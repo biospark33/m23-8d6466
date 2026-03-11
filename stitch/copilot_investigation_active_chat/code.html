@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Copilot Investigation: Active Chat</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "primary": "#21c45d",
+                        "background-light": "#f6f8f7",
+                        "background-dark": "#122017",
+                        "surface-dark": "#1a2e22",
+                    },
+                    fontFamily: {
+                        "display": ["Inter", "sans-serif"],
+                        "mono": ["JetBrains Mono", "monospace"],
+                    },
+                    borderRadius: {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                },
+            },
+        }
+    </script>
+<style>
+        /* Custom scrollbar for chat area */
+        .scrollbar-hide::-webkit-scrollbar {
+            display: none;
+        }
+        .scrollbar-hide {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head>
+<body class="bg-background-light dark:bg-background-dark font-display text-slate-900 dark:text-slate-100 antialiased overflow-hidden h-screen flex flex-col">
+<!-- Header -->
+<header class="flex items-center justify-between p-4 bg-surface-dark border-b border-white/5 shrink-0">
+<button class="text-slate-100 flex size-10 shrink-0 items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors">
+<span class="material-symbols-outlined">arrow_back</span>
+</button>
+<h2 class="text-slate-100 text-lg font-bold leading-tight tracking-tight flex-1 text-center">Copilot Investigation</h2>
+<button class="flex size-10 items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 text-slate-100 transition-colors">
+<span class="material-symbols-outlined">settings</span>
+</button>
+</header>
+<!-- Main Content Area (Chat) -->
+<main class="flex-1 overflow-y-auto scrollbar-hide flex flex-col p-4 gap-6 bg-background-light dark:bg-background-dark">
+<!-- User Message -->
+<div class="flex items-end gap-3 justify-end">
+<div class="flex flex-col gap-1 items-end max-w-[85%]">
+<p class="text-slate-400 text-xs font-medium">You</p>
+<div class="p-3 bg-primary text-slate-900 rounded-xl rounded-tr-none shadow-sm">
+<p class="text-sm font-medium leading-relaxed">What's the status?</p>
+</div>
+</div>
+<div class="h-8 w-8 rounded-full bg-slate-700 bg-center bg-cover shrink-0 border border-white/10" data-alt="User avatar profile picture" style="background-image: url('https://lh3.googleusercontent.com/aida-public/AB6AXuAQrS73N2NTmfosBerxAiJCihKA76_8j4tWKbiYorTzzpW9f3a2BK750TaWmN_6gAGLzr6nDbMoevIEwojjy6jaKBj5vfqAvK9p0IKQHaBtQFZMi3IGw7f-Z1X7QHyat25aPhZAdYaCMRulykH3sd9R48G2QVlvXwkBbn2JnSMygQLUzhjpCHISD8KHMCqPw49JI5XqF913P4MH522I7Jhlje5AXB2kqrPifkaTpCJCIS_acym3ZRC-vVaQUWTkD2zMb_RCMUMzKxY5');"></div>
+</div>
+<!-- Copilot Message 1 -->
+<div class="flex items-start gap-3">
+<div class="h-8 w-8 rounded-full bg-gradient-to-br from-primary to-emerald-800 flex items-center justify-center shrink-0 shadow-lg shadow-primary/20">
+<span class="material-symbols-outlined text-white text-sm">smart_toy</span>
+</div>
+<div class="flex flex-col gap-2 items-start max-w-[90%]">
+<p class="text-slate-400 text-xs font-medium">Copilot</p>
+<div class="p-4 bg-surface-dark border border-white/5 text-slate-100 rounded-xl rounded-tl-none shadow-sm w-full">
+<p class="text-sm leading-relaxed mb-3">All 4 stories are progressing normally.</p>
+<!-- Mini Table -->
+<div class="overflow-hidden rounded border border-white/10 bg-black/20 font-mono text-xs">
+<div class="grid grid-cols-3 gap-2 bg-white/5 p-2 text-slate-400 border-b border-white/10 font-bold">
+<div>Story</div>
+<div>Phase</div>
+<div class="text-right">Cost</div>
+</div>
+<div class="grid grid-cols-3 gap-2 p-2 border-b border-white/5 hover:bg-white/5 transition-colors">
+<div class="text-primary">#12</div>
+<div>Building</div>
+<div class="text-right text-slate-300">$1.20</div>
+</div>
+<div class="grid grid-cols-3 gap-2 p-2 border-b border-white/5 hover:bg-white/5 transition-colors">
+<div class="text-primary">#14</div>
+<div>Testing</div>
+<div class="text-right text-slate-300">$0.85</div>
+</div>
+<div class="grid grid-cols-3 gap-2 p-2 border-b border-white/5 hover:bg-white/5 transition-colors">
+<div class="text-primary">#15</div>
+<div>Deploy</div>
+<div class="text-right text-slate-300">$2.10</div>
+</div>
+<div class="grid grid-cols-3 gap-2 p-2 hover:bg-white/5 transition-colors">
+<div class="text-primary">#19</div>
+<div>Review</div>
+<div class="text-right text-slate-300">$0.50</div>
+</div>
+</div>
+</div>
+<!-- Action Indicator -->
+<div class="flex items-center gap-2 px-3 py-1.5 bg-primary/10 rounded-full border border-primary/20 animate-pulse">
+<span class="text-xs font-medium text-primary">📍 Navigating to Story 12...</span>
+</div>
+</div>
+</div>
+<!-- User Message 2 -->
+<div class="flex items-end gap-3 justify-end mt-2">
+<div class="flex flex-col gap-1 items-end max-w-[85%]">
+<p class="text-slate-400 text-xs font-medium">You</p>
+<div class="p-3 bg-primary text-slate-900 rounded-xl rounded-tr-none shadow-sm">
+<p class="text-sm font-medium leading-relaxed">Compare today's cost to yesterday</p>
+</div>
+</div>
+<div class="h-8 w-8 rounded-full bg-slate-700 bg-center bg-cover shrink-0 border border-white/10" data-alt="User avatar profile picture" style="background-image: url('https://lh3.googleusercontent.com/aida-public/AB6AXuBgyQwWDodX2io4o3s0KF6TQ2LKEkvvByHGXI7UYXK53aoZC50uk2LwKGl9YQ7v-NLZArIUnPdif7BSW64PTsJ4FBPkCAaoOQvIkJwGCKA8KjFX6gGBRJUt-8OIBMqXcY9IDFrdUDjMwly-qgYrtfbL4QoAppa2BaCcEtTgj0GM9cY_IeThAztLGPCIEa_oqWVxuytXuT68AqVLfS_bpz2kzhF0y7R0jUY5teemDKxW5o4hLQj_bZWzpOHAdOkUAH1JtrdZROgdEHiL');"></div>
+</div>
+<!-- Copilot Message 2 -->
+<div class="flex items-start gap-3">
+<div class="h-8 w-8 rounded-full bg-gradient-to-br from-primary to-emerald-800 flex items-center justify-center shrink-0 shadow-lg shadow-primary/20">
+<span class="material-symbols-outlined text-white text-sm">smart_toy</span>
+</div>
+<div class="flex flex-col gap-2 items-start max-w-[90%]">
+<p class="text-slate-400 text-xs font-medium">Copilot</p>
+<div class="p-4 bg-surface-dark border border-white/5 text-slate-100 rounded-xl rounded-tl-none shadow-sm w-full">
+<div class="flex items-center justify-between mb-4">
+<span class="text-sm font-medium text-slate-300">Cost Comparison</span>
+<span class="text-xs font-bold text-primary bg-primary/10 px-2 py-0.5 rounded flex items-center gap-1">
+<span class="material-symbols-outlined text-[10px]">trending_down</span> 21% reduction
+                        </span>
+</div>
+<!-- Mini Bar Chart -->
+<div class="flex items-end gap-4 h-24 w-full px-2">
+<!-- Bar 1: Yesterday -->
+<div class="flex-1 flex flex-col justify-end group gap-1">
+<div class="text-center text-xs text-slate-400 mb-1 opacity-0 group-hover:opacity-100 transition-opacity">$8.17</div>
+<div class="w-full bg-slate-600 rounded-t relative h-[85%] group-hover:bg-slate-500 transition-colors"></div>
+<div class="text-center text-xs text-slate-400 font-medium">Yesterday</div>
+</div>
+<!-- Bar 2: Today -->
+<div class="flex-1 flex flex-col justify-end group gap-1">
+<div class="text-center text-xs text-primary font-bold mb-1 opacity-100">$6.42</div>
+<div class="w-full bg-primary rounded-t relative h-[65%] shadow-[0_0_15px_rgba(33,196,93,0.3)]"></div>
+<div class="text-center text-xs text-slate-100 font-medium">Today</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Spacer to ensure content isn't hidden behind input -->
+<div class="h-4"></div>
+</main>
+<!-- Bottom Input Area -->
+<div class="p-4 bg-surface-dark border-t border-white/5 shrink-0 safe-area-pb">
+<div class="relative flex items-center bg-background-dark border border-white/10 rounded-full shadow-inner focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/50 transition-all">
+<button class="pl-4 pr-2 text-slate-400 hover:text-primary transition-colors">
+<span class="material-symbols-outlined text-xl">add_circle</span>
+</button>
+<input class="w-full bg-transparent border-none text-slate-100 placeholder-slate-500 focus:ring-0 py-3 text-sm" placeholder="Ask anything..." type="text"/>
+<button class="pr-2 pl-2 text-slate-400 hover:text-primary transition-colors">
+<span class="material-symbols-outlined text-xl">mic</span>
+</button>
+<button class="pr-3 pl-2 text-primary hover:text-emerald-300 transition-colors">
+<span class="material-symbols-outlined text-xl filled">send</span>
+</button>
+</div>
+<div class="flex justify-center mt-3 gap-1">
+<div class="w-10 h-1 rounded-full bg-slate-700"></div>
+</div>
+</div>
+</body></html>

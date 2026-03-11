@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>DevOps Dashboard - Idle Factory</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script>
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        primary: "#3b82f6", // Overriding to match 'Blue outlined button' request while keeping theme structure
+                        "background-light": "#f8fafc",
+                        "background-dark": "#0f172a", // Matching the requested neutral header/bg
+                        "surface-dark": "#1e293b",
+                        "text-muted": "#94a3b8",
+                        "text-subtle": "#64748b",
+                    },
+                    fontFamily: {
+                        display: ["Inter", "sans-serif"],
+                        mono: ["JetBrains Mono", "monospace"],
+                    },
+                    borderRadius: {
+                        DEFAULT: "0.25rem",
+                        lg: "0.5rem",
+                        xl: "0.75rem",
+                        full: "9999px",
+                    },
+                },
+            },
+        }
+    </script>
+<style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head>
+<body class="bg-background-light dark:bg-background-dark min-h-screen text-slate-900 dark:text-slate-100 antialiased overflow-x-hidden">
+<div class="relative flex min-h-screen w-full flex-col">
+<!-- Header -->
+<div class="flex items-center justify-between px-6 py-5 bg-background-light dark:bg-background-dark border-b border-slate-200 dark:border-slate-800">
+<h2 class="text-xl font-bold tracking-tight text-slate-900 dark:text-white">DevOps Dashboard</h2>
+<div class="flex items-center gap-3">
+<button class="p-2 text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 transition-colors">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<div class="h-8 w-8 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden border border-slate-300 dark:border-slate-600">
+<img alt="User Avatar" class="h-full w-full object-cover" data-alt="User profile avatar" src="https://lh3.googleusercontent.com/aida-public/AB6AXuB6IcKy25SdpebHkHSXvc5BxTyxgDi-GxIoFXdwjWWPukkPV7Z8U3Gf1hujomqeDlbum6tv4MosRWgGmUEF1u3bMCsATPp-u8EBdHOUk4-Jb7HY7Ctdq-oaKyQYGcggHVPNH4nJekgXiamJDxAj80ZtxBtxAkZpgeLNDh4gw8Rq31m7l4xRJCKtDqxCVDNoRxvD_uBE7QD7LGDEAo8_10qB7JaywaD_HymyBvMAFAQFzSLxUsHnfHXA2UuuNTbHeOfWN_CtLnZZYK-o"/>
+</div>
+</div>
+</div>
+<!-- Main Content Area -->
+<div class="flex-1 flex flex-col p-6 gap-6">
+<!-- Vitals Stats -->
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+<div class="flex flex-col gap-1 rounded-xl bg-surface-dark/50 dark:bg-surface-dark border border-slate-200 dark:border-slate-800 p-5 shadow-sm">
+<div class="flex items-center gap-2 mb-2">
+<span class="material-symbols-outlined text-text-subtle text-[20px]">bolt</span>
+<p class="text-text-subtle text-sm font-medium uppercase tracking-wider">Active</p>
+</div>
+<p class="font-mono text-2xl font-medium text-text-muted">0</p>
+</div>
+<div class="flex flex-col gap-1 rounded-xl bg-surface-dark/50 dark:bg-surface-dark border border-slate-200 dark:border-slate-800 p-5 shadow-sm">
+<div class="flex items-center gap-2 mb-2">
+<span class="material-symbols-outlined text-text-subtle text-[20px]">local_shipping</span>
+<p class="text-text-subtle text-sm font-medium uppercase tracking-wider">Shipped Today</p>
+</div>
+<p class="font-mono text-2xl font-medium text-text-muted">3</p>
+</div>
+<div class="flex flex-col gap-1 rounded-xl bg-surface-dark/50 dark:bg-surface-dark border border-slate-200 dark:border-slate-800 p-5 shadow-sm">
+<div class="flex items-center gap-2 mb-2">
+<span class="material-symbols-outlined text-text-subtle text-[20px]">attach_money</span>
+<p class="text-text-subtle text-sm font-medium uppercase tracking-wider">Cost</p>
+</div>
+<p class="font-mono text-2xl font-medium text-text-muted">$4.21</p>
+</div>
+</div>
+<!-- Empty State -->
+<div class="flex-1 flex flex-col items-center justify-center py-12 text-center">
+<div class="relative mb-8">
+<!-- Abstract empty state visual -->
+<div class="w-32 h-32 rounded-full bg-surface-dark flex items-center justify-center relative overflow-hidden ring-1 ring-slate-700/50">
+<div class="absolute inset-0 bg-gradient-to-tr from-blue-500/10 to-transparent"></div>
+<span class="material-symbols-outlined text-text-subtle text-5xl opacity-50">factory</span>
+</div>
+<!-- Decorative elements -->
+<div class="absolute -right-4 top-0 w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center border border-slate-700 animate-pulse">
+<span class="material-symbols-outlined text-text-subtle text-sm">hourglass_empty</span>
+</div>
+</div>
+<h3 class="text-text-muted text-xl font-semibold mb-2">No active stories</h3>
+<p class="text-text-subtle text-sm max-w-xs mx-auto mb-8">Select stories from Seeds to start the factory.</p>
+<button class="group flex items-center justify-center gap-2 px-6 py-2.5 rounded-lg border border-primary text-primary hover:bg-primary hover:text-white transition-all duration-300 font-medium text-sm">
+<span>Open Seeds</span>
+<span class="material-symbols-outlined text-[18px] group-hover:translate-x-1 transition-transform">arrow_forward</span>
+</button>
+</div>
+</div>
+<!-- Copilot Strip (Collapsed) -->
+<div class="fixed right-0 top-1/2 -translate-y-1/2 flex flex-col gap-4 bg-surface-dark border-l border-t border-b border-slate-700 rounded-l-xl py-4 px-2 shadow-xl z-50">
+<button class="p-2 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-colors relative group">
+<span class="material-symbols-outlined">smart_toy</span>
+<span class="absolute right-full mr-2 top-1/2 -translate-y-1/2 px-2 py-1 bg-slate-800 text-xs text-white rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">Ask AI</span>
+</button>
+<div class="w-full h-px bg-slate-700"></div>
+<button class="p-2 rounded-lg text-text-subtle hover:text-slate-200 hover:bg-slate-700/50 transition-colors">
+<span class="material-symbols-outlined">terminal</span>
+</button>
+</div>
+<!-- Bottom Navigation -->
+<div class="sticky bottom-0 z-40 bg-background-light dark:bg-surface-dark border-t border-slate-200 dark:border-slate-800 px-6 pb-6 pt-3 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)]">
+<div class="flex justify-between items-end">
+<a class="flex flex-col items-center gap-1.5 group flex-1" href="#">
+<span class="material-symbols-outlined text-primary text-[24px] group-hover:scale-110 transition-transform">dashboard</span>
+<span class="text-[10px] font-medium text-primary tracking-wide uppercase">Dashboard</span>
+</a>
+<a class="flex flex-col items-center gap-1.5 group flex-1" href="#">
+<span class="material-symbols-outlined text-slate-400 group-hover:text-slate-200 text-[24px] transition-colors">spa</span>
+<span class="text-[10px] font-medium text-slate-500 group-hover:text-slate-400 tracking-wide uppercase transition-colors">Seeds</span>
+</a>
+<a class="flex flex-col items-center gap-1.5 group flex-1" href="#">
+<span class="material-symbols-outlined text-slate-400 group-hover:text-slate-200 text-[24px] transition-colors">psychology</span>
+<span class="text-[10px] font-medium text-slate-500 group-hover:text-slate-400 tracking-wide uppercase transition-colors">Agents</span>
+</a>
+<a class="flex flex-col items-center gap-1.5 group flex-1" href="#">
+<span class="material-symbols-outlined text-slate-400 group-hover:text-slate-200 text-[24px] transition-colors">settings</span>
+<span class="text-[10px] font-medium text-slate-500 group-hover:text-slate-400 tracking-wide uppercase transition-colors">Settings</span>
+</a>
+</div>
+</div>
+</div>
+</body></html>

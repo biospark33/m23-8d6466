@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Expanded Story Detail View</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "primary": "#21c45d", // Emerald-500
+                        "primary-dark": "#15803d", // Emerald-700
+                        "amber-accent": "#f59e0b", // Amber-500
+                        "danger": "#ef4444", // Red-500
+                        "background-light": "#f6f8f7",
+                        "background-dark": "#0f172a", // Slate-900
+                        "surface-dark": "#1e293b", // Slate-800
+                        "terminal-dark": "#020617", // Slate-950
+                    },
+                    fontFamily: {
+                        "display": ["Inter", "sans-serif"],
+                        "mono": ["JetBrains Mono", "monospace"],
+                    },
+                    borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+                },
+            },
+        }
+    </script>
+<style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom scrollbar for terminal */
+        .scrollbar-hide::-webkit-scrollbar {
+            display: none;
+        }
+        .scrollbar-hide {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head>
+<body class="bg-background-light dark:bg-background-dark min-h-screen text-slate-900 dark:text-slate-100 font-display selection:bg-primary selection:text-white overflow-x-hidden">
+<div class="flex flex-col h-full min-h-screen w-full relative">
+<!-- Header -->
+<header class="sticky top-0 z-20 bg-surface-dark/95 backdrop-blur-sm border-b border-amber-accent/20 px-4 py-3 flex items-center justify-between">
+<div class="flex items-center gap-3">
+<button class="text-slate-400 hover:text-white transition-colors p-1 rounded-full hover:bg-slate-700/50">
+<span class="material-symbols-outlined text-[24px]">arrow_back</span>
+</button>
+<div class="flex flex-col">
+<h1 class="text-white text-lg font-bold leading-tight tracking-tight">Story 14</h1>
+<span class="text-xs text-amber-accent font-medium">Refactor API layer</span>
+</div>
+</div>
+<div class="flex items-center gap-2">
+<button class="text-slate-400 hover:text-primary transition-colors p-2 rounded-full hover:bg-slate-700/50">
+<span class="material-symbols-outlined text-[20px]">edit</span>
+</button>
+<button class="text-slate-400 hover:text-primary transition-colors p-2 rounded-full hover:bg-slate-700/50">
+<span class="material-symbols-outlined text-[20px]">more_vert</span>
+</button>
+</div>
+</header>
+<!-- Main Content Area -->
+<main class="flex-1 w-full flex flex-col md:flex-row max-w-7xl mx-auto">
+<!-- Mobile "Sidebar" - Horizontal Scroll on small screens, Sidebar on large -->
+<div class="md:w-1/4 w-full md:min-h-[calc(100vh-64px)] bg-background-dark/50 md:border-r border-slate-800 p-4 md:flex md:flex-col gap-3 hidden md:flex">
+<div class="p-3 bg-surface-dark rounded-lg border-l-4 border-primary shadow-sm hover:bg-slate-700/50 transition cursor-pointer">
+<div class="flex justify-between items-center mb-1">
+<span class="text-xs font-mono text-slate-400">ST-12</span>
+<span class="material-symbols-outlined text-[14px] text-primary">check_circle</span>
+</div>
+<p class="text-sm font-medium text-slate-200 truncate">Update user schema</p>
+</div>
+<div class="p-3 bg-surface-dark rounded-lg border-l-4 border-primary/50 shadow-sm hover:bg-slate-700/50 transition cursor-pointer opacity-70">
+<div class="flex justify-between items-center mb-1">
+<span class="text-xs font-mono text-slate-400">ST-13</span>
+<span class="material-symbols-outlined text-[14px] text-primary">check_circle</span>
+</div>
+<p class="text-sm font-medium text-slate-200 truncate">Optimize DB queries</p>
+</div>
+<div class="p-3 bg-slate-800/40 rounded-lg border-l-4 border-slate-600 shadow-sm hover:bg-slate-700/50 transition cursor-pointer opacity-50">
+<div class="flex justify-between items-center mb-1">
+<span class="text-xs font-mono text-slate-400">ST-15</span>
+<span class="material-symbols-outlined text-[14px] text-slate-500">radio_button_unchecked</span>
+</div>
+<p class="text-sm font-medium text-slate-200 truncate">Frontend Integration</p>
+</div>
+</div>
+<!-- Content Area -->
+<div class="flex-1 flex flex-col w-full bg-background-dark">
+<!-- Story Progress Header -->
+<div class="p-4 md:p-6 pb-2">
+<div class="flex flex-col gap-6">
+<!-- Pipeline Visualization -->
+<div class="w-full overflow-x-auto scrollbar-hide">
+<div class="flex items-center min-w-max px-2">
+<!-- Step 1: Develop -->
+<div class="flex flex-col items-center gap-2 relative group">
+<div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center shadow-lg shadow-primary/20 z-10">
+<span class="material-symbols-outlined text-white text-[16px]">check</span>
+</div>
+<span class="text-xs font-medium text-primary absolute -bottom-6 whitespace-nowrap">Develop</span>
+</div>
+<div class="h-[2px] w-16 bg-primary mx-1"></div>
+<!-- Step 2: BMAD -->
+<div class="flex flex-col items-center gap-2 relative group">
+<div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center shadow-lg shadow-primary/20 z-10">
+<span class="material-symbols-outlined text-white text-[16px]">check</span>
+</div>
+<span class="text-xs font-medium text-primary absolute -bottom-6 whitespace-nowrap">BMAD</span>
+</div>
+<div class="h-[2px] w-16 bg-primary mx-1"></div>
+<!-- Step 3: Fix Loop -->
+<div class="flex flex-col items-center gap-2 relative group">
+<div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center shadow-lg shadow-primary/20 z-10">
+<span class="material-symbols-outlined text-white text-[16px]">check</span>
+</div>
+<span class="text-xs font-medium text-primary absolute -bottom-6 whitespace-nowrap">Fix Loop</span>
+</div>
+<div class="h-[2px] w-16 bg-gradient-to-r from-primary to-danger mx-1"></div>
+<!-- Step 4: QA (Failed) -->
+<div class="flex flex-col items-center gap-2 relative group">
+<div class="w-8 h-8 rounded-full bg-danger flex items-center justify-center shadow-lg shadow-danger/20 z-10 ring-4 ring-danger/10">
+<span class="material-symbols-outlined text-white text-[16px]">close</span>
+</div>
+<span class="text-xs font-bold text-danger absolute -bottom-6 whitespace-nowrap">QA</span>
+</div>
+<div class="h-[2px] w-16 bg-slate-700 mx-1"></div>
+<!-- Step 5: PR (Pending) -->
+<div class="flex flex-col items-center gap-2 relative group">
+<div class="w-8 h-8 rounded-full bg-surface-dark border-2 border-slate-600 flex items-center justify-center z-10">
+<span class="material-symbols-outlined text-slate-500 text-[16px]">radio_button_unchecked</span>
+</div>
+<span class="text-xs font-medium text-slate-500 absolute -bottom-6 whitespace-nowrap">PR</span>
+</div>
+</div>
+</div>
+<!-- Spacer for pipeline labels -->
+<div class="h-2"></div>
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+<!-- Gate Checklist -->
+<div class="bg-surface-dark rounded-xl p-4 border border-slate-700/50">
+<h3 class="text-slate-400 text-xs font-bold uppercase tracking-wider mb-3">Gate Checklist</h3>
+<div class="space-y-3">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-primary text-[20px]">check_circle</span>
+<span class="text-sm text-slate-200">Unit tests pass</span>
+</div>
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-primary text-[20px]">check_circle</span>
+<span class="text-sm text-slate-200">Lint check pass</span>
+</div>
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-primary text-[20px]">check_circle</span>
+<span class="text-sm text-slate-200">Code review approved</span>
+</div>
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-danger text-[20px]">cancel</span>
+<span class="text-sm text-white font-medium">Integration tests pass</span>
+</div>
+</div>
+</div>
+<!-- Budget Arc -->
+<div class="bg-surface-dark rounded-xl p-4 border border-slate-700/50 relative overflow-hidden flex flex-col justify-between">
+<div class="flex justify-between items-start mb-2">
+<h3 class="text-slate-400 text-xs font-bold uppercase tracking-wider">Budget Consumption</h3>
+<span class="text-xs font-mono text-amber-accent">WARNING</span>
+</div>
+<div class="flex items-center gap-4">
+<!-- Simple CSS Arc approximation -->
+<div class="relative w-24 h-12 overflow-hidden">
+<div class="absolute w-24 h-24 rounded-full border-[6px] border-slate-700 top-0 left-0"></div>
+<div class="absolute w-24 h-24 rounded-full border-[6px] border-transparent border-t-primary border-r-amber-accent top-0 left-0 rotate-[-45deg]" style="transform: rotate(-45deg);"></div>
+</div>
+<div class="flex flex-col">
+<div class="text-2xl font-bold text-white tracking-tight">$2.41 <span class="text-slate-500 text-lg font-normal">/ $3.50</span></div>
+<div class="text-xs text-slate-400 mt-1">68% consumed (High usage)</div>
+</div>
+</div>
+<!-- Decorative background glow -->
+<div class="absolute -right-6 -bottom-6 w-24 h-24 bg-amber-accent/10 rounded-full blur-xl"></div>
+</div>
+</div>
+</div>
+</div>
+<!-- Agent Panels Section -->
+<div class="flex-1 p-4 md:p-6 bg-slate-900/50">
+<h3 class="text-slate-400 text-xs font-bold uppercase tracking-wider mb-4 flex items-center gap-2">
+<span class="material-symbols-outlined text-[16px]">smart_toy</span>
+                        Active Agents
+                    </h3>
+<div class="grid grid-cols-1 gap-4">
+<!-- Agent 1: Builder-02 (Working) -->
+<div class="bg-surface-dark rounded-xl overflow-hidden border border-slate-700/50 shadow-sm flex flex-col">
+<div class="bg-slate-800/80 px-3 py-2 flex justify-between items-center border-b border-slate-700/50">
+<div class="flex items-center gap-2">
+<div class="w-2 h-2 rounded-full bg-primary animate-pulse"></div>
+<span class="text-xs font-mono text-slate-300">Builder-02</span>
+</div>
+<span class="text-[10px] bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded font-mono">IDLE</span>
+</div>
+<div class="bg-terminal-dark p-3 font-mono text-xs text-slate-400 min-h-[60px]">
+<p>&gt; Initializing environment...</p>
+<p class="text-primary">&gt; Environment ready.</p>
+<p>&gt; Waiting for tasks...</p>
+</div>
+</div>
+<!-- Agent 2: Tester-01 (Requesting Help) -->
+<div class="bg-surface-dark rounded-xl overflow-hidden border border-amber-accent/50 shadow-md shadow-amber-900/10 flex flex-col relative ring-1 ring-amber-accent/20">
+<!-- Overlay Badge -->
+<div class="absolute top-0 right-0">
+<div class="bg-amber-accent text-slate-900 text-[10px] font-bold px-2 py-1 rounded-bl-lg flex items-center gap-1">
+<span class="material-symbols-outlined text-[12px]">warning</span>
+                                    INTERVENTION NEEDED
+                                </div>
+</div>
+<div class="bg-slate-800/80 px-3 py-2 flex justify-between items-center border-b border-slate-700/50">
+<div class="flex items-center gap-2">
+<div class="w-2 h-2 rounded-full bg-amber-accent animate-pulse"></div>
+<span class="text-xs font-mono text-white font-bold">Tester-01</span>
+</div>
+</div>
+<div class="bg-terminal-dark p-3 font-mono text-xs text-slate-300 min-h-[100px] border-b border-slate-800">
+<p class="text-slate-500">&gt; Running integration suite...</p>
+<p class="text-slate-500">&gt; Test 4/25: api_user_create</p>
+<p class="text-danger mt-1">! ERROR: Connection timed out in `auth_service`.</p>
+<p class="text-amber-accent mt-2">&gt; I'm unable to reach the auth service container. Should I restart the service or skip this test suite?</p>
+</div>
+<!-- Input Field for User -->
+<div class="p-2 bg-slate-800/50">
+<div class="relative">
+<input class="w-full bg-background-dark border border-slate-600 rounded-lg py-2 pl-3 pr-10 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-amber-accent focus:ring-1 focus:ring-amber-accent transition-all" placeholder="Type a command or select an action..." type="text"/>
+<button class="absolute right-2 top-1/2 -translate-y-1/2 text-primary hover:text-white transition-colors">
+<span class="material-symbols-outlined text-[18px]">send</span>
+</button>
+</div>
+<div class="flex gap-2 mt-2 overflow-x-auto scrollbar-hide pb-1">
+<button class="whitespace-nowrap px-3 py-1 rounded-full bg-slate-700 hover:bg-slate-600 text-[10px] text-slate-200 border border-slate-600 transition-colors">Restart Service</button>
+<button class="whitespace-nowrap px-3 py-1 rounded-full bg-slate-700 hover:bg-slate-600 text-[10px] text-slate-200 border border-slate-600 transition-colors">Skip Tests</button>
+<button class="whitespace-nowrap px-3 py-1 rounded-full bg-slate-700 hover:bg-slate-600 text-[10px] text-slate-200 border border-slate-600 transition-colors">View Logs</button>
+</div>
+</div>
+</div>
+<!-- Agent 3: Reviewer-Alpha (Working) -->
+<div class="bg-surface-dark rounded-xl overflow-hidden border border-slate-700/50 shadow-sm flex flex-col opacity-80">
+<div class="bg-slate-800/80 px-3 py-2 flex justify-between items-center border-b border-slate-700/50">
+<div class="flex items-center gap-2">
+<div class="w-2 h-2 rounded-full bg-primary"></div>
+<span class="text-xs font-mono text-slate-300">Reviewer-Alpha</span>
+</div>
+<span class="text-[10px] bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded font-mono">ANALYZING</span>
+</div>
+<div class="bg-terminal-dark p-3 font-mono text-xs text-slate-400 min-h-[60px]">
+<p>&gt; Scanning changes in `src/api/routes.ts`...</p>
+<p class="text-primary">&gt; No security vulnerabilities found.</p>
+<span class="animate-pulse">_</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+</main>
+</div>
+</body></html>
