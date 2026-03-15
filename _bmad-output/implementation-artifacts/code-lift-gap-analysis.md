@@ -91,7 +91,7 @@ Story 1.2 says: "Migrations are plain SQL files executed sequentially by Factory
 
 No story creates the SQL migration to add `learning_report` to Overstory's mail message type CHECK constraint. This blocks Story 3.3 (drift warnings via mail), any future learning_report mail usage, and FR23/FR57.
 
-**Resolution:** Story 1.6 (Overstory Schema Extensions) added. Consolidates mail.db and events.db schema extensions into a single story using Overstory's native probe-then-alter pattern. Also addresses M-4.
+**Resolution:** Story 1.6 (Overstory Schema Extensions) added. Consolidates all mail.db and events.db schema extensions into a single story using a dual migration strategy: (1) Overstory's native probe-then-alter pattern (`PRAGMA table_info` → `ALTER TABLE ADD COLUMN`) for new column additions (e.g., `phase` column in mail.db), and (2) SQLite table-rebuild (`CREATE new table` → `copy data` → `DROP old` → `RENAME new`) for CHECK constraint modifications (adding `learning_report` to mail.db, `hook_result` and `health_state` to events.db). Also addresses M-4.
 
 **M-2. TierResolver / Model Mapping Module (IMPORTANT)** — **SESSION 10: RESOLVED → Story 2.9**
 
