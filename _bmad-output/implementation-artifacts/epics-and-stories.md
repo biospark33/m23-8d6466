@@ -700,7 +700,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Depends on:** Epic 2 (performance middleware stub provides the afterModel() integration point; middleware chain orchestrates execution)
 **Packages touched:** factory-core
 **ADR references:** ADR-015 (Sections 15.2, 15.4, 15.5, 15.6, 15.7, 15.9, 15.10, 15.15), ADR-021
-**Total estimated LOC:** ~530
+**Total estimated LOC:** ~510
 
 ### Story 5.1: Action Scorer Module
 
@@ -970,7 +970,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Depends on:** Epic 5 (learning record extractor provides raw learning records; overlay effectiveness tracker measures enrichment impact), Epic 2 (learning middleware provides the injection point)
 **Packages touched:** factory-core
 **ADR references:** ADR-015 (Sections 15.5, 15.6, 15.7), ADR-021
-**Total estimated LOC:** ~620
+**Total estimated LOC:** ~640
 
 ### Story 7.1: Learning Record Extraction from Fix-Loops
 
@@ -1126,7 +1126,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Depends on:** Epic 1 (shared-types health and notification types, pipeline.db), Epic 2 (hook timeouts adjusted by circuit breaker)
 **Packages touched:** factory-core, shared-types, messenger (wrapped, not modified)
 **ADR references:** ADR-022 (Sections 22.1-22.7), ADR-023 (Sections 23.1-23.7)
-**Total estimated LOC:** ~590
+**Total estimated LOC:** ~550
 
 ### Story 8.1: Channel Interface and MessageBus Implementation
 
@@ -1535,7 +1535,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Depends on:** Epic 5 (performance data collection layers 1-3 provide the data foundation), Epic 7 (learning records for pattern mining), Epic 8 (notification channels for Channel Status)
 **Packages touched:** factory-core, dashboard
 **ADR references:** ADR-015 (Sections 15.4, 15.8, 15.9, 15.11, 15.12, 15.13, 15.14), ADR-022 (Section 22.5)
-**Total estimated LOC:** ~830
+**Total estimated LOC:** ~730
 
 ### Story 10.1: ELO Domain Rating Computation
 

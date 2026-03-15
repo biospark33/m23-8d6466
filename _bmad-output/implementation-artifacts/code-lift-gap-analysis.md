@@ -147,8 +147,8 @@ All 5 risks from the Session 9b gap analysis are now RESOLVED with explicit docu
 
 **Blocking items:** ZERO. All 3 blockers from Session 9b are resolved:
 1. RISK-1 / BLOCKER-1 (Superpowers enforcement field) → Option A chosen, Story 2.5 rewritten
-2. C-2 / BLOCKER-2 (Story 2.5 rewrite) → Completed
-3. M-1 / BLOCKER-3 (mail schema migration) → Story 1.6 added
+2. M-1 / BLOCKER-2 (mail schema migration) → Story 1.6 added
+3. M-3 / BLOCKER-3 (missing orchestration loop) → Story 4.0 added
 
 **Implementation readiness:** All documents amended in Session 10 are now implementation-ready with zero ambiguity. Every acceptance criterion amended in Session 10 references the actual API mechanism by name. Zero contradictions between PRD, architecture, and epics within the Session 10 scope. Zero orphan dependencies among the targeted amendments.
 
