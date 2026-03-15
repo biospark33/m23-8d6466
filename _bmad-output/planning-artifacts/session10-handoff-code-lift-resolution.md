@@ -118,7 +118,7 @@ This is the "brain" of the factory — the Symphony GenServer poll-reconcile-dis
 | **1.6** | Overstory Schema Extensions | 1 | ~40 | BLOCKING | Consolidates all Overstory DB schema changes (mail types, events types, phase column) using native probe-then-alter pattern. Resolves BLOCKER-2 and M-4. |
 | **2.9** | Pi SDK Tier-to-Model Mapping (TierResolver) | 2 | ~50 | IMPORTANT | Maps Factory Core tier directives (economy/standard/premium) to Pi SDK `Model<Api>` objects via `Agent.setModel()`. Reads mappings from `factory.yaml`, validates at startup against Pi SDK's ModelRegistry. |
 | **4.0** | Factory Core Orchestration Loop | 4 (or 1) | ~120 | BLOCKING | Main poll-reconcile-dispatch loop connecting startup skeleton to turn continuation engine. Symphony GenServer pattern. Resolves BLOCKER-3. |
-| **9.0** | ZeroClaw Carry-Forward Adaptation | 9 | ~20 | IMPORTANT | Copies 6 files, performs type contract replacement, auth path change (`zeroclaw` -> `.qds/ws-token`), subprotocol rename (`zeroclaw.v1` -> `qds-factory`), base path change (`/_app/` -> `/`). Prerequisite for all Epic 9 stories. |
+| **9.0** | ZeroClaw Carry-Forward Adaptation | 9 | ~20 | IMPORTANT | Copies 6 files, performs type contract replacement, auth path change (`zeroclaw` -> `.qds/ws-token`), subprotocol rename (`zeroclaw.v1` -> `qds-factory`), base path change (`/_app/` -> `/events` or gateway-configured events path; SSE clients must use the events path). Prerequisite for all Epic 9 stories. |
 
 Note: M-4 (Overstory EventType extensions) is absorbed into Story 1.6.
 

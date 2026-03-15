@@ -153,8 +153,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Acceptance criteria:**
 - [ ] Extend mail.db `message_type` CHECK constraint to include `learning_report` using SQLite table-rebuild migration: `PRAGMA table_info(mail)` probes current schema; if the CHECK must change, create a new table with the revised CHECK constraint, copy data from old table, drop old table, rename new table — following Overstory's `SessionStore.open()` idempotent migration pattern
 - [ ] Add `phase` column (TEXT NOT NULL DEFAULT 'dev') to mail.db per ADR-006 (5d) via `ALTER TABLE ADD COLUMN` (SQLite supports this), with composite index `(phase, to_agent, read)` for phase-scoped mail queries
-- [ ] Extend events.db `EventType` CHECK constraint to include `hook_result` per ADR-010 H2 using the same table-rebuild migration strategy
-- [ ] Extend events.db `EventType` CHECK constraint to include `health_state` per ADR-023 using the same table-rebuild migration strategy
+- [ ] Extend events.db `EventType` CHECK constraint to include BOTH `hook_result` (per ADR-010 H2) AND `health_state` (per ADR-023) in a single table-rebuild migration cycle: create a new table with the updated CHECK constraint accepting both new enum values, copy data from the old events table, drop the old table, rename the new table — avoiding duplicate full-table rewrites
 - [ ] All schema changes are idempotent: running the extension module twice produces no errors and no duplicate columns/constraints
 - [ ] Extension module uses `bun:sqlite` `PRAGMA table_info()` to probe current schema before deciding whether migration is needed — same introspection pattern as Overstory's `SessionStore.open()` migration logic. CHECK constraint changes use table-rebuild (create-copy-drop-rename); column additions use `ALTER TABLE ADD COLUMN`
 - [ ] Unit tests verify: fresh database gets all extensions, pre-extended database is not modified, each CHECK constraint accepts the new type values
