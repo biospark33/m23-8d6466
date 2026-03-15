@@ -1,9 +1,9 @@
 # QDS Engineer v2 -- Epic & Story Decomposition
 
-**Version:** 2.0
-**Date:** 2026-03-14
-**Source:** Consolidated v2 artifacts + Session 10 code-lift resolution (PRD v2, Architecture v2, UX Spec v2, Code-Lift Manifest v2.0, Gap Analysis v2.0)
-**Scope:** 10 epics, dependency-ordered stories, implementation-ready — zero ambiguity
+**Version:** 2.1
+**Date:** 2026-03-15
+**Source:** Consolidated v2 artifacts + Session 10 code-lift resolution + Session 11 twelve-factor alignment (PRD v2, Architecture v2, UX Spec v2, Code-Lift Manifest v2.0, Gap Analysis v2.0, ADR-024)
+**Scope:** 10 epics, dependency-ordered stories, implementation-ready — zero ambiguity. Session 11 adds 2 new stories (1.4b, 1.4c), amends 5 stories (1.4, 1.6, 4.0, 8.5, 9.0), and adds growth stories for twelve-factor operational maturity.
 
 ## Dependency Chain
 
@@ -28,15 +28,20 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - Story 9.0 (ZeroClaw Carry-Forward) → prerequisite for 9.1
 - Story 2.9 (TierResolver) → depends on 1.1, 1.4; prerequisite for 2.2, 2.3, 10.2
 
+**Session 11 dependency additions:**
+- Story 1.4b (Build & Containerization) → depends on 1.4; no downstream blockers (enables dev/prod parity)
+- Story 1.4c (Admin CLI) → depends on 1.4; no downstream blockers (operational tooling)
+- Story 9.0 amended to depend on 1.4 (gateway port/host config from Factory Core config loader)
+
 ---
 
 ## Epic 1: Foundation -- Pipeline DB, Shared Types, Factory Core Skeleton
 
-**Scope:** Establish the foundational packages that every subsequent epic depends on: shared Zod schemas, the pipeline.db migration system with initial MVP tables, the attribution.db schema extension, the Result utility type, and the Factory Core process skeleton that reads configuration, validates it, and initializes databases.
+**Scope:** Establish the foundational packages that every subsequent epic depends on: shared Zod schemas, the pipeline.db migration system with initial MVP tables, the attribution.db schema extension, the Result utility type, the Factory Core process skeleton with twelve-factor config alignment (env-var overrides, NDJSON logging, system dep checks), Docker containerization, and admin CLI tooling.
 **Depends on:** None (first epic)
-**Packages touched:** shared-types, factory-core
-**ADR references:** ADR-015 (Sections 15.3, 15.4, 15.6), ADR-016 (Section 16.3), ADR-017 (Section 17.7), ADR-019 (Sections 19.4, 19.5), ADR-020, ADR-021 (Section 21.2), ADR-023 (Section 23.6)
-**Total estimated LOC:** ~670
+**Packages touched:** shared-types, factory-core, docker, scripts
+**ADR references:** ADR-015 (Sections 15.3, 15.4, 15.6), ADR-016 (Section 16.3), ADR-017 (Section 17.7), ADR-019 (Sections 19.4, 19.5), ADR-020, ADR-021 (Section 21.2), ADR-023 (Section 23.6), ADR-024 (Sections 1, 2, 3, 5, 7, 8, 9, 10)
+**Total estimated LOC:** ~1,310 (was ~670; +210 from Story 1.4 expansion, +470 from Story 1.4b, +170 from Story 1.4c, net adjustment -210 for original 1.4 LOC delta)
 
 ### Story 1.1: shared-types Package with All Zod Schemas
 
@@ -106,24 +111,35 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 
 ### Story 1.4: Factory Core Process Skeleton
 
-**Description:** Create the Factory Core entry point that reads factory.yaml, validates it with Zod, freezes the config object with Object.freeze, and initializes both SQLite databases (pipeline.db and attribution.db) with WAL mode. This is the minimal bootable Factory Core process that all subsequent stories build upon. The process does not yet run the pipeline -- it just proves the startup sequence is sound.
+**Description:** Create the Factory Core entry point that reads factory.yaml, validates it with Zod, freezes the config object with Object.freeze, and initializes both SQLite databases (pipeline.db and attribution.db) with WAL mode. This is the minimal bootable Factory Core process that all subsequent stories build upon. The process does not yet run the pipeline -- it just proves the startup sequence is sound. Includes twelve-factor config alignment: environment variable overrides, configurable database paths, system dependency checks, NDJSON structured logging, and example config files.
 
 **Acceptance criteria:**
 - [ ] Factory Core reads `factory.yaml` from a configurable path (default: `.qds/factory.yaml`)
-- [ ] Config is validated against a Zod schema (FactoryConfig) that includes at minimum: phases config (max_turns per phase), budget config (per-story ceiling, global daily ceiling), health config (circuit breaker settings), and notifications config (channel routing)
+- [ ] Config is validated against a Zod schema (FactoryConfig) that includes at minimum: phases config (max_turns per phase), budget config (per-story ceiling, global daily ceiling), health config (circuit breaker settings), notifications config (channel routing), gateway config (port, host), and databases config (pipeline_path, attribution_path)
+- [ ] Config loader implements `applyEnvOverrides()` — walks `process.env` for `QDS_` prefixed variables, converts `__` (double underscore) to object nesting, merges after YAML parse but before Zod validation. Priority: env vars > `factory.yaml` > hardcoded defaults (ADR-024 Section 1)
+- [ ] Database paths are configurable via `factory.yaml` `databases.pipeline_path` (default `.qds/pipeline.db`) and `databases.attribution_path` (default `.qds/attribution.db`), overridable via `QDS_PIPELINE_DB_PATH` and `QDS_ATTRIBUTION_DB_PATH` env vars (ADR-024 Section 2)
 - [ ] Validated config is frozen via `Object.freeze()` (deep freeze) -- any mutation attempt throws at runtime
-- [ ] pipeline.db is opened/created with WAL mode and migration runner is executed
-- [ ] attribution.db is opened/created with WAL mode and its migrations are executed
-- [ ] Process logs startup diagnostics: config path, database paths, migration status, WAL mode confirmation
+- [ ] pipeline.db is opened/created at the configured path with WAL mode and migration runner is executed
+- [ ] attribution.db is opened/created at the configured path with WAL mode and its migrations are executed
+- [ ] Factory Core startup checks for required system dependencies (git >= 2.30, bun >= 1.0, tmux >= 3.0) and fails fast with actionable error messages if missing (ADR-024 Section 7)
+- [ ] Process logger writes to stdout as NDJSON (one JSON object per line) with fields: `timestamp`, `level`, `component`, `message`. Log level controlled by `QDS_LOG_LEVEL` env var (default: `info`). Values: `debug`, `info`, `warn`, `error` (ADR-024 Section 9)
+- [ ] Process logs startup diagnostics: config path, database paths, migration status, WAL mode confirmation, resolved env-var overrides (secrets redacted)
+- [ ] `factory.yaml.example` committed to repo with all configuration keys documented and safe default values. Actual `factory.yaml` is gitignored. `qds init` (Story 1.4c) copies `factory.yaml.example` -> `factory.yaml` if missing
+- [ ] `.env.example` committed to repo with all `QDS_*` environment variable keys, documented defaults, and safe placeholders for secrets. Actual `.env` is gitignored (ADR-024 Section 8)
 - [ ] Integration test verifies end-to-end startup with a sample factory.yaml and confirms both databases are accessible
+- [ ] Integration test verifies env-var overrides: set `QDS_PIPELINE_DB_PATH` to a temp path, confirm Factory Core opens the database at the overridden path
 
 **FR references:** FR1, FR36, FR37, FR40
-**ADR references:** ADR-020, ADR-015 (Section 15.3), Architecture Section 12.3 (Single Source of Truth)
+**ADR references:** ADR-020, ADR-015 (Section 15.3), ADR-024 (Sections 1, 2, 7, 8, 9), Architecture Section 12.3 (Single Source of Truth)
 **Files created/modified:**
-- `factory-core/src/index.ts` (~80 LOC)
-- `factory-core/src/config/schema.ts` (~60 LOC)
-- `factory-core/src/config/loader.ts` (~30 LOC)
-**Estimated LOC:** 170
+- `factory-core/src/index.ts` (~100 LOC)
+- `factory-core/src/config/schema.ts` (~80 LOC)
+- `factory-core/src/config/loader.ts` (~60 LOC)
+- `factory-core/src/config/env-overrides.ts` (~40 LOC)
+- `factory-core/src/logging/logger.ts` (~30 LOC)
+- `factory.yaml.example` (~40 LOC)
+- `.env.example` (~30 LOC)
+**Estimated LOC:** 380
 **Dependencies:** 1.1 (shared-types for config sub-schemas), 1.2 (migration runner), 1.3 (attribution migration)
 **MVP/Growth:** MVP
 
@@ -156,15 +172,82 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - [ ] Extend events.db `EventType` CHECK constraint to include `hook_result` (per ADR-010 H2), `health_state` (per ADR-023), and `subsystem_error` (required by Story 8.8 for subsystem health event logging) in a single table-rebuild migration cycle: create a new table with the updated CHECK constraint accepting all three new enum values, copy data from the old events table, drop the old table, rename the new table — avoiding duplicate full-table rewrites
 - [ ] All schema changes are idempotent: running the extension module twice produces no errors and no duplicate columns/constraints
 - [ ] Extension module uses `bun:sqlite` `PRAGMA table_info()` to probe current schema before deciding whether migration is needed — same introspection pattern as Overstory's `SessionStore.open()` migration logic. CHECK constraint changes use table-rebuild (create-copy-drop-rename); column additions use `ALTER TABLE ADD COLUMN`
+- [ ] Extension module reads Overstory database paths from Overstory's `loadConfig()` rather than hardcoding `.overstory/*.db`. This ensures database locations are consistent with Overstory's own configuration and respect any path overrides (ADR-024 Section 2)
 - [ ] Unit tests verify: fresh database gets all extensions, pre-extended database is not modified, each CHECK constraint accepts all new type values (mail.db: `learning_report`; events.db: `hook_result`, `health_state`, `subsystem_error`)
 
 **FR references:** FR23, FR57 (learning_report mail type), FR148 (hook_result event type), FR170 (health_state event type), FR170 (subsystem_error event type — added for Story 8.8; Story 8.8 depends on 1.6)
-**ADR references:** ADR-006 (Section 5d), ADR-010 (H2), ADR-023
+**ADR references:** ADR-006 (Section 5d), ADR-010 (H2), ADR-023, ADR-024 (Section 2)
 **Files created/modified:**
 - `factory-core/src/overstory/schema-extensions.ts` (~40 LOC)
 **Estimated LOC:** 40
 **Dependencies:** 1.4 (Factory Core skeleton for Overstory database path access). Note: Story 8.8 (Health State Events in events.db) depends on this story for the `subsystem_error` EventType value; the dependency is forward (8.8 → 1.6), not reverse.
 **MVP/Growth:** MVP
+
+### Story 1.4b: Build & Containerization
+
+**Description:** Establish Docker containerization for QDS Factory by copying the proven rfp-agents Docker pattern. This includes the `scripts/compose.sh` environment-aware wrapper, profile-based docker-compose configuration, Debian-based multi-stage Dockerfiles (NOT Alpine — ARM64 native binary compatibility), 3-layer env file hierarchy, named volumes for SQLite persistence, and a Makefile for convenience targets. This story enables dev/prod parity for both developers (Steve on ARM64, Marcus on AMD64) from day one.
+
+**Acceptance criteria:**
+- [ ] `docker/docker-compose.yml` defines services with profile-based composition: `--profile backing-services` (tmux daemon only), `--profile backend` (Factory Core + Gateway), `--profile frontend` (Factory Core + Gateway + Dashboard). Services use env vars for all configuration with defaults matching `factory.yaml.example` (ADR-024 Section 3)
+- [ ] `docker/docker-compose.dev.yml` overlay provides volume mounts for hot reload (`:ro` where applicable), command overrides for dev servers (Vite HMR for dashboard), debug ports, faster healthcheck intervals, and verbose logging (ADR-024 Section 8)
+- [ ] `factory-core/Dockerfile` is a multi-stage Debian-based build: deps stage (install), builder stage (compile/check), runtime stage (`oven/bun:debian` base, non-root user, healthcheck CMD). Digest-pinned base image for reproducible builds (ADR-024 Section 3)
+- [ ] `dashboard/Dockerfile` is a multi-stage Debian-based build: deps stage, builder stage (`vite build`), runner stage (`node:20-slim` serving static output, non-root user). NOT Alpine — Tailwind oxide ARM64 compatibility (ADR-024 Section 3)
+- [ ] `dashboard/Dockerfile.dev` is a dev-only image with Vite HMR dev server CMD for hot reload during development
+- [ ] `scripts/compose.sh` implements 3-layer env file priority: (1) `.env.example` base defaults, (2) `.env` local secrets, (3) `docker/.env.{environment}` Docker-specific overrides. Includes `FAIL_ON_MISSING_SECRETS` validation that rejects startup when required secrets are missing or still placeholder values in CI/staging (ADR-024 Sections 3, 8)
+- [ ] `scripts/compose.sh` includes TTY color detection, Docker availability check, and environment argument validation (copy from rfp-agents)
+- [ ] Named Docker volumes for SQLite persistence: `qds-pipeline-data` mounted at `/app/.qds`, `qds-overstory-data` mounted at `/app/.overstory`. Container destruction does not lose data (ADR-024 Section 2)
+- [ ] Healthchecks in both Dockerfiles AND docker-compose.yml (aligned): Factory Core uses `curl -f http://localhost:3001/health`, with `interval: 30s`, `timeout: 5s`, `retries: 3`, `start_period: 10s` (ADR-024 Section 7)
+- [ ] Service dependency: dashboard `depends_on` factory-core with `condition: service_healthy`
+- [ ] Docker env files: `docker/.env.development`, `docker/.env.staging`, `docker/.env.production` — all git-tracked, NO secrets. Contains Docker-specific overrides (service URLs, ports, feature flags) (ADR-024 Section 8)
+- [ ] `Makefile` with convenience targets: `make up` (start infrastructure), `make dev` (start with hot reload), `make down` (stop), `make logs` (follow), `make build` (build images), `make clean` (stop + remove volumes with confirmation) (ADR-024 Section 3)
+- [ ] All runtime stages use non-root users
+- [ ] `EXPOSE ${QDS_GATEWAY__PORT}` in Factory Core Dockerfile (ADR-024 Section 5)
+- [ ] Docker `stop_grace_period: 15s` in compose for Factory Core service (ADR-024 Section 7)
+- [ ] Integration test: `./scripts/compose.sh development up` starts all services, dashboard accessible via mapped port, `./scripts/compose.sh development down` stops cleanly
+
+**FR references:** FR1
+**ADR references:** ADR-024 (Sections 2, 3, 5, 7, 8)
+**Files created/modified:**
+- `docker/docker-compose.yml` (~80 LOC)
+- `docker/docker-compose.dev.yml` (~40 LOC)
+- `docker/.env.development` (~20 LOC)
+- `docker/.env.staging` (~20 LOC)
+- `docker/.env.production` (~20 LOC)
+- `factory-core/Dockerfile` (~50 LOC)
+- `dashboard/Dockerfile` (~60 LOC)
+- `dashboard/Dockerfile.dev` (~20 LOC)
+- `scripts/compose.sh` (~120 LOC)
+- `Makefile` (~40 LOC)
+**Estimated LOC:** 470
+**Dependencies:** 1.4 (Factory Core skeleton, `factory.yaml.example`, `.env.example`)
+**MVP/Growth:** MVP (P1 — end of Epic 1)
+
+### Story 1.4c: Factory Core Admin CLI
+
+**Description:** Implement one-off admin commands that run in the same runtime as Factory Core but exit after completion. These commands use the same config loading, env-var override resolution, and database access as the long-running process. All admin commands are runnable both bare-metal and inside Docker containers.
+
+**Acceptance criteria:**
+- [ ] `qds doctor` performs health checks: SQLite database integrity (`PRAGMA integrity_check`), `factory.yaml` Zod schema validation, Overstory connectivity (check for `.overstory/` directory and `ov` CLI availability), system dependency versions (git >= 2.30, bun >= 1.0, tmux >= 3.0), gateway port availability (attempt bind, release). Reports pass/fail for each check with actionable fix instructions on failure. Exits 0 if all pass, 1 if any fail (ADR-024 Section 10)
+- [ ] `qds migrate` runs Factory Core's sequential SQL migration runner against `pipeline.db` and `attribution.db` without starting the orchestration loop. Reports migrations applied and current schema version. Useful for running migrations before starting the full process (ADR-024 Section 10)
+- [ ] `qds config validate` loads `factory.yaml`, applies env-var overrides via `applyEnvOverrides()`, validates against Zod schema, and reports all validation errors with field paths and expected types. Exits 0 if valid, 1 if invalid (ADR-024 Section 10)
+- [ ] `qds config show` loads `factory.yaml`, applies env-var overrides, and displays the fully resolved configuration. API keys and credentials are redacted (replaced with `***`). Shows which values came from env vars vs YAML vs defaults (ADR-024 Section 10)
+- [ ] `qds init` creates `.qds/` directory if missing, copies `factory.yaml.example` -> `.qds/factory.yaml` if missing (does not overwrite existing), and reports what was created
+- [ ] All admin commands use the same config loader and database initialization as `factory-core/src/index.ts` — no separate config parsing code
+- [ ] All admin commands support `--help` flag with usage documentation
+- [ ] Docker support: all commands runnable via `docker compose exec factory qds <command>` (against running container) or `docker compose run --rm factory qds <command>` (fresh container) (ADR-024 Section 10)
+- [ ] Unit tests cover: doctor with all checks passing, doctor with missing dependency, config validate with valid config, config validate with invalid config, config show with env-var overrides and secret redaction
+
+**FR references:** FR1
+**ADR references:** ADR-024 (Section 10)
+**Files created/modified:**
+- `factory-core/src/cli/doctor.ts` (~60 LOC)
+- `factory-core/src/cli/migrate.ts` (~20 LOC)
+- `factory-core/src/cli/config.ts` (~40 LOC)
+- `factory-core/src/cli/init.ts` (~20 LOC)
+- `factory-core/src/cli/index.ts` (~30 LOC)
+**Estimated LOC:** 170
+**Dependencies:** 1.4 (Factory Core skeleton, config loader, migration runner)
+**MVP/Growth:** MVP (P2 — end of Epic 1)
 
 ---
 
@@ -538,13 +621,16 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - [ ] On Factory Core restart, the loop queries `turn_state` and `pipeline.db` to reconstruct in-memory state and resume from the last persisted checkpoint — no stories are lost or re-executed
 - [ ] Loop integrates with the circuit breaker (Story 8.5): when circuit breaker is OPEN, no new stories are dispatched (existing active stories continue)
 - [ ] All errors in the loop are wrapped in `toResultAsync()` — a single story's failure does not crash the orchestration loop
-- [ ] Unit tests cover: empty pipeline (no-op), single pending story dispatch, concurrent limit enforcement, crash recovery (restart mid-story), circuit breaker pause, story needing phase transition
+- [ ] SIGTERM/SIGINT handlers implement graceful shutdown sequence: (a) stop accepting new stories (set loop flag), (b) close WebSocket connections with close code `1001` ("going away"), (c) flush SSE buffers (send pending events), (d) checkpoint in-progress turn state to `turn_state` table, (e) persist circuit breaker state to `pipeline.db`, (f) close database connections (WAL checkpoint), (g) exit 0. Shutdown completes within 10 seconds (matches Docker's default SIGTERM->SIGKILL timeout) (ADR-024 Section 7)
+- [ ] Startup SLA: < 2 seconds from process start to orchestration loop running (config load -> migration check -> DB open -> gateway bind -> loop start) (ADR-024 Section 7)
+- [ ] Every orchestration log line includes structured correlation fields: `story_id`, `phase`, `agent_id`, `turn_number` (when applicable) for unified log tracing across Factory Core + Gateway + agent processes (ADR-024 Section 9)
+- [ ] Unit tests cover: empty pipeline (no-op), single pending story dispatch, concurrent limit enforcement, crash recovery (restart mid-story), circuit breaker pause, story needing phase transition, graceful shutdown on SIGTERM (verify WS close, state checkpoint, DB close)
 
 **FR references:** FR1, FR4, FR5
-**ADR references:** ADR-002, ADR-019 (Section 19.1)
+**ADR references:** ADR-002, ADR-019 (Section 19.1), ADR-024 (Sections 7, 9)
 **Files created/modified:**
-- `factory-core/src/pipeline/orchestration-loop.ts` (~120 LOC)
-**Estimated LOC:** 120
+- `factory-core/src/pipeline/orchestration-loop.ts` (~160 LOC)
+**Estimated LOC:** 160
 **Dependencies:** 1.4 (Factory Core skeleton), 1.2 (pipeline.db), 1.5 (Result type)
 **MVP/Growth:** MVP
 
@@ -1230,14 +1316,15 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - [ ] All state transitions are logged to events.db as health_state events
 - [ ] State transitions trigger notification via MessageBus (severity 'critical' for OPEN, 'info' for CLOSED recovery)
 - [ ] Configuration from factory.yaml health.circuit_breaker section: error_window_seconds, error_threshold, check_interval_seconds, recovery_intervals, timeout_multiplier
-- [ ] Unit tests cover: CLOSED->OPEN transition, OPEN->HALF_OPEN probe, HALF_OPEN->CLOSED recovery, HALF_OPEN->OPEN persistence, timeout doubling during OPEN, story queue during OPEN, queue drain on CLOSED
+- [ ] Circuit breaker state is persisted to `pipeline.db` on SIGTERM shutdown (called by orchestration loop's shutdown handler, Story 4.0). On Factory Core restart, circuit breaker state is restored from `pipeline.db` — if the last persisted state was OPEN, the circuit breaker resumes in OPEN and begins recovery probes immediately (ADR-024 Sections 4, 7)
+- [ ] Unit tests cover: CLOSED->OPEN transition, OPEN->HALF_OPEN probe, HALF_OPEN->CLOSED recovery, HALF_OPEN->OPEN persistence, timeout doubling during OPEN, story queue during OPEN, queue drain on CLOSED, state persistence on shutdown, state restoration on restart
 
 **FR references:** FR170
-**ADR references:** ADR-023 (Sections 23.2, 23.5)
+**ADR references:** ADR-023 (Sections 23.2, 23.5), ADR-024 (Sections 4, 7)
 **Files created/modified:**
-- `factory-core/src/health/circuit-breaker.ts` (~120 LOC)
-**Estimated LOC:** 120
-**Dependencies:** 8.1 (MessageBus for notifications), 1.4 (factory.yaml config)
+- `factory-core/src/health/circuit-breaker.ts` (~140 LOC)
+**Estimated LOC:** 140
+**Dependencies:** 8.1 (MessageBus for notifications), 1.4 (factory.yaml config), 1.2 (pipeline.db for state persistence)
 **MVP/Growth:** MVP
 
 ### Story 8.6: Subsystem Health Monitor (7 Monitored Subsystems)
@@ -1315,7 +1402,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 
 ### Story 9.0: ZeroClaw Carry-Forward Adaptation
 
-**Description:** Copy the 6 ZeroClaw carry-forward files (per ADR-001) and perform the 4 required adaptations to make them compatible with the QDS Factory dashboard. This is the prerequisite setup story for all Epic 9 dashboard stories.
+**Description:** Copy the 6 ZeroClaw carry-forward files (per ADR-001) and perform the 4 required adaptations to make them compatible with the QDS Factory dashboard. This is the prerequisite setup story for all Epic 9 dashboard stories. Also establishes the Gateway as a self-contained HTTP service with configurable port binding, health/readiness endpoints, and structured access logging per twelve-factor principles.
 
 **Acceptance criteria:**
 - [ ] 6 files copied from ZeroClaw: `index.html`, `vite.config.ts`, `tsconfig.json`, `tsconfig.app.json`, `src/lib/sse.ts`, `src/lib/ws.ts`
@@ -1323,11 +1410,17 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - [ ] Auth token mechanism: WebSocket auth token path changed from `zeroclaw` config to `.qds/ws-token` per Factory Core's credential management
 - [ ] WS subprotocol: renamed from `zeroclaw.v1` to `qds.v1` in `ws.ts` WebSocket constructor
 - [ ] SSE base path: changed from `/_app/` to `/events` (or gateway-configured path) in `sse.ts` fetch URL construction
+- [ ] Gateway binds to `factory.yaml` `gateway.port` (default `3001`) and `gateway.host` (default `0.0.0.0` inside Docker, `127.0.0.1` bare metal). Overridable via `QDS_GATEWAY__PORT` and `QDS_GATEWAY__HOST` env vars (ADR-024 Section 5)
+- [ ] Gateway startup logs: `Gateway listening on http://{host}:{port}` (ADR-024 Section 5)
+- [ ] `/health` endpoint returns `{ status: "ok", version: "x.y.z", uptime_ms: N }` for Docker readiness/liveness probes. Returns 200 when the gateway process is alive (ADR-024 Section 5)
+- [ ] `/ready` endpoint returns 200 only after database migrations complete and the orchestration loop is running. Returns 503 with `{ status: "starting" }` during initialization. This distinguishes "process alive" from "system fully initialized" (ADR-024 Section 5)
+- [ ] Gateway is self-contained — exports its service via port binding, not via shared memory or filesystem IPC. All dashboard communication goes through gateway (SSE, WS, REST) (ADR-024 Section 5)
+- [ ] Gateway access logs written to stdout as NDJSON: `method`, `path`, `status`, `latency_ms` per request (ADR-024 Section 9)
 - [ ] All adapted files compile with zero type errors against QDS shared-types
-- [ ] Unit tests verify: SSE client connects to correct base path, WS client uses correct subprotocol, type contracts match shared-types definitions
+- [ ] Unit tests verify: SSE client connects to correct base path, WS client uses correct subprotocol, type contracts match shared-types definitions, `/health` returns correct JSON, `/ready` returns 503 before initialization and 200 after, gateway binds to configured port
 
 **FR references:** FR43, FR44
-**ADR references:** ADR-001, ADR-009
+**ADR references:** ADR-001, ADR-009, ADR-024 (Sections 5, 9)
 **Files created/modified:**
 - `dashboard/src/lib/sse.ts` (~186 LOC, adapted)
 - `dashboard/src/lib/ws.ts` (~146 LOC, adapted)
@@ -1335,8 +1428,9 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - `dashboard/vite.config.ts` (copied)
 - `dashboard/tsconfig.json` (copied)
 - `dashboard/tsconfig.app.json` (copied)
-**Estimated LOC:** 20 (changes to existing files; ~332 LOC copied)
-**Dependencies:** 1.1 (shared-types for type contracts)
+- `factory-core/src/gateway/health.ts` (~30 LOC, new)
+**Estimated LOC:** 50 (changes to existing files + health endpoints; ~332 LOC copied)
+**Dependencies:** 1.1 (shared-types for type contracts), 1.4 (Factory Core config for gateway port/host)
 **MVP/Growth:** MVP
 
 ### Story 9.1: Revised Performance Dashboard
@@ -1730,6 +1824,42 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 
 ---
 
+## Growth Stories: Twelve-Factor Operational Maturity (Post-MVP)
+
+These stories extend the twelve-factor alignment established in ADR-024 but are not required for MVP. They improve operational maturity for production deployments.
+
+### Growth Story: Unified Log Aggregation
+
+**Description:** `qds logs` CLI command that tails Factory Core stdout + Overstory per-agent NDJSON log files in a unified, chronologically-sorted stream. Supports `--story <id>` filtering to show only log lines with a matching `story_id` correlation field, and `--component <name>` filtering.
+
+**ADR reference:** ADR-024 Section 9
+
+### Growth Story: Overstory Environment Variable Layer
+
+**Description:** Add `OVERSTORY_` prefix environment variable overrides to Overstory's `config.yaml` loading. This is a fork modification to Overstory that brings its configuration mechanism into twelve-factor alignment. Example: `OVERSTORY_DATABASES__SESSIONS_PATH` overrides the sessions database path.
+
+**ADR reference:** ADR-024 Sections 1, 2
+
+### Growth Story: Export/Backup/Restore
+
+**Description:** `qds export` (pipeline data as JSON for analysis), `qds backup` (SQLite `.backup` API wrapper for all 6 databases — atomic, consistent), `qds restore` (restore databases from backup files). All commands follow the admin process pattern (ADR-024 Section 10) — same runtime, same config, exit after completion.
+
+**ADR reference:** ADR-024 Section 10
+
+### Growth Story: CI Pipeline
+
+**Description:** GitHub Actions (or equivalent) workflow: build multi-arch Docker image (`linux/amd64` + `linux/arm64`), run test suite inside container, push tagged image to container registry. Staging environment uses `FAIL_ON_MISSING_SECRETS=true` for secret validation.
+
+**ADR reference:** ADR-024 Sections 3, 8
+
+### Growth Story: Docker Volume Management
+
+**Description:** `qds volumes backup` (export named volume data), `qds volumes prune` (remove orphaned volumes with confirmation), named volume lifecycle documentation. Ensures SQLite data on Docker volumes is properly managed across container updates.
+
+**ADR reference:** ADR-024 Section 2
+
+---
+
 ## FR Coverage Matrix
 
 | FR | Story | Status |
@@ -1834,7 +1964,8 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 | ADR-021 | 1.1, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 7.5, 7.7 | Epics 1, 2, 7 |
 | ADR-022 | 1.1, 6.6, 8.1, 8.2, 8.3, 8.4, 10.8 | Epics 1, 6, 8, 10 |
 | ADR-023 | 1.1, 1.6, 8.5, 8.6, 8.7, 8.8, 9.4, 9.7 | Epics 1, 8, 9 |
+| ADR-024 | 1.4, 1.4b, 1.4c, 1.6, 4.0, 8.5, 9.0 | Epics 1, 4, 8, 9 |
 
 ---
 
-*v2.0.1 — Session 10 code-lift resolution + PR review round 7. Epic 6 LOC corrected (430→450, matching story sum). Story 2.3 dependency on 2.9 (TierResolver) added. Story 1.6↔8.8 dependency direction clarified (8.8 depends on 1.6, not reverse). 10 epics, ~64 stories (4 added: 1.6, 2.9, 4.0, 9.0), 10 AC amendments, 3 blockers resolved, implementation-ready with zero ambiguity.*
+*v2.1 — Session 11 twelve-factor alignment. ADR-024 added (10 sections: env-var overrides, backing services, build/release/run, stateless processes, port binding, concurrency, disposability, dev/prod parity, logging, admin processes). 2 new stories added (1.4b Build & Containerization, 1.4c Admin CLI). 5 stories amended (1.4, 1.6, 4.0, 8.5, 9.0). Growth stories section added (5 post-MVP operational maturity stories). Epic 1 LOC updated (670→1,310). 10 epics, ~66 stories, implementation-ready with zero ambiguity.*
