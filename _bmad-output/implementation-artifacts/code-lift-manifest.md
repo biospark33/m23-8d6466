@@ -10,7 +10,7 @@
 ## Section 1: EPIC-BY-STORY MAPPING
 
 ### Epic 1: Foundation -- Pipeline DB, Shared Types, Factory Core Skeleton
-**Epic estimated LOC:** ~630
+**Epic estimated LOC:** ~670
 
 #### Story 1.1: shared-types Package with All Zod Schemas (210 LOC)
 
@@ -111,7 +111,7 @@
 ---
 
 ### Epic 2: Middleware Chain -- Overlay Composition Restructure
-**Epic estimated LOC:** ~340
+**Epic estimated LOC:** ~390
 
 #### Story 2.1: Middleware Interface and MiddlewareChain Executor (100 LOC)
 
@@ -1180,7 +1180,7 @@
 | Reuse Type | Description | LOC Savings | % of Total Reuse |
 |------------|-------------|-------------|------------------|
 | DIRECT_COPY | Import/copy with minimal changes | ~650 | 32.0% |
-| ADAPT | Modify structure/types for QDS context | ~910 | 44.8% |
+| ADAPT | Modify structure/types for QDS context | ~912 | 44.8% |
 | PATTERN_COPY | Replicate design pattern, new implementation | ~250 | 12.3% |
 | INTERFACE_CARRY | Carry type definitions across packages | ~160 | 7.9% |
 | API_CONSUME | Call external API, write integration glue | ~60 | 3.0% |

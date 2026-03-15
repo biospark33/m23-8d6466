@@ -6,7 +6,7 @@ QDS Factory synthesizes five proven open-source projects into a single platform 
 
 ## How It Works
 
-```
+```text
 Story In --> Develop --> BMAD Review --> Fix Loop --> QA Swarm --> PR Out
               |              |              |            |
           [builders]    [fresh agents]  [fix-lead]   [scouts]
@@ -37,7 +37,7 @@ Five components plug into Factory Core:
 | ZeroClaw | SSE/WS client architecture | Dashboard real-time patterns (design inspiration, not runtime dep) |
 | claude-mem | Progressive disclosure, session summaries | Memory patterns (design inspiration, not runtime dep) |
 
-```
+```text
                     +------------------+
                     |   Factory Core   |
                     |  (pipeline.db)   |
@@ -65,7 +65,7 @@ Five components plug into Factory Core:
 
 ## Project Structure
 
-```
+```text
 QDS-Factory/
   overstory/           Orchestration CLI (Bun/TypeScript) -- fork of jayminwest/overstory
   pi-mono/             Model-agnostic runtime (Node.js, 6 packages)
