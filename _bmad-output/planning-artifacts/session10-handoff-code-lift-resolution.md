@@ -62,14 +62,13 @@ Session 9b conducted a rigorous code-lift validation exercise using GitNexus kno
 
 ### BLOCKER-2: No Story Covers Overstory Mail Schema Extension (M-1)
 
-**What's wrong:** Architecture v2 line 280 says "Must extend schema for `learning_report` — Overstory's migration system handles upgrades." The mail system has 12 message types constrained by a CHECK constraint. Adding `learning_report` requires an ALTER TABLE to update the CHECK constraint plus adding a `phase` column per ADR-006 (5d). No story in the epics creates this migration.
+**What's wrong:** Architecture v2 line 280 says "Must extend schema for `learning_report` — Overstory's migration system handles upgrades." The mail system has 12 message types constrained by a CHECK constraint. Adding `learning_report` requires a SQLite table-rebuild migration (`CREATE new table` with updated CHECK → `copy data` → `DROP old` → `RENAME new` → recreate indexes) since SQLite does not support modifying existing CHECK constraints via `ALTER TABLE`. The rebuild also adds the `phase` column per ADR-006 (5d). No story in the epics creates this migration.
 
 **What this blocks:** Story 3.3 (drift warnings via mail), Stories 7.1/7.2 (learning records that may use mail), and FR23/FR57.
 
-**Fix:** Add Story 1.6: "Overstory Schema Extensions" — performs ALL Overstory schema changes using Overstory's native `PRAGMA table_info` probe-then-alter pattern (NOT the Factory Core sequential SQL migration runner):
-- Add `learning_report` to mail.db message type CHECK constraint
-- Add `phase` column to mail.db per ADR-006 (5d)
-- Add `hook_result` and `health_state` to events.db EventType CHECK constraint (needed by Stories 8.8, 3.3)
+**Fix:** Add Story 1.6: "Overstory Schema Extensions" — performs ALL Overstory schema changes (NOT via the Factory Core sequential SQL migration runner), using the appropriate SQLite strategy for each change type:
+- **CHECK constraint changes** (table-rebuild: `CREATE new table` → `copy data` → `DROP old` → `RENAME new` → recreate indexes): Add `learning_report` to mail.db message type CHECK, add `hook_result` and `health_state` to events.db EventType CHECK (needed by Stories 8.8, 3.3)
+- **New columns** (probe-then-alter: `PRAGMA table_info` → `ALTER TABLE ADD COLUMN`): Add `phase` column to mail.db per ADR-006 (5d)
 - Estimated ~40 LOC
 
 This also resolves M-4 (Overstory EventType extensions).

@@ -148,7 +148,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 
 ### Story 1.6: Overstory Schema Extensions
 
-**Description:** Perform ALL required schema changes to Overstory-owned databases using Overstory's native `PRAGMA table_info` probe-then-alter migration pattern (NOT Factory Core's sequential SQL migration runner). This consolidates all Overstory schema modifications into a single story to prevent scattered, uncoordinated ALTER TABLE operations across multiple epics.
+**Description:** Perform ALL required schema changes to Overstory-owned databases using Overstory's native `PRAGMA table_info` introspection pattern (NOT Factory Core's sequential SQL migration runner). Uses two SQLite-appropriate strategies: table-rebuild (`CREATE new table` → `copy data` → `DROP old` → `RENAME new`) for CHECK constraint modifications, and `ALTER TABLE ADD COLUMN` for new columns. This consolidates all Overstory schema modifications into a single story to prevent scattered, uncoordinated migrations across multiple epics.
 
 **Acceptance criteria:**
 - [ ] Extend mail.db `message_type` CHECK constraint to include `learning_report` using SQLite table-rebuild migration: `PRAGMA table_info(mail)` probes current schema; if the CHECK must change, create a new table with the revised CHECK constraint, copy data from old table, drop old table, rename new table — following Overstory's `SessionStore.open()` idempotent migration pattern
