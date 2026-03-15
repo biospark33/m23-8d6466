@@ -3,7 +3,7 @@
 **Version:** 2.0
 **Date:** 2026-03-14
 **Scope:** Cross-reference of deep-dive source code findings against PRD v2, Architecture v2, and Epic/Story decomposition
-**Session 10 status:** ALL 3 BLOCKERS RESOLVED. ALL 5 RISKS RESOLVED. ALL 10 STORY GAPS AMENDED. ALL 5 MISSING STORIES ADDRESSED (4 added, 1 consolidated).
+**Session 10 status:** ALL 3 blockers resolved, 5 risks resolved, 10 story gaps amended, and 5 missing stories addressed (4 added, 1 consolidated).
 **Documents reviewed:**
 - `_bmad-output/implementation-artifacts/epics-and-stories.md` (v2.0, Session 10)
 - `_bmad-output/planning-artifacts/architecture-v2.md`
@@ -80,7 +80,7 @@ Story 1.2 says: "Migrations are plain SQL files executed sequentially by Factory
 | **3.1** | must_haves parser does not name GSD Nyquist three-level verification. | MINOR | Add clarifying note. | **RESOLVED** — Story 3.1 AC amended |
 | **3.4** | Full Nyquist does not mention goal-first verification. | MINOR | Add goal-first AC. | **RESOLVED** — Story 3.4 AC amended |
 | **6.3** | Atomic task checkout lacks multi-process growth note. | IMPORTANT | Add claim-confirm growth note. | **RESOLVED** — Story 6.3 AC amended |
-| **6.1-6.4** | Cost source should be Pi SDK `Usage.cost.total`, not recomputed. | MINOR | Add explicit cost source AC. | **RESOLVED** — Story 6.4 AC amended |
+| **6.4** | Cost source should be Pi SDK `Usage.cost.total`, not recomputed (cross-cutting concern for Stories 6.1-6.4, AC amended in 6.4). | MINOR | Add explicit cost source AC. | **RESOLVED** — Story 6.4 AC amended |
 | **9.x** | ZeroClaw adaptations not covered by any story. | IMPORTANT | Create Story 9.0 setup story. | **RESOLVED** — Story 9.0 added |
 
 ---

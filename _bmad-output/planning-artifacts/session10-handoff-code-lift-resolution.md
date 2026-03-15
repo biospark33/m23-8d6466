@@ -168,7 +168,7 @@ These are not missing stories but existing stories with acceptance criteria that
 - Update the dependency chain (Story 4.0 becomes prerequisite for 4.1; Story 1.6 becomes prerequisite for 3.3, 8.8; Story 9.0 becomes prerequisite for 9.1)
 - Update the FR Coverage Matrix (new stories cover previously uncovered concerns)
 - Update the ADR Exercise Matrix
-- Update epic LOC totals (Epic 1: 630 -> ~670, Epic 2: 340 -> ~390, Epic 4: 530 -> ~650, Epic 9: 1,100 -> ~1,120)
+- Update epic LOC totals (Epic 1: 630 -> ~670, Epic 2: 340 -> ~390, Epic 4: 530 -> ~650, Epic 9: 1,100 -> ~1,220)
 - Bump document version header
 
 **Job 3: Apply architecture-v2 amendment notes**

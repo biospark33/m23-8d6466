@@ -100,6 +100,7 @@
 ---
 
 ### Epic 1 Subtotals
+
 | Metric | Value |
 |--------|-------|
 | Story LOC total | 670 |
@@ -232,6 +233,7 @@
 ---
 
 ### Epic 2 Subtotals
+
 | Metric | Value |
 |--------|-------|
 | Story LOC total | 390 |
@@ -339,6 +341,7 @@
 ---
 
 ### Epic 3 Subtotals
+
 | Metric | Value |
 |--------|-------|
 | Story LOC total | 660 |
@@ -469,6 +472,7 @@
 ---
 
 ### Epic 4 Subtotals
+
 | Metric | Value |
 |--------|-------|
 | Story LOC total | 650 |
@@ -479,7 +483,7 @@
 ---
 
 ### Epic 5: Performance Data Collection (MVP Layers 1-3)
-**Epic estimated LOC:** ~530 (corrected from stories: 120+80+100+30+100+80 = 510)
+**Epic estimated LOC:** ~510 (from stories: 120+80+100+30+100+80 = 510)
 
 #### Story 5.1: Action Scorer Module (120 LOC)
 
@@ -559,6 +563,7 @@
 ---
 
 ### Epic 5 Subtotals
+
 | Metric | Value |
 |--------|-------|
 | Story LOC total | 510 |
@@ -648,6 +653,7 @@
 ---
 
 ### Epic 6 Subtotals
+
 | Metric | Value |
 |--------|-------|
 | Story LOC total | 450 |
@@ -750,17 +756,18 @@
 ---
 
 ### Epic 7 Subtotals
+
 | Metric | Value |
 |--------|-------|
-| Story LOC total | 620 |
+| Story LOC total | 640 |
 | Reusable LOC | ~160 |
-| Net new LOC | ~460 (includes 120 Growth LOC from Story 7.3) |
-| Reuse % | 26% |
+| Net new LOC | ~480 (includes 120 Growth LOC from Story 7.3) |
+| Reuse % | 25% |
 
 ---
 
 ### Epic 8: Notifications & Health Monitoring
-**Epic estimated LOC:** ~590 (corrected from stories: 110+60+40+40+120+80+60+40 = 550)
+**Epic estimated LOC:** ~550 (from stories: 110+60+40+40+120+80+60+40 = 550)
 
 #### Story 8.1: Channel Interface and MessageBus Implementation (110 LOC)
 
@@ -867,6 +874,7 @@
 ---
 
 ### Epic 8 Subtotals
+
 | Metric | Value |
 |--------|-------|
 | Story LOC total | 550 |
@@ -996,6 +1004,7 @@
 ---
 
 ### Epic 9 Subtotals
+
 | Metric | Value |
 |--------|-------|
 | Story LOC total | 1,220 |
@@ -1008,7 +1017,7 @@
 ---
 
 ### Epic 10: Growth Phase -- Behavioral Effects
-**Epic estimated LOC:** ~830
+**Epic estimated LOC:** ~730
 
 #### Story 10.1: ELO Domain Rating Computation (100 LOC)
 
@@ -1125,14 +1134,15 @@
 ---
 
 ### Epic 10 Subtotals
+
 | Metric | Value |
 |--------|-------|
-| Story LOC total | 830 |
+| Story LOC total | 730 |
 | Reusable LOC | ~50 |
-| Net new LOC | ~780 |
-| Reuse % | 6% |
+| Net new LOC | ~680 |
+| Reuse % | 7% |
 
-**Note:** Epic 10 has the lowest reuse percentage overall. Growth-phase behavioral effects (ELO, tiers, routing, audit, anti-gaming) are novel QDS-specific logic with no direct precedent in source repos. Pi SDK provides model catalog lookup (API_CONSUME) but no tier management.
+**Note:** Epic 10 has the lowest reuse percentage (730 LOC, 7% reuse). Growth-phase behavioral effects (ELO, tiers, routing, audit, anti-gaming) are novel QDS-specific logic with no direct precedent in source repos. Pi SDK provides model catalog lookup (API_CONSUME) but no tier management.
 
 ---
 
@@ -1142,10 +1152,10 @@
 
 | Metric | Value |
 |--------|-------|
-| **Total estimated LOC (all stories)** | **6,550** |
-| **Total reusable LOC from source repos** | **1,979** |
-| **Net new LOC required** | **4,571** |
-| **Overall reuse percentage** | **30.2%** |
+| **Total estimated LOC (all stories)** | **6,470** |
+| **Total reusable LOC from source repos** | **2,032** |
+| **Net new LOC required** | **4,438** |
+| **Overall reuse percentage** | **31.4%** |
 
 ### Breakdown by Epic
 
@@ -1157,34 +1167,34 @@
 | 4 | Turn Continuation | 650 | 235 | 415 | 36% |
 | 5 | Performance Data | 510 | 140 | 370 | 27% |
 | 6 | Economic Governance | 450 | 130 | 320 | 29% |
-| 7 | Learning System | 620 | 160 | 460 | 26% |
+| 7 | Learning System | 640 | 160 | 480 | 25% |
 | 8 | Notifications/Health | 550 | 165 | 385 | 30% |
 | 9 | Dashboard Extensions | 1,220 | 432 | 788 | 35% |
-| 10 | Growth Behavioral | 830 | 50 | 780 | 6% |
-| **TOTAL** | | **6,550** | **1,979** (note 1) | **4,571** | **30.2%** |
+| 10 | Growth Behavioral | 730 | 50 | 680 | 7% |
+| **TOTAL** | | **6,470** | **2,032** (note 1) | **4,438** | **31.4%** |
 
-*Note 1: Reusable LOC increased from 1,630 to 1,979 due to Story 9.0 carry-forward accounting (332 LOC) and new stories 1.6, 2.9, 4.0 contributing additional code-lift references.*
+*Note 1: Reusable LOC increased from 1,630 to 2,032 due to Story 9.0 carry-forward accounting (332 LOC), new stories 1.6, 2.9, 4.0 contributing additional code-lift references, and corrected Epic 7/10 story sums.*
 
 ### Breakdown by Reuse Type
 
 | Reuse Type | Description | LOC Savings | % of Total Reuse |
 |------------|-------------|-------------|------------------|
-| DIRECT_COPY | Import/copy with minimal changes | ~315 | 19.3% |
-| ADAPT | Modify structure/types for QDS context | ~870 | 53.4% |
-| PATTERN_COPY | Replicate design pattern, new implementation | ~230 | 14.1% |
-| INTERFACE_CARRY | Carry type definitions across packages | ~160 | 9.8% |
-| API_CONSUME | Call external API, write integration glue | ~55 | 3.4% |
+| DIRECT_COPY | Import/copy with minimal changes | ~650 | 32.0% |
+| ADAPT | Modify structure/types for QDS context | ~910 | 44.8% |
+| PATTERN_COPY | Replicate design pattern, new implementation | ~250 | 12.3% |
+| INTERFACE_CARRY | Carry type definitions across packages | ~160 | 7.9% |
+| API_CONSUME | Call external API, write integration glue | ~60 | 3.0% |
 | STUDY / ADAPT_PATTERN | Design reference only (ZeroClaw Rust, research) | Patterns only | N/A |
-| **TOTAL** | | **~1,630** | **100%** |
+| **TOTAL** | | **~2,030** | **100%** |
 
 ### Breakdown by Source Repository
 
 | Source Repo | Total Reusable LOC | Primary Target Epics | Key Modules |
 |-------------|-------------------|---------------------|-------------|
-| **Overstory** | ~1,150 | 1, 2, 3, 4, 5, 6, 7, 8 | types.ts, sessions/store.ts, config.ts, watchdog/*, metrics/*, insights/analyzer.ts, agents/overlay.ts, merge/resolver.ts |
+| **Overstory** | ~1,190 | 1, 2, 3, 4, 5, 6, 7, 8 | types.ts, sessions/store.ts, config.ts, watchdog/*, metrics/*, insights/analyzer.ts, agents/overlay.ts, merge/resolver.ts |
 | **Pi-Mono** | ~170 | 1, 2, 4, 5, 6, 10 | ai/types.ts, agent/types.ts, Agent class API, Usage callback, transformContext, ModelRegistry |
 | **Superpowers** | ~210 (import) | 2 | skills-core.js (IMPORT_AS_IS with .d.ts) |
-| **ZeroClaw** | ~100 | 9, 10 | web/src/lib/sse.ts, web/src/lib/ws.ts, React hooks |
+| **ZeroClaw** | ~432 | 9, 10 | web/src/lib/sse.ts, web/src/lib/ws.ts, React hooks, carry-forward files (Story 9.0) |
 | **Claude-Mem** | ~120 | 1, 4, 6, 7 | MigrationRunner, SessionManager, PendingMessageStore, ContextBuilder |
 | **Research Repos** | Patterns only | All | deer-flow middleware, GSD Nyquist, symphony GenServer, paperclip adapter |
 
@@ -1413,7 +1423,7 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 | 34' | **8.7** Mitigations | 60 |
 | 35' | **8.8** Health Events | 40 |
 
-**Phase 5 total:** 1,130 LOC, ~325 LOC reused (29% reuse)
+**Phase 5 total:** 1,030 LOC, ~305 LOC reused (30% reuse)
 
 ### Phase 6: Dashboard Extensions (Epic 9)
 
@@ -1463,13 +1473,13 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 | 2. Middleware | 2 | 390 | 32% | Sequential |
 | 3. Three Workstreams | 3, 4, 5 | 1,820 | 28% | **3-way parallel** |
 | 4. Economics | 6 | 450 | 29% | Sequential |
-| 5. Learning + Health | 7, 8 | 1,130 | 29% | **2-way parallel** |
+| 5. Learning + Health | 7, 8 | 1,030 | 30% | **2-way parallel** |
 | 6. Dashboard | 9 | 1,220 | 35% | Partially parallel |
 | 7. Growth | 10 + Growth stories | 890 | 7% | Partially parallel |
-| **TOTAL** | | **6,570** | **30%** | |
+| **TOTAL** | | **6,470** | **31%** | |
 
 **Key insight:** Phases 1-2 (1,060 LOC, 55% reuse) establish the scaffolding that maximizes reuse for all subsequent phases. Investing in careful code-lifting during these phases pays dividends throughout the project. Phase 3's three-way parallelism is the largest acceleration opportunity.
 
 ---
 
-*End of Code-Lift Manifest v2.0 — Session 10 update. 4 new stories added (1.6, 2.9, 4.0, 9.0), totals revised, priority order updated.*
+*End of Code-Lift Manifest v2.0 — Session 10 update. 4 new stories added (1.6, 2.9, 4.0, 9.0), totals revised with corrected story sums, priority order updated.*

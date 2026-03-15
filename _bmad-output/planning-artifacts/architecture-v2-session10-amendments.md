@@ -29,7 +29,7 @@
 **Amended text:** "Stage 2 injects enforcement context: skill `description` fields from YAML frontmatter (which contain triggering conditions and guard rules as natural language). There is no separate `enforcement` field in Superpowers frontmatter — the `description` field IS the enforcement metadata. This is consistent with S1's `SkillMetadata` interface, which defines only `name` and `description` as frontmatter fields. The 3 critical enforcement skills (TDD, verification-before-completion, systematic-debugging) have descriptions that serve as their enforcement rules."
 
 **Additionally, amend S1 documentation comment:** After the `SkillMetadata` interface definition, add:
-```
+```ts
 // NOTE (Session 10): `description` is the ONLY enforcement metadata field.
 // PRD FR34's reference to a separate `enforcement` field was aspirational
 // and contradicts this accepted architecture decision. Factory Core reads

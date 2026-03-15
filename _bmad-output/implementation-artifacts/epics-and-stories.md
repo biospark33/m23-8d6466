@@ -2,7 +2,7 @@
 
 **Version:** 2.0
 **Date:** 2026-03-14
-**Source:** Consolidated v2 artifacts + Session 10 code-lift resolution (PRD v2, Architecture v2, UX Spec v2, Code-Lift Manifest v1.0, Gap Analysis v1.0)
+**Source:** Consolidated v2 artifacts + Session 10 code-lift resolution (PRD v2, Architecture v2, UX Spec v2, Code-Lift Manifest v2.0, Gap Analysis v2.0)
 **Scope:** 10 epics, dependency-ordered stories, implementation-ready — zero ambiguity
 
 ## Dependency Chain
@@ -151,12 +151,12 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Description:** Perform ALL required schema changes to Overstory-owned databases using Overstory's native `PRAGMA table_info` probe-then-alter migration pattern (NOT Factory Core's sequential SQL migration runner). This consolidates all Overstory schema modifications into a single story to prevent scattered, uncoordinated ALTER TABLE operations across multiple epics.
 
 **Acceptance criteria:**
-- [ ] Add `learning_report` to mail.db `message_type` CHECK constraint using Overstory's idempotent probe-then-alter pattern: `PRAGMA table_info(mail)` checks current schema before any ALTER TABLE
-- [ ] Add `phase` column (TEXT NOT NULL DEFAULT 'dev') to mail.db per ADR-006 (5d), with composite index `(phase, to_agent, read)` for phase-scoped mail queries
-- [ ] Add `hook_result` to events.db `EventType` CHECK constraint per ADR-010 H2
-- [ ] Add `health_state` to events.db `EventType` CHECK constraint per ADR-023
+- [ ] Extend mail.db `message_type` CHECK constraint to include `learning_report` using SQLite table-rebuild migration: `PRAGMA table_info(mail)` probes current schema; if the CHECK must change, create a new table with the revised CHECK constraint, copy data from old table, drop old table, rename new table — following Overstory's `SessionStore.open()` idempotent migration pattern
+- [ ] Add `phase` column (TEXT NOT NULL DEFAULT 'dev') to mail.db per ADR-006 (5d) via `ALTER TABLE ADD COLUMN` (SQLite supports this), with composite index `(phase, to_agent, read)` for phase-scoped mail queries
+- [ ] Extend events.db `EventType` CHECK constraint to include `hook_result` per ADR-010 H2 using the same table-rebuild migration strategy
+- [ ] Extend events.db `EventType` CHECK constraint to include `health_state` per ADR-023 using the same table-rebuild migration strategy
 - [ ] All schema changes are idempotent: running the extension module twice produces no errors and no duplicate columns/constraints
-- [ ] Extension module uses `bun:sqlite` `PRAGMA table_info()` to probe before altering — same pattern as Overstory's `SessionStore.open()` migration logic
+- [ ] Extension module uses `bun:sqlite` `PRAGMA table_info()` to probe current schema before deciding whether migration is needed — same introspection pattern as Overstory's `SessionStore.open()` migration logic. CHECK constraint changes use table-rebuild (create-copy-drop-rename); column additions use `ALTER TABLE ADD COLUMN`
 - [ ] Unit tests verify: fresh database gets all extensions, pre-extended database is not modified, each CHECK constraint accepts the new type values
 
 **FR references:** FR23, FR57 (learning_report mail type), FR148 (hook_result event type), FR170 (health_state event type)
@@ -218,7 +218,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Files created/modified:**
 - `factory-core/src/middleware/budget.ts` (~40 LOC)
 **Estimated LOC:** 40
-**Dependencies:** 2.1 (middleware chain), 1.3 (attribution.db with cost tables)
+**Dependencies:** 2.1 (middleware chain), 2.9 (TierResolver for cost profile resolution), 1.3 (attribution.db with cost tables)
 **MVP/Growth:** MVP
 
 ### Story 2.3: Credential Middleware
@@ -427,7 +427,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - `factory-core/src/middleware/verification.ts` (modify -- replace stub with real call)
 - `factory-core/src/verification/drift-reporter.ts` (~40 LOC)
 **Estimated LOC:** 60
-**Dependencies:** 3.2 (lightweight verifier), 2.7 (verification middleware)
+**Dependencies:** 3.2 (lightweight verifier), 2.7 (verification middleware), 1.6 (Overstory schema extensions for mail system)
 **MVP/Growth:** MVP
 
 ### Story 3.4: Full Nyquist Verifier (LLM-Powered)
@@ -566,7 +566,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Files created/modified:**
 - `factory-core/src/pipeline/turn-continuation.ts` (~120 LOC)
 **Estimated LOC:** 120
-**Dependencies:** 2.7 (verification middleware for structural check signal), 1.5 (Result type for error normalization)
+**Dependencies:** 4.0 (orchestration loop), 2.7 (verification middleware for structural check signal), 1.5 (Result type for error normalization)
 **MVP/Growth:** MVP
 
 ### Story 4.2: Progress Velocity Check
@@ -1300,7 +1300,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Files created/modified:**
 - `factory-core/src/health/health-events.ts` (~40 LOC)
 **Estimated LOC:** 40
-**Dependencies:** 8.5 (circuit breaker produces state transitions), 8.6 (subsystem monitor produces error events)
+**Dependencies:** 8.5 (circuit breaker produces state transitions), 8.6 (subsystem monitor produces error events), 1.6 (Overstory schema extensions for health_state event type)
 **MVP/Growth:** MVP
 
 ---
@@ -1311,7 +1311,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Depends on:** Epic 5 (performance data for dashboard display), Epic 6 (burn rate data), Epic 7 (learning records and epic context data), Epic 8 (health state data, notification channel status)
 **Packages touched:** dashboard
 **ADR references:** ADR-015, ADR-016, ADR-022, ADR-023
-**Total estimated LOC:** ~1,120
+**Total estimated LOC:** ~1,220
 
 ### Story 9.0: ZeroClaw Carry-Forward Adaptation
 
@@ -1357,7 +1357,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Files created/modified:**
 - `dashboard/src/views/PerformanceOverview.tsx` (~200 LOC)
 **Estimated LOC:** 200
-**Dependencies:** 5.1 (action scores data), 5.3 (session composites data), gateway SSE events for performance data
+**Dependencies:** 9.0 (ZeroClaw carry-forward adaptation), 5.1 (action scores data), 5.3 (session composites data), gateway SSE events for performance data
 **MVP/Growth:** MVP (structure and data display); Growth (tier transitions, ELO charts)
 
 ### Story 9.2: Learning Effectiveness Panel
@@ -1580,7 +1580,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Files created/modified:**
 - `factory-core/src/performance/tiers.ts` (~90 LOC)
 **Estimated LOC:** 90
-**Dependencies:** 10.1 (ELO ratings provide input)
+**Dependencies:** 10.1 (ELO ratings provide input), 2.9 (TierResolver for tier-to-model mapping)
 **MVP/Growth:** Growth
 
 ### Story 10.3: Tier Demotion Logic
