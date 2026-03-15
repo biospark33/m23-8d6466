@@ -66,14 +66,14 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 
 ### Story 1.2: pipeline.db Migration System and Initial MVP Schema
 
-**Description:** Create the SQL migration system for pipeline.db and implement the initial MVP schema containing 8 tables: action_scores, confidence_declarations, session_composites, learning_records, turn_state, epics, epic_context, and overlay_effectiveness. Migrations are plain SQL files executed sequentially by Factory Core at startup. All tables use SQLite with WAL mode for concurrent access safety.
+**Description:** Create the SQL migration system for pipeline.db and implement the initial MVP schema containing 9 tables: stories, action_scores, confidence_declarations, session_composites, learning_records, turn_state, epics, epic_context, and overlay_effectiveness. The `stories` table is the central pipeline tracking table polled by the orchestration loop (Story 4.0). Migrations are plain SQL files executed sequentially by Factory Core at startup. All tables use SQLite with WAL mode for concurrent access safety.
 
 **Acceptance criteria:**
 - [ ] Migration runner loads SQL files from `factory-core/src/migrations/` in lexicographic order and executes them idempotently (tracks applied migrations in a `_migrations` table)
-- [ ] Initial migration creates all 8 MVP tables with CHECK constraints, indexes, and defaults matching ADR-015 Sections 15.4 and 15.6, ADR-019 Section 19.5, and the epic-level context architecture
+- [ ] Initial migration creates all 9 MVP tables with CHECK constraints, indexes, and defaults matching ADR-015 Sections 15.4 and 15.6, ADR-019 Section 19.5, and the epic-level context architecture. The `stories` table includes: `id` (PRIMARY KEY), `status` (TEXT NOT NULL, CHECK IN ('pending', 'active', 'completed', 'failed')), `phase` (TEXT NOT NULL), `heartbeat_at` (TEXT — ISO-8601, updated by active story agents), `transfer_manifest` (TEXT — JSON for phase boundary data), `created_at` (TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP), `updated_at` (TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)
 - [ ] WAL mode is enabled on database open (`PRAGMA journal_mode=WAL`)
 - [ ] Migration runner is tested with fresh database creation and re-run idempotency
-- [ ] All indexes from the architecture are created (idx_action_scores_story, idx_action_scores_agent, idx_confidence_story, idx_composites_agent, idx_learning_domain, idx_learning_category, idx_turn_state_story, idx_epic_context_epic)
+- [ ] All indexes from the architecture are created (idx_stories_status, idx_stories_status_heartbeat, idx_action_scores_story, idx_action_scores_agent, idx_confidence_story, idx_composites_agent, idx_learning_domain, idx_learning_category, idx_turn_state_story, idx_epic_context_epic)
 - [ ] The sequential SQL migration runner manages ONLY Factory Core's own databases (`pipeline.db`, `attribution.db`). Overstory databases (`sessions.db`, `mail.db`, `events.db`, `metrics.db`) use Overstory's native probe-then-alter migration pattern and are managed by Story 1.6 (Overstory Schema Extensions)
 
 **FR references:** FR130, FR131, FR132, FR149, FR164, FR165, FR166, FR168
@@ -153,12 +153,12 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Acceptance criteria:**
 - [ ] Extend mail.db `message_type` CHECK constraint to include `learning_report` using SQLite table-rebuild migration: `PRAGMA table_info(mail)` probes current schema; if the CHECK must change, create a new table with the revised CHECK constraint, copy data from old table, drop old table, rename new table — following Overstory's `SessionStore.open()` idempotent migration pattern
 - [ ] Add `phase` column (TEXT NOT NULL DEFAULT 'dev') to mail.db per ADR-006 (5d) via `ALTER TABLE ADD COLUMN` (SQLite supports this), with composite index `(phase, to_agent, read)` for phase-scoped mail queries
-- [ ] Extend events.db `EventType` CHECK constraint to include BOTH `hook_result` (per ADR-010 H2) AND `health_state` (per ADR-023) in a single table-rebuild migration cycle: create a new table with the updated CHECK constraint accepting both new enum values, copy data from the old events table, drop the old table, rename the new table — avoiding duplicate full-table rewrites
+- [ ] Extend events.db `EventType` CHECK constraint to include `hook_result` (per ADR-010 H2), `health_state` (per ADR-023), and `subsystem_error` (required by Story 8.8 for subsystem health event logging) in a single table-rebuild migration cycle: create a new table with the updated CHECK constraint accepting all three new enum values, copy data from the old events table, drop the old table, rename the new table — avoiding duplicate full-table rewrites
 - [ ] All schema changes are idempotent: running the extension module twice produces no errors and no duplicate columns/constraints
 - [ ] Extension module uses `bun:sqlite` `PRAGMA table_info()` to probe current schema before deciding whether migration is needed — same introspection pattern as Overstory's `SessionStore.open()` migration logic. CHECK constraint changes use table-rebuild (create-copy-drop-rename); column additions use `ALTER TABLE ADD COLUMN`
-- [ ] Unit tests verify: fresh database gets all extensions, pre-extended database is not modified, each CHECK constraint accepts the new type values
+- [ ] Unit tests verify: fresh database gets all extensions, pre-extended database is not modified, each CHECK constraint accepts all new type values (mail.db: `learning_report`; events.db: `hook_result`, `health_state`, `subsystem_error`)
 
-**FR references:** FR23, FR57 (learning_report mail type), FR148 (hook_result event type), FR170 (health_state event type)
+**FR references:** FR23, FR57 (learning_report mail type), FR148 (hook_result event type), FR170 (health_state event type), FR170 (subsystem_error event type, required by Story 8.8)
 **ADR references:** ADR-006 (Section 5d), ADR-010 (H2), ADR-023
 **Files created/modified:**
 - `factory-core/src/overstory/schema-extensions.ts` (~40 LOC)
@@ -530,8 +530,9 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Description:** Implement the top-level orchestration loop that connects Factory Core's startup skeleton (Story 1.4) to the turn continuation engine (Stories 4.1-4.7). This is the "brain" of the factory — the Symphony GenServer poll-reconcile-dispatch pattern that: polls `pipeline.db` for pending/active stories, reconciles current state (which stories are running, which need phase transitions), dispatches new phase agents via Overstory's `ov sling`, enforces concurrent story limits, and handles Factory Core restarts (resume from persisted state).
 
 **Acceptance criteria:**
+- [ ] The `stories` table in `pipeline.db` is owned by Story 1.2's initial schema migration (001-initial-schema.sql). The table's minimal schema includes: `id` (PRIMARY KEY), `status` (TEXT NOT NULL, CHECK constraint: 'pending', 'active', 'completed', 'failed'), `phase` (TEXT NOT NULL), `heartbeat_at` (TEXT — ISO-8601 timestamp, updated by active story agents), `transfer_manifest` (TEXT — JSON blob for phase boundary data), `created_at` (TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP), `updated_at` (TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP). Indexed on `(status)` for polling queries and `(status, heartbeat_at)` for stale-heartbeat detection.
 - [ ] Main loop polls `pipeline.db` `stories` table at a configurable interval (default: 5s) for stories with status `pending` or `active`
-- [ ] Reconciliation phase compares running story state (in-memory) with persisted state (pipeline.db): detects stories that need phase transitions, stories that crashed mid-phase (no heartbeat), and new pending stories
+- [ ] Reconciliation phase compares running story state (in-memory) with persisted state (pipeline.db): detects stories that need phase transitions, stories that crashed mid-phase (no heartbeat — `heartbeat_at` older than configurable threshold, default: 30s), and new pending stories
 - [ ] Dispatch phase calls `ov sling` via Overstory to spawn the next phase's agent for each story needing a phase transition, passing the phase boundary transfer manifest
 - [ ] Concurrent story limit is enforced: configurable via `factory.yaml` `pipeline.max_concurrent_stories` (default: 3). When limit is reached, pending stories remain queued
 - [ ] On Factory Core restart, the loop queries `turn_state` and `pipeline.db` to reconstruct in-memory state and resume from the last persisted checkpoint — no stories are lost or re-executed
@@ -1320,7 +1321,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - [ ] 6 files copied from ZeroClaw: `index.html`, `vite.config.ts`, `tsconfig.json`, `tsconfig.app.json`, `src/lib/sse.ts`, `src/lib/ws.ts`
 - [ ] Type contract replacement: all ZeroClaw-specific type imports (`ZeroClawEvent`, `ZeroClawCommand`, etc.) replaced with QDS shared-types event/command contracts from `shared-types/`
 - [ ] Auth token mechanism: WebSocket auth token path changed from `zeroclaw` config to `.qds/ws-token` per Factory Core's credential management
-- [ ] WS subprotocol: renamed from `zeroclaw.v1` to `qds-factory` in `ws.ts` WebSocket constructor
+- [ ] WS subprotocol: renamed from `zeroclaw.v1` to `qds.v1` in `ws.ts` WebSocket constructor
 - [ ] SSE base path: changed from `/_app/` to `/events` (or gateway-configured path) in `sse.ts` fetch URL construction
 - [ ] All adapted files compile with zero type errors against QDS shared-types
 - [ ] Unit tests verify: SSE client connects to correct base path, WS client uses correct subprotocol, type contracts match shared-types definitions

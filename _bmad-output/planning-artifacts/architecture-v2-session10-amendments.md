@@ -58,11 +58,11 @@
 | `pipeline.db` | Factory Core | Sequential SQL files in `factory-core/src/migrations/`, tracked via `_migrations` table | Story 1.2 (Migration Runner) |
 | `attribution.db` | Factory Core | Same sequential SQL runner as pipeline.db | Story 1.2 (Migration Runner) |
 | `sessions.db` | Overstory | Overstory's native `PRAGMA table_info` probe-then-alter pattern | Overstory (pre-existing) |
-| `mail.db` | Overstory | Overstory's native probe-then-alter pattern | Story 1.6 (Overstory Schema Extensions) for Factory Core-required additions |
-| `events.db` | Overstory | Overstory's native probe-then-alter pattern | Story 1.6 (Overstory Schema Extensions) for Factory Core-required additions |
-| `metrics.db` | Overstory | Overstory's native probe-then-alter pattern | Overstory (pre-existing) |
+| `mail.db` | Overstory | Dual: probe-then-alter for ADD COLUMN (`phase`); table-rebuild (CREATE→copy→DROP→RENAME) for CHECK constraint changes (`learning_report`) | Story 1.6 (Overstory Schema Extensions) for Factory Core-required additions |
+| `events.db` | Overstory | Dual: probe-then-alter for any future ADD COLUMN; table-rebuild (CREATE→copy→DROP→RENAME) for CHECK constraint changes (`hook_result`, `health_state`, `subsystem_error`) | Story 1.6 (Overstory Schema Extensions) for Factory Core-required additions |
+| `metrics.db` | Overstory | Overstory's native probe-then-alter pattern | Overstory (pre-existing, no changes required) |
 
-**Critical rule:** Factory Core's sequential SQL migration runner (Story 1.2) MUST NOT be applied to Overstory-owned databases. Overstory databases use an idempotent probe-before-alter pattern (`PRAGMA table_info` check before `ALTER TABLE`) that is incompatible with sequential migration tracking. Story 1.6 performs all Factory Core-required Overstory schema extensions using Overstory's native pattern.
+**Critical rule:** Factory Core's sequential SQL migration runner (Story 1.2) MUST NOT be applied to Overstory-owned databases. Story 1.6 performs all Factory Core-required Overstory schema extensions using two SQLite-appropriate strategies: (1) **probe-then-alter** (`PRAGMA table_info` check → `ALTER TABLE ADD COLUMN`) for new column additions — this is Overstory's native idempotent pattern; (2) **table-rebuild** (`CREATE new table` with updated CHECK → `INSERT INTO ... SELECT` → `DROP old` → `ALTER TABLE RENAME`) for CHECK constraint modifications, since SQLite does not support modifying existing CHECK constraints via `ALTER TABLE`. Both strategies are idempotent: the probe phase detects whether the change has already been applied before executing.
 
 **Rationale:** The code-lift deep-dive (Session 9b) identified that Overstory's `SessionStore` uses `bun:sqlite` with a specific `PRAGMA table_info` check before `ALTER TABLE` — an idempotent probe pattern. Factory Core's migration runner (Story 1.2) uses sequential SQL files with a `_migrations` tracking table. Applying the wrong pattern to the wrong database risks breaking idempotency or creating split-brain migration state.
 

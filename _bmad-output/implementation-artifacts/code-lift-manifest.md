@@ -664,7 +664,7 @@
 ---
 
 ### Epic 7: Learning System & Epic Context
-**Epic estimated LOC:** ~620
+**Epic estimated LOC:** ~640
 
 #### Story 7.1: Learning Record Extraction from Fix-Loops (100 LOC)
 
@@ -892,7 +892,7 @@
 | Source | File | LOC | Reuse Type | What to Lift |
 |--------|------|-----|------------|-------------|
 | zeroclaw | `web/src/lib/sse.ts` | ~186 | DIRECT_COPY + ADAPT | Copy SSE client, change base path from `/_app/` to `/events`, replace ZeroClaw type imports with shared-types event contracts. |
-| zeroclaw | `web/src/lib/ws.ts` | ~146 | DIRECT_COPY + ADAPT | Copy WS client, rename subprotocol from `zeroclaw.v1` to `qds-factory`, change auth token path to `.qds/ws-token`, replace type imports. |
+| zeroclaw | `web/src/lib/ws.ts` | ~146 | DIRECT_COPY + ADAPT | Copy WS client, rename subprotocol from `zeroclaw.v1` to `qds.v1`, change auth token path to `.qds/ws-token`, replace type imports. |
 | zeroclaw | `web/index.html` | ~30 | DIRECT_COPY | Copy as-is. |
 | zeroclaw | `web/vite.config.ts` | ~20 | DIRECT_COPY | Copy as-is. |
 | zeroclaw | `web/tsconfig.json` | ~15 | DIRECT_COPY | Copy as-is. |
@@ -946,7 +946,7 @@
 
 | Source | File | LOC | Reuse Type | What to Lift |
 |--------|------|-----|------------|-------------|
-| zeroclaw | `web/src/lib/ws.ts` | ~146 | ADAPT_PATTERN | WebSocket client with session persistence and subprotocol auth. Health status updates could use WS for real-time push. ~40 LOC of WS client pattern. Subprotocol renamed from zeroclaw to qds.v1. |
+| zeroclaw | `web/src/lib/ws.ts` | ~146 | ADAPT_PATTERN | WebSocket client with session persistence and subprotocol auth. Health status updates could use WS for real-time push. ~40 LOC of WS client pattern. Subprotocol renamed from `zeroclaw.v1` to `qds.v1`. |
 | zeroclaw | React hooks `useWebSocket.ts` | ~50 | ADAPT_PATTERN | React hook for WS subscription. ~25 LOC of hook pattern. |
 
 **Estimated LOC savings:** ~40
@@ -1185,7 +1185,7 @@
 | INTERFACE_CARRY | Carry type definitions across packages | ~160 | 7.9% |
 | API_CONSUME | Call external API, write integration glue | ~60 | 3.0% |
 | STUDY / ADAPT_PATTERN | Design reference only (ZeroClaw Rust, research) | Patterns only | N/A |
-| **TOTAL** | | **~2,030** | **100%** |
+| **TOTAL** | | **2,032** | **100%** |
 
 ### Breakdown by Source Repository
 

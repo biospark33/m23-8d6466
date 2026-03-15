@@ -65,7 +65,7 @@ Architecture v2 line 280 states: "Must extend schema for `learning_report` -- Ov
 
 Story 1.2 says: "Migrations are plain SQL files executed sequentially by Factory Core at startup." The deep-dive reveals Overstory's `SessionStore` uses `bun:sqlite` with a specific pattern: `PRAGMA table_info` check before `ALTER TABLE`. This is an idempotent probe-then-alter pattern, not a sequential migration file pattern. If Factory Core's migration runner applies plain SQL files to Overstory's databases (like adding `learning_report` to mail.db), it must be compatible with Overstory's existing probe-based pattern.
 
-**Resolution (Session 10):** Story 1.2 AC amended to explicitly scope migration runner to Factory Core databases ONLY. Story 1.6 handles all Overstory schema extensions using Overstory's native probe-then-alter pattern. Architecture amendment (Amendment 3) adds Database Migration Ownership Boundaries table documenting which databases use which migration pattern.
+**Resolution (Session 10):** Story 1.2 AC amended to explicitly scope migration runner to Factory Core databases ONLY. Story 1.6 handles all Overstory schema extensions using a dual migration strategy appropriate to each change type: (1) Overstory's native probe-then-alter pattern (`PRAGMA table_info` → `ALTER TABLE ADD COLUMN`) for new column additions (e.g., `phase` column), and (2) SQLite table-rebuild (`CREATE new table` → `copy data` → `DROP old` → `RENAME new`) for CHECK constraint modifications (e.g., adding `learning_report` to mail.db, `hook_result`, `health_state`, and `subsystem_error` to events.db), since SQLite does not support modifying existing CHECK constraints via `ALTER TABLE`. Architecture amendment (Amendment 3) adds Database Migration Ownership Boundaries table documenting which databases use which migration pattern. See also Story 1.6 and Amendment 3 for the full dual-strategy specification.
 
 ---
 
@@ -105,11 +105,11 @@ Story 1.4 creates the process skeleton (startup, config, DB init). Stories 4.1-4
 
 **Resolution:** Story 4.0 (Factory Core Orchestration Loop) added. Implements poll-reconcile-dispatch pattern inspired by Symphony GenServer. Depends on 1.4, prerequisite for 4.1. Includes concurrent story limits, crash recovery, circuit breaker integration.
 
-**M-4. Overstory EventType Extension for `hook_result` and `health_state` (MINOR)** — **SESSION 10: RESOLVED → Story 1.6**
+**M-4. Overstory EventType Extension for `hook_result`, `health_state`, and `subsystem_error` (MINOR)** — **SESSION 10: RESOLVED → Story 1.6**
 
-ADR-010 H2 specifies extending Overstory's `EventType` CHECK constraint to include `hook_result`. ADR-023 adds `health_state`. No story explicitly creates these schema migrations.
+ADR-010 H2 specifies extending Overstory's `EventType` CHECK constraint to include `hook_result`. ADR-023 adds `health_state`. Story 8.8 requires `subsystem_error` for subsystem health event logging. No story explicitly creates these schema migrations.
 
-**Resolution:** Consolidated into Story 1.6 (Overstory Schema Extensions) alongside M-1. Both events.db CHECK constraint extensions (`hook_result`, `health_state`) are covered.
+**Resolution:** Consolidated into Story 1.6 (Overstory Schema Extensions) alongside M-1. All three events.db CHECK constraint extensions (`hook_result`, `health_state`, `subsystem_error`) are covered in a single table-rebuild migration.
 
 **M-5. ZeroClaw Carry-Forward Adaptation Story (MINOR)** — **SESSION 10: RESOLVED → Story 9.0**
 
