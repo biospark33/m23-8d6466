@@ -106,7 +106,7 @@ This is the "brain" of the factory — the Symphony GenServer poll-reconcile-dis
 
 **Problem:** Could be misinterpreted as applying to ALL databases including Overstory's. Overstory uses a different pattern (`PRAGMA table_info` probe before ALTER TABLE).
 
-**Fix:** Add AC to Story 1.2: "The sequential SQL migration runner manages ONLY Factory Core's own databases (`pipeline.db`, `attribution.db`). Overstory databases (`sessions.db`, `mail.db`, `events.db`, `metrics.db`) use Overstory's native probe-then-alter migration pattern and are managed by the separate Story 1.6 (Overstory Schema Extensions)."
+**Fix:** Add AC to Story 1.2: "The sequential SQL migration runner manages ONLY Factory Core's own databases (`pipeline.db`, `attribution.db`). Overstory databases (`sessions.db`, `mail.db`, `events.db`, `metrics.db`) are managed by Story 1.6 (Overstory Schema Extensions) using Overstory's native dual migration strategy: probe-then-alter (`PRAGMA table_info` → `ALTER TABLE ADD COLUMN`) for safe column additions, and table-rebuild (`CREATE new table` → `copy data` → `DROP old` → `RENAME new`) for CHECK constraint modifications (since SQLite does not support modifying existing CHECK constraints via ALTER TABLE)."
 
 ---
 

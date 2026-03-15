@@ -26,7 +26,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - Story 1.6 (Overstory Schema Extensions) → prerequisite for 3.3, 8.8
 - Story 4.0 (Orchestration Loop) → prerequisite for 4.1; depends on 1.4
 - Story 9.0 (ZeroClaw Carry-Forward) → prerequisite for 9.1
-- Story 2.9 (TierResolver) → depends on 1.1, 1.4; prerequisite for 2.2, 10.2
+- Story 2.9 (TierResolver) → depends on 1.1, 1.4; prerequisite for 2.2, 2.3, 10.2
 
 ---
 
@@ -74,7 +74,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - [ ] WAL mode is enabled on database open (`PRAGMA journal_mode=WAL`)
 - [ ] Migration runner is tested with fresh database creation and re-run idempotency
 - [ ] All indexes from the architecture are created (idx_stories_status, idx_stories_status_heartbeat, idx_action_scores_story, idx_action_scores_agent, idx_confidence_story, idx_composites_agent, idx_learning_domain, idx_learning_category, idx_turn_state_story, idx_epic_context_epic)
-- [ ] The sequential SQL migration runner manages ONLY Factory Core's own databases (`pipeline.db`, `attribution.db`). Overstory databases (`sessions.db`, `mail.db`, `events.db`, `metrics.db`) use Overstory's native probe-then-alter migration pattern and are managed by Story 1.6 (Overstory Schema Extensions)
+- [ ] The sequential SQL migration runner manages ONLY Factory Core's own databases (`pipeline.db`, `attribution.db`). Overstory databases (`sessions.db`, `mail.db`, `events.db`, `metrics.db`) are managed by Story 1.6 (Overstory Schema Extensions) using Overstory's native dual migration strategy: probe-then-alter (`PRAGMA table_info` → `ALTER TABLE ADD COLUMN`) for safe column additions, and table-rebuild (`CREATE new table` → `copy data` → `DROP old` → `RENAME new`) for CHECK constraint modifications (since SQLite does not support modifying existing CHECK constraints via ALTER TABLE)
 
 **FR references:** FR130, FR131, FR132, FR149, FR164, FR165, FR166, FR168
 **ADR references:** ADR-015 (Section 15.3, 15.4, 15.6), ADR-019 (Section 19.5), ADR-020
@@ -158,12 +158,12 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - [ ] Extension module uses `bun:sqlite` `PRAGMA table_info()` to probe current schema before deciding whether migration is needed — same introspection pattern as Overstory's `SessionStore.open()` migration logic. CHECK constraint changes use table-rebuild (create-copy-drop-rename); column additions use `ALTER TABLE ADD COLUMN`
 - [ ] Unit tests verify: fresh database gets all extensions, pre-extended database is not modified, each CHECK constraint accepts all new type values (mail.db: `learning_report`; events.db: `hook_result`, `health_state`, `subsystem_error`)
 
-**FR references:** FR23, FR57 (learning_report mail type), FR148 (hook_result event type), FR170 (health_state event type), FR170 (subsystem_error event type, required by Story 8.8)
+**FR references:** FR23, FR57 (learning_report mail type), FR148 (hook_result event type), FR170 (health_state event type), FR170 (subsystem_error event type — added for Story 8.8; Story 8.8 depends on 1.6)
 **ADR references:** ADR-006 (Section 5d), ADR-010 (H2), ADR-023
 **Files created/modified:**
 - `factory-core/src/overstory/schema-extensions.ts` (~40 LOC)
 **Estimated LOC:** 40
-**Dependencies:** 1.4 (Factory Core skeleton for Overstory database path access)
+**Dependencies:** 1.4 (Factory Core skeleton for Overstory database path access). Note: Story 8.8 (Health State Events in events.db) depends on this story for the `subsystem_error` EventType value; the dependency is forward (8.8 → 1.6), not reverse.
 **MVP/Growth:** MVP
 
 ---
@@ -236,7 +236,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Files created/modified:**
 - `factory-core/src/middleware/credential.ts` (~30 LOC)
 **Estimated LOC:** 30
-**Dependencies:** 2.1 (middleware chain)
+**Dependencies:** 2.1 (middleware chain), 2.9 (TierResolver — credential middleware calls `resolveModel()` to set the model on the Agent via `Agent.setModel()`)
 **MVP/Growth:** MVP
 
 ### Story 2.4: Learning Middleware
@@ -834,7 +834,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Depends on:** Epic 2 (budget middleware provides the beforeModel/afterModel integration points), Epic 1 (attribution.db task_checkouts table, shared-types BurnRateProjection)
 **Packages touched:** factory-core, shared-types
 **ADR references:** ADR-016 (Sections 16.1, 16.2, 16.3, 16.4, 16.5, 16.6), ADR-005, ADR-022
-**Total estimated LOC:** ~430
+**Total estimated LOC:** ~450
 
 ### Story 6.1: Per-Story Budget Enforcement
 
@@ -1837,4 +1837,4 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 
 ---
 
-*v2.0 — Session 10 code-lift resolution. 10 epics, ~64 stories (4 added: 1.6, 2.9, 4.0, 9.0), 10 AC amendments, 3 blockers resolved, implementation-ready with zero ambiguity.*
+*v2.0.1 — Session 10 code-lift resolution + PR review round 7. Epic 6 LOC corrected (430→450, matching story sum). Story 2.3 dependency on 2.9 (TierResolver) added. Story 1.6↔8.8 dependency direction clarified (8.8 depends on 1.6, not reverse). 10 epics, ~64 stories (4 added: 1.6, 2.9, 4.0, 9.0), 10 AC amendments, 3 blockers resolved, implementation-ready with zero ambiguity.*

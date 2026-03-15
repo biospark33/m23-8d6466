@@ -89,13 +89,13 @@
 
 | Source | File | LOC | Reuse Type | What to Lift |
 |--------|------|-----|------------|-------------|
-| overstory | `src/sessions/store.ts` | ~20 | PATTERN_COPY | `PRAGMA table_info` probe-then-alter pattern. The SessionStore's migration approach (check column existence before ALTER TABLE) is the exact pattern needed for idempotent schema extensions. ~15 LOC of probe logic. |
-| overstory | `src/mail/store.ts` | ~10 | ADAPT | CHECK constraint modification pattern. The mail store's existing message type CHECK constraint syntax informs how to extend it. |
-| overstory | `src/events/store.ts` | ~10 | ADAPT | EventType CHECK constraint modification pattern. Same approach as mail.db extensions. |
+| overstory | `src/sessions/store.ts` | ~20 | PATTERN_COPY | **Probe-then-alter pattern (for ADD COLUMN operations).** The SessionStore's `PRAGMA table_info` probe-then-`ALTER TABLE ADD COLUMN` approach is the exact pattern needed for idempotent column additions (e.g., adding `phase` column to mail.db). ~15 LOC of probe logic. |
+| overstory | `src/mail/store.ts` | ~10 | ADAPT | **Table-rebuild pattern (for CHECK constraint changes).** SQLite does not support modifying existing CHECK constraints via ALTER TABLE; the mail store's CHECK constraint syntax informs the replacement table's DDL. Migration uses `CREATE new table` → `copy data` → `DROP old` → `RENAME new` to update the message_type CHECK constraint. |
+| overstory | `src/events/store.ts` | ~10 | ADAPT | **Table-rebuild pattern (for CHECK constraint changes).** Same table-rebuild approach as mail.db. The events store's EventType CHECK constraint syntax informs the replacement table's DDL for adding `hook_result`, `health_state`, and `subsystem_error` values. |
 
-**Estimated LOC savings:** ~20 (probe-then-alter pattern, CHECK constraint syntax)
+**Estimated LOC savings:** ~20 (probe-then-alter pattern for ADD COLUMN; CHECK constraint DDL syntax for table-rebuild)
 **Net new LOC:** ~20
-**Design patterns from research repos:** None specific. Uses Overstory's native migration pattern exclusively.
+**Design patterns from research repos:** None specific. Uses Overstory's native migration patterns exclusively: probe-then-alter for ADD COLUMN (SessionStore pattern), table-rebuild for CHECK constraint modifications (SQLite limitation).
 
 ---
 
@@ -1236,7 +1236,7 @@
 
 **Source:** ZeroClaw deep-dive analysis
 **Impact:** Stories 9.1, 9.4
-**Detail:** ZeroClaw's WebSocket client uses subprotocol-based authentication (`ws.ts`, ~146 LOC). The QDS dashboard will rename the subprotocol from `zeroclaw` to `qds.v1` but preserve the authentication mechanism. The SSE client (`sse.ts`, ~186 LOC) with fetch-based reconnection and exponential backoff also carries forward for non-WebSocket event streams.
+**Detail:** ZeroClaw's WebSocket client uses subprotocol-based authentication (`ws.ts`, ~146 LOC). The QDS dashboard will rename the subprotocol from `zeroclaw.v1` to `qds.v1` but preserve the authentication mechanism. The SSE client (`sse.ts`, ~186 LOC) with fetch-based reconnection and exponential backoff also carries forward for non-WebSocket event streams.
 
 ### 7. Pi SDK's Usage.cost.total Provides Pre-Computed Per-Call Cost (CONFIRMED)
 
@@ -1317,7 +1317,7 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 | 3 | **1.2** pipeline.db Migration System | 200 | Zero dependencies. Every data-writing story depends on this. High reuse from Overstory session store. |
 | 4 | **1.3** attribution.db Schema Extension | 20 | Depends on 1.2. Tiny story, unlocks budget enforcement (Epic 6). |
 | 5 | **1.4** Factory Core Process Skeleton | 170 | Depends on 1.1, 1.2, 1.3. Proves the startup sequence. High reuse from Overstory config.ts. |
-| 6 | **1.6** Overstory Schema Extensions | 40 | Depends on 1.4. Unlocks Stories 3.3, 8.8. Uses Overstory's native probe-then-alter pattern. |
+| 6 | **1.6** Overstory Schema Extensions | 40 | Depends on 1.4. Unlocks Stories 3.3, 8.8. Uses two Overstory-native patterns: probe-then-alter for ADD COLUMN operations (SessionStore pattern), table-rebuild for CHECK constraint modifications (SQLite limitation). |
 
 **Phase 1 total:** 670 LOC, ~455 LOC reused (68% reuse)
 
