@@ -164,7 +164,7 @@ Story Intake → Develop → BMAD Review → Fix Loop → QA Swarm → PR
 | `pipeline.db` | Factory Core | Action scores, ELO ratings, budget tracking, learning records |
 | `attribution.db` | Factory Core | Per-call cost attribution chains |
 | `sessions.db` | Overstory | Agent lifecycle, runs |
-| `mail.db` | Overstory | Inter-agent messaging (8+ message types) |
+| `mail.db` | Overstory | Inter-agent messaging (message types managed via constrained schema; see Story 1.6 extensions) |
 | `events.db` | Overstory | Tool invocations, errors, timelines |
 | `metrics.db` | Overstory | Token usage, costs, session duration |
 

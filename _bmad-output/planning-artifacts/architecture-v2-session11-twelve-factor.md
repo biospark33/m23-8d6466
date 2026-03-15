@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-15
 **Scope:** ADR-024 (10 sections), 5 story amendments, 2 new stories, growth stories backlog
-**Applies to:** `_bmad-output/planning-artifacts/architecture-v2.md` v2.0, `_bmad-output/implementation-artifacts/epics-and-stories.md` v2.0
+**Applies to:** `_bmad-output/planning-artifacts/architecture-v2.md` v2.0, `_bmad-output/implementation-artifacts/epics-and-stories.md` v2.1
 **Methodology:** Twelve-Factor App (https://12factor.net) applied to QDS Factory as a web application with SSE/WebSocket streaming, Docker containerization, and multi-architecture support.
 
 ---
