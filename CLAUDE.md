@@ -24,7 +24,7 @@ bun run typecheck           # tsc --noEmit (overstory)
 
 ## Project Structure
 
-```
+```text
 QDS-Factory/
 ├── overstory/              # Agent orchestration CLI (Bun/TS) — FORK of jayminwest/overstory
 ├── pi-mono/                # Model-agnostic coding agent runtime (Node.js, 6 packages)
@@ -88,7 +88,7 @@ All specs live in `_bmad-output/`. Key files:
 ### Commit Style
 
 Follow the existing pattern:
-```
+```text
 Fix PR review round N: <concise summary of changes>
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
@@ -140,7 +140,7 @@ Overstory is a fork of `jayminwest/overstory` with active upstream development.
 
 The factory pipeline for a Story work type:
 
-```
+```text
 Story Intake → Develop → BMAD Review → Fix Loop → QA Swarm → PR
                   ↓           ↓            ↓          ↓
               [builders]  [fresh agents] [fix-lead]  [scouts]

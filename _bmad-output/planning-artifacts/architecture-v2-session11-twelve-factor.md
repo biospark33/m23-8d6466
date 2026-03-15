@@ -98,7 +98,7 @@ All backing services (SQLite databases, LLM providers, Telegram API, webhook end
 
 **Docker pattern (from rfp-agents):**
 
-```
+```text
 docker/
   docker-compose.yml          # Base compose (profiles: backing-services, backend, frontend)
   docker-compose.dev.yml      # Dev overrides (volume mounts, hot reload, fast healthchecks)
@@ -371,7 +371,7 @@ Admin commands run as one-off processes using the same codebase, same config loa
 | `qds migrate` | Run database migrations without starting orchestration loop | `docker compose run --rm factory qds migrate` |
 | `qds config validate` | Validate `factory.yaml` against Zod schema, report errors | `docker compose run --rm factory qds config validate` |
 | `qds config show` | Display resolved config (with env-var overrides applied, secrets redacted) | `docker compose run --rm factory qds config show` |
-| `qds init` | Copy `factory.yaml.example` -> `factory.yaml` if missing, create `.qds/` directory | N/A (host-only) |
+| `qds init` | Copy `factory.yaml.example` -> `.qds/factory.yaml` if missing, create `.qds/` directory | N/A (host-only) |
 
 **Key principle:** Admin commands run inside the same container image as the application. `docker compose exec` runs against a running container; `docker compose run --rm` spins up a fresh container for the command and removes it after.
 

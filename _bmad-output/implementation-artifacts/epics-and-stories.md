@@ -124,7 +124,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - [ ] Factory Core startup checks for required system dependencies (git >= 2.30, bun >= 1.0, tmux >= 3.0) and fails fast with actionable error messages if missing (ADR-024 Section 7)
 - [ ] Process logger writes to stdout as NDJSON (one JSON object per line) with fields: `timestamp`, `level`, `component`, `message`. Log level controlled by `QDS_LOG_LEVEL` env var (default: `info`). Values: `debug`, `info`, `warn`, `error` (ADR-024 Section 9)
 - [ ] Process logs startup diagnostics: config path, database paths, migration status, WAL mode confirmation, resolved env-var overrides (secrets redacted)
-- [ ] `factory.yaml.example` committed to repo with all configuration keys documented and safe default values. Actual `factory.yaml` is gitignored. `qds init` (Story 1.4c) copies `factory.yaml.example` -> `factory.yaml` if missing
+- [ ] `factory.yaml.example` committed to repo with all configuration keys documented and safe default values. Actual `.qds/factory.yaml` is gitignored. `qds init` (Story 1.4c) copies `factory.yaml.example` -> `.qds/factory.yaml` if missing
 - [ ] `.env.example` committed to repo with all `QDS_*` environment variable keys, documented defaults, and safe placeholders for secrets. Actual `.env` is gitignored (ADR-024 Section 8)
 - [ ] Integration test verifies end-to-end startup with a sample factory.yaml and confirms both databases are accessible
 - [ ] Integration test verifies env-var overrides: set `QDS_PIPELINE_DB_PATH` to a temp path, confirm Factory Core opens the database at the overridden path

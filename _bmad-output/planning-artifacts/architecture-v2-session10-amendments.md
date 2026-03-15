@@ -8,7 +8,7 @@
 
 ## Amendment 1: ADR-008 — Credential Injection Mechanism Specification
 
-**Section affected:** ADR-008, C4a (line ~522)
+**Section affected:** ADR-008, C4a (architecture-v2.md line 523, "Factory Core holds credentials in-memory")
 
 **Current text:** "Factory Core holds credentials in-memory. Passes to Pi SDK via constructor/init call"
 
@@ -22,7 +22,7 @@
 
 ## Amendment 2: ADR-013 — Enforcement Metadata Clarification
 
-**Section affected:** ADR-013, S5 (line ~896-901)
+**Section affected:** ADR-013, S5 (architecture-v2.md line 899, "Stage 2 injects enforcement context")
 
 **Current text (S5):** "Stage 2 injects enforcement context: skill descriptions (triggering conditions), guard rules, enforcement frontmatter."
 
