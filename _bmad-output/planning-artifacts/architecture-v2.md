@@ -35,7 +35,7 @@ _This document builds collaboratively through step-by-step discovery. Sections a
 
 | Component | Relationship to Factory Core | What Factory Core Uses |
 |-----------|------------------------------|----------------------|
-| **Overstory** | Agent orchestration library | `ov sling` for spawning, worktree isolation, 4-tier merge, mail.db for inter-agent comms, sessions.db for lifecycle, events.db for event store, metrics.db for telemetry, Seeds for task tracking, watchdog for health |
+| **Overstory** | Agent orchestration library | `ov sling` for spawning, worktree isolation, 4-tier merge, mail.db for inter-agent comms, sessions.db for lifecycle, events.db for event store, metrics.db for telemetry, Seeds for task tracking, watchdog for health *(Session 13 note: the mechanisms in this cell — worktrees, mail.db, sessions.db, events.db, metrics.db, Seeds, watchdog — are overstory's **implementation choices** for satisfying QDS invariants (filesystem isolation per story, async inter-agent coordination, agent lifecycle state, event sourcing, cost telemetry, task tracking, health monitoring). The invariants themselves are architectural and orthogonal to the specific mechanisms — see ADR-025 in `architecture-v2-session12-amendments.md` for the bias-stripped invariant/mechanism reclassification.)* |
 | **Pi SDK** | Model-agnostic LLM runtime | Model selection, provider routing, tool execution, per-call `Usage { tokens, cost }` reporting, `AgentSession` with save/load/branch/compact |
 | **Superpowers** | Read-only skill library | 14 skills, enforcement frontmatter, skill metadata for overlay injection |
 
@@ -78,7 +78,7 @@ The feedback loop: every maintenance fix produces a categorized learning record 
 | Capability Area | FR Range | Count | Architectural Weight | Architectural Support |
 |---|---|---|---|---|
 | Pipeline Execution | FR1–FR9 | 9 | Core — composable pipeline engine, work type declarations, phase transitions | ADR-002, ADR-003, pipeline subdirectory |
-| Quality Enforcement | FR10–FR20 | 11 | Core — 6-layer hook enforcement, BMAD review, QA swarm | ADR-006, ADR-007, ADR-010 |
+| Quality Enforcement | FR10–FR20 | 11 | Core — mechanical gate enforcement at phase boundaries (ADR-010 original 6-layer model, reframed as dual-plane edge-scripts + in-process engine in ADR-027), BMAD review, QA swarm | ADR-006, ADR-007, ADR-010, ADR-026, ADR-027 |
 | Agent Orchestration | FR21–FR27 | 7 | Core — Overstory integration, lifecycle management, mail system | ADR-002 (Overstory integration) |
 | Overlay & Context Management | FR28–FR35 | 8 | Core — 6-stage overlay pipeline, context budgets, Phase Boundary Protocol | ADR-004, ADR-013, stage-context |
 | Resource & Economic Management | FR36–FR42 | 7 | Core — Pi SDK tier directives, budgets, circuit breakers, attribution chains | ADR-005, economics subdirectory |
@@ -127,6 +127,8 @@ Factory Core → Pi SDK → Overstory → Agents. This is a layered runtime depe
 *Architectural implication:* If Pi SDK's API surface doesn't support tier directives as first-class concepts, Factory Core needs an adapter layer translating its policy model into Pi SDK's native configuration model. This must be verified against the actual Pi SDK codebase during architecture decisions.
 
 **SQLite concurrency model:**
+*Session 13 note: the architectural invariant here is **single source of truth for agent state with safe concurrent access** from multiple agents (NFR17). SQLite WAL mode is overstory's current mechanism for satisfying this invariant; alternative backends (Postgres, DuckDB) that provide equivalent concurrent-write safety would also satisfy the invariant. The discussion below documents the specific SQLite mechanism that overstory uses today. See ADR-025 for the bias-stripped invariant/mechanism reclassification.*
+
 Overstory uses SQLite for agent state and mail delivery. NFR17 requires concurrent read/write from up to 15 agents without corruption. SQLite's default journal mode (DELETE) will hit `SQLITE_BUSY` under heavy concurrent writes. WAL (Write-Ahead Logging) mode is likely required — but WAL changes durability and recovery characteristics. The Overstory codebase must be inspected for current journal mode configuration. This is an architecture decision, not a configuration change.
 
 **External dependencies:**
@@ -616,6 +618,14 @@ type ServerMessage =
 - **Provided by Starter:** Partially — hooks-deployer.ts (L1-L2 deployment) exists in Overstory. Gate script infrastructure (L3) and result storage pattern are new.
 
 **H1 — Execution Model: Factory Core spawns gate scripts, no separate runner**
+
+> **Session 13 reframing (ADR-027, `architecture-v2-session12-amendments.md`):** The 6-layer count and its specific names are **organizational, not architectural**. The architectural invariant is *gated mechanical verification at phase boundaries before context wipe* (see ADR-025 invariant 5). ADR-027 adopts a **dual-plane architecture** that satisfies this invariant via two coordinated runtime layers rather than six ordered scripts:
+>
+> 1. **Edge plane** — overstory's existing `src/agents/hooks-deployer.ts` (606 LOC POSIX shell script generator) remains unchanged. It writes `.claude/settings.local.json` to each worker's worktree with path-boundary guards, bash-command guards, capability-based file-modification guards, and git-safety guards. This is the L1–L2 equivalent in the 6-layer taxonomy. Runs in `/bin/sh`, zero runtime dependencies.
+>
+> 2. **In-process plane** — Factory Core's `factory-core/src/hooks/` (a ~400 LOC clean-room TypeScript hook engine introduced by ADR-027 and implemented inside Story 1.7) runs in-process at phase-boundary transitions. It is where ADR-026's lifted `@claude-flow/guidance` gates, `IEvaluator` implementations, `ShardRetriever`, and QDS-specific evaluators register and execute with priority ordering, timeout wrap, and typed result aggregation. This is the L3–L6 equivalent in the 6-layer taxonomy.
+>
+> The table below retains the 6-layer categorization as the **current mechanism mapping** from the original ADR-010 framing. Future sessions may collapse or expand the layer count (for example, ADR-027's in-process plane handles L3–L6 in one module, which could be described as a 2-layer model — dual-plane edge + in-process) without breaking the invariant. **The invariant is "gates at phase boundaries"; the mechanism is "how many distinct scripts and where they run."** See ADR-027 "Borrowed Concepts" table for the explicit list of patterns lifted conceptually from ruflo's `@claude-flow/hooks` design versus the ones rejected (ReasoningBank / HNSW / ONNX / daemons — none of which are in QDS scope).
 
 Barry's taxonomy clarifies the 6-layer model into three mechanical categories:
 
@@ -1868,6 +1878,8 @@ Factory Core: after_create hook
 ```
 
 **Design inspiration:** Symphony `workspace_lifecycle.ex` hook point pattern (4 lifecycle events around workspace operations). Our implementation is ~200 LOC new-write wrapping Overstory's worktree commands with `Bun.spawn()` hook execution.
+
+*Session 13 note (ADR-025): `git worktree` is overstory's mechanism for satisfying invariant 2 (filesystem isolation per story). The 4-point workspace lifecycle hooks here operate **around** that mechanism; alternative isolation mechanisms (overlay filesystems, containers, read-only clones) would require re-mapping the lifecycle events but do not invalidate the hook-point pattern itself. The invariant is "filesystem isolation per story with lifecycle hook points around creation and teardown"; the mechanism is "git worktree commands." See ADR-025 invariant/mechanism reclassification for the full list of mechanisms previously written into ADRs as if architectural.*
 
 #### 18.6 Integration Points
 
@@ -3172,7 +3184,16 @@ Inline code examples in this document are **illustrative of patterns**, not cano
 | ADR-013 | Superpowers Integration — .d.ts declarations, startup cache | Testing & Integration | Round 7 |
 | ADR-014 | Developer Communication Layer — Telegram Bot, dual-channel notifications | Developer Communication | Round 8b |
 
-**Decision Compatibility:** All 23 ADRs validated for mutual consistency. One amendment (ADR-009 G1 -> ADR-011 G1, `Bun.serve()` -> Express under Bun) is explicitly documented with cascading implications resolved. Session 8 amendments resolve 27 critical/important findings. No contradictory decisions remain. Technology versions are compatible: Bun 1.2.x/1.3.x runtime, CopilotKit `^1.52.1`, Express, SQLite WAL mode (bun:sqlite only, no Drizzle ORM), React 19 + Vite 6 + Tailwind 4.
+**ADR-024 through ADR-027 (added after session 8 in later amendment files):**
+
+| ADR | Decision | Category | Source Document | Session |
+|---|---|---|---|---|
+| ADR-024 | Twelve-Factor Operational Conventions — 10 sections covering config, backing services, build/release/run, processes, port binding, concurrency, disposability, dev/prod parity, logs, admin processes | Operations & Deployment | `architecture-v2-session11-twelve-factor.md` | Session 11 |
+| ADR-025 | Orchestrator Re-Confirmation — overstory retained as agent orchestration base, scope-closed per bias-stripped 135-point rubric (overstory 90, ruflo 54, build-fresh 10). 10 hard invariants re-derived from PRD v2; 11 items reclassified from architectural to implementation-choice mechanism | Orchestration / Foundation | `architecture-v2-session12-amendments.md` | Session 13 |
+| ADR-026 | `@claude-flow/guidance` Lift into Factory Core — tiered extraction (tier 1 full lift ~6,922 LOC, tier 2 spike-then-decide, tier 3 defer, tier 4 drop, tier 5 adapter rewrite). MIT-licensed, vendored via `factory-core/THIRD_PARTY_LICENSES.md`. Implemented by Story 1.7. | Enforcement Layer | `architecture-v2-session12-amendments.md` | Session 13 |
+| ADR-027 | Hook Engine Dual-Plane Strategy — overstory's `hooks-deployer.ts` edge plane (unchanged) + Factory Core's `factory-core/src/hooks/` in-process plane (~400 LOC clean-room, concepts borrowed from ruflo `@claude-flow/hooks` design, zero code lifted). Reframes ADR-010's 6-layer model as a mechanism under the gated-verification invariant. Implemented inside Story 1.7 as the adapter binding target. | Hook Infrastructure | `architecture-v2-session12-amendments.md` | Session 13 |
+
+**Decision Compatibility:** All 27 ADRs validated for mutual consistency. One amendment (ADR-009 G1 -> ADR-011 G1, `Bun.serve()` -> Express under Bun) is explicitly documented with cascading implications resolved. Session 8 amendments resolve 27 critical/important findings. Session 10 amendments in `architecture-v2-session10-amendments.md` amend ADR-008 and ADR-013 in place. Session 11 added ADR-024 (twelve-factor operational conventions) in `architecture-v2-session11-twelve-factor.md`. Session 13 added ADR-025 (orchestrator re-confirmation, scope-closed), ADR-026 (`@claude-flow/guidance` lift into Factory Core), and ADR-027 (hook engine dual-plane strategy) in `architecture-v2-session12-amendments.md`, and reframed ADR-010's 6-layer model as a dual-plane mechanism under the gated-verification invariant — see the session 13 reframing block inside ADR-010's H1 section above. All 4 additions have been validated against existing ADRs; no contradictory decisions remain. Technology versions are compatible: Bun 1.2.x/1.3.x runtime, CopilotKit `^1.52.1`, Express, SQLite WAL mode (bun:sqlite only, no Drizzle ORM), React 19 + Vite 6 + Tailwind 4.
 
 **Pattern Consistency:** Naming conventions, export patterns, Zod-as-source-of-truth, error handling, and state management patterns apply uniformly across all ADRs. Every pattern is mapped to a machine-enforced mechanism (Biome rules, L2 gate scripts, TypeScript compiler, Factory Core git module). No convention-only patterns exist.
 
@@ -3254,6 +3275,11 @@ When this document references an interface, schema, or configuration, the canoni
 | Telegram config schema | `shared-types/src/config.ts` (TelegramConfigSchema) | ADR-014 M10 |
 | Messenger event poller | `messenger/src/sync/event-poller.ts` | ADR-014 M1 |
 | Telegram API mock | `tests/fixtures/telegram-api-mock.ts` | ADR-014 M12 |
+| Guidance module (lifted) | `factory-core/src/guidance/` | ADR-026 |
+| Guidance hook adapter (tier-5 rewrite) | `factory-core/src/guidance/hooks-adapter.ts` | ADR-026 / ADR-027 |
+| Factory Core in-process hook engine | `factory-core/src/hooks/` | ADR-027 |
+| Third-party license manifest | `factory-core/THIRD_PARTY_LICENSES.md` | ADR-026 |
+| Upstream delta tracker | `factory-core/src/guidance/UPSTREAM_DELTA.md` | ADR-026 |
 | Performance types | `shared-types/src/performance.ts` | ADR-015 (revised) |
 | Action scorer | `factory-core/src/performance/action-scorer.ts` | ADR-015 |
 | Confidence tracker | `factory-core/src/performance/confidence.ts` | ADR-015 |

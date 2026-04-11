@@ -1,13 +1,17 @@
 # QDS Factory Code-Lift Manifest -- Validation Gap Analysis Report
 
-**Version:** 2.0
-**Date:** 2026-03-14
+**Version:** 2.1 (Session 13)
+**Date:** 2026-04-11 (session 13 amendments)
 **Scope:** Cross-reference of deep-dive source code findings against PRD v2, Architecture v2, and Epic/Story decomposition
 **Session 10 status:** ALL 3 blockers resolved, 5 risks resolved, 10 story gaps amended, and 5 missing stories addressed (4 added, 1 consolidated).
+**Session 13 additions:** 3 new ADRs (ADR-025 orchestrator re-confirmation, ADR-026 `@claude-flow/guidance` lift, ADR-027 hook engine dual-plane strategy), 1 new story (Story 1.7), 4 new risks opened (3 LOW-MEDIUM, 1 LOW — all mitigated at open-time), 14 session-12 invariant-vs-mechanism reclassifications to be tracked via Step 5 architecture-v2.md correction pass.
 **Documents reviewed:**
-- `_bmad-output/implementation-artifacts/epics-and-stories.md` (v2.0, Session 10)
+- `_bmad-output/implementation-artifacts/epics-and-stories.md` (v2.0, Session 10; v2.1 with Story 1.7 inserted by Session 13)
 - `_bmad-output/planning-artifacts/architecture-v2.md`
-- `_bmad-output/planning-artifacts/architecture-v2-session10-amendments.md` (new)
+- `_bmad-output/planning-artifacts/architecture-v2-session10-amendments.md`
+- `_bmad-output/planning-artifacts/architecture-v2-session11-twelve-factor.md`
+- `_bmad-output/planning-artifacts/architecture-v2-session12-amendments.md` (new, Session 13)
+- `_bmad-output/planning-artifacts/session12-ruflo-evaluation-findings.md` (new, Session 12 evidence base)
 
 ---
 
@@ -119,39 +123,98 @@ The deep-dive provides an exact 4-item adaptation checklist for the 6 carry-forw
 
 ---
 
-## 5. RISK REGISTER — ALL RESOLVED
+## 5. RISK REGISTER — SESSIONS 10 + 11 RESOLVED, SESSION 13 RISKS MITIGATED AT OPEN-TIME
 
-| Risk | Severity | Session 10 Status | Resolution |
-|------|----------|-------------------|------------|
-| **RISK-1:** Superpowers `enforcement` field fiction | HIGH | **RESOLVED** | BLOCKER-1 Option A: `description` IS enforcement. Story 2.5 rewritten, ADR-013 amended |
-| **RISK-2:** Missing orchestration loop | HIGH | **RESOLVED** | Story 4.0 added (poll-reconcile-dispatch, Symphony GenServer pattern) |
-| **RISK-3:** Pi SDK credential mechanism misunderstood | MEDIUM | **RESOLVED** | Story 2.3 AC rewritten with `getApiKey` callback. ADR-008 amended |
-| **RISK-4:** Overstory schema extensions uncovered | MEDIUM | **RESOLVED** | Story 1.6 added (consolidates all Overstory schema changes) |
-| **RISK-5:** Migration runner pattern incompatibility | LOW-MEDIUM | **RESOLVED** | Story 1.2 AC amended (FC-only scope). Architecture Amendment 3 (ownership table) |
+| Risk | Severity | Status | Resolution / Mitigation |
+|------|----------|--------|------------|
+| **RISK-1:** Superpowers `enforcement` field fiction | HIGH | **RESOLVED (S10)** | BLOCKER-1 Option A: `description` IS enforcement. Story 2.5 rewritten, ADR-013 amended |
+| **RISK-2:** Missing orchestration loop | HIGH | **RESOLVED (S10)** | Story 4.0 added (poll-reconcile-dispatch, Symphony GenServer pattern) |
+| **RISK-3:** Pi SDK credential mechanism misunderstood | MEDIUM | **RESOLVED (S10)** | Story 2.3 AC rewritten with `getApiKey` callback. ADR-008 amended |
+| **RISK-4:** Overstory schema extensions uncovered | MEDIUM | **RESOLVED (S10)** | Story 1.6 added (consolidates all Overstory schema changes) |
+| **RISK-5:** Migration runner pattern incompatibility | LOW-MEDIUM | **RESOLVED (S10)** | Story 1.2 AC amended (FC-only scope). Architecture Amendment 3 (ownership table) |
+| **RISK-6:** Alpine ARM64 native binary incompatibility | HIGH | **MITIGATED (S11)** | Debian-based images mandated per ADR-024 Section 3 |
+| **RISK-7:** `@claude-flow/guidance` license / upstream drift | LOW-MEDIUM | **MITIGATED at open-time (S13)** | License vendored via `factory-core/THIRD_PARTY_LICENSES.md` per ADR-026 Integration Decision 4. MIT confirmed (`_research-repos/ruflo/LICENSE` lines 1–21, Copyright 2024–2026 ruvnet). Ruflo is an active project (6,000+ commits, claude-flow v3.5 rebranded). Monitoring: quarterly re-index of `_research-repos/ruflo` + cypher diff against the lifted subset. Material compiler changes to `compiler.ts:28-50` rule syntax regexes are the highest-attention drift surface because of ADR-026 Integration Decision 1 (overstory overlay format adaptation). `factory-core/src/guidance/UPSTREAM_DELTA.md` tracks every `// QDS:` tagged edit for upstream-drift monitoring. |
+| **RISK-8:** Ruflo evaluation re-litigation | LOW | **MITIGATED at open-time (S13)** | ADR-025 is scope-closed with explicit re-opening criteria. Future "should we swap orchestrator?" questions must reference ADR-025 + `session12-ruflo-evaluation-findings.md` and either (a) produce a new product invariant that overstory structurally cannot satisfy, (b) show a measured structural regression in overstory's relevant subsystems via fresh cypher queries, (c) demonstrate an alternative scoring ≥ 20 points higher on the same 135-point rubric with the same methodology, or (d) show a material change in ruflo's structural shape (e.g., ruflo growing worktree/tmux primitives). Re-opening on preference, authority, or framework fashion is explicitly out of scope. |
+| **RISK-9:** Story 1.7 scope creep through compiler adaptation | LOW-MEDIUM | **MITIGATED at open-time (S13)** | Story 1.7's spike phase (day 3) includes an explicit budget check: **"if the compiler adaptation requires > 400 LOC of rework, raise an exception to the user before continuing."** This is a forced decision point that prevents the spike from silently growing into a rewrite. If triggered, the budget exception surfaces the trade-off explicitly (ADR-026 Integration Decision 1 Option A vs Option B) rather than absorbing scope silently. Story 1.7's MVP scope is explicitly bounded at tier 1 + adapter (~7,422 LOC); tier-2 promotions from the spike land in a follow-on story, not Story 1.7. |
+| **RISK-10:** Invariant-vs-mechanism conflation in existing ADRs | LOW-MEDIUM | **MITIGATED at open-time (S13)** | Session 12 Part A identified 11 items previously written into ADRs 001–023 as if architectural that are actually implementation-choice mechanisms overstory provides (tmux, git worktrees specifically, 6-layer hook taxonomy names, SQLite specifically, mail.db, TDD file-pair, 6-database split, action-scoring heuristic, observer/optimizer cadence, 50%/8K context budget, ELO). Step 5 of session 13 performs a targeted correction pass on `architecture-v2.md` (3,463 lines, 99 conflation candidates identified via grep) to tag conflation sites in-place without rewriting the document. Story acceptance criteria that reference a mechanism should be read as "using overstory's current mechanism for X" — the QDS invariant is X, not the mechanism. Future ADR authors must distinguish "the factory must" (invariant) from "overstory provides this by" (mechanism) per the ADR-025 guidance. |
 
-All 5 risks from the Session 9b gap analysis are now RESOLVED with explicit document amendments, new stories, and design decisions. Zero open risks remain.
+**Session 13 risks summary:** 4 new risks (RISK-7, RISK-8, RISK-9, RISK-10), all mitigated at open-time by the ADRs that introduced them. None are blocking. RISK-7 has a recurring quarterly monitoring action. RISK-8 has a scope-closure rule that shuts down re-litigation without new evidence. RISK-9 has a forced budget-check inside Story 1.7's spike phase. RISK-10 has a targeted correction pass (Step 5) plus a go-forward convention for future ADR authors.
+
+---
+
+## 6. SESSION 13 ADDITIONS — ADR-025, ADR-026, ADR-027
+
+Session 13 formalized the orchestrator re-evaluation from session 12 findings into three authoritative ADRs and one new MVP story. Unlike sessions 10 and 11 (which resolved existing gaps), session 13 **introduced new scope** driven by bias-stripped structural re-analysis. This section tracks that new scope.
+
+### ADR-025: Orchestrator Re-Confirmation (overstory retained, scope-closed)
+
+**Scope:** 10 hard invariants re-derived from PRD v2 alone (not from existing ADRs), 11 items reclassified from "architectural" to "implementation-choice mechanism", 135-point rubric scoring overstory at 90, ruflo at 54, build-fresh at 10 (9-of-10 invariants won by overstory). Rubric weights are criticality-derived and are themselves invariant per the re-opening criteria.
+**New stories:** None (this ADR closes a question, it does not open work).
+**Impact on existing stories:** None (overstory remains the base; the change is that overstory's identity as the base is now formalized and scope-closed rather than implicit in biased ADRs).
+**Artifact updates:** `architecture-v2.md` requires a targeted correction pass in Step 5 to tag invariant-vs-mechanism conflation sites.
+
+### ADR-026: `@claude-flow/guidance` Lift into Factory Core
+
+**Scope:** Tiered extraction of 32 files from `_research-repos/ruflo/v3/@claude-flow/guidance/src/` (22,349 LOC source, ~19,438 LOC test). Tier 1 = full lift, 12 files, ~6,922 LOC. Tier 2 = spike-then-decide, 9 files, ~9,390 LOC (spike evaluates up to 3). Tier 3 = defer to post-MVP, 8 files, ~5,322 LOC. Tier 4 = drop, 2 files, ~1,250 LOC. Tier 5 = replace with QDS-specific adapter, 1 file (`hooks.ts` 465 LOC), ~500 LOC new write. 4 integration decisions specified: rule syntax alignment (adapt compiler to overstory overlay format per Option B), hook adapter target (ADR-027), test framework (adapt to `bun test` from vitest), license vendoring (`factory-core/THIRD_PARTY_LICENSES.md` manifest).
+**New stories:** Story 1.7 (`@claude-flow/guidance` Lift Spike + Tier-1 Integration, ~7,422 LOC MVP). 3-day spike + constrained implementation. Blocked by 1.4, 1.5, and ADR-027 acceptance. Blocks Story 4.x phase-boundary enforcement and Story 8.x quality gate enforcement.
+**Impact on existing stories:** None (Story 1.7 is additive). Story 2.5 (Enforcement Middleware) and Story 2.6 (Skill Middleware) remain unchanged — ADR-013 / Superpowers `description` field handling is complementary to ADR-026's guidance lift, not replaced by it.
+**Artifact updates:** `code-lift-manifest.md` Section 1 Epic 1 gets Story 1.7 entry, Epic 1 subtotals updated, Section 2 reuse totals updated (project-wide reuse percentage jumps from 31.4% to 64.5% because ~6,922 LOC of the new scope is code-lift rather than new-write), Section 3 gets 4 new critical decisions (#11 overstory scope-closed, #12 invariant-vs-mechanism reclassification, #13 guidance is the cleanest lift in ruflo, #14 hooks package is NOT lifted), Section 5 Phase 1 gets Story 1.7 as implementation order #7.
+
+### ADR-027: Hook Engine Strategy — Dual-Plane (overstory edge + Factory Core in-process)
+
+**Scope:** Establishes that overstory's `src/agents/hooks-deployer.ts` (606 LOC POSIX shell script generator) and ruflo's `@claude-flow/hooks` (10,925 LOC TypeScript in-process hook engine) are **not two implementations of the same thing** — they operate at different runtime layers. Decision: dual-plane architecture. Overstory's edge plane is unchanged (reused as-is via `ov hooks install` at worker spawn time). Factory Core builds a ~400 LOC clean-room in-process plane (`factory-core/src/hooks/`) with concepts borrowed from ruflo's hooks design (priority registration, timeout wrap, pre/post event pairs, typed result aggregation) but zero lifted code. The two planes coordinate via Factory Core's pipeline engine — in-process results via `registry.execute(event, context)`, edge-plane results via `events.db` `hook_result` EventType (already covered by Story 1.6). In-process plane is **instance-based per story**, not a global singleton, enforcing invariant 1 (context isolation) at the hook-registry layer.
+**New stories:** None. The ~400 LOC in-process hook engine is built inside Story 1.7's adapter phase as a prerequisite for the tier-5 adapter (which must bind against a hook engine). If Story 1.7's scope grows beyond its 3-day spike + adapter budget, a follow-up Story 1.8 for the hook engine as a standalone deliverable can be split out — but the split requires measured evidence from the spike, not pre-emptive scope carving.
+**Impact on existing stories:** Story 1.7 carries this ADR's implementation. ADR-010 (6-layer hook pipeline in `architecture-v2.md`) is not replaced — it is reframed as "invariant = gated mechanical verification at phase boundaries; mechanism = dual-plane edge scripts + in-process engine coordinated by the pipeline." The count "6 layers" is organizational, not architectural, per session 12 Part A reclassification.
+**Artifact updates:** `architecture-v2.md` ADR-010 gets a cross-reference to ADR-027 in Step 5. No changes to stories in Epic 4, Epic 8, or elsewhere — those stories consume the hook engine, they do not specify its internals.
+
+### New Story Count
+
+| Session | New Stories Added | Story IDs |
+|---|---|---|
+| Session 10 | 4 | 1.6, 2.9, 4.0, 9.0 |
+| Session 11 | 2 | 1.4b, 1.4c (+ 5 growth stories backlog) |
+| Session 13 | 1 | 1.7 |
+| **Post-S13 MVP story count** | **~71** | (~64 original + 7 added across sessions 10/11/13) |
+
+**LOC budget evolution:**
+
+| Session | Project MVP LOC | Reusable LOC | Net New LOC | Reuse % |
+|---|---:|---:|---:|---:|
+| Original planning | 6,470 | 1,630 | 4,840 | 25.2% |
+| Session 10 (adjusted) | 6,470 | 2,032 | 4,438 | 31.4% |
+| Session 11 (no LOC change, operational) | 6,470 | 2,032 | 4,438 | 31.4% |
+| **Session 13** | **13,892** | **8,954** | **4,938** | **64.5%** |
+
+The session-13 jump is driven entirely by Story 1.7's ~7,422 LOC scope introduction. The net-new LOC only grows by ~500 (tier-5 adapter + hook engine net after compiler adaptation offset) — the bulk of Story 1.7 is lifted code, not new-write.
 
 ---
 
 ## Summary Statistics
 
-| Category | Count | Session 10 Status |
+| Category | Count | Status (through Session 13) |
 |----------|-------|-------------------|
-| Validated Assumptions | 8 | Confirmed |
-| Challenged Assumptions | 4 | **4/4 RESOLVED** |
-| Story-Level Gaps | 10 | **10/10 AMENDED** (9 AC amendments + 1 via new story) |
-| Missing Stories | 5 | **5/5 ADDRESSED** (4 stories added: 1.6, 2.9, 4.0, 9.0; M-4 consolidated into M-1 via Story 1.6) |
-| Risks (High) | 2 | **2/2 RESOLVED** |
-| Risks (Medium) | 2 | **2/2 RESOLVED** |
-| Risks (Low-Medium) | 1 | **1/1 RESOLVED** |
+| Validated Assumptions | 8 | Confirmed (S9b) |
+| Challenged Assumptions | 4 | **4/4 RESOLVED** (S10) |
+| Story-Level Gaps | 10 | **10/10 AMENDED** (S10, 9 AC amendments + 1 via new story) |
+| Missing Stories (S9b → S10) | 5 | **5/5 ADDRESSED** (S10, 4 added: 1.6, 2.9, 4.0, 9.0; M-4 consolidated into M-1 via 1.6) |
+| New Stories (S11) | 2 + 5 growth | 1.4b, 1.4c + growth backlog |
+| New Stories (S13) | 1 | **1.7** (`@claude-flow/guidance` lift per ADR-026) |
+| Risks S9b / S10 | 5 | **5/5 RESOLVED** (2 HIGH, 2 MEDIUM, 1 LOW-MEDIUM) |
+| Risks S11 | 1 | **1/1 MITIGATED** (RISK-6 Alpine ARM64 → Debian mandated) |
+| Risks S13 | 4 | **4/4 MITIGATED at open-time** (RISK-7 license/drift, RISK-8 re-litigation, RISK-9 scope creep, RISK-10 conflation) |
 
-**Blocking items:** ZERO. All 3 blockers from Session 9b are resolved:
-1. RISK-1 / BLOCKER-1 (Superpowers enforcement field) → Option A chosen, Story 2.5 rewritten
-2. M-1 / BLOCKER-2 (mail schema migration) → Story 1.6 added
-3. M-3 / BLOCKER-3 (missing orchestration loop) → Story 4.0 added
+**Blocking items:** ZERO. All historical blockers resolved (S10); no new blockers introduced by S13. Session 13 added new scope (Story 1.7, ~7,422 LOC) but did not introduce new dependencies that block existing stories — Story 1.7 depends on the existing 1.4 + 1.5 foundation and is a prerequisite for enforcement-dependent stories in Epic 4 and Epic 8 that had previously lacked a mechanical enforcement layer.
 
-**Implementation readiness:** All documents amended in Session 10 are now implementation-ready with zero ambiguity. Every acceptance criterion amended in Session 10 references the actual API mechanism by name. Zero contradictions between PRD, architecture, and epics within the Session 10 scope. Zero orphan dependencies among the targeted amendments.
+**Implementation readiness:** All documents amended through Session 13 are implementation-ready with zero ambiguity. Every acceptance criterion in Story 1.7 references the actual ruflo file paths, LOC counts, and MIT license location directly. Zero contradictions between PRD, architecture, and epics within the S10/S11/S13 scopes. Zero orphan dependencies. **Session 13 specifically:** Story 1.7 names its source files individually with per-file LOC and reuse classification, cites ruflo commit `b395d12` as the lift point, cites overstory commit `7872d54` as the integration target, and provides a 3-day spike plan with an explicit budget-check at day 3 that prevents silent scope creep.
+
+**Session 13 pending actions (tracked as Step 5 of session 13, not blockers):**
+
+1. `architecture-v2.md` targeted correction pass — tag invariant-vs-mechanism conflation sites in-place, surgical edits only, no rewrite. 99 candidate lines identified via grep (`tmux|worktree|mail\.db|6-layer|file-pair|SQLite`).
+2. `architecture-v2.md` ADR index section update — add ADR-025, ADR-026, ADR-027 references pointing to `architecture-v2-session12-amendments.md`.
+3. `architecture-v2.md` ADR-010 (hook pipeline) cross-reference to ADR-027 for the dual-plane architecture reframing.
+
+These pending actions are scoped, sequential, and do not introduce new risk surface.
 
 ---
 
-*v2.0 — Updated by Session 10 resolution. Original generated by Wave 2 Gap/Risk Validator agent. All findings resolved with explicit amendments, new stories, and design decisions.*
+*v2.1 — Updated by Session 13. v2.0 updated by Session 10 resolution. Original generated by Wave 2 Gap/Risk Validator agent (Session 9b). All findings resolved or mitigated with explicit amendments, new stories, and design decisions across S10, S11, S13.*
