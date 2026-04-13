@@ -44,7 +44,7 @@ All cross-references in this file, downstream amendments, and artifact updates u
 
 **Context:**
 
-On the morning of 2026-04-11, the user discovered [`ruvnet/ruflo`](https://github.com/ruvnet/ruflo) and asked whether it could replace or absorb QDS Factory's planned agent orchestration layer. Ruflo was quickly confirmed to be [`ruvnet/claude-flow`](https://github.com/ruvnet/claude-flow) v3.5 rebranded — the same project already referenced in `/Users/steve/CLAUDE.md` for SPARC commands and MCP tools.
+On the morning of 2026-04-11, the user discovered [`ruvnet/ruflo`](https://github.com/ruvnet/ruflo) and asked whether it could replace or absorb QDS Factory's planned agent orchestration layer. Ruflo was quickly confirmed to be [`ruvnet/claude-flow`](https://github.com/ruvnet/claude-flow) v3.5 rebranded — the same project already referenced in the root `CLAUDE.md` for SPARC commands and MCP tools.
 
 A first-pass same-session analysis recommended keeping overstory and lifting `@claude-flow/guidance` into Factory Core. The user correctly pushed back: *"all the ADRs and everything were tightly written around overstory being included. they're biased to ov."*
 
@@ -258,14 +258,14 @@ Re-opening under any other conditions (personal preference, argument from author
 - `_bmad-output/planning-artifacts/architecture-v2-session10-amendments.md` — ADR-008 credential injection amendment, ADR-013 enforcement metadata clarification, database migration ownership
 - `_bmad-output/planning-artifacts/architecture-v2-session11-twelve-factor.md` — ADR-024 (twelve-factor conventions)
 - `_bmad-output/implementation-artifacts/epics-and-stories.md` — Story 1.6 (overstory schema extensions), Story 2.3 (credential middleware)
-- `/Users/steve/.claude/projects/-Users-steve-QDS-Factory/memory/qds_orchestrator.md` — persisted long-horizon memory for future sessions
-- `/Users/steve/.claude/projects/-Users-steve-QDS-Factory/memory/gitnexus_cypher.md` — CLI pattern reference for re-running structural queries
+- `<repo-root>/memory/qds_orchestrator.md` — persisted long-horizon memory for future sessions (user-local Claude memory)
+- `<repo-root>/memory/gitnexus_cypher.md` — CLI pattern reference for re-running structural queries (user-local Claude memory)
 - `overstory/CLAUDE.md` — overstory fork conventions and integration-point registry
-- `/Users/steve/QDS-Factory/overstory/src/agents/hooks-deployer.ts` (606 LOC) — Claude Code hook generation foundation, referenced by ADR-035
-- `/Users/steve/QDS-Factory/overstory/src/runtimes/registry.ts` — Runtime abstraction referenced by ADR-008
-- `/Users/steve/QDS-Factory/overstory/src/runtimes/pi-guards.ts` — `NON_IMPLEMENTATION_CAPABILITIES` enforcement point
-- `/Users/steve/QDS-Factory/overstory/src/worktree/manager.ts` and `src/worktree/tmux.ts` — 858 LOC implementing invariants 1 and 2
-- `/Users/steve/QDS-Factory/overstory/src/merge/queue.ts` — SQLite FIFO merge queue (invariant 10)
+- `overstory/src/agents/hooks-deployer.ts` (606 LOC) — Claude Code hook generation foundation, referenced by ADR-035
+- `overstory/src/runtimes/registry.ts` — Runtime abstraction referenced by ADR-008
+- `overstory/src/runtimes/pi-guards.ts` — `NON_IMPLEMENTATION_CAPABILITIES` enforcement point
+- `overstory/src/worktree/manager.ts` and `overstory/src/worktree/tmux.ts` — 858 LOC implementing invariants 1 and 2
+- `overstory/src/merge/queue.ts` — SQLite FIFO merge queue (invariant 10)
 - `https://github.com/ruvnet/ruflo` — evaluated alternative (ruflo = claude-flow v3.5 rebranded)
 - `https://github.com/ruvnet/claude-flow` — upstream for ruflo lineage
 
@@ -544,7 +544,7 @@ Both layers are necessary. Neither replaces the other. **This is the decisive st
 
 ### Architecture Diagram
 
-```
+```text
 Developer submits story
          │
          ▼
@@ -610,7 +610,7 @@ The two planes do not communicate directly. They are coordinated by Factory Core
 
 The in-process hook engine lives in `factory-core/src/hooks/` with the following module structure:
 
-```
+```text
 factory-core/src/hooks/
   types.ts                  // FactoryHookEvent, FactoryHookPriority, FactoryHookContext,
                             //   FactoryHookResult, FactoryHookHandler, FactoryHookRegistration
@@ -834,7 +834,7 @@ This is the "6-layer enforcement" from the existing architecture-v2.md (ADR-010)
 - `overstory/src/agents/guard-rules.ts` — shared constants (`DANGEROUS_BASH_PATTERNS`, `SAFE_BASH_PREFIXES`, `WRITE_TOOLS`, `INTERACTIVE_TOOLS`) referenced by both planes
 - `overstory/src/runtimes/pi-guards.ts` — `NON_IMPLEMENTATION_CAPABILITIES` constant, part of the edge-plane enforcement
 - `_research-repos/ruflo/v3/@claude-flow/hooks/src/index.ts` (session-13 direct read) — the design source for borrowed concepts; NOT a lift target
-- `_research-repos/ruflo/v3/@claude-flow/hooks/` (10,925 LOC total) — verified outbound coupling to ReasoningBank / HNSW / ONNX / AgentDB via session-12 cypher queries
+- `_research-repos/ruflo/v3/@claude-flow/hooks/` (10,925 LOC total) — verified outbound coupling to ReasoningBank/HNSW/ONNX/AgentDB via session-12 cypher queries
 - `factory-core/src/hooks/` (to be created in Story 1.7) — the in-process plane home
 - `factory-core/src/guidance/hooks-adapter.ts` (to be created in Story 1.7 per ADR-034 Tier 5) — the binding between ADR-034's lifted guidance code and ADR-035's hook engine
 - `events.db` (overstory-owned, extended by Story 1.6) — `hook_result` EventType is the edge-plane → Factory Core data channel

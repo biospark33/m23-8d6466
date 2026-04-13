@@ -1240,7 +1240,7 @@
 | **Overstory** | ~1,190 | 1, 2, 3, 4, 5, 6, 7, 8 | types.ts, sessions/store.ts, config.ts, watchdog/*, metrics/*, insights/analyzer.ts, agents/overlay.ts, merge/resolver.ts, **agents/hooks-deployer.ts (ADR-035 edge plane, unchanged)** |
 | **Pi-Mono** | ~170 | 1, 2, 4, 5, 6, 10 | ai/types.ts, agent/types.ts, Agent class API, Usage callback, transformContext, ModelRegistry |
 | **Superpowers** | ~210 (import) | 2 | skills-core.js (IMPORT_AS_IS with .d.ts) |
-| **Ruflo (`@claude-flow/guidance`)** | **~6,922** (tier-1 per ADR-034) | **1 (Story 1.7)** | **`types.ts`, `crypto-utils.ts`, `gates.ts`, `proof.ts`, `ledger.ts` (incl. `IEvaluator` + 5 built-in evaluators), `retriever.ts` (incl. `HashEmbeddingProvider` non-semantic fallback), `continue-gate.ts`, `memory-gate.ts`, `authority.ts`, `capabilities.ts`, `compiler.ts` (adapted to overstory overlay format), `index.ts` (export-list pruned)`. NOT lifted: `@claude-flow/hooks` (10,925 LOC, drags ReasoningBank/HNSW/ONNX stack per ADR-035).** MIT license, `_research-repos/ruflo @ commit b395d12`. |
+| **Ruflo (`@claude-flow/guidance`)** | **~6,922** (tier-1 per ADR-034) | **1 (Story 1.7)** | **`types.ts`, `crypto-utils.ts`, `gates.ts`, `proof.ts`, `ledger.ts` (incl. `IEvaluator` + 5 built-in evaluators), `retriever.ts` (incl. `HashEmbeddingProvider` non-semantic fallback), `continue-gate.ts`, `memory-gate.ts`, `authority.ts`, `capabilities.ts`, `compiler.ts` (adapted to overstory overlay format), `index.ts` (export-list pruned). NOT lifted: `@claude-flow/hooks` (10,925 LOC, drags ReasoningBank/HNSW/ONNX stack per ADR-035).** MIT license, `_research-repos/ruflo @ commit b395d12`. |
 | **ZeroClaw** | ~432 | 9, 10 | web/src/lib/sse.ts, web/src/lib/ws.ts, React hooks, carry-forward files (Story 9.0) |
 | **Claude-Mem** | ~120 | 1, 4, 6, 7 | MigrationRunner, SessionManager, PendingMessageStore, ContextBuilder |
 | **Research Repos** | Patterns only | All | deer-flow middleware, GSD Nyquist, symphony GenServer, paperclip adapter, **ruflo `@claude-flow/hooks` (concepts only for ADR-035 in-process hook engine)** |
@@ -1369,7 +1369,7 @@ The following stories have **no reusable code** from any source repository and r
 | **5.4: Integration Wiring** | 30 | Replaces stub with real call. Straightforward wiring. |
 | **8.3: Webhook Channel** | 40 | Standard HTTP POST with retry. [Growth] |
 
-**Total 100% New LOC in Gap Stories:** ~1,320 LOC (21% of total project)
+**Total 100% New LOC in Gap Stories:** ~1,320 LOC (10% of total project)
 
 ---
 
@@ -1401,15 +1401,15 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 | Order | Story | LOC | Rationale |
 |-------|-------|-----|-----------|
-| 7 | **2.1** MiddlewareChain Executor | 100 | Depends on 1.1, 1.4. Core chain infrastructure. deer-flow middleware pattern as design reference. |
-| 8 | **2.9** TierResolver | 50 | Depends on 1.1, 1.4. Required by budget and credential middlewares. Pi SDK ModelRegistry validation. |
-| 9 | **2.2** Budget Middleware | 40 | Depends on 2.1. Fatal middleware -- must work early. Reuses Overstory pricing. |
-| 10 | **2.3** Credential Middleware | 30 | Depends on 2.1. Fatal middleware. Pi SDK getApiKey callback. |
-| 11 | **2.5** Enforcement Middleware | 30 | Depends on 2.1. Superpowers import (IMPORT_AS_IS). |
-| 12 | **2.6** Skill Middleware | 20 | Depends on 2.1. Shares Superpowers import with 2.5. |
-| 13 | **2.4** Learning Middleware | 50 | Depends on 2.1. Stub until Epic 7 populates learning records. |
-| 14 | **2.7** Verification Middleware | 30 | Depends on 2.1. Stub until Epic 3 implements real verifier. |
-| 15 | **2.8** Performance Middleware Stub | 40 | Depends on 2.1. Stub until Epic 5 implements real scorer. |
+| 8 | **2.1** MiddlewareChain Executor | 100 | Depends on 1.1, 1.4. Core chain infrastructure. deer-flow middleware pattern as design reference. |
+| 9 | **2.9** TierResolver | 50 | Depends on 1.1, 1.4. Required by budget and credential middlewares. Pi SDK ModelRegistry validation. |
+| 10 | **2.2** Budget Middleware | 40 | Depends on 2.1. Fatal middleware -- must work early. Reuses Overstory pricing. |
+| 11 | **2.3** Credential Middleware | 30 | Depends on 2.1. Fatal middleware. Pi SDK getApiKey callback. |
+| 12 | **2.5** Enforcement Middleware | 30 | Depends on 2.1. Superpowers import (IMPORT_AS_IS). |
+| 13 | **2.6** Skill Middleware | 20 | Depends on 2.1. Shares Superpowers import with 2.5. |
+| 14 | **2.4** Learning Middleware | 50 | Depends on 2.1. Stub until Epic 7 populates learning records. |
+| 15 | **2.7** Verification Middleware | 30 | Depends on 2.1. Stub until Epic 3 implements real verifier. |
+| 16 | **2.8** Performance Middleware Stub | 40 | Depends on 2.1. Stub until Epic 5 implements real scorer. |
 
 **Phase 2 total:** 390 LOC, ~125 LOC reused (32% reuse)
 
@@ -1421,37 +1421,37 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 | Order | Story | LOC | Rationale |
 |-------|-------|-----|-----------|
-| 16a | **3.1** must_haves Parser | 60 | Foundation for all verification. |
-| 17a | **3.2** Lightweight Verifier | 100 | Core verification logic. GSD Nyquist pattern. |
-| 18a | **3.3** Post-Task Hook Integration | 60 | Wires verifier into middleware. |
-| 19a | **3.4** Full Nyquist Verifier | 150 | LLM-powered verification. |
-| 20a | **3.5** Pre-BMAD Gate | 80 | Catches phantom completions. |
-| 21a | **3.6** Oscillation Detector | 60 | GAP STORY -- needs extra design attention. |
-| 22a | **3.7** Disagreement Protocol | 150 | Complex resolver. Reuses Overstory merge resolver. |
+| 17a | **3.1** must_haves Parser | 60 | Foundation for all verification. |
+| 18a | **3.2** Lightweight Verifier | 100 | Core verification logic. GSD Nyquist pattern. |
+| 19a | **3.3** Post-Task Hook Integration | 60 | Wires verifier into middleware. |
+| 20a | **3.4** Full Nyquist Verifier | 150 | LLM-powered verification. |
+| 21a | **3.5** Pre-BMAD Gate | 80 | Catches phantom completions. |
+| 22a | **3.6** Oscillation Detector | 60 | GAP STORY -- needs extra design attention. |
+| 23a | **3.7** Disagreement Protocol | 150 | Complex resolver. Reuses Overstory merge resolver. |
 
 **Workstream B: Turn Continuation (Epic 4)**
 
 | Order | Story | LOC | Rationale |
 |-------|-------|-----|-----------|
-| 16b-pre | **4.0** Orchestration Loop | 120 | Connects startup skeleton to turn engine. Symphony GenServer pattern. MUST precede 4.1. |
-| 16b | **4.1** Turn Continuation Loop | 120 | Core loop. Reuses Overstory watchdog daemon. |
-| 17b | **4.5** Workspace Lifecycle Hooks | 150 | Independent of turn loop. Symphony pattern. |
-| 18b | **4.2** Progress Velocity Check | 40 | Extends turn loop. |
-| 19b | **4.3** Turn State Persistence | 60 | Crash recovery. Reuses claude-mem patterns. |
-| 20b | **4.4** Continuation Prompt Template | 40 | Pi SDK transformContext injection. |
-| 21b | **4.6** Hook Rollback | 70 | Extends lifecycle hooks. |
-| 22b | **4.7** Stall Detection | 50 | Integrates with turn loop and circuit breaker. |
+| 17b-pre | **4.0** Orchestration Loop | 120 | Connects startup skeleton to turn engine. Symphony GenServer pattern. MUST precede 4.1. |
+| 17b | **4.1** Turn Continuation Loop | 120 | Core loop. Reuses Overstory watchdog daemon. |
+| 18b | **4.5** Workspace Lifecycle Hooks | 150 | Independent of turn loop. Symphony pattern. |
+| 19b | **4.2** Progress Velocity Check | 40 | Extends turn loop. |
+| 20b | **4.3** Turn State Persistence | 60 | Crash recovery. Reuses claude-mem patterns. |
+| 21b | **4.4** Continuation Prompt Template | 40 | Pi SDK transformContext injection. |
+| 22b | **4.6** Hook Rollback | 70 | Extends lifecycle hooks. |
+| 23b | **4.7** Stall Detection | 50 | Integrates with turn loop and circuit breaker. |
 
 **Workstream C: Performance Data (Epic 5)**
 
 | Order | Story | LOC | Rationale |
 |-------|-------|-----|-----------|
-| 16c | **5.1** Action Scorer | 120 | Core scoring. Reuses Overstory metrics patterns. |
-| 17c | **5.5** Learning Record Extractor | 100 | DIRECT_COPY from Overstory insights/analyzer. |
-| 18c | **5.2** Confidence Tracker | 80 | Statistical computation. |
-| 19c | **5.3** Session Composite | 100 | Aggregation layer. |
-| 20c | **5.4** Performance Middleware Integration | 30 | Replaces stub from 2.8. |
-| 21c | **5.6** Overlay Effectiveness Tracker | 80 | Measures learning system impact. |
+| 17c | **5.1** Action Scorer | 120 | Core scoring. Reuses Overstory metrics patterns. |
+| 18c | **5.5** Learning Record Extractor | 100 | DIRECT_COPY from Overstory insights/analyzer. |
+| 19c | **5.2** Confidence Tracker | 80 | Statistical computation. |
+| 20c | **5.3** Session Composite | 100 | Aggregation layer. |
+| 21c | **5.4** Performance Middleware Integration | 30 | Replaces stub from 2.8. |
+| 22c | **5.6** Overlay Effectiveness Tracker | 80 | Measures learning system impact. |
 
 **Phase 3 total:** 1,820 LOC across 3 workstreams, ~515 LOC reused (28% reuse)
 
@@ -1461,12 +1461,12 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 | Order | Story | LOC | Rationale |
 |-------|-------|-----|-----------|
-| 23 | **6.4** Cost Data Flow | 80 | Pi SDK Usage callback wiring. Foundation for budget queries. |
-| 24 | **6.1** Per-Story Budget Enforcement | 90 | Core enforcement. |
-| 25 | **6.2** Global Ceiling Enforcement | 80 | Extends per-story pattern. |
-| 26 | **6.3** Atomic Task Checkout | 90 | Claude-mem claim-confirm pattern. |
-| 27 | **6.5** Burn Rate Prediction | 60 | Feeds dashboard and notifications. |
-| 28 | **6.6** Budget Breach Notification | 50 | Soft dependency on MessageBus (Epic 8). |
+| 24 | **6.4** Cost Data Flow | 80 | Pi SDK Usage callback wiring. Foundation for budget queries. |
+| 25 | **6.1** Per-Story Budget Enforcement | 90 | Core enforcement. |
+| 26 | **6.2** Global Ceiling Enforcement | 80 | Extends per-story pattern. |
+| 27 | **6.3** Atomic Task Checkout | 90 | Claude-mem claim-confirm pattern. |
+| 28 | **6.5** Burn Rate Prediction | 60 | Feeds dashboard and notifications. |
+| 29 | **6.6** Budget Breach Notification | 50 | Soft dependency on MessageBus (Epic 8). |
 
 **Phase 4 total:** 450 LOC, ~130 LOC reused (29% reuse)
 
@@ -1478,24 +1478,24 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 | Order | Story | LOC |
 |-------|-------|-----|
-| 29 | **7.4** Epic Context Tables | 80 |
-| 30 | **7.1** Fix-Loop Learning Extraction | 100 |
-| 31 | **7.2** Maintenance Learning Extraction | 90 |
-| 32 | **7.5** Epic Context Assembly | 100 |
-| 33 | **7.6** Epic Context Extraction | 80 |
-| 34 | **7.7** Overlay Enrichment | 70 |
+| 30 | **7.4** Epic Context Tables | 80 |
+| 31 | **7.1** Fix-Loop Learning Extraction | 100 |
+| 32 | **7.2** Maintenance Learning Extraction | 90 |
+| 33 | **7.5** Epic Context Assembly | 100 |
+| 34 | **7.6** Epic Context Extraction | 80 |
+| 35 | **7.7** Overlay Enrichment | 70 |
 
 **Epic 8 (can start once Epic 1 is complete; 8.1-8.4 are independent of Epics 5-7):**
 
 | Order | Story | LOC |
 |-------|-------|-----|
-| 29' | **8.1** MessageBus | 110 |
-| 30' | **8.2** TelegramChannel | 60 |
-| 31' | **8.4** Routing Config | 40 |
-| 32' | **8.5** Circuit Breaker | 120 |
-| 33' | **8.6** Subsystem Monitor | 80 |
-| 34' | **8.7** Mitigations | 60 |
-| 35' | **8.8** Health Events | 40 |
+| 30' | **8.1** MessageBus | 110 |
+| 31' | **8.2** TelegramChannel | 60 |
+| 32' | **8.4** Routing Config | 40 |
+| 33' | **8.5** Circuit Breaker | 120 |
+| 34' | **8.6** Subsystem Monitor | 80 |
+| 35' | **8.7** Mitigations | 60 |
+| 36' | **8.8** Health Events | 40 |
 
 **Phase 5 total:** 1,030 LOC, ~305 LOC reused (30% reuse)
 
@@ -1505,15 +1505,15 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 | Order | Story | LOC | Notes |
 |-------|-------|-----|-------|
-| 36-pre | **9.0** ZeroClaw Carry-Forward | 20 | 6 files copied and adapted. MUST precede all other Epic 9 stories. |
-| 36 | **9.8** Bottom Drawer | 100 | Shell component, no data dependency. Can start early. |
-| 37 | **9.1** Performance Dashboard | 200 | ZeroClaw SSE/WS infrastructure reuse. |
-| 38 | **9.4** System Health Indicator | 180 | ZeroClaw WS pattern. |
-| 39 | **9.7** AmbientHeader Updates | 60 | Depends on 9.4. |
-| 40 | **9.2** Learning Effectiveness Panel | 180 | GAP STORY -- 100% new. |
-| 41 | **9.3** Burn Rate Prediction Panel | 150 | GAP STORY -- 100% new. |
-| 42 | **9.5** Epic Progress View | 200 | GAP STORY -- most complex novel UI. |
-| 43 | **9.6** Copilot Interactions | 130 | Depends on all other Epic 9 views. |
+| 37-pre | **9.0** ZeroClaw Carry-Forward | 20 | 6 files copied and adapted. MUST precede all other Epic 9 stories. |
+| 37 | **9.8** Bottom Drawer | 100 | Shell component, no data dependency. Can start early. |
+| 38 | **9.1** Performance Dashboard | 200 | ZeroClaw SSE/WS infrastructure reuse. |
+| 39 | **9.4** System Health Indicator | 180 | ZeroClaw WS pattern. |
+| 40 | **9.7** AmbientHeader Updates | 60 | Depends on 9.4. |
+| 41 | **9.2** Learning Effectiveness Panel | 180 | GAP STORY -- 100% new. |
+| 42 | **9.3** Burn Rate Prediction Panel | 150 | GAP STORY -- 100% new. |
+| 43 | **9.5** Epic Progress View | 200 | GAP STORY -- most complex novel UI. |
+| 44 | **9.6** Copilot Interactions | 130 | Depends on all other Epic 9 views. |
 
 **Phase 6 total:** 1,220 LOC, ~432 LOC reused (35% reuse)
 
@@ -1523,37 +1523,37 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 | Order | Story | LOC | Notes |
 |-------|-------|-----|-------|
-| 44 | **10.1** ELO Rating | 100 | Foundation for all Growth behavioral effects. |
-| 45 | **10.2** Tier Evaluation | 90 | GAP STORY -- novel, extra design needed. |
-| 46 | **10.3** Tier Demotion | 70 | GAP STORY. |
-| 47 | **10.6** Anti-Gaming | 80 | GAP STORY -- policy enforcement. |
-| 48 | **10.4** Task Routing | 80 | Uses ELO + tiers. |
-| 49 | **10.5** Random Audit | 60 | GAP STORY. |
-| 50 | **10.7** ELO Migration | 80 | Versioned epochs. |
-| 51 | **7.3** Pattern Knowledge Mining | 120 | Growth automation of Layer 2. |
-| 52 | **10.9** Automated Pattern Mining | 90 | Extends 7.3 to daily automation. |
-| 53 | **10.8** Channel Status Panel | 80 | Dashboard Growth component. |
-| 54 | **8.3** Webhook Channel | 40 | Growth extensibility. |
+| 45 | **10.1** ELO Rating | 100 | Foundation for all Growth behavioral effects. |
+| 46 | **10.2** Tier Evaluation | 90 | GAP STORY -- novel, extra design needed. |
+| 47 | **10.3** Tier Demotion | 70 | GAP STORY. |
+| 48 | **10.6** Anti-Gaming | 80 | GAP STORY -- policy enforcement. |
+| 49 | **10.4** Task Routing | 80 | Uses ELO + tiers. |
+| 50 | **10.5** Random Audit | 60 | GAP STORY. |
+| 51 | **10.7** ELO Migration | 80 | Versioned epochs. |
+| 52 | **7.3** Pattern Knowledge Mining | 120 | Growth automation of Layer 2. |
+| 53 | **10.9** Automated Pattern Mining | 90 | Extends 7.3 to daily automation. |
+| 54 | **10.8** Channel Status Panel | 80 | Dashboard Growth component. |
+| 55 | **8.3** Webhook Channel | 40 | Growth extensibility. |
 
 **Phase 7 total:** 890 LOC (all Growth), ~65 LOC reused (7% reuse)
 
 ---
 
-### Priority Summary
+### Priority Summary (Updated Session 13)
 
 | Phase | Epics | LOC | Reuse % | Parallelism |
 |-------|-------|-----|---------|-------------|
-| 1. Foundation | 1 | 670 | 68% | Sequential |
+| 1. Foundation | 1 (incl. Story 1.7) | 8,092 | 91% | Sequential |
 | 2. Middleware | 2 | 390 | 32% | Sequential |
 | 3. Three Workstreams | 3, 4, 5 | 1,820 | 28% | **3-way parallel** |
 | 4. Economics | 6 | 450 | 29% | Sequential |
 | 5. Learning + Health | 7, 8 | 1,030 | 30% | **2-way parallel** |
 | 6. Dashboard | 9 | 1,220 | 35% | Partially parallel |
 | 7. Growth | 10 + Growth stories | 890 | 7% | Partially parallel |
-| **TOTAL** | | **6,470** | **31%** | |
+| **TOTAL** | | **13,892** | **64.5%** | |
 
-**Key insight:** Phases 1-2 (1,060 LOC, 55% reuse) establish the scaffolding that maximizes reuse for all subsequent phases. Investing in careful code-lifting during these phases pays dividends throughout the project. Phase 3's three-way parallelism is the largest acceleration opportunity.
+**Key insight:** Session 13's Story 1.7 (`@claude-flow/guidance` lift per ADR-034) shifted Phase 1 from 670 LOC at 68% reuse to 8,092 LOC at 91% reuse, and the project-wide reuse rate from 31% to 64.5%. The net-new LOC only grows by ~500 (4,438 → 4,938) because the bulk of Story 1.7 is lifted MIT-licensed code. Phases 1–2 (8,482 LOC, ~89% reuse) now establish the scaffolding that maximizes reuse for all subsequent phases. Phase 3's three-way parallelism remains the largest acceleration opportunity.
 
 ---
 
-*End of Code-Lift Manifest v2.0 — Session 10 update. 4 new stories added (1.6, 2.9, 4.0, 9.0), totals revised with corrected story sums, priority order updated.*
+*End of Code-Lift Manifest v2.1 — Session 13 update. Story 1.7 added (ADR-034 guidance lift), execution ordering renumbered (contiguous 1–55), Section 2 and Section 5 totals reconciled to 13,892 LOC / 64.5% reuse. Session 10 additions (1.6, 2.9, 4.0, 9.0) remain unchanged.*

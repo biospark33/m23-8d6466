@@ -4,7 +4,7 @@
 **Date:** 2026-04-11 (session 13 amendments)
 **Scope:** Cross-reference of deep-dive source code findings against PRD v2, Architecture v2, and Epic/Story decomposition
 **Session 10 status:** ALL 3 blockers resolved, 5 risks resolved, 10 story gaps amended, and 5 missing stories addressed (4 added, 1 consolidated).
-**Session 13 additions:** 3 new ADRs (ADR-033 orchestrator re-confirmation, ADR-034 `@claude-flow/guidance` lift, ADR-035 hook engine dual-plane strategy), 1 new story (Story 1.7), 4 new risks opened (3 LOW-MEDIUM, 1 LOW — all mitigated at open-time), 14 session-12 invariant-vs-mechanism reclassifications to be tracked via Step 5 architecture-v2.md correction pass.
+**Session 13 additions:** 3 new ADRs (ADR-033 orchestrator re-confirmation, ADR-034 `@claude-flow/guidance` lift, ADR-035 hook engine dual-plane strategy), 1 new story (Story 1.7), 4 new risks opened (3 LOW-MEDIUM, 1 LOW — all mitigated at open-time), 11 session-12 invariant-vs-mechanism reclassifications to be tracked via Step 5 architecture-v2.md correction pass.
 **Documents reviewed:**
 - `_bmad-output/implementation-artifacts/epics-and-stories.md` (v2.0, Session 10; v2.1 with Story 1.7 inserted by Session 13)
 - `_bmad-output/planning-artifacts/architecture-v2.md`

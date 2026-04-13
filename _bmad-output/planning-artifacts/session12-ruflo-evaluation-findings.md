@@ -6,15 +6,15 @@
 **Goal:** Capture the structural evidence and decision rationale so session 13 can execute without re-running the evaluation
 **Durable artifacts this session produced:**
 - This findings document
-- `/Users/steve/.claude/projects/-Users-steve-QDS-Factory/memory/qds_orchestrator.md` (long-horizon memory)
-- `/Users/steve/.claude/projects/-Users-steve-QDS-Factory/memory/gitnexus_cypher.md` (CLI pattern memory)
+- `<repo-root>/memory/qds_orchestrator.md` (long-horizon memory, user-local Claude memory)
+- `<repo-root>/memory/gitnexus_cypher.md` (CLI pattern memory, user-local Claude memory)
 - Fresh gitnexus indexes on disk for overstory and ruflo
 
 ---
 
 ## Context — Why This Session Happened
 
-Session 11 merged the twelve-factor alignment work. The morning of 2026-04-11 the user discovered https://github.com/ruvnet/ruflo and asked whether it could replace or absorb QDS Factory's planned orchestration layer. Ruflo turned out to be claude-flow v3.5 rebranded — the same project already referenced in `/Users/steve/CLAUDE.md` for SPARC commands and MCP tools.
+Session 11 merged the twelve-factor alignment work. The morning of 2026-04-11 the user discovered https://github.com/ruvnet/ruflo and asked whether it could replace or absorb QDS Factory's planned orchestration layer. Ruflo turned out to be claude-flow v3.5 rebranded — the same project already referenced in the root `CLAUDE.md` for SPARC commands and MCP tools.
 
 **First-pass analysis** (with overstory-biased ADRs as ground truth) recommended keeping overstory and lifting `@claude-flow/guidance` into Factory Core. The user pushed back correctly: *"all the ADRs and everything were tightly written around overstory being included. they're biased to ov."*
 
@@ -201,6 +201,8 @@ First-pass (same-session) analysis made three errors corrected here:
 
 All five are gated on the decision above. Execute in order unless blocking issues arise.
 
+> **Historical numbering note:** Steps 1–3 below reference ADR-024/025/026 as originally proposed during session 12. These were renumbered in session 13 to avoid collision with PR #5 (session 12 gap-analysis amendments): **ADR-024 → ADR-033**, **ADR-025 → ADR-034**, **ADR-026 → ADR-035**. Prefer the final ADR-033/034/035 identifiers in all new references. See `architecture-v2-session12-amendments.md` "Note on ADR Numbering" for the full renumbering history.
+
 ### Step 1 — Close the orchestrator question with ADR-024 (or amendment)
 
 **Deliverable:** New ADR entry in `_bmad-output/planning-artifacts/architecture-v2-session10-amendments.md` (or new session12-amendments file) recording:
@@ -281,15 +283,15 @@ In `_bmad-output/implementation-artifacts/code-lift-gap-analysis.md`:
 In order:
 
 1. **This document** (`session12-ruflo-evaluation-findings.md`) — the analytical core
-2. **`/Users/steve/.claude/projects/-Users-steve-QDS-Factory/memory/qds_orchestrator.md`** — persisted long-horizon memory, for future sessions that might re-open this
-3. **`/Users/steve/.claude/projects/-Users-steve-QDS-Factory/memory/gitnexus_cypher.md`** — CLI pattern for querying KuzuDB indexes directly when MCP server isn't attached
+2. **`<repo-root>/memory/qds_orchestrator.md`** — persisted long-horizon memory, for future sessions that might re-open this (user-local Claude memory)
+3. **`<repo-root>/memory/gitnexus_cypher.md`** — CLI pattern for querying KuzuDB indexes directly when MCP server isn't attached (user-local Claude memory)
 4. `_bmad-output/planning-artifacts/prd-v2.md` — the actual product requirements (invariant source)
 5. `_bmad-output/planning-artifacts/architecture-v2.md` — the architecture (biased; read critically)
 6. `_bmad-output/planning-artifacts/architecture-v2-session10-amendments.md` — recent ADR amendments (session 10's scope)
 7. `_bmad-output/implementation-artifacts/code-lift-manifest.md` — per-repo extraction plans (session 9b work)
 8. `_bmad-output/implementation-artifacts/code-lift-gap-analysis.md` — risk register (session 9b work)
 9. `_research-repos/ruflo/v3/@claude-flow/guidance/src/` — the lift target source code
-10. `/Users/steve/QDS-Factory/overstory/src/` — the orchestration base source code
+10. `overstory/src/` — the orchestration base source code
 
 ---
 
@@ -300,9 +302,9 @@ For session 13 to execute without friction:
 - **Gitnexus MCP server is NOT attached** to the user's Claude Code config (checked `~/.claude/mcp-config.json` — only `archon` is registered). Use the CLI instead: `npx gitnexus cypher --repo <name> "<query>"`. See the memory file for gotchas (avoid MERGE/CREATE/DELETE keywords even in string literals).
 - **Indexes on disk:** all 7 component repos + ruflo. Ruflo indexed 2026-04-11 07:44 (74,020 nodes). Overstory re-indexed 2026-04-11 (2,019 nodes).
 - **Repo paths:**
-  - Overstory: `/Users/steve/QDS-Factory/overstory/` (fork of jayminwest/overstory)
-  - Ruflo: `/Users/steve/QDS-Factory/_research-repos/ruflo/` (clone of ruvnet/ruflo)
-  - Guidance source: `/Users/steve/QDS-Factory/_research-repos/ruflo/v3/@claude-flow/guidance/src/`
+  - Overstory: `<repo-root>/overstory/` (fork of jayminwest/overstory)
+  - Ruflo: `<repo-root>/_research-repos/ruflo/` (clone of ruvnet/ruflo)
+  - Guidance source: `<repo-root>/_research-repos/ruflo/v3/@claude-flow/guidance/src/`
 - **Git branch conventions:** main is protected; session work branches follow `session<N>/<description>` pattern
 - **Commit style:** `Fix PR review round N: <summary>\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`
 - **No destructive git ops without explicit user approval.**
@@ -313,7 +315,7 @@ For session 13 to execute without friction:
 
 Not blockers — but worth naming so they don't get skipped:
 
-1. **ADR numbering:** Session 10 went to ADR-023 or ADR-024 (check the amendments file). Session 12's new ADRs should be ADR-024 (orchestrator re-confirmation), ADR-025 (guidance lift), ADR-026 (hook engine strategy). Verify numbering collision before writing.
+1. **ADR numbering:** Session 10 went to ADR-023 or ADR-024 (check the amendments file). Session 12's new ADRs should be ADR-024 (orchestrator re-confirmation), ADR-025 (guidance lift), ADR-026 (hook engine strategy). Verify numbering collision before writing. *(Resolved in session 13: renumbered to ADR-033/034/035 after discovering PR #5 collision. See `architecture-v2-session12-amendments.md` "Note on ADR Numbering".)*
 2. **Story 1.9 shape:** Session 12 proposes a new spike story for the guidance lift evaluation. Should it be a spike (investigation-only, no code) or a spike + implementation combined (learn by doing)? Session 13 should decide before writing.
 3. **License vendoring:** Ruflo is MIT. Confirm vendoring policy in `factory-core/` — does QDS vendor LICENSE text inline, or maintain a `THIRD_PARTY_LICENSES.md` manifest?
 4. **Test framework adaptation:** guidance uses vitest, overstory uses `bun test`. Factory Core should pick one; session 13 decides.

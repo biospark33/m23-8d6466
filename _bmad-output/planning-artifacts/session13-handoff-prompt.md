@@ -10,7 +10,7 @@
 
 ## Copy-Paste This Block as Your First Message to the New Conversation
 
-```
+```text
 I'm picking up QDS Factory work from session 12. Session 12 did a bias-stripped
 re-evaluation of overstory vs ruflo as the agent orchestration base, using
 structural graph queries via `npx gitnexus cypher` against KuzuDB indexes of
@@ -28,21 +28,22 @@ the cold-start reading list (Part G), operational environment facts (Part H),
 and open questions (Part I).
 
 After reading, also read these persistent memory files:
-  /Users/steve/.claude/projects/-Users-steve-QDS-Factory/memory/qds_orchestrator.md
-  /Users/steve/.claude/projects/-Users-steve-QDS-Factory/memory/gitnexus_cypher.md
+  <repo-root>/memory/qds_orchestrator.md  (user-local Claude memory)
+  <repo-root>/memory/gitnexus_cypher.md   (user-local Claude memory)
 
 Your job this session is to execute all 5 concrete next steps from Part F:
 
-  Step 1: Author ADR-024 (or next free number) closing the orchestrator
+  Step 1: Author ADR-033 (or next free number) closing the orchestrator
           re-evaluation question, referencing session12 findings as evidence.
-  Step 2: Author ADR-025 specifying the @claude-flow/guidance lift into
+  Step 2: Author ADR-034 specifying the @claude-flow/guidance lift into
           Factory Core, with scope decisions on which of the 32 files to
           lift, which to defer, and which to drop. Reference session12
           findings Part B for the structural coupling analysis and Part F
           Step 2 for the tier-1/tier-2/drop file classification I proposed.
-  Step 3: Author ADR-026 specifying the hook engine strategy (extend
-          overstory hooks-deployer, borrow concepts from @claude-flow/hooks,
-          do NOT lift wholesale — verified coupling to ReasoningBank stack).
+  Step 3: Author ADR-035 specifying the hook engine strategy (dual-plane:
+          retain edge-plane hooks-deployer unchanged + add in-process Factory
+          Core engine; do NOT lift @claude-flow/hooks wholesale — verified
+          coupling to ReasoningBank stack).
   Step 4: Update _bmad-output/implementation-artifacts/code-lift-manifest.md
           and code-lift-gap-analysis.md with the new guidance lift entry and
           risk entries per session12 Part F Step 4.
@@ -72,12 +73,15 @@ But re-evaluate these if your own reading of the guidance source changes
 the calculus. The tier proposals are educated guesses from session12's
 structural analysis, not gospel.
 
-For the hook engine ADR-026, resist the temptation to lift @claude-flow/hooks
+For the hook engine ADR-035, resist the temptation to lift @claude-flow/hooks
 wholesale. The session12 cypher analysis confirmed it drags ReasoningBank
 (v3/@claude-flow/memory/src/hnsw-index.ts, v3/@claude-flow/embeddings, 
-v3/@claude-flow/neural/src/reasoning-bank.ts). Overstory's hooks-deployer.ts
-is ~800 LOC and already does hook script generation for Claude Code + Pi
-runtime guards. Extend that.
+v3/@claude-flow/neural/src/reasoning-bank.ts). The accepted architecture is
+dual-plane per ADR-035: (1) retain overstory's hooks-deployer.ts unchanged
+as the edge plane (generates bash scripts for Claude Code / Pi runtime guards),
+(2) build a separate ~400 LOC in-process Factory Core hook engine in
+factory-core/src/hooks/ that gates/evaluators from ADR-034 bind against.
+Do NOT extend hooks-deployer.ts — leave it as overstory upstream's domain.
 
 Conventions:
   - Commit style: `<action>: <summary>\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`
@@ -99,7 +103,7 @@ Anti-patterns to avoid:
   - Treating overstory mechanisms (tmux, worktrees, mail.db) as invariants
     in new ADR text — session12 Part A explicitly reclassified these as
     implementation choices
-  - Creating new files at the repo root (per /Users/steve/CLAUDE.md rules)
+  - Creating new files at the repo root (per root CLAUDE.md rules)
 
 When you finish each step, update the task list (use TaskCreate/TaskUpdate)
 and pause for user review before moving to the next step. Steps 1-3 are
@@ -140,7 +144,7 @@ steps and ask any blocking clarifying questions before touching artifacts.
 
 A clean git branch `session13/orchestrator-decision-closure` containing:
 
-1. New ADR-024, ADR-025, ADR-026 written into the amendments file (or a new `architecture-v2-session12-amendments.md`)
+1. New ADR-033, ADR-034, ADR-035 written into the amendments file (or a new `architecture-v2-session12-amendments.md`)
 2. `code-lift-manifest.md` with a new "Ruflo — @claude-flow/guidance Extraction" section
 3. `code-lift-gap-analysis.md` with 2 new risk entries
 4. `architecture-v2.md` with targeted annotations or rewrites in places that conflated mechanism with invariant (scope-limited — no rewrite)

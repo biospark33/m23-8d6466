@@ -35,9 +35,13 @@ _This document builds collaboratively through step-by-step discovery. Sections a
 
 | Component | Relationship to Factory Core | What Factory Core Uses |
 |-----------|------------------------------|----------------------|
-| **Overstory** | Agent orchestration library | `ov sling` for spawning, worktree isolation, 4-tier merge, mail.db for inter-agent comms, sessions.db for lifecycle, events.db for event store, metrics.db for telemetry, Seeds for task tracking, watchdog for health *(Session 13 note: the mechanisms in this cell — worktrees, mail.db, sessions.db, events.db, metrics.db, Seeds, watchdog — are overstory's **implementation choices** for satisfying QDS invariants (filesystem isolation per story, async inter-agent coordination, agent lifecycle state, event sourcing, cost telemetry, task tracking, health monitoring). The invariants themselves are architectural and orthogonal to the specific mechanisms — see ADR-033 in `architecture-v2-session12-amendments.md` for the bias-stripped invariant/mechanism reclassification.)* |
+| **Overstory** | Agent orchestration library | `ov sling` for spawning, worktree isolation, 4-tier merge, mail.db for inter-agent comms, sessions.db for lifecycle, events.db for event store, metrics.db for telemetry, Seeds for task tracking, watchdog for health *(See Session 13 Note 1: Invariant/Mechanism Reclassification below)* |
 | **Pi SDK** | Model-agnostic LLM runtime | Model selection, provider routing, tool execution, per-call `Usage { tokens, cost }` reporting, `AgentSession` with save/load/branch/compact |
 | **Superpowers** | Read-only skill library | 14 skills, enforcement frontmatter, skill metadata for overlay injection |
+
+**Session 13 Note 1: Invariant/Mechanism Reclassification**
+
+The mechanisms listed in the Overstory row (worktrees, mail.db, sessions.db, events.db, metrics.db, Seeds, watchdog) are overstory's **implementation choices** for satisfying QDS architectural invariants. The invariants themselves — filesystem isolation per story, async inter-agent coordination, agent lifecycle state, event sourcing, cost telemetry, task tracking, health monitoring — are orthogonal to the specific mechanisms. See ADR-033 in `architecture-v2-session12-amendments.md` for the bias-stripped invariant/mechanism reclassification.
 
 **Research repos are DESIGN INSPIRATION, not code transplant sources.** Session 7 demonstrated that the claimed 79% transplant ratio was inflated to ~43% on verified analysis. More importantly, the framing of "transplant" implies lifting code wholesale, which creates integration debt. The correct framing: we study proven patterns from PaperclipAI, GSD, DeerFlow, and Symphony, then write clean TypeScript/Bun code for our stack that embodies those patterns. We cite inspiration sources for traceability, but every line of code is native QDS code written to our conventions.
 
