@@ -1,7 +1,7 @@
 # Architecture v2.0 — Session 12 Amendments
 
 **Date:** 2026-04-11
-**Scope:** ADR-025 (orchestrator re-confirmation), ADR-026 (guidance lift), ADR-027 (hook engine strategy)
+**Scope:** ADR-033 (orchestrator re-confirmation), ADR-034 (guidance lift), ADR-035 (hook engine strategy)
 **Applies to:** `_bmad-output/planning-artifacts/architecture-v2.md` v2.0, `_bmad-output/planning-artifacts/architecture-v2-session10-amendments.md`, `_bmad-output/planning-artifacts/architecture-v2-session11-twelve-factor.md`, `_bmad-output/implementation-artifacts/epics-and-stories.md`
 **Methodology:** Bias-stripped structural re-evaluation via KuzuDB graph queries (`npx gitnexus cypher`) against fresh indexes of overstory and ruflo, triangulated with direct file reads and grep validation.
 **Evidence base:** `_bmad-output/planning-artifacts/session12-ruflo-evaluation-findings.md` (the analytical core document from session 12), this amendments file (session 13 formalization).
@@ -12,19 +12,29 @@
 
 The session 12 findings document (`session12-ruflo-evaluation-findings.md`, Part F) proposed ADR numbers **024, 025, 026** for the three decisions in this file. Those proposed numbers were **stale at the time of authoring** — session 11's twelve-factor work had already claimed ADR-024 (ten-section ADR landed in `architecture-v2-session11-twelve-factor.md`, scope ACCEPTED on 2026-03-15, approximately four weeks prior to session 12).
 
-Session 13 renumbered the three new ADRs monotonically to avoid collision:
+Session 13 renumbered the three new ADRs twice:
 
-| Findings doc proposal | Final number | Topic |
+**First renumbering (session 13, pre-rebase):** Shifted from findings-doc proposals to avoid collision with session 11's ADR-024:
+
+| Findings doc proposal | First renumber | Topic |
 |---|---|---|
-| ADR-024 | **ADR-025** | Orchestrator re-confirmation (keep overstory) |
-| ADR-025 | **ADR-026** | `@claude-flow/guidance` lift into Factory Core |
-| ADR-026 | **ADR-027** | Hook engine strategy (extend `hooks-deployer.ts`, do not lift `@claude-flow/hooks`) |
+| ADR-024 | ADR-025 | Orchestrator re-confirmation (keep overstory) |
+| ADR-025 | ADR-026 | `@claude-flow/guidance` lift into Factory Core |
+| ADR-026 | ADR-027 | Hook engine strategy (extend `hooks-deployer.ts`, do not lift `@claude-flow/hooks`) |
 
-All cross-references in this file, downstream amendments, and artifact updates use the **final numbers**. The findings document retains its original proposed numbers as a historical artifact; it is not retroactively edited.
+**Second renumbering (session 13, rebase onto origin/main):** PR #5 (`session12/architecture-gap-analysis-amendments` by Michael Crandall, merged 2026-03-15) claimed ADR-025 through ADR-032 in `architecture-v2-session12-gap-analysis-amendments.md`. Shifted again to avoid collision:
+
+| First renumber | Final number | Topic |
+|---|---|---|
+| ADR-025 | **ADR-033** | Orchestrator re-confirmation (keep overstory) |
+| ADR-026 | **ADR-034** | `@claude-flow/guidance` lift into Factory Core |
+| ADR-027 | **ADR-035** | Hook engine strategy (dual-plane: overstory edge + Factory Core in-process; do not lift `@claude-flow/hooks`) |
+
+All cross-references in this file, downstream amendments, and artifact updates use the **final numbers** (ADR-033/034/035). The findings document retains its original proposed numbers (024/025/026) as a historical artifact; it is not retroactively edited. The gap-analysis amendments file retains ADR-025 through ADR-032 as Michael's session 12 work; there is no numbering conflict between the two session-12-era amendment files.
 
 ---
 
-## ADR-025: Orchestrator Re-Confirmation — Overstory Retained as QDS Factory's Agent Orchestration Base
+## ADR-033: Orchestrator Re-Confirmation — Overstory Retained as QDS Factory's Agent Orchestration Base
 
 **Status:** ACCEPTED — scope-closed (see "Re-Opening Criteria" below)
 
@@ -58,7 +68,7 @@ The evaluation is captured in full in `session12-ruflo-evaluation-findings.md`. 
 
 **Decision:**
 
-**Keep overstory as QDS Factory's agent orchestration base.** Do not adopt ruflo. Do not build agent orchestration from scratch. Lift the `@claude-flow/guidance` package from ruflo into Factory Core as the enforcement layer (see ADR-026). Do not lift the `@claude-flow/hooks` package wholesale (see ADR-027).
+**Keep overstory as QDS Factory's agent orchestration base.** Do not adopt ruflo. Do not build agent orchestration from scratch. Lift the `@claude-flow/guidance` package from ruflo into Factory Core as the enforcement layer (see ADR-034). Do not lift the `@claude-flow/hooks` package wholesale (see ADR-035).
 
 ### Evidence — Invariants, Neutrally Re-Derived
 
@@ -183,13 +193,13 @@ Weights derived from invariant criticality. Non-negotiable product and architect
 | Time-to-first-PR | 5 | 5 | 1 | 0 |
 | **Total / 135** | | **90 (67%)** | **54 (40%)** | **10 (7%)** |
 
-**Overstory wins on 9 of 10 invariants.** Ruflo wins decisively on enforcement-layer maturity (invariant 5 subscore 8 vs 6) — but this is exactly what ADR-026 addresses by lifting `@claude-flow/guidance` without adopting ruflo wholesale. Fresh build is disqualified on time-to-first-PR and scale-of-rewrite.
+**Overstory wins on 9 of 10 invariants.** Ruflo wins decisively on enforcement-layer maturity (invariant 5 subscore 8 vs 6) — but this is exactly what ADR-034 addresses by lifting `@claude-flow/guidance` without adopting ruflo wholesale. Fresh build is disqualified on time-to-first-PR and scale-of-rewrite.
 
 ### Alternatives Considered
 
 | Option | Pros | Cons | Score |
 |---|---|---|---:|
-| **A. Keep overstory (decided)** | 9-of-10 invariants operationalized today; 28k LOC at 1.6× test ratio; front-door CLI (`ov sling`) already wired; runtime abstraction supports Pi SDK credential injection path; merge queue with 4-tier resolution; insight→mulch learning loop already domain-aware | Enforcement layer (invariant 5) less mature than ruflo's guidance package → addressed in ADR-026 | 90/135 |
+| **A. Keep overstory (decided)** | 9-of-10 invariants operationalized today; 28k LOC at 1.6× test ratio; front-door CLI (`ov sling`) already wired; runtime abstraction supports Pi SDK credential injection path; merge queue with 4-tier resolution; insight→mulch learning loop already domain-aware | Enforcement layer (invariant 5) less mature than ruflo's guidance package → addressed in ADR-034 | 90/135 |
 | **B. Adopt ruflo as base** | Guidance package is genuinely sophisticated (compiler, gates, proof, ledger, trust, retriever); ReasoningBank for self-learning; HNSW vector store; claims has statusline bar | 0 worktree code; 0 tmux code; `PhaseId` doesn't map to QDS phases; 697M repo to absorb; 20-package monorepo conflicts with QDS ADRs at multiple points; ruflo is claude-flow v3.5 rebranded, 6,000+ commit active project with aggressive upstream drift; no clean substrate-above-substrate split | 54/135 |
 | **C. Adopt `jayminwest/overstory` upstream directly without QDS fork** | Zero fork-drift risk | Cannot add QDS-specific integration points (Story 1.6 schema extensions, overlay extensions, Factory Core attribution); upstream moves faster than QDS could keep pace | Not scored — eliminated at scope level |
 | **D. Build orchestration from scratch in factory-core/** | No external dependency; fully QDS-controlled; smallest long-term maintenance surface | 6,470 LOC planning budget becomes 6,470 + 28,300 = 34,770 LOC; delivers first PR in approximately 2–3× time; re-implements 9-of-10 invariants overstory already satisfies | 10/135 |
@@ -202,7 +212,7 @@ Weights derived from invariant criticality. Non-negotiable product and architect
 - The worktree, merge queue, tmux, runtime registry, metrics, mulch, and insights subsystems remain the responsibility of overstory upstream. QDS does not pay the maintenance cost for these directly.
 - Story 1.6 (Overstory Schema Extensions) is the integration boundary. Factory Core extends overstory's databases via documented probe-then-alter and table-rebuild patterns (per ADR-024 Section 2 and session-10 amendment 3), not by reinventing them.
 - The Pi SDK credential callback pattern (ADR-008 amended) wires into overstory's existing runtime abstraction at `src/runtimes/registry.ts` with minimal surgery.
-- ADR-026 (guidance lift) and ADR-027 (hook engine strategy) address the one dimension where overstory scored lower than ruflo without forcing adoption of the full ruflo stack.
+- ADR-034 (guidance lift) and ADR-035 (hook engine strategy) address the one dimension where overstory scored lower than ruflo without forcing adoption of the full ruflo stack.
 
 **Negative:**
 
@@ -214,7 +224,7 @@ Weights derived from invariant criticality. Non-negotiable product and architect
 **Neutral:**
 
 - Overstory's fork of `@os-eco/mulch-cli` and its `canopy` prompt management integration are not currently on QDS's critical path but remain available surface area for future learning-loop work. No integration planned for MVP.
-- Ruflo's `@claude-flow/guidance` package dependencies, release cadence, and license terms (MIT confirmed) are now under monitoring per the fork-hygiene checklist that ADR-026 establishes.
+- Ruflo's `@claude-flow/guidance` package dependencies, release cadence, and license terms (MIT confirmed) are now under monitoring per the fork-hygiene checklist that ADR-034 establishes.
 
 ### Re-Opening Criteria
 
@@ -232,13 +242,13 @@ Re-opening under any other conditions (personal preference, argument from author
 
 ### Acceptance Criteria
 
-- [x] `architecture-v2-session12-amendments.md` created with ADR-025 as its first section
-- [x] ADR-025 references `session12-ruflo-evaluation-findings.md` as its primary evidence base
+- [x] `architecture-v2-session12-amendments.md` created with ADR-033 as its first section
+- [x] ADR-033 references `session12-ruflo-evaluation-findings.md` as its primary evidence base
 - [x] Rubric table reproduced verbatim from findings Part C with criticality-weighted scoring
 - [x] Invariant/mechanism reclassification captured in ADR text (not only in the findings doc) so future readers do not need to cross-read two documents
 - [x] Re-opening criteria explicit, measurable, and reference-able from future sessions
 - [x] ADR numbering shift (024 → 025) documented in the "Note on ADR Numbering" preamble
-- [ ] `architecture-v2.md` index section updated with ADR-025 reference *(Step 5, session 13)*
+- [ ] `architecture-v2.md` index section updated with ADR-033 reference *(Step 5, session 13)*
 - [ ] `prd-v2.md` has no unresolved orchestrator-identity ambiguity *(verified in Step 5 cross-check)*
 
 ### References
@@ -251,7 +261,7 @@ Re-opening under any other conditions (personal preference, argument from author
 - `/Users/steve/.claude/projects/-Users-steve-QDS-Factory/memory/qds_orchestrator.md` — persisted long-horizon memory for future sessions
 - `/Users/steve/.claude/projects/-Users-steve-QDS-Factory/memory/gitnexus_cypher.md` — CLI pattern reference for re-running structural queries
 - `overstory/CLAUDE.md` — overstory fork conventions and integration-point registry
-- `/Users/steve/QDS-Factory/overstory/src/agents/hooks-deployer.ts` (606 LOC) — Claude Code hook generation foundation, referenced by ADR-027
+- `/Users/steve/QDS-Factory/overstory/src/agents/hooks-deployer.ts` (606 LOC) — Claude Code hook generation foundation, referenced by ADR-035
 - `/Users/steve/QDS-Factory/overstory/src/runtimes/registry.ts` — Runtime abstraction referenced by ADR-008
 - `/Users/steve/QDS-Factory/overstory/src/runtimes/pi-guards.ts` — `NON_IMPLEMENTATION_CAPABILITIES` enforcement point
 - `/Users/steve/QDS-Factory/overstory/src/worktree/manager.ts` and `src/worktree/tmux.ts` — 858 LOC implementing invariants 1 and 2
@@ -261,7 +271,7 @@ Re-opening under any other conditions (personal preference, argument from author
 
 ---
 
-## ADR-026: `@claude-flow/guidance` Extraction into Factory Core
+## ADR-034: `@claude-flow/guidance` Extraction into Factory Core
 
 **Status:** ACCEPTED
 
@@ -269,7 +279,7 @@ Re-opening under any other conditions (personal preference, argument from author
 
 **Deciders:** Steve (user), session 13 authorship, evidence from session 12 structural analysis + session-13 source-code reading
 
-**Depends on:** ADR-025 (orchestrator re-confirmation establishes that the enforcement layer lands inside Factory Core, not by swapping orchestrators)
+**Depends on:** ADR-033 (orchestrator re-confirmation establishes that the enforcement layer lands inside Factory Core, not by swapping orchestrators)
 
 **Context:**
 
@@ -290,7 +300,7 @@ Session 12 Part B and session-13 verification queries confirmed the extraction f
 
 **Decision:**
 
-**Lift `@claude-flow/guidance` into Factory Core as `factory-core/src/guidance/`**, using a tiered extraction strategy that resolves ambiguous files through a timeboxed spike (Story 1.7) before committing full scope. Replace `src/hooks.ts` (465 LOC) with a QDS-specific adapter that bridges guidance gates and ledger evaluators into Factory Core's own hook engine (see ADR-027). Vendor the MIT license via a `factory-core/THIRD_PARTY_LICENSES.md` manifest.
+**Lift `@claude-flow/guidance` into Factory Core as `factory-core/src/guidance/`**, using a tiered extraction strategy that resolves ambiguous files through a timeboxed spike (Story 1.7) before committing full scope. Replace `src/hooks.ts` (465 LOC) with a QDS-specific adapter that bridges guidance gates and ledger evaluators into Factory Core's own hook engine (see ADR-035). Vendor the MIT license via a `factory-core/THIRD_PARTY_LICENSES.md` manifest.
 
 ### File-Level Scope Decisions
 
@@ -365,7 +375,7 @@ These files serve valid purposes but are out of scope for the enforcement layer 
 
 | File | LOC | Why replace |
 |---|---:|---|
-| `hooks.ts` | 465 | The single external coupling point. Imports 6 symbols from `@claude-flow/hooks` (`HookContext`, `HookResult`, `HookRegistrationOptions`, `HookEvent`, `HookPriority`, `HookRegistry`) and registers guidance gates + ledger evaluators as hooks in the `@claude-flow/hooks` registry. **Replace with a QDS-specific adapter** (`factory-core/src/guidance/hooks-adapter.ts`) that registers gates and evaluators against Factory Core's own hook engine (ADR-027). Estimated replacement LOC: ~500. |
+| `hooks.ts` | 465 | The single external coupling point. Imports 6 symbols from `@claude-flow/hooks` (`HookContext`, `HookResult`, `HookRegistrationOptions`, `HookEvent`, `HookPriority`, `HookRegistry`) and registers guidance gates + ledger evaluators as hooks in the `@claude-flow/hooks` registry. **Replace with a QDS-specific adapter** (`factory-core/src/guidance/hooks-adapter.ts`) that registers gates and evaluators against Factory Core's own hook engine (ADR-035). Estimated replacement LOC: ~500. |
 | **Tier 5 subtotal** | **~500 LOC (new write, not lift)** | |
 
 ### Scope Summary
@@ -403,7 +413,7 @@ Two options:
 
 #### Integration Decision 2 — Hook adapter target
 
-The replacement `hooks-adapter.ts` (tier 5) wires guidance gates and ledger evaluators into Factory Core's hook engine. That hook engine is specified in ADR-027. **Work order:** ADR-027 lands first (specifying the target interface), then the tier-5 adapter implementation lands as part of Story 1.7.
+The replacement `hooks-adapter.ts` (tier 5) wires guidance gates and ledger evaluators into Factory Core's hook engine. That hook engine is specified in ADR-035. **Work order:** ADR-035 lands first (specifying the target interface), then the tier-5 adapter implementation lands as part of Story 1.7.
 
 #### Integration Decision 3 — Test framework
 
@@ -457,7 +467,7 @@ See "Story 1.7" section added to `_bmad-output/implementation-artifacts/epics-an
 
 ### Acceptance Criteria
 
-- [x] ADR-026 present in `architecture-v2-session12-amendments.md`
+- [x] ADR-034 present in `architecture-v2-session12-amendments.md`
 - [x] Tier classification table for all 32 files with LOC counts and justification per file
 - [x] Integration decisions 1–4 documented with rationale
 - [x] MIT license vendoring policy specified (`THIRD_PARTY_LICENSES.md` at `factory-core/` root)
@@ -466,7 +476,7 @@ See "Story 1.7" section added to `_bmad-output/implementation-artifacts/epics-an
 - [ ] Story 1.7 added to `epics-and-stories.md` Epic 1 *(Step 2 of session 13, same commit)*
 - [ ] `code-lift-manifest.md` updated with guidance lift entry *(Step 4 of session 13)*
 - [ ] `code-lift-gap-analysis.md` updated with upstream-drift and license-compliance risk entries *(Step 4 of session 13)*
-- [ ] `architecture-v2.md` cross-reference from ADR-010 (hook pipeline) to ADR-026 *(Step 5 of session 13)*
+- [ ] `architecture-v2.md` cross-reference from ADR-010 (hook pipeline) to ADR-034 *(Step 5 of session 13)*
 
 ### References
 
@@ -479,13 +489,13 @@ See "Story 1.7" section added to `_bmad-output/implementation-artifacts/epics-an
 - `_research-repos/ruflo/v3/@claude-flow/guidance/src/retriever.ts` lines 32–60 — intent classification patterns + `HashEmbeddingProvider` non-semantic fallback
 - `_research-repos/ruflo/v3/@claude-flow/guidance/src/compiler.ts` lines 28–50 — rule syntax regex patterns (Integration Decision 1 touchpoint)
 - `overstory/src/agents/overlay.ts` — QDS-side overlay format that the compiler will be adapted to parse
-- `overstory/src/agents/hooks-deployer.ts` (606 LOC) — existing hook generation foundation (ADR-027 target)
-- ADR-025 (this file) — scope-closed orchestrator decision that this ADR is predicated on
-- ADR-027 (this file, below) — hook engine strategy the lifted guidance code will bind against
+- `overstory/src/agents/hooks-deployer.ts` (606 LOC) — existing hook generation foundation (ADR-035 target)
+- ADR-033 (this file) — scope-closed orchestrator decision that this ADR is predicated on
+- ADR-035 (this file, below) — hook engine strategy the lifted guidance code will bind against
 
 ---
 
-## ADR-027: Hook Engine Strategy — Dual-Plane Architecture (Overstory Scripts + Factory Core Engine)
+## ADR-035: Hook Engine Strategy — Dual-Plane Architecture (Overstory Scripts + Factory Core Engine)
 
 **Status:** ACCEPTED
 
@@ -493,11 +503,11 @@ See "Story 1.7" section added to `_bmad-output/implementation-artifacts/epics-an
 
 **Deciders:** Steve (user), session 13 authorship, evidence from direct source reading of both `hooks-deployer.ts` and `@claude-flow/hooks/index.ts`
 
-**Depends on:** ADR-025 (orchestrator retained), ADR-026 (guidance lift sets the consumer contract for this hook engine)
+**Depends on:** ADR-033 (orchestrator retained), ADR-034 (guidance lift sets the consumer contract for this hook engine)
 
 **Context:**
 
-ADR-026 lifts `@claude-flow/guidance` into Factory Core as the mechanical enforcement core. Guidance's `EnforcementGates`, `IEvaluator` implementations, and `ShardRetriever` are all **TypeScript classes with async methods**. They cannot run as bash scripts — they need an **in-process invocation mechanism** with priority ordering, timeouts, and typed results.
+ADR-034 lifts `@claude-flow/guidance` into Factory Core as the mechanical enforcement core. Guidance's `EnforcementGates`, `IEvaluator` implementations, and `ShardRetriever` are all **TypeScript classes with async methods**. They cannot run as bash scripts — they need an **in-process invocation mechanism** with priority ordering, timeouts, and typed results.
 
 Session 12 findings Part F Step 3 flagged the hook engine question and explicitly warned against wholesale lift of `@claude-flow/hooks`: the cypher analysis showed outbound edges into `@claude-flow/memory/src/hnsw-index.ts` (4 refs), `@claude-flow/embeddings/src/rvf-embedding-service.ts` (3 refs), `@claude-flow/memory/src/agentdb-adapter.ts` (1 ref), and `@claude-flow/neural/src/reasoning-bank.ts` (1 ref). Lifting the package drags the ReasoningBank stack (HNSW + ONNX MiniLM-L6 embeddings + AgentDB). That's a 10,925 LOC package plus its transitive dependencies.
 
@@ -526,7 +536,7 @@ Both layers are necessary. Neither replaces the other. **This is the decisive st
 
 1. **Edge Plane (unchanged, reused as-is):** Overstory's `src/agents/hooks-deployer.ts` continues to generate bash scripts that Claude Code runs at tool-use boundaries. Factory Core invokes `ov hooks install` during story setup (via `ov sling`) and does not modify the deployer's script-generation logic. All worktree-path-boundary guards, bash-command blocks, file-modification-by-capability rules, and git-safety enforcements remain exactly where they are today — at the edge, in `/bin/sh`, PATH-minimal, dependency-free.
 
-2. **In-Process Plane (new, lives in `factory-core/src/hooks/`):** A TypeScript hook engine that Factory Core's pipeline calls at phase-boundary transitions (story start, phase completion, BMAD review, fix loop, QA swarm, PR). The in-process engine is where ADR-026's lifted `EnforcementGates`, `IEvaluator` instances, `ShardRetriever`, and QDS-specific evaluators register and execute. Built from scratch in Factory Core — not lifted from `@claude-flow/hooks` — with concepts borrowed from the ruflo design but an implementation bound only to Bun, the TypeScript standard library, and Factory Core's own types.
+2. **In-Process Plane (new, lives in `factory-core/src/hooks/`):** A TypeScript hook engine that Factory Core's pipeline calls at phase-boundary transitions (story start, phase completion, BMAD review, fix loop, QA swarm, PR). The in-process engine is where ADR-034's lifted `EnforcementGates`, `IEvaluator` instances, `ShardRetriever`, and QDS-specific evaluators register and execute. Built from scratch in Factory Core — not lifted from `@claude-flow/hooks` — with concepts borrowed from the ruflo design but an implementation bound only to Bun, the TypeScript standard library, and Factory Core's own types.
 
 **Do not lift `@claude-flow/hooks` wholesale.** Verified coupling to ReasoningBank / HNSW / AgentDB / ONNX makes the wholesale lift a 10,925 LOC import that drags a vector store, an ONNX runtime, and a daemon system. None of these are in QDS Factory's MVP scope.
 
@@ -543,10 +553,10 @@ Developer submits story
 │ ─────────────────────────── │
 │   Phase: Develop            │
 │   ┌───────────────────┐     │
-│   │ In-Process Plane  │     │ ◀── ADR-027 scope
+│   │ In-Process Plane  │     │ ◀── ADR-035 scope
 │   │ FactoryHookRegistry│    │
 │   │                   │     │
-│   │ gates (ADR-026)   │     │
+│   │ gates (ADR-034)   │     │
 │   │ evaluators        │     │
 │   │ retriever         │     │
 │   └─────────┬─────────┘     │
@@ -584,7 +594,7 @@ Phase boundary (Develop → BMAD Review):
 │   .execute('phase-end',     │ ◀── gates run here (in-process)
 │     {phase, agent, files})  │
 │                             │
-│   → runs ADR-026 evaluators │
+│   → runs ADR-034 evaluators │
 │   → aggregates results      │
 │   → blocks or proceeds      │
 └─────────────────────────────┘
@@ -609,7 +619,7 @@ factory-core/src/hooks/
                             //   timeout wrap, error recovery, result aggregation
   events.ts                 // FactoryHookEvent enum + event name constants
   aggregation.ts            // severity ordering (block > require-confirmation > warn > allow)
-                            //   mirrors ADR-026 gates.ts DECISION_SEVERITY
+                            //   mirrors ADR-034 gates.ts DECISION_SEVERITY
   index.ts                  // Public API: createHookRegistry, createHookExecutor,
                             //   FactoryHooks namespace
   README.md                 // Module-level architecture doc (permitted)
@@ -726,7 +736,7 @@ export class FactoryHookExecutor {
 1. Handlers for a given event run in **priority order** (Critical first, Background last). Ties broken by registration order.
 2. Each handler is **wrapped in a timeout** (default 5,000 ms, per-registration override). Timeout produces a `FactoryHookResult` with `decision: "block"` and `reason: "hook timeout"` — timeouts are treated as failures, not as allow-by-default.
 3. Handler exceptions are **caught and converted** to `FactoryHookResult` with `decision: "block"` and `reason` containing the error message. Unhandled exceptions must never crash Factory Core's pipeline.
-4. After all handlers run, **aggregate using severity ordering**: `block > require-confirmation > warn > allow`. Reuses the exact same severity-ordering constant from ADR-026's `gates.ts` so the two layers speak the same language.
+4. After all handlers run, **aggregate using severity ordering**: `block > require-confirmation > warn > allow`. Reuses the exact same severity-ordering constant from ADR-034's `gates.ts` so the two layers speak the same language.
 5. Execution is **synchronous from the pipeline's perspective** — the pipeline awaits `execute()` and acts on the aggregated result. No fire-and-forget.
 6. **Every execution emits an event record** to `pipeline.db` (or a new `hooks.db` if schema pressure justifies splitting — decision deferred to Story 1.2 migration review). The event record includes: story ID, phase, event, duration, decision, per-handler results, any errors.
 
@@ -742,7 +752,7 @@ export class FactoryHookExecutor {
 | Typed result aggregation | `FactoryHookExecutionResult` with most-severe-wins aggregation | Multiple gates for one event need a single pipeline verdict |
 | Timeout-wrapped execution | Per-registration `timeoutMs` with default 5,000 ms | Hooks must not hang the pipeline |
 | Statusline integration | **Deferred to Growth phase, not MVP** | Nice-to-have — adds dashboard polish without serving an invariant |
-| ReasoningBank / HNSW / ONNX learning | **Rejected, not borrowed** | Out of scope for MVP per session 12 findings and ADR-026 |
+| ReasoningBank / HNSW / ONNX learning | **Rejected, not borrowed** | Out of scope for MVP per session 12 findings and ADR-034 |
 | Background daemons | **Rejected, not borrowed** | Factory Core runs on demand, not as a daemon system |
 | MCP tool definitions | **Rejected, not borrowed** | MCP tools are a ruflo-specific delivery mechanism |
 | Swarm communication / workers | **Rejected, not borrowed** | Factory Core uses Bun subprocesses directly |
@@ -773,14 +783,14 @@ This is the "6-layer enforcement" from the existing architecture-v2.md (ADR-010)
 | **A. Dual-plane (chosen)** | Reuses overstory's battle-tested edge plane without modification; in-process plane is minimal, typed, dependency-free; guidance lift binds against in-process plane cleanly; each plane does what it's good at | Two layers mean two places to think about; pipeline must coordinate reads from `events.db` and in-process results | **Accepted** |
 | **B. Lift `@claude-flow/hooks` wholesale into Factory Core** | Matches ruflo's architecture end-to-end; statusline + daemons come for free | 10,925 LOC import; drags ReasoningBank / HNSW / ONNX / AgentDB per verified cypher evidence; duplicates overstory's edge-plane work; incompatible with Bun's zero-runtime-deps approach; multiplies fork-hygiene cost | **Rejected** — session 12 explicitly called this out as a trap |
 | **C. Replace overstory's edge plane with a Factory Core in-process equivalent** | Single plane; fewer integration seams | Re-implements 606 LOC of hardened shell-script generation inside TypeScript, then has to reinvent the POSIX shell execution path that Claude Code already wires to `settings.local.json`; abandons overstory upstream surface | **Rejected** — moves work from a solved problem to an unsolved one |
-| **D. Move everything to the edge plane (extend `hooks-deployer.ts`)** | Single architecture; no in-process engine | ADR-026's `EnforcementGates` and `IEvaluator` implementations are TypeScript classes; serializing them to bash would destroy type safety and defeat the lift's purpose; bash gate scripts cannot run async I/O at the scale guidance needs | **Rejected** — wrong runtime layer for the lifted code |
+| **D. Move everything to the edge plane (extend `hooks-deployer.ts`)** | Single architecture; no in-process engine | ADR-034's `EnforcementGates` and `IEvaluator` implementations are TypeScript classes; serializing them to bash would destroy type safety and defeat the lift's purpose; bash gate scripts cannot run async I/O at the scale guidance needs | **Rejected** — wrong runtime layer for the lifted code |
 | **E. Adopt overstory's edge plane AND build the in-process plane as a thin wrapper around a third-party Node hook library** | Off-the-shelf code for priority/timeout/registration | No Node hook library has Factory Core's typed context shape; adapters would cost more than building from scratch; introduces a dependency QDS has no control over | **Rejected** — ~400 LOC clean-room implementation is cheaper and typed |
 
 ### Consequences
 
 **Positive:**
 
-- ADR-026's lifted guidance code has a typed, dependency-free home (`factory-core/src/hooks/` + `factory-core/src/guidance/`). The hooks-adapter file (Tier 5 in ADR-026) binds against `FactoryHookRegistry` with a known contract.
+- ADR-034's lifted guidance code has a typed, dependency-free home (`factory-core/src/hooks/` + `factory-core/src/guidance/`). The hooks-adapter file (Tier 5 in ADR-034) binds against `FactoryHookRegistry` with a known contract.
 - Overstory's edge plane stays untouched, which preserves the fork-hygiene property that upstream sync remains cheap.
 - Invariant 5 (mechanical gates at phase boundaries) is operationalized at two layers, with each layer using the runtime that suits its workload — shell scripts for edge checks, TypeScript classes for semantic gates and evaluators.
 - The in-process engine is small (~400 LOC clean-room + ~100 LOC tests) and avoids the 10,925 LOC trap.
@@ -789,7 +799,7 @@ This is the "6-layer enforcement" from the existing architecture-v2.md (ADR-010)
 **Negative:**
 
 - Pipeline code now coordinates two planes (`events.db` poll + `registry.execute()` await). This is a single place in `factory-core/src/pipeline/` — bounded complexity — but it is complexity that did not exist before.
-- Edge-plane extensions still require fork edits to `hooks-deployer.ts`, which remains a fork-hygiene cost (this was already true pre-ADR-027; it is explicit now).
+- Edge-plane extensions still require fork edits to `hooks-deployer.ts`, which remains a fork-hygiene cost (this was already true pre-ADR-035; it is explicit now).
 - The in-process hook engine is new code. Writing it to a PhD-level bar means test coverage, property tests for the aggregation function, and integration tests against the lifted guidance code. Estimate: ~16–24 hours of careful implementation + review.
 
 **Neutral:**
@@ -799,23 +809,23 @@ This is the "6-layer enforcement" from the existing architecture-v2.md (ADR-010)
 
 ### Implementation Notes
 
-- **Module location:** `factory-core/src/hooks/` — a new subsystem, peer to `factory-core/src/guidance/` (created by Story 1.7). The two communicate via the tier-5 adapter in ADR-026.
-- **Single story carries this ADR.** ADR-027 does **not** add a new story. The in-process hook engine is implemented inside Story 1.7's adapter phase: the adapter file (`hooks-adapter.ts`) needs a hook engine to bind against, so Story 1.7 builds the minimal engine as a prerequisite for the adapter. If Story 1.7's scope grows beyond its 3-day spike + adapter budget, create a follow-up Story 1.8 for the hook engine as a standalone deliverable (but do not pre-emptively split — wait for measured evidence from the spike).
+- **Module location:** `factory-core/src/hooks/` — a new subsystem, peer to `factory-core/src/guidance/` (created by Story 1.7). The two communicate via the tier-5 adapter in ADR-034.
+- **Single story carries this ADR.** ADR-035 does **not** add a new story. The in-process hook engine is implemented inside Story 1.7's adapter phase: the adapter file (`hooks-adapter.ts`) needs a hook engine to bind against, so Story 1.7 builds the minimal engine as a prerequisite for the adapter. If Story 1.7's scope grows beyond its 3-day spike + adapter budget, create a follow-up Story 1.8 for the hook engine as a standalone deliverable (but do not pre-emptively split — wait for measured evidence from the spike).
 - **Tests before gates.** Property-test the aggregation function against random `FactoryHookResult` arrays. Integration-test a synthetic pipeline that registers 3 gates (one critical, one normal, one background) and verifies priority ordering + timeout behavior. Target: ≥ 95% line coverage on `executor.ts` because it is the dangerous file.
 - **No global singletons.** Unlike ruflo's `defaultRegistry` / `defaultExecutor` / `initializeHooks()` singleton pattern, Factory Core's hook engine is **instance-based**. The pipeline owns one registry per story (or one per phase, if that turns out to be cleaner) and disposes it at phase end. This prevents state leakage across stories — which is itself a manifestation of invariant 1 (context isolation).
 - **No daemons.** Factory Core is a pipeline system, not a long-running daemon. Hooks run synchronously during pipeline transitions and terminate when the pipeline does.
 
 ### Acceptance Criteria
 
-- [x] ADR-027 present in `architecture-v2-session12-amendments.md`
+- [x] ADR-035 present in `architecture-v2-session12-amendments.md`
 - [x] Dual-plane architecture documented with diagram and responsibility split
 - [x] Edge plane explicitly marked as unchanged / owned by overstory
 - [x] In-process plane contract (types, registry, executor, semantics) specified with exact type signatures
 - [x] Borrowed concepts from ruflo explicitly listed as patterns, not code
 - [x] Rejected concepts from ruflo explicitly listed with reason
 - [x] Alternatives A–E considered and rejected with rationale
-- [x] Implementation responsibility assigned to Story 1.7 (ADR-026's story); no new story created
-- [ ] `architecture-v2.md` ADR-010 (6-layer hook pipeline) cross-reference updated to mention ADR-027 *(Step 5 of session 13)*
+- [x] Implementation responsibility assigned to Story 1.7 (ADR-034's story); no new story created
+- [ ] `architecture-v2.md` ADR-010 (6-layer hook pipeline) cross-reference updated to mention ADR-035 *(Step 5 of session 13)*
 - [ ] `code-lift-manifest.md` includes the "no wholesale lift of `@claude-flow/hooks`" entry *(Step 4 of session 13)*
 
 ### References
@@ -826,14 +836,14 @@ This is the "6-layer enforcement" from the existing architecture-v2.md (ADR-010)
 - `_research-repos/ruflo/v3/@claude-flow/hooks/src/index.ts` (session-13 direct read) — the design source for borrowed concepts; NOT a lift target
 - `_research-repos/ruflo/v3/@claude-flow/hooks/` (10,925 LOC total) — verified outbound coupling to ReasoningBank / HNSW / ONNX / AgentDB via session-12 cypher queries
 - `factory-core/src/hooks/` (to be created in Story 1.7) — the in-process plane home
-- `factory-core/src/guidance/hooks-adapter.ts` (to be created in Story 1.7 per ADR-026 Tier 5) — the binding between ADR-026's lifted guidance code and ADR-027's hook engine
+- `factory-core/src/guidance/hooks-adapter.ts` (to be created in Story 1.7 per ADR-034 Tier 5) — the binding between ADR-034's lifted guidance code and ADR-035's hook engine
 - `events.db` (overstory-owned, extended by Story 1.6) — `hook_result` EventType is the edge-plane → Factory Core data channel
 - ADR-010 (architecture-v2.md) — the existing 6-layer hook pipeline specification, reframed here as "invariant = gated mechanical verification; mechanism = dual-plane"
-- ADR-013 (architecture-v2.md) — Superpowers enforcement metadata in skill `description` field; ADR-027 hook engine consumes this via skill middleware (Story 2.6), not via direct import
-- ADR-025 (this file) — orchestrator foundation this hook engine lives on top of
-- ADR-026 (this file) — the consumer of this hook engine
+- ADR-013 (architecture-v2.md) — Superpowers enforcement metadata in skill `description` field; ADR-035 hook engine consumes this via skill middleware (Story 2.6), not via direct import
+- ADR-033 (this file) — orchestrator foundation this hook engine lives on top of
+- ADR-034 (this file) — the consumer of this hook engine
 
 ---
 
-*End of session 12 amendments. ADR-025, ADR-026, ADR-027 are authoritative and supersede any contradictory text in `architecture-v2.md`, prior session amendments, or the original session 12 findings document regarding orchestrator identity, enforcement layer source, and hook engine architecture. Downstream artifact updates (code-lift manifest, gap analysis, architecture-v2.md corrections) are tracked as Steps 4 and 5 of session 13.*
+*End of session 12 amendments. ADR-033, ADR-034, ADR-035 are authoritative and supersede any contradictory text in `architecture-v2.md`, prior session amendments, or the original session 12 findings document regarding orchestrator identity, enforcement layer source, and hook engine architecture. Downstream artifact updates (code-lift manifest, gap analysis, architecture-v2.md corrections) are tracked as Steps 4 and 5 of session 13.*
 

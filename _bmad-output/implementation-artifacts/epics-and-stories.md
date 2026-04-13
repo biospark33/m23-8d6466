@@ -185,30 +185,30 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 
 ### Story 1.7: `@claude-flow/guidance` Lift Spike and Tier-1 Integration
 
-**Description:** Implement ADR-026's tiered extraction of `@claude-flow/guidance` into `factory-core/src/guidance/`. This story is structured as a **3-day timeboxed spike followed by constrained tier-1 implementation and adapter writing**. The spike validates whether tier-1 files can be lifted cleanly (regex rule syntax adaptation, dependency isolation, test framework adaptation) and measures the feasibility of three prioritized tier-2 files (`adversarial.ts`, `trust.ts`, `conformance-kit.ts`) before full commitment. The implementation phase lifts tier-1 files whole, rewrites `src/hooks.ts` as a QDS-specific adapter against Factory Core's hook engine (per ADR-027), and vendors the MIT license. No tier-3 or tier-4 files are touched in this story.
+**Description:** Implement ADR-034's tiered extraction of `@claude-flow/guidance` into `factory-core/src/guidance/`. This story is structured as a **3-day timeboxed spike followed by constrained tier-1 implementation and adapter writing**. The spike validates whether tier-1 files can be lifted cleanly (regex rule syntax adaptation, dependency isolation, test framework adaptation) and measures the feasibility of three prioritized tier-2 files (`adversarial.ts`, `trust.ts`, `conformance-kit.ts`) before full commitment. The implementation phase lifts tier-1 files whole, rewrites `src/hooks.ts` as a QDS-specific adapter against Factory Core's hook engine (per ADR-035), and vendors the MIT license. No tier-3 or tier-4 files are touched in this story.
 
 **Acceptance criteria:**
 
 **Spike phase (days 1–3):**
 - [ ] Day 1 — Lift `types.ts`, `crypto-utils.ts`, `gates.ts` into `factory-core/src/guidance/` (the smallest self-contained tier-1 subset). Adapt import paths (`./types.js` → `./types.ts` per Bun conventions). Run `biome check .` and fix all violations (tab indentation, 100-char lines, no `any`). Confirm `gates.ts` `EnforcementGates` class instantiates with default config against a test `HookContext`-equivalent type.
 - [ ] Day 2 — Lift `ledger.ts` + 5 built-in evaluators. Adapt the `IEvaluator` interface and confirm `TestsPassEvaluator` / `ForbiddenCommandEvaluator` / `ForbiddenDependencyEvaluator` / `ViolationRateEvaluator` / `DiffQualityEvaluator` run under `bun test` with a synthetic `RunEvent`. Estimate total adaptation cost per evaluator file and extrapolate to full tier-1 LOC.
-- [ ] Day 3 — Attempt the compiler adaptation (Integration Decision 1 from ADR-026). Write a minimal test that parses an overstory-format overlay (`src/agents/overlay.ts` output) into a `PolicyBundle`. Document every regex pattern change with a `// QDS:` comment. If the compiler adaptation requires > 400 LOC of rework, raise an exception to the user before continuing — this is a scope budget check.
-- [ ] Day 3 (afternoon) — Read 1 of 3 prioritized tier-2 files (`adversarial.ts` recommended first, then `trust.ts`, then `conformance-kit.ts`) and document whether each file compiles against the tier-1 shape without dragging deferred dependencies. Update the ADR-026 tier table in `architecture-v2-session12-amendments.md` with measured findings (promote, demote, or confirm per file).
+- [ ] Day 3 — Attempt the compiler adaptation (Integration Decision 1 from ADR-034). Write a minimal test that parses an overstory-format overlay (`src/agents/overlay.ts` output) into a `PolicyBundle`. Document every regex pattern change with a `// QDS:` comment. If the compiler adaptation requires > 400 LOC of rework, raise an exception to the user before continuing — this is a scope budget check.
+- [ ] Day 3 (afternoon) — Read 1 of 3 prioritized tier-2 files (`adversarial.ts` recommended first, then `trust.ts`, then `conformance-kit.ts`) and document whether each file compiles against the tier-1 shape without dragging deferred dependencies. Update the ADR-034 tier table in `architecture-v2-session12-amendments.md` with measured findings (promote, demote, or confirm per file).
 
 **Implementation phase (post-spike):**
-- [ ] All tier-1 files from ADR-026 lifted into `factory-core/src/guidance/` with import paths adapted, `// QDS:` comments on every non-trivial edit, and `biome check .` + `tsc --noEmit` + `bun test` passing on the lifted subset
-- [ ] `factory-core/src/guidance/hooks-adapter.ts` written (new, not lifted) that registers `EnforcementGates` instances and `IEvaluator` implementations against Factory Core's hook engine (ADR-027 contract). The adapter exposes `registerGuidanceHooks(registry: FactoryHookRegistry): void` as its single public entry point.
+- [ ] All tier-1 files from ADR-034 lifted into `factory-core/src/guidance/` with import paths adapted, `// QDS:` comments on every non-trivial edit, and `biome check .` + `tsc --noEmit` + `bun test` passing on the lifted subset
+- [ ] `factory-core/src/guidance/hooks-adapter.ts` written (new, not lifted) that registers `EnforcementGates` instances and `IEvaluator` implementations against Factory Core's hook engine (ADR-035 contract). The adapter exposes `registerGuidanceHooks(registry: FactoryHookRegistry): void` as its single public entry point.
 - [ ] `factory-core/THIRD_PARTY_LICENSES.md` created with the first entry: `@claude-flow/guidance` lifted from `_research-repos/ruflo @ commit b395d12`, full MIT license text, list of lifted files, date, session reference
 - [ ] `factory-core/src/guidance/UPSTREAM_DELTA.md` created documenting every `// QDS:` tagged edit against upstream guidance source, with line references to both QDS and ruflo source files
 - [ ] `factory-core/src/guidance/README.md` created (this is a permitted documentation file — it describes lift scope, tier 1 vs 2 vs 3 vs 4 decisions, and how to re-run the spike)
 - [ ] At least 1 QDS-specific evaluator written that implements `IEvaluator` and operationalizes a QDS invariant not already covered by the 5 built-in evaluators — recommended: `PiSdkCostBudgetEvaluator` for invariant 8 (cost circuit breakers), consuming `attribution.db` cost data
 - [ ] Unit tests for the lifted subset achieve ≥80% line coverage, adapted from guidance's original test suite where possible
 - [ ] Integration test: a synthetic story running through the factory pipeline triggers at least one `EnforcementGates` gate (e.g., a destructive `rm -rf` in a bash command) and at least one evaluator (e.g., `TestsPassEvaluator` against a run-event with test results)
-- [ ] ADR-026 scope summary table updated with final LOC (actual vs estimated) and final tier classifications (post-spike)
+- [ ] ADR-034 scope summary table updated with final LOC (actual vs estimated) and final tier classifications (post-spike)
 - [ ] No import of `@claude-flow/hooks`, `@claude-flow/memory`, `@claude-flow/neural`, `@claude-flow/embeddings`, `@claude-flow/aidefence`, or `@claude-flow/security` remains in the lifted code — verify via `grep -r "from '@claude-flow" factory-core/src/guidance/` returning zero matches
 
 **FR references:** FR10–FR20 (quality enforcement layer), FR52, FR53 (evidence-backed PRs), FR103 (credential isolation — gates.ts secret regexes), FR51 (git safety — gates.ts destructive patterns), FR14, FR18 (mechanical gates at phase boundaries)
-**ADR references:** ADR-026 (this story implements it), ADR-025 (orchestrator foundation), ADR-027 (hook engine contract the adapter binds against), ADR-010 (6-layer hook pipeline that ADR-026 fills the enforcement gap in), ADR-013 (Superpowers enforcement metadata — gates.ts is complementary, not replacing)
+**ADR references:** ADR-034 (this story implements it), ADR-033 (orchestrator foundation), ADR-035 (hook engine contract the adapter binds against), ADR-010 (6-layer hook pipeline that ADR-034 fills the enforcement gap in), ADR-013 (Superpowers enforcement metadata — gates.ts is complementary, not replacing)
 **Files created/modified:**
 - `factory-core/src/guidance/types.ts` (~435 LOC lifted)
 - `factory-core/src/guidance/crypto-utils.ts` (~26 LOC lifted)
@@ -222,14 +222,14 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - `factory-core/src/guidance/capabilities.ts` (~639 LOC lifted)
 - `factory-core/src/guidance/compiler.ts` (~532 LOC lifted + ~200–400 LOC of overlay-format adaptation per Integration Decision 1)
 - `factory-core/src/guidance/index.ts` (~754 LOC lifted, heavily edited to remove deferred exports)
-- `factory-core/src/guidance/hooks-adapter.ts` (~500 LOC new write, ADR-027 binding)
+- `factory-core/src/guidance/hooks-adapter.ts` (~500 LOC new write, ADR-035 binding)
 - `factory-core/src/guidance/qds-evaluators.ts` (~150 LOC new write, 1+ QDS-specific evaluator e.g. `PiSdkCostBudgetEvaluator`)
 - `factory-core/src/guidance/UPSTREAM_DELTA.md` (documentation, permitted)
 - `factory-core/src/guidance/README.md` (documentation, permitted)
 - `factory-core/THIRD_PARTY_LICENSES.md` (~30 LOC initial entry for guidance)
 - Unit + integration test files co-located per overstory/bun test conventions
 **Estimated LOC:** ~7,422 LOC MVP scope (6,922 lifted tier-1 + 500 adapter) + up to ~1,500–3,000 LOC if spike promotes tier-2 files. Test LOC adapted from guidance's ~19,438 test LOC at an estimated 40% retention rate → ~7,775 test LOC co-located.
-**Dependencies:** 1.4 (Factory Core skeleton), 1.5 (Result<T> for gate/evaluator return types), ADR-027 acceptance (hook engine contract that `hooks-adapter.ts` binds against). **Blocks:** any subsequent story that relies on mechanical gates at phase boundaries (Story 4.x phase-boundary enforcement, Story 8.x quality gate enforcement).
+**Dependencies:** 1.4 (Factory Core skeleton), 1.5 (Result<T> for gate/evaluator return types), ADR-035 acceptance (hook engine contract that `hooks-adapter.ts` binds against). **Blocks:** any subsequent story that relies on mechanical gates at phase boundaries (Story 4.x phase-boundary enforcement, Story 8.x quality gate enforcement).
 **MVP/Growth:** MVP (P0 — enforcement layer is a day-one requirement per invariant 5)
 
 ### Story 1.4b: Build & Containerization
