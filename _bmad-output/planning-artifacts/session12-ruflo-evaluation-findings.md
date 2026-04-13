@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-11
 **From:** Session 12 (bias-stripped re-evaluation of overstory vs ruflo as QDS Factory's agent orchestration base, prompted by discovery of ruvnet/ruflo)
-**To:** Session 13 (ADR-025 + ADR-026 authoring, doc amendments, code-lift manifest updates)
+**To:** Session 13 (ADR-034 + ADR-035 authoring, doc amendments, code-lift manifest updates) *(originally ADR-025 + ADR-026; renumbered — see note at Step 1)*
 **Goal:** Capture the structural evidence and decision rationale so session 13 can execute without re-running the evaluation
 **Durable artifacts this session produced:**
 - This findings document
@@ -201,9 +201,9 @@ First-pass (same-session) analysis made three errors corrected here:
 
 All five are gated on the decision above. Execute in order unless blocking issues arise.
 
-> **Historical numbering note:** Steps 1–3 below reference ADR-024/025/026 as originally proposed during session 12. These were renumbered in session 13 to avoid collision with PR #5 (session 12 gap-analysis amendments): **ADR-024 → ADR-033**, **ADR-025 → ADR-034**, **ADR-026 → ADR-035**. Prefer the final ADR-033/034/035 identifiers in all new references. See `architecture-v2-session12-amendments.md` "Note on ADR Numbering" for the full renumbering history.
+> **Historical numbering note:** Steps 1–3 below were originally written during session 12 using ADR-024/025/026. These were renumbered in session 13 to avoid collision with PR #5 (session 12 gap-analysis amendments): **ADR-024 → ADR-033**, **ADR-025 → ADR-034**, **ADR-026 → ADR-035**. The headings and body below now use the final ADR-033/034/035 identifiers as primary labels, with old IDs retained parenthetically for traceability. See `architecture-v2-session12-amendments.md` "Note on ADR Numbering" for the full renumbering history.
 
-### Step 1 — Close the orchestrator question with ADR-024 (or amendment)
+### Step 1 — Close the orchestrator question with ADR-033 (formerly ADR-024)
 
 **Deliverable:** New ADR entry in `_bmad-output/planning-artifacts/architecture-v2-session10-amendments.md` (or new session12-amendments file) recording:
 - Decision: overstory retained as orchestration base
@@ -214,7 +214,7 @@ All five are gated on the decision above. Execute in order unless blocking issue
 
 **Acceptance:** `architecture-v2.md` index section lists the new ADR, and `prd-v2.md` / `architecture-v2.md` have no unresolved ambiguity about orchestrator identity.
 
-### Step 2 — Author ADR-025: Lift `@claude-flow/guidance` into Factory Core
+### Step 2 — Author ADR-034: Lift `@claude-flow/guidance` into Factory Core (formerly ADR-025)
 
 **Deliverable:** Full ADR in the session12-amendments file covering:
 - Context: enforcement stack design (Superpowers = skill content; guidance = mechanical enforcement)
@@ -232,9 +232,9 @@ All five are gated on the decision above. Execute in order unless blocking issue
 - License check: ruflo is MIT; confirm and vendor LICENSE text alongside lifted files
 - Fork hygiene: tag `// QDS:` on any edits; prefer additive changes; maintain an upstream-tracking checklist
 
-**Acceptance:** ADR-025 merged into amendments file with a spike story added to `epics-and-stories.md` (new Story 1.9 or similar: "Spike: evaluate guidance compiler+gates+proof extraction").
+**Acceptance:** ADR-034 merged into amendments file with a spike story added to `epics-and-stories.md` (new Story 1.9 or similar: "Spike: evaluate guidance compiler+gates+proof extraction"). *(Originally referenced as ADR-025.)*
 
-### Step 3 — Author ADR-026: Hook Engine Strategy
+### Step 3 — Author ADR-035: Hook Engine Strategy (formerly ADR-026)
 
 **Deliverable:** ADR covering:
 - Context: invariant 5 (phase-boundary gates) needs a hook registry + executor beyond what overstory's `hooks-deployer.ts` provides (which generates Claude Code / Pi guard scripts but doesn't itself enforce runtime rules)
@@ -243,7 +243,7 @@ All five are gated on the decision above. Execute in order unless blocking issue
 - Concepts worth borrowing (from ruflo's hooks README + source): hook registry with priority-based registration, hook executor with timeout+error recovery, pre/post-edit and pre/post-task and session-boundary events, hook result aggregation, statusline integration (if dashboard wants it)
 - Build target: `factory-core/src/hooks/` with typed events, priority-based registration, and a bridge into overstory's `hooks-deployer.ts` for Claude Code / Pi runtime gate generation
 
-**Acceptance:** ADR-026 merged. No new story yet — this ADR sets direction; implementation lives inside the existing Factory Core hook enforcement stories.
+**Acceptance:** ADR-035 merged. No new story yet — this ADR sets direction; implementation lives inside the existing Factory Core hook enforcement stories. *(Originally referenced as ADR-026.)*
 
 ### Step 4 — Update `code-lift-manifest.md` and `code-lift-gap-analysis.md`
 
@@ -262,7 +262,7 @@ In `_bmad-output/implementation-artifacts/code-lift-manifest.md`:
 
 In `_bmad-output/implementation-artifacts/code-lift-gap-analysis.md`:
 - Add risk entry: "Guidance lift — license compliance (MIT, compatible) / upstream drift (ruflo active @ 6,000+ commits, monitor @claude-flow/guidance changelog quarterly)"
-- Add risk entry: "Ruflo evaluation re-litigation — mitigated by session12 findings doc + ADR-024"
+- Add risk entry: "Ruflo evaluation re-litigation — mitigated by session12 findings doc + ADR-033" *(formerly ADR-024)*
 
 **Acceptance:** Both files updated; diff reviewed; no story count changes in `epics-and-stories.md` (spike adds Story 1.9 only).
 

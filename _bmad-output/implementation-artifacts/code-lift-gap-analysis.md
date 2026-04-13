@@ -207,13 +207,11 @@ The session-13 jump is driven entirely by Story 1.7's ~7,422 LOC scope introduct
 
 **Implementation readiness:** All documents amended through Session 13 are implementation-ready with zero ambiguity. Every acceptance criterion in Story 1.7 references the actual ruflo file paths, LOC counts, and MIT license location directly. Zero contradictions between PRD, architecture, and epics within the S10/S11/S13 scopes. Zero orphan dependencies. **Session 13 specifically:** Story 1.7 names its source files individually with per-file LOC and reuse classification, cites ruflo commit `b395d12` as the lift point, cites overstory commit `7872d54` as the integration target, and provides a 3-day spike plan with an explicit budget-check at day 3 that prevents silent scope creep.
 
-**Session 13 pending actions (tracked as Step 5 of session 13, not blockers):**
+**Session 13 Step 5 actions: COMPLETED.** All three architecture-v2.md edits from Step 5 have been applied in this PR:
 
-1. `architecture-v2.md` targeted correction pass — tag invariant-vs-mechanism conflation sites in-place, surgical edits only, no rewrite. 99 candidate lines identified via grep (`tmux|worktree|mail\.db|6-layer|file-pair|SQLite`).
-2. `architecture-v2.md` ADR index section update — add ADR-033, ADR-034, ADR-035 references pointing to `architecture-v2-session12-amendments.md`.
-3. `architecture-v2.md` ADR-010 (hook pipeline) cross-reference to ADR-035 for the dual-plane architecture reframing.
-
-These pending actions are scoped, sequential, and do not introduce new risk surface.
+1. ~~`architecture-v2.md` targeted correction pass~~ — **Done.** Invariant-vs-mechanism conflation sites tagged in-place (ADR-010 H1 section reframing block, FR mapping table, compatibility matrix).
+2. ~~`architecture-v2.md` ADR index section update~~ — **Done.** ADR-033, ADR-034, ADR-035 added to the ADR index table with full descriptions, pointing to `architecture-v2-session12-amendments.md`.
+3. ~~`architecture-v2.md` ADR-010 cross-reference to ADR-035~~ — **Done.** ADR-010's H1 section now contains the session 13 reframing block citing ADR-035's dual-plane architecture as the mechanism satisfying the gated-verification invariant.
 
 ---
 
