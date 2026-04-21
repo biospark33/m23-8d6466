@@ -1556,4 +1556,37 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 ---
 
-*End of Code-Lift Manifest v2.1 — Session 13 update. Story 1.7 added (ADR-034 guidance lift), execution ordering renumbered (contiguous 1–55), Section 2 and Section 5 totals reconciled to 13,892 LOC / 64.5% reuse. Session 10 additions (1.6, 2.9, 4.0, 9.0) remain unchanged.*
+---
+
+### Session 14: Attractor NLSpec Integration (Epic 11 + Stories 2.10, 2.11, 4.8)
+
+**Pattern source:** StrongDM Attractor (https://github.com/strongdm/attractor), Apache 2.0
+
+Attractor is a PATTERN SOURCE — no code is lifted. All implementations are 100% new-write following QDS conventions. Three NLSpecs (`attractor-spec.md`, `coding-agent-loop-spec.md`, `unified-llm-spec.md`) provide design patterns for pipeline graph DSL, agent loop enhancements, and provider resilience.
+
+| Story | Source | Reuse Type | What We Take |
+|-------|--------|-----------|-------------|
+| 2.10 (Provider Adapter Contract) | Attractor `unified-llm-spec.md` §7 | PATTERN_SOURCE | Formal adapter interface with capability discovery flags |
+| 2.11 (Fidelity Modes) | Attractor `attractor-spec.md` fidelity modes | PATTERN_SOURCE | Named context carryover modes (full/truncated/compact) per stage |
+| 4.8 (Semantic Loop Detection) | Attractor `coding-agent-loop-spec.md` loop detection | PATTERN_SOURCE | Repeated tool pattern detection; warning injection mid-loop |
+| 11.1 (Graph Parser) | Attractor `attractor-spec.md` §§1-3 | PATTERN_SOURCE | Node/edge graph model; validation lint rules |
+| 11.2 (Graph Template) | Attractor `attractor-spec.md` §§1-3 | PATTERN_SOURCE | Declarative graph representation for pipeline stages |
+| 11.3 (Fallback Chains) | Attractor `unified-llm-spec.md` §6 | PATTERN_SOURCE | Automatic failover with backoff/jitter |
+| 11.4 (Error Taxonomy) | Attractor `unified-llm-spec.md` §6 | PATTERN_SOURCE | Error classification with retryability |
+| 11.5 (Human Gates) | Attractor `attractor-spec.md` §6 | PATTERN_SOURCE | Interactive approval workflow; multi-backend Interviewer |
+| 11.6 (Local Env Adapter) | Attractor `coding-agent-loop-spec.md` Exec Env | PATTERN_SOURCE | Execution environment contract abstraction |
+| 11.7 (Docker Env Adapter) | Attractor `coding-agent-loop-spec.md` Exec Env | PATTERN_SOURCE | Execution environment contract abstraction |
+
+**Session 14 LOC:** +2,180 (380 MVP new-write, 1,800 Growth new-write, 0% reuse — all pattern-inspired)
+
+### Critical Findings (Session 14)
+
+**#15: Pipeline graph DSL adopted for Growth extensibility; MVP fixed pipeline preserved (invariant #6).** The YAML graph representation (ADR-036) is a declarative layer on top of ADR-006's fixed pipeline ordering and ADR-021's middleware chain. Custom graphs are Growth-only. The default 5-phase template is immutable.
+
+**#16: Provider adapter contract formalizes Pi SDK's implicit contract; does not fork Pi SDK.** `ProviderCapabilities` (ADR-037) wraps `Model<Api>` — it computes capability flags from existing metadata. Zero changes to Pi SDK internals. If Pi SDK changes its type definitions, capability computation updates accordingly.
+
+**#17: Human gate nodes adopted for Growth; MVP mechanical gates unchanged.** Human gates (ADR-039) are opt-in node types in custom pipeline graphs. The default 5-phase template has no human gates. All MVP mechanical quality gates (ADR-010, ADR-035) remain the primary enforcement mechanism.
+
+---
+
+*End of Code-Lift Manifest v2.2 — Session 14 update. Attractor added as PATTERN_SOURCE (10 story entries, 0% code reuse, 100% new-write). Session 14 additions: Stories 2.10, 2.11, 4.8 + Epic 11 (Stories 11.1-11.7). 3 critical findings (#15-#17). Project totals: 16,072 LOC (13,892 prior + 2,180 new). Session 10/11/13 entries unchanged.*

@@ -18,6 +18,7 @@ Epic 1 (Foundation)
         -> Epic 8 (Notifications & Health)
           -> Epic 9 (Dashboard Extensions)
             -> Epic 10 (Growth Behavioral Effects)
+            -> Epic 11 (Pipeline Extensibility & Attractor Patterns) [Growth, parallel with 10]
 ```
 
 Epics 3, 4, 5 can run in parallel after Epic 2 completes.
@@ -488,6 +489,51 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Dependencies:** 1.1 (shared-types for tier type definitions), 1.4 (Factory Core skeleton for config access)
 **MVP/Growth:** MVP
 
+### Story 2.10: Provider Adapter Contract & Capability Registry
+
+**Description:** Define a `ProviderCapabilities` interface in `shared-types` that wraps Pi SDK's `Model<Api>` type with explicit capability flags (supports_tool_calling, supports_structured_output, supports_streaming, supports_vision, supports_reasoning, max_context_window, max_output_tokens). Capabilities are computed statically from `Model<Api>` metadata at startup. The capability registry is a `Map<string, ProviderCapabilities>` keyed by model ID, populated during Factory Core initialization. This formalizes Pi SDK's implicit provider contract and provides the foundation for Growth-phase fallback chains (ADR-038) and runtime capability probing (FR200).
+
+**Acceptance criteria:**
+- [ ] `shared-types/src/provider-capabilities.ts` exports `ProviderCapabilities` interface with all 7 capability flags
+- [ ] `factory-core/src/providers/capability-registry.ts` computes `ProviderCapabilities` from `Model<Api>` metadata: `reasoning` flag → `supports_reasoning`, `input` array containing "image" → `supports_vision`, `contextWindow` → `max_context_window`, `maxTokens` → `max_output_tokens`
+- [ ] `supports_tool_calling` and `supports_structured_output` derived from provider-level defaults (all Anthropic/OpenAI/Google models support tools; structured output flagged per model family)
+- [ ] Capability registry populated at Factory Core startup before TierResolver (Story 2.9) initializes
+- [ ] Startup validation logs any models with unexpected capability combinations (e.g., reasoning model without tool support)
+- [ ] Unit tests validate capability computation for at least 3 provider families (Anthropic, OpenAI, Google)
+
+**FR references:** FR199, FR200
+**ADR references:** ADR-037
+**Files created/modified:**
+- `shared-types/src/provider-capabilities.ts` (~30 LOC)
+- `factory-core/src/providers/capability-registry.ts` (~120 LOC)
+- `shared-types/src/provider-capabilities.test.ts` (~50 LOC)
+**Estimated LOC:** 200
+**Dependencies:** 2.9 (TierResolver — consumer of capabilities), 1.1 (shared-types package)
+**MVP/Growth:** MVP
+
+### Story 2.11: Fidelity Mode Configuration
+
+**Description:** Define three named fidelity modes (`full`, `truncated`, `compact`) for context carryover WITHIN a pipeline phase. Add a `FidelityMiddleware` to the middleware chain that applies the configured fidelity mode via `transformContext()` before each LLM turn. `full` preserves complete session context, `truncated` keeps only the last N turns (configurable), and `compact` uses Pi SDK's `AgentSession.compact()` to produce a condensed summary. Fidelity mode is configured per-phase in `factory.yaml` with sensible defaults (develop=full, bmad=compact, fix_loop=truncated(5), qa=compact). Fidelity modes operate WITHIN a phase — cross-phase context isolation per ADR-006 is unchanged.
+
+**Acceptance criteria:**
+- [ ] `shared-types/src/fidelity.ts` exports `FidelityMode` type (`'full' | 'truncated' | 'compact'`) and `FidelityConfig` interface
+- [ ] `factory-core/src/middleware/fidelity-middleware.ts` implements `Middleware` interface with `beforeModel()` that applies fidelity mode to context
+- [ ] `truncated` mode preserves system prompt + overlay + last N turns (N from `fidelity_truncation_turns` config, default 5)
+- [ ] `compact` mode calls Pi SDK `AgentSession.compact()` and replaces message history with summary
+- [ ] `factory.yaml` schema extended with `phases.<phase>.fidelity` and `phases.<phase>.fidelity_truncation_turns` keys
+- [ ] Default fidelity per phase documented and applied when not explicitly configured
+
+**FR references:** FR208, FR209
+**ADR references:** ADR-021 amendment (Section 21.6)
+**Files created/modified:**
+- `shared-types/src/fidelity.ts` (~20 LOC)
+- `factory-core/src/middleware/fidelity-middleware.ts` (~60 LOC)
+- `factory-core/src/config/factory-yaml-schema.ts` (modify — add fidelity keys, ~20 LOC)
+- `factory-core/src/middleware/fidelity-middleware.test.ts` (~20 LOC)
+**Estimated LOC:** 120
+**Dependencies:** 2.1 (middleware chain executor), 2.4 (learning middleware — context composition precedent)
+**MVP/Growth:** Growth
+
 ---
 
 ## Epic 3: Continuous Verification -- Lightweight + Full Nyquist
@@ -826,6 +872,31 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - `factory-core/src/pipeline/stall-detector.ts` (~50 LOC)
 **Estimated LOC:** 50
 **Dependencies:** 4.1 (turn continuation loop), 4.3 (turn state persistence)
+**MVP/Growth:** MVP
+
+### Story 4.8: Semantic Loop Detection & Turn Flagging
+
+**Description:** Add semantic loop detection to the turn continuation loop (Story 4.1) at the tool-call boundary. Three detection patterns: (1) repeated identical tool calls — same tool + same arguments (deep-equal on serialized args) more than 3 times within a sliding window of 10 tool calls, (2) file rewrite cycles — same file modified and content matches a prior version within the last 5 edits, occurring 3+ times, (3) token consumption without progress — agent consumed more than 2x the rolling median token count for the current phase type AND zero checklist items advanced since last velocity check. On detection, the `turn_state` record in `pipeline.db` gets a `loop_flag` column set to the pattern name (`looping`, `file_oscillating`, or `stalled_high_cost`). The orchestration loop (Story 4.0) reads `loop_flag` and triggers the force-cap mechanism from Story 4.2, reducing remaining max_turns to 1.
+
+**Acceptance criteria:**
+- [ ] `factory-core/src/pipeline/loop-detector.ts` implements three detection patterns with configurable thresholds (default: N=3, W=10 for tool calls; 3 cycles for file oscillation; 2x median for token stall)
+- [ ] `pipeline.db` `turn_state` table extended with `loop_flag TEXT` column (nullable, values: 'looping', 'file_oscillating', 'stalled_high_cost', or NULL)
+- [ ] Loop detector called after each tool execution within the turn continuation loop
+- [ ] Tool call history maintained in-memory per turn session (sliding window of last W tool calls with serialized args)
+- [ ] File edit history maintained per turn session (last 5 versions per modified file, tracked via content hash)
+- [ ] Token consumption tracked against rolling median computed from `turn_state` records for the current phase type
+- [ ] When `loop_flag` is set, orchestration loop (Story 4.0) reduces remaining `max_turns` to 1 (force-cap from Story 4.2)
+- [ ] Unit tests validate each detection pattern independently with synthetic tool call / file edit / token consumption sequences
+
+**FR references:** FR204, FR205
+**ADR references:** ADR-019 amendment (Section 19.9)
+**Files created/modified:**
+- `factory-core/src/pipeline/loop-detector.ts` (~120 LOC)
+- `factory-core/src/migrations/003_turn_state_loop_flag.sql` (~5 LOC)
+- `factory-core/src/pipeline/turn-continuation.ts` (modify — integrate loop detector, ~15 LOC)
+- `factory-core/src/pipeline/loop-detector.test.ts` (~40 LOC)
+**Estimated LOC:** 180
+**Dependencies:** 4.1 (turn continuation loop), 4.3 (turn state persistence — provides tool call history access)
 **MVP/Growth:** MVP
 
 ---
@@ -1909,6 +1980,173 @@ These stories extend the twelve-factor alignment established in ADR-024 but are 
 
 ---
 
+## Epic 11: Pipeline Extensibility & Attractor Patterns
+
+**Scope:** Implement Growth-phase pipeline extensibility features inspired by StrongDM Attractor NLSpecs: declarative pipeline graph representation with validation, cross-provider fallback chains with error taxonomy, human gate nodes for interactive approval, and execution environment abstraction. All stories in this epic are Growth-only — they do not block any MVP epic.
+**Depends on:** Epic 2 (middleware chain — Story 2.10 provider adapter contract), Epic 4 (turn continuation — Story 4.0 orchestration loop), Epic 8 (notifications — Story 8.1 MessageBus, Story 8.5 circuit breaker)
+**Packages touched:** factory-core, shared-types
+**ADR references:** ADR-036 (pipeline graph DSL), ADR-038 (cross-provider fallback), ADR-039 (human gate nodes), ADR-040 (execution environment abstraction)
+**Total estimated LOC:** ~1,680
+
+### Story 11.1: Pipeline Graph Parser & Validator
+
+**Description:** Implement a YAML-based pipeline graph parser that reads graph definitions from `factory.yaml` and a graph validator that enforces 5 lint rules: (1) all nodes reachable from start node, (2) all phase boundary nodes have gate checks, (3) no unbounded cycles without exit conditions, (4) all edge references resolve to defined nodes, (5) default 5-phase template passes by construction. The parser produces a typed `PipelineGraph` object containing nodes (stage, gate, conditional, human_gate) and edges (transition, retry, fork) with optional conditions. Invalid graphs are rejected at startup with specific error messages including node/edge identifiers and rule violations.
+
+**Acceptance criteria:**
+- [ ] `factory-core/src/pipeline/graph-parser.ts` parses YAML graph definitions into a typed `PipelineGraph` object
+- [ ] `factory-core/src/pipeline/graph-validator.ts` enforces all 5 lint rules
+- [ ] Node types supported: `stage` (pipeline phase), `gate` (mechanical quality check), `conditional` (routing point), `human_gate` (interactive approval per ADR-039)
+- [ ] Edge types supported: `transition` (direct), `retry` (with max_iterations), `fork` (parallel branches)
+- [ ] Validation errors include node/edge identifiers, specific rule violated, and suggested fix
+- [ ] Parser + validator tested with: valid default template, invalid unreachable node, invalid missing gate, invalid unbounded cycle
+
+**FR references:** FR197, FR198
+**ADR references:** ADR-036
+**Files created/modified:**
+- `shared-types/src/pipeline-graph.ts` (~80 LOC)
+- `factory-core/src/pipeline/graph-parser.ts` (~120 LOC)
+- `factory-core/src/pipeline/graph-validator.ts` (~150 LOC)
+**Estimated LOC:** 350
+**Dependencies:** 4.0 (orchestration loop — runtime consumer of parsed graph)
+**MVP/Growth:** Growth
+
+### Story 11.2: Built-in 5-Phase Graph Template
+
+**Description:** Express the existing fixed 5-phase pipeline (Develop → BMAD → Fix Loop → QA → PR) as a YAML graph template that ships with Factory Core. This template is loaded by default when no custom graph is specified in `factory.yaml`. The template includes: 5 stage nodes, 4 gate nodes at phase boundaries, retry edges from Fix Loop back to Develop (with max_iterations from `factory.yaml`, default 3), and an exit edge from PR. The template is immutable — it cannot be modified by users in MVP or Growth (custom graphs are additive, not replacement).
+
+**Acceptance criteria:**
+- [ ] `factory-core/src/pipeline/default-template.yaml` defines the 5-phase graph
+- [ ] Template passes all 5 validation rules from Story 11.1
+- [ ] Template loaded automatically when `factory.yaml` has no `pipeline.graph` key
+- [ ] Template includes retry edge from Fix Loop to Develop with configurable max_iterations
+- [ ] Graph-to-execution compiler maps template nodes to existing orchestration loop actions (Story 4.0)
+- [ ] Dashboard can render the template graph as a visual flow diagram (data only — rendering is a separate dashboard story)
+
+**FR references:** FR197
+**ADR references:** ADR-036
+**Files created/modified:**
+- `factory-core/src/pipeline/default-template.yaml` (~40 LOC)
+- `factory-core/src/pipeline/graph-compiler.ts` (~200 LOC)
+- `factory-core/src/pipeline/graph-compiler.test.ts` (~10 LOC)
+**Estimated LOC:** 250
+**Dependencies:** 11.1 (graph parser & validator)
+**MVP/Growth:** Growth
+
+### Story 11.3: Cross-Provider Fallback Chains
+
+**Description:** Implement configurable cross-provider fallback chains that automatically fail over to alternative providers when the primary provider has transient issues. Fallback chains are defined in `factory.yaml` (`fallback_chains` key) mapping primary provider/model to ordered fallback sequences. Fallback is triggered by provider-level errors classified by the error taxonomy (Story 11.4), subject to: capability compatibility check (Story 2.10), tier constraint (same tier only), circuit breaker status (Story 8.5), and max 2 fallback attempts. Cost attribution chain (invariant #4) preserved through fallback — fallback costs attributed to same story/phase/agent.
+
+**Acceptance criteria:**
+- [ ] `factory-core/src/providers/fallback-chain.ts` reads `fallback_chains` from `factory.yaml` and resolves ordered alternatives
+- [ ] Before failover, checks: (1) fallback provider has required capabilities (via Story 2.10 registry), (2) fallback is within same tier, (3) circuit breaker is not open
+- [ ] Maximum 2 fallback attempts per original request (3 total providers tried)
+- [ ] Fallback provider costs written to `attribution.db` with same `story_id`, `phase`, `agent_id` as original request
+- [ ] Fallback events logged to `pipeline.db` with: original provider, error classification, fallback provider, outcome
+- [ ] Integration test: simulate rate-limit on primary → verify automatic failover to first fallback
+
+**FR references:** FR201, FR203
+**ADR references:** ADR-038
+**Files created/modified:**
+- `factory-core/src/providers/fallback-chain.ts` (~200 LOC)
+- `factory-core/src/providers/fallback-chain.test.ts` (~100 LOC)
+- `factory-core/src/config/factory-yaml-schema.ts` (modify — add fallback_chains key, ~20 LOC)
+- `factory-core/src/providers/fallback-logger.ts` (~30 LOC)
+**Estimated LOC:** 350
+**Dependencies:** 2.10 (provider adapter contract — capability checks), 8.5 (circuit breaker — health check)
+**MVP/Growth:** Growth
+
+### Story 11.4: Error Taxonomy & Retryability Classification
+
+**Description:** Implement an error taxonomy that classifies provider errors into 4 categories: `retryable_transient` (HTTP 503, network timeout — retry with exponential backoff up to 3 attempts), `retryable_after_backoff` (HTTP 429 with Retry-After — wait then retry once), `non_retryable` (HTTP 401/404 — fail immediately), and `partial_success` (truncated response — accept partial result, log warning). Classification is determined by HTTP status code + response body inspection. Each classification has a defined action policy consumed by Story 11.3's fallback executor.
+
+**Acceptance criteria:**
+- [ ] `factory-core/src/providers/error-taxonomy.ts` exports `ErrorClassification` enum and `classifyProviderError(error): ErrorClassification` function
+- [ ] Classification logic handles: HTTP status codes (401, 403, 404, 429, 500, 502, 503), network errors (ECONNREFUSED, ETIMEDOUT, ECONNRESET), and response truncation (stop_reason: length)
+- [ ] Each classification maps to an action policy: retry count, backoff strategy, fallback eligibility
+- [ ] Unit tests cover all HTTP status codes and network error types
+
+**FR references:** FR202
+**ADR references:** ADR-038
+**Files created/modified:**
+- `factory-core/src/providers/error-taxonomy.ts` (~60 LOC)
+- `factory-core/src/providers/error-taxonomy.test.ts` (~20 LOC)
+**Estimated LOC:** 80
+**Dependencies:** 2.10 (provider adapter contract — wraps provider errors)
+**MVP/Growth:** Growth
+
+### Story 11.5: Human Gate Nodes
+
+**Description:** Implement human gate nodes for pipeline graphs (Story 11.1) that pause execution and await developer approval. A human gate specifies: prompt text, timeout (default 24h), timeout action (approve/reject/escalate, default escalate), and required approvals (default 1). Approval state is stored in `pipeline.db` tables `human_gates` and `human_gate_responses`. Multi-backend delivery: CLI (`qds approve <gate-id>`), Telegram (inline keyboard buttons via FR171 MessageBus), and Dashboard (approval card). Gate resolution does not leak cross-phase context — developer comments are injected into the transfer manifest, not agent context.
+
+**Acceptance criteria:**
+- [ ] `pipeline.db` schema extended with `human_gates` and `human_gate_responses` tables
+- [ ] `factory-core/src/pipeline/human-gate.ts` implements gate node handler: creates gate record, publishes notification via MessageBus, blocks pipeline until resolved
+- [ ] CLI handler: `qds approve <gate-id> [--comment "..."]` writes response to `human_gate_responses`
+- [ ] Telegram handler: inline keyboard buttons (Approve/Reject) on gate notification message
+- [ ] Dashboard handler: approval card with comment field in story detail view
+- [ ] Timeout handling: after timeout expires, `timeout_action` is applied automatically
+- [ ] Developer comment from approval injected into next phase's transfer manifest, NOT into agent context (invariant #1)
+- [ ] Integration test: create gate → approve via CLI → verify pipeline resumes
+
+**FR references:** FR206, FR207
+**ADR references:** ADR-039, ADR-036
+**Files created/modified:**
+- `factory-core/src/migrations/004_human_gates.sql` (~20 LOC)
+- `factory-core/src/pipeline/human-gate.ts` (~160 LOC)
+- `factory-core/src/commands/approve.ts` (~60 LOC)
+- `factory-core/src/notifications/telegram-gate-handler.ts` (~80 LOC)
+- `factory-core/src/dashboard/approval-card.ts` (~80 LOC)
+**Estimated LOC:** 400
+**Dependencies:** 11.1 (graph parser — gate is a node type), 8.1 (MessageBus — notification delivery), 4.0 (orchestration loop — pipeline pause/resume)
+**MVP/Growth:** Growth
+
+### Story 11.6: Local Execution Environment Adapter
+
+**Description:** Implement the `ExecutionEnvironment` interface (ADR-040) and a local adapter that wraps Overstory's existing tmux-based execution. The interface defines 4 methods + healthCheck. The local adapter delegates to `ov sling` for spawn, reads tmux pane output for attach, and kills tmux sessions for destroy. This is a thin wrapper — all actual agent lifecycle management (worktree creation, overlay generation, hook deployment, session tracking) remains in Overstory.
+
+**Acceptance criteria:**
+- [ ] `factory-core/src/environments/types.ts` exports `ExecutionEnvironment`, `ProcessHandle`, and `HealthStatus` interfaces
+- [ ] `factory-core/src/environments/local-adapter.ts` implements `ExecutionEnvironment`:
+  - `spawn()` calls `ov sling` with appropriate arguments via `Bun.spawn()`
+  - `attach()` returns async iterable reading tmux pane output
+  - `destroy()` kills tmux session
+  - `healthCheck()` verifies tmux is available
+- [ ] Orchestration loop (Story 4.0) can use `ExecutionEnvironment` interface for agent spawning (Growth opt-in via `factory.yaml`)
+- [ ] Integration test: spawn agent via local adapter → verify process handle → destroy
+
+**FR references:** FR210, FR211
+**ADR references:** ADR-040
+**Files created/modified:**
+- `factory-core/src/environments/types.ts` (~50 LOC)
+- `factory-core/src/environments/local-adapter.ts` (~80 LOC)
+**Estimated LOC:** 130
+**Dependencies:** 4.0 (orchestration loop — consumer of environment interface)
+**MVP/Growth:** Growth
+
+### Story 11.7: Docker Execution Environment Adapter
+
+**Description:** Implement a Docker `ExecutionEnvironment` adapter that spawns agents in isolated Docker containers using the image from Story 1.4b. Provides stronger isolation than tmux for multi-tenant Growth scenarios. `spawn()` calls `docker run` with volume mounts for the worktree and environment variables. `attach()` calls `docker logs --follow`. `destroy()` calls `docker stop && docker rm`. Requires Docker daemon availability (per ADR-024 Section 3).
+
+**Acceptance criteria:**
+- [ ] `factory-core/src/environments/docker-adapter.ts` implements `ExecutionEnvironment`:
+  - `spawn()` calls `docker run` with: Story 1.4b image, worktree volume mount, env vars for config
+  - `attach()` calls `docker logs --follow` returning async iterable
+  - `destroy()` calls `docker stop && docker rm`
+  - `healthCheck()` verifies Docker daemon is available via `docker info`
+- [ ] Container names follow factory convention: `qds-<story-id>-<agent-name>`
+- [ ] Container cleanup on destroy is verified (no orphaned containers)
+- [ ] Integration test: spawn agent in container → verify logs via attach → destroy → verify cleanup
+
+**FR references:** FR212
+**ADR references:** ADR-040
+**Files created/modified:**
+- `factory-core/src/environments/docker-adapter.ts` (~120 LOC)
+**Estimated LOC:** 120
+**Dependencies:** 11.6 (local adapter — shares `ExecutionEnvironment` interface), 1.4b (Docker image)
+**MVP/Growth:** Growth
+
+---
+
 ## FR Coverage Matrix
 
 | FR | Story | Status |
@@ -1985,6 +2223,22 @@ These stories extend the twelve-factor alignment established in ADR-024 but are 
 | FR169 | 10.5 | Growth |
 | FR170 | 8.5, 8.6, 8.7, 8.8, 9.4 | Covered |
 | FR171 | 8.1, 8.2, 8.3, 8.4, 10.8 | Covered |
+| FR197 | 11.1, 11.2 | Growth |
+| FR198 | 11.1 | Growth |
+| FR199 | 2.10 | Covered (MVP) |
+| FR200 | 2.10 | Growth (runtime probing deferred) |
+| FR201 | 11.3 | Growth |
+| FR202 | 11.4 | Growth |
+| FR203 | 11.3 | Growth |
+| FR204 | 4.8 | Covered (MVP) |
+| FR205 | 4.8 | Growth (warning injection deferred) |
+| FR206 | 11.5 | Growth |
+| FR207 | 11.5 | Growth |
+| FR208 | 2.11 | Growth |
+| FR209 | 2.11 | Growth |
+| FR210 | 11.6 | Growth |
+| FR211 | 11.6 | Growth |
+| FR212 | 11.7 | Growth |
 
 ## ADR Exercise Matrix
 
@@ -2014,7 +2268,14 @@ These stories extend the twelve-factor alignment established in ADR-024 but are 
 | ADR-022 | 1.1, 6.6, 8.1, 8.2, 8.3, 8.4, 10.8 | Epics 1, 6, 8, 10 |
 | ADR-023 | 1.1, 1.6, 8.5, 8.6, 8.7, 8.8, 9.4, 9.7 | Epics 1, 8, 9 |
 | ADR-024 | 1.4, 1.4b, 1.4c, 1.6, 4.0, 8.5, 9.0 | Epics 1, 4, 8, 9 |
+| ADR-019 amend | 4.8 | Epic 4 (session 14) |
+| ADR-021 amend | 2.11 | Epic 2 (session 14) |
+| ADR-036 | 11.1, 11.2 | Epic 11 (session 14) |
+| ADR-037 | 2.10 | Epic 2 (session 14) |
+| ADR-038 | 11.3, 11.4 | Epic 11 (session 14) |
+| ADR-039 | 11.5 | Epic 11 (session 14) |
+| ADR-040 | 11.6, 11.7 | Epic 11 (session 14) |
 
 ---
 
-*v2.1 — Session 11 twelve-factor alignment. ADR-024 added (10 sections: env-var overrides, backing services, build/release/run, stateless processes, port binding, concurrency, disposability, dev/prod parity, logging, admin processes). 2 new stories added (1.4b Build & Containerization, 1.4c Admin CLI). 5 stories amended (1.4, 1.6, 4.0, 8.5, 9.0). Growth stories section added (5 post-MVP operational maturity stories). Epic 1 LOC updated (670→1,310). 10 epics, ~66 stories, implementation-ready with zero ambiguity.*
+*v2.2 — Session 14 Attractor NLSpec integration. 3 stories added to existing epics (2.10, 2.11, 4.8). New Epic 11 added (Pipeline Extensibility & Attractor Patterns) with 7 Growth stories (11.1-11.7). ADR-036 through ADR-040 + ADR-019/ADR-021 amendments. +2,180 LOC (380 MVP, 1,800 Growth). 11 epics, ~81 stories, implementation-ready with zero ambiguity.*
