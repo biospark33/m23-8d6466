@@ -211,58 +211,81 @@ Crash-safe: restart `/qds` on same epic, it reads `plan.json`, resumes from curr
 ### Full Node Sequence
 
 ```
-[bash]  gitnexus-check         provider: -      model: -          context: -
-[loop]  explore                provider: claude  model: opus       context: persistent, interactive
-[agent] create-plan            provider: claude  model: opus       context: fresh
-[loop]  refine-plan            provider: claude  model: opus       context: persistent, interactive
-[bash]  implement-setup        provider: -      model: -          context: -
-[loop]  implement              provider: claude  model: sonnet     context: fresh per iteration
-[loop]  fix-feedback           provider: claude  model: sonnet     context: persistent, interactive
-[agent] adversarial-review     provider: claude  model: sonnet     context: fresh
-[agent] qa-swarm               provider: claude  model: sonnet     context: fresh
-[agent] bmad-code-review-1     provider: codex   model: glm-5.1    context: fresh
-[agent] fix-wave-1             provider: codex   model: glm-5.1    context: fresh per agent
-[agent] bmad-code-review-2     provider: codex   model: glm-5.1    context: fresh
-[agent] fix-wave-2             provider: codex   model: glm-5.1    context: fresh per agent
-[agent] finalize               provider: codex   model: glm-5.1    context: fresh
+[bash]  gitnexus-check         provider: -      model: -               route: -                  context: -
+[loop]  explore                provider: claude  model: opus            route: Anthropic           context: persistent, interactive
+[agent] create-plan            provider: claude  model: opus            route: Anthropic           context: fresh
+[loop]  refine-plan            provider: claude  model: opus            route: Anthropic           context: persistent, interactive
+[bash]  implement-setup        provider: -      model: -               route: -                  context: -
+[loop]  implement              provider: claude  model: opus            route: Z.ai → GLM 5.1     context: fresh per iteration
+[loop]  fix-feedback           provider: claude  model: opus            route: Z.ai → GLM 5.1     context: persistent, interactive
+[agent] adversarial-review     provider: claude  model: opus            route: Z.ai → GLM 5.1     context: fresh
+[agent] qa-swarm               provider: claude  model: opus            route: Z.ai → GLM 5.1     context: fresh
+[agent] bmad-code-review-1     provider: claude  model: opus            route: Z.ai → GLM 5.1     context: fresh
+[agent] fix-wave-1             provider: claude  model: opus            route: Z.ai → GLM 5.1     context: fresh per agent
+[agent] bmad-code-review-2     provider: claude  model: opus            route: Z.ai → GLM 5.1     context: fresh
+[agent] fix-wave-2             provider: claude  model: opus            route: Z.ai → GLM 5.1     context: fresh per agent
+[agent] finalize               provider: claude  model: sonnet          route: Z.ai → GLM 5-turbo context: fresh
 ```
 
 ### Model Allocation Rationale
 
-Archon's `dag-executor` supports per-node `provider: claude | codex` resolution. Four things are silently dropped for `codex` nodes (verified in `dag-executor.ts` lines 402–455):
+All nodes use `provider: claude`. The routing distinction (Anthropic direct vs Z.ai/GLM) is controlled by per-node `env:` overrides in the workflow YAML — a small additive change to Archon's `dag-executor.ts` (see GLM Configuration below). Nodes without an `env:` block inherit the process environment and hit Anthropic directly.
 
-1. **Hooks** — Superpowers ambient hooks do not fire
-2. **MCP tools** — Context7, GitNexus graph tools (`query`, `impact`, `route_map`) unavailable
-3. **node.skills** — Archon-level skill preloading ignored
-4. **Skill tool** — structural gap: GLM runs in Codex runtime, not Claude Code SDK; the `Skill` tool does not exist there regardless of prompt instructions
+| Node | Model | Route | Reason |
+|------|-------|-------|--------|
+| explore, create-plan, refine-plan | **Opus** | Anthropic | Architectural judgment shapes all downstream work; real Claude quality essential |
+| implement, fix-feedback | **Opus** | Z.ai → GLM 5.1 | Active coding and interactive refinement; GLM 5.1 handles coding well; hooks, MCP, Skill tool all preserved |
+| adversarial-review, qa-swarm | **Opus** | Z.ai → GLM 5.1 | Invokes Superpowers skills; GLM 5.1 quality sufficient for pattern-based review |
+| bmad-code-review-1/2 | **Opus** | Z.ai → GLM 5.1 | Structured JSON output; consistent Opus tier across all post-review nodes |
+| fix-wave-1/2 | **Opus** | Z.ai → GLM 5.1 | Mechanical targeted fixes — biggest cost lever (up to 6 parallel agents × 2 rounds) |
+| finalize | **Sonnet** | Z.ai → GLM 5-turbo | Scripted git/PR operations; no judgment required; cheapest adequate tier |
+| Nightly wiki agent | **Sonnet** | Z.ai → GLM 5-turbo | Mechanical consolidation |
+| Weekly process consolidation | **Opus** | Anthropic | Strategic synthesis → proposes prompt improvements; real Claude quality required |
 
-All four constraints are satisfied by the current allocation: every node that needs hooks, MCP, or skill invocations is already on Claude. GLM nodes only touch `git`, `gh`, and bash — all CLI, all available to codex.
+**Cost lever:** Fix-wave nodes (up to 12 agent instances per story across both rounds) and all post-planning nodes run on Z.ai GLM 5.1 — a fraction of Anthropic Opus pricing. The three planning nodes stay on real Anthropic Opus because their output quality cascades through every downstream node.
 
-| Node | Model | Reason |
-|------|-------|--------|
-| explore, create-plan, refine-plan | **Opus** | Judgment shapes everything downstream; worth the cost |
-| implement, fix-feedback | **Sonnet** | Needs post-edit hooks (format, typecheck, tests, lint) |
-| adversarial-review, qa-swarm | **Sonnet** | Must invoke Superpowers skills; hooks fire |
-| bmad-code-review-1/2 | **GLM 5.1** | Structured JSON output only; no skills, no hooks needed |
-| fix-wave-1/2 | **GLM 5.1** | Mechanical targeted fixes — biggest cost lever (up to 6 agents × 2 rounds) |
-| finalize | **GLM 5.1** | Scripted git/PR steps; no judgment required |
-| Nightly wiki agent | **GLM 5.1** | Mechanical consolidation |
-| Weekly process consolidation | **Opus** | Strategic synthesis → proposes prompt improvements |
+### GLM Configuration — Per-Node Env Injection
 
-**Cost lever:** Fix waves are where costs compound most — parallel agents × 2 rounds per story. GLM 5.1 there yields the largest savings while Opus stays on the 3 nodes where architectural judgment shapes all downstream work.
+Z.ai provides an Anthropic-format-compatible API at `https://api.z.ai/api/anthropic`. Claude Code maps Anthropic model tiers to GLM models via subprocess env vars set on each node:
 
-### GLM 5.1 Configuration
+```
+ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.1       # Z.ai Opus tier
+ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5-turbo # Z.ai Sonnet tier
+```
 
-GLM uses an OpenAI-compatible API — no Archon code changes required, just config:
+When the CC subprocess is about to make an API call, it substitutes the model name using these env vars before sending to Z.ai. The workflow YAML's `model:` field continues to use standard Anthropic tier names — the env vars do the mapping transparently.
+
+**Archon code change — `dag-executor.ts` (~20 lines):**
+
+Add `env?: Record<string, string>` to the workflow node type definition. After the existing project-level env inject (line 598–601), add:
+
+```typescript
+// Per-node env overrides — win over project-level envVars
+if (node.env && Object.keys(node.env).length > 0) {
+  const missingVars: string[] = [];
+  const expandedNodeEnv = expandEnvVarsInRecord(node.env, missingVars);
+  if (missingVars.length > 0) {
+    getLog().warn({ nodeId: node.id, missingVars }, 'dag.node_env_vars_missing');
+  }
+  claudeOptions.env = { ...(claudeOptions.env ?? {}), ...expandedNodeEnv };
+}
+```
+
+`expandEnvVarsInRecord` already exists in dag-executor (used for MCP server env expansion). This reuses it unchanged — `${ZAI_API_KEY}` in node env values expands from the Archon process environment at execution time.
+
+**Per-node env block in `qds-piv-loop.yaml` (Z.ai nodes):**
 
 ```yaml
-# Archon config.yaml
-assistants:
-  codex:
-    model: glm-4-plus        # update to glm-5.1 when GA
-    baseUrl: https://open.bigmodel.cn/api/paas/v4/
-    apiKey: ${GLM_API_KEY}   # in .env, never committed
+env:
+  ANTHROPIC_AUTH_TOKEN: ${ZAI_API_KEY}
+  ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic
+  ANTHROPIC_DEFAULT_OPUS_MODEL: glm-5.1
+  API_TIMEOUT_MS: "3000000"
 ```
+
+Nodes routing to Anthropic directly (explore, create-plan, refine-plan, weekly consolidation) carry no `env:` block.
+
+`ZAI_API_KEY` lives in Archon's `.env` file (gitignored, never committed).
 
 ### Key Node Details
 
@@ -516,6 +539,8 @@ The system measurably improves with every cycle without explicit maintenance.
 
 | Artifact | Type | Action | Location |
 |----------|------|--------|----------|
+| `dag-executor.ts` | Archon core | MODIFY | `Archon/packages/workflows/src/` — add per-node `env:` support (~20 lines) |
+| workflow node type | Archon core | MODIFY | Archon workflow types — add `env?: Record<string, string>` to node schema |
 | `qds-piv-loop.yaml` | Archon workflow | CREATE | `Archon/.archon/workflows/defaults/` |
 | `/qds` | Claude Code skill | CREATE | superpowers or project skills |
 | `bmad-code-review` skill | Existing skill | MODIFY | add autonomous mode (structured JSON output, no HITL) |
@@ -546,5 +571,5 @@ The system measurably improves with every cycle without explicit maintenance.
 ## 8. Open Questions (deferred)
 
 1. **Telegram trigger** — Archon already supports Telegram as a platform adapter. Wire `/qds` as a Telegram command once the core is proven.
-2. **Economic governance** — model tier policy (economy/standard/premium per node) can be added as per-node `model:` overrides in the workflow YAML once baseline is working.
+2. **Economic governance** — cost attribution (per-story token budgets, spend tracking) deferred. Model routing per node is now designed (per-node `env:` + Z.ai). The remaining layer — budget limits, ELO scoring, spend alerts — can be added as a finalize-node post-step once baseline is working.
 3. **Full Option C** (native Archon orchestrator) — once the hybrid orchestrator pattern is proven, evaluate whether to add a "spawn sub-workflow-run" primitive to Archon proper.
