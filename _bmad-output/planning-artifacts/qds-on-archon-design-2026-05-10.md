@@ -229,10 +229,14 @@ Crash-safe: restart `/qds` on same epic, it reads `plan.json`, resumes from curr
 
 ### Model Allocation Rationale
 
-Archon's `dag-executor` supports per-node `provider: claude | codex` resolution with two hard constraints:
+Archon's `dag-executor` supports per-node `provider: claude | codex` resolution. Four things are silently dropped for `codex` nodes (verified in `dag-executor.ts` lines 402–455):
 
-1. **Hooks are Claude-only** — `provider: codex` nodes silently drop Superpowers hooks
-2. **Skill invocations are Claude-only** — nodes invoking `bmad-review-*` skills must stay on Claude
+1. **Hooks** — Superpowers ambient hooks do not fire
+2. **MCP tools** — Context7, GitNexus graph tools (`query`, `impact`, `route_map`) unavailable
+3. **node.skills** — Archon-level skill preloading ignored
+4. **Skill tool** — structural gap: GLM runs in Codex runtime, not Claude Code SDK; the `Skill` tool does not exist there regardless of prompt instructions
+
+All four constraints are satisfied by the current allocation: every node that needs hooks, MCP, or skill invocations is already on Claude. GLM nodes only touch `git`, `gh`, and bash — all CLI, all available to codex.
 
 | Node | Model | Reason |
 |------|-------|--------|
