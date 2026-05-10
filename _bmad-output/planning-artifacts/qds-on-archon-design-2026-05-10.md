@@ -211,20 +211,53 @@ Crash-safe: restart `/qds` on same epic, it reads `plan.json`, resumes from curr
 ### Full Node Sequence
 
 ```
-[bash]  gitnexus-check         model: -       context: -
-[loop]  explore                model: opus    context: persistent, interactive
-[agent] create-plan            model: sonnet  context: fresh
-[loop]  refine-plan            model: opus    context: persistent, interactive
-[bash]  implement-setup        model: -       context: -
-[loop]  implement              model: opus    context: fresh per iteration
-[loop]  fix-feedback           model: opus    context: persistent, interactive
-[agent] adversarial-review     model: sonnet  context: fresh
-[agent] qa-swarm               model: sonnet  context: fresh
-[agent] bmad-code-review-1     model: sonnet  context: fresh
-[bash]  fix-wave-1             model: -       spawns parallel agents
-[agent] bmad-code-review-2     model: sonnet  context: fresh
-[bash]  fix-wave-2             model: -       spawns parallel agents
-[agent] finalize               model: sonnet  context: fresh
+[bash]  gitnexus-check         provider: -      model: -          context: -
+[loop]  explore                provider: claude  model: opus       context: persistent, interactive
+[agent] create-plan            provider: claude  model: opus       context: fresh
+[loop]  refine-plan            provider: claude  model: opus       context: persistent, interactive
+[bash]  implement-setup        provider: -      model: -          context: -
+[loop]  implement              provider: claude  model: sonnet     context: fresh per iteration
+[loop]  fix-feedback           provider: claude  model: sonnet     context: persistent, interactive
+[agent] adversarial-review     provider: claude  model: sonnet     context: fresh
+[agent] qa-swarm               provider: claude  model: sonnet     context: fresh
+[agent] bmad-code-review-1     provider: codex   model: glm-5.1    context: fresh
+[agent] fix-wave-1             provider: codex   model: glm-5.1    context: fresh per agent
+[agent] bmad-code-review-2     provider: codex   model: glm-5.1    context: fresh
+[agent] fix-wave-2             provider: codex   model: glm-5.1    context: fresh per agent
+[agent] finalize               provider: codex   model: glm-5.1    context: fresh
+```
+
+### Model Allocation Rationale
+
+Archon's `dag-executor` supports per-node `provider: claude | codex` resolution with two hard constraints:
+
+1. **Hooks are Claude-only** — `provider: codex` nodes silently drop Superpowers hooks
+2. **Skill invocations are Claude-only** — nodes invoking `bmad-review-*` skills must stay on Claude
+
+| Node | Model | Reason |
+|------|-------|--------|
+| explore, create-plan, refine-plan | **Opus** | Judgment shapes everything downstream; worth the cost |
+| implement, fix-feedback | **Sonnet** | Needs post-edit hooks (format, typecheck, tests, lint) |
+| adversarial-review, qa-swarm | **Sonnet** | Must invoke Superpowers skills; hooks fire |
+| bmad-code-review-1/2 | **GLM 5.1** | Structured JSON output only; no skills, no hooks needed |
+| fix-wave-1/2 | **GLM 5.1** | Mechanical targeted fixes — biggest cost lever (up to 6 agents × 2 rounds) |
+| finalize | **GLM 5.1** | Scripted git/PR steps; no judgment required |
+| Nightly wiki agent | **GLM 5.1** | Mechanical consolidation |
+| Weekly process consolidation | **Opus** | Strategic synthesis → proposes prompt improvements |
+
+**Cost lever:** Fix waves are where costs compound most — parallel agents × 2 rounds per story. GLM 5.1 there yields the largest savings while Opus stays on the 3 nodes where architectural judgment shapes all downstream work.
+
+### GLM 5.1 Configuration
+
+GLM uses an OpenAI-compatible API — no Archon code changes required, just config:
+
+```yaml
+# Archon config.yaml
+assistants:
+  codex:
+    model: glm-4-plus        # update to glm-5.1 when GA
+    baseUrl: https://open.bigmodel.cn/api/paas/v4/
+    apiKey: ${GLM_API_KEY}   # in .env, never committed
 ```
 
 ### Key Node Details
