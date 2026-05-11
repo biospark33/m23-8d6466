@@ -1,9 +1,9 @@
 # QDS Factory -- Unified Code-Lift Manifest
 
-**Version:** 2.0
-**Date:** 2026-03-14
-**Source:** Deep-dive analyses of 6 source repositories + Session 10 code-lift resolution
-**Purpose:** Definitive reference for implementation agents -- maps every story to reusable artifacts from source repos
+**Version:** 2.2
+**Date:** 2026-05-10
+**Source:** Deep-dive analyses of 6 source repositories + Session 10 code-lift resolution + Session 14 additions
+**Purpose:** Definitive reference for implementation agents -- maps every story to reusable artifacts from source repos; Session 14 code-lift resolution and expanded scope (attractor added as PATTERN_SOURCE, 10 story entries, 0% code reuse, 100% new-write)
 
 ---
 
@@ -99,14 +99,54 @@
 
 ---
 
-### Epic 1 Subtotals
+#### Story 1.7: `@claude-flow/guidance` Lift Spike and Tier-1 Integration (~7,422 LOC MVP)
 
-| Metric | Value |
-|--------|-------|
-| Story LOC total | 670 |
-| Reusable LOC | ~455 |
-| Net new LOC | ~215 |
-| Reuse % | 68% |
+**Session 13, ADR-034 / ADR-035 introduction.** This story is the single largest code-lift in the entire manifest. It introduces an entirely new source repository (ruflo, via the `@claude-flow/guidance` package) and reframes the LOC budget for Epic 1 and the overall project. See ADR-034 for tier classification rationale and ADR-035 for the hook engine strategy that the tier-5 adapter binds against.
+
+| Source | File | LOC | Reuse Type | What to Lift |
+|--------|------|-----|------------|-------------|
+| ruflo | `v3/@claude-flow/guidance/src/types.ts` | ~435 | DIRECT_COPY | Shared type definitions: `RiskClass`, `ToolClass`, `TaskIntent`, `GuidanceRule`, `RuleShard`, `Constitution`, `RuleManifest`, `PolicyBundle`, `GateDecision`, `GateResult`, `GateConfig`, `RunEvent`, `Violation`, `EvaluatorResult`. Foundation — every other tier-1 file imports from this. |
+| ruflo | `v3/@claude-flow/guidance/src/crypto-utils.ts` | ~26 | DIRECT_COPY | Small hash/signing helper for rule IDs. Node built-in `createHash` only. |
+| ruflo | `v3/@claude-flow/guidance/src/gates.ts` | ~339 | DIRECT_COPY | **`EnforcementGates` class with 4 gates (destructive ops, tool allowlist, diff size, secrets).** Hard-coded 8 secret regexes (API keys, private keys, `sk-*`, `ghp_*`, `npm_*`, AWS) and 12 destructive patterns (`rm -rf`, `DROP TABLE`, `git push --force`, `git reset --hard`). Directly operationalizes QDS invariants 9 (credential isolation) and 10 (git safety). |
+| ruflo | `v3/@claude-flow/guidance/src/proof.ts` | ~369 | DIRECT_COPY | Mechanical proof-of-compliance generation. Invariant 3 (evidence-backed PRs). |
+| ruflo | `v3/@claude-flow/guidance/src/ledger.ts` | ~461 | DIRECT_COPY | **`RunLedger` + `IEvaluator` interface + 5 built-in evaluators: `TestsPassEvaluator`, `ForbiddenCommandEvaluator`, `ForbiddenDependencyEvaluator`, `ViolationRateEvaluator`, `DiffQualityEvaluator`.** Highest-value file in the lift — `IEvaluator` interface is 6 lines and directly maps to QDS's mechanical gate taxonomy at phase boundaries. |
+| ruflo | `v3/@claude-flow/guidance/src/retriever.ts` | ~482 | DIRECT_COPY | `ShardRetriever` + `HashEmbeddingProvider` (non-semantic fallback). Intent classification across 12 categories via regex. **Runs without HNSW / ONNX / any vector store** — critical for avoiding the ReasoningBank stack. |
+| ruflo | `v3/@claude-flow/guidance/src/continue-gate.ts` | ~533 | DIRECT_COPY | Gate that determines whether a run should continue. Invariant 5 component. |
+| ruflo | `v3/@claude-flow/guidance/src/memory-gate.ts` | ~584 | DIRECT_COPY | Gate that manages memory/context handoffs. Invariants 5 + 7. |
+| ruflo | `v3/@claude-flow/guidance/src/authority.ts` | ~768 | DIRECT_COPY | Authority chain resolution for rule precedence. |
+| ruflo | `v3/@claude-flow/guidance/src/capabilities.ts` | ~639 | DIRECT_COPY | Capability classification (tool → risk class mapping). |
+| ruflo | `v3/@claude-flow/guidance/src/compiler.ts` | ~532 + ~200–400 adaptation | ADAPT | **Integration Decision 1 from ADR-034** — compiler is lifted whole, then adapted (~200–400 LOC) to parse overstory's overlay format (`src/agents/overlay.ts` output) instead of ruflo's CLAUDE.md rule syntax. All QDS-specific edits tagged `// QDS:` per fork hygiene; tracked in `factory-core/src/guidance/UPSTREAM_DELTA.md`. |
+| ruflo | `v3/@claude-flow/guidance/src/index.ts` | ~754 | ADAPT | Public API surface + factory functions (`createCompiler`, `createGates`, `createLedger`, `createRetriever`). Heavily edited to remove exports for deferred/dropped tier files and to add QDS-specific re-exports. |
+| ruflo | `v3/@claude-flow/guidance/src/hooks.ts` | 465 (deleted) | REPLACE | **Tier 5 — adapter rewrite.** The lifted `hooks.ts` is deleted and replaced with `factory-core/src/guidance/hooks-adapter.ts` (~500 LOC new write) that binds `EnforcementGates` + `IEvaluator` implementations against Factory Core's hook engine (ADR-035), NOT against `@claude-flow/hooks`. Net LOC delta: roughly +35 (adapter is larger than the deleted file because it must handle the dual-plane coordination from ADR-035). |
+| factory-core | `src/guidance/qds-evaluators.ts` | ~150 | NEW_WRITE | First QDS-specific evaluator. Recommended: `PiSdkCostBudgetEvaluator` implementing `IEvaluator` against `attribution.db` cost data to operationalize invariant 8 (cost circuit breakers). Demonstrates the extension pattern. |
+| factory-core | `src/hooks/*` (engine from ADR-035) | ~400 | NEW_WRITE | **ADR-035 in-process hook engine.** Built inside Story 1.7 as a prerequisite for `hooks-adapter.ts`. `FactoryHookEvent` enum (16 events), `FactoryHookPriority` enum (5 tiers), `FactoryHookRegistry`, `FactoryHookExecutor`, severity aggregation (reuses the same `DECISION_SEVERITY` constant from lifted `gates.ts`). Clean-room implementation — concepts borrowed from `@claude-flow/hooks` design, zero code lifted from the hooks package. |
+| factory-core | `THIRD_PARTY_LICENSES.md` | ~30 | NEW_WRITE | MIT license vendoring manifest (first entry: `@claude-flow/guidance` lifted from `_research-repos/ruflo @ commit b395d12`). |
+
+**Estimated LOC savings:** ~6,922 (tier-1 files lifted as-is or with targeted adaptation — the compiler's overlay-format rework is a cost, but everything else is direct reuse of tested, MIT-licensed enforcement code)
+**Net new LOC:** ~1,050 (tier-5 adapter ~500 + QDS evaluators ~150 + ADR-035 hook engine ~400)
+**Total MVP scope:** ~7,422 LOC
+**Spike ceiling (tier-2 promotions):** +~1,500–3,000 LOC if Story 1.7's spike validates `adversarial.ts` (801 LOC), `trust.ts` (634 LOC), and/or `conformance-kit.ts` (1,000 LOC). Post-spike tier-2 work lands in a follow-on story if warranted, not Story 1.7.
+**CRITICAL FINDING (ADR-034):** `@claude-flow/guidance` is the **only** ruflo package that can be lifted cleanly. Its outbound dependency graph (verified via gitnexus cypher, session 12 + session 13) contains exactly 4 edges to other `@claude-flow/*` packages, and the single `@claude-flow/hooks` import is confined to `src/hooks.ts` (the tier-5 adapter file). Zero runtime dependency on `@claude-flow/memory` (HNSW + AgentDB), `@claude-flow/neural` (ReasoningBank), `@claude-flow/embeddings` (ONNX MiniLM-L6), or `@claude-flow/aidefence`. This is the structural fact that makes the lift feasible without dragging the full ruflo stack.
+**CRITICAL FINDING (ADR-035):** `@claude-flow/hooks` is **NOT** lifted. Verified 10,925 LOC package with outbound coupling into `@claude-flow/memory/hnsw-index.ts` (4 refs), `@claude-flow/embeddings/rvf-embedding-service.ts` (3 refs), `@claude-flow/memory/agentdb-adapter.ts` (1 ref), and `@claude-flow/neural/reasoning-bank.ts` (1 ref) would drag the ReasoningBank / HNSW / ONNX / AgentDB stack into Factory Core. Instead, Factory Core builds a ~400 LOC clean-room in-process hook engine that sits above overstory's existing `hooks-deployer.ts` edge plane (606 LOC, unchanged). Concepts borrowed from ruflo's hooks design (priority registration, timeout wrap, pre/post event pairs, typed result aggregation); no code lifted.
+**Design patterns from research repos:**
+- ruflo (`@claude-flow/hooks`): Priority-based hook registration + executor split + timeout-wrapped execution + typed result aggregation — borrowed as **design patterns only**, not code. See ADR-035 "Borrowed Concepts" table.
+- overstory (`src/agents/hooks-deployer.ts`, 606 LOC): Edge-plane POSIX shell script generation for Claude Code tool-use boundaries. Unchanged, reused as-is via `ov hooks install`. The dual-plane architecture from ADR-035 puts this alongside Factory Core's in-process plane — not replaced, not duplicated.
+- overstory (`src/insights/analyzer.ts` + `src/mulch/client.ts`): Pattern reference for how QDS-specific evaluators capture learning signals. First concrete example: `PiSdkCostBudgetEvaluator` consuming `attribution.db`.
+**License compliance:** Ruflo is MIT-licensed (`_research-repos/ruflo/LICENSE` lines 1–21, Copyright 2024–2026 ruvnet). Vendoring via `factory-core/THIRD_PARTY_LICENSES.md` manifest per ADR-034 Integration Decision 4.
+**Upstream drift monitoring:** Ruflo is an active project (6,000+ commits, claude-flow v3.5 rebranded). Monitor `@claude-flow/guidance` changelog quarterly via `_research-repos/ruflo` re-index + cypher diff against the lifted subset. Material compiler changes (rule syntax regexes at `compiler.ts:28-50`) require attention because of Integration Decision 1 (overstory overlay format adaptation).
+
+---
+
+### Epic 1 Subtotals (Updated by Session 13 — ADR-034)
+
+| Metric | Pre-Session-13 | Session 13 (with Story 1.7) | Delta |
+|--------|----------------|-----------------------------|-------|
+| Story LOC total | 670 | **~8,092** | **+7,422** |
+| Reusable LOC | ~455 | **~7,377** | **+6,922** |
+| Net new LOC | ~215 | **~1,265** (Epic 1 base 215 + Story 1.7 adapter/engine/evaluators 1,050) | **+1,050** |
+| Reuse % | 68% | **~91%** | +23 pts |
+
+**Note on the LOC jump:** Epic 1's scope grew by an order of magnitude in Story 1.7 because the enforcement-layer gap identified in session 12 was load-bearing. Session 12's bias-stripped rubric scored overstory at 90/135 — the 45-point gap was almost entirely in invariant 5 (phase-boundary gates, subscore 6/10). Story 1.7 closes that gap via the guidance lift rather than forcing ruflo adoption. The high reuse percentage (~91%) reflects that ~7,000 LOC of this scope is *tested, MIT-licensed, mechanically-verified enforcement code* being adapted rather than written from scratch. The alternative — writing 7,000 LOC of compiler / gates / ledger / evaluators / retriever from scratch — was rejected in ADR-034 Alternative D.
 
 ---
 
@@ -1148,20 +1188,22 @@
 
 ## Section 2: REUSE SUMMARY TABLE
 
-### Overall Project Totals
+### Overall Project Totals (Updated by Session 13 — ADR-034 / ADR-035)
 
-| Metric | Value |
-|--------|-------|
-| **Total estimated LOC (all stories)** | **6,470** |
-| **Total reusable LOC from source repos** | **2,032** |
-| **Net new LOC required** | **4,438** |
-| **Overall reuse percentage** | **31.4%** |
+| Metric | Pre-Session-13 | Session 13 | Delta |
+|--------|----------------|------------|-------|
+| **Total estimated LOC (all stories)** | **6,470** | **13,892** | **+7,422** |
+| **Total reusable LOC from source repos** | **2,032** | **8,954** | **+6,922** |
+| **Net new LOC required** | **4,438** | **4,938** | **+500** (tier-5 adapter net) |
+| **Overall reuse percentage** | **31.4%** | **64.5%** | +33.1 pts |
+
+**Note on the budget shift (Session 13):** Story 1.7 (`@claude-flow/guidance` lift per ADR-034) introduces ~7,422 LOC of scope that was NOT in the original 6,470 LOC planning budget. This is the single largest scope change since session 8 eliminated Drizzle ORM + credit economy. The scope change is justified by the bias-stripped orchestrator re-evaluation (session 12 findings, formalized in ADR-033): invariant 5 (phase-boundary gates) needs a mechanical enforcement engine, and the cleanest path to one is a tiered lift from ruflo's MIT-licensed `@claude-flow/guidance` package rather than writing ~7,000 LOC from scratch (rejected as ADR-034 Alternative D) or adopting ruflo wholesale (rejected as ADR-033 / ADR-034 Alternative E). The ~91% reuse percentage for Epic 1 and the +33 percentage point jump in the project-wide reuse rate reflect that most of the new scope is code-lift, not new-write.
 
 ### Breakdown by Epic
 
 | Epic | Scope | Estimated LOC | Reusable LOC | Net New LOC | Reuse % |
 |------|-------|---------------|-------------|-------------|---------|
-| 1 | Foundation | 670 | 455 | 215 | 68% |
+| 1 | Foundation (incl. Story 1.7 guidance lift) | **8,092** | **7,377** | **1,265** | **91%** |
 | 2 | Middleware Chain | 390 | 125 | 265 | 32% |
 | 3 | Verification | 660 | 140 | 520 | 21% |
 | 4 | Turn Continuation | 650 | 235 | 415 | 36% |
@@ -1171,32 +1213,37 @@
 | 8 | Notifications/Health | 550 | 165 | 385 | 30% |
 | 9 | Dashboard Extensions | 1,220 | 432 | 788 | 35% |
 | 10 | Growth Behavioral | 730 | 50 | 680 | 7% |
-| **TOTAL** | | **6,470** | **2,032** (note 1) | **4,438** | **31.4%** |
+| **TOTAL** | | **13,892** | **8,954** (note 1, note 2) | **4,938** | **64.5%** |
 
-*Note 1: Reusable LOC increased from 1,630 to 2,032 due to Story 9.0 carry-forward accounting (332 LOC), new stories 1.6, 2.9, 4.0 contributing additional code-lift references, and corrected Epic 7/10 story sums.*
+*Note 1: Reusable LOC increased from 1,630 (original) to 2,032 (session 10) to 8,954 (session 13). The session-10 jump reflected Story 9.0 carry-forward accounting (332 LOC) and new stories 1.6, 2.9, 4.0. The session-13 jump reflects Story 1.7's ~6,922 LOC tier-1 lift from `@claude-flow/guidance`.*
 
-### Breakdown by Reuse Type
+*Note 2: The session-13 reusable LOC count treats the guidance tier-1 files as DIRECT_COPY with targeted ADAPT on `compiler.ts` (~200–400 LOC of overlay-format adaptation per ADR-034 Integration Decision 1) and `index.ts` (export-list pruning). The ~6,922 figure is the upper bound assuming the spike validates all tier-1 files as lift-able. Story 1.7's spike phase measures the actual per-file adaptation cost and updates the ADR-034 tier table with measured findings.*
+
+### Breakdown by Reuse Type (Updated by Session 13)
 
 | Reuse Type | Description | LOC Savings | % of Total Reuse |
 |------------|-------------|-------------|------------------|
-| DIRECT_COPY | Import/copy with minimal changes | ~650 | 32.0% |
-| ADAPT | Modify structure/types for QDS context | ~912 | 44.8% |
-| PATTERN_COPY | Replicate design pattern, new implementation | ~250 | 12.3% |
-| INTERFACE_CARRY | Carry type definitions across packages | ~160 | 7.9% |
-| API_CONSUME | Call external API, write integration glue | ~60 | 3.0% |
-| STUDY / ADAPT_PATTERN | Design reference only (ZeroClaw Rust, research) | Patterns only | N/A |
-| **TOTAL** | | **2,032** | **100%** |
+| DIRECT_COPY | Import/copy with minimal changes | ~6,972 (650 pre + 6,322 guidance tier-1 less compiler/index adaptation) | 77.9% |
+| ADAPT | Modify structure/types for QDS context | ~1,512 (912 pre + 600 guidance compiler/index) | 16.9% |
+| PATTERN_COPY | Replicate design pattern, new implementation | ~250 | 2.8% |
+| INTERFACE_CARRY | Carry type definitions across packages | ~160 | 1.8% |
+| API_CONSUME | Call external API, write integration glue | ~60 | 0.7% |
+| STUDY / ADAPT_PATTERN | Design reference only (ZeroClaw Rust, research, ruflo `@claude-flow/hooks` concepts) | Patterns only | N/A |
+| **TOTAL** | | **~8,954** | **100%** |
 
-### Breakdown by Source Repository
+**Note on the DIRECT_COPY surge:** Pre-session-13, DIRECT_COPY was 32.0% of reuse (~650 LOC). Session 13's guidance lift makes it the dominant category at ~78% (~6,972 LOC) because most of the tier-1 guidance files lift whole with only import-path adjustments. ADAPT remains the second-largest category, led by the `compiler.ts` overlay-format rework (Integration Decision 1 in ADR-034) and `index.ts` export-list pruning. PATTERN_COPY / INTERFACE_CARRY / API_CONSUME percentages shrink proportionally but absolute LOC is unchanged.
+
+### Breakdown by Source Repository (Updated by Session 13)
 
 | Source Repo | Total Reusable LOC | Primary Target Epics | Key Modules |
 |-------------|-------------------|---------------------|-------------|
-| **Overstory** | ~1,190 | 1, 2, 3, 4, 5, 6, 7, 8 | types.ts, sessions/store.ts, config.ts, watchdog/*, metrics/*, insights/analyzer.ts, agents/overlay.ts, merge/resolver.ts |
+| **Overstory** | ~1,190 | 1, 2, 3, 4, 5, 6, 7, 8 | types.ts, sessions/store.ts, config.ts, watchdog/*, metrics/*, insights/analyzer.ts, agents/overlay.ts, merge/resolver.ts, **agents/hooks-deployer.ts (ADR-035 edge plane, unchanged)** |
 | **Pi-Mono** | ~170 | 1, 2, 4, 5, 6, 10 | ai/types.ts, agent/types.ts, Agent class API, Usage callback, transformContext, ModelRegistry |
 | **Superpowers** | ~210 (import) | 2 | skills-core.js (IMPORT_AS_IS with .d.ts) |
+| **Ruflo (`@claude-flow/guidance`)** | **~6,922** (tier-1 per ADR-034) | **1 (Story 1.7)** | **`types.ts`, `crypto-utils.ts`, `gates.ts`, `proof.ts`, `ledger.ts` (incl. `IEvaluator` + 5 built-in evaluators), `retriever.ts` (incl. `HashEmbeddingProvider` non-semantic fallback), `continue-gate.ts`, `memory-gate.ts`, `authority.ts`, `capabilities.ts`, `compiler.ts` (adapted to overstory overlay format), `index.ts` (export-list pruned). NOT lifted: `@claude-flow/hooks` (10,925 LOC, drags ReasoningBank/HNSW/ONNX stack per ADR-035).** MIT license, `_research-repos/ruflo @ commit b395d12`. |
 | **ZeroClaw** | ~432 | 9, 10 | web/src/lib/sse.ts, web/src/lib/ws.ts, React hooks, carry-forward files (Story 9.0) |
 | **Claude-Mem** | ~120 | 1, 4, 6, 7 | MigrationRunner, SessionManager, PendingMessageStore, ContextBuilder |
-| **Research Repos** | Patterns only | All | deer-flow middleware, GSD Nyquist, symphony GenServer, paperclip adapter |
+| **Research Repos** | Patterns only | All | deer-flow middleware, GSD Nyquist, symphony GenServer, paperclip adapter, **ruflo `@claude-flow/hooks` (concepts only for ADR-035 in-process hook engine)** |
 
 ---
 
@@ -1262,6 +1309,56 @@
 **Impact:** Story 6.3
 **Detail:** PendingMessageStore's atomic claim-confirm pattern (~100 LOC savings) uses the exact same UNIQUE constraint + timeout-based release mechanism that task_checkouts needs. This is a closer match than Overstory's session store pattern for this specific use case.
 
+### 11. Overstory Is the Agent Orchestration Base — Scope-Closed (NEW FINDING, Session 13, ADR-033)
+
+**Source:** Session 12 bias-stripped re-evaluation + fresh gitnexus cypher queries (overstory indexed 2026-04-11 commit `7872d54`, ruflo indexed 2026-04-11 commit `b395d12`)
+**Impact:** All 64 stories — establishes that the orchestration substrate is overstory, not ruflo, not a from-scratch build
+**Detail:** After the discovery of ruvnet/ruflo on 2026-04-11 and Steve's correct pushback that prior ADRs were biased toward overstory without neutral re-evaluation, session 12 conducted a bias-stripped re-derivation of QDS invariants from PRD-v2 alone and scored three candidates (overstory, ruflo, build-fresh) against a 135-point rubric weighted by invariant criticality. **Result: Overstory 90/135, Ruflo 54/135, Build Fresh 10/135.** Overstory wins 9 of 10 invariants. Ruflo wins on enforcement-layer maturity (invariant 5, subscore 8 vs 6) — but this gap is addressed by the ADR-034 guidance lift without forcing ruflo adoption. Critical structural findings: ruflo has **0 worktree files, 0 tmux files** (verified three ways), and its `PhaseId` is product-roadmap phases, not pipeline phases. ADR-033 is scope-closed — re-opening requires either a new invariant overstory structurally cannot satisfy, a measured regression in overstory's relevant subsystems, a rubric delta of ≥ 20 points with the same methodology, or a material change in ruflo's structural shape (e.g., ruflo growing worktree primitives). See `_bmad-output/planning-artifacts/session12-ruflo-evaluation-findings.md` for the full evidence chain and `architecture-v2-session12-amendments.md` ADR-033 for the formalized decision.
+
+### 12. Invariant vs Mechanism Reclassification — Prior ADRs Were Biased Toward Overstory Mechanisms (NEW FINDING, Session 13, ADR-033)
+
+**Source:** Session 12 Part A invariant re-derivation from PRD v2 alone (not from existing ADRs)
+**Impact:** Every story that cites a "mechanism as invariant" should read that citation as a mechanism claim, not an architectural requirement
+**Detail:** Several items previously written into ADRs as if architectural are actually **implementation-choice mechanisms** that overstory happens to provide — swappable without breaking QDS's contract with the developer. The following mechanisms were written into ADRs 001–023 as if they were invariants, but they are not:
+
+- Tmux-based session management
+- Git worktrees specifically
+- The 6-layer hook taxonomy with its specific names
+- SQLite databases specifically
+- Mail-based inter-agent coordination
+- TDD file-pair enforcement
+- The 6-database ownership split
+- Action scoring via hook heuristics
+- Daily/weekly learning cadence
+- The 50%/8K context budget rule
+- ELO ratings
+
+The genuine invariants are:
+
+- Dev↔review context isolation
+- Atomic story concurrency
+- Evidence-backed PRs
+- Cost attribution chains
+- Mechanical phase-boundary gates
+- Learning injection
+- Cost circuit breakers
+- Credential isolation
+- Git safety
+
+Step 5 of session 13 performs a targeted correction pass on `architecture-v2.md` to tag conflation sites in-place. **Implementation implication:** story acceptance criteria that reference a mechanism (e.g., "using tmux" or "via mail.db") should be read as "using overstory's current mechanism for X" — the QDS invariant is X, not tmux or mail.db specifically.
+
+### 13. Ruflo `@claude-flow/guidance` Is the Cleanest Lift in the Entire Ruflo Repository (NEW FINDING, Session 13, ADR-034)
+
+**Source:** Session 12 + session 13 cypher dependency analysis, session 13 direct source reading
+**Impact:** Story 1.7
+**Detail:** `@claude-flow/guidance` (32 files, 22,349 LOC source, ~19,438 LOC test) is the **only** ruflo package with a clean-lift profile. Key findings: (1) Exactly 4 outbound edges to other `@claude-flow/*` packages — browser/2, hooks/1, plugins/1 — and the hooks and plugins references live inside a single adapter file `src/hooks.ts` (465 LOC, the tier-5 replacement target). (2) Zero runtime imports from `@claude-flow/memory` (HNSW + AgentDB), `@claude-flow/neural` (ReasoningBank), `@claude-flow/embeddings` (ONNX), or `@claude-flow/aidefence`. (3) `retriever.ts` has a non-semantic `HashEmbeddingProvider` fallback that works without any vector store. (4) `gates.ts` secret regexes and destructive patterns (8 + 12 patterns respectively) immediately operationalize QDS invariants 9 and 10 with zero adaptation. (5) `ledger.ts` `IEvaluator` interface is 6 lines and directly maps to QDS's mechanical gate taxonomy at phase boundaries; the 5 built-in evaluators (`TestsPassEvaluator`, `ForbiddenCommandEvaluator`, `ForbiddenDependencyEvaluator`, `ViolationRateEvaluator`, `DiffQualityEvaluator`) are the highest-value pieces of lift material. (6) MIT license confirmed (`_research-repos/ruflo/LICENSE` lines 1–21, Copyright 2024–2026 ruvnet). ADR-034 classifies the 32 files into 5 tiers: tier 1 full lift (~6,922 LOC, 12 files), tier 2 spike-then-decide (~9,390 LOC, 9 files), tier 3 defer to post-MVP (~5,322 LOC, 8 files), tier 4 drop (~1,250 LOC, 2 files), tier 5 replace-with-adapter (465 LOC → ~500 LOC QDS adapter). Story 1.7's 3-day spike validates tier-1 feasibility and evaluates up to 3 tier-2 files before committing to the full lift.
+
+### 14. Ruflo `@claude-flow/hooks` Is NOT Lifted — Dual-Plane Architecture Instead (NEW FINDING, Session 13, ADR-035)
+
+**Source:** Session 12 cypher coupling analysis, session 13 direct source reading of both `hooks-deployer.ts` and `@claude-flow/hooks/src/index.ts`
+**Impact:** Story 1.7 (builds the in-process hook engine as a Story 1.7 prerequisite for the tier-5 adapter)
+**Detail:** Session 12's cypher analysis confirmed `@claude-flow/hooks` (10,925 LOC across 47 files) has outbound coupling into `@claude-flow/memory/hnsw-index.ts` (4 refs), `@claude-flow/embeddings/rvf-embedding-service.ts` (3 refs), `@claude-flow/memory/agentdb-adapter.ts` (1 ref), and `@claude-flow/neural/reasoning-bank.ts` (1 ref). Lifting the package drags the ReasoningBank / HNSW / ONNX / AgentDB stack. **Session 13 direct source reading revealed a deeper structural truth** that reframes the decision entirely: overstory's `hooks-deployer.ts` (606 LOC) and ruflo's `@claude-flow/hooks` are **not two implementations of the same thing** — they are fundamentally different architectures at different runtime layers. Overstory's is a POSIX shell script generator producing `/bin/sh` scripts that Claude Code runs at tool-use boundaries (zero runtime dependencies). Ruflo's is a TypeScript in-process hook engine with `HookRegistry` / `HookExecutor` / typed `HookContext` / `HookHandler` / `HookPriority`. **Both layers are necessary. Neither replaces the other.** ADR-035 adopts a dual-plane architecture: overstory's edge plane stays unchanged (reused as-is via `ov hooks install`), Factory Core builds a ~400 LOC clean-room in-process plane (`factory-core/src/hooks/`) with concepts borrowed from ruflo's hooks design (priority registration, timeout wrap, pre/post event pairs, typed result aggregation) but zero lifted code. The two planes coordinate via Factory Core's pipeline engine — in-process results via `registry.execute(event, context)`, edge-plane results via `events.db` `hook_result` EventType (Story 1.6). The in-process plane is **instance-based per story**, not a global singleton (unlike ruflo's `defaultRegistry`) — this enforces invariant 1 (context isolation) at the hook-registry layer.
+
 ---
 
 ## Section 4: GAP ANALYSIS -- Stories with ZERO Code-Lift References
@@ -1298,7 +1395,7 @@ The following stories have **no reusable code** from any source repository and r
 | **5.4: Integration Wiring** | 30 | Replaces stub with real call. Straightforward wiring. |
 | **8.3: Webhook Channel** | 40 | Standard HTTP POST with retry. [Growth] |
 
-**Total 100% New LOC in Gap Stories:** ~1,320 LOC (21% of total project)
+**Total 100% New LOC in Gap Stories:** ~1,320 LOC (10% of total project)
 
 ---
 
@@ -1318,8 +1415,11 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 | 4 | **1.3** attribution.db Schema Extension | 20 | Depends on 1.2. Tiny story, unlocks budget enforcement (Epic 6). |
 | 5 | **1.4** Factory Core Process Skeleton | 170 | Depends on 1.1, 1.2, 1.3. Proves the startup sequence. High reuse from Overstory config.ts. |
 | 6 | **1.6** Overstory Schema Extensions | 40 | Depends on 1.4. Unlocks Stories 3.3, 8.8. Uses two Overstory-native patterns: probe-then-alter for ADD COLUMN operations (SessionStore pattern), table-rebuild for CHECK constraint modifications (SQLite limitation). |
+| 7 | **1.7** `@claude-flow/guidance` Lift Spike + Tier-1 Integration | **~7,422** | **Depends on 1.4 (Factory Core skeleton), 1.5 (Result<T> for gate/evaluator return types), ADR-035 hook engine contract (built inside this story). NEW session 13 story introduced by ADR-034. This is the mechanical enforcement core — lifts tier-1 files from `@claude-flow/guidance` (compiler, gates, proof, ledger with 5 evaluators, retriever, continue-gate, memory-gate, types, authority, capabilities, index), writes the tier-5 adapter binding gates and evaluators to Factory Core's in-process hook engine (ADR-035), and builds the hook engine itself as a Story 1.7 prerequisite. Blocks Story 4.x phase-boundary enforcement and Story 8.x quality gate enforcement. 3-day timeboxed spike precedes full implementation.** |
 
-**Phase 1 total:** 670 LOC, ~455 LOC reused (68% reuse)
+**Phase 1 total (updated session 13):** ~8,092 LOC, ~7,377 LOC reused (~91% reuse)
+
+**Note on the Phase 1 LOC shift:** Pre-session-13, Phase 1 was 670 LOC total. Session 13's Story 1.7 adds ~7,422 LOC of scope to the foundation phase because the enforcement layer is a day-one requirement per invariant 5 (session 12 findings Part A). Story 1.7 does not block any pre-1.7 story — it adds new scope alongside the existing foundation work, not in replacement of it. The ~91% reuse percentage reflects that most of Story 1.7's scope is lifted (tested, MIT-licensed) code rather than new-write.
 
 ### Phase 2: Middleware Chain (Unlocks Epics 3, 4, 5 in parallel)
 
@@ -1327,15 +1427,15 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 | Order | Story | LOC | Rationale |
 |-------|-------|-----|-----------|
-| 7 | **2.1** MiddlewareChain Executor | 100 | Depends on 1.1, 1.4. Core chain infrastructure. deer-flow middleware pattern as design reference. |
-| 8 | **2.9** TierResolver | 50 | Depends on 1.1, 1.4. Required by budget and credential middlewares. Pi SDK ModelRegistry validation. |
-| 9 | **2.2** Budget Middleware | 40 | Depends on 2.1. Fatal middleware -- must work early. Reuses Overstory pricing. |
-| 10 | **2.3** Credential Middleware | 30 | Depends on 2.1. Fatal middleware. Pi SDK getApiKey callback. |
-| 11 | **2.5** Enforcement Middleware | 30 | Depends on 2.1. Superpowers import (IMPORT_AS_IS). |
-| 12 | **2.6** Skill Middleware | 20 | Depends on 2.1. Shares Superpowers import with 2.5. |
-| 13 | **2.4** Learning Middleware | 50 | Depends on 2.1. Stub until Epic 7 populates learning records. |
-| 14 | **2.7** Verification Middleware | 30 | Depends on 2.1. Stub until Epic 3 implements real verifier. |
-| 15 | **2.8** Performance Middleware Stub | 40 | Depends on 2.1. Stub until Epic 5 implements real scorer. |
+| 8 | **2.1** MiddlewareChain Executor | 100 | Depends on 1.1, 1.4. Core chain infrastructure. deer-flow middleware pattern as design reference. |
+| 9 | **2.9** TierResolver | 50 | Depends on 1.1, 1.4. Required by budget and credential middlewares. Pi SDK ModelRegistry validation. |
+| 10 | **2.2** Budget Middleware | 40 | Depends on 2.1. Fatal middleware -- must work early. Reuses Overstory pricing. |
+| 11 | **2.3** Credential Middleware | 30 | Depends on 2.1. Fatal middleware. Pi SDK getApiKey callback. |
+| 12 | **2.5** Enforcement Middleware | 30 | Depends on 2.1. Superpowers import (IMPORT_AS_IS). |
+| 13 | **2.6** Skill Middleware | 20 | Depends on 2.1. Shares Superpowers import with 2.5. |
+| 14 | **2.4** Learning Middleware | 50 | Depends on 2.1. Stub until Epic 7 populates learning records. |
+| 15 | **2.7** Verification Middleware | 30 | Depends on 2.1. Stub until Epic 3 implements real verifier. |
+| 16 | **2.8** Performance Middleware Stub | 40 | Depends on 2.1. Stub until Epic 5 implements real scorer. |
 
 **Phase 2 total:** 390 LOC, ~125 LOC reused (32% reuse)
 
@@ -1347,37 +1447,37 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 | Order | Story | LOC | Rationale |
 |-------|-------|-----|-----------|
-| 16a | **3.1** must_haves Parser | 60 | Foundation for all verification. |
-| 17a | **3.2** Lightweight Verifier | 100 | Core verification logic. GSD Nyquist pattern. |
-| 18a | **3.3** Post-Task Hook Integration | 60 | Wires verifier into middleware. |
-| 19a | **3.4** Full Nyquist Verifier | 150 | LLM-powered verification. |
-| 20a | **3.5** Pre-BMAD Gate | 80 | Catches phantom completions. |
-| 21a | **3.6** Oscillation Detector | 60 | GAP STORY -- needs extra design attention. |
-| 22a | **3.7** Disagreement Protocol | 150 | Complex resolver. Reuses Overstory merge resolver. |
+| 17a | **3.1** must_haves Parser | 60 | Foundation for all verification. |
+| 18a | **3.2** Lightweight Verifier | 100 | Core verification logic. GSD Nyquist pattern. |
+| 19a | **3.3** Post-Task Hook Integration | 60 | Wires verifier into middleware. |
+| 20a | **3.4** Full Nyquist Verifier | 150 | LLM-powered verification. |
+| 21a | **3.5** Pre-BMAD Gate | 80 | Catches phantom completions. |
+| 22a | **3.6** Oscillation Detector | 60 | GAP STORY -- needs extra design attention. |
+| 23a | **3.7** Disagreement Protocol | 150 | Complex resolver. Reuses Overstory merge resolver. |
 
 **Workstream B: Turn Continuation (Epic 4)**
 
 | Order | Story | LOC | Rationale |
 |-------|-------|-----|-----------|
-| 16b-pre | **4.0** Orchestration Loop | 120 | Connects startup skeleton to turn engine. Symphony GenServer pattern. MUST precede 4.1. |
-| 16b | **4.1** Turn Continuation Loop | 120 | Core loop. Reuses Overstory watchdog daemon. |
-| 17b | **4.5** Workspace Lifecycle Hooks | 150 | Independent of turn loop. Symphony pattern. |
-| 18b | **4.2** Progress Velocity Check | 40 | Extends turn loop. |
-| 19b | **4.3** Turn State Persistence | 60 | Crash recovery. Reuses claude-mem patterns. |
-| 20b | **4.4** Continuation Prompt Template | 40 | Pi SDK transformContext injection. |
-| 21b | **4.6** Hook Rollback | 70 | Extends lifecycle hooks. |
-| 22b | **4.7** Stall Detection | 50 | Integrates with turn loop and circuit breaker. |
+| 17b-pre | **4.0** Orchestration Loop | 120 | Connects startup skeleton to turn engine. Symphony GenServer pattern. MUST precede 4.1. |
+| 17b | **4.1** Turn Continuation Loop | 120 | Core loop. Reuses Overstory watchdog daemon. |
+| 18b | **4.5** Workspace Lifecycle Hooks | 150 | Independent of turn loop. Symphony pattern. |
+| 19b | **4.2** Progress Velocity Check | 40 | Extends turn loop. |
+| 20b | **4.3** Turn State Persistence | 60 | Crash recovery. Reuses claude-mem patterns. |
+| 21b | **4.4** Continuation Prompt Template | 40 | Pi SDK transformContext injection. |
+| 22b | **4.6** Hook Rollback | 70 | Extends lifecycle hooks. |
+| 23b | **4.7** Stall Detection | 50 | Integrates with turn loop and circuit breaker. |
 
 **Workstream C: Performance Data (Epic 5)**
 
 | Order | Story | LOC | Rationale |
 |-------|-------|-----|-----------|
-| 16c | **5.1** Action Scorer | 120 | Core scoring. Reuses Overstory metrics patterns. |
-| 17c | **5.5** Learning Record Extractor | 100 | DIRECT_COPY from Overstory insights/analyzer. |
-| 18c | **5.2** Confidence Tracker | 80 | Statistical computation. |
-| 19c | **5.3** Session Composite | 100 | Aggregation layer. |
-| 20c | **5.4** Performance Middleware Integration | 30 | Replaces stub from 2.8. |
-| 21c | **5.6** Overlay Effectiveness Tracker | 80 | Measures learning system impact. |
+| 17c | **5.1** Action Scorer | 120 | Core scoring. Reuses Overstory metrics patterns. |
+| 18c | **5.5** Learning Record Extractor | 100 | DIRECT_COPY from Overstory insights/analyzer. |
+| 19c | **5.2** Confidence Tracker | 80 | Statistical computation. |
+| 20c | **5.3** Session Composite | 100 | Aggregation layer. |
+| 21c | **5.4** Performance Middleware Integration | 30 | Replaces stub from 2.8. |
+| 22c | **5.6** Overlay Effectiveness Tracker | 80 | Measures learning system impact. |
 
 **Phase 3 total:** 1,820 LOC across 3 workstreams, ~515 LOC reused (28% reuse)
 
@@ -1387,12 +1487,12 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 | Order | Story | LOC | Rationale |
 |-------|-------|-----|-----------|
-| 23 | **6.4** Cost Data Flow | 80 | Pi SDK Usage callback wiring. Foundation for budget queries. |
-| 24 | **6.1** Per-Story Budget Enforcement | 90 | Core enforcement. |
-| 25 | **6.2** Global Ceiling Enforcement | 80 | Extends per-story pattern. |
-| 26 | **6.3** Atomic Task Checkout | 90 | Claude-mem claim-confirm pattern. |
-| 27 | **6.5** Burn Rate Prediction | 60 | Feeds dashboard and notifications. |
-| 28 | **6.6** Budget Breach Notification | 50 | Soft dependency on MessageBus (Epic 8). |
+| 24 | **6.4** Cost Data Flow | 80 | Pi SDK Usage callback wiring. Foundation for budget queries. |
+| 25 | **6.1** Per-Story Budget Enforcement | 90 | Core enforcement. |
+| 26 | **6.2** Global Ceiling Enforcement | 80 | Extends per-story pattern. |
+| 27 | **6.3** Atomic Task Checkout | 90 | Claude-mem claim-confirm pattern. |
+| 28 | **6.5** Burn Rate Prediction | 60 | Feeds dashboard and notifications. |
+| 29 | **6.6** Budget Breach Notification | 50 | Soft dependency on MessageBus (Epic 8). |
 
 **Phase 4 total:** 450 LOC, ~130 LOC reused (29% reuse)
 
@@ -1404,24 +1504,24 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 | Order | Story | LOC |
 |-------|-------|-----|
-| 29 | **7.4** Epic Context Tables | 80 |
-| 30 | **7.1** Fix-Loop Learning Extraction | 100 |
-| 31 | **7.2** Maintenance Learning Extraction | 90 |
-| 32 | **7.5** Epic Context Assembly | 100 |
-| 33 | **7.6** Epic Context Extraction | 80 |
-| 34 | **7.7** Overlay Enrichment | 70 |
+| 30 | **7.4** Epic Context Tables | 80 |
+| 31 | **7.1** Fix-Loop Learning Extraction | 100 |
+| 32 | **7.2** Maintenance Learning Extraction | 90 |
+| 33 | **7.5** Epic Context Assembly | 100 |
+| 34 | **7.6** Epic Context Extraction | 80 |
+| 35 | **7.7** Overlay Enrichment | 70 |
 
 **Epic 8 (can start once Epic 1 is complete; 8.1-8.4 are independent of Epics 5-7):**
 
 | Order | Story | LOC |
 |-------|-------|-----|
-| 29' | **8.1** MessageBus | 110 |
-| 30' | **8.2** TelegramChannel | 60 |
-| 31' | **8.4** Routing Config | 40 |
-| 32' | **8.5** Circuit Breaker | 120 |
-| 33' | **8.6** Subsystem Monitor | 80 |
-| 34' | **8.7** Mitigations | 60 |
-| 35' | **8.8** Health Events | 40 |
+| 30' | **8.1** MessageBus | 110 |
+| 31' | **8.2** TelegramChannel | 60 |
+| 32' | **8.4** Routing Config | 40 |
+| 33' | **8.5** Circuit Breaker | 120 |
+| 34' | **8.6** Subsystem Monitor | 80 |
+| 35' | **8.7** Mitigations | 60 |
+| 36' | **8.8** Health Events | 40 |
 
 **Phase 5 total:** 1,030 LOC, ~305 LOC reused (30% reuse)
 
@@ -1431,15 +1531,15 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 | Order | Story | LOC | Notes |
 |-------|-------|-----|-------|
-| 36-pre | **9.0** ZeroClaw Carry-Forward | 20 | 6 files copied and adapted. MUST precede all other Epic 9 stories. |
-| 36 | **9.8** Bottom Drawer | 100 | Shell component, no data dependency. Can start early. |
-| 37 | **9.1** Performance Dashboard | 200 | ZeroClaw SSE/WS infrastructure reuse. |
-| 38 | **9.4** System Health Indicator | 180 | ZeroClaw WS pattern. |
-| 39 | **9.7** AmbientHeader Updates | 60 | Depends on 9.4. |
-| 40 | **9.2** Learning Effectiveness Panel | 180 | GAP STORY -- 100% new. |
-| 41 | **9.3** Burn Rate Prediction Panel | 150 | GAP STORY -- 100% new. |
-| 42 | **9.5** Epic Progress View | 200 | GAP STORY -- most complex novel UI. |
-| 43 | **9.6** Copilot Interactions | 130 | Depends on all other Epic 9 views. |
+| 37-pre | **9.0** ZeroClaw Carry-Forward | 20 | 6 files copied and adapted. MUST precede all other Epic 9 stories. |
+| 37 | **9.8** Bottom Drawer | 100 | Shell component, no data dependency. Can start early. |
+| 38 | **9.1** Performance Dashboard | 200 | ZeroClaw SSE/WS infrastructure reuse. |
+| 39 | **9.4** System Health Indicator | 180 | ZeroClaw WS pattern. |
+| 40 | **9.7** AmbientHeader Updates | 60 | Depends on 9.4. |
+| 41 | **9.2** Learning Effectiveness Panel | 180 | GAP STORY -- 100% new. |
+| 42 | **9.3** Burn Rate Prediction Panel | 150 | GAP STORY -- 100% new. |
+| 43 | **9.5** Epic Progress View | 200 | GAP STORY -- most complex novel UI. |
+| 44 | **9.6** Copilot Interactions | 130 | Depends on all other Epic 9 views. |
 
 **Phase 6 total:** 1,220 LOC, ~432 LOC reused (35% reuse)
 
@@ -1449,37 +1549,71 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 | Order | Story | LOC | Notes |
 |-------|-------|-----|-------|
-| 44 | **10.1** ELO Rating | 100 | Foundation for all Growth behavioral effects. |
-| 45 | **10.2** Tier Evaluation | 90 | GAP STORY -- novel, extra design needed. |
-| 46 | **10.3** Tier Demotion | 70 | GAP STORY. |
-| 47 | **10.6** Anti-Gaming | 80 | GAP STORY -- policy enforcement. |
-| 48 | **10.4** Task Routing | 80 | Uses ELO + tiers. |
-| 49 | **10.5** Random Audit | 60 | GAP STORY. |
-| 50 | **10.7** ELO Migration | 80 | Versioned epochs. |
-| 51 | **7.3** Pattern Knowledge Mining | 120 | Growth automation of Layer 2. |
-| 52 | **10.9** Automated Pattern Mining | 90 | Extends 7.3 to daily automation. |
-| 53 | **10.8** Channel Status Panel | 80 | Dashboard Growth component. |
-| 54 | **8.3** Webhook Channel | 40 | Growth extensibility. |
+| 45 | **10.1** ELO Rating | 100 | Foundation for all Growth behavioral effects. |
+| 46 | **10.2** Tier Evaluation | 90 | GAP STORY -- novel, extra design needed. |
+| 47 | **10.3** Tier Demotion | 70 | GAP STORY. |
+| 48 | **10.6** Anti-Gaming | 80 | GAP STORY -- policy enforcement. |
+| 49 | **10.4** Task Routing | 80 | Uses ELO + tiers. |
+| 50 | **10.5** Random Audit | 60 | GAP STORY. |
+| 51 | **10.7** ELO Migration | 80 | Versioned epochs. |
+| 52 | **7.3** Pattern Knowledge Mining | 120 | Growth automation of Layer 2. |
+| 53 | **10.9** Automated Pattern Mining | 90 | Extends 7.3 to daily automation. |
+| 54 | **10.8** Channel Status Panel | 80 | Dashboard Growth component. |
+| 55 | **8.3** Webhook Channel | 40 | Growth extensibility. |
 
 **Phase 7 total:** 890 LOC (all Growth), ~65 LOC reused (7% reuse)
 
 ---
 
-### Priority Summary
+### Priority Summary (Updated Session 14)
 
 | Phase | Epics | LOC | Reuse % | Parallelism |
 |-------|-------|-----|---------|-------------|
-| 1. Foundation | 1 | 670 | 68% | Sequential |
+| 1. Foundation | 1 (incl. Story 1.7) | 8,092 | 91% | Sequential |
 | 2. Middleware | 2 | 390 | 32% | Sequential |
 | 3. Three Workstreams | 3, 4, 5 | 1,820 | 28% | **3-way parallel** |
 | 4. Economics | 6 | 450 | 29% | Sequential |
 | 5. Learning + Health | 7, 8 | 1,030 | 30% | **2-way parallel** |
 | 6. Dashboard | 9 | 1,220 | 35% | Partially parallel |
 | 7. Growth | 10 + Growth stories | 890 | 7% | Partially parallel |
-| **TOTAL** | | **6,470** | **31%** | |
+| 8. Session 14 (Attractor) | 11 + 2.10, 2.11, 4.8 | 2,180 | 0% | Sequential |
+| **TOTAL** | | **16,072** | **55.7%** | |
 
-**Key insight:** Phases 1-2 (1,060 LOC, 55% reuse) establish the scaffolding that maximizes reuse for all subsequent phases. Investing in careful code-lifting during these phases pays dividends throughout the project. Phase 3's three-way parallelism is the largest acceleration opportunity.
+**Key insight:** Session 13's Story 1.7 (`@claude-flow/guidance` lift per ADR-034) shifted Phase 1 from 670 LOC at 68% reuse to 8,092 LOC at 91% reuse, and the project-wide reuse rate from 31% to 64.5%. The net-new LOC only grows by ~500 (4,438 → 4,938) because the bulk of Story 1.7 is lifted MIT-licensed code. Phases 1–2 (8,482 LOC, ~89% reuse) now establish the scaffolding that maximizes reuse for all subsequent phases. Phase 3's three-way parallelism remains the largest acceleration opportunity.
 
 ---
 
-*End of Code-Lift Manifest v2.0 — Session 10 update. 4 new stories added (1.6, 2.9, 4.0, 9.0), totals revised with corrected story sums, priority order updated.*
+---
+
+### Session 14: Attractor NLSpec Integration (Epic 11 + Stories 2.10, 2.11, 4.8)
+
+**Pattern source:** StrongDM Attractor (https://github.com/strongdm/attractor), Apache 2.0
+
+Attractor is a PATTERN SOURCE — no code is lifted. All implementations are 100% new-write following QDS conventions. Three NLSpecs (`attractor-spec.md`, `coding-agent-loop-spec.md`, `unified-llm-spec.md`) provide design patterns for pipeline graph DSL, agent loop enhancements, and provider resilience.
+
+| Story | Source | Reuse Type | What We Take |
+|-------|--------|-----------|-------------|
+| 2.10 (Provider Adapter Contract) | Attractor `unified-llm-spec.md` §7 | PATTERN_SOURCE | Formal adapter interface with capability discovery flags |
+| 2.11 (Fidelity Modes) | Attractor `attractor-spec.md` fidelity modes | PATTERN_SOURCE | Named context carryover modes (full/truncated/compact) per stage |
+| 4.8 (Semantic Loop Detection) | Attractor `coding-agent-loop-spec.md` loop detection | PATTERN_SOURCE | Repeated tool pattern detection; warning injection mid-loop |
+| 11.1 (Graph Parser) | Attractor `attractor-spec.md` §§1-3 | PATTERN_SOURCE | Node/edge graph model; validation lint rules |
+| 11.2 (Graph Template) | Attractor `attractor-spec.md` §§1-3 | PATTERN_SOURCE | Declarative graph representation for pipeline stages |
+| 11.3 (Fallback Chains) | Attractor `unified-llm-spec.md` §6 | PATTERN_SOURCE | Automatic failover with backoff/jitter |
+| 11.4 (Error Taxonomy) | Attractor `unified-llm-spec.md` §6 | PATTERN_SOURCE | Error classification with retryability |
+| 11.5 (Human Gates) | Attractor `attractor-spec.md` §6 | PATTERN_SOURCE | Interactive approval workflow; multi-backend Interviewer |
+| 11.6 (Local Env Adapter) | Attractor `coding-agent-loop-spec.md` Exec Env | PATTERN_SOURCE | Execution environment contract abstraction |
+| 11.7 (Docker Env Adapter) | Attractor `coding-agent-loop-spec.md` Exec Env | PATTERN_SOURCE | Execution environment contract abstraction |
+
+**Session 14 LOC:** +2,180 (380 MVP new-write, 1,800 Growth new-write, 0% reuse — all pattern-inspired)
+
+### Critical Findings (Session 14)
+
+**#15: Pipeline graph DSL adopted for Growth extensibility; MVP fixed pipeline preserved (invariant #6).** The YAML graph representation (ADR-036) is a declarative layer on top of ADR-006's fixed pipeline ordering and ADR-021's middleware chain. Custom graphs are Growth-only. The default 5-phase template is immutable.
+
+**#16: Provider adapter contract formalizes Pi SDK's implicit contract; does not fork Pi SDK.** `ProviderCapabilities` (ADR-037) wraps `Model<Api>` — it computes capability flags from existing metadata. Zero changes to Pi SDK internals. If Pi SDK changes its type definitions, capability computation updates accordingly.
+
+**#17: Human gate nodes adopted for Growth; MVP mechanical gates unchanged.** Human gates (ADR-039) are opt-in node types in custom pipeline graphs. The default 5-phase template has no human gates. All MVP mechanical quality gates (ADR-010, ADR-035) remain the primary enforcement mechanism.
+
+---
+
+*End of Code-Lift Manifest v2.2 — Session 14 update. Attractor added as PATTERN_SOURCE (10 story entries, 0% code reuse, 100% new-write). Session 14 additions: Stories 2.10, 2.11, 4.8 + Epic 11 (Stories 11.1-11.7). 3 critical findings (#15-#17). Project totals: 16,072 LOC (13,892 prior + 2,180 new). Session 10/11/13 entries unchanged.*
