@@ -180,7 +180,20 @@
     const effort = node.effort ?? workflowLevelOptions.effort;
   ```
 
-- [ ] **Step 3.2: Add per-node env injection block**
+- [ ] **Step 3.2: Update expandEnvVarsInRecord regex**
+
+  In `/Users/steve/archon/packages/workflows/src/dag-executor.ts`, update `expandEnvVarsInRecord` (around line 314) from:
+  ```typescript
+    result[key] = val.replace(/\$([A-Z_][A-Z0-9_]*)/g, (_, varName: string) => {
+  ```
+  To:
+  ```typescript
+    result[key] = val.replace(/\$(?:\{([A-Z_][A-Z0-9_]*)\}|([A-Z_][A-Z0-9_]*))/g, (_, varName1: string, varName2: string) => {
+      const varName = varName1 ?? varName2;
+  ```
+  This supports both `$VAR_NAME` and `${VAR_NAME}` syntax as used in workflow YAML (PRD §7.1, §Task 3 critical syntax finding).
+
+- [ ] **Step 3.3: Add per-node env injection block**
 
   In `/Users/steve/archon/packages/workflows/src/dag-executor.ts`, change the block from:
   ```typescript
@@ -211,13 +224,13 @@
     // Per-node overrides take precedence over workflow-level defaults; maxBudgetUsd and systemPrompt are per-node only
   ```
 
-- [ ] **Step 3.3: Run type-check**
+- [ ] **Step 3.4: Run type-check**
 
   Run: `cd /Users/steve/archon/packages/workflows && bun run typecheck 2>&1 | tail -10`
 
   Expected: No type errors.
 
-- [ ] **Step 3.4: Commit**
+- [ ] **Step 3.5: Commit**
 
   ```bash
   cd /Users/steve/archon
@@ -225,8 +238,9 @@
   git commit -m "feat(workflows): inject per-node env into Claude subprocess
 
   Per-node env: block in workflow YAML overrides project-level envVars.
-  Uses existing expandEnvVarsInRecord to expand \$VAR_NAME references from
-  process.env at execution time. Missing vars warn but don't halt the run.
+  Uses expandEnvVarsInRecord to expand both \$VAR_NAME and \${VAR_NAME}
+  references from process.env at execution time. Missing vars warn but
+  don't halt the run.
 
   Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
   ```
@@ -1821,16 +1835,15 @@
   CONV_ID="qds-${STORY_ID}-$(date +%s)"
   STORY_CONTENT=$(cat "$STORY_FILE")
 
+  # Build JSON safely via Python to avoid injection of quotes/backslashes
+  PAYLOAD_FILE=$(mktemp)
+  python3 -c "import json,sys; json.dump({'conversationId': sys.argv[1], 'message': sys.argv[2]}, open(sys.argv[3],'w'))" "$CONV_ID" "$STORY_FILE" "$PAYLOAD_FILE"
+
   RUN_RESPONSE=$(curl -s -X POST \
     "${ARCHON_URL}/api/workflows/qds-piv-loop/run" \
     -H "Content-Type: application/json" \
-    -d "$(cat <<EOF
-  {
-    "conversationId": "${CONV_ID}",
-    "message": "${STORY_FILE}"
-  }
-  EOF
-  )")
+    -d @"$PAYLOAD_FILE")
+  rm -f "$PAYLOAD_FILE"
 
   echo "Run response: $RUN_RESPONSE"
 
@@ -1864,9 +1877,9 @@
 
   If the user wants to wait and monitor from CLI instead of the dashboard:
   ```bash
-  # Poll status every 30s
+  # Poll status every 30s — the Archon workflow writes status inside the worktree
   while true; do
-    STATUS=$(cat ".claude/qds/runs/${STORY_ID}/status" 2>/dev/null || echo "UNKNOWN")
+    STATUS=$(cat ".worktrees/${STORY_ID}/.claude/qds/runs/${STORY_ID}/status" 2>/dev/null || echo "UNKNOWN")
     echo "$(date +%H:%M:%S) Status: $STATUS"
     [ "$STATUS" = "MERGED" ] || [ "$STATUS" = "FAILED" ] && break
     sleep 30
@@ -2052,12 +2065,44 @@
   - `PLAN_FILE` — path to the plan.json file (e.g., `.claude/qds/epic-{slug}/plan.json`)
   - `ARCHON_URL` — Archon server URL (default: `http://localhost:7272` or `$ARCHON_URL`)
 
+  ## Advisory locking helpers
+
+  All reads and writes to `PLAN_FILE` must be serialized to prevent state corruption from concurrent `/qds` invocations on the same epic (NFR29).
+
+  ```bash
+  # Read plan.json under shared advisory lock
+  read_plan_locked() {
+    python3 -c "
+import fcntl, json, sys
+with open('$PLAN_FILE', 'r') as f:
+    fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+    data = json.load(f)
+    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    print(json.dumps(data))
+"
+  }
+
+  # Write plan.json under exclusive advisory lock
+  write_plan_locked() {
+    local json_data="$1"
+    python3 -c "
+import fcntl, json, sys
+with open('$PLAN_FILE', 'r+') as f:
+    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    f.seek(0)
+    f.write(json.dumps(json.loads(sys.argv[1]), indent=2))
+    f.truncate()
+    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+" "$json_data"
+  }
+  ```
+
   ## Loop iteration (repeat until all stories are merged or failed)
 
   ### Step A: Read current state from disk
 
   ```bash
-  cat "$PLAN_FILE"
+  PLAN_JSON=$(read_plan_locked)
   ```
 
   Parse the JSON. Identify:
@@ -2089,16 +2134,36 @@
   CONV_ID="qds-${STORY_ID}-$(date +%s)"
   STORY_ARG="${STORY_FILE:-$STORY_DESCRIPTION}"
 
+  # Build JSON safely via Python to avoid injection of quotes/backslashes
+  PAYLOAD_FILE=$(mktemp)
+  python3 -c "import json,sys; json.dump({'conversationId': sys.argv[1], 'message': sys.argv[2]}, open(sys.argv[3],'w'))" "$CONV_ID" "$STORY_ARG" "$PAYLOAD_FILE"
+
   RUN_RESPONSE=$(curl -s -X POST \
     "${ARCHON_URL}/api/workflows/qds-piv-loop/run" \
     -H "Content-Type: application/json" \
-    -d "{\"conversationId\": \"${CONV_ID}\", \"message\": \"${STORY_ARG}\"}")
+    -d @"$PAYLOAD_FILE")
+  rm -f "$PAYLOAD_FILE"
 
   RUN_ID=$(echo "$RUN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
   echo "Launched ${STORY_ID}: run_id=${RUN_ID}"
   ```
 
   3. Update plan.json — set story status to `in_progress`, record `worktree`, `branch`, `run_id`.
+  ```bash
+  UPDATED_PLAN=$(echo "$PLAN_JSON" | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+for s in data['stories']:
+    if s['id']=='${STORY_ID}':
+        s['status']='in_progress'
+        s['worktree']='.worktrees/${STORY_ID}'
+        s['branch']='${STORY_BRANCH}'
+        s['run_id']='${RUN_ID}'
+        break
+print(json.dumps(data))
+")
+  write_plan_locked "$UPDATED_PLAN"
+  ```
 
   ### Step D: Poll in-progress stories
 
@@ -2108,15 +2173,40 @@
   RUN_STATUS=$(curl -s "${ARCHON_URL}/api/workflows/runs/${RUN_ID}" | \
     python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status','unknown'))" 2>/dev/null || echo "unknown")
   echo "${STORY_ID}: ${RUN_STATUS}"
+
+  # The Archon workflow writes the definitive status inside the worktree
+  LOCAL_STATUS=$(cat ".worktrees/${STORY_ID}/.claude/qds/runs/${STORY_ID}/status" 2>/dev/null || echo "UNKNOWN")
   ```
 
-  - If `completed` or `status file = MERGED`: update plan.json → `merged`; run gitnexus analyze:
+  - If `RUN_STATUS` is `completed` or `LOCAL_STATUS` is `MERGED`:
     ```bash
-    gitnexus analyze && date +%s > .claude/qds/.gitnexus-last-analyze
+    UPDATED_PLAN=$(echo "$PLAN_JSON" | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+for s in data['stories']:
+    if s['id']=='${STORY_ID}':
+        s['status']='merged'
+        break
+print(json.dumps(data))
+")
+    write_plan_locked "$UPDATED_PLAN"
     ```
-    This ensures the next wave sees the merged work in the graph.
+    Set a flag `ANY_MERGED_THIS_WAVE=true`.
 
-  - If `failed`: update plan.json → `failed`. Human gate:
+  - If `RUN_STATUS` is `failed` or `LOCAL_STATUS` is `FAILED`:
+    ```bash
+    UPDATED_PLAN=$(echo "$PLAN_JSON" | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+for s in data['stories']:
+    if s['id']=='${STORY_ID}':
+        s['status']='failed'
+        break
+print(json.dumps(data))
+")
+    write_plan_locked "$UPDATED_PLAN"
+    ```
+    Human gate:
     ```
     ⚠ Story {STORY_ID} FAILED. Options:
     1. Retry — restart the workflow run for this story
@@ -2126,6 +2216,12 @@
     HALT and wait for human decision.
 
   - If still running: no action — will check again next iteration.
+
+  After processing all in-progress stories, if `ANY_MERGED_THIS_WAVE` is true:
+  ```bash
+  gitnexus analyze && date +%s > .claude/qds/.gitnexus-last-analyze
+  ```
+  This ensures the next wave sees the merged work in the graph.
 
   ### Step E: Print progress and sleep
 
@@ -2151,9 +2247,10 @@
   ═══════════════════════════════════════════════
   ```
 
-  Clean up worktrees:
+  Clean up worktrees (only those belonging to this epic):
   ```bash
-  git worktree list | grep '.worktrees' | awk '{print $1}' | while read wt; do
+  EPIC_WORKTREES=$(echo "$PLAN_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join([s.get('worktree','') for s in d['stories'] if s.get('worktree')]))")
+  for wt in $EPIC_WORKTREES; do
     git worktree remove "$wt" --force 2>/dev/null || true
   done
   ```
