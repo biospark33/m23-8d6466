@@ -687,7 +687,7 @@ Decision deferred to implementation — both are trivial fixes.
 
 **MVP Approach:** Problem-Solving MVP with extraction contingency. Ship one complete story through the full adversarial pipeline end-to-end without human intervention. Prove the fork+extend model, per-node env injection, and adversarial quality pipeline work in production. Then scale to epics and learning systems.
 
-**Key Strategic Decision:** Trade architectural control for time-to-validated-learning. The canonical PRD's MVP was a 6-month build of a custom Factory Core + 5 OSS integrations. The Archon pivot collapses that to ~20 tasks by consuming Archon as the runtime. The tradeoff: less control, faster validated learning.
+**Key Strategic Decision:** Trade architectural control for time-to-validated-learning. The canonical PRD's MVP was a 6-month build of a custom Factory Core + 5 OSS integrations. The Archon pivot collapses that to ~18 tasks by consuming Archon as the runtime. The tradeoff: less control, faster validated learning.
 
 **Resource Requirements:** 2 developers (Steve + co-dev), independent factory instances, shared state via git. Critical path on Developer A (Archon fork → YAML → /qds skill). Parallel track on Developer B (telemetry + wiki agent + smoke test).
 
@@ -777,7 +777,7 @@ The canonical PRD's 6-layer hook enforcement is adapted for Archon's node-based 
 
 | Risk | Mitigation |
 |---|---|
-| 2 developers, 20 tasks still too much scope | Parallel track: Dev A (critical path), Dev B (telemetry + wiki + smoke test). If behind, drop multi-story parallelism, ship single-story-only MVP. |
+| 2 developers, 18 tasks still too much scope | Parallel track: Dev A (critical path), Dev B (telemetry + wiki + smoke test). If behind, drop multi-story parallelism, ship single-story-only MVP. |
 | Archon upstream abandons or rewrites drastically | Extraction contingency: `/qds` skill and workflow YAML are portable. Worst case, re-implement on custom runtime (canonical PRD is the fallback blueprint). |
 | Economic model fails (GLM 5.1 cost higher than projected) | Validate with A/B test. JSONL telemetry tracks actual cost per story from day one. Anthropic direct still works, just more expensive. |
 
@@ -805,13 +805,13 @@ The following adjustments were incorporated based on multi-agent review (PM, Arc
 | 6 | `${VAR}` security audit before fix | Winston (Architect) | Same fix, security-framed. |
 | 7 | Hook enforcement from day 1 via Archon-native bash nodes | Steve (decision) | +2 YAML nodes. Zero custom infrastructure. |
 
-**Net result:** MVP expands from 18 tasks to **20 tasks**. Risk is lower. Validation is sharper. Fork is more stable. No custom infrastructure added.
+**Net result:** MVP remains **18 tasks** with enhanced risk mitigation, validation, and fork stability. No custom infrastructure added.
 
 ## Functional Requirements
 
 This section defines THE CAPABILITY CONTRACT for the product. Every downstream artifact — UX design, architecture, epic breakdown, story implementation — will ONLY implement what is listed here. If a capability is missing from this list, it will not exist in the final product.
 
-56 functional requirements organized across 8 capability areas. Each FR states WHAT capability exists, not HOW to implement it. This list was stress-tested via Advanced Elicitation (Pre-mortem Analysis, First Principles Analysis, Expert Panel Review) and enhanced with 6 additional requirements.
+59 functional requirements organized across 8 capability areas. Each FR states WHAT capability exists, not HOW to implement it. This list was stress-tested via Advanced Elicitation (Pre-mortem Analysis, First Principles Analysis, Expert Panel Review) and enhanced with 6 additional requirements.
 
 ### Epic Orchestration
 

@@ -486,7 +486,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 **Files created/modified:**
 - `factory-core/src/middleware/tier-resolver.ts` (~50 LOC)
 **Estimated LOC:** 50
-**Dependencies:** 1.1 (shared-types for tier type definitions), 1.4 (Factory Core skeleton for config access)
+**Dependencies:** 2.10 (capability registry must initialize before TierResolver), 1.1 (shared-types for tier type definitions), 1.4 (Factory Core skeleton for config access)
 **MVP/Growth:** MVP
 
 ### Story 2.10: Provider Adapter Contract & Capability Registry
@@ -508,7 +508,7 @@ Epics 3, 4, 5 can run in parallel after Epic 2 completes.
 - `factory-core/src/providers/capability-registry.ts` (~120 LOC)
 - `shared-types/src/provider-capabilities.test.ts` (~50 LOC)
 **Estimated LOC:** 200
-**Dependencies:** 2.9 (TierResolver — consumer of capabilities), 1.1 (shared-types package)
+**Dependencies:** 1.1 (shared-types package)
 **MVP/Growth:** MVP
 
 ### Story 2.11: Fidelity Mode Configuration
@@ -2095,7 +2095,7 @@ These stories extend the twelve-factor alignment established in ADR-024 but are 
 - `factory-core/src/pipeline/human-gate.ts` (~160 LOC)
 - `factory-core/src/commands/approve.ts` (~60 LOC)
 - `factory-core/src/notifications/telegram-gate-handler.ts` (~80 LOC)
-- `factory-core/src/dashboard/approval-card.ts` (~80 LOC)
+- `dashboard/src/approval-card.ts` (~80 LOC)
 **Estimated LOC:** 400
 **Dependencies:** 11.1 (graph parser — gate is a node type), 8.1 (MessageBus — notification delivery), 4.0 (orchestration loop — pipeline pause/resume)
 **MVP/Growth:** Growth

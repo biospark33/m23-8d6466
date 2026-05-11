@@ -324,7 +324,7 @@ These files implement the mechanical enforcement engine that QDS is missing. Lif
 | `authority.ts` | 768 | Authority chain resolution for rule precedence. | Inv 5 |
 | `capabilities.ts` | 639 | Capability classification (tool → risk class mapping). | Inv 5 |
 | `index.ts` | 754 | Public API surface + factory functions (`createCompiler`, `createGates`, `createLedger`, `createRetriever`). **Will need significant editing** to remove exports for deferred/dropped files and to add QDS-specific re-exports. | — |
-| **Tier 1 subtotal** | **~6,922 LOC** | | |
+| **Tier 1 subtotal** | **~5,922 LOC** | | |
 
 Tier 1 lifts approximately **31% of the guidance package** and delivers the mechanical enforcement core. This is the MVP scope for the lift.
 
@@ -382,15 +382,15 @@ These files serve valid purposes but are out of scope for the enforcement layer 
 
 | Tier | Action | Files | LOC |
 |---|---|---:|---:|
-| 1 | Full lift | 12 | ~6,922 |
+| 1 | Full lift | 12 | ~5,922 |
 | 2 | Spike-then-decide (2–3 files evaluated in Story 1.7) | 9 | ~9,390 (spike scope: ~2,000) |
 | 3 | Defer to post-MVP | 8 | ~5,322 (not lifted) |
 | 4 | Drop | 2 | ~1,250 (not lifted) |
 | 5 | Replace (QDS adapter) | 1 | ~500 (new write) |
-| **MVP lift total** | **Tier 1 + adapter rewrite** | **13 files** | **~7,422 LOC lifted + written** |
+| **MVP lift total** | **Tier 1 + adapter rewrite** | **13 files** | **~6,422 LOC lifted + written** |
 | **Spike additional scope** | **Tier 2 subset (decided inside Story 1.7)** | **2–3 files** | **~1,500–3,000 LOC** |
 
-MVP scope is **~7,422 LOC** (tier 1 + adapter), bounded above by **~10,400 LOC** if the spike validates all three prioritized tier-2 files. This is dramatically smaller than the raw 22,349 LOC of the guidance package and falls inside Factory Core's 6,470 LOC planning budget only partially — the code-lift manifest will need an update to reflect the increased budget (see Step 4 of session 13).
+MVP scope is **~6,422 LOC** (tier 1 + adapter), bounded above by **~9,400 LOC** if the spike validates all three prioritized tier-2 files. This is dramatically smaller than the raw 22,349 LOC of the guidance package and falls inside Factory Core's 6,470 LOC planning budget only partially — the code-lift manifest will need an update to reflect the increased budget (see Step 4 of session 13).
 
 ### Integration Decisions
 
@@ -451,7 +451,7 @@ Ruflo is MIT-licensed (`_research-repos/ruflo/LICENSE`, Copyright 2024–2026 ru
 
 **Negative:**
 
-- Factory Core LOC budget increases by ~7,422 LOC (tier 1 + adapter). The original 6,470 LOC planning budget is superseded by this ADR; `code-lift-manifest.md` and `code-lift-gap-analysis.md` updates in Step 4 of session 13 will reconcile the numbers.
+- Factory Core LOC budget increases by ~6,422 LOC (tier 1 + adapter). The original 6,470 LOC planning budget is superseded by this ADR; `code-lift-manifest.md` and `code-lift-gap-analysis.md` updates in Step 4 of session 13 will reconcile the numbers.
 - Integration Decision 1 (adapt compiler to overstory overlay format) introduces upstream-drift risk. Monitor `@claude-flow/guidance` changelog quarterly; flag material compiler changes in session handoffs.
 - `// QDS:` comment discipline across ~7,000 LOC of lifted code is a recurring fork-hygiene cost.
 - Test framework adaptation (vitest → bun test) is one-time but estimated at 8–16 hours across the lifted test suite (~19k test LOC at a few-hours-per-file rate for the tier-1 subset).

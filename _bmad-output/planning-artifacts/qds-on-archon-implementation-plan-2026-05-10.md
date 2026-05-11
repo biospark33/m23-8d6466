@@ -8,6 +8,8 @@
 
 **Tech Stack:** Bun/TypeScript (Archon core modification), Zod (schema validation), YAML (workflow definition), bash (gitnexus integration + state management), Claude Code skills (markdown), Z.ai API (OpenAI-compatible, Anthropic-format at `https://api.z.ai/api/anthropic`).
 
+**Path Conventions:** Throughout this plan, `$ARCHON_ROOT` refers to the root of your local Archon repository clone (e.g., `export ARCHON_ROOT=$HOME/archon`), and `$REPO_ROOT` refers to the root of the QDS-Factory repository. Paths starting with `_bmad-output/` are relative to `$REPO_ROOT`. Paths starting with `<archon-repo>/` are documentation placeholders for file references; use `$ARCHON_ROOT` when running shell commands.
+
 ---
 
 ## File Map
@@ -48,18 +50,18 @@
 ### Environment config
 | File | Action | Responsibility |
 |------|--------|---------------|
-| `/Users/steve/archon/.env.example` | MODIFY | Add ZAI_API_KEY and ARCHON_URL entries with comments |
+| `<archon-repo>/.env.example` | MODIFY | Add ZAI_API_KEY and ARCHON_URL entries with comments |
 
 ---
 
 ## Task 1: Add `env?` field to dag-node Zod schema
 
 **Files:**
-- Modify: `/Users/steve/archon/packages/workflows/src/schemas/dag-node.ts:138`
+- Modify: `<archon-repo>/packages/workflows/src/schemas/dag-node.ts:138`
 
 - [ ] **Step 1.1: Confirm current line 138**
 
-  Run: `sed -n '135,141p' /Users/steve/archon/packages/workflows/src/schemas/dag-node.ts`
+  Run: `sed -n '135,141p' $ARCHON_ROOT/packages/workflows/src/schemas/dag-node.ts`
 
   Expected output:
   ```
@@ -73,7 +75,7 @@
 
 - [ ] **Step 1.2: Add `env` field to dagNodeBaseSchema**
 
-  In `/Users/steve/archon/packages/workflows/src/schemas/dag-node.ts`, change line 138–139 from:
+  In `<archon-repo>/packages/workflows/src/schemas/dag-node.ts`, change line 138–139 from:
   ```typescript
     sandbox: sandboxSettingsSchema.optional(),
   });
@@ -87,14 +89,14 @@
 
 - [ ] **Step 1.3: Run schema tests to verify the field parses**
 
-  Run: `cd /Users/steve/archon/packages/workflows && bun test src/schemas.test.ts 2>&1 | tail -5`
+  Run: `cd $ARCHON_ROOT/packages/workflows && bun test src/schemas.test.ts 2>&1 | tail -5`
 
   Expected: All existing tests pass (no new tests yet — added in Task 2).
 
 - [ ] **Step 1.4: Commit**
 
   ```bash
-  cd /Users/steve/archon
+  cd $ARCHON_ROOT
   git add packages/workflows/src/schemas/dag-node.ts
   git commit -m "feat(workflows): add per-node env field to dagNodeBaseSchema
 
@@ -109,11 +111,11 @@
 ## Task 2: Schema tests for env field
 
 **Files:**
-- Modify: `/Users/steve/archon/packages/workflows/src/schemas.test.ts`
+- Modify: `<archon-repo>/packages/workflows/src/schemas.test.ts`
 
 - [ ] **Step 2.1: Write failing tests**
 
-  In `/Users/steve/archon/packages/workflows/src/schemas.test.ts`, find the block ending at approximately the last `test('parses fallbackModel string', ...)` test (around line 387). Add these two tests after it:
+  In `<archon-repo>/packages/workflows/src/schemas.test.ts`, find the block ending at approximately the last `test('parses fallbackModel string', ...)` test (around line 387). Add these two tests after it:
 
   ```typescript
   test('parses env record on prompt node', () => {
@@ -143,14 +145,14 @@
 
 - [ ] **Step 2.2: Run to confirm tests pass** (they should pass because Task 1 already added the schema field)
 
-  Run: `cd /Users/steve/archon/packages/workflows && bun test src/schemas.test.ts 2>&1 | tail -10`
+  Run: `cd $ARCHON_ROOT/packages/workflows && bun test src/schemas.test.ts 2>&1 | tail -10`
 
   Expected: All tests pass including the two new ones.
 
 - [ ] **Step 2.3: Commit**
 
   ```bash
-  cd /Users/steve/archon
+  cd $ARCHON_ROOT
   git add packages/workflows/src/schemas.test.ts
   git commit -m "test(workflows): add schema tests for per-node env field
 
@@ -162,11 +164,11 @@
 ## Task 3: Add per-node env injection to dag-executor.ts
 
 **Files:**
-- Modify: `/Users/steve/archon/packages/workflows/src/dag-executor.ts:601`
+- Modify: `<archon-repo>/packages/workflows/src/dag-executor.ts:601`
 
 - [ ] **Step 3.1: Confirm current lines 597–605**
 
-  Run: `sed -n '597,607p' /Users/steve/archon/packages/workflows/src/dag-executor.ts`
+  Run: `sed -n '597,607p' $ARCHON_ROOT/packages/workflows/src/dag-executor.ts`
 
   Expected output:
   ```typescript
@@ -182,7 +184,7 @@
 
 - [ ] **Step 3.2: Update expandEnvVarsInRecord regex**
 
-  In `/Users/steve/archon/packages/workflows/src/dag-executor.ts`, update `expandEnvVarsInRecord` (around line 314) from:
+  In `<archon-repo>/packages/workflows/src/dag-executor.ts`, update `expandEnvVarsInRecord` (around line 314) from:
   ```typescript
     result[key] = val.replace(/\$([A-Z_][A-Z0-9_]*)/g, (_, varName: string) => {
   ```
@@ -195,7 +197,7 @@
 
 - [ ] **Step 3.3: Add per-node env injection block**
 
-  In `/Users/steve/archon/packages/workflows/src/dag-executor.ts`, change the block from:
+  In `<archon-repo>/packages/workflows/src/dag-executor.ts`, change the block from:
   ```typescript
     // Inject per-project env vars (config file + DB) into subprocess env
     if (config.envVars && Object.keys(config.envVars).length > 0) {
@@ -226,14 +228,14 @@
 
 - [ ] **Step 3.4: Run type-check**
 
-  Run: `cd /Users/steve/archon/packages/workflows && bun run typecheck 2>&1 | tail -10`
+  Run: `cd $ARCHON_ROOT/packages/workflows && bun run typecheck 2>&1 | tail -10`
 
   Expected: No type errors.
 
 - [ ] **Step 3.5: Commit**
 
   ```bash
-  cd /Users/steve/archon
+  cd $ARCHON_ROOT
   git add packages/workflows/src/dag-executor.ts
   git commit -m "feat(workflows): inject per-node env into Claude subprocess
 
@@ -250,17 +252,17 @@
 ## Task 4: dag-executor tests for per-node env override
 
 **Files:**
-- Modify: `/Users/steve/archon/packages/workflows/src/dag-executor.test.ts`
+- Modify: `<archon-repo>/packages/workflows/src/dag-executor.test.ts`
 
 - [ ] **Step 4.1: Find the env var injection describe block**
 
-  Run: `grep -n "executeDagWorkflow -- env var injection" /Users/steve/archon/packages/workflows/src/dag-executor.test.ts`
+  Run: `grep -n "executeDagWorkflow -- env var injection" $ARCHON_ROOT/packages/workflows/src/dag-executor.test.ts`
 
   Expected: Output shows the line number of `describe('executeDagWorkflow -- env var injection', () => {`
 
 - [ ] **Step 4.2: Write the two new tests**
 
-  In `/Users/steve/archon/packages/workflows/src/dag-executor.test.ts`, find the closing `});` of the `describe('executeDagWorkflow -- env var injection', ...)` block (the one that ends after `it('does not set env on claudeOptions when config.envVars is empty', ...)`). Add these two tests before that closing `});`:
+  In `<archon-repo>/packages/workflows/src/dag-executor.test.ts`, find the closing `});` of the `describe('executeDagWorkflow -- env var injection', ...)` block (the one that ends after `it('does not set env on claudeOptions when config.envVars is empty', ...)`). Add these two tests before that closing `});`:
 
   ```typescript
   it('per-node env overrides config.envVars for that node', async () => {
@@ -329,20 +331,20 @@
 
 - [ ] **Step 4.3: Run executor tests to confirm passing**
 
-  Run: `cd /Users/steve/archon/packages/workflows && bun test src/dag-executor.test.ts 2>&1 | tail -15`
+  Run: `cd $ARCHON_ROOT/packages/workflows && bun test src/dag-executor.test.ts 2>&1 | tail -15`
 
   Expected: All tests pass including the two new ones.
 
 - [ ] **Step 4.4: Run full workflow package test suite**
 
-  Run: `cd /Users/steve/archon/packages/workflows && npm test 2>&1 | tail -20`
+  Run: `cd $ARCHON_ROOT/packages/workflows && npm test 2>&1 | tail -20`
 
   Expected: All tests pass.
 
 - [ ] **Step 4.5: Commit**
 
   ```bash
-  cd /Users/steve/archon
+  cd $ARCHON_ROOT
   git add packages/workflows/src/dag-executor.test.ts
   git commit -m "test(workflows): verify per-node env override and merge behavior
 
@@ -461,7 +463,7 @@
 - [ ] **Step 5.4: Commit**
 
   ```bash
-  cd /Users/steve/QDS-Factory
+  cd $REPO_ROOT
   git add -A -- "$(realpath ~/.claude/skills/bmad-code-review/)" 2>/dev/null || true
   # Note: ~/.claude files are not in this repo — commit to the skills location separately
   # or document the change in a skills-changelog.md
@@ -481,11 +483,11 @@
 ## Task 6: Create qds-piv-loop.yaml — skeleton + nodes 1–3
 
 **Files:**
-- Create: `/Users/steve/archon/.archon/workflows/defaults/qds-piv-loop.yaml`
+- Create: `<archon-repo>/.archon/workflows/defaults/qds-piv-loop.yaml`
 
 - [ ] **Step 6.1: Create the workflow skeleton with gitnexus-check + explore + create-plan**
 
-  Create `/Users/steve/archon/.archon/workflows/defaults/qds-piv-loop.yaml`:
+  Create `<archon-repo>/.archon/workflows/defaults/qds-piv-loop.yaml`:
 
   ```yaml
   name: qds-piv-loop
@@ -717,14 +719,14 @@
 
 - [ ] **Step 6.2: Verify YAML syntax for the created portion**
 
-  Run: `python3 -c "import yaml; data=yaml.safe_load(open('/Users/steve/archon/.archon/workflows/defaults/qds-piv-loop.yaml').read()); print(f'OK — {len(data[\"nodes\"])} nodes parsed')"`
+  Run: `python3 -c "import yaml; data=yaml.safe_load(open('$ARCHON_ROOT/.archon/workflows/defaults/qds-piv-loop.yaml').read()); print(f'OK — {len(data[\"nodes\"])} nodes parsed')"`
 
   Expected: `OK — 3 nodes parsed`
 
 - [ ] **Step 6.3: Commit**
 
   ```bash
-  cd /Users/steve/archon
+  cd $ARCHON_ROOT
   git add .archon/workflows/defaults/qds-piv-loop.yaml
   git commit -m "feat(workflows): add qds-piv-loop — nodes 1-3 (gitnexus-check, explore, create-plan)
 
@@ -736,11 +738,11 @@
 ## Task 7: qds-piv-loop.yaml — nodes 4–6 (refine-plan, implement-setup, implement)
 
 **Files:**
-- Modify: `/Users/steve/archon/.archon/workflows/defaults/qds-piv-loop.yaml`
+- Modify: `<archon-repo>/.archon/workflows/defaults/qds-piv-loop.yaml`
 
 - [ ] **Step 7.1: Append refine-plan + implement-setup + implement nodes**
 
-  Append to `/Users/steve/archon/.archon/workflows/defaults/qds-piv-loop.yaml`:
+  Append to `<archon-repo>/.archon/workflows/defaults/qds-piv-loop.yaml`:
 
   ```yaml
 
@@ -948,14 +950,14 @@
 
 - [ ] **Step 7.2: Verify YAML syntax**
 
-  Run: `python3 -c "import yaml; data=yaml.safe_load(open('/Users/steve/archon/.archon/workflows/defaults/qds-piv-loop.yaml').read()); print(f'OK — {len(data[\"nodes\"])} nodes parsed')"`
+  Run: `python3 -c "import yaml; data=yaml.safe_load(open('$ARCHON_ROOT/.archon/workflows/defaults/qds-piv-loop.yaml').read()); print(f'OK — {len(data[\"nodes\"])} nodes parsed')"`
 
   Expected: `OK — 6 nodes parsed`
 
 - [ ] **Step 7.3: Commit**
 
   ```bash
-  cd /Users/steve/archon
+  cd $ARCHON_ROOT
   git add .archon/workflows/defaults/qds-piv-loop.yaml
   git commit -m "feat(workflows): qds-piv-loop nodes 4-6 (refine-plan, implement-setup, implement)
 
@@ -969,11 +971,11 @@
 ## Task 8: qds-piv-loop.yaml — nodes 7–9 (fix-feedback, adversarial-review, qa-swarm)
 
 **Files:**
-- Modify: `/Users/steve/archon/.archon/workflows/defaults/qds-piv-loop.yaml`
+- Modify: `<archon-repo>/.archon/workflows/defaults/qds-piv-loop.yaml`
 
 - [ ] **Step 8.1: Append fix-feedback + adversarial-review + qa-swarm nodes**
 
-  Append to `/Users/steve/archon/.archon/workflows/defaults/qds-piv-loop.yaml`:
+  Append to `<archon-repo>/.archon/workflows/defaults/qds-piv-loop.yaml`:
 
   ```yaml
 
@@ -1207,14 +1209,14 @@
 
 - [ ] **Step 8.2: Verify YAML syntax**
 
-  Run: `python3 -c "import yaml; data=yaml.safe_load(open('/Users/steve/archon/.archon/workflows/defaults/qds-piv-loop.yaml').read()); print(f'OK — {len(data[\"nodes\"])} nodes parsed')"`
+  Run: `python3 -c "import yaml; data=yaml.safe_load(open('$ARCHON_ROOT/.archon/workflows/defaults/qds-piv-loop.yaml').read()); print(f'OK — {len(data[\"nodes\"])} nodes parsed')"`
 
   Expected: `OK — 9 nodes parsed`
 
 - [ ] **Step 8.3: Commit**
 
   ```bash
-  cd /Users/steve/archon
+  cd $ARCHON_ROOT
   git add .archon/workflows/defaults/qds-piv-loop.yaml
   git commit -m "feat(workflows): qds-piv-loop nodes 7-9 (fix-feedback, adversarial-review, qa-swarm)
 
@@ -1226,11 +1228,11 @@
 ## Task 9: qds-piv-loop.yaml — nodes 10–14 (review-1, fix-wave-1, review-2, fix-wave-2, finalize)
 
 **Files:**
-- Modify: `/Users/steve/archon/.archon/workflows/defaults/qds-piv-loop.yaml`
+- Modify: `<archon-repo>/.archon/workflows/defaults/qds-piv-loop.yaml`
 
 - [ ] **Step 9.1: Append final five nodes**
 
-  Append to `/Users/steve/archon/.archon/workflows/defaults/qds-piv-loop.yaml`:
+  Append to `<archon-repo>/.archon/workflows/defaults/qds-piv-loop.yaml`:
 
   ```yaml
 
@@ -1561,7 +1563,7 @@
 
         ## Step 7: Update status and output completion summary
         ```bash
-        echo "MERGED" > ".claude/qds/runs/${STORY_ID}/status"
+        echo "DRAFT_PR_CREATED" > ".claude/qds/runs/${STORY_ID}/status"
         ```
 
         Output:
@@ -1582,7 +1584,7 @@
 
 - [ ] **Step 9.2: Verify complete YAML parses correctly**
 
-  Run: `python3 -c "import yaml; data=yaml.safe_load(open('/Users/steve/archon/.archon/workflows/defaults/qds-piv-loop.yaml').read()); print(f'OK — {len(data[\"nodes\"])} nodes parsed'); [print(f'  node {i+1}: {n[\"id\"]}') for i,n in enumerate(data['nodes'])]"`
+  Run: `python3 -c "import yaml; data=yaml.safe_load(open('$ARCHON_ROOT/.archon/workflows/defaults/qds-piv-loop.yaml').read()); print(f'OK — {len(data[\"nodes\"])} nodes parsed'); [print(f'  node {i+1}: {n[\"id\"]}') for i,n in enumerate(data['nodes'])]"`
 
   Expected:
   ```
@@ -1606,7 +1608,7 @@
 - [ ] **Step 9.3: Commit**
 
   ```bash
-  cd /Users/steve/archon
+  cd $ARCHON_ROOT
   git add .archon/workflows/defaults/qds-piv-loop.yaml
   git commit -m "feat(workflows): complete qds-piv-loop — all 14 nodes
 
@@ -1622,15 +1624,15 @@
 ## Task 10: Validate qds-piv-loop.yaml via Archon loader
 
 **Files:**
-- Read: `/Users/steve/archon/.archon/workflows/defaults/qds-piv-loop.yaml`
+- Read: `<archon-repo>/.archon/workflows/defaults/qds-piv-loop.yaml`
 
 - [ ] **Step 10.1: Write a one-shot Archon loader validation script**
 
   ```bash
   cat > /tmp/validate-qds-workflow.ts << 'EOF'
-  import { discoverWorkflows } from '/Users/steve/archon/packages/workflows/src/loader';
+  import { discoverWorkflows } from '<archon-repo>/packages/workflows/src/loader';
 
-  const result = await discoverWorkflows('/Users/steve/archon', { loadDefaults: true });
+  const result = await discoverWorkflows('<archon-repo>', { loadDefaults: true });
   const qds = result.workflows.find(w => w.name === 'qds-piv-loop');
   if (!qds) {
     console.error('ERROR: qds-piv-loop not found in discovered workflows');
@@ -1640,7 +1642,7 @@
   console.log(`OK: qds-piv-loop discovered with ${qds.nodes.length} nodes`);
   qds.nodes.forEach((n, i) => console.log(`  ${i + 1}. ${n.id}`));
   EOF
-  cd /Users/steve/archon && bun run /tmp/validate-qds-workflow.ts
+  cd $ARCHON_ROOT && bun run /tmp/validate-qds-workflow.ts
   ```
 
   Expected: 14 nodes listed, no errors.
@@ -1651,9 +1653,9 @@
 
   ```bash
   cat > /tmp/check-env-fields.ts << 'EOF'
-  import { discoverWorkflows } from '/Users/steve/archon/packages/workflows/src/loader';
+  import { discoverWorkflows } from '<archon-repo>/packages/workflows/src/loader';
 
-  const result = await discoverWorkflows('/Users/steve/archon', { loadDefaults: true });
+  const result = await discoverWorkflows('<archon-repo>', { loadDefaults: true });
   const qds = result.workflows.find(w => w.name === 'qds-piv-loop');
   if (!qds) { console.error('Not found'); process.exit(1); }
 
@@ -1673,7 +1675,7 @@
     console.log(`OK: ${id} has no env override (will hit Anthropic)`);
   });
   EOF
-  cd /Users/steve/archon && bun run /tmp/check-env-fields.ts
+  cd $ARCHON_ROOT && bun run /tmp/check-env-fields.ts
   ```
 
   Expected: 11 nodes with env (implement through finalize except the 3 planning nodes). 3 planning nodes confirmed without env.
@@ -1758,7 +1760,7 @@
 - [ ] **Step 11.3: Commit (in QDS-Factory repo as documentation)**
 
   ```bash
-  cd /Users/steve/QDS-Factory
+  cd $REPO_ROOT
   echo "qds skill created at ~/.claude/skills/qds/ — 2026-05-10" >> docs/skills-changelog.md
   git add docs/skills-changelog.md
   git commit -m "docs: log qds skill creation in skills-changelog
@@ -1812,7 +1814,7 @@
   HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${ARCHON_URL}/api/health" 2>/dev/null || echo "000")
   if [ "$HTTP_STATUS" != "200" ]; then
     echo "ERROR: Archon is not running at ${ARCHON_URL}"
-    echo "Start Archon first: cd /Users/steve/archon && bun run dev"
+    echo "Start Archon first: cd $ARCHON_ROOT && bun run dev"
     exit 1
   fi
   echo "Archon OK at ${ARCHON_URL}"
@@ -2178,6 +2180,15 @@ print(json.dumps(data))
   LOCAL_STATUS=$(cat ".worktrees/${STORY_ID}/.claude/qds/runs/${STORY_ID}/status" 2>/dev/null || echo "UNKNOWN")
   ```
 
+  - If `LOCAL_STATUS` is `DRAFT_PR_CREATED`, run merge detection:
+    ```bash
+    PR_MERGED=$(gh pr view "${PR_URL}" --json merged --jq '.merged' 2>/dev/null || echo "false")
+    if [ "$PR_MERGED" = "true" ]; then
+      echo "MERGED" > ".worktrees/${STORY_ID}/.claude/qds/runs/${STORY_ID}/status"
+      LOCAL_STATUS="MERGED"
+    fi
+    ```
+
   - If `RUN_STATUS` is `completed` or `LOCAL_STATUS` is `MERGED`:
     ```bash
     UPDATED_PLAN=$(echo "$PLAN_JSON" | python3 -c "
@@ -2509,15 +2520,15 @@ print(json.dumps(data))
 ## Task 17: Environment configuration
 
 **Files:**
-- Modify: `/Users/steve/archon/.env.example` (create if missing)
+- Modify: `<archon-repo>/.env.example` (create if missing)
 
 - [ ] **Step 17.1: Check if .env.example exists**
 
-  Run: `ls /Users/steve/archon/.env.example 2>/dev/null || echo "NOT_FOUND"`
+  Run: `ls $ARCHON_ROOT/.env.example 2>/dev/null || echo "NOT_FOUND"`
 
 - [ ] **Step 17.2: Add QDS environment variables**
 
-  In `/Users/steve/archon/.env.example`, add (or create the file with):
+  In `<archon-repo>/.env.example`, add (or create the file with):
 
   ```bash
   # ─────────────────────────────────────────────────────────────
@@ -2536,25 +2547,25 @@ print(json.dumps(data))
 
   Copy `.env.example` to `.env` if not already present:
   ```bash
-  [ -f /Users/steve/archon/.env ] || cp /Users/steve/archon/.env.example /Users/steve/archon/.env
+  [ -f $ARCHON_ROOT/.env ] || cp $ARCHON_ROOT/.env.example $ARCHON_ROOT/.env
   ```
 
   Then manually set the real key:
   ```bash
-  # Edit /Users/steve/archon/.env and replace:
+  # Edit <archon-repo>/.env and replace:
   #   ZAI_API_KEY=your-zai-api-key-here
   # with the actual Z.ai API key from https://platform.z.ai
   ```
 
   Verify it's in .gitignore:
   ```bash
-  grep "\.env$" /Users/steve/archon/.gitignore || echo ".env" >> /Users/steve/archon/.gitignore
+  grep "\.env$" $ARCHON_ROOT/.gitignore || echo ".env" >> $ARCHON_ROOT/.gitignore
   ```
 
 - [ ] **Step 17.4: Commit .env.example**
 
   ```bash
-  cd /Users/steve/archon
+  cd $ARCHON_ROOT
   git add .env.example .gitignore
   git commit -m "chore: add ZAI_API_KEY and ARCHON_URL to .env.example
 
@@ -2572,7 +2583,7 @@ This is a manual validation task. It cannot be fully automated — it requires A
 - [ ] **Step 18.1: Start Archon**
 
   ```bash
-  cd /Users/steve/archon && bun run dev
+  cd $ARCHON_ROOT && bun run dev
   ```
 
   Wait for: `Archon ready at http://localhost:7272` (or check configured port).
@@ -2582,15 +2593,15 @@ This is a manual validation task. It cannot be fully automated — it requires A
   Open `http://localhost:7272` in browser. Navigate to Workflows.
   Confirm `qds-piv-loop` appears in the workflow list.
 
-  If not: check `/Users/steve/archon/.archon/workflows/defaults/` contains the YAML.
-  Run: `cd /Users/steve/archon && bun run /tmp/validate-qds-workflow.ts`
+  If not: check `<archon-repo>/.archon/workflows/defaults/` contains the YAML.
+  Run: `cd $ARCHON_ROOT && bun run /tmp/validate-qds-workflow.ts`
 
 - [ ] **Step 18.3: Run /qds on a simple story in a test project**
 
   In a test repository (e.g., any local git repo with a CLAUDE.md):
   ```bash
   # Ensure ZAI_API_KEY is set in your shell for Archon to pick up
-  echo $ZAI_API_KEY  # should show key, not empty
+  if [ -n "$ZAI_API_KEY" ]; then echo "ZAI_API_KEY is set"; else echo "ZAI_API_KEY is NOT set"; fi
 
   # In a Claude Code session in the test project:
   # 1. Initialize QDS for the project

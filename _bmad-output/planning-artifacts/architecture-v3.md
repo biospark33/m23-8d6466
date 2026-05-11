@@ -22,7 +22,7 @@ _This document builds collaboratively through step-by-step discovery. Sections a
 
 **Functional Requirements:**
 
-QDS on Archon defines 56 FRs across 8 capability areas:
+QDS on Archon defines 59 FRs across 8 capability areas:
 
 1. **Epic Orchestration (8 FRs):** `/qds` skill epic parsing, dependency-aware wave planning with GitNexus intelligence, plan.json state machine, resume-from-crash, concurrent epic protection
 2. **Story Pipeline Execution (8 FRs):** 14-node workflow execution, per-node env injection for model routing, fresh-context isolation for review nodes, HITL gates with timeout auto-approval, conditional paths, retry with exponential backoff
@@ -110,7 +110,7 @@ QDS on Archon does **not** use a traditional starter template (`create-next-app`
 
 **Rationale for Selection:**
 
-The PRD explicitly pivots from a custom Factory Core (~64 stories, ~6,470 LOC) to an Archon-native composition (~20 tasks). Archon provides the load-bearing infrastructure that would otherwise need to be built: DAG execution, worktree isolation, web UI, SSE streaming, headless agent spawning, and sandbox settings. The tradeoff is architectural control for time-to-validated-learning.
+The PRD explicitly pivots from a custom Factory Core (~64 stories, ~6,470 LOC) to an Archon-native composition (~18 tasks). Archon provides the load-bearing infrastructure that would otherwise need to be built: DAG execution, worktree isolation, web UI, SSE streaming, headless agent spawning, and sandbox settings. The tradeoff is architectural control for time-to-validated-learning.
 
 **Workflow Foundation:**
 

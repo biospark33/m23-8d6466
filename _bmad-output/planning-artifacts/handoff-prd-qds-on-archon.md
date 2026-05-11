@@ -26,16 +26,16 @@ QDS Factory on Archon is a **coding factory** that accepts development stories o
 
 | File | Purpose | Action |
 |---|---|---|
-| `/Users/steve/QDS-Factory/_bmad-output/planning-artifacts/prd-qds-on-archon.md` | **The PRD being written** | Read fully, append remaining sections |
-| `/Users/steve/QDS-Factory/_bmad-output/planning-artifacts/prd.md` | Canonical PRD (same WHY, different HOW) | Reference for requirements that carry over unchanged |
-| `/Users/steve/QDS-Factory/_bmad-output/planning-artifacts/qds-on-archon-design-2026-05-10.md` | Design spec | Reference for architecture decisions |
-| `/Users/steve/QDS-Factory/_bmad-output/planning-artifacts/qds-on-archon-implementation-plan-2026-05-10.md` | 18-task implementation plan | Reference for scope and sequencing |
-| `~/.claude/skills/bmad-create-prd/workflow.md` | BMAD PRD workflow entry point | Read to understand routing |
-| `~/.claude/skills/bmad-create-prd/steps-c/step-08-scoping.md` | **NEXT STEP** | Read fully and follow |
+| `_bmad-output/planning-artifacts/prd-qds-on-archon.md` | **The PRD being written** | Read fully, append remaining sections |
+| `_bmad-output/planning-artifacts/prd.md` | Canonical PRD (same WHY, different HOW) | Reference for requirements that carry over unchanged |
+| `_bmad-output/planning-artifacts/qds-on-archon-design-2026-05-10.md` | Design spec | Reference for architecture decisions |
+| `_bmad-output/planning-artifacts/qds-on-archon-implementation-plan-2026-05-10.md` | 18-task implementation plan | Reference for scope and sequencing |
+| `claude/skills/bmad-create-prd/workflow.md` | BMAD PRD workflow entry point | Read to understand routing |
+| `claude/skills/bmad-create-prd/steps-c/step-08-scoping.md` | **NEXT STEP** | Read fully and follow |
 | `~/.claude/skills/bmad-create-prd/templates/prd-template.md` | PRD template | Reference for structure |
-| `/Users/steve/archon/.archon/workflows/defaults/archon-piv-loop.yaml` | Base workflow we fork from | Reference for node structure and patterns |
-| `/Users/steve/archon/packages/workflows/src/dag-executor.ts` | Archon executor (modification target) | Reference for env injection context |
-| `/Users/steve/archon/packages/workflows/src/schemas/dag-node.ts` | Archon node schema (modification target) | Reference for schema extension context |
+| `<archon-repo>/.archon/workflows/defaults/archon-piv-loop.yaml` | Base workflow we fork from | Reference for node structure and patterns |
+| `<archon-repo>/packages/workflows/src/dag-executor.ts` | Archon executor (modification target) | Reference for env injection context |
+| `<archon-repo>/packages/workflows/src/schemas/dag-node.ts` | Archon node schema (modification target) | Reference for schema extension context |
 
 ---
 

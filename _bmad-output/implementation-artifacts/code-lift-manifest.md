@@ -1,9 +1,9 @@
 # QDS Factory -- Unified Code-Lift Manifest
 
-**Version:** 2.0
-**Date:** 2026-03-14
-**Source:** Deep-dive analyses of 6 source repositories + Session 10 code-lift resolution
-**Purpose:** Definitive reference for implementation agents -- maps every story to reusable artifacts from source repos
+**Version:** 2.2
+**Date:** 2026-05-10
+**Source:** Deep-dive analyses of 6 source repositories + Session 10 code-lift resolution + Session 14 additions
+**Purpose:** Definitive reference for implementation agents -- maps every story to reusable artifacts from source repos; Session 14 code-lift resolution and expanded scope (attractor added as PATTERN_SOURCE, 10 story entries, 0% code reuse, 100% new-write)
 
 ---
 
