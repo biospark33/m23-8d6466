@@ -1319,7 +1319,33 @@
 
 **Source:** Session 12 Part A invariant re-derivation from PRD v2 alone (not from existing ADRs)
 **Impact:** Every story that cites a "mechanism as invariant" should read that citation as a mechanism claim, not an architectural requirement
-**Detail:** Several items previously written into ADRs as if architectural are actually **implementation-choice mechanisms** that overstory happens to provide — swappable without breaking QDS's contract with the developer. Tmux-based session management, git worktrees specifically, the 6-layer hook taxonomy with its specific names, SQLite databases specifically, mail-based inter-agent coordination, TDD file-pair enforcement, the 6-database ownership split, action scoring via hook heuristics, daily/weekly learning cadence, the 50%/8K context budget rule, and ELO ratings — these were written into ADRs 001–023 as if they were invariants. They are not. The genuine invariants are: dev↔review context isolation, atomic story concurrency, evidence-backed PRs, cost attribution chains, mechanical phase-boundary gates, learning injection, cost circuit breakers, credential isolation, and git safety. Step 5 of session 13 performs a targeted correction pass on `architecture-v2.md` to tag conflation sites in-place. **Implementation implication:** story acceptance criteria that reference a mechanism (e.g., "using tmux" or "via mail.db") should be read as "using overstory's current mechanism for X" — the QDS invariant is X, not tmux or mail.db specifically.
+**Detail:** Several items previously written into ADRs as if architectural are actually **implementation-choice mechanisms** that overstory happens to provide — swappable without breaking QDS's contract with the developer. The following mechanisms were written into ADRs 001–023 as if they were invariants, but they are not:
+
+- Tmux-based session management
+- Git worktrees specifically
+- The 6-layer hook taxonomy with its specific names
+- SQLite databases specifically
+- Mail-based inter-agent coordination
+- TDD file-pair enforcement
+- The 6-database ownership split
+- Action scoring via hook heuristics
+- Daily/weekly learning cadence
+- The 50%/8K context budget rule
+- ELO ratings
+
+The genuine invariants are:
+
+- Dev↔review context isolation
+- Atomic story concurrency
+- Evidence-backed PRs
+- Cost attribution chains
+- Mechanical phase-boundary gates
+- Learning injection
+- Cost circuit breakers
+- Credential isolation
+- Git safety
+
+Step 5 of session 13 performs a targeted correction pass on `architecture-v2.md` to tag conflation sites in-place. **Implementation implication:** story acceptance criteria that reference a mechanism (e.g., "using tmux" or "via mail.db") should be read as "using overstory's current mechanism for X" — the QDS invariant is X, not tmux or mail.db specifically.
 
 ### 13. Ruflo `@claude-flow/guidance` Is the Cleanest Lift in the Entire Ruflo Repository (NEW FINDING, Session 13, ADR-034)
 
@@ -1389,7 +1415,7 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 | 4 | **1.3** attribution.db Schema Extension | 20 | Depends on 1.2. Tiny story, unlocks budget enforcement (Epic 6). |
 | 5 | **1.4** Factory Core Process Skeleton | 170 | Depends on 1.1, 1.2, 1.3. Proves the startup sequence. High reuse from Overstory config.ts. |
 | 6 | **1.6** Overstory Schema Extensions | 40 | Depends on 1.4. Unlocks Stories 3.3, 8.8. Uses two Overstory-native patterns: probe-then-alter for ADD COLUMN operations (SessionStore pattern), table-rebuild for CHECK constraint modifications (SQLite limitation). |
-| **7** | **1.7** `@claude-flow/guidance` Lift Spike + Tier-1 Integration | **~7,422** | **Depends on 1.4 (Factory Core skeleton), 1.5 (Result<T> for gate/evaluator return types), ADR-035 hook engine contract (built inside this story). NEW session 13 story introduced by ADR-034. This is the mechanical enforcement core — lifts tier-1 files from `@claude-flow/guidance` (compiler, gates, proof, ledger with 5 evaluators, retriever, continue-gate, memory-gate, types, authority, capabilities, index), writes the tier-5 adapter binding gates and evaluators to Factory Core's in-process hook engine (ADR-035), and builds the hook engine itself as a Story 1.7 prerequisite. Blocks Story 4.x phase-boundary enforcement and Story 8.x quality gate enforcement. 3-day timeboxed spike precedes full implementation.** |
+| 7 | **1.7** `@claude-flow/guidance` Lift Spike + Tier-1 Integration | **~7,422** | **Depends on 1.4 (Factory Core skeleton), 1.5 (Result<T> for gate/evaluator return types), ADR-035 hook engine contract (built inside this story). NEW session 13 story introduced by ADR-034. This is the mechanical enforcement core — lifts tier-1 files from `@claude-flow/guidance` (compiler, gates, proof, ledger with 5 evaluators, retriever, continue-gate, memory-gate, types, authority, capabilities, index), writes the tier-5 adapter binding gates and evaluators to Factory Core's in-process hook engine (ADR-035), and builds the hook engine itself as a Story 1.7 prerequisite. Blocks Story 4.x phase-boundary enforcement and Story 8.x quality gate enforcement. 3-day timeboxed spike precedes full implementation.** |
 
 **Phase 1 total (updated session 13):** ~8,092 LOC, ~7,377 LOC reused (~91% reuse)
 
@@ -1539,7 +1565,7 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 
 ---
 
-### Priority Summary (Updated Session 13)
+### Priority Summary (Updated Session 14)
 
 | Phase | Epics | LOC | Reuse % | Parallelism |
 |-------|-------|-----|---------|-------------|
@@ -1550,7 +1576,8 @@ Based on the dependency chain, reuse scaffolding opportunities, and risk mitigat
 | 5. Learning + Health | 7, 8 | 1,030 | 30% | **2-way parallel** |
 | 6. Dashboard | 9 | 1,220 | 35% | Partially parallel |
 | 7. Growth | 10 + Growth stories | 890 | 7% | Partially parallel |
-| **TOTAL** | | **13,892** | **64.5%** | |
+| 8. Session 14 (Attractor) | 11 + 2.10, 2.11, 4.8 | 2,180 | 0% | Sequential |
+| **TOTAL** | | **16,072** | **55.7%** | |
 
 **Key insight:** Session 13's Story 1.7 (`@claude-flow/guidance` lift per ADR-034) shifted Phase 1 from 670 LOC at 68% reuse to 8,092 LOC at 91% reuse, and the project-wide reuse rate from 31% to 64.5%. The net-new LOC only grows by ~500 (4,438 → 4,938) because the bulk of Story 1.7 is lifted MIT-licensed code. Phases 1–2 (8,482 LOC, ~89% reuse) now establish the scaffolding that maximizes reuse for all subsequent phases. Phase 3's three-way parallelism remains the largest acceleration opportunity.
 
