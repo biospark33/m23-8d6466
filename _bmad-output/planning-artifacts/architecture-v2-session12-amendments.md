@@ -738,7 +738,7 @@ export class FactoryHookExecutor {
 3. Handler exceptions are **caught and converted** to `FactoryHookResult` with `decision: "block"` and `reason` containing the error message. Unhandled exceptions must never crash Factory Core's pipeline.
 4. After all handlers run, **aggregate using severity ordering**: `block > require-confirmation > warn > allow`. Reuses the exact same severity-ordering constant from ADR-034's `gates.ts` so the two layers speak the same language.
 5. Execution is **synchronous from the pipeline's perspective** — the pipeline awaits `execute()` and acts on the aggregated result. No fire-and-forget.
-6. **Every execution emits an event record** to `pipeline.db` (or a new `hooks.db` if schema pressure justifies splitting — decision deferred to Story 1.2 migration review). The event record includes: story ID, phase, event, duration, decision, per-handler results, any errors.
+6. **Every execution emits an event record** to a file-based event log in `.claude/qds/hooks-events/` (one JSON Lines file per day: `hooks-events-YYYY-MM-DD.jsonl`). The event record includes: story ID, phase, event, duration, decision, per-handler results, any errors. Archon's native event store is the secondary sink for dashboard observability.
 
 ### Borrowed Concepts from `@claude-flow/hooks` (design patterns, not code)
 

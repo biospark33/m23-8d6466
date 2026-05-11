@@ -52,7 +52,7 @@ Overstory's watchdog (`src/watchdog/daemon.ts`, ~390 LOC) monitors process heart
 >
 > 3. **Token consumption without progress:** If the agent has consumed more than `2x` the rolling median token count for the current phase type, AND zero checklist items have advanced since the last velocity check, the turn is flagged as `stalled_high_cost`.
 
-**MVP scope:** Detection + turn flagging. When any pattern triggers, the `turn_state` record in `pipeline.db` gets a `loop_flag` column set to the detection pattern name. The orchestration loop (Story 4.0) reads `loop_flag` when evaluating phase transition. A flagged turn triggers the force-cap mechanism from Story 4.2 (progress velocity check), reducing remaining max_turns to 1.
+**MVP scope:** Detection + turn flagging. When any pattern triggers, the `turn_state` record in `.claude/qds/runs/{story_id}/turn_state.jsonl` gets a `loop_flag` field set to the detection pattern name. The orchestration loop (Story 4.0) reads `loop_flag` when evaluating phase transition. A flagged turn triggers the force-cap mechanism from Story 4.2 (progress velocity check), reducing remaining max_turns to 1.
 
 **Growth scope:** Warning injection via Pi SDK's steering mechanism (`getSteeringMessages()` callback). When a loop is detected, Factory Core injects a diagnostic message into the agent's next context turn describing: (a) the detected pattern (e.g., "You have called `write_file` on `src/auth.ts` 4 times with the same content"), (b) a suggestion to try an alternative approach, (c) a warning that continued looping will terminate the phase. If the loop persists after warning (same pattern detected in the very next turn), the phase is terminated and the pipeline evaluates whether to retry with a fresh agent or escalate.
 
@@ -61,7 +61,7 @@ Overstory's watchdog (`src/watchdog/daemon.ts`, ~390 LOC) monitors process heart
 - Invariant 8 (cost circuit breakers): Semantic loop detection is a PREVENTION mechanism that fires before the per-story budget circuit breaker. It catches runaway cost patterns that a budget ceiling alone would eventually catch, but earlier and with diagnostic context.
 - Does not affect invariants 1-7, 9-10.
 
-**Impact:** New Story 4.8 (Semantic Loop Detection & Turn Flagging) in Epic 4. Adds `loop_flag TEXT` column to `turn_state` table in `pipeline.db` (Story 1.2 migration 002 or later).
+**Impact:** New Story 4.8 (Semantic Loop Detection & Turn Flagging) in Epic 4. Adds `loop_flag` field to the JSON Lines turn-state records in `.claude/qds/runs/{story_id}/turn_state.jsonl` (Story 1.2 migration 002 or later).
 
 ### Acceptance Criteria
 
@@ -463,38 +463,46 @@ node:
 - **Telegram:** Inline keyboard buttons on the gate notification message (leverages FR120-FR129 Telegram integration and FR171 MessageBus)
 - **Dashboard:** Approval card in the story detail view with comment field
 
-All backends write to the same approval state in `pipeline.db`. The first approval that meets the `required_approvals` threshold resolves the gate.
+All backends write to the same approval state in `.claude/qds/gates/{gate_id}.json`. The first approval that meets the `required_approvals` threshold resolves the gate.
 
-**Approval state in pipeline.db:**
+**Approval state (file-based JSON):**
 
-```sql
-CREATE TABLE human_gates (
-  id TEXT PRIMARY KEY,
-  story_id TEXT NOT NULL REFERENCES stories(id),
-  phase TEXT NOT NULL,
-  prompt TEXT NOT NULL,
-  timeout_at TEXT NOT NULL,       -- ISO-8601
-  timeout_action TEXT NOT NULL DEFAULT 'escalate',
-  required_approvals INTEGER NOT NULL DEFAULT 1,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected', 'escalated', 'timed_out')),
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  resolved_at TEXT
-);
+Each gate is stored as an atomic JSON file at `.claude/qds/gates/{gate_id}.json`:
 
-CREATE TABLE human_gate_responses (
-  id TEXT PRIMARY KEY,
-  gate_id TEXT NOT NULL REFERENCES human_gates(id),
-  responder TEXT NOT NULL,         -- developer identifier
-  decision TEXT NOT NULL CHECK(decision IN ('approve', 'reject')),
-  comment TEXT,
-  backend TEXT NOT NULL CHECK(backend IN ('cli', 'telegram', 'dashboard')),
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+```json
+{
+  "id": "gate-uuid",
+  "story_id": "story-123",
+  "phase": "develop",
+  "prompt": "Builder is uncertain about API contract interpretation...",
+  "timeout_at": "2026-05-11T18:00:00Z",
+  "timeout_action": "escalate",
+  "required_approvals": 1,
+  "status": "pending",
+  "created_at": "2026-05-10T18:00:00Z",
+  "resolved_at": null,
+  "responses": [
+    {
+      "id": "resp-uuid",
+      "responder": "developer-id",
+      "decision": "approve",
+      "comment": "LGTM — proceed with the proposed interface",
+      "backend": "cli",
+      "created_at": "2026-05-10T18:05:00Z"
+    }
+  ]
+}
 ```
+
+**File operations:**
+
+- Gates are created via atomic write (`write-then-rename`) to `.claude/qds/gates/{gate_id}.json.tmp` → `.claude/qds/gates/{gate_id}.json`.
+- Responses are appended to the `responses` array in the same gate file, with the entire file rewritten atomically.
+- The `stories` reference is implicit via `story_id` string (foreign-key enforcement is handled by the pipeline engine at write time, not by the storage layer).
 
 **Invariant compliance:**
 
-- Invariant 1 (context isolation): Approval state is stored in `pipeline.db`, not in agent context. Gate resolution does not leak cross-phase context. The developer's comment is injected into the next phase's transfer manifest, not directly into agent context.
+- Invariant 1 (context isolation): Approval state is stored in `.claude/qds/gates/*.json` (file-based), not in agent context. Gate resolution does not leak cross-phase context. The developer's comment is injected into the next phase's transfer manifest, not directly into agent context.
 - Does not affect invariants 2-10.
 
 ### Alternatives Considered
@@ -512,13 +520,13 @@ CREATE TABLE human_gate_responses (
 
 - Formalizes the existing exception path for human involvement (deviation rule R4, circuit breaker escalations)
 - Multi-backend delivery ensures developers get notified wherever they are
-- Approval state is auditable in `pipeline.db`
+- Approval state is auditable as version-controlled JSON files in `.claude/qds/gates/`
 - Timeout with configurable action prevents gates from blocking indefinitely
 
 **Negative:**
 
 - Over-engineering risk for a 2-developer team that may never need mid-pipeline approvals
-- Adds 2 new tables to `pipeline.db` schema
+- Adds a new `gates/` directory under `.claude/qds/` with atomic JSON file writes
 - Multi-backend delivery requires integration work with CLI, Telegram, and Dashboard
 
 **Neutral:**
@@ -530,7 +538,7 @@ CREATE TABLE human_gate_responses (
 - [ ] ADR-039 present in `architecture-v2-session14-amendments.md`
 - [ ] Human gate specification format documented
 - [ ] Multi-backend approval delivery documented (CLI, Telegram, Dashboard)
-- [ ] `pipeline.db` schema extensions specified (human_gates, human_gate_responses)
+- [ ] File-based gate state documented (atomic JSON writes, `.claude/qds/gates/` directory)
 - [ ] Invariant #1 (context isolation) compliance verified
 - [ ] Timeout behavior with configurable action documented
 - [ ] Story 11.5 referenced as implementation story

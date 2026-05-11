@@ -1523,6 +1523,7 @@
           PR_URL=$(gh pr view HEAD --json url -q .url)
         fi
         echo "PR_URL=${PR_URL}"
+        echo "${PR_URL}" > ".claude/qds/runs/${STORY_ID}/pr_url"
         ```
 
         ## Step 3: Refresh GitNexus graph
@@ -2182,10 +2183,24 @@ print(json.dumps(data))
 
   - If `LOCAL_STATUS` is `DRAFT_PR_CREATED`, run merge detection:
     ```bash
-    PR_MERGED=$(gh pr view "${PR_URL}" --json merged --jq '.merged' 2>/dev/null || echo "false")
-    if [ "$PR_MERGED" = "true" ]; then
-      echo "MERGED" > ".worktrees/${STORY_ID}/.claude/qds/runs/${STORY_ID}/status"
-      LOCAL_STATUS="MERGED"
+    PR_URL=$(cat ".worktrees/${STORY_ID}/.claude/qds/runs/${STORY_ID}/pr_url" 2>/dev/null || echo "")
+    if [ -n "$PR_URL" ]; then
+      PR_MERGED=$(gh pr view "${PR_URL}" --json merged --jq '.merged' 2>/dev/null || echo "false")
+      if [ "$PR_MERGED" = "true" ]; then
+        echo "MERGED" > ".worktrees/${STORY_ID}/.claude/qds/runs/${STORY_ID}/status"
+        LOCAL_STATUS="MERGED"
+      fi
+
+      # Dep graph calibration: detect merge conflicts for parallel story pairs
+      MERGE_STATE=$(gh pr view "${PR_URL}" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null || echo "UNKNOWN")
+      if [ "$MERGE_STATE" = "DIRTY" ] || [ "$MERGE_STATE" = "CONFLICTING" ]; then
+        # Identify which other in-progress story might share files
+        CONFLICT_FILE=$(gh pr view "${PR_URL}" --json files --jq '.files[].path' 2>/dev/null | head -1 || echo "unknown")
+        for OTHER_STORY in $(echo "$PLAN_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join([s['id'] for s in d['stories'] if s.get('status') in ('in_progress','merged') and s['id'] != '${STORY_ID}']))"); do
+          # Store learning record for each potentially parallel story pair
+          claude-mem store --tag "dep-graph-learnings" --payload "{\"story_pair\": [\"${STORY_ID}\", \"${OTHER_STORY}\"], \"predicted\": \"parallel\", \"actual\": \"conflict\", \"reason\": \"shared file detected at merge: ${CONFLICT_FILE}\"}"
+        done
+      fi
     fi
     ```
 
@@ -2430,9 +2445,15 @@ print(json.dumps(data))
   ## Step 1: Gather what changed in the last 24 hours
 
   ```bash
+  COMMIT_COUNT=$(git log --since="24 hours ago" --oneline --no-merges | wc -l | tr -d ' ')
   git log --since="24 hours ago" --oneline --no-merges
-  git diff HEAD~$(git log --since="24 hours ago" --oneline | wc -l | tr -d ' ') --name-only 2>/dev/null || \
-    git diff $(git log --since="24 hours ago" --format="%H" | tail -1)..HEAD --name-only
+  if [ "$COMMIT_COUNT" -eq 0 ]; then
+    echo "No commits in the last 24 hours."
+  elif [ "$COMMIT_COUNT" -eq 1 ]; then
+    git diff HEAD~1 --name-only
+  else
+    git diff HEAD~${COMMIT_COUNT} --name-only
+  fi
   ```
 
   ## Step 2: Pull recent observations from claude-mem
@@ -2545,9 +2566,10 @@ print(json.dumps(data))
 
   **Do NOT commit the actual key.**
 
-  Copy `.env.example` to `.env` if not already present:
+  Ensure `$ARCHON_ROOT` is set (e.g., `export ARCHON_ROOT=$HOME/archon`), then copy `.env.example` to `.env` if not already present using relative paths from the Archon repo root:
   ```bash
-  [ -f $ARCHON_ROOT/.env ] || cp $ARCHON_ROOT/.env.example $ARCHON_ROOT/.env
+  cd "$ARCHON_ROOT"
+  [ -f .env ] || cp .env.example .env
   ```
 
   Then manually set the real key:
@@ -2684,20 +2706,10 @@ Running spec coverage check against the approved design:
 - [x] Wiki per-story update (finalize) — Task 9 (finalize Step 5 and 6)
 - [x] Nightly wiki consolidation — Task 16
 - [x] Hotspot detection — Task 16 (Step 6) + Task 15 (init creates .hotspots file)
-- [x] Dep graph calibration tracking — NOT yet implemented → **Gap found**
+- [x] Dep graph calibration tracking — implemented in Task 14 Step D (merge conflict detection + claude-mem storage with tag `dep-graph-learnings`)
 
-**Gap: Dep graph calibration (Section 5, Layer 1c)**
-The spec says: "track every dep prediction that was wrong — missed dep caused merge conflict, or over-constrained deps that serialized work unnecessarily." This storage is missing from the wave executor. Adding:
-
-In Task 14 wave-executor.md Step D, add after detecting merge conflict:
-```
-If git merge conflict detected when merging story branch:
-  Store to claude-mem: { tag: "dep-graph-learnings", story_pair: [A, B], predicted: "parallel", actual: "conflict", reason: "shared file detected at merge: {file}" }
-```
-
-This is a minor addition to wave-executor.md. Since it's a learning capture (not core functionality), add a note at the end of Task 14 to include this.
-
-**Spec check complete. One gap fixed inline above.**
+**Gap resolved: Dep graph calibration (Section 5, Layer 1c)**
+Task 14 Step D now detects merge conflicts via `gh pr view --json mergeStateStatus` when `LOCAL_STATUS` is `DRAFT_PR_CREATED`. On conflict (`DIRTY` or `CONFLICTING`), the wave executor stores a learning record to claude-mem with tag `dep-graph-learnings`, payload including `story_pair: [A, B]`, `predicted: "parallel"`, `actual: "conflict"`, and `reason: "shared file detected at merge: {file}"`. This closes the calibration loop for missed dependencies that should have been serialized.
 
 ---
 
