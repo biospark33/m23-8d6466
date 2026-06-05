@@ -67,7 +67,7 @@ QDS Factory is a system where:
 - Nightly cron: claude-mem observations → Hindsight retain, mulch expertise → Hindsight retain
 - Mental models refreshed after consolidation
 - Weekly deep consolidation: Hindsight reflect → propose workflow improvements → tune skills + model routing
-- Static wiki (.claude/wiki/) kept for human docs only; dynamic wiki replaced by Hindsight mental models
+- Static wiki (.claude/qds/wiki/) kept for human docs only; dynamic wiki replaced by Hindsight mental models
 
 ## Hindsight Documentation
 
