@@ -6,7 +6,7 @@
 
 You are continuing work on **QDS Factory v3** — an autonomous coding factory architecture. A detailed plan exists at:
 
-```
+```text
 ~/.claude/plans/last-session-shit-the-proud-panda.md
 ```
 
