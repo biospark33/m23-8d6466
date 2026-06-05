@@ -25,7 +25,7 @@ A **lights-out software factory**: work enters any channel (Telegram/iMessage/da
 
 ## 2. PRD location & current state (READ THIS FIRST)
 
-- **File:** `/Users/steve/QDS-Factory/_bmad-output/planning-artifacts/prd-qds-factory-v4.md` (14-section enterprise PRD; FR/NFR with stable IDs).
+- **File:** `~/QDS-Factory/_bmad-output/planning-artifacts/prd-qds-factory-v4.md` (14-section enterprise PRD; FR/NFR with stable IDs).
 - **Provenance:** ground-truthed by live Phase-0 spikes (4 parallel agents, file-cited) then hardened by **two** adversarial QA passes. It is honest about what is verified-on-disk vs upstream-only vs not-yet-installed (see its §5.6 confidence table). Match that discipline.
 - **Read in full before proposing anything:** §8 (accountability spine), **§9 (self-improvement — your primary target)**, §6.2 (`FR-MG`), §6.7 (`FR-ACT`), §7 (swarm archetypes + `qds-model-router`), §11 (NFRs), §12 (open questions), §14 (risk register). Skim §4.5 (code-intelligence layers) and §5 (component scorecard).
 

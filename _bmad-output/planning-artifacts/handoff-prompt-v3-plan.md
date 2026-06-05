@@ -7,7 +7,7 @@
 You are continuing work on **QDS Factory v3** — an autonomous coding factory architecture. A detailed plan exists at:
 
 ```
-/Users/steve/.claude/plans/last-session-shit-the-proud-panda.md
+~/.claude/plans/last-session-shit-the-proud-panda.md
 ```
 
 **READ THAT PLAN FILE FIRST.** It contains the complete architecture, implementation phases, and all design decisions.
@@ -15,9 +15,9 @@ You are continuing work on **QDS Factory v3** — an autonomous coding factory a
 ## Context
 
 QDS Factory is a system where:
-- **Hermes Agent** (at `/Users/steve/boardlensai/hermes-agent/`) is the 24/7 master orchestrator running on Orgo VM
-- **Archon** (at `/Users/steve/Archon/`) is the structured PIV loop engine (14-node DAG, fresh CC context per node)
-- **Claude Code** sessions run in three modes: Archon-driven (primary), headless Z.ai/GLM (cheap), interactive subscription on Orgo (Max plan)
+- **Hermes Agent** (at `~/boardlensai/hermes-agent/`) is the 24/7 master orchestrator running on Orgo VM
+- **Archon** (at `~/Archon/`) is the structured PIV loop engine (14-node DAG, fresh CC context per node)
+- **Agent sessions** run in three modes: Archon-driven (primary), headless Pi with GLM/Kimi via OpenRouter (cheap), interactive Claude Code subscription on Orgo (Max plan)
 - **Hindsight** is the core progressive memory system — the key innovation that makes the factory self-improving
 - **Mulch + Seeds + claude-mem + GitNexus** are complementary memory layers
 - **Telegram/iMessage** for remote control
@@ -26,11 +26,11 @@ QDS Factory is a system where:
 
 | Repo | Path | Purpose |
 |------|------|---------|
-| QDS Factory | `/Users/steve/QDS-Factory/` | This repo. Architecture docs, planning artifacts |
-| Hermes Agent | `/Users/steve/boardlensai/hermes-agent/` | Master orchestrator. 60+ tools, skills, cron, delegate_task |
-| Archon | `/Users/steve/Archon/` | DAG workflow engine. REST API, SSE monitoring, 14-node PIV loop |
-| rfp-agents | `/Users/steve/rfp-agents/` | Target repo for first QDS deployment |
-| boardlensai | `/Users/steve/boardlensai/` | Target repo (also contains Hermes agent) |
+| QDS Factory | `~/QDS-Factory/` | This repo. Architecture docs, planning artifacts |
+| Hermes Agent | `~/boardlensai/hermes-agent/` | Master orchestrator. 60+ tools, skills, cron, delegate_task |
+| Archon | `~/Archon/` | DAG workflow engine. REST API, SSE monitoring, 14-node PIV loop |
+| rfp-agents | `~/rfp-agents/` | Target repo for first QDS deployment |
+| boardlensai | `~/boardlensai/` | Target repo (also contains Hermes agent) |
 
 ## Architecture v3 Key Innovations (read plan for full detail)
 
@@ -43,7 +43,7 @@ QDS Factory is a system where:
 - Progressive improvement flywheel: Story 1 gets 15 bot comments → Story 30 gets 0-2
 
 ### 2. Smart Model Routing with Self-Improving Selection
-- Multiple API providers: Z.ai GLM (free), Kimi K2 (cheap), Anthropic API (pay-per-token), Anthropic Subscription (Max plan)
+- Multiple API providers: OpenRouter (for GLM/Kimi/Sonnet), Anthropic API (pay-per-token), Anthropic Subscription (Max plan)
 - Model router queries Hindsight meta bank before each task assignment
 - A/B testing: 10% of tasks get alternate model, outcomes retained for learning
 - Rate limit rotation across providers when one hits limits
@@ -71,7 +71,7 @@ QDS Factory is a system where:
 
 ## Hindsight Documentation
 
-Full Hindsight docs available at `/Users/steve/.claude/skills/hindsight-docs/`:
+Full Hindsight docs available at `~/.claude/skills/hindsight-docs/`:
 - `references/best-practices.md` — Mission design, tag strategies, anti-patterns
 - `references/developer/api/retain.md` — Content format, document_id for upsert, observation scopes
 - `references/developer/api/recall.md` — 4 retrieval strategies, budget levels, tag filtering, tag_groups
@@ -83,7 +83,7 @@ Full Hindsight docs available at `/Users/steve/.claude/skills/hindsight-docs/`:
 
 The plan is at ~10 sessions of implementation work. I want you to:
 
-1. **Read the plan file** at `/Users/steve/.claude/plans/last-session-shit-the-proud-panda.md` — understand it deeply
+1. **Read the plan file** at `~/.claude/plans/last-session-shit-the-proud-panda.md` — understand it deeply
 2. **Review the plan critically** — identify gaps, risks, or improvements that would make this system truly world-class
 3. **Sharpen the Hindsight integration** — look for ways to extract more value from the memory system. Are there additional retain/recall/reflect points we're missing? Are the missions optimal? Could entity labels or observation scopes be better configured?
 4. **Sharpen the parallelization** — is wave execution robust enough? What about partial merges, rebase conflicts, or stories that get blocked mid-execution?
@@ -103,8 +103,8 @@ The plan is at ~10 sessions of implementation work. I want you to:
 |------|----------|
 | v2 Design Spec (approved) | `_bmad-output/planning-artifacts/qds-on-archon-design-2026-05-10.md` |
 | v2 Implementation Plan (18 tasks, not started) | `_bmad-output/planning-artifacts/qds-on-archon-implementation-plan-2026-05-10.md` |
-| v3 Plan (current, being iterated) | `/Users/steve/.claude/plans/last-session-shit-the-proud-panda.md` |
-| Hindsight docs | `/Users/steve/.claude/skills/hindsight-docs/` |
+| v3 Plan (current, being iterated) | `~/.claude/plans/last-session-shit-the-proud-panda.md` |
+| Hindsight docs | `~/.claude/skills/hindsight-docs/` |
 
 ## Important Notes
 
