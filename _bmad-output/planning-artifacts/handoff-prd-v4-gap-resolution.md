@@ -336,21 +336,21 @@ Spawn one final agent to run the consistency checklist below against the updated
 
 Run after all edits. All must pass before declaring done.
 
-- [ ] Every FR cited in §6.8 FR→Phase traceability exists in §6.1..§6.10 with the same ID.
-- [ ] Every NFR has a measurable threshold statement.
-- [ ] Every OQ in §12.2 has: Owner-role, Spike action, Gates (FR IDs), Default/fallback.
-- [ ] Every Risk in §14 has: Likelihood, Impact, Mitigation, Owner, Trigger-to-watch.
-- [ ] The cross-reference line at bottom of §14 includes all risks by number.
-- [ ] Every new FR-LEARN ID in the v4 set (FR-LEARN-1..6) is referenced by at least one of: §6.8, §9, §10, §11, §13.
-- [ ] No FR-LEARN-7..27 appears in §6.1..§6.9 (they live only in §6.10 v5 placeholder).
-- [ ] §13 Phase-0 gate includes OQ-17 and the `gitnexus analyze` sequencing constraint.
-- [ ] §7 "dominating rule" paragraph includes the blast-radius floor.
-- [ ] §4.6 launcher spec exists and is cross-referenced from FR-EX-1, FR-EX-6, FR-EX-11, Phase-0 item 3.
-- [ ] OQ-1 entry in §12.2 includes the §7-dependency callout.
-- [ ] No `issue.cost` field anywhere in the document (NFR-ACC-3 invariant).
-- [ ] FR-EX-11 includes the changed-files union collection protocol.
-- [ ] NFR-SAF-3 includes archetype-specific timeout starting values.
-- [ ] Phase-0 item 1 exit criterion includes the non-regression test.
+- [x] Every FR cited in §6.8 FR→Phase traceability exists in §6.1..§6.10 with the same ID.
+- [x] Every NFR has a measurable threshold statement.
+- [x] Every OQ in §12.2 has: Owner-role, Spike action, Gates (FR IDs), Default/fallback.
+- [x] Every Risk in §14 has: Likelihood, Impact, Mitigation, Owner, Trigger-to-watch.
+- [x] The cross-reference line at bottom of §14 includes all risks by number.
+- [x] Every new FR-LEARN ID in the v4 set (FR-LEARN-28..33 — *renumbered per operator decision #2; the original "FR-LEARN-1..6" framing is superseded*) is referenced by at least one of: §6.8, §9, §10, §11, §13.
+- [x] No FR-LEARN-1..27 is *defined* in §6.1..§6.9 (they are defined only in §6.10 v5 deferred scope; §6.9/§9.4 cite the range solely as a deferred-scope pointer). *(Item updated from the original "FR-LEARN-7..27" wording: the renumber kept the full 1..27 set in §6.10.)*
+- [x] §13 Phase-0 gate includes OQ-17 and the `gitnexus analyze` sequencing constraint.
+- [x] §7 "dominating rule" paragraph includes the blast-radius floor.
+- [x] §4.6 launcher spec exists and is cross-referenced from FR-EX-1, FR-EX-6, FR-EX-11, Phase-0 item 3.
+- [x] OQ-1 entry in §12.2 includes the §7-dependency callout.
+- [x] No `issue.cost` field anywhere in the document (NFR-ACC-3 invariant).
+- [x] FR-EX-11 includes the changed-files union collection protocol.
+- [x] NFR-SAF-3 includes archetype-specific timeout starting values.
+- [x] Phase-0 item 1 exit criterion includes the non-regression test.
 
 ---
 
@@ -365,7 +365,7 @@ Run after all edits. All must pass before declaring done.
 
 ## CHANGE LOG (completed 2026-06-06)
 
-All edits made against `prd-qds-factory-v4.md`. Four parallel investigation agents grounded every claim to `file:line`; a final consistency agent verified the 15-item checklist (20/20 PASS). Several handoff *assumptions* were corrected by ground truth (flagged ⚠️ below).
+All edits made against `prd-qds-factory-v4.md`. Four parallel investigation agents grounded every claim to `file:line`; a final consistency agent verified the 15-item checklist (15/15 PASS). Several handoff *assumptions* were corrected by ground truth (flagged ⚠️ below).
 
 | Section | Change | Reason |
 |---|---|---|
