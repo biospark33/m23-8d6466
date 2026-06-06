@@ -42,7 +42,7 @@ A **verification/gate** slice, not new product capability. It cuts across every 
 
 5. **(clause 5 — P1.16 audit chain)** Given that PR, When the harness walks the chain, Then *"Audit-chain reconstructability: for that PR, the full §8.1 chain (epic → Seeds → Paperclip issue → cost_events → approvals/`issue_execution_decisions` → heartbeat_runs → Archon run → Pi team → pi-lens → Hindsight) walks end-to-end with no missing hop."*
 
-6. **(clause 6 — P1.13 ledger / P1.14 roll-up)** Given the issue tree, When the gate reads spend, Then *"Per-issue spend within budget: Paperclip shows per-issue-tree spend from `cost_events`, and it is at or under the agent/company budget cap (no silent over-cap)"* — `SUM(cost_events.costCents)` over the `parentId` subtree ≤ the agent/company `budgetMonthlyCents`.
+6. **(clause 6 — P1.13 ledger / P1.13 roll-up)** Given the issue tree, When the gate reads spend, Then *"Per-issue spend within budget: Paperclip shows per-issue-tree spend from `cost_events`, and it is at or under the agent/company budget cap (no silent over-cap)"* — `SUM(cost_events.costCents)` over the `parentId` subtree ≤ the agent/company `budgetMonthlyCents`.
 
 7. **(clause 7 — P1.11 memory retain)** Given the run, When the gate queries the dev bank, Then *"The Hindsight dev bank (`{repo}-dev-meta` / `{repo}`) contains findings retained from the run"* — ≥1 retained memory with `document_id == runId` is recallable.
 

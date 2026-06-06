@@ -24,7 +24,7 @@ This slice builds the audit-walk tool that executes the §8.4 query contract as 
 
 **Wiring closed:** On completion of this story, `audit-walk <pr_url>` on the P1.15 PR produces a report with `missing == []` (all 10 §8.4 joins resolve) and `withinBudget == true`, completing in ≤30s, using only code merged by this story plus its listed predecessors. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors are dependency edges (listed below), not unfinished wiring inside this story.
 
-**Dependency edges (predecessors):** P1.15 (the real PR exists + its run log correlates `pr_url`↔`issueId`, supplying hop 1), P1.11 (every run writes ≥1 `cost_events` row; per-issue-tree spend queryable within budget — hops 5 + the budget assertion), P1.13 (the audit-chain item the §8.1 walk reconstructs). Each store (Seeds, Paperclip, Archon run log, pi-lens report, Hindsight bank) is populated by its own predecessor; this story only walks them.
+**Dependency edges (predecessors):** P1.15 (the real PR exists + its run log correlates `pr_url`↔`issueId`, supplying hop 1), P1.13 (every run writes ≥1 `cost_events` row; per-issue-tree spend queryable within budget — hops 5 + the budget assertion), P1.11 (the audit-chain item the §8.1 walk reconstructs). Each store (Seeds, Paperclip, Archon run log, pi-lens report, Hindsight bank) is populated by its own predecessor; this story only walks them.
 
 ## Acceptance Criteria
 
