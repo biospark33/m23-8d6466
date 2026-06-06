@@ -38,6 +38,10 @@ Key files on disk (verified this session):
 
 Each gap is tagged: **[SPEC]** = new spec text needed in PRD, **[EDIT]** = existing text needs correction, **[TRIM]** = scope reduction.
 
+> **⚠️ STATUS — this GAP REGISTER is the original input plan (2026-06-06 AM), preserved as the historical record.** Where any item below conflicts with the final outcome, the authoritative records govern: the **CHANGE LOG** and **OPERATOR DECISIONS — RESOLVED** sections at the bottom of this doc, and the PRD itself (`prd-qds-factory-v4.md`). Two items were resolved differently than first drafted and carry inline superseded notes:
+> - **OPPORTUNITY-1** (PR-bot fix loop) — **resolved**: committed to **Phase 1** (item 15); the Phase-4 bullet was struck. It is no longer an open decision, and no `[OPERATOR DECISION NEEDED]` callout remains in the PRD.
+> - **TRIM-1** (Layer-B FR-LEARN trim) — **superseded**: the v4 foundation uses the next free IDs **`FR-LEARN-28..33`**, not the `FR-LEARN-1..6` repurposing drafted below. The original `FR-LEARN-1..27` are preserved **verbatim with their published IDs unchanged** in PRD §6.10 (v5 deferred scope), and OQ-7..16 / R16..R26 moved to PRD Appendix C. See Operator Decision #2.
+
 ---
 
 ### GAP-1 [SPEC] — `pi-team-launch.sh` is never specced
@@ -220,6 +224,8 @@ Direct PRD edit. No sub-agent.
 
 ### OPPORTUNITY-1 [SPEC] — PR-bot fix loop should be Phase 1, not Phase 4
 
+> **✅ RESOLVED (Operator Decision #1, below) — historical note.** The "Decision needed" framing and the instruction to add a `[OPERATOR DECISION NEEDED]` callout (this section) are **superseded**. Outcome: the PR-bot fix loop was **committed to Phase 1** (item 15), separable from the make-or-break exit gate; the Phase-4 bullet was **struck** (Phase-1 ~14→~16 stories, Phase-4 ~5→~3). The PRD carries no `[OPERATOR DECISION NEEDED]` callout for this item. Text below is retained as the original rationale.
+
 Current: Phase 4 says "PR-bot fix loop" as a single bullet. The highest-value Phase-1 demo — and the user's actual workflow — is: Telegram → PR → CodeRabbit/Gemini comments → Hermes wakes → Pi addresses comments → PR goes green.
 
 **Decision needed:** Does the user want to move PR-bot fix loop to Phase 1? If yes:
@@ -251,6 +257,8 @@ Add a sentence to FR-LEARN-3: "Arms violating the blast-radius floor (§7) are e
 ---
 
 ### TRIM-1 [TRIM] — Layer-B FR-LEARN-1..27 → 5-6 FRs for v4
+
+> **⚠️ SUPERSEDED ID SCHEME (Operator Decision #2, below) — historical note.** Every `FR-LEARN-1..6` / "5-6 FRs" / "replace FR-LEARN-1..27" framing in this section (and the §6.9 draft, sub-agent task, and execution-plan steps that reference it) is **superseded**. Final v4 scheme: the v4 foundation is **6 FRs at the next free IDs, `FR-LEARN-28..33`** (the FR list below maps 1:1 onto 28..33, same content); the original **`FR-LEARN-1..27` are preserved verbatim with their published IDs unchanged** in PRD §6.10 (v5 deferred scope) — **not** repurposed. OQ-7..16 → PRD Appendix C; R16..R26 → Appendix C; R15 kept in §14. Rationale: PR #9 is merged, so FR-LEARN-1..27 are published IDs and immutable. Text below is retained as the original scope rationale.
 
 **This is a scope decision, not a bug fix. The contextual bandit, counterfactual estimator, shadow runs, Mann-Kendall, CUSUM, difficulty normalization, ablation stories, and baseline epochs are correct engineering but v5 work.**
 
