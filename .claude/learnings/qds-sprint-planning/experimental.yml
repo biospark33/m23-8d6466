@@ -1,0 +1,53 @@
+# QDS Sprint Planning Skill - Low Confidence Experimental Patterns
+# These patterns require manual review before applying.
+# Confidence: LOW (inferred patterns, single observation)
+version: "1.1"
+skill: qds-sprint-planning
+last_updated: "2026-05-16T00:00:00Z"
+commit_hash: null
+
+metadata:
+  total_learnings: 1
+  applied_count: 1
+  success_rate: 1.0
+  # v1.1: Added SPL-023 from the 2026-05-16 PRO-HUB session.
+
+learnings:
+  - id: SPL-023
+    category: phase-3-commit-tooling
+    pattern: "Use git commit -F <tmpfile> as a robust alternative for sprint-planning commits"
+    description: |
+      CORRECTION (2026-05-16): The original write-up incorrectly blamed
+      apostrophes in story IDs (B3', B4') for breaking the heredoc commit
+      pattern. This was wrong: `<<'EOF'` (quoted heredoc delimiter) DOES
+      preserve apostrophes in the body without issue — confirmed by shell
+      test, exit 0, content intact. The `git commit -m "$(cat <<'EOF'
+      ... EOF)"` pattern is safe for apostrophe-containing messages.
+
+      The true root cause of the Phase-3 commit failure in the 2026-05-16
+      session is UNKNOWN (single observation; no definitive evidence).
+
+      Recommendation (robustness/best-practice, not a bug workaround):
+      Write the commit message to a temp file outside the repo (e.g.
+      /tmp/commit_msg.txt) and commit with `git commit -F /tmp/commit_msg.txt`.
+      This avoids all shell-quoting complexity — including multi-line
+      messages, special characters, and heredoc edge cases — and is
+      unambiguously safe. Both `<<'EOF'` and `git commit -F <file>`
+      remain valid options; the -F pattern is simply more resilient.
+      Per git safety: after any failed commit attempt, create a NEW commit
+      (never --amend).
+    evidence:
+      session: "2026-05-16 qds-sprint-planning for Epic PRO-HUB"
+      user_feedback: |
+        Phase-3 commit failed once; recovered by writing the message to
+        /tmp and using `git commit -F`. Original diagnosis (apostrophes
+        breaking <<'EOF') was incorrect — <<'EOF' handles apostrophes
+        correctly. True root cause unknown. Single observation.
+    correction:
+      date: "2026-05-16"
+      source: "CodeRabbit inline review on PR #1484"
+      summary: "Removed false apostrophe root-cause; confirmed <<'EOF' is safe; reframed -F as robustness practice."
+    first_seen: "2026-05-16"
+    times_seen: 1
+    applications: 1
+    confidence: "low"  # Single observation; root cause unknown; -F recommendation stands as best practice

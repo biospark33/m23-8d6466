@@ -1,0 +1,877 @@
+# QDS Sprint Planning Skill - High Confidence Patterns
+# These patterns are auto-applied when qds-sprint-planning is invoked.
+# Confidence: HIGH (user explicitly approved, seen 3+ times, or from sprint retro)
+version: "1.11"
+skill: qds-sprint-planning
+last_updated: "2026-05-17T00:00:00Z"
+commit_hash: null
+
+metadata:
+  total_learnings: 20
+  applied_count: 7
+  applications_attempted: 10  # Total number of pattern application attempts (successful + failed)
+  success_rate: 0.70  # Success rate of applied patterns: applied_count / applications_attempted (7/10 = 0.70)
+  # SPL-001 recurrence in B8 session (failed to apply max 2 stories per agent rule)
+  # v1.7: Added bidirectional related_patterns between SPL-001 and SPL-013 for traceability
+  # v1.8: Added SPL-014 (enumerate trigger surface) and SPL-015 (verify infra prereqs)
+  #       captured from the PRO-NUC.4 incident — PRO-NUC.1/2/3 shipped a "complete"
+  #       nuclear pipeline but left the chat-tool trigger path on legacy code and
+  #       never added the worker container, requiring a follow-up PR to actually
+  #       deliver the user-facing value. Both gaps were planning omissions, not
+  #       implementation bugs.
+  # v1.9: Added SPL-016 (validate story atomicity before ready-for-dev) — Phase 2.5
+  #       atomicity audit per issue #1435, in response to Epic RBAC-1 where stories
+  #       averaged 660 lines (range 474-804) with 26-40 DOD items each. RBAC-1.5
+  #       (13 SP, 32 DOD items, 804 lines) self-acknowledged it was "two
+  #       implementation sessions, atomic PR" — the skill recognized over-sizing
+  #       but had no enforcement step. PR #1394 took 15+ fix rounds versus ~5
+  #       for a properly-atomic story.
+  # v1.10: PRO-HUB session (2026-05-16). Added SPL-017 (Phase-0 epic-code
+  #        collision pre-check + namespacing) and SPL-018 (long-term
+  #        enterprise correctness over scope-minimization on delegated
+  #        decision forks). Reinforced SPL-001/SPL-013 — user re-asserted
+  #        "no more than 2 story files written per subagent!" and the rule
+  #        was correctly applied this session. SPL-019..SPL-022 added to
+  #        preferences.yml, SPL-023 to experimental.yml.
+  # v1.11: Added SPL-024 (auto-iterate adversarial review until findings
+  #        stabilize) per issue #1432 / PR #1500 — captured from the Epic
+  #        RBAC-1 retro skill audit (§4.5). Single-shot adversarial review
+  #        caught real structural issues but the chain stopped after one
+  #        pass; the next 50+ rounds of CR/Gemini surfaced issues the
+  #        one-shot review missed. Auto-iteration converges before commit
+  #        + adds pluggable domain-invariant checklists (rls, migration,
+  #        auth, secrets, input-handling shipped; pii + payments deferred).
+  #        NOTE: dev branch already had SPL-017/018 (PRO-HUB) and
+  #        SPL-019..023 in preferences/experimental; this PR's new
+  #        learning was renumbered from SPL-017 to SPL-024 to avoid
+  #        collision.
+
+learnings:
+  - id: SPL-001
+    category: agent-allocation
+    pattern: "Max 2 stories per writing agent"
+    related_patterns: [SPL-013]  # Enforcement mechanism via pre-flight check
+    description: |
+      When launching writing agents in Phase 2, assign maximum 2 stories
+      per agent to maintain quality and context. This prevents context overflow
+      and ensures each story receives proper attention.
+
+      ENFORCEMENT: This is a pre-flight check that MUST be verified before
+      spawning any writing agents. Calculate: num_agents = ceil(total_stories / 2).
+    evidence:
+      session: "2026-02-02 qds-sprint-planning for Epic B6"
+      user_feedback: "User corrected: 'the subagents doing the writing handle more
+      than 1-2 stories, each?? that should be the max'"
+      correction: "Agent 4 was assigned 5 stories (B6.7, B6.3a, B6.3b, B6.5a, B6.5b)
+      when max should be 2 per agent"
+    first_seen: "2026-02-02"
+    times_seen: 4
+    applications: 2
+    confidence: "high"  # User explicitly elevated: "that is a must change"
+    recurrence_evidence:
+      session: "2026-02-09 qds-sprint-planning for Epic B8"
+      user_feedback: "i noticed that it used a single subagent to write 3 stories
+      instead of max 2"
+      violation: "Single agent assigned B8.3a, B8.3b, B8.3c (3 stories)
+      when max should be 2 per agent"
+      correct_allocation: "Agent 1: B8.3a + B8.3b (2 stories), Agent 2: B8.3c (1 story)"
+    reaffirmation_evidence:
+      session: "2026-05-16 qds-sprint-planning for Epic PRO-HUB"
+      user_feedback: "User explicitly re-asserted mid-session: 'no more than 2
+      story files written per subagent!'"
+      outcome: "Rule was CORRECTLY APPLIED this session — every writing subagent
+      received <=2 story files (W1=B6+B7, W2=A1, W3=B1, W4=B2a+B2b, W5=B3p+B4p,
+      W6=B5+R1; plus the B8+B3p and B4p revision agents). Successful application;
+      confidence unchanged (stays high)."
+
+  # A6.6 Code Review Learnings (2026-02-06)
+  - id: SPL-002
+    category: story-definition
+    pattern: "API Contract Must Match Implementation Exactly"
+    description: |
+      When defining stories with REST API endpoints, the Pydantic request/response
+      schemas must match the story spec exactly. Common mismatches include:
+      - Including path params (rfp_id) in request body when they're already in URL
+      - Returning dict[str, Any] instead of typed response model
+      - Missing fields that are specified in the AC criteria
+
+    evidence:
+      story: "A6.6 Gate 5 API Bridge"
+      issues_found:
+        - "SignatureRequest had rfp_id field but URL already has /signature/{rfp_id}"
+        - "ApprovalRequest had rfp_id field but URL already has /approve/{rfp_id}"
+        - "FinalResponseResponse structure didn't match AC1 spec"
+      fix_effort: "4 hours to fix schemas, tests, and implementation"
+    first_seen: "2026-02-06"
+    times_seen: 1
+    applications: 0
+    confidence: "high"
+
+  - id: SPL-003
+    category: story-definition
+    pattern: "Define Test Fixtures Alongside Story Scaffolding"
+    description: |
+      When scaffolding a new story with API endpoints, create the test fixtures
+      (conftest.py) and mock clients BEFORE implementing endpoints. This prevents
+      discovering fundamental testing issues during code review.
+    evidence:
+      story: "A6.6 Gate 5 API Bridge"
+      problem: "Mock valkey client was sync Mock() instead of async class"
+      discovered: "During code review, not during implementation"
+      impact: "Tests failed with TypeError, required complete rewrite of conftest.py"
+    first_seen: "2026-02-06"
+    times_seen: 1
+    applications: 0
+    confidence: "high"
+
+  - id: SPL-004
+    category: architecture
+    pattern: "Stub Adapter Limitations Must Be Documented In Story"
+    description: |
+      When a story uses stub adapters (for external systems not yet implemented),
+      the story spec must explicitly document:
+      1. What the stub does (or doesn't do)
+      2. Where real validation happens (if stub is bypassed)
+      3. How tests should handle the stub
+
+    evidence:
+      story: "A6.6 Gate 5 API Bridge"
+      issue: "_StubRBACAdapter returns None, but state machine validates this as 'invalid role'"
+      missing: "Documentation that API layer handles RBAC, state machine should skip it"
+      fix: "Passed rbac=None to state machine, added comments explaining the bypass"
+    first_seen: "2026-02-06"
+    times_seen: 1
+    applications: 0
+    confidence: "high"
+
+  - id: SPL-005
+    category: testing
+    pattern: "Integration Tests Must Cover Multi-Call Workflows"
+    description: |
+      Stories with workflows (create signature → approve) need integration tests
+      that verify the full sequence, not just individual endpoints. Unit tests that
+      mock storage between calls don't catch state machine bugs.
+    evidence:
+      story: "A6.6 Gate 5 API Bridge"
+      unit_tests: "Each endpoint tested in isolation with fresh mock"
+      integration_gap: "No test verified signature → approval workflow"
+      bug_found: "Lock operation failed because mock didn't persist state"
+    first_seen: "2026-02-06"
+    times_seen: 1
+    applications: 0
+    confidence: "medium"  # Integration tests existed but needed expansion
+
+  # ============================================================================
+  # AUTO-SPLIT STORIES > 5 POINTS (2026-02-06)
+  # User explicitly requested: "we need each story to be max 3-5 points"
+  # ============================================================================
+
+  - id: SPL-006
+    category: auto-split-sizing
+    pattern: "AUTO-SPLIT: Stories > 5 points must be split into smaller substories"
+    description: |
+      CRITICAL: When ANY story is estimated at 6+ points (above the 3-5 point target),
+      the skill MUST proactively split it into smaller substories of ~4 points each.
+      This is not optional - the user explicitly requires max 3-5 points per story.
+
+      Default split pattern for agent stories:
+      - A (Core): Agent class, system prompt, orchestration logic (~4 pts)
+      - B (Tools): Individual tool implementations with Pydantic schemas (~4 pts)
+
+      For non-agent stories, split by logical boundaries (UI/data/processing).
+    evidence:
+      session: "A7.1/A7.2 story splitting (2026-02-06)"
+      user_feedback: "User explicitly requested: 'we need each story to be max 3-5 points.
+      so please split each into an a and b substory, each about 4 points if possible'"
+      correction: "A7.1 (8 pts) -> A7.1A (4 pts) + A7.1B (4 pts),
+      A7.2 (8 pts) -> A7.2A (4 pts) + A7.2B (4 pts)"
+    first_seen: "2026-02-06"
+    times_seen: 1
+    applications: 1
+    confidence: "high"  # User explicitly requested, MUST APPLY
+    auto_split_rules: |
+      TARGET SIZE: 3-5 points per story
+      SPLIT TRIGGER: story_points >= 6
+
+      Default split pattern:
+      - If 6-8 points: Split into A + B (~4 pts each)
+      - If 9-12 points: Split into A + B + C (~4 pts each)
+      - If >12 points: Split into more substories
+
+      Agent story split pattern (A/B):
+      A = Core (agent class, orchestration, system prompt)
+      B = Tools (individual tool implementations with Pydantic schemas)
+
+  - id: SPL-007
+    category: auto-split-core-tools
+    pattern: "AUTO-SPLIT: Agent stories use Core (A) + Tools (B) pattern"
+    description: |
+      When splitting agent implementation stories (6+ points), use the Core/Tools pattern:
+
+      {STORY}A - Core (~4 pts):
+      - Agent class with ClaudeAgentSDKClient interface
+      - System prompt (src/prompts/{agent}.yaml)
+      - Orchestration method (e.g., refine_response, validate_response)
+      - EventEmitterPort integration
+      - Database tables if core-specific
+
+      {STORY}B - Tools (~4 pts):
+      - Individual tool implementations
+      - Full Pydantic schemas (Input/Output with Field descriptions)
+      - Tool registration via ToolPort
+      - ADR-014 compliant naming ({agent}.{tool})
+      - Unit tests for each tool
+    evidence:
+      session: "A7.1/A7.2 story splitting (2026-02-06)"
+      user_feedback: "User approved Core/Tools split pattern for Writing and QA agents"
+      correction: "A7.1A (Core): WritingAgent class, refine_response() orchestration
+      A7.1B (Tools): ToneAnalyzerTool, ReadabilityScorerTool, StyleGuideTool, AudienceAdapterTool
+      A7.2A (Core): QAAgent class, validate_response() orchestration, validation_issues table
+      A7.2B (Tools): ConsistencyCheckerTool, CitationVerifierTool, ContradictionFinderTool, QualityScorerTool"
+    first_seen: "2026-02-06"
+    times_seen: 1
+    applications: 1
+    confidence: "high"  # User explicitly approved the pattern
+    split_pattern: |
+      Agent Story (6-8 pts) -> A (Core) + B (Tools)
+
+      A - {Epic}.{Story}a-{agent}-core:
+      - Agent class implementation
+      - System prompt
+      - Orchestration methods
+      - Event emission
+
+      B - {Epic}.{Story}b-{agent}-tools:
+      - Tool implementations
+      - Pydantic schemas
+      - Tool registration
+      - Unit tests
+
+  - id: SPL-008
+    category: auto-split-naming
+    pattern: "AUTO-SPLIT: Sub-story naming uses letter suffix (A/B/C)"
+    description: |
+      When splitting stories, use letter suffixes for sub-stories:
+      - Original: A7.1 -> Sub-stories: A7.1A, A7.1B
+      - A = Core story (agent class, orchestration)
+      - B = Tools story (individual tools with Pydantic schemas)
+
+      File names use kebab-case with suffix:
+      - a7-1a-writing-agent-core.md
+      - a7-1b-writing-agent-tools.md
+    evidence:
+      session: "A7.1/A7.2 story splitting (2026-02-06)"
+      user_feedback: "User approved A/B naming convention for split stories"
+      examples: "a7-1a-writing-agent-core.md, a7-1b-writing-agent-tools.md,
+      a7-2a-qa-agent-core.md, a7-2b-qa-agent-tools.md"
+    first_seen: "2026-02-06"
+    times_seen: 1
+    applications: 1
+    confidence: "high"  # User explicitly approved
+    naming_convention: |
+      Story ID: {EPIC}.{STORY}{SUFFIX}
+      Examples: A7.1A, A7.1B, A7.2A, A7.2B
+
+      File name: {story-id}-{short-title}.md
+      Examples: a7-1a-writing-agent-core.md, a7-1b-writing-agent-tools.md
+
+      Suffix meanings:
+      - A: Core (agent class, orchestration, system prompt)
+      - B: Tools (individual tool implementations with Pydantic schemas)
+      - C: Additional (if needed for 3-way splits)
+
+  - id: SPL-009
+    category: file-organization-epics
+    pattern: "Epics.md contains brief summary with link, not full detail"
+    description: |
+      When stories are created or split, epics.md should contain a brief summary with
+      a link to the full story file. Do NOT duplicate the full story content
+      in epics.md. This keeps epics.md scannable while maintaining detail
+      in individual story files.
+
+      Specifically, the Definition of Done should NOT be a full checklist in epics.md;
+      it should be a brief pointer or highlight, with the full checklist in the story file.
+    evidence:
+      session: "A7.1/A7.2 story splitting (2026-02-06)"
+      user_feedback: "CodeRabbit review: 'Keep the epics.md template brief; avoid full DoD duplication.
+      The SPL-008 template currently implies repeating a full DoD checklist in epics.md,
+      which undercuts the \"brief summary + link\" goal.'"
+      correction: "Epics.md entries contain: brief description, story points,
+      AC summary, high-level technical notes, and a link to the full story file (DoD stays in the story file)"
+    first_seen: "2026-02-06"
+    times_seen: 2
+    applications: 1
+    confidence: "medium"  # Inferred from existing pattern + CodeRabbit feedback
+    epics_format: |
+      ### Story A7.1A: {Title}
+
+      **Story File:** [`path/to/story.md`](./path/to/story.md)
+
+      As a **{Persona}**, I want {what}, So that {why}.
+
+      **Story Points:** {N}
+
+      **Acceptance Criteria:** (brief summary bullets)
+      - AC1: ...
+      - AC2: ...
+
+      **Technical Notes:** (key decisions)
+      - Model: ...
+      - Tools: ...
+
+      **Definition of Done:** See the linked story file for the full checklist.
+
+      **Full enterprise detail** is in the individual story file linked above.
+
+  - id: SPL-009-B
+    category: file-organization-sprint-status
+    pattern: "Mark split stories as 'split' in sprint-status.yaml"
+    description: |
+      When splitting stories, update sprint-status.yaml to:
+      1. Mark original story with status: "split"
+      2. Add comment: "DEPRECATED - See {new-story-ids} below"
+      3. Add new sub-stories with status: "ready-for-dev"
+      4. Include story points and creation date in comments
+    evidence:
+      session: "A7.1/A7.2 story splitting (2026-02-06)"
+      user_feedback: "No explicit feedback - pattern followed from existing convention"
+      examples: |
+        a7-1-writing-agent: split  # DEPRECATED - See a7-1a, a7-1b below
+        a7-1a-writing-agent-core: ready-for-dev  # 4 pts - ✅ Story created 2026-02-06
+        a7-1b-writing-agent-tools: ready-for-dev  # 4 pts - ✅ Story created 2026-02-06
+    first_seen: "2026-02-06"
+    times_seen: 1
+    applications: 1
+    confidence: "medium"  # Inferred from existing pattern
+    sprint_status_format: |
+        {original-story-id}: split  # DEPRECATED - See {new-id-1}, {new-id-2} below
+        {new-id-1}: ready-for-dev  # {N} pts - ✅ Story created {date}
+        {new-id-2}: ready-for-dev  # {N} pts - ✅ Story created {date}
+
+  # ============================================================================
+  # A7.2A QA AGENT CODE REVIEW LEARNINGS (2026-02-07)
+  # Story acceptance criteria validation lessons
+  # ============================================================================
+
+  - id: SPL-010
+    category: story-validation-dod
+    pattern: "Verify deferred features are properly documented in DoD"
+    description: |
+      When reviewing story Definition of Done, check that any deferred
+      implementation (e.g., database persistence, orchestrator registration)
+      has clear documentation explaining:
+      1. What specific story will implement the feature
+      2. Why the deferral is necessary (dependency story)
+      3. What placeholder behavior exists (NotImplementedError vs pass)
+    evidence:
+      session: "A7.2A QA Agent Core code review (2026-02-07)"
+      issue: "M3: _persist_issues() was pass but this wasn't clearly scoped.
+      The story should have explicitly documented the deferral to A7.3."
+    first_seen: "2026-02-07"
+    times_seen: 1
+    applications: 0
+    confidence: "high"  # User confirmed code review findings
+    validation_check: |
+      When reviewing stories with placeholder methods:
+      1. Check for 'pass' statements without documentation
+      2. Verify deferred story ID is explicitly mentioned
+      3. Confirm NotImplementedError or clear TODO comment exists
+      4. Update DoD to include "Deferred features documented with story ID"
+
+  - id: SPL-011
+    category: story-validation-testing
+    pattern: "Verify unit tests for all private validation/parsing methods"
+    description: |
+      When reviewing agent Core stories, ensure test coverage includes
+      dedicated unit tests for private methods that perform critical logic:
+      - _run_* methods (tool orchestration)
+      - _parse_* methods (data parsing)
+      - _format_* methods (output formatting)
+
+      Indirect testing via public API is insufficient.
+    evidence:
+      session: "A7.2A QA Agent Core code review (2026-02-07)"
+      issue: "M1: Missing unit tests for private methods - The _run_* validation
+      methods had no dedicated tests, only indirect testing via validate_response()"
+    first_seen: "2026-02-07"
+    times_seen: 1
+    applications: 0
+    confidence: "high"  # User confirmed code review findings
+    validation_check: |
+      During story review, for each private method:
+      1. Check if method performs validation, parsing, or transformation
+      2. Verify dedicated test class or test method exists
+      3. Confirm test covers error paths, not just happy path
+      4. Add to DoD: "Unit tests for all _run_, _parse_, _format_ methods"
+
+  - id: SPL-012
+    category: story-validation-integration
+    pattern: "Verify integration points claimed in DoD are actually implemented"
+    description: |
+      When stories claim integration points in DoD (e.g., "QAAgent ready for
+      orchestrator registration"), verify whether this is:
+      1. FULLY IMPLEMENTED in the story (code changes exist)
+      2. DOCUMENTED AS DEFERRED with explicit story ID
+      3. NEEDS STORY UPDATE to clarify the deferral
+
+      Ambiguous integration claims cause confusion about story completeness.
+    evidence:
+      session: "A7.2A QA Agent Core code review (2026-02-07)"
+      issue: "M4: Integration points claimed in DoD but not implemented -
+      Orchestrator registration claimed but deferred to A7.3"
+    first_seen: "2026-02-07"
+    times_seen: 1
+    applications: 0
+    confidence: "high"  # User confirmed code review findings
+    validation_check: |
+      When reviewing story DoD integration section:
+      1. For each claimed integration: check if code exists
+      2. If deferred: confirm story explicitly mentions deferral story ID
+      3. If unclear: flag for clarification before marking story ready
+      4. Preferred format: "Ready for {integration} (actual {integration} in {story-id})"
+
+  # ============================================================================
+  # B8 SPRINT PLANNING LEARNINGS (2026-02-09)
+  # Pattern application enforcement failure
+  # ============================================================================
+
+  - id: SPL-013
+    category: agent-allocation-enforcement
+    pattern: "Pre-flight check: Verify agent allocation BEFORE spawning writing agents"
+    related_patterns: [SPL-001]  # Enforces the max 2 stories per agent rule
+    description: |
+      CRITICAL: Before spawning any writing agents in Phase 2, run a pre-flight check
+      to verify that no agent will be assigned more than 2 stories.
+
+      Enforcement algorithm:
+      1. Count total stories to write: N
+      2. Calculate minimum agents needed: agents = ceil(N / 2)
+      3. Group stories by wave/batch strategy
+      4. Assign max 2 stories per agent
+      5. If any agent would exceed 2, spawn additional agents
+
+      Example: 5 stories require 3 agents (2+2+1 or 2+1+2 depending on wave strategy)
+    evidence:
+      session: "2026-02-09 qds-sprint-planning for Epic B8"
+      user_feedback: "i noticed that it used a single subagent to write 3 stories
+      instead of max 2"
+      violation: "Single agent assigned B8.3a, B8.3b, B8.3c (3 stories)
+      when max should be 2 per agent"
+      correct_allocation: "Agent 1: B8.3a + B8.3b (2 stories), Agent 2: B8.3c (1 story)
+      OR Agent 1: B8.3a (1 story), Agent 2: B8.3b + B8.3c (2 stories)"
+    first_seen: "2026-02-09"
+    times_seen: 1
+    applications: 0
+    confidence: "high"  # User explicitly identified the violation
+    enforcement_pseudo_code: |
+      def verify_agent_allocation(stories: List[Story]) -> List[List[Story]]:
+          """Pre-flight check for agent allocation"""
+          import math
+          max_stories_per_agent = 2
+
+          # Group by waves if applicable; treat all stories as single wave if no waves
+          waves = group_by_waves(stories) or [stories]
+
+          allocation = []
+          for wave in waves:
+              agents_in_wave = math.ceil(len(wave) / max_stories_per_agent)
+              for i in range(agents_in_wave):
+                  start = i * max_stories_per_agent
+                  end = min(start + max_stories_per_agent, len(wave))
+                  allocation.append(wave[start:end])
+
+          # Verify no agent exceeds max
+          for agent_stories in allocation:
+              assert len(agent_stories) <= max_stories_per_agent
+
+          return allocation
+
+  # ============================================================================
+  # PRO-NUC.4 LEARNINGS (2026-05-03)
+  # PRO-NUC.1/2/3 shipped a feature that LOOKED complete (worker pipeline,
+  # canvas service, raster assets baked, all merged) but the user-facing
+  # behaviour regressed because two trigger surfaces and one infra prereq
+  # were never enumerated in the sprint scope. A follow-up PR (#1313) had
+  # to wire what should have been wired in PRO-NUC.2.
+  # ============================================================================
+
+  - id: SPL-014
+    category: scope-definition
+    pattern: "ENUMERATE TRIGGER SURFACE: For any feature that can be invoked from multiple entry points, list every entry point in the story scope and add a per-trigger E2E acceptance test"
+    description: |
+      CRITICAL: When scoping a story whose value is "this pipeline produces
+      X output," the planning phase MUST enumerate every trigger surface
+      that can invoke the pipeline. For each trigger, the story's
+      acceptance criteria must include "trigger T produces output X
+      end-to-end against the local docker stack." A story that only tests
+      the canonical trigger (HTTP route, button click) silently ships
+      "complete" while parallel trigger paths (chat tools, scheduled jobs,
+      webhooks, AG-UI events, MCP tool calls) continue to use legacy code.
+
+      Trigger surfaces to enumerate (non-exhaustive):
+        * HTTP REST routes (`POST /...`)
+        * UI button handlers (frontend-driven)
+        * Chat agent tools (`{agent}.{tool}` invocations)
+        * Scheduled jobs (cron, APScheduler, ARQ recurring)
+        * Webhook receivers
+        * MCP server tools (external clients)
+        * Internal pub/sub event handlers
+        * CLI scripts / management commands
+
+      Each trigger that invokes the pipeline must be in scope for the
+      story OR explicitly out-of-scope with a referenced follow-up
+      story ID.  "Out of scope and undocumented" = guaranteed regression.
+
+      ENFORCEMENT: Story authoring template now includes a mandatory
+      "Trigger Surface" section listing every entry point + the test
+      that proves it produces the new behaviour. Story review rejects
+      any story whose pipeline could be invoked from a path not listed.
+    evidence:
+      session: "2026-05-03 PRO-NUC.4 follow-up PR #1313"
+      user_feedback: |
+        "and so confused... isn't this what our pro-nuc-1, pro-nuc-2,
+        pro-nuc-3 stories (mini-sprint) was supposed to handle??"
+      shipped_gap: |
+        PRO-NUC.2 (#1306) wired prebuild_proposal_figures + enrich_cover_letter
+        into the ARQ worker task `proposal_generate_task`. Verified correct
+        on disk. BUT the chat tool `proposal.export_documents` had its own
+        divergent inline-generation code at agent.py:1183-1439 that built
+        export data from conversation history, instantiated generators with
+        cls() (no figures_assets_root), and uploaded synchronously. NEVER
+        enqueued anything. Every chat-triggered export silently regressed
+        to native-mode parity. PRO-NUC scope assumed the canonical trigger
+        was the Export button on the proposal page; the chat tool was never
+        listed in the trigger surface and thus never E2E-tested.
+      remediation_pr: "PR #1313 (feat/pro-nuc-4-chat-export-async-arq)"
+    first_seen: "2026-05-03"
+    times_seen: 1
+    applications: 0
+    confidence: "high"  # User explicitly identified the gap; high-stakes regression
+    enforcement_template: |
+      ## Story Section: Trigger Surface
+
+      List every entry point that can invoke this story's pipeline.
+      For each, declare in-scope (with a per-trigger E2E test) or
+      out-of-scope (with a follow-up story ID).
+
+      | Trigger | Status | E2E Test | Follow-Up |
+      |---------|--------|----------|-----------|
+      | POST /api/v1/foo/{id}/bar | in-scope | tests/integration/test_foo_route.py | — |
+      | proposal.foo_bar chat tool | in-scope | tests/integration/test_chat_foo.py | — |
+      | scheduled `foo_bar_daily` job | out-of-scope | — | FOO-BAR.5 |
+
+      A story is NOT ready-for-dev until this section is filled.
+
+  - id: SPL-015
+    category: infra-prereqs
+    pattern: "VERIFY INFRA PREREQS: Worker / queue / scheduler / external-service dependencies must be confirmed deployed in the target environment's docker-compose (or equivalent) BEFORE the story is marked ready-for-dev"
+    description: |
+      CRITICAL: When a story depends on a background worker, queue
+      consumer, scheduled job, or external service, the planning phase
+      must verify that the infra is actually deployed in the target
+      environment — not just that the code exists.
+
+      Common assumption failures:
+        * "We have an ARQ worker" → no `worker:` service in docker-compose
+        * "Cron jobs run nightly" → no scheduler container in compose
+        * "Canvas service is opt-in" → service exists but no story enables
+          the canvas profile in the dev stack
+        * "Worker initializes the DB" → worker.on_startup never calls init_db()
+          (FastAPI lifespan does it; ARQ has no lifespan equivalent)
+
+      Even if the code is correct on disk, an undeployed infra dep means
+      the story silently doesn't work end-to-end. Worse, this gap is
+      invisible to unit tests and only surfaces when a user actually
+      triggers the new behaviour against the real stack.
+
+      ENFORCEMENT: Story authoring template now includes a mandatory
+      "Infra Prerequisites" section listing every required deployed
+      component + the docker-compose service name (or equivalent) that
+      provides it + the lifecycle hooks the component depends on
+      (init_db, init_zep_client, etc.).  Story review verifies each
+      listed component is actually present in the target compose file.
+    evidence:
+      session: "2026-05-03 PRO-NUC.4 follow-up PR #1313"
+      user_feedback: |
+        "and so confused... isn't this what our pro-nuc-1, pro-nuc-2,
+        pro-nuc-3 stories (mini-sprint) was supposed to handle??"
+      shipped_gap_a: |
+        PRO-NUC.2 wired proposal_generate_task into the ARQ worker code,
+        but no `worker:` service was ever added to docker/docker-compose.yml.
+        The existing Export button POST /generate would have silently hung
+        in this stack too — POST enqueues to Valkey, nothing consumes.
+        Latent because nobody clicked Export through this stack post-merge.
+      shipped_gap_b: |
+        Worker `on_startup` hook never called `init_db()`. First time
+        anything actually consumed `proposal_generate_task` it crashed
+        with "Database not initialized". Latent because earlier tasks
+        (send_pending_reminder) opened their own DB connections.
+      remediation_pr: "PR #1313 added worker service + worker init_db wiring"
+    first_seen: "2026-05-03"
+    times_seen: 1
+    applications: 0
+    confidence: "high"
+    enforcement_template: |
+      ## Story Section: Infra Prerequisites
+
+      List every deployed component this story depends on. For each,
+      verify the docker-compose service exists in the target env AND
+      its lifecycle hooks initialize the dependencies the FastAPI
+      lifespan would otherwise provide.
+
+      | Component | Compose Service | Lifecycle Hook Verified |
+      |-----------|-----------------|-------------------------|
+      | ARQ worker | `worker` (in docker-compose.yml) | `on_startup` calls init_db |
+      | Valkey | `valkey` | n/a (external) |
+      | Canvas service | `canvas-service` (profile: canvas) | health endpoint reachable |
+
+      A story is NOT ready-for-dev until each row's "Lifecycle Hook
+      Verified" column is populated and reviewed.
+
+  # ============================================================================
+  # EPIC RBAC-1 LEARNINGS (2026-05-13)
+  # Stories averaged 660 lines/story (range 474-804) with 26-40 DOD items each.
+  # RBAC-1.5 (13 SP, 32 DOD items, 804 lines) self-acknowledged it was "two
+  # implementation sessions, atomic PR" — the skill recognized over-sizing but
+  # had no enforcement step. Result: PR #1394 took 15+ fix rounds.
+  # ============================================================================
+
+  - id: SPL-016
+    category: story-atomicity
+    pattern: "Validate story atomicity before ready-for-dev (Phase 2.5)"
+    description: |
+      CRITICAL: After Phase 2 writes all stories and BEFORE Phase 3 wrap-up,
+      run the Phase 2.5 atomicity audit defined in
+      `.claude/skills/qds-sprint-planning/steps/phase-2-5-atomicity-audit.md`.
+
+      The audit checks every generated story for:
+        1. Normative-content size  ≤ 200 lines (BLOCK above 250)
+        2. Total file size          ≤ 400 lines (WARN)
+        3. SP budget                ≤ 8 SP (BLOCK)
+        4. DOD checkbox count       ≤ 10 high-signal items (WARN)
+        5. Title AND-connectors     ≤ 1 conjunction (WARN)
+        6. Blocker markers (⛔ / pending sign-off / TBD on) = 0 (BLOCK)
+        7. ## Files to Modify section present + ≤ 10 unique files (BLOCK if absent)
+        8. ## Security Invariants section required when ANY security-relevant
+           keyword class matches (BLOCK if triggered+absent). Keyword classes
+           (must remain byte-identical to bmad-create-story template.md
+           #1433 and bmad-check-implementation-readiness #1431 — canonical
+           source: `.claude/skills/bmad-create-story/template.md` §Security
+           Invariants comment block):
+             - RLS / row-level security / policy
+             - migration / DDL / schema change / alembic
+             - auth / authentication / authorization / RBAC / capability / scope / permission
+             - encryption / secrets / KMS / vault / credential
+             - PII / personal data / GDPR / HIPAA
+             - payment / billing / financial / PCI
+             - tenant / multi-tenancy / cross-tenant
+             - upload / file handling / deserialization / parse
+
+      Output: `_bmad-output/sprint-artifacts/sprint-{N}/atomicity-audit-{YYYY-MM-DD}.md`
+
+      HALT before Phase 3 if any BLOCK-severity finding lacks an operator
+      override entry. WARN findings are reported but non-blocking.
+
+      Keyword list in check 8 must match bmad-create-story template (#1433)
+      and bmad-check-implementation-readiness (#1431) verbatim. Any drift
+      between the three is a bug.
+    evidence:
+      session: "2026-05-13 Epic RBAC-1 retro / skill audit §4.1"
+      user_feedback: |
+        Stories averaged 660 lines/story (range 474-804) with 26-40 DOD
+        items each. RBAC-1.5 (13 SP, 32 DOD items, 804 lines) self-
+        acknowledged it was "two implementation sessions, atomic PR" —
+        the skill recognized over-sizing but had no enforcement step
+        to split.
+      remediation_pr: "Issue #1435 — adds Phase 2.5 gate"
+      related_issues: ["#1428", "#1431", "#1432", "#1433", "#1434"]
+    first_seen: "2026-05-13"
+    times_seen: 1
+    applications: 0
+    confidence: "high"  # From sprint retro action item
+    enforcement_reference: |
+      See `.claude/skills/qds-sprint-planning/steps/phase-2-5-atomicity-audit.md`
+      for the full check definitions, severity matrix, report format, and
+      HALT logic.
+
+  - id: SPL-017
+    category: epic-namespacing
+    pattern: "Phase 0: detect epic-code collisions and assign a dedicated namespaced epic code"
+    description: |
+      Before the Phase 0 confirmation gate, if the input plan uses generic /
+      letter labels (e.g. "Epic A/B/C", story IDs like A1/B6/B7/E1/E2), grep
+      `_bmad-output/epics.md` for `^## Epic` to enumerate the project's
+      existing epic codes. If ANY of the plan's internal labels collide with
+      an existing epic code, DO NOT proceed to confirmation — surface the
+      collision and propose a dedicated, namespaced epic code that follows
+      the project's named-code convention (PRO-NUC, RBAC-1, IAP, BGP, WEB-1).
+      Remap the plan's internal labels to story suffixes under that code
+      (e.g. plan label "B6" -> story PRO-HUB.B6). The plan's letters are
+      logical-internal labels, NOT project epic codes.
+
+      Rationale: the project keys epics.md sections, sprint-status.yaml
+      `epic-{code}` blocks, and story-file slugs by epic code. A collision
+      silently corrupts those status files and conflates two unrelated
+      epics. This is a pre-confirmation, corruption-prevention guardrail.
+    evidence:
+      session: "2026-05-16 qds-sprint-planning for the Company Proposal Hub plan"
+      user_feedback: |
+        Plan's internal A/B/C/R/E/D labels (story IDs A1, B6, B7, E1, E2)
+        collided with existing Epic A1 (Foundation, COMPLETE), Epic B6
+        (HITL Gates UI), Epic B7 (Export & Analytics), Epic E1/E2 (Party
+        Mode / Meta-Prompts). Caught at Phase 0; user accepted the
+        recommended dedicated code "PRO-HUB"; labels remapped to
+        PRO-HUB.{A1,B6,B7,B8,B1,B2a,B2b,B3prime,B4prime,B5,R1}.
+    first_seen: "2026-05-16"
+    times_seen: 1
+    applications: 1
+    confidence: "high"  # User accepted recommended namespacing; load-bearing corruption guardrail
+
+  - id: SPL-018
+    category: decision-philosophy
+    pattern: "On delegated decision forks, choose the long-term enterprise-correct option even if it expands sprint scope"
+    description: |
+      When a decision fork arises at a gate (research-approval, story-review)
+      and the user delegates the call with language like "what's the best
+      enterprise-grade decision? no shortcuts; prefer the best long-term
+      decision rather than prioritizing quick fixes or worrying about
+      current scope" — recommend AND justify the architecturally-correct
+      long-term option. Do NOT let "stay within the MVP / current sprint
+      scope" override correctness. When the correct answer is more work,
+      propose a new ATOMIC story or an additive contract change (and re-run
+      the Phase 2.5 atomicity audit on the delta) rather than degrading the
+      design or deferring with an undocumented gap.
+
+      Corollary: prefer mirroring the real server/system contract over a
+      client-side workaround (e.g. extend a typed client to match an
+      endpoint the backend already validates, instead of a create-then-PUT
+      two-step).
+    evidence:
+      session: "2026-05-16 qds-sprint-planning for Epic PRO-HUB"
+      user_feedback: |
+        User said (twice in one session): "what's best enterprise grade
+        decision here? no shortcuts. prefer best long-term decision rather
+        than prioritizing quick fixes or worrying about current scope" and
+        "add per-deal $ to scope now". Drove: (1) a NEW atomic story
+        PRO-HUB.B8 + revising B3'/B4' instead of honest-degradation;
+        (2) ratifying R1's additive CreateProposalData.prospect_data?
+        (backend already validates it) over a create-then-PUT workaround.
+    first_seen: "2026-05-16"
+    times_seen: 2
+    applications: 1
+    confidence: "high"  # Explicit + repeated 2x in one session + acted upon
+
+  # ============================================================================
+  # EPIC RBAC-1 RETRO SKILL AUDIT §4.5 (2026-05-16) — issue #1432
+  # Single-shot adversarial review caught real structural issues but the chain
+  # stopped after one pass; the next 50+ rounds of CR/Gemini surfaced issues
+  # the one-shot review missed. Auto-iteration converges before commit + adds
+  # pluggable domain-invariant checklists.
+  # ============================================================================
+
+  - id: SPL-024
+    category: review-process
+    pattern: "Auto-iterate adversarial review until findings stabilize"
+    description: |
+      Phase 3 wrap-up of qds-sprint-planning auto-invokes
+      `bmad-review-adversarial-general` in a bounded iteration loop
+      (max 3) against (a) each story file individually, (b) the
+      cross-story consistency view, (c) the sprint-status.yaml entries
+      staged for insertion, and (d) the targeted epic block in
+      epics.md — BEFORE any commit or PR creation.
+
+      Findings are categorized HIGH (structural — Alembic chain non-
+      linearizable, dependency cycle, missing AC, capability bypass,
+      cross-story contradiction) / MEDIUM (clarity — ambiguous
+      wording, missing spec reference, undefined acronym) / LOW (nits
+      — typos, formatting).
+
+      Exit condition: `HIGH == 0 AND MEDIUM <= 3`. Each iteration's
+      fixes are applied as an in-place re-write of the Phase 2 output
+      (NOT a separate commit; integrated into the wrap-up commit).
+
+      Pluggable domain checklists in
+      `.claude/skills/qds-sprint-planning/checklists/<domain>.md`
+      are auto-loaded into the `also_consider` payload when matching
+      trigger keywords appear in story / epic text:
+
+      | Triggers                                                                 | Checklist                     | Shipped |
+      |--------------------------------------------------------------------------|-------------------------------|---------|
+      | rls / row-level security / RLS policy                                    | rls-invariants.md             | yes     |
+      | migration / migrations / alembic / DDL / schema change                   | migration-invariants.md       | yes     |
+      | auth / authn / authz / rbac / capability / authentication / authorization | auth-invariants.md            | yes     |
+      | encryption / secret / secrets / KMS / vault                              | secrets-invariants.md         | yes     |
+      | upload / uploads / deserialization / file handling                       | input-invariants.md           | yes     |
+      | pii / gdpr / personal data                                               | pii-invariants.md             | deferred |
+      | payment / payments / billing / financial                                 | payments-invariants.md        | deferred |
+
+      If iteration 3 ends with surviving HIGH or > 3 MEDIUM findings,
+      Phase 3 surfaces a disposition table to the operator and HALTs
+      until the operator chooses
+      `[a]pply / [r]e-iterate / [e]dit / [q]uit`.
+
+      The iteration log (counts per iteration, dispositions taken,
+      which domain checklists fired) is appended to the wrap-up
+      commit's PR body so reviewers see what was caught before code
+      review.
+    evidence:
+      session: "2026-05-13 Epic RBAC-1 retro skill audit §4.5"
+      user_feedback: |
+        Epic RBAC-1 ran adversarial review ONCE during planning
+        (commit 99cce9d3b: "adversarial review fixes — linearize
+        Alembic chain, scope"). It caught real structural issues
+        — but the manual chain stopped there. The next 50+ rounds
+        of CodeRabbit / Gemini PR feedback caught issues the single
+        adversarial pass missed.
+      shipped_gap: |
+        Single-shot adversarial review surfaces one layer of
+        findings. Re-running against the rewritten content surfaces
+        a fresh layer. Two-to-three passes converge — and the
+        convergence criterion itself is a signal that the spec is
+        sound. Without an auto-loop, the convergence work fell to
+        CR/Gemini at PR-review time, paying the cost in human review
+        cycles instead of catching it pre-commit.
+      remediation_pr: "PR for issue #1432 (this entry)"
+    first_seen: "2026-05-16"
+    times_seen: 1
+    applications: 0
+    confidence: "medium"  # Newly introduced; promote to high after
+                          # observing 3+ successful Phase 3 runs that
+                          # converged on iteration 1 or 2.
+    citations:
+      - "GitHub issue #1432"
+      - "_bmad-output/sprint-artifacts/sprint-62/epic-rbac-1-retro-skill-audit-2026-05-13.md §4.5"
+      - ".claude/skills/qds-sprint-planning/steps/phase-3-wrap-up.md"
+    enforcement_template: |
+      ## Phase 3 Step 0: Adversarial Auto-Iteration
+
+      Before any of the file-write / commit / PR steps in Phase 3,
+      run the loop documented in
+      `.claude/skills/qds-sprint-planning/steps/phase-3-wrap-up.md`:
+
+      ```
+      loaded_checklists = scan story files + epic for trigger keywords
+      for iteration in 1..3:
+        findings = bmad-review-adversarial-general(
+          content = stories + cross-story view + sprint-status + epic block,
+          also_consider = loaded_checklists,
+        )
+        categorize HIGH / MEDIUM / LOW
+        if HIGH == 0 AND MEDIUM <= 3: break
+        if iteration < 3:
+          apply fixes in-place (no separate commit)
+        else:
+          # iteration 3: do NOT auto-apply; reserve for operator
+          surface disposition table, HALT.
+      ```
+
+      Iterations 1 and 2 auto-apply fixes in-place. Iteration 3 is
+      reserved for operator disposition: if convergence is not reached
+      by the end of iteration 2, iteration 3 runs the review one more
+      time to produce a final findings snapshot but does NOT auto-apply
+      fixes; instead it surfaces the disposition table
+      (`[a]pply / [r]e-iterate / [e]dit / [q]uit`) and HALTs.
+
+      The wrap-up PR body must include the iteration log:
+      iterations run, HIGH/MEDIUM/LOW counts per iteration, which
+      domain checklists fired, operator dispositions (if any).
