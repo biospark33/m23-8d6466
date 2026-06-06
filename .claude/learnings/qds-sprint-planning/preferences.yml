@@ -1,0 +1,118 @@
+# QDS Sprint Planning Skill - Medium Confidence Preferences
+# These preferences are shown for confirmation before applying.
+# Confidence: MEDIUM (user corrections without explicit approval)
+version: "1.1"
+skill: qds-sprint-planning
+last_updated: "2026-05-16T00:00:00Z"
+commit_hash: null
+
+metadata:
+  total_learnings: 4
+  applied_count: 4
+  success_rate: 1.0
+  # v1.1: Added SPL-019..SPL-022 from the 2026-05-16 PRO-HUB session.
+
+learnings:
+  - id: SPL-019
+    category: phase-0-track-selection
+    pattern: "Cross-track plans: surface the single-track constraint at Phase 0 and offer unified vs sequential"
+    description: |
+      When an input plan spans BOTH backend and frontend work, do not
+      silently force single-track nor silently violate the skill's
+      single-track constraint. At the Phase 0 gate, state the constraint
+      (single-track per run protects research/writing context quality) and
+      present an explicit user choice: one unified cross-track run vs two
+      sequential single-track runs (A then B). Record the choice and adapt
+      research-agent specialization accordingly.
+    evidence:
+      session: "2026-05-16 qds-sprint-planning for Epic PRO-HUB"
+      user_feedback: |
+        Plan was inherently cross-track (backend A1/B6/B7/B8 + frontend
+        B1/B2a/.../R1). The tradeoff was surfaced at Phase 0; user chose
+        "one unified cross-track run".
+    first_seen: "2026-05-16"
+    times_seen: 1
+    applications: 1
+    confidence: "medium"  # Good elicitation; situational, user-chosen
+
+  - id: SPL-020
+    category: research-gate-deep-dive
+    pattern: "Dispatch a read-only deep-dive subagent for material plan-vs-code conflicts before Phase 2"
+    related_patterns: [SPL-014]
+    description: |
+      When Phase-1 research surfaces a MATERIAL conflict between the input
+      plan and the actual codebase (the plan's stated mechanics already
+      exist under another name; an assumed schema/enum/constraint does not
+      exist; an assumed hook/function signature differs) and the resolution
+      is non-obvious or the user is undecided, dispatch a focused, read-only
+      deep-dive subagent (gitnexus + grep + Read, NO edits) to produce a
+      definitive, file:line-cited, enterprise-grade recommendation BEFORE
+      writing stories. Do not force a story-scoping decision on shallow
+      info; fold the deep-dive's verdict into the affected story specs.
+    evidence:
+      session: "2026-05-16 qds-sprint-planning for Epic PRO-HUB"
+      user_feedback: |
+        At the research-approval gate the user said "fire off a single
+        subagent to look at current code deeply ... what's best enterprise
+        grade decision" (A1) and "fire off another subagent if needed to
+        properly research this" (B7). Both deep-dives produced definitive
+        answers that materially reshaped A1 (a NEW independently-gated
+        ground-truth section, not extending the _has_profile_cache-
+        suppressed cached section) and B7 (outcome-keyed buckets + a
+        server-side needsYou predicate).
+    first_seen: "2026-05-16"
+    times_seen: 2
+    applications: 1
+    confidence: "medium"  # Explicit user request 2x; strong but situational
+
+  - id: SPL-021
+    category: phase-3-branch-hygiene
+    pattern: "Isolate the sprint-planning PR off origin/dev when the worktree is on unrelated WIP"
+    description: |
+      In Phase 3, before creating `feature/epic-{EPIC}-stories`: if the
+      worktree's current branch is ahead of dev with commits UNRELATED to
+      the sprint plan, run `git diff --name-only origin/dev..HEAD` and
+      confirm none of the planning-doc paths (`_bmad-output/epics.md`,
+      `_bmad-output/sprint-artifacts/sprint-status.yaml`, `CLAUDE.md`)
+      appear. If clean, create the branch off `origin/dev` carrying only
+      the uncommitted planning changes + the new sprint-{N}/ dir, so the PR
+      diff contains ONLY the sprint plan with zero unrelated-code noise.
+      Confirm the branch-base choice at the (non-skippable) commit gate.
+    evidence:
+      session: "2026-05-16 qds-sprint-planning for Epic PRO-HUB"
+      user_feedback: |
+        Worktree was on feature/proposal-pptx-prospect-logo (5 unrelated
+        committed logo commits ahead of origin/dev). Verified the logo
+        commits touched no planning-doc paths; based the new branch on
+        origin/dev; PR #1484 diff = only the 11 stories + 4 doc files.
+        User selected the "Isolated branch off origin/dev" option.
+    first_seen: "2026-05-16"
+    times_seen: 1
+    applications: 1
+    confidence: "medium"  # Good Phase-3 hygiene; user-accepted recommendation
+
+  - id: SPL-022
+    category: dod-atomicity-reconciliation
+    pattern: "Reconcile A6 DOD richness with the Phase-2.5 high-signal WARN"
+    related_patterns: [SPL-016]
+    description: |
+      The repo A6 standard wants rich 6-category DODs; the Phase-2.5 audit
+      check-4 WARNs above ~10 "high-signal" boxes. Reconcile (no
+      contradiction): write 6 DOD categories with 14-20 STORY-SPECIFIC,
+      falsifiable boxes; consolidate ALL project-wide CI invariants
+      (ruff/mypy/tests/Docker) into a SINGLE
+      `./scripts/dev/pre-review-check.sh --backend|--frontend` line (plus at
+      most one `npm run typecheck && lint && test` line for FE). Check-4 is
+      a non-blocking WARN, satisfied because the consolidated CI line is
+      excluded from the high-signal count. Never pad DOD with per-tool CI
+      repeats.
+    evidence:
+      session: "2026-05-16 qds-sprint-planning for Epic PRO-HUB"
+      user_feedback: |
+        11 stories written at 14-18 DOD boxes each passed the Phase 2.5
+        audit with zero BLOCK using this reconciliation. Resolves the
+        structural A6-vs-SPL-016 tension that recurs every sprint.
+    first_seen: "2026-05-16"
+    times_seen: 1
+    applications: 1
+    confidence: "medium"  # Interpretation/reconciliation; complements SPL-016

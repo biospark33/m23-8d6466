@@ -1,0 +1,15 @@
+# QDS Sprint Planning Skill - Learning Metadata
+version: "1.3"
+skill: qds-sprint-planning
+last_updated: "2026-05-16T00:00:00Z"
+commit_hash: null
+
+stats:
+  total_learnings: 24  # patterns.yml 19 (incl. SPL-017/018) + preferences.yml 4 + experimental.yml 1
+  high_confidence: 19
+  medium_confidence: 4
+  low_confidence: 1
+  last_reflection: "2026-05-16T00:00:00Z"
+  auto_applied: 5  # +1: SPL-001 correctly applied (<=2 stories/subagent) this session
+  prevented_errors: 5  # +1: SPL-017 caught the epic-code collision pre-confirmation
+  sessions_analyzed: 3
