@@ -42,7 +42,9 @@ This is a **verification/gate** slice, not a feature slice. It cuts through the 
 
 6. **[§13.4b — sat. P0.6]** Given the target language, When `lsp_diagnostics` runs on a seeded type error and `lsp_navigation` resolves a definition, Then an active LSP is proven (or the TUI-only limitation is recorded under OQ-2 with a fallback).
 
-7. **[§13.5 — sat. P0.3]** Given the launcher running a multi-role team, When per-role flags (model, budget) are passed as CLI args, Then the subprocess receives per-role environment variables AND a separate node with no per-role flags still inherits parent environment variables (merge, not assignment — CORRECTNESS-A). (Dedicated Archon env-patch story P0.1 killed per Warren decision; env passthrough is self-contained in P0.3's launcher.)
+7. **[§13.5 — sat. P0.3]** Given the launcher running a multi-role team, When per-role flags (model, budget) are passed as CLI args, Then the subprocess receives per-role environment variables (CORRECTNESS-A). (Dedicated Archon env-patch story P0.1 killed per Warren decision; env passthrough is self-contained in P0.3's launcher.)
+
+7b. **[§13.5 (non-regression) — sat. P0.3]** Given a separate node with no per-role flags, When it is launched, Then it still inherits parent environment variables (merge, not assignment — CORRECTNESS-A).
 
 8. **[§13.6 — sat. P0.7]** Given the Paperclip dashboard, When it is reached, Then it is reachable with the Telegram and Hindsight plugins both listed as installed.
 
