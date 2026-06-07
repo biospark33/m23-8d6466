@@ -50,9 +50,9 @@ This slice cuts Seeds (`.seeds/issues.jsonl` via `/usr/local/bin/sd`) → Hermes
 
 - `hermes/src/integrations/seeds_mirror.ts` (new — mirror module)
 - `hermes/src/paperclip/client.ts` (reuse from P1.1, extend with mirror methods)
-- `/Users/steve/boardlensai/paperclip/packages/db/src/schema/issues.ts`
-- `/Users/steve/boardlensai/paperclip/packages/db/src/migrations/0095_seeds_origin_unique_index.sql`
-- `/Users/steve/boardlensai/paperclip/server/src/routes/issues.ts`
+- `paperclip/packages/db/src/schema/issues.ts`
+- `paperclip/packages/db/src/migrations/0095_seeds_origin_unique_index.sql`
+- `paperclip/server/src/routes/issues.ts`
 - `tests/phase-1/p1-3-seeds-mirror.e2e.test.ts`
 
 ## Security Invariants
