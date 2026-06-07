@@ -1,7 +1,7 @@
 # QDS-Factory v4 — Pre-Dev Adversarial Review Campaign
 
 **Date:** 2026-06-06
-**Status:** ✅ CAMPAIGN COMPLETE — All 126 findings resolved (50 initial + 76 verification)
+**Status:** ✅ CAMPAIGN COMPLETE — All 123 findings resolved (47 initial + 76 verification)
 **Scope:** 5 stories (P0.3, P0.7, P0.9, P0.11, P1.1)
 **Prior review:** `adversarial-review-findings-2026-06-06.md` (iteration 1, ~27 HIGH / ~40 MED, corrections deferred)
 **Warren decision:** Applied (P0.1, P0.4, P0.8 killed; sprint-status.yaml updated ✅)
@@ -14,11 +14,11 @@
 
 | Wave | Status | Findings | Done | Remaining |
 |------|--------|----------|------|-----------|
-| Initial Scan | ✅ DONE | 51 | 51 | 0 |
+| Initial Scan | ✅ DONE | 47 | 47 | 0 |
 | Wave 0 — Cross-cutting | ✅ DONE | 5 CC items | 5 | 0 |
 | Wave 1 — BLOCKERs | ✅ DONE | 3 BLOCKERs | 3 | 0 |
 | Wave 2 — HIGHs | ✅ DONE | 12 HIGHs | 12 | 0 |
-| Wave 3 — MEDIUMs | ✅ DONE | 15 MEDIUMs | 15 | 0 |
+| Wave 3 — MEDIUMs | ✅ DONE | 13 MEDIUMs | 13 | 0 |
 | Wave 4 — LOWs | ✅ DONE | 10 LOWs | 10 | 0 |
 | Wave 5 — Verification | ✅ DONE | 76 | 33 B/H | 44 M/L |
 | Wave 5b — Re-fix B/H | ✅ DONE | 33 | 33 | 0 |
@@ -29,11 +29,11 @@
 | Story | Title | SP | BLOCKER | HIGH | MED | LOW | Total |
 |-------|-------|-----|---------|------|-----|-----|-------|
 | P0.3 | launcher-mixed-model-demo | 4 | 2 | 3 | 3 | 2 | 10 |
-| P0.7 | paperclip-plugins-install | 4 | 2 | 0 | 2 | 2 | 8 |
-| P0.9 | memory-banks-hindsight-mulch | 4 | 3 | 0 | 4 | 3 | 13 |
+| P0.7 | paperclip-plugins-install | 4 | 2 | 2 | 2 | 2 | 8 |
+| P0.9 | memory-banks-hindsight-mulch | 4 | 3 | 3 | 4 | 3 | 13 |
 | P0.11 | phase0-exit-gate | 3 | 3 | 1 | 2 | 1 | 7 |
-| P1.1 | dev-manager-registered | 3 | 3 | 3 | 2 | 1 | 12 |
-| **Totals** | | | **13** | **12** | **13** | **9** | **50** |
+| P1.1 | dev-manager-registered | 3 | 3 | 3 | 2 | 1 | 9 |
+| **Totals** | | | **13** | **12** | **13** | **9** | **47** |
 
 > Note: 1 cross-cutting BLOCKER theme counted per-story yields 13 story-level BLOCKERs below; cross-cutting table shows 5 unique CC themes.
 
@@ -69,12 +69,12 @@
 | P0.3-B2 | BLOCKER | dead-reference | Outdated dag-executor.ts references | ✅ DONE (Wave 0 CC-3) | All Archon/dag-executor refs replaced with Warren-neutral equivalents. Zero remaining hits. |
 | P0.3-H1 | HIGH | contract-gap | Coms path selection discovery unspecified | ✅ DONE | Added `PI_COMS_MODE` env var discovery + `config/pi-coms.json` fallback + `--coms-mode` CLI override to Technical Notes. E2E Slice updated with discovery note. |
 | P0.3-H2 | HIGH | dependency-error | Demo requires live API keys (unproven coms) | ✅ DONE | HONESTY note expanded: AC-1 cannot pass without both API keys; absent keys → BLOCKED-on-creds exit (not skipped/false-pass); no mock/stub path for make-or-break. |
-| P0.3-H3 | HIGH | model-id | Invalid model ID `anthropic/claude-opus-4` | ✅ DONE | Replaced with `claude-sonnet-4-20250514` (pinned Anthropic model ID, no `anthropic/` prefix). OpenRouter slugs `openrouter/z-ai/glm-4.6` and `openrouter/moonshotai/kimi-k2` retained as valid. All 3 occurrences in story file updated. |
+| P0.3-H3 | HIGH | model-id | Invalid model ID `anthropic/claude-opus-4` | ✅ DONE | Replaced with `claude-sonnet-4-6` (generational Anthropic model alias — per Wave 5b/launcher guidance, generational aliases auto-resolve to current stable variant, avoiding retirement breaks from date-pinned IDs like `claude-sonnet-4-20250514`). OpenRouter slugs `openrouter/z-ai/glm-4.6` and `openrouter/moonshotai/kimi-k2` retained as valid. All 3 occurrences in story file updated. |
 | P0.3-M1 | MEDIUM | schema-gap | Merged-output schema missing edge cases | ✅ DONE | Added edge-case rules to Contracts/Schema: `changed_files: []` valid, `result: null` invalid, `exit_class` mandatory non-null. |
 | P0.3-M2 | MEDIUM | ac-ambiguity | Make-or-break AC is compound (not binary) | ✅ DONE | Split AC-1 into labeled sub-clauses (a) stdout format + (b) coms evidence; both required but independently diagnosable. |
 | P0.3-M3 | MEDIUM | wiring-claim | "No sibling story required" contradicts P0.4 dependency | ✅ DONE | Guards/limits rewritten: loopy-kill guards IMPLEMENTED here; P0.4 killed, proof obligation in DoD (partial kill-proof via e2e). |
 | P0.3-L1 | LOW | integration-accuracy | Context-path handling unspecified | ✅ DONE | Added to Technical Notes: launcher resolves `--context-path` to absolute path, validates dir exists with ≥1 `.jsonl` file, exits non-zero if missing. |
-| P0.3-L2 | LOW | other | Budget cap propagation mechanism unclear | ✅ DONE | Added to Technical Notes: caps propagated as `BUDGET_CAP_ROLE_<N>` env vars to PI subprocesses, sourced from `--budget-role<N>` CLI args, default $0.50. |
+| P0.3-L2 | LOW | other | Budget cap propagation mechanism unclear | ✅ DONE | Added to Technical Notes: caps propagated as `BUDGET_CAP_ROLE_0`/`_1`/`_2` env vars to PI subprocesses, sourced from `--budget-role0-cents`/`--budget-role1-cents`/`--budget-role2-cents` CLI args (values in US cents), falling back to `--budget-cap-cents` if per-role flag omitted, default 50 cents ($0.50). |
 
 ### P0.7 — paperclip-plugins-install
 

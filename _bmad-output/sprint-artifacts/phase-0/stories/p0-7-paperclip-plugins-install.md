@@ -95,11 +95,18 @@ npx instance, `local_trusted`, v2026.529.0, company id
 4. Given a non-admin caller, When it POSTs to `/api/plugins/install`, Then the
    install is rejected (NFR-SEC-4 — installs restricted to instance admins) and no
    plugin row is created.
-   > **Mode note:** Admin-gate checks remain deferred to non-`local_trusted`
-   > configuration. Under `local_trusted`, this AC is exercised as a client-side
-   > contract (the test constructs the request with a non-admin key and asserts the
-   > expected rejection). Server-enforced admin-gate testing requires a
-   > non-`local_trusted` Paperclip configuration.
+   > **Mode note — `local_trusted` (client-side contract):** Under `local_trusted`,
+   > admin-gate enforcement is a client-side contract only: the test constructs a
+   > request with a non-admin key and asserts the expected rejection at the
+   > application/validation layer (the client refuses to proceed with the install).
+   > No server-side middleware rejection is expected in this mode.
+   >
+   > **Deferred acceptance item — server-enforced admin-gate:** A separate,
+   > clearly-marked acceptance criterion requires server-enforced admin-gate
+   > testing for non-`local_trusted` Paperclip configurations — i.e., the Paperclip
+   > server middleware must reject the install request with `403` when the bearer
+   > token does not resolve to an admin-scoped agent. This item is deferred to a
+   > future story that configures Paperclip in non-`local_trusted` mode.
 5. Given both plugins are already installed (`GET /api/plugins` lists both as
    `status:"installed"`), When the install driver re-runs (`POST /api/plugins/install`
    for each plugin with the **same version** as already installed), Then the operation
@@ -173,7 +180,7 @@ npx instance, `local_trusted`, v2026.529.0, company id
   existing row rather than duplicating it); admin-only enforced server-side
   (NFR-SEC-4).
 - **Env file example:** `config/paperclip.env.example` must list all required variables. Example content:
-  ```
+  ```dotenv
   # Paperclip bring-up environment (copy to .env and fill values)
   QDS_TELEGRAM_PLUGIN_PKG=paperclip-plugin-telegram  # npm package name for the Telegram plugin
   PAPERCLIP_API_BASE=http://localhost:3100             # Paperclip server base URL
