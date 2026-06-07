@@ -27,7 +27,7 @@ epics:
       P0.8:  { title: "Telegram verify / OQ-3 + Hermes fallback",            points: 3, status: killed, deps: [P0.7] }  # killed: Warren decision — Telegram verify deferred
       P0.9:  { title: "Seeds/Mulch pin + Hindsight banks round-trip",        points: 4, status: draft, deps: [P0.7] }
       P0.10: { title: "pi-gitnexus-plus + gitnexus analyze + queries",       points: 3, status: draft, deps: [] }
-      P0.11: { title: "Phase-0 exit gate (§13)",                             points: 3, status: draft, deps: [P0.3, P0.5, P0.6, P0.7, P0.9, P0.10] }  # P0.1, P0.4, P0.8 removed (killed)
+      P0.11: { title: "Phase-0 exit gate (§13)",                             points: 3, status: draft, deps: [P0.2, P0.3, P0.5, P0.6, P0.7, P0.9, P0.10] }  # P0.1, P0.4, P0.8 removed (killed)
   phase-1:
     name: Dev vertical slice (make-or-break)
     status: draft-pending-correction

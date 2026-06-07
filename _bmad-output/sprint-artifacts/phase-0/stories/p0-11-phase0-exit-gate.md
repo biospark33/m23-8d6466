@@ -24,7 +24,7 @@ This is a **verification/gate** slice, not a feature slice. It cuts through the 
 
 **Wiring closed:** On completion of this story, `npm run gate:phase0` produces the aggregated JSON verdict with `pass:true` and exit code `0` (or `pass:false` + non-zero on any red clause / missing OQ decision) using only code merged by this story (gate harness, the eleven assertion checks (AC-2…AC-11, with AC-7 split into AC-7 + AC-7b) that invoke the predecessor stories' exercised surfaces, and the OQ decision-log reader). No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors are dependency edges (listed below), not unfinished wiring inside this story.
 
-**Dependency edges (predecessors):** P0.3, P0.5, P0.6, P0.7, P0.9, P0.10. Each predecessor must be done because the gate re-exercises its exit-criterion; the gate adds no behavior of its own. P0.1, P0.4, P0.8 killed per Warren decision; their §13 clauses are either absorbed by living stories or removed below.
+**Dependency edges (predecessors):** P0.2, P0.3, P0.5, P0.6, P0.7, P0.9, P0.10. Each predecessor must be done because the gate re-exercises its exit-criterion; the gate adds no behavior of its own. P0.1, P0.4, P0.8 killed per Warren decision; their §13 clauses are either absorbed by living stories or removed below.
 
 ## Acceptance Criteria
 
