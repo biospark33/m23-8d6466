@@ -36,16 +36,16 @@ epics:
       P1.1:  { title: "Dev manager registered (hermes_local)",              points: 3, status: draft, deps: [P0.7, P0.11] }
       P1.2:  { title: "/qds intake -> one parent issue",                    points: 3, status: draft, deps: [P1.1] }
       P1.3:  { title: "Seeds-decompose -> Paperclip mirror (authority split)", points: 4, status: draft, deps: [P1.2, P0.9] }
-      P1.4:  { title: "qds-piv-loop 14-node DAG",                           points: 4, status: draft, deps: [P0.11] }  # P0.1 removed (killed)
+      P1.4:  { title: "qds-piv-loop 14-node DAG",                           points: 4, status: killed, deps: [P0.11] }  # killed: P0.1 killed by Warren (cascade)
       P1.5:  { title: "qds-model-router selection scored to meta",         points: 4, status: draft, deps: [P0.9, P0.10] }
       P1.6:  { title: "Pi-team Warren run -> structured JSON",               points: 5, status: draft, deps: [P0.3, P0.5, P0.9, P1.1, P1.2, P1.3] }
       P1.7:  { title: "Post-edit lsp_diagnostics gate",                    points: 3, status: draft, deps: [P0.6, P1.6] }
-      P1.8:  { title: "Drive run + SSE capture correlated to issue",       points: 3, status: draft, deps: [P1.1, P1.4] }
+      P1.8:  { title: "Drive run + SSE capture correlated to issue",       points: 3, status: killed, deps: [P1.1, P1.4] }  # killed: P1.4 killed (Warren cascade)
       P1.9:  { title: "Restart policy (classify + caps)",                  points: 3, status: draft, deps: [P1.8] }
       P1.10: { title: "executionPolicy approve/resume via Telegram",       points: 4, status: draft, deps: [P1.8] }  # P0.8 removed (killed)
       P1.11: { title: "qds-hindsight-prime recall + retain",              points: 4, status: draft, deps: [P0.9, P1.6] }
       P1.12: { title: "Mulch prime/record",                                points: 3, status: draft, deps: [P0.9, P1.6] }
-      P1.13: { title: "Cost ledger within budget",                         points: 4, status: draft, deps: [P1.6, P1.8] }
+      P1.13: { title: "Cost ledger within budget",                         points: 4, status: draft, deps: [P1.6, P1.2] }
       P1.14: { title: "Outcome record + router select (FR-LEARN-28/29)",   points: 3, status: draft, deps: [P1.5, P1.13] }
       P1.15: { title: "Telegram /qds -> real PR",                          points: 4, status: draft, deps: [P1.3, P1.6, P1.7, P1.8] }
       P1.16: { title: "Audit-chain reconstructable",                       points: 4, status: draft, deps: [P1.13, P1.11, P1.15] }
