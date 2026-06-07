@@ -1,75 +1,80 @@
-# P1.6: Pi-team implement bash node — single structured JSON result from a primed team
+# P1.6: Pi-team Warren run — Mulch-primed lead dispatches nested worker swarm, captures single merged JSON
 
-**Story Points:** 4
+**Story Points:** 5
 
 ## Spec Reference
 
-- PRD §4.6 (launcher contract) + §7; FR-OR-3, FR-EX-6
-- Supporting: NFR-OBS-1/OBS-3 (run streams + handoff logged), NFR-COST-1 (≥1 `cost_events`), NFR-SEC-2 (Paperclip bearer + run-scoped header), NFR-SEC-1 (`server.secret.json` 0600)
-- Phase exit gate: PRD §13 Phase-1 clause 3 (partial) — "reaches the Pi-team implement node … and emits a single structured JSON result." (The post-edit `lsp_diagnostics` refuse-to-emit gate is the SEPARATE story P1.7; this node captures the result.)
+- PRD §4.6 (launcher contract) + §7; FR-EX-3, FR-EX-6
+- Supporting: NFR-OBS-1/OBS-3 (run streams + handoff logged), NFR-COST-1 (≥1 `cost_events` per worker — see P1.13), NFR-SEC-2 (Paperclip bearer + run-scoped header), NFR-SEC-1 (`server.secret.json` 0600)
+- Phase exit gate: PRD §13 Phase-1 clause 3 (partial) — "reaches the Pi-team implement step … and emits a single structured JSON result." (The post-edit `lsp_diagnostics` refuse-to-emit gate is the SEPARATE story P1.7; this run captures the merged result.)
 
 ## User Story
 
-As the Hermes Dev manager driving the `qds-piv-loop` DAG,
-I want the implement node to launch a Mulch-primed, pi-lens-gated Pi team via `pi-team-launch.sh` and capture exactly one structured JSON object as the node's output,
-so that a heavy in-node swarm step yields one demonstrable, attributable result (G2 worker output merges into the node) rather than free-text stdout.
+As QDS dispatch layer,
+I want a Warren run to spawn a Mulch-primed lead pi that instructs ≤4 worker pi procs via bash tool, validates each worker's `response_schema` reply, and captures ONE merged JSON object as the run result,
+so that one Warren run = one swarm step = one structured result attributed to an issue (G2 worker output merges into the run) rather than free-text or unbounded stdout.
 
 ## Overview
 
-This slice cuts through Archon (`executeBashNode`) → the env-patched bash subprocess → `pi-team-launch.sh` → N Pi agents (lead + workers) → pi-lens prime + per-turn QA → Paperclip `cost_events` emit → node output. The bash node carries per-node `env` (PATH/creds + `PAPERCLIP_API_KEY`/`PAPERCLIP_RUN_ID` + role-model map + caps) injected via the FR-OR-4 3-site merge, and invokes the launcher with `--task`/`--context-path`/`--archetype`/caps/`--role-model`. The launcher spawns one `pi` subprocess per role (`--cname <run-id>-<role>`), each Mulch-primed via `--append-system-prompt`; the lead validates each worker's `coms_await` reply against its `response_schema` (parse-only upstream → lead validates), computes the `changed_files` set-union, and writes ONE merged JSON object to stdout — which Archon captures verbatim as node output. It is one atomic unit because the node output is not real until the launcher exists, the env reaches the subprocess, a live primed team runs, and the lead emits a schema-valid merged object — splitting any of these leaves leftover wiring (a stub launcher, an un-injected env, or a non-emitting lead).
+This slice cuts QDS dispatch layer → `WarrenClient` (`src/client/client.ts`) → warren run lifecycle (burrow-isolated branch) → lead pi system prompt carrying swarm instructions → lead spawns ≤4 worker pi procs via bash tool → worker NDJSON capture → schema validation + `changed_files` merge → one merged JSON written as run result. The lead pi receives a system prompt carrying: Mulch context (P0.9), pi-lens QA instruction (P0.5), worker model map (`openrouter/google/gemini-2.5-flash` — spike-verified: only model with tool use + cost reporting via openrouter; `gemini-2.0-flash-001` refuses tool use, `gemini-flash-1.5` crashes exit=1), `PAPERCLIP_API_KEY`/`PAPERCLIP_RUN_ID`, and explicit swarm instructions (spawn workers via bash tool: `pi --model openrouter/google/gemini-2.5-flash -p --no-session --mode json`). Each worker emits NDJSON; the lead captures each worker's NDJSON stdout, extracts `turn_end.message.usage.cost.total` (cost envelope P1.13 consumes), validates against `response_schema`, computes `changed_files` set-union, and writes ONE merged JSON object. Warren captures the lead result via `streamRunEvents`; QDS calls `waitForRun` and reads the merged object. One atomic unit: the swarm result is not real until warren dispatches, the lead spawns workers, workers run, lead validates + merges, and the cost envelope is written — splitting any of these leaves unbounded or unattributed work.
 
 ## E2E Slice
 
-**Demonstrable behavior:** Running the `qds-piv-loop` implement bash node (via `POST /api/workflows/qds-piv-loop/run`, or invoking the node script directly) on a sample task launches a live primed Pi team and the node output is a single JSON object matching the merged schema: `{ changed_files: string[], result: {...}, partial: boolean, exit_class: "transient"|"overflow"|"logic"|null, waivers: [...] }` — and ≥1 `cost_events` row is written for the run (`issueId` FK set).
+**Demonstrable behavior:** QDS calls `WarrenClient.dispatch({...})` for a sample issue; warren launches a lead pi with a Mulch-primed system prompt; the lead spawns 2 worker pi procs via bash tool (`pi --model openrouter/google/gemini-2.5-flash -p --no-session --mode json`); workers execute against the branch and return NDJSON; lead validates worker replies against `response_schema`, computes `changed_files` set-union, and writes ONE JSON object: `{ changed_files: string[], result: {...}, partial: boolean, exit_class: "transient"|"overflow"|"logic"|null, waivers: [...] }`. `waitForRun` returns status=success; merged object readable via `streamRunEvents`. Per-worker cost data (extracted from each worker's `turn_end.message.usage.cost.total`) is written to the cost envelope for P1.13.
 
-**Wiring closed:** On completion of this story, running the implement bash node produces exactly one schema-valid merged JSON object as node output (`JSON.parse` succeeds, `changed_files` is a string[]) from a live Mulch-primed, pi-lens-gated team launched by `pi-team-launch.sh`, plus ≥1 `cost_events` row for the run, using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors, if any, are dependency edges (listed below), not unfinished wiring inside this story.
+**Wiring closed:** On completion of this story, `WarrenClient.dispatch()` on a primed issue produces one schema-valid merged JSON object (`JSON.parse` succeeds, `changed_files` is `string[]`) from a live Mulch-primed, pi-lens-gated worker swarm, plus a populated cost envelope (per-worker `turn_end.message.usage.cost.total`) — using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors, if any, are dependency edges (listed below), not unfinished wiring inside this story.
 
-**Dependency edges (predecessors):** P0.3 (`pi-team-launch.sh` exists + hard guards/spawn-kill), P0.5 (pi-lens installed + headless prime/QA surface, warning-count proxy fallback if TUI-only), P0.9 (Mulch priming context available for `--context-path`), P1.4 (`qds-piv-loop` DAG authored with the implement bash node carrying per-node `env`; the FR-OR-4 3-site env merge is in place). The post-edit `lsp_diagnostics` emit gate is the SEPARATE successor story **P1.7** (dependency edge out, NOT wired here).
+**Dependency edges (predecessors):** P0.3 (spawn/kill logic), P0.5 (pi-lens installed + headless prime/QA surface, warning-count proxy fallback if TUI-only), P0.9 (Mulch prime context available for `--context-path` / `--append-system-prompt`), P1.1 (dev manager registered + authenticated in Paperclip), P1.2 (issue issued by intake — provides `issueId` for cost envelope), P1.3 (seeds decomposed + mirrored — branch ready for workers). The post-edit `lsp_diagnostics` emit gate is the SEPARATE successor story **P1.7**.
 
 ## Acceptance Criteria
 
-1. **(make-or-break)** Given the implement bash node runs `pi-team-launch.sh --task <t> --context-path <ctx> --archetype C` against a live primed team, When the node completes, Then the node output is exactly one JSON object for which `JSON.parse(stdout)` succeeds, `typeof result.changed_files === "object" && Array.isArray(result.changed_files)`, and `result.changed_files.every(f => typeof f === "string")` — i.e. a single structured result, not free text or multiple objects. (Binary: parse succeeds + `changed_files` is `string[]`.)
-2. Given the launcher run incurs LLM spend, When the node completes, Then ≥1 `cost_events` row exists for the run with `issueId` FK set and `costCents` a non-negative integer (NFR-COST-1; sole emitter is the launcher per r4 §3, fallback `ESTIMATED` from `heartbeat_runs.usageJson` if OpenRouter generation cost is unavailable).
-3. Given a worker reply that omits the mandatory `changed_files` field OR fails its `response_schema` validation, When the lead processes it, Then the lead does NOT silently merge it — it re-requests or fails the node as a logic error (`exit_class:"logic"`, non-zero exit), never emitting a partial object as if complete.
-4. Given a loopy/over-budget worker, When the launcher's wall-clock or budget cap is hit, Then the launcher SIGKILLs the team and the node exits non-zero (no unbounded blocking, no merged object emitted) — the guard fires, never a silent continue.
+> ≥3 scenarios, Given/When/Then. Exactly one tagged (make-or-break) and binary.
+
+1. **(make-or-break)** Given `WarrenClient.dispatch()` is called for a primed issue with ≥2 workers in the lead system prompt, When the lead pi completes, Then `waitForRun` returns status=success AND the run output is exactly one JSON object for which `JSON.parse(output)` succeeds, `typeof result.changed_files === "object" && Array.isArray(result.changed_files)`, and `result.changed_files.every(f => typeof f === "string")`. (Binary: parse succeeds + `changed_files` is `string[]`.)
+2. Given the lead spawns workers via bash tool, When each worker completes, Then the lead extracts each worker's `turn_end.message.usage.cost.total` from its NDJSON stdout and writes a per-worker cost envelope (keyed by cname + `warrenRunId`) for P1.13 to consume — workers' cost is never silently discarded (warren's own cost capture sees only lead spend, empirically 83% undercount confirmed in spike).
+3. Given a worker reply that omits the mandatory `changed_files` field OR fails its `response_schema` validation, When the lead processes it, Then the lead does NOT silently merge it — it re-requests or fails the run as a logic error (`exit_class:"logic"`), never emitting a partial object as if complete.
+4. Given a loopy/over-budget worker, When the lead's wall-clock or turn cap is hit, Then the lead SIGKILLs the worker subprocess (P0.3 spawn/kill) and the run exits non-zero (no unbounded blocking, no merged object emitted) — the guard fires, never a silent continue.
 
 ## Technical Notes
 
-- **Contracts/Schema (JSON/TS):** Worker `response_schema` MUST carry `changed_files: string[]` (omission ⇒ lead fails the node — CORRECTNESS-C). Merged lead output (stdout) = `{ changed_files: string[] (set-union), result: object, partial: boolean, exit_class: "transient"|"overflow"|"logic"|null, waivers: object[] }`. The lead validates each worker reply (coms `response_schema` is parse-only, r4 §1) and the launcher validates the merged object before writing stdout.
-- **Integration points (each wired & exercised):** (1) per-node `env` merged into `executeBashNode`'s subprocess (FR-OR-4 3-site patch, P1.4) carries `PAPERCLIP_API_KEY`/`PAPERCLIP_RUN_ID`/role-model map/caps; (2) bash node invokes `pi-team-launch.sh` and captures stdout verbatim as node output (`dag-executor.ts:1361-1368`, logs→stderr); (3) Mulch prime via `--context-path` → `--append-system-prompt`; (4) `cost_events` POST to `POST /companies/:companyId/cost-events` (`costs.ts:73`), bearer-authed; (5) pi-lens per-turn QA runs on each worker (prime/secret-scan; the refuse-to-emit diagnostics gate is P1.7, not here).
-- **Files / functions touched:** the implement-node script `qds-piv-loop/implement-node.sh` (the bash node body that builds the launcher invocation), `cost-emit.ts` (launcher-side `cost_events` POST), the worker `response_schema` definition, the lead merge/validate logic.
-- **Guards/limits:** `--wall-clock-cap-ms` MUST be ≤ the bash node's own `timeout` (`dag-node.ts:181`); `--budget-cap-cents`/`--turn-cap` enforced by the launcher process (owns spawn/kill, r4 §5); `coms_await` per-archetype timeout (TDD-Trio 8 min) carried in the env map (NFR-SAF-3).
+- **Contracts/Schema (JSON/TS):** Worker `response_schema` MUST carry `changed_files: string[]` (omission ⇒ lead fails the run — CORRECTNESS-C). Merged lead output (stdout) = `{ changed_files: string[] (set-union), result: object, partial: boolean, exit_class: "transient"|"overflow"|"logic"|null, waivers: object[] }`. The lead validates each worker reply (coms `response_schema` is parse-only, r4 §1) and validates the merged object before writing stdout.
+- **Warren integration:** QDS calls `WarrenClient.dispatch({ agent: ..., task: ..., branch: ... })` → `waitForRun(runId)` or `streamRunEvents(runId)`. Warren run lifecycle: dispatch → burrow sandbox (seccomp=unconfined, no nproc cap — nesting confirmed in spike) → lead pi process → workers (nested under lead, not warren-native agents) → reap + canopy push + result. **Warren's `costUsd` for the run captures lead spend ONLY (empirically 17% of true spend; 83% invisible in spike) — per-worker cost comes from the cost envelope, not warren's analytics.**
+- **Worker model:** `openrouter/google/gemini-2.5-flash` (spike-verified at pi 0.55.0; only openrouter model with tool use + cost reporting confirmed; `gemini-2.0-flash-001` refuses tool use, `gemini-flash-1.5` crashes exit=1).
+- **Cost envelope:** lead extracts `turn_end.message.usage.cost.total` from each worker's NDJSON stdout (pi 0.55.0 format, parse path matches `usage-aggregate.ts:90-122`; spike-confirmed shape) and writes `{ cname, model, costTotal, issueId, warrenRunId }` objects to a cost envelope file — consumed by P1.13 to POST `cost_events` rows to Paperclip.
+- **Integration points (each wired & exercised):** (1) `WarrenClient.dispatch()` + `waitForRun` from `scripts/warren/dispatch-run.ts`; (2) lead system prompt constructed with Mulch context + worker model map + swarm instructions (`scripts/pi-team/lead-system-prompt.ts`); (3) workers spawned via lead bash tool call: `pi -p --no-session --mode json`; (4) per-worker NDJSON parsed for `turn_end.message.usage.cost.total`; (5) lead merge/validate writes one merged JSON.
+- **Files / functions touched:** see "Files to Modify" below.
+- **Guards/limits:** lead wall-clock cap enforced via warren run timeout + P0.3 spawn-kill for stuck workers; `coms_await` per-archetype timeout (TDD-Trio 8 min) carried in lead system prompt; pi 0.55.0 `-p --no-session` flags mandatory (headless mode, no interactive prompt).
 
 ## Files to Modify
 
-- `archon-workflows/qds-piv-loop/implement-node.sh`
-- `scripts/pi-team/cost-emit.ts`
-- `scripts/pi-team/lead-merge.ts`
-- `scripts/pi-team/worker-schema.ts`
-- `scripts/pi-team/launch-args.ts`
-- `test/pi-team/implement-node.e2e.test.ts`
-- `test/pi-team/lead-merge.test.ts`
+- `scripts/warren/dispatch-run.ts` (new — WarrenClient dispatch + waitForRun/streamRunEvents)
+- `scripts/pi-team/lead-system-prompt.ts` (new — constructs lead prompt with Mulch context + worker model map + swarm instructions)
+- `scripts/pi-team/lead-merge.ts` (update — worker reply validation + `changed_files` set-union)
+- `scripts/pi-team/worker-schema.ts` (update — `response_schema` definition with mandatory `changed_files: string[]`)
+- `scripts/pi-team/cost-envelope.ts` (new — per-worker cost extraction from NDJSON, writes envelope for P1.13)
+- `test/pi-team/warren-run.e2e.test.ts` (new — e2e test)
+- `test/pi-team/lead-merge.test.ts` (update — unit tests for merge + schema validation logic)
 
 ## Security Invariants
 
-- **INV-1 (secrets/env):** The bash node env is a MERGE `{ ...process.env, ...(node.env ?? {}) }` (FR-OR-4) — injecting `PAPERCLIP_API_KEY`/`PAPERCLIP_RUN_ID`/role-model/caps must NOT wipe the subprocess's inherited `PATH`/credentials (CORRECTNESS-A non-regression); a bare `env: node.env` is forbidden.
-- **INV-2 (secrets):** `PAPERCLIP_API_KEY` and any model API key are read from env/secret refs only (NFR-SEC-1/2); they are NEVER written to the merged JSON node output, the `cost_events` rows, stderr logs, or the Mulch context — the launcher redacts before any emit.
-- **INV-3 (cost/budget):** The launcher process owns spawn/kill and enforces `--budget-cap-cents`/`--turn-cap`/`--wall-clock-cap-ms`; a loopy team terminates via the guard with a non-zero exit (NFR-SAF-1), never by exhausting credits, and `--wall-clock-cap-ms ≤` the bash node `timeout`.
-- **INV-4 (cost/budget + audit):** Every run writes ≥1 `cost_events` row with the `issueId` FK (NFR-COST-1) using the per-agent bearer + `PAPERCLIP_RUN_ID` header (NFR-SEC-2); an agent may only report its OWN `agentId` (`costs.ts:77-80`) — no spend is emitted off-ledger or under another agent's identity.
-- **INV-5 (input/file):** The merged stdout object is `JSON.parse`-validated and schema-checked by the launcher before being written as node output; a worker reply that fails validation or omits `changed_files` is rejected as a logic error, never merged into the result (CORRECTNESS-C/E).
+- **INV-1 (secrets):** `PAPERCLIP_API_KEY`, `PAPERCLIP_RUN_ID`, and any model API key are read from env/secret refs only (NFR-SEC-1/2); they are NEVER written to the merged JSON output, cost envelope, stderr logs, or Mulch context — redacted before any emit.
+- **INV-2 (cost/budget):** Lead pi owns spawn/kill of worker procs (P0.3) and enforces wall-clock/turn caps; a loopy team is SIGKILL'd with non-zero exit (NFR-SAF-1), never by exhausting credits.
+- **INV-3 (cost attribution):** Per-worker cost envelope carries each worker's OWN cname/model; the lead cannot attribute a worker's cost to another agent. Forwarded to P1.13 for Paperclip POST under the run's `agentId`.
+- **INV-4 (input validation):** Merged stdout object is validated against the merged schema before being written as run output; a worker reply that fails schema or omits `changed_files` is rejected as a logic error, never silently merged (CORRECTNESS-C/E).
 
 ## Definition of Done
 
-- [ ] **Impl:** The implement bash node builds and invokes `pi-team-launch.sh` with `--task`/`--context-path`/`--archetype`/caps/`--role-model` from the injected per-node env.
-- [ ] **Impl:** The lead validates each worker reply against its `response_schema`, computes the `changed_files` set-union, and writes ONE merged JSON object to stdout (launcher validates it before write).
-- [ ] **Impl:** A worker reply missing `changed_files` or failing schema validation is rejected as `exit_class:"logic"` (re-request or fail the node), never silently merged.
-- [ ] **Contract:** Worker `response_schema` (mandatory `changed_files: string[]`) and the merged-output schema (`changed_files`/`result`/`partial`/`exit_class`/`waivers`) are defined with field validation.
-- [ ] **Integration:** The per-node `env` (FR-OR-4 merge) reaches the launcher subprocess (verified: an env var set on the node is readable inside the launcher) — non-regression: inherited `PATH` still present (INV-1).
-- [ ] **Integration:** The bash node captures launcher stdout verbatim as node output (logs/diagnostics routed to stderr, surfaced as Archon warning).
-- [ ] **Observability/Audit:** ≥1 `cost_events` row is written for the run with `issueId` FK + `costCents` non-negative int, via the per-agent bearer + `PAPERCLIP_RUN_ID` header (NFR-COST-1/SEC-2).
-- [ ] **Security:** INV-1 (env merge non-regression), INV-2 (no secret in any emit), and INV-3 (guard SIGKILL on cap) each enforced and tested.
-- [ ] **Test (unit/integration):** Covers the lead merge + set-union, the missing-`changed_files` logic-error path, and the cap-hit SIGKILL non-zero exit.
-- [ ] **Test (e2e demo — MANDATORY):** Fires AC-1 trigger: runs the implement bash node against a live primed team; asserts `JSON.parse(stdout)` yields one object whose `changed_files` is a `string[]`, AND ≥1 `cost_events` row exists for the run — proving one DAG node yields one structured result with wiring closed.
+- [ ] **Impl:** `WarrenClient.dispatch()` triggers a warren run with a lead pi system prompt containing Mulch context, worker model map, `PAPERCLIP_API_KEY`/`PAPERCLIP_RUN_ID`, and swarm instructions.
+- [ ] **Impl:** Lead spawns ≤4 worker pi procs via bash tool (`pi --model openrouter/google/gemini-2.5-flash -p --no-session --mode json`).
+- [ ] **Impl:** Lead validates each worker reply against `response_schema`, computes `changed_files` set-union, writes ONE merged JSON object as lead stdout.
+- [ ] **Impl:** A worker reply missing `changed_files` or failing schema validation is rejected as `exit_class:"logic"` (re-request or fail the run), never silently merged.
+- [ ] **Impl:** Per-worker cost envelope written — one entry per worker cname, `turn_end.message.usage.cost.total` extracted from NDJSON stdout, keyed by `warrenRunId` + `cname`.
+- [ ] **Contract:** Worker `response_schema` (mandatory `changed_files: string[]`) and merged-output schema (`changed_files`/`result`/`partial`/`exit_class`/`waivers`) defined with field validation.
+- [ ] **Integration:** `WarrenClient.dispatch()` → `waitForRun` pipeline exercised end-to-end against a live warren instance.
+- [ ] **Observability/Audit:** Warren run id propagated to cost envelope entries; `streamRunEvents` carries merged result (NFR-OBS-1/OBS-3).
+- [ ] **Security:** INV-1 (no secret in any emit), INV-2 (SIGKILL on cap), INV-3 (own-cname cost only), INV-4 (schema-reject on bad worker reply) each enforced and tested.
+- [ ] **Test (unit/integration):** Covers lead merge + set-union, missing-`changed_files` logic-error path, cap-hit SIGKILL non-zero exit, and cost envelope extraction from worker NDJSON.
+- [ ] **Test (e2e demo — MANDATORY):** Fires AC-1: `WarrenClient.dispatch()` on a primed issue; `waitForRun` returns success; run output `JSON.parse` yields one object whose `changed_files` is `string[]`; cost envelope has ≥1 per-worker entry with non-zero `costTotal` — proving one Warren run yields one structured result with wiring closed.
 
 ## Dev Agent Record
 
