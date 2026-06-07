@@ -16,7 +16,7 @@ so that Phase 1 starts only on a fully de-risked, fully-wired foundation (G1: de
 
 ## Overview
 
-This is a **verification/gate** slice, not a feature slice. It cuts through the audit surface only: it runs a gate harness that re-checks each living predecessor story P0.2, P0.3, P0.5, P0.6, P0.7, P0.9, P0.10 exit-criterion (the §13 Phase-0 assertions) and reads the OQ decision-log, then emits one aggregated pass/fail result. It writes **no** new product behavior — it consumes the capabilities P0.2, P0.3, P0.5, P0.6, P0.7, P0.9, P0.10 already merged and asserts they are simultaneously green. (P0.1, P0.4, P0.8 killed per Warren decision; their §13 clauses are either absorbed by living stories or removed below.) The atomic unit is the gate itself: the §13 clause list + OQ-1..6 decisions reduced to one binary outcome. It is 3pts because it adds a harness + decision-log, not new orchestration.
+This is a **verification/gate** slice, not a feature slice. It cuts through the audit surface only: it runs a gate harness that re-checks each living predecessor story P0.3, P0.5, P0.6, P0.7, P0.9, P0.10 exit-criterion (the §13 Phase-0 assertions) and reads the OQ decision-log, then emits one aggregated pass/fail result. It writes **no** new product behavior — it consumes the capabilities P0.3, P0.5, P0.6, P0.7, P0.9, P0.10 already merged and asserts they are simultaneously green. (P0.1, P0.4, P0.8 killed per Warren decision; their §13 clauses are either absorbed by living stories or removed below.) The atomic unit is the gate itself: the §13 clause list + OQ-1..6 decisions reduced to one binary outcome. It is 3pts because it adds a harness + decision-log, not new orchestration.
 
 ## E2E Slice
 
@@ -24,7 +24,7 @@ This is a **verification/gate** slice, not a feature slice. It cuts through the 
 
 **Wiring closed:** On completion of this story, `npm run gate:phase0` produces the aggregated JSON verdict with `pass:true` and exit code `0` (or `pass:false` + non-zero on any red clause / missing OQ decision) using only code merged by this story (gate harness, the eleven assertion checks (AC-2…AC-11, with AC-7 split into AC-7 + AC-7b) that invoke the predecessor stories' exercised surfaces, and the OQ decision-log reader). No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors are dependency edges (listed below), not unfinished wiring inside this story.
 
-**Dependency edges (predecessors):** P0.2, P0.3, P0.5, P0.6, P0.7, P0.9, P0.10. Each predecessor must be done because the gate re-exercises its exit-criterion; the gate adds no behavior of its own. P0.1, P0.4, P0.8 killed per Warren decision; their §13 clauses are either absorbed by living stories or removed below.
+**Dependency edges (predecessors):** P0.3, P0.5, P0.6, P0.7, P0.9, P0.10. Each predecessor must be done because the gate re-exercises its exit-criterion; the gate adds no behavior of its own. P0.1, P0.4, P0.8 killed per Warren decision; their §13 clauses are either absorbed by living stories or removed below.
 
 ## Acceptance Criteria
 
@@ -94,12 +94,12 @@ This is a **verification/gate** slice, not a feature slice. It cuts through the 
 
 ## Definition of Done
 
-- [ ] **Impl:** `runPhase0Gate()` executes all eleven §13 Phase-0 assertion checks (AC-2…AC-11, with AC-7 split into AC-7 + AC-7b for §13.5's two conjuncts), each cross-referenced to its satisfying living predecessor (P0.2, P0.3, P0.5, P0.6, P0.7, P0.9, P0.10) via the `satisfiedBy` field.
+- [ ] **Impl:** `runPhase0Gate()` executes all eleven §13 Phase-0 assertion checks (AC-2…AC-11, with AC-7 split into AC-7 + AC-7b for §13.5's two conjuncts), each cross-referenced to its satisfying living predecessor (P0.3, P0.5, P0.6, P0.7, P0.9, P0.10) via the `satisfiedBy` field.
 - [ ] **Impl:** Gate is **fail-closed** — any errored/timed-out/ambiguous check scores `pass:false`; exit code is `0` only when every assertion is green AND all OQ-1..6 decisions are present.
 - [ ] **Impl:** `readOqDecisionLog()` loads `oq-decision-log.json` and validates OQ-1..OQ-6 each carry a non-empty `decision` (fallback noted where taken).
 - [ ] **Impl:** Gate harness validates `oq-decision-log.json` structure (6 OQ ids present, non-empty decision each) before AC-11 evaluation.
 - [ ] **Contract:** `phase0GateVerdictSchema` (Zod) added with field-level validation for `assertions[]` and `openQuestions[]`; verdict output validated before emit.
-- [ ] **Integration:** Each assertion check invokes its predecessor's already-wired surface (launcher, coms logs, budget/turn caps, pi-lens, LSP, env-passthrough via launcher, Paperclip plugins, Hindsight round-trip, gitnexus, OQ decision-log self-assembled by this gate) and asserts the §13 observable — proving wiring across living predecessors (P0.2, P0.3, P0.5, P0.6, P0.7, P0.9, P0.10) is closed and simultaneous.
+- [ ] **Integration:** Each assertion check invokes its predecessor's already-wired surface (launcher, coms logs, budget/turn caps, pi-lens, LSP, env-passthrough via launcher, Paperclip plugins, Hindsight round-trip, gitnexus, OQ decision-log self-assembled by this gate) and asserts the §13 observable — proving wiring across living predecessors (P0.3, P0.5, P0.6, P0.7, P0.9, P0.10) is closed and simultaneous.
 - [ ] **Observability:** The aggregated JSON verdict (per-assertion `{id, pass, satisfiedBy, detail}` + per-OQ `{id, decision}`) is emitted to stdout so a red clause names exactly which §13 assertion / OQ blocks Phase 0.
 - [ ] **Audit:** OQ-1..OQ-6 decisions are recorded in the checked-in decision-log with any fallback taken (satisfies §13.8).
 - [ ] **Test (unit):** Each assertion-check returns `pass:false` on a simulated red predecessor surface (one negative case per check) and `pass:true` on the green surface.
