@@ -38,7 +38,7 @@ epics:
       P1.3:  { title: "Seeds-decompose -> Paperclip mirror (authority split)", points: 4, status: draft, deps: [P1.2, P0.9] }
       P1.4:  { title: "qds-piv-loop 14-node DAG",                           points: 4, status: draft, deps: [P0.11] }  # P0.1 removed (killed)
       P1.5:  { title: "qds-model-router selection scored to meta",         points: 4, status: draft, deps: [P0.9, P0.10] }
-      P1.6:  { title: "Pi-team implement node -> structured JSON",         points: 5, status: draft, deps: [P0.3, P0.5, P0.9, P1.4] }
+      P1.6:  { title: "Pi-team Warren run -> structured JSON",               points: 5, status: draft, deps: [P0.3, P0.5, P0.9, P1.1, P1.2, P1.3] }
       P1.7:  { title: "Post-edit lsp_diagnostics gate",                    points: 3, status: draft, deps: [P0.6, P1.6] }
       P1.8:  { title: "Drive run + SSE capture correlated to issue",       points: 3, status: draft, deps: [P1.1, P1.4] }
       P1.9:  { title: "Restart policy (classify + caps)",                  points: 3, status: draft, deps: [P1.8] }

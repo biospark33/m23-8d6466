@@ -126,7 +126,7 @@ npx instance, `local_trusted`, v2026.529.0, company id
   installs and is omitted from the driver's request body.
   **Canonical package-name validation:** `packageName` must be non-empty, ≤256 chars,
   and match the npm package-name regex
-  `^(@[a-z0-9-~][a-z0-9-._~]*/)?[a-z0-9-~][a-z0-9-._~]*$`. This single regex is
+  `^(@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$`. This single regex is
   applied by both the env-var validator (`QDS_TELEGRAM_PLUGIN_PKG`) and the
   request-body validator — no duplicate or divergent patterns. If the value fails
   validation, the driver prints a diagnostic and exits non-zero (fail-fast).
