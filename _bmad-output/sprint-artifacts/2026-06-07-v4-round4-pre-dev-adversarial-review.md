@@ -1,7 +1,7 @@
 # QDS-Factory v4 — Pre-Dev Adversarial Review Campaign (Round 4)
 
 **Date:** 2026-06-07
-**Status:** ✅ ROUND 4 COMPLETE — All 206 findings (82 original + 124 W5 re-fix) resolved
+**Status:** ✅ ROUND 4 COMPLETE — All 208 findings (84 original + 124 W5 re-fix) resolved
 **Scope:** 5 stories (P1.7, P1.10, P1.14, P1.16, P1.17)
 **Prior reviews:**
 - Round 1 (`2026-06-06-v4-pre-dev-adversarial-review.md`): P0.3, P0.7, P0.9, P0.11, P1.1 — 124 findings resolved
@@ -45,7 +45,7 @@
 | P1.14 | outcome-record-router-select | 3 | 2 | 4 | 5 | 3 | 14 | ✅ | ✅ | ✅ | ✅ | ✅ | 24 (3B/7H/7M/7L) |
 | P1.16 | audit-chain-reconstructable | 4 | 1 | 5 | 7 | 4 | 17 | ✅ | ✅ | ✅ | ✅ | ✅ | 27 (2B/6H/13M/6L) |
 | P1.17 | phase1-make-or-break-gate | 3 | 2 | 6 | 7 | 4 | 19 | ✅ | ✅ | ✅ | ✅ | ✅ | 25 (2B/7H/10M/6L) |
-| **Totals** | | **17** | **8** | **27** | **32** | **17** | **82** | | | | | | **124** |
+| **Totals** | | **17** | **8** | **27** | **32** | **17** | **84** | | | | | | **124** |
 
 ---
 
@@ -390,7 +390,7 @@ From prior rounds — fixes contradicting these must surface as deliberate super
 | ~18:25 | Initial Scan | P1.14 reviewer complete | 14 findings (2B/4H/5M/3L) |
 | ~18:25 | Initial Scan | P1.10 reviewer complete | 17 findings (2B/7H/6M/2L) |
 | ~18:30 | Initial Scan | P1.16 reviewer complete | 17 findings (1B/5H/7M/4L) |
-| ~18:32 | Initial Scan | Tracker collated | 82 total findings (8B/27H/32M/17L), 5 CC themes identified |
+| ~18:32 | Initial Scan | Tracker collated | 84 total findings (8B/27H/32M/17L), 5 CC themes identified |
 | ~18:32 | Wave 0 | Dispatching | 5 CC items across all 5 stories, bundled by story file |
 | ~18:35 | Wave 0 | Complete | All 5 CC items applied. CC-1: 16 Archon→Warren replacements across 4 stories. CC-2: P1.10 dead deps removed + gateway absorbed; P1.17 dep cascade noted. CC-3: P1.14 retry_class clarified; P1.16 exit_class noted. CC-4: P1.14 storage located; P1.16 hop sources documented. CC-5: P1.7 P0.6 dep enhanced; P1.16 transitive deps added. |
 | ~18:42 | Wave 1 | Dispatching | 5 parallel subagents: w1-p17 (P1.7 verify), w1-p110 (P1.10 verify), w1-p114 (P1.14 fix), w1-p116 (P1.16 verify), w1-p117 (P1.17 verify) |
@@ -407,4 +407,4 @@ From prior rounds — fixes contradicting these must surface as deliberate super
 | ~20:10 | Wave 5b | Complete | 40/40 B+H re-fixes resolved. P1.7: coms_await removed, errorCount unified, lsp_diagnostics cross-ref, mixed gate test, symlink guard. P1.10: callback_data redesign (base64url <64B), webhook route POST /hermes/telegram/callback, decidedByUserId Paperclip resolution, dead P0.8 refs purged, TTL race resolved, rate-limit+replay, schema enumeration. P1.14: run_id z.string().min(1), exit_class added (12 fields), activity_log replaced with concrete tables, recordOutcome spec, terminal-status guard, storage unified to usageJson.outcomeRecord, runId→issueId join, AC-3 scoped to P1.14, per_role_model_tier reads router, rationale DoD test. P1.16: Hop 9 TDI aligned, Hop 10 bank={repo}, AC-2 dual budget, companyId scoping hops 2-7, FR-OR-7 parenthetical removed, Hop 8 corrected, --issue test DoD, exit_class in report. P1.17: cost-summary route corrected, clause 6 ownership clarified, WarrenClient SSE corrected, exit_class+prRef in schema, idempotency spec, bank derivation from QDS_SAMPLE_REPO, TELEGRAM_MOCK_MODE=gate, forced-failure clauses 4/5, P1.14 predecessor clarified. |
 | ~20:15 | Wave 5c | Dispatching | 5 parallel subagents for MEDIUM+LOW re-fix (P1.7=19, P1.10=15, P1.14=14, P1.16=19, P1.17=16) |
 | ~20:45 | Wave 5c | Complete | 84/84 M+L re-fixes resolved. P1.7(19): severity enum, lsp_diagnostics disambiguation, INV-4 cleanup, waiver idempotency, AC-1 errorCount, malformed JSON test, SUM verification, INV-2 prefix, partial field, changed_files cap, waiver enum extensibility, AC-2 waivers test, --mode test, truncated NDJSON, path unification, dedup test, waiver reason, stderr format, SP note. P1.10(15): WarrenClient resume path, non-paused guard, AC-2 sub-conditions, DoD reorganization, env var enumeration, telegram_plugin deferred, CLI local_trusted, RESUMABLE clarification, temporal AC-3 bound, backward-compat test, notifyChannel CLI, concurrent pauses test, health-check handler, wiring-closed sub-headings, timeoutMs priority. P1.14(14): 30s timeout guard, cost_data_available disambiguation, retry/exit naming, runId query DoD, retry cost aggregation, heartbeatRunId discovery SQL, archetype P1.5 ref, integer cost_cents, FR-MG-9 spec ref, router-rationale-store removed, Zod schema DoD, per_role_model_tier aggregation test, 600ms budget, orphan run guard. P1.16(19): AC-3 issueId-scoped cost_events, hop-level report fields, Hop 1 lookup mechanism, per-hop perf DoD, empty .seeds guard, agents.reportsTo deferred, P1.10 table refs, budgetMonthlyCents unified, multi-PR ambiguity, epic root DoD, cycle detection note, NFR-ACC-1 scope, Hop 7 fs.readFile, 1-based numbering, backward-compat test, CLI output format, 3s per-hop timeout, concurrent walk safety, executionPolicy blob clarification. P1.17(16): clause 1 unconditional check, per-clause timeout, gate report persistence DoD, sequential clause ordering, missing sample-repo fast-fail, durationMs default(0), INV-3 $QDS_COMPANY_ID, Warren workflow name validation, clause 8 gateway-only, retryCount<8 sub-check, SP rewrite, stdout clean JSON DoD, P1.16 merge-order DoD, multi-clause exit code, cost boundary note, issue-create route cited. |
-| ~20:45 | Campaign | ✅ COMPLETE | Round 4 finished. 82 original findings + 124 W5 verification findings = 206 total. All resolved across 5 stories. Zero regressions on verified-correct elements. |
+| ~20:45 | Campaign | ✅ COMPLETE | Round 4 finished. 84 original findings + 124 W5 verification findings = 208 total. All resolved across 5 stories. Zero regressions on verified-correct elements. |
