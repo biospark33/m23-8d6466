@@ -88,7 +88,7 @@ A vertical slice through the §6.6 comms front-door into the §6.3 pause/resume 
 - [ ] **Technical-Note honored (OQ-3, R4):** the Telegram BLOCKED-on-creds path is served by the **Hermes-gateway fallback** (explicit AC 4) — the gate is never assumed-approved because the plugin is unavailable; a duplicate callback is idempotent on `runId`.
 
 **DoD Group C — Integration (bot registration, status transitions, contracts):**
-- [ ] **Contract:** the Telegram callback contract (`runId`/`issueId`/`decision`/`decidedByUserId`/`decidedAt`/`via`) is field-validated; an issue with no `executionPolicy` runs unchanged (backward-compatible).
+- [ ] **Contract:** the Telegram callback `decisionToken` is validated and resolves to a server-side decision record containing `runId`/`issueId`/`decision`/`decidedByUserId`/`decidedAt`/`via` (callback_data is a base64url token, not a JSON payload — full context is looked up server-side per Technical Notes); an issue with no `executionPolicy` runs unchanged (backward-compatible).
 - [ ] **Integration:** the decision is persisted to `approvals` (`status`/`decidedByUserId`/`decidedAt`) + `issue_execution_decisions`, and the resume/halt is wired to the run state — exercised end-to-end, not stubbed.
 - [ ] **Observability:** the served path is recorded via the callback `via` field (`telegram_gateway`|`cli`|`ttl_auto_reject`) so the OQ-3 fallback usage is auditable, and the gate decision correlates to the issue id (NFR-OBS-3).
 - [ ] **Security:** resume runs only as the bearer-authenticated registered agent (NFR-SEC-2); bot token/chat ids are env-sourced and never logged (NFR-SEC-1); the gate cannot be bypassed by tap-absence — all asserted by test.
