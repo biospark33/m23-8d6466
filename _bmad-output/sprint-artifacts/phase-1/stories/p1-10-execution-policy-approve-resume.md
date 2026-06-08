@@ -90,7 +90,7 @@ A vertical slice through the §6.6 comms front-door into the §6.3 pause/resume 
 **DoD Group C — Integration (bot registration, status transitions, contracts):**
 - [ ] **Contract:** the Telegram callback contract (`runId`/`issueId`/`decision`/`decidedByUserId`/`decidedAt`/`via`) is field-validated; an issue with no `executionPolicy` runs unchanged (backward-compatible).
 - [ ] **Integration:** the decision is persisted to `approvals` (`status`/`decidedByUserId`/`decidedAt`) + `issue_execution_decisions`, and the resume/halt is wired to the run state — exercised end-to-end, not stubbed.
-- [ ] **Observability:** the served path is recorded via the callback `via` field (`hermes_gateway`|`cli`|`ttl_auto_reject`) so the OQ-3 fallback usage is auditable, and the gate decision correlates to the issue id (NFR-OBS-3).
+- [ ] **Observability:** the served path is recorded via the callback `via` field (`telegram_gateway`|`cli`|`ttl_auto_reject`) so the OQ-3 fallback usage is auditable, and the gate decision correlates to the issue id (NFR-OBS-3).
 - [ ] **Security:** resume runs only as the bearer-authenticated registered agent (NFR-SEC-2); bot token/chat ids are env-sourced and never logged (NFR-SEC-1); the gate cannot be bypassed by tap-absence — all asserted by test.
 - [ ] **Test (CI-mock mode):** at least one e2e test runs under `TELEGRAM_MOCK_MODE=true` with a fixture decision file, exercising the identical resume/halt + decision-writer + idempotency logic as the live path — proving headless CI can validate the full approval gate without a real Telegram webhook.
 - [ ] **Test (concurrent pauses):** two runs paused simultaneously. Approve run A, reject run B. Verify run A resumes, run B halts, no cross-contamination of decisions.
