@@ -1,77 +1,71 @@
-# P1.3: Seeds-decompose → Paperclip mirror (authority split)
+# P1.3: Seeds-Decompose -> GitHub Issue Mirror (Authority Split)
 
 **Story Points:** 4
 
 ## Spec Reference
 
-- PRD §6.2 (Manager — Hermes); FR-MG-3, FR-CP-3
-- PRD §6.5 (Memory & decomposition); FR-MEM-4 (Seeds dependency edges — predecessor P0.9)
-- Phase exit gate: PRD §13 Phase-1 clause 2 (decompose via Seeds; mirror to child Paperclip issues; dependencies only in `.seeds/issues.jsonl`, assignment+cost only in Paperclip; no duplicated authority)
-- NFR-ACC-3 (no `issue.cost` field), R2 mitigation (two-task-store authority split)
+- PRD §6, §7; FR-MG-3, FR-CP-3
+- Phase exit gate: PRD §13 Phase 1 clause 3
 
 ## User Story
 
-As a Hermes Dev manager,
-I want to decompose a parent issue into Seeds stories with dependency edges and mirror those stories one-directionally to child Paperclip issues,
-so that work is tracked end-to-end with a single owner per fact (Seeds=deps, Paperclip=assignment+cost) — closing the F1 decomposition hop without duplicated authority (G2 accountability).
+As a QDS factory operator,
+I want Seeds decomposition to persist stories locally and mirror them as GitHub sub-issues,
+so that decomposition authority lives in Seeds while assignment/execution authority lives in SwarmClaw, with no duplication.
 
 ## Overview
 
-This slice cuts Seeds (`.seeds/issues.jsonl` via `/usr/local/bin/sd`) → Hermes mirror logic → Paperclip `issues` (live `localhost:3100`, company `1287bc8d-2122-4484-bc0c-900662caf8a0`). The Dev manager runs `sd create` + `sd dep` to persist N stories with `blocks[]`/`blockedBy[]` edges, then — explicitly, after `sd create` succeeds (not event-driven) — POSTs one Paperclip child issue per story under the parent (`parentId`), tagged `originKind='seeds_story'` + `originId=<seeds_story_id>` (`issues.ts:45-46`). A partial unique index on `(companyId, originKind, originId)` (established pattern `issues.ts:93-141`) makes re-mirror an **upsert** of status, never a duplicate. Dependency edges stay ONLY in Seeds; assignment+cost stay ONLY in Paperclip. One atomic 4pt unit: the mirror is not demonstrable until both stores hold their own authoritative facts and re-run is idempotent.
+When the Dev Manager receives a decompose request, it invokes Seeds to generate story decomposition. Seeds persists stories to `.seeds/issues.jsonl` as the authoritative source for story definitions, dependencies, and acceptance criteria. A one-directional mirror then writes each story as a GitHub sub-issue via `gh issue create` with a `seeds-mirror` label. SwarmClaw owns assignment and execution tracking; Seeds owns decomposition structure. The mirror is read-only from GitHub's perspective: edits to GitHub issues do not flow back to Seeds.
 
 ## E2E Slice
 
-**Demonstrable behavior:** Hermes runs `mirrorSeedsToPaperclip(parentIssueId)` against a parent with N=3 decomposed Seeds stories (one carrying a `blockedBy[]` edge). It persists 3 records to `.seeds/issues.jsonl` and creates 3 Paperclip child issues under the parent. Re-running the same mirror creates **zero** new Paperclip issues (upserts status only). A query proves: each child issue carries `originKind='seeds_story'` + a distinct `originId`; **no** Paperclip issue has a dependency edge mirrored into `parentId` beyond the decomposition tree; **no** `cost` column exists on `issues`; the `blockedBy[]` edge exists in `.seeds/issues.jsonl` and is absent from Paperclip.
+**Demonstrable behavior:** Given an intake issue exists, a decompose A2A call produces: (1) `.seeds/issues.jsonl` appended with N story entries (each with id, title, dependencies, acceptance criteria), (2) N GitHub sub-issues created under the parent intake issue, each labeled `seeds-mirror`, (3) the response contains counts and mappings. No dependency or assignment data is duplicated in GitHub beyond a reference.
 
-**Wiring closed:** On completion of this story, running `mirrorSeedsToPaperclip(parentIssueId)` twice produces exactly 3 Paperclip child issues (each with `originKind='seeds_story'` + unique `originId`) and 3 `.seeds/issues.jsonl` records (deps intact), using only code merged by this story (the Hermes mirror module + the partial unique index migration). No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors, if any, are dependency edges (listed below), not unfinished wiring inside this story.
+**Wiring closed:** On completion of this story, a decompose call yields Seeds-persisted stories and GitHub-mirrored sub-issues with a strict one-directional flow, using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
-**Dependency edges (predecessors):** P1.2 (Dev manager creates the parent Paperclip issue, FR-MG-2), P0.9 (provides pinned `sd 0.2.5` binary; P1.3 owns `sd create`/`sd dep` calls that produce `.seeds/issues.jsonl`).
+**Dependency edges (predecessors):** P1.2 (intake creates GitHub issue), P0.9 (Hindsight memory banks operational).
 
 ## Acceptance Criteria
 
-1. **(make-or-break)** Given a parent Paperclip issue with 3 decomposed Seeds stories in `.seeds/issues.jsonl` (one with a `blockedBy[]` edge), When `mirrorSeedsToPaperclip(parentIssueId)` runs twice, Then after the second run there are exactly 3 child Paperclip issues under the parent (each `originKind='seeds_story'` with a distinct `originId` matching a Seeds story id), the dependency edge exists in `.seeds/issues.jsonl` and is absent from every Paperclip `parentId`/`issue_relations` row, and none of the 3 child issues carry a `cost` field in their JSON body or any `issue_relations` rows with dependency type — proving P1.3's code does not write cost or dependency data to Paperclip — and the Seeds `.seeds/issues.jsonl` records contain no assignment or cost fields (structurally enforced by the Seeds record schema, which lacks those fields — the bidirectional split is explicit) — no missing hop and no duplicated authority.
-2. Given an already-mirrored Seeds story whose `status` changed in Seeds, When the mirror re-runs, Then the matching Paperclip child issue is upserted (status updated, same row id) and the divergence is logged to stderr including: issue id, Seeds status, Paperclip status, ISO8601 timestamp (NFR-OBS-3) — never a new row created.
-3. Given a mirror attempt where the Paperclip POST fails (non-2xx) for one story, When the failure occurs, Then the mirror records the failure, leaves the Seeds record authoritative, and the mirror returns a structured result: `{ succeeded: Array<{seedsStoryId, paperclipIssueId}>, failed: Array<{seedsStoryId, error: string}> }`. The mirror does NOT throw on individual story failure; the caller inspects the `failed` array. If `failed.length > 0`, the caller treats the mirror as partially failed (gate fires; no silent partial-mirror that desyncs the two stores). Earlier successful creates in the same batch are kept.
+1. **(make-or-break)** Given an intake session exists with a parent GitHub issue, When POST /api/a2a with method "qds.decompose" and `{ "sessionId": "{id}" }`, Then `.seeds/issues.jsonl` is appended with >= 1 story entry and each story has a corresponding GitHub sub-issue linked to the parent issue.
+2. Given Seeds stories are persisted, When the mirror runs, Then each GitHub sub-issue contains the Seeds story ID in its body, title matches the Seeds story title, and label `seeds-mirror` is applied. Dependency edges are stored ONLY in `.seeds/issues.jsonl`, not in GitHub metadata. Dependency edges are also persisted to the Hindsight `{repo}` memory bank so that cross-environment and multi-worktree consumers can query the dependency graph without requiring access to the local `.seeds/` file.
+3. Given a GitHub sub-issue is edited by a user, When the next decompose call runs, Then the Seeds entries are NOT overwritten by GitHub content (Seeds is authoritative; mirror is one-directional).
 
 ## Technical Notes
 
-- **Contracts/Schema:** Paperclip child issue created via the live REST API as a registered `hermes_local` agent; body sets `parentId` (`issues.ts:29`), `assigneeAgentId` (`:35`), `status` (`:32`), `originKind='seeds_story'` + `originId` (`:45-46`). New migration: partial unique index on `(companyId, originKind, originId) WHERE originKind='seeds_story'` (pattern at `issues.ts:93-141`). Seeds record shape (read-only here): `{id,title,status,type,priority,labels,blocks[],blockedBy[],closeReason}`. **Backward-compat:** existing issues (all with `originKind='manual'`, the column default) are unaffected because the partial index `WHERE originKind='seeds_story'` excludes them. No rows have `originKind` NULL; the column is `NOT NULL DEFAULT 'manual'`. **No `cost` field written** (NFR-ACC-3 — per-issue cost is `SUM(cost_events.costCents)`). **Migration sequencing:** If P1.2 hasn't merged its migration when P1.3 lands, combine both origin indexes into a single migration file. If P1.2 has already merged, add only the `seeds_story` partial index here.
-- **Integration points (each wired & exercised in this story):** (1) `sd`/`.seeds/issues.jsonl` read via `/usr/local/bin/sd` (private CLI 0.2.5 — never `npm install`); (2) Paperclip REST create/upsert keyed on the unique index; (3) idempotent re-mirror proving no duplicate authority. Mirror is **one-directional (Seeds→Paperclip), called explicitly by Hermes after `sd create` succeeds** (not event-driven). **Predecessor version conflict:** P0.9 claims `@os-eco/seeds-cli` v0.5.9 (public npm). THIS STORY overrides with sd 0.2.5 (private CLI at `/usr/local/bin/sd`). If P0.9 has not yet merged, correct its Seeds pin before starting P1.3. If P0.9 has already merged, the installed binary at `/usr/local/bin/sd` is authoritative (0.2.5) regardless of P0.9's npm claim. Do NOT `npm install` any Seeds package.
-- **Authority on divergence:** Paperclip wins on assignment+cost, Seeds wins on dependency edges + status; divergences logged. Seeds `blocks[]`/`blockedBy[]` are NOT copied to `parentId` (`parentId` = decomposition tree only; dependency relations, if ever needed, belong in `issue_relations`, never `parentId`).
-- **CC-1 RESOLVED:** The mirror uses application-level find-before-insert as the primary idempotency mechanism: `SELECT id FROM issues WHERE company_id = ? AND origin_kind = 'seeds_story' AND origin_id = ?` before insert; if row exists, upsert status only. The mirror still sends `originKind='seeds_story'` and `originId` in the create payload, but dedup does not depend on a DB constraint. The partial unique index (migration `0095`) provides defense-in-depth if `originKind`/`originId` are REST-settable.
-- **Migration ownership:** P1.2 creates migration `0094` for `qds_intake` partial index; P1.3 creates `0095` for `seeds_story`. If both land simultaneously, combine into one migration file with two CREATE INDEX statements. Each story's migration adds only its own partial-index clause.
-- **Seeds record read path:** mirror calls `sd list --json` (or equivalent) to get stories for the parent. If `sd` does not support JSON output, the mirror reads `.seeds/issues.jsonl` directly and parses JSONL lines. The read mechanism must be confirmed during dev.
-- **Story-to-parent mapping:** `sd create` stores the Paperclip `parentIssueId` as a Seeds story metadata field (e.g., via `sd create --metadata parentIssueId=<id>`). The mirror queries Seeds for all stories whose metadata `parentIssueId` matches. If `sd create` does not support metadata, the mirror reads all `.seeds/issues.jsonl` entries created since the decomposition command and correlates by timestamp or batch token.
-- **Implementation language:** TypeScript, consistent with P1.1/P1.2 Hermes stack. Reuses P1.1's authenticated Paperclip client.
-- **Files / functions touched:** Hermes mirror module `mirrorSeedsToPaperclip`; Paperclip create-issue path consuming `originKind`/`originId`; migration adding the partial unique index.
-- **Guards/limits:** all Paperclip calls authenticated per NFR-SEC-2: the mirror module reads `PAPERCLIP_API_KEY` and `PAPERCLIP_RUN_ID` from environment variables (injected by the `hermes_local` adapter at `registry.ts:468-469`) and sends them as `Authorization: Bearer <key>` and `x-paperclip-run-id` headers on every REST call. Agent only mutates issues within its company scope.
+- **Contracts/Schema:** Seeds story entry: `{ id: string (seeds-{uuid}), title: string, description: string, dependencies: string[], acceptanceCriteria: string[], storyPoints: number, mirroredIssueNumber: number | null }`. Stored as JSONL (one JSON object per line) in `.seeds/issues.jsonl`. GitHub sub-issue body: `Seeds ID: {id}\n\n{description}`. Mirror response: `{ seedsCount: number, mirroredCount: number, mappings: Array<{seedsId, issueNumber}> }`.
+- **Integration points:** Seeds decomposition module (generates stories), `.seeds/issues.jsonl` (persistence), `gh issue create` (mirror), GitHub parent issue (link via `--body` reference or sub-issue API). Hindsight `{repo}` memory bank (store decomposition summary AND dependency edges for recall — dependency edges are written to Hindsight alongside `.seeds/issues.jsonl` to ensure cross-environment availability; `.seeds/issues.jsonl` remains the authoritative local source but Hindsight serves as the shared query layer).
+- **Files / functions touched:** Seeds decomposition handler, `.seeds/issues.jsonl` writer, GitHub mirror service, decompose A2A handler, decompose validation schema.
+- **Guards/limits:** Maximum 20 stories per decomposition. Each story title <= 280 chars. `.seeds/issues.jsonl` is append-only; no in-place mutation of existing entries. Mirror is best-effort: if GitHub API fails for one sub-issue, remaining sub-issues still created; failed mirrors logged with `mirroredIssueNumber: null`.
 
 ## Files to Modify
 
-- `hermes/src/integrations/seeds_mirror.ts` (new — mirror module)
-- `hermes/src/paperclip/client.ts` (reuse from P1.1, extend with mirror methods)
-- `paperclip/packages/db/src/schema/issues.ts`
-- `paperclip/packages/db/src/migrations/0095_seeds_origin_unique_index.sql`
-- `paperclip/server/src/routes/issues.ts`
-- `tests/phase-1/p1-3-seeds-mirror.e2e.test.ts`
+- `src/dev-manager/handlers/decompose.ts`
+- `src/seeds/writer.ts`
+- `src/seeds/schema.ts`
+- `src/integrations/github/mirror-service.ts`
+- `tests/e2e/seeds-decompose-mirror.test.ts`
 
 ## Security Invariants
 
-- **INV-1 (tenant isolation):** every mirrored child issue is created with the mirror caller's `companyId` (QDS `1287bc8d-2122-4484-bc0c-900662caf8a0`); the partial unique index is scoped `(companyId, originKind, originId)` so an `originId` collision across tenants cannot cross-link, and the mirror never reads/writes an issue outside its `PAPERCLIP_RUN_ID`-scoped company.
-- **INV-2 (migration safety / non-regression):** the new index is a **partial** unique index `WHERE originKind='seeds_story'`; it must not constrain or rewrite existing rows where `originKind='manual'` (the column default; NULL is impossible per NOT NULL constraint; no backfill, no lock on the full table beyond index build), preserving every pre-existing issue.
-- **INV-3 (no authority duplication):** the mirror never writes a `cost` value or a dependency edge to Paperclip (no `cost` column exists; `parentId` carries only the decomposition tree). A divergence between stores is **logged**, never silently reconciled by overwriting the authoritative store.
-- **INV-4 (auth):** all REST calls send bearer `PAPERCLIP_API_KEY` + `PAPERCLIP_RUN_ID` (NFR-SEC-2); no key is hardcoded or written to logs/stdout.
+- INV-1: Seeds story content sanitized before GitHub mirror (strip executable markdown, code fences in titles).
+- INV-2: `.seeds/issues.jsonl` is `.gitignore`d (not tracked in version control) and written with file permissions 0600 at runtime via `fs.chmod` after each append; no world-readable factory data. Git does not preserve restrictive permissions — the file must be excluded from tracking to enforce this invariant.
+- INV-3: Mirror operation uses a dedicated GitHub token scoped to `issues:write` on the target repo only; no broader repo permissions.
 
 ## Definition of Done
 
-- [ ] **Impl:** `mirrorSeedsToPaperclip(parentIssueId)` reads `.seeds/issues.jsonl` via `sd`, creates one Paperclip child issue per Seeds story under `parentId`, tagged `originKind='seeds_story'`+`originId`.
-- [ ] **Impl:** Re-mirror upserts an existing child's `status` (matched on `(companyId,originKind,originId)`) instead of creating a duplicate.
-- [ ] **Contract/Schema:** Migration `0095` adds the partial unique index on `(companyId, originKind, originId) WHERE originKind='seeds_story'`; applied and table queryable; backward-compat verified: existing `originKind='manual'` rows are excluded by the partial index `WHERE originKind='seeds_story'` and remain fully queryable without constraint impact.
-- [ ] **Integration:** Seeds→Paperclip mirror wired one-directionally, called explicitly post-`sd create` (not event-driven), and exercised against live `localhost:3100`.
-- [ ] **Observability/Audit:** each child issue's `originId` resolves back to a Seeds story id (audit-chain hop 7, §8.4); store divergences are logged with the issue id correlation (NFR-OBS-3).
-- [ ] **Security:** tenant-scoped create + partial-index migration safety + no-cost/no-dep-duplication invariants enforced (INV-1..3); bearer auth on every call (INV-4).
-- [ ] **Test (unit/integration):** covers create-new, re-mirror-upsert, status-divergence-logged, and the POST-failure guard path (AC-3).
-- [ ] **Test (e2e demo — MANDATORY):** runs `mirrorSeedsToPaperclip` twice on a 3-story parent (one `blockedBy[]` edge); asserts exactly 3 child issues with distinct `originId`, the dep edge present in Seeds and absent from Paperclip, and no `cost` column — proving wiring closed and no duplicated authority (§13 Phase-1 clause 2).
+- [ ] **Impl:** Decompose handler receives A2A method "qds.decompose" and validates sessionId exists and is in "intake" state.
+- [ ] **Impl:** Seeds stories generated and appended to `.seeds/issues.jsonl` with full schema (id, title, dependencies, acceptanceCriteria, storyPoints).
+- [ ] **Impl:** Each story mirrored as GitHub sub-issue with `seeds-mirror` label and Seeds ID in body.
+- [ ] **Impl:** Response returns `{ seedsCount, mirroredCount, mappings }` with seedsId-to-issueNumber map.
+- [ ] **Contract:** Seeds story schema validated: id format `seeds-{uuid}`, dependencies reference valid seeds IDs, storyPoints in [1, 8].
+- [ ] **Contract:** `.seeds/issues.jsonl` is append-only; existing entries never mutated by subsequent decompose calls.
+- [ ] **Integration:** Parent intake issue linked to sub-issues (via body reference or GitHub sub-issue API).
+- [ ] **Integration:** Partial mirror failure does not block remaining sub-issues; failures logged with `mirroredIssueNumber: null`.
+- [ ] **Security:** Story content sanitized before GitHub API call (strip executable markdown from titles).
+- [ ] **Security:** `.seeds/` added to `.gitignore`; `.seeds/issues.jsonl` written with `chmod 0600` after each append; permissions enforced at runtime since Git does not preserve them.
+- [ ] **Test (unit):** Seeds writer validates schema and rejects invalid entries.
+- [ ] **Test (e2e demo — MANDATORY):** Run decompose on intake session → verify `.seeds/issues.jsonl` has entries → verify GitHub sub-issues exist with correct titles and labels → verify dependency data is ONLY in Seeds, not duplicated in GitHub → verify dependency edges are also queryable from the Hindsight `{repo}` bank.
 
 ## Dev Agent Record
 
