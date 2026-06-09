@@ -42,7 +42,7 @@ This story registers a webhook in SwarmClaw (`POST /api/webhooks`), configures i
     source: z.enum(["github", "generic"]),
     events: z.array(z.string()).min(1),
     agent_id: z.string(),          // must exist in agent store
-    secret: z.string().min(16),    // HMAC key — stored hashed
+    secret: z.string().min(16),    // HMAC key — stored encrypted (AES-256-GCM or secrets manager)
     config: z.record(z.unknown()).optional(),
   });
 
@@ -122,7 +122,7 @@ This story registers a webhook in SwarmClaw (`POST /api/webhooks`), configures i
 
 > 8–12 high-signal, story-specific boxes. NO lint/tests/typecheck filler.
 
-- [ ] **Impl:** `POST /api/webhooks` registers a webhook with source, events, agent_id, and hashed secret; returns 201
+- [ ] **Impl:** `POST /api/webhooks` registers a webhook with source, events, agent_id, and encrypted secret; returns 201
 - [ ] **Impl:** `POST /api/webhooks/{id}` validates HMAC-SHA256 signature, normalizes payload, checks event subscription, and creates a session run record
 - [ ] **Impl:** Session run record contains trigger metadata (source, event, normalized payload, timestamp) and status `pending`
 - [ ] **Contract:** Zod schemas for `RegisterWebhookSchema`, `GitHubPushPayloadSchema`, `SessionRunSchema` validated on all routes

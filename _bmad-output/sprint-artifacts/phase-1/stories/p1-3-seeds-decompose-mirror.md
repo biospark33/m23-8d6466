@@ -49,7 +49,7 @@ When the Dev Manager receives a decompose request, it invokes Seeds to generate 
 ## Security Invariants
 
 - INV-1: Seeds story content sanitized before GitHub mirror (strip executable markdown, code fences in titles).
-- INV-2: `.seeds/issues.jsonl` written with restrictive file permissions (0600); no world-readable factory data.
+- INV-2: `.seeds/issues.jsonl` is `.gitignore`d (not tracked in version control) and written with file permissions 0600 at runtime via `fs.chmod` after each append; no world-readable factory data. Git does not preserve restrictive permissions — the file must be excluded from tracking to enforce this invariant.
 - INV-3: Mirror operation uses a dedicated GitHub token scoped to `issues:write` on the target repo only; no broader repo permissions.
 
 ## Definition of Done
@@ -63,7 +63,7 @@ When the Dev Manager receives a decompose request, it invokes Seeds to generate 
 - [ ] **Integration:** Parent intake issue linked to sub-issues (via body reference or GitHub sub-issue API).
 - [ ] **Integration:** Partial mirror failure does not block remaining sub-issues; failures logged with `mirroredIssueNumber: null`.
 - [ ] **Security:** Story content sanitized before GitHub API call (strip executable markdown from titles).
-- [ ] **Security:** `.seeds/issues.jsonl` written with 0600 permissions.
+- [ ] **Security:** `.seeds/` added to `.gitignore`; `.seeds/issues.jsonl` written with `chmod 0600` after each append; permissions enforced at runtime since Git does not preserve them.
 - [ ] **Test (unit):** Seeds writer validates schema and rejects invalid entries.
 - [ ] **Test (e2e demo — MANDATORY):** Run decompose on intake session → verify `.seeds/issues.jsonl` has entries → verify GitHub sub-issues exist with correct titles and labels → verify dependency data is ONLY in Seeds, not duplicated in GitHub.
 

@@ -47,7 +47,7 @@ After a PR is produced (P1.15), external bot reviewers (e.g., CodeRabbit, Gemini
 ## Security Invariants
 
 - INV-1: Webhook signature validation (HMAC-SHA256) is enforced on every comment webhook — no exceptions.
-- INV-2: Bot comment body is stored as a truncated snippet (max 200 chars) to prevent injection of excessive data into protocol state.
+- INV-2: Bot comment body is stored as a truncated snippet (max 4000 chars) to prevent injection of excessive data into protocol state while preserving sufficient context for downstream fix dispatch (P1.19).
 - INV-3: Only comments on PRs correlated to active protocol runs are processed — comments on unrelated repos are silently dropped.
 
 ## Definition of Done
@@ -58,7 +58,7 @@ After a PR is produced (P1.15), external bot reviewers (e.g., CodeRabbit, Gemini
 - [ ] **Impl:** Idempotent comment processing (same comment ID → no duplicate state entry).
 - [ ] **Contract:** Protocol state schema includes `bot_comments` array with comment_id, author, body_snippet, timestamp.
 - [ ] **Integration:** GitHub webhook → SwarmClaw webhook endpoint → bot detection → protocol state update confirmed.
-- [ ] **Security:** Webhook signature validation enforced; comment body truncated to 200 chars.
+- [ ] **Security:** Webhook signature validation enforced; comment body truncated to 4000 chars.
 - [ ] **Test (unit):** Bot detection classifier: given user.type="Bot" → true; user.type="User" → false; login ending "[bot]" → true.
 - [ ] **Test (e2e demo — MANDATORY):** Send simulated bot review comment webhook to SwarmClaw; confirm protocol state updates to "review_feedback_detected" with comment reference stored.
 

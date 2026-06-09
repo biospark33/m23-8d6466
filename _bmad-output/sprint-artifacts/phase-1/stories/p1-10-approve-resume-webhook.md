@@ -53,7 +53,7 @@ Certain protocol runs are gated at the `decide` phase by an `executionPolicy`. W
 - INV-POLICY-2: A run paused at decide cannot be resumed by any mechanism other than a valid approve decision — no bypass, no auto-resume.
 - INV-POLICY-3: All gate decisions (approve, reject, timeout) are logged to audit trail with `agentId`, `timestamp`, `reason`, `runId`, and `issueId`.
 - INV-POLICY-4: Decision requests with invalid `runId` or unauthorized `agentId` are rejected with no state change and the attempt is logged as a security event.
-- INV-POLICY-5: Inbound webhook requests delivering approve/reject decisions are validated for authenticity — the `X-Hub-Signature-256` header is verified using HMAC-SHA256 with the shared webhook secret and `crypto.timingSafeEqual` for constant-time comparison. Requests with missing or invalid signatures are rejected with 401, logged as security events, and cause no state change.
+- INV-POLICY-5: Inbound A2A JSON-RPC 2.0 requests delivering approve/reject decisions are validated for authenticity — the requester agent's identity is verified via the A2A authentication token (validated against the registered agent store), and the `agentId` in the request must match the token identity. Requests with missing, expired, or invalid tokens are rejected with JSON-RPC error code `-32600`, logged as security events, and cause no state change.
 
 ## Definition of Done
 
