@@ -32,7 +32,7 @@ This story implements the Phase 1 exit gate as defined in PRD §13. It runs all 
 
 ## Technical Notes
 
-- **Contracts/Schema:** Gate assertion groups: (G1) Real PR exists: PR URL resolvable, branch contains changes, PR is open/mergeable. (G2) Audit chain reconstructable: invoke P1.16 walker, all 8 hops resolve. (G3) Within-budget spend: query cost ledger, total <= budget cap for Phase 1. (G4) Approve/resume works: simulate policy pause, approve, confirm protocol resumes. (G5) Retained findings: query Hindsight `qds-collective` bank, confirm ≥1 finding document exists from P1.11. (G6) Outcome record: query Hindsight `{repo}-dev-meta` for runId, confirm FR-LEARN-28 fields populated.
+- **Contracts/Schema:** Gate assertion groups: (G1) Real PR exists: PR URL resolvable, branch contains changes, PR is open/mergeable. (G2) Audit chain reconstructable: invoke P1.16 walker, all 8 hops resolve. (G3) Within-budget spend: query cost ledger, total <= budget cap for Phase 1. (G4) Approve/resume evidence: verify recorded pause/approve/resume events exist in Hindsight or `{repo}-dev-meta` from prior runs (non-mutating read-only check — the gate never simulates policy actions against live state). (G5) Retained findings: query Hindsight `qds-collective` bank, confirm ≥1 finding document exists from P1.11. (G6) Outcome record: query Hindsight `{repo}-dev-meta` for runId, confirm FR-LEARN-28 fields populated.
 - **Integration points:** Gate script invokes: SwarmClaw API (dispatch, status), GitHub API (PR verification), Hindsight API (bank queries), cost ledger (spend query), audit walker (P1.16).
 - **Files / functions touched:** `scripts/phase1-gate.ts` (gate runner), `src/gate/assertions.ts` (individual assertion implementations), `src/gate/report.ts` (result formatting).
 - **Guards/limits:** Gate must complete in under 5 minutes total. Each assertion has a 60-second timeout. Gate result is deterministic — same state produces same result. No mutation of system state during gate run (read-only assertions).
@@ -52,7 +52,7 @@ This story implements the Phase 1 exit gate as defined in PRD §13. It runs all 
 ## Definition of Done
 
 - [ ] **Impl:** Gate runner script that executes all 6 assertion groups in sequence.
-- [ ] **Impl:** Individual assertion implementations for G1 (real PR), G2 (audit chain), G3 (budget), G4 (approve/resume), G5 (retained findings), G6 (outcome record).
+- [ ] **Impl:** Individual assertion implementations for G1 (real PR), G2 (audit chain), G3 (budget), G4 (approve/resume — read-only verification against recorded events), G5 (retained findings), G6 (outcome record).
 - [ ] **Impl:** Binary pass/fail report with per-assertion breakdown (ID, status, expected, actual, diagnostic).
 - [ ] **Impl:** Deterministic execution — same state produces identical results on repeated runs.
 - [ ] **Contract:** Gate assertion schema: `{ id: string, group: string, status: "PASS"|"FAIL", expected: string, actual: string, diagnostic?: string }`.

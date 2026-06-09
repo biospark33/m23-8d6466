@@ -5,6 +5,7 @@
 ## Spec Reference
 
 - PRD §3.1, §3.3; FR-MG-4, FR-OR-5, FR-OR-7
+- Phase exit gate: PRD §13 Phase 1 clause 8
 
 ## User Story
 

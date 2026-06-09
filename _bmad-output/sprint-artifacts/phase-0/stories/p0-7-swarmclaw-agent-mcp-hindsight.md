@@ -39,7 +39,7 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
   ```typescript
   // POST /api/agents
   const RegisterAgentSchema = z.object({
-    agent_id: z.string().min(1).max(128),
+    agent_id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$/),  // matches INV-SC1
     capabilities: z.array(z.string()).min(1),
     metadata: z.record(z.unknown()).optional(),
   });

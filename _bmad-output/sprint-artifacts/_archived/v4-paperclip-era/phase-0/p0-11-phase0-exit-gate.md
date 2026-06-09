@@ -16,7 +16,7 @@ so that Phase 1 starts only on a fully de-risked, fully-wired foundation (G1: de
 
 ## Overview
 
-This is a **verification/gate** slice, not a feature slice. It cuts through the audit surface only: it runs a gate harness that re-checks each living predecessor story P0.3, P0.5, P0.6, P0.7, P0.9, P0.10 exit-criterion (the §13 Phase-0 assertions) and reads the OQ decision-log, then emits one aggregated pass/fail result. It writes **no** new product behavior — it consumes the capabilities P0.3, P0.5, P0.6, P0.7, P0.9, P0.10 already merged and asserts they are simultaneously green. (P0.1, P0.4, P0.8 killed per Warren decision; their §13 clauses are either absorbed by living stories or removed below.) The atomic unit is the gate itself: the §13 clause list + OQ-1..6 decisions reduced to one binary outcome. It is 3pts because it adds a harness + decision-log, not new orchestration.
+This is a **verification/gate** slice, not a feature slice. It cuts through the audit surface only: it runs a gate harness that re-checks each living predecessor story P0.2, P0.3, P0.5, P0.6, P0.7, P0.9, P0.10 exit-criterion (the §13 Phase-0 assertions) and reads the OQ decision-log, then emits one aggregated pass/fail result. It writes **no** new product behavior — it consumes the capabilities P0.3, P0.5, P0.6, P0.7, P0.9, P0.10 already merged and asserts they are simultaneously green. (P0.1, P0.4, P0.8 killed per Warren decision; their §13 clauses are either absorbed by living stories or removed below.) The atomic unit is the gate itself: the §13 clause list + OQ-1..6 decisions reduced to one binary outcome. It is 3pts because it adds a harness + decision-log, not new orchestration.
 
 ## E2E Slice
 

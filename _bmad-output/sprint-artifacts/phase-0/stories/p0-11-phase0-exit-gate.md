@@ -99,7 +99,7 @@ This story creates a single executable gate script (`scripts/phase0-exit-gate.ts
 
 ## Files to Modify
 
-> ≤10 unique paths, one per line.
+> ≤13 unique paths, one per line.
 - `scripts/phase0-exit-gate.ts`
 - `src/gate/assertions/p0-1-env.ts`
 - `src/gate/assertions/p0-2-coms.ts`

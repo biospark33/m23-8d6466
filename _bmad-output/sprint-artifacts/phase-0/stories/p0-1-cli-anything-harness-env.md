@@ -54,7 +54,7 @@ The CLI-Anything harness is a manifest-driven generator (`manifest.yaml`) that w
 
 - **INV-1:** Env injection is a MERGE `{ ...process.env, ...manifest.env }` — a manifest with no `env` block still inherits parent `PATH`/credentials (non-regression). Bare assignment is prohibited at compile time (review checklist).
 - **INV-2:** No secret value is written to stdout, logs, or the structured output. The harness logs key names only, never values.
-- **INV-3:** Subprocess inherits a minimal env scope — only keys explicitly listed in manifest.env plus inherited PATH/HOME. No wholesale `process.env` dump into log output.
+- **INV-3:** Log output is minimal — env key names only, never values. The subprocess inherits the full merged env per INV-1 (`{ ...process.env, ...manifest.env }`), but the harness logs only env key names, not values. No wholesale `process.env` dump into log output or structured result.
 
 ## Definition of Done
 

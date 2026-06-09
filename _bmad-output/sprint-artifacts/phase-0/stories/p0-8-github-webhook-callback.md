@@ -112,7 +112,7 @@ This story registers a webhook in SwarmClaw (`POST /api/webhooks`), configures i
 
 > Concrete named invariants only — N/A NOT permitted when triggered.
 
-- **INV-WH1:** Webhook secret is stored as SHA-256 hash (argon2id if async available); the plaintext secret is never persisted and is zeroed from memory after hashing.
+- **INV-WH1:** Webhook secret is stored encrypted (AES-256-GCM with a server-managed key, or in a secrets manager); at verification time the plaintext is decrypted, used to compute the HMAC for the inbound payload, then zeroed from memory immediately after. The plaintext secret is never persisted to disk unencrypted and is never logged.
 - **INV-WH2:** HMAC-SHA256 validation uses `crypto.timingSafeEqual` to prevent timing side-channel attacks on signature comparison.
 - **INV-WH3:** Inbound payload is validated against `GitHubPushPayloadSchema` before any processing — malformed payloads are rejected with 400 before touching the session store.
 - **INV-WH4:** The webhook secret must be at least 16 characters; registration with shorter secrets returns 400.
@@ -127,7 +127,7 @@ This story registers a webhook in SwarmClaw (`POST /api/webhooks`), configures i
 - [ ] **Impl:** Session run record contains trigger metadata (source, event, normalized payload, timestamp) and status `pending`
 - [ ] **Contract:** Zod schemas for `RegisterWebhookSchema`, `GitHubPushPayloadSchema`, `SessionRunSchema` validated on all routes
 - [ ] **Integration:** HMAC middleware → event matcher → session store create — full chain wired and exercised
-- [ ] **Security:** INV-WH1 through INV-WH5 enforced — hashed secret storage, timing-safe comparison, payload validation, agent_id lookup
+- [ ] **Security:** INV-WH1 through INV-WH5 enforced — encrypted secret storage, timing-safe comparison, payload validation, agent_id lookup
 - [ ] **Test (unit/integration):** Valid webhook + valid signature → session run created; invalid signature → 401; unsubscribed event → 200 ignored
 - [ ] **Test (guard):** Non-existent webhook ID returns 404; non-existent agent_id in registration returns 404; duplicate push within 60s returns existing session
 - [ ] **Test (e2e demo — MANDATORY):** Register agent (P0.7) → register webhook → POST push payload with valid HMAC → query session store → assert session run exists with correct agent_id, status `pending`, and trigger metadata

@@ -18,7 +18,7 @@ Certain protocol runs are gated at the `decide` phase by an `executionPolicy`. W
 
 ## E2E Slice
 
-**Demonstrable behavior:** A protocol run for a gated issue reaches the `decide` phase. SwarmClaw pauses the run and fires a webhook to the registered agent callback URL. The agent sends `approve` via A2A JSON-RPC 2.0 (`methods: 'executionPolicy.approve'`). SwarmClaw resumes the run from decide → summarize. If the agent sends `reject`, the run halts with `status: 'rejected'`. All decisions logged with timestamp, agentId, and reason.
+**Demonstrable behavior:** A protocol run for a gated issue reaches the `decide` phase. SwarmClaw pauses the run and fires a webhook to the registered agent callback URL. The agent sends `approve` via A2A JSON-RPC 2.0 (`method: 'executionPolicy.approve'`). SwarmClaw resumes the run from decide → summarize. If the agent sends `reject`, the run halts with `status: 'rejected'`. All decisions logged with timestamp, agentId, and reason.
 
 **Wiring closed:** On completion of this story, a human gate decision (approve/reject) at the decide step drives the protocol lifecycle using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
@@ -53,6 +53,7 @@ Certain protocol runs are gated at the `decide` phase by an `executionPolicy`. W
 - INV-POLICY-2: A run paused at decide cannot be resumed by any mechanism other than a valid approve decision — no bypass, no auto-resume.
 - INV-POLICY-3: All gate decisions (approve, reject, timeout) are logged to audit trail with `agentId`, `timestamp`, `reason`, `runId`, and `issueId`.
 - INV-POLICY-4: Decision requests with invalid `runId` or unauthorized `agentId` are rejected with no state change and the attempt is logged as a security event.
+- INV-POLICY-5: Inbound webhook requests delivering approve/reject decisions are validated for authenticity — the `X-Hub-Signature-256` header is verified using HMAC-SHA256 with the shared webhook secret and `crypto.timingSafeEqual` for constant-time comparison. Requests with missing or invalid signatures are rejected with 401, logged as security events, and cause no state change.
 
 ## Definition of Done
 

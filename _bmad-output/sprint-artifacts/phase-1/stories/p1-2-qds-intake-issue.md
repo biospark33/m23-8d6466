@@ -15,7 +15,7 @@ so that every factory request has a tracked, traceable work item from inception.
 
 ## Overview
 
-When the Dev Manager agent receives an intake request via A2A (simulating a /qds command), it creates a new SwarmClaw session and opens a GitHub issue via `gh issue create`. The issue title follows the convention `[QDS-{session-id}] {brief}`, and labels include `qds-intake` and any domain labels extracted from the request. The session ID is embedded in the issue body. This story closes the loop from intake to a owned, labeled GitHub issue.
+When the Dev Manager agent receives an intake request via A2A (simulating a /qds command), it creates a new SwarmClaw session and opens a GitHub issue via `gh issue create`. The issue title follows the convention `[QDS-{session-id}] {brief}`, and labels include `qds-intake` and any domain labels extracted from the request. The session ID is embedded in the issue body. This story closes the loop from intake to an owned, labeled GitHub issue.
 
 ## E2E Slice
 
