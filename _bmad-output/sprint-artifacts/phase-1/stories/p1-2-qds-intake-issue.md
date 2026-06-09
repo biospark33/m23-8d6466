@@ -19,7 +19,7 @@ When the Dev Manager agent receives an intake request via A2A (simulating a /qds
 
 ## E2E Slice
 
-**Demonstrable behavior:** A POST to /api/a2a with method "qds.intake" carrying `{ "brief": "Add auth middleware", "domain": "backend" }` results in: (1) a SwarmClaw session created, (2) a GitHub issue with title `[QDS-{session-id}] Add auth middleware` labeled `qds-intake, backend`, (3) the A2A response contains `{ sessionId, issueUrl, issueNumber }`.
+**Demonstrable behavior:** A POST to /api/a2a with method "qds.intake" carrying `{ "brief": "Add auth middleware", "domain": "backend" }` results in: (1) a SwarmClaw session created, (2) a GitHub issue with title `[QDS-{short-id}] Add auth middleware` labeled `qds-intake, backend`, (3) the A2A response contains `{ sessionId, issueUrl, issueNumber }`.
 
 **Wiring closed:** On completion of this story, an intake A2A call produces exactly one owned GitHub issue and one SwarmClaw session, linked by session ID, using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 

@@ -33,7 +33,7 @@ After a PR is produced (P1.15), external bot reviewers (e.g., CodeRabbit, Gemini
 
 ## Technical Notes
 
-- **Contracts/Schema:** GitHub webhook payload for `issue_comment` or `pull_request_review_comment` events includes `comment.user.type` field. Bot detection: `user.type === "Bot"` OR `user.login.endsWith("[bot]")`. Protocol state update: `{ runId, status: "review_feedback_detected", bot_comments: [{ commentId, author, bodySnippet, timestamp }] }`.
+- **Contracts/Schema:** GitHub webhook payload for `issue_comment` or `pull_request_review_comment` events includes `comment.user.type` field. Bot detection: `user.type === "Bot"` OR `user.login.endsWith("[bot]")`. Protocol state update: `{ runId, status: "review_feedback_detected", botComments: [{ commentId, author, bodySnippet, timestamp }] }`.
 - **Integration points:** GitHub webhook → SwarmClaw `/api/webhooks/[id]` → signature validation → bot detection filter → protocol state update → signal for fix-dispatch readiness.
 - **Files / functions touched:** `src/swarmclaw/routes/webhooks.ts` (add comment event handler), `src/swarmclaw/bot-detection.ts` (bot user classifier), `src/swarmclaw/protocol.ts` (state transition: summarize → review_feedback_detected).
 - **Guards/limits:** Only process comments on PRs that belong to an active protocol run (correlation check). Ignore comments on closed/merged PRs. Maximum 50 bot comments tracked per run (overflow truncates oldest). Webhook processing must be idempotent (same comment ID processed twice = no duplicate state entry).
@@ -56,7 +56,7 @@ After a PR is produced (P1.15), external bot reviewers (e.g., CodeRabbit, Gemini
 - [ ] **Impl:** Bot detection classifier using `user.type === "Bot"` or `user.login.endsWith("[bot]")`.
 - [ ] **Impl:** Protocol state transition to "review_feedback_detected" with accumulated bot comment references.
 - [ ] **Impl:** Idempotent comment processing (same comment ID → no duplicate state entry).
-- [ ] **Contract:** Protocol state schema includes `bot_comments` array with commentId, author, bodySnippet, timestamp.
+- [ ] **Contract:** Protocol state schema includes `botComments` array with commentId, author, bodySnippet, timestamp.
 - [ ] **Integration:** GitHub webhook → SwarmClaw webhook endpoint → bot detection → protocol state update confirmed.
 - [ ] **Security:** Webhook signature validation enforced; comment body truncated to 4000 chars.
 - [ ] **Test (unit):** Bot detection classifier: given user.type="Bot" → true; user.type="User" → false; login ending "[bot]" → true.
