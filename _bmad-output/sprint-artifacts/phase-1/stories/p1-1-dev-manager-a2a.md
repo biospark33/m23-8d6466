@@ -36,7 +36,7 @@ Register a "Dev Manager" agent with SwarmClaw via POST /api/agents, setting its 
 - **Contracts/Schema:** Agent registration: `{ agentId: string, agentType: "department-manager"|"worker"|"observer", endpointUrl: string, capabilities: string[] }`. A2A request: JSON-RPC 2.0 with `targetAgentId` and `requesterAgentId` in headers. Response: standard JSON-RPC 2.0 response with `result` or `error`.
 - **Integration points:** SwarmClaw /api/agents (register), SwarmClaw /api/a2a (delegate), CLI-Anything harness endpoint (receiver). a2a_delegate config fields: targetUrl, targetExternalAgentId, taskName, taskMessage, timeoutMs, credentialId, onFailure.
 - **Files / functions touched:** SwarmClaw agent registry module, A2A routing handler, CLI-Anything harness adapter, agent registration test fixture.
-- **Guards/limits:** timeoutMs must be >= 1000ms and <= 300000ms. onFailure must be one of: `retry`, `fail`, `fallback`. agentId must match `^[a-z][a-z0-9-]{1,63}$`. Duplicate registration returns 409.
+- **Guards/limits:** timeoutMs must be >= 1000ms and <= 300000ms. onFailure must be one of: `retry`, `fail`, `fallback`. agentId must match `^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$` (aligned with P0.7 INV-SC1: 2–128 chars, alphanumeric start/end). Duplicate registration returns 409.
 
 ## Files to Modify
 
@@ -49,7 +49,7 @@ Register a "Dev Manager" agent with SwarmClaw via POST /api/agents, setting its 
 ## Security Invariants
 
 - INV-1: A2A calls require valid `targetAgentId` and `requesterAgentId` headers; missing headers result in 400.
-- INV-2: agentId in registration must match `^[a-z][a-z0-9-]{1,63}$`; reject malformed IDs with 422.
+- INV-2: agentId in registration must match `^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$` (aligned with P0.7 INV-SC1); reject malformed IDs with 422.
 - INV-3: endpointUrl must be http or https scheme; reject arbitrary schemes with 422.
 
 ## Definition of Done

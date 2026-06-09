@@ -15,7 +15,7 @@ so that every factory request has a tracked, traceable work item from inception.
 
 ## Overview
 
-When the Dev Manager agent receives an intake request via A2A (simulating a /qds command), it creates a new SwarmClaw session and opens a GitHub issue via `gh issue create`. The issue title follows the convention `[QDS-{session-id}] {brief}`, and labels include `qds-intake` and any domain labels extracted from the request. The session ID is embedded in the issue body. This story closes the loop from intake to an owned, labeled GitHub issue.
+When the Dev Manager agent receives an intake request via A2A (simulating a /qds command), it creates a new SwarmClaw session and opens a GitHub issue via `gh issue create`. The issue title follows the convention `[QDS-{short-id}] {brief}` where `{short-id}` is the first 8 hex characters of the UUIDv4 sessionId, and labels include `qds-intake` and any domain labels extracted from the request. The full session ID is embedded in the issue body for traceability. This story closes the loop from intake to an owned, labeled GitHub issue.
 
 ## E2E Slice
 
@@ -56,7 +56,7 @@ When the Dev Manager agent receives an intake request via A2A (simulating a /qds
 
 - [ ] **Impl:** Intake handler receives A2A method "qds.intake" and validates request schema.
 - [ ] **Impl:** SwarmClaw session created with UUIDv4 sessionId and initial state "intake".
-- [ ] **Impl:** `gh issue create` invoked with `[QDS-{sessionId}] {brief}` title, `qds-intake` label, and domain label.
+- [ ] **Impl:** `gh issue create` invoked with `[QDS-{short-id}] {brief}` title (where short-id = first 8 hex chars of sessionId), `qds-intake` label, and domain label.
 - [ ] **Impl:** Response returns `{ sessionId, issueUrl, issueNumber }` on success.
 - [ ] **Contract:** Intake request schema enforced: brief 1-280 chars, domain enum-validated.
 - [ ] **Integration:** Session ID stored in GitHub issue body for traceability.
