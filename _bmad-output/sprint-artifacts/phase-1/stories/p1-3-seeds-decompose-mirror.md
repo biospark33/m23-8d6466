@@ -10,12 +10,12 @@
 ## User Story
 
 As a QDS factory operator,
-I want Seeds decomposition to persist stories locally and mirror them as GitHub issue comments or sub-issues,
+I want Seeds decomposition to persist stories locally and mirror them as GitHub sub-issues,
 so that decomposition authority lives in Seeds while assignment/execution authority lives in SwarmClaw, with no duplication.
 
 ## Overview
 
-When the Dev Manager receives a decompose request, it invokes Seeds to generate story decomposition. Seeds persists stories to `.seeds/issues.jsonl` as the authoritative source for story definitions, dependencies, and acceptance criteria. A one-directional mirror then writes each story as a GitHub sub-issue (or comment on the parent intake issue) via `gh issue create` with a `seeds-mirror` label. SwarmClaw owns assignment and execution tracking; Seeds owns decomposition structure. The mirror is read-only from GitHub's perspective: edits to GitHub issues do not flow back to Seeds.
+When the Dev Manager receives a decompose request, it invokes Seeds to generate story decomposition. Seeds persists stories to `.seeds/issues.jsonl` as the authoritative source for story definitions, dependencies, and acceptance criteria. A one-directional mirror then writes each story as a GitHub sub-issue via `gh issue create` with a `seeds-mirror` label. SwarmClaw owns assignment and execution tracking; Seeds owns decomposition structure. The mirror is read-only from GitHub's perspective: edits to GitHub issues do not flow back to Seeds.
 
 ## E2E Slice
 

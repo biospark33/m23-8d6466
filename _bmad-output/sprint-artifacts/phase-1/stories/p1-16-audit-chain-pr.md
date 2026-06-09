@@ -35,7 +35,7 @@ For one real PR produced by P1.15, the audit chain must be fully reconstructable
 
 - **Contracts/Schema:** Audit chain hops (in order): (1) PR→protocol run via PR branch name pattern `qds/{runId}`, (2) run→issue via correlation key `issueId` in protocol state, (3) issue→cost via `SUM(cost_events) WHERE issueId`, (4) issue→decisions via `executionPolicy` stored in protocol state, (5) issue→decomposition via `parentId` tree in Seeds mirror, (6) run→Pi team via step output with agent names/models, (7) Pi team→pi-lens via TDI + stable IDs, (8) run→memory via Hindsight bank query `document_id=runId`.
 - **Integration points:** Audit walker queries: SwarmClaw protocol state store, GitHub API (PR details), Seeds decomposition store, cost ledger (P1.13), Hindsight banks (`{repo}`, `{repo}-dev-meta`, `qds-collective`), pi-lens TDI records.
-- **Files / functions touched:** `src/audit/chain-walker.ts` (main walker), `src/audit/hops.ts` (individual hop resolvers), `src/audit/correlation-keys.ts` (key extraction utilities), `src/swarmclaw/protocol.ts` (ensure correlation keys are persisted), `src/hindsight/client.ts` (bank queries for audit).
+- **Files / functions touched:** `src/audit/chain-walker.ts` (main walker), `src/audit/hops.ts` (individual hop resolvers), `src/audit/correlation-keys.ts` (key extraction utilities), `src/swarmclaw/protocol.ts` (ensure correlation keys are persisted), `src/memory/hindsight-client.ts` (bank queries for audit).
 - **Guards/limits:** Walker must timeout after 30s (NFR-OBS-4). Each hop must have a diagnostic message on failure. Correlation keys must be written at the point of creation, not retroactively.
 
 ## Files to Modify
@@ -44,7 +44,7 @@ For one real PR produced by P1.15, the audit chain must be fully reconstructable
 - `src/audit/hops.ts`
 - `src/audit/correlation-keys.ts`
 - `src/swarmclaw/protocol.ts`
-- `src/hindsight/client.ts`
+- `src/memory/hindsight-client.ts`
 
 ## Security Invariants
 

@@ -18,7 +18,7 @@ Before a protocol step executes, SwarmClaw primes the Pi agent context by recall
 
 ## E2E Slice
 
-**Demonstrable behavior:** A protocol step for issue #42 starts. SwarmClaw calls `hindsight-local-mcp` `/recall` with context from the issue body and prior run history. Relevant entries from `{repo}` and `qds-collective` banks are injected into the Pi agent context. After the step executes and produces output, SwarmClaw calls `hindsight-local-mcp` `/v1/default/banks/{repo}/memories` to retain the step's learnings. The full recall → execute → retain loop completes on the real run.
+**Demonstrable behavior:** A protocol step for issue #42 starts. SwarmClaw calls `hindsight-local-mcp` `/recall` with context from the issue body and prior run history. Relevant entries from `{repo}` and `qds-collective` banks are injected into the Pi agent context. After the step executes and produces output, SwarmClaw invokes the `retain` tool on the `hindsight-local-mcp` server to retain the step's learnings. The full recall → execute → retain loop completes on the real run.
 
 **Wiring closed:** On completion of this story, the memory loop (recall → execute → retain) completes on a real protocol step using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
@@ -27,7 +27,7 @@ Before a protocol step executes, SwarmClaw primes the Pi agent context by recall
 ## Acceptance Criteria
 
 1. **(make-or-break)** Given a protocol step is about to execute for an issue, When SwarmClaw primes the agent context, Then it calls `hindsight-local-mcp` `/recall` with the issue context and receives relevant entries from `{repo}`, `{repo}-dev-meta`, and `qds-collective` banks, and these entries are injected into the Pi agent's working context.
-2. Given a protocol step has completed successfully, When SwarmClaw retains learnings, Then it calls `hindsight-local-mcp` `/v1/default/banks/{bank_id}/memories` with structured content (what worked, what failed, decisions), and the entry is persisted to the appropriate bank with `metadata.issueId` and `metadata.runId`.
+2. Given a protocol step has completed successfully, When SwarmClaw retains learnings, Then it invokes the `retain` tool on the `hindsight-local-mcp` server with structured content (what worked, what failed, decisions), and the entry is persisted to the appropriate bank with `metadata.issueId` and `metadata.runId`.
 3. Given the Hindsight MCP server is unreachable, When a recall is attempted, Then the step proceeds without primed context, a `waiver.reason: 'hindsight-unavailable'` is logged, and the retain step is skipped (no partial writes).
 4. Given a recall returns entries, When they are injected into the agent context, Then each entry includes its `bank_id`, `relevance_score`, and `created_at` so the agent can assess recency and relevance.
 
