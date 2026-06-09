@@ -46,6 +46,9 @@ The CLI-Anything harness writes a `cost_events` row after each Pi role execution
 - `src/protocol/phase-executor.ts`
 - `src/models/cost-event.ts`
 - `src/cost/budget-config.ts`
+- `tests/cost/cost-ledger.test.ts`
+- `tests/cost/over-cap-gate.test.ts`
+- `tests/cost/cost-ledger-e2e.test.ts`
 
 ## Security Invariants
 
