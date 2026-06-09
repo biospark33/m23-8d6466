@@ -112,7 +112,7 @@ This story registers a webhook in SwarmClaw (`POST /api/webhooks`), configures i
 
 > Concrete named invariants only — N/A NOT permitted when triggered.
 
-- **INV-WH1:** Webhook secret is stored encrypted (AES-256-GCM with a server-managed key, or in a secrets manager); at verification time the plaintext is decrypted, used to compute the HMAC for the inbound payload, then zeroed from memory immediately after. The plaintext secret is never persisted to disk unencrypted and is never logged.
+- **INV-WH1:** Webhook secret is stored encrypted (AES-256-GCM with a server-managed key, or in a secrets manager); at verification time the plaintext is decrypted into a `Buffer` (not a JavaScript string — V8 strings are immutable and cannot be manually zeroed), used to compute the HMAC for the inbound payload via `Buffer`-based `crypto.createHmac`, then immediately overwritten with `buffer.fill(0)` after comparison. The payload is also processed as `Buffer` throughout the HMAC pipeline to avoid string intermediaries. The plaintext secret is never persisted to disk unencrypted, is never logged, and is never held as a JavaScript `string` at any point during verification.
 - **INV-WH2:** HMAC-SHA256 validation uses `crypto.timingSafeEqual` to prevent timing side-channel attacks on signature comparison.
 - **INV-WH3:** Inbound payload is validated against `GitHubPushPayloadSchema` before any processing — malformed payloads are rejected with 400 before touching the session store.
 - **INV-WH4:** The webhook secret must be at least 16 characters; registration with shorter secrets returns 400.

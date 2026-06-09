@@ -28,13 +28,13 @@ When the Dev Manager receives a decompose request, it invokes Seeds to generate 
 ## Acceptance Criteria
 
 1. **(make-or-break)** Given an intake session exists with a parent GitHub issue, When POST /api/a2a with method "qds.decompose" and `{ "sessionId": "{id}" }`, Then `.seeds/issues.jsonl` is appended with >= 1 story entry and each story has a corresponding GitHub sub-issue linked to the parent issue.
-2. Given Seeds stories are persisted, When the mirror runs, Then each GitHub sub-issue contains the Seeds story ID in its body, title matches the Seeds story title, and label `seeds-mirror` is applied. Dependency edges are stored ONLY in `.seeds/issues.jsonl`, not in GitHub metadata.
+2. Given Seeds stories are persisted, When the mirror runs, Then each GitHub sub-issue contains the Seeds story ID in its body, title matches the Seeds story title, and label `seeds-mirror` is applied. Dependency edges are stored ONLY in `.seeds/issues.jsonl`, not in GitHub metadata. Dependency edges are also persisted to the Hindsight `{repo}` memory bank so that cross-environment and multi-worktree consumers can query the dependency graph without requiring access to the local `.seeds/` file.
 3. Given a GitHub sub-issue is edited by a user, When the next decompose call runs, Then the Seeds entries are NOT overwritten by GitHub content (Seeds is authoritative; mirror is one-directional).
 
 ## Technical Notes
 
 - **Contracts/Schema:** Seeds story entry: `{ id: string (seeds-{uuid}), title: string, description: string, dependencies: string[], acceptanceCriteria: string[], storyPoints: number, mirroredIssueNumber: number | null }`. Stored as JSONL (one JSON object per line) in `.seeds/issues.jsonl`. GitHub sub-issue body: `Seeds ID: {id}\n\n{description}`. Mirror response: `{ seedsCount: number, mirroredCount: number, mappings: Array<{seedsId, issueNumber}> }`.
-- **Integration points:** Seeds decomposition module (generates stories), `.seeds/issues.jsonl` (persistence), `gh issue create` (mirror), GitHub parent issue (link via `--body` reference or sub-issue API). Hindsight {repo} bank (optional: store decomposition summary for recall).
+- **Integration points:** Seeds decomposition module (generates stories), `.seeds/issues.jsonl` (persistence), `gh issue create` (mirror), GitHub parent issue (link via `--body` reference or sub-issue API). Hindsight `{repo}` memory bank (store decomposition summary AND dependency edges for recall — dependency edges are written to Hindsight alongside `.seeds/issues.jsonl` to ensure cross-environment availability; `.seeds/issues.jsonl` remains the authoritative local source but Hindsight serves as the shared query layer).
 - **Files / functions touched:** Seeds decomposition handler, `.seeds/issues.jsonl` writer, GitHub mirror service, decompose A2A handler, decompose validation schema.
 - **Guards/limits:** Maximum 20 stories per decomposition. Each story title <= 280 chars. `.seeds/issues.jsonl` is append-only; no in-place mutation of existing entries. Mirror is best-effort: if GitHub API fails for one sub-issue, remaining sub-issues still created; failed mirrors logged with `mirroredIssueNumber: null`.
 
@@ -65,7 +65,7 @@ When the Dev Manager receives a decompose request, it invokes Seeds to generate 
 - [ ] **Security:** Story content sanitized before GitHub API call (strip executable markdown from titles).
 - [ ] **Security:** `.seeds/` added to `.gitignore`; `.seeds/issues.jsonl` written with `chmod 0600` after each append; permissions enforced at runtime since Git does not preserve them.
 - [ ] **Test (unit):** Seeds writer validates schema and rejects invalid entries.
-- [ ] **Test (e2e demo — MANDATORY):** Run decompose on intake session → verify `.seeds/issues.jsonl` has entries → verify GitHub sub-issues exist with correct titles and labels → verify dependency data is ONLY in Seeds, not duplicated in GitHub.
+- [ ] **Test (e2e demo — MANDATORY):** Run decompose on intake session → verify `.seeds/issues.jsonl` has entries → verify GitHub sub-issues exist with correct titles and labels → verify dependency data is ONLY in Seeds, not duplicated in GitHub → verify dependency edges are also queryable from the Hindsight `{repo}` bank.
 
 ## Dev Agent Record
 

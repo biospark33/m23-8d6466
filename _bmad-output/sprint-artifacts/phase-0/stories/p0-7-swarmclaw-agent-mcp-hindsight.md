@@ -107,7 +107,7 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
 > Concrete named invariants only — N/A NOT permitted when triggered.
 
 - **INV-SC1:** Agent registration requires `agent_id` matching `^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$` — no special chars, no path traversal.
-- **INV-SC2:** MCP server `command` field is validated against an allowlist of known binaries (`hindsight-local-mcp`, `node`, `npx`) — arbitrary command injection is rejected with 400.
+- **INV-SC2:** MCP server `command` field is validated against an allowlist of dedicated, purpose-built binaries (`hindsight-local-mcp` only). General-purpose runtimes (`node`, `npx`, `python`, `sh`) are explicitly excluded because they enable arbitrary code execution even with argument restrictions. Future extension to support runtime-based MCP servers (e.g., `npx hindsight-local-mcp`) requires full command-string validation with argument allowlisting — tracked as a separate security story. Arbitrary or unrecognized commands are rejected with 400.
 - **INV-SC3:** Environment variables passed to MCP server subprocesses are sourced ONLY from an explicit `env` map in the registration payload — never inherited from SwarmClaw's own process environment unless explicitly listed in a server-side allowlist (`SWARMCLAW_ENV_ALLOWLIST`).
 - **INV-SC4:** MCP server subprocess runs with no network listeners; stdio is the only communication channel. If the subprocess opens a TCP socket, the transport layer kills it within the spawn timeout.
 - **INV-SC5:** Secrets (API keys, tokens) in MCP server `env` are never logged or returned in GET/test responses — values are masked to `***` in any diagnostic output.

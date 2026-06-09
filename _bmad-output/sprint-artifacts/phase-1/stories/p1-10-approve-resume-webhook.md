@@ -30,7 +30,7 @@ Certain protocol runs are gated at the `decide` phase by an `executionPolicy`. W
 2. Given a paused run at decide, When the agent sends `approve` via A2A JSON-RPC 2.0 (`method: 'executionPolicy.approve'`, `params: { runId, decision: 'approve', reason: string }`), Then SwarmClaw resumes the run from decide → summarize and logs the approval with `agentId`, `timestamp`, and `reason`.
 3. Given a paused run at decide, When the agent sends `reject` via A2A JSON-RPC 2.0, Then SwarmClaw halts the run with `status: 'rejected'`, logs the rejection, and no further phases execute.
 4. Given a run is paused at decide, When no decision is received within the policy timeout (default 24h), Then the run auto-halts with `status: 'timed-out'` and a timeout event is logged.
-5. Given an approve/reject request arrives with an invalid `runId` or from an unauthorized agent, When SwarmClaw validates the request, Then the request is rejected with `error: { code: -32600, message: 'Invalid request' }` and no state change occurs.
+5. Given an approve/reject request arrives with an invalid `runId` or from an unauthorized agent, When SwarmClaw validates the request, Then the request is rejected with `error: { code: -32602, message: 'Invalid params' }` for an invalid `runId`, or `error: { code: -32001, message: 'Unauthorized agent' }` for an unauthorized `agentId`, and no state change occurs.
 
 ## Technical Notes
 
@@ -53,7 +53,7 @@ Certain protocol runs are gated at the `decide` phase by an `executionPolicy`. W
 - INV-POLICY-2: A run paused at decide cannot be resumed by any mechanism other than a valid approve decision — no bypass, no auto-resume.
 - INV-POLICY-3: All gate decisions (approve, reject, timeout) are logged to audit trail with `agentId`, `timestamp`, `reason`, `runId`, and `issueId`.
 - INV-POLICY-4: Decision requests with invalid `runId` or unauthorized `agentId` are rejected with no state change and the attempt is logged as a security event.
-- INV-POLICY-5: Inbound A2A JSON-RPC 2.0 requests delivering approve/reject decisions are validated for authenticity — the requester agent's identity is verified via the A2A authentication token (validated against the registered agent store), and the `agentId` in the request must match the token identity. Requests with missing, expired, or invalid tokens are rejected with JSON-RPC error code `-32600`, logged as security events, and cause no state change.
+- INV-POLICY-5: Inbound A2A JSON-RPC 2.0 requests delivering approve/reject decisions are validated for authenticity — the requester agent's identity is verified via the A2A authentication token (validated against the registered agent store), and the `agentId` in the request must match the token identity. Requests with invalid `runId` are rejected with JSON-RPC error code `-32602` (Invalid params). Requests with missing, expired, or invalid authentication tokens are rejected with JSON-RPC error code `-32000` (Server error: auth failure), logged as security events, and cause no state change. Error codes comply with JSON-RPC 2.0: `-32600` is reserved for structurally invalid requests only; application-level validation uses `-32602` (params) or `-32000` to `-32099` (server-defined).
 
 ## Definition of Done
 
