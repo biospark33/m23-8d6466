@@ -19,7 +19,7 @@ This is the pivotal Phase-0 demo: a CLI-Anything manifest launches a 3-agent War
 
 ## E2E Slice
 
-**Demonstrable behavior:** A CLI-Anything manifest for a 3-agent "Research-Trio" archetype launches `warren run` with role-model configs for `lead=anthropic/claude-sonnet-4-6`, `worker-a=openrouter/glm-4`, `worker-b=openrouter/deepseek-chat`. Coms shows ≥2 messages exchanged between agents. The merged JSON on stdout contains a `result` field, `partial: false`, `changed_files: []`, and `exit_class: "success"`.
+**Demonstrable behavior:** A CLI-Anything manifest for a 3-agent "Research-Trio" archetype launches `warren run` with role-model configs for `lead=anthropic/claude-sonnet-4-6`, `worker-a=openrouter/glm-4`, `worker-b=openrouter/deepseek-chat`. Coms shows ≥2 messages exchanged between agents. The merged JSON on stdout contains a `result` field, `partial: false`, `changedFiles: []`, and `exitClass: "success"`.
 
 **Wiring closed:** On completion of this story, running `cli-anything run --manifest research-trio.yaml` produces a single merged JSON object on stdout with `partial: false` and structured results from ≥2 distinct model providers, using only code merged by this story plus the coms vendor from P0.2 and the harness skeleton from P0.1. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors, if any, are dependency edges (listed below), not unfinished wiring inside this story.
 
@@ -33,7 +33,7 @@ This is the pivotal Phase-0 demo: a CLI-Anything manifest launches a 3-agent War
 
 ## Technical Notes
 
-- **Contracts/Schema:** Merged output schema: `{ result: Record<string,unknown>, changed_files: string[], partial: boolean, exit_class: "success"|"transient"|"overflow"|"logic", waivers: Waiver[], agent_outputs: Record<string,unknown>, coms_log: ComsEntry[] }`. Worker response_schema mandatory field: `changed_files: string[]`. Lead computes set-union before emit.
+- **Contracts/Schema:** Merged output schema: `{ result: Record<string,unknown>, changedFiles: string[], partial: boolean, exitClass: "success"|"transient"|"overflow"|"logic", waivers: Waiver[], agentOutputs: Record<string,unknown>, comsLog: ComsEntry[] }`. Worker response_schema mandatory field: `changedFiles: string[]`. Lead computes set-union before emit.
 - **Integration points (each wired & exercised in this story):** CLI-Anything manifest → `warren run` with `--role-model` flags → Pi subprocess spawning with `--cname <run-id>-<role>` → coms exchange via socket-coms or subprocess-RPC (per P0.2 decision) → lead merges → harness captures stdout.
 - **Files / functions touched:** `cli-anything/src/runner.ts` (team spawning), `cli-anything/src/merger.ts` (lead output merge), `cli-anything/src/coms-log.ts` (coms capture), `cli-anything/manifests/research-trio.yaml` (demo manifest).
 - **Guards/limits:** Budget cap per team (default $0.50), turn cap (default 5/agent), wall-clock cap (default 5 min). `coms_await` timeout per P0.2 decision (8 min for Trio archetype, OQ-16b).
@@ -51,19 +51,19 @@ This is the pivotal Phase-0 demo: a CLI-Anything manifest launches a 3-agent War
 ## Security Invariants
 
 - **INV-1:** API keys (Anthropic, OpenRouter) supplied via env vars, never hardcoded in manifest or logged. Harness logs key presence (`ANTHROPIC_API_KEY: set`) not values.
-- **INV-2:** Budget cap enforced by harness process (owns spawn/kill) — never delegated to agents. Exceeding cap produces non-zero exit with `exit_class: "overflow"`.
+- **INV-2:** Budget cap enforced by harness process (owns spawn/kill) — never delegated to agents. Exceeding cap produces non-zero exit with `exitClass: "overflow"`.
 - **INV-3:** No secret values in merged JSON output or coms log artifacts.
 
 ## Definition of Done
 
 - [ ] **Impl:** CLI-Anything runner spawns 3 Pi agents via Warren with mixed-model role configs, each named `--cname <run-id>-<role>`.
-- [ ] **Impl:** Lead merger collects worker outputs, validates `changed_files` field, computes set-union, produces merged JSON on stdout.
-- [ ] **Contract:** Merged output schema (result, changed_files, partial, exit_class, waivers, agent_outputs, coms_log) with field-level validation.
-- [ ] **Contract:** Worker response_schema mandatory `changed_files: string[]` enforced by lead; omission = node failure (CORRECTNESS-C).
+- [ ] **Impl:** Lead merger collects worker outputs, validates `changedFiles` field, computes set-union, produces merged JSON on stdout.
+- [ ] **Contract:** Merged output schema (result, changedFiles, partial, exitClass, waivers, agentOutputs, comsLog) with field-level validation.
+- [ ] **Contract:** Worker response_schema mandatory `changedFiles: string[]` enforced by lead; omission = node failure (CORRECTNESS-C).
 - [ ] **Integration:** Coms exchange between agents observable (≥2 messages); structured JSON stdout produced by harness.
 - [ ] **Observability:** Coms log captured as part of merged output (agent names, message counts, timing).
 - [ ] **Security:** Budget cap enforced by harness; non-zero exit on cap breach; API keys from env only.
-- [ ] **Test (unit):** Merger validates well-formed worker outputs and rejects missing `changed_files`; partial-result path tested.
+- [ ] **Test (unit):** Merger validates well-formed worker outputs and rejects missing `changedFiles`; partial-result path tested.
 - [ ] **Test (integration):** 3-agent manifest launches with mocked model responses; merged output schema valid.
 - [ ] **Test (e2e demo — MANDATORY):** Live `cli-anything run --manifest research-trio.yaml` produces merged JSON with `partial: false` and ≥2 provider results; coms log shows ≥2 messages exchanged.
 

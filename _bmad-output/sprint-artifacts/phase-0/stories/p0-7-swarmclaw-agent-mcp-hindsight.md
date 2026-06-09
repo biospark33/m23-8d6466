@@ -29,7 +29,7 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
 
 > ≥3 scenarios, Given/When/Then. Exactly one tagged (make-or-break) and binary.
 
-1. **(make-or-break)** Given a running SwarmClaw server and `hindsight-local-mcp` on PATH, When `POST /api/agents` (agent_id, capabilities) then `POST /api/mcp-servers` (name, transport: stdio, command: `hindsight-local-mcp`) then `POST /api/mcp-servers/{id}/test` are called in sequence, Then the test response contains `{ ok: true }` and lists at least `retain`, `recall`, `reflect`, `consolidate` in the tools array.
+1. **(make-or-break)** Given a running SwarmClaw server and `hindsight-local-mcp` on PATH, When `POST /api/agents` (agentId, capabilities) then `POST /api/mcp-servers` (name, transport: stdio, command: `hindsight-local-mcp`) then `POST /api/mcp-servers/{id}/test` are called in sequence, Then the test response contains `{ ok: true }` and lists at least `retain`, `recall`, `reflect`, `consolidate` in the tools array.
 2. Given a registered MCP server, When `POST /api/mcp-servers/{id}/invoke` is called with tool `retain` and a valid memory payload, Then the response status is 200 and the Hindsight bank receives the memory entry (verifiable via subsequent `recall`).
 3. Given `hindsight-local-mcp` is NOT on PATH or returns non-zero, When `POST /api/mcp-servers/{id}/test` is called, Then the response is `{ ok: false, error: <descriptive message> }` with HTTP 502 — the server never silently returns ok for a broken transport.
 
@@ -39,7 +39,7 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
   ```typescript
   // POST /api/agents
   const RegisterAgentSchema = z.object({
-    agent_id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$/),  // matches INV-SC1
+    agentId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$/),  // matches INV-SC1
     capabilities: z.array(z.string()).min(1),
     metadata: z.record(z.unknown()).optional(),
   });
@@ -106,7 +106,7 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
 
 > Concrete named invariants only — N/A NOT permitted when triggered.
 
-- **INV-SC1:** Agent registration requires `agent_id` matching `^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$` — no special chars, no path traversal.
+- **INV-SC1:** Agent registration requires `agentId` matching `^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$` — no special chars, no path traversal.
 - **INV-SC2:** MCP server `command` field is validated against an allowlist of dedicated, purpose-built binaries (`hindsight-local-mcp` only). General-purpose runtimes (`node`, `npx`, `python`, `sh`) are explicitly excluded because they enable arbitrary code execution even with argument restrictions. Future extension to support runtime-based MCP servers (e.g., `npx hindsight-local-mcp`) requires full command-string validation with argument allowlisting — tracked as a separate security story. Arbitrary or unrecognized commands are rejected with 400.
 - **INV-SC3:** Environment variables passed to MCP server subprocesses are sourced ONLY from an explicit `env` map in the registration payload — never inherited from SwarmClaw's own process environment unless explicitly listed in a server-side allowlist (`SWARMCLAW_ENV_ALLOWLIST`).
 - **INV-SC4:** MCP server subprocess runs with no network listeners; stdio is the only communication channel. If the subprocess opens a TCP socket, the transport layer kills it within the spawn timeout.
@@ -122,7 +122,7 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
 - [ ] **Impl:** `POST /api/mcp-servers/{id}/invoke` proxies a tool call to the MCP subprocess and returns the result
 - [ ] **Contract:** Zod schemas for `RegisterAgentSchema`, `RegisterMCPServerSchema`, `MCPTestResponseSchema`, `MCPInvokeSchema` validated on all routes
 - [ ] **Integration:** stdio transport lifecycle (spawn, handshake, invoke, graceful shutdown) wired and exercised end-to-end with `hindsight-local-mcp`
-- [ ] **Security:** INV-SC1 through INV-SC5 enforced — agent_id validated, command allowlist checked, env isolation confirmed, no secrets leaked in responses
+- [ ] **Security:** INV-SC1 through INV-SC5 enforced — agentId validated, command allowlist checked, env isolation confirmed, no secrets leaked in responses
 - [ ] **Test (unit/integration):** Agent registration + MCP registration + test endpoint returns ok:true with Hindsight tools listed; invoke retains a memory and recalls it
 - [ ] **Test (guard):** Missing `hindsight-local-mcp` binary produces `{ ok: false, error: ... }` with HTTP 502 — never silently succeeds
 - [ ] **Test (e2e demo — MANDATORY):** Sequential script: register agent → register MCP server → test → invoke `retain` → invoke `recall` → assert recalled content matches retained content

@@ -15,7 +15,7 @@ so that cost accounting, learning loops, and audit trails are mechanically compl
 
 ## Overview
 
-After every SwarmClaw protocol run completes (or fails), the system writes an outcome record keyed on `runId` with idempotent upsert semantics (NFR-REL-4). The record captures task metadata, model tier selections, token counts, cost in cents, wall-clock duration, first-pass acceptance, and retry count. Simultaneously, the router selection rationale is logged: signature inputs (task_type, archetype, repo fingerprint), chosen config (model tier per role), and the binding constraint that resolved the decision. This story wires Layer-B substrate capture into the protocol's summarize phase.
+After every SwarmClaw protocol run completes (or fails), the system writes an outcome record keyed on `runId` with idempotent upsert semantics (NFR-REL-4). The record captures task metadata, model tier selections, token counts, cost in cents, wall-clock duration, first-pass acceptance, and retry count. Simultaneously, the router selection rationale is logged: signature inputs (taskType, archetype, repo fingerprint), chosen config (model tier per role), and the binding constraint that resolved the decision. This story wires Layer-B substrate capture into the protocol's summarize phase.
 
 ## E2E Slice
 
@@ -27,17 +27,17 @@ After every SwarmClaw protocol run completes (or fails), the system writes an ou
 
 ## Acceptance Criteria
 
-1. **(make-or-break)** Given a SwarmClaw protocol run that completes the summarize phase, When the run finishes, Then an outcome record exists in Hindsight bank `{repo}-dev-meta` with document_id=`{runId}` containing all fields: task_type, archetype, per_role_model_tier, cost_cents, tokens, first_pass_accept, retry_count, wall_clock_ms.
+1. **(make-or-break)** Given a SwarmClaw protocol run that completes the summarize phase, When the run finishes, Then an outcome record exists in Hindsight bank `{repo}-dev-meta` with document_id=`{runId}` containing all fields: taskType, archetype, perRoleModelTier, costCents, tokens, firstPassAccept, retryCount, wallClockMs.
 2. Given the same `runId` processed a second time, When the outcome writer is invoked, Then the record is upserted (exactly one record per runId) — no duplicate entries exist in the bank.
-3. Given a completed run, When the router-selection log is queried, Then the entry contains: signature_inputs (task_type, archetype, repo fingerprint), chosen_config (model tier per role), and binding_constraint (the constraint that resolved the decision).
-4. Given a run that fails before the summarize phase, When the failure is caught, Then a partial outcome record is written with `first_pass_accept=false` and populated error fields.
+3. Given a completed run, When the router-selection log is queried, Then the entry contains: signatureInputs (taskType, archetype, repo fingerprint), chosenConfig (model tier per role), and bindingConstraint (the constraint that resolved the decision).
+4. Given a run that fails before the summarize phase, When the failure is caught, Then a partial outcome record is written with `firstPassAccept=false` and populated error fields.
 
 ## Technical Notes
 
-- **Contracts/Schema:** Outcome record (FR-LEARN-28): `{ runId: string, task_type: enum, archetype: string, per_role_model_tier: Record<Role, string>, cost_cents: integer, tokens: { prompt: int, completion: int, total: int }, first_pass_accept: boolean, retry_count: integer, wall_clock_ms: integer, timestamp: ISO-8601 }`. Router selection rationale: `{ runId: string, signature_inputs: { task_type, archetype, repo_fingerprint }, chosen_config: Record<Role, ModelTier>, binding_constraint: string }`. Keyed on `runId` for idempotent upsert (NFR-REL-4).
+- **Contracts/Schema:** Outcome record (FR-LEARN-28): `{ runId: string, taskType: enum, archetype: string, perRoleModelTier: Record<Role, string>, costCents: integer, tokens: { prompt: int, completion: int, total: int }, firstPassAccept: boolean, retryCount: integer, wallClockMs: integer, timestamp: ISO-8601 }`. Router selection rationale: `{ runId: string, signatureInputs: { taskType, archetype, repoFingerprint }, chosenConfig: Record<Role, ModelTier>, bindingConstraint: string }`. Keyed on `runId` for idempotent upsert (NFR-REL-4).
 - **Integration points:** SwarmClaw summarize phase → Hindsight MCP `retain` tool invocation with `document_id=runId`. Router selection log → same bank, separate document with `document_id={runId}:router`.
 - **Files / functions touched:** `src/swarmclaw/phases/summarize.ts` (outcome writer), `src/swarmclaw/router/selection-log.ts` (rationale logger), `src/memory/hindsight-client.ts` (bank write with upsert), `src/swarmclaw/protocol.ts` (wire summarize hook).
-- **Guards/limits:** Upsert must be atomic — use Hindsight's document_id uniqueness. Cost_cents must be non-negative. Tokens must be non-negative integers. Wall_clock_ms must be > 0 for completed runs.
+- **Guards/limits:** Upsert must be atomic — use Hindsight's document_id uniqueness. costCents must be non-negative. Tokens must be non-negative integers. wallClockMs must be > 0 for completed runs.
 
 ## Files to Modify
 
@@ -57,9 +57,9 @@ After every SwarmClaw protocol run completes (or fails), the system writes an ou
 - [ ] **Impl:** Outcome record writer in summarize phase with all FR-LEARN-28 fields populated.
 - [ ] **Impl:** Router selection rationale logger capturing signature inputs, chosen config, and binding constraint.
 - [ ] **Impl:** Idempotent upsert using Hindsight document_id=`runId` (NFR-REL-4).
-- [ ] **Impl:** Partial outcome record on failure (first_pass_accept=false, error fields populated).
+- [ ] **Impl:** Partial outcome record on failure (firstPassAccept=false, error fields populated).
 - [ ] **Contract:** Outcome record schema validated against FR-LEARN-28 field list.
-- [ ] **Contract:** Router selection schema includes signature_inputs, chosen_config, binding_constraint.
+- [ ] **Contract:** Router selection schema includes signatureInputs, chosenConfig, bindingConstraint.
 - [ ] **Integration:** Hindsight bank write via MCP `retain` tool on `{repo}-dev-meta` bank confirmed working.
 - [ ] **Integration:** Summarize phase in protocol.ts invokes outcome writer and router logger.
 - [ ] **Security:** No PII or secrets in outcome records (verified by scan).

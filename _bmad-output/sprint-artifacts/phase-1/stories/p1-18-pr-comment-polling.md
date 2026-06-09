@@ -1,4 +1,4 @@
-# P1.18: PR Comment-Polling Detects ≥1 Bot Review Comment
+# P1.18: PR Comment Webhook Ingestion Detects ≥1 Bot Review Comment
 
 **Story Points:** 3
 
