@@ -42,7 +42,7 @@ This is the pivotal Phase-0 demo: a CLI-Anything manifest launches a 3-agent War
 
 - `cli-anything/src/runner.ts`
 - `cli-anything/src/merger.ts`
-- `cli-thing/src/coms-log.ts`
+- `cli-anything/src/coms-log.ts`
 - `cli-anything/manifests/research-trio.yaml`
 - `cli-anything/test/merger.test.ts`
 - `cli-anything/test/runner-integration.test.ts`

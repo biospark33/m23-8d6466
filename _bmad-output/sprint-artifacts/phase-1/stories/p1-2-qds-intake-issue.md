@@ -27,7 +27,7 @@ When the Dev Manager agent receives an intake request via A2A (simulating a /qds
 
 ## Acceptance Criteria
 
-1. **(make-or-break)** Given the Dev Manager is registered, When POST /api/a2a with method "qds.intake" and body `{ "brief": "Add auth middleware", "domain": "backend" }`, Then a GitHub issue is created via `gh issue create` with title matching `^\[QDS-[a-f0-9]{8}\] Add auth middleware$` and labels `qds-intake, backend`.
+1. **(make-or-break)** Given the Dev Manager is registered, When POST /api/a2a with method "qds.intake" and body `{ "brief": "Add auth middleware", "domain": "backend" }`, Then a GitHub issue is created via `gh issue create` with title matching `^\[QDS-[a-f0-9]{8}\] Add auth middleware$` (first 8 hex chars of the UUIDv4 sessionId) and labels `qds-intake, backend`.
 2. Given the intake call succeeds, When the response is returned, Then it contains `{ sessionId: string, issueUrl: string, issueNumber: number }` where issueUrl is a valid GitHub URL.
 3. Given `gh issue create` fails (e.g., repo not found, auth expired), When the intake handler catches the error, Then the A2A response contains a structured JSON-RPC error with code -32603 and a message containing "GitHub issue creation failed", and no orphan session is left in an active state.
 

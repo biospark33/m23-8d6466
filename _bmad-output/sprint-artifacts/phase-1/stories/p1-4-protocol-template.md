@@ -23,7 +23,7 @@ Author a QDS factory protocol template as a JSON document defining the canonical
 
 **Wiring closed:** On completion of this story, the qds-factory protocol template is registered in SwarmClaw and a test invocation advances through all 5 phases producing structured outputs, using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
-**Dependency edges (predecessors):** P0.1 (SwarmClaw protocol engine core), P0.11 (Phase 0 exit gate).
+**Dependency edges (predecessors):** P0.7 (SwarmClaw agent/MCP registration), P0.11 (Phase 0 exit gate).
 
 ## Acceptance Criteria
 

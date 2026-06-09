@@ -33,7 +33,7 @@ The CLI-Anything harness is a manifest-driven generator (`manifest.yaml`) that w
 
 ## Technical Notes
 
-- **Contracts/Schema:** CLI-Anything `manifest.yaml` schema: top-level `name` (string), `command` (string template), `env` (optional `Record<string, string>`), `args` (optional string array). Env block is merged into subprocess env as `{ ...process.env, ...manifest.env }` — never bare assignment (same safety rule as Archon env-patch, CORRECTNESS-A).
+- **Contracts/Schema:** CLI-Anything `manifest.yaml` schema: top-level `name` (string), `command` (string template), `env` (optional `Record<string, string>`), `args` (optional string array). Env block is merged into subprocess env as `{ ...process.env, ...manifest.env }` — never bare assignment (see env-merge safety rule, CORRECTNESS-A).
 - **Integration points (each wired & exercised in this story):** manifest.yaml parse → env block extraction → `child_process.spawn` with merged env → Warren subprocess receives env → stdout captured and returned as structured JSON.
 - **Files / functions touched:** `cli-anything/src/manifest.ts` (parse), `cli-anything/src/runner.ts` (spawn with env merge), `cli-anything/src/index.ts` (CLI entry).
 - **Guards/limits:** Wall-clock timeout on harness invocation (default 10 min); structured JSON output on stdout (exit_class, stdout_excerpt, env_probe_result).
@@ -45,8 +45,8 @@ The CLI-Anything harness is a manifest-driven generator (`manifest.yaml`) that w
 - `cli-anything/src/index.ts`
 - `cli-anything/src/types.ts`
 - `cli-anything/package.json`
-- `cli-thing/test/manifest.test.ts`
-- `cli-thing/test/runner.test.ts`
+- `cli-anything/test/manifest.test.ts`
+- `cli-anything/test/runner.test.ts`
 - `cli-anything/test/fixtures/test-env.yaml`
 - `cli-anything/test/fixtures/test-bare.yaml`
 

@@ -102,6 +102,11 @@ This story creates a single executable gate script (`scripts/phase0-exit-gate.ts
 > ≤10 unique paths, one per line.
 - `scripts/phase0-exit-gate.ts`
 - `src/gate/assertions/p0-1-env.ts`
+- `src/gate/assertions/p0-2-coms.ts`
+- `src/gate/assertions/p0-3-mixed-model.ts`
+- `src/gate/assertions/p0-4-guard.ts`
+- `src/gate/assertions/p0-5-pi-lens.ts`
+- `src/gate/assertions/p0-6-lsp.ts`
 - `src/gate/assertions/p0-7-mcp-bridge.ts`
 - `src/gate/assertions/p0-8-webhook.ts`
 - `src/gate/assertions/p0-9-memory.ts`
@@ -113,7 +118,7 @@ This story creates a single executable gate script (`scripts/phase0-exit-gate.ts
 
 > Concrete named invariants only — N/A NOT permitted when triggered.
 
-No new security invariants are introduced by this story. The gate script operates in read-only mode against existing infrastructure and does not expose any new attack surface. All assertions use existing authenticated endpoints and do not store or log credentials. The gate report file (`phase0-gate-report.json`) contains only pass/fail status and does not include secrets, tokens, or environment variable values.
+No new security invariants are introduced by this story. Rationale: the gate script is read-only — it never writes credentials, stores tokens, or modifies protocol state. No new attack surface is introduced beyond querying existing authenticated endpoints. All assertions use existing authenticated endpoints and do not store or log credentials. The gate report file (`phase0-gate-report.json`) contains only pass/fail status and does not include secrets, tokens, or environment variable values.
 
 ## Definition of Done
 

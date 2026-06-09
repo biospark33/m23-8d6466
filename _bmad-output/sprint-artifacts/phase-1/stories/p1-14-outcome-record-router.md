@@ -5,6 +5,7 @@
 ## Spec Reference
 
 - PRD §11; FR-LEARN-28, FR-LEARN-29, NFR-REL-4
+- Phase exit gate: PRD §13 Phase 1 clause 14
 
 ## User Story
 

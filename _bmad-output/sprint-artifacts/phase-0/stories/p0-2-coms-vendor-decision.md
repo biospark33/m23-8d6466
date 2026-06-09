@@ -56,6 +56,8 @@ Smoke-tests the vendored `coms.ts` + `coms-net.ts` from `pi-vs-claude-code-vendo
 - [ ] **Contract:** `coms_send`/`coms_await`/`coms_get`/`coms_list` verb signatures documented in decision artifact with parse-only `response_schema` caveat.
 - [ ] **Integration:** Vendored `coms.ts` loads on `pi@0.55.0` with zero errors; `pi -e ./coms.ts --list-models` returns model listing.
 - [ ] **Test (smoke):** Two-agent registration succeeds; structured message parseable on both paths.
+- [ ] **Security:** INV-1 enforced: smoke test uses only test/non-production API keys; no real secrets in test fixtures. INV-2 enforced: unix socket files under `~/.pi/coms/` are per-user scope; no cross-user leakage.
+- [ ] **Observability:** OQ-1 decision artifact is well-formed markdown with all required sections (context, options, decision, rationale, constraints) and parseable by downstream tooling.
 - [ ] **Test (e2e demo — MANDATORY):** Smoke-test script produces structured JSON output showing ≥2 agents registered + ≥1 message exchanged; OQ-1 artifact file exists and is well-formed.
 
 ## Dev Agent Record

@@ -23,7 +23,7 @@ Register a "Dev Manager" agent with SwarmClaw via POST /api/agents, setting its 
 
 **Wiring closed:** On completion of this story, registering an agent and invoking it via A2A delegation produces a complete request-response cycle using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
-**Dependency edges (predecessors):** P0.7 (SwarmClaw API surface), P0.11 (Phase 0 exit gate).
+**Dependency edges (predecessors):** P0.1 (CLI-Anything harness skeleton), P0.7 (SwarmClaw API surface), P0.11 (Phase 0 exit gate).
 
 ## Acceptance Criteria
 

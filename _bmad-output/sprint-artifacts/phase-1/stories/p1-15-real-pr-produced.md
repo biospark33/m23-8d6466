@@ -20,9 +20,9 @@ This is THE make-or-break story for Phase 1. The full qds-factory protocol runs 
 
 **Demonstrable behavior:** A `dispatch_task` JSON-RPC call to SwarmClaw with a sample task (e.g., "Add a hello-world function to utils.py") produces a real, merged-open PR on the sample repository. The GitHub webhook fires back to SwarmClaw, the protocol advances through all phases, and the PR is visible on GitHub with the correct changes.
 
-**Wiring closed:** On completion of this story, `dispatch_task` → CLI-Anything → `warren run` → Pi agents → Warren PR → GitHub webhook → SwarmClaw summarize produces a demonstrable artifact (the PR) using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors (P1.3, P1.6, P1.7, P1.8) are dependency edges, not unfinished wiring inside this story.
+**Wiring closed:** On completion of this story, `dispatch_task` → CLI-Anything → `warren run` → Pi agents → Warren PR → GitHub webhook → SwarmClaw summarize produces a demonstrable artifact (the PR) using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors (P1.3, P1.6, P1.7, P1.8, P1.11, P1.12) are dependency edges, not unfinished wiring inside this story.
 
-**Dependency edges (predecessors):** P1.3, P1.6, P1.7, P1.8
+**Dependency edges (predecessors):** P1.3, P1.6, P1.7, P1.8, P1.11, P1.12
 
 ## Acceptance Criteria
 

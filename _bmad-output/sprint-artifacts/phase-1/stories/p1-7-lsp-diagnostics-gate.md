@@ -5,6 +5,7 @@
 ## Spec Reference
 
 - PRD §4.2; FR-EX-11, FR-EX-12, NFR-SAF-4
+- Phase exit gate: PRD §13 Phase 1 clause 7
 
 ## User Story
 

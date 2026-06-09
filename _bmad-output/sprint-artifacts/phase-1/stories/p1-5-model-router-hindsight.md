@@ -56,7 +56,7 @@ Build a model router that takes a task description and returns: (1) an archetype
 
 - [ ] **Impl:** Model router accepts task brief + optional context and returns archetype + tiers + confidence + signals.
 - [ ] **Impl:** Archetype scoring produces deterministic rankings from task signals (estimatedLOC, domain, riskLevel).
-- [ ] **Impl:** Tier selection maps archetype to model tiers with cost-aware constraints (max 1 opium unless high risk).
+- [ ] **Impl:** Tier selection maps archetype to model tiers with cost-aware constraints (max 1 opus unless high risk).
 - [ ] **Impl:** Decision retained to Hindsight `{repo}-dev-meta` bank via MCP with full structured payload.
 - [ ] **Contract:** Router input validated: taskBrief 10-500 chars, riskLevel enum, estimatedLOC positive int or null.
 - [ ] **Contract:** Router output schema enforced: archetype from enum, tiers values from ("haiku"|"sonnet"|"opus"), confidence in [0, 1].
