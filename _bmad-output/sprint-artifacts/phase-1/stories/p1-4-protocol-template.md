@@ -6,6 +6,7 @@
 
 - PRD §8, §9; FR-OR-1, FR-OR-2
 - Phase exit gate: PRD §13 Phase 1 clause 4
+- **Note:** FR-OR-1/FR-OR-2 are pre-pivot FRs referencing the Archon system. Post-pivot, this story fulfills the same capability via SwarmClaw protocol templates. PRD references are retained for backward traceability.
 
 ## User Story
 
@@ -31,9 +32,9 @@ Author a QDS factory protocol template as a JSON document defining the canonical
 2. Given the template is registered, When it is invoked with `{ "sessionId": "{id}", "input": { "taskBrief": "...", "stories": [...] } }`, Then the protocol engine executes phases in order: dispatch_task -> parallel (3 branches) -> compare -> decide -> summarize, and each phase produces a structured JSON output persisted as step results.
 3. Given the parallel phase has 3 branches, When one branch fails or times out, Then the compare phase still receives outputs from the remaining branches (graceful degradation, not a full protocol abort).
 4. Given 3 parallel branches with distinct outputs, When the compare phase executes, Then it produces a `ComparisonResult` with a 3x3 overlap matrix and a recommendation containing ranked preferred branches with rationale.
-5. Given comparison results where branch A scores 0.85 and branch B scores 0.80, When the decide phase executes, Then it selects branch A as winner with a `DecisionResult` containing scores, breakdown, and rationale (no tie flag since delta > 0.1).
-6. Given a protocol template with `participantAgentIds` containing "agent-alpha" and no corresponding `.canopy/agent.json` for "agent-alpha", When the protocol engine validates the phase, Then it returns error -32602 (Invalid params: unconfigured agent) before invoking any phase.
-7. Given a protocol invocation with `participantAgentIds` containing "rogue-agent" that is not registered via P0.7's agent registration, When the protocol engine validates participants, Then it returns HTTP 422 with body `{ error: { code: -32011, message: "Agent not registered: rogue-agent" } }` and does NOT execute any phase.
+5. Given comparison results where branch A scores 0.85 and branch B scores 0.70, When the decide phase executes, Then it selects branch A as winner with a `DecisionResult` containing scores, breakdown, and rationale (no tie flag since delta > 0.1). AC5 uses phaseCount: 5 for the qds-factory template specifically. Templates with different phase counts are valid per the guards/limits (phaseCount >= 2).
+6. Given a protocol template with `participantAgentIds` containing "agent-alpha" and no corresponding `.canopy/agent.json` for "agent-alpha", When the protocol is invoked, Then it returns error -32602 (Invalid params: unconfigured agent) before executing any phase (validation occurs at invocation time, not registration time).
+7. Given a protocol invocation with `participantAgentIds` containing "rogue-agent" that is not registered via P0.7's agent registration, When the protocol engine validates participants at invocation time, Then it returns HTTP 422 with body `{ error: { code: -32011, message: "Agent not registered: rogue-agent" } }` and does NOT execute any phase.
 
 ## Phase-to-PI Extension Mapping
 
@@ -45,8 +46,10 @@ Each protocol phase `kind` maps to a concrete PI extension file that Warren load
 | parallel        | extensions/pi-pi.ts        | Multi-agent parallel execution       |
 | compare         | extensions/coms-net.ts     | Cross-agent comparison via coms-net  |
 | decide          | extensions/coms-net.ts     | Agent vote/LLM judge decision        |
-| sequential      | extensions/agent-chain.ts  | Sequential agent pipeline            |
+| a2a_delegate    | extensions/a2a-delegate.ts | A2A delegation via P1.1 transport   |
 | summarize       | extensions/cross-agent.ts  | Cross-agent result aggregation       |
+
+> **Naming note:** The `summarize` phase was previously called `cross-agent` in P0.3. `summarize` is the canonical name. P0.3's table has been updated accordingly. The `a2a_delegate` phase routes delegation tasks through P1.1's A2A transport layer. Previously called `sequential` in earlier drafts.
 
 **Canopy config layer:**
 - Each participant agent has a `.canopy/agent.json` config file
@@ -60,16 +63,24 @@ Each protocol phase `kind` maps to a concrete PI extension file that Warren load
 - `coms_net_get(channel)` -> payload | null
 - `coms_net_list(sessionId, phaseId)` -> channel[]
 
+> For the full coms-net transport contract, ComsLogEntry schema, and integration details, see P0.3 Technical Notes and CC-9.
+
 ## Phase Algorithms
 
 ### compare Phase Algorithm
 The compare phase uses structured diff via coms-net.ts. Algorithm:
 1. Gather all branch outputs via `coms_net_list(sessionId, phaseId)`.
 2. For each branch output, extract `changedFiles`, `testResults`, and `summary` fields.
-3. Compute pairwise comparison: file overlap (Jaccard similarity of changed file paths), test pass rate delta, and semantic similarity of summaries (cosine similarity over sentence embeddings of summary text; the specific embedder is implementation-dependent but must be deterministic within a session).
-4. Produce a `ComparisonResult`: `{ branches: [{ agentId, fileCount, testPassRate, summary }], overlapMatrix: [[number]], recommendation: { preferredBranches: [agentId[]], rationale: string } }`.
+3. Compute pairwise comparison: file overlap (Jaccard similarity of changed file paths), test pass rate delta, and semantic similarity of summaries (default embedder: TF-IDF vectorizer over tokenized summary text, cosine similarity, clamped to [0,1]; alternative embedders acceptable if they produce values in [0,1]).
+4. Produce a `ComparisonResult`: `{ branches: [{ agentId, fileCount, testPassRate, summaryQuality: number, summary }], overlapMatrix: [[number]], recommendation: { preferredBranches: [agentId[]], rationale: string } }`. The overlapMatrix is a single-metric Jaccard similarity matrix of changed file paths, provided as diagnostic output. The decide phase does not consume it — decide computes its own metrics directly from branch outputs. `summaryQuality` for each branch is computed as the mean cosine similarity between that branch's summary and every other successful branch's summary. With exactly two successful branches, both receive the same score equal to their mutual similarity. If only one branch succeeds, `summaryQuality` defaults to 0.5. The `overlapMatrix` is diagnostic output only — the decide phase does not consume it and computes its own metrics directly from branch outputs.
 
-**Minimum branches for compare:** The compare phase requires >= 1 successful branch output. If all parallel branches fail, the compare phase produces `ComparisonResult` with `branches: []`, `overlapMatrix: []`, and `recommendation: { preferredBranches: [], rationale: "All branches failed" }`. The protocol then proceeds to decide phase, which produces `DecisionResult` with `winner: null`, `tie: false`, and `rationale: "No branches to decide between"`. The summarize phase reports the complete failure.
+**All-zero branch metrics guard:** If all branches produce zero metrics (all scores are 0.0), the compare step sets `similarity_matrix` to all-zeros and the decide step emits `tie_detected` event. No division by zero occurs because the weighted scoring uses `max(totalWeight, 1)` as denominator.
+
+**Normalization:** `summaryQuality` is clamped to [0.0, 1.0] before scoring. Negative values from cosine similarity are clamped to 0.0.
+
+**Partial-failure handling:** When a branch produces a failure object (no `changedFiles`, `testResults`, `summary`), it is excluded from the similarity matrix but included in the comparison results as `status: "failed"`. The decide algorithm treats failed branches as scoring 0.0.
+
+**Minimum branches for compare:** The compare phase requires >= 1 successful branch output. If all parallel branches fail, the compare phase produces `ComparisonResult` with `branches: []`, `overlapMatrix: []`, and `recommendation: { preferredBranches: [], rationale: "All branches failed" }`. The protocol then proceeds to decide phase, which produces `DecisionResult` with `winner: null`, `tie: false`, and `rationale: "No branches to decide between"`. The summarize phase reports the complete failure. When all branches fail, the protocol engine emits a `no_viable_output` event with payload: `{ sessionId, templateId, failedBranches: [{ branchId, error }] }`.
 
 ### decide Phase Algorithm
 The decide phase uses a configurable decision mechanism. Default algorithm: weighted scoring.
@@ -95,16 +106,27 @@ The `.pi/agents/` directory contains expert markdown files that Warren loads via
 
 ## Technical Notes
 
-- **Contracts/Schema:** Protocol template: `{ id: "qds-factory", version: "1.0.0", phases: [ { kind: "dispatch_task", config: {...} }, { kind: "parallel", config: { branches: [{ participantAgentIds: [...], facilitatorAgentId: "...", observerAgentIds: [...] }, ...] } }, { kind: "compare", config: {} }, { kind: "decide", config: {} }, { kind: "summarize", config: {} } ] }`. Phase output: `{ phaseIndex: number, kind: string, status: "completed"|"failed"|"skipped", output: ComparisonResult | DecisionResult | Record<string,unknown>, startedAt: ISO8601, completedAt: ISO8601 }`. The `output` field is typed per phase: `ComparisonResult` for compare (conforms to structure defined in Phase Algorithms section), `DecisionResult` for decide (conforms to structure defined in Phase Algorithms section), and `Record<string,unknown>` for all other phases (dispatch_task, parallel, summarize).
-  - `dispatch_task` — implemented via `extensions/agent-team.ts`
+- **Contracts/Schema:** Protocol template: `{ id: "qds-factory", version: "1.0.0", phases: [ { kind: "dispatch_task", config: { taskBrief: string, targetAgentIds: string[], mulchBankId: string, maxDurationMs: number, captureFormat: "structured-json" } }, { kind: "parallel", config: { branches: [{ participantAgentIds: [...], facilitatorAgentId: "...", observerAgentIds: [...] }, ...] } }, { kind: "compare", config: {} }, { kind: "decide", config: {} }, { kind: "summarize", config: {} } ] }`. The `dispatch_task` config follows the P1.6 pi-team dispatch contract. See P1.6 for full Warren harness specification. Phase output: `{ phaseIndex: number, kind: string, status: "completed"|"failed"|"skipped"|"partial", output: ComparisonResult | DecisionResult | Record<string,unknown>, startedAt: ISO8601, completedAt: ISO8601 }`. `partial` indicates the phase produced incomplete output (e.g., timeout with partial data). Consumers should check for `partial` before relying on phase output. Phase status emission rules: "completed" = phase produced full output; "partial" = some branches/sub-operations failed (parallel with 2/3 succeeding); "failed" = no meaningful output (all branches failed, dispatch error); "skipped" = not executed due to prior phase failure. Parallel emits "partial" when >= 1 but < all branches succeed. Compare emits "partial" when some branch outputs missing. Decide emits "completed" even when winner is null. Summarize always emits "completed". The `output` field is typed per phase: `ComparisonResult` for compare (conforms to structure defined in Phase Algorithms section), `DecisionResult` for decide (conforms to structure defined in Phase Algorithms section), and `Record<string,unknown>` for all other phases (dispatch_task, parallel, summarize).
+  - `dispatch_task` — implemented via `extensions/agent-team.ts`. The harness adapter generates `.canopy/agent.json` from this config before invoking `warren run --config`. The protocol template does not carry Warren CLI flags.
   - `parallel` — implemented via `extensions/pi-pi.ts`
   - `compare` — implemented via `extensions/coms-net.ts` (structured diff algorithm defined above)
   - `decide` — implemented via `extensions/coms-net.ts` (weighted scoring algorithm defined above)
   - `summarize` — implemented via `extensions/cross-agent.ts`
+  > **Schema precedence note:** The Technical Notes Contracts/Schema defines the phase output envelope. The Phase Algorithms section defines the shape of the `output` field for each phase kind. They are complementary — the envelope wraps the phase-specific output.
 - **Integration points:** SwarmClaw protocol template registration API, SwarmClaw protocol engine (executor), phase handlers for each kind (dispatch_task, parallel, compare, decide, summarize). Protocol engine phase router resolves each `kind` to its PI extension file per the Phase-to-PI Extension Mapping table above. Protocol engine validates all participantAgentIds against `.canopy/agent.json` before phase execution.
 - **Files / functions touched:** Protocol template definition (JSON), SwarmClaw template registration endpoint, protocol engine phase router (extension resolution), protocol engine config binding validator, PI extension files: `extensions/agent-team.ts`, `extensions/pi-pi.ts`, `extensions/coms-net.ts`, `extensions/cross-agent.ts`, phase handler implementations for compare/decide/summarize (dispatch_task and parallel exist from P0.1).
-- **Guards/limits:** parallel config requires >= 2 branches and <= 8 branches. Each branch must specify at least one participantAgentId. compare phase requires parallel phase to have completed (at least partially). decide phase requires compare output. Template version follows semver. All participantAgentIds must have a corresponding `.canopy/agent.json` — unconfigured agents cause rejection with error -32602.
-- **Template versioning:** Protocol templates are immutable once registered. Updates require a new templateId or a new version number. In-flight sessions pin the template version at invocation time — the session runs against the version that was current when it started. New invocations after a template update use the new version. Old versions remain retrievable (for debugging) but cannot be invoked for new sessions.
+- **Guards/limits:** parallel config requires >= 2 branches and <= 8 branches. Branch count is limited to 2-8 to balance coverage against cost and latency. Fewer than 2 branches provides no comparison benefit. More than 8 branches creates diminishing returns on quality while exponentially increasing compute cost. Each branch must specify at least one participantAgentId. Branch IDs are positional: branches[0] = 'branch-0', branches[1] = 'branch-1', etc. The observability layer maps agentId to branchId via the parallel config's participantAgentIds. compare phase requires parallel phase to have completed (at least partially). decide phase requires compare output. Template version follows semver. All participantAgentIds are validated at invocation time (not registration time) — registration accepts any participantAgentIds. At invocation, unregistered agents cause rejection with error -32011; unconfigured agents (no `.canopy/agent.json`) cause rejection with error -32602. Validation sequence at invocation time: (1) check agent registration (P0.7 registry) — unregistered → -32011; (2) check `.canopy/agent.json` existence — missing → -32602. Registration check runs first. Validation at invocation time is two-pass: (1) check all participantAgentIds for registration — if any fail, reject with -32011 listing all unregistered IDs; (2) check canopy config for all registered agents — if any fail, reject with -32602 listing all unconfigured IDs.
+- **Template versioning:** Protocol templates are immutable once registered. Updates require a new templateId or a new version number. In-flight sessions pin the template version at invocation time — the session runs against the version that was current when it started. New invocations after a template update use the new version. Old versions remain retrievable (for debugging) but cannot be invoked for new sessions. Template versions are retrieved via `GET /api/protocol-templates/{id}/versions/{version}`. The response includes the full template definition for debugging.
+
+### Registration Contract
+
+- **Template registration endpoint:** `POST /api/protocol-templates`. Auth: same as SwarmClaw's operator authentication (P0.7). Templates are stored in `.canopy/protocol-templates/` as immutable JSON files. Template IDs must match `^[a-z][a-z0-9-]{1,63}$` — lowercase alphanumeric with hyphens, starting with a letter, 2-64 characters total (minimum 2, maximum 64).
+- **Template validation errors on registration:**
+  - branchCount < 2: HTTP 400, -32602, "Parallel phase requires >= 2 branches"
+  - branchCount > 8: HTTP 400, -32602, "Parallel phase requires <= 8 branches"
+  - invalid phase kind: HTTP 400, -32602, "Invalid phase kind: <kind>"
+  - phaseCount < 2: HTTP 400, -32602, "Template must have >= 2 phases"
+  - templateId pattern mismatch: HTTP 400, -32602, "templateId must match ^[a-z][a-z0-9-]{1,63}$"
 
 ## Files to Modify
 
@@ -115,11 +137,21 @@ The `.pi/agents/` directory contains expert markdown files that Warren loads via
 - `src/swarmclaw/protocols/phases/summarize.ts`
 - `tests/e2e/protocol-template.test.ts`
 
+> The Files to Modify list is illustrative. Actual file count depends on the implementation structure. Key files are listed; supporting files (types, utilities, tests) may also be needed.
+
 ## Security Invariants
 
-- INV-1: Template registration requires authentication; only authorized agents can register protocol templates.
+- INV-1: Template registration requires authentication; only authorized agents can register protocol templates. Template registration requires operator-level auth (same as P0.7 MCP operations). No RBAC granularity is enforced — any authenticated operator can register, update, or delete templates. RBAC for template management is a Phase 2 concern.
 - INV-2: Protocol invocation scoped to sessionId; cross-session data access is forbidden.
-- INV-3: parallel branch participantAgentIds must reference registered agents; unregistered agent IDs rejected at template validation time with 422.
+- INV-3: At invocation time: (1) unregistered agent IDs → HTTP 422, error -32011; (2) registered agents without `.canopy/agent.json` → HTTP 400, error -32602. Both checks run at invocation, not registration. Template registration accepts any participantAgentIds.
+
+## CC-9 Observability Contract
+
+**Phase-transition logging:** Each phase transition emits a log event: `{ phase, from_state, to_state, timestamp, sessionId, templateId, branchCount }`.
+
+**Error event logging:** Phase failures emit: `{ phase, error, timestamp, sessionId, templateId, branchId? }`.
+
+**Metric capture:** Protocol execution records: `totalDurationMs`, per-phase `phaseDurationMs`, `branchesCompared`, `winnerBranchId?`. CC-9 logs `winnerBranchId` (the branch identifier, e.g., 'branch-0'). The DecisionResult uses `winner` (the agentId). These are different: a branch is a dispatch unit, an agent is the execution unit. The observability layer logs both.
 
 ## Definition of Done
 
@@ -133,8 +165,11 @@ The `.pi/agents/` directory contains expert markdown files that Warren loads via
 - [ ] **Integration:** Partial branch failure in parallel phase does not abort protocol; compare receives available outputs.
 - [ ] **Security:** Template registration endpoint requires authenticated agent; unauthenticated requests rejected with 401.
 - [ ] **Test (unit):** Template validation rejects missing phases, invalid phase kinds, and parallel with < 2 branches.
+- [ ] **Test (unit):** dispatch_task phase handler validates Warren output against expected schema (exitStatus, changedFiles, summary) and rejects malformed output with exitStatus 'logic'.
 - [ ] **Test (e2e demo — MANDATORY):** Register template -> invoke with test session -> verify 5 phase outputs produced with correct phaseIndex progression and structured JSON at each step.
-- [ ] **Test (unit — INV-3 security):** Invoke protocol with one registered and one unregistered agent — verify 422 response, verify no phase execution begins, verify registered agent is NOT invoked.
+- [ ] **Test (unit — INV-3 security):** Register template with unregistered agent IDs (succeeds — registration is permissive). Then invoke protocol with one registered and one unregistered agent — verify 422 response with error code -32011, verify no phase execution begins, verify registered agent is NOT invoked.
+- [ ] **Test (tie):** Run protocol with 2 branches producing identical output — verify `tie_detected` event emitted.
+- [ ] **Test (no viable):** Run protocol where all branches fail — verify `no_viable_output` event emitted with failure details for each branch.
 
 ## Dev Agent Record
 
