@@ -95,8 +95,8 @@ API: `coms_net_send`, `coms_net_await`, `coms_net_get`, `coms_net_list`
 - Every operation logs: `{requestId, operation, timestamp, duration, status}`
 - requestId propagates across layer boundaries
 - Errors include: `{code, message, stack?: string}`
-- Coms log schema: `ComsLogEntry: { requestId: string, channel: string, direction: "send"|"receive", senderAgent: string, receiverAgent: string, payload_size: number, duration_ms: number, timestamp: string }`
-- Cost events: `CostEvent: { agentId: string, model: string, inputTokens: number, outputTokens: number, costUsd: number, duration_ms: number }`
+- Coms log schema: `ComsLogEntry: { requestId: string, channel: string, direction: "send"|"receive", senderAgent: string, receiverAgent: string, payloadSize: number, durationMs: number, timestamp: string }`
+- Cost events: `CostEvent: { agentId: string, model: string, inputTokens: number, outputTokens: number, costUsd: number, durationMs: number }`
 
 ## Dev Agent Record
 
