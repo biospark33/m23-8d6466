@@ -104,7 +104,7 @@ This story provisions the three required Hindsight banks (`{resolveBankId(repoSl
 
   **Import flow:** Read `.mulch/expertise/` files, parse each file according to its extension (YAML → array, JSON → array, JSONL → line-by-line), validate each entry against `MulchExpertiseSchema` (with `id` auto-generated as UUID if absent), and retain as JSONL into the `{resolveBankId(repoSlug)}-dev-meta` bank.
 
-**Dedup key canonical form:** Mulch import deduplicates by hashing `domain + sorted(concepts).join(',')`. The concepts array is sorted alphabetically before hashing to ensure order-independent matching. Re-importing an expertise entry with the same domain and same concept set (in any order) updates the existing entry rather than creating a duplicate. The hash is computed as `SHA-256(domain + ':' + sorted_concepts.join(','))`.
+**Dedup key canonical form:** Mulch import deduplicates by hashing `domain + ':' + sorted(concepts).join(',')`. The concepts array is sorted alphabetically before hashing to ensure order-independent matching. Re-importing an expertise entry with the same domain and same concept set (in any order) updates the existing entry rather than creating a duplicate. The hash is computed as `SHA-256(domain + ':' + sorted_concepts.join(','))`.
 
 **Partial failure handling:** Mulch import is best-effort per-file. If one file fails to parse or validate, remaining files are still imported. The import response includes per-file status: `{ totalFiles, importedFiles, failures: Array<{ file, error }> }`. If a single file contains multiple entries, valid entries are imported and invalid entries are reported individually. Empty `.mulch/expertise/` directory is a graceful skip with a warning log, not an error.
 
@@ -155,6 +155,11 @@ This story provisions the three required Hindsight banks (`{resolveBankId(repoSl
 Bank IDs are derived from the repository slug via `resolveBankId`:
 
 ```typescript
+// Resolves a repo slug to a Hindsight bank ID.
+// Edge cases: all-special-char inputs (e.g. "!!!!") produce "" (empty string);
+// single-character inputs produce a single lowercase char. This function does NOT
+// enforce BankIdSchema — downstream validation at the P0.7 boundary rejects
+// invalid IDs. Callers must handle rejection gracefully.
 function resolveBankId(repoSlug: string): string {
   return repoSlug
     .toLowerCase()
@@ -162,6 +167,7 @@ function resolveBankId(repoSlug: string): string {
     .replace(/^-|-$/g, '')
     .slice(0, 63)
     // must match BankIdSchema: /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/
+    // (enforced 2–64 chars: 1 leading char + 0–62 middle chars + 1 trailing char)
 }
 ```
 
@@ -230,7 +236,7 @@ Bank timing metrics (emitted on success):
 
 - **INV-HM1:** Hindsight API auth token (if configured via `HINDSIGHT_BEARER_TOKEN` env var) is read from environment only — never hardcoded, never logged, never included in test output.
 - **INV-HM2:** Bank IDs are validated against `BankIdSchema` before any API call — path injection via crafted bank_id (e.g., `../../etc/passwd`) is rejected with 400.
-- **INV-HM3:** Mulch expertise file paths are resolved relative to the project root and validated to be inside `.mulch/expertise/` — directory traversal via symlinks or `..` segments is rejected.
+- **INV-HM3:** Mulch expertise file paths are resolved relative to the project root and validated to be inside `.mulch/expertise/` — symlinks are resolved and targets validated to remain within the project root; targets outside `.mulch/expertise/` or containing `..` traversal segments are rejected.
 - **INV-HM4:** Tenant isolation: bank operations are scoped to the bank_id — cross-bank data leakage in recall/reflect responses is verified absent in tests (recall on bank A never returns memories from bank B).
 
 ## Definition of Done

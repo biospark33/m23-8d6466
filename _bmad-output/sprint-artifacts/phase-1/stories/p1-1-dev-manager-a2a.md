@@ -84,7 +84,7 @@ The A2A delegation layer uses **local HTTP POST** to the CLI-Anything harness en
   "jsonrpc": "2.0",
   "result": {
     "status": "completed",
-    "exitStatus": 0,
+    "exitStatus": "success",
     "changedFiles": ["src/foo.ts"],
     "requestId": "<same uuid>"
   },

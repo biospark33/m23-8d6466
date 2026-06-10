@@ -73,7 +73,9 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
   // when the target tool requires it (retain, recall, reflect, consolidate).
   const MCPInvokeArgumentsSchema = z.record(z.unknown()).superRefine((args, ctx) => {
     // bank_id validation: if present, must match P0.9 BankIdSchema regex
-    // /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/
+    // /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/ — enforces 2–64 character length
+    // (1 leading char + 0–62 middle chars + 1 trailing char, alphanumeric only
+    // with hyphens allowed in the middle)
     if ('bank_id' in args && typeof args.bank_id === 'string') {
       const bankIdRegex = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/;
       if (!bankIdRegex.test(args.bank_id)) {
@@ -140,7 +142,7 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
   - `hindsight-local-mcp` — compiled binary on PATH
   - `node` — Node.js runtime (required when `hindsight-local-mcp` is installed as an npm package)
   - `npx` — npm package runner (required for dev/CI invocation of `npx hindsight-local-mcp`)
-  - `node_modules/.bin/hindsight-local-mcp` — local npm binary path
+  - `node_modules/.bin/hindsight-local-mcp` — local npm binary path (resolved to absolute path at startup based on SwarmClaw installation root; relative allowlist entries are canonicalized before comparison to prevent working-directory manipulation)
   The allowlist is extended via environment variable `SWARMCLAW_COMMAND_ALLOWLIST` (comma-separated absolute or basename paths, merged with defaults at startup). When a Node.js runtime is used, the `command` field is the runtime (`node` or `npx`) and the package/binary is passed via the `args` field — the subprocess spawn remains purpose-built. Arbitrary or unrecognized commands are rejected with 400. General-purpose shells (`sh`, `bash`, `zsh`, `python`, `python3`) remain excluded from both default and configurable allowlists because they enable unrestricted code execution regardless of argument restrictions.
 - **INV-SC3:** Environment variables passed to MCP server subprocesses are sourced ONLY from an explicit `env` map in the registration payload — never inherited from SwarmClaw's own process environment unless explicitly listed in a server-side allowlist (`SWARMCLAW_ENV_ALLOWLIST`).
 - **INV-SC4:** MCP server subprocess runs with no network listeners; stdio is the only communication channel. If the subprocess opens a TCP socket, the transport layer kills it within the spawn timeout.

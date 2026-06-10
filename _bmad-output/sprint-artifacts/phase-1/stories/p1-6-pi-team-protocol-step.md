@@ -63,7 +63,7 @@ When the qds-factory protocol reaches a dispatch_task phase, SwarmClaw invokes t
   | 3 | "overflow" | Resource limit exceeded (budget, turn cap, memory) |
   | >=4 or signal | "transient" | Unknown failure — treated as retryable by default |
 
-  Exit codes are mapped by the harness adapter. If Warren exits with a signal (SIGKILL, SIGTERM), the harness maps to `exitStatus: "transient"` (killed by resource limit or timeout) unless the signal was user-initiated, in which case it maps to `exitStatus: "logic"` (user cancelled).
+  Exit codes are mapped by the harness adapter. If Warren exits with a signal (SIGKILL, SIGTERM), the harness consults signal-origin metadata to determine the mapping: (1) if the INV-3 watchdog flag is set (process exceeded 4GB RSS) or kernel OOM indicator is present, map to `exitStatus: "transient"`; (2) if a `userCancel`/`requestedShutdown` flag is present (explicit user-initiated termination), map to `exitStatus: "logic"`; (3) if signal origin is unknown, default to `exitStatus: "transient"` (safe retryable default).
 - **Timeout alignment (CC-7):** maxDurationMs must be ≤ P1.1 timeoutMs upper bound (900s post-CC-7 fix). P1.6 max 600s is well within P1.1's 900s limit. The harness enforces maxDurationMs as a hard wall; Warren receives it via the manifest.
 
 ## Observability Contract (CC-9)
@@ -84,7 +84,7 @@ When the qds-factory protocol reaches a dispatch_task phase, SwarmClaw invokes t
 ## Security Invariants
 
 - INV-1: `warren run` invoked with `--repo` scoped to the session's repository; no cross-repo file access.
-- INV-2: changedFiles paths validated against path traversal using decode-then-check: URL-decode the path, normalize Unicode (NFC), then reject paths containing `..` segments, URL-decoded `..` (`%2e%2e`, `%2E%2E`), double-encoded variants, absolute paths, symlinks, and Unicode-normalized traversal sequences.
+- INV-2: changedFiles paths validated against path traversal using decode-then-check: URL-decode the path, normalize Unicode (NFC), then reject paths containing literal `..` segments, any percent-encoded `..` sequences (e.g. `%2e%2e`, `%2E%2E`), evidence of double-encoding (e.g. `%252e` or other percent-encoded percent signs remaining after first decode), absolute paths, symlinks, and Unicode-normalized traversal sequences.
 - INV-3: Warren process runs with resource limits enforced via Node.js `child_process.execFile` with `resourceLimits` option (where supported by the runtime) and a harness-level watchdog timer that checks memory usage at 5-second intervals. If the process exceeds 4GB RSS, the harness sends SIGTERM. CPU limiting is advisory (monitoring only) in Phase 1 — the harness logs CPU usage but does not kill for CPU overuse. Full cgroup-based enforcement is a Phase 2 concern when running in container environments.
 
 ## Definition of Done

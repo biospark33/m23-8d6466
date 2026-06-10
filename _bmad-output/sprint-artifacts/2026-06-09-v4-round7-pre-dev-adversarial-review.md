@@ -88,7 +88,7 @@
 
 ### CC-9: Observability Absent Across All Phase-0 Stories
 - **Stories:** P0.3, P0.7, P0.9, P1.1, P1.3, P1.6
-- **Issue:** No story specifies structured logging, request IDs, latency metrics, or timing breakdowns. P0.3 has coms-log but no schema. P0.7 has no MCP bridge observability. P0.9 has no bank operation logging. P1.1 has no A2A routing latency. P1.6 has no sub-timing.
+- **Issue:** No story specifies structured logging, request IDs, latency metrics, or timing breakdowns. P0.3 has coms-log but no schema. No MCP bridge observability is defined for P0.7. P0.9 lacks bank operation logging. P1.1 omits A2A routing latency. P1.6 has no sub-timing breakdowns.
 - **Severity:** MEDIUM across 6 stories
 
 ---
@@ -197,7 +197,7 @@
 | P1.4-B4 | BLOCKER | AC7 added (unregistered agent→422 with -32013), DoD test for INV-3 coverage (registered+unregistered mix) | ✅ DONE |
 | P1.4-H1 | HIGH | Template version 1.0.0 — no strategy for in-flight sessions when template updates mid-run (pin version? invalidate? informational?) | ✅ DONE — added Template Versioning subsection: immutable once registered, version pin at invocation, old versions retrievable but not invocable |
 | P1.4-H2 | HIGH | Graceful degradation only tested 1-of-3 branch failure — 2-of-3 failure undefined (minimum branches for compare = ?) | ✅ DONE — added minimum-branches-for-compare rule: ≥1 branch required, all-fail produces empty ComparisonResult/DecisionResult, summarize reports complete failure |
-| P1.4-H3 | HIGH | compare phase output schema is `output: any` — no comparison structure defined (per-branch summary? diff? recommendation?) | ✅ DONE — replaced output: any with typed union ComparisonResult | DecisionResult | Record<string,unknown> and cross-referenced Phase Algorithms section |
+| P1.4-H3 | HIGH | compare phase output schema is `output: any` — no comparison structure defined (per-branch summary? diff? recommendation?) | ✅ DONE — replaced output: any with typed union `ComparisonResult \| DecisionResult \| Record<string,unknown>` and cross-referenced Phase Algorithms section |
 | P1.4-H4 | HIGH | decide phase has no scoring algorithm, no justification schema, no tie-breaking rule | ✅ DONE — added explicit tie-breaking rule: top-2 within 0.1 → tie:true, human review required, protocol engine pauses and emits tie_detected event |
 | P1.4-H5 | HIGH | summarize phase output — no schema for final structured report (flat? nested? includes winning artifacts? links Hindsight?) | ✅ DONE — added summarize Phase Algorithm subsection with full schema: sessionId, templateId, phases[], finalResult{winner,summary,artifacts}, metadata{totalDurationMs,phaseCount,completedPhaseCount} |
 | P1.4-H6 | HIGH | No PI extension loading strategy per phase — protocol engine has no mechanism to resolve phase `kind` to concrete PI executor | ✅ DONE — resolved by W0 CC-3 (Phase-to-Extension Mapping table) and W1 B1 (mapping verified). No edit needed |

@@ -4,7 +4,7 @@
 **Status:** 🟡 CAMPAIGN IN PROGRESS — Initial Scan dispatching
 **Scope:** 10 load-bearing stories (P0.3, P0.7, P0.8, P0.9, P0.11, P1.1, P1.3, P1.10, P1.14, P1.17)
 **Mode:** Full adversarial — fresh-eyes, no prior context
-**Prior reviews ( Rounds 1–5):** All 30 stories reviewed across 5 rounds. Round 5 converged 2026-06-08. PR #17 merged 2026-06-09 with bot-review fixes (camelCase, regex alignment, Hindsight bank refs, error codes).
+**Prior reviews (Rounds 1–5):** All 30 stories reviewed across 5 rounds. Round 5 converged 2026-06-08. PR #17 merged 2026-06-09 with bot-review fixes (camelCase, regex alignment, Hindsight bank refs, error codes).
 **Selection rationale:** Top 10 load-bearing stories — those that establish or consume cross-cutting contracts (agent registry, MCP bridge, memory substrate, webhook security, protocol flow, exit gates). Regressions here cascade across all 30 stories.
 
 ---

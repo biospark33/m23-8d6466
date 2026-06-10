@@ -32,8 +32,8 @@ Author a QDS factory protocol template as a JSON document defining the canonical
 3. Given the parallel phase has 3 branches, When one branch fails or times out, Then the compare phase still receives outputs from the remaining branches (graceful degradation, not a full protocol abort).
 4. Given 3 parallel branches with distinct outputs, When the compare phase executes, Then it produces a `ComparisonResult` with a 3x3 overlap matrix and a recommendation containing ranked preferred branches with rationale.
 5. Given comparison results where branch A scores 0.85 and branch B scores 0.80, When the decide phase executes, Then it selects branch A as winner with a `DecisionResult` containing scores, breakdown, and rationale (no tie flag since delta > 0.1).
-6. Given a protocol template with `participantAgentId` "agent-alpha" and no corresponding `.canopy/agent.json` for "agent-alpha", When the protocol engine validates the phase, Then it returns error -32602 (Invalid params: unconfigured agent) before invoking any phase.
-7. Given a protocol invocation with `participantAgentId` "rogue-agent" that is not registered via P0.7's agent registration, When the protocol engine validates participants, Then it returns HTTP 422 with body `{ error: { code: -32013, message: "Agent not registered: rogue-agent" } }` and does NOT execute any phase.
+6. Given a protocol template with `participantAgentIds` containing "agent-alpha" and no corresponding `.canopy/agent.json` for "agent-alpha", When the protocol engine validates the phase, Then it returns error -32602 (Invalid params: unconfigured agent) before invoking any phase.
+7. Given a protocol invocation with `participantAgentIds` containing "rogue-agent" that is not registered via P0.7's agent registration, When the protocol engine validates participants, Then it returns HTTP 422 with body `{ error: { code: -32011, message: "Agent not registered: rogue-agent" } }` and does NOT execute any phase.
 
 ## Phase-to-PI Extension Mapping
 
@@ -66,14 +66,14 @@ Each protocol phase `kind` maps to a concrete PI extension file that Warren load
 The compare phase uses structured diff via coms-net.ts. Algorithm:
 1. Gather all branch outputs via `coms_net_list(sessionId, phaseId)`.
 2. For each branch output, extract `changedFiles`, `testResults`, and `summary` fields.
-3. Compute pairwise comparison: file overlap (Jaccard similarity of changed file paths), test pass rate delta, and semantic similarity of summaries.
+3. Compute pairwise comparison: file overlap (Jaccard similarity of changed file paths), test pass rate delta, and semantic similarity of summaries (cosine similarity over sentence embeddings of summary text; the specific embedder is implementation-dependent but must be deterministic within a session).
 4. Produce a `ComparisonResult`: `{ branches: [{ agentId, fileCount, testPassRate, summary }], overlapMatrix: [[number]], recommendation: { preferredBranches: [agentId[]], rationale: string } }`.
 
 **Minimum branches for compare:** The compare phase requires >= 1 successful branch output. If all parallel branches fail, the compare phase produces `ComparisonResult` with `branches: []`, `overlapMatrix: []`, and `recommendation: { preferredBranches: [], rationale: "All branches failed" }`. The protocol then proceeds to decide phase, which produces `DecisionResult` with `winner: null`, `tie: false`, and `rationale: "No branches to decide between"`. The summarize phase reports the complete failure.
 
 ### decide Phase Algorithm
 The decide phase uses a configurable decision mechanism. Default algorithm: weighted scoring.
-1. Score each branch: `testPassRate * 0.5 + uniqueFileCoverage * 0.3 + summaryQuality * 0.2`.
+1. For each branch, compute three metrics: `testPassRate` = `testResults.passed / (testResults.passed + testResults.failed)` (0.0–1.0); `uniqueFileCoverage` = `changedFiles.length / totalChangedFilesAcrossAllBranches` (0.0–1.0); `summaryQuality` = semantic similarity score from the compare phase (0.0–1.0). Score each branch: `testPassRate * 0.5 + uniqueFileCoverage * 0.3 + summaryQuality * 0.2`.
 2. Rank branches by score.
 3. If top-2 scores are within 0.1 (tie), flag for human review in the output.
 4. Produce a `DecisionResult`: `{ winner: agentId, scores: [{ agentId, score, breakdown: { testPassRate, uniqueFileCoverage, summaryQuality } }], tie: boolean, rationale: string }`.
