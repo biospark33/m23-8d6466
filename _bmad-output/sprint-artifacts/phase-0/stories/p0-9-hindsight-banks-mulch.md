@@ -50,7 +50,7 @@ This story provisions the three required Hindsight banks (`{resolveBankId(repoSl
   // Retain payload
   const RetainPayloadSchema = z.object({
     bank_id: BankIdSchema,
-    content: z.string().min(1).refine(v => v.length <= 102400, { message: 'Content exceeds 100KB limit' }),
+    content: z.string().min(1).refine(v => Buffer.byteLength(v, 'utf8') <= 102400, { message: 'Content exceeds 100KB byte limit' }),
     metadata: z.object({
       source: z.enum(["agent", "mulch-import", "manual", "consolidate"]),
       kind: z.enum(["decision", "pattern", "expertise", "observation"]).optional(),

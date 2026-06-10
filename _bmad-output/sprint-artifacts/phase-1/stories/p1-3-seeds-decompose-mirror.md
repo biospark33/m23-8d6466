@@ -60,7 +60,7 @@ The Seeds agent registers with the A2A delegation layer (P1.1) with agentId `qds
 ## Security Invariants
 
 - INV-1: Seeds story content sanitized before GitHub mirror and Hindsight storage (see Sanitization Contract below).
-- INV-2: `.seeds/issues.jsonl` is `.gitignore`d (not tracked in version control) and written with file permissions 0600 at runtime via `fs.chmod` — file permissions are set once per batch (not per-append). The `fs.chmod` call runs after the first write to a new file; subsequent appends skip the chmod. No world-readable factory data. Git does not preserve restrictive permissions — the file must be excluded from tracking to enforce this invariant.
+- INV-2: `.seeds/issues.jsonl` is `.gitignore`d (not tracked in version control) and written with file permissions 0600 at runtime via `fs.chmod` after every write batch. File permissions are verified and enforced at the start of each batch, regardless of whether the file was created by this process or pre-exists from a prior run. This ensures that a pre-existing file with loose permissions (e.g., created by another process or manually) is immediately corrected. No world-readable factory data. Git does not preserve restrictive permissions — the file must be excluded from tracking to enforce this invariant.
 - INV-3: Mirror operation uses a dedicated GitHub token scoped to `issues:write` on the target repo only; no broader repo permissions.
 
 ## Sanitization Contract
@@ -130,7 +130,7 @@ AC2's reference to Hindsight storage of dependency edges is satisfied by this sc
 - [ ] **Test (guard):** Seeds startup with `gh` not on PATH → verify warning logged and mirror operations return error code -32018 on decompose attempt.
 - [ ] **Security:** Story content sanitized before GitHub API call per Sanitization Contract (5 test cases: bash code block removal, inline shell construct strip, HTML tag strip, passthrough for clean input, mixed content with all rule types).
 - [ ] **Test (sanitization):** Decompose a story containing `powershell`, `ruby`, `bash` code blocks → verify all are replaced with `[code block removed: {language}]`. Verify `typescript` and `json` blocks are preserved.
-- [ ] **Security:** `.seeds/` added to `.gitignore`; `.seeds/issues.jsonl` written with `chmod 0600` after each append; permissions enforced at runtime since Git does not preserve them.
+- [ ] **Security:** `.seeds/` added to `.gitignore`; `.seeds/issues.jsonl` written with `chmod 0600` after every write batch (not just first write — pre-existing files with loose permissions are corrected); permissions enforced at runtime since Git does not preserve them.
 - [ ] **Test (unit):** Seeds writer validates schema and rejects invalid entries.
 - [ ] **Test (e2e demo — MANDATORY):** Run decompose on intake session → verify `.seeds/issues.jsonl` has entries → verify GitHub sub-issues exist with correct titles and labels → verify dependency data is ONLY in Seeds, not duplicated in GitHub → verify dependency edges are also queryable from the Hindsight `resolveBankId(repoSlug)` bank.
 - [ ] **Test (guard):** Decompose request producing > 20 stories truncates to 20 with `{ truncated: true, generatedCount: N, persistedCount: 20 }` in response.
