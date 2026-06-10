@@ -29,6 +29,8 @@
 | Wave 5b — Re-fix B/H | ⬜ TODO | — | 0 | — |
 | Wave 5c — Re-fix M/L | ⬜ TODO | — | 0 | — |
 
+> **"Done" column semantics:** rows count different units — "Initial Scan" counts stories reviewed (7 of 7); "Wave 0" counts cross-cutting themes resolved (9 of 9); "Wave 1–2" count individual findings resolved (19 BLOCKERs, 30 HIGHs).
+
 ## Per-Story Progress
 
 | Story | Title | SP | B | H | M | L | Total | W0 | W1 | W2 | W3 | W4 | W5 |

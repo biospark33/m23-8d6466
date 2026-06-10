@@ -63,12 +63,6 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
     error: z.string().optional(),
   });
 
-  // POST /api/mcp-servers/{id}/invoke
-  const MCPInvokeSchema = z.object({
-    tool: z.string(),
-    arguments: MCPInvokeArgumentsSchema,
-  });
-
   // Arguments validated per-tool — bank_id validated against P0.9 BankIdSchema
   // when the target tool requires it (retain, recall, reflect, consolidate).
   const MCPInvokeArgumentsSchema = z.record(z.unknown()).superRefine((args, ctx) => {
@@ -85,6 +79,12 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
         });
       }
     }
+  });
+
+  // POST /api/mcp-servers/{id}/invoke
+  const MCPInvokeSchema = z.object({
+    tool: z.string(),
+    arguments: MCPInvokeArgumentsSchema,
   });
   ```
 

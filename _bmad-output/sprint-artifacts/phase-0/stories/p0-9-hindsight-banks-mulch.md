@@ -165,7 +165,7 @@ function resolveBankId(repoSlug: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
-    .slice(0, 63)
+    .slice(0, 64)
     // must match BankIdSchema: /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/
     // (enforced 1–64 chars: alphanumeric start/end, with hyphens allowed in the middle)
 }
