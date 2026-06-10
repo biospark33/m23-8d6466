@@ -43,7 +43,7 @@ This story provisions the three required Hindsight banks (`{resolveBankId(repoSl
   ```typescript
   // Hindsight bank creation (via MCP invoke — retain to non-existent bank creates it)
   // OR explicit bank provisioning via Hindsight REST API
-  const BankIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/);
+  const BankIdSchema = z.string().regex(/^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/);
 
   // Retain payload
   const RetainPayloadSchema = z.object({
@@ -104,7 +104,7 @@ This story provisions the three required Hindsight banks (`{resolveBankId(repoSl
 
   **Import flow:** Read `.mulch/expertise/` files, parse each file according to its extension (YAML → array, JSON → array, JSONL → line-by-line), validate each entry against `MulchExpertiseSchema` (with `id` auto-generated as UUID if absent), and retain as JSONL into the `{resolveBankId(repoSlug)}-dev-meta` bank.
 
-**Dedup key canonical form:** Mulch import deduplicates by hashing `domain + ':' + sorted(concepts).join(',')`. The concepts array is sorted alphabetically before hashing to ensure order-independent matching. Re-importing an expertise entry with the same domain and same concept set (in any order) updates the existing entry rather than creating a duplicate. The hash is computed as `SHA-256(domain + ':' + sorted_concepts.join(','))`.
+**Dedup key canonical form:** Mulch import deduplicates by hashing a collision-safe JSON serialization of `{ "domain": domain, "concepts": sorted(concepts) }`. The concepts array is sorted alphabetically before serialization to ensure order-independent matching. Using JSON serialization (rather than delimiter concatenation) prevents hash collisions where a domain containing the delimiter character could produce the same key as a differently-structured entry. Re-importing an expertise entry with the same domain and same concept set (in any order) updates the existing entry rather than creating a duplicate. The hash is computed as `SHA-256(JSON.stringify({ domain, concepts: sorted_concepts }))`.
 
 **Partial failure handling:** Mulch import is best-effort per-file. If one file fails to parse or validate, remaining files are still imported. The import response includes per-file status: `{ totalFiles, importedFiles, failures: Array<{ file, error }> }`. If a single file contains multiple entries, valid entries are imported and invalid entries are reported individually. Empty `.mulch/expertise/` directory is a graceful skip with a warning log, not an error.
 
@@ -166,8 +166,8 @@ function resolveBankId(repoSlug: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
     .slice(0, 63)
-    // must match BankIdSchema: /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/
-    // (enforced 2–64 chars: 1 leading char + 0–62 middle chars + 1 trailing char)
+    // must match BankIdSchema: /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/
+    // (enforced 1–64 chars: alphanumeric start/end, with hyphens allowed in the middle)
 }
 ```
 

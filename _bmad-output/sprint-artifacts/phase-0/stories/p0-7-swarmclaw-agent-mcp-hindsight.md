@@ -73,11 +73,10 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
   // when the target tool requires it (retain, recall, reflect, consolidate).
   const MCPInvokeArgumentsSchema = z.record(z.unknown()).superRefine((args, ctx) => {
     // bank_id validation: if present, must match P0.9 BankIdSchema regex
-    // /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/ — enforces 2–64 character length
-    // (1 leading char + 0–62 middle chars + 1 trailing char, alphanumeric only
-    // with hyphens allowed in the middle)
+    // /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/ — enforces 1–64 character length
+    // (alphanumeric start/end, with hyphens allowed in the middle)
     if ('bank_id' in args && typeof args.bank_id === 'string') {
-      const bankIdRegex = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/;
+      const bankIdRegex = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/;
       if (!bankIdRegex.test(args.bank_id)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -103,7 +102,7 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
   - `hindsight-local-mcp` subprocess — stdio transport lifecycle (spawn, handshake, list-tools, call-tool)
 
 - **Cross-story validation contract:**
-  - `bank_id` in MCP invoke arguments is validated against P0.9's `BankIdSchema` regex (`/^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/`) at the SwarmClaw boundary before any request reaches the MCP server. P0.9 owns the canonical schema definition; P0.7 references it for pre-flight validation.
+  - `bank_id` in MCP invoke arguments is validated against P0.9's `BankIdSchema` regex (`/^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/`) at the SwarmClaw boundary before any request reaches the MCP server. P0.9 owns the canonical schema definition; P0.7 references it for pre-flight validation.
 
 - **Files / functions touched:**
   - `src/swarmclaw/routes/agents.ts` — POST handler

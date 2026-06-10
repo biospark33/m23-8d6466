@@ -63,7 +63,7 @@ When the qds-factory protocol reaches a dispatch_task phase, SwarmClaw invokes t
   | 3 | "overflow" | Resource limit exceeded (budget, turn cap, memory) |
   | >=4 or signal | "transient" | Unknown failure — treated as retryable by default |
 
-  Exit codes are mapped by the harness adapter. If Warren exits with a signal (SIGKILL, SIGTERM), the harness consults signal-origin metadata to determine the mapping: (1) if the INV-3 watchdog flag is set (process exceeded 4GB RSS) or kernel OOM indicator is present, map to `exitStatus: "transient"`; (2) if a `userCancel`/`requestedShutdown` flag is present (explicit user-initiated termination), map to `exitStatus: "logic"`; (3) if signal origin is unknown, default to `exitStatus: "transient"` (safe retryable default).
+  Exit codes are mapped by the harness adapter. If Warren exits with a signal (SIGKILL, SIGTERM), the harness consults signal-origin metadata to determine the mapping: (1) if the INV-3 watchdog flag is set (process exceeded 4GB RSS) or kernel OOM indicator is present, map to `exitStatus: "overflow"`; (2) if a `userCancel`/`requestedShutdown` flag is present (explicit user-initiated termination), map to `exitStatus: "logic"`; (3) if signal origin is unknown, default to `exitStatus: "transient"` (safe retryable default).
 - **Timeout alignment (CC-7):** maxDurationMs must be ≤ P1.1 timeoutMs upper bound (900s post-CC-7 fix). P1.6 max 600s is well within P1.1's 900s limit. The harness enforces maxDurationMs as a hard wall; Warren receives it via the manifest.
 
 ## Observability Contract (CC-9)
