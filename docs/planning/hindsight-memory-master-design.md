@@ -31,15 +31,16 @@ QDS-Factory operates a two-bank Hindsight memory system that makes the factory s
 
 **Bank 2 (`qds-meta`)**: Skill execution outcomes, prompt effectiveness, review catch rates, and factory workflow patterns. Entity labels partition by skill, outcome, and quality dimension.
 
-**Three proactive agents** elevate the system from reactive (recall/reflect on demand) to proactive (the system discovers insights without being asked):
+**Four proactive agents** elevate the system from reactive (recall/reflect on demand) to proactive (the system discovers insights without being asked):
 
 | Agent | Function | Schedule | Orthogonal Question |
 |-------|----------|----------|---------------------|
 | **Synthesizer** | Cross-bank pattern mining + drift surveillance | Weekly | "What correlations exist across banks that no human would think to query for?" |
 | **Meta-Optimizer** | Self-improvement feedback loop | Biweekly | "Is our improvement process itself improving?" |
 | **Blind Spot Detector** | Completeness audit via absence detection | Monthly | "What should we know but don't?" |
+| **Review Harvester** | External review mining (CodeRabbit, Gemini Code Assist) | Every 3 days | "What do external reviewers consistently catch that our coding agents consistently miss?" |
 
-These three questions are orthogonal — no agent can answer another's question. Each agent retains its findings back into the banks, creating a compounding improvement loop where the system's own outputs become inputs for future runs.
+These four questions are orthogonal — no agent can answer another's question. The first three analyze data already inside the system; the Review Harvester is the only agent that ingests external ground truth, providing the independent calibration that makes the Meta-Optimizer's trajectory analysis trustworthy. Each agent retains its findings back into the banks, creating a compounding improvement loop where the system's own outputs become inputs for future runs.
 
 The system's built-in mechanisms handle everything else: directives enforce charter compliance during reflect, observation consolidation tracks drift passively via freshness trends, and mental models provide zero-cost instant retrieval for repeated queries.
 
@@ -54,7 +55,7 @@ The system's built-in mechanisms handle everything else: directives enforce char
 | P1 | **No ego, only evidence** | Every finding requires source references. `data_sufficiency` fields force honesty about sparse data. No speculation without evidence. |
 | P2 | **Maximum power per agent** | Each agent must address a function that no other agent can fulfill. Overlap is waste. |
 | P3 | **Compounding, not accumulating** | Data that sits unused is noise. Every agent output must be retained as future input for another run. |
-| P4 | **Minimal operational surface** | 3 CronCreate entries, 3 schedules, 6-8 reflect calls/month total. No monitoring infrastructure. |
+| P4 | **Minimal operational surface** | 4 CronCreate entries, 4 schedules, ~27 reflect calls/month total. No monitoring infrastructure. The Review Harvester adds gh CLI calls but no additional state management. |
 | P5 | **Self-optimizing** | The Meta-Optimizer evaluates its own past recommendations. The system improves its own improvement process. |
 | P6 | **Proactive, not reactive** | Agents discover insights that no human would think to query for. Reactive reflect/recall handles everything else. |
 
@@ -63,7 +64,7 @@ The system's built-in mechanisms handle everything else: directives enforce char
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Number of banks | 2 (not 1, not 3+) | Product knowledge and process knowledge have fundamentally different retention policies, disposition profiles, and query patterns. Two is the minimum that preserves this separation. A single bank would force compromise on disposition tuning (skepticism=4 for product vs skepticism=5 for meta). |
-| Number of proactive agents | 3 (not 2, not 10) | Three orthogonal questions exhaust the proactive intelligence surface: cross-domain discovery, self-referential feedback, and absence detection. A 10-agent fleet was rejected as over-engineered. 2 agents leave absence detection uncovered. |
+| Number of proactive agents | 4 (not 3, not 10) | Four orthogonal questions exhaust the proactive intelligence surface: cross-domain discovery, self-referential feedback, absence detection, and external review mining. The Review Harvester is unique in ingesting external ground truth — the other three agents analyze internal data only. Without it, the Meta-Optimizer relies on self-reported outcomes with no independent calibration. A 10-agent fleet was rejected as over-engineered. 3 agents leave external calibration uncovered. |
 | Drift detection | Passive (built-in) + Synthesizer surveillance | Observation freshness trends (stable → weakening) are the passive drift signal. No dedicated drift agent — the Synthesizer absorbs drift surveillance into its weekly cross-bank run. |
 | Charter compliance | Directives (enforced at reflect layer) | Directives are the right tool for non-negotiable rules. They're enforced during every reflect call, not via cron. No charter-scanning agent. |
 | Agent output destination | Retained back into banks | Agent findings are retained with appropriate tags, making them available to future reflect/recall calls. This is the compounding mechanism. |
@@ -231,7 +232,7 @@ Configuration: `trigger={"refresh_after_consolidation": True}` on each model.
 
 ### 4.1 Agent Design Philosophy
 
-Each agent is a **scheduled CronCreate entry** that executes a sequence of Hindsight API calls, produces structured output via `response_schema`, and retains findings back into the banks. The agents are stateless — all state lives in Hindsight's observation layer. This means:
+Each agent is a **scheduled CronCreate entry** that executes a sequence of API calls (Hindsight API + external data sources where specified), produces structured output via `response_schema`, and retains findings back into the banks. The agents are stateless — all state lives in Hindsight's observation layer. This means:
 
 - No external state management
 - No databases to maintain
@@ -926,6 +927,298 @@ Gaps retained as `outcome:gap` observations serve as action items for future ses
 
 ---
 
+### 4.5 Agent 4: The Review Harvester — External Review Mining
+
+#### Identity
+
+| Field | Value |
+|-------|-------|
+| **Agent name** | `review-harvester` |
+| **Schedule** | Every 3 days at 02:17 local (`17 2 */3 * *`) |
+| **Banks touched** | Both (`qds-product`, `qds-meta`) |
+| **Data source** | GitHub PR review comments via `gh` CLI (CodeRabbit, Gemini Code Assist) |
+| **Budget** | `mid` |
+| **Reflect calls per run** | 1 (meta pattern correlation) |
+| **External API calls** | `gh pr list`, `gh api pulls/{N}/comments`, `gh api pulls/{N}/reviews` |
+| **Estimated tokens/run** | 8,000–12,000 |
+
+#### Value Hypothesis
+
+The other three proactive agents analyze data already inside the Hindsight system. The Review Harvester is the **only agent that ingests external ground truth** — what independent code reviewers (CodeRabbit, Gemini Code Assist) consistently catch that QDS-Factory coding agents consistently miss.
+
+CodeRabbit reviews are the highest-signal data source available for factory quality:
+- **Consistent**: Same reviewer, same standards, every PR — no inter-reviewer variance
+- **Unbiased**: External assessment, not self-evaluation by the coding agents
+- **Structured**: Severity levels, file locations, specific recommendations
+- **Already happening**: No new process needed — just mining existing output
+
+Without this agent, the Meta-Optimizer relies entirely on self-reported skill outcomes — "I ran skill X and it succeeded" — which is inherently biased. The Review Harvester provides the **external calibration** that makes the Meta-Optimizer's trajectory analysis trustworthy.
+
+The primary success metric is brutally simple: **fewer CodeRabbit comments per PR, trending toward lower severity, with declining repeat-pattern rates**. If the factory is improving, CodeRabbit should have less to say over time.
+
+#### Execution Sequence
+
+```
+Step 1: Fetch recent PR reviews from GitHub (gh CLI)
+Step 2: Classify and structure review comments
+Step 3: Reflect on qds-meta for pattern correlation + trend analysis
+Step 4: Retain findings into both banks
+```
+
+#### Step 1: GitHub Review Fetching
+
+```bash
+# Fetch recently merged PRs (last 3 days)
+gh pr list --state merged --limit 15 --json number,title,mergedAt \
+  --jq '.[] | select(.mergedAt > (now - 259200) | todate) | .number'
+
+# For each PR, fetch CodeRabbit review comments (inline)
+gh api repos/biospark33/QDS-Factory/pulls/{PR_NUMBER}/comments \
+  --jq '.[] | select(.user.login | test("coderabbitai|gemini-code-assist")) \
+  | {path, line, body, created_at, user: .user.login}'
+
+# For each PR, fetch review-level summaries
+gh api repos/biospark33/QDS-Factory/pulls/{PR_NUMBER}/reviews \
+  --jq '.[] | select(.user.login | test("coderabbitai|gemini-code-assist")) \
+  | {body, state, user: .user.login}'
+```
+
+#### Step 2: Classification
+
+Raw review comments are classified into structured categories. This step runs client-side (no Hindsight API call) and produces:
+
+```python
+review_data = {
+    "harvest_date": run_date,
+    "prs_analyzed": [...],
+    "total_comments": N,
+    "by_reviewer": {
+        "coderabbitai": N,
+        "gemini-code-assist": N
+    },
+    "by_severity": {
+        "critical": N,
+        "high": N,
+        "medium": N,
+        "low": N,
+        "nit": N
+    },
+    "by_category": {
+        "security": [...comments...],
+        "correctness": [...comments...],
+        "performance": [...comments...],
+        "maintainability": [...comments...],
+        "style": [...comments...],
+        "testing": [...comments...]
+    },
+    "recurring_patterns": [
+        {
+            "pattern": "Description of recurring issue",
+            "occurrences": N,
+            "prs": [...],
+            "files": [...],
+            "category": "security|correctness|...",
+            "severity": "high|medium|..."
+        }
+    ],
+    "new_issues": [...],       # Issues not seen in previous harvests
+    "resolved_issues": [...]   # Issues from previous harvests not recurring
+}
+```
+
+#### Step 3: Meta Pattern Correlation
+
+```python
+response = client.reflect(
+    bank_id="qds-meta",
+    query=f"""Analyze these external code review findings from the last 3 days
+of QDS-Factory PRs in the context of ALL prior review harvest data in this bank.
+
+REVIEW DATA:
+{json.dumps(review_data, indent=2)}
+
+TASKS:
+1. RECURRING PATTERN ANALYSIS: Which issues appear across multiple PRs?
+   These represent systematic coding agent weaknesses, not one-off mistakes.
+   Cross-reference with prior harvests to distinguish new vs persistent patterns.
+
+2. TREND ANALYSIS: Compare total comment count, severity distribution, and
+   repeat-pattern rate against prior harvests. Is the factory improving?
+   Compute comments-per-PR trend over the last 30 days.
+
+3. ROOT CAUSE HYPOTHESIS: For each recurring pattern, hypothesize WHY coding
+   agents miss it. Is it a skill gap? A missing directive in qds-product?
+   An antipattern that isn't documented? A quality dimension we don't measure?
+
+4. INTERVENTION PRIORITY: Rank recurring patterns by (frequency × severity)
+   and suggest the single highest-leverage fix for each top pattern.
+
+RULES:
+- Be ruthlessly specific. "CodeRabbit flagged X in files A, B, C across PRs
+  1, 2, 3" is useful. "Code quality needs improvement" is not.
+- Distinguish between NEW patterns (first appearance) and PERSISTENT patterns
+  (seen in multiple harvests). Persistent patterns are higher priority.
+- If a pattern was previously flagged and is now absent, mark it as RESOLVED.
+- Cite specific observation counts for every claim.""",
+    budget="mid",
+    tags=["skill:review-harvester", "outcome:insight", "outcome:missed"],
+    tags_match="any",
+    response_schema=REVIEW_HARVEST_SCHEMA,
+    include_facts=True,
+)
+```
+
+**Response schema** (`REVIEW_HARVEST_SCHEMA`):
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "harvest_summary": {
+      "type": "object",
+      "properties": {
+        "prs_analyzed": {"type": "integer"},
+        "total_comments": {"type": "integer"},
+        "severity_distribution": {
+          "type": "object",
+          "properties": {
+            "critical": {"type": "integer"},
+            "high": {"type": "integer"},
+            "medium": {"type": "integer"},
+            "low": {"type": "integer"},
+            "nit": {"type": "integer"}
+          }
+        },
+        "comments_per_pr_avg": {"type": "number"}
+      },
+      "required": ["prs_analyzed", "total_comments", "severity_distribution"]
+    },
+    "recurring_patterns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pattern": {"type": "string"},
+          "category": {
+            "type": "string",
+            "enum": ["security", "correctness", "performance",
+                     "maintainability", "style", "testing"]
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low"]
+          },
+          "frequency": {
+            "type": "integer",
+            "description": "Times seen across PRs in this harvest window"
+          },
+          "total_lifetime_occurrences": {
+            "type": "integer",
+            "description": "Times seen across ALL harvests in qds-meta"
+          },
+          "prs": {"type": "array", "items": {"type": "integer"}},
+          "root_cause_hypothesis": {"type": "string"},
+          "recommended_intervention": {"type": "string"},
+          "trend": {
+            "type": "string",
+            "enum": ["new", "persistent", "declining", "resolved"]
+          }
+        },
+        "required": ["pattern", "category", "severity", "frequency", "trend"]
+      },
+      "maxItems": 10
+    },
+    "quality_trend": {
+      "type": "object",
+      "properties": {
+        "direction": {
+          "type": "string",
+          "enum": ["improving", "stable", "degrading"]
+        },
+        "evidence": {"type": "string"},
+        "comments_per_pr_trend": {
+          "type": "string",
+          "enum": ["decreasing", "stable", "increasing"]
+        },
+        "severity_shift": {
+          "type": "string",
+          "description": "e.g., 'shifting from critical/high toward medium/low'"
+        }
+      },
+      "required": ["direction", "evidence"]
+    },
+    "top_intervention": {
+      "type": "object",
+      "properties": {
+        "description": {"type": "string"},
+        "target": {
+          "type": "string",
+          "description": "What skill, directive, or pattern should change"
+        },
+        "expected_impact": {
+          "type": "string",
+          "enum": ["high", "medium", "low"]
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "required": ["description", "target", "expected_impact", "confidence"]
+    },
+    "data_sufficiency": {
+      "type": "string",
+      "enum": ["sufficient", "marginal", "insufficient"]
+    }
+  },
+  "required": ["harvest_summary", "recurring_patterns",
+               "quality_trend", "data_sufficiency"]
+}
+```
+
+#### Step 4: Feedback Retention
+
+```python
+# Retain review patterns into qds-meta (factory performance data)
+client.retain(
+    bank_id="qds-meta",
+    items=[{
+        "content": json.dumps(response.structured_output),
+        "tags": ["skill:review-harvester", "outcome:insight"],
+        "document_id": f"review-harvest-{run_date}",
+        "context": "Tri-daily external review mining from CodeRabbit/Gemini Code Assist PR reviews"
+    }]
+)
+
+# Retain specific recurring antipatterns into qds-product
+# (what coding agents miss → documented as antipatterns for future sessions)
+for pattern in response.structured_output.get("recurring_patterns", []):
+    if pattern["frequency"] >= 2:  # Only retain patterns seen across multiple PRs
+        client.retain(
+            bank_id="qds-product",
+            items=[{
+                "content": json.dumps({
+                    "pattern": pattern["pattern"],
+                    "category": pattern["category"],
+                    "severity": pattern["severity"],
+                    "source": "coderabbit-review",
+                    "occurrences": pattern["total_lifetime_occurrences"],
+                    "root_cause": pattern.get("root_cause_hypothesis", "unknown"),
+                    "trend": pattern["trend"]
+                }),
+                "tags": ["knowledge_type:antipattern",
+                         f"severity:{pattern['severity']}"],
+                "document_id": f"review-antipattern-{slugify(pattern['pattern'])}",
+                "context": (f"Recurring issue caught by external reviewer across "
+                            f"{pattern['frequency']} PRs in this harvest window. "
+                            f"Lifetime occurrences: {pattern['total_lifetime_occurrences']}.")
+            }]
+        )
+```
+
+**Cross-agent compounding**: The Meta-Optimizer's biweekly run can now see Review Harvester findings in qds-meta. When the Meta-Optimizer evaluates "are interventions working?", it can compare self-reported skill outcomes against CodeRabbit's independent assessment. If we claim "adversarial reviews improved" but CodeRabbit is still flagging the same bug classes, the Meta-Optimizer detects the discrepancy. This is the external calibration loop.
+
+The Review Harvester also feeds the Synthesizer's cross-bank analysis: recurring CodeRabbit patterns retained in qds-product (as antipatterns) can be correlated with skill blind spots in qds-meta, producing higher-confidence cross-bank insights than either data source alone.
+
+---
+
 ## 5. The Compounding Loop
 
 ### 5.1 Data Flow
@@ -1028,6 +1321,19 @@ The Meta-Optimizer's `intervention_effectiveness` field creates a **selection pr
 
 Over time, the `persistent_failure_modes` list shrinks as effective interventions are found, and the `improvement_trajectory.direction` trends toward `improving` at an `accelerating` rate. This is genuine meta-learning.
 
+### 5.4 External Calibration via Review Harvester
+
+The Review Harvester creates a critical feedback loop that no internal data source can provide:
+
+1. CodeRabbit flags issue X on PRs 1, 2, 3 → Review Harvester detects recurrence → retained as antipattern in qds-product and pattern in qds-meta
+2. Meta-Optimizer sees the pattern, recommends intervention (e.g., "add directive about X")
+3. Intervention is implemented (directive added to qds-product)
+4. Subsequent sessions see the directive during pre-session recall → coding agents avoid issue X
+5. Review Harvester runs again → CodeRabbit no longer flags issue X → pattern marked as `resolved`
+6. Meta-Optimizer confirms: `intervention_effectiveness.measurable_improvement: true`
+
+This loop is only possible because the Review Harvester provides **independent, external validation**. Without it, step 5 would rely on self-assessment ("did we stop making that mistake?") rather than ground truth ("did CodeRabbit stop flagging it?").
+
 ---
 
 ## 6. Implementation Reference
@@ -1070,9 +1376,25 @@ prompt: |
   2. Reflect on qds-meta bank (skill coverage gaps + under-observed skills)
   3. Retain gaps in qds-meta bank
   See: docs/planning/hindsight-memory-master-design.md Section 4.4
+
+# Agent 4: Review Harvester — Every 3 days at 02:17 local
+cron: "17 2 */3 * *"
+recurring: true
+durable: true
+prompt: |
+  Run the Review Harvester proactive agent:
+  1. Fetch recent merged PRs from GitHub (last 3 days): gh pr list --state merged --limit 15 --json number,title,mergedAt
+  2. For each PR, fetch CodeRabbit/Gemini Code Assist review comments:
+     gh api repos/biospark33/QDS-Factory/pulls/{N}/comments
+     gh api repos/biospark33/QDS-Factory/pulls/{N}/reviews
+  3. Classify comments by severity, category, and recurrence
+  4. Reflect on qds-meta for pattern correlation against prior harvests
+  5. Retain recurring patterns as antipatterns in qds-product
+  6. Retain harvest analysis in qds-meta
+  See: docs/planning/hindsight-memory-master-design.md Section 4.5
 ```
 
-Note: All three agents run at 07:23 local, not 07:00 or 07:30, to avoid API contention at round-number times.
+Note: Agents 1–3 run at 07:23 local (off-minute to avoid API contention). The Review Harvester runs at 02:17 local — a different time window because it calls external APIs (GitHub) in addition to Hindsight, and nighttime execution minimizes interference with active development.
 
 ### 6.2 Integration with Existing Systems
 
@@ -1136,7 +1458,8 @@ Before agent implementation, the Hindsight server must be configured with:
 | Synthesizer | 4–5 | 3 | 15–20k | 60–100k |
 | Meta-Optimizer | 2 | 1 | 10–15k | 20–30k |
 | Blind Spot Detector | 1 | 2 | 8–10k | 8–10k |
-| **Total** | **7–8** | **—** | **—** | **88–140k** |
+| Review Harvester | 10 | 1 + gh CLI | 8–12k | 80–120k |
+| **Total** | **17–18** | **—** | **—** | **168–260k** |
 
 ### 7.2 Operational Guarantees
 
@@ -1180,7 +1503,7 @@ If the Meta-Optimizer reports `system_maturity: early_calibration` for more than
 |---------|-------------|--------------|
 | **Single bank** | Merge qds-product and qds-meta into one bank | Forces compromise on disposition tuning (skepticism=4 for product vs 5 for meta), missions (retain missions are fundamentally different), and observation scopes. Two banks preserve the right configuration per domain. |
 | **Per-module banks** | One bank per module (6 banks) | Over-partitioning. Cross-module queries become expensive client-side orchestration. Tag-based filtering within a single bank achieves the same isolation with simpler operations. |
-| **10-agent fleet** | Separate agents for drift, charter, gaps, trends, per-skill analysis, etc. | Over-engineered. Three orthogonal questions exhaust the proactive intelligence surface. More agents means more operational surface, more failure modes, and more coordination complexity for no additional insight coverage. |
+| **10-agent fleet** | Separate agents for drift, charter, gaps, trends, per-skill analysis, etc. | Over-engineered. Four orthogonal questions exhaust the proactive intelligence surface: three analyzing internal data + one ingesting external ground truth. More agents means more operational surface, more failure modes, and more coordination complexity for no additional insight coverage. |
 
 ---
 
@@ -1244,6 +1567,10 @@ If the Meta-Optimizer reports `system_maturity: early_calibration` for more than
 | Completeness score trend | Monthly improvement until ≥0.8 on both banks | `completeness_score` from Blind Spot Detector |
 | Drift signal resolution | ≥80% of `action_required: true` drift signals resolved within 4 weeks | Track `weeks_flagged` across Synthesizer runs |
 | False positive rate | <20% of agent insights are refuted by subsequent data | Cross-reference `intervention_effectiveness.measurable_improvement` |
+| **CodeRabbit comments per PR** | **Declining trend month-over-month** | `comments_per_pr_avg` from Review Harvester `quality_trend` |
+| **CodeRabbit severity distribution** | **Shift from critical/high toward medium/low** | `severity_distribution` tracked across harvests |
+| **Repeat-pattern rate** | **<20% of patterns persist for >4 harvests** | `recurring_patterns[].trend == "persistent"` count across harvests |
+| **External calibration agreement** | **Self-reported outcomes agree with CodeRabbit findings ≥80%** | Compare Meta-Optimizer trajectory against Review Harvester `quality_trend` |
 
 ### 10.2 Qualitative
 
@@ -1254,6 +1581,8 @@ If the Meta-Optimizer reports `system_maturity: early_calibration` for more than
 | No module is unaudited for >2 months | Blind Spot Detector gaps are resolved within 2 months of detection |
 | The system surprises us | Synthesizer discovers at least one cross-bank insight per month that no team member anticipated |
 | Interventions compound | Meta-Optimizer shows `accelerating` improvement rate by month 6 |
+| CodeRabbit has less to say over time | Review Harvester shows declining comments-per-PR and shifting severity distribution |
+| External and internal assessments converge | Self-reported skill outcomes and CodeRabbit findings tell the same story |
 
 ### 10.3 Anti-Success Signals
 
@@ -1279,6 +1608,7 @@ All response schemas referenced in this document, consolidated for implementatio
 | `BLIND_SPOT_PRODUCT_SCHEMA` | Blind Spot Detector Step 1 | Section 4.4, Step 1 |
 | `BLIND_SPOT_META_SCHEMA` | Blind Spot Detector Step 2 | Section 4.4, Step 2 |
 | `SKILL_PREP_SCHEMA` | Pre-skill hook | To be defined during implementation |
+| `REVIEW_HARVEST_SCHEMA` | Review Harvester Step 3 | Section 4.5, Step 3 |
 
 ## Appendix B: Entity Label Complete Definitions
 
@@ -1348,7 +1678,8 @@ All response schemas referenced in this document, consolidated for implementatio
         {"value": "meta-optimizer", "description": "Self-improvement feedback proactive agent"},
         {"value": "blind-spot-detector", "description": "Completeness audit proactive agent"},
         {"value": "sprint-planning", "description": "Sprint planning and estimation"},
-        {"value": "code-review", "description": "Code review process"}
+        {"value": "code-review", "description": "Code review process"},
+        {"value": "review-harvester", "description": "External review mining agent (CodeRabbit, Gemini Code Assist)"}
       ]
     },
     {
