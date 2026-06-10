@@ -168,7 +168,7 @@ A2A JSON payloads use camelCase throughout (agentId, taskBrief, timeoutMs, not a
 - [ ] **Test (unit):** A2A router forwards to correct endpoint based on targetAgentId lookup.
 - [ ] **Test (forward verification):** Harness request log captures forwarded JSON-RPC envelope; body matches original A2A request (verifies AC5).
 - [ ] **Test (e2e demo — MANDATORY):** Register Dev Manager → send A2A JSON-RPC call → receive correlated response; verify round-trip with < 5s latency.
-- [ ] **Test (SSRF):** Register agent with endpointUrl `http://evil.com/api` → verify 422 rejection. Register with `http://localhost:3100/a2a` → verify 200.
+- [ ] **Test (SSRF):** Register agent with endpointUrl `http://evil.com/api` → verify 422 rejection. Register with `http://localhost:3100/a2a` → verify 201.
 - [ ] **Test (retry):** A2A delegation with `onFailure='retry'` to unreachable endpoint produces 3 attempts with backoff (1s, 2s) before returning error code -32010. Test verifies attempt count (3 total), not exact backoff timing. Backoff delays verified separately via unit test.
 - [ ] **Test (agent-not-found):** A2A delegation with targetAgentId for an unregistered agent returns JSON-RPC error code -32011; no HTTP request is made to any endpoint.
 

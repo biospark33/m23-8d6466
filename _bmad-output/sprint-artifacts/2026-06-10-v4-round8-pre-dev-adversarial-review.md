@@ -189,7 +189,7 @@ Waves are sequenced; within a wave, items can be parallelized across stories.
 Resolve CC-R8-1 through CC-R8-9 first. Each touches ≥2 stories. 7 parallel subagents bundled-by-story-file.
 
 ### Wave 1 — BLOCKERs (per-story)
-6 remaining BLOCKERs (after Wave 0 resolves P0.7-B3 and P0.9-B1). Spawn 1 agent per affected story.
+4 remaining BLOCKERs (after Wave 0 resolves P0.7-B3 and P0.9-B1). Spawn 1 agent per affected story.
 
 ### Wave 2 — HIGHs (per-story)
 25 HIGHs minus those resolved in Wave 0. Same per-story parallel pattern.

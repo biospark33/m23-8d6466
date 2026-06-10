@@ -46,7 +46,7 @@ Resolve CC-R8-1 through CC-R8-9 first. Each touches multiple stories. **Bundled-
 8. **CC-R8-8** (SIGKILL) — Add 5s grace→SIGKILL to P0.7 AC6 and P1.6 INV-3
 9. **CC-R8-9** (Bank ID edges) — Document resolveBankId validation requirements
 
-### Wave 1 — BLOCKERs (6 items)
+### Wave 1 — BLOCKERs (4 items)
 After Wave 0, P0.7-B3 and P0.9-B1 should be partially/fully resolved. Remaining:
 - P0.7-B1: Expand AC7 args validation test coverage
 - P0.7-B2: Add npx package allowlist
