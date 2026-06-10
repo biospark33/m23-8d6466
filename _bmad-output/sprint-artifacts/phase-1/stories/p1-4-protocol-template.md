@@ -73,7 +73,7 @@ The compare phase uses structured diff via coms-net.ts. Algorithm:
 
 ### decide Phase Algorithm
 The decide phase uses a configurable decision mechanism. Default algorithm: weighted scoring.
-1. For each branch, compute three metrics: `testPassRate` = `(testResults.passed + testResults.failed) > 0 ? testResults.passed / (testResults.passed + testResults.failed) : 0.0` (0.0–1.0; defaults to 0.0 when no tests ran); `uniqueFileCoverage` = `totalChangedFilesAcrossAllBranches > 0 ? changedFiles.length / totalChangedFilesAcrossAllBranches : 0.0` (0.0–1.0; defaults to 0.0 when no files changed across any branch); `summaryQuality` = semantic similarity score from the compare phase (0.0–1.0). Score each branch: `testPassRate * 0.5 + uniqueFileCoverage * 0.3 + summaryQuality * 0.2`.
+1. For each branch, compute three metrics: `testPassRate` = `testResults && (testResults.passed + testResults.failed) > 0 ? testResults.passed / (testResults.passed + testResults.failed) : 0.0` (0.0–1.0; defaults to 0.0 when no tests ran or testResults is missing); `uniqueFileCoverage` = `totalChangedFilesAcrossAllBranches > 0 ? (changedFiles ? changedFiles.length : 0) / totalChangedFilesAcrossAllBranches : 0.0` (0.0–1.0; defaults to 0.0 when no files changed across any branch or changedFiles is missing); `summaryQuality` = semantic similarity score from the compare phase (0.0–1.0). Score each branch: `testPassRate * 0.5 + uniqueFileCoverage * 0.3 + summaryQuality * 0.2`.
 2. Rank branches by score.
 3. If top-2 scores are within 0.1 (tie), flag for human review in the output.
 4. Produce a `DecisionResult`: `{ winner: agentId, scores: [{ agentId, score, breakdown: { testPassRate, uniqueFileCoverage, summaryQuality } }], tie: boolean, rationale: string }`.

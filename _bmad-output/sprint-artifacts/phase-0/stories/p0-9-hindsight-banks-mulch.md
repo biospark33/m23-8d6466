@@ -164,10 +164,11 @@ function resolveBankId(repoSlug: string): string {
   return repoSlug
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
     .slice(0, 64)
+    .replace(/^-|-$/g, '')
     // must match BankIdSchema: /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/
     // (enforced 1–64 chars: alphanumeric start/end, with hyphens allowed in the middle)
+    // trailing-hyphen strip runs AFTER slice to catch hyphens introduced by truncation
 }
 ```
 

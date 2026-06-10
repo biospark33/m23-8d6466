@@ -29,7 +29,7 @@ When the qds-factory protocol reaches a dispatch_task phase, SwarmClaw invokes t
 
 1. **(make-or-break)** Given an active protocol session with a dispatch_task step, When the step executes, Then CLI-Anything harness is invoked with the task payload, `warren run --config .canopy/agent.json` executes (manifest-driven per P0.3 canonical pattern), and the step output is structured JSON containing `{ exitStatus: "success"|"transient"|"overflow"|"logic", changedFiles: string[], testResults: { passed: number, failed: number }, summary: string, durationMs: number }`.
 2. Given the Pi team completes successfully, When the structured JSON is captured, Then it is stored as the protocol step output and retrievable via the SwarmClaw session status API.
-3. Given `warren run` exits with non-zero code or times out, When the harness captures the failure, Then the step output is `{ exitStatus: "transient"|"overflow"|"logic", error: string, exitCode: number, partialOutput: string | null }` and the protocol engine does not crash.
+3. Given `warren run` exits with non-zero code or times out, When the harness captures the failure, Then the step output is `{ exitStatus: "transient"|"overflow"|"logic", error: string, exitCode: number, partialOutput: string | null, durationMs: number }` and the protocol engine does not crash.
 4. Given a fresh repository with no prior Mulch expertise in the specified Hindsight bank, When the dispatch_task step executes with Mulch priming, Then the Pi team runs without primed context (empty context is acceptable), the step output includes `mulchPrimed: false`, and execution succeeds with `exitStatus: "success"` — empty bank is not an error condition.
 
 ## Technical Notes
