@@ -33,9 +33,9 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
 2. Given a registered MCP server, When `POST /api/mcp-servers/{id}/invoke` is called with tool `retain` and a valid memory payload, Then the response status is 200 and the Hindsight bank receives the memory entry (verifiable via subsequent `recall`).
 3. Given `hindsight-local-mcp` is NOT on PATH or returns non-zero, When `POST /api/mcp-servers/{id}/test` is called, Then the response is `{ ok: false, error: <descriptive message> }` with HTTP 502 — the server never silently returns ok for a broken transport.
 4. Given an invoke request with an invalid `bank_id` (fails P0.9 BankIdSchema regex, e.g. contains uppercase, special characters, or exceeds 64 chars), When `POST /api/mcp-servers/{id}/invoke` is called with `tool: "retain"` and the invalid `bank_id`, Then the system returns MCP error `-32602` (Invalid params) with a descriptive message identifying the failing field and does NOT call the MCP server subprocess.
-5. Given the default command allowlist, When MCP server registration includes `command: "npx"` with `args: ["hindsight-local-mcp"]`, Then registration succeeds (201). When `command: "python"` is submitted, Then registration is rejected (400) because shells remain excluded.
-6. Given a registered MCP server with an active stdio subprocess, When the SwarmClaw server receives SIGTERM, Then all MCP subprocesses receive SIGTERM within 2 seconds, the `/test` endpoint returns `{ ok: false }` for those servers, and no orphan processes remain.
-7. Given a registration attempt with `command: "node"` and `args: ["-e", "process.exit(1)"]`, When the registration is submitted, Then it is rejected with 400 because inline code execution flags (`-e`) are not permitted for runtime commands. Similarly, `command: "npx"` with `args: ["--node-arg", "-e", "malicious-code", "hindsight-local-mcp"]` is rejected with 400 because `--node-arg` passthrough is prohibited.
+5. Given the default command allowlist, When MCP server registration includes `command: "npx"` with `args: ["hindsight-local-mcp"]`, Then registration succeeds (201). When `command: "python"` or `command: "python3"` is submitted, Then registration is rejected (400) because shells remain excluded.
+6. Given a registered MCP server with an active stdio subprocess, When the SwarmClaw server receives SIGTERM, Then all MCP subprocesses receive SIGTERM within 2 seconds. After sending SIGTERM, wait 5 seconds. If the subprocess has not exited, send SIGKILL. The `/test` endpoint returns `{ ok: false }` for those servers, and no orphan processes remain.
+7. Given a registration attempt with `command: "node"`, each denied flag is individually rejected: (a) `args: ["-e", "process.exit(1)"]` → rejected 400, (b) `args: ["-p", "process.exit(1)"]` → rejected 400, (c) `args: ["--print", "process.exit(1)"]` → rejected 400, (d) `args: ["-"]` (stdin mode) → rejected 400, (e) `args: ["--require", "relative-path"]` → rejected 400, (f) `args: ["-r", "relative-path"]` → rejected 400. Similarly, `command: "npx"` with `args: ["--node-arg", "-e", "malicious-code", "hindsight-local-mcp"]` is rejected with 400 because `--node-arg` passthrough is prohibited. For npx, the first positional arg must match an entry in `SWARMCLAW_NPX_PACKAGE_ALLOWLIST` (default: `hindsight-local-mcp`, `@anthropic-ai/claude-code`); unknown packages are rejected with 400.
 
 ## Technical Notes
 
@@ -45,28 +45,52 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
   const RegisterAgentSchema = z.object({
     agentId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$/),  // matches INV-SC1
     capabilities: z.array(z.string()).min(1),
-    metadata: z.record(z.unknown()).optional(),
+    agentType: z.enum(["department-manager","worker","observer","service"]).optional(),
+    endpointUrl: z.string().url().optional(),
+    metadata: z.record(z.unknown()).optional().refine(v => {
+      if (!v) return true;
+      try { return JSON.stringify(v).length <= 10240; } catch { return false; }
+    }, { message: 'metadata exceeds 10KB or contains circular references' }),
   });
+  // P1.1 requires both agentType and endpointUrl for agent registration.
+  // P0.7 accepts registrations without them for MCP-only agents.
 
   // POST /api/mcp-servers
   const RegisterMCPServerSchema = z.object({
     name: z.string().min(1).max(128),
-    transport: z.enum(["stdio", "sse"]),
+    // MCP server `name` must be unique per SwarmClaw instance. Duplicate names return 409 Conflict.
+    // The registration response (201) includes an auto-generated `id` field for internal referencing.
+    transport: z.enum(["stdio"]),
+    // SSE transport is deferred to Phase 2. Registration accepts only `transport: 'stdio'`.
     command: z.string().optional(),        // required for stdio
-    args: z.array(z.string()).default([]), // positional args passed to the subprocess
+    args: z.array(z.string()).default([]), // positional args passed to the subprocess; each element has a max length of 4096 characters
     url: z.string().url().optional(),      // required for sse
-    env: z.record(z.string()).optional(),  // env vars for the subprocess
+    env: z.record(z.string().min(1), z.string()).optional(),  // env vars for the subprocess; keys must be non-empty. Empty-string env values are permitted (e.g., `FOO=`). This is intentional — some tools use empty env vars as flags.
   });
+
+  // endpointUrl SSRF protection: if endpointUrl is provided in RegisterAgentSchema,
+  // its hostname must resolve to localhost (127.0.0.1, ::1, or hostname 'localhost').
+  // Non-loopback endpoints are rejected with 422. This enforces the Transport Contract
+  // (local HTTP POST only) at registration time.
 
   // POST /api/mcp-servers/{id}/test response
   const MCPTestResponseSchema = z.object({
     ok: z.boolean(),
     tools: z.array(z.string()).optional(),
     error: z.string().optional(),
+  }).refine(v => !v.ok || (v.tools && v.tools.length > 0), {
+    message: 'ok=true requires non-empty tools',
   });
 
   // Arguments validated per-tool — bank_id validated against P0.9 BankIdSchema
   // when the target tool requires it (retain, recall, reflect, consolidate).
+  // resolveBankId output must be validated against BankIdSchema before use.
+  // If resolveBankId produces a value that fails BankIdSchema, the provisioner
+  // returns a clear error before reaching P0.7's MCP boundary. P0.7 never receives
+  // an invalid bank ID from a well-implemented provisioner.
+  // Empty-string or single-character outputs indicate a malformed input slug and
+  // should be rejected by the caller. This is a caller-side validation responsibility,
+  // not a schema enforcement concern.
   const MCPInvokeArgumentsSchema = z.record(z.unknown()).superRefine((args, ctx) => {
     // bank_id validation: if present, must match P0.9 BankIdSchema regex
     // /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/ — enforces 1–64 character length
@@ -85,14 +109,29 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
 
   // POST /api/mcp-servers/{id}/invoke
   const MCPInvokeSchema = z.object({
-    tool: z.string(),
+    tool: z.string().min(1).max(256), // 256 chars accommodates multi-segment namespaced tool identifiers per MCP spec convention
     arguments: MCPInvokeArgumentsSchema,
+  });
+
+  // Structured error response for MCP invoke failures
+  const MCPInvokeErrorResponseSchema = z.object({
+    jsonrpc: z.literal("2.0"),
+    error: z.object({
+      code: z.number(),
+      message: z.string(),
+      data: z.object({
+        field: z.string().optional(),
+        violation: z.string().optional(),
+        requestId: z.string(),
+      }).optional(),
+    }),
+    id: z.string().or(z.number()).nullable(),
   });
   ```
 
   **Invoke validation flow:** Before MCP tool invocation, validate `arguments` against the tool's declared parameter schema. If validation fails, return MCP error `-32602` (Invalid params) with diagnostic detail including field path and failure reason. Do NOT forward the request to the MCP server.
 
-  **Tool enumeration caching:** Tool lists returned by `/test` are cached per MCP server registration. Cache TTL is 5 minutes (configurable via `SWARMCLAW_TOOL_CACHE_TTL_MS`). `/invoke` with an unknown tool (not in cache) triggers an on-demand re-enumeration before failing. This prevents stale-tool calls after MCP server restarts or updates.
+  **Tool enumeration caching:** Tool lists returned by `/test` are cached per MCP server registration. Cache TTL is 5 minutes (configurable via `SWARMCLAW_TOOL_CACHE_TTL_MS`). TTL must be >= 1000ms and <= 3600000ms (1 hour). Values outside this range are clamped. When clamped, emit a structured warning log: `{ level: 'warn', message: 'SWARMCLAW_TOOL_CACHE_TTL_MS clamped', raw, clamped, min: 1000, max: 3600000 }`. `/invoke` with an unknown tool (not in cache) triggers an on-demand re-enumeration before failing. If an invoke call returns a tool-not-found error from the MCP server, invalidate the cache entry and re-enumerate before retrying. This handles tools being removed between cache refreshes.
 
   **Downstream contract stability:** P0.9 (Hindsight banks) and P1.1 (A2A delegation) depend on this story's MCP invoke bridge and agent registry interfaces. Breaking changes to `RegisterAgentSchema`, `MCPInvokeSchema`, `MCPInvokeArgumentsSchema`, or the `/api/mcp-servers/{id}/invoke` response format MUST be treated as BLOCKER-level changes requiring coordinated updates to P0.9 and P1.1. The Dependency edges section in P0.9 and P1.1 reference these schemas by name.
 
@@ -117,7 +156,7 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
 - **Guards/limits:**
   - MCP server subprocess spawn timeout: 10 seconds
   - Tool invocation timeout: configurable via `SWARMCLAW_INVOKE_TIMEOUT_MS` env var; default **120 seconds**. Invoke timeout must be ≥ P0.9 consolidate timeout (60s default). P0.7 default raised to 120s to accommodate all P0.9 operations.
-  - Maximum registered MCP servers: 32
+  - Maximum registered MCP servers: 32. MCP server registration count check must be atomic (check + insert in a single synchronized operation) to prevent race conditions on the 32-server cap. For the in-memory store, use a write lock or synchronous check-then-insert pattern.
   - Maximum registered agents: 64
   - stdio transport must validate process exits cleanly on server shutdown
 
@@ -145,17 +184,17 @@ This story wires SwarmClaw's agent registry (`/api/agents`) and MCP server regis
   - `npx` — npm package runner (required for dev/CI invocation of `npx hindsight-local-mcp`)
   - `node_modules/.bin/hindsight-local-mcp` — local npm binary path (resolved to absolute path at startup based on SwarmClaw installation root; relative allowlist entries are canonicalized before comparison to prevent working-directory manipulation)
   When `command` is a general-purpose runtime (`node` or `npx`), the `args` array is validated against code-injection rules at registration time (before any subprocess is spawned):
-    - **`node`:** args must not contain `-e`, `--eval`, `-p`, `--print`, `-` (stdin mode), or `--require`/`-r` with a non-absolute path. Only script file paths (absolute or relative to the MCP server working directory) and Node.js CLI flags that do not enable inline code execution are permitted. Flags that accept inline JavaScript or stdin input are rejected with 400.
-    - **`npx`:** args must not contain `--node-arg`, `--node-args`, `-e`, or `--eval`. The first positional arg must be a valid npm package identifier (matching `^(@[a-z0-9][\w.-]*/)?[a-z0-9][\w.-]*$`). Flags that pass arbitrary arguments to the Node.js runtime are rejected with 400.
+    - **`node`:** args must not contain `-e`, `--eval`, `-p`, `--print`, `-` (stdin mode), or `--require`/`-r` with a non-absolute path. Only script file paths (absolute or relative to the MCP server working directory) and Node.js CLI flags that do not enable inline code execution are permitted. Flags that accept inline JavaScript or stdin input are rejected with 400. Residual risk: `--require` with an absolute path allows loading arbitrary modules from known filesystem locations. This is acceptable because MCP server registration requires trusted-operator access.
+    - **`npx`:** args must not contain `--node-arg`, `--node-args`, `-e`, or `--eval`. The first positional arg must match one of the entries in `SWARMCLAW_NPX_PACKAGE_ALLOWLIST` (env-var configurable, comma-separated). The `SWARMCLAW_NPX_PACKAGE_ALLOWLIST` env var is parsed as comma-separated with trimming: entries are split by `,` and each entry is `.trim()`-ed before comparison. The default allowlist includes: `hindsight-local-mcp`, `@anthropic-ai/claude-code`. Unknown packages are rejected with 400. This prevents arbitrary npm package execution through the MCP server registration path. Flags that pass arbitrary arguments to the Node.js runtime are also rejected with 400.
     - **Validation timing:** args are validated at MCP server registration time; invalid args produce a 400 response before any subprocess is spawned.
   The allowlist is extended via environment variable `SWARMCLAW_COMMAND_ALLOWLIST` (comma-separated absolute or basename paths, merged with defaults at startup). Arbitrary or unrecognized commands are rejected with 400. General-purpose shells (`sh`, `bash`, `zsh`, `python`, `python3`) remain excluded from both default and configurable allowlists because they enable unrestricted code execution regardless of argument restrictions.
-- **INV-SC3:** Environment variables passed to MCP server subprocesses are sourced ONLY from an explicit `env` map in the registration payload — never inherited from SwarmClaw's own process environment unless explicitly listed in a server-side allowlist (`SWARMCLAW_ENV_ALLOWLIST`).
-- **INV-SC4:** MCP server subprocess runs with no network listeners; stdio is the only communication channel. If the subprocess opens a TCP socket, the transport layer kills it within the spawn timeout.
+- **INV-SC3:** Environment variables passed to MCP server subprocesses are sourced ONLY from an explicit `env` map in the registration payload — never inherited from SwarmClaw's own process environment unless explicitly listed in a server-side allowlist (`SWARMCLAW_ENV_ALLOWLIST`). `SWARMCLAW_ENV_ALLOWLIST` is parsed as comma-separated with trimming: entries are split by `,` and each entry is `.trim()`-ed. Empty entries after trimming are ignored. Example: `PATH,HOME,  ,NODE_ENV` resolves to `['PATH', 'HOME', 'NODE_ENV']`.
+- **INV-SC4:** MCP server subprocess communicates exclusively via stdio. In containerized deployments (Phase 2), subprocesses run with dropped network capabilities. In Phase 1, network listener detection is best-effort (logging-only). The DoD test verifies that the subprocess communicates only via stdio by inspecting the transport layer, not by OS-level network monitoring.
 - **INV-SC5:** Secrets (API keys, tokens) in MCP server `env` are never logged or returned in GET/test responses — values are masked to `***` in any diagnostic output.
 
 ## Cross-Cutting Convention Notes
 
-- **Naming convention (CC-8):** JSON payloads at the SwarmClaw→MCP boundary use camelCase (`agentId`, not `agent_id`). Hindsight tool args may use snake_case internally (`bank_id`, `tool_name`) — the MCP bridge performs translation at the boundary. No existing fields are renamed; this note documents the convention for implementers.
+- **Naming convention (CC-8):** JSON payloads at the SwarmClaw→MCP boundary use camelCase (`agentId`, not `agent_id`). Hindsight tool args may use snake_case internally (`bank_id`, `source`, `content`) — the MCP bridge performs translation at the boundary. No existing fields are renamed; this note documents the convention for implementers.
 
 ## Observability Contract (CC-9)
 
@@ -176,25 +215,33 @@ Every MCP operation emits a structured log entry with the following minimum shap
 Additional MCP bridge timing fields:
 - `tool_enumeration_ms` — time to complete MCP `list-tools` handshake
 - `invoke_duration_ms` — time from tool call dispatch to subprocess response
-- `stdio_latency_ms` — round-trip stdio message latency
+- `stdio_latency_ms` — time from writing a JSON-RPC request to subprocess stdin to reading the first byte of the response from stdout (transport-level latency, excludes tool execution time)
 
 If the story already has a partial observability mechanism (e.g. coms-log), it is extended to match this contract. No operation may omit the `requestId` propagation — it is the join key for cross-layer tracing.
 
 ## Definition of Done
 
-> 8–12 high-signal, story-specific boxes. NO lint/tests/typecheck filler.
+> 18–22 high-signal, story-specific boxes. NO lint/tests/typecheck filler.
 
 - [ ] **Impl:** `POST /api/agents` creates an agent record with id, capabilities, and metadata; returns 201 with agent object
 - [ ] **Impl:** `POST /api/mcp-servers` spawns stdio transport to `hindsight-local-mcp`, completes MCP handshake (initialize + list-tools), stores server record; returns 201
 - [ ] **Impl:** `POST /api/mcp-servers/{id}/test` re-validates transport health and returns `{ ok: true, tools: [...] }`
 - [ ] **Impl:** `POST /api/mcp-servers/{id}/invoke` proxies a tool call to the MCP subprocess and returns the result
-- [ ] **Contract:** Zod schemas for `RegisterAgentSchema`, `RegisterMCPServerSchema`, `MCPTestResponseSchema`, `MCPInvokeSchema`, `MCPInvokeArgumentsSchema` validated on all routes
+- [ ] **Contract:** Zod schemas for `RegisterAgentSchema`, `RegisterMCPServerSchema`, `MCPTestResponseSchema`, `MCPInvokeSchema`, `MCPInvokeArgumentsSchema`, `MCPInvokeErrorResponseSchema` validated on all routes
 - [ ] **Integration:** stdio transport lifecycle (spawn, handshake, invoke, graceful shutdown) wired and exercised end-to-end with `hindsight-local-mcp`
 - [ ] **Security:** INV-SC1 through INV-SC5 enforced — agentId validated, command allowlist checked (including `node`/`npx` entries per INV-SC2), args validated against code-injection rules for runtime commands, env isolation confirmed, no secrets leaked in responses
 - [ ] **Test (unit/integration):** Agent registration + MCP registration + test endpoint returns ok:true with Hindsight tools listed; invoke retains a memory and recalls it
 - [ ] **Test (validation guard):** Invoke with invalid `bank_id` (fails P0.9 BankIdSchema regex) returns error `-32602` and does NOT call MCP server subprocess
 - [ ] **Test (allowlist coverage):** Default allowlist verified to include `node`, `npx`, `hindsight-local-mcp`, and `node_modules/.bin/hindsight-local-mcp`; shells (`sh`, `bash`, `python`) verified excluded; args validation verified — `node -e`/`--eval`/`-p`/`--print`/`-` rejected, `npx --node-arg`/`--node-args` rejected, valid args accepted
+- [ ] **Test (args coverage):** For each denied flag in INV-SC2 (`-e`, `--eval`, `-p`, `--print`, `-`, `--require`/`-r` with non-absolute path), verify `node` registration is rejected with 400 individually — no flag may pass validation untested
+- [ ] **Test (npx allowlist):** Register MCP server with `command: 'npx', args: ['malicious-pkg']` → verify 400 rejection. Register with `args: ['hindsight-local-mcp']` → verify accepted. Register with `args: ['@anthropic-ai/claude-code']` → verify accepted
 - [ ] **Test (guard):** Missing `hindsight-local-mcp` binary produces `{ ok: false, error: ... }` with HTTP 502 — never silently succeeds
 - [ ] **Test (e2e demo — MANDATORY):** Sequential script: register agent → register MCP server → test → invoke `retain` → invoke `recall` → assert recalled content matches retained content
-- [ ] **Test (lifecycle):** SIGTERM to SwarmClaw server propagates to MCP subprocesses; verify no orphan processes after shutdown
+- [ ] **Test (lifecycle):** SIGTERM to SwarmClaw server propagates to MCP subprocesses; verify subprocess PID exists before SIGTERM, then verify it no longer exists after 7s (2s SIGTERM + 5s grace); no orphan processes remain after shutdown
 - [ ] **Test (cache):** Invoke with tool not in cached list triggers re-enumeration; subsequent invoke succeeds
+- [ ] **Test (env isolation):** Register MCP server with `env: { FOO: 'bar' }` → verify subprocess sees exactly the allowed env vars (`FOO=bar` plus `SWARMCLAW_ENV_ALLOWLIST` entries) and does NOT see `SWARMCLAW_*`, `HINDSIGHT_*`, or any other internal SwarmClaw process env vars
+- [ ] **Test (capacity):** Register 33 MCP servers → verify 429 or 503 response. Register 65 agents → verify 429 or 503 response
+- [ ] **Test (duplicate name):** Register MCP server with `name: 'hindsight'` → 201. Register a second MCP server with same `name: 'hindsight'` → verify 409 Conflict response
+- [ ] **Test (SSRF):** Register agent with `endpointUrl: 'http://evil.com/api'` → verify 422 rejection. Register with `endpointUrl: 'http://localhost:3100/a2a'` → verify 201
+- [ ] **Test (concurrent cap):** Two concurrent registration requests when 31 servers exist → verify exactly one succeeds (201) and one fails (429/503)
+- [ ] **Test (args length):** Register MCP server with `args: ['a'.repeat(4097)]` → verify 400 rejection. Register with `args: ['a'.repeat(4096)]` → verify accepted
