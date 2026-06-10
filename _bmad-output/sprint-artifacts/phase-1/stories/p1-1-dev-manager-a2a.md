@@ -27,7 +27,7 @@ Register a "Dev Manager" agent with SwarmClaw via POST /api/agents, setting its 
 
 ## Acceptance Criteria
 
-1. **(make-or-break)** Given SwarmClaw is running, When POST /api/agents is called with `{ "agentId": "dev-manager", "agentType": "department-manager", "endpointUrl": "http://localhost:3100/harness" }`, Then the response is 201 with `{ "agentId": "dev-manager", "status": "registered" }`.
+1. **(make-or-break)** Given SwarmClaw is running, When POST /api/agents is called with `{ "agentId": "dev-manager", "agentType": "department-manager", "endpointUrl": "http://localhost:3100/a2a" }`, Then the response is 201 with `{ "agentId": "dev-manager", "status": "registered" }`.
 2. Given the Dev Manager agent is registered, When POST /api/a2a is called with JSON-RPC 2.0 body and headers `targetAgentId: dev-manager` / `requesterAgentId: orchestrator`, Then the request is forwarded to the CLI-Anything harness endpoint and the response is returned to the caller with matching correlation ID.
 3. Given the targetUrl is unreachable, When an A2A call is attempted, Then the onFailure policy fires and SwarmClaw returns a structured error response (not a 500 crash) within the configured timeoutMs.
 4. **(AC-B1)** Given a delegate request with correct agentId and task, When the Dev Manager processes it, Then it sends HTTP POST to `http://localhost:${process.env.SWARMCLAW_A2A_PORT || 3100}/a2a` with a JSON-RPC 2.0 envelope (`method: "a2a.delegate"`, `params.agentId`, `params.task`, `params.timeoutMs`, `params.requestId`) and returns the harness response to the caller within timeoutMs. If the harness is not listening (connection refused), returns error code -32010 with no subprocess fallback.

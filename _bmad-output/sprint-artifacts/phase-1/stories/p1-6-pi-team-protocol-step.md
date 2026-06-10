@@ -98,7 +98,7 @@ When the qds-factory protocol reaches a dispatch_task phase, SwarmClaw invokes t
 - [ ] **Integration:** Mulch priming loads context from specified Hindsight bank before Warren execution.
 - [ ] **Integration:** pi-lens gating validates Pi team output before capture (reject malformed output).
 - [ ] **Security:** changedFiles paths validated via decode-then-check: URL-decode, NFC-normalize Unicode, then reject `..` segments, encoded traversals (`%2e%2e`, double-encoded), absolute paths, and symlinks.
-- [ ] **Security:** Warren process resource-limited via harness watchdog: memory enforced (SIGTERM if >4GB RSS, checked every 5s), CPU advisory-only in Phase 1.
+- [ ] **Security:** Warren process resource-limited via harness watchdog: memory enforced (SIGTERM if >4GB RSS, checked every 200ms), CPU advisory-only in Phase 1.
 - [ ] **Test (empty bank):** Dispatch with empty Hindsight bank -> verify Pi team executes successfully with `mulchPrimed: false`.
 - [ ] **Test (unit):** Harness adapter constructs correct `warren run --config` invocation and manifest from dispatch_task config.
 - [ ] **Test (e2e demo — MANDATORY):** Run dispatch_task step -> verify Warren executes -> verify structured JSON captured as step output with exitStatus, changedFiles, testResults, summary fields.
