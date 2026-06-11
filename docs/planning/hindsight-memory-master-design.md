@@ -734,7 +734,7 @@ RULES:
           "recommended_next_intervention": {"type": "string"}
         },
         "required": ["failure_mode", "recurrence_count",
-                     "interventions_attempted"]
+                     "interventions_attempted", "interventions_effective"]
       },
       "maxItems": 5
     },
@@ -752,7 +752,7 @@ RULES:
           "evidence": {"type": "string",
             "description": "Required when implemented is true. Cite specific before/after observations demonstrating whether the intervention worked."}
         },
-        "required": ["intervention", "implemented", "measurable_improvement"]
+        "required": ["intervention", "implemented", "measurable_improvement", "evidence"]
       },
       "maxItems": 5
     },

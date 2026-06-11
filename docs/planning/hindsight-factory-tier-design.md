@@ -291,6 +291,8 @@ Not every project finding deserves factory-level attention. Promotion criteria:
 Each project-level agent appends a promotion step to its execution:
 
 ```python
+from datetime import datetime
+
 # Appended to each project agent's retention step
 def promote_to_factory(project_id: str, finding: dict, finding_type: str):
     """Promote a project-level finding to factory banks."""
@@ -298,6 +300,8 @@ def promote_to_factory(project_id: str, finding: dict, finding_type: str):
     # Only promote findings that meet criteria
     if not meets_promotion_criteria(finding, finding_type):
         return
+
+    run_date = datetime.utcnow().date().isoformat()
 
     # Enrich with project metadata
     promoted = {
