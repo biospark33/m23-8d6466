@@ -150,7 +150,7 @@ Configuration: `trigger={"refresh_after_consolidation": True}` on each model.
 
 | Hook | Action |
 |------|--------|
-| Pre-session | `recall(tags=["knowledge_type:charter"], match="all_strict")` + `recall(tags=["knowledge_type:antipattern"], match="all_strict")` |
+| Pre-session | `recall(tags=["knowledge_type:charter"], tags_match="all_strict")` + `recall(tags=["knowledge_type:antipattern"], tags_match="all_strict")` |
 | Post-session | `retain(session_summary, tags=[module:X, knowledge_type:Y, severity:Z])` |
 | Drift check | Absorbed into weekly Synthesizer run |
 
@@ -752,7 +752,7 @@ RULES:
           "evidence": {"type": "string",
             "description": "Required when implemented is true. Cite specific before/after observations demonstrating whether the intervention worked."}
         },
-        "required": ["intervention", "implemented", "measurable_improvement", "evidence"]
+        "required": ["intervention", "implemented", "measurable_improvement"]
       },
       "maxItems": 5
     },
@@ -1313,7 +1313,7 @@ for pattern in response.structured_output.get("recurring_patterns", []):
                 }),
                 "tags": ["knowledge_type:antipattern",
                          f"severity:{pattern['severity']}"],
-                "document_id": f"review-antipattern-{slugify(pattern['pattern'])}",
+                "document_id": f"review-antipattern-{pattern['pattern'].replace(' ', '-').lower()}",
                 "context": (f"Recurring issue caught by external reviewer across "
                             f"{pattern['frequency']} PRs in this harvest window. "
                             f"Lifetime occurrences: {pattern['total_lifetime_occurrences']}.")
@@ -1583,8 +1583,8 @@ Implementation: One-time seeding script during initial bank setup.
 
 | Hook | Action | Target |
 |------|--------|--------|
-| Pre-session | `recall(qds-product, tags=["knowledge_type:charter"], match="all_strict")` | Session context |
-| Pre-session | `recall(qds-product, tags=["knowledge_type:antipattern"], match="all_strict")` | Session context |
+| Pre-session | `recall(qds-product, tags=["knowledge_type:charter"], tags_match="all_strict")` | Session context |
+| Pre-session | `recall(qds-product, tags=["knowledge_type:antipattern"], tags_match="all_strict")` | Session context |
 | Pre-skill | `reflect(qds-meta, "What should I know about this skill?", tags=[skill:X], response_schema=...)` | Skill preparation |
 | Post-session | `retain(qds-product, session_summary, tags=[module:X, knowledge_type:Y])` | Bank ingestion |
 | Post-skill | `retain(qds-meta, skill_result, tags=[skill:X, outcome:Y, quality_dim:Z])` | Bank ingestion |

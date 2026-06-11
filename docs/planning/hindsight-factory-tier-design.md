@@ -291,6 +291,7 @@ Not every project finding deserves factory-level attention. Promotion criteria:
 Each project-level agent appends a promotion step to its execution:
 
 ```python
+import json
 from datetime import datetime
 
 # Appended to each project agent's retention step
