@@ -837,7 +837,7 @@ client.retain(
             "treatment_project": treatment,
             "control_project": control,
             "result": "success",
-            "effect_size": effect_size,
+            "effect_size": f"{effect_size * 100:+.1f}%",
             "promoted_to_factory_wide": True,
             "measurement_period_weeks": 4,
             "coderabbit_delta": treatment_security_comments.per_pr - control_security_comments.per_pr
@@ -901,7 +901,7 @@ client.retain(
             "type": "factory_transfer_proposal",
             "source_project": source_project,
             "intervention": intervention_description,
-            "evidence": f"Experiment showed {effect_size} improvement in {source_project}",
+            "evidence": f"Experiment showed {effect_size * 100:+.1f}% improvement in {source_project}",
             "similarity_score": similarity,
             "status": "proposed",
             "auto_applied": False  # Projects must explicitly accept
