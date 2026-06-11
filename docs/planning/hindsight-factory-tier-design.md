@@ -538,7 +538,7 @@ Step 4: Retain findings
 # Step 1: For each active project, fetch recent merged PRs
 for repo in $FACTORY_PROJECTS; do
   gh pr list --repo "$repo" --state merged --limit 10 \
-    --json number,title,mergedAt --jq '.[] | select(.mergedAt > (now - 259200) | todate) | .number'
+    --json number,title,mergedAt --jq '.[] | select((.mergedAt | fromdate) > (now - 259200)) | .number'
 done
 
 # Step 2: For each PR, fetch CodeRabbit/Gemini comments
@@ -809,7 +809,7 @@ control_security_comments = get_coderabbit_comments(
     since=experiment_start
 )
 
-effect_size = (treatment_security_comments.per_pr - control_security_comments.per_pr) / control_security_comments.per_pr
+effect_size = (treatment_security_comments.per_pr - control_security_comments.per_pr) / control_security_comments.per_pr if control_security_comments.per_pr > 0 else 0.0
 ```
 
 **Step 5 — Decision**:

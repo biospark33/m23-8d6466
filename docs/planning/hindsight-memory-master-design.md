@@ -1078,7 +1078,7 @@ Step 4: Retain findings into both banks
 ```bash
 # Fetch recently merged PRs (last 3 days)
 gh pr list --state merged --limit 15 --json number,title,mergedAt \
-  --jq '.[] | select(.mergedAt > (now - 259200) | todate) | .number'
+  --jq '.[] | select((.mergedAt | fromdate) > (now - 259200)) | .number'
 
 # For each PR, fetch CodeRabbit review comments (inline)
 gh api repos/biospark33/QDS-Factory/pulls/{PR_NUMBER}/comments \
