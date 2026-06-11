@@ -292,7 +292,7 @@ Each project-level agent appends a promotion step to its execution:
 
 ```python
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Appended to each project agent's retention step
 def promote_to_factory(project_id: str, finding: dict, finding_type: str):
@@ -302,7 +302,7 @@ def promote_to_factory(project_id: str, finding: dict, finding_type: str):
     if not meets_promotion_criteria(finding, finding_type):
         return
 
-    run_date = datetime.utcnow().date().isoformat()
+    run_date = datetime.now(timezone.utc).date().isoformat()
 
     # Enrich with project metadata
     promoted = {
@@ -814,7 +814,7 @@ control_security_comments = get_coderabbit_comments(
     since=experiment_start
 )
 
-effect_size = (treatment_security_comments.per_pr - control_security_comments.per_pr) / control_security_comments.per_pr if control_security_comments.per_pr > 0 else 0.0
+effect_size = (treatment_security_comments.per_pr - control_security_comments.per_pr) / control_security_comments.per_pr if control_security_comments.per_pr > 0 else (0.0 if treatment_security_comments.per_pr == 0 else 1.0)
 ```
 
 **Step 5 — Decision**:

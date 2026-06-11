@@ -1232,7 +1232,7 @@ RULES:
             "enum": ["new", "persistent", "declining", "resolved"]
           }
         },
-        "required": ["pattern", "category", "severity", "frequency", "trend"]
+        "required": ["pattern", "category", "severity", "frequency", "total_lifetime_occurrences", "trend"]
       },
       "maxItems": 10
     },
