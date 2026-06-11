@@ -626,7 +626,7 @@ done
           "project": {"type": "string"},
           "last_review_data": {"type": "string"},
           "days_silent": {"type": "integer"},
-          "concern": {"type": "string", "enum": ["no-recent-prs", "no-review-comments", "no-agent-runs"]}
+          "concern": {"type": "string", "enum": ["no-recent-prs", "no-review-comments", "no-review-tool-active", "no-agent-runs"]}
         }
       }
     },
@@ -646,6 +646,8 @@ done
   "required": ["coverage_gaps", "data_sufficiency"]
 }
 ```
+
+**Selection-time instrumentation gate**: The Factory Optimizer relies on this detector's findings during project selection for A/B experiments (Section 8.3 Step 2). Projects flagged with `no-review-comments` or `no-review-tool-active` are automatically excluded from treatment/control candidate lists — experiments cannot proceed without an active measurement instrument. The `unmeasured_projects` concern types are checked at selection-time, not just during this monthly run.
 
 ---
 
@@ -705,7 +707,7 @@ This loop takes ~8 weeks from first detection to factory-wide resolution. Withou
 
 Multiple projects provide natural treatment and control groups. The factory doesn't need a separate testing framework — it uses the portfolio as the experiment population.
 
-**Critical requirement**: CodeRabbit (or equivalent) must be active on ALL projects. CodeRabbit is the measurement instrument — consistent reviewer, same standards, every PR. Without it on all projects, there's no controlled comparison.
+**Critical requirement**: CodeRabbit (or equivalent) must be active on ALL projects. CodeRabbit is the measurement instrument — consistent reviewer, same standards, every PR. Without it on all projects, there's no controlled comparison. Projects without active review coverage are automatically excluded during experiment project selection (Section 8.3 Step 2) based on Factory Blind Spot Detector findings.
 
 ### 8.2 Experiment Lifecycle
 
@@ -740,19 +742,32 @@ measurement: "CodeRabbit security-category comment count per PR"
 **Step 2 — Project Selection**:
 
 ```python
-# Select treatment and control projects
+# Pre-verification: Exclude projects without active review coverage
+# (CodeRabbit or equivalent MUST be active — it is the measurement instrument)
+eligible = filter_projects(
+    require="active_review_coverage",
+    # Checked against Factory Blind Spot Detector findings:
+    # projects flagged with concern "no-review-comments" or
+    # "no-review-tool-active" are excluded
+    source="factory-blind-spot-detector-findings"
+)
+
+# Select treatment and control from eligible projects only
 treatment = select_project(
+    pool=eligible,
     criteria=["similar_tech_stack", "active_development", "no_existing_directive"],
     prefer="highest_current_issue_count"  # Maximize signal
 )
 
 control = select_project(
+    pool=eligible,
     criteria=["similar_tech_stack", "active_development", "no_existing_directive"],
     prefer="closest_match_to_treatment"
 )
 ```
 
 Projects must have:
+- **Active review coverage** (CodeRabbit or equivalent — gating requirement; projects without it are excluded from candidate lists with a reasoned rejection logged in factory-meta)
 - Similar tech stacks (fair comparison)
 - Active development (enough PRs to measure)
 - No pre-existing directive for the intervention (clean experiment)

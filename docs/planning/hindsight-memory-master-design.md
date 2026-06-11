@@ -116,7 +116,7 @@ reflect_mission: >
 | Label | Type | Tag | Values | Purpose |
 |-------|------|-----|--------|---------|
 | `knowledge_type` | `value` | `true` | `charter`, `decision`, `pattern`, `antipattern`, `state` | Hard SQL filtering at recall |
-| `module` | `value` | `true` | `harness`, `coms`, `auth`, `memory`, `cli`, `infra` | Module-scoped queries |
+| `module` | `value` | `true` | `harness`, `coms`, `auth`, `memory`, `cli`, `infra`, `factory` | Module-scoped queries |
 | `severity` | `value` | `true` | `critical`, `high`, `medium`, `low` | Priority-aware retrieval |
 
 #### Directives
@@ -226,6 +226,50 @@ Configuration: `trigger={"refresh_after_consolidation": True}` on each model.
 | Pre-skill-execution | `reflect("What should I know about this skill's strengths and pitfalls?", tags=[skill:X], response_schema=SKILL_PREP_SCHEMA)` |
 | Post-proactive-agent | `retain(agent_findings, tags=[skill:synthesizer|meta-optimizer|blind-spot-detector, outcome:insight|gap])` |
 
+**Pre-skill preparation schema** (`SKILL_PREP_SCHEMA`):
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "skill_strengths": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "What this skill does well based on past observations"
+    },
+    "known_pitfalls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pitfall": {"type": "string"},
+          "mitigation": {"type": "string"}
+        },
+        "required": ["pitfall", "mitigation"]
+      },
+      "description": "Recurring issues and how to avoid them"
+    },
+    "quality_dimension_focus": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Quality dimensions to watch during this skill execution"
+    },
+    "recommended_prep_actions": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Specific actions to take before running the skill"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "How confident the reflect is in this preparation advice, based on available data"
+    }
+  },
+  "required": ["skill_strengths", "known_pitfalls", "confidence"]
+}
+```
+
 ---
 
 ## 4. Proactive Agent Fleet
@@ -315,7 +359,7 @@ references. If data is insufficient for any analysis, state so explicitly.""",
           "dominant_severity": {"type": "string"},
           "key_concern": {"type": "string"}
         },
-        "required": ["module", "key_concern"]
+        "required": ["module", "antipattern_count_observations", "pattern_count_observations", "key_concern"]
       },
       "maxItems": 6
     },
@@ -332,7 +376,7 @@ references. If data is insufficient for any analysis, state so explicitly.""",
           "last_reinforced_approx": {"type": "string"},
           "risk_if_unaddressed": {"type": "string"}
         },
-        "required": ["observation_summary", "freshness_trend", "risk_if_unaddressed"]
+        "required": ["observation_summary", "freshness_trend", "severity", "module", "knowledge_type", "risk_if_unaddressed"]
       },
       "maxItems": 5
     },
@@ -394,12 +438,12 @@ Return only evidence-grounded findings. Cite specific observation counts.""",
         "type": "object",
         "properties": {
           "skill": {"type": "string"},
-          "success_rate_estimate": {"type": "string"},
+          "success_rate_estimate": {"type": "number", "minimum": 0, "maximum": 1},
           "weak_quality_dims": {"type": "array", "items": {"type": "string"}},
           "trend": {"type": "string", "enum": ["improving", "stable", "declining", "insufficient_data"]},
           "observation_count": {"type": "integer"}
         },
-        "required": ["skill", "trend"]
+        "required": ["skill", "success_rate_estimate", "observation_count", "trend"]
       }
     },
     "process_gaps": {
@@ -409,7 +453,7 @@ Return only evidence-grounded findings. Cite specific observation counts.""",
         "properties": {
           "skill": {"type": "string"},
           "available_observations": {"type": "integer"},
-          "minimum_for_analysis": {"type": "integer", "enum": [3]},
+          "minimum_for_analysis": {"type": "integer", "const": 3},
           "status": {"type": "string", "enum": ["insufficient", "marginal", "adequate"]}
         },
         "required": ["skill", "available_observations", "status"]
@@ -555,7 +599,7 @@ This retention ensures next week's Synthesizer run can observe:
 | Field | Value |
 |-------|-------|
 | **Agent name** | `meta-optimizer` |
-| **Schedule** | Biweekly — 1st and 15th at 07:23 local (`23 7 1,15 * *`) |
+| **Schedule** | Biweekly — 1st and 15th at 07:25 local (`25 7 1,15 * *`) |
 | **Banks touched** | `qds-meta` only |
 | **Budget** | `high` |
 | **Reflect calls per run** | 1 |
@@ -605,7 +649,13 @@ RULES:
   say so. Do not confabulate trends from sparse data.
 - Cite specific observation counts for every claim.
 - If fewer than 10 total observations exist in this bank, state that the
-  system is in early calibration and defer all trend claims.""",
+  system is in early calibration and defer all trend claims.
+- For any persistent_failure_modes entry that includes interventions_attempted,
+  you must also include interventions_effective (at minimum an empty array).
+  Listing what was tried without what worked produces unusable data.
+- For any intervention_effectiveness entry where implemented is true, the
+  evidence field must be present and non-empty. Without evidence, improvement
+  claims are unverifiable.""",
     budget="high",
     tags=["skill:synthesizer", "skill:meta-optimizer",
           "outcome:success", "outcome:failure", "outcome:missed",
@@ -677,7 +727,8 @@ RULES:
           },
           "interventions_effective": {
             "type": "array",
-            "items": {"type": "string"}
+            "items": {"type": "string"},
+            "description": "Required when interventions_attempted is non-empty. List which interventions produced measurable improvement. Empty array if none were effective."
           },
           "root_cause_hypothesis": {"type": "string"},
           "recommended_next_intervention": {"type": "string"}
@@ -698,7 +749,8 @@ RULES:
           },
           "implemented": {"type": "boolean"},
           "measurable_improvement": {"type": "boolean"},
-          "evidence": {"type": "string"}
+          "evidence": {"type": "string",
+            "description": "Required when implemented is true. Cite specific before/after observations demonstrating whether the intervention worked."}
         },
         "required": ["intervention", "implemented", "measurable_improvement"]
       },
@@ -755,7 +807,7 @@ client.retain(
 | Field | Value |
 |-------|-------|
 | **Agent name** | `blind-spot-detector` |
-| **Schedule** | Monthly — 1st at 07:23 local (`23 7 1 * *`) |
+| **Schedule** | Monthly — 1st at 07:27 local (`27 7 1 * *`) |
 | **Banks touched** | Both (`qds-product`, `qds-meta`) |
 | **Budget** | `mid` (analytical, not deep retrieval) |
 | **Reflect calls per run** | 2 (product + meta) |
@@ -899,7 +951,63 @@ rather than 'reliable'.""",
 )
 ```
 
-**Meta schema** (`BLIND_SPOT_META_SCHEMA`): Same structure as product schema, with `skill` replacing `module` and `outcome/quality_dim` replacing `knowledge_type`.
+**Meta schema** (`BLIND_SPOT_META_SCHEMA`):
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "coverage_gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "gap_description": {"type": "string"},
+          "skill": {"type": "string"},
+          "missing_outcome_or_quality_dim": {"type": "string",
+            "description": "The outcome type or quality dimension that is absent"
+          },
+          "expected": {"type": "string",
+            "description": "Why we'd expect this data to exist"
+          },
+          "actual": {"type": "string",
+            "description": "What was found instead (usually 'no observations')"
+          },
+          "risk": {"type": "string", "enum": ["high", "medium", "low"]},
+          "recommended_action": {"type": "string"}
+        },
+        "required": ["gap_description", "skill", "missing_outcome_or_quality_dim",
+                     "expected", "actual", "risk", "recommended_action"]
+      },
+      "maxItems": 10
+    },
+    "suspicious_absences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "skill": {"type": "string"},
+          "reason_for_suspicion": {"type": "string"},
+          "inference": {"type": "string",
+            "description": "What the absence suggests about the skill's observation coverage"
+          }
+        },
+        "required": ["skill", "reason_for_suspicion", "inference"]
+      },
+      "maxItems": 5
+    },
+    "completeness_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Fraction of expected skill×outcome×quality_dim cells that have observations"
+    },
+    "data_sufficiency": {"type": "string", "enum": ["sufficient", "marginal", "insufficient"]}
+  },
+  "required": ["coverage_gaps", "suspicious_absences",
+               "completeness_score", "data_sufficiency"]
+}
+```
 
 #### Step 3: Feedback Retention
 
@@ -1355,8 +1463,8 @@ prompt: |
   4. Retain findings in both banks
   See: docs/planning/hindsight-memory-master-design.md Section 4.2
 
-# Agent 2: Meta-Optimizer — Biweekly 1st and 15th at 07:23 local
-cron: "23 7 1,15 * *"
+# Agent 2: Meta-Optimizer — Biweekly 1st and 15th at 07:25 local
+cron: "25 7 1,15 * *"
 recurring: true
 durable: true
 prompt: |
@@ -1366,8 +1474,8 @@ prompt: |
   2. Retain findings in qds-meta bank
   See: docs/planning/hindsight-memory-master-design.md Section 4.3
 
-# Agent 3: Blind Spot Detector — Monthly 1st at 07:23 local
-cron: "23 7 1 * *"
+# Agent 3: Blind Spot Detector — Monthly 1st at 07:27 local
+cron: "27 7 1 * *"
 recurring: true
 durable: true
 prompt: |
@@ -1394,7 +1502,7 @@ prompt: |
   See: docs/planning/hindsight-memory-master-design.md Section 4.5
 ```
 
-Note: Agents 1–3 run at 07:23 local (off-minute to avoid API contention). The Review Harvester runs at 02:17 local — a different time window because it calls external APIs (GitHub) in addition to Hindsight, and nighttime execution minimizes interference with active development.
+Note: Agents 1–3 run at staggered minutes (07:23, 07:25, 07:27) to avoid API contention even when schedules coincide (e.g., the 1st falling on a Monday triggers both Synthesizer and Blind Spot Detector). The Review Harvester runs at 02:17 local — a different time window because it calls external APIs (GitHub) in addition to Hindsight, and nighttime execution minimizes interference with active development.
 
 ### 6.2 Integration with Existing Systems
 
@@ -1409,6 +1517,52 @@ Session ends
   → Bridge retains into appropriate Hindsight bank:
      - Product decisions → qds-product (tags: module:X, knowledge_type:decision)
      - Skill outcomes → qds-meta (tags: skill:X, outcome:Y, quality_dim:Z)
+```
+
+**Bridge classification rules**:
+
+The bridge must determine: (1) which content is relevant vs conversational noise, (2) which bank receives the content, and (3) which tags to apply. Classification is performed by the LLM using the bank missions as guidance — the rules below define the expected routing behavior.
+
+**Classification routing table**:
+
+| Content signal | Target bank | Tags | Classification cues |
+|---------------|-------------|------|-------------------|
+| Architectural choice or trade-off | `qds-product` | `knowledge_type:decision` + `module:X` | "decided", "chose", "trade-off", "instead of"; references to modules, APIs, schemas |
+| Bug pattern or recurring error | `qds-product` | `knowledge_type:antipattern` + `module:X` + `severity:Y` | "bug", "broken", "doesn't work"; failed tests, review findings |
+| Proven approach or successful pattern | `qds-product` | `knowledge_type:pattern` + `module:X` | "works well", "resolved", "passed all tests"; repeatable method |
+| Charter principle referenced | `qds-product` | `knowledge_type:charter` + `module:X` | References to PRD rules, security invariants, non-negotiable constraints |
+| Current module/feature state | `qds-product` | `knowledge_type:state` + `module:X` | "now supports", "currently implements", status updates |
+| Skill execution result | `qds-meta` | `skill:X` + `outcome:Y` + `quality_dim:Z` | Skill name in session context; success/partial/failure outcome |
+
+**Precedence**: When content matches multiple categories, `charter` > `antipattern` > `decision` > `pattern` > `state`. Charter principles and antipatterns are higher-priority knowledge that should never be misclassified.
+
+**Module tagging heuristics** (when module is not explicitly named):
+
+1. Map file paths to modules via project directory structure
+2. If multiple modules are referenced, split into separate retain calls
+3. If no module is identifiable but content is factory-related, use `module:factory`
+4. If module assignment confidence is low, omit the module tag rather than mis-tag
+
+**Multi-topic sessions**: Split into multiple retain calls, each containing a single coherent topic with consistent tags. Do not bundle unrelated topics into a single retain.
+
+**Bridge call input/output schema**:
+
+```json
+{
+  "input": {
+    "session_observation": "string — Swarmclaw session content",
+    "files_touched": ["string — file paths modified during session"],
+    "skills_used": ["string — skills invoked during session"]
+  },
+  "outputs": [
+    {
+      "bank_id": "qds-product | qds-meta",
+      "content": "string — extracted relevant content",
+      "tags": ["module:X", "knowledge_type:Y | skill:X", "outcome:Y", "quality_dim:Z"],
+      "session_id": "string — source session identifier"
+    }
+  ]
+}
 ```
 
 Implementation: Claude Code post-session hook that calls the bridge.
@@ -1461,6 +1615,11 @@ Before agent implementation, the Hindsight server must be configured with:
 | Review Harvester | 10 | 1 + gh CLI | 8–12k | 80–120k |
 | **Total** | **17–18** | **—** | **—** | **168–260k** |
 
+> **Note**: The token estimates above are **lower bounds** reflecting only reflect-call costs. Actual monthly token usage will be higher due to three additional sources not included in this table:
+> 1. **Retain operations** — verbose-mode extraction of facts/entities/relationships during post-session and post-agent retention
+> 2. **Observation consolidation** — automatic background runs that merge and refine observations after each retain
+> 3. **Review Harvester context** — GitHub PR comment ingestion adds input tokens proportional to review volume
+
 ### 7.2 Operational Guarantees
 
 | Guarantee | Mechanism |
@@ -1470,7 +1629,7 @@ Before agent implementation, the Hindsight server must be configured with:
 | **Failure recovery** | Agents are stateless. All state lives in Hindsight observations. If a run fails, the next scheduled run picks up from observation state. No external state to corrupt. |
 | **Audit trail** | `include_facts=True` on every reflect call. Every finding is traceable to specific memories and observations. |
 | **Self-throttling** | `system_maturity` field in Meta-Optimizer output causes early-calibration deferral when insufficient data exists. The system doesn't pretend to be insightful when it's still learning. |
-| **No operational clustering** | Schedules staggered across weekly/biweekly/monthly at an off-minute (07:23, not 07:00). |
+| **No operational clustering** | Schedules staggered across weekly/biweekly/monthly at distinct off-minutes (07:23, 07:25, 07:27) to prevent overlap when schedules coincide (e.g., the 1st falling on a Monday triggers both Synthesizer and Blind Spot Detector). |
 
 ### 7.3 Monitoring
 
@@ -1607,7 +1766,7 @@ All response schemas referenced in this document, consolidated for implementatio
 | `META_OPTIMIZER_SCHEMA` | Meta-Optimizer Step 1 | Section 4.3, Step 1 |
 | `BLIND_SPOT_PRODUCT_SCHEMA` | Blind Spot Detector Step 1 | Section 4.4, Step 1 |
 | `BLIND_SPOT_META_SCHEMA` | Blind Spot Detector Step 2 | Section 4.4, Step 2 |
-| `SKILL_PREP_SCHEMA` | Pre-skill hook | To be defined during implementation |
+| `SKILL_PREP_SCHEMA` | Pre-skill hook | Section 3.2 (Pre-skill preparation schema) |
 | `REVIEW_HARVEST_SCHEMA` | Review Harvester Step 3 | Section 4.5, Step 3 |
 
 ## Appendix B: Entity Label Complete Definitions
@@ -1641,7 +1800,8 @@ All response schemas referenced in this document, consolidated for implementatio
         {"value": "auth", "description": "Authentication and authorization"},
         {"value": "memory", "description": "Memory management and persistence"},
         {"value": "cli", "description": "Command-line interface"},
-        {"value": "infra", "description": "Infrastructure, deployment, CI/CD"}
+        {"value": "infra", "description": "Infrastructure, deployment, CI/CD"},
+        {"value": "factory", "description": "Factory-level processes, agent findings, and cross-cutting concerns"}
       ]
     },
     {

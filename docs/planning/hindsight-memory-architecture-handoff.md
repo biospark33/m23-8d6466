@@ -23,7 +23,7 @@ A two-bank Hindsight memory system that makes QDS-Factory self-improving — bot
 | Label | Values | Purpose |
 |-------|--------|---------|
 | `knowledge_type` | `charter`, `decision`, `pattern`, `antipattern`, `state` | Hard SQL filtering at recall |
-| `module` | `harness`, `coms`, `auth`, `memory`, `cli`, `infra` | Module-scoped queries |
+| `module` | `harness`, `coms`, `auth`, `memory`, `cli`, `infra`, `factory` | Module-scoped queries |
 | `severity` | `critical`, `high`, `medium`, `low` | Priority-aware retrieval |
 
 **Key configuration**:
