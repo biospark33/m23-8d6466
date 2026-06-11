@@ -752,7 +752,13 @@ RULES:
           "evidence": {"type": "string",
             "description": "Required when implemented is true. Cite specific before/after observations demonstrating whether the intervention worked."}
         },
-        "required": ["intervention", "implemented", "measurable_improvement"]
+        "required": ["intervention", "implemented", "measurable_improvement"],
+        "if": {
+          "properties": { "implemented": { "const": true } }
+        },
+        "then": {
+          "required": ["evidence"]
+        }
       },
       "maxItems": 5
     },

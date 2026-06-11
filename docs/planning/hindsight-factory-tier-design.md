@@ -770,7 +770,7 @@ treatment = select_project(
 )
 
 control = select_project(
-    pool=eligible,
+    pool=[p for p in eligible if p != treatment],
     criteria=["similar_tech_stack", "active_development", "no_existing_directive"],
     prefer="closest_match_to_treatment"
 )
