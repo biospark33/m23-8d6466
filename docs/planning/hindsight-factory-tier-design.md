@@ -1216,7 +1216,7 @@ prompt: |
   See: docs/planning/hindsight-factory-tier-design.md Section 6.4
 ```
 
-Note: Factory monthly/biweekly agents run on the 2nd/16th, after project-level agents have completed on the 1st/16th and promoted their findings. The Portfolio Review Harvester runs at 03:31, staggered 1+ hours from the project-level Review Harvester at 02:17, avoiding GitHub API rate-limit contention while allowing promotions to propagate.
+Note: Factory monthly/biweekly agents run on the 2nd/16th, after project-level agents have completed on the 1st/15th and promoted their findings. The Portfolio Review Harvester runs at 03:31, staggered 1+ hours from the project-level Review Harvester at 02:17, avoiding GitHub API rate-limit contention while allowing promotions to propagate.
 
 ---
 
