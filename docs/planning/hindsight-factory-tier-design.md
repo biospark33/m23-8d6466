@@ -341,11 +341,11 @@ def promote_to_factory(project_id: str, finding: dict, finding_type: str):
     # Map tags to bank-specific entity labels:
     # factory-product uses knowledge_type (directive, antipattern, etc.)
     # factory-meta uses finding_type (no knowledge_type label defined)
-    tags = [f"source_project:{project_id}", "promoted:true"]
+    tags = ["promoted:true"]
     if target_bank == "factory-product":
         tags.append(f"knowledge_type:{finding_type}")
     else:
-        tags.append(f"finding_type:{finding_type}")
+        tags.extend([f"source_project:{project_id}", f"finding_type:{finding_type}"])
 
     client.retain(
         bank_id=target_bank,
@@ -820,7 +820,7 @@ client.retain(
             "source": "factory-experiment",
             "experiment_id": f"exp-{slug}"
         }),
-        "tags": ["knowledge_type:charter", "quality_dim:security", "experiment:active"],
+        "tags": ["knowledge_type:charter", "severity:high"],
         "document_id": f"exp-{slug}-directive"
     }]
 )
@@ -877,7 +877,7 @@ client.retain(
             "measurement_period_weeks": 4,
             "coderabbit_delta": treatment_security_comments.per_pr - control_security_comments.per_pr
         }),
-        "tags": ["experiment_status:completed-success", f"quality_dim:security"],
+        "tags": ["experiment_status:completed-success"],
         "document_id": f"exp-{slug}-result"
     }]
 )
@@ -1024,7 +1024,7 @@ For each active project:
         bank_id=f"qds-product-{project}",
         items=[{
             "content": directive_content,
-            "tags": ["knowledge_type:charter", "source:factory-wide", "severity:high"],
+            "tags": ["knowledge_type:charter", "severity:high"],
             "document_id": f"factory-directive-{directive_id}"
         }]
     )
@@ -1046,7 +1046,7 @@ client.retain(
             "reason": "Project uses different auth framework where this directive doesn't apply",
             "alternative": "Local validation rule for this framework instead"
         }),
-        "tags": ["knowledge_type:charter", "source:project-local"],
+        "tags": ["knowledge_type:charter"],
         "document_id": f"override-factory-directive-{directive_id}"
     }]
 )
@@ -1084,7 +1084,8 @@ for directive in factory_directives.observations:
         bank_id=f"qds-product-{new_project}",
         items=[{
             "content": directive.content,
-            "tags": [t if t != "knowledge_type:directive" else "knowledge_type:charter" for t in directive.tags] + ["source:factory-bootstrap"],
+            # Filter to qds-product-valid entity labels only (knowledge_type, module, severity)
+            "tags": [t if t != "knowledge_type:directive" else "knowledge_type:charter" for t in directive.tags if t.split(":")[0] in ("knowledge_type", "module", "severity")],
             "document_id": directive.document_id
         }]
     )
