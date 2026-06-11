@@ -313,7 +313,7 @@ def promote_to_factory(project_id: str, finding: dict, finding_type: str):
     }
 
     # Route to appropriate factory bank
-    if finding_type in ("antipattern", "directive", "skill"):
+    if finding_type in ("antipattern", "directive"):
         target_bank = "factory-product"
     else:
         target_bank = "factory-meta"
@@ -437,7 +437,7 @@ Step 4: Retain cross-project insights
 | Field | Value |
 |-------|-------|
 | **Agent name** | `factory-optimizer` |
-| **Schedule** | Biweekly 1st and 16th at 03:23 local (`23 3 1,16 * *`) |
+| **Schedule** | Biweekly 2nd and 16th at 03:23 local (`23 3 2,16 * *`) |
 | **Banks touched** | Both factory banks |
 | **Budget** | `mid` |
 | **Reflect calls per run** | 2 |
@@ -513,7 +513,7 @@ Step 4: Retain findings
     },
     "data_sufficiency": {"type": "string", "enum": ["sufficient", "marginal", "insufficient"]}
   },
-  "required": ["portfolio_trajectory", "data_sufficiency"]
+  "required": ["portfolio_trajectory", "active_experiments", "completed_experiments", "next_experiment_recommendation", "data_sufficiency"]
 }
 ```
 
@@ -522,7 +522,7 @@ Step 4: Retain findings
 | Field | Value |
 |-------|-------|
 | **Agent name** | `portfolio-review-harvester` |
-| **Schedule** | Every 3 days at 02:31 local (`31 2 */3 * *`) |
+| **Schedule** | Every 3 days at 03:31 local (`31 3 */3 * *`) |
 | **Banks touched** | `factory-meta` (primary), `factory-product` (for antipatterns) |
 | **Budget** | `mid` |
 | **Reflect calls per run** | 1 |
@@ -594,7 +594,7 @@ done
     },
     "data_sufficiency": {"type": "string", "enum": ["sufficient", "marginal", "insufficient"]}
   },
-  "required": ["portfolio_summary", "data_sufficiency"]
+  "required": ["portfolio_summary", "cross_project_patterns", "portfolio_quality_trend", "data_sufficiency"]
 }
 ```
 
@@ -603,7 +603,7 @@ done
 | Field | Value |
 |-------|-------|
 | **Agent name** | `factory-blind-spot` |
-| **Schedule** | Monthly 1st at 03:07 local (`7 3 1 * *`) |
+| **Schedule** | Monthly 2nd at 03:07 local (`7 3 2 * *`) |
 | **Banks touched** | Both factory banks |
 | **Budget** | `mid` |
 | **Reflect calls per run** | 2 |
@@ -648,7 +648,7 @@ done
     },
     "data_sufficiency": {"type": "string", "enum": ["sufficient", "marginal", "insufficient"]}
   },
-  "required": ["coverage_gaps", "data_sufficiency"]
+  "required": ["unmeasured_projects", "coverage_gaps", "data_sufficiency"]
 }
 ```
 
@@ -1105,9 +1105,9 @@ New projects start with the factory's accumulated learnings from day one. This i
 | Agent | Schedule | Cron | Reflect calls/run | Runs/month |
 |-------|----------|------|--------------------|------------|
 | Cross-Project Synthesizer | Weekly Wed 03:11 | `11 3 * * 3` | 2 | 4–5 |
-| Factory Optimizer | Biweekly 1st/16th 03:23 | `23 3 1,16 * *` | 2 | 2 |
-| Portfolio Review Harvester | Every 3 days 02:31 | `31 2 */3 * *` | 1 | 10 |
-| Factory Blind Spot Detector | Monthly 1st 03:07 | `7 3 1 * *` | 2 | 1 |
+| Factory Optimizer | Biweekly 2nd/16th 03:23 | `23 3 2,16 * *` | 2 | 2 |
+| Portfolio Review Harvester | Every 3 days 03:31 | `31 3 */3 * *` | 1 | 10 |
+| Factory Blind Spot Detector | Monthly 2nd 03:07 | `7 3 2 * *` | 2 | 1 |
 | **Total** | | | **~7** | **~18** |
 
 ### 13.2 Total System Cost (Project + Factory)
@@ -1135,8 +1135,8 @@ prompt: |
   4. Retain cross-project insights in factory banks
   See: docs/planning/hindsight-factory-tier-design.md Section 6.1
 
-# Factory Agent 2: Factory Optimizer — Biweekly 1st/16th 03:23
-cron: "23 3 1,16 * *"
+# Factory Agent 2: Factory Optimizer — Biweekly 2nd/16th 03:23
+cron: "23 3 2,16 * *"
 recurring: true
 durable: true
 prompt: |
@@ -1148,8 +1148,8 @@ prompt: |
   5. Retain findings in factory banks
   See: docs/planning/hindsight-factory-tier-design.md Section 6.2
 
-# Factory Agent 3: Portfolio Review Harvester — Every 3 days 02:31
-cron: "31 2 */3 * *"
+# Factory Agent 3: Portfolio Review Harvester — Every 3 days 03:31
+cron: "31 3 */3 * *"
 recurring: true
 durable: true
 prompt: |
@@ -1162,8 +1162,8 @@ prompt: |
   6. Retain portfolio analysis in factory-meta
   See: docs/planning/hindsight-factory-tier-design.md Section 6.3
 
-# Factory Agent 4: Factory Blind Spot Detector — Monthly 1st 03:07
-cron: "7 3 1 * *"
+# Factory Agent 4: Factory Blind Spot Detector — Monthly 2nd 03:07
+cron: "7 3 2 * *"
 recurring: true
 durable: true
 prompt: |
@@ -1174,7 +1174,7 @@ prompt: |
   See: docs/planning/hindsight-factory-tier-design.md Section 6.4
 ```
 
-Note: Factory agents run between 02:31–03:23 local, a window that doesn't overlap with project-level agent schedules (02:17 and 07:23). This avoids API contention between tiers.
+Note: Factory monthly/biweekly agents run on the 2nd/16th, after project-level agents have completed on the 1st/16th and promoted their findings. The Portfolio Review Harvester runs at 03:31, staggered 1+ hours from the project-level Review Harvester at 02:17, avoiding GitHub API rate-limit contention while allowing promotions to propagate.
 
 ---
 

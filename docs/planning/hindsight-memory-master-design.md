@@ -777,8 +777,8 @@ RULES:
     "data_sufficiency_note": {"type": "string"}
   },
   "required": ["system_maturity", "improvement_trajectory",
-               "persistent_failure_modes", "top_recommendation",
-               "meta_confidence"]
+               "persistent_failure_modes", "intervention_effectiveness",
+               "top_recommendation", "meta_confidence"]
 }
 ```
 
@@ -1277,7 +1277,7 @@ RULES:
     }
   },
   "required": ["harvest_summary", "recurring_patterns",
-               "quality_trend", "data_sufficiency"]
+               "quality_trend", "top_intervention", "data_sufficiency"]
 }
 ```
 
