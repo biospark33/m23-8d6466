@@ -1734,4 +1734,10 @@ Invoke via skill: `/hindsight-docs`
 
 ---
 
-*End of document. This is the canonical reference for QDS-Factory Hindsight memory system implementation. All sessions implementing, modifying, or extending this system should read this document first.*
+---
+
+**Upstream extension**: This document defines the **project-level** memory tier. The factory tier — cross-project learning, A/B testing, and self-optimization across the entire QDS portfolio — is defined in [QDS-MEM-002](hindsight-factory-tier-design.md). The factory tier is purely additive and requires no changes to this document's architecture.
+
+---
+
+*End of document. This is the canonical reference for QDS-Factory project-level Hindsight memory system implementation. All sessions implementing, modifying, or extending this system should read this document first. For factory-tier cross-project architecture, see QDS-MEM-002.*
