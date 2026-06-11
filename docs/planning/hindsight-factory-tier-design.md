@@ -263,6 +263,18 @@ The factory tier is **purely additive**. It requires zero changes to QDS-MEM-001
         {"value": "transfer-success-rate", "description": "Intervention transfer success rate"},
         {"value": "portfolio-variance", "description": "Quality variance across projects"}
       ]
+    },
+    {
+      "key": "finding_type",
+      "type": "multi-values",
+      "tag": true,
+      "values": [
+        {"value": "insight", "description": "Agent insight with cross-project relevance"},
+        {"value": "skill-outcome", "description": "Skill outcome aggregate"},
+        {"value": "drift-alert", "description": "Drift signal alert"},
+        {"value": "completeness-gap", "description": "Blind spot completeness gap"},
+        {"value": "directive-override", "description": "Directive override by a project"}
+      ]
     }
   ]
 }

@@ -35,7 +35,7 @@ A two-bank Hindsight memory system that makes QDS-Factory self-improving — bot
 
 **Operational surface**:
 - After session: `retain(session_summary, tags=[module:X, story:Y])`
-- Before session: `recall(tags=["knowledge_type:charter"], tags_match="all_strict")` + `recall(tags=["knowledge_type:antipattern"])`
+- Before session: `recall(tags=["knowledge_type:charter"], tags_match="all")` + `recall(tags=["knowledge_type:antipattern"], tags_match="all")`
 - Drift check: `reflect("What contradicts our charter?")` with `include_facts=True`
 
 ### Bank 2: `qds-meta` — The factory improving itself

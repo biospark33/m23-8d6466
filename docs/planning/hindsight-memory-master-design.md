@@ -150,7 +150,7 @@ Configuration: `trigger={"refresh_after_consolidation": True}` on each model.
 
 | Hook | Action |
 |------|--------|
-| Pre-session | `recall(tags=["knowledge_type:charter"], tags_match="all_strict")` + `recall(tags=["knowledge_type:antipattern"], tags_match="all_strict")` |
+| Pre-session | `recall(tags=["knowledge_type:charter"], tags_match="all")` + `recall(tags=["knowledge_type:antipattern"], tags_match="all")` |
 | Post-session | `retain(session_summary, tags=[module:X, knowledge_type:Y, severity:Z])` |
 | Drift check | Absorbed into weekly Synthesizer run |
 
@@ -1587,8 +1587,8 @@ Implementation: One-time seeding script during initial bank setup.
 
 | Hook | Action | Target |
 |------|--------|--------|
-| Pre-session | `recall(qds-product, tags=["knowledge_type:charter"], tags_match="all_strict")` | Session context |
-| Pre-session | `recall(qds-product, tags=["knowledge_type:antipattern"], tags_match="all_strict")` | Session context |
+| Pre-session | `recall(qds-product, tags=["knowledge_type:charter"], tags_match="all")` | Session context |
+| Pre-session | `recall(qds-product, tags=["knowledge_type:antipattern"], tags_match="all")` | Session context |
 | Pre-skill | `reflect(qds-meta, "What should I know about this skill?", tags=[skill:X], response_schema=...)` | Skill preparation |
 | Post-session | `retain(qds-product, session_summary, tags=[module:X, knowledge_type:Y])` | Bank ingestion |
 | Post-skill | `retain(qds-meta, skill_result, tags=[skill:X, outcome:Y, quality_dim:Z])` | Bank ingestion |
