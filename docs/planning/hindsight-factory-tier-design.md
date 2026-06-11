@@ -83,7 +83,7 @@ The factory tier is **purely additive**. It requires zero changes to QDS-MEM-001
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Key property**: Factory agents read from and write to **factory banks only**. They do not access project banks directly. Project findings reach factory banks through the promotion pipeline (Section 5). This keeps the two tiers decoupled — a project can be added or removed without any factory-level configuration changes beyond bank registration.
+**Key property**: Factory agents **read** from factory banks only — they never reflect on or recall from project banks. For **writes**, factory agents target factory banks for all analytical output, with two architecturally intentional downward-flow exceptions: transfer proposals written to project meta banks (Section 9.3) and propagated directives written to project product banks (Section 11.1). These downward writes require no changes to project-level agents or their recall logic (Principle F1). Project findings reach factory banks through the promotion pipeline (Section 5). This keeps the two tiers decoupled — a project can be added or removed without any factory-level configuration changes beyond bank registration.
 
 ---
 
@@ -291,6 +291,7 @@ Not every project finding deserves factory-level attention. Promotion criteria:
 Each project-level agent appends a promotion step to its execution:
 
 ```python
+import hashlib
 import json
 from datetime import datetime, timezone
 
@@ -312,6 +313,12 @@ def promote_to_factory(project_id: str, finding: dict, finding_type: str):
         "finding_type": finding_type,
     }
 
+    # Collision-safe document ID: hash the finding content to prevent
+    # same-day same-type overwrites when multiple findings are promoted
+    finding_hash = hashlib.md5(
+        json.dumps(finding, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:8]
+
     # Route to appropriate factory bank
     if finding_type in ("antipattern", "directive"):
         target_bank = "factory-product"
@@ -327,7 +334,7 @@ def promote_to_factory(project_id: str, finding: dict, finding_type: str):
                 f"finding_type:{finding_type}",
                 "promoted:true",
             ],
-            "document_id": f"promoted-{project_id}-{finding_type}-{run_date}",
+            "document_id": f"promoted-{project_id}-{finding_type}-{run_date}-{finding_hash}",
             "context": f"Promoted from project {project_id} {finding_type} analysis"
         }]
     )

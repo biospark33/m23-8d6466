@@ -750,15 +750,9 @@ RULES:
           "implemented": {"type": "boolean"},
           "measurable_improvement": {"type": "boolean"},
           "evidence": {"type": "string",
-            "description": "Required when implemented is true. Cite specific before/after observations demonstrating whether the intervention worked."}
+            "description": "Required. When implemented is true, cite specific before/after observations. When implemented is false, use empty string."}
         },
-        "required": ["intervention", "implemented", "measurable_improvement"],
-        "if": {
-          "properties": { "implemented": { "const": true } }
-        },
-        "then": {
-          "required": ["evidence"]
-        }
+        "required": ["intervention", "implemented", "measurable_improvement", "evidence"]
       },
       "maxItems": 5
     },
