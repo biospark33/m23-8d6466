@@ -672,8 +672,8 @@ The factory tier's core value proposition: patterns that span multiple projects 
 
 ```
 weight = 1                              if projects_affected == 1
-weight = 5 * (projects_affected - 1)    if projects_affected == 2
-weight = 10 * (projects_affected - 1)   if projects_affected >= 3
+weight = 5                              if projects_affected == 2
+weight = 10                             if projects_affected >= 3
 ```
 
 ### 7.2 Amplification in Practice
@@ -814,7 +814,7 @@ control_security_comments = get_coderabbit_comments(
     since=experiment_start
 )
 
-effect_size = (treatment_security_comments.per_pr - control_security_comments.per_pr) / control_security_comments.per_pr if control_security_comments.per_pr > 0 else (0.0 if treatment_security_comments.per_pr == 0 else 1.0)
+effect_size = (control_security_comments.per_pr - treatment_security_comments.per_pr) / control_security_comments.per_pr if control_security_comments.per_pr > 0 else (0.0 if treatment_security_comments.per_pr == 0 else -1.0)
 ```
 
 **Step 5 — Decision**:
