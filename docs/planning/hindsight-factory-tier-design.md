@@ -285,6 +285,7 @@ Not every project finding deserves factory-level attention. Promotion criteria:
 | Skill outcome | All outcomes promoted | `factory-meta` as `skill-outcome` aggregate |
 | Drift signal | `action_required: true` only | `factory-meta` as `drift-alert` |
 | Blind spot gap | Any gap | `factory-meta` as `completeness-gap` |
+| Directive override (from project-level override) | Any override of a factory-wide directive | `factory-meta` as `directive-override` |
 
 ### 5.2 Promotion Implementation
 
@@ -325,15 +326,20 @@ def promote_to_factory(project_id: str, finding: dict, finding_type: str):
     else:
         target_bank = "factory-meta"
 
+    # Map tags to bank-specific entity labels:
+    # factory-product uses knowledge_type (directive, antipattern, etc.)
+    # factory-meta uses finding_type (no knowledge_type label defined)
+    tags = [f"source_project:{project_id}", "promoted:true"]
+    if target_bank == "factory-product":
+        tags.append(f"knowledge_type:{finding_type}")
+    else:
+        tags.append(f"finding_type:{finding_type}")
+
     client.retain(
         bank_id=target_bank,
         items=[{
             "content": json.dumps(promoted),
-            "tags": [
-                f"source_project:{project_id}",
-                f"finding_type:{finding_type}",
-                "promoted:true",
-            ],
+            "tags": tags,
             "document_id": f"promoted-{project_id}-{finding_type}-{run_date}-{finding_hash}",
             "context": f"Promoted from project {project_id} {finding_type} analysis"
         }]
@@ -802,7 +808,7 @@ client.retain(
             "source": "factory-experiment",
             "experiment_id": f"exp-{slug}"
         }),
-        "tags": ["knowledge_type:directive", "quality_dim:security", "experiment:active"],
+        "tags": ["knowledge_type:charter", "quality_dim:security", "experiment:active"],
         "document_id": f"exp-{slug}-directive"
     }]
 )
@@ -918,7 +924,7 @@ client.retain(
             "status": "proposed",
             "auto_applied": False  # Projects must explicitly accept
         }),
-        "tags": ["knowledge_type:transfer-proposal", "outcome:pending"],
+        "tags": ["skill:meta-optimizer", "outcome:gap"],
         "document_id": f"transfer-{source_project}-{target_project}-{slug}"
     }]
 )
@@ -1001,7 +1007,7 @@ For each active project:
         bank_id=f"qds-product-{project}",
         items=[{
             "content": directive_content,
-            "tags": ["knowledge_type:directive", "source:factory-wide", "priority:high"],
+            "tags": ["knowledge_type:charter", "source:factory-wide", "priority:high"],
             "document_id": f"factory-directive-{directive_id}"
         }]
     )
@@ -1023,9 +1029,21 @@ client.retain(
             "reason": "Project uses different auth framework where this directive doesn't apply",
             "alternative": "Local validation rule for this framework instead"
         }),
-        "tags": ["knowledge_type:directive-override", "source:project-local"],
+        "tags": ["knowledge_type:charter", "source:project-local"],
         "document_id": f"override-factory-directive-{directive_id}"
     }]
+)
+
+# Promote override to factory so the Factory Optimizer can track it
+# (factory agents read only factory banks per Principle F2)
+promote_to_factory(
+    project_id="MY_PROJECT",
+    finding={
+        "overrides": f"factory-directive-{directive_id}",
+        "reason": "Project uses different auth framework where this directive doesn't apply",
+        "alternative": "Local validation rule for this framework instead"
+    },
+    finding_type="directive-override"
 )
 ```
 
@@ -1049,7 +1067,7 @@ for directive in factory_directives.observations:
         bank_id=f"qds-product-{new_project}",
         items=[{
             "content": directive.content,
-            "tags": directive.tags + ["source:factory-bootstrap"],
+            "tags": [t if t != "knowledge_type:directive" else "knowledge_type:charter" for t in directive.tags] + ["source:factory-bootstrap"],
             "document_id": directive.document_id
         }]
     )
