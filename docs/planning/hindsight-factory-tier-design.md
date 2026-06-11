@@ -844,7 +844,12 @@ control_security_comments = get_coderabbit_comments(
     since=experiment_start
 )
 
-effect_size = (control_security_comments.per_pr - treatment_security_comments.per_pr) / control_security_comments.per_pr if control_security_comments.per_pr > 0 else (0.0 if treatment_security_comments.per_pr == 0 else -1.0)
+control_val = control_security_comments.per_pr
+treatment_val = treatment_security_comments.per_pr
+if control_val > 0:
+    effect_size = (control_val - treatment_val) / control_val
+else:
+    effect_size = 0.0 if treatment_val == 0 else -1.0
 ```
 
 **Step 5 — Decision**:
@@ -1019,7 +1024,7 @@ For each active project:
         bank_id=f"qds-product-{project}",
         items=[{
             "content": directive_content,
-            "tags": ["knowledge_type:charter", "source:factory-wide", "priority:high"],
+            "tags": ["knowledge_type:charter", "source:factory-wide", "severity:high"],
             "document_id": f"factory-directive-{directive_id}"
         }]
     )

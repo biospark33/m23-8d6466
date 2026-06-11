@@ -1208,6 +1208,11 @@ RULES:
         "type": "object",
         "properties": {
           "pattern": {"type": "string"},
+          "module": {
+            "type": "string",
+            "enum": ["harness", "coms", "auth", "memory", "cli", "infra", "factory"],
+            "description": "The product module this pattern primarily affects"
+          },
           "category": {
             "type": "string",
             "enum": ["security", "correctness", "performance",
@@ -1233,7 +1238,7 @@ RULES:
             "enum": ["new", "persistent", "declining", "resolved"]
           }
         },
-        "required": ["pattern", "category", "severity", "frequency", "total_lifetime_occurrences", "trend"]
+        "required": ["pattern", "module", "category", "severity", "frequency", "total_lifetime_occurrences", "trend"]
       },
       "maxItems": 10
     },
@@ -1316,6 +1321,7 @@ for pattern in response.structured_output.get("recurring_patterns", []):
                     "trend": pattern["trend"]
                 }),
                 "tags": ["knowledge_type:antipattern",
+                         f"module:{pattern['module']}",
                          f"severity:{pattern['severity']}"],
                 "document_id": f"review-antipattern-{hashlib.md5(pattern['pattern'].encode('utf-8')).hexdigest()}",
                 "context": (f"Recurring issue caught by external reviewer across "
