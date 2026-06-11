@@ -752,7 +752,7 @@ RULES:
           "evidence": {"type": "string",
             "description": "Required when implemented is true. Cite specific before/after observations demonstrating whether the intervention worked."}
         },
-        "required": ["intervention", "implemented", "measurable_improvement"]
+        "required": ["intervention", "implemented", "measurable_improvement", "evidence"]
       },
       "maxItems": 5
     },
@@ -1195,7 +1195,8 @@ RULES:
             "medium": {"type": "integer"},
             "low": {"type": "integer"},
             "nit": {"type": "integer"}
-          }
+          },
+          "required": ["critical", "high", "medium", "low", "nit"]
         },
         "comments_per_pr_avg": {"type": "number"}
       },

@@ -484,7 +484,8 @@ Step 4: Retain findings
           "control_project": {"type": "string"},
           "status": {"type": "string", "enum": ["running", "evaluation_due", "concluded"]},
           "preliminary_result": {"type": "string", "enum": ["positive", "neutral", "negative", "too_early"]}
-        }
+        },
+        "required": ["hypothesis", "treatment_project", "control_project", "status", "preliminary_result"]
       }
     },
     "completed_experiments": {
@@ -497,7 +498,8 @@ Step 4: Retain findings
           "effect_size": {"type": "string", "description": "e.g., '-35% CodeRabbit security comments'"},
           "promoted_to_factory_wide": {"type": "boolean"},
           "transfer_success_rate": {"type": "number", "description": "Success rate when applied to other projects"}
-        }
+        },
+        "required": ["hypothesis", "result", "effect_size", "promoted_to_factory_wide"]
       }
     },
     "next_experiment_recommendation": {
@@ -509,7 +511,8 @@ Step 4: Retain findings
         "control_project": {"type": "string"},
         "measurement_dimension": {"type": "string"},
         "expected_duration_weeks": {"type": "integer"}
-      }
+      },
+      "required": ["hypothesis", "rationale", "treatment_project", "control_project", "measurement_dimension", "expected_duration_weeks"]
     },
     "data_sufficiency": {"type": "string", "enum": ["sufficient", "marginal", "insufficient"]}
   },
@@ -568,7 +571,8 @@ done
         },
         "portfolio_avg_comments_per_pr": {"type": "number"},
         "portfolio_variance": {"type": "number", "description": "Std dev of comments/PR across projects"}
-      }
+      },
+      "required": ["total_prs_analyzed", "total_comments", "projects_with_reviews", "portfolio_avg_comments_per_pr"]
     },
     "cross_project_patterns": {
       "type": "array",
@@ -590,7 +594,8 @@ done
         "direction": {"type": "string", "enum": ["improving", "stable", "degrading"]},
         "variance_direction": {"type": "string", "enum": ["converging", "stable", "diverging"]},
         "evidence": {"type": "string"}
-      }
+      },
+      "required": ["direction", "evidence"]
     },
     "data_sufficiency": {"type": "string", "enum": ["sufficient", "marginal", "insufficient"]}
   },
