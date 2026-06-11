@@ -752,7 +752,7 @@ RULES:
           "evidence": {"type": "string",
             "description": "Required when implemented is true. Cite specific before/after observations demonstrating whether the intervention worked."}
         },
-        "required": ["intervention", "implemented", "measurable_improvement", "evidence"]
+        "required": ["intervention", "implemented", "measurable_improvement"]
       },
       "maxItems": 5
     },
@@ -1286,6 +1286,7 @@ RULES:
 
 ```python
 import hashlib
+import json
 
 # Retain review patterns into qds-meta (factory performance data)
 client.retain(
