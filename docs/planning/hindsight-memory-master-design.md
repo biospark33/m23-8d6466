@@ -1078,7 +1078,7 @@ Step 4: Retain findings into both banks
 ```bash
 # Fetch recently merged PRs (last 3 days)
 gh pr list --state merged --limit 15 --json number,title,mergedAt \
-  --jq '.[] | select((.mergedAt | fromdate) > (now - 259200)) | .number'
+  --jq '.[] | select(.mergedAt != null and (.mergedAt | fromdate) > (now - 259200)) | .number'
 
 # For each PR, fetch CodeRabbit review comments (inline)
 gh api repos/biospark33/QDS-Factory/pulls/{PR_NUMBER}/comments \
@@ -1284,6 +1284,8 @@ RULES:
 #### Step 4: Feedback Retention
 
 ```python
+import hashlib
+
 # Retain review patterns into qds-meta (factory performance data)
 client.retain(
     bank_id="qds-meta",
@@ -1313,7 +1315,7 @@ for pattern in response.structured_output.get("recurring_patterns", []):
                 }),
                 "tags": ["knowledge_type:antipattern",
                          f"severity:{pattern['severity']}"],
-                "document_id": f"review-antipattern-{pattern['pattern'].replace(' ', '-').lower()}",
+                "document_id": f"review-antipattern-{hashlib.md5(pattern['pattern'].encode('utf-8')).hexdigest()}",
                 "context": (f"Recurring issue caught by external reviewer across "
                             f"{pattern['frequency']} PRs in this harvest window. "
                             f"Lifetime occurrences: {pattern['total_lifetime_occurrences']}.")

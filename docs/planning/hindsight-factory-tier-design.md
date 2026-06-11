@@ -543,7 +543,7 @@ Step 4: Retain findings
 # Step 1: For each active project, fetch recent merged PRs
 for repo in $FACTORY_PROJECTS; do
   gh pr list --repo "$repo" --state merged --limit 10 \
-    --json number,title,mergedAt --jq '.[] | select((.mergedAt | fromdate) > (now - 259200)) | .number'
+    --json number,title,mergedAt --jq '.[] | select(.mergedAt != null and (.mergedAt | fromdate) > (now - 259200)) | .number'
 done
 
 # Step 2: For each PR, fetch CodeRabbit/Gemini comments
