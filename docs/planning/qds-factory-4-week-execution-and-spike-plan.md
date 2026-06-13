@@ -33,7 +33,7 @@ autonomously becomes a **reviewed pull request**, fully audited and costed, with
 factory measurably better with use.
 
 The current pivot is **SwarmClaw (orchestrator) + Warren (Pi-team harness) + Hindsight (KG memory) + cron
-"Hermes" bots + Gitnexus/pi-lens (code intelligence)**. The active sprint stories already reflect this pivot;
+"Hermes" bots + GitNexus/pi-lens (code intelligence)**. The active sprint stories already reflect this pivot;
 some older planning docs do not (see §2).
 
 **The single most important fact for planning:** the *documented* scope is roughly 3× what 2 devs can build to
@@ -59,7 +59,7 @@ ground truth; the PRD/architecture docs are partially stale.**
 | Workflow / DAG engine | Archon PIV DAG (+ env patch) | **SwarmClaw protocol template** (5-phase) | stories |
 | Pi-team execution harness | inline DAG nodes | **Warren** | stories |
 | Memory | Hindsight (cloud assumption corrected) | **Hindsight** (local-capable) | both agree |
-| Code intelligence | GitNexus + claude-mem | Gitnexus + pi-lens + mulch + Hindsight | stories |
+| Code intelligence | GitNexus + claude-mem | GitNexus + pi-lens + mulch + Hindsight | stories |
 
 > ⚠️ **Terminology trap — "Hermes."** The PRD uses "Hermes" for the 24/7 *department-manager* agents
 > (Dev/QA/Maintenance). Operators colloquially also call the **proactive cron agents** (Synthesizer,
@@ -207,7 +207,7 @@ rework. Point values are from story frontmatter (ground truth); "—" marks a wo
 | Factory tier — all 4 banks + 4 agents | — | `promote_to_factory(finding, type)` typed interface → no-op/log sink (§6.1) | §3.2: needs N>1 repos |
 | Project Synthesizer, Meta-Optimizer, Blind-Spot | — | shared **agent-runner interface** `reflect → response_schema → retain` (§6.2) | §3.1: nothing to analyze in 4 wks |
 | Transfer learning, A/B routing | — | factory-meta experiment schema stubbed; single-arm router only (matches NG4) | needs N>1 repos |
-| Gitnexus analyze (P0.10) | 3 | leave MCP tool registration point open in P0.7 (§6.1) | off critical path; graph IQ deferred |
+| GitNexus analyze (P0.10) | 3 | leave MCP tool registration point open in P0.7 (§6.1) | off critical path; graph IQ deferred |
 | GitHub seeds mirror (P1.3) | 4 | intake writes local `.seeds/issues.jsonl` only (§6.4 manifest) | see scope boundary below |
 | Mental models, directives enforcement | — | declarative bank manifest (§6.4) — append later | config-only, no rework |
 | P0.3 — mixed-model 3-agent demo | 4 | Warren multi-model dispatch exercised by P1.6 | re-proven by P1.6 on the real path; Phase-0 demo is redundant validation |
@@ -359,7 +359,7 @@ SPIKE-N: <name>
   `tags_match` decision (which mode the build standardizes on).
 - **Known landmines (status as of this revision):** ~~missing `import json` in 6 design code blocks~~ —
   **RESOLVED** (PR #20 added `import json` to both design docs; verified present at
-  hindsight-memory-master-design.md and hindsight-factory-tier-design.md); hardcoded `biospark33/QDS-Factory`
+  docs/planning/hindsight-memory-master-design.md and docs/planning/hindsight-factory-tier-design.md); hardcoded `biospark33/QDS-Factory`
   GitHub paths — **intentional** (single-repo design docs; parameterize at build time, not in the design); the
   1st-of-month `07:23/07:25/07:27` cron cluster — **still live** (API contention, R8).
 - **Exit decision:** go / go-with-documented-fallbacks. **No memory feature code starts until this exits.**
