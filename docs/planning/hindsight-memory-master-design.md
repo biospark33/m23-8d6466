@@ -144,7 +144,7 @@ One per module, auto-refreshing on consolidation:
 | `cli-architecture` | "Summarize the CLI module's design, constraints, and known issues" | `module:cli` |
 | `infra-architecture` | "Summarize the infra module's design, constraints, and known issues" | `module:infra` |
 
-Configuration: `trigger={"refresh_after_consolidation": True}` on each model.
+Configuration: `trigger={"refresh_after_consolidation": true}` on each model.
 
 #### Operational Surface
 
@@ -216,7 +216,7 @@ reflect_mission: >
 | `skill-effectiveness` | "Which skills are most and least effective, and what distinguishes their outcomes?" | *(none — global)* |
 | `quality-dimensions` | "Which quality dimensions are strongest and weakest across all skills?" | *(none — global)* |
 
-Configuration: `trigger={"refresh_after_consolidation": True}` on each model.
+Configuration: `trigger={"refresh_after_consolidation": true}` on each model.
 
 #### Operational Surface
 

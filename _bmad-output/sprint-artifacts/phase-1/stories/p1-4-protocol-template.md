@@ -24,7 +24,9 @@ Author a QDS factory protocol template as a JSON document defining the canonical
 
 **Wiring closed:** On completion of this story, the qds-factory protocol template is registered in SwarmClaw and a test invocation advances through all 5 phases producing structured outputs, using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
-**Dependency edges (predecessors):** P0.7 (SwarmClaw agent/MCP registration), P0.11 (Phase 0 exit gate).
+**Dependency edges (predecessors):** P0.7 (SwarmClaw agent/MCP registration).
+
+> **Predecessor reconciliation (PR #21, QDS-EXEC-001):** P0.11 (Phase-0 exit gate) is **deferred** per the 4-week execution plan §4.2 — its gate function is folded into per-story Definition-of-Done checkpoints and the P1.17 Phase-1 slice gate. P0.7 above is the real technical dependency. The predecessor edge was reconciled against the DEFER set so it no longer points at a phantom (deferred) story.
 
 ## Acceptance Criteria
 

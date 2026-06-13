@@ -20,9 +20,13 @@ This is THE make-or-break story for Phase 1. The full qds-factory protocol runs 
 
 **Demonstrable behavior:** A `dispatch_task` JSON-RPC call to SwarmClaw with a sample task (e.g., "Add a hello-world function to utils.py") produces a real, merged-open PR on the sample repository. The GitHub webhook fires back to SwarmClaw, the protocol advances through all phases, and the PR is visible on GitHub with the correct changes.
 
-**Wiring closed:** On completion of this story, `dispatch_task` → CLI-Anything → `warren run` → Pi agents → Warren PR → GitHub webhook → SwarmClaw summarize produces a demonstrable artifact (the PR) using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors (P1.3, P1.6, P1.7, P1.8, P1.11, P1.12) are dependency edges, not unfinished wiring inside this story.
+**Wiring closed:** On completion of this story, `dispatch_task` → CLI-Anything → `warren run` → Pi agents → Warren PR → GitHub webhook → SwarmClaw summarize produces a demonstrable artifact (the PR) using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors (reconciled list below) are dependency edges, not unfinished wiring inside this story.
 
-**Dependency edges (predecessors):** P1.3, P1.6, P1.7, P1.8, P1.11, P1.12
+**Dependency edges (predecessors):** P1.6, P1.8, P1.11.
+
+> **Predecessor reconciliation (PR #21, QDS-EXEC-001):** Three prior predecessors — P1.3 (GitHub seeds mirror), P1.7 (post-edit LSP gate), P1.12 (mulch prime/record) — remain **deferred** per the 4-week execution plan §4.2 and are NOT hard dependencies for the lights-on artifact. Their load-bearing capabilities are carried by seams / KEEP stories: intake via **P1.2** (`/qds` intake → session + GitHub issue, KEEP), not the deferred P1.3 mirror; quality signal via **P0.5** (pi-lens diagnostics, KEEP) with the P1.7 gate-hook point left open in the emit phase; mulch via the **SPIKE-7**-validated binary (empty Hindsight bank is a non-error condition per P1.6 AC4). **P1.8** (protocol run + issue correlation) was restored as a hard predecessor after the P1.17-exit-gate cascade decision un-deferred it (see execution plan §4.1). Hard technical predecessors retained: **P1.6** (Pi-team dispatch), **P1.8** (protocol run + issue correlation), **P1.11** (Hindsight prime/retain).
+>
+> **Plan-soundness note:** P1.15 still runs on seams for the three remaining deferred items (P1.3/P1.7/P1.12) — the execution plan's explicit design (§4.1 lists P1.15 as the lights-on KEEP story). If seam-only viability is later challenged in practice, the remedy is to re-add those deferred stories before P1.15 — not new architecture.
 
 ## Acceptance Criteria
 

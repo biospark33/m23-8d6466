@@ -23,7 +23,9 @@ Register a "Dev Manager" agent with SwarmClaw via POST /api/agents, setting its 
 
 **Wiring closed:** On completion of this story, registering an agent and invoking it via A2A delegation produces a complete request-response cycle using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
-**Dependency edges (predecessors):** P0.1 (CLI-Anything harness skeleton), P0.7 (SwarmClaw API surface), P0.11 (Phase 0 exit gate).
+**Dependency edges (predecessors):** P0.1 (CLI-Anything harness skeleton), P0.7 (SwarmClaw API surface).
+
+> **Predecessor reconciliation (PR #21, QDS-EXEC-001):** P0.11 (Phase-0 exit gate) is **deferred** per the 4-week execution plan §4.2 — its gate function is folded into per-story Definition-of-Done checkpoints and the P1.17 Phase-1 slice gate. P0.1 and P0.7 above are the real technical dependencies. The predecessor edge was reconciled against the DEFER set so it no longer points at a phantom (deferred) story.
 
 ## Acceptance Criteria
 

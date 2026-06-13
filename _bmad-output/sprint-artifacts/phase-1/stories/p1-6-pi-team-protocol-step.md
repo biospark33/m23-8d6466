@@ -23,7 +23,9 @@ When the qds-factory protocol reaches a dispatch_task phase, SwarmClaw invokes t
 
 **Wiring closed:** On completion of this story, a dispatch_task protocol step yields a single demonstrable Pi team result in structured JSON, using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
-**Dependency edges (predecessors):** P0.3 (CLI-Anything harness operational), P0.5 (pi-lens gating), P0.9 (Hindsight for Mulch priming), P1.4 (protocol template with dispatch_task phase).
+**Dependency edges (predecessors):** P0.1 (CLI-Anything harness skeleton + env propagation), P0.5 (pi-lens gating), P0.9 (Hindsight for Mulch priming), P1.4 (protocol template with dispatch_task phase).
+
+> **Predecessor reconciliation (PR #21, QDS-EXEC-001):** P0.3 (mixed-model 3-agent demo) is **deferred** per the 4-week execution plan §4.2 — its multi-model dispatch is re-proven by this story on the real protocol path, so the demo is redundant. The prior edge "P0.3 (CLI-Anything harness operational)" was a **pre-existing mislabel**: P0.3 is a demo, not the harness. The CLI-Anything harness generator itself is delivered by P0.1 (listed above), which is the true "harness operational" dependency. Corrected so the predecessor no longer points at a deferred story.
 
 ## Acceptance Criteria
 

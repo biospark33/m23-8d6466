@@ -22,7 +22,7 @@ When a Pi agent step or protocol phase fails during a run, SwarmClaw classifies 
 
 **Wiring closed:** On completion of this story, failure classification is deterministic given a failure signal, and restart decisions are enforced within caps using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
-**Dependency edges (predecessors):** P1.8
+**Dependency edges (predecessors):** P1.8.
 
 ## Acceptance Criteria
 

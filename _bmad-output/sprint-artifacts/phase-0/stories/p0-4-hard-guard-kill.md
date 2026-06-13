@@ -24,7 +24,9 @@ Adds guard enforcement to the CLI-Anything harness from P0.1/P0.3. The harness p
 
 **Wiring closed:** On completion of this story, running the guard-test manifest (loopy agent, tight caps) produces a non-zero exit code, `exit_class` in {`transient`, `overflow`}, and a termination reason — using only code merged by this story plus P0.1 harness skeleton. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors, if any, are dependency edges (listed below), not unfinished wiring inside this story.
 
-**Dependency edges (predecessors):** P0.3 (3-agent merged-JSON demo — guards attach to the same runner).
+**Dependency edges (predecessors):** P0.1 (CLI-Anything harness skeleton — guards attach to P0.1's runner).
+
+> **Predecessor reconciliation (PR #21, QDS-EXEC-001):** P0.3 (3-agent mixed-model demo) is **deferred** per the 4-week execution plan §4.2 — its multi-agent dispatch is re-exercised by P1.6 on the real path. The guards attach to the harness runner delivered by **P0.1** (`cli-anything/src/runner.ts`), which is confirmed by this story's own Files-to-Modify list and its Wiring-closed clause ("plus P0.1 harness skeleton"). Corrected so the predecessor no longer points at a deferred story; "P0.3 = the runner" was a mislabel (P0.3 is a demo, P0.1 is the runner).
 
 ## Acceptance Criteria
 
