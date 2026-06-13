@@ -249,7 +249,7 @@ Dev A = strongest engineer on the critical-path bottlenecks. Dev B = balanced, o
 
 | Week | Dev A (critical path / bottlenecks) | Dev B (plumbing / memory / safety) | Milestone |
 |---|---|---|---|
-| **1** | Days 1–2: **SPIKE-1 (Hindsight)** w/ Dev B. Then P0.7 SwarmClaw (allowlist via SPIKE-2). | Days 1–2: SPIKE-1. Then P0.1, P0.2, P0.9 banks. P0.4 guard-kill early. | Foundations green; Hindsight primitives validated or pivoted |
+| **1** | Days 1–2: **SPIKE-1 (Hindsight)** w/ Dev B. Then P0.7 SwarmClaw (allowlist via SPIKE-2). | Days 1–2: SPIKE-1 **(+ SPIKE-9 in parallel, 0.5d — SwarmClaw→Hindsight bridge execution-model decision)**. Then P0.1, P0.2, P0.9 banks. P0.4 guard-kill early. | Foundations green; Hindsight primitives validated or pivoted |
 | **2** | P1.1 → P1.4 (protocol template, via SPIKE-5) → P1.6 (Warren, via SPIKE-3) | P0.5 pi-lens (SPIKE-4), P1.11 memory prime/retain, P1.13 cost ledger, **correlation-key plumbing** | Dispatch path executable end-to-end in a harness |
 | **3** | **P1.15 real PR** (target ~day 15; via SPIKE-6 webhook correlation) → P1.16 audit chain | Review Harvester (SPIKE-8) + retain hooks; P1.9 restart policy | **Lights-on**: first autonomous audited PR |
 | **4** | P1.18 → P1.19 review→fix loop; bug-fix fallout from P1.15 | P1.17 exit gate; defer-seam stubs (§4.2); end-to-end soak | Slice complete, hardened, audited |
@@ -271,7 +271,10 @@ into the KEEP slice.
 ### 6.1 `promote_to_factory(finding, finding_type)` — factory-tier seam
 Typed function appended to each project agent's retention step. In the 4-week build it validates the finding,
 computes the **compound document id** `promoted-{project_id}-{finding_type}-{run_date}-{content_hash[:8]}`
-(per QDS-MEM-002 §5.2) and writes to a **no-op / log sink**. The id is collision-safe because the `[:8]` (32-bit)
+(per QDS-MEM-002 §5.2, where `run_date = datetime.now(timezone.utc).date().isoformat()` — a **UTC `YYYY-MM-DD`** string, e.g.
+`2026-06-13`, so the id is timezone-stable across agents/envs regardless of local TZ and **storage-safe**: date-only ISO has no
+`:`/space and is a valid key in document stores / Redis-style KV stores that forbid special characters in keys) and writes to a
+**no-op / log sink**. The id is collision-safe because the `[:8]` (32-bit)
 hash is a *suffix inside a narrow (project, type, date) bucket*, not a bare key — so the birthday-paradox bound
 (~65k same-bucket entries) is unreachable in practice (same-content collisions are intentional dedup, not data
 loss). If a future use ever adopts a *global bare-hash* key (e.g. cross-project transfer-learning fingerprint),
@@ -361,7 +364,7 @@ SPIKE-N: <name>
   1st-of-month `07:23/07:25/07:27` cron cluster — **still live** (API contention, R8).
 - **Exit decision:** go / go-with-documented-fallbacks. **No memory feature code starts until this exits.**
 
-### SPIKE-2 — SwarmClaw command-allowlist & agent+MCP registry (OQ-7)
+### SPIKE-2 — SwarmClaw command-allowlist & agent+MCP registry (OQ-18)
 - **Protects:** P0.7 (the critical-path bottleneck, 9 security invariants, ~200 LOC).
 - **Time-box:** 1–2 days, Dev A.
 - **Objective:** validate the command-allowlist enforcement model and the atomic agent/MCP registry
@@ -571,7 +574,7 @@ SPIKE-N: <name>
 | R7 | Scope creep back toward factory tier / 8 agents | Medium | "let's just add the Synthesizer too" | this doc's cut line; seams make deferral cheap |
 | R8 | Cron contention 1st-of-month cluster | Low | overlapping API calls | re-stagger schedules during SPIKE-1 |
 | R9 | Review Harvester token cost unbounded | Low | large PR review volume | SPIKE-8 sampling cap |
-| R10 | **Dev A single-point-of-failure** | **High** | Dev A blocked >2 days | Dev A owns all critical-path bottlenecks (P0.7, P1.1, P1.4, P1.6, P1.15, P1.16) + 4 of 9 spikes. Cross-train Dev B on the P0.7 design during week 1 so Dev B can at minimum unblock P1.1 entry; capture the SPIKE-2 allowlist verdict in docs so it isn't tacit knowledge |
+| R10 | **Dev A single-point-of-failure** | **High** | Dev A blocked >2 days | Dev A owns all critical-path bottlenecks (P0.7, P1.1, P1.4, P1.6, P1.15, P1.16) + 4 of 9 spikes. Cross-train Dev B on the P0.7 design during week 1 so Dev B can at minimum unblock P1.1 entry; capture the SPIKE-2 allowlist verdict in docs so it isn't tacit knowledge. **Week-3 contingency (P1.15 = the single hardest Dev A dependency):** if Dev A is blocked during week 3, Dev B advances the **P1.16 audit-walker mechanics** and the **P1.17 exit-gate harness** against SPIKE-6 mocked-PR data while Dev A recovers — both are independently buildable from the §6.3 correlation keys (final pass of each still needs the real P1.15 PR, but the walker/gate scaffolding does not). **P1.15 blocked >3 days = extend the window by 1 week before touching any deferred scope** (never absorb a §4.2 DEFER story to cover the slip — see §3.3). |
 | R11 | Bridge execution model decided late | Medium | SPIKE-9 red or deferred | The SwarmClaw→Hindsight bridge is a design-decision gate on KEEP story P1.11. Run SPIKE-9 in week 1; if no clean hook, take the manual-retain fallback so the flywheel still runs (not fully autonomous) |
 | R12 | Channel service unavailability (intake path) | Low | external coms outage / rate-limit | P0.2 coms-vendor smoke-test de-risks viability; for the 4-week slice the `/qds` intake is exercised locally — the external channel (Telegram/Slack) is G3 polish, deferred behind the intake seam |
 
@@ -599,14 +602,16 @@ The slice is **done** when all hold (maps to P1.17's exit assertions plus rigor 
    tests; correlation keys present on every artifact; **no secrets in artifacts — verified by a pre-commit secret
    scan (e.g. gitleaks) plus a manual audit of hardcoded `biospark33/QDS-Factory` paths**; spikes each left a
    written verdict; **any spike that exited red-with-fallback has its fallback code merged and tested**;
-   **latency budgets confirmed in CI: pi-lens headless ≤3s (SPIKE-4) and mulch prime ≤10s (SPIKE-7)**.
+   **latency budgets confirmed: pi-lens headless ≤3s in CI (SPIKE-4); mulch seam ≤10s validated at the SPIKE-7 exit as a
+   one-shot seam-validation (NOT a CI regression — P1.12 mulch prime/record is DEFERRED per §4.2, so mulch does not enter CI
+   until P1.12 ships)**.
 
 ---
 
 ## 10. Open questions to resolve in week 1 (non-blocking, run in parallel)
 
 - **OQ-2** pi-lens headless invocation → SPIKE-4.
-- **OQ-7** SwarmClaw command allowlist → SPIKE-2.
+- **OQ-18** SwarmClaw command allowlist → SPIKE-2. *(Renumbered from a draft "OQ-7": PRD v4 Appendix C already defines OQ-7 = the config-policy / recomputed-policy artifact store, part of deferred v5 Layer-B self-optimization — reusing it here broke traceability. OQ-18 is the first free number; PRD v4 tops out at OQ-17.)*
 - **OQ — substrate of record:** confirm SwarmClaw/Warren is canonical; annotate PRD/architecture (§2).
 - **OQ — Warren exit codes:** validate the assumed table → SPIKE-3.
 - **OQ — mulch pre-install:** binary presence/version → SPIKE-7.
