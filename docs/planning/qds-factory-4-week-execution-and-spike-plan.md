@@ -207,8 +207,8 @@ rework. Point values are from story frontmatter (ground truth); "—" marks a wo
 | Factory tier — all 4 banks + 4 agents | — | `promote_to_factory(finding, type)` typed interface → no-op/log sink (§6.1) | §3.2: needs N>1 repos |
 | Project Synthesizer, Meta-Optimizer, Blind-Spot | — | shared **agent-runner interface** `reflect → response_schema → retain` (§6.2) | §3.1: nothing to analyze in 4 wks |
 | Transfer learning, A/B routing | — | factory-meta experiment schema stubbed; single-arm router only (matches NG4) | needs N>1 repos |
-| GitNexus analyze (P0.10) | 3 | leave MCP tool registration point open in P0.7 (§6.1) | off critical path; graph IQ deferred |
-| GitHub seeds mirror (P1.3) | 4 | intake writes local `.seeds/issues.jsonl` only (§6.4 manifest) | see scope boundary below |
+| GitNexus analyze (P0.10) | 3 | leave MCP tool registration point open in P0.7 | off critical path; graph IQ deferred |
+| GitHub seeds mirror (P1.3) | 4 | intake writes local `.seeds/issues.jsonl` only | see scope boundary below |
 | Mental models, directives enforcement | — | declarative bank manifest (§6.4) — append later | config-only, no rework |
 | P0.3 — mixed-model 3-agent demo | 4 | Warren multi-model dispatch exercised by P1.6 | re-proven by P1.6 on the real path; Phase-0 demo is redundant validation |
 | P0.6 — LSP provision | 3 | pi-lens `lsp_diagnostics`/`lsp_navigation` surfaces ride with P0.5 | P0.5 carries core signal; full LSP gate (P1.7) defers together |
