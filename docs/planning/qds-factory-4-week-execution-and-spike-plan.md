@@ -263,8 +263,8 @@ Dev A = strongest engineer on the critical-path bottlenecks. Dev B = balanced, o
 | Week | Dev A (critical path / bottlenecks) | Dev B (plumbing / memory / safety) | Milestone |
 |---|---|---|---|
 | **1** | Days 1–2: **SPIKE-1 (Hindsight)** w/ Dev B. Then P0.7 SwarmClaw (allowlist via SPIKE-2). | Days 1–2: SPIKE-1 **(+ SPIKE-9 in parallel, 0.5d — SwarmClaw→Hindsight bridge execution-model decision)**. Then P0.1, P0.2, P0.9 banks. P0.4 guard-kill early. | Foundations green; Hindsight primitives validated or pivoted |
-| **2** | P1.1 → P1.4 (protocol template, via SPIKE-5) → P1.6 (Warren, via SPIKE-3) | P0.5 pi-lens (SPIKE-4), P1.11 memory prime/retain, P1.13 cost ledger, **correlation-key plumbing** | Dispatch path executable end-to-end in a harness |
-| **3** | **P1.15 real PR** (target ~day 15; via SPIKE-6 webhook correlation) → P1.16 audit chain | Review Harvester (SPIKE-8) + retain hooks; P1.9 restart policy | **Lights-on**: first autonomous audited PR |
+| **2** | P1.1 → P1.4 (protocol template, via SPIKE-5) → P1.6 (Warren, via SPIKE-3) → P1.8 (protocol run + issue correlation, un-deferred) | P0.5 pi-lens (SPIKE-4) → P0.10 GitNexus analyze (un-deferred; feeds P1.5) → P1.5 scored router (un-deferred); P1.11 memory prime/retain, P1.13 cost ledger, **correlation-key plumbing** | Dispatch path executable end-to-end in a harness |
+| **3** | **P1.15 real PR** (target ~day 15; via SPIKE-6 webhook correlation) → P1.16 audit chain | P0.8 webhook→session (un-deferred; builds on wk-1 P0.7) → P1.10 approve/resume webhook (un-deferred; → P1.17 G4) → P1.14 outcome record via P1.13 ledger (un-deferred; → P1.17 G6); Review Harvester (SPIKE-8) + retain hooks; P1.9 restart policy | **Lights-on**: first autonomous audited PR |
 | **4** | P1.18 → P1.19 review→fix loop; bug-fix fallout from P1.15 | P1.17 exit gate; defer-seam stubs (§4.2); end-to-end soak | Slice complete, hardened, audited |
 
 **Sequencing rules**
