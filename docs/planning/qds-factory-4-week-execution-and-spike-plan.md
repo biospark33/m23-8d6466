@@ -283,14 +283,14 @@ into the KEEP slice.
 
 ### 6.1 `promote_to_factory(finding, finding_type)` — factory-tier seam
 Typed function appended to each project agent's retention step. In the 4-week build it validates the finding,
-computes the **compound document id** `promoted-{project_id}-{finding_type}-{run_date}-{content_hash[:8]}`
+computes the **compound document id** `promoted-{project_id}-{finding_type}-{run_date}-{content_hash.slice(0, 8)}`
 (per QDS-MEM-002 §5.2, where `run_date` is a **UTC `YYYY-MM-DD`** string — the spec's reference form is Python
 `datetime.now(timezone.utc).date().isoformat()`; the **TypeScript implementation** (this codebase's primary language,
 per the PRD) uses `new Date().toISOString().split('T')[0]`, which is equivalent because `Date.prototype.toISOString()`
 always serializes in UTC (the `Z` offset), yielding the same date-only ISO key — e.g.
 `2026-06-13`, so the id is timezone-stable across agents/envs regardless of local TZ and **storage-safe**: date-only ISO has no
 `:`/space and is a valid key in document stores / Redis-style KV stores that forbid special characters in keys) and writes to a
-**no-op / log sink**. The id is collision-safe because the `[:8]` (32-bit)
+**no-op / log sink**. The id is collision-safe because the `slice(0, 8)` (32-bit)
 hash is a *suffix inside a narrow (project, type, date) bucket*, not a bare key — so the birthday-paradox bound
 (~65k same-bucket entries) is unreachable in practice (same-content collisions are intentional dedup, not data
 loss). If a future use ever adopts a *global bare-hash* key (e.g. cross-project transfer-learning fingerprint),
@@ -353,7 +353,7 @@ SPIKE-N: <name>
   1. `reflect()` with a `response_schema` returns valid, schema-conforming structured output reliably (test
      with `META_OPTIMIZER_SCHEMA`-shaped and `REVIEW_HARVEST_SCHEMA`-shaped schemas, incl. required-field and
      nested-array cases).
-  2. Mental models created with `trigger={"refresh_after_consolidation": True}` actually auto-refresh after a
+  2. Mental models created with `trigger={"refresh_after_consolidation": true}` actually auto-refresh after a
      retain triggers consolidation (and the API accepts that trigger field).
   3. `CronCreate` produces durable, recurring jobs that survive restart and fire on schedule.
   4. Observation consolidation: confirm whether it is automatic post-retain or requires an explicit call;
@@ -459,7 +459,8 @@ SPIKE-N: <name>
 - **Protects:** P1.4 (blocks P1.6/P1.8).
 - **Time-box:** 1–2 days, Dev A (offline, runs in parallel — see §5 SPIKE-5 carve-out: gates P1.4 finalization, not entry).
 - **Objective:** choose the compare/decide scoring approach for the 5-phase template — validate whether TF-IDF
-  is sufficient or too heavy, and finalize weighted-scoring weights, before Warren integration.
+  is sufficiently discriminative (lexical matching) versus a small semantic embedding, and finalize
+  weighted-scoring weights, before Warren integration.
 - **Why load-bearing:** the decide phase picks which candidate result to emit. A scorer that can't discriminate
   good from bad either emits weak output (hurting PR quality, G1) or forces an expensive LLM judge on every
   node (hurting cost, G2). Settling this offline prevents a mid-sprint scorer swap that perturbs every decide
