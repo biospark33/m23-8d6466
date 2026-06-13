@@ -22,7 +22,7 @@ The CLI-Anything harness writes a `cost_events` row after each Pi role execution
 
 **Wiring closed:** On completion of this story, spend is native, summable per issue, and capped with an over-cap gate using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
-**Dependency edges (predecessors):** P1.6, P1.8
+**Dependency edges (predecessors):** P1.6, P1.8.
 
 ## Acceptance Criteria
 

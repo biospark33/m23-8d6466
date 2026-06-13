@@ -120,31 +120,38 @@ This is the single largest scope reclaim, at near-zero future rework cost.
 
 ### 3.3 Budget reality — the KEEP slice is over its own budget (load-bearing caveat)
 
-> ⚠️ **Honest accounting.** The 18-story KEEP slice in §4.1 points to **64 pts** when summed from story
-> frontmatter (the ground truth), not the "~45 pts" a first read suggests. The longest *serial* critical-path
-> chain (P0.1 → P0.7 → P1.1 → P1.4 → P1.6 → P1.15 → P1.18 → P1.19) is ~29 pts; the remaining ~35 pts run in
-> parallel off that spine (memory, cost ledger, audit, guard-kill). So 64 pts is achievable only with strong
-> parallelism and minimal integration fallout.
+> ⚠️ **Honest accounting.** The 24-story KEEP slice in §4.1 points to **84 pts** when summed from story
+> frontmatter (the ground truth), not the "~45 pts" a first read suggests — and **+20 pts of that (the P1.17-gate
+> cascade: P0.8, P0.10, P1.5, P1.8, P1.10, P1.14) was added deliberately** so the exit gate asserts G4/G6 against
+> real capabilities rather than seam-only proxies. The longest *serial* critical-path chain to lights-on
+> (P0.1 → P0.7 → P1.1 → P1.4 → P1.6 → P1.15 → P1.18 → P1.19, with P1.8 running parallel to P1.6) is still ~29
+> pts; the remaining ~55 pts run in parallel off that spine (memory, cost ledger, audit, guard-kill, router,
+> webhooks, GitNexus). 84 pts is achievable only with strong parallelism and minimal integration fallout — and it
+> is a **large stretch**.
 
 This means one of two things is true, and the team must pick before week 1:
 
-1. **The throughput estimate is optimistic** — 2 devs doing 64 enterprise-grade pts (tested/audited/hardened) in
+1. **The throughput estimate is optimistic** — 2 devs doing 84 enterprise-grade pts (tested/audited/hardened) in
    4 weeks assumes near-zero rework and full Dev A/Dev B parallelism. If P1.15 surfaces the expected cascade of
-   earlier-story bugs (§5 buffer), 64 pts will not finish. Treat 45–50 as the *committed* target and 64 as the
-   *stretch*.
-2. **The slice needs ~15–19 pts more trim** to land at 45–50. Cheapest trims (reversible, behind seams):
-   P0.5 nav-surface trim, P1.9 restart-policy → cgroup-only fallback, P1.18/P1.19 review-loop reduced to
-   comment-detection-only (defer the Pi-Pair auto-fix to week 5+).
+   earlier-story bugs (§5 buffer), 84 pts will not finish. Treat 45–50 as the *committed* target and 84 as an
+   **aggressive stretch**.
+2. **The slice needs substantial trim** to land at 45–50 — now a ~34–39 pt gap, worsened by the cascade. Cheapest
+   trims (reversible, behind seams): P0.5 nav-surface trim, P1.9 restart-policy → cgroup-only fallback,
+   P1.18/P1.19 review-loop reduced to comment-detection-only (defer the Pi-Pair auto-fix to week 5+). If the
+   cascade itself proves infeasible, the fallback is to **re-defer P1.10/P1.14 and reinterpret P1.17's G4/G6 to
+   seam targets** (the option originally recommended for this gate) — this restores the 64-pt baseline and the
+   original ~15–19 pt gap.
 
-**Default posture:** build the §4.1 slice as the stretch target, but treat every DEFER story (§4.2) as
-non-negotiably out — do not absorb limbo stories into KEEP under schedule pressure. The over-budget gap is closed
-by trimming the slice or extending the window, not by quietly widening scope.
+**Default posture:** build the §4.1 slice as the stretch target, but treat every remaining DEFER story (§4.2) as
+non-negotiably out — do not absorb further limbo stories into KEEP under schedule pressure. The over-budget gap is
+closed by trimming the slice, re-deferring part of the cascade, or extending the window — not by quietly widening
+scope. The P1.17-gate cascade is the one sanctioned exception (a gate-integrity decision, not a precedent).
 
 ---
 
 ## 4. Cut / Keep / Defer
 
-### 4.1 KEEP — the bulletproof vertical slice (64 pts across 18 stories; ~29-pt serial critical path)
+### 4.1 KEEP — the bulletproof vertical slice (84 pts across 24 stories; ~29-pt serial critical path to the P1.15 lights-on moment + a P1.17-gate sub-tree)
 
 Build these to full enterprise grade: tested, audited, hardened, no shortcuts.
 
@@ -156,9 +163,11 @@ Build these to full enterprise grade: tested, audited, hardened, no shortcuts.
 | P0.2 | Coms vendor smoke-test | foundation; blocks dispatch |
 | P0.4 | Hard guard kill (budget/turn/wall-clock/coms_await) | **safety, non-negotiable for lights-out** |
 | P0.7 | SwarmClaw agent+MCP registry, Hindsight bridge | **THE bottleneck**; blocks P1.1/P0.8/P0.9 |
+| P0.8 | GitHub webhook → SwarmClaw session | push→session trigger (G3 autonomous loop); un-deferred (cascade) for the P1.17 gate |
 | P1.1 | Dev Manager A2A delegation + router | orchestration entry |
 | P1.2 | `/qds` intake → session + GitHub issue | channel entry |
 | P1.4 | qds-factory protocol template (5-phase) | blocks P1.6/P1.8 |
+| P1.8 | Protocol run + issue correlation | runId/issueId lineage; P1.15 + audit + P1.17 depend on it (un-deferred, cascade) |
 | P1.6 | Pi-team dispatch via Warren | second bottleneck; blocks P1.15 |
 | P1.15 | Real PR produced on sample repo | **the lights-on moment** |
 | P1.18 → P1.19 | Bot review-comment detection → Pi-Pair fix → PR green | the self-correction loop |
@@ -169,6 +178,8 @@ Build these to full enterprise grade: tested, audited, hardened, no shortcuts.
 |---|---|---|
 | P1.13 | Cost ledger per-issue + over-cap gate | costed-everything requirement |
 | P1.16 | Audit chain walker (8 hops) | reconstructable lineage |
+| P1.10 | executionPolicy approve/resume webhook | native GitHub PR-review approval; feeds P1.17 G4 (un-deferred, cascade) |
+| P1.14 | Outcome record + router-selection log | outcome vector via P1.13; feeds P1.17 G6 (un-deferred, cascade) |
 | P1.17 | Phase-1 exit gate (6 assertions) | proves the slice |
 
 **Memory — PROJECT TIER ONLY, plumbing-first (the flywheel)**
@@ -176,6 +187,7 @@ Build these to full enterprise grade: tested, audited, hardened, no shortcuts.
 | Item | Note |
 |---|---|
 | P0.9 | Hindsight banks (`qds-product` + `qds-meta` — **two banks, not four**) + mulch import |
+| P1.5 | Scored model router (archetype/tier → Hindsight dev-meta); router-selection log feeds P1.14 outcome record (un-deferred, cascade) |
 | P1.11 | Hindsight prime (pre-exec recall) + retain (post-exec learning) |
 | Hooks | pre-session recall (charter + antipatterns), post-session retain, post-skill retain |
 | Review Harvester | **the one cron agent to build** — external ground truth, ~9 fires, feeds the yield-curve KPI |
@@ -185,12 +197,17 @@ Build these to full enterprise grade: tested, audited, hardened, no shortcuts.
 | Story | Title | Note |
 |---|---|---|
 | P0.5 | Pi-lens headless (diagnostics) | quality signal inside nodes |
+| P0.10 | GitNexus analyze + graph queries | complexity/router signal; feeds P1.5 (un-deferred, cascade) |
 | P1.9 | Restart policy (classify → retry/wall-clock caps) | safety |
 
-> **Story accounting (closes the §3.3 budget loop).** The 18 stories above are the entire KEEP set (64 pts;
-> ~29-pt serial critical path). **Every other Phase-0/Phase-1 story is DEFERRED** — see §4.2 for the explicit
-> list and each story's defer rationale. Do not absorb a deferred story into KEEP under schedule pressure; close
-> the budget gap per §3.3, not by widening scope.
+> **Story accounting (closes the §3.3 budget loop).** The 24 stories above are the KEEP set (**84 pts**; ~29-pt
+> serial critical path to the P1.15 lights-on moment). This total includes a **+20-pt / 6-story cascade**
+> (P0.8, P0.10, P1.5, P1.8, P1.10, P1.14) un-deferred from §4.2 so the P1.17 exit gate asserts G4 (approve/resume)
+> and G6 (outcome record) against **real capabilities** rather than seam-only proxies — see §3.3 for the budget
+> consequence. **Every other Phase-0/Phase-1 story remains DEFERRED** — see §4.2 for the explicit list and each
+> story's defer rationale. Do not absorb further deferred stories into KEEP under schedule pressure: the 84-pt
+> slice already far exceeds the 45–50-pt committed throughput, so close any future gap by trimming or extending
+> the window, not by widening scope. The cascade was a one-time gate-integrity decision, not a precedent.
 >
 > **Conditional trims (decision triggers, not vague "if tight"):**
 > - **P0.6 (LSP provision, 3 pts)** is NOT in KEEP. It is DEFERRED unless: SPIKE-4 exits green in <0.5 day AND
@@ -207,28 +224,24 @@ rework. Point values are from story frontmatter (ground truth); "—" marks a wo
 | Factory tier — all 4 banks + 4 agents | — | `promote_to_factory(finding, type)` typed interface → no-op/log sink (§6.1) | §3.2: needs N>1 repos |
 | Project Synthesizer, Meta-Optimizer, Blind-Spot | — | shared **agent-runner interface** `reflect → response_schema → retain` (§6.2) | §3.1: nothing to analyze in 4 wks |
 | Transfer learning, A/B routing | — | factory-meta experiment schema stubbed; single-arm router only (matches NG4) | needs N>1 repos |
-| GitNexus analyze (P0.10) | 3 | leave MCP tool registration point open in P0.7 | off critical path; graph IQ deferred |
 | GitHub seeds mirror (P1.3) | 4 | intake writes local `.seeds/issues.jsonl` only | see scope boundary below |
 | Mental models, directives enforcement | — | declarative bank manifest (§6.4) — append later | config-only, no rework |
 | P0.3 — mixed-model 3-agent demo | 4 | Warren multi-model dispatch exercised by P1.6 | re-proven by P1.6 on the real path; Phase-0 demo is redundant validation |
 | P0.6 — LSP provision | 3 | pi-lens `lsp_diagnostics`/`lsp_navigation` surfaces ride with P0.5 | P0.5 carries core signal; full LSP gate (P1.7) defers together |
-| P0.8 — GitHub webhook → session | 3 | webhook correlation validated by SPIKE-6 (mocked PR ok); audit polls first PR | push→session trigger is the G3 autonomous loop; G2 audit polls (P1.18 pattern) for the first PR |
 | P0.11 — Phase-0 exit gate | 3 | per-story tests as informal checkpoints; P1.17 is the slice gate | P1.17 (KEEP) validates the slice; P0.11 is a mid-slice checkpoint, re-add first if buffer |
-| P1.5 — scored model router | 4 | single-arm fixed-config router (matches NG4); router-selection log stub | optimization (cost/quality), not lights-on; P1.15 runs on fixed config |
 | P1.7 — post-edit `lsp_diagnostics` gate | 3 | gate hook point present in emit phase; ast-grep fallback path | quality hardening; depends on deferred P0.6 |
-| P1.8 — protocol run + issue correlation | 3 | correlation keys (runId/issueId/sessionId) on every artifact from day 1 (§6.3) | §6.3 seam carries issue correlation for audit; full run lifecycle + live streaming is polish |
-| P1.10 — executionPolicy approve/resume webhook | 4 | decide-phase gate point left in protocol template (P1.4) | §9 Gate 1 "gated approvals" = GitHub PR-review approval (native), not the decide-phase webhook |
 | P1.12 — mulch prime/record | 3 | mulch binary validated by SPIKE-7; prime/record hook point in harness | G3 house-style polish; the primary flywheel is the Hindsight banks (P0.9/P1.11), not mulch |
-| P1.14 — outcome record + router log | 3 | outcome vector captured in cost_events (P1.13); runId keying via §6.3 | router-selection log needs deferred P1.5; cost data flows via P1.13 |
 
 > **P1.3 scope boundary (explicit).** P1.3 in this window = **local write only**: intake writes
 > `.seeds/issues.jsonl`. **Do NOT implement the GitHub mirror** — that is the deferred half. Two devs building
 > different halves of a "one-directional" story is the failure mode; this line makes the boundary binary.
 >
-> **P0.8 / P1.10 audit path.** The first real PR's audit chain (P1.16) is reconstructed via **polling**
-> (P1.18 polls comments; PR merge status polled) + the §6.3 correlation keys, not via live webhooks. P0.8
-> (webhook ingestion) and P1.10 (executionPolicy webhook) activate when the G3 autonomous push→session loop
-> comes online.
+> **Audit-path note (revised, PR #21 cascade).** P0.8 (GitHub webhook → session) and P1.10 (executionPolicy
+> approve/resume webhook) were **un-deferred to KEEP** — see §4.1 — so the P1.17 exit gate's G4 assertion has a
+> real approve/resume + webhook path rather than a seam-only proxy. Pulling them in also pulled their sub-tree
+> (P1.8, P1.5, P0.10) to KEEP. The first real PR's audit chain (P1.16) may now use live webhooks where
+> available; polling (P1.18 polls comments; PR merge status polled) remains the resilient fallback. This
+> un-defer is a deliberate P1.17-gate-integrity decision, not a schedule-slip absorption (see §3.3 + R10).
 
 ### 4.3 Rationale summary
 
@@ -236,10 +249,10 @@ rework. Point values are from story frontmatter (ground truth); "—" marks a wo
 - Everything cut is reachable by **adding config/schema/cron against an existing interface**, not new architecture. Seam traceability:
   - Factory tier → §6.1 `promote_to_factory`
   - Proactive/analysis agents → §6.2 agent-runner interface
-  - Audit + cross-project correlation → §6.3 correlation keys (also serves deferred P1.8/P1.14 issue correlation)
+  - Audit + cross-project correlation → §6.3 correlation keys (also serves P1.8/P1.14 issue correlation; both un-deferred to KEEP via the P1.17-gate cascade)
   - Bank/label/directives config → §6.4 declarative manifest
 - The slice is chosen so every one of the four product goals (G1 useful, G2 accountable, G3 self-improving-via-flywheel, G4 safe) has at least one shipped, tested capability.
-- **Budget caveat (§3.3):** the 64-pt slice exceeds the 45–50-pt throughput estimate. Treat 45–50 as committed, 64 as stretch; close the gap by trimming the slice or extending the window — never by absorbing deferred stories.
+- **Budget caveat (§3.3):** the 84-pt slice exceeds the 45–50-pt throughput estimate (64 pts without the P1.17-gate cascade). Treat 45–50 as committed, 84 as aggressive stretch; close the gap by trimming, re-deferring part of the cascade, or extending the window — never by absorbing further deferred stories.
 
 ---
 
@@ -271,7 +284,10 @@ into the KEEP slice.
 ### 6.1 `promote_to_factory(finding, finding_type)` — factory-tier seam
 Typed function appended to each project agent's retention step. In the 4-week build it validates the finding,
 computes the **compound document id** `promoted-{project_id}-{finding_type}-{run_date}-{content_hash[:8]}`
-(per QDS-MEM-002 §5.2, where `run_date = datetime.now(timezone.utc).date().isoformat()` — a **UTC `YYYY-MM-DD`** string, e.g.
+(per QDS-MEM-002 §5.2, where `run_date` is a **UTC `YYYY-MM-DD`** string — the spec's reference form is Python
+`datetime.now(timezone.utc).date().isoformat()`; the **TypeScript implementation** (this codebase's primary language,
+per the PRD) uses `new Date().toISOString().split('T')[0]`, which is equivalent because `Date.prototype.toISOString()`
+always serializes in UTC (the `Z` offset), yielding the same date-only ISO key — e.g.
 `2026-06-13`, so the id is timezone-stable across agents/envs regardless of local TZ and **storage-safe**: date-only ISO has no
 `:`/space and is a valid key in document stores / Redis-style KV stores that forbid special characters in keys) and writes to a
 **no-op / log sink**. The id is collision-safe because the `[:8]` (32-bit)
@@ -574,7 +590,7 @@ SPIKE-N: <name>
 | R7 | Scope creep back toward factory tier / 8 agents | Medium | "let's just add the Synthesizer too" | this doc's cut line; seams make deferral cheap |
 | R8 | Cron contention 1st-of-month cluster | Low | overlapping API calls | re-stagger schedules during SPIKE-1 |
 | R9 | Review Harvester token cost unbounded | Low | large PR review volume | SPIKE-8 sampling cap |
-| R10 | **Dev A single-point-of-failure** | **High** | Dev A blocked >2 days | Dev A owns all critical-path bottlenecks (P0.7, P1.1, P1.4, P1.6, P1.15, P1.16) + 4 of 9 spikes. Cross-train Dev B on the P0.7 design during week 1 so Dev B can at minimum unblock P1.1 entry; capture the SPIKE-2 allowlist verdict in docs so it isn't tacit knowledge. **Week-3 contingency (P1.15 = the single hardest Dev A dependency):** if Dev A is blocked during week 3, Dev B advances the **P1.16 audit-walker mechanics** and the **P1.17 exit-gate harness** against SPIKE-6 mocked-PR data while Dev A recovers — both are independently buildable from the §6.3 correlation keys (final pass of each still needs the real P1.15 PR, but the walker/gate scaffolding does not). **P1.15 blocked >3 days = extend the window by 1 week before touching any deferred scope** (never absorb a §4.2 DEFER story to cover the slip — see §3.3). |
+| R10 | **Dev A single-point-of-failure** | **High** | Dev A blocked >2 days | Dev A owns all critical-path bottlenecks (P0.7, P1.1, P1.4, P1.6, P1.15, P1.16) + 4 of 9 spikes. Cross-train Dev B on the P0.7 design during week 1 so Dev B can at minimum unblock P1.1 entry; capture the SPIKE-2 allowlist verdict in docs so it isn't tacit knowledge. **Week-3 contingency (P1.15 = the single hardest Dev A dependency):** if Dev A is blocked during week 3, Dev B advances the **P1.16 audit-walker mechanics** and the **P1.17 exit-gate harness** against SPIKE-6 mocked-PR data while Dev A recovers — both are independently buildable from the §6.3 correlation keys (final pass of each still needs the real P1.15 PR, but the walker/gate scaffolding does not). **P1.15 blocked >3 days = extend the window by 1 week before touching any deferred scope** (never absorb a §4.2 DEFER story to cover the slip — the P1.17-gate cascade in §4.1 is the one sanctioned exception; ordinary schedule slips must not absorb further DEFER stories — see §3.3). |
 | R11 | Bridge execution model decided late | Medium | SPIKE-9 red or deferred | The SwarmClaw→Hindsight bridge is a design-decision gate on KEEP story P1.11. Run SPIKE-9 in week 1; if no clean hook, take the manual-retain fallback so the flywheel still runs (not fully autonomous) |
 | R12 | Channel service unavailability (intake path) | Low | external coms outage / rate-limit | P0.2 coms-vendor smoke-test de-risks viability; for the 4-week slice the `/qds` intake is exercised locally — the external channel (Telegram/Slack) is G3 polish, deferred behind the intake seam |
 
