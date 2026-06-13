@@ -12,7 +12,7 @@ source_documents:
   - _bmad-output/planning-artifacts/prd-qds-factory-v4.md  # PRD v4 (Paperclip/Hermes naming — see §2 doc-drift note)
   - _bmad-output/planning-artifacts/architecture-v3.md     # Archon-era architecture (partly superseded by pivot)
   - _bmad-output/sprint-artifacts/phase-0/stories/*        # 11 stories, 37 pts (SwarmClaw/Warren ground truth)
-  - _bmad-output/sprint-artifacts/phase-1/stories/*        # 19 stories, 61 pts (SwarmClaw/Warren ground truth)
+  - _bmad-output/sprint-artifacts/phase-1/stories/*        # 19 stories, 67 pts (SwarmClaw/Warren ground truth)
 constraints: "2 developers · 4 calendar weeks · full enterprise-grade rigor · no shortcuts · adaptable for later optimization"
 ---
 
@@ -80,15 +80,15 @@ Honest accounting of everything the design currently calls for:
 | Workstream | Size | Source |
 |---|---|---|
 | Phase-0 stories | 11 stories / 37 pts | sprint artifacts |
-| Phase-1 stories | 19 stories / 61 pts | sprint artifacts |
+| Phase-1 stories | 19 stories / 67 pts | sprint artifacts |
 | Project-tier memory rollout | 6-phase implementation | QDS-MEM-001 |
 | Project-tier proactive agents | 4 (Synthesizer, Meta-Optimizer, Blind-Spot, Review Harvester) | QDS-MEM-001 |
 | Factory-tier memory | 2 banks + promotion pipeline + A/B + transfer learning | QDS-MEM-002 |
 | Factory-tier proactive agents | 4 (Cross-Project Synthesizer, Factory Optimizer, Portfolio Harvester, Factory Blind-Spot) | QDS-MEM-002 |
 
-Dependency analysis of the stories alone (98 pts) lands at **~65% confidence at 4 weeks, realistic 5–6 weeks**,
-and that excludes the entire memory rollout and 8 cron agents. A realistic 2-dev / 4-week throughput at
-enterprise grade (tested, audited, hardened) is **~45–50 well-chosen points**.
+Dependency analysis of the stories alone (104 pts — 37 phase-0 + 67 phase-1) lands at **~65% confidence
+at 4 weeks, realistic 5–6 weeks**, and that excludes the entire memory rollout and 8 cron agents. A realistic
+2-dev / 4-week throughput at enterprise grade (tested, audited, hardened) is **~45–50 well-chosen points**.
 
 **Conclusion:** prioritization is not optional. The cut/keep/defer line in §4 is the plan.
 
@@ -118,11 +118,33 @@ four factory banks stay empty and the four factory agents analyze nothing. Build
 seam** (the `promote_to_factory()` interface) writing to a no-op/log sink, and defer all four factory agents.
 This is the single largest scope reclaim, at near-zero future rework cost.
 
+### 3.3 Budget reality — the KEEP slice is over its own budget (load-bearing caveat)
+
+> ⚠️ **Honest accounting.** The 18-story KEEP slice in §4.1 points to **64 pts** when summed from story
+> frontmatter (the ground truth), not the "~45 pts" a first read suggests. The longest *serial* critical-path
+> chain (P0.1 → P0.7 → P1.1 → P1.4 → P1.6 → P1.15 → P1.18 → P1.19) is ~29 pts; the remaining ~35 pts run in
+> parallel off that spine (memory, cost ledger, audit, guard-kill). So 64 pts is achievable only with strong
+> parallelism and minimal integration fallout.
+
+This means one of two things is true, and the team must pick before week 1:
+
+1. **The throughput estimate is optimistic** — 2 devs doing 64 enterprise-grade pts (tested/audited/hardened) in
+   4 weeks assumes near-zero rework and full Dev A/Dev B parallelism. If P1.15 surfaces the expected cascade of
+   earlier-story bugs (§5 buffer), 64 pts will not finish. Treat 45–50 as the *committed* target and 64 as the
+   *stretch*.
+2. **The slice needs ~15–19 pts more trim** to land at 45–50. Cheapest trims (reversible, behind seams):
+   P0.5 nav-surface trim, P1.9 restart-policy → cgroup-only fallback, P1.18/P1.19 review-loop reduced to
+   comment-detection-only (defer the Pi-Pair auto-fix to week 5+).
+
+**Default posture:** build the §4.1 slice as the stretch target, but treat every DEFER story (§4.2) as
+non-negotiably out — do not absorb limbo stories into KEEP under schedule pressure. The over-budget gap is closed
+by trimming the slice or extending the window, not by quietly widening scope.
+
 ---
 
 ## 4. Cut / Keep / Defer
 
-### 4.1 KEEP — the bulletproof vertical slice (~45 pts critical path)
+### 4.1 KEEP — the bulletproof vertical slice (64 pts across 18 stories; ~29-pt serial critical path)
 
 Build these to full enterprise grade: tested, audited, hardened, no shortcuts.
 
@@ -162,25 +184,62 @@ Build these to full enterprise grade: tested, audited, hardened, no shortcuts.
 
 | Story | Title | Note |
 |---|---|---|
-| P0.5 | Pi-lens headless (diagnostics) | quality signal inside nodes; trim P0.6 nav if tight |
+| P0.5 | Pi-lens headless (diagnostics) | quality signal inside nodes |
 | P1.9 | Restart policy (classify → retry/wall-clock caps) | safety |
+
+> **Story accounting (closes the §3.3 budget loop).** The 18 stories above are the entire KEEP set (64 pts;
+> ~29-pt serial critical path). **Every other Phase-0/Phase-1 story is DEFERRED** — see §4.2 for the explicit
+> list and each story's defer rationale. Do not absorb a deferred story into KEEP under schedule pressure; close
+> the budget gap per §3.3, not by widening scope.
+>
+> **Conditional trims (decision triggers, not vague "if tight"):**
+> - **P0.6 (LSP provision, 3 pts)** is NOT in KEEP. It is DEFERRED unless: SPIKE-4 exits green in <0.5 day AND
+>   Dev B has ≥2 days of week-1 buffer after P0.1/P0.2/P0.9/P0.4. If kept, trim its navigation surface to
+>   diagnostics-only. P0.5 alone carries the core quality signal; P0.6 + P1.7 are the richer, deferrable gate.
 
 ### 4.2 DEFER — build as seams now, fill later (zero-rework target)
 
-| Deferred | Seam to build now (so it plugs in) |
-|---|---|
-| Factory tier — all 4 banks + 4 agents | `promote_to_factory(finding, type)` typed interface → no-op/log sink |
-| Project Synthesizer, Meta-Optimizer, Blind-Spot | shared **agent-runner interface** (`reflect → response_schema → retain`) |
-| Transfer learning, A/B routing | factory-meta experiment schema stubbed; single-arm router only (matches NG4) |
-| Gitnexus analyze (P0.10) | leave the MCP tool registration point open in P0.7 |
-| GitHub seeds mirror (P1.3 one-directional) | intake writes the local `.seeds/issues.jsonl`; GitHub mirror later |
-| Mental models, directives enforcement | declarative bank manifest (see §6.4) — append later |
+Every row below is deferred. The "seam" column is what gets built now so the deferred work plugs in later with no
+rework. Point values are from story frontmatter (ground truth); "—" marks a workstream, not a single story.
+
+| Deferred item | Pts | Seam to build now (so it plugs in) | Defer rationale |
+|---|---|---|---|
+| Factory tier — all 4 banks + 4 agents | — | `promote_to_factory(finding, type)` typed interface → no-op/log sink (§6.1) | §3.2: needs N>1 repos |
+| Project Synthesizer, Meta-Optimizer, Blind-Spot | — | shared **agent-runner interface** `reflect → response_schema → retain` (§6.2) | §3.1: nothing to analyze in 4 wks |
+| Transfer learning, A/B routing | — | factory-meta experiment schema stubbed; single-arm router only (matches NG4) | needs N>1 repos |
+| Gitnexus analyze (P0.10) | 3 | leave MCP tool registration point open in P0.7 (§6.1) | off critical path; graph IQ deferred |
+| GitHub seeds mirror (P1.3) | 4 | intake writes local `.seeds/issues.jsonl` only (§6.4 manifest) | see scope boundary below |
+| Mental models, directives enforcement | — | declarative bank manifest (§6.4) — append later | config-only, no rework |
+| P0.3 — mixed-model 3-agent demo | 4 | Warren multi-model dispatch exercised by P1.6 | re-proven by P1.6 on the real path; Phase-0 demo is redundant validation |
+| P0.6 — LSP provision | 3 | pi-lens `lsp_diagnostics`/`lsp_navigation` surfaces ride with P0.5 | P0.5 carries core signal; full LSP gate (P1.7) defers together |
+| P0.8 — GitHub webhook → session | 3 | webhook correlation validated by SPIKE-6 (mocked PR ok); audit polls first PR | push→session trigger is the G3 autonomous loop; G2 audit polls (P1.18 pattern) for the first PR |
+| P0.11 — Phase-0 exit gate | 3 | per-story tests as informal checkpoints; P1.17 is the slice gate | P1.17 (KEEP) validates the slice; P0.11 is a mid-slice checkpoint, re-add first if buffer |
+| P1.5 — scored model router | 4 | single-arm fixed-config router (matches NG4); router-selection log stub | optimization (cost/quality), not lights-on; P1.15 runs on fixed config |
+| P1.7 — post-edit `lsp_diagnostics` gate | 3 | gate hook point present in emit phase; ast-grep fallback path | quality hardening; depends on deferred P0.6 |
+| P1.8 — protocol run + issue correlation | 3 | correlation keys (runId/issueId/sessionId) on every artifact from day 1 (§6.3) | §6.3 seam carries issue correlation for audit; full run lifecycle + live streaming is polish |
+| P1.10 — executionPolicy approve/resume webhook | 4 | decide-phase gate point left in protocol template (P1.4) | §9 Gate 1 "gated approvals" = GitHub PR-review approval (native), not the decide-phase webhook |
+| P1.12 — mulch prime/record | 3 | mulch binary validated by SPIKE-7; prime/record hook point in harness | G3 house-style polish; the primary flywheel is the Hindsight banks (P0.9/P1.11), not mulch |
+| P1.14 — outcome record + router log | 3 | outcome vector captured in cost_events (P1.13); runId keying via §6.3 | router-selection log needs deferred P1.5; cost data flows via P1.13 |
+
+> **P1.3 scope boundary (explicit).** P1.3 in this window = **local write only**: intake writes
+> `.seeds/issues.jsonl`. **Do NOT implement the GitHub mirror** — that is the deferred half. Two devs building
+> different halves of a "one-directional" story is the failure mode; this line makes the boundary binary.
+>
+> **P0.8 / P1.10 audit path.** The first real PR's audit chain (P1.16) is reconstructed via **polling**
+> (P1.18 polls comments; PR merge status polled) + the §6.3 correlation keys, not via live webhooks. P0.8
+> (webhook ingestion) and P1.10 (executionPolicy webhook) activate when the G3 autonomous push→session loop
+> comes online.
 
 ### 4.3 Rationale summary
 
 - Cuts come from §3.1 (analysis agents can't prove value in 4 weeks) and §3.2 (factory tier needs N>1 repos).
-- Everything cut is reachable by **adding config/schema/cron against an existing interface**, not new architecture (see §6).
+- Everything cut is reachable by **adding config/schema/cron against an existing interface**, not new architecture. Seam traceability:
+  - Factory tier → §6.1 `promote_to_factory`
+  - Proactive/analysis agents → §6.2 agent-runner interface
+  - Audit + cross-project correlation → §6.3 correlation keys (also serves deferred P1.8/P1.14 issue correlation)
+  - Bank/label/directives config → §6.4 declarative manifest
 - The slice is chosen so every one of the four product goals (G1 useful, G2 accountable, G3 self-improving-via-flywheel, G4 safe) has at least one shipped, tested capability.
+- **Budget caveat (§3.3):** the 64-pt slice exceeds the 45–50-pt throughput estimate. Treat 45–50 as committed, 64 as stretch; close the gap by trimming the slice or extending the window — never by absorbing deferred stories.
 
 ---
 
@@ -198,6 +257,7 @@ Dev A = strongest engineer on the critical-path bottlenecks. Dev B = balanced, o
 **Sequencing rules**
 
 - Spikes are gates: **do not start the feature code a spike protects until the spike exits green or a documented fallback is chosen.**
+- **SPIKE-5 carve-out ("non-blocking" defined).** SPIKE-5 (weighted-scoring strategy) is the one spike labeled non-blocking. It runs **offline in parallel** with week-2 P1.4 work; P1.4 may *start* before SPIKE-5 exits, but P1.4's decide-phase **scoring does not finalize** until SPIKE-5 exits green (chosen scorer + weights) or its rubric-judge fallback is chosen. "Non-blocking" means it gates *finalization*, not *entry* — consistent with the gate rule above.
 - P1.15 is the integration validator and **will surface bugs in earlier stories** — reserve 2–3 days of week-3/4 buffer for fallout.
 - Correlation keys (runId/issueId/sessionId) are threaded from **day one** on every artifact. Retrofitting the 8-hop audit chain is the most expensive mistake available here.
 
@@ -210,9 +270,13 @@ into the KEEP slice.
 
 ### 6.1 `promote_to_factory(finding, finding_type)` — factory-tier seam
 Typed function appended to each project agent's retention step. In the 4-week build it validates the finding,
-computes the collision-safe document id (content-hash `[:8]`, per QDS-MEM-002 §5.2), and writes to a **no-op /
-log sink**. Later: point the sink at the two factory banks and deploy the four factory agents. No call-site
-changes.
+computes the **compound document id** `promoted-{project_id}-{finding_type}-{run_date}-{content_hash[:8]}`
+(per QDS-MEM-002 §5.2) and writes to a **no-op / log sink**. The id is collision-safe because the `[:8]` (32-bit)
+hash is a *suffix inside a narrow (project, type, date) bucket*, not a bare key — so the birthday-paradox bound
+(~65k same-bucket entries) is unreachable in practice (same-content collisions are intentional dedup, not data
+loss). If a future use ever adopts a *global bare-hash* key (e.g. cross-project transfer-learning fingerprint),
+widen to `[:12]`/`[:16]` at that point; the compound id needs no change now. Later: point the sink at the two
+factory banks and deploy the four factory agents. No call-site changes.
 
 ### 6.2 Agent-runner interface — proactive-agent seam
 Review Harvester, Synthesizer, Meta-Optimizer, Blind-Spot all share one shape: `reflect(bank, query, budget,
@@ -280,13 +344,21 @@ SPIKE-N: <name>
 - **Method:** stand up the two project banks from the manifest (§6.4) with full config; scripted retain →
   recall → reflect(response_schema) → consolidate cycle; a temporary CronCreate firing on a 1-minute schedule
   to observe durability; assert structured outputs against the schemas.
-- **Success:** all five hypotheses green; reusable bank-setup + retain/recall harness produced.
-- **Failure / fallback:** for any red primitive, document the actual behavior and choose: (a) client-side
-  schema enforcement if `response_schema` is unreliable; (b) explicit consolidation/refresh calls in the agent
-  runner if auto-triggers don't fire; (c) external scheduler (system cron / scheduled wakeup) if `CronCreate`
-  is not durable.
-- **Known landmines to verify here:** missing `import json` in 6 design code blocks; hardcoded
-  `biospark33/QDS-Factory` GitHub paths; the 1st-of-month `07:23/07:25/07:27` cron cluster (API contention).
+- **Success criteria (green):** all five hypotheses green; reusable bank-setup + retain/recall harness produced.
+- **Failure criteria (red):** any primitive deviates from the design's stated behavior (wrong structured-output
+  shape, auto-refresh/consolidation not firing, CronCreate not durable, or `tags_match` semantics mismatched) —
+  captured as an observed-behavior diff, not a judgment call.
+- **Fallback:** for any red primitive, choose: (a) client-side schema enforcement if `response_schema` is
+  unreliable; (b) explicit consolidation/refresh calls in the agent runner if auto-triggers don't fire;
+  (c) external scheduler (system cron / scheduled wakeup) if `CronCreate` is not durable.
+- **Artifacts:** (1) verdict doc with a per-primitive observed-behavior table + go/no-go; (2) reusable
+  bank-setup + retain/recall/reflect harness (becomes the Review Harvester's substrate); (3) a written
+  `tags_match` decision (which mode the build standardizes on).
+- **Known landmines (status as of this revision):** ~~missing `import json` in 6 design code blocks~~ —
+  **RESOLVED** (PR #20 added `import json` to both design docs; verified present at
+  hindsight-memory-master-design.md and hindsight-factory-tier-design.md); hardcoded `biospark33/QDS-Factory`
+  GitHub paths — **intentional** (single-repo design docs; parameterize at build time, not in the design); the
+  1st-of-month `07:23/07:25/07:27` cron cluster — **still live** (API contention, R8).
 - **Exit decision:** go / go-with-documented-fallbacks. **No memory feature code starts until this exits.**
 
 ### SPIKE-2 — SwarmClaw command-allowlist & agent+MCP registry (OQ-7)
@@ -300,8 +372,14 @@ SPIKE-N: <name>
   registry add/remove is atomic under concurrent access; MCP invoke timeout behaves.
 - **Method:** isolated prototype of the allowlist matcher + registry with an adversarial test set (injection,
   path traversal, race on registry mutation).
-- **Success / failure / fallback:** green = allowlist passes the adversarial set and registry is race-free;
-  red = adopt a stricter wrapper (e.g., explicit argv allowlist, no shell) and re-test.
+- **Success criteria (green):** allowlist passes the adversarial set (no bypass) and the registry is race-free
+  under concurrent mutation.
+- **Failure criteria (red):** any adversarial input bypasses the allowlist, OR a concurrent registry mutation
+  produces a lost update / torn state.
+- **Fallback:** adopt a stricter wrapper (explicit argv allowlist, no shell) and/or a mutex-guarded registry;
+  re-run the adversarial set until green.
+- **Artifacts:** (1) verdict doc naming the chosen allowlist model + registry concurrency control; (2) the
+  adversarial test set (becomes P0.7's security-regression suite).
 - **Exit decision:** go-with-chosen-allowlist-model before P0.7 integration.
 
 ### SPIKE-3 — Warren subprocess lifecycle, exit-code mapping, resource watchdog
@@ -316,32 +394,68 @@ SPIKE-N: <name>
   `O_NOFOLLOW` blocks the symlink race.
 - **Method:** drive Warren with crafted jobs that exit each code path; a memory-hog job to trip the watchdog;
   a symlink-swap harness for the TOCTOU case.
-- **Success / failure / fallback:** green = mapping confirmed + watchdog kills cleanly; red = build a
-  table-driven exit-code mapper from observed codes, and/or move resource limits to OS cgroup/`ulimit`.
+- **Success criteria (green):** observed exit codes map cleanly to the assumed table; the watchdog kills the
+  memory-hog cleanly without orphaning; the symlink swap is rejected.
+- **Failure criteria (red):** an observed exit code does not fit the assumed mapping (unclassifiable), OR the
+  watchdog fails to kill within budget, OR the symlink swap succeeds.
+- **Fallback:** build a table-driven exit-code mapper from observed codes; and/or move resource limits to OS
+  cgroup/`ulimit`; and/or harden the open path beyond `O_NOFOLLOW`.
+- **Artifacts:** (1) verdict doc with the validated exit-code table + watchdog/TOCTOU results; (2) the crafted
+  job fixtures (become P1.6/P1.9 regression tests).
 - **Exit decision:** go-with-validated-mapping before P1.6 integration.
 
-### SPIKE-4 — pi-lens headless invocation (OQ-2)
-- **Protects:** P0.5 (and the in-node quality signal generally).
+### SPIKE-4 — pi-lens headless invocation & LSP diagnostics (OQ-2)
+- **Protects:** P0.5 (and the in-node quality signal generally); also de-risks the post-edit `lsp_diagnostics`
+  gate (FR-EX-11, dependency of the deferred P1.7) and the TDI emit path (FR-EX-8).
 - **Time-box:** 0.5–1 day, Dev B.
-- **Objective:** confirm the canonical headless invocation (`--mode json`?), latency ≤3s, and graceful
-  behavior when pi-lens is absent (TDI fallback).
-- **Hypotheses:** headless JSON mode exists and is stable; latency budget holds; absence path degrades, not
-  crashes.
-- **Success / failure / fallback:** green = documented invocation + latency numbers; red = define the
-  diagnostics-only fallback and the TDI emit fallback (this also feeds the §9.3 OQ-2 logged-fallback in PRD).
+- **Objective:** confirm the canonical headless invocation, latency ≤3s (NFR-PERF-6), graceful absence-path
+  behavior (TDI fallback), **and that headless `lsp_diagnostics` emits machine-readable results** (the FR-EX-11
+  blocker). Note: the Phase-0 spikes (PRD §5.4 / Appendix D, 2026-06-06) already established that pi-lens
+  v3.8.47 is installed, registers `lsp_diagnostics`/`lsp_navigation`/`ast_grep_*`, and that "machine-readable
+  JSON emission [is] confirmed headless"; TDI is a TUI slash-command, headless via on-disk `~/.pi-lens/`
+  artifacts. This spike **re-validates those facts in the SwarmClaw build context** and closes the one residual
+  (live diagnostic content, blocked on an API key per the PRD).
+- **Why load-bearing:** the in-node quality signal and the post-edit gate both depend on headless, parseable
+  pi-lens output. If headless JSON/RPC emission is unstable in this build, FR-EX-11 degrades to FR-EX-12
+  (ast-grep + tests) — a quality loss we must decide deliberately, not discover at P1.7.
+- **Hypotheses:** headless `--mode json` / `--mode rpc` is stable and parseable (re-confirm v3.8.47);
+  `lsp_diagnostics` returns machine-readable findings headless (FR-EX-11 dependency); the latency budget holds
+  (≤3s p95); the absence path (no pi-lens / no language server) degrades, not crashes.
+- **Method:** run pi-lens headless (`--mode json`, and `--mode rpc` for TDI artifacts) against a fixture file
+  with a known type error; capture `lsp_diagnostics` output and assert it is valid JSON with a findings array;
+  time the call (≥20 runs, report p95); run with pi-lens absent and with no language server to confirm graceful
+  degradation + a logged waiver.
+- **Success criteria (green):** documented canonical invocation + `lsp_diagnostics` parseable JSON + latency
+  p95 ≤3s + absence path logs a waiver (no crash).
+- **Failure criteria (red):** headless `lsp_diagnostics` is TUI-only/unparseable, OR p95 latency >3s, OR the
+  absence path crashes/hangs.
+- **Fallback:** define the diagnostics-only fallback (FR-EX-12: ast-grep + test-pass as the emit precondition)
+  and the TDI emit fallback (FR-EX-8: pi-lens warning count via `--mode rpc` as a logged proxy). This also
+  feeds the §9.3 OQ-2 logged-fallback in the PRD.
+- **Artifacts:** (1) verdict doc: go / go-diagnostics-only, with the canonical invocation string + latency
+  numbers; (2) a small `pi-lens headless` shim/wrapper used by P0.5 and (later) P1.7.
 - **Exit decision:** go / go-diagnostics-only.
 
 ### SPIKE-5 — Protocol-template weighted scoring / embedder strategy
 - **Protects:** P1.4 (blocks P1.6/P1.8).
-- **Time-box:** 1–2 days, Dev A (offline, non-blocking).
+- **Time-box:** 1–2 days, Dev A (offline, runs in parallel — see §5 SPIKE-5 carve-out: gates P1.4 finalization, not entry).
 - **Objective:** choose the compare/decide scoring approach for the 5-phase template — validate whether TF-IDF
   is sufficient or too heavy, and finalize weighted-scoring weights, before Warren integration.
+- **Why load-bearing:** the decide phase picks which candidate result to emit. A scorer that can't discriminate
+  good from bad either emits weak output (hurting PR quality, G1) or forces an expensive LLM judge on every
+  node (hurting cost, G2). Settling this offline prevents a mid-sprint scorer swap that perturbs every decide
+  result.
 - **Hypotheses:** a lightweight similarity/scoring function discriminates good vs bad candidate results well
   enough for the decide phase without a heavy embedder.
 - **Method:** offline prototype scoring on sample candidate outputs; compare TF-IDF vs a simpler heuristic vs a
   small embedding call; tune weights.
-- **Success / failure / fallback:** green = chosen scorer + weights documented; red = fall back to an explicit
-  rubric-based LLM judge in the decide phase.
+- **Success criteria (green):** chosen scorer + weights documented; the discriminator separates good/bad
+  sample candidates with a usable margin.
+- **Failure criteria (red):** no lightweight scorer discriminates the sample set with a usable margin (all
+  candidates score ~equally, or rankings are unstable).
+- **Fallback:** fall back to an explicit rubric-based LLM judge in the decide phase (higher cost, logged).
+- **Artifacts:** (1) verdict doc naming the scorer + weights (or the LLM-judge fallback); (2) the offline
+  scoring harness + labeled sample set (becomes the decide-phase regression fixture).
 - **Exit decision:** go-with-chosen-scorer before P1.4 finalization.
 
 ### SPIKE-6 — Webhook correlation-key threading
@@ -354,18 +468,42 @@ SPIKE-N: <name>
 - **Hypotheses:** the branch-naming + metadata scheme uniquely correlates a webhook event back to its run and
   issue.
 - **Method:** integration test that fires a dispatch, opens a real (or mocked) PR, receives the webhook, and
-  asserts full-chain resolution **before** building the full P1.15 dispatch.
-- **Success / failure / fallback:** green = chain resolves every hop; red = add explicit correlation id to PR
-  body/metadata and re-test.
+  asserts full-chain resolution **before** building the full P1.15 dispatch. (A mocked PR is acceptable — see
+  §4.2 P0.8/P1.10 note; the first real PR's audit uses polling.)
+- **Success criteria (green):** the correlation scheme resolves every hop (dispatch → run → branch → PR →
+  webhook → correlation) for both real and mocked PRs.
+- **Failure criteria (red):** any hop cannot be uniquely correlated back to its run/issue (ambiguous or missing
+  key).
+- **Fallback:** add an explicit correlation id to PR body/metadata and re-test until every hop resolves.
+- **Artifacts:** (1) verdict doc with the validated branch-naming + metadata scheme; (2) the dispatch→webhook
+  integration test (becomes P1.16's audit-chain regression).
 - **Exit decision:** go-with-validated-correlation-scheme before P1.15.
 
 ### SPIKE-7 — mulch binary & latency
-- **Protects:** P1.12 (mulch prime/record) and any dependent dispatch priming.
+- **Protects:** P1.12 (mulch prime/record — DEFERRED) and any dependent dispatch priming. Validates the mulch
+  *seam* so the P1.12 defer is zero-rework.
 - **Time-box:** 0.5 day, Dev B.
-- **Objective:** confirm the `mulch` binary (assumed `/usr/local/bin/mulch` v0.6.3) is/will-be present and that
-  prime ≤10s / record ≤5s latency budgets hold.
-- **Success / failure / fallback:** green = present + within budget; red = vendor/pin the binary in P0 env, or
-  raise timeouts with logged justification.
+- **Objective:** confirm the `mulch` binary is/will-be present and that the prime ≤10s / record ≤5s latency
+  budgets hold, using the real CLI verbs (not a guess).
+- **Why load-bearing:** if `mulch` is absent or slow, the house-style prime step either blocks dispatch
+  (latency-budget blowout) or silently no-ops. Knowing this before the P1.12 defer hardens lets the seam degrade
+  correctly (`waiver.reason: 'mulch-unavailable'`) instead of failing at runtime.
+- **Hypotheses:** `mulch` is present at the expected path/version; `mulch prime --domain <d> --json` and
+  `mulch record --domain <d> --content <s> --source <s>` behave per the P1.12 contract; prime p95 ≤10s and
+  record p95 ≤5s.
+- **Method:** `command -v mulch` + `mulch --version` to confirm `/usr/local/bin/mulch` v0.6.3 (or current
+  stable); run `time mulch prime --domain typescript --json` against an empty and a populated
+  `.mulch/expertise/` directory (empty must return `{entries:[]}`, not error — per P1.12 "empty expertise is
+  not a failure"); run `time mulch record --domain typescript --content "..." --source spike-7`; repeat ≥10×,
+  report p95 for both verbs.
+- **Success criteria (green):** binary present at expected version; prime/record match the P1.12 contract;
+  prime p95 ≤10s and record p95 ≤5s; empty-prime is a clean baseline.
+- **Failure criteria (red):** binary absent/wrong version, OR a verb's output shape mismatches the contract,
+  OR either latency budget exceeds p95.
+- **Fallback:** vendor/pin the binary in the P0 env; or raise the timeouts with logged justification and a
+  `waiver` on the prime step.
+- **Artifacts:** (1) verdict doc: binary presence/version + p95 latency numbers; (2) a `mulch` CLI wrapper
+  snippet usable by the (deferred) P1.12 prime/record hooks.
 - **Exit decision:** go / go-with-adjusted-budgets.
 
 ### SPIKE-8 — GitHub review-harvesting extraction
@@ -373,14 +511,50 @@ SPIKE-N: <name>
 - **Time-box:** 0.5–1 day, Dev B.
 - **Objective:** validate the `gh` extraction of CodeRabbit / Gemini-Code-Assist inline + review comments,
   severity classification, and that paths/queries are parameterized (not hardcoded to one repo).
+- **Why load-bearing:** the Review Harvester is the KEEP slice's only source of *external* ground truth — it
+  feeds the yield-curve KPI and is the one cron agent that proves value inside 4 weeks. If extraction is
+  unreliable or hardcoded to one repo, the flywheel's strongest signal is corrupted from day one.
 - **Hypotheses:** the `gh pr list` + `gh api .../comments` + `.../reviews` queries reliably return bot comments
   with parseable severity; token cost per harvest is bounded.
 - **Method:** run the three `gh` queries against existing merged PRs (the repo has PR #20 history); measure
   comment volume and token cost; confirm the `REVIEW_HARVEST_SCHEMA` reflect call returns conformant output
   (depends on SPIKE-1 hypothesis 1).
-- **Success / failure / fallback:** green = parameterized extraction + bounded cost; red = add a sampling cap
-  and parameterize repo via config.
+- **Success criteria (green):** parameterized extraction (repo via config) + bounded token cost; the reflect
+  call returns `REVIEW_HARVEST_SCHEMA`-conformant output.
+- **Failure criteria (red):** queries miss inline vs review comments, OR severity is unparseable, OR token cost
+  is unbounded without a cap, OR output fails the schema.
+- **Fallback:** add a sampling cap (N comments/PR, M PRs/harvest) and parameterize the repo via config; re-run
+  until conformant and bounded.
+- **Artifacts:** (1) verdict doc: query shapes + measured token cost + cap value; (2) the parameterized `gh`
+  extraction module (becomes the Review Harvester's collector).
 - **Exit decision:** go-with-parameterized-extraction.
+
+### SPIKE-9 — SwarmClaw→Hindsight bridge execution model (SwarmClaw-hook parity)
+- **Protects:** P1.11 (Hindsight prime/retain — KEEP). Resolves the §10 "bridge execution model" OQ before
+  P1.11 starts.
+- **Time-box:** 0.5 day, Dev B, week 1 (in parallel with SPIKE-1).
+- **Objective:** decide how the SwarmClaw→Hindsight classification bridge runs in *this* build — a SwarmClaw
+  post-session hook (the design's stated model), a separate agent, or manual — by validating what SwarmClaw
+  actually exposes.
+- **Why load-bearing:** the design (QDS-MEM-001 §6.2) assumed a Claude Code post-session hook; SwarmClaw is the
+  *new* (post-pivot) orchestrator. If SwarmClaw has no post-session/retain hook equivalent, the bridge can't
+  retain learnings automatically — the flywheel (G3) silently breaks at P1.11. This is a design-decision gate
+  on an in-scope KEEP story, so it meets the spike threshold.
+- **Hypotheses:** SwarmClaw exposes a session-end (or phase-end) hook/callback that can invoke the
+  classification + retain pipeline; if not, a separate lightweight retain agent or a manual retain step is
+  viable without new architecture.
+- **Method:** inspect the SwarmClaw build for a session-end/phase-end hook surface (grep the registry/protocol
+  template for hook or callback registration); if present, prototype the bridge call; if absent, prototype the
+  separate-agent and manual options; document the chosen model against QDS-MEM-001 §6.2.
+- **Success criteria (green):** a chosen, prototype-validated bridge execution model (hook / agent / manual)
+  that retains to the project banks post-session.
+- **Failure criteria (red):** none of the three models prototypes cleanly without new architecture (i.e., the
+  bridge requires building SwarmClaw hook infrastructure first).
+- **Fallback:** manual retain step for the 4-week window (operator-triggered post-session retain), with the
+  hook/agent model deferred behind the §6.2 seam — the flywheel still runs, just not fully autonomous.
+- **Artifacts:** (1) decision doc: chosen bridge model + the SwarmClaw hook-parity finding; (2) the bridge
+  call-site stub (hook or agent) wired for P1.11.
+- **Exit decision:** go-with-chosen-bridge-model before P1.11 starts.
 
 ---
 
@@ -397,6 +571,9 @@ SPIKE-N: <name>
 | R7 | Scope creep back toward factory tier / 8 agents | Medium | "let's just add the Synthesizer too" | this doc's cut line; seams make deferral cheap |
 | R8 | Cron contention 1st-of-month cluster | Low | overlapping API calls | re-stagger schedules during SPIKE-1 |
 | R9 | Review Harvester token cost unbounded | Low | large PR review volume | SPIKE-8 sampling cap |
+| R10 | **Dev A single-point-of-failure** | **High** | Dev A blocked >2 days | Dev A owns all critical-path bottlenecks (P0.7, P1.1, P1.4, P1.6, P1.15, P1.16) + 4 of 9 spikes. Cross-train Dev B on the P0.7 design during week 1 so Dev B can at minimum unblock P1.1 entry; capture the SPIKE-2 allowlist verdict in docs so it isn't tacit knowledge |
+| R11 | Bridge execution model decided late | Medium | SPIKE-9 red or deferred | The SwarmClaw→Hindsight bridge is a design-decision gate on KEEP story P1.11. Run SPIKE-9 in week 1; if no clean hook, take the manual-retain fallback so the flywheel still runs (not fully autonomous) |
+| R12 | Channel service unavailability (intake path) | Low | external coms outage / rate-limit | P0.2 coms-vendor smoke-test de-risks viability; for the 4-week slice the `/qds` intake is exercised locally — the external channel (Telegram/Slack) is G3 polish, deferred behind the intake seam |
 
 ---
 
@@ -405,16 +582,24 @@ SPIKE-N: <name>
 The slice is **done** when all hold (maps to P1.17's exit assertions plus rigor gates):
 
 1. **G1 lights-on:** a `/qds` intake produces ≥1 real reviewed PR on the sample repo with no human input except
-   gated approvals.
-2. **G2 accountable:** for that PR, the full 8-hop audit chain reconstructs with **no missing hop**, and
-   cost/story is queryable from the `cost_events` ledger.
-3. **G3 flywheel:** post-session/post-skill retain and pre-session recall are live; banks accumulate
-   observations; Review Harvester runs on cron and writes findings; the four deferred-agent seams (§6) exist
-   and are tested as no-ops.
-4. **G4 safe:** a loopy prompt **terminates via a guard, not by exhausting credits**; restart policy enforces
-   retry/wall-clock caps; over-cap gate fires.
-5. **Rigor:** every KEEP story has tests; security invariants (P0.7, P1.3 sanitization) have adversarial tests;
-   correlation keys present on every artifact; no secrets in artifacts; spikes each left a written verdict.
+   gated approvals (GitHub PR-review approval — see §4.2 P1.10 note; the decide-phase executionPolicy webhook is
+   deferred).
+2. **G2 accountable:** for that PR, the full 8-hop audit chain reconstructs with **no missing hop** (reconstructed
+   via polling + the §6.3 correlation keys for the first PR — see §4.2 P0.8 note), and cost/story is queryable
+   from the `cost_events` ledger.
+3. **G3 flywheel:** post-session/post-skill retain and pre-session recall are live; banks accumulate observations
+   (**≥10 retain events logged across the 4-week window**); the Review Harvester runs on cron and **completes
+   ≥1 harvest that writes ≥1 `REVIEW_HARVEST_SCHEMA`-conformant document** to the project bank; the **two
+   deferred-agent seams** (§6.1 `promote_to_factory`, §6.2 agent-runner) are tested as no-ops; correlation keys
+   (§6.3) are present on every artifact; the bank manifest (§6.4) is declarative and append-only.
+4. **G4 safe:** a synthetic loopy prompt **terminates via a guard, not by exhausting credits** — **both the P0.4
+   turn cap AND the wall-clock cap fire under test**; the restart policy enforces retry/wall-clock caps; the
+   over-cap gate fires.
+5. **Rigor:** every KEEP story has tests; security invariants (P0.7 allowlist, P1.3 sanitization) have adversarial
+   tests; correlation keys present on every artifact; **no secrets in artifacts — verified by a pre-commit secret
+   scan (e.g. gitleaks) plus a manual audit of hardcoded `biospark33/QDS-Factory` paths**; spikes each left a
+   written verdict; **any spike that exited red-with-fallback has its fallback code merged and tested**;
+   **latency budgets confirmed in CI: pi-lens headless ≤3s (SPIKE-4) and mulch prime ≤10s (SPIKE-7)**.
 
 ---
 
@@ -426,7 +611,7 @@ The slice is **done** when all hold (maps to P1.17's exit assertions plus rigor 
 - **OQ — Warren exit codes:** validate the assumed table → SPIKE-3.
 - **OQ — mulch pre-install:** binary presence/version → SPIKE-7.
 - **Directives source:** which `_bmad-output/` security invariants become Hindsight directives (QDS-MEM-001 §3.1) — extract during P0.9 bank seeding.
-- **Bridge execution model:** is the SwarmClaw→Hindsight classification bridge a hook, a separate agent, or manual? (QDS-MEM-001 §6.2 leaves this open.) Decide before P1.11.
+- **Bridge execution model:** is the SwarmClaw→Hindsight classification bridge a SwarmClaw hook, a separate agent, or manual? → **SPIKE-9**. (QDS-MEM-001 §6.2 specifies a "Claude Code post-session hook that calls the bridge" — not fully open; the real question is whether SwarmClaw, the post-pivot orchestrator, exposes an equivalent hook. Decide before P1.11.)
 
 ---
 
