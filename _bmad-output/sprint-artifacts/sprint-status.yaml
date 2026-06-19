@@ -52,3 +52,23 @@ epics:
       P1.17: { title: "Phase-1 make-or-break gate (§13)",                  points: 3, status: draft, deps: [P1.10, P1.14, P1.16] }
       P1.18: { title: "PR comment-polling detect",                         points: 3, status: draft, deps: [P1.15] }
       P1.19: { title: "Pi Pair fix -> PR green",                           points: 4, status: draft, deps: [P1.18] }
+  phase-2:
+    name: Operational Memory Substrate (QDS-MEM-003)   # additive epic — NOT in the 4-week window; gates on P0.7 + P1.6 + P1.15
+    status: ready-for-dev   # 13 stories authored; atomicity PASS; adversarial review converged (HIGH 41->0, MED 63->0 over 3 iterations)
+    points: 44
+    stories_dir: sprint-artifacts/phase-2/stories
+    atomicity_audit: sprint-artifacts/phase-2/atomicity-audit-2026-06-19.md
+    stories:
+      P2.0:  { title: "Toolchain bootstrap (vendor pi-mem substrate + pin dual-runtime)", points: 3, status: ready-for-dev, deps: [P0.7] }
+      P2.1:  { title: "Event store (SQLite + sqlite-vec) + recall",        points: 4, status: ready-for-dev, deps: [P2.0] }  # SPIKE-11 informs
+      P2.2:  { title: "Schema migration runner",                          points: 3, status: ready-for-dev, deps: [P2.0] }
+      P2.3:  { title: "Tool-call capture (pi-mono ExtensionAPI)",         points: 3, status: ready-for-dev, deps: [P2.1] }
+      P2.4:  { title: "DAG-node capture (swarmclaw seam)",                points: 4, status: ready-for-dev, deps: [P2.1] }  # BLOCKED-BY SPIKE-10 (live tap + E2E)
+      P2.5:  { title: "Reasoning + agent-context capture",                points: 3, status: ready-for-dev, deps: [P2.1, P2.3] }
+      P2.6:  { title: "Outcome capture",                                   points: 3, status: ready-for-dev, deps: [P2.1, P2.3] }
+      P2.7:  { title: "Nightly promotion cron",                           points: 4, status: ready-for-dev, deps: [P2.3, P2.5, P2.6] }
+      P2.8:  { title: "Hindsight retain bridge",                          points: 3, status: ready-for-dev, deps: [P2.7, P1.11] }  # resolves SPIKE-9
+      P2.9:  { title: "Experiment propose + human gate",                  points: 3, status: ready-for-dev, deps: [P2.1, P2.8] }
+      P2.10: { title: "A/B execution + deploy",                           points: 5, status: ready-for-dev, deps: [P2.9] }  # BLOCKED-BY SPIKE-10 (E2E)
+      P2.11: { title: "Confirm cron (30-day auto-rollback)",              points: 3, status: ready-for-dev, deps: [P2.10] }
+      P2.12: { title: "Replay + retention policy",                        points: 3, status: ready-for-dev, deps: [P2.1] }
