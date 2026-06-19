@@ -186,7 +186,7 @@ Build these to full enterprise grade: tested, audited, hardened, no shortcuts.
 
 | Item | Note |
 |---|---|
-| P0.9 | Hindsight banks (`qds-product` + `qds-meta` — **two banks, not four**) + mulch import |
+| P0.9 | Hindsight banks (`qds-product` + `qds-meta` — **two project banks, not four**; spike scope — the two factory-tier banks are deferred per §3.2/§4.2, full 4-bank design in QDS-MEM-002) + mulch import |
 | P1.5 | Scored model router (archetype/tier → Hindsight dev-meta); router-selection log feeds P1.14 outcome record (un-deferred, cascade) |
 | P1.11 | Hindsight prime (pre-exec recall) + retain (post-exec learning) |
 | Hooks | pre-session recall (charter + antipatterns), post-session retain, post-skill retain |
@@ -549,9 +549,15 @@ SPIKE-N: <name>
   extraction module (becomes the Review Harvester's collector).
 - **Exit decision:** go-with-parameterized-extraction.
 
-### SPIKE-9 — SwarmClaw→Hindsight bridge execution model (SwarmClaw-hook parity)
+### SPIKE-9 — SwarmClaw→Hindsight bridge execution model (SwarmClaw-hook parity) — ✅ RESOLVED
 - **Protects:** P1.11 (Hindsight prime/retain — KEEP). Resolves the §10 "bridge execution model" OQ before
   P1.11 starts.
+- **Verdict (resolved):** the bridge runs as a **batch nightly promotion cron**, not a live SwarmClaw/Claude-Code
+  hook or a separate retain agent. The operational memory tier (QDS-MEM-003) pre-distills the day's events into
+  one "Daily Learnings" document overnight, then `retain()`s it into the Hindsight banks — replacing the live
+  LLM classification the old §6.2 model assumed. Batch replaces live handoff. See
+  [QDS-MEM-003-IMPL Delta 7](operational-memory-implementation-plan.md) + [QDS-MEM-001 §6.2](hindsight-memory-master-design.md).
+  (The bridge call-site stub + I/O schema from the original §6.2 design remain valid for that retain call.)
 - **Time-box:** 0.5 day, Dev B, week 1 (in parallel with SPIKE-1).
 - **Objective:** decide how the SwarmClaw→Hindsight classification bridge runs in *this* build — a SwarmClaw
   post-session hook (the design's stated model), a separate agent, or manual — by validating what SwarmClaw
@@ -574,7 +580,49 @@ SPIKE-N: <name>
   hook/agent model deferred behind the §6.2 seam — the flywheel still runs, just not fully autonomous.
 - **Artifacts:** (1) decision doc: chosen bridge model + the SwarmClaw hook-parity finding; (2) the bridge
   call-site stub (hook or agent) wired for P1.11.
-- **Exit decision:** go-with-chosen-bridge-model before P1.11 starts.
+- **Exit decision:** go-with-chosen-bridge-model before P1.11 starts. **(RESOLVED — batch nightly cron; see verdict above.)**
+
+### SPIKE-10 — swarmclaw DAG event-hook surface (op-memory capture seam)
+- **Protects:** QDS-MEM-003-IMPL P2.4 (DAG-node + handoff capture) and P2.10 (A/B variant-tagged DAG runs).
+- **Time-box:** 0.5–1 day, Dev B (or whoever owns the Phase-2 epic).
+- **Objective:** determine the exact event-hook surface swarmclaw exposes for DAG-node transitions + inter-node
+  handoffs, and whether a DAG run can be tagged with an A/B `variant`. (pi-mono has no DAG concept — these
+  signals must come from swarmclaw.)
+- **Why load-bearing:** Delta 5 (QDS-MEM-003-IMPL §C) — without a swarmclaw DAG hook, node/handoff capture and
+  variant-tagged experiment runs cannot be wired. P2.4 and P2.10's E2E path both gate here.
+- **Method:** grep the swarmclaw registry/protocol template for node-transition / handoff / variant hooks;
+  prototype emitting a `node` event + a variant tag on a sample DAG; document the surface (or its absence +
+  the adaptation seam required).
+- **Success criteria (green):** a documented swarmclaw DAG hook surface (or a clean seam to add one) that yields
+  node/handoff events and accepts a variant tag.
+- **Failure criteria (red):** no node-transition hook exists and none can be added without new swarmclaw
+  infrastructure.
+- **Fallback:** capture only the pi-mono-level signals (tool/message/outcome — P2.3/P2.5/P2.6) for the first
+  Phase-2 pass; defer DAG-node capture (P2.4) and the E2E A/B path (P2.10, ships interface+unit first) until the
+  swarmclaw seam lands.
+- **Artifacts:** (1) verdict doc naming the swarmclaw DAG hook surface; (2) a minimal node-event emit prototype.
+- **Exit decision:** go / go-capture-level-only.
+
+### SPIKE-11 — sqlite-vec + ONNX MiniLM validation in Bun (op-memory vector backend)
+- **Protects:** QDS-MEM-003-IMPL P2.1 (event store + `event_vec`).
+- **Time-box:** 0.5 day, Dev B.
+- **Objective:** confirm sqlite-vec loads under the Bun/Node dual runtime and the local ONNX
+  `Xenova/all-MiniLM-L6-v2` (384-dim) embedder runs deterministically from a pinned local path (no remote
+  fetch), transactional with the SQLite event rows.
+- **Why load-bearing:** Delta 3 (QDS-MEM-003-IMPL §C) + INV-OM4 — the whole "zero per-event LLM/HTTP, cheap
+  embedded vector capture" thesis rests on this combo working in this runtime. If sqlite-vec or the ONNX runtime
+  is unstable under Bun, the backend choice reopens.
+- **Method:** load sqlite-vec in a Bun script; create a `vec0` virtual table; run the local ONNX embedder on a
+  fixed input ≥20×, assert deterministic 384-dim output; insert + vector-write in one transaction; assert no
+  network egress.
+- **Success criteria (green):** sqlite-vec + ONNX MiniLM both work under Bun; embeddings deterministic;
+  transactional write; zero remote fetch.
+- **Failure criteria (red):** either component fails to load/run under Bun, or embeddings are non-deterministic,
+  or a remote fetch occurs.
+- **Fallback:** pin the Node-only path (drop Bun for the op-memory worker); or swap the embedder for an
+  equivalent local 384-dim ONNX model; log the deviation.
+- **Artifacts:** (1) verdict doc + the Bun load snippet; (2) a tiny embed+write harness reused by P2.1/P2.3.
+- **Exit decision:** go / go-with-node-only-fallback.
 
 ---
 
@@ -592,7 +640,7 @@ SPIKE-N: <name>
 | R8 | Cron contention 1st-of-month cluster | Low | overlapping API calls | re-stagger schedules during SPIKE-1 |
 | R9 | Review Harvester token cost unbounded | Low | large PR review volume | SPIKE-8 sampling cap |
 | R10 | **Dev A single-point-of-failure** | **High** | Dev A blocked >2 days | Dev A owns all critical-path bottlenecks (P0.7, P1.1, P1.4, P1.6, P1.15, P1.16) + 4 of 9 spikes. Cross-train Dev B on the P0.7 design during week 1 so Dev B can at minimum unblock P1.1 entry; capture the SPIKE-2 allowlist verdict in docs so it isn't tacit knowledge. **Week-3 contingency (P1.15 = the single hardest Dev A dependency):** if Dev A is blocked during week 3, Dev B advances the **P1.16 audit-walker mechanics** and the **P1.17 exit-gate harness** against SPIKE-6 mocked-PR data while Dev A recovers — both are independently buildable from the §6.3 correlation keys (final pass of each still needs the real P1.15 PR, but the walker/gate scaffolding does not). **P1.15 blocked >3 days = extend the window by 1 week before touching any deferred scope** (never absorb a §4.2 DEFER story to cover the slip — the P1.17-gate cascade in §4.1 is the one sanctioned exception; ordinary schedule slips must not absorb further DEFER stories — see §3.3). |
-| R11 | Bridge execution model decided late | Medium | SPIKE-9 red or deferred | The SwarmClaw→Hindsight bridge is a design-decision gate on KEEP story P1.11. Run SPIKE-9 in week 1; if no clean hook, take the manual-retain fallback so the flywheel still runs (not fully autonomous) |
+| R11 | Bridge execution model decided late | Medium | SPIKE-9 red or deferred | The SwarmClaw→Hindsight bridge is a design-decision gate on KEEP story P1.11. Run SPIKE-9 in week 1; if no clean hook, take the manual-retain fallback so the flywheel still runs (not fully autonomous). **[SPIKE-9 RESOLVED]** — bridge model = batch nightly promotion cron (not a live hook); see §7 SPIKE-9 verdict + [QDS-MEM-003-IMPL Delta 7](operational-memory-implementation-plan.md). |
 | R12 | Channel service unavailability (intake path) | Low | external coms outage / rate-limit | P0.2 coms-vendor smoke-test de-risks viability; for the 4-week slice the `/qds` intake is exercised locally — the external channel (Telegram/Slack) is G3 polish, deferred behind the intake seam |
 
 ---
@@ -633,7 +681,7 @@ The slice is **done** when all hold (maps to P1.17's exit assertions plus rigor 
 - **OQ — Warren exit codes:** validate the assumed table → SPIKE-3.
 - **OQ — mulch pre-install:** binary presence/version → SPIKE-7.
 - **Directives source:** which `_bmad-output/` security invariants become Hindsight directives (QDS-MEM-001 §3.1) — extract during P0.9 bank seeding.
-- **Bridge execution model:** is the SwarmClaw→Hindsight classification bridge a SwarmClaw hook, a separate agent, or manual? → **SPIKE-9**. (QDS-MEM-001 §6.2 specifies a "Claude Code post-session hook that calls the bridge" — not fully open; the real question is whether SwarmClaw, the post-pivot orchestrator, exposes an equivalent hook. Decide before P1.11.)
+- **Bridge execution model:** is the SwarmClaw→Hindsight classification bridge a SwarmClaw hook, a separate agent, or manual? → **SPIKE-9**. (QDS-MEM-001 §6.2 specifies a "Claude Code post-session hook that calls the bridge" — not fully open; the real question is whether SwarmClaw, the post-pivot orchestrator, exposes an equivalent hook. Decide before P1.11.) **[RESOLVED]** — SPIKE-9 verdict: the bridge is a batch nightly promotion cron (operational tier pre-distills → `retain`), not a live hook/agent; see §7 SPIKE-9 + QDS-MEM-003-IMPL Delta 7.
 
 ---
 

@@ -1577,6 +1577,19 @@ The bridge must determine: (1) which content is relevant vs conversational noise
 
 Implementation: Claude Code post-session hook that calls the bridge.
 
+> **Cross-ref — resolved execution model.** With the operational memory tier
+> ([QDS-MEM-003](operational-memory-design.md)) in place, this post-session retain pipeline runs as a **batch
+> nightly promotion cron**, not a live Claude Code hook. The cron distills the day's operational events into one
+> "Daily Learnings" document and `retain()`s it into the banks per the routing above. See
+> [QDS-MEM-003 §7](operational-memory-design.md) and
+> [QDS-MEM-003-IMPL Delta 7](operational-memory-implementation-plan.md). This resolves SPIKE-9
+> (QDS-EXEC-001 §7). The routing table and I/O schema above remain valid for that retain call.
+>
+> **Cron-term disambiguation.** This **nightly promotion cron** (operational tier, high-volume daily distill,
+> QDS-MEM-003 §7) is distinct from the **Hindsight strategic cron agents** in §5/§6.1
+> (Synthesizer / Meta-Optimizer / Blind-Spot Detector, weekly / biweekly / monthly). Different tiers, different
+> cadences, same downstream banks.
+
 #### Sprint Artifact Ingestion
 
 QDS-Factory sprint artifacts at `_bmad-output/` are the initial charter content for `qds-product`:
