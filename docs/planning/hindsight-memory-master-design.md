@@ -1575,7 +1575,7 @@ The bridge must determine: (1) which content is relevant vs conversational noise
 }
 ```
 
-Implementation: Claude Code post-session hook that calls the bridge.
+Implementation: **resolved** — see the cross-ref note directly below (batch nightly promotion cron, not a live Claude Code hook).
 
 > **Cross-ref — resolved execution model.** With the operational memory tier
 > ([QDS-MEM-003](operational-memory-design.md)) in place, this post-session retain pipeline runs as a **batch

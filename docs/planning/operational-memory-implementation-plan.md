@@ -43,7 +43,7 @@ pi-mem's substrate is **copy-pasted** into QDS-Factory and **adapted in place**.
 
 Each vendored file retains its original license header. A `THIRD_PARTY_NOTICES.md` entry (created when substrate lands in code) records: ArtemisAI/pi-mem lineage, claude-mem v10.5.2 ancestry, license type, and the import date.
 
-### A.5 Build-vs-reuse trade-off (decision #6, user-confirmed)
+### A.5 Build-vs-reuse trade-off (QDS-MEM-003 §10 "Relationship to pi-mem" decision, user-confirmed)
 
 | Option | Cost | Risk | Verdict |
 |---|---|---|---|
@@ -104,6 +104,27 @@ Each vendored file retains its original license header. A `THIRD_PARTY_NOTICES.m
 
 Re-anchors QDS-MEM-003 §11's 15 design stories (P0-OM-1…P4-OM-15) into a Phase-2 epic with distinct slugs. Point values are planning estimates. Class = vendor / glue / net-new (§0).
 
+### D.0 Correspondence — 15 design stories → 13 Phase-2 stories
+
+QDS-MEM-003 §11 decomposes the substrate into **15 design-phase stories** (P0-OM-1…P4-OM-15, 47 pts). This §D re-anchors them into **13 vendoring-aware stories** (P2.0–P2.12, ~44 pts). Points are **re-estimated at the vendor/glue/net-new altitude** (§0) after the pi-mem teardown (§B/§C) — not mechanically redistributed, hence 47 → ~44. The mapping is by capability:
+
+| Design story (QDS-MEM-003 §11) | → Phase-2 story | Change | Reason |
+|---|---|---|---|
+| P0-OM-1 (store bootstrap) | → P2.0 + P2.1 + P2.2 | **split 1→3** | vendoring splits the monolithic bootstrap into toolchain lift (P2.0), store + vector (P2.1), migrations runner (P2.2) |
+| P0-OM-2 (tool-call capture) | → P2.3 | 1:1 | glue adapter on the pi-mono ExtensionAPI seam |
+| P0-OM-3 (recall API) | → P2.1 (absorbed) | **merged** | recall + vector search live inside the event-store story; no standalone recall slice |
+| P1-OM-4 (DAG-node capture) | → P2.4 | 1:1 (3→4) | net-new; gated on SPIKE-10 |
+| P1-OM-5 (reasoning capture) | → P2.5 | 1:1 | glue |
+| P1-OM-6 (outcome capture) | → P2.6 | 1:1 | glue |
+| P2-OM-7 (nightly cron) | → P2.7 | 1:1 (3→4) | net-new; replaces stripped per-event LLM (D1) |
+| P2-OM-8 (Hindsight bridge) | → P2.8 | 1:1 | net-new |
+| P3-OM-9 (experiment propose) + P3-OM-10 (human gate) | → P2.9 | **merge 2→1** | propose + gate are one workflow unit |
+| P3-OM-11 (A/B execution) + P3-OM-12 (winner deploy) | → P2.10 | **merge 2→1** | execute + deploy are one variant-tagged-DAG story (5 pts) |
+| P3-OM-13 (30-day confirm) | → P2.11 | 1:1 (4→3) | net-new |
+| P4-OM-14 (replay/debug) + P4-OM-15 (retention/observability) | → P2.12 | **merge 2→1** | both are housekeeping over the same event store |
+
+**Net: 15 → 13** (+2 from the P0-OM-1 split; −4 from four merges: P0-OM-3 absorbed into P2.1, P3-OM-9+10→P2.9, P3-OM-11+12→P2.10, P4-OM-14+15→P2.12).
+
 ### D.1 Phase 2a — Foundation & Intake (5 stories / 17 pts)
 
 | Story | Title | Pts | Class | Notes |
@@ -142,13 +163,18 @@ Re-anchors QDS-MEM-003 §11's 15 design stories (P0-OM-1…P4-OM-15) into a Phas
 ### D.5 Sequencing DAG
 
 ```
-P0.7 (SwarmClaw agent+MCP registry) ── epic entry gate ──▶ P2.0
-                                                            │
-P2.0 ──▶ P2.1 ──┬──▶ P2.3 (glue)
-P2.0 ──▶ P2.2 ──┤──▶ P2.5 (glue)     ◀── fan out once P2.1 exists
-               └──▶ P2.6 (glue)
-SPIKE-10 ──▶ P2.4 (net-new, DAG capture)          ◀── D5 depends
-SPIKE-11 ──▶ P2.1's sqlite-vec/ONNX              ◀── D3 depends
+P0.7 (SwarmClaw agent+MCP registry) ── epic entry gate ──▶ P2.0 (toolchain)
+                                                             │
+                          ┌──────────────────────────────────┴──────────────────────────────────┐
+                          ▼                                                                     ▼
+                P2.1 (event store + vec)                                                P2.2 (migrations runner)
+                ◀── SPIKE-11 (sqlite-vec/ONNX, D3)
+                    │
+        ┌───────────┼───────────┐   ◀── fan out once P2.1 exists
+        ▼           ▼           ▼
+      P2.3        P2.5        P2.6            (glue capture adapters: tool / reasoning / outcome)
+
+SPIKE-10 ──▶ P2.4 (net-new, DAG-node capture)                 ◀── D5 depends (P2.4 also needs P2.1)
 
 P2.3/P2.5/P2.6 (capture live) ──▶ P2.7 (nightly cron) ──▶ P2.8 (Hindsight bridge)
 P1.11 (KEEP, Hindsight retain) ──▶ P2.8          ◀── cross-epic dependency

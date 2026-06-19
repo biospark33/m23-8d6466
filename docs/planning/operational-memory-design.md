@@ -1,7 +1,7 @@
 # QDS-Factory Operational Memory Substrate — Design & Decision Document
 
 **Document ID**: QDS-MEM-003
-**Status**: Approved design, implementation-ready (awaiting implementation plan)
+**Status**: Approved design, implementation-ready — implementation plan recorded in [QDS-MEM-003-IMPL](operational-memory-implementation-plan.md)
 **Created**: 2026-06-18
 **Authority**: Architecture decision record for the operational memory tier sitting below Hindsight
 **Relationship**: Sits beneath [QDS-MEM-001](hindsight-memory-master-design.md) (project-level Hindsight) and [QDS-MEM-002](hindsight-factory-tier-design.md) (factory-tier Hindsight). Purely additive; requires no changes to either Hindsight document.
