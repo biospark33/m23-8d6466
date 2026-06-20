@@ -106,7 +106,7 @@ Step 3.1a passes each per-story subagent a `shared_pattern_note` — a ≤10-lin
    - **Files to Modify**: which story owns which module (file ownership).
    - **Security Invariants**: auth allowlist source, audit-column non-null-FK requirements.
 3. **Compress to ≤10 lines** — one pattern per line, each tagged with its source so a reviewer can verify the token against the originating story/epic rather than trusting the digest.
-4. **Conflict resolution**: if two stories disagree on a token (e.g., Story A binds the tenant on `graph_id`, Story B on `tenant_id`), do NOT silently pick one — surface it as a cross-story HIGH finding for the 3.1b agent. That contradiction is exactly what the cross-story agent exists to catch.
+4. **Conflict resolution**: if two stories disagree on a token (e.g., Story A binds the tenant on `graph_id`, Story B on `tenant_id`), do NOT silently pick one — surface it as a cross-story HIGH finding for the 3.1b agent. That contradiction is precisely what the cross-story agent catches.
 
 **Sample `shared_pattern_note` (≤10 lines, illustrative):**
 
