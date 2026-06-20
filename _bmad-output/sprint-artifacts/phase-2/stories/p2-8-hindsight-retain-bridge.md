@@ -35,15 +35,19 @@ This story wires the bridge from the P2.7 Daily Learnings doc into Hindsight via
 4. Given a retained doc, When it is written to qds-product, Then it carries `module`, `knowledge_type`, and `severity` tags (values validated against the §6.2 `z.enum` vocabulary); when written to qds-meta it carries `skill`, `outcome`, and `quality_dim` tags (closed-vocab enum-validated; correct tag scoping per bank, no anonymous writes).
 5. Given the source Daily Learnings doc, When content is retained, Then the bridge RE-SCANS the body for secret patterns itself (defense-in-depth, INV-OM3 = re-scan not re-trust — does not merely trust P2.7's upstream mask) and asserts no secret pattern is present before retain.
 6. Given a successful retain of both banks for date D, When the pushes complete, Then the bridge stamps `promotion_runs.retained_at` for date D, so a doc-written-but-not-retained date is detectable and replayable (closing the P2.7↔P2.8 exactly-once seam).
-7. Given date D-1 has `doc_path` set but `retained_at` NULL (a stranded prior retain failure/crash), When the next nightly run executes, Then the run (the P2.8 bridge, or the cron-runner invoking it) FIRST scans `promotion_runs` for any prior date with `doc_path` set AND `retained_at` NULL, re-pushes D-1's doc (re-route + retain both banks with the same dated documentId+`replace`), and stamps `retained_at` for D-1 — then proceeds with today's date (recovery scan makes INV-P28-3 both detectable AND replayable).
+7. Given date D-1 has `doc_path` set but `retained_at` NULL (a stranded prior retain failure/crash), When the next nightly run executes, Then the run (the P2.8 bridge, or the cron-runner invoking it) FIRST scans `promotion_runs` for any prior date with `doc_path` set AND `retained_at` NULL (the `retained_at IS NULL` predicate is the filter — it inherently skips any date that already has `retained_at` set, so only stranded/incomplete retain records are targeted, never already-successful ones), re-pushes D-1's doc (re-route + retain both banks with the same dated documentId+`replace`), and stamps `retained_at` for D-1 — then proceeds with today's date (recovery scan makes INV-P28-3 both detectable AND replayable).
 8. Given a bank's content was already retained on a partial-failure run, When the bridge re-pushes after recovery, Then the re-pushed per-bank content is BYTE-IDENTICAL to the first attempt — routing is a PURE DETERMINISTIC function of the immutable Daily Learnings artifact (a section cannot move banks between runs), so `replace` overwrites with identical bytes and no stale/moved-section entry can survive.
 
 ## Technical Notes
 
 - **Contracts/Schema:**
 ```typescript
-// real retain() signature (§D.5) — DO NOT redefine the Hindsight client; reuse P1.11 hindsight-client
+// real retain() signature (§D.5, from hindsight-docs/references/developer/api/retain.md) — reuse the P1.11 hindsight-client
+// AND EXTEND it (additive, NOT a redefine) to expose the FULL §D.5 surface:
 // await client.retain(bankId, content, { documentId, updateMode, tags, context?, timestamp?, metadata?, entities? })
+// P1.11's retain schema (p1-11 §Contracts) only models { bank_id, content, metadata:{issueId,runId,stepId,kind} } —
+// it does NOT expose documentId/updateMode/tags. P2.8 OWNS extending the client to forward them so the bridge's
+// idempotency contract is schema-enforced at the client boundary, NOT assumed from P1.11 passthrough.
 // Closed-vocab tag VALUES validated via z.enum (§6.2), NOT open z.record(string,string).
 const KnowledgeType = z.enum(['decision', 'antipattern', 'pattern']);     // §6.2 qds-product
 const Severity      = z.enum(['critical', 'high', 'medium', 'low']);      // §6.2 qds-product
@@ -51,19 +55,21 @@ const Outcome       = z.enum(['success', 'partial', 'failure', 'skipped']); // �
 const QualityDim    = z.enum(['correctness', 'efficiency', 'maintainability', 'safety']); // §6.2 qds-meta
 const ProductTags = z.object({ module: z.string(), knowledge_type: KnowledgeType, severity: Severity });
 const MetaTags    = z.object({ skill: z.string(), outcome: Outcome, quality_dim: QualityDim });
+// metadata slot mirrors §D.5 retain() `metadata?` — carries the no-class `flagged:true` signal (NOT a tag value).
+const RetainMetadata = z.object({ flagged: z.boolean().optional() }).optional();
 const RetainPlan = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  documentId: z.string(),                               // STABLE dated id, e.g. daily-learnings-2026-06-19
+  documentId: z.string().regex(/^daily-learnings-\d{4}-\d{2}-\d{2}$/),  // STABLE dated id, e.g. daily-learnings-2026-06-19 — regex-enforced so an omitted/malformed documentId fails validation (INV-P28-1) before it can duplicate on retry
   updateMode: z.literal('replace'),                     // dated + replace = idempotent overwrite
   // BOTH banks pushed every run (even when content is empty) so `replace` clears a re-routed/now-empty bank.
   pushes: z.tuple([
-    z.object({ bankId: z.literal('qds-product'), content: z.string(), tags: ProductTags }),
-    z.object({ bankId: z.literal('qds-meta'),    content: z.string(), tags: MetaTags }),
+    z.object({ bankId: z.literal('qds-product'), content: z.string(), tags: ProductTags, metadata: RetainMetadata }),
+    z.object({ bankId: z.literal('qds-meta'),    content: z.string(), tags: MetaTags,    metadata: RetainMetadata }),
   ]),
 });
 ```
-- **Integration points (each wired & exercised in this story):** reads the P2.7 artifact at `promotion_runs.doc_path` and RE-VALIDATES it against the `DailyLearningsDoc` schema (typed handoff); reuses the P1.11 `hindsight-client` `retain()` wiring (cross-epic KEEP loop — MCP-only channel per INV-MEM-1); applies QDS-MEM-001 §6.2 routing/precedence + I/O schema; targets banks **qds-product** and **qds-meta**; stamps `promotion_runs.retained_at` on success (R12/R14 seam).
-- **Files / functions touched:** `src/promotion/retain-bridge.ts` (`RetainBridge.push(doc)` — re-scan secrets, build documentId, route per §6.2, ALWAYS loop BOTH banks, retain with `replace`, THROW on partial failure leaving `retained_at` NULL, stamp `retained_at` only on full success; `RetainBridge.recoverStranded()` — scan `promotion_runs` for prior dates with `doc_path` set AND `retained_at` NULL, re-push each before today), `src/promotion/retain-routing.ts` (QDS-MEM-001 §6.2 precedence → bank+tags mapping; PURE DETERMINISTIC fn of the immutable doc; multi-class→precedence, no-class→qds-product default with reserved in-vocab tags + `flagged:true`), `src/promotion/retain-types.ts` (`RetainPlan` + closed-vocab `z.enum` tag schemas).
+- **Integration points (each wired & exercised in this story):** reads the P2.7 artifact at `promotion_runs.doc_path` and RE-VALIDATES it against the `DailyLearningsDoc` schema (**defined in P2.7 §Technical Notes → Contracts/Schema** — the `const DailyLearningsDoc = z.object({ date, generated_at, window, clusters[], truncated, doc_bytes })` block at P2.7 line 45; NOT redefined here, shared/imported so the two stories carry one validation contract, no drift); reuses the P1.11 `hindsight-client` `retain()` wiring AND EXTENDS it additively to expose the full §D.5 retain surface (cross-epic KEEP loop — MCP-only channel per INV-MEM-1); applies QDS-MEM-001 §6.2 routing/precedence + I/O schema; targets banks **qds-product** and **qds-meta**; stamps `promotion_runs.retained_at` on success (R12/R14 seam).
+- **Files / functions touched:** `src/promotion/retain-bridge.ts` (`RetainBridge.push(doc)` — re-scan secrets, build documentId, route per §6.2, ALWAYS loop BOTH banks, retain with `replace`, THROW on partial failure leaving `retained_at` NULL, stamp `retained_at` only on full success; `RetainBridge.recoverStranded()` — scan `promotion_runs` for prior dates with `doc_path` set AND `retained_at` NULL, re-push each before today), `src/promotion/retain-routing.ts` (QDS-MEM-001 §6.2 precedence → bank+tags mapping; PURE DETERMINISTIC fn of the immutable doc; multi-class→precedence, no-class→qds-product default with reserved in-vocab tags + `flagged:true`), `src/promotion/retain-types.ts` (`RetainPlan` + `RetainMetadata` + closed-vocab `z.enum` tag schemas), `src/memory/hindsight-client.ts` (EXTEND P1.11's client additively to forward the full §D.5 retain surface — `documentId`/`updateMode`/`tags`/`metadata` — which P1.11's `{bank_id,content,metadata}` retain schema does not expose; the idempotency contract is OWNED + schema-enforced by P2.8, not assumed from P1.11 passthrough).
 - **Routing precedence (§6.2):** a section matching MULTIPLE knowledge classes is assigned by §6.2 precedence order; a section matching NO class is flagged and routed to the default bank **qds-product** with reserved in-vocab tags (`knowledge_type:'pattern'`, `severity:'low'`, `module:'unclassified'`) plus a `flagged:true` metadata field (never silently dropped, never an out-of-vocab tag value). Tag VALUES validated against the closed §6.2 vocabulary via `z.enum` (`knowledge_type`, `severity`, `outcome`, `quality_dim`) — not open `z.record(string,string)`.
 - **Guards/limits:** stable dated `documentId` per day; `updateMode:"replace"` (never default/append — append duplicates on retry); BOTH banks pushed EVERY run even when empty (so `replace` clears a now-empty bank); per-bank loop (no multi-bank retain); each bank's `replace` independently idempotent — one-bank failure surfaces an error and the next run's `replace` self-heals that bank (no partial-state corruption); reuse P1.11 MCP-only channel (no direct HTTP to Hindsight); bridge RE-SCANS for secrets before retain (re-scan not re-trust).
 - **SPIKE note:** resolves **SPIKE-9 (D7)** — the bridge is a batch nightly retain, NOT a live per-event hook; no spike is open against this story.
@@ -74,6 +80,7 @@ const RetainPlan = z.object({
 - `src/promotion/retain-bridge.ts`
 - `src/promotion/retain-routing.ts`
 - `src/promotion/retain-types.ts`
+- `src/memory/hindsight-client.ts`
 - `tests/promotion/retain-bridge.test.ts`
 - `tests/promotion/retain-idempotency.test.ts`
 
@@ -101,7 +108,7 @@ const RetainPlan = z.object({
 - [ ] **Integration:** End-to-end push of a real Daily Learnings doc into both banks; post-query confirms one doc/bank with correct enum-validated tags; `retained_at` stamped
 - [ ] **Security:** INV-OM1 (no per-event/LLM egress), INV-OM3 (bridge RE-SCANS for secrets — re-scan not re-trust), INV-P28-1 (stable dated documentId + replace, both banks every run ⇒ no duplicate on retry), INV-P28-2 (enum-validated per-bank tag scoping, no-class never dropped), INV-P28-3 (`retained_at` exactly-once seam) — each enforced and asserted
 - [ ] **Test (unit):** routing splits product vs meta sections; multi-class→precedence and no-class→qds-product default with reserved in-vocab tags + `flagged:true`; per-bank enum tag assembly; retry with same documentId+replace does not duplicate; both-banks-pushed-when-empty clears a now-empty bank; one-bank failure THROWS leaving `retained_at` NULL; re-push of the same doc is byte-identical per bank; `recoverStranded()` re-pushes a D-1 with `doc_path` set/`retained_at` NULL and stamps it
-- [ ] **Test (client passthrough):** assert the P1.11 hindsight-client actually forwards `documentId` + `updateMode` through to the MCP call (the whole idempotency delegates to it)
+- [ ] **Test (client extend + passthrough):** P1.11's retain schema (`{bank_id,content,metadata}`) does NOT expose `documentId`/`updateMode`/`tags`, so this story EXTENDS the hindsight-client additively to forward the full §D.5 retain surface; assert the bridge's `retain(bank, content, {documentId, updateMode:"replace", tags, metadata})` reaches the underlying Hindsight MCP `retain` call with `documentId` + `updateMode` + `tags` + `metadata` intact (the idempotency contract is OWNED + schema-enforced by P2.8, NOT assumed from P1.11 passthrough)
 - [ ] **Test (e2e demo — MANDATORY):** Push a real P2.7 doc for date D into qds-product + qds-meta, query both banks and assert one correctly-tagged doc each; re-run the bridge for the same doc and re-query — assert the per-bank count stays at exactly one and `promotion_runs.retained_at` is stamped (idempotent dated documentId proven end-to-end)
 
 ## Dev Agent Record
