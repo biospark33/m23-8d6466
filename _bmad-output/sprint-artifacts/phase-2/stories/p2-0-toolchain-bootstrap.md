@@ -49,7 +49,7 @@ This story establishes the Track-A vendor decision: it clones the ArtemisAI/pi-m
     stripViolations: string[];          // STRIP paths/specifier/callers; MUST be []
   };
   ```
-- **Pinned set (exact, from lockfile):** `{ "sqlite-vec": "0.1.9", "@huggingface/transformers": "3.8.1", "better-sqlite3": "12.6.2", "<cron-lib croner>": "<exact>" }`. `onnxruntime` (onnxruntime-node / onnxruntime-web) is transitive of `@huggingface/transformers` — fixed by the lockfile, not separately pinned.
+- **Pinned set (exact, from lockfile):** `{ "sqlite-vec": "0.1.9", "@huggingface/transformers": "3.8.1", "better-sqlite3": "12.6.2", "croner": "10.0.1" }`. `onnxruntime` (onnxruntime-node / onnxruntime-web) is transitive of `@huggingface/transformers` — fixed by the lockfile, not separately pinned.
 - **Extension-load path per runtime:** Bun (`bun:sqlite`) loads via `new Database(...); db.loadExtension(require('sqlite-vec').getLoadablePath())`; Node loads via `better-sqlite3` + `require('sqlite-vec').load(db)`. The sqlite-vec native binary is platform-specific (`sqlite-vec-darwin-arm64` / `-linux-x64` etc., resolved as optional deps by the lockfile) — note the dev (darwin-arm64) vs CI/image (linux-x64) platform split in `THIRD_PARTY_NOTICES.md`.
 - **cron-lib pin rationale:** pin `croner` NOW (single-source the choice for P2.7/P2.11 so both cron stories build on one pinned, Bun-verified library) rather than deferring to P2.7 — avoids two stories independently choosing/pinning a cron lib.
 - **Created artifacts:** the vendored `vendor/pi-mem/**` tree and the local ONNX model directory (`models/Xenova/all-MiniLM-L6-v2/`, ~23MB, committed/vendored — not fetched) are net-new artifacts of this story.

@@ -68,9 +68,32 @@ This story wires the outcome-capture surface end-to-end: thin adapters around th
   //   else (≥1 'success', rest 'skipped') OR (all 'skipped', ≥1 event) → 'success';
   //   else (zero outcome events) → NULL (empty rollup — the ONLY NULL outcome).
   ```
-- **Integration points (each wired & exercised in this story):** P2.1 event store transactional write path (event row UPSERT on `(run_id, source, step_id)`); P2.1 `runs` table (`overall_outcome` UPDATE on the run-close trigger); P2.3-owned `maskAndCap` (`src/capture/mask-and-cap.ts`) reused, not re-authored; P2.3-owned `orphan:<session>` run helper reused for no-live-run capture (R1); test/review/build adapter call sites.
-- **Files / functions touched:** `src/capture/outcome-adapter.ts` (the three adapters + shared writer; UPSERT on `(run_id, source, step_id)`), `src/capture/outcome-rollup.ts` (overall_outcome precedence, recomputed on run close), reuse `src/capture/mask-and-cap.ts` (P2.3-owned `maskAndCap`).
-- **Guards/limits:** `payload_json` (NOT NULL) AND `result_json` each masked-then-capped ≤64 KB via `maskAndCap` (INV-OM3); `error` masked identically; resolve non-null `run_id` (capture-time ctx or `orphan:<session>` fallback) before write — never NULL, never dropped (INV-OM2/R1); one outcome row per `(run_id, source, step_id)` via last-write-wins UPSERT (flaky-retry collision of the same step, R7; widened from `(run_id, source)` because the DAG does not guarantee one step per source — same-source steps disambiguated by `step_id`); rollup runs once on run close as a single bounded UPDATE — no LLM, no network; outcome events NOT embedded into `event_vec` (R6).
+- **UPSERT mechanism — `(run_id, source, step_id)` idempotency:** `source` and `step_id` live inside `payload_json`, not as top-level `events` columns, so a native SQLite `ON CONFLICT(run_id, source, step_id)` clause would fail. P2.6 authors its own migration that creates a **partial expression index** on the `events` table:
+  ```sql
+  CREATE UNIQUE INDEX idx_outcome_upsert
+    ON events(
+      run_id,
+      json_extract(payload_json, '$.source'),
+      json_extract(payload_json, '$.step_id')
+    )
+    WHERE event_type = 'outcome';
+  ```
+  This enables a native SQLite UPSERT with matching conflict target expressions:
+  ```sql
+  INSERT INTO events (...) VALUES (...)
+  ON CONFLICT(run_id,
+    json_extract(payload_json, '$.source'),
+    json_extract(payload_json, '$.step_id'))
+  WHERE event_type = 'outcome'
+  DO UPDATE SET outcome = excluded.outcome,
+               error    = excluded.error,
+               result_json = excluded.result_json,
+               created_at  = excluded.created_at;
+  ```
+  This index is **P2.6-owned** (not P2.1) because it is outcome-specific; it must be applied by P2.2's migration runner after the P2.1 DDL migration. No `source`/`step_id` columns are added to the P2.1 `events` schema.
+- **Integration points (each wired & exercised in this story):** P2.1 event store transactional write path (event row last-write-wins UPSERT via the `idx_outcome_upsert` partial expression index above); P2.1 `runs` table (`overall_outcome` UPDATE on the run-close trigger); P2.3-owned `maskAndCap` (`src/capture/mask-and-cap.ts`) reused, not re-authored; P2.3-owned `orphan:<session>` run helper reused for no-live-run capture (R1); test/review/build adapter call sites.
+- **Files / functions touched:** `src/capture/outcome-adapter.ts` (the three adapters + shared writer; last-write-wins UPSERT via the `idx_outcome_upsert` partial expression index), `src/capture/outcome-rollup.ts` (overall_outcome precedence, recomputed on run close), `migrations/0006_outcome_upsert_index.sql` (P2.6-owned partial expression index on `events`), reuse `src/capture/mask-and-cap.ts` (P2.3-owned `maskAndCap`).
+- **Guards/limits:** `payload_json` (NOT NULL) AND `result_json` each masked-then-capped ≤64 KB via `maskAndCap` (INV-OM3); `error` masked identically; resolve non-null `run_id` (capture-time ctx or `orphan:<session>` fallback) before write — never NULL, never dropped (INV-OM2/R1); one outcome row per `(run_id, source, step_id)` via last-write-wins UPSERT enforced by the P2.6-owned `idx_outcome_upsert` partial expression index (`WHERE event_type = 'outcome'` on `json_extract(payload_json,'$.source')` + `json_extract(payload_json,'$.step_id')`) — enables native SQLite `ON CONFLICT(...)` syntax; same-source steps with distinct `step_id` produce separate rows (not clobbered); rollup runs once on run close as a single bounded UPDATE — no LLM, no network; outcome events NOT embedded into `event_vec` (R6).
 
 ## Files to Modify
 
@@ -78,6 +101,7 @@ This story wires the outcome-capture surface end-to-end: thin adapters around th
 - `src/capture/outcome-adapter.ts`
 - `src/capture/outcome-rollup.ts`
 - `src/capture/mask-and-cap.ts`
+- `migrations/0006_outcome_upsert_index.sql`
 - `tests/capture/outcome-adapter.test.ts`
 - `tests/capture/outcome-rollup.test.ts`
 
@@ -96,7 +120,7 @@ This story wires the outcome-capture surface end-to-end: thin adapters around th
 - [ ] **Impl:** test, review, and build adapters each emit one `events` row with `event_type='outcome'` carrying `outcome`, `error`, NOT-NULL `payload_json` ({source,outcome,summary} envelope), `result_json`, and §5.2 threading fields.
 - [ ] **Impl:** `runs.overall_outcome` is rolled up on the run-close trigger per any-failure-dominates precedence (failure > partial > success; skipped non-failing; zero events → NULL).
 - [ ] **Contract:** adapters emit `outcome ∈ {success,partial,failure,skipped}` (NEVER NULL); NULL outcome reserved solely for the empty-rollup `runs.overall_outcome`; adapter inputs validated before write; no fields beyond the P2.1 `events` schema are introduced.
-- [ ] **Integration:** adapters wired into the P2.1 transactional write path (UPSERT on `(run_id, source, step_id)` — widened so two same-source steps do not clobber) and exercised against a real fixture run end-to-end (test+review+build).
+- [ ] **Integration:** adapters wired into the P2.1 transactional write path; `migrations/0006_outcome_upsert_index.sql` (P2.6-authored partial expression index `idx_outcome_upsert`) applied via P2.2's runner to enable native SQLite UPSERT on `(run_id, json_extract(payload_json,'$.source'), json_extract(payload_json,'$.step_id')) WHERE event_type = 'outcome'` — two same-source steps with distinct `step_id` produce separate rows; adapters exercised against a real fixture run end-to-end (test+review+build).
 - [ ] **Security:** INV-OM1 (network mock asserts zero egress; SDK `query()` spy never invoked), INV-OM2 (non-null `run_id`; orphan-context capture uses `orphan:<session>` run, never dropped), INV-OM3 (64KB mask+cap on `payload_json`, `result_json`, and `error`) each enforced and individually tested.
 - [ ] **Guard:** `run_id` resolved (capture ctx or `orphan:<session>` fallback) before insertion; flaky re-fire for `(run_id, source, step_id)` last-write-wins UPSERT (no duplicate) and triggers rollup recompute; two distinct same-source steps (different `step_id`) write separate rows.
 - [ ] **Scope:** outcome events NOT written to `event_vec` (R6); trend aggregation, external CodeRabbit harvest, and LLM classification are out of scope (Hindsight §2 / P2.7).
