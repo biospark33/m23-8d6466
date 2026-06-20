@@ -51,8 +51,8 @@ This story wires the bridge from the P2.7 Daily Learnings doc into Hindsight via
 // Closed-vocab tag VALUES validated via z.enum (§6.2), NOT open z.record(string,string).
 const KnowledgeType = z.enum(['decision', 'antipattern', 'pattern']);     // §6.2 qds-product
 const Severity      = z.enum(['critical', 'high', 'medium', 'low']);      // §6.2 qds-product
-const Outcome       = z.enum(['success', 'partial', 'failure', 'skipped']); // §6.2 qds-meta
-const QualityDim    = z.enum(['correctness', 'efficiency', 'maintainability', 'safety']); // §6.2 qds-meta
+const Outcome       = z.enum(['success', 'partial', 'failure', 'skipped', 'confirmed', 'rolled_back']); // §6.2 qds-meta; 'confirmed'/'rolled_back' added for P2.11 experiment-verdict retention
+const QualityDim    = z.enum(['correctness', 'efficiency', 'maintainability', 'safety', 'intervention_effectiveness']); // §6.2 qds-meta; 'intervention_effectiveness' added for P2.11 experiment-verdict retention
 const ProductTags = z.object({ module: z.string(), knowledge_type: KnowledgeType, severity: Severity });
 const MetaTags    = z.object({ skill: z.string(), outcome: Outcome, quality_dim: QualityDim });
 // metadata slot mirrors §D.5 retain() `metadata?` — carries the no-class `flagged:true` signal (NOT a tag value).

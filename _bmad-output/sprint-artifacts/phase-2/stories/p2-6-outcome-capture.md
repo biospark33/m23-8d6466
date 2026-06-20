@@ -65,7 +65,7 @@ This story wires the outcome-capture surface end-to-end: thin adapters around th
   //   (R7 flaky retry of the SAME step), so two distinct same-source steps do NOT clobber.
   // runs.overall_outcome rollup precedence (recomputed at run close):
   //   any 'failure' → 'failure'; else any 'partial' → 'partial';
-  //   else (≥1 'success', rest 'skipped') → 'success';
+  //   else (≥1 'success', rest 'skipped') OR (all 'skipped', ≥1 event) → 'success';
   //   else (zero outcome events) → NULL (empty rollup — the ONLY NULL outcome).
   ```
 - **Integration points (each wired & exercised in this story):** P2.1 event store transactional write path (event row UPSERT on `(run_id, source, step_id)`); P2.1 `runs` table (`overall_outcome` UPDATE on the run-close trigger); P2.3-owned `maskAndCap` (`src/capture/mask-and-cap.ts`) reused, not re-authored; P2.3-owned `orphan:<session>` run helper reused for no-live-run capture (R1); test/review/build adapter call sites.
