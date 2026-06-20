@@ -73,6 +73,30 @@ This story wires the front of the A/B experiment lifecycle end-to-end: the optim
 - **Files / functions touched:** `src/experiments/propose.ts` (optimizer scan→lifecycle-run+row, dedup), `src/experiments/gate.ts` (authZ allowlist + transition), `src/experiments/state-machine.ts` (AUTHOR: complete §B.2 table + per-entrypoint guards + atomic transition emitter — owns the `db.transaction` flip+event), `src/cli/experiment.ts` (approve/reject commands).
 - **Guards/limits:** legal-transition table is the single source of truth (illegal transition for the entrypoint throws, no row mutation); gate is single-shot (only `proposed` is gateable); transition event write + status flip happen in ONE `db.transaction(fn)` (sync per §D.4) owned by `state-machine.ts` (no flip without audit, no audit without flip); propose never sets `approved_*`; metric constrained to the four-value enum; propose dedup skips when an open (proposed/approved/running) experiment exists for the same skill+variant; propose runs single-instance (cron, no concurrent invocation) so the check-then-insert race cannot occur, and the skip is additionally backed by a partial UNIQUE index on `(skill, variant_a_ref, variant_b_ref) WHERE status IN ('proposed','approved','running')` so a duplicate open row is rejected at the DB even under a hypothetical race.
 
+**Transaction-boundary contract (`state-machine.ts` — R10).** `state-machine.ts` exports exactly ONE transition entrypoint — `transitionExperiment(...)` — that wraps the per-entrypoint legal-edge guard + status flip + audit-event emit in a single `db.transaction(fn)` (sync per §D.4). BOTH the gate module AND every successor story (P2.10 execute/deploy, P2.11 confirm) MUST call it; no module performs the flip and the audit write as separate operations (no flip-without-audit, no audit-without-flip — the atomicity INV-EXP2 keys on):
+
+```typescript
+// src/experiments/state-machine.ts — single transactional transition entrypoint (R10).
+export async function transitionExperiment(args: {
+  experimentId: string;
+  entrypoint: "gate" | "execute" | "deploy" | "confirm"; // selects the legal-edge subset (§B.2)
+  to: ExperimentStatus;                                   // target status; throws if illegal from current
+  actor: string;                                          // recorded as approved_by / deciding actor
+  audit: { runId: string; eventType: "outcome"; payload: Record<string, unknown> };
+  mutator?: (txn: Txn) => Promise<void>;                  // optional same-txn side effect (deploy_ref revert, runs flip, …)
+}): Promise<{ from: ExperimentStatus; to: ExperimentStatus }>;
+// Body: db.transaction(async (txn) => { guard(entrypoint, from, to); flip; emit audit; await mutator?.(txn); })
+
+// Gate caller (THIS story) — the first transitionExperiment call:
+await transitionExperiment({
+  experimentId: id, entrypoint: "gate", to: "approved", actor,
+  audit: { runId: `experiment:${id}`, eventType: "outcome", payload: { from: "proposed", to: "approved" } },
+});
+// P2.10 (execute/deploy) + P2.11 (confirm) reuse the SAME entrypoint for their edges — no parallel flip+audit anywhere.
+```
+
+> **Call-direction note.** Propose CREATES the row (synthetic lifecycle `runs` INSERT + `experiments` INSERT in its own atomic transaction) — it is an INSERT, not a status flip, so it does not call `transitionExperiment`. The gate's `proposed→approved|rejected` flip is the FIRST `transitionExperiment` call; P2.10/P2.11 continue reusing it for every subsequent edge. This keeps creation and transition as distinct atomic operations while guaranteeing every FLIP routes through one owned function.
+
 ## Files to Modify
 
 > ≤10 unique paths, one per line.

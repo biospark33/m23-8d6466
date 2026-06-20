@@ -85,13 +85,55 @@ its checklist items to the **also_consider** input passed to
 
 **Operator-visible output:**
 
-```
+```text
 🛡  Domain checklists active: rls-invariants, migration-invariants
    (triggered by: "RLS policy" in story sprint-X/stories/foo.md,
                   "alembic migration" in epic definition)
 ```
 
 ---
+
+## Step 3.0.5 — Generate `shared_pattern_note` (orchestrator, before 3.1a)
+
+Step 3.1a passes each per-story subagent a `shared_pattern_note` — a ≤10-line digest of the load-bearing patterns every story in this epic must agree on (auth, multi-tenancy, schema keys, event names, file ownership). The orchestrator generates it ONCE, before spawning any 3.1a agent, so every per-story reviewer and the single 3.1b cross-story agent share the same definition of "consistent."
+
+**Procedure:**
+
+1. **Scan the epic definition block** (`_bmad-output/epics.md`) for the cross-cutting mandates every story inherits — the auth/capability model, the tenant-binding column, naming conventions, and the audit-event vocabulary. These are epic-level and apply to every story.
+2. **Scan each story file's load-bearing headers** for the tokens that must not drift between stories:
+   - **Technical Notes → Contracts/Schema**: primary-key convention, tenant-binding column, table names, enum values.
+   - **Integration points**: `event_type` vocabulary, `run_id` format, queue/topic names.
+   - **Files to Modify**: which story owns which module (file ownership).
+   - **Security Invariants**: auth allowlist source, audit-column non-null-FK requirements.
+3. **Compress to ≤10 lines** — one pattern per line, each tagged with its source so a reviewer can verify the token against the originating story/epic rather than trusting the digest.
+4. **Conflict resolution**: if two stories disagree on a token (e.g., Story A binds the tenant on `graph_id`, Story B on `tenant_id`), do NOT silently pick one — surface it as a cross-story HIGH finding for the 3.1b agent. That contradiction is exactly what the cross-story agent exists to catch.
+
+**Sample `shared_pattern_note` (≤10 lines, illustrative):**
+
+```text
+shared_pattern_note:
+  tenant_key: experiments.graph_id               # source: epic §4.1
+  pk_fmt: <table>_id uuid, default gen_random_uuid()   # source: convention
+  status_enum: proposed|approved|running|analyzed|deployed|confirming|confirmed|rolled_back  # P2.9 §C
+  event_vocab: event_type='outcome' per transition     # source: P2.1 store
+  run_id_fmt: experiment:<id> lifecycle run            # source: P2.9
+  authz: QDS_EXP_ACTORS env allowlist → approved_by    # source: P2.9 INV-EXP1
+  audit_fk: events.run_id NOT NULL → runs (INV-OM2)    # source: epic invariants
+  state_machine_owner: src/experiments/state-machine.ts # source: P2.9 (R10)
+  file_owner: src/optimizer/* → P2.10/P2.11            # source: story Files-to-Modify
+```
+
+**Pattern-type → source map** (keeps generation consistent across runs):
+
+| Pattern type | Source |
+|---|---|
+| auth / capability model | Epic block (cross-cutting) + story Security Invariants |
+| multi-tenancy / tenant binding | Epic block + story Contracts/Schema (Technical Notes) |
+| schema keys (PK/FK/enum) | Story Technical Notes → Contracts/Schema |
+| event names / `run_id` format | Story Integration points + epic event vocabulary |
+| file ownership (module → story) | Story "Files to Modify" sections |
+
+The note is a **review aid, not a new source of truth** — if it disagrees with a story file, the story file wins and the note is corrected.
 
 ## Step 3.1 — Per-Story Adversarial Pipeline (delegated, structured)
 
@@ -113,7 +155,7 @@ its checklist items to the **also_consider** input passed to
 Spawn all per-story pipeline agents **in parallel in a single message**.
 Each agent's contract:
 
-```
+```text
 INPUTS (paths + data only — NO story bodies in the orchestrator prompt):
   - story_file_path(s): the 1–2 story files this agent owns
   - also_consider: the domain-checklist markdown from Step 3.0 (verbatim)
@@ -159,7 +201,7 @@ contradiction, and returns the same structured-verdict shape with a
 
 ### 3.1c — Orchestrator aggregation (data only)
 
-```
+```text
 verdicts = [ per-story verdicts from 3.1a ] + [ cross-story verdict from 3.1b ]
 
 if any verdict has surviving HIGH OR final.medium > 3 OR a cross-story HIGH:
@@ -197,7 +239,7 @@ HIGH, `final.medium > 3`, or a cross-story HIGH, print this table —
 built from the structured verdict fields, not from re-read story text —
 and HALT:
 
-```
+```text
 ⚠️  Adversarial review did not converge after 3 iterations.
 
 | # | Severity | Artifact | Finding | Proposed Disposition |

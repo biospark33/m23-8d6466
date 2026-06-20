@@ -228,7 +228,12 @@ Quality Standard: A6 (20-36 DOD checkboxes, Pydantic schemas, 12-Factor complian
 - **Returns to the orchestrator only**: the report file path + a ≤10-line
   abstract. The orchestrator passes that **path** into writer prompts —
   it does **not** inline full research bodies (that re-emits every report
-  into every writer prompt; the dominant Phase-1→2 token sink).
+  into every writer prompt; the dominant Phase-1→2 token sink). The
+  orchestrator **interpolates each returned report path into the matching
+  `{R1_PATH}`–`{R5_PATH}` placeholder** when constructing the Writer
+  Agent prompts (see "Research Context (read these — paths, not inlined
+  bodies)" in the Writing Agent Template), so each writer prompt carries
+  five concrete file paths — not five report bodies.
 - Writers `Read` the report paths they need. Reports stay specific to
   track (backend vs frontend) and **incorporate learned patterns** from
   previous sessions (story estimation, wave strategy, research sources).
