@@ -114,7 +114,7 @@ Step 3.1a passes each per-story subagent a `shared_pattern_note` — a ≤10-lin
 shared_pattern_note:
   tenant_key: experiments.graph_id               # source: epic §4.1
   pk_fmt: <table>_id uuid, default gen_random_uuid()   # source: convention
-  status_enum: proposed|approved|running|analyzed|deployed|confirming|confirmed|rolled_back  # P2.9 §C
+  status_enum: proposed|approved|running|analyzed|deployed|confirming|confirmed|rolled_back|rejected  # P2.9 §C
   event_vocab: event_type='outcome' per transition     # source: P2.1 store
   run_id_fmt: experiment:<id> lifecycle run            # source: P2.9
   authz: QDS_EXP_ACTORS env allowlist → approved_by    # source: P2.9 INV-EXP1
