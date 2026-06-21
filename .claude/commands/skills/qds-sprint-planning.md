@@ -1,9 +1,9 @@
 ---
 name: qds-sprint-planning
 description: Enterprise-grade story planning workflow with parallel research and parallel writing. Use when planning new epic stories for a single track (A or B). Executes 2-phase core workflow with pre/post phases: Phase 0 (preparation), Phase 1 (parallel research with 5 agents), Phase 2 (parallel story writing with DUAL OUTPUT), and Phase 3 (wrap-up with status updates and PR creation).
-version: 1.2.0
+version: 1.3.0
 author: biospark33
-last_updated: 2026-05-16
+last_updated: 2026-06-19
 ---
 
 # QDS Sprint Story Planning Skill
@@ -183,7 +183,7 @@ confidence = (completeness * 0.30) + (reliability * 0.25) + (consistency * 0.20)
 **HITL Interaction:**
 
 ```
-🎯 QDS Sprint Story Planning v1.2.0
+🎯 QDS Sprint Story Planning v1.3.0
 
 Epic ID: A7
 Track: A (Backend/Intelligence)
@@ -220,13 +220,23 @@ Quality Standard: A6 (20-36 DOD checkboxes, Pydantic schemas, 12-Factor complian
 | **Agent 4** | React/Next.js Patterns | Context7 MCP for React, Next.js, CopilotKit, TailwindCSS patterns |
 | **Agent 5** | Dependency Analysis | Story sequencing, wave/batch strategy from epics.md |
 
-**Each research agent produces:**
+**Each research agent produces (v1.3.0 — write-to-file, return path):**
 
-- Structured report with file paths
-- Patterns, schemas, and findings
-- Specific to track (backend vs frontend)
-- Ready for insertion into writing agent prompts
-- **Incorporates learned patterns** from previous planning sessions (story estimation, wave strategy, research sources)
+- **Writes** its structured report to
+  `_bmad-output/workflow-state/qds-sprint-planning/{epic}-{track}/research/R{n}-{slug}.md`
+  using the `Write` tool (e.g. `R1-story-template.md`, `R3-data-model.md`).
+- **Returns to the orchestrator only**: the report file path + a ≤10-line
+  abstract. The orchestrator passes that **path** into writer prompts —
+  it does **not** inline full research bodies (that re-emits every report
+  into every writer prompt; the dominant Phase-1→2 token sink). The
+  orchestrator **interpolates each returned report path into the matching
+  `{R1_PATH}`–`{R5_PATH}` placeholder** when constructing the Writer
+  Agent prompts (see "Research Context (read these — paths, not inlined
+  bodies)" in the Writing Agent Template), so each writer prompt carries
+  five concrete file paths — not five report bodies.
+- Writers `Read` the report paths they need. Reports stay specific to
+  track (backend vs frontend) and **incorporate learned patterns** from
+  previous sessions (story estimation, wave strategy, research sources).
 
 ### Phase 2: Parallel Story Writing (Waves, Max 2 Stories Per Agent)
 
@@ -321,28 +331,35 @@ Before any of the file-write / commit / PR steps in this phase, run the
 adversarial-review iteration loop documented in
 [`.claude/skills/qds-sprint-planning/steps/phase-3-wrap-up.md`](../../skills/qds-sprint-planning/steps/phase-3-wrap-up.md).
 
-The loop:
+The loop (v1.3.0 — **delegated, structured**; the orchestrator never
+holds story bodies or re-writes artifacts inline):
 
 - Scans every Phase 2 story file + the epic definition for **domain
   triggers** (rls, migration, auth, secrets, upload, deserialization,
   file handling, …) and loads matching checklists from
   `.claude/skills/qds-sprint-planning/checklists/<domain>.md` as the
-  `also_consider` payload for the review agent.
-- Invokes `bmad-review-adversarial-general` against each story
-  individually + the cross-story consistency view + the
-  sprint-status.yaml entries + the targeted epic block.
+  `also_consider` payload.
+- Spawns **one self-contained pipeline subagent per story** (or per
+  2-story writer batch), **in parallel in one message**, passing
+  **file paths + the checklist payload** — not story contents. Each
+  subagent runs review→fix→verify in its **own context**, applying
+  `bmad-review-adversarial-general` + the severity heuristics, and
+  `Edit`s its story file **in place** each round.
 - Categorizes findings into **HIGH** (structural), **MEDIUM**
-  (clarity), **LOW** (nits).
-- Exits when `HIGH == 0 AND MEDIUM <= 3` (typically converges in 2–3
-  iterations on a well-researched epic).
-- Applies findings automatically only for iterations 1–2 as an
-  in-place re-write pass — **NOT a separate commit**; integrated into
-  the same Phase 2 output that steps 1–8 below will commit. Iteration
-  3 does **not** auto-apply: it surfaces a disposition table and
-  HALTs (see next bullet).
-- If iteration 3 ends with surviving HIGH or > 3 MEDIUM findings,
-  surfaces a disposition table to the operator and **HALTs** the
-  wrap-up until the operator chooses
+  (clarity), **LOW** (nits). A subagent converges (and stops editing)
+  when `HIGH == 0 AND MEDIUM <= 3` — typically 2–3 internal iterations.
+- Each subagent returns a **structured verdict** (JSON: iterations,
+  converged, final HIGH/MEDIUM/LOW counts, applied + surviving lists,
+  checklists_fired) — **not prose, not the story body**. After the
+  per-story agents return, one **cross-story consistency subagent**
+  runs over the final file **paths** (+ sprint-status + epic block) and
+  edits in place for any contradiction in shared patterns.
+- The orchestrator aggregates verdicts **by data**. Fixes are already on
+  disk (subagents edited in place) — **NOT a separate commit**; they are
+  integrated into the same Phase 2 output that steps 1–8 below commit.
+- If any verdict has surviving HIGH or > 3 MEDIUM (or a cross-story
+  HIGH), the orchestrator surfaces a disposition table built from the
+  verdict fields and **HALTs** the wrap-up until the operator chooses
   `[a]pply` / `[r]e-iterate` / `[e]dit` / `[q]uit`.
 
 The adversarial-review log (counts per iteration, dispositions taken,
@@ -572,22 +589,18 @@ The `{story-slug}` is derived from the story ID and title:
 
 To generate: (1) lowercase the epic letter/number, (2) replace the dot with a dash, (3) append a dash, (4) convert the title to kebab-case.
 
-## Research Context
+## Research Context (read these — paths, not inlined bodies)
 
-### Story Template (from Agent 1)
-{STORY_TEMPLATE}
+`Read` the research reports you need from the workflow-state `research/`
+directory. The orchestrator gives you the paths + a one-line abstract per
+report; pull the detail yourself rather than receiving it inlined (keeps
+the orchestrator prompt small and your context scoped to what you write):
 
-### Tool/UX Specifications (from Agent 2)
-{TOOL_UX_SPECS}
-
-### Entity/Component Patterns (from Agent 3)
-{ENTITY_COMPONENT_PATTERNS}
-
-### External Dependencies (from Agent 4)
-{EXTERNAL_DEPENDENCIES}
-
-### Dependency Analysis (from Agent 5)
-{DEPENDENCY_ANALYSIS}
+- **Story Template** (Agent 1): `{R1_PATH}`
+- **Tool/UX Specifications** (Agent 2): `{R2_PATH}`
+- **Entity/Component Patterns** (Agent 3): `{R3_PATH}`
+- **External Dependencies** (Agent 4): `{R4_PATH}`
+- **Dependency Analysis** (Agent 5): `{R5_PATH}`
 
 ## Quality Requirements
 
@@ -776,7 +789,7 @@ fi
 Output:
 
 ```
-🎯 QDS Sprint Story Planning v1.2.0
+🎯 QDS Sprint Story Planning v1.3.0
 
 Phase 0: Epic & Track Selection
   ✅ Epic: A7 (Writing + QA Agents)
@@ -818,7 +831,7 @@ Phase 3: Updates
 Output:
 
 ```
-🎯 QDS Sprint Story Planning v1.2.0
+🎯 QDS Sprint Story Planning v1.3.0
 
 Phase 0: Epic & Track Selection
   ✅ Epic: B4 (Question Management Flow)
@@ -909,6 +922,44 @@ If Context7 MCP is not available:
 - Claude Code Task tool (for parallel agent execution)
 
 ## Changelog
+
+### [1.3.0] - 2026-06-19
+
+**Token-efficiency rewrite of the adversarial wrap-up + research handoff
+(delegate, don't re-emit).**
+
+Motivated by instrumenting the QDS-MEM-003 run (13 stories): the
+orchestrator emitted **~554k output tokens** in the main loop — almost
+all of it re-writing story bodies in place across adversarial iterations,
+and re-inlining research reports into every writer prompt. The subagents
+found the problems; the orchestrator (Opus, main loop) did the expensive
+writing. 37 agents spawned, 25 of them adversarial machinery routed
+through the orchestrator.
+
+- **Changed** (`steps/phase-3-wrap-up.md` Step 3.1): replaced the
+  orchestrator-rewrites-in-place loop with a **per-story pipeline
+  subagent** that owns review→fix→verify in its **own context** and
+  `Edit`s the story file **in place**. One agent per story (or per
+  2-story writer batch) + one cross-story consistency agent. Collapses
+  the old review→fix→fix2→verify round-trips (≈25 agents) to ≈14.
+- **Changed**: subagents return a **structured JSON verdict**
+  (iterations / converged / final counts / applied + surviving /
+  checklists_fired) — **not prose, not story bodies**. The orchestrator
+  aggregates **by data** and never holds story text.
+- **Changed**: the orchestrator passes **file paths + checklist
+  payloads**, never file contents (levers 3 + 4).
+- **Changed** (Phase 1→2 handoff): research agents now **Write** their
+  reports to
+  `workflow-state/qds-sprint-planning/{epic}-{track}/research/R{n}-*.md`
+  and return only a path + ≤10-line abstract; writer agents `Read` the
+  paths. Stops the orchestrator re-inlining every research body into
+  every writer prompt.
+- **Result (estimated)**: orchestrator output ~554k → ~180k; agents
+  37 → ~22. ~2–3× cheaper per run with equal-or-better rigor (per-story
+  pipeline verify is more coherent than fan-out-and-reassemble).
+- **Scope note**: this release implements the four structural levers.
+  Deferred trims (skip-converged re-review, adaptive research-track
+  count, SKILL.md prompt-template extraction) tracked for a follow-up.
 
 ### [1.2.0] - 2026-05-16
 

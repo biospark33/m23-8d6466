@@ -27,10 +27,13 @@ each time it runs against rewritten content. One pass is never enough.
 Two-to-three passes converge — and the convergence criterion itself is
 a signal that the spec is sound.
 
-**Mechanism:** Auto-iterate `bmad-review-adversarial-general` over the
-Phase 2 outputs until findings stabilize OR the iteration cap is hit.
-Apply each round's findings as a re-write pass (NOT a separate commit —
-integrate into the Phase 2 output before the wrap-up commit).
+**Mechanism (v1.3.0 — delegated).** Spawn one self-contained pipeline
+subagent per story; each iterates `bmad-review-adversarial-general` over
+its own file(s) until findings stabilize OR the iteration cap is hit, and
+`Edit`s the file in place each round (NOT a separate commit — the fixes
+land in the Phase 2 output before the wrap-up commit). The orchestrator
+passes paths + checklists and collects structured verdicts only; it never
+holds story text or re-writes artifacts itself.
 
 ---
 
@@ -82,7 +85,7 @@ its checklist items to the **also_consider** input passed to
 
 **Operator-visible output:**
 
-```
+```text
 🛡  Domain checklists active: rls-invariants, migration-invariants
    (triggered by: "RLS policy" in story sprint-X/stories/foo.md,
                   "alembic migration" in epic definition)
@@ -90,68 +93,129 @@ its checklist items to the **also_consider** input passed to
 
 ---
 
-## Step 3.1 — Adversarial Iteration Loop (max 3 iterations)
+## Step 3.0.5 — Generate `shared_pattern_note` (orchestrator, before 3.1a)
 
+Step 3.1a passes each per-story subagent a `shared_pattern_note` — a ≤10-line digest of the load-bearing patterns every story in this epic must agree on (auth, multi-tenancy, schema keys, event names, file ownership). The orchestrator generates it ONCE, before spawning any 3.1a agent, so every per-story reviewer and the single 3.1b cross-story agent share the same definition of "consistent."
+
+**Procedure:**
+
+1. **Scan the epic definition block** (`_bmad-output/epics.md`) for the cross-cutting mandates every story inherits — the auth/capability model, the tenant-binding column, naming conventions, and the audit-event vocabulary. These are epic-level and apply to every story.
+2. **Scan each story file's load-bearing headers** for the tokens that must not drift between stories:
+   - **Technical Notes → Contracts/Schema**: primary-key convention, tenant-binding column, table names, enum values.
+   - **Integration points**: `event_type` vocabulary, `run_id` format, queue/topic names.
+   - **Files to Modify**: which story owns which module (file ownership).
+   - **Security Invariants**: auth allowlist source, audit-column non-null-FK requirements.
+3. **Compress to ≤10 lines** — one pattern per line, each tagged with its source so a reviewer can verify the token against the originating story/epic rather than trusting the digest.
+4. **Conflict resolution**: if two stories disagree on a token (e.g., Story A binds the tenant on `graph_id`, Story B on `tenant_id`), do NOT silently pick one — surface it as a cross-story HIGH finding for the 3.1b agent. That contradiction is precisely what the cross-story agent catches.
+
+**Sample `shared_pattern_note` (≤10 lines, illustrative):**
+
+```text
+shared_pattern_note:
+  tenant_key: experiments.graph_id               # source: epic §4.1
+  pk_fmt: <table>_id uuid, default gen_random_uuid()   # source: convention
+  status_enum: proposed|approved|running|analyzed|deployed|confirming|confirmed|rolled_back|rejected  # P2.9 §C
+  event_vocab: event_type='outcome' per transition     # source: P2.1 store
+  run_id_fmt: experiment:<id> lifecycle run            # source: P2.9
+  authz: QDS_EXP_ACTORS env allowlist → approved_by    # source: P2.9 INV-EXP1
+  audit_fk: events.run_id NOT NULL → runs (INV-OM2)    # source: epic invariants
+  state_machine_owner: src/experiments/state-machine.ts # source: P2.9 (R10)
+  file_owner: src/optimizer/* → P2.10/P2.11            # source: story Files-to-Modify
 ```
-loaded_checklists = result of Step 3.0
-for iteration in 1..3:
 
-  # 1. Invoke adversarial review
-  findings = invoke bmad-review-adversarial-general with:
-    content =
-      - Each story file (reviewed individually)
-      - Cross-story consistency review (all story files together —
-        check for contradictions in shared patterns: auth, multi-tenancy,
-        schema, naming, file ownership, event names)
-      - Sprint-status.yaml entries staged for insertion
-      - Epic definition block in epics.md targeted for update
-    also_consider = concatenation of loaded_checklists (from Step 3.0)
+**Pattern-type → source map** (keeps generation consistent across runs):
 
-  # 2. Categorize findings by severity
-  for finding in findings:
-    if finding is STRUCTURAL (e.g. linearizable migration chain broken,
-                              dependency cycle, missing AC, missing DOD
-                              category, capability/auth bypass risk,
-                              cross-story contradiction):
-      severity = HIGH
-    elif finding is CLARITY (e.g. ambiguous wording, missing spec
-                             reference, undefined acronym, contract
-                             type mismatch with no security/correctness
-                             impact):
-      severity = MEDIUM
-    else:
-      severity = LOW   # typos, style nits, formatting
+| Pattern type | Source |
+|---|---|
+| auth / capability model | Epic block (cross-cutting) + story Security Invariants |
+| multi-tenancy / tenant binding | Epic block + story Contracts/Schema (Technical Notes) |
+| schema keys (PK/FK/enum) | Story Technical Notes → Contracts/Schema |
+| event names / `run_id` format | Story Integration points + epic event vocabulary |
+| file ownership (module → story) | Story "Files to Modify" sections |
 
-  # 3. Exit condition (convergence)
-  if count(HIGH) == 0 AND count(MEDIUM) <= 3:
-    log "✅ Adversarial review converged after iteration {iteration}"
-    log f"   HIGH=0  MEDIUM={count(MEDIUM)}  LOW={count(LOW)}"
-    break
+The note is a **review aid, not a new source of truth** — if it disagrees with a story file, the story file wins and the note is corrected.
 
-  # 4. Apply findings as a re-write pass (iterations 1–2 only)
-  #    NOT a separate commit. The wrap-up commit will include the
-  #    final converged state of the story files / sprint-status /
-  #    epic block — re-writes here are integrated into the same
-  #    Phase 2 output that Step 3.2+ will commit.
-  #
-  #    Iteration 3 is RESERVED for surfacing surviving findings to
-  #    the operator — the loop does NOT auto-apply fixes on the
-  #    third pass. Auto-applying on iteration 3 would mutate the
-  #    artifacts before the operator can decide between
-  #    [a]pply / [r]e-iterate / [e]dit / [q]uit, which contradicts
-  #    the disposition-table semantics in Step 3.2.
-  if iteration < 3:
-    for finding in findings ordered by severity (HIGH → MEDIUM → LOW):
-      re-write the affected artifact in place to address the finding
-      re-validate spec references / cross-story consistency
-    log f"🔄 Iteration {iteration}: applied {count(findings)} fixes — re-running review"
-  else:
-    # Iteration 3 did not converge — HALT without applying fixes.
-    # The operator chooses the disposition in Step 3.2; only after
-    # an explicit [a]pply do the re-writes execute.
-    surface_disposition_table_to_operator(findings)
+## Step 3.1 — Per-Story Adversarial Pipeline (delegated, structured)
+
+> **Token contract (v1.3.0).** The orchestrator does **NOT** read story
+> bodies into its own context and does **NOT** re-write artifacts inline.
+> It spawns one **self-contained pipeline subagent per story** (or per
+> 2-story writer batch), passes **file paths + the checklist payload**,
+> and receives a **structured verdict** — never a re-emitted story body.
+> Each subagent owns the full review→fix→verify cycle in its own context
+> and `Edit`s the story file **in place**. This replaces the old
+> orchestrator-rewrites-in-place loop, which re-emitted every story body
+> ×N iterations in the main loop (the dominant token sink — see the
+> v1.3.0 changelog). Levers applied: delegate fixes (1), collapse
+> review→fix→verify into one agent (2), paths-not-contents (3),
+> structured-output verdicts (4).
+
+### 3.1a — Per-story pipeline subagent (one per story / writer batch)
+
+Spawn all per-story pipeline agents **in parallel in a single message**.
+Each agent's contract:
+
+```text
+INPUTS (paths + data only — NO story bodies in the orchestrator prompt):
+  - story_file_path(s): the 1–2 story files this agent owns
+  - also_consider: the domain-checklist markdown from Step 3.0 (verbatim)
+  - sibling_story_paths: paths (not contents) of the other stories, for
+    cross-story awareness of shared patterns
+  - shared_pattern_note: ≤10-line summary of load-bearing shared patterns
+    (auth, multi-tenancy, schema keys, event names, file ownership)
+
+LOOP (max 3 internal iterations, entirely inside the subagent's context):
+  1. Read the owned story file(s).
+  2. Adversarially review (apply bmad-review-adversarial-general method +
+     the severity heuristics table below + also_consider checklists).
+  3. if count(HIGH)==0 AND count(MEDIUM)<=3: converged → break.
+  4. if iteration < 3: Edit the file IN PLACE to resolve HIGH→MEDIUM
+     findings; re-validate spec refs; continue.
+     else (iteration 3 did not converge): do NOT edit further — return
+     surviving findings for the operator disposition table.
+
+RETURN (structured verdict — JSON, NOT prose, NOT the story body):
+  {
+    "story": "P2.3",
+    "iterations": 2,
+    "converged": true,
+    "final": { "high": 0, "medium": 1, "low": 4 },
+    "applied":   [ { "severity": "HIGH", "line": 88, "summary": "..." } ],
+    "surviving": [ ],
+    "checklists_fired": [ "migration-invariants" ]
+  }
+```
+
+The subagent edits files directly, so its fixes are already on disk when
+it returns. The orchestrator never holds story text.
+
+### 3.1b — Cross-story consistency agent (one, after 3.1a returns)
+
+After all per-story agents return, spawn **one** cross-story consistency
+subagent. It receives the **paths** of all final story files +
+`sprint-status.yaml` + the epic block, checks for contradictions in
+shared patterns (auth, multi-tenancy, schema keys, naming, file
+ownership, event names), `Edit`s any file in place to resolve a
+contradiction, and returns the same structured-verdict shape with a
+`cross_story` finding list. No story bodies cross the orchestrator.
+
+### 3.1c — Orchestrator aggregation (data only)
+
+```text
+verdicts = [ per-story verdicts from 3.1a ] + [ cross-story verdict from 3.1b ]
+
+if any verdict has surviving HIGH OR final.medium > 3 OR a cross-story HIGH:
+    surface_disposition_table_to_operator(verdicts)   # Step 3.2
     HALT — wrap-up does NOT proceed to commit until operator decides.
+else:
+    log "✅ Adversarial review converged (per-story pipeline)"
+    log convergence table built from verdicts:
+        | story | iters | HIGH | MEDIUM | LOW | checklists |
+    proceed to Step 3.3
 ```
+
+The orchestrator routes **by the structured verdict fields**. It does not
+re-summarize prose findings and does not re-emit story content.
 
 ### Severity heuristics (for the categorize step)
 
@@ -170,10 +234,12 @@ signal Phase 1 research was thin — surface it in the wrap-up summary.
 
 ## Step 3.2 — Disposition Table (operator surface when loop doesn't converge)
 
-If iteration 3 ends with surviving HIGH findings or > 3 MEDIUM findings,
-print this table and HALT:
+If aggregation (Step 3.1c) finds any per-story verdict with surviving
+HIGH, `final.medium > 3`, or a cross-story HIGH, print this table —
+built from the structured verdict fields, not from re-read story text —
+and HALT:
 
-```
+```text
 ⚠️  Adversarial review did not converge after 3 iterations.
 
 | # | Severity | Artifact | Finding | Proposed Disposition |

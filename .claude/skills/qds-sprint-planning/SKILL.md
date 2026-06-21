@@ -1,9 +1,9 @@
 ---
 name: qds-sprint-planning-resources
 description: Phase 3 wrap-up step + pluggable domain-invariant checklists used by the qds-sprint-planning skill. Loaded as references — NOT invoked directly. See `.claude/commands/skills/qds-sprint-planning.md` for the canonical skill definition.
-version: 1.2.0
+version: 1.3.0
 author: biospark33
-last_updated: 2026-05-16
+last_updated: 2026-06-19
 ---
 
 # qds-sprint-planning — Reference Resources
