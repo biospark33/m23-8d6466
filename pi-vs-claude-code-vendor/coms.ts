@@ -1648,7 +1648,11 @@ export default function (pi: ExtensionAPI) {
 				displayProject = projectMatch[1];
 				try { ctx.ui.notify(`coms: displaying project ${displayProject}`, "info"); } catch { /* ignore */ }
 			}
-			await refreshPool();
+			try {
+				await refreshPool();
+			} catch (err) {
+				try { ctx.ui.notify(`coms: refresh failed — ${err instanceof Error ? err.message : String(err)}`, "error"); } catch { /* ignore */ }
+			}
 		},
 	});
 

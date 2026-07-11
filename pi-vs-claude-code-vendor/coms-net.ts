@@ -822,6 +822,13 @@ export default function (pi: ExtensionAPI) {
 				resp = await fetch(url, { method: "GET", headers, signal: ac.signal });
 			} catch (err: any) {
 				clearTimeout(handshakeTimer);
+				if (ac.signal.aborted) {
+					// Intentional abort (manual reconnect superseding this attempt, or
+					// shutdown) — the new attempt or cleanShutdown already owns the
+					// reconnect/teardown lifecycle. Scheduling here would race it.
+					audit("sse_connect_aborted");
+					return;
+				}
 				audit("sse_connect_failed", { reason: safeError(err) });
 				scheduleReconnect();
 				return;
