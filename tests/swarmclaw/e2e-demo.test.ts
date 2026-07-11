@@ -80,4 +80,4 @@ test("e2e: agent → mcp-server → test → retain → recall roundtrip over HT
   expect(recall.status).toBe(200);
   const payload = JSON.parse(recall.json.result.content[0].text);
   expect(payload.memories).toContain(secret);
-});
+}, 20000);

@@ -26,6 +26,25 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Continuously drain a subprocess stdout stream in the background, discarding
+ * output. The server emits CC-9 structured logs to stdout on every operation;
+ * if nobody reads, the OS pipe buffer fills and the server blocks on write
+ * (unable to process SIGTERM). Draining prevents that deadlock.
+ */
+function drainStdout(stdout: ReadableStream<Uint8Array>): void {
+  const reader = stdout.getReader();
+  void (async () => {
+    try {
+      for (let done = false; !done; ) {
+        done = (await reader.read()).done;
+      }
+    } catch {
+      /* stream closed */
+    }
+  })();
+}
+
 let server: ReturnType<typeof Bun.spawn> | null = null;
 
 afterEach(async () => {
@@ -56,7 +75,10 @@ async function findChildPid(parentPid: number): Promise<number | null> {
 }
 
 test("SIGTERM propagates to MCP subprocess; PID gone within 7s, no orphans", async () => {
-  const port = 3199;
+  // Fixed high port (randomized to avoid collisions). Readiness is detected by
+  // connection-retry rather than stdout parsing, making it robust to subprocess
+  // startup latency under a saturated test suite.
+  const port = 40000 + Math.floor(Math.random() * 20000);
   server = Bun.spawn(["bun", INDEX], {
     stdin: "pipe",
     stdout: "pipe",
@@ -70,10 +92,14 @@ test("SIGTERM propagates to MCP subprocess; PID gone within 7s, no orphans", asy
   });
   const serverPid = server.pid!;
 
-  // Wait for the server to listen.
+  // Drain stdout so the server never blocks on a full pipe (CC-9 logs).
+  drainStdout(server.stdout as ReadableStream<Uint8Array>);
+
   const base = `http://localhost:${port}`;
+
+  // Wait for the server to accept connections (up to ~24s under heavy load).
   let up = false;
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 120; i++) {
     try {
       const r = await fetch(`${base}/api/agents`, {
         method: "POST",
@@ -123,4 +149,4 @@ test("SIGTERM propagates to MCP subprocess; PID gone within 7s, no orphans", asy
   await server.exited.catch(() => {});
   const orphan = await findChildPid(serverPid);
   expect(orphan).toBeNull();
-}, 20000);
+}, 30000);

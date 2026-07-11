@@ -80,7 +80,7 @@ describe("AC1 make-or-break: register agent + mcp-server + test", () => {
     for (const t of ["retain", "recall", "reflect", "consolidate"]) {
       expect(body.tools).toContain(t);
     }
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -111,7 +111,7 @@ describe("AC2: invoke retain persists, recall retrieves", () => {
     const result = (recall.body as { result: { content: Array<{ text: string }> } }).result;
     const payload = JSON.parse(result.content[0]!.text);
     expect(payload.memories).toContain("the sky is blue");
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ describe("AC3: broken transport never silently succeeds", () => {
     );
     expect(resp.status).toBe(502);
     expect((resp.body as { ok: boolean }).ok).toBe(false);
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -158,7 +158,7 @@ describe("AC4: invalid bank_id rejected pre-dispatch with -32602", () => {
     const body = resp.body as { error: { code: number; data: { field: string } } };
     expect(body.error.code).toBe(-32602);
     expect(body.error.data.field).toContain("bank_id");
-  });
+  }, 15000);
 
   test("valid bank_id passes validation", async () => {
     const mcpStore = newMcpStore();
@@ -174,7 +174,7 @@ describe("AC4: invalid bank_id rejected pre-dispatch with -32602", () => {
       arguments: { bank_id: "valid-bank-01", content: "ok" },
     });
     expect(resp.status).toBe(200);
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -190,7 +190,7 @@ describe("AC5: registration command allowlist", () => {
       fakeFactory(),
     );
     expect(resp.status).toBe(201);
-  });
+  }, 15000);
 
   test.each(["python", "python3"])("%s → 400 (shells excluded)", async (cmd) => {
     const mcpStore = newMcpStore();
@@ -201,7 +201,7 @@ describe("AC5: registration command allowlist", () => {
       fakeFactory(),
     );
     expect(resp.status).toBe(400);
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -224,7 +224,7 @@ describe("AC7: code-injection args rejected at registration", () => {
       fakeFactory(),
     );
     expect(resp.status).toBe(400);
-  });
+  }, 15000);
 
   test("npx --node-arg passthrough → 400", async () => {
     const mcpStore = newMcpStore();
@@ -235,7 +235,7 @@ describe("AC7: code-injection args rejected at registration", () => {
       fakeFactory(),
     );
     expect(resp.status).toBe(400);
-  });
+  }, 15000);
 
   test.each([
     [["-p", "malicious-package", "hindsight-local-mcp"]],
@@ -249,7 +249,7 @@ describe("AC7: code-injection args rejected at registration", () => {
       fakeFactory(),
     );
     expect(resp.status).toBe(400);
-  });
+  }, 15000);
 
   test("npx unknown package → 400", async () => {
     const mcpStore = newMcpStore();
@@ -260,7 +260,7 @@ describe("AC7: code-injection args rejected at registration", () => {
       fakeFactory(),
     );
     expect(resp.status).toBe(400);
-  });
+  }, 15000);
 
   test("npx @anthropic-ai/claude-code accepted → 201", async () => {
     const mcpStore = newMcpStore();
@@ -271,7 +271,7 @@ describe("AC7: code-injection args rejected at registration", () => {
       fakeFactory(),
     );
     expect(resp.status).toBe(201);
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -281,11 +281,11 @@ describe("INV-SC1: agentId regex", () => {
   test.each(["Bad_Agent", "-bad", "bad-", "a/b", ".."])("invalid agentId %s → 400", async (agentId) => {
     const resp = await handleRegisterAgent(new AgentStore(), { agentId, capabilities: ["x"] });
     expect(resp.status).toBe(400);
-  });
+  }, 15000);
   test("valid agentId → 201", async () => {
     const resp = await handleRegisterAgent(new AgentStore(), { agentId: "good-agent-1", capabilities: ["x"] });
     expect(resp.status).toBe(201);
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -304,7 +304,7 @@ describe("INV-SC5: secrets masked in responses", () => {
     const env = (resp.body as { env: Record<string, string> }).env;
     expect(env.HINDSIGHT_API_LLM_API_KEY).toBe("***");
     expect(JSON.stringify(resp.body)).not.toContain("sk-secret");
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -334,7 +334,7 @@ describe("Env isolation: subprocess env is scoped", () => {
     delete process.env.SWARMCLAW_INTERNAL_SECRET;
     // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
     delete process.env.HINDSIGHT_INTERNAL;
-  });
+  }, 15000);
 
   test("SWARMCLAW_ENV_ALLOWLIST entries flow through", async () => {
     process.env.MY_ALLOWED = "allowed-value";
@@ -354,7 +354,7 @@ describe("Env isolation: subprocess env is scoped", () => {
     delete process.env.MY_ALLOWED;
     // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
     delete process.env.SWARMCLAW_ENV_ALLOWLIST;
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -377,7 +377,7 @@ describe("Guards: capacity, duplicate, SSRF, args-length", () => {
       fakeFactory(),
     );
     expect(b.status).toBe(409);
-  });
+  }, 15000);
 
   test("65th agent → 429", async () => {
     const agentStore = new AgentStore();
@@ -387,19 +387,32 @@ describe("Guards: capacity, duplicate, SSRF, args-length", () => {
     }
     const over = await handleRegisterAgent(agentStore, { agentId: "agent-over", capabilities: ["x"] });
     expect(over.status).toBe(429);
-  });
+  }, 15000);
+
+  // Pre-fill store slots WITHOUT spawning real subprocesses. The 32-cap is
+  // enforced synchronously in MCPStore.reserve() before any spawn, so filling
+  // via reserve()+finalize() with a slot-occupying stub exercises the exact
+  // invariant while keeping the test fast and non-flaky. The BOUNDARY
+  // registration still runs through the real handler + real spawn.
+  function fillSlots(store: MCPStore, n: number): void {
+    for (let i = 0; i < n; i++) {
+      const rid = store.reserve(`fill-${i}`);
+      store.finalize(rid, {
+        name: `fill-${i}`,
+        transport: "stdio",
+        command: "hindsight-local-mcp",
+        args: [],
+        createdAt: new Date().toISOString(),
+        stdio: { shutdown: async () => {}, isRunning: false } as any,
+        bridge: {} as any,
+        healthy: true,
+      });
+    }
+  }
 
   test("33rd MCP server → 429", async () => {
     const mcpStore = newMcpStore();
-    for (let i = 0; i < 32; i++) {
-      const r = await handleRegisterMCPServer(
-        mcpStore,
-        { name: `srv-${i}`, transport: "stdio", command: "hindsight-local-mcp" },
-        undefined,
-        fakeFactory(),
-      );
-      expect(r.status).toBe(201);
-    }
+    fillSlots(mcpStore, 32);
     const over = await handleRegisterMCPServer(
       mcpStore,
       { name: "srv-over", transport: "stdio", command: "hindsight-local-mcp" },
@@ -407,18 +420,11 @@ describe("Guards: capacity, duplicate, SSRF, args-length", () => {
       fakeFactory(),
     );
     expect(over.status).toBe(429);
-  }, 20000);
+  }, 15000);
 
   test("concurrent cap: 31 exist, two concurrent registrations → exactly one 201", async () => {
     const mcpStore = newMcpStore();
-    for (let i = 0; i < 31; i++) {
-      await handleRegisterMCPServer(
-        mcpStore,
-        { name: `pre-${i}`, transport: "stdio", command: "hindsight-local-mcp" },
-        undefined,
-        fakeFactory(),
-      );
-    }
+    fillSlots(mcpStore, 31);
     const [r1, r2] = await Promise.all([
       handleRegisterMCPServer(mcpStore, { name: "race-a", transport: "stdio", command: "hindsight-local-mcp" }, undefined, fakeFactory()),
       handleRegisterMCPServer(mcpStore, { name: "race-b", transport: "stdio", command: "hindsight-local-mcp" }, undefined, fakeFactory()),
@@ -435,7 +441,7 @@ describe("Guards: capacity, duplicate, SSRF, args-length", () => {
     expect(evil.status).toBe(422);
     const good = await handleRegisterAgent(store, { agentId: "good-endpoint", capabilities: ["x"], endpointUrl: "http://localhost:3100/a2a" });
     expect(good.status).toBe(201);
-  });
+  }, 15000);
 
   test("args length: 4097 chars → 400, 4096 → accepted", async () => {
     const mcpStore = newMcpStore();
@@ -455,7 +461,7 @@ describe("Guards: capacity, duplicate, SSRF, args-length", () => {
       fakeFactory(),
     );
     expect(okLen.status).toBe(201);
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -479,7 +485,7 @@ describe("Tool cache re-enumeration", () => {
     rec.bridge.invalidateCache(); // force a cache miss
     const resp = await handleInvokeMCPServer(mcpStore, id, { tool: "reflect", arguments: { bank_id: "b" } });
     expect(resp.status).toBe(200);
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -500,7 +506,7 @@ describe("AC6: /test reports ok:false for a dead transport", () => {
     const testResp = await handleTestMCPServer(mcpStore, id);
     expect(testResp.status).toBe(502);
     expect((testResp.body as { ok: boolean }).ok).toBe(false);
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
