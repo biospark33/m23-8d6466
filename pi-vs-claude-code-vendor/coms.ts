@@ -33,6 +33,7 @@ const TIMEOUT_MS = Number(process.env.PI_COMS_TIMEOUT_MS) || 1_800_000;
 const PING_INTERVAL_MS = Number(process.env.PI_COMS_PING_INTERVAL_MS) || 10_000;
 const KEEPALIVE_INTERVAL_MS = 30_000;
 const LINE_CAP_BYTES = 64 * 1024;
+const SOCKET_OP_TIMEOUT_MS = 5_000;
 
 const FALLBACK_PALETTE = [
 	"#72F1B8", "#36F9F6", "#FF7EDB", "#FEDE5D",
@@ -313,6 +314,13 @@ function pruneDeadEntries(project: string): RegistryEntry[] {
 	const entries = readAllRegistryEntries(project);
 	const live: RegistryEntry[] = [];
 	for (const entry of entries) {
+		// A corrupt/malformed registry file can yield a non-positive pid; passing
+		// that to process.kill signals the current process (undefined/null) or
+		// the whole process group (0), which would falsely mark a dead entry live.
+		if (typeof entry.pid !== "number" || !Number.isInteger(entry.pid) || entry.pid <= 0) {
+			removeRegistryEntry(project, entry.name);
+			continue;
+		}
 		try {
 			process.kill(entry.pid, 0);
 			live.push(entry);
@@ -461,9 +469,12 @@ function sendEnvelope(endpoint: string, envelope: Envelope | Pong | { type: stri
 	return new Promise((resolve, reject) => {
 		const sock = net.createConnection({ path: endpoint });
 		let settled = false;
+		const timer = setTimeout(() => fail(new Error("socket operation timeout")), SOCKET_OP_TIMEOUT_MS);
+		try { timer.unref?.(); } catch { /* ignore */ }
 		const fail = (err: Error) => {
 			if (settled) return;
 			settled = true;
+			clearTimeout(timer);
 			try { sock.destroy(); } catch { /* ignore */ }
 			reject(err);
 		};
@@ -476,6 +487,7 @@ function sendEnvelope(endpoint: string, envelope: Envelope | Pong | { type: stri
 				try { sock.end(); } catch { /* ignore */ }
 				if (settled) return;
 				settled = true;
+				clearTimeout(timer);
 				if (parsed && parsed.type === "nack") {
 					reject(new Error(parsed.error || "nack"));
 				} else {
@@ -571,6 +583,7 @@ export default function (pi: ExtensionAPI) {
 		model: string;
 		endpoint: string;
 		registryFile: string;
+		startedAt: string;
 	} | null = null;
 	const peerCards: Map<string, AgentCard & { staleCount: number }> = new Map();
 	const pendingReplies: Map<string, PendingReply> = new Map();
@@ -859,6 +872,7 @@ export default function (pi: ExtensionAPI) {
 			model,
 			endpoint,
 			registryFile,
+			startedAt: entry.started_at,
 		};
 		includeExplicit = false;
 		displayProject = project;
@@ -901,7 +915,7 @@ export default function (pi: ExtensionAPI) {
 					pid: process.pid,
 					endpoint: identity.endpoint,
 					cwd: identity.cwd,
-					started_at: nowIso(),
+					started_at: identity.startedAt,
 					explicit: identity.explicit,
 					version: 1,
 					context_used_pct: Math.round(ctx?.getContextUsage()?.percent ?? 0),
@@ -1443,12 +1457,14 @@ export default function (pi: ExtensionAPI) {
 				? params.timeout_ms
 				: TIMEOUT_MS;
 
+			let timedTimer: NodeJS.Timeout | undefined;
 			const timed = new Promise<{ error: string }>((resolve) => {
-				const t = setTimeout(() => resolve({ error: "timeout" }), timeoutMs);
-				try { (t as any).unref?.(); } catch { /* ignore */ }
+				timedTimer = setTimeout(() => resolve({ error: "timeout" }), timeoutMs);
+				try { timedTimer.unref?.(); } catch { /* ignore */ }
 			});
 
 			const winner = await Promise.race([entry.promise, timed]);
+			clearTimeout(timedTimer);
 			if ((winner as any).error) {
 				return {
 					content: [{ type: "text" as const, text: `coms_await: error — ${(winner as any).error}` }],
@@ -1484,7 +1500,7 @@ export default function (pi: ExtensionAPI) {
 		// Walk the session branch for the most recent assistant message text.
 		let lastAssistantText = "";
 		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.type === "message" && entry.message.role === "assistant") {
+			if (entry.type === "message" && entry.message && entry.message.role === "assistant") {
 				const m = entry.message as any;
 				if (typeof m.content === "string") {
 					lastAssistantText = m.content;

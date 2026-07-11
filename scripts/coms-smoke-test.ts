@@ -228,7 +228,9 @@ function pathSocketComs(): { registered: number; exchanged: number } {
 		detail: `registry confined to ${comsDir}`,
 	});
 
-	fs.rmSync(comsDir, { recursive: true, force: true });
+	// comsDir is a subdir of the mkdtempSync root — remove the root so the
+	// per-run temp dir doesn't leak on every smoke test run.
+	fs.rmSync(path.dirname(comsDir), { recursive: true, force: true });
 	return { registered: discovered.length, exchanged };
 }
 

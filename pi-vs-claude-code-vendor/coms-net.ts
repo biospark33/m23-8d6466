@@ -510,6 +510,9 @@ export default function (pi: ExtensionAPI) {
 		return {
 			feed(chunk: Uint8Array): void {
 				buf += decoder.decode(chunk, { stream: true });
+				// SSE line endings may be LF, CR, or CRLF per the WHATWG spec — normalize
+				// to LF so the \n\n frame boundary and per-line parsing below hold either way.
+				buf = buf.replace(/\r\n/g, "\n");
 				let idx;
 				while ((idx = buf.indexOf("\n\n")) >= 0) {
 					const frame = buf.slice(0, idx);
@@ -1429,12 +1432,14 @@ export default function (pi: ExtensionAPI) {
 				return { response: null, error: safeError(err) };
 			});
 
+			let timeoutTimer: NodeJS.Timeout | undefined;
 			const timeoutPromise = new Promise<{ error: string }>((resolve) => {
-				const t = setTimeout(() => resolve({ error: "timeout" }), timeoutMs);
-				try { (t as any).unref?.(); } catch { /* ignore */ }
+				timeoutTimer = setTimeout(() => resolve({ error: "timeout" }), timeoutMs);
+				try { timeoutTimer.unref?.(); } catch { /* ignore */ }
 			});
 
 			const winner = await Promise.race([localPromise, serverPromise, timeoutPromise]);
+			clearTimeout(timeoutTimer);
 			try { ac.abort(); } catch { /* ignore */ }
 
 			if ((winner as any).error) {
@@ -1472,7 +1477,7 @@ export default function (pi: ExtensionAPI) {
 		// Walk the session branch for the most recent assistant text.
 		let lastAssistantText = "";
 		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.type === "message" && entry.message.role === "assistant") {
+			if (entry.type === "message" && entry.message && entry.message.role === "assistant") {
 				const m = entry.message as any;
 				if (typeof m.content === "string") {
 					lastAssistantText = m.content;
