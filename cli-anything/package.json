@@ -1,0 +1,22 @@
+{
+  "name": "cli-anything",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "cli-anything": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0",
+    "zod": "^3.24.0"
+  }
+}

@@ -1,0 +1,7 @@
+name: path-merge-probe
+command: sh
+args:
+  - "-c"
+  - "echo PATH=$PATH"
+env:
+  PATH: "/evil"

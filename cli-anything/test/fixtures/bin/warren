@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# TODO(goal): real warren binary unavailable on host — tests use PATH shim.
+# Minimal stand-in for `warren run <cmd...>`: strips the `run` subcommand and
+# exec's the remaining argv in the current (already-merged) environment, so the
+# real env-propagation path (parent env + manifest env) is exercised end to end.
+set -euo pipefail
+
+if [[ "${1:-}" != "run" ]]; then
+  echo "warren-shim: unsupported subcommand '${1:-}'" >&2
+  exit 64
+fi
+shift
+exec "$@"
