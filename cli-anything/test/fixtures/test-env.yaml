@@ -1,0 +1,7 @@
+name: env-probe
+command: sh
+args:
+  - "-c"
+  - "echo QDS_PROBE=$QDS_PROBE; echo PATH=$PATH"
+env:
+  QDS_PROBE: "x7"

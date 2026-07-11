@@ -1,0 +1,3 @@
+command: sh
+env:
+  QDS_PROBE: "x7"
