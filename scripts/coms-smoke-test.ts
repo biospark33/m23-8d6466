@@ -46,7 +46,7 @@ const record = (c: Check): Check => {
 
 // ── pi presence + version pin (AC precondition) ─────────────────────────────
 function checkPiVersion(): string | null {
-	const r = spawnSync("pi", ["--version"], { encoding: "utf8" });
+	const r = spawnSync("pi", ["--version"], { encoding: "utf8", shell: process.platform === "win32" });
 	const version = (r.stdout ?? "").trim().split("\n")[0]?.trim() ?? "";
 	record({
 		name: "pi_version_pin",
@@ -61,6 +61,7 @@ function checkExtensionLoads(): number {
 	const r = spawnSync("pi", ["-e", COMS_EXT, "--list-models"], {
 		encoding: "utf8",
 		cwd: VENDOR_DIR,
+		shell: process.platform === "win32",
 	});
 	const modelCount = (r.stdout ?? "")
 		.split("\n")
@@ -86,7 +87,7 @@ function pathSubprocessRpc(): { registered: number; exchanged: number } {
 		const r = spawnSync(
 			"pi",
 			["--mode", "json", "-p", `You are ${cname}. Reply with exactly: ok`],
-			{ encoding: "utf8", cwd: VENDOR_DIR, timeout: 60_000 },
+			{ encoding: "utf8", cwd: VENDOR_DIR, timeout: 60_000, shell: process.platform === "win32" },
 		);
 		const lines = (r.stdout ?? "").split("\n").filter(Boolean);
 		const events: Array<{ type?: string }> = [];

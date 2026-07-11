@@ -261,13 +261,24 @@ function registryFilePath(project: string, name: string): string {
 	return path.join(projectAgentsDir(project), `${name}.json`);
 }
 
-function writeRegistryAtomic(entry: RegistryEntry, project: string): string {
+function writeRegistryAtomic(entry: RegistryEntry, project: string, opts?: { exclusive?: boolean }): string {
 	const dir = projectAgentsDir(project);
 	fs.mkdirSync(dir, { recursive: true });
 	const final = registryFilePath(project, entry.name);
-	const tmp = `${final}.tmp`;
+	const tmp = `${final}.${process.pid}.tmp`;
 	fs.writeFileSync(tmp, JSON.stringify(entry, null, 2));
-	fs.renameSync(tmp, final);
+	if (opts?.exclusive) {
+		// fs.linkSync is a single atomic syscall that fails with EEXIST if `final`
+		// already exists — closes the TOCTOU window a plain renameSync would leave
+		// between two agents racing to claim the same resolveUniqueName() result.
+		try {
+			fs.linkSync(tmp, final);
+		} finally {
+			try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
+		}
+	} else {
+		fs.renameSync(tmp, final);
+	}
 	return final;
 }
 
@@ -472,6 +483,11 @@ function readOneLine(socket: net.Socket): Promise<string> {
 				finish(new Error("line too large"));
 				return;
 			}
+			// A newline can only land in the chunk that just arrived — the previous
+			// call would already have finished otherwise — so only concat (and
+			// rescan from the start) once one is actually present, keeping this
+			// O(N) overall instead of O(N^2) for a line split across many chunks.
+			if (chunk.indexOf(0x0a) < 0) return;
 			const buf = Buffer.concat(chunks, total);
 			const nl = buf.indexOf(0x0a);
 			if (nl >= 0) {
@@ -612,6 +628,7 @@ export default function (pi: ExtensionAPI) {
 	let server: net.Server | null = null;
 	let pingTimer: NodeJS.Timeout | null = null;
 	let keepaliveTimer: NodeJS.Timeout | null = null;
+	let pinging = false;
 	let includeExplicit = false;
 	let displayProject: string | null = null;
 	let currentCtx: ExtensionContext | null = null;
@@ -774,6 +791,9 @@ export default function (pi: ExtensionAPI) {
 				nack(socket, "", "malformed envelope");
 				return;
 			}
+			// Same O(N) vs O(N^2) reasoning as readOneLine: only concat once the
+			// newline has actually arrived in the latest chunk.
+			if (chunk.indexOf(0x0a) < 0) return;
 			const buf = Buffer.concat(chunks, total);
 			const nl = buf.indexOf(0x0a);
 			if (nl < 0) return;
@@ -895,7 +915,7 @@ export default function (pi: ExtensionAPI) {
 		};
 		let registryFile: string;
 		try {
-			registryFile = writeRegistryAtomic(entry, project);
+			registryFile = writeRegistryAtomic(entry, project, { exclusive: true });
 		} catch (err) {
 			ctx.ui?.notify?.(`📡 coms: registry write failed — ${err instanceof Error ? err.message : String(err)}`, "error");
 			try { server?.close(); } catch { /* ignore */ }
@@ -938,7 +958,11 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// 7. Start ping + keepalive cycles.
-		pingTimer = setInterval(() => { refreshPool().catch(() => {}); }, PING_INTERVAL_MS);
+		pingTimer = setInterval(() => {
+			if (pinging) return;
+			pinging = true;
+			refreshPool().catch(() => {}).finally(() => { pinging = false; });
+		}, PING_INTERVAL_MS);
 		try { (pingTimer as any).unref?.(); } catch { /* ignore */ }
 		keepaliveTimer = setInterval(() => {
 			if (!identity) return;
@@ -1082,7 +1106,8 @@ export default function (pi: ExtensionAPI) {
 			const left = theme.fg("dim", "┏━") + theme.fg("border", " coms ");
 			const leftFill = theme.fg("dim", "━");
 			const nameLen = identity ? identity.name.length : 0;
-			const rightTagVisLen = identity ? nameLen + 4 : 0;
+			// rightTag renders " " + name + " ━" = nameLen + 3 visible cells.
+			const rightTagVisLen = identity ? nameLen + 3 : 0;
 			const remaining = safeWidth - 9 /* "┏━ coms ━" */ - rightTagVisLen - 1 /* "┓" */;
 			if (identity && remaining >= 1) {
 				const rightTag =
@@ -1585,8 +1610,13 @@ export default function (pi: ExtensionAPI) {
 		let payload: any = lastAssistantText;
 		let error: string | null = null;
 		if (inbound.response_schema && typeof inbound.response_schema === "object") {
+			// Models frequently wrap structured output in a ```json fence even when
+			// asked for raw JSON — unwrap one before parsing so that common case
+			// doesn't spuriously fail with "response not valid JSON".
+			const fenced = lastAssistantText.trim().match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i);
+			const jsonText = fenced ? fenced[1] : lastAssistantText;
 			try {
-				payload = JSON.parse(lastAssistantText);
+				payload = JSON.parse(jsonText);
 			} catch {
 				error = "response not valid JSON";
 				payload = null;
@@ -1665,6 +1695,12 @@ export default function (pi: ExtensionAPI) {
 		process.off("SIGTERM", onSigTerm);
 		if (pingTimer) { try { clearInterval(pingTimer); } catch { /* ignore */ } pingTimer = null; }
 		if (keepaliveTimer) { try { clearInterval(keepaliveTimer); } catch { /* ignore */ } keepaliveTimer = null; }
+		for (const entry of pendingReplies.values()) {
+			if (entry.timer) {
+				try { clearTimeout(entry.timer); } catch { /* ignore */ }
+			}
+		}
+		pendingReplies.clear();
 		if (server) {
 			try { server.close(); } catch { /* ignore */ }
 			server = null;

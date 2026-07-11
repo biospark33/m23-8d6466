@@ -45,6 +45,7 @@ const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 10_000;
 const MESSAGE_TIMEOUT_MS = Number(process.env.PI_COMS_NET_MESSAGE_TTL_MS) || 1_800_000;
 const HTTP_TIMEOUT_MS = 10_000;
+const SSE_BUF_CAP_BYTES = 16 * 1024 * 1024;
 const SHUTDOWN_DELETE_TIMEOUT_MS = 2_000;
 
 const SERVER_URL_ENV = process.env.PI_COMS_NET_SERVER_URL;
@@ -318,14 +319,18 @@ function readServerSecret(project: string): ServerSecretJson | null {
 	const p = path.join(projectDir(project), "server.secret.json");
 	try {
 		if (!fs.existsSync(p)) return null;
-		// Only trust the token if the file is mode 0600. Windows doesn't map
-		// st.mode onto Unix permission bits (it's always ~0o666/0o444 based on
-		// the read-only attribute), so this check is meaningless there — skip it
-		// and rely on the OS's own ACL-based file protection instead.
+		// Only trust the token if group/other have no access to the file.
+		// Windows doesn't map st.mode onto Unix permission bits (it's always
+		// ~0o666/0o444 based on the read-only attribute), so this check is
+		// meaningless there — skip it and rely on the OS's own ACL-based file
+		// protection instead.
 		const st = fs.statSync(p);
 		if (process.platform !== "win32") {
 			const mode = st.mode & 0o777;
-			if (mode !== 0o600) return null;
+			// Reject if group or other has any access; owner-only read (0o400) or
+			// read-write (0o600) are both fine — 0o400 is the more locked-down
+			// choice for a secret file, not a reason to refuse it.
+			if ((mode & 0o077) !== 0) return null;
 		}
 		const raw = fs.readFileSync(p, "utf-8");
 		const parsed = JSON.parse(raw) as ServerSecretJson;
@@ -361,8 +366,10 @@ function normalizeServerUrlCandidate(raw: string): string | null {
 
 function resolveServerUrl(project: string, cliFlag: string | undefined): string | null {
 	if (cliFlag && cliFlag.length > 0) {
-		const v = normalizeServerUrlCandidate(cliFlag);
-		if (v) return v;
+		// An explicitly-provided --server-url is the user's intent; if it's
+		// invalid/insecure, fail here instead of silently falling through to
+		// the env var or project server.json (which could be a different server).
+		return normalizeServerUrlCandidate(cliFlag);
 	}
 	if (SERVER_URL_ENV && SERVER_URL_ENV.length > 0) {
 		const v = normalizeServerUrlCandidate(SERVER_URL_ENV);
@@ -576,6 +583,11 @@ export default function (pi: ExtensionAPI) {
 			// across a payload stays O(N) instead of the O(N^2) a whole-buffer
 			// regex replace/rescan would cost as buf grows across chunks.
 			feed(chunk: Uint8Array): void {
+				// Bound the unconsumed tail so a server that streams data with no
+				// newline can't grow buf without limit and OOM the process.
+				if (buf.length + chunk.length > SSE_BUF_CAP_BYTES) {
+					throw new Error("coms-net: SSE buffer exceeded cap — dropping connection");
+				}
 				buf += decoder.decode(chunk, { stream: true });
 				let nl;
 				while ((nl = buf.indexOf("\n")) >= 0) {
@@ -836,6 +848,15 @@ export default function (pi: ExtensionAPI) {
 			clearTimeout(handshakeTimer);
 			if (!resp.ok || !resp.body) {
 				audit("sse_connect_http_error", { status: resp.status });
+				// 401/403/404 mean the token or URL is wrong — retrying with the
+				// same credentials/path will never succeed, so stop instead of
+				// spamming the server with an unbounded reconnect loop.
+				if (resp.status === 401 || resp.status === 403 || resp.status === 404) {
+					if (currentCtx?.hasUI) {
+						try { currentCtx.ui.notify(`📡 coms-net: connection rejected (HTTP ${resp.status}) — not retrying`, "error"); } catch { /* ignore */ }
+					}
+					return;
+				}
 				scheduleReconnect();
 				return;
 			}
@@ -1018,7 +1039,7 @@ export default function (pi: ExtensionAPI) {
 		if (!authToken) {
 			ctx.ui?.notify?.(
 				`📡 coms-net: no auth token for project "${project}". Set PI_COMS_NET_AUTH_TOKEN or pass --auth-token. ` +
-				`If running a local server, ensure ~/.pi/coms-net/projects/${project}/server.secret.json exists with mode 0600.`,
+				`If running a local server, ensure ~/.pi/coms-net/projects/${project}/server.secret.json exists with mode 0600 (or 0400).`,
 				"error",
 			);
 			audit("boot_failed", { reason: "no_auth_token", project });
@@ -1144,7 +1165,8 @@ export default function (pi: ExtensionAPI) {
 			const left = theme.fg("dim", "┏━") + theme.fg("border", " coms-net ");
 			const leftFill = theme.fg("dim", "━");
 			const nameLen = identity ? identity.name.length : 0;
-			const rightTagVisLen = identity ? nameLen + 4 : 0;
+			// rightTag renders " " + name + " ━" = nameLen + 3 visible cells.
+			const rightTagVisLen = identity ? nameLen + 3 : 0;
 			// "┏━ coms-net ━" prefix has 13 visible cells.
 			const remaining = safeWidth - 13 - rightTagVisLen - 1; // -1 for "┓"
 			if (identity && remaining >= 1) {
@@ -1527,7 +1549,12 @@ export default function (pi: ExtensionAPI) {
 				if (err instanceof HttpError && err.status === 404) {
 					return { response: null, error: "unknown msg_id" };
 				}
-				return { response: null, error: safeError(err) };
+				// A transient network error on the long-poll (timeout, connection
+				// reset, etc.) doesn't mean the message failed — it means this one
+				// polling channel failed. Don't let it win Promise.race over a
+				// healthy local SSE connection; hang here and let localPromise or
+				// timeoutPromise decide instead.
+				return new Promise<{ response?: any; error?: string | null }>(() => {});
 			});
 
 			let timeoutTimer: NodeJS.Timeout | undefined;
@@ -1600,8 +1627,13 @@ export default function (pi: ExtensionAPI) {
 		let payload: any = lastAssistantText;
 		let error: string | null = null;
 		if (inbound.response_schema && typeof inbound.response_schema === "object") {
+			// Models frequently wrap structured output in a ```json fence even when
+			// asked for raw JSON — unwrap one before parsing so that common case
+			// doesn't spuriously fail with "response not valid JSON".
+			const fenced = lastAssistantText.trim().match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i);
+			const jsonText = fenced ? fenced[1] : lastAssistantText;
 			try {
-				payload = JSON.parse(lastAssistantText);
+				payload = JSON.parse(jsonText);
 			} catch {
 				error = "response not valid JSON";
 				payload = null;

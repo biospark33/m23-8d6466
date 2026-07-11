@@ -122,7 +122,15 @@ function applyExtensionTitle(ctx: ExtensionContext): void {
 	if (!ctx.hasUI) return;
 	const name = primaryExtensionName();
 	if (!name) return;
-	setTimeout(() => ctx.ui.setTitle(`π - ${name}`), 150);
+	setTimeout(() => {
+		// The session can end before this fires (e.g. a fast CLI run or test) —
+		// the UI context may already be torn down by then.
+		try {
+			ctx.ui.setTitle(`π - ${name}`);
+		} catch {
+			/* ignore */
+		}
+	}, 150);
 }
 
 // ── Combined default ───────────────────────────────────────────────────────
