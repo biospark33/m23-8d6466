@@ -110,8 +110,12 @@ function isCommandAllowed(command: string, allowlist: string[]): boolean {
   return allowlist.some((entry) => basename(entry) === base);
 }
 
-// Node flags that enable inline code / stdin execution.
-const NODE_INLINE_FLAGS = new Set(["-e", "--eval", "-p", "--print", "--input-type"]);
+// Long-form node flags that enable inline code execution.
+const NODE_INLINE_LONG_FLAGS = new Set(["--eval", "--print", "--input-type"]);
+// Single-letter short flags that enable inline code execution. Node bundles
+// single-dash short flags (`-pe` == `-p -e`), so these are matched per-letter
+// against a decomposed cluster — never by exact token match.
+const NODE_INLINE_SHORT_LETTERS = new Set(["e", "p"]);
 
 function validateNodeArgs(args: string[]): void {
   for (let i = 0; i < args.length; i++) {
@@ -119,21 +123,51 @@ function validateNodeArgs(args: string[]): void {
     if (arg === "-") {
       throw new CommandValidationError("node stdin mode ('-') is not permitted");
     }
-    // Handle `--flag=value` form for eval/print.
+    // Handle `--flag=value` form.
     const flag = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
-    if (NODE_INLINE_FLAGS.has(flag)) {
-      throw new CommandValidationError(`node flag '${flag}' enables inline code execution and is not permitted`);
+
+    // Long flags (`--foo`): exact match against the inline set.
+    if (flag.startsWith("--")) {
+      if (NODE_INLINE_LONG_FLAGS.has(flag)) {
+        throw new CommandValidationError(`node flag '${flag}' enables inline code execution and is not permitted`);
+      }
+      if (flag === "--require") {
+        const target = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[i + 1];
+        if (target === undefined) {
+          throw new CommandValidationError("--require requires a module path");
+        }
+        if (!target.startsWith("/")) {
+          throw new CommandValidationError("--require with a non-absolute path is not permitted");
+        }
+        if (!arg.includes("=")) i++; // consumed the next token
+      }
+      continue;
     }
-    if (flag === "--require" || flag === "-r") {
-      // Require target may be the same token (--require=x) or the next token.
-      const target = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[i + 1];
-      if (target === undefined) {
-        throw new CommandValidationError("--require/-r requires a module path");
+
+    // Single-dash short-flag CLUSTER (`-p`, `-pe`, `-rp`, ...): Node bundles
+    // single-dash short flags, so `node -pe "<code>"` runs `-p -e` and executes
+    // arbitrary inline JS. Decompose the cluster into its letters and reject if
+    // ANY letter enables inline code (`e`/`p`); enforce the absolute-path rule
+    // when the cluster contains `r` (require). Exact-token matching is unsafe here.
+    if (flag.startsWith("-") && flag.length > 1) {
+      const letters = flag.slice(1).split("");
+      for (const ch of letters) {
+        if (NODE_INLINE_SHORT_LETTERS.has(ch)) {
+          throw new CommandValidationError(
+            `node short flag '-${ch}' (in '${arg}') enables inline code execution and is not permitted`,
+          );
+        }
       }
-      if (!target.startsWith("/")) {
-        throw new CommandValidationError("--require/-r with a non-absolute path is not permitted");
+      if (letters.includes("r")) {
+        const target = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[i + 1];
+        if (target === undefined) {
+          throw new CommandValidationError("-r requires a module path");
+        }
+        if (!target.startsWith("/")) {
+          throw new CommandValidationError("-r with a non-absolute path is not permitted");
+        }
+        if (!arg.includes("=")) i++; // consumed the next token
       }
-      if (!arg.includes("=")) i++; // consumed the next token
     }
   }
 }

@@ -65,8 +65,23 @@ describe("INV-SC2 command allowlist", () => {
     [["-"]],
     [["--require", "relative-path"]],
     [["-r", "relative-path"]],
+    // Bundled single-dash short-flag clusters — Node expands `-pe` to `-p -e`,
+    // so exact-token matching would let these through (INV-SC2 RCE bypass).
+    [["-pe", "process.exit(1)"]],
+    [["-ep", "process.exit(1)"]],
+    [["-rp", "process.exit(1)"]],
+    [["-er", "process.exit(1)"]],
+    [["-re", "process.exit(1)"]],
+    [["-rp", "relative-path"]],
+    [["-r", "relative-path"]],
   ])("node args %j rejected", (args) => {
     expect(() => validateCommand({ command: "node", args, env: {} })).toThrow(CommandValidationError);
+  });
+
+  test("node bundled short-flag cluster with require + absolute path still enforced", () => {
+    // `-r` bundled cluster must still require an absolute module path.
+    expect(() => validateCommand({ command: "node", args: ["-r", "relative"], env: {} })).toThrow(CommandValidationError);
+    expect(() => validateCommand({ command: "node", args: ["-r", "/abs/mod.js", "server.js"], env: {} })).not.toThrow();
   });
 
   test("node --require with absolute path accepted", () => {
