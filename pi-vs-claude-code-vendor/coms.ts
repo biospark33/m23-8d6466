@@ -752,6 +752,12 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function connHandler(socket: net.Socket): void {
+		// Idle clients that never send a complete framed line would otherwise
+		// hold the socket (and its fd) open forever — bound it.
+		socket.setTimeout(SOCKET_OP_TIMEOUT_MS);
+		socket.once("timeout", () => {
+			try { socket.destroy(); } catch { /* ignore */ }
+		});
 		// Buffer-accumulate (not per-chunk string decode) so a multi-byte UTF-8
 		// sequence split across TCP packet boundaries doesn't get corrupted by
 		// premature decoding; only the complete framed line is decoded.
@@ -1501,6 +1507,15 @@ export default function (pi: ExtensionAPI) {
 			const timeoutMs = typeof params.timeout_ms === "number" && params.timeout_ms > 0
 				? params.timeout_ms
 				: TIMEOUT_MS;
+
+			// coms_send already armed a background timer at the default TIMEOUT_MS;
+			// left running, it can resolve entry.promise with a spurious timeout
+			// before (or after) this call's own timeoutMs elapses. This call is
+			// now the sole owner of the deadline.
+			if (entry.timer) {
+				clearTimeout(entry.timer);
+				entry.timer = null;
+			}
 
 			let timedTimer: NodeJS.Timeout | undefined;
 			const timed = new Promise<{ error: string }>((resolve) => {

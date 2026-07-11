@@ -286,7 +286,18 @@ function readFrontmatterFromArgv(argv: string[]): { name?: string; description?:
 
 // ━━ Registry / server-discovery I/O ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+// Rejects path traversal / separator injection in the project name, which
+// can originate from untrusted input (--project CLI flag or PI_COMS_PROJECT
+// env var).
+function isSafePathComponent(s: unknown): s is string {
+	return typeof s === "string" && s.length > 0 && s !== "." && s !== ".." &&
+		!s.includes("/") && !s.includes("\\");
+}
+
 function projectDir(project: string): string {
+	if (!isSafePathComponent(project)) {
+		throw new Error(`coms-net: invalid project name "${project}"`);
+	}
 	return path.join(COMS_NET_DIR, "projects", project);
 }
 
@@ -307,10 +318,15 @@ function readServerSecret(project: string): ServerSecretJson | null {
 	const p = path.join(projectDir(project), "server.secret.json");
 	try {
 		if (!fs.existsSync(p)) return null;
-		// Only trust the token if the file is mode 0600.
+		// Only trust the token if the file is mode 0600. Windows doesn't map
+		// st.mode onto Unix permission bits (it's always ~0o666/0o444 based on
+		// the read-only attribute), so this check is meaningless there — skip it
+		// and rely on the OS's own ACL-based file protection instead.
 		const st = fs.statSync(p);
-		const mode = st.mode & 0o777;
-		if (mode !== 0o600) return null;
+		if (process.platform !== "win32") {
+			const mode = st.mode & 0o777;
+			if (mode !== 0o600) return null;
+		}
 		const raw = fs.readFileSync(p, "utf-8");
 		const parsed = JSON.parse(raw) as ServerSecretJson;
 		if (!parsed || typeof parsed.token !== "string" || parsed.token.length === 0) return null;
@@ -945,6 +961,10 @@ export default function (pi: ExtensionAPI) {
 		const flags = readCliFlags(pi);
 		const fm = readFrontmatterFromArgv(process.argv);
 		const project = flags.project || PROJECT_ENV || "default";
+		if (!isSafePathComponent(project)) {
+			ctx.ui?.notify?.(`📡 coms-net: invalid --project value "${project}"`, "error");
+			return;
+		}
 		const explicit = flags.explicit === true;
 		const session_id = ulid();
 
