@@ -1,0 +1,7 @@
+# GitNexus defaults ignore any dir named `tests`, `__tests__`, or `fixtures`
+# (safety net so real repos don't index test scaffolding). This fixture dir
+# lives under both `tests/` and `fixtures/`, so negate those defaults here so
+# `gitnexus analyze` on this directory indexes swarmclaw.ts's symbols (#771).
+!tests/
+!__tests__/
+!fixtures/
