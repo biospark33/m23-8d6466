@@ -152,15 +152,16 @@ function ulid(): string {
 	return (timeStr + randStr).slice(0, 26);
 }
 
+function isValidHex(hex: string): boolean {
+	return /^#[0-9a-fA-F]{6}$/.test(hex);
+}
+
 function hexFg(hex: string, s: string): string {
+	if (!isValidHex(hex)) return s;
 	const r = parseInt(hex.slice(1, 3), 16);
 	const g = parseInt(hex.slice(3, 5), 16);
 	const b = parseInt(hex.slice(5, 7), 16);
 	return `\x1b[38;2;${r};${g};${b}m${s}\x1b[39m`;
-}
-
-function isValidHex(hex: string): boolean {
-	return /^#[0-9a-fA-F]{6}$/.test(hex);
 }
 
 function fallbackColor(sessionId: string): string {
@@ -633,12 +634,25 @@ export default function (pi: ExtensionAPI) {
 	let displayProject: string | null = null;
 	let currentCtx: ExtensionContext | null = null;
 
-	// Oldest unfulfilled inbound (FIFO) — the one whose turn is actually
-	// running. Derived live from inboundQueue instead of a separate global so
-	// there's no snapshot to go stale when a new inbound arrives mid-turn.
-	function activeInbound(): InboundContext | null {
-		for (const i of inboundQueue.values()) {
-			if (!i.fulfilled) return i;
+	// The inbound whose prompt is anchored in this session's own branch —
+	// not just "oldest pending in the global queue", which would misattribute
+	// hops/replies to an unrelated inbound sitting in inboundQueue while this
+	// session runs an unrelated turn. Walking the branch (each inbound prompt
+	// is injected with details.msg_id) ties the lookup to what's actually
+	// driving the current turn.
+	function activeInbound(ctx?: ExtensionContext | null): InboundContext | null {
+		const c = ctx ?? currentCtx;
+		if (!c) return null;
+		const branch = c.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type === "message" && entry.message) {
+				const msgId = (entry.message as any).details?.msg_id;
+				if (msgId) {
+					const inbound = inboundQueue.get(msgId);
+					if (inbound && !inbound.fulfilled) return inbound;
+				}
+			}
 		}
 		return null;
 	}
@@ -1605,12 +1619,15 @@ export default function (pi: ExtensionAPI) {
 	// ━━ agent_end: capture turn output and dispatch response back ━━━━━━━━
 
 	pi.on("agent_end", async (_event, ctx) => {
-		const inbound = activeInbound();
+		const inbound = activeInbound(ctx);
 		if (!inbound || !identity) return;
 
 		// Walk the session branch for the most recent assistant message text
 		// *after* the inbound prompt entry, so a stale reply from an earlier
 		// turn is never resent if this turn produced no new assistant message.
+		// Only overwrite on non-empty text — a later assistant message that's
+		// tool-calls-only (no text block) must not blank out a real reply from
+		// an earlier message in the same turn.
 		let lastAssistantText = "";
 		let foundInbound = false;
 		for (const entry of ctx.sessionManager.getBranch()) {
@@ -1622,13 +1639,17 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (entry.type === "message" && entry.message && entry.message.role === "assistant") {
 				const m = entry.message as any;
+				let msgText = "";
 				if (typeof m.content === "string") {
-					lastAssistantText = m.content;
+					msgText = m.content;
 				} else if (Array.isArray(m.content)) {
-					lastAssistantText = m.content
+					msgText = m.content
 						.filter((b: any) => b && b.type === "text")
 						.map((b: any) => b.text)
 						.join("\n");
+				}
+				if (msgText.trim()) {
+					lastAssistantText = msgText;
 				}
 			}
 		}
