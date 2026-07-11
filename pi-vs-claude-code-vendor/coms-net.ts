@@ -487,7 +487,6 @@ export default function (pi: ExtensionAPI) {
 	let reconnectAttempts = 0;
 	let notifiedReconnectCap = false;
 	let currentCtx: ExtensionContext | null = null;
-	let currentInbound: InboundContext | null = null;
 	let includeExplicit = false;
 	let displayProject: string | null = null;
 	let lastWidgetSnapshot = "";
@@ -508,17 +507,21 @@ export default function (pi: ExtensionAPI) {
 			headers["Content-Type"] = "application/json";
 			init.body = JSON.stringify(body);
 		}
-		// Timeout via AbortController unless caller passed their own signal.
+		// Timeout via AbortController, chained to the caller's signal (if any) so
+		// neither the timeout nor the caller's own abort gets silently dropped.
 		let timer: any = null;
 		const ac = new AbortController();
 		const timeoutMs = opts?.timeoutMs ?? HTTP_TIMEOUT_MS;
 		if (opts?.signal) {
-			init.signal = opts.signal;
-		} else {
-			init.signal = ac.signal;
-			timer = setTimeout(() => { try { ac.abort(); } catch { /* ignore */ } }, timeoutMs);
-			try { (timer as any).unref?.(); } catch { /* ignore */ }
+			if (opts.signal.aborted) {
+				ac.abort();
+			} else {
+				opts.signal.addEventListener("abort", () => ac.abort(), { once: true });
+			}
 		}
+		init.signal = ac.signal;
+		timer = setTimeout(() => { try { ac.abort(); } catch { /* ignore */ } }, timeoutMs);
+		try { (timer as any).unref?.(); } catch { /* ignore */ }
 		let resp: Response;
 		let text: string;
 		try {
@@ -728,6 +731,16 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	// Oldest unfulfilled inbound (FIFO) — the one whose turn is actually
+	// running. Derived live from inboundQueue instead of a separate global so
+	// there's no snapshot to go stale when a new inbound arrives mid-turn.
+	function activeInbound(): InboundContext | null {
+		for (const i of inboundQueue.values()) {
+			if (!i.fulfilled) return i;
+		}
+		return null;
+	}
+
 	function handleInboundPrompt(data: any): void {
 		const msg_id: string | undefined = data?.msg_id;
 		if (!msg_id || typeof msg_id !== "string") return;
@@ -749,7 +762,6 @@ export default function (pi: ExtensionAPI) {
 			fulfilled: false,
 		};
 		inboundQueue.set(msg_id, inbound);
-		currentInbound = inbound;
 
 		try {
 			pi.sendMessage(
@@ -782,7 +794,6 @@ export default function (pi: ExtensionAPI) {
 			} catch { /* best-effort */ }
 		} catch (err) {
 			inboundQueue.delete(msg_id);
-			currentInbound = null;
 			audit("prompt_in_failed", { msg_id, reason: safeError(err) });
 		}
 	}
@@ -1328,7 +1339,8 @@ export default function (pi: ExtensionAPI) {
 		async execute(_callId, params) {
 			if (!identity) throw new Error("coms-net not initialised");
 
-			const hops = currentInbound ? currentInbound.hops + 1 : 0;
+			const active = activeInbound();
+			const hops = active ? active.hops + 1 : 0;
 			if (hops >= MAX_HOPS) {
 				throw new Error(`coms-net: hop limit reached (${hops} >= ${MAX_HOPS})`);
 			}
@@ -1596,7 +1608,7 @@ export default function (pi: ExtensionAPI) {
 	// ━━ agent_end: capture turn output and submit response ━━━━━━━━━━━━━━━━
 
 	pi.on("agent_end", async (_event, ctx) => {
-		const inbound = [...inboundQueue.values()].reverse().find((i) => !i.fulfilled);
+		const inbound = activeInbound();
 		if (!inbound || !identity) return;
 
 		// Walk the session branch for the most recent assistant text *after* the
@@ -1663,9 +1675,6 @@ export default function (pi: ExtensionAPI) {
 
 		inbound.fulfilled = true;
 		inboundQueue.delete(inbound.msg_id);
-		if (currentInbound && currentInbound.msg_id === inbound.msg_id) {
-			currentInbound = null;
-		}
 	});
 
 	// ━━ /coms-net slash command ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

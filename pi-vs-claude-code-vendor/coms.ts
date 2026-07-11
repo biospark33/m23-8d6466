@@ -632,7 +632,16 @@ export default function (pi: ExtensionAPI) {
 	let includeExplicit = false;
 	let displayProject: string | null = null;
 	let currentCtx: ExtensionContext | null = null;
-	let currentInbound: InboundContext | null = null;
+
+	// Oldest unfulfilled inbound (FIFO) — the one whose turn is actually
+	// running. Derived live from inboundQueue instead of a separate global so
+	// there's no snapshot to go stale when a new inbound arrives mid-turn.
+	function activeInbound(): InboundContext | null {
+		for (const i of inboundQueue.values()) {
+			if (!i.fulfilled) return i;
+		}
+		return null;
+	}
 
 	// Phase A stub handlers — each just acks valid envelopes. Phase B replaces these.
 	function ackOk(socket: net.Socket, msg_id: string): void {
@@ -671,11 +680,7 @@ export default function (pi: ExtensionAPI) {
 		};
 		inboundQueue.set(env.msg_id, inbound);
 
-		// 3. Track the current inbound so that any coms_send issued during the
-		//    resulting LLM turn inherits the right hop count.
-		currentInbound = inbound;
-
-		// 4. Inject as a follow-up message into the receiver's next turn.
+		// 3. Inject as a follow-up message into the receiver's next turn.
 		try {
 			pi.sendMessage(
 				{
@@ -693,7 +698,6 @@ export default function (pi: ExtensionAPI) {
 		} catch (err) {
 			// If sendMessage fails, drop the inbound and nack.
 			inboundQueue.delete(env.msg_id);
-			currentInbound = null;
 			nack(socket, env.msg_id, "internal error");
 			return;
 		}
@@ -1396,7 +1400,8 @@ export default function (pi: ExtensionAPI) {
 			if (!target) {
 				throw new Error(`coms: no live agent matching "${params.target}"`);
 			}
-			const hops = currentInbound ? currentInbound.hops + 1 : 0;
+			const active = activeInbound();
+			const hops = active ? active.hops + 1 : 0;
 			if (hops >= MAX_HOPS) {
 				throw new Error(`coms: hop limit reached (${hops} >= ${MAX_HOPS})`);
 			}
@@ -1600,7 +1605,7 @@ export default function (pi: ExtensionAPI) {
 	// ━━ agent_end: capture turn output and dispatch response back ━━━━━━━━
 
 	pi.on("agent_end", async (_event, ctx) => {
-		const inbound = [...inboundQueue.values()].reverse().find((i) => !i.fulfilled);
+		const inbound = activeInbound();
 		if (!inbound || !identity) return;
 
 		// Walk the session branch for the most recent assistant message text
@@ -1680,9 +1685,6 @@ export default function (pi: ExtensionAPI) {
 
 		inbound.fulfilled = true;
 		inboundQueue.delete(inbound.msg_id);
-		if (currentInbound && currentInbound.msg_id === inbound.msg_id) {
-			currentInbound = null;
-		}
 	});
 
 	// ━━ /coms slash command ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
