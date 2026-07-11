@@ -169,10 +169,10 @@ function fallbackColor(sessionId: string): string {
 }
 
 function parseFrontmatter(raw: string): { name?: string; description?: string; color?: string; body: string } {
-	const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+	const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
 	if (!match) return { body: raw };
 	const frontmatter: Record<string, string> = {};
-	for (const line of match[1].split("\n")) {
+	for (const line of match[1].split(/\r?\n/)) {
 		const idx = line.indexOf(":");
 		if (idx > 0) {
 			const key = line.slice(0, idx).trim();
@@ -239,11 +239,25 @@ function readCliFlags(pi: ExtensionAPI): CliFlags {
 
 // ━━ Registry I/O ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+// Rejects path traversal / separator injection in project & agent names, both
+// of which can originate from untrusted input (--project CLI flag, agent
+// frontmatter, or another agent's coms_list tool call).
+function isSafePathComponent(s: unknown): s is string {
+	return typeof s === "string" && s.length > 0 && s !== "." && s !== ".." &&
+		!s.includes("/") && !s.includes("\\");
+}
+
 function projectAgentsDir(project: string): string {
+	if (!isSafePathComponent(project)) {
+		throw new Error(`coms: invalid project name "${project}"`);
+	}
 	return path.join(COMS_DIR, "projects", project, "agents");
 }
 
 function registryFilePath(project: string, name: string): string {
+	if (!isSafePathComponent(name)) {
+		throw new Error(`coms: invalid agent name "${name}"`);
+	}
 	return path.join(projectAgentsDir(project), `${name}.json`);
 }
 
@@ -272,7 +286,11 @@ function readAllRegistryEntries(project: string): RegistryEntry[] {
 		try {
 			const raw = fs.readFileSync(path.join(dir, f), "utf-8");
 			const parsed = JSON.parse(raw) as RegistryEntry;
-			if (parsed && typeof parsed.session_id === "string") {
+			// A corrupt/malicious registry file could carry a `name` containing
+			// path separators or "..". Reject it here so no downstream consumer
+			// (pruneDeadEntries/removeRegistryEntry, etc.) ever derives a path
+			// from an unsafe stored name.
+			if (parsed && typeof parsed.session_id === "string" && isSafePathComponent(parsed.name)) {
 				out.push(parsed);
 			}
 		} catch {
@@ -432,36 +450,39 @@ async function bindEndpoint(
 
 function readOneLine(socket: net.Socket): Promise<string> {
 	return new Promise((resolve, reject) => {
-		let buf = "";
+		// Buffer-accumulate (not per-chunk string decode) so a multi-byte UTF-8
+		// sequence split across TCP packet boundaries doesn't get corrupted by
+		// premature decoding; only the complete framed line is decoded.
+		const chunks: Buffer[] = [];
+		let total = 0;
 		let settled = false;
+		const finish = (err: Error | null, line?: string) => {
+			if (settled) return;
+			settled = true;
+			socket.removeListener("data", onData);
+			socket.removeListener("error", onError);
+			socket.removeListener("close", onClose);
+			if (err) reject(err);
+			else resolve(line as string);
+		};
 		const onData = (chunk: Buffer) => {
-			buf += chunk.toString("utf-8");
-			if (buf.length > LINE_CAP_BYTES) {
-				if (settled) return;
-				settled = true;
-				socket.removeListener("data", onData);
-				reject(new Error("line too large"));
+			chunks.push(chunk);
+			total += chunk.length;
+			if (total > LINE_CAP_BYTES) {
+				finish(new Error("line too large"));
 				return;
 			}
-			const nl = buf.indexOf("\n");
+			const buf = Buffer.concat(chunks, total);
+			const nl = buf.indexOf(0x0a);
 			if (nl >= 0) {
-				if (settled) return;
-				settled = true;
-				socket.removeListener("data", onData);
-				resolve(buf.slice(0, nl));
+				finish(null, buf.slice(0, nl).toString("utf-8"));
 			}
 		};
+		const onError = (err: Error) => finish(err);
+		const onClose = () => finish(new Error("connection closed before line received"));
 		socket.on("data", onData);
-		socket.once("error", (err) => {
-			if (settled) return;
-			settled = true;
-			reject(err);
-		});
-		socket.once("close", () => {
-			if (settled) return;
-			settled = true;
-			reject(new Error("connection closed before line received"));
-		});
+		socket.once("error", onError);
+		socket.once("close", onClose);
 	});
 }
 
@@ -731,22 +752,28 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function connHandler(socket: net.Socket): void {
-		let buf = "";
+		// Buffer-accumulate (not per-chunk string decode) so a multi-byte UTF-8
+		// sequence split across TCP packet boundaries doesn't get corrupted by
+		// premature decoding; only the complete framed line is decoded.
+		const chunks: Buffer[] = [];
+		let total = 0;
 		let handled = false;
 		const onData = (chunk: Buffer) => {
 			if (handled) return;
-			buf += chunk.toString("utf-8");
-			if (buf.length > LINE_CAP_BYTES) {
+			chunks.push(chunk);
+			total += chunk.length;
+			if (total > LINE_CAP_BYTES) {
 				handled = true;
 				socket.removeListener("data", onData);
 				nack(socket, "", "malformed envelope");
 				return;
 			}
-			const nl = buf.indexOf("\n");
+			const buf = Buffer.concat(chunks, total);
+			const nl = buf.indexOf(0x0a);
 			if (nl < 0) return;
 			handled = true;
 			socket.removeListener("data", onData);
-			const line = buf.slice(0, nl);
+			const line = buf.slice(0, nl).toString("utf-8");
 			let parsed: any;
 			try {
 				parsed = JSON.parse(line);
@@ -789,11 +816,19 @@ export default function (pi: ExtensionAPI) {
 		const flags = readCliFlags(pi);
 		const fm = readFrontmatterFromArgv(process.argv);
 		const project = flags.project || "default";
+		if (!isSafePathComponent(project)) {
+			ctx.ui?.notify?.(`📡 coms: invalid --project value "${project}"`, "error");
+			return;
+		}
 		const explicit = flags.explicit === true;
 		const session_id = ulid();
 
 		const defaultName = `agent-${session_id.slice(-6)}`;
 		const desiredName = flags.name || fm.name || defaultName;
+		if (!isSafePathComponent(desiredName)) {
+			ctx.ui?.notify?.(`📡 coms: invalid agent name "${desiredName}"`, "error");
+			return;
+		}
 		const name = resolveUniqueName(project, desiredName);
 		if (name !== desiredName) {
 			try {
@@ -820,7 +855,7 @@ export default function (pi: ExtensionAPI) {
 
 		// 2. Ensure storage dirs exist.
 		try {
-			fs.mkdirSync(path.join(COMS_DIR, "projects", project, "agents"), { recursive: true });
+			fs.mkdirSync(projectAgentsDir(project), { recursive: true });
 			if (process.platform !== "win32") {
 				fs.mkdirSync(path.join(COMS_DIR, "sockets"), { recursive: true });
 				try { fs.chmodSync(COMS_DIR, 0o700); } catch { /* best-effort */ }
@@ -1607,6 +1642,8 @@ export default function (pi: ExtensionAPI) {
 	async function cleanShutdown(): Promise<void> {
 		if (shuttingDown) return;
 		shuttingDown = true;
+		process.off("SIGINT", onSigInt);
+		process.off("SIGTERM", onSigTerm);
 		if (pingTimer) { try { clearInterval(pingTimer); } catch { /* ignore */ } pingTimer = null; }
 		if (keepaliveTimer) { try { clearInterval(keepaliveTimer); } catch { /* ignore */ } keepaliveTimer = null; }
 		if (server) {
@@ -1628,6 +1665,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("session_shutdown", async () => { await cleanShutdown(); });
-	process.on("SIGINT", () => { void cleanShutdown(); });
-	process.on("SIGTERM", () => { void cleanShutdown(); });
+	const onSigInt = () => { void cleanShutdown(); };
+	const onSigTerm = () => { void cleanShutdown(); };
+	process.on("SIGINT", onSigInt);
+	process.on("SIGTERM", onSigTerm);
 }

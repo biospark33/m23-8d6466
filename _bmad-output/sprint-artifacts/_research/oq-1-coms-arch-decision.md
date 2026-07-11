@@ -74,9 +74,10 @@ promoted when true peer-to-peer messaging between long-lived agents is required.
 - **Both paths are real and verified where auth permits.** `coms.ts` loads on
   pinned `pi@0.55.0` with zero errors (AC3: `pi -e ./coms.ts --list-models`
   exit 0, 251 models listed), and its registry contract round-trips (2 peers
-  registered + discovered, `coms_send` envelope round-tripped with a parse-only
-  reply) in the smoke test. The socket path is therefore *ready to promote*, not
-  blocked.
+  registered + discovered) and its `coms_send` envelope shape round-trips through
+  JSON (registry/shape coverage only — not a live peer exchange) in the smoke
+  test. The socket path is therefore *ready to promote*, not blocked, pending the
+  live peer-exchange verification noted below.
 - **Auth boundary drove the default, not viability.** A live model round-trip
   (subprocess `agent_end`, or a full socket `coms_send → coms_await`) requires pi
   auth, which was unavailable in the build environment (oauth token expired, no
@@ -91,7 +92,7 @@ promoted when true peer-to-peer messaging between long-lived agents is required.
 `response_schema` is **parse-only**: on `agent_end` the receiver runs
 `JSON.parse(lastAssistantText)` when a `response_schema` is present and returns
 `error: "response not valid JSON"` on failure. It is **NOT** validated against the
-schema (PRD §5.2; `coms.ts:1502`).
+schema (PRD §5.2; `coms.ts:1537-1544`).
 
 | Verb | Signature | Behavior |
 |------|-----------|----------|
@@ -123,13 +124,26 @@ Identity flags registered by the extension at load (`pi.registerFlag`): `--cname
 
 ## Evidence
 
-Run `bun scripts/coms-smoke-test.ts` (structured JSON report, exit 0 on pass):
+Run `bun scripts/coms-smoke-test.ts` (structured JSON report; exit 0 only when
+AC1 is backed by a real message exchange, not registry/shape coverage alone):
 
-```
+```text
 agents_registered: 4  (2 subprocess-RPC streams + 2 socket-coms peers)
-messages_exchanged: 1  (socket-coms coms_send envelope round-trip)
-AC1 (>=2 agents, >=1 msg): true
+messages_exchanged: 0  (no live coms_send/coms_await or agent_end round-trip —
+                        pi auth unavailable in the build environment)
+AC1 (>=2 agents, >=1 msg): false  — blocked on restored pi auth, not on either
+                                     transport's viability
 AC3 (extension loads, exit 0): true  (251 models listed)
 rpc_live_round_trip: SKIPPED — TODO(goal): pi auth unavailable
+socket_envelope_shape_coverage: true — envelope shape round-trips through JSON;
+                                        coverage only, does not count as a message
 inv2_per_user_isolation: registry confined to per-run temp dir
 ```
+
+AC1 was previously (incorrectly) reported `true` off a self-serialized,
+in-process JSON round-trip on the socket-coms path that never touched a real
+peer. That accounting bug is fixed (`socket_envelope_shape_coverage` no longer
+contributes to `messages_exchanged`); AC1 now correctly reports `false` until a
+live round-trip runs with restored pi auth (see Auth gate below). This does not
+change the Decision above — both transports' non-live behavior (extension load,
+registry contract, JSON stream parsing) was independently verified either way.

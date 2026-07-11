@@ -218,10 +218,10 @@ function fallbackColor(sessionId: string): string {
 }
 
 function parseFrontmatter(raw: string): { name?: string; description?: string; color?: string; body: string } {
-	const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+	const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
 	if (!match) return { body: raw };
 	const frontmatter: Record<string, string> = {};
-	for (const line of match[1].split("\n")) {
+	for (const line of match[1].split(/\r?\n/)) {
 		const idx = line.indexOf(":");
 		if (idx > 0) {
 			const key = line.slice(0, idx).trim();
@@ -320,11 +320,43 @@ function readServerSecret(project: string): ServerSecretJson | null {
 	}
 }
 
+function isLoopbackHost(hostname: string): boolean {
+	const h = hostname.toLowerCase();
+	return h === "localhost" || h === "127.0.0.1" || h === "::1";
+}
+
+// Accepts https for any host, or http only for explicit loopback hosts —
+// server URLs can come from env vars or a project-local server.json, so a
+// non-loopback http:// endpoint would send the auth bearer token in the
+// clear. Invalid/insecure candidates are rejected in favor of the next
+// source rather than silently downgrading.
+function normalizeServerUrlCandidate(raw: string): string | null {
+	let url: URL;
+	try {
+		url = new URL(raw);
+	} catch {
+		return null;
+	}
+	if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
+		return null;
+	}
+	return raw.replace(/\/+$/, "");
+}
+
 function resolveServerUrl(project: string, cliFlag: string | undefined): string | null {
-	if (cliFlag && cliFlag.length > 0) return cliFlag.replace(/\/+$/, "");
-	if (SERVER_URL_ENV && SERVER_URL_ENV.length > 0) return SERVER_URL_ENV.replace(/\/+$/, "");
+	if (cliFlag && cliFlag.length > 0) {
+		const v = normalizeServerUrlCandidate(cliFlag);
+		if (v) return v;
+	}
+	if (SERVER_URL_ENV && SERVER_URL_ENV.length > 0) {
+		const v = normalizeServerUrlCandidate(SERVER_URL_ENV);
+		if (v) return v;
+	}
 	const sj = readServerJson(project);
-	if (sj && sj.local_url) return sj.local_url.replace(/\/+$/, "");
+	if (sj && sj.local_url) {
+		const v = normalizeServerUrlCandidate(sj.local_url);
+		if (v) return v;
+	}
 	return null;
 }
 
@@ -765,14 +797,20 @@ export default function (pi: ExtensionAPI) {
 				"Authorization": `Bearer ${authToken}`,
 				"Accept": "text/event-stream",
 			};
+			// Bound the initial handshake (headers) only — once fetch resolves the
+			// SSE stream itself is long-lived and must not be subject to this timer.
+			const handshakeTimer = setTimeout(() => { try { ac.abort(); } catch { /* ignore */ } }, HTTP_TIMEOUT_MS);
+			try { (handshakeTimer as any).unref?.(); } catch { /* ignore */ }
 			let resp: Response;
 			try {
 				resp = await fetch(url, { method: "GET", headers, signal: ac.signal });
 			} catch (err: any) {
+				clearTimeout(handshakeTimer);
 				audit("sse_connect_failed", { reason: safeError(err) });
 				scheduleReconnect();
 				return;
 			}
+			clearTimeout(handshakeTimer);
 			if (!resp.ok || !resp.body) {
 				audit("sse_connect_http_error", { status: resp.status });
 				scheduleReconnect();
@@ -1632,6 +1670,9 @@ export default function (pi: ExtensionAPI) {
 		if (shuttingDown) return;
 		shuttingDown = true;
 
+		process.off("SIGINT", onSigInt);
+		process.off("SIGTERM", onSigTerm);
+
 		if (heartbeatTimer) {
 			try { clearInterval(heartbeatTimer); } catch { /* ignore */ }
 			heartbeatTimer = null;
@@ -1681,6 +1722,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("session_shutdown", async () => { await cleanShutdown(); });
-	process.on("SIGINT", () => { void cleanShutdown(); });
-	process.on("SIGTERM", () => { void cleanShutdown(); });
+	const onSigInt = () => { void cleanShutdown(); };
+	const onSigTerm = () => { void cleanShutdown(); };
+	process.on("SIGINT", onSigInt);
+	process.on("SIGTERM", onSigTerm);
 }

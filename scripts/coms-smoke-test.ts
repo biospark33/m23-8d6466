@@ -151,87 +151,93 @@ interface RegistryEntry {
 function pathSocketComs(): { registered: number; exchanged: number } {
 	// INV-2: isolate to a per-run temp dir so the host ~/.pi/coms is untouched.
 	const comsDir = `${fs.mkdtempSync(path.join(os.tmpdir(), "coms-smoke-"))}/coms`;
-	const project = "smoketest";
-	const agentsDir = path.join(comsDir, "projects", project, "agents");
-	fs.mkdirSync(agentsDir, { recursive: true });
-	fs.chmodSync(comsDir, 0o700); // per-user scope
+	try {
+		const project = "smoketest";
+		const agentsDir = path.join(comsDir, "projects", project, "agents");
+		fs.mkdirSync(agentsDir, { recursive: true });
+		fs.chmodSync(comsDir, 0o700); // per-user scope
 
-	// Write two peers in the exact on-disk shape coms.ts uses (writeRegistryAtomic).
-	const mkEntry = (name: string, n: number): RegistryEntry => ({
-		session_id: `01SMOKE${n}0000000000000000000`,
-		name,
-		purpose: `smoke peer ${n}`,
-		model: "smoke/none",
-		color: "#72F1B8",
-		pid: process.pid,
-		endpoint: path.join(comsDir, "sockets", `smoke-${n}.sock`),
-		cwd: VENDOR_DIR,
-		started_at: new Date().toISOString(),
-		explicit: false,
-		version: 1,
-	});
-	for (const [i, name] of ["smoke-a", "smoke-b"].entries()) {
-		const entry = mkEntry(name, i + 1);
-		const final = path.join(agentsDir, `${name}.json`);
-		const tmp = `${final}.tmp`;
-		fs.writeFileSync(tmp, JSON.stringify(entry, null, 2));
-		fs.renameSync(tmp, final); // atomic, matches coms.ts
+		// Write two peers in the exact on-disk shape coms.ts uses (writeRegistryAtomic).
+		const mkEntry = (name: string, n: number): RegistryEntry => ({
+			session_id: `01SMOKE${n}0000000000000000000`,
+			name,
+			purpose: `smoke peer ${n}`,
+			model: "smoke/none",
+			color: "#72F1B8",
+			pid: process.pid,
+			endpoint: path.join(comsDir, "sockets", `smoke-${n}.sock`),
+			cwd: VENDOR_DIR,
+			started_at: new Date().toISOString(),
+			explicit: false,
+			version: 1,
+		});
+		for (const [i, name] of ["smoke-a", "smoke-b"].entries()) {
+			const entry = mkEntry(name, i + 1);
+			const final = path.join(agentsDir, `${name}.json`);
+			const tmp = `${final}.tmp`;
+			fs.writeFileSync(tmp, JSON.stringify(entry, null, 2));
+			fs.renameSync(tmp, final); // atomic, matches coms.ts
+		}
+
+		// Discover peers back the way coms_list does (readAllRegistryEntries).
+		const discovered: RegistryEntry[] = [];
+		for (const f of fs.readdirSync(agentsDir)) {
+			if (!f.endsWith(".json")) continue;
+			const parsed = JSON.parse(
+				fs.readFileSync(path.join(agentsDir, f), "utf8"),
+			) as RegistryEntry;
+			if (typeof parsed.session_id === "string") discovered.push(parsed);
+		}
+
+		// NOTE: this is registry/envelope-shape coverage only — it builds a
+		// prompt envelope in-process and round-trips it through JSON.stringify/
+		// parse without ever sending it over a real coms.ts socket to a live
+		// peer. It must NOT count as a "message exchanged": only a real
+		// coms_send → coms_await exchange between two live peers proves the
+		// transport works, and AC1 must not be satisfiable by this fake alone.
+		const target = discovered[0];
+		const envelope = {
+			type: "prompt" as const,
+			msg_id: "01SMOKEMSG0000000000000000",
+			sender_name: "smoke-a",
+			target: target?.name,
+			prompt: "ping",
+			conversation_id: null,
+			response_schema: { type: "object", properties: { ok: { type: "boolean" } } },
+			hops: 0,
+		};
+		const wire = JSON.stringify(envelope);
+		const roundTripped = JSON.parse(wire) as typeof envelope;
+		// response_schema is parse-only: JSON.parse of a reply, NOT schema-validated.
+		const reply = JSON.parse('{"ok":true}') as Record<string, unknown>;
+		const shapeOk = roundTripped.target === target?.name && reply.ok === true;
+
+		// INV-2 assertion: nothing leaked outside the isolated dir.
+		const leaked = !comsDir.startsWith(os.tmpdir());
+
+		record({
+			name: "socket_registry_two_agents",
+			ok: discovered.length >= 2,
+			detail: `${discovered.length} peers registered & discovered in isolated registry`,
+		});
+		record({
+			name: "socket_envelope_shape_coverage",
+			ok: shapeOk,
+			detail: `coms_send envelope shape round-tripped through JSON for peer "${target?.name}" ` +
+				`(registry/shape coverage only — no live peer exchange, does not count toward messages_exchanged/AC1)`,
+		});
+		record({
+			name: "inv2_per_user_isolation",
+			ok: !leaked,
+			detail: `registry confined to ${comsDir}`,
+		});
+
+		return { registered: discovered.length, exchanged: 0 };
+	} finally {
+		// comsDir is a subdir of the mkdtempSync root — remove the root so the
+		// per-run temp dir doesn't leak on every smoke test run, even on throw.
+		fs.rmSync(path.dirname(comsDir), { recursive: true, force: true });
 	}
-
-	// Discover peers back the way coms_list does (readAllRegistryEntries).
-	const discovered: RegistryEntry[] = [];
-	for (const f of fs.readdirSync(agentsDir)) {
-		if (!f.endsWith(".json")) continue;
-		const parsed = JSON.parse(
-			fs.readFileSync(path.join(agentsDir, f), "utf8"),
-		) as RegistryEntry;
-		if (typeof parsed.session_id === "string") discovered.push(parsed);
-	}
-
-	// A "message exchanged" on this path = a structured prompt envelope built for
-	// one discovered peer and round-tripped through JSON (the coms_send payload
-	// shape) with a parse-only response_schema — mirrors coms.ts §5.2 semantics.
-	const target = discovered[0];
-	const envelope = {
-		type: "prompt" as const,
-		msg_id: "01SMOKEMSG0000000000000000",
-		sender_name: "smoke-a",
-		target: target?.name,
-		prompt: "ping",
-		conversation_id: null,
-		response_schema: { type: "object", properties: { ok: { type: "boolean" } } },
-		hops: 0,
-	};
-	const wire = JSON.stringify(envelope);
-	const roundTripped = JSON.parse(wire) as typeof envelope;
-	// response_schema is parse-only: JSON.parse of a reply, NOT schema-validated.
-	const reply = JSON.parse('{"ok":true}') as Record<string, unknown>;
-	const exchanged =
-		roundTripped.target === target?.name && reply.ok === true ? 1 : 0;
-
-	// INV-2 assertion: nothing leaked outside the isolated dir.
-	const leaked = !comsDir.startsWith(os.tmpdir());
-
-	record({
-		name: "socket_registry_two_agents",
-		ok: discovered.length >= 2,
-		detail: `${discovered.length} peers registered & discovered in isolated registry`,
-	});
-	record({
-		name: "socket_envelope_round_trip",
-		ok: exchanged >= 1,
-		detail: `coms_send envelope round-tripped to peer "${target?.name}", parse-only reply ok`,
-	});
-	record({
-		name: "inv2_per_user_isolation",
-		ok: !leaked,
-		detail: `registry confined to ${comsDir}`,
-	});
-
-	// comsDir is a subdir of the mkdtempSync root — remove the root so the
-	// per-run temp dir doesn't leak on every smoke test run.
-	fs.rmSync(path.dirname(comsDir), { recursive: true, force: true });
-	return { registered: discovered.length, exchanged };
 }
 
 // ── Run ─────────────────────────────────────────────────────────────────────
