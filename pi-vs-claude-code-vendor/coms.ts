@@ -971,6 +971,27 @@ export default function (pi: ExtensionAPI) {
 				// Detect missing-registry BEFORE writing so the self_heal audit only
 				// fires when something actually went wrong (file unlinked under us).
 				const missingBeforeWrite = !fs.existsSync(identity.registryFile);
+				if (!missingBeforeWrite) {
+					// Registry file exists — verify we still own it before overwriting.
+					// If it was unlinked and re-claimed by another session between our
+					// last heartbeat and this one, existing.session_id won't match ours;
+					// writing anyway would hijack the other session's registration and
+					// cause split-brain routing.
+					try {
+						const existing = JSON.parse(fs.readFileSync(identity.registryFile, "utf-8")) as RegistryEntry;
+						if (existing.session_id !== identity.session_id) {
+							pi.appendEntry("coms-log", {
+								event: "heartbeat_conflict",
+								session_id: identity.session_id,
+								conflicting_session_id: existing.session_id,
+								name: identity.name,
+							});
+							return;
+						}
+					} catch {
+						// Corrupt/unreadable entry — safe to self-heal by overwriting below.
+					}
+				}
 				const live: RegistryEntry = {
 					session_id: identity.session_id,
 					name: identity.name,
