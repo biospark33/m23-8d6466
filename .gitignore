@@ -1,0 +1,7 @@
+node_modules/
+.gitnexus/
+ruvector.db
+.swarm/
+*.log
+.DS_Store
+bun.lockb

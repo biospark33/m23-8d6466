@@ -1,0 +1,20 @@
+{
+  "name": "qds-factory",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit",
+    "lint": "bunx @biomejs/biome check src scripts tests cli-anything 2>/dev/null || bunx @biomejs/biome check ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/bun": "^1.2.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  },
+  "dependencies": {
+    "zod": "^3.24.0"
+  }
+}
