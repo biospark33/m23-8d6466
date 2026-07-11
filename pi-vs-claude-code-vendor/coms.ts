@@ -1634,7 +1634,7 @@ export default function (pi: ExtensionAPI) {
 			// Models frequently wrap structured output in a ```json fence even when
 			// asked for raw JSON — unwrap one before parsing so that common case
 			// doesn't spuriously fail with "response not valid JSON".
-			const fenced = lastAssistantText.trim().match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i);
+			const fenced = lastAssistantText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/i);
 			const jsonText = fenced ? fenced[1] : lastAssistantText;
 			try {
 				payload = JSON.parse(jsonText);

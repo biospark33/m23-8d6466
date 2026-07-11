@@ -343,7 +343,7 @@ function readServerSecret(project: string): ServerSecretJson | null {
 
 function isLoopbackHost(hostname: string): boolean {
 	const h = hostname.toLowerCase();
-	return h === "localhost" || h === "127.0.0.1" || h === "::1";
+	return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
 }
 
 // Accepts https for any host, or http only for explicit loopback hosts —
@@ -1630,7 +1630,7 @@ export default function (pi: ExtensionAPI) {
 			// Models frequently wrap structured output in a ```json fence even when
 			// asked for raw JSON — unwrap one before parsing so that common case
 			// doesn't spuriously fail with "response not valid JSON".
-			const fenced = lastAssistantText.trim().match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i);
+			const fenced = lastAssistantText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/i);
 			const jsonText = fenced ? fenced[1] : lastAssistantText;
 			try {
 				payload = JSON.parse(jsonText);
