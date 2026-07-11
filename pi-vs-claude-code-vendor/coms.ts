@@ -935,6 +935,16 @@ export default function (pi: ExtensionAPI) {
 						writeRegistryAtomic(live, identity.project);
 					}
 				}
+
+				// Prune expired pending replies so long-lived sessions don't leak
+				// entries whose timeout already fired (or that were resolved but
+				// never cleaned up).
+				const now = Date.now();
+				for (const [mid, entry] of pendingReplies.entries()) {
+					if (now - new Date(entry.created_at).getTime() > TIMEOUT_MS + 60_000) {
+						pendingReplies.delete(mid);
+					}
+				}
 			} catch { /* best-effort */ }
 		}, KEEPALIVE_INTERVAL_MS);
 		try { (keepaliveTimer as any).unref?.(); } catch { /* ignore */ }
@@ -1497,9 +1507,18 @@ export default function (pi: ExtensionAPI) {
 		const inbound = [...inboundQueue.values()].reverse().find((i) => !i.fulfilled);
 		if (!inbound || !identity) return;
 
-		// Walk the session branch for the most recent assistant message text.
+		// Walk the session branch for the most recent assistant message text
+		// *after* the inbound prompt entry, so a stale reply from an earlier
+		// turn is never resent if this turn produced no new assistant message.
 		let lastAssistantText = "";
+		let foundInbound = false;
 		for (const entry of ctx.sessionManager.getBranch()) {
+			if (!foundInbound) {
+				if (entry.type === "message" && entry.message && (entry.message as any).details?.msg_id === inbound.msg_id) {
+					foundInbound = true;
+				}
+				continue;
+			}
 			if (entry.type === "message" && entry.message && entry.message.role === "assistant") {
 				const m = entry.message as any;
 				if (typeof m.content === "string") {

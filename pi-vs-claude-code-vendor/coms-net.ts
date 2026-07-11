@@ -465,14 +465,15 @@ export default function (pi: ExtensionAPI) {
 			try { (timer as any).unref?.(); } catch { /* ignore */ }
 		}
 		let resp: Response;
+		let text: string;
 		try {
 			resp = await fetch(url, init);
+			text = await resp.text();
 		} catch (err: any) {
-			if (timer) { try { clearTimeout(timer); } catch { /* ignore */ } }
 			throw new Error(`coms-net: fetch failed: ${err?.message ?? String(err)}`);
+		} finally {
+			if (timer) { try { clearTimeout(timer); } catch { /* ignore */ } }
 		}
-		if (timer) { try { clearTimeout(timer); } catch { /* ignore */ } }
-		const text = await resp.text();
 		let parsed: any = null;
 		if (text.length > 0) {
 			try { parsed = JSON.parse(text); } catch { parsed = text; }
@@ -507,37 +508,47 @@ export default function (pi: ExtensionAPI) {
 	function makeSseParser(onEvent: (event: string, data: any, id?: string) => void) {
 		const decoder = new TextDecoder("utf-8");
 		let buf = "";
+		let event = "message";
+		let dataLines: string[] = [];
+		let id: string | undefined;
+		function flush(): void {
+			if (dataLines.length > 0) {
+				const joined = dataLines.join("\n");
+				let data: any = joined;
+				try { data = JSON.parse(joined); } catch { /* keep as string */ }
+				try { onEvent(event, data, id); } catch { /* ignore handler errors */ }
+			}
+			event = "message";
+			dataLines = [];
+			id = undefined;
+		}
 		return {
+			// Line-by-line incremental parsing: each feed() only rescans the
+			// unconsumed tail of buf (single indexOf per line), so total work
+			// across a payload stays O(N) instead of the O(N^2) a whole-buffer
+			// regex replace/rescan would cost as buf grows across chunks.
 			feed(chunk: Uint8Array): void {
 				buf += decoder.decode(chunk, { stream: true });
-				// SSE line endings may be LF, CR, or CRLF per the WHATWG spec — normalize
-				// to LF so the \n\n frame boundary and per-line parsing below hold either way.
-				buf = buf.replace(/\r\n/g, "\n");
-				let idx;
-				while ((idx = buf.indexOf("\n\n")) >= 0) {
-					const frame = buf.slice(0, idx);
-					buf = buf.slice(idx + 2);
-					let event = "message";
-					const dataLines: string[] = [];
-					let id: string | undefined;
-					for (const line of frame.split("\n")) {
-						if (line.length === 0) continue;
-						if (line.startsWith(":")) continue; // SSE comment
-						if (line.startsWith("event:")) {
-							event = line.slice(6).trimStart();
-						} else if (line.startsWith("data:")) {
-							let v = line.slice(5);
-							if (v.startsWith(" ")) v = v.slice(1);
-							dataLines.push(v);
-						} else if (line.startsWith("id:")) {
-							id = line.slice(3).trimStart();
-						}
-					}
-					if (dataLines.length > 0) {
-						const joined = dataLines.join("\n");
-						let data: any = joined;
-						try { data = JSON.parse(joined); } catch { /* keep as string */ }
-						try { onEvent(event, data, id); } catch { /* ignore handler errors */ }
+				let nl;
+				while ((nl = buf.indexOf("\n")) >= 0) {
+					let line = buf.slice(0, nl);
+					buf = buf.slice(nl + 1);
+					// SSE line endings may be LF, CR, or CRLF per the WHATWG spec —
+					// strip a trailing CR so CRLF-terminated streams parse the same
+					// as LF-terminated ones.
+					if (line.endsWith("\r")) line = line.slice(0, -1);
+					if (line.length === 0) {
+						flush();
+					} else if (line.startsWith(":")) {
+						// SSE comment
+					} else if (line.startsWith("event:")) {
+						event = line.slice(6).trimStart();
+					} else if (line.startsWith("data:")) {
+						let v = line.slice(5);
+						if (v.startsWith(" ")) v = v.slice(1);
+						dataLines.push(v);
+					} else if (line.startsWith("id:")) {
+						id = line.slice(3).trimStart();
 					}
 				}
 			},
@@ -741,57 +752,69 @@ export default function (pi: ExtensionAPI) {
 	// ━━ SSE open + read loop ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 	async function openSse(): Promise<void> {
+		if (shuttingDown) return;
 		if (!serverUrl || !authToken || !sseUrlPath || !identity) return;
-		if (sseAbort) {
-			try { sseAbort.abort(); } catch { /* ignore */ }
-		}
-		const ac = new AbortController();
-		sseAbort = ac;
-		const url = serverUrl + sseUrlPath;
-		const headers: Record<string, string> = {
-			"Authorization": `Bearer ${authToken}`,
-			"Accept": "text/event-stream",
-		};
-		let resp: Response;
 		try {
-			resp = await fetch(url, { method: "GET", headers, signal: ac.signal });
-		} catch (err: any) {
-			audit("sse_connect_failed", { reason: safeError(err) });
-			scheduleReconnect();
-			return;
-		}
-		if (!resp.ok || !resp.body) {
-			audit("sse_connect_http_error", { status: resp.status });
-			scheduleReconnect();
-			return;
-		}
-		// Connection established. Reset the backoff state.
-		reconnectAttempts = 0;
-		notifiedReconnectCap = false;
-		try {
-			pi.appendEntry("coms-net-log", { event: "sse_open", ts: nowIso(), url: sseUrlPath });
-		} catch { /* best-effort */ }
-
-		const parser = makeSseParser((event, data, id) => handleSseEvent(event, data, id));
-		const reader = resp.body.getReader();
-		try {
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				if (value) parser.feed(value);
+			if (sseAbort) {
+				try { sseAbort.abort(); } catch { /* ignore */ }
 			}
-			audit("sse_disconnect", { reason: "stream_end" });
-		} catch (err: any) {
-			if (ac.signal.aborted) {
-				audit("sse_disconnect", { reason: "aborted" });
+			const ac = new AbortController();
+			sseAbort = ac;
+			const url = serverUrl + sseUrlPath;
+			const headers: Record<string, string> = {
+				"Authorization": `Bearer ${authToken}`,
+				"Accept": "text/event-stream",
+			};
+			let resp: Response;
+			try {
+				resp = await fetch(url, { method: "GET", headers, signal: ac.signal });
+			} catch (err: any) {
+				audit("sse_connect_failed", { reason: safeError(err) });
+				scheduleReconnect();
 				return;
 			}
-			audit("sse_disconnect", { reason: safeError(err) });
-		} finally {
-			try { reader.releaseLock(); } catch { /* ignore */ }
-		}
-		if (!shuttingDown) {
-			scheduleReconnect();
+			if (!resp.ok || !resp.body) {
+				audit("sse_connect_http_error", { status: resp.status });
+				scheduleReconnect();
+				return;
+			}
+			// Connection established. Reset the backoff state.
+			reconnectAttempts = 0;
+			notifiedReconnectCap = false;
+			try {
+				pi.appendEntry("coms-net-log", { event: "sse_open", ts: nowIso(), url: sseUrlPath });
+			} catch { /* best-effort */ }
+
+			const parser = makeSseParser((event, data, id) => handleSseEvent(event, data, id));
+			const reader = resp.body.getReader();
+			try {
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					if (value) parser.feed(value);
+				}
+				audit("sse_disconnect", { reason: "stream_end" });
+			} catch (err: any) {
+				if (ac.signal.aborted) {
+					audit("sse_disconnect", { reason: "aborted" });
+					return;
+				}
+				audit("sse_disconnect", { reason: safeError(err) });
+			} finally {
+				try { reader.releaseLock(); } catch { /* ignore */ }
+			}
+			if (!shuttingDown) {
+				scheduleReconnect();
+			}
+		} catch (err: any) {
+			// Catch-all: getReader() (or anything else in this function) can throw
+			// synchronously outside the inner try blocks above. openSse is invoked
+			// fire-and-forget (`void openSse()`), so an uncaught rejection here
+			// would surface as an unhandled promise rejection.
+			audit("sse_unhandled_error", { reason: safeError(err) });
+			if (!shuttingDown) {
+				scheduleReconnect();
+			}
 		}
 	}
 
@@ -821,7 +844,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function reRegisterAndOpen(): Promise<void> {
-		if (!identity) return;
+		if (!identity || shuttingDown) return;
 		// Re-register (server upserts), then re-open SSE.
 		const reg = await registerAgent();
 		sseUrlPath = reg.sse_url;
@@ -1004,6 +1027,16 @@ export default function (pi: ExtensionAPI) {
 				.catch((err) => {
 					audit("heartbeat_failed", { reason: safeError(err) });
 				});
+
+			// Prune expired pending replies so long-lived sessions don't leak
+			// entries whose timeout already fired (or that were resolved but
+			// never cleaned up).
+			const now = Date.now();
+			for (const [mid, entry] of pendingReplies.entries()) {
+				if (now - new Date(entry.created_at).getTime() > MESSAGE_TIMEOUT_MS + 60_000) {
+					pendingReplies.delete(mid);
+				}
+			}
 		}, HEARTBEAT_MS);
 		try { (heartbeatTimer as any).unref?.(); } catch { /* ignore */ }
 	});
@@ -1474,9 +1507,18 @@ export default function (pi: ExtensionAPI) {
 		const inbound = [...inboundQueue.values()].reverse().find((i) => !i.fulfilled);
 		if (!inbound || !identity) return;
 
-		// Walk the session branch for the most recent assistant text.
+		// Walk the session branch for the most recent assistant text *after* the
+		// inbound prompt entry, so a stale reply from an earlier turn is never
+		// resent if this turn produced no new assistant message.
 		let lastAssistantText = "";
+		let foundInbound = false;
 		for (const entry of ctx.sessionManager.getBranch()) {
+			if (!foundInbound) {
+				if (entry.type === "message" && entry.message && (entry.message as any).details?.msg_id === inbound.msg_id) {
+					foundInbound = true;
+				}
+				continue;
+			}
 			if (entry.type === "message" && entry.message && entry.message.role === "assistant") {
 				const m = entry.message as any;
 				if (typeof m.content === "string") {
