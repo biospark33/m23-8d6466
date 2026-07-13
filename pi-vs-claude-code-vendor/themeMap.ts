@@ -122,7 +122,7 @@ function applyExtensionTitle(ctx: ExtensionContext): void {
 	if (!ctx.hasUI) return;
 	const name = primaryExtensionName();
 	if (!name) return;
-	setTimeout(() => {
+	const titleTimer = setTimeout(() => {
 		// The session can end before this fires (e.g. a fast CLI run or test) —
 		// the UI context may already be torn down by then.
 		try {
@@ -131,6 +131,10 @@ function applyExtensionTitle(ctx: ExtensionContext): void {
 			/* ignore */
 		}
 	}, 150);
+	// Unref: this fires ~150ms into session start, and a fast CLI run / test may
+	// exit before then. A refed timer would hold the event loop alive and delay
+	// process exit purely for a cosmetic title-set — never worth blocking exit.
+	titleTimer.unref();
 }
 
 // ── Combined default ───────────────────────────────────────────────────────

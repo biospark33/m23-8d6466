@@ -941,6 +941,14 @@ export default function (pi: ExtensionAPI) {
 		} catch (err) {
 			ctx.ui?.notify?.(`📡 coms: registry write failed — ${err instanceof Error ? err.message : String(err)}`, "error");
 			try { server?.close(); } catch { /* ignore */ }
+			// bindEndpoint already created the socket file, but identity isn't
+			// assigned until after this try succeeds — so cleanShutdown (which
+			// unlinks identity.endpoint) won't reach it. Remove the stale .sock
+			// here on POSIX; win32 uses named pipes (not filesystem entries), so
+			// skip there, matching cleanShutdown's platform guard.
+			if (process.platform !== "win32") {
+				try { fs.unlinkSync(endpoint); } catch { /* ignore */ }
+			}
 			return;
 		}
 
