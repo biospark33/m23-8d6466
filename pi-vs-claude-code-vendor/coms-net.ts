@@ -603,10 +603,15 @@ export default function (pi: ExtensionAPI) {
 					throw new Error("coms-net: SSE buffer exceeded cap — dropping connection");
 				}
 				buf += decoder.decode(chunk, { stream: true });
+				// Track the consumed prefix with a start index and slice buf once
+				// after the loop, so a chunk with K lines costs O(N) total copying
+				// instead of the O(K*N) that re-slicing the tail on every line
+				// would cost.
 				let nl;
-				while ((nl = buf.indexOf("\n")) >= 0) {
-					let line = buf.slice(0, nl);
-					buf = buf.slice(nl + 1);
+				let start = 0;
+				while ((nl = buf.indexOf("\n", start)) >= 0) {
+					let line = buf.slice(start, nl);
+					start = nl + 1;
 					// SSE line endings may be LF, CR, or CRLF per the WHATWG spec —
 					// strip a trailing CR so CRLF-terminated streams parse the same
 					// as LF-terminated ones.
@@ -625,6 +630,7 @@ export default function (pi: ExtensionAPI) {
 						id = line.slice(3).trimStart();
 					}
 				}
+				if (start > 0) buf = buf.slice(start);
 			},
 		};
 	}
@@ -1598,12 +1604,15 @@ export default function (pi: ExtensionAPI) {
 					return { response: null, error: "unknown msg_id" };
 				}
 				// Transient network error on the long-poll (timeout, connection
-				// reset, …). If a local SSE entry is tracking this msg_id, defer to
-				// it (or to the timeout) by staying pending — bounded by
-				// timeoutPromise. If no local entry exists, there is no other
-				// delivery path: fail fast with an actionable error rather than
-				// hanging the agent for the full timeoutMs.
-				if (pending) return new Promise<{ response?: any; error?: string | null }>(() => { /* defer to local/timeout */ });
+				// reset, …). When a local SSE entry tracks this msg_id, alias its
+				// promise so serverPromise settles cleanly with the local result
+				// (still bounded by timeoutPromise — pending.promise is also a
+				// direct racer, so this changes no race outcome, only avoids
+				// leaving serverPromise pending forever). If no local entry
+				// exists, there is no other delivery path: fail fast with an
+				// actionable error rather than hanging the agent for the full
+				// timeoutMs.
+				if (pending) return pending.promise;
 				return { response: null, error: "server_poll_failed" };
 			});
 
