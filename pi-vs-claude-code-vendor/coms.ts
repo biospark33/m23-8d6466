@@ -717,7 +717,7 @@ export default function (pi: ExtensionAPI) {
 	function activeInbound(ctx?: ExtensionContext | null): InboundContext | null {
 		const c = ctx ?? currentCtx;
 		if (!c) return null;
-		const branch = c.sessionManager.getBranch();
+		const branch = c.sessionManager?.getBranch() ?? [];
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];
 			if (entry.type === "message" && entry.message) {
@@ -1111,7 +1111,14 @@ export default function (pi: ExtensionAPI) {
 					// cause split-brain routing.
 					try {
 						const existing = JSON.parse(fs.readFileSync(identity.registryFile, "utf-8")) as RegistryEntry;
-						if (existing.session_id !== identity.session_id) {
+						// Only a *valid* foreign session_id declares a conflict. A file
+						// that parses but lacks session_id (partial write flushed as
+						// valid JSON, e.g. "{}") yields undefined — treating that as a
+						// conflict would falsely tear down the live agent. Missing/
+						// malformed session_id means the entry is not authoritative;
+						// fall through and self-heal by overwriting below. (JSON null/
+						// primitives throw on .session_id access → caught → self-heal.)
+						if (existing && typeof existing.session_id === "string" && existing.session_id !== identity.session_id) {
 							pi.appendEntry("coms-log", {
 								event: "heartbeat_conflict",
 								session_id: identity.session_id,
@@ -1770,7 +1777,7 @@ export default function (pi: ExtensionAPI) {
 		// an earlier message in the same turn.
 		let lastAssistantText = "";
 		let foundInbound = false;
-		for (const entry of ctx.sessionManager.getBranch()) {
+		for (const entry of ctx.sessionManager?.getBranch() ?? []) {
 			if (!foundInbound) {
 				if (entry.type === "message" && entry.message && (entry.message as any).details?.msg_id === inbound.msg_id) {
 					foundInbound = true;

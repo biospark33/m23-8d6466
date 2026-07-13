@@ -786,7 +786,7 @@ export default function (pi: ExtensionAPI) {
 	function activeInbound(ctx?: ExtensionContext | null): InboundContext | null {
 		const c = ctx ?? currentCtx;
 		if (!c) return null;
-		const branch = c.sessionManager.getBranch();
+		const branch = c.sessionManager?.getBranch() ?? [];
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];
 			if (entry.type === "message" && entry.message) {
@@ -1013,6 +1013,17 @@ export default function (pi: ExtensionAPI) {
 				await reRegisterAndOpen();
 			} catch (err) {
 				audit("sse_reconnect_failed", { reason: safeError(err) });
+				// 401/403/404 from re-registration mean the token or URL is wrong —
+				// retrying with the same credentials/path will never succeed, so stop
+				// instead of spamming the server with an unbounded reconnect loop.
+				// (Mirrors the terminal-status handling in openSse's SSE GET path.)
+				if (err instanceof HttpError && (err.status === 401 || err.status === 403 || err.status === 404)) {
+					audit("sse_reconnect_aborted", { status: err.status });
+					if (currentCtx?.hasUI) {
+						try { currentCtx.ui.notify(`📡 coms-net: reconnect failed (HTTP ${err.status}) — not retrying`, "error"); } catch { /* ignore */ }
+					}
+					return;
+				}
 				scheduleReconnect();
 			}
 		}, backoff);
@@ -1784,7 +1795,7 @@ export default function (pi: ExtensionAPI) {
 		// message in the same turn.
 		let lastAssistantText = "";
 		let foundInbound = false;
-		for (const entry of ctx.sessionManager.getBranch()) {
+		for (const entry of ctx.sessionManager?.getBranch() ?? []) {
 			if (!foundInbound) {
 				if (entry.type === "message" && entry.message && (entry.message as any).details?.msg_id === inbound.msg_id) {
 					foundInbound = true;
