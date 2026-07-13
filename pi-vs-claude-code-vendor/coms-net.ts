@@ -301,10 +301,12 @@ function readFrontmatterFromArgv(argv: string[]): { name?: string; description?:
 
 // Rejects path traversal / separator injection in the project name, which
 // can originate from untrusted input (--project CLI flag or PI_COMS_PROJECT
-// env var).
+// env var). Strict whitelist rather than a separator blacklist: also blocks
+// Windows ADS (colon) and null-byte injection, which the old blacklist let
+// through. "." and ".." pass the character class, so they're rejected
+// explicitly.
 function isSafePathComponent(s: unknown): s is string {
-	return typeof s === "string" && s.length > 0 && s !== "." && s !== ".." &&
-		!s.includes("/") && !s.includes("\\");
+	return typeof s === "string" && /^[a-zA-Z0-9_.-]+$/.test(s) && s !== "." && s !== "..";
 }
 
 function projectDir(project: string): string {
@@ -654,6 +656,11 @@ export default function (pi: ExtensionAPI) {
 			// and is delivered as a string — degraded, not silently lost. Named
 			// end() rather than flush() to avoid shadowing the inner dispatcher.
 			end(): void {
+				// Flush any partial multi-byte sequence the streaming decoder is
+				// still holding (stream ended mid-character): decode() without
+				// { stream: true } emits U+FFFD for incomplete sequences instead
+				// of silently dropping the buffered bytes.
+				buf += decoder.decode();
 				if (buf.length > 0) {
 					let line = buf;
 					if (line.endsWith("\r")) line = line.slice(0, -1);

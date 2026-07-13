@@ -275,10 +275,12 @@ function readCliFlags(pi: ExtensionAPI): CliFlags {
 
 // Rejects path traversal / separator injection in project & agent names, both
 // of which can originate from untrusted input (--project CLI flag, agent
-// frontmatter, or another agent's coms_list tool call).
+// frontmatter, or another agent's coms_list tool call). Strict whitelist
+// rather than a separator blacklist: also blocks Windows ADS (colon) and
+// null-byte injection, which the old blacklist let through. "." and ".." pass
+// the character class, so they're rejected explicitly.
 function isSafePathComponent(s: unknown): s is string {
-	return typeof s === "string" && s.length > 0 && s !== "." && s !== ".." &&
-		!s.includes("/") && !s.includes("\\");
+	return typeof s === "string" && /^[a-zA-Z0-9_.-]+$/.test(s) && s !== "." && s !== "..";
 }
 
 function projectAgentsDir(project: string): string {
@@ -417,11 +419,13 @@ function pruneDeadEntries(project: string): RegistryEntry[] {
 				removeRegistryEntry(project, entry.name, entry.session_id);
 				continue;
 			}
-			// EPERM means the process exists but we can't signal it — treat as live.
-			live.push(entry);
-			continue;
+			// EPERM means the process exists but belongs to another user — which
+			// may be a recycled PID unrelated to this agent. Don't treat that as
+			// proof of life: fall through to the heartbeat check so a stale entry
+			// still gets pruned instead of living in the registry forever.
 		}
-		// The PID answers, but that isn't proof the agent is alive: the PID may
+		// The PID appears live (signal succeeded, or EPERM for another user's
+		// process), but that isn't proof the agent is alive: the PID may
 		// have been recycled by an unrelated process, or the agent may be hung
 		// with a live process but a dead event loop. A healthy agent rewrites
 		// heartbeat_at every KEEPALIVE_INTERVAL_MS, so prune entries whose
@@ -1004,7 +1008,13 @@ export default function (pi: ExtensionAPI) {
 				// mkdir dirname(endpoint) (not COMS_DIR/sockets) so the tmp-dir
 				// fallback from makeEndpoint gets created too; chmod 0700 keeps
 				// sockets private to this user in the shared tmp dir.
-				fs.mkdirSync(path.dirname(endpoint), { recursive: true, mode: 0o700 });
+				const endpointDir = path.dirname(endpoint);
+				fs.mkdirSync(endpointDir, { recursive: true, mode: 0o700 });
+				// recursive mkdir's mode only applies to dirs it actually creates,
+				// so chmod explicitly: a pre-existing dir (left by an older
+				// version or created manually) could otherwise stay world-accessible
+				// and expose the socket in the shared tmp dir (INV-2).
+				try { fs.chmodSync(endpointDir, 0o700); } catch { /* best-effort */ }
 				try { fs.chmodSync(COMS_DIR, 0o700); } catch { /* best-effort */ }
 			}
 		} catch (err) {
@@ -1019,6 +1029,15 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui?.notify?.(`📡 coms: bind failed — ${err instanceof Error ? err.message : String(err)}`, "error");
 			return;
 		}
+		// bindEndpoint only guards the listen phase; once it resolves the server
+		// has no 'error' listener, and net.Server re-throws an unhandled 'error'
+		// event (e.g. EMFILE on accept), crashing the whole process. Attach a
+		// persistent listener that logs and keeps the server alive.
+		server.on("error", (err) => {
+			try {
+				pi.appendEntry("coms-log", { event: "server_error", error: err.message });
+			} catch { /* best-effort */ }
+		});
 
 		// 4. Build + write registry entry atomically.
 		const entry: RegistryEntry = {
