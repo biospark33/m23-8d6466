@@ -513,15 +513,20 @@ export default function (pi: ExtensionAPI) {
 		let timer: any = null;
 		const ac = new AbortController();
 		const timeoutMs = opts?.timeoutMs ?? HTTP_TIMEOUT_MS;
+		// Shared abort handler for both the timeout and the caller's signal. Named
+		// so it can be detached from the caller's signal on completion — otherwise
+		// { once: true } only self-removes if the signal fires, leaving the closure
+		// (and its capture of `ac`) pinned to a long-lived caller signal.
+		const onAbort = () => { try { ac.abort(); } catch { /* ignore */ } };
 		if (opts?.signal) {
 			if (opts.signal.aborted) {
 				ac.abort();
 			} else {
-				opts.signal.addEventListener("abort", () => ac.abort(), { once: true });
+				opts.signal.addEventListener("abort", onAbort, { once: true });
 			}
 		}
 		init.signal = ac.signal;
-		timer = setTimeout(() => { try { ac.abort(); } catch { /* ignore */ } }, timeoutMs);
+		timer = setTimeout(onAbort, timeoutMs);
 		try { (timer as any).unref?.(); } catch { /* ignore */ }
 		let resp: Response;
 		let text: string;
@@ -532,6 +537,7 @@ export default function (pi: ExtensionAPI) {
 			throw new Error(`coms-net: fetch failed: ${err?.message ?? String(err)}`);
 		} finally {
 			if (timer) { try { clearTimeout(timer); } catch { /* ignore */ } }
+			if (opts?.signal) { try { opts.signal.removeEventListener("abort", onAbort); } catch { /* ignore */ } }
 		}
 		let parsed: any = null;
 		if (text.length > 0) {
@@ -1553,12 +1559,10 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			// Race local pending promise against server long-poll, capped at timeoutMs.
-			const localPromise: Promise<{ response?: any; error?: string | null }> = pending
-				? pending.promise
-				: new Promise(() => { /* never resolves on its own; SSE will */ });
-
-			// Server long-poll. Cap server timeout to the requested timeout (server enforces its own max too).
+			// Race the server long-poll (and the local SSE promise, when one is
+			// tracked for this msg_id) against the timeout. pending.promise is only
+			// entered into the race when a local entry exists, so the absence of one
+			// no longer plants a never-resolving placeholder that pins closures.
 			const serverTimeoutMs = Math.min(timeoutMs, MESSAGE_TIMEOUT_MS);
 			const ac = new AbortController();
 			const serverPromise = httpFetch(
@@ -1575,12 +1579,14 @@ export default function (pi: ExtensionAPI) {
 				if (err instanceof HttpError && err.status === 404) {
 					return { response: null, error: "unknown msg_id" };
 				}
-				// A transient network error on the long-poll (timeout, connection
-				// reset, etc.) doesn't mean the message failed — it means this one
-				// polling channel failed. Don't let it win Promise.race over a
-				// healthy local SSE connection; hang here and let localPromise or
-				// timeoutPromise decide instead.
-				return new Promise<{ response?: any; error?: string | null }>(() => {});
+				// Transient network error on the long-poll (timeout, connection
+				// reset, …). If a local SSE entry is tracking this msg_id, defer to
+				// it (or to the timeout) by staying pending — bounded by
+				// timeoutPromise. If no local entry exists, there is no other
+				// delivery path: fail fast with an actionable error rather than
+				// hanging the agent for the full timeoutMs.
+				if (pending) return new Promise<{ response?: any; error?: string | null }>(() => { /* defer to local/timeout */ });
+				return { response: null, error: "server_poll_failed" };
 			});
 
 			let timeoutTimer: NodeJS.Timeout | undefined;
@@ -1589,7 +1595,9 @@ export default function (pi: ExtensionAPI) {
 				try { timeoutTimer.unref?.(); } catch { /* ignore */ }
 			});
 
-			const winner = await Promise.race([localPromise, serverPromise, timeoutPromise]);
+			const racers: Promise<{ response?: any; error?: string | null }>[] = [serverPromise, timeoutPromise];
+			if (pending) racers.push(pending.promise);
+			const winner = await Promise.race(racers);
 			clearTimeout(timeoutTimer);
 			try { ac.abort(); } catch { /* ignore */ }
 
