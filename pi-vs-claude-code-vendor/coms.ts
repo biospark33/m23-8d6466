@@ -116,7 +116,9 @@ interface PendingReply {
 	promise: Promise<{ response?: any; error?: string | null }>;
 	result?: { response?: any; error?: string | null };
 	target_name?: string;
-	created_at: string;
+	// Epoch ms at coms_send time (kept as a number so the keepalive pruning
+	// loop avoids re-parsing an ISO string on every sweep).
+	created_at: number;
 	// Effective await deadline (ms). Defaults to TIMEOUT_MS at send time; a
 	// coms_await override replaces it so the keepalive pruning loop below does
 	// not evict the entry before the caller's own timeout fires.
@@ -783,6 +785,14 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	// Context usage can be NaN (e.g. 0/0 before any tokens are counted);
+	// clamp non-finite values to 0 so agent cards never carry NaN/Infinity,
+	// which would later crash widget rendering ("#".repeat(NaN) → RangeError).
+	function safeContextPct(ctx: { getContextUsage?: () => { percent?: number } | null | undefined } | null | undefined): number {
+		const p = ctx?.getContextUsage?.()?.percent;
+		return typeof p === "number" && Number.isFinite(p) ? Math.round(p) : 0;
+	}
+
 	function handleResponse(socket: net.Socket, env: ResponseEnvelope): void {
 		const pending = pendingReplies.get(env.msg_id);
 		if (pending) {
@@ -810,7 +820,7 @@ export default function (pi: ExtensionAPI) {
 	function handlePing(socket: net.Socket, env: PingEnvelope): void {
 		const ctx = currentCtx;
 		const ident = identity;
-		const pct = ctx ? Math.round(ctx.getContextUsage()?.percent ?? 0) : 0;
+		const pct = safeContextPct(ctx);
 		const card: AgentCard = {
 			name: ident?.name ?? "unknown",
 			purpose: ident?.purpose ?? "",
@@ -1114,7 +1124,7 @@ export default function (pi: ExtensionAPI) {
 					started_at: identity.startedAt,
 					explicit: identity.explicit,
 					version: 1,
-					context_used_pct: Math.round(ctx?.getContextUsage()?.percent ?? 0),
+					context_used_pct: safeContextPct(ctx),
 					queue_depth: inboundQueue.size,
 					heartbeat_at: nowIso(),
 				};
@@ -1141,7 +1151,7 @@ export default function (pi: ExtensionAPI) {
 					// Entries under a coms_await deadline measure from the await's
 					// start; the default path (background timer from coms_send)
 					// measures from the message's created_at.
-					const base = entry.await_started_at ?? new Date(entry.created_at).getTime();
+					const base = entry.await_started_at ?? entry.created_at;
 					if (now - base > limit) {
 						pendingReplies.delete(mid);
 					}
@@ -1275,10 +1285,13 @@ export default function (pi: ExtensionAPI) {
 		const out: string[] = [topBorder];
 
 		for (const r of rows) {
-			const pctNum = r.pct ?? 0;
+			// r.pct originates from a peer's card and can be NaN (typeof NaN ===
+			// "number"); without this guard Math.round(NaN) propagates and
+			// String.prototype.repeat(NaN) throws RangeError, killing the TUI.
+			const pctNum = Number.isFinite(r.pct) ? (r.pct as number) : 0;
 			const filled = Math.max(0, Math.min(15, Math.round((pctNum / 100) * 15)));
 			const empty = 15 - filled;
-			const pctLabel = r.pct == null ? "--%" : `${r.pct}%`;
+			const pctLabel = Number.isFinite(r.pct) ? `${r.pct}%` : "--%";
 
 			if (r.stale) {
 				const dimRow = `✗ ${r.name.padEnd(12)} ${abbreviateModel(r.model).padEnd(14)} [${"-".repeat(15)}] ${pctLabel.padStart(4)}  —  ${r.purpose || ""}`;
@@ -1548,7 +1561,7 @@ export default function (pi: ExtensionAPI) {
 				timer: null,
 				promise,
 				target_name: target.name,
-				created_at: nowIso(),
+				created_at: Date.now(),
 				timeout_ms: TIMEOUT_MS,
 			};
 			entry.timer = setTimeout(() => {
@@ -1694,6 +1707,10 @@ export default function (pi: ExtensionAPI) {
 
 			const winner = await Promise.race([entry.promise, timed]);
 			clearTimeout(timedTimer);
+			// The reply is fully consumed by this await (success, error, or
+			// timeout). Drop the entry immediately instead of leaving it for the
+			// keepalive pruning loop to reclaim up to timeout_ms + 60s later.
+			pendingReplies.delete(params.msg_id);
 			if ((winner as any).error) {
 				return {
 					content: [{ type: "text" as const, text: `coms_await: error — ${(winner as any).error}` }],

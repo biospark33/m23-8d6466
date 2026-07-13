@@ -147,7 +147,9 @@ interface PendingReply {
 	result?: { response?: any; error?: string | null };
 	target_name?: string;
 	target_session?: string;
-	created_at: string;
+	// Epoch ms at coms_net_send time (kept as a number so the heartbeat
+	// pruning loop avoids re-parsing an ISO string on every sweep).
+	created_at: number;
 	// Effective await deadline (ms). Defaults to MESSAGE_TIMEOUT_MS at send time;
 	// a coms_net_await override replaces it so the heartbeat pruning loop does
 	// not evict the entry before the caller's own timeout fires.
@@ -855,6 +857,14 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	// Context usage can be NaN (e.g. 0/0 before any tokens are counted);
+	// clamp non-finite values to 0 so agent cards never carry NaN/Infinity,
+	// which would later crash widget rendering ("#".repeat(NaN) → RangeError).
+	function safeContextPct(ctx: { getContextUsage?: () => { percent?: number } | null | undefined } | null | undefined): number {
+		const p = ctx?.getContextUsage?.()?.percent;
+		return typeof p === "number" && Number.isFinite(p) ? Math.round(p) : 0;
+	}
+
 	function handleInboundResponse(data: any): void {
 		const msg_id: string | undefined = data?.msg_id;
 		if (!msg_id) return;
@@ -1214,7 +1224,7 @@ export default function (pi: ExtensionAPI) {
 		heartbeatTimer = setInterval(() => {
 			if (!identity || shuttingDown) return;
 			const ctxNow = currentCtx;
-			const pct = Math.round(ctxNow?.getContextUsage()?.percent ?? 0);
+			const pct = safeContextPct(ctxNow);
 			const hbReq: HeartbeatRequest = {
 				project: identity.project,
 				context_used_pct: pct,
@@ -1236,7 +1246,7 @@ export default function (pi: ExtensionAPI) {
 				// Entries under a coms_net_await deadline measure from the
 				// await's start; the default path measures from the message's
 				// created_at.
-				const base = entry.await_started_at ?? new Date(entry.created_at).getTime();
+				const base = entry.await_started_at ?? entry.created_at;
 				if (now - base > limit) {
 					pendingReplies.delete(mid);
 				}
@@ -1317,10 +1327,13 @@ export default function (pi: ExtensionAPI) {
 		const out: string[] = [topBorder];
 
 		for (const r of rows) {
-			const pctNum = r.pct ?? 0;
+			// r.pct originates from a peer's card and can be NaN (typeof NaN ===
+			// "number"); without this guard Math.round(NaN) propagates and
+			// String.prototype.repeat(NaN) throws RangeError, killing the TUI.
+			const pctNum = Number.isFinite(r.pct) ? (r.pct as number) : 0;
 			const filled = Math.max(0, Math.min(15, Math.round((pctNum / 100) * 15)));
 			const empty = 15 - filled;
-			const pctLabel = r.pct == null ? "--%" : `${r.pct}%`;
+			const pctLabel = Number.isFinite(r.pct) ? `${r.pct}%` : "--%";
 
 			if (r.stale) {
 				const dimRow = `✗ ${r.name.padEnd(12)} ${abbreviateModel(r.model).padEnd(14)} [${"-".repeat(15)}] ${pctLabel.padStart(4)}  —  ${r.purpose || ""}`;
@@ -1497,7 +1510,7 @@ export default function (pi: ExtensionAPI) {
 				promise,
 				target_name: params.target,
 				target_session,
-				created_at: nowIso(),
+				created_at: Date.now(),
 				timeout_ms: MESSAGE_TIMEOUT_MS,
 			});
 
@@ -1650,6 +1663,9 @@ export default function (pi: ExtensionAPI) {
 				pending.await_started_at = Date.now();
 			}
 			if (pending && pending.result) {
+				// Already resolved locally via SSE: this await consumes the reply,
+				// so free the entry now rather than waiting for the prune sweep.
+				pendingReplies.delete(msg_id);
 				const r = pending.result;
 				if (r.error) {
 					return {
@@ -1718,6 +1734,10 @@ export default function (pi: ExtensionAPI) {
 			const winner = await Promise.race(racers);
 			clearTimeout(timeoutTimer);
 			try { ac.abort(); } catch { /* ignore */ }
+			// The reply is fully consumed by this await (success, error, or
+			// timeout). Drop the entry immediately instead of leaving it for the
+			// heartbeat pruning loop to reclaim up to timeout_ms + 60s later.
+			pendingReplies.delete(msg_id);
 
 			if ((winner as any).error) {
 				return {
