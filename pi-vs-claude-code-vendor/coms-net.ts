@@ -972,6 +972,11 @@ export default function (pi: ExtensionAPI) {
 				}
 				audit("sse_disconnect", { reason: safeError(err) });
 			} finally {
+				// releaseLock() alone does not close the underlying source: on an
+				// errored body stream (network failure) the socket would linger
+				// until GC. cancel() explicitly tears it down. After `done` or an
+				// abort this is a no-op/rejection — both swallowed by the try.
+				try { await reader.cancel(); } catch { /* ignore */ }
 				try { reader.releaseLock(); } catch { /* ignore */ }
 			}
 			if (!shuttingDown) {

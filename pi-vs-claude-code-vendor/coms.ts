@@ -32,6 +32,10 @@ const MAX_HOPS = Number(process.env.PI_COMS_MAX_HOPS) || 5;
 const TIMEOUT_MS = Number(process.env.PI_COMS_TIMEOUT_MS) || 1_800_000;
 const PING_INTERVAL_MS = Number(process.env.PI_COMS_PING_INTERVAL_MS) || 10_000;
 const KEEPALIVE_INTERVAL_MS = 30_000;
+// A live agent rewrites heartbeat_at every KEEPALIVE_INTERVAL_MS. Allow three
+// missed cycles before declaring the entry stale — catches recycled PIDs and
+// hung agents, which process.kill(pid, 0) alone cannot detect.
+const HEARTBEAT_STALE_MS = 3 * KEEPALIVE_INTERVAL_MS;
 // Envelopes are newline-framed JSON; prompts carrying file context or
 // multi-turn history routinely exceed 64 KB. 16 MB matches coms-net's
 // SSE_BUF_CAP_BYTES while still bounding the per-line accumulator.
@@ -408,15 +412,30 @@ function pruneDeadEntries(project: string): RegistryEntry[] {
 		}
 		try {
 			process.kill(entry.pid, 0);
-			live.push(entry);
 		} catch (e: any) {
 			if (e && e.code === "ESRCH") {
 				removeRegistryEntry(project, entry.name, entry.session_id);
-			} else {
-				// EPERM means the process exists but we can't signal it — treat as live.
-				live.push(entry);
+				continue;
+			}
+			// EPERM means the process exists but we can't signal it — treat as live.
+			live.push(entry);
+			continue;
+		}
+		// The PID answers, but that isn't proof the agent is alive: the PID may
+		// have been recycled by an unrelated process, or the agent may be hung
+		// with a live process but a dead event loop. A healthy agent rewrites
+		// heartbeat_at every KEEPALIVE_INTERVAL_MS, so prune entries whose
+		// heartbeat is stale (or unparseable — a live agent never writes one).
+		// Entries without heartbeat_at (written by pre-heartbeat agents) are
+		// exempt and stay live on the pid check alone.
+		if (entry.heartbeat_at !== undefined) {
+			const beatMs = Date.parse(entry.heartbeat_at);
+			if (!Number.isFinite(beatMs) || Date.now() - beatMs > HEARTBEAT_STALE_MS) {
+				removeRegistryEntry(project, entry.name, entry.session_id);
+				continue;
 			}
 		}
+		live.push(entry);
 	}
 	return live;
 }
@@ -1014,6 +1033,9 @@ export default function (pi: ExtensionAPI) {
 			started_at: nowIso(),
 			explicit,
 			version: 1,
+			// Seed the heartbeat at registration so a process that hangs before
+			// its first keepalive still becomes stale-detectable by peers.
+			heartbeat_at: nowIso(),
 		};
 		let registryFile: string;
 		try {
@@ -1408,16 +1430,13 @@ export default function (pi: ExtensionAPI) {
 			if (byName) return byName;
 		}
 		// Fall back to scanning all projects by session_id (or name as last resort).
-		for (const proj of listProjects()) {
-			const entries = pruneDeadEntries(proj);
-			const bySession = entries.find((e) => e.session_id === target);
-			if (bySession) return bySession;
-		}
-		for (const proj of listProjects()) {
-			const entries = pruneDeadEntries(proj);
-			const byName = entries.find((e) => e.name === target);
-			if (byName) return byName;
-		}
+		// One prune pass over the combined list — the previous per-project double
+		// loop ran pruneDeadEntries (dir reads + process.kill signals) twice.
+		const allEntries = pruneDeadEntriesAllProjects();
+		const bySession = allEntries.find((e) => e.session_id === target);
+		if (bySession) return bySession;
+		const byNameGlobal = allEntries.find((e) => e.name === target);
+		if (byNameGlobal) return byNameGlobal;
 		return null;
 	}
 
