@@ -17,9 +17,9 @@
  * collision. v1 stays untouched.
  *
  * Usage:
- *   bun scripts/coms-net-server.ts                                 # start hub
- *   pi -e extensions/coms-net.ts                                   # auto-discover local server.json
- *   pi -e extensions/coms-net.ts --server-url http://host:port \
+ *   bun scripts/coms-net-server.ts                                 # start hub (planned — not yet shipped in this branch)
+ *   pi -e pi-vs-claude-code-vendor/coms-net.ts                     # auto-discover local server.json
+ *   pi -e pi-vs-claude-code-vendor/coms-net.ts --server-url http://host:port \
  *      --auth-token <tok> --cname planner --project default
  *
  * Note: the agent name flag is `--cname` (not `--name`). pi's own harness owns
@@ -39,13 +39,23 @@ import * as crypto from "node:crypto";
 // ━━ Constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 const COMS_NET_DIR = path.join(os.homedir(), ".pi", "coms-net");
-const MAX_HOPS = Number(process.env.PI_COMS_NET_MAX_HOPS) || 5;
-const HEARTBEAT_MS = Number(process.env.PI_COMS_NET_HEARTBEAT_MS) || 10_000;
+// Env overrides for tunables are clamped: `Number(env) || DEFAULT` would
+// reject a legitimate 0, accept -1 (setInterval(-1) spins at ~1ms — a
+// self-DoS) or Infinity (silently disables hop protection), and allow
+// unbounded TTLs that pin memory for days.
+function envBoundedInt(env: string | undefined, def: number, min: number, max: number): number {
+	const n = Number(env);
+	if (!Number.isFinite(n) || n <= 0) return def;
+	return Math.min(Math.max(n, min), max);
+}
+const MAX_HOPS = envBoundedInt(process.env.PI_COMS_NET_MAX_HOPS, 5, 1, 64);
+const HEARTBEAT_MS = envBoundedInt(process.env.PI_COMS_NET_HEARTBEAT_MS, 10_000, 1_000, 300_000);
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 10_000;
-const MESSAGE_TIMEOUT_MS = Number(process.env.PI_COMS_NET_MESSAGE_TTL_MS) || 1_800_000;
+const MESSAGE_TIMEOUT_MS = envBoundedInt(process.env.PI_COMS_NET_MESSAGE_TTL_MS, 1_800_000, 1_000, 86_400_000);
 const HTTP_TIMEOUT_MS = 10_000;
 const SSE_BUF_CAP_BYTES = 16 * 1024 * 1024;
+const HTTP_BODY_CAP_BYTES = 16 * 1024 * 1024;
 const SHUTDOWN_DELETE_TIMEOUT_MS = 2_000;
 
 const SERVER_URL_ENV = process.env.PI_COMS_NET_SERVER_URL;
@@ -128,6 +138,9 @@ interface ResponseSubmitRequest {
 	responder_session: string;
 	response: any;
 	error: string | null;
+	// Echoed from the inbound envelope so the original caller can correlate
+	// the reply with its conversation thread.
+	conversation_id: string | null;
 }
 
 interface InboundContext {
@@ -137,16 +150,24 @@ interface InboundContext {
 	sender_name: string;
 	sender_cwd: string;
 	response_schema?: object | null;
+	conversation_id: string | null;
 	fulfilled: boolean;
+	// Epoch ms at receipt; the heartbeat sweep evicts entries that never
+	// reached agent_end (aborted turns) so they can't linger forever or
+	// misattribute later sends' hops.
+	created_at: number;
 }
 
 interface PendingReply {
 	resolve: (value: { response?: any; error?: string | null }) => void;
-	reject: (err: Error) => void;
 	promise: Promise<{ response?: any; error?: string | null }>;
 	result?: { response?: any; error?: string | null };
 	target_name?: string;
 	target_session?: string;
+	conversation_id?: string | null;
+	// Set while a coms_net_await is in flight for this msg_id; a second
+	// concurrent await must not race the same reply.
+	awaiting?: boolean;
 	// Epoch ms at coms_net_send time (kept as a number so the heartbeat
 	// pruning loop avoids re-parsing an ISO string on every sweep).
 	created_at: number;
@@ -264,6 +285,75 @@ function abbreviateModel(model: string): string {
 	return m;
 }
 
+// Peer-controlled strings (card name/purpose/cwd, sender identity) are
+// rendered raw into the TUI and interpolated into injected prompts. Strip
+// C0/DEL control characters (ANSI escape sequences are a terminal-injection
+// channel) and cap length so a hostile or buggy peer can't wreck widget
+// layout. Non-strings coerce to the fallback.
+function sanitizePeerText(s: unknown, fallback = "", max = 64): string {
+	if (typeof s !== "string") return fallback;
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — strips C0/DEL control characters from peer-controlled strings
+	const clean = s.replace(/[\x00-\x1f\x7f]/g, "");
+	return clean.length > max ? clean.slice(0, max) : clean;
+}
+
+// Cards arrive over the wire from the hub (ultimately from other peers), so
+// their string fields are untrusted: coerce non-strings to safe defaults and
+// strip control characters / cap length, or a single malformed card crashes
+// widget rendering (localeCompare/padEnd on a non-string). A card without a
+// string session_id is unusable as a map key — drop it.
+function sanitizeCard(a: any): AgentCard | null {
+	if (!a || typeof a !== "object" || typeof a.session_id !== "string" || !a.session_id) return null;
+	return {
+		...a,
+		name: sanitizePeerText(a.name, "?"),
+		purpose: sanitizePeerText(a.purpose),
+		model: sanitizePeerText(a.model, "?"),
+		color: sanitizePeerText(a.color),
+		cwd: sanitizePeerText(a.cwd),
+		project: sanitizePeerText(a.project),
+	};
+}
+
+// Same coercion for the partial fields of an agent_updated patch — only the
+// fields actually present in the patch.
+function sanitizeCardPatch(a: Partial<AgentCard>): Partial<AgentCard> {
+	const out: Partial<AgentCard> = { ...a };
+	if (out.name !== undefined) out.name = sanitizePeerText(out.name, "?");
+	if (out.purpose !== undefined) out.purpose = sanitizePeerText(out.purpose);
+	if (out.model !== undefined) out.model = sanitizePeerText(out.model, "?");
+	if (out.color !== undefined) out.color = sanitizePeerText(out.color);
+	if (out.cwd !== undefined) out.cwd = sanitizePeerText(out.cwd);
+	if (out.project !== undefined) out.project = sanitizePeerText(out.project);
+	return out;
+}
+
+// Read a response body with an accumulated-byte cap: resp.text() buffers the
+// whole body, so a misbehaving/compromised server could OOM the agent on any
+// endpoint. (The SSE path has its own cap in makeSseParser.feed.)
+async function readBodyCapped(resp: Response): Promise<string> {
+	if (!resp.body) return "";
+	const reader = resp.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (value) {
+				total += value.length;
+				if (total > HTTP_BODY_CAP_BYTES) {
+					throw new Error("coms-net: response body exceeded cap");
+				}
+				chunks.push(value);
+			}
+		}
+	} finally {
+		try { reader.releaseLock(); } catch { /* ignore */ }
+	}
+	return new TextDecoder("utf-8").decode(Buffer.concat(chunks));
+}
+
 function findSystemPromptPath(argv: string[]): string | null {
 	const scan = (flag: string): string | null => {
 		for (let i = 0; i < argv.length; i++) {
@@ -300,7 +390,7 @@ function readFrontmatterFromArgv(argv: string[]): { name?: string; description?:
 // ━━ Registry / server-discovery I/O ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 // Rejects path traversal / separator injection in the project name, which
-// can originate from untrusted input (--project CLI flag or PI_COMS_PROJECT
+// can originate from untrusted input (--project CLI flag or PI_COMS_NET_PROJECT
 // env var). Strict whitelist rather than a separator blacklist: also blocks
 // Windows ADS (colon) and null-byte injection, which the old blacklist let
 // through. "." and ".." pass the character class, so they're rejected
@@ -509,6 +599,9 @@ export default function (pi: ExtensionAPI) {
 	let displayProject: string | null = null;
 	let lastWidgetSnapshot = "";
 	let shuttingDown = false;
+	// Effective heartbeat cadence — the server may tune it via
+	// RegisterResponse.heartbeat_interval_ms; defaults to HEARTBEAT_MS.
+	let heartbeatIntervalMs = HEARTBEAT_MS;
 
 	// ━━ HTTP helper ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -549,7 +642,7 @@ export default function (pi: ExtensionAPI) {
 		let text: string;
 		try {
 			resp = await fetch(url, init);
-			text = await resp.text();
+			text = await readBodyCapped(resp);
 		} catch (err: any) {
 			throw new Error(`coms-net: fetch failed: ${err?.message ?? String(err)}`);
 		} finally {
@@ -593,8 +686,12 @@ export default function (pi: ExtensionAPI) {
 		let event = "message";
 		let dataLines: string[] = [];
 		let id: string | undefined;
+		// Whether any field line was seen for the current event — lets a
+		// data-less named event (e.g. `event: server_ping\n\n`) still dispatch
+		// with empty data per the SSE spec instead of vanishing silently.
+		let sawField = false;
 		function flush(): void {
-			if (dataLines.length > 0) {
+			if (dataLines.length > 0 || (sawField && event !== "message")) {
 				const joined = dataLines.join("\n");
 				let data: any = joined;
 				try { data = JSON.parse(joined); } catch { /* keep as string */ }
@@ -603,20 +700,32 @@ export default function (pi: ExtensionAPI) {
 			event = "message";
 			dataLines = [];
 			id = undefined;
+			sawField = false;
 		}
 		function processLine(line: string): void {
 			if (line.length === 0) {
 				flush();
 			} else if (line.startsWith(":")) {
 				// SSE comment
-			} else if (line.startsWith("event:")) {
-				event = line.slice(6).trimStart();
-			} else if (line.startsWith("data:")) {
-				let v = line.slice(5);
-				if (v.startsWith(" ")) v = v.slice(1);
-				dataLines.push(v);
-			} else if (line.startsWith("id:")) {
-				id = line.slice(3).trimStart();
+			} else {
+				// Per the SSE spec a field line without a colon uses the whole
+				// line as the field name with an empty value (a bare `data`
+				// line appends "").
+				const colon = line.indexOf(":");
+				const field = colon >= 0 ? line.slice(0, colon) : line;
+				const raw = colon >= 0 ? line.slice(colon + 1) : "";
+				if (field === "event") {
+					event = raw.trimStart();
+					sawField = true;
+				} else if (field === "data") {
+					let v = raw;
+					if (v.startsWith(" ")) v = v.slice(1);
+					dataLines.push(v);
+					sawField = true;
+				} else if (field === "id") {
+					id = raw.trimStart();
+					sawField = true;
+				}
 			}
 		}
 		return {
@@ -627,7 +736,10 @@ export default function (pi: ExtensionAPI) {
 			feed(chunk: Uint8Array): void {
 				// Bound the unconsumed tail so a server that streams data with no
 				// newline can't grow buf without limit and OOM the process.
-				if (buf.length + chunk.length > SSE_BUF_CAP_BYTES) {
+				// buf.length counts UTF-16 code units, not bytes — measure the
+				// actual UTF-8 byte length so the cap can't be exceeded ~2-3x
+				// in memory by multi-byte content.
+				if (Buffer.byteLength(buf, "utf8") + chunk.length > SSE_BUF_CAP_BYTES) {
 					throw new Error("coms-net: SSE buffer exceeded cap — dropping connection");
 				}
 				buf += decoder.decode(chunk, { stream: true });
@@ -714,18 +826,19 @@ export default function (pi: ExtensionAPI) {
 				peerCards.clear();
 				const agents: AgentCard[] = Array.isArray(data.agents) ? data.agents : [];
 				for (const a of agents) {
-					if (!a || typeof a.session_id !== "string") continue;
-					if (identity && a.session_id === identity.session_id) continue;
-					peerCards.set(a.session_id, a);
+					const card = sanitizeCard(a);
+					if (!card) continue;
+					if (identity && card.session_id === identity.session_id) continue;
+					peerCards.set(card.session_id, card);
 				}
 				maybeRequestRender();
 				return;
 			}
 			case "agent_joined": {
-				const a: AgentCard | undefined = data.agent;
-				if (!a || typeof a.session_id !== "string") return;
-				if (identity && a.session_id === identity.session_id) return;
-				peerCards.set(a.session_id, a);
+				const card = sanitizeCard(data.agent);
+				if (!card) return;
+				if (identity && card.session_id === identity.session_id) return;
+				peerCards.set(card.session_id, card);
 				maybeRequestRender();
 				return;
 			}
@@ -735,10 +848,11 @@ export default function (pi: ExtensionAPI) {
 				if (identity && a.session_id === identity.session_id) return;
 				const prev = peerCards.get(a.session_id);
 				if (prev) {
-					peerCards.set(a.session_id, applyAgentPatch(prev, a));
+					peerCards.set(a.session_id, applyAgentPatch(prev, sanitizeCardPatch(a)));
 				} else if (a.name && a.color && a.model) {
 					// Defensive: treat as a join.
-					peerCards.set(a.session_id, a as AgentCard);
+					const card = sanitizeCard(a);
+					if (card) peerCards.set(a.session_id, card);
 				}
 				maybeRequestRender();
 				return;
@@ -811,13 +925,20 @@ export default function (pi: ExtensionAPI) {
 	function handleInboundPrompt(data: any): void {
 		const msg_id: string | undefined = data?.msg_id;
 		if (!msg_id || typeof msg_id !== "string") return;
+		// Redelivery after an SSE reconnect must not inject the same prompt
+		// twice into the session.
+		if (inboundQueue.has(msg_id)) {
+			audit("prompt_in_duplicate", { msg_id });
+			return;
+		}
 		const sender = data.sender ?? {};
-		const senderName = typeof sender.name === "string" ? sender.name : "unknown";
-		const senderCwd = typeof sender.cwd === "string" ? sender.cwd : "?";
+		const senderName = sanitizePeerText(sender.name, "unknown");
+		const senderCwd = sanitizePeerText(sender.cwd, "?");
 		const senderSession = typeof sender.session_id === "string" ? sender.session_id : "?";
 		const promptText = typeof data.prompt === "string" ? data.prompt : "";
 		const hops = typeof data.hops === "number" ? data.hops : 0;
 		const responseSchema = (data.response_schema && typeof data.response_schema === "object") ? data.response_schema : null;
+		const conversationId = typeof data.conversation_id === "string" ? data.conversation_id : null;
 
 		const inbound: InboundContext = {
 			msg_id,
@@ -826,7 +947,9 @@ export default function (pi: ExtensionAPI) {
 			sender_name: senderName,
 			sender_cwd: senderCwd,
 			response_schema: responseSchema,
+			conversation_id: conversationId,
 			fulfilled: false,
+			created_at: Date.now(),
 		};
 		inboundQueue.set(msg_id, inbound);
 
@@ -841,6 +964,7 @@ export default function (pi: ExtensionAPI) {
 						msg_id,
 						sender_session: senderSession,
 						response_schema: responseSchema,
+						conversation_id: conversationId,
 						hops,
 					},
 				},
@@ -945,6 +1069,11 @@ export default function (pi: ExtensionAPI) {
 					if (currentCtx?.hasUI) {
 						try { currentCtx.ui.notify(`📡 coms-net: connection rejected (HTTP ${resp.status}) — not retrying`, "error"); } catch { /* ignore */ }
 					}
+					// Without this the heartbeat keeps POSTing status "online" and
+					// the hub shows the agent routable while it can never receive
+					// inbound prompts. (Mirrors the heartbeat terminal-status
+					// handler.)
+					void cleanShutdown();
 					return;
 				}
 				scheduleReconnect();
@@ -1034,6 +1163,30 @@ export default function (pi: ExtensionAPI) {
 		try { (reconnectTimer as any).unref?.(); } catch { /* ignore */ }
 	}
 
+	// A `response` event delivered while SSE was down is lost for any send
+	// never awaited/polled — after a reconnect, poll each unresolved pending
+	// entry once and resolve the ones already terminal on the server, so the
+	// reply isn't silently dropped until the prune sweep (up to
+	// MESSAGE_TIMEOUT_MS later).
+	function resyncPendingReplies(): void {
+		for (const [mid, entry] of pendingReplies.entries()) {
+			if (entry.result) continue;
+			httpFetch("GET", `/v1/messages/${encodeURIComponent(mid)}`)
+				.then((data: any) => {
+					if (data?.status !== "complete" && data?.status !== "error" && data?.status !== "timeout") return;
+					if (entry.result) return; // resolved via SSE while this poll was in flight
+					const errVal = data.status === "timeout"
+						? "timeout"
+						: typeof data.error === "string" ? data.error
+							: data.status === "error" ? "error" : null;
+					entry.result = { response: data.response ?? null, error: errVal };
+					try { entry.resolve(entry.result); } catch { /* ignore */ }
+					audit("response_resynced", { msg_id: mid, status: data.status });
+				})
+				.catch(() => { /* best-effort resync; the prune sweep is the backstop */ });
+		}
+	}
+
 	async function reRegisterAndOpen(): Promise<void> {
 		if (!identity || shuttingDown) return;
 		// Re-register (server upserts), then re-open SSE.
@@ -1051,6 +1204,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		sseUrlPath = reg.sse_url;
 		audit("sse_reconnect", { attempt: reconnectAttempts });
+		resyncPendingReplies();
 		// Fire and forget; openSse manages its own lifecycle.
 		void openSse();
 	}
@@ -1073,6 +1227,11 @@ export default function (pi: ExtensionAPI) {
 		const resp = await httpFetch("POST", "/v1/agents/register", req) as RegisterResponse;
 		if (!resp || !resp.agent) {
 			throw new Error("coms-net: malformed register response");
+		}
+		// Without sse_url the agent registers and heartbeats but openSse()
+		// silently no-ops forever — never receiving inbound prompts. Fail loud.
+		if (typeof resp.sse_url !== "string" || !resp.sse_url) {
+			throw new Error("coms-net: malformed register response (missing sse_url)");
 		}
 		// Server may auto-suffix the name on collision.
 		if (resp.agent.name !== identity.name) {
@@ -1116,6 +1275,13 @@ export default function (pi: ExtensionAPI) {
 		authToken = null;
 		sseUrlPath = null;
 		peerCards.clear();
+		// Settle in-flight entries before clearing so a coms_net_await racing
+		// this reset resolves immediately instead of hanging until its own
+		// timeout (up to MESSAGE_TIMEOUT_MS).
+		for (const entry of pendingReplies.values()) {
+			entry.result = { error: "session_reset" };
+			try { entry.resolve(entry.result); } catch { /* ignore */ }
+		}
 		pendingReplies.clear();
 		inboundQueue.clear();
 		sseAbort = null;
@@ -1124,6 +1290,7 @@ export default function (pi: ExtensionAPI) {
 		reconnectAttempts = 0;
 		notifiedReconnectCap = false;
 		lastWidgetSnapshot = "";
+		heartbeatIntervalMs = HEARTBEAT_MS;
 
 		applyExtensionDefaults(import.meta.url, ctx);
 		currentCtx = ctx;
@@ -1169,8 +1336,19 @@ export default function (pi: ExtensionAPI) {
 		// 2. Resolve server URL.
 		serverUrl = resolveServerUrl(project, flags.serverUrl);
 		if (!serverUrl) {
+			if (flags.serverUrl) {
+				// An explicit --server-url was provided but rejected as
+				// invalid/insecure — say so instead of telling the user to
+				// start a server.
+				ctx.ui?.notify?.(
+					`📡 coms-net: invalid or insecure --server-url "${flags.serverUrl}" (https required for non-loopback hosts)`,
+					"error",
+				);
+				audit("boot_failed", { reason: "invalid_server_url", project });
+				return;
+			}
 			ctx.ui?.notify?.(
-				`📡 coms-net: no server URL for project "${project}". Start one with: bun scripts/coms-net-server.ts`,
+				`📡 coms-net: no server URL for project "${project}". Start one with: bun scripts/coms-net-server.ts (planned — not yet shipped in this branch)`,
 				"error",
 			);
 			audit("boot_failed", { reason: "no_server_url", project });
@@ -1189,12 +1367,13 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// 4. Health check — verify reachability without consuming auth surface.
+		// 4. Health check — verify reachability over the authenticated channel
+		// (httpFetch attaches the bearer to every request, /health included).
 		try {
 			await httpFetch("GET", "/health");
 		} catch (err) {
 			ctx.ui?.notify?.(
-				`📡 coms-net: server unreachable at ${serverUrl} — ${safeError(err)}. Start one with: bun scripts/coms-net-server.ts`,
+				`📡 coms-net: server unreachable at ${serverUrl} — ${safeError(err)}. Start one with: bun scripts/coms-net-server.ts (planned — not yet shipped in this branch)`,
 				"error",
 			);
 			audit("boot_failed", { reason: "health_failed", error: safeError(err) });
@@ -1214,6 +1393,14 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		sseUrlPath = reg.sse_url;
+
+		// Honor the server-advertised heartbeat cadence when sane (finite,
+		// 1s–5min); fall back to the local default so a malformed value can't
+		// spin or stall the loop.
+		const srvHb = reg.heartbeat_interval_ms;
+		heartbeatIntervalMs = typeof srvHb === "number" && Number.isFinite(srvHb) && srvHb >= 1_000
+			? Math.min(srvHb, 300_000)
+			: HEARTBEAT_MS;
 
 		// 6. Boot audit.
 		try {
@@ -1255,7 +1442,7 @@ export default function (pi: ExtensionAPI) {
 				.catch((err) => {
 					audit("heartbeat_failed", { reason: safeError(err) });
 					// 401/403/404 mean the session is dead or the token/URL is wrong —
-					// retrying every HEARTBEAT_MS will never succeed, so shut down
+					// retrying every heartbeatIntervalMs will never succeed, so shut down
 					// cleanly instead of spamming the server. (Mirrors the
 					// terminal-status handling in scheduleReconnect/openSse.)
 					if (err instanceof HttpError && (err.status === 401 || err.status === 403 || err.status === 404)) {
@@ -1278,7 +1465,16 @@ export default function (pi: ExtensionAPI) {
 					pendingReplies.delete(mid);
 				}
 			}
-		}, HEARTBEAT_MS);
+			// Evict inbound contexts whose turn never reached agent_end
+			// (aborted session): left in place they'd stay branch-anchored,
+			// misattribute later sends' hops, and grow the map unboundedly
+			// under a prompt flood.
+			for (const [mid, ctx] of inboundQueue.entries()) {
+				if (now - ctx.created_at > MESSAGE_TIMEOUT_MS + 60_000) {
+					inboundQueue.delete(mid);
+				}
+			}
+		}, heartbeatIntervalMs);
 		try { (heartbeatTimer as any).unref?.(); } catch { /* ignore */ }
 	});
 
@@ -1299,6 +1495,10 @@ export default function (pi: ExtensionAPI) {
 		for (const [sid, card] of peerCards.entries()) {
 			if (identity && sid === identity.session_id) continue;
 			if (!includeExplicit && card.explicit) continue;
+			// After `/coms-net --project X` the widget shows project X; SSE
+			// events for the own project keep writing cards into peerCards, so
+			// filter here or the widget gradually mixes both projects' agents.
+			if (displayProject && card.project !== displayProject) continue;
 			rows.push({
 				name: card.name,
 				model: card.model,
@@ -1430,7 +1630,15 @@ export default function (pi: ExtensionAPI) {
 				}
 				throw new Error(`coms-net: list failed: ${safeError(err)}`);
 			}
-			const agents: AgentCard[] = Array.isArray(resp?.agents) ? resp.agents : [];
+			const rawAgents: any[] = Array.isArray(resp?.agents) ? resp.agents : [];
+			// Cards are peer-controlled — coerce untrusted string fields so a
+			// non-string name/model can't throw out of abbreviateModel and
+			// escape execute().
+			const agents: AgentCard[] = [];
+			for (const a of rawAgents) {
+				const card = sanitizeCard(a);
+				if (card) agents.push(card);
+			}
 			const peers = agents.filter(a => a.session_id !== identity!.session_id);
 
 			const lines = peers.length === 0
@@ -1501,14 +1709,22 @@ export default function (pi: ExtensionAPI) {
 				throw new Error(`coms-net: hop limit reached (${hops} >= ${MAX_HOPS})`);
 			}
 
+			const conversationId = typeof (params as any).conversation_id === "string" ? (params as any).conversation_id : null;
+			// Coerce with the same rule the receiver applies in
+			// handleInboundPrompt: a string/number schema would otherwise cross
+			// the wire and be silently dropped, masking a caller error in a
+			// contract parameter.
+			const schemaParam = (params as any).response_schema;
+			const responseSchema = (schemaParam && typeof schemaParam === "object") ? schemaParam as object : null;
+
 			const req: SendRequest = {
 				project: identity.project,
 				sender_session: identity.session_id,
 				target: params.target,
 				target_session: null,
 				prompt: params.prompt,
-				conversation_id: (params as any).conversation_id ?? null,
-				response_schema: ((params as any).response_schema as object | undefined) ?? null,
+				conversation_id: conversationId,
+				response_schema: responseSchema,
 				hops,
 			};
 
@@ -1522,21 +1738,24 @@ export default function (pi: ExtensionAPI) {
 				}
 				throw new Error(`coms-net: send failed: ${safeError(err)}`);
 			}
+			// Without a string msg_id the pending entry would key the map by
+			// `undefined` and the SSE response could never match it.
+			if (typeof resp?.msg_id !== "string" || !resp.msg_id) {
+				throw new Error("coms-net: malformed send response (missing msg_id)");
+			}
 			const { msg_id, target_session } = resp;
 
 			// Park a pending entry that the SSE `response` event will resolve.
 			let resolveFn!: (v: { response?: any; error?: string | null }) => void;
-			let rejectFn!: (e: Error) => void;
-			const promise = new Promise<{ response?: any; error?: string | null }>((res, rej) => {
+			const promise = new Promise<{ response?: any; error?: string | null }>((res) => {
 				resolveFn = res;
-				rejectFn = rej;
 			});
 			pendingReplies.set(msg_id, {
 				resolve: resolveFn,
-				reject: rejectFn,
 				promise,
 				target_name: params.target,
 				target_session,
+				conversation_id: conversationId,
 				created_at: Date.now(),
 				timeout_ms: MESSAGE_TIMEOUT_MS,
 			});
@@ -1557,7 +1776,7 @@ export default function (pi: ExtensionAPI) {
 					type: "text" as const,
 					text: `coms_net_send → ${params.target}\nmsg_id ${msg_id}\nhops ${hops}`,
 				}],
-				details: { msg_id, target: params.target, target_session, hops },
+				details: { msg_id, target: params.target, target_session, hops, conversation_id: conversationId },
 			};
 		},
 		renderCall(args, theme) {
@@ -1609,7 +1828,7 @@ export default function (pi: ExtensionAPI) {
 					: `coms_net_get: complete\n${typeof r.response === "string" ? r.response : JSON.stringify(r.response, null, 2)}`;
 				return {
 					content: [{ type: "text" as const, text }],
-					details: { status: "complete", response: r.response, error: r.error ?? null },
+					details: { status: "complete", response: r.response, error: r.error ?? null, conversation_id: pending.conversation_id ?? null },
 				};
 			}
 			// Fall back to server.
@@ -1629,18 +1848,19 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 			const status = resp?.status ?? "pending";
+			const conversationId = typeof resp?.conversation_id === "string" ? resp.conversation_id : null;
 			if (status === "complete" || status === "error" || status === "timeout") {
 				const text = resp.error
 					? `coms_net_get: ${status} — ${resp.error}`
 					: `coms_net_get: ${status}\n${typeof resp.response === "string" ? resp.response : (JSON.stringify(resp.response, null, 2) ?? "")}`;
 				return {
 					content: [{ type: "text" as const, text }],
-					details: { status, response: resp.response, error: resp.error ?? null },
+					details: { status, response: resp.response, error: resp.error ?? null, conversation_id: conversationId },
 				};
 			}
 			return {
 				content: [{ type: "text" as const, text: `coms_net_get: ${status}` }],
-				details: { status },
+				details: { status, conversation_id: conversationId },
 			};
 		},
 		renderCall(args, theme) {
@@ -1675,17 +1895,32 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_callId, params) {
 			const msg_id = (params as any).msg_id as string;
-			const timeoutMs = typeof (params as any).timeout_ms === "number" && (params as any).timeout_ms > 0
-				? (params as any).timeout_ms
+			// Clamp to the documented server cap: an uncapped value lets
+			// Infinity / >2³¹−1 collapse to ~1ms in setTimeout (instant spurious
+			// timeout), and a huge value would block the agent far past the
+			// "Server cap applies" contract.
+			const rawTimeout = (params as any).timeout_ms;
+			const timeoutMs = typeof rawTimeout === "number" && Number.isFinite(rawTimeout) && rawTimeout > 0
+				? Math.min(rawTimeout, MESSAGE_TIMEOUT_MS)
 				: MESSAGE_TIMEOUT_MS;
 
 			// Local SSE-resolved fast path.
 			const pending = pendingReplies.get(msg_id);
+			if (pending?.awaiting) {
+				// A coms_net_await is already racing this reply — a second one
+				// would double-consume it (or hit "unknown msg_id" after the
+				// first await deletes the entry).
+				return {
+					content: [{ type: "text" as const, text: `coms_net_await: error — already awaiting msg_id ${msg_id}` }],
+					details: { error: "already_awaiting" },
+				};
+			}
 			// Record the effective deadline so the heartbeat pruning loop honors
 			// the caller's timeout instead of the default MESSAGE_TIMEOUT_MS,
 			// measured from this invocation (the server-side await starts now,
 			// not at coms_net_send time).
 			if (pending) {
+				pending.awaiting = true;
 				pending.timeout_ms = timeoutMs;
 				pending.await_started_at = Date.now();
 			}
@@ -1722,7 +1957,9 @@ export default function (pi: ExtensionAPI) {
 				if (data?.status === "complete") return { response: data.response, error: null };
 				if (data?.status === "error") return { response: null, error: data.error ?? "error" };
 				if (data?.status === "timeout") return { response: null, error: "timeout" };
-				return { response: data?.response, error: data?.error ?? null };
+				// A non-terminal status (queued/delivered/pending) or a missing
+				// one must not alias to a successful empty reply.
+				return { response: null, error: `unexpected_status:${data?.status ?? "unknown"}` };
 			}).catch((err) => {
 				if (err instanceof HttpError) {
 					if (err.status === 404) {
@@ -1832,7 +2069,13 @@ export default function (pi: ExtensionAPI) {
 
 		let payload: any = lastAssistantText;
 		let error: string | null = null;
-		if (inbound.response_schema && typeof inbound.response_schema === "object") {
+		if (!lastAssistantText.trim()) {
+			// An aborted / tool-calls-only / errored turn produced no assistant
+			// text — POSTing "" with error: null would resolve the caller's
+			// coms_net_await with a blank success instead of a real failure.
+			error = "empty response (turn produced no reply text)";
+			payload = null;
+		} else if (inbound.response_schema && typeof inbound.response_schema === "object") {
 			// Models frequently wrap structured output in a ```json fence even when
 			// asked for raw JSON — unwrap one before parsing so that common case
 			// doesn't spuriously fail with "response not valid JSON".
@@ -1851,6 +2094,7 @@ export default function (pi: ExtensionAPI) {
 			responder_session: identity.session_id,
 			response: payload,
 			error,
+			conversation_id: inbound.conversation_id,
 		};
 
 		try {
@@ -1877,11 +2121,15 @@ export default function (pi: ExtensionAPI) {
 		description: "Refresh the coms-net pool widget; or --all / --project <name> / --server / --reconnect",
 		handler: async (args, ctx) => {
 			const trimmed = (args ?? "").trim();
-			if (trimmed.includes("--all")) {
+			// Tokenize so `--all` etc. match only as exact tokens — substring
+			// matching would also fire on `--allow`, `--allfoo`, or a project
+			// name containing "--all".
+			const tokens = trimmed.split(/\s+/).filter(Boolean);
+			if (tokens.includes("--all")) {
 				includeExplicit = !includeExplicit;
 				try { ctx.ui.notify(`coms-net: include_explicit = ${includeExplicit}`, "info"); } catch { /* ignore */ }
 			}
-			if (trimmed.includes("--reconnect")) {
+			if (tokens.includes("--reconnect")) {
 				try { ctx.ui.notify("coms-net: reconnecting SSE...", "info"); } catch { /* ignore */ }
 				// A pending scheduled reconnect must not fire alongside this
 				// manual one — that would double the register + SSE-open.
@@ -1897,7 +2145,7 @@ export default function (pi: ExtensionAPI) {
 				notifiedReconnectCap = false;
 				try { await reRegisterAndOpen(); } catch (err) { audit("manual_reconnect_failed", { reason: safeError(err) }); }
 			}
-			if (trimmed.includes("--server")) {
+			if (tokens.includes("--server")) {
 				try {
 					const health = await httpFetch("GET", "/health");
 					ctx.ui?.notify?.(
@@ -1908,9 +2156,10 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui?.notify?.(`coms-net: server health failed — ${safeError(err)}`, "error");
 				}
 			}
-			const projectMatch = trimmed.match(/--project\s+(\S+)/);
-			if (projectMatch) {
-				displayProject = projectMatch[1];
+			const projectIdx = tokens.indexOf("--project");
+			const projectArg = projectIdx >= 0 ? tokens[projectIdx + 1] : undefined;
+			if (projectArg) {
+				displayProject = projectArg;
 				try { ctx.ui.notify(`coms-net: displaying project ${displayProject}`, "info"); } catch { /* ignore */ }
 			}
 
@@ -1922,12 +2171,15 @@ export default function (pi: ExtensionAPI) {
 				const agents: AgentCard[] = Array.isArray(resp?.agents) ? resp.agents : [];
 				peerCards.clear();
 				for (const a of agents) {
-					if (identity && a.session_id === identity.session_id) continue;
-					peerCards.set(a.session_id, a);
+					const card = sanitizeCard(a);
+					if (!card) continue;
+					if (identity && card.session_id === identity.session_id) continue;
+					peerCards.set(card.session_id, card);
 				}
 				maybeRequestRender();
 			} catch (err) {
 				audit("refresh_failed", { reason: safeError(err) });
+				try { ctx.ui?.notify?.(`coms-net: refresh failed — ${safeError(err)}`, "error"); } catch { /* ignore */ }
 			}
 		},
 	});

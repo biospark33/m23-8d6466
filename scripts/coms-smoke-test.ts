@@ -4,38 +4,73 @@
  *
  * Exercises BOTH Pi agent messaging substrates against pinned `pi@0.55.0`:
  *
- *   Path A — subprocess-RPC (`pi --mode json -p`): spawns a headless pi and
- *            parses its JSON event stream. This is the day-1 default path and
- *            needs NO vendored coms.ts. Transport parse is always verified; the
- *            live model turn is only asserted when pi auth is available (the
- *            harness auto-skips it otherwise — never fabricated).
+ *   Path A — subprocess-RPC (`pi --mode json -p`): spawns two headless pi
+ *            processes and parses their JSON event streams. A round-trip counts
+ *            ONLY from a real `agent_end` event carrying assistant text. This is
+ *            the make-or-break message path per the story's AC1 OR clause.
  *
- *   Path B — socket-coms: verifies the vendored coms.ts extension loads on
- *            pi 0.55.0 (AC3, `pi -e ./coms.ts --list-models`), then exercises
- *            the peer registry contract the extension itself uses
- *            (~/.pi/coms/projects/<project>/agents/<name>.json write → discover)
- *            inside an ISOLATED PI_COMS_DIR so real per-user coms is untouched.
+ *   Path B — socket-coms: verifies BOTH vendored extensions load on pi 0.55.0
+ *            (AC3, `pi -e ./coms.ts|coms-net.ts --list-models`), then spawns two
+ *            REAL concurrent `pi -e ./coms.ts --mode json --cname …` peers from
+ *            the vendor dir and waits for coms.ts's own session_start to write
+ *            both registry entries into an isolated PI_COMS_DIR — no registry
+ *            JSON is ever hand-written by this script. Agent A is instructed
+ *            (via its -p prompt) to coms_send agent B and coms_await the reply;
+ *            B's coms.ts auto-handles the inbound prompt and replies on
+ *            agent_end. The round-trip counts only from real pi JSON events in
+ *            A's stream (coms_send ack + coms_await reply + agent_end with
+ *            assistant text).
  *
  * Emits a single structured JSON report to stdout: agents registered + messages
- * exchanged per path, plus an AC map. Exit 0 iff every make-or-break check that
- * can run under current auth actually passed.
+ * exchanged per path, plus an AC map. Exit 0 iff the make-or-break gate holds:
+ * Path A produced a real agent_end round-trip AND Path B registered ≥2 real
+ * peers, and every other gating check passed. The Path B live exchange is
+ * reported PASS/FAIL with real evidence but is NOT gating: AC1's message
+ * clause is satisfied by either substrate (story OR clause), and the
+ * model-driven reply depends on two live agents' turn timing.
  *
- * INV-1: no real API keys are read, written, or logged — the live turn uses
+ * Model override: set PI_SMOKE_MODEL to pin the model used by every spawned
+ * pi (passed through as `--model`) — e.g. when the default provider's auth is
+ * expired: PI_SMOKE_MODEL=openrouter/anthropic/claude-haiku-4.5. Unset → pi's
+ * configured default model.
+ *
+ * INV-1: no real API keys are read, written, or logged — the live turns use
  *        whatever auth pi already holds and this script never touches secrets.
- * INV-2: registry writes go to a per-run temp PI_COMS_DIR (0700), so there is
- *        no cross-user leakage and the host's ~/.pi/coms is never mutated.
+ * INV-2: Path B spawns run with PI_COMS_DIR pointed at a per-run temp dir
+ *        (0700), so spawned pi registry writes are confined there and the
+ *        host's ~/.pi/coms is never mutated.
  *
- * Usage: bun scripts/coms-smoke-test.ts
+ * Usage:
+ *   bun scripts/coms-smoke-test.ts
+ *   PI_SMOKE_MODEL=openrouter/anthropic/claude-haiku-4.5 bun scripts/coms-smoke-test.ts
  */
 
-import { spawnSync } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 const VENDOR_DIR = path.join(import.meta.dir, "..", "pi-vs-claude-code-vendor");
 const COMS_EXT = path.join(VENDOR_DIR, "coms.ts");
+const COMS_NET_EXT = path.join(VENDOR_DIR, "coms-net.ts");
 const PIN = "0.55.0";
+
+// Model override for every spawned pi — see header (PI_SMOKE_MODEL).
+const SMOKE_MODEL = process.env.PI_SMOKE_MODEL?.trim() || null;
+const modelArgs = (): string[] => (SMOKE_MODEL ? ["--model", SMOKE_MODEL] : []);
+
+const SPAWN_TIMEOUT_MS = 90_000; // per `pi -p` spawn (either path)
+const EXT_LOAD_TIMEOUT_MS = 60_000;
+// `pi --version` also loads global extensions before printing; 10s proved
+// flaky under load (ETIMEDOUT with four peers spawning), so keep 30s.
+const VERSION_TIMEOUT_MS = 30_000;
+const REGISTRY_POLL_TIMEOUT_MS = 30_000;
+// pi's JSON event stream includes full message snapshots per delta; 1 MiB
+// (spawnSync's default) is not enough for a chatty turn.
+const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const COMS_PROJECT = "smoke"; // isolated project namespace for Path B peers
+const AWAIT_TIMEOUT_MS = 45_000; // coms_await budget inside agent A's prompt
 
 type Check = { name: string; ok: boolean; skipped?: string; detail?: string };
 const checks: Check[] = [];
@@ -44,97 +79,281 @@ const record = (c: Check): Check => {
 	return c;
 };
 
-// ── pi presence + version pin (AC precondition) ─────────────────────────────
-function checkPiVersion(): string | null {
-	const r = spawnSync("pi", ["--version"], { encoding: "utf8", shell: process.platform === "win32" });
-	const version = (r.stdout ?? "").trim().split("\n")[0]?.trim() ?? "";
-	record({
-		name: "pi_version_pin",
-		ok: version === PIN,
-		detail: `found "${version}", expected "${PIN}"`,
-	});
-	return version === PIN ? version : null;
+// ── Spawn-result inspection (C1/C2): timeout, missing binary, and signal
+//    deaths must surface as failed checks, never as empty-output silence. ────
+type SyncResult = ReturnType<typeof spawnSync>;
+function spawnProblem(r: SyncResult): string | null {
+	if (r.error) return `spawn error: ${String(r.error)}`;
+	if (r.signal) return `killed by signal ${r.signal}`;
+	if (r.status === null) return "no exit status (status=null)";
+	return null;
 }
 
-// ── AC3: vendored coms.ts loads on pinned pi (`-e ./coms.ts --list-models`) ──
-function checkExtensionLoads(): number {
-	const r = spawnSync("pi", ["-e", COMS_EXT, "--list-models"], {
+// ── pi presence + version pin (AC precondition) ─────────────────────────────
+function checkPiVersion(): string | null {
+	const r = spawnSync("pi", ["--version"], {
 		encoding: "utf8",
-		cwd: VENDOR_DIR,
+		timeout: VERSION_TIMEOUT_MS,
+		maxBuffer: MAX_OUTPUT_BYTES,
 		shell: process.platform === "win32",
 	});
-	const modelCount = (r.stdout ?? "")
-		.split("\n")
-		.filter((l) => /^(anthropic|openrouter|openai|google)\s/.test(l)).length;
+	const problem = spawnProblem(r);
+	// pi may print extension-load warnings around the version; the version is
+	// the first semver-looking line on stdout.
+	const version =
+		(r.stdout ?? "")
+			.split("\n")
+			.map((l) => l.trim())
+			.find((l) => /^\d+\.\d+\.\d+/.test(l)) ?? "";
 	record({
-		name: "ac3_extension_loads",
-		ok: r.status === 0 && modelCount > 0,
-		detail: `exit=${r.status}, models_listed=${modelCount}`,
+		name: "pi_version_pin",
+		ok: !problem && version === PIN,
+		detail: problem ?? `found "${version}", expected "${PIN}"`,
+	});
+	return !problem && version === PIN ? version : null;
+}
+
+// ── AC3: a vendored extension loads on pinned pi (`-e ./ext --list-models`) ──
+function checkExtensionLoads(extPath: string, checkName: string): number {
+	const r = spawnSync("pi", ["-e", extPath, "--list-models"], {
+		encoding: "utf8",
+		cwd: VENDOR_DIR,
+		timeout: EXT_LOAD_TIMEOUT_MS,
+		maxBuffer: MAX_OUTPUT_BYTES,
+		shell: process.platform === "win32",
+	});
+	const problem = spawnProblem(r);
+	// Model rows are "<provider> <model> …" lines under a "provider model …"
+	// header. Count by the provider whitelist first; fall back to all non-empty
+	// rows minus the header so a provider rename/new provider can't silently
+	// zero the count and false-fail AC3 (C6).
+	const lines = (r.stdout ?? "")
+		.split("\n")
+		.map((l) => l.trim())
+		.filter(Boolean);
+	const rows = lines.filter((l) => !/^provider\s/i.test(l));
+	const byProvider = rows.filter((l) => /^(anthropic|openrouter|openai|google)\s/.test(l)).length;
+	const modelCount = byProvider > 0 ? byProvider : rows.length;
+	const ok = !problem && r.status === 0 && modelCount > 0;
+	record({
+		name: checkName,
+		ok,
+		detail:
+			problem ??
+			`exit=${r.status}, models_listed=${modelCount}${byProvider === 0 && modelCount > 0 ? " (fallback: non-empty rows)" : ""}`,
 	});
 	return r.status === 0 ? modelCount : 0;
 }
 
+// ── Async pi spawn with timeout + output cap (C1/C2) ────────────────────────
+interface SpawnOutcome {
+	status: number | null;
+	signal: NodeJS.Signals | null;
+	stdout: string;
+	stderr: string;
+	// spawn failure, timeout, or output-cap kill — anything that makes the
+	// outcome untrustworthy even when status happens to be 0.
+	error: string | null;
+}
+
+function startPi(
+	args: string[],
+	opts: { timeoutMs: number; env?: NodeJS.ProcessEnv },
+): { proc: ChildProcess; done: Promise<SpawnOutcome> } {
+	const proc = spawn("pi", args, {
+		cwd: VENDOR_DIR,
+		env: opts.env ?? process.env,
+		shell: process.platform === "win32",
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	const stdoutChunks: Buffer[] = [];
+	const stderrChunks: Buffer[] = [];
+	let outBytes = 0;
+	let errBytes = 0;
+	let capped = false;
+	let timedOut = false;
+	let spawnErr: string | null = null;
+	const done = new Promise<SpawnOutcome>((resolve) => {
+		let forceTimer: NodeJS.Timeout | null = null;
+		const timer = setTimeout(() => {
+			timedOut = true;
+			try {
+				proc.kill("SIGTERM");
+			} catch {
+				// already gone
+			}
+			// A stuck child gets 5s to honor SIGTERM before SIGKILL.
+			forceTimer = setTimeout(() => {
+				try {
+					proc.kill("SIGKILL");
+				} catch {
+					// already gone
+				}
+			}, 5_000);
+		}, opts.timeoutMs);
+		proc.on("error", (e) => {
+			spawnErr = `spawn error: ${String(e)}`;
+		});
+		proc.stdout?.on("data", (c: Buffer) => {
+			if (outBytes + c.length <= MAX_OUTPUT_BYTES) {
+				stdoutChunks.push(c);
+				outBytes += c.length;
+			} else if (!capped) {
+				capped = true;
+				try {
+					proc.kill("SIGTERM");
+				} catch {
+					// already gone
+				}
+			}
+		});
+		proc.stderr?.on("data", (c: Buffer) => {
+			if (errBytes + c.length <= MAX_OUTPUT_BYTES) {
+				stderrChunks.push(c);
+				errBytes += c.length;
+			}
+		});
+		proc.on("close", (status, signal) => {
+			clearTimeout(timer);
+			if (forceTimer) clearTimeout(forceTimer);
+			resolve({
+				status,
+				signal,
+				stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+				stderr: Buffer.concat(stderrChunks).toString("utf8"),
+				error:
+					spawnErr ??
+					(timedOut
+						? `timeout after ${opts.timeoutMs}ms (killed${signal === "SIGKILL" ? " with SIGKILL" : ""})`
+						: capped
+							? `stdout exceeded ${MAX_OUTPUT_BYTES} bytes (killed)`
+							: null),
+			});
+		});
+	});
+	return { proc, done };
+}
+
+// ── pi JSON event stream parsing ────────────────────────────────────────────
+interface PiEvent {
+	type?: string;
+	toolName?: string;
+	result?: { content?: Array<{ type?: string; text?: string }>; details?: Record<string, unknown> };
+	messages?: Array<Record<string, unknown>>;
+	[k: string]: unknown;
+}
+
+function parseEvents(stdout: string): PiEvent[] {
+	const events: PiEvent[] = [];
+	for (const line of stdout.split("\n")) {
+		const t = line.trim();
+		if (!t.startsWith("{") || !t.endsWith("}")) continue;
+		try {
+			events.push(JSON.parse(t) as PiEvent);
+		} catch {
+			// non-JSON line — ignored, must not crash the parser
+		}
+	}
+	return events;
+}
+
+function assistantText(msg: Record<string, unknown>): string {
+	if (!msg || msg.role !== "assistant") return "";
+	if (typeof msg.content === "string") return msg.content;
+	if (Array.isArray(msg.content)) {
+		return msg.content
+			.filter((b): b is { type: string; text?: string } => Boolean(b) && (b as { type?: string }).type === "text")
+			.map((b) => b.text ?? "")
+			.join("\n");
+	}
+	return "";
+}
+
+// A real completed turn: agent_end carrying at least one assistant message
+// with visible text (not a tool-calls-only or empty message).
+function agentEndWithText(events: PiEvent[]): boolean {
+	return events.some(
+		(e) =>
+			e.type === "agent_end" &&
+			Array.isArray(e.messages) &&
+			e.messages.some((m) => assistantText(m).trim().length > 0),
+	);
+}
+
+// Broader auth-failure detection (C7): pi may surface expired/absent auth as
+// stderr text, a JSON error event on stdout, or a non-zero exit — the literal
+// "Authentication failed" string is only one of the shapes.
+const AUTH_FAIL_RE =
+	/authentication failed|unauthorized|invalid api key|api key|run \/login|\b401\b|\b403\b|forbidden/i;
+function detectAuthFailure(out: SpawnOutcome, events: PiEvent[]): boolean {
+	if (AUTH_FAIL_RE.test(`${out.stderr}\n${out.stdout}`)) return true;
+	return events.some((e) => e.type === "error" && AUTH_FAIL_RE.test(JSON.stringify(e)));
+}
+
 // ── Path A: subprocess-RPC JSON event stream ────────────────────────────────
-function pathSubprocessRpc(): { registered: number; exchanged: number } {
+async function pathSubprocessRpc(): Promise<{ registered: number; exchanged: number }> {
 	// A "registered" agent on this path = one spawned pi subprocess whose JSON
-	// stream opened (the session header is the RPC handshake). We spawn two.
+	// stream opened (the session header is the RPC handshake). We spawn two,
+	// concurrently.
+	const cnames = ["smoke-rpc-a", "smoke-rpc-b"];
+	const runs = cnames.map((cname) =>
+		startPi(["--mode", "json", ...modelArgs(), "-p", `You are ${cname}. Reply with exactly: ok`], {
+			timeoutMs: SPAWN_TIMEOUT_MS,
+		}),
+	);
+	const outcomes = await Promise.all(runs.map((r) => r.done));
+
 	let registered = 0;
 	let exchanged = 0;
-	let liveTurn = false;
-	let authAvailable = true;
-
-	for (const cname of ["smoke-rpc-a", "smoke-rpc-b"]) {
-		const r = spawnSync(
-			"pi",
-			["--mode", "json", "-p", `You are ${cname}. Reply with exactly: ok`],
-			{ encoding: "utf8", cwd: VENDOR_DIR, timeout: 60_000, shell: process.platform === "win32" },
-		);
-		const lines = (r.stdout ?? "").split("\n").filter(Boolean);
-		const events: Array<{ type?: string }> = [];
-		for (const l of lines) {
-			try {
-				events.push(JSON.parse(l));
-			} catch {
-				// non-JSON line — ignored, must not crash the parser
-			}
-		}
-		const hasSession = events.some((e) => e.type === "session");
-		if (hasSession) registered += 1;
-		// A completed round-trip needs a real model turn (agent_end).
-		if (events.some((e) => e.type === "agent_end")) {
-			exchanged += 1;
-			liveTurn = true;
-		}
-		if (/Authentication failed/i.test(r.stderr ?? "")) authAvailable = false;
+	let authFailed = false;
+	const problems: string[] = [];
+	for (const out of outcomes) {
+		const events = parseEvents(out.stdout);
+		if (out.error) problems.push(out.error);
+		else if (out.status !== 0)
+			problems.push(`exit=${out.status}${out.signal ? ` signal=${out.signal}` : ""}`);
+		if (events.some((e) => e.type === "session")) registered += 1;
+		// A completed round-trip needs a real model turn (agent_end with text).
+		if (agentEndWithText(events)) exchanged += 1;
+		if (detectAuthFailure(out, events)) authFailed = true;
 	}
 
 	record({
 		name: "rpc_stream_parse",
 		ok: registered >= 2,
-		detail: `${registered}/2 subprocess JSON streams opened & parsed`,
+		detail: `${registered}/2 subprocess JSON streams opened & parsed${problems.length ? `; problems: ${problems.join("; ")}` : ""}`,
 	});
 
-	if (liveTurn) {
+	if (exchanged >= 1) {
 		record({
 			name: "rpc_live_round_trip",
-			ok: exchanged >= 1,
-			detail: `${exchanged} agent_end round-trip(s)`,
+			ok: true,
+			detail: `${exchanged} agent_end round-trip(s) with assistant text`,
+		});
+	} else if (authFailed) {
+		record({
+			name: "rpc_live_round_trip",
+			ok: false,
+			skipped:
+				"pi auth unavailable — no agent_end observed and an auth failure was detected in pi output",
+			detail:
+				"transport parse verified; live turn requires pi auth (or set PI_SMOKE_MODEL to an authed provider/model)",
 		});
 	} else {
 		record({
 			name: "rpc_live_round_trip",
-			ok: true,
-			skipped: authAvailable
-				? "TODO(goal): no agent_end observed and no auth error — treated as unavailable"
-				: "TODO(goal): pi auth unavailable — live model turn not exercised",
-			detail: "transport parse verified; live turn requires pi auth",
+			ok: false,
+			detail: `no agent_end with assistant text in either stream${problems.length ? `; problems: ${problems.join("; ")}` : ""}`,
 		});
 	}
 
 	return { registered, exchanged };
 }
 
-// ── Path B: socket-coms peer registry contract (isolated PI_COMS_DIR) ────────
+// ── Path B: socket-coms with two REAL concurrent pi peers (isolated PI_COMS_DIR)
+// Mirrors coms.ts's RegistryEntry, INCLUDING the per-agent `secret` added by
+// the envelope-auth protocol change. Entries are produced ONLY by coms.ts's
+// own session_start — this script never writes registry JSON.
 interface RegistryEntry {
 	session_id: string;
 	name: string;
@@ -147,119 +366,333 @@ interface RegistryEntry {
 	started_at: string;
 	explicit: boolean;
 	version: number;
+	secret?: string; // envelope auth token (post protocol change)
+	context_used_pct?: number;
+	queue_depth?: number;
+	heartbeat_at?: string;
 }
 
-function pathSocketComs(): { registered: number; exchanged: number } {
-	// INV-2: isolate to a per-run temp dir so the host ~/.pi/coms is untouched.
-	const comsDir = `${fs.mkdtempSync(path.join(os.tmpdir(), "coms-smoke-"))}/coms`;
+async function pathSocketComs(): Promise<{
+	registered: number;
+	exchanged: number;
+	sendAcked: boolean;
+	bAnswered: boolean;
+}> {
+	// INV-2: isolate to a per-run temp dir; spawned pi get PI_COMS_DIR=comsDir
+	// so every registry write coms.ts makes is confined here.
+	const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "coms-smoke-"));
+	const comsDir = path.join(tmpRoot, "coms");
+	const result = { registered: 0, exchanged: 0, sendAcked: false, bAnswered: false };
+	let procA: ChildProcess | null = null;
+	let procB: ChildProcess | null = null;
 	try {
-		const project = "smoketest";
-		const agentsDir = path.join(comsDir, "projects", project, "agents");
+		const agentsDir = path.join(comsDir, "projects", COMS_PROJECT, "agents");
 		fs.mkdirSync(agentsDir, { recursive: true });
 		// Unix-only: 0o700 is meaningless on Windows and throws on restricted
-		// filesystems. mkdtemp already isolates comsDir under the user's own tmp.
+		// filesystems. mkdtemp already isolates tmpRoot under the user's own tmp.
 		if (process.platform !== "win32") {
-			try { fs.chmodSync(comsDir, 0o700); } catch { /* best-effort */ }
+			try {
+				fs.chmodSync(comsDir, 0o700);
+			} catch {
+				// best-effort
+			}
 		}
+		const comsEnv = { ...process.env, PI_COMS_DIR: comsDir, PI_COMS_TIMEOUT_MS: "60000" };
 
-		// Write two peers in the exact on-disk shape coms.ts uses (writeRegistryAtomic).
-		const mkEntry = (name: string, n: number): RegistryEntry => ({
-			session_id: `01SMOKE${n}0000000000000000000`,
-			name,
-			purpose: `smoke peer ${n}`,
-			model: "smoke/none",
-			color: "#72F1B8",
-			pid: process.pid,
-			endpoint: path.join(comsDir, "sockets", `smoke-${n}.sock`),
-			cwd: VENDOR_DIR,
-			started_at: new Date().toISOString(),
-			explicit: false,
-			version: 1,
-		});
-		for (const [i, name] of ["smoke-a", "smoke-b"].entries()) {
-			const entry = mkEntry(name, i + 1);
-			const final = path.join(agentsDir, `${name}.json`);
-			const tmp = `${final}.tmp`;
-			fs.writeFileSync(tmp, JSON.stringify(entry, null, 2));
-			fs.renameSync(tmp, final); // atomic, matches coms.ts
-		}
-
-		// Discover peers back the way coms_list does (readAllRegistryEntries).
-		const discovered: RegistryEntry[] = [];
-		for (const f of fs.readdirSync(agentsDir)) {
-			if (!f.endsWith(".json")) continue;
-			const parsed = JSON.parse(
-				fs.readFileSync(path.join(agentsDir, f), "utf8"),
-			) as RegistryEntry;
-			if (typeof parsed.session_id === "string") discovered.push(parsed);
-		}
-
-		// NOTE: this is registry/envelope-shape coverage only — it builds a
-		// prompt envelope in-process and round-trips it through JSON.stringify/
-		// parse without ever sending it over a real coms.ts socket to a live
-		// peer. It must NOT count as a "message exchanged": only a real
-		// coms_send → coms_await exchange between two live peers proves the
-		// transport works, and AC1 must not be satisfiable by this fake alone.
-		const target = discovered[0];
-		const envelope = {
-			type: "prompt" as const,
-			msg_id: "01SMOKEMSG0000000000000000",
-			sender_name: "smoke-a",
-			target: target?.name,
-			prompt: "ping",
-			conversation_id: null,
-			response_schema: { type: "object", properties: { ok: { type: "boolean" } } },
-			hops: 0,
+		const registryPath = (name: string) => path.join(agentsDir, `${name}.json`);
+		const readEntry = (name: string): RegistryEntry | null => {
+			try {
+				const parsed = JSON.parse(fs.readFileSync(registryPath(name), "utf8")) as RegistryEntry;
+				return parsed && typeof parsed.session_id === "string" ? parsed : null;
+			} catch {
+				return null;
+			}
 		};
-		const wire = JSON.stringify(envelope);
-		const roundTripped = JSON.parse(wire) as typeof envelope;
-		// response_schema is parse-only: JSON.parse of a reply, NOT schema-validated.
-		const reply = JSON.parse('{"ok":true}') as Record<string, unknown>;
-		const shapeOk = target !== undefined && roundTripped.target === target.name && reply.ok === true;
+		// Poll for coms.ts's OWN session_start to write the entry — the registry
+		// is the only coordination channel between this script and the peers.
+		const waitForEntry = async (name: string): Promise<RegistryEntry | null> => {
+			const deadline = Date.now() + REGISTRY_POLL_TIMEOUT_MS;
+			while (Date.now() < deadline) {
+				const entry = readEntry(name);
+				if (entry) return entry;
+				await new Promise((r) => setTimeout(r, 250));
+			}
+			return null;
+		};
 
-		// INV-2 assertion: nothing leaked outside the isolated dir.
-		const leaked = !comsDir.startsWith(os.tmpdir());
+		// ── Spawn the two real peers. B first (A can only coms_send a registered
+		// target); B's prompt keeps its turn alive via `sleep` so the inbound
+		// prompt lands while the process is still running.
+		const runB = startPi(
+			[
+				"-e",
+				COMS_EXT,
+				"--mode",
+				"json",
+				...modelArgs(),
+				"--cname",
+				"smoke-b",
+				"--project",
+				COMS_PROJECT,
+				"-p",
+				'You are agent smoke-b in a coms smoke test. First call the bash tool with command "sleep 25" to stay available. Then reply with exactly: done-waiting. If you receive a coms message from smoke-a, answer it briefly and directly.',
+			],
+			{ timeoutMs: SPAWN_TIMEOUT_MS, env: comsEnv },
+		);
+		procB = runB.proc;
+		const entryB = await waitForEntry("smoke-b");
+		if (!entryB) {
+			try {
+				runB.proc.kill("SIGTERM");
+			} catch {
+				// already gone
+			}
+			await runB.done;
+			record({
+				name: "socket_registry_two_agents",
+				ok: false,
+				detail: "smoke-b never wrote its registry entry (coms.ts session_start did not complete)",
+			});
+			record({
+				name: "socket_live_round_trip",
+				ok: false,
+				skipped: "no registered peer — exchange not attempted",
+			});
+			return result;
+		}
 
+		const runA = startPi(
+			[
+				"-e",
+				COMS_EXT,
+				"--mode",
+				"json",
+				...modelArgs(),
+				"--cname",
+				"smoke-a",
+				"--project",
+				COMS_PROJECT,
+				"-p",
+				`You are agent smoke-a in a coms smoke test. Call the coms_send tool with target "smoke-b" and prompt "ping from smoke-a — reply with exactly: pong". Then call the coms_await tool with the returned msg_id and timeout_ms ${AWAIT_TIMEOUT_MS}. Finally report, in one short sentence, the reply you received (or the error).`,
+			],
+			{ timeoutMs: SPAWN_TIMEOUT_MS, env: comsEnv },
+		);
+		procA = runA.proc;
+		const entryA = await waitForEntry("smoke-a");
+		const [outA, outB] = await Promise.all([runA.done, runB.done]);
+
+		// ── Real registrations: entries written by coms.ts's session_start,
+		// captured from the live registry BEFORE the peers' cleanShutdown
+		// removes them on exit. On POSIX the entry's pid must be the spawned
+		// process's pid — proof the registration came from our real peer.
+		const pidOk = (entry: RegistryEntry | null, proc: ChildProcess): boolean =>
+			process.platform === "win32" ||
+			(entry !== null && typeof proc.pid === "number" && entry.pid === proc.pid);
+		const bothRegistered =
+			entryA !== null &&
+			entryB !== null &&
+			entryA.name === "smoke-a" &&
+			entryB.name === "smoke-b" &&
+			entryA.session_id !== entryB.session_id &&
+			pidOk(entryA, runA.proc) &&
+			pidOk(entryB, runB.proc);
+		result.registered = [entryA, entryB].filter((e) => e !== null).length;
 		record({
 			name: "socket_registry_two_agents",
-			ok: discovered.length >= 2,
-			detail: `${discovered.length} peers registered & discovered in isolated registry`,
-		});
-		record({
-			name: "socket_envelope_shape_coverage",
-			ok: shapeOk,
-			detail: `coms_send envelope shape round-tripped through JSON for peer "${target?.name}" (registry/shape coverage only — no live peer exchange, does not count toward messages_exchanged/AC1)`,
-		});
-		record({
-			name: "inv2_per_user_isolation",
-			ok: !leaked,
-			detail: `registry confined to ${comsDir}`,
+			ok: bothRegistered,
+			detail: bothRegistered
+				? `2 peers registered by coms.ts session_start in isolated PI_COMS_DIR (smoke-a pid ${entryA?.pid}, smoke-b pid ${entryB?.pid})`
+				: `registrations: smoke-a=${entryA ? "yes" : "no"}, smoke-b=${entryB ? "yes" : "no"}, pids match spawned procs: ${pidOk(entryA, runA.proc) && pidOk(entryB, runB.proc)}`,
 		});
 
-		return { registered: discovered.length, exchanged: 0 };
+		// ── INV-2: assert the REAL dir's perms/ownership (the old tmpdir-prefix
+		// check was a tautology — mkdtemp output always starts with tmpdir).
+		let inv2Ok = comsDir.startsWith(tmpRoot);
+		let inv2Detail = `registry confined to ${comsDir}`;
+		if (process.platform !== "win32") {
+			const st = fs.statSync(comsDir);
+			const mode = st.mode & 0o777;
+			const ownerOk = typeof process.getuid === "function" && st.uid === process.getuid();
+			inv2Ok = inv2Ok && mode === 0o700 && ownerOk;
+			inv2Detail += `; dir mode=${mode.toString(8)} uid=${st.uid}`;
+		}
+		record({ name: "inv2_per_user_isolation", ok: inv2Ok, detail: inv2Detail });
+
+		// ── Envelope shape coverage (C5): build the REAL PromptEnvelope shape
+		// from the two real registry entries — Envelope base fields
+		// (sender_session, sender_endpoint, sender_cwd, timestamp), no `target`
+		// field, optional conversation_id, and the post-protocol-change `secret`
+		// read from the TARGET's real registry entry. Round-tripped through JSON
+		// only (shape coverage — does NOT count toward messages_exchanged).
+		if (entryA && entryB) {
+			const envelope = {
+				type: "prompt" as const,
+				msg_id: `01SMOKE${crypto.randomBytes(10).toString("hex").toUpperCase().slice(0, 20)}`,
+				sender_session: entryA.session_id,
+				sender_endpoint: entryA.endpoint,
+				sender_name: entryA.name,
+				sender_cwd: entryA.cwd,
+				hops: 0,
+				timestamp: new Date().toISOString(),
+				prompt: "ping",
+				secret: entryB.secret,
+				conversation_id: null,
+				response_schema: null,
+			};
+			const roundTripped = JSON.parse(JSON.stringify(envelope)) as typeof envelope;
+			// Comment-pinned copy of coms.ts's isValidEnvelope + PromptEnvelope
+			// required fields, post protocol change (incl. `secret`). Keep in sync
+			// with coms.ts's connHandler validation.
+			const shapeOk =
+				typeof roundTripped.type === "string" &&
+				typeof roundTripped.msg_id === "string" &&
+				typeof roundTripped.sender_session === "string" &&
+				typeof roundTripped.sender_endpoint === "string" &&
+				typeof roundTripped.sender_name === "string" &&
+				typeof roundTripped.sender_cwd === "string" &&
+				typeof roundTripped.timestamp === "string" &&
+				typeof roundTripped.prompt === "string" &&
+				typeof roundTripped.hops === "number" &&
+				typeof roundTripped.secret === "string" &&
+				roundTripped.secret.length > 0;
+			record({
+				name: "socket_envelope_shape_coverage",
+				ok: shapeOk,
+				detail: shapeOk
+					? `real PromptEnvelope shape (incl. target secret from smoke-b's registry entry) round-tripped through JSON (shape coverage only — does not count toward messages_exchanged/AC1)`
+					: `envelope rejected by pinned shape predicate${typeof entryB.secret !== "string" ? " — target registry entry carries no `secret` (envelope-auth protocol change not present in coms.ts)" : ""}`,
+			});
+		}
+
+		// ── Live exchange evidence, counted ONLY from real pi JSON events.
+		const eventsA = parseEvents(outA.stdout);
+		const eventsB = parseEvents(outB.stdout);
+		const sendEvent = eventsA.find(
+			(e) =>
+				e.type === "tool_execution_end" &&
+				e.toolName === "coms_send" &&
+				typeof e.result?.details?.msg_id === "string",
+		);
+		result.sendAcked = sendEvent !== undefined;
+		const awaitEvent = eventsA.find(
+			(e) =>
+				e.type === "tool_execution_end" &&
+				e.toolName === "coms_await" &&
+				!e.result?.details?.error &&
+				e.result?.details?.response !== undefined &&
+				e.result?.details?.response !== null &&
+				(typeof e.result?.details?.response !== "string" || e.result.details.response.trim().length > 0),
+		);
+		// B's own stream: an inbound coms message arrived AND B's agent_end
+		// carries assistant text answering it (sub-evidence — the reply still
+		// has to make it back to A's coms_await to count as a round-trip).
+		result.bAnswered = eventsB.some((e) => {
+			if (e.type !== "agent_end" || !Array.isArray(e.messages)) return false;
+			const msgs = e.messages;
+			const idx = msgs.findIndex(
+				(m) => m.role === "custom" || (m as { customType?: string }).customType === "coms-inbound",
+			);
+			return idx >= 0 && msgs.slice(idx + 1).some((m) => assistantText(m).trim().length > 0);
+		});
+		const roundTrip =
+			result.sendAcked && awaitEvent !== undefined && agentEndWithText(eventsA);
+		result.exchanged = roundTrip ? 1 : 0;
+		const problems = [outA.error, outB.error].filter((p): p is string => p !== null);
+		const replyText =
+			typeof awaitEvent?.result?.details?.response === "string"
+				? awaitEvent.result.details.response.trim().slice(0, 60)
+				: null;
+		record({
+			name: "socket_live_round_trip",
+			ok: roundTrip,
+			detail: roundTrip
+				? `coms_send acked (msg_id ${String(sendEvent?.result?.details?.msg_id)}), coms_await returned "${replyText}", agent_end with assistant text in smoke-a's stream`
+				: `send_acked=${result.sendAcked}, smoke-b answered inbound=${result.bAnswered}, coms_await reply received=${awaitEvent !== undefined}${problems.length ? `; spawn problems: ${problems.join("; ")}` : ""}`,
+		});
+
+		return result;
+	} catch (e) {
+		// C8: an fs/spawn failure must not abort the run — record it so the
+		// structured report is still emitted with a failed check.
+		record({
+			name: "socket_path_error",
+			ok: false,
+			detail: `path B aborted: ${e instanceof Error ? e.message : String(e)}`,
+		});
+		return result;
 	} finally {
-		// comsDir is a subdir of the mkdtempSync root — remove the root so the
-		// per-run temp dir doesn't leak on every smoke test run, even on throw.
-		fs.rmSync(path.dirname(comsDir), { recursive: true, force: true });
+		// Belt-and-braces: peers are normally done by here, but never leave a
+		// live pi behind, and always remove the per-run temp dir.
+		for (const p of [procA, procB]) {
+			try {
+				p?.kill("SIGKILL");
+			} catch {
+				// already gone
+			}
+		}
+		fs.rmSync(tmpRoot, { recursive: true, force: true });
 	}
 }
 
 // ── Run ─────────────────────────────────────────────────────────────────────
-const pinnedVersion = checkPiVersion();
-const modelsListed = pinnedVersion ? checkExtensionLoads() : 0;
-const rpc = pathSubprocessRpc();
-const socket = pathSocketComs();
+let pinnedVersion: string | null = null;
+let modelsComs = 0;
+let modelsComsNet = 0;
+const rpc = { registered: 0, exchanged: 0 };
+const socket = { registered: 0, exchanged: 0, sendAcked: false, bAnswered: false };
+
+try {
+	pinnedVersion = checkPiVersion();
+	if (pinnedVersion) {
+		modelsComs = checkExtensionLoads(COMS_EXT, "ac3_extension_loads_coms");
+		modelsComsNet = checkExtensionLoads(COMS_NET_EXT, "ac3_extension_loads_coms_net");
+	} else {
+		record({
+			name: "ac3_extension_loads_coms",
+			ok: false,
+			skipped: "pi version mismatch — extension load not attempted",
+		});
+		record({
+			name: "ac3_extension_loads_coms_net",
+			ok: false,
+			skipped: "pi version mismatch — extension load not attempted",
+		});
+	}
+	const [rpcResult, socketResult] = await Promise.all([pathSubprocessRpc(), pathSocketComs()]);
+	rpc.registered = rpcResult.registered;
+	rpc.exchanged = rpcResult.exchanged;
+	socket.registered = socketResult.registered;
+	socket.exchanged = socketResult.exchanged;
+	socket.sendAcked = socketResult.sendAcked;
+	socket.bAnswered = socketResult.bAnswered;
+} catch (e) {
+	// C8: nothing above may prevent the structured report from being emitted.
+	record({
+		name: "smoke_test_internal_error",
+		ok: false,
+		detail: `unhandled: ${e instanceof Error ? e.message : String(e)}`,
+	});
+}
 
 const totalRegistered = rpc.registered + socket.registered;
 const totalExchanged = rpc.exchanged + socket.exchanged;
-// Make-or-break (AC1): ≥2 agents registered AND ≥1 message exchanged on ≥1 path.
-const acMakeOrBreak = totalRegistered >= 2 && totalExchanged >= 1;
+// Make-or-break (AC1): Path A produced a real agent_end round-trip AND Path B
+// registered ≥2 real peers via coms.ts's own session_start. The Path B live
+// exchange (socket_live_round_trip) is reported with real evidence but is NOT
+// gating — AC1's message clause is satisfied by either substrate (the story's
+// OR clause) and the model-driven reply depends on two live agents' timing.
+const rpcRoundTrip = checks.find((c) => c.name === "rpc_live_round_trip")?.ok === true;
+const socketRegistered = checks.find((c) => c.name === "socket_registry_two_agents")?.ok === true;
+const acMakeOrBreak = rpcRoundTrip && socketRegistered;
+const gatingChecks = checks.filter((c) => c.name !== "socket_live_round_trip");
 
 const report = {
 	story: "p0-2-coms-vendor-decision",
 	pi_version: pinnedVersion ?? "MISMATCH",
 	pinned: pinnedVersion === PIN,
-	models_listed: modelsListed,
+	smoke_model: SMOKE_MODEL ?? "pi-default",
+	models_listed: modelsComs,
+	models_listed_coms_net: modelsComsNet,
 	paths: {
 		subprocess_rpc: rpc,
 		socket_coms: socket,
@@ -267,16 +700,17 @@ const report = {
 	agents_registered: totalRegistered,
 	messages_exchanged: totalExchanged,
 	ac_map: {
-		"AC1_make_or_break_>=2agents_>=1msg": acMakeOrBreak,
-		AC3_extension_loads: checks.find((c) => c.name === "ac3_extension_loads")?.ok ?? false,
+		"AC1_make_or_break_rpc_roundtrip_+_>=2socket_peers": acMakeOrBreak,
+		AC3_extension_loads_coms: checks.find((c) => c.name === "ac3_extension_loads_coms")?.ok ?? false,
+		AC3_extension_loads_coms_net:
+			checks.find((c) => c.name === "ac3_extension_loads_coms_net")?.ok ?? false,
 	},
 	checks,
-	// Gate = every check that ran passed AND AC1 make-or-break holds. A skipped
-	// live-turn does not fail the checks sweep itself, but it leaves
-	// messages_exchanged at 0, so acMakeOrBreak is false and the gate fails.
-	// Intentional: exit 0 only when AC1 is backed by a real message exchange
-	// (see _bmad-output/sprint-artifacts/_research/oq-1-coms-arch-decision.md).
-	pass: checks.every((c) => c.ok || c.skipped) && acMakeOrBreak,
+	// Gate = every gating check passed (skipped ≠ passed for the make-or-break
+	// names: rpc_live_round_trip must be ok===true, so an auth skip fails the
+	// gate honestly) AND AC1 make-or-break holds. Exit 0 only when AC1 is backed
+	// by a real message exchange — no waivers.
+	pass: gatingChecks.every((c) => c.ok || c.skipped) && acMakeOrBreak,
 };
 
 console.log(JSON.stringify(report, null, 2));

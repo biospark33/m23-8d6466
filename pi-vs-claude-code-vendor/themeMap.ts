@@ -99,12 +99,19 @@ export function applyExtensionTheme(fileUrl: string, ctx: ExtensionContext): boo
  * this and gets the same answer ("subagent-widget"), so all setTitle calls
  * are idempotent — no shared state or deduplication needed.
  *
- * Returns null if no -e flag is present (e.g. plain `pi` with no extensions).
+ * Returns null if no -e flag is present (e.g. plain `pi` with no extensions),
+ * or if every -e is followed by another flag rather than a path.
  */
 function primaryExtensionName(): string | null {
 	const argv = process.argv;
 	for (let i = 0; i < argv.length - 1; i++) {
-		if (argv[i] === "-e" || argv[i] === "--extension") {
+		// The value after -e/--extension must exist and be a path, not another
+		// flag — `pi -e --mode json` would otherwise report "--mode" as the
+		// extension name. Keep scanning so a later real -e still wins.
+		if (
+			(argv[i] === "-e" || argv[i] === "--extension") &&
+			!argv[i + 1].startsWith("-")
+		) {
 			return basename(argv[i + 1]).replace(/\.[^.]+$/, "");
 		}
 	}

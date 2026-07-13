@@ -18,7 +18,7 @@ epics:
     points: 37
     stories:
       P0.1:  { title: "Archon env-patch productionize + non-regression gate", points: 3, status: killed, deps: [] }  # killed: Warren decision — flat agents, no Archon DAG
-      P0.2:  { title: "Vendor coms.ts + OQ-1/OQ-5 decision",                  points: 3, status: draft, deps: [] }
+      P0.2:  { title: "Vendor coms.ts + OQ-1/OQ-5 decision",                  points: 3, status: done, deps: [] }  # done 2026-07-13: PR #25, bmad-code-review clean (54/54 fixed), AC1-3 live green
       P0.3:  { title: "pi-team-launch.sh mixed-model merged-JSON demo",       points: 4, status: draft, deps: [P0.2] }  # P0.1 removed (killed)
       P0.4:  { title: "Hard-guard loopy-prompt kill",                         points: 3, status: killed, deps: [P0.3] }  # killed: Warren decision — loopy-kill absorbed into launcher guards
       P0.5:  { title: "pi-lens headless TDI/warnings (or proxy)",            points: 4, status: draft, deps: [] }

@@ -1,8 +1,9 @@
 /**
  * coms — Peer-to-peer messaging between Pi agents on the same machine
  *
- * Each agent listens on a single endpoint (unix socket on POSIX, named pipe on
- * Windows) and discovers peers through per-project registry files under
+ * Each agent listens on a unix socket (POSIX-only; the Windows named-pipe
+ * branch is unsupported and fails fast at startup) and discovers peers
+ * through per-project registry files under
  * ~/.pi/coms/projects/<project>/agents/<name>.json.
  *
  * Phase A (foundation): identity resolution, registry I/O, transport bind/send,
@@ -15,8 +16,7 @@
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
-import { Text, Container, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
-import type { AutocompleteItem } from "@mariozechner/pi-tui";
+import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { applyExtensionDefaults } from "./themeMap.ts";
 import * as net from "node:net";
@@ -24,13 +24,23 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 
 // ━━ Constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+// Env-var knobs must be finite, positive numbers: Infinity would disable the
+// hop guard or make timeouts never fire, negatives would nack every inbound
+// prompt or busy-loop setInterval, and values above 2^31-1 overflow Node's
+// setTimeout (clamped to ~1ms → spurious immediate timeouts).
+function envPositiveInt(v: string | undefined, def: number): number {
+	const n = Number(v);
+	return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 2 ** 31 - 1) : def;
+}
+
 const COMS_DIR = process.env.PI_COMS_DIR || path.join(os.homedir(), ".pi", "coms");
-const MAX_HOPS = Number(process.env.PI_COMS_MAX_HOPS) || 5;
-const TIMEOUT_MS = Number(process.env.PI_COMS_TIMEOUT_MS) || 1_800_000;
-const PING_INTERVAL_MS = Number(process.env.PI_COMS_PING_INTERVAL_MS) || 10_000;
+const MAX_HOPS = envPositiveInt(process.env.PI_COMS_MAX_HOPS, 5);
+const TIMEOUT_MS = envPositiveInt(process.env.PI_COMS_TIMEOUT_MS, 1_800_000);
+const PING_INTERVAL_MS = envPositiveInt(process.env.PI_COMS_PING_INTERVAL_MS, 10_000);
 const KEEPALIVE_INTERVAL_MS = 30_000;
 // A live agent rewrites heartbeat_at every KEEPALIVE_INTERVAL_MS. Allow three
 // missed cycles before declaring the entry stale — catches recycled PIDs and
@@ -41,6 +51,10 @@ const HEARTBEAT_STALE_MS = 3 * KEEPALIVE_INTERVAL_MS;
 // SSE_BUF_CAP_BYTES while still bounding the per-line accumulator.
 const LINE_CAP_BYTES = 16 * 1024 * 1024;
 const SOCKET_OP_TIMEOUT_MS = 5_000;
+// inboundQueue entries are only removed on agent_end (or by keepalive pruning
+// after TIMEOUT_MS); cap concurrent unfulfilled inbounds so a flooding peer
+// cannot grow the map without bound.
+const MAX_INBOUND = 256;
 
 const FALLBACK_PALETTE = [
 	"#72F1B8", "#36F9F6", "#FF7EDB", "#FEDE5D",
@@ -62,6 +76,9 @@ interface Envelope {
 
 interface PromptEnvelope extends Envelope {
 	type: "prompt";
+	// Shared secret from the *receiver's* registry entry; receivers nack any
+	// envelope whose secret doesn't match their own (D1).
+	secret: string;
 	prompt: string;
 	sender_name: string;
 	sender_cwd: string;
@@ -73,6 +90,9 @@ interface ResponseEnvelope extends Envelope {
 	type: "response";
 	response: any;
 	error?: string | null;
+	// Echo of the originating prompt's conversation_id so the caller can
+	// correlate threads (D2).
+	conversation_id?: string | null;
 }
 
 interface PingEnvelope extends Envelope {
@@ -106,6 +126,11 @@ interface RegistryEntry {
 	started_at: string;
 	explicit: boolean;
 	version: number;
+	// Per-session shared secret (crypto.randomUUID) that senders must echo in
+	// prompt envelopes; the 0700 registry dir keeps it same-user-only (INV-2).
+	// Optional so entries written by pre-auth agents still parse — but
+	// coms_send refuses to target them.
+	secret?: string;
 	// Live status snapshot — refreshed every KEEPALIVE_INTERVAL_MS by the heartbeat.
 	// Optional so older entries (pre-heartbeat-refresh) still parse cleanly.
 	context_used_pct?: number;
@@ -115,11 +140,12 @@ interface RegistryEntry {
 
 interface PendingReply {
 	resolve: (value: any) => void;
-	reject: (err: Error) => void;
 	timer: NodeJS.Timeout | null;
 	promise: Promise<{ response?: any; error?: string | null }>;
 	result?: { response?: any; error?: string | null };
 	target_name?: string;
+	// conversation_id from coms_send, surfaced by coms_get for correlation (D2).
+	conversation_id?: string | null;
 	// Epoch ms at coms_send time (kept as a number so the keepalive pruning
 	// loop avoids re-parsing an ISO string on every sweep).
 	created_at: number;
@@ -138,7 +164,11 @@ interface InboundContext {
 	hops: number;
 	sender_endpoint: string;
 	sender_session: string;
+	conversation_id?: string | null;
 	response_schema?: object | null;
+	// Epoch ms at receipt; keepalive pruning evicts unfulfilled entries older
+	// than TIMEOUT_MS so a never-completing turn can't leak the entry forever.
+	created_at: number;
 	fulfilled: boolean;
 }
 
@@ -475,15 +505,6 @@ function pruneDeadEntriesAllProjects(): RegistryEntry[] {
 	return out;
 }
 
-function keepaliveTouch(file: string): void {
-	try {
-		const now = new Date();
-		fs.utimesSync(file, now, now);
-	} catch {
-		// best-effort
-	}
-}
-
 // ━━ Transport ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function probeStaleSocket(endpoint: string): Promise<"in_use" | "stale"> {
@@ -496,7 +517,11 @@ function probeStaleSocket(endpoint: string): Promise<"in_use" | "stale"> {
 			try { sock.destroy(); } catch { /* ignore */ }
 			resolve(verdict);
 		};
-		const timer = setTimeout(() => finish("stale"), 250);
+		// 250ms proved too tight: under load a live agent's accept backlog can
+		// delay the probe connect past the timeout, and bindEndpoint would then
+		// unlink a live agent's socket out from under it. 1.5s keeps the
+		// "stale" verdict conservative.
+		const timer = setTimeout(() => finish("stale"), 1500);
 		sock.once("connect", () => {
 			clearTimeout(timer);
 			finish("in_use");
@@ -616,6 +641,23 @@ function sendEnvelope(endpoint: string, envelope: Envelope | Pong | { type: stri
 	});
 }
 
+// One-shot synchronous delivery script for the 'exit' fallback (see the exit
+// handler at the bottom of the default export). Reads the framed envelope
+// line from stdin, connects to the endpoint, writes it, and waits briefly
+// for the ack. Plain CommonJS so it runs under both node and bun via
+// `process.execPath -e`.
+const EXIT_DELIVER_SCRIPT = `
+const net = require("node:net");
+const fs = require("node:fs");
+const endpoint = process.argv[1];
+const line = fs.readFileSync(0, "utf-8");
+const sock = net.createConnection({ path: endpoint }, () => { sock.write(line + "\\n"); });
+let buf = Buffer.alloc(0);
+sock.on("data", (c) => { buf = Buffer.concat([buf, c]); if (buf.indexOf(10) >= 0) process.exit(0); });
+sock.on("error", () => process.exit(1));
+setTimeout(() => process.exit(2), 4000);
+`;
+
 // ━━ System-prompt frontmatter scan ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function findSystemPromptPath(argv: string[]): string | null {
@@ -698,6 +740,9 @@ export default function (pi: ExtensionAPI) {
 		cwd: string;
 		model: string;
 		endpoint: string;
+		// Shared secret written to our registry entry; inbound prompt envelopes
+		// must echo it (D1).
+		secret: string;
 		registryFile: string;
 		startedAt: string;
 	} | null = null;
@@ -711,6 +756,13 @@ export default function (pi: ExtensionAPI) {
 	let includeExplicit = false;
 	let displayProject: string | null = null;
 	let currentCtx: ExtensionContext | null = null;
+	// Registry-entry snapshot for the pool widget, refreshed each ping cycle so
+	// renderPool never does filesystem I/O inside the TUI render callback.
+	let cachedRegistryEntries: RegistryEntry[] = [];
+	// Responses recorded synchronously at agent_end but not yet confirmed
+	// delivered by the async sendEnvelope path — see the 'exit' handler at the
+	// bottom for the print-mode exit race this covers.
+	const pendingExitDispatches: { endpoint: string; line: string; done: boolean }[] = [];
 
 	// The inbound whose prompt is anchored in this session's own branch —
 	// not just "oldest pending in the global queue", which would misattribute
@@ -724,12 +776,20 @@ export default function (pi: ExtensionAPI) {
 		const branch = c.sessionManager?.getBranch() ?? [];
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];
-			if (entry.type === "message" && entry.message) {
-				const msgId = (entry.message as any).details?.msg_id;
-				if (msgId) {
-					const inbound = inboundQueue.get(msgId);
-					if (inbound && !inbound.fulfilled) return inbound;
-				}
+			if (!entry) continue;
+			// pi 0.55.0 stores extension-injected messages as custom_message
+			// entries with details at entry level (session-manager
+			// appendCustomMessageEntry); plain message entries carry details on
+			// entry.message. Match both shapes.
+			let msgId: string | undefined;
+			if (entry.type === "custom_message") {
+				msgId = (entry as any).details?.msg_id;
+			} else if (entry.type === "message" && entry.message) {
+				msgId = (entry.message as any).details?.msg_id;
+			}
+			if (msgId) {
+				const inbound = inboundQueue.get(msgId);
+				if (inbound && !inbound.fulfilled) return inbound;
 			}
 		}
 		return null;
@@ -755,24 +815,52 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function handlePrompt(socket: net.Socket, env: PromptEnvelope): void {
-		// 1. Hop limit check
-		if (typeof env.hops !== "number" || env.hops >= MAX_HOPS) {
+		// 1. Shared-secret auth: the sender must echo the secret from this
+		// agent's own registry entry (protected by the 0700 registry dir). Nack
+		// mismatches without ever triggering a turn.
+		if (typeof env.secret !== "string" || env.secret !== identity?.secret) {
+			nack(socket, env.msg_id, "unauthorized");
+			return;
+		}
+
+		// 2. Hop limit check — require a non-negative integer: NaN slips past a
+		// plain `>=` comparison and negative hops bypass the limit, either of
+		// which lets a peer relay forever.
+		if (!Number.isInteger(env.hops) || env.hops < 0 || env.hops >= MAX_HOPS) {
 			nack(socket, env.msg_id, "hops exceeded");
 			return;
 		}
 
-		// 2. Insert into inbound queue
+		// 3. Prompt-envelope-specific field validation: undefined/object values
+		// would interpolate as "undefined"/"[object Object]" into the injected
+		// message and burn an agent turn on garbage.
+		if (typeof env.prompt !== "string" || typeof env.sender_name !== "string" || typeof env.sender_cwd !== "string") {
+			nack(socket, env.msg_id, "malformed prompt envelope");
+			return;
+		}
+
+		// 4. Queue cap: inboundQueue entries are only removed on agent_end (or
+		// by keepalive pruning), so a flooding peer must not grow it unbounded.
+		if (inboundQueue.size >= MAX_INBOUND) {
+			nack(socket, env.msg_id, "queue full");
+			return;
+		}
+
+		// 5. Insert into inbound queue
+		const conversationId = typeof env.conversation_id === "string" ? env.conversation_id : null;
 		const inbound: InboundContext = {
 			msg_id: env.msg_id,
 			hops: env.hops,
 			sender_endpoint: env.sender_endpoint,
 			sender_session: env.sender_session,
+			conversation_id: conversationId,
 			response_schema: env.response_schema ?? null,
+			created_at: Date.now(),
 			fulfilled: false,
 		};
 		inboundQueue.set(env.msg_id, inbound);
 
-		// 3. Inject as a follow-up message into the receiver's next turn.
+		// 6. Inject as a follow-up message into the receiver's next turn.
 		try {
 			pi.sendMessage(
 				{
@@ -782,6 +870,7 @@ export default function (pi: ExtensionAPI) {
 					details: {
 						msg_id: env.msg_id,
 						sender_session: env.sender_session,
+						conversation_id: conversationId,
 						response_schema: env.response_schema ?? null,
 					},
 				},
@@ -794,7 +883,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// 5. Ack + audit log
+		// 7. Ack + audit log
 		ackOk(socket, env.msg_id);
 		try {
 			pi.appendEntry("coms-log", {
@@ -938,12 +1027,29 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ━━ session_start ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-	pi.on("session_start", async (_event, ctx) => {
-		// session_start can fire again on this same extension instance — session
-		// switch, /new, or print/json mode where session_shutdown may never have
-		// fired (pi-mono #2576). Tear down any live prior session and reset all
-		// per-session state, or the shuttingDown latch stays set and the new
-		// session's socket/registry are never cleaned up, and stale maps leak.
+	let initializing = false;
+	const onSessionStart = async (_event: unknown, ctx: ExtensionContext) => {
+		// This story is POSIX-scoped: the Windows named-pipe branch has no
+		// per-user ACL equivalent of the 0700 socket dir (INV-2), so fail fast
+		// with a clear message instead of running unauthenticated IPC.
+		if (process.platform === "win32") {
+			ctx.ui?.notify?.("📡 coms: Windows named pipes are not supported — coms is POSIX-only in this release", "error");
+			return;
+		}
+		// session_start can fire back-to-back on this same extension instance
+		// (session switch + /new, or print/json mode where session_shutdown may
+		// never have fired — pi-mono #2576). The handler awaits cleanShutdown()
+		// and bindEndpoint(), so without this latch two invocations both pass
+		// the identity/server check before either bind completes → two bound
+		// servers and orphaned ping/keepalive intervals.
+		while (initializing) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		initializing = true;
+		const finishInit = () => { initializing = false; };
+		// Tear down any live prior session and reset all per-session state, or
+		// the shuttingDown latch stays set and the new session's socket/registry
+		// are never cleaned up, and stale maps leak.
 		if (!shuttingDown && (identity || server)) {
 			await cleanShutdown();
 		}
@@ -956,6 +1062,12 @@ export default function (pi: ExtensionAPI) {
 		pingTimer = null;
 		keepaliveTimer = null;
 		pinging = false;
+		// Pool-filter state belongs to the session: reset it here (not only on
+		// the success path) so a failed init doesn't leak the previous
+		// session's filter into the next one.
+		displayProject = null;
+		includeExplicit = false;
+		cachedRegistryEntries = [];
 
 		applyExtensionDefaults(import.meta.url, ctx);
 		currentCtx = ctx;
@@ -966,6 +1078,7 @@ export default function (pi: ExtensionAPI) {
 		const project = flags.project || "default";
 		if (!isSafePathComponent(project)) {
 			ctx.ui?.notify?.(`📡 coms: invalid --project value "${project}"`, "error");
+			finishInit();
 			return;
 		}
 		const explicit = flags.explicit === true;
@@ -975,9 +1088,10 @@ export default function (pi: ExtensionAPI) {
 		const desiredName = flags.name || fm.name || defaultName;
 		if (!isSafePathComponent(desiredName)) {
 			ctx.ui?.notify?.(`📡 coms: invalid agent name "${desiredName}"`, "error");
+			finishInit();
 			return;
 		}
-		const name = resolveUniqueName(project, desiredName);
+		let name = resolveUniqueName(project, desiredName);
 		if (name !== desiredName) {
 			try {
 				pi.appendEntry("coms-log", { event: "name_collision", desired: desiredName, assigned: name, project });
@@ -1004,21 +1118,21 @@ export default function (pi: ExtensionAPI) {
 		// 2. Ensure storage dirs exist.
 		try {
 			fs.mkdirSync(projectAgentsDir(project), { recursive: true });
-			if (process.platform !== "win32") {
-				// mkdir dirname(endpoint) (not COMS_DIR/sockets) so the tmp-dir
-				// fallback from makeEndpoint gets created too; chmod 0700 keeps
-				// sockets private to this user in the shared tmp dir.
-				const endpointDir = path.dirname(endpoint);
-				fs.mkdirSync(endpointDir, { recursive: true, mode: 0o700 });
-				// recursive mkdir's mode only applies to dirs it actually creates,
-				// so chmod explicitly: a pre-existing dir (left by an older
-				// version or created manually) could otherwise stay world-accessible
-				// and expose the socket in the shared tmp dir (INV-2).
-				try { fs.chmodSync(endpointDir, 0o700); } catch { /* best-effort */ }
-				try { fs.chmodSync(COMS_DIR, 0o700); } catch { /* best-effort */ }
-			}
+			// (POSIX-only here — the handler already returned on win32.)
+			// mkdir dirname(endpoint) (not COMS_DIR/sockets) so the tmp-dir
+			// fallback from makeEndpoint gets created too; chmod 0700 keeps
+			// sockets private to this user in the shared tmp dir.
+			const endpointDir = path.dirname(endpoint);
+			fs.mkdirSync(endpointDir, { recursive: true, mode: 0o700 });
+			// recursive mkdir's mode only applies to dirs it actually creates,
+			// so chmod explicitly: a pre-existing dir (left by an older
+			// version or created manually) could otherwise stay world-accessible
+			// and expose the socket in the shared tmp dir (INV-2).
+			try { fs.chmodSync(endpointDir, 0o700); } catch { /* best-effort */ }
+			try { fs.chmodSync(COMS_DIR, 0o700); } catch { /* best-effort */ }
 		} catch (err) {
 			ctx.ui?.notify?.(`📡 coms: failed to create dirs — ${err instanceof Error ? err.message : String(err)}`, "error");
+			finishInit();
 			return;
 		}
 
@@ -1027,6 +1141,7 @@ export default function (pi: ExtensionAPI) {
 			server = await bindEndpoint(endpoint, connHandler);
 		} catch (err) {
 			ctx.ui?.notify?.(`📡 coms: bind failed — ${err instanceof Error ? err.message : String(err)}`, "error");
+			finishInit();
 			return;
 		}
 		// bindEndpoint only guards the listen phase; once it resolves the server
@@ -1039,38 +1154,53 @@ export default function (pi: ExtensionAPI) {
 			} catch { /* best-effort */ }
 		});
 
-		// 4. Build + write registry entry atomically.
-		const entry: RegistryEntry = {
-			session_id,
-			name,
-			purpose,
-			model,
-			color,
-			pid: process.pid,
-			endpoint,
-			cwd,
-			started_at: nowIso(),
-			explicit,
-			version: 1,
-			// Seed the heartbeat at registration so a process that hangs before
-			// its first keepalive still becomes stale-detectable by peers.
-			heartbeat_at: nowIso(),
-		};
-		let registryFile: string;
-		try {
-			registryFile = writeRegistryAtomic(entry, project, { exclusive: true });
-		} catch (err) {
-			ctx.ui?.notify?.(`📡 coms: registry write failed — ${err instanceof Error ? err.message : String(err)}`, "error");
-			try { server?.close(); } catch { /* ignore */ }
-			// bindEndpoint already created the socket file, but identity isn't
-			// assigned until after this try succeeds — so cleanShutdown (which
-			// unlinks identity.endpoint) won't reach it. Remove the stale .sock
-			// here on POSIX; win32 uses named pipes (not filesystem entries), so
-			// skip there, matching cleanShutdown's platform guard.
-			if (process.platform !== "win32") {
-				try { fs.unlinkSync(endpoint); } catch { /* ignore */ }
+		// 4. Build + write registry entry atomically. Two agents launched
+		// concurrently with the same --cname can both resolveUniqueName() to the
+		// same free name and then race the exclusive write; on EEXIST re-resolve
+		// and retry a bounded number of times instead of leaving the agent with
+		// no coms at all.
+		const secret = crypto.randomUUID();
+		const startedAt = nowIso();
+		let registryFile: string | null = null;
+		for (let attempt = 0; attempt < 3; attempt++) {
+			if (attempt > 0) {
+				name = resolveUniqueName(project, desiredName);
 			}
-			return;
+			const entry: RegistryEntry = {
+				session_id,
+				name,
+				purpose,
+				model,
+				color,
+				pid: process.pid,
+				endpoint,
+				cwd,
+				started_at: startedAt,
+				explicit,
+				version: 1,
+				// Shared secret peers must echo in prompt envelopes (D1); the
+				// registry dir is chmod 0700, so only same-user agents can read it.
+				secret,
+				// Seed the heartbeat at registration so a process that hangs before
+				// its first keepalive still becomes stale-detectable by peers.
+				heartbeat_at: startedAt,
+			};
+			try {
+				registryFile = writeRegistryAtomic(entry, project, { exclusive: true });
+				break;
+			} catch (err) {
+				const code = (err as NodeJS.ErrnoException).code;
+				if (code === "EEXIST" && attempt < 2) continue;
+				ctx.ui?.notify?.(`📡 coms: registry write failed — ${err instanceof Error ? err.message : String(err)}`, "error");
+				try { server?.close(); } catch { /* ignore */ }
+				// bindEndpoint already created the socket file, but identity isn't
+				// assigned until after this try succeeds — so cleanShutdown (which
+				// unlinks identity.endpoint) won't reach it. Remove the stale .sock
+				// here (POSIX-only — the handler already returned on win32).
+				try { fs.unlinkSync(endpoint); } catch { /* ignore */ }
+				finishInit();
+				return;
+			}
 		}
 
 		identity = {
@@ -1083,8 +1213,9 @@ export default function (pi: ExtensionAPI) {
 			cwd,
 			model,
 			endpoint,
-			registryFile,
-			startedAt: entry.started_at,
+			secret,
+			registryFile: registryFile!,
+			startedAt,
 		};
 		includeExplicit = false;
 		displayProject = project;
@@ -1172,14 +1303,14 @@ export default function (pi: ExtensionAPI) {
 					started_at: identity.startedAt,
 					explicit: identity.explicit,
 					version: 1,
+					secret: identity.secret,
 					context_used_pct: safeContextPct(ctx),
 					queue_depth: inboundQueue.size,
 					heartbeat_at: nowIso(),
 				};
 				// Unconditional atomic write: handles BOTH the live-status refresh
 				// (file present → overwrite with fresh values) AND self-heal (file
-				// missing → re-create entry). The atomic write also bumps mtime, so
-				// keepaliveTouch is now redundant.
+				// missing → re-create entry). The atomic write also bumps mtime.
 				writeRegistryAtomic(live, identity.project);
 				if (missingBeforeWrite) {
 					pi.appendEntry("coms-log", { event: "self_heal", session_id: identity.session_id, reason: "registry file missing" });
@@ -1204,12 +1335,35 @@ export default function (pi: ExtensionAPI) {
 						pendingReplies.delete(mid);
 					}
 				}
+
+				// Prune inbound entries whose turn never completed (session
+				// abort, or sendMessage no-op after ack) — they are otherwise
+				// only removed in agent_end and would live until process exit.
+				for (const [mid, inbound] of inboundQueue.entries()) {
+					if (!inbound.fulfilled && now - inbound.created_at > TIMEOUT_MS) {
+						inboundQueue.delete(mid);
+					}
+				}
 			} catch { /* best-effort */ }
 		}, KEEPALIVE_INTERVAL_MS);
 		try { (keepaliveTimer as any).unref?.(); } catch { /* ignore */ }
 
 		// Kick one ping cycle immediately so the widget populates fast.
 		refreshPool().catch(() => {});
+		finishInit();
+	};
+	pi.on("session_start", (event, ctx) => {
+		// An unexpected throw mid-init must not wedge the initializing latch —
+		// every future session_start would spin forever waiting for it.
+		void onSessionStart(event, ctx).catch((err) => {
+			initializing = false;
+			try {
+				pi.appendEntry("coms-log", {
+					event: "session_start_error",
+					error: err instanceof Error ? err.message : String(err),
+				});
+			} catch { /* best-effort */ }
+		});
 	});
 
 	// ━━ Helpers used by tools ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1237,10 +1391,10 @@ export default function (pi: ExtensionAPI) {
 
 	// ━━ Pool widget rendering ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 	function renderPool(width: number, theme: Theme): string[] {
-		const projectFilter = displayProject ?? identity?.project ?? "default";
-		const registryEntries = projectFilter === "*"
-			? readAllRegistryEntriesAcrossProjects()
-			: readAllRegistryEntries(projectFilter);
+		// Read the ping-cycle snapshot instead of scanning the registry on every
+		// frame: this runs inside the TUI render callback, where synchronous
+		// directory reads + JSON.parse per redraw/resize would stutter the UI.
+		const registryEntries = cachedRegistryEntries;
 
 		interface Row {
 			name: string;
@@ -1387,6 +1541,9 @@ export default function (pi: ExtensionAPI) {
 		const live = projectFilter === "*"
 			? pruneDeadEntriesAllProjects()
 			: pruneDeadEntries(projectFilter);
+		// Snapshot for renderPool, which must not touch the filesystem inside
+		// the TUI render callback.
+		cachedRegistryEntries = live;
 
 		const peers = live.filter((e) =>
 			e.session_id !== identity!.session_id && (includeExplicit || !e.explicit),
@@ -1412,8 +1569,29 @@ export default function (pi: ExtensionAPI) {
 			if (r.status === "fulfilled" && r.value.pong && r.value.pong.agent_card) {
 				const { peer, pong } = r.value;
 				seenSessions.add(peer.session_id);
+				const card = pong.agent_card as AgentCard;
+				// Peer-controlled fields: a non-string name/model/purpose/color
+				// would throw inside renderPool (padEnd/startsWith) and crash the
+				// TUI; clamp pct to finite so the bar math never sees NaN. The
+				// session stays in seenSessions either way (the peer is alive),
+				// so a previous good card isn't marked stale over one bad pong.
+				if (
+					typeof card.name !== "string" ||
+					typeof card.model !== "string" ||
+					typeof card.purpose !== "string" ||
+					typeof card.color !== "string"
+				) {
+					continue;
+				}
 				const prev = peerCards.get(peer.session_id);
-				const next = { ...pong.agent_card, staleCount: 0 };
+				const next = {
+					...card,
+					context_used_pct:
+						typeof card.context_used_pct === "number" && Number.isFinite(card.context_used_pct)
+							? card.context_used_pct
+							: 0,
+					staleCount: 0,
+				};
 				if (!prev || JSON.stringify({ ...prev, staleCount: 0 }) !== JSON.stringify(next)) {
 					peerCards.set(peer.session_id, next);
 					changed = true;
@@ -1569,6 +1747,12 @@ export default function (pi: ExtensionAPI) {
 			if (!target) {
 				throw new Error(`coms: no live agent matching "${params.target}"`);
 			}
+			// The target must carry a shared secret in its registry entry;
+			// entries without one were written by pre-auth (legacy) agents we
+			// can't authenticate to.
+			if (typeof target.secret !== "string" || target.secret.length === 0) {
+				throw new Error(`coms: target "${target.name}" has no shared secret in its registry entry (incompatible or legacy agent)`);
+			}
 			const active = activeInbound();
 			const hops = active ? active.hops + 1 : 0;
 			if (hops >= MAX_HOPS) {
@@ -1577,6 +1761,7 @@ export default function (pi: ExtensionAPI) {
 			const msg_id = ulid();
 			const env: PromptEnvelope = {
 				type: "prompt",
+				secret: target.secret,
 				msg_id,
 				sender_session: identity.session_id,
 				sender_endpoint: identity.endpoint,
@@ -1589,23 +1774,20 @@ export default function (pi: ExtensionAPI) {
 				response_schema: (params.response_schema as object | undefined) ?? null,
 			};
 
-			// Send the envelope synchronously and wait for the receiver's ack.
-			await sendEnvelope(target.endpoint, env);
-
-			// Register a pending entry whose promise the receiver-side handleResponse
-			// (or the timeout below) will settle.
+			// Register the pending entry (with its timer armed) BEFORE sending:
+			// a fast response arriving between send and registration would hit
+			// handleResponse with no entry, be logged as orphan_response, and be
+			// lost forever — the sender would then block the full timeout.
 			let resolveFn!: (v: { response?: any; error?: string | null }) => void;
-			let rejectFn!: (e: Error) => void;
-			const promise = new Promise<{ response?: any; error?: string | null }>((res, rej) => {
+			const promise = new Promise<{ response?: any; error?: string | null }>((res) => {
 				resolveFn = res;
-				rejectFn = rej;
 			});
 			const entry: PendingReply = {
 				resolve: resolveFn,
-				reject: rejectFn,
 				timer: null,
 				promise,
 				target_name: target.name,
+				conversation_id: params.conversation_id ?? null,
 				created_at: Date.now(),
 				timeout_ms: TIMEOUT_MS,
 			};
@@ -1617,6 +1799,20 @@ export default function (pi: ExtensionAPI) {
 			// Don't keep the event loop alive solely for this timer.
 			try { (entry.timer as any).unref?.(); } catch { /* ignore */ }
 			pendingReplies.set(msg_id, entry);
+
+			// Send the envelope synchronously and wait for the receiver's ack.
+			// On failure, roll the pending entry back so coms_get/coms_await
+			// never see a dead msg_id.
+			try {
+				await sendEnvelope(target.endpoint, env);
+			} catch (err) {
+				if (entry.timer) {
+					try { clearTimeout(entry.timer); } catch { /* ignore */ }
+					entry.timer = null;
+				}
+				pendingReplies.delete(msg_id);
+				throw err;
+			}
 
 			try {
 				pi.appendEntry("coms-log", {
@@ -1682,15 +1878,23 @@ export default function (pi: ExtensionAPI) {
 				const r = entry.result;
 				const text = r.error
 					? `coms_get: error — ${r.error}`
-					: `coms_get: complete\n${typeof r.response === "string" ? r.response : JSON.stringify(r.response, null, 2)}`;
+					: `coms_get: complete\n${typeof r.response === "string" ? r.response : (JSON.stringify(r.response, null, 2) ?? "")}`;
 				return {
 					content: [{ type: "text" as const, text }],
-					details: { status: "complete", response: r.response, error: r.error ?? null },
+					details: {
+						status: r.error ? "error" : "complete",
+						response: r.response,
+						error: r.error ?? null,
+						...(entry.conversation_id ? { conversation_id: entry.conversation_id } : {}),
+					},
 				};
 			}
 			return {
 				content: [{ type: "text" as const, text: "coms_get: pending" }],
-				details: { status: "pending" },
+				details: {
+					status: "pending",
+					...(entry.conversation_id ? { conversation_id: entry.conversation_id } : {}),
+				},
 			};
 		},
 		renderCall(args, theme) {
@@ -1725,8 +1929,11 @@ export default function (pi: ExtensionAPI) {
 					details: { error: "unknown msg_id" },
 				};
 			}
-			const timeoutMs = typeof params.timeout_ms === "number" && params.timeout_ms > 0
-				? params.timeout_ms
+			// Finite positive values only: Infinity would never time out, and
+			// values above 2^31-1 overflow Node's setTimeout (clamped to ~1ms →
+			// spurious immediate timeout).
+			const timeoutMs = typeof params.timeout_ms === "number" && Number.isFinite(params.timeout_ms) && params.timeout_ms > 0
+				? Math.min(params.timeout_ms, 2 ** 31 - 1)
 				: TIMEOUT_MS;
 
 			// coms_send already armed a background timer at the default TIMEOUT_MS;
@@ -1798,7 +2005,15 @@ export default function (pi: ExtensionAPI) {
 		let foundInbound = false;
 		for (const entry of ctx.sessionManager?.getBranch() ?? []) {
 			if (!foundInbound) {
-				if (entry.type === "message" && entry.message && (entry.message as any).details?.msg_id === inbound.msg_id) {
+				// Anchor on the injected prompt entry. pi 0.55.0 stores it as a
+				// custom_message entry (details at entry level); match the plain
+				// message shape too for compatibility.
+				const anchorMsgId = entry.type === "custom_message"
+					? (entry as any).details?.msg_id
+					: entry.type === "message" && entry.message
+						? (entry.message as any).details?.msg_id
+						: undefined;
+				if (anchorMsgId === inbound.msg_id) {
 					foundInbound = true;
 				}
 				continue;
@@ -1845,10 +2060,22 @@ export default function (pi: ExtensionAPI) {
 			timestamp: nowIso(),
 			response: payload,
 			error,
+			// Echo the originating prompt's conversation_id so the caller can
+			// correlate threads (D2).
+			conversation_id: inbound.conversation_id ?? null,
 		};
 
+		// Record the dispatch synchronously BEFORE awaiting: in pi's print mode
+		// (`-p` / `--mode json`) agent event listeners are fire-and-forget
+		// (pi-agent-core drops the listener promise) and main.js calls
+		// process.exit(0) immediately after the final turn, so this floating
+		// handler can be killed mid-send. The 'exit' handler below
+		// synchronously delivers any dispatch still pending at process exit.
+		const dispatch = { endpoint: inbound.sender_endpoint, line: JSON.stringify(respEnv), done: false };
+		pendingExitDispatches.push(dispatch);
 		try {
 			await sendEnvelope(inbound.sender_endpoint, respEnv);
+			dispatch.done = true;
 			try {
 				pi.appendEntry("coms-log", {
 					event: "outbound_response",
@@ -1859,6 +2086,9 @@ export default function (pi: ExtensionAPI) {
 				// best-effort
 			}
 		} catch (e: any) {
+			// Leave dispatch.done = false: the 'exit' fallback retries delivery.
+			// Responses are idempotent — a duplicate is at worst an
+			// orphan_response log on the receiver (re-resolve is a no-op).
 			try {
 				pi.appendEntry("coms-log", {
 					event: "outbound_response_failed",
@@ -1879,14 +2109,23 @@ export default function (pi: ExtensionAPI) {
 		description: "Force-refresh the coms pool widget (or filter with --all / --project <name>)",
 		handler: async (args, ctx) => {
 			const trimmed = (args ?? "").trim();
-			if (trimmed.includes("--all")) {
+			// Tokenize instead of substring-matching: "--allow" must not toggle
+			// --all, and the project value must be validated like the CLI flag
+			// path (an invalid name would otherwise silently yield an empty pool).
+			const tokens = trimmed.split(/\s+/).filter((t) => t.length > 0);
+			if (tokens.includes("--all")) {
 				includeExplicit = !includeExplicit;
 				try { ctx.ui.notify(`coms: include_explicit = ${includeExplicit}`, "info"); } catch { /* ignore */ }
 			}
-			const projectMatch = trimmed.match(/--project\s+(\S+)/);
-			if (projectMatch) {
-				displayProject = projectMatch[1];
-				try { ctx.ui.notify(`coms: displaying project ${displayProject}`, "info"); } catch { /* ignore */ }
+			const projIdx = tokens.indexOf("--project");
+			if (projIdx >= 0 && projIdx + 1 < tokens.length) {
+				const proj = tokens[projIdx + 1]!;
+				if (!isSafePathComponent(proj)) {
+					try { ctx.ui.notify(`coms: invalid project name "${proj}"`, "error"); } catch { /* ignore */ }
+				} else {
+					displayProject = proj;
+					try { ctx.ui.notify(`coms: displaying project ${displayProject}`, "info"); } catch { /* ignore */ }
+				}
 			}
 			try {
 				await refreshPool();
@@ -1932,4 +2171,25 @@ export default function (pi: ExtensionAPI) {
 	// default termination (once any listener attaches, Ctrl-C no longer exits)
 	// and can hang the host on shutdown. The host owns process lifecycle.
 	pi.on("session_shutdown", async () => { await cleanShutdown(); });
+
+	// The 'exit' event, unlike SIGINT/SIGTERM handlers, cannot suppress or
+	// defer termination beyond its own synchronous run — so this does not
+	// hijack the host's lifecycle. It buys one synchronous delivery attempt
+	// for responses that the print-mode exit race (see agent_end) would
+	// otherwise drop: main.js's process.exit(0) kills the floating agent_end
+	// handler mid-send. 'exit' handlers must be fully synchronous, so the
+	// delivery runs in a child process (spawnSync); normally the async path
+	// has already marked every dispatch done and this is a no-op.
+	process.on("exit", () => {
+		for (const d of pendingExitDispatches) {
+			if (d.done) continue;
+			try {
+				spawnSync(process.execPath, ["-e", EXIT_DELIVER_SCRIPT, d.endpoint], {
+					input: d.line,
+					timeout: SOCKET_OP_TIMEOUT_MS,
+					stdio: ["pipe", "ignore", "ignore"],
+				});
+			} catch { /* best-effort — the process is already exiting */ }
+		}
+	});
 }

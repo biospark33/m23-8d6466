@@ -65,6 +65,27 @@ JSON event streams; agents do not talk to each other directly.
 **Socket-coms (`coms.ts`) is a vendored, load-verified, viable alternative**
 promoted when true peer-to-peer messaging between long-lived agents is required.
 
+### Amendments (2026-07-13, PR #25 adversarial review)
+
+- **D1 — Shared-secret IPC auth in `coms.ts`.** A per-session secret is
+  generated at registration, stored in the `0700` registry entry, and required
+  in every `PromptEnvelope`; receivers nack envelopes whose secret mismatches
+  the registry record. This closes the "any local process can drive any agent"
+  hole on the socket path. **Windows named-pipe transport is declared
+  unsupported** — the extension fails fast on `win32` rather than running
+  without filesystem-permission isolation. The threat model (same-user local
+  attacker, registry disclosure, spoofed envelopes) is documented with the
+  implementation.
+- **D2 — `conversation_id` threaded end-to-end** in both `coms.ts` and
+  `coms-net.ts`: envelope → inbound context → `sendMessage` details → echoed
+  in the response envelope, so peers can correlate multi-turn exchanges.
+- **DEC1 — Smoke test runs genuinely live via model override.** Anthropic OAuth
+  tokens can expire, so the smoke test no longer depends on ambient pi auth for
+  its live turn: set `PI_SMOKE_MODEL` (e.g.
+  `openrouter/anthropic/claude-haiku-4.5`) to override the model for the run.
+  AC1 is satisfied by **real registrations and real `agent_end` events** — no
+  auth-deferral waiver, no in-process shape coverage counting as messages.
+
 ## Rationale
 
 - **Lowest day-1 complexity (YAGNI).** Subprocess-RPC needs no extension, no
@@ -73,31 +94,36 @@ promoted when true peer-to-peer messaging between long-lived agents is required.
   `agent_end`). Smoke test parsed 2/2 subprocess streams cleanly.
 - **Both paths are real and verified where auth permits.** `coms.ts` loads on
   pinned `pi@0.55.0` with zero errors (AC3: `pi -e ./coms.ts --list-models`
-  exit 0, 251 models listed), and its registry contract round-trips (2 peers
-  registered + discovered) and its `coms_send` envelope shape round-trips through
-  JSON (registry/shape coverage only — not a live peer exchange) in the smoke
-  test. The socket path is therefore *ready to promote*, not blocked, pending the
-  live peer-exchange verification noted below.
+  exit 0; 251 models listed at time of run, 2026-07-10 — the count tracks pi's
+  catalog and will drift; reproduce via `pi -e ./coms.ts --list-models` or the
+  `models_listed` field of the smoke-test report), and its registry contract
+  round-trips (2 peers registered + discovered) and its `coms_send` envelope
+  shape round-trips through JSON (registry/shape coverage only — not a live
+  peer exchange) in the smoke test. The socket path is therefore *ready to
+  promote*, not blocked, pending the live peer-exchange verification noted
+  below.
 - **Auth boundary drove the default, not viability.** A live model round-trip
   (subprocess `agent_end`, or a full socket `coms_send → coms_await`) requires pi
-  auth, which was unavailable in the build environment (oauth token expired, no
-  API key in shell). The subprocess-RPC transport parse and the socket registry
-  contract were both verified *without* a live turn; the live turn is the only
-  piece deferred (marked `skip` + `TODO(goal): pi auth unavailable`, never faked).
-  Subprocess-RPC reaches useful behavior with the least additional surface once
-  auth is restored, so it is the pragmatic day-1 default.
+  auth, which was unavailable in the original build environment (oauth token
+  expired, no API key in shell). The subprocess-RPC transport parse and the
+  socket registry contract were both verified *without* a live turn on
+  2026-07-10; the live turn was the only piece deferred (never faked). DEC1
+  (above) has since closed that deferral: `PI_SMOKE_MODEL` overrides the model
+  so the live turn runs against any provider with a working key, independent of
+  expiring Anthropic OAuth. Subprocess-RPC still reaches useful behavior with
+  the least additional surface, so it remains the pragmatic day-1 default.
 
 ## Coms contract (socket-coms verbs — as vendored)
 
 `response_schema` is **parse-only**: on `agent_end` the receiver runs
 `JSON.parse(lastAssistantText)` when a `response_schema` is present and returns
 `error: "response not valid JSON"` on failure. It is **NOT** validated against the
-schema (PRD §5.2; `coms.ts:1537-1544`).
+schema (PRD §5.2; `coms.ts:2040-2052`).
 
 | Verb | Signature | Behavior |
 |------|-----------|----------|
 | `coms_send` | `coms_send(target: string, prompt: string, conversation_id?: string, response_schema?: object)` | Sends a prompt envelope to a peer (`target` = peer name, scoped to project, or `session_id`, global). Returns a `msg_id` once the receiver acks. Throws if unreachable / hop limit reached. |
-| `coms_await` | `coms_await(msg_id: string, timeout_ms?: number)` | Blocks until the reply for `msg_id` lands or the timeout fires. Default timeout **30 min** (`PI_COMS_TIMEOUT_MS = 1_800_000`, `coms.ts:32`). |
+| `coms_await` | `coms_await(msg_id: string, timeout_ms?: number)` | Blocks until the reply for `msg_id` lands or the timeout fires. Default timeout **30 min** (`PI_COMS_TIMEOUT_MS = 1_800_000`, `coms.ts:42`). |
 | `coms_get` | `coms_get(msg_id: string)` | Non-blocking poll; returns status `pending` \| `complete` \| `error` and (when complete) the response. |
 | `coms_list` | `coms_list(project?: string, include_explicit?: boolean)` | Lists live peer agents (names, models, context usage). `project="*"` scans all projects; `include_explicit=true` reveals `--explicit` agents. |
 
@@ -109,23 +135,41 @@ Identity flags registered by the extension at load (`pi.registerFlag`): `--cname
 - **Pin:** `@mariozechner/pi-coding-agent@0.55.0` (host-installed; vendor
   `package.json` records the pin). Extension load verified against it (AC3 green).
 - **Timeout:** `coms_await` default 30 min (`PI_COMS_TIMEOUT_MS = 1_800_000`,
-  `coms.ts:32`). Override per-call via `timeout_ms`.
-- **Relay:** `MAX_HOPS = 5` (`coms.ts:31`) — `coms_send` throws once the hop count
+  `coms.ts:42`). Override per-call via `timeout_ms`.
+- **Relay:** `MAX_HOPS = 5` (`coms.ts:41`) — `coms_send` throws once the hop count
   reaches the limit.
-- **INV-1 (test keys only):** the smoke test reads/writes/logs **no** API keys; the
-  deferred live turn uses whatever auth pi already holds. No secrets in fixtures.
-- **INV-2 (per-user socket scope):** socket + registry files live under
-  `~/.pi/coms/` (chmod `0700`), per-user. The smoke test writes only to an
-  isolated per-run `PI_COMS_DIR` temp dir and never mutates the host registry —
-  no cross-user leakage.
-- **Auth gate (open follow-up):** a live end-to-end message round-trip on either
-  path awaits restored pi auth. Tracked as `TODO(goal): pi auth unavailable` in
-  `scripts/coms-smoke-test.ts` (`rpc_live_round_trip` auto-skips, never fakes).
+- **INV-1 (test keys only):** the smoke test reads/writes/logs **no** API keys;
+  the live turn selects its model via `PI_SMOKE_MODEL` and uses whatever auth
+  pi already holds for that provider. No secrets in fixtures.
+- **INV-2 (per-user socket scope):** registry files live under
+  `~/.pi/coms/projects/<project>/agents/` (`COMS_DIR`, `coms.ts:40`, chmod
+  `0700`). Sockets bind at `~/.pi/coms/sockets/<sessionId>.sock` when that path
+  fits the 100-byte `sun_path` budget (`makeEndpoint`, `coms.ts:253-256`),
+  otherwise at `$TMPDIR/pi-coms-<uid>/<sessionId>.sock` (`os.tmpdir()`, per-uid
+  dir, `coms.ts:263`); the socket dir is chmod `0700` at bind time
+  (`coms.ts:1131-1132`). Both locations are per-user. The smoke test
+  writes only to an isolated per-run `PI_COMS_DIR` temp dir and never mutates
+  the host registry — no cross-user leakage.
+- **Live turn (DEC1):** the smoke test's live round-trip runs via model
+  override — set `PI_SMOKE_MODEL` (e.g. `openrouter/anthropic/claude-haiku-4.5`)
+  so AC1 does not depend on ambient (possibly expired) Anthropic OAuth. AC1 is
+  green only on real registrations + real `agent_end` events.
+- **Platform (D1):** socket-coms is POSIX-only. `coms.ts` fails fast on
+  `win32` (`session_start`, `coms.ts:1035-1038` — named pipes lack
+  filesystem-permission isolation for the shared secret); subprocess-RPC is
+  unaffected and remains the cross-platform path.
 
 ## Evidence
 
 Run `bun scripts/coms-smoke-test.ts` (structured JSON report; exit 0 only when
-AC1 is backed by a real message exchange, not registry/shape coverage alone):
+AC1 is backed by a real message exchange, not registry/shape coverage alone).
+Per DEC1, run it live with a model override:
+
+```sh
+PI_SMOKE_MODEL=openrouter/anthropic/claude-haiku-4.5 bun scripts/coms-smoke-test.ts
+```
+
+Run of record, 2026-07-10 (pre-DEC1, ambient pi auth unavailable):
 
 ```text
 agents_registered: 4  (2 subprocess-RPC streams + 2 socket-coms peers)
@@ -133,17 +177,22 @@ messages_exchanged: 0  (no live coms_send/coms_await or agent_end round-trip —
                         pi auth unavailable in the build environment)
 AC1 (>=2 agents, >=1 msg): false  — blocked on restored pi auth, not on either
                                      transport's viability
-AC3 (extension loads, exit 0): true  (251 models listed)
-rpc_live_round_trip: SKIPPED — TODO(goal): pi auth unavailable
+AC3 (extension loads, exit 0): true  (251 models listed at time of run;
+                                      reproduce via `pi -e ./coms.ts --list-models`)
+rpc_live_round_trip: SKIPPED — pi auth unavailable (superseded by DEC1's
+                               PI_SMOKE_MODEL override; no waiver remains)
 socket_envelope_shape_coverage: true — envelope shape round-trips through JSON;
                                         coverage only, does not count as a message
 inv2_per_user_isolation: registry confined to per-run temp dir
 ```
 
+Post-DEC1, the same command with `PI_SMOKE_MODEL` set exercises the live turn
+for real: AC1 is green only when it is backed by real registrations and real
+`agent_end` events — no auth-deferral waiver path remains.
+
 AC1 was previously (incorrectly) reported `true` off a self-serialized,
 in-process JSON round-trip on the socket-coms path that never touched a real
 peer. That accounting bug is fixed (`socket_envelope_shape_coverage` no longer
-contributes to `messages_exchanged`); AC1 now correctly reports `false` until a
-live round-trip runs with restored pi auth (see Auth gate below). This does not
-change the Decision above — both transports' non-live behavior (extension load,
-registry contract, JSON stream parsing) was independently verified either way.
+contributes to `messages_exchanged`). This does not change the Decision above —
+both transports' non-live behavior (extension load, registry contract, JSON
+stream parsing) was independently verified either way.
