@@ -148,6 +148,10 @@ interface PendingReply {
 	target_name?: string;
 	target_session?: string;
 	created_at: string;
+	// Effective await deadline (ms). Defaults to MESSAGE_TIMEOUT_MS at send time;
+	// a coms_net_await override replaces it so the heartbeat pruning loop does
+	// not evict the entry before the caller's own timeout fires.
+	timeout_ms?: number;
 }
 
 interface ServerJson {
@@ -1150,7 +1154,8 @@ export default function (pi: ExtensionAPI) {
 			// never cleaned up).
 			const now = Date.now();
 			for (const [mid, entry] of pendingReplies.entries()) {
-				if (now - new Date(entry.created_at).getTime() > MESSAGE_TIMEOUT_MS + 60_000) {
+				const limit = (entry.timeout_ms ?? MESSAGE_TIMEOUT_MS) + 60_000;
+				if (now - new Date(entry.created_at).getTime() > limit) {
 					pendingReplies.delete(mid);
 				}
 			}
@@ -1402,6 +1407,7 @@ export default function (pi: ExtensionAPI) {
 				target_name: params.target,
 				target_session,
 				created_at: nowIso(),
+				timeout_ms: MESSAGE_TIMEOUT_MS,
 			});
 
 			try {
@@ -1544,6 +1550,9 @@ export default function (pi: ExtensionAPI) {
 
 			// Local SSE-resolved fast path.
 			const pending = pendingReplies.get(msg_id);
+			// Record the effective deadline so the heartbeat pruning loop honors
+			// the caller's timeout instead of the default MESSAGE_TIMEOUT_MS.
+			if (pending) pending.timeout_ms = timeoutMs;
 			if (pending && pending.result) {
 				const r = pending.result;
 				if (r.error) {
@@ -1767,9 +1776,6 @@ export default function (pi: ExtensionAPI) {
 		if (shuttingDown) return;
 		shuttingDown = true;
 
-		process.off("SIGINT", onSigInt);
-		process.off("SIGTERM", onSigTerm);
-
 		if (heartbeatTimer) {
 			try { clearInterval(heartbeatTimer); } catch { /* ignore */ }
 			heartbeatTimer = null;
@@ -1818,9 +1824,9 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	// Rely on the host's session_shutdown event for cleanup. Registering
+	// process-level SIGINT/SIGTERM handlers from an extension suppresses Node's
+	// default termination (once any listener attaches, Ctrl-C no longer exits)
+	// and can hang the host on shutdown. The host owns process lifecycle.
 	pi.on("session_shutdown", async () => { await cleanShutdown(); });
-	const onSigInt = () => { void cleanShutdown(); };
-	const onSigTerm = () => { void cleanShutdown(); };
-	process.on("SIGINT", onSigInt);
-	process.on("SIGTERM", onSigTerm);
 }

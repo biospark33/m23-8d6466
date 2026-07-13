@@ -156,7 +156,11 @@ function pathSocketComs(): { registered: number; exchanged: number } {
 		const project = "smoketest";
 		const agentsDir = path.join(comsDir, "projects", project, "agents");
 		fs.mkdirSync(agentsDir, { recursive: true });
-		fs.chmodSync(comsDir, 0o700); // per-user scope
+		// Unix-only: 0o700 is meaningless on Windows and throws on restricted
+		// filesystems. mkdtemp already isolates comsDir under the user's own tmp.
+		if (process.platform !== "win32") {
+			try { fs.chmodSync(comsDir, 0o700); } catch { /* best-effort */ }
+		}
 
 		// Write two peers in the exact on-disk shape coms.ts uses (writeRegistryAtomic).
 		const mkEntry = (name: string, n: number): RegistryEntry => ({

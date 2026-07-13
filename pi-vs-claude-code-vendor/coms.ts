@@ -114,6 +114,10 @@ interface PendingReply {
 	result?: { response?: any; error?: string | null };
 	target_name?: string;
 	created_at: string;
+	// Effective await deadline (ms). Defaults to TIMEOUT_MS at send time; a
+	// coms_await override replaces it so the keepalive pruning loop below does
+	// not evict the entry before the caller's own timeout fires.
+	timeout_ms?: number;
 }
 
 interface InboundContext {
@@ -1045,7 +1049,8 @@ export default function (pi: ExtensionAPI) {
 				// never cleaned up).
 				const now = Date.now();
 				for (const [mid, entry] of pendingReplies.entries()) {
-					if (now - new Date(entry.created_at).getTime() > TIMEOUT_MS + 60_000) {
+					const limit = (entry.timeout_ms ?? TIMEOUT_MS) + 60_000;
+					if (now - new Date(entry.created_at).getTime() > limit) {
 						pendingReplies.delete(mid);
 					}
 				}
@@ -1452,6 +1457,7 @@ export default function (pi: ExtensionAPI) {
 				promise,
 				target_name: target.name,
 				created_at: nowIso(),
+				timeout_ms: TIMEOUT_MS,
 			};
 			entry.timer = setTimeout(() => {
 				if (entry.result) return;
@@ -1581,6 +1587,9 @@ export default function (pi: ExtensionAPI) {
 				clearTimeout(entry.timer);
 				entry.timer = null;
 			}
+			// This call now owns the deadline; record the effective timeout so the
+			// keepalive pruning loop honors it instead of the default TIMEOUT_MS.
+			entry.timeout_ms = timeoutMs;
 
 			let timedTimer: NodeJS.Timeout | undefined;
 			const timed = new Promise<{ error: string }>((resolve) => {
@@ -1735,8 +1744,6 @@ export default function (pi: ExtensionAPI) {
 	async function cleanShutdown(): Promise<void> {
 		if (shuttingDown) return;
 		shuttingDown = true;
-		process.off("SIGINT", onSigInt);
-		process.off("SIGTERM", onSigTerm);
 		if (pingTimer) { try { clearInterval(pingTimer); } catch { /* ignore */ } pingTimer = null; }
 		if (keepaliveTimer) { try { clearInterval(keepaliveTimer); } catch { /* ignore */ } keepaliveTimer = null; }
 		for (const entry of pendingReplies.values()) {
@@ -1763,9 +1770,9 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	// Rely on the host's session_shutdown event for cleanup. Registering
+	// process-level SIGINT/SIGTERM handlers from an extension suppresses Node's
+	// default termination (once any listener attaches, Ctrl-C no longer exits)
+	// and can hang the host on shutdown. The host owns process lifecycle.
 	pi.on("session_shutdown", async () => { await cleanShutdown(); });
-	const onSigInt = () => { void cleanShutdown(); };
-	const onSigTerm = () => { void cleanShutdown(); };
-	process.on("SIGINT", onSigInt);
-	process.on("SIGTERM", onSigTerm);
 }
