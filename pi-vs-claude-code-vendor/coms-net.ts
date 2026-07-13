@@ -1298,7 +1298,16 @@ export default function (pi: ExtensionAPI) {
 			const projectFilter = (params as any).project ?? identity.project;
 			const includeExp = (params as any).include_explicit === true;
 			const qs = `?project=${encodeURIComponent(projectFilter)}&include_explicit=${includeExp ? "true" : "false"}`;
-			const resp = await httpFetch("GET", `/v1/agents${qs}`);
+			let resp: any;
+			try {
+				resp = await httpFetch("GET", `/v1/agents${qs}`);
+			} catch (err) {
+				if (err instanceof HttpError) {
+					const detail = (err.body && err.body.error) || err.message;
+					throw new Error(`coms-net: list failed (${err.status}): ${detail}`);
+				}
+				throw new Error(`coms-net: list failed: ${safeError(err)}`);
+			}
 			const agents: AgentCard[] = Array.isArray(resp?.agents) ? resp.agents : [];
 			const peers = agents.filter(a => a.session_id !== identity!.session_id);
 
