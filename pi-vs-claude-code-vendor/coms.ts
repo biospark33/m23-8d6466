@@ -32,7 +32,10 @@ const MAX_HOPS = Number(process.env.PI_COMS_MAX_HOPS) || 5;
 const TIMEOUT_MS = Number(process.env.PI_COMS_TIMEOUT_MS) || 1_800_000;
 const PING_INTERVAL_MS = Number(process.env.PI_COMS_PING_INTERVAL_MS) || 10_000;
 const KEEPALIVE_INTERVAL_MS = 30_000;
-const LINE_CAP_BYTES = 64 * 1024;
+// Envelopes are newline-framed JSON; prompts carrying file context or
+// multi-turn history routinely exceed 64 KB. 16 MB matches coms-net's
+// SSE_BUF_CAP_BYTES while still bounding the per-line accumulator.
+const LINE_CAP_BYTES = 16 * 1024 * 1024;
 const SOCKET_OP_TIMEOUT_MS = 5_000;
 
 const FALLBACK_PALETTE = [
@@ -201,11 +204,27 @@ function parseFrontmatter(raw: string): { name?: string; description?: string; c
 	};
 }
 
+// macOS caps sun_path at 104 bytes (incl. NUL), Linux at 108 — a deep
+// PI_COMS_DIR or long home path can blow past that and make bind fail with
+// EINVAL/ENAMETOOLONG. Use 100 as the budget so the check is conservative on
+// every POSIX platform.
+const MAX_SOCKET_PATH_BYTES = 100;
+
 function makeEndpoint(sessionId: string): string {
 	if (process.platform === "win32") {
 		return `\\\\.\\pipe\\pi-coms-${sessionId}`;
 	}
-	return path.join(COMS_DIR, "sockets", `${sessionId}.sock`);
+	const socketPath = path.join(COMS_DIR, "sockets", `${sessionId}.sock`);
+	if (Buffer.byteLength(socketPath, "utf-8") <= MAX_SOCKET_PATH_BYTES) {
+		return socketPath;
+	}
+	// Fall back to a per-user dir under the system tmp dir. Both ends derive
+	// the endpoint solely from makeEndpoint (clients connect via the endpoint
+	// recorded in the registry), so the fallback stays consistent as long as
+	// the dir name is deterministic. getuid keeps concurrent users' sockets
+	// apart in the shared tmp dir; the dir is chmod'd 0700 at bind time.
+	const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+	return path.join(os.tmpdir(), `pi-coms-${uid}`, `${sessionId}.sock`);
 }
 
 function nowIso(): string {
@@ -953,7 +972,10 @@ export default function (pi: ExtensionAPI) {
 		try {
 			fs.mkdirSync(projectAgentsDir(project), { recursive: true });
 			if (process.platform !== "win32") {
-				fs.mkdirSync(path.join(COMS_DIR, "sockets"), { recursive: true });
+				// mkdir dirname(endpoint) (not COMS_DIR/sockets) so the tmp-dir
+				// fallback from makeEndpoint gets created too; chmod 0700 keeps
+				// sockets private to this user in the shared tmp dir.
+				fs.mkdirSync(path.dirname(endpoint), { recursive: true, mode: 0o700 });
 				try { fs.chmodSync(COMS_DIR, 0o700); } catch { /* best-effort */ }
 			}
 		} catch (err) {
@@ -1065,13 +1087,15 @@ export default function (pi: ExtensionAPI) {
 								name: identity.name,
 							});
 							// Our name was reclaimed by another session. This keepalive
-							// can't recover it (we deliberately don't hijack back below),
-							// so stop the interval — otherwise every tick re-detects the
-							// same conflict and spams coms-log.
-							if (keepaliveTimer) {
-								try { clearInterval(keepaliveTimer); } catch { /* ignore */ }
-								keepaliveTimer = null;
-							}
+							// can't recover it (we deliberately don't hijack back), and
+							// merely stopping the interval would leave the socket server
+							// bound: the agent could still receive messages on a stale
+							// endpoint while being unregistered — a zombie. Tear coms
+							// down instead. cleanShutdown clears all timers, closes the
+							// server, unlinks the socket, and removes our registry entry
+							// (session_id-guarded, so the reclaiming session's entry is
+							// never touched); it does not exit the host process.
+							void cleanShutdown();
 							return;
 						}
 					} catch {
