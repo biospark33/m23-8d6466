@@ -1834,12 +1834,12 @@ export default function (pi: ExtensionAPI) {
 			if (trimmed.includes("--server")) {
 				try {
 					const health = await httpFetch("GET", "/health");
-					ctx.ui.notify(
+					ctx.ui?.notify?.(
 						`coms-net server: ${serverUrl} · version ${health?.version ?? "?"} · server_id ${health?.server_id ?? "?"}`,
 						"info",
 					);
 				} catch (err) {
-					ctx.ui.notify(`coms-net: server health failed — ${safeError(err)}`, "error");
+					ctx.ui?.notify?.(`coms-net: server health failed — ${safeError(err)}`, "error");
 				}
 			}
 			const projectMatch = trimmed.match(/--project\s+(\S+)/);
