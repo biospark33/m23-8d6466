@@ -340,9 +340,18 @@ function readAllRegistryEntriesAcrossProjects(): RegistryEntry[] {
 	return out;
 }
 
-function removeRegistryEntry(project: string, name: string): void {
+function removeRegistryEntry(project: string, name: string, sessionId?: string): void {
 	try {
-		fs.unlinkSync(registryFilePath(project, name));
+		const p = registryFilePath(project, name);
+		// TOCTOU guard: if another session reclaimed our name between the read
+		// that decided this entry was dead and the unlink, the on-disk
+		// session_id won't match ours — bail so we don't delete a live agent's
+		// registry file. Omitting sessionId (no current callers do) skips it.
+		if (sessionId !== undefined && fs.existsSync(p)) {
+			const parsed = JSON.parse(fs.readFileSync(p, "utf-8")) as RegistryEntry;
+			if (parsed.session_id !== sessionId) return;
+		}
+		fs.unlinkSync(p);
 	} catch {
 		// best-effort
 	}
@@ -356,7 +365,7 @@ function pruneDeadEntries(project: string): RegistryEntry[] {
 		// that to process.kill signals the current process (undefined/null) or
 		// the whole process group (0), which would falsely mark a dead entry live.
 		if (typeof entry.pid !== "number" || !Number.isInteger(entry.pid) || entry.pid <= 0) {
-			removeRegistryEntry(project, entry.name);
+			removeRegistryEntry(project, entry.name, entry.session_id);
 			continue;
 		}
 		try {
@@ -364,7 +373,7 @@ function pruneDeadEntries(project: string): RegistryEntry[] {
 			live.push(entry);
 		} catch (e: any) {
 			if (e && e.code === "ESRCH") {
-				removeRegistryEntry(project, entry.name);
+				removeRegistryEntry(project, entry.name, entry.session_id);
 			} else {
 				// EPERM means the process exists but we can't signal it — treat as live.
 				live.push(entry);
@@ -1020,6 +1029,14 @@ export default function (pi: ExtensionAPI) {
 								conflicting_session_id: existing.session_id,
 								name: identity.name,
 							});
+							// Our name was reclaimed by another session. This keepalive
+							// can't recover it (we deliberately don't hijack back below),
+							// so stop the interval — otherwise every tick re-detects the
+							// same conflict and spams coms-log.
+							if (keepaliveTimer) {
+								try { clearInterval(keepaliveTimer); } catch { /* ignore */ }
+								keepaliveTimer = null;
+							}
 							return;
 						}
 					} catch {
@@ -1772,7 +1789,7 @@ export default function (pi: ExtensionAPI) {
 			if (process.platform !== "win32") {
 				try { fs.unlinkSync(identity.endpoint); } catch { /* ignore */ }
 			}
-			try { removeRegistryEntry(identity.project, identity.name); } catch { /* ignore */ }
+			try { removeRegistryEntry(identity.project, identity.name, identity.session_id); } catch { /* ignore */ }
 			try {
 				pi.appendEntry("coms-log", { event: "shutdown", session_id: identity.session_id });
 			} catch { /* best-effort */ }

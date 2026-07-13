@@ -595,6 +595,21 @@ export default function (pi: ExtensionAPI) {
 			dataLines = [];
 			id = undefined;
 		}
+		function processLine(line: string): void {
+			if (line.length === 0) {
+				flush();
+			} else if (line.startsWith(":")) {
+				// SSE comment
+			} else if (line.startsWith("event:")) {
+				event = line.slice(6).trimStart();
+			} else if (line.startsWith("data:")) {
+				let v = line.slice(5);
+				if (v.startsWith(" ")) v = v.slice(1);
+				dataLines.push(v);
+			} else if (line.startsWith("id:")) {
+				id = line.slice(3).trimStart();
+			}
+		}
 		return {
 			// Line-by-line incremental parsing: each feed() only rescans the
 			// unconsumed tail of buf (single indexOf per line), so total work
@@ -620,21 +635,24 @@ export default function (pi: ExtensionAPI) {
 					// strip a trailing CR so CRLF-terminated streams parse the same
 					// as LF-terminated ones.
 					if (line.endsWith("\r")) line = line.slice(0, -1);
-					if (line.length === 0) {
-						flush();
-					} else if (line.startsWith(":")) {
-						// SSE comment
-					} else if (line.startsWith("event:")) {
-						event = line.slice(6).trimStart();
-					} else if (line.startsWith("data:")) {
-						let v = line.slice(5);
-						if (v.startsWith(" ")) v = v.slice(1);
-						dataLines.push(v);
-					} else if (line.startsWith("id:")) {
-						id = line.slice(3).trimStart();
-					}
+					processLine(line);
 				}
 				if (start > 0) buf = buf.slice(start);
+			},
+			// Dispatch any event left buffered when the stream ends without a
+			// trailing blank line. SSE only emits on a blank line, so a server
+			// that closes cleanly after its last `\n` (no `\n\n`) would otherwise
+			// drop a complete event. A genuinely truncated event fails JSON.parse
+			// and is delivered as a string — degraded, not silently lost. Named
+			// end() rather than flush() to avoid shadowing the inner dispatcher.
+			end(): void {
+				if (buf.length > 0) {
+					let line = buf;
+					if (line.endsWith("\r")) line = line.slice(0, -1);
+					processLine(line);
+					buf = "";
+				}
+				flush();
 			},
 		};
 	}
@@ -920,6 +938,9 @@ export default function (pi: ExtensionAPI) {
 					if (done) break;
 					if (value) parser.feed(value);
 				}
+				// Stream ended — flush any event the server sent without a
+				// trailing blank line so it isn't dropped.
+				try { parser.end(); } catch { /* best-effort */ }
 				audit("sse_disconnect", { reason: "stream_end" });
 			} catch (err: any) {
 				if (ac.signal.aborted) {
