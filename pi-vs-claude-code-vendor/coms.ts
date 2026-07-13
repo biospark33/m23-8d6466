@@ -175,15 +175,15 @@ function isValidHex(hex: string): boolean {
 
 function hexFg(hex: string, s: string): string {
 	if (!isValidHex(hex)) return s;
-	const r = parseInt(hex.slice(1, 3), 16);
-	const g = parseInt(hex.slice(3, 5), 16);
-	const b = parseInt(hex.slice(5, 7), 16);
+	const r = Number.parseInt(hex.slice(1, 3), 16);
+	const g = Number.parseInt(hex.slice(3, 5), 16);
+	const b = Number.parseInt(hex.slice(5, 7), 16);
 	return `\x1b[38;2;${r};${g};${b}m${s}\x1b[39m`;
 }
 
 function fallbackColor(sessionId: string): string {
 	const h = crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 8);
-	return FALLBACK_PALETTE[Number(BigInt("0x" + h)) % FALLBACK_PALETTE.length];
+	return FALLBACK_PALETTE[Number(BigInt(`0x${h}`)) % FALLBACK_PALETTE.length];
 }
 
 function parseFrontmatter(raw: string): { name?: string; description?: string; color?: string; body: string } {
@@ -593,7 +593,7 @@ function sendEnvelope(endpoint: string, envelope: Envelope | Pong | { type: stri
 		sock.once("error", fail);
 		sock.once("connect", async () => {
 			try {
-				sock.write(JSON.stringify(envelope) + "\n");
+				sock.write(`${JSON.stringify(envelope)}\n`);
 				const line = await readOneLine(sock);
 				const parsed = JSON.parse(line);
 				try { sock.end(); } catch { /* ignore */ }
@@ -734,7 +734,7 @@ export default function (pi: ExtensionAPI) {
 	// Phase A stub handlers — each just acks valid envelopes. Phase B replaces these.
 	function ackOk(socket: net.Socket, msg_id: string): void {
 		try {
-			socket.write(JSON.stringify({ type: "ack", msg_id }) + "\n");
+			socket.write(`${JSON.stringify({ type: "ack", msg_id })}\n`);
 		} catch {
 			// ignore
 		}
@@ -743,7 +743,7 @@ export default function (pi: ExtensionAPI) {
 
 	function nack(socket: net.Socket, msg_id: string, error: string): void {
 		try {
-			socket.write(JSON.stringify({ type: "nack", msg_id, error }) + "\n");
+			socket.write(`${JSON.stringify({ type: "nack", msg_id, error })}\n`);
 		} catch {
 			// ignore
 		}
@@ -850,7 +850,7 @@ export default function (pi: ExtensionAPI) {
 		};
 		const pong: Pong = { type: "pong", msg_id: env.msg_id, agent_card: card };
 		try {
-			socket.write(JSON.stringify(pong) + "\n");
+			socket.write(`${JSON.stringify(pong)}\n`);
 		} catch {
 			// ignore
 		}
@@ -1294,10 +1294,10 @@ export default function (pi: ExtensionAPI) {
 				topBorder = left + leftFill + middle + rightTag + right;
 			} else {
 				const fallbackRemaining = Math.max(0, safeWidth - 2 /* "┏━" */ - 6 /* " coms " */ - 1 /* "┓" */);
-				const right = theme.fg("dim", "━".repeat(fallbackRemaining) + "┓");
+				const right = theme.fg("dim", `${"━".repeat(fallbackRemaining)}┓`);
 				topBorder = left + right;
 			}
-			bottomBorder = theme.fg("dim", "┗" + "━".repeat(safeWidth - 2) + "┛");
+			bottomBorder = theme.fg("dim", `┗${"━".repeat(safeWidth - 2)}┛`);
 		}
 
 		if (rows.length === 0) {
@@ -1324,7 +1324,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (r.stale) {
 				const dimRow = `✗ ${r.name.padEnd(12)} ${abbreviateModel(r.model).padEnd(14)} [${"-".repeat(15)}] ${pctLabel.padStart(4)}  —  ${r.purpose || ""}`;
-				out.push(truncateToWidth(" " + theme.fg("dim", dimRow), width));
+				out.push(truncateToWidth(` ${theme.fg("dim", dimRow)}`, width));
 				continue;
 			}
 
@@ -1335,11 +1335,11 @@ export default function (pi: ExtensionAPI) {
 				? theme.fg("dim", "-".repeat(15))
 				: hexFg(r.color, "#".repeat(filled)) + theme.fg("dim", "-".repeat(empty));
 			const bar = theme.fg("warning", "[") + barFill + theme.fg("warning", "]");
-			const pctPart = " " + theme.fg("accent", pctLabel.padStart(4));
+			const pctPart = ` ${theme.fg("accent", pctLabel.padStart(4))}`;
 			const sep = theme.fg("dim", "  —  ");
 			const purposePart = theme.fg("muted", r.purpose || "");
 
-			const line = " " + swatch + " " + namePart + " " + modelPart + " " + bar + pctPart + sep + purposePart;
+			const line = ` ${swatch} ${namePart} ${modelPart} ${bar}${pctPart}${sep}${purposePart}`;
 			out.push(truncateToWidth(line, width));
 		}
 
@@ -1525,7 +1525,7 @@ export default function (pi: ExtensionAPI) {
 				const pct = a.context_used_pct != null ? `${a.context_used_pct}%` : "?%";
 				return `${dot} ${theme.fg("accent", a.name)} ${theme.fg("dim", a.model)} ${theme.fg("warning", pct)}`;
 			}).join("\n");
-			return new Text(header + "\n" + rows, 0, 0);
+			return new Text(`${header}\n${rows}`, 0, 0);
 		},
 	});
 
@@ -1618,7 +1618,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme) {
 			const tgt = (args as any).target ?? "?";
 			const prompt = (args as any).prompt ?? "";
-			const preview = prompt.length > 60 ? prompt.slice(0, 57) + "..." : prompt;
+			const preview = prompt.length > 60 ? `${prompt.slice(0, 57)}...` : prompt;
 			return new Text(
 				theme.fg("toolTitle", theme.bold("coms_send ")) +
 				theme.fg("accent", tgt) +
@@ -1636,7 +1636,7 @@ export default function (pi: ExtensionAPI) {
 			return new Text(
 				theme.fg("success", "→ ") +
 				theme.fg("accent", d.target) +
-				theme.fg("dim", `  msg_id `) +
+				theme.fg("dim", "  msg_id ") +
 				theme.fg("warning", d.msg_id),
 				0, 0,
 			);
@@ -1670,7 +1670,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 			return {
-				content: [{ type: "text" as const, text: `coms_get: pending` }],
+				content: [{ type: "text" as const, text: "coms_get: pending" }],
 				details: { status: "pending" },
 			};
 		},

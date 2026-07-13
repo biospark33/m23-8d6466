@@ -215,7 +215,7 @@ function pathSocketComs(): { registered: number; exchanged: number } {
 		const roundTripped = JSON.parse(wire) as typeof envelope;
 		// response_schema is parse-only: JSON.parse of a reply, NOT schema-validated.
 		const reply = JSON.parse('{"ok":true}') as Record<string, unknown>;
-		const shapeOk = roundTripped.target === target?.name && reply.ok === true;
+		const shapeOk = target !== undefined && roundTripped.target === target.name && reply.ok === true;
 
 		// INV-2 assertion: nothing leaked outside the isolated dir.
 		const leaked = !comsDir.startsWith(os.tmpdir());

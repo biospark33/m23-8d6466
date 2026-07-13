@@ -219,15 +219,15 @@ function isValidHex(hex: string): boolean {
 
 function hexFg(hex: string, s: string): string {
 	if (!isValidHex(hex)) return s;
-	const r = parseInt(hex.slice(1, 3), 16);
-	const g = parseInt(hex.slice(3, 5), 16);
-	const b = parseInt(hex.slice(5, 7), 16);
+	const r = Number.parseInt(hex.slice(1, 3), 16);
+	const g = Number.parseInt(hex.slice(3, 5), 16);
+	const b = Number.parseInt(hex.slice(5, 7), 16);
 	return `\x1b[38;2;${r};${g};${b}m${s}\x1b[39m`;
 }
 
 function fallbackColor(sessionId: string): string {
 	const h = crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 8);
-	return FALLBACK_PALETTE[Number(BigInt("0x" + h)) % FALLBACK_PALETTE.length];
+	return FALLBACK_PALETTE[Number(BigInt(`0x${h}`)) % FALLBACK_PALETTE.length];
 }
 
 function parseFrontmatter(raw: string): { name?: string; description?: string; color?: string; body: string } {
@@ -392,7 +392,7 @@ function resolveServerUrl(project: string, cliFlag: string | undefined): string 
 		if (v) return v;
 	}
 	const sj = readServerJson(project);
-	if (sj && sj.local_url) {
+	if (sj?.local_url) {
 		const v = normalizeServerUrlCandidate(sj.local_url);
 		if (v) return v;
 	}
@@ -633,9 +633,9 @@ export default function (pi: ExtensionAPI) {
 				// after the loop, so a chunk with K lines costs O(N) total copying
 				// instead of the O(K*N) that re-slicing the tail on every line
 				// would cost.
-				let nl;
 				let start = 0;
-				while ((nl = buf.indexOf("\n", start)) >= 0) {
+				let nl = buf.indexOf("\n", start);
+				while (nl >= 0) {
 					let line = buf.slice(start, nl);
 					start = nl + 1;
 					// SSE line endings may be LF, CR, or CRLF per the WHATWG spec —
@@ -643,6 +643,7 @@ export default function (pi: ExtensionAPI) {
 					// as LF-terminated ones.
 					if (line.endsWith("\r")) line = line.slice(0, -1);
 					processLine(line);
+					nl = buf.indexOf("\n", start);
 				}
 				if (start > 0) buf = buf.slice(start);
 			},
@@ -827,11 +828,7 @@ export default function (pi: ExtensionAPI) {
 				{
 					customType: "coms-net-inbound",
 					content:
-						`[inbound coms-net message from ${senderName} @ ${senderCwd}]\n` +
-						`[reply by writing a normal assistant message — your turn output is auto-returned to ${senderName}. ` +
-						`DO NOT call coms_net_send/coms_net_await/coms_net_get to reply; that creates a ping-pong loop. ` +
-						`msg_id ${msg_id} belongs to ${senderName}'s outbound, not yours.]\n\n` +
-						`${promptText}`,
+						`[inbound coms-net message from ${senderName} @ ${senderCwd}]\n[reply by writing a normal assistant message — your turn output is auto-returned to ${senderName}. DO NOT call coms_net_send/coms_net_await/coms_net_get to reply; that creates a ping-pong loop. msg_id ${msg_id} belongs to ${senderName}'s outbound, not yours.]\n\n${promptText}`,
 					display: true,
 					details: {
 						msg_id,
@@ -997,7 +994,7 @@ export default function (pi: ExtensionAPI) {
 	function scheduleReconnect(): void {
 		if (shuttingDown) return;
 		if (reconnectTimer) return;
-		const backoff = Math.min(RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts), RECONNECT_MAX_MS);
+		const backoff = Math.min(RECONNECT_BASE_MS * 2 ** reconnectAttempts, RECONNECT_MAX_MS);
 		reconnectAttempts++;
 		audit("sse_reconnect_scheduled", { attempt: reconnectAttempts, backoff_ms: backoff });
 		if (backoff >= RECONNECT_MAX_MS && !notifiedReconnectCap) {
@@ -1190,8 +1187,7 @@ export default function (pi: ExtensionAPI) {
 			await httpFetch("GET", "/health");
 		} catch (err) {
 			ctx.ui?.notify?.(
-				`📡 coms-net: server unreachable at ${serverUrl} — ${safeError(err)}. ` +
-				`Start one with: bun scripts/coms-net-server.ts`,
+				`📡 coms-net: server unreachable at ${serverUrl} — ${safeError(err)}. Start one with: bun scripts/coms-net-server.ts`,
 				"error",
 			);
 			audit("boot_failed", { reason: "health_failed", error: safeError(err) });
@@ -1251,6 +1247,14 @@ export default function (pi: ExtensionAPI) {
 			httpFetch("POST", `/v1/agents/${encodeURIComponent(identity.session_id)}/heartbeat`, hbReq, { timeoutMs: 5_000 })
 				.catch((err) => {
 					audit("heartbeat_failed", { reason: safeError(err) });
+					// 401/403/404 mean the session is dead or the token/URL is wrong —
+					// retrying every HEARTBEAT_MS will never succeed, so shut down
+					// cleanly instead of spamming the server. (Mirrors the
+					// terminal-status handling in scheduleReconnect/openSse.)
+					if (err instanceof HttpError && (err.status === 401 || err.status === 403 || err.status === 404)) {
+						audit("heartbeat_terminal", { status: err.status });
+						void cleanShutdown();
+					}
 				});
 
 			// Prune expired pending replies so long-lived sessions don't leak
@@ -1323,10 +1327,10 @@ export default function (pi: ExtensionAPI) {
 				topBorder = left + leftFill + middle + rightTag + right;
 			} else {
 				const fallbackRemaining = Math.max(0, safeWidth - 2 /* "┏━" */ - 10 /* " coms-net " */ - 1 /* "┓" */);
-				const right = theme.fg("dim", "━".repeat(fallbackRemaining) + "┓");
+				const right = theme.fg("dim", `${"━".repeat(fallbackRemaining)}┓`);
 				topBorder = left + right;
 			}
-			bottomBorder = theme.fg("dim", "┗" + "━".repeat(safeWidth - 2) + "┛");
+			bottomBorder = theme.fg("dim", `┗${"━".repeat(safeWidth - 2)}┛`);
 		}
 
 		if (rows.length === 0) {
@@ -1353,7 +1357,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (r.stale) {
 				const dimRow = `✗ ${r.name.padEnd(12)} ${abbreviateModel(r.model).padEnd(14)} [${"-".repeat(15)}] ${pctLabel.padStart(4)}  —  ${r.purpose || ""}`;
-				out.push(truncateToWidth(" " + theme.fg("dim", dimRow), width));
+				out.push(truncateToWidth(` ${theme.fg("dim", dimRow)}`, width));
 				continue;
 			}
 
@@ -1364,11 +1368,11 @@ export default function (pi: ExtensionAPI) {
 				? theme.fg("dim", "-".repeat(15))
 				: hexFg(r.color, "#".repeat(filled)) + theme.fg("dim", "-".repeat(empty));
 			const bar = theme.fg("warning", "[") + barFill + theme.fg("warning", "]");
-			const pctPart = " " + theme.fg("accent", pctLabel.padStart(4));
+			const pctPart = ` ${theme.fg("accent", pctLabel.padStart(4))}`;
 			const sep = theme.fg("dim", "  —  ");
 			const purposePart = theme.fg("muted", r.purpose || "");
 
-			const line = " " + swatch + " " + namePart + " " + modelPart + " " + bar + pctPart + sep + purposePart;
+			const line = ` ${swatch} ${namePart} ${modelPart} ${bar}${pctPart}${sep}${purposePart}`;
 			out.push(truncateToWidth(line, width));
 		}
 
@@ -1414,7 +1418,7 @@ export default function (pi: ExtensionAPI) {
 				resp = await httpFetch("GET", `/v1/agents${qs}`);
 			} catch (err) {
 				if (err instanceof HttpError) {
-					const detail = (err.body && err.body.error) || err.message;
+					const detail = (err.body?.error) || err.message;
 					throw new Error(`coms-net: list failed (${err.status}): ${detail}`);
 				}
 				throw new Error(`coms-net: list failed: ${safeError(err)}`);
@@ -1457,7 +1461,7 @@ export default function (pi: ExtensionAPI) {
 				const pct = typeof a.context_used_pct === "number" ? `${a.context_used_pct}%` : "?%";
 				return `${dot} ${theme.fg("accent", a.name)} ${theme.fg("dim", abbreviateModel(a.model))} ${theme.fg("warning", pct)}`;
 			}).join("\n");
-			return new Text(header + "\n" + rows, 0, 0);
+			return new Text(`${header}\n${rows}`, 0, 0);
 		},
 	});
 
@@ -1506,7 +1510,7 @@ export default function (pi: ExtensionAPI) {
 				resp = await httpFetch("POST", "/v1/messages", req) as SendResponse;
 			} catch (err) {
 				if (err instanceof HttpError) {
-					const detail = (err.body && err.body.error) || err.message;
+					const detail = (err.body?.error) || err.message;
 					throw new Error(`coms-net: send failed (${err.status}): ${detail}`);
 				}
 				throw new Error(`coms-net: send failed: ${safeError(err)}`);
@@ -1552,7 +1556,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme) {
 			const tgt = (args as any).target ?? "?";
 			const prompt = (args as any).prompt ?? "";
-			const preview = prompt.length > 60 ? prompt.slice(0, 57) + "..." : prompt;
+			const preview = prompt.length > 60 ? `${prompt.slice(0, 57)}...` : prompt;
 			return new Text(
 				theme.fg("toolTitle", theme.bold("coms_net_send ")) +
 				theme.fg("accent", tgt) +
@@ -1570,7 +1574,7 @@ export default function (pi: ExtensionAPI) {
 			return new Text(
 				theme.fg("success", "→ ") +
 				theme.fg("accent", d.target) +
-				theme.fg("dim", `  msg_id `) +
+				theme.fg("dim", "  msg_id ") +
 				theme.fg("warning", d.msg_id),
 				0, 0,
 			);
@@ -1591,7 +1595,7 @@ export default function (pi: ExtensionAPI) {
 			const msg_id = (params as any).msg_id as string;
 			// Local SSE-resolved fast path.
 			const pending = pendingReplies.get(msg_id);
-			if (pending && pending.result) {
+			if (pending?.result) {
 				const r = pending.result;
 				const text = r.error
 					? `coms_net_get: error — ${r.error}`
@@ -1678,7 +1682,7 @@ export default function (pi: ExtensionAPI) {
 				pending.timeout_ms = timeoutMs;
 				pending.await_started_at = Date.now();
 			}
-			if (pending && pending.result) {
+			if (pending?.result) {
 				// Already resolved locally via SSE: this await consumes the reply,
 				// so free the entry now rather than waiting for the prune sweep.
 				pendingReplies.delete(msg_id);
