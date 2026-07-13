@@ -895,21 +895,29 @@ export default function (pi: ExtensionAPI) {
 			};
 			// Bound the initial handshake (headers) only — once fetch resolves the
 			// SSE stream itself is long-lived and must not be subject to this timer.
-			const handshakeTimer = setTimeout(() => { try { ac.abort(); } catch { /* ignore */ } }, HTTP_TIMEOUT_MS);
+			// handshakeTimedOut distinguishes a timeout abort from an intentional one:
+			// ac.signal.aborted alone cannot, and treating a timeout as intentional
+			// would return below without scheduleReconnect() — permanently killing
+			// the reconnect loop on a single transient handshake stall.
+			let handshakeTimedOut = false;
+			const handshakeTimer = setTimeout(() => {
+				handshakeTimedOut = true;
+				try { ac.abort(); } catch { /* ignore */ }
+			}, HTTP_TIMEOUT_MS);
 			try { (handshakeTimer as any).unref?.(); } catch { /* ignore */ }
 			let resp: Response;
 			try {
 				resp = await fetch(url, { method: "GET", headers, signal: ac.signal });
 			} catch (err: any) {
 				clearTimeout(handshakeTimer);
-				if (ac.signal.aborted) {
+				if (ac.signal.aborted && !handshakeTimedOut) {
 					// Intentional abort (manual reconnect superseding this attempt, or
 					// shutdown) — the new attempt or cleanShutdown already owns the
 					// reconnect/teardown lifecycle. Scheduling here would race it.
 					audit("sse_connect_aborted");
 					return;
 				}
-				audit("sse_connect_failed", { reason: safeError(err) });
+				audit("sse_connect_failed", { reason: handshakeTimedOut ? "handshake_timeout" : safeError(err) });
 				scheduleReconnect();
 				return;
 			}
@@ -1000,6 +1008,17 @@ export default function (pi: ExtensionAPI) {
 		if (!identity || shuttingDown) return;
 		// Re-register (server upserts), then re-open SSE.
 		const reg = await registerAgent();
+		if (shuttingDown) {
+			// Shutdown raced our in-flight registration: cleanShutdown() already
+			// sent its DELETE while this POST was on the wire, so the register
+			// that just resolved re-created the record after it was removed —
+			// an orphaned registration for a dead client. Undo it best-effort.
+			// (Returning early without the DELETE — as a naive shuttingDown check
+			// would — stops openSse() but leaves the orphan on the server.)
+			audit("reconnect_registration_orphaned", { attempt: reconnectAttempts });
+			await unregisterAgentBestEffort(HTTP_TIMEOUT_MS);
+			return;
+		}
 		sseUrlPath = reg.sse_url;
 		audit("sse_reconnect", { attempt: reconnectAttempts });
 		// Fire and forget; openSse manages its own lifecycle.
@@ -1868,6 +1887,27 @@ export default function (pi: ExtensionAPI) {
 
 	// ━━ Clean shutdown (idempotent) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+	// Best-effort DELETE of this agent's registration. Shared by cleanShutdown
+	// and by reRegisterAndOpen's orphan-cleanup path; never throws.
+	async function unregisterAgentBestEffort(timeoutMs: number): Promise<void> {
+		if (!identity || !serverUrl || !authToken) return;
+		const ac = new AbortController();
+		const t = setTimeout(() => { try { ac.abort(); } catch { /* ignore */ } }, timeoutMs);
+		try { (t as any).unref?.(); } catch { /* ignore */ }
+		try {
+			await httpFetch(
+				"DELETE",
+				`/v1/agents/${encodeURIComponent(identity.session_id)}?project=${encodeURIComponent(identity.project)}`,
+				undefined,
+				{ signal: ac.signal },
+			);
+		} catch {
+			// best-effort — server may already be gone.
+		} finally {
+			try { clearTimeout(t); } catch { /* ignore */ }
+		}
+	}
+
 	async function cleanShutdown(): Promise<void> {
 		if (shuttingDown) return;
 		shuttingDown = true;
@@ -1886,23 +1926,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// Best-effort DELETE with short timeout.
-		if (identity && serverUrl && authToken) {
-			const ac = new AbortController();
-			const t = setTimeout(() => { try { ac.abort(); } catch { /* ignore */ } }, SHUTDOWN_DELETE_TIMEOUT_MS);
-			try { (t as any).unref?.(); } catch { /* ignore */ }
-			try {
-				await httpFetch(
-					"DELETE",
-					`/v1/agents/${encodeURIComponent(identity.session_id)}?project=${encodeURIComponent(identity.project)}`,
-					undefined,
-					{ signal: ac.signal },
-				);
-			} catch {
-				// best-effort — server may already be gone.
-			} finally {
-				try { clearTimeout(t); } catch { /* ignore */ }
-			}
-		}
+		await unregisterAgentBestEffort(SHUTDOWN_DELETE_TIMEOUT_MS);
 
 		if (identity) {
 			try {
