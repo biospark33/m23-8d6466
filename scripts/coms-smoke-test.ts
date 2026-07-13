@@ -228,8 +228,7 @@ function pathSocketComs(): { registered: number; exchanged: number } {
 		record({
 			name: "socket_envelope_shape_coverage",
 			ok: shapeOk,
-			detail: `coms_send envelope shape round-tripped through JSON for peer "${target?.name}" ` +
-				`(registry/shape coverage only — no live peer exchange, does not count toward messages_exchanged/AC1)`,
+			detail: `coms_send envelope shape round-tripped through JSON for peer "${target?.name}" (registry/shape coverage only — no live peer exchange, does not count toward messages_exchanged/AC1)`,
 		});
 		record({
 			name: "inv2_per_user_isolation",
@@ -272,7 +271,11 @@ const report = {
 		AC3_extension_loads: checks.find((c) => c.name === "ac3_extension_loads")?.ok ?? false,
 	},
 	checks,
-	// hard-fail only on checks that ran (skipped live-turn does not fail the gate)
+	// Gate = every check that ran passed AND AC1 make-or-break holds. A skipped
+	// live-turn does not fail the checks sweep itself, but it leaves
+	// messages_exchanged at 0, so acMakeOrBreak is false and the gate fails.
+	// Intentional: exit 0 only when AC1 is backed by a real message exchange
+	// (see _bmad-output/sprint-artifacts/_research/oq-1-coms-arch-decision.md).
 	pass: checks.every((c) => c.ok || c.skipped) && acMakeOrBreak,
 };
 
