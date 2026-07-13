@@ -152,6 +152,11 @@ interface PendingReply {
 	// a coms_net_await override replaces it so the heartbeat pruning loop does
 	// not evict the entry before the caller's own timeout fires.
 	timeout_ms?: number;
+	// Epoch ms when coms_net_await took ownership of the deadline. Pruning
+	// measures the effective timeout from this point (the server-side await
+	// starts at invocation, not at send); entries never awaited fall back to
+	// created_at.
+	await_started_at?: number;
 }
 
 interface ServerJson {
@@ -1048,6 +1053,29 @@ export default function (pi: ExtensionAPI) {
 	// ━━ session_start ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 	pi.on("session_start", async (_event, ctx) => {
+		// session_start can fire again on this same extension instance — session
+		// switch, /new, or print/json mode where session_shutdown may never have
+		// fired (pi-mono #2576). Tear down any live prior session and reset all
+		// per-session state, or the shuttingDown latch stays set and silently
+		// disables the extension, and stale identity/maps/timers leak across.
+		if (!shuttingDown && (identity || sseAbort || heartbeatTimer || reconnectTimer)) {
+			await cleanShutdown();
+		}
+		shuttingDown = false;
+		identity = null;
+		serverUrl = null;
+		authToken = null;
+		sseUrlPath = null;
+		peerCards.clear();
+		pendingReplies.clear();
+		inboundQueue.clear();
+		sseAbort = null;
+		heartbeatTimer = null;
+		reconnectTimer = null;
+		reconnectAttempts = 0;
+		notifiedReconnectCap = false;
+		lastWidgetSnapshot = "";
+
 		applyExtensionDefaults(import.meta.url, ctx);
 		currentCtx = ctx;
 
@@ -1186,7 +1214,11 @@ export default function (pi: ExtensionAPI) {
 			const now = Date.now();
 			for (const [mid, entry] of pendingReplies.entries()) {
 				const limit = (entry.timeout_ms ?? MESSAGE_TIMEOUT_MS) + 60_000;
-				if (now - new Date(entry.created_at).getTime() > limit) {
+				// Entries under a coms_net_await deadline measure from the
+				// await's start; the default path measures from the message's
+				// created_at.
+				const base = entry.await_started_at ?? new Date(entry.created_at).getTime();
+				if (now - base > limit) {
 					pendingReplies.delete(mid);
 				}
 			}
@@ -1591,8 +1623,13 @@ export default function (pi: ExtensionAPI) {
 			// Local SSE-resolved fast path.
 			const pending = pendingReplies.get(msg_id);
 			// Record the effective deadline so the heartbeat pruning loop honors
-			// the caller's timeout instead of the default MESSAGE_TIMEOUT_MS.
-			if (pending) pending.timeout_ms = timeoutMs;
+			// the caller's timeout instead of the default MESSAGE_TIMEOUT_MS,
+			// measured from this invocation (the server-side await starts now,
+			// not at coms_net_send time).
+			if (pending) {
+				pending.timeout_ms = timeoutMs;
+				pending.await_started_at = Date.now();
+			}
 			if (pending && pending.result) {
 				const r = pending.result;
 				if (r.error) {
@@ -1780,6 +1817,12 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (trimmed.includes("--reconnect")) {
 				try { ctx.ui.notify("coms-net: reconnecting SSE...", "info"); } catch { /* ignore */ }
+				// A pending scheduled reconnect must not fire alongside this
+				// manual one — that would double the register + SSE-open.
+				if (reconnectTimer) {
+					try { clearTimeout(reconnectTimer); } catch { /* ignore */ }
+					reconnectTimer = null;
+				}
 				if (sseAbort) {
 					try { sseAbort.abort(); } catch { /* ignore */ }
 					sseAbort = null;

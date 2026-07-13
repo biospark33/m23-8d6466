@@ -118,6 +118,10 @@ interface PendingReply {
 	// coms_await override replaces it so the keepalive pruning loop below does
 	// not evict the entry before the caller's own timeout fires.
 	timeout_ms?: number;
+	// Epoch ms when coms_await took ownership of the deadline. Pruning measures
+	// the effective timeout from this point (the await's own timer starts at
+	// invocation, not at send); entries never awaited fall back to created_at.
+	await_started_at?: number;
 }
 
 interface InboundContext {
@@ -883,6 +887,24 @@ export default function (pi: ExtensionAPI) {
 
 	// ━━ session_start ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 	pi.on("session_start", async (_event, ctx) => {
+		// session_start can fire again on this same extension instance — session
+		// switch, /new, or print/json mode where session_shutdown may never have
+		// fired (pi-mono #2576). Tear down any live prior session and reset all
+		// per-session state, or the shuttingDown latch stays set and the new
+		// session's socket/registry are never cleaned up, and stale maps leak.
+		if (!shuttingDown && (identity || server)) {
+			await cleanShutdown();
+		}
+		shuttingDown = false;
+		identity = null;
+		peerCards.clear();
+		pendingReplies.clear();
+		inboundQueue.clear();
+		server = null;
+		pingTimer = null;
+		keepaliveTimer = null;
+		pinging = false;
+
 		applyExtensionDefaults(import.meta.url, ctx);
 		currentCtx = ctx;
 
@@ -1092,7 +1114,11 @@ export default function (pi: ExtensionAPI) {
 				const now = Date.now();
 				for (const [mid, entry] of pendingReplies.entries()) {
 					const limit = (entry.timeout_ms ?? TIMEOUT_MS) + 60_000;
-					if (now - new Date(entry.created_at).getTime() > limit) {
+					// Entries under a coms_await deadline measure from the await's
+					// start; the default path (background timer from coms_send)
+					// measures from the message's created_at.
+					const base = entry.await_started_at ?? new Date(entry.created_at).getTime();
+					if (now - base > limit) {
 						pendingReplies.delete(mid);
 					}
 				}
@@ -1630,8 +1656,11 @@ export default function (pi: ExtensionAPI) {
 				entry.timer = null;
 			}
 			// This call now owns the deadline; record the effective timeout so the
-			// keepalive pruning loop honors it instead of the default TIMEOUT_MS.
+			// keepalive pruning loop honors it instead of the default TIMEOUT_MS,
+			// measured from this invocation (the race timer below starts now, not
+			// at coms_send time).
 			entry.timeout_ms = timeoutMs;
+			entry.await_started_at = Date.now();
 
 			let timedTimer: NodeJS.Timeout | undefined;
 			const timed = new Promise<{ error: string }>((resolve) => {
