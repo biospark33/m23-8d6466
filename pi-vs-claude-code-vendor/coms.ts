@@ -270,14 +270,27 @@ function writeRegistryAtomic(entry: RegistryEntry, project: string, opts?: { exc
 	const dir = projectAgentsDir(project);
 	fs.mkdirSync(dir, { recursive: true });
 	const final = registryFilePath(project, entry.name);
+	const data = JSON.stringify(entry, null, 2);
 	const tmp = `${final}.${process.pid}.tmp`;
-	fs.writeFileSync(tmp, JSON.stringify(entry, null, 2));
+	fs.writeFileSync(tmp, data);
 	if (opts?.exclusive) {
 		// fs.linkSync is a single atomic syscall that fails with EEXIST if `final`
 		// already exists — closes the TOCTOU window a plain renameSync would leave
-		// between two agents racing to claim the same resolveUniqueName() result.
+		// between two agents racing to claim the same resolveUniqueName() result,
+		// and keeps content atomic (a crash mid-write only ever orphans `tmp`).
+		// Hard links are unsupported on some filesystems (FAT/exFAT, VirtualBox
+		// shared folders, certain network mounts); there we fall back to an
+		// O_EXCL create ('wx'), trading the tiny crash-atomicity window for
+		// portability. EEXIST and all other errors propagate unchanged.
 		try {
 			fs.linkSync(tmp, final);
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code === "ENOTSUP" || code === "EPERM") {
+				fs.writeFileSync(final, data, { flag: "wx" });
+			} else {
+				throw err;
+			}
 		} finally {
 			try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
 		}
@@ -1636,7 +1649,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			const resp = (winner as any).response;
 			return {
-				content: [{ type: "text" as const, text: typeof resp === "string" ? resp : JSON.stringify(resp, null, 2) }],
+				content: [{ type: "text" as const, text: typeof resp === "string" ? resp : (JSON.stringify(resp, null, 2) ?? "") }],
 				details: { response: resp },
 			};
 		},

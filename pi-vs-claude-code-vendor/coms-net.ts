@@ -1541,7 +1541,7 @@ export default function (pi: ExtensionAPI) {
 			if (status === "complete" || status === "error" || status === "timeout") {
 				const text = resp.error
 					? `coms_net_get: ${status} — ${resp.error}`
-					: `coms_net_get: ${status}\n${typeof resp.response === "string" ? resp.response : JSON.stringify(resp.response, null, 2)}`;
+					: `coms_net_get: ${status}\n${typeof resp.response === "string" ? resp.response : (JSON.stringify(resp.response, null, 2) ?? "")}`;
 				return {
 					content: [{ type: "text" as const, text }],
 					details: { status, response: resp.response, error: resp.error ?? null },
@@ -1603,7 +1603,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				const resp = r.response;
 				return {
-					content: [{ type: "text" as const, text: typeof resp === "string" ? resp : JSON.stringify(resp, null, 2) }],
+					content: [{ type: "text" as const, text: typeof resp === "string" ? resp : (JSON.stringify(resp, null, 2) ?? "") }],
 					details: { response: resp },
 				};
 			}
@@ -1671,7 +1671,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			const resp = (winner as any).response;
 			return {
-				content: [{ type: "text" as const, text: typeof resp === "string" ? resp : JSON.stringify(resp, null, 2) }],
+				content: [{ type: "text" as const, text: typeof resp === "string" ? resp : (JSON.stringify(resp, null, 2) ?? "") }],
 				details: { response: resp },
 			};
 		},
