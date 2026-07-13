@@ -73,7 +73,9 @@ export function applyExtensionTheme(fileUrl: string, ctx: ExtensionContext): boo
 		return true; // Pretend we succeeded, but don't overwrite the primary theme
 	}
 
-	let themeName = THEME_MAP[name];
+	// Own-property only — a file named e.g. `constructor.ts` must not inherit
+	// Object.prototype members and skip the synthwave fallback below.
+	let themeName = Object.hasOwn(THEME_MAP, name) ? THEME_MAP[name] : undefined;
 	
 	if (!themeName) {
 		themeName = "synthwave";

@@ -35,7 +35,7 @@ runtime, and records which is the day-1 default.
 - **Vendored to:** `pi-vs-claude-code-vendor/` (see its `package.json` `_provenance`)
 - Pi runtime pin `@mariozechner/pi-coding-agent@0.55.0` is enforced by the host
   install (`/usr/local/bin/pi` → `.../pi-coding-agent@0.55.0`) and recorded in the
-  vendor `package.json` `peerDependencies` / `engines`.
+  vendor `package.json` `peerDependencies`.
 
 ## Options
 

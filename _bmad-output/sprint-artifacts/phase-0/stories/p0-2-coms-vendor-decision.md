@@ -192,6 +192,53 @@ bmad-code-review (2026-07-13): 3 parallel layers (Blind Hunter / Edge Case Hunte
 - [x] [Review][Patch] R2-51: Contract gaps: await timeout/unknown-id, target precedence, fenced-JSON unwrap, response secret, MAX_HOPS const [oq-1-coms-arch-decision.md]
 - [x] [Review][Patch] R2-52: Story stale citations + INV-1 drift + artifact header date [p0-2-coms-vendor-decision.md, oq-1-coms-arch-decision.md]
 
+**bmad-code-review round 3 (2026-07-13): 3 parallel layers over 3 diff chunks, verified triage, all findings fixed. 42 patch (13+18+11), 0 decision-needed, 0 deferred, 0 dismissed.**
+
+**Patches (all applied):**
+
+- [x] [Review][Patch] A1: `pendingExitDispatches` grows unbounded, survives session resets, and can hang process exit [coms.ts:74, 1252, 2471-2476]
+- [x] [Review][Patch] A2: `agent_end` fulfills the oldest queued inbound on *every* turn end, including turns coms did not trigger [coms.ts:2320-2341]
+- [x] [Review][Patch] A3: Malformed `<name>.json` in the registry permanently blocks that agent name [coms.ts:1431-1448]
+- [x] [Review][Patch] A4: `turnQueue` entries shifted and discarded when `identity` is null [coms.ts:2315, 2341]
+- [x] [Review][Patch] A5: `response_schema` enforced on reply but never documented to callers [coms.ts:2012]
+- [x] [Review][Patch] A6: `refreshInFlight` latch force-reset mid-refresh → torn cross-session `peerCards` writes [coms.ts:883, 1262, 1780, 1807-1809]
+- [x] [Review][Patch] A7: Registry secret file world-readable between publish and chmod [coms.ts:397-399, 464]
+- [x] [Review][Patch] A8: `probeStaleSocket` treats `ECONNREFUSED` as "definitively stale" — false on Linux with a full accept backlog [coms.ts:638-646]
+- [x] [Review][Patch] A9: `coms_list` interpolates peer-controlled `context_used_pct` without the validation `refreshPool` got [coms.ts:1940-1946]
+- [x] [Review][Patch] A10: No per-field size cap: an authenticated peer can inject up to ~16MB prompts [coms.ts:70, 1021-1027]
+- [x] [Review][Patch] A11: `session_shutdown` during `onSessionStart` init wedges the `shuttingDown` latch → registry entry and socket leak [coms.ts:2546-2554]
+- [x] [Review][Patch] A12: `TURN_DEADLINE_MS` pruning deletes inbound entries without tombstoning → replay-guard hole [coms.ts:1586-1594]
+- [x] [Review][Patch] A13: `envPositiveInt` accepts 1 ms → `PI_COMS_PING_INTERVAL_MS` can busy-loop the ping cycle [coms.ts:51-53]
+- [x] [Review][Patch] B1: Failed response POST produces duplicate submissions and corrupts the retry-timer map [coms-net.ts:~2264, ~2355, ~2374]
+- [x] [Review][Patch] B2: `/coms-net --reconnect` silently no-ops after a terminal-status cleanShutdown [coms-net.ts:~2403-2420]
+- [x] [Review][Patch] B3: Non-anchored `turnQueue` head stalls FIFO attribution for up to ~31 minutes [coms-net.ts:~2248-2258]
+- [x] [Review][Patch] B4: Server-assigned agent name stored and rendered unsanitized [coms-net.ts:~1403-1419]
+- [x] [Review][Patch] B5: SSE read-loop abort race kills the reconnect loop [coms-net.ts:~1248-1258]
+- [x] [Review][Patch] B6: Heartbeat eviction of an aborted-turn inbound skips the tombstone → stale re-injection after reconnect [coms-net.ts:~1494]
+- [x] [Review][Patch] B7: Negative `hops` from a peer bypasses `MAX_HOPS` [coms-net.ts:~1061-1064]
+- [x] [Review][Patch] B8: SSE `response` event and reconnect-resync resolve a complete-without-response reply as a blank success [coms-net.ts:~1146-1153, ~1333-1340]
+- [x] [Review][Patch] B9: Non-OK, non-terminal SSE HTTP responses leak the unread body/socket [coms-net.ts:~1211]
+- [x] [Review][Patch] B10: Inbound prompt text has no size cap before injection into the session [coms-net.ts:~1050-1056]
+- [x] [Review][Patch] B11: SSE parser's per-feed `Buffer.byteLength(buf)` contradicts the claimed O(N) parsing [coms-net.ts:~799-805, ~852-861, ~876, ~894]
+- [x] [Review][Patch] B12: Boot-failure returns leave `identity` set in a half-initialised extension [coms-net.ts:~1590, ~1598, ~1611, ~1624, ~1638]
+- [x] [Review][Patch] B13: `cleanShutdown` leaves `identity`/`serverUrl`/`authToken` populated; tools keep firing with a dead token [coms-net.ts:~1817, ~1904]
+- [x] [Review][Patch] B14: `coms_net_list` renders raw `context_used_pct`, including NaN [coms-net.ts:~1846, ~1874]
+- [x] [Review][Patch] B15: `tombstoneFulfilled`'s 1000-entry bound is not enforced under a distinct-id flood [coms-net.ts:~1118-1127]
+- [x] [Review][Patch] B16: `findSystemPromptPath` misses the `--flag=value` argv form [coms-net.ts:~369-374]
+- [x] [Review][Patch] B17: `coms_net_await` drops `conversation_id` when the server long-poll wins with no local pending entry [coms-net.ts:~2158-2173, ~2214, ~2221]
+- [x] [Review][Patch] B18: Send-side `response_schema` validation rejects arrays, receiver accepts them; parity comment is wrong [coms-net.ts:~1067]
+- [x] [Review][Patch] C1: win32 `shell: true` arg quoting is ineffective [coms-smoke-test.ts:~252-255]
+- [x] [Review][Patch] C2: Path A `registered` counts processes that exited non-zero [coms-smoke-test.ts:~421-422]
+- [x] [Review][Patch] C3: `extBase` via `split("/")` breaks AC3 load-failure detection on win32 [coms-smoke-test.ts:~179-181]
+- [x] [Review][Patch] C4: `models_listed` report fields can show a model count while the AC3 check failed [coms-smoke-test.ts:~196]
+- [x] [Review][Patch] C5: STRICT mode still lets a *skipped* `socket_live_round_trip` satisfy the gate [coms-smoke-test.ts:~942]
+- [x] [Review][Patch] C6: `waitForReady`-fail branch records no `socket_registry_two_agents` entry [coms-smoke-test.ts:~598-604]
+- [x] [Review][Patch] C7: INV-1 redaction allowlist misses common secret-bearing env names [coms-smoke-test.ts:~84-87]
+- [x] [Review][Patch] C8: Final `writeSync(1, …)` can throw uncaught EPIPE and lose the report [coms-smoke-test.ts:~948-953]
+- [x] [Review][Patch] C9: Version-pin regex duplicates the `PIN` literal [coms-smoke-test.ts:~144]
+- [x] [Review][Patch] C10: `THEME_MAP[name]` allows prototype-chain hits instead of the synthwave fallback [themeMap.ts:~76-78]
+- [x] [Review][Patch] C11: OQ-1 artifact cites a `package.json` `engines` field that no longer exists [oq-1-coms-arch-decision.md:38]
+
 ### Remediation Round (2026-07-13)
 
 Second adversarial review round, 12 layers (Blind Hunter / Edge Case Hunter /

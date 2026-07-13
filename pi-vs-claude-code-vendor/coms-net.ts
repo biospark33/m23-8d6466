@@ -363,16 +363,20 @@ async function readBodyCapped(resp: Response): Promise<string> {
 function findSystemPromptPath(argv: string[]): string | null {
 	const scan = (flag: string): string | null => {
 		for (let i = 0; i < argv.length; i++) {
-			if (argv[i] === flag && i + 1 < argv.length) {
-				const candidate = argv[i + 1];
-				if (candidate.endsWith(".md")) {
-					try {
-						if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-							return candidate;
-						}
-					} catch {
-						// fall through
+			// Accept both `--flag value` and `--flag=value` argv forms; the
+			// latter is a common convention and silently ignoring it registers
+			// the agent under an auto-generated name with no warning.
+			const candidate =
+				argv[i] === flag && i + 1 < argv.length ? argv[i + 1]
+				: argv[i].startsWith(`${flag}=`) ? argv[i].slice(flag.length + 1)
+				: null;
+			if (candidate?.endsWith(".md")) {
+				try {
+					if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+						return candidate;
 					}
+				} catch {
+					// fall through
 				}
 			}
 		}
@@ -732,6 +736,11 @@ export default function (pi: ExtensionAPI) {
 	function makeSseParser(onEvent: (event: string, data: any, id?: string) => void) {
 		const decoder = new TextDecoder("utf-8");
 		let buf = "";
+		// buf.length counts UTF-16 code units, not bytes — track the buffered
+		// UTF-8 byte length incrementally so the cap check below stays O(1)
+		// per feed instead of re-measuring the whole tail (O(N^2) on a
+		// newline-starved stream, exactly the case the cap guards).
+		let bufBytes = 0;
 		let event = "message";
 		let dataLines: string[] = [];
 		let id: string | undefined;
@@ -785,13 +794,11 @@ export default function (pi: ExtensionAPI) {
 			feed(chunk: Uint8Array): void {
 				// Bound the unconsumed tail so a server that streams data with no
 				// newline can't grow buf without limit and OOM the process.
-				// buf.length counts UTF-16 code units, not bytes — measure the
-				// actual UTF-8 byte length so the cap can't be exceeded ~2-3x
-				// in memory by multi-byte content.
-				if (Buffer.byteLength(buf, "utf8") + chunk.length > SSE_BUF_CAP_BYTES) {
+				if (bufBytes + chunk.length > SSE_BUF_CAP_BYTES) {
 					throw new Error("coms-net: SSE buffer exceeded cap — dropping connection");
 				}
 				buf += decoder.decode(chunk, { stream: true });
+				bufBytes += chunk.length;
 				// Track the consumed prefix with a start index and slice buf once
 				// after the loop, so a chunk with K lines costs O(N) total copying
 				// instead of the O(K*N) that re-slicing the tail on every line
@@ -808,7 +815,12 @@ export default function (pi: ExtensionAPI) {
 					processLine(line);
 					nl = buf.indexOf("\n", start);
 				}
-				if (start > 0) buf = buf.slice(start);
+				if (start > 0) {
+					// One bounded measurement of the consumed prefix instead of
+					// re-measuring the whole tail on every feed.
+					bufBytes -= Buffer.byteLength(buf.slice(0, start), "utf8");
+					buf = buf.slice(start);
+				}
 			},
 			// Dispatch any event left buffered when the stream ends without a
 			// trailing blank line. SSE only emits on a blank line, so a server
@@ -827,6 +839,7 @@ export default function (pi: ExtensionAPI) {
 					if (line.endsWith("\r")) line = line.slice(0, -1);
 					processLine(line);
 					buf = "";
+					bufBytes = 0;
 				}
 				flush();
 			},
@@ -991,12 +1004,28 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		const promptText = data.prompt;
+		// Bound injected context: the 16 MiB SSE cap is the only other limit,
+		// and a single prompt that large blows out the agent's context window
+		// (and real token cost) from a buggy/hostile peer.
+		const promptBytes = Buffer.byteLength(promptText, "utf8");
+		if (promptBytes > 200_000) {
+			audit("prompt_too_large", { msg_id, bytes: promptBytes });
+			return;
+		}
 		const sender = data.sender ?? {};
 		const senderName = sanitizePeerText(sender.name, "unknown");
 		const senderCwd = sanitizePeerText(sender.cwd, "?");
 		const senderSession = typeof sender.session_id === "string" ? sender.session_id : "?";
-		const hops = typeof data.hops === "number" ? data.hops : 0;
-		const responseSchema = (data.response_schema && typeof data.response_schema === "object") ? data.response_schema : null;
+		// Clamp hops at the trust boundary: a negative value from a peer would
+		// keep `hops + 1 >= MAX_HOPS` permanently false in coms_net_send and
+		// bypass the runaway-chain stop entirely.
+		const hops = typeof data.hops === "number" && Number.isFinite(data.hops)
+			? Math.max(0, Math.min(Math.floor(data.hops), MAX_HOPS))
+			: 0;
+		// Match the sender-side rule in coms_net_send: schemas must be plain
+		// JSON objects — arrays would cross the wire here but be rejected at
+		// send time, an asymmetric contract.
+		const responseSchema = (data.response_schema && typeof data.response_schema === "object" && !Array.isArray(data.response_schema)) ? data.response_schema : null;
 		const conversationId = typeof data.conversation_id === "string" ? data.conversation_id : null;
 
 		const inbound: InboundContext = {
@@ -1056,6 +1085,15 @@ export default function (pi: ExtensionAPI) {
 			for (const [mid, exp] of fulfilledMsgIds.entries()) {
 				if (exp <= now) fulfilledMsgIds.delete(mid);
 			}
+			// A distinct-id flood within the TTL leaves nothing expired — evict
+			// oldest (Map is insertion-ordered) so the bound is real. An evicted
+			// tombstone admits at most one redelivery re-injection, which the
+			// inboundQueue dedupe still covers.
+			while (fulfilledMsgIds.size > 1000) {
+				const oldest = fulfilledMsgIds.keys().next().value;
+				if (oldest === undefined) break;
+				fulfilledMsgIds.delete(oldest);
+			}
 		}
 	}
 
@@ -1084,7 +1122,11 @@ export default function (pi: ExtensionAPI) {
 		const errVal: string | null = typeof data.error === "string" ? data.error : null;
 		const pending = pendingReplies.get(msg_id);
 		if (pending) {
-			pending.result = { response: responseVal, error: errVal };
+			// Mirror the long-poll guard in coms_net_await: "complete" with no
+			// response and no error is a malformed reply, not a blank success.
+			pending.result = responseVal === undefined && errVal === null
+				? { response: null, error: "malformed server reply" }
+				: { response: responseVal, error: errVal };
 			try { pending.resolve(pending.result); } catch { /* ignore */ }
 			try {
 				pi.appendEntry("coms-net-log", {
@@ -1145,6 +1187,11 @@ export default function (pi: ExtensionAPI) {
 			}
 			clearTimeout(handshakeTimer);
 			if (!resp.ok || !resp.body) {
+				// Drain/cancel the body or the socket lingers until GC on every
+				// non-OK response — a flapping server would accumulate half-open
+				// connections across the reconnect loop (mirrors the SSE
+				// read-loop teardown and readBodyCapped's over-cap cancel).
+				try { await resp.body?.cancel(); } catch { /* ignore */ }
 				audit("sse_connect_http_error", { status: resp.status });
 				// 401/403/404 mean the token or URL is wrong — retrying with the
 				// same credentials/path will never succeed, so stop instead of
@@ -1183,11 +1230,15 @@ export default function (pi: ExtensionAPI) {
 				try { parser.end(); } catch { /* best-effort */ }
 				audit("sse_disconnect", { reason: "stream_end" });
 			} catch (err: any) {
-				if (ac.signal.aborted) {
+				if (ac.signal.aborted && !handshakeTimedOut) {
 					audit("sse_disconnect", { reason: "aborted" });
 					return;
 				}
-				audit("sse_disconnect", { reason: safeError(err) });
+				// A handshake-timeout abort must fall through to the
+				// scheduleReconnect() below — treating it as an intentional
+				// abort (like the fetch-rejection path above used to) kills
+				// the reconnect loop on a single transient handshake stall.
+				audit("sse_disconnect", { reason: handshakeTimedOut ? "handshake_timeout" : safeError(err) });
 			} finally {
 				// releaseLock() alone does not close the underlying source: on an
 				// errored body stream (network failure) the socket would linger
@@ -1267,7 +1318,12 @@ export default function (pi: ExtensionAPI) {
 						? "timeout"
 						: typeof data.error === "string" ? data.error
 							: data.status === "error" ? "error" : null;
-					entry.result = { response: data.response ?? null, error: errVal };
+					// Mirror the long-poll guard: "complete" with no response and
+					// no error is a malformed reply, not a blank success.
+					const malformed = data.status === "complete" && data.response === undefined && errVal === null;
+					entry.result = malformed
+						? { response: null, error: "malformed server reply" }
+						: { response: data.response ?? null, error: errVal };
 					try { entry.resolve(entry.result); } catch { /* ignore */ }
 					audit("response_resynced", { msg_id: mid, status: data.status });
 				})
@@ -1340,18 +1396,23 @@ export default function (pi: ExtensionAPI) {
 		if (typeof resp.sse_url !== "string" || !resp.sse_url) {
 			throw new Error("coms-net: malformed register response (missing sse_url)");
 		}
-		// Server may auto-suffix the name on collision.
-		if (resp.agent.name !== identity.name) {
+		// Server may auto-suffix the name on collision. It is still
+		// server-controlled text rendered into the TUI (status line, widget
+		// border) — sanitize like any peer-controlled string; a non-string
+		// keeps the current name instead of propagating into target
+		// comparisons and audit entries.
+		const assigned = sanitizePeerText(resp.agent.name, identity.name);
+		if (assigned !== identity.name) {
 			try {
 				pi.appendEntry("coms-net-log", {
 					event: "name_collision",
 					ts: nowIso(),
 					desired: identity.name,
-					assigned: resp.agent.name,
+					assigned,
 					project: identity.project,
 				});
 			} catch { /* best-effort */ }
-			identity.name = resp.agent.name;
+			identity.name = assigned;
 		}
 		try {
 			pi.appendEntry("coms-net-log", {
@@ -1425,6 +1486,10 @@ export default function (pi: ExtensionAPI) {
 				inboundQueue.delete(mid);
 				const qi = turnQueue.indexOf(mid);
 				if (qi >= 0) turnQueue.splice(qi, 1);
+				// Tombstone so a redelivery after an SSE reconnect can't
+				// re-inject this stale prompt as a fresh turn — the dedupe
+				// gate checks fulfilledMsgIds as well as inboundQueue.
+				tombstoneFulfilled(mid);
 			}
 		}
 	}
@@ -1524,6 +1589,7 @@ export default function (pi: ExtensionAPI) {
 					"error",
 				);
 				audit("boot_failed", { reason: "invalid_server_url", project });
+				identity = null;
 				return;
 			}
 			ctx.ui?.notify?.(
@@ -1531,6 +1597,7 @@ export default function (pi: ExtensionAPI) {
 				"error",
 			);
 			audit("boot_failed", { reason: "no_server_url", project });
+			identity = null;
 			return;
 		}
 
@@ -1543,6 +1610,7 @@ export default function (pi: ExtensionAPI) {
 				"error",
 			);
 			audit("boot_failed", { reason: "no_auth_token", project });
+			identity = null;
 			return;
 		}
 
@@ -1556,6 +1624,7 @@ export default function (pi: ExtensionAPI) {
 				"error",
 			);
 			audit("boot_failed", { reason: "health_failed", error: safeError(err) });
+			identity = null;
 			return;
 		}
 
@@ -1569,6 +1638,7 @@ export default function (pi: ExtensionAPI) {
 				"error",
 			);
 			audit("boot_failed", { reason: "register_failed", error: safeError(err) });
+			identity = null;
 			return;
 		}
 		sseUrlPath = reg.sse_url;
@@ -1746,7 +1816,10 @@ export default function (pi: ExtensionAPI) {
 			include_explicit: Type.Optional(Type.Boolean({ description: "Include agents launched with --explicit. Default false." })),
 		}),
 		async execute(_callId, params) {
-			if (!identity) {
+			// Gate on the shutdown latch too: after a terminal-status
+			// cleanShutdown the identity survives (for --reconnect recovery)
+			// but the token is dead — fail fast instead of 401 round-trips.
+			if (!identity || shuttingDown) {
 				throw new Error("coms-net not initialised");
 			}
 			const projectFilter = (params as any).project ?? identity.project;
@@ -1777,7 +1850,7 @@ export default function (pi: ExtensionAPI) {
 				? "No peer agents found."
 				: peers.map((a) => {
 					const live = a.status === "online" ? "●" : a.status === "stale" ? "~" : "✗";
-					const ctxStr = typeof a.context_used_pct === "number" ? ` ${a.context_used_pct}%` : " ?%";
+					const ctxStr = Number.isFinite(a.context_used_pct) ? ` ${a.context_used_pct}%` : " ?%";
 					return `${live} ${a.name} (${abbreviateModel(a.model)})${ctxStr}${a.purpose ? ` — ${a.purpose}` : ""}`;
 				}).join("\n");
 
@@ -1805,7 +1878,7 @@ export default function (pi: ExtensionAPI) {
 				const dot = a.status === "online" ? theme.fg("success", "●")
 					: a.status === "stale" ? theme.fg("warning", "~")
 					: theme.fg("error", "✗");
-				const pct = typeof a.context_used_pct === "number" ? `${a.context_used_pct}%` : "?%";
+				const pct = Number.isFinite(a.context_used_pct) ? `${a.context_used_pct}%` : "?%";
 				return `${dot} ${theme.fg("accent", a.name)} ${theme.fg("dim", abbreviateModel(a.model))} ${theme.fg("warning", pct)}`;
 			}).join("\n");
 			return new Text(`${header}\n${rows}`, 0, 0);
@@ -1833,7 +1906,8 @@ export default function (pi: ExtensionAPI) {
 			response_schema: Type.Optional(Type.Any({ description: "Optional JSON Schema describing the expected response shape." })),
 		}),
 		async execute(_callId, params) {
-			if (!identity) throw new Error("coms-net not initialised");
+			// Gate on the shutdown latch too (see coms_net_list).
+			if (!identity || shuttingDown) throw new Error("coms-net not initialised");
 
 			const active = activeInbound();
 			const hops = active ? active.hops + 1 : 0;
@@ -2095,18 +2169,22 @@ export default function (pi: ExtensionAPI) {
 				undefined,
 				{ timeoutMs: serverTimeoutMs + 5_000, signal: ac.signal },
 			).then((data: any) => {
+				// The server echoes the conversation id; carry it through so an
+				// await with no local pending entry (e.g. a pruned msg_id) still
+				// surfaces it in details instead of dropping it.
+				const conv = typeof data?.conversation_id === "string" ? data.conversation_id : null;
 				if (data?.status === "complete") {
 					// A "complete" reply without a string response would stringify
 					// `undefined` into a blank success below — treat as an error.
 					return typeof data.response === "string"
-						? { response: data.response, error: null }
-						: { response: null, error: "malformed server reply" };
+						? { response: data.response, error: null, conversation_id: conv }
+						: { response: null, error: "malformed server reply", conversation_id: conv };
 				}
-				if (data?.status === "error") return { response: null, error: data.error ?? "error" };
-				if (data?.status === "timeout") return { response: null, error: "timeout" };
+				if (data?.status === "error") return { response: null, error: data.error ?? "error", conversation_id: conv };
+				if (data?.status === "timeout") return { response: null, error: "timeout", conversation_id: conv };
 				// A non-terminal status (queued/delivered/pending) or a missing
 				// one must not alias to a successful empty reply.
-				return { response: null, error: `unexpected_status:${data?.status ?? "unknown"}` };
+				return { response: null, error: `unexpected_status:${data?.status ?? "unknown"}`, conversation_id: conv };
 			}).catch((err) => {
 				if (err instanceof HttpError) {
 					if (err.status === 404) {
@@ -2153,13 +2231,13 @@ export default function (pi: ExtensionAPI) {
 			if ((winner as any).error) {
 				return {
 					content: [{ type: "text" as const, text: `coms_net_await: error — ${(winner as any).error}` }],
-					details: { error: (winner as any).error, conversation_id: pending?.conversation_id ?? null },
+					details: { error: (winner as any).error, conversation_id: (winner as any).conversation_id ?? pending?.conversation_id ?? null },
 				};
 			}
 			const resp = (winner as any).response;
 			return {
 				content: [{ type: "text" as const, text: typeof resp === "string" ? resp : (JSON.stringify(resp, null, 2) ?? "") }],
-				details: { response: resp, conversation_id: pending?.conversation_id ?? null },
+				details: { response: resp, conversation_id: (winner as any).conversation_id ?? pending?.conversation_id ?? null },
 			};
 		},
 		renderCall(args, theme) {
@@ -2200,12 +2278,21 @@ export default function (pi: ExtensionAPI) {
 			if (anchored) {
 				turnQueue.shift();
 				inbound = cand;
+				break;
 			}
-			break;
+			// Head's anchor is gone from this branch (fork/navigation/
+			// compaction). Drop it from the FIFO list so it can't block every
+			// later inbound for the full ~31 min heartbeat-sweep window; the
+			// activeInbound fallback re-finds it if it is ever re-anchored.
+			turnQueue.shift();
 		}
 		// Fallback for inbounds not tracked in turnQueue (e.g. injected before
 		// this build of the extension state existed).
 		if (!inbound) inbound = activeInbound(ctx);
+		// Don't double-POST an inbound whose retry is already pending — a
+		// failed response POST leaves the entry unfulfilled and re-findable
+		// here, which would arm a second retry timer for the same msg_id.
+		if (inbound && responseRetryTimers.has(inbound.msg_id)) inbound = null;
 		if (!inbound || !identity) return;
 
 		// Walk the session branch for the most recent assistant text *after* the
@@ -2290,7 +2377,7 @@ export default function (pi: ExtensionAPI) {
 			const msgId = inbound.msg_id;
 			const t = setTimeout(async () => {
 				responseRetryTimers.delete(msgId);
-				if (shuttingDown) return;
+				if (shuttingDown || inbound.fulfilled) return;
 				try {
 					await httpFetch("POST", `/v1/messages/${encodeURIComponent(msgId)}/response`, req);
 					try {
@@ -2308,6 +2395,11 @@ export default function (pi: ExtensionAPI) {
 				markInboundFulfilled(inbound);
 			}, 2_000);
 			try { (t as any).unref?.(); } catch { /* ignore */ }
+			// Clear any orphaned timer for the same msg_id before overwriting —
+			// otherwise the old timer still fires and its map delete() evicts
+			// the live one, escaping cleanShutdown's cancellation sweep.
+			const prev = responseRetryTimers.get(msgId);
+			if (prev) { try { clearTimeout(prev); } catch { /* ignore */ } }
 			responseRetryTimers.set(msgId, t);
 		}
 	});
@@ -2340,8 +2432,21 @@ export default function (pi: ExtensionAPI) {
 				}
 				reconnectAttempts = 0;
 				notifiedReconnectCap = false;
+				// A prior terminal-status cleanShutdown latched shuttingDown;
+				// identity, serverUrl and authToken survive it, so clear the
+				// latch or both reRegisterAndOpen and scheduleReconnect
+				// silently no-op.
+				if (shuttingDown) shuttingDown = false;
 				try {
 					await reRegisterAndOpen();
+					// cleanShutdown cleared the heartbeat interval and
+					// reRegisterAndOpen only restarts it when one is already
+					// running — re-arm it here or the agent stays registered
+					// with a dead heartbeat.
+					if (!heartbeatTimer) {
+						heartbeatTimer = setInterval(heartbeatTick, heartbeatIntervalMs);
+						try { (heartbeatTimer as any).unref?.(); } catch { /* ignore */ }
+					}
 				} catch (err) {
 					audit("manual_reconnect_failed", { reason: safeError(err) });
 					// A transient failure here would otherwise leave inbound

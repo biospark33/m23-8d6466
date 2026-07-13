@@ -81,7 +81,10 @@ const AWAIT_TIMEOUT_MS = 45_000; // coms_await budget inside agent A's prompt
 //    embedded in the report. ─────────────────────────────────────────────────
 const SECRET_VALUES = Object.entries(process.env)
 	.filter(
-		([k, v]) => /(KEY|TOKEN|SECRET|PASSWORD)/i.test(k) && typeof v === "string" && v.length >= 8,
+		([k, v]) =>
+			/(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|JWT|AUTH|DSN|URL)/i.test(k) &&
+			typeof v === "string" &&
+			v.length >= 8,
 	)
 	.map(([, v]) => v as string);
 function redact(s: string): string {
@@ -138,7 +141,7 @@ function checkPiVersion(): string | null {
 		(r.stdout ?? "")
 			.split("\n")
 			.map((l) => l.trim())
-			.find((l) => /^v?0\.55\.0$/.test(l))
+			.find((l) => new RegExp(`^v?${PIN.replace(/\./g, "\\.")}$`).test(l))
 			?.replace(/^v/, "") ?? "";
 	record({
 		name: "pi_version_pin",
@@ -175,7 +178,8 @@ function checkExtensionLoads(extPath: string, checkName: string): number {
 	// failure OF THE EXTENSION UNDER TEST on stderr fails the check even when
 	// exit=0. Scope to this extension's basename — unrelated global extensions
 	// (e.g. a user's pi-gitnexus-plus) failing to load must not fail AC3.
-	const extBase = extPath.split("/").pop() ?? extPath;
+	// path.basename is separator-safe (split("/") would break on win32 paths).
+	const extBase = path.basename(extPath);
 	const loadFailure = (r.stderr ?? "")
 		.split("\n")
 		.map((l) => l.trim())
@@ -190,7 +194,7 @@ function checkExtensionLoads(extPath: string, checkName: string): number {
 				? `extension-load failure on stderr: "${redact(loadFailure)}"`
 				: `exit=${r.status}, header=${hasHeader}, models_listed=${modelCount}`),
 	});
-	return r.status === 0 ? modelCount : 0;
+	return ok ? modelCount : 0;
 }
 
 // ── Async pi spawn with timeout + output cap (C1/C2) ────────────────────────
@@ -247,9 +251,10 @@ function startPi(
 	opts: { timeoutMs: number; env?: NodeJS.ProcessEnv },
 ): { proc: ChildProcess; done: Promise<SpawnOutcome> } {
 	const isWin = process.platform === "win32";
-	// With shell:true on win32, cmd.exe mangles embedded double quotes in the
-	// prompt args — double them per cmd.exe quoting rules. POSIX path unchanged.
-	const finalArgs = isWin ? args.map((a) => a.replace(/"/g, '""')) : args;
+	// shell:true → Node joins args with spaces and no quoting; wrap each arg so
+	// cmd.exe keeps space/quote-bearing prompts as one argv entry. POSIX path
+	// unchanged.
+	const finalArgs = isWin ? args.map((a) => `"${a.replace(/"/g, '""')}"`) : args;
 	const proc = spawn("pi", finalArgs, {
 		cwd: VENDOR_DIR,
 		env: opts.env ?? process.env,
@@ -415,8 +420,8 @@ async function pathSubprocessRpc(): Promise<{
 		} else if (out.status !== 0)
 			problems.push(`exit=${out.status}${out.signal ? ` signal=${out.signal}` : ""}`);
 		if (out.truncated) problems.push("output truncated at cap — diagnostics may be missing");
-		// Only a session header from a process that did NOT error/timeout counts.
-		if (!out.error && events.some((e) => e.type === "session")) registered += 1;
+		// Only a session header from a process that did NOT error/timeout/crash counts.
+		if (!out.error && out.status === 0 && events.some((e) => e.type === "session")) registered += 1;
 		// A completed round-trip needs a real model turn (agent_end with text).
 		if (agentEndWithText(events)) exchanged += 1;
 		if (detectAuthFailure(out, events)) authFailed = true;
@@ -595,6 +600,12 @@ async function pathSocketComs(): Promise<{
 		if (!(await waitForReady(entryB))) {
 			killTree(runB.proc, "SIGTERM");
 			await runB.done;
+			record({
+				name: "socket_registry_two_agents",
+				ok: false,
+				detail:
+					"smoke-b registered (registry entry written by coms.ts session_start) but smoke-a was never spawned — B's endpoint never accepted a connection",
+			});
 			record({
 				name: "socket_peer_b_ready",
 				ok: false,
@@ -929,11 +940,16 @@ const report = {
 	// gate honestly) AND AC1 make-or-break holds. Exit 0 only when AC1 is
 	// backed by a real message exchange — no waivers.
 	pass:
-		gatingChecks.every((c) => c.ok || (c.skipped !== undefined && SKIPPABLE.has(c.name))) &&
+		gatingChecks.every((c) => c.ok || (!STRICT && c.skipped !== undefined && SKIPPABLE.has(c.name))) &&
 		acMakeOrBreak,
 };
 
 // Synchronous write + natural exit: process.exit() right after a large
 // console.log can truncate the piped JSON report.
-fs.writeSync(1, `${JSON.stringify(report, null, 2)}\n`);
+try {
+	fs.writeSync(1, `${JSON.stringify(report, null, 2)}\n`);
+} catch {
+	// Consumer closed the pipe early (EPIPE/EBADF) — the run already
+	// completed; exit code still reflects report.pass.
+}
 process.exitCode = report.pass ? 0 : 1;

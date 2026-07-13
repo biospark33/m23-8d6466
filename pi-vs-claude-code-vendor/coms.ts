@@ -48,7 +48,9 @@ const TIMEOUT_MS = envPositiveInt(process.env.PI_COMS_TIMEOUT_MS, 1_800_000);
 // TIMEOUT_MS is the SENDER-side reply timeout; keep the two independent so a
 // short sender timeout can't evict an in-flight inbound turn early.
 const TURN_DEADLINE_MS = envPositiveInt(process.env.PI_COMS_TURN_DEADLINE_MS, 1_800_000);
-const PING_INTERVAL_MS = envPositiveInt(process.env.PI_COMS_PING_INTERVAL_MS, 10_000);
+// Floor at 1s: envPositiveInt accepts any positive integer, and a
+// unit-confused value like 10 (ms) would busy-loop the ping cycle.
+const PING_INTERVAL_MS = Math.max(1000, envPositiveInt(process.env.PI_COMS_PING_INTERVAL_MS, 10_000));
 const KEEPALIVE_INTERVAL_MS = 30_000;
 // A live agent rewrites heartbeat_at every KEEPALIVE_INTERVAL_MS. Allow three
 // missed cycles before declaring the entry stale — catches recycled PIDs and
@@ -63,6 +65,14 @@ const SOCKET_OP_TIMEOUT_MS = 5_000;
 // after TURN_DEADLINE_MS); cap concurrent unfulfilled inbounds so a flooding
 // peer cannot grow the map without bound.
 const MAX_INBOUND = 256;
+// Prompts are injected into the receiver's context; cap each one well below
+// LINE_CAP_BYTES so an authenticated peer can't burn the whole context window
+// (or pin ~4GB via 256 queued 16MB envelopes) with a single send.
+const MAX_PROMPT_BYTES = 256 * 1024;
+// Failed response sends are retained for the 'exit' fallback, each holding a
+// full response payload; cap so a persistently dead peer can't grow the array
+// without bound (and hang process exit with one spawnSync per entry).
+const MAX_PENDING_EXIT_DISPATCHES = 64;
 
 const FALLBACK_PALETTE = [
 	"#72F1B8", "#36F9F6", "#FF7EDB", "#FEDE5D",
@@ -388,6 +398,9 @@ function writeRegistryAtomic(entry: RegistryEntry, project: string, opts?: { exc
 	const data = JSON.stringify(entry, null, 2);
 	const tmp = `${final}.${process.pid}.tmp`;
 	fs.writeFileSync(tmp, data);
+	// The entry carries the shared secret: tighten perms immediately so the
+	// file is never world-readable in the window before the post-publish chmod.
+	try { fs.chmodSync(tmp, 0o600); } catch { /* best-effort */ }
 	if (opts?.exclusive) {
 		// fs.linkSync is a single atomic syscall that fails with EEXIST if `final`
 		// already exists — closes the TOCTOU window a plain renameSync would leave
@@ -402,7 +415,7 @@ function writeRegistryAtomic(entry: RegistryEntry, project: string, opts?: { exc
 		} catch (err) {
 			const code = (err as NodeJS.ErrnoException).code;
 			if (code === "ENOTSUP" || code === "EPERM") {
-				fs.writeFileSync(final, data, { flag: "wx" });
+				fs.writeFileSync(final, data, { flag: "wx", mode: 0o600 });
 			} else {
 				throw err;
 			}
@@ -619,6 +632,16 @@ async function bindEndpoint(
 		}
 		if (verdict === "in_use") {
 			throw new Error(`coms: endpoint already in use (${endpoint})`);
+		}
+		if (verdict === "stale") {
+			// Linux returns ECONNREFUSED for a live listener whose accept backlog
+			// is full — re-probe once before unlinking so a loaded peer's socket
+			// is never deleted out from under it.
+			await new Promise((r) => setTimeout(r, 250));
+			verdict = await probeStaleSocket(endpoint);
+			if (verdict === "in_use" || verdict === "timeout") {
+				throw new Error(`coms: endpoint already in use (${endpoint})`);
+			}
 		}
 		try {
 			fs.unlinkSync(endpoint);
@@ -877,6 +900,10 @@ export default function (pi: ExtensionAPI) {
 	// run through refreshPoolGuarded so a manual refresh can't overlap a
 	// scheduled one.
 	let refreshInFlight = false;
+	// Bumped on every session start; an old session's refreshPool that is still
+	// awaiting peer pings must drop its results instead of writing them into
+	// the new session's freshly-cleared state.
+	let sessionGen = 0;
 	let includeExplicit = false;
 	let displayProject: string | null = null;
 	let currentCtx: ExtensionContext | null = null;
@@ -985,6 +1012,13 @@ export default function (pi: ExtensionAPI) {
 		// message and burn an agent turn on garbage.
 		if (typeof env.prompt !== "string" || typeof env.sender_name !== "string" || typeof env.sender_cwd !== "string") {
 			nack(socket, env.msg_id, "malformed prompt envelope");
+			return;
+		}
+		// Per-field size cap: LINE_CAP_BYTES (16MB) bounds the transport frame,
+		// but a prompt that large would burn the receiver's whole context
+		// window — and 256 queued ones would pin ~4GB of state.
+		if (Buffer.byteLength(env.prompt, "utf8") > MAX_PROMPT_BYTES) {
+			nack(socket, env.msg_id, "prompt too large");
 			return;
 		}
 
@@ -1236,6 +1270,10 @@ export default function (pi: ExtensionAPI) {
 		pendingReplies.clear();
 		inboundQueue.clear();
 		turnQueue.length = 0;
+		// Dispatches left by a dead session are useless — their endpoint socket
+		// is unlinked by cleanShutdown — and would otherwise accumulate across
+		// resets, each costing one blocking spawnSync (5s) at process exit.
+		pendingExitDispatches.length = 0;
 		awaitingIds.clear();
 		// fulfilledMsgIds deliberately NOT cleared — the replay tombstones must
 		// survive a session switch (/new), or a replayed msg_id from before the
@@ -1244,6 +1282,7 @@ export default function (pi: ExtensionAPI) {
 		pingTimer = null;
 		keepaliveTimer = null;
 		refreshInFlight = false;
+		sessionGen++;
 		// Pool-filter state belongs to the session: reset it here (not only on
 		// the success path) so a failed init doesn't leak the previous
 		// session's filter into the next one.
@@ -1372,7 +1411,23 @@ export default function (pi: ExtensionAPI) {
 				break;
 			} catch (err) {
 				const code = (err as NodeJS.ErrnoException).code;
-				if (code === "EEXIST" && attempt < 2) continue;
+				if (code === "EEXIST" && attempt < 2) {
+					// A corrupt/unparseable <name>.json is invisible to
+					// resolveUniqueName (readAllRegistryEntries skips it) but
+					// still blocks the exclusive create. Remove it like
+					// pruneDeadEntries removes dead entries so one bad file
+					// can't permanently squat a name.
+					try {
+						const p = registryFilePath(project, name);
+						const parsed = JSON.parse(fs.readFileSync(p, "utf-8"));
+						if (!parsed || typeof parsed.session_id !== "string" || !isSafePathComponent(parsed.name)) {
+							try { fs.unlinkSync(p); } catch { /* best-effort */ }
+						}
+					} catch {
+						try { fs.unlinkSync(registryFilePath(project, name)); } catch { /* best-effort */ }
+					}
+					continue;
+				}
 				ctx.ui?.notify?.(`📡 coms: registry write failed — ${err instanceof Error ? err.message : String(err)}`, "error");
 				try { server?.close(); } catch { /* ignore */ }
 				// bindEndpoint already created the socket file, but identity isn't
@@ -1525,6 +1580,10 @@ export default function (pi: ExtensionAPI) {
 				for (const [mid, inbound] of inboundQueue.entries()) {
 					if (!inbound.fulfilled && now - inbound.created_at > TURN_DEADLINE_MS) {
 						inboundQueue.delete(mid);
+						// Tombstone like the fulfill path does, or a replayed
+						// envelope with this msg_id passes the duplicate check
+						// and injects a fresh turn.
+						markFulfilled(mid);
 					}
 				}
 			} catch { /* best-effort */ }
@@ -1720,6 +1779,7 @@ export default function (pi: ExtensionAPI) {
 	// ━━ Ping cycle ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 	async function refreshPool(): Promise<void> {
 		if (!identity) return;
+		const gen = sessionGen;
 		const projectFilter = displayProject ?? identity.project;
 		const live = projectFilter === "*"
 			? pruneDeadEntriesAllProjects()
@@ -1744,6 +1804,10 @@ export default function (pi: ExtensionAPI) {
 			const reply = await sendEnvelope(peer.endpoint, pingEnv);
 			return { peer, pong: reply as Pong };
 		}));
+
+		// A session switch mid-refresh cleared peerCards/cachedRegistryEntries;
+		// writing these stale results now would tear the new session's state.
+		if (gen !== sessionGen) return;
 
 		const seenSessions = new Set<string>();
 		let changed = false;
@@ -1880,7 +1944,13 @@ export default function (pi: ExtensionAPI) {
 					cwd: c.entry.cwd,
 					project: c.project,
 					alive: pong != null,
-					context_used_pct: pong ? pong.context_used_pct : null,
+					// Peer-controlled: clamp like refreshPool does, or a buggy/
+					// malicious peer's NaN/string/object pct lands in the tool
+					// output fed back to the calling model.
+					context_used_pct:
+						pong && typeof pong.context_used_pct === "number" && Number.isFinite(pong.context_used_pct)
+							? pong.context_used_pct
+							: null,
 					color: c.entry.color,
 				};
 			});
@@ -1933,7 +2003,7 @@ export default function (pi: ExtensionAPI) {
 			target: Type.String({ description: "Peer name (preferred, scoped to your project) or session_id (global)." }),
 			prompt: Type.String({ description: "The prompt to send." }),
 			conversation_id: Type.Optional(Type.String()),
-			response_schema: Type.Optional(Type.Any({ description: "Optional JSON Schema describing the expected response shape." })),
+			response_schema: Type.Optional(Type.Any({ description: "Optional JSON Schema describing the expected response shape. Parse-only: the schema is NOT shown to the receiving agent — your prompt must instruct it to reply with raw JSON matching this schema, or the response will fail with 'response not valid JSON'." })),
 		}),
 		async execute(_callId, params) {
 			if (!identity) {
@@ -2247,16 +2317,30 @@ export default function (pi: ExtensionAPI) {
 		// unfulfilled inbound, so a followUp injected mid-turn was answered
 		// with the wrong text while the older inbound starved.) Only this one
 		// inbound is marked fulfilled.
+		// Identity check first: if a heartbeat-conflict teardown nulled it while
+		// inbounds are queued, shifting here would orphan the turnQueue slot —
+		// the entry would stay in inboundQueue but never be fulfillable.
+		if (!identity) return;
 		let inbound: InboundContext | null = null;
+		const branch = ctx.sessionManager?.getBranch() ?? [];
 		while (turnQueue.length > 0) {
-			const mid = turnQueue.shift()!;
+			const mid = turnQueue[0]!;
 			const cand = inboundQueue.get(mid);
-			if (cand && !cand.fulfilled) {
-				inbound = cand;
-				break;
-			}
+			if (!cand || cand.fulfilled) { turnQueue.shift(); continue; } // stale slot
+			// Only fulfill if THIS turn was actually triggered by the queued
+			// prompt: the followUp entry is appended to the branch when its own
+			// turn starts, so a user-initiated turn that ends while a prompt is
+			// still queued has no anchor and must leave turnQueue untouched.
+			const anchored = branch.some((entry: any) =>
+				entry && (entry.type === "custom_message"
+					? (entry as any).details?.msg_id === mid
+					: entry.type === "message" && entry.message && (entry.message as any).details?.msg_id === mid));
+			if (!anchored) return; // not our turn — wait for the followUp's own agent_end
+			turnQueue.shift();
+			inbound = cand;
+			break;
 		}
-		if (!inbound || !identity) return;
+		if (!inbound) return;
 
 		// Walk the session branch for the most recent assistant message text
 		// *after* the inbound prompt entry, so a stale reply from an earlier
@@ -2381,6 +2465,12 @@ export default function (pi: ExtensionAPI) {
 			} catch {
 				// best-effort
 			}
+			// Bound the exit-fallback queue: a peer that never comes back would
+			// otherwise accumulate one full response payload per failed send, and
+			// the 'exit' handler would spawn one blocking child per entry.
+			while (pendingExitDispatches.length > MAX_PENDING_EXIT_DISPATCHES) {
+				pendingExitDispatches.shift();
+			}
 		}
 
 		inbound.fulfilled = true;
@@ -2459,7 +2549,15 @@ export default function (pi: ExtensionAPI) {
 	// process-level SIGINT/SIGTERM handlers from an extension suppresses Node's
 	// default termination (once any listener attaches, Ctrl-C no longer exits)
 	// and can hang the host on shutdown. The host owns process lifecycle.
-	pi.on("session_shutdown", async () => { await cleanShutdown(); });
+	pi.on("session_shutdown", async () => {
+		// Wait out an in-flight onSessionStart: cleanShutdown against
+		// half-built state would set the shuttingDown latch while init
+		// continues and wedges every later cleanup.
+		while (initializing) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		await cleanShutdown();
+	});
 
 	// The 'exit' event, unlike SIGINT/SIGTERM handlers, cannot suppress or
 	// defer termination beyond its own synchronous run — so this does not
