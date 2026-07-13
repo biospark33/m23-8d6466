@@ -288,11 +288,15 @@ function writeRegistryAtomic(entry: RegistryEntry, project: string, opts?: { exc
 }
 
 function readAllRegistryEntries(project: string): RegistryEntry[] {
-	const dir = projectAgentsDir(project);
-	if (!fs.existsSync(dir)) return [];
 	const out: RegistryEntry[] = [];
+	let dir: string;
 	let files: string[];
 	try {
+		// projectAgentsDir throws on an invalid project name — resolve inside
+		// the try so the function returns [] (its failure contract) instead of
+		// escaping and crashing the caller.
+		dir = projectAgentsDir(project);
+		if (!fs.existsSync(dir)) return [];
 		files = fs.readdirSync(dir);
 	} catch {
 		return [];

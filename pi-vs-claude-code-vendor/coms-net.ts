@@ -308,8 +308,10 @@ function projectDir(project: string): string {
 }
 
 function readServerJson(project: string): ServerJson | null {
-	const p = path.join(projectDir(project), "server.json");
+	// projectDir throws on an invalid project name — resolve inside the try so
+	// the function returns null (its failure contract) instead of escaping.
 	try {
+		const p = path.join(projectDir(project), "server.json");
 		if (!fs.existsSync(p)) return null;
 		const raw = fs.readFileSync(p, "utf-8");
 		const parsed = JSON.parse(raw) as ServerJson;
@@ -321,8 +323,10 @@ function readServerJson(project: string): ServerJson | null {
 }
 
 function readServerSecret(project: string): ServerSecretJson | null {
-	const p = path.join(projectDir(project), "server.secret.json");
+	// See readServerJson: projectDir throws on an invalid name, so resolve
+	// inside the try to honor the null-on-failure contract.
 	try {
+		const p = path.join(projectDir(project), "server.secret.json");
 		if (!fs.existsSync(p)) return null;
 		// Only trust the token if group/other have no access to the file.
 		// Windows doesn't map st.mode onto Unix permission bits (it's always
@@ -1600,8 +1604,18 @@ export default function (pi: ExtensionAPI) {
 				if (data?.status === "timeout") return { response: null, error: "timeout" };
 				return { response: data?.response, error: data?.error ?? null };
 			}).catch((err) => {
-				if (err instanceof HttpError && err.status === 404) {
-					return { response: null, error: "unknown msg_id" };
+				if (err instanceof HttpError) {
+					if (err.status === 404) {
+						return { response: null, error: "unknown msg_id" };
+					}
+					// Fatal server-side auth rejection (401/403). Unlike a transient
+					// network error this cannot resolve on retry, so aliasing to
+					// pending.promise only stalls until timeoutPromise fires (up to
+					// MESSAGE_TIMEOUT_MS = 30 min). Fail fast with an actionable error
+					// rather than hanging the agent on a deterministic failure.
+					if (err.status === 401 || err.status === 403) {
+						return { response: null, error: `authentication_failed (${err.status})` };
+					}
 				}
 				// Transient network error on the long-poll (timeout, connection
 				// reset, …). When a local SSE entry tracks this msg_id, alias its
