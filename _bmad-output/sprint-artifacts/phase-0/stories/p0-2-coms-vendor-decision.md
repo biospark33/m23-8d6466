@@ -36,7 +36,7 @@ Smoke-tests the vendored `coms.ts` + `coms-net.ts` from `pi-vs-claude-code-vendo
 - **Contracts/Schema:** OQ decision artifact: markdown with sections (context, options, decision, rationale, constraints). Coms contract: `coms_send(target, prompt, conversation_id?, response_schema?)` / `coms_await(msg_id, timeout_ms?)` / `coms_get` / `coms_list`. `response_schema` is parse-only (`JSON.parse` on `agent_end`, NOT schema-validated — §5.2).
 - **Integration points (each wired & exercised in this story):** vendored `coms.ts` loads on `pi@0.55.0`; `pi.registerFlag("cname", ...)` registers `--cname`; unix socket registry at `~/.pi/coms/` populated; subprocess-RPC `pi --mode json -p` produces parseable JSON event stream.
 - **Files / functions touched:** `pi-vs-claude-code-vendor/coms.ts` (vendored, read-only verification), `scripts/coms-smoke-test.ts` (new), `_bmad-output/sprint-artifacts/_research/oq-1-coms-arch-decision.md` (new).
-- **Guards/limits:** Default `coms_await` timeout 30 min (`PI_COMS_TIMEOUT_MS = 1_800_000ms`, `coms.ts:32`); `MAX_HOPS=5` for socket-coms.
+- **Guards/limits:** Default `coms_await` timeout 30 min (`PI_COMS_TIMEOUT_MS = 1_800_000ms`, `coms.ts:46`); receiver-side turn deadline `PI_COMS_TURN_DEADLINE_MS` (default 30 min, `coms.ts:50`); `MAX_HOPS=5` (fixed constant, `coms.ts:45`) for socket-coms.
 
 ## Files to Modify
 
@@ -46,7 +46,7 @@ Smoke-tests the vendored `coms.ts` + `coms-net.ts` from `pi-vs-claude-code-vendo
 
 ## Security Invariants
 
-- **INV-1:** Smoke test uses only test/non-production API keys; no real secrets in test fixtures.
+- **INV-1:** Smoke test uses pi's ambient configured auth (whatever provider key pi already holds, selected via `PI_SMOKE_MODEL`); there is no test-key sandbox. Mitigation: env-secret values are redacted from captured output and the JSON report; no real secrets in test fixtures.
 - **INV-2:** Unix socket coms files under `~/.pi/coms/` are per-user scope; no cross-user leakage.
 
 ## Definition of Done
@@ -56,9 +56,9 @@ Smoke-tests the vendored `coms.ts` + `coms-net.ts` from `pi-vs-claude-code-vendo
 - [x] **Contract:** `coms_send`/`coms_await`/`coms_get`/`coms_list` verb signatures documented in decision artifact with parse-only `response_schema` caveat.
 - [x] **Integration:** Vendored `coms.ts` loads on `pi@0.55.0` with zero errors; `pi -e ./coms.ts --list-models` returns model listing.
 - [x] **Test (smoke):** Two-agent registration succeeds; structured message parseable on both paths.
-- [x] **Security:** INV-1 enforced: smoke test uses only test/non-production API keys; no real secrets in test fixtures. INV-2 enforced: unix socket files under `~/.pi/coms/` are per-user scope; no cross-user leakage.
+- [x] **Security:** INV-1 enforced: smoke test uses ambient pi auth with env-secret redaction from the JSON report; no real secrets in test fixtures. INV-2 enforced: unix socket files under `~/.pi/coms/` are per-user scope; no cross-user leakage.
 - [x] **Observability:** OQ-1 decision artifact is well-formed markdown with all required sections (context, options, decision, rationale, constraints) and parseable by downstream tooling.
-- [x] **Test (e2e demo — MANDATORY):** Smoke-test script produces structured JSON output showing ≥2 agents registered + ≥1 message exchanged; OQ-1 artifact file exists and is well-formed.
+- [x] **Test (e2e demo — MANDATORY):** Smoke-test script produces structured JSON output showing ≥2 agents registered + ≥1 message exchanged; OQ-1 artifact file exists and is well-formed. Evidence: 2026-07-13 run of record (`agents_registered: 4`, `messages_exchanged: 3`, `pass: true`) embedded in the OQ-1 artifact's Evidence section; raw JSON at `_bmad-output/sprint-artifacts/_research/oq-1-smoke-run-2026-07-13.json`.
 
 ## Dev Agent Record
 
@@ -136,3 +136,79 @@ bmad-code-review (2026-07-13): 3 parallel layers (Blind Hunter / Edge Case Hunte
 - [x] [Review][Patch] C14: vendored MIT code shipped no LICENSE/attribution [pi-vs-claude-code-vendor/LICENSE]
 
 **Verification:** biome clean on all touched files; repo `tsc --noEmit` exit 0; scoped vendor tsc zero new errors vs baseline; live smoke run exit 0 (`pass: true`, all 10 checks ok).
+
+**Round 2 (2026-07-13, 12 layers: blind/edge/auditor × 4 groups):** ~60 raw findings → 52 patch, 0 decision-needed, 0 deferred, ~8 dismissed (duplicates/false positives across layers). All patches applied.
+
+- [x] [Review][Patch] R2-1: envPositiveInt floored fractional (0,1) env values to 0 [coms.ts:35]
+- [x] [Review][Patch] R2-2: Crossed reply attribution with queued inbounds — FIFO turnQueue [coms.ts, coms-net.ts]
+- [x] [Review][Patch] R2-3: Replayed msg_id re-injected turns — 1h tombstone set [coms.ts, coms-net.ts]
+- [x] [Review][Patch] R2-4: agent_end fabricated empty response when anchor compacted away [coms.ts]
+- [x] [Review][Patch] R2-5: pendingExitDispatches unbounded growth [coms.ts]
+- [x] [Review][Patch] R2-6: bindEndpoint probe-timeout unlinked live peer socket [coms.ts]
+- [x] [Review][Patch] R2-7: Response path unauthenticated — secret echo + timing-safe verify [coms.ts, coms-net.ts]
+- [x] [Review][Patch] R2-8: removeRegistryEntry residual TOCTOU — inode/mtime recheck [coms.ts]
+- [x] [Review][Patch] R2-9: Dead code readAllRegistryEntriesAcrossProjects removed [coms.ts]
+- [x] [Review][Patch] R2-10: coms_await/coms_net_await dropped conversation_id [coms.ts, coms-net.ts]
+- [x] [Review][Patch] R2-11: Receiver turn deadline coupled to sender TIMEOUT_MS — PI_COMS_TURN_DEADLINE_MS [coms.ts]
+- [x] [Review][Patch] R2-12: Non-string registry fields crashed widget render [coms.ts]
+- [x] [Review][Patch] R2-13: refreshPool concurrent runs (interval vs /coms) [coms.ts]
+- [x] [Review][Patch] R2-14: Concurrent coms_await same msg_id double-consume [coms.ts]
+- [x] [Review][Patch] R2-15: coms_send ack-loss deleted pending reply [coms.ts]
+- [x] [Review][Patch] R2-16: cleanShutdown left identity set (zombie sender) [coms.ts]
+- [x] [Review][Patch] R2-17: Any non-nack JSON accepted as ack — require type+msg_id match [coms.ts]
+- [x] [Review][Patch] R2-18: Secret compare not constant-time — timingSafeEqual [coms.ts]
+- [x] [Review][Patch] R2-19: sanitizePeerText left C1 controls (U+0080–U+009F) [coms-net.ts]
+- [x] [Review][Patch] R2-20: Self-send guard in coms_send/coms_net_send [coms.ts, coms-net.ts]
+- [x] [Review][Patch] R2-21: Non-object response_schema silently coerced — explicit throw [coms.ts, coms-net.ts]
+- [x] [Review][Patch] R2-22: Registry file written 0644 carrying secret — chmod 0600 [coms.ts]
+- [x] [Review][Patch] R2-23: Co-load flag collision with coms-net — duplicate-tolerant registerFlag [coms.ts, coms-net.ts]
+- [x] [Review][Patch] R2-24: MAX_HOPS env-overridable to 64 — fixed constant 5 [coms.ts, coms-net.ts]
+- [x] [Review][Patch] R2-25: cleanShutdown never settled pendingReplies (30-min hang) [coms-net.ts]
+- [x] [Review][Patch] R2-26: Failed response POST marked inbound fulfilled — one retry + final audit [coms-net.ts]
+- [x] [Review][Patch] R2-27: coms_net_get fast path reported errored reply as "complete" [coms-net.ts]
+- [x] [Review][Patch] R2-28: /coms-net --all toggle no-op render — snapshot key covers flags [coms-net.ts]
+- [x] [Review][Patch] R2-29: Heartbeat no in-flight guard [coms-net.ts]
+- [x] [Review][Patch] R2-30: Runtime messages referenced unshipped coms-net-server.ts [coms-net.ts]
+- [x] [Review][Patch] R2-31: Reconnect cluster: terminal re-register → cleanShutdown; manual reconnect failure → reschedule; heartbeat cadence refresh; stale-generation guard; non-string prompt nack; body-cap reader cancel; long-poll malformed-reply guard; stale-anchor prune [coms-net.ts]
+- [x] [Review][Patch] R2-32: server_url userinfo/query/fragment not stripped; audit log credential risk [coms-net.ts]
+- [x] [Review][Patch] R2-33: process.exit truncated piped JSON report — writeSync + exitCode [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-34: AC3 fallback counted stdout noise as models; no extension-load negative assertion [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-35: Version-pin first-match fragility — exact-line match [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-36: Auth-failure regex false-positives on model output — stderr-only tightened [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-37: Peer-early-exit mislabeled as transport failure [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-38: Registry-file presence as socket readiness proxy — real connect probe [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-39: Orphaned grandchildren; finally rmSync could mask result — killTree + awaited close [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-40: Shape-coverage fake ULID — real Crockford-base32 ULID [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-41: package.json unenforced engines.pi removed [pi-vs-claude-code-vendor/package.json]
+- [x] [Review][Patch] R2-42: stderr cap silently dropped diagnostics — truncated flag surfaced [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-43: win32 shell quoting mangled embedded quotes [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-44: Skipped checks laundered failures — structural SKIPPABLE allowlist + PI_SMOKE_STRICT gate [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-45: Ambient env secrets could leak into report — value redaction [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-46: Registration counted headers from failed processes [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-47: Pinned envelope shape copy drifted from contract [coms-smoke-test.ts]
+- [x] [Review][Patch] R2-48: OQ-1 artifact self-contradicted AC1 status (red run-of-record vs green claims) — post-remediation run embedded [oq-1-coms-arch-decision.md]
+- [x] [Review][Patch] R2-49: OQ-5 (pi 0.55.0 vs coms.ts 0.73+ skew) decision unrecorded — section added [oq-1-coms-arch-decision.md]
+- [x] [Review][Patch] R2-50: D1 threat model circular vs same-user attacker — honest residual + chmod/file-mode/contract gaps documented [oq-1-coms-arch-decision.md]
+- [x] [Review][Patch] R2-51: Contract gaps: await timeout/unknown-id, target precedence, fenced-JSON unwrap, response secret, MAX_HOPS const [oq-1-coms-arch-decision.md]
+- [x] [Review][Patch] R2-52: Story stale citations + INV-1 drift + artifact header date [p0-2-coms-vendor-decision.md, oq-1-coms-arch-decision.md]
+
+### Remediation Round (2026-07-13)
+
+Second adversarial review round, 12 layers (Blind Hunter / Edge Case Hunter /
+Acceptance Auditor × 4 file groups: coms.ts, coms-net.ts, smoke test, docs).
+~60 raw findings triaged to ~55 patches: coms.ts (23), coms-net.ts (15
+contract + 11 reconnect), smoke test (15), plus docs fixes. Key outcomes:
+response-secret auth on both envelopes (timing-safe, `forged_response`
+audit), `MAX_HOPS=5` fixed constant (env knobs removed),
+`PI_COMS_TURN_DEADLINE_MS` receiver-side knob, registry files chmod 0600,
+strict gate `PI_SMOKE_STRICT=1`, `coms_await` surfaces `conversation_id`, C1
+control chars stripped, self-send rejected, non-object `response_schema`
+rejected.
+
+**Verification:** repo `tsc --noEmit` clean; biome clean on touched files;
+vendored-code standard "no new tsc errors vs baseline" held (zero new errors);
+fresh smoke run 2026-07-13 (`PI_SMOKE_STRICT=1
+PI_SMOKE_MODEL=openrouter/anthropic/claude-haiku-4.5`): `pass: true`, all 10
+checks ok, AC1 true (both clauses), both AC3 checks true — raw JSON at
+`_bmad-output/sprint-artifacts/_research/oq-1-smoke-run-2026-07-13.json`,
+embedded in the OQ-1 artifact Evidence section.

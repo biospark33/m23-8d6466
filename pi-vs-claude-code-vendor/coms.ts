@@ -28,18 +28,26 @@ import { spawnSync } from "node:child_process";
 
 // ━━ Constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-// Env-var knobs must be finite, positive numbers: Infinity would disable the
-// hop guard or make timeouts never fire, negatives would nack every inbound
-// prompt or busy-loop setInterval, and values above 2^31-1 overflow Node's
-// setTimeout (clamped to ~1ms → spurious immediate timeouts).
+// Env-var knobs must be finite, positive INTEGERS: Infinity would disable
+// the hop guard or make timeouts never fire, negatives would nack every
+// inbound prompt or busy-loop setInterval, values above 2^31-1 overflow
+// Node's setTimeout (clamped to ~1ms → spurious immediate timeouts), and a
+// fractional value like 0.5 would floor to 0 — a zero timer bricks intervals.
 function envPositiveInt(v: string | undefined, def: number): number {
 	const n = Number(v);
-	return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 2 ** 31 - 1) : def;
+	return Number.isInteger(n) && n > 0 ? Math.min(n, 2 ** 31 - 1) : def;
 }
 
 const COMS_DIR = process.env.PI_COMS_DIR || path.join(os.homedir(), ".pi", "coms");
-const MAX_HOPS = envPositiveInt(process.env.PI_COMS_MAX_HOPS, 5);
+// Fixed hop cap: prompts with hops >= MAX_HOPS are nacked and coms_send
+// refuses to relay further. Deliberately NOT an env knob — the documented
+// guard is exactly 5.
+const MAX_HOPS = 5;
 const TIMEOUT_MS = envPositiveInt(process.env.PI_COMS_TIMEOUT_MS, 1_800_000);
+// Receiver-side deadline for pruning inbound turns that never completed.
+// TIMEOUT_MS is the SENDER-side reply timeout; keep the two independent so a
+// short sender timeout can't evict an in-flight inbound turn early.
+const TURN_DEADLINE_MS = envPositiveInt(process.env.PI_COMS_TURN_DEADLINE_MS, 1_800_000);
 const PING_INTERVAL_MS = envPositiveInt(process.env.PI_COMS_PING_INTERVAL_MS, 10_000);
 const KEEPALIVE_INTERVAL_MS = 30_000;
 // A live agent rewrites heartbeat_at every KEEPALIVE_INTERVAL_MS. Allow three
@@ -52,8 +60,8 @@ const HEARTBEAT_STALE_MS = 3 * KEEPALIVE_INTERVAL_MS;
 const LINE_CAP_BYTES = 16 * 1024 * 1024;
 const SOCKET_OP_TIMEOUT_MS = 5_000;
 // inboundQueue entries are only removed on agent_end (or by keepalive pruning
-// after TIMEOUT_MS); cap concurrent unfulfilled inbounds so a flooding peer
-// cannot grow the map without bound.
+// after TURN_DEADLINE_MS); cap concurrent unfulfilled inbounds so a flooding
+// peer cannot grow the map without bound.
 const MAX_INBOUND = 256;
 
 const FALLBACK_PALETTE = [
@@ -88,6 +96,11 @@ interface PromptEnvelope extends Envelope {
 
 interface ResponseEnvelope extends Envelope {
 	type: "response";
+	// Echo of the secret the originating prompt carried (the responder's own
+	// registry secret, already verified inbound). The original sender
+	// verifies it against the secret it sent; a same-user attacker who
+	// harvested only a msg_id from logs cannot forge a response without it.
+	secret: string;
 	response: any;
 	error?: string | null;
 	// Echo of the originating prompt's conversation_id so the caller can
@@ -146,6 +159,9 @@ interface PendingReply {
 	target_name?: string;
 	// conversation_id from coms_send, surfaced by coms_get for correlation (D2).
 	conversation_id?: string | null;
+	// The target's registry secret we sent in the prompt; the response must
+	// echo it back (verified timing-safe in handleResponse).
+	expected_secret?: string;
 	// Epoch ms at coms_send time (kept as a number so the keepalive pruning
 	// loop avoids re-parsing an ISO string on every sweep).
 	created_at: number;
@@ -164,10 +180,14 @@ interface InboundContext {
 	hops: number;
 	sender_endpoint: string;
 	sender_session: string;
+	// Verified prompt secret (== our registry secret), echoed into the
+	// response envelope so the original sender can authenticate the reply.
+	secret: string;
 	conversation_id?: string | null;
 	response_schema?: object | null;
 	// Epoch ms at receipt; keepalive pruning evicts unfulfilled entries older
-	// than TIMEOUT_MS so a never-completing turn can't leak the entry forever.
+	// than TURN_DEADLINE_MS so a never-completing turn can't leak the entry
+	// forever.
 	created_at: number;
 	fulfilled: boolean;
 }
@@ -268,11 +288,27 @@ function nowIso(): string {
 }
 
 function abbreviateModel(model: string): string {
-	let m = model || "";
+	// Registry/pong fields are peer-controlled; a non-string would throw on
+	// startsWith/slice and crash the TUI render callback.
+	let m = typeof model === "string" ? model : "";
 	if (m.startsWith("claude-")) m = m.slice("claude-".length);
 	if (m.length > 14) m = m.slice(0, 14);
 	return m;
 }
+
+// Constant-time secret comparison: a plain !== short-circuits on the first
+// mismatched byte, leaking the match-prefix length through timing.
+// timingSafeEqual requires equal-length buffers, so check length first.
+function secretEqual(a: string, b: string): boolean {
+	const ba = Buffer.from(a);
+	const bb = Buffer.from(b);
+	if (ba.length !== bb.length) return false;
+	return crypto.timingSafeEqual(ba, bb);
+}
+
+// Audit hook installed by the default export so module-level helpers (which
+// have no pi handle) can still record security-relevant events.
+let auditFn: ((data: Record<string, unknown>) => void) | null = null;
 
 // ━━ CLI flag shape (read via pi.registerFlag/pi.getFlag) ━━━━━━━━━━━━━━━━━━━
 
@@ -282,6 +318,24 @@ interface CliFlags {
 	project?: string;
 	color?: string;
 	explicit?: boolean;
+}
+
+// coms-net.ts registers the same flag names, so loading both extensions
+// together makes the second registerFlag throw on pi versions that reject
+// duplicates. Swallow only duplicate-registration errors; anything else is
+// a real bug and must still propagate.
+function registerFlagSafe(
+	pi: ExtensionAPI,
+	name: string,
+	options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
+): void {
+	try {
+		pi.registerFlag(name, options);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		if (/already|duplicate/i.test(msg)) return;
+		throw err;
+	}
 }
 
 function readCliFlags(pi: ExtensionAPI): CliFlags {
@@ -358,6 +412,10 @@ function writeRegistryAtomic(entry: RegistryEntry, project: string, opts?: { exc
 	} else {
 		fs.renameSync(tmp, final);
 	}
+	// The entry carries the shared secret; the registry dir is 0700, but make
+	// the file itself owner-only too so a permissive umask or a manually
+	// created parent dir never leaves it world-readable (best-effort).
+	try { fs.chmodSync(final, 0o600); } catch { /* best-effort */ }
 	return final;
 }
 
@@ -381,11 +439,21 @@ function readAllRegistryEntries(project: string): RegistryEntry[] {
 			const raw = fs.readFileSync(path.join(dir, f), "utf-8");
 			const parsed = JSON.parse(raw) as RegistryEntry;
 			// A corrupt/malicious registry file could carry a `name` containing
-			// path separators or "..". Reject it here so no downstream consumer
-			// (pruneDeadEntries/removeRegistryEntry, etc.) ever derives a path
-			// from an unsafe stored name.
-			if (parsed && typeof parsed.session_id === "string" && isSafePathComponent(parsed.name)) {
+			// path separators or "..", or non-string display fields that crash
+			// the widget render (padEnd/startsWith on a number). Reject such
+			// entries here so no downstream consumer (pruneDeadEntries/
+			// removeRegistryEntry/renderPool) ever derives a path from an
+			// unsafe stored name or renders a non-string field.
+			if (
+				parsed &&
+				typeof parsed.session_id === "string" &&
+				isSafePathComponent(parsed.name) &&
+				typeof parsed.model === "string" &&
+				typeof parsed.purpose === "string"
+			) {
 				out.push(parsed);
+			} else {
+				try { auditFn?.({ event: "registry_entry_malformed", file: f }); } catch { /* best-effort */ }
 			}
 		} catch {
 			// skip malformed
@@ -394,36 +462,29 @@ function readAllRegistryEntries(project: string): RegistryEntry[] {
 	return out;
 }
 
-function readAllRegistryEntriesAcrossProjects(): RegistryEntry[] {
-	const root = path.join(COMS_DIR, "projects");
-	let projects: string[];
-	try {
-		projects = fs.readdirSync(root);
-	} catch {
-		return [];
-	}
-	const out: RegistryEntry[] = [];
-	for (const p of projects) {
-		try {
-			if (!fs.statSync(path.join(root, p)).isDirectory()) continue;
-		} catch {
-			continue;
-		}
-		out.push(...readAllRegistryEntries(p));
-	}
-	return out;
-}
-
 function removeRegistryEntry(project: string, name: string, sessionId?: string): void {
 	try {
 		const p = registryFilePath(project, name);
-		// TOCTOU guard: if another session reclaimed our name between the read
-		// that decided this entry was dead and the unlink, the on-disk
-		// session_id won't match ours — bail so we don't delete a live agent's
-		// registry file. Omitting sessionId (no current callers do) skips it.
-		if (sessionId !== undefined && fs.existsSync(p)) {
+		// TOCTOU guard (narrowed, not eliminated): if another session reclaimed
+		// our name between the read that decided this entry was dead and the
+		// unlink, the on-disk session_id won't match ours — bail so we don't
+		// delete a live agent's registry file. The second lstat catches a
+		// reclaim that lands mid-check (the file is replaced between our parse
+		// and the unlink); a reclaim after that still wins the race. Omitting
+		// sessionId (no current callers do) skips the guard entirely.
+		if (sessionId !== undefined) {
+			let before: fs.Stats;
+			try {
+				before = fs.lstatSync(p);
+			} catch {
+				return; // already gone — nothing to remove
+			}
 			const parsed = JSON.parse(fs.readFileSync(p, "utf-8")) as RegistryEntry;
 			if (parsed.session_id !== sessionId) return;
+			const after = fs.lstatSync(p);
+			if (after.dev !== before.dev || after.ino !== before.ino || after.mtimeMs !== before.mtimeMs) {
+				return; // replaced mid-check — leave it for its new owner
+			}
 		}
 		fs.unlinkSync(p);
 	} catch {
@@ -507,11 +568,11 @@ function pruneDeadEntriesAllProjects(): RegistryEntry[] {
 
 // ━━ Transport ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function probeStaleSocket(endpoint: string): Promise<"in_use" | "stale"> {
+function probeStaleSocket(endpoint: string, timeoutMs = 1500): Promise<"in_use" | "stale" | "timeout"> {
 	return new Promise((resolve) => {
 		const sock = net.createConnection({ path: endpoint });
 		let settled = false;
-		const finish = (verdict: "in_use" | "stale") => {
+		const finish = (verdict: "in_use" | "stale" | "timeout") => {
 			if (settled) return;
 			settled = true;
 			try { sock.destroy(); } catch { /* ignore */ }
@@ -520,19 +581,23 @@ function probeStaleSocket(endpoint: string): Promise<"in_use" | "stale"> {
 		// 250ms proved too tight: under load a live agent's accept backlog can
 		// delay the probe connect past the timeout, and bindEndpoint would then
 		// unlink a live agent's socket out from under it. 1.5s keeps the
-		// "stale" verdict conservative.
-		const timer = setTimeout(() => finish("stale"), 1500);
+		// "stale" verdict conservative, and a timeout is inconclusive — never
+		// treated as stale (bindEndpoint retries once, then refuses to bind).
+		const timer = setTimeout(() => finish("timeout"), timeoutMs);
 		sock.once("connect", () => {
 			clearTimeout(timer);
 			finish("in_use");
 		});
 		sock.once("error", (err: any) => {
 			clearTimeout(timer);
-			if (err && err.code === "ECONNREFUSED") {
+			if (err && (err.code === "ECONNREFUSED" || err.code === "ENOENT")) {
+				// Nothing listening / file vanished — definitively stale.
 				finish("stale");
 			} else {
-				// ENOENT or other — treat as stale (file may be gone or unusable)
-				finish("stale");
+				// Any other error (EACCES, ...) is inconclusive: treat the
+				// socket as in use so we never unlink something we don't
+				// understand.
+				finish("in_use");
 			}
 		});
 	});
@@ -543,7 +608,15 @@ async function bindEndpoint(
 	connHandler: (socket: net.Socket) => void,
 ): Promise<net.Server> {
 	if (process.platform !== "win32" && fs.existsSync(endpoint)) {
-		const verdict = await probeStaleSocket(endpoint);
+		let verdict = await probeStaleSocket(endpoint);
+		if (verdict === "timeout") {
+			// Inconclusive — the peer may be live but overloaded. Retry once
+			// with a longer budget; never unlink on timeout.
+			verdict = await probeStaleSocket(endpoint, 3000);
+			if (verdict === "timeout") {
+				throw new Error(`coms: endpoint busy: unresponsive peer (${endpoint})`);
+			}
+		}
 		if (verdict === "in_use") {
 			throw new Error(`coms: endpoint already in use (${endpoint})`);
 		}
@@ -609,8 +682,20 @@ function readOneLine(socket: net.Socket): Promise<string> {
 function sendEnvelope(endpoint: string, envelope: Envelope | Pong | { type: string; msg_id?: string; [k: string]: any }): Promise<any> {
 	return new Promise((resolve, reject) => {
 		const sock = net.createConnection({ path: endpoint });
+		// The reply type that proves the receiver processed THIS envelope: a
+		// pong answers a ping, an ack answers everything else, and either must
+		// echo our msg_id. Previously any non-nack JSON satisfied the send.
+		const expectedReply = envelope.type === "ping" ? "pong" : "ack";
+		const expectedMsgId = envelope.msg_id;
 		let settled = false;
-		const timer = setTimeout(() => fail(new Error("socket operation timeout")), SOCKET_OP_TIMEOUT_MS);
+		let wroteBytes = false;
+		const timer = setTimeout(() => {
+			const err = new Error("socket operation timeout");
+			// A timeout after the bytes went out means "ack lost", not
+			// "undelivered" — flag it so coms_send keeps the pending reply.
+			if (wroteBytes) (err as any).bytesWritten = true;
+			fail(err);
+		}, SOCKET_OP_TIMEOUT_MS);
 		try { timer.unref?.(); } catch { /* ignore */ }
 		const fail = (err: Error) => {
 			if (settled) return;
@@ -621,8 +706,16 @@ function sendEnvelope(endpoint: string, envelope: Envelope | Pong | { type: stri
 		};
 		sock.once("error", fail);
 		sock.once("connect", async () => {
+			// Post-connect errors mean the envelope was (at least partially)
+			// written — flag them like the write path below.
+			sock.removeListener("error", fail);
+			sock.once("error", (err) => {
+				if (wroteBytes) (err as any).bytesWritten = true;
+				fail(err);
+			});
 			try {
 				sock.write(`${JSON.stringify(envelope)}\n`);
+				wroteBytes = true;
 				const line = await readOneLine(sock);
 				const parsed = JSON.parse(line);
 				try { sock.end(); } catch { /* ignore */ }
@@ -630,12 +723,21 @@ function sendEnvelope(endpoint: string, envelope: Envelope | Pong | { type: stri
 				settled = true;
 				clearTimeout(timer);
 				if (parsed && parsed.type === "nack") {
+					// Definitive rejection (unauthorized, hops exceeded, ...):
+					// the prompt was NOT queued, so no bytesWritten flag —
+					// coms_send rolls the pending entry back.
 					reject(new Error(parsed.error || "nack"));
-				} else {
+				} else if (parsed && parsed.type === expectedReply && parsed.msg_id === expectedMsgId) {
 					resolve(parsed);
+				} else {
+					const err = new Error(`unexpected reply (expected ${expectedReply} for ${expectedMsgId})`);
+					(err as any).bytesWritten = true;
+					reject(err);
 				}
 			} catch (err) {
-				fail(err instanceof Error ? err : new Error(String(err)));
+				const e = err instanceof Error ? err : new Error(String(err));
+				if (wroteBytes) (e as any).bytesWritten = true;
+				fail(e);
 			}
 		});
 	});
@@ -703,31 +805,38 @@ export default function (pi: ExtensionAPI) {
 	// Without these, pi 0.73+ rejects the invocation with "Unknown options:
 	// --cname, --project, ..." before this extension's hooks ever fire.
 	// Agent name flag is `--cname`: pi's harness owns `--name` and resumes it.
-	pi.registerFlag("cname", {
+	// registerFlagSafe tolerates co-loading with coms-net.ts (same flag names).
+	registerFlagSafe(pi, "cname", {
 		description: "Override coms agent name (otherwise from frontmatter or auto-generated). Distinct from pi's own --name, which the harness owns and resumes.",
 		type: "string",
 		default: undefined,
 	});
-	pi.registerFlag("purpose", {
+	registerFlagSafe(pi, "purpose", {
 		description: "Override agent purpose (otherwise from frontmatter description)",
 		type: "string",
 		default: undefined,
 	});
-	pi.registerFlag("project", {
+	registerFlagSafe(pi, "project", {
 		description: "Project namespace for peer discovery",
 		type: "string",
 		default: "default",
 	});
-	pi.registerFlag("color", {
+	registerFlagSafe(pi, "color", {
 		description: "Hex color #RRGGBB (otherwise from frontmatter or palette fallback)",
 		type: "string",
 		default: undefined,
 	});
-	pi.registerFlag("explicit", {
+	registerFlagSafe(pi, "explicit", {
 		description: "Hide this agent from auto-discovery; only addressable by exact name",
 		type: "boolean",
 		default: false,
 	});
+
+	// Let module-level registry helpers record security events (they have no
+	// pi handle of their own).
+	auditFn = (data) => {
+		try { pi.appendEntry("coms-log", data); } catch { /* best-effort */ }
+	};
 
 	// State containers — shared across all hooks for this extension instance.
 	let identity: {
@@ -749,10 +858,25 @@ export default function (pi: ExtensionAPI) {
 	const peerCards: Map<string, AgentCard & { staleCount: number }> = new Map();
 	const pendingReplies: Map<string, PendingReply> = new Map();
 	const inboundQueue: Map<string, InboundContext> = new Map();
+	// FIFO order of msg_ids injected with triggerTurn: agent_end fulfills the
+	// oldest still-unfulfilled entry, so a followUp injected mid-turn can't be
+	// answered with another inbound's text while the older one starves.
+	const turnQueue: string[] = [];
+	// msg_id → expiry ts. Fulfilled prompts stay tombstoned for 1h so a replay
+	// (a retransmitted envelope, or an attacker echoing a logged msg_id) is
+	// nacked as "duplicate" instead of injecting a second turn. Deliberately
+	// NOT cleared on session reset: the replay guard must survive /new.
+	const fulfilledMsgIds = new Map<string, number>();
+	// msg_ids currently owned by a coms_await call — a second await on the
+	// same id would race the first for the single result.
+	const awaitingIds = new Set<string>();
 	let server: net.Server | null = null;
 	let pingTimer: NodeJS.Timeout | null = null;
 	let keepaliveTimer: NodeJS.Timeout | null = null;
-	let pinging = false;
+	// Shared refreshPool latch: both the ping interval and the /coms command
+	// run through refreshPoolGuarded so a manual refresh can't overlap a
+	// scheduled one.
+	let refreshInFlight = false;
 	let includeExplicit = false;
 	let displayProject: string | null = null;
 	let currentCtx: ExtensionContext | null = null;
@@ -769,7 +893,8 @@ export default function (pi: ExtensionAPI) {
 	// hops/replies to an unrelated inbound sitting in inboundQueue while this
 	// session runs an unrelated turn. Walking the branch (each inbound prompt
 	// is injected with details.msg_id) ties the lookup to what's actually
-	// driving the current turn.
+	// driving the current turn. Used by coms_send for hop counting; agent_end
+	// fulfills strictly FIFO via turnQueue instead (see below).
 	function activeInbound(ctx?: ExtensionContext | null): InboundContext | null {
 		const c = ctx ?? currentCtx;
 		if (!c) return null;
@@ -795,6 +920,29 @@ export default function (pi: ExtensionAPI) {
 		return null;
 	}
 
+	// Tombstone helpers for the fulfilled-msg_id replay guard (fulfilledMsgIds).
+	function isDuplicateMsgId(msgId: string): boolean {
+		const exp = fulfilledMsgIds.get(msgId);
+		if (exp === undefined) return false;
+		if (Date.now() > exp) {
+			fulfilledMsgIds.delete(msgId);
+			return false;
+		}
+		return true;
+	}
+
+	function markFulfilled(msgId: string): void {
+		// Prune opportunistically on insert so the tombstone map can't grow
+		// without bound in a long-lived session.
+		if (fulfilledMsgIds.size > 1000) {
+			const now = Date.now();
+			for (const [id, exp] of fulfilledMsgIds) {
+				if (now > exp) fulfilledMsgIds.delete(id);
+			}
+		}
+		fulfilledMsgIds.set(msgId, Date.now() + 3_600_000);
+	}
+
 	// Phase A stub handlers — each just acks valid envelopes. Phase B replaces these.
 	function ackOk(socket: net.Socket, msg_id: string): void {
 		try {
@@ -817,8 +965,9 @@ export default function (pi: ExtensionAPI) {
 	function handlePrompt(socket: net.Socket, env: PromptEnvelope): void {
 		// 1. Shared-secret auth: the sender must echo the secret from this
 		// agent's own registry entry (protected by the 0700 registry dir). Nack
-		// mismatches without ever triggering a turn.
-		if (typeof env.secret !== "string" || env.secret !== identity?.secret) {
+		// mismatches without ever triggering a turn. Compared timing-safe so a
+		// same-user attacker can't probe the secret byte-by-byte.
+		if (typeof env.secret !== "string" || !identity || !secretEqual(env.secret, identity.secret)) {
 			nack(socket, env.msg_id, "unauthorized");
 			return;
 		}
@@ -839,20 +988,28 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// 4. Queue cap: inboundQueue entries are only removed on agent_end (or
+		// 4. Replay/duplicate guard: a msg_id already queued — or fulfilled
+		// within the tombstone window — must not inject a second turn.
+		if (inboundQueue.has(env.msg_id) || isDuplicateMsgId(env.msg_id)) {
+			nack(socket, env.msg_id, "duplicate");
+			return;
+		}
+
+		// 5. Queue cap: inboundQueue entries are only removed on agent_end (or
 		// by keepalive pruning), so a flooding peer must not grow it unbounded.
 		if (inboundQueue.size >= MAX_INBOUND) {
 			nack(socket, env.msg_id, "queue full");
 			return;
 		}
 
-		// 5. Insert into inbound queue
+		// 6. Insert into inbound queue
 		const conversationId = typeof env.conversation_id === "string" ? env.conversation_id : null;
 		const inbound: InboundContext = {
 			msg_id: env.msg_id,
 			hops: env.hops,
 			sender_endpoint: env.sender_endpoint,
 			sender_session: env.sender_session,
+			secret: env.secret,
 			conversation_id: conversationId,
 			response_schema: env.response_schema ?? null,
 			created_at: Date.now(),
@@ -860,7 +1017,7 @@ export default function (pi: ExtensionAPI) {
 		};
 		inboundQueue.set(env.msg_id, inbound);
 
-		// 6. Inject as a follow-up message into the receiver's next turn.
+		// 7. Inject as a follow-up message into the receiver's next turn.
 		try {
 			pi.sendMessage(
 				{
@@ -882,8 +1039,10 @@ export default function (pi: ExtensionAPI) {
 			nack(socket, env.msg_id, "internal error");
 			return;
 		}
+		// Record injection order: agent_end fulfills strictly FIFO.
+		turnQueue.push(env.msg_id);
 
-		// 7. Ack + audit log
+		// 8. Ack + audit log
 		ackOk(socket, env.msg_id);
 		try {
 			pi.appendEntry("coms-log", {
@@ -908,6 +1067,24 @@ export default function (pi: ExtensionAPI) {
 	function handleResponse(socket: net.Socket, env: ResponseEnvelope): void {
 		const pending = pendingReplies.get(env.msg_id);
 		if (pending) {
+			// Response auth: the responder must echo the SAME secret the
+			// original prompt carried (this agent's registry secret). The
+			// prompt receiver already verified it; echoing proves the responder
+			// actually saw the prompt envelope — a same-user attacker who only
+			// harvested a msg_id from logs cannot forge the response.
+			if (
+				typeof env.secret !== "string" ||
+				typeof pending.expected_secret !== "string" ||
+				!secretEqual(env.secret, pending.expected_secret)
+			) {
+				try {
+					pi.appendEntry("coms-log", { event: "forged_response", msg_id: env.msg_id });
+				} catch {
+					// best-effort
+				}
+				nack(socket, env.msg_id, "unauthorized");
+				return;
+			}
 			if (pending.timer) {
 				try { clearTimeout(pending.timer); } catch { /* ignore */ }
 				pending.timer = null;
@@ -1058,10 +1235,15 @@ export default function (pi: ExtensionAPI) {
 		peerCards.clear();
 		pendingReplies.clear();
 		inboundQueue.clear();
+		turnQueue.length = 0;
+		awaitingIds.clear();
+		// fulfilledMsgIds deliberately NOT cleared — the replay tombstones must
+		// survive a session switch (/new), or a replayed msg_id from before the
+		// reset would inject a fresh turn.
 		server = null;
 		pingTimer = null;
 		keepaliveTimer = null;
-		pinging = false;
+		refreshInFlight = false;
 		// Pool-filter state belongs to the session: reset it here (not only on
 		// the success path) so a failed init doesn't leak the previous
 		// session's filter into the next one.
@@ -1241,9 +1423,7 @@ export default function (pi: ExtensionAPI) {
 
 		// 7. Start ping + keepalive cycles.
 		pingTimer = setInterval(() => {
-			if (pinging) return;
-			pinging = true;
-			refreshPool().catch(() => {}).finally(() => { pinging = false; });
+			refreshPoolGuarded().catch(() => {});
 		}, PING_INTERVAL_MS);
 		try { (pingTimer as any).unref?.(); } catch { /* ignore */ }
 		keepaliveTimer = setInterval(() => {
@@ -1339,8 +1519,11 @@ export default function (pi: ExtensionAPI) {
 				// Prune inbound entries whose turn never completed (session
 				// abort, or sendMessage no-op after ack) — they are otherwise
 				// only removed in agent_end and would live until process exit.
+				// TURN_DEADLINE_MS is the receiver-side deadline (TIMEOUT_MS is
+				// sender-side); stale entries also drop out of turnQueue when
+				// agent_end skips msg_ids no longer in inboundQueue.
 				for (const [mid, inbound] of inboundQueue.entries()) {
-					if (!inbound.fulfilled && now - inbound.created_at > TIMEOUT_MS) {
+					if (!inbound.fulfilled && now - inbound.created_at > TURN_DEADLINE_MS) {
 						inboundQueue.delete(mid);
 					}
 				}
@@ -1615,6 +1798,19 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	// Both the ping interval and the /coms command run through this latch so a
+	// manual refresh can't overlap a scheduled one (duplicate pings, torn
+	// peerCards updates). A latched call is simply skipped.
+	async function refreshPoolGuarded(): Promise<void> {
+		if (refreshInFlight) return;
+		refreshInFlight = true;
+		try {
+			await refreshPool();
+		} finally {
+			refreshInFlight = false;
+		}
+	}
+
 	function listProjects(): string[] {
 		const root = path.join(COMS_DIR, "projects");
 		try {
@@ -1747,11 +1943,32 @@ export default function (pi: ExtensionAPI) {
 			if (!target) {
 				throw new Error(`coms: no live agent matching "${params.target}"`);
 			}
+			// Self-send guard: never target our own registration. A live name
+			// collision within one project is impossible (resolveUniqueName), so
+			// a same-name entry from our own project can only be us; a
+			// same-named agent in another project remains a legitimate target.
+			if (target.session_id === identity.session_id) {
+				throw new Error("coms: refusing to send to self");
+			}
+			if (
+				target.name === identity.name &&
+				pruneDeadEntries(identity.project).some((e) => e.session_id === target.session_id)
+			) {
+				throw new Error("coms: refusing to send to self");
+			}
 			// The target must carry a shared secret in its registry entry;
 			// entries without one were written by pre-auth (legacy) agents we
 			// can't authenticate to.
 			if (typeof target.secret !== "string" || target.secret.length === 0) {
 				throw new Error(`coms: target "${target.name}" has no shared secret in its registry entry (incompatible or legacy agent)`);
+			}
+			// A non-object response_schema (string/number/array/...) would be
+			// silently coerced to null downstream — fail loudly instead.
+			if (
+				params.response_schema != null &&
+				(typeof params.response_schema !== "object" || Array.isArray(params.response_schema))
+			) {
+				throw new Error("coms: response_schema must be a plain object (JSON Schema)");
 			}
 			const active = activeInbound();
 			const hops = active ? active.hops + 1 : 0;
@@ -1788,6 +2005,7 @@ export default function (pi: ExtensionAPI) {
 				promise,
 				target_name: target.name,
 				conversation_id: params.conversation_id ?? null,
+				expected_secret: target.secret,
 				created_at: Date.now(),
 				timeout_ms: TIMEOUT_MS,
 			};
@@ -1801,11 +2019,29 @@ export default function (pi: ExtensionAPI) {
 			pendingReplies.set(msg_id, entry);
 
 			// Send the envelope synchronously and wait for the receiver's ack.
-			// On failure, roll the pending entry back so coms_get/coms_await
-			// never see a dead msg_id.
+			// On a definitive failure (connect refused, nack), roll the pending
+			// entry back so coms_get/coms_await never see a dead msg_id. On an
+			// ack loss AFTER the bytes went out, keep it — the receiver may
+			// have queued the prompt and the reply can still arrive inbound.
 			try {
 				await sendEnvelope(target.endpoint, env);
 			} catch (err) {
+				if ((err as any)?.bytesWritten) {
+					try {
+						pi.appendEntry("coms-log", {
+							event: "send_ack_unconfirmed",
+							msg_id,
+							target: target.name,
+							reason: err instanceof Error ? err.message : String(err),
+						});
+					} catch {
+						// best-effort
+					}
+					return {
+						content: [{ type: "text" as const, text: `coms_send → ${target.name}\nmsg_id ${msg_id}\nhops ${hops}\nack unconfirmed` }],
+						details: { msg_id, target: target.name, target_session: target.session_id, hops, ack_confirmed: false },
+					};
+				}
 				if (entry.timer) {
 					try { clearTimeout(entry.timer); } catch { /* ignore */ }
 					entry.timer = null;
@@ -1827,7 +2063,7 @@ export default function (pi: ExtensionAPI) {
 
 			return {
 				content: [{ type: "text" as const, text: `coms_send → ${target.name}\nmsg_id ${msg_id}\nhops ${hops}` }],
-				details: { msg_id, target: target.name, target_session: target.session_id, hops },
+				details: { msg_id, target: target.name, target_session: target.session_id, hops, ack_confirmed: true },
 			};
 		},
 		renderCall(args, theme) {
@@ -1929,51 +2165,64 @@ export default function (pi: ExtensionAPI) {
 					details: { error: "unknown msg_id" },
 				};
 			}
-			// Finite positive values only: Infinity would never time out, and
-			// values above 2^31-1 overflow Node's setTimeout (clamped to ~1ms →
-			// spurious immediate timeout).
-			const timeoutMs = typeof params.timeout_ms === "number" && Number.isFinite(params.timeout_ms) && params.timeout_ms > 0
-				? Math.min(params.timeout_ms, 2 ** 31 - 1)
-				: TIMEOUT_MS;
-
-			// coms_send already armed a background timer at the default TIMEOUT_MS;
-			// left running, it can resolve entry.promise with a spurious timeout
-			// before (or after) this call's own timeoutMs elapses. This call is
-			// now the sole owner of the deadline.
-			if (entry.timer) {
-				clearTimeout(entry.timer);
-				entry.timer = null;
+			// Only one await may own a msg_id's deadline/result — a second one
+			// would clear the first's timer ownership and race for the result.
+			if (awaitingIds.has(params.msg_id)) {
+				throw new Error(`coms_await: another coms_await is already pending for msg_id ${params.msg_id}`);
 			}
-			// This call now owns the deadline; record the effective timeout so the
-			// keepalive pruning loop honors it instead of the default TIMEOUT_MS,
-			// measured from this invocation (the race timer below starts now, not
-			// at coms_send time).
-			entry.timeout_ms = timeoutMs;
-			entry.await_started_at = Date.now();
+			awaitingIds.add(params.msg_id);
+			try {
+				// Finite positive values only: Infinity would never time out, and
+				// values above 2^31-1 overflow Node's setTimeout (clamped to ~1ms →
+				// spurious immediate timeout).
+				const timeoutMs = typeof params.timeout_ms === "number" && Number.isFinite(params.timeout_ms) && params.timeout_ms > 0
+					? Math.min(params.timeout_ms, 2 ** 31 - 1)
+					: TIMEOUT_MS;
 
-			let timedTimer: NodeJS.Timeout | undefined;
-			const timed = new Promise<{ error: string }>((resolve) => {
-				timedTimer = setTimeout(() => resolve({ error: "timeout" }), timeoutMs);
-				try { timedTimer.unref?.(); } catch { /* ignore */ }
-			});
+				// coms_send already armed a background timer at the default TIMEOUT_MS;
+				// left running, it can resolve entry.promise with a spurious timeout
+				// before (or after) this call's own timeoutMs elapses. This call is
+				// now the sole owner of the deadline.
+				if (entry.timer) {
+					clearTimeout(entry.timer);
+					entry.timer = null;
+				}
+				// This call now owns the deadline; record the effective timeout so the
+				// keepalive pruning loop honors it instead of the default TIMEOUT_MS,
+				// measured from this invocation (the race timer below starts now, not
+				// at coms_send time).
+				entry.timeout_ms = timeoutMs;
+				entry.await_started_at = Date.now();
 
-			const winner = await Promise.race([entry.promise, timed]);
-			clearTimeout(timedTimer);
-			// The reply is fully consumed by this await (success, error, or
-			// timeout). Drop the entry immediately instead of leaving it for the
-			// keepalive pruning loop to reclaim up to timeout_ms + 60s later.
-			pendingReplies.delete(params.msg_id);
-			if ((winner as any).error) {
+				let timedTimer: NodeJS.Timeout | undefined;
+				const timed = new Promise<{ error: string }>((resolve) => {
+					timedTimer = setTimeout(() => resolve({ error: "timeout" }), timeoutMs);
+					try { timedTimer.unref?.(); } catch { /* ignore */ }
+				});
+
+				const winner = await Promise.race([entry.promise, timed]);
+				clearTimeout(timedTimer);
+				// The reply is fully consumed by this await (success, error, or
+				// timeout). Drop the entry immediately instead of leaving it for the
+				// keepalive pruning loop to reclaim up to timeout_ms + 60s later.
+				pendingReplies.delete(params.msg_id);
+				if ((winner as any).error) {
+					return {
+						content: [{ type: "text" as const, text: `coms_await: error — ${(winner as any).error}` }],
+						details: { error: (winner as any).error },
+					};
+				}
+				const resp = (winner as any).response;
 				return {
-					content: [{ type: "text" as const, text: `coms_await: error — ${(winner as any).error}` }],
-					details: { error: (winner as any).error },
+					content: [{ type: "text" as const, text: typeof resp === "string" ? resp : (JSON.stringify(resp, null, 2) ?? "") }],
+					details: {
+						response: resp,
+						...(entry.conversation_id ? { conversation_id: entry.conversation_id } : {}),
+					},
 				};
+			} finally {
+				awaitingIds.delete(params.msg_id);
 			}
-			const resp = (winner as any).response;
-			return {
-				content: [{ type: "text" as const, text: typeof resp === "string" ? resp : (JSON.stringify(resp, null, 2) ?? "") }],
-				details: { response: resp },
-			};
 		},
 		renderCall(args, theme) {
 			const id = (args as any).msg_id ?? "?";
@@ -1992,7 +2241,21 @@ export default function (pi: ExtensionAPI) {
 	// ━━ agent_end: capture turn output and dispatch response back ━━━━━━━━
 
 	pi.on("agent_end", async (_event, ctx) => {
-		const inbound = activeInbound(ctx);
+		// Fulfill strictly FIFO: prompts are injected with triggerTurn in
+		// arrival order, so the oldest still-unfulfilled turnQueue entry owns
+		// this turn. (The old branch-backward walk picked the NEWEST
+		// unfulfilled inbound, so a followUp injected mid-turn was answered
+		// with the wrong text while the older inbound starved.) Only this one
+		// inbound is marked fulfilled.
+		let inbound: InboundContext | null = null;
+		while (turnQueue.length > 0) {
+			const mid = turnQueue.shift()!;
+			const cand = inboundQueue.get(mid);
+			if (cand && !cand.fulfilled) {
+				inbound = cand;
+				break;
+			}
+		}
 		if (!inbound || !identity) return;
 
 		// Walk the session branch for the most recent assistant message text
@@ -2037,7 +2300,19 @@ export default function (pi: ExtensionAPI) {
 
 		let payload: any = lastAssistantText;
 		let error: string | null = null;
-		if (inbound.response_schema && typeof inbound.response_schema === "object") {
+		if (!foundInbound) {
+			// The injected prompt entry is gone from the branch (compaction/
+			// truncation). Don't fabricate an empty success — report the loss
+			// so the sender gets a clear error; the inbound is still marked
+			// fulfilled + tombstoned below so it can't hang or be replayed.
+			payload = null;
+			error = "prompt context lost";
+			try {
+				pi.appendEntry("coms-log", { event: "response_context_lost", msg_id: inbound.msg_id });
+			} catch {
+				// best-effort
+			}
+		} else if (inbound.response_schema && typeof inbound.response_schema === "object") {
 			// Models frequently wrap structured output in a ```json fence even when
 			// asked for raw JSON — unwrap one before parsing so that common case
 			// doesn't spuriously fail with "response not valid JSON".
@@ -2053,6 +2328,9 @@ export default function (pi: ExtensionAPI) {
 
 		const respEnv: ResponseEnvelope = {
 			type: "response",
+			// Echo the prompt's secret so the original sender can authenticate
+			// this response against the secret it sent (see handleResponse).
+			secret: inbound.secret,
 			msg_id: inbound.msg_id,
 			sender_session: identity.session_id,
 			sender_endpoint: identity.endpoint,
@@ -2076,6 +2354,11 @@ export default function (pi: ExtensionAPI) {
 		try {
 			await sendEnvelope(inbound.sender_endpoint, respEnv);
 			dispatch.done = true;
+			// Drop confirmed dispatches so the array only retains unsettled
+			// ones — a long-lived session would otherwise accumulate one entry
+			// per reply forever.
+			const idx = pendingExitDispatches.indexOf(dispatch);
+			if (idx >= 0) pendingExitDispatches.splice(idx, 1);
 			try {
 				pi.appendEntry("coms-log", {
 					event: "outbound_response",
@@ -2102,6 +2385,9 @@ export default function (pi: ExtensionAPI) {
 
 		inbound.fulfilled = true;
 		inboundQueue.delete(inbound.msg_id);
+		// Tombstone the msg_id for 1h so a retransmitted or replayed prompt is
+		// nacked as "duplicate" instead of injecting another turn.
+		markFulfilled(inbound.msg_id);
 	});
 
 	// ━━ /coms slash command ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2128,7 +2414,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			try {
-				await refreshPool();
+				await refreshPoolGuarded();
 			} catch (err) {
 				try { ctx.ui.notify(`coms: refresh failed — ${err instanceof Error ? err.message : String(err)}`, "error"); } catch { /* ignore */ }
 			}
@@ -2164,6 +2450,9 @@ export default function (pi: ExtensionAPI) {
 		if (currentCtx?.hasUI) {
 			try { currentCtx.ui.setWidget("coms-pool", undefined); } catch { /* ignore */ }
 		}
+		// Clear identity last so a post-teardown coms_send fails fast on the
+		// `!identity` check instead of sending with a dead registration.
+		identity = null;
 	}
 
 	// Rely on the host's session_shutdown event for cleanup. Registering

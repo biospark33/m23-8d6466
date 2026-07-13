@@ -17,7 +17,8 @@
  * collision. v1 stays untouched.
  *
  * Usage:
- *   bun scripts/coms-net-server.ts                                 # start hub (planned — not yet shipped in this branch)
+ *   # start your coms-net hub server first (external — not shipped in this
+ *   # branch; see _bmad-output/sprint-artifacts/_research/oq-1-coms-arch-decision.md)
  *   pi -e pi-vs-claude-code-vendor/coms-net.ts                     # auto-discover local server.json
  *   pi -e pi-vs-claude-code-vendor/coms-net.ts --server-url http://host:port \
  *      --auth-token <tok> --cname planner --project default
@@ -48,7 +49,9 @@ function envBoundedInt(env: string | undefined, def: number, min: number, max: n
 	if (!Number.isFinite(n) || n <= 0) return def;
 	return Math.min(Math.max(n, min), max);
 }
-const MAX_HOPS = envBoundedInt(process.env.PI_COMS_NET_MAX_HOPS, 5, 1, 64);
+// Fixed at the documented guard (5). Deliberately NOT env-overridable: an
+// override allowed up to 64 hops, far past the intended runaway-chain stop.
+const MAX_HOPS = 5;
 const HEARTBEAT_MS = envBoundedInt(process.env.PI_COMS_NET_HEARTBEAT_MS, 10_000, 1_000, 300_000);
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 10_000;
@@ -287,13 +290,13 @@ function abbreviateModel(model: string): string {
 
 // Peer-controlled strings (card name/purpose/cwd, sender identity) are
 // rendered raw into the TUI and interpolated into injected prompts. Strip
-// C0/DEL control characters (ANSI escape sequences are a terminal-injection
+// C0/DEL/C1 control characters (ANSI escape sequences are a terminal-injection
 // channel) and cap length so a hostile or buggy peer can't wreck widget
 // layout. Non-strings coerce to the fallback.
 function sanitizePeerText(s: unknown, fallback = "", max = 64): string {
 	if (typeof s !== "string") return fallback;
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — strips C0/DEL control characters from peer-controlled strings
-	const clean = s.replace(/[\x00-\x1f\x7f]/g, "");
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — strips C0/DEL/C1 control characters from peer-controlled strings
+	const clean = s.replace(/[\x00-\x1f\x7f\u0080-\u009f]/g, "");
 	return clean.length > max ? clean.slice(0, max) : clean;
 }
 
@@ -343,6 +346,9 @@ async function readBodyCapped(resp: Response): Promise<string> {
 			if (value) {
 				total += value.length;
 				if (total > HTTP_BODY_CAP_BYTES) {
+					// Tear the socket down like the SSE error path does — without
+					// cancel() an aborted-over-cap response body lingers until GC.
+					try { await reader.cancel(); } catch { /* ignore */ }
 					throw new Error("coms-net: response body exceeded cap");
 				}
 				chunks.push(value);
@@ -469,7 +475,15 @@ function normalizeServerUrlCandidate(raw: string): string | null {
 	if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
 		return null;
 	}
-	return raw.replace(/\/+$/, "");
+	// Drop userinfo/query/fragment: credentials must never ride along in the
+	// stored URL (it is written to the audit log verbatim), and query/fragment
+	// are meaningless on an API base URL. url.toString() then yields a
+	// canonical credential-free form.
+	url.username = "";
+	url.password = "";
+	url.search = "";
+	url.hash = "";
+	return url.toString().replace(/\/+$/, "");
 }
 
 function resolveServerUrl(project: string, cliFlag: string | undefined): string | null {
@@ -535,37 +549,51 @@ function readCliFlags(pi: ExtensionAPI): CliFlags {
 export default function (pi: ExtensionAPI) {
 	// ━━ Identity flags ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 	// Agent name flag is `--cname`: pi's harness owns `--name` and resumes it.
-	pi.registerFlag("cname", {
+	// coms.ts registers several of the same flag names (purpose/project/color/
+	// explicit); when both extensions are co-loaded the second registration
+	// throws a duplicate-flag error. Swallow exactly that (the flag already
+	// exists with an equivalent definition, and getFlag reads the same value);
+	// any other registration error is real and must still throw.
+	function registerFlagOnce(name: string, def: any): void {
+		try {
+			pi.registerFlag(name, def);
+		} catch (err: any) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (/already|duplicate/i.test(msg)) return;
+			throw err;
+		}
+	}
+	registerFlagOnce("cname", {
 		description: "Override coms-net agent name (otherwise from frontmatter or auto-generated). Distinct from pi's own --name, which the harness owns and resumes.",
 		type: "string",
 		default: undefined,
 	});
-	pi.registerFlag("purpose", {
+	registerFlagOnce("purpose", {
 		description: "Override agent purpose (otherwise from frontmatter description)",
 		type: "string",
 		default: undefined,
 	});
-	pi.registerFlag("project", {
+	registerFlagOnce("project", {
 		description: "Project namespace for the coms-net hub",
 		type: "string",
 		default: "default",
 	});
-	pi.registerFlag("color", {
+	registerFlagOnce("color", {
 		description: "Hex color #RRGGBB (otherwise from frontmatter or palette fallback)",
 		type: "string",
 		default: undefined,
 	});
-	pi.registerFlag("explicit", {
+	registerFlagOnce("explicit", {
 		description: "Hide this agent from auto-discovery; only addressable by exact name",
 		type: "boolean",
 		default: false,
 	});
-	pi.registerFlag("server-url", {
+	registerFlagOnce("server-url", {
 		description: "coms-net server base URL (overrides env and local server.json)",
 		type: "string",
 		default: undefined,
 	});
-	pi.registerFlag("auth-token", {
+	registerFlagOnce("auth-token", {
 		description: "Bearer token for the coms-net hub (overrides env and server.secret.json). NEVER logged.",
 		type: "string",
 		default: undefined,
@@ -589,6 +617,20 @@ export default function (pi: ExtensionAPI) {
 	const peerCards: Map<string, AgentCard> = new Map();
 	const pendingReplies: Map<string, PendingReply> = new Map();
 	const inboundQueue: Map<string, InboundContext> = new Map();
+	// FIFO of msg_ids injected this session with triggerTurn: true. agent_end
+	// answers the OLDEST still-pending one, never the newest branch entry —
+	// otherwise a second inbound arriving mid-turn steals the first's reply.
+	const turnQueue: string[] = [];
+	// msg_id → expiry ts for inbounds already answered. Redelivery of the same
+	// msg_id after an SSE reconnect must not re-inject a fulfilled prompt; the
+	// inboundQueue-only dedupe window closed at agent_end. Entries outlive
+	// session resets deliberately (reconnects straddle them) and expire by TTL.
+	const fulfilledMsgIds = new Map<string, number>();
+	const FULFILLED_TTL_MS = 3_600_000;
+	// One retry timer per failed response POST (see agent_end). Tracked so
+	// cleanShutdown can cancel them instead of letting a retry fire into a
+	// torn-down session.
+	const responseRetryTimers = new Map<string, NodeJS.Timeout>();
 	let sseAbort: AbortController | null = null;
 	let heartbeatTimer: NodeJS.Timeout | null = null;
 	let reconnectTimer: NodeJS.Timeout | null = null;
@@ -599,6 +641,13 @@ export default function (pi: ExtensionAPI) {
 	let displayProject: string | null = null;
 	let lastWidgetSnapshot = "";
 	let shuttingDown = false;
+	// Latch so a slow heartbeat POST can't stack up overlapping requests when
+	// the tick interval is shorter than the server's response time.
+	let heartbeatInFlight = false;
+	// Incremented on every session_start and cleanShutdown. An in-flight
+	// reRegisterAndOpen captures it before awaiting and discards its result
+	// when the generation moved on underneath it (stale reconnect).
+	let sessionGeneration = 0;
 	// Effective heartbeat cadence — the server may tune it via
 	// RegisterResponse.heartbeat_interval_ms; defaults to HEARTBEAT_MS.
 	let heartbeatIntervalMs = HEARTBEAT_MS;
@@ -790,7 +839,10 @@ export default function (pi: ExtensionAPI) {
 		const arr = [...peerCards.values()]
 			.map(c => `${c.session_id}|${c.name}|${c.color}|${c.model}|${c.context_used_pct}|${c.queue_depth}|${c.status}|${c.purpose}|${c.explicit ? 1 : 0}`)
 			.sort();
-		return arr.join("\n");
+		// includeExplicit/displayProject change what renderPool shows without
+		// changing any card — fold them in or toggling `/coms-net --all` /
+		// `--project` against an unchanged pool diffs to a no-op render.
+		return `${includeExplicit ? 1 : 0}|${displayProject ?? ""}\n${arr.join("\n")}`;
 	}
 
 	function maybeRequestRender(): void {
@@ -926,16 +978,23 @@ export default function (pi: ExtensionAPI) {
 		const msg_id: string | undefined = data?.msg_id;
 		if (!msg_id || typeof msg_id !== "string") return;
 		// Redelivery after an SSE reconnect must not inject the same prompt
-		// twice into the session.
-		if (inboundQueue.has(msg_id)) {
+		// twice into the session — including prompts already answered, whose
+		// inboundQueue entry was removed at agent_end (tombstone window).
+		if (inboundQueue.has(msg_id) || fulfilledMsgIds.has(msg_id)) {
 			audit("prompt_in_duplicate", { msg_id });
 			return;
 		}
+		// A non-string prompt would inject an empty/garbage turn with
+		// triggerTurn — reject it outright instead of coercing to "".
+		if (typeof data.prompt !== "string") {
+			audit("prompt_malformed", { msg_id });
+			return;
+		}
+		const promptText = data.prompt;
 		const sender = data.sender ?? {};
 		const senderName = sanitizePeerText(sender.name, "unknown");
 		const senderCwd = sanitizePeerText(sender.cwd, "?");
 		const senderSession = typeof sender.session_id === "string" ? sender.session_id : "?";
-		const promptText = typeof data.prompt === "string" ? data.prompt : "";
 		const hops = typeof data.hops === "number" ? data.hops : 0;
 		const responseSchema = (data.response_schema && typeof data.response_schema === "object") ? data.response_schema : null;
 		const conversationId = typeof data.conversation_id === "string" ? data.conversation_id : null;
@@ -970,6 +1029,8 @@ export default function (pi: ExtensionAPI) {
 				},
 				{ deliverAs: "followUp", triggerTurn: true },
 			);
+			// FIFO turn attribution: agent_end answers the oldest queued inbound.
+			turnQueue.push(msg_id);
 			try {
 				pi.appendEntry("coms-net-log", {
 					event: "prompt_in",
@@ -983,6 +1044,29 @@ export default function (pi: ExtensionAPI) {
 			inboundQueue.delete(msg_id);
 			audit("prompt_in_failed", { msg_id, reason: safeError(err) });
 		}
+	}
+
+	// Tombstone a fulfilled msg_id so a redelivered copy is dropped by
+	// handleInboundPrompt. Prune expired entries on insert once the map grows
+	// past 1000 so a prompt flood can't pin memory.
+	function tombstoneFulfilled(msgId: string): void {
+		fulfilledMsgIds.set(msgId, Date.now() + FULFILLED_TTL_MS);
+		if (fulfilledMsgIds.size > 1000) {
+			const now = Date.now();
+			for (const [mid, exp] of fulfilledMsgIds.entries()) {
+				if (exp <= now) fulfilledMsgIds.delete(mid);
+			}
+		}
+	}
+
+	// Terminal transition for an inbound: mark fulfilled, drop it from the
+	// queue and the FIFO turn attribution list, and tombstone the msg_id.
+	function markInboundFulfilled(inbound: InboundContext): void {
+		inbound.fulfilled = true;
+		inboundQueue.delete(inbound.msg_id);
+		const qi = turnQueue.indexOf(inbound.msg_id);
+		if (qi >= 0) turnQueue.splice(qi, 1);
+		tombstoneFulfilled(inbound.msg_id);
 	}
 
 	// Context usage can be NaN (e.g. 0/0 before any tokens are counted);
@@ -1155,6 +1239,10 @@ export default function (pi: ExtensionAPI) {
 					if (currentCtx?.hasUI) {
 						try { currentCtx.ui.notify(`📡 coms-net: reconnect failed (HTTP ${err.status}) — not retrying`, "error"); } catch { /* ignore */ }
 					}
+					// Without this the heartbeat keeps POSTing status "online" and
+					// the hub shows the agent routable while its SSE is dead.
+					// (Mirrors the terminal-status handling in openSse.)
+					void cleanShutdown();
 					return;
 				}
 				scheduleReconnect();
@@ -1189,13 +1277,17 @@ export default function (pi: ExtensionAPI) {
 
 	async function reRegisterAndOpen(): Promise<void> {
 		if (!identity || shuttingDown) return;
+		// Capture the session generation before awaiting: a session_start/cleanShutdown
+		// racing this call bumps it, making any result we resolve afterwards stale.
+		const gen = sessionGeneration;
 		// Re-register (server upserts), then re-open SSE.
 		const reg = await registerAgent();
-		if (shuttingDown) {
-			// Shutdown raced our in-flight registration: cleanShutdown() already
-			// sent its DELETE while this POST was on the wire, so the register
-			// that just resolved re-created the record after it was removed —
-			// an orphaned registration for a dead client. Undo it best-effort.
+		if (shuttingDown || gen !== sessionGeneration) {
+			// Shutdown (or a session reset) raced our in-flight registration:
+			// cleanShutdown() already sent its DELETE while this POST was on the
+			// wire, so the register that just resolved re-created the record
+			// after it was removed — an orphaned registration for a dead client.
+			// Undo it best-effort and discard the result without opening SSE.
 			// (Returning early without the DELETE — as a naive shuttingDown check
 			// would — stops openSse() but leaves the orphan on the server.)
 			audit("reconnect_registration_orphaned", { attempt: reconnectAttempts });
@@ -1203,6 +1295,21 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		sseUrlPath = reg.sse_url;
+		// Honor the server-advertised heartbeat cadence on every re-register —
+		// it may have changed since session_start. Restart the interval so the
+		// new cadence takes effect immediately (same sanity clamp as boot).
+		const srvHb = reg.heartbeat_interval_ms;
+		const newHb = typeof srvHb === "number" && Number.isFinite(srvHb) && srvHb >= 1_000
+			? Math.min(srvHb, 300_000)
+			: HEARTBEAT_MS;
+		if (newHb !== heartbeatIntervalMs && heartbeatTimer) {
+			heartbeatIntervalMs = newHb;
+			try { clearInterval(heartbeatTimer); } catch { /* ignore */ }
+			heartbeatTimer = setInterval(heartbeatTick, heartbeatIntervalMs);
+			try { (heartbeatTimer as any).unref?.(); } catch { /* ignore */ }
+		} else {
+			heartbeatIntervalMs = newHb;
+		}
 		audit("sse_reconnect", { attempt: reconnectAttempts });
 		resyncPendingReplies();
 		// Fire and forget; openSse manages its own lifecycle.
@@ -1258,6 +1365,70 @@ export default function (pi: ExtensionAPI) {
 		return resp;
 	}
 
+	// ━━ Heartbeat tick (extracted so re-register can restart the interval) ━━
+
+	function heartbeatTick(): void {
+		if (!identity || shuttingDown) return;
+		const ctxNow = currentCtx;
+		const pct = safeContextPct(ctxNow);
+		const hbReq: HeartbeatRequest = {
+			project: identity.project,
+			context_used_pct: pct,
+			queue_depth: inboundQueue.size,
+			model: ctxNow?.model?.id ?? identity.model,
+			status: "online",
+		};
+		// Skip the POST while a previous heartbeat is still unsettled — the
+		// interval can be shorter than a stalled server's response time, and
+		// overlapping heartbeats would stack unbounded in-flight requests.
+		if (heartbeatInFlight) {
+			audit("heartbeat_skipped_busy");
+		} else {
+			heartbeatInFlight = true;
+			httpFetch("POST", `/v1/agents/${encodeURIComponent(identity.session_id)}/heartbeat`, hbReq, { timeoutMs: 5_000 })
+				.catch((err) => {
+					audit("heartbeat_failed", { reason: safeError(err) });
+					// 401/403/404 mean the session is dead or the token/URL is wrong —
+					// retrying every heartbeatIntervalMs will never succeed, so shut down
+					// cleanly instead of spamming the server. (Mirrors the
+					// terminal-status handling in scheduleReconnect/openSse.)
+					if (err instanceof HttpError && (err.status === 401 || err.status === 403 || err.status === 404)) {
+						audit("heartbeat_terminal", { status: err.status });
+						void cleanShutdown();
+					}
+				})
+				.finally(() => { heartbeatInFlight = false; });
+		}
+
+		// Prune expired pending replies so long-lived sessions don't leak
+		// entries whose timeout already fired (or that were resolved but
+		// never cleaned up).
+		const now = Date.now();
+		for (const [mid, entry] of pendingReplies.entries()) {
+			const limit = (entry.timeout_ms ?? MESSAGE_TIMEOUT_MS) + 60_000;
+			// Entries under a coms_net_await deadline measure from the
+			// await's start; the default path measures from the message's
+			// created_at.
+			const base = entry.await_started_at ?? entry.created_at;
+			if (now - base > limit) {
+				pendingReplies.delete(mid);
+			}
+		}
+		// Evict inbound contexts whose turn never reached agent_end
+		// (aborted session): left in place they'd stay branch-anchored,
+		// misattribute later sends' hops, and grow the map unboundedly
+		// under a prompt flood. Age is the only criterion — a live branch
+		// anchor must NOT exempt an entry, or a stale anchor misattributes
+		// hops for the full ~31 min window and trips the hop limit.
+		for (const [mid, ctx] of inboundQueue.entries()) {
+			if (now - ctx.created_at > MESSAGE_TIMEOUT_MS + 60_000) {
+				inboundQueue.delete(mid);
+				const qi = turnQueue.indexOf(mid);
+				if (qi >= 0) turnQueue.splice(qi, 1);
+			}
+		}
+	}
+
 	// ━━ session_start ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -1270,6 +1441,8 @@ export default function (pi: ExtensionAPI) {
 			await cleanShutdown();
 		}
 		shuttingDown = false;
+		// Invalidate any reRegisterAndOpen still awaiting from the prior session.
+		sessionGeneration++;
 		identity = null;
 		serverUrl = null;
 		authToken = null;
@@ -1284,6 +1457,11 @@ export default function (pi: ExtensionAPI) {
 		}
 		pendingReplies.clear();
 		inboundQueue.clear();
+		turnQueue.length = 0;
+		for (const t of responseRetryTimers.values()) {
+			try { clearTimeout(t); } catch { /* ignore */ }
+		}
+		responseRetryTimers.clear();
 		sseAbort = null;
 		heartbeatTimer = null;
 		reconnectTimer = null;
@@ -1291,6 +1469,7 @@ export default function (pi: ExtensionAPI) {
 		notifiedReconnectCap = false;
 		lastWidgetSnapshot = "";
 		heartbeatIntervalMs = HEARTBEAT_MS;
+		heartbeatInFlight = false;
 
 		applyExtensionDefaults(import.meta.url, ctx);
 		currentCtx = ctx;
@@ -1348,7 +1527,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			ctx.ui?.notify?.(
-				`📡 coms-net: no server URL for project "${project}". Start one with: bun scripts/coms-net-server.ts (planned — not yet shipped in this branch)`,
+				`📡 coms-net: no server URL for project "${project}". Start your coms-net hub server (external — not shipped in this branch; see _bmad-output/sprint-artifacts/_research/oq-1-coms-arch-decision.md)`,
 				"error",
 			);
 			audit("boot_failed", { reason: "no_server_url", project });
@@ -1373,7 +1552,7 @@ export default function (pi: ExtensionAPI) {
 			await httpFetch("GET", "/health");
 		} catch (err) {
 			ctx.ui?.notify?.(
-				`📡 coms-net: server unreachable at ${serverUrl} — ${safeError(err)}. Start one with: bun scripts/coms-net-server.ts (planned — not yet shipped in this branch)`,
+				`📡 coms-net: server unreachable at ${serverUrl} — ${safeError(err)}. Start your coms-net hub server (external — not shipped in this branch; see _bmad-output/sprint-artifacts/_research/oq-1-coms-arch-decision.md)`,
 				"error",
 			);
 			audit("boot_failed", { reason: "health_failed", error: safeError(err) });
@@ -1427,54 +1606,7 @@ export default function (pi: ExtensionAPI) {
 		void openSse();
 
 		// 9. Heartbeat loop.
-		heartbeatTimer = setInterval(() => {
-			if (!identity || shuttingDown) return;
-			const ctxNow = currentCtx;
-			const pct = safeContextPct(ctxNow);
-			const hbReq: HeartbeatRequest = {
-				project: identity.project,
-				context_used_pct: pct,
-				queue_depth: inboundQueue.size,
-				model: ctxNow?.model?.id ?? identity.model,
-				status: "online",
-			};
-			httpFetch("POST", `/v1/agents/${encodeURIComponent(identity.session_id)}/heartbeat`, hbReq, { timeoutMs: 5_000 })
-				.catch((err) => {
-					audit("heartbeat_failed", { reason: safeError(err) });
-					// 401/403/404 mean the session is dead or the token/URL is wrong —
-					// retrying every heartbeatIntervalMs will never succeed, so shut down
-					// cleanly instead of spamming the server. (Mirrors the
-					// terminal-status handling in scheduleReconnect/openSse.)
-					if (err instanceof HttpError && (err.status === 401 || err.status === 403 || err.status === 404)) {
-						audit("heartbeat_terminal", { status: err.status });
-						void cleanShutdown();
-					}
-				});
-
-			// Prune expired pending replies so long-lived sessions don't leak
-			// entries whose timeout already fired (or that were resolved but
-			// never cleaned up).
-			const now = Date.now();
-			for (const [mid, entry] of pendingReplies.entries()) {
-				const limit = (entry.timeout_ms ?? MESSAGE_TIMEOUT_MS) + 60_000;
-				// Entries under a coms_net_await deadline measure from the
-				// await's start; the default path measures from the message's
-				// created_at.
-				const base = entry.await_started_at ?? entry.created_at;
-				if (now - base > limit) {
-					pendingReplies.delete(mid);
-				}
-			}
-			// Evict inbound contexts whose turn never reached agent_end
-			// (aborted session): left in place they'd stay branch-anchored,
-			// misattribute later sends' hops, and grow the map unboundedly
-			// under a prompt flood.
-			for (const [mid, ctx] of inboundQueue.entries()) {
-				if (now - ctx.created_at > MESSAGE_TIMEOUT_MS + 60_000) {
-					inboundQueue.delete(mid);
-				}
-			}
-		}, heartbeatIntervalMs);
+		heartbeatTimer = setInterval(heartbeatTick, heartbeatIntervalMs);
 		try { (heartbeatTimer as any).unref?.(); } catch { /* ignore */ }
 	});
 
@@ -1710,12 +1842,21 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const conversationId = typeof (params as any).conversation_id === "string" ? (params as any).conversation_id : null;
-			// Coerce with the same rule the receiver applies in
+			// Validate with the same rule the receiver applies in
 			// handleInboundPrompt: a string/number schema would otherwise cross
 			// the wire and be silently dropped, masking a caller error in a
-			// contract parameter.
+			// contract parameter. Fail loudly instead of coercing to null.
 			const schemaParam = (params as any).response_schema;
+			if (schemaParam !== undefined && schemaParam !== null && (typeof schemaParam !== "object" || Array.isArray(schemaParam))) {
+				throw new Error("coms-net: response_schema must be a JSON object");
+			}
 			const responseSchema = (schemaParam && typeof schemaParam === "object") ? schemaParam as object : null;
+
+			// Sending to self would auto-answer its own prompt at agent_end —
+			// a degenerate ping-pong loop. Refuse both name and session_id forms.
+			if (params.target === identity.name || params.target === identity.session_id) {
+				throw new Error("coms-net: cannot send to self");
+			}
 
 			const req: SendRequest = {
 				project: identity.project,
@@ -1828,7 +1969,7 @@ export default function (pi: ExtensionAPI) {
 					: `coms_net_get: complete\n${typeof r.response === "string" ? r.response : JSON.stringify(r.response, null, 2)}`;
 				return {
 					content: [{ type: "text" as const, text }],
-					details: { status: "complete", response: r.response, error: r.error ?? null, conversation_id: pending.conversation_id ?? null },
+					details: { status: r.error ? "error" : "complete", response: r.response, error: r.error ?? null, conversation_id: pending.conversation_id ?? null },
 				};
 			}
 			// Fall back to server.
@@ -1912,7 +2053,7 @@ export default function (pi: ExtensionAPI) {
 				// first await deletes the entry).
 				return {
 					content: [{ type: "text" as const, text: `coms_net_await: error — already awaiting msg_id ${msg_id}` }],
-					details: { error: "already_awaiting" },
+					details: { error: "already_awaiting", conversation_id: pending?.conversation_id ?? null },
 				};
 			}
 			// Record the effective deadline so the heartbeat pruning loop honors
@@ -1932,13 +2073,13 @@ export default function (pi: ExtensionAPI) {
 				if (r.error) {
 					return {
 						content: [{ type: "text" as const, text: `coms_net_await: error — ${r.error}` }],
-						details: { error: r.error },
+						details: { error: r.error, conversation_id: pending.conversation_id ?? null },
 					};
 				}
 				const resp = r.response;
 				return {
 					content: [{ type: "text" as const, text: typeof resp === "string" ? resp : (JSON.stringify(resp, null, 2) ?? "") }],
-					details: { response: resp },
+					details: { response: resp, conversation_id: pending.conversation_id ?? null },
 				};
 			}
 
@@ -1954,7 +2095,13 @@ export default function (pi: ExtensionAPI) {
 				undefined,
 				{ timeoutMs: serverTimeoutMs + 5_000, signal: ac.signal },
 			).then((data: any) => {
-				if (data?.status === "complete") return { response: data.response, error: null };
+				if (data?.status === "complete") {
+					// A "complete" reply without a string response would stringify
+					// `undefined` into a blank success below — treat as an error.
+					return typeof data.response === "string"
+						? { response: data.response, error: null }
+						: { response: null, error: "malformed server reply" };
+				}
 				if (data?.status === "error") return { response: null, error: data.error ?? "error" };
 				if (data?.status === "timeout") return { response: null, error: "timeout" };
 				// A non-terminal status (queued/delivered/pending) or a missing
@@ -2006,13 +2153,13 @@ export default function (pi: ExtensionAPI) {
 			if ((winner as any).error) {
 				return {
 					content: [{ type: "text" as const, text: `coms_net_await: error — ${(winner as any).error}` }],
-					details: { error: (winner as any).error },
+					details: { error: (winner as any).error, conversation_id: pending?.conversation_id ?? null },
 				};
 			}
 			const resp = (winner as any).response;
 			return {
 				content: [{ type: "text" as const, text: typeof resp === "string" ? resp : (JSON.stringify(resp, null, 2) ?? "") }],
-				details: { response: resp },
+				details: { response: resp, conversation_id: pending?.conversation_id ?? null },
 			};
 		},
 		renderCall(args, theme) {
@@ -2032,7 +2179,33 @@ export default function (pi: ExtensionAPI) {
 	// ━━ agent_end: capture turn output and submit response ━━━━━━━━━━━━━━━━
 
 	pi.on("agent_end", async (_event, ctx) => {
-		const inbound = activeInbound(ctx);
+		const branch = ctx.sessionManager?.getBranch() ?? [];
+		// FIFO turn attribution: answer the OLDEST injected inbound still
+		// awaiting a reply. Walking the branch from the end and picking the
+		// newest anchor (the old behavior) misattributes the reply to a second
+		// inbound that arrived mid-turn. Only claim the head if its injected
+		// entry actually anchors this branch — a user-driven turn must not
+		// consume a queued inbound's reply slot.
+		let inbound: InboundContext | null = null;
+		while (turnQueue.length > 0) {
+			const mid = turnQueue[0] as string;
+			const cand = inboundQueue.get(mid);
+			if (!cand || cand.fulfilled) {
+				turnQueue.shift();
+				continue;
+			}
+			const anchored = branch.some(
+				e => e.type === "message" && e.message && (e.message as any).details?.msg_id === mid,
+			);
+			if (anchored) {
+				turnQueue.shift();
+				inbound = cand;
+			}
+			break;
+		}
+		// Fallback for inbounds not tracked in turnQueue (e.g. injected before
+		// this build of the extension state existed).
+		if (!inbound) inbound = activeInbound(ctx);
 		if (!inbound || !identity) return;
 
 		// Walk the session branch for the most recent assistant text *after* the
@@ -2043,7 +2216,7 @@ export default function (pi: ExtensionAPI) {
 		// message in the same turn.
 		let lastAssistantText = "";
 		let foundInbound = false;
-		for (const entry of ctx.sessionManager?.getBranch() ?? []) {
+		for (const entry of branch) {
 			if (!foundInbound) {
 				if (entry.type === "message" && entry.message && (entry.message as any).details?.msg_id === inbound.msg_id) {
 					foundInbound = true;
@@ -2107,12 +2280,36 @@ export default function (pi: ExtensionAPI) {
 					error,
 				});
 			} catch { /* best-effort */ }
+			markInboundFulfilled(inbound);
 		} catch (e: any) {
+			// Do NOT fulfill on a failed POST — the reply never reached the
+			// server and the caller is still waiting. Schedule exactly one
+			// retry; only if that also fails do we give up, tombstone, and let
+			// the caller's own timeout resolve it.
 			audit("response_out_failed", { msg_id: inbound.msg_id, reason: safeError(e) });
+			const msgId = inbound.msg_id;
+			const t = setTimeout(async () => {
+				responseRetryTimers.delete(msgId);
+				if (shuttingDown) return;
+				try {
+					await httpFetch("POST", `/v1/messages/${encodeURIComponent(msgId)}/response`, req);
+					try {
+						pi.appendEntry("coms-net-log", {
+							event: "response_out",
+							ts: nowIso(),
+							msg_id: msgId,
+							error,
+							retried: true,
+						});
+					} catch { /* best-effort */ }
+				} catch (e2: any) {
+					audit("response_out_failed_final", { msg_id: msgId, reason: safeError(e2) });
+				}
+				markInboundFulfilled(inbound);
+			}, 2_000);
+			try { (t as any).unref?.(); } catch { /* ignore */ }
+			responseRetryTimers.set(msgId, t);
 		}
-
-		inbound.fulfilled = true;
-		inboundQueue.delete(inbound.msg_id);
 	});
 
 	// ━━ /coms-net slash command ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2143,7 +2340,21 @@ export default function (pi: ExtensionAPI) {
 				}
 				reconnectAttempts = 0;
 				notifiedReconnectCap = false;
-				try { await reRegisterAndOpen(); } catch (err) { audit("manual_reconnect_failed", { reason: safeError(err) }); }
+				try {
+					await reRegisterAndOpen();
+				} catch (err) {
+					audit("manual_reconnect_failed", { reason: safeError(err) });
+					// A transient failure here would otherwise leave inbound
+					// delivery dead until the extension restarts — fall back to
+					// the scheduled backoff loop. Terminal auth/path errors get
+					// the same treatment as the scheduled path: notify + shutdown.
+					if (err instanceof HttpError && (err.status === 401 || err.status === 403 || err.status === 404)) {
+						try { ctx.ui.notify(`📡 coms-net: reconnect failed (HTTP ${err.status}) — not retrying`, "error"); } catch { /* ignore */ }
+						void cleanShutdown();
+					} else {
+						scheduleReconnect();
+					}
+				}
 			}
 			if (tokens.includes("--server")) {
 				try {
@@ -2210,6 +2421,9 @@ export default function (pi: ExtensionAPI) {
 	async function cleanShutdown(): Promise<void> {
 		if (shuttingDown) return;
 		shuttingDown = true;
+		// Invalidate any reRegisterAndOpen still awaiting — its registration
+		// result is stale the moment shutdown begins.
+		sessionGeneration++;
 
 		if (heartbeatTimer) {
 			try { clearInterval(heartbeatTimer); } catch { /* ignore */ }
@@ -2223,6 +2437,21 @@ export default function (pi: ExtensionAPI) {
 			try { sseAbort.abort(); } catch { /* ignore */ }
 			sseAbort = null;
 		}
+		// Cancel pending response-POST retries — their timers would otherwise
+		// fire into a torn-down session (they also self-skip on shuttingDown).
+		for (const t of responseRetryTimers.values()) {
+			try { clearTimeout(t); } catch { /* ignore */ }
+		}
+		responseRetryTimers.clear();
+
+		// Settle in-flight entries so a coms_net_await racing this shutdown
+		// resolves immediately instead of hanging until its own timeout (up to
+		// MESSAGE_TIMEOUT_MS = 30 min). Mirrors the session_start reset loop.
+		for (const entry of pendingReplies.values()) {
+			entry.result = { error: "shutdown" };
+			try { entry.resolve(entry.result); } catch { /* ignore */ }
+		}
+		pendingReplies.clear();
 
 		// Best-effort DELETE with short timeout.
 		await unregisterAgentBestEffort(SHUTDOWN_DELETE_TIMEOUT_MS);

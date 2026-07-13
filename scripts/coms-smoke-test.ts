@@ -25,17 +25,19 @@
  * exchanged per path, plus an AC map. Exit 0 iff the make-or-break gate holds:
  * Path A produced a real agent_end round-trip AND Path B registered ≥2 real
  * peers, and every other gating check passed. The Path B live exchange is
- * reported PASS/FAIL with real evidence but is NOT gating: AC1's message
- * clause is satisfied by either substrate (story OR clause), and the
- * model-driven reply depends on two live agents' turn timing.
+ * reported PASS/FAIL with real evidence but is NOT gating by default
+ * (PI_SMOKE_STRICT=1 makes it gating): AC1's message clause is satisfied by
+ * either substrate (story OR clause), and the model-driven reply depends on
+ * two live agents' turn timing.
  *
  * Model override: set PI_SMOKE_MODEL to pin the model used by every spawned
  * pi (passed through as `--model`) — e.g. when the default provider's auth is
  * expired: PI_SMOKE_MODEL=openrouter/anthropic/claude-haiku-4.5. Unset → pi's
  * configured default model.
  *
- * INV-1: no real API keys are read, written, or logged — the live turns use
- *        whatever auth pi already holds and this script never touches secrets.
+ * INV-1: no real API keys are written or logged — the live turns use whatever
+ *        auth pi already holds, and captured pi output is redacted for ambient
+ *        secret-looking env values before anything enters the report.
  * INV-2: Path B spawns run with PI_COMS_DIR pointed at a per-run temp dir
  *        (0700), so spawned pi registry writes are confined there and the
  *        host's ~/.pi/coms is never mutated.
@@ -48,6 +50,7 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -71,6 +74,36 @@ const REGISTRY_POLL_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const COMS_PROJECT = "smoke"; // isolated project namespace for Path B peers
 const AWAIT_TIMEOUT_MS = 45_000; // coms_await budget inside agent A's prompt
+
+// ── Report hygiene: ambient secrets must never leak into the JSON report.
+//    Any process.env value whose key looks secret-bearing (≥8 chars, to skip
+//    noise like "true") is redacted from captured pi output before it is
+//    embedded in the report. ─────────────────────────────────────────────────
+const SECRET_VALUES = Object.entries(process.env)
+	.filter(
+		([k, v]) => /(KEY|TOKEN|SECRET|PASSWORD)/i.test(k) && typeof v === "string" && v.length >= 8,
+	)
+	.map(([, v]) => v as string);
+function redact(s: string): string {
+	let out = s;
+	for (const v of SECRET_VALUES) out = out.split(v).join("[REDACTED]");
+	return out;
+}
+
+// Well-formed 26-char Crockford-base32 ULID (48-bit time + 80-bit
+// randomness) for shape-coverage msg_ids — no more fake "01SMOKE…" ids.
+const ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+function ulid(): string {
+	let head = "";
+	let t = Date.now();
+	for (let i = 0; i < 10; i++) {
+		head = (ULID_ALPHABET[t % 32] ?? "0") + head;
+		t = Math.floor(t / 32);
+	}
+	let tail = "";
+	for (const b of crypto.randomBytes(16)) tail += ULID_ALPHABET[b % 32] ?? "0";
+	return head + tail;
+}
 
 type Check = { name: string; ok: boolean; skipped?: string; detail?: string };
 const checks: Check[] = [];
@@ -98,17 +131,23 @@ function checkPiVersion(): string | null {
 		shell: process.platform === "win32",
 	});
 	const problem = spawnProblem(r);
-	// pi may print extension-load warnings around the version; the version is
-	// the first semver-looking line on stdout.
+	// pi may print extension-load warnings around the version; accept ONLY a
+	// line that is exactly the pinned version (after trim, optional leading v)
+	// — never fuzzy-match a version string inside a warning line.
 	const version =
 		(r.stdout ?? "")
 			.split("\n")
 			.map((l) => l.trim())
-			.find((l) => /^\d+\.\d+\.\d+/.test(l)) ?? "";
+			.find((l) => /^v?0\.55\.0$/.test(l))
+			?.replace(/^v/, "") ?? "";
 	record({
 		name: "pi_version_pin",
 		ok: !problem && version === PIN,
-		detail: problem ?? `found "${version}", expected "${PIN}"`,
+		detail:
+			problem ??
+			(version === PIN
+				? `found "${PIN}"`
+				: `no line exactly "${PIN}" (or "v${PIN}") on stdout — pin mismatch`),
 	});
 	return !problem && version === PIN ? version : null;
 }
@@ -124,23 +163,32 @@ function checkExtensionLoads(extPath: string, checkName: string): number {
 	});
 	const problem = spawnProblem(r);
 	// Model rows are "<provider> <model> …" lines under a "provider model …"
-	// header. Count by the provider whitelist first; fall back to all non-empty
-	// rows minus the header so a provider rename/new provider can't silently
-	// zero the count and false-fail AC3 (C6).
+	// header. Require BOTH the expected header AND ≥1 row matching the known
+	// provider whitelist — a bare non-empty-row fallback would count noise (C6).
 	const lines = (r.stdout ?? "")
 		.split("\n")
 		.map((l) => l.trim())
 		.filter(Boolean);
-	const rows = lines.filter((l) => !/^provider\s/i.test(l));
-	const byProvider = rows.filter((l) => /^(anthropic|openrouter|openai|google)\s/.test(l)).length;
-	const modelCount = byProvider > 0 ? byProvider : rows.length;
-	const ok = !problem && r.status === 0 && modelCount > 0;
+	const hasHeader = lines.some((l) => /^provider\s/i.test(l));
+	const modelCount = lines.filter((l) => /^(anthropic|openrouter|openai|google)\s/.test(l)).length;
+	// Negative assertion: AC3 is extension-LOAD compatibility, so a load
+	// failure OF THE EXTENSION UNDER TEST on stderr fails the check even when
+	// exit=0. Scope to this extension's basename — unrelated global extensions
+	// (e.g. a user's pi-gitnexus-plus) failing to load must not fail AC3.
+	const extBase = extPath.split("/").pop() ?? extPath;
+	const loadFailure = (r.stderr ?? "")
+		.split("\n")
+		.map((l) => l.trim())
+		.find((l) => l.includes(extBase) && /failed to load|error/i.test(l));
+	const ok = !problem && r.status === 0 && hasHeader && modelCount > 0 && !loadFailure;
 	record({
 		name: checkName,
 		ok,
 		detail:
 			problem ??
-			`exit=${r.status}, models_listed=${modelCount}${byProvider === 0 && modelCount > 0 ? " (fallback: non-empty rows)" : ""}`,
+			(loadFailure
+				? `extension-load failure on stderr: "${redact(loadFailure)}"`
+				: `exit=${r.status}, header=${hasHeader}, models_listed=${modelCount}`),
 	});
 	return r.status === 0 ? modelCount : 0;
 }
@@ -151,19 +199,63 @@ interface SpawnOutcome {
 	signal: NodeJS.Signals | null;
 	stdout: string;
 	stderr: string;
+	// stdout or stderr hit MAX_OUTPUT_BYTES — diagnostics may be missing.
+	truncated: boolean;
 	// spawn failure, timeout, or output-cap kill — anything that makes the
 	// outcome untrustworthy even when status happens to be 0.
 	error: string | null;
+}
+
+// Kill the whole process tree: POSIX spawns are detached group leaders, so
+// signal the GROUP (-pid) to sweep grandchildren (pi tool calls like `sleep`);
+// on win32 use taskkill /T. Best-effort — a dead process must never throw.
+function killTree(proc: ChildProcess, signal: NodeJS.Signals = "SIGKILL"): void {
+	const pid = proc.pid;
+	if (typeof pid !== "number") return;
+	try {
+		if (process.platform === "win32") {
+			spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+		} else {
+			process.kill(-pid, signal);
+		}
+	} catch {
+		try {
+			proc.kill(signal);
+		} catch {
+			// already gone
+		}
+	}
+}
+
+// Wait for a peer's close event (bounded) so rmSync never races a live pi.
+function waitForClose(proc: ChildProcess | null, ms: number): Promise<void> {
+	return new Promise((resolve) => {
+		if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
+			resolve();
+			return;
+		}
+		const t = setTimeout(resolve, ms);
+		proc.once("close", () => {
+			clearTimeout(t);
+			resolve();
+		});
+	});
 }
 
 function startPi(
 	args: string[],
 	opts: { timeoutMs: number; env?: NodeJS.ProcessEnv },
 ): { proc: ChildProcess; done: Promise<SpawnOutcome> } {
-	const proc = spawn("pi", args, {
+	const isWin = process.platform === "win32";
+	// With shell:true on win32, cmd.exe mangles embedded double quotes in the
+	// prompt args — double them per cmd.exe quoting rules. POSIX path unchanged.
+	const finalArgs = isWin ? args.map((a) => a.replace(/"/g, '""')) : args;
+	const proc = spawn("pi", finalArgs, {
 		cwd: VENDOR_DIR,
 		env: opts.env ?? process.env,
-		shell: process.platform === "win32",
+		shell: isWin,
+		// Own process group on POSIX so killTree can sweep grandchildren.
+		detached: !isWin,
 		stdio: ["ignore", "pipe", "pipe"],
 	});
 	const stdoutChunks: Buffer[] = [];
@@ -171,24 +263,17 @@ function startPi(
 	let outBytes = 0;
 	let errBytes = 0;
 	let capped = false;
+	let errCapped = false;
 	let timedOut = false;
 	let spawnErr: string | null = null;
 	const done = new Promise<SpawnOutcome>((resolve) => {
 		let forceTimer: NodeJS.Timeout | null = null;
 		const timer = setTimeout(() => {
 			timedOut = true;
-			try {
-				proc.kill("SIGTERM");
-			} catch {
-				// already gone
-			}
+			killTree(proc, "SIGTERM");
 			// A stuck child gets 5s to honor SIGTERM before SIGKILL.
 			forceTimer = setTimeout(() => {
-				try {
-					proc.kill("SIGKILL");
-				} catch {
-					// already gone
-				}
+				killTree(proc, "SIGKILL");
 			}, 5_000);
 		}, opts.timeoutMs);
 		proc.on("error", (e) => {
@@ -200,17 +285,17 @@ function startPi(
 				outBytes += c.length;
 			} else if (!capped) {
 				capped = true;
-				try {
-					proc.kill("SIGTERM");
-				} catch {
-					// already gone
-				}
+				killTree(proc, "SIGTERM");
 			}
 		});
 		proc.stderr?.on("data", (c: Buffer) => {
 			if (errBytes + c.length <= MAX_OUTPUT_BYTES) {
 				stderrChunks.push(c);
 				errBytes += c.length;
+			} else {
+				// Keep capturing nothing but flag it — silently dropped stderr
+				// diagnostics must be visible in the report.
+				errCapped = true;
 			}
 		});
 		proc.on("close", (status, signal) => {
@@ -219,8 +304,9 @@ function startPi(
 			resolve({
 				status,
 				signal,
-				stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-				stderr: Buffer.concat(stderrChunks).toString("utf8"),
+				stdout: redact(Buffer.concat(stdoutChunks).toString("utf8")),
+				stderr: redact(Buffer.concat(stderrChunks).toString("utf8")),
+				truncated: capped || errCapped,
 				error:
 					spawnErr ??
 					(timedOut
@@ -281,20 +367,33 @@ function agentEndWithText(events: PiEvent[]): boolean {
 }
 
 // Broader auth-failure detection (C7): pi may surface expired/absent auth as
-// stderr text, a JSON error event on stdout, or a non-zero exit — the literal
-// "Authentication failed" string is only one of the shapes.
-const AUTH_FAIL_RE =
-	/authentication failed|unauthorized|invalid api key|api key|run \/login|\b401\b|\b403\b|forbidden/i;
+// stderr text or a structured JSON error event. Tightened to STDERR ONLY
+// (never stdout — model output must not trip it) and requiring auth context:
+// a 401/403 near auth wording, auth wording near a 401/403/api-key/token, or
+// known pi phrasing.
+const AUTH_FAIL_RES = [
+	/\b(401|403)\b.*(unauthor|forbidden|denied|api.?key|token)/i,
+	/\b(unauthorized|forbidden)\b.*\b(401|403|api.?key|token)\b/i,
+	/invalid api key|authentication failed/i,
+];
 function detectAuthFailure(out: SpawnOutcome, events: PiEvent[]): boolean {
-	if (AUTH_FAIL_RE.test(`${out.stderr}\n${out.stdout}`)) return true;
-	return events.some((e) => e.type === "error" && AUTH_FAIL_RE.test(JSON.stringify(e)));
+	if (AUTH_FAIL_RES.some((re) => re.test(out.stderr))) return true;
+	// Structured pi error events are not model output; same tightened patterns.
+	return events.some(
+		(e) => e.type === "error" && AUTH_FAIL_RES.some((re) => re.test(JSON.stringify(e))),
+	);
 }
 
 // ── Path A: subprocess-RPC JSON event stream ────────────────────────────────
-async function pathSubprocessRpc(): Promise<{ registered: number; exchanged: number }> {
+async function pathSubprocessRpc(): Promise<{
+	registered: number;
+	exchanged: number;
+	spawn_errors: number;
+}> {
 	// A "registered" agent on this path = one spawned pi subprocess whose JSON
-	// stream opened (the session header is the RPC handshake). We spawn two,
-	// concurrently.
+	// stream opened (the session header is the RPC handshake) AND which did not
+	// already error/time out — a dying process must not inflate the count. We
+	// spawn two, concurrently.
 	const cnames = ["smoke-rpc-a", "smoke-rpc-b"];
 	const runs = cnames.map((cname) =>
 		startPi(["--mode", "json", ...modelArgs(), "-p", `You are ${cname}. Reply with exactly: ok`], {
@@ -305,14 +404,19 @@ async function pathSubprocessRpc(): Promise<{ registered: number; exchanged: num
 
 	let registered = 0;
 	let exchanged = 0;
+	let spawn_errors = 0;
 	let authFailed = false;
 	const problems: string[] = [];
 	for (const out of outcomes) {
 		const events = parseEvents(out.stdout);
-		if (out.error) problems.push(out.error);
-		else if (out.status !== 0)
+		if (out.error) {
+			problems.push(out.error);
+			spawn_errors += 1;
+		} else if (out.status !== 0)
 			problems.push(`exit=${out.status}${out.signal ? ` signal=${out.signal}` : ""}`);
-		if (events.some((e) => e.type === "session")) registered += 1;
+		if (out.truncated) problems.push("output truncated at cap — diagnostics may be missing");
+		// Only a session header from a process that did NOT error/timeout counts.
+		if (!out.error && events.some((e) => e.type === "session")) registered += 1;
 		// A completed round-trip needs a real model turn (agent_end with text).
 		if (agentEndWithText(events)) exchanged += 1;
 		if (detectAuthFailure(out, events)) authFailed = true;
@@ -347,7 +451,7 @@ async function pathSubprocessRpc(): Promise<{ registered: number; exchanged: num
 		});
 	}
 
-	return { registered, exchanged };
+	return { registered, exchanged, spawn_errors };
 }
 
 // ── Path B: socket-coms with two REAL concurrent pi peers (isolated PI_COMS_DIR)
@@ -419,6 +523,33 @@ async function pathSocketComs(): Promise<{
 			}
 			return null;
 		};
+		// A registry FILE is not proof the peer's socket is accepting — probe a
+		// real connection to the advertised endpoint (unix socket / named pipe)
+		// with bounded retries before spawning A.
+		const probeEndpoint = (endpoint: string): Promise<boolean> =>
+			new Promise((resolve) => {
+				const sock = net.createConnection({ path: endpoint });
+				const t = setTimeout(() => {
+					sock.destroy();
+					resolve(false);
+				}, 500);
+				sock.once("connect", () => {
+					clearTimeout(t);
+					sock.destroy();
+					resolve(true);
+				});
+				sock.once("error", () => {
+					clearTimeout(t);
+					resolve(false);
+				});
+			});
+		const waitForReady = async (entry: RegistryEntry): Promise<boolean> => {
+			for (let i = 0; i < 10; i++) {
+				if (await probeEndpoint(entry.endpoint)) return true;
+				await new Promise((r) => setTimeout(r, 250));
+			}
+			return false;
+		};
 
 		// ── Spawn the two real peers. B first (A can only coms_send a registered
 		// target); B's prompt keeps its turn alive via `sleep` so the inbound
@@ -440,13 +571,13 @@ async function pathSocketComs(): Promise<{
 			{ timeoutMs: SPAWN_TIMEOUT_MS, env: comsEnv },
 		);
 		procB = runB.proc;
+		let bClosedAt: number | null = null;
+		runB.done.then(() => {
+			bClosedAt = Date.now();
+		});
 		const entryB = await waitForEntry("smoke-b");
 		if (!entryB) {
-			try {
-				runB.proc.kill("SIGTERM");
-			} catch {
-				// already gone
-			}
+			killTree(runB.proc, "SIGTERM");
 			await runB.done;
 			record({
 				name: "socket_registry_two_agents",
@@ -460,6 +591,28 @@ async function pathSocketComs(): Promise<{
 			});
 			return result;
 		}
+		// Readiness is a real connection to B's endpoint, not the registry file.
+		if (!(await waitForReady(entryB))) {
+			killTree(runB.proc, "SIGTERM");
+			await runB.done;
+			record({
+				name: "socket_peer_b_ready",
+				ok: false,
+				detail:
+					"smoke-b's registry entry exists but its endpoint never accepted a connection after 10×250ms (readiness is not registry-file presence)",
+			});
+			record({
+				name: "socket_live_round_trip",
+				ok: false,
+				skipped: "peer B never became connectable — exchange not attempted",
+			});
+			return result;
+		}
+		record({
+			name: "socket_peer_b_ready",
+			ok: true,
+			detail: "smoke-b accepting connections on its advertised endpoint",
+		});
 
 		const runA = startPi(
 			[
@@ -478,6 +631,10 @@ async function pathSocketComs(): Promise<{
 			{ timeoutMs: SPAWN_TIMEOUT_MS, env: comsEnv },
 		);
 		procA = runA.proc;
+		let aClosedAt: number | null = null;
+		runA.done.then(() => {
+			aClosedAt = Date.now();
+		});
 		const entryA = await waitForEntry("smoke-a");
 		const [outA, outB] = await Promise.all([runA.done, runB.done]);
 
@@ -518,16 +675,18 @@ async function pathSocketComs(): Promise<{
 		}
 		record({ name: "inv2_per_user_isolation", ok: inv2Ok, detail: inv2Detail });
 
-		// ── Envelope shape coverage (C5): build the REAL PromptEnvelope shape
-		// from the two real registry entries — Envelope base fields
-		// (sender_session, sender_endpoint, sender_cwd, timestamp), no `target`
-		// field, optional conversation_id, and the post-protocol-change `secret`
-		// read from the TARGET's real registry entry. Round-tripped through JSON
-		// only (shape coverage — does NOT count toward messages_exchanged).
+		// ── Envelope shape coverage (C5): build the REAL PromptEnvelope AND
+		// ResponseEnvelope shapes from the two real registry entries — Envelope
+		// base fields (sender_session, sender_endpoint, timestamp), no `target`
+		// field, conversation_id surfaced for correlation, and the
+		// post-protocol-change `secret` (required on BOTH prompts and responses
+		// since 2026-07-13) read from the TARGET's real registry entry.
+		// Round-tripped through JSON only (shape coverage — does NOT count
+		// toward messages_exchanged).
 		if (entryA && entryB) {
 			const envelope = {
 				type: "prompt" as const,
-				msg_id: `01SMOKE${crypto.randomBytes(10).toString("hex").toUpperCase().slice(0, 20)}`,
+				msg_id: ulid(),
 				sender_session: entryA.session_id,
 				sender_endpoint: entryA.endpoint,
 				sender_name: entryA.name,
@@ -539,10 +698,27 @@ async function pathSocketComs(): Promise<{
 				conversation_id: null,
 				response_schema: null,
 			};
+			const response = {
+				type: "response" as const,
+				msg_id: ulid(),
+				sender_session: entryB.session_id,
+				sender_endpoint: entryB.endpoint,
+				hops: 0,
+				timestamp: new Date().toISOString(),
+				response: "pong",
+				error: null,
+				// Post-2026-07-13: responses carry a required `secret` (echo of
+				// the prompt's secret) — responses without it are invalid.
+				secret: entryB.secret,
+				conversation_id: null,
+			};
 			const roundTripped = JSON.parse(JSON.stringify(envelope)) as typeof envelope;
-			// Comment-pinned copy of coms.ts's isValidEnvelope + PromptEnvelope
-			// required fields, post protocol change (incl. `secret`). Keep in sync
-			// with coms.ts's connHandler validation.
+			const roundTrippedResp = JSON.parse(JSON.stringify(response)) as typeof response;
+			// Comment-pinned copy of coms.ts's isValidEnvelope + PromptEnvelope /
+			// ResponseEnvelope required fields, post protocol change (2026-07-13):
+			// `secret` required on prompts AND responses; conversation_id surfaced
+			// in await details; MAX_HOPS is a fixed constant 5. Keep in sync with
+			// coms.ts's connHandler validation.
 			const shapeOk =
 				typeof roundTripped.type === "string" &&
 				typeof roundTripped.msg_id === "string" &&
@@ -553,13 +729,25 @@ async function pathSocketComs(): Promise<{
 				typeof roundTripped.timestamp === "string" &&
 				typeof roundTripped.prompt === "string" &&
 				typeof roundTripped.hops === "number" &&
+				roundTripped.hops < 5 &&
 				typeof roundTripped.secret === "string" &&
-				roundTripped.secret.length > 0;
+				roundTripped.secret.length > 0 &&
+				// Response envelope: same base + required secret + conversation_id.
+				typeof roundTrippedResp.type === "string" &&
+				typeof roundTrippedResp.msg_id === "string" &&
+				typeof roundTrippedResp.sender_session === "string" &&
+				typeof roundTrippedResp.sender_endpoint === "string" &&
+				typeof roundTrippedResp.timestamp === "string" &&
+				typeof roundTrippedResp.hops === "number" &&
+				roundTrippedResp.hops < 5 &&
+				typeof roundTrippedResp.secret === "string" &&
+				roundTrippedResp.secret.length > 0 &&
+				"conversation_id" in roundTrippedResp;
 			record({
 				name: "socket_envelope_shape_coverage",
 				ok: shapeOk,
 				detail: shapeOk
-					? `real PromptEnvelope shape (incl. target secret from smoke-b's registry entry) round-tripped through JSON (shape coverage only — does not count toward messages_exchanged/AC1)`
+					? `real Prompt+ResponseEnvelope shapes (incl. required secret from smoke-b's registry entry) round-tripped through JSON (shape coverage only — does not count toward messages_exchanged/AC1)`
 					: `envelope rejected by pinned shape predicate${typeof entryB.secret !== "string" ? " — target registry entry carries no `secret` (envelope-auth protocol change not present in coms.ts)" : ""}`,
 			});
 		}
@@ -598,6 +786,17 @@ async function pathSocketComs(): Promise<{
 			result.sendAcked && awaitEvent !== undefined && agentEndWithText(eventsA);
 		result.exchanged = roundTrip ? 1 : 0;
 		const problems = [outA.error, outB.error].filter((p): p is string => p !== null);
+		if (outA.truncated || outB.truncated)
+			problems.push("output truncated at cap — diagnostics may be missing");
+		// B exiting before A's send completes (e.g. the model skipped the
+		// `sleep 25` stay-alive) is a peer-lifecycle miss, not a transport
+		// failure — label it as such so the evidence isn't misleading.
+		const peerExitedBeforeSend =
+			!roundTrip &&
+			!result.sendAcked &&
+			bClosedAt !== null &&
+			aClosedAt !== null &&
+			bClosedAt <= aClosedAt;
 		const replyText =
 			typeof awaitEvent?.result?.details?.response === "string"
 				? awaitEvent.result.details.response.trim().slice(0, 60)
@@ -607,7 +806,9 @@ async function pathSocketComs(): Promise<{
 			ok: roundTrip,
 			detail: roundTrip
 				? `coms_send acked (msg_id ${String(sendEvent?.result?.details?.msg_id)}), coms_await returned "${replyText}", agent_end with assistant text in smoke-a's stream`
-				: `send_acked=${result.sendAcked}, smoke-b answered inbound=${result.bAnswered}, coms_await reply received=${awaitEvent !== undefined}${problems.length ? `; spawn problems: ${problems.join("; ")}` : ""}`,
+				: peerExitedBeforeSend
+					? `peer_exited_before_send: smoke-b exited before smoke-a's send completed (B's stay-alive turn ended early)${problems.length ? `; spawn problems: ${problems.join("; ")}` : ""}`
+					: `send_acked=${result.sendAcked}, smoke-b answered inbound=${result.bAnswered}, coms_await reply received=${awaitEvent !== undefined}${problems.length ? `; spawn problems: ${problems.join("; ")}` : ""}`,
 		});
 
 		return result;
@@ -622,15 +823,19 @@ async function pathSocketComs(): Promise<{
 		return result;
 	} finally {
 		// Belt-and-braces: peers are normally done by here, but never leave a
-		// live pi behind, and always remove the per-run temp dir.
+		// live pi behind, and always remove the per-run temp dir. Kill whole
+		// process GROUPS (grandchildren included), await close (bounded) so
+		// rmSync never races a live pi, and never let a cleanup failure mask
+		// the run result.
 		for (const p of [procA, procB]) {
-			try {
-				p?.kill("SIGKILL");
-			} catch {
-				// already gone
-			}
+			if (p) killTree(p, "SIGKILL");
 		}
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await Promise.all([waitForClose(procA, 3_000), waitForClose(procB, 3_000)]);
+		try {
+			fs.rmSync(tmpRoot, { recursive: true, force: true });
+		} catch {
+			// cleanup failure must not mask the run result
+		}
 	}
 }
 
@@ -638,7 +843,7 @@ async function pathSocketComs(): Promise<{
 let pinnedVersion: string | null = null;
 let modelsComs = 0;
 let modelsComsNet = 0;
-const rpc = { registered: 0, exchanged: 0 };
+const rpc = { registered: 0, exchanged: 0, spawn_errors: 0 };
 const socket = { registered: 0, exchanged: 0, sendAcked: false, bAnswered: false };
 
 try {
@@ -661,6 +866,7 @@ try {
 	const [rpcResult, socketResult] = await Promise.all([pathSubprocessRpc(), pathSocketComs()]);
 	rpc.registered = rpcResult.registered;
 	rpc.exchanged = rpcResult.exchanged;
+	rpc.spawn_errors = rpcResult.spawn_errors;
 	socket.registered = socketResult.registered;
 	socket.exchanged = socketResult.exchanged;
 	socket.sendAcked = socketResult.sendAcked;
@@ -679,12 +885,20 @@ const totalExchanged = rpc.exchanged + socket.exchanged;
 // Make-or-break (AC1): Path A produced a real agent_end round-trip AND Path B
 // registered ≥2 real peers via coms.ts's own session_start. The Path B live
 // exchange (socket_live_round_trip) is reported with real evidence but is NOT
-// gating — AC1's message clause is satisfied by either substrate (the story's
-// OR clause) and the model-driven reply depends on two live agents' timing.
+// gating by default (PI_SMOKE_STRICT=1 makes it gating) — AC1's message
+// clause is satisfied by either substrate (the story's OR clause) and the
+// model-driven reply depends on two live agents' timing.
 const rpcRoundTrip = checks.find((c) => c.name === "rpc_live_round_trip")?.ok === true;
 const socketRegistered = checks.find((c) => c.name === "socket_registry_two_agents")?.ok === true;
 const acMakeOrBreak = rpcRoundTrip && socketRegistered;
-const gatingChecks = checks.filter((c) => c.name !== "socket_live_round_trip");
+// socket_live_round_trip is advisory-only by default (AC1's message clause is
+// satisfied by either substrate and the model-driven reply depends on two
+// live agents' timing); PI_SMOKE_STRICT=1 makes it gating. SKIPPABLE is the
+// ONLY check name whose skip may satisfy the gate — an arbitrary skipped
+// check can no longer launder a failure.
+const STRICT = process.env.PI_SMOKE_STRICT === "1";
+const SKIPPABLE = new Set(["socket_live_round_trip"]);
+const gatingChecks = checks.filter((c) => STRICT || c.name !== "socket_live_round_trip");
 
 const report = {
 	story: "p0-2-coms-vendor-decision",
@@ -706,12 +920,20 @@ const report = {
 			checks.find((c) => c.name === "ac3_extension_loads_coms_net")?.ok ?? false,
 	},
 	checks,
-	// Gate = every gating check passed (skipped ≠ passed for the make-or-break
-	// names: rpc_live_round_trip must be ok===true, so an auth skip fails the
-	// gate honestly) AND AC1 make-or-break holds. Exit 0 only when AC1 is backed
-	// by a real message exchange — no waivers.
-	pass: gatingChecks.every((c) => c.ok || c.skipped) && acMakeOrBreak,
+	gate_note: STRICT
+		? "PI_SMOKE_STRICT=1: socket_live_round_trip is gating"
+		: "socket_live_round_trip is advisory-only (excluded from the gate) unless PI_SMOKE_STRICT=1",
+	redaction: "env-secret-values",
+	// Gate = every gating check passed (skipped ≠ passed except for SKIPPABLE
+	// names; rpc_live_round_trip must be ok===true, so an auth skip fails the
+	// gate honestly) AND AC1 make-or-break holds. Exit 0 only when AC1 is
+	// backed by a real message exchange — no waivers.
+	pass:
+		gatingChecks.every((c) => c.ok || (c.skipped !== undefined && SKIPPABLE.has(c.name))) &&
+		acMakeOrBreak,
 };
 
-console.log(JSON.stringify(report, null, 2));
-process.exit(report.pass ? 0 : 1);
+// Synchronous write + natural exit: process.exit() right after a large
+// console.log can truncate the piped JSON report.
+fs.writeSync(1, `${JSON.stringify(report, null, 2)}\n`);
+process.exitCode = report.pass ? 0 : 1;
