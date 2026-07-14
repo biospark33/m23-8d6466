@@ -159,11 +159,20 @@ function applyExtensionTitle(ctx: ExtensionContext): void {
 	if (!ctx.hasUI) return;
 	const name = primaryExtensionName();
 	if (!name) return;
+	// Capture ONLY ctx.ui, not the whole ExtensionContext: if the session is
+	// torn down inside the 150ms window, the pending timer pins just the UI
+	// facade, not the session's full object graph (sessionManager, model
+	// registry, model). The pin is bounded either way — the timer always
+	// fires and releases it. There is deliberately no clear-on-shutdown:
+	// ExtensionContext exposes no lifecycle hook (session_shutdown lives on
+	// the extension API object, which this helper never receives), and a
+	// 150ms self-releasing, unref'd timer is not a leak worth an API change.
+	const ui = ctx.ui;
 	const titleTimer = setTimeout(() => {
 		// The session can end before this fires (e.g. a fast CLI run or test) —
 		// the UI context may already be torn down by then.
 		try {
-			ctx.ui.setTitle(`π - ${name}`);
+			ui.setTitle(`π - ${name}`);
 		} catch {
 			/* ignore */
 		}

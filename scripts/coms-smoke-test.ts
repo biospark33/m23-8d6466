@@ -101,20 +101,25 @@ const SOCKET_REPLY_TOKEN = "pong";
 //    to skip noise like "true") is redacted from captured pi output before it
 //    is embedded in the report. Segment-boundary matching (not substring) so
 //    PATH/AUTHOR-style keys don't trip it, while *_PAT, bare *_PASS, *_CRED,
-//    *_PRIVATE etc. are now covered (C7). Values are redacted LONGEST-FIRST:
-//    when one secret is a substring of another, replacing the shorter one
-//    first would fragment the longer one and leave its tail unredacted. ──────
-const SECRET_VALUES = Object.entries(process.env)
-	.filter(
-		([k, v]) =>
-			/(^|_)(KEY|TOKEN|SECRET|PASS|PASSWORD|PAT|CRED|CREDENTIAL|PRIVATE|JWT|AUTH|DSN|URL)($|_)/i.test(
-				k,
-			) &&
-			typeof v === "string" &&
-			v.length >= 8,
-	)
-	.map(([, v]) => v as string)
-	.sort((a, b) => b.length - a.length);
+//    *_PRIVATE etc. are now covered (C7). Deduped — several env vars can hold
+//    the same value, and re-scanning for a string already replaced is wasted
+//    work in redact(). Values are redacted LONGEST-FIRST: when one secret is
+//    a substring of another, replacing the shorter one first would fragment
+//    the longer one and leave its tail unredacted. ─────────────────────────
+const SECRET_VALUES = Array.from(
+	new Set(
+		Object.entries(process.env)
+			.filter(
+				([k, v]) =>
+					/(^|_)(KEY|TOKEN|SECRET|PASS|PASSWORD|PAT|CRED|CREDENTIAL|PRIVATE|JWT|AUTH|DSN|URL)($|_)/i.test(
+						k,
+					) &&
+					typeof v === "string" &&
+					v.length >= 8,
+			)
+			.map(([, v]) => v as string),
+	),
+).sort((a, b) => b.length - a.length);
 function redact(s: string): string {
 	let out = s;
 	for (const v of SECRET_VALUES) out = out.split(v).join("[REDACTED]");
@@ -373,16 +378,30 @@ function startPi(
 	opts: { timeoutMs: number; env?: NodeJS.ProcessEnv },
 ): { proc: ChildProcess; done: Promise<SpawnOutcome> } {
 	const isWin = process.platform === "win32";
-	// shell:true → Node joins args with spaces and no quoting; wrap each arg so
-	// cmd.exe keeps space/quote-bearing prompts as one argv entry. & | ^ are
-	// inert inside double quotes, but %VAR% is expanded even there — reject %
-	// with a clear error rather than silently mangling the arg (C18). POSIX
-	// path unchanged.
+	// shell:true is UNAVOIDABLE on win32 here: bare `pi` resolves to a .cmd
+	// shim, CreateProcess cannot execute a batch file without cmd.exe, and
+	// modern Node refuses shell:false on batch files outright (EINVAL,
+	// CVE-2024-27980) — so "resolve pi.cmd and spawn with shell:false" is not
+	// a real option. With shell:true Node joins args with spaces and no
+	// quoting, so wrap each arg ourselves. Safety model against cmd.exe's
+	// quote-state machine (each `"` toggles quoted state):
+	//   - `"` → `""`: parity-PRESERVING (a pair toggles state twice), so an
+	//     embedded quote cannot break out of the wrapper — `& | < > ^ ( )`
+	//     stay quoted and inert. Caveat: the child CRT collapses the pair, so
+	//     a literal `"` does not survive win32 argv — cosmetic for these
+	//     prompts, and no escaping satisfies both cmd and the CRT anyway.
+	//   - reject `%`: cmd.exe expands %VAR% even inside double quotes (C18).
+	//   - reject `!`: expands inside quotes when delayed expansion is enabled
+	//     (non-default, and not escapable from outside a batch file).
+	//   - reject CR/LF: line terminators end the command regardless of quote
+	//     state — the one genuine breakout from a quoted wrapper.
+	// POSIX path unchanged (no shell, argv passed verbatim).
 	const finalArgs = isWin
 		? args.map((a) => {
-				if (a.includes("%"))
+				const bad = /[%!\r\n]/.exec(a);
+				if (bad)
 					throw new Error(
-						`win32 spawn: argument contains '%' which cmd.exe expands even inside quotes: ${a.slice(0, 60)}`,
+						`win32 spawn: argument contains ${JSON.stringify(bad[0])} which cmd.exe interprets even inside quotes: ${a.slice(0, 60)}`,
 					);
 				return `"${a.replace(/"/g, '""')}"`;
 			})
@@ -574,15 +593,27 @@ async function pathSubprocessRpc(): Promise<{
 	// (C5 — pi 0.55.0 has no no-global-extensions flag).
 	const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "coms-smoke-rpc-"));
 	activeTmpDirs.add(tmpRoot);
+	// Hoisted OUTSIDE the try and filled incrementally (not .map, whose result
+	// is lost if the callback throws mid-loop) so the finally can sweep every
+	// spawned child. The sweep matters on the EXCEPTION path only: startPi's
+	// per-child self-kill timeout lives in THIS process, so if an exception
+	// (e.g. a win32 arg rejection, an fs error) unwinds us toward process exit
+	// while a detached child is still running, that timeout dies with the
+	// parent and the child is orphaned. Mirror pathSocketComs's finally:
+	// kill + bounded close-wait before rmSync, so rmSync never races a live
+	// pi. On the happy path every child has already closed, so the kill is a
+	// no-op (ESRCH-tolerant) and the wait resolves immediately.
+	const runs: Array<{ proc: ChildProcess; done: Promise<SpawnOutcome> }> = [];
 	try {
 		const envA = { ...childEnv.env, PI_COMS_DIR: path.join(tmpRoot, "coms") };
-		const cnames = ["smoke-rpc-a", "smoke-rpc-b"];
-		const runs = cnames.map((cname) =>
-			startPi(["--mode", "json", ...modelArgs(), "-p", `You are ${cname}. Reply with exactly: ok`], {
-				timeoutMs: SPAWN_TIMEOUT_MS,
-				env: envA,
-			}),
-		);
+		for (const cname of ["smoke-rpc-a", "smoke-rpc-b"]) {
+			runs.push(
+				startPi(["--mode", "json", ...modelArgs(), "-p", `You are ${cname}. Reply with exactly: ok`], {
+					timeoutMs: SPAWN_TIMEOUT_MS,
+					env: envA,
+				}),
+			);
+		}
 		const outcomes = await Promise.all(runs.map((r) => r.done));
 
 		let registered = 0;
@@ -646,6 +677,11 @@ async function pathSubprocessRpc(): Promise<{
 
 		return { registered, exchanged, spawn_errors, replyContentVerified };
 	} finally {
+		// Belt-and-braces, mirroring pathSocketComs: on the exception path a
+		// spawned peer can still be alive — never leave a live pi behind, and
+		// await close (bounded) so the rmSync below never races one.
+		for (const r of runs) killTree(r.proc, "SIGKILL");
+		await Promise.all(runs.map((r) => waitForClose(r.proc, 3_000)));
 		activeTmpDirs.delete(tmpRoot);
 		try {
 			fs.rmSync(tmpRoot, { recursive: true, force: true });
