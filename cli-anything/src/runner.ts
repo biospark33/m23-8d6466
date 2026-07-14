@@ -185,7 +185,18 @@ export function redactBoundaryPrefix(text: string, parentEnv: EnvMap): string {
     }
     const maxK = Math.min(text.length, value.length - 1);
     for (let k = maxK; k >= 1; k--) {
-      if (text.endsWith(value.slice(0, k))) {
+      // Compare characters directly instead of text.endsWith(value.slice(0, k)):
+      // the slice form allocates a fresh string per k, which for multi-KB
+      // secrets (certs, private keys) means thousands of transient strings.
+      const offset = text.length - k;
+      let match = true;
+      for (let i = 0; i < k; i++) {
+        if (text[offset + i] !== value[i]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
         if (k >= MIN_BOUNDARY_PREFIX_LEN) {
           if (bestRedact === null || k > bestRedact.len) {
             bestRedact = { key, len: k };
@@ -243,10 +254,22 @@ function extractProbe(stdout: string, truncated: boolean): string | null {
   const completeLines = truncated
     ? stdout.slice(0, stdout.lastIndexOf("\n") + 1)
     : stdout;
-  const line = completeLines.split("\n").find((l) => l.startsWith(PROBE_KEY));
-  if (line === undefined) return null;
-  const value = line.slice(PROBE_KEY.length).replace(/\r$/, "");
-  return value.length > 0 ? value : null;
+  // Scan for the probe key at a line start via indexOf instead of split("\n"):
+  // splitting a 256 KB excerpt allocates one string per line to find one match.
+  let index = completeLines.indexOf(PROBE_KEY);
+  while (index !== -1) {
+    if (index === 0 || completeLines[index - 1] === "\n") {
+      const endIndex = completeLines.indexOf("\n", index);
+      const line =
+        endIndex === -1
+          ? completeLines.slice(index)
+          : completeLines.slice(index, endIndex);
+      const value = line.slice(PROBE_KEY.length).replace(/\r$/, "");
+      return value.length > 0 ? value : null;
+    }
+    index = completeLines.indexOf(PROBE_KEY, index + 1);
+  }
+  return null;
 }
 
 export interface RunOptions {
