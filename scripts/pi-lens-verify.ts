@@ -9,14 +9,36 @@
  * every tool path below is the real thing, just reached headlessly.
  *
  * Exercised (AC → check):
- *   AC1  lsp_diagnostics  — real LSP type error, structured JSON, stable aw:<hash> id
- *   AC2  secret-scan      — hardcoded-secret detection + emit-block semantics (NFR-SEC-3)
- *   AC3  warning-count    — numeric count read from on-disk ~/.pi-lens artifact + fallback reason
+ *   AC1  lsp_diagnostics  — real LSP type error, structured JSON, stable aw:<hash> id.
+ *        The error-severity fixture proves derived-id determinism + parity with
+ *        pi-lens's OWN id function. A warning-severity pyright fixture +
+ *        pilens_turn_end additionally PROBES for an id pi-lens actually assigned
+ *        (read back from actionable-warnings.jsonl); evidence labels the id as
+ *        "observed" or "derived+native-parity only" — never faked.
+ *   AC2a secret-scan detection (live) — opengrep flags the synthetic hardcoded secret.
+ *   AC2b emit-block (NFR-SEC-3) — EMPIRICAL probe: pilens_turn_end output is
+ *        inspected for the '🔴 STOP — hardcoded secrets' blocker. Pass ONLY if
+ *        observed; otherwise skip with the source-verified reason (gitleaks/trivy
+ *        absent → opengrep-only findings stay advisory, never promoted to blockers).
+ *   AC3  warning-count    — numeric count read from the on-disk project artifact
+ *        (actionable-warnings.jsonl primary, cache/code-quality-warnings.json
+ *        fallback with an explicit FR-EX-8 fallbackReason).
+ *
+ * Containment: the server is spawned with PILENS_DATA_DIR pointed INSIDE the temp
+ * work dir (plus PI_LENS_CONFIG_PATH for a run-local config enabling the
+ * actionable-warnings aggregator), so all pi-lens on-disk state is removed with
+ * the work dir — no ~/.pi-lens/projects/*pilens-verify* orphans.
  *
  * Output: structured JSON results on stdout ({ results: Check[], summary }).
- * Exit 0 iff every non-skipped check passed.
+ * Exit 0 iff every non-skipped check passed (under --strict or CI, any skip of a
+ * NON-optional check also exits non-zero).
  *
- * Run:  bun scripts/pi-lens-verify.ts [--json] [--keep]
+ * Flags: --json (accepted, output is always JSON), --keep (retain the temp dir;
+ *        the synthetic-secret fixture is STILL scrubbed — overwritten then
+ *        deleted — so no key-shaped strings persist), --strict (skips of
+ *        non-optional checks fail the run; CI env implies --strict).
+ *
+ * Run:  bun scripts/pi-lens-verify.ts [--json] [--keep] [--strict]
  */
 
 import { execFileSync, spawn } from "node:child_process";
@@ -25,33 +47,70 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+/** pi-lens version the story pins. Drift is reported, never fatal. */
+const SPEC_PI_LENS_VERSION = "3.8.47";
+
+/** Non-fatal warnings surfaced in the summary (version drift, ambiguous installs). */
+const notes: string[] = [];
+
 // ---------------------------------------------------------------------------
 // pi-lens install resolution
 // ---------------------------------------------------------------------------
 
 /** Resolve the installed pi-lens package root + version from the global npm dir. */
 function resolvePiLens(): { root: string; version: string; server: string } {
-  // pi installs npm:pi-lens into the node used by pi. Probe the known global dir
+  // pi installs npm:pi-lens into the node used by pi. Probe the known global dirs
   // first, then fall back to `npm root -g`.
   const candidates = [
     path.join(os.homedir(), ".local", "node-arm64", "lib", "node_modules", "pi-lens"),
     path.join(os.homedir(), ".local", "node-x64", "lib", "node_modules", "pi-lens"),
   ];
-  let root = candidates.find((c) => fs.existsSync(path.join(c, "package.json")));
-  if (!root) {
+  try {
+    const g = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
+    candidates.push(path.join(g, "pi-lens"));
+  } catch {
+    /* npm unavailable — probe the known dirs only */
+  }
+  // Collect EVERY resolvable install so multiple divergent versions are visible
+  // instead of silently picking the first.
+  const found: Array<{ root: string; version: string }> = [];
+  for (const c of candidates) {
+    const pkgPath = path.join(c, "package.json");
+    if (found.some((f) => f.root === c) || !fs.existsSync(pkgPath)) continue;
     try {
-      const g = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
-      const p = path.join(g, "pi-lens");
-      if (fs.existsSync(path.join(p, "package.json"))) root = p;
+      found.push({ root: c, version: JSON.parse(fs.readFileSync(pkgPath, "utf8")).version as string });
     } catch {
-      /* ignore */
+      /* unreadable package.json — skip this candidate */
     }
   }
-  if (!root) throw new Error("pi-lens not found in any known global node_modules dir");
-  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-  const server = path.join(root, "dist", "mcp", "server.js");
-  if (!fs.existsSync(server)) throw new Error(`pi-lens MCP server missing at ${server}`);
-  return { root, version: pkg.version as string, server };
+  const primary = found.find((f) => fs.existsSync(path.join(f.root, "dist", "mcp", "server.js")));
+  if (!primary) throw new Error("pi-lens not found in any known global node_modules dir");
+  const divergent = found.filter((f) => f.version !== primary.version);
+  if (divergent.length > 0) {
+    notes.push(
+      `multiple pi-lens installs with divergent versions: using ${primary.root}@${primary.version}; also found ${divergent
+        .map((f) => `${f.root}@${f.version}`)
+        .join(", ")}`,
+    );
+  }
+  return { root: primary.root, version: primary.version, server: path.join(primary.root, "dist", "mcp", "server.js") };
+}
+
+/**
+ * Runtime for the MCP server child. pi-lens ships a Node package; running its
+ * server under this process's execPath (bun) risks Node-isms in its deps, so
+ * prefer a real node: PILENS_NODE override, else `node` on PATH, else fall back
+ * to process.execPath as a last resort.
+ */
+function resolveNodeRuntime(): string {
+  const override = process.env.PILENS_NODE?.trim();
+  if (override) return override;
+  try {
+    execFileSync("node", ["--version"], { stdio: "ignore" });
+    return "node";
+  } catch {
+    return process.execPath;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -63,18 +122,55 @@ interface McpToolResult {
   error?: unknown;
 }
 
+interface PendingRpc {
+  method: string;
+  timer: ReturnType<typeof setTimeout>;
+  resolve: (msg: Record<string, unknown>) => void;
+  reject: (err: Error) => void;
+}
+
 class McpClient {
   private proc: ReturnType<typeof spawn>;
   private buf = "";
+  private stderrBuf = "";
   private id = 0;
-  private pending = new Map<number, (msg: Record<string, unknown>) => void>();
+  private closed = false;
+  private pending = new Map<number, PendingRpc>();
 
-  constructor(server: string, cwd: string) {
-    this.proc = spawn(process.execPath, [server], {
-      stdio: ["pipe", "pipe", "ignore"],
+  constructor(server: string, cwd: string, env: NodeJS.ProcessEnv) {
+    this.proc = spawn(resolveNodeRuntime(), [server], {
+      stdio: ["pipe", "pipe", "pipe"], // stderr captured, surfaced in errors
       cwd,
+      env,
     });
     this.proc.stdout?.on("data", (d: Buffer) => this.onData(d.toString()));
+    this.proc.stderr?.on("data", (d: Buffer) => {
+      // Keep a bounded tail — enough to diagnose a crashed/misconfigured server.
+      this.stderrBuf = (this.stderrBuf + d.toString()).slice(-16_384);
+    });
+    // stdin writes after the child died would raise EPIPE asynchronously — swallow.
+    this.proc.stdin?.on("error", () => {});
+    // A crashed/unspawnable server must fail fast: reject every outstanding RPC
+    // with the real cause instead of hanging until the per-rpc timeout.
+    this.proc.on("error", (err) => this.failAllPending(`server process error: ${err.message}`));
+    this.proc.on("exit", (code, signal) => {
+      if (!this.closed) this.failAllPending(`server exited (code=${code}, signal=${signal})`);
+    });
+  }
+
+  private stderrTail(): string {
+    const tail = this.stderrBuf.trim();
+    return tail ? ` stderr: ${tail.slice(-500)}` : "";
+  }
+
+  /** Reject all outstanding RPCs with `cause` + the captured stderr tail. */
+  private failAllPending(cause: string): void {
+    const suffix = this.stderrTail();
+    for (const p of this.pending.values()) {
+      clearTimeout(p.timer);
+      p.reject(new Error(`rpc ${p.method} failed: ${cause}.${suffix}`));
+    }
+    this.pending.clear();
   }
 
   private onData(chunk: string): void {
@@ -90,24 +186,24 @@ class McpClient {
         continue;
       }
       const mid = msg.id as number | undefined;
-      if (mid !== undefined && this.pending.has(mid)) {
-        this.pending.get(mid)?.(msg);
-        this.pending.delete(mid);
+      const p = mid === undefined ? undefined : this.pending.get(mid);
+      if (p) {
+        this.pending.delete(mid as number);
+        clearTimeout(p.timer);
+        p.resolve(msg);
       }
     }
   }
 
   private rpc(method: string, params: unknown, timeoutMs: number): Promise<Record<string, unknown>> {
+    if (this.closed) return Promise.reject(new Error(`rpc ${method} failed: client closed.${this.stderrTail()}`));
     const myId = ++this.id;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(myId);
-        reject(new Error(`rpc ${method} timed out after ${timeoutMs}ms`));
+        reject(new Error(`rpc ${method} timed out after ${timeoutMs}ms.${this.stderrTail()}`));
       }, timeoutMs);
-      this.pending.set(myId, (msg) => {
-        clearTimeout(timer);
-        resolve(msg);
-      });
+      this.pending.set(myId, { method, timer, resolve, reject });
       this.proc.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", id: myId, method, params })}\n`);
     });
   }
@@ -130,7 +226,11 @@ class McpClient {
     return (msg.result as McpToolResult) ?? { error: msg.error };
   }
 
+  /** Idempotent: safe to call multiple times; always kills the child. */
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.failAllPending("client closed");
     this.proc.kill();
   }
 }
@@ -208,6 +308,48 @@ async function deriveNativeId(
   }
 }
 
+/**
+ * pi-lens's aw: aggregator is gated to warning severity + a code action, and the
+ * per-turn history is NDJSON: <projectDataDir>/actionable-warnings.jsonl, one
+ * line per warning, carrying the assigned id as `warningId`
+ * (dist/clients/actionable-warnings.js:appendActionableWarningsHistory).
+ */
+function readActionableWarningsHistory(projectDir: string): {
+  path: string;
+  entries: Array<Record<string, unknown>>;
+} {
+  const p = path.join(projectDir, "actionable-warnings.jsonl");
+  if (!fs.existsSync(p)) return { path: p, entries: [] };
+  try {
+    const entries = fs
+      .readFileSync(p, "utf8")
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => {
+        try {
+          return JSON.parse(l) as Record<string, unknown>;
+        } catch {
+          return undefined;
+        }
+      })
+      .filter((e): e is Record<string, unknown> => e !== undefined);
+    return { path: p, entries };
+  } catch {
+    return { path: p, entries: [] };
+  }
+}
+
+/**
+ * Provenance-based secret-finding matcher (pi-lens families, not keyword soup):
+ * an auxiliary opengrep diagnostic, or a rule/code from the known secret rule
+ * families (Semgrep `*.secrets.*`, `hardcoded-secret`, `detected-...-key`).
+ */
+function isSecretDiagnostic(d: Record<string, unknown>): boolean {
+  if (d.tool === "opengrep") return true;
+  const ruleAndCode = `${d.rule ?? ""} ${d.code ?? ""}`;
+  return /\.secrets\.|hardcoded-secret|detected-[\w-]+-key/i.test(ruleAndCode);
+}
+
 // ---------------------------------------------------------------------------
 // Check plumbing
 // ---------------------------------------------------------------------------
@@ -219,6 +361,8 @@ interface Check {
   status: Status;
   evidence: Record<string, unknown>;
   reason?: string;
+  /** A skip of an optional check never fails --strict (environment-dependent). */
+  optional?: boolean;
 }
 
 const checks: Check[] = [];
@@ -248,23 +392,52 @@ function projectDataDir(cwd: string): string {
 
 async function main(): Promise<void> {
   const keep = process.argv.includes("--keep");
+  const strict = process.argv.includes("--strict") || !!process.env.CI;
   const pl = resolvePiLens();
+  if (pl.version !== SPEC_PI_LENS_VERSION) {
+    notes.push(`pi-lens version drift: spec pins ${SPEC_PI_LENS_VERSION}, installed ${pl.version} (non-fatal)`);
+  }
 
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "pilens-verify-"));
+  // Contain ALL pi-lens on-disk state inside the temp work dir: the server is
+  // spawned with PILENS_DATA_DIR pointing here, and this process's env is set
+  // too so projectDataDir() below resolves to the same contained location.
+  const pilensDataDir = path.join(work, ".pilens-data");
+  process.env.PILENS_DATA_DIR = pilensDataDir;
+  // Run-local pi-lens config: enables the actionable-warnings aggregator (off by
+  // default — lens-config.js resolvePiLensFlag) so turn-end actually assigns
+  // aw: ids we can read back. PI_LENS_CONFIG_PATH keeps the user's global
+  // ~/.pi-lens/config.json untouched.
+  const pilensConfigPath = path.join(work, "pi-lens-config.json");
+  fs.writeFileSync(
+    pilensConfigPath,
+    JSON.stringify({ actionableWarnings: { enabled: true, includeLspCodeActions: true } }),
+  );
+
   const tsFile = path.join(work, "type-error.ts");
   const secretFile = path.join(work, "leak.ts");
+  const warnFile = path.join(work, "unused-import.py");
   // pi-lens's opengrep secret detector scopes to the git working tree, so the
   // fixture dir must be a git repo with the files staged for secret rules to fire.
-  const git = (args: string[]): void => {
+  // Record git availability/staging explicitly — the checks below surface it.
+  const gitState = { available: false, initOk: false, stagedOk: false };
+  const git = (args: string[]): boolean => {
     try {
       execFileSync("git", ["-C", work, ...args], { stdio: "ignore" });
+      return true;
     } catch {
-      /* git optional — secret-scan check will skip with a logged reason */
+      return false;
     }
   };
-  git(["init", "-q"]);
+  try {
+    execFileSync("git", ["--version"], { stdio: "ignore" });
+    gitState.available = true;
+  } catch {
+    notes.push("git not available on PATH — secret-scan fixture cannot be staged; AC2a will skip");
+  }
+  gitState.initOk = gitState.available && git(["init", "-q"]);
 
-  // AC1 fixture: a genuine TS type error.
+  // AC1 fixture: a genuine TS type error (error severity → structured LSP diag).
   fs.writeFileSync(
     tsFile,
     [
@@ -276,6 +449,13 @@ async function main(): Promise<void> {
       "",
     ].join("\n"),
   );
+
+  // AC1 observed-id fixture: a WARNING-severity, fixable diagnostic — the only
+  // kind pi-lens's aw: aggregator assigns ids to. TS has no warning-category
+  // diagnostics at all, so use pyright (on PATH): reportUnusedImport=warning
+  // yields LSP severity 2 for the unused import below.
+  fs.writeFileSync(path.join(work, "pyrightconfig.json"), JSON.stringify({ reportUnusedImport: "warning" }));
+  fs.writeFileSync(warnFile, ["import os", "", "def main() -> int:", "    return 1", ""].join("\n"));
 
   // AC2 fixture: obviously-synthetic hardcoded secrets (never a real credential).
   // Generated at runtime so no secret-shaped string is ever committed.
@@ -293,214 +473,320 @@ async function main(): Promise<void> {
   );
 
   // Stage fixtures so opengrep's secret ruleset (git-working-tree scoped) sees them.
-  git(["add", "-A"]);
-  const gitTracked = fs.existsSync(path.join(work, ".git"));
+  gitState.stagedOk = gitState.initOk && git(["add", "-A"]);
 
-  const client = new McpClient(pl.server, work);
+  const clientEnv = { ...process.env, PILENS_DATA_DIR: pilensDataDir, PI_LENS_CONFIG_PATH: pilensConfigPath };
   try {
-    await client.init();
+    const client = new McpClient(pl.server, work, clientEnv);
+    try {
+      await client.init();
 
-    // --- AC1: lsp_diagnostics (pure LSP path) --------------------------------
-    // Warm the LSP server, then run the per-edit dispatch (LSP + linters) which
-    // returns the structured diagnostics array.
-    await client.call("pilens_lsp_diagnostics", { path: tsFile, cwd: work, severity: "all" }, 60_000);
-    const analyzeTs = await client.call("pilens_analyze", { file: tsFile, cwd: work }, 60_000);
-    const tsJson = parseToolJson(analyzeTs);
-    const tsDiags = (tsJson?.diagnostics as Array<Record<string, unknown>>) ?? [];
-    const lspDiag = tsDiags.find((d) => d.tool === "lsp");
+      // --- AC1: lsp_diagnostics (pure LSP path) ------------------------------
+      // Warm the LSP server, then run the per-edit dispatch (LSP + linters) which
+      // returns the structured diagnostics array.
+      await client.call("pilens_lsp_diagnostics", { path: tsFile, cwd: work, severity: "all" }, 60_000);
+      const analyzeTs = await client.call("pilens_analyze", { file: tsFile, cwd: work }, 60_000);
+      const tsJson = parseToolJson(analyzeTs);
+      const tsDiags = (tsJson?.diagnostics as Array<Record<string, unknown>>) ?? [];
+      const lspDiag = tsDiags.find((d) => d.tool === "lsp");
 
-    if (lspDiag && String(lspDiag.rule ?? "").length > 0) {
-      // Derive the stable aw:<hash> id the actionable-warnings aggregator would
-      // assign to this LSP diagnostic and prove it's deterministic (re-derive ==).
-      const idArgs = {
-        cwd: work,
-        filePath: tsFile,
-        tool: "lsp",
-        source: "typescript",
-        code: String(lspDiag.rule).split(":")[1],
-        message: String(lspDiag.message),
-        line: Number(lspDiag.line),
-      };
-      const id1 = createActionableWarningId(idArgs);
-      const id2 = createActionableWarningId(idArgs);
-      // Parity: our reproduction must equal pi-lens's OWN id function for the
-      // same inputs — otherwise "stable aw:<hash>" is only self-consistent, not
-      // the real contract. Import the native function from the resolved package.
-      const nativeId = await deriveNativeId(pl.root, idArgs);
-      const shape = /^aw:[0-9a-f]{10}$/.test(id1);
-      const parity = nativeId === undefined || nativeId === id1;
-      record({
-        ac: "AC1",
-        name: "lsp_diagnostics structured output with stable aw:<hash> id",
-        status: id1 === id2 && shape && parity ? "pass" : "fail",
-        evidence: {
-          diagnosticCount: tsDiags.length,
-          lspStatus: (tsJson?.lsp as Record<string, unknown>)?.status,
-          lspLatencyMs: (tsJson?.lsp as Record<string, unknown>)?.durationMs,
-          diagnostic: {
-            line: lspDiag.line,
-            column: lspDiag.column,
-            severity: lspDiag.severity,
-            semantic: lspDiag.semantic,
-            tool: lspDiag.tool,
-            rule: lspDiag.rule,
-            message: lspDiag.message,
+      // Warm + register the warning fixture (pilens_analyze registers the file
+      // into turn-state, which pilens_turn_end's aw: aggregation consumes).
+      // Bounded: a cold pyright start may lag — aggregation re-queries LSP at
+      // turn-end anyway, so this only needs to register + warm, not to observe.
+      // The result IS kept to document (in AC1 evidence) whether the fixture's
+      // warning-severity diagnostic surfaced at all.
+      const analyzeWarn = await client.call("pilens_analyze", { file: warnFile, cwd: work }, 90_000);
+      const warnDiags = (parseToolJson(analyzeWarn)?.diagnostics as Array<Record<string, unknown>>) ?? [];
+      const warnLspDiag = warnDiags.find((d) => d.tool === "lsp" && d.severity === "warning");
+
+      // --- AC2a: secret-scan detection (live, opengrep) -----------------------
+      // pi-lens's secret detector (opengrep) attaches as an AUXILIARY warm LSP
+      // server to the dispatch LSP runner (dist/clients/dispatch/runners/lsp.js).
+      // Its FIRST pass on a file is a cold ~8s start that can return before the
+      // secret rules finish, so poll pilens_analyze until a secret surfaces (the
+      // server is warm — ~1.3s — after the first pass). Bounded retry keeps the
+      // check deterministic instead of racing opengrep's cold start.
+      let secretDiags: Array<Record<string, unknown>> = [];
+      let secretHit: Record<string, unknown> | undefined;
+      for (let attempt = 0; attempt < 4 && !secretHit; attempt++) {
+        await client.call("pilens_lsp_diagnostics", { path: secretFile, cwd: work, severity: "all" }, 60_000);
+        const analyzeSecret = await client.call("pilens_analyze", { file: secretFile, cwd: work }, 60_000);
+        secretDiags = (parseToolJson(analyzeSecret)?.diagnostics as Array<Record<string, unknown>>) ?? [];
+        secretHit = secretDiags.find(isSecretDiagnostic);
+      }
+      const onPath = (bin: string): boolean =>
+        !!process.env.PATH?.split(":").some((p) => fs.existsSync(path.join(p, bin)));
+      const gitleaksAvail = onPath("gitleaks");
+      const trivyAvail = onPath("trivy");
+
+      // --- Shared turn-end: drives aw: aggregation (AC1 observed-id probe),
+      // the emit-block probe (AC2b), and the on-disk warning count (AC3). ----
+      const turnEnd = await client.call("pilens_turn_end", { cwd: work, files: [tsFile, secretFile, warnFile] }, 90_000);
+      const turnEndText = turnEnd.content?.map((c) => c.text ?? "").join("\n") ?? "";
+      const projectDir = projectDataDir(work);
+      const awHistory = readActionableWarningsHistory(projectDir);
+
+      // AC1 observed-id probe: find an aw: id pi-lens ACTUALLY assigned to one
+      // of our fixtures in its own NDJSON history, and check our independent
+      // derivation from the entry's own fields equals it.
+      const awEntry =
+        awHistory.entries.find((e) => path.resolve(String(e.filePath ?? "")) === warnFile) ??
+        awHistory.entries.find((e) => String(e.filePath ?? "").startsWith(work));
+      const awDerived = awEntry
+        ? createActionableWarningId({
+            cwd: work,
+            filePath: String(awEntry.filePath),
+            tool: awEntry.tool as string | undefined,
+            source: awEntry.source as string | undefined,
+            code: awEntry.code as string | undefined,
+            rule: awEntry.rule as string | undefined,
+            message: String(awEntry.message ?? ""),
+            line: awEntry.line as number | undefined,
+          })
+        : undefined;
+      const idObserved = awEntry !== undefined && awDerived === awEntry.warningId;
+
+      if (lspDiag && String(lspDiag.rule ?? "").length > 0) {
+        // Derive the stable aw:<hash> id the actionable-warnings aggregator would
+        // assign to this LSP diagnostic and prove it's deterministic (re-derive ==).
+        const ruleStr = String(lspDiag.rule);
+        const colonIdx = ruleStr.indexOf(":");
+        const idArgs = {
+          cwd: work,
+          filePath: tsFile,
+          tool: "lsp",
+          source: "typescript",
+          code: colonIdx >= 0 ? ruleStr.slice(colonIdx + 1) : undefined,
+          message: String(lspDiag.message),
+          line: Number(lspDiag.line),
+        };
+        const id1 = createActionableWarningId(idArgs);
+        const id2 = createActionableWarningId(idArgs);
+        // Parity: our reproduction must equal pi-lens's OWN id function for the
+        // same inputs — otherwise "stable aw:<hash>" is only self-consistent, not
+        // the real contract. Import the native function from the resolved package.
+        const nativeId = await deriveNativeId(pl.root, idArgs);
+        const shape = /^aw:[0-9a-f]{10}$/.test(id1);
+        const parity = nativeId === undefined || nativeId === id1;
+        record({
+          ac: "AC1",
+          name: "lsp_diagnostics structured output with stable aw:<hash> id",
+          status: id1 === id2 && shape && parity ? "pass" : "fail",
+          evidence: {
+            diagnosticCount: tsDiags.length,
+            lspStatus: (tsJson?.lsp as Record<string, unknown>)?.status,
+            lspLatencyMs: (tsJson?.lsp as Record<string, unknown>)?.durationMs,
+            diagnostic: {
+              line: lspDiag.line,
+              column: lspDiag.column,
+              severity: lspDiag.severity,
+              semantic: lspDiag.semantic,
+              tool: lspDiag.tool,
+              rule: lspDiag.rule,
+              message: lspDiag.message,
+            },
+            stableId: id1,
+            idProvenance: idObserved ? "observed" : "derived+native-parity",
+            idReproducible: id1 === id2,
+            nativeId: nativeId ?? "(pi-lens fn not importable — shape-only check)",
+            matchesNative: parity,
+            // Observed id: pi-lens's OWN assignment read back from
+            // actionable-warnings.jsonl. Never faked — absent stays absent.
+            idObserved,
+            observedId: idObserved ? awEntry?.warningId : undefined,
+            observedMatchesDerived: idObserved ? true : undefined,
+            observedSource: idObserved ? awHistory.path : undefined,
+            warningFixtureDiagnostic: warnLspDiag
+              ? { rule: warnLspDiag.rule, severity: warnLspDiag.severity, fixable: warnLspDiag.fixable }
+              : undefined,
+            awHistoryEntries: awHistory.entries.length,
+            idNotObservedReason: idObserved
+              ? undefined
+              : awEntry !== undefined
+                ? `pi-lens assigned ${String(awEntry.warningId)} but our derivation from the entry fields gave ${awDerived} — id-input drift between pi-lens internals and this harness.`
+                : warnLspDiag
+                  ? `the warning fixture DID produce a severity-2 LSP diagnostic (${String(warnLspDiag.rule)}, fixable=${String(warnLspDiag.fixable)}), but pi-lens assigned no aw: id at turn-end (${awHistory.entries.length} entries): the aggregator (actionable-warnings.js) additionally requires an LSP CODE ACTION for the diagnostic, and this host's language servers provide none for it — OSS pyright ships no quick-fix for reportUnusedImport, and TypeScript has no warning-category diagnostics at all. Dispatch-path warnings (e.g. ruff) can't be observed either: the MCP pilens_analyze path never records them into the warm runtime (clients/mcp/analyze.js). Derived id + native-function parity remain the evidence.`
+                  : `no warning-severity LSP diagnostic surfaced for the fixture this run and pi-lens assigned no aw: id (${awHistory.entries.length} entries). Derived id + native-function parity remain the evidence.`,
           },
-          stableId: id1,
-          idReproducible: id1 === id2,
-          nativeId: nativeId ?? "(pi-lens fn not importable — shape-only check)",
-          matchesNative: parity,
-        },
-      });
-    } else {
-      record({
-        ac: "AC1",
-        name: "lsp_diagnostics structured output with stable aw:<hash> id",
-        status: "fail",
-        reason: "no LSP-origin diagnostic returned",
-        evidence: { rawSummary: analyzeTs.content?.[0]?.text?.slice(0, 300) },
-      });
-    }
+        });
+      } else {
+        record({
+          ac: "AC1",
+          name: "lsp_diagnostics structured output with stable aw:<hash> id",
+          status: "fail",
+          reason: "no LSP-origin diagnostic returned",
+          evidence: { rawSummary: analyzeTs.content?.[0]?.text?.slice(0, 300) },
+        });
+      }
 
-    // --- AC2: secret-scan (NFR-SEC-3 / INV-1) --------------------------------
-    // pi-lens surfaces hardcoded secrets from three sources: gitleaks + trivy
-    // (session scan, need their binaries) and ast-grep hardcoded-secret rules
-    // (bundled, always available). runtime-turn.js promotes any of these to a
-    // turn-end BLOCKER ("🔴 STOP — hardcoded secrets detected"), i.e. it blocks
-    // the emit. We assert detection headlessly via the analyze dispatch, and
-    // fall back to documenting the block mechanism if the external scanners
-    // aren't installed on PATH.
-    // pi-lens's secret detector (opengrep) attaches as an AUXILIARY warm LSP
-    // server to the dispatch LSP runner (dist/clients/dispatch/runners/lsp.js).
-    // Its FIRST pass on a file is a cold ~8s start that can return before the
-    // secret rules finish, so poll pilens_analyze until a secret surfaces (the
-    // server is warm — ~1.3s — after the first pass). Bounded retry keeps the
-    // check deterministic instead of racing opengrep's cold start.
-    const secretRe = /hardcoded|secret|password|credential|api[-_]?key|token/i;
-    let secretDiags: Array<Record<string, unknown>> = [];
-    let secretHit: Record<string, unknown> | undefined;
-    for (let attempt = 0; attempt < 4 && !secretHit; attempt++) {
-      await client.call("pilens_lsp_diagnostics", { path: secretFile, cwd: work, severity: "all" }, 60_000);
-      const analyzeSecret = await client.call("pilens_analyze", { file: secretFile, cwd: work }, 60_000);
-      secretDiags = (parseToolJson(analyzeSecret)?.diagnostics as Array<Record<string, unknown>>) ?? [];
-      secretHit = secretDiags.find((d) =>
-        secretRe.test(`${d.rule ?? ""} ${d.code ?? ""} ${d.message ?? ""}`),
-      );
-    }
-    const gitleaksAvail = !!process.env.PATH?.split(":").some((p) =>
-      fs.existsSync(path.join(p, "gitleaks")),
-    );
+      // --- AC2a: secret-scan detection (live) ---------------------------------
+      if (secretHit) {
+        record({
+          ac: "AC2",
+          name: "secret-scan detects hardcoded secret (live, opengrep)",
+          status: "pass",
+          evidence: {
+            detectedBy: secretHit.tool, // opengrep (bundled Semgrep secret rules)
+            rule: secretHit.rule,
+            message: secretHit.message,
+            line: secretHit.line,
+            severity: secretHit.severity,
+            matchedBy: "provenance (tool/rule family), not keyword regex",
+            git: gitState,
+            gitleaksOnPath: gitleaksAvail,
+            trivyOnPath: trivyAvail,
+            fixtureSecretsSynthetic: true,
+          },
+        });
+      } else {
+        record({
+          ac: "AC2",
+          name: "secret-scan detects hardcoded secret (live, opengrep)",
+          status: "skip",
+          reason:
+            `no secret finding surfaced for the synthetic fixture (git=${JSON.stringify(gitState)}, gitleaksOnPath=${gitleaksAvail}, trivyOnPath=${trivyAvail}). opengrep's secret ruleset scopes to the git working tree; without git init+staging the bundled scanner sees nothing. TODO(goal): ensure git is available to exercise live secret detection.`,
+          evidence: {
+            scannedDiagnostics: secretDiags.length,
+            git: gitState,
+            gitleaksOnPath: gitleaksAvail,
+            trivyOnPath: trivyAvail,
+            fixtureSecretsSynthetic: true,
+          },
+        });
+      }
 
-    if (secretHit) {
+      // --- AC2b: emit-block on NFR-SEC-3 (EMPIRICAL probe) ---------------------
+      // runtime-turn.js pushes '🔴 STOP — hardcoded secrets detected' into
+      // blockerParts ONLY from sessionSecrets — gitleaks + trivy findings.
+      // Bundled opengrep (ast-grep) findings merely ENRICH a blocker whose
+      // location already came from gitleaks/trivy; opengrep-only findings stay
+      // advisory. So the block is observable here only when gitleaks/trivy ran.
+      // Verify the mechanism in the INSTALLED source, then probe turn-end output.
+      const runtimeTurnSrc = (() => {
+        try {
+          return fs.readFileSync(path.join(pl.root, "dist", "clients", "runtime-turn.js"), "utf8");
+        } catch {
+          return "";
+        }
+      })();
+      const blockMechanismSourceVerified =
+        runtimeTurnSrc.includes("🔴 STOP — hardcoded secrets detected") && runtimeTurnSrc.includes("sessionSecrets");
+      const stopMatch = turnEndText.match(/🔴 STOP[^\n]*hardcoded secrets[^\n]*/i);
+      const emitBlockObserved = stopMatch !== null;
+
       record({
         ac: "AC2",
-        name: "secret-scan detects hardcoded secret + emit-block on NFR-SEC-3",
-        status: "pass",
+        name: "secret-scan emit-block on NFR-SEC-3 (empirical pilens_turn_end probe)",
+        status: secretHit && emitBlockObserved ? "pass" : "skip",
+        optional: true, // depends on gitleaks/trivy being installed on the host
+        reason: emitBlockObserved
+          ? undefined
+          : secretHit
+            ? `emit-block NOT observed in turn-end output: gitleaks/trivy are not installed (gitleaksOnPath=${gitleaksAvail}, trivyOnPath=${trivyAvail}), and runtime-turn.js promotes ONLY gitleaks/trivy sessionSecrets to the '🔴 STOP' blocker — the opengrep detection above is advisory-tier and never blocks by itself. Block mechanism ${blockMechanismSourceVerified ? "verified" : "NOT found"} in installed source (dist/clients/runtime-turn.js).`
+            : "secret detection did not fire (see AC2a), so the emit-block probe is not meaningful",
         evidence: {
-          detectedBy: secretHit.tool, // opengrep (bundled Semgrep secret rules)
-          rule: secretHit.rule,
-          message: secretHit.message,
-          line: secretHit.line,
-          severity: secretHit.severity,
-          // Detection proven live above. The emit-BLOCK half: runtime-turn.js
-          // collapses gitleaks/trivy/ast-grep hardcoded-secret findings by
-          // location and pushes '🔴 STOP — hardcoded secrets detected' to
-          // blockerParts, which blocks the turn-end emit (INV-1 / NFR-SEC-3).
+          emitBlockObserved,
+          blockerEvidence: stopMatch?.[0],
+          detectionProvenLive: !!secretHit,
+          turnEndExcerpt: turnEndText.slice(0, 300),
+          gitleaksOnPath: gitleaksAvail,
+          trivyOnPath: trivyAvail,
           blockMechanism:
-            "runtime-turn.js: sessionSecrets → blockerParts.push('🔴 STOP — hardcoded secrets detected')",
-          gitleaksOnPath: gitleaksAvail,
-          fixtureSecretsSynthetic: true,
+            "runtime-turn.js: sessionSecrets (gitleaks+trivy ONLY) → blockerParts.push('🔴 STOP — hardcoded secrets detected'); opengrep findings enrich but never promote",
+          blockMechanismSourceVerified,
         },
       });
-    } else {
-      record({
-        ac: "AC2",
-        name: "secret-scan detects hardcoded secret + emit-block on NFR-SEC-3",
-        status: "skip",
-        reason:
-          `no secret finding surfaced for the synthetic fixture (gitTracked=${gitTracked}, gitleaksOnPath=${gitleaksAvail}). opengrep's secret ruleset scopes to the git working tree; gitleaks/trivy session scan need their binaries. Emit-block verified by source: runtime-turn.js promotes any hardcoded-secret finding to a turn-end BLOCKER. TODO(goal): ensure git + install gitleaks/trivy to exercise live secret-scan emit-block.`,
-        evidence: {
-          scannedDiagnostics: secretDiags.length,
-          gitTracked,
-          gitleaksOnPath: gitleaksAvail,
-          fixtureSecretsSynthetic: true,
-        },
-      });
-    }
 
-    // --- AC3: warning-count proxy from on-disk artifact (FR-EX-8) ------------
-    // Trigger a real actionable-warning aggregation, then read the on-disk count.
-    // Spec names ~/.pi-lens/cache/actionable-warnings.json; pi-lens 3.8.x writes
-    // the turn-delta proxy as code-quality-warnings.json in the same cache dir
-    // (actionable-warnings.json only when fixable-warning findings aggregate).
-    // Read whichever exists, log the fallback reason.
-    await client.call("pilens_turn_end", { cwd: work, files: [tsFile, secretFile] }, 60_000);
-    const cacheDir = path.join(projectDataDir(work), "cache");
-    const proxy = readWarningProxy(cacheDir);
-    record({
-      ac: "AC3",
-      name: "warning-count proxy readable as numeric from ~/.pi-lens artifact (FR-EX-8)",
-      status: proxy.count !== undefined ? "pass" : "fail",
-      evidence: {
-        cacheDir,
-        artifactRead: proxy.artifact,
-        warningCount: proxy.count,
-        fallbackReason: proxy.fallbackReason,
-      },
-      reason: proxy.count === undefined ? "no readable warning-count artifact on disk" : undefined,
-    });
+      // --- AC3: warning-count from on-disk artifact (FR-EX-8) ------------------
+      // pi-lens 3.8.x writes the aw: history as NDJSON at
+      // <projectDataDir>/actionable-warnings.jsonl (one line per warning), NOT a
+      // cache/actionable-warnings.json. Primary = derive the count from that
+      // JSONL; fall back to the turn-delta cache/code-quality-warnings.json with
+      // an explicit reason (FR-EX-8).
+      const proxy = readWarningProxy(projectDir);
+      record({
+        ac: "AC3",
+        name: "warning-count readable as numeric from on-disk pi-lens artifact (FR-EX-8)",
+        status: proxy.count !== undefined ? "pass" : "fail",
+        evidence: {
+          projectDir,
+          artifactRead: proxy.artifact,
+          warningCount: proxy.count,
+          fallbackReason: proxy.fallbackReason,
+        },
+        reason: proxy.count === undefined ? "no readable warning-count artifact on disk" : undefined,
+      });
+    } finally {
+      client.close();
+    }
   } finally {
-    client.close();
-    if (!keep) fs.rmSync(work, { recursive: true, force: true });
+    if (keep) {
+      // --keep hygiene: scrub the synthetic-secret fixture (overwrite, then
+      // delete) so no key-shaped strings persist in the retained temp dir.
+      try {
+        fs.writeFileSync(secretFile, "// scrubbed by pi-lens-verify --keep\n");
+        fs.rmSync(secretFile, { force: true });
+      } catch {
+        /* best-effort scrub */
+      }
+    } else {
+      fs.rmSync(work, { recursive: true, force: true });
+    }
+    // Belt-and-suspenders: remove pi-lens's project data dir for this work dir
+    // even if something escaped the contained PILENS_DATA_DIR.
+    fs.rmSync(projectDataDir(work), { recursive: true, force: true });
   }
 
   // -------------------------------------------------------------------------
+  const pass = checks.filter((c) => c.status === "pass").length;
+  const fail = checks.filter((c) => c.status === "fail").length;
+  const skip = checks.filter((c) => c.status === "skip").length;
+  const nonOptionalSkip = checks.filter((c) => c.status === "skip" && !c.optional).length;
   const summary = {
     piLensVersion: pl.version,
     piLensRoot: pl.root,
-    pass: checks.filter((c) => c.status === "pass").length,
-    fail: checks.filter((c) => c.status === "fail").length,
-    skip: checks.filter((c) => c.status === "skip").length,
+    piLensVersionSpec: SPEC_PI_LENS_VERSION,
+    versionMismatch: pl.version !== SPEC_PI_LENS_VERSION,
+    strict,
+    pass,
+    fail,
+    skip,
+    optionalSkip: skip - nonOptionalSkip,
+    notes,
   };
   process.stdout.write(`${JSON.stringify({ results: checks, summary }, null, 2)}\n`);
-  process.exit(summary.fail === 0 ? 0 : 1);
+  // Set exitCode (not process.exit) so a backpressured stdout pipe drains first.
+  process.exitCode = fail > 0 || (strict && nonOptionalSkip > 0) ? 1 : 0;
 }
 
 /**
- * TDI/warning-count proxy: read a numeric warning count from pi-lens's on-disk
- * cache. FR-EX-8 requires an explicit fallback reason when the primary artifact
- * (actionable-warnings.json — spec'd path) is absent, since headless TDI is a
- * TUI-only slash-command with no CLI flag.
+ * Warning-count reader (FR-EX-8): primary artifact is pi-lens's NDJSON history
+ * <projectDataDir>/actionable-warnings.jsonl (one line per warning — count the
+ * entries). Fallback is the turn-delta cache/code-quality-warnings.json with an
+ * explicit fallbackReason, since headless TDI is a TUI-only slash-command with
+ * no CLI flag.
  */
-function readWarningProxy(cacheDir: string): {
+function readWarningProxy(projectDir: string): {
   count?: number;
   artifact?: string;
   fallbackReason?: string;
 } {
-  const primary = path.join(cacheDir, "actionable-warnings.json");
-  if (fs.existsSync(primary)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(primary, "utf8"));
-      const count = countFrom(data);
-      if (count !== undefined) return { count, artifact: primary };
-    } catch {
-      /* fall through */
-    }
+  const history = readActionableWarningsHistory(projectDir);
+  if (fs.existsSync(history.path) && history.entries.length > 0) {
+    return { count: history.entries.length, artifact: history.path };
   }
-  // Documented fallback: turn-delta code-quality warnings.
-  const fallback = path.join(cacheDir, "code-quality-warnings.json");
+  const fallback = path.join(projectDir, "cache", "code-quality-warnings.json");
   if (fs.existsSync(fallback)) {
     try {
       const data = JSON.parse(fs.readFileSync(fallback, "utf8"));
       const count = countFrom(data);
       if (count !== undefined) {
+        const historyState = fs.existsSync(history.path) ? "has 0 entries" : "absent";
         return {
           count,
           artifact: fallback,
-          fallbackReason:
-            "actionable-warnings.json absent (only written when fixable-warning findings " +
-            "aggregate at turn-end; headless TDI slash-command unavailable). Fell back to " +
-            "code-quality-warnings.json summary.warnings — the turn-delta warning-count proxy.",
+          fallbackReason: `actionable-warnings.jsonl ${historyState} (only appended when the aw: aggregator emits ≥1 warning at turn-end; headless TDI slash-command unavailable). Fell back to code-quality-warnings.json summary.warnings — the turn-delta warning-count proxy.`,
         };
       }
     } catch {
@@ -508,11 +794,11 @@ function readWarningProxy(cacheDir: string): {
     }
   }
   return {
-    fallbackReason: `no warning-count artifact found in ${cacheDir} (checked actionable-warnings.json, code-quality-warnings.json)`,
+    fallbackReason: `no warning-count artifact found in ${projectDir} (checked actionable-warnings.jsonl, cache/code-quality-warnings.json)`,
   };
 }
 
-/** Extract a numeric warning count from either artifact shape. */
+/** Extract a numeric warning count from the fallback artifact shape. */
 function countFrom(data: unknown): number | undefined {
   if (!data || typeof data !== "object") return undefined;
   const d = data as Record<string, unknown>;
