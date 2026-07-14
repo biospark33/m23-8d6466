@@ -156,8 +156,10 @@ export function redactSecrets(text: string, parentEnv: EnvMap): string {
   const valueToKey = new Map<string, string>();
   const patterns: string[] = [];
   for (const [key, value] of entries) {
-    if (!valueToKey.has(value)) valueToKey.set(value, key);
-    patterns.push(escapeRegex(value));
+    if (!valueToKey.has(value)) {
+      valueToKey.set(value, key);
+      patterns.push(escapeRegex(value));
+    }
   }
   const re = new RegExp(patterns.join("|"), "g");
   return text.replace(re, (match) => `[REDACTED:${valueToKey.get(match)!}]`);
@@ -173,7 +175,7 @@ export function redactSecrets(text: string, parentEnv: EnvMap): string {
  * stripped entirely (no marker, no leaked secret characters, no output
  * mangling).
  */
-function redactBoundaryPrefix(text: string, parentEnv: EnvMap): string {
+export function redactBoundaryPrefix(text: string, parentEnv: EnvMap): string {
   let bestRedact: { key: string; len: number } | null = null;
   let bestStrip = 0;
 
@@ -181,7 +183,8 @@ function redactBoundaryPrefix(text: string, parentEnv: EnvMap): string {
     if (value.length < MIN_REDACTABLE_VALUE_LEN || !SECRET_KEY_RE.test(key)) {
       continue;
     }
-    for (let k = value.length - 1; k >= 1; k--) {
+    const maxK = Math.min(text.length, value.length - 1);
+    for (let k = maxK; k >= 1; k--) {
       if (text.endsWith(value.slice(0, k))) {
         if (k >= MIN_BOUNDARY_PREFIX_LEN) {
           if (bestRedact === null || k > bestRedact.len) {

@@ -16,6 +16,7 @@ import {
   logEnvKeys,
   MAX_STDOUT_EXCERPT,
   mergeEnv,
+  redactBoundaryPrefix,
   redactSecrets,
   runManifest,
 } from "../src/runner.ts";
@@ -161,6 +162,50 @@ describe("redactSecrets (extended SECRET_KEY_RE heuristic)", () => {
       expect(out).not.toContain(value);
       expect(out).toContain(`[REDACTED:${key}]`);
     }
+  });
+
+  it("deduplicates shared secret values instead of emitting duplicate regex branches", () => {
+    const shared = "hunter2-shared-secret-value";
+    const parent = {
+      FIRST_TOKEN: shared,
+      SECOND_TOKEN: shared,
+    };
+    const out = redactSecrets(`prefix ${shared} suffix`, parent);
+    expect(out).not.toContain(shared);
+    // Identical values must redact once; the first key in insertion order owns
+    // the label, so no duplicate `[REDACTED:SECOND_TOKEN]` marker is produced.
+    expect(out).toContain("[REDACTED:FIRST_TOKEN]");
+    expect(out).not.toContain("[REDACTED:SECOND_TOKEN]");
+  });
+});
+
+describe("redactBoundaryPrefix (INV-2 truncation-boundary hardening)", () => {
+  it("redacts a trailing secret prefix that reaches the truncation boundary", () => {
+    const parent = { MY_SECRET_TOKEN: "hunter2-super-secret-boundary-value" };
+    const text = `prefix-${parent.MY_SECRET_TOKEN.slice(0, 12)}`;
+    expect(redactBoundaryPrefix(text, parent)).toBe("prefix-[REDACTED:MY_SECRET_TOKEN]");
+  });
+
+  it("strips a short (< 8 chars) trailing secret prefix without a marker", () => {
+    const parent = { MY_SECRET_TOKEN: "hunter2supersecret" };
+    const text = `prefix-${parent.MY_SECRET_TOKEN.slice(0, 3)}`;
+    expect(redactBoundaryPrefix(text, parent)).toBe("prefix-");
+  });
+
+  it("is safe when a very long secret value is checked against a short text", () => {
+    const parent = { MY_CERT: "A".repeat(10_000) };
+    const text = "short text with no cert prefix";
+    const start = Date.now();
+    const out = redactBoundaryPrefix(text, parent);
+    expect(Date.now() - start).toBeLessThan(100);
+    expect(out).toBe(text);
+  });
+
+  it("still redacts a long secret when its prefix lands at the text boundary", () => {
+    const secret = "A".repeat(10_000);
+    const parent = { MY_CERT: secret };
+    const text = `prefix-${secret.slice(0, 20)}`;
+    expect(redactBoundaryPrefix(text, parent)).toBe("prefix-[REDACTED:MY_CERT]");
   });
 });
 
