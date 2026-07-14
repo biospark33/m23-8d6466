@@ -35,8 +35,9 @@ export type ExitClass = "ok" | "nonzero" | "timeout" | "spawn_error";
 export interface HarnessResult {
   exit_class: ExitClass;
   /**
-   * Subprocess stdout, capped at MAX_STDOUT_EXCERPT bytes (see runner.ts).
-   * Secret-looking parent env values are redacted before emission (INV-2).
+   * Subprocess stdout, capped at MAX_STDOUT_EXCERPT UTF-16 code units
+   * (see runner.ts). Secret-looking parent env values are redacted before
+   * emission (INV-2), and the cap is re-applied after redaction.
    */
   stdout_excerpt: string;
   env_probe_result: string | null;
@@ -46,4 +47,6 @@ export interface HarnessResult {
   spawn_error_code?: string | null;
   /** Signal that killed the child, when it died by signal (code === null). */
   signal?: string | null;
+  /** Child's real exit code (null when killed by signal or spawn failed). */
+  exit_code?: number | null;
 }

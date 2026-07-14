@@ -53,19 +53,19 @@ The CLI-Anything harness is a manifest-driven generator (`manifest.yaml`) that w
 ## Security Invariants
 
 - **INV-1:** Env injection is a MERGE `{ ...process.env, ...manifest.env }` — a manifest with no `env` block still inherits parent `PATH`/credentials (non-regression). Bare assignment is prohibited at compile time (review checklist).
-- **INV-2:** No secret value is written to stdout, logs, or the structured output. The harness logs key names only, never values.
-- **INV-3:** Log output is minimal — env key names only, never values. The subprocess inherits the full merged env per INV-1 (`{ ...process.env, ...manifest.env }`), but the harness logs only env key names, not values. No wholesale `process.env` dump into log output or structured result.
+- **INV-2:** No secret value is written to stdout, logs, or the structured output. Redaction is a HEURISTIC over PARENT-process env values: a value is redacted from `stdout_excerpt`/`env_probe_result` only when its env key matches `SECRET_KEY_RE` (secret-name patterns) AND the value is ≥8 chars. Manifest-supplied env values are operator-trusted input and are NOT redacted — AC1 requires the `QDS_PROBE` value to appear verbatim in stdout. The harness logs key names only, never values.
+- **INV-3:** Log output is minimal — env key names only, never values, and capped at 50 key names per log line. The subprocess inherits the full merged env per INV-1 (`{ ...process.env, ...manifest.env }`), but the harness logs only env key names, not values. No wholesale `process.env` dump into log output or structured result.
 
 ## Definition of Done
 
-- [ ] **Impl:** CLI-Anything manifest parser extracts `env` block from YAML; runner spawns Warren subprocess with merged env.
-- [ ] **Impl:** Structured JSON output schema (exit_class, stdout_excerpt, env_probe_result) emitted on harness stdout.
-- [ ] **Contract:** manifest.yaml TypeScript type with field-level validation (name required, command required, env optional Record<string,string>).
-- [ ] **Integration:** `cli-anything run --manifest` → Warren subprocess receives merged env → stdout captured — wired and exercised.
-- [ ] **Security:** Env merge is additive (`...process.env, ...manifest.env`), tested with a bare manifest (non-regression) and an override manifest (merge precedence).
-- [ ] **Test (unit):** manifest parser validates well-formed and malformed YAML; runner constructs correct spawn options.
-- [ ] **Test (integration):** `cli-anything run --manifest test-env.yaml` produces stdout containing `QDS_PROBE=x7`.
-- [ ] **Test (e2e demo — MANDATORY):** Fires `cli-anything run` with env-bearing and bare manifests; asserts `QDS_PROBE=x7` and non-empty `PATH` respectively; proves wiring closed.
+- [x] **Impl:** CLI-Anything manifest parser extracts `env` block from YAML; runner spawns Warren subprocess with merged env.
+- [x] **Impl:** Structured JSON output schema (exit_class, stdout_excerpt, env_probe_result) emitted on harness stdout.
+- [x] **Contract:** manifest.yaml TypeScript type with field-level validation (name required, command required, env optional Record<string,string>).
+- [x] **Integration:** `cli-anything run --manifest` → Warren subprocess receives merged env → stdout captured — wired and exercised.
+- [x] **Security:** Env merge is additive (`...process.env, ...manifest.env`), tested with a bare manifest (non-regression) and an override manifest (merge precedence).
+- [x] **Test (unit):** manifest parser validates well-formed and malformed YAML; runner constructs correct spawn options.
+- [x] **Test (integration):** `cli-anything run --manifest test-env.yaml` produces stdout containing `QDS_PROBE=x7`.
+- [x] **Test (e2e demo — MANDATORY):** Fires `cli-anything run` with env-bearing and bare manifests; asserts `QDS_PROBE=x7` and non-empty `PATH` respectively; proves wiring closed.
 
 ## Dev Agent Record
 
@@ -80,3 +80,15 @@ Code review was run on merged PR #24 (commit 396d386) using the gds-code-review 
 - [x] Test coverage: timeout, spawn_error, empty-PATH, strict-schema, additive-inheritance, truncation tests added; weak INV-2 test replaced with a real echoed-secret assertion; mandatory e2e test (`bun run src/index.ts`) added.
 
 Follow-up adversarial re-review returned two blocking items, both fixed: trailing partial-prefix redaction of secrets cut at the truncation boundary, and `decoder.end()` skipped once truncated so a mid-sequence cut cannot push the excerpt past the cap (new boundary-leak and multi-byte cap tests added).
+
+#### Round 2 — code review of fix/p0-1-code-review-findings (2026-07-14)
+
+3 parallel layers: Blind Hunter, Edge Case Hunter, Acceptance Auditor; all findings classified patch and applied (decision_needed: 0, defer: 0, dismissed: 0):
+
+- [x] Secret-channel/redaction hardening (INV-2/INV-3): boundary-prefix redaction now enforces a minimum prefix length of 8 (no 1-char fragment mangling); the excerpt cap is re-applied after redaction (`[REDACTED:key]` growth cannot exceed the cap); `env_probe_result` is nulled when stdout was truncated (a probe line cut mid-value is never silently reported or leaked); `SECRET_KEY_RE` extended to `SECRET|TOKEN|PASS|CRED|API[_-]?KEY|PRIVATE|CERT|DSN|DATABASE_URL`.
+- [x] Timeout/process-tree correctness: timer callback guards `child.exitCode !== null || child.killed` (natural exit at the timeout instant is no longer misclassified as 124, and a reused PID/process group is never signaled); `close` prefers the real `code` (`timeout` only when `timedOut && code === null`); win32 timeout now tree-kills via `taskkill /pid <pid> /T /F`; SIGINT/SIGTERM handlers group-kill the active child then re-raise (no orphaned detached children); `child.stdout` `error` settles as `spawn_error` with double-settle guard.
+- [x] Cap semantics: `stdout_excerpt` cap documented as UTF-16 code units (matching `String.length`); slicing is surrogate-safe (trailing unpaired surrogate stripped); oversized chunks are bounded to remaining capacity before decode; `timeoutMs` clamped to the setTimeout range (`2^31-1`).
+- [x] Env merge win32 correctness: parent PATH key looked up case-insensitively (`Path` vs `PATH`), parent's original key casing preserved, case-variant duplicate keys collapsed; `mergeEnv` takes an optional `platform` param so the win32 branch is unit-testable.
+- [x] CLI hardening: Zod/YAML errors sanitized for stderr — field paths + issue codes only, never received manifest values (INV-2); `--timeout-ms` flag added (space and `=` forms); usage text documents both `--manifest` forms and the leading-`-` caveat.
+- [x] Result schema: `exit_code: number | null` added to `HarnessResult` and populated from the child's real close code (additive field in the structured JSON output).
+- [x] Test coverage: grandchild process-tree kill on timeout; win32 `mergeEnv` via platform param (Path casing preserved, no duplicates, empty-PATH no-op); e2e stderr drained with kill-timeout and guarded JSON.parse (POSIX-only shell fixtures, win32 covered at unit level); `spawn_error_code` asserted `"ENOENT"`; real malformed-manifest fixture (65-path no longer passes vacuously via ENOENT); 50-key log cap, `cleanEnv` filtering, redaction re-cap, min-prefix boundary redaction, probe-on-truncation, timeout-race classification, `exit_code` presence, stderr sanitization, extended `SECRET_KEY_RE` patterns.
