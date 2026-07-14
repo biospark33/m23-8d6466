@@ -117,3 +117,25 @@ Follow-up adversarial re-review returned two blocking items, both fixed: trailin
 - [x] **e2e coverage of 124/127/65 paths**: real-binary e2e tests now assert CLI exit codes and structured output for timeout (`124`, `exit_class: timeout`, `signal: SIGKILL`), spawn_error (`127`, `ENOENT`), and manifest validation errors (`65`); kill-timer uses process-group kill and reaps grandchildren.
 
 Final verification after all three waves: **83 pass / 0 fail** in `cli-anything`; root `bun test` pass; `bunx tsc --noEmit` clean.
+
+#### Round 4 — fresh code review of fix/p0-1-code-review-findings (2026-07-14)
+
+3 parallel layers: Blind Hunter, Edge Case Hunter, Acceptance Auditor; **decision_needed: 0, patch: 15, defer: 2, dismissed: 2**. All patch findings fixed, including low-severity items. Deferred/dismissed items are process-level concerns (spec mutation and DoD checkboxes in the same changeset) that do not affect runtime correctness.
+
+- [x] **Redaction marker corruption**: `redactSecrets()` now builds a single-pass `RegExp` alternation over the original text (longest-value-first, escaped values), so a shorter secret that is a substring of a `[REDACTED:<key>]` marker cannot corrupt the marker.
+- [x] **Extended secret-key heuristic**: `SECRET_KEY_RE` now also matches `SSH`, `SIGNING`, `AUTH`, and generic `*_KEY` / `*_URL` / `*_URI` shapes.
+- [x] **Programmatic timeout validation**: `runManifest()` coerces non-finite, zero, or negative `timeoutMs` to `DEFAULT_TIMEOUT_MS` instead of causing an immediate timeout.
+- [x] **Log sanitizer hardening**: `sanitizeLogKey()` now replaces all `\p{Cc}` control characters (including DEL and C1 controls) plus U+2028/U+2029 line/paragraph separators.
+- [x] **Boundary redaction after final cap**: `settle()` re-applies `redactBoundaryPrefix()` whenever the post-redaction cap cuts the excerpt, preventing a secret fragment from leaking at the new boundary.
+- [x] **Probe value never redacted**: `env_probe_result` is now capped but not redacted, preserving the AC1 verbatim contract even when the probe value happens to match a parent secret.
+- [x] **Probe extraction on newline-less truncation**: `extractProbe()` returns `null` when stdout is truncated and contains no newline, because the final line is partial and cannot be trusted.
+- [x] **Natural-exit stdout-hold watchdog**: `child.on("exit")` records the real exit classification and arms the 5 s unref'd watchdog, so a grandchild holding the stdout pipe open after the direct child exits naturally cannot hang the harness.
+- [x] **Signal re-raise safety**: `handleSignal()` wraps `process.kill(process.pid, sig)` in try/catch and falls back to `process.exit(1)` on platforms where re-raising can throw.
+- [x] **`--` end-of-options support**: `index.ts` splits argv at the first `"--"`; the first post-`--` token supplies the manifest path if none was given before it.
+- [x] **First flag wins**: `--manifest` and `--timeout-ms` now honor argv order; the first occurrence wins across both space and `=` forms.
+- [x] **Stray positional / unknown flag rejection**: unconsumed tokens in the pre-`--` argv region are rejected with usage and exit 64.
+- [x] **Manifest size limit**: `parseManifestFile()` rejects files larger than 1 MB via `ManifestTooLargeError`, mapped to exit 65.
+- [x] **Host-independent tests**: `spawn_error` runner test uses a freshly-created empty temp dir instead of `/usr/bin:/bin`; the watchdog fixture replaces `perl -e 'setsid...'` with a portable Bun/Node script.
+- [x] **Test coverage for new hardening**: marker-corruption, extended `SECRET_KEY_RE`, timeout coercion, DEL/U+2028/U+2029 sanitization, boundary redaction after re-cap, verbatim probe despite parent-secret collision, newline-less truncated probe, `--` parsing, first-wins semantics, stray-arg rejection, and manifest-too-large tests added.
+
+Final verification after Round 4: **93 pass / 0 fail** in `cli-anything` (179 pass / 0 fail root `bun test`); `bunx tsc --noEmit` clean; `biome check` clean.

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -128,6 +135,32 @@ describe("redactSecrets (extended SECRET_KEY_RE heuristic)", () => {
     expect(out).not.toContain("hunter2-abc123");
     expect(out).not.toContain("hunter2");
     expect(out).toContain("[REDACTED:MY_TOKEN]");
+  });
+
+  it("does not corrupt markers when a shorter secret value is a substring of a marker", () => {
+    const parent = {
+      LONG_TOKEN: "hunter2-abc123",
+      SHORT_TOKEN: "REDACTED",
+    };
+    const out = redactSecrets("hunter2-abc123", parent);
+    expect(out).toBe("[REDACTED:LONG_TOKEN]");
+    expect(out).not.toContain("[REDACTED:SHORT_TOKEN]");
+  });
+
+  it("redacts values under extended secret-key patterns", () => {
+    const parent = {
+      API_KEY: "ak-12345678",
+      SERVICE_URL: "https://example.com/secret",
+      DATABASE_URI: "db://secret",
+      SSH_PRIVATE: "ssh-12345678",
+      SIGNING_KEY: "sk-12345678",
+      AUTH_TOKEN: "at-12345678",
+    };
+    const out = redactSecrets(Object.values(parent).join(" "), parent);
+    for (const [key, value] of Object.entries(parent)) {
+      expect(out).not.toContain(value);
+      expect(out).toContain(`[REDACTED:${key}]`);
+    }
   });
 });
 
@@ -356,7 +389,7 @@ describe.skipIf(process.platform === "win32")("runManifest (integration via warr
   it(
     "force-settles via watchdog when a descendant holds the stdout pipe open after timeout",
     async () => {
-    // Deterministic simulation: spawn a grandchild in a new session (setsid)
+    // Deterministic simulation: spawn a grandchild in a new session (detached)
     // that inherits and holds the stdout pipe open. The direct child is killed
     // by the timeout group-kill, but `close` cannot fire until the escaped
     // grandchild releases the pipe. The 5s watchdog must force-settle.
@@ -365,20 +398,32 @@ describe.skipIf(process.platform === "win32")("runManifest (integration via warr
       `qds-watchdog-${process.pid}-${Date.now()}`,
     );
     const pidFile = join(tmpDir, "gchild.pid");
+    const scriptPath = join(tmpDir, "gchild.ts");
     const manifestPath = join(tmpDir, "manifest.yaml");
     await mkdir(tmpDir, { recursive: true });
     let gchildPid: number | undefined;
     try {
       await Bun.write(
+        scriptPath,
+        [
+          'import { spawn } from "node:child_process";',
+          'import { writeFileSync } from "node:fs";',
+          'const child = spawn("sleep", ["1000"], {',
+          '  detached: true,',
+          '  stdio: ["ignore", "inherit", "ignore"],',
+          '});',
+          'writeFileSync(process.env.PIDFILE!, String(child.pid));',
+          'await new Promise(() => {});',
+          '',
+        ].join("\n"),
+      );
+      await Bun.write(
         manifestPath,
         [
           "name: watchdog-grandchild",
-          "command: sh",
+          "command: bun",
           "args:",
-          '  - "-c"',
-          "  - >-",
-          `    perl -e 'use POSIX qw(setsid); setsid(); exec("sleep","1000") or die $!;' & echo $! > "$PIDFILE";`,
-          "    exec sleep 30",
+          `  - ${scriptPath}`,
           "env:",
           `  PIDFILE: ${pidFile}`,
           "",
@@ -387,8 +432,8 @@ describe.skipIf(process.platform === "win32")("runManifest (integration via warr
       const start = Date.now();
       const resPromise = runManifest(manifestPath, {
         env: { ...process.env, PATH: shimPath },
-        // Give the grandchild enough time to call setsid() before the timeout
-        // kill, otherwise it is still in the parent's group and dies normally.
+        // Give the grandchild enough time to detach before the timeout kill,
+        // otherwise it is still in the parent's group and dies normally.
         timeoutMs: 1500,
       });
       for (let i = 0; i < 100 && !existsSync(pidFile); i++) await sleep(25);
@@ -427,14 +472,20 @@ describe.skipIf(process.platform === "win32")("runManifest (integration via warr
   }, { timeout: 15_000 });
 
   it("spawn_error: warren unresolvable on PATH → spawn_error with ENOENT", async () => {
-    const start = Date.now();
-    const res = await runManifest(join(FIXTURES, "test-badcmd.yaml"), {
-      env: { PATH: "/usr/bin:/bin" },
-    });
-    expect(res.exit_class).toBe("spawn_error");
-    expect(res.spawn_error_code).toBe("ENOENT");
-    expect(res.exit_code).toBeNull();
-    expect(Date.now() - start).toBeLessThan(4000);
+    // An empty PATH directory guarantees `warren` cannot be found on any host.
+    const emptyBin = mkdtempSync(join(tmpdir(), "cli-anything-empty-path-"));
+    try {
+      const start = Date.now();
+      const res = await runManifest(join(FIXTURES, "test-badcmd.yaml"), {
+        env: { PATH: emptyBin },
+      });
+      expect(res.exit_class).toBe("spawn_error");
+      expect(res.spawn_error_code).toBe("ENOENT");
+      expect(res.exit_code).toBeNull();
+      expect(Date.now() - start).toBeLessThan(4000);
+    } finally {
+      rmSync(emptyBin, { recursive: true, force: true });
+    }
   });
 
   it("CRLF: strips a trailing \\r from the extracted probe value", async () => {
@@ -594,6 +645,87 @@ describe.skipIf(process.platform === "win32")("runManifest (integration via warr
     expect(logLine!).not.toContain(badKey);
     // Control chars are replaced with '?' so the log stays single-line.
     expect(logLine!).toContain("BAD??KEY?");
+  });
+
+  it("sanitizes DEL and Unicode line terminators in env key names for logging", async () => {
+    const badKey = "BAD\x7fKEY\u2028\u2029";
+    const { stderr } = await withCapturedStderr(() =>
+      runManifest(join(FIXTURES, "test-env.yaml"), {
+        env: { ...process.env, PATH: shimPath, [badKey]: "value" },
+      }),
+    );
+    const logLine = stderr.split("\n").find((l) => l.includes("env keys ->"));
+    expect(logLine).toBeDefined();
+    expect(logLine!).not.toContain(badKey);
+    expect(logLine!).toContain("BAD?KEY??");
+  });
+
+  it("coerces timeoutMs 0, negative, and NaN to the default timeout", async () => {
+    for (const bad of [0, -5, Number.NaN]) {
+      const res = await runManifest(join(FIXTURES, "test-env.yaml"), {
+        env: { ...process.env, PATH: shimPath },
+        timeoutMs: bad,
+      });
+      expect(res.exit_class).toBe("ok");
+      expect(res.env_probe_result).toBe("x7");
+    }
+  });
+
+  it("returns env_probe_result verbatim even when it equals a parent secret value", async () => {
+    const probe = "hunter2supersecret";
+    const tmpDir = mkdtempSync(join(tmpdir(), "qds-probe-secret-"));
+    const manifestPath = join(tmpDir, "manifest.yaml");
+    try {
+      writeFileSync(
+        manifestPath,
+        [
+          "name: probe-secret",
+          "command: sh",
+          "args:",
+          '  - "-c"',
+          '  - "echo QDS_PROBE=$QDS_PROBE"',
+          "env:",
+          `  QDS_PROBE: ${probe}`,
+          "",
+        ].join("\n"),
+      );
+      const res = await runManifest(manifestPath, {
+        env: { ...process.env, PATH: shimPath, MY_SECRET_TOKEN: probe },
+      });
+      expect(res.exit_class).toBe("ok");
+      expect(res.env_probe_result).toBe(probe);
+      expect(res.stdout_excerpt).not.toContain(probe);
+      expect(res.stdout_excerpt).toContain("[REDACTED:MY_SECRET_TOKEN]");
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("nulls the probe when stdout is truncated and contains only a partial QDS_PROBE line with no newline", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "qds-probe-only-"));
+    const manifestPath = join(tmpDir, "manifest.yaml");
+    try {
+      writeFileSync(
+        manifestPath,
+        [
+          "name: probe-only",
+          "command: sh",
+          "args:",
+          '  - "-c"',
+          '  - "printf \'QDS_PROBE=%s\' $(head -c 400000 /dev/zero | tr \'\\\\0\' C)"',
+          "",
+        ].join("\n"),
+      );
+      const res = await runManifest(manifestPath, {
+        env: { ...process.env, PATH: shimPath },
+        timeoutMs: 5000,
+      });
+      expect(res.exit_class).toBe("ok");
+      expect(res.truncated).toBe(true);
+      expect(res.env_probe_result).toBeNull();
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 

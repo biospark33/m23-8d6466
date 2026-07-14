@@ -22,7 +22,7 @@ const MAX_LOGGED_ENV_KEYS = 50;
  * MIN_REDACTABLE_VALUE_LEN floor below.
  */
 const SECRET_KEY_RE =
-  /SECRET|TOKEN|PASS|CRED|API[_-]?KEY|PRIVATE|CERT|DSN|DATABASE_URL/i;
+  /SECRET|TOKEN|PASS|CRED|API[_-]?KEY|PRIVATE|CERT|DSN|DATABASE_URL|SSH|SIGNING|AUTH|[_-]KEY|[_-]URL|[_-]URI/i;
 
 /** Short values are ignored to avoid mangling output with false positives. */
 const MIN_REDACTABLE_VALUE_LEN = 8;
@@ -128,12 +128,7 @@ export function logEnvKeys(env: EnvMap): string[] {
  * sanitized.
  */
 function sanitizeLogKey(key: string): string {
-  let out = "";
-  for (const ch of key) {
-    const code = ch.codePointAt(0) ?? 0;
-    out += code <= 0x1f ? "?" : ch;
-  }
-  return out;
+  return key.replace(/[\p{Cc}\u2028\u2029]/gu, "?");
 }
 
 /**
@@ -145,18 +140,27 @@ function sanitizeLogKey(key: string): string {
  * substring of a longer one cannot replace inside the longer occurrence and
  * leave the longer secret's tail leaking.
  */
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+}
+
 export function redactSecrets(text: string, parentEnv: EnvMap): string {
-  let out = text;
   const entries = Object.entries(parentEnv)
     .filter(
       ([key, value]) =>
         value.length >= MIN_REDACTABLE_VALUE_LEN && SECRET_KEY_RE.test(key),
     )
     .sort((a, b) => b[1].length - a[1].length);
+  if (entries.length === 0) return text;
+
+  const valueToKey = new Map<string, string>();
+  const patterns: string[] = [];
   for (const [key, value] of entries) {
-    out = out.split(value).join(`[REDACTED:${key}]`);
+    if (!valueToKey.has(value)) valueToKey.set(value, key);
+    patterns.push(escapeRegex(value));
   }
-  return out;
+  const re = new RegExp(patterns.join("|"), "g");
+  return text.replace(re, (match) => `[REDACTED:${valueToKey.get(match)!}]`);
 }
 
 /**
@@ -232,10 +236,10 @@ export function classifyExit(
 function extractProbe(stdout: string, truncated: boolean): string | null {
   // When truncated, the final line is partial and may cut the probe value:
   // only consider complete lines (up to and including the last newline).
-  const completeLines =
-    truncated && stdout.includes("\n")
-      ? stdout.slice(0, stdout.lastIndexOf("\n") + 1)
-      : stdout;
+  if (truncated && !stdout.includes("\n")) return null;
+  const completeLines = truncated
+    ? stdout.slice(0, stdout.lastIndexOf("\n") + 1)
+    : stdout;
   const line = completeLines.split("\n").find((l) => l.startsWith(PROBE_KEY));
   if (line === undefined) return null;
   const value = line.slice(PROBE_KEY.length).replace(/\r$/, "");
@@ -268,10 +272,12 @@ export async function runManifest(
   const env = mergeEnv(parent, manifest.env);
   const { file, argv } = buildSpawn(manifest);
   // Clamp to the setTimeout range: values > 2^31-1 overflow to ~1ms.
-  const timeoutMs = Math.min(
-    Math.max(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, 0),
-    2_147_483_647,
-  );
+  const timeoutMs =
+    opts.timeoutMs !== undefined &&
+    Number.isFinite(opts.timeoutMs) &&
+    opts.timeoutMs > 0
+      ? Math.min(opts.timeoutMs, 2_147_483_647)
+      : DEFAULT_TIMEOUT_MS;
 
   // INV-3: log key names only — never values, never a process.env dump.
   const keys = logEnvKeys(env);
@@ -348,7 +354,11 @@ export async function runManifest(
         killChildTree();
       }
       // Re-raise against ourselves so the harness dies from the same signal.
-      process.kill(process.pid, sig);
+      try {
+        process.kill(process.pid, sig);
+      } catch {
+        process.exit(1);
+      }
     }
 
     const onSigint = (): void => handleSignal("SIGINT");
@@ -372,20 +382,25 @@ export async function runManifest(
         watchdog = null;
       }
       removeSignalHandlers();
-      let stdout_excerpt = redactSecrets(result.stdout_excerpt, parent);
-      if (result.truncated === true) {
-        // The cap may have cut a secret value in half: redact its trailing prefix
-        // or strip a short fragment so nothing leaks at the boundary.
-        stdout_excerpt = redactBoundaryPrefix(stdout_excerpt, parent);
+      const redacted = redactSecrets(result.stdout_excerpt, parent);
+      const excerpt =
+        result.truncated === true
+          ? redactBoundaryPrefix(redacted, parent)
+          : redacted;
+      let stdout_excerpt = capExcerpt(excerpt);
+      // If the cap cut the excerpt or the original stdout was truncated, a
+      // secret fragment may now sit at the new cut boundary: redact it and cap
+      // again so nothing leaks.
+      if (
+        result.truncated === true ||
+        stdout_excerpt.length < excerpt.length
+      ) {
+        stdout_excerpt = capExcerpt(
+          redactBoundaryPrefix(stdout_excerpt, parent),
+        );
       }
-      // Redaction can grow the excerpt ([REDACTED:key] is longer than the
-      // matched value): re-apply the cap so the contract always holds.
-      stdout_excerpt = capExcerpt(stdout_excerpt);
       const rawProbe = result.env_probe_result;
-      const env_probe_result =
-        rawProbe === null
-          ? null
-          : capProbe(redactSecrets(rawProbe, parent));
+      const env_probe_result = rawProbe === null ? null : capProbe(rawProbe);
       resolve({
         ...result,
         stdout_excerpt,
@@ -393,17 +408,27 @@ export async function runManifest(
       });
     }
 
-    function armWatchdog(): void {
+    function armWatchdog(
+      classification: {
+        exit_class: ExitClass;
+        exit_code: number | null;
+        signal: string | null;
+      } = {
+        exit_class: "timeout",
+        exit_code: null,
+        signal: "SIGKILL",
+      },
+    ): void {
       if (watchdog !== null || settled) return;
       watchdog = setTimeout(() => {
         if (settled) return;
         settle({
-          exit_class: "timeout",
+          exit_class: classification.exit_class,
           stdout_excerpt: stdout,
           env_probe_result: null,
           spawn_error_code: null,
-          exit_code: null,
-          signal: "SIGKILL",
+          exit_code: classification.exit_code,
+          signal: classification.signal,
           truncated,
         });
       }, 5000);
@@ -503,6 +528,14 @@ export async function runManifest(
         signal: null,
         truncated,
       });
+    });
+
+    child.on("exit", (code, signal) => {
+      // The process exited but its stdio streams may still be held open by a
+      // descendant. Record the real classification and arm a short watchdog to
+      // force-settle if `close` never arrives.
+      if (settled) return;
+      armWatchdog(classifyExit(timedOut, code, signal));
     });
 
     child.on("close", (code, signal) => {

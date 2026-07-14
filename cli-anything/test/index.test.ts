@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { exitCodeFor, main } from "../src/index.ts";
@@ -48,6 +48,15 @@ describe("main() argv parsing", () => {
   it("rejects a missing --manifest value with usage (64)", async () => {
     expect(await main(["run"])).toBe(64);
     expect(await main(["run", "--manifest"])).toBe(64);
+  });
+
+  it("rejects a stray positional argument with usage (64)", async () => {
+    const { value, stderr } = await withCapturedStderr(() =>
+      main(["run", "--manifest", ENV_FIXTURE, "extra"]),
+    );
+    expect(value).toBe(64);
+    expect(stderr).toContain("usage:");
+    expect(stderr).toContain("extra");
   });
 
   it("rejects a flag-looking --manifest value with usage (64)", async () => {
@@ -138,6 +147,22 @@ describe("main() manifest load/parse errors", () => {
     expect(value).toBe(70);
     expect(stderr).toContain("internal error");
   });
+
+  it("manifest file larger than 1 MB → 65 EX_DATAERR", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "cli-anything-big-manifest-"));
+    const bigManifest = join(tmpDir, "too-big.yaml");
+    try {
+      // > MAX_MANIFEST_SIZE_BYTES (1 MB) so the file is rejected before parsing.
+      writeFileSync(bigManifest, "x".repeat(1024 * 1024 + 1));
+      const { value, stderr } = await withCapturedStderr(() =>
+        main(["run", "--manifest", bigManifest]),
+      );
+      expect(value).toBe(65);
+      expect(stderr).toContain("manifest file too large");
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("stderr sanitization (INV-2: no secret values on stderr)", () => {
@@ -200,6 +225,39 @@ describe.skipIf(process.platform === "win32")(
   () => {
     it("accepts the --manifest=<path> form", async () => {
       expect(await main(["run", `--manifest=${ENV_FIXTURE}`])).toBe(0);
+    });
+
+    it("uses the first token after -- as the manifest path", async () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "cli-anything-dash-path-"));
+      const weirdPath = join(tmpDir, "--weird.yaml");
+      try {
+        writeFileSync(
+          weirdPath,
+          [
+            "name: weird",
+            "command: sh",
+            "args:",
+            '  - "-c"',
+            '  - "echo ok"',
+            "",
+          ].join("\n"),
+        );
+        expect(await main(["run", "--", weirdPath])).toBe(0);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("first --manifest wins when the flag is repeated", async () => {
+      expect(
+        await main([
+          "run",
+          "--manifest",
+          ENV_FIXTURE,
+          "--manifest",
+          join(FIXTURES, "test-fail.yaml"),
+        ]),
+      ).toBe(0);
     });
 
     it("--timeout-ms drives a real timeout through main() → 124 (space form)", async () => {

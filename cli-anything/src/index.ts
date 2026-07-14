@@ -1,18 +1,21 @@
 #!/usr/bin/env bun
 import { YAMLParseError } from "yaml";
 import { ZodError } from "zod";
+import { ManifestTooLargeError } from "./manifest.ts";
 import { runManifest } from "./runner.ts";
 import type { ExitClass, HarnessResult } from "./types.ts";
 
 const USAGE = [
-  "usage: cli-anything run --manifest <path.yaml> [--timeout-ms <n>]",
+  "usage: cli-anything run [--manifest <path.yaml>] [--timeout-ms <n>] [-- <args>]",
   '  --manifest <path> | --manifest=<path>    manifest YAML path; values beginning',
   '                                           with "-" require the "=" form; repeated',
-  '                                           flags: first "--manifest=" wins, else',
-  "                                           the first space-separated form",
+  '                                           flags: first wins (space or = form)',
   "  --timeout-ms <n> | --timeout-ms=<n>      wall-clock timeout in ms: a decimal",
   "                                           integer in 1..2147483647 (default 10 min)",
-  "  unknown flags are rejected with this usage text (exit 64)",
+  "  --                                       end of options; first token after --",
+  "                                           is used as the manifest path if none",
+  "                                           was given before it",
+  "  unknown flags and stray positional args are rejected (exit 64)",
 ].join("\n");
 
 /** Harness exit_class → process exit code. */
@@ -54,6 +57,12 @@ function classifyError(
   err: unknown,
   manifestPath?: string,
 ): { exitCode: number; message: string } {
+  if (err instanceof ManifestTooLargeError) {
+    return {
+      exitCode: 65,
+      message: "cli-anything: manifest file too large",
+    };
+  }
   if (err instanceof ZodError) {
     const lines = err.issues.map(
       (i) => `  - ${i.path.length > 0 ? i.path.join(".") : "<root>"}: ${i.code}`,
@@ -97,16 +106,6 @@ function parseTimeoutMs(raw: string): number | undefined {
   return n > 0 && n <= MAX_TIMEOUT_MS ? n : undefined;
 }
 
-/** True for a recognized flag in either `--flag value` or `--flag=value` form. */
-function isKnownFlag(arg: string): boolean {
-  return (
-    arg === "--manifest" ||
-    arg.startsWith("--manifest=") ||
-    arg === "--timeout-ms" ||
-    arg.startsWith("--timeout-ms=")
-  );
-}
-
 /**
  * CLI entry: `cli-anything run --manifest <path>` (or `--manifest=<path>`;
  * values beginning with "-" require the "=" form), optional
@@ -122,41 +121,94 @@ export async function main(argv: string[]): Promise<number> {
     return 64;
   }
 
+  // Split at the first "--": known flags are parsed only from preDash; the
+  // first post-"--" token may supply the manifest path.
+  const dashIdx = rest.indexOf("--");
+  const preDash = dashIdx >= 0 ? rest.slice(0, dashIdx) : rest;
+  const postDash = dashIdx >= 0 ? rest.slice(dashIdx + 1) : [];
+
   let manifestPath: string | undefined;
-  const eqArg = rest.find((a) => a.startsWith("--manifest="));
-  if (eqArg !== undefined) {
-    manifestPath = eqArg.slice("--manifest=".length);
-  } else {
-    const flagIdx = rest.indexOf("--manifest");
-    const value = flagIdx >= 0 ? rest[flagIdx + 1] : undefined;
-    if (value !== undefined && !value.startsWith("-")) manifestPath = value;
+  let timeoutMs: number | undefined;
+  let timeoutSeen = false;
+  const consumed = new Set<number>();
+
+  for (let i = 0; i < preDash.length; i++) {
+    const arg = preDash[i]!;
+
+    if (arg === "--manifest") {
+      consumed.add(i);
+      const value = preDash[i + 1];
+      if (value === undefined || value.startsWith("-")) {
+        console.error(USAGE);
+        return 64;
+      }
+      if (manifestPath === undefined) {
+        manifestPath = value;
+      }
+      consumed.add(i + 1);
+      i++;
+      continue;
+    }
+
+    if (arg.startsWith("--manifest=")) {
+      consumed.add(i);
+      if (manifestPath === undefined) {
+        manifestPath = arg.slice("--manifest=".length);
+      }
+      continue;
+    }
+
+    if (arg === "--timeout-ms") {
+      consumed.add(i);
+      const value = preDash[i + 1];
+      if (value === undefined || value.startsWith("-")) {
+        console.error(USAGE);
+        return 64;
+      }
+      if (!timeoutSeen) {
+        timeoutMs = parseTimeoutMs(value);
+        timeoutSeen = true;
+      }
+      consumed.add(i + 1);
+      i++;
+      continue;
+    }
+
+    if (arg.startsWith("--timeout-ms=")) {
+      consumed.add(i);
+      if (!timeoutSeen) {
+        timeoutMs = parseTimeoutMs(arg.slice("--timeout-ms=".length));
+        timeoutSeen = true;
+      }
+    }
   }
+
+  // Reject unknown flags and stray positional arguments in preDash.
+  for (let i = 0; i < preDash.length; i++) {
+    if (consumed.has(i)) continue;
+    const arg = preDash[i]!;
+    if (arg.startsWith("-")) {
+      console.error(`cli-anything: unknown flag '${arg}'\n${USAGE}`);
+      return 64;
+    }
+    console.error(`cli-anything: unexpected positional argument '${arg}'\n${USAGE}`);
+    return 64;
+  }
+
+  // If no --manifest was given before "--", the first post-"--" token is the
+  // manifest path; remaining post-"--" tokens are ignored (they are reserved
+  // for future passthrough to the payload command).
+  if (manifestPath === undefined && postDash.length > 0) {
+    manifestPath = postDash[0];
+  }
+
   if (!manifestPath) {
     console.error(USAGE);
     return 64;
   }
 
-  let timeoutMs: number | undefined;
-  const eqTimeout = rest.find((a) => a.startsWith("--timeout-ms="));
-  const timeoutSeen = eqTimeout !== undefined || rest.includes("--timeout-ms");
-  if (eqTimeout !== undefined) {
-    timeoutMs = parseTimeoutMs(eqTimeout.slice("--timeout-ms=".length));
-  } else if (timeoutSeen) {
-    const value = rest[rest.indexOf("--timeout-ms") + 1];
-    timeoutMs =
-      value !== undefined && !value.startsWith("-") ? parseTimeoutMs(value) : undefined;
-  }
   if (timeoutSeen && timeoutMs === undefined) {
     console.error(USAGE);
-    return 64;
-  }
-
-  // Any remaining arg starting with "-" is an unknown flag (a typo like
-  // --timout-ms must not be silently ignored). Flag VALUES never start with
-  // "-" — the space-form extraction above rejects those already.
-  const unknownFlag = rest.find((a) => a.startsWith("-") && !isKnownFlag(a));
-  if (unknownFlag !== undefined) {
-    console.error(`cli-anything: unknown flag '${unknownFlag}'\n${USAGE}`);
     return 64;
   }
 
