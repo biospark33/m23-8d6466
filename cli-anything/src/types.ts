@@ -12,8 +12,8 @@ import { z } from "zod";
  */
 export const ManifestSchema = z
   .object({
-    name: z.string().min(1),
-    command: z.string().min(1),
+    name: z.string().trim().min(1),
+    command: z.string().trim().min(1),
     args: z.array(z.string()).optional(),
     env: z.record(z.string(), z.string()).optional(),
   })
@@ -34,6 +34,16 @@ export type ExitClass = "ok" | "nonzero" | "timeout" | "spawn_error";
  */
 export interface HarnessResult {
   exit_class: ExitClass;
+  /**
+   * Subprocess stdout, capped at MAX_STDOUT_EXCERPT bytes (see runner.ts).
+   * Secret-looking parent env values are redacted before emission (INV-2).
+   */
   stdout_excerpt: string;
   env_probe_result: string | null;
+  /** True when stdout_excerpt was truncated at the MAX_STDOUT_EXCERPT cap. */
+  truncated?: boolean;
+  /** OS error code when the spawn itself failed (exit_class "spawn_error"). */
+  spawn_error_code?: string | null;
+  /** Signal that killed the child, when it died by signal (code === null). */
+  signal?: string | null;
 }

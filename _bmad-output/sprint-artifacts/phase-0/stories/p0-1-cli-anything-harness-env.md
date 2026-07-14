@@ -69,4 +69,14 @@ The CLI-Anything harness is a manifest-driven generator (`manifest.yaml`) that w
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Review Findings
+
+Code review was run on merged PR #24 (commit 396d386) using the gds-code-review workflow (3 parallel layers: Blind Hunter, Edge Case Hunter, Acceptance Auditor). All ~22 findings, including low severity, were fixed:
+
+- [x] Secret-channel hardening (INV-2/INV-3): secret-like parent env values redacted from `stdout_excerpt`/`env_probe_result`; stdout capture capped at 256KB (`truncated` flag); UTF-8-safe StringDecoder; env-keys log line capped at 50 key names.
+- [x] Process-tree timeout kill: `detached` spawn on POSIX, SIGKILL to the process group on timeout; win32 fallback preserved.
+- [x] Error handling & exit codes: sync-spawn throw → `spawn_error` (127); double-settle guard; `spawn_error_code`/`signal` surfaced; manifest/usage errors exit 65/64 with clean stderr messages; timeout → 124.
+- [x] Edge-case hardening: CRLF probe stripping; empty manifest `PATH` leaves parent PATH unchanged; win32 case-insensitive PATH key; undefined `process.env` values filtered; `--manifest=<path>` form; trim validation on `name`/`command`.
+- [x] Test coverage: timeout, spawn_error, empty-PATH, strict-schema, additive-inheritance, truncation tests added; weak INV-2 test replaced with a real echoed-secret assertion; mandatory e2e test (`bun run src/index.ts`) added.
+
+Follow-up adversarial re-review returned two blocking items, both fixed: trailing partial-prefix redaction of secrets cut at the truncation boundary, and `decoder.end()` skipped once truncated so a mid-sequence cut cannot push the excerpt past the cap (new boundary-leak and multi-byte cap tests added).

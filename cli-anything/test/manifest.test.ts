@@ -56,6 +56,31 @@ env:
     ).toThrow();
   });
 
+  it("rejects unknown top-level keys (.strict())", () => {
+    expect(() =>
+      parseManifest(`
+name: extra-key
+command: sh
+bogus: true
+`),
+    ).toThrow();
+  });
+
+  it("rejects whitespace-only name and command", () => {
+    expect(() =>
+      parseManifest(`
+name: "   "
+command: sh
+`),
+    ).toThrow(/name/i);
+    expect(() =>
+      parseManifest(`
+name: ok
+command: "  "
+`),
+    ).toThrow(/command/i);
+  });
+
   it("rejects syntactically invalid YAML", () => {
     expect(() => parseManifest("name: [unterminated")).toThrow();
   });

@@ -1,0 +1,5 @@
+name: big-stdout
+command: sh
+args:
+  - "-c"
+  - "head -c 300000 /dev/zero | tr '\\0' A"

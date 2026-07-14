@@ -1,0 +1,5 @@
+name: failing-command
+command: sh
+args:
+  - "-c"
+  - "exit 3"

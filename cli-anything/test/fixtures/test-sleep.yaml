@@ -1,0 +1,5 @@
+name: sleeper
+command: sh
+args:
+  - "-c"
+  - "sleep 5"
