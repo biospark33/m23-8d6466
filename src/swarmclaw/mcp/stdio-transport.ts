@@ -88,10 +88,16 @@ export function resolveCommandAllowlist(env: NodeJS.ProcessEnv = process.env): s
 }
 
 export function resolveNpxPackageAllowlist(env: NodeJS.ProcessEnv = process.env): string[] {
-  return parseCsvEnv(env.SWARMCLAW_NPX_PACKAGE_ALLOWLIST, [
-    "hindsight-local-mcp",
-    "@anthropic-ai/claude-code",
-  ]);
+  const raw = env.SWARMCLAW_NPX_PACKAGE_ALLOWLIST;
+  if (raw === undefined) {
+    return ["hindsight-local-mcp", "@anthropic-ai/claude-code"];
+  }
+  // A set-but-empty value means deny all npx packages — do NOT fall back to
+  // the defaults (unlike parseCsvEnv's unset handling).
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
 
 export class CommandValidationError extends Error {
@@ -104,14 +110,29 @@ export class CommandValidationError extends Error {
 function isCommandAllowed(command: string, allowlist: string[]): boolean {
   if (FORBIDDEN_COMMANDS.has(basename(command))) return false;
   if (allowlist.includes(command)) return true;
-  // Match by basename against allowlist basenames (covers both `node` and
-  // absolute-path forms of allowlisted binaries).
+  if (command.includes("/")) {
+    // Path-like commands match only an exact (possibly canonicalized)
+    // allowlist entry — never a basename, otherwise any same-named binary at
+    // an arbitrary path (e.g. /tmp/evil/hindsight-local-mcp) would pass.
+    return allowlist.includes(resolve(command));
+  }
+  // Bare-name command → resolved via PATH at spawn time; match by basename
+  // against allowlist basenames (covers both `node` and absolute-path forms
+  // of allowlisted binaries).
   const base = basename(command);
   return allowlist.some((entry) => basename(entry) === base);
 }
 
 // Long-form node flags that enable inline code execution.
 const NODE_INLINE_LONG_FLAGS = new Set(["--eval", "--print", "--input-type"]);
+// Node flags that load a module before the entry point (INV-SC2). Each takes
+// a module path (`--flag=value` or the next token); only absolute paths are
+// permitted — anything else (data:/http:/https: specifiers, relative paths)
+// is rejected.
+const NODE_MODULE_LOAD_FLAGS = new Set(["--require", "--import", "--experimental-loader", "--loader"]);
+// Node flags that bind a network listener (debugger). INV-SC4 Phase 1 is
+// best-effort detection + logging only — these remain permitted.
+const NODE_LISTENER_FLAGS = new Set(["--inspect", "--inspect-brk", "--inspect-port", "--debug"]);
 // Single-letter short flags that enable inline code execution. Node bundles
 // single-dash short flags (`-pe` == `-p -e`), so these are matched per-letter
 // against a decomposed cluster — never by exact token match.
@@ -131,15 +152,29 @@ function validateNodeArgs(args: string[]): void {
       if (NODE_INLINE_LONG_FLAGS.has(flag)) {
         throw new CommandValidationError(`node flag '${flag}' enables inline code execution and is not permitted`);
       }
-      if (flag === "--require") {
+      if (NODE_MODULE_LOAD_FLAGS.has(flag)) {
         const target = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[i + 1];
         if (target === undefined) {
-          throw new CommandValidationError("--require requires a module path");
+          throw new CommandValidationError(`${flag} requires a module path`);
         }
         if (!target.startsWith("/")) {
-          throw new CommandValidationError("--require with a non-absolute path is not permitted");
+          throw new CommandValidationError(`${flag} with a non-absolute path is not permitted`);
         }
         if (!arg.includes("=")) i++; // consumed the next token
+      }
+      if (NODE_LISTENER_FLAGS.has(flag)) {
+        log({
+          level: "warn",
+          message: "node flag opens a network listener (INV-SC4)",
+          flag,
+          // CC-9 required fields (best-effort for a validation-time warning):
+          requestId: newRequestId(),
+          operation: "mcp.validate_command",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: 0,
+          status: "ok",
+        });
       }
       continue;
     }
@@ -183,6 +218,10 @@ const NPX_FORBIDDEN_FLAGS = new Set([
   "--package",
 ]);
 
+// npx flags that take the NEXT token as their value; the value must not be
+// mistaken for the positional package argument (e.g. `--registry <url>`).
+const NPX_VALUE_FLAGS = new Set(["--registry", "--cache", "--userconfig", "--cwd"]);
+
 function validateNpxArgs(args: string[], packageAllowlist: string[]): void {
   let sawPositional = false;
   for (let i = 0; i < args.length; i++) {
@@ -190,6 +229,13 @@ function validateNpxArgs(args: string[], packageAllowlist: string[]): void {
     const flag = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
     if (NPX_FORBIDDEN_FLAGS.has(flag)) {
       throw new CommandValidationError(`npx flag '${flag}' is not permitted (package/node-arg injection)`);
+    }
+    if (NPX_VALUE_FLAGS.has(flag) && !arg.includes("=")) {
+      if (i + 1 >= args.length) {
+        throw new CommandValidationError(`npx flag '${flag}' requires a value`);
+      }
+      i++; // consumed the flag's value token
+      continue;
     }
     if (arg.startsWith("-")) {
       continue; // some other allowed flag (e.g. -y)
@@ -256,6 +302,27 @@ export function buildSubprocessEnv(
   if (explicit) {
     for (const [k, v] of Object.entries(explicit)) out[k] = v;
   }
+  // INV-SC2: NODE_OPTIONS injects arbitrary flags (--require/--import/...) into
+  // every node-family runtime, bypassing all arg validation above — so it is
+  // stripped even when explicitly provided or named in SWARMCLAW_ENV_ALLOWLIST.
+  if ("NODE_OPTIONS" in out) {
+    log({
+      level: "warn",
+      message: "NODE_OPTIONS dropped from subprocess env (INV-SC2)",
+      // CC-9 required fields (best-effort for an env-isolation warning):
+      requestId: newRequestId(),
+      operation: "mcp.build_env",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "ok",
+    });
+    const filtered: Record<string, string> = {};
+    for (const [k, v] of Object.entries(out)) {
+      if (k !== "NODE_OPTIONS") filtered[k] = v;
+    }
+    return filtered;
+  }
   return out;
 }
 
@@ -274,12 +341,16 @@ export interface StdioTransportOptions {
   validationEnv?: NodeJS.ProcessEnv;
 }
 
+/** Maximum buffered frame size; a misbehaving server exceeding this is killed. */
+const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+
 interface Pending {
   resolve: (result: unknown) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   startedAt: number;
   onFirstByte?: (latencyMs: number) => void;
+  firstByteFired?: boolean;
 }
 
 export class StdioTransport {
@@ -287,6 +358,7 @@ export class StdioTransport {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private readBuf = "";
+  private stderrTail = "";
   private closed = false;
   private readonly encoder = new TextEncoder();
 
@@ -316,6 +388,7 @@ export class StdioTransport {
       cwd: this.opts.cwd,
     });
     void this.readLoop();
+    void this.stderrLoop();
     // spawn timeout is enforced by the initialize() handshake caller via a race.
   }
 
@@ -324,7 +397,45 @@ export class StdioTransport {
     try {
       // @ts-expect-error Bun ReadableStream is async-iterable
       for await (const chunk of this.proc!.stdout) {
-        this.readBuf += decoder.decode(chunk);
+        // {stream: true} keeps multibyte UTF-8 split across chunks intact.
+        this.readBuf += decoder.decode(chunk, { stream: true });
+        // First stdout bytes after a request measure stdio_latency_ms (time
+        // from request write to first response byte, CC-9). `pending` is
+        // insertion-ordered, so the first unfired entry is the earliest.
+        for (const [, p] of this.pending) {
+          if (p.firstByteFired !== true) {
+            p.firstByteFired = true;
+            p.onFirstByte?.(Date.now() - p.startedAt);
+            break;
+          }
+        }
+        if (this.readBuf.length > MAX_FRAME_BYTES) {
+          log({
+            level: "error",
+            message: "frame too large",
+            requestId: newRequestId(),
+            operation: "mcp.transport",
+            agentId: null,
+            timestamp: new Date().toISOString(),
+            duration: 0,
+            status: "error",
+            error: {
+              code: "frame_too_large",
+              message: `buffered frame exceeds ${MAX_FRAME_BYTES} bytes`,
+            },
+          });
+          for (const [, p] of this.pending) {
+            clearTimeout(p.timer);
+            p.reject(new Error("MCP frame exceeds 16MB limit"));
+          }
+          this.pending.clear();
+          try {
+            this.proc?.kill("SIGKILL");
+          } catch {
+            /* already dead */
+          }
+          break;
+        }
         let idx: number;
         // biome-ignore lint/suspicious/noAssignInExpressions: standard line-buffer drain
         while ((idx = this.readBuf.indexOf("\n")) >= 0) {
@@ -333,15 +444,38 @@ export class StdioTransport {
           if (line.trim()) this.handleLine(line);
         }
       }
+      this.readBuf += decoder.decode(); // flush any held-back multibyte bytes
     } catch {
       // stream closed
     }
     this.closed = true;
+    const tail = this.stderrTail.trim();
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
-      p.reject(new Error("transport closed before response"));
+      p.reject(
+        new Error(
+          tail ? `transport closed before response (stderr: ${tail})` : "transport closed before response",
+        ),
+      );
     }
     this.pending.clear();
+  }
+
+  /**
+   * Drain stderr so a full pipe buffer can never deadlock the child, keeping
+   * the last ~8KB for diagnostics (surfaced in close-before-response errors).
+   */
+  private async stderrLoop(): Promise<void> {
+    const decoder = new TextDecoder();
+    try {
+      // @ts-expect-error Bun ReadableStream is async-iterable
+      for await (const chunk of this.proc!.stderr) {
+        this.stderrTail = (this.stderrTail + decoder.decode(chunk, { stream: true })).slice(-8192);
+      }
+      this.stderrTail = (this.stderrTail + decoder.decode()).slice(-8192);
+    } catch {
+      // stream closed
+    }
   }
 
   private handleLine(line: string): void {
@@ -349,12 +483,41 @@ export class StdioTransport {
     try {
       msg = JSON.parse(line);
     } catch {
+      log({
+        level: "warn",
+        message: "dropping unparseable JSON-RPC line from subprocess",
+        bytes: line.length,
+        requestId: newRequestId(),
+        operation: "mcp.transport",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "ok",
+      });
       return;
     }
-    if (typeof msg.id !== "number") return; // notification or unmatched
+    // A message carrying `method` is server-initiated: a notification (no id)
+    // or a server→client request. We support no server methods, but JSON-RPC
+    // requires a response to requests so the server is not left hanging.
+    // String ids are valid JSON-RPC and get the same reply; they cannot
+    // collide with `pending` because the client only issues numeric ids.
+    if (typeof msg.method === "string") {
+      if (typeof msg.id === "number" || typeof msg.id === "string") {
+        try {
+          this.write({
+            jsonrpc: "2.0",
+            id: msg.id,
+            error: { code: -32601, message: "method not supported by client" },
+          });
+        } catch {
+          // transport already closing
+        }
+      }
+      return;
+    }
+    if (typeof msg.id !== "number") return; // unmatched response
     const p = this.pending.get(msg.id);
     if (!p) return;
-    p.onFirstByte?.(Date.now() - p.startedAt);
     clearTimeout(p.timer);
     this.pending.delete(msg.id);
     if (msg.error) {
@@ -433,10 +596,15 @@ export class StdioTransport {
     } catch {
       /* already dead */
     }
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
     const exited = await Promise.race([
       proc.exited,
-      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), graceMs)),
+      new Promise<"timeout">((r) => {
+        graceTimer = setTimeout(() => r("timeout"), graceMs);
+      }),
     ]);
+    // Clear the grace timer when the process wins the race so it cannot dangle.
+    if (graceTimer !== undefined) clearTimeout(graceTimer);
     if (exited === "timeout") {
       try {
         proc.kill("SIGKILL");

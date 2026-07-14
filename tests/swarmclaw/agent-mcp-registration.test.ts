@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { StdioTransport } from "../../src/swarmclaw/mcp/stdio-transport.ts";
+import { type LogEntry, setLogSink, StdioTransport } from "../../src/swarmclaw/mcp/stdio-transport.ts";
 import { handleRegisterAgent } from "../../src/swarmclaw/routes/agents.ts";
 import {
   handleInvokeMCPServer,
@@ -89,33 +91,77 @@ describe("AC1 make-or-break: register agent + mcp-server + test", () => {
 describe("AC2: invoke retain persists, recall retrieves", () => {
   test("retain → recall roundtrip", async () => {
     const mcpStore = newMcpStore();
-    const reg = await handleRegisterMCPServer(
-      mcpStore,
-      { name: "hs", transport: "stdio", command: "hindsight-local-mcp" },
-      undefined,
-      fakeFactory(),
+    // CC-9: capture structured logs around one registration + one invoke so we
+    // can assert the observability contract (requestId propagation, required
+    // fields, timing fields) without an extra spawn.
+    const logs: LogEntry[] = [];
+    const restoreSink = setLogSink((e) => logs.push(e));
+    try {
+      const reg = await handleRegisterMCPServer(
+        mcpStore,
+        { name: "hs", transport: "stdio", command: "hindsight-local-mcp" },
+        "req-cc9-register",
+        fakeFactory({ FAKE_MCP_ECHO_META: "1" }),
+      );
+      const id = (reg.body as { id: string }).id;
+
+      const retain = await handleInvokeMCPServer(
+        mcpStore,
+        id,
+        { tool: "retain", arguments: { bank_id: "team-alpha", content: "the sky is blue" } },
+        "req-cc9-invoke",
+      );
+      expect(retain.status).toBe(200);
+      // CC-9 wire leg: the subprocess itself must have received _meta.requestId
+      // on the tools/call params (tool-bridge.ts:268) — the fixture echoes it
+      // back as an extra content entry behind FAKE_MCP_ECHO_META.
+      const retainResult = (retain.body as { result: { content: Array<{ text: string }> } }).result;
+      const metaEcho = JSON.parse(retainResult.content[1]!.text) as { meta_request_id: string };
+      expect(metaEcho.meta_request_id).toBe("req-cc9-invoke");
+
+      const recall = await handleInvokeMCPServer(mcpStore, id, {
+        tool: "recall",
+        arguments: { bank_id: "team-alpha" },
+      });
+      expect(recall.status).toBe(200);
+      const result = (recall.body as { result: { content: Array<{ text: string }> } }).result;
+      const payload = JSON.parse(result.content[0]!.text);
+      expect(payload.memories).toContain("the sky is blue");
+    } finally {
+      restoreSink();
+    }
+
+    // CC-9 contract: minimum shape + requestId as the join key.
+    const assertCc9Shape = (e: LogEntry, requestId: string) => {
+      expect(e.requestId).toBe(requestId);
+      expect(typeof e.operation).toBe("string");
+      expect(e.agentId).toBeNull();
+      expect(typeof e.timestamp).toBe("string");
+      expect(typeof e.duration).toBe("number");
+      expect(typeof e.status).toBe("string");
+    };
+    const regEntries = logs.filter((l) => l.operation === "mcp.register" && l.requestId === "req-cc9-register");
+    expect(regEntries).toHaveLength(1);
+    assertCc9Shape(regEntries[0]!, "req-cc9-register");
+    const routeInvokes = logs.filter(
+      (l) => l.operation === "mcp.invoke" && l.requestId === "req-cc9-invoke" && !("invoke_duration_ms" in l),
     );
-    const id = (reg.body as { id: string }).id;
-
-    const retain = await handleInvokeMCPServer(mcpStore, id, {
-      tool: "retain",
-      arguments: { bank_id: "team-alpha", content: "the sky is blue" },
-    });
-    expect(retain.status).toBe(200);
-
-    const recall = await handleInvokeMCPServer(mcpStore, id, {
-      tool: "recall",
-      arguments: { bank_id: "team-alpha" },
-    });
-    expect(recall.status).toBe(200);
-    const result = (recall.body as { result: { content: Array<{ text: string }> } }).result;
-    const payload = JSON.parse(result.content[0]!.text);
-    expect(payload.memories).toContain("the sky is blue");
+    expect(routeInvokes).toHaveLength(1);
+    assertCc9Shape(routeInvokes[0]!, "req-cc9-invoke");
+    // MCP bridge timing fields.
+    const listTools = logs.find((l) => l.operation === "mcp.list_tools" && l.requestId === "req-cc9-register");
+    expect(typeof listTools?.tool_enumeration_ms).toBe("number");
+    const bridgeInvokes = logs.filter(
+      (l) => l.operation === "mcp.invoke" && l.requestId === "req-cc9-invoke" && "invoke_duration_ms" in l,
+    );
+    expect(bridgeInvokes).toHaveLength(1);
+    expect(typeof bridgeInvokes[0]!.invoke_duration_ms).toBe("number");
+    expect(typeof bridgeInvokes[0]!.stdio_latency_ms).toBe("number");
   }, 15000);
 });
 
 // ---------------------------------------------------------------------------
-// AC3 / guard: broken transport → { ok:false } 502
+// AC3 / guard: broken transport → { ok:false, error } 502
 // ---------------------------------------------------------------------------
 describe("AC3: broken transport never silently succeeds", () => {
   test("subprocess that exits immediately → 502 ok:false on register", async () => {
@@ -127,7 +173,46 @@ describe("AC3: broken transport never silently succeeds", () => {
       brokenFactory(),
     );
     expect(resp.status).toBe(502);
-    expect((resp.body as { ok: boolean }).ok).toBe(false);
+    const body = resp.body as { ok: boolean; error?: unknown };
+    expect(body.ok).toBe(false);
+    expect(typeof body.error).toBe("string");
+    expect((body.error as string).length).toBeGreaterThan(0);
+  }, 15000);
+
+  test("allowlisted command missing on disk (spawn ENOENT) → 502 ok:false with error", async () => {
+    const mcpStore = newMcpStore();
+    // NO factory override: the default factory builds the real StdioTransport,
+    // whose Bun.spawn throws ENOENT — node_modules/.bin/hindsight-local-mcp
+    // passes the default allowlist but does not exist in this repo.
+    const resp = await handleRegisterMCPServer(mcpStore, {
+      name: "enoent",
+      transport: "stdio",
+      command: "node_modules/.bin/hindsight-local-mcp",
+    });
+    expect(resp.status).toBe(502);
+    const body = resp.body as { ok: boolean; error?: unknown };
+    expect(body.ok).toBe(false);
+    expect(typeof body.error).toBe("string");
+    expect((body.error as string).length).toBeGreaterThan(0);
+  }, 15000);
+
+  test("hanging server → 502 only after the ~10s spawn/handshake timeout", async () => {
+    const mcpStore = newMcpStore();
+    const start = Date.now();
+    const resp = await handleRegisterMCPServer(
+      mcpStore,
+      { name: "hang", transport: "stdio", command: "hindsight-local-mcp" },
+      undefined,
+      fakeFactory({ FAKE_MCP_HANG: "1" }),
+    );
+    const elapsed = Date.now() - start;
+    expect(resp.status).toBe(502);
+    const body = resp.body as { ok: boolean; error?: unknown };
+    expect(body.ok).toBe(false);
+    expect(typeof body.error).toBe("string");
+    expect((body.error as string).length).toBeGreaterThan(0);
+    // Proves the real 10s withSpawnTimeout path ran, not an instant failure.
+    expect(elapsed).toBeGreaterThanOrEqual(9000);
   }, 15000);
 });
 
@@ -150,6 +235,16 @@ describe("AC4: invalid bank_id rejected pre-dispatch with -32602", () => {
     );
     const id = (reg.body as { id: string }).id;
 
+    // Wrap the live bridge to prove validation happens pre-dispatch: the
+    // subprocess bridge must never be invoked for a rejected payload.
+    const rec = mcpStore.get(id)!;
+    const orig = rec.bridge.invoke.bind(rec.bridge);
+    let calls = 0;
+    rec.bridge.invoke = ((...a: Parameters<typeof orig>) => {
+      calls++;
+      return orig(...a);
+    }) as typeof rec.bridge.invoke;
+
     const resp = await handleInvokeMCPServer(mcpStore, id, {
       tool: "retain",
       arguments: { bank_id: bankId, content: "x" },
@@ -158,6 +253,7 @@ describe("AC4: invalid bank_id rejected pre-dispatch with -32602", () => {
     const body = resp.body as { error: { code: number; data: { field: string } } };
     expect(body.error.code).toBe(-32602);
     expect(body.error.data.field).toContain("bank_id");
+    expect(calls).toBe(0);
   }, 15000);
 
   test("valid bank_id passes validation", async () => {
@@ -174,6 +270,18 @@ describe("AC4: invalid bank_id rejected pre-dispatch with -32602", () => {
       arguments: { bank_id: "valid-bank-01", content: "ok" },
     });
     expect(resp.status).toBe(200);
+    // Boundary: the BankIdSchema regex accepts exactly 64 chars…
+    const max64 = await handleInvokeMCPServer(mcpStore, id, {
+      tool: "retain",
+      arguments: { bank_id: "a".repeat(64), content: "ok" },
+    });
+    expect(max64.status).toBe(200);
+    // …and a single char.
+    const oneChar = await handleInvokeMCPServer(mcpStore, id, {
+      tool: "retain",
+      arguments: { bank_id: "b", content: "ok" },
+    });
+    expect(oneChar.status).toBe(200);
   }, 15000);
 });
 
@@ -210,6 +318,7 @@ describe("AC5: registration command allowlist", () => {
 describe("AC7: code-injection args rejected at registration", () => {
   test.each([
     [["-e", "process.exit(1)"]],
+    [["--eval", "process.exit(1)"]],
     [["-p", "process.exit(1)"]],
     [["--print", "process.exit(1)"]],
     [["-"]],
@@ -314,46 +423,53 @@ describe("Env isolation: subprocess env is scoped", () => {
   test("subprocess sees FOO=bar but not internal SwarmClaw vars", async () => {
     process.env.SWARMCLAW_INTERNAL_SECRET = "leak-me";
     process.env.HINDSIGHT_INTERNAL = "also-leak";
-    const mcpStore = newMcpStore();
-    // Echo env back via the fake server.
-    const reg = await handleRegisterMCPServer(
-      mcpStore,
-      { name: "env-check", transport: "stdio", command: "hindsight-local-mcp", env: { FOO: "bar" } },
-      undefined,
-      fakeFactory({ FAKE_MCP_ECHO_ENV: "1" }),
-    );
-    const id = (reg.body as { id: string }).id;
-    const inv = await handleInvokeMCPServer(mcpStore, id, { tool: "retain", arguments: { bank_id: "b", content: "c" } });
-    const echoed = JSON.parse((inv.body as { result: { content: Array<{ text: string }> } }).result.content[0]!.text);
-    expect(echoed.FOO).toBe("bar");
-    // FAKE_MCP_ECHO_ENV is injected by the test harness itself, so it is present;
-    // the isolation guarantee under test is that internal SwarmClaw vars are absent.
-    expect(echoed.SWARMCLAW_INTERNAL_SECRET).toBeUndefined();
-    expect(echoed.HINDSIGHT_INTERNAL).toBeUndefined();
-    // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
-    delete process.env.SWARMCLAW_INTERNAL_SECRET;
-    // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
-    delete process.env.HINDSIGHT_INTERNAL;
+    try {
+      const mcpStore = newMcpStore();
+      // Echo env back via the fake server.
+      const reg = await handleRegisterMCPServer(
+        mcpStore,
+        { name: "env-check", transport: "stdio", command: "hindsight-local-mcp", env: { FOO: "bar" } },
+        undefined,
+        fakeFactory({ FAKE_MCP_ECHO_ENV: "1" }),
+      );
+      const id = (reg.body as { id: string }).id;
+      const inv = await handleInvokeMCPServer(mcpStore, id, { tool: "retain", arguments: { bank_id: "b", content: "c" } });
+      const echoed = JSON.parse((inv.body as { result: { content: Array<{ text: string }> } }).result.content[0]!.text);
+      expect(echoed.FOO).toBe("bar");
+      // FAKE_MCP_ECHO_ENV is injected by the test harness itself, so it is present;
+      // the isolation guarantee under test is that internal SwarmClaw vars are absent.
+      expect(echoed.SWARMCLAW_INTERNAL_SECRET).toBeUndefined();
+      expect(echoed.HINDSIGHT_INTERNAL).toBeUndefined();
+    } finally {
+      // Restore even on assertion failure — leaked vars would poison other tests.
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.SWARMCLAW_INTERNAL_SECRET;
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.HINDSIGHT_INTERNAL;
+    }
   }, 15000);
 
   test("SWARMCLAW_ENV_ALLOWLIST entries flow through", async () => {
     process.env.MY_ALLOWED = "allowed-value";
     process.env.SWARMCLAW_ENV_ALLOWLIST = "MY_ALLOWED";
-    const mcpStore = newMcpStore();
-    const reg = await handleRegisterMCPServer(
-      mcpStore,
-      { name: "env-allow", transport: "stdio", command: "hindsight-local-mcp" },
-      undefined,
-      fakeFactory({ FAKE_MCP_ECHO_ENV: "1" }),
-    );
-    const id = (reg.body as { id: string }).id;
-    const inv = await handleInvokeMCPServer(mcpStore, id, { tool: "retain", arguments: { bank_id: "b", content: "c" } });
-    const echoed = JSON.parse((inv.body as { result: { content: Array<{ text: string }> } }).result.content[0]!.text);
-    expect(echoed.MY_ALLOWED).toBe("allowed-value");
-    // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
-    delete process.env.MY_ALLOWED;
-    // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
-    delete process.env.SWARMCLAW_ENV_ALLOWLIST;
+    try {
+      const mcpStore = newMcpStore();
+      const reg = await handleRegisterMCPServer(
+        mcpStore,
+        { name: "env-allow", transport: "stdio", command: "hindsight-local-mcp" },
+        undefined,
+        fakeFactory({ FAKE_MCP_ECHO_ENV: "1" }),
+      );
+      const id = (reg.body as { id: string }).id;
+      const inv = await handleInvokeMCPServer(mcpStore, id, { tool: "retain", arguments: { bank_id: "b", content: "c" } });
+      const echoed = JSON.parse((inv.body as { result: { content: Array<{ text: string }> } }).result.content[0]!.text);
+      expect(echoed.MY_ALLOWED).toBe("allowed-value");
+    } finally {
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.MY_ALLOWED;
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.SWARMCLAW_ENV_ALLOWLIST;
+    }
   }, 15000);
 });
 
@@ -437,7 +553,9 @@ describe("Guards: capacity, duplicate, SSRF, args-length", () => {
 
   test("SSRF: non-loopback endpointUrl → 422, loopback → 201", async () => {
     const store = new AgentStore();
-    const evil = await handleRegisterAgent(store, { agentId: "evil-agent", capabilities: ["x"], endpointUrl: "http://evil.com/api" });
+    // TEST-NET-3 (RFC 5737) literal IP: isIP() short-circuits synchronously —
+    // no real external DNS lookup, keeping the test hermetic.
+    const evil = await handleRegisterAgent(store, { agentId: "evil-agent", capabilities: ["x"], endpointUrl: "http://203.0.113.1/api" });
     expect(evil.status).toBe(422);
     const good = await handleRegisterAgent(store, { agentId: "good-endpoint", capabilities: ["x"], endpointUrl: "http://localhost:3100/a2a" });
     expect(good.status).toBe(201);
@@ -468,23 +586,41 @@ describe("Guards: capacity, duplicate, SSRF, args-length", () => {
 // Cache re-enumeration: tool not in initial cache triggers re-enumeration
 // ---------------------------------------------------------------------------
 describe("Tool cache re-enumeration", () => {
-  test("invoke with tool absent from initial cache re-enumerates and succeeds", async () => {
-    // Fake server initially advertises only retain/recall; we invoke 'reflect'
-    // which IS supported by the fake but simulate cache miss by using a fresh
-    // bridge whose cache we can force-miss. Here we rely on the fact that the
-    // bridge re-enumerates on cache miss for unknown tools.
-    const mcpStore = newMcpStore();
-    const reg = await handleRegisterMCPServer(
-      mcpStore,
-      { name: "cache-srv", transport: "stdio", command: "hindsight-local-mcp" },
-      undefined,
-      fakeFactory(),
-    );
-    const id = (reg.body as { id: string }).id;
-    const rec = mcpStore.get(id)!;
-    rec.bridge.invalidateCache(); // force a cache miss
-    const resp = await handleInvokeMCPServer(mcpStore, id, { tool: "reflect", arguments: { bank_id: "b" } });
-    expect(resp.status).toBe(200);
+  test("invoke with tool absent from the STALE cache re-enumerates and succeeds", async () => {
+    // True DoD scenario: registration caches [retain,recall] (read from a tools
+    // file via the fixture's FAKE_MCP_TOOLS_FILE knob); the file then gains
+    // `reflect`, so invoking reflect enters the stale-cache branch and must
+    // re-enumerate (exactly one extra tools/list) before dispatching.
+    const toolsFile = join(tmpdir(), `fake-mcp-tools-${crypto.randomUUID()}.txt`);
+    writeFileSync(toolsFile, "retain,recall");
+    const logs: LogEntry[] = [];
+    const restoreSink = setLogSink((e) => logs.push(e));
+    try {
+      const mcpStore = newMcpStore();
+      const reg = await handleRegisterMCPServer(
+        mcpStore,
+        { name: "cache-srv", transport: "stdio", command: "hindsight-local-mcp" },
+        undefined,
+        fakeFactory({ FAKE_MCP_TOOLS_FILE: toolsFile }),
+      );
+      expect(reg.status).toBe(201);
+      const id = (reg.body as { id: string }).id;
+      // Registration cached exactly [retain, recall].
+      expect((reg.body as { tools: string[] }).tools).toEqual(["retain", "recall"]);
+
+      // The server now advertises reflect too — the registration cache is stale.
+      writeFileSync(toolsFile, "retain,recall,reflect");
+
+      const resp = await handleInvokeMCPServer(mcpStore, id, { tool: "reflect", arguments: { bank_id: "b" } }, "req-cache-renum");
+      expect(resp.status).toBe(200);
+      // Proof the invoke really re-enumerated: exactly one tools/list carried
+      // the invoke's requestId (the registration enumeration used another id).
+      const reEnums = logs.filter((l) => l.operation === "mcp.list_tools" && l.requestId === "req-cache-renum");
+      expect(reEnums).toHaveLength(1);
+    } finally {
+      restoreSink();
+      rmSync(toolsFile, { force: true });
+    }
   }, 15000);
 });
 
@@ -505,13 +641,71 @@ describe("AC6: /test reports ok:false for a dead transport", () => {
     await rec.stdio.shutdown(1000); // kill the subprocess out from under it
     const testResp = await handleTestMCPServer(mcpStore, id);
     expect(testResp.status).toBe(502);
-    expect((testResp.body as { ok: boolean }).ok).toBe(false);
+    const body = testResp.body as { ok: boolean; error?: unknown };
+    expect(body.ok).toBe(false);
+    expect(typeof body.error).toBe("string");
+    expect((body.error as string).length).toBeGreaterThan(0);
   }, 15000);
 });
 
 // ---------------------------------------------------------------------------
-// AC3 also via /test: unknown/broken command surfaces ok:false at /test path.
-// A server registered against a subprocess that dies → /test 502 ok:false.
-// (Register-time broken transport is covered in AC3 above; this covers the
-//  /test endpoint contract specifically.)
+// Schema negative/boundary paths (agent + MCP registration + invoke)
 // ---------------------------------------------------------------------------
+describe("Schema boundaries", () => {
+  // A factory that must never be invoked: all schema rejections return before
+  // any transport construction.
+  const noSpawn: TransportFactory = () => {
+    throw new Error("transport factory must not be called for schema rejections");
+  };
+
+  test.each([
+    ["capabilities: []", { agentId: "cap-empty", capabilities: [] }],
+    ["metadata > 10KB", { agentId: "meta-big", capabilities: ["x"], metadata: { big: "x".repeat(10241) } }],
+    ["agentId 129 chars", { agentId: `a${"b".repeat(127)}c`, capabilities: ["x"] }],
+  ])("invalid agent payload (%s) → 400", async (_label, payload) => {
+    const resp = await handleRegisterAgent(new AgentStore(), payload);
+    expect(resp.status).toBe(400);
+  }, 15000);
+
+  test("circular metadata → 400 (refine catches the JSON.stringify throw)", async () => {
+    const m: Record<string, unknown> = {};
+    m.self = m;
+    const resp = await handleRegisterAgent(new AgentStore(), { agentId: "meta-circular", capabilities: ["x"], metadata: m });
+    expect(resp.status).toBe(400);
+  }, 15000);
+
+  test("agentId 128 chars (boundary) → 201", async () => {
+    const resp = await handleRegisterAgent(new AgentStore(), { agentId: `a${"b".repeat(126)}c`, capabilities: ["x"] });
+    expect(resp.status).toBe(201);
+  }, 15000);
+
+  test.each([
+    ["name 129 chars", { name: "n".repeat(129), transport: "stdio", command: "hindsight-local-mcp" }],
+    ["env empty key", { name: "env-empty-key", transport: "stdio", command: "hindsight-local-mcp", env: { "": "v" } }],
+    ["transport sse", { name: "sse-srv", transport: "sse", url: "http://localhost:9999/mcp" }],
+  ])("invalid MCP payload (%s) → 400 pre-spawn", async (_label, payload) => {
+    const resp = await handleRegisterMCPServer(newMcpStore(), payload, undefined, noSpawn);
+    expect(resp.status).toBe(400);
+  }, 15000);
+
+  test("name 128 chars (boundary) → 201, and tool 257 chars → 400 -32602", async () => {
+    const mcpStore = newMcpStore();
+    const reg = await handleRegisterMCPServer(
+      mcpStore,
+      { name: "n".repeat(128), transport: "stdio", command: "hindsight-local-mcp" },
+      undefined,
+      fakeFactory(),
+    );
+    expect(reg.status).toBe(201);
+    const id = (reg.body as { id: string }).id;
+    // Reuse this one registration for the invoke-schema boundary (max 256).
+    const resp = await handleInvokeMCPServer(mcpStore, id, {
+      tool: "t".repeat(257),
+      arguments: { bank_id: "b" },
+    });
+    expect(resp.status).toBe(400);
+    const body = resp.body as { error: { code: number; data: { field: string } } };
+    expect(body.error.code).toBe(-32602);
+    expect(body.error.data.field).toBe("tool");
+  }, 15000);
+});

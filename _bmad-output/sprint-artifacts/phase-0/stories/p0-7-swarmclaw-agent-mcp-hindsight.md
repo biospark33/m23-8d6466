@@ -245,3 +245,16 @@ If the story already has a partial observability mechanism (e.g. coms-log), it i
 - [ ] **Test (SSRF):** Register agent with `endpointUrl: 'http://evil.com/api'` → verify 422 rejection. Register with `endpointUrl: 'http://localhost:3100/a2a'` → verify 201
 - [ ] **Test (concurrent cap):** Two concurrent registration requests when 31 servers exist → verify exactly one succeeds (201) and one fails (429/503)
 - [ ] **Test (args length):** Register MCP server with `args: ['a'.repeat(4097)]` → verify 400 rejection. Register with `args: ['a'.repeat(4096)]` → verify accepted
+
+## Dev Agent Record
+
+### Review Findings — Round 1 (2026-07-14)
+
+bmad-code-review round 1 (branch `review/p0-7-bmad-code-review`): 3 parallel layers (Blind Hunter / Edge Case Hunter / Acceptance Auditor) over 4 diff chunks (routes / mcp / stores+wiring / tests), verified triage (every candidate re-verified against current code; 0 false positives), all findings fixed incl. low. 124 raw findings → 57 canonical patch items (A 8, B 18, C 9, D 22; 0 dismissed, 0 deferred, 7 orchestrator rulings). Regression re-review of the fix diff caught 6 follow-ups (2 MEDIUM, 4 LOW); all 6 fixed. Post-remediation: `bun test` green (211/211 repo-wide; swarmclaw suite 86 → 107), `tsc --noEmit` clean, biome clean. Key themes:
+
+- [x] Shutdown lifecycle (AC6): in-flight (reserved, pre-finalize) registrations killable via `attachTransport` + pending-transport drain in `shutdownAll`; listener stopped before teardown; per-transport error isolation (`Promise.allSettled`); 12s force-exit watchdog [mcp-store.ts, index.ts, mcp-servers.ts]
+- [x] INV-SC2 hardening: `--import`/`--experimental-loader`/`--loader` absolute-path-gated; `NODE_OPTIONS` stripped from subprocess env; basename-vs-path allowlist canonicalization; npx value-flag consumption + set-but-empty allowlist = deny-all; `--inspect` family → INV-SC4 warn [stdio-transport.ts]
+- [x] Transport robustness: stderr drained (8KB tail surfaced in close errors), `TextDecoder {stream:true}`, 16MB frame cap + SIGKILL, server→client JSON-RPC requests answered `-32601` (numeric + string ids), first-byte stdio latency per CC-9 [stdio-transport.ts]
+- [x] Contract honesty: JSON-RPC error codes propagated (`-32601`/`-32602` → 400, else 502); `MCPTestResponseSchema`/`MCPInvokeErrorResponseSchema` actually validated on routes; per-tool `inputSchema` pre-dispatch validation (`-32602`, no dispatch) on CC-8-translated args; `maskEnv` masks ALL env values (INV-SC5); camelCase `bankId` validated; `_meta.requestId` wire propagation (CC-9) [mcp-servers.ts, tool-bridge.ts]
+- [x] Server wiring: duplicate `agentId` → 409; UUID-strict `x-request-id` with regen fallback; 404/500 carry `x-request-id`; 413 body cap incl. chunked transfer-encoding; schema count caps (args ≤256, capabilities ≤64, env ≤64 keys); `SWARMCLAW_PORT` validation (0 = ephemeral) [index.ts, agent-store.ts]
+- [x] Test integrity: illusory cache test → true stale-cache + `-32601` retry coverage; real 10s spawn-timeout test; ENOENT → 502 case; CC-9 log-shape + wire-leg (`_meta.requestId`) assertions; PPID-agnostic orphan sweep; lifecycle on port 0 w/ stdout discovery; env-mutation try/finally; boundary + schema-negative matrices [tests/swarmclaw]

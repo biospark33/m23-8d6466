@@ -1,7 +1,10 @@
 /**
- * Tool bridge: enumerate MCP tools (with TTL cache), invoke tools, validate
- * arguments (INV bank_id via BankIdSchema), mask secrets (INV-SC5), and emit
- * observability logs (CC-9).
+ * Tool bridge: enumerate MCP tools (with TTL cache), invoke tools, mask
+ * secrets (INV-SC5), and emit observability logs (CC-9).
+ *
+ * bank_id argument validation lives in MCPInvokeArgumentsSchema (checking
+ * both `bank_id` and `bankId` spellings against the P0.9 BankIdSchema regex)
+ * and is applied by the route before dispatch — NOT inside ToolBridge.invoke.
  */
 
 import { z } from "zod";
@@ -22,12 +25,15 @@ const BANK_ID_REGEX = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/;
 export const MCPInvokeArgumentsSchema = z
   .record(z.unknown())
   .superRefine((args, ctx) => {
-    if ("bank_id" in args && typeof args.bank_id === "string") {
-      if (!BANK_ID_REGEX.test(args.bank_id)) {
+    // Both spellings reach the subprocess as `bank_id` (toSnakeArgs converts
+    // camelCase keys at dispatch), so both must be validated at the boundary.
+    for (const key of ["bank_id", "bankId"]) {
+      const value = args[key];
+      if (typeof value === "string" && !BANK_ID_REGEX.test(value)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `bank_id "${args.bank_id}" fails BankIdSchema validation (P0.9)`,
-          path: ["bank_id"],
+          message: `${key} "${value}" fails BankIdSchema validation (P0.9)`,
+          path: [key],
         });
       }
     }
@@ -68,14 +74,16 @@ export const MCPInvokeErrorResponseSchema = z.object({
 // Secret masking (INV-SC5).
 // ---------------------------------------------------------------------------
 
-const SECRET_KEY_PATTERN = /(key|token|secret|password|passwd|credential|auth)/i;
-
-/** Mask secret-looking values in an env map to `***` for diagnostics/responses. */
+/**
+ * Mask every env value to `***` for diagnostics/responses (INV-SC5). Key names
+ * stay visible; heuristic key-matching both under-covers (PASS, DSN) and
+ * over-covers (MONKEY), so all values are masked regardless of key name.
+ */
 export function maskEnv(env: Record<string, string> | undefined): Record<string, string> {
   if (!env) return {};
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) {
-    out[k] = SECRET_KEY_PATTERN.test(k) ? "***" : v;
+  for (const k of Object.keys(env)) {
+    out[k] = "***";
   }
   return out;
 }
@@ -98,7 +106,7 @@ export function resolveToolCacheTtl(env: NodeJS.ProcessEnv = process.env): numbe
     log({
       level: "warn",
       message: "SWARMCLAW_TOOL_CACHE_TTL_MS clamped",
-      raw: parsed,
+      raw, // the original env string (story contract: raw value, not parsed)
       clamped,
       min: TTL_MIN_MS,
       max: TTL_MAX_MS,
@@ -144,6 +152,7 @@ export function toSnakeArgs(args: Record<string, unknown>): Record<string, unkno
 
 export class ToolBridge {
   private cache: ToolCacheEntry | null = null;
+  private readonly inputSchemas = new Map<string, Record<string, unknown>>();
   private readonly ttlMs: number;
 
   constructor(
@@ -159,9 +168,14 @@ export class ToolBridge {
     const start = Date.now();
     try {
       const result = (await this.transport.request("tools/list", {}, 30_000)) as {
-        tools?: Array<{ name: string }>;
+        tools?: Array<{ name: string; inputSchema?: Record<string, unknown> }>;
       };
-      const tools = (result.tools ?? []).map((t) => t.name);
+      const enumerated = result.tools ?? [];
+      const tools = enumerated.map((t) => t.name);
+      this.inputSchemas.clear();
+      for (const t of enumerated) {
+        if (t.inputSchema !== undefined) this.inputSchemas.set(t.name, t.inputSchema);
+      }
       this.cache = { tools, expiresAt: Date.now() + this.ttlMs };
       log({
         requestId,
@@ -190,18 +204,46 @@ export class ToolBridge {
 
   /** Cached tool list, re-enumerating on miss/expiry. */
   async getTools(requestId: string): Promise<string[]> {
-    if (this.cache && this.cache.expiresAt > Date.now()) return this.cache.tools;
-    return this.enumerateTools(requestId);
+    return (await this.getToolsCached(requestId)).tools;
+  }
+
+  /**
+   * Tool list plus whether it came from the cache — lets callers skip a
+   * redundant re-enumeration right after a fresh enumeration.
+   */
+  private async getToolsCached(requestId: string): Promise<{ tools: string[]; fromCache: boolean }> {
+    if (this.cache && this.cache.expiresAt > Date.now()) {
+      return { tools: this.cache.tools, fromCache: true };
+    }
+    return { tools: await this.enumerateTools(requestId), fromCache: false };
+  }
+
+  /**
+   * Raw `inputSchema` captured at enumeration time for a tool. Returns
+   * undefined for an unknown tool, when the server declared no schema, or
+   * once the tool-list cache has expired (schemas share its TTL so the
+   * /invoke route's pre-validation never uses a snapshot the bridge itself
+   * would treat as stale). Used by the /invoke route for minimal
+   * pre-dispatch argument validation.
+   */
+  getToolInputSchema(tool: string): Record<string, unknown> | undefined {
+    if (!this.cache || this.cache.expiresAt <= Date.now()) return undefined;
+    return this.inputSchemas.get(tool);
   }
 
   invalidateCache(): void {
     this.cache = null;
+    this.inputSchemas.clear();
   }
 
   /**
-   * Invoke a tool. Validates arguments (bank_id) BEFORE dispatch, re-enumerates
-   * on unknown tool, retries once on tool-not-found from the server.
-   * Returns the raw MCP tool result.
+   * Invoke a tool. Re-enumerates on unknown tool, retries once on
+   * tool-not-found from the server. Returns the raw MCP tool result.
+   *
+   * bank_id argument validation does NOT live here — it is applied by the
+   * route via MCPInvokeArgumentsSchema (both `bank_id` and `bankId`
+   * spellings) before dispatch, so invoke only ever sees pre-validated args.
+   * Every exceptional exit logs exactly one status:"error" mcp.invoke entry.
    */
   async invoke(
     tool: string,
@@ -209,65 +251,73 @@ export class ToolBridge {
     timeoutMs: number,
     requestId: string,
   ): Promise<unknown> {
-    // Ensure the tool exists (re-enumerate on cache miss before failing).
-    let tools = await this.getTools(requestId);
-    if (!tools.includes(tool)) {
-      tools = await this.enumerateTools(requestId);
-      if (!tools.includes(tool)) {
-        throw new JsonRpcError(-32601, `Unknown tool: ${tool}`);
-      }
-    }
-
-    const snakeArgs = toSnakeArgs(args);
     const start = Date.now();
     let stdioLatency = 0;
     try {
-      const result = await this.transport.request(
-        "tools/call",
-        { name: tool, arguments: snakeArgs },
-        timeoutMs,
-        (latency) => {
-          stdioLatency = latency;
-        },
-      );
-      log({
-        requestId,
-        operation: "mcp.invoke",
-        agentId: this.agentId,
-        timestamp: new Date().toISOString(),
-        duration: Date.now() - start,
-        status: "ok",
-        invoke_duration_ms: Date.now() - start,
-        stdio_latency_ms: stdioLatency,
-      });
-      return result;
-    } catch (err) {
-      // If the server reports the tool missing, invalidate + retry once.
-      if (err instanceof JsonRpcError && err.code === -32601) {
-        this.invalidateCache();
-        const refreshed = await this.enumerateTools(requestId);
-        if (refreshed.includes(tool)) {
-          const retry = await this.transport.request(
-            "tools/call",
-            { name: tool, arguments: snakeArgs },
-            timeoutMs,
-            (latency) => {
-              stdioLatency = latency;
-            },
-          );
-          log({
-            requestId,
-            operation: "mcp.invoke",
-            agentId: this.agentId,
-            timestamp: new Date().toISOString(),
-            duration: Date.now() - start,
-            status: "ok",
-            invoke_duration_ms: Date.now() - start,
-            stdio_latency_ms: stdioLatency,
-          });
-          return retry;
-        }
+      // Ensure the tool exists. Re-enumerate only when the miss came from a
+      // cached list — a fresh enumeration is already authoritative.
+      const lookup = await this.getToolsCached(requestId);
+      let tools = lookup.tools;
+      if (!tools.includes(tool) && lookup.fromCache) {
+        tools = await this.enumerateTools(requestId);
       }
+      if (!tools.includes(tool)) {
+        throw new JsonRpcError(-32601, `Unknown tool: ${tool}`);
+      }
+
+      const snakeArgs = toSnakeArgs(args);
+      try {
+        const result = await this.transport.request(
+          "tools/call",
+          { name: tool, arguments: snakeArgs, _meta: { requestId } },
+          timeoutMs,
+          (latency) => {
+            stdioLatency = latency;
+          },
+        );
+        log({
+          requestId,
+          operation: "mcp.invoke",
+          agentId: this.agentId,
+          timestamp: new Date().toISOString(),
+          duration: Date.now() - start,
+          status: "ok",
+          invoke_duration_ms: Date.now() - start,
+          stdio_latency_ms: stdioLatency,
+        });
+        return result;
+      } catch (err) {
+        // If the server reports the tool missing, invalidate + retry once.
+        // Failures of the re-enumeration or the retry itself propagate to the
+        // outer catch, which logs the single error entry.
+        if (err instanceof JsonRpcError && err.code === -32601) {
+          this.invalidateCache();
+          const refreshed = await this.enumerateTools(requestId);
+          if (refreshed.includes(tool)) {
+            const retry = await this.transport.request(
+              "tools/call",
+              { name: tool, arguments: snakeArgs, _meta: { requestId } },
+              timeoutMs,
+              (latency) => {
+                stdioLatency = latency;
+              },
+            );
+            log({
+              requestId,
+              operation: "mcp.invoke",
+              agentId: this.agentId,
+              timestamp: new Date().toISOString(),
+              duration: Date.now() - start,
+              status: "ok",
+              invoke_duration_ms: Date.now() - start,
+              stdio_latency_ms: stdioLatency,
+            });
+            return retry;
+          }
+        }
+        throw err;
+      }
+    } catch (err) {
       log({
         requestId,
         operation: "mcp.invoke",
@@ -284,10 +334,32 @@ export class ToolBridge {
   }
 }
 
+// Story Guards/limits: invoke timeout must be ≥ P0.9 consolidate timeout
+// (60s default) so long-running consolidate/reflect calls are not cut short.
+const INVOKE_TIMEOUT_MIN_MS = 60_000;
+
 export function resolveInvokeTimeout(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.SWARMCLAW_INVOKE_TIMEOUT_MS;
   const DEFAULT = 120_000;
   if (raw === undefined) return DEFAULT;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT;
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT;
+  const clamped = Math.max(INVOKE_TIMEOUT_MIN_MS, parsed);
+  if (clamped !== parsed) {
+    log({
+      level: "warn",
+      message: "SWARMCLAW_INVOKE_TIMEOUT_MS clamped",
+      raw, // the original env string (matches the TTL-clamp warn shape)
+      clamped,
+      min: INVOKE_TIMEOUT_MIN_MS,
+      // CC-9 required fields (best-effort for a config-time warning):
+      requestId: newRequestId(),
+      operation: "config.invoke_timeout",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "ok",
+    });
+  }
+  return clamped;
 }

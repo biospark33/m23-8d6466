@@ -33,13 +33,20 @@ afterAll(async () => {
   delete process.env.SWARMCLAW_ENV_ALLOWLIST;
 });
 
-async function post(path: string, body: unknown): Promise<{ status: number; json: any }> {
+async function post(
+  path: string,
+  body: unknown,
+  requestId?: string,
+): Promise<{ status: number; json: any; headers: Headers }> {
   const res = await fetch(`${base}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(requestId ? { "x-request-id": requestId } : {}),
+    },
     body: JSON.stringify(body),
   });
-  return { status: res.status, json: await res.json() };
+  return { status: res.status, json: await res.json(), headers: res.headers };
 }
 
 test("e2e: agent → mcp-server → test → retain → recall roundtrip over HTTP", async () => {
@@ -64,20 +71,29 @@ test("e2e: agent → mcp-server → test → retain → recall roundtrip over HT
   expect(test.json.ok).toBe(true);
   expect(test.json.tools).toEqual(expect.arrayContaining(["retain", "recall", "reflect", "consolidate"]));
 
-  // 4. Invoke retain
+  // 4. Invoke retain — CC-9: a client-supplied x-request-id must be echoed in
+  // the response header AND used as the JSON-RPC body id.
   const secret = `memory-${crypto.randomUUID()}`;
-  const retain = await post(`/api/mcp-servers/${id}/invoke`, {
-    tool: "retain",
-    arguments: { bank_id: "e2e-bank", content: secret },
-  });
+  const retainReqId = crypto.randomUUID();
+  const retain = await post(
+    `/api/mcp-servers/${id}/invoke`,
+    { tool: "retain", arguments: { bank_id: "e2e-bank", content: secret } },
+    retainReqId,
+  );
   expect(retain.status).toBe(200);
+  expect(retain.headers.get("x-request-id")).toBe(retainReqId);
+  expect(retain.json.id).toBe(retainReqId);
 
   // 5. Invoke recall — content must match what was retained
-  const recall = await post(`/api/mcp-servers/${id}/invoke`, {
-    tool: "recall",
-    arguments: { bank_id: "e2e-bank" },
-  });
+  const recallReqId = crypto.randomUUID();
+  const recall = await post(
+    `/api/mcp-servers/${id}/invoke`,
+    { tool: "recall", arguments: { bank_id: "e2e-bank" } },
+    recallReqId,
+  );
   expect(recall.status).toBe(200);
+  expect(recall.headers.get("x-request-id")).toBe(recallReqId);
+  expect(recall.json.id).toBe(recallReqId);
   const payload = JSON.parse(recall.json.result.content[0].text);
   expect(payload.memories).toContain(secret);
 }, 20000);
