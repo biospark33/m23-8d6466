@@ -43,7 +43,7 @@ Phase-0 sibling depends on 3.8.69 behavior.
 
 ## 1. Result summary (real script output, excerpt)
 
-```
+```console
 $ bun scripts/pi-lens-verify.ts
 {
   "results": [ … 4 checks; see per-AC sections … ],
@@ -65,15 +65,21 @@ $ bun scripts/pi-lens-verify.ts
 
 **3 pass, 0 fail, 1 skip (optional).** The single skip is AC2b (secret-scan
 emit-block), which is marked `optional: true` because it depends on
-gitleaks/trivy being installed on the host.
+gitleaks/trivy being installed on the host. These are the harness's *check*
+results; story-level AC statuses are assessed per-AC in §3 (AC1 is **partial**
+at the story level — the harness check's contract is derivation + parity, not
+pi-lens-assigned observation).
 
 **Exit-code semantics (as implemented):**
 
-- exit **0** iff there are no FAILs — skips are allowed (AC2b's optional skip
-  still yields exit 0);
-- exit **1** on any FAIL, or — under `--strict` / `CI` env — on any skip of a
+- exit **0** — in **default mode** — when there are no FAILs: skips are allowed
+  (AC2b's optional skip still yields exit 0);
+- exit **1** on any FAIL (including the synthetic failed check recorded when a
+  probe rejects mid-run), or — under `--strict` / `CI` env — on any skip of a
   **non-optional** check (AC2b is optional, so `--strict` still exits 0 here);
-- exit **2** on fatal harness error (e.g. pi-lens not found, MCP server crash).
+- exit **2** on fatal harness error *before checks start* (e.g. pi-lens not
+  found). A mid-run probe failure (e.g. MCP server crash) is NOT exit 2: it is
+  recorded as a synthetic failed check so the JSON summary still emits (exit 1).
 
 ---
 
@@ -109,15 +115,20 @@ MCP tools exercised: `pilens_lsp_diagnostics`, `pilens_analyze`,
 **State containment (new in the revised harness):** the server is spawned with
 `PILENS_DATA_DIR` pointed **inside** the temp work dir (plus
 `PI_LENS_CONFIG_PATH` for a run-local config enabling the actionable-warnings
-aggregator), so all pi-lens on-disk state is removed with the work dir — no more
-`~/.pi-lens/projects/*pilens-verify*` orphans, and the user's global
-`~/.pi-lens/config.json` is untouched.
+aggregator), so all **project-scoped** pi-lens on-disk state is removed with the
+work dir — no more `~/.pi-lens/projects/*pilens-verify*` orphans, and the user's
+global `~/.pi-lens/config.json` is untouched. **Global exception:** pi-lens's
+latency telemetry appends to `~/.pi-lens/latency.log`, which is keyed on
+`PI_LENS_HOME` (not `PILENS_DATA_DIR` — `dist/clients/latency-logger.js` →
+`file-utils.js:getGlobalPiLensDir`) and therefore escapes containment by design;
+the harness intentionally leaves it in place (it is the p95 data source
+referenced in Findings §5.5).
 
 ---
 
 ## 3. AC → evidence map
 
-### AC1 — structured LSP diagnostic + stable `aw:<hash>` ID — **PASS** (with an honest provenance caveat)
+### AC1 — structured LSP diagnostic + stable `aw:<hash>` ID — **PARTIAL** (diagnostic live; ID derived + native-parity, never pi-lens-assigned)
 
 Fixture (generated at runtime): a TS file with a genuine type error
 (`const wrong: string = add(1, 2)`). Driven via `pilens_lsp_diagnostics` (warm
@@ -147,6 +158,13 @@ LSP) → `pilens_analyze`. Real evidence (excerpt from the harness's AC1 check):
 
 Framing, precisely:
 
+- **Status split (why PARTIAL):** the *structured LSP diagnostic* half is met
+  live — a real TS2322 diagnostic captured from the running pi-lens MCP server
+  (below). The *stable `aw:<hash>` ID* half is only partially met: the id is
+  derived deterministically and proven equal to pi-lens's own id function
+  (native parity), but pi-lens itself never assigned an id to any diagnostic
+  this run (`idObserved:false`). The harness *check* still records `pass`
+  because its contract is derivation + parity; the story-level AC is partial.
 - **`lsp_diagnostics` returns plain text; the structured array comes from
   `pilens_analyze`.** The tool literally named `pilens_lsp_diagnostics` returns a
   human-readable line (`L4:7: error[typescript] (2322): Type 'number' is not
@@ -265,9 +283,13 @@ was **NOT observed**. Harness evidence (excerpt):
   promotion path are present in the installed source
   (`blockMechanismSourceVerified: true`). The blocker report prints only
   `file:line — rule [sources]`, never the secret value.
-- **To close this live:** install gitleaks or trivy on PATH (or run an
-  LLM-backed agent turn), then re-run; the probe passes only when the `🔴 STOP`
-  line is actually observed in turn-end output.
+- **To close this live:** install gitleaks or trivy on PATH, then re-run; the
+  probe passes only when a gitleaks/trivy finding enters `sessionSecrets` and
+  the `🔴 STOP` line is actually observed in turn-end output. An LLM-backed
+  agent turn is **not** an alternative verification path: the blocker derives
+  solely from `sessionSecrets` (gitleaks/trivy findings), independent of
+  transport — without those scanners an agent turn produces no block either.
+  opengrep-only findings remain advisory and never satisfy this check.
 
 > **Spec-vs-impl discrepancy (flagged, NOT silently "confirmed"):** the story's
 > literal `secret_detected` finding-type string **does not exist** in pi-lens
@@ -362,12 +384,15 @@ Harness evidence (excerpt — paths shortened):
    cold start and miss the secret. The harness handles both: it `git init`s and
    stages the fixture dir AND polls `pilens_analyze` up to 4× until a secret
    surfaces — verified deterministic across consecutive runs.
-5. **LSP cold latency exceeds NFR-PERF-6** — the warm `lspLatencyMs` observed in
-   AC1 evidence is ~1.2–1.9s (1211ms in the quoted run), within the ≤3s p95
-   target; **cold** starts (first-ever LSP boot, esp. pyright) exceed it. pi-lens
-   itself writes a real `~/.pi-lens/latency.log` (structured JSON lines with
-   `durationMs`) for p95 tracking. Guard note only; pi-lens augmentation is
-   advisory (NFR-PERF-5), so this does not block a turn.
+5. **LSP cold latency vs NFR-PERF-6 (no p95 claim made)** — the warm
+   `lspLatencyMs` values in AC1 evidence (~1.2–1.9s across runs, 1211ms in the
+   quoted run) are **observed samples from individual runs, not evidence of p95
+   compliance**. A p95 claim requires aggregating `durationMs` from
+   `~/.pi-lens/latency.log` across representative runs; no such aggregation was
+   performed, so NFR-PERF-6 is recorded as *not measured*, not met. **Cold**
+   starts (first-ever LSP boot, esp. pyright) exceed the ≤3s target. Guard note
+   only; pi-lens augmentation is advisory (NFR-PERF-5), so this does not block a
+   turn.
 6. **`lsp.status: "failed"` with a valid diagnostic** — pi-lens marks the LSP
    runner "failed" when the file *has* type errors (the type-check "failed"),
    not when tooling failed; the diagnostic is still valid and returned. Not a bug.
@@ -438,6 +463,8 @@ bun scripts/pi-lens-verify.ts --keep   # retain temp dir (synthetic secret fixtu
 bun scripts/pi-lens-verify.ts --strict # skips of NON-optional checks fail the run (CI env implies --strict)
 ```
 
-**Exit semantics:** exit 0 iff no FAIL (skips allowed); exit 1 on any FAIL, or on
-a non-optional skip under `--strict`/`CI`; exit 2 on fatal error. Runtime is ~1–2
-min due to LSP cold starts. Flags: `--json` (accepted; output is always JSON).
+**Exit semantics:** exit 0 iff no FAIL (default mode: skips allowed); exit 1 on
+any FAIL — including a mid-run probe failure recorded as a synthetic failed
+check — or on a non-optional skip under `--strict`/`CI`; exit 2 on fatal error
+before checks start. Runtime is ~1–2 min due to LSP cold starts. Flags:
+`--json` (accepted; output is always JSON).

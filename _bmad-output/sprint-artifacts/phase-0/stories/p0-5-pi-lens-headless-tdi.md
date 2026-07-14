@@ -103,21 +103,25 @@ drift, non-fatal).
   AC2b is optional (host-dependent), so strict still exits 0 here.
 - **Provenance-based secret matching** (tool/rule families, not keyword regex),
   git working-tree staging for opengrep's ruleset, bounded polling past
-  opengrep's cold start, and accurate exit semantics (exit 0 iff no FAIL, skips
-  allowed; exit 2 fatal).
+  opengrep's cold start, and accurate exit semantics (exit 0 iff no FAIL —
+  default mode, skips allowed; exit 2 fatal before checks start).
 - **Version-drift reporting**: `piLensVersion` vs `piLensVersionSpec` with a
   non-fatal note (3.8.69 installed vs 3.8.47 pinned).
 
 ### Compliance Check
 
-- AC1: **met with caveat** — structured LSP diagnostic live; stable `aw:<hash>`
-  id derived with native-function parity (`idObserved:false`; the story's
+- AC1: **partial** — structured LSP diagnostic live via the MCP transport; the
+  stable `aw:<hash>` id is derived with native-function parity but was never
+  assigned by pi-lens itself (`idObserved:false`), and the story's
   `tool_execution_end`→`JSON.stringify` transport is not exercised — the harness
-  parses the MCP fenced-JSON payload instead).
+  parses the MCP fenced-JSON payload instead. The harness's AC1 *check* still
+  passes (its contract is derivation + parity); the story-level AC is partial.
 - AC2: **partial** — detection proven live; emit-block NOT observed (needs
-  gitleaks/trivy or an LLM-backed turn); the `secret_detected` finding-type
-  label does not exist in pi-lens 3.8.69 (rule-ID-based detection) — flagged as
-  a spec-vs-impl discrepancy, not silently confirmed.
+  gitleaks/trivy findings in `sessionSecrets` — an LLM-backed turn alone cannot
+  produce the block, since the blocker derives solely from that path); the
+  `secret_detected` finding-type label does not exist in pi-lens 3.8.69
+  (rule-ID-based detection) — flagged as a spec-vs-impl discrepancy, not
+  silently confirmed.
 - AC3: **met** — FR-EX-8 numeric read + logged fallback proven; demonstrated
   count is a reconciled 0-value fallback.
 - Coding conventions / file scope: respected — review touched only the harness,
@@ -131,7 +135,7 @@ drift, non-fatal).
 - [x] MCP server spawned under Node, not bun
 - [x] `--strict`/`CI` mode and accurate exit-code semantics
 - [x] Report reconciled to the revised harness (versions, excerpts labeled, DoD traceability)
-- [ ] Live emit-block observation — needs gitleaks/trivy installed (or an LLM-backed turn)
+- [ ] Live emit-block observation — needs gitleaks/trivy installed (an LLM-backed turn alone cannot produce the block; it derives solely from `sessionSecrets`)
 - [ ] AC1 observed-id — needs an LSP that emits a code-action-bearing warning (OSS pyright has no quick-fix for `reportUnusedImport`; TS has no warning-category diagnostics)
 - [ ] MANDATORY `--mode json` agent e2e demo — blocked on LLM auth in this environment
 
@@ -151,12 +155,14 @@ drift, non-fatal).
 
 ### Performance Considerations
 
-Warm `lspLatencyMs` observed at ~1.2–1.9s (1211ms in the quoted run) — within
-the ≤3s p95 target (NFR-PERF-6). **Cold** LSP starts (first boot, especially
-pyright, and opengrep's ~8s auxiliary-server cold start) exceed the target; this
-is documented in the report (Findings §5.5) and mitigated in the harness by
-warming + bounded polling. pi-lens augmentation is advisory (NFR-PERF-5), so
-cold-start latency does not block a turn.
+Warm `lspLatencyMs` observed at ~1.2–1.9s (1211ms in the quoted run). These are
+**observed samples, not a p95 measurement**: NFR-PERF-6 (≤3s p95) requires
+aggregating `durationMs` from `~/.pi-lens/latency.log` across representative
+runs, which was not performed — recorded as *not measured*, not met. **Cold**
+LSP starts (first boot, especially pyright, and opengrep's ~8s auxiliary-server
+cold start) exceed the target; this is documented in the report (Findings §5.5)
+and mitigated in the harness by warming + bounded polling. pi-lens augmentation
+is advisory (NFR-PERF-5), so cold-start latency does not block a turn.
 
 ### Final Status
 

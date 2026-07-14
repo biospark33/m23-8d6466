@@ -26,8 +26,12 @@
  *
  * Containment: the server is spawned with PILENS_DATA_DIR pointed INSIDE the temp
  * work dir (plus PI_LENS_CONFIG_PATH for a run-local config enabling the
- * actionable-warnings aggregator), so all pi-lens on-disk state is removed with
- * the work dir — no ~/.pi-lens/projects/*pilens-verify* orphans.
+ * actionable-warnings aggregator), so all PROJECT-SCOPED pi-lens on-disk state is
+ * removed with the work dir — no ~/.pi-lens/projects/*pilens-verify* orphans.
+ * One global exception: pi-lens's latency telemetry appends to
+ * ~/.pi-lens/latency.log, keyed on PI_LENS_HOME (not PILENS_DATA_DIR — see
+ * dist/clients/latency-logger.js → file-utils.js:getGlobalPiLensDir); the
+ * harness intentionally leaves that log in place.
  *
  * Output: structured JSON results on stdout ({ results: Check[], summary }).
  * Exit 0 iff every non-skipped check passed (under --strict or CI, any skip of a
@@ -57,8 +61,12 @@ const notes: string[] = [];
 // pi-lens install resolution
 // ---------------------------------------------------------------------------
 
-/** Resolve the installed pi-lens package root + version from the global npm dir. */
-function resolvePiLens(): { root: string; version: string; server: string } {
+/**
+ * Resolve the installed pi-lens package root + version from the global npm dir.
+ * Exported for tests (main() is guarded by import.meta.main, so importing this
+ * module does not self-execute). Throws when pi-lens is not installed.
+ */
+export function resolvePiLens(): { root: string; version: string; server: string } {
   // pi installs npm:pi-lens into the node used by pi. Probe the known global dirs
   // first, then fall back to `npm root -g`.
   const candidates = [
@@ -717,13 +725,27 @@ async function main(): Promise<void> {
         },
         reason: proxy.count === undefined ? "no readable warning-count artifact on disk" : undefined,
       });
+    } catch (err) {
+      // A rejected client.call or any other probe failure must not escape to
+      // main().catch (exit 2, no machine-readable output): record a synthetic
+      // failed check so the JSON summary below still emits with the failure
+      // counted (exit 1). client.close() still runs in the finally.
+      record({
+        ac: "AC?",
+        name: "unexpected probe failure during AC execution",
+        status: "fail",
+        reason: err instanceof Error ? err.message : String(err),
+        evidence: { stack: err instanceof Error ? err.stack : undefined },
+      });
     } finally {
       client.close();
     }
   } finally {
     if (keep) {
       // --keep hygiene: scrub the synthetic-secret fixture (overwrite, then
-      // delete) so no key-shaped strings persist in the retained temp dir.
+      // delete) so no key-shaped strings persist in the retained temp dir. The
+      // work dir AND its pi-lens project data (incl. actionable-warnings.jsonl)
+      // are kept — --keep exists to inspect them.
       try {
         fs.writeFileSync(secretFile, "// scrubbed by pi-lens-verify --keep\n");
         fs.rmSync(secretFile, { force: true });
@@ -731,11 +753,12 @@ async function main(): Promise<void> {
         /* best-effort scrub */
       }
     } else {
+      // Belt-and-suspenders: also remove pi-lens's project data dir for this
+      // work dir even if something escaped the contained PILENS_DATA_DIR (it
+      // normally lives inside `work`, so this is redundant with the removal).
       fs.rmSync(work, { recursive: true, force: true });
+      fs.rmSync(projectDataDir(work), { recursive: true, force: true });
     }
-    // Belt-and-suspenders: remove pi-lens's project data dir for this work dir
-    // even if something escaped the contained PILENS_DATA_DIR.
-    fs.rmSync(projectDataDir(work), { recursive: true, force: true });
   }
 
   // -------------------------------------------------------------------------
@@ -809,7 +832,11 @@ function countFrom(data: unknown): number | undefined {
   return undefined;
 }
 
-main().catch((err) => {
-  process.stderr.write(`pi-lens-verify fatal: ${err instanceof Error ? err.stack : String(err)}\n`);
-  process.exit(2);
-});
+// Guarded so tests can import resolvePiLens without self-executing main()
+// (import.meta.main is Bun's entry-point check — true only when run directly).
+if (import.meta.main) {
+  main().catch((err) => {
+    process.stderr.write(`pi-lens-verify fatal: ${err instanceof Error ? err.stack : String(err)}\n`);
+    process.exit(2);
+  });
+}

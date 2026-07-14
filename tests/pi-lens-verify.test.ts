@@ -8,14 +8,13 @@
  * sized for that.
  *
  * Graceful degradation: pi-lens is a host-global install, not a repo dep, so
- * machines/CI without it must stay green. The test probes the same install
- * candidates the harness itself uses and test.skip()s when none resolve.
+ * machines/CI without it must stay green. The test imports the harness's own
+ * install resolver and test.skip()s when no install resolves.
  */
 import { describe, expect, test } from "bun:test";
-import { execFileSync, spawnSync } from "node:child_process";
-import * as fs from "node:fs";
-import * as os from "node:os";
+import { spawnSync } from "node:child_process";
 import * as path from "node:path";
+import { resolvePiLens } from "../scripts/pi-lens-verify.ts";
 
 const REPO_ROOT = path.join(import.meta.dir, "..");
 const HARNESS = path.join(REPO_ROOT, "scripts", "pi-lens-verify.ts");
@@ -27,28 +26,17 @@ const CHILD_TIMEOUT_MS = 170_000;
 const TEST_TIMEOUT_MS = 180_000;
 
 /**
- * Resolve the pi-lens MCP server entry point, mirroring the candidate list in
- * the harness's own resolvePiLens() (the script is NOT imported — it
- * self-executes main()). Returns undefined when pi-lens is not installed.
+ * Resolve the pi-lens MCP server entry point via the harness's OWN resolver
+ * (imported — the harness guards main() behind import.meta.main, so importing
+ * it does not self-execute). Returns undefined when pi-lens is not installed:
+ * the harness resolver throws in that case, the test needs a probe instead.
  */
 function resolvePiLensServer(): string | undefined {
-  const candidates = [
-    path.join(os.homedir(), ".local", "node-arm64", "lib", "node_modules", "pi-lens"),
-    path.join(os.homedir(), ".local", "node-x64", "lib", "node_modules", "pi-lens"),
-  ];
   try {
-    const g = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
-    candidates.push(path.join(g, "pi-lens"));
+    return resolvePiLens().server;
   } catch {
-    /* npm unavailable — probe the known dirs only */
+    return undefined;
   }
-  for (const c of candidates) {
-    const server = path.join(c, "dist", "mcp", "server.js");
-    if (fs.existsSync(path.join(c, "package.json")) && fs.existsSync(server)) {
-      return server;
-    }
-  }
-  return undefined;
 }
 
 interface VerifySummary {
@@ -79,9 +67,13 @@ describe("pi-lens verification harness (P0.5)", () => {
         maxBuffer: 16 * 1024 * 1024,
       });
       if (proc.error) {
-        throw new Error(`failed to run harness: ${proc.error.message}\nstderr: ${proc.stderr.slice(-2000)}`);
+        // On spawn failure proc.stderr can be null — guard before slicing.
+        const tail = proc.stderr ? proc.stderr.slice(-2000) : "(no stderr captured)";
+        throw new Error(`failed to run harness: ${proc.error.message}\nstderr: ${tail}`);
       }
-      expect(proc.status, `harness stderr: ${proc.stderr.trim().slice(-2000)}`).toBe(0);
+      // Same guard for the assertion message (null stderr on spawn failure).
+      const stderrTail = proc.stderr ? proc.stderr.trim().slice(-2000) : "(no stderr captured)";
+      expect(proc.status, `harness stderr: ${stderrTail}`).toBe(0);
 
       let out: VerifyOutput;
       try {
