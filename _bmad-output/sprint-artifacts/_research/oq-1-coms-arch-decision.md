@@ -144,8 +144,8 @@ promoted when true peer-to-peer messaging between long-lived agents is required.
 ## Coms contract (socket-coms verbs — as vendored)
 
 `response_schema` is **parse-only**: on `agent_end` the receiver first unwraps
-a ```` ```json ```` code fence if the assistant text is wrapped in one, then
-runs `JSON.parse` when a `response_schema` is present, returning
+a JSON code fence (`` ```json `` … `` ``` ``) if the assistant text is wrapped
+in one, then runs `JSON.parse` when a `response_schema` is present, returning
 `error: "response not valid JSON"` on failure. It is **NOT** validated against
 the schema (PRD §5.2; `agent_end` handler, ~`coms.ts:2629-2635`). Response
 envelopes carry the receiver's `secret` echo (verified constant-time by the

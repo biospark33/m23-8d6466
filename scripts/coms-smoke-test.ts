@@ -101,7 +101,9 @@ const SOCKET_REPLY_TOKEN = "pong";
 //    to skip noise like "true") is redacted from captured pi output before it
 //    is embedded in the report. Segment-boundary matching (not substring) so
 //    PATH/AUTHOR-style keys don't trip it, while *_PAT, bare *_PASS, *_CRED,
-//    *_PRIVATE etc. are now covered (C7). ────────────────────────────────────
+//    *_PRIVATE etc. are now covered (C7). Values are redacted LONGEST-FIRST:
+//    when one secret is a substring of another, replacing the shorter one
+//    first would fragment the longer one and leave its tail unredacted. ──────
 const SECRET_VALUES = Object.entries(process.env)
 	.filter(
 		([k, v]) =>
@@ -111,7 +113,8 @@ const SECRET_VALUES = Object.entries(process.env)
 			typeof v === "string" &&
 			v.length >= 8,
 	)
-	.map(([, v]) => v as string);
+	.map(([, v]) => v as string)
+	.sort((a, b) => b.length - a.length);
 function redact(s: string): string {
 	let out = s;
 	for (const v of SECRET_VALUES) out = out.split(v).join("[REDACTED]");
@@ -168,17 +171,32 @@ const childEnv = smokeChildEnv();
 
 // Well-formed 26-char Crockford-base32 ULID (48-bit time + 80-bit
 // randomness) for shape-coverage msg_ids — no more fake "01SMOKE…" ids.
+// Mirrors the vendored generator (coms.ts `ulid`, ~coms.ts:234) so probe
+// envelopes carry ids indistinguishable from real coms traffic: 10 bytes of
+// randomness bit-packed 5 bits per char — drawing 16 bytes and masking each
+// with % 32 would consume 128 bits to emit the same 80.
 const ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 function ulid(): string {
-	let head = "";
-	let t = Date.now();
-	for (let i = 0; i < 10; i++) {
-		head = (ULID_ALPHABET[t % 32] ?? "0") + head;
+	const time = Date.now();
+	const rand = crypto.randomBytes(10);
+	let timeStr = "";
+	let t = time;
+	for (let i = 9; i >= 0; i--) {
+		timeStr = (ULID_ALPHABET[t % 32] ?? "0") + timeStr;
 		t = Math.floor(t / 32);
 	}
-	let tail = "";
-	for (const b of crypto.randomBytes(16)) tail += ULID_ALPHABET[b % 32] ?? "0";
-	return head + tail;
+	let randStr = "";
+	let bits = 0;
+	let value = 0;
+	for (const byte of rand) {
+		value = (value << 8) | byte;
+		bits += 8;
+		while (bits >= 5) {
+			bits -= 5;
+			randStr += ULID_ALPHABET[(value >> bits) & 31] ?? "0";
+		}
+	}
+	return (timeStr + randStr).slice(0, 26);
 }
 
 type Check = { name: string; ok: boolean; skipped?: string; detail?: string };

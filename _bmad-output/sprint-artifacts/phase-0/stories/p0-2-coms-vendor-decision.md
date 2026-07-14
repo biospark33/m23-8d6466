@@ -36,7 +36,7 @@ Smoke-tests the vendored `coms.ts` + `coms-net.ts` from `pi-vs-claude-code-vendo
 - **Contracts/Schema:** OQ decision artifact: markdown with sections (context, options, decision, rationale, constraints). Coms contract: `coms_send(target, prompt, conversation_id?, response_schema?)` / `coms_await(msg_id, timeout_ms?)` / `coms_get` / `coms_list`. `response_schema` is parse-only (`JSON.parse` on `agent_end`, NOT schema-validated — §5.2).
 - **Integration points (each wired & exercised in this story):** vendored `coms.ts` loads on `pi@0.55.0`; `pi.registerFlag("cname", ...)` registers `--cname`; unix socket registry at `~/.pi/coms/` populated; subprocess-RPC `pi --mode json -p` produces parseable JSON event stream.
 - **Files / functions touched:** `pi-vs-claude-code-vendor/coms.ts` (vendored, read-only verification), `scripts/coms-smoke-test.ts` (new), `_bmad-output/sprint-artifacts/_research/oq-1-coms-arch-decision.md` (new).
-- **Guards/limits:** Default `coms_await` timeout 30 min (`PI_COMS_TIMEOUT_MS = 1_800_000ms`, `coms.ts:46`); receiver-side turn deadline `PI_COMS_TURN_DEADLINE_MS` (default 30 min, `coms.ts:50`); `MAX_HOPS=5` (fixed constant, `coms.ts:45`) for socket-coms.
+- **Guards/limits:** Default `coms_await` timeout 30 min (`PI_COMS_TIMEOUT_MS = 1_800_000ms`, ~`coms.ts:50`); receiver-side turn deadline `PI_COMS_TURN_DEADLINE_MS` (default 30 min, ~`coms.ts:54`); `MAX_HOPS=5` (fixed constant, ~`coms.ts:49`) for socket-coms.
 
 ## Files to Modify
 
