@@ -38,8 +38,10 @@
  *
  * INV-1: no real API keys are written or logged — child pi processes receive
  *        a MINIMAL ALLOWLIST env (PATH, HOME, USER, LOGNAME, SHELL, TERM,
- *        LANG, LC_*, TMPDIR, TMP, TEMP, plus only the one provider key
- *        implied by PI_SMOKE_MODEL's provider prefix). If no provider key can
+ *        LANG, LC_*, TMPDIR, TMP, TEMP — win32 adds SystemRoot, USERPROFILE,
+ *        APPDATA, LOCALAPPDATA, PATHEXT, ComSpec, OS, PROCESSOR_ARCHITECTURE,
+ *        matched case-insensitively — plus only the one provider key implied
+ *        by PI_SMOKE_MODEL's provider prefix). If no provider key can
  *        be identified, the child falls back to the full env and the report
  *        says so (`env_scope`). Captured pi output is additionally redacted
  *        for ambient secret-looking env values before anything enters the
@@ -71,7 +73,12 @@ const PIN = "0.55.0";
 const SMOKE_MODEL = process.env.PI_SMOKE_MODEL?.trim() || null;
 const modelArgs = (): string[] => (SMOKE_MODEL ? ["--model", SMOKE_MODEL] : []);
 
-const SPAWN_TIMEOUT_MS = 90_000; // per `pi -p` spawn (either path)
+// Per `pi -p` spawn (either path). Must outlive B's full round-trip: B's
+// followUp answer only runs AFTER its sleep-60 stay-alive turn ends (pi 0.55.0
+// runs followUps inside the same runLoop — verified in pi-agent-core's
+// agent-loop.js), so B replies at ~70-90s after boot; A then needs its own
+// boot + model + coms_await window on top. 90s killed slow-but-healthy runs.
+const SPAWN_TIMEOUT_MS = 240_000;
 const EXT_LOAD_TIMEOUT_MS = 60_000;
 // `pi --version` also loads global extensions before printing; 10s proved
 // flaky under load (ETIMEDOUT with four peers spawning), so keep 30s.
@@ -84,7 +91,11 @@ const REGISTRY_POLL_TIMEOUT_MS = Math.floor((SPAWN_TIMEOUT_MS * 2) / 3);
 // (spawnSync's default) is not enough for a chatty turn.
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const COMS_PROJECT = "smoke"; // isolated project namespace for Path B peers
-const AWAIT_TIMEOUT_MS = 45_000; // coms_await budget inside agent A's prompt
+// coms_await budget inside agent A's prompt. Must cover B's answer latency:
+// B's followUp turn runs only after its sleep-60 turn ends, so the reply lands
+// ~70-90s after B's boot; A's await starts ~30-40s after B's boot. 45s made
+// the round-trip a model-latency coin flip (two consecutive red runs 2026-07-14).
+const AWAIT_TIMEOUT_MS = 150_000;
 // Mirrored from coms.ts (READ-ONLY contract) for the raw-socket negative
 // probes: the per-line transport cap (connHandler) and the fixed hop cap
 // (handlePrompt nacks hops >= MAX_HOPS). Keep in sync with coms.ts.
@@ -133,6 +144,23 @@ function redact(s: string): string {
 // configured default model may need any provider's auth — and say so in the
 // report (`env_scope`). Redaction above stays as defense-in-depth.
 const ENV_ALLOWLIST = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TMPDIR", "TMP", "TEMP"];
+// win32 children additionally need SystemRoot (DNS/winsock/crypto RNG init),
+// USERPROFILE (pi's config dir), Path+PATHEXT (their own tool spawns), etc.
+// Windows env keys are case-INSENSITIVE — conventionally `Path`, not `PATH`,
+// and Node preserves the casing — so on win32 membership is compared
+// uppercased against the combined list. POSIX keeps the exact-case match
+// against ENV_ALLOWLIST alone (unchanged behavior).
+const ENV_ALLOWLIST_WIN32_EXTRA = [
+	"SystemRoot",
+	"USERPROFILE",
+	"APPDATA",
+	"LOCALAPPDATA",
+	"PATHEXT",
+	"ComSpec",
+	"OS",
+	"PROCESSOR_ARCHITECTURE",
+];
+const ENV_ALLOWLIST_WIN32_UPPER = [...ENV_ALLOWLIST, ...ENV_ALLOWLIST_WIN32_EXTRA].map((k) => k.toUpperCase());
 const PROVIDER_KEYS: Record<string, string[]> = {
 	anthropic: ["ANTHROPIC_API_KEY"],
 	openrouter: ["OPENROUTER_API_KEY"],
@@ -143,7 +171,11 @@ function smokeChildEnv(): { env: NodeJS.ProcessEnv; scope: string } {
 	const base: NodeJS.ProcessEnv = {};
 	for (const [k, v] of Object.entries(process.env)) {
 		if (v === undefined) continue;
-		if (ENV_ALLOWLIST.includes(k) || k.startsWith("LC_")) base[k] = v;
+		const allowlisted =
+			process.platform === "win32"
+				? ENV_ALLOWLIST_WIN32_UPPER.includes(k.toUpperCase())
+				: ENV_ALLOWLIST.includes(k);
+		if (allowlisted || k.startsWith("LC_")) base[k] = v;
 	}
 	const provider = SMOKE_MODEL?.split("/")[0]?.toLowerCase() ?? "";
 	const keys = PROVIDER_KEYS[provider];
@@ -167,9 +199,13 @@ function smokeChildEnv(): { env: NodeJS.ProcessEnv; scope: string } {
 			scope: `full-env fallback — provider "${provider}" key(s) ${keys.join("/")} not present in env`,
 		};
 	}
+	const allowlistNote =
+		process.platform === "win32"
+			? "PATH/SystemRoot/USERPROFILE/APPDATA/LOCALAPPDATA/PATHEXT/ComSpec/OS/PROCESSOR_ARCHITECTURE/TMP/TEMP (win32 case-insensitive)"
+			: "PATH/HOME/USER/LOGNAME/SHELL/TERM/LANG/LC_*/TMPDIR/TMP/TEMP";
 	return {
 		env: base,
-		scope: `allowlist (${keys.filter((k) => base[k]).join("+")} + PATH/HOME/USER/LOGNAME/SHELL/TERM/LANG/LC_*/TMPDIR/TMP/TEMP)`,
+		scope: `allowlist (${keys.filter((k) => base[k]).join("+")} + ${allowlistNote})`,
 	};
 }
 const childEnv = smokeChildEnv();
@@ -221,9 +257,41 @@ function spawnProblem(r: SyncResult): string | null {
 	return null;
 }
 
+// ── win32 shell-arg quoting (C3/C18), shared by startPi and the spawnSync
+//    probes so a repo path containing spaces survives cmd.exe. ──────────────
+// shell:true is UNAVOIDABLE on win32 for `pi`: bare `pi` resolves to a .cmd
+// shim, CreateProcess cannot execute a batch file without cmd.exe, and modern
+// Node refuses shell:false on batch files outright (EINVAL, CVE-2024-27980) —
+// so "resolve pi.cmd and spawn with shell:false" is not a real option. With
+// shell:true Node joins args with spaces and NO quoting, so wrap each arg
+// ourselves. Safety model against cmd.exe's quote-state machine (each `"`
+// toggles quoted state):
+//   - `"` → `""`: parity-PRESERVING (a pair toggles state twice), so an
+//     embedded quote cannot break out of the wrapper — `& | < > ^ ( )`
+//     stay quoted and inert. Caveat: the child CRT collapses the pair, so
+//     a literal `"` does not survive win32 argv — cosmetic for these
+//     prompts, and no escaping satisfies both cmd and the CRT anyway.
+//   - reject `%`: cmd.exe expands %VAR% even inside double quotes (C18).
+//   - reject `!`: expands inside quotes when delayed expansion is enabled
+//     (non-default, and not escapable from outside a batch file).
+//   - reject CR/LF: line terminators end the command regardless of quote
+//     state — the one genuine breakout from a quoted wrapper.
+// POSIX path unchanged (no shell, argv passed verbatim).
+function win32ShellArgs(args: string[]): string[] {
+	if (process.platform !== "win32") return args;
+	return args.map((a) => {
+		const bad = /[%!\r\n]/.exec(a);
+		if (bad)
+			throw new Error(
+				`win32 spawn: argument contains ${JSON.stringify(bad[0])} which cmd.exe interprets even inside quotes: ${a.slice(0, 60)}`,
+			);
+		return `"${a.replace(/"/g, '""')}"`;
+	});
+}
+
 // ── pi presence + version pin (AC precondition) ─────────────────────────────
 function checkPiVersion(): string | null {
-	const r = spawnSync("pi", ["--version"], {
+	const r = spawnSync("pi", win32ShellArgs(["--version"]), {
 		encoding: "utf8",
 		timeout: VERSION_TIMEOUT_MS,
 		maxBuffer: MAX_OUTPUT_BYTES,
@@ -259,7 +327,7 @@ function checkPiVersion(): string | null {
 
 // ── AC3: a vendored extension loads on pinned pi (`-e ./ext --list-models`) ──
 function checkExtensionLoads(extPath: string, checkName: string): number {
-	const r = spawnSync("pi", ["-e", extPath, "--list-models"], {
+	const r = spawnSync("pi", win32ShellArgs(["-e", extPath, "--list-models"]), {
 		encoding: "utf8",
 		cwd: VENDOR_DIR,
 		timeout: EXT_LOAD_TIMEOUT_MS,
@@ -378,34 +446,10 @@ function startPi(
 	opts: { timeoutMs: number; env?: NodeJS.ProcessEnv },
 ): { proc: ChildProcess; done: Promise<SpawnOutcome> } {
 	const isWin = process.platform === "win32";
-	// shell:true is UNAVOIDABLE on win32 here: bare `pi` resolves to a .cmd
-	// shim, CreateProcess cannot execute a batch file without cmd.exe, and
-	// modern Node refuses shell:false on batch files outright (EINVAL,
-	// CVE-2024-27980) — so "resolve pi.cmd and spawn with shell:false" is not
-	// a real option. With shell:true Node joins args with spaces and no
-	// quoting, so wrap each arg ourselves. Safety model against cmd.exe's
-	// quote-state machine (each `"` toggles quoted state):
-	//   - `"` → `""`: parity-PRESERVING (a pair toggles state twice), so an
-	//     embedded quote cannot break out of the wrapper — `& | < > ^ ( )`
-	//     stay quoted and inert. Caveat: the child CRT collapses the pair, so
-	//     a literal `"` does not survive win32 argv — cosmetic for these
-	//     prompts, and no escaping satisfies both cmd and the CRT anyway.
-	//   - reject `%`: cmd.exe expands %VAR% even inside double quotes (C18).
-	//   - reject `!`: expands inside quotes when delayed expansion is enabled
-	//     (non-default, and not escapable from outside a batch file).
-	//   - reject CR/LF: line terminators end the command regardless of quote
-	//     state — the one genuine breakout from a quoted wrapper.
-	// POSIX path unchanged (no shell, argv passed verbatim).
-	const finalArgs = isWin
-		? args.map((a) => {
-				const bad = /[%!\r\n]/.exec(a);
-				if (bad)
-					throw new Error(
-						`win32 spawn: argument contains ${JSON.stringify(bad[0])} which cmd.exe interprets even inside quotes: ${a.slice(0, 60)}`,
-					);
-				return `"${a.replace(/"/g, '""')}"`;
-			})
-		: args;
+	// shell:true is UNAVOIDABLE on win32 here (bare `pi` is a .cmd shim —
+	// CVE-2024-27980), so args go through the shared win32ShellArgs quoting;
+	// the full safety model (quote parity + `%!`/CR/LF rejection) lives there.
+	const finalArgs = win32ShellArgs(args);
 	const proc = spawn("pi", finalArgs, {
 		cwd: VENDOR_DIR,
 		// INV-1: scoped allowlist env by default (see smokeChildEnv), never a
@@ -763,15 +807,28 @@ async function pathSocketComs(): Promise<{
 		};
 		// Poll for coms.ts's OWN session_start to write the entry — the registry
 		// is the only coordination channel between this script and the peers.
-		const waitForEntry = async (name: string): Promise<RegistryEntry | null> => {
+		// Race the poll against the peer's close: a dead peer will never write
+		// its entry, so don't burn the full poll budget on it (C5).
+		const waitForEntry = async (name: string, proc: ChildProcess): Promise<RegistryEntry | null> => {
+			let exited = proc.exitCode !== null || proc.signalCode !== null;
+			const onClose = new Promise<void>((r) => {
+				if (exited) r();
+				else
+					proc.once("close", () => {
+						exited = true;
+						r();
+					});
+			});
 			const deadline = Date.now() + REGISTRY_POLL_TIMEOUT_MS;
 			while (Date.now() < deadline) {
 				const entry = readEntry(name);
 				if (entry) return entry;
-				await new Promise((r) => setTimeout(r, 250));
+				if (exited) break;
+				await Promise.race([new Promise((r) => setTimeout(r, 250)), onClose]);
 			}
 			// Final UNCONDITIONAL read: an entry written during the last poll
-			// window must not be missed (C10).
+			// window (or by a peer that registered on its way out) must not be
+			// missed (C10).
 			return readEntry(name);
 		};
 		// A registry FILE is not proof the peer's socket is accepting — probe a
@@ -933,8 +990,10 @@ async function pathSocketComs(): Promise<{
 
 		// ── Spawn the two real peers. B first (A can only coms_send a registered
 		// target); B's prompt keeps its turn alive via `sleep` so the inbound
-		// prompt lands while the process is still running. sleep 60 covers the
-		// 45s coms_await budget plus B's own boot time (C19).
+		// prompt lands while the process is still running. The sleep-60 turn is
+		// ALSO what delays B's answer: the followUp runs only after that turn
+		// ends, so the reply lands ~70-90s after B's boot — AWAIT_TIMEOUT_MS and
+		// SPAWN_TIMEOUT_MS are sized to that latency (C19).
 		const runB = startPi(
 			[
 				"-e",
@@ -958,7 +1017,7 @@ async function pathSocketComs(): Promise<{
 		runB.proc.once("close", () => {
 			bClosedAt = Date.now();
 		});
-		const entryB = await waitForEntry("smoke-b");
+		const entryB = await waitForEntry("smoke-b", runB.proc);
 		if (!entryB) {
 			killTree(runB.proc, "SIGTERM");
 			await runB.done;
@@ -1051,7 +1110,7 @@ async function pathSocketComs(): Promise<{
 		runA.proc.once("close", () => {
 			aClosedAt = Date.now();
 		});
-		const entryA = await waitForEntry("smoke-a");
+		const entryA = await waitForEntry("smoke-a", runA.proc);
 		const [outA, outB] = await Promise.all([runA.done, runB.done]);
 
 		// ── Real registrations: entries written by coms.ts's session_start,

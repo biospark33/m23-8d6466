@@ -30,6 +30,7 @@ interface SmokeRun {
   messages_exchanged: number;
   ac_map: Record<string, boolean>;
   checks: { name: string; ok: boolean; detail?: string }[];
+  strict?: boolean;
   gate_note?: string;
   pass_with_waiver?: boolean;
   pass: boolean;
@@ -52,6 +53,19 @@ describe("oq-1 smoke run of record (2026-07-13)", () => {
     expect(gateNote).toMatch(/strict/i);
     expect(gateNote).toContain("PI_SMOKE_STRICT");
     expect(run.pass_with_waiver ?? false).toBe(false);
+    // Gen-2 reports carry an explicit strict flag; when present it must be
+    // true — a non-strict regenerated run must not satisfy this gate.
+    if ("strict" in run) expect(run.strict).toBe(true);
+    // "socket_live_round_trip is gating" is the strict-gating phrasing of
+    // BOTH report generations (gen 1: "PI_SMOKE_STRICT=1: ... is gating";
+    // gen 2: "STRICT (default): ... is gating — set PI_SMOKE_STRICT=0 to
+    // waive it"); the non-strict phrasings ("advisory-only (waived)",
+    // "PASS WITH WAIVER ... waived") never contain it.
+    expect(gateNote).toMatch(/socket_live_round_trip is gating/);
+    // Reject waiver markers (waived / WAIVER). Note: the strict gen-2 note
+    // legitimately contains "waive" ("...to waive it"), so a blanket /waiv/i
+    // exclusion would fail a valid strict gen-2 regeneration.
+    expect(gateNote).not.toMatch(/\bwaiv(?:ed|er)\b/i);
   });
 
   test("pi version pin recorded", () => {
