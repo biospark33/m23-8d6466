@@ -88,9 +88,10 @@ promoted when true peer-to-peer messaging between long-lived agents is required.
   - **Follow-ups now implemented:** responses carry a secret echo verified
     constant-time on the sender side — a harvested `msg_id` alone can't forge
     a reply, and mismatches are audit-logged as `forged_response`
-    (`coms.ts:1076-1082`); registry *files* are chmod `0600`, not just the
-    `0700` dir (`coms.ts:415-418`); fulfilled `msg_id`s are tombstoned for 1h
-    so replays can't inject a second turn (`coms.ts:865, 992`).
+    (`handleResponse`, ~`coms.ts:1223-1243`); registry *files* are chmod
+    `0600`, not just the `0700` dir (~`coms.ts:482, 510`); fulfilled `msg_id`s
+    are tombstoned for 1h so replays can't inject a second turn
+    (`fulfilledMsgIds`, ~`coms.ts:1005, 1060-1087`).
   - **Chmod behavior (reconciled):** all chmods are **best-effort** — a chmod
     failure is tolerated, not fail-fast, because the `0700` directory is the
     primary boundary and the `0600` file mode only hardens against permissive
@@ -146,24 +147,25 @@ promoted when true peer-to-peer messaging between long-lived agents is required.
 a ```` ```json ```` code fence if the assistant text is wrapped in one, then
 runs `JSON.parse` when a `response_schema` is present, returning
 `error: "response not valid JSON"` on failure. It is **NOT** validated against
-the schema (PRD §5.2; `coms.ts:2315-2326`). Response envelopes carry the
-receiver's `secret` echo (verified constant-time by the original sender;
-`coms.ts:99-103, 2331-2333`) and the prompt's `conversation_id`.
+the schema (PRD §5.2; `agent_end` handler, ~`coms.ts:2629-2635`). Response
+envelopes carry the receiver's `secret` echo (verified constant-time by the
+original sender; `secretEqual` ~`coms.ts:359`, `handleResponse`
+~`coms.ts:1231-1243`) and the prompt's `conversation_id`.
 
 | Verb | Signature | Behavior |
 |------|-----------|----------|
-| `coms_send` | `coms_send(target: string, prompt: string, conversation_id?: string, response_schema?: object)` | Sends a prompt envelope (carrying the target's registry `secret`) to a peer. `target` resolution precedence (`resolveTarget`, `coms.ts:1825-1841`): **name within the caller's project → `session_id` across all projects → name across all projects**. Returns a `msg_id` once the receiver acks. Throws if unreachable, if the target has no registry secret, or once the hop limit is reached. |
-| `coms_await` | `coms_await(msg_id: string, timeout_ms?: number)` | Blocks until the reply for `msg_id` lands or the timeout fires. Default timeout **30 min** (`PI_COMS_TIMEOUT_MS = 1_800_000`, `coms.ts:46`). Unknown `msg_id` returns an **error result** (`details.error = "unknown msg_id"` — not a throw); timeout resolves with an error result (`details.error = "timeout"`); a second concurrent `coms_await` on the same `msg_id` throws. On success the result details include `conversation_id` (D2). |
+| `coms_send` | `coms_send(target: string, prompt: string, conversation_id?: string, response_schema?: object)` | Sends a prompt envelope (carrying the target's registry `secret`) to a peer. `target` resolution precedence (`resolveTarget`, ~`coms.ts:2103`): **name within the caller's project → `session_id` across all projects → name across all projects**. Returns a `msg_id` once the receiver acks. Throws if unreachable, if the target has no registry secret, or once the hop limit is reached. |
+| `coms_await` | `coms_await(msg_id: string, timeout_ms?: number)` | Blocks until the reply for `msg_id` lands or the timeout fires. Default timeout **30 min** (`PI_COMS_TIMEOUT_MS = 1_800_000`, `coms.ts:50`). Unknown `msg_id` returns an **error result** (`details.error = "unknown msg_id"` — not a throw); timeout resolves with an error result (`details.error = "timeout"`); a second concurrent `coms_await` on the same `msg_id` throws. On success the result details include `conversation_id` (D2). |
 | `coms_get` | `coms_get(msg_id: string)` | Non-blocking poll; returns status `pending` \| `complete` \| `error` and (when complete) the response. Unknown `msg_id` returns status `error`. Result details include `conversation_id` when present. |
 | `coms_list` | `coms_list(project?: string, include_explicit?: boolean)` | Lists live peer agents (names, models, context usage). `project="*"` scans all projects; `include_explicit=true` reveals `--explicit` agents. |
 
 Fixed limits and env knobs: `MAX_HOPS = 5` is a **fixed constant**
-(`coms.ts:45`; prompts with `hops >= MAX_HOPS` are nacked) — not env-tunable.
+(`coms.ts:49`; prompts with `hops >= MAX_HOPS` are nacked) — not env-tunable.
 `PI_COMS_TIMEOUT_MS` (default 30 min) is the **sender-side** `coms_await`
-default. `PI_COMS_TURN_DEADLINE_MS` (default 30 min, `coms.ts:50`) is the
+default. `PI_COMS_TURN_DEADLINE_MS` (default 30 min, `coms.ts:54`) is the
 **receiver-side** deadline: an injected turn that never completes (session
 abort, `sendMessage` no-op after ack) is pruned from the inbound queue after
-it (`coms.ts:1522-1528`), so a dead turn can't leak its entry.
+it (~`coms.ts:1793`), so a dead turn can't leak its entry.
 
 Identity flags registered by the extension at load (`pi.registerFlag`): `--cname`,
 `--purpose`, `--project`, `--color`, `--explicit`.
@@ -173,37 +175,56 @@ Identity flags registered by the extension at load (`pi.registerFlag`): `--cname
 - **Pin:** `@mariozechner/pi-coding-agent@0.55.0` (host-installed; vendor
   `package.json` records the pin). Extension load verified against it (AC3 green).
 - **Timeout:** `coms_await` default 30 min (`PI_COMS_TIMEOUT_MS = 1_800_000`,
-  `coms.ts:46`). Override per-call via `timeout_ms`. Receiver-side turn
-  deadline `PI_COMS_TURN_DEADLINE_MS` (default 30 min, `coms.ts:50`).
-- **Relay:** `MAX_HOPS = 5` (`coms.ts:45`, fixed constant) — `coms_send`
+  `coms.ts:50`). Override per-call via `timeout_ms`. Receiver-side turn
+  deadline `PI_COMS_TURN_DEADLINE_MS` (default 30 min, `coms.ts:54`).
+- **Relay:** `MAX_HOPS = 5` (`coms.ts:49`, fixed constant) — `coms_send`
   throws once the hop count reaches the limit.
-- **INV-1 (ambient auth + redaction; no test-key sandbox):** the smoke test
+- **INV-1 (scoped child env + redaction; no test-key sandbox):** the smoke test
   uses pi's **ambient configured auth** — the live turn selects its model via
-  `PI_SMOKE_MODEL` and uses whatever auth pi already holds for that provider;
-  there is no test-key sandbox. Mitigation: env-secret values are **redacted**
-  from captured pi output and the JSON report (implemented 2026-07-13,
-  `redact()` in `scripts/coms-smoke-test.ts`; report field
-  `"redaction": "env-secret-values"`), and no secrets appear in fixtures.
+  `PI_SMOKE_MODEL` (consumed by the parent, passed as `--model`, never
+  forwarded to children) and uses whatever auth pi already holds for that
+  provider; there is no test-key sandbox. Primary mitigation: spawned pi
+  children receive a **scoped env allowlist** (`smokeChildEnv()` in
+  `scripts/coms-smoke-test.ts`) — basics
+  (PATH/HOME/USER/LOGNAME/SHELL/TERM/LANG/LC_*/TMPDIR/TMP/TEMP), the
+  per-spawn `PI_COMS_DIR`/`PI_COMS_TIMEOUT_MS` knobs, and **only the provider
+  key the selected model needs** (google forwards both `GOOGLE_API_KEY` and
+  `GEMINI_API_KEY`) — so unrelated live API keys never enter child processes.
+  Fallback: when no provider key can be identified (no `PI_SMOKE_MODEL`,
+  unknown provider prefix, or the key is unset), children get the full parent
+  env; the choice is disclosed per-run via the report's `env_scope` field.
+  Residual caveat: `HOME` is forwarded, so pi's on-disk credential store
+  under `~/.pi` remains readable by the child — env-var scoping does not
+  sandbox file-based auth. Redaction of captured output (`redact()`; report
+  field `"redaction": "env-secret-values"`) remains defense-in-depth. No
+  secrets appear in fixtures.
 - **INV-2 (per-user socket scope):** registry files live under
-  `~/.pi/coms/projects/<project>/agents/` (`COMS_DIR`, `coms.ts:41`, dir
+  `~/.pi/coms/projects/<project>/agents/` (`COMS_DIR`, `coms.ts:45`, dir
   chmod `0700`, registry files chmod `0600`, both best-effort). Sockets bind
   at `~/.pi/coms/sockets/<sessionId>.sock` when that path fits the 100-byte
-  `sun_path` budget (`makeEndpoint`, `coms.ts:269-284`), otherwise at
+  `sun_path` budget (`makeEndpoint`, ~`coms.ts:310-328`), otherwise at
   `$TMPDIR/pi-coms-<uid>/<sessionId>.sock` (`os.tmpdir()`, per-uid dir,
-  `coms.ts:281-284`); the socket dir is chmod `0700` at bind time
-  (`coms.ts:1313-1314`). Both locations are per-user. The smoke test
+  ~`coms.ts:325-327`); the socket dir is chmod `0700` at bind time
+  (~`coms.ts:1551-1552`). Both locations are per-user. The smoke test
   writes only to an isolated per-run `PI_COMS_DIR` temp dir and never mutates
   the host registry — no cross-user leakage.
 - **Live turn (DEC1):** the smoke test's live round-trip runs via model
   override — set `PI_SMOKE_MODEL` (e.g. `openrouter/anthropic/claude-haiku-4.5`)
   so AC1 does not depend on ambient (possibly expired) Anthropic OAuth. AC1 is
-  green only on real registrations + real `agent_end` events; with
-  `PI_SMOKE_STRICT=1` the socket live round-trip is gating (2026-07-13 run of
-  record passed under this mode).
+  green only on real registrations + real `agent_end` events; the strict gate
+  is the default (socket live round-trip gating; `PI_SMOKE_STRICT=0` waives it
+  with a loud `pass_with_waiver` flag) — the 2026-07-13 run of record passed
+  in strict mode.
 - **Platform (D1):** socket-coms is POSIX-only. `coms.ts` fails fast on
-  `win32` (`session_start`, `coms.ts:1210-1215` — named pipes lack
+  `win32` (`session_start`, ~`coms.ts:1430` — named pipes lack
   filesystem-permission isolation for the shared secret); subprocess-RPC is
   unaffected and remains the cross-platform path.
+- **coms-net server redelivery contract:** client-side fulfilled-`msg_id`
+  tombstones expire after 1h (`fulfilledMsgIds` in `coms-net.ts`). The hub
+  server must therefore not redeliver a prompt beyond that 1h window — or, if
+  its replay window is longer, deliveries must carry a delivery epoch so
+  clients can dedupe past the tombstone TTL. Within the window, redelivered
+  prompts are deduped by the tombstone set and never inject a second turn.
 
 ## OQ-5 — pi 0.55.0 vs coms.ts 0.73+ version skew
 
@@ -288,6 +309,16 @@ ac_map:
 Post-DEC1, the same command with `PI_SMOKE_MODEL` set exercised the live turn
 for real on 2026-07-13: AC1 is green, backed by real registrations and real
 `agent_end` events — no auth-deferral waiver path remains.
+
+**Disclosure — `bAnswered: false` in the 2026-07-13 run of record:** the
+socket round-trip verdict rests on smoke-a's stream — `coms_send` acked,
+`coms_await` returned `"pong"`, and a real `agent_end` with assistant text
+landed on the sender's stream. The `bAnswered` field is a **best-effort
+B-side heuristic** that watches smoke-b's own stream for its answering turn;
+on pi 0.55.0 it did not match the `agent_end` message shape and recorded
+`false` despite the successful round trip (internal-consistency finding from
+review round 4, where the detector was hardened). The gating signal is and
+remains the A-side evidence above; `bAnswered` is diagnostic only.
 
 AC1 was previously (incorrectly) reported `true` off a self-serialized,
 in-process JSON round-trip on the socket-coms path that never touched a real

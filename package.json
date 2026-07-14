@@ -6,7 +6,8 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
-    "lint": "bunx @biomejs/biome check src scripts tests cli-anything 2>/dev/null || bunx @biomejs/biome check ."
+    "smoke:coms": "bun scripts/coms-smoke-test.ts",
+    "lint": "bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor 2>/dev/null || bunx @biomejs/biome check ."
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

@@ -82,12 +82,23 @@ export function applyExtensionTheme(fileUrl: string, ctx: ExtensionContext): boo
 	}
 
 	const result = ctx.ui.setTheme(themeName);
-	
+
 	if (!result.success && themeName !== "synthwave") {
+		warnThemeFailureOnce(themeName);
 		return ctx.ui.setTheme("synthwave").success;
 	}
-	
+
 	return result.success;
+}
+
+// setTheme failures are otherwise invisible — the extension boots with a silent
+// fallback theme and the user can't tell their mapped theme never applied.
+// Warn once per theme name so stacked extensions don't spam the console.
+const warnedThemeFailures = new Set<string>();
+function warnThemeFailureOnce(themeName: string): void {
+	if (warnedThemeFailures.has(themeName)) return;
+	warnedThemeFailures.add(themeName);
+	console.warn(`[themeMap] failed to apply theme "${themeName}" — falling back to synthwave`);
 }
 // ── Title ──────────────────────────────────────────────────────────────────
 
@@ -106,15 +117,26 @@ export function applyExtensionTheme(fileUrl: string, ctx: ExtensionContext): boo
  */
 function primaryExtensionName(): string | null {
 	const argv = process.argv;
-	for (let i = 0; i < argv.length - 1; i++) {
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === undefined) continue;
+		// Equals form: `pi --extension=extensions/foo.ts` or `pi -e=extensions/foo.ts`.
+		// Without this, an equals-form launch yields no primary name and the LAST
+		// stacked extension's theme wins, contradicting "primary wins".
+		if (arg.startsWith("--extension=") || arg.startsWith("-e=")) {
+			const value = arg.slice(arg.indexOf("=") + 1);
+			if (value && !value.startsWith("-")) {
+				return basename(value).replace(/\.[^.]+$/, "");
+			}
+			continue;
+		}
+		if (i >= argv.length - 1) continue;
 		// The value after -e/--extension must exist and be a path, not another
 		// flag — `pi -e --mode json` would otherwise report "--mode" as the
 		// extension name. Keep scanning so a later real -e still wins.
-		if (
-			(argv[i] === "-e" || argv[i] === "--extension") &&
-			!argv[i + 1].startsWith("-")
-		) {
-			return basename(argv[i + 1]).replace(/\.[^.]+$/, "");
+		const next = argv[i + 1];
+		if ((arg === "-e" || arg === "--extension") && next && !next.startsWith("-")) {
+			return basename(next).replace(/\.[^.]+$/, "");
 		}
 	}
 	return null;
@@ -126,6 +148,12 @@ function primaryExtensionName(): string | null {
  * same value — no coordination or shared state required.
  *
  * Deferred 150 ms to fire after Pi's own startup title-set.
+ *
+ * Known race: the 150 ms defer is a heuristic, not a happens-before edge.
+ * Under load Pi's startup title-set can land AFTER this timer fires, so Pi's
+ * title wins and the extension title is lost (or, with stacked extensions,
+ * ordering can invert). The title is cosmetic; accept the race rather than
+ * coupling to Pi internals for a deterministic ordering.
  */
 function applyExtensionTitle(ctx: ExtensionContext): void {
 	if (!ctx.hasUI) return;

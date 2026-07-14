@@ -259,3 +259,41 @@ PI_SMOKE_MODEL=openrouter/anthropic/claude-haiku-4.5`): `pass: true`, all 10
 checks ok, AC1 true (both clauses), both AC3 checks true — raw JSON at
 `_bmad-output/sprint-artifacts/_research/oq-1-smoke-run-2026-07-13.json`,
 embedded in the OQ-1 artifact Evidence section.
+
+### Review Findings — Round 4 (2026-07-13)
+
+bmad-code-review round 4: 6 layers (blind/edge/adversarial hunters +
+verification-gap + acceptance-auditor) over coms.ts, coms-net.ts, the smoke
+test, and docs/themeMap. ~70 raw findings → 56 patch items, 2 dismissed
+(documented scope deviation; informational), 0 decision-needed. **56/56
+resolved** (55 patched; 1 verified already-correct in current code). A
+regression re-review of the fix diff caught 17 follow-up issues (3 coms.ts,
+8 coms-net.ts, 6 script/docs — incl. a real turnQueue reply-loss regression
+from the round-4 edits); all 17 fixed. Wiring the vendor dir into tsconfig
+with real pi 0.55.0 types surfaced 52 latent strictness errors (implicit-any
+through `any`-typed safe-register helpers, unchecked indexed access, pi API
+`number | null` pct) — all fixed without behavior change. Post-remediation:
+repo `tsc --noEmit` clean, biome clean, `bun test` green (6/6, incl. the new
+oq1-evidence gate). Key themes:
+
+- [x] Session-latch races: concurrent session_start/shutdown serialized on one
+  latch (both files); bounded init spin; exit-handler install-once + budget
+  guards; duplicate-safe tool/command registration [coms.ts, coms-net.ts]
+- [x] Response/prompt size caps at both trust boundaries; nack-as-rejection;
+  sender field sanitization; corrupt-registry pruning; queue/tombstone caps;
+  in-flight awaits resolved on reset/shutdown [coms.ts, coms-net.ts]
+- [x] Raw-socket negative probes (wrong secret, hop overflow, oversized line)
+  augment the client-side shape self-check (now honestly labeled as a drift
+  detector); strict gate is now the default with a loud `pass_with_waiver`
+  mode [coms-smoke-test.ts]
+- [x] INV-1 env scoping: pi children get a minimal env allowlist (only the
+  needed provider key; full-env fallback disclosed via `env_scope`); redaction
+  demoted to defense-in-depth [coms-smoke-test.ts, oq-1-coms-arch-decision.md]
+- [x] Docs: stale coms.ts line refs refreshed to symbol+approx-line form;
+  `bAnswered:false` disclosed in Evidence; coms-net server redelivery
+  contract recorded [oq-1-coms-arch-decision.md]
+- [x] Repo wiring: `smoke:coms` script, vendor dir in lint paths and tsconfig
+  include (pi 0.55.0 types via vendor devDependency), `tests/oq1-evidence.test.ts`
+  gating the run of record [package.json, tsconfig.json, tests/]
+- [x] themeMap: `--extension=path` equals-form parsed, title-defer race
+  documented, theme-apply failures warn once [themeMap.ts]

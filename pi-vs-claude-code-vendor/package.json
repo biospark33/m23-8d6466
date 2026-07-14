@@ -16,5 +16,8 @@
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "0.55.0"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "0.55.0"
   }
 }
