@@ -1,0 +1,5 @@
+name: euro-flood
+command: sh
+args:
+  - "-c"
+  - 'awk "BEGIN{for(i=0;i<300000;i++)printf \"€\"}"'

@@ -1,0 +1,5 @@
+name: marker-probe
+command: sh
+args:
+  - "-c"
+  - "echo PARENT_MARKER=$PARENT_MARKER"

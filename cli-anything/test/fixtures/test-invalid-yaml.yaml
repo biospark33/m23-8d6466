@@ -1,0 +1,7 @@
+name: invalid-yaml
+command: sh
+args:
+  - "-c"
+  - "echo hi
+env:
+  QDS_PROBE: x

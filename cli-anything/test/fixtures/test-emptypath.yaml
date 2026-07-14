@@ -1,0 +1,7 @@
+name: empty-path-probe
+command: sh
+args:
+  - "-c"
+  - "echo PATH=$PATH"
+env:
+  PATH: ""

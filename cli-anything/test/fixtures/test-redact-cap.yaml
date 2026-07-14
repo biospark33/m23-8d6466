@@ -1,0 +1,9 @@
+name: redact-recap
+command: sh
+args:
+  - "-c"
+  # 262118 A's + 18-char secret + 8 A's = exactly MAX_STDOUT_EXCERPT bytes.
+  # The secret is not at the cut, so after replacing it with the longer
+  # "[REDACTED:MY_SECRET_TOKEN]" marker and re-capping, the full marker
+  # remains visible and the excerpt stays within the cap.
+  - 'head -c 262118 /dev/zero | tr "\0" A; printf "%s" "$MY_SECRET_TOKEN"; head -c 8 /dev/zero | tr "\0" A'
