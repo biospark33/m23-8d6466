@@ -1,0 +1,23 @@
+{
+  "name": "pi-vs-claude-code-vendor",
+  "private": true,
+  "type": "module",
+  "description": "Vendored Pi coms extensions (coms.ts + coms-net.ts) for QDS-Factory Pi swarm messaging. Loaded via `pi -e ./coms.ts`; not a published package.",
+  "license": "MIT",
+  "_provenance": {
+    "source_repo": "https://github.com/disler/pi-vs-claude-code",
+    "source_path": "extensions/",
+    "commit": "0ed11f44932fdef29bd98467700019762298f50d",
+    "commit_date": "2026-07-10T16:09:59Z",
+    "vendored_files": ["coms.ts", "coms-net.ts", "themeMap.ts"],
+    "vendored_at": "2026-07-10",
+    "license_note": "Upstream is MIT (Copyright (c) 2026 IndyDevDan); the full license text and attribution ship in ./LICENSE alongside the vendored files, as MIT requires.",
+    "notes": "themeMap.ts is a local import of coms.ts/coms-net.ts and is vendored to keep the extensions self-contained. External imports (@mariozechner/pi-coding-agent, @mariozechner/pi-tui, @sinclair/typebox) are provided by the pi runtime at load time."
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "0.55.0"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "0.55.0"
+  }
+}

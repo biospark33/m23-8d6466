@@ -1,0 +1,83 @@
+{
+  "story": "p0-2-coms-vendor-decision",
+  "pi_version": "0.55.0",
+  "pinned": true,
+  "smoke_model": "openrouter/anthropic/claude-haiku-4.5",
+  "models_listed": 251,
+  "models_listed_coms_net": 251,
+  "paths": {
+    "subprocess_rpc": {
+      "registered": 2,
+      "exchanged": 2,
+      "spawn_errors": 0
+    },
+    "socket_coms": {
+      "registered": 2,
+      "exchanged": 1,
+      "sendAcked": true,
+      "bAnswered": false
+    }
+  },
+  "agents_registered": 4,
+  "messages_exchanged": 3,
+  "ac_map": {
+    "AC1_make_or_break_rpc_roundtrip_+_>=2socket_peers": true,
+    "AC3_extension_loads_coms": true,
+    "AC3_extension_loads_coms_net": true
+  },
+  "checks": [
+    {
+      "name": "pi_version_pin",
+      "ok": true,
+      "detail": "found \"0.55.0\""
+    },
+    {
+      "name": "ac3_extension_loads_coms",
+      "ok": true,
+      "detail": "exit=0, header=true, models_listed=251"
+    },
+    {
+      "name": "ac3_extension_loads_coms_net",
+      "ok": true,
+      "detail": "exit=0, header=true, models_listed=251"
+    },
+    {
+      "name": "socket_peer_b_ready",
+      "ok": true,
+      "detail": "smoke-b accepting connections on its advertised endpoint"
+    },
+    {
+      "name": "rpc_stream_parse",
+      "ok": true,
+      "detail": "2/2 subprocess JSON streams opened & parsed"
+    },
+    {
+      "name": "rpc_live_round_trip",
+      "ok": true,
+      "detail": "2 agent_end round-trip(s) with assistant text"
+    },
+    {
+      "name": "socket_registry_two_agents",
+      "ok": true,
+      "detail": "2 peers registered by coms.ts session_start in isolated PI_COMS_DIR (smoke-a pid 67865, smoke-b pid 67837)"
+    },
+    {
+      "name": "inv2_per_user_isolation",
+      "ok": true,
+      "detail": "registry confined to /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/coms-smoke-tnd13m/coms; dir mode=700 uid=501"
+    },
+    {
+      "name": "socket_envelope_shape_coverage",
+      "ok": true,
+      "detail": "real Prompt+ResponseEnvelope shapes (incl. required secret from smoke-b's registry entry) round-tripped through JSON (shape coverage only — does not count toward messages_exchanged/AC1)"
+    },
+    {
+      "name": "socket_live_round_trip",
+      "ok": true,
+      "detail": "coms_send acked (msg_id 01KXEJW2EB7B3ZN3XY8TFH3T69), coms_await returned \"pong\", agent_end with assistant text in smoke-a's stream"
+    }
+  ],
+  "gate_note": "PI_SMOKE_STRICT=1: socket_live_round_trip is gating",
+  "redaction": "env-secret-values",
+  "pass": true
+}

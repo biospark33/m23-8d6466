@@ -13,6 +13,6 @@
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"],
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts", "pi-vs-claude-code-vendor/**/*.ts"],
   "exclude": ["node_modules", "cli-anything", "_bmad-output"]
 }
