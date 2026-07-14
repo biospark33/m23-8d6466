@@ -1,0 +1,5 @@
+name: probe-flood
+command: sh
+args:
+  - "-c"
+  - "echo QDS_PROBE=x7; head -c 300000 /dev/zero | tr '\\0' A"

@@ -1,0 +1,5 @@
+name: timeout-test
+command: sh
+args:
+  - "-c"
+  - "echo QDS_PROBE=timeout; sleep 30"

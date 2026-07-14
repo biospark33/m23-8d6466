@@ -1,0 +1,6 @@
+name: probe-cut
+command: sh
+args:
+  - "-c"
+  # Fill the cap so the probe line starts near the end and is cut mid-value.
+  - "head -c 262130 /dev/zero | tr '\\0' A; printf 'QDS_PROBE=%s' $(head -c 100 /dev/zero | tr '\\0' B)"

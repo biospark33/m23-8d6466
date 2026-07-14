@@ -92,3 +92,28 @@ Follow-up adversarial re-review returned two blocking items, both fixed: trailin
 - [x] CLI hardening: Zod/YAML errors sanitized for stderr — field paths + issue codes only, never received manifest values (INV-2); `--timeout-ms` flag added (space and `=` forms); usage text documents both `--manifest` forms and the leading-`-` caveat.
 - [x] Result schema: `exit_code: number | null` added to `HarnessResult` and populated from the child's real close code (additive field in the structured JSON output).
 - [x] Test coverage: grandchild process-tree kill on timeout; win32 `mergeEnv` via platform param (Path casing preserved, no duplicates, empty-PATH no-op); e2e stderr drained with kill-timeout and guarded JSON.parse (POSIX-only shell fixtures, win32 covered at unit level); `spawn_error_code` asserted `"ENOENT"`; real malformed-manifest fixture (65-path no longer passes vacuously via ENOENT); 50-key log cap, `cleanEnv` filtering, redaction re-cap, min-prefix boundary redaction, probe-on-truncation, timeout-race classification, `exit_code` presence, stderr sanitization, extended `SECRET_KEY_RE` patterns.
+
+#### Round 3 — code review of fix/p0-1-code-review-findings (2026-07-14)
+
+3 parallel layers: Blind Hunter, Edge Case Hunter, Acceptance Auditor; **decision_needed: 0, patch: 18, defer: 0, dismissed: 1**. Dismissed: F1 — manifest-supplied env values are not redacted; this is already the documented INV-2 threat model (operator-trusted manifest input; parent env secrets are redacted by heuristic). All patch findings fixed, including low-severity items.
+
+- [x] **Probe preservation on truncation** (`runner.ts:extractProbe`): `env_probe_result` is now extracted only from *complete* lines; an early `QDS_PROBE=x7` line followed by a large flood is still reported, while a probe cut mid-value remains `null`.
+- [x] **Timeout kill hang / process-tree leak**: `killChildTree()` now has `child.kill('SIGKILL')` fallbacks if group kill / `taskkill` fails; an unref'd 5 s watchdog force-settles as `timeout` if `close` never fires (handles daemonizing descendants). `stdout` stream errors also kill the live child before settling.
+- [x] **Redaction ordering / tail leaks**: `redactSecrets()` processes parent secret values longest-first so overlapping values cannot leave tails behind.
+- [x] **Boundary-prefix leak**: trailing secret fragments shorter than `MIN_BOUNDARY_PREFIX_LEN` are stripped from the end of a truncated excerpt instead of emitted, closing the 1–7 char leak path without noisy mangling.
+- [x] **Timeout-race classification**: extracted `classifyExit()`; timer and signal handlers guard on `signalCode`/`settled`/`timedOut` so natural exits at the timeout instant are not misclassified as 124 and reused PIDs/process groups are never signaled; deterministic unit tests replace the vacuous wall-clock test.
+- [x] **Signal-handler install window + SIGHUP**: SIGINT/SIGTERM/SIGHUP handlers are installed before `spawn()` via a mutable child holder, removing the orphan window; SIGHUP now reaps the detached tree on terminal close.
+- [x] **Log forging (INV-3)**: env key names are sanitized for control characters (`\r\n\x00-\x1f` → `?`) in the key-only log line.
+- [x] **JSON contract uniformity**: every settle path now emits `truncated`, `signal`, `spawn_error_code`, and `exit_code` explicitly, eliminating path-dependent absent fields.
+- [x] **`env_probe_result` cap**: probe values are capped to 1024 UTF-16 code units, surrogate-safe.
+- [x] **Comment accuracy**: corrected the streaming cap invariant comment to note final enforcement at `settle`; narrowed the win32 `mergeEnv` duplicate-collapse comment to PATH-only.
+- [x] **win32 correctness in tests**: `mergeEnv` tests use explicit `;` delimiter for the win32 branch; POSIX-only sh/signal tests are `skipIf(process.platform === "win32")` gated.
+- [x] **Test hardening**: timeout result asserts `signal: "SIGKILL"`; re-cap test asserts the full `[REDACTED:<key>]` marker, no secret value, and cap invariant; grandchild-kill test passes the PID file path via env instead of shell interpolation.
+- [x] **CLI unknown-flag rejection**: `index.ts` rejects unknown/misspelled flags (including `=value` forms) with usage on stderr and exit 64.
+- [x] **Strict `--timeout-ms` parsing**: accepts only decimal digits in the range `1..2^31-1`; rejects `1e3`, `0x10`, `0`, negatives, and oversized values.
+- [x] **Error classification / INV-2 stderr sanitization**: ENOENT → 66 with the operator-supplied manifest path; YAML syntax errors → 65 with line/column position but no source values; unexpected internal failures → 70; all stderr output stays value-free.
+- [x] **Unknown `exit_class` default**: mapping now defaults to 1 with a stderr note instead of silently exiting 0 when `EXIT_CODES[exit_class]` is undefined.
+- [x] **spawn_error test isolation**: `PATH` for the missing-binary test is set to a freshly-created empty temp dir, removing host-dependency on whether `/usr/bin/warren` exists.
+- [x] **e2e coverage of 124/127/65 paths**: real-binary e2e tests now assert CLI exit codes and structured output for timeout (`124`, `exit_class: timeout`, `signal: SIGKILL`), spawn_error (`127`, `ENOENT`), and manifest validation errors (`65`); kill-timer uses process-group kill and reaps grandchildren.
+
+Final verification after all three waves: **83 pass / 0 fail** in `cli-anything`; root `bun test` pass; `bunx tsc --noEmit` clean.

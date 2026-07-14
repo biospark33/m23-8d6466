@@ -1,0 +1,5 @@
+name: oversized-probe
+command: sh
+args:
+  - "-c"
+  - "printf 'QDS_PROBE=%s\\n' $(head -c 2000 /dev/zero | tr '\\0' B)"

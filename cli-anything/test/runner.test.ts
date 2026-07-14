@@ -2,9 +2,10 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import {
   buildSpawn,
+  classifyExit,
   logEnvKeys,
   MAX_STDOUT_EXCERPT,
   mergeEnv,
@@ -70,7 +71,7 @@ describe("mergeEnv (INV-1 additive merge)", () => {
 describe("mergeEnv win32 PATH handling (via the platform param)", () => {
   it("parent `Path` + manifest `PATH` → single `Path` key with append (no duplicate)", () => {
     const merged = mergeEnv({ Path: "C:\\bin" }, { PATH: "C:\\evil" }, "win32");
-    expect(merged.Path).toBe(`C:\\bin${delimiter}C:\\evil`);
+    expect(merged.Path).toBe("C:\\bin;C:\\evil");
     expect(Object.keys(merged).filter((k) => k.toLowerCase() === "path")).toEqual([
       "Path",
     ]);
@@ -86,7 +87,7 @@ describe("mergeEnv win32 PATH handling (via the platform param)", () => {
 
   it("matches the manifest PATH key case-insensitively", () => {
     const merged = mergeEnv({ Path: "C:\\bin" }, { path: "C:\\evil" }, "win32");
-    expect(merged.Path).toBe(`C:\\bin${delimiter}C:\\evil`);
+    expect(merged.Path).toBe("C:\\bin;C:\\evil");
     expect(Object.keys(merged).filter((k) => k.toLowerCase() === "path")).toEqual([
       "Path",
     ]);
@@ -117,6 +118,17 @@ describe("redactSecrets (extended SECRET_KEY_RE heuristic)", () => {
     });
     expect(out).toBe("short7! visible-text");
   });
+
+  it("processes overlapping secret values longest-first so no tail leaks", () => {
+    const parent = {
+      MY_PASS: "hunter2",
+      MY_TOKEN: "hunter2-abc123",
+    };
+    const out = redactSecrets("value: hunter2-abc123", parent);
+    expect(out).not.toContain("hunter2-abc123");
+    expect(out).not.toContain("hunter2");
+    expect(out).toContain("[REDACTED:MY_TOKEN]");
+  });
 });
 
 describe("buildSpawn", () => {
@@ -134,7 +146,54 @@ describe("buildSpawn", () => {
   });
 });
 
-describe("runManifest (integration via warren shim)", () => {
+describe("classifyExit", () => {
+  it("natural exit at the timeout instant is not classified as timeout", () => {
+    expect(classifyExit(true, 0, null)).toEqual({
+      exit_class: "ok",
+      signal: null,
+      exit_code: 0,
+    });
+  });
+
+  it("signal kill after timeout attempt is classified as timeout with the real signal", () => {
+    expect(classifyExit(true, null, "SIGTERM")).toEqual({
+      exit_class: "timeout",
+      signal: "SIGTERM",
+      exit_code: null,
+    });
+  });
+
+  it("forced timeout fallback reports SIGKILL when no signal is known", () => {
+    expect(classifyExit(true, null, null)).toEqual({
+      exit_class: "timeout",
+      signal: "SIGKILL",
+      exit_code: null,
+    });
+  });
+
+  it("classifies natural ok and nonzero exits", () => {
+    expect(classifyExit(false, 0, null)).toEqual({
+      exit_class: "ok",
+      signal: null,
+      exit_code: 0,
+    });
+    expect(classifyExit(false, 3, null)).toEqual({
+      exit_class: "nonzero",
+      signal: null,
+      exit_code: 3,
+    });
+  });
+
+  it("classifies a signal-killed child that did not time out as nonzero", () => {
+    expect(classifyExit(false, null, "SIGKILL")).toEqual({
+      exit_class: "nonzero",
+      signal: "SIGKILL",
+      exit_code: null,
+    });
+  });
+});
+
+describe.skipIf(process.platform === "win32")("runManifest (integration via warren shim)", () => {
   it("AC1: env-bearing manifest → stdout contains QDS_PROBE=x7", async () => {
     const res = await runManifest(join(FIXTURES, "test-env.yaml"), {
       env: { ...process.env, PATH: shimPath },
@@ -206,6 +265,7 @@ describe("runManifest (integration via warren shim)", () => {
     expect(res.exit_class).toBe("timeout");
     // Killed by signal, so there is no real exit code.
     expect(res.exit_code).toBeNull();
+    expect(res.signal).toBe("SIGKILL");
     expect(Date.now() - start).toBeLessThan(4000);
   });
 
@@ -219,6 +279,15 @@ describe("runManifest (integration via warren shim)", () => {
     expect(res.exit_class).toBe("ok");
     expect(res.exit_code).toBe(0);
     expect(res.env_probe_result).toBe("x7");
+  });
+
+  it("does not leak SIGHUP listeners after settle", async () => {
+    if (process.platform === "win32") return;
+    const before = process.listenerCount("SIGHUP");
+    await runManifest(join(FIXTURES, "test-env.yaml"), {
+      env: { ...process.env, PATH: shimPath },
+    });
+    expect(process.listenerCount("SIGHUP")).toBe(before);
   });
 
   it("timeout kills the whole process tree, including grandchildren", async () => {
@@ -238,7 +307,11 @@ describe("runManifest (integration via warren shim)", () => {
           "command: sh",
           "args:",
           '  - "-c"',
-          `  - "sleep 30 & echo $! > ${pidFile}; exec sleep 30"`,
+          "  - >-",
+          '    sleep 30 & echo $! > "$PIDFILE";',
+          "    exec sleep 30",
+          "env:",
+          `  PIDFILE: ${pidFile}`,
           "",
         ].join("\n"),
       );
@@ -280,6 +353,79 @@ describe("runManifest (integration via warren shim)", () => {
     }
   });
 
+  it(
+    "force-settles via watchdog when a descendant holds the stdout pipe open after timeout",
+    async () => {
+    // Deterministic simulation: spawn a grandchild in a new session (setsid)
+    // that inherits and holds the stdout pipe open. The direct child is killed
+    // by the timeout group-kill, but `close` cannot fire until the escaped
+    // grandchild releases the pipe. The 5s watchdog must force-settle.
+    const tmpDir = join(
+      tmpdir(),
+      `qds-watchdog-${process.pid}-${Date.now()}`,
+    );
+    const pidFile = join(tmpDir, "gchild.pid");
+    const manifestPath = join(tmpDir, "manifest.yaml");
+    await mkdir(tmpDir, { recursive: true });
+    let gchildPid: number | undefined;
+    try {
+      await Bun.write(
+        manifestPath,
+        [
+          "name: watchdog-grandchild",
+          "command: sh",
+          "args:",
+          '  - "-c"',
+          "  - >-",
+          `    perl -e 'use POSIX qw(setsid); setsid(); exec("sleep","1000") or die $!;' & echo $! > "$PIDFILE";`,
+          "    exec sleep 30",
+          "env:",
+          `  PIDFILE: ${pidFile}`,
+          "",
+        ].join("\n"),
+      );
+      const start = Date.now();
+      const resPromise = runManifest(manifestPath, {
+        env: { ...process.env, PATH: shimPath },
+        // Give the grandchild enough time to call setsid() before the timeout
+        // kill, otherwise it is still in the parent's group and dies normally.
+        timeoutMs: 1500,
+      });
+      for (let i = 0; i < 100 && !existsSync(pidFile); i++) await sleep(25);
+      gchildPid = Number(readFileSync(pidFile, "utf8").trim());
+      const res = await resPromise;
+      const elapsed = Date.now() - start;
+
+      expect(res.exit_class).toBe("timeout");
+      expect(res.exit_code).toBeNull();
+      expect(res.signal).toBe("SIGKILL");
+      // The watchdog only fires after the timeout plus its 5s grace.
+      expect(elapsed).toBeGreaterThan(4800);
+      expect(elapsed).toBeLessThan(9000);
+
+      // Confirm the grandchild really escaped the group kill and held the pipe.
+      let aliveAfter = false;
+      try {
+        process.kill(gchildPid, 0);
+        aliveAfter = true;
+      } catch {
+        aliveAfter = false;
+      }
+      expect(aliveAfter).toBe(true);
+
+      // Clean up the orphaned grandchild that held the pipe open.
+      if (Number.isInteger(gchildPid)) {
+        try {
+          process.kill(gchildPid, "SIGKILL");
+        } catch {
+          // Already dead.
+        }
+      }
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  }, { timeout: 15_000 });
+
   it("spawn_error: warren unresolvable on PATH → spawn_error with ENOENT", async () => {
     const start = Date.now();
     const res = await runManifest(join(FIXTURES, "test-badcmd.yaml"), {
@@ -311,6 +457,35 @@ describe("runManifest (integration via warren shim)", () => {
     expect(res.env_probe_result).toBeNull();
   });
 
+  it("reports a probe emitted before a truncation flood", async () => {
+    const res = await runManifest(join(FIXTURES, "test-probe-flood.yaml"), {
+      env: { ...process.env, PATH: shimPath },
+    });
+    expect(res.exit_class).toBe("ok");
+    expect(res.truncated).toBe(true);
+    expect(res.env_probe_result).toBe("x7");
+  });
+
+  it("nulls the probe when the probe line itself is cut mid-value", async () => {
+    const res = await runManifest(join(FIXTURES, "test-probe-cut.yaml"), {
+      env: { ...process.env, PATH: shimPath },
+    });
+    expect(res.exit_class).toBe("ok");
+    expect(res.truncated).toBe(true);
+    expect(res.env_probe_result).toBeNull();
+  });
+
+  it("caps an oversized QDS_PROBE value at MAX_PROBE_RESULT_LEN", async () => {
+    const res = await runManifest(join(FIXTURES, "test-oversized-probe.yaml"), {
+      env: { ...process.env, PATH: shimPath },
+    });
+    expect(res.exit_class).toBe("ok");
+    expect(res.env_probe_result).not.toBeNull();
+    expect(res.env_probe_result!.length).toBeLessThanOrEqual(1024);
+    // It should be the leading portion of the probe value, not truncated mid-surrogate.
+    expect(res.env_probe_result).toBe("B".repeat(1024));
+  });
+
   it("does not leak a secret straddling the truncation boundary (INV-2)", async () => {
     const secretValue = "hunter2-super-secret-boundary-value";
     const res = await runManifest(join(FIXTURES, "test-bigsecret.yaml"), {
@@ -323,26 +498,30 @@ describe("runManifest (integration via warren shim)", () => {
     for (let k = 8; k <= secretValue.length; k++) {
       expect(res.stdout_excerpt.includes(secretValue.slice(0, k))).toBe(false);
     }
+    // The excerpt must not end with any prefix of the secret, and the marker
+    // at the tail must be complete (not a fragment like "[REDACTE").
+    for (let k = 1; k <= secretValue.length; k++) {
+      expect(res.stdout_excerpt.endsWith(secretValue.slice(0, k))).toBe(false);
+    }
     expect(res.stdout_excerpt).toContain("[REDACTED:MY_SECRET_TOKEN]");
+    expect(res.stdout_excerpt.endsWith("[REDACTED")).toBe(false);
     expect(res.stdout_excerpt.length).toBeLessThanOrEqual(MAX_STDOUT_EXCERPT);
     // Benign output ahead of the cut is untouched (no mangling).
     expect(res.stdout_excerpt.startsWith("A".repeat(100))).toBe(true);
   });
 
-  it("leaves a short (< 8 chars) trailing secret prefix unredacted without mangling output", async () => {
+  it("strips a short (< 8 chars) trailing secret prefix at the boundary without leaking it", async () => {
     const secretValue = "hunter2supersecret";
     const res = await runManifest(join(FIXTURES, "test-bigsecret-short.yaml"), {
       env: { ...process.env, PATH: shimPath, MY_SECRET_TOKEN: secretValue },
     });
     expect(res.exit_class).toBe("ok");
     expect(res.truncated).toBe(true);
-    // 4 chars survive the cut — below MIN_BOUNDARY_PREFIX_LEN, so the excerpt
-    // is left as-is: no [REDACTED:...] spray over benign content.
+    // The short fragment is stripped entirely: no secret characters leak and
+    // no [REDACTED:...] marker is sprayed into benign output.
     expect(res.stdout_excerpt).not.toContain("[REDACTED:");
-    expect(res.stdout_excerpt.endsWith(secretValue.slice(0, 4))).toBe(true);
-    // But no 8+ char prefix of the secret may survive either way.
-    for (let k = 8; k <= secretValue.length; k++) {
-      expect(res.stdout_excerpt.includes(secretValue.slice(0, k))).toBe(false);
+    for (let k = 1; k <= secretValue.length; k++) {
+      expect(res.stdout_excerpt.endsWith(secretValue.slice(0, k))).toBe(false);
     }
     expect(res.stdout_excerpt.length).toBeLessThanOrEqual(MAX_STDOUT_EXCERPT);
   });
@@ -353,12 +532,14 @@ describe("runManifest (integration via warren shim)", () => {
       env: { ...process.env, PATH: shimPath, MY_SECRET_TOKEN: secretValue },
     });
     expect(res.exit_class).toBe("ok");
-    // Output is exactly cap-sized (not truncated) and ends in the full secret;
-    // the [REDACTED:...] marker is longer than the secret, so without the
-    // post-redaction re-cap the excerpt would exceed MAX_STDOUT_EXCERPT.
-    expect(res.stdout_excerpt.length).toBeLessThanOrEqual(MAX_STDOUT_EXCERPT);
+    expect(res.truncated).toBe(false);
+    // The full redaction marker is present (not a truncated fragment), the
+    // secret value is gone, and the excerpt stays within the cap.
+    expect(res.stdout_excerpt).toContain("[REDACTED:MY_SECRET_TOKEN]");
     expect(res.stdout_excerpt).not.toContain(secretValue);
-    expect(res.stdout_excerpt).toContain("[REDACTED");
+    expect(res.stdout_excerpt.length).toBeLessThanOrEqual(MAX_STDOUT_EXCERPT);
+    // No partial marker bleeds at the tail.
+    expect(res.stdout_excerpt.endsWith("[REDACTED")).toBe(false);
   });
 
   it("keeps stdout_excerpt within the cap with multi-byte content at the cut", async () => {
@@ -398,6 +579,21 @@ describe("runManifest (integration via warren shim)", () => {
     const logLine = stderr.split("\n").find((l) => l.includes("env keys ->"));
     expect(logLine).toBeDefined();
     expect(logLine!).not.toContain("QDS_UNDEFINED_KEY");
+  });
+
+  it("sanitizes control characters in env key names for logging (INV-3)", async () => {
+    const badKey = "BAD\r\nKEY\x01";
+    const { stderr } = await withCapturedStderr(() =>
+      runManifest(join(FIXTURES, "test-env.yaml"), {
+        env: { ...process.env, PATH: shimPath, [badKey]: "value" },
+      }),
+    );
+    const logLine = stderr.split("\n").find((l) => l.includes("env keys ->"));
+    expect(logLine).toBeDefined();
+    // The raw multi-line key name must not appear in the log line.
+    expect(logLine!).not.toContain(badKey);
+    // Control chars are replaced with '?' so the log stays single-line.
+    expect(logLine!).toContain("BAD??KEY?");
   });
 });
 

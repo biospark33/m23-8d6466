@@ -1,14 +1,16 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { delimiter as PATH_DELIM } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { parseManifestFile } from "./manifest.ts";
-import type { HarnessResult, Manifest } from "./types.ts";
+import type { ExitClass, HarnessResult, Manifest } from "./types.ts";
 
 /** Default wall-clock timeout for a harness invocation: 10 minutes. */
 export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Hard cap on captured subprocess stdout kept in memory / emitted. */
 export const MAX_STDOUT_EXCERPT = 256 * 1024;
+
+/** Hard cap on the extracted QDS_PROBE value. */
+const MAX_PROBE_RESULT_LEN = 1024;
 
 /** Max env key names shown in the log line (INV-3: key names only). */
 const MAX_LOGGED_ENV_KEYS = 50;
@@ -28,6 +30,8 @@ const MIN_REDACTABLE_VALUE_LEN = 8;
 /** Minimum trailing-prefix length redacted at the truncation cut boundary. */
 const MIN_BOUNDARY_PREFIX_LEN = MIN_REDACTABLE_VALUE_LEN;
 
+const PROBE_KEY = "QDS_PROBE=";
+
 /**
  * Enforce the excerpt cap (measured in UTF-16 code units, matching
  * String.prototype.length) without leaving a trailing unpaired surrogate
@@ -35,6 +39,14 @@ const MIN_BOUNDARY_PREFIX_LEN = MIN_REDACTABLE_VALUE_LEN;
  */
 function capExcerpt(text: string): string {
   return text.slice(0, MAX_STDOUT_EXCERPT).replace(/[\uD800-\uDBFF]$/, "");
+}
+
+/**
+ * Enforce the probe-result cap (measured in UTF-16 code units) without
+ * leaving a trailing unpaired surrogate.
+ */
+function capProbe(value: string): string {
+  return value.slice(0, MAX_PROBE_RESULT_LEN).replace(/[\uD800-\uDBFF]$/, "");
 }
 
 type EnvMap = Record<string, string>;
@@ -55,11 +67,11 @@ function cleanEnv(env: NodeJS.ProcessEnv): EnvMap {
  *
  * PATH is special-cased (AC3): a manifest PATH does NOT replace the parent
  * PATH — it is APPENDED (`parent + delimiter + manifest`). An EMPTY manifest
- * PATH leaves the parent PATH unchanged (no dangling delimiter). On win32 the
- * PATH key is matched case-insensitively in BOTH the manifest and the parent
- * env, the parent's original key casing is preserved, and case-variant
- * duplicate keys are collapsed. Every other key follows plain last-wins
- * `{ ...parent, ...manifest }` merge.
+ * PATH leaves the parent PATH unchanged (no dangling delimiter). On win32,
+ * PATH is special-cased again: the PATH key is matched case-insensitively in
+ * BOTH the manifest and the parent env, the parent's original key casing is
+ * preserved, and case-variant duplicate PATH keys are collapsed. Every other
+ * key follows plain last-wins `{ ...parent, ...manifest }` merge.
  *
  * The `platform` parameter exists so the win32 branch is unit-testable.
  */
@@ -83,14 +95,15 @@ export function mergeEnv(
       const parentPath =
         parentPathKey !== undefined ? parent[parentPathKey]! : "";
       const targetKey = parentPathKey ?? pathKey;
+      const pathDelim = platform === "win32" ? ";" : ":";
       const mergedPath =
         manifestPath === ""
           ? parentPath // Empty manifest PATH: leave the parent PATH unchanged.
           : parentPath
-            ? `${parentPath}${PATH_DELIM}${manifestPath}`
+            ? `${parentPath}${pathDelim}${manifestPath}`
             : manifestPath;
       if (platform === "win32") {
-        // Collapse case-variant duplicates (e.g. parent `Path` + manifest `PATH`).
+        // Collapse case-variant duplicate PATH keys (e.g. parent `Path` + manifest `PATH`).
         for (const k of Object.keys(merged)) {
           if (k !== targetKey && k.toLowerCase() === "path") delete merged[k];
         }
@@ -110,16 +123,38 @@ export function logEnvKeys(env: EnvMap): string[] {
 }
 
 /**
+ * Replace control characters that could forge log lines when embedded in env
+ * key names (INV-3). The real env keys are untouched; only the log line is
+ * sanitized.
+ */
+function sanitizeLogKey(key: string): string {
+  let out = "";
+  for (const ch of key) {
+    const code = ch.codePointAt(0) ?? 0;
+    out += code <= 0x1f ? "?" : ch;
+  }
+  return out;
+}
+
+/**
  * Redact secret-looking PARENT env values from a string (INV-2 hardening).
  * Only the pre-merge parent env is consulted: manifest-supplied values (e.g.
  * the QDS_PROBE probe) are never redacted.
+ *
+ * Candidates are processed longest-value-first so a shorter secret that is a
+ * substring of a longer one cannot replace inside the longer occurrence and
+ * leave the longer secret's tail leaking.
  */
 export function redactSecrets(text: string, parentEnv: EnvMap): string {
   let out = text;
-  for (const [key, value] of Object.entries(parentEnv)) {
-    if (value.length >= MIN_REDACTABLE_VALUE_LEN && SECRET_KEY_RE.test(key)) {
-      out = out.split(value).join(`[REDACTED:${key}]`);
-    }
+  const entries = Object.entries(parentEnv)
+    .filter(
+      ([key, value]) =>
+        value.length >= MIN_REDACTABLE_VALUE_LEN && SECRET_KEY_RE.test(key),
+    )
+    .sort((a, b) => b[1].length - a[1].length);
+  for (const [key, value] of entries) {
+    out = out.split(value).join(`[REDACTED:${key}]`);
   }
   return out;
 }
@@ -127,25 +162,42 @@ export function redactSecrets(text: string, parentEnv: EnvMap): string {
 /**
  * Redact a TRAILING partial prefix of a secret value left at the truncation
  * cut boundary (INV-2). When the excerpt was capped mid-value, the full value
- * no longer matches — but its prefix at the cut still leaks. Checks the
- * longest proper prefix first so the biggest leak is redacted. Prefixes
- * shorter than MIN_BOUNDARY_PREFIX_LEN are left alone: redacting 1-char
- * fragments would mangle ordinary output and spray key names everywhere.
+ * no longer matches — but its prefix at the cut still leaks.
+ *
+ * If the trailing fragment is at least MIN_BOUNDARY_PREFIX_LEN, it is replaced
+ * with a redaction marker. If it is shorter than that minimum, the fragment is
+ * stripped entirely (no marker, no leaked secret characters, no output
+ * mangling).
  */
 function redactBoundaryPrefix(text: string, parentEnv: EnvMap): string {
-  let out = text;
+  let bestRedact: { key: string; len: number } | null = null;
+  let bestStrip = 0;
+
   for (const [key, value] of Object.entries(parentEnv)) {
     if (value.length < MIN_REDACTABLE_VALUE_LEN || !SECRET_KEY_RE.test(key)) {
       continue;
     }
-    for (let k = value.length - 1; k >= MIN_BOUNDARY_PREFIX_LEN; k--) {
-      if (out.endsWith(value.slice(0, k))) {
-        out = `${out.slice(0, out.length - k)}[REDACTED:${key}]`;
+    for (let k = value.length - 1; k >= 1; k--) {
+      if (text.endsWith(value.slice(0, k))) {
+        if (k >= MIN_BOUNDARY_PREFIX_LEN) {
+          if (bestRedact === null || k > bestRedact.len) {
+            bestRedact = { key, len: k };
+          }
+        } else if (k > bestStrip) {
+          bestStrip = k;
+        }
         break;
       }
     }
   }
-  return out;
+
+  if (bestRedact !== null) {
+    return `${text.slice(0, text.length - bestRedact.len)}[REDACTED:${bestRedact.key}]`;
+  }
+  if (bestStrip > 0) {
+    return text.slice(0, text.length - bestStrip);
+  }
+  return text;
 }
 
 /** Build the `warren run <command> <args...>` invocation for a manifest. */
@@ -156,11 +208,37 @@ export function buildSpawn(manifest: Manifest): { file: string; argv: string[] }
   };
 }
 
-/** Pull the QDS_PROBE value out of subprocess stdout, if present. */
-function extractProbe(stdout: string): string | null {
-  const line = stdout.split("\n").find((l) => l.startsWith("QDS_PROBE="));
+/**
+ * Classify the subprocess exit given the timeout flag and the raw close
+ * event values. Extracted so the race-prone classification logic can be
+ * unit-tested deterministically.
+ */
+export function classifyExit(
+  timedOut: boolean,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): { exit_class: ExitClass; signal: string | null; exit_code: number | null } {
+  if (timedOut && code === null) {
+    return { exit_class: "timeout", signal: signal ?? "SIGKILL", exit_code: null };
+  }
+  return {
+    exit_class: code === 0 ? "ok" : "nonzero",
+    signal: signal ?? null,
+    exit_code: code,
+  };
+}
+
+/** Pull the QDS_PROBE value out of complete lines of subprocess stdout. */
+function extractProbe(stdout: string, truncated: boolean): string | null {
+  // When truncated, the final line is partial and may cut the probe value:
+  // only consider complete lines (up to and including the last newline).
+  const completeLines =
+    truncated && stdout.includes("\n")
+      ? stdout.slice(0, stdout.lastIndexOf("\n") + 1)
+      : stdout;
+  const line = completeLines.split("\n").find((l) => l.startsWith(PROBE_KEY));
   if (line === undefined) return null;
-  const value = line.slice("QDS_PROBE=".length).replace(/\r$/, "");
+  const value = line.slice(PROBE_KEY.length).replace(/\r$/, "");
   return value.length > 0 ? value : null;
 }
 
@@ -201,10 +279,137 @@ export async function runManifest(
     keys.length > MAX_LOGGED_ENV_KEYS
       ? [...keys.slice(0, MAX_LOGGED_ENV_KEYS), "..."]
       : keys;
-  console.error(`cli-anything: env keys -> ${shown.join(",")}`);
+  console.error(
+    `cli-anything: env keys -> ${shown.map(sanitizeLogKey).join(",")}`,
+  );
 
   return await new Promise<HarnessResult>((resolve) => {
-    let child: ChildProcess;
+    let child: ChildProcess | null = null;
+    const decoder = new StringDecoder("utf8");
+    let stdout = "";
+    let truncated = false;
+    let timedOut = false;
+    let settled = false;
+    let watchdog: ReturnType<typeof setTimeout> | null = null;
+
+    /** Kill the whole child tree: process group on POSIX, taskkill /T on win32. */
+    function killChildTree(): void {
+      const c = child;
+      if (c === null) return;
+      if (c.pid === undefined) {
+        try {
+          c.kill("SIGKILL");
+        } catch {
+          // Process already gone.
+        }
+        return;
+      }
+      if (process.platform === "win32") {
+        // Tree kill on win32; if it fails, fall back to killing the direct child.
+        execFile("taskkill", ["/pid", String(c.pid), "/T", "/F"], (err) => {
+          if (err) {
+            try {
+              c.kill("SIGKILL");
+            } catch {
+              // Process already gone.
+            }
+          }
+        });
+      } else {
+        try {
+          process.kill(-c.pid, "SIGKILL");
+        } catch {
+          // Process group already gone; fall back to the direct child.
+          try {
+            c.kill("SIGKILL");
+          } catch {
+            // Process already gone.
+          }
+        }
+      }
+    }
+
+    function removeSignalHandlers(): void {
+      process.removeListener("SIGINT", onSigint);
+      process.removeListener("SIGTERM", onSigterm);
+      if (process.platform !== "win32") {
+        process.removeListener("SIGHUP", onSighup);
+      }
+    }
+
+    /** Forward a harness-terminating signal to the child tree, then re-raise. */
+    function handleSignal(sig: "SIGINT" | "SIGTERM" | "SIGHUP"): void {
+      removeSignalHandlers();
+      if (
+        child !== null &&
+        child.exitCode === null &&
+        child.signalCode === null
+      ) {
+        killChildTree();
+      }
+      // Re-raise against ourselves so the harness dies from the same signal.
+      process.kill(process.pid, sig);
+    }
+
+    const onSigint = (): void => handleSignal("SIGINT");
+    const onSigterm = (): void => handleSignal("SIGTERM");
+    const onSighup = (): void => handleSignal("SIGHUP");
+
+    // Install handlers BEFORE spawn so a signal in the spawn-gap cannot orphan
+    // a freshly detached tree. They no-op safely while `child` is still null.
+    process.on("SIGINT", onSigint);
+    process.on("SIGTERM", onSigterm);
+    if (process.platform !== "win32") {
+      process.on("SIGHUP", onSighup);
+    }
+
+    function settle(result: HarnessResult): void {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      if (watchdog !== null) {
+        clearTimeout(watchdog);
+        watchdog = null;
+      }
+      removeSignalHandlers();
+      let stdout_excerpt = redactSecrets(result.stdout_excerpt, parent);
+      if (result.truncated === true) {
+        // The cap may have cut a secret value in half: redact its trailing prefix
+        // or strip a short fragment so nothing leaks at the boundary.
+        stdout_excerpt = redactBoundaryPrefix(stdout_excerpt, parent);
+      }
+      // Redaction can grow the excerpt ([REDACTED:key] is longer than the
+      // matched value): re-apply the cap so the contract always holds.
+      stdout_excerpt = capExcerpt(stdout_excerpt);
+      const rawProbe = result.env_probe_result;
+      const env_probe_result =
+        rawProbe === null
+          ? null
+          : capProbe(redactSecrets(rawProbe, parent));
+      resolve({
+        ...result,
+        stdout_excerpt,
+        env_probe_result,
+      });
+    }
+
+    function armWatchdog(): void {
+      if (watchdog !== null || settled) return;
+      watchdog = setTimeout(() => {
+        if (settled) return;
+        settle({
+          exit_class: "timeout",
+          stdout_excerpt: stdout,
+          env_probe_result: null,
+          spawn_error_code: null,
+          exit_code: null,
+          signal: "SIGKILL",
+          truncated,
+        });
+      }, 5000);
+      watchdog.unref();
+    }
+
     try {
       // stderr is ignored (not piped): the harness captures subprocess stdout
       // only, and an unread stderr pipe can delay `close` under some runtimes.
@@ -217,87 +422,41 @@ export async function runManifest(
       });
     } catch (err) {
       // Synchronous spawn failure (e.g. NUL bytes in argv/env → EINVAL).
-      const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+      removeSignalHandlers();
+      const code =
+        err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
       resolve({
         exit_class: "spawn_error",
         stdout_excerpt: "",
         env_probe_result: null,
         spawn_error_code: code ?? null,
         exit_code: null,
+        signal: null,
+        truncated: false,
       });
       return;
     }
 
-    const decoder = new StringDecoder("utf8");
-    let stdout = "";
-    let truncated = false;
-    let timedOut = false;
-    let settled = false;
-
-    /** Kill the whole child tree: process group on POSIX, taskkill /T on win32. */
-    const killChildTree = (): void => {
-      if (child.pid === undefined) {
-        child.kill("SIGKILL");
-        return;
-      }
-      if (process.platform === "win32") {
-        // Tree kill on win32; swallow errors (process may already be gone).
-        execFile("taskkill", ["/pid", String(child.pid), "/T", "/F"], () => {});
-      } else {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch {
-          // Process group already gone.
-        }
-      }
-    };
-
-    /** Forward a harness-terminating signal to the child tree, then re-raise. */
-    const onSigint = (): void => handleSignal("SIGINT");
-    const onSigterm = (): void => handleSignal("SIGTERM");
-    const removeSignalHandlers = (): void => {
-      process.removeListener("SIGINT", onSigint);
-      process.removeListener("SIGTERM", onSigterm);
-    };
-    const handleSignal = (sig: "SIGINT" | "SIGTERM"): void => {
-      removeSignalHandlers();
-      killChildTree();
-      // Re-raise against ourselves so the harness dies from the same signal.
-      process.kill(process.pid, sig);
-    };
-    process.on("SIGINT", onSigint);
-    process.on("SIGTERM", onSigterm);
-
     const timer = setTimeout(() => {
       // The child may have exited (or been killed) between the timer firing
       // and this callback running: don't misclassify a natural exit as a
-      // timeout, and don't signal a possibly-reused process group.
-      if (child.exitCode !== null || child.killed) return;
+      // timeout, and don't signal a possibly-reused process group. Also guard
+      // on harness state because the POSIX group kill does not set child.killed.
+      if (
+        child === null ||
+        child.exitCode !== null ||
+        child.signalCode !== null ||
+        settled ||
+        timedOut
+      ) {
+        return;
+      }
       timedOut = true;
       killChildTree();
+      // If the kill fails or a descendant holds the stdout pipe open, `close`
+      // may never fire; force-settle after a short grace period.
+      armWatchdog();
     }, timeoutMs);
-
-    /** Resolve exactly once, redacting secrets on the way out (INV-2). */
-    const settle = (result: HarnessResult): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      removeSignalHandlers();
-      let stdout_excerpt = redactSecrets(result.stdout_excerpt, parent);
-      if (result.truncated === true) {
-        // The cap may have cut a secret value in half: redact its trailing prefix.
-        stdout_excerpt = redactBoundaryPrefix(stdout_excerpt, parent);
-      }
-      // Redaction can grow the excerpt ([REDACTED:key] is longer than the
-      // matched value): re-apply the cap so the contract always holds.
-      stdout_excerpt = capExcerpt(stdout_excerpt);
-      const probe = result.env_probe_result;
-      resolve({
-        ...result,
-        stdout_excerpt,
-        env_probe_result: probe === null ? null : redactSecrets(probe, parent),
-      });
-    };
 
     child.stdout!.on("data", (d: Buffer) => {
       if (truncated) return;
@@ -308,8 +467,8 @@ export async function runManifest(
       }
       if (d.length > remaining) {
         // Bound the decode to the remaining capacity: a single oversized
-        // chunk is never fully materialized past the cap (decoded UTF-16
-        // code units <= input bytes, so the cap still holds).
+        // chunk is never fully materialized past the cap. The final cap is
+        // re-applied in settle (capExcerpt), which is the real invariant.
         stdout += decoder.write(d.subarray(0, remaining));
         truncated = true;
       } else {
@@ -318,13 +477,15 @@ export async function runManifest(
     });
 
     child.stdout!.on("error", (err: NodeJS.ErrnoException) => {
-      // Stream read failure: settle as spawn_error (guarded against double-settle).
+      // Stream read failure: kill the live child, then settle as spawn_error.
+      killChildTree();
       settle({
         exit_class: "spawn_error",
         stdout_excerpt: stdout,
         env_probe_result: null,
         spawn_error_code: err.code ?? null,
         exit_code: null,
+        signal: null,
         truncated,
       });
     });
@@ -339,6 +500,7 @@ export async function runManifest(
         env_probe_result: null,
         spawn_error_code: err.code ?? null,
         exit_code: null,
+        signal: null,
         truncated,
       });
     });
@@ -347,20 +509,18 @@ export async function runManifest(
       // Skip decoder.end() once truncated: after a mid-sequence cut it would
       // append U+FFFD. The cap is re-applied in settle either way.
       if (!truncated) stdout += decoder.end();
-      // Prefer the real exit code when present: a child that exited naturally
-      // at the instant the timeout fired is NOT a timeout.
-      const exit_class =
-        timedOut && code === null ? "timeout" : code === 0 ? "ok" : "nonzero";
+      const classification = classifyExit(timedOut, code, signal);
       settle({
-        exit_class,
+        exit_class: classification.exit_class,
         stdout_excerpt: stdout,
-        // When truncated, the QDS_PROBE line may be cut mid-value and the full
-        // pre-cap buffer is not retained: never report a silently truncated
-        // probe as complete (and never leak a secret prefix through it).
-        env_probe_result: truncated ? null : extractProbe(stdout),
+        // Extract the probe from complete lines only. When truncated, the
+        // trailing partial line (which may be the probe line cut mid-value)
+        // is excluded, so only a fully captured probe is reported.
+        env_probe_result: extractProbe(stdout, truncated),
+        spawn_error_code: null,
+        exit_code: classification.exit_code,
+        signal: classification.signal,
         truncated,
-        signal: signal ?? null,
-        exit_code: code,
       });
     });
   });
