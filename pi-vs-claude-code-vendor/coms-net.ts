@@ -1518,6 +1518,19 @@ export default function (pi: ExtensionAPI) {
 				// connections across the reconnect loop (mirrors the SSE
 				// read-loop teardown and readBodyCapped's over-cap cancel).
 				try { await resp.body?.cancel(); } catch { /* ignore */ }
+				// A newer attempt (manual --reconnect) or cleanShutdown can abort
+				// `ac` and reassign `sseAbort` during the cancel await above. If
+				// that happened this attempt no longer owns the connection, and
+				// processing the status below would race the current owner: a
+				// stale scheduleReconnect() pins a timer that can survive the
+				// superseder's success, and a stale cleanShutdown() (401/403/404)
+				// would tear down even as the superseder reconnects. Bail and let
+				// the owner drive. (Mirrors the fetch-reject supersede check
+				// above and the stream-end `ac === sseAbort` guard further down.)
+				if (ac !== sseAbort) {
+					audit("sse_connect_aborted");
+					return;
+				}
 				audit("sse_connect_http_error", { status: resp.status });
 				// 401/403/404 mean the token or URL is wrong — retrying with the
 				// same credentials/path will never succeed, so stop instead of
