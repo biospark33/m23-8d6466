@@ -20,6 +20,8 @@ import { fileURLToPath } from "node:url";
 // Key   = extension filename without extension (matches extensions/<key>.ts)
 // Value = theme name from .pi/themes/<value>.json
 //
+// The full upstream table is kept intact (only coms/coms-net are vendored here)
+// so this file diffs cleanly against upstream on re-vendor. See DIVERGENCE.md.
 export const THEME_MAP: Record<string, string> = {
 	"agent-chain":        "midnight-ocean",   // deep sequential pipeline
 	"agent-team":         "dracula",          // rich orchestration palette
