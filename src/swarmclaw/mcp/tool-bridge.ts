@@ -27,6 +27,17 @@ export const MCPInvokeArgumentsSchema = z
   .superRefine((args, ctx) => {
     // Both spellings reach the subprocess as `bank_id` (toSnakeArgs converts
     // camelCase keys at dispatch), so both must be validated at the boundary.
+    // Reject conflicting duplicates — toSnakeArgs would silently let whichever
+    // key enumerates last win. Same-value duplicates are harmless.
+    const snakeBankId = args.bank_id;
+    const camelBankId = args.bankId;
+    if (snakeBankId !== undefined && camelBankId !== undefined && snakeBankId !== camelBankId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "both bank_id and bankId spellings present with conflicting values",
+        path: ["bankId"],
+      });
+    }
     for (const key of ["bank_id", "bankId"]) {
       const value = args[key];
       if (typeof value === "string" && !BANK_ID_REGEX.test(value)) {
@@ -147,6 +158,73 @@ export function toSnakeArgs(args: Record<string, unknown>): Record<string, unkno
 }
 
 // ---------------------------------------------------------------------------
+// Minimal inputSchema argument validation (P0.7 invoke flow).
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal inputSchema check: required[] properties present, and declared
+ * primitive `type` fields matching the actual JSON type. Deliberately NOT a
+ * full JSON-Schema engine. Shared by the /invoke route's cached-schema fast
+ * path and ToolBridge.invoke's post-enumeration check.
+ */
+export function validateArgsAgainstInputSchema(
+  schema: unknown,
+  args: Record<string, unknown>,
+): { field: string; violation: string } | null {
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return null;
+  const s = schema as Record<string, unknown>;
+  const required = s.required;
+  if (Array.isArray(required)) {
+    for (const prop of required) {
+      // hasOwnProperty, not `in`: `in` walks the prototype chain and would let
+      // e.g. required:["constructor"] pass against an empty args object.
+      if (typeof prop === "string" && !Object.prototype.hasOwnProperty.call(args, prop)) {
+        return { field: prop, violation: `required property "${prop}" is missing` };
+      }
+    }
+  }
+  const properties = s.properties;
+  if (properties !== null && typeof properties === "object" && !Array.isArray(properties)) {
+    for (const [prop, decl] of Object.entries(properties as Record<string, unknown>)) {
+      if (!Object.prototype.hasOwnProperty.call(args, prop)) continue;
+      const type =
+        decl !== null && typeof decl === "object" ? (decl as Record<string, unknown>).type : undefined;
+      if (typeof type !== "string") continue;
+      if (!jsonTypeMatches(args[prop], type)) {
+        return { field: prop, violation: `expected ${type}, got ${jsonTypeOf(args[prop])}` };
+      }
+    }
+  }
+  return null;
+}
+
+function jsonTypeOf(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function jsonTypeMatches(value: unknown, type: string): boolean {
+  switch (type) {
+    case "string":
+      return typeof value === "string";
+    case "number":
+      return typeof value === "number";
+    case "integer":
+      return typeof value === "number" && Number.isInteger(value);
+    case "boolean":
+      return typeof value === "boolean";
+    case "array":
+      return Array.isArray(value);
+    case "object":
+      return typeof value === "object" && value !== null && !Array.isArray(value);
+    default:
+      // Unknown/non-primitive type declaration — skipped (minimal validator).
+      return true;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // ToolBridge — one per registered MCP server.
 // ---------------------------------------------------------------------------
 
@@ -168,9 +246,14 @@ export class ToolBridge {
     const start = Date.now();
     try {
       const result = (await this.transport.request("tools/list", {}, 30_000)) as {
-        tools?: Array<{ name: string; inputSchema?: Record<string, unknown> }>;
+        tools?: Array<{ name?: unknown; inputSchema?: Record<string, unknown> }>;
       };
-      const enumerated = result.tools ?? [];
+      // Skip malformed entries (missing/empty non-string name) entirely —
+      // they must not leak into the names list or the schema map.
+      const enumerated = (result.tools ?? []).filter(
+        (t): t is { name: string; inputSchema?: Record<string, unknown> } =>
+          typeof t.name === "string" && t.name.length > 0,
+      );
       const tools = enumerated.map((t) => t.name);
       this.inputSchemas.clear();
       for (const t of enumerated) {
@@ -200,11 +283,6 @@ export class ToolBridge {
       });
       throw err;
     }
-  }
-
-  /** Cached tool list, re-enumerating on miss/expiry. */
-  async getTools(requestId: string): Promise<string[]> {
-    return (await this.getToolsCached(requestId)).tools;
   }
 
   /**
@@ -266,6 +344,23 @@ export class ToolBridge {
       }
 
       const snakeArgs = toSnakeArgs(args);
+
+      // Validate against the tool's declared inputSchema now that the tool
+      // list (and thus inputSchemas) is current — this also covers the
+      // post-TTL-expiry path the route's cached-schema check cannot see.
+      // Compares snake_case args against the server's snake_case schema (CC-8).
+      const inputSchema = this.inputSchemas.get(tool);
+      if (inputSchema) {
+        const argViolation = validateArgsAgainstInputSchema(inputSchema, snakeArgs);
+        if (argViolation) {
+          throw new JsonRpcError(
+            -32602,
+            `Invalid params: ${argViolation.field}: ${argViolation.violation}`,
+            { field: argViolation.field, violation: argViolation.violation },
+          );
+        }
+      }
+
       try {
         const result = await this.transport.request(
           "tools/call",
@@ -337,6 +432,9 @@ export class ToolBridge {
 // Story Guards/limits: invoke timeout must be ≥ P0.9 consolidate timeout
 // (60s default) so long-running consolidate/reflect calls are not cut short.
 const INVOKE_TIMEOUT_MIN_MS = 60_000;
+// 1h, mirroring the TTL clamp's max — delays above 2^31-1 overflow setTimeout
+// into ~1ms, so an unbounded env value would silently disable the timeout.
+const INVOKE_TIMEOUT_MAX_MS = 3_600_000;
 
 export function resolveInvokeTimeout(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.SWARMCLAW_INVOKE_TIMEOUT_MS;
@@ -344,7 +442,7 @@ export function resolveInvokeTimeout(env: NodeJS.ProcessEnv = process.env): numb
   if (raw === undefined) return DEFAULT;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT;
-  const clamped = Math.max(INVOKE_TIMEOUT_MIN_MS, parsed);
+  const clamped = Math.min(INVOKE_TIMEOUT_MAX_MS, Math.max(INVOKE_TIMEOUT_MIN_MS, parsed));
   if (clamped !== parsed) {
     log({
       level: "warn",
@@ -352,6 +450,7 @@ export function resolveInvokeTimeout(env: NodeJS.ProcessEnv = process.env): numb
       raw, // the original env string (matches the TTL-clamp warn shape)
       clamped,
       min: INVOKE_TIMEOUT_MIN_MS,
+      max: INVOKE_TIMEOUT_MAX_MS,
       // CC-9 required fields (best-effort for a config-time warning):
       requestId: newRequestId(),
       operation: "config.invoke_timeout",

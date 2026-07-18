@@ -11,7 +11,6 @@ import {
   JsonRpcError,
   log,
   newRequestId,
-  SPAWN_TIMEOUT_MS,
   StdioTransport,
   validateCommand,
 } from "../mcp/stdio-transport.ts";
@@ -23,6 +22,7 @@ import {
   resolveInvokeTimeout,
   ToolBridge,
   toSnakeArgs,
+  validateArgsAgainstInputSchema,
 } from "../mcp/tool-bridge.ts";
 import {
   CapacityError,
@@ -30,7 +30,7 @@ import {
   type MCPStore,
   RegisterMCPServerSchema,
 } from "../store/mcp-store.ts";
-import type { RouteResponse } from "./agents.ts";
+import { deriveErrorMessage, type RouteResponse } from "./agents.ts";
 
 // Transport factory is injectable so tests can point at the fake stdio server
 // without touching the command allowlist path.
@@ -103,7 +103,8 @@ export async function handleRegisterMCPServer(
     store.attachTransport(reservationId, stdio);
     const bridge = new ToolBridge(stdio, null);
     await stdio.spawn();
-    await withSpawnTimeout(stdio.initialize());
+    // The transport enforces the spawn/handshake timeout internally (SPAWN_TIMEOUT_MS).
+    await stdio.initialize();
     const tools = await bridge.enumerateTools(requestId);
     if (tools.length === 0) {
       // Zero tools at handshake is unhealthy — route to the existing 502 path.
@@ -137,6 +138,14 @@ export async function handleRegisterMCPServer(
     store.release(reservationId);
     // StdioTransport.shutdown is a no-op when the transport never spawned.
     await stdio?.shutdown(2_000).catch(() => {});
+    // store.finalize throws "store is shutting down" in the shutdown race —
+    // that is not a handshake failure; surface the store's message as 503.
+    if (err instanceof Error && err.message === "store is shutting down") {
+      return logAndReturn(start, requestId, "mcp.register", {
+        status: 503,
+        body: { ok: false, error: err.message },
+      });
+    }
     return logAndReturn(start, requestId, "mcp.register", {
       status: 502,
       body: { ok: false, error: `MCP handshake failed: ${(err as Error).message}` },
@@ -152,7 +161,10 @@ export async function handleTestMCPServer(
   const start = Date.now();
   const rec = store.get(id);
   if (!rec) {
-    return logAndReturn(start, requestId, "mcp.test", { status: 404, body: { error: "MCP server not found" } });
+    return logAndReturn(start, requestId, "mcp.test", {
+      status: 404,
+      body: { ok: false, error: "MCP server not found" },
+    });
   }
   if (!rec.stdio.isRunning) {
     rec.healthy = false;
@@ -200,7 +212,9 @@ export async function handleInvokeMCPServer(
   // Validate arguments (bank_id etc.) BEFORE dispatch — never touches the subprocess on failure.
   const parsed = MCPInvokeSchema.safeParse(payload);
   if (!parsed.success) {
-    const bankIssue = parsed.error.issues.find((iss) => iss.path[iss.path.length - 1] === "bank_id");
+    const bankIssue = parsed.error.issues.find(
+      (iss) => iss.path[iss.path.length - 1] === "bank_id" || iss.path[iss.path.length - 1] === "bankId",
+    );
     const issue = bankIssue ?? parsed.error.issues[0];
     const fieldPath = issue?.path.join(".");
     return logAndReturn(start, requestId, "mcp.invoke", {
@@ -209,7 +223,7 @@ export async function handleInvokeMCPServer(
         code: -32602,
         message: issue?.message ?? "Invalid params",
         requestId,
-        id: null,
+        id: requestId,
         field: fieldPath ? fieldPath : undefined,
         violation: issue?.message,
       }),
@@ -224,7 +238,7 @@ export async function handleInvokeMCPServer(
   // re-enumerates and raises -32601.
   const inputSchema = rec.bridge.getToolInputSchema(parsed.data.tool);
   if (inputSchema) {
-    const argViolation = validateAgainstInputSchema(toSnakeArgs(parsed.data.arguments), inputSchema);
+    const argViolation = validateArgsAgainstInputSchema(inputSchema, toSnakeArgs(parsed.data.arguments));
     if (argViolation) {
       return logAndReturn(start, requestId, "mcp.invoke", {
         status: 400,
@@ -232,7 +246,7 @@ export async function handleInvokeMCPServer(
           code: -32602,
           message: `Invalid params: ${argViolation.violation}`,
           requestId,
-          id: null,
+          id: requestId,
           field: argViolation.field,
           violation: argViolation.violation,
         }),
@@ -280,28 +294,12 @@ export async function handleInvokeMCPServer(
   }
 }
 
-async function withSpawnTimeout<T>(p: Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`spawn/handshake timed out after ${SPAWN_TIMEOUT_MS}ms`)),
-      SPAWN_TIMEOUT_MS,
-    );
-  });
-  try {
-    return await Promise.race([p, timeout]);
-  } finally {
-    // Clear the handle so a settled race never leaves a dangling live timer.
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
 /** Build a JSON-RPC error body and validate it against the DoD response contract. */
 function invokeErrorBody(opts: {
   code: number;
   message: string;
   requestId: string;
-  id: string | null;
+  id: string;
   field?: string;
   violation?: string;
 }): unknown {
@@ -327,66 +325,6 @@ function errorDataStrings(data: unknown): { field?: string; violation?: string }
   };
 }
 
-/**
- * Minimal inputSchema check: required[] properties present, and declared
- * primitive `type` fields matching the actual JSON type. Deliberately NOT a
- * full JSON-Schema engine.
- */
-function validateAgainstInputSchema(
-  args: Record<string, unknown>,
-  schema: Record<string, unknown>,
-): { field: string; violation: string } | null {
-  const required = schema.required;
-  if (Array.isArray(required)) {
-    for (const prop of required) {
-      // hasOwnProperty, not `in`: `in` walks the prototype chain and would let
-      // e.g. required:["constructor"] pass against an empty args object.
-      if (typeof prop === "string" && !Object.prototype.hasOwnProperty.call(args, prop)) {
-        return { field: prop, violation: `required property "${prop}" is missing` };
-      }
-    }
-  }
-  const properties = schema.properties;
-  if (properties !== null && typeof properties === "object" && !Array.isArray(properties)) {
-    for (const [prop, decl] of Object.entries(properties as Record<string, unknown>)) {
-      if (!Object.prototype.hasOwnProperty.call(args, prop)) continue;
-      const type =
-        decl !== null && typeof decl === "object" ? (decl as Record<string, unknown>).type : undefined;
-      if (typeof type !== "string") continue;
-      if (!jsonTypeMatches(args[prop], type)) {
-        return { field: prop, violation: `expected ${type}, got ${jsonTypeOf(args[prop])}` };
-      }
-    }
-  }
-  return null;
-}
-
-function jsonTypeOf(value: unknown): string {
-  if (value === null) return "null";
-  if (Array.isArray(value)) return "array";
-  return typeof value;
-}
-
-function jsonTypeMatches(value: unknown, type: string): boolean {
-  switch (type) {
-    case "string":
-      return typeof value === "string";
-    case "number":
-      return typeof value === "number";
-    case "integer":
-      return typeof value === "number" && Number.isInteger(value);
-    case "boolean":
-      return typeof value === "boolean";
-    case "array":
-      return Array.isArray(value);
-    case "object":
-      return typeof value === "object" && value !== null && !Array.isArray(value);
-    default:
-      // Unknown/non-primitive type declaration — skipped (minimal validator).
-      return true;
-  }
-}
-
 function logAndReturn(
   start: number,
   requestId: string,
@@ -405,17 +343,4 @@ function logAndReturn(
       : {}),
   });
   return resp;
-}
-
-/** CC-9: surface the real error message from the response body when present. */
-function deriveErrorMessage(body: unknown, fallback: string): string {
-  if (body !== null && typeof body === "object") {
-    const err = (body as Record<string, unknown>).error;
-    if (typeof err === "string") return err;
-    if (err !== null && typeof err === "object") {
-      const msg = (err as Record<string, unknown>).message;
-      if (typeof msg === "string") return msg;
-    }
-  }
-  return fallback;
 }

@@ -79,7 +79,12 @@ function drainLines(stdout: ReadableStream<Uint8Array>, onLine: (line: string) =
 let server: ReturnType<typeof Bun.spawn> | null = null;
 
 afterEach(async () => {
-  if (server?.pid && pidAlive(server.pid)) {
+  // Kill only a subprocess Bun still considers running. A bare pidAlive probe
+  // is unsafe after a clean exit: the PID may already have been recycled by an
+  // unrelated process, and SIGKILL would hit the bystander. exitCode is Bun's
+  // own bookkeeping — null only until the child exits and is reaped — so a
+  // recycled PID can never pass this guard.
+  if (server && server.exitCode === null) {
     try {
       server.kill("SIGKILL");
     } catch {
@@ -222,3 +227,43 @@ test("SIGTERM propagates to MCP subprocess; PID gone within 7s, no orphans", asy
   const leaked = await listFixturePids();
   expect(leaked).toEqual([]);
 }, 60000);
+
+/**
+ * Spawn the server with a given SWARMCLAW_PORT and wait for it to exit,
+ * capturing stderr. Used by the invalid-port tests: bad config must be
+ * rejected immediately (exit 1 + structured error line), so no readiness
+ * probe or drain loop is needed — the one stderr line cannot fill the pipe.
+ * The shared `server` handle lets afterEach reap a straggler.
+ */
+async function runWithPort(port: string): Promise<{ code: number; stderr: string }> {
+  server = Bun.spawn(["bun", INDEX], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, SWARMCLAW_PORT: port },
+  });
+  const [code, stderr] = await Promise.all([
+    server.exited,
+    new Response(server.stderr as ReadableStream<Uint8Array>).text(),
+  ]);
+  return { code, stderr };
+}
+
+test("invalid SWARMCLAW_PORT=abc → exit 1 + structured stderr line", async () => {
+  const { code, stderr } = await runWithPort("abc");
+  expect(code).toBe(1);
+  const line = stderr.split("\n").find((l) => l.includes("invalid SWARMCLAW_PORT"));
+  expect(line).toBeDefined();
+  const parsed = JSON.parse(line!) as { level?: string; message?: string };
+  expect(parsed.level).toBe("error");
+  expect(parsed.message).toContain("abc");
+}, 15000);
+
+test("out-of-range SWARMCLAW_PORT=70000 → exit 1 + structured stderr line", async () => {
+  const { code, stderr } = await runWithPort("70000");
+  expect(code).toBe(1);
+  const line = stderr.split("\n").find((l) => l.includes("invalid SWARMCLAW_PORT"));
+  expect(line).toBeDefined();
+  const parsed = JSON.parse(line!) as { level?: string; message?: string };
+  expect(parsed.level).toBe("error");
+  expect(parsed.message).toContain("70000");
+}, 15000);

@@ -18,6 +18,17 @@
  *                              tools/list, so a test can mutate the advertised tool set at
  *                              runtime (stale-cache re-enumeration test); falls back to
  *                              FAKE_MCP_TOOLS/defaults when unset or unreadable
+ *   FAKE_MCP_TOOL_DEFS_FILE  — path to a JSON file holding an array of full tool
+ *                              definitions ([{name, description, inputSchema}, …]);
+ *                              re-read on every tools/list and, when it parses to a
+ *                              non-empty array, advertised EXACTLY as-is. Precedence:
+ *                              this file wins over FAKE_MCP_NO_TOOLS /
+ *                              FAKE_MCP_TOOLS_FILE / FAKE_MCP_TOOLS / defaults
+ *   FAKE_MCP_NO_TOOLS        — advertise an empty tool array from tools/list
+ *   FAKE_MCP_ERROR_TOOL      — tools/call for this tool name always fails with a
+ *                              JSON-RPC error instead of a result (error-mapping test)
+ *   FAKE_MCP_ERROR_CODE      — integer code for that error (default -32603)
+ *   FAKE_MCP_ERROR_INCLUDE_FIELD — attach data:{field:"bank_id",violation:…} to that error
  *   FAKE_MCP_ECHO_ENV        — on `tools/call`, echo process.env as the result (env-isolation test)
  *   FAKE_MCP_ECHO_META       — on `tools/call`, append a content entry echoing the wire-level
  *                              params._meta.requestId (CC-9 propagation assertion)
@@ -25,9 +36,25 @@
  *   FAKE_MCP_HANG            — never respond (spawn/handshake timeout test)
  *   FAKE_MCP_GARBAGE_LINE    — write one non-JSON line before every real JSON reply
  *                              (malformed-wire robustness test)
+ *   FAKE_MCP_RAW_WRITE_BYTES — on `initialize`, first write N raw "x" bytes with NO
+ *                              newline (trips the transport's frame-size cap); keep running
+ *   FAKE_MCP_SERVER_REQUEST  — after the initialize response, send a server→client
+ *                              `roots/list` request (id 99) and record whether a response
+ *                              comes back; `recall` results then include
+ *                              "server_request_answered": true|false
+ *   FAKE_MCP_RESPONSE_DELAY_MS — hold back every response write by this many ms
+ *                              (transport latency assertion)
+ *   FAKE_MCP_STDERR_MARKER   — write this line to stderr at startup, before anything
+ *                              else (stderr-tail surfacing assertion on close errors)
  */
 
 import { readFileSync } from "node:fs";
+
+if (process.env.FAKE_MCP_STDERR_MARKER !== undefined) {
+  // Before ANYTHING else (including the exit-code short-circuit below): lets a
+  // test assert the transport surfaces the subprocess' stderr tail in close errors.
+  process.stderr.write(`${process.env.FAKE_MCP_STDERR_MARKER}\n`);
+}
 
 const exitCode = process.env.FAKE_MCP_EXIT_CODE;
 if (exitCode !== undefined) {
@@ -46,6 +73,13 @@ const DEFAULT_TOOLS = ["retain", "recall", "reflect", "consolidate"];
 const toolNames = process.env.FAKE_MCP_TOOLS
   ? process.env.FAKE_MCP_TOOLS.split(",").map((s) => s.trim()).filter(Boolean)
   : DEFAULT_TOOLS;
+
+const rawWriteBytes = Number(process.env.FAKE_MCP_RAW_WRITE_BYTES ?? 0);
+const responseDelayMs = Number(process.env.FAKE_MCP_RESPONSE_DELAY_MS ?? 0);
+
+// Set when the client answers our server→client request (id 99); only surfaced
+// in recall results when FAKE_MCP_SERVER_REQUEST=1.
+let serverRequestAnswered = false;
 
 // Runtime-mutable advertised tools: when FAKE_MCP_TOOLS_FILE is set, re-read
 // the file on every tools/list so a test can change the tool set mid-flight.
@@ -70,10 +104,32 @@ function reply(obj: unknown): void {
     // Interleave one malformed line before the real reply.
     process.stdout.write("this is not json\n");
   }
-  process.stdout.write(`${JSON.stringify(obj)}\n`);
+  const line = `${JSON.stringify(obj)}\n`;
+  if (responseDelayMs > 0) {
+    // Hold each response back so latency assertions see a measurable gap.
+    // Timers with the same delay fire in schedule order, so replies stay ordered.
+    setTimeout(() => process.stdout.write(line), responseDelayMs);
+    return;
+  }
+  process.stdout.write(line);
 }
 
+// Advertised tool definitions. Precedence: a valid, non-empty
+// FAKE_MCP_TOOL_DEFS_FILE wins when set (full schemas for typed/required-arg
+// tests); then FAKE_MCP_NO_TOOLS (empty array); then FAKE_MCP_TOOLS_FILE,
+// falling back to FAKE_MCP_TOOLS/defaults. Tool-call behavior is unaffected —
+// names resolve through callTool either way.
 function toolDefs() {
+  const defsFile = process.env.FAKE_MCP_TOOL_DEFS_FILE;
+  if (defsFile !== undefined) {
+    try {
+      const defs = JSON.parse(readFileSync(defsFile, "utf8"));
+      if (Array.isArray(defs) && defs.length > 0) return defs;
+    } catch {
+      /* unreadable/invalid file → fall through to the name-only knobs */
+    }
+  }
+  if (process.env.FAKE_MCP_NO_TOOLS === "1") return [];
   return currentToolNames().map((name) => ({
     name,
     description: `fake hindsight tool ${name}`,
@@ -96,7 +152,12 @@ function callTool(name: string, args: Record<string, unknown>) {
     }
     case "recall": {
       const arr = banks.get(bankId) ?? [];
-      return { content: [{ type: "text", text: JSON.stringify({ bank_id: bankId, memories: arr }) }] };
+      const payload: Record<string, unknown> = { bank_id: bankId, memories: arr };
+      if (process.env.FAKE_MCP_SERVER_REQUEST === "1") {
+        // Additive: report whether the client answered our roots/list request.
+        payload.server_request_answered = serverRequestAnswered;
+      }
+      return { content: [{ type: "text", text: JSON.stringify(payload) }] };
     }
     case "reflect":
       return { content: [{ type: "text", text: JSON.stringify({ reflected: true, bank_id: bankId }) }] };
@@ -145,7 +206,16 @@ async function main(): Promise<void> {
 
 function handle(msg: any): void {
   const { id, method, params } = msg;
+  if (process.env.FAKE_MCP_SERVER_REQUEST === "1" && method === undefined && id === 99) {
+    // Response to our roots/list request — record it, send nothing back.
+    serverRequestAnswered = true;
+    return;
+  }
   if (method === "initialize") {
+    if (Number.isInteger(rawWriteBytes) && rawWriteBytes > 0) {
+      // Blast N unterminated bytes at the transport to trip its frame-size cap.
+      process.stdout.write("x".repeat(rawWriteBytes));
+    }
     reply({
       jsonrpc: "2.0",
       id,
@@ -155,6 +225,11 @@ function handle(msg: any): void {
         serverInfo: { name: "fake-hindsight-mcp", version: "0.0.1" },
       },
     });
+    if (process.env.FAKE_MCP_SERVER_REQUEST === "1") {
+      // Server→client request; the transport under test answers -32601. The
+      // response (id 99) is recorded above and surfaced via `recall`.
+      reply({ jsonrpc: "2.0", id: 99, method: "roots/list", params: {} });
+    }
     return;
   }
   if (method === "notifications/initialized") {
@@ -167,6 +242,20 @@ function handle(msg: any): void {
   if (method === "tools/call") {
     const name = params?.name;
     const args = (params?.arguments ?? {}) as Record<string, unknown>;
+    if (process.env.FAKE_MCP_ERROR_TOOL !== undefined && name === process.env.FAKE_MCP_ERROR_TOOL) {
+      // Simulated upstream failure: reply with the configured error code
+      // instead of a result (error-mapping test).
+      const parsed = Number(process.env.FAKE_MCP_ERROR_CODE);
+      const error: { code: number; message: string; data?: unknown } = {
+        code: Number.isInteger(parsed) ? parsed : -32603,
+        message: `Simulated error from tool: ${name}`,
+      };
+      if (process.env.FAKE_MCP_ERROR_INCLUDE_FIELD === "1") {
+        error.data = { field: "bank_id", violation: "simulated upstream violation" };
+      }
+      reply({ jsonrpc: "2.0", id, error });
+      return;
+    }
     const result = callTool(name, args);
     if (result === null) {
       // MCP convention: unknown tool -> error

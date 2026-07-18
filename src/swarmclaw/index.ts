@@ -47,17 +47,31 @@ export function createServer(port = 0): SwarmClawServer {
       const { method } = req;
       const path = url.pathname;
 
-      const json = (r: { status: number; body: unknown }) =>
+      const json = (r: { status: number; body: unknown }, extraHeaders?: Record<string, string>) =>
         new Response(JSON.stringify(r.body), {
           status: r.status,
-          headers: { "content-type": "application/json", "x-request-id": requestId },
+          headers: { "content-type": "application/json", "x-request-id": requestId, ...extraHeaders },
+        });
+
+      const logPayloadTooLarge = () =>
+        log({
+          requestId,
+          operation: "http.payload_too_large",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: Date.now() - start,
+          status: "error",
+          error: { code: "413", message: "payload too large" },
         });
 
       // Reject oversized bodies before buffering them (all routes are POST).
       if (method === "POST") {
         const len = Number(req.headers.get("content-length") ?? 0);
-        if (len > 1_048_576) {
-          return json({ status: 413, body: { error: "payload too large" } });
+        if (len > MAX_BODY_BYTES) {
+          logPayloadTooLarge();
+          // The body stays unread on the socket — close the connection so a
+          // keep-alive client can never reuse this poisoned channel.
+          return json({ status: 413, body: { error: "payload too large" } }, { connection: "close" });
         }
       }
 
@@ -81,7 +95,9 @@ export function createServer(port = 0): SwarmClawServer {
         // Over-limit body read (chunked requests carry no content-length, so
         // the fast-path guard above cannot see them) — same 413 shape.
         if (err === PAYLOAD_TOO_LARGE) {
-          return json({ status: 413, body: { error: "payload too large" } });
+          logPayloadTooLarge();
+          // Same unread-body reasoning as the declared-length fast path above.
+          return json({ status: 413, body: { error: "payload too large" } }, { connection: "close" });
         }
         const e = err instanceof Error ? err : new Error(String(err));
         log({
@@ -109,6 +125,8 @@ export function createServer(port = 0): SwarmClawServer {
   return { port: server.port ?? port, agentStore, mcpStore, stop };
 }
 
+const MAX_BODY_BYTES = 1_048_576;
+
 const PAYLOAD_TOO_LARGE = new Error("payload too large");
 
 async function safeJson(req: Request): Promise<unknown> {
@@ -124,7 +142,7 @@ async function safeJson(req: Request): Promise<unknown> {
       const { done, value } = await reader.read();
       if (done) break;
       received += value.length;
-      if (received > 1_048_576) {
+      if (received > MAX_BODY_BYTES) {
         await reader.cancel();
         throw PAYLOAD_TOO_LARGE;
       }

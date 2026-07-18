@@ -79,13 +79,13 @@ export class AgentStore {
   private readonly agents = new Map<string, AgentRecord>();
   private readonly agentIds = new Set<string>();
 
-  /** Atomic capacity + agentId-uniqueness check + insert. */
+  /** Atomic agentId-uniqueness + capacity check + insert. */
   create(input: RegisterAgentInput): AgentRecord {
-    if (this.agents.size >= MAX_AGENTS) {
-      throw new CapacityError(`maximum of ${MAX_AGENTS} agents reached`);
-    }
     if (this.agentIds.has(input.agentId)) {
       throw new DuplicateAgentError(input.agentId);
+    }
+    if (this.agents.size >= MAX_AGENTS) {
+      throw new CapacityError(`maximum of ${MAX_AGENTS} agents reached`);
     }
     const record: AgentRecord = {
       ...input,

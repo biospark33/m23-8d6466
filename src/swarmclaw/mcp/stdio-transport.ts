@@ -74,15 +74,23 @@ function basename(cmd: string): string {
   return parts[parts.length - 1] ?? cmd;
 }
 
+// SwarmClaw installation root (this file lives at src/swarmclaw/mcp/). Relative
+// allowlist entries anchor here — never to process.cwd() — so the resolved
+// match target cannot shift with the working directory (INV-SC2).
+const INSTALL_ROOT = resolve(import.meta.dir, "../../..");
+
 export function resolveCommandAllowlist(env: NodeJS.ProcessEnv = process.env): string[] {
   const extra = parseCsvEnv(env.SWARMCLAW_COMMAND_ALLOWLIST, []);
   const merged = [...DEFAULT_COMMAND_ALLOWLIST, ...extra];
-  // Canonicalize relative entries (e.g. node_modules/.bin/...) to absolute
-  // to prevent working-directory manipulation at match time.
+  // Canonicalize relative path-like entries (e.g. node_modules/.bin/...) to
+  // absolute, anchored at the installation root to prevent working-directory
+  // manipulation at match time. Bare basenames (node, npx) stay basenames.
   const set = new Set<string>();
   for (const entry of merged) {
     set.add(entry);
-    if (!entry.startsWith("/")) set.add(resolve(entry));
+    if (!entry.startsWith("/") && (entry.includes("/") || entry.includes("\\"))) {
+      set.add(resolve(INSTALL_ROOT, entry));
+    }
   }
   return [...set];
 }
@@ -207,7 +215,12 @@ function validateNodeArgs(args: string[]): void {
   }
 }
 
-// npx flags that pass args to Node or inject extra packages.
+// npx flags that pass args to Node, inject extra packages, or redirect package
+// provenance. The provenance flags (--registry/--userconfig/--cache) would let
+// the *allowlisted package name* be fetched from an attacker-controlled source —
+// a supply-chain bypass of INV-SC2 — so they are forbidden outright rather than
+// value-consumed. Matching strips any `=value` suffix before the lookup, so
+// both `--registry <url>` and `--registry=<url>` are rejected.
 const NPX_FORBIDDEN_FLAGS = new Set([
   "--node-arg",
   "--node-args",
@@ -216,11 +229,14 @@ const NPX_FORBIDDEN_FLAGS = new Set([
   "-p",
   "--print",
   "--package",
+  "--registry",
+  "--userconfig",
+  "--cache",
 ]);
 
 // npx flags that take the NEXT token as their value; the value must not be
-// mistaken for the positional package argument (e.g. `--registry <url>`).
-const NPX_VALUE_FLAGS = new Set(["--registry", "--cache", "--userconfig", "--cwd"]);
+// mistaken for the positional package argument (e.g. `--cwd <dir>`).
+const NPX_VALUE_FLAGS = new Set(["--cwd"]);
 
 function validateNpxArgs(args: string[], packageAllowlist: string[]): void {
   let sawPositional = false;
@@ -228,7 +244,9 @@ function validateNpxArgs(args: string[], packageAllowlist: string[]): void {
     const arg = args[i]!;
     const flag = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
     if (NPX_FORBIDDEN_FLAGS.has(flag)) {
-      throw new CommandValidationError(`npx flag '${flag}' is not permitted (package/node-arg injection)`);
+      throw new CommandValidationError(
+        `npx flag '${flag}' is not permitted (package/node-arg injection or provenance redirect)`,
+      );
     }
     if (NPX_VALUE_FLAGS.has(flag) && !arg.includes("=")) {
       if (i + 1 >= args.length) {
@@ -521,7 +539,13 @@ export class StdioTransport {
     clearTimeout(p.timer);
     this.pending.delete(msg.id);
     if (msg.error) {
-      const err = new JsonRpcError(msg.error.code, msg.error.message, msg.error.data);
+      // Coerce a non-conforming wire shape so the rejected error always has a
+      // numeric code / string message — the route's response schema requires
+      // it, and a non-number code would escape as a 500 instead of a 502.
+      const raw = msg.error;
+      const code = typeof raw.code === "number" ? raw.code : -32603;
+      const message = typeof raw.message === "string" ? raw.message : String(raw.message ?? "unknown MCP error");
+      const err = new JsonRpcError(code, message, raw.data);
       p.reject(err);
     } else {
       p.resolve(msg.result);

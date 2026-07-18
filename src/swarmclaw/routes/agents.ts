@@ -39,7 +39,7 @@ export async function handleRegisterAgent(
     if (proto !== "http:" && proto !== "https:") {
       return finish(start, requestId, input.agentId, {
         status: 422,
-        body: { error: `endpointUrl must resolve to loopback (SSRF guard): ${input.endpointUrl}` },
+        body: { error: `endpointUrl must use http(s) scheme: ${input.endpointUrl}` },
       });
     }
     const loopback = await isLoopbackEndpoint(input.endpointUrl);
@@ -92,7 +92,7 @@ function finish(
 }
 
 /** CC-9: surface the real error message from the response body when present. */
-function deriveErrorMessage(body: unknown, fallback: string): string {
+export function deriveErrorMessage(body: unknown, fallback: string): string {
   if (body !== null && typeof body === "object") {
     const err = (body as Record<string, unknown>).error;
     if (typeof err === "string") return err;
