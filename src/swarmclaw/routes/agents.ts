@@ -6,6 +6,7 @@ import { log, newRequestId } from "../mcp/stdio-transport.ts";
 import {
   type AgentStore,
   CapacityError,
+  DuplicateAgentError,
   isLoopbackEndpoint,
   RegisterAgentSchema,
 } from "../store/agent-store.ts";
@@ -31,11 +32,25 @@ export async function handleRegisterAgent(
   const input = parsed.data;
 
   if (input.endpointUrl) {
-    const loopback = await isLoopbackEndpoint(input.endpointUrl);
-    if (!loopback) {
+    // The SSRF guard is "local HTTP POST only" — z.string().url() accepts any
+    // scheme (e.g. ftp://), so restrict to HTTP(S) before the loopback check.
+    // new URL cannot throw here: z.string().url() already parsed it.
+    const proto = new URL(input.endpointUrl).protocol;
+    if (proto !== "http:" && proto !== "https:") {
+      // Stable redacted message: never echo the request-supplied endpointUrl
+      // (user-controlled input) back in the response.
       return finish(start, requestId, input.agentId, {
         status: 422,
-        body: { error: `endpointUrl must resolve to loopback (SSRF guard): ${input.endpointUrl}` },
+        body: { error: "endpointUrl must use http(s) scheme" },
+      });
+    }
+    const loopback = await isLoopbackEndpoint(input.endpointUrl);
+    if (!loopback) {
+      // Stable redacted message: never echo endpointUrl (SSRF rejection detail
+      // is not for the response surface; the requestId carries correlation).
+      return finish(start, requestId, input.agentId, {
+        status: 422,
+        body: { error: "endpointUrl must resolve to a loopback address (SSRF guard)" },
       });
     }
   }
@@ -44,6 +59,12 @@ export async function handleRegisterAgent(
     const record = store.create(input);
     return finish(start, requestId, record.agentId, { status: 201, body: record });
   } catch (err) {
+    if (err instanceof DuplicateAgentError) {
+      return finish(start, requestId, input.agentId, {
+        status: 409,
+        body: { error: err.message },
+      });
+    }
     if (err instanceof CapacityError) {
       return finish(start, requestId, input.agentId, {
         status: 429,
@@ -68,8 +89,21 @@ function finish(
     duration: Date.now() - start,
     status: resp.status < 400 ? "ok" : "error",
     ...(resp.status >= 400
-      ? { error: { code: String(resp.status), message: "agent registration failed" } }
+      ? { error: { code: String(resp.status), message: deriveErrorMessage(resp.body, "agent registration failed") } }
       : {}),
   });
   return resp;
+}
+
+/** CC-9: surface the real error message from the response body when present. */
+export function deriveErrorMessage(body: unknown, fallback: string): string {
+  if (body !== null && typeof body === "object") {
+    const err = (body as Record<string, unknown>).error;
+    if (typeof err === "string") return err;
+    if (err !== null && typeof err === "object") {
+      const msg = (err as Record<string, unknown>).message;
+      if (typeof msg === "string") return msg;
+    }
+  }
+  return fallback;
 }

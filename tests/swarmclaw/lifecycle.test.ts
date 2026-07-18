@@ -27,13 +27,14 @@ async function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Continuously drain a subprocess stdout stream in the background, discarding
+ * Continuously drain a subprocess stream in the background, discarding
  * output. The server emits CC-9 structured logs to stdout on every operation;
  * if nobody reads, the OS pipe buffer fills and the server blocks on write
- * (unable to process SIGTERM). Draining prevents that deadlock.
+ * (unable to process SIGTERM). Draining prevents that deadlock — stderr is
+ * drained for the same reason.
  */
-function drainStdout(stdout: ReadableStream<Uint8Array>): void {
-  const reader = stdout.getReader();
+function drain(stream: ReadableStream<Uint8Array>): void {
+  const reader = stream.getReader();
   void (async () => {
     try {
       for (let done = false; !done; ) {
@@ -45,10 +46,45 @@ function drainStdout(stdout: ReadableStream<Uint8Array>): void {
   })();
 }
 
+/**
+ * Drain stdout line-by-line, invoking onLine for each complete line. Used to
+ * discover the ephemeral port the server bound (SWARMCLAW_PORT=0) from its
+ * startup log line. {stream:true} keeps multibyte UTF-8 split across chunks
+ * intact.
+ */
+function drainLines(stdout: ReadableStream<Uint8Array>, onLine: (line: string) => void): void {
+  const reader = stdout.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  void (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        // biome-ignore lint/suspicious/noAssignInExpressions: standard line-buffer drain
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          onLine(line);
+        }
+      }
+    } catch {
+      /* stream closed */
+    }
+  })();
+}
+
 let server: ReturnType<typeof Bun.spawn> | null = null;
 
 afterEach(async () => {
-  if (server?.pid && pidAlive(server.pid)) {
+  // Kill only a subprocess Bun still considers running. A bare pidAlive probe
+  // is unsafe after a clean exit: the PID may already have been recycled by an
+  // unrelated process, and SIGKILL would hit the bystander. exitCode is Bun's
+  // own bookkeeping — null only until the child exits and is reaped — so a
+  // recycled PID can never pass this guard.
+  if (server && server.exitCode === null) {
     try {
       server.kill("SIGKILL");
     } catch {
@@ -74,32 +110,66 @@ async function findChildPid(parentPid: number): Promise<number | null> {
   return null;
 }
 
+/**
+ * PPID-agnostic sweep: PIDs of ANY process running the fixture, however it is
+ * parented. After the server exits, a leaked fixture subprocess is reparented
+ * to PID 1, so a ppid match would never see it — scan the whole table.
+ */
+async function listFixturePids(): Promise<number[]> {
+  const proc = Bun.spawn(["ps", "-eo", "pid,command"], { stdout: "pipe" });
+  const out = await new Response(proc.stdout).text();
+  const pids: number[] = [];
+  for (const line of out.split("\n")) {
+    if (!line.includes("fake-mcp-server.ts")) continue;
+    const m = line.trim().match(/^(\d+)\s+/);
+    if (m) pids.push(Number(m[1]));
+  }
+  return pids;
+}
+
 test("SIGTERM propagates to MCP subprocess; PID gone within 7s, no orphans", async () => {
-  // Fixed high port (randomized to avoid collisions). Readiness is detected by
-  // connection-retry rather than stdout parsing, making it robust to subprocess
-  // startup latency under a saturated test suite.
-  const port = 40000 + Math.floor(Math.random() * 20000);
+  // Ephemeral port (SWARMCLAW_PORT=0) — a random fixed port can collide with
+  // the OS ephemeral range (49152-65535) or another process. The assigned port
+  // is discovered from the server's startup log line; readiness is then
+  // confirmed by connection-retry, robust to startup latency under load.
   server = Bun.spawn(["bun", INDEX], {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
     env: {
       ...process.env,
-      SWARMCLAW_PORT: String(port),
+      SWARMCLAW_PORT: "0",
       SWARMCLAW_COMMAND_ALLOWLIST: "bun",
       SWARMCLAW_ENV_ALLOWLIST: "PATH",
     },
   });
   const serverPid = server.pid!;
 
-  // Drain stdout so the server never blocks on a full pipe (CC-9 logs).
-  drainStdout(server.stdout as ReadableStream<Uint8Array>);
+  // Drain stdout (line-buffered, for port discovery) and stderr (discard) so
+  // the server never blocks on a full pipe (CC-9 logs).
+  let port: number | undefined;
+  drainLines(server.stdout as ReadableStream<Uint8Array>, (line) => {
+    try {
+      const parsed = JSON.parse(line) as { message?: string; port?: unknown };
+      if (parsed.message === "swarmclaw listening" && typeof parsed.port === "number") {
+        port = parsed.port;
+      }
+    } catch {
+      /* non-JSON line */
+    }
+  });
+  drain(server.stderr as ReadableStream<Uint8Array>);
 
-  const base = `http://localhost:${port}`;
+  // Wait for the startup line carrying the bound port (up to ~24s under load).
+  for (let i = 0; i < 120 && port === undefined; i++) {
+    await sleep(200);
+  }
+  expect(port).toBeDefined();
+  const base = `http://localhost:${port!}`;
 
-  // Wait for the server to accept connections (up to ~24s under heavy load).
+  // Confirm readiness by connection-retry (up to ~12s under heavy load).
   let up = false;
-  for (let i = 0; i < 120; i++) {
+  for (let i = 0; i < 60; i++) {
     try {
       const r = await fetch(`${base}/api/agents`, {
         method: "POST",
@@ -145,8 +215,55 @@ test("SIGTERM propagates to MCP subprocess; PID gone within 7s, no orphans", asy
   }
   expect(gone).toBe(true);
 
-  // Server itself should have exited; no orphan for the fixture remains.
+  // Server itself should have exited; the child must be gone, and no fixture
+  // process may remain anywhere on the process table.
   await server.exited.catch(() => {});
-  const orphan = await findChildPid(serverPid);
-  expect(orphan).toBeNull();
-}, 30000);
+  expect(pidAlive(childPid!)).toBe(false);
+  // PPID-agnostic orphan sweep: once the server exits, a leaked fixture
+  // subprocess would be reparented to PID 1, so the old ppid match could never
+  // see it. Scan the whole table instead. bun runs test files serially in one
+  // process and every other suite shuts its fixtures down in afterEach, so no
+  // other fixture process can legitimately be alive at this point.
+  const leaked = await listFixturePids();
+  expect(leaked).toEqual([]);
+}, 60000);
+
+/**
+ * Spawn the server with a given SWARMCLAW_PORT and wait for it to exit,
+ * capturing stderr. Used by the invalid-port tests: bad config must be
+ * rejected immediately (exit 1 + structured error line), so no readiness
+ * probe or drain loop is needed — the one stderr line cannot fill the pipe.
+ * The shared `server` handle lets afterEach reap a straggler.
+ */
+async function runWithPort(port: string): Promise<{ code: number; stderr: string }> {
+  server = Bun.spawn(["bun", INDEX], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, SWARMCLAW_PORT: port },
+  });
+  const [code, stderr] = await Promise.all([
+    server.exited,
+    new Response(server.stderr as ReadableStream<Uint8Array>).text(),
+  ]);
+  return { code, stderr };
+}
+
+test("invalid SWARMCLAW_PORT=abc → exit 1 + structured stderr line", async () => {
+  const { code, stderr } = await runWithPort("abc");
+  expect(code).toBe(1);
+  const line = stderr.split("\n").find((l) => l.includes("invalid SWARMCLAW_PORT"));
+  expect(line).toBeDefined();
+  const parsed = JSON.parse(line!) as { level?: string; message?: string };
+  expect(parsed.level).toBe("error");
+  expect(parsed.message).toContain("abc");
+}, 15000);
+
+test("out-of-range SWARMCLAW_PORT=70000 → exit 1 + structured stderr line", async () => {
+  const { code, stderr } = await runWithPort("70000");
+  expect(code).toBe(1);
+  const line = stderr.split("\n").find((l) => l.includes("invalid SWARMCLAW_PORT"));
+  expect(line).toBeDefined();
+  const parsed = JSON.parse(line!) as { level?: string; message?: string };
+  expect(parsed.level).toBe("error");
+  expect(parsed.message).toContain("70000");
+}, 15000);

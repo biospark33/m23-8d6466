@@ -8,7 +8,7 @@ import { z } from "zod";
 
 export const RegisterAgentSchema = z.object({
   agentId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$/),
-  capabilities: z.array(z.string()).min(1),
+  capabilities: z.array(z.string().max(256)).min(1).max(64),
   agentType: z.enum(["department-manager", "worker", "observer", "service"]).optional(),
   endpointUrl: z.string().url().optional(),
   metadata: z
@@ -68,11 +68,22 @@ export class CapacityError extends Error {
   }
 }
 
+export class DuplicateAgentError extends Error {
+  constructor(agentId: string) {
+    super(`agentId '${agentId}' already registered`);
+    this.name = "DuplicateAgentError";
+  }
+}
+
 export class AgentStore {
   private readonly agents = new Map<string, AgentRecord>();
+  private readonly agentIds = new Set<string>();
 
-  /** Atomic capacity check + insert. */
+  /** Atomic agentId-uniqueness + capacity check + insert. */
   create(input: RegisterAgentInput): AgentRecord {
+    if (this.agentIds.has(input.agentId)) {
+      throw new DuplicateAgentError(input.agentId);
+    }
     if (this.agents.size >= MAX_AGENTS) {
       throw new CapacityError(`maximum of ${MAX_AGENTS} agents reached`);
     }
@@ -82,6 +93,7 @@ export class AgentStore {
       createdAt: new Date().toISOString(),
     };
     this.agents.set(record.id, record);
+    this.agentIds.add(input.agentId);
     return record;
   }
 
@@ -99,5 +111,6 @@ export class AgentStore {
 
   clear(): void {
     this.agents.clear();
+    this.agentIds.clear();
   }
 }

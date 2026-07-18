@@ -5,16 +5,22 @@
  */
 
 import { z } from "zod";
-import type { StdioTransport } from "../mcp/stdio-transport.ts";
+import { log, newRequestId, type StdioTransport } from "../mcp/stdio-transport.ts";
 import type { ToolBridge } from "../mcp/tool-bridge.ts";
+import { CapacityError } from "./agent-store.ts";
+
+export { CapacityError };
 
 export const RegisterMCPServerSchema = z.object({
   name: z.string().min(1).max(128),
   transport: z.enum(["stdio"]),
   command: z.string().optional(),
-  args: z.array(z.string().max(4096)).default([]),
+  args: z.array(z.string().max(4096)).max(256).default([]),
   url: z.string().url().optional(),
-  env: z.record(z.string().min(1), z.string()).optional(),
+  env: z
+    .record(z.string().min(1), z.string())
+    .optional()
+    .refine((v) => !v || Object.keys(v).length <= 64, { message: "env exceeds 64 keys" }),
 });
 
 export type RegisterMCPServerInput = z.infer<typeof RegisterMCPServerSchema>;
@@ -41,16 +47,14 @@ export class DuplicateNameError extends Error {
   }
 }
 
-export class CapacityError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "CapacityError";
-  }
-}
-
 export class MCPStore {
   private readonly servers = new Map<string, MCPServerRecord>();
   private readonly namesInUse = new Set<string>();
+  private readonly reservations = new Map<string, string>();
+  /** Transports of in-flight registrations, keyed by reservation id. */
+  private readonly pendingTransports = new Map<string, StdioTransport>();
+  /** Set synchronously at the start of shutdownAll — closes reserve/finalize. */
+  private closed = false;
 
   /**
    * Atomically reserve a name + capacity slot. This runs synchronously (no
@@ -59,6 +63,9 @@ export class MCPStore {
    * async spawn/handshake, then finalize() or release() the reservation.
    */
   reserve(name: string): string {
+    if (this.closed) {
+      throw new Error("store is shutting down");
+    }
     if (this.namesInUse.has(name)) {
       throw new DuplicateNameError(name);
     }
@@ -71,14 +78,32 @@ export class MCPStore {
     return id;
   }
 
-  private readonly reservations = new Map<string, string>();
+  /**
+   * Track a freshly-constructed transport against its reservation so
+   * shutdownAll() can SIGTERM it even while spawn/handshake is still in
+   * flight. No-op unless the reservation exists.
+   */
+  attachTransport(id: string, stdio: StdioTransport): void {
+    if (this.reservations.has(id)) {
+      this.pendingTransports.set(id, stdio);
+    }
+  }
 
   /** Finalize a reserved slot with the fully-built record. */
   finalize(id: string, record: Omit<MCPServerRecord, "id">): MCPServerRecord {
-    if (!this.reservations.has(id)) {
+    if (this.closed) {
+      throw new Error("store is shutting down");
+    }
+    const reserved = this.reservations.get(id);
+    if (reserved === undefined) {
       throw new Error(`no reservation for id ${id}`);
     }
+    if (record.name !== reserved) {
+      // Throw before deleting so the reservation stays intact for release().
+      throw new Error("finalize name does not match reservation");
+    }
     this.reservations.delete(id);
+    this.pendingTransports.delete(id);
     const full: MCPServerRecord = { ...record, id };
     this.servers.set(id, full);
     return full;
@@ -86,6 +111,7 @@ export class MCPStore {
 
   /** Release a reservation (spawn/handshake failed). */
   release(id: string): void {
+    this.pendingTransports.delete(id);
     const name = this.reservations.get(id);
     if (name !== undefined) {
       this.reservations.delete(id);
@@ -114,9 +140,30 @@ export class MCPStore {
   }
 
   async shutdownAll(): Promise<void> {
-    await Promise.all([...this.servers.values()].map((r) => r.stdio.shutdown()));
+    // First synchronous statement: close the store so no new records or
+    // reservations can appear while the drain below is in flight.
+    this.closed = true;
+    const targets = [...[...this.servers.values()].map((r) => r.stdio), ...this.pendingTransports.values()];
+    // Per-transport errors are isolated: one stuck/throwing shutdown must not
+    // skip the remaining transports or the map cleanup.
+    const results = await Promise.allSettled(targets.map((t) => t.shutdown()));
+    for (const r of results) {
+      if (r.status === "rejected") {
+        const err = r.reason instanceof Error ? r.reason : new Error(String(r.reason));
+        log({
+          requestId: newRequestId(),
+          operation: "mcp.shutdown",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: 0,
+          status: "error",
+          error: { code: "shutdown", message: err.message, stack: err.stack },
+        });
+      }
+    }
     this.servers.clear();
     this.namesInUse.clear();
     this.reservations.clear();
+    this.pendingTransports.clear();
   }
 }
