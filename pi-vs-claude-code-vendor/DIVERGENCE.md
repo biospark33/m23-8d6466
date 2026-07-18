@@ -14,6 +14,52 @@ These files are vendored from upstream `disler/pi-vs-claude-code` at commit
 - `coms.ts` and `coms-net.ts` share intent but are separate transports (local
   Unix-socket IPC vs HTTP/SSE hub). Constants "mirror" only where a comment says
   so; where values intentionally differ, the code comment states why.
+- The identical/parity layer now lives in **`coms-core.ts`** (a LOCAL module,
+  not vendored — no upstream counterpart). Both transports import it exactly
+  like `themeMap.ts`. New shared helper/constant/env-parse logic goes there;
+  transport-specific logic stays per-file. See the `coms-core.ts` section below.
+
+## `coms-core.ts` (local shared layer — NOT vendored)
+
+Extracted from the two transports where the code was byte-for-byte identical
+(or identical after the drift fixes above). Zero behavior change — a pure
+refactor covered by `tests/vendor/coms-core.test.ts`.
+
+- **Pure helpers**: `ulid` (+ Crockford alphabet), `isValidHex`, `hexFg`,
+  `fallbackColor` (+ `FALLBACK_PALETTE`), `parseFrontmatter`, `abbreviateModel`
+  (incl. the non-string guard that historically drifted), `sanitizePeerText`,
+  `secretEqual` (used only by coms.ts's shared-secret IPC auth; coms-net uses a
+  bearer token), `isSafePathComponent`.
+- **`envBoundedInt(env, def, { min?, max?, integer? })`** — one bounded env-int
+  parser unifying coms.ts's `envPositiveInt` (now `{ integer: true, max: 2^31-1 }`)
+  and coms-net's old positional `envBoundedInt(env, def, min, max)` (now
+  `{ min, max }`). Superset: `integer` reproduces the old integer-only timer-knob
+  rejection; without it, finite fractional values clamp as before. Every existing
+  call site keeps its exact effective bounds.
+- **Shared caps** (identical value AND meaning): `MAX_HOPS` (5), `MAX_INBOUND`
+  (256), `MAX_FULFILLED_TOMBSTONES` (1000), `MAX_PENDING_EXIT_DISPATCHES` (64),
+  `EXIT_DELIVER_BUDGET_MS` (10s). Divergent caps (`MAX_PROMPT_BYTES`) stay in
+  their files — see the table below.
+- **`isDuplicateRegistration`** — the `/already|duplicate/i` predicate. coms.ts's
+  `registerFlagSafe/ToolSafe/CommandSafe` and coms-net's `registerFlagOnce` both
+  use it, but their WRAPPERS stay per-file: coms-net's `registerFlagOnce`
+  additionally gates on a `KNOWN_COMS_FLAGS` allow-set (stricter than coms.ts's
+  blanket swallow), so only the predicate is shared.
+
+### Deliberately NOT extracted (remaining manual-parity surface)
+
+Left in each transport because the two implementations differ in semantics or
+are transport-coupled; unifying would not be zero-behavior:
+
+- **Replay tombstones** — coms.ts `isDuplicateMsgId`/`markFulfilled` (delete-on-
+  read expiry, `>=` cap, inline 1h TTL) vs coms-net `tombstoneFulfilled`/
+  `markInboundFulfilled` (`.has()` check, `>` cap, `FULFILLED_TTL_MS`, plus the
+  queue+FIFO drop in the same terminal step). Different semantics — left in place.
+- **Registration wrappers** — `registerFlagSafe/ToolSafe/CommandSafe` vs
+  `registerFlagOnce` + `KNOWN_COMS_FLAGS` (see above).
+- **Inbound-queue / turnQueue FIFO attribution, renderPool/widget code,
+  agent_end response capture, transport/registry/SSE logic** — transport-specific
+  by nature; out of scope for this incremental extraction.
 
 ## `coms.ts` (local Unix-socket IPC transport)
 

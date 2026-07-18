@@ -12,8 +12,12 @@
  * slash command, clean shutdown lifecycle.
  *
  * Vendored into QDS-Factory (pi-vs-claude-code-vendor/) from the pi-mono coms
- * extension for the pi-vs-claude-code review harness; keep behavioral parity
- * with coms-net.ts manually — there is no shared module.
+ * extension for the pi-vs-claude-code review harness. The identical/parity
+ * layer (pure helpers, bounded env-int parser, duplicate-registration guard,
+ * shared caps) lives in ./coms-core.ts — imported here exactly like
+ * ./themeMap.ts. Transport-specific logic below (Unix-socket bind/send,
+ * registry I/O, tombstone bookkeeping, queues, widgets) stays per-file and is
+ * kept in manual parity with coms-net.ts; see DIVERGENCE.md.
  *
  * Usage: pi -e pi-vs-claude-code-vendor/coms.ts
  */
@@ -23,6 +27,24 @@ import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { applyExtensionDefaults } from "./themeMap.ts";
+import {
+	abbreviateModel,
+	envBoundedInt,
+	fallbackColor,
+	hexFg,
+	isDuplicateRegistration,
+	isSafePathComponent,
+	isValidHex,
+	MAX_FULFILLED_TOMBSTONES,
+	MAX_HOPS,
+	MAX_INBOUND,
+	MAX_PENDING_EXIT_DISPATCHES,
+	EXIT_DELIVER_BUDGET_MS,
+	parseFrontmatter,
+	sanitizePeerText,
+	secretEqual,
+	ulid,
+} from "./coms-core.ts";
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -32,29 +54,22 @@ import { spawnSync } from "node:child_process";
 
 // ━━ Constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-// Env-var knobs must be finite, positive INTEGERS: Infinity would disable
-// the hop guard or make timeouts never fire, negatives would nack every
-// inbound prompt or busy-loop setInterval, values above 2^31-1 overflow
-// Node's setTimeout (clamped to ~1ms → spurious immediate timeouts), and a
-// fractional value like 0.5 would floor to 0 — a zero timer bricks intervals.
-function envPositiveInt(v: string | undefined, def: number): number {
-	const n = Number(v);
-	return Number.isInteger(n) && n > 0 ? Math.min(n, 2 ** 31 - 1) : def;
-}
+// Timer/size knobs must be finite, positive INTEGERS (the { integer: true }
+// mode of envBoundedInt): Infinity would disable the guard or make timeouts
+// never fire, negatives would nack every inbound or busy-loop setInterval,
+// values above 2^31-1 overflow Node's setTimeout, and a fractional value like
+// 0.5 would floor to 0 — a zero timer bricks intervals. Capped at 2^31-1.
+const INT_MAX = 2 ** 31 - 1;
 
 const COMS_DIR = process.env.PI_COMS_DIR || path.join(os.homedir(), ".pi", "coms");
-// Fixed hop cap: prompts with hops >= MAX_HOPS are nacked and coms_send
-// refuses to relay further. Deliberately NOT an env knob — the documented
-// guard is exactly 5.
-const MAX_HOPS = 5;
-const TIMEOUT_MS = envPositiveInt(process.env.PI_COMS_TIMEOUT_MS, 1_800_000);
+const TIMEOUT_MS = envBoundedInt(process.env.PI_COMS_TIMEOUT_MS, 1_800_000, { integer: true, max: INT_MAX });
 // Receiver-side deadline for pruning inbound turns that never completed.
 // TIMEOUT_MS is the SENDER-side reply timeout; keep the two independent so a
 // short sender timeout can't evict an in-flight inbound turn early.
-const TURN_DEADLINE_MS = envPositiveInt(process.env.PI_COMS_TURN_DEADLINE_MS, 1_800_000);
-// Floor at 1s: envPositiveInt accepts any positive integer, and a
+const TURN_DEADLINE_MS = envBoundedInt(process.env.PI_COMS_TURN_DEADLINE_MS, 1_800_000, { integer: true, max: INT_MAX });
+// Floor at 1s: envBoundedInt accepts any positive integer, and a
 // unit-confused value like 10 (ms) would busy-loop the ping cycle.
-const PING_INTERVAL_MS = Math.max(1000, envPositiveInt(process.env.PI_COMS_PING_INTERVAL_MS, 10_000));
+const PING_INTERVAL_MS = Math.max(1000, envBoundedInt(process.env.PI_COMS_PING_INTERVAL_MS, 10_000, { integer: true, max: INT_MAX }));
 const KEEPALIVE_INTERVAL_MS = 30_000;
 // A live agent rewrites heartbeat_at every KEEPALIVE_INTERVAL_MS. Allow three
 // missed cycles before declaring the entry stale — catches recycled PIDs and
@@ -65,18 +80,13 @@ const HEARTBEAT_STALE_MS = 3 * KEEPALIVE_INTERVAL_MS;
 // SSE_BUF_CAP_BYTES while still bounding the per-line accumulator.
 const LINE_CAP_BYTES = 16 * 1024 * 1024;
 const SOCKET_OP_TIMEOUT_MS = 5_000;
-// inboundQueue entries are only removed on agent_end (or by keepalive pruning
-// after TURN_DEADLINE_MS); cap concurrent unfulfilled inbounds so a flooding
-// peer cannot grow the map without bound.
-const MAX_INBOUND = 256;
+// MAX_INBOUND, MAX_PENDING_EXIT_DISPATCHES, MAX_FULFILLED_TOMBSTONES,
+// EXIT_DELIVER_BUDGET_MS and MAX_HOPS are imported from ./coms-core.ts —
+// identical value and meaning in both transports (see DIVERGENCE.md).
 // Prompts are injected into the receiver's context; cap each one well below
 // LINE_CAP_BYTES so an authenticated peer can't burn the whole context window
 // (or pin ~4GB via 256 queued 16MB envelopes) with a single send.
 const MAX_PROMPT_BYTES = 256 * 1024;
-// Failed response sends are retained for the 'exit' fallback, each holding a
-// full response payload; cap so a persistently dead peer can't grow the array
-// without bound (and hang process exit with one spawnSync per entry).
-const MAX_PENDING_EXIT_DISPATCHES = 64;
 // Responses land verbatim in the caller's coms_get/coms_await tool output;
 // cap like MAX_PROMPT_BYTES so a peer can't push a full LINE_CAP_BYTES (16MB)
 // payload into the caller's context window.
@@ -91,21 +101,9 @@ const MAX_RESPONSE_SCHEMA_BYTES = 32_768;
 // the keepalive sweep reclaims them; cap the retained count (oldest completed
 // evicted first) so chatty agents can't grow the map without bound.
 const MAX_COMPLETED_REPLIES = 256;
-// Hard cap on fulfilled-msg_id replay tombstones: markFulfilled prunes
-// expired entries first, then evicts oldest-inserted.
-const MAX_FULFILLED_TOMBSTONES = 1000;
 // Bound on the session_start/session_shutdown init-latch spin: without a
 // deadline a wedged init would spin the 25ms poll loop forever.
-const INIT_LATCH_TIMEOUT_MS = envPositiveInt(process.env.PI_COMS_INIT_LATCH_TIMEOUT_MS, 30_000);
-// Total wall-clock budget for all exit-fallback dispatches: each costs one
-// blocking spawnSync (up to ~4s inside the script), so without a cap a
-// backlog of undelivered responses could stall process exit for minutes.
-const EXIT_DELIVER_BUDGET_MS = 10_000;
-
-const FALLBACK_PALETTE = [
-	"#72F1B8", "#36F9F6", "#FF7EDB", "#FEDE5D",
-	"#C792EA", "#FF8B39", "#4D9DE0", "#FFAA8B",
-];
+const INIT_LATCH_TIMEOUT_MS = envBoundedInt(process.env.PI_COMS_INIT_LATCH_TIMEOUT_MS, 30_000, { integer: true, max: INT_MAX });
 
 // ━━ Types ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -231,81 +229,10 @@ interface InboundContext {
 }
 
 // ━━ Helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-// 10 Crockford chars encode 50 bits of timestamp; Date.now() needs 48 bits
-// (good until ~year 10889), so the final slice(0, 26) never truncates the
-// time portion and ids stay roughly time-ordered.
-function ulid(): string {
-	const time = Date.now();
-	const rand = crypto.randomBytes(10);
-	let timeStr = "";
-	let t = time;
-	for (let i = 9; i >= 0; i--) {
-		timeStr = CROCKFORD[t % 32] + timeStr;
-		t = Math.floor(t / 32);
-	}
-	let randStr = "";
-	let bits = 0;
-	let value = 0;
-	for (const byte of rand) {
-		value = (value << 8) | byte;
-		bits += 8;
-		while (bits >= 5) {
-			bits -= 5;
-			randStr += CROCKFORD[(value >> bits) & 31];
-		}
-	}
-	return (timeStr + randStr).slice(0, 26);
-}
-
-function isValidHex(hex: string): boolean {
-	return /^#[0-9a-fA-F]{6}$/.test(hex);
-}
-
-function hexFg(hex: string, s: string): string {
-	if (!isValidHex(hex)) return s;
-	const r = Number.parseInt(hex.slice(1, 3), 16);
-	const g = Number.parseInt(hex.slice(3, 5), 16);
-	const b = Number.parseInt(hex.slice(5, 7), 16);
-	return `\x1b[38;2;${r};${g};${b}m${s}\x1b[39m`;
-}
-
-function fallbackColor(sessionId: string): string {
-	const h = crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 8);
-	// The modulo guarantees an in-range index.
-	return FALLBACK_PALETTE[Number(BigInt(`0x${h}`)) % FALLBACK_PALETTE.length]!;
-}
-
-function parseFrontmatter(raw: string): { name?: string; description?: string; color?: string; body: string } {
-	const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
-	if (!match) return { body: raw };
-	// Both groups are required by the regex; guard only to satisfy
-	// noUncheckedIndexedAccess.
-	const fmRaw = match[1];
-	const body = match[2];
-	if (fmRaw === undefined || body === undefined) return { body: raw };
-	const frontmatter: Record<string, string> = {};
-	for (const line of fmRaw.split(/\r?\n/)) {
-		const idx = line.indexOf(":");
-		if (idx > 0) {
-			const key = line.slice(0, idx).trim();
-			let val = line.slice(idx + 1).trim();
-			// strip surrounding quotes for values like color: "#36F9F6"
-			if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-				val = val.slice(1, -1);
-			}
-			frontmatter[key] = val;
-		}
-	}
-	return {
-		name: frontmatter.name,
-		description: frontmatter.description,
-		color: frontmatter.color,
-		body,
-	};
-}
+//
+// Pure/parity helpers (ulid, hexFg, fallbackColor, parseFrontmatter,
+// abbreviateModel, sanitizePeerText, secretEqual, isSafePathComponent) live in
+// ./coms-core.ts. Transport-specific helpers stay below.
 
 // macOS caps sun_path at 104 bytes (incl. NUL), Linux at 108 — a deep
 // PI_COMS_DIR or long home path can blow past that and make bind fail with
@@ -338,37 +265,6 @@ function nowIso(): string {
 	return new Date().toISOString();
 }
 
-function abbreviateModel(model: string): string {
-	// Registry/pong fields are peer-controlled; a non-string would throw on
-	// startsWith/slice and crash the TUI render callback.
-	let m = typeof model === "string" ? model : "";
-	if (m.startsWith("claude-")) m = m.slice("claude-".length);
-	if (m.length > 14) m = m.slice(0, 14);
-	return m;
-}
-
-// Peer-supplied display strings (sender_name/sender_cwd from inbound
-// envelopes) are interpolated raw into the injected prompt and rendered in
-// the TUI. Strip C0/DEL/C1 control characters (ANSI escape sequences are a
-// terminal-injection channel) and cap length — the transport frame allows
-// near-16MB fields. Mirrors sanitizePeerText in coms-net.ts.
-function sanitizePeerText(s: unknown, fallback = "", max = 64): string {
-	if (typeof s !== "string") return fallback;
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — strips C0/DEL/C1 control characters from peer-controlled strings
-	const clean = s.replace(/[\x00-\x1f\x7f\u0080-\u009f]/g, "");
-	return clean.length > max ? clean.slice(0, max) : clean;
-}
-
-// Constant-time secret comparison: a plain !== short-circuits on the first
-// mismatched byte, leaking the match-prefix length through timing.
-// timingSafeEqual requires equal-length buffers, so check length first.
-function secretEqual(a: string, b: string): boolean {
-	const ba = Buffer.from(a);
-	const bb = Buffer.from(b);
-	if (ba.length !== bb.length) return false;
-	return crypto.timingSafeEqual(ba, bb);
-}
-
 // Audit hook installed by the default export so module-level helpers (which
 // have no pi handle) can still record security-relevant events.
 let auditFn: ((data: Record<string, unknown>) => void) | null = null;
@@ -391,15 +287,10 @@ interface CliFlags {
 	explicit?: boolean;
 }
 
-// coms-net.ts registers the same flag names, so loading both extensions
-// together makes the second registerFlag throw on pi versions that reject
-// duplicates. Swallow only duplicate-registration errors; anything else is
-// a real bug and must still propagate.
-function isDuplicateRegistration(err: unknown): boolean {
-	const msg = err instanceof Error ? err.message : String(err);
-	return /already|duplicate/i.test(msg);
-}
-
+// isDuplicateRegistration (imported from ./coms-core.ts) swallows only the
+// duplicate-registration error thrown when co-loading with coms-net.ts (or an
+// extension reload) double-registers the same flag/tool/command; anything else
+// is a real bug and must still propagate.
 function registerFlagSafe(
 	pi: ExtensionAPI,
 	name: string,
@@ -451,16 +342,8 @@ function readCliFlags(pi: ExtensionAPI): CliFlags {
 }
 
 // ━━ Registry I/O ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-// Rejects path traversal / separator injection in project & agent names, both
-// of which can originate from untrusted input (--project CLI flag, agent
-// frontmatter, or another agent's coms_list tool call). Strict whitelist
-// rather than a separator blacklist: also blocks Windows ADS (colon) and
-// null-byte injection, which the old blacklist let through. "." and ".." pass
-// the character class, so they're rejected explicitly.
-function isSafePathComponent(s: unknown): s is string {
-	return typeof s === "string" && /^[a-zA-Z0-9_.-]+$/.test(s) && s !== "." && s !== "..";
-}
+// isSafePathComponent (imported from ./coms-core.ts) rejects path
+// traversal / separator injection in project & agent names.
 
 function projectAgentsDir(project: string): string {
 	if (!isSafePathComponent(project)) {

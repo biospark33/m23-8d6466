@@ -2,7 +2,7 @@
   "name": "pi-vs-claude-code-vendor",
   "private": true,
   "type": "module",
-  "description": "Vendored Pi coms extensions (coms.ts + coms-net.ts) for QDS-Factory Pi swarm messaging. Loaded via `pi -e ./coms.ts`; not a published package.",
+  "description": "Vendored Pi coms extensions (coms.ts + coms-net.ts) for QDS-Factory Pi swarm messaging, plus the local coms-core.ts shared layer. Loaded via `pi -e ./coms.ts`; not a published package.",
   "license": "MIT",
   "_provenance": {
     "source_repo": "https://github.com/disler/pi-vs-claude-code",
@@ -12,7 +12,7 @@
     "vendored_files": ["coms.ts", "coms-net.ts", "themeMap.ts"],
     "vendored_at": "2026-07-10",
     "license_note": "Upstream is MIT (Copyright (c) 2026 IndyDevDan); the full license text and attribution ship in ./LICENSE alongside the vendored files, as MIT requires.",
-    "notes": "themeMap.ts is a local import of coms.ts/coms-net.ts and is vendored to keep the extensions self-contained. External imports (@mariozechner/pi-coding-agent, @mariozechner/pi-tui, @sinclair/typebox) are provided by the pi runtime at load time."
+    "notes": "themeMap.ts is a local import of coms.ts/coms-net.ts and is vendored to keep the extensions self-contained. coms-core.ts is NOT vendored — it is a LOCAL extraction of the identical/parity layer (pure helpers, bounded env-int parser, duplicate-registration guard, shared caps) that coms.ts and coms-net.ts both import like themeMap.ts; it has no upstream counterpart, so a re-vendor never overwrites it (3-way merge only touches the vendored_files). External imports (@mariozechner/pi-coding-agent, @mariozechner/pi-tui, @sinclair/typebox) are provided by the pi runtime at load time."
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "0.55.0"
