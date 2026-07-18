@@ -464,6 +464,46 @@ describe("stdio transport robustness", () => {
     }
   }, 20000);
 
+  test("first-byte latency is attributed to the request whose response resolves, not the earliest pending", async () => {
+    // Two overlapping tools/call requests: `retain` held back 400ms, `reflect`
+    // answered immediately. Chunk-level attribution (the old bug) would credit
+    // reflect's fast arrival to retain (the earliest unfired pending), so
+    // retain would read ~0ms and reflect would read ~400ms — inverted. Per-
+    // request attribution reads retain ≈ its own delay and reflect ≈ fast.
+    const t = bunFake({ FAKE_MCP_TOOL_DELAY_MS: JSON.stringify({ retain: 400 }) });
+    live.push(t);
+    await t.spawn();
+    await t.initialize();
+
+    let retainLatency = -1;
+    let reflectLatency = -1;
+    const retain = t.request(
+      "tools/call",
+      { name: "retain", arguments: { bank_id: "a", content: "x" } },
+      5000,
+      (l) => {
+        retainLatency = l;
+      },
+    );
+    const reflect = t.request(
+      "tools/call",
+      { name: "reflect", arguments: { bank_id: "a" } },
+      5000,
+      (l) => {
+        reflectLatency = l;
+      },
+    );
+    await Promise.all([retain, reflect]);
+
+    // reflect resolved first and fast; retain resolved later, near its delay.
+    expect(reflectLatency).toBeGreaterThanOrEqual(0);
+    expect(reflectLatency).toBeLessThan(200);
+    expect(retainLatency).toBeGreaterThanOrEqual(300);
+    // The decisive check: retain's latency reflects ITS OWN delay, not reflect's
+    // fast arrival — retain must be clearly slower than reflect.
+    expect(retainLatency).toBeGreaterThan(reflectLatency);
+  }, 15000);
+
   test("malformed non-JSON lines on the wire are skipped, replies still resolve", async () => {
     const t = bunFake({ FAKE_MCP_GARBAGE_LINE: "1" });
     live.push(t);
@@ -650,13 +690,14 @@ describe("real hindsight-local-mcp (integration)", () => {
     "real binary exposes an HTTP API (host/port), not an stdio JSON-RPC server",
     async () => {
       // The launcher imports heavy modules (pg0/uvicorn) before argparse prints,
-      // so `--help` takes several seconds and its latency is load-dependent. We
-      // bound the wait ourselves (25s) and FAIL EXPLICITLY on a timeout — a
-      // green run with zero assertions would be a faked pass.
+      // so `--help` takes 9-14s idle and is load-dependent — under full-suite
+      // CPU contention a 25s bound flaked. Bound the wait at 60s (still FAIL
+      // EXPLICITLY on timeout; a green run with zero assertions would be a
+      // faked pass) and give the test wrapper headroom above it.
       const proc = Bun.spawn(["hindsight-local-mcp", "--help"], { stdout: "pipe", stderr: "pipe" });
       const out = await Promise.race([
         new Response(proc.stdout).text(),
-        new Promise<null>((res) => setTimeout(() => res(null), 25_000)),
+        new Promise<null>((res) => setTimeout(() => res(null), 60_000)),
       ]);
       try {
         proc.kill("SIGKILL");
@@ -666,7 +707,7 @@ describe("real hindsight-local-mcp (integration)", () => {
       await proc.exited.catch(() => {});
       if (out === null) {
         throw new Error(
-          "hindsight-local-mcp --help exceeded 25s in an environment where the binary is present",
+          "hindsight-local-mcp --help exceeded 60s in an environment where the binary is present",
         );
       }
       // The launcher exposes the Hindsight API HTTP server (host/port flags),
@@ -675,6 +716,7 @@ describe("real hindsight-local-mcp (integration)", () => {
       expect(out).toContain("--port");
       expect(out.toLowerCase()).toContain("host");
     },
-    30_000,
+    // Above the 60s internal bound so the wrapper never fires first.
+    75_000,
   );
 });

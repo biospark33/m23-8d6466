@@ -10,7 +10,7 @@ import {
   handleTestMCPServer,
   type TransportFactory,
 } from "../../src/swarmclaw/routes/mcp-servers.ts";
-import { AgentStore } from "../../src/swarmclaw/store/agent-store.ts";
+import { AgentStore, isLoopbackEndpoint, setDnsLookup } from "../../src/swarmclaw/store/agent-store.ts";
 import { MCPStore } from "../../src/swarmclaw/store/mcp-store.ts";
 
 const FAKE = join(import.meta.dir, "fixtures", "fake-mcp-server.ts");
@@ -770,6 +770,47 @@ describe("Guards: capacity, duplicate, SSRF, args-length", () => {
     expect(body.error).toContain("ftp://localhost/x");
   }, 15000);
 
+  // SSRF: the DNS-resolution branch (hostname → multiple A/AAAA records) is
+  // DNS-rebinding-relevant — a mixed loopback/non-loopback result set must be
+  // rejected. The injectable lookup seam drives it without real DNS.
+  describe("isLoopbackEndpoint DNS resolution (.every branch)", () => {
+    test("all-loopback results → accept", async () => {
+      const restore = setDnsLookup(async () => [{ address: "127.0.0.1" }, { address: "::1" }]);
+      try {
+        expect(await isLoopbackEndpoint("http://rebind.test/api")).toBe(true);
+      } finally {
+        restore();
+      }
+    });
+
+    test("mixed loopback + non-loopback results → reject (DNS-rebinding guard)", async () => {
+      const restore = setDnsLookup(async () => [{ address: "127.0.0.1" }, { address: "8.8.8.8" }]);
+      try {
+        expect(await isLoopbackEndpoint("http://rebind.test/api")).toBe(false);
+      } finally {
+        restore();
+      }
+    });
+
+    test("all-non-loopback results → reject", async () => {
+      const restore = setDnsLookup(async () => [{ address: "203.0.113.7" }]);
+      try {
+        expect(await isLoopbackEndpoint("http://rebind.test/api")).toBe(false);
+      } finally {
+        restore();
+      }
+    });
+
+    test("empty result set → reject", async () => {
+      const restore = setDnsLookup(async () => []);
+      try {
+        expect(await isLoopbackEndpoint("http://rebind.test/api")).toBe(false);
+      } finally {
+        restore();
+      }
+    });
+  });
+
   test("args length: 4097 chars → 400, 4096 → accepted", async () => {
     const mcpStore = newMcpStore();
     const tooLong = await handleRegisterMCPServer(
@@ -865,6 +906,31 @@ describe("AC6: /test reports ok:false for a dead transport", () => {
     expect(body.ok).toBe(false);
     expect(typeof body.error).toBe("string");
     expect((body.error as string).length).toBeGreaterThan(0);
+  }, 15000);
+
+  test("after shutting down the subprocess, /invoke → 502 fast (no timeout wait)", async () => {
+    const mcpStore = newMcpStore();
+    const reg = await handleRegisterMCPServer(
+      mcpStore,
+      { name: "dead-invoke-srv", transport: "stdio", command: "hindsight-local-mcp" },
+      undefined,
+      fakeFactory(),
+    );
+    const id = (reg.body as { id: string }).id;
+    const rec = mcpStore.get(id)!;
+    await rec.stdio.shutdown(1000); // kill the subprocess out from under it
+    const startedAt = Date.now();
+    const resp = await handleInvokeMCPServer(mcpStore, id, {
+      tool: "retain",
+      arguments: { bank_id: "b", content: "c" },
+    });
+    // Must return promptly via the isRunning short-circuit, not wait out the
+    // 60s+ invoke timeout on a request the dead transport can never answer.
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+    expect(resp.status).toBe(502);
+    const body = resp.body as { error: { code: number; message: string } };
+    expect(body.error.code).toBe(-32603);
+    expect(body.error.message).toContain("transport is not running");
   }, 15000);
 });
 

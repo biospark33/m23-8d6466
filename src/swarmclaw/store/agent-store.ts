@@ -38,6 +38,19 @@ export const MAX_AGENTS = 64;
 
 const LOOPBACK_IPS = new Set(["127.0.0.1", "::1"]);
 
+/** DNS resolver seam (mirrors setLogSink): overridable so tests can drive the
+ * multi-result `.every()` branch deterministically without real DNS. */
+type LookupAll = (host: string) => Promise<Array<{ address: string }>>;
+let dnsLookup: LookupAll = (host) => lookup(host, { all: true });
+
+export function setDnsLookup(fn: LookupAll): () => void {
+  const prev = dnsLookup;
+  dnsLookup = fn;
+  return () => {
+    dnsLookup = prev;
+  };
+}
+
 /**
  * SSRF guard: endpointUrl hostname must resolve to loopback. Returns true if
  * loopback, false otherwise. Non-resolving hosts are treated as non-loopback.
@@ -54,7 +67,7 @@ export async function isLoopbackEndpoint(endpointUrl: string): Promise<boolean> 
   const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
   if (isIP(bare)) return LOOPBACK_IPS.has(bare);
   try {
-    const results = await lookup(host, { all: true });
+    const results = await dnsLookup(host);
     return results.length > 0 && results.every((r) => LOOPBACK_IPS.has(r.address));
   } catch {
     return false;
@@ -77,12 +90,15 @@ export class DuplicateAgentError extends Error {
 
 export class AgentStore {
   private readonly agents = new Map<string, AgentRecord>();
-  private readonly agentIds = new Set<string>();
 
-  /** Atomic agentId-uniqueness + capacity check + insert. */
+  /** Atomic agentId-uniqueness + capacity check + insert. `agents` is keyed by
+   * the generated uuid, so agentId uniqueness is derived by scanning values —
+   * bounded by MAX_AGENTS (64), so no separate mirror index is warranted. */
   create(input: RegisterAgentInput): AgentRecord {
-    if (this.agentIds.has(input.agentId)) {
-      throw new DuplicateAgentError(input.agentId);
+    for (const rec of this.agents.values()) {
+      if (rec.agentId === input.agentId) {
+        throw new DuplicateAgentError(input.agentId);
+      }
     }
     if (this.agents.size >= MAX_AGENTS) {
       throw new CapacityError(`maximum of ${MAX_AGENTS} agents reached`);
@@ -93,7 +109,6 @@ export class AgentStore {
       createdAt: new Date().toISOString(),
     };
     this.agents.set(record.id, record);
-    this.agentIds.add(input.agentId);
     return record;
   }
 
@@ -111,6 +126,5 @@ export class AgentStore {
 
   clear(): void {
     this.agents.clear();
-    this.agentIds.clear();
   }
 }

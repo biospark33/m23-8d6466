@@ -9,7 +9,6 @@ import {
   buildSubprocessEnv,
   CommandValidationError,
   JsonRpcError,
-  log,
   newRequestId,
   StdioTransport,
   validateCommand,
@@ -30,7 +29,7 @@ import {
   type MCPStore,
   RegisterMCPServerSchema,
 } from "../store/mcp-store.ts";
-import { deriveErrorMessage, type RouteResponse } from "./agents.ts";
+import { logResponse, type RouteResponse } from "./agents.ts";
 
 // Transport factory is injectable so tests can point at the fake stdio server
 // without touching the command allowlist path.
@@ -41,6 +40,12 @@ export type TransportFactory = (opts: {
 }) => StdioTransport;
 
 const defaultTransportFactory: TransportFactory = (opts) => new StdioTransport(opts);
+
+// Grace before SIGKILL when tearing down a failed registration. Shorter than
+// the 5s runtime default: a transport that never finished its handshake has no
+// in-flight work to drain and its child dies promptly, so a long wait only
+// delays the error response.
+const REGISTRATION_TEARDOWN_GRACE_MS = 2_000;
 
 export async function handleRegisterMCPServer(
   store: MCPStore,
@@ -137,7 +142,7 @@ export async function handleRegisterMCPServer(
   } catch (err) {
     store.release(reservationId);
     // StdioTransport.shutdown is a no-op when the transport never spawned.
-    await stdio?.shutdown(2_000).catch(() => {});
+    await stdio?.shutdown(REGISTRATION_TEARDOWN_GRACE_MS).catch(() => {});
     // store.finalize throws "store is shutting down" in the shutdown race —
     // that is not a handshake failure; surface the store's message as 503.
     if (err instanceof Error && err.message === "store is shutting down") {
@@ -207,6 +212,17 @@ export async function handleInvokeMCPServer(
   const rec = store.get(id);
   if (!rec) {
     return logAndReturn(start, requestId, "mcp.invoke", { status: 404, body: { error: "MCP server not found" } });
+  }
+
+  // Short-circuit a dead transport before validation/dispatch (mirrors
+  // handleTestMCPServer): invoking a shut-down transport would otherwise wait
+  // out the full invoke timeout on a request that can never be answered.
+  if (!rec.stdio.isRunning) {
+    rec.healthy = false;
+    return logAndReturn(start, requestId, "mcp.invoke", {
+      status: 502,
+      body: invokeErrorBody({ code: -32603, message: "transport is not running", requestId, id: requestId }),
+    });
   }
 
   // Validate arguments (bank_id etc.) BEFORE dispatch — never touches the subprocess on failure.
@@ -331,16 +347,6 @@ function logAndReturn(
   operation: string,
   resp: RouteResponse,
 ): RouteResponse {
-  log({
-    requestId,
-    operation,
-    agentId: null,
-    timestamp: new Date().toISOString(),
-    duration: Date.now() - start,
-    status: resp.status < 400 ? "ok" : "error",
-    ...(resp.status >= 400
-      ? { error: { code: String(resp.status), message: deriveErrorMessage(resp.body, `${operation} failed`) } }
-      : {}),
-  });
-  return resp;
+  // MCP routes carry no agentId in the CC-9 entry.
+  return logResponse(start, requestId, operation, null, resp);
 }

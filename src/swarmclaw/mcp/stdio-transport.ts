@@ -417,16 +417,10 @@ export class StdioTransport {
       for await (const chunk of this.proc!.stdout) {
         // {stream: true} keeps multibyte UTF-8 split across chunks intact.
         this.readBuf += decoder.decode(chunk, { stream: true });
-        // First stdout bytes after a request measure stdio_latency_ms (time
-        // from request write to first response byte, CC-9). `pending` is
-        // insertion-ordered, so the first unfired entry is the earliest.
-        for (const [, p] of this.pending) {
-          if (p.firstByteFired !== true) {
-            p.firstByteFired = true;
-            p.onFirstByte?.(Date.now() - p.startedAt);
-            break;
-          }
-        }
+        // stdio_latency_ms (first-response-byte latency, CC-9) is attributed
+        // per-request in handleLine, when a response line resolves its own
+        // pending entry — NOT here on raw chunk arrival, which cannot tell whose
+        // bytes arrived and would misattribute request B's chunk to request A.
         if (this.readBuf.length > MAX_FRAME_BYTES) {
           log({
             level: "error",
@@ -497,7 +491,9 @@ export class StdioTransport {
   }
 
   private handleLine(line: string): void {
-    let msg: any;
+    // The line comes from an untrusted subprocess — parse to `unknown` and
+    // narrow the JSON-RPC envelope explicitly before touching any field.
+    let msg: unknown;
     try {
       msg = JSON.parse(line);
     } catch {
@@ -514,17 +510,19 @@ export class StdioTransport {
       });
       return;
     }
+    if (msg === null || typeof msg !== "object") return; // not a JSON-RPC object
+    const env = msg as { id?: unknown; method?: unknown; error?: unknown; result?: unknown };
     // A message carrying `method` is server-initiated: a notification (no id)
     // or a server→client request. We support no server methods, but JSON-RPC
     // requires a response to requests so the server is not left hanging.
     // String ids are valid JSON-RPC and get the same reply; they cannot
     // collide with `pending` because the client only issues numeric ids.
-    if (typeof msg.method === "string") {
-      if (typeof msg.id === "number" || typeof msg.id === "string") {
+    if (typeof env.method === "string") {
+      if (typeof env.id === "number" || typeof env.id === "string") {
         try {
           this.write({
             jsonrpc: "2.0",
-            id: msg.id,
+            id: env.id,
             error: { code: -32601, message: "method not supported by client" },
           });
         } catch {
@@ -533,22 +531,33 @@ export class StdioTransport {
       }
       return;
     }
-    if (typeof msg.id !== "number") return; // unmatched response
-    const p = this.pending.get(msg.id);
+    if (typeof env.id !== "number") return; // unmatched response
+    const p = this.pending.get(env.id);
     if (!p) return;
+    // Attribute first-byte latency to THIS request now that its response line
+    // has resolved (CC-9). Granularity is line-level, not raw-byte-level: for
+    // this request the measured latency is the time until its full response
+    // line was buffered, which for typical single-frame MCP replies equals the
+    // arrival of its first byte. This is correct under concurrency, where
+    // chunk-level attribution would credit one request's bytes to another.
+    if (p.firstByteFired !== true) {
+      p.firstByteFired = true;
+      p.onFirstByte?.(Date.now() - p.startedAt);
+    }
     clearTimeout(p.timer);
-    this.pending.delete(msg.id);
-    if (msg.error) {
+    this.pending.delete(env.id);
+    if (env.error !== undefined && env.error !== null) {
       // Coerce a non-conforming wire shape so the rejected error always has a
       // numeric code / string message — the route's response schema requires
       // it, and a non-number code would escape as a 500 instead of a 502.
-      const raw = msg.error;
+      const raw = env.error as { code?: unknown; message?: unknown; data?: unknown };
       const code = typeof raw.code === "number" ? raw.code : -32603;
       const message = typeof raw.message === "string" ? raw.message : String(raw.message ?? "unknown MCP error");
       const err = new JsonRpcError(code, message, raw.data);
       p.reject(err);
     } else {
-      p.resolve(msg.result);
+      // Result stays opaque JSON — passed through unchanged after envelope narrowing.
+      p.resolve(env.result);
     }
   }
 

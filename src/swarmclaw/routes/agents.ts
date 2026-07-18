@@ -77,15 +77,27 @@ function finish(
   agentId: string | null,
   resp: RouteResponse,
 ): RouteResponse {
+  return logResponse(start, requestId, "agent.register", agentId, resp);
+}
+
+/** Emit the CC-9 response log entry and return the response unchanged. Shared by
+ * the agent and MCP routes (operation + agentId vary per caller). */
+export function logResponse(
+  start: number,
+  requestId: string,
+  operation: string,
+  agentId: string | null,
+  resp: RouteResponse,
+): RouteResponse {
   log({
     requestId,
-    operation: "agent.register",
+    operation,
     agentId,
     timestamp: new Date().toISOString(),
     duration: Date.now() - start,
     status: resp.status < 400 ? "ok" : "error",
     ...(resp.status >= 400
-      ? { error: { code: String(resp.status), message: deriveErrorMessage(resp.body, "agent registration failed") } }
+      ? { error: { code: String(resp.status), message: deriveErrorMessage(resp.body, `${operation} failed`) } }
       : {}),
   });
   return resp;

@@ -125,11 +125,14 @@ export function createServer(port = 0): SwarmClawServer {
   return { port: server.port ?? port, agentStore, mcpStore, stop };
 }
 
-const MAX_BODY_BYTES = 1_048_576;
+export const MAX_BODY_BYTES = 1_048_576;
 
-const PAYLOAD_TOO_LARGE = new Error("payload too large");
+export const PAYLOAD_TOO_LARGE = new Error("payload too large");
 
-async function safeJson(req: Request): Promise<unknown> {
+// Exported as a test seam: a unit test drives an over-limit chunked stream
+// (no content-length) through the bounded read to assert the PAYLOAD_TOO_LARGE
+// → 413 path deterministically, independent of the HTTP-layer race.
+export async function safeJson(req: Request): Promise<unknown> {
   const body = req.body;
   if (!body) return {};
   try {
