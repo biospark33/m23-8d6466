@@ -2555,12 +2555,15 @@ export default function (pi: ExtensionAPI) {
 			}
 			awaitingIds.add(params.msg_id);
 			try {
-				// Finite positive INTEGERS only (matching envPositiveInt):
-				// Infinity would never time out, a fraction like 0.5 would arm
-				// a near-instant timer, and values above 2^31-1 overflow Node's
-				// setTimeout (clamped to ~1ms → spurious immediate timeout).
-				const timeoutMs = typeof params.timeout_ms === "number" && Number.isInteger(params.timeout_ms) && params.timeout_ms > 0
-					? Math.min(params.timeout_ms, 2 ** 31 - 1)
+				// Match coms_net_await's clamp for behavioral parity (file header):
+				// any finite positive number, floored at 1s so a near-zero value
+				// can't arm an instant timer that deletes this entry and orphans
+				// the late reply. Cap at 2^31-1 (Node setTimeout overflow) — NOT
+				// MESSAGE_TIMEOUT_MS, because this is a LOCAL timer with no server
+				// cap (coms-net delegates to a remote server with a "Server cap
+				// applies" contract, hence its tighter ceiling).
+				const timeoutMs = typeof params.timeout_ms === "number" && Number.isFinite(params.timeout_ms) && params.timeout_ms > 0
+					? Math.min(Math.max(params.timeout_ms, 1_000), 2 ** 31 - 1)
 					: TIMEOUT_MS;
 
 				// coms_send already armed a background timer at the default TIMEOUT_MS;
