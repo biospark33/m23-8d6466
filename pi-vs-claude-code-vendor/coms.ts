@@ -2810,19 +2810,21 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			const dispatch = { endpoint: inbound.sender_endpoint, line: JSON.stringify(respEnv), done: false };
-			// Admission-control the exit-handler fallback, not evict it. A
-			// batched runLoop can anchor more inbound replies to one agent_end
-			// than MAX_PENDING_EXIT_DISPATCHES; evicting the oldest (the prior
-			// policy) would drop a current-turn dispatch before pass 2 below
-			// ever sends it — a silently lost reply. Instead admit only while
-			// there is room: every admitted dispatch is retained for crash
-			// replay, and overflow dispatches still send via pass 2, they just
-			// forgo replay. (This diverges from coms-net.ts intentionally:
-			// coms-net's prepareInboundResponse is fire-and-forget per inbound
-			// ACROSS turns, where oldest-eviction of long-abandoned entries is
-			// the right policy; a single agent_end batch is the opposite case.)
-			if (pendingExitDispatches.length < MAX_PENDING_EXIT_DISPATCHES) {
-				pendingExitDispatches.push(dispatch);
+			// Cap the crash-replay set, evicting the OLDEST unsettled entry on
+			// overflow. pendingExitDispatches backs ONLY the process-'exit'
+			// fallback below — it retries replies whose pass-2 send was
+			// pre-empted by a crash. Pass 2 sends every dispatch from `sends`
+			// regardless of membership here, and its success-splice is a no-op
+			// if this entry was evicted, so eviction NEVER loses a reply; it
+			// only drops crash-replay coverage for one. Evicting oldest keeps
+			// the replay set holding the most-recent (most-likely-live)
+			// dispatches. A fill-then-stop admission policy would instead let
+			// stale entries from dead/offline peers (send failed, never
+			// spliced, process still alive) pin the cap and starve crash-replay
+			// coverage for every subsequent turn. Parity with coms-net.ts.
+			pendingExitDispatches.push(dispatch);
+			while (pendingExitDispatches.length > MAX_PENDING_EXIT_DISPATCHES) {
+				pendingExitDispatches.shift();
 			}
 			sends.push({ inbound, respEnv, dispatch, error });
 		}
