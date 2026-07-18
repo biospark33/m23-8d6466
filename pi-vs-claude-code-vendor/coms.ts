@@ -2695,13 +2695,23 @@ export default function (pi: ExtensionAPI) {
 			const mid = anchorMsgId(entry);
 			if (mid !== undefined) {
 				const hit = inbounds.find((i) => i.msg_id === mid);
+				// Any inbound prompt anchor is a turn boundary — flush the
+				// current slice, then start a new one only if this anchor is
+				// one we're claiming. A fulfilled / foreign prompt's anchor
+				// (no hit) must STILL close the prior slice; otherwise cur
+				// stays pinned to the previous unfulfilled inbound and this
+				// anchor's turn's assistant replies below get attributed to
+				// it (cross-attribution).
+				if (cur) {
+					slices.get(cur)!.text = curText;
+					cur = null;
+					curText = "";
+				}
 				if (hit) {
-					if (cur) slices.get(cur)!.text = curText;
 					slices.set(hit, { found: true, text: "" });
 					cur = hit;
-					curText = "";
-					continue;
 				}
+				continue;
 			}
 			if (cur && entry.type === "message" && entry.message && entry.message.role === "assistant") {
 				const m = entry.message as any;

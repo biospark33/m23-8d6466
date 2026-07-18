@@ -3124,9 +3124,24 @@ export default function (pi: ExtensionAPI) {
 		// deliver dispatches already recorded; a second agent_end running
 		// while pass 2 is suspended must also see these as claimed.
 		const prepared: PreparedInboundResponse[] = [];
-		for (const [i, { inbound, anchorIdx }] of claimed.entries()) {
+		for (const { inbound, anchorIdx } of claimed) {
 			if (responseRetryTimers.has(inbound.msg_id)) continue;
-			const end = claimed[i + 1]?.anchorIdx ?? branch.length;
+			// Slice end = the NEXT inbound prompt anchor in the branch (any
+			// msg_id), not just the next CLAIMED one. claimed skips fulfilled /
+			// retry-pending inbounds, so using claimed[i+1].anchorIdx would
+			// span across a foreign anchor sitting between two claimed ones
+			// and fold that turn's replies into this slice (sliceReplyText
+			// returns the LAST non-empty assistant text, so the later foreign
+			// reply wins → cross-attribution). Reachable under session fork /
+			// navigation / compaction, which can leave a fulfilled inbound's
+			// anchor between two still-unfulfilled ones.
+			let end = branch.length;
+			for (let j = anchorIdx + 1; j < branch.length; j++) {
+				if (anchorMsgIdOf(branch[j]) !== undefined) {
+					end = j;
+					break;
+				}
+			}
 			inbound.dispatching = true;
 			const prep = prepareInboundResponse(inbound, sliceReplyText(branch, anchorIdx + 1, end));
 			if (prep) prepared.push(prep);
