@@ -436,6 +436,46 @@ describe("tool bridge -32601 retry path", () => {
       .map((r) => (r.params as { _meta?: { requestId?: string } })?._meta?.requestId);
     expect(callMetas).toEqual(["req-retry", "req-retry"]);
   });
+
+  test("-32601 retry revalidates args against the refreshed schema (blocks stale dispatch)", async () => {
+    // Schema drift between cache population and the -32601 retry: the first
+    // tools/list declares a permissive reflect schema (caller's bank_id-only
+    // args pass the main-path check); the post-failure re-enumeration tightens
+    // it to require `content`. The args must be rejected against the refreshed
+    // schema BEFORE the retry dispatch — callAttempts stays at 1 and invoke
+    // throws -32602. Guards against the stale-args-slip-through the round-2
+    // review flagged on the retry branch.
+    let listCalls = 0;
+    let callAttempts = 0;
+    const stub = {
+      request: (method: string, _params: unknown) => {
+        if (method === "tools/list") {
+          listCalls++;
+          const reflectSchema =
+            listCalls === 1
+              ? { type: "object" }
+              : {
+                  type: "object",
+                  required: ["content"],
+                  properties: { content: { type: "string" } },
+                };
+          return Promise.resolve({ tools: [{ name: "reflect", inputSchema: reflectSchema }] });
+        }
+        if (method === "tools/call") {
+          callAttempts++;
+          return Promise.reject(new JsonRpcError(-32601, "Unknown tool: reflect"));
+        }
+        return Promise.reject(new Error(`unexpected method ${method}`));
+      },
+    } as unknown as StdioTransport;
+    const bridge = new ToolBridge(stub, null, {});
+    await bridge.enumerateTools("req-drift-seed"); // first tools/list — permissive schema
+    await expect(bridge.invoke("reflect", { bank_id: "b" }, 5000, "req-drift")).rejects.toThrow(
+      /Invalid params: content: required property "content" is missing/,
+    );
+    expect(callAttempts).toBe(1); // retry never dispatched — validation blocked it
+    expect(listCalls).toBe(2); // seed + post-failure re-enumeration
+  });
 });
 
 // ---------------------------------------------------------------------------
