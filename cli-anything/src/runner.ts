@@ -186,8 +186,12 @@ export function redactBoundaryPrefix(text: string, parentEnv: EnvMap): string {
     // ponytail: cap the boundary scan at 4096. The scan is O(text × value) in
     // the adversarial worst case (a long prefix that matches the text tail then
     // diverges mid-string defeats both early-breaks → ~10^10 comparisons on a
-    // ~200KB secret). A leaked boundary fragment longer than 4KB isn't a
-    // realistic redaction target; raise the ceiling if one ever is.
+    // ~200KB secret). Known ceiling: a truncation-cut PARTIAL fragment of a
+    // secret longer than 4KB (e.g. a PEM private key) leaks its leading
+    // (len−4096) chars — complete occurrences are already removed by
+    // redactSecrets() before this scan, so only that partial-at-the-cut case
+    // escapes. Raising the cap re-opens the quadratic cost (~maxK²/2 ops), so
+    // widen it only with a matching wall-clock regression test.
     const maxK = Math.min(text.length, value.length - 1, 4096);
     for (let k = maxK; k >= 1; k--) {
       // Compare characters directly instead of text.endsWith(value.slice(0, k)):
