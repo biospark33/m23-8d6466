@@ -2947,6 +2947,17 @@ export default function (pi: ExtensionAPI) {
 			conversation_id: inbound.conversation_id,
 		};
 
+		// Producer-side response cap (mirrors the receiver-side check in
+		// handleInboundResponse and the producer-side cap in coms.ts): an
+		// oversized payload would be rejected at the transport layer and strand
+		// the caller's coms_net_await until its full timeout — fail cleanly
+		// here. Mutate req before dispatch is constructed so the body string
+		// below stringifies the capped value.
+		if (responseSizeBytes(req.response) > MAX_RESPONSE_BYTES) {
+			req.response = null;
+			req.error = "response too large";
+		}
+
 		// The bearer token is captured NOW: the install-once exit handler's
 		// closure may belong to a stale extension instance whose authToken was
 		// nulled by a session_start reset (see the module-level declaration).
