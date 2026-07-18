@@ -1187,8 +1187,7 @@ export default function (pi: ExtensionAPI) {
 		// coms_send sender-side rule): an array would be silently treated as
 		// "parse the reply as JSON" at agent_end, and the blob is stored per
 		// inbound and persisted into the session branch via details, so the
-		// 16MB transport cap is far too loose for it. (The envelope arrived via
-		// JSON.parse, so JSON.stringify here cannot throw on cycles.)
+		// 16MB transport cap is far too loose for it.
 		if (
 			env.response_schema != null &&
 			(typeof env.response_schema !== "object" || Array.isArray(env.response_schema))
@@ -1196,12 +1195,24 @@ export default function (pi: ExtensionAPI) {
 			nack(socket, env.msg_id, "malformed prompt envelope");
 			return;
 		}
-		if (
-			env.response_schema != null &&
-			Buffer.byteLength(JSON.stringify(env.response_schema), "utf8") > MAX_RESPONSE_SCHEMA_BYTES
-		) {
-			nack(socket, env.msg_id, "malformed prompt envelope");
-			return;
+		// JSON.stringify can throw even on an acyclic value — a deeply nested
+		// schema trips V8's recursive serialization stack (RangeError) before
+		// any byte count exists. The envelope arriving via JSON.parse rules
+		// out cycles but NOT deep nesting (parse and stringify have separate
+		// depth budgets), so measure inside try and treat an unserializable
+		// schema as a malformed envelope.
+		if (env.response_schema != null) {
+			let schemaBytes: number;
+			try {
+				schemaBytes = Buffer.byteLength(JSON.stringify(env.response_schema), "utf8");
+			} catch {
+				nack(socket, env.msg_id, "malformed prompt envelope");
+				return;
+			}
+			if (schemaBytes > MAX_RESPONSE_SCHEMA_BYTES) {
+				nack(socket, env.msg_id, "malformed prompt envelope");
+				return;
+			}
 		}
 
 		// 4. Replay/duplicate guard: a msg_id already queued — or fulfilled
@@ -2799,13 +2810,19 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			const dispatch = { endpoint: inbound.sender_endpoint, line: JSON.stringify(respEnv), done: false };
-			pendingExitDispatches.push(dispatch);
-			// Enforce the cap at push time too (mirrors coms-net.ts): a batch
-			// larger than MAX_PENDING_EXIT_DISPATCHES must not stall process
-			// exit with one blocking spawnSync per entry — evict the oldest
-			// (their turns are the most likely already abandoned).
-			while (pendingExitDispatches.length > MAX_PENDING_EXIT_DISPATCHES) {
-				pendingExitDispatches.shift();
+			// Admission-control the exit-handler fallback, not evict it. A
+			// batched runLoop can anchor more inbound replies to one agent_end
+			// than MAX_PENDING_EXIT_DISPATCHES; evicting the oldest (the prior
+			// policy) would drop a current-turn dispatch before pass 2 below
+			// ever sends it — a silently lost reply. Instead admit only while
+			// there is room: every admitted dispatch is retained for crash
+			// replay, and overflow dispatches still send via pass 2, they just
+			// forgo replay. (This diverges from coms-net.ts intentionally:
+			// coms-net's prepareInboundResponse is fire-and-forget per inbound
+			// ACROSS turns, where oldest-eviction of long-abandoned entries is
+			// the right policy; a single agent_end batch is the opposite case.)
+			if (pendingExitDispatches.length < MAX_PENDING_EXIT_DISPATCHES) {
+				pendingExitDispatches.push(dispatch);
 			}
 			sends.push({ inbound, respEnv, dispatch, error });
 		}

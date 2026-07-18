@@ -1414,7 +1414,16 @@ export default function (pi: ExtensionAPI) {
 		let result: { response: any; error: string | null };
 		if (responseVal === undefined && errVal === null) {
 			result = { response: null, error: "malformed server reply" };
-		} else if (errVal === null && responseSizeBytes(responseVal) > MAX_RESPONSE_BYTES) {
+		} else if (
+			responseSizeBytes(responseVal) > MAX_RESPONSE_BYTES ||
+			(errVal !== null && responseSizeBytes(errVal) > MAX_RESPONSE_BYTES)
+		) {
+			// Cap whichever terminal value will be surfaced. The error string
+			// is peer-supplied and bounded only by the 16 MiB SSE cap — without
+			// this branch a hostile/buggy hub could interpolate a multi-MiB
+			// error verbatim into the caller's tool output. (responseSizeBytes
+			// returns 0 for undefined, so the responseVal term is safe when
+			// only an error is present.)
 			audit("response_too_large", { msg_id });
 			result = { response: null, error: "response too large" };
 		} else {
@@ -1615,7 +1624,19 @@ export default function (pi: ExtensionAPI) {
 				void cleanShutdown();
 				return;
 			}
-			if (!shuttingDown) {
+			// A superseded attempt must not schedule a reconnect: a manual
+			// /coms-net --reconnect (or shutdown) created a newer controller
+			// and owns the follow-up. This guards the one path the catch-block
+			// `ac.signal.aborted` check cannot reach — a stream that ended
+			// normally (loop broke on `done`, no throw → no catch) and was then
+			// superseded during the finally's `await reader.cancel()`. The
+			// newer attempt reassigns `sseAbort` (and aborts `ac` on its way
+			// in, line ~1468), so `ac === sseAbort` is false here exactly when
+			// this attempt no longer owns the connection. (The catch block
+			// needs no separate `ac !== sseAbort` guard: every reassignment
+			// site aborts the prior controller first, so there `ac.signal
+			// .aborted` is already true and the early-return above fires.)
+			if (!shuttingDown && ac === sseAbort) {
 				scheduleReconnect();
 			}
 		} catch (err: any) {
@@ -1696,8 +1717,15 @@ export default function (pi: ExtensionAPI) {
 					// body is bounded only by HTTP_BODY_CAP_BYTES (16 MiB) and the
 					// payload lands verbatim in the caller's tool output.
 					const malformed = data.status === "complete" && data.response === undefined && errVal === null;
-					const tooLarge = !malformed && errVal === null && data.status === "complete"
-						&& responseSizeBytes(data.response) > MAX_RESPONSE_BYTES;
+					// Cap whichever terminal value surfaces (mirrors the SSE
+					// path): the response on a "complete" status, AND a peer-
+					// supplied error string on any status — both are bounded
+					// only by the 16 MiB HTTP body cap.
+					const tooLarge = !malformed && (
+						(errVal === null && data.status === "complete"
+							&& responseSizeBytes(data.response) > MAX_RESPONSE_BYTES) ||
+						(errVal !== null && responseSizeBytes(errVal) > MAX_RESPONSE_BYTES)
+					);
 					if (tooLarge) audit("response_too_large", { msg_id: mid });
 					entry.result = malformed
 						? { response: null, error: "malformed server reply" }
@@ -2719,21 +2747,41 @@ export default function (pi: ExtensionAPI) {
 				// surfaces it in details instead of dropping it.
 				const conv = typeof data?.conversation_id === "string" ? data.conversation_id : null;
 				if (data?.status === "complete") {
-					// A "complete" reply without a string response would stringify
-					// `undefined` into a blank success below — treat as an error.
-					if (typeof data.response !== "string") {
+					const responseVal = data.response;
+					// Mirror SSE/resync: accept a string OR a structured (parsed
+					// JSON) response. prepareInboundResponse POSTs parsed JSON
+					// objects for schema-driven prompts, and the SSE/resync
+					// paths already surface them — rejecting non-strings here
+					// broke valid schema-driven replies on the await path. Only
+					// an absent response (undefined) is malformed.
+					if (responseVal === undefined) {
 						return { response: null, error: "malformed server reply", conversation_id: conv };
 					}
-					// Cap like the SSE response path (MAX_RESPONSE_BYTES): this
-					// long-poll body is bounded only by HTTP_BODY_CAP_BYTES
-					// (16 MiB) and lands verbatim in the tool result.
-					if (Buffer.byteLength(data.response, "utf8") > MAX_RESPONSE_BYTES) {
+					// Cap like the SSE path (MAX_RESPONSE_BYTES via
+					// responseSizeBytes, which measures strings AND objects):
+					// this long-poll body is bounded only by HTTP_BODY_CAP_BYTES
+					// (16 MiB) and lands verbatim in the tool result. Capping
+					// objects too keeps the long-poll a behavioral peer of the
+					// SSE path (which also caps objects) rather than a looser
+					// back-door for oversized structured payloads.
+					if (responseSizeBytes(responseVal) > MAX_RESPONSE_BYTES) {
 						audit("response_too_large", { msg_id });
 						return { response: null, error: "response too large", conversation_id: conv };
 					}
-					return { response: data.response, error: null, conversation_id: conv };
+					return { response: responseVal, error: null, conversation_id: conv };
 				}
-				if (data?.status === "error") return { response: null, error: data.error ?? "error", conversation_id: conv };
+				if (data?.status === "error") {
+					// Cap a peer-supplied error string too (parity with the
+					// complete path and the SSE/resync paths): the error is
+					// interpolated verbatim into the caller's tool output and
+					// is bounded only by the 16 MiB HTTP body cap.
+					const e = typeof data.error === "string" ? data.error : "error";
+					if (responseSizeBytes(e) > MAX_RESPONSE_BYTES) {
+						audit("response_too_large", { msg_id });
+						return { response: null, error: "response too large", conversation_id: conv };
+					}
+					return { response: null, error: e, conversation_id: conv };
+				}
 				if (data?.status === "timeout") return { response: null, error: "timeout", conversation_id: conv };
 				// A non-terminal status (queued/delivered/pending) or a missing
 				// one must not alias to a successful empty reply.
