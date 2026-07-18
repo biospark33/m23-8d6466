@@ -807,14 +807,18 @@ async function pathSocketComs(): Promise<{
 		};
 		// Poll for coms.ts's OWN session_start to write the entry — the registry
 		// is the only coordination channel between this script and the peers.
-		// Race the poll against the peer's close: a dead peer will never write
-		// its entry, so don't burn the full poll budget on it (C5).
+		// Race the poll against the peer's exit: a dead peer will never write
+		// its entry, so don't burn the full poll budget on it (C5). Use 'exit'
+		// not 'close' — 'close' is delayed when a grandchild (e.g. the bash tool's
+		// `sleep 60` in smoke-b) inherits and holds the pipe stdio open after the
+		// pi process itself has terminated, which would hang this loop for the
+		// full poll budget. 'exit' fires the moment the peer dies regardless.
 		const waitForEntry = async (name: string, proc: ChildProcess): Promise<RegistryEntry | null> => {
 			let exited = proc.exitCode !== null || proc.signalCode !== null;
-			const onClose = new Promise<void>((r) => {
+			const onExit = new Promise<void>((r) => {
 				if (exited) r();
 				else
-					proc.once("close", () => {
+					proc.once("exit", () => {
 						exited = true;
 						r();
 					});
@@ -824,7 +828,7 @@ async function pathSocketComs(): Promise<{
 				const entry = readEntry(name);
 				if (entry) return entry;
 				if (exited) break;
-				await Promise.race([new Promise((r) => setTimeout(r, 250)), onClose]);
+				await Promise.race([new Promise((r) => setTimeout(r, 250)), onExit]);
 			}
 			// Final UNCONDITIONAL read: an entry written during the last poll
 			// window (or by a peer that registered on its way out) must not be
