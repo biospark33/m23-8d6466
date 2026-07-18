@@ -79,6 +79,10 @@ const toolNames = process.env.FAKE_MCP_TOOLS
   : DEFAULT_TOOLS;
 
 const rawWriteBytes = Number(process.env.FAKE_MCP_RAW_WRITE_BYTES ?? 0);
+// Character repeated for RAW_WRITE_BYTES. Default ASCII "x" (1 byte); set to a
+// multibyte char to exercise the transport's UTF-8 *wire-byte* frame cap (a
+// string-length cap would undercount multibyte content and miss the limit).
+const rawWriteChar = process.env.FAKE_MCP_RAW_WRITE_CHAR ?? "x";
 const responseDelayMs = Number(process.env.FAKE_MCP_RESPONSE_DELAY_MS ?? 0);
 
 // Optional per-tool response delay (JSON map {toolName: ms}). Lets a test make
@@ -223,15 +227,26 @@ async function main(): Promise<void> {
 
 function handle(msg: any): void {
   const { id, method, params } = msg;
-  if (process.env.FAKE_MCP_SERVER_REQUEST === "1" && method === undefined && id === 99) {
-    // Response to our roots/list request — record it, send nothing back.
+  if (
+    process.env.FAKE_MCP_SERVER_REQUEST === "1" &&
+    msg.jsonrpc === "2.0" &&
+    method === undefined &&
+    id === 99 &&
+    msg.error !== null &&
+    typeof msg.error === "object" &&
+    (msg.error as { code?: unknown }).code === -32601
+  ) {
+    // The client's response to our roots/list request: the transport answers
+    // every server→client request with a -32601 "method not supported" error.
+    // Record ONLY that exact JSON-RPC 2.0 + -32601 shape (a result or a
+    // different error code would mean the client mis-answered).
     serverRequestAnswered = true;
     return;
   }
   if (method === "initialize") {
     if (Number.isInteger(rawWriteBytes) && rawWriteBytes > 0) {
       // Blast N unterminated bytes at the transport to trip its frame-size cap.
-      process.stdout.write("x".repeat(rawWriteBytes));
+      process.stdout.write(rawWriteChar.repeat(rawWriteBytes));
     }
     reply({
       jsonrpc: "2.0",

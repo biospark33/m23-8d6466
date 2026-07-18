@@ -37,16 +37,20 @@ export async function handleRegisterAgent(
     // new URL cannot throw here: z.string().url() already parsed it.
     const proto = new URL(input.endpointUrl).protocol;
     if (proto !== "http:" && proto !== "https:") {
+      // Stable redacted message: never echo the request-supplied endpointUrl
+      // (user-controlled input) back in the response.
       return finish(start, requestId, input.agentId, {
         status: 422,
-        body: { error: `endpointUrl must use http(s) scheme: ${input.endpointUrl}` },
+        body: { error: "endpointUrl must use http(s) scheme" },
       });
     }
     const loopback = await isLoopbackEndpoint(input.endpointUrl);
     if (!loopback) {
+      // Stable redacted message: never echo endpointUrl (SSRF rejection detail
+      // is not for the response surface; the requestId carries correlation).
       return finish(start, requestId, input.agentId, {
         status: 422,
-        body: { error: `endpointUrl must resolve to loopback (SSRF guard): ${input.endpointUrl}` },
+        body: { error: "endpointUrl must resolve to a loopback address (SSRF guard)" },
       });
     }
   }
@@ -88,6 +92,11 @@ export function logResponse(
   operation: string,
   agentId: string | null,
   resp: RouteResponse,
+  /** Optional server-side-only diagnostic for the log's error.message. When
+   * provided, overrides the message derived from resp.body — used to preserve
+   * subprocess-sourced detail (e.g. the real JsonRpcError text) in logs WITHOUT
+   * leaking it into resp.body (which is already sanitized for the client). */
+  detail?: string,
 ): RouteResponse {
   log({
     requestId,
@@ -97,7 +106,7 @@ export function logResponse(
     duration: Date.now() - start,
     status: resp.status < 400 ? "ok" : "error",
     ...(resp.status >= 400
-      ? { error: { code: String(resp.status), message: deriveErrorMessage(resp.body, `${operation} failed`) } }
+      ? { error: { code: String(resp.status), message: detail ?? deriveErrorMessage(resp.body, `${operation} failed`) } }
       : {}),
   });
   return resp;

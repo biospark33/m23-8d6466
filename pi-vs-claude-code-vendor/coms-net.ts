@@ -68,6 +68,13 @@ const MAX_PROMPT_BYTES = 200_000;
 // hostile/buggy peer can inject up to the 16 MiB SSE cap of schema JSON into
 // the session context on every inbound prompt.
 const MAX_RESPONSE_SCHEMA_BYTES = 32_768;
+// Receiver-side cap on a peer-supplied response body (mirrors coms.ts
+// MAX_RESPONSE_BYTES). The reply lands verbatim in the caller's
+// coms_net_get/coms_net_await tool output, so without this a buggy/hostile
+// peer can push up to the 16 MiB SSE cap of payload into the caller's
+// context window on every round-trip — the same failure class
+// MAX_RESPONSE_SCHEMA_BYTES and MAX_PROMPT_BYTES prevent.
+const MAX_RESPONSE_BYTES = 256 * 1024;
 // Hard cap on queued inbounds: entries are only removed at agent_end (or by
 // the heartbeat sweep at MESSAGE_TIMEOUT_MS + 60s), so a prompt flood must
 // not grow inboundQueue/turnQueue for ~31 min. Same bound as coms.ts.
@@ -186,10 +193,28 @@ interface InboundContext {
 	response_schema?: object | null;
 	conversation_id: string | null;
 	fulfilled: boolean;
+	// Set synchronously when agent_end claims this entry for submission and
+	// cleared when the first POST settles (fulfilled, or a retry timer armed
+	// — the responseRetryTimers guard covers it from there). Closes the
+	// duplicate-POST window where a second fire-and-forget agent_end could
+	// fallback-submit an inbound whose first POST is still in flight.
+	dispatching: boolean;
 	// Epoch ms at receipt; the heartbeat sweep evicts entries that never
 	// reached agent_end (aborted turns) so they can't linger forever or
 	// misattribute later sends' hops.
 	created_at: number;
+}
+
+// The synchronous half of a response submission (payload/schema handling +
+// exit-dispatch bookkeeping), produced by prepareInboundResponse and consumed
+// by submitInboundResponse. Split so a batched agent_end can push EVERY
+// dispatch before its first await (see agent_end).
+interface PreparedInboundResponse {
+	inbound: InboundContext;
+	req: ResponseSubmitRequest;
+	error: string | null;
+	dispatch: { msg_id: string; url: string; body: string; token: string; done: boolean };
+	dropDispatch: () => void;
 }
 
 interface PendingReply {
@@ -265,7 +290,7 @@ setTimeout(() => process.exit(2), ${EXIT_DELIVER_TIMEOUT_MS}).unref();
 // live state even after an extension reload stacks a second default-export
 // invocation. The token is captured per dispatch at push time: the handler
 // closure may belong to a stale instance whose authToken was already nulled
-// by a terminal cleanShutdown.
+// by a session_start reset.
 const pendingExitDispatches: { msg_id: string; url: string; body: string; token: string; done: boolean }[] = [];
 let exitHandlerInstalled = false;
 
@@ -395,7 +420,24 @@ function sanitizeCardPatch(a: Partial<AgentCard>): Partial<AgentCard> {
 	if (out.color !== undefined) out.color = sanitizePeerText(out.color);
 	if (out.cwd !== undefined) out.cwd = sanitizePeerText(out.cwd);
 	if (out.project !== undefined) out.project = sanitizePeerText(out.project);
+	// Same enum coercion as sanitizeCard: an out-of-enum status from a patch
+	// would overwrite a card's valid status, and renderPool treats anything
+	// not stale/offline as live — a liveness spoof from a buggy/hostile
+	// heartbeat payload. Default to offline, the safe pessimistic reading.
+	if (out.status !== undefined && out.status !== "online" && out.status !== "stale" && out.status !== "offline") out.status = "offline";
 	return out;
+}
+
+// Serialized byte size of a peer-supplied response payload for the
+// MAX_RESPONSE_BYTES cap. Unserializable values (e.g. circular refs) count
+// as 0 — they can't be stringified into the caller's context anyway.
+function responseSizeBytes(v: any): number {
+	try {
+		const s = typeof v === "string" ? v : JSON.stringify(v);
+		return Buffer.byteLength(s ?? "", "utf8");
+	} catch {
+		return 0;
+	}
 }
 
 // Read a response body with an accumulated-byte cap: resp.text() buffers the
@@ -791,6 +833,10 @@ export default function (pi: ExtensionAPI) {
 	// Effective heartbeat cadence — the server may tune it via
 	// RegisterResponse.heartbeat_interval_ms; defaults to HEARTBEAT_MS.
 	let heartbeatIntervalMs = HEARTBEAT_MS;
+	// Residual-gap latch (see handleInboundResponse): response authenticity is
+	// delegated to the server contract — audit once per session so the
+	// delegation is on record without logging on every reply.
+	let responseAuthGapAudited = false;
 
 	// ━━ HTTP helper ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1173,7 +1219,7 @@ export default function (pi: ExtensionAPI) {
 		const sender = data.sender ?? {};
 		const senderName = sanitizePeerText(sender.name, "unknown");
 		const senderCwd = sanitizePeerText(sender.cwd, "?");
-		const senderSession = typeof sender.session_id === "string" ? sender.session_id : "?";
+		const senderSession = sanitizePeerText(sender.session_id, "?");
 		// Clamp hops at the trust boundary: a negative value from a peer would
 		// keep `hops + 1 >= MAX_HOPS` permanently false in coms_net_send and
 		// bypass the runaway-chain stop entirely.
@@ -1236,6 +1282,7 @@ export default function (pi: ExtensionAPI) {
 			response_schema: responseSchema,
 			conversation_id: conversationId,
 			fulfilled: false,
+			dispatching: false,
 			created_at: Date.now(),
 		};
 		inboundQueue.set(msg_id, inbound);
@@ -1317,26 +1364,81 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function handleInboundResponse(data: any): void {
-		// Type-check like the prompt handler: a non-string msg_id would key
-		// the map lookup as garbage and (worse) buffer junk below.
+		// Same ULID gate as the prompt path: an unvalidated server/peer-controlled
+		// id would key the map lookups as garbage, churn the earlyResponses
+		// buffer, and land raw in the audit log.
 		const msg_id: string | undefined = data?.msg_id;
-		if (typeof msg_id !== "string" || !msg_id) return;
+		if (typeof msg_id !== "string" || !/^[0-9A-HJKMNP-TV-Z]{26}$/i.test(msg_id)) {
+			// Settle — don't silently strand — any pending entry keyed by a
+			// non-ULID id (registered before the send-side format check below
+			// existed, or by an older build): dropping the response here would
+			// otherwise leave its coms_net_await hanging until the full
+			// MESSAGE_TIMEOUT_MS.
+			let settled = false;
+			if (typeof msg_id === "string") {
+				const stranded = pendingReplies.get(msg_id);
+				if (stranded && !stranded.result) {
+					stranded.result = { response: null, error: "malformed server reply (bad msg_id format)" };
+					try { stranded.resolve(stranded.result); } catch { /* ignore */ }
+					settled = true;
+				}
+			}
+			audit("response_malformed", { reason: "bad_msg_id", settled });
+			return;
+		}
+		// Residual authentication gap: unlike coms.ts, this response path has no
+		// per-message secret echo + timing-safe verify (coms.ts secretEqual /
+		// forged_response). The scheme is not safely implementable here: the hub
+		// server is external/unshipped and its contract (the canonical type
+		// block above, mirrored on the server) round-trips only known fields
+		// (conversation_id, response_schema) — whether it would preserve an
+		// unknown secret field through send → prompt event → response submit →
+		// response event is unverifiable from this repo, and hard-failing on a
+		// stripped field would reject every legitimate reply. Response
+		// authenticity is therefore delegated to the server contract (like the
+		// redelivery contract at FULFILLED_TTL_MS): the hub must accept
+		// /v1/messages/{id}/response only from the session the prompt was
+		// delivered to. Audited once per session so the delegation is on
+		// record; response_in still logs each accepted reply.
+		if (!responseAuthGapAudited) {
+			responseAuthGapAudited = true;
+			audit("response_auth_delegated", { msg_id });
+		}
 		const responseVal = data.response;
 		const errVal: string | null = typeof data.error === "string" ? data.error : null;
+		// Mirror the long-poll guard in coms_net_await: "complete" with no
+		// response and no error is a malformed reply, not a blank success. And
+		// cap the reply at the trust boundary (MAX_RESPONSE_BYTES): the only
+		// other bound is the 16 MiB SSE cap, and the payload lands verbatim in
+		// the caller's coms_net_get/await tool output.
+		let result: { response: any; error: string | null };
+		if (responseVal === undefined && errVal === null) {
+			result = { response: null, error: "malformed server reply" };
+		} else if (
+			responseSizeBytes(responseVal) > MAX_RESPONSE_BYTES ||
+			(errVal !== null && responseSizeBytes(errVal) > MAX_RESPONSE_BYTES)
+		) {
+			// Cap whichever terminal value will be surfaced. The error string
+			// is peer-supplied and bounded only by the 16 MiB SSE cap — without
+			// this branch a hostile/buggy hub could interpolate a multi-MiB
+			// error verbatim into the caller's tool output. (responseSizeBytes
+			// returns 0 for undefined, so the responseVal term is safe when
+			// only an error is present.)
+			audit("response_too_large", { msg_id });
+			result = { response: null, error: "response too large" };
+		} else {
+			result = { response: responseVal, error: errVal };
+		}
 		const pending = pendingReplies.get(msg_id);
 		if (pending) {
-			// Mirror the long-poll guard in coms_net_await: "complete" with no
-			// response and no error is a malformed reply, not a blank success.
-			pending.result = responseVal === undefined && errVal === null
-				? { response: null, error: "malformed server reply" }
-				: { response: responseVal, error: errVal };
+			pending.result = result;
 			try { pending.resolve(pending.result); } catch { /* ignore */ }
 			try {
 				pi.appendEntry("coms-net-log", {
 					event: "response_in",
 					ts: nowIso(),
 					msg_id,
-					error: errVal,
+					error: result.error,
 				});
 			} catch { /* best-effort */ }
 		} else {
@@ -1358,9 +1460,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			earlyResponses.set(msg_id, {
-				result: responseVal === undefined && errVal === null
-					? { response: null, error: "malformed server reply" }
-					: { response: responseVal, error: errVal },
+				result,
 				expires: Date.now() + EARLY_RESPONSE_TTL_MS,
 			});
 			audit("orphan_response", { msg_id, buffered: true });
@@ -1418,6 +1518,19 @@ export default function (pi: ExtensionAPI) {
 				// connections across the reconnect loop (mirrors the SSE
 				// read-loop teardown and readBodyCapped's over-cap cancel).
 				try { await resp.body?.cancel(); } catch { /* ignore */ }
+				// A newer attempt (manual --reconnect) or cleanShutdown can abort
+				// `ac` and reassign `sseAbort` during the cancel await above. If
+				// that happened this attempt no longer owns the connection, and
+				// processing the status below would race the current owner: a
+				// stale scheduleReconnect() pins a timer that can survive the
+				// superseder's success, and a stale cleanShutdown() (401/403/404)
+				// would tear down even as the superseder reconnects. Bail and let
+				// the owner drive. (Mirrors the fetch-reject supersede check
+				// above and the stream-end `ac === sseAbort` guard further down.)
+				if (ac !== sseAbort) {
+					audit("sse_connect_aborted");
+					return;
+				}
 				audit("sse_connect_http_error", { status: resp.status });
 				// 401/403/404 mean the token or URL is wrong — retrying with the
 				// same credentials/path will never succeed, so stop instead of
@@ -1452,9 +1565,16 @@ export default function (pi: ExtensionAPI) {
 			// arrive at least once per interval; see the constant's comment).
 			const watchdogMs = SSE_WATCHDOG_FACTOR * heartbeatIntervalMs;
 			let watchdogTimer: NodeJS.Timeout | null = null;
+			// Distinguish a watchdog abort from an intentional one (manual
+			// reconnect superseding this attempt, or shutdown): both set
+			// ac.signal.aborted with handshakeTimedOut === false, but the
+			// watchdog must fall through to scheduleReconnect() below —
+			// treating it as intentional would kill inbound delivery
+			// permanently on the first half-open connection.
+			let watchdogFired = false;
 			const armWatchdog = () => {
 				if (watchdogTimer) { try { clearTimeout(watchdogTimer); } catch { /* ignore */ } }
-				watchdogTimer = setTimeout(() => { try { ac.abort(); } catch { /* ignore */ } }, watchdogMs);
+				watchdogTimer = setTimeout(() => { watchdogFired = true; try { ac.abort(); } catch { /* ignore */ } }, watchdogMs);
 				try { (watchdogTimer as any).unref?.(); } catch { /* ignore */ }
 			};
 			const disarmWatchdog = () => {
@@ -1484,15 +1604,18 @@ export default function (pi: ExtensionAPI) {
 				try { parser.end(); } catch { /* best-effort */ }
 				audit("sse_disconnect", { reason: "stream_end" });
 			} catch (err: any) {
-				if (ac.signal.aborted && !handshakeTimedOut) {
+				if (ac.signal.aborted && !handshakeTimedOut && !watchdogFired) {
 					audit("sse_disconnect", { reason: "aborted" });
 					return;
 				}
-				// A handshake-timeout abort must fall through to the
-				// scheduleReconnect() below — treating it as an intentional
-				// abort (like the fetch-rejection path above used to) kills
-				// the reconnect loop on a single transient handshake stall.
-				audit("sse_disconnect", { reason: handshakeTimedOut ? "handshake_timeout" : safeError(err) });
+				// A handshake-timeout or watchdog abort must fall through to
+				// the scheduleReconnect() below — treating either as an
+				// intentional abort (like the fetch-rejection path above used
+				// to) kills the reconnect loop: the handshake case on a single
+				// transient stall, the watchdog case on every half-open
+				// connection (the exact failure the watchdog exists to recover
+				// from).
+				audit("sse_disconnect", { reason: watchdogFired ? "watchdog_timeout" : handshakeTimedOut ? "handshake_timeout" : safeError(err) });
 			} finally {
 				disarmWatchdog();
 				// releaseLock() alone does not close the underlying source: on an
@@ -1514,7 +1637,19 @@ export default function (pi: ExtensionAPI) {
 				void cleanShutdown();
 				return;
 			}
-			if (!shuttingDown) {
+			// A superseded attempt must not schedule a reconnect: a manual
+			// /coms-net --reconnect (or shutdown) created a newer controller
+			// and owns the follow-up. This guards the one path the catch-block
+			// `ac.signal.aborted` check cannot reach — a stream that ended
+			// normally (loop broke on `done`, no throw → no catch) and was then
+			// superseded during the finally's `await reader.cancel()`. The
+			// newer attempt reassigns `sseAbort` (and aborts `ac` on its way
+			// in, line ~1468), so `ac === sseAbort` is false here exactly when
+			// this attempt no longer owns the connection. (The catch block
+			// needs no separate `ac !== sseAbort` guard: every reassignment
+			// site aborts the prior controller first, so there `ac.signal
+			// .aborted` is already true and the early-return above fires.)
+			if (!shuttingDown && ac === sseAbort) {
 				scheduleReconnect();
 			}
 		} catch (err: any) {
@@ -1590,11 +1725,26 @@ export default function (pi: ExtensionAPI) {
 						: typeof data.error === "string" ? data.error
 							: data.status === "error" ? "error" : null;
 					// Mirror the long-poll guard: "complete" with no response and
-					// no error is a malformed reply, not a blank success.
+					// no error is a malformed reply, not a blank success. And cap
+					// the reply like the SSE path (MAX_RESPONSE_BYTES): this GET
+					// body is bounded only by HTTP_BODY_CAP_BYTES (16 MiB) and the
+					// payload lands verbatim in the caller's tool output.
 					const malformed = data.status === "complete" && data.response === undefined && errVal === null;
+					// Cap whichever terminal value surfaces (mirrors the SSE
+					// path): the response on a "complete" status, AND a peer-
+					// supplied error string on any status — both are bounded
+					// only by the 16 MiB HTTP body cap.
+					const tooLarge = !malformed && (
+						(errVal === null && data.status === "complete"
+							&& responseSizeBytes(data.response) > MAX_RESPONSE_BYTES) ||
+						(errVal !== null && responseSizeBytes(errVal) > MAX_RESPONSE_BYTES)
+					);
+					if (tooLarge) audit("response_too_large", { msg_id: mid });
 					entry.result = malformed
 						? { response: null, error: "malformed server reply" }
-						: { response: data.response ?? null, error: errVal };
+						: tooLarge
+							? { response: null, error: "response too large" }
+							: { response: data.response ?? null, error: errVal };
 					try { entry.resolve(entry.result); } catch { /* ignore */ }
 					audit("response_resynced", { msg_id: mid, status: data.status });
 				})
@@ -1607,11 +1757,14 @@ export default function (pi: ExtensionAPI) {
 		if (reconnectInFlight) return;
 		reconnectInFlight = true;
 		try {
-			// A terminal-status cleanShutdown (heartbeat 401/403/404) nulls
-			// serverUrl/authToken while keeping identity for --reconnect
-			// recovery — re-run boot's resolution or httpFetch throws
-			// "no server URL"/"no auth token" forever and the heartbeat stays
-			// dead even after a successful re-register.
+			// Defensive: cleanShutdown keeps serverUrl/authToken — they survive
+			// it for --reconnect recovery (see the /coms-net --reconnect
+			// handler), and the paths that DO null them (session_start, boot
+			// failure) also leave identity null, so the early return above
+			// already covered them. If URL/token are ever missing here anyway,
+			// re-run boot's resolution or httpFetch throws "no server URL"/"no
+			// auth token" forever and the heartbeat stays dead even after a
+			// successful re-register.
 			if (!serverUrl) serverUrl = resolveServerUrl(identity.project, readCliFlags(pi).serverUrl);
 			if (!authToken) authToken = resolveAuthToken(identity.project, readCliFlags(pi).authToken);
 			if (!serverUrl || !authToken) {
@@ -1715,7 +1868,19 @@ export default function (pi: ExtensionAPI) {
 
 	// ━━ Heartbeat tick (extracted so re-register can restart the interval) ━━
 
+	// The tick runs under setInterval: a synchronous throw (e.g. a host API
+	// like sessionManager.getBranch() mid-teardown after a session switch)
+	// would escape the interval callback as an uncaughtException and crash the
+	// agent process, so the whole body is guarded and audited.
 	function heartbeatTick(): void {
+		try {
+			heartbeatTickBody();
+		} catch (err) {
+			audit("heartbeat_tick_error", { reason: safeError(err) });
+		}
+	}
+
+	function heartbeatTickBody(): void {
 		if (!identity || shuttingDown) return;
 		const ctxNow = currentCtx;
 		const pct = safeContextPct(ctxNow);
@@ -1818,6 +1983,9 @@ export default function (pi: ExtensionAPI) {
 			await cleanShutdown();
 		}
 		shuttingDown = false;
+		// Re-arm the once-per-session residual-gap audit (see
+		// handleInboundResponse) for the new session.
+		responseAuthGapAudited = false;
 		// Invalidate any reRegisterAndOpen still awaiting from the prior session.
 		sessionGeneration++;
 		identity = null;
@@ -2326,6 +2494,14 @@ export default function (pi: ExtensionAPI) {
 			if (typeof resp?.msg_id !== "string" || !resp.msg_id) {
 				throw new Error("coms-net: malformed send response (missing msg_id)");
 			}
+			// The response path hard-gates on ULID ids (handleInboundResponse,
+			// same assumption as the prompt path): if the hub ever assigned any
+			// other format, the pending entry registered below could never be
+			// resolved by a response event and the caller would hang until
+			// MESSAGE_TIMEOUT_MS — fail fast and loud on the contract mismatch.
+			if (!/^[0-9A-HJKMNP-TV-Z]{26}$/i.test(resp.msg_id)) {
+				throw new Error("coms-net: malformed send response (bad msg_id format)");
+			}
 			const { msg_id, target_session } = resp;
 
 			// Park a pending entry that the SSE `response` event will resolve.
@@ -2376,8 +2552,12 @@ export default function (pi: ExtensionAPI) {
 			};
 		},
 		renderCall(args, theme) {
-			const tgt = (args as any).target ?? "?";
-			const prompt = (args as any).prompt ?? "";
+			// Tool args are model output, and peer prompt text is injected into
+			// the session — a hostile peer prompt can steer the model into
+			// passing ANSI escape sequences here. Sanitize like any
+			// peer-controlled string before rendering into the TUI.
+			const tgt = sanitizePeerText((args as any).target, "?");
+			const prompt = sanitizePeerText((args as any).prompt);
 			const preview = prompt.length > 60 ? `${prompt.slice(0, 57)}...` : prompt;
 			return new Text(
 				theme.fg("toolTitle", theme.bold("coms_net_send ")) +
@@ -2464,7 +2644,9 @@ export default function (pi: ExtensionAPI) {
 			};
 		},
 		renderCall(args, theme) {
-			const id = (args as any).msg_id ?? "?";
+			// Sanitized like coms_net_send's renderCall — tool args are model
+			// output reachable by prompt injection.
+			const id = sanitizePeerText((args as any).msg_id, "?");
 			return new Text(
 				theme.fg("toolTitle", theme.bold("coms_net_get ")) + theme.fg("warning", id),
 				0, 0,
@@ -2578,13 +2760,41 @@ export default function (pi: ExtensionAPI) {
 				// surfaces it in details instead of dropping it.
 				const conv = typeof data?.conversation_id === "string" ? data.conversation_id : null;
 				if (data?.status === "complete") {
-					// A "complete" reply without a string response would stringify
-					// `undefined` into a blank success below — treat as an error.
-					return typeof data.response === "string"
-						? { response: data.response, error: null, conversation_id: conv }
-						: { response: null, error: "malformed server reply", conversation_id: conv };
+					const responseVal = data.response;
+					// Mirror SSE/resync: accept a string OR a structured (parsed
+					// JSON) response. prepareInboundResponse POSTs parsed JSON
+					// objects for schema-driven prompts, and the SSE/resync
+					// paths already surface them — rejecting non-strings here
+					// broke valid schema-driven replies on the await path. Only
+					// an absent response (undefined) is malformed.
+					if (responseVal === undefined) {
+						return { response: null, error: "malformed server reply", conversation_id: conv };
+					}
+					// Cap like the SSE path (MAX_RESPONSE_BYTES via
+					// responseSizeBytes, which measures strings AND objects):
+					// this long-poll body is bounded only by HTTP_BODY_CAP_BYTES
+					// (16 MiB) and lands verbatim in the tool result. Capping
+					// objects too keeps the long-poll a behavioral peer of the
+					// SSE path (which also caps objects) rather than a looser
+					// back-door for oversized structured payloads.
+					if (responseSizeBytes(responseVal) > MAX_RESPONSE_BYTES) {
+						audit("response_too_large", { msg_id });
+						return { response: null, error: "response too large", conversation_id: conv };
+					}
+					return { response: responseVal, error: null, conversation_id: conv };
 				}
-				if (data?.status === "error") return { response: null, error: data.error ?? "error", conversation_id: conv };
+				if (data?.status === "error") {
+					// Cap a peer-supplied error string too (parity with the
+					// complete path and the SSE/resync paths): the error is
+					// interpolated verbatim into the caller's tool output and
+					// is bounded only by the 16 MiB HTTP body cap.
+					const e = typeof data.error === "string" ? data.error : "error";
+					if (responseSizeBytes(e) > MAX_RESPONSE_BYTES) {
+						audit("response_too_large", { msg_id });
+						return { response: null, error: "response too large", conversation_id: conv };
+					}
+					return { response: null, error: e, conversation_id: conv };
+				}
 				if (data?.status === "timeout") return { response: null, error: "timeout", conversation_id: conv };
 				// A non-terminal status (queued/delivered/pending) or a missing
 				// one must not alias to a successful empty reply.
@@ -2651,7 +2861,9 @@ export default function (pi: ExtensionAPI) {
 			};
 		},
 		renderCall(args, theme) {
-			const id = (args as any).msg_id ?? "?";
+			// Sanitized like coms_net_send's renderCall — tool args are model
+			// output reachable by prompt injection.
+			const id = sanitizePeerText((args as any).msg_id, "?");
 			return new Text(
 				theme.fg("toolTitle", theme.bold("coms_net_await ")) + theme.fg("warning", id),
 				0, 0,
@@ -2666,61 +2878,17 @@ export default function (pi: ExtensionAPI) {
 
 	// ━━ agent_end: capture turn output and submit response ━━━━━━━━━━━━━━━━
 
-	pi.on("agent_end", async (_event, ctx) => {
-		const branch = ctx.sessionManager?.getBranch() ?? [];
-		// FIFO turn attribution: answer the OLDEST injected inbound still
-		// awaiting a reply. Walking the branch from the end and picking the
-		// newest anchor (the old behavior) misattributes the reply to a second
-		// inbound that arrived mid-turn. Only claim the head if its injected
-		// entry actually anchors this branch — a user-driven turn must not
-		// consume a queued inbound's reply slot.
-		let inbound: InboundContext | null = null;
-		while (turnQueue.length > 0) {
-			const mid = turnQueue[0] as string;
-			const cand = inboundQueue.get(mid);
-			if (!cand || cand.fulfilled) {
-				turnQueue.shift();
-				continue;
-			}
-			const anchored = branch.some(e => anchorMsgIdOf(e) === mid);
-			if (anchored) {
-				turnQueue.shift();
-				inbound = cand;
-				break;
-			}
-			// Head's anchor is gone from this branch (fork/navigation/
-			// compaction). Drop it from the FIFO list so it can't block every
-			// later inbound for the full ~31 min heartbeat-sweep window; the
-			// activeInbound fallback re-finds it if it is ever re-anchored.
-			turnQueue.shift();
-		}
-		// Fallback for inbounds not tracked in turnQueue (e.g. injected before
-		// this build of the extension state existed).
-		if (!inbound) inbound = activeInbound(ctx);
-		// Don't double-POST an inbound whose retry is already pending — a
-		// failed response POST leaves the entry unfulfilled and re-findable
-		// here, which would arm a second retry timer for the same msg_id.
-		if (inbound && responseRetryTimers.has(inbound.msg_id)) inbound = null;
-		if (!inbound || !identity) return;
-
-		// Walk the session branch for the most recent assistant text *after* the
-		// inbound prompt entry, so a stale reply from an earlier turn is never
-		// resent if this turn produced no new assistant message. Only overwrite
-		// on non-empty text — a later assistant message that's tool-calls-only
-		// (no text block) must not blank out a real reply from an earlier
-		// message in the same turn.
-		let lastAssistantText = "";
-		let foundInbound = false;
-		for (const entry of branch) {
-			if (!foundInbound) {
-				// Anchor on the injected prompt entry (custom_message or plain
-				// message shape — see anchorMsgIdOf).
-				if (anchorMsgIdOf(entry) === inbound.msg_id) {
-					foundInbound = true;
-				}
-				continue;
-			}
-			if (entry.type === "message" && entry.message && entry.message.role === "assistant") {
+	// Extract one turn's reply text: the LAST non-empty assistant text within
+	// [startIdx, endIdx) of the branch. Only overwrite on non-empty text — a
+	// later assistant message that's tool-calls-only (no text block) must not
+	// blank out a real reply from an earlier message in the same turn. The
+	// slice bound keeps batched follow-up turns from cross-attributing each
+	// other's replies (see agent_end).
+	function sliceReplyText(branch: any[], startIdx: number, endIdx: number): string {
+		let text = "";
+		for (let i = startIdx; i < endIdx; i++) {
+			const entry = branch[i];
+			if (entry?.type === "message" && entry.message && entry.message.role === "assistant") {
 				const m = entry.message as any;
 				let msgText = "";
 				if (typeof m.content === "string") {
@@ -2732,11 +2900,23 @@ export default function (pi: ExtensionAPI) {
 						.join("\n");
 				}
 				if (msgText.trim()) {
-					lastAssistantText = msgText;
+					text = msgText;
 				}
 			}
 		}
+		return text;
+	}
 
+	// Build one inbound's reply submission WITHOUT awaiting: payload/schema
+	// handling and exit-dispatch bookkeeping. Extracted from
+	// submitInboundResponse so a batched agent_end can record every dispatch
+	// synchronously before its first await — in pi's print/json mode (-p)
+	// agent event listeners are fire-and-forget and main.js calls
+	// process.exit(0) immediately after the final turn, so dispatches pushed
+	// only inside an awaited loop iteration would silently lose replies #2..N
+	// (the 'exit' fallback can only deliver what was pushed before the yield).
+	function prepareInboundResponse(inbound: InboundContext, lastAssistantText: string): PreparedInboundResponse | null {
+		if (!identity) return null;
 		let payload: any = lastAssistantText;
 		let error: string | null = null;
 		if (!lastAssistantText.trim()) {
@@ -2767,15 +2947,20 @@ export default function (pi: ExtensionAPI) {
 			conversation_id: inbound.conversation_id,
 		};
 
-		// Record the dispatch synchronously BEFORE awaiting: in pi's print/json
-		// mode (-p) agent event listeners are fire-and-forget and main.js calls
-		// process.exit(0) immediately after the final turn, so this floating
-		// handler can be killed mid-POST. The 'exit' handler below synchronously
-		// re-delivers any dispatch still pending at process exit (mirrors
-		// coms.ts pendingExitDispatches). The bearer token is captured NOW: a
-		// terminal cleanShutdown can null authToken before process exit, and
-		// the install-once exit handler's closure may belong to a stale
-		// extension instance (see the module-level declaration).
+		// Producer-side response cap (mirrors the receiver-side check in
+		// handleInboundResponse and the producer-side cap in coms.ts): an
+		// oversized payload would be rejected at the transport layer and strand
+		// the caller's coms_net_await until its full timeout — fail cleanly
+		// here. Mutate req before dispatch is constructed so the body string
+		// below stringifies the capped value.
+		if (responseSizeBytes(req.response) > MAX_RESPONSE_BYTES) {
+			req.response = null;
+			req.error = "response too large";
+		}
+
+		// The bearer token is captured NOW: the install-once exit handler's
+		// closure may belong to a stale extension instance whose authToken was
+		// nulled by a session_start reset (see the module-level declaration).
 		const dispatch = {
 			msg_id: inbound.msg_id,
 			url: `${serverUrl}/v1/messages/${encodeURIComponent(inbound.msg_id)}/response`,
@@ -2795,6 +2980,15 @@ export default function (pi: ExtensionAPI) {
 			const idx = pendingExitDispatches.indexOf(dispatch);
 			if (idx >= 0) pendingExitDispatches.splice(idx, 1);
 		};
+		return { inbound, req, error, dispatch, dropDispatch };
+	}
+
+	// Submit one prepared reply: the POST itself, bounded retries, and
+	// fulfillment. Extracted from agent_end so a batched runLoop's single
+	// agent_end can fulfill every anchored inbound, each with its own
+	// dispatch + retry state.
+	async function submitInboundResponse(prep: PreparedInboundResponse): Promise<void> {
+		const { inbound, req, error, dispatch, dropDispatch } = prep;
 		// Retry with backoff (2s/10s/60s) instead of a single fixed 2s retry —
 		// a brief network blip would otherwise lose the reply and leave the
 		// caller waiting its full timeout. Only one timer per msg_id is ever
@@ -2879,6 +3073,107 @@ export default function (pi: ExtensionAPI) {
 			// caller's own timeout resolve it.
 			audit("response_out_failed", { msg_id: inbound.msg_id, reason: safeError(e) });
 			scheduleResponseRetry(0);
+		} finally {
+			// The first attempt is settled: the entry is either fulfilled
+			// (activeInbound skips it) or retry-armed (the responseRetryTimers
+			// guard in agent_end covers it), so the in-flight claim can go.
+			inbound.dispatching = false;
+		}
+	}
+
+	pi.on("agent_end", async (_event, ctx) => {
+		// Shutdown latch (all four tools gate on it too): after a terminal-
+		// status cleanShutdown the token is dead and the heartbeat sweep that
+		// prunes unfulfilled inbounds is stopped — POSTing here would burn a
+		// dead-token request (plus a retry timer) per queued inbound and leak
+		// the entries until the next session_start reset.
+		if (shuttingDown) return;
+		const branch = ctx.sessionManager?.getBranch() ?? [];
+		// FIFO turn attribution, per turn: pi 0.55.0 runs queued follow-ups in
+		// ONE runLoop with a single agent_end, so this event must fulfill EVERY
+		// anchored unfulfilled turnQueue entry — not just the oldest — each
+		// reply scoped to the slice between its anchor and the next inbound's
+		// anchor. (The old one-inbound-per-event + unbounded-walk-to-branch-end
+		// both lost the later turns' replies and cross-attributed text produced
+		// after later anchors to the first inbound.) Only claim entries whose
+		// injected prompt actually anchors this branch — a user-driven turn
+		// must not consume a queued inbound's reply slot.
+		const claimed: { inbound: InboundContext; anchorIdx: number }[] = [];
+		const kept: string[] = [];
+		for (const mid of turnQueue) {
+			const cand = inboundQueue.get(mid);
+			if (!cand || cand.fulfilled) continue; // stale slot — drop
+			const anchorIdx = branch.findIndex(e => anchorMsgIdOf(e) === mid);
+			if (anchorIdx < 0) {
+				// Not anchored in this branch: its followUp may not be persisted
+				// yet (pi 0.55.0 queues followUps in memory until their turn
+				// starts — the anchor lands at message_end), or the anchor was
+				// lost to fork/navigation/compaction. Keep the slot: it can't
+				// block the per-entry scan, a later agent_end claims it once
+				// anchored, and a never-anchored entry is pruned + tombstoned
+				// by the heartbeat sweep.
+				kept.push(mid);
+				continue;
+			}
+			claimed.push({ inbound: cand, anchorIdx });
+		}
+		turnQueue.length = 0;
+		turnQueue.push(...kept);
+		if (!identity) return;
+		// Don't double-POST an inbound whose retry is already pending — a
+		// failed response POST leaves the entry unfulfilled and re-findable
+		// here, which would arm a second retry timer for the same msg_id.
+		if (claimed.length === 0) {
+			// Fallback for inbounds not tracked in turnQueue (e.g. injected
+			// before this build of the extension state existed). Skip an
+			// inbound another fire-and-forget agent_end already claimed but
+			// whose first POST is still in flight (dispatching) — the
+			// responseRetryTimers guard alone doesn't cover that window, and
+			// re-submitting here would POST the same msg_id twice.
+			const inbound = activeInbound(ctx);
+			if (!inbound || inbound.dispatching || responseRetryTimers.has(inbound.msg_id)) return;
+			const anchorIdx = branch.findIndex(e => anchorMsgIdOf(e) === inbound.msg_id);
+			inbound.dispatching = true;
+			const prep = prepareInboundResponse(inbound, sliceReplyText(branch, anchorIdx + 1, branch.length));
+			if (prep) await submitInboundResponse(prep);
+			else inbound.dispatching = false;
+			return;
+		}
+		// Branch order (not queue order) decides the slice boundaries.
+		claimed.sort((a, b) => a.anchorIdx - b.anchorIdx);
+		// Pass 1 — synchronous: mark every claim in-flight and build every
+		// submission (which pushes its exit-dispatch) BEFORE the first await.
+		// Both are required by the print-mode race: process.exit(0) can fire
+		// at the first await in pass 2, and the 'exit' fallback can only
+		// deliver dispatches already recorded; a second agent_end running
+		// while pass 2 is suspended must also see these as claimed.
+		const prepared: PreparedInboundResponse[] = [];
+		for (const { inbound, anchorIdx } of claimed) {
+			if (responseRetryTimers.has(inbound.msg_id)) continue;
+			// Slice end = the NEXT inbound prompt anchor in the branch (any
+			// msg_id), not just the next CLAIMED one. claimed skips fulfilled /
+			// retry-pending inbounds, so using claimed[i+1].anchorIdx would
+			// span across a foreign anchor sitting between two claimed ones
+			// and fold that turn's replies into this slice (sliceReplyText
+			// returns the LAST non-empty assistant text, so the later foreign
+			// reply wins → cross-attribution). Reachable under session fork /
+			// navigation / compaction, which can leave a fulfilled inbound's
+			// anchor between two still-unfulfilled ones.
+			let end = branch.length;
+			for (let j = anchorIdx + 1; j < branch.length; j++) {
+				if (anchorMsgIdOf(branch[j]) !== undefined) {
+					end = j;
+					break;
+				}
+			}
+			inbound.dispatching = true;
+			const prep = prepareInboundResponse(inbound, sliceReplyText(branch, anchorIdx + 1, end));
+			if (prep) prepared.push(prep);
+			else inbound.dispatching = false;
+		}
+		// Pass 2 — the awaited POSTs.
+		for (const prep of prepared) {
+			await submitInboundResponse(prep);
 		}
 	});
 

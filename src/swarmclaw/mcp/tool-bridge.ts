@@ -40,7 +40,19 @@ export const MCPInvokeArgumentsSchema = z
     }
     for (const key of ["bank_id", "bankId"]) {
       const value = args[key];
-      if (typeof value === "string" && !BANK_ID_REGEX.test(value)) {
+      if (value === undefined) continue;
+      // A present bank_id must be a string before the BankIdSchema regex can
+      // apply — otherwise a number/boolean/null would slip past the typeof guard
+      // below and reach the subprocess unvalidated.
+      if (typeof value !== "string") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${key} must be a string (P0.9 BankIdSchema)`,
+          path: [key],
+        });
+        continue;
+      }
+      if (!BANK_ID_REGEX.test(value)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `${key} "${value}" fails BankIdSchema validation (P0.9)`,
@@ -303,6 +315,14 @@ export class ToolBridge {
    * /invoke route's pre-validation never uses a snapshot the bridge itself
    * would treat as stale). Used by the /invoke route for minimal
    * pre-dispatch argument validation.
+   *
+   * Cache-expiry safety: when this returns undefined because the cache expired,
+   * the route SKIPS its pre-dispatch check and delegates to invoke(), which
+   * calls getToolsCached() (re-enumerating the now-stale cache) and then
+   * validates args against the fresh inputSchema BEFORE the tools/call request.
+   * So invalid arguments are rejected before subprocess dispatch regardless of
+   * cache state — the route check is a fast path for the warm-cache case, not a
+   * load-bearing validator.
    */
   getToolInputSchema(tool: string): Record<string, unknown> | undefined {
     if (!this.cache || this.cache.expiresAt <= Date.now()) return undefined;
@@ -312,6 +332,26 @@ export class ToolBridge {
   invalidateCache(): void {
     this.cache = null;
     this.inputSchemas.clear();
+  }
+
+  /**
+   * Validate snake_case args against the tool's currently-cached inputSchema
+   * and throw a JSON-RPC -32602 on violation. No-op when the server declared
+   * no schema for the tool. Shared by the main invoke path and the -32601
+   * retry path so a schema refresh can never let stale args slip through to
+   * the subprocess unchecked.
+   */
+  private validateArgsOrThrow(tool: string, snakeArgs: Record<string, unknown>): void {
+    const inputSchema = this.inputSchemas.get(tool);
+    if (!inputSchema) return;
+    const argViolation = validateArgsAgainstInputSchema(inputSchema, snakeArgs);
+    if (argViolation) {
+      throw new JsonRpcError(
+        -32602,
+        `Invalid params: ${argViolation.field}: ${argViolation.violation}`,
+        { field: argViolation.field, violation: argViolation.violation },
+      );
+    }
   }
 
   /**
@@ -349,17 +389,7 @@ export class ToolBridge {
       // list (and thus inputSchemas) is current — this also covers the
       // post-TTL-expiry path the route's cached-schema check cannot see.
       // Compares snake_case args against the server's snake_case schema (CC-8).
-      const inputSchema = this.inputSchemas.get(tool);
-      if (inputSchema) {
-        const argViolation = validateArgsAgainstInputSchema(inputSchema, snakeArgs);
-        if (argViolation) {
-          throw new JsonRpcError(
-            -32602,
-            `Invalid params: ${argViolation.field}: ${argViolation.violation}`,
-            { field: argViolation.field, violation: argViolation.violation },
-          );
-        }
-      }
+      this.validateArgsOrThrow(tool, snakeArgs);
 
       try {
         const result = await this.transport.request(
@@ -389,6 +419,12 @@ export class ToolBridge {
           this.invalidateCache();
           const refreshed = await this.enumerateTools(requestId);
           if (refreshed.includes(tool)) {
+            // The refresh may have changed the tool's schema (required fields,
+            // types). Revalidate the caller's args against the refreshed schema
+            // before re-dispatching — otherwise stale args that no longer match
+            // would reach the subprocess unchecked. Throws -32602 on violation,
+            // which the outer catch logs and rethrows (retry is abandoned).
+            this.validateArgsOrThrow(tool, snakeArgs);
             const retry = await this.transport.request(
               "tools/call",
               { name: tool, arguments: snakeArgs, _meta: { requestId } },

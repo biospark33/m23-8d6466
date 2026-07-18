@@ -143,18 +143,32 @@ export async function handleRegisterMCPServer(
     store.release(reservationId);
     // StdioTransport.shutdown is a no-op when the transport never spawned.
     await stdio?.shutdown(REGISTRATION_TEARDOWN_GRACE_MS).catch(() => {});
-    // store.finalize throws "store is shutting down" in the shutdown race —
-    // that is not a handshake failure; surface the store's message as 503.
-    if (err instanceof Error && err.message === "store is shutting down") {
+    // A shutdown that began mid-registration (store closed, or the transport
+    // drained before spawn) is service-unavailable, not a handshake failure.
+    // Both messages are SwarmClaw's own (not subprocess-controlled), so echoing
+    // them in the body is safe and matches the documented 503 contract.
+    if (
+      err instanceof Error &&
+      (err.message === "store is shutting down" || err.message === "transport is shutting down")
+    ) {
       return logAndReturn(start, requestId, "mcp.register", {
         status: 503,
         body: { ok: false, error: err.message },
       });
+
     }
-    return logAndReturn(start, requestId, "mcp.register", {
-      status: 502,
-      body: { ok: false, error: `MCP handshake failed: ${(err as Error).message}` },
-    });
+    // JsonRpcError carries a child-controlled message (subprocess JSON-RPC error
+    // text); never surface it in the response body — log the detail server-side.
+    // Every other error here is SwarmClaw's own message (zero-tools, timeout,
+    // frame cap, transport-closed) or a system error (ENOENT), safe to surface.
+    const safeMessage = err instanceof JsonRpcError ? "MCP handshake failed" : (err as Error).message;
+    return logAndReturn(
+      start,
+      requestId,
+      "mcp.register",
+      { status: 502, body: { ok: false, error: safeMessage } },
+      (err as Error).message,
+    );
   }
 }
 
@@ -195,10 +209,13 @@ export async function handleTestMCPServer(
     });
   } catch (err) {
     rec.healthy = false;
+    // JsonRpcError carries a child-controlled message; surface a stable public
+    // message and keep the detail server-side only.
+    const safeMessage = err instanceof JsonRpcError ? "transport health check failed" : `transport health check failed: ${(err as Error).message}`;
     return logAndReturn(start, requestId, "mcp.test", {
       status: 502,
-      body: { ok: false, error: `transport health check failed: ${(err as Error).message}` },
-    });
+      body: { ok: false, error: safeMessage },
+    }, (err as Error).message);
   }
 }
 
@@ -346,7 +363,15 @@ function logAndReturn(
   requestId: string,
   operation: string,
   resp: RouteResponse,
+  /** Optional server-side-only diagnostic detail for the log's error.message.
+   * When omitted, the message is derived from the response body (which is
+   * already sanitized for the client). Used to preserve subprocess-sourced
+   * detail in logs WITHOUT leaking it into the response body. */
+  detail?: string,
 ): RouteResponse {
-  // MCP routes carry no agentId in the CC-9 entry.
-  return logResponse(start, requestId, operation, null, resp);
+  // MCP routes carry no agentId in the CC-9 entry. `detail` (when present) is
+  // server-side-only log diagnostic — preserved in the log entry's error.message
+  // WITHOUT leaking into resp.body (which is already sanitized for the client).
+  return logResponse(start, requestId, operation, null, resp, detail);
+
 }

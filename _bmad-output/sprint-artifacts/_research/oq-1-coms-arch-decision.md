@@ -306,6 +306,21 @@ ac_map:
   AC3 (extension loads, coms-net.ts): true
 ```
 
+Note on report schema: the frozen JSON above is generation 1 — a run with the
+current `scripts/coms-smoke-test.ts` additionally emits `strict`, `env_scope`,
+and `bAnsweredObserved` fields plus a revised `gate_note` (`"STRICT (default):
+socket_live_round_trip is gating — set PI_SMOKE_STRICT=0 to waive it"`), so a
+fresh run's report shape differs from the embedded block.
+
+Post-round-5 re-verification (2026-07-14): a fresh strict-gate live run with
+the round-5 code is green — `pass: true`, `strict: true`, no waiver,
+`agents_registered: 4`, `messages_exchanged: 3`, 13/13 checks ok,
+`socket_live_round_trip` content-verified (`coms_await` returned `"pong"`).
+Raw JSON: `_bmad-output/sprint-artifacts/_research/oq-1-smoke-run-2026-07-14.json`.
+The round-5 review also fixed the harness's latent timing coin flip (B's
+followUp answer lands ~70-90s after boot; `AWAIT_TIMEOUT_MS` 45s→150s,
+`SPAWN_TIMEOUT_MS` 90s→240s), which had red-flipped this check twice.
+
 Post-DEC1, the same command with `PI_SMOKE_MODEL` set exercised the live turn
 for real on 2026-07-13: AC1 is green, backed by real registrations and real
 `agent_end` events — no auth-deferral waiver path remains.
