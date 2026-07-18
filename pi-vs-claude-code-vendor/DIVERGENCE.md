@@ -112,10 +112,11 @@ transport-specific work:
 | Constant | `coms.ts` | `coms-net.ts` | Why |
 |---|---|---|---|
 | `MAX_PROMPT_BYTES` | `256*1024` | `200_000` | Transport-specific HTTP cap; coms.ts sizes against the local-IPC 16 MiB×256 envelope pin, which has no HTTP analog. |
+| `INIT_LATCH_TIMEOUT_MS` override envelope | default `30_000`; env `PI_COMS_*`, integer-only, no floor, max `2^31-1` | default `30_000`; env `PI_COMS_NET_*`, clamp `[1_000, 300_000]`, fractionals accepted | Defaults are equal but the env override envelope differs per transport (net enforces a 1 s floor / 5 min ceiling). |
 
 All other shared caps (`MAX_INBOUND`, `MAX_PENDING_EXIT_DISPATCHES`,
-`MAX_FULFILLED_TOMBSTONES`, `EXIT_DELIVER_BUDGET_MS`, `INIT_LATCH_TIMEOUT_MS`)
-are kept numerically equal to `coms.ts`.
+`MAX_FULFILLED_TOMBSTONES`, `EXIT_DELIVER_BUDGET_MS`) are kept numerically
+equal to `coms.ts`; `INIT_LATCH_TIMEOUT_MS` is default-equal only (see table).
 
 ## `themeMap.ts`
 
