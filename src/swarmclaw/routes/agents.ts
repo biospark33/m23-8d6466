@@ -37,16 +37,20 @@ export async function handleRegisterAgent(
     // new URL cannot throw here: z.string().url() already parsed it.
     const proto = new URL(input.endpointUrl).protocol;
     if (proto !== "http:" && proto !== "https:") {
+      // Stable redacted message: never echo the request-supplied endpointUrl
+      // (user-controlled input) back in the response.
       return finish(start, requestId, input.agentId, {
         status: 422,
-        body: { error: `endpointUrl must use http(s) scheme: ${input.endpointUrl}` },
+        body: { error: "endpointUrl must use http(s) scheme" },
       });
     }
     const loopback = await isLoopbackEndpoint(input.endpointUrl);
     if (!loopback) {
+      // Stable redacted message: never echo endpointUrl (SSRF rejection detail
+      // is not for the response surface; the requestId carries correlation).
       return finish(start, requestId, input.agentId, {
         status: 422,
-        body: { error: `endpointUrl must resolve to loopback (SSRF guard): ${input.endpointUrl}` },
+        body: { error: "endpointUrl must resolve to a loopback address (SSRF guard)" },
       });
     }
   }

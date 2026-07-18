@@ -145,8 +145,9 @@ describe("INV-SC2 command allowlist", () => {
   });
 
   // AC7 npx provenance flags — a redirected registry/userconfig/cache would let
-  // the allowlisted package NAME be fetched from an attacker-controlled source.
-  // Rejected outright in both `--flag value` and `--flag=value` forms.
+  // the allowlisted package NAME be fetched from an attacker-controlled source;
+  // --cwd shifts the working dir so the package resolves from an attacker-chosen
+  // location. All rejected outright in both `--flag value` and `--flag=value` forms.
   test.each([
     [["--registry", "http://evil.example", "hindsight-local-mcp"]],
     [["--registry=http://evil.example", "hindsight-local-mcp"]],
@@ -154,14 +155,11 @@ describe("INV-SC2 command allowlist", () => {
     [["--userconfig=http://evil.example", "hindsight-local-mcp"]],
     [["--cache", "/tmp/evil-cache", "hindsight-local-mcp"]],
     [["--cache=/tmp/evil-cache", "hindsight-local-mcp"]],
+    [["--cwd", "/tmp/evil-cwd", "hindsight-local-mcp"]],
+    [["--cwd=/tmp/evil-cwd", "hindsight-local-mcp"]],
+    [["--cwd", "/tmp/evil-cwd", "hindsight-local-mcp", "extra-positional"]],
   ])("npx provenance args %j rejected", (args) => {
     expect(() => validateCommand({ command: "npx", args, env: {} })).toThrow(CommandValidationError);
-  });
-
-  test("npx --cwd consumes its value; trailing --cwd rejected", () => {
-    // Value consumed, so the package positional is still validated (and accepted).
-    expect(() => validateCommand({ command: "npx", args: ["--cwd", "/tmp", "hindsight-local-mcp"], env: {} })).not.toThrow();
-    expect(() => validateCommand({ command: "npx", args: ["--cwd"], env: {} })).toThrow(/requires a value/);
   });
 
   test("npx with allowlisted package accepted", () => {
@@ -547,6 +545,20 @@ describe("stdio transport robustness", () => {
     const pid = t.pid!;
     await expect(t.initialize()).rejects.toThrow("MCP frame exceeds 16MB limit");
     // The transport SIGKILLs the runaway server itself; shutdown just awaits the reap.
+    await t.shutdown(2000);
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 20000);
+
+  test("frame cap counts UTF-8 WIRE BYTES, not UTF-16 units (multibyte regression)", async () => {
+    // "✓" (U+2713) = 3 UTF-8 bytes but 1 UTF-16 code unit. 5_592_406 chars =>
+    // 16_777_218 wire bytes (> 16 MiB cap) but readBuf.length == 5_592_406
+    // (< 16 MiB). A string-length cap would NOT trip and the request would hang;
+    // the byte-length cap must reject + SIGKILL.
+    const t = bunFake({ FAKE_MCP_RAW_WRITE_BYTES: "5592406", FAKE_MCP_RAW_WRITE_CHAR: "✓" });
+    live.push(t);
+    await t.spawn();
+    const pid = t.pid!;
+    await expect(t.initialize()).rejects.toThrow("MCP frame exceeds 16MB limit");
     await t.shutdown(2000);
     expect(() => process.kill(pid, 0)).toThrow();
   }, 20000);

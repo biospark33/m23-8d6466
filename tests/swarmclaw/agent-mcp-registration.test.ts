@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type LogEntry, setLogSink, StdioTransport } from "../../src/swarmclaw/mcp/stdio-transport.ts";
@@ -69,6 +69,20 @@ function pinNpxAllowlistUnset(): void {
       process.env.SWARMCLAW_NPX_PACKAGE_ALLOWLIST = saved;
     }
   });
+}
+
+/** Capture an env var's current value BEFORE a test overwrites it; call the
+ * returned restore() in finally to put it back — deleting only when the var was
+ * originally absent (preserves host-provided values instead of clobbering them). */
+function saveEnv(key: string): () => void {
+  const prev = process.env[key];
+  return () => {
+    if (prev === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = prev;
+    }
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -232,32 +246,39 @@ describe("AC3: broken transport never silently succeeds", () => {
   }, 15000);
 
   test("allowlisted command missing on disk (spawn ENOENT) → 502 ok:false with error", async () => {
-    // H2 environment guard: this test assumes the binary is absent. On a host
-    // where it IS installed, the spawn would start the real server instead of
-    // failing with ENOENT — a different failure mode this test does not
-    // cover — so skip there and keep today's behavior everywhere else.
-    const binPath = join(import.meta.dir, "..", "..", "node_modules", ".bin", "hindsight-local-mcp");
-    if (existsSync(binPath)) return;
-    const mcpStore = newMcpStore();
-    // NO factory override: the default factory builds the real StdioTransport,
-    // whose Bun.spawn throws ENOENT — node_modules/.bin/hindsight-local-mcp
-    // passes the default allowlist but does not exist in this repo.
-    const resp = await handleRegisterMCPServer(mcpStore, {
-      name: "enoent",
-      transport: "stdio",
-      command: "node_modules/.bin/hindsight-local-mcp",
-    });
-    expect(resp.status).toBe(502);
-    const body = resp.body as { ok: boolean; error?: unknown };
-    expect(body.ok).toBe(false);
-    expect(typeof body.error).toBe("string");
-    expect((body.error as string).length).toBeGreaterThan(0);
+    // Deterministic: a unique nonexistent absolute path temporarily added to the
+    // command allowlist. No dependency on whether the real binary is installed,
+    // and the host allowlist is restored in finally.
+    const missingBin = `/tmp/.swarmclaw-enoent-${crypto.randomUUID()}`;
+    const restoreAllowlist = saveEnv("SWARMCLAW_COMMAND_ALLOWLIST");
+    process.env.SWARMCLAW_COMMAND_ALLOWLIST = missingBin;
+    try {
+      const mcpStore = newMcpStore();
+      // NO factory override: the default factory builds the real StdioTransport,
+      // whose Bun.spawn throws ENOENT — the path passes the allowlist but does
+      // not exist on disk.
+      const resp = await handleRegisterMCPServer(mcpStore, {
+        name: "enoent",
+        transport: "stdio",
+        command: missingBin,
+      });
+      expect(resp.status).toBe(502);
+      const body = resp.body as { ok: boolean; error?: unknown };
+      expect(body.ok).toBe(false);
+      expect(typeof body.error).toBe("string");
+      expect((body.error as string).length).toBeGreaterThan(0);
+    } finally {
+      restoreAllowlist();
+    }
   }, 15000);
 
   // H13: the transport keeps a stderr tail for diagnostics — a subprocess that
-  // dies mid-handshake must surface it in the 502 error string.
-  test("broken subprocess stderr tail is surfaced in the 502 error", async () => {
+  // dies mid-handshake must surface it SERVER-SIDE (log), never in the 502
+  // response body (subprocess-controlled text must not reach the API surface).
+  test("broken subprocess stderr tail is logged server-side, not leaked in the 502 body", async () => {
     const mcpStore = newMcpStore();
+    const logs: LogEntry[] = [];
+    const restoreSink = setLogSink((e) => logs.push(e));
     const markerFactory: TransportFactory = (opts) =>
       new StdioTransport({
         command: "bun",
@@ -265,17 +286,27 @@ describe("AC3: broken transport never silently succeeds", () => {
         env: { ...process.env, ...opts.env, FAKE_MCP_EXIT_CODE: "3", FAKE_MCP_STDERR_MARKER: "marker123" },
         validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
       });
-    const resp = await handleRegisterMCPServer(
-      mcpStore,
-      { name: "stderr-broken", transport: "stdio", command: "hindsight-local-mcp" },
-      undefined,
-      markerFactory,
-    );
-    expect(resp.status).toBe(502);
-    const body = resp.body as { ok: boolean; error?: unknown };
-    expect(body.ok).toBe(false);
-    expect(typeof body.error).toBe("string");
-    expect(body.error as string).toContain("marker123");
+    try {
+      const resp = await handleRegisterMCPServer(
+        mcpStore,
+        { name: "stderr-broken", transport: "stdio", command: "hindsight-local-mcp" },
+        undefined,
+        markerFactory,
+      );
+      expect(resp.status).toBe(502);
+      const body = resp.body as { ok: boolean; error?: unknown };
+      expect(body.ok).toBe(false);
+      expect(typeof body.error).toBe("string");
+      // Redaction guarantee: subprocess stderr must NEVER appear in the body.
+      expect(body.error as string).not.toContain("marker123");
+      // The tail is surfaced server-side only, in the transport-close log entry.
+      const tailLog = logs.find(
+        (l) => typeof l.stderrTail === "string" && (l.stderrTail as string).includes("marker123"),
+      );
+      expect(tailLog).toBeDefined();
+    } finally {
+      restoreSink();
+    }
   }, 15000);
 
   test("hanging server → 502 only after the ~10s spawn/handshake timeout", async () => {
@@ -594,6 +625,8 @@ describe("INV-SC5: secrets masked in responses", () => {
 // ---------------------------------------------------------------------------
 describe("Env isolation: subprocess env is scoped", () => {
   test("subprocess sees FOO=bar but not internal SwarmClaw vars", async () => {
+    const restoreSecret = saveEnv("SWARMCLAW_INTERNAL_SECRET");
+    const restoreHindsight = saveEnv("HINDSIGHT_INTERNAL");
     process.env.SWARMCLAW_INTERNAL_SECRET = "leak-me";
     process.env.HINDSIGHT_INTERNAL = "also-leak";
     try {
@@ -615,14 +648,14 @@ describe("Env isolation: subprocess env is scoped", () => {
       expect(echoed.HINDSIGHT_INTERNAL).toBeUndefined();
     } finally {
       // Restore even on assertion failure — leaked vars would poison other tests.
-      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
-      delete process.env.SWARMCLAW_INTERNAL_SECRET;
-      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
-      delete process.env.HINDSIGHT_INTERNAL;
+      restoreSecret();
+      restoreHindsight();
     }
   }, 15000);
 
   test("SWARMCLAW_ENV_ALLOWLIST entries flow through", async () => {
+    const restoreMyAllowed = saveEnv("MY_ALLOWED");
+    const restoreAllowlist = saveEnv("SWARMCLAW_ENV_ALLOWLIST");
     process.env.MY_ALLOWED = "allowed-value";
     process.env.SWARMCLAW_ENV_ALLOWLIST = "MY_ALLOWED";
     try {
@@ -638,10 +671,8 @@ describe("Env isolation: subprocess env is scoped", () => {
       const echoed = JSON.parse((inv.body as { result: { content: Array<{ text: string }> } }).result.content[0]!.text);
       expect(echoed.MY_ALLOWED).toBe("allowed-value");
     } finally {
-      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
-      delete process.env.MY_ALLOWED;
-      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
-      delete process.env.SWARMCLAW_ENV_ALLOWLIST;
+      restoreMyAllowed();
+      restoreAllowlist();
     }
   }, 15000);
 });
@@ -767,7 +798,8 @@ describe("Guards: capacity, duplicate, SSRF, args-length", () => {
     expect(resp.status).toBe(422);
     const body = resp.body as { error: string };
     expect(body.error).toContain("endpointUrl must use http(s) scheme");
-    expect(body.error).toContain("ftp://localhost/x");
+    // Redaction: the request-supplied endpointUrl must NOT be echoed back.
+    expect(body.error).not.toContain("ftp://localhost/x");
   }, 15000);
 
   test("args length: 4097 chars → 400, 4096 → accepted", async () => {
@@ -890,6 +922,21 @@ describe("Schema boundaries", () => {
     expect(resp.status).toBe(400);
   }, 15000);
 
+  // H11 boundary acceptance: the caps rejected above are upper bounds — exactly
+  // 64 capabilities and a 256-char entry must still be ACCEPTED.
+  test("agent boundary accepted: 64 capabilities + 256-char value → 201", async () => {
+    const r1 = await handleRegisterAgent(new AgentStore(), {
+      agentId: "cap-64-ok",
+      capabilities: Array.from({ length: 64 }, (_, i) => `cap-${i}`),
+    });
+    expect(r1.status).toBe(201);
+    const r2 = await handleRegisterAgent(new AgentStore(), {
+      agentId: "cap-256val-ok",
+      capabilities: ["c".repeat(256)],
+    });
+    expect(r2.status).toBe(201);
+  }, 15000);
+
   test("circular metadata → 400 (refine catches the JSON.stringify throw)", async () => {
     const m: Record<string, unknown> = {};
     m.self = m;
@@ -923,6 +970,32 @@ describe("Schema boundaries", () => {
   ])("invalid MCP payload (%s) → 400 pre-spawn", async (_label, payload) => {
     const resp = await handleRegisterMCPServer(newMcpStore(), payload, undefined, noSpawn);
     expect(resp.status).toBe(400);
+  }, 15000);
+
+  // H11 boundary acceptance: exactly 256 args items and 64 env keys must still
+  // be ACCEPTED (the over-limit cases above are one past these caps). Arg
+  // LENGTH 4096/4097 is covered by the dedicated args-length test.
+  test("MCP boundary accepted: 256 args + 64 env keys → 201", async () => {
+    const mcpStore = newMcpStore();
+    const r1 = await handleRegisterMCPServer(
+      mcpStore,
+      { name: "args-256-ok", transport: "stdio", command: "hindsight-local-mcp", args: Array.from({ length: 256 }, (_, i) => `a${i}`) },
+      undefined,
+      fakeFactory(),
+    );
+    expect(r1.status).toBe(201);
+    const r2 = await handleRegisterMCPServer(
+      mcpStore,
+      {
+        name: "env-64-ok",
+        transport: "stdio",
+        command: "hindsight-local-mcp",
+        env: Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`K${i}`, "v"])),
+      },
+      undefined,
+      fakeFactory(),
+    );
+    expect(r2.status).toBe(201);
   }, 15000);
 
   test("name 128 chars (boundary) → 201, and tool 257 chars → 400 -32602", async () => {
@@ -1016,6 +1089,28 @@ describe("Registration failure contracts", () => {
     expect(typeof body.error).toBe("string");
     expect(body.error as string).toContain("shutting down");
     expect(body.error as string).not.toContain("handshake failed");
+    expect(mcpStore.size).toBe(0);
+  }, 15000);
+
+  // Reservation-lifecycle terminality: shutdownAll() draining a registered-but-
+  // unspawned transport must prevent any later spawn — no child may start after
+  // a shutdown has begun. StdioTransport.shutdown() marks itself closed FIRST,
+  // so a subsequent spawn() refuses.
+  test("shutdownAll after attachTransport before spawn → spawn refuses, no child", async () => {
+    const mcpStore = newMcpStore();
+    const rid = mcpStore.reserve("race-spawn");
+    const t = new StdioTransport({
+      command: "bun",
+      args: [FAKE],
+      env: { PATH: process.env.PATH ?? "" },
+      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+    });
+    mcpStore.attachTransport(rid, t);
+    // Drain the pending transport BEFORE it ever spawns.
+    await mcpStore.shutdownAll();
+    // spawn() must refuse (closed) — and no subprocess may have started.
+    await expect(t.spawn()).rejects.toThrow(/shutting down/);
+    expect(t.pid).toBeUndefined();
     expect(mcpStore.size).toBe(0);
   }, 15000);
 });

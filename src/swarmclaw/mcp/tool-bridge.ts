@@ -40,7 +40,19 @@ export const MCPInvokeArgumentsSchema = z
     }
     for (const key of ["bank_id", "bankId"]) {
       const value = args[key];
-      if (typeof value === "string" && !BANK_ID_REGEX.test(value)) {
+      if (value === undefined) continue;
+      // A present bank_id must be a string before the BankIdSchema regex can
+      // apply — otherwise a number/boolean/null would slip past the typeof guard
+      // below and reach the subprocess unvalidated.
+      if (typeof value !== "string") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${key} must be a string (P0.9 BankIdSchema)`,
+          path: [key],
+        });
+        continue;
+      }
+      if (!BANK_ID_REGEX.test(value)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `${key} "${value}" fails BankIdSchema validation (P0.9)`,
@@ -303,6 +315,14 @@ export class ToolBridge {
    * /invoke route's pre-validation never uses a snapshot the bridge itself
    * would treat as stale). Used by the /invoke route for minimal
    * pre-dispatch argument validation.
+   *
+   * Cache-expiry safety: when this returns undefined because the cache expired,
+   * the route SKIPS its pre-dispatch check and delegates to invoke(), which
+   * calls getToolsCached() (re-enumerating the now-stale cache) and then
+   * validates args against the fresh inputSchema BEFORE the tools/call request.
+   * So invalid arguments are rejected before subprocess dispatch regardless of
+   * cache state — the route check is a fast path for the warm-cache case, not a
+   * load-bearing validator.
    */
   getToolInputSchema(tool: string): Record<string, unknown> | undefined {
     if (!this.cache || this.cache.expiresAt <= Date.now()) return undefined;

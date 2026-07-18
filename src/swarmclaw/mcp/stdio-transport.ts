@@ -216,11 +216,13 @@ function validateNodeArgs(args: string[]): void {
 }
 
 // npx flags that pass args to Node, inject extra packages, or redirect package
-// provenance. The provenance flags (--registry/--userconfig/--cache) would let
-// the *allowlisted package name* be fetched from an attacker-controlled source —
-// a supply-chain bypass of INV-SC2 — so they are forbidden outright rather than
-// value-consumed. Matching strips any `=value` suffix before the lookup, so
-// both `--registry <url>` and `--registry=<url>` are rejected.
+// provenance. The provenance flags (--registry/--userconfig/--cache/--cwd)
+// would let the *allowlisted package name* be fetched/resolved from an
+// attacker-controlled source — a supply-chain bypass of INV-SC2 — so they are
+// forbidden outright. --cwd shifts npx's working directory, changing which
+// package.json/node_modules the package resolves from, so it is a provenance
+// flag too (not a value-consumed option). Matching strips any `=value` suffix
+// before the lookup, so both `--registry <url>` and `--registry=<url>` are rejected.
 const NPX_FORBIDDEN_FLAGS = new Set([
   "--node-arg",
   "--node-args",
@@ -232,11 +234,8 @@ const NPX_FORBIDDEN_FLAGS = new Set([
   "--registry",
   "--userconfig",
   "--cache",
+  "--cwd",
 ]);
-
-// npx flags that take the NEXT token as their value; the value must not be
-// mistaken for the positional package argument (e.g. `--cwd <dir>`).
-const NPX_VALUE_FLAGS = new Set(["--cwd"]);
 
 function validateNpxArgs(args: string[], packageAllowlist: string[]): void {
   let sawPositional = false;
@@ -247,13 +246,6 @@ function validateNpxArgs(args: string[], packageAllowlist: string[]): void {
       throw new CommandValidationError(
         `npx flag '${flag}' is not permitted (package/node-arg injection or provenance redirect)`,
       );
-    }
-    if (NPX_VALUE_FLAGS.has(flag) && !arg.includes("=")) {
-      if (i + 1 >= args.length) {
-        throw new CommandValidationError(`npx flag '${flag}' requires a value`);
-      }
-      i++; // consumed the flag's value token
-      continue;
     }
     if (arg.startsWith("-")) {
       continue; // some other allowed flag (e.g. -y)
@@ -320,6 +312,19 @@ export function buildSubprocessEnv(
   if (explicit) {
     for (const [k, v] of Object.entries(explicit)) out[k] = v;
   }
+  // INV-SC2: PATH is the executable-resolution root. A request-controlled PATH
+  // would let the subprocess resolve node/npx from an attacker-chosen directory,
+  // bypassing the command allowlist — so PATH is always taken from the trusted
+  // parent process (when present), never from the explicit request env. An
+  // explicit PATH in the request is silently overridden (or dropped if the
+  // parent has no PATH to trust).
+  const trustedPath = parentEnv.PATH;
+  if (trustedPath !== undefined) {
+    out.PATH = trustedPath;
+  } else if ("PATH" in out) {
+    // biome-ignore lint/performance/noDelete: drop request-controlled PATH when no trusted parent PATH exists
+    delete out.PATH;
+  }
   // INV-SC2: NODE_OPTIONS injects arbitrary flags (--require/--import/...) into
   // every node-family runtime, bypassing all arg validation above — so it is
   // stripped even when explicitly provided or named in SWARMCLAW_ENV_ALLOWLIST.
@@ -335,11 +340,8 @@ export function buildSubprocessEnv(
       duration: 0,
       status: "ok",
     });
-    const filtered: Record<string, string> = {};
-    for (const [k, v] of Object.entries(out)) {
-      if (k !== "NODE_OPTIONS") filtered[k] = v;
-    }
-    return filtered;
+    // biome-ignore lint/performance/noDelete: env isolation requires delete
+    delete out.NODE_OPTIONS;
   }
   return out;
 }
@@ -362,6 +364,11 @@ export interface StdioTransportOptions {
 /** Maximum buffered frame size; a misbehaving server exceeding this is killed. */
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
+/** UTF-8 byte length of a string (wire bytes, not UTF-16 code units). */
+function utf8ByteLength(s: string): number {
+  return Buffer.byteLength(s, "utf8");
+}
+
 interface Pending {
   resolve: (result: unknown) => void;
   reject: (err: Error) => void;
@@ -376,6 +383,8 @@ export class StdioTransport {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private readBuf = "";
+  private readBufBytes = 0; // UTF-8 byte length of readBuf (wire bytes, not UTF-16 code units)
+  private lineStartAt = 0; // Date.now() when the current line's first byte arrived
   private stderrTail = "";
   private closed = false;
   private readonly encoder = new TextEncoder();
@@ -391,6 +400,11 @@ export class StdioTransport {
   }
 
   async spawn(): Promise<void> {
+    // A shutdown that began before spawn (e.g. shutdownAll draining a pending
+    // transport mid-registration) must keep the child from ever starting.
+    if (this.closed) {
+      throw new Error("transport is shutting down");
+    }
     // Deny-list is re-checked here as defense in depth even though routes
     // validate at registration time.
     validateCommand({
@@ -415,19 +429,18 @@ export class StdioTransport {
     try {
       // @ts-expect-error Bun ReadableStream is async-iterable
       for await (const chunk of this.proc!.stdout) {
-        // {stream: true} keeps multibyte UTF-8 split across chunks intact.
-        this.readBuf += decoder.decode(chunk, { stream: true });
-        // First stdout bytes after a request measure stdio_latency_ms (time
-        // from request write to first response byte, CC-9). `pending` is
-        // insertion-ordered, so the first unfired entry is the earliest.
-        for (const [, p] of this.pending) {
-          if (p.firstByteFired !== true) {
-            p.firstByteFired = true;
-            p.onFirstByte?.(Date.now() - p.startedAt);
-            break;
-          }
+        const decoded = decoder.decode(chunk, { stream: true }); // keeps multibyte UTF-8 split across chunks intact
+        if (decoded.length > 0) {
+          // Mark the start of a new line when readBuf was empty before this
+          // chunk; a partial line carried over from a prior chunk already has
+          // lineStartAt set to its true first-byte time.
+          if (this.readBuf.length === 0) this.lineStartAt = Date.now();
+          this.readBuf += decoded;
+          this.readBufBytes += utf8ByteLength(decoded);
         }
-        if (this.readBuf.length > MAX_FRAME_BYTES) {
+        // Enforce the cap on RAW WIRE BYTES, not readBuf.length (UTF-16 code
+        // units): multibyte content would otherwise undercount and slip past.
+        if (this.readBufBytes > MAX_FRAME_BYTES) {
           log({
             level: "error",
             message: "frame too large",
@@ -452,14 +465,23 @@ export class StdioTransport {
           } catch {
             /* already dead */
           }
+          // Release the retained buffer + byte count so the close path does not
+          // carry it forward after the child is gone.
+          this.readBuf = "";
+          this.readBufBytes = 0;
           break;
         }
         let idx: number;
         // biome-ignore lint/suspicious/noAssignInExpressions: standard line-buffer drain
         while ((idx = this.readBuf.indexOf("\n")) >= 0) {
           const line = this.readBuf.slice(0, idx);
+          const lineByteLen = utf8ByteLength(line) + 1; // +1 for the consumed newline
+          const lineFirstByteAt = this.lineStartAt;
           this.readBuf = this.readBuf.slice(idx + 1);
-          if (line.trim()) this.handleLine(line);
+          this.readBufBytes = Math.max(0, this.readBufBytes - lineByteLen);
+          // A partial line left after draining started in THIS chunk.
+          this.lineStartAt = this.readBuf.length > 0 ? Date.now() : 0;
+          if (line.trim()) this.handleLine(line, lineFirstByteAt);
         }
       }
       this.readBuf += decoder.decode(); // flush any held-back multibyte bytes
@@ -467,14 +489,25 @@ export class StdioTransport {
       // stream closed
     }
     this.closed = true;
+    // Surface the captured stderr tail server-side ONLY — it is subprocess
+    // output and must never leak into the API-facing rejection below.
     const tail = this.stderrTail.trim();
+    if (tail) {
+      log({
+        level: "warn",
+        message: "subprocess stderr on transport close",
+        requestId: newRequestId(),
+        operation: "mcp.transport",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "ok",
+        stderrTail: tail.slice(0, 8192),
+      });
+    }
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
-      p.reject(
-        new Error(
-          tail ? `transport closed before response (stderr: ${tail})` : "transport closed before response",
-        ),
-      );
+      p.reject(new Error("transport closed before response"));
     }
     this.pending.clear();
   }
@@ -496,7 +529,7 @@ export class StdioTransport {
     }
   }
 
-  private handleLine(line: string): void {
+  private handleLine(line: string, firstByteAt: number): void {
     let msg: any;
     try {
       msg = JSON.parse(line);
@@ -505,6 +538,22 @@ export class StdioTransport {
         level: "warn",
         message: "dropping unparseable JSON-RPC line from subprocess",
         bytes: line.length,
+        requestId: newRequestId(),
+        operation: "mcp.transport",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "ok",
+      });
+      return;
+    }
+    // JSON.parse accepts any JSON value; only a JSON-RPC object is usable.
+    // null, arrays, numbers, booleans, strings → malformed wire message; drop
+    // it like an unparseable line (do NOT close the transport over one bad line).
+    if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
+      log({
+        level: "warn",
+        message: "dropping non-object JSON-RPC line from subprocess",
         requestId: newRequestId(),
         operation: "mcp.transport",
         agentId: null,
@@ -538,6 +587,13 @@ export class StdioTransport {
     if (!p) return;
     clearTimeout(p.timer);
     this.pending.delete(msg.id);
+    // Attribute first-byte latency to THIS response by id (correct for
+    // concurrent, out-of-order, and multiple-responses-per-chunk), rather than
+    // to the earliest-unfired pending entry on any stdout bytes.
+    if (p.firstByteFired !== true) {
+      p.firstByteFired = true;
+      p.onFirstByte?.(firstByteAt - p.startedAt);
+    }
     if (msg.error) {
       // Coerce a non-conforming wire shape so the rejected error always has a
       // numeric code / string message — the route's response schema requires
@@ -613,6 +669,9 @@ export class StdioTransport {
    * Resolves once the process has exited (or been killed).
    */
   async shutdown(graceMs = 5_000): Promise<void> {
+    // Mark closed FIRST so a concurrent spawn() refuses (no child may start
+    // after a shutdown has begun), even when this transport never spawned.
+    this.closed = true;
     if (!this.proc) return;
     const proc = this.proc;
     try {
@@ -637,7 +696,6 @@ export class StdioTransport {
       }
       await proc.exited;
     }
-    this.closed = true;
   }
 }
 

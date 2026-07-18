@@ -115,10 +115,11 @@ export function createServer(port = 0): SwarmClawServer {
   });
 
   const stop = async () => {
-    // Stop accepting new requests first; then drain subprocesses. Any handler
-    // that survived stop(true) fails reserve/finalize on the closed store and
-    // cleans up via its own catch path.
-    server.stop(true);
+    // Stop accepting new requests first (await HTTP shutdown so a failure to
+    // drain/closed listener surfaces, not swallowed); then drain subprocesses.
+    // Any handler that survived stop(true) fails reserve/finalize on the closed
+    // store and cleans up via its own catch path.
+    await server.stop(true);
     await mcpStore.shutdownAll();
   };
 
