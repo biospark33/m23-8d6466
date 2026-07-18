@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "workspaces": ["pi-vs-claude-code-vendor"],
   "scripts": {
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",

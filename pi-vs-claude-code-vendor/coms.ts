@@ -81,6 +81,12 @@ const MAX_PENDING_EXIT_DISPATCHES = 64;
 // cap like MAX_PROMPT_BYTES so a peer can't push a full LINE_CAP_BYTES (16MB)
 // payload into the caller's context window.
 const MAX_RESPONSE_BYTES = 256 * 1024;
+// Receiver-side cap on a peer-supplied response_schema: the blob is stored
+// per inbound and persisted into the session branch via details, so the 16MB
+// transport cap is far too loose for it. Same bound as coms-net's
+// MAX_RESPONSE_SCHEMA_BYTES — the two transports are behavioral peers and a
+// schema accepted by one must not be nacked by the other.
+const MAX_RESPONSE_SCHEMA_BYTES = 32_768;
 // Completed pendingReplies entries are retained for coms_get polling until
 // the keepalive sweep reclaims them; cap the retained count (oldest completed
 // evicted first) so chatty agents can't grow the map without bound.
@@ -526,7 +532,23 @@ function readAllRegistryEntries(project: string, skipped?: string[]): RegistryEn
 		return [];
 	}
 	for (const f of files) {
-		if (!f.endsWith(".json")) continue;
+		if (!f.endsWith(".json")) {
+			// A crash between writeFileSync(tmp) and link/rename in
+			// writeRegistryAtomic orphans `<name>.json.<pid>.tmp` forever —
+			// nothing else ever touches non-.json names. Reap tmp files older
+			// than 1h (far past any plausible write window, so a live agent
+			// mid-write is never unlinked).
+			if (f.endsWith(".tmp")) {
+				try {
+					const p = path.join(dir, f);
+					if (Date.now() - fs.statSync(p).mtimeMs > 3_600_000) {
+						fs.unlinkSync(p);
+						try { auditFn?.({ event: "registry_tmp_reaped", file: f }); } catch { /* best-effort */ }
+					}
+				} catch { /* best-effort */ }
+			}
+			continue;
+		}
 		try {
 			const raw = fs.readFileSync(path.join(dir, f), "utf-8");
 			const parsed = JSON.parse(raw) as RegistryEntry;
@@ -543,7 +565,19 @@ function readAllRegistryEntries(project: string, skipped?: string[]): RegistryEn
 				typeof parsed.model === "string" &&
 				typeof parsed.purpose === "string"
 			) {
-				out.push(parsed);
+				// Registry files are same-user-writable (a planted entry passes
+				// the pid + heartbeat liveness checks in pruneDeadEntries), so
+				// display fields are peer-controlled: strip control characters
+				// (ANSI escape injection into the pool widget) and cap length at
+				// this boundary so every consumer — renderPool, coms_list text
+				// AND the details object fed back to the calling model — inherits
+				// it. `name` needs no sanitizing (isSafePathComponent whitelist).
+				out.push({
+					...parsed,
+					purpose: sanitizePeerText(parsed.purpose, "", 256),
+					model: sanitizePeerText(parsed.model, "unknown", 64),
+					cwd: sanitizePeerText(parsed.cwd, "", 256),
+				});
 			} else {
 				try { auditFn?.({ event: "registry_entry_malformed", file: f }); } catch { /* best-effort */ }
 				skipped?.push(path.join(dir, f));
@@ -994,9 +1028,11 @@ export default function (pi: ExtensionAPI) {
 	const peerCards: Map<string, AgentCard & { staleCount: number }> = new Map();
 	const pendingReplies: Map<string, PendingReply> = new Map();
 	const inboundQueue: Map<string, InboundContext> = new Map();
-	// FIFO order of msg_ids injected with triggerTurn: agent_end fulfills the
-	// oldest still-unfulfilled entry, so a followUp injected mid-turn can't be
-	// answered with another inbound's text while the older one starves.
+	// FIFO order of msg_ids injected with triggerTurn: agent_end fulfills every
+	// anchored still-unfulfilled entry (pi 0.55.0 runs follow-up turns inside
+	// one runLoop and emits a single agent_end per batch), so a followUp
+	// injected mid-turn can't be answered with another inbound's text while
+	// the older one starves.
 	const turnQueue: string[] = [];
 	// msg_id → expiry ts. Fulfilled prompts stay tombstoned for 1h so a replay
 	// (a retransmitted envelope, or an attacker echoing a logged msg_id) is
@@ -1138,6 +1174,46 @@ export default function (pi: ExtensionAPI) {
 			nack(socket, env.msg_id, "prompt too large");
 			return;
 		}
+		// sender_endpoint is peer-controlled yet becomes the connect() target
+		// for the response (and the exit-fallback child env): bound its length
+		// so a peer can't point us at an arbitrary oversized socket path.
+		// Confinement to the known socket roots is deliberately NOT enforced —
+		// a legitimate relay may run under a different PI_COMS_DIR.
+		if (Buffer.byteLength(env.sender_endpoint, "utf8") > 200) {
+			nack(socket, env.msg_id, "malformed prompt envelope");
+			return;
+		}
+		// response_schema must be a plain object of bounded size (mirrors the
+		// coms_send sender-side rule): an array would be silently treated as
+		// "parse the reply as JSON" at agent_end, and the blob is stored per
+		// inbound and persisted into the session branch via details, so the
+		// 16MB transport cap is far too loose for it.
+		if (
+			env.response_schema != null &&
+			(typeof env.response_schema !== "object" || Array.isArray(env.response_schema))
+		) {
+			nack(socket, env.msg_id, "malformed prompt envelope");
+			return;
+		}
+		// JSON.stringify can throw even on an acyclic value — a deeply nested
+		// schema trips V8's recursive serialization stack (RangeError) before
+		// any byte count exists. The envelope arriving via JSON.parse rules
+		// out cycles but NOT deep nesting (parse and stringify have separate
+		// depth budgets), so measure inside try and treat an unserializable
+		// schema as a malformed envelope.
+		if (env.response_schema != null) {
+			let schemaBytes: number;
+			try {
+				schemaBytes = Buffer.byteLength(JSON.stringify(env.response_schema), "utf8");
+			} catch {
+				nack(socket, env.msg_id, "malformed prompt envelope");
+				return;
+			}
+			if (schemaBytes > MAX_RESPONSE_SCHEMA_BYTES) {
+				nack(socket, env.msg_id, "malformed prompt envelope");
+				return;
+			}
+		}
 
 		// 4. Replay/duplicate guard: a msg_id already queued — or fulfilled
 		// within the tombstone window — must not inject a second turn.
@@ -1275,7 +1351,9 @@ export default function (pi: ExtensionAPI) {
 				try { clearTimeout(pending.timer); } catch { /* ignore */ }
 				pending.timer = null;
 			}
-			pending.result = { response: env.response, error: env.error ?? null };
+			// Coerce error to string-or-null: a non-string value would render
+			// as "[object Object]" in coms_get's output text.
+			pending.result = { response: env.response, error: typeof env.error === "string" ? env.error : null };
 			try {
 				pending.resolve(pending.result);
 			} catch {
@@ -1334,6 +1412,10 @@ export default function (pi: ExtensionAPI) {
 			typeof obj === "object" &&
 			typeof obj.type === "string" &&
 			typeof obj.msg_id === "string" &&
+			// ULIDs are 26 chars; cap well above that so a near-16MB msg_id
+			// can't become a Map key in inboundQueue/turnQueue/fulfilledMsgIds
+			// or get echoed raw into acks/nacks and audit entries.
+			obj.msg_id.length <= 128 &&
 			typeof obj.sender_session === "string" &&
 			typeof obj.sender_endpoint === "string"
 		);
@@ -1469,9 +1551,12 @@ export default function (pi: ExtensionAPI) {
 		pendingReplies.clear();
 		inboundQueue.clear();
 		turnQueue.length = 0;
-		// Dispatches left by a dead session are useless — their endpoint socket
-		// is unlinked by cleanShutdown — and would otherwise accumulate across
-		// resets, each costing one blocking spawnSync (5s) at process exit.
+		// Deliberately abandon dispatches left by a dead session. They target
+		// the original senders' endpoints (not ours — cleanShutdown unlinks
+		// only our own socket) and might still be deliverable, but a reset
+		// means this session's turn context is gone, so senders observe a
+		// timeout instead. The drop also bounds the blocking spawnSync (~5s)
+		// each retained entry costs at process exit.
 		pendingExitDispatches.length = 0;
 		awaitingIds.clear();
 		// fulfilledMsgIds deliberately NOT cleared — the replay tombstones must
@@ -1803,7 +1888,9 @@ export default function (pi: ExtensionAPI) {
 		try { (keepaliveTimer as any).unref?.(); } catch { /* ignore */ }
 
 		// Kick one ping cycle immediately so the widget populates fast.
-		refreshPool().catch(() => {});
+		// Through the same latch as the interval/coms paths so a slow first
+		// refresh can't overlap the first scheduled tick.
+		refreshPoolGuarded().catch(() => {});
 		finishInit();
 	};
 	pi.on("session_start", (event, ctx) => {
@@ -2033,9 +2120,10 @@ export default function (pi: ExtensionAPI) {
 				const card = pong.agent_card as AgentCard;
 				// Peer-controlled fields: a non-string name/model/purpose/color
 				// would throw inside renderPool (padEnd/startsWith) and crash the
-				// TUI; clamp pct to finite so the bar math never sees NaN. The
-				// session stays in seenSessions either way (the peer is alive),
-				// so a previous good card isn't marked stale over one bad pong.
+				// TUI; clamp pct so the bar math never sees NaN or out-of-range
+				// values. The session stays in seenSessions either way (the peer
+				// is alive), so a previous good card isn't marked stale over one
+				// bad pong.
 				if (
 					typeof card.name !== "string" ||
 					typeof card.model !== "string" ||
@@ -2047,9 +2135,19 @@ export default function (pi: ExtensionAPI) {
 				const prev = peerCards.get(peer.session_id);
 				const next = {
 					...card,
+					// The ping path needs no secret, so card fields are
+					// unauthenticated peer input rendered raw by renderPool:
+					// strip control chars (ANSI injection into the TUI) and cap
+					// length. Color keeps its isValidHex gate in hexFg; pct is
+					// clamped to [0,100] + rounded like safeContextPct so a
+					// peer's 1e21/-50/long-decimal can't reach the widget label.
+					name: sanitizePeerText(card.name, "unknown", 64),
+					model: sanitizePeerText(card.model, "unknown", 64),
+					purpose: sanitizePeerText(card.purpose, "", 256),
+					color: sanitizePeerText(card.color, "", 32),
 					context_used_pct:
 						typeof card.context_used_pct === "number" && Number.isFinite(card.context_used_pct)
-							? card.context_used_pct
+							? Math.max(0, Math.min(100, Math.round(card.context_used_pct)))
 							: 0,
 					staleCount: 0,
 				};
@@ -2158,12 +2256,13 @@ export default function (pi: ExtensionAPI) {
 					cwd: c.entry.cwd,
 					project: c.project,
 					alive: pong != null,
-					// Peer-controlled: clamp like refreshPool does, or a buggy/
-					// malicious peer's NaN/string/object pct lands in the tool
-					// output fed back to the calling model.
+					// Peer-controlled: clamp like refreshPool does (finite,
+					// rounded, [0,100] — matching safeContextPct), or a buggy/
+					// malicious peer's NaN/string/object/out-of-range pct lands
+					// in the tool output fed back to the calling model.
 					context_used_pct:
 						pong && typeof pong.context_used_pct === "number" && Number.isFinite(pong.context_used_pct)
-							? pong.context_used_pct
+							? Math.max(0, Math.min(100, Math.round(pong.context_used_pct)))
 							: null,
 					color: c.entry.color,
 				};
@@ -2456,11 +2555,15 @@ export default function (pi: ExtensionAPI) {
 			}
 			awaitingIds.add(params.msg_id);
 			try {
-				// Finite positive values only: Infinity would never time out, and
-				// values above 2^31-1 overflow Node's setTimeout (clamped to ~1ms →
-				// spurious immediate timeout).
+				// Match coms_net_await's clamp for behavioral parity (file header):
+				// any finite positive number, floored at 1s so a near-zero value
+				// can't arm an instant timer that deletes this entry and orphans
+				// the late reply. Cap at 2^31-1 (Node setTimeout overflow) — NOT
+				// MESSAGE_TIMEOUT_MS, because this is a LOCAL timer with no server
+				// cap (coms-net delegates to a remote server with a "Server cap
+				// applies" contract, hence its tighter ceiling).
 				const timeoutMs = typeof params.timeout_ms === "number" && Number.isFinite(params.timeout_ms) && params.timeout_ms > 0
-					? Math.min(params.timeout_ms, 2 ** 31 - 1)
+					? Math.min(Math.max(params.timeout_ms, 1_000), 2 ** 31 - 1)
 					: TIMEOUT_MS;
 
 				// coms_send already armed a background timer at the default TIMEOUT_MS;
@@ -2525,74 +2628,95 @@ export default function (pi: ExtensionAPI) {
 	// ━━ agent_end: capture turn output and dispatch response back ━━━━━━━━
 
 	pi.on("agent_end", async (_event, ctx) => {
-		// Fulfill strictly FIFO: prompts are injected with triggerTurn in
-		// arrival order, so the oldest still-unfulfilled turnQueue entry owns
-		// this turn. (The old branch-backward walk picked the NEWEST
-		// unfulfilled inbound, so a followUp injected mid-turn was answered
-		// with the wrong text while the older inbound starved.) Only this one
-		// inbound is marked fulfilled.
 		// Identity check first: if a heartbeat-conflict teardown nulled it while
 		// inbounds are queued, shifting here would orphan the turnQueue slot —
 		// the entry would stay in inboundQueue but never be fulfillable.
 		if (!identity) return;
-		let inbound: InboundContext | null = null;
 		const branch = ctx.sessionManager?.getBranch() ?? [];
-		while (turnQueue.length > 0) {
-			const mid = turnQueue[0]!;
+		// pi 0.55.0 stores extension-injected prompts as custom_message entries
+		// with details at entry level (session-manager appendCustomMessageEntry);
+		// plain message entries carry details on entry.message. Match both shapes.
+		const anchorMsgId = (entry: any): string | undefined =>
+			entry && (entry.type === "custom_message"
+				? (entry as any).details?.msg_id
+				: entry.type === "message" && entry.message
+					? (entry.message as any).details?.msg_id
+					: undefined);
+		// Fulfill strictly FIFO, but ALL anchored entries, not just the first:
+		// pi 0.55.0 runs follow-up turns inside ONE runLoop and emits a single
+		// agent_end for the whole batch (pi-agent-core agent-loop), so several
+		// queued prompts can all be anchored when this fires. Fulfilling only
+		// the oldest would answer it with the LAST turn's text (the slice walk
+		// below would run past the next inbound's anchor) and starve the rest
+		// until TURN_DEADLINE_MS pruning.
+		const inbounds: InboundContext[] = [];
+		const kept: string[] = [];
+		for (const mid of turnQueue) {
 			const cand = inboundQueue.get(mid);
-			if (!cand || cand.fulfilled) { turnQueue.shift(); continue; } // stale slot
-			// Only fulfill if THIS turn was actually triggered by the queued
+			if (!cand || cand.fulfilled) continue; // stale slot — drop
+			// Only fulfill if a turn was actually triggered by the queued
 			// prompt: the followUp entry is appended to the branch when its own
-			// turn starts. A head without an anchor (compacted/forked out of the
-			// branch) is dropped rather than left to block the FIFO until
-			// TURN_DEADLINE_MS pruning; the entry stays in inboundQueue and is
-			// pruned + tombstoned by the keepalive sweep (coms-net.ts behaves
-			// the same way).
-			const anchored = branch.some((entry: any) =>
-				entry && (entry.type === "custom_message"
-					? (entry as any).details?.msg_id === mid
-					: entry.type === "message" && entry.message && (entry.message as any).details?.msg_id === mid));
-			if (anchored) {
-				turnQueue.shift();
-				inbound = cand;
-				break;
+			// turn starts. A slot without an anchor is KEPT, not dropped: pi
+			// 0.55.0 queues followUps in memory and persists them only at
+			// message_end of their turn (pi-agent-core agent-loop), so a
+			// followUp that arrives between the loop's follow-up check and the
+			// single agent_end — or is left queued after an error/abort
+			// agent_end — has no anchor at THIS event but will at a later one.
+			// Keeping the slot costs nothing (the per-entry scan can't block),
+			// and a never-anchored entry is still pruned + tombstoned by the
+			// keepalive sweep (mirrors coms-net.ts).
+			if (branch.some((entry: any) => anchorMsgId(entry) === mid)) {
+				inbounds.push(cand);
+				continue;
 			}
-			turnQueue.shift(); // lost anchor — drop and continue
+			kept.push(mid);
 		}
-		// Fallback (mirrors coms-net.ts): prompts injected mid-turn via
-		// followUp have no anchor until their own turn starts, so the first
-		// unrelated agent_end (e.g. a user turn) shifts every queued head off
-		// the FIFO scan above and nothing re-pushes them — each prompt's
-		// response would never be dispatched and the sender's coms_await would
-		// hang until timeout. Re-anchor against the session branch before
-		// giving up.
-		if (!inbound) inbound = activeInbound(ctx);
-		if (!inbound) return;
+		turnQueue.length = 0;
+		turnQueue.push(...kept);
+		// Fallback (mirrors coms-net.ts) for inbounds not tracked in turnQueue
+		// (e.g. injected before this extension state existed): re-anchor
+		// against the session branch before giving up, or the prompt's
+		// response would never be dispatched and the sender's coms_await
+		// would hang until timeout.
+		if (inbounds.length === 0) {
+			const fallback = activeInbound(ctx);
+			if (!fallback) return;
+			inbounds.push(fallback);
+		}
 
-		// Walk the session branch for the most recent assistant message text
-		// *after* the inbound prompt entry, so a stale reply from an earlier
-		// turn is never resent if this turn produced no new assistant message.
-		// Only overwrite on non-empty text — a later assistant message that's
-		// tool-calls-only (no text block) must not blank out a real reply from
-		// an earlier message in the same turn.
-		let lastAssistantText = "";
-		let foundInbound = false;
-		for (const entry of ctx.sessionManager?.getBranch() ?? []) {
-			if (!foundInbound) {
-				// Anchor on the injected prompt entry. pi 0.55.0 stores it as a
-				// custom_message entry (details at entry level); match the plain
-				// message shape too for compatibility.
-				const anchorMsgId = entry.type === "custom_message"
-					? (entry as any).details?.msg_id
-					: entry.type === "message" && entry.message
-						? (entry.message as any).details?.msg_id
-						: undefined;
-				if (anchorMsgId === inbound.msg_id) {
-					foundInbound = true;
+		// Walk the branch once: each inbound's reply text is the slice of
+		// assistant messages between its own anchor and the NEXT inbound's
+		// anchor — never beyond it, so a batched (or late) fulfillment can't
+		// pick up an unrelated later turn's text. Only overwrite on non-empty
+		// text — a later assistant message that's tool-calls-only (no text
+		// block) must not blank out a real reply from an earlier message in
+		// the same turn.
+		const slices = new Map<InboundContext, { found: boolean; text: string }>();
+		let cur: InboundContext | null = null;
+		let curText = "";
+		for (const entry of branch) {
+			const mid = anchorMsgId(entry);
+			if (mid !== undefined) {
+				const hit = inbounds.find((i) => i.msg_id === mid);
+				// Any inbound prompt anchor is a turn boundary — flush the
+				// current slice, then start a new one only if this anchor is
+				// one we're claiming. A fulfilled / foreign prompt's anchor
+				// (no hit) must STILL close the prior slice; otherwise cur
+				// stays pinned to the previous unfulfilled inbound and this
+				// anchor's turn's assistant replies below get attributed to
+				// it (cross-attribution).
+				if (cur) {
+					slices.get(cur)!.text = curText;
+					cur = null;
+					curText = "";
+				}
+				if (hit) {
+					slices.set(hit, { found: true, text: "" });
+					cur = hit;
 				}
 				continue;
 			}
-			if (entry.type === "message" && entry.message && entry.message.role === "assistant") {
+			if (cur && entry.type === "message" && entry.message && entry.message.role === "assistant") {
 				const m = entry.message as any;
 				let msgText = "";
 				if (typeof m.content === "string") {
@@ -2604,116 +2728,166 @@ export default function (pi: ExtensionAPI) {
 						.join("\n");
 				}
 				if (msgText.trim()) {
-					lastAssistantText = msgText;
+					curText = msgText;
 				}
 			}
 		}
+		if (cur) slices.get(cur)!.text = curText;
 
-		let payload: any = lastAssistantText;
-		let error: string | null = null;
-		if (!foundInbound) {
-			// The injected prompt entry is gone from the branch (compaction/
-			// truncation). Don't fabricate an empty success — report the loss
-			// so the sender gets a clear error; the inbound is still marked
-			// fulfilled + tombstoned below so it can't hang or be replayed.
-			payload = null;
-			error = "prompt context lost";
-			try {
-				pi.appendEntry("coms-log", { event: "response_context_lost", msg_id: inbound.msg_id });
-			} catch {
-				// best-effort
-			}
-		} else if (inbound.response_schema && typeof inbound.response_schema === "object") {
-			// Models frequently wrap structured output in a ```json fence even when
-			// asked for raw JSON — unwrap one before parsing so that common case
-			// doesn't spuriously fail with "response not valid JSON".
-			const fenced = lastAssistantText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/i);
-			const jsonText = fenced?.[1] ?? lastAssistantText;
-			try {
-				payload = JSON.parse(jsonText);
-			} catch {
-				error = "response not valid JSON";
-				payload = null;
-			}
-		} else if (!lastAssistantText.trim()) {
-			// Turn anchored but produced no assistant text (abort, tools-only
-			// turn, model error): don't hand the sender a blank success.
-			payload = null;
-			error = "empty response";
-		}
-
-		const respEnv: ResponseEnvelope = {
-			type: "response",
-			// Echo the prompt's secret so the original sender can authenticate
-			// this response against the secret it sent (see handleResponse).
-			secret: inbound.secret,
-			msg_id: inbound.msg_id,
-			sender_session: identity.session_id,
-			sender_endpoint: identity.endpoint,
-			hops: 0,
-			timestamp: nowIso(),
-			response: payload,
-			error,
-			// Echo the originating prompt's conversation_id so the caller can
-			// correlate threads (D2).
-			conversation_id: inbound.conversation_id ?? null,
-		};
-
-		// Record the dispatch synchronously BEFORE awaiting: in pi's print mode
-		// (`-p` / `--mode json`) agent event listeners are fire-and-forget
+		// Pass 1 — synchronous: compute every reply and record EVERY
+		// exit-dispatch before the first await. In pi's print mode (`-p` /
+		// `--mode json`) agent event listeners are fire-and-forget
 		// (pi-agent-core drops the listener promise) and main.js calls
 		// process.exit(0) immediately after the final turn, so this floating
-		// handler can be killed mid-send. The 'exit' handler below
-		// synchronously delivers any dispatch still pending at process exit.
-		const dispatch = { endpoint: inbound.sender_endpoint, line: JSON.stringify(respEnv), done: false };
-		pendingExitDispatches.push(dispatch);
-		try {
-			await sendEnvelope(inbound.sender_endpoint, respEnv);
-			dispatch.done = true;
-			// Drop confirmed dispatches so the array only retains unsettled
-			// ones — a long-lived session would otherwise accumulate one entry
-			// per reply forever.
-			const idx = pendingExitDispatches.indexOf(dispatch);
-			if (idx >= 0) pendingExitDispatches.splice(idx, 1);
-			try {
-				pi.appendEntry("coms-log", {
-					event: "outbound_response",
-					msg_id: inbound.msg_id,
-					error,
-				});
-			} catch {
-				// best-effort
+		// handler can be killed at the first await in pass 2. The 'exit'
+		// handler below synchronously delivers any dispatch still pending at
+		// process exit — but only dispatches pushed BEFORE that first yield,
+		// so pushing one per awaited iteration would silently lose replies
+		// #2..N of a batched runLoop in exactly the mode that races exit.
+		const sends: {
+			inbound: InboundContext;
+			respEnv: ResponseEnvelope;
+			dispatch: { endpoint: string; line: string; done: boolean };
+			error: string | null;
+		}[] = [];
+		for (const inbound of inbounds) {
+			const slice = slices.get(inbound) ?? { found: false, text: "" };
+			const lastAssistantText = slice.text;
+			let payload: any = lastAssistantText;
+			let error: string | null = null;
+			if (!slice.found) {
+				// The injected prompt entry is gone from the branch (compaction/
+				// truncation). Don't fabricate an empty success — report the loss
+				// so the sender gets a clear error; the inbound is still marked
+				// fulfilled + tombstoned below so it can't hang or be replayed.
+				payload = null;
+				error = "prompt context lost";
+				try {
+					pi.appendEntry("coms-log", { event: "response_context_lost", msg_id: inbound.msg_id });
+				} catch {
+					// best-effort
+				}
+			} else if (
+				inbound.response_schema &&
+				typeof inbound.response_schema === "object" &&
+				!Array.isArray(inbound.response_schema)
+			) {
+				// Models frequently wrap structured output in a ```json fence even when
+				// asked for raw JSON — unwrap one before parsing so that common case
+				// doesn't spuriously fail with "response not valid JSON".
+				const fenced = lastAssistantText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/i);
+				const jsonText = fenced?.[1] ?? lastAssistantText;
+				try {
+					payload = JSON.parse(jsonText);
+				} catch {
+					error = "response not valid JSON";
+					payload = null;
+				}
+			} else if (!lastAssistantText.trim()) {
+				// Turn anchored but produced no assistant text (abort, tools-only
+				// turn, model error): don't hand the sender a blank success.
+				payload = null;
+				error = "empty response";
 			}
-		} catch (e: any) {
-			// Leave dispatch.done = false: the 'exit' fallback retries delivery.
-			// Duplicates are possible in BOTH directions — this retry path, and
-			// a first send that actually succeeded but whose ack was lost. They
-			// are safe, not impossible: the receiver either still holds the
-			// pending entry (same payload overwrites the same result; promise
-			// re-resolve is a no-op) or has already consumed it (at worst an
-			// orphan_response audit log).
+			// Producer-side response cap (mirrors the receiver-side check in
+			// handleResponse): an oversized payload would be nacked at the
+			// transport layer with no pending-entry semantics and strand the
+			// caller's coms_await until its full timeout — fail cleanly here.
+			let respBytes = 0;
 			try {
-				pi.appendEntry("coms-log", {
-					event: "outbound_response_failed",
-					msg_id: inbound.msg_id,
-					reason: e?.message ?? String(e),
-				});
+				const s = typeof payload === "string" ? payload : JSON.stringify(payload);
+				respBytes = Buffer.byteLength(s ?? "", "utf8");
 			} catch {
-				// best-effort
+				// Unserializable payload — treat as empty for sizing.
 			}
-			// Bound the exit-fallback queue: a peer that never comes back would
-			// otherwise accumulate one full response payload per failed send, and
-			// the 'exit' handler would spawn one blocking child per entry.
+			if (respBytes > MAX_RESPONSE_BYTES) {
+				payload = null;
+				error = "response too large";
+			}
+
+			const respEnv: ResponseEnvelope = {
+				type: "response",
+				// Echo the prompt's secret so the original sender can authenticate
+				// this response against the secret it sent (see handleResponse).
+				secret: inbound.secret,
+				msg_id: inbound.msg_id,
+				sender_session: identity.session_id,
+				sender_endpoint: identity.endpoint,
+				hops: 0,
+				timestamp: nowIso(),
+				response: payload,
+				error,
+				// Echo the originating prompt's conversation_id so the caller can
+				// correlate threads (D2).
+				conversation_id: inbound.conversation_id ?? null,
+			};
+
+			const dispatch = { endpoint: inbound.sender_endpoint, line: JSON.stringify(respEnv), done: false };
+			// Cap the crash-replay set, evicting the OLDEST unsettled entry on
+			// overflow. pendingExitDispatches backs ONLY the process-'exit'
+			// fallback below — it retries replies whose pass-2 send was
+			// pre-empted by a crash. Pass 2 sends every dispatch from `sends`
+			// regardless of membership here, and its success-splice is a no-op
+			// if this entry was evicted, so eviction NEVER loses a reply; it
+			// only drops crash-replay coverage for one. Evicting oldest keeps
+			// the replay set holding the most-recent (most-likely-live)
+			// dispatches. A fill-then-stop admission policy would instead let
+			// stale entries from dead/offline peers (send failed, never
+			// spliced, process still alive) pin the cap and starve crash-replay
+			// coverage for every subsequent turn. Parity with coms-net.ts.
+			pendingExitDispatches.push(dispatch);
 			while (pendingExitDispatches.length > MAX_PENDING_EXIT_DISPATCHES) {
 				pendingExitDispatches.shift();
 			}
+			sends.push({ inbound, respEnv, dispatch, error });
 		}
 
-		inbound.fulfilled = true;
-		inboundQueue.delete(inbound.msg_id);
-		// Tombstone the msg_id for 1h so a retransmitted or replayed prompt is
-		// nacked as "duplicate" instead of injecting another turn.
-		markFulfilled(inbound.msg_id);
+		// Pass 2 — the awaited sends. A print-mode exit mid-pass still delivers
+		// the remaining dispatches via the 'exit' fallback (all were queued in
+		// pass 1); duplicates from that race are safe (see the catch below).
+		for (const { inbound, respEnv, dispatch, error } of sends) {
+			try {
+				await sendEnvelope(inbound.sender_endpoint, respEnv);
+				dispatch.done = true;
+				// Drop confirmed dispatches so the array only retains unsettled
+				// ones — a long-lived session would otherwise accumulate one entry
+				// per reply forever.
+				const idx = pendingExitDispatches.indexOf(dispatch);
+				if (idx >= 0) pendingExitDispatches.splice(idx, 1);
+				try {
+					pi.appendEntry("coms-log", {
+						event: "outbound_response",
+						msg_id: inbound.msg_id,
+						error,
+					});
+				} catch {
+					// best-effort
+				}
+			} catch (e: any) {
+				// Leave dispatch.done = false: the 'exit' fallback retries delivery.
+				// Duplicates are possible in BOTH directions — this retry path, and
+				// a first send that actually succeeded but whose ack was lost. They
+				// are safe, not impossible: the receiver either still holds the
+				// pending entry (same payload overwrites the same result; promise
+				// re-resolve is a no-op) or has already consumed it (at worst an
+				// orphan_response audit log).
+				try {
+					pi.appendEntry("coms-log", {
+						event: "outbound_response_failed",
+						msg_id: inbound.msg_id,
+						reason: e?.message ?? String(e),
+					});
+				} catch {
+					// best-effort
+				}
+			}
+
+			inbound.fulfilled = true;
+			inboundQueue.delete(inbound.msg_id);
+			// Tombstone the msg_id for 1h so a retransmitted or replayed prompt is
+			// nacked as "duplicate" instead of injecting another turn.
+			markFulfilled(inbound.msg_id);
+		}
 	});
 
 	// ━━ /coms slash command ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
