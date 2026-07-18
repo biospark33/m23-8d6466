@@ -207,6 +207,30 @@ describe("redactBoundaryPrefix (INV-2 truncation-boundary hardening)", () => {
     const text = `prefix-${secret.slice(0, 20)}`;
     expect(redactBoundaryPrefix(text, parent)).toBe("prefix-[REDACTED:MY_CERT]");
   });
+
+  it("completes fast on an adversarial divergent-prefix secret (O(n²) DoS guard)", () => {
+    // Adversarial shape that defeats BOTH early-breaks past the 4096 cap: the
+    // secret's prefix matches the text tail for exactly 4096 chars, then
+    // diverges at a "B". For every k > 4096 the inner char loop walks 4096
+    // matching chars before mismatching (no full match → no outer break), so
+    // an UNBOUNDED scan is O(4096 × text.length) — ~1.2e9 comparisons / ~11s
+    // wall-clock here. A uniform repeated value would hit the full-match break
+    // at the first large k and stay cheap; the mid-string divergence is what
+    // makes it quadratic. The cap ends the scan at k=4096 → ~4096 comparisons.
+    const N = 300_000;
+    const secret = `${"A".repeat(4096)}B${"A".repeat(N)}`;
+    const parent = { MY_SECRET_TOKEN: secret };
+    const text = `benign output ${"A".repeat(N)}`;
+    const start = Date.now();
+    const out = redactBoundaryPrefix(text, parent);
+    const elapsed = Date.now() - start;
+    // Unfixed this runs for ~11s; the 4096 cap keeps it well under a second.
+    expect(elapsed).toBeLessThan(2000);
+    // Correctness is preserved: the 4096-char matching tail is a >= 8-char
+    // secret prefix, so it is redacted, and benign output ahead of the cut is
+    // untouched (both the fixed and unfixed scans redact exactly k=4096 here).
+    expect(out).toBe(`benign output ${"A".repeat(N - 4096)}[REDACTED:MY_SECRET_TOKEN]`);
+  });
 });
 
 describe("buildSpawn", () => {

@@ -183,7 +183,12 @@ export function redactBoundaryPrefix(text: string, parentEnv: EnvMap): string {
     if (value.length < MIN_REDACTABLE_VALUE_LEN || !SECRET_KEY_RE.test(key)) {
       continue;
     }
-    const maxK = Math.min(text.length, value.length - 1);
+    // ponytail: cap the boundary scan at 4096. The scan is O(text × value) in
+    // the adversarial worst case (a long prefix that matches the text tail then
+    // diverges mid-string defeats both early-breaks → ~10^10 comparisons on a
+    // ~200KB secret). A leaked boundary fragment longer than 4KB isn't a
+    // realistic redaction target; raise the ceiling if one ever is.
+    const maxK = Math.min(text.length, value.length - 1, 4096);
     for (let k = maxK; k >= 1; k--) {
       // Compare characters directly instead of text.endsWith(value.slice(0, k)):
       // the slice form allocates a fresh string per k, which for multi-KB
@@ -323,6 +328,7 @@ export async function runManifest(
     let timedOut = false;
     let settled = false;
     let watchdog: ReturnType<typeof setTimeout> | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
     /** Kill the whole child tree: process group on POSIX, taskkill /T on win32. */
     function killChildTree(): void {
@@ -402,7 +408,10 @@ export async function runManifest(
     function settle(result: HarnessResult): void {
       if (settled) return;
       settled = true;
-      if (timer !== undefined) clearTimeout(timer);
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
       if (watchdog !== null) {
         clearTimeout(watchdog);
         watchdog = null;
@@ -488,7 +497,7 @@ export async function runManifest(
       return;
     }
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       // The child may have exited (or been killed) between the timer firing
       // and this callback running: don't misclassify a natural exit as a
       // timeout, and don't signal a possibly-reused process group. Also guard
