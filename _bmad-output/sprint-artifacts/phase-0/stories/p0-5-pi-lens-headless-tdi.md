@@ -64,3 +64,106 @@ Installs pi-lens v3.8.47, confirms `--mode json`/`--mode rpc` headless emission,
 ## Dev Agent Record
 
 <!-- Empty placeholder — filled during development. -->
+
+## QA Results
+
+**Review Date:** 2026-07-14
+**Reviewed By:** Quinn — Senior Developer QA (BMAD review-story)
+
+### Code Quality Assessment
+
+The verification harness (`scripts/pi-lens-verify.ts`, revised in the companion
+fix) is now honest and well-structured: a minimal newline-framed JSON-RPC 2.0
+`McpClient` with proper lifecycle (fail-fast on server crash/exit, bounded stderr
+tail, idempotent close), deterministic checks, and evidence that distinguishes
+*observed* vs *derived* facts instead of blurring them. The earlier report
+over-reported (3/3 "pass", a live Python proof, an emit-block described as if
+observed); the revised harness + report correct all of that. Real run: 3 pass,
+0 fail, 1 optional skip, exit 0, against pi-lens **3.8.69** (spec pins 3.8.47 —
+drift, non-fatal).
+
+### Refactoring Performed (companion harness fix — summarized here for the record)
+
+- **Honesty split of AC2** into AC2a (secret *detection*, live via opengrep —
+  pass) and AC2b (*emit-block*, empirical `pilens_turn_end` probe — optional
+  skip, `emitBlockObserved:false`; the block is passed only if the `🔴 STOP`
+  line is actually seen).
+- **Observed-vs-derived ID for AC1**: the harness now imports pi-lens's own
+  `createActionableWarningId` for native parity, and separately probes
+  `actionable-warnings.jsonl` for an id pi-lens actually assigned —
+  `idObserved:false` is recorded plainly (aggregator requires a code-action-
+  bearing warning; none available on this host).
+- **McpClient lifecycle**: fail-fast rejection of pending RPCs on server
+  error/exit, EPIPE guard, bounded stderr capture, idempotent close.
+- **State containment**: `PILENS_DATA_DIR` + `PI_LENS_CONFIG_PATH` pointed inside
+  the temp dir — no more `~/.pi-lens/projects/*` litter, global config untouched.
+- **Explicit Node runtime** for the MCP server (`PILENS_NODE`/`node`, bun only as
+  last resort) since pi-lens ships a Node package.
+- **Strict mode**: `--strict` / `CI` exits non-zero on any *non-optional* skip;
+  AC2b is optional (host-dependent), so strict still exits 0 here.
+- **Provenance-based secret matching** (tool/rule families, not keyword regex),
+  git working-tree staging for opengrep's ruleset, bounded polling past
+  opengrep's cold start, and accurate exit semantics (exit 0 iff no FAIL —
+  default mode, skips allowed; exit 2 fatal before checks start).
+- **Version-drift reporting**: `piLensVersion` vs `piLensVersionSpec` with a
+  non-fatal note (3.8.69 installed vs 3.8.47 pinned).
+
+### Compliance Check
+
+- AC1: **partial** — structured LSP diagnostic live via the MCP transport; the
+  stable `aw:<hash>` id is derived with native-function parity but was never
+  assigned by pi-lens itself (`idObserved:false`), and the story's
+  `tool_execution_end`→`JSON.stringify` transport is not exercised — the harness
+  parses the MCP fenced-JSON payload instead. The harness's AC1 *check* still
+  passes (its contract is derivation + parity); the story-level AC is partial.
+- AC2: **partial** — detection proven live; emit-block NOT observed (needs
+  gitleaks/trivy findings in `sessionSecrets` — an LLM-backed turn alone cannot
+  produce the block, since the blocker derives solely from that path); the
+  `secret_detected` finding-type label does not exist in pi-lens 3.8.69
+  (rule-ID-based detection) — flagged as a spec-vs-impl discrepancy, not
+  silently confirmed.
+- AC3: **met** — FR-EX-8 numeric read + logged fallback proven; demonstrated
+  count is a reconciled 0-value fallback.
+- Coding conventions / file scope: respected — review touched only the harness,
+  the report, and this QA section.
+
+### Improvements Checklist
+
+- [x] Harness reports observed-vs-derived IDs honestly (`idObserved`, `idProvenance`, native parity)
+- [x] AC2 split into live detection (pass) vs emit-block probe (optional skip)
+- [x] pi-lens on-disk state contained in the temp dir (`PILENS_DATA_DIR`)
+- [x] MCP server spawned under Node, not bun
+- [x] `--strict`/`CI` mode and accurate exit-code semantics
+- [x] Report reconciled to the revised harness (versions, excerpts labeled, DoD traceability)
+- [ ] Live emit-block observation — needs gitleaks/trivy installed (an LLM-backed turn alone cannot produce the block; it derives solely from `sessionSecrets`)
+- [ ] AC1 observed-id — needs an LSP that emits a code-action-bearing warning (OSS pyright has no quick-fix for `reportUnusedImport`; TS has no warning-category diagnostics)
+- [ ] MANDATORY `--mode json` agent e2e demo — blocked on LLM auth in this environment
+
+### Security Review
+
+- **INV-1:** detection proven **live** (opengrep Semgrep rule fires on the
+  synthetic key); the emit-block path is **source-verified only**
+  (`runtime-turn.js` promotes gitleaks/trivy `sessionSecrets` to the `🔴 STOP`
+  blocker; opengrep-only findings stay advisory). No secret value reaches any
+  output — the blocker names `file:line — rule [sources]` only.
+- **INV-2:** preserved — LSP servers launched by named commands from
+  `LSP_SERVERS`, discovered from `node_modules/.bin` or PATH only; no arbitrary
+  binary execution.
+- Synthetic secrets are generated at runtime from string fragments (no
+  key-shaped literal committed); the temp dir is deleted post-run, and under
+  `--keep` the secret fixture is overwritten-then-deleted.
+
+### Performance Considerations
+
+Warm `lspLatencyMs` observed at ~1.2–1.9s (1211ms in the quoted run). These are
+**observed samples, not a p95 measurement**: NFR-PERF-6 (≤3s p95) requires
+aggregating `durationMs` from `~/.pi-lens/latency.log` across representative
+runs, which was not performed — recorded as *not measured*, not met. **Cold**
+LSP starts (first boot, especially pyright, and opengrep's ~8s auxiliary-server
+cold start) exceed the target; this is documented in the report (Findings §5.5)
+and mitigated in the harness by warming + bounded polling. pi-lens augmentation
+is advisory (NFR-PERF-5), so cold-start latency does not block a turn.
+
+### Final Status
+
+**Changes Required / Partially Approved — core headless surfaces proven live (AC1 diagnostics, AC2 detection, AC3 proxy); emit-block, observed-id, and the mandatory `--mode json` agent demo remain open (environment-gated), documented in the report.**
