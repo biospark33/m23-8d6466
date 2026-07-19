@@ -62,7 +62,14 @@ export interface BridgeProbe {
   healthy: boolean;
 }
 
-export type BankStatus = "created" | "exists";
+// `failed` is used only for the logProvision bankStatus field when
+// createBank throws a non-idempotent error (HTTP 500/502/408 etc.) or when
+// schema validation rejects the bankId inside createBankIdempotent. The
+// top-level ProvisionResult envelope does NOT carry `failed` — failed
+// provisions surface via the provisionBanks -32005 error envelope. This
+// keeps the success-path type narrow while making the observability log
+// honest about what happened.
+export type BankStatus = "created" | "exists" | "failed";
 
 export interface ProvisionedBank {
   bankId: string;
@@ -174,7 +181,10 @@ function acquireLock(path: string): (() => void) | null {
       try {
         unlinkSync(path);
       } catch {
-        /* raced — another caller already cleaned it */
+        /* raced — another caller either cleaned the stale lock first OR
+         * acquired a fresh one between our unlink and tryOpen. Either way
+         * we lost the race; the tryOpen() below returns null → caller
+         * reports provision_in_progress. */
       }
       fd = tryOpen();
     }
@@ -219,7 +229,11 @@ function isStaleLock(path: string): boolean {
     return false;
   }
   const pid = Number.parseInt(pidStr, 10);
-  if (!Number.isFinite(pid) || pid <= 0) return false;
+  // Empty / non-numeric / non-positive PID → lock file is corrupt or a prior
+  // writeFileSync(fd, pid) failed silently. Treat as STALE (recoverable) so we
+  // unlink + reclaim, rather than blocking all provisions for LOCK_STALE_MS
+  // on a lock with no live holder. mtime backstop above still applies.
+  if (!Number.isFinite(pid) || pid <= 0) return true;
   return !isPidAlive(pid);
 }
 
@@ -326,20 +340,25 @@ async function createBankIdempotent(
   bankId: string,
   requestId: string,
 ): Promise<BankStatus> {
-  // Defensive: belt-and-suspenders schema check before any PUT. Derived ids
-  // are validated at the resolver; an explicit --bank-id from a caller could
-  // still slip through (CLI does its own check; this is the last gate).
-  if (!BankIdSchema.safeParse(bankId).success) {
-    throw new HindsightHttpError(
-      422,
-      `invalid bank_id (schema): ${bankId}`,
-      requestId,
-    );
-  }
   const start = Date.now();
   let status: BankStatus = "created";
   let logErr: { code: string; message: string } | undefined;
   try {
+    // Defensive: belt-and-suspenders schema check before any PUT. Derived ids
+    // are validated at the resolver; an explicit --bank-id from a caller could
+    // still slip through (CLI does its own check; this is the last gate).
+    // Inside the try so the finally below emits an observability entry for a
+    // validation failure (the listBanks-fail fallback can reach us with an
+    // edge id that bypassed the -32003 guard in provisionBanks).
+    if (!BankIdSchema.safeParse(bankId).success) {
+      status = "failed";
+      logErr = { code: "schema_invalid", message: `invalid bank_id (schema): ${bankId}` };
+      throw new HindsightHttpError(
+        422,
+        `invalid bank_id (schema): ${bankId}`,
+        requestId,
+      );
+    }
     await client.createBank(bankId);
     status = "created";
     return status;
@@ -363,7 +382,7 @@ async function createBankIdempotent(
         return status;
       }
     }
-    status = "created";
+    status = "failed"; // bank was never created — don't log bankStatus:"created"
     logErr = {
       code: `http_${e instanceof HindsightHttpError ? e.status : "error"}`,
       message: (e as Error).message,

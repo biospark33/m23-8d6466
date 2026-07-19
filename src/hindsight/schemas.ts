@@ -142,9 +142,12 @@ export const ConsolidateResponseSchema = z.object({
 
 export const MulchExpertiseSchema = z.object({
   id: z.string().uuid().optional(),
-  domain: z.string(),
+  // `.min(1)` on domain + expertise: an all-empty entry would otherwise pass,
+  // dedup to a constant hash, and silently import one empty record per run.
+  // concepts left as-is (empty concepts array = untagged but valid entry).
+  domain: z.string().min(1),
   concepts: z.array(z.string()),
-  expertise: z.string(),
+  expertise: z.string().min(1),
   source: z.string().optional(),
   confidence: z.number().min(0).max(1).optional(),
 });

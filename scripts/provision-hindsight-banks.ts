@@ -8,8 +8,8 @@
  *   HINDSIGHT_BEARER_TOKEN (spec INV-HM1, preferred) or HINDSIGHT_API_KEY
  *   (research-brief/legacy fallback) for the real HindsightClient.
  * - Reads SWARMCLAW_BASE_URL for the bridge probe (optional — if unset, the
- *   probe defaults to {registered:true, healthy:true} so the script can run
- *   standalone in tests / dev without a live SwarmClaw).
+ *   probe falls back to http://127.0.0.1:3000; connection failure surfaces as
+ *   -32001 bridge-not-registered, satisfying AC-4 from the real CLI).
  * - On {ok:false} → prints JSON envelope to stdout + exit(1).
  * - On {ok:true} → prints {ok,banks,requestId} JSON + exit(0).
  * - Single JSON object to stdout only (no interleaved log lines — the logger
@@ -61,17 +61,29 @@ function defaultRepoSlug(): string {
 /**
  * Bridge probe via SwarmClaw (optional). Looks for a registered MCP server
  * whose name contains "hindsight", then GETs its /test endpoint. If
- * SWARMCLAW_BASE_URL is unset, returns {registered:true, healthy:true} so the
- * script works standalone in dev/tests.
+ * SWARMCLAW_BASE_URL is unset, falls back to the conventional SwarmClaw port
+ * http://127.0.0.1:3000 — if that connection fails the probe returns
+ * {registered:false, healthy:false}, so AC-4 (-32001) can still fire from the
+ * real CLI when SwarmClaw is down (previously the dev short-circuit masked it).
  */
 export async function realBridgeProbe(): Promise<BridgeProbe> {
-  const base = process.env.SWARMCLAW_BASE_URL;
-  if (!base) return { registered: true, healthy: true };
+  const base = process.env.SWARMCLAW_BASE_URL ?? "http://127.0.0.1:3000";
   const url = base.replace(/\/+$/, "");
+  // ponytail: 5s budget per fetch — hung SwarmClaw shouldn't hang provision.
+  const fetchWithTimeout = async (target: string): Promise<Response> => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      return await fetch(target, {
+        headers: { accept: "application/json" },
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   try {
-    const res = await fetch(`${url}/api/mcp-servers`, {
-      headers: { accept: "application/json" },
-    });
+    const res = await fetchWithTimeout(`${url}/api/mcp-servers`);
     if (!res.ok) {
       // 401/403: the bridge endpoint responded but auth-blocked us. The bridge
       // IS registered (the HTTP server is up); health can't be verified.
@@ -99,9 +111,7 @@ export async function realBridgeProbe(): Promise<BridgeProbe> {
       // match, but health unconfirmed rather than assumed healthy.
       return { registered: true, healthy: false };
     }
-    const testRes = await fetch(`${url}/api/mcp-servers/${id}/test`, {
-      headers: { accept: "application/json" },
-    });
+    const testRes = await fetchWithTimeout(`${url}/api/mcp-servers/${id}/test`);
     if (!testRes.ok) return { registered: true, healthy: false };
     const testBody: unknown = await testRes.json();
     const ok =
@@ -118,9 +128,12 @@ async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   const repoSlug = args.repoSlug ?? defaultRepoSlug();
 
+  // INV-HM1: the client constructor reads HINDSIGHT_BEARER_TOKEN (preferred)
+  // then HINDSIGHT_API_KEY (legacy) from env, coercing empty strings to
+  // undefined. No explicit apiKey here — passing one would re-introduce the
+  // empty-string-shadows-fallback hazard the constructor now guards against.
   const client = new HindsightClient({
     baseUrl: process.env.HINDSIGHT_BASE_URL,
-    apiKey: process.env.HINDSIGHT_BEARER_TOKEN ?? process.env.HINDSIGHT_API_KEY,
   });
   const bridgeProbe = await realBridgeProbe();
 

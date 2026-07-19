@@ -63,6 +63,22 @@ export function parseArgs(argv: string[]): Args {
   const VALUE_FLAGS = new Set(["--expertise-dir", "--repo-slug", "--bank-id"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
+    // Fix 1: accept `--flag=value` syntax (parity with provision script).
+    const eqMatch = a.match(/^--([^=]+)=(.*)$/);
+    if (eqMatch) {
+      const flag = `--${eqMatch[1]!}`;
+      const v = eqMatch[2]!;
+      if (!VALUE_FLAGS.has(flag)) {
+        throw new Error(`unknown flag: ${flag}`);
+      }
+      if (v.length === 0) {
+        throw new Error(`${flag} requires a non-empty value`);
+      }
+      if (flag === "--expertise-dir") opts.expertiseDir = v;
+      else if (flag === "--repo-slug") opts.repoSlug = v;
+      else opts.bankId = v;
+      continue;
+    }
     if (VALUE_FLAGS.has(a)) {
       // A value flag MUST be followed by a non-empty value. A bare
       // `--expertise-dir` (missing value) is a user typo — error loudly
@@ -87,6 +103,10 @@ export function parseArgs(argv: string[]): Args {
         ].join("\n"),
       );
       process.exit(0);
+    } else if (a.startsWith("--")) {
+      // Fix 2: unknown flag — surface typo loudly rather than silently
+      // proceeding with defaults (e.g. `--bankid` vs `--bank-id`).
+      throw new Error(`unknown flag: ${a}`);
     }
   }
   return opts;

@@ -36,6 +36,14 @@ import { log, newRequestId } from "../swarmclaw/mcp/stdio-transport.ts";
 const DEFAULT_CONTENT = "Sprint planning uses SPARC methodology";
 const DEFAULT_QUERY = "planning methodology";
 
+/**
+ * Recall limit for the verifier's recall calls. Default is 5, but on a bank
+ * that already holds ≥5 unrelated memories, the just-retained test memory may
+ * rank below the fold → false recall_content_mismatch. 50 (schema max) keeps
+ * the verifier robust on non-pristine banks. Ponytail: could be tunable; YAGNI.
+ */
+const VERIFIER_RECALL_LIMIT = 50;
+
 /** Tokens with ≥3 chars, lowercased — crude but sufficient for Phase-1. */
 const STOPWORD_MIN_LEN = 3;
 
@@ -46,11 +54,16 @@ function keyTokens(text: string): string[] {
     .filter((t) => t.length >= STOPWORD_MIN_LEN);
 }
 
+/** Escape regex special chars in a token for safe embedding. Ponytail: minimal. */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * Phase-1 relevance: true if any recalled result's content contains ALL of the
- * retained content's key tokens (order-independent, substring match). Ponytail:
- * O(n*m) scan, fine for the test-memory scale; upgrade to a real similarity
- * score in Phase-2.
+ * retained content's key tokens (order-independent, token-boundary match).
+ * Ponytail: O(n*m) scan, fine for the test-memory scale; upgrade to a real
+ * similarity score in Phase-2.
  */
 function resultsContainRetainedTokens(
   results: readonly { content: string }[],
@@ -63,10 +76,26 @@ function resultsContainRetainedTokens(
     const needle = retainedContent.toLowerCase();
     return results.some((r) => r.content.toLowerCase().includes(needle));
   }
-  return results.some((r) => {
-    const c = r.content.toLowerCase();
-    return tokens.every((t) => c.includes(t));
-  });
+  // Token-boundary match per token: avoids false positives like "spa" matching
+  // inside "spark". (?:^|[^a-z0-9]) + token + (?:[^a-z0-9]|$), case-insensitive.
+  const tokenRes = tokens.map(
+    (t) => new RegExp(`(?:^|[^a-z0-9])${escapeRegex(t)}(?:[^a-z0-9]|$)`, "i"),
+  );
+  return results.some((r) => tokenRes.every((re) => re.test(r.content)));
+}
+
+/**
+ * Derive a recall query from retained content: first 1-2 significant tokens
+ * (≥3 chars). Ponytail: crude but sufficient for Phase-1; the verifier only
+ * needs recall to surface the just-retained memory.
+ */
+function deriveQuery(content: string): string {
+  const tokens = content
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .filter((t) => t.length >= STOPWORD_MIN_LEN)
+    .slice(0, 2);
+  return tokens.length > 0 ? tokens.join(" ") : DEFAULT_QUERY;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +176,9 @@ export async function verifyRoundTrip(
 ): Promise<RoundTripResult> {
   const { client, bankId } = opts;
   const content = opts.content ?? DEFAULT_CONTENT;
-  const query = opts.query ?? DEFAULT_QUERY;
+  // Derive query from content when caller supplied content but no query, so a
+  // custom-content caller without an explicit query still recalls sensibly.
+  const query = opts.query ?? (opts.content ? deriveQuery(opts.content) : DEFAULT_QUERY);
   const requestId = opts.requestId ?? newRequestId();
 
   const wallStart = Date.now();
@@ -220,7 +251,7 @@ export async function verifyRoundTrip(
     let recallMs = 0;
     let results: readonly { content: string }[] = [];
     try {
-      const res = await client.recall(bankId, query);
+      const res = await client.recall(bankId, query, VERIFIER_RECALL_LIMIT);
       recallMs = res.durationMs;
       durations.recall = recallMs;
       results = res.results;
@@ -432,7 +463,7 @@ export async function verifyRoundTrip(
     let results: readonly { content: string }[] = [];
     let postRecallMs = 0;
     try {
-      const res = await client.recall(bankId, query);
+      const res = await client.recall(bankId, query, VERIFIER_RECALL_LIMIT);
       postRecallMs = res.durationMs;
       results = res.results;
       // AC-7 advisory covers BOTH recalls — flag slow on the post-consolidation

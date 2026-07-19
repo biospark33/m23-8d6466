@@ -22,9 +22,30 @@ afterEach(() => {
 });
 
 describe("realBridgeProbe — review R2 M4/M5", () => {
-  test("unset SWARMCLAW_BASE_URL → default healthy probe (standalone dev)", async () => {
+  test("unset SWARMCLAW_BASE_URL → probes default 127.0.0.1:3000 [R3]", async () => {
+    // R3: env-unset no longer short-circuits healthy (that masked AC-4/AC-5
+    // from the real CLI). It now falls back to the SwarmClaw default URL so
+    // the probe is real — AC-4 (-32001) is reachable when SwarmClaw is down.
+    process.env.SWARMCLAW_BASE_URL = undefined;
+    globalThis.fetch = mock(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/api/mcp-servers")) {
+        return jsonRes({ servers: [{ id: "hs-1", name: "hindsight" }] });
+      }
+      if (u.includes("/test")) return jsonRes({ ok: true });
+      return jsonRes({}, 404);
+    }) as unknown as typeof fetch;
     const p = await realBridgeProbe();
     expect(p).toEqual({ registered: true, healthy: true });
+  });
+
+  test("unset SWARMCLAW_BASE_URL + SwarmClaw unreachable → not registered [R3]", async () => {
+    process.env.SWARMCLAW_BASE_URL = undefined;
+    globalThis.fetch = mock(async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+    const p = await realBridgeProbe();
+    expect(p).toEqual({ registered: false, healthy: false });
   });
 
   test("401 auth-required → bridge registered, health unconfirmed (not -32001) [M5]", async () => {

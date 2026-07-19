@@ -35,7 +35,7 @@ This story provisions the three required Hindsight banks (`{resolveBankId(repoSl
 4. Given P0.7 MCP bridge not registered (no SwarmClaw agent for Hindsight), When the provision script is invoked, Then the provisioner exits non-zero and emits a structured error envelope `{ ok: false, error: { code: -32001, message: "MCP bridge not registered" }, requestId: <uuid> }` on its output (CLI exit code + JSON envelope; P0.9 owns no HTTP listener) without creating banks.
 5. Given P0.7 MCP bridge registered but Hindsight binary not on PATH (P0.7 /test returns `{ ok: false }`), When the provision script is invoked, Then the provisioner exits non-zero and emits `{ ok: false, error: { code: -32002, message: "Hindsight binary unavailable" }, requestId: <uuid> }` on its output (CLI exit code + JSON envelope; P0.9 owns no HTTP listener) without creating banks.
 6. After importing a `.mulch/expertise/` directory containing YAML and JSON files, all entries are stored as JSONL in the `{resolveBankId(repoSlug)}-dev-meta` bank.
-7. Given a bank with ≤100 memories, When recall is called with a semantic query, Then results are returned within 2 seconds for exact-match queries and within 5 seconds for semantic-similarity queries. Timeout at 10s returns an error, not stale results. 2s and 5s latency targets are monitored and logged via CC-9 `recall_ms` timing. Exceeding the target emits a `slow_query: true` advisory flag. Only the 10s hard timeout produces an error response.
+7. Given a bank with ≤100 memories, When recall is called with a semantic query, Then results are returned within 2 seconds for exact-match queries and within 5 seconds for semantic-similarity queries. Timeout at 10s returns an error, not stale results. 2s and 5s latency targets are monitored and logged via CC-9 `recall_ms` timing. Exceeding the target emits a `slow_query: true` advisory flag. Only the 10s hard timeout produces an error response. *(Phase 2: the 2s exact-match advisory is deferred alongside a recall `mode` field — only the 5s semantic advisory is wired in Phase 1; see Review Findings §Spec clarifications.)*
 
 ## Technical Notes
 
@@ -447,3 +447,41 @@ Second adversarial pass (Blind Hunter + Edge Case Hunter + Acceptance Auditor). 
 
 - **AC-7 2s exact-match advisory:** confirmed deferred to Phase 2 alongside a recall `mode` field (Round 1 amendment holds); only the 5s semantic advisory is wired.
 - **realBridgeProbe 401/403 semantics (R2-M5):** an auth-blocked `/api/mcp-servers` response is NOT a registration failure — the bridge HTTP server is up. The probe now reports `{registered:true, healthy:false}` so the CLI does not emit a misleading -32001.
+
+### Review Findings Round 3 (bmad code review, 2026-07-19)
+
+Third adversarial pass (Blind Hunter + Edge Case Hunter + Acceptance Auditor). Acceptance Auditor confirmed all 7 ACs PASS, all 6 invariants enforced, all 10 schemas field-for-field, all DoD checkboxes backed — zero BLOCKER/HIGH contract deviations. Blind + Edge surfaced 13 runtime-robustness fix groups (no spec violations); all fixed in code on this branch. 7 candidate findings dismissed with reasoning.
+
+#### Fixed in code (Round 3)
+
+- [x] [Review][Patch] R3-1 `HindsightClient` ctor `apiKey` resolution via `??` did not fall through empty string — explicit `apiKey:""` shadowed valid env fallback → silent 401. Empty opt now coerced to undefined so the fallback chain works (root-cause fix at the ctor chokepoint) [src/hindsight/client.ts]
+- [x] [Review][Patch] R3-2 provision script re-introduced the R2-M3 empty-string hazard by passing `apiKey: HINDSIGHT_BEARER_TOKEN ?? HINDSIGHT_API_KEY` — dropped the explicit `apiKey:` line so the ctor owns env resolution, mirroring the import script [scripts/provision-hindsight-banks.ts]
+- [x] [Review][Patch] R3-3 `realBridgeProbe` short-circuited `{registered:true, healthy:true}` when `SWARMCLAW_BASE_URL` unset — masked AC-4/AC-5 from the real CLI. Now probes the SwarmClaw default `http://127.0.0.1:3000` so AC-4 (-32001) is reachable when SwarmClaw is down [scripts/provision-hindsight-banks.ts]
+- [x] [Review][Patch] R3-4 `realBridgeProbe` fetches had no timeout — a hung SwarmClaw hung the whole provision script. Both fetches now wrapped in an AbortController with a 5s timeout cleared in `finally` (PR #34 discipline) [scripts/provision-hindsight-banks.ts]
+- [x] [Review][Patch] R3-5 empty/corrupt PID lock file (silent `writeFileSync` failure) was treated as NOT-stale → blocked all provisions for the full 5-min `LOCK_STALE_MS` with no holder. NaN/non-positive PID now treated as STALE (reclaimable) [src/hindsight/bank-provisioner.ts]
+- [x] [Review][Patch] R3-6 `createBankIdempotent` set `status="created"` before re-throwing on a non-idempotent error (HTTP 500/502/408) → `finally` logged `bankStatus:"created"` for a bank never created. `BankStatus` extended with `"failed"`; catch sets `status="failed"` before rethrow [src/hindsight/bank-provisioner.ts]
+- [x] [Review][Patch] R3-7 `createBankIdempotent`'s `BankIdSchema.safeParse` ran before the try/finally → schema-invalid id threw with no observability entry. safeParse moved inside the try so the finally emits a log entry [src/hindsight/bank-provisioner.ts]
+- [x] [Review][Patch] R3-8 `dedupHash` sorted concepts but did not dedupe them — `{domain,["a","a"]}` hashed differently than `{domain,["a"]}` → silent duplicate entries. Concepts now Set-deduped before NFC+sort+serialize [src/hindsight/mulch-importer.ts]
+- [x] [Review][Patch] R3-9 re-import ignored `RetainResponse.status` → every entry counted as imported, never updated, breaking the DoD idempotency metric. retain return now captured; `status==="updated"` counts as an update regardless of in-process `seenHashes` [src/hindsight/mulch-importer.ts]
+- [x] [Review][Patch] R3-10 a FIFO/socket/device named `*.yaml` passed the ext filter + statSync then `readFileSync` blocked indefinitely. `stat.isFile()` guard added at both the listing and parse paths [src/hindsight/mulch-importer.ts]
+- [x] [Review][Patch] R3-11 symlink ext dispatch used the TARGET's ext (`extname(realpath)`) so `link.yaml → real.json` parsed as JSON. Now uses the LINK ext for format dispatch while keeping realpath for the read + escape validation [src/hindsight/mulch-importer.ts]
+- [x] [Review][Patch] R3-12 `MulchExpertiseSchema.domain`/`.expertise` had no min-length → all-empty entries passed and deduped to a constant hash. Both now `.min(1)` [src/hindsight/schemas.ts]
+- [x] [Review][Patch] R3-13 round-trip verifier recalled with default limit=5 → on a seeded bank the test memory could rank below 5 and never appear (false `recall_content_mismatch`). Verifier now passes limit=50; default query derived from caller content when content supplied without query; token matching tightened to word-boundary regex (substring fallback preserved) [src/hindsight/round-trip-verifier.ts]
+- [x] [Review][Patch] R3-14 import script `parseArgs` only accepted `--flag value` (sibling provision script accepts both forms); unknown flags were silently ignored → a typo targeted the wrong bank. Now accepts `--flag=value` and throws on unknown flags [scripts/import-mulch-expertise.ts]
+- [x] [Review][Patch] R3-15 null JSONL line (idiomatic tombstone) landed in `failures` as `not_object`; now silently skipped with a debug log [src/hindsight/mulch-importer.ts]
+- [x] [Review][Patch] R3-16 `acquireLock` TOCTOU comment claimed only one cause for a post-unlink EEXIST — corrected to state the real semantics (lost the race either way); behavior unchanged [src/hindsight/bank-provisioner.ts]
+
+#### Dismissed (Round 3, with reasoning)
+
+- cross-tenant write via explicit `--bank-id`: BankIdSchema-valid is the authorization contract; `--bank-id` is operator-controlled, not attacker-controlled. Speculative.
+- lock path per-host (homedir) not "truly global": spec CC-10/INV-HM6 mandates `~/.hindsight/provision.lock` exactly. Round 1 dismissal holds.
+- tenant-isolation probe uses `kind:"expertise"`: limited by the kind enum; UUID marker makes cross-bank collision near-impossible.
+- PID reuse → stale lock treated as live: conservative-by-design (Round 2 dismissal); `LOCK_STALE_MS` mtime backstop recovers orphans.
+- `extractExistingBankIds` adds display `name` to collision set: already fixed in R2-M8 (name used only when itself schema-valid).
+- Mulch `confidence` rides inside the JSONL content, not `RetainPayloadSchema.metadata`: spec-aligned (Mulch Priming Consumer Contract: confidence is metadata only, ranking is by recall score).
+- `acquireLock` → -32005 "provision lock unavailable" code: taxonomy has no dedicated lock-unavailable slot; -32005 ("bank provisioning failed") is the correct parent and the message names the cause. No code change.
+
+#### Spec clarifications (Round 3 amendments)
+
+- **AC-7 2s exact-match advisory:** inline deferral marker added to the AC-7 body (Round 1/2 amendment holds) — only the 5s semantic advisory is wired in Phase 1; the 2s advisory lands in Phase 2 alongside a recall `mode` field.
+- **realBridgeProbe default-URL fallback (R3-3):** when `SWARMCLAW_BASE_URL` is unset, the probe now targets `http://127.0.0.1:3000` (SwarmClaw default) rather than short-circuiting healthy. This makes AC-4/AC-5 reachable from the real CLI (the prior dev affordance defeated the production guarantee). The unit test for the env-unset path is updated to mock the default-URL probe.

@@ -88,10 +88,13 @@ export class HindsightClient {
     );
     // INV-HM1: env-only fallback. Never logged. Both env names accepted:
     // HINDSIGHT_BEARER_TOKEN (spec INV-HM1, preferred) and
-    // HINDSIGHT_API_KEY (research-brief/legacy fallback). Empty-string env
-    // values are coerced to undefined so a misconfigured
-    // HINDSIGHT_BEARER_TOKEN="" cannot shadow a valid HINDSIGHT_API_KEY.
-    this.apiKey = opts.apiKey
+    // HINDSIGHT_API_KEY (research-brief/legacy fallback). Empty-string opt and
+    // env values are all coerced to undefined so a misconfigured
+    // HINDSIGHT_BEARER_TOKEN="" (or apiKey:"" arg) cannot shadow a valid
+    // HINDSIGHT_API_KEY — `??` falls through on null/undefined only, so the
+    // coercion at every link is load-bearing.
+    const optKey = opts.apiKey && opts.apiKey.length > 0 ? opts.apiKey : undefined;
+    this.apiKey = optKey
       ?? (process.env.HINDSIGHT_BEARER_TOKEN || undefined)
       ?? (process.env.HINDSIGHT_API_KEY || undefined);
     this.requestId = opts.requestId;

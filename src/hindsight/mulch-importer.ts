@@ -189,18 +189,28 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
   const supportedFiles: string[] = [];
   for (const name of entries) {
     const full = pathResolve(dirReal, name);
-    // Skip subdirs (non-recursive contract).
+    // Use stat (not lstat) so symlinks-to-files are followed consistently with
+    // the realpath validation in parseFile.
     let st: ReturnType<typeof statSync>;
     try {
       st = statSync(full);
     } catch {
       continue;
     }
-    if (st.isDirectory()) continue;
+    // Fix 3: skip non-regular files (dirs, FIFOs, sockets, devices). A FIFO or
+    // socket named `stream.yaml` would otherwise pass the ext filter, succeed
+    // at statSync, then block readFileSync indefinitely. isFile() cleanly
+    // rejects dirs AND special files AND symlinks-to-dirs.
+    if (!st.isFile()) {
+      if (!st.isDirectory()) {
+        debugLog(requestId, "import.skip", `skipping non-regular file: ${name}`);
+      }
+      continue;
+    }
     if (SUPPORTED_EXTS.has(extname(name).toLowerCase())) {
       supportedFiles.push(full);
     } else {
-      // Unsupported ext / subdir → debug log (spec: "skipped with debug-level log").
+      // Unsupported ext → debug log (spec: "skipped with debug-level log").
       debugLog(requestId, "import.skip", `skipping unsupported file: ${name}`);
     }
   }
@@ -240,7 +250,7 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
     let fileErr: { code: string; message: string } | undefined;
 
     try {
-      const entries = parseFile(filePath, dirReal, failures);
+      const entries = parseFile(filePath, dirReal, failures, requestId);
       let fileImported = false;
       let fileUpdated = false;
       for (let i = 0; i < entries.length; i++) {
@@ -272,7 +282,7 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
         const isUpdate = seenHashes.has(hash);
 
         try {
-          await opts.client.retain(opts.bankId, jsonl, {
+          const retainRes = await opts.client.retain(opts.bankId, jsonl, {
             source: "mulch-import",
             kind: "expertise",
             tags: validated.concepts,
@@ -281,7 +291,12 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
           // failed retain poisons the dedup set and a later same-hash entry is
           // silently treated as an update instead of retrying. (B-1)
           seenHashes.add(hash);
-          if (isUpdate) fileUpdated = true;
+          // Fix 2: trust the retain response's own `status` over the in-process
+          // seenHashes — on re-import (fresh seenHashes) the bank knows whether
+          // the memory was newly created or updated an existing one. Defensive:
+          // tolerate clients/fixtures that omit `status`.
+          const statusVal = (retainRes as { status?: unknown } | null)?.status;
+          if (isUpdate || statusVal === "updated") fileUpdated = true;
           else fileImported = true;
         } catch (e) {
           failures.push({
@@ -346,7 +361,7 @@ interface ParsedEntry {
  * entry, per spec). INV-HM3 path safety enforced here so a symlink escape
  * never even reaches the parser.
  */
-function parseFile(filePath: string, dirReal: string, failures: ImportFailure[]): ParsedEntry[] {
+function parseFile(filePath: string, dirReal: string, failures: ImportFailure[], requestId: string): ParsedEntry[] {
   // INV-HM3: resolve realpath and require it to stay within dirReal. A symlink
   // whose target is outside the expertise dir resolves to a path NOT prefixed
   // by dirReal → reject with SymlinkEscapeError.
@@ -375,6 +390,13 @@ function parseFile(filePath: string, dirReal: string, failures: ImportFailure[])
   if (stat.size > MAX_FILE_BYTES) {
     throw new FileTooLargeError();
   }
+  // Fix 3 (defense in depth): a FIFO/socket/device that survived the directory
+  // listing (e.g. created between listing and parse) would block readFileSync.
+  // stat follows symlinks, so this also rejects symlinks-to-dirs consistently
+  // with the realpath validation above.
+  if (!stat.isFile()) {
+    throw new SymlinkTargetUnreadableError();
+  }
 
   const raw = readFileSync(resolved);
   let text = raw.toString("utf8");
@@ -383,7 +405,10 @@ function parseFile(filePath: string, dirReal: string, failures: ImportFailure[])
     text = text.slice(1);
   }
 
-  const ext = extname(resolved).toLowerCase();
+  // Fix 5: dispatch on the LINK's extension (filePath), not the target's.
+  // A symlink `link.yaml` → `real.json` must be parsed as YAML per the
+  // operator's naming. `resolved` is still used for the read + escape check.
+  const ext = extname(filePath).toLowerCase();
   if (ext === ".yaml" || ext === ".yml") {
     const parsed = parse(text);
     return toArray(parsed, "yaml_object_not_array");
@@ -404,7 +429,18 @@ function parseFile(filePath: string, dirReal: string, failures: ImportFailure[])
       const trimmed = line.trim();
       if (trimmed.length === 0) continue;
       try {
-        out.push(JSON.parse(trimmed) as ParsedEntry);
+        const parsedLine = JSON.parse(trimmed);
+        // Fix 4: `null` JSONL lines are a valid idiomatic tombstone in some
+        // tooling (NDJSON / JSON Lines delimiters). They carry no expertise, so
+        // skip them silently with a debug log rather than surfacing as a
+        // failure (chose conservative: real objects still go to validation;
+        // non-object primitives like arrays/numbers still become `not_object`
+        // failures downstream — only literal `null` is the graceful skip).
+        if (parsedLine === null) {
+          debugLog(requestId, "import.skip", `skipping null JSONL line ${lineNo} in ${relFile}`);
+          continue;
+        }
+        out.push(parsedLine as ParsedEntry);
       } catch {
         // B-3: one malformed line must NOT drop the whole file as parse_failed.
         // Record the per-entry failure at the line's position and keep parsing.
@@ -457,11 +493,16 @@ function validateEntry(
 /**
  * Dedup hash: SHA-256 of canonical JSON of {domain, sorted concepts}, both NFC
  * -normalized. Idempotent across re-imports of the same domain+concepts set.
+ *
+ * Concepts are deduped via Set BEFORE sort+normalize so `{domain, ["a","a"]}`
+ * hashes identically to `{domain, ["a"]}` — otherwise a duplicate concept in a
+ * single entry would silently produce a second distinct entry instead of
+ * deduplicating.
  */
 export function dedupHash(domain: string, concepts: string[]): string {
   const normalized = {
     domain: domain.normalize("NFC"),
-    concepts: concepts.map((c) => c.normalize("NFC")).sort(),
+    concepts: [...new Set(concepts.map((c) => c.normalize("NFC")))].sort(),
   };
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
