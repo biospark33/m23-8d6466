@@ -738,6 +738,46 @@ for await (const chunk of Bun.stdin.stream()) {
     expect((err as JsonRpcError).code).toBe(-32603); // no code on a primitive → internal-error default
     expect((err as JsonRpcError).message).toBe("boom"); // primitive surfaced, not "unknown MCP error"
   }, 15000);
+
+  test("array upstream error frame is stringified, not treated as an object", async () => {
+    // A non-conforming server emits an array as `error`. Arrays are
+    // `typeof === "object"`, so without an Array.isArray guard the cast would
+    // treat the array as `{ code?, message?, data? }`, find no code/message,
+    // and fall back to "unknown MCP error" — discarding the real payload.
+    // The transport must stringify the array into the message instead.
+    const script = `
+const decoder = new TextDecoder();
+let buf = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buf += decoder.decode(chunk, { stream: true });
+  let idx;
+  while ((idx = buf.indexOf("\\n")) >= 0) {
+    const line = buf.slice(0, idx);
+    buf = buf.slice(idx + 1);
+    if (!line.trim()) continue;
+    const msg = JSON.parse(line);
+    if (msg.method === "initialize") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "array-err", version: "0" } } }) + "\\n");
+    } else if (msg.method === "tools/call") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: ["boom", "extra"] }) + "\\n");
+    }
+  }
+}
+`;
+    const t = new StdioTransport({
+      command: "bun",
+      args: ["-e", script],
+      env: { ...(process.env as Record<string, string>) },
+      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+    });
+    live.push(t);
+    await t.spawn();
+    await t.initialize();
+    const err = await t.request("tools/call", { name: "retain", arguments: {} }, 5000).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(JsonRpcError);
+    expect((err as JsonRpcError).code).toBe(-32603); // no code on an array → internal-error default
+    expect((err as JsonRpcError).message).toBe("boom,extra"); // array stringified, not "unknown MCP error"
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------

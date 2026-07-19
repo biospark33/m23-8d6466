@@ -608,7 +608,7 @@ export class StdioTransport {
       // primitive (bare string/number) rather than an object. Treat a primitive
       // as the message string so the actual error text survives coercion
       // instead of being replaced by the "unknown MCP error" fallback.
-      const raw = typeof env.error === "object" && env.error !== null
+      const raw = typeof env.error === "object" && env.error !== null && !Array.isArray(env.error)
         ? (env.error as { code?: unknown; message?: unknown; data?: unknown })
         : { message: String(env.error) };
       const code = typeof raw.code === "number" ? raw.code : -32603;
