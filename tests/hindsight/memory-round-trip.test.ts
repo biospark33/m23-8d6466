@@ -424,6 +424,31 @@ describe("verifyRoundTrip — post-consolidation recall", () => {
   });
 });
 
+describe("verifyRoundTrip — short content (no key tokens)", () => {
+  test("retained content with no ≥3-char tokens still round-trips via substring fallback", async () => {
+    // "hi go" → keyTokens yields nothing (all tokens <3 chars). Previously
+    // this produced a false recall_content_mismatch; the substring fallback
+    // in resultsContainRetainedTokens now validates the round-trip.
+    const result = await verifyRoundTrip({
+      client: makeClient({
+        recall: async () => ({
+          results: [{ content: "hi go", score: 0.9, memoryId: "short-mem" }],
+          durationMs: 20,
+        }),
+      }),
+      bankId: DEFAULTS.bankId,
+      content: "hi go",
+      query: "hi",
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ok = result as Extract<RoundTripResult, { ok: true }>;
+    expect(ok.recallMatches).toBe(true);
+    expect(ok.memoryId).toBe("mem-1");
+  });
+});
+
 describe("verifyRoundTrip — custom content/query", () => {
   test("custom content + query are passed through and matched", async () => {
     let seenQuery = "";

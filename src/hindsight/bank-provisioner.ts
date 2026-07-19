@@ -231,13 +231,14 @@ const MAX_SUFFIX = 11; // -2 .. -11 → 10 candidates, plus the base = 11 total
 
 /**
  * Truncate a base bank id so that base + the LONGEST suffix we'll ever
- * append stays ≤63 chars (BankIdSchema caps at 63). Suffixes we use:
- *   - "-2" .. "-11"  (collision loop)  → up to 3 chars
- *   - "-dev-meta"                     → 9 chars (fixed dev-meta bank)
- * The dev-meta suffix dominates: reserve 9 chars + 1 join = 10. So base ≤53
- * guarantees BOTH the repo id and the `-dev-meta` variant stay schema-valid.
+ * append stays within the BankIdSchema cap of 64 chars. Suffixes we use:
+ *   - "-2" .. "-11"  (collision loop)  → up to 3 chars ("-11")
+ *   - "-dev-meta"    (dev-meta bank)   → 9 chars, joined to repoBankId
+ * Worst case: safeBase + "-11" + "-dev-meta" = safeBase + 12 chars. So
+ * base ≤ 64 − 12 = 52 guarantees base, suffixed, AND `-dev-meta` variants
+ * all stay schema-valid (≤64) even when the collision loop appends "-11".
  */
-const MAX_BASE_LEN = 53; // 63 - len("-dev-meta")
+const MAX_BASE_LEN = 52; // 64 - len("-11") - len("-dev-meta")
 
 function truncateForSuffix(baseId: string): string {
   if (baseId.length <= MAX_BASE_LEN) return baseId;
@@ -251,7 +252,7 @@ function truncateForSuffix(baseId: string): string {
  * Resolve the repo bank id (`{resolveBankId}`) against existing banks + the
  * fixed `qds-collective` id. Returns the chosen id, or null if every suffix
  * collides (`-2..-11` all taken, OR every suffix candidate fails BankIdSchema
- * — the latter happens when the base id is already near the 63-char cap and
+ * — the latter happens when the base id is already near the 64-char cap and
  * truncation cannot produce a valid suffixed form → -32005 per INV-HM6).
  */
 function resolveRepoBankId(
@@ -260,7 +261,7 @@ function resolveRepoBankId(
 ): string | null {
   // ALWAYS truncate to the safe-max length first. This guarantees the
   // returned id, AND its `-dev-meta` variant, stay schema-valid even when
-  // the base id is already at the 63-char schema cap.
+  // the base id is already at the 64-char schema cap.
   const safeBase = truncateForSuffix(baseId);
   // Try the (truncated) base as-is first.
   if (
@@ -327,6 +328,7 @@ async function createBankIdempotent(
   }
   const start = Date.now();
   let status: BankStatus = "created";
+  let logErr: { code: string; message: string } | undefined;
   try {
     await client.createBank(bankId);
     status = "created";
@@ -343,9 +345,13 @@ async function createBankIdempotent(
       }
     }
     status = "created";
+    logErr = {
+      code: `http_${e instanceof HindsightHttpError ? e.status : "error"}`,
+      message: (e as Error).message,
+    };
     throw e;
   } finally {
-    logProvision(requestId, bankId, Date.now() - start, status);
+    logProvision(requestId, bankId, Date.now() - start, status, logErr);
   }
 }
 
@@ -476,9 +482,21 @@ export async function provisionBanks(opts: ProvisionOptions): Promise<ProvisionR
     const targets: string[] = [repoBankId, `${repoBankId}-dev-meta`, COLLECTIVE_BANK_ID];
 
     const banks: ProvisionedBank[] = [];
-    for (const bankId of targets) {
-      const status = await createBankIdempotent(opts.client, bankId, requestId);
-      banks.push({ bankId, status });
+    try {
+      for (const bankId of targets) {
+        const status = await createBankIdempotent(opts.client, bankId, requestId);
+        banks.push({ bankId, status });
+      }
+    } catch (e) {
+      // Non-idempotent createBank error (e.g. HTTP 500/502/408) — emit the
+      // -32005 envelope rather than letting the raw HindsightHttpError escape
+      // and crash the CLI without a JSON envelope. Lock still releases via
+      // the outer finally.
+      return envelopeErr(
+        ERR_BANK_COLLISION,
+        `bank provisioning failed: ${(e as Error).message}`,
+        requestId,
+      );
     }
 
     return { ok: true, banks, requestId };

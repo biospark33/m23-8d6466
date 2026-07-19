@@ -372,3 +372,38 @@ Bank timing metrics (emitted on success):
 - [ ] **Test (e2e demo — MANDATORY):** Run provision script → run Mulch import (YAML + JSON inputs → JSONL storage verified) → invoke retain via MCP bridge → invoke recall → invoke reflect → assert round-trip completes with correct data for all three banks
 - [ ] **Test (idempotency):** Run provision + import twice → assert bank IDs unchanged, Mulch entry count unchanged (no duplicates), and recall with exact-match query returns same result set (content comparison, not score comparison)
 - [ ] **Test (dependency failure):** Attempt bank provision with MCP bridge unavailable — verify structured error returned (AC4/AC5), no partial bank creation
+
+### Review Findings (bmad code review, 2026-07-19)
+
+Findings from the bmad adversarial code review (Blind Hunter + Edge Case Hunter + Acceptance Auditor). All actionable findings fixed in code on this branch; dismissals recorded with reasoning.
+
+#### Fixed in code
+
+- [x] [Review][Patch] dev-meta bank id overflow on collision suffix → MAX_BASE_LEN 53→52 [src/hindsight/bank-provisioner.ts]
+- [x] [Review][Patch] non-idempotent createBank error escaped provisionBanks without an envelope → wrapped in try/catch returning -32005 [src/hindsight/bank-provisioner.ts]
+- [x] [Review][Patch] failed createBank logged status:"ok" → error now threaded into logProvision [src/hindsight/bank-provisioner.ts]
+- [x] [Review][Patch] malformed JSONL line dropped whole file → per-line try/catch with per-entry entryIndex [src/hindsight/mulch-importer.ts]
+- [x] [Review][Patch] content cap checked expertise field not the JSONL wire payload → cap now on the jsonl string [src/hindsight/mulch-importer.ts]
+- [x] [Review][Patch] failed retain poisoned dedup set → seenHashes.add moved after successful retain [src/hindsight/mulch-importer.ts]
+- [x] [Review][Patch] bank-scoped client methods skipped BankIdSchema validation → assertBankId guard added (INV-HM2) [src/hindsight/client.ts]
+- [x] [Review][Patch] requestJSON 502 requestId diverged from request() log → single requestId threaded through [src/hindsight/client.ts]
+- [x] [Review][Patch] auth env var: now reads HINDSIGHT_BEARER_TOKEN (spec) with HINDSIGHT_API_KEY fallback [src/hindsight/client.ts, scripts/*]
+- [x] [Review][Patch] stale createBank + HINDSIGHT_DEBUG comments corrected [src/hindsight/client.ts]
+- [x] [Review][Patch] process.exit truncation risk on piped stdout → process.exitCode in scripts [scripts/*]
+- [x] [Review][Patch] verifier false-negative on short content → substring fallback when no key tokens [src/hindsight/round-trip-verifier.ts]
+
+#### Dismissed (with reasoning)
+
+- retain `{items:[...]}` request body vs single-object response: CONFIRMED Hindsight contract per research-brief line 38 — not a bug.
+- global single-flight lock path (~/.hindsight/provision.lock): spec CC-10/INV-HM6 mandates this exact global path.
+- concurrent Mulch import cross-call dedup: spec explicitly defers to Phase 1 (single-process); Phase 2 concern.
+- conflicting expertise for same domain+concepts hash silently overwrites: spec-intended (Technical Notes: "considered updates of the same expertise area").
+- UTF-16 / multi-BOM not stripped: spec mandates UTF-8; single-BOM strip is the contract.
+- `__proto__` shallow-spread in validateEntry: JSON.parse own-property `__proto__` does not pollute; Zod strips unknown keys. Non-issue.
+- verifier drives client.ts not the /invoke bridge: the bridge proof lives in tests/hindsight/bridge-round-trip.test.ts (already documented in the verifier header docstring).
+
+#### Spec clarifications (amendments recorded by this review)
+
+- **Mulch CLI not invoked (Integration Points):** P0.9's importer reads `.mulch/expertise/` files directly as canonical input; `/usr/local/bin/mulch` is NOT spawned. The spec's "expertise extraction if needed" clause is conditional and not triggered by the file-read path. The version-warning contract is deferred until a code path actually invokes the CLI.
+- **AC-7 2s exact-match advisory deferred:** the recall payload has no `mode` field to distinguish exact-match (2s target) from semantic (5s target) queries in Phase 1, so only the 5s semantic advisory is wired (`slow_query:true` at >5s). The 2s exact-match advisory is deferred to Phase 2 alongside a recall `mode` field — mirroring the AC-1 ≥0.8 Phase-2 deferral.
+- **INV-HM1 env var aliasing:** the client reads `HINDSIGHT_BEARER_TOKEN` (spec name, preferred) with fallback to `HINDSIGHT_API_KEY` (research-brief legacy name). Either satisfies INV-HM1.

@@ -4,8 +4,9 @@
  *
  * Usage: provision-hindsight-banks [--repo-slug <slug>]
  *
- - Reads HINDSIGHT_BASE_URL (default http://127.0.0.1:8888) + HINDSIGHT_API_KEY
- *   for the real HindsightClient.
+ - Reads HINDSIGHT_BASE_URL (default http://127.0.0.1:8888) and
+ *   HINDSIGHT_BEARER_TOKEN (spec INV-HM1, preferred) or HINDSIGHT_API_KEY
+ *   (research-brief/legacy fallback) for the real HindsightClient.
  * - Reads SWARMCLAW_BASE_URL for the bridge probe (optional — if unset, the
  *   probe defaults to {registered:true, healthy:true} so the script can run
  *   standalone in tests / dev without a live SwarmClaw).
@@ -103,7 +104,7 @@ async function main(): Promise<number> {
 
   const client = new HindsightClient({
     baseUrl: process.env.HINDSIGHT_BASE_URL,
-    apiKey: process.env.HINDSIGHT_API_KEY,
+    apiKey: process.env.HINDSIGHT_BEARER_TOKEN ?? process.env.HINDSIGHT_API_KEY,
   });
   const bridgeProbe = await realBridgeProbe();
 
@@ -113,4 +114,4 @@ async function main(): Promise<number> {
 }
 
 const code = await main();
-process.exit(code);
+process.exitCode = code;

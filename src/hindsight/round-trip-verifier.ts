@@ -57,7 +57,12 @@ function resultsContainRetainedTokens(
   retainedContent: string,
 ): boolean {
   const tokens = keyTokens(retainedContent);
-  if (tokens.length === 0) return false;
+  if (tokens.length === 0) {
+    // No key tokens (all <3 chars / non-Latin) — fall back to whole-content
+    // substring match so short content still validates the round-trip.
+    const needle = retainedContent.toLowerCase();
+    return results.some((r) => r.content.toLowerCase().includes(needle));
+  }
   return results.some((r) => {
     const c = r.content.toLowerCase();
     return tokens.every((t) => c.includes(t));

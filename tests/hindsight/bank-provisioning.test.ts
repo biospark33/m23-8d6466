@@ -145,18 +145,52 @@ describe("bank-provisioner: idempotency", () => {
     expect(result.banks[0]!.status).toBe("exists");
   });
 
-  test("createBank throwing non-conflict error → propagates", async () => {
+  test("createBank throwing non-conflict error → -32005 envelope (fix E-3)", async () => {
+    // Previously: raw HindsightHttpError escaped provisionBanks uncaught,
+    // crashing the CLI with NO JSON envelope. Fix E-3 wraps the createBank
+    // loop in a try/catch and emits {ok:false, error:{code:-32005, message}}.
     const client = makeMockClient({
       createBankThrows: () => new HindsightHttpError(500, "server boom", "r"),
     });
-    await expect(
-      provisionBanks({
-        client,
-        repoSlug: "QDS-Factory",
-        bridgeProbe: HEALTHY,
-        lockPath,
-      }),
-    ).rejects.toThrow(/server boom/);
+    const result = await provisionBanks({
+      client,
+      repoSlug: "QDS-Factory",
+      bridgeProbe: HEALTHY,
+      lockPath,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(ERR_BANK_COLLISION);
+    expect(result.error.message).toMatch(/bank provisioning failed/);
+    expect(result.error.message).toMatch(/server boom/);
+  });
+
+  test("createBank 502 → -32005 envelope AND lock released (fix E-3)", async () => {
+    // First call: createBank throws 502 → envelope returned (no throw).
+    // Second call (clean client) must proceed normally — proves the lock
+    // was released via the outer finally block.
+    const failingClient = makeMockClient({
+      createBankThrows: () => new HindsightHttpError(502, "boom", "req"),
+    });
+    const r1 = await provisionBanks({
+      client: failingClient,
+      repoSlug: "QDS-Factory",
+      bridgeProbe: HEALTHY,
+      lockPath,
+    });
+    expect(r1.ok).toBe(false);
+    if (r1.ok) return;
+    expect(r1.error.code).toBe(ERR_BANK_COLLISION);
+    expect(r1.error.message).toMatch(/bank provisioning failed/);
+
+    // Lock must be released — a clean second call proceeds.
+    const r2 = await provisionBanks({
+      client: makeMockClient(),
+      repoSlug: "QDS-Factory",
+      bridgeProbe: HEALTHY,
+      lockPath,
+    });
+    expect(r2.ok).toBe(true);
   });
 });
 
@@ -392,14 +426,19 @@ describe("bank-provisioner: single-flight (INV-HM6 / CC-10)", () => {
   });
 
   test("lock released after error", async () => {
+    // Fix E-3: failed createBank now returns a -32005 envelope (no throw),
+    // but the lock must still release — a clean second call proceeds.
     const client = makeMockClient({
       createBankThrows: () => new HindsightHttpError(500, "boom", "r"),
     });
-    await expect(
-      provisionBanks({ client, repoSlug: "QDS-Factory", bridgeProbe: HEALTHY, lockPath }),
-    ).rejects.toThrow();
+    const r1 = await provisionBanks({
+      client,
+      repoSlug: "QDS-Factory",
+      bridgeProbe: HEALTHY,
+      lockPath,
+    });
+    expect(r1.ok).toBe(false);
     // Lock should be released; a clean second run works.
-    client.createBank.mockImplementation(() => Promise.resolve({ ok: true }));
     const r2 = await provisionBanks({
       client: makeMockClient(),
       repoSlug: "QDS-Factory",
@@ -464,11 +503,12 @@ describe("bank-provisioner: envelope contract", () => {
 describe("bank-provisioner: fix [1] 64-char slug overflow (INV-HM2)", () => {
   test("64-char repo slug with colliding truncated base → suffixed valid id", async () => {
     // resolveBankId of a 64-char [a-z0-9] slug returns the same 64 chars,
-    // which the provisioner truncates to 53 (so `-dev-meta` fits). If that
-    // 53-char truncated form collides in listBanks, the suffix loop runs and
-    // returns `<truncated>-2`, which must itself be schema-valid.
+    // which the provisioner truncates to 52 (so `-dev-meta` AND a collision
+    // suffix both fit). If that 52-char truncated form collides in listBanks,
+    // the suffix loop runs and returns `<truncated>-2`, which must itself be
+    // schema-valid, and `<truncated>-2-dev-meta` must also be schema-valid.
     const slug64 = "a".repeat(64);
-    const truncatedBase = "a".repeat(53);
+    const truncatedBase = "a".repeat(52);
     // Sanity: base + suffixed variants are invalid without truncation.
     expect(BankIdSchema.safeParse(`${slug64}-2`).success).toBe(false);
     expect(BankIdSchema.safeParse(`${slug64}-dev-meta`).success).toBe(false);
@@ -485,14 +525,13 @@ describe("bank-provisioner: fix [1] 64-char slug overflow (INV-HM2)", () => {
     if (!result.ok) return;
     const repoBankId = result.banks[0]!.bankId;
     const devMetaId = result.banks[1]!.bankId;
-    // Both MUST be schema-valid (fix [1] core guarantee).
+    // Both MUST be schema-valid (fix [1] core guarantee — ≤64 chars).
     expect(BankIdSchema.safeParse(repoBankId).success).toBe(true);
     expect(BankIdSchema.safeParse(devMetaId).success).toBe(true);
+    expect(devMetaId.length).toBeLessThanOrEqual(64);
     // Suffixed form, not the bare truncated base.
     expect(repoBankId).toBe(`${truncatedBase}-2`);
-    expect(repoBankId.length).toBeLessThanOrEqual(63);
     expect(devMetaId).toBe(`${repoBankId}-dev-meta`);
-    expect(BankIdSchema.safeParse(devMetaId).success).toBe(true);
     // createBank was called 3 times with valid ids only.
     expect(client.createBank).toHaveBeenCalledTimes(3);
     for (const call of client.createBank.mock.calls) {
@@ -512,10 +551,11 @@ describe("bank-provisioner: fix [1] 64-char slug overflow (INV-HM2)", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    // Base was truncated to keep `-dev-meta` valid: 53 chars max base.
+    // Base truncated to 52 chars max so `-dev-meta` (9) + worst-case collision
+    // suffix ("-11", 3) both still fit within the 64-char schema cap.
     const repoBankId = result.banks[0]!.bankId;
     const devMetaId = result.banks[1]!.bankId;
-    expect(repoBankId.length).toBe(53);
+    expect(repoBankId.length).toBe(52);
     expect(BankIdSchema.safeParse(repoBankId).success).toBe(true);
     expect(BankIdSchema.safeParse(devMetaId).success).toBe(true);
   });
@@ -602,5 +642,70 @@ describe("bank-provisioner: -32005 reserved for collision-unresolvable only", ()
     if (result.ok) return;
     expect(result.error.code).toBe(ERR_BANK_COLLISION);
     expect(result.error.message).toBe("bank_id_collision_unresolvable");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix E-1 (HIGH): worst-case collision "-11" + "-dev-meta" stays ≤64.
+// ---------------------------------------------------------------------------
+
+describe("bank-provisioner: fix E-1 worst-case suffix length (INV-HM2)", () => {
+  test("base near cap, collision loop reaches -11 → repoBankId-dev-meta valid", async () => {
+    // 60-char slug → truncated to 52 (safeBase). Pre-populate existing banks
+    // with safeBase AND safeBase-2..safeBase-10 so the loop falls through to
+    // the LAST candidate (safeBase-11). Then `${safeBase}-11-dev-meta` must
+    // still satisfy BankIdSchema (52 + "-11" + "-dev-meta" = 64).
+    const safeBase = "c".repeat(52);
+    const slug = "c".repeat(60);
+    const existing = [safeBase];
+    for (let n = 2; n <= 10; n++) existing.push(`${safeBase}-${n}`);
+    const client = makeMockClient({ existingBankIds: existing });
+    const result = await provisionBanks({
+      client,
+      repoSlug: slug,
+      bridgeProbe: HEALTHY,
+      lockPath,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const repoBankId = result.banks[0]!.bankId;
+    const devMetaId = result.banks[1]!.bankId;
+    expect(repoBankId).toBe(`${safeBase}-11`);
+    expect(repoBankId.length).toBe(55); // 52 + len("-11")
+    expect(devMetaId).toBe(`${repoBankId}-dev-meta`);
+    // The load-bearing assertion: dev-meta id is exactly at the 64-char cap
+    // and still parses. Pre-fix this overflowed to 65 → createBank 422 mid-loop.
+    expect(devMetaId.length).toBe(64);
+    expect(BankIdSchema.safeParse(devMetaId).success).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix B-4 (MEDIUM): failed createBank logs status:"error", not "ok".
+// ---------------------------------------------------------------------------
+
+describe("bank-provisioner: fix B-4 failed-provision log status", () => {
+  test("non-idempotent createBank failure → provision log status:'error'", async () => {
+    const client = makeMockClient({
+      createBankThrows: () => new HindsightHttpError(503, "upstream down", "r"),
+    });
+    const result = await provisionBanks({
+      client,
+      repoSlug: "QDS-Factory",
+      bridgeProbe: HEALTHY,
+      lockPath,
+      requestId: "b4-1",
+    });
+    expect(result.ok).toBe(false);
+    const provisionLogs = logEntries.filter(
+      (e) => e.operation === "provision" && e.requestId === "b4-1",
+    );
+    expect(provisionLogs.length).toBeGreaterThanOrEqual(1);
+    for (const e of provisionLogs) {
+      // Pre-fix: the failed provision logged status:"ok". Post-fix: "error".
+      expect(e.status).toBe("error");
+      expect(typeof e.error?.code).toBe("string");
+      expect(e.error?.code).toMatch(/^http_/);
+    }
   });
 });

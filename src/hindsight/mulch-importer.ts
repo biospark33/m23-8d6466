@@ -237,23 +237,13 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
     let fileErr: { code: string; message: string } | undefined;
 
     try {
-      const entries = parseFile(filePath, dirReal);
+      const entries = parseFile(filePath, dirReal, failures);
       let fileImported = false;
       let fileUpdated = false;
       for (let i = 0; i < entries.length; i++) {
         const entry = entries[i]!;
         const validated = validateEntry(entry, filePath, dirReal, i, failures);
         if (validated === null) continue; // failure already recorded
-
-        // Per-entry content cap (reuses RetainPayloadSchema's 102400 byte limit).
-        if (Buffer.byteLength(validated.expertise, "utf8") > MAX_CONTENT_BYTES) {
-          failures.push({ file: relFile, entryIndex: i, error: "content_too_large" });
-          continue;
-        }
-
-        const hash = dedupHash(validated.domain, validated.concepts);
-        const isUpdate = seenHashes.has(hash);
-        seenHashes.add(hash);
 
         // Canonical JSONL line — stable field order via the schema's shape.
         const jsonl = JSON.stringify({
@@ -265,12 +255,29 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
           ...(validated.confidence !== undefined ? { confidence: validated.confidence } : {}),
         });
 
+        // Per-entry content cap is on the WIRE PAYLOAD (the JSONL line actually
+        // sent to retain), which mirrors RetainPayloadSchema's 102400-byte cap.
+        // Checking `expertise` alone under-reports: expertise near 100KB makes
+        // the wrapping JSONL exceed the cap and fail at retain with a confusing
+        // retain_failed. (B-2/E-11)
+        if (Buffer.byteLength(jsonl, "utf8") > MAX_CONTENT_BYTES) {
+          failures.push({ file: relFile, entryIndex: i, error: "content_too_large" });
+          continue;
+        }
+
+        const hash = dedupHash(validated.domain, validated.concepts);
+        const isUpdate = seenHashes.has(hash);
+
         try {
           await opts.client.retain(opts.bankId, jsonl, {
             source: "mulch-import",
             kind: "expertise",
             tags: validated.concepts,
           });
+          // Only mark the hash as seen AFTER a successful retain — otherwise a
+          // failed retain poisons the dedup set and a later same-hash entry is
+          // silently treated as an update instead of retrying. (B-1)
+          seenHashes.add(hash);
           if (isUpdate) fileUpdated = true;
           else fileImported = true;
         } catch (e) {
@@ -331,10 +338,12 @@ interface ParsedEntry {
 
 /**
  * Read + parse a single file. Throws on read/parse failure (caller records the
- * whole-file failure). INV-HM3 path safety enforced here so a symlink escape
+ * whole-file failure) EXCEPT for `.jsonl`, where one malformed line is recorded
+ * as a per-entry failure and the rest of the file still parses (best-effort per
+ * entry, per spec). INV-HM3 path safety enforced here so a symlink escape
  * never even reaches the parser.
  */
-function parseFile(filePath: string, dirReal: string): ParsedEntry[] {
+function parseFile(filePath: string, dirReal: string, failures: ImportFailure[]): ParsedEntry[] {
   // INV-HM3: resolve realpath and require it to stay within dirReal. A symlink
   // whose target is outside the expertise dir resolves to a path NOT prefixed
   // by dirReal → reject with SymlinkEscapeError.
@@ -381,11 +390,20 @@ function parseFile(filePath: string, dirReal: string): ParsedEntry[] {
     return toArray(parsed, "json_object_not_array");
   }
   if (ext === ".jsonl") {
+    const relFile = relative(dirReal, filePath);
     const out: ParsedEntry[] = [];
+    let i = 0;
     for (const line of text.split("\n")) {
       const trimmed = line.trim();
       if (trimmed.length === 0) continue;
-      out.push(JSON.parse(trimmed) as ParsedEntry);
+      try {
+        out.push(JSON.parse(trimmed) as ParsedEntry);
+      } catch {
+        // B-3: one malformed line must NOT drop the whole file as parse_failed.
+        // Record the per-entry failure at the line's position and keep parsing.
+        failures.push({ file: relFile, entryIndex: i, error: "invalid_jsonl_line" });
+      }
+      i++;
     }
     return out;
   }

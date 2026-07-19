@@ -105,12 +105,14 @@ async function main(): Promise<void> {
         error: resolved.error,
       })}\n`,
     );
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   const client = new HindsightClient({
     baseUrl: process.env.HINDSIGHT_BASE_URL,
-    apiKey: process.env.HINDSIGHT_API_KEY, // env-only (INV-HM1)
+    // env-only (INV-HM1): spec name preferred, research-brief/legacy fallback.
+    apiKey: process.env.HINDSIGHT_BEARER_TOKEN ?? process.env.HINDSIGHT_API_KEY,
   });
 
   let result: ImportResult;
@@ -135,7 +137,7 @@ async function main(): Promise<void> {
   }
 
   process.stdout.write(`${JSON.stringify(result)}\n`);
-  process.exit(result.ok ? 0 : 1);
+  process.exitCode = result.ok ? 0 : 1;
 }
 
 // Only run when invoked directly (not when imported by tests).

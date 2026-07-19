@@ -453,6 +453,9 @@ describe("importMulch — empty dir", () => {
 
 describe("importMulch — per-entry content cap", () => {
   test("101KB expertise string → content_too_large failure", async () => {
+    // B-2/E-11: the cap is checked on the WIRE PAYLOAD (the JSONL line), not
+    // just the expertise field. Expertise at 101KB + JSONL wrapping overhead
+    // still lands well over the 100KB cap → content_too_large fires.
     const tooBig = "y".repeat(MAX_CONTENT_BYTES + 1024);
     writeFile(
       "cap.json",
@@ -700,5 +703,91 @@ describe("importMulch — fix [8] unreadable expertise dir (EACCES)", () => {
     });
     expect(result.ok).toBe(true);
     expect(result.note).toBe("empty expertise dir");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B-3 (HIGH): one malformed JSONL line must not drop the whole file.
+// ---------------------------------------------------------------------------
+
+describe("importMulch — B-3 malformed JSONL line is per-entry, not whole-file", () => {
+  test("valid line still imports; bad line recorded as invalid_jsonl_line; no parse_failed", async () => {
+    writeFile(
+      "mixed.jsonl",
+      `{"domain":"ok","concepts":["a"],"expertise":"valid"}
+this is not json
+{"domain":"ok2","concepts":["b"],"expertise":"also valid"}
+`,
+    );
+    const client = makeMockClient();
+    const result = await importMulch({
+      client: client as any,
+      expertiseDir: tmpDir,
+      bankId: "bank-jsonl",
+    });
+    expect(result.ok).toBe(true);
+    // Two valid lines retained.
+    expect(client._allCalls.length).toBe(2);
+    // Bad line recorded as per-entry failure.
+    const bad = result.failures.find((f) => f.error === "invalid_jsonl_line");
+    expect(bad).toBeDefined();
+    expect(bad!.entryIndex).toBe(1); // second non-blank line
+    expect(bad!.file).toBe("mixed.jsonl");
+    // NO whole-file parse_failed for this file.
+    const pf = result.failures.find(
+      (f) => f.file === "mixed.jsonl" && f.error === "parse_failed",
+    );
+    expect(pf).toBeUndefined();
+    // The file still counts as imported.
+    expect(result.importedFiles).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B-1 (LOW): failed retain must not poison the dedup set.
+// ---------------------------------------------------------------------------
+
+describe("importMulch — B-1 failed retain does not poison dedup", () => {
+  test("first retain throws, second same-hash entry still imports (not silent update)", async () => {
+    // Two files, same domain+concepts → same dedup hash. The first retain
+    // throws (simulating a transient bank failure); the second must STILL be
+    // retained (counted as imported, not silently treated as an update).
+    writeFile(
+      "a.json",
+      `[{"domain":"qds","concepts":["dedup"],"expertise":"first"}]`,
+    );
+    writeFile(
+      "b.json",
+      `[{"domain":"qds","concepts":["dedup"],"expertise":"second"}]`,
+    );
+
+    let firstCall = true;
+    const client = makeMockClient();
+    const origRetain = client.retain.bind(client);
+    client.retain = async (bankId: string, content: string, metadata?: any) => {
+      if (firstCall) {
+        firstCall = false;
+        throw new Error("transient bank failure");
+      }
+      return origRetain(bankId, content, metadata);
+    };
+
+    const result = await importMulch({
+      client: client as any,
+      expertiseDir: tmpDir,
+      bankId: "bank-poison",
+    });
+    expect(result.ok).toBe(true);
+    // First retain threw → retain_failed recorded.
+    const rf = result.failures.find((f) =>
+      f.error.startsWith("retain_failed:"),
+    );
+    expect(rf).toBeDefined();
+    expect(rf!.file).toBe("a.json");
+    // Second entry was still retained (not skipped as a duplicate).
+    expect(client._allCalls.length).toBe(1);
+    // And counted as an import (hash was NOT poisoned by the failed first call).
+    expect(result.importedFiles).toBe(1);
+    expect(result.updatedFiles).toBe(0);
   });
 });

@@ -25,6 +25,7 @@ import {
 import { maskEnv } from "../swarmclaw/mcp/tool-bridge.ts";
 import type { z } from "zod";
 import {
+  BankIdSchema,
   ConsolidateResponseSchema,
   RecallResponseSchema,
   ReflectResponseSchema,
@@ -85,8 +86,12 @@ export class HindsightClient {
       /\/+$/,
       "",
     );
-    // INV-HM1: env-only fallback. Never logged.
-    this.apiKey = opts.apiKey ?? process.env.HINDSIGHT_API_KEY;
+    // INV-HM1: env-only fallback. Never logged. Both env names accepted:
+    // HINDSIGHT_BEARER_TOKEN (spec INV-HM1, preferred) and
+    // HINDSIGHT_API_KEY (research-brief/legacy fallback).
+    this.apiKey = opts.apiKey
+      ?? process.env.HINDSIGHT_BEARER_TOKEN
+      ?? process.env.HINDSIGHT_API_KEY;
     this.requestId = opts.requestId;
   }
 
@@ -100,11 +105,13 @@ export class HindsightClient {
 
   /**
    * Create or update a bank. Per Hindsight OpenAPI this is PUT-scoped to the
-   * bank_id in the path (idempotent upsert), NOT POST /v1/default/banks.
-   * Body is the CreateBankRequest; we send an empty config body so Hindsight
-   * applies defaults (caller can extend later via the config endpoints).
+   * bank_id in the path (idempotent upsert), NOT POST /v1/default/banks. The
+   * body echoes bank_id; Hindsight ignores extra fields on a path-scoped PUT
+   * (caller can extend config later via the config endpoints).
    */
   async createBank(bankId: string): Promise<unknown> {
+    const requestId = this.requestId ?? newRequestId();
+    assertBankId(bankId, requestId);
     return this.request(
       "PUT",
       `/v1/default/banks/${bankId}`,
@@ -112,6 +119,7 @@ export class HindsightClient {
       RETAIN_TIMEOUT_MS,
       "createBank",
       bankId,
+      requestId,
     );
   }
 
@@ -124,6 +132,8 @@ export class HindsightClient {
       tags?: string[];
     },
   ): Promise<RetainResponse> {
+    const requestId = this.requestId ?? newRequestId();
+    assertBankId(bankId, requestId);
     const body: Record<string, unknown> = {
       items: [metadata ? { content, metadata } : { content }],
     };
@@ -135,10 +145,13 @@ export class HindsightClient {
       "retain",
       bankId,
       RetainResponseSchema,
+      requestId,
     );
   }
 
   async recall(bankId: string, query: string, limit = 5): Promise<RecallResponse> {
+    const requestId = this.requestId ?? newRequestId();
+    assertBankId(bankId, requestId);
     return this.requestJSON(
       "POST",
       `/v1/default/banks/${bankId}/memories/recall`,
@@ -147,10 +160,13 @@ export class HindsightClient {
       "recall",
       bankId,
       RecallResponseSchema,
+      requestId,
     );
   }
 
   async reflect(bankId: string, query?: string): Promise<ReflectResponse> {
+    const requestId = this.requestId ?? newRequestId();
+    assertBankId(bankId, requestId);
     const body: Record<string, unknown> = {};
     if (query !== undefined) body.query = query;
     return this.requestJSON(
@@ -161,6 +177,7 @@ export class HindsightClient {
       "reflect",
       bankId,
       ReflectResponseSchema,
+      requestId,
     );
   }
 
@@ -168,6 +185,8 @@ export class HindsightClient {
     bankId: string,
     options?: { maxAge?: number; preserveRecent?: number },
   ): Promise<ConsolidateResponse> {
+    const requestId = this.requestId ?? newRequestId();
+    assertBankId(bankId, requestId);
     const body: Record<string, unknown> = {};
     if (options !== undefined) body.options = options;
     return this.requestJSON(
@@ -178,6 +197,7 @@ export class HindsightClient {
       "consolidate",
       bankId,
       ConsolidateResponseSchema,
+      requestId,
     );
   }
 
@@ -196,14 +216,15 @@ export class HindsightClient {
     operation: string,
     bankId: string,
     schema: S,
+    requestId: string,
   ): Promise<z.infer<S>> {
-    const data = await this.request(method, path, body, timeoutMs, operation, bankId);
+    const data = await this.request(method, path, body, timeoutMs, operation, bankId, requestId);
     const parsed = schema.safeParse(data);
     if (!parsed.success) {
       throw new HindsightHttpError(
         502,
         `Hindsight response failed schema validation: ${parsed.error.message}`,
-        this.requestId ?? newRequestId(),
+        requestId,
       );
     }
     return parsed.data;
@@ -223,8 +244,9 @@ export class HindsightClient {
     timeoutMs: number = RETAIN_TIMEOUT_MS,
     operation = "request",
     bankId = "",
+    requestId?: string,
   ): Promise<unknown> {
-    const requestId = this.requestId ?? newRequestId();
+    const rid = requestId ?? this.requestId ?? newRequestId();
     const start = Date.now();
     const url = `${this.baseUrl}${path}`;
     const controller = new AbortController();
@@ -236,7 +258,7 @@ export class HindsightClient {
     // name HINDSIGHT_API_KEY is unchanged; only the header name + scheme change.
     const headers: Record<string, string> = {
       "content-type": "application/json",
-      "x-request-id": requestId,
+      "x-request-id": rid,
     };
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
 
@@ -257,7 +279,7 @@ export class HindsightClient {
         const message = await safeErrorMessage(res);
         status = "error";
         errMsg = { code: `http_${res.status}`, message };
-        throw new HindsightHttpError(res.status, message, requestId);
+        throw new HindsightHttpError(res.status, message, rid);
       }
       // INV-HM5: response body is `unknown` until narrowed by caller.
       const text = await res.text();
@@ -269,7 +291,7 @@ export class HindsightClient {
         throw new HindsightHttpError(
           502,
           `Hindsight returned non-JSON body: ${truncate(text)}`,
-          requestId,
+          rid,
         );
       }
       return data;
@@ -281,7 +303,7 @@ export class HindsightClient {
         throw new HindsightHttpError(
           408,
           `Hindsight ${operation} timed out after ${timeoutMs}ms`,
-          requestId,
+          rid,
         );
       }
       status = "error";
@@ -289,12 +311,12 @@ export class HindsightClient {
       throw new HindsightHttpError(
         502,
         `Hindsight ${operation} fetch failed: ${(e as Error).message}`,
-        requestId,
+        rid,
       );
     } finally {
       clearTimeout(timer);
       const entry: LogEntry = {
-        requestId,
+        requestId: rid,
         operation,
         agentId: null,
         timestamp: new Date().toISOString(),
@@ -304,8 +326,9 @@ export class HindsightClient {
         ...(errMsg ? { error: errMsg } : {}),
       };
       log(entry);
-      // INV-HM1: if any env diagnostic ever lands in a log, mask it. We log
-      // no env today; this no-op guard documents the policy for future callers.
+      // INV-HM1: opt-in env diagnostic via `HINDSIGHT_DEBUG`. The full env is
+      // logged masked via `maskEnv` (the sanctioned INV-HM1 all-values-masked
+      // policy); never raw. No env is logged when the flag is unset.
       if (process.env.HINDSIGHT_DEBUG) {
         log({
           ...entry,
@@ -366,4 +389,11 @@ async function safeErrorMessage(res: Response): Promise<string> {
 
 function truncate(s: string, max = 512): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+/** INV-HM2: validate bank_id at the client boundary before it reaches the URL path. */
+function assertBankId(bankId: string, requestId: string): void {
+  if (!BankIdSchema.safeParse(bankId).success) {
+    throw new HindsightHttpError(422, `invalid bank_id: ${bankId}`, requestId);
+  }
 }

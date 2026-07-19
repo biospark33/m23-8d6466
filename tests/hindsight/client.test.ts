@@ -326,6 +326,49 @@ describe("HindsightClient error paths", () => {
     expect(headers.get("x-request-id")).toBe("req-trace");
   });
 
+  test("invalid bankId → HindsightHttpError 422 before any fetch (INV-HM2)", async () => {
+    installMock({ body: {} });
+    const client = new HindsightClient({ baseUrl: "http://hindsight.test" });
+    for (const bad of ["../../etc", "UPPER CASE", "-leading", "trailing-"]) {
+      lastCall = undefined;
+      let caught: HindsightHttpError | undefined;
+      try {
+        await client.retain(bad, "should never be sent");
+      } catch (e) {
+        if (e instanceof HindsightHttpError) caught = e;
+      }
+      expect(caught).toBeDefined();
+      expect(caught?.status).toBe(422);
+      expect(caught?.message).toContain(bad);
+      // Guard runs before request: no fetch should have been issued.
+      expect(lastCall).toBeUndefined();
+    }
+  });
+
+  test("HINDSIGHT_BEARER_TOKEN preferred over HINDSIGHT_API_KEY (INV-HM1)", async () => {
+    // Both set → bearer token wins.
+    process.env.HINDSIGHT_BEARER_TOKEN = "bearer-val";
+    process.env.HINDSIGHT_API_KEY = "legacy-val";
+    try {
+      installMock({ body: {} });
+      const clientBoth = new HindsightClient({});
+      await clientBoth.listBanks();
+      let headers = new Headers(lastCall?.init?.headers);
+      expect(headers.get("Authorization")).toBe("Bearer bearer-val");
+
+      // Only legacy key set → still works (fallback).
+      delete process.env.HINDSIGHT_BEARER_TOKEN;
+      installMock({ body: {} });
+      const clientLegacy = new HindsightClient({});
+      await clientLegacy.listBanks();
+      headers = new Headers(lastCall?.init?.headers);
+      expect(headers.get("Authorization")).toBe("Bearer legacy-val");
+    } finally {
+      delete process.env.HINDSIGHT_BEARER_TOKEN;
+      delete process.env.HINDSIGHT_API_KEY;
+    }
+  });
+
   test("default timeout consts are the spec values", () => {
     expect(RETAIN_TIMEOUT_MS).toBe(30_000);
     expect(RECALL_TIMEOUT_MS).toBe(10_000);
