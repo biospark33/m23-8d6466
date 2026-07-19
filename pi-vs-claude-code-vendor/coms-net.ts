@@ -60,9 +60,13 @@ const HTTP_TIMEOUT_MS = 10_000;
 const SSE_BUF_CAP_BYTES = 16 * 1024 * 1024;
 const HTTP_BODY_CAP_BYTES = 16 * 1024 * 1024;
 const SHUTDOWN_DELETE_TIMEOUT_MS = 2_000;
-// Receiver-side prompt cap (byte length). coms_net_send enforces the same
-// limit before POSTing, or the receiver's silent drop would leave the caller
-// waiting until its own await times out.
+// Receiver-side prompt cap (byte length). coms_net_send enforces this same
+// value before POSTing (send-side == receive-side), or the receiver's silent
+// drop would leave the caller waiting until its own await times out.
+// Intentionally 200_000, NOT coms.ts's 256*1024: this is a transport-specific
+// HTTP cap, whereas coms.ts sizes its cap against the local-IPC 16MB×256
+// envelope-queue memory pin, a concern that does not exist over HTTP. See
+// DIVERGENCE.md.
 const MAX_PROMPT_BYTES = 200_000;
 // Trust-boundary cap for a peer-supplied response_schema: without it a
 // hostile/buggy peer can inject up to the 16 MiB SSE cap of schema JSON into
@@ -79,9 +83,13 @@ const MAX_RESPONSE_BYTES = 256 * 1024;
 // the heartbeat sweep at MESSAGE_TIMEOUT_MS + 60s), so a prompt flood must
 // not grow inboundQueue/turnQueue for ~31 min. Same bound as coms.ts.
 const MAX_INBOUND = 256;
+// Hard cap on fulfilled-msg_id replay tombstones: tombstoneFulfilled prunes
+// expired entries first, then evicts oldest-inserted (mirrors coms.ts).
+const MAX_FULFILLED_TOMBSTONES = 1000;
 // Bound on exit-fallback response dispatches: each undelivered entry costs
-// one blocking spawnSync at process exit (see the 'exit' handler).
-const MAX_PENDING_EXIT_DISPATCHES = 32;
+// one blocking spawnSync at process exit (see the 'exit' handler). Mirrors
+// coms.ts MAX_PENDING_EXIT_DISPATCHES.
+const MAX_PENDING_EXIT_DISPATCHES = 64;
 const EXIT_DELIVER_TIMEOUT_MS = 4_000;
 // Total wall-clock budget for the 'exit' delivery loop: each spawnSync blocks
 // up to EXIT_DELIVER_TIMEOUT_MS (+1s), so without a cap a backlog of
@@ -294,7 +302,7 @@ setTimeout(() => process.exit(2), ${EXIT_DELIVER_TIMEOUT_MS}).unref();
 const pendingExitDispatches: { msg_id: string; url: string; body: string; token: string; done: boolean }[] = [];
 let exitHandlerInstalled = false;
 
-// ━━ Helpers — verbatim from coms.ts (lines 131-210) ━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━ Helpers — kept in manual parity with coms.ts; verify on edit ━━━━━━━━━━━━
 
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -367,8 +375,10 @@ function nowIso(): string {
 	return new Date().toISOString();
 }
 
-function abbreviateModel(model: string): string {
-	let m = model || "";
+function abbreviateModel(model: unknown): string {
+	// Registry/pong fields are peer-controlled; a non-string would throw on
+	// startsWith/slice and crash the TUI render callback.
+	let m = typeof model === "string" ? model : "";
 	if (m.startsWith("claude-")) m = m.slice("claude-".length);
 	if (m.length > 14) m = m.slice(0, 14);
 	return m;
@@ -1323,10 +1333,10 @@ export default function (pi: ExtensionAPI) {
 
 	// Tombstone a fulfilled msg_id so a redelivered copy is dropped by
 	// handleInboundPrompt. Prune expired entries on insert once the map grows
-	// past 1000 so a prompt flood can't pin memory.
+	// past MAX_FULFILLED_TOMBSTONES so a prompt flood can't pin memory.
 	function tombstoneFulfilled(msgId: string): void {
 		fulfilledMsgIds.set(msgId, Date.now() + FULFILLED_TTL_MS);
-		if (fulfilledMsgIds.size > 1000) {
+		if (fulfilledMsgIds.size > MAX_FULFILLED_TOMBSTONES) {
 			const now = Date.now();
 			for (const [mid, exp] of fulfilledMsgIds.entries()) {
 				if (exp <= now) fulfilledMsgIds.delete(mid);
@@ -1335,7 +1345,7 @@ export default function (pi: ExtensionAPI) {
 			// oldest (Map is insertion-ordered) so the bound is real. An evicted
 			// tombstone admits at most one redelivery re-injection, which the
 			// inboundQueue dedupe still covers.
-			while (fulfilledMsgIds.size > 1000) {
+			while (fulfilledMsgIds.size > MAX_FULFILLED_TOMBSTONES) {
 				const oldest = fulfilledMsgIds.keys().next().value;
 				if (oldest === undefined) break;
 				fulfilledMsgIds.delete(oldest);
