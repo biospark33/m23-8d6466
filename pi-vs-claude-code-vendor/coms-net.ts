@@ -31,31 +31,40 @@ import type { AgentToolResult, ExtensionAPI, ExtensionContext, Theme } from "@ma
 import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { applyExtensionDefaults } from "./themeMap.ts";
+import {
+	abbreviateModel,
+	envBoundedInt,
+	fallbackColor,
+	hexFg,
+	isDuplicateRegistration,
+	isSafePathComponent,
+	isValidHex,
+	MAX_FULFILLED_TOMBSTONES,
+	MAX_HOPS,
+	MAX_INBOUND,
+	MAX_PENDING_EXIT_DISPATCHES,
+	EXIT_DELIVER_BUDGET_MS,
+	parseFrontmatter,
+	sanitizePeerText,
+	ulid,
+} from "./coms-core.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import * as crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 
 // ━━ Constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 const COMS_NET_DIR = path.join(os.homedir(), ".pi", "coms-net");
-// Env overrides for tunables are clamped: `Number(env) || DEFAULT` would
-// reject a legitimate 0, accept -1 (setInterval(-1) spins at ~1ms — a
-// self-DoS) or Infinity (silently disables hop protection), and allow
-// unbounded TTLs that pin memory for days.
-function envBoundedInt(env: string | undefined, def: number, min: number, max: number): number {
-	const n = Number(env);
-	if (!Number.isFinite(n) || n <= 0) return def;
-	return Math.min(Math.max(n, min), max);
-}
-// Fixed at the documented guard (5). Deliberately NOT env-overridable: an
-// override allowed up to 64 hops, far past the intended runaway-chain stop.
-const MAX_HOPS = 5;
-const HEARTBEAT_MS = envBoundedInt(process.env.PI_COMS_NET_HEARTBEAT_MS, 10_000, 1_000, 300_000);
+// Env overrides for tunables are clamped by envBoundedInt (imported from
+// ./coms-core.ts): `Number(env) || DEFAULT` would reject a legitimate 0,
+// accept -1 (setInterval(-1) spins at ~1ms — a self-DoS) or Infinity (silently
+// disables hop protection), and allow unbounded TTLs that pin memory for days.
+// MAX_HOPS is fixed at the documented guard (5), imported from core.
+const HEARTBEAT_MS = envBoundedInt(process.env.PI_COMS_NET_HEARTBEAT_MS, 10_000, { min: 1_000, max: 300_000 });
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 10_000;
-const MESSAGE_TIMEOUT_MS = envBoundedInt(process.env.PI_COMS_NET_MESSAGE_TTL_MS, 1_800_000, 1_000, 86_400_000);
+const MESSAGE_TIMEOUT_MS = envBoundedInt(process.env.PI_COMS_NET_MESSAGE_TTL_MS, 1_800_000, { min: 1_000, max: 86_400_000 });
 const HTTP_TIMEOUT_MS = 10_000;
 const SSE_BUF_CAP_BYTES = 16 * 1024 * 1024;
 const HTTP_BODY_CAP_BYTES = 16 * 1024 * 1024;
@@ -72,6 +81,9 @@ const MAX_PROMPT_BYTES = 200_000;
 // hostile/buggy peer can inject up to the 16 MiB SSE cap of schema JSON into
 // the session context on every inbound prompt.
 const MAX_RESPONSE_SCHEMA_BYTES = 32_768;
+// MAX_INBOUND, MAX_FULFILLED_TOMBSTONES, MAX_PENDING_EXIT_DISPATCHES and
+// EXIT_DELIVER_BUDGET_MS are imported from ./coms-core.ts — identical value and
+// meaning in both transports (see DIVERGENCE.md).
 // Receiver-side cap on a peer-supplied response body (mirrors coms.ts
 // MAX_RESPONSE_BYTES). The reply lands verbatim in the caller's
 // coms_net_get/coms_net_await tool output, so without this a buggy/hostile
@@ -79,27 +91,11 @@ const MAX_RESPONSE_SCHEMA_BYTES = 32_768;
 // context window on every round-trip — the same failure class
 // MAX_RESPONSE_SCHEMA_BYTES and MAX_PROMPT_BYTES prevent.
 const MAX_RESPONSE_BYTES = 256 * 1024;
-// Hard cap on queued inbounds: entries are only removed at agent_end (or by
-// the heartbeat sweep at MESSAGE_TIMEOUT_MS + 60s), so a prompt flood must
-// not grow inboundQueue/turnQueue for ~31 min. Same bound as coms.ts.
-const MAX_INBOUND = 256;
-// Hard cap on fulfilled-msg_id replay tombstones: tombstoneFulfilled prunes
-// expired entries first, then evicts oldest-inserted (mirrors coms.ts).
-const MAX_FULFILLED_TOMBSTONES = 1000;
-// Bound on exit-fallback response dispatches: each undelivered entry costs
-// one blocking spawnSync at process exit (see the 'exit' handler). Mirrors
-// coms.ts MAX_PENDING_EXIT_DISPATCHES.
-const MAX_PENDING_EXIT_DISPATCHES = 64;
 const EXIT_DELIVER_TIMEOUT_MS = 4_000;
-// Total wall-clock budget for the 'exit' delivery loop: each spawnSync blocks
-// up to EXIT_DELIVER_TIMEOUT_MS (+1s), so without a cap a backlog of
-// undelivered responses would stall process exit for minutes (mirrors coms.ts
-// EXIT_DELIVER_BUDGET_MS).
-const EXIT_DELIVER_BUDGET_MS = 10_000;
 // Bounded wait for the session_start/session_shutdown init latch: a wedged
 // init must not spin the poll loop forever — on timeout proceed and audit
 // loudly (mirrors coms.ts INIT_LATCH_TIMEOUT_MS).
-const INIT_LATCH_TIMEOUT_MS = envBoundedInt(process.env.PI_COMS_NET_INIT_LATCH_TIMEOUT_MS, 30_000, 1_000, 300_000);
+const INIT_LATCH_TIMEOUT_MS = envBoundedInt(process.env.PI_COMS_NET_INIT_LATCH_TIMEOUT_MS, 30_000, { min: 1_000, max: 300_000 });
 // SSE watchdog: server pings must arrive within this factor of the heartbeat
 // interval, or the (half-open) connection is torn down and reconnected. A
 // silently-dead connection would otherwise heartbeat "online" forever while
@@ -110,11 +106,6 @@ const SSE_WATCHDOG_FACTOR = 3;
 const SERVER_URL_ENV = process.env.PI_COMS_NET_SERVER_URL;
 const AUTH_TOKEN_ENV = process.env.PI_COMS_NET_AUTH_TOKEN;
 const PROJECT_ENV = process.env.PI_COMS_NET_PROJECT;
-
-const FALLBACK_PALETTE = [
-	"#72F1B8", "#36F9F6", "#FF7EDB", "#FEDE5D",
-	"#C792EA", "#FF8B39", "#4D9DE0", "#FFAA8B",
-];
 
 // ━━ Shared types (canonical block — mirrored on server) ━━━━━━━━━━━━━━━━━━━
 
@@ -302,98 +293,14 @@ setTimeout(() => process.exit(2), ${EXIT_DELIVER_TIMEOUT_MS}).unref();
 const pendingExitDispatches: { msg_id: string; url: string; body: string; token: string; done: boolean }[] = [];
 let exitHandlerInstalled = false;
 
-// ━━ Helpers — kept in manual parity with coms.ts; verify on edit ━━━━━━━━━━━━
-
-const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-function ulid(): string {
-	const time = Date.now();
-	const rand = crypto.randomBytes(10);
-	let timeStr = "";
-	let t = time;
-	for (let i = 9; i >= 0; i--) {
-		timeStr = CROCKFORD[t % 32] + timeStr;
-		t = Math.floor(t / 32);
-	}
-	let randStr = "";
-	let bits = 0;
-	let value = 0;
-	for (const byte of rand) {
-		value = (value << 8) | byte;
-		bits += 8;
-		while (bits >= 5) {
-			bits -= 5;
-			randStr += CROCKFORD[(value >> bits) & 31];
-		}
-	}
-	return (timeStr + randStr).slice(0, 26);
-}
-
-function isValidHex(hex: string): boolean {
-	return /^#[0-9a-fA-F]{6}$/.test(hex);
-}
-
-function hexFg(hex: string, s: string): string {
-	if (!isValidHex(hex)) return s;
-	const r = Number.parseInt(hex.slice(1, 3), 16);
-	const g = Number.parseInt(hex.slice(3, 5), 16);
-	const b = Number.parseInt(hex.slice(5, 7), 16);
-	return `\x1b[38;2;${r};${g};${b}m${s}\x1b[39m`;
-}
-
-function fallbackColor(sessionId: string): string {
-	const h = crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 8);
-	// x % length on a non-empty literal array is always a valid index.
-	return FALLBACK_PALETTE[Number(BigInt(`0x${h}`)) % FALLBACK_PALETTE.length]!;
-}
-
-function parseFrontmatter(raw: string): { name?: string; description?: string; color?: string; body: string } {
-	const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
-	if (!match) return { body: raw };
-	const [, fm = "", body = ""] = match;
-	const frontmatter: Record<string, string> = {};
-	for (const line of fm.split(/\r?\n/)) {
-		const idx = line.indexOf(":");
-		if (idx > 0) {
-			const key = line.slice(0, idx).trim();
-			let val = line.slice(idx + 1).trim();
-			if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-				val = val.slice(1, -1);
-			}
-			frontmatter[key] = val;
-		}
-	}
-	return {
-		name: frontmatter.name,
-		description: frontmatter.description,
-		color: frontmatter.color,
-		body,
-	};
-}
+// ━━ Helpers — transport-specific; shared/parity helpers live in coms-core.ts ━
+//
+// ulid, hexFg, fallbackColor, parseFrontmatter, abbreviateModel,
+// sanitizePeerText, isSafePathComponent are imported from ./coms-core.ts. The
+// card/body/argv helpers below are net-transport-specific and stay here.
 
 function nowIso(): string {
 	return new Date().toISOString();
-}
-
-function abbreviateModel(model: unknown): string {
-	// Registry/pong fields are peer-controlled; a non-string would throw on
-	// startsWith/slice and crash the TUI render callback.
-	let m = typeof model === "string" ? model : "";
-	if (m.startsWith("claude-")) m = m.slice("claude-".length);
-	if (m.length > 14) m = m.slice(0, 14);
-	return m;
-}
-
-// Peer-controlled strings (card name/purpose/cwd, sender identity) are
-// rendered raw into the TUI and interpolated into injected prompts. Strip
-// C0/DEL/C1 control characters (ANSI escape sequences are a terminal-injection
-// channel) and cap length so a hostile or buggy peer can't wreck widget
-// layout. Non-strings coerce to the fallback.
-function sanitizePeerText(s: unknown, fallback = "", max = 64): string {
-	if (typeof s !== "string") return fallback;
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — strips C0/DEL/C1 control characters from peer-controlled strings
-	const clean = s.replace(/[\x00-\x1f\x7f\u0080-\u009f]/g, "");
-	return clean.length > max ? clean.slice(0, max) : clean;
 }
 
 // Cards arrive over the wire from the hub (ultimately from other peers), so
@@ -519,16 +426,9 @@ function readFrontmatterFromArgv(argv: string[]): { name?: string; description?:
 }
 
 // ━━ Registry / server-discovery I/O ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-// Rejects path traversal / separator injection in the project name, which
-// can originate from untrusted input (--project CLI flag or PI_COMS_NET_PROJECT
-// env var). Strict whitelist rather than a separator blacklist: also blocks
-// Windows ADS (colon) and null-byte injection, which the old blacklist let
-// through. "." and ".." pass the character class, so they're rejected
-// explicitly.
-function isSafePathComponent(s: unknown): s is string {
-	return typeof s === "string" && /^[a-zA-Z0-9_.-]+$/.test(s) && s !== "." && s !== "..";
-}
+// isSafePathComponent (imported from ./coms-core.ts) rejects path
+// traversal / separator injection in the project name (--project CLI flag or
+// PI_COMS_NET_PROJECT env var).
 
 function projectDir(project: string): string {
 	if (!isSafePathComponent(project)) {
@@ -728,8 +628,10 @@ export default function (pi: ExtensionAPI) {
 		try {
 			pi.registerFlag(name, def);
 		} catch (err: any) {
-			const msg = err instanceof Error ? err.message : String(err);
-			if (KNOWN_COMS_FLAGS.has(name) && /already|duplicate/i.test(msg)) return;
+			// Scoped to known co-loaded flag names — stricter than coms.ts's
+			// blanket swallow (see coms-core.isDuplicateRegistration, which
+			// supplies the shared /already|duplicate/i predicate).
+			if (KNOWN_COMS_FLAGS.has(name) && isDuplicateRegistration(err)) return;
 			throw err;
 		}
 	}
