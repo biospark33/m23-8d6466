@@ -166,6 +166,35 @@ export function redactSecrets(text: string, parentEnv: EnvMap): string {
 }
 
 /**
+ * Length of the longest prefix of `value` that is also a suffix of `text`
+ * (0 if no non-empty prefix qualifies). Linear time via the KMP automaton:
+ * O(value.length) to build the failure function, O(text.length) to scan — so
+ * boundary redaction of an arbitrarily long secret is O(text.length +
+ * value.length) per env var, not the O(text × value) quadratic the naive
+ * suffix scan hits on adversarial divergent input. Only tests UTF-16 code-unit
+ * equality, never slices into the middle of a surrogate pair.
+ */
+function longestPrefixSuffix(text: string, value: string): number {
+  if (value.length === 0 || text.length === 0) return 0;
+  // KMP failure function for the pattern (value).
+  const pi = new Array<number>(value.length).fill(0);
+  for (let i = 1, k = 0; i < value.length; i++) {
+    while (k > 0 && value[i] !== value[k]) k = pi[k - 1]!;
+    if (value[i] === value[k]) k++;
+    pi[i] = k;
+  }
+  // Drive the automaton over text; the terminal state is the longest prefix of
+  // `value` that is a suffix of `text`.
+  let j = 0;
+  for (let i = 0; i < text.length; i++) {
+    while (j > 0 && text[i] !== value[j]) j = pi[j - 1]!;
+    if (text[i] === value[j]) j++;
+    if (j === value.length) j = pi[j - 1]!;
+  }
+  return j;
+}
+
+/**
  * Redact a TRAILING partial prefix of a secret value left at the truncation
  * cut boundary (INV-2). When the excerpt was capped mid-value, the full value
  * no longer matches — but its prefix at the cut still leaks.
@@ -183,38 +212,22 @@ export function redactBoundaryPrefix(text: string, parentEnv: EnvMap): string {
     if (value.length < MIN_REDACTABLE_VALUE_LEN || !SECRET_KEY_RE.test(key)) {
       continue;
     }
-    // ponytail: cap the boundary scan at 4096. The scan is O(text × value) in
-    // the adversarial worst case (a long prefix that matches the text tail then
-    // diverges mid-string defeats both early-breaks → ~10^10 comparisons on a
-    // ~200KB secret). Known ceiling: a truncation-cut PARTIAL fragment of a
-    // secret longer than 4KB (e.g. a PEM private key) leaks its leading
-    // (len−4096) chars — complete occurrences are already removed by
-    // redactSecrets() before this scan, so only that partial-at-the-cut case
-    // escapes. Raising the cap re-opens the quadratic cost (~maxK²/2 ops), so
-    // widen it only with a matching wall-clock regression test.
-    const maxK = Math.min(text.length, value.length - 1, 4096);
-    for (let k = maxK; k >= 1; k--) {
-      // Compare characters directly instead of text.endsWith(value.slice(0, k)):
-      // the slice form allocates a fresh string per k, which for multi-KB
-      // secrets (certs, private keys) means thousands of transient strings.
-      const offset = text.length - k;
-      let match = true;
-      for (let i = 0; i < k; i++) {
-        if (text[offset + i] !== value[i]) {
-          match = false;
-          break;
-        }
+    // Largest k where text ends with value[0..k) — the true prefix-suffix
+    // length, in linear time. The previous capped scan (maxK ≤ 4096) leaked the
+    // WHOLE fragment when a >4KB secret prefix sat at the truncation cut: no
+    // k ≤ 4096 matched the true length, so nothing was redacted. KMP has no cap,
+    // so the full boundary prefix is redacted regardless of secret length.
+    let k = longestPrefixSuffix(text, value);
+    if (k === 0) continue;
+    // Complete occurrences are already removed by redactSecrets() before this
+    // scan; cap defensively excludes a full trailing match.
+    if (k >= value.length) k = value.length - 1;
+    if (k >= MIN_BOUNDARY_PREFIX_LEN) {
+      if (bestRedact === null || k > bestRedact.len) {
+        bestRedact = { key, len: k };
       }
-      if (match) {
-        if (k >= MIN_BOUNDARY_PREFIX_LEN) {
-          if (bestRedact === null || k > bestRedact.len) {
-            bestRedact = { key, len: k };
-          }
-        } else if (k > bestStrip) {
-          bestStrip = k;
-        }
-        break;
-      }
+    } else if (k > bestStrip) {
+      bestStrip = k;
     }
   }
 

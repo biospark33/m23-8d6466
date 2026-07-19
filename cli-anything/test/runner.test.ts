@@ -209,14 +209,13 @@ describe("redactBoundaryPrefix (INV-2 truncation-boundary hardening)", () => {
   });
 
   it("completes fast on an adversarial divergent-prefix secret (O(n²) DoS guard)", () => {
-    // Adversarial shape that defeats BOTH early-breaks past the 4096 cap: the
-    // secret's prefix matches the text tail for exactly 4096 chars, then
-    // diverges at a "B". For every k > 4096 the inner char loop walks 4096
-    // matching chars before mismatching (no full match → no outer break), so
-    // an UNBOUNDED scan is O(4096 × text.length) — ~1.2e9 comparisons / ~11s
-    // wall-clock here. A uniform repeated value would hit the full-match break
-    // at the first large k and stay cheap; the mid-string divergence is what
-    // makes it quadratic. The cap ends the scan at k=4096 → ~4096 comparisons.
+    // Adversarial shape that made the naive suffix scan quadratic: the secret's
+    // prefix matches the text tail for exactly 4096 chars, then diverges at a
+    // "B". A uniform repeated value hits a full-match early-break and stays
+    // cheap; the mid-string divergence defeats every early-break, so an unguarded
+    // char-by-char scan is O(4096 × text.length) — ~1.2e9 comparisons / ~11s
+    // wall-clock here. KMP makes boundary matching linear (O(text.length +
+    // value.length) per secret), so it stays well under a second.
     const N = 300_000;
     const secret = `${"A".repeat(4096)}B${"A".repeat(N)}`;
     const parent = { MY_SECRET_TOKEN: secret };
@@ -224,12 +223,26 @@ describe("redactBoundaryPrefix (INV-2 truncation-boundary hardening)", () => {
     const start = Date.now();
     const out = redactBoundaryPrefix(text, parent);
     const elapsed = Date.now() - start;
-    // Unfixed this runs for ~11s; the 4096 cap keeps it well under a second.
+    // Unfixed (naive scan) this runs for ~11s; linear KMP keeps it fast.
     expect(elapsed).toBeLessThan(2000);
     // Correctness is preserved: the 4096-char matching tail is a >= 8-char
     // secret prefix, so it is redacted, and benign output ahead of the cut is
-    // untouched (both the fixed and unfixed scans redact exactly k=4096 here).
+    // untouched (the longest prefix-suffix here is exactly k=4096).
     expect(out).toBe(`benign output ${"A".repeat(N - 4096)}[REDACTED:MY_SECRET_TOKEN]`);
+  });
+
+  it("redacts a truncation-boundary prefix LONGER than 4096 chars (no cap leak)", () => {
+    // Regression for the security hole the 4096 cap opened: when the truncation
+    // cut leaves a >4KB prefix of a long secret at the boundary, no k <= 4096
+    // matches the true prefix-suffix length, so the capped scan found nothing and
+    // the ENTIRE secret fragment leaked into stdout_excerpt. With linear KMP
+    // (no cap) the full boundary prefix is redacted regardless of length.
+    const secret = `AKIA${"x".repeat(6000)}`; // 6004-char secret
+    const parent = { AWS_SECRET_ACCESS_KEY: secret };
+    const cut = 5000; // truncation cut leaves 5000 (>4096) secret chars at boundary
+    const text = `log line\n${secret.slice(0, cut)}`;
+    const out = redactBoundaryPrefix(text, parent);
+    expect(out).toBe("log line\n[REDACTED:AWS_SECRET_ACCESS_KEY]");
   });
 });
 
