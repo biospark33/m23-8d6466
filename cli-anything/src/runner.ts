@@ -184,12 +184,18 @@ function longestPrefixSuffix(text: string, value: string): number {
     pi[i] = k;
   }
   // Drive the automaton over text; the terminal state is the longest prefix of
-  // `value` that is a suffix of `text`.
+  // `value` that is a suffix of `text`. On a full match mid-text, reset j to the
+  // longest proper border so the scan can keep looking for further matches — but
+  // at the terminal position PRESERVE j === value.length: if text ends with the
+  // complete value, the longest qualifying prefix is the value itself, not a
+  // smaller border. The caller's `k >= value.length` fallback decides policy
+  // (redactSecrets already removed complete occurrences); the helper just reports
+  // the true prefix-suffix length.
   let j = 0;
   for (let i = 0; i < text.length; i++) {
     while (j > 0 && text[i] !== value[j]) j = pi[j - 1]!;
     if (text[i] === value[j]) j++;
-    if (j === value.length) j = pi[j - 1]!;
+    if (j === value.length && i < text.length - 1) j = pi[j - 1]!;
   }
   return j;
 }

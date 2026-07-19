@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
   existsSync,
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -243,6 +242,20 @@ describe("redactBoundaryPrefix (INV-2 truncation-boundary hardening)", () => {
     const text = `log line\n${secret.slice(0, cut)}`;
     const out = redactBoundaryPrefix(text, parent);
     expect(out).toBe("log line\n[REDACTED:AWS_SECRET_ACCESS_KEY]");
+  });
+
+  it("redacts a complete secret that lands at the text boundary (terminal full-match)", () => {
+    // Defensive fallback for the terminal full-match: if a complete secret value
+    // reaches redactBoundaryPrefix un-redacted at the very end of the text, the
+    // KMP helper must report the full value.length (not a smaller internal border)
+    // so the caller's `k >= value.length` cap redacts it (value.length - 1 chars)
+    // instead of leaking the whole value. The pre-fix terminal reset returned the
+    // proper border (0 for this no-border value), so the complete secret leaked.
+    const secret = "Aa1Bb2Cc3Dd4Ee5Ff6Gg7Hh8"; // 24 chars, pi[23] = 0 (no border)
+    const parent = { MY_SECRET_TOKEN: secret };
+    const text = `log line\n${secret}`; // text ENDS with the complete secret
+    const out = redactBoundaryPrefix(text, parent);
+    expect(out).toBe(`log line\n${secret[0]}[REDACTED:MY_SECRET_TOKEN]`);
   });
 });
 
