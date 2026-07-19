@@ -166,6 +166,41 @@ export function redactSecrets(text: string, parentEnv: EnvMap): string {
 }
 
 /**
+ * Length of the longest prefix of `value` that is also a suffix of `text`
+ * (0 if no non-empty prefix qualifies). Linear time via the KMP automaton:
+ * O(value.length) to build the failure function, O(text.length) to scan — so
+ * boundary redaction of an arbitrarily long secret is O(text.length +
+ * value.length) per env var, not the O(text × value) quadratic the naive
+ * suffix scan hits on adversarial divergent input. Only tests UTF-16 code-unit
+ * equality, never slices into the middle of a surrogate pair.
+ */
+function longestPrefixSuffix(text: string, value: string): number {
+  if (value.length === 0 || text.length === 0) return 0;
+  // KMP failure function for the pattern (value).
+  const pi = new Array<number>(value.length).fill(0);
+  for (let i = 1, k = 0; i < value.length; i++) {
+    while (k > 0 && value[i] !== value[k]) k = pi[k - 1]!;
+    if (value[i] === value[k]) k++;
+    pi[i] = k;
+  }
+  // Drive the automaton over text; the terminal state is the longest prefix of
+  // `value` that is a suffix of `text`. On a full match mid-text, reset j to the
+  // longest proper border so the scan can keep looking for further matches — but
+  // at the terminal position PRESERVE j === value.length: if text ends with the
+  // complete value, the longest qualifying prefix is the value itself, not a
+  // smaller border. The caller's `k >= value.length` fallback decides policy
+  // (redactSecrets already removed complete occurrences); the helper just reports
+  // the true prefix-suffix length.
+  let j = 0;
+  for (let i = 0; i < text.length; i++) {
+    while (j > 0 && text[i] !== value[j]) j = pi[j - 1]!;
+    if (text[i] === value[j]) j++;
+    if (j === value.length && i < text.length - 1) j = pi[j - 1]!;
+  }
+  return j;
+}
+
+/**
  * Redact a TRAILING partial prefix of a secret value left at the truncation
  * cut boundary (INV-2). When the excerpt was capped mid-value, the full value
  * no longer matches — but its prefix at the cut still leaks.
@@ -183,29 +218,22 @@ export function redactBoundaryPrefix(text: string, parentEnv: EnvMap): string {
     if (value.length < MIN_REDACTABLE_VALUE_LEN || !SECRET_KEY_RE.test(key)) {
       continue;
     }
-    const maxK = Math.min(text.length, value.length - 1);
-    for (let k = maxK; k >= 1; k--) {
-      // Compare characters directly instead of text.endsWith(value.slice(0, k)):
-      // the slice form allocates a fresh string per k, which for multi-KB
-      // secrets (certs, private keys) means thousands of transient strings.
-      const offset = text.length - k;
-      let match = true;
-      for (let i = 0; i < k; i++) {
-        if (text[offset + i] !== value[i]) {
-          match = false;
-          break;
-        }
+    // Largest k where text ends with value[0..k) — the true prefix-suffix
+    // length, in linear time. The previous capped scan (maxK ≤ 4096) leaked the
+    // WHOLE fragment when a >4KB secret prefix sat at the truncation cut: no
+    // k ≤ 4096 matched the true length, so nothing was redacted. KMP has no cap,
+    // so the full boundary prefix is redacted regardless of secret length.
+    let k = longestPrefixSuffix(text, value);
+    if (k === 0) continue;
+    // Complete occurrences are already removed by redactSecrets() before this
+    // scan; cap defensively excludes a full trailing match.
+    if (k >= value.length) k = value.length - 1;
+    if (k >= MIN_BOUNDARY_PREFIX_LEN) {
+      if (bestRedact === null || k > bestRedact.len) {
+        bestRedact = { key, len: k };
       }
-      if (match) {
-        if (k >= MIN_BOUNDARY_PREFIX_LEN) {
-          if (bestRedact === null || k > bestRedact.len) {
-            bestRedact = { key, len: k };
-          }
-        } else if (k > bestStrip) {
-          bestStrip = k;
-        }
-        break;
-      }
+    } else if (k > bestStrip) {
+      bestStrip = k;
     }
   }
 
@@ -323,6 +351,7 @@ export async function runManifest(
     let timedOut = false;
     let settled = false;
     let watchdog: ReturnType<typeof setTimeout> | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
     /** Kill the whole child tree: process group on POSIX, taskkill /T on win32. */
     function killChildTree(): void {
@@ -402,7 +431,10 @@ export async function runManifest(
     function settle(result: HarnessResult): void {
       if (settled) return;
       settled = true;
-      if (timer !== undefined) clearTimeout(timer);
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
       if (watchdog !== null) {
         clearTimeout(watchdog);
         watchdog = null;
@@ -488,7 +520,7 @@ export async function runManifest(
       return;
     }
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       // The child may have exited (or been killed) between the timer firing
       // and this callback running: don't misclassify a natural exit as a
       // timeout, and don't signal a possibly-reused process group. Also guard
