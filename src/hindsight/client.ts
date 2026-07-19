@@ -88,10 +88,12 @@ export class HindsightClient {
     );
     // INV-HM1: env-only fallback. Never logged. Both env names accepted:
     // HINDSIGHT_BEARER_TOKEN (spec INV-HM1, preferred) and
-    // HINDSIGHT_API_KEY (research-brief/legacy fallback).
+    // HINDSIGHT_API_KEY (research-brief/legacy fallback). Empty-string env
+    // values are coerced to undefined so a misconfigured
+    // HINDSIGHT_BEARER_TOKEN="" cannot shadow a valid HINDSIGHT_API_KEY.
     this.apiKey = opts.apiKey
-      ?? process.env.HINDSIGHT_BEARER_TOKEN
-      ?? process.env.HINDSIGHT_API_KEY;
+      ?? (process.env.HINDSIGHT_BEARER_TOKEN || undefined)
+      ?? (process.env.HINDSIGHT_API_KEY || undefined);
     this.requestId = opts.requestId;
   }
 
@@ -391,9 +393,21 @@ function truncate(s: string, max = 512): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
-/** INV-HM2: validate bank_id at the client boundary before it reaches the URL path. */
+/** INV-HM2: validate bank_id at the client boundary before it reaches the URL path.
+ *  Logs a structured entry on rejection — this throws BEFORE request(), so the
+ *  request() finally-log would never fire and the rejection would be invisible. */
 function assertBankId(bankId: string, requestId: string): void {
   if (!BankIdSchema.safeParse(bankId).success) {
+    log({
+      requestId,
+      operation: "assertBankId",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      bankId,
+      error: { code: "invalid_bank_id", message: `invalid bank_id: ${bankId}` },
+    });
     throw new HindsightHttpError(422, `invalid bank_id: ${bankId}`, requestId);
   }
 }

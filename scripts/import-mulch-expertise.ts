@@ -60,14 +60,20 @@ export function parseArgs(argv: string[]): Args {
     repoSlug: process.env.QDS_REPO_SLUG ?? basename(process.cwd()),
     bankId: "",
   };
+  const VALUE_FLAGS = new Set(["--expertise-dir", "--repo-slug", "--bank-id"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    if (a === "--expertise-dir") {
-      opts.expertiseDir = argv[++i] ?? opts.expertiseDir;
-    } else if (a === "--repo-slug") {
-      opts.repoSlug = argv[++i] ?? opts.repoSlug;
-    } else if (a === "--bank-id") {
-      opts.bankId = argv[++i] ?? opts.bankId;
+    if (VALUE_FLAGS.has(a)) {
+      // A value flag MUST be followed by a non-empty value. A bare
+      // `--expertise-dir` (missing value) is a user typo — error loudly
+      // instead of silently importing from the default dir.
+      const v = argv[++i];
+      if (typeof v !== "string" || v.length === 0 || v.startsWith("--")) {
+        throw new Error(`${a} requires a non-empty value`);
+      }
+      if (a === "--expertise-dir") opts.expertiseDir = v;
+      else if (a === "--repo-slug") opts.repoSlug = v;
+      else opts.bankId = v;
     } else if (a === "--help" || a === "-h") {
       process.stdout.write(
         [
@@ -87,7 +93,27 @@ export function parseArgs(argv: string[]): Args {
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  let args: Args;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (e) {
+    // parseArgs throws on a value flag with no value (user typo). Emit a
+    // structured envelope rather than a raw stack trace.
+    const requestId = crypto.randomUUID();
+    process.stdout.write(
+      `${JSON.stringify({
+        ok: false,
+        totalFiles: 0,
+        importedFiles: 0,
+        updatedFiles: 0,
+        failures: [],
+        requestId,
+        error: { code: "bad_args", message: (e as Error).message },
+      })}\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
 
   // INV-HM2 (fix [9]): validate the bank id BEFORE constructing the client /
   // issuing any retain. Emit a structured -32003 envelope + exit(1).
@@ -109,10 +135,12 @@ async function main(): Promise<void> {
     return;
   }
 
+  // INV-HM1: the client constructor reads HINDSIGHT_BEARER_TOKEN (preferred)
+  // then HINDSIGHT_API_KEY (legacy) from env, coercing empty strings to
+  // undefined. No explicit apiKey here — passing one would re-introduce the
+  // empty-string-shadows-fallback hazard the constructor now guards against.
   const client = new HindsightClient({
     baseUrl: process.env.HINDSIGHT_BASE_URL,
-    // env-only (INV-HM1): spec name preferred, research-brief/legacy fallback.
-    apiKey: process.env.HINDSIGHT_BEARER_TOKEN ?? process.env.HINDSIGHT_API_KEY,
   });
 
   let result: ImportResult;
@@ -132,7 +160,7 @@ async function main(): Promise<void> {
       updatedFiles: 0,
       failures: [],
       requestId: crypto.randomUUID(),
-      error: { code: -1, message: `import crashed: ${(e as Error).message}` },
+      error: { code: "import_crashed", message: `import crashed: ${(e as Error).message}` },
     };
   }
 

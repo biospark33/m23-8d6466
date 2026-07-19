@@ -68,4 +68,14 @@ describe("import-mulch-expertise CLI — parseArgs", () => {
     expect(a.expertiseDir).toBe(".mulch/expertise");
     expect(a.bankId).toBe("");
   });
+
+  test("value flag with no value throws (no silent default) [Review R2 L1]", () => {
+    // A bare `--expertise-dir` (missing value) is a typo, not a request for
+    // the default dir. parseArgs must throw rather than silently import from
+    // `.mulch/expertise`.
+    expect(() => parseArgs(["--expertise-dir"])).toThrow(/requires a non-empty value/);
+    expect(() => parseArgs(["--repo-slug", ""])).toThrow(/requires a non-empty value/);
+    // A flag-looking value (`--bank-id --repo-slug`) is also rejected.
+    expect(() => parseArgs(["--bank-id", "--repo-slug"])).toThrow(/requires a non-empty value/);
+  });
 });

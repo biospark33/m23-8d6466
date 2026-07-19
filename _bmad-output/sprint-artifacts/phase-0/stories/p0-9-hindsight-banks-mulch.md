@@ -407,3 +407,43 @@ Findings from the bmad adversarial code review (Blind Hunter + Edge Case Hunter 
 - **Mulch CLI not invoked (Integration Points):** P0.9's importer reads `.mulch/expertise/` files directly as canonical input; `/usr/local/bin/mulch` is NOT spawned. The spec's "expertise extraction if needed" clause is conditional and not triggered by the file-read path. The version-warning contract is deferred until a code path actually invokes the CLI.
 - **AC-7 2s exact-match advisory deferred:** the recall payload has no `mode` field to distinguish exact-match (2s target) from semantic (5s target) queries in Phase 1, so only the 5s semantic advisory is wired (`slow_query:true` at >5s). The 2s exact-match advisory is deferred to Phase 2 alongside a recall `mode` field — mirroring the AC-1 ≥0.8 Phase-2 deferral.
 - **INV-HM1 env var aliasing:** the client reads `HINDSIGHT_BEARER_TOKEN` (spec name, preferred) with fallback to `HINDSIGHT_API_KEY` (research-brief legacy name). Either satisfies INV-HM1.
+
+### Review Findings Round 2 (bmad code review, 2026-07-19)
+
+Second adversarial pass (Blind Hunter + Edge Case Hunter + Acceptance Auditor). Acceptance Auditor confirmed all 7 ACs PASS, all 10 schemas match spec field-for-field, all 6 invariants enforced — zero BLOCKER/HIGH contract deviations. Blind + Edge surfaced 14 runtime-robustness findings (no spec violations); all 14 fixed in code on this branch. 12 candidate findings dismissed with reasoning (spec-intended or false positive after verification).
+
+#### Fixed in code (Round 2)
+
+- [x] [Review][Patch] R2-M1 dev-meta bank id overflow on listBanks-fail fallback → truncate base to MAX_BASE_LEN(52) so `-dev-meta` (61 chars) stays schema-valid [src/hindsight/bank-provisioner.ts]
+- [x] [Review][Patch] R2-M2 acquireLock re-threw non-EEXIST (EACCES/ENOTDIR) outside any try → escaped the envelope contract as a raw stack trace; now wrapped → -32005 "provision lock unavailable" envelope [src/hindsight/bank-provisioner.ts]
+- [x] [Review][Patch] R2-M6/M7 idempotent set masked bare 422 + loose `msg.includes("exist")` as "exists" → narrowed to HTTP 409 OR explicit "already exist" body; a real 422 validation failure now surfaces as -32005 instead of a silent false "exists" [src/hindsight/bank-provisioner.ts]
+- [x] [Review][Patch] R2-M8 extractExistingBankIds added display `name` to the collision set → false -2 suffix on first provision; `name` now used only when it is itself a schema-valid bank id [src/hindsight/bank-provisioner.ts]
+- [x] [Review][Patch] R2-M3 empty-string `HINDSIGHT_BEARER_TOKEN=""` shadowed a valid `HINDSIGHT_API_KEY` via `??` → both env names now coerce empty to undefined; scripts no longer pass an explicit apiKey (client constructor owns the fallback) [src/hindsight/client.ts, scripts/*]
+- [x] [Review][Patch] R2-L4 assertBankId threw before request() so no observability entry was emitted → now logs a structured `assertBankId` error entry on rejection [src/hindsight/client.ts]
+- [x] [Review][Patch] R2-M4 realBridgeProbe failed OPEN when a matched server had no usable id (assumed healthy without calling /test) → now fail-closed `{registered:true, healthy:false}` [scripts/provision-hindsight-banks.ts]
+- [x] [Review][Patch] R2-M5 realBridgeProbe mapped 401/403 to `{registered:false}` → CLI emitted -32001, misdiagnosing an auth gap as a registration gap; 401/403 now `{registered:true, healthy:false}` (bridge responded, health unconfirmed) [scripts/provision-hindsight-banks.ts]
+- [x] [Review][Patch] R2-M9 provision script ran top-level `setLogSink` + `await main()` with no `import.meta.main` guard → importing the module hijacked the global log sink / kicked off a provision; both now guarded (parity with the import script) [scripts/provision-hindsight-banks.ts]
+- [x] [Review][Patch] R2-L1 import script `parseArgs` silently kept the default when a value flag had no value → now throws `"<flag> requires a non-empty value"` (envelope + exit 1 in main) [scripts/import-mulch-expertise.ts]
+- [x] [Review][Patch] R2-L2 JSONL `entryIndex` reported the non-blank ordinal, not the file line number (spec says "JSONL line N") → now 1-based file line number [src/hindsight/mulch-importer.ts]
+- [x] [Review][Patch] R2-L3 `slow_query:true` advisory flagged only the initial recall, never the post-consolidation recall → now OR-ed from both recalls (AC-7) [src/hindsight/round-trip-verifier.ts]
+- [x] [Review][Patch] R2-L5 ad hoc error codes `-5` (dir-not-found) and `-1` (import crash) were outside any taxonomy and inconsistent with the sibling string codes → normalized to `"expertise_dir_not_found"` and `"import_crashed"` [src/hindsight/mulch-importer.ts, scripts/import-mulch-expertise.ts]
+
+#### Dismissed (Round 2, with reasoning)
+
+- dedupHash no case-folding: spec (Technical Notes) mandates NFC-only; case-difference = distinct entry is spec-intended.
+- post-consolidation strict ALL-tokens matcher: `preserveRecent` keeps the just-retained memory verbatim, so tokens survive consolidation; matches AC-1 Phase-1 token-overlap relevance.
+- `round_trip_ms` = op-time sum not wall clock: documented intentional (header comment); defensible reading of CC-9.
+- ALL non-idempotent createBank throws → -32005: the taxonomy offers no "network/gateway" code for surface (b); the envelope message carries the real cause verbatim.
+- 422-self-mask via `createBankIdempotent`'s own safeParse: FALSE on inspection — the safeParse 422 throws BEFORE the try block, so it is not caught by the idempotent branch.
+- F-1 importer-script `-dev-meta` validation gap: FALSE — `resolveBankId("!!!!")` → `""` → `"-dev-meta"` fails BankIdSchema (leading hyphen) → -32003.
+- `toArray` single YAML object treated as one entry: lenient by design (better than dropping a valid seed).
+- `verifyTenantIsolation` marker retained as a raw string (not JSONL): INV-HM4 probe helper, not a consumer path; marker distinctiveness is the point.
+- `maskEnv(process.env as Record<string,string>)` undefined values: P0.7 reused redactor handles `string | undefined`.
+- `createBank` PUT response unvalidated: the provisioner ignores the createBank return value.
+- `resolveBankId` no non-string guard: CLI guarantees a string (basename/env).
+- `isPidAlive` EPERM→alive + empty-PID 5-min recovery: conservative-by-design; the LOCK_STALE_MS mtime backstop recovers orphaned locks.
+
+#### Spec clarifications (Round 2 amendments)
+
+- **AC-7 2s exact-match advisory:** confirmed deferred to Phase 2 alongside a recall `mode` field (Round 1 amendment holds); only the 5s semantic advisory is wired.
+- **realBridgeProbe 401/403 semantics (R2-M5):** an auth-blocked `/api/mcp-servers` response is NOT a registration failure — the bridge HTTP server is up. The probe now reports `{registered:true, healthy:false}` so the CLI does not emit a misleading -32001.

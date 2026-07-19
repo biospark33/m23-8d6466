@@ -357,15 +357,15 @@ describe("HindsightClient error paths", () => {
       expect(headers.get("Authorization")).toBe("Bearer bearer-val");
 
       // Only legacy key set → still works (fallback).
-      delete process.env.HINDSIGHT_BEARER_TOKEN;
+      process.env.HINDSIGHT_BEARER_TOKEN = undefined;
       installMock({ body: {} });
       const clientLegacy = new HindsightClient({});
       await clientLegacy.listBanks();
       headers = new Headers(lastCall?.init?.headers);
       expect(headers.get("Authorization")).toBe("Bearer legacy-val");
     } finally {
-      delete process.env.HINDSIGHT_BEARER_TOKEN;
-      delete process.env.HINDSIGHT_API_KEY;
+      process.env.HINDSIGHT_BEARER_TOKEN = undefined;
+      process.env.HINDSIGHT_API_KEY = undefined;
     }
   });
 

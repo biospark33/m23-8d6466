@@ -300,8 +300,18 @@ function extractExistingBankIds(raw: unknown): Set<string> {
     }
     if (entry !== null && typeof entry === "object") {
       const obj = entry as Record<string, unknown>;
-      const id = obj.bank_id ?? obj.bankId ?? obj.id ?? obj.name;
-      if (typeof id === "string") out.add(id);
+      const id = obj.bank_id ?? obj.bankId ?? obj.id;
+      if (typeof id === "string") {
+        out.add(id);
+      } else {
+        // Fall back to `name` ONLY when it is itself a schema-valid bank id.
+        // A human display name ("My Repo") would otherwise pollute the
+        // collision set and force a spurious -2 suffix on first provision.
+        const name = obj.name;
+        if (typeof name === "string" && BankIdSchema.safeParse(name).success) {
+          out.add(name);
+        }
+      }
     }
   }
   return out;
@@ -339,7 +349,16 @@ async function createBankIdempotent(
       // idempotent success per "re-provisioning existing bank returns
       // existing bank_id" (DoD bullet 1).
       const msg = e.message.toLowerCase();
-      if (e.status === 409 || e.status === 422 || msg.includes("exist") || msg.includes("already")) {
+      // Idempotent-success signal: HTTP 409 (canonical "already exists"), OR a
+      // body that explicitly says "already exist(s)". Bare 422 is intentionally
+      // NOT treated as idempotent — a real Hindsight 422 is a validation
+      // failure (bad shape/field), not a conflict; masking it as "exists"
+      // would silently skip bank creation and 404 every later retain. A server
+      // that returns 422 for an existing bank is expected to say so in the
+      // body (caught by the message match below). Loose substrings like bare
+      // "exist"/"already" are also excluded — they match unrelated messages
+      // ("field X must exist").
+      if (e.status === 409 || msg.includes("already exist")) {
         status = "exists";
         return status;
       }
@@ -426,7 +445,23 @@ export async function provisionBanks(opts: ProvisionOptions): Promise<ProvisionR
 
   // Single-flight (INV-HM6 / CC-10). Skip when explicitly disabled.
   const lockPath = opts.lockPath ?? defaultLockPath();
-  const release = opts.noLock ? (() => {}) : acquireLock(lockPath);
+  let release: (() => void) | null;
+  if (opts.noLock) {
+    release = () => {};
+  } else {
+    // acquireLock can throw on an unwritable lock dir (EACCES/ENOSPC) — wrap
+    // it so the CLI emits a structured envelope instead of a raw stack trace
+    // escaping the contract.
+    try {
+      release = acquireLock(lockPath);
+    } catch (e) {
+      return envelopeErr(
+        ERR_BANK_COLLISION,
+        `provision lock unavailable: ${(e as Error).message}`,
+        requestId,
+      );
+    }
+  }
   if (release === null) {
     // Fresh lock held by a live process → provision_in_progress (no code).
     return provisionInProgress(requestId);
@@ -474,9 +509,12 @@ export async function provisionBanks(opts: ProvisionOptions): Promise<ProvisionR
       }
       repoBankId = resolved_id;
     } else {
-      // listBanks failed → no collision loop. Use the (schema-valid) base id
-      // directly; a real collision is caught by the idempotent PUT below.
-      repoBankId = baseId;
+      // listBanks failed → no collision loop. Truncate to the safe-max length
+      // so the `${repoBankId}-dev-meta` variant stays schema-valid (≤64). Using
+      // the untruncated baseId (up to 64 chars) here would make -dev-meta
+      // overflow to 73 chars and fail inside createBankIdempotent. A real
+      // collision is still caught by the idempotent PUT below.
+      repoBankId = truncateForSuffix(baseId);
     }
 
     const targets: string[] = [repoBankId, `${repoBankId}-dev-meta`, COLLECTIVE_BANK_ID];

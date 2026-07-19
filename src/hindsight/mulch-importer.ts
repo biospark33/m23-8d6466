@@ -138,7 +138,10 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
       updatedFiles: 0,
       failures: [],
       requestId,
-      error: { code: -5, message: `expertise dir not found: ${opts.expertiseDir}` },
+      // Stable string code (consistent with ERR_EXPERTISE_DIR_UNREADABLE for
+      // the sibling readdir-failure path). Not a -3200N code: this is an
+      // importer-internal surface, not the HTTP bridge surface (CC-W3 (a)).
+      error: { code: "expertise_dir_not_found", message: `expertise dir not found: ${opts.expertiseDir}` },
     };
     emitLog(requestId, "import", opts.bankId, start, "error", result.error);
     return result;
@@ -392,8 +395,12 @@ function parseFile(filePath: string, dirReal: string, failures: ImportFailure[])
   if (ext === ".jsonl") {
     const relFile = relative(dirReal, filePath);
     const out: ParsedEntry[] = [];
-    let i = 0;
+    // `lineNo` is the 1-based FILE LINE NUMBER (per spec "JSONL line 3"), not
+    // the non-blank ordinal — operators use entryIndex to jump to the line in
+    // the source file, so blank lines must count.
+    let lineNo = 0;
     for (const line of text.split("\n")) {
+      lineNo++;
       const trimmed = line.trim();
       if (trimmed.length === 0) continue;
       try {
@@ -401,9 +408,8 @@ function parseFile(filePath: string, dirReal: string, failures: ImportFailure[])
       } catch {
         // B-3: one malformed line must NOT drop the whole file as parse_failed.
         // Record the per-entry failure at the line's position and keep parsing.
-        failures.push({ file: relFile, entryIndex: i, error: "invalid_jsonl_line" });
+        failures.push({ file: relFile, entryIndex: lineNo, error: "invalid_jsonl_line" });
       }
-      i++;
     }
     return out;
   }

@@ -435,6 +435,9 @@ export async function verifyRoundTrip(
       const res = await client.recall(bankId, query);
       postRecallMs = res.durationMs;
       results = res.results;
+      // AC-7 advisory covers BOTH recalls — flag slow on the post-consolidation
+      // recall too, not just the initial one.
+      if (postRecallMs > SLOW_QUERY_THRESHOLD_MS) slowQuery = true;
     } catch (e) {
       status = "error";
       if (e instanceof HindsightHttpError) {

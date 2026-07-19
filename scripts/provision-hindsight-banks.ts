@@ -25,9 +25,13 @@ import {
 import { setLogSink } from "../src/swarmclaw/mcp/stdio-transport.ts";
 
 // Route structured logs to stderr so stdout carries only the JSON envelope.
-setLogSink((entry) => {
-  process.stderr.write(`${JSON.stringify(entry)}\n`);
-});
+// Guarded by import.meta.main so importing this module (e.g. for a shared
+// helper) does not hijack the process-global log sink or kick off a provision.
+if (import.meta.main) {
+  setLogSink((entry) => {
+    process.stderr.write(`${JSON.stringify(entry)}\n`);
+  });
+}
 
 interface ArgSpec {
   repoSlug?: string;
@@ -60,7 +64,7 @@ function defaultRepoSlug(): string {
  * SWARMCLAW_BASE_URL is unset, returns {registered:true, healthy:true} so the
  * script works standalone in dev/tests.
  */
-async function realBridgeProbe(): Promise<BridgeProbe> {
+export async function realBridgeProbe(): Promise<BridgeProbe> {
   const base = process.env.SWARMCLAW_BASE_URL;
   if (!base) return { registered: true, healthy: true };
   const url = base.replace(/\/+$/, "");
@@ -68,7 +72,16 @@ async function realBridgeProbe(): Promise<BridgeProbe> {
     const res = await fetch(`${url}/api/mcp-servers`, {
       headers: { accept: "application/json" },
     });
-    if (!res.ok) return { registered: false, healthy: false };
+    if (!res.ok) {
+      // 401/403: the bridge endpoint responded but auth-blocked us. The bridge
+      // IS registered (the HTTP server is up); health can't be verified.
+      // Anything else (404/5xx) → treat as not registered. Mapping 401/403 to
+      // "not registered" would misdiagnose an auth gap as a registration gap.
+      if (res.status === 401 || res.status === 403) {
+        return { registered: true, healthy: false };
+      }
+      return { registered: false, healthy: false };
+    }
     const data: unknown = await res.json();
     const servers: unknown[] = Array.isArray(data)
       ? data
@@ -81,7 +94,10 @@ async function realBridgeProbe(): Promise<BridgeProbe> {
     if (!hs) return { registered: false, healthy: false };
     const id = (hs as { id?: unknown }).id;
     if (typeof id !== "string" && typeof id !== "number") {
-      return { registered: true, healthy: true };
+      // The server matched the "hindsight" name but exposes no usable id, so
+      // we cannot call /test. Fail closed on health (AC-5): registered by name
+      // match, but health unconfirmed rather than assumed healthy.
+      return { registered: true, healthy: false };
     }
     const testRes = await fetch(`${url}/api/mcp-servers/${id}/test`, {
       headers: { accept: "application/json" },
@@ -113,5 +129,8 @@ async function main(): Promise<number> {
   return result.ok ? 0 : 1;
 }
 
-const code = await main();
-process.exitCode = code;
+// Only run when invoked directly (not when imported by tests / other scripts).
+if (import.meta.main) {
+  const code = await main();
+  process.exitCode = code;
+}

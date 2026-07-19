@@ -709,3 +709,94 @@ describe("bank-provisioner: fix B-4 failed-provision log status", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review R2 (2026-07-19): listBanks-fail dev-meta overflow + lock-throw guard
+// ---------------------------------------------------------------------------
+
+describe("bank-provisioner: review R2 fixes", () => {
+  test("listBanks fails + long slug → dev-meta still fits BankIdSchema [R2 M1]", async () => {
+    // Pre-fix: the listBanks-fail fallback used the untruncated 64-char base
+    // id, so `${base}-dev-meta` overflowed to 73 chars and failed inside
+    // createBankIdempotent. Post-fix: the fallback truncates to MAX_BASE_LEN
+    // (52), so dev-meta = 61 chars and stays schema-valid.
+    const longSlug = "a".repeat(64);
+    const client = makeMockClient();
+    client.listBanks.mockImplementation(() => Promise.reject(new Error("net err")));
+    const result = await provisionBanks({
+      client,
+      repoSlug: longSlug,
+      bridgeProbe: HEALTHY,
+      lockPath,
+      requestId: "r2-m1",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    for (const b of result.banks) {
+      expect(BankIdSchema.safeParse(b.bankId).success).toBe(true);
+    }
+    const devMeta = result.banks.find((b) => b.bankId.endsWith("-dev-meta"));
+    expect(devMeta).toBeDefined();
+    expect(devMeta!.bankId.length).toBeLessThanOrEqual(64);
+  });
+
+  test("uncreatable lock path → structured envelope, no crash [R2 M2]", async () => {
+    // lockPath whose parent is a regular file → openSync(wx) throws a non-
+    // EEXIST errno (ENOTDIR/EACCES/EISDIR) → the acquireLock wrapper must
+    // surface a structured envelope instead of escaping as a raw stack trace.
+    writeFileSync(join(tmpDir, "blocker"), "i am a file, not a dir");
+    const client = makeMockClient();
+    const result = await provisionBanks({
+      client,
+      repoSlug: "QDS-Factory",
+      bridgeProbe: HEALTHY,
+      lockPath: join(tmpDir, "blocker", "provision.lock"),
+      requestId: "r2-m2",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(ERR_BANK_COLLISION);
+    expect(result.error.message).toMatch(/provision lock unavailable/);
+    // No bank work done — the guard short-circuits before any createBank.
+    expect(client.createBank).not.toHaveBeenCalled();
+  });
+
+  test("extractExistingBankIds ignores display names that aren't valid ids [R2 M8]", async () => {
+    // A bank with a human display name "My Repo" (invalid id shape) must NOT
+    // pollute the collision set and force a spurious -2 suffix.
+    const client = makeMockClient();
+    client.listBanks.mockImplementation(() =>
+      Promise.resolve({ banks: [{ bank_id: "other-repo", name: "My Repo" }] }),
+    );
+    const result = await provisionBanks({
+      client,
+      repoSlug: "my-repo",
+      bridgeProbe: HEALTHY,
+      lockPath,
+      requestId: "r2-m8",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // "my-repo" is NOT taken (only "other-repo" exists; "My Repo" is a display
+    // name, ignored) → no -2 suffix.
+    expect(result.banks[0]!.bankId).toBe("my-repo");
+  });
+
+  test("bare 422 (not 'already exist') is NOT masked as idempotent exists [R2 M6/M7]", async () => {
+    // A 422 whose body does not say "already exist" is a real validation
+    // failure → must surface as -32005, not silently "exists".
+    const client = makeMockClient({
+      createBankThrows: () => new HindsightHttpError(422, "invalid field: options", "r"),
+    });
+    const result = await provisionBanks({
+      client,
+      repoSlug: "QDS-Factory",
+      bridgeProbe: HEALTHY,
+      lockPath,
+      requestId: "r2-m6",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(ERR_BANK_COLLISION);
+  });
+});

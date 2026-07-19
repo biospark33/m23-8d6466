@@ -691,7 +691,7 @@ describe("importMulch — fix [8] unreadable expertise dir (EACCES)", () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error?.code).toBe(-5); // dir-not-found stable code
+    expect(result.error?.code).toBe("expertise_dir_not_found"); // dir-not-found stable code
   });
 
   test("empty dir → graceful ok:true with empty expertise dir note (regression)", async () => {
@@ -731,7 +731,7 @@ this is not json
     // Bad line recorded as per-entry failure.
     const bad = result.failures.find((f) => f.error === "invalid_jsonl_line");
     expect(bad).toBeDefined();
-    expect(bad!.entryIndex).toBe(1); // second non-blank line
+    expect(bad!.entryIndex).toBe(2); // 1-based file line number (spec: "JSONL line N")
     expect(bad!.file).toBe("mixed.jsonl");
     // NO whole-file parse_failed for this file.
     const pf = result.failures.find(
