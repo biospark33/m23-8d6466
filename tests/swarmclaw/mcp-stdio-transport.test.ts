@@ -700,6 +700,44 @@ for await (const chunk of Bun.stdin.stream()) {
     expect((err as JsonRpcError).code).toBe(-32603); // coerced from "E_FAIL"
     expect((err as JsonRpcError).message).toBe("42"); // stringified from 42
   }, 15000);
+
+  test("primitive (non-object) upstream error frame stringifies into the message", async () => {
+    // A non-conforming server emits a bare primitive as `error` (not an object).
+    // The transport must surface the primitive as the message rather than
+    // discarding it for the "unknown MCP error" fallback.
+    const script = `
+const decoder = new TextDecoder();
+let buf = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buf += decoder.decode(chunk, { stream: true });
+  let idx;
+  while ((idx = buf.indexOf("\\n")) >= 0) {
+    const line = buf.slice(0, idx);
+    buf = buf.slice(idx + 1);
+    if (!line.trim()) continue;
+    const msg = JSON.parse(line);
+    if (msg.method === "initialize") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "primitive-err", version: "0" } } }) + "\\n");
+    } else if (msg.method === "tools/call") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: "boom" }) + "\\n");
+    }
+  }
+}
+`;
+    const t = new StdioTransport({
+      command: "bun",
+      args: ["-e", script],
+      env: { ...(process.env as Record<string, string>) },
+      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+    });
+    live.push(t);
+    await t.spawn();
+    await t.initialize();
+    const err = await t.request("tools/call", { name: "retain", arguments: {} }, 5000).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(JsonRpcError);
+    expect((err as JsonRpcError).code).toBe(-32603); // no code on a primitive → internal-error default
+    expect((err as JsonRpcError).message).toBe("boom"); // primitive surfaced, not "unknown MCP error"
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -747,10 +785,21 @@ describe("real hindsight-local-mcp (integration)", () => {
       // EXPLICITLY on timeout; a green run with zero assertions would be a
       // faked pass) and give the test wrapper headroom above it.
       const proc = Bun.spawn(["hindsight-local-mcp", "--help"], { stdout: "pipe", stderr: "pipe" });
-      const out = await Promise.race([
-        new Response(proc.stdout).text(),
-        new Promise<null>((res) => setTimeout(() => res(null), 60_000)),
-      ]);
+      // Hold the 60s timer so it can be cleared in `finally` — otherwise, when
+      // stdout resolves first, the dangling timer keeps the event loop alive
+      // (and can stall the runner) for the full minute.
+      let helpTimer: ReturnType<typeof setTimeout> | undefined;
+      let out: string | null;
+      try {
+        out = await Promise.race([
+          new Response(proc.stdout).text(),
+          new Promise<null>((res) => {
+            helpTimer = setTimeout(() => res(null), 60_000);
+          }),
+        ]);
+      } finally {
+        if (helpTimer !== undefined) clearTimeout(helpTimer);
+      }
       try {
         proc.kill("SIGKILL");
       } catch {

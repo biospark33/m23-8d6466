@@ -604,7 +604,13 @@ export class StdioTransport {
       // Coerce a non-conforming wire shape so the rejected error always has a
       // numeric code / string message — the route's response schema requires
       // it, and a non-number code would escape as a 500 instead of a 502.
-      const raw = env.error as { code?: unknown; message?: unknown; data?: unknown };
+      // `env.error` is typed `unknown`; a non-conforming server may emit a
+      // primitive (bare string/number) rather than an object. Treat a primitive
+      // as the message string so the actual error text survives coercion
+      // instead of being replaced by the "unknown MCP error" fallback.
+      const raw = typeof env.error === "object" && env.error !== null
+        ? (env.error as { code?: unknown; message?: unknown; data?: unknown })
+        : { message: String(env.error) };
       const code = typeof raw.code === "number" ? raw.code : -32603;
       const message = typeof raw.message === "string" ? raw.message : String(raw.message ?? "unknown MCP error");
       const err = new JsonRpcError(code, message, raw.data);
