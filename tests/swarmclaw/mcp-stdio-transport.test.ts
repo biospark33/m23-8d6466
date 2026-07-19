@@ -502,6 +502,46 @@ describe("stdio transport robustness", () => {
     }
   }, 20000);
 
+  test("first-byte latency is attributed to the request whose response resolves, not the earliest pending", async () => {
+    // Two overlapping tools/call requests: `retain` held back 400ms, `reflect`
+    // answered immediately. Chunk-level attribution (the old bug) would credit
+    // reflect's fast arrival to retain (the earliest unfired pending), so
+    // retain would read ~0ms and reflect would read ~400ms — inverted. Per-
+    // request attribution reads retain ≈ its own delay and reflect ≈ fast.
+    const t = bunFake({ FAKE_MCP_TOOL_DELAY_MS: JSON.stringify({ retain: 400 }) });
+    live.push(t);
+    await t.spawn();
+    await t.initialize();
+
+    let retainLatency = -1;
+    let reflectLatency = -1;
+    const retain = t.request(
+      "tools/call",
+      { name: "retain", arguments: { bank_id: "a", content: "x" } },
+      5000,
+      (l) => {
+        retainLatency = l;
+      },
+    );
+    const reflect = t.request(
+      "tools/call",
+      { name: "reflect", arguments: { bank_id: "a" } },
+      5000,
+      (l) => {
+        reflectLatency = l;
+      },
+    );
+    await Promise.all([retain, reflect]);
+
+    // reflect resolved first and fast; retain resolved later, near its delay.
+    expect(reflectLatency).toBeGreaterThanOrEqual(0);
+    expect(reflectLatency).toBeLessThan(200);
+    expect(retainLatency).toBeGreaterThanOrEqual(300);
+    // The decisive check: retain's latency reflects ITS OWN delay, not reflect's
+    // fast arrival — retain must be clearly slower than reflect.
+    expect(retainLatency).toBeGreaterThan(reflectLatency);
+  }, 15000);
+
   test("malformed non-JSON lines on the wire are skipped, replies still resolve", async () => {
     const t = bunFake({ FAKE_MCP_GARBAGE_LINE: "1" });
     live.push(t);
@@ -660,6 +700,84 @@ for await (const chunk of Bun.stdin.stream()) {
     expect((err as JsonRpcError).code).toBe(-32603); // coerced from "E_FAIL"
     expect((err as JsonRpcError).message).toBe("42"); // stringified from 42
   }, 15000);
+
+  test("primitive (non-object) upstream error frame stringifies into the message", async () => {
+    // A non-conforming server emits a bare primitive as `error` (not an object).
+    // The transport must surface the primitive as the message rather than
+    // discarding it for the "unknown MCP error" fallback.
+    const script = `
+const decoder = new TextDecoder();
+let buf = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buf += decoder.decode(chunk, { stream: true });
+  let idx;
+  while ((idx = buf.indexOf("\\n")) >= 0) {
+    const line = buf.slice(0, idx);
+    buf = buf.slice(idx + 1);
+    if (!line.trim()) continue;
+    const msg = JSON.parse(line);
+    if (msg.method === "initialize") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "primitive-err", version: "0" } } }) + "\\n");
+    } else if (msg.method === "tools/call") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: "boom" }) + "\\n");
+    }
+  }
+}
+`;
+    const t = new StdioTransport({
+      command: "bun",
+      args: ["-e", script],
+      env: { ...(process.env as Record<string, string>) },
+      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+    });
+    live.push(t);
+    await t.spawn();
+    await t.initialize();
+    const err = await t.request("tools/call", { name: "retain", arguments: {} }, 5000).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(JsonRpcError);
+    expect((err as JsonRpcError).code).toBe(-32603); // no code on a primitive → internal-error default
+    expect((err as JsonRpcError).message).toBe("boom"); // primitive surfaced, not "unknown MCP error"
+  }, 15000);
+
+  test("array upstream error frame is stringified, not treated as an object", async () => {
+    // A non-conforming server emits an array as `error`. Arrays are
+    // `typeof === "object"`, so without an Array.isArray guard the cast would
+    // treat the array as `{ code?, message?, data? }`, find no code/message,
+    // and fall back to "unknown MCP error" — discarding the real payload.
+    // The transport must stringify the array into the message instead.
+    const script = `
+const decoder = new TextDecoder();
+let buf = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buf += decoder.decode(chunk, { stream: true });
+  let idx;
+  while ((idx = buf.indexOf("\\n")) >= 0) {
+    const line = buf.slice(0, idx);
+    buf = buf.slice(idx + 1);
+    if (!line.trim()) continue;
+    const msg = JSON.parse(line);
+    if (msg.method === "initialize") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "array-err", version: "0" } } }) + "\\n");
+    } else if (msg.method === "tools/call") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: ["boom", "extra"] }) + "\\n");
+    }
+  }
+}
+`;
+    const t = new StdioTransport({
+      command: "bun",
+      args: ["-e", script],
+      env: { ...(process.env as Record<string, string>) },
+      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+    });
+    live.push(t);
+    await t.spawn();
+    await t.initialize();
+    const err = await t.request("tools/call", { name: "retain", arguments: {} }, 5000).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(JsonRpcError);
+    expect((err as JsonRpcError).code).toBe(-32603); // no code on an array → internal-error default
+    expect((err as JsonRpcError).message).toBe("boom,extra"); // array stringified, not "unknown MCP error"
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -702,14 +820,26 @@ describe("real hindsight-local-mcp (integration)", () => {
     "real binary exposes an HTTP API (host/port), not an stdio JSON-RPC server",
     async () => {
       // The launcher imports heavy modules (pg0/uvicorn) before argparse prints,
-      // so `--help` takes several seconds and its latency is load-dependent. We
-      // bound the wait ourselves (25s) and FAIL EXPLICITLY on a timeout — a
-      // green run with zero assertions would be a faked pass.
+      // so `--help` takes 9-14s idle and is load-dependent — under full-suite
+      // CPU contention a 25s bound flaked. Bound the wait at 60s (still FAIL
+      // EXPLICITLY on timeout; a green run with zero assertions would be a
+      // faked pass) and give the test wrapper headroom above it.
       const proc = Bun.spawn(["hindsight-local-mcp", "--help"], { stdout: "pipe", stderr: "pipe" });
-      const out = await Promise.race([
-        new Response(proc.stdout).text(),
-        new Promise<null>((res) => setTimeout(() => res(null), 25_000)),
-      ]);
+      // Hold the 60s timer so it can be cleared in `finally` — otherwise, when
+      // stdout resolves first, the dangling timer keeps the event loop alive
+      // (and can stall the runner) for the full minute.
+      let helpTimer: ReturnType<typeof setTimeout> | undefined;
+      let out: string | null;
+      try {
+        out = await Promise.race([
+          new Response(proc.stdout).text(),
+          new Promise<null>((res) => {
+            helpTimer = setTimeout(() => res(null), 60_000);
+          }),
+        ]);
+      } finally {
+        if (helpTimer !== undefined) clearTimeout(helpTimer);
+      }
       try {
         proc.kill("SIGKILL");
       } catch {
@@ -718,7 +848,7 @@ describe("real hindsight-local-mcp (integration)", () => {
       await proc.exited.catch(() => {});
       if (out === null) {
         throw new Error(
-          "hindsight-local-mcp --help exceeded 25s in an environment where the binary is present",
+          "hindsight-local-mcp --help exceeded 60s in an environment where the binary is present",
         );
       }
       // The launcher exposes the Hindsight API HTTP server (host/port flags),
@@ -727,6 +857,7 @@ describe("real hindsight-local-mcp (integration)", () => {
       expect(out).toContain("--port");
       expect(out.toLowerCase()).toContain("host");
     },
-    30_000,
+    // Above the 60s internal bound so the wrapper never fires first.
+    75_000,
   );
 });

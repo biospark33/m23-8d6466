@@ -44,6 +44,10 @@
  *                              "server_request_answered": true|false
  *   FAKE_MCP_RESPONSE_DELAY_MS — hold back every response write by this many ms
  *                              (transport latency assertion)
+ *   FAKE_MCP_TOOL_DELAY_MS   — JSON map {toolName: ms}; holds back the tools/call
+ *                              response for the named tool by that many ms (others
+ *                              reply immediately). Drives per-request first-byte
+ *                              latency attribution under overlapping invokes.
  *   FAKE_MCP_STDERR_MARKER   — write this line to stderr at startup, before anything
  *                              else (stderr-tail surfacing assertion on close errors)
  */
@@ -81,6 +85,19 @@ const rawWriteBytes = Number(process.env.FAKE_MCP_RAW_WRITE_BYTES ?? 0);
 const rawWriteChar = process.env.FAKE_MCP_RAW_WRITE_CHAR ?? "x";
 const responseDelayMs = Number(process.env.FAKE_MCP_RESPONSE_DELAY_MS ?? 0);
 
+// Optional per-tool response delay (JSON map {toolName: ms}). Lets a test make
+// one overlapping invoke slow and another fast to check per-request latency.
+const toolDelayMs: Record<string, number> = (() => {
+  const raw = process.env.FAKE_MCP_TOOL_DELAY_MS;
+  if (raw === undefined) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+})();
+
 // Set when the client answers our server→client request (id 99); only surfaced
 // in recall results when FAKE_MCP_SERVER_REQUEST=1.
 let serverRequestAnswered = false;
@@ -103,16 +120,16 @@ function currentToolNames(): string[] {
 // In-memory bank store: bank_id -> array of retained memory contents.
 const banks = new Map<string, string[]>();
 
-function reply(obj: unknown): void {
+function reply(obj: unknown, extraDelayMs = 0): void {
   if (process.env.FAKE_MCP_GARBAGE_LINE === "1") {
     // Interleave one malformed line before the real reply.
     process.stdout.write("this is not json\n");
   }
   const line = `${JSON.stringify(obj)}\n`;
-  if (responseDelayMs > 0) {
-    // Hold each response back so latency assertions see a measurable gap.
-    // Timers with the same delay fire in schedule order, so replies stay ordered.
-    setTimeout(() => process.stdout.write(line), responseDelayMs);
+  const delay = responseDelayMs + extraDelayMs;
+  if (delay > 0) {
+    // Hold this response back so latency assertions see a measurable gap.
+    setTimeout(() => process.stdout.write(line), delay);
     return;
   }
   process.stdout.write(line);
@@ -257,6 +274,7 @@ function handle(msg: any): void {
   if (method === "tools/call") {
     const name = params?.name;
     const args = (params?.arguments ?? {}) as Record<string, unknown>;
+    const perToolDelay = typeof toolDelayMs[name] === "number" ? toolDelayMs[name]! : 0;
     if (process.env.FAKE_MCP_ERROR_TOOL !== undefined && name === process.env.FAKE_MCP_ERROR_TOOL) {
       // Simulated upstream failure: reply with the configured error code
       // instead of a result (error-mapping test).
@@ -285,7 +303,7 @@ function handle(msg: any): void {
         text: JSON.stringify({ meta_request_id: params?._meta?.requestId ?? null }),
       });
     }
-    reply({ jsonrpc: "2.0", id, result });
+    reply({ jsonrpc: "2.0", id, result }, perToolDelay);
     return;
   }
   if (id !== undefined) {

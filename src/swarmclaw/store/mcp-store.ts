@@ -131,14 +131,6 @@ export class MCPStore {
     return this.servers.size;
   }
 
-  async remove(id: string): Promise<void> {
-    const rec = this.servers.get(id);
-    if (!rec) return;
-    this.servers.delete(id);
-    this.namesInUse.delete(rec.name);
-    await rec.stdio.shutdown();
-  }
-
   async shutdownAll(): Promise<void> {
     // First synchronous statement: close the store so no new records or
     // reservations can appear while the drain below is in flight.

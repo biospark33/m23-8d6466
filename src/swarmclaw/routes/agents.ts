@@ -81,15 +81,32 @@ function finish(
   agentId: string | null,
   resp: RouteResponse,
 ): RouteResponse {
+  return logResponse(start, requestId, "agent.register", agentId, resp);
+}
+
+/** Emit the CC-9 response log entry and return the response unchanged. Shared by
+ * the agent and MCP routes (operation + agentId vary per caller). */
+export function logResponse(
+  start: number,
+  requestId: string,
+  operation: string,
+  agentId: string | null,
+  resp: RouteResponse,
+  /** Optional server-side-only diagnostic for the log's error.message. When
+   * provided, overrides the message derived from resp.body — used to preserve
+   * subprocess-sourced detail (e.g. the real JsonRpcError text) in logs WITHOUT
+   * leaking it into resp.body (which is already sanitized for the client). */
+  detail?: string,
+): RouteResponse {
   log({
     requestId,
-    operation: "agent.register",
+    operation,
     agentId,
     timestamp: new Date().toISOString(),
     duration: Date.now() - start,
     status: resp.status < 400 ? "ok" : "error",
     ...(resp.status >= 400
-      ? { error: { code: String(resp.status), message: deriveErrorMessage(resp.body, "agent registration failed") } }
+      ? { error: { code: String(resp.status), message: detail ?? deriveErrorMessage(resp.body, `${operation} failed`) } }
       : {}),
   });
   return resp;

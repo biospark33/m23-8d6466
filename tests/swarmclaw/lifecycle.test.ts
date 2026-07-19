@@ -111,16 +111,19 @@ async function findChildPid(parentPid: number): Promise<number | null> {
 }
 
 /**
- * PPID-agnostic sweep: PIDs of ANY process running the fixture, however it is
- * parented. After the server exits, a leaked fixture subprocess is reparented
- * to PID 1, so a ppid match would never see it — scan the whole table.
+ * PPID-agnostic sweep, scoped to THIS test run. After the server exits, a
+ * leaked fixture subprocess is reparented to PID 1, so a ppid match would never
+ * see it — scan the whole table. But a bare `fake-mcp-server.ts` match also
+ * catches OTHER suites' fixtures running concurrently, so we require the
+ * per-run marker token (passed as an extra fixture argv, visible in `ps
+ * command`) — only THIS run's fixtures carry it.
  */
-async function listFixturePids(): Promise<number[]> {
+async function listFixturePids(runId: string): Promise<number[]> {
   const proc = Bun.spawn(["ps", "-eo", "pid,command"], { stdout: "pipe" });
   const out = await new Response(proc.stdout).text();
   const pids: number[] = [];
   for (const line of out.split("\n")) {
-    if (!line.includes("fake-mcp-server.ts")) continue;
+    if (!line.includes("fake-mcp-server.ts") || !line.includes(runId)) continue;
     const m = line.trim().match(/^(\d+)\s+/);
     if (m) pids.push(Number(m[1]));
   }
@@ -187,11 +190,15 @@ test("SIGTERM propagates to MCP subprocess; PID gone within 7s, no orphans", asy
   }
   expect(up).toBe(true);
 
-  // Register an MCP server → spawns the fake stdio subprocess.
+  // Unique per-run marker token, passed as an extra fixture argv so the orphan
+  // sweep can match ONLY this run's fixtures (not a sibling suite's) in `ps`.
+  const runId = `swarmclaw-run-${crypto.randomUUID()}`;
+
+  // Register an MCP server → spawns the fake stdio subprocess (with the marker).
   const reg = await fetch(`${base}/api/mcp-servers`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name: "lc", transport: "stdio", command: "bun", args: [FAKE] }),
+    body: JSON.stringify({ name: "lc", transport: "stdio", command: "bun", args: [FAKE, runId] }),
   });
   expect(reg.status).toBe(201);
 
@@ -219,12 +226,11 @@ test("SIGTERM propagates to MCP subprocess; PID gone within 7s, no orphans", asy
   // process may remain anywhere on the process table.
   await server.exited.catch(() => {});
   expect(pidAlive(childPid!)).toBe(false);
-  // PPID-agnostic orphan sweep: once the server exits, a leaked fixture
-  // subprocess would be reparented to PID 1, so the old ppid match could never
-  // see it. Scan the whole table instead. bun runs test files serially in one
-  // process and every other suite shuts its fixtures down in afterEach, so no
-  // other fixture process can legitimately be alive at this point.
-  const leaked = await listFixturePids();
+  // Orphan sweep scoped to THIS run's marker: once the server exits, a leaked
+  // fixture would be reparented to PID 1 (a ppid match could never see it), so
+  // scan the whole table — but only for fixtures carrying this run's marker, so
+  // a concurrently-running sibling suite's fixture cannot cause a false orphan.
+  const leaked = await listFixturePids(runId);
   expect(leaked).toEqual([]);
 }, 60000);
 

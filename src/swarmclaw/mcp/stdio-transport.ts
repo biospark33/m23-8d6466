@@ -530,7 +530,9 @@ export class StdioTransport {
   }
 
   private handleLine(line: string, firstByteAt: number): void {
-    let msg: any;
+    // The line comes from an untrusted subprocess — parse to `unknown` and
+    // narrow the JSON-RPC envelope explicitly before touching any field.
+    let msg: unknown;
     try {
       msg = JSON.parse(line);
     } catch {
@@ -563,17 +565,18 @@ export class StdioTransport {
       });
       return;
     }
+    const env = msg as { id?: unknown; method?: unknown; error?: unknown; result?: unknown };
     // A message carrying `method` is server-initiated: a notification (no id)
     // or a server→client request. We support no server methods, but JSON-RPC
     // requires a response to requests so the server is not left hanging.
     // String ids are valid JSON-RPC and get the same reply; they cannot
     // collide with `pending` because the client only issues numeric ids.
-    if (typeof msg.method === "string") {
-      if (typeof msg.id === "number" || typeof msg.id === "string") {
+    if (typeof env.method === "string") {
+      if (typeof env.id === "number" || typeof env.id === "string") {
         try {
           this.write({
             jsonrpc: "2.0",
-            id: msg.id,
+            id: env.id,
             error: { code: -32601, message: "method not supported by client" },
           });
         } catch {
@@ -582,29 +585,39 @@ export class StdioTransport {
       }
       return;
     }
-    if (typeof msg.id !== "number") return; // unmatched response
-    const p = this.pending.get(msg.id);
+    if (typeof env.id !== "number") return; // unmatched response
+    const p = this.pending.get(env.id);
     if (!p) return;
     clearTimeout(p.timer);
-    this.pending.delete(msg.id);
+    this.pending.delete(env.id);
     // Attribute first-byte latency to THIS response by id (correct for
     // concurrent, out-of-order, and multiple-responses-per-chunk), rather than
-    // to the earliest-unfired pending entry on any stdout bytes.
+    // to the earliest-unfired pending entry on any stdout bytes. `firstByteAt`
+    // is the arrival time of this response line's first byte (captured in
+    // readLoop via lineStartAt), so the latency reflects true first-byte
+    // arrival — not the later moment the full line resolved.
     if (p.firstByteFired !== true) {
       p.firstByteFired = true;
       p.onFirstByte?.(firstByteAt - p.startedAt);
     }
-    if (msg.error) {
+    if (env.error !== undefined && env.error !== null) {
       // Coerce a non-conforming wire shape so the rejected error always has a
       // numeric code / string message — the route's response schema requires
       // it, and a non-number code would escape as a 500 instead of a 502.
-      const raw = msg.error;
+      // `env.error` is typed `unknown`; a non-conforming server may emit a
+      // primitive (bare string/number) rather than an object. Treat a primitive
+      // as the message string so the actual error text survives coercion
+      // instead of being replaced by the "unknown MCP error" fallback.
+      const raw = typeof env.error === "object" && env.error !== null && !Array.isArray(env.error)
+        ? (env.error as { code?: unknown; message?: unknown; data?: unknown })
+        : { message: String(env.error) };
       const code = typeof raw.code === "number" ? raw.code : -32603;
       const message = typeof raw.message === "string" ? raw.message : String(raw.message ?? "unknown MCP error");
       const err = new JsonRpcError(code, message, raw.data);
       p.reject(err);
     } else {
-      p.resolve(msg.result);
+      // Result stays opaque JSON — passed through unchanged after envelope narrowing.
+      p.resolve(env.result);
     }
   }
 
