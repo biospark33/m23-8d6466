@@ -350,7 +350,7 @@ function nowIso(): string {
 	return new Date().toISOString();
 }
 
-function abbreviateModel(model: string): string {
+function abbreviateModel(model: unknown): string {
 	// Registry/pong fields are peer-controlled; a non-string would throw on
 	// startsWith/slice and crash the TUI render callback.
 	let m = typeof model === "string" ? model : "";
