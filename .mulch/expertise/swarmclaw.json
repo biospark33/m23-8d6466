@@ -1,0 +1,17 @@
+[
+  {
+    "domain": "swarmclaw",
+    "concepts": ["mcp", "tool-bridge", "retry"],
+    "expertise": "The SwarmClaw MCP bridge retries once on -32601 (unknown tool) after cache invalidation and schema re-validation. Tests must assert the FINAL error code, not the first — a transient -32601 that clears on retry is a success path."
+  },
+  {
+    "domain": "swarmclaw",
+    "concepts": ["maskenv", "redaction", "security"],
+    "expertise": "maskEnv(env?) masks ALL env values to *** before any env diagnostic is logged. It is the canonical P0.7 redactor — never write a bespoke one. PATH is always taken from the trusted parent process, never from a request-controlled env."
+  },
+  {
+    "domain": "swarmclaw",
+    "concepts": ["npx", "allowlist", "command-validation"],
+    "expertise": "INV-SC2 command allowlist: npx packages must be in SWARMCLAW_NPX_PACKAGE_ALLOWLIST (default hindsight-local-mcp, @anthropic-ai/claude-code). Provenance flags (--registry/--userconfig/--cache/--cwd) are forbidden because they can redirect the allowlisted package name to an attacker-controlled source."
+  }
+]

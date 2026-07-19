@@ -1,0 +1,597 @@
+/**
+ * Mulch expertise importer (P0.9).
+ *
+ * Reads a directory of `.yaml/.yml/.json/.jsonl` expertise files, parses + validates
+ * each entry against `MulchExpertiseSchema`, dedups by SHA-256(domain + NFC-sorted
+ * concepts), and retains each as a JSONL line into the target Hindsight bank.
+ *
+ * Contract: see _bmad-output/sprint-artifacts/phase-0/stories/p0-9-hindsight-banks-mulch.md
+ * "Mulch Storage Format Contract" (lines 164-181) + research-brief.md "File plan".
+ *
+ * Security:
+ *  - INV-HM3: each file path is resolved via `fs.realpathSync` and validated to
+ *    remain inside the expertise dir's own realpath (which is expected to live
+ *    under the project root). Symlinks pointing OUTSIDE are rejected per-file.
+ *  - INV-HM4: `verifyTenantIsolation` helper retains a marker into bankA and
+ *    asserts it is NOT recallable from bankB. Not called by importMulch —
+ *    exported separately for the DoD security test.
+ */
+
+import { createHash, randomUUID } from "node:crypto";
+import { realpathSync, readdirSync, statSync, readFileSync } from "node:fs";
+import { extname, relative, sep as PATH_SEP, resolve as pathResolve } from "node:path";
+
+import { parse } from "yaml";
+import { MulchExpertiseSchema, ERR_MULCH_FILE_COUNT, type MulchExpertise } from "./schemas.ts";
+import type { HindsightClient } from "./client.ts";
+import { log, newRequestId, type LogEntry } from "../swarmclaw/mcp/stdio-transport.ts";
+
+// ---------------------------------------------------------------------------
+// Constants (spec contract)
+// ---------------------------------------------------------------------------
+
+export const MAX_FILES = 100;
+export const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5 MB per file
+export const MAX_CONTENT_BYTES = 102_400; // 100 KB per expertise entry (mirrors RetainPayloadSchema)
+const SUPPORTED_EXTS = new Set([".yaml", ".yml", ".json", ".jsonl"]);
+const UTF8_BOM = 0xfeff; // U+FEFF — the EF BB BF bytes decode to this single codepoint
+
+// ---------------------------------------------------------------------------
+// Typed errors (stable failure-code classification — fix [5])
+// ---------------------------------------------------------------------------
+
+/**
+ * Raised when a single file exceeds MAX_FILE_BYTES. Classified into the
+ * stable failure code `file_too_large`. Replaces message/name sniffing.
+ */
+export class FileTooLargeError extends Error {
+  constructor(message = "file_too_large") {
+    super(message);
+    this.name = "FileTooLargeError";
+  }
+}
+
+/**
+ * Raised when a symlink's realpath target escapes the expertise dir (either
+ * outside the dir entirely, OR into a subdirectory of the dir — INV-HM3
+ * "top-level files only"). Stable failure code `symlink_escape`.
+ */
+export class SymlinkEscapeError extends Error {
+  constructor(message = "symlink_escape") {
+    super(message);
+    this.name = "SymlinkEscapeError";
+  }
+}
+
+/**
+ * Raised when realpath() on a candidate file fails (target missing or
+ * unreadable). Stable failure code `symlink_target_unreadable` (mapped to
+ * `symlink_escape` in the failure taxonomy since the importer can't trust
+ * the target).
+ */
+export class SymlinkTargetUnreadableError extends Error {
+  constructor(message = "symlink_target_unreadable") {
+    super(message);
+    this.name = "SymlinkTargetUnreadableError";
+  }
+}
+
+/** Stable errno code surfaced when the expertise dir cannot be read. */
+export const ERR_EXPERTISE_DIR_UNREADABLE = "expertise_dir_unreadable";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface ImportFailure {
+  file: string;
+  entryIndex?: number;
+  error: string;
+}
+
+export interface ImportResult {
+  ok: boolean;
+  totalFiles: number;
+  importedFiles: number;
+  updatedFiles: number;
+  failures: ImportFailure[];
+  requestId: string;
+  filesProcessed?: number;
+  note?: string;
+  /** `code` is a numeric MCP-style code (-32004 etc.) OR a stable string code
+   *  (`expertise_dir_unreadable`) for the unreadable-dir path (fix [8]). */
+  error?: { code: number | string; message: string };
+}
+
+export interface ImportOptions {
+  client: HindsightClient;
+  expertiseDir: string;
+  bankId: string;
+  requestId?: string;
+}
+
+// ---------------------------------------------------------------------------
+// importMulch
+// ---------------------------------------------------------------------------
+
+/**
+ * Read `expertiseDir` (non-recursive), parse each supported file, validate
+ * entries, dedup, and retain as JSONL into `bankId`. Best-effort per-entry:
+ * malformed files/entries go to `failures[]`, the rest still import.
+ */
+export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
+  const requestId = opts.requestId ?? newRequestId();
+  const start = Date.now();
+  const failures: ImportFailure[] = [];
+  let importedFiles = 0;
+  let updatedFiles = 0;
+
+  // Resolve the expertise dir's own realpath ONCE — every file must live under it.
+  let dirReal: string;
+  try {
+    dirReal = realpathSync(opts.expertiseDir);
+  } catch {
+    const result: ImportResult = {
+      ok: false,
+      totalFiles: 0,
+      importedFiles: 0,
+      updatedFiles: 0,
+      failures: [],
+      requestId,
+      error: { code: -5, message: `expertise dir not found: ${opts.expertiseDir}` },
+    };
+    emitLog(requestId, "import", opts.bankId, start, "error", result.error);
+    return result;
+  }
+
+  // Non-recursive listing: top-level entries only. readdir with FileCall makes
+  // the supported/unsupported split cheap without a stat-per-file.
+  let entries: string[];
+  try {
+    entries = readdirSync(dirReal);
+  } catch (e) {
+    // ENOENT (or a vanished dir between realpath + readdir) → graceful empty.
+    // Anything else (EACCES, EBUSY, ENOTDIR) → real read failure, surface it.
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return emptyDirResult(requestId, opts.bankId, start);
+    }
+    const result: ImportResult = {
+      ok: false,
+      totalFiles: 0,
+      importedFiles: 0,
+      updatedFiles: 0,
+      failures: [],
+      requestId,
+      error: { code: ERR_EXPERTISE_DIR_UNREADABLE, message: "expertise_dir_unreadable" },
+    };
+    log({
+      requestId,
+      operation: "import.readdir",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      bankId: opts.bankId,
+      level: "error",
+      message: `readdirSync failed: errno=${code ?? "unknown"} err=${(e as Error).message}`,
+    });
+    emitLog(requestId, "import", opts.bankId, start, "error", {
+      code: ERR_EXPERTISE_DIR_UNREADABLE,
+      message: "expertise_dir_unreadable",
+    });
+    return result;
+  }
+
+  const supportedFiles: string[] = [];
+  for (const name of entries) {
+    const full = pathResolve(dirReal, name);
+    // Skip subdirs (non-recursive contract).
+    let st: ReturnType<typeof statSync>;
+    try {
+      st = statSync(full);
+    } catch {
+      continue;
+    }
+    if (st.isDirectory()) continue;
+    if (SUPPORTED_EXTS.has(extname(name).toLowerCase())) {
+      supportedFiles.push(full);
+    } else {
+      // Unsupported ext / subdir → debug log (spec: "skipped with debug-level log").
+      debugLog(requestId, "import.skip", `skipping unsupported file: ${name}`);
+    }
+  }
+
+  // Empty dir → graceful skip.
+  if (supportedFiles.length === 0) {
+    return emptyDirResult(requestId, opts.bankId, start);
+  }
+
+  // 100-file quota (spec: do NOT import on overflow, return -32004).
+  if (supportedFiles.length > MAX_FILES) {
+    const result: ImportResult = {
+      ok: false,
+      totalFiles: supportedFiles.length,
+      importedFiles: 0,
+      updatedFiles: 0,
+      failures: [],
+      requestId,
+      filesProcessed: MAX_FILES,
+      error: {
+        code: ERR_MULCH_FILE_COUNT,
+        message: "File count exceeds maximum (100)",
+      },
+    };
+    emitLog(requestId, "import", opts.bankId, start, "error", result.error);
+    return result;
+  }
+
+  // Dedup state — across ALL files in this run. Re-import with same domain +
+  // concepts (any order) counts as update, not duplicate (idempotent).
+  const seenHashes = new Set<string>();
+
+  for (const filePath of supportedFiles) {
+    const fileStart = Date.now();
+    const relFile = relative(dirReal, filePath);
+    let status: "ok" | "error" = "ok";
+    let fileErr: { code: string; message: string } | undefined;
+
+    try {
+      const entries = parseFile(filePath, dirReal);
+      let fileImported = false;
+      let fileUpdated = false;
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i]!;
+        const validated = validateEntry(entry, filePath, dirReal, i, failures);
+        if (validated === null) continue; // failure already recorded
+
+        // Per-entry content cap (reuses RetainPayloadSchema's 102400 byte limit).
+        if (Buffer.byteLength(validated.expertise, "utf8") > MAX_CONTENT_BYTES) {
+          failures.push({ file: relFile, entryIndex: i, error: "content_too_large" });
+          continue;
+        }
+
+        const hash = dedupHash(validated.domain, validated.concepts);
+        const isUpdate = seenHashes.has(hash);
+        seenHashes.add(hash);
+
+        // Canonical JSONL line — stable field order via the schema's shape.
+        const jsonl = JSON.stringify({
+          id: validated.id,
+          domain: validated.domain,
+          concepts: validated.concepts,
+          expertise: validated.expertise,
+          ...(validated.source !== undefined ? { source: validated.source } : {}),
+          ...(validated.confidence !== undefined ? { confidence: validated.confidence } : {}),
+        });
+
+        try {
+          await opts.client.retain(opts.bankId, jsonl, {
+            source: "mulch-import",
+            kind: "expertise",
+            tags: validated.concepts,
+          });
+          if (isUpdate) fileUpdated = true;
+          else fileImported = true;
+        } catch (e) {
+          failures.push({
+            file: relFile,
+            entryIndex: i,
+            error: `retain_failed: ${(e as Error).message}`,
+          });
+          status = "error";
+          fileErr = { code: "retain_failed", message: (e as Error).message };
+        }
+      }
+
+      if (fileImported) importedFiles++;
+      if (fileUpdated) updatedFiles++;
+    } catch (e) {
+      // Whole-file failure (read/parse). entryIndex omitted per spec.
+      // Classification via typed error classes (fix [5]) — robust to
+      // message renames, only `instanceof` matters.
+      let code: string;
+      if (e instanceof FileTooLargeError) code = "file_too_large";
+      else if (e instanceof SymlinkEscapeError) code = "symlink_escape";
+      else if (e instanceof SymlinkTargetUnreadableError) code = "symlink_escape";
+      else code = "parse_failed";
+      const msg = (e as Error).message;
+      failures.push({ file: relFile, error: code });
+      status = "error";
+      fileErr = { code, message: msg };
+    }
+
+    emitFileLog(requestId, opts.bankId, fileStart, status, relFile, fileErr);
+  }
+
+  const result: ImportResult = {
+    ok: true,
+    totalFiles: supportedFiles.length,
+    importedFiles,
+    updatedFiles,
+    failures,
+    requestId,
+  };
+  emitLog(requestId, "import", opts.bankId, start, "ok");
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Parsing — per extension
+// ---------------------------------------------------------------------------
+
+interface ParsedEntry {
+  id?: string;
+  domain: string;
+  concepts: string[];
+  expertise: string;
+  source?: string;
+  confidence?: number;
+}
+
+/**
+ * Read + parse a single file. Throws on read/parse failure (caller records the
+ * whole-file failure). INV-HM3 path safety enforced here so a symlink escape
+ * never even reaches the parser.
+ */
+function parseFile(filePath: string, dirReal: string): ParsedEntry[] {
+  // INV-HM3: resolve realpath and require it to stay within dirReal. A symlink
+  // whose target is outside the expertise dir resolves to a path NOT prefixed
+  // by dirReal → reject with SymlinkEscapeError.
+  let resolved: string;
+  try {
+    resolved = realpathSync(filePath);
+  } catch {
+    throw new SymlinkTargetUnreadableError();
+  }
+  if (resolved !== dirReal && !resolved.startsWith(dirReal + PATH_SEP)) {
+    throw new SymlinkEscapeError("symlink_escape");
+  }
+  // INV-HM3 (subdir): contract is TOP-LEVEL FILES ONLY. A symlink in
+  // `.mulch/expertise/` whose target resolves into a SUBDIRECTORY of dirReal
+  // (e.g. `.mulch/expertise/subdir/secret`) would expand the read surface
+  // beyond top-level. A legitimate top-level regular file's realpath equals
+  // its own path — relative-to-dirReal contains no separator. Reject anything
+  // whose target's relative path contains a separator (fix [6]).
+  const relTarget = relative(dirReal, resolved);
+  if (relTarget.includes(PATH_SEP)) {
+    throw new SymlinkEscapeError("symlink_escape_subdir");
+  }
+
+  // 5 MB per-file cap (before reading the whole body into memory would be a DoS).
+  const stat = statSync(resolved);
+  if (stat.size > MAX_FILE_BYTES) {
+    throw new FileTooLargeError();
+  }
+
+  const raw = readFileSync(resolved);
+  let text = raw.toString("utf8");
+  // BOM strip — EF BB BF decodes to U+FEFF at the start of the string.
+  if (text.charCodeAt(0) === UTF8_BOM) {
+    text = text.slice(1);
+  }
+
+  const ext = extname(resolved).toLowerCase();
+  if (ext === ".yaml" || ext === ".yml") {
+    const parsed = parse(text);
+    return toArray(parsed, "yaml_object_not_array");
+  }
+  if (ext === ".json") {
+    const parsed = JSON.parse(text);
+    return toArray(parsed, "json_object_not_array");
+  }
+  if (ext === ".jsonl") {
+    const out: ParsedEntry[] = [];
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) continue;
+      out.push(JSON.parse(trimmed) as ParsedEntry);
+    }
+    return out;
+  }
+  // Unsupported exts are filtered before parseFile; defensive no-op.
+  return [];
+}
+
+// ---------------------------------------------------------------------------
+// Validation + dedup
+// ---------------------------------------------------------------------------
+
+function validateEntry(
+  raw: unknown,
+  filePath: string,
+  dirReal: string,
+  entryIndex: number,
+  failures: ImportFailure[],
+): MulchExpertise | null {
+  const relFile = relative(dirReal, filePath);
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    failures.push({ file: relFile, entryIndex, error: "not_object" });
+    return null;
+  }
+  const obj = { ...(raw as Record<string, unknown>) };
+  // Auto-generate UUID id when absent (spec).
+  if (obj.id === undefined || obj.id === null) {
+    obj.id = randomUUID();
+  }
+  // Auto-record source as relative file path when absent (spec).
+  if (obj.source === undefined || obj.source === null) {
+    obj.source = relFile;
+  }
+  const parsed = MulchExpertiseSchema.safeParse(obj);
+  if (!parsed.success) {
+    failures.push({
+      file: relFile,
+      entryIndex,
+      error: parsed.error.issues.map((i) => i.message).join("; "),
+    });
+    return null;
+  }
+  return parsed.data;
+}
+
+/**
+ * Dedup hash: SHA-256 of canonical JSON of {domain, sorted concepts}, both NFC
+ * -normalized. Idempotent across re-imports of the same domain+concepts set.
+ */
+export function dedupHash(domain: string, concepts: string[]): string {
+  const normalized = {
+    domain: domain.normalize("NFC"),
+    concepts: concepts.map((c) => c.normalize("NFC")).sort(),
+  };
+  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
+function toArray(parsed: unknown, errMsg: string): ParsedEntry[] {
+  if (Array.isArray(parsed)) return parsed as ParsedEntry[];
+  // Spec ambiguity: "if a YAML file is a single object not an array, treat as
+  // one entry OR report failure". We treat a single OBJECT shaped like an
+  // expertise entry as a one-element array (lenient — better than dropping a
+  // valid seed). Anything else (string/number/null) → not_array failure.
+  if (parsed !== null && typeof parsed === "object") {
+    return [parsed as ParsedEntry];
+  }
+  throw new Error(errMsg);
+}
+
+// ---------------------------------------------------------------------------
+// INV-HM4: tenant isolation verifier (separate export, for the DoD test)
+// ---------------------------------------------------------------------------
+
+export interface TenantIsolationOptions {
+  client: HindsightClient;
+  bankA: string;
+  bankB: string;
+  requestId?: string;
+}
+
+export interface TenantIsolationResult {
+  ok: boolean;
+  bankA: string;
+  bankB: string;
+  marker: string;
+  requestId: string;
+  error?: { code: string; message: string };
+}
+
+/**
+ * Retains a unique marker into bankA, then recalls it from bankB. Asserts the
+ * marker does NOT appear in bankB's results. Passes only if the client
+ * actually isolates tenants (mock or real).
+ */
+export async function verifyTenantIsolation(
+  opts: TenantIsolationOptions,
+): Promise<TenantIsolationResult> {
+  const requestId = opts.requestId ?? newRequestId();
+  const marker = `tenant-isolation-probe-${randomUUID()}`;
+  const start = Date.now();
+
+  try {
+    await opts.client.retain(opts.bankA, marker, {
+      source: "mulch-import",
+      kind: "expertise",
+      tags: ["tenant-isolation-probe"],
+    });
+  } catch (e) {
+    const error = { code: "retain_failed", message: (e as Error).message };
+    emitLog(requestId, "tenant_isolation", opts.bankA, start, "error", error);
+    return { ok: false, bankA: opts.bankA, bankB: opts.bankB, marker, requestId, error };
+  }
+
+  let leaked: boolean;
+  try {
+    const recall = await opts.client.recall(opts.bankB, marker, 10);
+    leaked = recall.results.some((r) => r.content.includes(marker));
+  } catch (e) {
+    const error = { code: "recall_failed", message: (e as Error).message };
+    emitLog(requestId, "tenant_isolation", opts.bankB, start, "error", error);
+    return { ok: false, bankA: opts.bankA, bankB: opts.bankB, marker, requestId, error };
+  }
+  const status = leaked ? "error" : "ok";
+  emitLog(requestId, "tenant_isolation", opts.bankB, start, status);
+  return {
+    ok: !leaked,
+    bankA: opts.bankA,
+    bankB: opts.bankB,
+    marker,
+    requestId,
+    ...(leaked ? { error: { code: "tenant_leak", message: "marker from bankA found in bankB" } } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Logging helpers (CC-9)
+// ---------------------------------------------------------------------------
+
+function emitLog(
+  requestId: string,
+  operation: string,
+  bankId: string,
+  start: number,
+  status: "ok" | "error",
+  error?: { code: number | string; message: string },
+): void {
+  const entry: LogEntry = {
+    requestId,
+    operation,
+    agentId: null,
+    timestamp: new Date().toISOString(),
+    duration: Date.now() - start,
+    status,
+    bankId,
+    ...(error ? { error: { code: String(error.code), message: error.message } } : {}),
+  };
+  log(entry);
+}
+
+function emitFileLog(
+  requestId: string,
+  bankId: string,
+  start: number,
+  status: "ok" | "error",
+  file: string,
+  error?: { code: string; message: string },
+): void {
+  const entry: LogEntry = {
+    requestId,
+    operation: "import.file",
+    agentId: null,
+    timestamp: new Date().toISOString(),
+    duration: Date.now() - start,
+    status,
+    bankId,
+    file,
+    import_ms: Date.now() - start,
+    ...(error ? { error } : {}),
+  };
+  log(entry);
+}
+
+function debugLog(requestId: string, operation: string, message: string): void {
+  const entry: LogEntry = {
+    requestId,
+    operation,
+    agentId: null,
+    timestamp: new Date().toISOString(),
+    duration: 0,
+    status: "ok",
+    bankId: "",
+    level: "debug",
+    message,
+  };
+  log(entry);
+}
+
+function emptyDirResult(requestId: string, bankId: string, start: number): ImportResult {
+  const result: ImportResult = {
+    ok: true,
+    totalFiles: 0,
+    importedFiles: 0,
+    updatedFiles: 0,
+    failures: [],
+    requestId,
+    note: "empty expertise dir",
+  };
+  emitLog(requestId, "import", bankId, start, "ok");
+  return result;
+}
