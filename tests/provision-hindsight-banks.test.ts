@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { realBridgeProbe } from "../scripts/provision-hindsight-banks.ts";
+import { parseArgs, realBridgeProbe } from "../scripts/provision-hindsight-banks.ts";
 
 // realBridgeProbe is a CLI-only network helper that was previously uncovered.
 // Review R2 hardened two fails-open / misdiagnosis paths (M4 missing-id, M5
@@ -106,5 +106,43 @@ describe("realBridgeProbe — review R2 M4/M5", () => {
     }) as unknown as typeof fetch;
     const p = await realBridgeProbe();
     expect(p).toEqual({ registered: false, healthy: false });
+  });
+});
+
+describe("provision-hindsight-banks CLI — parseArgs", () => {
+  test("--repo-slug <slug> sets repoSlug", () => {
+    expect(parseArgs(["--repo-slug", "foo"])).toEqual({ repoSlug: "foo" });
+  });
+
+  test("--repo <slug> alias sets repoSlug", () => {
+    expect(parseArgs(["--repo", "foo"])).toEqual({ repoSlug: "foo" });
+  });
+
+  test("--repo-slug=<slug> eq form sets repoSlug", () => {
+    expect(parseArgs(["--repo-slug=foo"])).toEqual({ repoSlug: "foo" });
+  });
+
+  test("no args → repoSlug unset (default applied in main)", () => {
+    expect(parseArgs([])).toEqual({});
+  });
+
+  test("bare --repo-slug (missing value) throws", () => {
+    // Previously silently fell back to the cwd-basename default, masking the
+    // typo. Now errors loudly (parity with import-mulch-expertise.ts).
+    expect(() => parseArgs(["--repo-slug"])).toThrow(/requires a non-empty value/);
+  });
+
+  test('--repo-slug "" (empty value) throws', () => {
+    expect(() => parseArgs(["--repo-slug", ""])).toThrow(/requires a non-empty value/);
+  });
+
+  test("--repo-slug --foo (value looks like a flag) throws", () => {
+    expect(() => parseArgs(["--repo-slug", "--foo"])).toThrow(/requires a non-empty value/);
+  });
+
+  test("unknown flag throws", () => {
+    // Previously silently ignored — a typo like `--reposlug` would proceed
+    // with defaults. Now surfaces loudly.
+    expect(() => parseArgs(["--bogus"])).toThrow(/unknown flag/);
   });
 });

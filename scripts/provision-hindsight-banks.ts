@@ -37,18 +37,55 @@ interface ArgSpec {
   repoSlug?: string;
 }
 
-function parseArgs(argv: string[]): ArgSpec {
+export function parseArgs(argv: string[]): ArgSpec {
   const out: ArgSpec = {};
+  // `--repo-slug` and `--repo` are value-flag aliases (preserved from the
+  // original impl). Strict parity with import-mulch-expertise.ts: reject
+  // unknown flags, require non-empty values, accept `--flag=value`, support
+  // `--help`. argv stays string[] (the real sibling's signature) — the only
+  // caller is process.argv.slice(2), and typeof v !== "string" below is the
+  // off-the-end undefined guard, not a tautological string check.
+  const VALUE_FLAGS = new Set(["--repo-slug", "--repo"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    if (a === "--repo-slug" || a === "--repo") {
-      const v = argv[i + 1];
-      if (typeof v === "string" && v.length > 0) {
-        out.repoSlug = v;
-        i++;
+    // Accept `--flag=value` (parity with import-mulch-expertise.ts).
+    const eqMatch = a.match(/^--([^=]+)=(.*)$/);
+    if (eqMatch) {
+      const flag = `--${eqMatch[1]!}`;
+      const v = eqMatch[2]!;
+      if (!VALUE_FLAGS.has(flag)) {
+        throw new Error(`unknown flag: ${flag}`);
       }
-    } else if (a.startsWith("--repo-slug=")) {
-      out.repoSlug = a.slice("--repo-slug=".length);
+      if (v.length === 0) {
+        throw new Error(`${flag} requires a non-empty value`);
+      }
+      out.repoSlug = v;
+      continue;
+    }
+    if (VALUE_FLAGS.has(a)) {
+      // A value flag MUST be followed by a non-empty value. A bare
+      // `--repo-slug` (missing value) is a user typo — error loudly instead
+      // of silently falling back to the cwd-basename default.
+      const v = argv[++i];
+      if (typeof v !== "string" || v.length === 0 || v.startsWith("--")) {
+        throw new Error(`${a} requires a non-empty value`);
+      }
+      out.repoSlug = v;
+    } else if (a === "--help" || a === "-h") {
+      process.stdout.write(
+        [
+          "Usage: provision-hindsight-banks [--repo-slug <slug>]",
+          "",
+          "Defaults:",
+          "  --repo-slug  QDS_REPO_SLUG env, else cwd basename",
+          "",
+        ].join("\n"),
+      );
+      process.exit(0);
+    } else if (a.startsWith("--")) {
+      // Unknown flag — surface typos loudly rather than silently proceeding
+      // with defaults (e.g. `--repo-slug` typo'd as `--reposlug`).
+      throw new Error(`unknown flag: ${a}`);
     }
   }
   return out;
@@ -125,7 +162,23 @@ export async function realBridgeProbe(): Promise<BridgeProbe> {
 }
 
 async function main(): Promise<number> {
-  const args = parseArgs(process.argv.slice(2));
+  let args: ArgSpec;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (e) {
+    // parseArgs throws on a bad flag / missing value (user typo). Emit a
+    // structured envelope rather than a raw stack trace — parity with
+    // import-mulch-expertise.ts. Shape mirrors ProvisionErr so consumers
+    // reading {ok,error,requestId} see one consistent failure contract.
+    process.stdout.write(
+      `${JSON.stringify({
+        ok: false,
+        requestId: crypto.randomUUID(),
+        error: { code: "bad_args", message: (e as Error).message },
+      })}\n`,
+    );
+    return 1;
+  }
   const repoSlug = args.repoSlug ?? defaultRepoSlug();
 
   // INV-HM1: the client constructor reads HINDSIGHT_BEARER_TOKEN (preferred)
