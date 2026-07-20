@@ -25,6 +25,7 @@ import {
   ERR_BANK_ID_INVALID,
   resolveBankId,
 } from "../src/hindsight/schemas.ts";
+import { parseValueFlags } from "./lib/cli-args.ts";
 
 export interface Args {
   expertiseDir: string;
@@ -60,55 +61,25 @@ export function parseArgs(argv: string[]): Args {
     repoSlug: process.env.QDS_REPO_SLUG ?? basename(process.cwd()),
     bankId: "",
   };
-  const VALUE_FLAGS = new Set(["--expertise-dir", "--repo-slug", "--bank-id"]);
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
-    // Fix 1: accept `--flag=value` syntax (parity with provision script).
-    const eqMatch = a.match(/^--([^=]+)=(.*)$/);
-    if (eqMatch) {
-      const flag = `--${eqMatch[1]!}`;
-      const v = eqMatch[2]!;
-      if (!VALUE_FLAGS.has(flag)) {
-        throw new Error(`unknown flag: ${flag}`);
-      }
-      if (v.length === 0) {
-        throw new Error(`${flag} requires a non-empty value`);
-      }
+  // Grammar + validation live in the shared helper; this wrapper owns only the
+  // flag table, output mapping, defaults, and help text.
+  parseValueFlags(argv, {
+    flags: ["--expertise-dir", "--repo-slug", "--bank-id"],
+    onValue: (flag, v) => {
       if (flag === "--expertise-dir") opts.expertiseDir = v;
       else if (flag === "--repo-slug") opts.repoSlug = v;
       else opts.bankId = v;
-      continue;
-    }
-    if (VALUE_FLAGS.has(a)) {
-      // A value flag MUST be followed by a non-empty value. A bare
-      // `--expertise-dir` (missing value) is a user typo — error loudly
-      // instead of silently importing from the default dir.
-      const v = argv[++i];
-      if (typeof v !== "string" || v.length === 0 || v.startsWith("--")) {
-        throw new Error(`${a} requires a non-empty value`);
-      }
-      if (a === "--expertise-dir") opts.expertiseDir = v;
-      else if (a === "--repo-slug") opts.repoSlug = v;
-      else opts.bankId = v;
-    } else if (a === "--help" || a === "-h") {
-      process.stdout.write(
-        [
-          "Usage: import-mulch-expertise [--expertise-dir <d>] [--repo-slug <s>] [--bank-id <b>]",
-          "",
-          "Defaults:",
-          "  --expertise-dir  .mulch/expertise",
-          "  --repo-slug      QDS_REPO_SLUG env, else cwd basename",
-          "  --bank-id        {resolveBankId(repoSlug)}-dev-meta",
-          "",
-        ].join("\n"),
-      );
-      process.exit(0);
-    } else if (a.startsWith("--")) {
-      // Fix 2: unknown flag — surface typo loudly rather than silently
-      // proceeding with defaults (e.g. `--bankid` vs `--bank-id`).
-      throw new Error(`unknown flag: ${a}`);
-    }
-  }
+    },
+    help: [
+      "Usage: import-mulch-expertise [--expertise-dir <d>] [--repo-slug <s>] [--bank-id <b>]",
+      "",
+      "Defaults:",
+      "  --expertise-dir  .mulch/expertise",
+      "  --repo-slug      QDS_REPO_SLUG env, else cwd basename",
+      "  --bank-id        {resolveBankId(repoSlug)}-dev-meta",
+      "",
+    ],
+  });
   return opts;
 }
 

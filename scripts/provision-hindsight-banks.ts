@@ -23,6 +23,7 @@ import {
   type BridgeProbe,
 } from "../src/hindsight/bank-provisioner.ts";
 import { setLogSink } from "../src/swarmclaw/mcp/stdio-transport.ts";
+import { parseValueFlags } from "./lib/cli-args.ts";
 
 // Route structured logs to stderr so stdout carries only the JSON envelope.
 // Guarded by import.meta.main so importing this module (e.g. for a shared
@@ -39,55 +40,22 @@ interface ArgSpec {
 
 export function parseArgs(argv: string[]): ArgSpec {
   const out: ArgSpec = {};
-  // `--repo-slug` and `--repo` are value-flag aliases (preserved from the
-  // original impl). Strict parity with import-mulch-expertise.ts: reject
-  // unknown flags, require non-empty values, accept `--flag=value`, support
-  // `--help`. argv stays string[] (the real sibling's signature) — the only
-  // caller is process.argv.slice(2), and typeof v !== "string" below is the
-  // off-the-end undefined guard, not a tautological string check.
-  const VALUE_FLAGS = new Set(["--repo-slug", "--repo"]);
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
-    // Accept `--flag=value` (parity with import-mulch-expertise.ts).
-    const eqMatch = a.match(/^--([^=]+)=(.*)$/);
-    if (eqMatch) {
-      const flag = `--${eqMatch[1]!}`;
-      const v = eqMatch[2]!;
-      if (!VALUE_FLAGS.has(flag)) {
-        throw new Error(`unknown flag: ${flag}`);
-      }
-      if (v.length === 0) {
-        throw new Error(`${flag} requires a non-empty value`);
-      }
-      out.repoSlug = v;
-      continue;
-    }
-    if (VALUE_FLAGS.has(a)) {
-      // A value flag MUST be followed by a non-empty value. A bare
-      // `--repo-slug` (missing value) is a user typo — error loudly instead
-      // of silently falling back to the cwd-basename default.
-      const v = argv[++i];
-      if (typeof v !== "string" || v.length === 0 || v.startsWith("--")) {
-        throw new Error(`${a} requires a non-empty value`);
-      }
-      out.repoSlug = v;
-    } else if (a === "--help" || a === "-h") {
-      process.stdout.write(
-        [
-          "Usage: provision-hindsight-banks [--repo-slug <slug>]",
-          "",
-          "Defaults:",
-          "  --repo-slug  QDS_REPO_SLUG env, else cwd basename",
-          "",
-        ].join("\n"),
-      );
-      process.exit(0);
-    } else if (a.startsWith("--")) {
-      // Unknown flag — surface typos loudly rather than silently proceeding
-      // with defaults (e.g. `--repo-slug` typo'd as `--reposlug`).
-      throw new Error(`unknown flag: ${a}`);
-    }
-  }
+  // Grammar + validation live in the shared helper; this wrapper owns only the
+  // flag table (`--repo-slug` / `--repo` aliases), the output mapping, and the
+  // help text. argv stays string[] — the only caller is process.argv.slice(2).
+  parseValueFlags(argv, {
+    flags: ["--repo-slug", "--repo"],
+    onValue: (flag, v) => {
+      if (flag === "--repo-slug" || flag === "--repo") out.repoSlug = v;
+    },
+    help: [
+      "Usage: provision-hindsight-banks [--repo-slug <slug>]",
+      "",
+      "Defaults:",
+      "  --repo-slug  QDS_REPO_SLUG env, else cwd basename",
+      "",
+    ],
+  });
   return out;
 }
 

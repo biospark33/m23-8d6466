@@ -131,7 +131,8 @@ export interface RoundTripDurations {
   recall: number;
   reflect: number;
   consolidate: number;
-  /** retain+recall+reflect+consolidate+post-consolidation recall wall clock. */
+  postRecall: number;
+  /** Sum of the five op durations above (retain→recall→reflect→consolidate→post-consolidation recall). Not wall clock — inter-op gaps are excluded. */
   total: number;
 }
 
@@ -187,6 +188,7 @@ export async function verifyRoundTrip(
     recall: 0,
     reflect: 0,
     consolidate: 0,
+    postRecall: 0,
     total: 0,
   };
 
@@ -472,6 +474,7 @@ export async function verifyRoundTrip(
     try {
       const res = await client.recall(bankId, query, VERIFIER_RECALL_LIMIT);
       postRecallMs = res.durationMs;
+      durations.postRecall = postRecallMs;
       results = res.results;
       // AC-7 advisory covers BOTH recalls — flag slow on the post-consolidation
       // recall too, not just the initial one.
@@ -533,13 +536,18 @@ export async function verifyRoundTrip(
     });
   }
 
-  // total = sum of the four Hindsight op durations (the meaningful "time in
-  // Hindsight" metric). Wall clock (Date.now - wallStart) would also include
-  // inter-op gaps; we keep `wallStart` around for future profiling but report
-  // the op-time sum as round_trip_ms since that is what CC-9 calls the
-  // "retain→recall→reflect→consolidate cycle duration".
+  // total = sum of all FIVE Hindsight op durations (the meaningful "time in
+  // Hindsight" metric), including the post-consolidation recall — the cycle is
+  // retain→recall→reflect→consolidate→post-consolidation recall (see docstring).
+  // Wall clock (Date.now - wallStart) would also include inter-op gaps; we keep
+  // `wallStart` around for future profiling but report the op-time sum as
+  // round_trip_ms so the metric reflects time actually spent in Hindsight.
   durations.total =
-    durations.retain + durations.recall + durations.reflect + durations.consolidate;
+    durations.retain +
+    durations.recall +
+    durations.reflect +
+    durations.consolidate +
+    durations.postRecall;
   void wallStart; // retained for future wall-clock profiling
 
   // CC-9: round_trip_ms emitted once at the end. Capture into a local so the
