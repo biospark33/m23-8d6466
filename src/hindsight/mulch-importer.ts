@@ -253,9 +253,8 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
       const entries = parseFile(filePath, dirReal, failures, requestId);
       let fileImported = false;
       let fileUpdated = false;
-      for (let i = 0; i < entries.length; i++) {
-        const entry = entries[i]!;
-        const validated = validateEntry(entry, filePath, dirReal, i, failures);
+      for (const { entry, index } of entries) {
+        const validated = validateEntry(entry, filePath, dirReal, index, failures);
         if (validated === null) continue; // failure already recorded
 
         // Canonical JSONL line — stable field order via the schema's shape.
@@ -274,7 +273,7 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
         // the wrapping JSONL exceed the cap and fail at retain with a confusing
         // retain_failed. (B-2/E-11)
         if (Buffer.byteLength(jsonl, "utf8") > MAX_CONTENT_BYTES) {
-          failures.push({ file: relFile, entryIndex: i, error: "content_too_large" });
+          failures.push({ file: relFile, entryIndex: index, error: "content_too_large" });
           continue;
         }
 
@@ -301,7 +300,7 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
         } catch (e) {
           failures.push({
             file: relFile,
-            entryIndex: i,
+            entryIndex: index,
             error: `retain_failed: ${(e as Error).message}`,
           });
           status = "error";
@@ -355,13 +354,28 @@ interface ParsedEntry {
 }
 
 /**
+ * A parsed entry paired with its original positional index. For `.jsonl` files
+ * `index` is the 1-based FILE LINE NUMBER (blank/null/malformed lines count
+ * toward it but are skipped from the output); for JSON/YAML arrays it is the
+ * 0-based array index. Threading the index through `parseFile` — instead of
+ * reconstructing it from the loop position in the consumer — keeps failure
+ * `entryIndex` values aligned with the real source position even when earlier
+ * lines were skipped (the 0-based array offset desyncs from the file line as
+ * soon as a blank/null/malformed line is dropped before the entry).
+ */
+interface ParsedEntryWithIndex {
+  entry: ParsedEntry;
+  index: number;
+}
+
+/**
  * Read + parse a single file. Throws on read/parse failure (caller records the
  * whole-file failure) EXCEPT for `.jsonl`, where one malformed line is recorded
  * as a per-entry failure and the rest of the file still parses (best-effort per
  * entry, per spec). INV-HM3 path safety enforced here so a symlink escape
  * never even reaches the parser.
  */
-function parseFile(filePath: string, dirReal: string, failures: ImportFailure[], requestId: string): ParsedEntry[] {
+function parseFile(filePath: string, dirReal: string, failures: ImportFailure[], requestId: string): ParsedEntryWithIndex[] {
   // INV-HM3: resolve realpath and require it to stay within dirReal. A symlink
   // whose target is outside the expertise dir resolves to a path NOT prefixed
   // by dirReal → reject with SymlinkEscapeError.
@@ -411,15 +425,15 @@ function parseFile(filePath: string, dirReal: string, failures: ImportFailure[],
   const ext = extname(filePath).toLowerCase();
   if (ext === ".yaml" || ext === ".yml") {
     const parsed = parse(text);
-    return toArray(parsed, "yaml_object_not_array");
+    return toArray(parsed, "yaml_object_not_array").map((entry, index) => ({ entry, index }));
   }
   if (ext === ".json") {
     const parsed = JSON.parse(text);
-    return toArray(parsed, "json_object_not_array");
+    return toArray(parsed, "json_object_not_array").map((entry, index) => ({ entry, index }));
   }
   if (ext === ".jsonl") {
     const relFile = relative(dirReal, filePath);
-    const out: ParsedEntry[] = [];
+    const out: ParsedEntryWithIndex[] = [];
     // `lineNo` is the 1-based FILE LINE NUMBER (per spec "JSONL line 3"), not
     // the non-blank ordinal — operators use entryIndex to jump to the line in
     // the source file, so blank lines must count.
@@ -440,7 +454,7 @@ function parseFile(filePath: string, dirReal: string, failures: ImportFailure[],
           debugLog(requestId, "import.skip", `skipping null JSONL line ${lineNo} in ${relFile}`);
           continue;
         }
-        out.push(parsedLine as ParsedEntry);
+        out.push({ entry: parsedLine as ParsedEntry, index: lineNo });
       } catch {
         // B-3: one malformed line must NOT drop the whole file as parse_failed.
         // Record the per-entry failure at the line's position and keep parsing.

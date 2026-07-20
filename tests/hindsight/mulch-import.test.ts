@@ -791,3 +791,78 @@ describe("importMulch — B-1 failed retain does not poison dedup", () => {
     expect(result.updatedFiles).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// JSONL entryIndex desync: a validation/retain failure on a line that comes
+// AFTER a skipped (blank / null / malformed) line must report the real 1-based
+// file line number, not the 0-based position among surviving entries. Guards
+// the parseFile → ParsedEntryWithIndex threading.
+// ---------------------------------------------------------------------------
+
+describe("importMulch — JSONL entryIndex tracks file line, not array offset", () => {
+  test("schema-invalid entry reports its 1-based line number, not 0-based offset", async () => {
+    // line 1: valid entry (imports)
+    // line 2: valid JSON object but domain is a number → fails MulchExpertiseSchema
+    writeFile(
+      "desync.jsonl",
+      `{"domain":"ok","concepts":["a"],"expertise":"valid"}
+{"domain":123,"concepts":["b"],"expertise":"bad domain type"}
+`,
+    );
+    const client = makeMockClient();
+    const result = await importMulch({
+      client: client as any,
+      expertiseDir: tmpDir,
+      bankId: "bank-desync",
+    });
+    expect(result.ok).toBe(true);
+    // line 1 still imported.
+    expect(client._allCalls.length).toBe(1);
+    // line 2 failed schema validation at its REAL 1-based line number (2), not
+    // the 0-based array offset (1). Before the ParsedEntryWithIndex fix this
+    // reported entryIndex:1.
+    const fail = result.failures.find((f) => f.file === "desync.jsonl");
+    expect(fail).toBeDefined();
+    expect(fail!.entryIndex).toBe(2); // 1-based file line number
+    expect(fail!.file).toBe("desync.jsonl");
+  });
+
+  test("entryIndex stays correct when blank/null lines precede a failure", async () => {
+    // line 1: valid entry
+    // line 2: blank (skipped)
+    // line 3: null tombstone (skipped)
+    // line 4: valid entry
+    // line 5: malformed JSON (invalid_jsonl_line)
+    // line 6: valid JSON object, schema-invalid (domain number) → failure
+    writeFile(
+      "desync2.jsonl",
+      `{"domain":"ok","concepts":["a"],"expertise":"v1"}
+
+null
+{"domain":"ok2","concepts":["b"],"expertise":"v2"}
+{not json
+{"domain":999,"concepts":["c"],"expertise":"bad"}
+`,
+    );
+    const client = makeMockClient();
+    const result = await importMulch({
+      client: client as any,
+      expertiseDir: tmpDir,
+      bankId: "bank-desync2",
+    });
+    expect(result.ok).toBe(true);
+    // The malformed line (line 5) is recorded at its real line number.
+    const bad = result.failures.find((f) => f.error === "invalid_jsonl_line");
+    expect(bad).toBeDefined();
+    expect(bad!.entryIndex).toBe(5);
+    // The schema-invalid entry (line 6) is also recorded at its real line
+    // number — NOT offset 2 (the 0-based position among surviving entries).
+    const schemaFail = result.failures.find(
+      (f) => f.file === "desync2.jsonl" && f.error !== "invalid_jsonl_line",
+    );
+    expect(schemaFail).toBeDefined();
+    expect(schemaFail!.entryIndex).toBe(6);
+    // lines 1 + 4 imported (2 retains).
+    expect(client._allCalls.length).toBe(2);
+  });
+});
