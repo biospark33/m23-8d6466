@@ -97,8 +97,8 @@ CREATED_SKILLS=0
 if [ ! -d "$SKILLS_DIR" ]; then CREATED_SKILLS=1; fi
 
 cleanup() {
-  [ "$CREATED_IGNORE" = "1" ] && rm -f "$IGNORE_FILE"
-  [ "$CREATED_SKILLS" = "1" ] && rm -rf "$SKILLS_DIR"
+  [ "${CREATED_IGNORE:-0}" = "1" ] && rm -f "${IGNORE_FILE:-}"
+  [ "${CREATED_SKILLS:-0}" = "1" ] && rm -rf "${SKILLS_DIR:-}"
   return 0
 }
 # Trap EXIT only so cleanup runs exactly once. Signal traps set the conventional

@@ -77,12 +77,23 @@ function gn(args: string[]): unknown {
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (e) {
-    // execFileSync's default message is just "Command failed: ..." — surface the
-    // stderr diagnostic so CI failures point at the real gitnexus error.
-    const err = e as { stderr?: Buffer | string; message?: string };
-    const stderr =
-      (typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString() ?? "") ?? "").slice(0, 500);
-    throw new Error(`gitnexus ${args.join(" ")} failed: ${err.message ?? String(e)}\nstderr: ${stderr}`);
+    // gitnexus exits 0 with a structured JSON error on stdout for soft failures
+    // (not-found, bad query) — verified live against 1.6.9. execFileSync throws
+    // on ANY non-zero exit though, so if a hard failure still wrote JSON to
+    // stdout, recover it and fall through to the parse below; this keeps AC-3's
+    // "graceful on unknown symbol" assertable instead of throwing past the test.
+    const err = e as { stdout?: Buffer | string; stderr?: Buffer | string; message?: string };
+    const stdoutStr =
+      typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString() ?? "");
+    if (stdoutStr.includes("{")) {
+      out = stdoutStr;
+    } else {
+      // execFileSync's default message is just "Command failed: ..." — surface the
+      // stderr diagnostic so CI failures point at the real gitnexus error.
+      const stderr =
+        (typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString() ?? "")).slice(0, 500);
+      throw new Error(`gitnexus ${args.join(" ")} failed: ${err.message ?? String(e)}\nstderr: ${stderr}`);
+    }
   }
   // gitnexus 1.6.9 emits clean JSON on stdout (logs → stderr). Prefer a full
   // parse; only slice from the first `{` if leading noise slips through. Slicing
