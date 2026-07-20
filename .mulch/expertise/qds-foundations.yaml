@@ -1,0 +1,36 @@
+# QDS Foundations — real seed expertise (P0.9 live seed file).
+# Consumed by scripts/import-mulch-expertise.ts; ships with the repo.
+# Schema: MulchExpertiseSchema (id auto-generated on import; source recorded).
+- domain: qds
+  concepts: [sparc, methodology, tdd]
+  expertise: >
+    SPARC (Specification, Pseudocode, Architecture, Refinement, Completion)
+    drives every QDS story. Spec-first, then pseudocode, then TDD red-green.
+    Skipping the spec phase to "just ship" is the single largest source of
+    rework in this codebase.
+- domain: qds
+  concepts: [swarmclaw, mcp, bridge]
+  expertise: >
+    SwarmClaw is the MCP tool bridge (P0.7). Hindsight tools (retain, recall,
+    reflect, consolidate) are invoked through SwarmClaw's /invoke route, never
+    called directly. Bridge errors use MCPInvokeErrorResponseSchema
+    ({jsonrpc, error:{code,message,data?}, id}); -32601/-32602 → HTTP 400,
+    else → HTTP 502.
+- domain: qds
+  concepts: [trunk-based, branching, git]
+  expertise: >
+    Trunk-based: short-lived feature branches off main, PR back to main, no
+    release branches in Phase 0/1. Branch convention is recorded as a one-line
+    sentinel in CLAUDE.md per repo. Do not introduce gitflow.
+- domain: qds
+  concepts: [bun, typescript, zod, biome]
+  expertise: >
+    Stack: Bun runtime, TypeScript strict, Zod v3 (.refine({message}) syntax
+    not error:), Biome for lint (noExplicitAny off, formatter off). Tests via
+    bun:test. No path aliases — relative imports only.
+- domain: qds
+  concepts: [hindsight, memory, banks]
+  expertise: >
+    Hindsight memory banks are bank-scoped REST: /v1/default/banks/{bank_id}.
+    Three provisioned banks: {repoSlug}, {repoSlug}-dev-meta, qds-collective.
+    Mulch expertise imports into {repoSlug}-dev-meta as JSONL.
