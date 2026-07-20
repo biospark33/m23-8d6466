@@ -19,7 +19,7 @@ This story installs the `pi-gitnexus-plus` extension (v0.7.0) into the Pi agent 
 
 ## E2E Slice
 
-**Demonstrable behavior:** Run `pi install npm:pi-gitnexus-plus@0.7.0`, run `gitnexus analyze` on the QDS-Factory repo, then invoke `gitnexus_query` (query: "SwarmClaw agent registration"), `gitnexus_context` (symbol: "registerAgent"), and `gitnexus_impact` (target: "registerAgent", direction: "upstream") — all three return non-empty results.
+**Demonstrable behavior:** Run `pi install npm:pi-gitnexus-plus@0.7.0`, run `gitnexus analyze` on the QDS-Factory repo, then invoke `gitnexus_query` (query: "SwarmClaw routes"), `gitnexus_context` (symbol: "registerSwarmClawAgent"), and `gitnexus_impact` (target: "registerSwarmClawAgent", direction: "upstream") — all three return non-empty results.
 
 **Wiring closed:** On completion of this story, `gitnexus_query`, `gitnexus_context`, and `gitnexus_impact` return structured results for known QDS-Factory symbols using only code installed by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 
@@ -29,7 +29,7 @@ This story installs the `pi-gitnexus-plus` extension (v0.7.0) into the Pi agent 
 
 > ≥3 scenarios, Given/When/Then. Exactly one tagged (make-or-break) and binary.
 
-1. **(make-or-break)** Given `pi-gitnexus-plus@0.7.0` installed and `gitnexus analyze` completed on QDS-Factory, When `gitnexus_query` is invoked with query "SwarmClaw routes", `gitnexus_context` is invoked with symbol "registerAgent", and `gitnexus_impact` is invoked with target "registerAgent" direction "upstream", Then all three return non-empty result objects with at least one symbol, file path, and relevance score.
+1. **(make-or-break)** Given `pi-gitnexus-plus@0.7.0` installed and `gitnexus analyze` completed on QDS-Factory, When `gitnexus_query` is invoked with query "SwarmClaw routes", `gitnexus_context` is invoked with symbol "registerSwarmClawAgent", and `gitnexus_impact` is invoked with target "registerSwarmClawAgent" direction "upstream", Then all three return non-empty result objects with at least one symbol, file path, and relevance score. (Symbol renamed from registerAgent → registerSwarmClawAgent during code review: the original name collides with vendored pi-vs-claude-code-vendor/coms-net.ts.)
 2. Given a completed analysis, When `gitnexus_query` is called with a query matching zero symbols (e.g., "ZZZZZZZ_NONEXISTENT_SYMBOL"), Then the result is an empty array (not null, not error) — graceful empty, never crash.
 3. Given `pi-gitnexus-plus` is NOT installed, When an agent attempts to invoke `gitnexus_query`, Then Pi returns a tool-not-found error (not a silent failure or hang) — the agent can detect the missing extension and report it.
 
@@ -89,12 +89,13 @@ This story installs the `pi-gitnexus-plus` extension (v0.7.0) into the Pi agent 
   - `gitnexus_query` tool — semantic/keyword code search
   - `gitnexus_context` tool — 360-degree symbol view
   - `gitnexus_impact` tool — blast radius analysis
-  - GitNexus CLI v1.6.3 (`/usr/local/bin/gitnexus`) — underlying indexer
+  - GitNexus CLI v1.6.9 (resolved via command -v gitnexus with ~/.local/node-arm64/bin/gitnexus as fallback; the spec's /usr/local/bin path is not present on this host) — underlying indexer
 
 - **Files / functions touched:**
   - No source files modified — this story is install + verify
   - `scripts/install-gitnexus-plus.sh` — installation and analysis script
   - `tests/gitnexus/graph-queries.test.ts` — verification test suite
+  - `tests/gitnexus/fixtures/swarmclaw.ts` — fixture symbols for query/context/impact tests
 
 - **Guards/limits:**
   - Analysis timeout: 300 seconds (large repo)
@@ -131,3 +132,36 @@ This story installs the `pi-gitnexus-plus` extension (v0.7.0) into the Pi agent 
 - [ ] **Test (unit/integration):** Query returns results for "SwarmClaw"; context returns refs for known symbol; impact returns risk level for known target; empty query returns empty array (not null/error)
 - [ ] **Test (guard):** Missing extension → tool-not-found error; zero-match query → empty array; uninstalled state detected before analysis attempt
 - [ ] **Test (e2e demo — MANDATORY):** Install extension → run analysis → invoke all three tools in sequence → assert non-empty structured results for each
+
+### Review Findings
+
+> Triaged output of bmad-code-review (Blind Hunter + Edge Case Hunter + Acceptance Auditor). All `patch` items applied in this PR; `defer` items are documented constraints; `dismiss` were false positives.
+
+**Patched (BLOCKER):**
+- [x] [Review][Patch] `resolveRepoName` captured gitnexus's disambiguated label `QDS-Factory  (/path)` (emitted when a name is indexed twice) — gitnexus rejected it as `-r`, failing 7/13 tests. Queries now pass `-r <absolute repo path>` (which gitnexus always accepts) and a thin `assertIndexed()` helper gives a clear error if the repo isn't indexed. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] `DefinitionSchema.type` was required but gitnexus 1.6.9 omits `type` from every definition (keys: id, name, filePath, startLine, endLine) — every parse threw. Made `type` (and already-optional `module`) optional. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] Fixture symbol `registerAgent` collided with vendored `pi-vs-claude-code-vendor/coms-net.ts` — `context registerAgent` resolved to coms-net.ts (callers `reRegisterAndOpen`, `onSessionStart`), shadowing the fixture. Renamed fixture symbol to unique `registerSwarmClawAgent`; tests + this spec updated. [tests/gitnexus/fixtures/swarmclaw.ts]
+
+**Patched (HIGH/MEDIUM/LOW):**
+- [x] [Review][Patch] INV-GN2 injection guard `/[;|`]\|\$\(/` missed `&&`, `&`, `>`, `<`, newline, `$VAR`, quotes — replaced deny-list with allow-list `^[A-Za-z0-9 _.-]+$`. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] Install-script cleanup unconditionally `rm -rf .claude/skills/gitnexus` — nuked pre-existing skill dirs. Now removed only when this run created it (`CREATED_SKILLS` guard). [scripts/install-gitnexus-plus.sh]
+- [x] [Review][Patch] `pi list` verify ran even when `GITNEXUS_SKIP_INSTALL=1` — moved inside the skip guard; anchored grep to `pi-gitnexus-plus@${EXT_VERSION}`. [scripts/install-gitnexus-plus.sh]
+- [x] [Review][Patch] `trap cleanup EXIT` didn't preserve exit code or catch INT/TERM — now `trap cleanup EXIT INT TERM` with `rc=$?; exit "$rc"`. [scripts/install-gitnexus-plus.sh]
+- [x] [Review][Patch] AC-1 impact assertion `impactedCount >= 0` was a tautology — now `> 0` (registerSwarmClawRoutes is a guaranteed caller of registerSwarmClawAgent). [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] AC-2 zero-match test only asserted `Array.isArray` — unfalsifiable. Now also asserts no returned definition name equals the bogus query string. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] AC-3 unknown-subcommand test only asserted `.toThrow()` — now asserts nonzero exit with a recognizable error message. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] `ImpactResultSchema.risk` enum omitted `UNKNOWN` — gitnexus emits `UNKNOWN` for low-data targets. Added `UNKNOWN` to the enum. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] `perl -e alarm` timeout not portable — now prefers `timeout`/`gtimeout`, falls back to perl. Same pattern wraps `gitnexus status` (30s, non-fatal). [scripts/install-gitnexus-plus.sh]
+- [x] [Review][Patch] `resolveGitnexus` used `existsSync` (true for dirs) — added `statSync.isFile()` check. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] REPO_ROOT resolution via `BASH_SOURCE` broke under symlink/piped invocation — now uses `git rev-parse --show-toplevel`. [scripts/install-gitnexus-plus.sh]
+- [x] [Review][Patch] `pi install` could hang on an interactive prompt — added `< /dev/null`. [scripts/install-gitnexus-plus.sh]
+- [x] [Review][Patch] Fixture `dispatch` had no caller (router docstring was false) — added `routeTask` caller. [tests/gitnexus/fixtures/swarmclaw.ts]
+- [x] [Review][Patch] Schema/comment said "gitnexus 1.6.3" — corrected to 1.6.9 (actual installed). [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] AC-1 query test over-constrained to a specific symbol name — now asserts non-empty definitions with valid shape + repo-relative paths, using the spec's literal "SwarmClaw routes" query string. [tests/gitnexus/graph-queries.test.ts]
+
+**Deferred (documented constraints, out of story scope):**
+- [x] [Review][Defer] DoD #6 "exercised through Pi agent invocation" — tests drive the gitnexus CLI engine directly (the Pi extension shells out to the same CLI); live Pi-agent invocation needs LLM API keys not present in CI. Engine layer proven; wrapper layer deferred. [tests/gitnexus/graph-queries.test.ts] — deferred, CI key constraint
+- [x] [Review][Defer] AC-3 "Pi returns tool-not-found" is a Pi-layer behavior; the CLI-analogue (nonzero exit on unknown subcommand) is asserted instead. Full Pi-layer test deferred (same API-key constraint). [tests/gitnexus/graph-queries.test.ts] — deferred, CI key constraint
+- [x] [Review][Defer] INV-GN2 production enforcement — this story ships no query wrapper (the extension is third-party); the guard lives at the test/harness boundary we own. [tests/gitnexus/graph-queries.test.ts] — deferred, no wrapper ships in this story
+- [x] [Review][Defer] AC-1 "relevance score" — gitnexus returns no relevanceScore on definitions (only `priority` on processes); tests assert the CLI's actual contract. [tests/gitnexus/graph-queries.test.ts] — deferred, CLI contract drift
+- [x] [Review][Defer] Spec technical-note drift: CLI path `/usr/local/bin/gitnexus` and version `1.6.3` — code resolves the path dynamically and handles 1.6.9. [p0-10-gitnexus-analyze-graph.md] — deferred, code is more correct than spec
