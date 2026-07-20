@@ -19,7 +19,7 @@ epics:
     stories:
       P0.1:  { title: "Archon env-patch productionize + non-regression gate", points: 3, status: killed, deps: [] }  # killed: Warren decision — flat agents, no Archon DAG
       P0.2:  { title: "Vendor coms.ts + OQ-1/OQ-5 decision",                  points: 3, status: done, deps: [] }  # done 2026-07-13: PR #25, bmad-code-review R1 54/54 + R2 52/52 + R3 42/42 + R4 56/56 (+17 regression follow-ups + 52 tsc strictness) fixed, AC1-3 live green (strict gate); R5 2026-07-14: 29/29 findings + 5 regression follow-ups + harness timing root cause fixed, fresh strict-gate live run green 13/13
-      P0.3:  { title: "pi-team-launch.sh mixed-model merged-JSON demo",       points: 4, status: in-review, deps: [P0.2] }  # P0.1 removed (killed); CC-2 amended 2026-07-20 (real warren 0.10.0 CLI surface verified)
+      P0.3:  { title: "pi-team-launch.sh mixed-model merged-JSON demo",       points: 4, status: done, deps: [P0.2] }  # done 2026-07-20: PR #40 squash-merged; 4 review rounds (Gemini 9 + CodeRabbit 5 findings incl. 1 Major security, all fixed), live mixed-provider e2e green (evidence _research/p0-3-live-run-2026-07-20.json); CC-2 amended to real warren 0.10.0 surface
       P0.4:  { title: "Hard-guard loopy-prompt kill",                         points: 3, status: killed, deps: [P0.3] }  # killed: Warren decision — loopy-kill absorbed into launcher guards
       P0.5:  { title: "pi-lens headless TDI/warnings (or proxy)",            points: 4, status: draft, deps: [] }
       P0.6:  { title: "LSP provision + diagnostics/navigation",              points: 3, status: draft, deps: [P0.5] }
