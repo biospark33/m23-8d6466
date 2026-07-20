@@ -376,7 +376,14 @@ export async function verifyRoundTrip(
       });
       return { ok: false, step: "reflect", error: errMsg, requestId };
     }
-    if (!insights.every((i) => typeof i.summary === "string" && i.summary.length > 0)) {
+    // `i.summary` is statically `string` (typed ReflectResponse), so a
+    // `typeof === "string"` guard would be a TS tautology. The meaningful
+    // check is non-empty: "" is a valid string but an empty insight summary.
+    // The production client Zod-validates via `ReflectResponseSchema`
+    // (`summary: z.string().min(1)`) upstream, but the verifier also runs
+    // against mock/fake clients (unit tests) that bypass Zod, so this guard
+    // is kept as the runtime check for an empty-summary insight.
+    if (!insights.every((i) => i.summary.length > 0)) {
       errMsg = { code: "invalid_insights", message: "reflect returned an insight with empty summary" };
       status = "error";
       log({
