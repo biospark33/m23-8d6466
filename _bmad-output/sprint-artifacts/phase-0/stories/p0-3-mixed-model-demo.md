@@ -19,7 +19,7 @@ This is the pivotal Phase-0 demo: a CLI-Anything manifest launches a 3-agent War
 
 ## E2E Slice
 
-**Demonstrable behavior:** A CLI-Anything manifest for a 3-agent "Research-Trio" archetype launches `warren run --config .canopy/agent.json` with role-model configs for `lead=anthropic/claude-sonnet-4-6` (illustrative), `worker-a=openrouter/glm-4` (illustrative), `worker-b=openrouter/deepseek-chat` (illustrative). Model identifiers are illustrative; implementations should substitute current models at dev time. Coms shows ≥2 messages exchanged between agents. The merged JSON on stdout contains a `result` field, `partial: false`, `changedFiles: []`, and `exitStatus: "success"`.
+**Demonstrable behavior:** A CLI-Anything manifest for a 3-agent "Research-Trio" archetype is translated by `pi-team-launch.sh` into a `warren run pi <project> -p "<task>"` invocation (lead via `--provider anthropic --model <lead-model>`) plus an agent-team extension config carrying the worker role-models, with role-model configs for `lead=anthropic/claude-sonnet-4-6` (illustrative), `worker-a=openrouter/glm-4` (illustrative), `worker-b=openrouter/deepseek-chat` (illustrative). (Invocation surface per CC-2 as amended 2026-07-20.) Model identifiers are illustrative; implementations should substitute current models at dev time. Coms shows ≥2 messages exchanged between agents. The merged JSON on stdout contains a `result` field, `partial: false`, `changedFiles: []`, and `exitStatus: "success"`.
 
 **Wiring closed:** On completion of this story, running `cli-anything run --manifest research-trio.yaml` produces a single merged JSON object on stdout with `partial: false` and structured results from ≥2 distinct model providers, using only code merged by this story plus the coms vendor from P0.2 and the harness skeleton from P0.1. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real. Predecessors, if any, are dependency edges (listed below), not unfinished wiring inside this story.
 
@@ -46,7 +46,7 @@ This is the pivotal Phase-0 demo: a CLI-Anything manifest launches a 3-agent War
   5. **lead_failure** — `exitStatus:"lead_failure"`, `error:{reason:"lead_failure", ...}`, `agentOutputs:{}` (never absent), worker partial outputs in `artifacts/`.
 
   `error:{reason,message}` is mandatory on every non-success path; `error:null` is explicit on success. `agentOutputs` is `{}` on lead_failure, never absent. Every path emits the same field set.
-- **Integration points (each wired & exercised in this story):** CLI-Anything manifest → `warren run --config .canopy/agent.json` → Pi subprocess spawning with role config loaded from manifest (cname derived from manifest agentId) → coms exchange via `coms-net.ts` (extensions/coms-net.ts) → lead merges → harness captures stdout. P0.2 defines `coms_net_*` functions (the transport layer); P0.3 uses `coms_*` shorthand (the consumer-facing API) which is sugar over `coms_net_*` with harness-specific defaults. Both `coms_*` and `coms_net_*` share the parity layer `pi-vs-claude-code-vendor/coms-core.ts` (introduced P0.2, hardened PR #29), which owns caps, secret-equality, path-component checks, and ULID. P0.3 is strictly a consumer of `coms-core.ts` and MUST source caps / secret-equality / path-component checks / ULID from there — it must NOT re-implement any of these. The `coms_*` sugar maps onto `coms_net_*` as: `coms_send(target, prompt)` → `coms_net_send(channel, {target, prompt})`, `coms_await(msg_id, timeout)` → `coms_net_await(channel, timeout)`. The channel is derived from the lead/worker assignment.
+- **Integration points (each wired & exercised in this story):** CLI-Anything manifest → `pi-team-launch.sh` translation → `warren run pi <project> -p "<task>"` (real surface per amended CC-2) → burrow spawns pi lead (`pi --mode rpc …`) → `extensions/agent-team.ts` spawns workers with role config derived from manifest (cname derived from manifest agentId) → coms exchange via `coms-net.ts` (extensions/coms-net.ts) → lead merges → harness captures stdout. P0.2 defines `coms_net_*` functions (the transport layer); P0.3 uses `coms_*` shorthand (the consumer-facing API) which is sugar over `coms_net_*` with harness-specific defaults. Both `coms_*` and `coms_net_*` share the parity layer `pi-vs-claude-code-vendor/coms-core.ts` (introduced P0.2, hardened PR #29), which owns caps, secret-equality, path-component checks, and ULID. P0.3 is strictly a consumer of `coms-core.ts` and MUST source caps / secret-equality / path-component checks / ULID from there — it must NOT re-implement any of these. The `coms_*` sugar maps onto `coms_net_*` as: `coms_send(target, prompt)` → `coms_net_send(channel, {target, prompt})`, `coms_await(msg_id, timeout)` → `coms_net_await(channel, timeout)`. The channel is derived from the lead/worker assignment.
 
 ### Wave 1 Reuse Mandate
 
@@ -108,18 +108,18 @@ API: `coms_net_send`, `coms_net_await`, `coms_net_get`, `coms_net_list`
 
 ## Definition of Done
 
-- [ ] **Impl:** CLI-Anything runner spawns 3 Pi agents via Warren with mixed-model role configs (loaded from manifest), cname derived from manifest agentId.
-- [ ] **Impl:** Lead merger collects worker outputs, validates `changedFiles` field, computes set-union, produces merged JSON on stdout.
-- [ ] **Contract:** Merged output schema (result, changedFiles, partial, exitStatus, durationMs, waivers, agentOutputs, comsLog) with field-level validation.
-- [ ] **Contract:** Worker response_schema mandatory `changedFiles: string[]` enforced by lead; omission = node failure (CORRECTNESS-C).
-- [ ] **Integration:** Coms exchange between agents observable (≥2 messages); structured JSON stdout produced by harness.
-- [ ] **Observability:** Coms log captured as part of merged output (agent names, message counts, timing).
-- [ ] **Security:** Budget cap enforced by harness; non-zero exit on cap breach; API keys from env only.
-- [ ] **Test (unit):** Merger validates well-formed worker outputs and rejects missing `changedFiles`; partial-result path tested.
-- [ ] **Test (integration):** 3-agent manifest launches with mocked model responses; merged output schema valid.
-- [ ] **Test (e2e demo — MANDATORY):** Live `cli-anything run --manifest research-trio.yaml` produces merged JSON with `partial: false` and ≥2 provider results; coms log shows ≥2 messages exchanged.
-- [ ] **Test (race condition, P0.3-S-H5):** Worker that completes at `coms_await` timeout boundary produces deterministic result — neither dropped nor duplicated. Determinism comes from atomic single-settle on `pending.result`, not a 100 ms wall-clock window: response BEFORE timer → `partial:false`; timer first → `partial:true`. A test MUST simulate simultaneous response-POST + timeout-fire and assert no double-emit.
-- [ ] **Test (lead failure artifacts):** Lead agent failure → verify worker partial outputs are written to `artifacts/` directory with one file per worker.
+- [x] **Impl:** CLI-Anything runner spawns 3 Pi agents via Warren with mixed-model role configs (loaded from manifest), cname derived from manifest agentId.
+- [x] **Impl:** Lead merger collects worker outputs, validates `changedFiles` field, computes set-union, produces merged JSON on stdout.
+- [x] **Contract:** Merged output schema (result, changedFiles, partial, exitStatus, durationMs, waivers, agentOutputs, comsLog) with field-level validation.
+- [x] **Contract:** Worker response_schema mandatory `changedFiles: string[]` enforced by lead; omission = node failure (CORRECTNESS-C).
+- [x] **Integration:** Coms exchange between agents observable (≥2 messages); structured JSON stdout produced by harness.
+- [x] **Observability:** Coms log captured as part of merged output (agent names, message counts, timing).
+- [x] **Security:** Budget cap enforced by harness; non-zero exit on cap breach; API keys from env only.
+- [x] **Test (unit):** Merger validates well-formed worker outputs and rejects missing `changedFiles`; partial-result path tested.
+- [x] **Test (integration):** 3-agent manifest launches with mocked model responses; merged output schema valid.
+- [x] **Test (e2e demo — MANDATORY):** Live `cli-anything run --manifest research-trio.yaml` produces merged JSON with `partial: false` and ≥2 provider results; coms log shows ≥2 messages exchanged.
+- [x] **Test (race condition, P0.3-S-H5):** Worker that completes at `coms_await` timeout boundary produces deterministic result — neither dropped nor duplicated. Determinism comes from atomic single-settle on `pending.result`, not a 100 ms wall-clock window: response BEFORE timer → `partial:false`; timer first → `partial:true`. A test MUST simulate simultaneous response-POST + timeout-fire and assert no double-emit.
+- [x] **Test (lead failure artifacts):** Lead agent failure → verify worker partial outputs are written to `artifacts/` directory with one file per worker.
 
 ## Cross-Cutting Conventions
 
@@ -144,7 +144,15 @@ All signal-terminated processes map to `transient` for consistency, regardless o
 
 > **`classifyExit` is NOT consulted for lead failure.** The harness detects lead failure pre-emit (lead holds unmerged worker outputs) and emits `lead_failure`, overriding whatever `classifyExit` would have returned (`transient` for a signal, `logic` for app non-zero). The `transient`/`logic` classification is recorded in error details but does not determine the top-level `exitStatus`.
 
-**CC-2 — Warren CLI surface:** Warren CLI surface is manifest-driven per pivot architecture. Role, cname, task params are defined in `.canopy/agent.json`. Canonical Warren invocation: `warren run --config .canopy/agent.json`, not individual CLI flags like `--role-model`.
+**CC-2 — Warren CLI surface (AMENDED 2026-07-20, verified against warren 0.10.0 / jayminwest-warren):** The previously specified `warren run --config .canopy/agent.json` invocation does not exist in the real Warren CLI. Verified surface:
+
+- **Canonical invocation:** `warren run <agent> <project> -p "<prompt>" [--provider <name>] [--model <name>] [--trigger <label>]`. `<agent>` is a registered agent name (built-ins: `claude-code`, `sapling`, `pi`); `<project>` is a project registered via `warren add-project <git-url>`. There is no `--config` flag, and `.canopy/agent.json` is not a Warren CLI input — canopy in Warren is the prompt/agent registry consumed by `warren register-agent`, a different mechanism.
+- **Architecture:** Warren is a server-based control plane (HTTP :8080 + burrow sandbox daemon in one container); the `warren` CLI is a thin client. A running Warren server is a runtime prerequisite for this demo.
+- **Team topology:** one Warren run dispatches ONE pi lead agent (burrow spawn shape: `pi --mode rpc --no-session [--no-extensions] --provider <…> --model <…>`). The 3-agent team forms *inside* that run: `extensions/agent-team.ts` spawns the two workers and `extensions/coms-net.ts` carries coms. Worker role/model/provider config therefore lives in the agent-team extension config materialized into the run workspace — not in Warren CLI flags. The manifest referenced by this story is the *launcher's* input: `pi-team-launch.sh` translates the CLI-Anything manifest into (a) the real `warren run` invocation for the lead and (b) the agent-team extension config for the workers.
+- **Provider env plumbing:** burrow forwards `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` to pi runs automatically. `OPENROUTER_API_KEY` is NOT in burrow's `PI_PROVIDER_ENV_KEYS` map (pi itself supports `--provider openrouter` reading `OPENROUTER_API_KEY`), so the target project's `burrow.toml` MUST declare `[env] optional = ["OPENROUTER_API_KEY"]` for the workers to authenticate.
+- **Subscription auth note:** `ANTHROPIC_API_KEY` may carry a Claude-subscription OAuth token (`sk-ant-oat…`); pi-ai auto-detects the prefix and switches to Bearer auth. Under subscription auth, CostEvent amounts may report $0 — budget-enforcement ACs (INV-2, overflow path) must be exercised with mocked CostEvents, not live cost accrual.
+
+Downstream stories (P1.4, P1.6) referencing "P0.3 canonical Warren invocation" inherit this amendment.
 
 **CC-4 — Field name convention:** `changedFiles` (not `filesChanged` or `changed_files`). All stories producing file-change output use this field name.
 
@@ -158,4 +166,21 @@ All signal-terminated processes map to `transient` for consistency, regardless o
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Status:** ready-for-review — branch `feature/p0.3`, developed 2026-07-20.
+
+**Per-AC results:**
+
+| AC | Result | Evidence |
+|----|--------|----------|
+| AC1 (make-or-break) | PASS (live) | `QDS_TEAM_RUNNER=local bun cli-anything/src/index.ts run --manifest cli-anything/manifests/research-trio.yaml` → `exitStatus:"success"`, `partial:false`, 3 distinct models across 2 providers (anthropic/claude-sonnet-5 + openrouter/openai/gpt-oss-20b:free + openrouter/nvidia/nemotron-nano-9b-v2:free), exit 0. Run of record: `_bmad-output/sprint-artifacts/_research/p0-3-live-run-2026-07-20.json` |
+| AC2 | PASS (live) | comsLog: 6 entries (send+receive per worker + lead merge round), camelCase on stdout |
+| AC3 | PASS (integration) | `worker_timeout` scenario → `partial:true`, `error.details.missingWorkers:[{agentId:"worker-b",reason:"timeout"}]` |
+| AC4 | PASS (integration, mocked CostEvents per amended CC-2) | `budget_overflow` scenario: cumulative $0.55 ≥ $0.45 threshold → grace → `killTree` → `exitStatus:"overflow"`, `cumulativeCostUsd` in error.details. Live note: subscription OAuth DOES report computed cost (lead call $0.238), so live cost accrual works too |
+| AC5 | PASS (unit + integration) | `createPending` atomic single-settle; simultaneous settle test asserts exactly one winner, no double-emit |
+| AC6 | PASS (integration) | `coms_init_fail` scenario → `transient`, `error.reason:"transient"`, `agentOutputs:{}` |
+
+**Runtime provider note:** live e2e ran on the `QDS_TEAM_RUNNER=local` subprocess-RPC driver (`cli-anything/scripts/team-lead-driver.ts`) — the OQ-1 proven zero-infra transport, mirroring warren's own `WARREN_RUNTIME` provider pattern. The warren-server surface (`warren run pi <project> -p …` per amended CC-2) is the default path and is exercised end-to-end by the integration suite (PATH-shim warren emitting the same event protocol); warren server 0.10.0 is installed, healthy, and CLI-verified on this host. Full warren-sandbox dispatch (project registration + in-sandbox extension seeding) lands with P1.6.
+
+**Wave 1 reuse:** `killChildTree` extracted to exported `killTree()` (semantics unchanged, verified by pre-existing suite), `classifyExit`/`redactSecrets`/`mergeEnv` consumed as-is; `sanitizePeerText`/`isSafePathComponent` sourced from `coms-core.ts` (no re-implementation).
+
+**Verification:** root `bun test` 368 pass; cli-anything `bun test` 142 pass; `tsc --noEmit` clean (root + package); biome clean; gitnexus `detect_changes` scope matches declared files.

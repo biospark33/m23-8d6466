@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 import { YAMLParseError } from "yaml";
 import { ZodError } from "zod";
-import { ManifestTooLargeError } from "./manifest.ts";
-import { runManifest } from "./runner.ts";
-import type { ExitClass, HarnessResult } from "./types.ts";
+import { ManifestTooLargeError, manifestKind } from "./manifest.ts";
+import { runManifest, runTeamManifest } from "./runner.ts";
+import type { ExitClass, ExitStatus, HarnessResult, MergedOutput } from "./types.ts";
 
 const USAGE = [
   "usage: cli-anything run [--manifest <path.yaml>] [--timeout-ms <n>] [-- <args>]",
@@ -24,6 +24,18 @@ const EXIT_CODES: Record<ExitClass, number> = {
   nonzero: 1,
   timeout: 124,
   spawn_error: 127,
+};
+
+/**
+ * Team exitStatus → process exit code (P0.3, INV-2: non-zero on cap breach).
+ * transient uses 75 (EX_TEMPFAIL: retryable).
+ */
+const TEAM_EXIT_CODES: Record<ExitStatus, number> = {
+  success: 0,
+  logic: 1,
+  lead_failure: 2,
+  overflow: 3,
+  transient: 75,
 };
 
 /**
@@ -210,6 +222,29 @@ export async function main(argv: string[]): Promise<number> {
   if (timeoutSeen && timeoutMs === undefined) {
     console.error(USAGE);
     return 64;
+  }
+
+  // P0.3: a manifest with a `team` block routes to the team runner and emits
+  // the MergedOutput contract instead of HarnessResult.
+  let kind: "single" | "team";
+  try {
+    kind = manifestKind(manifestPath);
+  } catch (err) {
+    const { exitCode, message } = classifyError(err, manifestPath);
+    console.error(message);
+    return exitCode;
+  }
+  if (kind === "team") {
+    let merged: MergedOutput;
+    try {
+      merged = await runTeamManifest(manifestPath);
+    } catch (err) {
+      const { exitCode, message } = classifyError(err, manifestPath);
+      console.error(message);
+      return exitCode;
+    }
+    console.log(JSON.stringify(merged));
+    return TEAM_EXIT_CODES[merged.exitStatus] ?? 1;
   }
 
   let result: HarnessResult;

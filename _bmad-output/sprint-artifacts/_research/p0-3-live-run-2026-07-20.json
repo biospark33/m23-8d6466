@@ -1,0 +1,132 @@
+{
+  "story": "P0.3",
+  "run_of_record": true,
+  "timestamp": "2026-07-20T14:25:00-04:00",
+  "command": "QDS_TEAM_RUNNER=local bun cli-anything/src/index.ts run --manifest cli-anything/manifests/research-trio.yaml",
+  "runtime": "local subprocess-RPC driver (OQ-1); warren-server surface covered by integration tests",
+  "providers": {
+    "lead": "anthropic (subscription OAuth, sk-ant-oat auto-detected by pi-ai)",
+    "workers": "openrouter free-tier"
+  },
+  "assertions": {
+    "ac1_merged_json_partial_false": true,
+    "ac1_distinct_models_gte2": true,
+    "ac2_coms_messages_gte2": true,
+    "exit_code": 0,
+    "error_null_explicit": true,
+    "schema_fields": [
+      "agentOutputs",
+      "changedFiles",
+      "comsLog",
+      "durationMs",
+      "error",
+      "exitStatus",
+      "partial",
+      "result",
+      "waivers"
+    ]
+  },
+  "merged_output": {
+    "result": {
+      "summary": "Worker A highlights the technical strengths of the system: reliable low-latency inter-process communication, a decoupled architecture supporting modular agent integration, and built-in fault tolerance with retry logic for robust operations. Worker B counters with risk considerations: uncontrolled spending can cause financial instability, weak oversight reduces accountability and transparency in resource allocation, and resources may be overextended beyond capacity or strategic priorities. Together, the findings suggest a technically sound, resilient architecture that must be paired with disciplined financial governance and clear resource controls to avoid operational and fiscal risk.",
+      "workerSummaries": "worker-a: - Reliable inter-process communication with minimal latency. - Decoupled architecture enabling modular agent integration. - Built-in fault tolerance and retry logic for robust operations. | worker-b: - Financial instability due to uncontrolled spending\n- Reduced accountability and transparency in resource allocation\n- Risk of overextending resources beyond capacity or strategic priorities",
+      "respondedWorkers": [
+        "worker-a",
+        "worker-b"
+      ],
+      "models": [
+        "anthropic/claude-sonnet-5",
+        "openrouter/openai/gpt-oss-20b:free",
+        "openrouter/nvidia/nemotron-nano-9b-v2:free"
+      ]
+    },
+    "changedFiles": [],
+    "partial": false,
+    "exitStatus": "success",
+    "durationMs": 178499,
+    "waivers": [],
+    "agentOutputs": {
+      "worker-b": {
+        "summary": "- Financial instability due to uncontrolled spending\n- Reduced accountability and transparency in resource allocation\n- Risk of overextending resources beyond capacity or strategic priorities"
+      },
+      "worker-a": {
+        "summary": "- Reliable inter-process communication with minimal latency. - Decoupled architecture enabling modular agent integration. - Built-in fault tolerance and retry logic for robust operations."
+      }
+    },
+    "comsLog": [
+      {
+        "requestId": "rpc-1",
+        "sessionId": "team-94886",
+        "phaseId": "dispatch_task",
+        "channel": "lead:worker-a",
+        "direction": "send",
+        "senderAgent": "lead",
+        "receiverAgent": "worker-a",
+        "payloadSize": 161,
+        "durationMs": 0,
+        "timestamp": "2026-07-20T18:25:51.273Z"
+      },
+      {
+        "requestId": "rpc-2",
+        "sessionId": "team-94886",
+        "phaseId": "dispatch_task",
+        "channel": "lead:worker-b",
+        "direction": "send",
+        "senderAgent": "lead",
+        "receiverAgent": "worker-b",
+        "payloadSize": 155,
+        "durationMs": 0,
+        "timestamp": "2026-07-20T18:25:51.280Z"
+      },
+      {
+        "requestId": "rpc-3",
+        "sessionId": "team-94886",
+        "phaseId": "dispatch_task",
+        "channel": "worker-b:lead",
+        "direction": "receive",
+        "senderAgent": "worker-b",
+        "receiverAgent": "lead",
+        "payloadSize": 241,
+        "durationMs": 15652,
+        "timestamp": "2026-07-20T18:26:06.932Z"
+      },
+      {
+        "requestId": "rpc-4",
+        "sessionId": "team-94886",
+        "phaseId": "dispatch_task",
+        "channel": "worker-a:lead",
+        "direction": "receive",
+        "senderAgent": "worker-a",
+        "receiverAgent": "lead",
+        "payloadSize": 230,
+        "durationMs": 171457,
+        "timestamp": "2026-07-20T18:28:42.730Z"
+      },
+      {
+        "requestId": "rpc-5",
+        "sessionId": "team-94886",
+        "phaseId": "dispatch_task",
+        "channel": "harness:lead",
+        "direction": "send",
+        "senderAgent": "harness",
+        "receiverAgent": "lead",
+        "payloadSize": 401,
+        "durationMs": 0,
+        "timestamp": "2026-07-20T18:28:42.730Z"
+      },
+      {
+        "requestId": "rpc-6",
+        "sessionId": "team-94886",
+        "phaseId": "dispatch_task",
+        "channel": "lead:harness",
+        "direction": "receive",
+        "senderAgent": "lead",
+        "receiverAgent": "harness",
+        "payloadSize": 739,
+        "durationMs": 7009,
+        "timestamp": "2026-07-20T18:28:49.739Z"
+      }
+    ],
+    "error": null
+  }
+}

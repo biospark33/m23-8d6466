@@ -1,0 +1,18 @@
+name: research-trio-test
+team:
+  project: qds-factory
+  lead:
+    agentId: lead
+    model: anthropic/claude-test-lead
+    prompt: "Coordinate the trio and merge worker results."
+  workers:
+    - agentId: worker-a
+      model: openrouter/vendor-a/model-a
+      prompt: "Research topic A."
+    - agentId: worker-b
+      model: openrouter/vendor-b/model-b
+      prompt: "Research topic B."
+  budgetCapUsd: 0.5
+  turnCap: 5
+  wallClockCapMs: 300000
+  comsAwaitTimeoutMs: 240000

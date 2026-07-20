@@ -1,0 +1,6 @@
+# Burrow sandbox config for QDS-Factory runs (P0.3, CC-2 amended).
+# OPENROUTER_API_KEY is not in burrow's built-in PI_PROVIDER_ENV_KEYS map, so
+# it must be declared here for sandboxed pi workers to authenticate against
+# OpenRouter. Forwarded only when set on the host; never via argv.
+[env]
+optional = ["OPENROUTER_API_KEY"]

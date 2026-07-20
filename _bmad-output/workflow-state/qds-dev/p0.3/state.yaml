@@ -1,0 +1,33 @@
+# qds-dev workflow state — P0.3
+story_key: p0.3
+story_file: _bmad-output/sprint-artifacts/phase-0/stories/p0-3-mixed-model-demo.md
+track: single-dev
+mode: standard
+phase: 4          # 0=selection 1=branch 2=research 3=gate 4=dev-story 5=verify+pr
+branch: feature/p0.3
+base: main
+started: 2026-07-20T13:30:00-04:00
+spec_amendment: db81111  # CC-2 amended to real warren 0.10.0 surface
+research:
+  confidence: 0.9
+  auto_approved: true
+  tracks:
+    context7: satisfied-via-source-verification  # warren 0.10.0 + pi-ai read directly
+    codebase: done
+    examples: done
+    specs: done
+    dependencies: done  # P0.2 status=done verified in sprint-status.yaml
+    cross_track: n/a
+  key_findings:
+    - runner.ts buildSpawn already targets `warren run`; route launcher through runManifest
+    - killChildTree/armWatchdog are closures in runManifest (not exported); reuse via runManifest or minimal export refactor
+    - classifyExit returns ok|nonzero|timeout|spawn_error; map to CC-1 5-enum in launcher
+    - coms-net.ts is a pi extension (tools coms_net_send/await), not importable; orchestrate subprocesses per coms-smoke-test.ts patterns
+    - tests at tests/pi-team-launch.test.ts, bun test, PATH-shim fixtures; smoke script + PI_SMOKE_STRICT waiver pattern from P0.2
+    - PRD v4 pre-pivot vocab (exit_class 3-enum); story CC-1/CC-2(amended) is contract of record
+    - burrow.toml needs [env] optional=["OPENROUTER_API_KEY"]; subscription OAuth => mock CostEvents for budget ACs
+environment:
+  warren_server: http://localhost:8080 (docker, healthy)
+  warren_cli: /usr/local/bin/warren (0.10.0, bun-linked from ~/Development/AI-Tools/warren)
+  anthropic_auth: subscription OAuth (sk-ant-oat, pi-ai auto-detect)
+  openrouter_key: present in warren container env

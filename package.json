@@ -3,13 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "workspaces": ["pi-vs-claude-code-vendor"],
+  "workspaces": [
+    "pi-vs-claude-code-vendor"
+  ],
   "scripts": {
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
     "smoke:coms": "bun scripts/coms-smoke-test.ts",
     "verify:pi-lens": "bun scripts/pi-lens-verify.ts",
-    "lint": "bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor 2>/dev/null || bunx @biomejs/biome check ."
+    "lint": "bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor 2>/dev/null || bunx @biomejs/biome check .",
+    "smoke:team": "QDS_TEAM_RUNNER=local bun cli-anything/src/index.ts run --manifest cli-anything/manifests/research-trio.yaml"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

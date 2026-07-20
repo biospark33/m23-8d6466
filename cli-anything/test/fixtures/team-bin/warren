@@ -1,0 +1,135 @@
+#!/usr/bin/env bun
+/**
+ * Team-mode warren shim for runner-integration tests. Emits the NDJSON event
+ * stream the P0.3 harness parses (cost / coms / worker_output / merged),
+ * driven by QDS_FAKE_SCENARIO. Real `warren run pi <project> -p ...` argv is
+ * accepted and ignored beyond the `run` guard.
+ */
+const scenario = process.env["QDS_FAKE_SCENARIO"] ?? "success";
+
+if (process.argv[2] !== "run") {
+  console.error(`warren-team-shim: unsupported subcommand '${process.argv[2]}'`);
+  process.exit(64);
+}
+
+const say = (o: unknown): void => {
+  console.log(JSON.stringify(o));
+};
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+const coms = (i: number, from: string, to: string) => ({
+  type: "coms",
+  request_id: `req-${i}`,
+  session_id: "sess-1",
+  phase_id: "dispatch_task",
+  channel: `${from}:${to}`,
+  direction: "send",
+  sender_agent: from,
+  receiver_agent: to,
+  payload_size: 128,
+  duration_ms: 5,
+  timestamp: new Date().toISOString(),
+});
+
+const cost = (agentId: string, model: string, costUsd: number) => ({
+  type: "cost",
+  agentId,
+  model,
+  inputTokens: 100,
+  outputTokens: 50,
+  costUsd,
+  durationMs: 800,
+  timestamp: new Date().toISOString(),
+});
+
+// QDS_FAKE_SECRET_ECHO simulates a worker leaking an env secret into its
+// structured reply (INV-3 artifact-redaction test).
+const secretEcho = process.env["QDS_FAKE_SECRET_ECHO"];
+const workerOutput = (agentId: string, changedFiles: string[] | undefined) => ({
+  type: "worker_output",
+  agentId,
+  output: {
+    ...(changedFiles !== undefined ? { changedFiles } : {}),
+    result: {
+      summary: `${agentId} done`,
+      model: `model-of-${agentId}`,
+      ...(secretEcho !== undefined ? { leaked: `token is ${secretEcho}` } : {}),
+    },
+  },
+});
+
+async function main(): Promise<void> {
+  switch (scenario) {
+    case "success": {
+      say(coms(1, "lead", "worker-a"));
+      say(coms(2, "worker-a", "lead"));
+      say(coms(3, "lead", "worker-b"));
+      say(cost("lead", "anthropic/claude-x", 0.01));
+      say(cost("worker-a", "openrouter/model-a", 0.02));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      say(workerOutput("worker-b", ["src/b.ts", "src/a.ts"]));
+      say({ type: "merged", result: { summary: "lead merged both workers" } });
+      process.exit(0);
+      break;
+    }
+    case "worker_timeout": {
+      say(coms(1, "lead", "worker-a"));
+      say(coms(2, "worker-a", "lead"));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      // worker-b never replies; lead still emits its merge and exits cleanly.
+      say({ type: "merged", result: { summary: "merged without worker-b" } });
+      // Give the harness's worker-b await timer time to fire before exit.
+      await sleep(300);
+      process.exit(0);
+      break;
+    }
+    case "budget_overflow": {
+      say(coms(1, "lead", "worker-a"));
+      say(cost("worker-a", "openrouter/model-a", 0.2));
+      say(cost("worker-b", "openrouter/model-b", 0.2));
+      say(cost("lead", "anthropic/claude-x", 0.15));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      // Keep running: the harness must kill us (grace, then killTree).
+      await sleep(60_000);
+      break;
+    }
+    case "coms_init_fail": {
+      say({ type: "coms_init_error", reason: "no_server_url" });
+      process.exit(1);
+      break;
+    }
+    case "lead_crash": {
+      say(coms(1, "lead", "worker-a"));
+      say(coms(2, "worker-a", "lead"));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      say(workerOutput("worker-b", ["src/b.ts"]));
+      // Lead dies before emitting the merged event.
+      process.exit(1);
+      break;
+    }
+    case "logic_exit": {
+      process.exit(3);
+      break;
+    }
+    case "bad_worker_output": {
+      say(coms(1, "lead", "worker-a"));
+      say(coms(2, "worker-a", "lead"));
+      say(workerOutput("worker-a", undefined)); // changedFiles omitted
+      say(workerOutput("worker-b", ["src/b.ts"]));
+      say({ type: "merged", result: { summary: "merged" } });
+      process.exit(0);
+      break;
+    }
+    case "hang": {
+      await sleep(60_000);
+      break;
+    }
+    default: {
+      console.error(`warren-team-shim: unknown scenario '${scenario}'`);
+      process.exit(70);
+    }
+  }
+}
+
+await main();

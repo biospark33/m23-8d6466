@@ -37,7 +37,7 @@ When the qds-factory protocol reaches a dispatch_task phase, SwarmClaw invokes t
 ## Technical Notes
 
 - **exitStatus taxonomy (CC-1, aligned with P0.3):** Previous `status: 'failure'` maps to `exitStatus: 'transient'|'overflow'|'logic'`. Consumers must handle all three failure modes. This aligns with P0.3's canonical taxonomy. `"success"` = normal completion. `"transient"` = retryable failure (network, timeout). `"overflow"` = resource limit exceeded. `"logic"` = task logic error. P0.3 previously used `exitStatus: 'logic_error'` (corrected to `'logic'` in Round 8 Wave 5b). The canonical CC-1 value is `'logic'`. Any encounter with `'logic_error'` in other stories should be treated as a typo for `'logic'`.
-- **Warren CLI surface (CC-2, aligned with P0.3):** Warren CLI is manifest-driven per pivot. The canonical invocation is `warren run --config .canopy/agent.json`. Task params (task, agents, mulchBank, maxDurationMs) are defined in `.canopy/agent.json`. See P0.3 and P1.4 for canonical Warren invocation pattern.
+- **Warren CLI surface (CC-2, aligned with P0.3):** ⚠️ AMENDED 2026-07-20 — the real Warren CLI (0.10.0) has no `--config` flag; canonical invocation is `warren run <agent> <project> -p "<prompt>" [--provider --model]` against a running Warren server, with team/task params carried in the agent-team extension config the harness materializes into the run workspace (not `.canopy/agent.json`). See P0.3 CC-2 (amended) for the authoritative surface; all `warren run --config .canopy/agent.json` references in this story must be read through that amendment and reconciled at pre-dev review of this story.
   ```
   .canopy/agent.json example:
   {

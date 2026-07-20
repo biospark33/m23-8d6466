@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isSafePathComponent } from "../../pi-vs-claude-code-vendor/coms-core.ts";
 
 /**
  * CLI-Anything manifest schema.
@@ -20,6 +21,131 @@ export const ManifestSchema = z
   .strict();
 
 export type Manifest = z.infer<typeof ManifestSchema>;
+
+/**
+ * P0.3 team manifest: a 3-agent mixed-model Warren team. Distinguished from
+ * the flat single-command manifest by the required `team` block.
+ *
+ * Role model strings use `provider/model` form (e.g. "anthropic/claude-sonnet-4-5",
+ * "openrouter/z-ai/glm-4.7"): split on the FIRST "/" — provider is the pi
+ * `--provider` name, the rest is the model id.
+ */
+export const TeamRoleSchema = z
+  .object({
+    /** Agent id; becomes the coms cname (`<run-id>-<role>`) AND an artifact
+     * filename — must satisfy coms-core's safe-path-component contract
+     * (rejects ".", "..", separators). */
+    agentId: z.string().trim().min(1).refine((s) => isSafePathComponent(s)),
+    /** `provider/model` — split on first "/"; both halves must be non-empty. */
+    model: z
+      .string()
+      .trim()
+      .min(1)
+      .refine((s) => {
+        const idx = s.indexOf("/");
+        return idx > 0 && idx < s.length - 1;
+      }),
+    prompt: z.string().trim().min(1),
+  })
+  .strict();
+
+export const TeamManifestSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    team: z
+      .object({
+        lead: TeamRoleSchema,
+        workers: z.array(TeamRoleSchema).min(1).max(3),
+        /** Warren project id the run executes against. */
+        project: z.string().trim().min(1),
+        /** Per-team shared budget cap in USD (INV-2). Default 0.50. */
+        budgetCapUsd: z.number().positive().max(10).default(0.5),
+        /** Turn cap per agent. Default 5. */
+        turnCap: z.number().int().positive().max(50).default(5),
+        /** Wall-clock cap ms. Default 5 min (INV-2). */
+        wallClockCapMs: z.number().int().positive().max(3_600_000).default(300_000),
+        /** Per-message coms await timeout ms (Trio override, OQ-16b). */
+        comsAwaitTimeoutMs: z.number().int().positive().max(1_800_000).default(240_000),
+      })
+      .strict(),
+    env: z.record(z.string(), z.string()).optional(),
+  })
+  .strict();
+
+export type TeamManifest = z.infer<typeof TeamManifestSchema>;
+export type TeamRole = z.infer<typeof TeamRoleSchema>;
+
+/** Post-pivot exitStatus taxonomy (CC-1, 5-value enum). */
+export type ExitStatus =
+  | "success"
+  | "transient"
+  | "overflow"
+  | "logic"
+  | "lead_failure";
+
+/** Structured budget/model override — audit-only in Phase 0 (P0.3-S-M5). */
+export interface Waiver {
+  type: "budget_override" | "model_fallback";
+  reason: string;
+  approvedBy: string;
+}
+
+/** Coms log entry — camelCase on stdout (harness boundary, CC-9). */
+export interface ComsLogEntry {
+  requestId: string;
+  sessionId: string;
+  phaseId: string;
+  channel: string;
+  direction: "send" | "receive";
+  senderAgent: string;
+  receiverAgent: string;
+  payloadSize: number;
+  durationMs: number;
+  timestamp: string;
+}
+
+/** Cost event polled after each LLM turn (CC-9). */
+export interface CostEvent {
+  agentId: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  durationMs: number;
+  timestamp: string;
+}
+
+/** Error payload — mandatory on every non-success path (P0.3-M2). */
+export interface MergedError {
+  reason: "overflow" | "transient" | "logic" | "lead_failure";
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+/**
+ * Merged team output emitted on harness stdout (P0.3 contract).
+ * Every exit path emits the SAME field set (P0.3-M2): `error` is null
+ * (explicit) on success, populated otherwise; `agentOutputs` is `{}` on
+ * lead_failure / coms-init transient, never absent.
+ */
+export interface MergedOutput {
+  result: Record<string, unknown>;
+  changedFiles: string[];
+  partial: boolean;
+  exitStatus: ExitStatus;
+  durationMs: number;
+  waivers: Waiver[];
+  agentOutputs: Record<string, unknown>;
+  comsLog: ComsLogEntry[];
+  error: MergedError | null;
+}
+
+/** A worker's structured reply; `changedFiles` is mandatory (CORRECTNESS-C). */
+export interface WorkerOutput {
+  agentId: string;
+  changedFiles: string[];
+  result: Record<string, unknown>;
+}
 
 /** Exit classification for the structured harness result. */
 export type ExitClass = "ok" | "nonzero" | "timeout" | "spawn_error";

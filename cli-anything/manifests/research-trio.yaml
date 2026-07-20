@@ -1,0 +1,44 @@
+# P0.3 Research-Trio archetype: 3-agent mixed-model Warren team.
+# Lead runs on Anthropic direct; both workers route via OpenRouter, giving
+# ≥2 distinct model providers in the merged output (AC1).
+#
+# Model IDs are current as of 2026-07-20; substitute at run time if a slug
+# rotates — the merged-output contract does not depend on specific models.
+# Runtime prerequisites (CC-2 amended):
+#   - warren server reachable (docker compose up in the warren checkout)
+#   - `qds-factory` registered: warren add-project <git-url>
+#   - ANTHROPIC_API_KEY (sk-ant-oat subscription token OK) + OPENROUTER_API_KEY
+#   - target project burrow.toml declares [env] optional OPENROUTER_API_KEY
+name: research-trio
+team:
+  project: qds-factory
+  lead:
+    agentId: lead
+    model: anthropic/claude-sonnet-5
+    prompt: >-
+      You are the Research-Trio lead. Dispatch the two workers, exchange at
+      least two coms messages with them, collect their structured replies
+      (each MUST include a changedFiles array), merge them, and emit a single
+      merged JSON result.
+  # Worker models: free-tier OpenRouter slugs (verified live 2026-07-20) so
+  # the demo runs on a zero-credit OpenRouter account. On a funded account,
+  # premium slugs work identically (e.g. z-ai/glm-4.6, deepseek/deepseek-chat)
+  # — OpenRouter pre-authorizes max_tokens against the credit balance, so
+  # paid slugs 402 on an unfunded account.
+  workers:
+    - agentId: worker-a
+      model: openrouter/openai/gpt-oss-20b:free
+      prompt: >-
+        Research worker A: summarize the strengths of subprocess-RPC agent
+        coms in three bullet points. Reply with structured JSON including an
+        empty changedFiles array.
+    - agentId: worker-b
+      model: openrouter/nvidia/nemotron-nano-9b-v2:free
+      prompt: >-
+        Research worker B: summarize the risks of unbounded agent budgets in
+        three bullet points. Reply with structured JSON including an empty
+        changedFiles array.
+  budgetCapUsd: 0.5
+  turnCap: 5
+  wallClockCapMs: 300000
+  comsAwaitTimeoutMs: 240000
