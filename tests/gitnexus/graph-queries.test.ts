@@ -31,9 +31,13 @@ const REPO_ROOT_RAW = spawnSync("git", ["rev-parse", "--show-toplevel"], {
 });
 if (REPO_ROOT_RAW.status !== 0 || !REPO_ROOT_RAW.stdout) {
   // Without this guard, a missing git / non-repo cwd makes stdout undefined and
-  // `.trim()` throws an opaque TypeError before any test runs.
+  // `.trim()` throws an opaque TypeError before any test runs. Prefer `.error`
+  // (e.g. `spawnSync git ENOENT`) when the binary fails to spawn entirely —
+  // status is null and stderr is empty in that case, which would otherwise
+  // produce a cryptic "...(status=null): " message.
+  const reason = REPO_ROOT_RAW.error ? REPO_ROOT_RAW.error.message : (REPO_ROOT_RAW.stderr ?? "");
   throw new Error(
-    `git rev-parse --show-toplevel failed (status=${REPO_ROOT_RAW.status}): ${REPO_ROOT_RAW.stderr ?? ""}`,
+    `git rev-parse --show-toplevel failed (status=${REPO_ROOT_RAW.status}): ${reason}`,
   );
 }
 // Strip trailing slashes so the assertIndexed() anchored regex matches regardless
