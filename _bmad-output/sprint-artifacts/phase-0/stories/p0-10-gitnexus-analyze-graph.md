@@ -31,7 +31,7 @@ This story installs the `pi-gitnexus-plus` extension (v0.7.0) into the Pi agent 
 
 1. **(make-or-break)** Given `pi-gitnexus-plus@0.7.0` installed and `gitnexus analyze` completed on QDS-Factory, When `gitnexus_query` is invoked with query "SwarmClaw routes", `gitnexus_context` is invoked with symbol "registerSwarmClawAgent", and `gitnexus_impact` is invoked with target "registerSwarmClawAgent" direction "upstream", Then all three return non-empty structured result objects (at least one symbol + a repo-relative file path); `gitnexus_query` must surface the known SwarmClaw fixture. (gitnexus 1.6.9 emits no per-definition `relevanceScore` — only `priority` on processes — so the AC asserts structured non-empty shape rather than a score field. Symbol renamed from registerAgent → registerSwarmClawAgent during code review: the original name collides with vendored pi-vs-claude-code-vendor/coms-net.ts.)
 2. Given a completed analysis, When `gitnexus_query` is called with a query matching zero symbols (e.g., "ZZZZZZZ_NONEXISTENT_SYMBOL"), Then the result is a valid structured QueryResult (arrays present, not null, not an error object) that never crashes and never reports the bogus symbol as a real definition — graceful non-match. (gitnexus's semantic engine returns nearest-neighbour candidates rather than a literal empty array; the load-bearing invariant is "never crash, never false-match".)
-3. Given `pi-gitnexus-plus` is NOT installed, When an agent attempts to invoke `gitnexus_query`, Then Pi returns a tool-not-found error (not a silent failure or hang) — the agent can detect the missing extension and report it.
+3. Given `pi-gitnexus-plus` is NOT installed, When an agent attempts to invoke `gitnexus_query`, Then Pi returns a tool-not-found error (not a silent failure or hang) — the agent can detect the missing extension and report it. *(Verified via the CLI analogue — `gitnexus` exits nonzero with a recognizable error on an unknown subcommand — because the Pi-layer path needs LLM API keys absent from CI; the CLI arg-parser and Pi's tool registry share no code, so the literal "Pi returns tool-not-found" claim is structurally deferred to a keyed environment.)*
 
 ## Technical Notes
 
@@ -114,7 +114,7 @@ This story installs the `pi-gitnexus-plus` extension (v0.7.0) into the Pi agent 
 
 > Concrete named invariants only — N/A NOT permitted when triggered.
 
-- **INV-GN1:** `gitnexus analyze` only reads source files within the repository root — no traversal above the repo boundary (verified by checking that all indexed file paths start with the repo root prefix).
+- **INV-GN1:** `gitnexus analyze` keeps indexed file paths within the repository root — no `File` node has a `filePath` that is absolute (starts with `/`) or contains a parent-traversal (`..`) segment (verified by a cypher scan collecting every numeric table cell and asserting the max is 0). *Note: this validates the STORED-path shape. It cannot, from graph data alone, prove the indexer never read a file above the repo root and stored it under a relative key — that stronger read-boundary claim would require a sentinel-file positive control, which is out of scope for this install-and-verify story.*
 - **INV-GN2:** Query input is sanitized against injection patterns — graph query strings containing shell metacharacters (`;`, `|`, `$()`, backticks) are rejected with a validation error before reaching the query engine.
 - **INV-GN3:** File paths returned in query/context/impact results are validated as relative paths within the repo — absolute paths or paths containing `..` are normalized or rejected.
 
@@ -130,7 +130,7 @@ This story installs the `pi-gitnexus-plus` extension (v0.7.0) into the Pi agent 
 - [ ] **Integration:** Extension registers all 14 agent tools in Pi; three core tools exercised end-to-end through Pi agent invocation
 - [ ] **Security:** INV-GN1 through INV-GN3 enforced — repo boundary respected, query input sanitized, paths normalized
 - [ ] **Test (unit/integration):** Query returns results for "SwarmClaw"; context returns refs for known symbol; impact returns risk level for known target; empty query returns empty array (not null/error)
-- [ ] **Test (guard):** Missing extension → tool-not-found error; zero-match query → empty array; uninstalled state detected before analysis attempt
+- [x] **Test (guard):** Missing extension → tool-not-found error (CLI analogue); zero-match query → graceful valid result that never crashes and never reports the bogus symbol as real (gitnexus's semantic engine returns nearest-neighbours rather than a literal empty array); uninstalled state detected before analysis attempt
 - [ ] **Test (e2e demo — MANDATORY):** Install extension → run analysis → invoke all three tools in sequence → assert non-empty structured results for each
 
 ### Review Findings
@@ -190,3 +190,36 @@ This story installs the `pi-gitnexus-plus` extension (v0.7.0) into the Pi agent 
 - [x] [Review][Defer] DoD "14 tools registered in Pi" — needs live Pi introspection (API keys not in CI); 3 core tools proven via the CLI engine. [tests/gitnexus/graph-queries.test.ts] — deferred, API-key constraint
 
 **Dismissed (Round 2 — false positive / by design):** assertIndexed regex (matches the verified `Path:    <abspath>` format); allow-list strictness (correct for an injection boundary); guard-wiring (`assertSafeQuery` IS called at the query sites); PATH fallthrough in `resolveGitnexus` (intentional); bash 3.2 arrays (supported since 2.0); perl exit 142 vs `timeout` 124 (nonzero gates either way); `status` non-fatal (reporting only, not gating); `EXT_VERSION` no env override (YAGNI); deferred-item `[x]` marks (skill convention = recorded, not implemented); committed fixture `.gitnexusignore` (belt-and-suspenders alongside the transient root file, not dead).
+
+### Review Findings — Round 3 (bmad-code-review)
+
+> Round 3 re-ran Blind Hunter + Edge Case Hunter + Acceptance Auditor (parallel) on the round-2 patch set. 19 findings patched (incl. LOW), 4 deferred (real constraints), 6 dismissed (noise/by-design). All 16 tests green; install script verified idempotent (exit 0 on re-run after the cleanup-trap fix).
+
+**Patched (Round 3):**
+- [x] [Review][Patch] `cleanup()` returned nonzero when `.claude/skills/gitnexus` pre-existed (`CREATED_SKILLS=0` → `[ = 1 ]` exits 1); under `set -e` the EXIT trap aborted before `exit "$rc"`, so re-runs exited 1 — contradicting the "safe to re-run" header. Added explicit `return 0`. [scripts/install-gitnexus-plus.sh]
+- [x] [Review][Patch] `git rev-parse` failure unguarded under `set -e` (empty REPO_ROOT → cryptic abort); now captures stderr, FATAL-messages, and asserts non-empty. [scripts/install-gitnexus-plus.sh]
+- [x] [Review][Patch] `$HOME` unbound under `set -u` in stripped CI envs; guarded with `${HOME:-}`. [scripts/install-gitnexus-plus.sh]
+- [x] [Review][Patch] `pi list` under `pipefail` could false-fail the verify block (infra error read as "wrong version") and skip the install branch; now captured once to a string, grep run against the string, with infra-no-output distinguished from wrong-version. [scripts/install-gitnexus-plus.sh]
+- [x] [Review][Patch] No guard that a timeout provider exists — the `perl` fallback expanded to `perl: command not found` (exit 127) under `set -e`; now fails loudly if none of `timeout`/`gtimeout`/`perl` is on PATH. [scripts/install-gitnexus-plus.sh]
+- [x] [Review][Patch] Pre-existing root `.gitnexusignore` lacking `tests/`/`fixtures/` negations silently broke fixture indexing; now emits a WARN so AC-1 failure is diagnosable (user file not mutated). [scripts/install-gitnexus-plus.sh]
+- [x] [Review][Patch] A SIGKILL/OOM during analyze can leak the transient root `.gitnexusignore` (traps don't run on SIGKILL); added anchored `/.gitnexusignore` to the root `.gitignore` so the leak surfaces as ignored, not as untracked. [.gitignore]
+- [x] [Review][Patch] `EXT_VERSION` hardcoded; now `${EXT_VERSION:-0.7.0}` so CI can pin a pre-release without editing the script. [scripts/install-gitnexus-plus.sh]
+- [x] [Review][Patch] `REPO_ROOT` resolution: `spawnSync` stdout `undefined` when git missing → opaque `.trim()` TypeError; now guards status/stdout, FATAL-messages, and strips trailing slashes for regex robustness. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] `assertIndexed` `\s*$` anchor brittle to a future trailing annotation on the `Path:` line; loosened to `(\s|$)`. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] `statSync` could throw EACCES (unreadable parent) uncaught in `resolveGitnexus`; wrapped in try/catch. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] `gn()` re-threw `execFileSync` errors with just "Command failed: …" (no stderr); now surfaces the gitnexus diagnostic so CI failures are actionable. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] Empty/whitespace query passed the `SAFE_QUERY` allow-list; `assertSafeQuery` now rejects empty input. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] `beforeAll` only asserted the repo was indexed, not that the fixture symbols resolved — a `.gitnexusignore`/reachability change made downstream AC tests fail with opaque "symbol not found"; added a fixture-symbol preflight probe for fast-fail root cause. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] AC-2 false-match check was case-sensitive — a case-folded neighbour could slip past; now case-insensitive. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] AC-3 context-on-unknown-symbol only accepted `not_found`/`error`; a semantic fuzzy-resolve to `found` with a different name would fail the test though it's graceful — now accepts `found` AND asserts the resolved name is not the bogus query (no false match). [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] AC-1 impact test only proved target echo (could pass with a constant response); added a distinct-target positive control (`dispatch`) proving the tool resolves arbitrary input from the graph. [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] AC-3 unknown-subcommand test's `|| r.error` accepted an ENOENT (binary missing) as "loud failure" — conflating missing-gitnexus with rejected-subcommand; now asserts the binary spawned (`r.error === undefined`). [tests/gitnexus/graph-queries.test.ts]
+- [x] [Review][Patch] Spec AC-3 / INV-GN1 / DoD #8 text reconciled to what is actually testable (CLI-analogue honesty; stored-vs-read-boundary scope; "graceful non-match" not "empty array"). [p0-10-gitnexus-analyze-graph.md]
+
+**Deferred (Round 3 — real but out of story scope):**
+- [x] [Review][Defer] Concurrent runs racing on the transient root `.gitnexusignore` — gitnexus reads the file by fixed name, so a per-PID filename can't work; worktree-per-job avoids it. [scripts/install-gitnexus-plus.sh] — deferred, gitnexus fixed-filename constraint
+- [x] [Review][Defer] `perl alarm` fallback signal-forwarding on INT/TERM (exec replaces the image) — best-effort by design; the timeout-provider guard + EXIT trap cover the common paths. [scripts/install-gitnexus-plus.sh] — deferred, best-effort signal path
+- [x] [Review][Defer] DoD #6 "14 tools registered in Pi" — tool-count needs Pi CLI introspection whose exact surface is uncertain without a keyed env; current deferral stands. [tests/gitnexus/graph-queries.test.ts] — deferred, Pi-CLI-surface uncertainty
+- [x] [Review][Defer] AC-1 impact `impactedCount > 0` positive control — blast radius is 0 on the call graph alone (round-2 verified); needs `analyze --pdg`, out of story scope. Distinct-target resolution control added instead. [tests/gitnexus/graph-queries.test.ts] — deferred, needs --pdg
+
+**Dismissed (Round 3 — false positive / by design):** `Math.max(...cells)` multi-column conflation (the cypher query returns a single `bad` column by construction — YAGNI); INV-GN2 allow-list "over-rejects" punctuation (intentional at a security boundary — empty-input guard added instead); `ContextResultSchema` `status: z.literal("found")` rigid (a status change SHOULD fail AC-1 — that is signal, not noise); schema `null`-tolerance for `processes`/`timing` (shapes verified live — speculative hardening); `pi list` install-branch "aborts under pipefail" (an `if` condition is exempt from `set -e` — only the verify block was real, now patched); AC-1 caller-set exact-equality (would flake on analyzer self-edges; the existing `toContain` + `length > 0` already falsifies the indexing claim).

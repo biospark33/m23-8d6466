@@ -5,3 +5,8 @@ ruvector.db
 *.log
 .DS_Store
 bun.lockb
+
+# P0.10: a SIGKILL/OOM during `gitnexus analyze` can leak the transient root
+# .gitnexusignore (traps don't run on SIGKILL). Ignore it so the leak surfaces
+# as ignored, not as an untracked file polluting `git status`.
+/.gitnexusignore

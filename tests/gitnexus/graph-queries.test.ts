@@ -26,9 +26,19 @@ import { z } from "zod";
 // Resolve REPO_ROOT the same way the install script does (`git rev-parse
 // --show-toplevel`) so tests query the exact worktree `gitnexus analyze` indexed —
 // import.meta.dir arithmetic can diverge under worktrees/symlinks.
-const REPO_ROOT = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+const REPO_ROOT_RAW = spawnSync("git", ["rev-parse", "--show-toplevel"], {
   encoding: "utf-8",
-}).stdout.trim();
+});
+if (REPO_ROOT_RAW.status !== 0 || !REPO_ROOT_RAW.stdout) {
+  // Without this guard, a missing git / non-repo cwd makes stdout undefined and
+  // `.trim()` throws an opaque TypeError before any test runs.
+  throw new Error(
+    `git rev-parse --show-toplevel failed (status=${REPO_ROOT_RAW.status}): ${REPO_ROOT_RAW.stderr ?? ""}`,
+  );
+}
+// Strip trailing slashes so the assertIndexed() anchored regex matches regardless
+// of how rev-parse formats the toplevel.
+const REPO_ROOT = REPO_ROOT_RAW.stdout.trim().replace(/\/+$/, "");
 
 // gitnexus lives at a non-standard path on this host (~/.local/node-arm64/bin);
 // the story assumed /usr/local/bin. Resolve robustly.
@@ -38,7 +48,16 @@ function resolveGitnexus(): string {
     "/usr/local/bin/gitnexus",
   ];
   for (const c of candidates) {
-    if (existsSync(c) && statSync(c).isFile()) return c;
+    if (!existsSync(c)) continue;
+    // statSync can throw EACCES on an unreadable parent dir; the && short-circuit
+    // above doesn't catch a throw, so wrap it.
+    let isFile = false;
+    try {
+      isFile = statSync(c).isFile();
+    } catch {
+      continue;
+    }
+    if (isFile) return c;
   }
   // Fall back to PATH resolution.
   return "gitnexus";
@@ -48,13 +67,23 @@ const GN = resolveGitnexus();
 /** Run a gitnexus subcommand, returning parsed JSON (gitnexus 1.6.9 emits clean
  * JSON on stdout; log lines go to stderr, but keep the noise-strip for safety). */
 function gn(args: string[]): unknown {
-  const out = execFileSync(GN, args, {
-    cwd: REPO_ROOT,
-    encoding: "utf-8",
-    timeout: 30_000,
-    maxBuffer: 32 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  let out: string;
+  try {
+    out = execFileSync(GN, args, {
+      cwd: REPO_ROOT,
+      encoding: "utf-8",
+      timeout: 30_000,
+      maxBuffer: 32 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (e) {
+    // execFileSync's default message is just "Command failed: ..." — surface the
+    // stderr diagnostic so CI failures point at the real gitnexus error.
+    const err = e as { stderr?: Buffer | string; message?: string };
+    const stderr =
+      (typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString() ?? "") ?? "").slice(0, 500);
+    throw new Error(`gitnexus ${args.join(" ")} failed: ${err.message ?? String(e)}\nstderr: ${stderr}`);
+  }
   // gitnexus 1.6.9 emits clean JSON on stdout (logs → stderr). Prefer a full
   // parse; only slice from the first `{` if leading noise slips through. Slicing
   // unconditionally would mis-parse if a log line ever contains `{` on stdout.
@@ -75,7 +104,7 @@ function assertIndexed(): void {
     maxBuffer: 8 * 1024 * 1024,
   });
   // Each indexed repo has a `    Path:    <abspath>` line.
-  const re = new RegExp(`Path:\\s+${REPO_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "m");
+  const re = new RegExp(`Path:\\s+${REPO_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\s|$)`, "m");
   if (!re.test(listing)) {
     throw new Error(`repo not indexed at ${REPO_ROOT} — run scripts/install-gitnexus-plus.sh`);
   }
@@ -131,6 +160,16 @@ const ImpactResultSchema = z.object({
 
 beforeAll(() => {
   assertIndexed();
+  // Fail fast with a clear root cause if the fixture symbols are missing from the
+  // index (e.g. .gitnexusignore filtering them out, or a reachability-filter
+  // change). Without this, downstream AC tests fail with opaque "symbol not found"
+  // errors while assertIndexed() still passes.
+  const probe = gn(["context", "registerSwarmClawAgent", "-r", REPO_ROOT]) as { status?: string };
+  if (probe.status !== "found") {
+    throw new Error(
+      "fixture symbol registerSwarmClawAgent missing from index — check .gitnexusignore + run scripts/install-gitnexus-plus.sh",
+    );
+  }
 });
 
 // --- INV-GN2: query-string injection rejection (validated at OUR boundary) ---
@@ -144,6 +183,8 @@ beforeAll(() => {
 // left (&&, &, >, <, newlines, $VAR, quotes).
 const SAFE_QUERY = /^[A-Za-z0-9 _.-]+$/;
 function assertSafeQuery(q: string): void {
+  // Empty/whitespace query passes the allow-list regex but is never a valid query.
+  if (!q || !q.trim()) throw new Error("INV-GN2: rejected empty query");
   if (!SAFE_QUERY.test(q)) throw new Error(`INV-GN2: rejected non-allowlisted chars in query: ${q}`);
 }
 
@@ -205,6 +246,15 @@ describe("AC-1 (make-or-break): all three tools return non-empty structured resu
     // load-bearing proof that impact resolved the fixture symbol.
     expect(Number.isInteger(result.impactedCount)).toBe(true);
     expect(result.impactedCount).toBeGreaterThanOrEqual(0);
+    // Positive control: impact must resolve a DIFFERENT target from the graph
+    // (proving it queries the index, not echo). `dispatch` is another fixture
+    // symbol with a real caller (routeTask). impactedCount can still be 0 without
+    // --pdg, but target resolution for arbitrary input is falsifiable proof.
+    const disp = ImpactResultSchema.parse(
+      gn(["impact", "dispatch", "-r", REPO_ROOT, "--direction", "upstream"]),
+    );
+    expect(disp.target.name).toBe("dispatch");
+    expect(disp.target.filePath).toContain("swarmclaw.ts");
   });
 });
 
@@ -221,8 +271,10 @@ describe("AC-2: zero-match query is graceful (never crash / never error object)"
     expect(Array.isArray(result.definitions)).toBe(true);
     expect(Array.isArray(result.processes)).toBe(true);
     for (const d of result.definitions) {
-      expect(d.name).not.toBe(q);
-      expect(d.name).not.toContain(q);
+      // Case-insensitive: a neighbor whose name case-foldedly contains the bogus
+      // query would slip past a case-sensitive check.
+      expect(d.name.toLowerCase()).not.toBe(q.toLowerCase());
+      expect(d.name.toLowerCase()).not.toContain(q.toLowerCase());
     }
   });
 });
@@ -232,11 +284,19 @@ describe("AC-3 / guard: missing-symbol and missing-tool are detectable errors, n
     const raw = gn(["context", "ZZZ_DEFINITELY_NOT_A_SYMBOL", "-r", REPO_ROOT]) as {
       status?: string;
       error?: string;
+      symbol?: { name?: string };
     };
-    // gitnexus returns either status:"not_found" or an error field — never a crash.
-    expect(
-      raw.status === "not_found" || (typeof raw.error === "string" && raw.error.length > 0),
-    ).toBe(true);
+    // gitnexus returns not_found, an error field, or (if it fuzzy-resolves) found
+    // with a DIFFERENT symbol — all are graceful (never a crash). The load-bearing
+    // rule: it must not report the bogus name as a real match.
+    const graceful =
+      raw.status === "not_found" ||
+      (typeof raw.error === "string" && raw.error.length > 0) ||
+      raw.status === "found";
+    expect(graceful).toBe(true);
+    if (raw.status === "found") {
+      expect(raw.symbol?.name).not.toBe("ZZZ_DEFINITELY_NOT_A_SYMBOL");
+    }
   });
 
   test("invoking an unregistered gitnexus subcommand fails loudly (tool-not-found analogue)", () => {
@@ -247,9 +307,12 @@ describe("AC-3 / guard: missing-symbol and missing-tool are detectable errors, n
       encoding: "utf-8",
       timeout: 10_000,
     });
+    // The binary MUST have spawned — r.error (ENOENT) means gitnexus itself is
+    // missing, a different failure than "tool rejected an unknown subcommand".
+    expect(r.error).toBeUndefined();
     expect(r.status).not.toBe(0);
     const stderr = r.stderr ?? "";
-    expect(/unknown|invalid|error|not found/i.test(stderr) || r.error).toBeTruthy();
+    expect(/unknown|invalid|error|not found/i.test(stderr)).toBeTruthy();
   });
 });
 
