@@ -23,9 +23,9 @@ epics:
       P0.4:  { title: "Hard-guard loopy-prompt kill",                         points: 3, status: killed, deps: [P0.3] }  # killed: Warren decision — loopy-kill absorbed into launcher guards
       P0.5:  { title: "pi-lens headless TDI/warnings (or proxy)",            points: 4, status: draft, deps: [] }
       P0.6:  { title: "LSP provision + diagnostics/navigation",              points: 3, status: draft, deps: [P0.5] }
-      P0.7:  { title: "SwarmClaw agent + MCP server + Hindsight bridge",      points: 4, status: draft, deps: [] }
+      P0.7:  { title: "SwarmClaw agent + MCP server + Hindsight bridge",      points: 4, status: done, deps: [] }  # done 2026-07-18: PR #27 merged + review PRs #31/#34 (bmad round 1: 57 findings; CodeRabbit/Gemini rounds 2-3); all 22 DoD items complete, swarmclaw suite green (175 pass as of 2026-07-20)
       P0.8:  { title: "Telegram verify / OQ-3 + Hermes fallback",            points: 3, status: killed, deps: [P0.7] }  # killed: Warren decision — Telegram verify deferred
-      P0.9:  { title: "Seeds/Mulch pin + Hindsight banks round-trip",        points: 4, status: draft, deps: [P0.7] }
+      P0.9:  { title: "Seeds/Mulch pin + Hindsight banks round-trip",        points: 4, status: done, deps: [P0.7] }  # done 2026-07-20: PR #37 merged (bmad rounds 1-4 + Gemini review: 48+ fixes across bank-provisioner, mulch-importer, client, round-trip-verifier)
       P0.10: { title: "pi-gitnexus-plus + gitnexus analyze + queries",       points: 3, status: draft, deps: [] }
       P0.11: { title: "Phase-0 exit gate (§13)",                             points: 3, status: draft, deps: [P0.2, P0.3, P0.5, P0.6, P0.7, P0.9, P0.10] }  # P0.1, P0.4, P0.8 removed (killed)
   phase-1:
