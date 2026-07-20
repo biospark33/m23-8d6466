@@ -125,6 +125,14 @@ function assertIndexed(): void {
   }
 }
 
+/** Assert a path is repo-relative: no leading slash, no parent-traversal segment.
+ * Centralizes the INV-GN1/INV-GN3 invariant checked across query/context/impact
+ * result paths, so the rule can't drift between the four assertion sites. */
+function expectRepoRelativePath(path: string): void {
+  expect(path.startsWith("/")).toBe(false);
+  expect(path).not.toContain("..");
+}
+
 // --- Zod schemas matching the CLI's REAL output contract ---------------------
 // (Adapted from the story's idealized schemas to the shapes gitnexus 1.6.9
 //  actually returns — see report AC→evidence map.)
@@ -230,8 +238,7 @@ describe("AC-1 (make-or-break): all three tools return non-empty structured resu
     // route-ish symbol — semantic/embedding search can return unrelated neighbours.
     expect(result.definitions.some((d) => d.filePath.includes("swarmclaw.ts"))).toBe(true);
     for (const d of result.definitions) {
-      expect(d.filePath.startsWith("/")).toBe(false);
-      expect(d.filePath).not.toContain("..");
+      expectRepoRelativePath(d.filePath);
     }
   });
 
@@ -352,8 +359,7 @@ describe("INV-GN1 & INV-GN3: indexed paths stay within the repo, relative & norm
   test("query/context result file paths are repo-relative (no leading slash, no ..)", () => {
     const result = QueryResultSchema.parse(gn(["query", "SwarmClaw routes", "-r", REPO_ROOT]));
     for (const d of result.definitions) {
-      expect(d.filePath.startsWith("/")).toBe(false);
-      expect(d.filePath).not.toContain("..");
+      expectRepoRelativePath(d.filePath);
     }
   });
 
@@ -366,13 +372,11 @@ describe("INV-GN1 & INV-GN3: indexed paths stay within the repo, relative & norm
       ...(ctx.outgoing.calls ?? []).map((c) => c.filePath),
     ];
     for (const p of refPaths) {
-      expect(p.startsWith("/")).toBe(false);
-      expect(p).not.toContain("..");
+      expectRepoRelativePath(p);
     }
     const imp = ImpactResultSchema.parse(
       gn(["impact", "registerSwarmClawAgent", "-r", REPO_ROOT, "--direction", "upstream"]),
     );
-    expect(imp.target.filePath.startsWith("/")).toBe(false);
-    expect(imp.target.filePath).not.toContain("..");
+    expectRepoRelativePath(imp.target.filePath);
   });
 });

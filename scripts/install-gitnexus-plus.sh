@@ -81,10 +81,15 @@ CREATED_IGNORE=0
 if [ ! -f "$IGNORE_FILE" ]; then
   printf '!tests/\n!__tests__/\n!fixtures/\n' > "$IGNORE_FILE"
   CREATED_IGNORE=1
-elif ! grep -qE '^!(tests/?|__tests__/?|fixtures/?)\s*$' "$IGNORE_FILE"; then
-  # A pre-existing root .gitnexusignore that doesn't negate tests//fixtures/ leaves
-  # gitnexus's DEFAULT_IGNORE_LIST filtering the fixture — AC-1 silently fails. We
-  # don't mutate the user's file; warn so the failure mode is diagnosable.
+elif ! grep -qE '^!tests/?\s*$' "$IGNORE_FILE" \
+   || ! grep -qE '^!__tests__/?\s*$' "$IGNORE_FILE" \
+   || ! grep -qE '^!fixtures/?\s*$' "$IGNORE_FILE"; then
+  # A pre-existing root .gitnexusignore that doesn't negate tests/__tests__/fixtures
+  # leaves gitnexus's DEFAULT_IGNORE_LIST filtering the fixture — AC-1 silently fails.
+  # We don't mutate the user's file; warn so the failure mode is diagnosable. NOTE:
+  # the three greps can't be one alternation — `grep -E 'a|b|c'` succeeds if ANY
+  # pattern matches, so a file negating only `!tests/` (missing `!fixtures/`) would
+  # skip the warning even though the fixture symbols still get filtered.
   echo "WARN: pre-existing $IGNORE_FILE does not negate tests/fixtures — fixture symbols may not index (AC-1 could fail)" >&2
 fi
 
@@ -117,7 +122,9 @@ trap 'rc=143; exit "$rc"' TERM
 # --skip-agents-md: don't mutate AGENTS.md/CLAUDE.md (out of story scope).
 # 300s timeout per story guard (large-repo cap). Prefer GNU `timeout` / macOS
 # `gtimeout` when present (clean kill + exit code); fall back to the portable
-# `perl` alarm when neither is on PATH.
+# `perl` alarm when neither is on PATH. `--kill-after=15` force-sends SIGKILL if
+# the analyze hasn't exited 15s after the SIGTERM at the 300s mark — bounds a
+# SIGTERM-trapping/ignoring `gitnexus analyze` instead of hanging CI forever.
 # Fail loudly if NO timeout provider is available instead of letting the perl
 # fallback expand to `perl: command not found` (exit 127) under `set -e`.
 if ! command -v timeout >/dev/null 2>&1 \
@@ -128,9 +135,9 @@ if ! command -v timeout >/dev/null 2>&1 \
 fi
 
 if command -v timeout >/dev/null 2>&1; then
-  TIMEOUT=(timeout 300)
+  TIMEOUT=(timeout --kill-after=15 300)
 elif command -v gtimeout >/dev/null 2>&1; then
-  TIMEOUT=(gtimeout 300)
+  TIMEOUT=(gtimeout --kill-after=15 300)
 else
   TIMEOUT=(perl -e 'alarm 300; exec @ARGV')
 fi
@@ -143,9 +150,9 @@ echo "--- graph status ---"
 # Status is just reporting — a locked graph DB or slow read shouldn't fail CI.
 # 30s cap with the same portable resolver; non-fatal on timeout/error.
 if command -v timeout >/dev/null 2>&1; then
-  STATUS_TO=(timeout 30)
+  STATUS_TO=(timeout --kill-after=10 30)
 elif command -v gtimeout >/dev/null 2>&1; then
-  STATUS_TO=(gtimeout 30)
+  STATUS_TO=(gtimeout --kill-after=10 30)
 else
   STATUS_TO=(perl -e 'alarm 30; exec @ARGV')
 fi
