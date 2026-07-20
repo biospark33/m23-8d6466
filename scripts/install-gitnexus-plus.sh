@@ -43,8 +43,9 @@ if [ "${GITNEXUS_SKIP_INSTALL:-0}" != "1" ]; then
     # </dev/null: never block on an interactive prompt in CI.
     pi install "$EXT" < /dev/null
   fi
-  # Pin the version too — a stale older listing shouldn't pass a pinned install.
-  pi list 2>/dev/null | grep -q "pi-gitnexus-plus@${EXT_VERSION}" || {
+  # Pin the exact version — anchor it so a prerelease (`@0.7.0-beta`) or newer
+  # patch doesn't satisfy the bare `pi-gitnexus-plus@0.7.0` substring.
+  pi list 2>/dev/null | grep -qE "pi-gitnexus-plus@${EXT_VERSION}([^[:alnum:]._+-]|\$)" || {
     echo "FATAL: pi-gitnexus-plus@${EXT_VERSION} not listed after install" >&2
     exit 1
   }
@@ -75,12 +76,16 @@ CREATED_SKILLS=0
 if [ ! -d "$SKILLS_DIR" ]; then CREATED_SKILLS=1; fi
 
 cleanup() {
-  rc=$?
   [ "$CREATED_IGNORE" = "1" ] && rm -f "$IGNORE_FILE"
   [ "$CREATED_SKILLS" = "1" ] && rm -rf "$SKILLS_DIR"
-  exit "$rc"
 }
-trap cleanup EXIT INT TERM
+# Trap EXIT only so cleanup runs exactly once. Signal traps set the conventional
+# exit code (130=INT, 143=TERM) then exit — the EXIT trap runs cleanup with that
+# code preserved. Trapping the same fn on EXIT INT TERM double-runs cleanup and
+# can mask the real exit code under `set -e`.
+trap 'rc=$?; cleanup; exit "$rc"' EXIT
+trap 'rc=130; exit "$rc"' INT
+trap 'rc=143; exit "$rc"' TERM
 
 # --embeddings: the semantic query path (gitnexus_query) needs vector search to
 # return definitions for a small graph; pure BM25 misses symbol-name-only hits.

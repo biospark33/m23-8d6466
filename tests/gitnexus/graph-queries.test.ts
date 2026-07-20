@@ -23,7 +23,12 @@ import { join } from "node:path";
 import { beforeAll, describe, expect, test } from "bun:test";
 import { z } from "zod";
 
-const REPO_ROOT = join(import.meta.dir, "..", "..");
+// Resolve REPO_ROOT the same way the install script does (`git rev-parse
+// --show-toplevel`) so tests query the exact worktree `gitnexus analyze` indexed —
+// import.meta.dir arithmetic can diverge under worktrees/symlinks.
+const REPO_ROOT = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+  encoding: "utf-8",
+}).stdout.trim();
 
 // gitnexus lives at a non-standard path on this host (~/.local/node-arm64/bin);
 // the story assumed /usr/local/bin. Resolve robustly.
@@ -50,11 +55,16 @@ function gn(args: string[]): unknown {
     maxBuffer: 32 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  // query/context/impact emit a single JSON object; strip any leading
-  // [gitnexus]/GitNexus log lines before the first `{`.
-  const start = out.indexOf("{");
-  if (start === -1) throw new Error(`no JSON in gitnexus output: ${out.slice(0, 200)}`);
-  return JSON.parse(out.slice(start));
+  // gitnexus 1.6.9 emits clean JSON on stdout (logs → stderr). Prefer a full
+  // parse; only slice from the first `{` if leading noise slips through. Slicing
+  // unconditionally would mis-parse if a log line ever contains `{` on stdout.
+  try {
+    return JSON.parse(out);
+  } catch {
+    const start = out.indexOf("{");
+    if (start === -1) throw new Error(`no JSON in gitnexus output: ${out.slice(0, 200)}`);
+    return JSON.parse(out.slice(start));
+  }
 }
 
 /** Verify this repo is indexed by gitnexus (queries pass REPO_ROOT as -r directly). */
@@ -160,6 +170,9 @@ describe("AC-1 (make-or-break): all three tools return non-empty structured resu
     const raw = gn(["query", "SwarmClaw routes", "-r", REPO_ROOT]);
     const result = QueryResultSchema.parse(raw);
     expect(result.definitions.length).toBeGreaterThan(0);
+    // AC-1 load-bearing: the query must surface the known fixture, not just any
+    // route-ish symbol — semantic/embedding search can return unrelated neighbours.
+    expect(result.definitions.some((d) => d.filePath.includes("swarmclaw.ts"))).toBe(true);
     for (const d of result.definitions) {
       expect(d.filePath.startsWith("/")).toBe(false);
       expect(d.filePath).not.toContain("..");
@@ -248,9 +261,14 @@ describe("INV-GN1 & INV-GN3: indexed paths stay within the repo, relative & norm
       "-r",
       REPO_ROOT,
     ]) as { markdown?: string };
-    // cypher returns a markdown table; a clean graph yields `bad = 0`.
+    // cypher returns a single-column markdown table (`| bad |`); collect every
+    // numeric cell and assert the max is 0. Anchoring to `| 0 |` alone would also
+    // match `| 10 |` / `| 100 |` — unfalsifiable for the traversal guard.
     expect(raw.markdown).toBeDefined();
-    expect(raw.markdown).toMatch(/\|\s*0\s*\|/);
+    const md = raw.markdown ?? "";
+    const cells = [...md.matchAll(/\|\s*(\d+)\s*\|/g)].map((m) => Number(m[1]));
+    expect(cells.length).toBeGreaterThan(0);
+    expect(Math.max(...cells)).toBe(0);
   });
 
   test("query/context result file paths are repo-relative (no leading slash, no ..)", () => {
@@ -259,5 +277,24 @@ describe("INV-GN1 & INV-GN3: indexed paths stay within the repo, relative & norm
       expect(d.filePath.startsWith("/")).toBe(false);
       expect(d.filePath).not.toContain("..");
     }
+  });
+
+  test("context ref paths and impact target path are repo-relative (INV-GN3 across all three tools)", () => {
+    // INV-GN3 names query/context/impact — exercise the ref + target paths the
+    // query-only check above doesn't reach.
+    const ctx = ContextResultSchema.parse(gn(["context", "registerSwarmClawAgent", "-r", REPO_ROOT]));
+    const refPaths = [
+      ...(ctx.incoming.calls ?? []).map((c) => c.filePath),
+      ...(ctx.outgoing.calls ?? []).map((c) => c.filePath),
+    ];
+    for (const p of refPaths) {
+      expect(p.startsWith("/")).toBe(false);
+      expect(p).not.toContain("..");
+    }
+    const imp = ImpactResultSchema.parse(
+      gn(["impact", "registerSwarmClawAgent", "-r", REPO_ROOT, "--direction", "upstream"]),
+    );
+    expect(imp.target.filePath.startsWith("/")).toBe(false);
+    expect(imp.target.filePath).not.toContain("..");
   });
 });

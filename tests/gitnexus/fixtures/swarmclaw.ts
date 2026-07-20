@@ -21,7 +21,9 @@ export function getAgent(id: string): Agent | undefined {
   return registry.get(id);
 }
 
-/** Wire the default SwarmClaw routes by registering the built-in agents. */
+/** Wire the default SwarmClaw routes by registering the built-in agents.
+ * ponytail: load-bearing — the AC-1 context test asserts this is an incoming
+ * caller of registerSwarmClawAgent; don't remove without updating the test. */
 export function registerSwarmClawRoutes(): void {
   registerSwarmClawAgent({ id: "coordinator", name: "Coordinator" });
   registerSwarmClawAgent({ id: "worker", name: "Worker" });
