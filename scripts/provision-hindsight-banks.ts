@@ -148,14 +148,27 @@ export async function realBridgeProbe(): Promise<BridgeProbe> {
       // match, but health unconfirmed rather than assumed healthy.
       return { registered: true, healthy: false };
     }
-    const testRes = await fetchWithTimeout(`${url}/api/mcp-servers/${id}/test`);
-    if (!testRes.ok) return { registered: true, healthy: false };
-    const testBody: unknown = await testRes.json();
-    const ok =
-      typeof testBody === "object" &&
-      testBody !== null &&
-      (testBody as { ok?: unknown }).ok === true;
-    return { registered: true, healthy: ok };
+    // The server WAS found in /api/mcp-servers (we have its id), so it IS
+    // registered. A failure reaching or parsing /test is a HEALTH-CHECK failure
+    // (the -32002 Hindsight-unavailable path), NOT a registration failure
+    // (-32001). Wrap the /test fetch + parse in a nested try-catch so a timeout
+    // or non-JSON body returns {registered:true, healthy:false} instead of
+    // throwing into the outer catch and misdiagnosing as not-registered.
+    try {
+      const testRes = await fetchWithTimeout(`${url}/api/mcp-servers/${id}/test`);
+      if (!testRes.ok) return { registered: true, healthy: false };
+      const testBody: unknown = await testRes.json();
+      // Exclude arrays: typeof [] === "object" in JS, so an array body must not
+      // be narrowed as a {ok} object.
+      const ok =
+        typeof testBody === "object" &&
+        testBody !== null &&
+        !Array.isArray(testBody) &&
+        (testBody as { ok?: unknown }).ok === true;
+      return { registered: true, healthy: ok };
+    } catch {
+      return { registered: true, healthy: false };
+    }
   } catch {
     return { registered: false, healthy: false };
   }

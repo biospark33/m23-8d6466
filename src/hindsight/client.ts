@@ -292,12 +292,16 @@ export class HindsightClient {
       try {
         data = text.length === 0 ? {} : JSON.parse(text);
       } catch {
-        // Non-JSON 2xx body — surface stringified, never the raw object.
-        throw new HindsightHttpError(
-          502,
-          `Hindsight returned non-JSON body: ${truncate(text)}`,
-          rid,
-        );
+        // Non-JSON 2xx body — surface stringified, never the raw object. Mirror
+        // the non-2xx / abort / fetch_failed paths: set error state BEFORE the
+        // throw so the finally-log reports status:"error" (not "ok") with the
+        // truncated body in errMsg. Without this the throw escapes to the outer
+        // catch's `instanceof HindsightHttpError` re-throw and the finally runs
+        // with the default status:"ok" — a 502 logged as success.
+        const message = `Hindsight returned non-JSON body: ${truncate(text)}`;
+        status = "error";
+        errMsg = { code: "non_json_body", message };
+        throw new HindsightHttpError(502, message, rid);
       }
       return data;
     } catch (e) {

@@ -356,16 +356,23 @@ describe("HindsightClient error paths", () => {
       let headers = new Headers(lastCall?.init?.headers);
       expect(headers.get("Authorization")).toBe("Bearer bearer-val");
 
-      // Only legacy key set → still works (fallback).
-      process.env.HINDSIGHT_BEARER_TOKEN = undefined;
+      // Only legacy key set → still works (fallback). delete (not = undefined):
+      // Node stringifies `process.env.X = undefined` to the literal "undefined",
+      // which (being a truthy string) would survive the client constructor's
+      // `|| undefined` coercion and shadow HINDSIGHT_API_KEY. delete truly unsets
+      // so the legacy fallback path is actually exercised.
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.HINDSIGHT_BEARER_TOKEN;
       installMock({ body: {} });
       const clientLegacy = new HindsightClient({});
       await clientLegacy.listBanks();
       headers = new Headers(lastCall?.init?.headers);
       expect(headers.get("Authorization")).toBe("Bearer legacy-val");
     } finally {
-      process.env.HINDSIGHT_BEARER_TOKEN = undefined;
-      process.env.HINDSIGHT_API_KEY = undefined;
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.HINDSIGHT_BEARER_TOKEN;
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.HINDSIGHT_API_KEY;
     }
   });
 

@@ -18,7 +18,12 @@ function jsonRes(body: unknown, status = 200): Response {
 
 afterEach(() => {
   globalThis.fetch = origFetch;
-  process.env.SWARMCLAW_BASE_URL = undefined;
+  // delete (not = undefined): Node stringifies `process.env.X = undefined` to
+  // the literal "undefined", which (truthy string) defeats the
+  // `?? "http://127.0.0.1:3000"` fallback in realBridgeProbe. delete truly
+  // unsets the key so the default-URL path is reachable.
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  delete process.env.SWARMCLAW_BASE_URL;
 });
 
 describe("realBridgeProbe — review R2 M4/M5", () => {
@@ -26,9 +31,12 @@ describe("realBridgeProbe — review R2 M4/M5", () => {
     // R3: env-unset no longer short-circuits healthy (that masked AC-4/AC-5
     // from the real CLI). It now falls back to the SwarmClaw default URL so
     // the probe is real — AC-4 (-32001) is reachable when SwarmClaw is down.
-    process.env.SWARMCLAW_BASE_URL = undefined;
+    // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+    delete process.env.SWARMCLAW_BASE_URL;
+    const requested: string[] = [];
     globalThis.fetch = mock(async (url: string | URL | Request) => {
       const u = String(url);
+      requested.push(u);
       if (u.endsWith("/api/mcp-servers")) {
         return jsonRes({ servers: [{ id: "hs-1", name: "hindsight" }] });
       }
@@ -37,10 +45,16 @@ describe("realBridgeProbe — review R2 M4/M5", () => {
     }) as unknown as typeof fetch;
     const p = await realBridgeProbe();
     expect(p).toEqual({ registered: true, healthy: true });
+    // Prove the `??` fallback fired and the default URL was actually requested
+    // (guards against a stale env value sneaking through the probe).
+    expect(requested.some((u) => u.startsWith("http://127.0.0.1:3000/"))).toBe(
+      true,
+    );
   });
 
   test("unset SWARMCLAW_BASE_URL + SwarmClaw unreachable → not registered [R3]", async () => {
-    process.env.SWARMCLAW_BASE_URL = undefined;
+    // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+    delete process.env.SWARMCLAW_BASE_URL;
     globalThis.fetch = mock(async () => {
       throw new Error("ECONNREFUSED");
     }) as unknown as typeof fetch;

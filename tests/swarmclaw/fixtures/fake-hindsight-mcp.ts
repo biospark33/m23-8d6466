@@ -270,4 +270,13 @@ async function main(): Promise<void> {
 // to extend callTool with real timing; the current durations are constants.
 void now;
 
-main();
+// Explicit rejection handler: an unhandled rejection on the main() promise
+// (e.g. Bun.stdin.stream() throws) would otherwise surface as a silent
+// unhandledRejection, leaving this fixture process hanging or exiting 0 —
+// which makes bridge integration tests time out instead of failing loudly.
+// Log to stderr + exit non-zero on fixture crash; normal completion untouched.
+main().catch((err: unknown) => {
+  const detail = err instanceof Error ? err.stack ?? err.message : String(err);
+  process.stderr.write(`fake-hindsight-mcp main() failed: ${detail}\n`);
+  process.exit(1);
+});

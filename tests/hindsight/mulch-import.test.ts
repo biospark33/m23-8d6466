@@ -761,12 +761,22 @@ describe("importMulch — B-1 failed retain does not poison dedup", () => {
       `[{"domain":"qds","concepts":["dedup"],"expertise":"second"}]`,
     );
 
-    let firstCall = true;
     const client = makeMockClient();
     const origRetain = client.retain.bind(client);
+    // Trigger the transient failure on a.json's specific content (expertise
+    // "first"), NOT on call order. readdirSync iteration order is not guaranteed
+    // across platforms/FSes, so a firstCall flag would make the
+    // rf!.file==="a.json" assertion flaky whenever b.json is processed first.
+    // Keying on the parsed expertise makes a.json deterministically fail
+    // regardless of which file the importer reaches first.
     client.retain = async (bankId: string, content: string, metadata?: any) => {
-      if (firstCall) {
-        firstCall = false;
+      let expertise: string | undefined;
+      try {
+        expertise = (JSON.parse(content) as { expertise?: string }).expertise;
+      } catch {
+        /* non-JSON content (tenant probe marker) — never the failure trigger */
+      }
+      if (expertise === "first") {
         throw new Error("transient bank failure");
       }
       return origRetain(bankId, content, metadata);
