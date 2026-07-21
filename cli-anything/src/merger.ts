@@ -213,7 +213,9 @@ export function buildMergedOutput(
     partial: opts.partial,
     exitStatus,
     durationMs: opts.durationMs,
-    waivers: opts.waivers,
+    // INV-3 breadth: waivers carry operator/peer-authored strings (reason,
+    // approvedBy) — redact them so no secret can ride the audit trail.
+    waivers: redactDeep(opts.waivers, redact) as Waiver[],
     agentOutputs: redactDeep(agentOutputs, redact) as Record<string, unknown>,
     comsLog: redactDeep(opts.comsLog, redact) as ComsLogEntry[],
     error:

@@ -277,7 +277,14 @@ async function main(): Promise<void> {
     log("no workers configured");
     process.exit(64);
   }
-  const awaitTimeoutMs = Number(process.env.PI_COMS_TIMEOUT_MS ?? 240_000);
+  // Bounded parse (F25): bare Number() turns a malformed PI_COMS_TIMEOUT_MS
+  // into NaN, and setTimeout(NaN) fires at ~0ms — every worker is killed
+  // instantly. Require finite >= 1ms, else fall back to the 4 min default.
+  const awaitTimeoutRaw = Number(process.env.PI_COMS_TIMEOUT_MS ?? 240_000);
+  const awaitTimeoutMs =
+    Number.isFinite(awaitTimeoutRaw) && awaitTimeoutRaw >= 1
+      ? awaitTimeoutRaw
+      : 240_000;
 
   log(`dispatching ${workers.length} workers (subprocess-RPC)`);
   let comsSeq = 0;

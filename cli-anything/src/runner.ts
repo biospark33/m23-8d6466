@@ -657,6 +657,15 @@ export async function runManifest(
 /** Budget kill threshold as a fraction of the team cap (P0.3 §Budget, 90%). */
 export const BUDGET_KILL_FRACTION = 0.9;
 
+/**
+ * Hard cap on captured lead-run stdout kept in memory for the team path
+ * (F15): unlike runManifest's byte-capped excerpt, the team handler parsed
+ * NDJSON lines into an unbounded `lineBuffer` — a malicious/buggy lead
+ * emitting an endless newline-less stream grew memory without bound (OOM).
+ * 1 MiB is far above any legitimate event line; oversize lines are dropped.
+ */
+export const MAX_TEAM_STDOUT_BYTES = 1024 * 1024;
+
 /** Split a `provider/model` role string at the FIRST slash (CC-2 amended). */
 export function splitRoleModel(roleModel: string): {
   provider: string;
@@ -1043,7 +1052,7 @@ export async function runTeamManifest(
               // components). Unknown/crafted ids are dropped, not written.
               if (!pendings.has(event.agentId)) {
                 console.error(
-                  `cli-anything: dropping worker_output for undeclared agentId`,
+                  "cli-anything: dropping worker_output for undeclared agentId",
                 );
                 break;
               }
@@ -1062,7 +1071,27 @@ export async function runTeamManifest(
     }
 
     child.stdout!.on("data", (d: Buffer) => {
-      lineBuffer += decoder.write(d);
+      if (teamStdoutCapped) return;
+      const decoded = decoder.write(d);
+      // F15: bound total captured lead stdout so an endless newline-less
+      // stream cannot grow memory without bound.
+      if (teamStdoutBytes + decoded.length > MAX_TEAM_STDOUT_BYTES) {
+        const remaining = Math.max(0, MAX_TEAM_STDOUT_BYTES - teamStdoutBytes);
+        lineBuffer += decoded.slice(0, remaining);
+        teamStdoutBytes = MAX_TEAM_STDOUT_BYTES;
+        teamStdoutCapped = true;
+        console.error(
+          `cli-anything: lead stdout cap ${MAX_TEAM_STDOUT_BYTES} bytes exceeded — further output dropped`,
+        );
+      } else {
+        lineBuffer += decoded;
+        teamStdoutBytes += decoded.length;
+      }
+      // A single line longer than the cap cannot be a valid NDJSON event;
+      // drop it so lineBuffer never holds the whole oversized line.
+      if (lineBuffer.length > MAX_TEAM_STDOUT_BYTES) {
+        lineBuffer = "";
+      }
       let nl = lineBuffer.indexOf("\n");
       while (nl !== -1) {
         processLine(lineBuffer.slice(0, nl));
@@ -1089,9 +1118,17 @@ export async function runTeamManifest(
     });
 
     let closed = false;
+    let finalizing = false;
+    let teamStdoutBytes = 0;
+    let teamStdoutCapped = false;
     const finalize = (code: number | null, signal: NodeJS.Signals | null): void => {
       void (async () => {
-        if (settled) return;
+        // F5: the exit-watchdog and `close` can both call finalize before
+        // `settled` flips (the body awaits mid-way). Guard entry so the
+        // artifact writes + pending loop run exactly once; settle()'s own
+        // idempotency guard already protects the single resolve.
+        if (settled || finalizing) return;
+        finalizing = true;
 
         // Flush the decoder and any final line written WITHOUT a trailing
         // newline — otherwise a last `merged` event would sit unparsed in
