@@ -34,19 +34,43 @@ if [ -z "$GITNEXUS" ]; then
   echo "FATAL: gitnexus CLI not found on PATH or ~/.local/node-arm64/bin" >&2
   exit 1
 fi
-echo "gitnexus: $GITNEXUS ($("$GITNEXUS" --version))"
+# Guard the version capture: first-run interactive prompts, slow startup, or a
+# lock-wait can hang `$GITNEXUS --version` with no stdin redirect, before any
+# trap/guard applies. </dev/null + timeout/gtimeout (portable resolver: fall
+# back to plain run with `|| true` if neither is present at this point — DO NOT
+# introduce the perl alarm here, it's reserved for analyze/status). Tolerate
+# failure/empty output → print `unknown`.
+if command -v timeout >/dev/null 2>&1; then
+  GN_VER="$(timeout 10 "$GITNEXUS" --version </dev/null 2>/dev/null | head -1 || true)"
+elif command -v gtimeout >/dev/null 2>&1; then
+  GN_VER="$(gtimeout 10 "$GITNEXUS" --version </dev/null 2>/dev/null | head -1 || true)"
+else
+  GN_VER="$("$GITNEXUS" --version </dev/null 2>/dev/null | head -1 || true)"
+fi
+echo "gitnexus: $GITNEXUS (${GN_VER:-unknown})"
 
 # --- 1. Install the extension (idempotent) ------------------------------------
 # The verify block lives INSIDE the install guard so GITNEXUS_SKIP_INSTALL=1
 # (analyze-only mode, common in CI containers that have `gitnexus` but not
 # `pi`) doesn't false-fail on a missing `pi` binary.
 if [ "${GITNEXUS_SKIP_INSTALL:-0}" != "1" ]; then
+  # Fail fast on a missing `pi` binary BEFORE `pi list` — otherwise the skip
+  # branch below misreports "pi-gitnexus-plus already installed" (empty grep
+  # input → no match → falls through to `pi install`, which then fails with a
+  # confusing `pi: command not found` under `set -e`).
+  if ! command -v pi >/dev/null 2>&1; then
+    echo "FATAL: \`pi\` CLI not on PATH — set GITNEXUS_SKIP_INSTALL=1 (analyze-only) or install pi" >&2
+    exit 1
+  fi
   # Capture `pi list` once and separate its failure (infra) from a missing/wrong
   # version (real). Under `set -o pipefail`, `pi list | grep` aborts the pipeline
   # when `pi list` exits nonzero — capture first, grep the string, so a flaky `pi
   # list` doesn't false-fail a successful install or skip the install branch.
   PI_LIST="$(pi list 2>/dev/null || true)"
-  if printf '%s\n' "$PI_LIST" | grep -q "pi-gitnexus-plus"; then
+  # Same anchored pattern as the post-install verify below — a stale older
+  # version (e.g. @0.6.0) satisfying the loose `pi-gitnexus-plus` substring
+  # would skip install and then FATAL in verify.
+  if printf '%s\n' "$PI_LIST" | grep -qE "pi-gitnexus-plus@${EXT_VERSION}([^[:alnum:]._+-]|\$)"; then
     echo "pi-gitnexus-plus already installed — skipping install."
   else
     echo "Installing $EXT ..."
@@ -57,14 +81,23 @@ if [ "${GITNEXUS_SKIP_INSTALL:-0}" != "1" ]; then
   # Pin the exact version — anchor it so a prerelease (`@0.7.0-beta`) or newer
   # patch doesn't satisfy the bare `pi-gitnexus-plus@0.7.0` substring. Distinguish
   # "pi list returned nothing" (infra error) from "wrong version listed" (real).
-  printf '%s\n' "$PI_LIST" | grep -qE "pi-gitnexus-plus@${EXT_VERSION}([^[:alnum:]._+-]|\$)" || {
-    if [ -z "$PI_LIST" ]; then
-      echo "FATAL: \`pi list\` returned no output — cannot verify install (pi infra error?)" >&2
-    else
-      echo "FATAL: pi-gitnexus-plus@${EXT_VERSION} not listed after install" >&2
+  # One-shot retry: the pi registry cache can lag a just-completed `pi install`,
+  # so if the anchored verify fails AND `pi list` is non-empty, re-capture once
+  # before declaring FATAL (single retry, not a loop — keeps the failure mode
+  # diagnosable and bounds wall-clock).
+  if ! printf '%s\n' "$PI_LIST" | grep -qE "pi-gitnexus-plus@${EXT_VERSION}([^[:alnum:]._+-]|\$)"; then
+    if [ -n "$PI_LIST" ]; then
+      PI_LIST="$(pi list 2>/dev/null || true)"
     fi
-    exit 1
-  }
+    printf '%s\n' "$PI_LIST" | grep -qE "pi-gitnexus-plus@${EXT_VERSION}([^[:alnum:]._+-]|\$)" || {
+      if [ -z "$PI_LIST" ]; then
+        echo "FATAL: \`pi list\` returned no output — cannot verify install (pi infra error?)" >&2
+      else
+        echo "FATAL: pi-gitnexus-plus@${EXT_VERSION} not listed after install" >&2
+      fi
+      exit 1
+    }
+  fi
 fi
 
 # --- 2. Analyze the repo ------------------------------------------------------
@@ -76,20 +109,38 @@ fi
 # is transient because a root `.gitnexusignore` is not a story deliverable.
 # ponytail: transient negation file, not committed — the fixture symbols are the
 # only reason we override the safety-net ignore list.
+#
+# CONCURRENT-RUN HAZARD: two invocations of this script in the same repo
+# (parallel CI matrix, overlapping stories) race on the transient root
+# `.gitnexusignore` — run A's EXIT trap can `rm` the file while run B is
+# mid-analyze, dropping the negations and silently filtering the fixture.
+# Worse, `gitnexus analyze --force` running concurrently can corrupt the graph
+# DB (no file lock). Concurrent same-repo runs are UNSUPPORTED; no locking is
+# added here (out of scope) — serialize across CI matrix shards / stories.
 IGNORE_FILE="$REPO_ROOT/.gitnexusignore"
 CREATED_IGNORE=0
-if [ ! -f "$IGNORE_FILE" ]; then
+# Guard before writing: `[ ! -f ]` is true for a broken symlink or a non-regular
+# file, and `>` follows symlinks (could clobber the target of a symlink pointing
+# elsewhere). If $IGNORE_FILE exists as a symlink (-L) or directory (-d), FATAL
+# instead of writing — protects the user's filesystem from a footgun the
+# bare-negation logic doesn't anticipate.
+if [ -e "$IGNORE_FILE" ] && { [ -L "$IGNORE_FILE" ] || [ -d "$IGNORE_FILE" ]; }; then
+  echo "FATAL: $IGNORE_FILE exists as a symlink or directory — refusing to overwrite (remove it manually)" >&2
+  exit 1
+elif [ ! -f "$IGNORE_FILE" ]; then
   printf '!tests/\n!__tests__/\n!fixtures/\n' > "$IGNORE_FILE"
   CREATED_IGNORE=1
-elif ! grep -qE '^!tests/?\s*$' "$IGNORE_FILE" \
-   || ! grep -qE '^!__tests__/?\s*$' "$IGNORE_FILE" \
-   || ! grep -qE '^!fixtures/?\s*$' "$IGNORE_FILE"; then
+elif ! grep -qE '^!tests/?\*{0,2}\s*$' "$IGNORE_FILE" \
+   || ! grep -qE '^!__tests__/?\*{0,2}\s*$' "$IGNORE_FILE" \
+   || ! grep -qE '^!fixtures/?\*{0,2}\s*$' "$IGNORE_FILE"; then
   # A pre-existing root .gitnexusignore that doesn't negate tests/__tests__/fixtures
   # leaves gitnexus's DEFAULT_IGNORE_LIST filtering the fixture — AC-1 silently fails.
   # We don't mutate the user's file; warn so the failure mode is diagnosable. NOTE:
   # the three greps can't be one alternation — `grep -E 'a|b|c'` succeeds if ANY
   # pattern matches, so a file negating only `!tests/` (missing `!fixtures/`) would
-  # skip the warning even though the fixture symbols still get filtered.
+  # skip the warning even though the fixture symbols still get filtered. The glob
+  # suffix `/?\*{0,2}` also accepts `!tests/**` and `!tests/*` — valid gitignore-
+  # style globs gitnexus honors alongside the bare `!tests/` form.
   echo "WARN: pre-existing $IGNORE_FILE does not negate tests/fixtures — fixture symbols may not index (AC-1 could fail)" >&2
 fi
 
@@ -102,8 +153,12 @@ CREATED_SKILLS=0
 if [ ! -d "$SKILLS_DIR" ]; then CREATED_SKILLS=1; fi
 
 cleanup() {
-  [ "${CREATED_IGNORE:-0}" = "1" ] && rm -f "${IGNORE_FILE:-}"
-  [ "${CREATED_SKILLS:-0}" = "1" ] && rm -rf "${SKILLS_DIR:-}"
+  # `|| true` on both rm's: under `set -e` a failed removal (permissions, read-
+  # only fs, busy mount) would abort cleanup before `return 0`, masking the real
+  # exit code $rc (set by the EXIT trap) with exit 1 — breaks the "safe to
+  # re-run" contract. Suppress so cleanup always reaches `return 0`.
+  [ "${CREATED_IGNORE:-0}" = "1" ] && { rm -f "${IGNORE_FILE:-}" 2>/dev/null || true; }
+  [ "${CREATED_SKILLS:-0}" = "1" ] && { rm -rf "${SKILLS_DIR:-}" 2>/dev/null || true; }
   return 0
 }
 # Trap EXIT only so cleanup runs exactly once. Signal traps set the conventional
@@ -139,6 +194,9 @@ if command -v timeout >/dev/null 2>&1; then
 elif command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT=(gtimeout --kill-after=15 300)
 else
+  # ponytail: perl alarm fires SIGALRM at 300s but no SIGKILL follow-up — install
+  # timeout/gtimeout for a SIGTERM-trapping gitnexus (alarm survives execve per
+  # POSIX, but a gitnexus that ignores SIGALRM would hang this branch).
   TIMEOUT=(perl -e 'alarm 300; exec @ARGV')
 fi
 echo "Running gitnexus analyze (--embeddings, 300s cap) ..."

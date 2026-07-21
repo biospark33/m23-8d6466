@@ -18,7 +18,7 @@
  * work on other branches.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { beforeAll, describe, expect, test } from "bun:test";
 import { z } from "zod";
@@ -107,7 +107,16 @@ function gn(args: string[]): unknown {
   } catch {
     const start = out.indexOf("{");
     if (start === -1) throw new Error(`no JSON in gitnexus output: ${out.slice(0, 200)}`);
-    return JSON.parse(out.slice(start));
+    try {
+      return JSON.parse(out.slice(start));
+    } catch {
+      // Surface BOTH the parse failure and a slice of the original output so a
+      // truncated/malformed response is diagnosable instead of an opaque
+      // "Unexpected token" with no context.
+      throw new Error(
+        `gitnexus ${args.join(" ")} returned non-JSON output: ${out.slice(0, 200)}`,
+      );
+    }
   }
 }
 
@@ -116,10 +125,20 @@ function assertIndexed(): void {
   const listing = execFileSync(GN, ["list"], {
     cwd: REPO_ROOT,
     encoding: "utf-8",
+    timeout: 30_000,
     maxBuffer: 8 * 1024 * 1024,
   });
-  // Each indexed repo has a `    Path:    <abspath>` line.
-  const re = new RegExp(`Path:\\s+${REPO_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\s|$)`, "m");
+  // Each indexed repo has a `    Path:    <abspath>` line. On macOS, `git
+  // rev-parse --show-toplevel` may return `/var/...` while gitnexus stores the
+  // realpath (`/private/var/...`), or vice versa — normalize both forms and
+  // accept either at the Path: position so the comparison doesn't break across
+  // symlink boundaries.
+  const rootReal = realpathSync(REPO_ROOT);
+  const esc = (p: string) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(
+    `Path:\\s+(?:${esc(REPO_ROOT)}|${esc(rootReal)})(\\s|$)`,
+    "m",
+  );
   if (!re.test(listing)) {
     throw new Error(`repo not indexed at ${REPO_ROOT} — run scripts/install-gitnexus-plus.sh`);
   }
@@ -131,6 +150,18 @@ function assertIndexed(): void {
 function expectRepoRelativePath(path: string): void {
   expect(path.startsWith("/")).toBe(false);
   expect(path).not.toContain("..");
+}
+
+/** The repo-relative path of the known fixture these tests anchor on. */
+const FIXTURE_PATH = "tests/gitnexus/fixtures/swarmclaw.ts";
+/** Match either the repo-relative fixture path or any abspath ending with it —
+ * tightens the prior `includes("swarmclaw.ts")` substring check so unrelated
+ * files like `notswarmclaw.ts` can't satisfy the assertion. */
+function isFixturePath(p: string): boolean {
+  return p === FIXTURE_PATH || p.endsWith(`/${FIXTURE_PATH}`);
+}
+function expectFixturePath(p: string): void {
+  expect(isFixturePath(p)).toBe(true);
 }
 
 // --- Zod schemas matching the CLI's REAL output contract ---------------------
@@ -236,7 +267,7 @@ describe("AC-1 (make-or-break): all three tools return non-empty structured resu
     expect(result.definitions.length).toBeGreaterThan(0);
     // AC-1 load-bearing: the query must surface the known fixture, not just any
     // route-ish symbol — semantic/embedding search can return unrelated neighbours.
-    expect(result.definitions.some((d) => d.filePath.includes("swarmclaw.ts"))).toBe(true);
+    expect(result.definitions.some((d) => isFixturePath(d.filePath))).toBe(true);
     for (const d of result.definitions) {
       expectRepoRelativePath(d.filePath);
     }
@@ -247,7 +278,7 @@ describe("AC-1 (make-or-break): all three tools return non-empty structured resu
     const result = ContextResultSchema.parse(raw);
     expect(result.status).toBe("found");
     expect(result.symbol.name).toBe("registerSwarmClawAgent");
-    expect(result.symbol.filePath).toContain("swarmclaw.ts");
+    expectFixturePath(result.symbol.filePath);
     // registerSwarmClawRoutes calls registerSwarmClawAgent — a guaranteed incoming edge.
     expect(result.incoming.calls?.length ?? 0).toBeGreaterThan(0);
     expect(result.incoming.calls?.some((c) => c.name === "registerSwarmClawRoutes")).toBe(true);
@@ -257,7 +288,7 @@ describe("AC-1 (make-or-break): all three tools return non-empty structured resu
     const raw = gn(["impact", "registerSwarmClawAgent", "-r", REPO_ROOT, "--direction", "upstream"]);
     const result = ImpactResultSchema.parse(raw);
     expect(result.target.name).toBe("registerSwarmClawAgent");
-    expect(result.target.filePath).toContain("swarmclaw.ts");
+    expectFixturePath(result.target.filePath);
     expect(["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"]).toContain(result.risk);
     // impactedCount reflects PDG-weighted blast radius (needs `analyze --pdg`
     // for full inter-procedural depth); this story's analyze builds the call
@@ -276,7 +307,7 @@ describe("AC-1 (make-or-break): all three tools return non-empty structured resu
       gn(["impact", "dispatch", "-r", REPO_ROOT, "--direction", "upstream"]),
     );
     expect(disp.target.name).toBe("dispatch");
-    expect(disp.target.filePath).toContain("swarmclaw.ts");
+    expectFixturePath(disp.target.filePath);
   });
 });
 
@@ -297,6 +328,9 @@ describe("AC-2: zero-match query is graceful (never crash / never error object)"
       // query would slip past a case-sensitive check.
       expect(d.name.toLowerCase()).not.toBe(q.toLowerCase());
       expect(d.name.toLowerCase()).not.toContain(q.toLowerCase());
+      // The bogus query must not leak into the filePath either — semantic-search
+      // neighbours could otherwise surface a path derived from the query string.
+      expect(d.filePath.toLowerCase()).not.toContain(q.toLowerCase());
     }
   });
 });
@@ -317,6 +351,11 @@ describe("AC-3 / guard: missing-symbol and missing-tool are detectable errors, n
       raw.status === "found";
     expect(graceful).toBe(true);
     if (raw.status === "found") {
+      // Without these guards, `raw.symbol` being undefined makes
+      // `undefined !== "ZZZ..."` true — the test would pass against a malformed
+      // response. Assert the symbol actually exists before the name check.
+      expect(raw.symbol).toBeDefined();
+      expect(raw.symbol?.name).toBeDefined();
       expect(raw.symbol?.name).not.toBe("ZZZ_DEFINITELY_NOT_A_SYMBOL");
     }
   });
@@ -352,8 +391,20 @@ describe("INV-GN1 & INV-GN3: indexed paths stay within the repo, relative & norm
     expect(raw.markdown).toBeDefined();
     const md = raw.markdown ?? "";
     const cells = [...md.matchAll(/\|\s*(\d+)\s*\|/g)].map((m) => Number(m[1]));
-    expect(cells.length).toBeGreaterThan(0);
-    expect(Math.max(...cells)).toBe(0);
+    // Diagnose shape changes (e.g. a `| N rows affected |` footer adding stray
+    // numbers, or an empty result) with a slice of the raw markdown so the
+    // format drift is visible in CI output instead of an opaque expect failure.
+    if (cells.length === 0) {
+      throw new Error(
+        `INV-GN1: no numeric cells parsed from cypher output — table shape changed? markdown: ${md.slice(0, 300)}`,
+      );
+    }
+    const worst = Math.max(...cells);
+    if (worst !== 0) {
+      throw new Error(
+        `INV-GN1: ${worst} indexed path(s) are absolute or contain '..'; markdown: ${md.slice(0, 300)}`,
+      );
+    }
   });
 
   test("query/context result file paths are repo-relative (no leading slash, no ..)", () => {
