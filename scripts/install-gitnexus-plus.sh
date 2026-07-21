@@ -41,9 +41,9 @@ fi
 # introduce the perl alarm here, it's reserved for analyze/status). Tolerate
 # failure/empty output → print `unknown`.
 if command -v timeout >/dev/null 2>&1; then
-  GN_VER="$(timeout 10 "$GITNEXUS" --version </dev/null 2>/dev/null | head -1 || true)"
+  GN_VER="$(timeout --kill-after=5 10 "$GITNEXUS" --version </dev/null 2>/dev/null | head -1 || true)"
 elif command -v gtimeout >/dev/null 2>&1; then
-  GN_VER="$(gtimeout 10 "$GITNEXUS" --version </dev/null 2>/dev/null | head -1 || true)"
+  GN_VER="$(gtimeout --kill-after=5 10 "$GITNEXUS" --version </dev/null 2>/dev/null | head -1 || true)"
 else
   GN_VER="$("$GITNEXUS" --version </dev/null 2>/dev/null | head -1 || true)"
 fi

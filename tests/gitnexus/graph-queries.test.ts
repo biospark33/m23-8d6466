@@ -148,6 +148,7 @@ function assertIndexed(): void {
  * Centralizes the INV-GN1/INV-GN3 invariant checked across query/context/impact
  * result paths, so the rule can't drift between the four assertion sites. */
 function expectRepoRelativePath(p: string): void {
+  expect(p).toBeTruthy();
   // isAbsolute() is more precise than startsWith("/") — it encodes the
   // absolute-path semantics explicitly instead of a leading-char heuristic.
   expect(isAbsolute(p)).toBe(false);
@@ -225,8 +226,8 @@ beforeAll(() => {
   // index (e.g. .gitnexusignore filtering them out, or a reachability-filter
   // change). Without this, downstream AC tests fail with opaque "symbol not found"
   // errors while assertIndexed() still passes.
-  const probe = gn(["context", "registerSwarmClawAgent", "-r", REPO_ROOT]) as { status?: string };
-  if (probe.status !== "found") {
+  const probe = gn(["context", "registerSwarmClawAgent", "-r", REPO_ROOT]) as { status?: string } | null;
+  if (probe?.status !== "found") {
     throw new Error(
       "fixture symbol registerSwarmClawAgent missing from index — check .gitnexusignore + run scripts/install-gitnexus-plus.sh",
     );
@@ -348,22 +349,22 @@ describe("AC-3 / guard: missing-symbol and missing-tool are detectable errors, n
       status?: string;
       error?: string;
       symbol?: { name?: string };
-    };
+    } | null;
     // gitnexus returns not_found, an error field, or (if it fuzzy-resolves) found
     // with a DIFFERENT symbol — all are graceful (never a crash). The load-bearing
     // rule: it must not report the bogus name as a real match.
     const graceful =
-      raw.status === "not_found" ||
-      (typeof raw.error === "string" && raw.error.length > 0) ||
-      raw.status === "found";
+      raw?.status === "not_found" ||
+      (raw != null && typeof raw.error === "string" && raw.error.length > 0) ||
+      raw?.status === "found";
     expect(graceful).toBe(true);
-    if (raw.status === "found") {
+    if (raw?.status === "found") {
       // Without these guards, `raw.symbol` being undefined makes
       // `undefined !== "ZZZ..."` true — the test would pass against a malformed
       // response. Assert the symbol actually exists before the name check.
-      expect(raw.symbol).toBeDefined();
-      expect(raw.symbol?.name).toBeDefined();
-      expect(raw.symbol?.name).not.toBe("ZZZ_DEFINITELY_NOT_A_SYMBOL");
+      expect(raw?.symbol).toBeDefined();
+      expect(raw?.symbol?.name).toBeDefined();
+      expect(raw?.symbol?.name).not.toBe("ZZZ_DEFINITELY_NOT_A_SYMBOL");
     }
   });
 
@@ -391,12 +392,12 @@ describe("INV-GN1 & INV-GN3: indexed paths stay within the repo, relative & norm
       "MATCH (f:File) WHERE f.filePath STARTS WITH '/' OR f.filePath CONTAINS '..' RETURN count(f) AS bad",
       "-r",
       REPO_ROOT,
-    ]) as { markdown?: string };
+    ]) as { markdown?: string } | null;
     // cypher returns a single-column markdown table (`| bad |`); collect every
     // numeric cell and assert the max is 0. Anchoring to `| 0 |` alone would also
     // match `| 10 |` / `| 100 |` — unfalsifiable for the traversal guard.
-    expect(raw.markdown).toBeDefined();
-    const md = raw.markdown ?? "";
+    expect(raw?.markdown).toBeDefined();
+    const md = raw?.markdown ?? "";
     const cells = [...md.matchAll(/\|\s*(\d+)\s*\|/g)].map((m) => Number(m[1]));
     // Diagnose shape changes (e.g. a `| N rows affected |` footer adding stray
     // numbers, or an empty result) with a slice of the raw markdown so the

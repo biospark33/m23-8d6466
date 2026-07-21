@@ -143,7 +143,7 @@ This story installs the `pi-gitnexus-plus` extension (v0.7.0) into the Pi agent 
 - [x] `Review: Patch` Fixture symbol `registerAgent` collided with vendored `pi-vs-claude-code-vendor/coms-net.ts` — `context registerAgent` resolved to coms-net.ts (callers `reRegisterAndOpen`, `onSessionStart`), shadowing the fixture. Renamed fixture symbol to unique `registerSwarmClawAgent`; tests + this spec updated. [tests/gitnexus/fixtures/swarmclaw.ts]
 
 **Patched (HIGH/MEDIUM/LOW):**
-- [x] `Review: Patch` INV-GN2 injection guard `/[;|`]\|\$\(/` missed `&&`, `&`, `>`, `<`, newline, `$VAR`, quotes — replaced deny-list with allow-list `^[A-Za-z0-9 _.-]+$`. [tests/gitnexus/graph-queries.test.ts]
+- [x] `Review: Patch` INV-GN2 injection guard ``/[;|`]\|\$\(/`` missed `&&`, `&`, `>`, `<`, newline, `$VAR`, quotes — replaced deny-list with allow-list `^[A-Za-z0-9 _.-]+$`. [tests/gitnexus/graph-queries.test.ts]
 - [x] `Review: Patch` Install-script cleanup unconditionally `rm -rf .claude/skills/gitnexus` — nuked pre-existing skill dirs. Now removed only when this run created it (`CREATED_SKILLS` guard). [scripts/install-gitnexus-plus.sh]
 - [x] `Review: Patch` `pi list` verify ran even when `GITNEXUS_SKIP_INSTALL=1` — moved inside the skip guard; anchored grep to `pi-gitnexus-plus@${EXT_VERSION}`. [scripts/install-gitnexus-plus.sh]
 - [x] `Review: Patch` `trap cleanup EXIT` didn't preserve exit code or catch INT/TERM — now `trap cleanup EXIT INT TERM` with `rc=$?; exit "$rc"`. [scripts/install-gitnexus-plus.sh]
