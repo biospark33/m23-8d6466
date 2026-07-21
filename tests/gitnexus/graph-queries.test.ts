@@ -19,7 +19,7 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { beforeAll, describe, expect, test } from "bun:test";
 import { z } from "zod";
 
@@ -147,9 +147,16 @@ function assertIndexed(): void {
 /** Assert a path is repo-relative: no leading slash, no parent-traversal segment.
  * Centralizes the INV-GN1/INV-GN3 invariant checked across query/context/impact
  * result paths, so the rule can't drift between the four assertion sites. */
-function expectRepoRelativePath(path: string): void {
-  expect(path.startsWith("/")).toBe(false);
-  expect(path).not.toContain("..");
+function expectRepoRelativePath(p: string): void {
+  // isAbsolute() is more precise than startsWith("/") — it encodes the
+  // absolute-path semantics explicitly instead of a leading-char heuristic.
+  expect(isAbsolute(p)).toBe(false);
+  // Reject only exact ".." segments (parent traversal), split on either
+  // separator. A naive not.toContain("..") over the whole string would reject
+  // valid filenames like "version..backup.ts" where ".." sits inside a single
+  // segment rather than being a traversal.
+  const segments = p.split(/[\\/]/);
+  expect(segments).not.toContain("..");
 }
 
 /** The repo-relative path of the known fixture these tests anchor on. */
