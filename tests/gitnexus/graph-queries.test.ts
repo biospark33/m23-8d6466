@@ -47,10 +47,15 @@ const REPO_ROOT = REPO_ROOT_RAW.stdout.trim().replace(/\/+$/, "");
 // gitnexus lives at a non-standard path on this host (~/.local/node-arm64/bin);
 // the story assumed /usr/local/bin. Resolve robustly.
 function resolveGitnexus(): string {
-  const candidates = [
-    join(process.env.HOME ?? "", ".local/node-arm64/bin/gitnexus"),
-    "/usr/local/bin/gitnexus",
-  ];
+  const candidates: string[] = [];
+  if (process.env.HOME) {
+    // Only push the home-relative path when HOME is defined: `join("", ...)`
+    // resolves to a relative path that existsSync/statSync match against CWD,
+    // which could exec an unrelated ./local/node-arm64/bin/gitnexus if one
+    // happened to sit in CWD. Gating on HOME keeps every candidate absolute.
+    candidates.push(join(process.env.HOME, ".local/node-arm64/bin/gitnexus"));
+  }
+  candidates.push("/usr/local/bin/gitnexus");
   for (const c of candidates) {
     if (!existsSync(c)) continue;
     // statSync can throw EACCES on an unreadable parent dir; the && short-circuit

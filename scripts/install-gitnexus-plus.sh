@@ -82,13 +82,15 @@ if [ "${GITNEXUS_SKIP_INSTALL:-0}" != "1" ]; then
   # patch doesn't satisfy the bare `pi-gitnexus-plus@0.7.0` substring. Distinguish
   # "pi list returned nothing" (infra error) from "wrong version listed" (real).
   # One-shot retry: the pi registry cache can lag a just-completed `pi install`,
-  # so if the anchored verify fails AND `pi list` is non-empty, re-capture once
-  # before declaring FATAL (single retry, not a loop — keeps the failure mode
-  # diagnosable and bounds wall-clock).
+  # so if the anchored verify fails, re-capture `pi list` once before declaring
+  # FATAL. Retry UNCONDITIONALLY (not gated on PI_LIST being non-empty): a
+  # transient empty `pi list` (registry lock, blip) is itself recoverable by a
+  # retry, and if it's a real infra break the re-capture stays empty and the
+  # `[ -z "$PI_LIST" ]` branch below still reports the infra-error message —
+  # so the retry costs one subprocess on the failure path and loses no
+  # diagnostic distinction. Single retry, not a loop — bounds wall-clock.
   if ! printf '%s\n' "$PI_LIST" | grep -qE "pi-gitnexus-plus@${EXT_VERSION}([^[:alnum:]._+-]|\$)"; then
-    if [ -n "$PI_LIST" ]; then
-      PI_LIST="$(pi list 2>/dev/null || true)"
-    fi
+    PI_LIST="$(pi list 2>/dev/null || true)"
     printf '%s\n' "$PI_LIST" | grep -qE "pi-gitnexus-plus@${EXT_VERSION}([^[:alnum:]._+-]|\$)" || {
       if [ -z "$PI_LIST" ]; then
         echo "FATAL: \`pi list\` returned no output — cannot verify install (pi infra error?)" >&2
