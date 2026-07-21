@@ -231,6 +231,30 @@ describe("runTeamManifest", () => {
     }
   }, 15_000);
 
+  it("F15: multibyte char split at the cap boundary resets the decoder so resumed parsing is clean", async () => {
+    // A 3-byte char straddles the chunk boundary that also breaches the byte
+    // cap, leaving a partial char buffered in the StringDecoder when the line
+    // is discarded. Without a decoder reset those stale bytes flush as a U+FFFD
+    // prefix onto the trailing `merged` line — JSON.parse fails and the run
+    // misclassifies. Success + the exact merged result proves the reset landed.
+    const capError = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const out = await runTeamManifest(TEAM_MANIFEST, {
+        env: teamEnv("split_multibyte_at_cap"),
+        teamStdoutCapBytes: 2048,
+      });
+      expectUniformSchema(out);
+      expect(out.exitStatus).toBe("success");
+      expect(out.result).toEqual({ summary: "resumed after split multibyte line" });
+      const capFired = capError.mock.calls.some((c) =>
+        String(c[0]).includes("lead stdout line exceeded"),
+      );
+      expect(capFired).toBe(true);
+    } finally {
+      capError.mockRestore();
+    }
+  }, 15_000);
+
   it("CLI: `cli-anything run --manifest <team.yaml>` emits MergedOutput and exit 0 (AC1 wiring)", async () => {
     const proc = Bun.spawn(
       ["bun", join(import.meta.dir, "..", "src", "index.ts"), "run", "--manifest", TEAM_MANIFEST],

@@ -1036,7 +1036,11 @@ export async function runTeamManifest(
     }
 
     let lineBuffer = "";
-    const decoder = new StringDecoder("utf8");
+    // Reassignable: a multibyte char split across chunks leaves partial bytes
+    // buffered inside the decoder. When we discard an oversized line we must
+    // drop those partial bytes too — otherwise they flush as a garbage prefix
+    // onto the first resumed line and corrupt its NDJSON parse.
+    let decoder = new StringDecoder("utf8");
     // F15 stdout-cap state — declared before the `data` handler that closes
     // over them, so there is no use-before-initialization window.
     let teamStdoutBytes = 0;
@@ -1096,6 +1100,9 @@ export async function runTeamManifest(
         teamStdoutCapped = false;
         teamStdoutBytes = 0;
         lineBuffer = "";
+        // Defensive: drop any partial-char bytes buffered while the discarded
+        // line was still being decoded, so they cannot prefix the resumed tail.
+        decoder = new StringDecoder("utf8");
       }
       // Count raw Buffer bytes BEFORE decoding: decoded.length is UTF-16 code
       // units and undercounts multibyte UTF-8 (up to 4x), so a line of 3-byte
@@ -1106,6 +1113,10 @@ export async function runTeamManifest(
         );
         lineBuffer = "";
         teamStdoutBytes = 0;
+        // Reset the decoder: earlier chunks of THIS oversized line may have
+        // left a partial multibyte char buffered. Dropping it here stops those
+        // stale bytes from corrupting the first line parsed after resume.
+        decoder = new StringDecoder("utf8");
         // Discard the rest of this oversized line through its next newline. It
         // may be later in THIS chunk (drop in place + decode only the tail); if
         // it spans into the next chunk, stay in discard-mode until it lands.
