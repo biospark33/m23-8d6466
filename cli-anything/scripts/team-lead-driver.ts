@@ -279,10 +279,15 @@ async function main(): Promise<void> {
   }
   // Bounded parse (F25): bare Number() turns a malformed PI_COMS_TIMEOUT_MS
   // into NaN, and setTimeout(NaN) fires at ~0ms — every worker is killed
-  // instantly. Require finite >= 1ms, else fall back to the 4 min default.
+  // instantly. A value > 2^31-1 overflows setTimeout's signed 32-bit ms
+  // field, which Node treats as 1ms (TimeoutOverflowWarning) — the same
+  // instant-kill symptom. Accept only integers in [1, 2_147_483_647], else
+  // fall back to the 4 min default.
   const awaitTimeoutRaw = Number(process.env.PI_COMS_TIMEOUT_MS ?? 240_000);
   const awaitTimeoutMs =
-    Number.isFinite(awaitTimeoutRaw) && awaitTimeoutRaw >= 1
+    Number.isInteger(awaitTimeoutRaw) &&
+    awaitTimeoutRaw >= 1 &&
+    awaitTimeoutRaw <= 2_147_483_647
       ? awaitTimeoutRaw
       : 240_000;
 

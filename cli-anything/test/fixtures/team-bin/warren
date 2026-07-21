@@ -125,6 +125,25 @@ async function main(): Promise<void> {
       await sleep(60_000);
       break;
     }
+    case "oversized_multibyte_line": {
+      // F15 regression: a legitimate preamble of small NDJSON lines, then ONE
+      // line whose raw byte length (multibyte UTF-8) exceeds the cap but whose
+      // UTF-16 unit length does NOT — exercises raw-byte counting + per-line
+      // discard + resume. The trailing `merged` MUST still parse.
+      say(coms(1, "lead", "worker-a"));
+      say(coms(2, "worker-a", "lead"));
+      say(cost("worker-a", "openrouter/model-a", 0.01));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      say(workerOutput("worker-b", ["src/b.ts"]));
+      // "あ" is 3 UTF-8 bytes but 1 UTF-16 unit: 1000 of them = 3000 bytes,
+      // 1000 units — under a 2048-byte cap by units, over it by bytes. No
+      // newline until past the cap, then terminate the oversized line.
+      process.stdout.write("あ".repeat(1000));
+      process.stdout.write("\n");
+      say({ type: "merged", result: { summary: "resumed after oversized line" } });
+      process.exit(0);
+      break;
+    }
     default: {
       console.error(`warren-team-shim: unknown scenario '${scenario}'`);
       process.exit(70);
