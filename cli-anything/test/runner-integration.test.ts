@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -206,6 +206,54 @@ describe("runTeamManifest", () => {
     expect(out.exitStatus).toBe("overflow");
     expect(out.error?.reason).toBe("overflow");
   }, 20_000);
+
+  it("F15: per-line cap drops an oversized multibyte line and resumes parsing (merged still lands)", async () => {
+    // 1000 × "あ" = 3000 UTF-8 bytes but 1000 UTF-16 units. Under a 2048-byte
+    // cap by units, OVER it by bytes — the old decoded.length counter would
+    // let it slip past. Spy on the harness's own cap log to prove the
+    // byte-accurate cap fired, and assert the trailing `merged` still parsed
+    // (proving parsing resumed after the oversized line was discarded).
+    const capError = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const out = await runTeamManifest(TEAM_MANIFEST, {
+        env: teamEnv("oversized_multibyte_line"),
+        teamStdoutCapBytes: 2048,
+      });
+      expectUniformSchema(out);
+      expect(out.exitStatus).toBe("success");
+      expect(out.result).toEqual({ summary: "resumed after oversized line" });
+      const capFired = capError.mock.calls.some((c) =>
+        String(c[0]).includes("lead stdout line exceeded"),
+      );
+      expect(capFired).toBe(true);
+    } finally {
+      capError.mockRestore();
+    }
+  }, 15_000);
+
+  it("F15: multibyte char split at the cap boundary resets the decoder so resumed parsing is clean", async () => {
+    // A 3-byte char straddles the chunk boundary that also breaches the byte
+    // cap, leaving a partial char buffered in the StringDecoder when the line
+    // is discarded. Without a decoder reset those stale bytes flush as a U+FFFD
+    // prefix onto the trailing `merged` line — JSON.parse fails and the run
+    // misclassifies. Success + the exact merged result proves the reset landed.
+    const capError = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const out = await runTeamManifest(TEAM_MANIFEST, {
+        env: teamEnv("split_multibyte_at_cap"),
+        teamStdoutCapBytes: 2048,
+      });
+      expectUniformSchema(out);
+      expect(out.exitStatus).toBe("success");
+      expect(out.result).toEqual({ summary: "resumed after split multibyte line" });
+      const capFired = capError.mock.calls.some((c) =>
+        String(c[0]).includes("lead stdout line exceeded"),
+      );
+      expect(capFired).toBe(true);
+    } finally {
+      capError.mockRestore();
+    }
+  }, 15_000);
 
   it("CLI: `cli-anything run --manifest <team.yaml>` emits MergedOutput and exit 0 (AC1 wiring)", async () => {
     const proc = Bun.spawn(

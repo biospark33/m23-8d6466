@@ -237,7 +237,12 @@ export async function main(argv: string[]): Promise<number> {
   if (kind === "team") {
     let merged: MergedOutput;
     try {
-      merged = await runTeamManifest(manifestPath);
+      // `--timeout-ms` overrides the manifest wall-clock cap for team runs too
+      // (F33: previously silently ignored for the team path).
+      merged = await runTeamManifest(
+        manifestPath,
+        timeoutMs !== undefined ? { wallClockCapMs: timeoutMs } : {},
+      );
     } catch (err) {
       const { exitCode, message } = classifyError(err, manifestPath);
       console.error(message);

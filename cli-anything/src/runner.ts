@@ -657,6 +657,15 @@ export async function runManifest(
 /** Budget kill threshold as a fraction of the team cap (P0.3 §Budget, 90%). */
 export const BUDGET_KILL_FRACTION = 0.9;
 
+/**
+ * Hard cap on captured lead-run stdout kept in memory for the team path
+ * (F15): unlike runManifest's byte-capped excerpt, the team handler parsed
+ * NDJSON lines into an unbounded `lineBuffer` — a malicious/buggy lead
+ * emitting an endless newline-less stream grew memory without bound (OOM).
+ * 1 MiB is far above any legitimate event line; oversize lines are dropped.
+ */
+export const MAX_TEAM_STDOUT_BYTES = 1024 * 1024;
+
 /** Split a `provider/model` role string at the FIRST slash (CC-2 amended). */
 export function splitRoleModel(roleModel: string): {
   provider: string;
@@ -723,6 +732,8 @@ export interface TeamRunOptions {
   wallClockCapMs?: number;
   /** Override the manifest's budget cap in USD (tests). */
   budgetCapUsd?: number;
+  /** Override the per-line team stdout cap in bytes (tests). */
+  teamStdoutCapBytes?: number;
   /** In-flight grace after the budget threshold before killTree (default 5 s). */
   graceMs?: number;
   /** Directory for lead-failure worker partials. Default `<cwd>/artifacts`. */
@@ -837,6 +848,9 @@ export async function runTeamManifest(
       : undefined;
   const graceMs = opts.graceMs ?? envGraceMs ?? WATCHDOG_GRACE_MS;
   const artifactsDir = opts.artifactsDir ?? join(process.cwd(), "artifacts");
+  // F15 per-line cap (tests): defaults to the 1 MiB constant; tests pass a
+  // small value to exercise the oversized-multibyte-line boundary precisely.
+  const teamStdoutCapBytes = opts.teamStdoutCapBytes ?? MAX_TEAM_STDOUT_BYTES;
 
   // Agent-team extension config for the workers (CC-2 amended): worker
   // role-models are NOT Warren CLI flags.
@@ -1022,7 +1036,15 @@ export async function runTeamManifest(
     }
 
     let lineBuffer = "";
-    const decoder = new StringDecoder("utf8");
+    // Reassignable: a multibyte char split across chunks leaves partial bytes
+    // buffered inside the decoder. When we discard an oversized line we must
+    // drop those partial bytes too — otherwise they flush as a garbage prefix
+    // onto the first resumed line and corrupt its NDJSON parse.
+    let decoder = new StringDecoder("utf8");
+    // F15 stdout-cap state — declared before the `data` handler that closes
+    // over them, so there is no use-before-initialization window.
+    let teamStdoutBytes = 0;
+    let teamStdoutCapped = false;
     function processLine(line: string): void {
       {
         const event = parseTeamEventLine(line);
@@ -1043,7 +1065,7 @@ export async function runTeamManifest(
               // components). Unknown/crafted ids are dropped, not written.
               if (!pendings.has(event.agentId)) {
                 console.error(
-                  `cli-anything: dropping worker_output for undeclared agentId`,
+                  "cli-anything: dropping worker_output for undeclared agentId",
                 );
                 break;
               }
@@ -1061,12 +1083,63 @@ export async function runTeamManifest(
       }
     }
 
-    child.stdout!.on("data", (d: Buffer) => {
-      lineBuffer += decoder.write(d);
+    child.stdout!.on("data", (chunk: Buffer) => {
+      // F15 (per-line cap): bound the CURRENT unterminated line, not cumulative
+      // run output. A long legitimate run emits many small NDJSON lines that
+      // would exhaust a cumulative 1 MiB budget and silently drop every later
+      // event — including `merged`, misclassifying a clean run as
+      // lead_failure/logic. An oversized line is discarded through its next
+      // newline, then parsing resumes.
+      let bytes: Buffer = chunk;
+      // Resume after an oversized line: drop through its terminating newline,
+      // which may sit inside this same chunk, then parse the tail.
+      if (teamStdoutCapped) {
+        const nl = bytes.indexOf(0x0a);
+        if (nl === -1) return;
+        bytes = bytes.subarray(nl + 1);
+        teamStdoutCapped = false;
+        teamStdoutBytes = 0;
+        lineBuffer = "";
+        // Defensive: drop any partial-char bytes buffered while the discarded
+        // line was still being decoded, so they cannot prefix the resumed tail.
+        decoder = new StringDecoder("utf8");
+      }
+      // Count raw Buffer bytes BEFORE decoding: decoded.length is UTF-16 code
+      // units and undercounts multibyte UTF-8 (up to 4x), so a line of 3-byte
+      // chars could slip past the cap and grow lineBuffer without bound.
+      if (teamStdoutBytes + bytes.length > teamStdoutCapBytes) {
+        console.error(
+          `cli-anything: lead stdout line exceeded ${teamStdoutCapBytes} byte cap — line dropped, parsing resumes after next newline`,
+        );
+        lineBuffer = "";
+        teamStdoutBytes = 0;
+        // Reset the decoder: earlier chunks of THIS oversized line may have
+        // left a partial multibyte char buffered. Dropping it here stops those
+        // stale bytes from corrupting the first line parsed after resume.
+        decoder = new StringDecoder("utf8");
+        // Discard the rest of this oversized line through its next newline. It
+        // may be later in THIS chunk (drop in place + decode only the tail); if
+        // it spans into the next chunk, stay in discard-mode until it lands.
+        const nl = bytes.indexOf(0x0a);
+        if (nl === -1) {
+          teamStdoutCapped = true;
+          return;
+        }
+        bytes = bytes.subarray(nl + 1);
+      }
+      // Decode exactly once: the full chunk in the normal path, or only the
+      // tail that survived a discarded oversized line.
+      if (bytes.length > 0) {
+        lineBuffer += decoder.write(bytes);
+        teamStdoutBytes += bytes.length;
+      }
+      // Consume complete lines; reset the per-line byte counter for whatever
+      // partial line remains after each newline.
       let nl = lineBuffer.indexOf("\n");
       while (nl !== -1) {
         processLine(lineBuffer.slice(0, nl));
         lineBuffer = lineBuffer.slice(nl + 1);
+        teamStdoutBytes = Buffer.byteLength(lineBuffer, "utf8");
         nl = lineBuffer.indexOf("\n");
       }
     });
@@ -1089,17 +1162,27 @@ export async function runTeamManifest(
     });
 
     let closed = false;
+    let finalizing = false;
     const finalize = (code: number | null, signal: NodeJS.Signals | null): void => {
       void (async () => {
-        if (settled) return;
+        // F5: the exit-watchdog and `close` can both call finalize before
+        // `settled` flips (the body awaits mid-way). Guard entry so the
+        // artifact writes + pending loop run exactly once; settle()'s own
+        // idempotency guard already protects the single resolve.
+        if (settled || finalizing) return;
+        finalizing = true;
 
         // Flush the decoder and any final line written WITHOUT a trailing
         // newline — otherwise a last `merged` event would sit unparsed in
         // lineBuffer and the run would misclassify as lead_failure/logic.
-        lineBuffer += decoder.end();
-        if (lineBuffer.length > 0) {
-          processLine(lineBuffer);
-          lineBuffer = "";
+        // EOF mid-oversized-line: the decoder tail belongs to the discarded
+        // line, so drop it instead of parsing a fragment.
+        if (!teamStdoutCapped) {
+          lineBuffer += decoder.end();
+          if (lineBuffer.length > 0) {
+            processLine(lineBuffer);
+            lineBuffer = "";
+          }
         }
 
         // Overflow paths win regardless of the raw classification (CC-1

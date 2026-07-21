@@ -125,6 +125,63 @@ async function main(): Promise<void> {
       await sleep(60_000);
       break;
     }
+    case "oversized_multibyte_line": {
+      // F15 regression: a legitimate preamble of small NDJSON lines, then ONE
+      // line whose raw byte length (multibyte UTF-8) exceeds the cap but whose
+      // UTF-16 unit length does NOT — exercises raw-byte counting + per-line
+      // discard + resume. The trailing `merged` MUST still parse.
+      say(coms(1, "lead", "worker-a"));
+      say(coms(2, "worker-a", "lead"));
+      say(cost("worker-a", "openrouter/model-a", 0.01));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      say(workerOutput("worker-b", ["src/b.ts"]));
+      // "あ" is 3 UTF-8 bytes but 1 UTF-16 unit: 1000 of them = 3000 bytes,
+      // 1000 units — under a 2048-byte cap by units, over it by bytes. No
+      // newline until past the cap, then terminate the oversized line.
+      process.stdout.write("あ".repeat(1000));
+      process.stdout.write("\n");
+      say({ type: "merged", result: { summary: "resumed after oversized line" } });
+      process.exit(0);
+      break;
+    }
+    case "split_multibyte_at_cap": {
+      // F15 decoder-reset regression: unlike oversized_multibyte_line (whole
+      // chars), this splits ONE 3-byte char ("あ" = E3 81 82) across the chunk
+      // boundary that ALSO breaches the byte cap, so the decoder is holding a
+      // partial char when the line is discarded. If the discard path fails to
+      // reset the decoder, those stale bytes flush as a U+FFFD prefix onto the
+      // trailing `merged` line, JSON.parse fails, and the run misclassifies.
+      // sleeps force each write() into its own reader `data` event so the split
+      // is deterministic rather than dependent on pipe coalescing.
+      say(coms(1, "lead", "worker-a"));
+      say(coms(2, "worker-a", "lead"));
+      say(cost("worker-a", "openrouter/model-a", 0.01));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      say(workerOutput("worker-b", ["src/b.ts"]));
+      await sleep(50); // let the preamble drain as its own chunk(s)
+      // Chunk A: 679×"あ" (2037 B) + the FIRST byte of a 680th "あ" = 2038 B.
+      // Under a 2048-byte cap, so it is accepted and the decoder buffers the
+      // lone lead byte (accepted prefix ends at an odd UTF-8 offset).
+      const chunkA = Buffer.concat([
+        Buffer.from("あ".repeat(679), "utf8"),
+        Buffer.from([0xe3]),
+      ]);
+      process.stdout.write(chunkA);
+      await sleep(50);
+      // Chunk B: the 2 continuation bytes that complete the split char, filler,
+      // then the newline. 2038 + 23 = 2061 > 2048 → the line is discarded and
+      // the decoder MUST be reset before parsing resumes.
+      const chunkB = Buffer.concat([
+        Buffer.from([0x81, 0x82]),
+        Buffer.from("x".repeat(20), "utf8"),
+        Buffer.from("\n", "utf8"),
+      ]);
+      process.stdout.write(chunkB);
+      await sleep(50);
+      say({ type: "merged", result: { summary: "resumed after split multibyte line" } });
+      process.exit(0);
+      break;
+    }
     default: {
       console.error(`warren-team-shim: unknown scenario '${scenario}'`);
       process.exit(70);
