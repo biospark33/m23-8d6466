@@ -1032,6 +1032,10 @@ export async function runTeamManifest(
 
     let lineBuffer = "";
     const decoder = new StringDecoder("utf8");
+    // F15 stdout-cap state — declared before the `data` handler that closes
+    // over them, so there is no use-before-initialization window.
+    let teamStdoutBytes = 0;
+    let teamStdoutCapped = false;
     function processLine(line: string): void {
       {
         const event = parseTeamEventLine(line);
@@ -1087,11 +1091,9 @@ export async function runTeamManifest(
         lineBuffer += decoded;
         teamStdoutBytes += decoded.length;
       }
-      // A single line longer than the cap cannot be a valid NDJSON event;
-      // drop it so lineBuffer never holds the whole oversized line.
-      if (lineBuffer.length > MAX_TEAM_STDOUT_BYTES) {
-        lineBuffer = "";
-      }
+      // Oversized lines never fully assemble: once the cap fires the handler
+      // early-returns on every later chunk, so lineBuffer holds at most a
+      // truncated prefix (<= MAX) that won't parse as NDJSON and is ignored.
       let nl = lineBuffer.indexOf("\n");
       while (nl !== -1) {
         processLine(lineBuffer.slice(0, nl));
@@ -1119,8 +1121,6 @@ export async function runTeamManifest(
 
     let closed = false;
     let finalizing = false;
-    let teamStdoutBytes = 0;
-    let teamStdoutCapped = false;
     const finalize = (code: number | null, signal: NodeJS.Signals | null): void => {
       void (async () => {
         // F5: the exit-watchdog and `close` can both call finalize before
