@@ -119,12 +119,17 @@ fi
 # added here (out of scope) — serialize across CI matrix shards / stories.
 IGNORE_FILE="$REPO_ROOT/.gitnexusignore"
 CREATED_IGNORE=0
-# Guard before writing: `[ ! -f ]` is true for a broken symlink or a non-regular
-# file, and `>` follows symlinks (could clobber the target of a symlink pointing
-# elsewhere). If $IGNORE_FILE exists as a symlink (-L) or directory (-d), FATAL
-# instead of writing — protects the user's filesystem from a footgun the
-# bare-negation logic doesn't anticipate.
-if [ -e "$IGNORE_FILE" ] && { [ -L "$IGNORE_FILE" ] || [ -d "$IGNORE_FILE" ]; }; then
+# Guard before writing: `>` follows symlinks and could clobber the target of a
+# symlink pointing elsewhere on the filesystem. FATAL if $IGNORE_FILE is a
+# symlink (-L) or directory (-d). Do NOT prefix with `[ -e ] &&` — `-e` follows
+# symlinks and returns FALSE for a BROKEN symlink, short-circuiting past `-L` so
+# the check falls through to the write branch below (`[ ! -f ]` is also true for
+# a broken symlink, so the elif would `>` through the dangling link, creating or
+# overwriting its target — the exact footgun this guard exists to prevent).
+# `-L` uses lstat, matching BOTH working and broken symlinks, so it alone is the
+# correct symlink test. (Verified empirically: broken symlink → `[ -e ]`=false,
+# `[ -L ]`=true, `[ ! -f ]`=true.)
+if [ -L "$IGNORE_FILE" ] || [ -d "$IGNORE_FILE" ]; then
   echo "FATAL: $IGNORE_FILE exists as a symlink or directory — refusing to overwrite (remove it manually)" >&2
   exit 1
 elif [ ! -f "$IGNORE_FILE" ]; then
