@@ -1,0 +1,121 @@
+{
+  "timestamp": "2026-07-25T15:32:38.123Z",
+  "overall": "FAIL",
+  "assertions": [
+    {
+      "id": "preflight-toolchain",
+      "story": "P0.11",
+      "prd_clause": "§13 P0 preflight",
+      "status": "pass",
+      "pass": true,
+      "detail": "toolchain present; unset env (defaults apply): HINDSIGHT_BASE_URL, HINDSIGHT_BEARER_TOKEN, SWARMCLAW_BASE_URL, QDS_REPO_SLUG",
+      "duration_ms": 5
+    },
+    {
+      "id": "P0.1-archon-env-patch",
+      "story": "P0.1 (killed)",
+      "prd_clause": "§13 P0 clause 5",
+      "status": "void",
+      "pass": false,
+      "detail": "VOID — P0.1 killed by Warren decision (flat agents, no Archon DAG). There is no Archon DAG in the v4 architecture, so clause 5 has no subject and is dropped, not failed.",
+      "duration_ms": 0
+    },
+    {
+      "id": "P0.3-merged-json-mixed-model",
+      "story": "P0.3",
+      "prd_clause": "§13 P0 clause 1",
+      "status": "pass",
+      "pass": true,
+      "detail": "single merged JSON, partial=false, exitStatus=success, 3 distinct models, 6 coms entries — evidence-of-record p0-3-live-run-2026-07-20.json (recorded live run, not re-executed by this gate; run used QDS_TEAM_RUNNER=local subprocess-RPC, not the warren-server path). NOTE: clause names pi-team-launch.sh, which does not exist; capability shipped as cli-anything.",
+      "duration_ms": 13
+    },
+    {
+      "id": "P0.2-coms-two-agents-two-messages",
+      "story": "P0.2",
+      "prd_clause": "§13 P0 clause 2",
+      "status": "pass",
+      "pass": true,
+      "detail": "agents=4, messages=3, strict, unwaived — evidence-of-record oq-1-smoke-run-2026-07-14.json (recorded live run, not re-executed by this gate)",
+      "duration_ms": 10
+    },
+    {
+      "id": "OQ-1-6-decisions-recorded",
+      "story": "P0.2",
+      "prd_clause": "§13 P0 clause 8",
+      "status": "pass",
+      "pass": true,
+      "detail": "all six OQs carry a decision in PRD Appendix D (OQ-1=RESOLVED, OQ-2=RESOLVED, OQ-3=BLOCKED+fallback, OQ-4=BLOCKED+fallback, OQ-5=RESOLVED, OQ-6=RESOLVED); clause 8 explicitly permits a recorded fallback",
+      "duration_ms": 8
+    },
+    {
+      "id": "P0.4-hard-cap-wired-nonzero-exit",
+      "story": "P0.4 (killed; absorbed into launcher guards)",
+      "prd_clause": "§13 P0 clause 3",
+      "status": "pass",
+      "pass": true,
+      "detail": "budgetCapUsd + wallClockCapMs declared; overflow -> exit 3. STRUCTURAL only — proves the cap path exists and exits non-zero; no live loopy-prompt run has ever been executed in Phase-0 (P0.4 was killed)",
+      "duration_ms": 3
+    },
+    {
+      "id": "P0.5-pi-lens-headless-warning-proxy",
+      "story": "P0.5",
+      "prd_clause": "§13 P0 clause 4",
+      "status": "skip",
+      "pass": false,
+      "detail": "verifier exited 2 (fatal before checks ran): pi-lens-verify fatal: Error: pi-lens not found in any known global node_modules dir",
+      "duration_ms": 1563
+    },
+    {
+      "id": "P0.6-lsp-warm-diagnostics-and-navigation",
+      "story": "P0.6",
+      "prd_clause": "§13 P0 clause 4b",
+      "status": "pass",
+      "pass": true,
+      "detail": "warm diagnostics reflect an uncommitted edit within the latency budget (warmP95Ms=453/3000); cross-file definition resolved. SCOPED to warm diagnostics + navigation. NOT asserted (P0.6 story-level PARTIAL): single-query freshness, the AC3 artifact half, pi-lens-internal init timeout (AC3a), literal sequential per-file RPCs (AC4).",
+      "duration_ms": 108863
+    },
+    {
+      "id": "P0.7-swarmclaw-hindsight-mcp-bridge",
+      "story": "P0.7",
+      "prd_clause": "§13 P0 clause 6 (Hindsight half)",
+      "status": "fail",
+      "pass": false,
+      "detail": "POST /api/mcp-servers -> 502: {\"ok\":false,\"error\":\"Executable not found in $PATH: \\\"hindsight-local-mcp\\\"\"}. NOTE: the real hindsight-local-mcp in this environment is an HTTP server on :8888/mcp/, not a stdio JSON-RPC binary, so clause 6's literal stdio registration may be unachievable as specified.",
+      "duration_ms": 137
+    },
+    {
+      "id": "P0.8-telegram-plugin-installed",
+      "story": "P0.8 (killed)",
+      "prd_clause": "§13 P0 clause 6 (Telegram half)",
+      "status": "void",
+      "pass": false,
+      "detail": "VOID — P0.8 killed by Warren decision (Telegram verify deferred). OQ-3 is recorded BLOCKED-on-creds with the Hermes-driven Telegram gateway as the fallback in effect, which clause 8 permits. Telegram approve/resume is re-tested by P1.10, not Phase-0.",
+      "duration_ms": 0
+    },
+    {
+      "id": "P0.9-hindsight-round-trip",
+      "story": "P0.9",
+      "prd_clause": "§13 P0 clause 7",
+      "status": "fail",
+      "pass": false,
+      "detail": "no reachable Hindsight API at http://127.0.0.1:8888 (listBanks -> HTTP 404); served by \"Jupyter Server\" — not Hindsight. OQ-4 records the local stack as BLOCKED-on-env (arm64 libpq/openssl@3 mismatch).",
+      "duration_ms": 98
+    },
+    {
+      "id": "P0.10-gitnexus-graph-queries",
+      "story": "P0.10",
+      "prd_clause": "§13 P0 clause 7b",
+      "status": "pass",
+      "pass": true,
+      "detail": "context resolved createServer -> src/swarmclaw/index.ts; impact returned target with impactedCount=2. WARNING: index reports STALE — re-run `gitnexus analyze` before Phase-1 stories.",
+      "duration_ms": 20905
+    }
+  ],
+  "summary": {
+    "pass": 7,
+    "fail": 2,
+    "skip": 1,
+    "void": 2
+  },
+  "total_duration_ms": 108920
+}

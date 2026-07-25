@@ -14,7 +14,14 @@ meta:
 epics:
   phase-0:
     name: Foundations & de-risk
-    status: draft-pending-correction
+    # All P0 stories are delivered, but the §13 exit gate is RED — Phase-0 has
+    # NOT met its exit criteria and Phase-1 stories should not start on the
+    # strength of story statuses alone. Run `bun scripts/phase0-exit-gate.ts`.
+    # Open blockers: clause 7 (Hindsight/OQ-4 BLOCKED-on-env), clause 6
+    # (hindsight-local-mcp transport mismatch), clause 4 (pi-lens-verify.ts
+    # PI_LENS_ROOT resolution). Also unresolved: pi 0.55.0 -> 0.81.1 drift
+    # (OQ-5/R4 re-validation) and a STALE gitnexus index (FR-EX-9 precondition).
+    status: gate-red-not-exitable
     points: 37
     stories:
       P0.1:  { title: "Archon env-patch productionize + non-regression gate", points: 3, status: killed, deps: [] }  # killed: Warren decision — flat agents, no Archon DAG
@@ -27,7 +34,7 @@ epics:
       P0.8:  { title: "Telegram verify / OQ-3 + Hermes fallback",            points: 3, status: killed, deps: [P0.7] }  # killed: Warren decision — Telegram verify deferred
       P0.9:  { title: "Seeds/Mulch pin + Hindsight banks round-trip",        points: 4, status: done, deps: [P0.7] }  # done 2026-07-20: PR #37 merged (bmad rounds 1-4 + Gemini review: 48+ fixes across bank-provisioner, mulch-importer, client, round-trip-verifier)
       P0.10: { title: "pi-gitnexus-plus + gitnexus analyze + queries",       points: 3, status: done, deps: [] }  # done 2026-07-21: PR #39 merged (feat(p0-10): install pi-gitnexus-plus + prove graph queries)
-      P0.11: { title: "Phase-0 exit gate (§13)",                             points: 3, status: draft, deps: [P0.2, P0.3, P0.5, P0.6, P0.7, P0.9, P0.10] }  # P0.1, P0.4, P0.8 removed (killed)
+      P0.11: { title: "Phase-0 exit gate (§13)",                             points: 3, status: done, deps: [P0.2, P0.3, P0.5, P0.6, P0.7, P0.9, P0.10] }  # done 2026-07-25: gate delivered (scripts/phase0-exit-gate.ts + src/gate/*, 45 tests). Asserts per PRD §13 CLAUSE (1,2,3,4,4b,5,6,7,7b,8), not per story number — clause 5 (P0.1) and clause 6-Telegram (P0.8) recorded VOID; clause 3 (P0.4) kept LIVE as a STRUCTURAL check so risk R10 is not silently retired. 3 local review rounds; 2 CRITICAL findings fixed (spawnSync blocked the event loop defeating per-assertion timeouts + concurrency; total-budget expiry did not stop the pool). >>> GATE VERDICT: **PHASE_0_GATE: FAIL** (7 pass / 2 fail / 1 skip / 2 void) — **PHASE-0 IS NOT EXITABLE**. Story AC1 is UNDEMONSTRATED, not failed: its precondition ("all systems running") is unmet. Blockers are all upstream — clause 7 Hindsight (OQ-4 still BLOCKED-on-env), clause 6 (hindsight-local-mcp is HTTP not stdio; clause may be unachievable as specified), clause 4 (pi-lens-verify.ts ignores PI_LENS_ROOT; lsp-verify.ts honours it and passes 7/7). See _research/phase0-gate-report.md
   phase-1:
     name: Dev vertical slice (make-or-break)
     status: draft-pending-correction
