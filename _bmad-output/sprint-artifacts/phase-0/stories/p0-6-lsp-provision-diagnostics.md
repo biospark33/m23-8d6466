@@ -114,7 +114,13 @@ Full evidence and reconciliation: `_bmad-output/sprint-artifacts/_research/lsp-v
 
 ## Dev Agent Record
 
-**Completed:** 2026-07-24 · Branch `feature/p0-6-lsp-provision-diagnostics`
+**Status:** DONE — PR #42 squash-merged to `main` 2026-07-25 as `cfca40d`.
+**Completed:** 2026-07-24 · Branch `feature/p0-6-lsp-provision-diagnostics` (deleted local + remote)
+
+**Review:** 5 rounds, 24 findings, all addressed. CodeRabbit final: "No further
+findings from static review of 690a420." Sift final: "Sifted through the code and
+found no issues." Gemini Code Assist did not participate — its consumer version
+was sunset mid-review and all its review activity has permanently ceased.
 
 **Deliverables**
 - `scripts/lsp-verify.ts` — headless verification harness (MCP stdio + real agent turn)

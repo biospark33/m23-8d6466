@@ -12,6 +12,12 @@
 **Totals: 30 stories · 104 pts** — Phase 0: 11 / 37 pts · Phase 1: 19 / 67 pts. All 3–4 pts.
 **Status: `draft-pending-correction`** (adversarial iteration 1 not yet applied).
 
+> **Per-story status lives in `../sprint-artifacts/sprint-status.yaml`**, which is
+> authoritative — this index tracks decomposition (points, deps, waves), not progress.
+> Phase 0 as of 2026-07-25: P0.2, P0.3, P0.5, P0.6, P0.7, P0.9, P0.10 **done**;
+> P0.1, P0.4, P0.8 **killed** (Warren decision); **P0.11 (exit gate) is the only
+> Phase-0 story remaining** and is now unblocked.
+
 ## Epic = Phase 0 — Foundations & de-risk (acquisition-heavy)
 
 | Story | Title | Pts | Deps | Wave | FR | Security |
@@ -38,7 +44,7 @@
 | [P1.4](../sprint-artifacts/phase-1/stories/p1-4-qds-piv-loop-dag.md) | Author `qds-piv-loop` 14-node DAG | 4 | P0.1,P0.11 | 5 | FR-OR-1/2 | — |
 | [P1.5](../sprint-artifacts/phase-1/stories/p1-5-qds-model-router.md) | `qds-model-router` archetype+tier selection scored to meta | 4 | P0.9,P0.10 | 6 | FR-MG-5, FR-EX-7 | cost |
 | [P1.6](../sprint-artifacts/phase-1/stories/p1-6-pi-team-implement-node.md) | Pi-team implement node captures structured JSON | 4 | P0.3,P0.5,P0.9,P1.4 | 6 | FR-OR-3, FR-EX-6 | secrets, input, cost |
-| [P1.7](../sprint-artifacts/phase-1/stories/p1-7-post-edit-lsp-gate.md) | Post-edit `lsp_diagnostics` gate blocks emit on errors | 3 | P0.6,P1.6 | 7 | FR-EX-11/12 | input |
+| [P1.7](../sprint-artifacts/phase-1/stories/p1-7-lsp-diagnostics-gate.md) | Post-edit `lsp_diagnostics` gate blocks emit on errors | 3 | P0.6,P1.6 | 7 | FR-EX-11/12 | input |
 | [P1.8](../sprint-artifacts/phase-1/stories/p1-8-drive-sse-capture.md) | Drive run + SSE + capture correlated to issue id | 3 | P1.1,P1.4 | 6 | FR-MG-4, FR-OR-5 | auth |
 | [P1.9](../sprint-artifacts/phase-1/stories/p1-9-restart-policy.md) | Restart policy (deterministic classify + caps) | 3 | P1.8 | 7 | FR-MG-8/9 | cost |
 | [P1.10](../sprint-artifacts/phase-1/stories/p1-10-execution-policy-approve-resume.md) | `executionPolicy` approve/resume via Telegram | 4 | P0.8,P1.8 | 8 | FR-OR-6, FR-CM-2 | auth, secrets |

@@ -25,6 +25,22 @@ This story creates a single executable gate script (`scripts/phase0-exit-gate.ts
 
 **Dependency edges (predecessors):** P0.1, P0.2, P0.3, P0.4, P0.5, P0.6, P0.7, P0.8, P0.9, P0.10 (all Phase-0 stories must be complete).
 
+> **Dependency status as of 2026-07-25 — P0.11 is UNBLOCKED.** Done: P0.2, P0.3,
+> P0.5, P0.6, P0.7, P0.9, P0.10. Killed by Warren decision (assertions must be
+> dropped from the gate, not left failing): **P0.1, P0.4, P0.8**. P0.11 is the
+> only Phase-0 story remaining.
+>
+> **P0.6 assertion — reuse, and do not over-claim.** `scripts/lsp-verify.ts`
+> already emits a machine-readable verdict (`{results, summary}`, exit 0 iff no
+> FAIL), so the gate should invoke it rather than re-implement LSP probing; its
+> shared transport lives in `scripts/lib/mcp-stdio-client.ts`.
+> **Its 7/7 probe pass is NOT full story acceptance:** AC1, AC3, AC3a and AC4 are
+> recorded story-level PARTIAL. If the gate asserts "LSP live", scope that
+> assertion to what is actually proven — warm diagnostics reflect uncommitted
+> edits within the latency budget — and not to first-query freshness, the AC3
+> artifact half, or pi-lens's internal init timeout. See
+> `_research/lsp-verification-report.md` §7 and the P0.6 story status table.
+
 ## Acceptance Criteria
 
 > ≥3 scenarios, Given/When/Then. Exactly one tagged (make-or-break) and binary.
