@@ -45,219 +45,30 @@
  * Run:  bun scripts/pi-lens-verify.ts [--json] [--keep] [--strict]
  */
 
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { McpClient, type McpToolResult, parseToolJson } from "./lib/mcp-stdio-client.ts";
+import { harnessNotes as notes, projectDataDir, resolveGlobalPiLens } from "./lib/pi-lens-harness.ts";
 
 /** pi-lens version the story pins. Drift is reported, never fatal. */
 const SPEC_PI_LENS_VERSION = "3.8.47";
 
-/** Non-fatal warnings surfaced in the summary (version drift, ambiguous installs). */
-const notes: string[] = [];
 
 // ---------------------------------------------------------------------------
 // pi-lens install resolution
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the installed pi-lens package root + version from the global npm dir.
- * Exported for tests (main() is guarded by import.meta.main, so importing this
- * module does not self-execute). Throws when pi-lens is not installed.
+ * Re-exported from `lib/pi-lens-harness.ts`, where the implementation now
+ * lives so P0.6+ harnesses share it rather than copy-adapting it. Kept as a
+ * named export here because `tests/pi-lens-verify.test.ts` imports it from
+ * this module.
  */
 export function resolvePiLens(): { root: string; version: string; server: string } {
-  // pi installs npm:pi-lens into the node used by pi. Probe the known global dirs
-  // first, then fall back to `npm root -g`.
-  const candidates = [
-    path.join(os.homedir(), ".local", "node-arm64", "lib", "node_modules", "pi-lens"),
-    path.join(os.homedir(), ".local", "node-x64", "lib", "node_modules", "pi-lens"),
-  ];
-  try {
-    const g = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
-    candidates.push(path.join(g, "pi-lens"));
-  } catch {
-    /* npm unavailable — probe the known dirs only */
-  }
-  // Collect EVERY resolvable install so multiple divergent versions are visible
-  // instead of silently picking the first.
-  const found: Array<{ root: string; version: string }> = [];
-  for (const c of candidates) {
-    const pkgPath = path.join(c, "package.json");
-    if (found.some((f) => f.root === c) || !fs.existsSync(pkgPath)) continue;
-    try {
-      found.push({ root: c, version: JSON.parse(fs.readFileSync(pkgPath, "utf8")).version as string });
-    } catch {
-      /* unreadable package.json — skip this candidate */
-    }
-  }
-  const primary = found.find((f) => fs.existsSync(path.join(f.root, "dist", "mcp", "server.js")));
-  if (!primary) throw new Error("pi-lens not found in any known global node_modules dir");
-  const divergent = found.filter((f) => f.version !== primary.version);
-  if (divergent.length > 0) {
-    notes.push(
-      `multiple pi-lens installs with divergent versions: using ${primary.root}@${primary.version}; also found ${divergent
-        .map((f) => `${f.root}@${f.version}`)
-        .join(", ")}`,
-    );
-  }
-  return { root: primary.root, version: primary.version, server: path.join(primary.root, "dist", "mcp", "server.js") };
-}
-
-/**
- * Runtime for the MCP server child. pi-lens ships a Node package; running its
- * server under this process's execPath (bun) risks Node-isms in its deps, so
- * prefer a real node: PILENS_NODE override, else `node` on PATH, else fall back
- * to process.execPath as a last resort.
- */
-function resolveNodeRuntime(): string {
-  const override = process.env.PILENS_NODE?.trim();
-  if (override) return override;
-  try {
-    execFileSync("node", ["--version"], { stdio: "ignore" });
-    return "node";
-  } catch {
-    return process.execPath;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Minimal MCP stdio client (JSON-RPC 2.0, newline-framed)
-// ---------------------------------------------------------------------------
-
-interface McpToolResult {
-  content?: Array<{ type: string; text?: string }>;
-  error?: unknown;
-}
-
-interface PendingRpc {
-  method: string;
-  timer: ReturnType<typeof setTimeout>;
-  resolve: (msg: Record<string, unknown>) => void;
-  reject: (err: Error) => void;
-}
-
-class McpClient {
-  private proc: ReturnType<typeof spawn>;
-  private buf = "";
-  private stderrBuf = "";
-  private id = 0;
-  private closed = false;
-  private pending = new Map<number, PendingRpc>();
-
-  constructor(server: string, cwd: string, env: NodeJS.ProcessEnv) {
-    this.proc = spawn(resolveNodeRuntime(), [server], {
-      stdio: ["pipe", "pipe", "pipe"], // stderr captured, surfaced in errors
-      cwd,
-      env,
-    });
-    this.proc.stdout?.on("data", (d: Buffer) => this.onData(d.toString()));
-    this.proc.stderr?.on("data", (d: Buffer) => {
-      // Keep a bounded tail — enough to diagnose a crashed/misconfigured server.
-      this.stderrBuf = (this.stderrBuf + d.toString()).slice(-16_384);
-    });
-    // stdin writes after the child died would raise EPIPE asynchronously — swallow.
-    this.proc.stdin?.on("error", () => {});
-    // A crashed/unspawnable server must fail fast: reject every outstanding RPC
-    // with the real cause instead of hanging until the per-rpc timeout.
-    this.proc.on("error", (err) => this.failAllPending(`server process error: ${err.message}`));
-    this.proc.on("exit", (code, signal) => {
-      if (!this.closed) this.failAllPending(`server exited (code=${code}, signal=${signal})`);
-    });
-  }
-
-  private stderrTail(): string {
-    const tail = this.stderrBuf.trim();
-    return tail ? ` stderr: ${tail.slice(-500)}` : "";
-  }
-
-  /** Reject all outstanding RPCs with `cause` + the captured stderr tail. */
-  private failAllPending(cause: string): void {
-    const suffix = this.stderrTail();
-    for (const p of this.pending.values()) {
-      clearTimeout(p.timer);
-      p.reject(new Error(`rpc ${p.method} failed: ${cause}.${suffix}`));
-    }
-    this.pending.clear();
-  }
-
-  private onData(chunk: string): void {
-    this.buf += chunk;
-    for (let i = this.buf.indexOf("\n"); i >= 0; i = this.buf.indexOf("\n")) {
-      const line = this.buf.slice(0, i);
-      this.buf = this.buf.slice(i + 1);
-      if (!line.trim()) continue;
-      let msg: Record<string, unknown>;
-      try {
-        msg = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      const mid = msg.id as number | undefined;
-      const p = mid === undefined ? undefined : this.pending.get(mid);
-      if (p) {
-        this.pending.delete(mid as number);
-        clearTimeout(p.timer);
-        p.resolve(msg);
-      }
-    }
-  }
-
-  private rpc(method: string, params: unknown, timeoutMs: number): Promise<Record<string, unknown>> {
-    if (this.closed) return Promise.reject(new Error(`rpc ${method} failed: client closed.${this.stderrTail()}`));
-    const myId = ++this.id;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(myId);
-        reject(new Error(`rpc ${method} timed out after ${timeoutMs}ms.${this.stderrTail()}`));
-      }, timeoutMs);
-      this.pending.set(myId, { method, timer, resolve, reject });
-      this.proc.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", id: myId, method, params })}\n`);
-    });
-  }
-
-  private notify(method: string, params: unknown): void {
-    this.proc.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
-  }
-
-  async init(): Promise<void> {
-    await this.rpc(
-      "initialize",
-      { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "p0-5-verify", version: "1" } },
-      15_000,
-    );
-    this.notify("notifications/initialized", {});
-  }
-
-  async call(name: string, args: Record<string, unknown>, timeoutMs = 60_000): Promise<McpToolResult> {
-    const msg = await this.rpc("tools/call", { name, arguments: args }, timeoutMs);
-    return (msg.result as McpToolResult) ?? { error: msg.error };
-  }
-
-  /** Idempotent: safe to call multiple times; always kills the child. */
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.failAllPending("client closed");
-    this.proc.kill();
-  }
-}
-
-/**
- * pi-lens tool results carry the structured `details` object as a fenced ```json
- * block appended to the summary line (see dist/mcp/server.js:toolText). Parse it
- * back out so we can assert on the machine-readable payload.
- */
-function parseToolJson(result: McpToolResult): Record<string, unknown> | undefined {
-  const text = result.content?.[0]?.text;
-  if (!text) return undefined;
-  const fence = text.match(/```json\n([\s\S]*?)\n```/);
-  if (!fence?.[1]) return undefined;
-  try {
-    return JSON.parse(fence[1]);
-  } catch {
-    return undefined;
-  }
+  return resolveGlobalPiLens();
 }
 
 // ---------------------------------------------------------------------------
@@ -378,22 +189,6 @@ function record(c: Check): void {
   checks.push(c);
 }
 
-/** Resolve pi-lens's on-disk project data dir for a given cwd (file-utils.js logic). */
-function projectDataDir(cwd: string): string {
-  const legacy = path.join(cwd, ".pi-lens");
-  const configured = process.env.PILENS_DATA_DIR?.trim();
-  if (!configured && fs.existsSync(legacy)) return legacy;
-  const base = configured || path.join(os.homedir(), ".pi-lens", "projects");
-  const slug = path
-    .resolve(cwd)
-    .replace(/^[a-z]:/i, "")
-    .replace(/\/+/g, "-")
-    .replace(/[^A-Za-z0-9-]/g, "")
-    .replace(/^-+/, "")
-    .replace(/-+$/, "");
-  return path.join(base.trim(), slug || "default");
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -485,7 +280,7 @@ async function main(): Promise<void> {
 
   const clientEnv = { ...process.env, PILENS_DATA_DIR: pilensDataDir, PI_LENS_CONFIG_PATH: pilensConfigPath };
   try {
-    const client = new McpClient(pl.server, work, clientEnv);
+    const client = new McpClient(pl.server, work, clientEnv, "p0-5-verify");
     try {
       await client.init();
 

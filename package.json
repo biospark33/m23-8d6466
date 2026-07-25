@@ -12,7 +12,8 @@
     "smoke:coms": "bun scripts/coms-smoke-test.ts",
     "verify:pi-lens": "bun scripts/pi-lens-verify.ts",
     "lint": "bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor 2>/dev/null || bunx @biomejs/biome check .",
-    "smoke:team": "QDS_TEAM_RUNNER=local bun cli-anything/src/index.ts run --manifest cli-anything/manifests/research-trio.yaml"
+    "smoke:team": "QDS_TEAM_RUNNER=local bun cli-anything/src/index.ts run --manifest cli-anything/manifests/research-trio.yaml",
+    "verify:lsp": "bun scripts/lsp-verify.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
