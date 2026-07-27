@@ -161,7 +161,24 @@ export class McpClient {
 
   async call(name: string, args: Record<string, unknown>, timeoutMs = 60_000): Promise<McpToolResult> {
     const msg = await this.rpc("tools/call", { name, arguments: args }, timeoutMs);
-    return (msg.result as McpToolResult) ?? { error: msg.error, isError: true };
+    if (msg.result === null || msg.result === undefined) {
+      return { error: msg.error, isError: true };
+    }
+    // A `result` that is PRESENT but not an object — a bare string, a number,
+    // an array — used to fall straight through this cast. `isError` stayed
+    // unset and `toolText()` yielded "", so the caller saw "no error, no text"
+    // and had no way to tell "the tool had nothing to report" from "the tool
+    // produced no evidence" (#83). That is the same false-green class as the
+    // handshake bug in #64: an absence read as an absence of problems. Both
+    // harnesses on this client want the strict reading, so flag it here rather
+    // than leave the trap armed for the next caller.
+    if (typeof msg.result !== "object" || Array.isArray(msg.result)) {
+      return {
+        error: `tools/call ${name}: expected an object result, got ${Array.isArray(msg.result) ? "array" : typeof msg.result}`,
+        isError: true,
+      };
+    }
+    return msg.result as McpToolResult;
   }
 
   /** Idempotent: safe to call repeatedly; always kills the child. */
