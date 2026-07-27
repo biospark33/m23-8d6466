@@ -20,7 +20,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { beforeAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { z } from "zod";
 
 // Resolve REPO_ROOT the same way the install script does (`git rev-parse
@@ -40,8 +40,8 @@ if (REPO_ROOT_RAW.status !== 0 || !REPO_ROOT_RAW.stdout) {
     `git rev-parse --show-toplevel failed (status=${REPO_ROOT_RAW.status}): ${reason}`,
   );
 }
-// Strip trailing slashes so the assertIndexed() anchored regex matches regardless
-// of how rev-parse formats the toplevel.
+// Strip trailing slashes so indexUnavailableReason()'s anchored regex matches
+// regardless of how rev-parse formats the toplevel.
 const REPO_ROOT = REPO_ROOT_RAW.stdout.trim().replace(/\/+$/, "");
 
 // gitnexus lives at a non-standard path on this host (~/.local/node-arm64/bin);
@@ -125,14 +125,34 @@ function gn(args: string[]): unknown {
   }
 }
 
-/** Verify this repo is indexed by gitnexus (queries pass REPO_ROOT as -r directly). */
-function assertIndexed(): void {
-  const listing = execFileSync(GN, ["list"], {
+/**
+ * Preflight: is this repo's gitnexus index usable by these tests?
+ *
+ * Returns a reason string when gitnexus is a genuinely MISSING DEPENDENCY (not
+ * installed) or the index is ABSENT/STALE (environmental — the suite degrades
+ * to `(skip)` with a diagnostic), or null when it's usable. A *broken* gitnexus
+ * (non-zero exit from a runnable CLI, a throwing probe) deliberately returns
+ * null too, so the named tests below still run and fail with real diagnostics —
+ * the skip must never hide a contract regression, only a missing dependency.
+ */
+function indexUnavailableReason(): string | null {
+  const listing = spawnSync(GN, ["list"], {
     cwd: REPO_ROOT,
     encoding: "utf-8",
     timeout: 30_000,
     maxBuffer: 8 * 1024 * 1024,
   });
+  if (listing.error) return `gitnexus not installed: ${listing.error.message}`;
+  if (listing.status !== 0) {
+    // A `gitnexus` that runs and exits non-zero is a broken CLI/runtime, not an
+    // absent index — that's a contract regression, not a missing dependency. Warn
+    // with the stderr (otherwise it vanishes) and return null so the named tests
+    // below still run and fail with real diagnostics instead of being skipped.
+    console.warn(
+      `[graph-queries.test] \`gitnexus list\` exited ${listing.status}: ${(listing.stderr ?? "").slice(0, 300)}`,
+    );
+    return null;
+  }
   // Each indexed repo has a `    Path:    <abspath>` line. On macOS, `git
   // rev-parse --show-toplevel` may return `/var/...` while gitnexus stores the
   // realpath (`/private/var/...`), or vice versa — normalize both forms and
@@ -144,10 +164,36 @@ function assertIndexed(): void {
     `Path:\\s+(?:${esc(REPO_ROOT)}|${esc(rootReal)})(\\s|$)`,
     "m",
   );
-  if (!re.test(listing)) {
-    throw new Error(`repo not indexed at ${REPO_ROOT} — run scripts/install-gitnexus-plus.sh`);
+  if (!re.test(listing.stdout ?? "")) return `repo not indexed at ${REPO_ROOT}`;
+  // The index exists but may have been built without the fixture negation, so
+  // gitnexus's DEFAULT_IGNORE_LIST filtered tests/ and fixtures/ out. Probe the
+  // one symbol every AC below anchors on.
+  let probe: { status?: string } | null;
+  try {
+    probe = gn(["context", "registerSwarmClawAgent", "-r", REPO_ROOT]) as { status?: string } | null;
+  } catch {
+    return null; // gitnexus itself errored — a real failure; let the tests report it.
   }
+  if (probe?.status !== "found") {
+    return "fixture symbol registerSwarmClawAgent missing from index (tests/ + fixtures/ filtered by DEFAULT_IGNORE_LIST?)";
+  }
+  return null;
 }
+
+const SKIP_REASON = indexUnavailableReason();
+if (SKIP_REASON !== null) {
+  console.warn(
+    `
+[graph-queries.test] SKIPPING gitnexus graph tests — ${SKIP_REASON}
+  Fix: \`bash scripts/install-gitnexus-plus.sh\` from the repo root
+       (analyze-only: \`GITNEXUS_SKIP_INSTALL=1 bash scripts/install-gitnexus-plus.sh\`).
+  A plain \`gitnexus analyze\` is NOT sufficient: it omits the transient
+  .gitnexusignore negation (!tests/ !__tests__/ !fixtures/) these fixtures need.
+`,
+  );
+}
+/** Index-dependent describes — skipped (never silently blacked out) on a stale index. */
+const describeIndexed = describe.skipIf(SKIP_REASON !== null);
 
 /** Assert a path is repo-relative: no leading slash, no parent-traversal segment.
  * Centralizes the INV-GN1/INV-GN3 invariant checked across query/context/impact
@@ -225,20 +271,6 @@ const ImpactResultSchema = z.object({
   affected_modules: z.array(z.unknown()),
 });
 
-beforeAll(() => {
-  assertIndexed();
-  // Fail fast with a clear root cause if the fixture symbols are missing from the
-  // index (e.g. .gitnexusignore filtering them out, or a reachability-filter
-  // change). Without this, downstream AC tests fail with opaque "symbol not found"
-  // errors while assertIndexed() still passes.
-  const probe = gn(["context", "registerSwarmClawAgent", "-r", REPO_ROOT]) as { status?: string } | null;
-  if (probe?.status !== "found") {
-    throw new Error(
-      "fixture symbol registerSwarmClawAgent missing from index — check .gitnexusignore + run scripts/install-gitnexus-plus.sh",
-    );
-  }
-});
-
 // --- INV-GN2: query-string injection rejection (validated at OUR boundary) ---
 // gitnexus's CLI passes the query straight to the graph engine (no shell); it
 // does NOT reject shell metacharacters itself. Per story guidance, we own the
@@ -272,7 +304,7 @@ describe("INV-GN2: query input sanitization", () => {
   });
 });
 
-describe("AC-1 (make-or-break): all three tools return non-empty structured results", () => {
+describeIndexed("AC-1 (make-or-break): all three tools return non-empty structured results", () => {
   test("gitnexus_query — 'SwarmClaw routes' returns non-empty structured definitions", () => {
     assertSafeQuery("SwarmClaw routes");
     const raw = gn(["query", "SwarmClaw routes", "-r", REPO_ROOT]);
@@ -324,7 +356,7 @@ describe("AC-1 (make-or-break): all three tools return non-empty structured resu
   });
 });
 
-describe("AC-2: zero-match query is graceful (never crash / never error object)", () => {
+describeIndexed("AC-2: zero-match query is graceful (never crash / never error object)", () => {
   test("nonexistent symbol query returns a valid QueryResult and does not match the bogus name", () => {
     const q = "ZZZZZZZ_NONEXISTENT_SYMBOL";
     assertSafeQuery(q);
@@ -348,7 +380,7 @@ describe("AC-2: zero-match query is graceful (never crash / never error object)"
   });
 });
 
-describe("AC-3 / guard: missing-symbol and missing-tool are detectable errors, not hangs", () => {
+describeIndexed("AC-3 / guard: missing-symbol and missing-tool are detectable errors, not hangs", () => {
   test("context on an unknown symbol returns a structured not-found status", () => {
     const raw = gn(["context", "ZZZ_DEFINITELY_NOT_A_SYMBOL", "-r", REPO_ROOT]) as {
       status?: string;
@@ -390,7 +422,7 @@ describe("AC-3 / guard: missing-symbol and missing-tool are detectable errors, n
   });
 });
 
-describe("INV-GN1 & INV-GN3: indexed paths stay within the repo, relative & normalized", () => {
+describeIndexed("INV-GN1 & INV-GN3: indexed paths stay within the repo, relative & normalized", () => {
   test("no indexed file path is absolute or contains a parent-traversal segment", () => {
     const raw = gn([
       "cypher",
