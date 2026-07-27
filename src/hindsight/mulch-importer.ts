@@ -70,10 +70,22 @@ export class SymlinkEscapeError extends Error {
  * the target).
  */
 export class SymlinkTargetUnreadableError extends Error {
-  constructor(message = "symlink_target_unreadable") {
-    super(message);
+  constructor(message = "symlink_target_unreadable", options?: { cause?: unknown }) {
+    super(message, options);
     this.name = "SymlinkTargetUnreadableError";
   }
+}
+
+/**
+ * The errno code behind a failed fs call, falling back to its message. Used to
+ * keep the stable `error` codes intact while still reporting WHY (#67) — an
+ * `expertise_dir_not_found` that was really EACCES is an unfixable support
+ * ticket otherwise.
+ */
+function errnoOf(e: unknown): string {
+  const code = (e as NodeJS.ErrnoException | undefined)?.code;
+  if (code) return code;
+  return e instanceof Error ? e.message : String(e);
 }
 
 /** Stable errno code surfaced when the expertise dir cannot be read. */
@@ -87,6 +99,14 @@ export interface ImportFailure {
   file: string;
   entryIndex?: number;
   error: string;
+  /**
+   * Underlying cause behind the stable `error` code — an errno (`EACCES`) or a
+   * parser message. Optional and purely diagnostic: `error` stays the stable
+   * contract callers switch on, this is what makes the support ticket fixable
+   * (#67). Never populated with anything caller-controlled beyond the OS/parser
+   * message itself.
+   */
+  cause?: string;
 }
 
 export interface ImportResult {
@@ -130,7 +150,12 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
   let dirReal: string;
   try {
     dirReal = realpathSync(opts.expertiseDir);
-  } catch {
+  } catch (e) {
+    // The code stays `expertise_dir_not_found`, but the message now names the
+    // errno: this path also fires on EACCES and ELOOP, and reporting those as
+    // "not found" sent operators looking for a missing directory that was
+    // actually right there and unreadable (#67).
+    const cause = errnoOf(e);
     const result: ImportResult = {
       ok: false,
       totalFiles: 0,
@@ -141,7 +166,10 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
       // Stable string code (consistent with ERR_EXPERTISE_DIR_UNREADABLE for
       // the sibling readdir-failure path). Not a -3200N code: this is an
       // importer-internal surface, not the HTTP bridge surface (CC-W3 (a)).
-      error: { code: "expertise_dir_not_found", message: `expertise dir not found: ${opts.expertiseDir}` },
+      error: {
+        code: "expertise_dir_not_found",
+        message: `expertise dir not found: ${opts.expertiseDir} (${cause})`,
+      },
     };
     emitLog(requestId, "import", opts.bankId, start, "error", result.error);
     return result;
@@ -194,7 +222,12 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
     let st: ReturnType<typeof statSync>;
     try {
       st = statSync(full);
-    } catch {
+    } catch (e) {
+      // Still a skip, not a failure — a file that vanished between readdir and
+      // stat is not the caller's problem and must not fail the import. But the
+      // skip is no longer invisible: a permission-denied file silently dropping
+      // out of the count is exactly the unfixable support ticket in #67.
+      debugLog(requestId, "import.skip", `skipping ${name}: stat failed (${errnoOf(e)})`);
       continue;
     }
     // Fix 3: skip non-regular files (dirs, FIFOs, sockets, devices). A FIFO or
@@ -320,7 +353,11 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
       else if (e instanceof SymlinkTargetUnreadableError) code = "symlink_escape";
       else code = "parse_failed";
       const msg = (e as Error).message;
-      failures.push({ file: relFile, error: code });
+      // `error` stays the stable code; `cause` carries the message so the
+      // reason survives into the result, not just the log (#67). Both
+      // symlink cases collapse to `symlink_escape`, so without this an escape
+      // and an unreadable target are indistinguishable to the caller.
+      failures.push({ file: relFile, error: code, cause: msg });
       status = "error";
       fileErr = { code, message: msg };
     }
@@ -382,8 +419,11 @@ function parseFile(filePath: string, dirReal: string, failures: ImportFailure[],
   let resolved: string;
   try {
     resolved = realpathSync(filePath);
-  } catch {
-    throw new SymlinkTargetUnreadableError();
+  } catch (e) {
+    // Carry the errno: a dangling symlink (ENOENT) and one whose target is
+    // unreadable (EACCES) are the same message otherwise, and only the second
+    // is actionable by the operator (#67).
+    throw new SymlinkTargetUnreadableError(`symlink_target_unreadable (${errnoOf(e)})`, { cause: e });
   }
   if (resolved !== dirReal && !resolved.startsWith(dirReal + PATH_SEP)) {
     throw new SymlinkEscapeError("symlink_escape");
@@ -409,7 +449,11 @@ function parseFile(filePath: string, dirReal: string, failures: ImportFailure[],
   // stat follows symlinks, so this also rejects symlinks-to-dirs consistently
   // with the realpath validation above.
   if (!stat.isFile()) {
-    throw new SymlinkTargetUnreadableError();
+    // Name the shape: "unreadable" on a FIFO reads as a permissions problem and
+    // sends the operator down the wrong path (#67).
+    throw new SymlinkTargetUnreadableError(
+      `symlink_target_unreadable (not a regular file: ${stat.isDirectory() ? "directory" : stat.isFIFO() ? "fifo" : stat.isSocket() ? "socket" : "special file"})`,
+    );
   }
 
   const raw = readFileSync(resolved);
@@ -455,10 +499,17 @@ function parseFile(filePath: string, dirReal: string, failures: ImportFailure[],
           continue;
         }
         out.push({ entry: parsedLine as ParsedEntry, index: lineNo });
-      } catch {
+      } catch (e) {
         // B-3: one malformed line must NOT drop the whole file as parse_failed.
         // Record the per-entry failure at the line's position and keep parsing.
-        failures.push({ file: relFile, entryIndex: lineNo, error: "invalid_jsonl_line" });
+        // The parser message rides along as `cause` — "invalid_jsonl_line" alone
+        // does not tell an operator WHICH character on the line broke it (#67).
+        failures.push({
+          file: relFile,
+          entryIndex: lineNo,
+          error: "invalid_jsonl_line",
+          cause: e instanceof Error ? e.message : String(e),
+        });
       }
     }
     return out;

@@ -733,6 +733,11 @@ this is not json
     expect(bad).toBeDefined();
     expect(bad!.entryIndex).toBe(2); // 1-based file line number (spec: "JSONL line N")
     expect(bad!.file).toBe("mixed.jsonl");
+    // #67: the stable code alone does not say WHAT was malformed. The parser
+    // message rides along in `cause` so the failure is diagnosable from the
+    // result, without re-running the import with logging on.
+    expect(bad!.cause).toBeTruthy();
+    expect(typeof bad!.cause).toBe("string");
     // NO whole-file parse_failed for this file.
     const pf = result.failures.find(
       (f) => f.file === "mixed.jsonl" && f.error === "parse_failed",
