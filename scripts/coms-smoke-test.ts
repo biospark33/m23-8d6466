@@ -58,11 +58,17 @@
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import {
+	collectSecretValues,
+	killTree,
+	redact as redactSecrets,
+	ulid,
+	win32ShellArgs,
+} from "./lib/coms-smoke-helpers.ts";
 
 const VENDOR_DIR = path.join(import.meta.dir, "..", "pi-vs-claude-code-vendor");
 const COMS_EXT = path.join(VENDOR_DIR, "coms.ts");
@@ -110,32 +116,11 @@ const SOCKET_REPLY_TOKEN = "pong";
 // ── Report hygiene: ambient secrets must never leak into the JSON report.
 //    Any process.env value whose key has a secret-bearing SEGMENT (≥8 chars,
 //    to skip noise like "true") is redacted from captured pi output before it
-//    is embedded in the report. Segment-boundary matching (not substring) so
-//    PATH/AUTHOR-style keys don't trip it, while *_PAT, bare *_PASS, *_CRED,
-//    *_PRIVATE etc. are now covered (C7). Deduped — several env vars can hold
-//    the same value, and re-scanning for a string already replaced is wasted
-//    work in redact(). Values are redacted LONGEST-FIRST: when one secret is
-//    a substring of another, replacing the shorter one first would fragment
-//    the longer one and leave its tail unredacted. ─────────────────────────
-const SECRET_VALUES = Array.from(
-	new Set(
-		Object.entries(process.env)
-			.filter(
-				([k, v]) =>
-					/(^|_)(KEY|TOKEN|SECRET|PASS|PASSWORD|PAT|CRED|CREDENTIAL|PRIVATE|JWT|AUTH|DSN|URL)($|_)/i.test(
-						k,
-					) &&
-					typeof v === "string" &&
-					v.length >= 8,
-			)
-			.map(([, v]) => v as string),
-	),
-).sort((a, b) => b.length - a.length);
-function redact(s: string): string {
-	let out = s;
-	for (const v of SECRET_VALUES) out = out.split(v).join("[REDACTED]");
-	return out;
-}
+//    is embedded in the report. See scripts/lib/coms-smoke-helpers.ts for the
+//    matching rules and their known limits; unit-tested in
+//    tests/scripts/coms-smoke-helpers.test.ts. ─────────────────────────────
+const SECRET_VALUES = collectSecretValues();
+const redact = (s: string): string => redactSecrets(s, SECRET_VALUES);
 
 // ── INV-1 (C6): child pi env is an ALLOWLIST, not a copy of process.env. ────
 // Only the one provider key implied by PI_SMOKE_MODEL's provider prefix is
@@ -210,36 +195,6 @@ function smokeChildEnv(): { env: NodeJS.ProcessEnv; scope: string } {
 }
 const childEnv = smokeChildEnv();
 
-// Well-formed 26-char Crockford-base32 ULID (48-bit time + 80-bit
-// randomness) for shape-coverage msg_ids — no more fake "01SMOKE…" ids.
-// Mirrors the vendored generator (coms.ts `ulid`, ~coms.ts:234) so probe
-// envelopes carry ids indistinguishable from real coms traffic: 10 bytes of
-// randomness bit-packed 5 bits per char — drawing 16 bytes and masking each
-// with % 32 would consume 128 bits to emit the same 80.
-const ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-function ulid(): string {
-	const time = Date.now();
-	const rand = crypto.randomBytes(10);
-	let timeStr = "";
-	let t = time;
-	for (let i = 9; i >= 0; i--) {
-		timeStr = (ULID_ALPHABET[t % 32] ?? "0") + timeStr;
-		t = Math.floor(t / 32);
-	}
-	let randStr = "";
-	let bits = 0;
-	let value = 0;
-	for (const byte of rand) {
-		value = (value << 8) | byte;
-		bits += 8;
-		while (bits >= 5) {
-			bits -= 5;
-			randStr += ULID_ALPHABET[(value >> bits) & 31] ?? "0";
-		}
-	}
-	return (timeStr + randStr).slice(0, 26);
-}
-
 type Check = { name: string; ok: boolean; skipped?: string; detail?: string };
 const checks: Check[] = [];
 const record = (c: Check): Check => {
@@ -255,38 +210,6 @@ function spawnProblem(r: SyncResult): string | null {
 	if (r.signal) return `killed by signal ${r.signal}`;
 	if (r.status === null) return "no exit status (status=null)";
 	return null;
-}
-
-// ── win32 shell-arg quoting (C3/C18), shared by startPi and the spawnSync
-//    probes so a repo path containing spaces survives cmd.exe. ──────────────
-// shell:true is UNAVOIDABLE on win32 for `pi`: bare `pi` resolves to a .cmd
-// shim, CreateProcess cannot execute a batch file without cmd.exe, and modern
-// Node refuses shell:false on batch files outright (EINVAL, CVE-2024-27980) —
-// so "resolve pi.cmd and spawn with shell:false" is not a real option. With
-// shell:true Node joins args with spaces and NO quoting, so wrap each arg
-// ourselves. Safety model against cmd.exe's quote-state machine (each `"`
-// toggles quoted state):
-//   - `"` → `""`: parity-PRESERVING (a pair toggles state twice), so an
-//     embedded quote cannot break out of the wrapper — `& | < > ^ ( )`
-//     stay quoted and inert. Caveat: the child CRT collapses the pair, so
-//     a literal `"` does not survive win32 argv — cosmetic for these
-//     prompts, and no escaping satisfies both cmd and the CRT anyway.
-//   - reject `%`: cmd.exe expands %VAR% even inside double quotes (C18).
-//   - reject `!`: expands inside quotes when delayed expansion is enabled
-//     (non-default, and not escapable from outside a batch file).
-//   - reject CR/LF: line terminators end the command regardless of quote
-//     state — the one genuine breakout from a quoted wrapper.
-// POSIX path unchanged (no shell, argv passed verbatim).
-function win32ShellArgs(args: string[]): string[] {
-	if (process.platform !== "win32") return args;
-	return args.map((a) => {
-		const bad = /[%!\r\n]/.exec(a);
-		if (bad)
-			throw new Error(
-				`win32 spawn: argument contains ${JSON.stringify(bad[0])} which cmd.exe interprets even inside quotes: ${a.slice(0, 60)}`,
-			);
-		return `"${a.replace(/"/g, '""')}"`;
-	});
 }
 
 // ── pi presence + version pin (AC precondition) ─────────────────────────────
@@ -382,27 +305,6 @@ interface SpawnOutcome {
 	// spawn failure, timeout, or output-cap kill — anything that makes the
 	// outcome untrustworthy even when status happens to be 0.
 	error: string | null;
-}
-
-// Kill the whole process tree: POSIX spawns are detached group leaders, so
-// signal the GROUP (-pid) to sweep grandchildren (pi tool calls like `sleep`);
-// on win32 use taskkill /T. Best-effort — a dead process must never throw.
-function killTree(proc: ChildProcess, signal: NodeJS.Signals = "SIGKILL"): void {
-	const pid = proc.pid;
-	if (typeof pid !== "number") return;
-	try {
-		if (process.platform === "win32") {
-			spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-		} else {
-			process.kill(-pid, signal);
-		}
-	} catch {
-		try {
-			proc.kill(signal);
-		} catch {
-			// already gone
-		}
-	}
 }
 
 // Wait for a peer's close event (bounded) so rmSync never races a live pi.
