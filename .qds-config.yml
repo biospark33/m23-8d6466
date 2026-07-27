@@ -1,0 +1,29 @@
+# QDS skill-suite project config for QDS-Factory.
+# Consumed by ~/.claude/skills/qds-shared/resolve.sh before any path/git/gh op.
+qds:
+  paths:
+    bmad_dir: _bmad-output
+    backend_dir: .          # single-package Bun/TS repo; no services/ split
+    frontend_dir: .         # no frontend
+  stack:
+    backend_lang: typescript
+    frontend_lang: none
+  commands:
+    test: bun test
+    lint: bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor
+    typecheck: bunx tsc --noEmit
+  pr:
+    default_base: main
+    # QDS-Factory rule: PRs MUST be authored by biospark33 (CodeRabbit review
+    # binding). All other git/gh ops run as i3creations. The resolver applies
+    # this per-op via qds_with_pr_identity — it never mutates global gh auth.
+    author_account: biospark33
+    commit_account: i3creations
+    # gemini-code-assist is DELIBERATELY EXCLUDED. The consumer version was
+    # sunset ("All code review activity has officially ceased") and it now
+    # posts only that notice. The monitor's merge-ready gate is
+    # `coderabbit_ok && gemini_ok`, so leaving it listed makes merge-readiness
+    # permanently unsatisfiable — the monitor would poll forever.
+    # Corroborated by sprint-status.yaml:32 ("Gemini sunset") during P0.6.
+    bot_reviewers: coderabbitai
+    escalation_handle: "@i3creations"

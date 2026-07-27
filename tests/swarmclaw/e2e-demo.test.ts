@@ -145,6 +145,17 @@ test("H4b: chunked body over 1 MiB (no content-length) → 413 from the bounded 
   // Bun fetch sends a ReadableStream body as Transfer-Encoding: chunked with
   // no content-length (verified empirically), so the declared-length fast path
   // cannot see it — this exercises the byte-counting bounded read in safeJson.
+  //
+  // Runs against its OWN ephemeral origin rather than the shared `base`.
+  // This request is deliberately ABANDONED mid-upload: the server refuses
+  // before draining, so the socket is left with unread chunked bytes. Bun
+  // fetch pools connections per ORIGIN, so on the shared origin that
+  // half-drained connection is handed to whichever test runs next — which
+  // then reads leftover body bytes as its response and sees a framing-error
+  // 400. That surfaced under CPU contention as an H4c failure (#72), but it
+  // is H4b's residue, not a defect in the test that inherits it. Isolating
+  // the ONE test that abandons a body fixes every downstream victim at once.
+  const own = createServer(0);
   const chunk = new Uint8Array(65536);
   let produced = 0;
   const stream = new ReadableStream<Uint8Array>({
@@ -157,23 +168,29 @@ test("H4b: chunked body over 1 MiB (no content-length) → 413 from the bounded 
       controller.enqueue(chunk);
     },
   });
-  const res = await fetch(`${base}/api/agents`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    duplex: "half",
-    body: stream,
-  });
-  // The app's safeJson byte cap is correct and deterministic (asserted directly
-  // in "H4b-unit" below). Over the real HTTP path, though, Bun's pre-handler can
-  // reject an over-limit chunked upload with an empty-body 400 BEFORE the app
-  // ever reads the stream — a Bun-internal race that surfaces under CPU load.
-  // Accept either the app's 413 or Bun's 400: both correctly refuse the body.
-  expect([413, 400]).toContain(res.status);
-  if (res.status === 413) {
-    // App path: bounded read cancelled mid-stream → drop-connection contract.
-    expect(res.headers.get("connection")).toBe("close");
-    expect(res.headers.get("x-request-id")).toMatch(UUID_V4);
-    expect(await res.json()).toEqual({ error: "payload too large" });
+  // fetch itself is inside the try: a throwing fetch (connection refused,
+  // network error) must still stop the server, or the port leaks.
+  try {
+    const res = await fetch(`http://localhost:${own.port}/api/agents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      duplex: "half",
+      body: stream,
+    });
+    // The app's safeJson byte cap is correct and deterministic (asserted directly
+    // in "H4b-unit" below). Over the real HTTP path, though, Bun's pre-handler can
+    // reject an over-limit chunked upload with an empty-body 400 BEFORE the app
+    // ever reads the stream — a Bun-internal race that surfaces under CPU load.
+    // Accept either the app's 413 or Bun's 400: both correctly refuse the body.
+    expect([413, 400]).toContain(res.status);
+    if (res.status === 413) {
+      // App path: bounded read cancelled mid-stream → drop-connection contract.
+      expect(res.headers.get("connection")).toBe("close");
+      expect(res.headers.get("x-request-id")).toMatch(UUID_V4);
+      expect(await res.json()).toEqual({ error: "payload too large" });
+    }
+  } finally {
+    await own.stop();
   }
 }, 10000);
 

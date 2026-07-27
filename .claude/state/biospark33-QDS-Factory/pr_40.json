@@ -1,0 +1,32 @@
+{
+  "version": "2.4.0",
+  "pr": 40,
+  "repo": "biospark33/QDS-Factory",
+  "branch": "feature/p0.3",
+  "base": "main",
+  "status": "merged",
+  "last_processed_comment_id": 5026327312,
+  "last_commit_hash": "2a0404a",
+  "last_push_timestamp": "2026-07-20T19:39:28Z",
+  "last_poll_timestamp": "2026-07-20T18:59:16Z",
+  "round": 4,
+  "cycle": 7,
+  "cycle_limit": 20,
+  "bot_status": {
+    "coderabbit": {
+      "state": "AVAILABLE"
+    },
+    "gemini": {
+      "state": "AVAILABLE"
+    }
+  },
+  "merge_conflicts": false,
+  "disagreement_memory": {},
+  "circuit_breaker": {},
+  "telemetry": {
+    "poll_cycles": 7,
+    "fix_dispatches": 4,
+    "epic_id": "p0.3"
+  },
+  "last_processed_comment_id_inline": 3617006934
+}

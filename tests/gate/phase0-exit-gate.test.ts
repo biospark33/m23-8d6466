@@ -13,7 +13,7 @@
  *     verdict and only fails if the contract itself is violated.
  */
 import { describe, expect, test } from "bun:test";
-import { execFile, spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -280,10 +280,18 @@ describe("runGate — timeouts hold against REAL subprocesses", () => {
         ],
         { assertionTimeoutMs: 500 },
       );
+      const observedMs = Date.now() - t0;
       expect(report.assertions[0]?.status).toBe("fail");
       expect(report.assertions[0]?.detail).toMatch(/timed out/i);
       // Proves the timer actually preempted rather than waiting out the child.
-      expect(Date.now() - t0).toBeLessThan(5_000);
+      // 5 s sits midway between the 500 ms budget and the 10 s child, so it
+      // discriminates "preempted" from "waited it out" with room for
+      // contention — and says which it observed rather than leaving a bare
+      // red that reads identically to a real regression (#72).
+      expect(
+        observedMs,
+        `the 500ms assertion budget cut off after ${observedMs}ms; over 5000ms means the timer did not preempt the 10000ms child`,
+      ).toBeLessThan(5_000);
     },
     30_000,
   );
@@ -312,14 +320,29 @@ describe("runGate — timeouts hold against REAL subprocesses", () => {
         await execFileAsync(process.execPath, ["-e", "setTimeout(()=>{}, 700)"]);
         return { pass: true as const };
       };
+      // The budget is denominated in ONE spawn, not in wall-clock ms. An
+      // absolute constant is really an assertion about the machine's spare
+      // capacity, so it went red under core contention while the pool was
+      // perfectly concurrent (#72). Contention inflates the baseline and the
+      // 4-way run together, so the RATIO stays diagnostic where a constant
+      // stops being one.
+      const soloT0 = Date.now();
+      await spawnOne();
+      const soloMs = Date.now() - soloT0;
+      // Serialised would be ~4 baselines; concurrent is ~1 plus spawn overhead.
+      const budgetMs = Math.round(soloMs * 2.5);
+
       const t0 = Date.now();
       const report = await runGate(
         Array.from({ length: 4 }, (_, i) => assertion(`child${i}`, spawnOne)),
         { concurrency: 4, assertionTimeoutMs: 20_000 },
       );
+      const observedMs = Date.now() - t0;
       expect(report.overall).toBe("PASS");
-      // Serialised would be ~2.8 s; concurrent should be well under that.
-      expect(Date.now() - t0).toBeLessThan(2_200);
+      expect(
+        observedMs,
+        `4 concurrent child-spawning checks took ${observedMs}ms against a ${budgetMs}ms budget (2.5x the ${soloMs}ms single-spawn baseline; serialised would be ~4x)`,
+      ).toBeLessThan(budgetMs);
     },
     30_000,
   );
@@ -519,33 +542,70 @@ describe("clause 8 — OQ decision audit", () => {
 });
 
 describe("gate script process contract", () => {
+  /**
+   * The gate's own total budget is DEFAULT_TOTAL_TIMEOUT_MS (600 s); the child
+   * budget is that plus slack for process start and report rendering, and stays
+   * strictly under the test budget so a wedged gate is reported as an
+   * over-budget gate rather than as an opaque bun-test timeout.
+   */
+  const CHILD_BUDGET_MS = 870_000;
   const TIMEOUT_MS = 900_000;
 
   test(
     "emits a PHASE_0_GATE marker, an exit code that agrees with it, and a valid report",
-    () => {
+    async () => {
       const reportPath = path.join(
         fs.mkdtempSync(path.join(os.tmpdir(), "p0-gate-")),
         "phase0-gate-report.json",
       );
-      const run = spawnSync("bun", [GATE, "--report", reportPath], {
-        cwd: REPO_ROOT,
-        encoding: "utf8",
-        timeout: 870_000,
-      });
+
+      // Async (not `spawnSync`): a synchronous spawn blocks bun test's event
+      // loop, so neither this test's own budget nor anything else can preempt
+      // it — the same rule src/gate/gate-runner.ts:66 states for gate checks
+      // (#66). SIGKILL because a gate wedged behind a blocking child is exactly
+      // the case a polite SIGTERM cannot end.
+      const t0 = Date.now();
+      let stdout = "";
+      let status: number | null = 0;
+      let runFailure: string | undefined;
+      try {
+        stdout = (
+          await execFileAsync("bun", [GATE, "--report", reportPath], {
+            cwd: REPO_ROOT,
+            encoding: "utf8",
+            timeout: CHILD_BUDGET_MS,
+            killSignal: "SIGKILL",
+            maxBuffer: 16 * 1024 * 1024,
+          })
+        ).stdout;
+      } catch (err) {
+        const e = err as { code?: number | string; killed?: boolean; stdout?: string; message?: string };
+        stdout = e.stdout ?? "";
+        // A non-zero exit is the gate's FAIL verdict, not a run failure.
+        if (typeof e.code === "number") status = e.code;
+        else {
+          status = null;
+          runFailure = e.killed === true ? "killed at its budget" : (e.message ?? String(err));
+        }
+      }
+      const elapsedMs = Date.now() - t0;
 
       // A red gate on an unprovisioned host is a CORRECT outcome. Assert the
       // contract holds in both directions rather than demanding green.
       // Surface a spawn failure or timeout directly — otherwise the first
-      // symptom is a confusing `passed || failed` assertion against empty stdout.
-      expect(run.error, `gate did not run: ${run.error?.message ?? ""}`).toBeUndefined();
+      // symptom is a confusing `passed || failed` assertion against empty
+      // stdout. Reporting observed-vs-budgeted is what makes a contention
+      // failure distinguishable from a real regression at a glance (#72).
+      expect(
+        runFailure,
+        `gate did not produce a verdict: ${runFailure ?? ""} (observed ${elapsedMs}ms of a ${CHILD_BUDGET_MS}ms child budget)`,
+      ).toBeUndefined();
 
-      const stdout = run.stdout ?? "";
       const passed = stdout.includes("PHASE_0_GATE: PASS");
       const failed = stdout.includes("PHASE_0_GATE: FAIL");
       expect(passed || failed).toBe(true);
       expect(passed && failed).toBe(false);
-      expect(run.status).toBe(passed ? 0 : 1);
+      expect(status).toBe(passed ? 0 : 1);
 
       expect(fs.existsSync(reportPath)).toBe(true);
       const parsed = GateReportSchema.parse(JSON.parse(fs.readFileSync(reportPath, "utf8")));

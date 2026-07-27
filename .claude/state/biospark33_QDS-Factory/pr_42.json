@@ -1,0 +1,87 @@
+{
+  "version": "2.4.0",
+  "pr": 42,
+  "repo": "biospark33/QDS-Factory",
+  "branch": "feature/p0-6-lsp-provision-diagnostics",
+  "base": "main",
+  "status": "merge-ready-awaiting-operator",
+  "last_processed_comment_id": 5075075385,
+  "last_commit_hash": "daf5a81",
+  "last_push_timestamp": "2026-07-24T22:46:10Z",
+  "last_poll_timestamp": "2026-07-24T22:59:53Z",
+  "round": 2,
+  "cycle": 4,
+  "cycle_limit": 20,
+  "invocation_flags": {
+    "no_merge": false,
+    "no_fix": false,
+    "interval": 3,
+    "timeout": 15,
+    "max_rounds": 20,
+    "update_docs": false,
+    "single_check": false,
+    "loop": true,
+    "self_review": false,
+    "cycle_limit": 20
+  },
+  "chain": {
+    "generation": 0,
+    "spawned_at": null,
+    "outgoing_cycle": null,
+    "outgoing_exit_status": null,
+    "incoming_task_id": null,
+    "reason": null
+  },
+  "bot_status": {
+    "coderabbit": {
+      "state": "AVAILABLE",
+      "last_activity_timestamp": "2026-07-24T22:29:53Z",
+      "limit_hit_timestamp": null,
+      "last_escalation_timestamp": null,
+      "escalation_count": 0
+    },
+    "gemini": {
+      "state": "DISABLED",
+      "last_activity_timestamp": null,
+      "limit_hit_timestamp": "2026-07-24T22:19:48Z",
+      "last_escalation_timestamp": null,
+      "escalation_count": 0
+    }
+  },
+  "review_mode": "FULL_REVIEW",
+  "disagreement_memory": {},
+  "circuit_breaker": {},
+  "changed_file_extensions": [
+    ".json",
+    ".md",
+    ".ts",
+    ".yaml"
+  ],
+  "merge_conflicts": false,
+  "merge_conflicts_detected_at": null,
+  "self_review": {
+    "active": false,
+    "round": 0,
+    "last_clean": false
+  },
+  "escalated": false,
+  "escalation_time": null,
+  "telemetry": {
+    "poll_cycles": 4,
+    "haiku_poll_tokens_estimated": 16000,
+    "sonnet_fix_tokens_estimated": 25000,
+    "fix_dispatches": 2,
+    "pr_comments_posted": 2,
+    "bot_rate_limit_events": [
+      {
+        "bot": "gemini",
+        "detected_at": "2026-07-24T22:19:48Z",
+        "recovery_eta": null,
+        "reason": "consumer Gemini Code Assist SUNSET — permanent, will never review"
+      }
+    ],
+    "first_poll_at": "2026-07-24T22:18:41Z",
+    "last_poll_at": "2026-07-24T22:29:53Z",
+    "epic_id": "p0-6"
+  }
+}

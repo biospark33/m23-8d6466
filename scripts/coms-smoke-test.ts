@@ -107,6 +107,17 @@ const AWAIT_TIMEOUT_MS = 150_000;
 // (handlePrompt nacks hops >= MAX_HOPS). Keep in sync with coms.ts.
 const COMS_LINE_CAP_BYTES = 16 * 1024 * 1024;
 const COMS_MAX_HOPS = 5;
+// Raw-socket probe STALL budget — see probeNack. The old budget was 5 s of
+// TOTAL wall clock, which the oversize probe cannot satisfy by construction:
+// it must deliver COMS_LINE_CAP_BYTES and then wait for a starved peer to
+// parse them, so the budget scaled with machine load rather than with peer
+// health. This one bounds a different quantity — "the socket moved no bytes
+// at all", i.e. the peer is GONE rather than merely slow — so the value is
+// re-derived for that meaning instead of inherited: it matches
+// VERSION_TIMEOUT_MS, the smallest peer-liveness budget this script already
+// uses, and sits ~6x above the worst stall measured under 2x-oversubscribed
+// CPU (5.1 s, with all 16 MiB confirmed flushed).
+const PROBE_IDLE_MS = 30_000;
 // Expected reply tokens for content verification (C2): Path A's prompt says
 // "Reply with exactly: ok"; Path B's relayed prompt says "reply with exactly:
 // pong". Case-insensitive whole-word match against the best available text.
@@ -802,14 +813,47 @@ async function pathSocketComs(): Promise<{
 				const chunks: Buffer[] = [];
 				let connected = false;
 				let settled = false;
+				const started = Date.now();
 				const finish = (ok: boolean, detail: string) => {
 					if (settled) return;
 					settled = true;
-					clearTimeout(t);
+					clearInterval(tick);
 					sock.destroy();
 					resolve({ ok, detail });
 				};
-				const t = setTimeout(() => finish(false, "no nack line within 5s"), 5_000);
+				// The budget is STALL, not total wall clock. The oversize probe
+				// must push a full COMS_LINE_CAP_BYTES down the socket before
+				// coms.ts can see the cap exceeded and nack, so a deadline
+				// measured from connect was really a bulk-transfer budget: it
+				// scaled with machine load and went red under CPU contention
+				// while coms.ts was behaving correctly (#72).
+				//
+				// Progress is SAMPLED from the socket's own counters, not driven by
+				// events: a single 16 MiB write emits exactly one 'drain' — when
+				// the whole userspace buffer has finally flushed — so events
+				// cannot tell "streaming against a descheduled peer" apart from
+				// "peer is gone". `bytesWritten` alone would not either, since it
+				// counts bytes handed to write() including those still queued;
+				// subtracting `writableLength` leaves the bytes the kernel has
+				// actually taken, which advances only as the peer drains them.
+				const flushed = () => sock.bytesWritten - sock.writableLength + sock.bytesRead;
+				let lastProgressAt = Date.now();
+				let lastBytes = -1;
+				const tick = setInterval(() => {
+					if (settled) return;
+					const moved = flushed();
+					if (moved !== lastBytes) {
+						lastBytes = moved;
+						lastProgressAt = Date.now();
+						return;
+					}
+					if (Date.now() - lastProgressAt >= PROBE_IDLE_MS) {
+						finish(
+							false,
+							`no nack line: the socket moved no bytes for ${Date.now() - lastProgressAt}ms against a ${PROBE_IDLE_MS}ms stall budget (observed ${Date.now() - started}ms total, ${sock.bytesWritten - sock.writableLength}/${typeof payload === "string" ? Buffer.byteLength(payload) : payload.length} bytes flushed, ${sock.bytesRead} read)`,
+						);
+					}
+				}, 250);
 				sock.on("error", (e) => {
 					// After connect, write errors (e.g. EPIPE when the server ends
 					// the socket right after nacking the oversized probe) are not
@@ -818,6 +862,7 @@ async function pathSocketComs(): Promise<{
 				});
 				sock.once("connect", () => {
 					connected = true;
+					lastProgressAt = Date.now();
 					sock.write(payload);
 				});
 				sock.on("data", (c) => {

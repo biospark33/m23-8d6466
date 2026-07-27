@@ -55,11 +55,16 @@
  * Run:  bun scripts/lsp-verify.ts [--json] [--keep] [--strict]
  */
 
-import { execFileSync, spawnSync } from "node:child_process";
+import {
+  execFile,
+  execFileSync,
+  type ExecFileOptionsWithStringEncoding,
+} from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { type Check, createChecklist } from "./lib/harness-notes.ts";
 import {
   McpClient,
@@ -80,6 +85,43 @@ import {
 
 // Re-exported so tests keep a single import site for the harness surface.
 export { compareVersions, p95, parseToolJsonText, resolvePiLens };
+
+/**
+ * Async (not `spawnSync`): a synchronous spawn would block the event loop, so
+ * no timeout could preempt it — neither this harness's own nor the SIGTERM the
+ * Phase-0 gate sends when it invokes this script through `runVerifier`. The
+ * agent probe budgets 300 s per attempt over 3 attempts, so a blocking spawn
+ * made the harness unkillable for up to 900 s and the gate along with it
+ * (#66, #72).
+ */
+const execFileAsync = promisify(execFile);
+
+/**
+ * `execFileAsync` with the child's stdin closed immediately.
+ *
+ * REQUIRED for `pi`, not cosmetic. `spawnSync` hands the child a stdin that is
+ * already at EOF, but async `execFile` leaves that pipe OPEN — so a prompt-mode
+ * turn blocks waiting for input that never arrives and burns its entire 300 s
+ * budget, three attempts deep (measured: 39 s -> 2133 s before this line).
+ * Closing stdin restores exactly the synchronous behaviour.
+ */
+function execFilePi(
+  file: string,
+  args: string[],
+  opts: ExecFileOptionsWithStringEncoding,
+): Promise<{ stdout: string; stderr: string }> {
+  const p = execFileAsync(file, args, opts);
+  p.child.stdin?.end();
+  return p;
+}
+
+/** Shape execFile attaches to its rejection: a non-zero exit sets numeric `code`. */
+interface ExecFileError extends Error {
+  code?: number | string;
+  killed?: boolean;
+  stdout?: string;
+  stderr?: string;
+}
 
 /** pi-lens floor the story mandates. Installed-below-floor is reported, never fatal. */
 const MIN_PI_LENS_VERSION = "3.8.69";
@@ -540,10 +582,14 @@ interface AgentProbeResult {
  */
 const AGENT_PROBE_ATTEMPTS = 3;
 
-function probeAgentModeJson(cwd: string, piLensExtension: string, libFile: string): AgentProbeResult {
+async function probeAgentModeJson(
+  cwd: string,
+  piLensExtension: string,
+  libFile: string,
+): Promise<AgentProbeResult> {
   let last: AgentProbeResult | undefined;
   for (let attempt = 1; attempt <= AGENT_PROBE_ATTEMPTS; attempt++) {
-    const result = probeAgentModeJsonOnce(cwd, piLensExtension, libFile, attempt);
+    const result = await probeAgentModeJsonOnce(cwd, piLensExtension, libFile, attempt);
     last = result;
     // Stop as soon as the demo is fully satisfied, or when retrying cannot help
     // (pi missing / auth failure / a killed run).
@@ -554,12 +600,12 @@ function probeAgentModeJson(cwd: string, piLensExtension: string, libFile: strin
   return last as AgentProbeResult;
 }
 
-function probeAgentModeJsonOnce(
+async function probeAgentModeJsonOnce(
   cwd: string,
   piLensExtension: string,
   libFile: string,
   attempt: number,
-): AgentProbeResult {
+): Promise<AgentProbeResult> {
   const prompt =
     "You have pi-lens tools available. If a tool-activation step is required, " +
     "perform it FIRST and then CONTINUE — activating the tools is not the task. " +
@@ -591,28 +637,43 @@ function probeAgentModeJsonOnce(
 
   let piVersion: string | undefined;
   try {
-    piVersion = execFileSync("pi", ["--version"], { encoding: "utf8", timeout: 15_000 }).trim();
+    piVersion = (
+      await execFilePi("pi", ["--version"], { encoding: "utf8", timeout: 15_000 })
+    ).stdout.trim();
   } catch {
     return empty;
   }
 
-  // spawnSync THROWS (RangeError) when the child exceeds maxBuffer; without
-  // this guard that escapes to main()'s catch and is recorded as a confusing
-  // synthetic "AC?" failure instead of a clean agent-probe deferral.
+  // A non-zero exit is a NORMAL outcome here (pi dies at LLM auth), so it must
+  // keep the captured output. Only a kill — timeout or maxBuffer — or a spawn
+  // failure makes the capture untrustworthy; that lands in the `error` branch
+  // below rather than escaping to main()'s catch as a synthetic "AC?" failure.
   let proc: { stdout: string | null; stderr: string | null; status: number | null; error?: Error };
   try {
-    proc = spawnSync("pi", args, {
+    const res = await execFilePi("pi", args, {
       cwd,
       encoding: "utf8",
       timeout: 300_000,
       maxBuffer: 32 * 1024 * 1024,
     });
+    proc = { stdout: res.stdout, stderr: res.stderr, status: 0 };
   } catch (err) {
-    return {
-      ...empty,
-      piFound: true,
-      piVersion,
-      reason: `the agent turn could not be captured: ${err instanceof Error ? err.message : String(err)}`,
+    const e = err as ExecFileError;
+    const exited = typeof e.code === "number";
+    proc = {
+      stdout: e.stdout ?? "",
+      stderr: e.stderr ?? "",
+      status: exited ? (e.code as number) : null,
+      // execFile's own message on a kill is "Command failed: <the entire
+      // prompt>", which buries the cause. Report the cause instead; the
+      // captured output is already carried in stdoutExcerpt/stderrExcerpt.
+      error: exited
+        ? undefined
+        : new Error(
+            e.killed === true
+              ? `killed by the 300000ms timeout or the 32 MiB output cap (${String(e.code ?? "no code")})`
+              : (e.message ?? String(err)).slice(0, 300),
+          ),
     };
   }
   if (proc.error) {
@@ -1184,7 +1245,7 @@ async function main(): Promise<void> {
       // runs. Probe the same thing so the status is OBSERVED here, not
       // inherited on faith — and record it as an optional skip when auth is
       // unavailable rather than pretending the demo ran.
-      const agentProbe = probeAgentModeJson(work, path.join(pl.root, "dist", "index.js"), libFile);
+      const agentProbe = await probeAgentModeJson(work, path.join(pl.root, "dist", "index.js"), libFile);
       const e2eMet = agentProbe.toolPayloadObserved && agentProbe.errorReflected && agentProbe.definitionResolved;
       record({
         ac: "DoD-e2e",
