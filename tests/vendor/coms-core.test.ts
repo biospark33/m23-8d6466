@@ -6,17 +6,25 @@
  * abbreviateModel non-string guard) and that the extraction now dedupes. A
  * regression in any of these is a regression in both transports.
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	abbreviateModel,
 	envBoundedInt,
 	fallbackColor,
 	FALLBACK_PALETTE,
+	findSystemPromptPath,
 	hexFg,
 	isDuplicateRegistration,
 	isSafePathComponent,
 	isValidHex,
+	MAX_RESPONSE_BYTES,
+	MAX_RESPONSE_SCHEMA_BYTES,
+	nowIso,
 	parseFrontmatter,
+	readFrontmatterFromArgv,
 	sanitizePeerText,
 	secretEqual,
 	ulid,
@@ -224,5 +232,80 @@ describe("envBoundedInt", () => {
 	test("overflow: with the coms.ts 2^31-1 cap", () => {
 		const INT_MAX = 2 ** 31 - 1;
 		expect(envBoundedInt("3000000000", 100, { integer: true, max: INT_MAX })).toBe(INT_MAX);
+	});
+});
+
+describe("nowIso", () => {
+	test("ISO-8601 UTC instant, round-trips through Date", () => {
+		const s = nowIso();
+		expect(s).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+		expect(new Date(s).toISOString()).toBe(s);
+	});
+});
+
+describe("shared caps", () => {
+	test("response + schema caps hold the documented values", () => {
+		// Both transports are behavioral peers: a reply/schema accepted by one
+		// must not be nacked by the other. MAX_PROMPT_BYTES is deliberately NOT
+		// here — it differs per transport (see DIVERGENCE.md).
+		expect(MAX_RESPONSE_BYTES).toBe(256 * 1024);
+		expect(MAX_RESPONSE_SCHEMA_BYTES).toBe(32_768);
+	});
+});
+
+describe("findSystemPromptPath / readFrontmatterFromArgv", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "coms-core-test-"));
+	const md = path.join(dir, "agent.md");
+	fs.writeFileSync(md, '---\nname: planner\ncolor: "#36F9F6"\ndescription: plans things\n---\nbody text\n');
+	const notMd = path.join(dir, "agent.txt");
+	fs.writeFileSync(notMd, "nope");
+	afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	test("empty argv finds nothing", () => {
+		expect(findSystemPromptPath([])).toBeNull();
+		expect(readFrontmatterFromArgv([])).toEqual({});
+	});
+	test("accepts both `--flag path` and `--flag=path`", () => {
+		expect(findSystemPromptPath(["--system-prompt", md])).toBe(md);
+		expect(findSystemPromptPath([`--system-prompt=${md}`])).toBe(md);
+		expect(findSystemPromptPath(["--append-system-prompt", md])).toBe(md);
+		expect(findSystemPromptPath([`--append-system-prompt=${md}`])).toBe(md);
+	});
+	test("--system-prompt wins over --append-system-prompt regardless of argv order", () => {
+		const md2 = path.join(dir, "other.md");
+		fs.writeFileSync(md2, "---\nname: other\n---\nx\n");
+		expect(findSystemPromptPath(["--append-system-prompt", md2, "--system-prompt", md])).toBe(md);
+		expect(findSystemPromptPath(["--system-prompt", md, "--append-system-prompt", md2])).toBe(md);
+	});
+	test("ignores non-.md, missing files, directories and dangling trailing flags", () => {
+		expect(findSystemPromptPath(["--system-prompt", notMd])).toBeNull();
+		expect(findSystemPromptPath(["--system-prompt", path.join(dir, "gone.md")])).toBeNull();
+		expect(findSystemPromptPath(["--system-prompt", dir])).toBeNull();
+		expect(findSystemPromptPath(["--system-prompt"])).toBeNull();
+		expect(findSystemPromptPath(["--system-prompt="])).toBeNull();
+	});
+	test("reads name/description/color out of the frontmatter", () => {
+		expect(readFrontmatterFromArgv(["--system-prompt", md])).toEqual({
+			name: "planner",
+			description: "plans things",
+			color: "#36F9F6",
+		});
+	});
+	test("malformed frontmatter yields all-undefined, not a throw", () => {
+		const bad = path.join(dir, "bad.md");
+		fs.writeFileSync(bad, "no frontmatter here\n");
+		expect(readFrontmatterFromArgv(["--system-prompt", bad])).toEqual({
+			name: undefined,
+			description: undefined,
+			color: undefined,
+		});
+	});
+	test("file that disappears after a good read degrades to {}, not a throw", () => {
+		const gone = path.join(dir, "vanishes.md");
+		fs.writeFileSync(gone, "---\nname: x\n---\n");
+		const argv = ["--system-prompt", gone];
+		expect(readFrontmatterFromArgv(argv)).toEqual({ name: "x", description: undefined, color: undefined });
+		fs.rmSync(gone);
+		expect(readFrontmatterFromArgv(argv)).toEqual({});
 	});
 });

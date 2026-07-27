@@ -17,6 +17,7 @@
  */
 
 import * as crypto from "node:crypto";
+import * as fs from "node:fs";
 
 // ━━ Shared constants (identical value AND meaning in both transports) ━━━━━━━
 //
@@ -38,6 +39,16 @@ export const MAX_PENDING_EXIT_DISPATCHES = 64;
 // Total wall-clock budget for all exit-fallback dispatches so a backlog can't
 // stall process exit for minutes.
 export const EXIT_DELIVER_BUDGET_MS = 10_000;
+// Receiver-side cap on a peer-supplied response body. The reply lands verbatim
+// in the caller's coms_get/coms_await (coms_net_get/coms_net_await) tool
+// output, so without it a buggy/hostile peer can push a full transport-cap
+// (16 MiB line / SSE) payload into the caller's context window per round-trip.
+export const MAX_RESPONSE_BYTES = 256 * 1024;
+// Receiver-side cap on a peer-supplied response_schema: the blob is stored per
+// inbound and persisted into the session branch, so the 16 MiB transport cap is
+// far too loose. Shared deliberately — the two transports are behavioral peers
+// and a schema accepted by one must not be nacked by the other.
+export const MAX_RESPONSE_SCHEMA_BYTES = 32_768;
 
 // ━━ Bounded env-int parser ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
@@ -143,6 +154,59 @@ export function parseFrontmatter(raw: string): { name?: string; description?: st
 		color: frontmatter.color,
 		body,
 	};
+}
+
+export function nowIso(): string {
+	return new Date().toISOString();
+}
+
+// ━━ Filesystem-touching helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// Everything above this banner is pure (no I/O, no ambient state). The two
+// functions below read the filesystem via `fs` — see DIVERGENCE.md's
+// "coms-core.ts" section for why that's in-scope for this module.
+
+// Prefer --system-prompt (overwrite). Fall back to --append-system-prompt.
+// These flags are pi-builtin (not extension-registered) so we scan argv
+// directly. First match wins per preference order.
+export function findSystemPromptPath(argv: string[]): string | null {
+	const scan = (flag: string): string | null => {
+		for (let i = 0; i < argv.length; i++) {
+			// Accept both `--flag value` and `--flag=value` argv forms; pi's
+			// parser handles both, and silently ignoring the `=` form registers
+			// the agent under an auto-generated name with no warning.
+			const arg = argv[i];
+			if (arg === undefined) continue;
+			const candidate = arg === flag && i + 1 < argv.length
+				? argv[i + 1]
+				: arg.startsWith(`${flag}=`)
+					? arg.slice(flag.length + 1)
+					: null;
+			if (candidate?.endsWith(".md")) {
+				try {
+					if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+						return candidate;
+					}
+				} catch {
+					// fall through
+				}
+			}
+		}
+		return null;
+	};
+	return scan("--system-prompt") ?? scan("--append-system-prompt");
+}
+
+export function readFrontmatterFromArgv(argv: string[]): { name?: string; description?: string; color?: string } {
+	const p = findSystemPromptPath(argv);
+	if (!p) return {};
+	try {
+		const raw = fs.readFileSync(p, "utf-8");
+		const { name, description, color } = parseFrontmatter(raw);
+		return { name, description, color };
+	} catch {
+		return {};
+	}
 }
 
 export function abbreviateModel(model: unknown): string {

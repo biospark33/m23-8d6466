@@ -31,6 +31,7 @@ import {
 	abbreviateModel,
 	envBoundedInt,
 	fallbackColor,
+	findSystemPromptPath,
 	hexFg,
 	isDuplicateRegistration,
 	isSafePathComponent,
@@ -39,8 +40,11 @@ import {
 	MAX_HOPS,
 	MAX_INBOUND,
 	MAX_PENDING_EXIT_DISPATCHES,
+	MAX_RESPONSE_BYTES,
+	MAX_RESPONSE_SCHEMA_BYTES,
 	EXIT_DELIVER_BUDGET_MS,
-	parseFrontmatter,
+	nowIso,
+	readFrontmatterFromArgv,
 	sanitizePeerText,
 	secretEqual,
 	ulid,
@@ -81,22 +85,13 @@ const HEARTBEAT_STALE_MS = 3 * KEEPALIVE_INTERVAL_MS;
 const LINE_CAP_BYTES = 16 * 1024 * 1024;
 const SOCKET_OP_TIMEOUT_MS = 5_000;
 // MAX_INBOUND, MAX_PENDING_EXIT_DISPATCHES, MAX_FULFILLED_TOMBSTONES,
-// EXIT_DELIVER_BUDGET_MS and MAX_HOPS are imported from ./coms-core.ts —
-// identical value and meaning in both transports (see DIVERGENCE.md).
+// EXIT_DELIVER_BUDGET_MS, MAX_HOPS, MAX_RESPONSE_BYTES and
+// MAX_RESPONSE_SCHEMA_BYTES are imported from ./coms-core.ts — identical value
+// and meaning in both transports (see DIVERGENCE.md).
 // Prompts are injected into the receiver's context; cap each one well below
 // LINE_CAP_BYTES so an authenticated peer can't burn the whole context window
 // (or pin ~4GB via 256 queued 16MB envelopes) with a single send.
 const MAX_PROMPT_BYTES = 256 * 1024;
-// Responses land verbatim in the caller's coms_get/coms_await tool output;
-// cap like MAX_PROMPT_BYTES so a peer can't push a full LINE_CAP_BYTES (16MB)
-// payload into the caller's context window.
-const MAX_RESPONSE_BYTES = 256 * 1024;
-// Receiver-side cap on a peer-supplied response_schema: the blob is stored
-// per inbound and persisted into the session branch via details, so the 16MB
-// transport cap is far too loose for it. Same bound as coms-net's
-// MAX_RESPONSE_SCHEMA_BYTES — the two transports are behavioral peers and a
-// schema accepted by one must not be nacked by the other.
-const MAX_RESPONSE_SCHEMA_BYTES = 32_768;
 // Completed pendingReplies entries are retained for coms_get polling until
 // the keepalive sweep reclaims them; cap the retained count (oldest completed
 // evicted first) so chatty agents can't grow the map without bound.
@@ -230,9 +225,10 @@ interface InboundContext {
 
 // ━━ Helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
-// Pure/parity helpers (ulid, hexFg, fallbackColor, parseFrontmatter,
-// abbreviateModel, sanitizePeerText, secretEqual, isSafePathComponent) live in
-// ./coms-core.ts. Transport-specific helpers stay below.
+// Pure/parity helpers (ulid, hexFg, fallbackColor, abbreviateModel,
+// sanitizePeerText, secretEqual, isSafePathComponent, nowIso,
+// findSystemPromptPath, readFrontmatterFromArgv) live in ./coms-core.ts.
+// Transport-specific helpers stay below.
 
 // macOS caps sun_path at 104 bytes (incl. NUL), Linux at 108 — a deep
 // PI_COMS_DIR or long home path can blow past that and make bind fail with
@@ -259,10 +255,6 @@ function makeEndpoint(sessionId: string): string {
 	// apart in the shared tmp dir; the dir is chmod'd 0700 at bind time.
 	const uid = typeof process.getuid === "function" ? process.getuid() : 0;
 	return path.join(os.tmpdir(), `pi-coms-${uid}`, `${sessionId}.sock`);
-}
-
-function nowIso(): string {
-	return new Date().toISOString();
 }
 
 // Audit hook installed by the default export so module-level helpers (which
@@ -806,50 +798,6 @@ sock.on("close", () => process.exit(0));
 const timer = setTimeout(() => process.exit(2), 4000);
 if (timer.unref) timer.unref();
 `;
-
-// ━━ System-prompt frontmatter scan ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-function findSystemPromptPath(argv: string[]): string | null {
-	// Prefer --system-prompt (overwrite). Fall back to --append-system-prompt.
-	// These flags are pi-builtin (not extension-registered) so we still scan
-	// argv directly. First match wins per preference order.
-	const scan = (flag: string): string | null => {
-		for (let i = 0; i < argv.length; i++) {
-			// Accept both `--flag path` and `--flag=path` (pi's parser and
-			// coms-net handle both forms).
-			const arg = argv[i];
-			if (arg === undefined) continue;
-			const candidate = arg === flag && i + 1 < argv.length
-				? argv[i + 1]
-				: arg.startsWith(`${flag}=`)
-					? arg.slice(flag.length + 1)
-					: null;
-			if (candidate?.endsWith(".md")) {
-				try {
-					if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-						return candidate;
-					}
-				} catch {
-					// fall through
-				}
-			}
-		}
-		return null;
-	};
-	return scan("--system-prompt") ?? scan("--append-system-prompt");
-}
-
-function readFrontmatterFromArgv(argv: string[]): { name?: string; description?: string; color?: string } {
-	const p = findSystemPromptPath(argv);
-	if (!p) return {};
-	try {
-		const raw = fs.readFileSync(p, "utf-8");
-		const { name, description, color } = parseFrontmatter(raw);
-		return { name, description, color };
-	} catch {
-		return {};
-	}
-}
 
 // ━━ Default export ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

@@ -38,8 +38,30 @@ refactor covered by `tests/vendor/coms-core.test.ts`.
   call site keeps its exact effective bounds.
 - **Shared caps** (identical value AND meaning): `MAX_HOPS` (5), `MAX_INBOUND`
   (256), `MAX_FULFILLED_TOMBSTONES` (1000), `MAX_PENDING_EXIT_DISPATCHES` (64),
-  `EXIT_DELIVER_BUDGET_MS` (10s). Divergent caps (`MAX_PROMPT_BYTES`) stay in
-  their files — see the table below.
+  `EXIT_DELIVER_BUDGET_MS` (10s), `MAX_RESPONSE_BYTES` (256 KiB),
+  `MAX_RESPONSE_SCHEMA_BYTES` (32 KiB). Divergent caps (`MAX_PROMPT_BYTES`,
+  `INIT_LATCH_TIMEOUT_MS`) stay in their files — see the table below.
+- **`nowIso`** — `new Date().toISOString()`; was byte-identical in both files.
+- **System-prompt frontmatter scan**: `findSystemPromptPath` (scans argv for
+  `--system-prompt`, falling back to `--append-system-prompt`; accepts both
+  `--flag path` and `--flag=path`; requires an existing `.md` regular file) and
+  `readFrontmatterFromArgv` (reads it and returns `parseFrontmatter`'s
+  name/description/color, `{}` on any read failure). `readFrontmatterFromArgv`
+  was byte-identical; `findSystemPromptPath` differed only in comment wording
+  and ternary line-wrapping — same AST, same behavior. Extraction adds a
+  `node:fs` import to `coms-core.ts` — **this is a deliberate, permanent
+  layering change**: `coms-core.ts` is no longer pure-helpers-only, it now
+  also owns the two filesystem-touching functions above (both were already
+  doing `fs` I/O in the pre-extraction transports; extraction only moved
+  them, it didn't add I/O that wasn't there). The file marks the boundary
+  with a `// ━━ Filesystem-touching helpers ━━` banner above `nowIso`'s
+  successor — everything above that banner is pure, everything below reads
+  the filesystem. Kept as one file rather than split into a separate
+  `coms-core-io.ts`: both transports already import `coms-core.ts` as a
+  single unit like `themeMap.ts`, and — per the 3-way-merge rule above —
+  every additional file is permanent merge surface against a future
+  `0ed11f44` sync, so a doc-only boundary was chosen over a structural split
+  for no behavioral gain.
 - **`isDuplicateRegistration`** — the `/already|duplicate/i` predicate. coms.ts's
   `registerFlagSafe/ToolSafe/CommandSafe` and coms-net's `registerFlagOnce` both
   use it, but their WRAPPERS stay per-file: coms-net's `registerFlagOnce`
@@ -57,6 +79,11 @@ are transport-coupled; unifying would not be zero-behavior:
   queue+FIFO drop in the same terminal step). Different semantics — left in place.
 - **Registration wrappers** — `registerFlagSafe/ToolSafe/CommandSafe` vs
   `registerFlagOnce` + `KNOWN_COMS_FLAGS` (see above).
+- **`readCliFlags` / `CliFlags`** — NOT a parity pair. coms-net's version is a
+  strict superset: it also reads `--server-url` / `--auth-token` (flags only
+  coms-net registers) and its `CliFlags` carries the matching `serverUrl` /
+  `authToken` fields. Sharing it would make coms.ts read two flags its parser
+  never declares. Transport-shaped, like the `CliFlags` type itself.
 - **Inbound-queue / turnQueue FIFO attribution, renderPool/widget code,
   agent_end response capture, transport/registry/SSE logic** — transport-specific
   by nature; out of scope for this incremental extraction.
@@ -115,8 +142,9 @@ transport-specific work:
 | `INIT_LATCH_TIMEOUT_MS` override envelope | default `30_000`; env `PI_COMS_*`, integer-only, no floor, max `2^31-1` | default `30_000`; env `PI_COMS_NET_*`, clamp `[1_000, 300_000]`, fractionals accepted | Defaults are equal but the env override envelope differs per transport (net enforces a 1 s floor / 5 min ceiling). |
 
 All other shared caps (`MAX_INBOUND`, `MAX_PENDING_EXIT_DISPATCHES`,
-`MAX_FULFILLED_TOMBSTONES`, `EXIT_DELIVER_BUDGET_MS`) are kept numerically
-equal to `coms.ts`; `INIT_LATCH_TIMEOUT_MS` is default-equal only (see table).
+`MAX_FULFILLED_TOMBSTONES`, `EXIT_DELIVER_BUDGET_MS`, `MAX_RESPONSE_BYTES`,
+`MAX_RESPONSE_SCHEMA_BYTES`) now come from `coms-core.ts`, so they cannot drift;
+`INIT_LATCH_TIMEOUT_MS` is default-equal only and stays per-file (see table).
 
 ## `themeMap.ts`
 

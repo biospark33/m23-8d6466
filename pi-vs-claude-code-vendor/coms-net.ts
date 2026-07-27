@@ -35,6 +35,7 @@ import {
 	abbreviateModel,
 	envBoundedInt,
 	fallbackColor,
+	findSystemPromptPath,
 	hexFg,
 	isDuplicateRegistration,
 	isSafePathComponent,
@@ -43,8 +44,11 @@ import {
 	MAX_HOPS,
 	MAX_INBOUND,
 	MAX_PENDING_EXIT_DISPATCHES,
+	MAX_RESPONSE_BYTES,
+	MAX_RESPONSE_SCHEMA_BYTES,
 	EXIT_DELIVER_BUDGET_MS,
-	parseFrontmatter,
+	nowIso,
+	readFrontmatterFromArgv,
 	sanitizePeerText,
 	ulid,
 } from "./coms-core.ts";
@@ -77,20 +81,10 @@ const SHUTDOWN_DELETE_TIMEOUT_MS = 2_000;
 // envelope-queue memory pin, a concern that does not exist over HTTP. See
 // DIVERGENCE.md.
 const MAX_PROMPT_BYTES = 200_000;
-// Trust-boundary cap for a peer-supplied response_schema: without it a
-// hostile/buggy peer can inject up to the 16 MiB SSE cap of schema JSON into
-// the session context on every inbound prompt.
-const MAX_RESPONSE_SCHEMA_BYTES = 32_768;
-// MAX_INBOUND, MAX_FULFILLED_TOMBSTONES, MAX_PENDING_EXIT_DISPATCHES and
-// EXIT_DELIVER_BUDGET_MS are imported from ./coms-core.ts — identical value and
-// meaning in both transports (see DIVERGENCE.md).
-// Receiver-side cap on a peer-supplied response body (mirrors coms.ts
-// MAX_RESPONSE_BYTES). The reply lands verbatim in the caller's
-// coms_net_get/coms_net_await tool output, so without this a buggy/hostile
-// peer can push up to the 16 MiB SSE cap of payload into the caller's
-// context window on every round-trip — the same failure class
-// MAX_RESPONSE_SCHEMA_BYTES and MAX_PROMPT_BYTES prevent.
-const MAX_RESPONSE_BYTES = 256 * 1024;
+// MAX_INBOUND, MAX_FULFILLED_TOMBSTONES, MAX_PENDING_EXIT_DISPATCHES,
+// EXIT_DELIVER_BUDGET_MS, MAX_RESPONSE_BYTES and MAX_RESPONSE_SCHEMA_BYTES are
+// imported from ./coms-core.ts — identical value and meaning in both
+// transports (see DIVERGENCE.md).
 const EXIT_DELIVER_TIMEOUT_MS = 4_000;
 // Bounded wait for the session_start/session_shutdown init latch: a wedged
 // init must not spin the poll loop forever — on timeout proceed and audit
@@ -295,13 +289,10 @@ let exitHandlerInstalled = false;
 
 // ━━ Helpers — transport-specific; shared/parity helpers live in coms-core.ts ━
 //
-// ulid, hexFg, fallbackColor, parseFrontmatter, abbreviateModel,
-// sanitizePeerText, isSafePathComponent are imported from ./coms-core.ts. The
-// card/body/argv helpers below are net-transport-specific and stay here.
-
-function nowIso(): string {
-	return new Date().toISOString();
-}
+// ulid, hexFg, fallbackColor, abbreviateModel, sanitizePeerText,
+// isSafePathComponent, nowIso, findSystemPromptPath and
+// readFrontmatterFromArgv are imported from ./coms-core.ts. The card/body
+// helpers below are net-transport-specific and stay here.
 
 // Cards arrive over the wire from the hub (ultimately from other peers), so
 // their string fields are untrusted: coerce non-strings to safe defaults and
@@ -384,45 +375,6 @@ async function readBodyCapped(resp: Response): Promise<string> {
 		try { reader.releaseLock(); } catch { /* ignore */ }
 	}
 	return new TextDecoder("utf-8").decode(Buffer.concat(chunks));
-}
-
-function findSystemPromptPath(argv: string[]): string | null {
-	const scan = (flag: string): string | null => {
-		for (let i = 0; i < argv.length; i++) {
-			// Accept both `--flag value` and `--flag=value` argv forms; the
-			// latter is a common convention and silently ignoring it registers
-			// the agent under an auto-generated name with no warning.
-			const arg = argv[i];
-			if (arg === undefined) continue;
-			const candidate =
-				arg === flag && i + 1 < argv.length ? argv[i + 1]
-				: arg.startsWith(`${flag}=`) ? arg.slice(flag.length + 1)
-				: null;
-			if (candidate?.endsWith(".md")) {
-				try {
-					if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-						return candidate;
-					}
-				} catch {
-					// fall through
-				}
-			}
-		}
-		return null;
-	};
-	return scan("--system-prompt") ?? scan("--append-system-prompt");
-}
-
-function readFrontmatterFromArgv(argv: string[]): { name?: string; description?: string; color?: string } {
-	const p = findSystemPromptPath(argv);
-	if (!p) return {};
-	try {
-		const raw = fs.readFileSync(p, "utf-8");
-		const { name, description, color } = parseFrontmatter(raw);
-		return { name, description, color };
-	} catch {
-		return {};
-	}
 }
 
 // ━━ Registry / server-discovery I/O ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
