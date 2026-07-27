@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "workspaces": [
-    "pi-vs-claude-code-vendor"
+    "pi-vs-claude-code-vendor",
+    "cli-anything"
   ],
   "scripts": {
     "test": "bun test",
