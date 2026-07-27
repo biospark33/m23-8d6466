@@ -33,6 +33,14 @@ bun run lint        # biome check (non-clean on main today — 6 pre-existing fi
 `bun test` currently has one known failure on `main` (`H4c: keep-alive pool
 survives a 413`). Anything beyond that is yours.
 
+Routine observability output (the swarmclaw JSONL log lines and cli-anything's
+per-run env diagnostics) is muted under `bun test` — Bun sets `NODE_ENV=test`,
+and the noise used to bury real failures. To get it back for a suite:
+
+```bash
+QDS_LOG_VERBOSE=1 bun test tests/swarmclaw
+```
+
 Copy `.env.example` to `.env` for the full list of configurable environment
 variables — every one has a default, so nothing is required to run the tests.
 

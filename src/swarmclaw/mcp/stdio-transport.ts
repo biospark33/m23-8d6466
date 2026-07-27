@@ -23,8 +23,21 @@ export interface LogEntry {
   [k: string]: unknown;
 }
 
+/**
+ * Quiet under `bun test` (Bun sets NODE_ENV=test): the JSONL stream buried real
+ * failures in hundreds of unrelated lines (#53). Set `QDS_LOG_VERBOSE=1` to get
+ * it back for a suite — `QDS_LOG_VERBOSE=1 bun test tests/swarmclaw`.
+ * Production is unaffected: NODE_ENV is never "test" there. Tests that assert on
+ * log output install their own sink via setLogSink() and bypass this entirely.
+ * Read at call time, not module load, so a test can toggle it.
+ */
+function logMuted(): boolean {
+  return process.env.NODE_ENV === "test" && !process.env.QDS_LOG_VERBOSE;
+}
+
 /** Sink is overridable so tests can capture logs deterministically. */
 export let logSink: (entry: LogEntry) => void = (entry) => {
+  if (logMuted()) return;
   process.stdout.write(`${JSON.stringify(entry)}\n`);
 };
 

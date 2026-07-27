@@ -35,6 +35,10 @@ async function withCapturedStderr<T>(
 ): Promise<{ value: T; stderr: string }> {
   const lines: string[] = [];
   const orig = console.error;
+  // Routine diagnostics are muted under NODE_ENV=test (#53) — opt back in with
+  // the same escape hatch a developer would use: QDS_LOG_VERBOSE=1.
+  const origVerbose = process.env.QDS_LOG_VERBOSE;
+  process.env.QDS_LOG_VERBOSE = "1";
   console.error = (...args: unknown[]) => {
     lines.push(args.map(String).join(" "));
   };
@@ -42,6 +46,9 @@ async function withCapturedStderr<T>(
     return { value: await fn(), stderr: lines.join("\n") };
   } finally {
     console.error = orig;
+    // "" restores muting: the gate treats empty as unset. (Assigning undefined
+    // would stringify to "undefined" and read as verbose.)
+    process.env.QDS_LOG_VERBOSE = origVerbose ?? "";
   }
 }
 

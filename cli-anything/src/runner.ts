@@ -36,6 +36,17 @@ const MAX_PROBE_RESULT_LEN = 1024;
 const MAX_LOGGED_ENV_KEYS = 50;
 
 /**
+ * Routine per-run diagnostics (env key names, provider-key presence). Quiet
+ * under `bun test` (Bun sets NODE_ENV=test) because they buried real failures
+ * in test output (#53); `QDS_LOG_VERBOSE=1` brings them back for a suite.
+ * Warnings and errors do NOT go through here — they always print.
+ */
+function diag(message: string): void {
+  if (process.env.NODE_ENV === "test" && !process.env.QDS_LOG_VERBOSE) return;
+  console.error(message);
+}
+
+/**
  * Parent-env KEY NAMES whose values look secret-ish. Values under such keys
  * are redacted from stdout_excerpt / env_probe_result (INV-2 hardening).
  * Heuristic: high-signal secret-bearing key patterns only, plus the
@@ -404,9 +415,7 @@ export async function runManifest(
     keys.length > MAX_LOGGED_ENV_KEYS
       ? [...keys.slice(0, MAX_LOGGED_ENV_KEYS), "..."]
       : keys;
-  console.error(
-    `cli-anything: env keys -> ${shown.map(sanitizeLogKey).join(",")}`,
-  );
+  diag(`cli-anything: env keys -> ${shown.map(sanitizeLogKey).join(",")}`);
 
   return await new Promise<HarnessResult>((resolve) => {
     let child: ChildProcess | null = null;
@@ -871,7 +880,7 @@ export async function runTeamManifest(
 
   // INV-1: presence-only logging for provider keys; never values.
   for (const key of ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]) {
-    console.error(`cli-anything: ${key}: ${env[key] !== undefined ? "set" : "unset"}`);
+    diag(`cli-anything: ${key}: ${env[key] !== undefined ? "set" : "unset"}`);
   }
 
   const redact = (s: string): string => redactSecrets(s, parent);
