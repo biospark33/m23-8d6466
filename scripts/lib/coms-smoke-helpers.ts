@@ -9,7 +9,7 @@
  * Tests: `tests/scripts/coms-smoke-helpers.test.ts`.
  */
 import { type ChildProcess, spawnSync } from "node:child_process";
-import * as crypto from "node:crypto";
+import { CROCKFORD, ulid } from "../../pi-vs-claude-code-vendor/coms-core.ts";
 
 // ── Report hygiene: ambient secrets must never leak into the JSON report. ────
 // An env value is treated as a secret when its KEY contains a secret word as a
@@ -162,35 +162,16 @@ export function killTree(proc: ChildProcess, signal: NodeJS.Signals = "SIGKILL")
 	}
 }
 
-// Well-formed 26-char Crockford-base32 ULID (48-bit time + 80-bit
-// randomness) for shape-coverage msg_ids — no more fake "01SMOKE…" ids.
-// Mirrors the vendored generator (coms-core.ts `ulid`) so probe envelopes carry
-// ids indistinguishable from real coms traffic: 10 bytes of randomness
-// bit-packed 5 bits per char — drawing 16 bytes and masking each with % 32
-// would consume 128 bits to emit the same 80.
-// DUPLICATE of pi-vs-claude-code-vendor/coms-core.ts:75 — deduping it is
-// tracked separately (issue #59); coms-core.ts is vendored under a 3-way-merge
-// rule, so this copy stays for now.
-export const ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-export function ulid(): string {
-	const time = Date.now();
-	const rand = crypto.randomBytes(10);
-	let timeStr = "";
-	let t = time;
-	for (let i = 9; i >= 0; i--) {
-		timeStr = (ULID_ALPHABET[t % 32] ?? "0") + timeStr;
-		t = Math.floor(t / 32);
-	}
-	let randStr = "";
-	let bits = 0;
-	let value = 0;
-	for (const byte of rand) {
-		value = (value << 8) | byte;
-		bits += 8;
-		while (bits >= 5) {
-			bits -= 5;
-			randStr += ULID_ALPHABET[(value >> bits) & 31] ?? "0";
-		}
-	}
-	return (timeStr + randStr).slice(0, 26);
-}
+// Well-formed 26-char Crockford-base32 ULID (48-bit time + 80-bit randomness)
+// for shape-coverage msg_ids — no more fake "01SMOKE…" ids. Probe envelopes
+// must carry ids indistinguishable from real coms traffic, which is exactly
+// what the canonical generator produces, so this now IMPORTS it instead of
+// mirroring it (#59).
+//
+// The old copy justified itself with "coms-core.ts is vendored under a 3-way-
+// merge rule". That was wrong: coms-core.ts is a LOCAL module with no upstream
+// counterpart (DIVERGENCE.md, "coms-core.ts (local shared layer — NOT
+// vendored)"), and DIVERGENCE.md already names `ulid` + the Crockford alphabet
+// as belonging there. Importing it carries no merge burden.
+export const ULID_ALPHABET = CROCKFORD;
+export { ulid };
