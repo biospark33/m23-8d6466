@@ -52,24 +52,42 @@ describe("SECRET_ENV_KEY_RE", () => {
 	});
 
 	test("does NOT match a secret word that is merely a substring", () => {
-		// The whole point of the (^|_)…($|_) anchoring: PATH must not be treated
+		// The whole point of the segment anchoring: PATH must not be treated
 		// as a PAT, or every report would be [REDACTED] soup.
 		for (const k of ["PATH", "AUTHOR", "PASSAGE", "KEYBOARD", "MONKEY", "PATTERN", "URLENCODE"]) {
 			expect(SECRET_ENV_KEY_RE.test(k)).toBe(false);
 		}
 	});
 
-	// KNOWN BUG (#73): hyphen is not a segment boundary, so a hyphenated secret
-	// key such as `x-api-key` / `X-AUTH-TOKEN` is NEVER redacted. Hyphenated env
-	// names are legal (docker --env, k8s-injected vars) and process.env accepts
-	// them, so this is a live credential-leak path, not a cosmetic gap — it must
-	// not read as green-and-fine. Left `test.todo` (not asserted as passing)
-	// until #73 widens the boundary class to `[_-]`; fixing the regex itself is
-	// deliberately out of scope for this change. See the KNOWN BUG note on
-	// SECRET_ENV_KEY_RE in scripts/lib/coms-smoke-helpers.ts.
-	test.todo("BUG (#73): a hyphenated secret key IS redacted", () => {
-		expect(SECRET_ENV_KEY_RE.test("x-api-key")).toBe(true);
-		expect(SECRET_ENV_KEY_RE.test("X-AUTH-TOKEN")).toBe(true);
+	test("FIXED (#73): any non-alphanumeric char is a segment boundary, not just `_`", () => {
+		// Hyphenated env names are legal (docker --env, k8s-injected vars) and
+		// process.env accepts them; header-style keys are a common shape for
+		// exactly the credentials this guard exists to catch. Dotted keys show up
+		// via Spring-style config. The boundary class is `[^A-Za-z0-9]` so every
+		// separator anyone actually uses counts.
+		for (const k of [
+			"x-api-key",
+			"X-AUTH-TOKEN",
+			"db-password",
+			"api.key",
+			"spring.datasource.password",
+			"svc:token",
+			"MIXED-STYLE_KEY",
+			"-KEY-", // separator on both sides, nothing else
+		]) {
+			expect(SECRET_ENV_KEY_RE.test(k)).toBe(true);
+		}
+	});
+
+	test("ACCEPTED LIMIT: a separator-less key is NOT matched", () => {
+		// The residual leak path after #73: with no boundary char around the
+		// secret word there is nothing to anchor on, and the only alternative —
+		// substring matching — would redact PATH/AUTHOR/MONKEY and shred every
+		// report. camelCase can't be used as a boundary either, since the pattern
+		// is deliberately case-insensitive so `github_token` matches.
+		for (const k of ["APIKEY", "PASSWD", "apiKey", "githubtoken", "SECRETS"]) {
+			expect(SECRET_ENV_KEY_RE.test(k)).toBe(false);
+		}
 	});
 
 	test("is stateless across calls (no /g lastIndex trap)", () => {
@@ -151,6 +169,11 @@ describe("collectSecretValues", () => {
 	test("the four candidate spellings collapse for an ordinary alphanumeric secret", () => {
 		// No cost in the common case — the Set dedupes raw/trimmed/escaped.
 		expect(collectSecretValues({ GITHUB_TOKEN: "ghp_abcdefgh1234" })).toEqual(["ghp_abcdefgh1234"]);
+	});
+
+	test("FIXED (#73): a hyphenated key's value is collected and scrubbed end to end", () => {
+		const secrets = collectSecretValues({ "x-api-key": "sk-live-DEADBEEFCAFE" });
+		expect(redact("auth failed: sk-live-DEADBEEFCAFE", secrets)).toBe("auth failed: [REDACTED]");
 	});
 
 	test("ignores non-string env slots", () => {

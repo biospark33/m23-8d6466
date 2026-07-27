@@ -12,17 +12,24 @@ import { type ChildProcess, spawnSync } from "node:child_process";
 import * as crypto from "node:crypto";
 
 // ── Report hygiene: ambient secrets must never leak into the JSON report. ────
-// An env value is treated as a secret when its KEY has a secret-bearing
-// SEGMENT. Segment-boundary matching (not substring) so PATH/AUTHOR-style keys
-// don't trip it, while *_PAT, bare *_PASS, *_CRED, *_PRIVATE etc. are covered
+// An env value is treated as a secret when its KEY contains a secret word as a
+// whole SEGMENT. A segment boundary is the start/end of the key or ANY
+// non-alphanumeric character — `_`, `-`, `.`, `:` and friends all separate
+// segments, because every env-var naming convention in the wild uses one of
+// them (`API_KEY`, `x-api-key`, `spring.datasource.password`). Matching by
+// segment rather than substring is what keeps PATH/AUTHOR-style keys from
+// tripping it, while *_PAT, bare *_PASS, *_CRED, *_PRIVATE etc. are covered
 // (C7).
 //
 // Contract / known limits of this pattern:
-//   - KNOWN BUG (#73): the boundary class is `_` only — a hyphenated key such
-//     as `x-api-key` or `X-AUTH-TOKEN` does NOT match, so its value is never
-//     redacted. Tracked separately; NOT fixed here because widening the class
-//     to `[_-]` needs its own review of blast radius. Pinned in
-//     tests/scripts/coms-smoke-helpers.test.ts as `test.todo`.
+//   - ACCEPTED LIMIT: a key with NO separator at all around the secret word is
+//     not matched — `APIKEY`, `PASSWD`, `apiKey`, `githubtoken` all slip
+//     through. This is the price of segment matching: the only way to catch
+//     them is substring matching, which would redact PATH, AUTHOR, MONKEY and
+//     turn every report into `[REDACTED]` soup. Case-boundary (camelCase)
+//     detection is not possible either — the pattern is case-INsensitive by
+//     design so `github_token` matches. Pinned in
+//     tests/scripts/coms-smoke-helpers.test.ts.
 //   - ACCEPTED LIMIT: `URL` in the alternation over-redacts — any `*_URL_*`
 //     segment (e.g. `BASE_URL_PREFIX`, `API_URL`) is treated as secret-bearing
 //     even when it holds a plain hostname. This is deliberate: over-redaction
@@ -30,7 +37,7 @@ import * as crypto from "node:crypto";
 //     connection string carrying inline credentials (`DATABASE_URL`) MUST be
 //     covered. The scrub fails CLOSED on purpose.
 export const SECRET_ENV_KEY_RE =
-	/(^|_)(KEY|TOKEN|SECRET|PASS|PASSWORD|PAT|CRED|CREDENTIAL|PRIVATE|JWT|AUTH|DSN|URL)($|_)/i;
+	/(^|[^A-Za-z0-9])(KEY|TOKEN|SECRET|PASS|PASSWORD|PAT|CRED|CREDENTIAL|PRIVATE|JWT|AUTH|DSN|URL)($|[^A-Za-z0-9])/i;
 
 // Values shorter than this are ignored — they are almost always noise ("true",
 // "1", "dev") whose redaction would shred the report.
