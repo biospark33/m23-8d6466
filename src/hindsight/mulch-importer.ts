@@ -83,9 +83,11 @@ export class SymlinkTargetUnreadableError extends Error {
  * ticket otherwise.
  */
 function errnoOf(e: unknown): string {
-  const code = (e as NodeJS.ErrnoException | undefined)?.code;
-  if (code) return code;
-  return e instanceof Error ? e.message : String(e);
+  const raw = (e as NodeJS.ErrnoException | undefined)?.code;
+  const str = raw ?? (e instanceof Error ? e.message : String(e));
+  // ponytail: single-line + 200-char cap — a wrapped error's multi-line message
+  // or a parser dump must not corrupt the result envelope or log line (#67).
+  return (str.split("\n")[0] ?? "").slice(0, 200);
 }
 
 /** Stable errno code surfaced when the expertise dir cannot be read. */
@@ -187,6 +189,7 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
     if (code === "ENOENT") {
       return emptyDirResult(requestId, opts.bankId, start);
     }
+    const cause = code ?? "unknown";
     const result: ImportResult = {
       ok: false,
       totalFiles: 0,
@@ -194,7 +197,7 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
       updatedFiles: 0,
       failures: [],
       requestId,
-      error: { code: ERR_EXPERTISE_DIR_UNREADABLE, message: "expertise_dir_unreadable" },
+      error: { code: ERR_EXPERTISE_DIR_UNREADABLE, message: `expertise dir unreadable: ${opts.expertiseDir} (${cause})` },
     };
     log({
       requestId,
@@ -209,7 +212,7 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
     });
     emitLog(requestId, "import", opts.bankId, start, "error", {
       code: ERR_EXPERTISE_DIR_UNREADABLE,
-      message: "expertise_dir_unreadable",
+      message: `expertise dir unreadable: ${opts.expertiseDir} (${cause})`,
     });
     return result;
   }
@@ -353,11 +356,12 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
       else if (e instanceof SymlinkTargetUnreadableError) code = "symlink_escape";
       else code = "parse_failed";
       const msg = (e as Error).message;
-      // `error` stays the stable code; `cause` carries the message so the
-      // reason survives into the result, not just the log (#67). Both
-      // symlink cases collapse to `symlink_escape`, so without this an escape
-      // and an unreadable target are indistinguishable to the caller.
-      failures.push({ file: relFile, error: code, cause: msg });
+      // `error` is the stable code callers switch on; `cause` carries the reason
+      // ONLY when it adds information beyond the code itself — otherwise the field
+      // is redundant noise (#67).
+      const failure: ImportFailure = { file: relFile, error: code };
+      if (msg && msg !== code) failure.cause = msg;
+      failures.push(failure);
       status = "error";
       fileErr = { code, message: msg };
     }
@@ -442,7 +446,7 @@ function parseFile(filePath: string, dirReal: string, failures: ImportFailure[],
   // 5 MB per-file cap (before reading the whole body into memory would be a DoS).
   const stat = statSync(resolved);
   if (stat.size > MAX_FILE_BYTES) {
-    throw new FileTooLargeError();
+    throw new FileTooLargeError(`file_too_large: ${stat.size} bytes exceeds ${MAX_FILE_BYTES}`);
   }
   // Fix 3 (defense in depth): a FIFO/socket/device that survived the directory
   // listing (e.g. created between listing and parse) would block readFileSync.

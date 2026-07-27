@@ -675,7 +675,8 @@ describe("importMulch — fix [8] unreadable expertise dir (EACCES)", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error?.code).toBe("expertise_dir_unreadable");
-    expect(result.error?.message).toBe("expertise_dir_unreadable");
+    expect(result.error?.message).toContain("expertise dir unreadable");
+    expect(result.error?.message).toContain("ENOTDIR"); // #67: errno now reaches the result, not just the log
   });
 
   test("readdirSync ENOENT (dir vanishes between realpath+readdir) → still graceful empty", async () => {
@@ -692,6 +693,8 @@ describe("importMulch — fix [8] unreadable expertise dir (EACCES)", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error?.code).toBe("expertise_dir_not_found"); // dir-not-found stable code
+    // #67: the errno behind realpath failure now reaches the result message
+    expect(result.error?.message).toContain("ENOENT");
   });
 
   test("empty dir → graceful ok:true with empty expertise dir note (regression)", async () => {
@@ -738,6 +741,8 @@ this is not json
     // result, without re-running the import with logging on.
     expect(bad!.cause).toBeTruthy();
     expect(typeof bad!.cause).toBe("string");
+    expect(bad!.cause).not.toBe(bad!.error); // #67: cause must add info beyond the stable code
+    expect(bad!.cause!).toMatch(/JSON|token|position|Unexpected|json/i); // carries the parser message
     // NO whole-file parse_failed for this file.
     const pf = result.failures.find(
       (f) => f.file === "mixed.jsonl" && f.error === "parse_failed",
