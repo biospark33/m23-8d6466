@@ -68,9 +68,15 @@ export function createServer(port = 0): SwarmClawServer {
       if (method === "POST") {
         const len = Number(req.headers.get("content-length") ?? 0);
         if (len > MAX_BODY_BYTES) {
+          // Drain the refused body off the socket before responding. An
+          // unread remainder leaves bytes on a keep-alive connection that
+          // Bun's pool reuses, mis-parsing the next request as a 400.
+          // ponytail: drain capped at MAX_BODY_BYTES — clears the poisoning
+          // for bodies near the cap (the actual failure mode). Pathological
+          // multi-GB declared lengths fall back to connection: close below;
+          // per-request byte accounting with a hard close is the upgrade path.
+          await drainBody(req);
           logPayloadTooLarge();
-          // The body stays unread on the socket — close the connection so a
-          // keep-alive client can never reuse this poisoned channel.
           return json({ status: 413, body: { error: "payload too large" } }, { connection: "close" });
         }
       }
@@ -129,6 +135,28 @@ export function createServer(port = 0): SwarmClawServer {
 export const MAX_BODY_BYTES = 1_048_576;
 
 export const PAYLOAD_TOO_LARGE = new Error("payload too large");
+
+// Drain an unread request body off the socket so a keep-alive client cannot
+// reuse a connection whose buffer still holds the refused payload (Bun
+// mis-parses the next request on that connection as a 400). Bounded at
+// MAX_BODY_BYTES; a body larger than that relies on the connection: close
+// response header to evict the channel.
+async function drainBody(req: Request): Promise<void> {
+  if (!req.body) return;
+  const reader = req.body.getReader();
+  let drained = 0;
+  try {
+    while (drained < MAX_BODY_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      drained += value.length;
+    }
+  } catch {
+    // Socket already closed — nothing left to drain.
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
 
 // Exported as a test seam: a unit test drives an over-limit chunked stream
 // (no content-length) through the bounded read to assert the PAYLOAD_TOO_LARGE
