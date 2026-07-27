@@ -79,14 +79,44 @@ describe("SECRET_ENV_KEY_RE", () => {
 		}
 	});
 
-	test("ACCEPTED LIMIT: a separator-less key is NOT matched", () => {
-		// The residual leak path after #73: with no boundary char around the
-		// secret word there is nothing to anchor on, and the only alternative —
-		// substring matching — would redact PATH/AUTHOR/MONKEY and shred every
-		// report. camelCase can't be used as a boundary either, since the pattern
-		// is deliberately case-insensitive so `github_token` matches.
+	test("FIXED (#82): separator-less keys are matched by the curated substring tier", () => {
+		// These have no boundary char to anchor on, so tier 1 cannot see them.
+		// Tier 2 catches them with a short list of words that do not occur inside
+		// innocuous identifiers. Was pinned here as an ACCEPTED LIMIT until #82.
 		for (const k of ["APIKEY", "PASSWD", "apiKey", "githubtoken", "SECRETS"]) {
+			expect(SECRET_ENV_KEY_RE.test(k)).toBe(true);
+		}
+	});
+
+	test("#82's substring tier does not re-break the segment-anchoring negatives", () => {
+		// The reason tier 2 is a curated list and not a blanket substring match:
+		// every one of these must still be treated as innocuous. `KEY`, `PASS`,
+		// `PAT`, `AUTH` and `URL` are deliberately ABSENT from tier 2 for exactly
+		// this reason — see the table in coms-smoke-helpers.ts.
+		for (const k of [
+			"PATH",
+			"AUTHOR",
+			"PASSAGE",
+			"KEYBOARD",
+			"MONKEY",
+			"PATTERN",
+			"URLENCODE",
+			"PATHOLOGY",
+			"BYPASS",
+			"COMPASS",
+			"AUTHORITY",
+			"DONKEY",
+		]) {
 			expect(SECRET_ENV_KEY_RE.test(k)).toBe(false);
+		}
+	});
+
+	test("#82: over-redaction is the accepted direction for tier-2 near-misses", () => {
+		// TOKENIZER/SECRETARY are not credentials, but they contain a tier-2 word
+		// and so are redacted. Pinned deliberately: over-redaction costs report
+		// legibility, under-redaction leaks a credential. Fails CLOSED.
+		for (const k of ["TOKENIZER", "SECRETARY", "PASSWORD_HINT_LABEL"]) {
+			expect(SECRET_ENV_KEY_RE.test(k)).toBe(true);
 		}
 	});
 

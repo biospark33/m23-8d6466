@@ -22,22 +22,53 @@ import * as crypto from "node:crypto";
 // (C7).
 //
 // Contract / known limits of this pattern:
-//   - ACCEPTED LIMIT: a key with NO separator at all around the secret word is
-//     not matched — `APIKEY`, `PASSWD`, `apiKey`, `githubtoken` all slip
-//     through. This is the price of segment matching: the only way to catch
-//     them is substring matching, which would redact PATH, AUTHOR, MONKEY and
-//     turn every report into `[REDACTED]` soup. Case-boundary (camelCase)
-//     detection is not possible either — the pattern is case-INsensitive by
-//     design so `github_token` matches. Pinned in
-//     tests/scripts/coms-smoke-helpers.test.ts.
 //   - ACCEPTED LIMIT: `URL` in the alternation over-redacts — any `*_URL_*`
 //     segment (e.g. `BASE_URL_PREFIX`, `API_URL`) is treated as secret-bearing
 //     even when it holds a plain hostname. This is deliberate: over-redaction
 //     only costs report legibility, under-redaction leaks a credential, and a
 //     connection string carrying inline credentials (`DATABASE_URL`) MUST be
 //     covered. The scrub fails CLOSED on purpose.
-export const SECRET_ENV_KEY_RE =
+const SECRET_ENV_KEY_SEGMENT_RE =
 	/(^|[^A-Za-z0-9])(KEY|TOKEN|SECRET|PASS|PASSWORD|PAT|CRED|CREDENTIAL|PRIVATE|JWT|AUTH|DSN|URL)($|[^A-Za-z0-9])/i;
+
+// Tier 2 (#82): a key with NO separator at all — `APIKEY`, `PASSWD`, `apiKey`,
+// `githubtoken`, `SECRETS` — is invisible to segment matching, and camelCase
+// cannot rescue it (the match is case-INsensitive by design, so `github_token`
+// works but `apiKey` and `apikey` are indistinguishable).
+//
+// The fix is NOT to drop the boundary rule wholesale: substring-matching `KEY`
+// or `PASS` re-breaks PATH, AUTHOR, PASSAGE, KEYBOARD, MONKEY, PATTERN and
+// turns the report into `[REDACTED]` soup. Instead this is a curated substring
+// tier holding ONLY words long and specific enough that they do not occur
+// inside innocuous identifiers. Each entry has to earn its place:
+//
+//   safe here          why                        NOT here          why not
+//   -----------------  -------------------------  ----------------  --------------
+//   PASSWD, PASSWORD   no ordinary word contains  KEY               MONKEY, KEYBOARD
+//   PASSPHRASE         them                       PASS              PASSAGE
+//   SECRET             (also catches SECRETS)     PAT               PATH, PATTERN
+//   TOKEN              TOKENIZER over-redacts,    AUTH              AUTHOR
+//   CREDENTIAL         which is the safe          URL               URLENCODE
+//   APIKEY, ACCESSKEY  direction
+//   PRIVATEKEY, AUTHTOKEN
+//
+// Over-redaction costs report legibility; under-redaction leaks a credential.
+// This tier fails CLOSED on purpose, exactly like the `URL` entry above.
+const SECRET_ENV_KEY_SUBSTRING_RE =
+	/(PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|CREDENTIAL|APIKEY|ACCESSKEY|PRIVATEKEY|AUTHTOKEN)/i;
+
+/**
+ * True when an env KEY looks secret-bearing: a secret word as a whole segment
+ * (tier 1), or one of the curated separator-less words (tier 2, #82).
+ *
+ * Kept as a RegExp-shaped object rather than a plain function because callers
+ * and tests use `.test(key)`; `lastIndex` is never involved (no /g on either
+ * tier), so this is safe to share across calls.
+ */
+export const SECRET_ENV_KEY_RE = {
+	test: (key: string): boolean =>
+		SECRET_ENV_KEY_SEGMENT_RE.test(key) || SECRET_ENV_KEY_SUBSTRING_RE.test(key),
+};
 
 // Values shorter than this are ignored — they are almost always noise ("true",
 // "1", "dev") whose redaction would shred the report.
