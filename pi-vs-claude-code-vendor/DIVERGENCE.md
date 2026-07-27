@@ -25,6 +25,10 @@ Extracted from the two transports where the code was byte-for-byte identical
 (or identical after the drift fixes above). Zero behavior change — a pure
 refactor covered by `tests/vendor/coms-core.test.ts`.
 
+- `CROCKFORD` is exported (#59) so `scripts/lib/coms-smoke-helpers.ts` can
+  re-export `ulid` + the alphabet instead of keeping its own copy. That copy had
+  justified itself with the 3-way-merge rule, which does not apply here —
+  `coms-core.ts` is local, with no upstream counterpart to merge against.
 - **Pure helpers**: `ulid` (+ Crockford alphabet), `isValidHex`, `hexFg`,
   `fallbackColor` (+ `FALLBACK_PALETTE`), `parseFrontmatter`, `abbreviateModel`
   (incl. the non-string guard that historically drifted), `sanitizePeerText`,

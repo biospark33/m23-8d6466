@@ -489,10 +489,11 @@ describe.skipIf(process.platform === "win32")("killTree", () => {
 	});
 });
 
-// NOTE: this ulid duplicates pi-vs-claude-code-vendor/coms-core.ts:75 (already
-// tested in tests/vendor/coms-core.test.ts). Deduping is tracked separately
-// (issue #59) — coms-core.ts is vendored under a 3-way-merge rule. These tests
-// exist so the COPY cannot silently drift from the canonical generator.
+// FIXED (#59): there is no longer a copy here — `ulid` is re-exported from the
+// canonical generator in pi-vs-claude-code-vendor/coms-core.ts (also covered by
+// tests/vendor/coms-core.test.ts). These tests are kept as a contract check on
+// the RE-EXPORT: they fail if the helper stops surfacing `ulid`/`ULID_ALPHABET`
+// or starts surfacing something that is not the canonical generator.
 describe("ulid", () => {
 	test("shape: 26 Crockford-base32 chars", () => {
 		const id = ulid();

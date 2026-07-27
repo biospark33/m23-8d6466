@@ -78,7 +78,9 @@ export function envBoundedInt(env: string | undefined, def: number, opts: EnvBou
 
 // ━━ Pure helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+// Exported because the coms smoke test asserts generated ids against the
+// alphabet, and a second copy of it there is what #59 was about.
+export const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 // 10 Crockford chars encode 50 bits of timestamp; Date.now() needs 48 bits
 // (good until ~year 10889), so the final slice(0, 26) never truncates the
