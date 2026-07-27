@@ -96,6 +96,12 @@ function handle(msg) {
   if (MODE === "stringresult" && msg.method === "tools/call") {
     return out({ jsonrpc: "2.0", id: msg.id, result: "just a string" });
   }
+  if (MODE === "arrayresult" && msg.method === "tools/call") {
+    return out({ jsonrpc: "2.0", id: msg.id, result: [{ type: "text", text: "hi" }] });
+  }
+  if (MODE === "numberresult" && msg.method === "tools/call") {
+    return out({ jsonrpc: "2.0", id: msg.id, result: 42 });
+  }
   if (MODE === "big" && msg.method !== "initialize") {
     return out(ok(msg.id, "y".repeat(2 * 1024 * 1024)));
   }
@@ -212,14 +218,22 @@ describe("McpClient — failures are never reported as success", () => {
     }
   });
 
-  test("a non-object `result` yields empty text and no structured payload", async () => {
-    // Latent surface: a server that answers with a bare string is NOT flagged
-    // isError. Callers must therefore treat empty toolText as "no evidence",
-    // never as "nothing was wrong" — this pins that it stays empty.
-    const c = client("stringresult");
+  test.each([
+    ["stringresult", "string"],
+    ["arrayresult", "array"],
+    ["numberresult", "number"],
+  ])("FIXED (#83): a non-object `result` (%s) is flagged isError, not silently empty", async (mode, kind) => {
+    // Was pinned as a latent surface: a server answering with a bare string
+    // left isError unset and toolText "", so a caller could not tell "nothing
+    // to report" from "no evidence produced". Now the client names the shape it
+    // got. toolText stays "" — the point is that isError says why.
+    const c = client(mode);
     try {
       await c.init(5_000);
       const res = await c.call("t", {}, 5_000);
+      expect(res.isError).toBe(true);
+      expect(String(res.error)).toContain(`expected an object result, got ${kind}`);
+      expect(String(res.error)).toContain("tools/call t");
       expect(toolText(res)).toBe("");
       expect(parseToolJsonText(toolText(res))).toBeUndefined();
     } finally {
