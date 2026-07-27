@@ -22,11 +22,49 @@
  * instruction.
  */
 import * as path from "node:path";
-import type { GateAssertion } from "../gate-runner.ts";
-import { findCheck, runVerifier, verifierUnusable } from "../verifier-child.ts";
+import type { GateAssertion, GateCheckOutcome } from "../gate-runner.ts";
+import { runVerifier, type VerifierRun } from "../verifier-child.ts";
+import { checkRequiredAcs, isOutcome } from "./lib/verdict.ts";
 
 /** The harness itself budgets ~55 s (cold LSP + 20 warm samples + a 15 s probe). */
 const VERIFIER_TIMEOUT_MS = 180_000;
+
+const SCOPE =
+  "SCOPED to warm diagnostics + navigation. NOT asserted (P0.6 story-level PARTIAL): " +
+  "single-query freshness, the AC3 artifact half, pi-lens-internal init timeout (AC3a), " +
+  "literal sequential per-file RPCs (AC4).";
+
+/**
+ * Turns an lsp-verify run into the clause-4b verdict.
+ *
+ * Exported so the boundary is testable without spawning the harness (same shape
+ * as p0-2's `auditOqDecisions`).
+ */
+export function evaluateLspVerdict(run: VerifierRun): GateCheckOutcome {
+  const result = checkRequiredAcs(run, ["AC1", "AC2"]);
+  if (isOutcome(result)) return result;
+  const { failures, checks } = result;
+  const ac1 = checks.AC1;
+
+  // The clause is about diagnostics reflecting a real uncommitted edit —
+  // assert that specific evidence key, not merely a green check.
+  const editUncommitted = ac1?.evidence?.editUncommitted;
+  if (ac1?.status === "pass" && editUncommitted !== true) {
+    failures.push(`AC1 passed but editUncommitted=${String(editUncommitted)} (expected true)`);
+  }
+  const warmP95Met = ac1?.evidence?.warmP95Met;
+  if (ac1?.status === "pass" && warmP95Met !== true) {
+    failures.push(`AC1 passed but warmP95Met=${String(warmP95Met)} (latency budget not met)`);
+  }
+
+  if (failures.length > 0) return { pass: false, detail: `${failures.join("; ")} — ${SCOPE}` };
+  return {
+    pass: true,
+    detail: `warm diagnostics reflect an uncommitted edit within the latency budget (warmP95Ms=${String(
+      ac1?.evidence?.warmP95Ms,
+    )}/${String(ac1?.evidence?.warmP95BudgetMs)}); cross-file definition resolved. ${SCOPE}`,
+  };
+}
 
 export function lspAssertions(repoRoot: string): GateAssertion[] {
   const verifier = path.join(repoRoot, "scripts", "lsp-verify.ts");
@@ -47,40 +85,7 @@ export function lspAssertions(repoRoot: string): GateAssertion[] {
           cwd: repoRoot,
           timeoutMs: VERIFIER_TIMEOUT_MS,
         });
-        const unusable = verifierUnusable(run);
-        if (unusable) return { pass: false, skip: true, detail: unusable };
-
-        const ac1 = findCheck(run, "AC1");
-        const ac2 = findCheck(run, "AC2");
-        const failures: string[] = [];
-        if (!ac1) failures.push("no AC1 (diagnostics) check in verdict");
-        else if (ac1.status !== "pass") failures.push(`AC1 status=${ac1.status}: ${ac1.reason ?? "-"}`);
-        if (!ac2) failures.push("no AC2 (navigation) check in verdict");
-        else if (ac2.status !== "pass") failures.push(`AC2 status=${ac2.status}: ${ac2.reason ?? "-"}`);
-
-        // The clause is about diagnostics reflecting a real uncommitted edit —
-        // assert that specific evidence key, not merely a green check.
-        const editUncommitted = ac1?.evidence?.editUncommitted;
-        if (ac1?.status === "pass" && editUncommitted !== true) {
-          failures.push(`AC1 passed but editUncommitted=${String(editUncommitted)} (expected true)`);
-        }
-        const warmP95Met = ac1?.evidence?.warmP95Met;
-        if (ac1?.status === "pass" && warmP95Met !== true) {
-          failures.push(`AC1 passed but warmP95Met=${String(warmP95Met)} (latency budget not met)`);
-        }
-
-        const scope =
-          "SCOPED to warm diagnostics + navigation. NOT asserted (P0.6 story-level PARTIAL): " +
-          "single-query freshness, the AC3 artifact half, pi-lens-internal init timeout (AC3a), " +
-          "literal sequential per-file RPCs (AC4).";
-
-        if (failures.length > 0) return { pass: false, detail: `${failures.join("; ")} — ${scope}` };
-        return {
-          pass: true,
-          detail: `warm diagnostics reflect an uncommitted edit within the latency budget (warmP95Ms=${String(
-            ac1?.evidence?.warmP95Ms,
-          )}/${String(ac1?.evidence?.warmP95BudgetMs)}); cross-file definition resolved. ${scope}`,
-        };
+        return evaluateLspVerdict(run);
       },
     },
   ];

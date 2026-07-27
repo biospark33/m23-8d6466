@@ -14,11 +14,14 @@
  * is clearly labelled so the write is identifiable in the bank, and no
  * credentials are written. See the evidence report for the read-only tension.
  */
-import type { GateAssertion } from "../gate-runner.ts";
+import type { GateAssertion, GateCheckOutcome } from "../gate-runner.ts";
 import { HindsightClient, HindsightHttpError, resolveBankId } from "../../hindsight/index.ts";
 // Not re-exported from the module index, whose header asks callers not to
 // re-shape the public contract — so it is imported from its source module.
-import { verifyRoundTrip } from "../../hindsight/round-trip-verifier.ts";
+import {
+  verifyRoundTrip,
+  type RoundTripResult,
+} from "../../hindsight/round-trip-verifier.ts";
 
 /**
  * Budget for the listBanks probe plus verifyRoundTrip's five calls
@@ -28,6 +31,63 @@ import { verifyRoundTrip } from "../../hindsight/round-trip-verifier.ts";
  * replace the step-named failure this check produces with a bare timeout.
  */
 const ASSERTION_TIMEOUT_MS = 150_000;
+
+/**
+ * Renders a failed reachability probe.
+ *
+ * Exported for the same reason as p0-2's `auditOqDecisions`: the interesting
+ * behaviour (naming the WRONG service that answered on the shared port, instead
+ * of dumping its HTML error page) is otherwise only reachable by standing up a
+ * hostile server.
+ */
+export function describeListBanksFailure(err: unknown, baseUrl: string): string {
+  let detail: string;
+  if (err instanceof HindsightHttpError) {
+    // Collapse the body to one line and, when an unrelated service
+    // answered with an HTML error page, name it from its <title>
+    // instead of dumping markup into the failure list.
+    const raw = err.message.replace(/\s+/g, " ").trim();
+    const title = raw.match(/<title>([^<]+)<\/title>/i)?.[1];
+    const body = title ? `served by "${title}" — not Hindsight` : raw.slice(0, 200);
+    detail = `no reachable Hindsight API at ${baseUrl} (listBanks -> HTTP ${err.status}); ${body}`;
+  } else {
+    detail = `Hindsight unreachable at ${baseUrl}: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  return `${detail}. OQ-4 records the local stack as BLOCKED-on-env (arm64 libpq/openssl@3 mismatch).`;
+}
+
+/**
+ * Turns a round-trip result into the clause-7 verdict.
+ *
+ * `recallMatches` and `insightCount` are asserted, not merely printed. Today
+ * `verifyRoundTrip`'s union makes them redundant — but this gate is the artifact
+ * that certifies clause 7, and it previously reported both values in its green
+ * detail while deciding on `result.ok` alone. Reporting a number is not checking
+ * it: if the verifier ever returned `ok:true` with a zero recall or no insights,
+ * the gate would have certified "retain -> recall -> reflect round-trips" off a
+ * round trip that recalled nothing.
+ */
+export function evaluateRoundTrip(result: RoundTripResult, bankId: string): GateCheckOutcome {
+  if (!result.ok) {
+    return {
+      pass: false,
+      detail: `round-trip failed at step "${result.step}": ${result.error?.code ?? ""} ${result.error?.message ?? ""}`.trim(),
+    };
+  }
+  const shortfalls: string[] = [];
+  if (result.recallMatches !== true) shortfalls.push(`recallMatches=${String(result.recallMatches)}`);
+  if (!(result.insightCount >= 1)) shortfalls.push(`insightCount=${String(result.insightCount)}`);
+  if (shortfalls.length > 0) {
+    return {
+      pass: false,
+      detail: `round-trip reported ok but proved no round trip: ${shortfalls.join(", ")}`,
+    };
+  }
+  return {
+    pass: true,
+    detail: `round-trip green on bank "${bankId}" (recallMatches=${result.recallMatches}, insightCount=${result.insightCount})`,
+  };
+}
 
 export function memoryAssertions(): GateAssertion[] {
   return [
@@ -58,22 +118,7 @@ export function memoryAssertions(): GateAssertion[] {
         try {
           await client.listBanks();
         } catch (err) {
-          let detail: string;
-          if (err instanceof HindsightHttpError) {
-            // Collapse the body to one line and, when an unrelated service
-            // answered with an HTML error page, name it from its <title>
-            // instead of dumping markup into the failure list.
-            const raw = err.message.replace(/\s+/g, " ").trim();
-            const title = raw.match(/<title>([^<]+)<\/title>/i)?.[1];
-            const body = title ? `served by "${title}" — not Hindsight` : raw.slice(0, 200);
-            detail = `no reachable Hindsight API at ${baseUrl} (listBanks -> HTTP ${err.status}); ${body}`;
-          } else {
-            detail = `Hindsight unreachable at ${baseUrl}: ${err instanceof Error ? err.message : String(err)}`;
-          }
-          return {
-            pass: false,
-            detail: `${detail}. OQ-4 records the local stack as BLOCKED-on-env (arm64 libpq/openssl@3 mismatch).`,
-          };
+          return { pass: false, detail: describeListBanksFailure(err, baseUrl) };
         }
 
         // Wrapped: a throw here would still be caught by the gate runner and
@@ -86,16 +131,7 @@ export function memoryAssertions(): GateAssertion[] {
             content: "QDS Phase-0 exit-gate probe — retain/recall/reflect round-trip check.",
           });
 
-          if (!result.ok) {
-            return {
-              pass: false,
-              detail: `round-trip failed at step "${result.step}": ${result.error?.code ?? ""} ${result.error?.message ?? ""}`.trim(),
-            };
-          }
-          return {
-            pass: true,
-            detail: `round-trip green on bank "${bankId}" (recallMatches=${result.recallMatches}, insightCount=${result.insightCount})`,
-          };
+          return evaluateRoundTrip(result, bankId);
         } catch (err) {
           return {
             pass: false,

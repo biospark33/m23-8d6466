@@ -36,17 +36,48 @@ const OPTIONAL_ENV = [
  * Deliberately not a subprocess: a synchronous spawn would block the gate's
  * event loop (defeating its own timeouts), and shelling out to `command -v`
  * would put a `shell: true` invocation on the hot path for no benefit.
+ *
+ * `isFile` is load-bearing: `X_OK` is set on every directory, so a directory
+ * named `git` sitting on PATH would otherwise satisfy "git is installed" — a
+ * preflight that greens on something it cannot execute.
  */
-function onPath(bin: string): boolean {
+export function onPath(bin: string): boolean {
   const dirs = (process.env.PATH ?? "").split(path.delimiter).filter((d) => d.length > 0);
   return dirs.some((dir) => {
+    const candidate = path.join(dir, bin);
     try {
-      fs.accessSync(path.join(dir, bin), fs.constants.X_OK);
-      return true;
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return fs.statSync(candidate).isFile();
     } catch {
       return false;
     }
   });
+}
+
+/**
+ * The preflight verdict itself, separated from the filesystem probing so the
+ * barrier's pass/fail boundary is unit-testable (see p0-2's `auditOqDecisions`
+ * for the same shape).
+ *
+ * The unset-env list is REPORTING ONLY — every var has a default, so it must
+ * never move the verdict. It is threaded through both branches so AC3's "report
+ * which env vars are missing" is answerable from either outcome.
+ */
+export function preflightVerdict(
+  missingBins: readonly string[],
+  missingPaths: readonly string[],
+  unsetEnv: readonly string[],
+): { pass: boolean; detail: string } {
+  const envNote = `unset env (defaults apply): ${unsetEnv.length > 0 ? unsetEnv.join(", ") : "none"}`;
+  if (missingBins.length > 0 || missingPaths.length > 0) {
+    const parts = [
+      missingBins.length > 0 ? `missing binaries: ${missingBins.join(", ")}` : "",
+      missingPaths.length > 0 ? `missing repo paths: ${missingPaths.join(", ")}` : "",
+      envNote,
+    ].filter(Boolean);
+    return { pass: false, detail: parts.join("; ") };
+  }
+  return { pass: true, detail: `toolchain present; ${envNote}` };
 }
 
 export function envAssertions(repoRoot: string): GateAssertion[] {
@@ -63,21 +94,7 @@ export function envAssertions(repoRoot: string): GateAssertion[] {
           (p) => !fs.existsSync(path.join(repoRoot, p)),
         );
         const unsetEnv = OPTIONAL_ENV.filter((v) => !process.env[v]);
-
-        if (missingBins.length > 0 || missingPaths.length > 0) {
-          const parts = [
-            missingBins.length > 0 ? `missing binaries: ${missingBins.join(", ")}` : "",
-            missingPaths.length > 0 ? `missing repo paths: ${missingPaths.join(", ")}` : "",
-            `unset env (defaults apply): ${unsetEnv.length > 0 ? unsetEnv.join(", ") : "none"}`,
-          ].filter(Boolean);
-          return { pass: false, detail: parts.join("; ") };
-        }
-        return {
-          pass: true,
-          detail: `toolchain present; unset env (defaults apply): ${
-            unsetEnv.length > 0 ? unsetEnv.join(", ") : "none"
-          }`,
-        };
+        return preflightVerdict(missingBins, missingPaths, unsetEnv);
       },
     },
     {

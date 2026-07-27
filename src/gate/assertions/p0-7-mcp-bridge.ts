@@ -25,10 +25,79 @@
  * shared long-lived instance repeated runs would consume MAX_MCP_SERVERS=32 and
  * deny capacity to real registrations.
  */
+import { z } from "zod";
 import type { GateAssertion } from "../gate-runner.ts";
 
 const REQUIRED_TOOLS = ["retain", "recall", "reflect", "consolidate"] as const;
 const HTTP_TIMEOUT_MS = 10_000;
+
+/**
+ * Operator-facing remedy for a 429. Capacity exhaustion is operationally
+ * distinct from a bad request: it means this gate has been re-run against a
+ * LONG-LIVED SwarmClaw and is now competing with real registrations for the 32
+ * slots. Say so explicitly rather than reporting a generic registration
+ * failure, because the remedy is procedural, not a code fix.
+ *
+ * Held as a const so the message is one template literal at the call site
+ * (biome `useTemplate`, issue #F025) without reflowing the prose.
+ */
+const CAPACITY_EXHAUSTED =
+  "POST /api/mcp-servers -> 429 (MCP server capacity exhausted). " +
+  "The clause-6 probe registers one record per run and SwarmClaw exposes no " +
+  "listing or delete route, so it must only be pointed at a DISPOSABLE " +
+  "SwarmClaw (in-memory stores; restart clears them). Restart the target " +
+  "instance, or add upstream lifecycle endpoints before running the gate " +
+  "against a shared, long-lived server.";
+
+/**
+ * SwarmClaw response shapes, validated rather than trusted (#F028).
+ *
+ * The bodies are `unknown` on the way in: `any` would let an upstream shape
+ * change surface as a silent `undefined` on the pass/fail path instead of a
+ * failure. `passthrough` keeps the schemas tolerant of fields the gate does not
+ * read — the point is to narrow what IS read, not to pin the whole contract.
+ */
+const RegistrationSchema = z.object({ id: z.string().min(1) }).passthrough();
+const ToolsEnvelopeSchema = z.object({ tools: z.array(z.unknown()) }).passthrough();
+const ToolEntrySchema = z.union([
+  z.string().min(1),
+  z.object({ name: z.string().min(1) }).passthrough(),
+]);
+
+/** The registered server's id, or undefined if the body did not carry one. */
+export function extractServerId(json: unknown): string | undefined {
+  const parsed = RegistrationSchema.safeParse(json);
+  return parsed.success ? parsed.data.id : undefined;
+}
+
+/** /test reported a healthy bridge. Anything other than a literal `true` is not health. */
+export function bridgeTestOk(json: unknown): boolean {
+  return z.object({ ok: z.literal(true) }).passthrough().safeParse(json).success;
+}
+
+/**
+ * Tool names from a /test body. Entries the schema does not recognise are
+ * dropped, never coerced — an unreadable entry must not stand in for a tool.
+ */
+export function extractToolNames(json: unknown): string[] {
+  const envelope = ToolsEnvelopeSchema.safeParse(json);
+  if (!envelope.success) return [];
+  return envelope.data.tools.flatMap((t) => {
+    const entry = ToolEntrySchema.safeParse(t);
+    if (!entry.success) return [];
+    return [typeof entry.data === "string" ? entry.data : entry.data.name];
+  });
+}
+
+/**
+ * The clause-6 predicate. A body with no tools, an empty `tools: []`, or a
+ * missing `tools` key all report the full required set as missing — "could not
+ * see the toolset" is never a vacuous pass.
+ */
+export function missingRequiredTools(json: unknown): string[] {
+  const tools = extractToolNames(json);
+  return REQUIRED_TOOLS.filter((t) => !tools.includes(t));
+}
 
 /** SwarmClaw's own default port is 3100 (src/swarmclaw/index.ts). */
 function swarmclawBase(): string {
@@ -38,7 +107,7 @@ function swarmclawBase(): string {
 async function postJson(
   url: string,
   body: unknown,
-): Promise<{ status: number; json?: any; text?: string; error?: string }> {
+): Promise<{ status: number; json?: unknown; text?: string; error?: string }> {
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -110,20 +179,9 @@ export function mcpBridgeAssertions(): GateAssertion[] {
           command: "hindsight-local-mcp",
         });
         if (server.status === 429) {
-          // Capacity exhaustion is operationally distinct from a bad request:
-          // it means this gate has been re-run against a LONG-LIVED SwarmClaw
-          // and is now competing with real registrations for the 32 slots.
-          // Say so explicitly rather than reporting a generic registration
-          // failure, because the remedy is procedural, not a code fix.
           return {
             pass: false,
-            detail:
-              `POST /api/mcp-servers -> 429 (MCP server capacity exhausted). ` +
-              `The clause-6 probe registers one record per run and SwarmClaw exposes no ` +
-              `listing or delete route, so it must only be pointed at a DISPOSABLE ` +
-              `SwarmClaw (in-memory stores; restart clears them). Restart the target ` +
-              `instance, or add upstream lifecycle endpoints before running the gate ` +
-              `against a shared, long-lived server. Body: ${(server.text ?? "").slice(0, 200)}`,
+            detail: `${CAPACITY_EXHAUSTED} Body: ${(server.text ?? "").slice(0, 200)}`,
           };
         }
         if (server.status !== 201) {
@@ -134,25 +192,23 @@ export function mcpBridgeAssertions(): GateAssertion[] {
           };
         }
 
-        const id = server.json?.id;
-        if (typeof id !== "string" || id.length === 0) {
+        const id = extractServerId(server.json);
+        if (id === undefined) {
           return { pass: false, detail: "registration returned no server id" };
         }
 
         // encodeURIComponent: `id` comes from the response body, so encoding keeps
         // the probe URL well-formed even if it ever contains path-unsafe characters.
         const tested = await postJson(`${base}/api/mcp-servers/${encodeURIComponent(id)}/test`, {});
-        if (tested.status !== 200 || tested.json?.ok !== true) {
+        if (tested.status !== 200 || !bridgeTestOk(tested.json)) {
           return {
             pass: false,
             detail: `POST /api/mcp-servers/${encodeURIComponent(id)}/test -> ${tested.status}: ${(tested.text ?? "").slice(0, 300)}`,
           };
         }
 
-        const tools: string[] = Array.isArray(tested.json?.tools)
-          ? tested.json.tools.map((t: any) => (typeof t === "string" ? t : t?.name)).filter(Boolean)
-          : [];
-        const missing = REQUIRED_TOOLS.filter((t) => !tools.includes(t));
+        const tools = extractToolNames(tested.json);
+        const missing = missingRequiredTools(tested.json);
         return missing.length > 0
           ? { pass: false, detail: `bridge healthy but missing tools: ${missing.join(", ")} (saw: ${tools.join(", ") || "none"})` }
           : { pass: true, detail: `bridge healthy; tools: ${tools.join(", ")}` };

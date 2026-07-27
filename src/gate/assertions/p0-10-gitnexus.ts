@@ -15,6 +15,7 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { z } from "zod";
 import type { GateAssertion } from "../gate-runner.ts";
 
 const execFileAsync = promisify(execFile);
@@ -51,12 +52,113 @@ async function gitnexus(
   }
 }
 
-function parseJson(text: string): any | undefined {
+/** `unknown`, not `any` (#F028): a shape change must fail a parse, not vanish. */
+function parseJson(text: string): unknown {
   try {
-    return JSON.parse(text);
+    return JSON.parse(text) as unknown;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The gitnexus response shapes the gate actually reads, validated rather than
+ * trusted (#F028). `passthrough` keeps them tolerant of the many fields the gate
+ * ignores; `error` and `impactedCount` stay `unknown` because they are only
+ * rendered, never compared.
+ */
+const ContextResponseSchema = z
+  .object({
+    status: z.string().optional(),
+    error: z.unknown(),
+    symbol: z.object({ filePath: z.string().min(1) }).passthrough().optional(),
+  })
+  .passthrough();
+
+const ImpactResponseSchema = z
+  .object({
+    error: z.unknown(),
+    target: z.object({ name: z.string().min(1) }).passthrough().optional(),
+    impactedCount: z.unknown(),
+  })
+  .passthrough();
+
+/** Audits `gitnexus context` output. Returns the resolved filePath on success. */
+export function auditContextJson(raw: unknown): { pass: boolean; detail: string; filePath?: string } {
+  const parsed = ContextResponseSchema.safeParse(raw);
+  if (!parsed.success) {
+    return {
+      pass: false,
+      detail: `gitnexus context returned an unrecognised shape: ${parsed.error.issues
+        .map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`)
+        .join("; ")}`,
+    };
+  }
+  const json = parsed.data;
+  // A soft failure is reported as an error object with exit 0.
+  if (json.error) return { pass: false, detail: `gitnexus context: ${String(json.error)}` };
+  if (json.status !== "found" || !json.symbol?.filePath) {
+    return {
+      pass: false,
+      detail: `gitnexus context returned status=${String(json.status)} with no symbol filePath`,
+    };
+  }
+  return { pass: true, detail: "", filePath: json.symbol.filePath };
+}
+
+/** Audits `gitnexus impact` output. Returns the impacted count for the detail line. */
+export function auditImpactJson(raw: unknown): {
+  pass: boolean;
+  detail: string;
+  impactedCount?: unknown;
+} {
+  const parsed = ImpactResponseSchema.safeParse(raw);
+  if (!parsed.success) {
+    return {
+      pass: false,
+      detail: `gitnexus impact returned an unrecognised shape: ${parsed.error.issues
+        .map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`)
+        .join("; ")}`,
+    };
+  }
+  const json = parsed.data;
+  if (json.error) return { pass: false, detail: `gitnexus impact: ${String(json.error)}` };
+  if (!json.target?.name) {
+    return { pass: false, detail: "gitnexus impact returned no target — graph data absent" };
+  }
+  return { pass: true, detail: "", impactedCount: json.impactedCount };
+}
+
+/**
+ * Staleness is NOT part of clause 7b (which requires a non-error state and real
+ * data), but it is material to Phase-1 correctness, so it is surfaced in the
+ * detail rather than silently ignored.
+ *
+ * A failed `gitnexus status` must NOT read as "fresh": an empty stdout misses
+ * the regex and would silently suppress the staleness signal, the opposite of
+ * surfacing it.
+ */
+export function stalenessNote(status: {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}): string {
+  if (status.status !== 0) {
+    return ` WARNING: staleness UNKNOWN — \`gitnexus status\` exited ${String(status.status)}: ${status.stderr}`;
+  }
+  // Exit 0 with NOTHING on stdout is not a fresh index, it is an unanswered
+  // question: no output misses every pattern and would silently read as fresh.
+  if (status.stdout.trim().length === 0) {
+    return " WARNING: staleness UNKNOWN — `gitnexus status` exited 0 but printed nothing.";
+  }
+  // Word-bounded and negation-aware: a bare /stale/i also matches "stale: false"
+  // and "not stale", so a FRESH index would have been reported STALE — and a
+  // warning that fires on every healthy run is a warning nobody reads.
+  const out = status.stdout.toLowerCase();
+  const negated = /\bstale\b\s*[:=]\s*(?:false|no|0)\b/.test(out) || /\bnot stale\b/.test(out);
+  return !negated && /\bstale\b/.test(out)
+    ? " WARNING: index reports STALE — re-run `gitnexus analyze` before Phase-1 stories."
+    : "";
 }
 
 export function gitnexusAssertions(repoRoot: string): GateAssertion[] {
@@ -77,47 +179,29 @@ export function gitnexusAssertions(repoRoot: string): GateAssertion[] {
           };
         }
         const ctxJson = parseJson(ctx.stdout);
-        if (!ctxJson) return { pass: false, detail: "gitnexus context emitted no parseable JSON" };
-        // A soft failure is reported as an error object with exit 0.
-        if (ctxJson.error) {
-          return { pass: false, detail: `gitnexus context: ${String(ctxJson.error)}` };
+        if (ctxJson === undefined) {
+          return { pass: false, detail: "gitnexus context emitted no parseable JSON" };
         }
-        if (ctxJson.status !== "found" || !ctxJson.symbol?.filePath) {
-          return {
-            pass: false,
-            detail: `gitnexus context returned status=${String(ctxJson.status)} with no symbol filePath`,
-          };
-        }
+        const ctxAudit = auditContextJson(ctxJson);
+        if (!ctxAudit.pass) return { pass: false, detail: ctxAudit.detail };
 
         const imp = await gitnexus(["impact", PROBE_SYMBOL, "-r", repoRoot, "--direction", "upstream"], repoRoot);
         if (imp.status !== 0) {
           return { pass: false, detail: `gitnexus impact exited ${String(imp.status)}: ${imp.stderr}` };
         }
         const impJson = parseJson(imp.stdout);
-        if (!impJson) return { pass: false, detail: "gitnexus impact emitted no parseable JSON" };
-        if (impJson.error) return { pass: false, detail: `gitnexus impact: ${String(impJson.error)}` };
-        if (!impJson.target?.name) {
-          return { pass: false, detail: "gitnexus impact returned no target — graph data absent" };
+        if (impJson === undefined) {
+          return { pass: false, detail: "gitnexus impact emitted no parseable JSON" };
         }
+        const impAudit = auditImpactJson(impJson);
+        if (!impAudit.pass) return { pass: false, detail: impAudit.detail };
 
-        // Staleness is NOT part of clause 7b (which requires a non-error state
-        // and real data), but it is material to Phase-1 correctness, so it is
-        // surfaced in the detail rather than silently ignored.
-        // A failed `gitnexus status` must NOT read as "fresh": an empty stdout
-        // misses the regex and would silently suppress the staleness signal,
-        // the opposite of surfacing it.
-        const status = await gitnexus(["status"], repoRoot);
-        const stale =
-          status.status !== 0
-            ? ` WARNING: staleness UNKNOWN — \`gitnexus status\` exited ${String(status.status)}: ${status.stderr}`
-            : /stale/i.test(status.stdout)
-              ? " WARNING: index reports STALE — re-run `gitnexus analyze` before Phase-1 stories."
-              : "";
+        const stale = stalenessNote(await gitnexus(["status"], repoRoot));
 
         return {
           pass: true,
-          detail: `context resolved ${PROBE_SYMBOL} -> ${String(ctxJson.symbol.filePath)}; impact returned target with impactedCount=${String(
-            impJson.impactedCount,
+          detail: `context resolved ${PROBE_SYMBOL} -> ${String(ctxAudit.filePath)}; impact returned target with impactedCount=${String(
+            impAudit.impactedCount,
           )}.${stale}`,
         };
       },

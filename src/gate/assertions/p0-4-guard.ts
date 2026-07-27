@@ -19,6 +19,75 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { GateAssertion } from "../gate-runner.ts";
 
+/**
+ * Strips comment lines so a DISABLED declaration cannot satisfy a "declares X"
+ * check.
+ *
+ * This closes a false green that both halves of the audit had: `# budgetCapUsd:
+ * 0.5` in the manifest satisfied `/budgetCapUsd\s*:/`, and a stale `// overflow:
+ * 3` comment in index.ts was matched by `String.match` BEFORE the real mapping,
+ * so a live `overflow: 0` (cap breach exits zero — the exact runaway this clause
+ * guards) was reported green.
+ */
+function stripComments(text: string, marker: "#" | "//"): string {
+  return text
+    .split("\n")
+    .map((l) => (l.trimStart().startsWith(marker) ? "" : l))
+    .join("\n");
+}
+
+/**
+ * A declaration must carry an actual positive number. `budgetCapUsd:` with no
+ * value, or `: null`, is an absent cap wearing the key's name.
+ */
+function declaresPositive(text: string, key: string): boolean {
+  // Anchored at the line start so `defaultBudgetCapUsd` cannot stand in for
+  // `budgetCapUsd` — the key the launcher actually reads.
+  const m = text.match(new RegExp(`^[ \\t]*${key}\\s*:\\s*([0-9]*\\.?[0-9]+)`, "m"));
+  return m !== null && Number(m[1]) > 0;
+}
+
+export interface LauncherGuardAudit {
+  failures: string[];
+  overflowExit?: string;
+}
+
+/**
+ * Audits the launcher's cap declarations and its overflow exit mapping.
+ *
+ * Exported so clause 3's structural contract is testable rather than buried in
+ * a check (same shape as p0-2's `auditOqDecisions`).
+ *
+ * EVERY overflow mapping must be non-zero, not merely the first one found: the
+ * previous first-match-wins read let a second, real mapping of 0 hide behind an
+ * earlier benign one.
+ */
+export function auditLauncherGuards(manifestText: string, indexText: string): LauncherGuardAudit {
+  const manifest = stripComments(manifestText, "#");
+  const index = stripComments(indexText, "//");
+
+  const failures: string[] = [];
+  if (!declaresPositive(manifest, "budgetCapUsd")) {
+    failures.push("manifest declares no budgetCapUsd");
+  }
+  if (!declaresPositive(manifest, "wallClockCapMs")) {
+    failures.push("manifest declares no wallClockCapMs");
+  }
+
+  // The overflow exit status must map to a NON-ZERO code, else a cap
+  // breach would look like success to any caller.
+  const overflowMatches = [...index.matchAll(/\boverflow\s*:\s*(\d+)/g)].map((m) => m[1] as string);
+  if (overflowMatches.length === 0) {
+    failures.push("no overflow exit-code mapping found in cli-anything/src/index.ts");
+  }
+  const zeroMapping = overflowMatches.find((code) => Number(code) === 0);
+  if (zeroMapping !== undefined) {
+    failures.push(`overflow maps to exit ${zeroMapping} (must be non-zero)`);
+  }
+
+  return { failures, overflowExit: overflowMatches[0] };
+}
+
 export function guardAssertions(repoRoot: string): GateAssertion[] {
   const manifest = path.join(repoRoot, "cli-anything", "manifests", "research-trio.yaml");
   const indexTs = path.join(repoRoot, "cli-anything", "src", "index.ts");
@@ -36,21 +105,10 @@ export function guardAssertions(repoRoot: string): GateAssertion[] {
           return { pass: false, detail: `launcher files missing: ${missing.join(", ")}` };
         }
 
-        const manifestText = fs.readFileSync(manifest, "utf8");
-        const indexText = fs.readFileSync(indexTs, "utf8");
-
-        const failures: string[] = [];
-        if (!/budgetCapUsd\s*:/.test(manifestText)) failures.push("manifest declares no budgetCapUsd");
-        if (!/wallClockCapMs\s*:/.test(manifestText)) failures.push("manifest declares no wallClockCapMs");
-
-        // The overflow exit status must map to a NON-ZERO code, else a cap
-        // breach would look like success to any caller.
-        const overflowMatch = indexText.match(/overflow\s*:\s*(\d+)/);
-        if (!overflowMatch) {
-          failures.push("no overflow exit-code mapping found in cli-anything/src/index.ts");
-        } else if (Number(overflowMatch[1]) === 0) {
-          failures.push(`overflow maps to exit ${overflowMatch[1]} (must be non-zero)`);
-        }
+        const { failures, overflowExit } = auditLauncherGuards(
+          fs.readFileSync(manifest, "utf8"),
+          fs.readFileSync(indexTs, "utf8"),
+        );
 
         const caveat =
           "STRUCTURAL only — proves the cap path exists and exits non-zero; " +
@@ -60,7 +118,7 @@ export function guardAssertions(repoRoot: string): GateAssertion[] {
           ? { pass: false, detail: `${failures.join("; ")} — ${caveat}` }
           : {
               pass: true,
-              detail: `budgetCapUsd + wallClockCapMs declared; overflow -> exit ${overflowMatch?.[1]}. ${caveat}`,
+              detail: `budgetCapUsd + wallClockCapMs declared; overflow -> exit ${overflowExit}. ${caveat}`,
             };
       },
     },

@@ -32,8 +32,58 @@ interface LiveRun {
     exitStatus?: string;
     partial?: boolean;
     comsLog?: unknown[];
-    result?: { models?: unknown[] };
+    // `unknown`, not `unknown[]`: this is untrusted on-disk evidence, and
+    // declaring it as an array would let a schema drift to a scalar pass the
+    // type checker and reach `.map` at runtime. `auditMixedModelRun` narrows it.
+    result?: { models?: unknown };
   };
+}
+
+export interface MixedModelAudit {
+  failures: string[];
+  distinctModels: number;
+  comsCount: number;
+}
+
+/**
+ * Audits a P0.3 run of record against clause 1.
+ *
+ * Exported so the clause-1 contract is testable rather than buried in a check
+ * (same shape as p0-2's `auditOqDecisions`). Every field is checked with an
+ * explicit positive assertion — `!== 0`, `!== false`, `!== "success"` — so a
+ * MISSING field fails rather than reading as satisfied.
+ */
+export function auditMixedModelRun(run: LiveRun): MixedModelAudit {
+  const merged = run.merged_output;
+  const rawModels = merged?.result?.models;
+  const models = Array.isArray(rawModels) ? rawModels : [];
+  // JSON.stringify rather than String(): the current evidence file holds
+  // model-id strings, but String() on objects collapses every element to
+  // "[object Object]" (size always 1), so this is schema-change-proof.
+  const distinctModels = new Set(models.map((m) => JSON.stringify(m))).size;
+  const comsCount = Array.isArray(merged?.comsLog) ? merged.comsLog.length : 0;
+
+  const failures: string[] = [];
+  if (run.assertions?.exit_code !== 0) {
+    failures.push(`assertions.exit_code=${String(run.assertions?.exit_code)} (expected 0)`);
+  }
+  if (!merged) failures.push("no merged_output object");
+  // A non-array `models` is a schema change, not zero models — say so, because
+  // "0 distinct models" would read as a run that simply used no model.
+  if (merged && rawModels !== undefined && !Array.isArray(rawModels)) {
+    failures.push(`merged_output.result.models is not an array (got ${typeof rawModels})`);
+  }
+  if (merged?.partial !== false) failures.push(`partial=${String(merged?.partial)} (expected false)`);
+  if (merged?.exitStatus !== "success") {
+    failures.push(`exitStatus=${String(merged?.exitStatus)} (expected "success")`);
+  }
+  // Routed through the shared NaN-safe threshold helper so no assertion
+  // module carries a bare `< min` comparison for a future caller to copy.
+  if (!meetsMinCount(distinctModels, 2)) {
+    failures.push(`distinct models=${distinctModels} (expected >=2)`);
+  }
+
+  return { failures, distinctModels, comsCount };
 }
 
 export function mixedModelAssertions(repoRoot: string): GateAssertion[] {
@@ -67,28 +117,7 @@ export function mixedModelAssertions(repoRoot: string): GateAssertion[] {
           };
         }
 
-        const merged = run.merged_output;
-        const models = merged?.result?.models ?? [];
-        // JSON.stringify rather than String(): the current evidence file holds
-        // model-id strings, but String() on objects collapses every element to
-        // "[object Object]" (size always 1), so this is schema-change-proof.
-        const distinctModels = new Set(models.map((m) => JSON.stringify(m))).size;
-        const comsCount = merged?.comsLog?.length ?? 0;
-
-        const failures: string[] = [];
-        if (run.assertions?.exit_code !== 0) {
-          failures.push(`assertions.exit_code=${String(run.assertions?.exit_code)} (expected 0)`);
-        }
-        if (!merged) failures.push("no merged_output object");
-        if (merged?.partial !== false) failures.push(`partial=${String(merged?.partial)} (expected false)`);
-        if (merged?.exitStatus !== "success") {
-          failures.push(`exitStatus=${String(merged?.exitStatus)} (expected "success")`);
-        }
-        // Routed through the shared NaN-safe threshold helper so no assertion
-        // module carries a bare `< min` comparison for a future caller to copy.
-        if (!meetsMinCount(distinctModels, 2)) {
-          failures.push(`distinct models=${distinctModels} (expected >=2)`);
-        }
+        const { failures, distinctModels, comsCount } = auditMixedModelRun(run);
 
         const provenance =
           `evidence-of-record ${path.basename(evidence)} (recorded live run, not re-executed by this gate; run used QDS_TEAM_RUNNER=local subprocess-RPC, not the warren-server path)`;
