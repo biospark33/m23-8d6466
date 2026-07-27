@@ -145,11 +145,17 @@ export class McpClient {
 
   /** MCP handshake under an explicit (or default) deadline. */
   async init(timeoutMs: number = DEFAULT_INIT_TIMEOUT_MS): Promise<void> {
-    await this.rpc(
+    const msg = await this.rpc(
       "initialize",
       { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: this.clientName, version: "1" } },
       timeoutMs,
     );
+    // A JSON-RPC error response RESOLVES the rpc (that is how `call` surfaces
+    // tool errors). Unchecked here, a server that REJECTS the handshake would
+    // read as a successful init and the harness would keep going.
+    if (msg.error !== undefined) {
+      throw new Error(`rpc initialize failed: server returned an error: ${JSON.stringify(msg.error)}`);
+    }
     this.notify("notifications/initialized", {});
   }
 
