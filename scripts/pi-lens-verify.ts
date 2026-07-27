@@ -446,12 +446,17 @@ async function main(): Promise<void> {
           },
         });
       } else {
+        // TODO(goal): provision git on the verification host so AC2a (this
+        // skip branch) runs live instead. AC2b still skips without gitleaks/
+        // trivy. Kept as a code comment, NOT in the `reason` string below —
+        // that text is operator-facing and should say what happened and why,
+        // not carry a developer work item.
         record({
           ac: "AC2",
           name: "secret-scan detects hardcoded secret (live, opengrep)",
           status: "skip",
           reason:
-            `no secret finding surfaced for the synthetic fixture (git=${JSON.stringify(gitState)}, gitleaksOnPath=${gitleaksAvail}, trivyOnPath=${trivyAvail}). opengrep's secret ruleset scopes to the git working tree; without git init+staging the bundled scanner sees nothing. TODO(goal): ensure git is available to exercise live secret detection.`,
+            `no secret finding surfaced for the synthetic fixture (git=${JSON.stringify(gitState)}, gitleaksOnPath=${gitleaksAvail}, trivyOnPath=${trivyAvail}). opengrep's secret ruleset scopes to the git working tree; without git init+staging the bundled scanner sees nothing.`,
           evidence: {
             scannedDiagnostics: secretDiags.length,
             git: gitState,
