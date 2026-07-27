@@ -206,9 +206,30 @@ else
   # POSIX, but a gitnexus that ignores SIGALRM would hang this branch).
   TIMEOUT=(perl -e 'alarm 300; exec @ARGV')
 fi
-echo "Running gitnexus analyze (--embeddings, 300s cap) ..."
+# --embeddings aborts the whole analyze on macOS Intel: onnxruntime-node ships no
+# darwin/x64 native binding, and the failure is at native-import time, so neither
+# ONNX_WEB_BACKEND=wasm nor GITNEXUS_EMBEDDING_DEVICE avoids it (#74). Dropping
+# the flag there degrades gitnexus_query to BM25-only — worse for symbol-name-only
+# hits, but a degraded index beats no reindex path at all. tests/gitnexus passes
+# either way (16/16 verified without embeddings), so nothing this repo asserts
+# depends on the vector path.
+#
+# Deliberately a plain string, not an array: stock macOS bash is 3.2, where
+# `"${EMPTY[@]}"` under `set -u` aborts with "unbound variable" — which would
+# break the exact platform this branch exists to unbreak. The value never
+# contains whitespace, so unquoted word-splitting to zero args is safe here.
+EMBEDDINGS_FLAG="--embeddings"
+if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "x86_64" ]; then
+  EMBEDDINGS_FLAG=""
+  echo "WARN: macOS Intel (darwin/x64) detected — running analyze WITHOUT --embeddings." >&2
+  echo "      onnxruntime-node has no darwin/x64 binding, so --embeddings aborts the analyze (#74)." >&2
+  echo "      The graph will be BM25-only: gitnexus_query may miss symbol-name-only hits." >&2
+fi
+
+echo "Running gitnexus analyze (${EMBEDDINGS_FLAG:-no embeddings}, 300s cap) ..."
+# shellcheck disable=SC2086  # intentional split: empty EMBEDDINGS_FLAG must vanish
 "${TIMEOUT[@]}" \
-  "$GITNEXUS" analyze "$REPO_ROOT" --force --embeddings --skip-agents-md
+  "$GITNEXUS" analyze "$REPO_ROOT" --force $EMBEDDINGS_FLAG --skip-agents-md
 
 # --- 3. Report graph stats ----------------------------------------------------
 echo "--- graph status ---"
