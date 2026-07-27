@@ -4,8 +4,9 @@
  * This helper has an explicit behavior contract written into its own docblock,
  * and three scripts depend on it. The tests below assert THAT CONTRACT clause by
  * clause rather than the implementation, so a rewrite that keeps the grammar
- * keeps the suite green — and the two places where the code and the docblock
- * disagree are pinned as such (see "documented contract vs actual behavior").
+ * keeps the suite green. The two edges that the docblock once left ambiguous
+ * (`--help=value`, bare `--`) are now stated explicitly in it, and the tests
+ * below assert that reconciled contract rather than pinning a disagreement.
  */
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -125,23 +126,20 @@ describe("parseValueFlags — unknown flags and bare tokens", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Documented contract vs actual behavior.
-//
-// The docblock says "`--help` / `-h`: write help to stdout and process.exit(0)"
-// and "any other `--flag` → throw unknown flag". Two argv shapes fall between
-// those clauses; these tests pin what the code ACTUALLY does so a future change
-// is a deliberate one.
+// Documented contract — the edges between the help clause and the unknown-flag
+// clause. These used to be a docblock/behavior disagreement pinned as such;
+// the docblock now states both explicitly, so these assert the contract.
 // ---------------------------------------------------------------------------
 describe("parseValueFlags — documented-contract edges", () => {
   test("`--help=anything` throws unknown-flag instead of printing help", () => {
-    // The `--flag=value` branch is evaluated before the help branch, so the
-    // `=` form never reaches it. Divergence from the docblock's help clause.
+    // Documented: the `--flag=value` branch is evaluated before the help
+    // branch, so the `=` form never reaches it. Treated as a typo.
     expect(() => collect(["--help=1"])).toThrow("unknown flag: --help");
   });
 
   test("a bare `--` throws unknown-flag rather than ending option parsing", () => {
-    // POSIX would treat `--` as end-of-options; this parser does not, and the
-    // docblock does not mention it either way.
+    // Documented: no POSIX end-of-options handling — no consumer script takes
+    // positional arguments that would need it.
     expect(() => collect(["--", "positional"])).toThrow("unknown flag: --");
   });
 

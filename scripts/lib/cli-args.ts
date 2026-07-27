@@ -9,12 +9,27 @@
  * its flag table, output mapping, and help lines.
  *
  * Behavior contract (parity with the prior inline parsers):
- *  - `--flag=value`: non-empty value required; unknown flag → throw.
+ *  - `--flag=value`: non-empty value required; unknown flag → throw. The value
+ *    may contain `=` and may itself look like a flag (`--a=--b` yields `--b`);
+ *    only the space form rejects a flag-looking value.
  *  - `--flag value`: the next argv element must exist, be non-empty, and not
  *    look like a flag (`--…`). Otherwise → throw "requires a non-empty value".
- *  - `--help` / `-h`: write `help` to stdout and `process.exit(0)`.
+ *  - `--help` / `-h` (exact token): write `help` to stdout and `process.exit(0)`.
  *  - any other `--flag` → throw "unknown flag".
  *  - bare tokens not starting with `--` are ignored (positional tolerance).
+ *
+ * Two edges the clauses above used to leave ambiguous. Both are pinned in
+ * tests/scripts/cli-args.test.ts; stated here so the docblock and the code
+ * agree (#56, and the review note on #88):
+ *  - `--help=anything` throws "unknown flag: --help" rather than printing help.
+ *    The `--flag=value` branch is evaluated first, so the `=` form never
+ *    reaches the help clause. Treated as a typo, not a help request.
+ *  - a bare `--` throws "unknown flag: --". This parser has NO POSIX
+ *    end-of-options handling; none of the three consumer scripts take
+ *    positional arguments that would need it.
+ *
+ * A flag declared in `spec.flags` always wins over these built-ins — declaring
+ * `--help` as a value flag makes `--help x` deliver `("--help", "x")`.
  */
 
 export interface ValueFlagSpec {
