@@ -53,7 +53,13 @@ interface VerifyOutput {
 
 const piLensAvailable = resolvePiLensServer() !== undefined;
 // Skip (not fail) when pi-lens is absent so `bun test` stays green on machines
-// and CI runners without the global install.
+// and CI runners without the install — but say so, so a wholly-skipped file is
+// never silently dark (#65).
+if (!piLensAvailable) {
+  console.warn(
+    "[pi-lens-verify.test] pi-lens is not resolvable (PI_LENS_ROOT unset/invalid, no repo-local node_modules/pi-lens, no global install) — the P0.5 harness integration test is SKIPPED. Set PI_LENS_ROOT to a pi-lens install root to run it.",
+  );
+}
 const liveTest = piLensAvailable ? test : test.skip;
 
 describe("pi-lens verification harness (P0.5)", () => {

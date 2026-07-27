@@ -42,6 +42,10 @@
  *        deleted — so no key-shaped strings persist), --strict (skips of
  *        non-optional checks fail the run; CI env implies --strict).
  *
+ * Env:   PI_LENS_ROOT — explicit pi-lens install root, tried before the
+ *        repo-local `node_modules/pi-lens` and the global probe (one resolver,
+ *        one env contract, shared with `scripts/lsp-verify.ts`).
+ *
  * Run:  bun scripts/pi-lens-verify.ts [--json] [--keep] [--strict]
  */
 
@@ -50,8 +54,14 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type Check, createChecklist } from "./lib/harness-notes.ts";
 import { McpClient, type McpToolResult, parseToolJson } from "./lib/mcp-stdio-client.ts";
-import { harnessNotes as notes, projectDataDir, resolveGlobalPiLens } from "./lib/pi-lens-harness.ts";
+import {
+  harnessNotes as notes,
+  type PiLensInstall,
+  projectDataDir,
+  resolvePiLens as resolvePiLensAt,
+} from "./lib/pi-lens-harness.ts";
 
 /** pi-lens version the story pins. Drift is reported, never fatal. */
 const SPEC_PI_LENS_VERSION = "3.8.47";
@@ -61,14 +71,21 @@ const SPEC_PI_LENS_VERSION = "3.8.47";
 // pi-lens install resolution
 // ---------------------------------------------------------------------------
 
+/** This repo's root — the `node_modules/pi-lens` candidate the resolver probes. */
+const REPO_ROOT = path.resolve(import.meta.dir, "..");
+
 /**
- * Re-exported from `lib/pi-lens-harness.ts`, where the implementation now
- * lives so P0.6+ harnesses share it rather than copy-adapting it. Kept as a
- * named export here because `tests/pi-lens-verify.test.ts` imports it from
- * this module.
+ * Thin binding of `lib/pi-lens-harness.ts`'s resolver to this repo's root, so
+ * this harness honours the SAME order as every other one: `PI_LENS_ROOT` →
+ * repo-local → global. It previously called the global probe directly, which
+ * ignored `PI_LENS_ROOT` and made the harness fatal on hosts where the
+ * override was the only install (#55).
+ *
+ * Kept as a named export because `tests/pi-lens-verify.test.ts` imports it
+ * from this module.
  */
-export function resolvePiLens(): { root: string; version: string; server: string } {
-  return resolveGlobalPiLens();
+export function resolvePiLens(): PiLensInstall {
+  return resolvePiLensAt(REPO_ROOT);
 }
 
 // ---------------------------------------------------------------------------
@@ -173,21 +190,7 @@ function isSecretDiagnostic(d: Record<string, unknown>): boolean {
 // Check plumbing
 // ---------------------------------------------------------------------------
 
-type Status = "pass" | "fail" | "skip";
-interface Check {
-  ac: string;
-  name: string;
-  status: Status;
-  evidence: Record<string, unknown>;
-  reason?: string;
-  /** A skip of an optional check never fails --strict (environment-dependent). */
-  optional?: boolean;
-}
-
-const checks: Check[] = [];
-function record(c: Check): void {
-  checks.push(c);
-}
+const { checks, record } = createChecklist<Check>();
 
 // ---------------------------------------------------------------------------
 // Main
@@ -564,6 +567,7 @@ async function main(): Promise<void> {
   const summary = {
     piLensVersion: pl.version,
     piLensRoot: pl.root,
+    piLensSource: pl.source,
     piLensVersionSpec: SPEC_PI_LENS_VERSION,
     versionMismatch: pl.version !== SPEC_PI_LENS_VERSION,
     strict,

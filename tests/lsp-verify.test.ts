@@ -343,7 +343,15 @@ interface VerifyOutput {
   summary: { piLensVersion: string; pass: number; fail: number; skip: number; optionalSkip: number };
 }
 
-const liveTest = piLensAvailable() ? test : test.skip;
+const piLensResolves = piLensAvailable();
+// Skipped, but never silently (#65): a wholly-dark suite must name the missing
+// dependency and the env var that would fix it.
+if (!piLensResolves) {
+  console.warn(
+    "[lsp-verify.test] pi-lens is not resolvable (PI_LENS_ROOT unset/invalid, no repo-local node_modules/pi-lens, no global install) — the P0.6 harness integration test is SKIPPED. Set PI_LENS_ROOT to a pi-lens install root to run it.",
+  );
+}
+const liveTest = piLensResolves ? test : test.skip;
 
 describe("LSP verification harness (P0.6)", () => {
   liveTest(

@@ -60,6 +60,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { type Check, createChecklist } from "./lib/harness-notes.ts";
 import {
   McpClient,
   type McpToolResult,
@@ -74,11 +75,11 @@ import {
   isInside,
   p95,
   projectDataDir,
-  resolveGlobalPiLens,
+  resolvePiLens,
 } from "./lib/pi-lens-harness.ts";
 
 // Re-exported so tests keep a single import site for the harness surface.
-export { compareVersions, p95, parseToolJsonText };
+export { compareVersions, p95, parseToolJsonText, resolvePiLens };
 
 /** pi-lens floor the story mandates. Installed-below-floor is reported, never fatal. */
 const MIN_PI_LENS_VERSION = "3.8.69";
@@ -160,59 +161,16 @@ const LSP_INIT_TIMEOUT_S = ((): number => {
 // pi-lens install resolution
 // ---------------------------------------------------------------------------
 
-interface PiLensInstall {
-  root: string;
-  version: string;
-  server: string;
-  /** How the install was found — recorded so provisioning is auditable. */
-  source: "PI_LENS_ROOT" | "repo-local" | "global";
-}
-
-/**
- * Resolve a usable pi-lens install. Extends P0.5's global-only resolver with
- * two provisioning-friendly locations, because pi-lens is NOT guaranteed to be
- * a host-global install on every machine (P0.5's evidence came from a different
- * host): an explicit `PI_LENS_ROOT` override, then a repo-local
- * `node_modules/pi-lens`, then P0.5's global probe.
- *
- * Exported for tests — main() is guarded by import.meta.main, so importing this
- * module does not self-execute. Throws when no install resolves.
- */
-export function resolvePiLens(repoRoot: string): PiLensInstall {
-  const direct: Array<{ root: string; source: PiLensInstall["source"] }> = [];
-  const override = process.env.PI_LENS_ROOT?.trim();
-  if (override) direct.push({ root: override, source: "PI_LENS_ROOT" });
-  direct.push({ root: path.join(repoRoot, "node_modules", "pi-lens"), source: "repo-local" });
-
-  for (const cand of direct) {
-    const pkgPath = path.join(cand.root, "package.json");
-    const server = path.join(cand.root, "dist", "mcp", "server.js");
-    if (!fs.existsSync(pkgPath) || !fs.existsSync(server)) continue;
-    try {
-      const version = JSON.parse(fs.readFileSync(pkgPath, "utf8")).version as string;
-      return { root: cand.root, version, server, source: cand.source };
-    } catch {
-      /* unreadable package.json — fall through to the next candidate */
-    }
-  }
-  // Delegate to P0.5's resolver for the global probe rather than duplicating it.
-  const global = resolveGlobalPiLens();
-  return { ...global, source: "global" };
-}
+// The resolver (`PI_LENS_ROOT` → repo-local `node_modules/pi-lens` → global
+// probe) now lives in `lib/pi-lens-harness.ts` so every harness shares one env
+// contract (#55). Re-exported above; `tests/lsp-verify.test.ts` imports it
+// from this module.
 
 // ---------------------------------------------------------------------------
 // Check plumbing
 // ---------------------------------------------------------------------------
 
-type Status = "pass" | "fail" | "skip";
-interface Check {
-  ac: string;
-  name: string;
-  status: Status;
-  evidence: Record<string, unknown>;
-  reason?: string;
-  /** A skip of an optional check never fails --strict (environment-dependent). */
-  optional?: boolean;
+interface LspCheck extends Check {
   /**
    * Where the CHECK's contract is narrower than the story's AC as literally
    * worded, the check may pass while the story-level AC is only partial. P0.5
@@ -224,10 +182,7 @@ interface Check {
   storyLevelNote?: string;
 }
 
-const checks: Check[] = [];
-function record(c: Check): void {
-  checks.push(c);
-}
+const { checks, record } = createChecklist<LspCheck>();
 
 /**
  * Read pi-lens's global latency telemetry (`~/.pi-lens/latency.log`, NDJSON) and

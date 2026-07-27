@@ -23,11 +23,59 @@ export interface PiLensInstall {
   root: string;
   version: string;
   server: string;
+  /** How the install was found — recorded so provisioning is auditable. */
+  source: "PI_LENS_ROOT" | "repo-local" | "global";
+}
+
+/**
+ * Resolve a usable pi-lens install: an explicit `PI_LENS_ROOT` override, then a
+ * repo-local `node_modules/pi-lens`, then the global probe. pi-lens is NOT
+ * guaranteed to be a host-global install on every machine, so every harness
+ * MUST resolve through here — a resolver that skipped the override was the
+ * cause of `pi-lens-verify` fatalling on hosts where `PI_LENS_ROOT` was the
+ * only install (#55).
+ *
+ * Throws when no install resolves.
+ */
+/**
+ * Read `version` out of a package.json, throwing when it is absent or not a
+ * string. Both resolvers call this inside a try that skips the candidate, so a
+ * version-less package.json is treated exactly like an unreadable one — the
+ * `as string` cast alone let `undefined` through and only blew up later, inside
+ * `compareVersions`.
+ */
+function readPkgVersion(pkgPath: string): string {
+  const version = JSON.parse(fs.readFileSync(pkgPath, "utf8")).version;
+  if (typeof version !== "string" || version === "") {
+    throw new Error(`missing or non-string "version" in ${pkgPath}`);
+  }
+  return version;
+}
+
+export function resolvePiLens(repoRoot: string): PiLensInstall {
+  const direct: Array<{ root: string; source: PiLensInstall["source"] }> = [];
+  const override = process.env.PI_LENS_ROOT?.trim();
+  if (override) direct.push({ root: override, source: "PI_LENS_ROOT" });
+  direct.push({ root: path.join(repoRoot, "node_modules", "pi-lens"), source: "repo-local" });
+
+  for (const cand of direct) {
+    const pkgPath = path.join(cand.root, "package.json");
+    const server = path.join(cand.root, "dist", "mcp", "server.js");
+    if (!fs.existsSync(pkgPath) || !fs.existsSync(server)) continue;
+    try {
+      return { root: cand.root, version: readPkgVersion(pkgPath), server, source: cand.source };
+    } catch {
+      /* unreadable or version-less package.json — fall through to the next candidate */
+    }
+  }
+  return resolveGlobalPiLens();
 }
 
 /**
  * Resolve the installed pi-lens package root + version from the global npm dir.
  * Throws when pi-lens is not installed in any known global location.
+ *
+ * Prefer `resolvePiLens()` — this is only its last step.
  */
 export function resolveGlobalPiLens(): PiLensInstall {
   // pi installs npm:pi-lens into the node used by pi. Probe the known global
@@ -51,9 +99,9 @@ export function resolveGlobalPiLens(): PiLensInstall {
     const pkgPath = path.join(c, "package.json");
     if (found.some((f) => f.root === c) || !fs.existsSync(pkgPath)) continue;
     try {
-      found.push({ root: c, version: JSON.parse(fs.readFileSync(pkgPath, "utf8")).version as string });
+      found.push({ root: c, version: readPkgVersion(pkgPath) });
     } catch {
-      /* unreadable package.json — skip this candidate */
+      /* unreadable or version-less package.json — skip this candidate */
     }
   }
   const primary = found.find((f) => fs.existsSync(path.join(f.root, "dist", "mcp", "server.js")));
@@ -66,7 +114,12 @@ export function resolveGlobalPiLens(): PiLensInstall {
         .join(", ")}`,
     );
   }
-  return { root: primary.root, version: primary.version, server: path.join(primary.root, "dist", "mcp", "server.js") };
+  return {
+    root: primary.root,
+    version: primary.version,
+    server: path.join(primary.root, "dist", "mcp", "server.js"),
+    source: "global",
+  };
 }
 
 /**
