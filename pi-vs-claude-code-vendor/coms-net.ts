@@ -40,6 +40,8 @@ import {
 	isDuplicateRegistration,
 	isSafePathComponent,
 	isValidHex,
+	isWireRecord,
+	type WireRecord,
 	MAX_FULFILLED_TOMBSTONES,
 	MAX_HOPS,
 	MAX_INBOUND,
@@ -211,9 +213,9 @@ interface PreparedInboundResponse {
 }
 
 interface PendingReply {
-	resolve: (value: { response?: any; error?: string | null }) => void;
-	promise: Promise<{ response?: any; error?: string | null }>;
-	result?: { response?: any; error?: string | null };
+	resolve: (value: { response?: unknown; error?: string | null }) => void;
+	promise: Promise<{ response?: unknown; error?: string | null }>;
+	result?: { response?: unknown; error?: string | null };
 	target_name?: string;
 	target_session?: string;
 	conversation_id?: string | null;
@@ -299,47 +301,74 @@ let exitHandlerInstalled = false;
 // strip control characters / cap length, or a single malformed card crashes
 // widget rendering (localeCompare/padEnd on a non-string). A card without a
 // string session_id is unusable as a map key — drop it.
-function sanitizeCard(a: any): AgentCard | null {
-	if (!a || typeof a !== "object" || typeof a.session_id !== "string" || !a.session_id) return null;
+function sanitizeCard(a: unknown): AgentCard | null {
+	if (!isWireRecord(a) || typeof a.session_id !== "string" || !a.session_id) return null;
 	// Coerce the status enum: an out-of-enum or missing status (e.g. from the
 	// agent_updated defensive join path, which may lack it entirely) would
 	// render as "online" with a --% bar — default to offline, the safe
 	// pessimistic reading.
 	const status: AgentStatus = a.status === "online" || a.status === "stale" || a.status === "offline" ? a.status : "offline";
+	// Every AgentCard field is built explicitly (no `...a` spread): the spread
+	// also carried unrecognised wire keys into a value declared AgentCard, and
+	// those keys have no reader — they only rode along into rendered details.
 	return {
-		...a,
+		session_id: a.session_id,
 		name: sanitizePeerText(a.name, "?"),
 		purpose: sanitizePeerText(a.purpose),
 		model: sanitizePeerText(a.model, "?"),
+		provider: typeof a.provider === "string" ? a.provider : undefined,
 		color: sanitizePeerText(a.color),
 		cwd: sanitizePeerText(a.cwd),
 		project: sanitizePeerText(a.project),
+		explicit: a.explicit === true,
+		started_at: typeof a.started_at === "string" ? a.started_at : "",
+		// Non-numeric/non-finite peer values become NaN, which every consumer
+		// already screens with Number.isFinite (bar/label rendering, list
+		// details) — same rendering as the old untyped passthrough, but the
+		// declared `number` is now true.
+		context_used_pct: wireFiniteNumber(a.context_used_pct),
+		queue_depth: wireFiniteNumber(a.queue_depth),
 		status,
 	};
 }
 
+// A peer-supplied numeric field: pass finite numbers through, map everything
+// else (missing, string, null, NaN, Infinity) to NaN so the value is a real
+// `number` and still fails the Number.isFinite checks at each use site.
+function wireFiniteNumber(v: unknown): number {
+	return typeof v === "number" && Number.isFinite(v) ? v : Number.NaN;
+}
+
 // Same coercion for the partial fields of an agent_updated patch — only the
 // fields actually present in the patch.
-function sanitizeCardPatch(a: Partial<AgentCard>): Partial<AgentCard> {
-	const out: Partial<AgentCard> = { ...a };
-	if (out.name !== undefined) out.name = sanitizePeerText(out.name, "?");
-	if (out.purpose !== undefined) out.purpose = sanitizePeerText(out.purpose);
-	if (out.model !== undefined) out.model = sanitizePeerText(out.model, "?");
-	if (out.color !== undefined) out.color = sanitizePeerText(out.color);
-	if (out.cwd !== undefined) out.cwd = sanitizePeerText(out.cwd);
-	if (out.project !== undefined) out.project = sanitizePeerText(out.project);
+function sanitizeCardPatch(a: WireRecord): Partial<AgentCard> {
+	const out: Partial<AgentCard> = {};
+	// Only known AgentCard fields are copied out — an unrecognised wire key
+	// has no reader anyway, and dropping it keeps the patch honest.
+	if (a.name !== undefined) out.name = sanitizePeerText(a.name, "?");
+	if (a.purpose !== undefined) out.purpose = sanitizePeerText(a.purpose);
+	if (a.model !== undefined) out.model = sanitizePeerText(a.model, "?");
+	if (a.color !== undefined) out.color = sanitizePeerText(a.color);
+	if (a.cwd !== undefined) out.cwd = sanitizePeerText(a.cwd);
+	if (a.project !== undefined) out.project = sanitizePeerText(a.project);
+	if (typeof a.session_id === "string") out.session_id = a.session_id;
+	if (typeof a.provider === "string") out.provider = a.provider;
+	if (a.explicit !== undefined) out.explicit = a.explicit === true;
+	if (typeof a.started_at === "string") out.started_at = a.started_at;
+	if (a.context_used_pct !== undefined) out.context_used_pct = wireFiniteNumber(a.context_used_pct);
+	if (a.queue_depth !== undefined) out.queue_depth = wireFiniteNumber(a.queue_depth);
 	// Same enum coercion as sanitizeCard: an out-of-enum status from a patch
 	// would overwrite a card's valid status, and renderPool treats anything
 	// not stale/offline as live — a liveness spoof from a buggy/hostile
 	// heartbeat payload. Default to offline, the safe pessimistic reading.
-	if (out.status !== undefined && out.status !== "online" && out.status !== "stale" && out.status !== "offline") out.status = "offline";
+	if (a.status !== undefined) out.status = a.status === "online" || a.status === "stale" ? a.status : "offline";
 	return out;
 }
 
 // Serialized byte size of a peer-supplied response payload for the
 // MAX_RESPONSE_BYTES cap. Unserializable values (e.g. circular refs) count
 // as 0 — they can't be stringified into the caller's context anyway.
-function responseSizeBytes(v: any): number {
+function responseSizeBytes(v: unknown): number {
 	try {
 		const s = typeof v === "string" ? v : JSON.stringify(v);
 		return Buffer.byteLength(s ?? "", "utf8");
@@ -645,7 +674,7 @@ export default function (pi: ExtensionAPI) {
 	// prompt and our POST returning). Buffered here and drained when the
 	// pending entry is created; expired on insert so a flood of replies for
 	// msg_ids we never sent can't pin memory.
-	const earlyResponses = new Map<string, { result: { response?: any; error?: string | null }; expires: number }>();
+	const earlyResponses = new Map<string, { result: { response?: unknown; error?: string | null }; expires: number }>();
 	const EARLY_RESPONSE_TTL_MS = 300_000;
 	const MAX_EARLY_RESPONSES = 256;
 	const inboundQueue: Map<string, InboundContext> = new Map();
@@ -781,7 +810,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ━━ SSE parser (hand-rolled, no dep) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-	function makeSseParser(onEvent: (event: string, data: any, id?: string) => void) {
+	function makeSseParser(onEvent: (event: string, data: unknown, id?: string) => void) {
 		const decoder = new TextDecoder("utf-8");
 		let buf = "";
 		// buf.length counts UTF-16 code units, not bytes — track the buffered
@@ -799,7 +828,7 @@ export default function (pi: ExtensionAPI) {
 		function flush(): void {
 			if (dataLines.length > 0 || (sawField && event !== "message")) {
 				const joined = dataLines.join("\n");
-				let data: any = joined;
+				let data: unknown = joined;
 				try { data = JSON.parse(joined); } catch { /* keep as string */ }
 				try { onEvent(event, data, id); } catch { /* ignore handler errors */ }
 			}
@@ -928,16 +957,22 @@ export default function (pi: ExtensionAPI) {
 		return { ...prev, ...patch };
 	}
 
-	function handleSseEvent(event: string, data: any, _id?: string): void {
-		if (!data || typeof data !== "object") return;
+	function handleSseEvent(event: string, data: unknown, _id?: string): void {
+		// Everything below reads `data.x` as `unknown` — the hub is untrusted,
+		// so each field needs its own check before use.
+		if (!isWireRecord(data)) return;
 		switch (event) {
 			case "hello": {
 				audit("sse_hello", { server_id: data.server_id, server_time: data.server_time });
 				return;
 			}
 			case "pool_snapshot": {
+				// Validate BEFORE mutating: a malformed snapshot (non-array
+				// `agents`) used to clear the pool and then iterate nothing, so
+				// one bad frame from the hub wiped every known peer.
+				if (!Array.isArray(data.agents)) return;
 				peerCards.clear();
-				const agents: AgentCard[] = Array.isArray(data.agents) ? data.agents : [];
+				const agents: unknown[] = data.agents;
 				for (const a of agents) {
 					const card = sanitizeCard(a);
 					if (!card) continue;
@@ -956,8 +991,8 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			case "agent_updated": {
-				const a: Partial<AgentCard> | undefined = data.agent;
-				if (!a || typeof a.session_id !== "string") return;
+				const a = data.agent;
+				if (!isWireRecord(a) || typeof a.session_id !== "string") return;
 				if (identity && a.session_id === identity.session_id) return;
 				const prev = peerCards.get(a.session_id);
 				if (prev) {
@@ -971,7 +1006,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			case "agent_stale": {
-				const sid: string | undefined = data.session_id;
+				const sid = typeof data.session_id === "string" ? data.session_id : "";
 				if (!sid) return;
 				const prev = peerCards.get(sid);
 				if (prev) {
@@ -981,7 +1016,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			case "agent_left": {
-				const sid: string | undefined = data.session_id;
+				const sid = typeof data.session_id === "string" ? data.session_id : "";
 				if (!sid) return;
 				if (peerCards.delete(sid)) {
 					maybeRequestRender();
@@ -1046,8 +1081,8 @@ export default function (pi: ExtensionAPI) {
 		return null;
 	}
 
-	function handleInboundPrompt(data: any): void {
-		const msg_id: string | undefined = data?.msg_id;
+	function handleInboundPrompt(data: WireRecord): void {
+		const msg_id: unknown = data.msg_id;
 		// The server controls msg_id and it keys maps, anchors branch entries,
 		// and is interpolated raw into the injected prompt — validate charset
 		// and length (ULID shape) instead of trusting it. Case-insensitive:
@@ -1080,7 +1115,9 @@ export default function (pi: ExtensionAPI) {
 			audit("prompt_too_large", { msg_id, bytes: promptBytes });
 			return;
 		}
-		const sender = data.sender ?? {};
+		// `sender` is a nested wire object: narrow it before reading fields
+		// (sanitizePeerText already takes `unknown` and falls back safely).
+		const sender: WireRecord = isWireRecord(data.sender) ? data.sender : {};
 		const senderName = sanitizePeerText(sender.name, "unknown");
 		const senderCwd = sanitizePeerText(sender.cwd, "?");
 		const senderSession = sanitizePeerText(sender.session_id, "?");
@@ -1227,11 +1264,11 @@ export default function (pi: ExtensionAPI) {
 		return typeof p === "number" && Number.isFinite(p) ? Math.round(p) : 0;
 	}
 
-	function handleInboundResponse(data: any): void {
+	function handleInboundResponse(data: WireRecord): void {
 		// Same ULID gate as the prompt path: an unvalidated server/peer-controlled
 		// id would key the map lookups as garbage, churn the earlyResponses
 		// buffer, and land raw in the audit log.
-		const msg_id: string | undefined = data?.msg_id;
+		const msg_id: unknown = data.msg_id;
 		if (typeof msg_id !== "string" || !/^[0-9A-HJKMNP-TV-Z]{26}$/i.test(msg_id)) {
 			// Settle — don't silently strand — any pending entry keyed by a
 			// non-ULID id (registered before the send-side format check below
@@ -1275,7 +1312,7 @@ export default function (pi: ExtensionAPI) {
 		// cap the reply at the trust boundary (MAX_RESPONSE_BYTES): the only
 		// other bound is the 16 MiB SSE cap, and the payload lands verbatim in
 		// the caller's coms_net_get/await tool output.
-		let result: { response: any; error: string | null };
+		let result: { response: unknown; error: string | null };
 		if (responseVal === undefined && errVal === null) {
 			result = { response: null, error: "malformed server reply" };
 		} else if (
@@ -1581,8 +1618,9 @@ export default function (pi: ExtensionAPI) {
 		for (const [mid, entry] of pendingReplies.entries()) {
 			if (entry.result) continue;
 			httpFetch("GET", `/v1/messages/${encodeURIComponent(mid)}`)
-				.then((data: any) => {
-					if (data?.status !== "complete" && data?.status !== "error" && data?.status !== "timeout") return;
+				.then((data: unknown) => {
+					if (!isWireRecord(data)) return;
+					if (data.status !== "complete" && data.status !== "error" && data.status !== "timeout") return;
 					if (entry.result) return; // resolved via SSE while this poll was in flight
 					const errVal = data.status === "timeout"
 						? "timeout"
@@ -2369,8 +2407,8 @@ export default function (pi: ExtensionAPI) {
 			const { msg_id, target_session } = resp;
 
 			// Park a pending entry that the SSE `response` event will resolve.
-			let resolveFn!: (v: { response?: any; error?: string | null }) => void;
-			const promise = new Promise<{ response?: any; error?: string | null }>((res) => {
+			let resolveFn!: (v: { response?: unknown; error?: string | null }) => void;
+			const promise = new Promise<{ response?: unknown; error?: string | null }>((res) => {
 				resolveFn = res;
 			});
 			pendingReplies.set(msg_id, {
@@ -2467,12 +2505,15 @@ export default function (pi: ExtensionAPI) {
 			const pending = pendingReplies.get(msg_id);
 			if (pending?.result) {
 				const r = pending.result;
-				const text = r.error
+				// Same nullish test as coms_net_await — an `error: ""` reply must
+				// not read as "complete" here and as an error there.
+				const failed = r.error != null;
+				const text = failed
 					? `coms_net_get: error — ${r.error}`
 					: `coms_net_get: complete\n${typeof r.response === "string" ? r.response : JSON.stringify(r.response, null, 2)}`;
 				return {
 					content: [{ type: "text" as const, text }],
-					details: { status: r.error ? "error" : "complete", response: r.response, error: r.error ?? null, conversation_id: pending.conversation_id ?? null },
+					details: { status: failed ? "error" : "complete", response: r.response, error: r.error ?? null, conversation_id: pending.conversation_id ?? null },
 				};
 			}
 			// Fall back to server.
@@ -2579,7 +2620,10 @@ export default function (pi: ExtensionAPI) {
 				// so free the entry now rather than waiting for the prune sweep.
 				pendingReplies.delete(msg_id);
 				const r = pending.result;
-				if (r.error) {
+				// Nullish, not truthy: handleInboundResponse preserves a
+				// peer-supplied `error: ""`, and a truthiness check would report
+				// that failure as a blank success.
+				if (r.error != null) {
 					return {
 						content: [{ type: "text" as const, text: `coms_net_await: error — ${r.error}` }],
 						details: { error: r.error, conversation_id: pending.conversation_id ?? null },
@@ -2618,12 +2662,16 @@ export default function (pi: ExtensionAPI) {
 				`/v1/messages/${encodeURIComponent(msg_id)}/await?timeout_ms=${timeoutMs}`,
 				undefined,
 				{ timeoutMs: timeoutMs + 5_000, signal: ac.signal },
-			).then((data: any) => {
+			).then((raw: unknown) => {
+				// Untrusted hub body: a non-object (e.g. a plain string) reads as
+				// an empty record, which falls through to unexpected_status below
+				// exactly as the old `data.status` optional chain did.
+				const data: WireRecord = isWireRecord(raw) ? raw : {};
 				// The server echoes the conversation id; carry it through so an
 				// await with no local pending entry (e.g. a pruned msg_id) still
 				// surfaces it in details instead of dropping it.
-				const conv = typeof data?.conversation_id === "string" ? data.conversation_id : null;
-				if (data?.status === "complete") {
+				const conv = typeof data.conversation_id === "string" ? data.conversation_id : null;
+				if (data.status === "complete") {
 					const responseVal = data.response;
 					// Mirror SSE/resync: accept a string OR a structured (parsed
 					// JSON) response. prepareInboundResponse POSTs parsed JSON
@@ -2647,7 +2695,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					return { response: responseVal, error: null, conversation_id: conv };
 				}
-				if (data?.status === "error") {
+				if (data.status === "error") {
 					// Cap a peer-supplied error string too (parity with the
 					// complete path and the SSE/resync paths): the error is
 					// interpolated verbatim into the caller's tool output and
@@ -2659,10 +2707,10 @@ export default function (pi: ExtensionAPI) {
 					}
 					return { response: null, error: e, conversation_id: conv };
 				}
-				if (data?.status === "timeout") return { response: null, error: "timeout", conversation_id: conv };
+				if (data.status === "timeout") return { response: null, error: "timeout", conversation_id: conv };
 				// A non-terminal status (queued/delivered/pending) or a missing
 				// one must not alias to a successful empty reply.
-				return { response: null, error: `unexpected_status:${data?.status ?? "unknown"}`, conversation_id: conv };
+				return { response: null, error: `unexpected_status:${String(data.status ?? "unknown")}`, conversation_id: conv };
 			}).catch((err) => {
 				if (err instanceof HttpError) {
 					if (err.status === 404) {
@@ -2698,7 +2746,9 @@ export default function (pi: ExtensionAPI) {
 			// Caller-cancel racer: settles the race immediately on host abort so
 			// execute returns instead of surviving until the long-poll or the
 			// timeout fires (see onCallerAbort above).
-			const racers: Promise<{ response?: any; error?: string | null }>[] = [serverPromise, timeoutPromise, abortPromise];
+			// One shared result shape for every racer, so the winner is read
+			// through the type instead of an `as any` per field.
+			const racers: Promise<{ response?: unknown; error?: string | null; conversation_id?: string | null }>[] = [serverPromise, timeoutPromise, abortPromise];
 			if (pending) racers.push(pending.promise);
 			const winner = await Promise.race(racers);
 			clearTimeout(timeoutTimer);
@@ -2712,16 +2762,17 @@ export default function (pi: ExtensionAPI) {
 			// path, and the next await won't hit "already awaiting".
 			pendingReplies.delete(msg_id);
 
-			if ((winner as any).error) {
+			// Nullish, not truthy — same reason as the SSE-resolved path above.
+			if (winner.error != null) {
 				return {
-					content: [{ type: "text" as const, text: `coms_net_await: error — ${(winner as any).error}` }],
-					details: { error: (winner as any).error, conversation_id: (winner as any).conversation_id ?? pending?.conversation_id ?? null },
+					content: [{ type: "text" as const, text: `coms_net_await: error — ${winner.error}` }],
+					details: { error: winner.error, conversation_id: winner.conversation_id ?? pending?.conversation_id ?? null },
 				};
 			}
-			const resp = (winner as any).response;
+			const resp = winner.response;
 			return {
 				content: [{ type: "text" as const, text: typeof resp === "string" ? resp : (JSON.stringify(resp, null, 2) ?? "") }],
-				details: { response: resp, conversation_id: (winner as any).conversation_id ?? pending?.conversation_id ?? null },
+				details: { response: resp, conversation_id: winner.conversation_id ?? pending?.conversation_id ?? null },
 			};
 		},
 		renderCall(args, theme) {

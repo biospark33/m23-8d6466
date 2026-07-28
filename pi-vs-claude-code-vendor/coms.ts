@@ -36,6 +36,8 @@ import {
 	isDuplicateRegistration,
 	isSafePathComponent,
 	isValidHex,
+	isWireRecord,
+	type WireRecord,
 	MAX_FULFILLED_TOMBSTONES,
 	MAX_HOPS,
 	MAX_INBOUND,
@@ -113,6 +115,18 @@ interface Envelope {
 	timestamp: string;
 }
 
+// What an inbound line is actually known to be after isValidEnvelope: an
+// object with these four string fields checked at runtime. Everything else
+// (hops, timestamp, secret, prompt, response…) is still `unknown` and each
+// handler must check it before use — the interfaces below describe what this
+// agent SENDS, not what a peer is trusted to have sent.
+type WireEnvelope = WireRecord & {
+	type: string;
+	msg_id: string;
+	sender_session: string;
+	sender_endpoint: string;
+};
+
 interface PromptEnvelope extends Envelope {
 	type: "prompt";
 	// Shared secret from the *receiver's* registry entry; receivers nack any
@@ -132,7 +146,9 @@ interface ResponseEnvelope extends Envelope {
 	// verifies it against the secret it sent; a same-user attacker who
 	// harvested only a msg_id from logs cannot forge a response without it.
 	secret: string;
-	response: any;
+	// Arbitrary JSON payload: `unknown`, not `any`, so a consumer must check
+	// its shape rather than silently inheriting `any` across the boundary.
+	response: unknown;
 	error?: string | null;
 	// Echo of the originating prompt's conversation_id so the caller can
 	// correlate threads (D2).
@@ -183,10 +199,10 @@ interface RegistryEntry {
 }
 
 interface PendingReply {
-	resolve: (value: any) => void;
+	resolve: (value: { response?: unknown; error?: string | null }) => void;
 	timer: NodeJS.Timeout | null;
-	promise: Promise<{ response?: any; error?: string | null }>;
-	result?: { response?: any; error?: string | null };
+	promise: Promise<{ response?: unknown; error?: string | null }>;
+	result?: { response?: unknown; error?: string | null };
 	target_name?: string;
 	// conversation_id from coms_send, surfaced by coms_get for correlation (D2).
 	conversation_id?: string | null;
@@ -973,7 +989,7 @@ export default function (pi: ExtensionAPI) {
 		try { socket.end(); } catch { /* ignore */ }
 	}
 
-	function handlePrompt(socket: net.Socket, env: PromptEnvelope): void {
+	function handlePrompt(socket: net.Socket, env: WireEnvelope): void {
 		// 1. Shared-secret auth: the sender must echo the secret from this
 		// agent's own registry entry (protected by the 0700 registry dir). Nack
 		// mismatches without ever triggering a turn. Compared timing-safe so a
@@ -986,7 +1002,9 @@ export default function (pi: ExtensionAPI) {
 		// 2. Hop limit check — require a non-negative integer: NaN slips past a
 		// plain `>=` comparison and negative hops bypass the limit, either of
 		// which lets a peer relay forever.
-		if (!Number.isInteger(env.hops) || env.hops < 0 || env.hops >= MAX_HOPS) {
+		// (typeof is redundant with Number.isInteger at runtime but is what
+		// narrows the peer-supplied `unknown` to a number for the compiler.)
+		if (typeof env.hops !== "number" || !Number.isInteger(env.hops) || env.hops < 0 || env.hops >= MAX_HOPS) {
 			nack(socket, env.msg_id, "hops exceeded");
 			return;
 		}
@@ -1127,7 +1145,7 @@ export default function (pi: ExtensionAPI) {
 		return typeof p === "number" && Number.isFinite(p) ? Math.round(p) : 0;
 	}
 
-	function handleResponse(socket: net.Socket, env: ResponseEnvelope): void {
+	function handleResponse(socket: net.Socket, env: WireEnvelope): void {
 		const pending = pendingReplies.get(env.msg_id);
 		if (pending) {
 			// Response auth: the responder must echo the SAME secret the
@@ -1216,7 +1234,7 @@ export default function (pi: ExtensionAPI) {
 		ackOk(socket, env.msg_id);
 	}
 
-	function handlePing(socket: net.Socket, env: PingEnvelope): void {
+	function handlePing(socket: net.Socket, env: WireEnvelope): void {
 		const ctx = currentCtx;
 		const ident = identity;
 		const pct = safeContextPct(ctx);
@@ -1237,10 +1255,9 @@ export default function (pi: ExtensionAPI) {
 		try { socket.end(); } catch { /* ignore */ }
 	}
 
-	function isValidEnvelope(obj: any): obj is Envelope {
+	function isValidEnvelope(obj: unknown): obj is WireEnvelope {
 		return (
-			obj &&
-			typeof obj === "object" &&
+			isWireRecord(obj) &&
 			typeof obj.type === "string" &&
 			typeof obj.msg_id === "string" &&
 			// ULIDs are 26 chars; cap well above that so a near-16MB msg_id
@@ -1284,7 +1301,7 @@ export default function (pi: ExtensionAPI) {
 			handled = true;
 			socket.removeListener("data", onData);
 			const line = buf.slice(0, nl).toString("utf-8");
-			let parsed: any;
+			let parsed: unknown;
 			try {
 				parsed = JSON.parse(line);
 			} catch {
@@ -1292,17 +1309,17 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (!isValidEnvelope(parsed)) {
-				const mid = parsed && typeof parsed.msg_id === "string" ? parsed.msg_id : "";
+				const mid = isWireRecord(parsed) && typeof parsed.msg_id === "string" ? parsed.msg_id : "";
 				nack(socket, mid, "malformed envelope");
 				return;
 			}
 			try {
 				if (parsed.type === "prompt") {
-					handlePrompt(socket, parsed as PromptEnvelope);
+					handlePrompt(socket, parsed);
 				} else if (parsed.type === "response") {
-					handleResponse(socket, parsed as ResponseEnvelope);
+					handleResponse(socket, parsed);
 				} else if (parsed.type === "ping") {
-					handlePing(socket, parsed as PingEnvelope);
+					handlePing(socket, parsed);
 				} else {
 					nack(socket, parsed.msg_id, "unknown type");
 				}
@@ -2209,8 +2226,8 @@ export default function (pi: ExtensionAPI) {
 			// a fast response arriving between send and registration would hit
 			// handleResponse with no entry, be logged as orphan_response, and be
 			// lost forever — the sender would then block the full timeout.
-			let resolveFn!: (v: { response?: any; error?: string | null }) => void;
-			const promise = new Promise<{ response?: any; error?: string | null }>((res) => {
+			let resolveFn!: (v: { response?: unknown; error?: string | null }) => void;
+			const promise = new Promise<{ response?: unknown; error?: string | null }>((res) => {
 				resolveFn = res;
 			});
 			const entry: PendingReply = {
@@ -2326,13 +2343,16 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (entry.result) {
 				const r = entry.result;
-				const text = r.error
+				// Same nullish test as coms_await — an `error: ""` reply must not
+				// read as "complete" here and as an error there.
+				const failed = r.error != null;
+				const text = failed
 					? `coms_get: error — ${r.error}`
 					: `coms_get: complete\n${typeof r.response === "string" ? r.response : (JSON.stringify(r.response, null, 2) ?? "")}`;
 				return {
 					content: [{ type: "text" as const, text }],
 					details: {
-						status: r.error ? "error" : "complete",
+						status: failed ? "error" : "complete",
 						response: r.response,
 						error: r.error ?? null,
 						...(entry.conversation_id ? { conversation_id: entry.conversation_id } : {}),
@@ -2413,7 +2433,9 @@ export default function (pi: ExtensionAPI) {
 				entry.await_started_at = Date.now();
 
 				let timedTimer: NodeJS.Timeout | undefined;
-				const timed = new Promise<{ error: string }>((resolve) => {
+				// Same shape as entry.promise so the race winner is one typed
+				// union (no `as any` to read .error/.response off it).
+				const timed = new Promise<{ response?: unknown; error: string }>((resolve) => {
 					timedTimer = setTimeout(() => resolve({ error: "timeout" }), timeoutMs);
 					try { timedTimer.unref?.(); } catch { /* ignore */ }
 				});
@@ -2424,13 +2446,16 @@ export default function (pi: ExtensionAPI) {
 				// timeout). Drop the entry immediately instead of leaving it for the
 				// keepalive pruning loop to reclaim up to timeout_ms + 60s later.
 				pendingReplies.delete(params.msg_id);
-				if ((winner as any).error) {
+				// Nullish, not truthy: handleResponse keeps any string the peer
+				// sent, including "", and a truthiness check would surface that
+				// failure as a success carrying an undefined response.
+				if (winner.error != null) {
 					return {
-						content: [{ type: "text" as const, text: `coms_await: error — ${(winner as any).error}` }],
-						details: { error: (winner as any).error },
+						content: [{ type: "text" as const, text: `coms_await: error — ${winner.error}` }],
+						details: { error: winner.error },
 					};
 				}
-				const resp = (winner as any).response;
+				const resp = winner.response;
 				return {
 					content: [{ type: "text" as const, text: typeof resp === "string" ? resp : (JSON.stringify(resp, null, 2) ?? "") }],
 					details: {

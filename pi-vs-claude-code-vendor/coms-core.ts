@@ -252,6 +252,20 @@ export function isSafePathComponent(s: unknown): s is string {
 	return typeof s === "string" && /^[a-zA-Z0-9_.-]+$/.test(s) && s !== "." && s !== "..";
 }
 
+// ━━ Wire-protocol narrowing (trust boundary) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// Anything decoded from a peer/hub (JSON.parse of a socket line or an SSE
+// data field) is untrusted. `WireRecord` is the honest type for it: the value
+// is known to be a non-null, non-array object and NOTHING else — every field
+// reads as `unknown` and only a real runtime check can narrow it. Declaring a
+// wire value as a rich interface (`as PromptEnvelope`) is a lie the compiler
+// then propagates; `WireRecord` makes the compiler demand the check instead.
+export type WireRecord = Record<string, unknown>;
+
+export function isWireRecord(v: unknown): v is WireRecord {
+	return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
 // Co-loading coms.ts + coms-net.ts (or an extension reload) double-registers
 // the same flag/tool/command names; on pi builds whose registerFlag throws on
 // duplicates, swallow ONLY the duplicate error — anything else is a real bug.

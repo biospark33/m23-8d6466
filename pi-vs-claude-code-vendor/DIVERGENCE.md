@@ -66,6 +66,11 @@ refactor covered by `tests/vendor/coms-core.test.ts`.
   every additional file is permanent merge surface against a future
   `0ed11f44` sync, so a doc-only boundary was chosen over a structural split
   for no behavioral gain.
+- **`WireRecord` / `isWireRecord`** (#60) — the wire-protocol trust-boundary
+  type: a value decoded from a peer/hub (socket line, SSE `data:`, hub JSON) is
+  a non-null non-array object and nothing more, so every field reads as
+  `unknown` until a runtime check narrows it. Both transports use it instead of
+  typing decoded data as `any` or casting it to a rich interface.
 - **`isDuplicateRegistration`** — the `/already|duplicate/i` predicate. coms.ts's
   `registerFlagSafe/ToolSafe/CommandSafe` and coms-net's `registerFlagOnce` both
   use it, but their WRAPPERS stay per-file: coms-net's `registerFlagOnce`
@@ -114,6 +119,25 @@ are transport-coupled; unifying would not be zero-behavior:
   (ANSI terminal-injection channel) and caps length.
 - **`abbreviateModel` guard** — `typeof model === "string"` so a non-string
   peer field can't throw out of the TUI render callback.
+- **Honest inbound-envelope typing (#60)** — `isValidEnvelope(obj: unknown)`
+  now narrows to a local `WireEnvelope` (`WireRecord` + the four string fields
+  it actually checks) instead of claiming `Envelope`, and `connHandler` passes
+  that to `handlePrompt`/`handleResponse`/`handlePing` instead of casting
+  `as PromptEnvelope` / `as ResponseEnvelope` / `as PingEnvelope`. The
+  `Prompt`/`Response`/`Ping` interfaces now describe only what this agent
+  SENDS. Every field the handlers read (`hops`, `prompt`, `secret`,
+  `response_schema`, …) was already runtime-checked; the compiler now enforces
+  that a newly added read is checked too. One added runtime term: `typeof
+  env.hops !== "number"` in handlePrompt (redundant with the existing
+  `Number.isInteger`, present so the value narrows). `ResponseEnvelope.response`
+  and the `pendingReplies` result shape are `unknown`, not `any`, which let the
+  `(winner as any)` reads in `coms_await` drop their casts.
+- **Empty error string is an error (#60 review)** — `coms_await` and `coms_get`
+  classify a settled reply with `winner.error != null` / `r.error != null`
+  instead of truthiness. `handleResponse` keeps whatever string the peer sent
+  (`typeof env.error === "string" ? env.error : null`) and `isValidEnvelope`
+  does not constrain `error`, so a peer-supplied `error: ""` reached the caller
+  as a success carrying an undefined response.
 
 ## `coms-net.ts` (HTTP/SSE hub transport)
 
@@ -137,6 +161,29 @@ transport-specific work:
   cmd delayed-expansion `!`.
 - **HTTP body cap + abort** — over-cap response bodies are torn down like the
   SSE error path rather than lingering until GC.
+- **Honest SSE/card typing (#60)** — `makeSseParser`'s `data`, `handleSseEvent`,
+  `sanitizeCard`, `sanitizeCardPatch`, `responseSizeBytes`, the two inbound
+  handlers and the reply/resync long-poll bodies take `unknown` / `WireRecord`
+  instead of `any`. `sanitizeCard` no longer spreads unchecked wire fields into
+  a declared `AgentCard`: `session_id`/`provider`/`started_at` are typechecked,
+  `explicit` is `=== true`, and `context_used_pct`/`queue_depth` go through
+  `wireFiniteNumber` (non-finite → `NaN`, which every consumer already screens
+  with `Number.isFinite`, so rendering is unchanged). `sanitizeCardPatch` builds
+  a fresh patch of known fields only — an unrecognised wire key had no reader.
+  The `pendingReplies`/await-racer result shape is `unknown`, which removed the
+  `(winner as any)` reads in `coms_net_await`. Left as-is: `httpFetch` still
+  returns `any` (15 call sites — retyping it is a separate, larger change).
+- **`pool_snapshot` validates before mutating (#60 review)** — `handleSseEvent`
+  returns on a non-array `agents` instead of clearing `peerCards` first and
+  falling back to `[]`. One malformed frame from the hub used to wipe every
+  known peer and leave the pool empty until the next good snapshot.
+- **Empty error string is an error (#60 review)** — same change as `coms.ts`:
+  `coms_net_await` (both the SSE-resolved fast path and the race winner) and
+  `coms_net_get`'s local-entry path use `error != null`. `handleInboundResponse`
+  preserves a hub-supplied `error: ""` (`typeof data.error === "string" ?
+  data.error : null`), which the truthiness check reported as a blank success.
+  The server-derived `coms_net_get` fallback is unchanged — it keys off the
+  hub's own `status` field, not this value.
 
 ### Intentional value differences vs `coms.ts`
 

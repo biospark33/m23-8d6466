@@ -20,6 +20,7 @@ import {
 	isDuplicateRegistration,
 	isSafePathComponent,
 	isValidHex,
+	isWireRecord,
 	MAX_RESPONSE_BYTES,
 	MAX_RESPONSE_SCHEMA_BYTES,
 	nowIso,
@@ -200,6 +201,37 @@ describe("isDuplicateRegistration", () => {
 	test("does not match unrelated errors", () => {
 		expect(isDuplicateRegistration(new Error("boom"))).toBe(false);
 		expect(isDuplicateRegistration(undefined)).toBe(false);
+	});
+});
+
+describe("isWireRecord", () => {
+	test("accepts plain and prototype-less JSON objects", () => {
+		expect(isWireRecord({})).toBe(true);
+		expect(isWireRecord({ type: "prompt" })).toBe(true);
+		expect(isWireRecord(JSON.parse('{"msg_id":"x"}'))).toBe(true);
+		expect(isWireRecord(Object.create(null))).toBe(true);
+	});
+	test("rejects null, arrays and primitives", () => {
+		// The pre-guard `typeof obj === "object"` admitted both null-ish
+		// handling bugs and arrays; a JSON array must never be narrowed to a
+		// record and then read field-by-field.
+		expect(isWireRecord(null)).toBe(false);
+		expect(isWireRecord(undefined)).toBe(false);
+		expect(isWireRecord([])).toBe(false);
+		expect(isWireRecord([{ type: "prompt" }])).toBe(false);
+		expect(isWireRecord(JSON.parse("[1,2,3]"))).toBe(false);
+		expect(isWireRecord("prompt")).toBe(false);
+		expect(isWireRecord(0)).toBe(false);
+		expect(isWireRecord(false)).toBe(false);
+	});
+	test("a narrowed record still yields unknown fields (checked, not trusted)", () => {
+		const v: unknown = JSON.parse('{"msg_id":123,"hops":"nope"}');
+		if (!isWireRecord(v)) throw new Error("expected a wire record");
+		// The point of the type: these reads are `unknown`, so the runtime
+		// checks below are the only thing that can make them usable.
+		expect(typeof v.msg_id === "string").toBe(false);
+		expect(typeof v.hops === "number").toBe(false);
+		expect(v.missing).toBeUndefined();
 	});
 });
 
