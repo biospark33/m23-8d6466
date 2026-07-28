@@ -20,6 +20,7 @@ import {
   REFLECT_TIMEOUT_MS,
   RETAIN_TIMEOUT_MS,
 } from "../../src/hindsight/client.ts";
+import { setLogSink, type LogEntry } from "../../src/swarmclaw/mcp/stdio-transport.ts";
 
 // ---------------------------------------------------------------------------
 // global fetch mock harness — save/restore per test (story mandate).
@@ -383,3 +384,79 @@ describe("HindsightClient error paths", () => {
     expect(CONSOLIDATE_TIMEOUT_MS).toBe(60_000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// mock mode — P1.11/P1.12 AC5 env-fallback (OQ-4 BLOCKED-on-env). No network.
+// ---------------------------------------------------------------------------
+
+describe("HindsightClient mock mode", () => {
+  beforeEach(() => {
+    // Sentinel: if mock mode ever calls fetch, the global mock records it and
+    // these tests fail. We never install a returning fetch — any call is a bug.
+    lastCall = undefined;
+    globalThis.fetch = (async () => {
+      throw new Error("mock mode MUST NOT call fetch");
+    }) as unknown as typeof globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("default mode is live — reaches fetch (no mock short-circuit)", async () => {
+    const c = new HindsightClient({ baseUrl: "http://x" });
+    // Live mode with a throwing fetch proves the request path was NOT
+    // short-circuited by mock logic.
+    await expect(c.recall("qds-factory", "x")).rejects.toThrow(
+      "mock mode MUST NOT call fetch",
+    );
+  });
+
+  test("mock recall returns schema-valid empty results without network", async () => {
+    const c = new HindsightClient({ mode: "mock" });
+    const res = await c.recall("qds-factory", "anything");
+    expect(RecallResponseSchema.safeParse(res).success).toBe(true);
+    expect(res.results).toEqual([]);
+  });
+
+  test("mock retain returns schema-valid response with deterministic memoryId", async () => {
+    const c = new HindsightClient({ mode: "mock" });
+    const res = await c.retain("qds-factory", "data");
+    expect(RetainResponseSchema.safeParse(res).success).toBe(true);
+    expect(res.memoryId).toBe("mock-qds-factory");
+    expect(res.bankId).toBe("qds-factory");
+  });
+
+  test("mock reflect + consolidate + banks return schema-valid/echo shapes", async () => {
+    const c = new HindsightClient({ mode: "mock" });
+    const reflected = await c.reflect("qds-factory");
+    expect(ReflectResponseSchema.safeParse(reflected).success).toBe(true);
+    const consolidated = await c.consolidate("qds-factory");
+    expect(ConsolidateResponseSchema.safeParse(consolidated).success).toBe(true);
+    const created = await c.createBank("qds-factory");
+    expect(created).toEqual({ bank_id: "qds-factory" });
+    const listed = await c.listBanks();
+    expect(listed).toEqual({});
+  });
+
+  // Mock mode bypasses the network, NOT the telemetry: audit + waiver
+  // diagnostics must still see operation/duration/status/requestId even when
+  // P1.11/P1.12 AC5 runs entirely against canned bodies.
+  test("mock mode still emits the CC-9 telemetry log entry (no network)", async () => {
+    const entries: LogEntry[] = [];
+    const restore = setLogSink((e) => entries.push(e));
+    try {
+      const c = new HindsightClient({ mode: "mock", requestId: "fixed-rid" });
+      await c.retain("qds-factory", "data");
+    } finally {
+      restore();
+    }
+
+    const retainLog = entries.find((e) => e.operation === "retain");
+    expect(retainLog).toBeDefined();
+    expect(retainLog?.requestId).toBe("fixed-rid");
+    expect(retainLog?.bankId).toBe("qds-factory");
+    expect(retainLog?.status).toBe("ok");
+    expect(typeof retainLog?.duration).toBe("number");
+  });
+});
+

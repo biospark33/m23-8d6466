@@ -10,6 +10,46 @@ installed at `~/.pi/agent/npm/node_modules/pi-lens`.
 
 ---
 
+## Update 2026-07-28 — proposals applied; two findings below are now stale
+
+The reconciliation was carried out. Read this block before §2, §3 and §4.
+
+**Board (`sprint-status.yaml`):** P0.5 and P0.9 both downgraded `done` →
+`in-review`, each with the reasoning inline. Clarifying notes added to P0.6
+(the downgrade does not cascade), P1.6 and P1.7 (§5's findings).
+
+**Story files:** every DoD box in both stories now carries a state and an inline
+citation, using P0.11's `[x]` / `[~]` / `[ ]` convention. Final tallies —
+**P0.5: 3 met / 1 partial / 5 not satisfied. P0.9: 6 met / 4 partial / 1 not
+satisfied.**
+
+**Stale finding 1 — §4 is fixed.** PR **#84** (issue #55) unified the resolver;
+`scripts/lib/pi-lens-harness.ts:57-58` now honours `PI_LENS_ROOT`. The verifier
+no longer fatals. Gate clause 4 is unblocked.
+
+**Stale finding 2 — P0.5 DoD 2 is settled, and it is a `[x]`.** §3 called it
+UNVERIFIABLE and named the settle condition: *"land issue #55's `PI_LENS_ROOT`
+fix, then run `bun scripts/pi-lens-verify.ts --strict` and confirm all three
+check families execute."* Both done on 2026-07-28 against pi-lens 3.8.71 →
+**exit 0, 3 pass / 0 fail / 1 optional skip**, with AC1 `lsp_diagnostics`
+(live TS2322, `stableId: aw:35344075b5`), AC2 secret-scan (live opengrep
+detection) and AC3 warning-count proxy all executing. §2's summary table
+therefore reads **2 satisfied / 1 unverifiable** for P0.5 where it should now
+read **3 satisfied / 0 unverifiable**. Nothing else changed: the emit-block
+still does not fire (`gitleaksOnPath:false, trivyOnPath:false`) and
+`idObserved` is still `false`.
+
+**Unchanged:** every P0.9 finding, and P0.5's other eight items. The MANDATORY
+e2e demos in both stories remain un-run.
+
+**Deliberately not decided here:** §7's P0.9 option A (restore `done` + record
+an OQ-4 waiver) versus option B (`in-review`). B was applied because it is the
+evidence-only reading — a MANDATORY item that has never executed is not done —
+and because it treats P0.5 and P0.9 by the same rule. Granting a waiver is a
+policy call (§8 Q2) and remains open to the maintainer.
+
+---
+
 ## 0. TL;DR
 
 - **P0.5 is not done.** Its own evidence artifact — written by the story's own
@@ -51,14 +91,23 @@ For contrast, P0.11 (`p0-11-phase0-exit-gate.md`) does this honestly — it uses
 
 ## 2. Summary table
 
+**Current (post-2026-07-28 update — reflects PR #84):**
+
 | Story | DoD items | Checked | SATISFIED-UNCHECKED | NOT-SATISFIED | UNVERIFIABLE |
 |---|---|---|---|---|---|
-| **P0.5** | 9 | **0** | **2** (items 3, 7) | **6** (items 1, 4, 5, 6, 8, 9) | **1** (item 2) |
+| **P0.5** | 9 | **0** | **3** (items 2, 3, 7) | **6** (items 1, 4, 5, 6, 8, 9) | **0** |
 | **P0.9** | 11 | **0** | **6** (items 1, 2, 3, 4, 6, 8) | **2** (items 5, 9) | **3** (items 7, 10, 11) |
 
-Read that top row again: **P0.5 has two of nine DoD items demonstrably met, and
-both of those are documentation items.** Every functional item is either unmet or
-unverifiable.
+> **Superseded original (2026-07-26, kept for provenance):** P0.5 read
+> `2 satisfied / 1 unverifiable` — item 2 was UNVERIFIABLE because the verifier
+> fatalled on this host. PR **#84** landed the `PI_LENS_ROOT` resolver fix and
+> the 2026-07-28 live run (`bun scripts/pi-lens-verify.ts --strict` → exit 0,
+> 3 pass / 0 fail / 1 optional skip) settled item 2 as **satisfied**. P0.9's
+> row is unchanged.
+
+Read the P0.5 row again: **three of nine DoD items are demonstrably met, and two
+of those three are documentation items.** Every remaining functional item is
+unmet — the verifier now *runs*, but the MANDATORY e2e demo still has not.
 
 (P0.5's 3 extra unchecked QA-improvement boxes, lines 138–140, are all
 NOT-SATISFIED and duplicate DoD items 6, 8 and 9. They are not counted above.)
@@ -90,19 +139,30 @@ has drifted further since. P1.7's story explicitly says *"Do not re-pin to
 amend the pin, not to install 3.8.47.
 
 ### DoD 2 (line 55) — *"Verification script exercises `lsp_diagnostics`, secret-scan, and warning-count proxy paths."*
-**UNVERIFIABLE.**
-`scripts/pi-lens-verify.ts` exists (PR #26 +529, PR #30 +520/−207); report line
-439 grades it **Met**, and the recorded run in report §1 lines 51–63 shows
-`pass:3, fail:0, skip:1, exit 0`. Its unit tests are green here today
-(`bun test tests/pi-lens-verify.test.ts tests/lsp-verify.test.ts` → **36 pass, 2
-skip, 0 fail**).
-**But I cannot re-confirm the claim.** That recorded run came from a different
-host running pi-lens 3.8.69, and the script **fatals before a single check runs
-on this host** (§4). The only evidence that it exercises all three paths is a
-transcript I cannot reproduce.
-**To settle it a human must:** land issue #55's `PI_LENS_ROOT` fix, then run
-`bun scripts/pi-lens-verify.ts --strict` and confirm all three check families
-execute.
+**SATISFIED** (settled 2026-07-28 — see the Update block at the top of this
+document). PR **#84** unified the `PI_LENS_ROOT` resolver
+(`scripts/lib/pi-lens-harness.ts:57-58`); the settle condition named below was
+then executed on this host against pi-lens 3.8.71 →
+`bun scripts/pi-lens-verify.ts --strict` **exit 0, 3 pass / 0 fail / 1 optional
+skip**, with all three check families executing (AC1 `lsp_diagnostics` live
+TS2322 `stableId: aw:35344075b5`, AC2 secret-scan live opengrep detection, AC3
+warning-count proxy).
+
+> **Superseded analysis (2026-07-26), kept for provenance — do not act on it:**
+> **UNVERIFIABLE.**
+> `scripts/pi-lens-verify.ts` exists (PR #26 +529, PR #30 +520/−207); report line
+> 439 grades it **Met**, and the recorded run in report §1 lines 51–63 shows
+> `pass:3, fail:0, skip:1, exit 0`. Its unit tests are green here today
+> (`bun test tests/pi-lens-verify.test.ts tests/lsp-verify.test.ts` → **36 pass, 2
+> skip, 0 fail**).
+> **But I cannot re-confirm the claim.** That recorded run came from a different
+> host running pi-lens 3.8.69, and the script **fatals before a single check runs
+> on this host** (§4). The only evidence that it exercises all three paths is a
+> transcript I cannot reproduce.
+> **To settle it a human must:** land issue #55's `PI_LENS_ROOT` fix, then run
+> `bun scripts/pi-lens-verify.ts --strict` and confirm all three check families
+> execute. — *This condition was met on 2026-07-28; see the SATISFIED verdict
+> above.*
 
 ### DoD 3 (line 56) — *"pi-lens `lsp_diagnostics` structured output format documented."*
 **SATISFIED-UNCHECKED.** Report §3 AC1 contract table; graded **Met** at report
@@ -154,9 +214,17 @@ Required / Partially Approved"*.
 
 ---
 
-## 4. P0.5's deliverable is currently broken on this host (reproduced)
+## 4. ~~P0.5's deliverable is currently broken on this host~~ — HISTORICAL, FIXED BY PR #84
 
-The known defect is real and I reproduced it twice:
+> **This entire section is superseded and describes a defect that no longer
+> exists.** It records the 2026-07-26 state. PR **#84** (issue #55) unified the
+> resolver — `scripts/lib/pi-lens-harness.ts:57-58` now honours `PI_LENS_ROOT`
+> — and the verifier runs clean on this host as of 2026-07-28 (exit 0,
+> 3 pass / 0 fail / 1 optional skip). Gate clause 4 is unblocked. Retained
+> below only as the reproduction record that motivated the fix; **do not treat
+> it as a current blocker.**
+
+The defect as reproduced on 2026-07-26 (twice):
 
 ```
 $ bun scripts/pi-lens-verify.ts

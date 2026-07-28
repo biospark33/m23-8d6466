@@ -47,6 +47,30 @@ export const CONSOLIDATE_TIMEOUT_MS = 60_000;
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:8888";
 
+/**
+ * Canned schema-valid bodies returned in `'mock'` mode — no network. Each
+ * shape matches the Zod schema the typed method parses downstream
+ * (`requestJSON`), so mock round-trips pass validation like live ones.
+ * `bankId` echoes the request's bank; the synthetic retain `memoryId` is
+ * deterministic per bank so repeat calls are comparable.
+ */
+function mockBody(path: string, bankId: string): unknown {
+  if (path.endsWith("/memories/recall")) return { results: [], durationMs: 0 };
+  if (path.endsWith("/memories")) {
+    return { memoryId: `mock-${bankId}`, bankId, status: "created" as const, durationMs: 0 };
+  }
+  if (path.endsWith("/reflect")) {
+    return { bankId, insights: [{ summary: "mock" }], durationMs: 0 };
+  }
+  if (path.endsWith("/consolidate")) {
+    return { consolidatedCount: 0, preservedCount: 0, durationMs: 0 };
+  }
+  // createBank = PUT /v1/default/banks/<bankId>; listBanks = GET /v1/default/banks.
+  if (/\/banks\/[^/]+$/.test(path)) return { bank_id: bankId };
+  if (path.endsWith("/banks")) return {};
+  return {};
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -70,6 +94,14 @@ export interface HindsightClientOptions {
   baseUrl?: string;
   apiKey?: string;
   requestId?: string;
+  /**
+   * `'live'` (default) hits the Hindsight HTTP API. `'mock'` short-circuits
+   * every request to a schema-valid canned body without touching the network
+   * — used by P1.11/P1.12 AC5 env-fallback when Hindsight is unreachable
+   * (OQ-4 BLOCKED-on-env) and by tests. Callers that need to assert a real
+   * round-trip must NOT set this.
+   */
+  mode?: "live" | "mock";
 }
 
 // ---------------------------------------------------------------------------
@@ -80,8 +112,10 @@ export class HindsightClient {
   private readonly baseUrl: string;
   private readonly apiKey: string | undefined;
   private readonly requestId: string | undefined;
+  private readonly mode: "live" | "mock";
 
   constructor(opts: HindsightClientOptions = {}) {
+    this.mode = opts.mode ?? "live";
     this.baseUrl = (opts.baseUrl ?? process.env.HINDSIGHT_BASE_URL ?? DEFAULT_BASE_URL).replace(
       /\/+$/,
       "",
@@ -279,6 +313,12 @@ export class HindsightClient {
     let status: "ok" | "error" = "ok";
     let errMsg: { code: string; message: string } | undefined;
     try {
+      // Mock mode bypasses the NETWORK only — not the telemetry. Returning
+      // from inside the try keeps the `finally` below, so a mock call still
+      // emits the same operation/duration/status/requestId log entry a live
+      // one does. Audit and waiver diagnostics (P1.11/P1.12 AC5 run entirely
+      // in mock mode) would otherwise have no trace at all.
+      if (this.mode === "mock") return mockBody(path, bankId);
       const res = await fetch(url, init);
       if (!res.ok) {
         const message = await safeErrorMessage(res);

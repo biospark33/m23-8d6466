@@ -51,15 +51,30 @@ Installs pi-lens v3.8.47, confirms `--mode json`/`--mode rpc` headless emission,
 
 ## Definition of Done
 
+> **Reconciled 2026-07-28 (issue #51).** Legend: `[x]` satisfied with cited
+> evidence · `[~]` partial (sub-clause unmet, named inline) · `[ ]` not
+> satisfied. Per-item analysis:
+> `_bmad-output/sprint-artifacts/p0-5-p0-9-dod-reconciliation.md` §3.
+> **3 met / 1 partial / 5 not satisfied — this story is `in-review`, not `done`.**
+
 - [ ] **Impl:** pi-lens v3.8.47 installed via `pi install npm:pi-lens`; settings.json contains package entry.
-- [ ] **Impl:** Verification script exercises `lsp_diagnostics`, secret-scan, and warning-count proxy paths.
-- [ ] **Contract:** pi-lens `lsp_diagnostics` structured output format documented (finding ID format, severity, file:line, message).
+      *Install half real (`~/.pi/agent/settings.json:8` has `"npm:pi-lens"`); pinned-version half false — installed is **3.8.71**, and P1.7 (`p1-7-lsp-diagnostics-gate.md:61-62`) says do not re-pin to 3.8.47. Fix is a spec amendment (see reconciliation §8 Q4).*
+- [x] **Impl:** Verification script exercises `lsp_diagnostics`, secret-scan, and warning-count proxy paths.
+      *Settled 2026-07-28. `scripts/pi-lens-verify.ts` (PR #26/#30) was un-runnable until PR #84 (issue #55) unified the resolver in `scripts/lib/pi-lens-harness.ts:57-58` to honour `PI_LENS_ROOT`. Live re-run on pi-lens 3.8.71: `bun scripts/pi-lens-verify.ts --strict` → exit 0, 3 pass / 0 fail / 1 optional skip; all three check families (AC1 `lsp_diagnostics`, AC2 secret-scan, AC3 warning-count proxy) executed.*
+- [x] **Contract:** pi-lens `lsp_diagnostics` structured output format documented (finding ID format, severity, file:line, message).
+      *`_research/pi-lens-verification-report.md` §3 AC1 contract table; graded Met at report line 440. Live AC1 output confirms shape: `rule:"typescript:2322"`, `severity:"error"`, line/column, `stableId:"aw:35344075b5"`.*
 - [ ] **Integration:** `--mode json` headless emission confirmed — machine-readable JSON on stdout, no TUI required.
+      *Report line 441 = Partial: only the session-handshake event reached stdout before LLM auth failed. The diagnostic payload was validated over MCP stdio, a different transport than this item names.*
 - [ ] **Integration:** LSP server auto-discovery from PATH confirmed for TypeScript and Python.
+      *Report line 442 = Partial: TypeScript live (`typescript-language-server@5.3.0`, real TS2322). Python (pyright) runs only as a fixture with no assertion — confirmed again in the 2026-07-28 run.*
 - [ ] **Security:** Secret-scan blocks emit on hardcoded API key pattern; finding type `secret_detected` confirmed.
-- [ ] **Observability:** TDI proxy path documented: on-disk artifact read with logged fallback reason when TUI-only TDI is unavailable (FR-EX-8).
-- [ ] **Test (verification):** Structured diagnostics output parseable with stable IDs; warning count numeric; secret-scan blocks.
+      *Report line 443 = Not met as worded. Detection is live (opengrep). The **block** has never been observed: it requires a gitleaks/trivy `sessionSecrets` finding and neither binary is installed (2026-07-28 run: `gitleaksOnPath:false, trivyOnPath:false`); `secret_detected` does not exist in installed pi-lens. NFR-SEC-3 / INV-1 is source-verified only.*
+- [x] **Observability:** TDI proxy path documented: on-disk artifact read with logged fallback reason when TUI-only TDI is unavailable (FR-EX-8).
+      *Report line 444 = Met. 2026-07-28 AC3 run reads `cache/code-quality-warnings.json` → numeric `warningCount` with an explicit `fallbackReason`.*
+- [~] **Test (verification):** Structured diagnostics output parseable with stable IDs; warning count numeric; secret-scan blocks.
+      *2 of 3 sub-clauses met. Parseable ✅; warning count numeric ✅. Stable ID is **derived** by the harness with native-function parity (`idProvenance:"derived+native-parity"`, `matchesNative:true`) but never assigned by pi-lens (`idObserved:false`) — this host's LSPs emit no code-action-bearing warning. Secret-scan block ✗ (see item 6).*
 - [ ] **Test (e2e demo — MANDATORY):** Pi agent with pi-lens runs in `--mode json` against test files; stdout contains structured diagnostics with ≥1 finding and warning count; secret-scan blocks on secret file.
+      *Report line 446 = NOT met — blocked on LLM auth; no agent turn has ever run. Story Final Status (below) says it "remains open". P0.6 met the equivalent agent e2e; P0.5 has not.*
 
 ## Dev Agent Record
 

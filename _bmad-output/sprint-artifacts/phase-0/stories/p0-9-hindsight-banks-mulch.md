@@ -361,17 +361,47 @@ Bank timing metrics (emitted on success):
 
 > 8–12 high-signal, story-specific boxes. NO lint/tests/typecheck filler.
 
-- [ ] **Impl:** Bank provisioner creates `{resolveBankId(repoSlug)}`, `{resolveBankId(repoSlug)}-dev-meta`, and `qds-collective` banks; idempotent on re-run
-- [ ] **Impl:** Round-trip verifier retains a test memory, recalls it by semantic query, reflects on it, and confirms consolidation preserves it
-- [ ] **Impl:** Mulch importer reads all `.mulch/expertise/*.{yaml,yml,json,jsonl}` files, parses them against `MulchExpertiseSchema` (auto-generating UUID `id` and recording `source` path), and retains each as JSONL into `{resolveBankId(repoSlug)}-dev-meta`
-- [ ] **Contract:** Zod schemas for `RetainPayloadSchema`, `RecallPayloadSchema`, `ReflectPayloadSchema`, `ConsolidatePayloadSchema`, `ConsolidateResponseSchema`, `ReflectResponseSchema`, `RetainResponseSchema`, `RecallResponseSchema`, `MulchExpertiseSchema` validated on all inputs
-- [ ] **Integration:** Hindsight HTTP client wired to SwarmClaw MCP invoke path — all four operations (retain, recall, reflect, consolidate) exercised through the bridge
-- [ ] **Security:** INV-HM1 through INV-HM6 enforced — bearer token env-only (P0.7 `maskEnv` policy), bank_id validated, file path scoped, tenant isolation verified, `client.ts` defensive-parse (PR #34 pattern), provision single-flight
-- [ ] **Test (unit/integration):** Provision three banks → retain to each → recall from each → assert correct content returned per bank; import Mulch files → recall by concept → assert match
-- [ ] **Test (guard):** Invalid bank_id → error surfaced; empty `.mulch/expertise/` → graceful skip with warning; malformed expertise file → parse error reported, other files still imported
+> **Reconciled 2026-07-28 (issue #51).** Legend: `[x]` satisfied with cited
+> evidence · `[~]` partial — proven at mock level, the live/recall half is
+> untested · `[ ]` not satisfied. Per-item analysis:
+> `_bmad-output/sprint-artifacts/p0-5-p0-9-dod-reconciliation.md` §6.
+> **6 met / 4 partial / 1 not satisfied.** Nothing here is unbuilt — ~6,300
+> lines merged in PR #37, and the hindsight suite is green on this host
+> (`bun test tests/hindsight tests/provision-hindsight-banks.test.ts tests/import-mulch-expertise.test.ts` → 132 pass / 0 fail).
+> Every open item traces to **one** wall: Hindsight has never booted
+> (OQ-4 BLOCKED-on-env, `_research/phase0-gate-report.md:119-121`), so no
+> **live-Hindsight** recall or end-to-end assertion exists anywhere in the
+> tree. Mock-level recall coverage and fake-client bridge tests DO exist and
+> are green (they are what the `[~]` partials below are scored against) — the
+> gap is specifically that nothing has ever been asserted against a running
+> Hindsight instance. The
+> implementation is done; the **demonstration** is capped. Board downgraded to
+> `in-review` because the MANDATORY item has never run — see
+> reconciliation §7 for the alternative (keep `done` + record an OQ-4 waiver);
+> that call is the maintainer's.
+
+- [x] **Impl:** Bank provisioner creates `{resolveBankId(repoSlug)}`, `{resolveBankId(repoSlug)}-dev-meta`, and `qds-collective` banks; idempotent on re-run
+      *`src/hindsight/bank-provisioner.ts` (563 lines, PR #37). `tests/hindsight/bank-provisioning.test.ts:85` happy path, `:117` idempotency, `:315` single-flight (INV-HM6 / CC-10). Green.*
+- [x] **Impl:** Round-trip verifier retains a test memory, recalls it by semantic query, reflects on it, and confirms consolidation preserves it
+      *`src/hindsight/round-trip-verifier.ts` (581 lines, PR #37). `tests/hindsight/memory-round-trip.test.ts` — 8 describes covering happy path, each failure mode, and `:372` post-consolidation preservation. Green. Drives a mocked client, not a live Hindsight.*
+- [x] **Impl:** Mulch importer reads all `.mulch/expertise/*.{yaml,yml,json,jsonl}` files, parses them against `MulchExpertiseSchema` (auto-generating UUID `id` and recording `source` path), and retains each as JSONL into `{resolveBankId(repoSlug)}-dev-meta`
+      *`src/hindsight/mulch-importer.ts` (676 lines). `tests/hindsight/mulch-import.test.ts` — 17 describes: happy path `:130`, dedup `:191`, partial failure `:262`, quota `:307`, 5MB cap `:340`, BOM `:360`, empty dir `:411`. Real fixtures shipped in the same PR (`.mulch/expertise/qds-foundations.yaml`, `swarmclaw.json`).*
+- [x] **Contract:** Zod schemas for `RetainPayloadSchema`, `RecallPayloadSchema`, `ReflectPayloadSchema`, `ConsolidatePayloadSchema`, `ConsolidateResponseSchema`, `ReflectResponseSchema`, `RetainResponseSchema`, `RecallResponseSchema`, `MulchExpertiseSchema` validated on all inputs
+      *All nine named schemas plus `BankIdSchema` present in `src/hindsight/schemas.ts` at lines 28, 60, 77, 83, 88, 102, 109, 120, 133, 143. Round-2 review recorded "all 10 schemas match spec field-for-field".*
+- [~] **Integration:** Hindsight HTTP client wired to SwarmClaw MCP invoke path — all four operations (retain, recall, reflect, consolidate) exercised through the bridge
+      *Split proof, never joined. `tests/hindsight/bridge-round-trip.test.ts:83` drives the real P0.7 route handlers through `/invoke` for all four ops — but against `tests/swarmclaw/fixtures/fake-hindsight-mcp.ts`, a bun-subprocess fake (its header states "without a live Hindsight binary (which is unreachable on this host)"). The round-trip verifier drives `client.ts` directly, not through `/invoke`. Round-1 review dismissed this deliberately (Review Findings, below); ratify or reword — reconciliation §8 Q3.*
+- [x] **Security:** INV-HM1 through INV-HM6 enforced — bearer token env-only (P0.7 `maskEnv` policy), bank_id validated, file path scoped, tenant isolation verified, `client.ts` defensive-parse (PR #34 pattern), provision single-flight
+      *Named tests: INV-HM1 `tests/hindsight/client.test.ts:348`; INV-HM2 `client.test.ts:329` + `bank-provisioning.test.ts:230,503,652`; INV-HM3 `mulch-import.test.ts:382,601`; INV-HM4 `mulch-import.test.ts:501`; INV-HM6 `bank-provisioning.test.ts:315`. **INV-HM5** (defensive-parse) carries no test by name — enforced at `src/hindsight/client.ts:11`, covered indirectly by the non-JSON/502 error-path describe (`client.test.ts:248`).*
+- [~] **Test (unit/integration):** Provision three banks → retain to each → recall from each → assert correct content returned per bank; import Mulch files → recall by concept → assert match
+      *Provision half proven: `bank-provisioning.test.ts:86` asserts exactly `["qds-factory","qds-factory-dev-meta","qds-collective"]`. **Recall half absent** — grepping `recall` across `bank-provisioning.test.ts` returns zero hits, and in `mulch-import.test.ts` recall appears only as mock plumbing (`:20-82`) and the tenant-isolation probe (`:501,:522`). No test asserts recalled content per bank or matches an imported concept back out. To settle: boot Hindsight (OQ-4), run both scripts, recall a known concept (e.g. `sparc`) from `qds-factory-dev-meta`.*
+- [x] **Test (guard):** Invalid bank_id → error surfaced; empty `.mulch/expertise/` → graceful skip with warning; malformed expertise file → parse error reported, other files still imported
+      *Invalid bank_id → `bank-provisioning.test.ts:230` (-32003) and `client.test.ts:329`; empty dir → `mulch-import.test.ts:411`; malformed → `mulch-import.test.ts:262` (partial failure) and `:713` (malformed JSONL line is per-entry, not whole-file).*
 - [ ] **Test (e2e demo — MANDATORY):** Run provision script → run Mulch import (YAML + JSON inputs → JSONL storage verified) → invoke retain via MCP bridge → invoke recall → invoke reflect → assert round-trip completes with correct data for all three banks
-- [ ] **Test (idempotency):** Run provision + import twice → assert bank IDs unchanged, Mulch entry count unchanged (no duplicates), and recall with exact-match query returns same result set (content comparison, not score comparison)
-- [ ] **Test (dependency failure):** Attempt bank provision with MCP bridge unavailable — verify structured error returned (AC4/AC5), no partial bank creation
+      *Has never run. `_research/phase0-gate-report.md:63` records §13 clause 7 as **FAIL**: "no reachable Hindsight API at http://127.0.0.1:8888 (listBanks -> HTTP 404); served by 'Jupyter Server' — not Hindsight. OQ-4 records the local stack as BLOCKED-on-env (arm64 libpq/openssl@3 mismatch)." **BLOCKED-on-env: OQ-4** — operator-side, not a code gap.*
+- [~] **Test (idempotency):** Run provision + import twice → assert bank IDs unchanged, Mulch entry count unchanged (no duplicates), and recall with exact-match query returns same result set (content comparison, not score comparison)
+      *2 of 3 clauses proven at mock level: bank IDs unchanged (`bank-provisioning.test.ts:117`) and entry count unchanged (`mulch-import.test.ts:191` dedup), reinforced by fix R3-9 which made re-import honour `RetainResponse.status === "updated"`. The third — **recall with an exact-match query returns the same result set, compared by content** — has no test and cannot be shown against a mock, which returns whatever it is told.*
+- [~] **Test (dependency failure):** Attempt bank provision with MCP bridge unavailable — verify structured error returned (AC4/AC5), no partial bank creation
+      *Error codes tested against mocks: `bank-provisioning.test.ts:197` (-32001 bridge not registered), `:214` (-32002 Hindsight unavailable), plus `tests/provision-hindsight-banks.test.ts:29` for the `realBridgeProbe` R2-M4/M5 fixes. **"No partial bank creation" is undemonstrated** — no bank has ever actually been created anywhere. To settle: with Hindsight live, run the provision script with SwarmClaw stopped and confirm a subsequent `listBanks` shows zero banks.*
 
 ### Review Findings (bmad code review, 2026-07-19)
 
