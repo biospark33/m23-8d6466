@@ -1,8 +1,17 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { ComsLogCollector } from "./coms-log.ts";
+import {
+  cleanEnv,
+  diag,
+  type EnvMap,
+  logEnvKeys,
+  MAX_LOGGED_ENV_KEYS,
+  mergeEnv,
+  sanitizeLogKey,
+} from "./env.ts";
 import { parseManifestFile, parseTeamManifestFile } from "./manifest.ts";
 import {
   buildMergedOutput,
@@ -11,8 +20,20 @@ import {
   unionChangedFiles,
   validateWorkerOutput,
 } from "./merger.ts";
+import {
+  capExcerpt,
+  capProbe,
+  MAX_STDOUT_EXCERPT,
+  redactBoundaryPrefix,
+  redactSecrets,
+} from "./redact.ts";
+import {
+  buildTeamSpawn,
+  parseTeamEventLine,
+  splitRoleModel,
+  writeArtifactAtomic,
+} from "./team-events.ts";
 import type {
-  CostEvent,
   ExitClass,
   HarnessResult,
   Manifest,
@@ -23,259 +44,34 @@ import type {
   WorkerOutput,
 } from "./types.ts";
 
+// Public surface is unchanged (#62): these moved to sibling modules and are
+// re-exported so every existing `from "./runner.ts"` import keeps working.
+export {
+  cleanEnv,
+  type EnvMap,
+  logEnvKeys,
+  mergeEnv,
+} from "./env.ts";
+export {
+  capExcerpt,
+  capProbe,
+  MAX_PROBE_RESULT_LEN,
+  MAX_STDOUT_EXCERPT,
+  redactBoundaryPrefix,
+  redactSecrets,
+} from "./redact.ts";
+export {
+  buildTeamSpawn,
+  parseTeamEventLine,
+  splitRoleModel,
+  type TeamEvent,
+  writeArtifactAtomic,
+} from "./team-events.ts";
+
 /** Default wall-clock timeout for a harness invocation: 10 minutes. */
 export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
-/** Hard cap on captured subprocess stdout kept in memory / emitted. */
-export const MAX_STDOUT_EXCERPT = 256 * 1024;
-
-/** Hard cap on the extracted QDS_PROBE value. */
-const MAX_PROBE_RESULT_LEN = 1024;
-
-/** Max env key names shown in the log line (INV-3: key names only). */
-const MAX_LOGGED_ENV_KEYS = 50;
-
-/**
- * Routine per-run diagnostics (env key names, provider-key presence). Quiet
- * under `bun test` (Bun sets NODE_ENV=test) because they buried real failures
- * in test output (#53); `QDS_LOG_VERBOSE=1` brings them back for a suite.
- * Warnings and errors do NOT go through here — they always print.
- */
-function diag(message: string): void {
-  if (process.env.NODE_ENV === "test" && !process.env.QDS_LOG_VERBOSE) return;
-  console.error(message);
-}
-
-/**
- * Parent-env KEY NAMES whose values look secret-ish. Values under such keys
- * are redacted from stdout_excerpt / env_probe_result (INV-2 hardening).
- * Heuristic: high-signal secret-bearing key patterns only, plus the
- * MIN_REDACTABLE_VALUE_LEN floor below.
- */
-const SECRET_KEY_RE =
-  /SECRET|TOKEN|PASS|CRED|API[_-]?KEY|PRIVATE|CERT|DSN|DATABASE_URL|SSH|SIGNING|AUTH|[_-]KEY|[_-]URL|[_-]URI/i;
-
-/** Short values are ignored to avoid mangling output with false positives. */
-const MIN_REDACTABLE_VALUE_LEN = 8;
-
-/** Minimum trailing-prefix length redacted at the truncation cut boundary. */
-const MIN_BOUNDARY_PREFIX_LEN = MIN_REDACTABLE_VALUE_LEN;
-
 const PROBE_KEY = "QDS_PROBE=";
-
-/**
- * Enforce the excerpt cap (measured in UTF-16 code units, matching
- * String.prototype.length) without leaving a trailing unpaired surrogate
- * from a sliced pair.
- */
-function capExcerpt(text: string): string {
-  return text.slice(0, MAX_STDOUT_EXCERPT).replace(/[\uD800-\uDBFF]$/, "");
-}
-
-/**
- * Enforce the probe-result cap (measured in UTF-16 code units) without
- * leaving a trailing unpaired surrogate.
- */
-function capProbe(value: string): string {
-  return value.slice(0, MAX_PROBE_RESULT_LEN).replace(/[\uD800-\uDBFF]$/, "");
-}
-
-type EnvMap = Record<string, string>;
-
-/** Drop undefined-valued entries — process.env values may be undefined. */
-function cleanEnv(env: NodeJS.ProcessEnv): EnvMap {
-  const out: EnvMap = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (value !== undefined) out[key] = value;
-  }
-  return out;
-}
-
-/**
- * Merge manifest env onto parent env — INV-1: additive merge, never a bare
- * assignment. A manifest with no env block still inherits the full parent env
- * (PATH, credentials, ...), so this is a non-regression by construction.
- *
- * PATH is special-cased (AC3): a manifest PATH does NOT replace the parent
- * PATH — it is APPENDED (`parent + delimiter + manifest`). An EMPTY manifest
- * PATH leaves the parent PATH unchanged (no dangling delimiter). On win32,
- * PATH is special-cased again: the PATH key is matched case-insensitively in
- * BOTH the manifest and the parent env, the parent's original key casing is
- * preserved, and case-variant duplicate PATH keys are collapsed. Every other
- * key follows plain last-wins `{ ...parent, ...manifest }` merge.
- *
- * The `platform` parameter exists so the win32 branch is unit-testable.
- */
-export function mergeEnv(
-  parent: EnvMap,
-  manifestEnv: EnvMap | undefined,
-  platform: NodeJS.Platform = process.platform,
-): EnvMap {
-  const merged: EnvMap = { ...parent, ...manifestEnv };
-  if (manifestEnv !== undefined) {
-    const pathKey = Object.keys(manifestEnv).find((k) =>
-      platform === "win32" ? k.toLowerCase() === "path" : k === "PATH",
-    );
-    if (pathKey !== undefined) {
-      const manifestPath = manifestEnv[pathKey]!;
-      // Find the parent's PATH key case-insensitively (win32 uses `Path`) so
-      // we read the real parent value and keep the original key casing.
-      const parentPathKey = Object.keys(parent).find((k) =>
-        platform === "win32" ? k.toLowerCase() === "path" : k === "PATH",
-      );
-      const parentPath =
-        parentPathKey !== undefined ? parent[parentPathKey]! : "";
-      const targetKey = parentPathKey ?? pathKey;
-      const pathDelim = platform === "win32" ? ";" : ":";
-      const mergedPath =
-        manifestPath === ""
-          ? parentPath // Empty manifest PATH: leave the parent PATH unchanged.
-          : parentPath
-            ? `${parentPath}${pathDelim}${manifestPath}`
-            : manifestPath;
-      if (platform === "win32") {
-        // Collapse case-variant duplicate PATH keys (e.g. parent `Path` + manifest `PATH`).
-        for (const k of Object.keys(merged)) {
-          if (k !== targetKey && k.toLowerCase() === "path") delete merged[k];
-        }
-      }
-      merged[targetKey] = mergedPath;
-    }
-  }
-  return merged;
-}
-
-/**
- * Env KEY NAMES only, for logging — INV-2/INV-3. Never returns values, so no
- * secret can reach a log line or the structured result through this path.
- */
-export function logEnvKeys(env: EnvMap): string[] {
-  return Object.keys(env).sort();
-}
-
-/**
- * Replace control characters that could forge log lines when embedded in env
- * key names (INV-3). The real env keys are untouched; only the log line is
- * sanitized.
- */
-function sanitizeLogKey(key: string): string {
-  return key.replace(/[\p{Cc}\u2028\u2029]/gu, "?");
-}
-
-/**
- * Redact secret-looking PARENT env values from a string (INV-2 hardening).
- * Only the pre-merge parent env is consulted: manifest-supplied values (e.g.
- * the QDS_PROBE probe) are never redacted.
- *
- * Candidates are processed longest-value-first so a shorter secret that is a
- * substring of a longer one cannot replace inside the longer occurrence and
- * leave the longer secret's tail leaking.
- */
-function escapeRegex(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
-}
-
-export function redactSecrets(text: string, parentEnv: EnvMap): string {
-  const entries = Object.entries(parentEnv)
-    .filter(
-      ([key, value]) =>
-        value.length >= MIN_REDACTABLE_VALUE_LEN && SECRET_KEY_RE.test(key),
-    )
-    .sort((a, b) => b[1].length - a[1].length);
-  if (entries.length === 0) return text;
-
-  const valueToKey = new Map<string, string>();
-  const patterns: string[] = [];
-  for (const [key, value] of entries) {
-    if (!valueToKey.has(value)) {
-      valueToKey.set(value, key);
-      patterns.push(escapeRegex(value));
-    }
-  }
-  const re = new RegExp(patterns.join("|"), "g");
-  return text.replace(re, (match) => `[REDACTED:${valueToKey.get(match)!}]`);
-}
-
-/**
- * Length of the longest prefix of `value` that is also a suffix of `text`
- * (0 if no non-empty prefix qualifies). Linear time via the KMP automaton:
- * O(value.length) to build the failure function, O(text.length) to scan — so
- * boundary redaction of an arbitrarily long secret is O(text.length +
- * value.length) per env var, not the O(text × value) quadratic the naive
- * suffix scan hits on adversarial divergent input. Only tests UTF-16 code-unit
- * equality, never slices into the middle of a surrogate pair.
- */
-function longestPrefixSuffix(text: string, value: string): number {
-  if (value.length === 0 || text.length === 0) return 0;
-  // KMP failure function for the pattern (value).
-  const pi = new Array<number>(value.length).fill(0);
-  for (let i = 1, k = 0; i < value.length; i++) {
-    while (k > 0 && value[i] !== value[k]) k = pi[k - 1]!;
-    if (value[i] === value[k]) k++;
-    pi[i] = k;
-  }
-  // Drive the automaton over text; the terminal state is the longest prefix of
-  // `value` that is a suffix of `text`. On a full match mid-text, reset j to the
-  // longest proper border so the scan can keep looking for further matches — but
-  // at the terminal position PRESERVE j === value.length: if text ends with the
-  // complete value, the longest qualifying prefix is the value itself, not a
-  // smaller border. The caller's `k >= value.length` fallback decides policy
-  // (redactSecrets already removed complete occurrences); the helper just reports
-  // the true prefix-suffix length.
-  let j = 0;
-  for (let i = 0; i < text.length; i++) {
-    while (j > 0 && text[i] !== value[j]) j = pi[j - 1]!;
-    if (text[i] === value[j]) j++;
-    if (j === value.length && i < text.length - 1) j = pi[j - 1]!;
-  }
-  return j;
-}
-
-/**
- * Redact a TRAILING partial prefix of a secret value left at the truncation
- * cut boundary (INV-2). When the excerpt was capped mid-value, the full value
- * no longer matches — but its prefix at the cut still leaks.
- *
- * If the trailing fragment is at least MIN_BOUNDARY_PREFIX_LEN, it is replaced
- * with a redaction marker. If it is shorter than that minimum, the fragment is
- * stripped entirely (no marker, no leaked secret characters, no output
- * mangling).
- */
-export function redactBoundaryPrefix(text: string, parentEnv: EnvMap): string {
-  let bestRedact: { key: string; len: number } | null = null;
-  let bestStrip = 0;
-
-  for (const [key, value] of Object.entries(parentEnv)) {
-    if (value.length < MIN_REDACTABLE_VALUE_LEN || !SECRET_KEY_RE.test(key)) {
-      continue;
-    }
-    // Largest k where text ends with value[0..k) — the true prefix-suffix
-    // length, in linear time. The previous capped scan (maxK ≤ 4096) leaked the
-    // WHOLE fragment when a >4KB secret prefix sat at the truncation cut: no
-    // k ≤ 4096 matched the true length, so nothing was redacted. KMP has no cap,
-    // so the full boundary prefix is redacted regardless of secret length.
-    let k = longestPrefixSuffix(text, value);
-    if (k === 0) continue;
-    // Complete occurrences are already removed by redactSecrets() before this
-    // scan; cap defensively excludes a full trailing match.
-    if (k >= value.length) k = value.length - 1;
-    if (k >= MIN_BOUNDARY_PREFIX_LEN) {
-      if (bestRedact === null || k > bestRedact.len) {
-        bestRedact = { key, len: k };
-      }
-    } else if (k > bestStrip) {
-      bestStrip = k;
-    }
-  }
-
-  if (bestRedact !== null) {
-    return `${text.slice(0, text.length - bestRedact.len)}[REDACTED:${bestRedact.key}]`;
-  }
-  if (bestStrip > 0) {
-    return text.slice(0, text.length - bestStrip);
-  }
-  return text;
-}
 
 /** Watchdog grace after a kill before force-settling (grandchild stdout-hold). */
 export const WATCHDOG_GRACE_MS = 5000;
@@ -675,63 +471,6 @@ export const BUDGET_KILL_FRACTION = 0.9;
  */
 export const MAX_TEAM_STDOUT_BYTES = 1024 * 1024;
 
-/** Split a `provider/model` role string at the FIRST slash (CC-2 amended). */
-export function splitRoleModel(roleModel: string): {
-  provider: string;
-  model: string;
-} {
-  const idx = roleModel.indexOf("/");
-  // Defensive: zod validation requires a "/", but programmatic callers can
-  // bypass it — without this guard, slice(0, -1) mangles both halves.
-  if (idx === -1) {
-    return { provider: "", model: roleModel };
-  }
-  return { provider: roleModel.slice(0, idx), model: roleModel.slice(idx + 1) };
-}
-
-/**
- * Build the real Warren 0.10.0 invocation for the team lead (CC-2 amended
- * 2026-07-20): `warren run pi <project> -p "<prompt>" --provider --model`.
- * Worker role-models ride in QDS_AGENT_TEAM_CONFIG_JSON env (agent-team
- * extension config), NOT in Warren CLI flags.
- *
- * Runtime provider selection (mirrors warren's own WARREN_RUNTIME pattern):
- * `QDS_TEAM_RUNNER=local` swaps the warren-server dispatch for the local
- * subprocess-RPC lead driver (`scripts/team-lead-driver.ts`, OQ-1 zero-infra
- * path) — same event protocol, same merged-output contract, no server.
- */
-export function buildTeamSpawn(
-  manifest: TeamManifest,
-  runner: "warren" | "local" = "warren",
-): {
-  file: string;
-  argv: string[];
-} {
-  if (runner === "local") {
-    return {
-      file: "bun",
-      argv: [join(import.meta.dir, "..", "scripts", "team-lead-driver.ts")],
-    };
-  }
-  const lead = splitRoleModel(manifest.team.lead.model);
-  return {
-    file: "warren",
-    argv: [
-      "run",
-      "pi",
-      manifest.team.project,
-      "-p",
-      manifest.team.lead.prompt,
-      "--provider",
-      lead.provider,
-      "--model",
-      lead.model,
-      "--trigger",
-      "cli-anything",
-    ],
-  };
-}
-
 export interface TeamRunOptions {
   /** Parent env to merge from. Defaults to process.env. */
   env?: NodeJS.ProcessEnv;
@@ -747,78 +486,6 @@ export interface TeamRunOptions {
   graceMs?: number;
   /** Directory for lead-failure worker partials. Default `<cwd>/artifacts`. */
   artifactsDir?: string;
-}
-
-/** One parsed NDJSON event from the lead run's stdout. */
-type TeamEvent =
-  | { kind: "cost"; event: CostEvent }
-  | { kind: "coms"; raw: unknown }
-  | { kind: "worker_output"; agentId: string; output: unknown }
-  | { kind: "merged"; result: Record<string, unknown> }
-  | { kind: "coms_init_error"; reason: string };
-
-/** Parse one stdout line into a team event; null for non-event lines. */
-function parseTeamEventLine(line: string): TeamEvent | null {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith("{")) return null;
-  let raw: unknown;
-  try {
-    raw = JSON.parse(trimmed);
-  } catch {
-    return null;
-  }
-  if (typeof raw !== "object" || raw === null) return null;
-  const o = raw as Record<string, unknown>;
-  switch (o.type) {
-    case "cost": {
-      const costUsd = o.costUsd;
-      if (typeof costUsd !== "number" || !Number.isFinite(costUsd) || costUsd < 0) {
-        return null;
-      }
-      return {
-        kind: "cost",
-        event: {
-          agentId: typeof o.agentId === "string" ? o.agentId : "unknown",
-          model: typeof o.model === "string" ? o.model : "unknown",
-          inputTokens: typeof o.inputTokens === "number" ? o.inputTokens : 0,
-          outputTokens: typeof o.outputTokens === "number" ? o.outputTokens : 0,
-          costUsd,
-          durationMs: typeof o.durationMs === "number" ? o.durationMs : 0,
-          timestamp: typeof o.timestamp === "string" ? o.timestamp : "",
-        },
-      };
-    }
-    case "coms":
-      return { kind: "coms", raw: o };
-    case "worker_output": {
-      if (typeof o.agentId !== "string") return null;
-      return { kind: "worker_output", agentId: o.agentId, output: o.output };
-    }
-    case "merged": {
-      const result = o.result;
-      return {
-        kind: "merged",
-        result:
-          typeof result === "object" && result !== null && !Array.isArray(result)
-            ? (result as Record<string, unknown>)
-            : {},
-      };
-    }
-    case "coms_init_error":
-      return {
-        kind: "coms_init_error",
-        reason: typeof o.reason === "string" ? o.reason : "unknown",
-      };
-    default:
-      return null;
-  }
-}
-
-/** Atomic write: tmpfile + rename (P0.3-S-M4, mirrors writeRegistryAtomic). */
-function writeArtifactAtomic(dir: string, name: string, data: unknown): void {
-  const tmp = join(dir, `.${name}.tmp-${process.pid}`);
-  writeFileSync(tmp, JSON.stringify(data, null, 2));
-  renameSync(tmp, join(dir, `${name}.json`));
 }
 
 /**
