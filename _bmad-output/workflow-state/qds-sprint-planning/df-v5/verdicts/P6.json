@@ -1,0 +1,76 @@
+{
+  "stories": ["DF2.7", "DF2.9"],
+  "iterations": 3,
+  "converged": true,
+  "final": { "high": 0, "medium": 1, "low": 2 },
+  "applied": [
+    {
+      "story": "DF2.9",
+      "severity": "HIGH",
+      "summary": "AC2 required every resolved @mariozechner/pi-* at exactly 0.55.0, which would fail a faithful build: the live tree carries pi-coding-agent@0.55.0 with pi-agent-core/pi-ai/pi-tui at 0.55.4, and the gates report writes 0.55.x for the sub-packages while pinning only pi-coding-agent. It also contradicted the story's own Technical Notes. Rewrote AC2 to pin pi-coding-agent exactly, let the pi-libs float inside 0.55.x, record observed versions in the sweep summary, and fail only on leaving 0.55.x."
+    },
+    {
+      "story": "DF2.9",
+      "severity": "HIGH",
+      "summary": "AC4 said any package shipping its own license text is 'not duplicated into NOTICE', which excluded the Apache-2.0 NOTICE-propagation duty that Technical Notes and INV-3 require for license-text-shipping deps (openai, @google/genai, @mistralai/mistralai, @aws-sdk/*, @anthropic-ai/sandbox-runtime). Stated behavior had no AC and was actively contradicted. Added the explicit carve-out naming those packages per INV-3."
+    },
+    {
+      "story": "DF2.7",
+      "severity": "HIGH",
+      "summary": "AC1 mandated the sum for inputTokens/outputTokens unconditionally while Technical Notes left the accumulation mode empirically undetermined and warned a blind += on a running-total stream double-counts. The hedge was applied only to costUsd; tokens were hard-coded with no evidence, so a running-total probe result would violate INV-COST-3. Rewrote AC1 as session total per-field with the mode fixed by the probe, and extended the probe to determine the mode for usage.input/usage.output as well as usage.cost.total."
+    },
+    {
+      "story": "DF2.7",
+      "severity": "MEDIUM",
+      "summary": "Consistency debris from the AC1 fix: the E2E Slice and the DoD unit-test line still hard-coded token summation. Both restated as session totals."
+    },
+    {
+      "story": "DF2.7",
+      "severity": "MEDIUM",
+      "summary": "Dangling invariant cross-references: AC4 cited (INV-5) and Technical Notes cited INV-2, but the story defines INV-COST-1..5. Corrected to INV-COST-5 and INV-COST-2/INV-COST-3."
+    },
+    {
+      "story": "DF2.7",
+      "severity": "MEDIUM",
+      "summary": "budgetCapUsd (default 0.5, max 10, types.ts:62-68) sat unqualified next to DD-9's 5,000,000 micro-dollar run budget cap, inviting a dev to reconcile two caps at different layers. Added an explicit tier-3-harness-vs-DF2.8/DF3.6 boundary note."
+    },
+    {
+      "story": "DF2.7",
+      "severity": "MEDIUM",
+      "summary": "Trigger Surface cited a nonexistent 'AC-5 evidence artifact' (AC5 is the zero-usage case and mandates no artifact); retargeted to the DoD e2e evidence artifact. Also added runner-integration.test.ts to Files to Modify, where it was cited as the e2e test but unlisted."
+    },
+    {
+      "story": "DF2.7",
+      "severity": "MEDIUM",
+      "summary": "AC5 (zero usage-bearing events) had no DoD test line; folded into the malformed-usage test item."
+    },
+    {
+      "story": "DF2.9",
+      "severity": "MEDIUM",
+      "summary": "AC2's version-pin failure path and AC4's new NOTICE-propagation clause had no DoD coverage; added one combined 'Test (pin + NOTICE propagation)' DoD item. Also added piVersions to the sweep summary schema, which AC2 now requires but the Observability Contract omitted."
+    },
+    {
+      "story": "DF2.9",
+      "severity": "LOW",
+      "summary": "Clarified that the new top-level oci/ holds build inputs only and the OCI runtime driver lands later at src/providers/oci/ (R3 section 9.2), preventing confusion with the DF2 provider domain."
+    }
+  ],
+  "surviving": [
+    {
+      "story": "DF2.7",
+      "severity": "MEDIUM",
+      "summary": "The make-or-break AC1 depends on a live pre-dev probe against pi 0.55.x via OpenRouter, with no documented fallback if the probe cannot run (key absent, pi unresolvable). Infra Prerequisites names the dependencies and the Deviation bullet covers absent cache fields, but not a blocked probe. Left unfixed because any fallback would be speculative — dev should escalate rather than invent a fixture."
+    },
+    {
+      "story": "DF2.7",
+      "severity": "LOW",
+      "summary": "cli-anything/src/runner.ts is listed in Files to Modify though the additive CostEvent widening likely needs no production change there; the DoD work at that file is test re-assertion of the kill path."
+    },
+    {
+      "story": "DF2.9",
+      "severity": "LOW",
+      "summary": "New top-level oci/ directory deviates from R3 section 9.1's observed preference for new domains under existing src/. Now justified in-story (Dockerfile plus license texts are not src material) and the lint-scope consequence is captured, but it remains a convention deviation a reviewer should sign off on."
+    }
+  ],
+  "checklists_fired": ["secrets-invariants"]
+}

@@ -1,0 +1,221 @@
+# DF2.2: exe.dev Driver + Five-Assertion Setup Gate
+
+**Story Points:** 5
+**Sprint:** v5-S1 (track B, provider)
+
+## Spec Reference
+
+- `docs/superpowers/specs/2026-08-11-dark-factory-v5-architecture-design.md` §3.4, §3.5, §5.1, §5.3, §6 items 1/3/5
+- Decision register: v5 §4 **D7** (provider-driver interface, exe.dev + OCI as two first-class drivers), **D8**
+- Contracts: provider-driver verbs `create/fill/setup/execute/observe/teardown/reap` (v5 §5.1) — interface owned by DF2.1
+- Binding facts: R5 §6 fact **11** (exe.dev figures are vendor-single-origin; no SOC 2 / DPA / SLA), fact **13** (pi catalog stale both ways), fact **15** (in-box evidence is a claim, not proof)
+- Source patterns (file:line): R4 §3.4 — `INK/just/sandbox/lifecycle/setup.just:8-10, 18-24, 48-58, 61-65, 90-120, 122-145, 147-151, 169-201, 205-243, 245-271`;
+  R4 §3.5 — `create.just:85, 87-89, 108-122, 172-173`; `teardown.just:64, 161`; `observe.just:126-131, 159-161`; `manage/mod.just:29`; `fill.just:74-90`
+
+## User Story
+
+As the factory host,
+I want an exe.dev provider driver whose `setup` refuses to return ready until five assertions prove the box is genuinely usable,
+so that a run never spends money inside a box whose clone is truncated, whose model registry is empty, or whose cost table silently reports $0.0000.
+
+## Overview
+
+The exe.dev driver implements DF2.1's provider interface over six control-plane command shapes
+(`new`, `ls`, `rm`, `share port`, `share set-public`, `whoami`) plus generic `ssh`/`scp`. `fill`
+clones the repo and pins the recorded SHA on a `sbx/<run-id>` branch that adds no commit and leaves
+the tree byte-identical. `setup` clears the sentinel, provisions, then runs the five-assertion gate
+(table below) — C/D/E as one script **inside** the box, so the run key never crosses the wire.
+
+## E2E Slice
+
+**Demonstrable behavior:** Given a run record carrying `commitSha` and a roster path, When
+`driver.create() → driver.fill() → driver.setup()` runs, it provisions a VM named `<run-id>`,
+resolves `httpsUrl` as `<run-id>.exe.xyz`, clones and pins the SHA on `sbx/<run-id>`, then
+returns `ready` only after all five assertions pass — each recorded as
+`{ item, ok, note }` evidence (e.g. `"A: HEAD 4f9c2ab, porcelain empty"`,
+`"D: pi cost.total 4.3e-05 > 0; 5/5 models priced"`).
+
+**Wiring closed:** On completion of this story, a box can be created, filled at a pinned SHA, and
+gated to `ready` using only code merged by this story plus DF2.1's interface and DF2.3's
+credential lifecycle. No stub, no `TODO: wire later`, and no sibling story is required to make
+this behavior real. DF2.5 harvests from such a box; DF3.1 dispatches to one.
+
+**Dependency edges (predecessors):** DF2.1, DF2.3.
+
+## Acceptance Criteria
+
+1. **(make-or-break)** Given a run record with `commitSha` and an active roster path passed **as
+   an argument**, When `setup` runs, Then it returns `ready` only if all five assertions pass, and
+   the returned evidence carries one `{item, ok, note}` entry per assertion — pass **and** fail
+   alike. `setup` is a driver method, not a process: on any failure it **returns**
+   `{ready: false, failedItem, assertionCode, assertions[]}` where `assertionCode` is that
+   assertion's code (A=1, B=1, C=2, D=3, E=4 — A and B deliberately **share** 1, so the failing
+   `item` is the discriminator and the code never is), **leaves the VM alive**, and carries the
+   debug commands plus the teardown command in the payload. Only the `scripts/`-level caller maps
+   `assertionCode` to a process exit status; DF3.1's dispatcher keeps it in the payload.
+2. Given a box where `pi --list-models` **exits 0 while printing "No models available"**, When
+   assertion B runs, Then B fails on content. *Negative control: an implementation that trusts
+   `$?` passes this box and MUST fail this test.* `command -v pi` is checked first, so
+   "command not found" cannot satisfy a non-empty-output check.
+3. Given a fill that produced truncated/zero-byte files, When assertion A runs, Then A fails
+   because `git status --porcelain` is non-empty — even though `HEAD` prefix-matches the recorded
+   `commitSha`. (Measured upstream: an unsynced clone produced 5,641 zero-byte files and reported
+   success.)
+4. Given `~/.pi/agent/models.json` with a partial `cost` block (missing `cacheWrite`), When
+   assertion D runs, Then it fails naming the whole-roster-drop consequence; given a model whose
+   `cost.input` is `0`, D fails rather than letting the factory report `$0.0000` while spending.
+   D's first half requires a real `pi -p --mode json` call reporting `cost.total > 0` — diffing
+   `/api/v1/key` usage is the wrong instrument and must not be used.
+5. Given `ssh exe.dev new --name <id> --json` returns a response whose key names do not match any
+   recognized shape, When `create` runs, Then the driver falls back to re-reading the one verified
+   shape `ls <name> --json` → `{"vms":[{vm_name, https_url, ssh_dest, …}]}` and derives
+   `https_url` from `<name>.exe.xyz`; if both are unusable, `create` fails closed **after** the
+   name is recorded, so the VM is findable by `ls` and never orphaned invisibly.
+6. Given a box whose `/tmp/PROVISION_READY` sentinel survives from a previous run, When `setup`
+   runs, Then it clears the sentinel **before** provisioning — stale readiness is never read as this
+   run's. Given a key whose `limit` is `null`, Then E fails: an uncapped key must never gate green.
+7. Given a box being provisioned, When `setup` runs, Then it writes `QDS_TEAM_RUNNER=local` into the
+   box's run environment — the environment the in-box engine inherits — beside DF2.3's
+   `/home/agent/app/.env` key-delivery contract, and the setup-gate test asserts the variable is
+   present with exactly that value before `ready` is returned. This is the producer DF1.6's
+   `dispatch_task` reads from its **inherited** environment (df1-6 AC5): a box provisioned without it
+   refuses at the first `dispatch_task` rather than taking the `warren` branch.
+
+## Trigger Surface
+
+| Trigger | Status | E2E Test | Follow-Up |
+|---------|--------|----------|-----------|
+| DF2.1 driver registry resolving `exedev` for `create`/`fill`/`setup`/`execute`/`observe` | in-scope | `tests/providers/exedev/driver.test.ts` | — |
+| `setup(runId, rosterPath)` in the create→fill→setup chain | in-scope | `tests/providers/exedev/setup-gate.test.ts` | — |
+| One live-fire mount against a real exe.dev account | in-scope | DOD e2e item (evidence run) | — |
+| `teardown` / `rm <vm>` (the only VM-destroying path) | out-of-scope | — | DF2.5 |
+| `share port` / `share set-public` for the visualizer | out-of-scope | — | DF4.2 |
+| `fleet dispatch` CLI selecting a driver | out-of-scope | — | DF3.1 |
+| OCI driver implementing the same interface (enterprise tier) | out-of-scope | — | DF2.9 |
+
+## Infra Prerequisites
+
+| Component | Service (compose/k8s/provider) | Lifecycle Hook Verified |
+|-----------|-------------------------------|-------------------------|
+| exe.dev gateway account + SSH access | exe.dev (Bold Software, Inc.), Personal/Team plan **[VERIFY]** | `ssh exe.dev whoami` preflight returns the expected account before any record is created |
+| `vm-sharing admins-only` org setting | exe.dev team settings — flipped day one (design §3.5) | operator attestation recorded once in `.sandbox/exedev-posture.json`; `setPublic()` refuses to run when the attestation is absent |
+| Per-run capped LLM key | DF2.3 credential lifecycle | key minted after VM create, delivered before setup; assertion E proves credit remaining |
+| Box image with pi **0.55.0** (pinned — R5 §6 facts 1/14), roster, `~/.pi/agent/models.json` | golden VM tag today; OCI image contract later (DF2.9) | assertion B proves the registry loaded; assertion D proves rates are non-zero |
+| In-box probe dependencies (`curl`, `python3`, `git`) | box image | assertion script exits `127`-mapped with a named missing dependency rather than a false fail |
+
+## Technical Notes
+
+- **The provider surface is six shapes** (R4 §3.5, verified exhaustively): `new --name <id> --tag
+  <tag> --json`, `ls [<name>] --json`, `rm <vm>`, `share port <vm> <port>`,
+  `share set-public <vm>`, `whoami`. Everything else is plain `ssh <vm>.exe.xyz "<cmd>"` and
+  `scp`. The vendored 2,242-line `exedev` Python CLI is **not** the port target — the recipes
+  beside it never call it.
+- **Verified vs unverified is recorded, not assumed.** `ls --json`'s shape and the
+  `<name>.exe.xyz` derivation are Measured; `new --json`'s key names are UNVERIFIED. The driver
+  carries the split explicitly and prefers a re-read of the verified shape over a guess.
+- **Assertion table** (`setup.just:90-255`):
+
+  | # | Assertion | Proves | Exit |
+  |---|---|---|---|
+  | A | git integrity **by content** | `HEAD` prefix-matches the record's `commitSha` **and** `git status --porcelain` is empty | 1 |
+  | B | pi registry loaded | `command -v pi`, then `--list-models` non-empty **and** not containing `no models available` | 1 |
+  | C | live model ping per roster | real `chat/completions` per roster model with `provider:{zdr:true, data_collection:"deny"}`; accepts `content` **or** `reasoning` | 2 |
+  | D | cost table loaded | real `pi -p --mode json` reports `cost.total > 0`, **and** every model in `models.json` has non-zero `cost.input` | 3 |
+  | E | capped credit remaining | `GET /api/v1/key` with the **runtime** key; remaining is **computed** as `limit - usage`; a `null` limit means **uncapped** and E **fails** — DF2.3 INV-CRED-1 requires a capped key. Proves headroom, never liveness: this endpoint returns `200` for a dead key (DF2.3 INV-CRED-4), so C is the liveness proof and must run first | 4 |
+
+- **Three structural rules carried verbatim from the source:** C/D/E run as **one script inside
+  the box** so the runtime key never crosses the wire and the gate exercises the box's own egress;
+  the roster is an **argument, not an environment variable** (`ssh host 'cmd'` carries no
+  environment — a measured bug where every fan-out arm gated against models it would never call);
+  and `/tmp/PROVISION_READY` is cleared before provisioning (AC6).
+- **Two pi rate-table landmines (R4 §4.2):** `models.json` requires **all four** of
+  `input`/`output`/`cacheRead`/`cacheWrite` — a partial block fails validation and pi drops the
+  **entire roster**; a missing `cost` block defaults every rate to zero and the factory reports
+  `$0.0000` forever while genuinely spending (observed on a 463.6k-token run).
+- **Fill semantics** (`fill.just:74-90`): public unauthenticated clone, SHA pinned, branch
+  `sbx/<run-id>` created at existing `HEAD` — no commit added, tree byte-identical, so assertion A
+  still passes. A re-fill **switches to** the branch, never re-creates it; its commits are the output.
+- **Guards/limits:** per-assertion timeout 60_000 ms, whole gate 300_000 ms; `POST https://exe.dev/exec`
+  is capped at 30 s / 64 KB **[VERIFY]**, which is why every exec path uses SSH.
+- **Deviation/assumption — all exe.dev behavioural and commercial claims are `[VERIFY]`,
+  vendor-single-origin** (R5 §6 fact 11): wildcard gateway host key, default port-8000 proxying,
+  "only one port can ever be anonymous", ~2 s boot, VMs never expire and bill until killed,
+  server-side secret injection, 50-VM / 100 GB-pooled-disk allowances. Each is recorded
+  `verified: false` and the driver refuses the dependent operation rather than assuming. **No AC in
+  this story assumes a SOC 2 report, a customer-facing DPA, or an SLA exists** — none does.
+
+## Observability Contract
+
+- Every driver operation logs `{ requestId, runId, op, vm, durationMs, outcome, verified }`;
+  `verified` records whether the response shape was the Measured one or a fallback.
+- requestId propagates from the dispatch that created the run record; errors include
+  `{ code, message, remediation }` naming the literal next command.
+- Sub-timings: `create_ms`, `fill_ms`, `gate_a_ms` … `gate_e_ms`. Secrets are never logged — the
+  gate reports credit as a computed remainder, never the key.
+
+## Files to Modify
+
+- `src/providers/exedev/driver.ts`
+- `src/providers/exedev/fill.ts`
+- `src/providers/exedev/setup-gate.ts`
+- `src/providers/exedev/assertions-in-box.sh`
+- `src/providers/index.ts`
+- `tests/providers/exedev/driver.test.ts`
+- `tests/providers/exedev/setup-gate.test.ts`
+- `tests/providers/exedev/fixtures/fake-exedev.ts`
+
+## Security Invariants
+
+- **INV-1 (isolation):** one run per box, single-tenant. `vm-sharing` is `admins-only`; the
+  driver's `setPublic()` refuses without the recorded posture attestation, and at most one port is
+  ever anonymous **[VERIFY]**. No trace or visualizer port is exposed by this story.
+- **INV-2 (input validation + ordering):** assertion A runs before any assertion that spends
+  money, so a truncated clone is caught before the first paid token. The run-id is validated as a
+  hostname (regex plus a 63-char limit) before it becomes a VM name and therefore a public URL.
+- **INV-3 (never trust `$?`):** every assertion asserts on **content**, not on exit status —
+  `pi --list-models` exits 0 while printing "No models available". A green gate states what it
+  verified; a red one names the item and carries the evidence note.
+- **INV-4 (credential containment):** the runtime key never crosses the wire during setup. C/D/E
+  execute as one in-box script reading the key from the box's own `0600` file; the provisioning
+  key is never present in the box at all. See DF2.3 INV-CRED-1 … INV-CRED-3.
+- **INV-5 (fail-closed):** a failing gate **never destroys the VM** — destroying it throws away
+  the evidence. An unverified vendor claim is never an implicit pass: the dependent operation is
+  refused and recorded `verified: false`. In-box gate output is a **claim, not proof** (R5 §6
+  fact 15) — nothing here authorizes a PR; host-side re-verification is DF5.1's job.
+
+## Definition of Done
+
+- [ ] **Impl:** `src/providers/exedev/driver.ts` implements DF2.1's interface over the six control-plane
+      shapes plus `ssh`/`scp`, with the verified/unverified response-shape split recorded per call.
+- [ ] **Impl:** `fill` clones, pins the record's `commitSha`, and creates-or-switches `sbx/<run-id>` leaving the tree
+      byte-identical; a re-fill never re-creates the branch.
+- [ ] **Impl:** five-assertion gate with source-fixed exit codes (A/B=1, C=2, D=3, E=4), C/D/E as one in-box
+      script, roster passed as an argument, sentinel cleared before provisioning.
+- [ ] **Contract:** setup returns `{ready, failedItem?, assertionCode?, assertions[]}` with one
+      `{item, ok, note}` per assertion, recorded on pass and fail alike; no code path in the driver
+      calls `process.exit`.
+- [ ] **Integration:** driver registered in `src/providers/index.ts`; the run key delivered by DF2.3 is
+      the key assertion E measures.
+- [ ] **Integration (team-runner seam, DF1.6 boundary):** `setup` writes `QDS_TEAM_RUNNER=local` into the
+      box run environment beside DF2.3's `/home/agent/app/.env` delivery (AC7); the setup-gate test asserts
+      the variable and its value are present in that environment before `ready` is returned.
+- [ ] **Security:** `setPublic()` refuses without the recorded `vm-sharing admins-only` attestation; a
+      gate failure leaves the VM alive and prints teardown (INV-1, INV-5).
+- [ ] **Test (unit):** each of the five assertions has an independent pass case and fail case against the
+      exe.dev/box fake.
+- [ ] **Test (exit-code-trap):** a box whose `pi --list-models` exits 0 printing "No models available"
+      fails assertion B; a `$?`-trusting implementation passes it and MUST fail this test.
+- [ ] **Test (cost-table landmine):** partial `cost` block (missing `cacheWrite`) and zero `cost.input`
+      each fail assertion D with the roster-drop / silent-$0.0000 diagnosis named.
+- [ ] **Test (e2e demo — MANDATORY):** one live-fire `create → fill → setup` against a real exe.dev
+      account produces a `ready` result with all five assertion notes captured to
+      `.sandbox/runs/<run-id>-setup.json`. On the successful `ready` path, cleanup runs as a
+      finally-style step **after** the artifact is retained, invoking DF2.5's `teardown`/`rm <vm>` verb
+      — the only VM-destroying path (see Trigger Surface) — rather than any ad-hoc deletion; VM
+      destruction is asserted only from teardown's own confirmation, never assumed from the harness
+      issuing the call. A `setup` failure preserves INV-5's fail-closed semantics: the VM stays alive,
+      the artifact is retained, and the failure note names the DF2.5/DF2.6 remediation path.
+
+## Dev Agent Record
+
+<!-- Empty placeholder — filled during development. -->

@@ -1,0 +1,81 @@
+{
+  "stories": ["DF5.1", "DF5.2"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 2, "low": 2 },
+  "applied": [
+    {
+      "story": "DF5.1",
+      "severity": "MEDIUM",
+      "summary": "Storage contract contradicted itself: the Determinism note requires every re-verify retained append-only with DF5.2 reading the latest, but the persisted path was a single `.sandbox/reverify/<run-id>.json`. Changed to `.jsonl`, one record per line, last line authoritative (E2E slice + DoD Contract); DF5.2's Infra Prerequisites row updated to match so the two stories name the same artifact."
+    },
+    {
+      "story": "DF5.1",
+      "severity": "MEDIUM",
+      "summary": "INV-RV-4 mandated redaction at the report boundary with no executable check. DoD Security line now requires a test that plants a sentinel secret in gate output and greps every log line and report field for it (secrets checklist: redaction test)."
+    },
+    {
+      "story": "DF5.2",
+      "severity": "MEDIUM",
+      "summary": "F10-adjacent TOCTOU: the push was specified as `refs/sandbox/<run-id>:refs/heads/qds/<run-id>`, so the ref could move between the AC3 sha comparison and the push, publishing content the host never verified. AC1, E2E slice, Overview, DoD Impl and INV-PR-6 now push the verified sha itself, never the ref name."
+    },
+    {
+      "story": "DF5.2",
+      "severity": "MEDIUM",
+      "summary": "Approval was not bound to the verdict it authorized — an approval of an earlier re-verify could ride a later re-harvest to a PR. Bound via `decidedAt` later than the relied-on report's `startedAt` (AC1, AC3, Infra prereq row, INV-PR-5). Deliberately NOT expressed as a new `headSha` field on the approval: DF3.4's `ApprovalRecord` is a closed schema that rejects unknown keys, so that formulation would have been a cross-story contradiction; the temporal binding uses only fields both stories already define. *(CodeRabbit P14 follow-up: this temporal-only `decidedAt > startedAt` binding was subsequently strengthened in DF5.2 + epic to `decidedAt > completedAt` plus a content binding to the report id and verified headSha via a host-owned record, since temporal-only could still bind to an intermediate report state. Kept here as the historical v1 closure.)*"
+    },
+    {
+      "story": "DF5.2",
+      "severity": "MEDIUM",
+      "summary": "Token source contradicted itself — Infra prereq said 'host keychain or host-only env' while INV-PR-2 and the DoD said 'keychain or stdin, never argv'. Unified on host keychain or stdin, never a box, never argv (secrets checklist: storage/injection consistency)."
+    },
+    {
+      "story": "DF5.2",
+      "severity": "MEDIUM",
+      "summary": "No rotation or revocation path for the GitHub token (secrets checklist: rotation mechanism). INV-PR-2 now states the token is held only for the call and never cached to disk, so operator rotation or revocation takes effect on the next invocation, and a revoked or out-of-scope token refuses at preflight (AC5) rather than failing mid-push."
+    },
+    {
+      "story": "DF5.2",
+      "severity": "MEDIUM",
+      "summary": "DD-8 completeness: R2 §7 marks the audit's 'reviewer-visible artifacts attached' clause NET-NEW, but the changed-file list appeared only in Technical Notes and Guards while AC2 and the DoD Contract line omitted it — the body spec disagreed with itself across three places. Added to AC2 and the DoD Contract line; the NET-NEW annotation now names the reviewer-visible artifact list alongside issue refs, cost summary and the green-gate precondition."
+    },
+    {
+      "story": "DF5.2",
+      "severity": "MEDIUM",
+      "summary": "Provenance of the two gating records was unstated, leaving open a reading where a harvested artifact could supply an approval. INV-PR-5 now states both records are host-authored artifacts read from host paths and never reconstructed from harvested output, so a box cannot manufacture its own approval (F10)."
+    },
+    {
+      "story": "DF5.2",
+      "severity": "MEDIUM",
+      "summary": "DoD Security line now requires a sentinel-token test asserting the token appears in no log line, run-record field or error surface (secrets checklist: redaction test)."
+    },
+    {
+      "story": "DF5.2",
+      "severity": "LOW",
+      "summary": "Line-cap offsets so additions stayed within the 200-line hard cap: webhook-correlation note compressed 4 lines to 3, deviation/assumption note 4 to 3, Overview/E2E/AC1 rewrapped. Final counts DF5.1 197, DF5.2 200."
+    }
+  ],
+  "surviving": [
+    {
+      "story": "DF5.2",
+      "severity": "MEDIUM",
+      "summary": "The refusal path posts an issue comment using the same host token, but no clause states the comment path re-checks the allowlist before calling GitHub. INV-PR-3 ('acts only on registered repositories') covers it by implication rather than by statement; not fixed because DF5.2 is at the 200-line cap and no offset was available without cutting load-bearing text."
+    },
+    {
+      "story": "DF5.1",
+      "severity": "MEDIUM",
+      "summary": "DF1.6 is listed as a predecessor (correct per R5 §2) but no prose explains what DF5.1 consumes from it — Infra Prerequisites names DF2.5, DF1.2 and DF1.1 only. A reader cannot tell whether the edge is real or ceremonial."
+    },
+    {
+      "story": "DF5.1",
+      "severity": "LOW",
+      "summary": "AC1's enumerated `ReverifyReport` fields omit `claimed` and `reason`, both present in the Technical Notes schema and covered by DoD lines. Cosmetic duplication gap, no ambiguity about the contract."
+    },
+    {
+      "story": "DF5.2",
+      "severity": "LOW",
+      "summary": "`tests/pr/fixtures/repos.json` will carry repo slugs and possibly token placeholders; no statement that fixture secrets are obviously fake sentinels (secrets checklist test-invariant)."
+    }
+  ],
+  "checklists_fired": ["secrets-invariants", "auth-invariants"]
+}

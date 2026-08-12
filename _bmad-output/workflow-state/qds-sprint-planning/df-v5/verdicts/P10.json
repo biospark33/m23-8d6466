@@ -1,0 +1,91 @@
+{
+  "stories": ["DF3.1", "DF3.2"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 1, "low": 4 },
+  "applied": [
+    {
+      "story": "DF3.2",
+      "severity": "HIGH",
+      "summary": "Admission API contradicted its own dependency: story called `headroom()` returning an integer, but DF2.6 provides `checkHeadroom(n)` -> `{allowed, liveVms, ceiling, headroom, reason?}`. Rewritten consistently across Overview, E2E slice, AC1, Infra Prerequisites, Technical Notes, INV-2 and two DoD items; AC1 now uses DF2.6 AC2's exact refusal payload."
+    },
+    {
+      "story": "DF3.2",
+      "severity": "HIGH",
+      "summary": "Atomic slot reservation invented state no component implements — DF2.6 offers a point-in-time check, no reservation ledger, so 'partial reservation is released' and 'a refusal leaves the ledger unchanged' were unimplementable. Replaced with the honest contract: one `checkHeadroom(N)` covering all N before the first mint (never N checks of 1), a point-in-time read that mutates nothing, concurrent fan-outs out of scope per DD-1."
+    },
+    {
+      "story": "DF3.2",
+      "severity": "HIGH",
+      "summary": "AC6 ('Given N=1 ... not an error') was directly contradicted by Guards/limits ('N is an integer in 2..8 for best-of-N and race'). AC6 now scoped to `--pattern many-stories --n 1`; best-of-n and race reject N=1 at validation with exit 2 because a comparison needs two arms."
+    },
+    {
+      "story": "DF3.2",
+      "severity": "HIGH",
+      "summary": "Missing AC for an in-scope trigger: `fleet rank <fanout-id>` had a trigger-surface row, its own test file, an E2E-slice claim and a DoD contract item but no acceptance criterion — so P1.4's surviving tie rule (R2 §2) was unenforced. Added AC7 fixing the rank shape, the 0.1 tie threshold with no automatic tie-break, plus the null-score and all-arms-failed edges."
+    },
+    {
+      "story": "DF3.2",
+      "severity": "MEDIUM",
+      "summary": "AC5 required race losers to be 'harvested before teardown' while DF2.5's fixed six-step order already harvests at steps 2-3 — implying a second harvest call. Reworded to one unmodified DF2.5 `teardown` whose order harvests before it destroys."
+    },
+    {
+      "story": "DF3.2",
+      "severity": "LOW",
+      "summary": "DoD realigned to the amended ACs: race wording, the N=1 test split by pattern, and the rank tie assertion folded into the Contract item to hold DoD at 10 items. Removed a stray blank line in Technical Notes."
+    },
+    {
+      "story": "DF3.1",
+      "severity": "MEDIUM",
+      "summary": "AC3 said dispatch 'exits non-zero with that assertion's code', but DF2.2's assertion codes are A/B=1, C=2, D=3, E=4 — which collide with this CLI's own table (1=run/provider failure, 2=usage/schema, 3=setup-gate, 4=run not found), so an assertion-C failure would exit 2 'usage error'. Now exits 3 carrying the assertion code in the payload, matching the table and the DoD."
+    },
+    {
+      "story": "DF3.1",
+      "severity": "MEDIUM",
+      "summary": "Exit-code table declared itself 'this CLI's own table' at 0-4 while DF3.2 uses exit 5 for admission refusal on the same binary (`scripts/fleet.ts`) — two tables for one executable. Reserved 5 in DF3.1's single table, attributed to DF3.2."
+    },
+    {
+      "story": "DF3.1",
+      "severity": "MEDIUM",
+      "summary": "CC-9 site (4) demanded a DoD assertion over trace-store rows, but the trace store is DF1.4 and the end-to-end join is DF1.8 — neither is in DF3.1's R5 §2 dependency set, and the E2E runs against the `fake` driver with no tier 2. The four-site rule is preserved as the surviving contract; the DoD test is scoped to host-side sites 1-3 and site 4 is named as fed here, joined by DF1.8."
+    },
+    {
+      "story": "DF3.1",
+      "severity": "MEDIUM",
+      "summary": "Circular deferral on `fleet reap`: DF3.1 and DF3.2 deferred it to DF2.6 while DF2.6 defers the `fleet reap` CLI verb back to DF3.1, leaving it owned by nobody. Both owned files now state DF2.6's `scripts/sandbox-reap.ts` is the whole surface and no `fleet reap` wrapper ships in v5.0."
+    },
+    {
+      "story": "DF3.1",
+      "severity": "LOW",
+      "summary": "Offsetting compressions to hold the 200-line normative cap: Wiring-closed tail and the Resolved-value rule tightened (file 204 -> 204 lines, points unchanged)."
+    }
+  ],
+  "surviving": [
+    {
+      "story": "DF3.2",
+      "severity": "MEDIUM",
+      "summary": "Cross-story, fix belongs outside my owned files: DF2.6's trigger surface still defers `fleet reap` / `fleet status` CLI verbs to DF3.1, while DF3.1 and DF3.2 now declare no `fleet reap` wrapper ships in v5.0. DF2.6 needs the mirror edit or the deferral loop reopens."
+    },
+    {
+      "story": "DF3.1",
+      "severity": "LOW",
+      "summary": "The ack prints and logs `httpsUrl` — the box's one shared public port — with no statement of what it serves. F11/R10 confidentiality and port auth are DF4.1's scope, so DF3.1 is right not to claim it, but a reader cannot tell from DF3.1 alone that the printed URL is not a confidentiality surface."
+    },
+    {
+      "story": "DF3.1",
+      "severity": "LOW",
+      "summary": "`boxUnknown` (the 30_000 ms driver `list` timeout state) appears in Guards/limits and the DoD but has no acceptance criterion; AC4 covers only `boxMissing`."
+    },
+    {
+      "story": "DF3.1",
+      "severity": "LOW",
+      "summary": "Secrets-checklist rotation-cadence item is discharged by delegation (Infra row 'Run key | DF2.3 credential lifecycle') rather than an explicit not-applicable sentence; per-run mint-and-revoke makes rotation inherent, but the omission is implicit."
+    },
+    {
+      "story": "DF3.2",
+      "severity": "LOW",
+      "summary": "`fanoutId` has no stated format or uniqueness rule despite being the observability group key across N arm traces and the argument to `fleet rank <fanout-id>`."
+    }
+  ],
+  "checklists_fired": ["auth-invariants", "secrets-invariants", "input-invariants"]
+}

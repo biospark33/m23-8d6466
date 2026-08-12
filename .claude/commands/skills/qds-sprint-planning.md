@@ -1,9 +1,9 @@
 ---
 name: qds-sprint-planning
 description: Enterprise-grade story planning workflow with parallel research and parallel writing. Use when planning new epic stories for a single track (A or B). Executes 2-phase core workflow with pre/post phases: Phase 0 (preparation), Phase 1 (parallel research with 5 agents), Phase 2 (parallel story writing with DUAL OUTPUT), and Phase 3 (wrap-up with status updates and PR creation).
-version: 1.3.0
+version: 1.4.0
 author: biospark33
-last_updated: 2026-06-19
+last_updated: 2026-08-12
 ---
 
 # QDS Sprint Story Planning Skill
@@ -238,6 +238,29 @@ Quality Standard: A6 (20-36 DOD checkboxes, Pydantic schemas, 12-Factor complian
   track (backend vs frontend) and **incorporate learned patterns** from
   previous sessions (story estimation, wave strategy, research sources).
 
+**Conditional crosswalk agent (SPL-025 — MANDATORY when applicable).**
+If this run consumes an upstream disposition/audit table that names
+clauses as "surviving verbatim" (supersession audits, re-derivation
+maps), one research agent MUST extract the ACTUAL VERBATIM TEXT of every
+named clause from the source story files — real labels, real line
+numbers — into a crosswalk report.
+
+**Crosswalk output contract (SPL-025):** the crosswalk is `Write`n to
+`_bmad-output/workflow-state/qds-sprint-planning/{epic}-{track}/research/crosswalk.md`
+and its path returned to the orchestrator as **`{CROSSWALK_PATH}`**. This
+work is owned by **Agent 1 (Story Pattern Research)** — when a crosswalk
+applies, Agent 1 produces BOTH `{R1_PATH}` and `{CROSSWALK_PATH}`. The
+orchestrator interpolates `{CROSSWALK_PATH}` into every writer prompt
+alongside `{R1_PATH}`–`{R5_PATH}` (see "Research Context" in the Writing
+Agent Template, which declares the conditional `{CROSSWALK_PATH}` input).
+Writers consume ONLY the crosswalk, never the audit table directly. Clauses the audit names that do not
+resolve to source text are marked **NET-NEW** in the crosswalk and
+authored fresh under normal adversarial review — never pasted under a
+"survives verbatim, do not re-litigate" banner (that launders unreviewed
+requirements past the review loop). Origin: 2026-08-12 DF-v5 derivation,
+where 28 phantom clauses, one 10,000× unit contradiction, and one
+inverted security doctrine were caught by exactly this agent.
+
 ### Phase 2: Parallel Story Writing (Waves, Max 2 Stories Per Agent)
 
 After research completes:
@@ -441,7 +464,19 @@ Extract the story template structure including:
 
 Output: A complete story template that matches the established pattern for this track.
 
-Return ONLY the template structure with placeholders like {STORY_ID}, {TITLE}, {POINTS}, etc.
+Return the template structure with placeholders like {STORY_ID}, {TITLE}, {POINTS}, etc.
+
+**Conditional crosswalk task (SPL-025).** If this run consumes an upstream
+disposition/audit table that names clauses as "surviving verbatim"
+(supersession audits, re-derivation maps), also: read the source story files
+those clauses cite, extract the ACTUAL VERBATIM TEXT of every named clause
+with its real label and line number, and `Write` it to
+`_bmad-output/workflow-state/qds-sprint-planning/{epic}-{track}/research/crosswalk.md`.
+Clauses that do not resolve to source text are marked NET-NEW. When no such
+audit table is in scope, skip this task entirely.
+
+Return the template report's file path, and — only when the crosswalk task
+applied — the crosswalk file path as well.
 ```
 
 ### Agent 2 - Tool Specifications (Track A) / UX Specifications (Track B)
@@ -601,24 +636,41 @@ the orchestrator prompt small and your context scoped to what you write):
 - **Entity/Component Patterns** (Agent 3): `{R3_PATH}`
 - **External Dependencies** (Agent 4): `{R4_PATH}`
 - **Dependency Analysis** (Agent 5): `{R5_PATH}`
+- **Clause Crosswalk** (Agent 1; CONDITIONAL — present ONLY when this run
+  consumes an upstream disposition/audit table naming "surviving verbatim"
+  clauses): `{CROSSWALK_PATH}`. When present, this is the SOLE source for
+  any clause the audit names "surviving verbatim" — read the crosswalk,
+  not the audit table. Clauses the crosswalk marks NET-NEW are authored
+  fresh under normal adversarial review.
 
 ## Quality Requirements
 
 Every story MUST include:
 
 1. **Header with spec reference**: `**Spec Reference:** [SPEC_FILE.md] §[SECTION]`
+   — plus `**Story Points:**` and `**Sprint:**` header fields (SPL-028:
+   mandatory header fields live HERE in the template, not in per-wave
+   writer prompts — per-prompt statements replicate inconsistently
+   across waves; 9 of 12 wave-1 DF-v5 stories shipped without a Sprint
+   header for exactly this reason)
 2. **User story format**: As a **[Role]**, I want [Feature], So that [Value]
 3. **Overview section**: Technical overview with key patterns
 4. **Acceptance Criteria**: Given/When/Then scenarios
 5. **Technical Notes**: Model config, file structure, integration points
 6. **12-Factor Agent Compliance** (Track A) or UI Compliance (Track B)
-7. **Definition of Done**: 20-36 DOD checkboxes across 6 categories:
-   - Implementation (6-10 items)
-   - Testing (4-7 items)
-   - Code Quality (3-5 items)
-   - Documentation (2-5 items)
-   - Dependencies (2-5 items)
-   - Integration (3-4 items)
+7. **Definition of Done**: ≤10 HIGH-SIGNAL checkboxes spanning the 6
+   category concerns (Implementation, Testing, Code Quality,
+   Documentation, Dependencies, Integration — one line may cover a
+   category; drop project-wide CI invariants like "tests pass"/"lint
+   clean"). The historical 20-36-checkbox A6 standard is superseded by
+   the Phase 2.5 atomicity gate (check 4); if this section and the gate
+   ever disagree, the gate wins.
+
+**Size discipline (SPL-027):** target ≤185 normative lines per story.
+The 200-line cap belongs to the Phase-3 adversarial loop, which needs
+~15 lines of headroom to add invariants without cutting load-bearing
+text — writers who aim at the cap converge at 195–200 and force review
+fixes to be declined for line budget.
 
 ## Dual Output Pattern (CRITICAL)
 
@@ -922,6 +974,38 @@ If Context7 MCP is not available:
 - Claude Code Task tool (for parallel agent execution)
 
 ## Changelog
+
+### [1.4.0] - 2026-08-12
+
+**Reflect pass from the DF-v5 backlog derivation (31 stories / 111 pts,
+PR #101). Transcript:
+`.claude/learnings/qds-sprint-planning/transcripts/2026-08-12_063910_DF-v5-backlog-derivation.md`.**
+
+- **Added (Phase 1, SPL-025):** mandatory conditional **crosswalk agent**
+  whenever a run consumes an upstream disposition/audit table naming
+  "surviving verbatim" clauses — verbatim source extraction with real
+  labels/line numbers; unresolvable clauses marked NET-NEW and authored
+  fresh under normal review. Caught 28 phantom clauses, a 10,000× unit
+  contradiction, and an inverted security doctrine in DF-v5.
+- **Changed (step 3.1a, SPL-026):** pipeline subagents now **Write their
+  JSON verdict to `workflow-state/.../verdicts/<batch>.json`** in the
+  original prompt, in addition to returning it — final-text-only verdicts
+  are unreachable from the orchestrator after completion.
+- **Changed (step 3.1b):** the cross-story agent receives the per-story
+  verdicts' surviving **cross-boundary findings as an explicit work
+  queue** (verifying attributions — one DF-v5 queue item blamed the wrong
+  story), on top of its full-slate sweep.
+- **Added (step 3.0.5 + Phase 2.5):** orchestrator **mechanical grep
+  pre-scans** (atomicity mechanicals, shared-pattern tokens) before
+  spawning judgment agents — cheap, catches gross failures instantly,
+  grounds the shared_pattern_note in verified data.
+- **Changed (Writing template, SPL-027/SPL-028):** writers target
+  **≤185 normative lines** (cap headroom belongs to the review loop);
+  `**Sprint:**` header mandatory **in the template** (per-wave prompt
+  statements replicate inconsistently — 9 wave-1 omissions).
+- **Fixed:** Quality Requirements item 7 contradicted the Phase 2.5
+  atomicity gate (20-36 DOD checkboxes vs ≤10 high-signal) — gate wins,
+  template now says so.
 
 ### [1.3.0] - 2026-06-19
 

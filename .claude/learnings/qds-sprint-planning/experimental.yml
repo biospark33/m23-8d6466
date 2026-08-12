@@ -1,13 +1,13 @@
 # QDS Sprint Planning Skill - Low Confidence Experimental Patterns
 # These patterns require manual review before applying.
 # Confidence: LOW (inferred patterns, single observation)
-version: "1.1"
+version: "1.2"
 skill: qds-sprint-planning
-last_updated: "2026-05-16T00:00:00Z"
+last_updated: "2026-08-12T00:00:00Z"
 commit_hash: null
 
 metadata:
-  total_learnings: 1
+  total_learnings: 2
   applied_count: 1
   success_rate: 1.0
   # v1.1: Added SPL-023 from the 2026-05-16 PRO-HUB session.
@@ -48,6 +48,35 @@ learnings:
       source: "CodeRabbit inline review on PR #1484"
       summary: "Removed false apostrophe root-cause; confirmed <<'EOF' is safe; reframed -F as robustness practice."
     first_seen: "2026-05-16"
-    times_seen: 1
+    times_seen: 2
     applications: 1
-    confidence: "low"  # Single observation; root cause unknown; -F recommendation stands as best practice
+    confidence: "low"  # Two observations; root cause still unknown; -F recommendation stands as best practice. Promote to preferences on next recurrence.
+
+    recurrence_evidence:
+      - session: "2026-05-16 qds-sprint-planning for Epic PRO-HUB"
+        finding: "First observation — Phase-3 commit failed once; recovered via git commit -F."
+      - session: "2026-08-12 DF-v5 backlog derivation"
+        finding: |
+          Reinforced: heredoc-in-command-substitution commit message failed
+          shell parse (unexpected EOF); git commit -F /tmp/df-commit-msg.txt
+          succeeded first try. times_seen now 2; promote to preferences on
+          next recurrence.
+
+  - id: SPL-030
+    category: tooling-hygiene
+    pattern: "Never cd in compound Bash calls during orchestration; absolute paths only"
+    description: |
+      A `cd <dir> && ...` in one Bash call persists the cwd into later
+      calls. Mid-campaign this made relative-path checks report the story
+      directory missing and all review verdicts absent -- a false alarm
+      that cost several turns and nearly triggered misdiagnosis of the
+      review wave. Orchestrator Bash calls use absolute paths exclusively;
+      if a cd is unavoidable, append `; cd -` or reset cwd in the same
+      call.
+    evidence:
+      session: "2026-08-12 DF-v5 backlog derivation"
+      finding: "ls _bmad-output/... from inside the stories dir returned 'No such file or directory' while 6 verdict files sat at the absolute path"
+    first_seen: "2026-08-12"
+    times_seen: 1
+    applications: 0
+    confidence: "low"

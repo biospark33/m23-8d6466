@@ -1,0 +1,96 @@
+{
+  "stories": ["DF5.3", "DF5.4"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 2, "low": 3 },
+  "applied": [
+    {
+      "story": "DF5.3",
+      "severity": "HIGH",
+      "summary": "Box-lifecycle and bundle-verification links had no emitting module. Files to Modify / Trigger Surface named only credentials.ts + teardown.ts, but DF2.5's `git bundle verify` lives in src/providers/harvest.ts and the box create/fill/setup transitions land in DF2.1's src/providers/run-record.ts — so AC3 (link 'written by its emitter at the moment of the event') was unsatisfiable for hops 5 and 6. Added both files and rewrote the Trigger Surface row plus the DoD Integration line to name each event's own emitter."
+    },
+    {
+      "story": "DF5.3",
+      "severity": "HIGH",
+      "summary": "Hop 5 read 'provision→fill→setup-gate→harvest→teardown→reap', contradicting shared_pattern_note / DF2.1's canonical host-side verb set create/fill/setup/execute/observe/teardown/reap — 'provision' and 'harvest' name no verb in the provider seam. Corrected in the hop table and the Overview."
+    },
+    {
+      "story": "DF5.3",
+      "severity": "MEDIUM",
+      "summary": "AC1 named the VOID hop only as 'the memory hop … typed void'. Register §4 row 3 / DD-4 requires the Hindsight retain-receipt link recorded VOID under the P0.11 convention explicitly in an AC; AC1 now names the retain receipt, the P0.11 VOID convention and step-6 pendency."
+    },
+    {
+      "story": "DF5.3",
+      "severity": "MEDIUM",
+      "summary": "Dependency edges omitted R5 §2's parenthetical P1.11/P1.12 retain-receipt edge; now stated as degraded-to-VOID rather than satisfied (R5 §5.3, DD-4). Listed edges otherwise match R5 §2 exactly."
+    },
+    {
+      "story": "DF5.3",
+      "severity": "MEDIUM",
+      "summary": "migration-invariants: audit.db is migrated from two entry points (first recordAuditLink and first walk) with no idempotency statement. Infra row now specifies CREATE TABLE/TRIGGER IF NOT EXISTS, and (CodeRabbit P15 follow-up) the write-time migration in recordAuditLink is serialized with BEGIN IMMEDIATE + busy_timeout so two concurrent first-callers cannot deadlock on SQLITE_BUSY/LOCKED; the first walk is read-only and fails closed with a named broken hop on an uninitialized store (see DF5.3 lines 89-90), so only recordAuditLink ever mutates schema."
+    },
+    {
+      "story": "DF5.3",
+      "severity": "MEDIUM",
+      "summary": "secrets-invariants: INV-AUDIT-2 asserted no key material/token in chain or diagnostics but no test exercised it. Folded a redaction test into the DoD Security line; DoD stays at 10 items."
+    },
+    {
+      "story": "DF5.4",
+      "severity": "MEDIUM",
+      "summary": "Clause map showed DF5.4-P1's Owner and DF5.4-V1's Group as '—', but the chassis requires non-empty `story` and a `group` enum value (GateAssertionSchema gate-runner.ts:99-101); a literal reading yields a schema-invalid GateAssertion. Set P1 Owner = DF5.4, V1 Group = main (inert — the chassis settles VOID before grouping)."
+    },
+    {
+      "story": "DF5.4",
+      "severity": "MEDIUM",
+      "summary": "The chassis's required `prd_clause` field (gate-runner.ts:51, non-empty) was unspecified anywhere in the story. Added the mapping to the clause-map header: `story` = the Owner column, `prd_clause` = \"§8 step 5 — <stage>\", since no PRD §13 clause covers these."
+    },
+    {
+      "story": "DF5.4",
+      "severity": "MEDIUM",
+      "summary": "C2 said 'box provisioned'; corrected to DF2.1's canonical create/fill/setup verbs to match shared_pattern_note and DF5.3's hop 5."
+    },
+    {
+      "story": "DF5.4",
+      "severity": "MEDIUM",
+      "summary": "Files to Modify edits the shared src/gate/assertions/lib/verdict.ts (used by P0.11's existing assertions) with no regression guard. Now states the extension is additive and P0.11's 45 existing cases stay green."
+    },
+    {
+      "story": "DF5.4",
+      "severity": "MEDIUM",
+      "summary": "secrets-invariants: INV-GATE-2 asserted no token/key material/PII in the report but no test exercised it. Folded a redaction test into the DoD Security line; DoD stays at 10 items."
+    },
+    {
+      "story": "DF5.4",
+      "severity": "LOW",
+      "summary": "Added a budget-feasibility note (11 clauses at concurrency 4 settle in three waves inside 300 s; C9's ≤30 s `qds audit` walk fits its 60 s assertion budget) while compressing bullets to hold the ≤200 normative cap."
+    }
+  ],
+  "surviving": [
+    {
+      "story": "DF5.3",
+      "severity": "MEDIUM",
+      "summary": "No AC asserts the CI-workflow behavior on a broken chain — the NET-NEW obligation (R2 §11 item 20, CI verification of merged factory PRs) rests on the DoD Contract line and the Trigger Surface row only. Not fixed: the file is at the 200-line normative cap with no headroom, and the obligation is stated, just not AC-enforced."
+    },
+    {
+      "story": "DF5.4",
+      "severity": "MEDIUM",
+      "summary": "secrets-invariants 'fixture secrets are obviously fake': tests/gate/fixtures/df5-run-of-record.json is named but the story does not state the sentinel-value convention for the key hashes and tokens it will carry."
+    },
+    {
+      "story": "DF5.3",
+      "severity": "LOW",
+      "summary": "AC2's diagnostic shape uses camelCase `evidencePath` while the audit_links column is snake_case `evidence_path`; harmless but an inconsistent naming signal to the implementer."
+    },
+    {
+      "story": "DF5.3",
+      "severity": "LOW",
+      "summary": "DF1.8 is cited as the origin for hop 2's (repo_slug, issue_id) correlation and for the resolved requestId, but is not a dependency edge (R5 §2 omits it). Sequencing is safe — DF1.8 ships v5-S2, DF5.3 v5-S3 — so this is an attribution nuance, not a build-order defect."
+    },
+    {
+      "story": "DF5.4",
+      "severity": "LOW",
+      "summary": "DF5.4-V1's `group: main` is inert because the chassis filters VOID clauses out of `runnable` before grouping (gate-runner.ts:180-184); the table does not explain why the value is present, so a reader may think V1 runs in the main pool."
+    }
+  ],
+  "checklists_fired": ["secrets-invariants", "migration-invariants"]
+}

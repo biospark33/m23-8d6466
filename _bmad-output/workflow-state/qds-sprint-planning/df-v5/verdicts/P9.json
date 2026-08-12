@@ -1,0 +1,96 @@
+{
+  "stories": ["DF2.4", "DF2.6"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 2, "low": 2 },
+  "applied": [
+    {
+      "story": "DF2.4",
+      "severity": "HIGH",
+      "summary": "AC3/INV-5 guaranteed teardown 'runs to completion' on every verdict, contradicting DF2.5 AC3/INV-5 (harvest failure aborts before revoke/destroy; unconfirmed destroy leaves the record open) while DoD-Integration claims DF2.5 is 'unchanged' — and contradicting DF2.6's premise that failed teardowns exist. Now: teardown is *invoked* on every verdict, completing the six steps or, where DF2.5's abort fires, leaving the box alive and the record open for DF2.6's reaper."
+    },
+    {
+      "story": "DF2.4",
+      "severity": "HIGH",
+      "summary": "Make-or-break AC1's 'every number read from the provider host-side, none from the box' is unsatisfiable: the artifact schema carries `turnsCompleted`, which has no host-side source and is load-bearing in AC4. Scoped the clause to the numbers the verdict rests on (spend, cap, revocation); `turnsCompleted` now stored `source: \"in-box\"` and can only downgrade a verdict to `inconclusive`, never establish one (INV-2 aligned)."
+    },
+    {
+      "story": "DF2.4",
+      "severity": "MEDIUM",
+      "summary": "`redactSecrets` is a tier-3 workspace function (`cli-anything/src/redact.ts:62`) whose signature `(text, parentEnv)` redacts only values present in a parent env map, and root `src/` imports no workspace code (R3 §9.2 verified: no such import exists today). AC5 now specifies redaction with the run key itself as input, reimplemented under `src/providers/`, citing redact.ts:27,62 as pattern not dependency."
+    },
+    {
+      "story": "DF2.4",
+      "severity": "MEDIUM",
+      "summary": "`killOrigin` is required in the evidence artifact (E2E slice, AC1, DoD contract) but its value domain was never stated; defined as `provider-cap`|`wall-clock`|`host-error` and AC1 now asserts `killOrigin: \"provider-cap\"`."
+    },
+    {
+      "story": "DF2.4",
+      "severity": "MEDIUM",
+      "summary": "DF2.5 is required by AC1, AC3 and DoD-Integration but absent from the declared dependency edges (R5 §2 omits it too). Added a sequencing note — edges stay DF2.2/DF2.3 per R5 §2, with DF2.5 named as S1-merged code this story must not be sequenced ahead of."
+    },
+    {
+      "story": "DF2.4",
+      "severity": "LOW",
+      "summary": "DD-6 cites 'P0.4's never-run AC3'; source check shows P0.4's live-run clauses are AC1/AC2 (AC3 is the coms_await timeout). The story cited AC1/AC2 correctly but silently — the register drift is now footnoted so downstream reviewers do not re-flag it. Also fixed a 'network\\n-failure' hyphen line-break."
+    },
+    {
+      "story": "DF2.6",
+      "severity": "HIGH",
+      "summary": "The reaper could destroy a run in flight. DF2.5 leaves the run record open both *during* a run and after an aborted teardown, and no criterion distinguished them, so 'open record + live VM' was simultaneously the failed-teardown signal and a live job. Added configured `staleAfterMs`, `paired` defined as the in-flight class, and new AC6 with a negative control (an implementation reading 'record open' as the leak signal reaps a running job and MUST fail)."
+    },
+    {
+      "story": "DF2.6",
+      "severity": "HIGH",
+      "summary": "E2E slice contradicted AC1 and the DoD: the slice tore down 'the open record' under `--yes` while AC1 reaps only leak classes, the fixture called the paired record 'closed' while the DoD says the survivor is 'the paired live run', and a closed record cannot leave a live VM. Fixture rebuilt — run A in-flight (untouched), run B stale (torn down via DF2.5), record-less VM destroyed, orphan `sbx-` key revoked, unprefixed operator key untouched — making `liveVms: 1 / 50` and 'one teardown, one destroy, one revoke' simultaneously true."
+    },
+    {
+      "story": "DF2.6",
+      "severity": "HIGH",
+      "summary": "Cross-story ownership gap with DF3.2: DF3.2 AC1/INV-2 require an atomic N-slot reservation and state it 'owns only the check', while DF2.6 provides a point-in-time read and forbids stored queues ('derived, never stored') — nobody owned the reservation. Added the explicit boundary: `checkHeadroom(n)` is a read not a lock, reserves nothing, is the sole headroom entry point; DF3.2 builds reservation over it under `src/fleet/`; concurrent dispatchers out of scope for both under DD-1's single-operator CLI."
+    },
+    {
+      "story": "DF2.6",
+      "severity": "MEDIUM",
+      "summary": "`staleAfterMs` had no backing field — DF2.1's closed twelve-field record (`runId,vmName,httpsUrl,keyHash,limitMicroUsd,spendMicroUsd,sessionId,commitSha,ports,pid,createdAt,closedAt`) has no heartbeat and this story adds none. Age pinned to `now − createdAt` (immutable field) with the configuration rule stated (set above the longest expected run)."
+    },
+    {
+      "story": "DF2.6",
+      "severity": "MEDIUM",
+      "summary": "AC1 claimed *every* item classifies into exactly one of four classes, but the operator's unprefixed key is not factory-owned. Population scoped to `sbx-` keys / run-id-named VMs / `.sandbox/runs` records; anything else is reported `foreign` and is never a candidate (INV-1)."
+    },
+    {
+      "story": "DF2.6",
+      "severity": "MEDIUM",
+      "summary": "secrets-invariants: no statement that key material stays out of logs and error payloads. Added — the reaper reads only key hashes from the provider list; no key value reaches a log line, a report or an error payload."
+    },
+    {
+      "story": "DF2.6",
+      "severity": "MEDIUM",
+      "summary": "Trigger Surface row 'Fan-out N pre-flight headroom check for N boxes at once → out-of-scope' read as excluding n>1, contradicting AC2's in-scope `checkHeadroom(3)`. Reworded to the atomic N-slot reservation and fan-out refusal built over `checkHeadroom(n)`."
+    }
+  ],
+  "surviving": [
+    {
+      "story": "DF2.6",
+      "severity": "MEDIUM",
+      "summary": "Naming drift into DF3.2 (not owned): DF3.2's Infra Prerequisites calls it `headroom()` returning an integer, DF2.6 defines `checkHeadroom(n)` returning `{allowed, liveVms, ceiling, headroom, reason?}`. Satisfiable (the object carries a `headroom` field) and DF2.6 now declares itself the sole entry point, but DF3.2 needs the signature corrected."
+    },
+    {
+      "story": "DF2.6",
+      "severity": "MEDIUM",
+      "summary": "DF3.2 (not owned) calls its reservation 'atomic' across N; DF2.6 now states it stores no reservation state and is not a lock. Sound under DD-1's single-operator CLI, but DF3.2 should either scope 'atomic' to a single-process reader or name the assumption."
+    },
+    {
+      "story": "DF2.4",
+      "severity": "LOW",
+      "summary": "'Wiring closed' says 'no sibling story is required to make this behavior real' in the same sentence that lists DF2.1/DF2.2/DF2.3/DF2.5 as required merged code. Template phrasing (intent is 'no future story'); left as-is for cross-story consistency."
+    },
+    {
+      "story": "DF2.4",
+      "severity": "LOW",
+      "summary": "The DD-6 register itself still reads 'P0.4's never-run AC3' (as does R5 §1.2). Corrected in the story text; the register erratum is a DF5.5-scope chore outside the owned files."
+    }
+  ],
+  "checklists_fired": ["secrets-invariants", "input-invariants"]
+}

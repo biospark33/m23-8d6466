@@ -1,0 +1,101 @@
+{
+  "stories": ["DF1.3", "DF1.4"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 3, "low": 2 },
+  "applied": [
+    {
+      "story": "DF1.3",
+      "severity": "HIGH",
+      "summary": "`agent_end` cost fields had no unit; INV-3 makes the budget guard read them. Bound to integer micro-dollars (µ$) per DD-9, explicitly excluding float dollars and `costCents`."
+    },
+    {
+      "story": "DF1.3",
+      "severity": "HIGH",
+      "summary": "`contextWindow` was a widened-contract field with no resolution source and no defined unknown value, and the Infra row attributed its validation to DF1.5 — a phantom dependency (R5 §2 lists DF1.2 only). Now resolves from the DF1.1 roster entry, `0` = unknown-never-full, with DF1.5 named as a later hardening and explicitly not a dependency."
+    },
+    {
+      "story": "DF1.3",
+      "severity": "HIGH",
+      "summary": "INV-1 asserted `retries` outside `0..5` is rejected at construction, but no AC or test covered it — the one configuration that defeats the story's entire bounded-loop premise was unverified. Added to make-or-break AC1 and to the send-count-matrix DoD test (`retries: 6` / `-1` rejected, not clamped)."
+    },
+    {
+      "story": "DF1.3",
+      "severity": "MEDIUM",
+      "summary": "AC3 said a turn reporting `aborted`/`error` must not overwrite occupancy without naming the field, while the DoD test used `stopReason`. Unified on `stopReason: aborted | error` (R4 §1.10, `MOD/agent_pi.py:272-275`)."
+    },
+    {
+      "story": "DF1.3",
+      "severity": "MEDIUM",
+      "summary": "AC1 phrased `PARSE_FIX_ATTEMPTS` as a per-phase param alongside `retries`, contradicting Technical Notes (module constant = 2) and weakening INV-1's no-configuration-raises-the-ceiling claim. Reworded to distinguish phase param from module constant."
+    },
+    {
+      "story": "DF1.4",
+      "severity": "HIGH",
+      "summary": "Observability contract logged `exitStatus` on a failed trace write. That is the CC-1 5-value run-classification enum (`cli-anything/src/types.ts:79`); a failed SQLite insert is none of its values — carried through unfiltered from the R1 template boilerplate. Replaced with `statement` and an explicit note that the enum classifies a terminated run, not an insert."
+    },
+    {
+      "story": "DF1.4",
+      "severity": "HIGH",
+      "summary": "`sessions.archived` was declared with no writer, and INV-3 (exactly one writable connection, owned by the tracer; all readers `{readonly:true}`) forbids its only known writer — DF4.1's archive route, the visualizer's single write (R4 §2.5). Column now specified as review-triage never written by a run, with DF4.1 archiving through the tracer's connection rather than opening its own."
+    },
+    {
+      "story": "DF1.4",
+      "severity": "MEDIUM",
+      "summary": "Migration checklist (chain-linearizability / cross-story collision): the flat MIGRATIONS list had no ordering or ownership rule while DF1.8 also adds trace columns. Declared append-only and order-stable, later stories append and never edit or reorder."
+    },
+    {
+      "story": "DF1.4",
+      "severity": "MEDIUM",
+      "summary": "Migration checklist (lock-acquisition risk): `ALTER TABLE ADD COLUMN` runs at init holding the writer lock against `busy_timeout=5000`, with no constraint on the decls. Every `decl` now required nullable or constant-default so each ALTER is metadata-only."
+    },
+    {
+      "story": "DF1.4",
+      "severity": "MEDIUM",
+      "summary": "INV-1 (F11 confidentiality) set modes on 'the file' only, but the WAL `-wal`/`-shm` sidecars carry the same compiled prompts, and a harvest copying `trace.db` without a checkpoint copies an incomplete db into the DF2.5 harvest set. Sidecars now named in-boundary with `0600`, and harvests checkpoint the WAL first."
+    },
+    {
+      "story": "DF1.4",
+      "severity": "MEDIUM",
+      "summary": "`sessions.total_cost` — the persisted mirror of DF1.3's `agent_end` cost — carried no unit, the exact gap DD-9 exists to close. Bound to integer micro-dollars (µ$)."
+    },
+    {
+      "story": "DF1.4",
+      "severity": "MEDIUM",
+      "summary": "`sessions.pipeline_name` had no stated mapping to SSSF's `adw_name` (R4 §2.1 MIGRATIONS list), leaving rename-vs-net-new ambiguous; and migration checklist 'column rename dual-write' was unaddressed. Mapping stated, and the `adw_id`→`request_id` change explicitly scoped as a port-time rename in a schema this repo never shipped under the old name — no live-column rename path exists."
+    },
+    {
+      "story": "DF1.4",
+      "severity": "MEDIUM",
+      "summary": "'Signal handling is DF1.1's; this story provides the `processes_end_all` it calls' read as a predecessor calling a successor's function. Reworded: DF1.1 owns the handler, DF1.4 ships the function that handler and `session_finish` both call."
+    }
+  ],
+  "surviving": [
+    {
+      "story": "DF1.4",
+      "severity": "MEDIUM",
+      "summary": "`events.tokens` has no stated relationship to `sessions.total_tokens` — whether it is a per-event slice rolled up into the session total, and when that rollup is computed, is inferable but unspecified."
+    },
+    {
+      "story": "DF1.4",
+      "severity": "MEDIUM",
+      "summary": "`sessions.status` has no enumerated value domain, unlike `phases.status` which carries an explicit `DEFAULT 'fail'` and a stated must-be-earned semantic."
+    },
+    {
+      "story": "DF1.3",
+      "severity": "MEDIUM",
+      "summary": "`UsageBreakdown`'s field list is relied on (input excludes cache reads; `reasoningTokens` nested under output) but never enumerated in-story — it is reachable only by following the R4 §1.10 citation."
+    },
+    {
+      "story": "DF1.4",
+      "severity": "LOW",
+      "summary": "The 'In-box trace' Infra Prerequisites row names DF2.5 in the Lifecycle-Hook-Verified column though DF2.5 is not a predecessor; the scenario is out of scope for this story's e2e and DF2.5 is a downstream consumer, so no dependency edge is actually implied."
+    },
+    {
+      "story": "DF1.3",
+      "severity": "LOW",
+      "summary": "The UsageBreakdown semantics (input excludes cache reads, reasoning nested under output) appear in Technical Notes and the DoD Contract item but have no dedicated AC."
+    }
+  ],
+  "checklists_fired": ["migration-invariants", "input-invariants", "secrets-invariants"]
+}

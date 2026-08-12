@@ -1,0 +1,91 @@
+{
+  "stories": ["DF3.3", "DF3.6"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 3 },
+  "applied": [
+    {
+      "story": "DF3.3",
+      "severity": "HIGH",
+      "summary": "Duplicate contract ownership: Technical Notes declared `DispatchBrief` as 'new, owned by this story' with `src/phase-engine/brief.ts`, but predecessor DF3.1 already owns the closed `src/fleet/brief-schema.ts` and enforces it at ingress (DF3.1 INV-2). Re-specced to consume DF3.1's schema and add no second brief schema; DoD Contract line now requires no second schema in the diff."
+    },
+    {
+      "story": "DF3.3",
+      "severity": "HIGH",
+      "summary": "Module-root contradiction with shared_pattern_note and R3 §9.2: all four sources and both tests sat under `src/phase-engine/*` / `tests/phase-engine/*` although DF3.3 is a DF3 story and every sibling (DF3.1/3.2/3.4/3.5) uses `src/fleet/*`; R3 §9.2 names the resident agent as an external *consumer* of the phase-engine barrel. Split along the real seam: agent -> `src/fleet/resident.ts` + `tests/fleet/resident.test.ts`, engine-owned solicitation port stays at `src/phase-engine/steering.ts`. Added a Technical Note fixing import direction (fleet imports engine, never the reverse), which makes INV-RES-1 a module boundary rather than a habit."
+    },
+    {
+      "story": "DF3.3",
+      "severity": "HIGH",
+      "summary": "AC5 and the telemetry DoD required `runTotalSpendMicros` on 'the run record', but DF2.1's run record is a closed twelve-field schema (`limitMicroUsd`/`spendMicroUsd`, unreadable-record-is-a-hard-error) and `runTotalSpendMicros` exists nowhere in the slate. Re-pointed resident telemetry to the run journal (DF1.1), stated DF2.1's record is closed and this story adds no field to it, and made the DoD test scan for zero added run-record fields."
+    },
+    {
+      "story": "DF3.6",
+      "severity": "MEDIUM",
+      "summary": "Infra Prerequisites and INV-BND-2 read the run-key cap from a field named `limit` — inkwell's discarded float-dollar name, which DF2.1's Technical Notes explicitly call out — not the closed schema's `limitMicroUsd`. Corrected both, and made explicit that this story only reads the record and writes no run-record field."
+    },
+    {
+      "story": "DF3.6",
+      "severity": "MEDIUM",
+      "summary": "The worst-case projection formula `(promptCharCeiling/4 + maxOutputTokens) x rate` referenced two terms that existed nowhere: DF3.3 declared a 16,000-char prompt ceiling but no output cap. Added `maxOutputTokens` 1,024 to DF3.3's per-call Guards/limits and re-wrote DF3.6's projection to cite both as DF3.3's guards plus DF1.5's validated `cost` block (which DF1.5 rejects when absent)."
+    },
+    {
+      "story": "DF3.6",
+      "severity": "MEDIUM",
+      "summary": "Files to Modify and the Infra Prerequisites row pointed at `src/phase-engine/resident.ts`, the file DF3.3 moved to `src/fleet/`. Re-pointed to `src/phase-engine/steering.ts` (the call site `checkBounds` actually gates) with its matching test path."
+    },
+    {
+      "story": "DF3.3",
+      "severity": "MEDIUM",
+      "summary": "Secrets checklist, 'no secrets in error messages': INV-RES-3 refused the run on credential-shaped brief values but never constrained the refusal message, so the rejected credential could be echoed into it. Now requires naming the field, never the value."
+    },
+    {
+      "story": "DF3.3",
+      "severity": "MEDIUM",
+      "summary": "INV-RES-3 cited 'R5 §6 facts 16/17' for credential containment; fact 16 is the trace-DB/visualizer fact (F11/R10), unrelated to credentials. Narrowed to fact 17."
+    },
+    {
+      "story": "DF3.3",
+      "severity": "MEDIUM",
+      "summary": "Seam gap against DF3.4, which claims 'DF3.3's steering channel' for mid-run `attach` while DF3.3 asserted 'there is no fourth point'. Closed by stating an attach message is queued and delivered as prompt context at the next of the three existing points — DF3.4 gets no second channel, so INV-RES-1 survives DF3.4."
+    },
+    {
+      "story": "DF3.6",
+      "severity": "LOW",
+      "summary": "Technical Note wrote the cap ordering as `runBudgetCapMicros < runKeyCapMicros` while AC2 and INV-BND-2 both use `<=`; a dev following the note would refuse a legal equal-cap config. Aligned to `<=`."
+    },
+    {
+      "story": "DF3.6",
+      "severity": "LOW",
+      "summary": "Observability contract logged `spentMicros` where every other reference in both stories is `spendMicros`. Unified."
+    },
+    {
+      "story": "DF3.6",
+      "severity": "LOW",
+      "summary": "DoD Impl line cited INV-BND-4 (the ceiling is absolute) for the pre-flight projection requirement; the governing clauses are AC1 and INV-BND-3 (meter integrity). Re-cited."
+    },
+    {
+      "story": "DF3.6",
+      "severity": "LOW",
+      "summary": "Added one clause explaining why this DF3 story ships engine code in `src/phase-engine/` rather than the `src/fleet/` root its siblings use — F12's enforcement locus — so the deviation is not re-flagged as the inconsistency DF3.3 actually had."
+    }
+  ],
+  "surviving": [
+    {
+      "story": "DF3.3",
+      "severity": "LOW",
+      "summary": "Suffix style differs across the slate for the same unit: journal/resident fields use `spendMicros`/`residentSpendCeilingMicros` while DF2.1's run record uses `spendMicroUsd`/`limitMicroUsd`. Both are integer micro-dollars per DD-9, which is the only binding constraint; renaming ~15 references across two files to harmonize a suffix was judged churn, not correctness."
+    },
+    {
+      "story": "DF3.6",
+      "severity": "LOW",
+      "summary": "The ordering assertion consumes `runBudgetCapMicros`, which DF2.8 owns, but DF2.8 is not a predecessor and adding it would contradict R5 §2 (a HIGH). Mitigated in place by the Infra Prerequisites row: absent config falls back to the documented 5,000,000 micro-dollar default, never to unbounded."
+    },
+    {
+      "story": "DF3.3",
+      "severity": "LOW",
+      "summary": "Secrets checklist 'fixture secrets are obviously fake' is not explicitly stated for `fake-resident.ts` / `pipeline.resident.json`. Low risk — neither fixture carries key material, and INV-RES-3's credential-shape list doubles as the sentinel vocabulary."
+    }
+  ],
+  "checklists_fired": ["secrets-invariants", "auth-invariants"]
+}

@@ -1,0 +1,34 @@
+name: f6-step0-proof
+team:
+  project: qds-factory
+  lead:
+    agentId: lead
+    model: openrouter/anthropic/claude-sonnet-4.6
+    prompt: >-
+      You are the F6 proof-run team lead in a scratch clone of qds-factory.
+      After merging worker replies, run `bun test` from the cli-anything
+      directory yourself and state the exact pass/fail counts in
+      result.summary along with the synthesis of worker findings.
+  workers:
+    - agentId: worker-a
+      model: openrouter/anthropic/claude-sonnet-4.6
+      prompt: >-
+        You are in a scratch clone of qds-factory. The cli-anything package
+        has exactly one failing test: run `bun test` inside the cli-anything
+        directory to see it. Diagnose the root cause, fix the SOURCE code
+        (never the test), and re-run the suite until all tests pass. Reply
+        with JSON: changedFiles = repo-relative paths you edited, and
+        result.summary = root cause + fix + final suite counts.
+    - agentId: worker-b
+      model: openrouter/deepseek/deepseek-v4-flash-0731
+      prompt: >-
+        You are in a scratch clone of qds-factory. The cli-anything package
+        has exactly one failing test. READ the code under cli-anything/src
+        and cli-anything/test to identify the most likely root cause. Do NOT
+        edit any file and do NOT run tests. Reply with JSON: changedFiles =
+        [] and result.summary = your root-cause analysis and proposed
+        minimal fix.
+  budgetCapUsd: 8
+  turnCap: 5
+  wallClockCapMs: 3000000
+  comsAwaitTimeoutMs: 1500000

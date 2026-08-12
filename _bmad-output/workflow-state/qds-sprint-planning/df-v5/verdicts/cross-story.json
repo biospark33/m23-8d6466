@@ -1,0 +1,72 @@
+{
+  "cross_story": true,
+  "edited_files": [
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-1-phase-abstraction-lifecycle.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-2-gates-evidence-envelope-adapter.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-3-dual-retry-discipline.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-4-sqlite-trace-store.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-5-roster-config-slug-validation.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-6-dispatch-task-team-runtime.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-9-lean-worker-profile.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df2-1-provider-driver-run-records.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df2-3-credential-lifecycle.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df2-5-bundle-harvest-teardown.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df2-6-quota-accounting-reaper.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df3-2-fanout-best-of-n.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df3-5-tier1-factory-skills.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df4-1-visualizer-port-auth.md",
+    "_bmad-output/sprint-artifacts/dark-factory-v5/stories/df5-1-host-side-reverify.md"
+  ],
+  "final": { "high": 0, "medium": 0, "low": 2 },
+  "applied": [
+    {
+      "files": ["df2-6-quota-accounting-reaper.md", "df2-3-credential-lifecycle.md", "df3-5-tier1-factory-skills.md"],
+      "severity": "MEDIUM",
+      "summary": "Closed the `fleet reap` deferral loop. DF2.6 and DF2.3 both deferred a `fleet reap` CLI verb to DF3.1, but DF3.1 and DF3.2 each state v5.0 ships NO `fleet reap` wrapper and point back at DF2.6 — a two-way dangling deferral. DF3.1's actual verb set is dispatch/status/harvest/teardown (title + Trigger Surface), so the two deniers win. DF2.6's row split into `fleet status` -> DF3.1 (which does ship it) plus an explicit 'no `fleet reap` wrapper, follow-up: none derived' row; DF2.3's row narrowed to `fleet teardown` with the reaper named as DF2.6's `scripts/sandbox-reap.ts`. NOT IN THE WORK QUEUE, found in the sweep: DF3.5's `factory-harvest` skill documented '(harvest, teardown, reap)' in both the Overview and the Trigger Surface — DF3.5's own AC1 requires every documented verb to resolve against `listVerbs()`, so the story as written would fail its own build check. Dropped `reap` from both spots and named the reaper script as deliberately not-a-verb."
+    },
+    {
+      "files": ["df2-6-quota-accounting-reaper.md", "df3-2-fanout-best-of-n.md"],
+      "severity": "MEDIUM",
+      "summary": "Resolved the 'atomic reservation' contradiction — but the offender was DF2.6, not DF3.2 as the queue assumed. DF3.2 already described admission as a point-in-time read that reserves nothing; DF2.6 still carried the stale wording in two places ('Atomic N-slot reservation ... DF3.2' in the Trigger Surface, and \"DF3.2's atomic N-slot reservation is built over it\" in the Technical Notes) while simultaneously declaring `checkHeadroom` stores no reservation state and is not a lock. Per the owner rule DF2.6 owns headroom, but it does not own the description of DF3.2's scope, so DF2.6 was corrected to match: the trigger row now reads 'Fan-out admission over `checkHeadroom(n)` — one call covering all N, before the first mint', and the note says DF3.2 calls it once and holds no slot, with the read-then-mint gap named as safe only under DD-1's single-operator CLI. DF3.2's own note sharpened to label that single-process reader as a **stated assumption** rather than an implication. Zero `atomic`/`N-slot` residue remains anywhere in the slate tied to headroom (the surviving `atomic` hits are DF2.1's unrelated atomic-replace file-write discipline)."
+    },
+    {
+      "files": ["df5-1-host-side-reverify.md"],
+      "severity": "MEDIUM",
+      "summary": "DF5.1's DF1.6 predecessor edge is real per R5 §2 (DF5.1 deps = DF2.5, DF1.2, DF1.6), so the dep was kept and the missing prose supplied rather than the edge removed. The consumed contract is DF1.6's merged step-output schema (`exitStatus`, `changedFiles`, `testResults`) — the shape DF5.1 parses `claimed` against to compute `discrepancies`. Written line-neutral into the existing Infra Prerequisites row that already governs `claimed`, so no line budget was spent."
+    },
+    {
+      "files": ["df4-1-visualizer-port-auth.md"],
+      "severity": "MEDIUM",
+      "summary": "Ratified the Bearer-or-Basic auth scheme per the orchestrator's decision. The 'How the browser presents the credential' note now opens '(derivation decision, ratified in cross-story review)' and states Bearer is primary over the tier-1 forward, with Basic as a browser-navigation-only fallback carrying THE SAME SECRET, never a second password. AC1 already listed Bearer first and both under one constant-time compare, so no AC substance changed."
+    },
+    {
+      "files": ["df1-1-phase-abstraction-lifecycle.md", "df1-2-gates-evidence-envelope-adapter.md", "df1-3-dual-retry-discipline.md", "df1-4-sqlite-trace-store.md", "df1-5-roster-config-slug-validation.md", "df1-6-dispatch-task-team-runtime.md", "df1-9-lean-worker-profile.md", "df2-1-provider-driver-run-records.md", "df2-5-bundle-harvest-teardown.md"],
+      "severity": "MEDIUM",
+      "summary": "NOT IN THE WORK QUEUE, found in the sweep: 9 of 31 stories carried no `**Sprint:**` header at all while the other 22 did. All 9 are v5-S1 per R5 §3 and were labelled to match the existing house style — DF1.1-DF1.6 'v5-S1 (track A, engine)' with the R5 §3 chain noted on DF1.1/DF1.6, DF2.1/DF2.5 'v5-S1 (track B, provider)' with the DF2.1 -> DF2.3 -> DF2.2 -> DF2.5 chain noted, DF1.9 'v5-S1 (early-safe...)' mirroring DF2.7's existing wording since R5 §3 pairs them on the same dev/week/file. Slate now reads 13 / 13 / 5 across v5-S1 / v5-S2 / v5-S3, matching R5 §3's 13-story S1, 13-story S2, 5-story S3 exactly."
+    }
+  ],
+  "surviving": [
+    {
+      "files": ["df3-2-fanout-best-of-n.md", "df4-1-visualizer-port-auth.md"],
+      "severity": "LOW",
+      "summary": "Both files now sit at exactly 200 normative lines (the hard cap) after absorbing the ratification and stated-assumption text; DF1.8, DF2.8, DF3.1 and DF3.3 were already at 200 before this pass. No slack remains in six files — any further pass that must add a line to one of them has to find an offsetting removal first."
+    },
+    {
+      "files": ["df5-1-host-side-reverify.md", "df5-2-host-side-pr-creation.md", "df5-3-audit-chain-extended.md", "df6-1-pr-feedback-fix-loop.md"],
+      "severity": "LOW",
+      "summary": "The module-root convention is stated only for DF1 (`src/phase-engine/*`), DF2 (`src/providers/*`) and DF3 (`src/fleet/*`). DF5/DF6 introduce four further flat domains — `src/reverify/`, `src/pr/`, `src/audit/`, `src/fixloop/` — and only DF6.1 cites an authority for it ('new flat `src/` domain per R3 §9.1'). Not a contradiction and no story places a module in a root another story claims; flagged so the convention is stated once rather than inferred four times. Natural home is DF5.5's repoint chore."
+    }
+  ],
+  "verified_clean": [
+    "Headroom API (work-queue item 1): already converged before this pass — DF3.2's Infra Prerequisites and DF2.6 both carry `checkHeadroom(n)` returning `{allowed, liveVms, ceiling, headroom, reason?}`. Zero occurrences of a bare `headroom()` anywhere in the slate.",
+    "exitStatus enum: 5-value `success|transient|overflow|logic|lead_failure` in DF1.1, DF1.6, DF1.8, DF1.9, DF2.4, DF3.1. The only 4-value hits are DF5.5's deliberate scope (fixing a stale citation at `p1-11:44`) and DF5.4's unrelated gate-chassis `pass|fail|skip|void` verdict enum. No residue.",
+    "Cost unit: integer micro-dollars everywhere; cap default 5,000,000 micro-USD ($5.00) consistent across DF2-7, DF3-6 and DF5-5; DF2.3's 50,000,000 run-key cap is explicitly and deliberately a different number. `costCents` appears only inside explicit negations (DF1.3, DF2.8, DF4.1, DF5.5).",
+    "Provider verbs `create/fill/setup/execute/observe/teardown/reap` consistent between DF2.1 (owner), DF2.2 and DF4.2; fleet CLI verbs consistent across DF3.1/DF3.2/DF3.4/DF3.5 after the reap fix.",
+    "Module roots: DF1 -> `src/phase-engine/*`, DF2 -> `src/providers/*`, DF3 -> `src/fleet/*`, all KEEP assets correctly under `cli-anything/*` (DF1.6, DF1.9, DF2.7). No story places a module in a root another story claims.",
+    "`refs/sandbox/<run-id>` spelling uniform across all 9 stories that reference it; harvest set is 'ranged bundle + artifacts tar + trace DB' in DF2.5 (owner) and consistent in DF3.2, DF5.1, DF5.2.",
+    "runId/requestId semantics: runId minted by the dispatcher at dispatch (DF3.1 only, four consistent statements, caller-minting explicitly forbidden); requestId propagates per CC-9 with the resolved-value rule, consistent in DF3.1, DF3.2, DF1.6, DF5.1.",
+    "Story Points and totals: per-epic 29/31/22/8/17/4 = 111 points across 31 stories, matching R5 §1 exactly.",
+    "Dependency edges: all 31 per-story predecessor sets checked against R5 §2's authoritative table — every one matches, including the P-story KEEP edges (P0.2/P0.3, P1.2, P1.3/P1.7, P1.11/P1.12, P1.18, P0.11).",
+    "DD-8 attributions spot-checked in DF1.6, DF2.8, DF5.2, DF6.1: verbatim clauses carry file:line citations into R2 source text, NET-NEW material is labelled 'NET-NEW per DD-8, authored fresh' with the design section cited instead of a phase-1 ancestor."
+  ]
+}

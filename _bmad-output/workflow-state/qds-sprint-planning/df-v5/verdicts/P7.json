@@ -1,0 +1,56 @@
+{
+  "stories": ["DF1.6"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 2, "low": 2 },
+  "applied": [
+    {
+      "story": "DF1.6",
+      "severity": "HIGH",
+      "summary": "coms_init_error classification contradicted the story's own precedence rule. The Infra Prerequisites cell asserted 'recorded and classified transient' while the normative precedence rule in Technical Notes (which AC3 delegates to) had no coms-init step — its step 2 ('envelope missing on a normally-exited process → lead_failure, including exit code 0') would misclassify a coms-init failure as lead_failure. Verified against runner.ts:878-889, where comsInitError settles 'transient' with no partial output BEFORE classifyExit runs. Added precedence step 0 to Technical Notes with the runner.ts citation, named it in AC3, corrected step 1's now-stale 'evaluated first' to 'ahead of steps 2-3', and demoted the Infra cell to a pointer so classification is stated once."
+    },
+    {
+      "story": "DF1.6",
+      "severity": "HIGH",
+      "summary": "INV-4 (no-secrets-in-step-output) had no verifying test — secrets-invariants checklist gap. INV-2 and INV-3 each carried a negative-control DoD test; INV-4 is the story's only NET-NEW invariant (authored fresh per DD-8) and appeared solely as an unverified claim in the Security DoD item. Rewrote that item as 'Security (INV-3, and INV-4 as a negative control)': a driver stream whose coms payload and merged summary both echo the provider key value must leave every outbound string (envelope, journal row, trace row, artifact path, persisted prompt) carrying the redaction marker and zero characters of the key, with an explicit MUST-fail clause for an implementation that redacts only at the log sink. Folded into the existing item rather than added, holding DoD at 10."
+    },
+    {
+      "story": "DF1.6",
+      "severity": "MEDIUM",
+      "summary": "Interface disagreement with DF1.2. NDJSON adaptation routed worker_output through asEnvelope, but DF1.2 AC2 defines asEnvelope(result, label) as the adapter for deterministic subprocess results; a worker_output is already an agent report and needs no adapter (it would be a type error at implementation). Rewrote to 'a DF1.2 Envelope directly', citing DF1.2 AC2, preserving the same-door intent."
+    },
+    {
+      "story": "DF1.6",
+      "severity": "MEDIUM",
+      "summary": "Precedence rule was labeled 'steps 1-2 verbatim' but the text is a faithful condensation of p1-6:78-83, not a quotation — a checkable claim that reads false. Relabeled 'steps 1-2 carry the substance of ...; step 0 and the exit table are re-derived against this runtime'. The one-line summary retained in the story IS verbatim and stays."
+    },
+    {
+      "story": "DF1.6",
+      "severity": "MEDIUM",
+      "summary": "DD-8 labeling gap on prompts-persisted. R2 §3/§11 records 'prompts persisted pre-execution' as appearing nowhere in P1.6 (NET-NEW). The Observability Contract cited design §5.2 but, unlike AC2 and INV-4, did not flag it as NET-NEW, leaving it readable as inherited P1.6 contract. Added the explicit NET-NEW-per-DD-8 marker."
+    }
+  ],
+  "surviving": [
+    {
+      "story": "DF1.6",
+      "severity": "MEDIUM",
+      "summary": "Trigger Surface row 2 (bun cli-anything/src/index.ts run --manifest + npm run smoke:team) is marked in-scope but no AC governs that entry point directly; AC1 covers only the phase-body path. Coverage is indirect, via the mandatory e2e-demo DoD item which exercises that surface live. Not fixed: adding a sixth AC for an already-shipped P0.3 harness surface would expand scope for a path the e2e demo already proves."
+    },
+    {
+      "story": "DF1.6",
+      "severity": "MEDIUM",
+      "summary": "AC3 names exitCode/partialOutput/durationMs from p1-6:34's failure schema but not error/mulchPrimed/mulchPrimeError?. The DoD Contract item covers them generically as 'the failure-branch fields'. Not fixed: enumerating them in AC3 costs lines against the 200-line cap for no behavioral change."
+    },
+    {
+      "story": "DF1.6",
+      "severity": "LOW",
+      "summary": "Cost figures are quoted in USD ($0.04912262, bracket [$0.049, ~$0.91]) while the program ledger unit is integer micro-dollars (DD-9). Not a contradiction — these are quoted F6 provider measurements and DF1.6 declares no ledger unit (DF2.7 owns instrumentation, DF2.8 the ledger) — but a reader could infer USD is the contract unit."
+    },
+    {
+      "story": "DF1.6",
+      "severity": "LOW",
+      "summary": "AC2 and INV-4 refer to a 'trace event' / 'trace row' while DF1.6's dependency set (DF1.1, DF1.2, DF1.5, P0.2, P0.3 — matching R5 §2 exactly) excludes DF1.4's trace store. This resolves coherently through DF1.1's file-backed PhaseJournal port, which DF1.4 later swaps behind, but the story does not say so explicitly."
+    }
+  ],
+  "checklists_fired": ["secrets-invariants", "input-invariants"]
+}

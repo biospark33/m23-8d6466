@@ -1,0 +1,91 @@
+{
+  "stories": ["DF4.1", "DF4.2"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 2, "low": 2 },
+  "applied": [
+    {
+      "story": "DF4.1",
+      "severity": "HIGH",
+      "summary": "Unreachable E2E slice: AC1 gated the static branch AND forbade any WWW-Authenticate header, while the E2E slice required a browser at http://127.0.0.1:4600/ to render — a navigation cannot attach an Authorization header, and no token-to-browser delivery mechanism was specified anywhere. The obvious implementer workaround (a ?token= query param) would violate the secrets checklist and contradict the story's own 'token is never logged' rule, since the Observability Contract logs `route` on every request. Fixed: AC1 now accepts Bearer OR Basic <base64(':'+token)> under the same constant-time compare; a new Technical Note scopes WWW-Authenticate: Basic to the static branch only (JSON routes stay silent) and states the token never appears in a URL, query string or fragment; E2E slice reworded to 'challenges for the token'; DoD unit test now asserts the challenge appears on the static branch only."
+    },
+    {
+      "story": "DF4.1",
+      "severity": "HIGH",
+      "summary": "AC5 was unimplementable at DF4.1's dependency position — it required a throw inside the exe.dev provider driver's share port / set-public paths, but R5 §2 gives DF4.1 exactly one predecessor (DF1.4), the driver is not in Files-to-Modify, and DF4.2 already owns that enforcement. Fixed without touching the dependency edge: AC5 now specifies an assertNeverPublic(port) guard exported from visualizer/server/auth.ts (a file DF4.1 already owns) plus 'no code merged by this story registers that port with any exposure path'; DF4.2's INV-2 routes the driver's two shapes through that same guard. INV-2 and the Security DoD line updated to match on both sides."
+    },
+    {
+      "story": "DF4.1",
+      "severity": "HIGH",
+      "summary": "Secrets checklist (rotation cadence, token expiry, session revocation) was silently unanswered for the host operator's QDS_VIZ_TOKEN — DF4.2 scoped the per-box token's lifecycle but nothing covered the host one. Fixed in the existing Infra Prerequisites row at zero line cost: token is minted fresh per server start so restart is rotation; nothing is persisted, so there is deliberately no expiry field and no revocation list — the credential's lifetime is the process's."
+    },
+    {
+      "story": "DF4.2",
+      "severity": "HIGH",
+      "summary": "The in-box QDS_VIZ_TOKEN is delivered over stdin but landed in a mode-600 file inside the box, and nothing said that file sits outside the harvest set — a token file in the work tree or artifacts dir would ride DF2.5's tar back into the repo's data boundary. INV-3 now names the mode-600 file as the story's one deviation from env-only injection and bounds it: written to $HOME/.qds/viz-token, outside every harvested path (not the work tree, artifacts dir or trace DB), shredded at teardown. Deliberately phrased against harvested paths rather than 'DF2.5's harvest set' so the assertion does not add DF2.5 as a predecessor. DoD security line updated to match."
+    },
+    {
+      "story": "DF4.1",
+      "severity": "MEDIUM",
+      "summary": "Cost unit unstated on the one surface whose job is displaying cost — SSSF's sessions.total_cost is a float USD and DD-9 mandates integer micro-dollars. Contracts/Schema note now states micro-dollars end to end, never costCents, never a float, with format.ts rendering dollars for display only."
+    },
+    {
+      "story": "DF4.1",
+      "severity": "MEDIUM",
+      "summary": "R4 §2.6 item 5 (no rate limiting, no request size limits) was silently dropped from the carried-over hardening list. Guards/limits now states the disposition explicitly: no rate limiter and no lockout by design, justified by loopback-only binding plus >=32 bytes of entropy under a constant-time compare; archive POST body capped at 1 KB."
+    },
+    {
+      "story": "DF4.1",
+      "severity": "MEDIUM",
+      "summary": "No redaction test existed despite 'the token is never logged in any form' being an INV-1 obligation. Security DoD now requires a test asserting no line logged during a 401 or a 200 contains the token or any prefix of it."
+    },
+    {
+      "story": "DF4.2",
+      "severity": "MEDIUM",
+      "summary": "Technical Notes claimed teardown ordering was 'unchanged and unowned by this story' while the Trigger Surface marked driver teardown in-scope and the DoD required the stop-before-spend-capture ordering. Reworded to the precise truth: this story adds exactly one call at the head of the existing teardown sequence, ordering otherwise unchanged."
+    },
+    {
+      "story": "DF4.2",
+      "severity": "MEDIUM",
+      "summary": "AC1 and the unit DoD said 'all eight routes', omitting the static branch — the exact surface DF4.1's own DoD calls out as the likeliest implementation gap. Both now read 'all eight JSON routes and the static branch', with the static branch additionally exercised as a browser-shaped navigation carrying no header."
+    },
+    {
+      "story": "DF4.2",
+      "severity": "MEDIUM",
+      "summary": "Test-file ownership collided with DF4.1: DF4.1 creates visualizer/test/{auth,routes}.test.ts covering all routes, while DF4.2 introduced a third overlapping visualizer/test/server-routes.test.ts. DF4.2 now extends DF4.1's two files (Files-to-Modify and the Trigger Surface build-gate cell both updated); no third route-test file."
+    },
+    {
+      "story": "DF4.1",
+      "severity": "LOW",
+      "summary": "Atomicity WARN cleared: the bare `visualizer/src/` directory entry in Files-to-Modify replaced by two explicit brace-enumerated lines (five .vue components, six lib modules) at zero net line cost."
+    },
+    {
+      "story": "DF4.2",
+      "severity": "LOW",
+      "summary": "Atomicity WARN cleared: `visualizer/test/lib/*.test.ts` glob replaced by the enumerated six modules. Also reconciled the line-count arithmetic — the bounded-scope note enumerated 3,484 lines against a ~4,656 claim, so it now names the ~1.2k remainder as shared/types.ts, the small chip components and config."
+    }
+  ],
+  "surviving": [
+    {
+      "story": "DF4.1",
+      "severity": "MEDIUM",
+      "summary": "The Bearer-or-Basic scheme is a design decision made during this review, not sourced from R4/R5 — it is the minimal native mechanism that lets a browser navigation carry the credential without putting a token in a URL, but it widens AC1's accepted credential shape. Worth lead ratification; the alternative (a bootstrap route setting an HttpOnly cookie) costs more code and a one-time token-in-URL hop."
+    },
+    {
+      "story": "DF4.2",
+      "severity": "MEDIUM",
+      "summary": "The ~1.2k-line remainder attributed to shared/types.ts, small chip components and config is reconciliation arithmetic done during review, not a figure measured in R4 §2.5 (which computes ~3,991 total against R5 §7's ~4,656). The point estimate is unaffected; a dev should re-measure before treating either figure as the coverage denominator."
+    },
+    {
+      "story": "DF4.1",
+      "severity": "LOW",
+      "summary": "Infra Prerequisites says `bun test visualizer/test` while DF4.2 uses `bun test visualizer/`. Both resolve; cosmetic drift left alone to preserve the line budget."
+    },
+    {
+      "story": "DF4.2",
+      "severity": "LOW",
+      "summary": "Spec Reference still cites `observe.just:113, :159-161, :162-167, :174-177` while the compressed Technical Note now cites the collapsed `:159-167` range. Both are accurate against R4 §2.6; not worth a line."
+    }
+  ],
+  "checklists_fired": ["auth-invariants.md", "secrets-invariants.md", "input-invariants.md"]
+}

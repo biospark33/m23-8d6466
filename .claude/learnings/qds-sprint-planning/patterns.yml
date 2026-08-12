@@ -1,13 +1,13 @@
 # QDS Sprint Planning Skill - High Confidence Patterns
 # These patterns are auto-applied when qds-sprint-planning is invoked.
 # Confidence: HIGH (user explicitly approved, seen 3+ times, or from sprint retro)
-version: "1.11"
+version: "1.12"
 skill: qds-sprint-planning
-last_updated: "2026-05-17T00:00:00Z"
+last_updated: "2026-08-12T00:00:00Z"
 commit_hash: null
 
 metadata:
-  total_learnings: 20
+  total_learnings: 22
   applied_count: 7
   applications_attempted: 10  # Total number of pattern application attempts (successful + failed)
   success_rate: 0.70  # Success rate of applied patterns: applied_count / applications_attempted (7/10 = 0.70)
@@ -45,6 +45,14 @@ metadata:
   #        SPL-019..023 in preferences/experimental; this PR's new
   #        learning was renumbered from SPL-017 to SPL-024 to avoid
   #        collision.
+  # v1.12: Added SPL-025 (verbatim clause crosswalk before writers) and
+  #        SPL-026 (subagent verdicts persisted to disk in the original
+  #        prompt) from the 2026-08-12 DF-v5 backlog derivation. SPL-025
+  #        prevented 28 unreviewed requirements laundering through F14's
+  #        "survives verbatim" shield plus a 10,000x unit error and an
+  #        inverted push doctrine. Both encoded structurally in skill
+  #        v1.4.0. Transcript:
+  #        transcripts/2026-08-12_063910_DF-v5-backlog-derivation.md
 
 learnings:
   - id: SPL-001
@@ -875,3 +883,73 @@ learnings:
       The wrap-up PR body must include the iteration log:
       iterations run, HIGH/MEDIUM/LOW counts per iteration, which
       domain checklists fired, operator dispositions (if any).
+
+  # ============================================================================
+  # DF-V5 BACKLOG DERIVATION LEARNINGS (2026-08-12)
+  # 31-story derivation from the Dark Factory v5 build order. Full session:
+  # transcripts/2026-08-12_063910_DF-v5-backlog-derivation.md
+  # ============================================================================
+
+  - id: SPL-025
+    category: review-process
+    pattern: "Extract a verbatim clause crosswalk BEFORE writers consume any upstream disposition/audit table that names surviving clauses"
+    description: |
+      CRITICAL: When derivation consumes an upstream audit/disposition table
+      that names clauses as "surviving verbatim" (e.g. an F14-style
+      supersession audit), a dedicated Phase-1 research agent MUST first
+      extract the ACTUAL VERBATIM TEXT of every named clause from the source
+      story files, with real labels and line numbers. Writers consume ONLY
+      that crosswalk, never the audit table directly.
+
+      Clauses the audit names that do NOT resolve to source text are marked
+      NET-NEW and authored fresh under normal adversarial review — never
+      pasted under a "survives verbatim, do not re-litigate" banner. Doing
+      otherwise launders unreviewed requirements through the no-relitigation
+      shield.
+    evidence:
+      session: "2026-08-12 DF-v5 backlog derivation"
+      finding: |
+        The closed F14 audit's §3 clause labels did not resolve against the
+        source story files for 8 of 10 RE-DERIVE stories: label drift
+        (P1.6's schema was AC1, audit said AC3), nonexistent labels (audit
+        cited AC5/AC6 on a 4-AC story), and 28 "phantom" clauses whose text
+        existed nowhere in the story set (they were the design doc's
+        contract language). Plus one 10,000x unit contradiction
+        (costCents vs micro-dollars) and one inverted security doctrine
+        (in-box push vs D8 host-side push). The R2 crosswalk agent caught
+        all of it pre-writing; resolutions recorded as register decisions
+        DD-8/DD-9/DD-10 without modifying the closed audit.
+      remediation: "Encoded structurally in skill v1.4.0 Phase 1"
+    first_seen: "2026-08-12"
+    times_seen: 1
+    applications: 1
+    confidence: "high"  # Incident-backed, load-bearing, user endorsed encoding into the skill
+
+  - id: SPL-026
+    category: agent-orchestration
+    pattern: "Structured-verdict subagents MUST Write their verdict to a workflow-state file in the ORIGINAL prompt, not only return it as final text"
+    description: |
+      Background review/pipeline subagents that return structured JSON
+      verdicts as final text are unreachable from the orchestrator once they
+      complete: idle notifications carry no content and task-output lookup
+      does not resolve teammate agents. The original spawn prompt must
+      instruct: "Write your verdict JSON to
+      workflow-state/<skill>/<run>/verdicts/<batch>.json AND return it."
+      Retrofitting via post-hoc messages works but races completion and
+      costs a resume round-trip per agent.
+
+      Writer agents are naturally immune (their deliverable IS a file);
+      the trap is any agent whose deliverable is a judgment.
+    evidence:
+      session: "2026-08-12 DF-v5 backlog derivation"
+      finding: |
+        16 adversarial pipeline agents returned JSON verdicts as final text
+        per the v1.3.0 contract; the orchestrator could not read any of
+        them. A mid-flight SendMessage retrofit ("also Write to
+        verdicts/PN.json") recovered all 16, but three agents had already
+        finished and needed individual resume messages.
+      remediation: "Encoded structurally in skill v1.4.0 step 3.1a RETURN contract"
+    first_seen: "2026-08-12"
+    times_seen: 1
+    applications: 1
+    confidence: "high"  # Structural gap in the v1.3.0 token contract; fix is mechanical

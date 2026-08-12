@@ -99,7 +99,7 @@ Step 3.1a passes each per-story subagent a `shared_pattern_note` — a ≤10-lin
 
 **Procedure:**
 
-1. **Scan the epic definition block** (`_bmad-output/epics.md`) for the cross-cutting mandates every story inherits — the auth/capability model, the tenant-binding column, naming conventions, and the audit-event vocabulary. These are epic-level and apply to every story.
+1. **Scan the epic definition block** — the project's epic index file (default `_bmad-output/epics.md`; resolve to the current track's actual index if that default is absent or stale, e.g. `_bmad-output/implementation-artifacts/epics-and-stories-{track}.md`) — for the cross-cutting mandates every story inherits — the auth/capability model, the tenant-binding column, naming conventions, and the audit-event vocabulary. These are epic-level and apply to every story.
 2. **Scan each story file's load-bearing headers** for the tokens that must not drift between stories:
    - **Technical Notes → Contracts/Schema**: primary-key convention, tenant-binding column, table names, enum values.
    - **Integration points**: `event_type` vocabulary, `run_id` format, queue/topic names.
@@ -135,9 +135,19 @@ shared_pattern_note:
 
 The note is a **review aid, not a new source of truth** — if it disagrees with a story file, the story file wins and the note is corrected.
 
+**Ground the note in greps, not memory (v1.4.0).** Before writing the
+note, the orchestrator runs cheap mechanical scans over the story files
+for the drift-prone tokens (enum spellings, unit names, verb lists,
+ref-path formats, module roots): `grep -ho` + `sort | uniq -c` per
+token class. Tokens that scan clean go into the note as verified;
+tokens that scan mixed are flagged as suspects for the 3.1a/3.1b agents
+("verify, don't assume — contradiction = HIGH"). Costs a few hundred
+tokens; catches gross drift before any judgment agent spends a context
+window on it.
+
 ## Step 3.1 — Per-Story Adversarial Pipeline (delegated, structured)
 
-> **Token contract (v1.3.0).** The orchestrator does **NOT** read story
+> **Token contract (v1.4.0).** The orchestrator does **NOT** read story
 > bodies into its own context and does **NOT** re-write artifacts inline.
 > It spawns one **self-contained pipeline subagent per story** (or per
 > 2-story writer batch), passes **file paths + the checklist payload**,
@@ -174,34 +184,80 @@ LOOP (max 3 internal iterations, entirely inside the subagent's context):
      else (iteration 3 did not converge): do NOT edit further — return
      surviving findings for the operator disposition table.
 
-RETURN (structured verdict — JSON, NOT prose, NOT the story body):
+RETURN (structured verdict — JSON, NOT prose, NOT the story body).
+**SPL-026 (v1.4.0): the subagent MUST also `Write` this same JSON to
+`_bmad-output/workflow-state/qds-sprint-planning/{epic}-{track}/verdicts/<batch>.json`
+BEFORE returning** — a final-text-only verdict is unreachable from the
+orchestrator once the background agent completes (idle notifications
+carry no content; retrofitting via follow-up messages races completion
+and costs a resume round-trip per agent). The disk copy is also what
+makes re-aggregation and resume possible without transcripts.
   {
+    "schemaVersion": 1,
     "story": "P2.3",
-    "iterations": 2,
-    "converged": true,
-    "final": { "high": 0, "medium": 1, "low": 4 },
-    "applied":   [ { "severity": "HIGH", "line": 88, "summary": "..." } ],
-    "surviving": [ ],
+    "owned_story_ids": ["P2.3"],
+    "iterations": 3,
+    "converged": false,
+    "final": { "high": 1, "medium": 1, "low": 4 },
+    "applied":   [ { "severity": "HIGH", "line": 88, "summary": "...",
+                     "owned_story_ids": ["P2.3"], "affected_story_ids": ["P2.3"],
+                     "owner_story_id": "P2.3", "cross_boundary": false } ],
+    "surviving": [ { "severity": "HIGH", "line": 140,
+                     "summary": "tenant key drifts to P2.9's graph_id",
+                     "owned_story_ids": ["P2.3"], "affected_story_ids": ["P2.9"],
+                     "owner_story_id": "P2.9", "cross_boundary": true } ],
     "checklists_fired": [ "migration-invariants" ]
   }
+  # Finding fields (v1.4.1 — machine-readable cross-boundary routing):
+  #   owned_story_ids    stories whose files the reporting agent owns
+  #   affected_story_ids every story whose spec the finding touches
+  #   owner_story_id     the single story that OWNS the fix (subsystem owner)
+  #   cross_boundary     true iff owner_story_id not in owned_story_ids —
+  #                      exactly the 3.1b queue inputs (build the queue from
+  #                      these fields, NOT by parsing prose / the singular
+  #                      `story` field)
 ```
 
 The subagent edits files directly, so its fixes are already on disk when
-it returns. The orchestrator never holds story text.
+it returns. The orchestrator never holds story text — it aggregates from
+the `verdicts/` directory.
 
 ### 3.1b — Cross-story consistency agent (one, after 3.1a returns)
 
 After all per-story agents return, spawn **one** cross-story consistency
 subagent. It receives the **paths** of all final story files +
-`sprint-status.yaml` + the epic block, checks for contradictions in
-shared patterns (auth, multi-tenancy, schema keys, naming, file
-ownership, event names), `Edit`s any file in place to resolve a
-contradiction, and returns the same structured-verdict shape with a
-`cross_story` finding list. No story bodies cross the orchestrator.
+`sprint-status.yaml` + the epic block, **plus an explicit work queue built
+from the structured 3.1a finding fields: every surviving finding where
+`cross_boundary == true` AND `owner_story_id` is NOT in the reporting
+agent's `owned_story_ids`** (v1.4.1 — the queue is selected from
+`owned_story_ids` / `affected_story_ids` / `owner_story_id` /
+`cross_boundary`, not by parsing finding prose or the singular `story`
+field; per-story agents legitimately leave cross-boundary findings as
+"surviving", and without the queue handoff they are silently dropped). The cross-story agent **verifies each queue
+item's attribution before fixing** — in the DF-v5 run one queue item
+blamed the wrong story; the subsystem's owner wins, but the owner of a
+subsystem is not automatically the owner of another story's description
+of it. It checks for contradictions in shared patterns (auth,
+multi-tenancy, schema keys, naming, file ownership, event names),
+`Edit`s any file in place to resolve a contradiction, and returns the
+same structured-verdict shape with a `cross_story` finding list —
+**also Written to `verdicts/cross-story.json` per the 3.1a rule**. No
+story bodies cross the orchestrator.
 
 ### 3.1c — Orchestrator aggregation (data only)
 
 ```text
+expected_batches = [ every story/writer-batch dispatched in 3.1a ] + [ "cross-story" ]
+found = read_verdict_files(verdicts/*.json)
+
+if found does not have exactly one schema-conforming verdict per expected batch
+   (missing file, duplicate batch, or JSON that fails the verdict schema —
+   `schemaVersion: 1`, requiring `owned_story_ids`/`affected_story_ids`/
+   `owner_story_id`/`cross_boundary` on every finding and `iterations`/
+   `converged`/`checklists_fired` at the top level, per 3.1a's shape):
+    HALT before commit — report which batch(es) are missing/invalid; do NOT
+    aggregate or proceed to Step 3.2/3.3 on a partial verdict set.
+
 verdicts = [ per-story verdicts from 3.1a ] + [ cross-story verdict from 3.1b ]
 
 if any verdict has surviving HIGH OR final.medium > 3 OR a cross-story HIGH:

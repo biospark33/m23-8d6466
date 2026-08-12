@@ -1,0 +1,101 @@
+{
+  "stories": ["DF1.5", "DF1.9"],
+  "iterations": 2,
+  "converged": true,
+  "final": { "high": 0, "medium": 0, "low": 3 },
+  "applied": [
+    {
+      "story": "DF1.5",
+      "severity": "HIGH",
+      "summary": "INV-1 named redactSecrets (cli-anything/src/redact.ts:62) as the credential control, but it only masks parent-env values under secret-ish key names — a key read via pi's !-prefix indirection out of ~/.pi/agent/auth.json is never in the env and passes through unredacted; no src/ -> cli-anything/src/ import exists anywhere in the repo (module_roots keeps KEEP assets in cli-anything/*). Rewrote INV-1 around non-interpolation, stated the redaction limitation explicitly, and made the DoD security item a seeded-sentinel-key test."
+    },
+    {
+      "story": "DF1.5",
+      "severity": "HIGH",
+      "summary": "Slug resolution was undefined: the schema has both a `provider` field and a `model` documented as `provider/id`, and real model ids contain `/` (this host's registered model is id deepseek/deepseek-v4-flash-0731 under provider openrouter, R4 4.2). AC1 is make-or-break on 'resolve each slug' with no resolution rule. Added the rule (provider authoritative; first-`/` split only when provider absent; contradicting prefix is a validation error), retitled AC1 to `(provider, model)` pairs, added a DoD slug-resolution test."
+    },
+    {
+      "story": "DF1.5",
+      "severity": "HIGH",
+      "summary": "Technical Notes stated a behavior — 'Validation warns when a role declares extensions and a non-null tools list' (the --tools silently filters extension tools landmine, R4 1.5 / sssf.config.yaml:9-11) — with no AC and no DoD coverage. Folded the warning assertion into the unit-test DoD item."
+    },
+    {
+      "story": "DF1.5",
+      "severity": "MEDIUM",
+      "summary": "Fail-fast collect-all list named 'missing prompt file', but prompt_engineering is not in this story's schema (deliberate subset of SSSF's AgentConfig). Replaced with 'duplicate role name', which is in-schema."
+    },
+    {
+      "story": "DF1.5",
+      "severity": "MEDIUM",
+      "summary": "Exit-code precedence undefined when a collect-all run yields both a rejected slug (exit 1) and an unevaluable gate (exit 2). Specified that 2 dominates 1 — an unevaluated gate is not a complete verdict — with rejections still listed in the report."
+    },
+    {
+      "story": "DF1.5",
+      "severity": "MEDIUM",
+      "summary": "Schema claimed 'field set and semantics follow R4 1.5' while dropping four SSSF fields (coding_agent, color, purpose, prompt_engineering) and adding an explicit `provider`. Restated as a deliberate subset plus `provider` so the deviation is intentional, not an omission."
+    },
+    {
+      "story": "DF1.5",
+      "severity": "LOW",
+      "summary": "Removed the speculative pluggable listModels(provider) seam sentence — one provider is in scope today and the abstraction was unrequested; also removed the unverifiable '23 tests' count on cli-args.ts (83 lines verified, test count did not match)."
+    },
+    {
+      "story": "DF1.9",
+      "severity": "HIGH",
+      "summary": "DoD required the raw NDJSON capture 'written through writeArtifactAtomic at mode 0600' — unsatisfiable as written: the helper JSON.stringify's its payload, force-appends .json, enforces /^[\\w.-]+$/ on the name and sets no mode (verified cli-anything/src/team-events.ts:138-161), and team-events.ts is not in Files to Modify. Split the two write paths: raw capture via writeFileSync(..., {mode: 0o600}) into QDS_TEAM_RAW_WORKER_DIR; the JSON verdict artifact keeps writeArtifactAtomic unchanged, with team-events.ts explicitly untouched."
+    },
+    {
+      "story": "DF1.9",
+      "severity": "HIGH",
+      "summary": "The make-or-break AC1's central quantity, 'the measured ratio', was never defined (no numerator/denominator), and a raw first-turn-input ratio is confounded by task-prompt size: the 5-6x hypothesis concerns the 37,279-token overhead term, so a large prompt inflates both arms' totals and can record `refuted` while the lever worked exactly as claimed. Defined ratio = control mean first-turn input tokens / lean mean (per worker then aggregated) and required per-worker absolute `deltaTokens` in the artifact; wired deltaTokens into AC1, the E2E slice and the DoD e2e item."
+    },
+    {
+      "story": "DF1.9",
+      "severity": "MEDIUM",
+      "summary": "AC2 did not pin argv position for --no-extensions/--no-skills or the -e pairs, yet AC3 and the DoD demand a byte-exact 9-element argv diff. Pinned the order: lean flags then one -e <path> pair per allowlist entry, all inserted before -p, which stays last and still carries ${w.prompt}\\n\\n${schemaInstruction} (verified team-lead-driver.ts:129-141)."
+    },
+    {
+      "story": "DF1.9",
+      "severity": "MEDIUM",
+      "summary": "INV-1 said capture files are created 'under artifacts/' while AC5 gates capture on the operator-chosen QDS_TEAM_RAW_WORKER_DIR — a direct contradiction about where bytes land. Resolved in the INV-1 rewrite: files go into that directory."
+    },
+    {
+      "story": "DF1.9",
+      "severity": "MEDIUM",
+      "summary": "The story implied --no-extensions and --no-skills are symmetric. R4 4.1 verbatim: --no-skills disables discovery *and loading*, so no explicit --skill survives lean, unlike -e paths under --no-extensions. Named the asymmetry and scoped a skills allowlist out, so a future roster cannot assume symmetry."
+    },
+    {
+      "story": "DF1.9",
+      "severity": "MEDIUM",
+      "summary": "Traced the lead's coms concern to code: on the proven local path 'coms' is subprocess-RPC the driver synthesizes (team-lead-driver.ts:14-15, :42), not a pi extension, and workers get no -e at all — so --no-extensions cannot regress coms today. Stated this so an implementer does not hunt for a coms extension to preserve; AC2's -e survival assertion remains as protection for the future coms-net case."
+    },
+    {
+      "story": "DF1.9",
+      "severity": "LOW",
+      "summary": "Corrected the presence-only key-logging citation from runner.ts:547-550 to :548-551 (verified), in both the Infra Prerequisites table and INV-4."
+    },
+    {
+      "story": "DF1.9",
+      "severity": "LOW",
+      "summary": "Noted in Guards/limits that runner.ts:546 overwrites PI_COMS_TIMEOUT_MS from the manifest, so the bench harness cannot set the per-run timeout via the parent env — it must come from the manifest."
+    }
+  ],
+  "surviving": [
+    {
+      "story": "DF1.5",
+      "severity": "LOW",
+      "summary": "AC2's shallow-merge citation MOD/agents.py:33-41 points into the out-of-repo SSSF reference tree (REFERENCE ONLY per R5 6 fact 20), so it cannot be verified from this repo; it is correctly transcribed from R4 1.5, which quotes the source verbatim."
+    },
+    {
+      "story": "DF1.5",
+      "severity": "LOW",
+      "summary": "DoD enumerates thinking levels 'from pi 0.55.0' while Infra Prerequisites records the local tree running pi libs 0.55.4 (vendor dir peer-pins 0.55.0). The --help evidence in R4 4.3 is from 0.55.0; the residual risk is a 0.55.4 level set that differs, which the preflight version assertion would not catch."
+    },
+    {
+      "story": "DF1.9",
+      "severity": "LOW",
+      "summary": "AC3 renders today's argv as `-p <prompt>` without spelling out the \\n\\n${schemaInstruction} suffix; AC2 and the 9-element DoD boundary test both pin it exactly, so the ambiguity cannot survive into the implementation."
+    }
+  ],
+  "checklists_fired": ["secrets-invariants", "input-invariants", "auth-invariants"]
+}
