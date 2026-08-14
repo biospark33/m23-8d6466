@@ -1,0 +1,44 @@
+# QDS Factory default per-role model roster (DF1.5).
+#
+# One entry per role over a roster-wide `defaults` block. The merge is a shallow
+# setdefault: a per-role value always wins, and a per-role `tools` list REPLACES
+# the defaults list rather than extending it.
+#
+# Every slug here is proven live before a run starts — `bun scripts/roster-check.ts
+# --roster config/rosters/qds-default.roster.yaml` puts each resolved
+# (provider, model) pair through pi's merged catalog AND OpenRouter's live model
+# list, and refuses a slug that clears only one.
+#
+# OpenRouter is the working provider path on this host; direct-Anthropic routing
+# is not used (its OAuth expired ~2026-02-25). Note that `provider` is
+# authoritative: `anthropic/claude-haiku-4.5` below is an OpenRouter MODEL ID
+# whose first segment happens to name a vendor — it is not split.
+#
+# The pi catalog gate only lists a provider's models once that provider's
+# credential is visible to pi, so run roster-check with OPENROUTER_API_KEY set
+# (or pi's own auth configured). Without it the catalog gate reports the
+# openrouter slugs as absent rather than passing them by omission.
+
+defaults:
+  provider: openrouter
+  thinking: medium
+  # null = every tool usable. A role that narrows this must also name any tool
+  # its `harness_engineering` extensions register, or that tool is filtered out.
+  tools: null
+  # [] = no repo writes. Roles that need to write narrow it to a path list.
+  writes: []
+  harness_engineering: []
+
+roles:
+  - name: planner
+    model: anthropic/claude-haiku-4.5
+    thinking: high
+
+  - name: worker
+    model: deepseek/deepseek-v3.2
+    writes: ["src/", "tests/", "scripts/"]
+
+  - name: reviewer
+    model: qwen/qwen3-30b-a3b-instruct-2507
+    thinking: low
+    tools: ["read", "grep", "bash"]

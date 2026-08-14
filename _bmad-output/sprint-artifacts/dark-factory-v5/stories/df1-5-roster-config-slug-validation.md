@@ -254,4 +254,149 @@ roster by the phase engine is a separate edge (DF1.1/DF1.6), out of scope here.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Status:** in-review — implemented on `feature/df1-5`.
+
+### Files landed
+
+| File | Role |
+|------|------|
+| `src/phase-engine/roster/schema.ts` | closed schema, shallow `defaults` merge, slug resolution, path confinement |
+| `src/phase-engine/roster/validate.ts` | both gates, rate tables, `resolveRate`, `toMicrosPerMTok`, exit-code aggregation |
+| `scripts/roster-check.ts` | operator CLI through `parseValueFlags` |
+| `config/rosters/qds-default.roster.yaml` | three OpenRouter roles |
+| `tests/phase-engine/roster/{schema,validate}.test.ts`, `tests/scripts/roster-check.test.ts` | 68 tests |
+| `package.json` | `yaml@^2.9.0` as a direct root dependency |
+
+### Exported surface (DF1.6 / DF3.3 / DF3.6 consume this — do not rename)
+
+`schema.ts` — `loadRoster(path, {repoRoot?, cwd?})`, `parseRoster(text, path?)`, `THINKING_LEVELS`,
+`ROSTER_MAX_BYTES`, `RosterError` (`code: "roster_invalid" | "roster_unreadable"` — the second is an
+unavailable control, exit `2`), types `ResolvedRole` / `ResolvedRoster` / `ThinkingLevel` /
+`LoadRosterOptions`.
+
+`validate.ts` — the ones a consumer actually calls:
+
+| Export | What DF1.6 / DF3.3 / DF3.6 use it for |
+|--------|----------------------------------------|
+| `validateRoster(roster, deps?)` | run both gates; returns `RosterReport` with `exitCode` 0/1/2 |
+| `resolveRate(slug, sources?)` | **the** rate source. Integer µ$ per MILLION tokens; divide by `1_000_000` only at your own projection site |
+| `resetRateSources()` | **DF3.3 must call this** to pick up a `~/.pi/agent/models.json` edit. The tables are memoized for the process lifetime — right for a CLI, wrong for a long-lived resident, which would otherwise serve rates frozen at startup forever |
+| `loadRateSources()` | eagerly load + memo the two tables; throws if the registry is unusable |
+| `toMicrosPerMTok(value, unit)` | the single unit-conversion site |
+| `probePiCatalog(run?)`, `probeProviderModels(provider, fetch?)` | either gate on its own; both take an injection seam |
+| `loadBundledCatalog(dir?)`, `readCustomRegistry(path?)`, `findBundledCatalogDir()`, `defaultCustomRegistryPath()`, `parsePiModelTable(stdout)`, `runPi(args)` | lower-level pieces |
+| `RateError`, `PI_PINNED_VERSION_PREFIX` | error type + the F13 pin the version preflight warns against |
+
+Types: `GateVerdict`, `RateSource`, `RateUnit`, `ResolvedRate`, `RateSources`, `RateTable`,
+`CostEntry`, `CustomRegistry`, `CatalogProbe`, `ProviderProbe`, `PiRun`, `PiRunner`, `FetchLike`,
+`RoleRecord`, `RosterReport`, `ValidateDeps`.
+
+`scripts/roster-check.ts` — `main(argv)`, `parseArgs`, `formatReport`, `sanitize`.
+
+### Autonomous decisions (`--yolo`)
+
+**DN-1 — the "contradicting model prefix" check moved from the schema to the catalog gate.**
+The story asks the schema to reject "a `model` prefix disagreeing with an explicit `provider`"
+while ALSO resolving `provider: openrouter` + `model: deepseek/deepseek-v4-flash-0731` verbatim.
+Those are only compatible if a prefix can be told from a provider id offline, and it cannot: pi
+ships provider files for both `anthropic` and `deepseek`
+(`@earendil-works/pi-ai/dist/providers/data/`), yet `anthropic/claude-haiku-4.5` and
+`deepseek/deepseek-v3.2` are correct OpenRouter MODEL ids. Implementing the literal rule would
+reject the story's own worked example and every real gateway slug. So `schema.ts` resolves
+`(provider, model)` verbatim whenever `provider` is set, and `validate.ts`'s catalog gate — which
+holds the real pairs — rejects a declared pair that is absent while its split reading IS present,
+naming both readings. Still a validation error, still never a silent winner, and now correct.
+Covered by `validate.test.ts` "names both readings when a model prefix contradicts provider".
+
+**DN-2 — the `pi --version` preflight warns on the pin instead of hard-failing.** Infra
+Prerequisites ask the preflight to assert the version starts `0.55.`. This host runs pi **0.84.1**,
+so a hard prefix gate would exit `2` on every run and the mandatory e2e demo could never pass —
+the stale-pin failure mode this story exists to catch. Implemented: the version must PARSE (a
+missing or broken binary is still `unverified`, INV-4 intact); drift off the pin emits
+`WARN pi 0.84.1 is not the F13-pinned 0.55.x line`. `PI_PINNED_VERSION_PREFIX` is exported so the
+pin can be tightened when F13 catches up.
+
+**DN-3 — `thinking: max` is rejected, per spec, even though pi 0.84.1 accepts it.** The Technical
+Notes bind the schema to pi 0.55.0's set. 0.84.1's `--help` does list `max`; widening the enum was
+left to whoever moves the pin. `THINKING_LEVELS` is exported so it is a one-line change.
+
+**DN-4 — both rate tables are `usd-per-mtok`, and the unit is declared, not guessed.** Ground
+truth: pi's own consumer computes `cost = (rates.input / 1_000_000) * tokens`
+(`@earendil-works/pi-ai/dist/models.js:540-543`) and applies that identically to bundled-catalog
+entries and `~/.pi/agent/models.json` entries — one schema, one consumer. `RateTable.unit` carries
+the declaration, `toMicrosPerMTok` is the single conversion site, and an undeterminable unit or a
+non-finite/negative value throws (INV-3). `usd-per-token` is implemented and tested for
+equivalence so the converter cannot silently be a no-op.
+
+**DN-5 — `resolveRate` returns `source` alongside the four rates.** The Observability Contract
+requires every per-role record to name the table that priced it; re-deriving that at the log site
+would run the lookup twice. The four AC6-named keys are present, exact, and unchanged.
+
+**DN-6 — the provider gate covers OpenRouter only, and reads no credential.** OpenRouter's
+`GET /api/v1/models` is public, so the probe sends no `Authorization` header at all and
+`readCustomRegistry` lifts only `id` and `cost` out of `models.json` — `apiKey` is never bound
+(INV-1 by construction, not by redaction; the sentinel test pins it). Any other provider is
+`unverified` → exit `2`, fail-closed, never a pass by omission.
+
+**DN-7 — `writes` must be declared explicitly.** `null` means unrestricted repo writes;
+inferring that from silence is the one default here with a blast radius. `thinking` defaults to
+`off`, `tools` to `null`, `harness_engineering` to `[]` — none can widen write scope.
+`defaults` deliberately does not accept `name` (a roster-wide role name guarantees duplicates).
+
+**DN-8 — pi spawn budget is 90 s (`QDS_PI_TIMEOUT_MS`), and a timeout is reported as such.**
+Measured on this host: `pi --version` 12 s, `pi --list-models` 32 s — pi refreshes provider
+catalogs on startup. The first cut used a 30 s `AbortSignal`, which killed the process and
+returned an empty-but-successful read that was indistinguishable from a genuinely empty catalog.
+`runPi` now carries an explicit `timedOut` flag.
+
+**DN-9 — the e2e demo test requires `OPENROUTER_API_KEY` in the env, and skips without it.**
+pi's catalog only lists a provider's models once that provider's credential is visible to it, so
+without a key the demo would measure the host's auth gap rather than the roster. The key is read
+by pi from the ambient env; no test or source file reads, logs, or passes its value.
+
+### E2E demo — observed
+
+```console
+$ OPENROUTER_API_KEY=… bun scripts/roster-check.ts --roster config/rosters/qds-default.roster.yaml
+planner · openrouter/anthropic/claude-haiku-4.5 · pi:pass · provider:pass · source:bundled
+worker · openrouter/deepseek/deepseek-v3.2 · pi:pass · provider:pass · source:bundled
+reviewer · openrouter/qwen/qwen3-30b-a3b-instruct-2507 · pi:pass · provider:pass · source:bundled
+WARN pi 0.84.1 is not the F13-pinned 0.55.x line
+EXIT=0
+
+$ # same roster, worker slug → openrouter/does-not-exist
+worker · openrouter/does-not-exist · pi:fail · provider:fail · source:none
+FAIL [worker] provider-API gate rejected "openrouter/does-not-exist": provider "openrouter" does not list model "does-not-exist"
+EXIT=1
+```
+
+### Review rounds
+
+Three sequential in-depth reviews of the full diff were run before the PR, each by a fresh cold-read
+agent covering LOGIC / EDGE CASE / INVARIANT / SECURITY / SPEC-COMPLIANCE / TEST GAPS. Every real
+finding was fixed and the gates re-run before the next round.
+
+**Round 1 (commit `f4ad18b`)** — 2 HIGH, 4 MEDIUM/LOW, 6 test gaps. A symlink inside
+`config/rosters/` defeated path confinement, and because the `yaml` parser embeds the offending
+SOURCE LINE in its message and the CLI writes that to stdout, the pair was a file-read primitive.
+`resolveRate` let a complete-but-all-zero `models.json` block override a priced model. Both gates'
+own logic was entirely untested (every test injected a hand-written stub), so the DoD's "an
+implementation that gates on `$?` MUST fail this test" was unenforced.
+
+**Round 2 (commit `a3d300f`)** — 2 HIGH, 3 MEDIUM, 6 mutation-testing gaps. The round-1 zero guard
+only fired when the bundled catalog *also* priced the slug, exempting the likeliest shape of all;
+`MIN_NONZERO_MICROS_PER_MTOK = 1` caught only the round-to-exactly-zero sliver, so a $3/MTok model
+stated per token survived as `3` µ$/MTok — the exact 10⁶ harm AC6 names. An unreadable `models.json`
+exited `1`. And the `sanitize` regex embedded a raw NUL, which made git classify
+`scripts/roster-check.ts` as **binary** and drop the entire operator surface from the PR diff.
+
+**Round 3** — no BLOCKER; 3 MEDIUM, 3 LOW. The stderr record stream was unsanitized (`JSON.stringify`
+escapes only C0, so U+009B/U+202E passed through raw on the sibling stream). An unreadable registry
+still fell through to a bundled rate, recording a confident `source: bundled` price for a slug whose
+authoritative price was never read. The widened cache-zero guard made a legitimate override
+inexpressible, so it is now a warning for the cache keys and hard only for `input`/`output`.
+
+### Out of scope (unchanged)
+
+No scoring, ranking or selection logic (P1.5 keeps router scoring). No phase-engine consumption
+(DF1.1/DF1.6). No `src/` → `cli-anything/src/` import — none was needed.
