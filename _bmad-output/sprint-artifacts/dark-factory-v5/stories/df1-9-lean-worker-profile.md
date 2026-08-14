@@ -89,7 +89,7 @@ predecessor.
 |-----------|-------------------------------|-------------------------|
 | pi CLI 0.55.x with `--no-extensions` / `--no-skills` | host binary `/usr/local/bin/pi`; F13 pins pi libs 0.55.x | bench preflight greps both flags out of `pi --help` and asserts `pi --version` starts `0.55.`; either absent → exit `2` **before any spend** |
 | OpenRouter routing + a funded key | `OPENROUTER_API_KEY` in the parent env; presence-only logged at `cli-anything/src/runner.ts:548-551` | the existing presence check logs `set`; `unset` → the bench refuses to run and spends nothing |
-| Warm-cache parity between arms | same manifest, same roster, arms run back-to-back in one invocation | arm order and start timestamps recorded in the artifact; each arm asserts `n >= 3` |
+| Warm-cache parity between arms | same manifest, same roster, arms interleaved (C,L,C,L,…) in one invocation | arm order and start timestamps recorded in the artifact; each arm asserts `n >= 3` |
 | Artifact sink | `artifacts/` on the host (existing `writeArtifactAtomic`, `cli-anything/src/team-events.ts:138`) | the harness writes the verdict atomically; a partial write leaves no artifact rather than half of one |
 
 ## Technical Notes
@@ -208,31 +208,146 @@ predecessor.
 
 ## Definition of Done
 
-- [ ] **Impl:** per-worker `lean` adds exactly `--no-extensions --no-skills` to the pi argv in
+- [x] **Impl:** per-worker `lean` adds exactly `--no-extensions --no-skills` to the pi argv in
       `runWorkerPi`; `extensions` entries are appended as explicit `-e <path>`
-- [ ] **Impl:** opt-in redacted raw-NDJSON capture per worker, gated on `QDS_TEAM_RAW_WORKER_DIR`,
+- [x] **Impl:** opt-in redacted raw-NDJSON capture per worker, gated on `QDS_TEAM_RAW_WORKER_DIR`,
       written mode `0600` into that dir; the JSON verdict artifact keeps `writeArtifactAtomic`
       unchanged — `cli-anything/src/team-events.ts` is not modified (enforces INV-1)
-- [ ] **Contract:** `WorkerConfig` **and** `TeamRoleSchema` (`cli-anything/src/types.ts`) widened with
+- [x] **Contract:** `WorkerConfig` **and** `TeamRoleSchema` (`cli-anything/src/types.ts`) widened with
       `lean?`/`extensions?`, the latter still `.strict()`; a manifest carrying either key validates,
       one carrying an unrelated unknown key still fails; absent fields reproduce today's argv
       byte-for-byte
-- [ ] **Integration:** manifest `lean:`/`extensions:` flow through the worker mapping in
+- [x] **Integration:** manifest `lean:`/`extensions:` flow through the worker mapping in
       `cli-anything/src/runner.ts:539-543` into `QDS_AGENT_TEAM_CONFIG_JSON`
-- [ ] **Security:** an `extensions` path outside the repo root is rejected before spawn, with the
+- [x] **Security:** an `extensions` path outside the repo root is rejected before spawn, with the
       path echoed but never executed (see INV-2)
-- [ ] **Test (unit):** argv assertions for lean-on, lean-off, and lean-on-with-two-`-e`-paths —
+- [x] **Test (unit):** argv assertions for lean-on, lean-off, and lean-on-with-two-`-e`-paths —
       the last proving explicit extensions survive `--no-extensions`
-- [ ] **Test (default-off boundary):** a manifest with no `lean` key produces the exact
+- [x] **Test (default-off boundary):** a manifest with no `lean` key produces the exact
       9-element argv of `team-lead-driver.ts:129-141`; a diff of one element fails the test
-- [ ] **Test (measurement integrity):** an arm stubbed to produce zero usage-bearing turns →
+- [x] **Test (measurement integrity):** an arm stubbed to produce zero usage-bearing turns →
       harness exits non-zero, writes `hypothesisVerdict: "inconclusive"`, and emits no `ratio`
       field. An implementation that averages over the surviving arm MUST fail this test
-- [ ] **Test (e2e demo — MANDATORY):** `npm run bench:lean-worker` on
+- [ ] **Test (e2e demo — MANDATORY):** ⚠️ NOT DONE — no funded OPENROUTER_API_KEY on this host, so the bench refuses at preflight (exit 2, nothing spent). Apparatus verified end to end against a stub pi; see Dev Agent Record. Needs a funded run or PO acceptance.
+      ORIGINAL: `npm run bench:lean-worker` on
       `cli-anything/manifests/lean-benchmark.yaml` produces `artifacts/lean-worker-benchmark.json`
       carrying both arms at `n >= 3`, mean first-turn input tokens per arm, `ratio`, `deltaTokens`
       and a `hypothesisVerdict` — recorded and reported whatever the number turns out to be
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Status:** implemented, PR open (stacked on DF2.7). Developed with
+`qds-dev DF1.9 --yolo --skip-docker-tests`; all `--yolo`-skippable HITL gates auto-approved.
+Three sequential in-depth review rounds before PR.
+
+### ⚠️ The measurement was NOT taken. The apparatus is complete.
+
+This story's own title is "the deliverable is the measurement", so this has to be the first
+thing on the page: **no arm has ever run against a real provider.** This host has no funded
+`OPENROUTER_API_KEY`, so `npm run bench:lean-worker` refuses at preflight — **exit 2, nothing
+spent, no artifact written**, which is the AC4/INV-5 fail-closed path working exactly as
+specified. The **mandatory e2e DoD box is therefore left UNCHECKED** and needs PO acceptance
+of this deviation, or one run against a funded key.
+
+What *is* proven: the whole apparatus end to end — both arms, the manifest rewrite, the raw
+capture, the first-turn parser, the aggregation and the verdict — against a stub pi. The stub
+subtracts exactly 37,279 tokens when it sees both flags, i.e. **it assumes the hypothesis
+under test**. Its `ratio 5.66 → supported` measures the harness and says nothing about pi.
+The 5–6× remains untested, exactly as gates report §3.3 marks it.
+
+### The e2e demo found a real bug in the harness
+
+The first end-to-end run reported `ratio 4.11 → refuted` while the modelled lever removed a
+clean 37,279 tokens from *every* worker. Cause: the driver captures the **lead's** stream too,
+and the harness averaged it in — `lean` is per-worker and the lead is never leaned, so its
+ratio is 1.0 by construction (5.66, 5.66, 1.0 → 4.11). A silent drag toward "refuted" on every
+run, on the exact hypothesis the story exists to test. Fixed by measuring only the manifest's
+declared workers; regression-locked.
+
+That is also the story's own warning made concrete: `deltaTokens` was a clean 74,558 the whole
+time. A reader with only the ratio concludes the lever failed; a reader with `deltaTokens`
+beside it sees it worked. The artifact carries both, per worker and in aggregate.
+
+### Autonomous decisions (--yolo)
+
+- **Arms are produced by rewriting the manifest**, not by a driver-side env override — the only
+  difference between arms is the manifest key this story ships, so there is no second config
+  path production never uses. `yaml` was already a dependency. `lean` is *removed* for the
+  control arm rather than set to `undefined`, because `yaml` serialises that as `lean: null`
+  and `z.boolean()` rejects null — the control arm would fail validation before spawning.
+- **Arms are interleaved** (C,L,C,L,…) rather than run back to back, and the real order plus
+  per-iteration timestamps go in the artifact as `iterationOrder`. Back-to-back arms give the
+  second arm every prompt-cache effect the first warmed, and that lands entirely on the lever's
+  side; the Infra Prerequisites row asks for parity, and sequencing was not it.
+- **`cli-anything/src/manifest.ts` was NOT edited** despite being in Files to Modify. It holds
+  no role-schema logic — it delegates wholly to `TeamManifestSchema`, so widening
+  `TeamRoleSchema` *is* the load path. The edit would have been a no-op diff.
+- **The pi-version preflight is implemented as specified** (exit 2 unless `0.55.`), with
+  `QDS_BENCH_ALLOW_PI_VERSION=1` as an explicit escape hatch that records the actual version in
+  the artifact. Note the correction below: under `npm run` the pinned pi *is* 0.55.0, so the
+  gate passes by the intended route.
+- **`extensions` containment is checked only under `lean`.** `buildWorkerArgv` emits `-e`
+  nowhere else, so killing a worker over a field that was never going to reach pi's argv is a
+  denial of service, not a protection. A non-lean worker carrying `extensions` is logged.
+
+### Correction carried from DF2.7 (see PR body)
+
+A bare shell `pi` on this host is the *global* `@earendil-works` build (0.84.1). But `bun run`
+prepends `node_modules/.bin`, so every project script gets the **workspace-pinned
+`@mariozechner/pi-coding-agent` 0.55.0** — the F13 pin. There is no version deviation on the
+code path. DF2.7's Deviations section said otherwise and is corrected on this branch; the
+per-turn-delta verdict was re-verified against 0.55.0 directly and holds on both builds.
+
+### Review rounds (3, each a fresh cold-read of the full diff)
+
+**Round 1 — 14 findings.** Two fail-open holes in the harness: a worker that vanished from the
+**control** arm was deleted from the report rather than failing it (the run returned
+`supported` with a ratio from the survivors and an empty error list), and `n` counted
+iterations *attempted*, so the ≥3 gate could never trip on real data. Two security holes in
+the capture path: `writeFileSync`'s `mode` applies only at creation and it follows symlinks — a
+pre-existing 0644 file kept its mode, and a planted symlink redirected the worker's compiled
+prompt into the link target; and containment was purely lexical, so `<root>/ext/out → /etc`
+passed. Also: a non-string `extensions` entry threw inside the promise executor and killed the
+*whole* team run, model slugs were a placeholder, `QDS_BENCH_RUNS=abc` produced NaN iterations
+that also defeated the underpowered guard, and truncated captures still yielded a number.
+
+**Round 2 — 12 findings.** The round-1 realpath fix **over-corrected**: requiring both lexical
+*and* real-path containment rejects legitimate paths on macOS, where `/tmp` and `/var` are
+symlinks — CI temp checkouts are exactly that case. Also: a zero **control** mean sailed through
+every guard and produced a confident `refuted` (a broken instrument reported as a measured
+refutation), `aggregate` could return `supported` alongside a non-empty `errors` array,
+`exitStatus` collapsed the 5-value CC-1 enum to two guesses instead of reading the runner's
+merged output, the harness `spawnSync` had no timeout, an exception mid-loop discarded every
+observation already paid for, and the two preflight CLI tests silently encoded "this dev box
+has some particular pi installed globally".
+
+**Round 3 — DO-NOT-SHIP, 4 blocking items, all fixed.** The big one: containment was anchored
+to `process.cwd()`, and the driver is spawned with no `cwd`, so it inherits the operator's
+shell directory — run the harness from `$HOME` and `extensions: [".ssh"]` is "inside the root".
+The mirror case was worse: run from a subdirectory and a legitimate repo-root-relative path was
+*accepted*, then pi resolved the same relative string against its own cwd and loaded nothing —
+silent capability loss, which INV-3 exists to forbid. Fixed by anchoring to
+`pathResolve(import.meta.dir, "..", "..")` and passing the **resolved** paths into the argv, so
+the string that was checked is the string that reaches pi. Second: the test suite `rmSync`'d
+the repo's shared `artifacts/` directory, destroying other stories' evidence, and the preflight
+tests failed on any host where an operator had actually run the bench — the bench now takes
+`QDS_BENCH_ARTIFACTS_DIR` and tests use a temp sink. Third and fourth were this record and the
+sprint-status line.
+
+### Known residuals (recorded, not fixed)
+
+- `mkdirSync(dir, { mode: 0o700 })` does not change the mode of a directory that already
+  exists, so pointing `QDS_TEAM_RAW_WORKER_DIR` at an existing 0755 directory leaves it 0755.
+  Files stay 0600, so the residual exposure is the listing of agent ids, not content.
+- Captures live in `mkdtemp` under the system temp dir during a bench run; a SIGKILL of the
+  bench leaves them there (0600) until the OS cleans up.
+- **Redaction scope** is parent-env values under secret-ish key names (DF1.5 INV-1). Secrets
+  embedded in the compiled prompt, in manifest values, or in files the worker read are not
+  parent-env values and are not masked. The supported boundary is parent-env coverage plus the
+  0600 mode plus the opt-in directory.
+
+### Gates
+
+`bun test cli-anything tests/lean-worker-benchmark.test.ts` 276 pass / 0 fail ·
+`bunx tsc --noEmit` clean ·
+`bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor` clean.

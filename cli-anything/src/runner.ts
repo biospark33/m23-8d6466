@@ -579,6 +579,11 @@ export async function runTeamManifest(
       agentId: w.agentId,
       ...splitRoleModel(w.model),
       prompt: w.prompt,
+      // DF1.9: opt-in lean profile. Spread conditionally so a manifest with no
+      // `lean` key produces the exact config object it produced before this
+      // story — the driver's default argv path stays byte-identical (AC3).
+      ...(w.lean !== undefined ? { lean: w.lean } : {}),
+      ...(w.extensions !== undefined ? { extensions: w.extensions } : {}),
     })),
     turnCap: manifest.team.turnCap,
   });

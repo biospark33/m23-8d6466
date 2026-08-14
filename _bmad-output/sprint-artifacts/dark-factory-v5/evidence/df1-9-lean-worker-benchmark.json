@@ -1,0 +1,296 @@
+{
+  "story": "DF1.9 - Lean Worker Profile: Measure the Extension/Skill Overhead",
+  "dodClause": "Test (e2e demo - MANDATORY)",
+  "recordedAt": "2026-08-13T23:58:27.027413+00:00",
+  "commitBase": "b77de173fc43dac9b3f2c0fffaeb832dfbab3f5b",
+  "headline": "THE DELIVERABLE IS THE MEASUREMENT APPARATUS, AND IT IS REAL. THE 5-6x PAYOFF IS STILL UNMEASURED ON THIS HOST: no funded OpenRouter key exists, so no arm has ever run against a real provider. Nothing below is a measurement of pi's actual overhead reduction.",
+  "run1_preflightRefusal": {
+    "command": "npm run bench:lean-worker",
+    "purpose": "the real, unmodified command on this host",
+    "exitCode": 2,
+    "stdout": [
+      "$ bun scripts/lean-worker-benchmark.ts cli-anything/manifests/lean-benchmark.yaml",
+      "lean-bench: preflight failed \u2014 OPENROUTER_API_KEY is unset; the benchmark roster is OpenRouter-only and refuses to run rather than produce a one-armed comparison. Nothing was spent.",
+      "lean-bench: {\"requestId\":\"lean-bench-mss6i30g\",\"piVersion\":\"0.55.0\"}"
+    ],
+    "artifactWritten": false,
+    "reading": "OPENROUTER_API_KEY is unset, so the bench refused BEFORE any spend and wrote no artifact at all. A preflight failure is not a measurement, and writing one would invite it being read as a result. This is INV-5 and the AC4 fail-closed path working on the real host, not a simulation.",
+    "piVersionSeen": "0.55.0 - the workspace-pinned @mariozechner/pi-coding-agent that `bun run` puts on PATH via node_modules/.bin, i.e. the F13 pin. A bare shell `pi` resolves instead to the global @earendil-works build (0.84.1); the project's own scripts never use it."
+  },
+  "run2_harnessIntegrity": {
+    "command": "PATH=<stub>:$PATH OPENROUTER_API_KEY=<fake> QDS_BENCH_RUNS=3 bun scripts/lean-worker-benchmark.ts cli-anything/manifests/lean-benchmark.yaml",
+    "purpose": "exercise the whole apparatus end to end - two arms, manifest rewrite, raw capture, first-turn parsing, aggregation, verdict - without a provider",
+    "exitCode": 0,
+    "stubbedLever": "The stub pi reports first-turn input = 8000 task tokens + 37279 discovery overhead, and drops the overhead when it sees --no-extensions AND --no-skills. The 37279 figure is the MEASURED overhead from gates report sec3.3; that the flags remove it is the ASSUMPTION UNDER TEST, and this stub assumes it. The resulting ratio therefore measures the harness, NOT pi.",
+    "verdictArtifact": {
+      "requestId": "lean-bench-mss6i1wu",
+      "recordedAt": "2026-08-13T23:58:09.754Z",
+      "manifest": "cli-anything/manifests/lean-benchmark.yaml",
+      "arms": {
+        "control": {
+          "n": 3,
+          "startedAt": "2026-08-13T23:58:08.498Z",
+          "durationMs": 607,
+          "runs": [
+            {
+              "iteration": 1,
+              "agentId": "worker-b",
+              "model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+              "firstTurnInputTokens": 45279,
+              "usageBearingTurns": 2,
+              "durationMs": 200,
+              "exitStatus": "success"
+            },
+            {
+              "iteration": 1,
+              "agentId": "worker-a",
+              "model": "openrouter/openai/gpt-oss-20b:free",
+              "firstTurnInputTokens": 45279,
+              "usageBearingTurns": 2,
+              "durationMs": 200,
+              "exitStatus": "success"
+            },
+            {
+              "iteration": 2,
+              "agentId": "worker-b",
+              "model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+              "firstTurnInputTokens": 45279,
+              "usageBearingTurns": 2,
+              "durationMs": 202,
+              "exitStatus": "success"
+            },
+            {
+              "iteration": 2,
+              "agentId": "worker-a",
+              "model": "openrouter/openai/gpt-oss-20b:free",
+              "firstTurnInputTokens": 45279,
+              "usageBearingTurns": 2,
+              "durationMs": 202,
+              "exitStatus": "success"
+            },
+            {
+              "iteration": 3,
+              "agentId": "worker-b",
+              "model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+              "firstTurnInputTokens": 45279,
+              "usageBearingTurns": 2,
+              "durationMs": 202,
+              "exitStatus": "success"
+            },
+            {
+              "iteration": 3,
+              "agentId": "worker-a",
+              "model": "openrouter/openai/gpt-oss-20b:free",
+              "firstTurnInputTokens": 45279,
+              "usageBearingTurns": 2,
+              "durationMs": 202,
+              "exitStatus": "success"
+            }
+          ]
+        },
+        "lean": {
+          "n": 3,
+          "startedAt": "2026-08-13T23:58:08.498Z",
+          "durationMs": 637,
+          "runs": [
+            {
+              "iteration": 1,
+              "agentId": "worker-b",
+              "model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+              "firstTurnInputTokens": 8000,
+              "usageBearingTurns": 2,
+              "durationMs": 209,
+              "exitStatus": "success"
+            },
+            {
+              "iteration": 1,
+              "agentId": "worker-a",
+              "model": "openrouter/openai/gpt-oss-20b:free",
+              "firstTurnInputTokens": 8000,
+              "usageBearingTurns": 2,
+              "durationMs": 209,
+              "exitStatus": "success"
+            },
+            {
+              "iteration": 2,
+              "agentId": "worker-b",
+              "model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+              "firstTurnInputTokens": 8000,
+              "usageBearingTurns": 2,
+              "durationMs": 203,
+              "exitStatus": "success"
+            },
+            {
+              "iteration": 2,
+              "agentId": "worker-a",
+              "model": "openrouter/openai/gpt-oss-20b:free",
+              "firstTurnInputTokens": 8000,
+              "usageBearingTurns": 2,
+              "durationMs": 203,
+              "exitStatus": "success"
+            },
+            {
+              "iteration": 3,
+              "agentId": "worker-b",
+              "model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+              "firstTurnInputTokens": 8000,
+              "usageBearingTurns": 2,
+              "durationMs": 221,
+              "exitStatus": "success"
+            },
+            {
+              "iteration": 3,
+              "agentId": "worker-a",
+              "model": "openrouter/openai/gpt-oss-20b:free",
+              "firstTurnInputTokens": 8000,
+              "usageBearingTurns": 2,
+              "durationMs": 221,
+              "exitStatus": "success"
+            }
+          ]
+        }
+      },
+      "control_arm_ms": 607,
+      "lean_arm_ms": 637,
+      "durationMs": 1244,
+      "notes": [
+        "pi 0.55.0",
+        "Arms are INTERLEAVED, actual order: control#1, lean#1, control#2, lean#2, control#3, lean#3 \u2014 neither arm inherits the other's warm prompt cache.",
+        "n counts iterations that produced at least one observation, not iterations attempted.",
+        "ratio = control mean first-turn input tokens / lean mean, per worker then averaged; deltaTokens is the absolute tokens removed. A large task prompt inflates BOTH arms' first-turn totals and can push the ratio under 5 while the lever worked exactly as claimed \u2014 read deltaTokens beside the verdict, not the ratio alone."
+      ],
+      "hypothesisVerdict": "supported",
+      "ratio": 5.659875,
+      "deltaTokens": 74558,
+      "perWorker": [
+        {
+          "agentId": "worker-a",
+          "models": [
+            "openrouter/openai/gpt-oss-20b:free"
+          ],
+          "controlMeanFirstTurnInputTokens": 45279,
+          "leanMeanFirstTurnInputTokens": 8000,
+          "deltaTokens": 37279,
+          "ratio": 5.659875
+        },
+        {
+          "agentId": "worker-b",
+          "models": [
+            "openrouter/nvidia/nemotron-nano-9b-v2:free"
+          ],
+          "controlMeanFirstTurnInputTokens": 45279,
+          "leanMeanFirstTurnInputTokens": 8000,
+          "deltaTokens": 37279,
+          "ratio": 5.659875
+        }
+      ],
+      "errors": [],
+      "iterationOrder": [
+        {
+          "iteration": 1,
+          "arm": "control",
+          "startedAt": "2026-08-13T23:58:08.510Z"
+        },
+        {
+          "iteration": 1,
+          "arm": "lean",
+          "startedAt": "2026-08-13T23:58:08.711Z"
+        },
+        {
+          "iteration": 2,
+          "arm": "control",
+          "startedAt": "2026-08-13T23:58:08.922Z"
+        },
+        {
+          "iteration": 2,
+          "arm": "lean",
+          "startedAt": "2026-08-13T23:58:09.125Z"
+        },
+        {
+          "iteration": 3,
+          "arm": "control",
+          "startedAt": "2026-08-13T23:58:09.329Z"
+        },
+        {
+          "iteration": 3,
+          "arm": "lean",
+          "startedAt": "2026-08-13T23:58:09.532Z"
+        }
+      ]
+    },
+    "reading": "ratio 5.659875, deltaTokens 74558, verdict supported - which is exactly what the stub was built to produce. It proves the arms, the capture, the parser and the aggregation are wired correctly. It proves nothing about pi."
+  },
+  "reviewHardening": {
+    "note": "Round 1 of the pre-PR review found two FAIL-OPEN holes in the harness and two security holes in the capture path. All four are fixed and regression-locked; they are recorded here because each one would have produced a confidently wrong number or a real exposure.",
+    "failOpen1_controlArmWorkerVanishes": "The agent set was derived from the CONTROL arm's observed runs, so a worker that failed to spawn in the control arm was DELETED from the report rather than failing it: the run returned `supported` with a ratio computed from the survivors and an empty errors list. The expected set now comes from the manifest and missing-ness is checked for BOTH arms.",
+    "failOpen2_nCountedAttemptsNotObservations": "`n` was the iteration count, set unconditionally, so the >=3 guard could never trip on real data \u2014 an arm could report n=3 while a worker contributed one observation, and that single run was averaged as a three-run mean. TWO fixes: the >=3 requirement is now enforced per worker per arm on the observations actually collected, AND `n` itself now counts iterations that produced at least one observation rather than iterations attempted, so the number the artifact reports is the number a reader thinks it is.",
+    "security1_captureModeAndSymlink": "writeFileSync applies `mode` only at CREATION and follows symlinks, so a pre-existing 0644 file kept its mode and a pre-existing symlink redirected the worker's compiled prompt into the link target \u2014 arbitrary-file overwrite via an operator-supplied capture dir. Now: lstat + unlink, then openSync(path, 'wx', 0o600), and the directory is created 0700.",
+    "security2_symlinkExtensionEscape": "resolveExtensionPaths was purely lexical, so `<root>/ext/out -> /etc` passed containment and `-e ext/out` was handed to pi. Containment is now checked on the realpath'd form only \u2014 a lexical-AND-realpath combination was tried and reverted in Round 2 because it rejected legitimate paths on macOS, where /tmp and /var are themselves symlinks. Empty/whitespace and non-string entries are rejected too \u2014 the latter previously threw inside the promise executor and killed the WHOLE team run instead of degrading one worker.",
+    "alsoFixed": [
+      "Truncated captures (the 8 MiB cap) now mark the run inconclusive instead of yielding a first-turn number from a stream that may have lost the turn (INV-5).",
+      "Arms are INTERLEAVED (C,L,C,L,...) rather than run back to back, so the second arm does not inherit the first's warm prompt cache \u2014 the 'warm-cache parity' the Infra Prerequisites row asks for.",
+      "Model slugs are recorded per run from the manifest (AC1) instead of the placeholder '(from manifest)'.",
+      "The per-run log line now carries the full Observability Contract field set.",
+      "QDS_BENCH_RUNS is parsed with the same bounded-integer discipline as PI_COMS_TIMEOUT_MS; a non-numeric value previously produced NaN iterations that also defeated the underpowered guard.",
+      "8 MiB truncation trims back to a whole codepoint instead of leaving a U+FFFD."
+    ]
+  },
+  "bugFoundByTheE2EDemo": {
+    "symptom": "The first end-to-end bench run reported ratio 4.11 -> 'refuted' even though the modelled lever removed exactly 37,279 tokens from every worker.",
+    "cause": "The driver's raw capture writes a stream for the LEAD as well as the workers, and the harness averaged the lead in. `lean` is a per-worker flag and the lead is never leaned, so its ratio is 1.0 by construction: per-worker ratios of 5.66, 5.66 and 1.0 average to 4.11.",
+    "impact": "A silent drag toward 'refuted' on every run - the harness would have under-reported the lever it exists to measure, on the exact hypothesis the story is about.",
+    "fix": "workerAgentIds() reads team.workers[].agentId from the manifest and the harness measures only those agents. After the fix the same stub yields ratio 5.66 -> 'supported'.",
+    "regressionLocked": "tests/lean-worker-benchmark.test.ts - 'workerAgentIds - the lead is never measured'."
+  },
+  "whyDeltaTokensSitsBesideTheRatio": {
+    "spec": "Technical Notes: 'refuted alongside deltaTokens ~= 37K is an artifact of prompt size, not a refutation - the verdict file must let a reader see that.'",
+    "demonstrated": "The pre-fix run is exactly that failure mode in miniature: deltaTokens was a clean 74,558 (2 x 37,279, the full modelled overhead on both workers) while the ratio read 4.11 and the verdict read 'refuted'. A reader with only the ratio would have concluded the lever failed. A reader with deltaTokens beside it sees the lever worked perfectly and the ratio was diluted. The artifact carries both, per worker and in aggregate."
+  },
+  "argvProof": {
+    "purpose": "AC2/AC3 - what the driver actually execs, captured from a pi stub that echoes its own argv",
+    "leanWorker": [
+      "--provider",
+      "openrouter",
+      "--model",
+      "m",
+      "--mode",
+      "json",
+      "--no-session",
+      "--no-extensions",
+      "--no-skills",
+      "-e",
+      "cli-anything/src",
+      "-e",
+      "./scripts",
+      "-p",
+      "<prompt>\\n\\n<schema instruction>"
+    ],
+    "defaultWorker": [
+      "--provider",
+      "openrouter",
+      "--model",
+      "m",
+      "--mode",
+      "json",
+      "--no-session",
+      "-p",
+      "<prompt>\\n\\n<schema instruction>"
+    ],
+    "reading": "The default worker's argv is the exact 9-element argv that shipped before this story - lean is opt-in and the default path did not move (AC3). Under lean, --no-extensions --no-skills and both explicit -e pairs land BEFORE -p, which stays last and still carries prompt + schema instruction (AC2). Explicit -e paths survive --no-extensions because it disables discovery only."
+  },
+  "securityProof": {
+    "extensionEscapeRefused": "A worker declaring extensions: ['../../../etc'] was refused BEFORE spawn: 'worker worker-escape refused: extensions path escapes the repo root: ../../../etc'. The path is echoed for the operator and never executed; the worker fails closed rather than silently running without its declared extensions (INV-2, INV-3).",
+    "rawCaptureOptIn": "With QDS_TEAM_RAW_WORKER_DIR unset, no file and no directory is created anywhere (AC5). With it set, each worker's stream is written as <agentId>.ndjson at mode 0600 - verified -rw------- on disk, including the pre-existing-file and planted-symlink cases - via an exclusive openSync(path,'wx',0o600), NOT writeArtifactAtomic (which JSON.stringifys, forces .json and sets no mode). LIMIT, stated: the directory is created 0700 when the driver creates it, but mkdirSync does NOT change the mode of a directory that already exists, so an operator pointing QDS_TEAM_RAW_WORKER_DIR at an existing 0755 directory gets 0755. Files stay 0600 either way, so the residual exposure is the listing of agent ids, not content.",
+    "redactionScope": "Every byte passes redactSecrets seeded from the parent env, so OPENROUTER_API_KEY-shaped values are masked. LIMIT, stated: redaction covers parent-env values under secret-ish key names only (DF1.5 INV-1). Secrets embedded in the compiled prompt, in manifest values, or in files the worker read are NOT parent-env values and are NOT masked. The supported boundary is parent-env coverage + 0600 + the opt-in directory; captured NDJSON is client source code and stays inside the repo data boundary.",
+    "capture": "Bounded at 8 MiB with the truncation recorded in-file; agentId must be a single safe path component or nothing is written."
+  },
+  "deviations": {
+    "piVersionGate": "The spec's preflight asserts `pi --version` starts 0.55. \u2014 implemented as specified. Under `npm run`/`bun run` the workspace-pinned pi IS 0.55.0, so the gate passes on this host by the intended route. QDS_BENCH_ALLOW_PI_VERSION=1 is an explicit, recorded escape hatch for measuring against another build; when used, the actual version is written into the artifact's notes rather than swallowed.",
+    "manifestEditNotNeeded": "Files to Modify lists cli-anything/src/manifest.ts. It needed no change: it delegates wholly to TeamManifestSchema, so widening TeamRoleSchema in types.ts IS the load path. Editing it would have been a no-op diff.",
+    "extensionsCheckedOnlyUnderLean": "The DoD clause 'an extensions path outside the repo root is rejected before spawn' is unconditional; the implementation validates only when lean is set, because buildWorkerArgv emits -e nowhere else. Killing a worker over a field that was never going to reach pi's argv is a denial of service, not a protection. A non-lean worker carrying extensions is logged ('extensions ignored (lean is not set)') instead.",
+    "containmentIsCwdNotGitRoot": "Round 3 fix: resolveExtensionPaths is now called with REPO_ROOT (`pathResolve(import.meta.dir, '..', '..')`), not process.cwd(), so containment is against the repository root regardless of the subdirectory the harness is invoked from. This deviation no longer applies.",
+    "armSelection": "The two arms are produced by rewriting the manifest (yaml, already a dependency) rather than by adding a driver-side env override, so the only difference between arms is the manifest key this story actually ships - no second configuration path that production never uses."
+  },
+  "whatRemainsUnmeasured": "The hypothesis itself. A real verdict needs a funded OPENROUTER_API_KEY and one `npm run bench:lean-worker`; the apparatus is complete and will record supported, refuted or inconclusive with equal willingness. No AC or artifact field in this story asserts a saving the harness did not compute.",
+  "suite": "bun test cli-anything + tests/lean-worker-benchmark.test.ts"
+}

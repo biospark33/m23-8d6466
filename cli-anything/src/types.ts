@@ -46,7 +46,22 @@ export const TeamRoleSchema = z
         return idx > 0 && idx < s.length - 1;
       }),
     prompt: z.string().trim().min(1),
+    /**
+     * DF1.9 — opt-in lean worker profile: spawn pi with `--no-extensions
+     * --no-skills`. Absent means today's argv, byte for byte.
+     */
+    lean: z.boolean().optional(),
+    /**
+     * Explicit extension paths kept under lean (`--no-extensions` disables
+     * discovery only, so these still load). Repo-root-relative; containment
+     * is enforced before spawn, not here, because the repo root is a runtime
+     * fact. A non-array, or a non-string entry, is a validation error — never
+     * a truthy coercion (INV-2).
+     */
+    extensions: z.array(z.string().trim().min(1)).optional(),
   })
+  // Still .strict(): widening with two named optional keys must not make any
+  // OTHER unknown key acceptable as a side effect (INV-2).
   .strict();
 
 export const TeamManifestSchema = z

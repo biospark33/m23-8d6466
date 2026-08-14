@@ -1,0 +1,40 @@
+# DF1.9 lean-worker benchmark roster.
+#
+# The A/B harness (`npm run bench:lean-worker`) runs THIS manifest in two arms:
+# once as written (control arm) and once with `lean: true` on every worker
+# (lean arm). The arms are INTERLEAVED (control, lean, control, lean, …) in one
+# invocation, so neither arm inherits the other's warm prompt cache.
+# The lean key is NOT set here — the control arm must be a manifest with no
+# lean key at all, which is exactly what AC3 pins as today's argv.
+#
+# OpenRouter-only by necessity, not by preference: Anthropic OAuth on this host
+# expired ~2026-02-25 (R5 §6 fact 4). An unreachable provider fails the bench
+# preflight closed at exit 2 rather than producing a one-armed comparison.
+#
+# Prompts are deliberately SHORT. The hypothesis is about pi's 37,279-token
+# fixed overhead; a large task prompt inflates both arms' first-turn totals and
+# drags the ratio down while the lever worked exactly as claimed. Keeping the
+# task small keeps the overhead term dominant in the measurement.
+name: lean-worker-benchmark
+team:
+  project: qds-factory
+  lead:
+    agentId: lead
+    model: openrouter/openai/gpt-oss-20b:free
+    prompt: >-
+      Merge the two workers' replies into one short summary.
+  workers:
+    - agentId: worker-a
+      model: openrouter/openai/gpt-oss-20b:free
+      prompt: >-
+        Reply with the single word "ack".
+    - agentId: worker-b
+      model: openrouter/nvidia/nemotron-nano-9b-v2:free
+      prompt: >-
+        Reply with the single word "ack".
+  # 90% of this cap is the harness kill threshold. The bench is 6-10 short
+  # turns on free slugs; 0.5 leaves generous headroom without being a licence.
+  budgetCapUsd: 0.5
+  turnCap: 2
+  wallClockCapMs: 300000
+  comsAwaitTimeoutMs: 240000

@@ -426,7 +426,14 @@ describe("team-lead-driver end to end — emitted cost events (DF2.7)", () => {
     expect(costs[0]?.turnCount).toBe(3);
     expect(costs[0]?.unpricedTurns).toBe(1);
     expect(costs[0]?.costUsd).toBeCloseTo(0.0221244 + 0.0322308, 10);
-    expect(stderr).toContain("refusing paid lead merge");
+    // Text collection is gated to message_end (R3 fix): the truncated turn's
+    // message_start/message_update never contribute, so `text` is left at
+    // turn 2's placeholder ("turn 2") rather than the truncated turn's
+    // REPLY JSON — which fails to parse, so the worker never "responds" and
+    // the driver never reaches its own "refusing paid lead merge" branch.
+    // The worker is instead left unsettled at the harness, which is where a
+    // truly-incomplete reply belongs (its coms_await slot times out → partial).
+    expect(stderr).toContain("worker worker-a reply was not parseable JSON");
   }, 30_000);
 
   it("never lets tool output stand in for the worker's reply", () => {

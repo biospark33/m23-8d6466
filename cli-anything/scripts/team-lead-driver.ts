@@ -21,13 +21,39 @@
  * INV-1: provider keys ride the inherited env; never argv, never logged.
  */
 import { spawn } from "node:child_process";
+import {
+  closeSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { isAbsolute, join, relative, resolve as pathResolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { redactSecrets } from "../src/redact.ts";
 
 interface WorkerConfig {
   agentId: string;
   provider: string;
   model: string;
   prompt: string;
+  /**
+   * DF1.9 — opt-in lean profile: spawn pi with extension and skill discovery
+   * off. pi's measured per-turn fixed overhead is 37,279 input tokens, 78-88%
+   * of every agent's bill, and it is all ambient discovery (today's workers
+   * pass no `-e` at all).
+   */
+  lean?: boolean;
+  /**
+   * Explicit extension paths to keep under lean. `--no-extensions` disables
+   * DISCOVERY only, so these still load. Repo-root-relative; an entry that
+   * escapes the root is rejected before spawn, never sanitized (INV-2).
+   * Not symmetric for skills: `--no-skills` disables discovery AND loading,
+   * so nothing survives it — out of scope here.
+   */
+  extensions?: string[];
 }
 
 const say = (o: unknown): void => {
@@ -264,8 +290,7 @@ export function harvestPiStream(stdout: string): PiHarvest {
     }
     if (typeof event !== "object" || event === null) continue;
     const e = event as Record<string, unknown>;
-    // message_end events carry the assistant message; agent_end carries
-    // the final message list. Collect text blocks from either shape.
+    // message_end events carry the assistant message under `.message`.
     const message = (e.message ?? e.assistantMessage) as
       | Record<string, unknown>
       | undefined;
@@ -278,7 +303,13 @@ export function harvestPiStream(stdout: string): PiHarvest {
     // through would hand `extractJsonObject` a file body or a bash result, and
     // if that happened to be JSON it would be emitted as the worker's
     // structured `worker_output` (changedFiles and all).
-    if (isAssistant) {
+    // Text comes from message_end ONLY — the same terminal-only rule usage
+    // follows above (INV-COST-3's docstring). message_start/message_update
+    // carry the same message mid-flight; on the SIGKILL timeout path
+    // message_end never arrives, so collecting from those events would leak a
+    // partial, still-streaming reply into `text` and defeat the empty-text
+    // failure classification below.
+    if (isAssistant && e.type === "message_end") {
       const content = message?.content;
       const blockTexts: string[] = [];
       if (Array.isArray(content)) {
@@ -332,27 +363,233 @@ export function harvestPiStream(stdout: string): PiHarvest {
   return { text, ...totals };
 }
 
+export const SCHEMA_INSTRUCTION =
+  'Reply with ONLY a JSON object of the shape {"changedFiles": string[], "result": {"summary": string}} — changedFiles is MANDATORY (use [] when no files changed). No prose outside the JSON.';
+
+/**
+ * Build the pi argv for one worker (DF1.9).
+ *
+ * Lean is OPT-IN: with no `lean` key the argv is byte-identical to the one
+ * that shipped before this story, so the default path is unchanged. Under
+ * lean, `--no-extensions --no-skills` and any explicit `-e <path>` pairs are
+ * inserted BEFORE `-p`, which stays last and still carries the prompt plus
+ * the schema instruction.
+ */
+export function buildWorkerArgv(w: WorkerConfig): string[] {
+  const argv = [
+    "--provider",
+    w.provider,
+    "--model",
+    w.model,
+    "--mode",
+    "json",
+    "--no-session",
+  ];
+  if (w.lean === true) {
+    argv.push("--no-extensions", "--no-skills");
+    // `-e` only under lean: with discovery on, re-listing a path pi would
+    // already find changes nothing and would silently diverge from AC3.
+    for (const ext of w.extensions ?? []) argv.push("-e", ext);
+  }
+  argv.push("-p", `${w.prompt}\n\n${SCHEMA_INSTRUCTION}`);
+  return argv;
+}
+
+/**
+ * Validate an extensions allowlist against the repo root (INV-2).
+ *
+ * Rejected, never sanitized: the offending path is echoed back so the operator
+ * sees what was refused, and the worker does not spawn. Uses path containment
+ * (`relative()`), not a string prefix — `<root>-sibling/evil` starts with the
+ * root as a string but is not inside it.
+ */
+export function resolveExtensionPaths(
+  extensions: unknown[],
+  repoRoot: string,
+): { ok: true; paths: string[] } | { ok: false; rejected: string } {
+  const root = realpathOr(pathResolve(repoRoot));
+  const paths: string[] = [];
+  for (const ext of extensions) {
+    // The QDS_AGENT_TEAM_CONFIG_JSON seam is in scope and is parsed with a
+    // bare cast, so a non-string entry reaches here. Reject it rather than
+    // letting path.resolve throw and take the whole team run down with it.
+    if (typeof ext !== "string" || ext.trim() === "") {
+      return { ok: false, rejected: typeof ext === "string" ? ext : String(ext) };
+    }
+    // Containment is checked on the REAL path, and only on the real path.
+    // A lexical check alone accepts `<root>/ext/out` when that is a symlink
+    // to /etc; a lexical check *in addition* rejects legitimate paths, because
+    // `root` is itself realpath'd and on macOS /tmp and /var are symlinks —
+    // an absolute path written through the symlinked prefix would fail the
+    // lexical leg while resolving to the same directory. realpathOr falls back
+    // to the lexical path when the target does not exist yet, so a
+    // not-yet-created `-e` path is still checked.
+    const resolved = realpathOr(pathResolve(root, ext));
+    const rel = relative(root, resolved);
+    // Exact '..' or a '../' prefix means "escapes root"; a bare '..' prefix
+    // does not — '..gitignore' or '..hidden' are legitimate in-root names
+    // that happen to start with two dots, and must not be rejected as if
+    // they were parent-directory traversal.
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel))
+      return { ok: false, rejected: ext };
+    // Return the RESOLVED path, and have the caller put that in the argv. If
+    // the string that was checked is not the string that is passed, the check
+    // is decorative: pi resolves `-e` against its own cwd, so a relative entry
+    // validated against one root can load from another (or from nowhere at
+    // all, silently — INV-3), and a symlink swapped in between is re-resolved.
+    paths.push(resolved);
+  }
+  return { ok: true, paths };
+}
+
+/**
+ * The repo root, derived from this file's own location rather than from
+ * `process.cwd()`.
+ *
+ * The driver is spawned with no `cwd` option, so it inherits whatever
+ * directory the operator invoked the harness from. Anchoring containment to
+ * cwd makes INV-2 a statement about the operator's shell: run from `$HOME` and
+ * `extensions: [".ssh"]` is "inside the root".
+ */
+export const REPO_ROOT = pathResolve(import.meta.dir, "..", "..");
+
+/** realpathSync, or the input unchanged when the path does not exist yet. */
+function realpathOr(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+/** process.env with undefined values dropped — the shape redactSecrets wants. */
+function parentEnvStrings(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined),
+  );
+}
+
+/** Raw worker capture cap (F-bounded): 8 MiB, truncation recorded in-file. */
+export const MAX_RAW_CAPTURE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Written into a capture that hit the cap. Consumers MUST treat a file
+ * containing it as an incomplete measurement (INV-5): the benchmark reads
+ * first-turn tokens, and a truncated stream can silently omit the turn.
+ */
+export const RAW_CAPTURE_TRUNCATION_MARKER = `[truncated at ${MAX_RAW_CAPTURE_BYTES} bytes]`;
+
+/** Capture filenames are single path components: word chars, dot, dash. */
+const SAFE_CAPTURE_NAME_RE = /^[\w-][\w.-]*$/;
+
+/**
+ * Opt-in redacted raw-NDJSON capture (DF1.9, INV-1).
+ *
+ * `dir` unset → returns null and writes nothing, creates nothing (AC5).
+ *
+ * Deliberately NOT `writeArtifactAtomic`: that helper `JSON.stringify`s its
+ * payload, force-appends `.json` and sets no mode. This writes the raw stream
+ * verbatim with mode 0600.
+ *
+ * Redaction scope is parent-env values under secret-ish key names (DF1.5
+ * INV-1). Secrets embedded in the compiled prompt, in manifest values, or in
+ * files the worker read are NOT parent-env values and are NOT masked —
+ * captured NDJSON is client source code and stays inside the repo data
+ * boundary. The supported boundary is parent-env coverage + 0600 + opt-in.
+ */
+export function writeRawWorkerCapture(
+  dir: string | undefined,
+  agentId: string,
+  raw: string,
+  parentEnv: Record<string, string>,
+): string | null {
+  if (dir === undefined || dir === "") return null;
+  if (!SAFE_CAPTURE_NAME_RE.test(agentId) || agentId === "..") return null;
+  // Redact BEFORE truncating, so the cut cannot split a secret and leave a
+  // tail of it in the clear.
+  let body = redactSecrets(raw, parentEnv);
+  if (Buffer.byteLength(body, "utf8") > MAX_RAW_CAPTURE_BYTES) {
+    // Decode with fatal=false would leave a U+FFFD at a split codepoint; trim
+    // back to the last whole character instead.
+    const kept = Buffer.from(body, "utf8")
+      .subarray(0, MAX_RAW_CAPTURE_BYTES)
+      .toString("utf8")
+      .replace(/�$/, "");
+    body = `${kept}\n${RAW_CAPTURE_TRUNCATION_MARKER}\n`;
+  }
+  const path = join(dir, `${agentId}.ndjson`);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // `mode` on writeFileSync applies only at CREATION, and writeFileSync
+  // follows symlinks. A pre-existing 0644 file would keep its mode, and a
+  // pre-existing symlink would redirect the worker's compiled prompt into
+  // whatever it points at. Remove any existing entry (lstat-based, so the
+  // link itself goes, not its target) and create exclusively.
+  try {
+    if (lstatSync(path, { throwIfNoEntry: false }) !== undefined) unlinkSync(path);
+  } catch {
+    // Racing another writer; the exclusive open below fails closed.
+  }
+  const fd = openSync(path, "wx", 0o600);
+  try {
+    writeFileSync(fd, body);
+  } finally {
+    closeSync(fd);
+  }
+  return path;
+}
+
 /** Run one worker pi subprocess in --mode json and harvest text + usage. */
 function runWorkerPi(w: WorkerConfig, timeoutMs: number): Promise<PiRunOutcome> {
   return new Promise((resolve) => {
     const started = Date.now();
-    const schemaInstruction =
-      'Reply with ONLY a JSON object of the shape {"changedFiles": string[], "result": {"summary": string}} — changedFiles is MANDATORY (use [] when no files changed). No prose outside the JSON.';
-    const child = spawn(
-      "pi",
-      [
-        "--provider",
-        w.provider,
-        "--model",
-        w.model,
-        "--mode",
-        "json",
-        "--no-session",
-        "-p",
-        `${w.prompt}\n\n${schemaInstruction}`,
-      ],
-      { stdio: ["ignore", "pipe", "pipe"], env: process.env },
-    );
+    // INV-2: an extensions entry escaping the repo root is refused BEFORE the
+    // spawn, with the path echoed but never executed. Fail closed — a lean
+    // worker that cannot load its declared extensions must not silently run
+    // without them (INV-3).
+    //
+    // Checked only when the paths will actually be passed to pi, i.e. under
+    // lean: `buildWorkerArgv` emits `-e` nowhere else, and killing a worker
+    // over a field that was never going to be used is a denial of service,
+    // not a protection. A non-lean worker carrying extensions gets a warning.
+    const declared = Array.isArray(w.extensions) ? w.extensions : [];
+    let spawnConfig = w;
+    if (declared.length > 0) {
+      if (w.lean !== true) {
+        log(`worker ${w.agentId}: extensions ignored (lean is not set)`);
+      } else {
+        let check: ReturnType<typeof resolveExtensionPaths>;
+        try {
+          check = resolveExtensionPaths(declared, REPO_ROOT);
+        } catch (err) {
+          // Never let a malformed allowlist take down the whole team run —
+          // one broken worker degrades to partial (the same contract the
+          // child `error` handler below maintains).
+          check = {
+            ok: false,
+            rejected: err instanceof Error ? err.message : String(err),
+          };
+        }
+        if (!check.ok) {
+          log(
+            `worker ${w.agentId} refused: extensions path escapes the repo root: ${check.rejected}`,
+          );
+          resolve({
+            text: "",
+            ...ZERO_USAGE,
+            durationMs: Date.now() - started,
+            exitCode: null,
+          });
+          return;
+        }
+        // Pass the RESOLVED paths to pi, so the argv carries exactly what
+        // containment approved.
+        spawnConfig = { ...w, extensions: check.paths };
+      }
+    }
+    const child = spawn("pi", buildWorkerArgv(spawnConfig), {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: process.env,
+    });
     // StringDecoder: a multi-byte UTF-8 char split across chunk boundaries
     // would corrupt under per-chunk toString (Gemini #40, medium).
     const stdoutDecoder = new StringDecoder("utf8");
@@ -390,6 +627,22 @@ function runWorkerPi(w: WorkerConfig, timeoutMs: number): Promise<PiRunOutcome> 
       clearTimeout(timer);
       stdout += stdoutDecoder.end();
       stderr += stderrDecoder.end();
+      // DF1.9: opt-in raw capture, so first-turn input tokens are observable
+      // for the lean benchmark. Off unless QDS_TEAM_RAW_WORKER_DIR is set.
+      try {
+        const captured = writeRawWorkerCapture(
+          process.env.QDS_TEAM_RAW_WORKER_DIR,
+          w.agentId,
+          stdout,
+          parentEnvStrings(),
+        );
+        if (captured !== null) log(`worker ${w.agentId} raw stream -> ${captured}`);
+      } catch (err) {
+        // A capture failure is diagnostics, never a reason to lose the run.
+        log(
+          `worker ${w.agentId} raw capture failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       // pi --mode json emits NDJSON events; harvest assistant text + usage.
       const harvest = harvestPiStream(stdout);
       const { text } = harvest;
