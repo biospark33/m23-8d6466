@@ -234,7 +234,63 @@ OCI driver does the same later at v5 §8 step 7 (DF2.9 defines that image, not a
 
 ## Dev Agent Record
 
-**Status:** implemented, in review (2026-08-13). Branch `feature/df2-1-provider-driver-run-records`.
+**Status:** done — PR [#102](https://github.com/biospark33/QDS-Factory/pull/102) squash-merged to
+`main` 2026-08-14 (`5b66f84`). Branch `feature/df2-1-provider-driver-run-records` (deleted on merge).
+
+**Post-PR review — five rounds.** CodeRabbit's merge-readiness verdict: *"Yes. Excluding CI/CD
+status, this PR is ready to merge. The previously blocking `fillRun()` parent-directory symlink
+race is resolved and covered by a deterministic regression test."*
+
+- **Round 1 (`733b1e7`)** — path traversal in `fillRun` (absolute / `..` paths now rejected); reap
+  race (the `store.list()` claim snapshot moved after `driver.list()`, closing a window where reap
+  could destroy a box for an in-flight `createRun`); metadata rebind in `readMeta` (`meta.name !==
+  vm` now rejected, so a workload cannot redirect `expose`/`setPublic` into another box);
+  `schemaVersion` downgrade guard; `owner > 0` required before `isAlive` (`process.kill(0,0)`
+  always succeeds, which made pid-0 owners immortal); test log-sink restore ordering; a placeholder
+  E2E command replaced with a real seven-verb transcript.
+- **Rounds 2 and 4** — no code change. Three findings rejected with recorded reasoning:
+  `fake-driver.ts:58` "imports orchestration verbs" (false positive — the module imports only types
+  plus `assertValidRunId`; the verbs are imported by the *test* file, which CodeRabbit independently
+  confirmed), `index.ts:83` `target.name` possibly undefined (`ProviderDriver.name` is a required
+  interface member), and a bogus duplicate-anonymous-function match. Round 4 also disproved a
+  finding predicting `fake-driver.test.ts:169` would fail — it passes (19/19), because `FILL_SCRIPT`
+  already carried an explicit `-L` check on the final target. Confirmed `FakeDriver.exec` spawns
+  real `sh` via `Bun.spawn`, so the passing test genuinely exercises the boundary rather than a mock.
+- **Round 3 (`d5be460`)** — static symlink escape: the round-1 guard was textual only, so a symlink
+  already inside the box passed every string check and redirected the write. Added per-component
+  symlink checks and `set -C` on the final open.
+- **Round 5 (`fff9270`) — the real one.** Round 3's fix was still racy, and its "zero-width race"
+  claim was wrong. The component check and the `cat > "$p"` open are separate operations; a
+  concurrent process can swap an already-checked component for a symlink in between, and `set -C`
+  only makes the *last* component's open atomic — it never protected the parent path the kernel
+  re-resolves. Reproduced with a scheduler-preemption stand-in at that exact gap. **POSIX `sh`
+  cannot express the fix** (no `openat`/`O_NOFOLLOW`), so traversal moved to Python
+  `os.open`/`os.mkdir` with `dir_fd=` (single `openat`/`mkdirat` syscalls): each component is opened
+  `O_NOFOLLOW` relative to the previously *held* directory fd, so check and use are one atomic
+  kernel operation and a held fd references the inode, immune to its parent being renamed. Final
+  target opens `O_CREAT|O_EXCL|O_NOFOLLOW` against the held parent fd. `sh` now only probes for
+  `python3` and passes the source and path as separate argv elements — no shell interpolation of the
+  payload.
+
+> **Regression test is deterministic, not timing-based.** A test-only sync hook
+> (`QDS_FILL_TEST_SYNC`, inert unless set) pauses traversal while holding a directory fd; the test
+> renames that directory away and plants a symlink, then releases — asserting the write lands in the
+> original inode. Required a real side fix: `FakeDriver.exec` now passes `env: process.env` to
+> `Bun.spawn`, whose default silently snapshots env at Bun startup and dropped runtime mutations.
+>
+> **Security-boundary lesson:** three rounds each believed they had closed this write path
+> (textual → static symlink → TOCTOU). A path-safety guard written in shell should be treated as
+> unfinished until it is descriptor-based.
+
+> **CI note:** the `check` workflow shows FAILURE, but the job never started — GitHub Actions
+> billing ("recent account payments have failed or your spending limit needs to be increased").
+> Wave-wide, not a code signal. Local gates at merge: 72 pass / 0 fail focal, `tsc --noEmit` clean,
+> biome clean.
+
+> **Deferred, non-blocking (carried forward as follow-ups):** `scripts/run-record.ts:22` couples the
+> providers CLI to the MCP transport for logging, and `:223` duplicates the field schema between CLI
+> and store. Both are valid cross-cutting refactors, deliberately not folded into a review-fix pass.
+
 
 ### Delivered
 

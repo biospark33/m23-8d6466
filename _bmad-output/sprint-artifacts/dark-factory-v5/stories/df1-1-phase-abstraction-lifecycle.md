@@ -321,8 +321,57 @@ trace store behind the same port without changing this story's semantics.
 
 ## Dev Agent Record
 
-**Status:** in-progress → PR open (qds-dev, `--yolo --skip-docker-tests`)<br />
-**Branch:** `feature/df1.1`<br />
+**Status:** done — PR [#104](https://github.com/biospark33/QDS-Factory/pull/104) squash-merged to
+`main` 2026-08-14 (`6d5d3a1`). Developed with qds-dev (`--yolo --skip-docker-tests`).<br />
+**Branch:** `feature/df1.1` (deleted on merge)<br />
+
+**Post-PR review — five rounds, all on two boundaries.** CodeRabbit's merge-readiness verdict:
+*"Yes. Excluding the failed CI check, PR #104 is ready to merge. I found no remaining blocking
+source issue at head commit `1d4f32f`."*
+
+- **Round 1 (`18b9bbb`)** — empty-command guard returned `exitCode: 1`; log-forging window closed
+  for manifest *keys*; undefined-rejection no longer drops the error from the journal row; journal
+  on-disk internals (`runMarkerPath`/`runMarkerRoot`/`writeTerminalMarker`) removed from the public
+  barrel; a tautological `effectiveCeilingMicros` test rewritten to run a real phase; `readJournal`
+  deduplicated into a shared test util. Two findings rejected: `phase.ts:394`
+  construction-error-halts-run (contradicts an intentional retry-after-`PhaseConstructionError`
+  test — the fix was attempted, broke that test, and reverted) and `pipeline-run.ts:138`
+  "orchestrates outside the engine" (false; `main()` already composes via `phase-engine/index.ts`).
+- **Round 3 (`dcfec34`)** — round 1's guard was **incomplete**: `phase.ts:275`'s `clean` check only
+  inspects promise *resolution* and never reads `exitCode`, so the guard recorded success. Now it
+  throws, letting `Run.phase`'s default-fail promotion apply. Sanitization also promoted to a
+  shared exported `sanitizeForMessage` and applied at every free-text site interpolating
+  manifest-controlled `name`/`description` (5 in `phase.ts`, 2 in `pipeline-run.ts`, plus
+  `manifest.ts`); structured JSON fields left alone as they are not a forging vector.
+- **Round 4 (`93f1c9e`)** — the Zod validation path was still an unsanitized route to the same
+  sink. Note the mechanism differs from the report: `.strict()`'s `unrecognized_keys` issue leaves
+  `path` as `[]`/`["phases", N]` and embeds the raw key inside `issue.message`, so sanitizing only
+  path segments would have missed it. Added `formatZodIssue()` sanitizing **both** path segments
+  and `message`, applied at `manifest.ts:429` and the sibling `phase.ts:202`
+  (`PhaseAgentSchema.safeParse`, also `.strict()`, formatted the same unsanitized way).
+- **Round 5 (`1d4f32f`)** — the escaping primitive itself leaked. `JSON.stringify(...).slice(1,-1)`
+  escapes `\n`/`\r` but leaves **U+2028, U+2029, U+0085 NEL, U+007F DEL, and the whole U+0080–U+009F
+  C1 range** literal. Fixed in the one shared helper so every call site inherits it; one regression
+  test per newly-escaped character.
+
+> **Escaping-boundary lesson:** four consecutive rounds landed on the same sink because each fix was
+> scoped to the site reported (keys → name/description → Zod message → the escape function). Anyone
+> extending `sanitizeForMessage` should enumerate the full character set and every message path,
+> not the one named in the finding.
+>
+> **Tooling hazard:** writing literal U+2028/U+0085 bytes through an editor silently corrupts files
+> to binary. Use `\xNN`/`\uNNNN` text escapes when touching this code.
+
+> **CI note:** the `check` workflow shows FAILURE, but the job never started — GitHub Actions
+> reported *"The job was not started because recent account payments have failed or your spending
+> limit needs to be increased."* Wave-wide billing condition, not a code signal. Local gates at
+> merge: 109 pass / 0 fail focal, `tsc --noEmit` clean, biome clean.
+
+> **Non-blocking, deliberately not actioned:** Sift suggested moving `sanitizeForMessage` out of
+> `types.ts` as runtime logic in a types module. CodeRabbit assessed it as non-blocking —
+> `types.ts` already carries runtime constants and helpers, so the placement is consistent with the
+> current structure.
+
 **Files:** `src/phase-engine/{index,types,manifest,phase,journal}.ts`, `scripts/pipeline-run.ts`,
 `tests/phase-engine/{manifest,phase-lifecycle,pipeline-run}.test.ts`,
 `tests/phase-engine/fixtures/pipeline.qds-factory.json`
