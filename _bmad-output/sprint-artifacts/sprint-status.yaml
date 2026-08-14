@@ -108,7 +108,7 @@ epics:
     points: 34
     stories_dir: sprint-artifacts/dark-factory-v5/stories
     stories:
-      DF2.1: { title: "Provider-Driver Interface + Run Records",                   points: 4, status: ready-for-dev, deps: [] }  # v5-S1 — opens DF2.1 -> DF2.3 -> DF2.2 -> DF2.5
+      DF2.1: { title: "Provider-Driver Interface + Run Records",                   points: 4, status: in-review, deps: [] }  # v5-S1 — opens DF2.1 -> DF2.3 -> DF2.2 -> DF2.5. 2026-08-13: implemented, PR open. Ships src/providers/{driver,run-record,fake-driver,index}.ts + scripts/run-record.ts + 69 tests (AC1 O_EXCL race incl. 6-process interleave, AC2 closed schema + allow-listed extensions + atomic replace + SIGKILL .tmp sweep, AC3 hard-error list, AC4 empty-line get, AC5 exported runDriverContract suite for DF2.2/OCI, AC6 hostname-grammar ids at every verb). e2e demo captured in the story Dev Agent Record; 3 mandatory pre-PR review rounds found 22 findings (7/11/4), all fixed — incl. a concurrent-set lost update that dropped keyHash, a symlink escape in the fake driver's copyFile, and two paths where one bad record stopped list() fleet-wide.
       DF2.2: { title: "exe.dev Driver + Five-Assertion Setup Gate",                points: 5, status: ready-for-dev, deps: [DF2.1, DF2.3] }  # v5-S1
       DF2.3: { title: "Per-Run Credential Lifecycle — Mint, Cap, Deliver, Revoke, Verify-Against-List", points: 4, status: ready-for-dev, deps: [DF2.1] }  # v5-S1
       DF2.4: { title: "Live Cap-Hit Kill Demonstration — Real Key, Real Spend, Recorded Evidence", points: 3, status: ready-for-dev, deps: [DF2.2, DF2.3, DF2.5] }  # v5-S2 — teardown invoked unchanged from DF2.5

@@ -12,3 +12,6 @@ bun.lockb
 # .gitnexusignore (traps don't run on SIGKILL). Ignore it so the leak surfaces
 # as ignored, not as an untracked file polluting `git status`.
 /.gitnexusignore
+
+# DF2.1: host run records + fake-driver boxes are per-run scratch, never committed.
+.sandbox/

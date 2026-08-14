@@ -201,37 +201,141 @@ OCI driver does the same later at v5 §8 step 7 (DF2.9 defines that image, not a
 
 ## Definition of Done
 
-- [ ] **Impl:** `ProviderDriver` defined with the eight primitives; the seven lifecycle verbs
+- [x] **Impl:** `ProviderDriver` defined with the eight primitives; the seven lifecycle verbs
       composed over them host-side, with only `create`/`teardown`/`reap` provider-specific
-- [ ] **Impl:** run-record store with `create`/`get`/`set`/`close`/`list`/`path`/`newId`, plus the
+- [x] **Impl:** run-record store with `create`/`get`/`set`/`close`/`list`/`path`/`newId`, plus the
       CLI at `scripts/run-record.ts` using `parseValueFlags` from `scripts/lib/cli-args.ts`
-- [ ] **Contract:** twelve-field closed core schema enforced on write — unknown-key and
+- [x] **Contract:** twelve-field closed core schema enforced on write — unknown-key and
       immutable-field writes both rejected with the key named; the one sanctioned additive key
       `extensions` accepted only under a registered, shape-validated sub-key (AC2). A test writes
       `extensions.telemetry.foo` — an unregistered namespace — and asserts the write is rejected
       with the key named, then writes `extensions.pr.prUrl` and `extensions.fanout.fanoutId` and
       asserts both are accepted: the rejected/accepted pair is the allow-list proof, and `pr`,
       `fixLoop` and `fanout` are registered by this story
-- [ ] **Integration:** `fake` driver registered in `src/providers/index.ts` and resolvable by name;
+- [x] **Integration:** `fake` driver registered in `src/providers/index.ts` and resolvable by name;
       the exported contract suite is importable by DF2.2 and by the future OCI driver story
       (v5 §8 step 7 — DF2.9 defines the image, not a driver)
-- [ ] **Security:** record-before-VM ordering unreachable in the wrong order by construction (INV-1);
+- [x] **Security:** record-before-VM ordering unreachable in the wrong order by construction (INV-1);
       no code path writes key material into the record (INV-2)
-- [ ] **Test (atomic replace + idempotent close):** a failure injected between temp-write and
+- [x] **Test (atomic replace + idempotent close):** a failure injected between temp-write and
       `rename` leaves the prior record byte-identical (AC2); a SIGKILL between temp-write and
       `rename` leaves the prior record byte-identical and the stale `.tmp` is cleaned at next
       construction; `close()` twice is first-close-wins — `closedAt` keeps its original value and
       the second call succeeds
-- [ ] **Test (create path):** two interleaved `create()` calls on one id → exactly one file, one
+- [x] **Test (create path):** two interleaved `create()` calls on one id → exactly one file, one
       `EEXIST`, and a check-then-write implementation MUST fail (AC1); ids `../evil`, `A-b` and
       64+ chars are refused by every verb routing through `path()`, nothing written (AC6)
-- [ ] **Test (malformed record):** a truncated JSON file in `.sandbox/runs/` → `list()` throws
+- [x] **Test (malformed record):** a truncated JSON file in `.sandbox/runs/` → `list()` throws
       naming the file; a `try/catch`-and-skip implementation MUST fail this test (AC3)
-- [ ] **Test (unset field):** `get <id> vmName` on a record without it → exit `0`, empty line (AC4)
-- [ ] **Test (e2e demo — MANDATORY):** the fake driver walked through all seven verbs produces
+- [x] **Test (unset field):** `get <id> vmName` on a record without it → exit `0`, empty line (AC4)
+- [x] **Test (e2e demo — MANDATORY):** the fake driver walked through all seven verbs produces
       `.sandbox/runs/<run-id>.json` on disk at mode `0600` with `vmName`, `httpsUrl` and `closedAt`
       populated, and `run-record list` returns it — captured in the Dev Agent Record
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Status:** implemented, in review (2026-08-13). Branch `feature/df2-1-provider-driver-run-records`.
+
+### Delivered
+
+| File | What |
+|------|------|
+| `src/providers/driver.ts` | `ProviderDriver` (8 primitives) + the 7 host-side lifecycle verbs |
+| `src/providers/run-record.ts` | `RunRecordStore` (`create/get/set/close/list/path`) + `newId`/`assertValidRunId` + `EXTENSION_NAMESPACES` |
+| `src/providers/fake-driver.ts` | `FakeDriver` — real implementation over a temp dir + child processes |
+| `src/providers/index.ts` | registry (`registerDriver`/`resolveDriver`) + observability wrapper; registers `fake` |
+| `scripts/run-record.ts` | CLI `new-id\|create\|path\|get\|set\|close\|list`, built on `parseValueFlags` |
+| `tests/providers/run-record.test.ts` | 52 tests (AC1–AC4, AC6, INV-2/3/4/5, observability, concurrency) |
+| `tests/providers/driver-contract.test.ts` | the exported `runDriverContract()` suite, side-effect-free on import (AC5) |
+| `tests/providers/fake-driver.test.ts` | runs that suite against `fake`, plus the registry and driver-side observability tests |
+
+### Exported surface DF2.2 / DF2.3 build on (unchanged by later drivers)
+
+`ProviderDriver`, `ProviderVm`, `ExecResult`, `BoxFile`, `createRun`, `fillRun`, `setupRun`,
+`executeRun`, `observeRun`, `teardownRun`, `reapRuns`, `registerDriver`, `resolveDriver`,
+`RunRecordStore`, `RunRecord`, `RunRecordPatch`, `EXTENSION_NAMESPACES`, `newId`,
+`assertValidRunId`, and `runDriverContract()` from the contract test.
+
+### Decisions taken autonomously (--yolo)
+
+1. **Lifecycle verb names carry a `Run` suffix** (`createRun`, `fillRun`, …) because `create`/`list`
+   collide with the driver primitives of the same name in a single import scope. The verb set and
+   their composition over primitives are exactly as specified.
+2. **Lifecycle verbs live in `driver.ts`**, not a new file — the story's Files-to-Modify list is
+   the contract and the verbs are the seam's other half.
+3. **`extensions.<ns>.schemaVersion` is stamped by the store**, not supplied by the caller. A caller
+   may pass it, but a mismatch is rejected. This makes the version an invariant of the registry
+   rather than a value each writer has to remember.
+4. **Fault-injection seam:** `RunRecordStore({ beforeRename })` is a documented hook so AC2's
+   "failure injected between temp-write and rename" is a real test, not a mock of the store.
+5. **INV-2 detector** is a credential-prefix list plus a bare-long-token heuristic (marked
+   `ponytail:` in the source), applied to every core field except `keyHash` and to every extension
+   field. It is a guard, not a proof; upgrade if a real leak gets past it.
+6. **`destroy()` is idempotent** in the seam's contract (asserted by the suite): teardown and reap
+   both retry, and an absent box is the goal state.
+7. **Store construction probes O_EXCL + mode 0600 and throws (INV-5)**, tightens the records dir to
+   `0700` via explicit `chmod` (mkdir's mode is ignored for an existing dir and masked by umask),
+   and sweeps stale `.tmp` files before any run starts.
+8. **`.sandbox/` added to `.gitignore`** — run records and fake boxes are per-run host scratch.
+9. **CLI arg split:** positionals are collected in a pre-pass and only flag tokens reach
+   `parseValueFlags`, so the shared grammar stays the single owner of flag validation.
+
+### E2E demo (MANDATORY DoD item) — captured live 2026-08-14
+
+Ad-hoc script exercising all seven lifecycle verbs against `createRun`/`fillRun`/
+`setupRun`/`executeRun`/`observeRun`/`teardownRun`/`reapRuns` over a `FakeDriver`
+and a fresh `RunRecordStore`; not a checked-in file, transcript captured verbatim
+(structured log lines from `setLogSink` interleave with the demo's own `console.log`
+output, both left in place):
+
+```text
+$ bun run-record-e2e-demo.ts
+new-id: e2e-demo-20260814-e7770d
+{"requestId":"6d3a2d4c-ce31-462b-a6e1-fc6624386afc","operation":"run-record.create","agentId":null,"timestamp":"2026-08-14T01:00:02.663Z","duration":1,"status":"ok","runId":"e2e-demo-20260814-e7770d","driver":null,"verb":"create","durationMs":1,"outcome":"ok","record_write_ms":1}
+{"requestId":"6d3a2d4c-ce31-462b-a6e1-fc6624386afc","operation":"run-record.set","agentId":null,"timestamp":"2026-08-14T01:00:02.677Z","duration":4,"status":"ok","runId":"e2e-demo-20260814-e7770d","driver":null,"verb":"set","durationMs":4,"outcome":"ok","record_write_ms":4}
+create → vmName: e2e-demo-20260814-e7770d httpsUrl: https://e2e-demo-20260814-e7770d-8080.fake.local
+fill: payload.txt written
+setup: test -f payload.txt ok
+execute: payload
+observe: /var/folders/b1/3xqsp60176l3n0f7rxfv6q2h0000gn/T/qds-e2e-runs-nHdOl3/observed.txt
+{"requestId":"6d3a2d4c-ce31-462b-a6e1-fc6624386afc","operation":"run-record.close","agentId":null,"timestamp":"2026-08-14T01:00:02.766Z","duration":2,"status":"ok","runId":"e2e-demo-20260814-e7770d","driver":null,"verb":"close","durationMs":2,"outcome":"ok","record_write_ms":2}
+teardown closedAt: 2026-08-14T01:00:02.764Z
+{"requestId":"6d3a2d4c-ce31-462b-a6e1-fc6624386afc","operation":"run-record.list","agentId":null,"timestamp":"2026-08-14T01:00:02.767Z","duration":1,"status":"ok","runId":null,"driver":null,"verb":"list","durationMs":1,"outcome":"ok","record_write_ms":1}
+reap: []
+mode: 600
+record: {
+  "runId": "e2e-demo-20260814-e7770d",
+  "createdAt": "2026-08-14T01:00:02.662Z",
+  "vmName": "e2e-demo-20260814-e7770d",
+  "httpsUrl": "https://e2e-demo-20260814-e7770d-8080.fake.local",
+  "ports": [8080],
+  "closedAt": "2026-08-14T01:00:02.764Z"
+}
+{"requestId":"6d3a2d4c-ce31-462b-a6e1-fc6624386afc","operation":"run-record.list","agentId":null,"timestamp":"2026-08-14T01:00:02.767Z","duration":0,"status":"ok","runId":null,"driver":null,"verb":"list","durationMs":0,"outcome":"ok","record_write_ms":0}
+list: [{"runId":"e2e-demo-20260814-e7770d","createdAt":"2026-08-14T01:00:02.662Z","vmName":"e2e-demo-20260814-e7770d","httpsUrl":"https://e2e-demo-20260814-e7770d-8080.fake.local","ports":[8080],"closedAt":"2026-08-14T01:00:02.764Z"}]
+{"requestId":"6d3a2d4c-ce31-462b-a6e1-fc6624386afc","operation":"run-record.create","agentId":null,"timestamp":"2026-08-14T01:00:02.768Z","duration":1,"status":"error","error":{"code":"EEXIST","message":"EEXIST: file already exists, open '/var/folders/b1/3xqsp60176l3n0f7rxfv6q2h0000gn/T/qds-e2e-runs-nHdOl3/e2e-demo-20260814-e7770d.json'"},"runId":"e2e-demo-20260814-e7770d","driver":null,"verb":"create","durationMs":1,"outcome":"error","record_write_ms":1}
+second create: EEXIST EEXIST: file already exists, open '/var/folders/b1/3xqsp60176l3n0f7rxfv6q2h0000gn/T/qds-e2e-runs-nHdOl3/e2e-demo-20260814-e7770d.json'
+```
+
+### Review rounds (3 mandatory in-depth rounds before the PR)
+
+| Round | Found | Headline findings, all fixed |
+|-------|-------|------------------------------|
+| 1 | 7 | INV-2 heuristic rejected a 40-char git SHA and any 40–63 char run id (so `commitSha`/`vmName` were unwritable and `createRun` failed *after* the box existed); `reapRuns` destroyed the live box of an open run in the pre-`vmName` window; the stale-`.tmp` sweep ate concurrent writers' temps and the INV-5 probe; `set()` accepted `closedAt`, bypassing first-close-wins; failed mutations logged nothing; the contract module had import-time side effects |
+| 2 | 11 | The secret charset excluded every credential that matters (an AWS secret key and a JWT were accepted); `copyFile` followed symlinks out of the box; a newer `extensions.schemaVersion` made `list()` throw fleet-wide; `teardownRun` destroyed nothing when the crash beat the `vmName` write; `instrument()` wrapped every callable; `RunRecordPatch`'s index signature let a typo compile |
+| 3 | 4 (+docs) | Concurrent `set()` lost the other writer's field — a dropped `keyHash` is INV-4's failure mode exactly, now fixed with a stealable per-record O_EXCL lock; `keyHash` was exempt from the whole secret scan, not just the length heuristic; the read path still threw on extension *values*, reopening the `list()` outage; a stray directory in the boxes root aborted `reapRuns` |
+
+### Known ceilings (deliberate, marked `ponytail:` in the source)
+
+- The INV-2 detector is a prefix list plus a mixed-class length heuristic, not an
+  entropy model or a scanner.
+- The per-record lock is a file lock with a 5s timeout, stolen when its owner pid
+  is gone. Pid reuse could spare a stale lock or temp; both are inert.
+- `assertExclusiveCreateSupported` (INV-5) has no failure-branch test — inducing a
+  platform without `O_EXCL` needs a seam the story does not ask for.
+
+### Gates
+
+`bun test tests/providers` → 69 pass / 0 fail across 3 files. `bunx tsc --noEmit` clean.
+`bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor` clean.
+Docker CI-parity tests skipped (`--skip-docker-tests`).
