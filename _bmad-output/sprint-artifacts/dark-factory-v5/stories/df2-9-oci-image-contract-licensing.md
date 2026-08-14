@@ -224,7 +224,67 @@ step 7).
 
 ## Dev Agent Record
 
-**Status:** in-review · branch `feature/df2-9-oci-image-contract` · implemented 2026-08-13
+**Status:** done — PR [#105](https://github.com/biospark33/QDS-Factory/pull/105) squash-merged to
+`main` 2026-08-14 (`43ca5e7`). Branch `feature/df2-9-oci-image-contract` (deleted on merge);
+implemented 2026-08-13.
+
+**Post-PR review — eight rounds.** CodeRabbit's merge-readiness verdict: *"Yes. Excluding CI/CD
+status, I see no remaining non-CI blocker in PR #105. The Round 8 change completes the AC1 failure
+taxonomy."*
+
+Code fixes (rounds 1–3):
+
+- **`c18cfca`** — `oci/Dockerfile` `CMD ["node","--version"]` exited immediately with nothing
+  running; now runs the vendored extension's documented entrypoint (the reviewer's suggested
+  `index.js` does not exist in this repo). `license-sweep.ts` `expressionAtoms()` stripped
+  parentheses before splitting on AND/OR, so `MIT AND (Apache-2.0 OR BSD-2-Clause)` evaluated
+  wrong — replaced with a recursive-descent parser honouring SPDX precedence. Duplicate `fail`/`die`
+  extracted to `exitWithFailure` in the already-shared `cli-args.ts`.
+- **`92a17b8`** — `exitWithFailure` switched from `process.stderr.write` to `fs.writeSync(2, ...)`
+  before `process.exit`: when stderr is a pipe the write is async and `exit` truncates it, so the
+  operator's error message could vanish.
+- **`cb81756`** — same flush race fixed at its real site, `emit()` in `generate-notice.ts` (the
+  finding named `cli-args.ts`; the unguarded write was elsewhere). Added `persist-credentials:
+  false` to both `actions/checkout` steps — zizmor `artipacked`: checkout persists git credentials
+  into the workspace by default and neither job needs git auth afterwards.
+
+> **`actions/checkout` version — a correction worth recording.** Round 1 changed `@v7` → `@v4` on
+> the premise that v7 did not exist. **That premise was false.** `gh api repos/actions/checkout/releases`
+> shows `v7.0.0` published 2026-06-18 and `v7.0.1` on 2026-07-20 — v7 is the current major and
+> predates this branch by ~2 months. The original change was a downgrade of a correct choice, and
+> two later rounds rejected version suggestions on the same bad premise. Round 5 (`4d57a4b`)
+> restored `@v7` on both steps, keeping `persist-credentials: false`. CodeRabbit independently
+> withdrew its own finding and recorded a repo learning. Sift subsequently re-raised "v7 does not
+> exist" twice more with BUG severity; both were rejected against the release API. **Check the
+> release list before acting on a "version does not exist" claim.**
+
+Documentation rounds (4–8) — five passes on this file's failure taxonomy:
+
+- `dfc6ee4` fixed the User Story's "fails on any uncovered or forbidden package"; `8d85c0b`
+  corrected the attribution class to cover SPDX ids observed from **both** covered and uncovered
+  packages (`license-sweep.ts:546-551` builds `missingTexts` from `[...covered, ...uncovered]`);
+  `5d1ea6d` rescoped AC1's "only when" to the attribution subclass; `fa328f7` added "an unreadable
+  package" to AC1's prerequisite list.
+- **The verified taxonomy** (from `generate-notice.ts` exit paths): *attribution* — an observed SPDX
+  id has no canonical text → exit 2 before NOTICE generation, or an uncovered package's entry is
+  absent from the written NOTICE → exit 1; *policy* — denied package name or off-pin
+  `pi-coding-agent` → exit 1; *prerequisite* — empty swept tree → exit 1; unreadable package,
+  missing builder, unreachable registry, absent license-texts dir → exit 2.
+
+> **Why five rounds:** each pass corrected the sentence the reviewer named and left a sibling
+> saying something narrower. Round 8 finally enumerated every failure-list occurrence in the file
+> as a table. That sweep also showed where a blanket edit would have been *wrong*: the
+> Observability Contract's list at lines 160-162 is deliberately scoped to failures with **no
+> package path**, so "unreadable" (which has one) is correctly excluded there. Anyone editing this
+> taxonomy again should produce the occurrence table first.
+
+> **CI note:** the `check` workflow shows FAILURE, but the job never started — GitHub Actions
+> billing ("recent account payments have failed or your spending limit needs to be increased").
+> Wave-wide, not a code signal. Local gates at merge: 70 pass / 0 fail focal, `tsc --noEmit` clean,
+> biome clean.
+
+> **Non-blocking, deliberately not actioned:** the `die`/`fail` wrapper comments — both are
+> one-line delegates to `exitWithFailure`, which CodeRabbit confirmed is not a blocker.
 
 ### What shipped
 

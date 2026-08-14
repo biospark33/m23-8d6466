@@ -236,9 +236,55 @@ predecessor.
 
 ## Dev Agent Record
 
-**Status:** implemented, PR open (stacked on DF2.7). Developed with
-`qds-dev DF1.9 --yolo --skip-docker-tests`; all `--yolo`-skippable HITL gates auto-approved.
-Three sequential in-depth review rounds before PR.
+**Status:** done — PR [#107](https://github.com/biospark33/QDS-Factory/pull/107) squash-merged to
+`main` 2026-08-14 (`a182205`). Developed with `qds-dev DF1.9 --yolo --skip-docker-tests`; all
+`--yolo`-skippable HITL gates auto-approved. Three in-depth review rounds before PR, plus three
+after. **The measurement is still not taken — see the warning below; merging did not change that.**
+
+CodeRabbit's merge-readiness verdict: *"Yes. Excluding CI/CD, PR #107 is ready to merge. All
+unresolved review threads are outdated."*
+
+Post-PR rounds:
+
+- **`4eff36b`** — `resolveExtensionPaths` rejected legitimate in-root names like `..gitignore`
+  because the escape check was `rel.startsWith("..")`; now `rel === ".." || rel.startsWith(\`..${sep}\`)
+  || isAbsolute(rel)`, importing `sep` so it holds on Windows (the suggested fix hardcoded `/`).
+  Rejected: `isAssistant` treating a missing `role` as assistant — deliberate and documented, no
+  producer emits a role-less `toolResult`, and flipping the default would silently drop real
+  assistant usage. CodeRabbit later withdrew that finding.
+- **`b7576fd`** — text collection in `harvestPiStream` gated to `message_end` only, matching the
+  terminal-only rule the function already applied to usage accumulation; a SIGKILLed mid-stream
+  `message_update` could otherwise leak partial text that `extractJsonObject` misparses as a
+  complete reply. Two evidence corrections: containment is realpath-only (lexical was reverted in
+  round 2 for macOS symlinks), and `resolveExtensionPaths` takes `REPO_ROOT`, not `process.cwd()`.
+  **Rejected with teeth:** the suggestion to mark successful runs partial when `costUnpriced` would
+  have *thrown at runtime* — `merger.ts` enforces `exitStatus === "success" ⟹ partial === false` as
+  a frozen P0.3-M2 invariant. Recorded as a possible follow-up story, not a quick win.
+- **`c46dbfe`** — `scripts/lean-worker-benchmark.ts:6` still described the arms as running "back to
+  back"; they interleave (C,L,C,L,… at line 618). The sweep also found the same stale claim in this
+  file's Infra Prerequisites table, which no reviewer had flagged.
+
+> **Apparatus-is-inert challenge — rejected with the full chain.** A reviewer claimed nothing
+> implements `lean`, which would mean both arms run identically and the harness measures nothing
+> ("consistent with the missing measurement"). Verified wired end to end; the supporting files
+> landed in `1589bf6`, outside the reviewer's diff window: `package.json:18` → `scripts/lean-worker-benchmark.ts`
+> (`manifestForArm()` strips/sets `lean`, `main()` interleaves) → `types.ts:53` `TeamRoleSchema.lean`
+> → `runner.ts:546` spread into `QDS_AGENT_TEAM_CONFIG_JSON` → `team-lead-driver.ts:378`
+> `buildWorkerArgv` emitting `--no-extensions --no-skills` → `spawn("pi", …)` at line 589. The
+> driver-level argv assertion the reviewer asked for already exists at `team-lead-driver.test.ts:268`.
+
+> **Merge-conflict resolution (`b34a5c5`).** DF2.7 (#103), DF2.1 (#102) and DF1.1 (#104)
+> squash-merged into `main` after this branch was cut from DF2.7's pre-squash commits, so `main`
+> shared no ancestry with them and the branch went `CONFLICTING`. Resolved by merge (not rebase —
+> the branch was published): `main` authoritative for DF2.7-owned files, this PR for DF1.9-owned
+> files, `sprint-status.yaml` merged so both stories' entries survive. Verified semantically, not
+> just textually — the full `lean` chain and `main`'s `applyCostEvent` finite/non-negative guard
+> both survive; `bun test cli-anything` 212 pass / 0 fail. CodeRabbit reviewed the merge commit and
+> independently confirmed all three properties.
+
+> **CI note:** the `check` workflow shows FAILURE, but the job never started — GitHub Actions
+> billing. Wave-wide, not a code signal. Local gates at merge: 212 pass / 0 fail (`cli-anything`),
+> `tsc --noEmit` clean, biome clean.
 
 ### ⚠️ The measurement was NOT taken. The apparatus is complete.
 
