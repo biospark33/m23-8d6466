@@ -80,7 +80,12 @@ async function main(): Promise<void> {
       // worker-b never replies; lead still emits its merge and exits cleanly.
       say({ type: "merged", result: { summary: "merged without worker-b" } });
       // Give the harness's worker-b await timer time to fire before exit.
-      await sleep(300);
+      // 1.5 s, not 300 ms: the test's coms budget has to land in the window
+      // between "worker-a's output arrived" and "the child exited", and at
+      // 300 ms that window was tight enough that CPU contention pushed
+      // worker-a's arrival past it too, failing the run with BOTH workers
+      // timed out. Widening the fixture is the fix; the assertion is unchanged.
+      await sleep(1500);
       process.exit(0);
       break;
     }
@@ -91,6 +96,19 @@ async function main(): Promise<void> {
       say(cost("lead", "anthropic/claude-x", 0.15));
       say(workerOutput("worker-a", ["src/a.ts"]));
       // Keep running: the harness must kill us (grace, then killTree).
+      await sleep(60_000);
+      break;
+    }
+    // DF2.7 / INV-COST-5: same spend as budget_overflow, but the worker's
+    // cost record is KNOWN-PARTIAL — some turns were never priced. The
+    // cumulative total is therefore under-counted and the budget state must
+    // say so.
+    case "budget_overflow_unpriced": {
+      say(coms(1, "lead", "worker-a"));
+      say({ ...cost("worker-a", "openrouter/model-a", 0.2), turnCount: 4, unpricedTurns: 2 });
+      say(cost("worker-b", "openrouter/model-b", 0.2));
+      say(cost("lead", "anthropic/claude-x", 0.15));
+      say(workerOutput("worker-a", ["src/a.ts"]));
       await sleep(60_000);
       break;
     }

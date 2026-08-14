@@ -94,7 +94,10 @@ describe("runTeamManifest", () => {
   it("worker timeout: partial:true, transient, missing worker logged with reason timeout (AC3)", async () => {
     const out = await runTeamManifest(TEAM_MANIFEST, {
       env: teamEnv("worker_timeout"),
-      comsAwaitTimeoutMs: 100,
+      // 400 ms, paired with the shim's 1.5 s hold: long enough that worker-a's
+      // reply lands inside the budget even under CPU contention, short enough
+      // that worker-b's await timer still fires before the child exits.
+      comsAwaitTimeoutMs: 400,
     });
     expectUniformSchema(out);
     expect(out.exitStatus).toBe("transient");
@@ -118,10 +121,35 @@ describe("runTeamManifest", () => {
     // Killed promptly (grace 200ms + watchdog), nowhere near the 60s hang.
     expect(Date.now() - started).toBeLessThan(15_000);
     // Cost details: cumulative spend reported, no secret leakage of env.
-    const details = out.error?.details as { cumulativeCostUsd?: number };
+    const details = out.error?.details as {
+      cumulativeCostUsd?: number;
+      costUnpriced?: boolean;
+    };
     expect(details.cumulativeCostUsd).toBeCloseTo(0.55, 5);
+    // DF2.7: legacy cost lines (no turnCount/unpricedTurns) still accumulate
+    // and still kill at the same threshold — the widening did not move the
+    // budget guard (AC3 + INV-COST-3).
+    expect(details.costUnpriced).toBe(false);
     // agentOutputs populated with whatever the lead collected (path 3).
     expect(Object.keys(out.agentOutputs)).toEqual(["worker-a"]);
+  }, 20_000);
+
+  it("budget overflow with unpriced turns: cumulative total is marked partial (DF2.7, INV-COST-5)", async () => {
+    const out = await runTeamManifest(TEAM_MANIFEST, {
+      env: teamEnv("budget_overflow_unpriced"),
+      graceMs: 200,
+    });
+    expectUniformSchema(out);
+    expect(out.exitStatus).toBe("overflow");
+    const details = out.error?.details as {
+      cumulativeCostUsd?: number;
+      costUnpriced?: boolean;
+    };
+    // Same accumulated spend as the priced run — an unpriced turn is never
+    // priced at $0 and never credited against the total; it only marks the
+    // record incomplete so nothing bills or spends against a partial figure.
+    expect(details.cumulativeCostUsd).toBeCloseTo(0.55, 5);
+    expect(details.costUnpriced).toBe(true);
   }, 20_000);
 
   it("coms init failure: transient with agentOutputs {} and no partial output (AC6)", async () => {

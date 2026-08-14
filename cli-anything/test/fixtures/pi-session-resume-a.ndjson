@@ -1,0 +1,5 @@
+{"type":"session","id":"df27-resume-shared","cwd":"/tmp/df27","version":"0.55.0"}
+{"type":"agent_start"}
+{"type":"message_end","message":{"role":"assistant","provider":"openrouter","model":"anthropic/claude-sonnet-4.6","content":[{"type":"text","text":"leg A turn one"}],"stopReason":"toolUse","usage":{"input":5000,"output":100,"cacheRead":0,"cacheWrite":0,"totalTokens":5100,"cost":{"input":0.01,"output":0,"cacheRead":0,"cacheWrite":0,"total":0.01}}}}
+{"type":"message_end","message":{"role":"assistant","provider":"openrouter","model":"anthropic/claude-sonnet-4.6","content":[{"type":"text","text":"{\"changedFiles\":[],\"result\":{\"summary\":\"leg A done\"}}"}],"stopReason":"stop","usage":{"input":6000,"output":200,"cacheRead":0,"cacheWrite":0,"totalTokens":6200,"cost":{"input":0.012,"output":0,"cacheRead":0,"cacheWrite":0,"total":0.012}}}}
+{"type":"agent_end","willRetry":false,"messages":[]}

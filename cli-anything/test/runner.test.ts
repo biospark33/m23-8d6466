@@ -10,13 +10,17 @@ import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  applyCostEvent,
+  budgetKillThresholdUsd,
   buildSpawn,
   classifyExit,
   logEnvKeys,
   MAX_STDOUT_EXCERPT,
   mergeEnv,
+  parseTeamEventLine,
   runManifest,
 } from "../src/runner.ts";
+import type { TeamEvent } from "../src/runner.ts";
 import type { Manifest } from "../src/types.ts";
 
 const FIXTURES = join(import.meta.dir, "fixtures");
@@ -698,5 +702,111 @@ describe("INV-2 / INV-3: no secret values in structured output or logs", () => {
     expect(keys).toContain("SECRET");
     expect(keys).toContain("A");
     expect(keys.join(",")).not.toContain("hunter2");
+  });
+});
+
+describe("budget kill path under session-cumulative cost semantics (DF2.7)", () => {
+  const costLine = (agentId: string, costUsd: number, extra = ""): string =>
+    `{"type":"cost","agentId":"${agentId}","model":"p/m","costUsd":${costUsd}${extra}}`;
+
+  /**
+   * Drives the guard via the production `applyCostEvent`/`budgetKillThresholdUsd`
+   * helpers exported from runner.ts (not a reimplementation) — this test pins
+   * the actual production accumulation math, so it fails if that math drifts.
+   */
+  function accumulate(
+    lines: string[],
+    budgetCapUsd: number,
+  ): {
+    cumulativeCostUsd: number;
+    costUnpriced: boolean;
+    killedAfter: number | null;
+    killThresholdUsd: number;
+  } {
+    const killThresholdUsd = budgetKillThresholdUsd(budgetCapUsd);
+    let state = { cumulativeCostUsd: 0, costUnpriced: false };
+    let killedAfter: number | null = null;
+    lines.forEach((line, i) => {
+      const event = parseTeamEventLine(line);
+      if (event?.kind !== "cost") return;
+      state = applyCostEvent(state, event.event);
+      if (state.cumulativeCostUsd >= killThresholdUsd && killedAfter === null) {
+        killedAfter = i;
+      }
+    });
+    return { ...state, killedAfter, killThresholdUsd };
+  }
+
+  it("fires at 90% of cap on the SUM of per-invocation session totals", () => {
+    // Each event is now one pi invocation's whole session, not one turn. The
+    // guard still sums across events, because no event restates another's
+    // spend — that is the reset-boundary contract AC6 pins.
+    const r = accumulate(
+      [costLine("worker-a", 0.2), costLine("worker-b", 0.2), costLine("lead", 0.15)],
+      0.5,
+    );
+    expect(r.killThresholdUsd).toBeCloseTo(0.45, 10);
+    expect(r.cumulativeCostUsd).toBeCloseTo(0.55, 10);
+    expect(r.killedAfter).toBe(2); // not before the third event
+    expect(r.costUnpriced).toBe(false);
+  });
+
+  it("does not fire on a run that stays under the threshold", () => {
+    const r = accumulate([costLine("worker-a", 0.2), costLine("worker-b", 0.2)], 0.5);
+    expect(r.killedAfter).toBeNull();
+  });
+
+  it("marks the budget state unpriced without changing the accumulated total", () => {
+    const priced = accumulate([costLine("worker-a", 0.2), costLine("lead", 0.3)], 0.5);
+    const partial = accumulate(
+      [costLine("worker-a", 0.2, ',"turnCount":4,"unpricedTurns":2'), costLine("lead", 0.3)],
+      0.5,
+    );
+    // An unpriced turn contributes nothing and credits nothing — same total,
+    // same kill point; only the partiality flag differs (INV-COST-5).
+    expect(partial.cumulativeCostUsd).toBeCloseTo(priced.cumulativeCostUsd, 10);
+    expect(partial.killedAfter).toBe(priced.killedAfter);
+    expect(priced.costUnpriced).toBe(false);
+    expect(partial.costUnpriced).toBe(true);
+  });
+
+  it("never lets a malformed cost line move the accumulator backwards (INV-COST-1)", () => {
+    // costUsd < 0 is rejected outright by parseTeamEventLine; the new numerics
+    // floor to 0. Neither can decrement the cumulative total.
+    expect(parseTeamEventLine(costLine("w", -1))).toBeNull();
+    const r = accumulate(
+      [costLine("worker-a", 0.2), costLine("w", -1), costLine("lead", 0.1)],
+      0.5,
+    );
+    expect(r.cumulativeCostUsd).toBeCloseTo(0.3, 10);
+  });
+
+  it("applyCostEvent itself rejects non-finite/negative costUsd (INV-COST-5, defense-in-depth)", () => {
+    // parseTeamEventLine already drops malformed cost lines before they reach
+    // applyCostEvent, but applyCostEvent is exported public API and its own
+    // doc comment claims to be the sole source of truth for the guard math —
+    // it must not trust a well-formed CostEvent input either, in case a
+    // future caller bypasses the parse-layer filter.
+    const base = { cumulativeCostUsd: 1, costUnpriced: false };
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -5]) {
+      const next = applyCostEvent(base, { costUsd: bad });
+      expect(next.cumulativeCostUsd).toBe(1); // unchanged, never poisoned/decremented
+      expect(next.costUnpriced).toBe(true); // flagged, not silently dropped
+    }
+    // A valid event still accumulates normally afterwards.
+    const recovered = applyCostEvent(
+      applyCostEvent(base, { costUsd: Number.NaN }),
+      { costUsd: 0.5 },
+    );
+    expect(recovered.cumulativeCostUsd).toBeCloseTo(1.5, 10);
+  });
+
+  it("keeps legacy cost lines (no DF2.7 fields) on the same kill path (AC3)", () => {
+    const legacy = parseTeamEventLine(costLine("worker-a", 0.2));
+    const event = (legacy as Extract<TeamEvent, { kind: "cost" }>).event;
+    expect(event.costUsd).toBe(0.2);
+    expect(event.turnCount).toBe(0);
+    expect(event.unpricedTurns).toBe(0);
+    expect(accumulate([costLine("worker-a", 0.46)], 0.5).killedAfter).toBe(0);
   });
 });

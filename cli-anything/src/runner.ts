@@ -462,6 +462,45 @@ export async function runManifest(
 /** Budget kill threshold as a fraction of the team cap (P0.3 §Budget, 90%). */
 export const BUDGET_KILL_FRACTION = 0.9;
 
+/** Dollar threshold at which the budget kill fires for a given cap. */
+export function budgetKillThresholdUsd(budgetCapUsd: number): number {
+  return budgetCapUsd * BUDGET_KILL_FRACTION;
+}
+
+/** Running total tracked by the DF2.7 cost guard (INV-COST-2 / INV-COST-5). */
+export interface CostGuardState {
+  cumulativeCostUsd: number;
+  costUnpriced: boolean;
+}
+
+/**
+ * Pure accumulation step for one `cost` event: sums costUsd (SUM across
+ * per-invocation session totals — no event restates another's spend,
+ * INV-COST-2) and stickily sets costUnpriced once any event reports
+ * unpricedTurns > 0 (INV-COST-5, never cleared by a later fully-priced
+ * event). This is the ONLY place the guard's math lives — runTeamManifest's
+ * live event loop and its unit tests both call it, so they cannot drift.
+ *
+ * A non-finite (NaN/Infinity) or negative costUsd is treated as unpriced
+ * (INV-COST-5) and excluded from the sum: adding NaN would poison
+ * cumulativeCostUsd for every subsequent event (NaN >= threshold is always
+ * false, silently disabling the budget kill for the rest of the run), and
+ * a negative value would understate spend and delay the kill.
+ */
+export function applyCostEvent(
+  state: CostGuardState,
+  event: { costUsd: number; unpricedTurns?: number },
+): CostGuardState {
+  const costValid = Number.isFinite(event.costUsd) && event.costUsd >= 0;
+  return {
+    cumulativeCostUsd: costValid
+      ? state.cumulativeCostUsd + event.costUsd
+      : state.cumulativeCostUsd,
+    costUnpriced:
+      state.costUnpriced || !costValid || (event.unpricedTurns ?? 0) > 0,
+  };
+}
+
 /**
  * Hard cap on captured lead-run stdout kept in memory for the team path
  * (F15): unlike runManifest's byte-capped excerpt, the team handler parsed
@@ -512,7 +551,7 @@ export async function runTeamManifest(
   const env = mergeEnv(parent, manifest.env);
 
   const budgetCapUsd = opts.budgetCapUsd ?? manifest.team.budgetCapUsd;
-  const killThresholdUsd = budgetCapUsd * BUDGET_KILL_FRACTION;
+  const killThresholdUsd = budgetKillThresholdUsd(budgetCapUsd);
   const wallClockCapMs = opts.wallClockCapMs ?? manifest.team.wallClockCapMs;
   const comsAwaitTimeoutMs =
     opts.comsAwaitTimeoutMs ?? manifest.team.comsAwaitTimeoutMs;
@@ -561,6 +600,12 @@ export async function runTeamManifest(
     let mergedResult: Record<string, unknown> | null = null;
     let comsInitError: string | null = null;
     let cumulativeCostUsd = 0;
+    // DF2.7 / INV-COST-5: a `cost` event carrying unpricedTurns > 0 means its
+    // totals are KNOWN-PARTIAL — an unmeasured turn is never priced at $0. The
+    // cumulative total below is therefore under-counted, so every path that
+    // reports it must say so rather than let a reader (or DF2.8's ledger) read
+    // a partial figure as a complete one.
+    let costUnpriced = false;
     let budgetKilled = false;
     let wallTimedOut = false;
     let settled = false;
@@ -681,7 +726,7 @@ export async function runTeamManifest(
         settle("overflow", true, {
           reason: "overflow",
           message: `wall-clock cap ${wallClockCapMs} ms exceeded`,
-          details: { cumulativeCostUsd },
+          details: { cumulativeCostUsd, costUnpriced },
         });
       });
     });
@@ -705,7 +750,7 @@ export async function runTeamManifest(
           settle("overflow", true, {
             reason: "overflow",
             message: `budget kill threshold $${killThresholdUsd.toFixed(4)} reached (cap $${budgetCapUsd.toFixed(2)})`,
-            details: { cumulativeCostUsd },
+            details: { cumulativeCostUsd, costUnpriced },
           });
         });
       });
@@ -726,11 +771,33 @@ export async function runTeamManifest(
         const event = parseTeamEventLine(line);
         if (event !== null) {
           switch (event.kind) {
-            case "cost":
+            case "cost": {
               // Budget poll AFTER each turn (P0.3-S-H4): synchronous check.
-              cumulativeCostUsd += event.event.costUsd;
+              // DF2.7: costUsd is now the emitting subprocess's SESSION total
+              // (one ledger row per event, SUM across rows) — no event
+              // restates another's spend, so summing here is still exactly
+              // right and is the ONLY accumulator the kill decision reads
+              // (INV-COST-2). applyCostEvent is the single source of truth
+              // for this math, shared with the unit tests in
+              // runner.test.ts so the guard cannot drift from what's tested.
+              const wasUnpriced = costUnpriced;
+              ({ cumulativeCostUsd, costUnpriced } = applyCostEvent(
+                { cumulativeCostUsd, costUnpriced },
+                event.event,
+              ));
+              if (costUnpriced && !wasUnpriced) {
+                // console.error, not diag(): diag is routine per-run
+                // diagnostics and is silenced under NODE_ENV=test. A
+                // known-partial billing total is a warning — on the success
+                // path this line is the ONLY surface for it, because
+                // MergedOutput's key set is frozen (P0.3-M2).
+                console.error(
+                  "cli-anything: cost event reports unpriced turns; cumulative total is partial (INV-COST-5)",
+                );
+              }
               if (cumulativeCostUsd >= killThresholdUsd) onBudgetThreshold();
               break;
+            }
             case "coms":
               comsLog.push(event.raw);
               break;
@@ -869,7 +936,7 @@ export async function runTeamManifest(
             message: budgetKilled
               ? `budget kill threshold $${killThresholdUsd.toFixed(4)} reached (cap $${budgetCapUsd.toFixed(2)})`
               : `wall-clock cap ${wallClockCapMs} ms exceeded`,
-            details: { cumulativeCostUsd },
+            details: { cumulativeCostUsd, costUnpriced },
           });
           return;
         }

@@ -104,13 +104,34 @@ export interface ComsLogEntry {
   timestamp: string;
 }
 
-/** Cost event polled after each LLM turn (CC-9). */
+/**
+ * Cost event polled after each LLM turn (CC-9).
+ *
+ * DF2.7 widens this ADDITIVELY: the four optional numerics carry session-
+ * cumulative cache economics and turn accounting for one pi subprocess
+ * invocation. `costUsd` keeps its existing USD-float meaning on the wire —
+ * the integer micro-dollar unit belongs to the DF2.8 ledger (DD-9), which
+ * converts at its own boundary. Producers that predate this widening simply
+ * omit the four fields; `parseTeamEventLine` defaults them to 0.
+ */
 export interface CostEvent {
   agentId: string;
   model: string;
   inputTokens: number;
   outputTokens: number;
+  /** Cache-read tokens for this invocation. 0 when the provider reports none. */
+  cacheReadTokens?: number;
+  /** Cache-write tokens for this invocation. 0 when the provider reports none. */
+  cacheWriteTokens?: number;
   costUsd: number;
+  /** Assistant turns observed in this invocation, priced or not. */
+  turnCount?: number;
+  /**
+   * Turns whose usage was missing or malformed. `> 0` means the totals above
+   * are a KNOWN-PARTIAL cost record: under-counted, never $0-priced
+   * (INV-COST-5).
+   */
+  unpricedTurns?: number;
   durationMs: number;
   timestamp: string;
 }

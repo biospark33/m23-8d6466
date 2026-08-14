@@ -1,0 +1,289 @@
+{
+  "story": "DF2.7 - Session-Cumulative Cost Instrumentation in the Team Lead Driver",
+  "dodClause": "Test (e2e demo - MANDATORY)",
+  "recordedAt": "2026-08-13T23:17:16.969011+00:00",
+  "commitBase": "b77de173fc43dac9b3f2c0fffaeb832dfbab3f5b",
+  "note": "This artifact records THREE separate invocations of the same code at the same working tree, each labelled with its own command. They are not one run presented as one: the harness does not persist the driver's raw stdout, so the raw NDJSON is captured from a direct driver invocation of the same code path the harness spawns (buildTeamSpawn returns exactly `bun cli-anything/scripts/team-lead-driver.ts`).",
+  "providerFidelity": {
+    "live": false,
+    "reason": "No provider credential exists on this host: ~/.pi/agent/auth.json is empty ([]) and OPENROUTER_API_KEY is unset. R5 sec6 fact 4 already records the Anthropic OAuth expiry (~2026-02-25). A live smoke:team would fail at auth and spend nothing, so it could not produce a usage-bearing stream at all.",
+    "substitute": "cli-anything/test/fixtures/team-bin/pi - a shim that replays a REAL-shaped pi --mode json NDJSON stream. Every other component on the path is production code: runner.ts -> buildTeamSpawn -> team-lead-driver.ts -> cost events -> parseTeamEventLine -> the budget guard.",
+    "whatThisDoesAndDoesNotProve": "PROVES: the instrumentation is session-cumulative end to end, survives pi's duplicate message_update/turn_end/agent_end emissions, and flows into the budget guard. DOES NOT PROVE: any dollar figure against a real provider bill - the token and cost numbers below are replayed, not billed."
+  },
+  "usageShapeProvenance": {
+    "source": "17 real pi assistant-message usage records read from ~/.pi/agent/sessions (1465 usage records scanned across 10 session directories), plus pi's own dist/core/usage-totals.js",
+    "observedShape": {
+      "input": "number",
+      "output": "number",
+      "cacheRead": "number",
+      "cacheWrite": "number",
+      "totalTokens": "number",
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+      }
+    },
+    "cacheFieldSpelling": "camelCase - cacheRead / cacheWrite. NOT cache_read_input_tokens / cache_creation_input_tokens.",
+    "cacheFieldsObserved": "0 in every one of the 1465 records scanned. Emitted as reported (0); never synthesized from residuals, so gates report sec3.4 condition 2 stays open.",
+    "perFieldMode": "PER-TURN DELTA for all five fields (input, output, cacheRead, cacheWrite, cost.total). Decisive evidence: pi derives session totals by SUMMING per-message usage - addUsageToTotals(totals, usage) { totals.input += usage.input; ...; totals.cost += usage.cost.total } in dist/core/usage-totals.js. Corroborated observationally: per-record output is non-monotone across a session (158, 333, 799, 452, 200, 145), which a running total cannot be.",
+    "operatorChosen": "accumulate (+=), applied once per assistant message_end",
+    "probeDeviation": "The story's live two-leg probe could not be run (no credential - see providerFidelity). Substituted: pi's own accumulation source plus the real local session corpus. The verdict is per-field and empirical either way; the recorded gap is that no leg ran against a BILLED stream, and that every observed record priced at $0 (OAuth/free routing), so cost.total's delta semantics rest on the source reading rather than on observed non-zero values.",
+    "versionCorrection": "A bare shell `pi` on this host is the GLOBAL @earendil-works build (0.84.1), which is where the session corpus and the first source reading came from. But `bun run`/`npm run` prepend node_modules/.bin, so every project script \u2014 smoke:team, and therefore the driver's spawn('pi') \u2014 gets the WORKSPACE-PINNED @mariozechner/pi-coding-agent 0.55.0, the F13 pin. There is no version deviation on the code path. Re-verified directly against 0.55.0: Usage is field-for-field identical (camelCase cacheRead/cacheWrite, cost.total), and 0.55.0 likewise derives session totals by summing per-assistant-message usage (agent-session.js:2205-2215). The per-turn-delta verdict holds on BOTH builds.",
+    "residualRisk": "readTurnUsage treats an absent or malformed cost block as UNPRICED rather than as $0. Every record in the observed corpus carries a cost block (total 0), so this is the shape pi emits even for unpriced routing - but it was not confirmed against a :free OpenRouter slug specifically. If some provider omits the block entirely, those turns count as unpriced and the run degrades to a mechanical merge rather than over-reporting spend. That is the fail-closed direction INV-COST-5 asks for."
+  },
+  "doubleCountHazardFound": "pi emits the SAME assistant message object - carrying the SAME usage - on message_start, every message_update, message_end and turn_end, and replays the whole message list in agent_end. A naive += over every usage-bearing event multiplies the bill several-fold and would kill healthy runs early at the budget guard (INV-COST-3). Usage is therefore accumulated on message_end ONLY, and toolResult messages are excluded (pi documents their usage as 'not part of main LLM context accounting').",
+  "truncatedStreamHazardFound": "Accumulating on message_end alone drops an in-flight turn when the timeout path SIGKILLs pi mid-message - and, worse, would emit that truncated record as COMPLETE. The harvest therefore tracks the open message and counts an unterminated one as turnCount+1 / unpricedTurns+1, so the runaway-worker case (the expensive one) marks the total partial instead of failing open.",
+  "resetBoundary": {
+    "contract": "the pi subprocess invocation; each runWorkerPi call starts its accumulators at zero",
+    "leg2Finding": "pi --mode json subscribes to LIVE session events only (modes/print-mode.js: session.subscribe -> toJsonEvent) and does not replay pre-existing session entries as they happen. A resumed --session-id therefore emits only its own new turns; no carried-in baseline needs subtracting.",
+    "noSessionNote": "The driver spawns pi with --no-session, so a resumed --session-id is unreachable on this code path today. The fixtures encode the boundary anyway because it is the contract DF2.8's ledger sums over, not because the shipped driver can currently enter it.",
+    "negativeControlEncoded": "pi-session-resume-b.ndjson's agent_end message list replays the earlier invocation's messages, so the carried-in totals are physically present in the stream. An implementation that reads them restates leg A's spend inside leg B's cost event, the two events sum to 37000 input tokens / $0.072 instead of the true 26000 / $0.052, and DF2.8's ledger SUM bills the first invocation twice. SCOPE OF THIS CONTROL, stated honestly: it kills an agent_end-list accumulator. It does NOT exercise the spec's other hypothesised hazard - pi reporting RUNNING totals across a resumed session, which would need baseline subtraction - because the probe found per-turn deltas, so no such stream can be produced and no baseline-subtraction code exists to test.",
+    "fixtures": [
+      "cli-anything/test/fixtures/pi-session-resume-a.ndjson",
+      "cli-anything/test/fixtures/pi-session-resume-b.ndjson"
+    ]
+  },
+  "runs": {
+    "1_harnessSmokeRun": {
+      "command": "PATH=cli-anything/test/fixtures/team-bin:$PATH QDS_TEAM_RUNNER=local bun cli-anything/src/index.ts run --manifest cli-anything/manifests/research-trio.yaml",
+      "purpose": "the npm run smoke:team path end to end, through the real harness",
+      "exitCode": 0,
+      "mergedOutput": {
+        "result": {
+          "summary": "stubbed reply from claude-sonnet-5",
+          "workerSummaries": "worker-a: stubbed reply from openai/gpt-oss-20b:free | worker-b: stubbed reply from nvidia/nemotron-nano-9b-v2:free",
+          "respondedWorkers": [
+            "worker-a",
+            "worker-b"
+          ],
+          "models": [
+            "anthropic/claude-sonnet-5",
+            "openrouter/openai/gpt-oss-20b:free",
+            "openrouter/nvidia/nemotron-nano-9b-v2:free"
+          ]
+        },
+        "changedFiles": [],
+        "partial": false,
+        "exitStatus": "success",
+        "durationMs": 101,
+        "waivers": [],
+        "agentOutputs": {
+          "worker-a": {
+            "summary": "stubbed reply from openai/gpt-oss-20b:free"
+          },
+          "worker-b": {
+            "summary": "stubbed reply from nvidia/nemotron-nano-9b-v2:free"
+          }
+        },
+        "comsLog": [
+          {
+            "requestId": "rpc-1",
+            "sessionId": "team-89927",
+            "phaseId": "dispatch_task",
+            "channel": "lead:worker-a",
+            "direction": "send",
+            "senderAgent": "lead",
+            "receiverAgent": "worker-a",
+            "payloadSize": 161,
+            "durationMs": 0,
+            "timestamp": "2026-08-13T23:17:04.145Z"
+          },
+          {
+            "requestId": "rpc-2",
+            "sessionId": "team-89927",
+            "phaseId": "dispatch_task",
+            "channel": "lead:worker-b",
+            "direction": "send",
+            "senderAgent": "lead",
+            "receiverAgent": "worker-b",
+            "payloadSize": 155,
+            "durationMs": 0,
+            "timestamp": "2026-08-13T23:17:04.150Z"
+          },
+          {
+            "requestId": "rpc-3",
+            "sessionId": "team-89927",
+            "phaseId": "dispatch_task",
+            "channel": "worker-a:lead",
+            "direction": "receive",
+            "senderAgent": "worker-a",
+            "receiverAgent": "lead",
+            "payloadSize": 85,
+            "durationMs": 31,
+            "timestamp": "2026-08-13T23:17:04.176Z"
+          },
+          {
+            "requestId": "rpc-4",
+            "sessionId": "team-89927",
+            "phaseId": "dispatch_task",
+            "channel": "worker-b:lead",
+            "direction": "receive",
+            "senderAgent": "worker-b",
+            "receiverAgent": "lead",
+            "payloadSize": 93,
+            "durationMs": 27,
+            "timestamp": "2026-08-13T23:17:04.177Z"
+          },
+          {
+            "requestId": "rpc-5",
+            "sessionId": "team-89927",
+            "phaseId": "dispatch_task",
+            "channel": "harness:lead",
+            "direction": "send",
+            "senderAgent": "harness",
+            "receiverAgent": "lead",
+            "payloadSize": 115,
+            "durationMs": 0,
+            "timestamp": "2026-08-13T23:17:04.177Z"
+          },
+          {
+            "requestId": "rpc-6",
+            "sessionId": "team-89927",
+            "phaseId": "dispatch_task",
+            "channel": "lead:harness",
+            "direction": "receive",
+            "senderAgent": "lead",
+            "receiverAgent": "harness",
+            "payloadSize": 77,
+            "durationMs": 25,
+            "timestamp": "2026-08-13T23:17:04.202Z"
+          }
+        ],
+        "error": null
+      },
+      "stderr": [
+        "cli-anything: ANTHROPIC_API_KEY: unset",
+        "cli-anything: OPENROUTER_API_KEY: unset"
+      ]
+    },
+    "2_directDriverRun": {
+      "command": "PATH=... QDS_AGENT_TEAM_CONFIG_JSON=<3-role config> bun cli-anything/scripts/team-lead-driver.ts",
+      "purpose": "same driver the harness spawns, run directly so its raw NDJSON stdout can be captured verbatim",
+      "exitCode": 0,
+      "perAgentSessionCumulativeTotals": [
+        {
+          "type": "cost",
+          "agentId": "worker-a",
+          "model": "openrouter/openai/gpt-oss-20b:free",
+          "inputTokens": 262360,
+          "outputTokens": 1290,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "costUsd": 0.078708,
+          "turnCount": 3,
+          "unpricedTurns": 0,
+          "durationMs": 28,
+          "timestamp": "2026-08-13T23:17:10.310Z"
+        },
+        {
+          "type": "cost",
+          "agentId": "worker-b",
+          "model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+          "inputTokens": 262360,
+          "outputTokens": 1290,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "costUsd": 0.078708,
+          "turnCount": 3,
+          "unpricedTurns": 0,
+          "durationMs": 26,
+          "timestamp": "2026-08-13T23:17:10.311Z"
+        },
+        {
+          "type": "cost",
+          "agentId": "lead",
+          "model": "anthropic/claude-sonnet-5",
+          "inputTokens": 262360,
+          "outputTokens": 1290,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "costUsd": 0.078708,
+          "turnCount": 3,
+          "unpricedTurns": 0,
+          "durationMs": 25,
+          "timestamp": "2026-08-13T23:17:10.336Z"
+        }
+      ],
+      "runTotals": {
+        "costUsd": 0.236124,
+        "inputTokens": 787080,
+        "outputTokens": 3870,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "turnCount": 9,
+        "unpricedTurns": 0
+      },
+      "rawNdjson": {
+        "note": "Full driver stdout, verbatim. INV-COST-4: the four new fields are numerics only - no free text, no prompt content, no key material enters CostEvent.",
+        "lines": [
+          "{\"type\":\"coms\",\"request_id\":\"rpc-1\",\"session_id\":\"team-91141\",\"phase_id\":\"dispatch_task\",\"channel\":\"lead:worker-a\",\"direction\":\"send\",\"sender_agent\":\"lead\",\"receiver_agent\":\"worker-a\",\"payload_size\":15,\"duration_ms\":0,\"timestamp\":\"2026-08-13T23:17:10.280Z\"}",
+          "{\"type\":\"coms\",\"request_id\":\"rpc-2\",\"session_id\":\"team-91141\",\"phase_id\":\"dispatch_task\",\"channel\":\"lead:worker-b\",\"direction\":\"send\",\"sender_agent\":\"lead\",\"receiver_agent\":\"worker-b\",\"payload_size\":15,\"duration_ms\":0,\"timestamp\":\"2026-08-13T23:17:10.285Z\"}",
+          "{\"type\":\"cost\",\"agentId\":\"worker-a\",\"model\":\"openrouter/openai/gpt-oss-20b:free\",\"inputTokens\":262360,\"outputTokens\":1290,\"cacheReadTokens\":0,\"cacheWriteTokens\":0,\"costUsd\":0.078708,\"turnCount\":3,\"unpricedTurns\":0,\"durationMs\":28,\"timestamp\":\"2026-08-13T23:17:10.310Z\"}",
+          "{\"type\":\"coms\",\"request_id\":\"rpc-3\",\"session_id\":\"team-91141\",\"phase_id\":\"dispatch_task\",\"channel\":\"worker-a:lead\",\"direction\":\"receive\",\"sender_agent\":\"worker-a\",\"receiver_agent\":\"lead\",\"payload_size\":85,\"duration_ms\":28,\"timestamp\":\"2026-08-13T23:17:10.310Z\"}",
+          "{\"type\":\"worker_output\",\"agentId\":\"worker-a\",\"output\":{\"changedFiles\":[],\"result\":{\"summary\":\"stubbed reply from openai/gpt-oss-20b:free\"}}}",
+          "{\"type\":\"cost\",\"agentId\":\"worker-b\",\"model\":\"openrouter/nvidia/nemotron-nano-9b-v2:free\",\"inputTokens\":262360,\"outputTokens\":1290,\"cacheReadTokens\":0,\"cacheWriteTokens\":0,\"costUsd\":0.078708,\"turnCount\":3,\"unpricedTurns\":0,\"durationMs\":26,\"timestamp\":\"2026-08-13T23:17:10.311Z\"}",
+          "{\"type\":\"coms\",\"request_id\":\"rpc-4\",\"session_id\":\"team-91141\",\"phase_id\":\"dispatch_task\",\"channel\":\"worker-b:lead\",\"direction\":\"receive\",\"sender_agent\":\"worker-b\",\"receiver_agent\":\"lead\",\"payload_size\":93,\"duration_ms\":26,\"timestamp\":\"2026-08-13T23:17:10.311Z\"}",
+          "{\"type\":\"worker_output\",\"agentId\":\"worker-b\",\"output\":{\"changedFiles\":[],\"result\":{\"summary\":\"stubbed reply from nvidia/nemotron-nano-9b-v2:free\"}}}",
+          "{\"type\":\"coms\",\"request_id\":\"rpc-5\",\"session_id\":\"team-91141\",\"phase_id\":\"dispatch_task\",\"channel\":\"harness:lead\",\"direction\":\"send\",\"sender_agent\":\"harness\",\"receiver_agent\":\"lead\",\"payload_size\":115,\"duration_ms\":0,\"timestamp\":\"2026-08-13T23:17:10.311Z\"}",
+          "{\"type\":\"cost\",\"agentId\":\"lead\",\"model\":\"anthropic/claude-sonnet-5\",\"inputTokens\":262360,\"outputTokens\":1290,\"cacheReadTokens\":0,\"cacheWriteTokens\":0,\"costUsd\":0.078708,\"turnCount\":3,\"unpricedTurns\":0,\"durationMs\":25,\"timestamp\":\"2026-08-13T23:17:10.336Z\"}",
+          "{\"type\":\"coms\",\"request_id\":\"rpc-6\",\"session_id\":\"team-91141\",\"phase_id\":\"dispatch_task\",\"channel\":\"lead:harness\",\"direction\":\"receive\",\"sender_agent\":\"lead\",\"receiver_agent\":\"harness\",\"payload_size\":77,\"duration_ms\":25,\"timestamp\":\"2026-08-13T23:17:10.336Z\"}",
+          "{\"type\":\"merged\",\"result\":{\"summary\":\"stubbed reply from claude-sonnet-5\",\"workerSummaries\":\"worker-a: stubbed reply from openai/gpt-oss-20b:free | worker-b: stubbed reply from nvidia/nemotron-nano-9b-v2:free\",\"respondedWorkers\":[\"worker-a\",\"worker-b\"],\"models\":[\"anthropic/claude-sonnet-5\",\"openrouter/openai/gpt-oss-20b:free\",\"openrouter/nvidia/nemotron-nano-9b-v2:free\"]}}"
+        ]
+      }
+    },
+    "3_unpricedDriverRun": {
+      "command": "PATH=... QDS_FAKE_PI_UNPRICED=1 QDS_AGENT_TEAM_CONFIG_JSON=<1-worker config> bun cli-anything/scripts/team-lead-driver.ts",
+      "purpose": "INV-COST-5 demonstration - the middle turn's usage block is absent",
+      "exitCode": 0,
+      "emittedCostEvents": [
+        {
+          "type": "cost",
+          "agentId": "worker-a",
+          "model": "openrouter/openai/gpt-oss-20b:free",
+          "inputTokens": 154924,
+          "outputTokens": 491,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "costUsd": 0.046477199999999996,
+          "turnCount": 3,
+          "unpricedTurns": 1,
+          "durationMs": 29,
+          "timestamp": "2026-08-13T23:17:16.888Z"
+        }
+      ],
+      "reading": "turnCount 3, unpricedTurns 1, costUsd 0.0464772 = the two priced turns only. The unmeasured turn was never priced at $0 and never credited against the total.",
+      "nextPaidSubprocessRefused": "The LEAD MERGE, specifically. Workers are dispatched concurrently under Promise.all, so the lead merge is the only paid subprocess the driver can still refuse once a worker's partiality is known. This is not a general per-turn kill - that needs the engine-side projection DF3.6 owns.",
+      "blastRadius": "The guard is per-RUN: one partial worker refuses the merge for the whole run, including for healthy workers, because the cumulative total the budget guard reads is per-run. A worker SIGKILLed on the PI_COMS_TIMEOUT_MS path now counts as partial, so routine timeouts degrade the run to a mechanical merge. Regression-locked by a multi-worker test.",
+      "stderr": [
+        "team-lead-driver: dispatching 1 workers (subprocess-RPC)",
+        "team-lead-driver: refusing paid lead merge: cumulative cost is partial (unpriced turns from worker-a); falling back to concat"
+      ],
+      "harnessSide": "runner.ts sets costUnpriced on the budget state and reports it in every error detail that carries cumulativeCostUsd. GAP, stated: on the SUCCESS path runTeamManifest reports no cost figure at all, so it reports no partiality flag either - MergedOutput's key set is frozen by the P0.3-M2 uniform-schema contract (asserted by expectUniformSchema) and this story does not widen it. runTeamManifest also consumes cost events without persisting them. The machine-readable surface DF2.8 consumes is the driver's own NDJSON cost event stream, which carries turnCount and unpricedTurns on every event; persisting it is DF2.8's ledger work and is out of scope here per the story's Trigger Surface."
+    }
+  },
+  "comparisonToF6LastTurnSum": {
+    "f6EventSumUsd": 0.04912262,
+    "f6Semantics": "LAST-TURN sum. F6's own measurementCaveat: 'team-lead-driver.ts harvests usage from the LAST pi message event per worker (runWorkerPi overwrite semantics), so multi-turn worker sessions under-report'. Attempt 2's true cost was left bracketed [$0.049, ~$0.91].",
+    "instrumentedSemantics": "SESSION-CUMULATIVE sum across all turns of each pi invocation",
+    "notComparableAsDollars": "F6 ran real providers; this rerun replays a stub. The comparison below is of SEMANTICS, not of bills.",
+    "semanticDemonstration": {
+      "perInvocationLastTurnValue": {
+        "costUsd": 0.0243528,
+        "inputTokens": 81176,
+        "outputTokens": 333
+      },
+      "perInvocationSessionTotal": {
+        "costUsd": 0.078708,
+        "inputTokens": 262360,
+        "outputTokens": 1290
+      },
+      "underReportFactorThisStream": 3.232,
+      "reading": "On this 3-turn stream the pre-change assignment implementation reports 30.9% of the real spend. F6's $0.04912262 is the same kind of number: a floor, not a total. The bracket F6 left open is exactly what this instrumentation closes."
+    }
+  },
+  "hazard3_toolOutputAsReply": "Text blocks were harvested from every message-bearing event, including toolResult. A run ending on a tool result handed the tool's output to extractJsonObject; if that output was itself JSON it was emitted verbatim as the worker's structured worker_output, changedFiles and all - untrusted tool content promoted to a worker result. Text collection is now gated on the same assistant-role predicate as usage. Regression-locked by a test verified to fail when the gate is removed.",
+  "suite": "bun test cli-anything - 178 pass, 0 fail; bunx tsc --noEmit clean; biome check clean"
+}

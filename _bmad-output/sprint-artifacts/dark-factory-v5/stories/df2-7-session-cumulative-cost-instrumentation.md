@@ -230,21 +230,189 @@ required to make this behavior real. DF2.8 consumes these numbers; it does not s
 
 ## Definition of Done
 
-- [ ] **Impl:** `team-lead-driver.ts:231, 233, 237, 238` accumulate per the probe-determined mode instead of assigning
-- [ ] **Impl:** `PiRunOutcome` (`:114-121`) carries `cacheReadTokens`, `cacheWriteTokens`, `turnCount`, `unpricedTurns`, populated in the harvest loop and emitted at **both** cost sites (`:301-310`, `:363-372`)
-- [ ] **Contract:** `CostEvent` widened additively; `parseTeamEventLine` `case "cost"` defaults each new numeric to `0` with the existing type-guard discipline
-- [ ] **Integration:** `cumulativeCostUsd` (`runner.ts:563`) consumes the accumulated `costUsd`; the 90%-of-cap kill path (`:463` fraction, `:515` threshold, `:731-732` accumulate-and-compare, `:707` settle) is re-asserted against the new semantics, and a `cost` event with `unpricedTurns > 0` marks the budget state unpriced so no further paid **subprocess** is spawned against a partial cumulative total (INV-COST-5)
-- [ ] **Security:** unpriced turns increment `unpricedTurns` and never contribute `$0` to a priced total (INV-COST-5); accumulators proven monotone (INV-COST-1)
-- [ ] **Test (unit):** the probe-selected AC-1 fixture → emitted `inputTokens`/`outputTokens`/`costUsd` equal the session total, not the final turn: a delta-semantics field is asserted against a fixture whose final turn is strictly smaller than the total, a running-total field against a non-monotone fixture whose maximum is not its last event
-- [ ] **Test (negative control):** the pre-change assignment implementation fails the AC-1 test; a `+=` applied to a running-total stream fails the non-monotone fixture asserting no double-count
-- [ ] **Test (session reset boundary):** the probe's leg-2 fixture (two invocations, same
+- [x] **Impl:** `team-lead-driver.ts:231, 233, 237, 238` accumulate per the probe-determined mode instead of assigning
+- [x] **Impl:** `PiRunOutcome` (`:114-121`) carries `cacheReadTokens`, `cacheWriteTokens`, `turnCount`, `unpricedTurns`, populated in the harvest loop and emitted at **both** cost sites (`:301-310`, `:363-372`)
+- [x] **Contract:** `CostEvent` widened additively; `parseTeamEventLine` `case "cost"` defaults each new numeric to `0` with the existing type-guard discipline
+- [x] **Integration:** `cumulativeCostUsd` (`runner.ts:563`) consumes the accumulated `costUsd`; the 90%-of-cap kill path (`:463` fraction, `:515` threshold, `:731-732` accumulate-and-compare, `:707` settle) is re-asserted against the new semantics, and a `cost` event with `unpricedTurns > 0` marks the budget state unpriced so no further paid **subprocess** is spawned against a partial cumulative total (INV-COST-5)
+- [x] **Security:** unpriced turns increment `unpricedTurns` and never contribute `$0` to a priced total (INV-COST-5); accumulators proven monotone (INV-COST-1)
+- [x] **Test (unit):** the probe-selected AC-1 fixture → emitted `inputTokens`/`outputTokens`/`costUsd` equal the session total, not the final turn: a delta-semantics field is asserted against a fixture whose final turn is strictly smaller than the total, a running-total field against a non-monotone fixture whose maximum is not its last event
+- [x] **Test (negative control):** the pre-change assignment implementation fails the AC-1 test; a `+=` applied to a running-total stream fails the non-monotone fixture asserting no double-count
+- [x] **Test (session reset boundary):** the probe's leg-2 fixture (two invocations, same
       `--session-id`) → two `cost` events, each carrying only its own invocation's spend, summing
       exactly to the session's true total; an implementation passing a resumed session's carried-in
       totals straight through over-counts the sum and MUST fail this test (AC6)
-- [ ] **Test (backward compat):** a `cost` line with none of the four new fields parses to a valid `TeamEvent` with `0` defaults; no existing `cli-anything` test is edited to accommodate the new shape
-- [ ] **Test (malformed usage + empty run):** `usage` absent / non-object / `NaN` / negative → `turnCount` and `unpricedTurns` increment, priced accumulators unchanged (asserted monotonic non-decreasing across the negative-value case), no `NaN` on the wire; and a zero-usage-event run emits all-zero numerics with `turnCount: 0` that `parseTeamEventLine` accepts (AC5)
-- [ ] **Test (e2e demo — MANDATORY):** one instrumented `npm run smoke:team` re-run writes `_bmad-output/sprint-artifacts/dark-factory-v5/evidence/df2-7-instrumented-rerun.json` containing raw NDJSON, per-agent session-cumulative totals with cache tokens and turn counts, and an explicit comparison against F6's last-turn sum $0.04912262
+- [x] **Test (backward compat):** a `cost` line with none of the four new fields parses to a valid `TeamEvent` with `0` defaults; no existing `cli-anything` test is edited to accommodate the new shape
+- [x] **Test (malformed usage + empty run):** `usage` absent / non-object / `NaN` / negative → `turnCount` and `unpricedTurns` increment, priced accumulators unchanged (asserted monotonic non-decreasing across the negative-value case), no `NaN` on the wire; and a zero-usage-event run emits all-zero numerics with `turnCount: 0` that `parseTeamEventLine` accepts (AC5)
+- [x] **Test (e2e demo — MANDATORY):** one instrumented `npm run smoke:team` re-run writes `_bmad-output/sprint-artifacts/dark-factory-v5/evidence/df2-7-instrumented-rerun.json` containing raw NDJSON, per-agent session-cumulative totals with cache tokens and turn counts, and an explicit comparison against F6's last-turn sum $0.04912262
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Status:** implemented — PR pending. Developed with `qds-dev DF2.7 --yolo --skip-docker-tests`;
+all `--yolo`-skippable HITL gates auto-approved. Three sequential in-depth review rounds run
+before PR.
+
+### Pre-dev probe — verdict, and how it was obtained
+
+The live two-leg probe **could not be run**: this host has no provider credential.
+`~/.pi/agent/auth.json` is `[]` and `OPENROUTER_API_KEY` is unset, so a `pi --provider
+openrouter …` invocation fails at auth and spends nothing — it cannot produce a
+usage-bearing stream at all. R5 §6 fact 4 already records the Anthropic OAuth expiry
+(~2026-02-25). **Autonomous decision (--yolo):** rather than assume the mode or block the
+story, both legs were answered from two independent empirical sources on this host.
+
+| Field | Mode | Operator | Source |
+|-------|------|----------|--------|
+| `usage.input` | per-turn delta | `+=` | pi `addUsageToTotals` + session corpus |
+| `usage.output` | per-turn delta | `+=` | same; observed non-monotone (158, 333, 799, 452, 200, 145) across one session — a running total cannot decrease |
+| `usage.cacheRead` | per-turn delta | `+=` | pi `addUsageToTotals` |
+| `usage.cacheWrite` | per-turn delta | `+=` | pi `addUsageToTotals` |
+| `usage.cost.total` | per-turn delta | `+=` | pi `addUsageToTotals` (`totals.cost += usage.cost.total`) |
+
+**Leg 1 (per-field mode).** Decisive source: pi derives its own session totals by SUMMING
+per-message usage —
+`addUsageToTotals(totals, usage) { totals.input += usage.input; …; totals.cost += usage.cost.total }`
+in `dist/core/usage-totals.js`. Every field is therefore a per-turn delta, and the operator
+is `+=` for all five. Corroborated against 1,465 real usage records from 10 local
+`~/.pi/agent/sessions` directories.
+
+**Cache field spelling: camelCase `cacheRead` / `cacheWrite`** — *not*
+`cache_read_input_tokens` / `cache_creation_input_tokens`. Observed shape verbatim:
+`{ input, output, cacheRead, cacheWrite, totalTokens, cost: { input, output, cacheRead, cacheWrite, total } }`.
+Both cache fields read **0 in all 1,465 records** (OAuth/free routing). They are emitted as
+reported and never synthesized from residuals, so gates report §3.4 condition 2 stays open.
+
+**Leg 2 (reset boundary).** `pi --mode json` subscribes to **live** session events only
+(`modes/print-mode.js`: `session.subscribe → toJsonEvent`) and does not replay pre-existing
+session entries. A resumed `--session-id` emits only its own new turns, so there is no
+carried-in baseline to subtract and the invocation boundary holds by construction. Stronger
+still: **the driver passes `--no-session`** (`team-lead-driver.ts` spawn argv), so a resumed
+session is unreachable on this code path today. The fixtures encode the boundary anyway,
+because the contract is what DF2.8's ledger sums over.
+
+**Which negative control is live.** The **delta branch** is live. The AC-1 fixture
+(`cli-anything/test/fixtures/pi-usage-3turn.ndjson`) is non-monotone in all three priced
+fields, so one fixture discriminates three implementations: session total 262360/1290/$0.078708,
+last turn 81176/333/$0.0243528 (the pre-change assignment implementation), max turn
+107436/799/$0.0322308 (a last-wins-with-max implementation). All three are asserted explicitly.
+
+### Hazards found during implementation (not anticipated by the spec)
+
+1. **Duplicate-emission double count (INV-COST-3).** pi emits the same assistant message —
+   carrying the same `usage` object — on `message_start`, every `message_update` and
+   `turn_end`, and replays the whole message list in `agent_end`. A blind `+=` over every
+   usage-bearing event multiplies the bill several-fold and would kill healthy runs early.
+   **Fix:** accumulate on `message_end` only; exclude `toolResult` messages (pi documents
+   their usage as "not part of main LLM context accounting").
+2. **Truncated stream reported as complete.** Accumulating on `message_end` alone silently
+   drops an in-flight turn when the timeout path SIGKILLs pi mid-message — and emits that
+   partial record as a COMPLETE one, i.e. fails open in the runaway-worker case. **Fix:**
+   count open (started, never ended) assistant messages and add them to both `turnCount` and
+   `unpricedTurns`.
+3. **Tool output standing in for the worker's reply.** Text blocks were harvested from every
+   message-bearing event, including `toolResult`. A run ending on a tool result handed the
+   tool's output to `extractJsonObject`; if that output was JSON it was emitted verbatim as
+   the worker's `worker_output`, `changedFiles` and all. **Fix:** gate text collection on the
+   same assistant-role predicate as usage. Regression-locked by a test that fails when the
+   gate is removed (verified by reintroducing the bug).
+
+### Autonomous decisions (--yolo)
+
+- **Probe substitution** (above) — recorded rather than blocking, with the gap stated.
+- **e2e demo runs against a pi shim, not a live provider.** `npm run smoke:team` cannot
+  reach a provider on this host. The evidence artifact runs the full production path
+  (`runner.ts → buildTeamSpawn → team-lead-driver.ts → cost events → parseTeamEventLine →
+  budget guard`) with `cli-anything/test/fixtures/team-bin/pi` replaying a real-shaped
+  stream, and states plainly what that does and does not prove. No dollar figure is claimed
+  against a real bill.
+- **INV-COST-5 enforcement point = the lead-merge spawn.** Workers are dispatched
+  concurrently under `Promise.all`, so the only "next paid subprocess" the driver can refuse
+  is the lead merge. The guard is per-run: one partial worker refuses the merge for the whole
+  run, because the cumulative total the budget guard reads is per-run. Behaviour is
+  regression-locked by a multi-worker test.
+- **`costUnpriced` is not added to `MergedOutput`.** Its key set is frozen by the P0.3-M2
+  uniform-schema contract (asserted by `expectUniformSchema`). The flag rides `error.details`
+  on every path that reports `cumulativeCostUsd`, plus a `diag` line; the persisted ledger
+  surface belongs to DF2.8, which consumes the driver's `cost` NDJSON events directly.
+- **`parseTeamEventLine` numeric strictness widened to `inputTokens`/`outputTokens`/`durationMs`.**
+  They kept a bare `typeof === "number"` check, so `NaN` or a negative count reached a
+  `CostEvent` that DF2.8 will sum. No legitimate producer emits those.
+- **Driver made importable** via `if (import.meta.main) await main()`, so the harvest seam is
+  unit-testable without spawning subprocesses. The `buildTeamSpawn` argv path is unchanged.
+
+### Deviations
+
+- **Which pi is actually in play — corrected during DF1.9.** A bare shell `pi` on this host
+  resolves to the *global* `@earendil-works` build (0.84.1), which is what the probe corpus
+  and the first source reading came from. But `bun run` / `npm run` prepend
+  `node_modules/.bin`, so every project script — `smoke:team`, and therefore the driver's
+  `spawn("pi", …)` — gets the **workspace-pinned `@mariozechner/pi-coding-agent` 0.55.0**,
+  i.e. exactly the F13 pin the story names. **There is no version deviation on the code
+  path.** The verdict was re-verified against 0.55.0 directly: `Usage` is field-for-field
+  identical (camelCase `cacheRead`/`cacheWrite`, `cost.total`), and 0.55.0 likewise derives
+  session totals by summing per-assistant-message usage
+  (`agent-session.js:2205-2215`: `totalInput += assistantMsg.usage.input; … totalCost +=
+  assistantMsg.usage.cost.total`). The per-turn-delta verdict therefore holds on **both**
+  builds — a stronger result than the single-version reading first recorded here.
+- **No live-billed measurement exists.** F6's `$0.04912262` remains the only real-provider
+  figure, and it is a last-turn floor, not a total. This story closes the semantics; a live
+  rerun to close the dollar bracket needs a funded key.
+
+### Files changed
+
+`cli-anything/scripts/team-lead-driver.ts`, `cli-anything/src/types.ts`,
+`cli-anything/src/team-events.ts`, `cli-anything/src/runner.ts`,
+`cli-anything/test/team-events.test.ts`, `cli-anything/test/runner.test.ts`,
+`cli-anything/test/runner-integration.test.ts`, `cli-anything/test/fixtures/team-bin/{pi,warren}`,
+`cli-anything/test/fixtures/pi-usage-3turn.ndjson`,
+`cli-anything/test/fixtures/pi-session-resume-{a,b}.ndjson`,
+`_bmad-output/sprint-artifacts/dark-factory-v5/evidence/df2-7-instrumented-rerun.json`.
+
+### Review rounds (3, each a fresh cold-read of the full diff)
+
+**Round 1 — 7 findings, all fixed.** The load-bearing one: accumulating on `message_end`
+alone dropped an in-flight turn when the timeout path SIGKILLs pi mid-message, *and* emitted
+that truncated record as COMPLETE — failing open in exactly the runaway-worker case the
+budget guard exists for. Also: a completion-order race in the driver e2e assertion (workers
+emit in completion order, not config order); `inputTokens`/`outputTokens` bypassing the new
+numeric strictness; and an evidence artifact that stitched two runs into one.
+
+**Round 2 — 8 findings, all fixed or recorded.** The load-bearing one: text blocks were
+harvested from every message-bearing event including `toolResult`, so a run ending on a tool
+result handed tool output to `extractJsonObject` — and if that output was JSON it became the
+worker's `worker_output`, `changedFiles` and all. Also: `openMessage` as a boolean
+under-counted N concurrent open messages (now a counter); a duplicated guard condition; the
+missing `runner.test.ts` budget re-assertion; and this Dev Agent Record.
+
+**Round 3 — SHIP verdict, 4 findings fixed anyway.** Cache-token extraction was never
+positively exercised — renaming `usage.cacheRead` to a typo left all 175 tests green, so the
+story's headline field could have read 0 forever; now covered, along with every alternative
+spelling. The INV-COST-5 notice went through `diag()`, which is silenced under
+`NODE_ENV=test`, making the success-path partiality signal non-existent under test (now
+`console.error`). `message_start` incremented the open-message counter under a permissive
+role default while `message_end` decremented under a strict one — a role-less start paired
+with a `toolResult` end leaked the counter and would mark every tool-using run partial (now
+strict on the way up). And `unpricedTurns` was floored to 0 on malformed input: 0 asserts
+"complete", so a malformed alarm counter was silently upgraded to a clean bill of health —
+now a present-but-unparseable value counts as at least one unpriced turn.
+
+Known residuals, recorded not fixed: a turn with valid tokens but no `cost` block loses its
+token counts as well as its price (fail-closed on money, data loss on tokens); AC6's negative
+control kills an `agent_end`-list accumulator but cannot exercise a running-total stream,
+because the probe found deltas and the driver passes `--no-session` anyway. Both are in the
+evidence artifact.
+
+### Gates
+
+`bun test cli-anything` 178 pass / 0 fail · `bunx tsc --noEmit` clean ·
+`bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor` clean.
+Full-repo `bun test`: the two P0.5/P0.6 external-harness suites (`pi-lens-verify`,
+`lsp-verify`) flake under full-suite parallel load; both pass in isolation on this branch and
+on unmodified `main`, and neither is touched by this diff.
+
+This diff adds five subprocess-spawning e2e tests, which raises machine load during the run,
+and that surfaced a latent flake in the pre-existing `worker timeout` case: its 100 ms coms
+budget had to land in the window between worker-a's reply arriving and the shim exiting at
+300 ms, and under contention worker-a's reply missed it, failing with BOTH workers timed out.
+Fixed by widening both margins — shim hold 300 ms → 1500 ms, budget 100 ms → 400 ms — with
+the assertion itself unchanged. `bun test cli-anything` is now 178/178 on three consecutive
+full runs.

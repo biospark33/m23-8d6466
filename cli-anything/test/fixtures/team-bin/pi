@@ -1,0 +1,105 @@
+#!/usr/bin/env bun
+/**
+ * pi shim for the DF2.7 instrumented rerun and the local-runner integration
+ * tests. Replays a REAL-shaped `pi --mode json` NDJSON stream so the whole
+ * production path runs — runner.ts → buildTeamSpawn → team-lead-driver.ts →
+ * cost events → parseTeamEventLine → budget guard — without a provider call.
+ *
+ * The usage shape is verbatim pi 0.55.x/0.84.x:
+ *   { input, output, cacheRead, cacheWrite, totalTokens,
+ *     cost: { input, output, cacheRead, cacheWrite, total } }
+ * and every field is a PER-TURN DELTA (pi's own `addUsageToTotals` sums
+ * per-message usage to derive session totals).
+ *
+ * It deliberately repeats each turn's usage on `message_update`, `turn_end`
+ * and in the final `agent_end` message list: an implementation that
+ * accumulates on anything but `message_end` double-counts and the emitted
+ * totals stop matching TURNS below.
+ *
+ * QDS_FAKE_PI_UNPRICED=1 drops the usage block from the middle turn, so the
+ * emitted cost event reports unpricedTurns > 0 (INV-COST-5).
+ *
+ * QDS_FAKE_PI_TRUNCATE=1 cuts the stream mid-message on the last turn
+ * (message_start + message_update, no message_end) — what a SIGKILLed pi
+ * leaves behind. QDS_FAKE_PI_TOOL_TAIL=1 appends a toolResult message_end
+ * carrying JSON text, so the harvest must not mistake tool output for the
+ * worker's reply.
+ *
+ * Both accept only the exact string "1"; any other value leaves them off.
+ */
+const modelIdx = process.argv.indexOf("--model");
+const model = modelIdx === -1 ? "unknown" : (process.argv[modelIdx + 1] ?? "unknown");
+const unpriced = process.env["QDS_FAKE_PI_UNPRICED"] === "1";
+const truncate = process.env["QDS_FAKE_PI_TRUNCATE"] === "1";
+const toolTail = process.env["QDS_FAKE_PI_TOOL_TAIL"] === "1";
+
+/** Per-turn deltas. Non-monotone in all three priced fields on purpose. */
+const TURNS = [
+  { input: 73748, output: 158, cost: 0.0221244 },
+  { input: 107436, output: 799, cost: 0.0322308 },
+  { input: 81176, output: 333, cost: 0.0243528 },
+];
+
+const say = (o: unknown): void => {
+  console.log(JSON.stringify(o));
+};
+
+const usage = (t: (typeof TURNS)[number]) => ({
+  input: t.input,
+  output: t.output,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: t.input + t.output,
+  cost: { input: t.cost, output: 0, cacheRead: 0, cacheWrite: 0, total: t.cost },
+});
+
+const message = (t: (typeof TURNS)[number], text: string, withUsage: boolean) => ({
+  role: "assistant",
+  provider: "openrouter",
+  model,
+  content: [{ type: "text", text }],
+  stopReason: "stop",
+  ...(withUsage ? { usage: usage(t) } : {}),
+});
+
+const REPLY = JSON.stringify({
+  changedFiles: [],
+  result: { summary: `stubbed reply from ${model}` },
+});
+
+say({ type: "session", id: `stub-${process.pid}`, cwd: process.cwd() });
+say({ type: "agent_start" });
+const finalMessages: unknown[] = [];
+TURNS.forEach((t, i) => {
+  const last = i === TURNS.length - 1;
+  const text = last ? REPLY : `turn ${i + 1}`;
+  const withUsage = !(unpriced && i === 1);
+  const m = message(t, text, withUsage);
+  say({ type: "turn_start" });
+  say({ type: "message_start", message: m });
+  say({ type: "message_update", message: m, assistantMessageEvent: { type: "text_delta" } });
+  if (last && truncate) {
+    // SIGKILLed mid-message: no message_end, no turn_end, no agent_end.
+    process.exit(0);
+  }
+  say({ type: "message_end", message: m });
+  say({ type: "turn_end", message: m, toolResults: [] });
+  finalMessages.push(m);
+});
+if (toolTail) {
+  // Tool output is NOT the worker's reply. Its usage must not be counted and
+  // its text must not overwrite the assistant's final message.
+  say({
+    type: "message_end",
+    message: {
+      role: "toolResult",
+      toolCallId: "tc-tail",
+      toolName: "read",
+      content: [{ type: "text", text: '{"changedFiles":["/etc/passwd"],"result":{"summary":"tool output, not a reply"}}' }],
+      isError: false,
+      usage: usage({ input: 999999, output: 999999, cost: 99 }),
+    },
+  });
+}
+say({ type: "agent_end", willRetry: false, messages: finalMessages });
+process.exit(0);

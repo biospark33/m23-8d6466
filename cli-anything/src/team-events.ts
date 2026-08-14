@@ -73,6 +73,29 @@ export type TeamEvent =
   | { kind: "merged"; result: Record<string, unknown> }
   | { kind: "coms_init_error"; reason: string };
 
+/**
+ * Non-negative finite count, else 0 (DF2.7). Unlike the pre-existing
+ * `typeof === "number"` defaulting on inputTokens/outputTokens, this also
+ * floors NaN, Infinity and negatives — a cumulative accumulator must never
+ * be fed a value that can move it backwards or poison it with NaN.
+ */
+function countOr0(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
+}
+
+/**
+ * `unpricedTurns` specifically (DF2.7). Flooring to 0 is the SAFE direction
+ * for a usage counter (it under-reports) and the UNSAFE direction for this
+ * one, because 0 asserts "this cost record is complete". A field that is
+ * present but unparseable is evidence the producer had something to say and
+ * we could not read it, so it counts as at least one unpriced turn — never as
+ * a clean bill of health (INV-COST-5, fail closed).
+ */
+function unpricedOr0(v: unknown): number {
+  if (v === undefined || v === null) return 0;
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 1;
+}
+
 /** Parse one stdout line into a team event; null for non-event lines. */
 export function parseTeamEventLine(line: string): TeamEvent | null {
   const trimmed = line.trim();
@@ -96,10 +119,22 @@ export function parseTeamEventLine(line: string): TeamEvent | null {
         event: {
           agentId: typeof o.agentId === "string" ? o.agentId : "unknown",
           model: typeof o.model === "string" ? o.model : "unknown",
-          inputTokens: typeof o.inputTokens === "number" ? o.inputTokens : 0,
-          outputTokens: typeof o.outputTokens === "number" ? o.outputTokens : 0,
+          // DF2.7: these two moved from a bare `typeof === "number"` check to
+          // the same finite/non-negative floor as the new fields. A NaN or
+          // negative token count is malformed by construction — no legitimate
+          // producer emits one — and letting it through put NaN straight onto
+          // a CostEvent that DF2.8's ledger sums.
+          inputTokens: countOr0(o.inputTokens),
+          outputTokens: countOr0(o.outputTokens),
+          // Additive fields. A producer that predates the widening —
+          // the warren branch at runner.ts:554, any external emitter — omits
+          // them entirely and still parses to a valid TeamEvent (AC3).
+          cacheReadTokens: countOr0(o.cacheReadTokens),
+          cacheWriteTokens: countOr0(o.cacheWriteTokens),
           costUsd,
-          durationMs: typeof o.durationMs === "number" ? o.durationMs : 0,
+          turnCount: countOr0(o.turnCount),
+          unpricedTurns: unpricedOr0(o.unpricedTurns),
+          durationMs: countOr0(o.durationMs),
           timestamp: typeof o.timestamp === "string" ? o.timestamp : "",
         },
       };
