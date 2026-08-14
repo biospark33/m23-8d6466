@@ -1,0 +1,17 @@
+{
+  "imageRef": "qds-factory:df2.9-test",
+  "treePackageCount": 175,
+  "coveredCount": 165,
+  "uncoveredCount": 10,
+  "deniedHits": [],
+  "piVersions": {
+    "@mariozechner/jiti": "2.6.5",
+    "@mariozechner/pi-agent-core": "0.55.4",
+    "@mariozechner/pi-ai": "0.55.4",
+    "@mariozechner/pi-coding-agent": "0.55.0",
+    "@mariozechner/pi-tui": "0.55.4"
+  },
+  "noticeBytes": 44563,
+  "sweptAt": "2026-08-13T22:13:29.331Z",
+  "exitCode": 0
+}

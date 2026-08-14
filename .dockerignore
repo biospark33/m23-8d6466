@@ -1,0 +1,27 @@
+# Build context for oci/Dockerfile (see `bun run build:image`). Everything the
+# image does not need stays out — the runtime stage copies only
+# pi-vs-claude-code-vendor/ and the generated oci/.build/NOTICE.
+.git
+.github
+.claude
+.gitnexus
+.swarm
+node_modules
+# Docker patterns are not recursive: without this a nested dependency tree (e.g.
+# pi-vs-claude-code-vendor/node_modules) would be copied into the image WITHOUT
+# being part of the swept tree.
+**/node_modules
+_bmad-output
+docs
+tests
+src
+scripts
+cli-anything
+*.log
+.DS_Store
+# Defence in depth: nothing COPYs these, but they should not be in the context
+# either — the credential scan (INV-5) is the backstop, not the first line.
+.env
+.env.*
+*.pem
+*.key

@@ -32,6 +32,8 @@
  * `--help` as a value flag makes `--help x` deliver `("--help", "x")`.
  */
 
+import { writeSync } from "node:fs";
+
 export interface ValueFlagSpec {
   /** Recognized value flags, e.g. `["--repo-slug", "--repo"]`. */
   flags: readonly string[];
@@ -80,4 +82,25 @@ export function parseValueFlags(argv: readonly string[], spec: ValueFlagSpec): v
       throw new Error(`unknown flag: ${a}`);
     }
   }
+}
+
+/**
+ * Writes a `<prefix>` header plus an indented `- ` line per message to
+ * stderr, then `process.exit(code)`. `generate-notice.ts` and
+ * `build-image.ts` each declared this identically (down to the exit-code
+ * contract: 1 = compliance failure, 2 = fatal before conclusion) under a
+ * different local name (`fail` / `die`) and a different prefix string —
+ * duplication with no behavioral difference. Callers wrap this in a
+ * prefix-bound local so call sites don't change.
+ *
+ * Uses `fs.writeSync` rather than `process.stderr.write`: when stderr is a
+ * pipe (the common case in CI and redirected output), `process.stderr.write`
+ * can be asynchronous, and `process.exit` right after it would tear the
+ * process down before the write lands — the failure message gets truncated
+ * or dropped even though the exit code is still correct. `writeSync` blocks
+ * until the write completes, so nothing races the exit.
+ */
+export function exitWithFailure(prefix: string, code: 1 | 2, lines: readonly string[]): never {
+  writeSync(2, `${[prefix, ...lines.map((l) => `  - ${l}`)].join("\n")}\n`);
+  process.exit(code);
 }

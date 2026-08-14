@@ -5,6 +5,11 @@ ruvector.db
 *.log
 .DS_Store
 bun.lockb
+
+# DF2.9: image build scratch — the generated NOTICE, the sweep summary and the
+# per-stage .iid files are outputs of `bun run build:image`, regenerated every
+# run. The committed evidence copy lives under _bmad-output/sprint-artifacts/.
+oci/.build/
 .env
 .env.local
 

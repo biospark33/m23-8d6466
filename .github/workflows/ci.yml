@@ -21,6 +21,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
       # Root install also covers cli-anything/ (not a declared workspace, but
       # its deps hoist from the root lockfile) — see #54.
@@ -28,3 +30,34 @@ jobs:
       - run: bun run typecheck
       - run: bun run lint
       - run: bun test
+
+  # DF2.9: the enterprise image contract. The license sweep is the gate — a
+  # denied package, a broken pin, or a package the build cannot attribute exits
+  # nonzero from `build:image`, which fails this job before anything is tagged.
+  image:
+    runs-on: ubuntu-latest
+    needs: check
+    # A cold npm install + two image stages + the layer scan; 30 min caps a
+    # hung pull rather than burning the 6h default.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+      # Deliberately NOT docker/setup-buildx-action: it selects a
+      # docker-container-driver builder, whose output stays in the build cache
+      # unless --load/--push is given. `build:image` then extracts the tree with
+      # `docker create <id>`, scans the image and tags it — all of which need
+      # the image in the daemon's local store. The runner's default `docker`
+      # driver puts it there, which is also what the local build uses.
+      - run: bun run build:image
+      - name: Upload sweep summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-sweep-summary
+          path: |
+            oci/.build/sweep-summary.json
+            oci/.build/NOTICE
+          if-no-files-found: warn

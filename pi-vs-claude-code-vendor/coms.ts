@@ -11,8 +11,11 @@
  * response capture. Phase C: live pool widget, ping + keepalive cycles, /coms
  * slash command, clean shutdown lifecycle.
  *
- * Vendored into QDS-Factory (pi-vs-claude-code-vendor/) from the pi-mono coms
- * extension for the pi-vs-claude-code review harness. The identical/parity
+ * Vendored into QDS-Factory (pi-vs-claude-code-vendor/) from
+ * disler/pi-vs-claude-code `extensions/` at commit 0ed11f44 (see
+ * package.json `_provenance`) for the pi-vs-claude-code review harness —
+ * NOT from pi-mono, which an earlier version of this header claimed. The
+ * identical/parity
  * layer (pure helpers, bounded env-int parser, duplicate-registration guard,
  * shared caps) lives in ./coms-core.ts — imported here exactly like
  * ./themeMap.ts. Transport-specific logic below (Unix-socket bind/send,

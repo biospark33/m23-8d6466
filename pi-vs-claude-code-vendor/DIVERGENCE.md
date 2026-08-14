@@ -99,6 +99,13 @@ are transport-coupled; unifying would not be zero-behavior:
 
 ## `coms.ts` (local Unix-socket IPC transport)
 
+- **Provenance header corrected (DF2.9)** — the file docblock claimed the file
+  was vendored "from the pi-mono coms extension". It was not: it comes from
+  `disler/pi-vs-claude-code` `extensions/` at commit `0ed11f44`, exactly as
+  `package.json` `_provenance` records. The header now says so. Audit hygiene,
+  not a legal defect — the vendored `LICENSE` (MIT © 2026 IndyDevDan) plus
+  `_provenance` already exceed MIT's requirement. `coms-net.ts` carried no such
+  claim and is byte-unchanged by this story.
 - **Shared-secret IPC auth** — inbound envelopes and responses carry a
   shared secret; `secretEqual` compares in constant time.
 - **Response-secret auth** — responses authenticated separately from the

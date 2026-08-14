@@ -13,7 +13,7 @@
 ## User Story
 
 As the enterprise-tier operator shipping pi plus the vendored coms substrate into a client VPC,
-I want the image build to generate its NOTICE from a sweep of the actual post-build tree and to fail on any uncovered or forbidden package,
+I want the image build to generate its NOTICE from a sweep of the actual post-build tree and to fail closed across three distinct classes — attribution failures (an observed SPDX identifier has no canonical license text, or an uncovered package's resolved entry is verified absent from the generated NOTICE), policy failures (it is a forbidden package by name, or pi resolves off its pinned version), and prerequisite failures (an empty swept tree, a missing builder, an unreachable registry, an unreadable package, or an absent license-texts directory) — never merely because a package ships no license text of its own,
 so that redistribution compliance is enforced by the build rather than by a hand-maintained list that goes stale the first time a dependency moves.
 
 ## Overview
@@ -24,7 +24,11 @@ unlicensed core — subject to three conditions. This story encodes them as a bu
 `scripts/lib/license-sweep.ts` module walks the **built image's** dependency tree, classifies
 every package by whether it ships license text, and `scripts/generate-notice.ts` writes a
 NOTICE covering the uncovered set into the image. The sweep is also the gate — it exits
-nonzero, failing the build, on any package it cannot cover and on any denied package name.
+nonzero, failing the build, on an attribution failure (an observed SPDX identifier — from a
+covered or an uncovered package — has no canonical text, or a NOTICE verified to omit an
+uncovered package it should cover), a policy failure (a denied package name or
+an off-pin pi version), or a prerequisite failure (an empty tree, a missing builder, an
+unreachable registry, an unreadable package, or an absent license-texts directory).
 Alongside it: build with `--omit=optional`, pin pi to the vendored peer-pin, and correct the
 false pi-mono provenance header in the one vendored file that carries it.
 
@@ -55,8 +59,16 @@ step 7).
    complete Apache-2.0 text — sourced from a checked-in mapping that covers every SPDX
    identifier the sweep can discover, not only MIT and Apache-2.0; a discovered identifier with
    no canonical text available fails the build at exit `2` before NOTICE generation, never as a
-   partial or silently-omitted NOTICE entry. The sweep exits nonzero, failing the build, if any
-   package in the tree is uncovered.
+   partial or silently-omitted NOTICE entry. Being *uncovered* — shipping no license text of
+   its own — is not by itself a failure: the sweep resolves canonical text and writes a NOTICE
+   entry for it. Scoped to attribution behavior for uncovered packages specifically — the sweep
+   separately fails closed on policy failures (a denied package name, an off-pin `pi-coding-agent`
+   version) and on prerequisite failures (an empty swept tree, a missing builder, an unreachable
+   registry, an unreadable package, or an absent license-texts directory), per the Overview's complete failure taxonomy — an
+   uncovered package fails the build only when it cannot be attributed this way: no canonical text
+   exists for its SPDX identifier (exit `2`, before NOTICE generation), or, as a build-time
+   consistency check rather than a distinct compliance state, its resolved entry is verified absent
+   from the generated NOTICE (exit `1`).
    *Negative control: an implementation that transcribes the twelve packages named in gates
    report §2 condition 1 into a static list passes a spot check and MUST fail this test,
    because the observed tree holds fifteen and the set shifts with `--omit=optional` and
@@ -145,9 +157,17 @@ step 7).
 - The sweep emits one structured JSON summary per run:
   `{ imageRef, treePackageCount, coveredCount, uncoveredCount, deniedHits[], piVersions, noticeBytes, sweptAt, exitCode }`,
   written next to the build log and echoed to stdout.
-- Every failure names the offending package and its dependency path — never an aggregate count
-  alone. `exitCode`: `0` clean, `1` compliance failure (uncovered or denied), `2` fatal before
-  the sweep ran (no builder, registry unreachable, missing license text file).
+- Every package-level failure names the offending package and its dependency path — never an
+  aggregate count alone; prerequisite failures (an empty tree, a missing builder, an
+  unreachable registry, an absent license-texts directory) have no package path to name.
+  `exitCode`: `0` clean (uncovered packages present and fully attributed in NOTICE is a clean
+  run, not a failure); `1` a **policy failure** (a denied package, an off-pin version) or a
+  **prerequisite/empty-tree failure** (an empty swept tree), or an **attribution failure**
+  verified at NOTICE-write time (an uncovered package's entry absent from the generated
+  NOTICE); `2` an **attribution failure** caught before the sweep could conclude (an observed
+  SPDX identifier — from a covered or an uncovered package — has no canonical text) or a
+  **prerequisite failure** (a package could not be read, no builder, registry unreachable,
+  license-texts directory absent).
 - The generated NOTICE header records the sweep timestamp, the resolved pi version, and the
   install flags used, so an auditor can tell which tree the file describes.
 
@@ -186,22 +206,187 @@ step 7).
 
 ## Definition of Done
 
-- [ ] **Impl:** `scripts/lib/license-sweep.ts` classifies every package in a given tree as covered / uncovered / denied and returns the structured summary
-- [ ] **Impl:** `scripts/generate-notice.ts` writes `/usr/share/doc/qds-factory/NOTICE` from the uncovered set with license text, copyright line, and the BlueOak-1.0.0 reviewer note
-- [ ] **Impl:** `oci/Dockerfile` installs with `--omit=optional`, pins `@mariozechner/pi-coding-agent@0.55.0`, and runs sweep → generate → tag in that order
-- [ ] **Contract:** sweep exit codes 0 / 1 / 2 as specified; failure output names the package and its dependency path
-- [ ] **Integration:** `build:image` and `notice:sweep` wired in root `package.json`, `oci` added to the `lint` scope, and the CI image job in `.github/workflows/ci.yml` fails on a nonzero sweep
-- [ ] **Security:** denylist runs before NOTICE generation and before tagging (INV-2); unresolvable license → exit 2 (INV-4); layer scan finds no credential-shaped file (INV-5)
-- [ ] **Impl (provenance):** `coms.ts:14-15` corrected to `disler/pi-vs-claude-code` `extensions/` @ `0ed11f44`; DIVERGENCE row added; `coms-net.ts` byte-unchanged
-- [ ] **Test (uncovered package):** a fixture tree with a license-text-less package absent from NOTICE → sweep exits 1 and names it; a static twelve-package list fails this case
-- [ ] **Test (unmapped SPDX identifier, INV-4):** a fixture package reporting a recognized but
+- [x] **Impl:** `scripts/lib/license-sweep.ts` classifies every package in a given tree as covered / uncovered / denied and returns the structured summary
+- [x] **Impl:** `scripts/generate-notice.ts` writes `/usr/share/doc/qds-factory/NOTICE` from the uncovered set with license text, copyright line, and the BlueOak-1.0.0 reviewer note
+- [x] **Impl:** `oci/Dockerfile` installs with `--omit=optional` and pins `@mariozechner/pi-coding-agent@0.55.0`; `scripts/build-image.ts` orchestrates the sweep → generate → tag sequence between the `deps` and `runtime` builds
+- [x] **Contract:** sweep exit codes 0 / 1 / 2 as specified; failure output names the package and its dependency path
+- [x] **Integration:** `build:image` and `notice:sweep` wired in root `package.json`, `oci` added to the `lint` scope, and the CI image job in `.github/workflows/ci.yml` fails on a nonzero sweep
+- [x] **Security:** denylist runs before NOTICE generation and before tagging (INV-2); unresolvable license → exit 2 (INV-4); layer scan finds no credential-shaped file (INV-5)
+- [x] **Impl (provenance):** `coms.ts:14-15` corrected to `disler/pi-vs-claude-code` `extensions/` @ `0ed11f44`; DIVERGENCE row added; `coms-net.ts` byte-unchanged
+- [x] **Test (uncovered package):** a fixture tree with a license-text-less package absent from NOTICE → sweep exits 1 and names it; a static twelve-package list fails this case
+- [x] **Test (unmapped SPDX identifier, INV-4):** a fixture package reporting a recognized but
       unmapped SPDX identifier (e.g. BSD-3-Clause) with no matching entry in `oci/license-texts/`
       → sweep exits 2 before NOTICE generation, naming the missing identifier; an implementation
       that emits a NOTICE omitting that package's text MUST fail this test
-- [ ] **Test (denied package):** `@mariozechner/pi-proxy` injected as a transitive dep → build aborts pre-tag, exit 1, path named; same for `@mariozechner/pi`
-- [ ] **Test (pin + NOTICE propagation):** an off-pin `pi-coding-agent` fails the build and names the observed version, while `pi-ai@0.55.4` under a 0.55.0 coding-agent passes (AC2); a covered Apache-2.0 package carrying an upstream NOTICE has that file's bytes present in the generated NOTICE (AC4/INV-3)
-- [ ] **Test (e2e demo — MANDATORY):** a real `bun run build:image` produces a tagged image whose `/usr/share/doc/qds-factory/NOTICE` is non-empty, contains the full Apache-2.0 text for the three `@aws-sdk` packages and MIT © 2025 Mario Zechner for the four pi packages, and whose tree contains no `@mariozechner/clipboard` — sweep summary JSON committed as evidence
+- [x] **Test (denied package):** `@mariozechner/pi-proxy` injected as a transitive dep → build aborts pre-tag, exit 1, path named; same for `@mariozechner/pi`
+- [x] **Test (pin + NOTICE propagation):** an off-pin `pi-coding-agent` fails the build and names the observed version, while `pi-ai@0.55.4` under a 0.55.0 coding-agent passes (AC2); a covered Apache-2.0 package carrying an upstream NOTICE has that file's bytes present in the generated NOTICE (AC4/INV-3)
+- [x] **Test (e2e demo — MANDATORY):** a real `bun run build:image` produces a tagged image whose `/usr/share/doc/qds-factory/NOTICE` is non-empty, contains the full Apache-2.0 text for the three `@aws-sdk` packages and MIT © 2025 Mario Zechner for the four pi packages, and whose tree contains no `@mariozechner/clipboard` — sweep summary JSON committed as evidence
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Status:** in-review · branch `feature/df2-9-oci-image-contract` · implemented 2026-08-13
+
+### What shipped
+
+| File | Role |
+|------|------|
+| `scripts/lib/license-sweep.ts` | walks a tree, classifies covered / uncovered / denied / unresolved, resolves canonical texts, renders NOTICE, verifies coverage |
+| `scripts/generate-notice.ts` | CLI — the generator AND the gate; owns exit codes 0/1/2 |
+| `scripts/build-image.ts` | orchestrates deps-build → extract → sweep → runtime-build → credential scan → tag |
+| `oci/Dockerfile` | two stages; `--omit=optional`, pinned coding agent, NOTICE copied into `/usr/share/doc/qds-factory/NOTICE` |
+| `oci/license-texts/*.txt` | 7 canonical texts: MIT, Apache-2.0, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD, BlueOak-1.0.0 |
+| `tests/scripts/license-sweep.test.ts` | 46 tests over on-disk fixture trees + the CLI's exit contract |
+| `.github/workflows/ci.yml` | `image` job, `needs: check`, uploads the sweep summary |
+| `pi-vs-claude-code-vendor/{coms.ts,DIVERGENCE.md}` | AC5 provenance fix + ledger row |
+
+### Live evidence (2026-08-13, this host)
+
+- `bun run build:image --tag qds-factory:df2.9-test` → **exit 0**, tagged
+  `sha256:178f7851…`. Summary committed at
+  `_bmad-output/sprint-artifacts/dark-factory-v5/evidence/df2-9-sweep-summary.json`:
+  175 packages, 165 covered, **10 uncovered**, NOTICE 44,563 bytes, no denied hits.
+- In-image assertions: `/usr/share/doc/qds-factory/NOTICE` is 44,563 bytes and
+  carries **three** complete Apache-2.0 texts (one per `@aws-sdk` package —
+  `END OF TERMS AND CONDITIONS` × 3) and **four** `Copyright (c) 2025 Mario
+  Zechner` lines (the pi packages). `/app/node_modules/@mariozechner/` holds
+  jiti, pi-agent-core, pi-ai, pi-coding-agent, pi-tui — **zero** clipboard
+  entries, so `--omit=optional` is asserted by inspecting the tree, not the flag.
+- AC3 against a real 175-package tree: `@mariozechner/pi-proxy` injected under
+  `pi-coding-agent/node_modules/` → **exit 1**, message names
+  `"@mariozechner/pi-coding-agent > @mariozechner/pi-proxy"`, and **no NOTICE
+  file was written** (checked). Nothing was tagged.
+- `bun test` exit 0 · `bunx tsc --noEmit` clean · biome clean over the extended
+  scope (now including `oci`).
+
+**The observed tree holds 10 uncovered packages, not the 12 named in gates
+report §2 nor the 15 observed on 2026-08-11** — `eastasianwidth` and `netmask`
+are not in the 0.55.0 `--omit=optional` tree at all. That drift is the story's
+whole thesis and the reason the list is derived at build time; a transcribed
+list would have shipped two phantom entries and, on the next bump, missed real
+ones.
+
+### Decisions (--yolo; recorded rather than gated)
+
+1. **The sweep runs on the host, between the two image stages** — not inside a
+   `RUN` layer. The Dockerfile's `deps` stage produces the tree; `build-image.ts`
+   extracts it (`docker create` + `docker cp`), sweeps it, and only then builds
+   `runtime`, which copies the NOTICE in. This keeps the required
+   sweep → generate → tag ordering (INV-2: nothing is tagged until every check
+   passes) without installing bun into the shipped image. `scripts/build-image.ts`
+   is therefore a file this story adds beyond the spec's "Files to Modify" list.
+2. **No npm-registry preflight probe.** The Infra Prerequisites table asks for
+   one, but this sweep reads licenses from the *installed tree*, which is the
+   artifact being shipped — it never contacts the registry. `npm install` in the
+   `deps` stage already fails closed when the registry is unreachable, and the
+   build cannot reach the sweep without it. A probe here would gate nothing;
+   asserting otherwise would be theater. INV-4's fail-closed duty is discharged
+   against the tree instead.
+3. **"Uncovered" is one compliance state, not two — `verifyNoticeCoverage` is a
+   safety net over it, not a second state.** A package that ships no license
+   text of its own is *uncovered*; that alone passes, because the sweep
+   resolves canonical text and writes it into NOTICE. `verifyNoticeCoverage`
+   then re-reads the generated NOTICE and fails the build (exit 1) if an
+   uncovered package's entry is missing from it — catching a NOTICE-generation
+   bug, not classifying a second kind of package. AC1 and the Observability
+   Contract now spell out this distinction explicitly (round-3 review); a
+   transcribed twelve-entry list still trips the same check, because it omits
+   packages the real tree carries and `verifyNoticeCoverage` names them absent.
+4. **Canonical texts are required for every identifier the sweep observes,
+   including covered packages'.** Strictly more than AC1 demands, and the literal
+   reading of "every SPDX identifier the sweep observes". It means a future
+   dependency arriving with an exotic-but-textless license fails the build
+   instead of slipping past on its own bundled file.
+5. **`license` absent + license text present ⇒ covered, not fatal.**
+   `@mistralai/mistralai@1.10.0` really is this shape in the 0.55.0 tree: no
+   `license` field, a full Apache-2.0 `LICENSE` file. Its redistribution duty is
+   discharged by the shipped text, so exit 2 there would fail the build over a
+   metadata gap with no legal content. Absent field **and** absent text is still
+   exit 2 (INV-4). The package is disclosed by name in the NOTICE's reviewer
+   section, so the gap is visible rather than swallowed.
+6. **Copyright years are never invented.** npm metadata carries no year, so the
+   default line is `Copyright (c) <author>`. The four pi packages get
+   `Copyright (c) 2025 Mario Zechner` from a small checked-in override table,
+   sourced from the pi monorepo root LICENSE (earendil-works/pi) that the
+   per-package tarballs omit — an authoritative source, not a guess.
+7. **BlueOak-1.0.0 is disclosed, not flagged.** `glob`/`minimatch` land in a
+   reviewer-facing section of NOTICE listing less-common-but-permissive
+   identifiers, so a proactive disclosure never reads as a discovery. Its
+   canonical text is checked in, so it also satisfies decision 4.
+8. **Denylist ordering is enforced by construction and by test.** The CLI checks
+   `result.denied` before pins, before the INV-4 checks, and before rendering; a
+   dedicated test asserts a denied package beats an unresolvable license (exit 1,
+   not 2) and that no NOTICE file exists afterwards.
+9. **`.dockerignore` added** (not in the spec's file list) so the build context
+   excludes `.git`, `_bmad-output`, `docs` and the test tree. Without it the
+   context upload dominates the build.
+10. **`oci/.build/` is gitignored**; the generated NOTICE and summary are build
+    outputs. The evidence copy of the summary is committed under
+    `_bmad-output/sprint-artifacts/dark-factory-v5/evidence/`.
+
+### Three review rounds (all findings fixed, then re-verified live)
+
+Round 1 — the sweep counted a source file named `license.js` as license text
+(a package could ship with no attribution at all); NOTICE coverage was verified
+by substring, so `glob@1.2.3` could be discharged by an unrelated
+`fast-glob@1.2.3` line; `X WITH Y` was split like a disjunction and resolved to
+X's text alone. On the image: the credential scan exempted all of
+`node_modules` (where npm reads `.npmrc`), anchored on an `ENV`/`ARG` keyword
+that BuildKit's build-arg layers do not carry, and piped `docker export` into
+`tar` without `pipefail`; CI selected a `docker-container` buildx driver whose
+output never reaches the daemon store, which would have broken `docker create`
+and `docker tag` on the first CI run; and a failed build left the previous tag
+resolving, so a push after a denylist trip would have shipped the older image.
+
+Round 2 — deduping kept one copy's whole record, so an upstream NOTICE on the
+complete copy vanished when a partial copy won the tiebreak, and a package
+could be called unresolved while a sibling copy named its license. The verdict
+still comes from the worst copy; the evidence is now unioned across copies. An
+unreadable manifest silently deleted a package *and its whole subtree* from the
+sweep while still reporting clean. Name-based credential matching failed on a
+stock `node:22` image, which ships npm's own
+`/usr/local/lib/node_modules/npm/.npmrc` (holding `prefix=/usr/local`) — config
+files are now read and judged by content, which is also what lets the scan
+catch a real `.env` or `_authToken`.
+
+Round 3 — **the swept tree was not bound to the shipped tree.** The `deps` and
+`runtime` stages were two independent `docker build` invocations, and the
+runtime build only reused the swept layer because BuildKit's cache key is the
+`RUN` string. There is no lockfile and the pi libs float inside `0.55.x`, so any
+cache miss (builder GC, `docker builder prune`, a fresh CI runner) would have
+installed a different tree and shipped it with a NOTICE describing the old one —
+exit 0, INV-1 void. The Dockerfile now takes `ARG DEPS_IMAGE` and the runtime
+stage copies `--from=swept`; `build-image.ts` pins it to the exact image it
+swept. Via a throwaway local tag rather than the bare image ID: BuildKit
+resolves a `FROM` argument as a repository name, so `FROM sha256:…` goes to the
+registry — proven by a build that failed with `pull access denied` before the
+fix landed. Round 3 also closed the last fail-open path in the walk (a
+manifest-less directory or dangling symlink vanished without being reported)
+and widened the INV-5 patterns to `.env.local`/`.env.production`, `*.key`,
+`*.jks`, `.docker/config.json` and AWS's spaced `aws_secret_access_key = …`.
+
+### Gaps / follow-ups
+
+- **Registry push, image signing, provenance attestation** — out of scope by the
+  story (v5 §8 step 7).
+- **The vendored `pi-vs-claude-code-vendor/` tree is copied into the image but is
+  not part of the swept `node_modules`.** It ships its own `LICENSE` (MIT ©
+  2026 IndyDevDan) plus `_provenance`, so INV-1 holds by inspection rather than
+  by the sweep. DF4.1, which consumes this sweep, adds files to that directory:
+  if it ever adds a third-party file with separate licensing, the sweep will not
+  see it. Widening the sweep to a set of extra directories is the natural
+  follow-up at that point.
+- **`coms-net.ts` is byte-unchanged** — verifiable from the PR diff, which does
+  not list the file. No hash fixture was added; a pinned digest would be churn
+  the next legitimate edit has to update.
+- **The step ORDER in `build-image.ts` is enforced by structure, not by a
+  test.** Moving `docker tag` above the sweep would regress INV-2/AC3 green.
+  Testing it needs the orchestration refactored around an injectable `run`;
+  the cheap half is done (the sweep's exit code is relayed verbatim and is
+  covered, and the CLI's own ordering — denylist before generation — is).
+- `bun run notice:sweep` against an arbitrary tree does not assert that a
+  `pi-coding-agent` is present; that is AC2's positive half and lives in
+  `build-image.ts`, because the audit re-run is deliberately usable against
+  trees that are not the image.
+- The CI `image` job runs a cold `npm install` plus two image stages (~2–4 min
+  on a warm runner). It is `needs: check`, so it never burns runner time on a
+  branch that fails lint/typecheck/tests.
