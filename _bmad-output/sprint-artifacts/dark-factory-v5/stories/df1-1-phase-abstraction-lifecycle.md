@@ -321,4 +321,130 @@ trace store behind the same port without changing this story's semantics.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Status:** in-progress → PR open (qds-dev, `--yolo --skip-docker-tests`)<br />
+**Branch:** `feature/df1.1`<br />
+**Files:** `src/phase-engine/{index,types,manifest,phase,journal}.ts`, `scripts/pipeline-run.ts`,
+`tests/phase-engine/{manifest,phase-lifecycle,pipeline-run}.test.ts`,
+`tests/phase-engine/fixtures/pipeline.qds-factory.json`
+
+### Dev Notes — autonomous decisions (gates skipped under `--yolo`)
+
+1. **INV-1 shipped form: `fs.realpath` + run-root prefix re-assertion + post-open fd-path
+   verification + read through the fd.** Named in the `manifest.ts` module docblock with the
+   four steps mapped to the code. The component walk is not implementable on Bun (no relative
+   `openat(O_NOFOLLOW)`), which the story explicitly permits.
+2. **Post-open fd-path resolution is platform-specific and fails closed.** Linux reads
+   `/proc/self/fd/<fd>` via `readlink`. darwin has no `/proc`, so the loader calls
+   `fcntl(fd, F_GETPATH)` through `bun:ffi`/`libSystem.B.dylib` — verified working on Bun
+   1.3.13/darwin 24. Any other platform, or any failure to establish either facility, returns
+   `null` and the read is **refused** (INV-5). Without the darwin branch the story would be
+   unrunnable on the dev platform and the mandatory e2e demo untestable there; the branch is
+   the *equivalent facility*, not a weaker check.
+3. **The fd check asserts both the run-root prefix and equality with the resolved path.**
+   Equality is strictly stronger and additionally catches an in-root swap; a test covers it.
+4. **`onResolved` test seam.** `loadManifest` takes an optional hook fired between the
+   `realpath` and the `open`, which is the only way to exercise the resolve-to-open swap the
+   DoD requires. Never supplied on a real run.
+5. **AC3's literal echo formula misses the DoD's own example.**
+   `d.replace(/\.+$/,"").toLowerCase() === name.replaceAll("_"," ").toLowerCase()` does *not*
+   reject `{name:"commit_plan", description:"Commit the plan"}` ("commit the plan" ≠ "commit
+   plan"), which the DoD requires to throw. `assertLegibleDescription` normalizes both sides
+   identically (trailing dots stripped, case folded, `_` → space, articles dropped) — a strict
+   **superset** of the AC's form, so everything the AC rejects is still rejected. Both the DoD
+   examples and the AC's literal form are asserted.
+6. **Retry *behaviour* is DF1.3's; this story arms one timer for the one attempt it runs.** The
+   admission formula already carries both multipliers, so DF1.3 cannot overrun the caller.
+7. **`CANCEL_GRACE_MS = 5 000`.** A body that ignores its `AbortSignal` would otherwise hang the
+   run forever, contradicting AC4's "the run does not hang". After the abort the engine waits a
+   bounded grace for cancellation, then records the failure regardless.
+8. **`Run.finish` writes the terminal marker, not the `PhaseJournal` port.** The marker is an
+   engine-level completion signal at a fixed path; the port is storage and DF1.4 swaps it.
+9. **`code` phases execute their `command`; `engineer`/`agent` phases throw** (`no executor …
+   DF1.6`). That is what makes the e2e slice's phase 2 fail by a *thrown body* rather than by a
+   non-zero command exit, per the "phase outcome vs run outcome" note.
+10. **`runRoot` is validated as "supplied, resolvable, a directory".** uid-0 ownership is not
+    checked — every test and every dev run would fail it, and the anchor's job is containment,
+    not privilege.
+11. **Runner exit codes:** `0` ok, `1` settled not-ok, `2` never settled (manifest refused,
+    flags bad, journal unwritable, a second signal). Exit `2` always leaves the **marker**
+    absent, which is the half DF3.2's poller keys on. A refused load never constructs the
+    journal either; a failure after the walk began leaves a journal carrying `ok: false`.
+    The banner write is non-fatal precisely so an `EPIPE` on stdout cannot downgrade a
+    settled run to "never settled".
+12. **GitNexus process item:** `detect_changes({scope:"compare", base_ref:"main"})` run against
+    this worktree reports 12 changed files, **0 changed indexed symbols, 0 affected processes,
+    risk low** — the diff is a new module with no existing callers, so the upstream blast
+    radius is empty by construction and no `impact()` returned HIGH/CRITICAL.
+
+13. **Known tension: `CANCEL_GRACE_MS` vs the DoD's "no post-overflow side effect".** AC4 says
+    the run must not hang; the DoD says nothing may happen after the timer fires. A body that
+    ignores its `AbortSignal` makes those two mutually exclusive, and the diff resolves it in
+    favour of "the run does not hang": after the grace the phase is recorded `fail` /
+    `overflow` and the walk halts **while an ignoring body may still be alive**. Three things
+    bound the damage: owned subprocess trees are killed (process-group `SIGKILL`, tested), the
+    engine hands the body no journal access so nothing it does afterwards can become a run
+    fact (tested), and `pipeline-run.ts` calls `process.exit` after `finish` so no straggler
+    outlives the terminal marker. Recorded as a **conflict**, not a clarification: the DoD's
+    overflow item holds for owned subprocesses and for journal state, **not** for arbitrary
+    in-process side effects a body performs after ignoring its own cancellation.
+14. **`O_NONBLOCK` on the manifest open.** Without it, a FIFO planted beneath the run root
+    blocks the synchronous loader indefinitely and the `isFile()` rejection never runs — the run
+    is then neither green nor red but *absent*, which is exactly what DF3.2's poller reads as
+    "still going". Tested with a real `mkfifo`.
+15. **The terminal marker is written atomically** (temp + `fsync` + rename, `O_EXCL |
+    O_NOFOLLOW`), like the journal. Its whole value to a cross-process poller is that its
+    presence is a commitment; an in-place write can be read half-finished, and an in-place
+    write through a planted symlink is an arbitrary-file write.
+16. **Manifest commands run with a scrubbed environment and a cwd pinned to the run root.**
+    DF1.2's `commandGate` is the intended gate on this argv; until it lands there is no reason
+    to hand a manifest-declared command the engine's full environment. INV-4 keeps credentials
+    out of the manifest — the inherited env would be the obvious way around that.
+17. **Manifest size ceiling (1 MiB) and credential-walk depth ceiling (64).** Both refuse as
+    `ManifestError` before the schema runs, so a hostile file cannot exhaust memory or the
+    stack ahead of the gates that exist to refuse it.
+18. **`journal_write_ms` on a persisted row covers the writes observed up to that row's own
+    write** (a write cannot report its own cost); the phase's complete journal cost is on the
+    structured log line. `durationMs` remains authoritative per the observability contract.
+
+19. **The owned process group is killed when the phase settles, not only on abort.** A command
+    that backgrounds work and returns (`sh -c 'sleep 60 &'`) would otherwise leave the tree
+    alive past a `success` phase — the abort listener never fires on a clean exit. Both shapes
+    are tested (overflow-with-`wait`, and clean-exit-without-`wait`).
+20. **Body error text is redacted and capped before it is persisted**, through the repo's
+    existing `cli-anything/src/redact.ts` parent-env redactor. INV-4 says credentials never
+    transit a journal record, and a body's error message is the obvious way one would.
+21. **Illegible descriptions are refused at load as well as at construction.** A static
+    manifest defect must not surface mid-walk, where it leaves a half-journalled run and no
+    terminal marker. The rule itself lives in `types.ts` so loader and constructor share it.
+22. **The INV-1 test seams are off the public surface.** `loadManifest` takes three arguments;
+    `loadManifestWithSeams` is exported from `manifest.ts` only and never from `index.ts`, so
+    no caller of the package can substitute an fd-path resolver that defeats INV-1.
+23. **The darwin `F_GETPATH` binding self-probes before it is trusted.** `fcntl` is variadic
+    and a fixed-arity FFI trampoline is not the variadic ABI on every architecture (arm64
+    passes variadic arguments on the stack). The binding is validated against a path already
+    known (`/`) at first use; a failed probe means the facility is unavailable, which is
+    INV-5's fail-closed case rather than a wrong answer trusted as right.
+24. **A marker-write failure forces the journal back to not-ok** before the error propagates,
+    so the journal cannot claim green while the completion signal the poller reads is absent.
+
+25. **A terminated run is never `ok`, and the engine owns that rule.** `terminate()` only fails
+    the phase in flight; a signal landing *between* phases used to leave every row green, so
+    `finish(true)` published `ok: true` and a marker saying so. `Run.finish` now folds
+    `terminating` into `ok` itself rather than trusting each caller of the library primitive.
+26. **`code` phase output is relayed to stderr, not inherited on fd 1.** The banner and the
+    structured log are run facts; a manifest-declared command must not be able to forge
+    either. Tested with a command that prints a convincing fake banner.
+27. **The child is awaited on `exit`, not `close`.** `close` also waits for every stdio stream
+    to end, and a backgrounded grandchild holds the inherited pipe open — a command that
+    already returned would otherwise sit out its entire ceiling and record `overflow`.
+28. **Residual, documented race:** the settle-time process-group kill runs when `exit` is
+    delivered, after the direct child is reaped, so a recycled pgid could in principle be
+    signalled. It fires once (never both on abort and on settle) and is the narrowest form
+    available without a supervisor process this story does not own.
+
+### Verification
+
+`bun test tests/phase-engine` green (94 tests, stable over 3 consecutive runs) · `bunx tsc --noEmit` clean ·
+`bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor` clean ·
+e2e: `bun scripts/pipeline-run.ts --manifest tests/phase-engine/fixtures/pipeline.qds-factory.json
+--budget-ms 120000 --journal out.json` exits `1` with `plan=success`, `build=fail`, `ok=false`.

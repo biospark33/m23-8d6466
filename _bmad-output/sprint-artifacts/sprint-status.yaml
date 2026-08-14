@@ -94,7 +94,7 @@ epics:
     points: 32
     stories_dir: sprint-artifacts/dark-factory-v5/stories
     stories:
-      DF1.1: { title: "Phase Lifecycle Primitive with Versioned Pipeline Manifest", points: 4, status: ready-for-dev, deps: [] }  # v5-S1
+      DF1.1: { title: "Phase Lifecycle Primitive with Versioned Pipeline Manifest", points: 4, status: in-progress, deps: [] }  # v5-S1
       DF1.2: { title: "Gates with Evidence over a Unified Envelope Adapter",        points: 4, status: ready-for-dev, deps: [DF1.1] }  # v5-S1
       DF1.3: { title: "Dual Retry Discipline — Separately Bounded Parse and Gate Retries", points: 3, status: ready-for-dev, deps: [DF1.2, DF2.7] }  # v5-S1
       DF1.4: { title: "SQLite Trace Store (7-Table Schema, WAL, Rowid-Cursor Reads)", points: 4, status: ready-for-dev, deps: [DF1.1, DF1.2] }  # v5-S1
