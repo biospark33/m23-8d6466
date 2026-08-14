@@ -254,7 +254,24 @@ roster by the phase engine is a separate edge (DF1.1/DF1.6), out of scope here.
 
 ## Dev Agent Record
 
-**Status:** in-review — implemented on `feature/df1-5`.
+**Status:** done — PR [#106](https://github.com/biospark33/QDS-Factory/pull/106) squash-merged to
+`main` 2026-08-14 (`ef66658`). Four review rounds (CodeRabbit + Sift): 8 findings fixed in round 1
+(`095dfbd` — MD040 fence, `roster_unreadable` message text, `..`-prefix confinement using `sep`,
+dead `??` fallbacks in the YAML-parse and `defaultCustomRegistryPath` paths, env-teardown leak via
+`restoreEnv()`, temp-dir leak on write failure, and a fixture that never reached the sanitized
+error text); 2 findings rejected with recorded reasoning (`roster-check.ts:97` exit-code bypass —
+`loadRateSources` is not imported and `main()`'s catch-all already maps to exit 2;
+`roster-check.ts:73` secret redaction — `runPi` discards child stderr and the provider probe hits
+only the public unauthenticated OpenRouter endpoint, so no credential transits either path).
+CodeRabbit merge-readiness verdict 2026-08-14: *"Yes. Excluding CI/CD status, PR #106 is ready to
+merge."* Local gates green at merge: 108 pass / 2 skip / 0 fail focal, `tsc --noEmit` clean,
+biome clean.
+
+> **CI note:** the `check` workflow shows FAILURE on this PR, but the job never started — GitHub
+> Actions reported *"The job was not started because recent account payments have failed or your
+> spending limit needs to be increased."* This is a billing condition affecting every PR in the
+> v5-S1 wave, not a code signal. Local focal tests + `tsc` + biome are the authoritative gate per
+> project policy.
 
 ### Files landed
 

@@ -247,9 +247,34 @@ required to make this behavior real. DF2.8 consumes these numbers; it does not s
 
 ## Dev Agent Record
 
-**Status:** implemented — PR pending. Developed with `qds-dev DF2.7 --yolo --skip-docker-tests`;
-all `--yolo`-skippable HITL gates auto-approved. Three sequential in-depth review rounds run
-before PR.
+**Status:** done — PR [#103](https://github.com/biospark33/QDS-Factory/pull/103) squash-merged to
+`main` 2026-08-14. Developed with `qds-dev DF2.7 --yolo --skip-docker-tests`; all
+`--yolo`-skippable HITL gates auto-approved. Three sequential in-depth review rounds run before
+PR, then two post-PR review rounds:
+
+- Round 1 (`bf85af4`) — corrected a stale suite count in the evidence artifact (175 → 178 pass,
+  matching the Gates section), and extracted the budget-guard math into exported
+  `applyCostEvent(state, event)` / `budgetKillThresholdUsd(cap)` helpers so `runTeamManifest` and
+  `runner.test.ts` exercise the same code instead of the test re-implementing it.
+- Round 2 (`3fd479b`) — `applyCostEvent` now rejects non-finite and negative `costUsd` at its
+  public API boundary, setting the sticky `costUnpriced` flag instead of poisoning the cumulative
+  total. Scope stated honestly: the production call site (`runner.ts:774`) was already guarded
+  upstream by `parseTeamEventLine`, which drops malformed cost lines, so this is defence-in-depth
+  on an exported API whose doc comment claims sole ownership of the guard math — not a live
+  data-corruption bug. Direct unit test covers `NaN`, `+Infinity`, and negative input plus
+  subsequent valid accumulation.
+
+CodeRabbit merge-readiness verdict 2026-08-14: *"Yes. Excluding the failing CI workflow, this PR
+is ready from a code-review perspective."* Local gates green at merge: 95 pass / 0 fail focal,
+`tsc --noEmit` clean, biome clean.
+
+> **CI note:** the `check` workflow shows FAILURE, but the job never started — GitHub Actions
+> reported *"The job was not started because recent account payments have failed or your spending
+> limit needs to be increased."* Billing condition across the whole v5-S1 wave, not a code signal.
+>
+> **Open thread:** CodeRabbit flagged that the review thread on `cli-anything/test/runner.test.ts`
+> line 12 remained open at merge time even though the requested change had landed — a GitHub
+> thread-state artifact, no outstanding work.
 
 ### Pre-dev probe — verdict, and how it was obtained
 
