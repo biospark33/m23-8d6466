@@ -21,8 +21,8 @@
 import {
   CORE_FIELDS,
   EXTENSION_NAMESPACES,
-  IMMUTABLE_FIELDS,
   RunRecordStore,
+  SETTABLE_FIELDS,
   newId,
   type RunRecordPatch,
 } from "../src/providers/run-record.ts";
@@ -44,10 +44,8 @@ const COERCE: Readonly<Record<string, "int" | "ports">> = Object.fromEntries(
   Object.entries(CORE_FIELDS).filter(([, kind]) => kind !== "string"),
 ) as Readonly<Record<string, "int" | "ports">>;
 
-/** Writable core fields — `runId` and `createdAt` are immutable, `closedAt` is `close`'s. */
-const SET_FIELDS = Object.keys(CORE_FIELDS).filter(
-  (f) => !IMMUTABLE_FIELDS.has(f) && f !== "closedAt",
-) as string[];
+/** Writable core fields — the store's settable-field policy, verbatim. */
+const SET_FIELDS = [...SETTABLE_FIELDS];
 
 const SET_FLAGS = SET_FIELDS.map((f) => `--${f}`);
 const ALL_FLAGS = [...SET_FLAGS, "--dir", "--ext"];

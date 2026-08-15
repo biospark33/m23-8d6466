@@ -24,7 +24,13 @@ import { run as cliRun } from "../../scripts/run-record.ts";
 import { setLogSink } from "../../src/swarmclaw/mcp/stdio-transport.ts";
 import { teardownRun } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
-import { RunRecordStore, assertValidRunId, newId } from "../../src/providers/run-record.ts";
+import {
+  CORE_FIELDS,
+  RunRecordStore,
+  SETTABLE_FIELDS,
+  assertValidRunId,
+  newId,
+} from "../../src/providers/run-record.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const CLI = join(REPO_ROOT, "scripts/run-record.ts");
@@ -228,6 +234,20 @@ describe("set (AC2)", () => {
     expect(() => store.set("run-c", { closedAt: "" } as never)).toThrow(/closedAt is written by close\(\)/);
     expect(() => store.set("run-c", { closedAt: new Date().toISOString() } as never)).toThrow(/closedAt/);
     expect(snapshot("run-c")).toEqual(before);
+  });
+
+  test("SETTABLE_FIELDS is the exact writable set: every listed field set() accepts, every excluded one it rejects", () => {
+    // The export is the CLI's flag table, so it must track the store's actual
+    // behavior — a field the CLI would offer as a flag but set() rejects (the
+    // next operation-managed field added like closedAt) is a command that can
+    // only ever fail.
+    for (const f of SETTABLE_FIELDS) {
+      const v = CORE_FIELDS[f] === "int" ? 1 : CORE_FIELDS[f] === "ports" ? [1] : "x";
+      expect(() => store.set("run-c", { [f]: v } as never)).not.toThrow();
+    }
+    for (const f of ["runId", "createdAt", "closedAt"]) {
+      expect(() => store.set("run-c", { [f]: "x" } as never)).toThrow();
+    }
   });
 
   test("INV-2: credential-shaped values are refused, in core fields and in extensions", () => {

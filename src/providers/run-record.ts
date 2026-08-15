@@ -68,6 +68,16 @@ export const CORE_FIELDS: Readonly<Record<string, FieldKind>> = {
 /** Set once at `create()`; never rewritable. */
 export const IMMUTABLE_FIELDS: ReadonlySet<string> = new Set(["runId", "createdAt"]);
 
+/**
+ * Core fields a caller may write via `set()`: the twelve minus `runId`/`createdAt`
+ * (immutable) and `closedAt` (`close()`'s alone). Exported so the CLI derives its
+ * flag table from this one constant — the writable-field policy lives only here,
+ * not half-here and half in the CLI.
+ */
+export const SETTABLE_FIELDS: readonly string[] = Object.keys(CORE_FIELDS).filter(
+  (f) => !IMMUTABLE_FIELDS.has(f) && f !== "closedAt",
+);
+
 /** Costs are integer micro-dollars — sub-cent role splits are not float-representable (DD-9). */
 export interface RunRecord {
   runId: string;
