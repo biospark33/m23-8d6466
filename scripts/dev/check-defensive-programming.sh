@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
     --base) BASE="$2"; shift 2 ;;
     --code-only) CODE_ONLY="$2"; shift 2 ;;
     --warn) WARN=1; shift ;;
-    *) echo "unknown flag: $1" >&2; echo "usage: $0 [--base <ref>] [--warn]" >&2; exit 2 ;;
+    *) echo "unknown flag: $1" >&2; echo "usage: $0 [--base <ref>] [--warn] [--code-only <file>]" >&2; exit 2 ;;
   esac
 done
 
@@ -49,6 +49,10 @@ FINDINGS=0
 
 # Held in variables: an unquoted '' inside [[ =~ ]] collapses to the empty
 # string and the pattern degrades to "any ?? at all" (found the hard way).
+# D016 is word-boundaried on both ends (round 8): a bare substring pattern
+# also matched "has any idea" / "as anything" in comments and prose. POSIX
+# ERE has no \b, so the boundaries are spelled out.
+D016_RE='(^|[^A-Za-z0-9_])as[[:space:]]+any([^A-Za-z0-9_]|$)|(^|[^A-Za-z0-9_])as[[:space:]]+unknown[[:space:]]+as([^A-Za-z0-9_]|$)'
 D018_RE='(\?\?|\|\|)[[:space:]]*(""|'"''"')'
 D019_RE='catch[[:space:]]*(\(.*\))?[[:space:]]*\{[[:space:]]*\}[[:space:]]*$'
 D020_RE='JSON\.parse\('
@@ -208,7 +212,10 @@ d017_scan() { # file added_line_csv
         w = ""
         if (c == "(") pd++
         else if (c == ")") { if (pd > 0) pd-- }
-        else if (c == "{") { openFrame(pd == 0 && pend_async); pend_async = 0 }
+        # pend_async survives braces at paren depth > 0 (round 8): the {} of a
+        # default parameter like async function f(opts = {}) { must not disarm
+        # the async that the function body brace should consume.
+        else if (c == "{") { openFrame(pd == 0 && pend_async); if (pd == 0) pend_async = 0 }
         else if (c == "}") closeFrame()
       }
       # A keyword ending the line is still only in the w buffer — flush it
@@ -240,7 +247,12 @@ fi
 
 # Tool failures propagate (review round 6): a failed git diff must stop the
 # gate, not silently scan an empty file set and print OK.
-CHANGED="$(git diff --name-only --diff-filter=ACMR "${BASE}" -- '*.ts' | sort -u)"
+# Diff from the merge-base, not BASE's tip (round 8): once BASE advances past
+# the fork point, its own edits appear reversed in a tip diff — lines main
+# DELETED would surface as "added" hunks and get scanned as if this branch
+# wrote them. The merge-base is also the per-file diff base below.
+MB="$(git merge-base "${BASE}" HEAD)"
+CHANGED="$(git diff --name-only --diff-filter=ACMR "${MB}" -- '*.ts' | sort -u)"
 if [[ -n "$CHANGED" ]]; then
   mapfile -t FILES <<< "$CHANGED"
 else
@@ -255,7 +267,7 @@ for f in "${FILES[@]}"; do
     [[ -z "$lineno" ]] && continue
     [[ "$text" =~ dp:ok ]] && continue
 
-    if [[ "$text" =~ as[[:space:]]+any|as[[:space:]]+unknown[[:space:]]+as ]]; then
+    if [[ "$text" =~ $D016_RE ]]; then
       report "$f" "$lineno" "D016" "type-erasing cast on an added line"
     fi
     # Empty-string literal ONLY (`?? ""` / `|| ''`); a fallback to a real
@@ -269,7 +281,7 @@ for f in "${FILES[@]}"; do
     if [[ "$text" =~ $D020_RE ]] && ! dp020_guarded "$f" "$lineno"; then
       report "$f" "$lineno" "D020" "unguarded JSON.parse on non-literal input"
     fi
-  done < <(git diff "${BASE}" -- "$f" | awk '
+  done < <(git diff "${MB}" -- "$f" | awk '
     /^@@ / { match($0, /\+[0-9]+/); n = substr($0, RSTART + 1, RLENGTH - 1) - 1; next }
     /^ / { n++ }
     /^\+/ && !/^\+\+\+/ { n++; print n "\t" substr($0, 2) }
@@ -277,7 +289,7 @@ for f in "${FILES[@]}"; do
 
   # D017 needs whole-function context: report each ADDED async function that
   # awaits with no try/catch anywhere in its own body.
-  ADDED_CSV="$(git diff "${BASE}" -- "$f" | awk '
+  ADDED_CSV="$(git diff "${MB}" -- "$f" | awk '
     /^@@ / { match($0, /\+[0-9]+/); n = substr($0, RSTART + 1, RLENGTH - 1) - 1; next }
     /^ / { n++ }
     /^\+/ && !/^\+\+\+/ { n++; printf "%s,", n }

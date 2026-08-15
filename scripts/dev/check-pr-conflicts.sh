@@ -29,7 +29,10 @@ done
 cd "$(git rev-parse --show-toplevel)"
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-CHANGED="$(git diff --name-only "${BASE}" | sort -u)"
+# Merge-base, not BASE's tip (round 8): files main touched after the fork
+# point are not this branch's changes and must not inflate MINE.
+MB="$(git merge-base "${BASE}" HEAD)"
+CHANGED="$(git diff --name-only "${MB}" | sort -u)"
 if [[ -n "$CHANGED" ]]; then
   mapfile -t MINE <<< "$CHANGED"
 else
@@ -48,7 +51,9 @@ if [[ -n "$PR_LIST" ]]; then
   while IFS=$'\t' read -r number head; do
     [[ -z "${number:-}" ]] && continue
     [[ "$head" == "$BRANCH" ]] && continue  # this branch's own PR
-    PR_FILES="$(gh pr diff "$number" --name-only)"
+    # </dev/null: gh inherits this loop's here-string stdin and must not
+    # consume the records the outer read loop still needs (round 8).
+    PR_FILES="$(gh pr diff "$number" --name-only </dev/null)"
     while IFS= read -r file; do
       [[ -z "$file" ]] && continue
       for mine in "${MINE[@]}"; do
