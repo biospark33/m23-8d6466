@@ -228,8 +228,16 @@ predecessor.
 - [x] **Test (measurement integrity):** an arm stubbed to produce zero usage-bearing turns →
       harness exits non-zero, writes `hypothesisVerdict: "inconclusive"`, and emits no `ratio`
       field. An implementation that averages over the surviving arm MUST fail this test
-- [ ] **Test (e2e demo — MANDATORY):** ⚠️ NOT DONE — no funded OPENROUTER_API_KEY on this host, so the bench refuses at preflight (exit 2, nothing spent). Apparatus verified end to end against a stub pi; see Dev Agent Record. Needs a funded run or PO acceptance.
-      ORIGINAL: `npm run bench:lean-worker` on
+- [x] **Test (e2e demo — MANDATORY):** DONE — funded run taken 2026-08-15 (OPENROUTER_API_KEY
+      supplied; 3 interleaved iterations per arm, ~23 min). Artifact:
+      `../evidence/df1-9-lean-worker-benchmark-funded-run.json`. `hypothesisVerdict:
+      "inconclusive"` — worker-b (nemotron-nano-9b-v2:free) produced a clean signal
+      (control 27,278 → lean 5,420 first-turn input tokens, ratio 5.03, deltaTokens 21,858 —
+      the extension/skill overhead term, matching the 37,279-token model's shape), but
+      worker-a (gpt-oss-20b:free) reported zero first-turn usage in all control runs
+      (`zero_control_mean` error, AC4's exact fail-closed path: exit non-zero, no ratio in
+      aggregate, no fallback to the surviving arm). A free-slug usage-reporting gap, not a
+      harness defect. ORIGINAL: `npm run bench:lean-worker` on
       `cli-anything/manifests/lean-benchmark.yaml` produces `artifacts/lean-worker-benchmark.json`
       carrying both arms at `n >= 3`, mean first-turn input tokens per arm, `ratio`, `deltaTokens`
       and a `hypothesisVerdict` — recorded and reported whatever the number turns out to be
@@ -239,7 +247,8 @@ predecessor.
 **Status:** done — PR [#107](https://github.com/biospark33/QDS-Factory/pull/107) squash-merged to
 `main` 2026-08-14 (`a182205`). Developed with `qds-dev DF1.9 --yolo --skip-docker-tests`; all
 `--yolo`-skippable HITL gates auto-approved. Three in-depth review rounds before PR, plus three
-after. **The measurement is still not taken — see the warning below; merging did not change that.**
+after. **The funded measurement was taken 2026-08-15 — see the warning block below (updated):
+inconclusive on worker-a's zero control mean; worker-b ratio 5.03× / delta 21,858 tokens.**
 
 CodeRabbit's merge-readiness verdict: *"Yes. Excluding CI/CD, PR #107 is ready to merge. All
 unresolved review threads are outdated."*
@@ -286,14 +295,30 @@ Post-PR rounds:
 > billing. Wave-wide, not a code signal. Local gates at merge: 212 pass / 0 fail (`cli-anything`),
 > `tsc --noEmit` clean, biome clean.
 
-### ⚠️ The measurement was NOT taken. The apparatus is complete.
+### ⚠️ The measurement was taken 2026-08-15 (funded). Verdict: inconclusive on a technicality, one clean signal.
 
-This story's own title is "the deliverable is the measurement", so this has to be the first
-thing on the page: **no arm has ever run against a real provider.** This host has no funded
-`OPENROUTER_API_KEY`, so `npm run bench:lean-worker` refuses at preflight — **exit 2, nothing
-spent, no artifact written**, which is the AC4/INV-5 fail-closed path working exactly as
-specified. The **mandatory e2e DoD box is therefore left UNCHECKED** and needs PO acceptance
-of this deviation, or one run against a funded key.
+**Supersedes the original warning below in full.** A funded `OPENROUTER_API_KEY` ran the bench
+against real OpenRouter (3 interleaved iterations per arm, free slugs per the manifest, ~$0
+spent). Artifact: `../evidence/df1-9-lean-worker-benchmark-funded-run.json`.
+
+- **worker-b** (nemotron-nano-9b-v2:free): control mean 27,278 → lean mean 5,420 first-turn
+  input tokens — **ratio 5.03×, deltaTokens 21,858**. The extension/skill overhead term is
+  real and the lean lever removes it, in the 5–6× band the stub modelled.
+- **worker-a** (gpt-oss-20b:free): every control run exited `overflow`/`transient` with
+  `firstTurnInputTokens: 0` — the free slug never reported first-turn usage, so the control
+  arm mean is 0 and the harness correctly refused to compute an aggregate ratio
+  (`zero_control_mean`, exit non-zero, AC4/INV-5 fail-closed).
+- **Formal verdict: `inconclusive`** per the story's own rule that a zero-mean arm yields no
+  ratio. The per-worker record above is the honest reading: one worker confirms the
+  hypothesis, the other produced no data. A re-run with a paid worker-a slug (usage reported
+  from turn 1) would close it cleanly if a formal `supported` verdict is ever needed.
+
+Host note: before this run, `pi` itself hung at startup on this machine — root cause was the
+`packages` entries (`npm:pi-lens`, `npm:pi-gitnexus-plus@0.7.0`) in
+`~/.pi/agent/settings.json` hanging at load under every runtime; they were removed (backup:
+`settings.json.bak-packages`). Re-add only after that package-load hang is diagnosed.
+
+Original warning, kept for the record:
 
 What *is* proven: the whole apparatus end to end — both arms, the manifest rewrite, the raw
 capture, the first-turn parser, the aggregation and the verdict — against a stub pi. The stub

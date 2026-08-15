@@ -1,0 +1,200 @@
+{
+  "requestId": "lean-bench-mstoz0bz",
+  "recordedAt": "2026-08-15T01:47:38.176Z",
+  "manifest": "cli-anything/manifests/lean-benchmark.yaml",
+  "arms": {
+    "control": {
+      "n": 3,
+      "startedAt": "2026-08-15T01:24:02.473Z",
+      "durationMs": 847605,
+      "runs": [
+        {
+          "iteration": 1,
+          "agentId": "worker-b",
+          "model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+          "firstTurnInputTokens": 27278,
+          "usageBearingTurns": 1,
+          "durationMs": 304939,
+          "exitStatus": "overflow"
+        },
+        {
+          "iteration": 1,
+          "agentId": "worker-a",
+          "model": "openrouter/openai/gpt-oss-20b:free",
+          "firstTurnInputTokens": 0,
+          "usageBearingTurns": 4,
+          "durationMs": 304939,
+          "exitStatus": "overflow"
+        },
+        {
+          "iteration": 2,
+          "agentId": "worker-b",
+          "model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+          "firstTurnInputTokens": 27278,
+          "usageBearingTurns": 1,
+          "durationMs": 302635,
+          "exitStatus": "overflow"
+        },
+        {
+          "iteration": 2,
+          "agentId": "worker-a",
+          "model": "openrouter/openai/gpt-oss-20b:free",
+          "firstTurnInputTokens": 0,
+          "usageBearingTurns": 4,
+          "durationMs": 302635,
+          "exitStatus": "overflow"
+        },
+        {
+          "iteration": 3,
+          "agentId": "worker-b",
+          "model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+          "firstTurnInputTokens": 27278,
+          "usageBearingTurns": 1,
+          "durationMs": 236437,
+          "exitStatus": "transient"
+        },
+        {
+          "iteration": 3,
+          "agentId": "worker-a",
+          "model": "openrouter/openai/gpt-oss-20b:free",
+          "firstTurnInputTokens": 0,
+          "usageBearingTurns": 4,
+          "durationMs": 236437,
+          "exitStatus": "transient"
+        }
+      ]
+    },
+    "lean": {
+      "n": 3,
+      "startedAt": "2026-08-15T01:24:02.473Z",
+      "durationMs": 567957,
+      "runs": [
+        {
+          "iteration": 1,
+          "agentId": "worker-b",
+          "model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+          "firstTurnInputTokens": 5420,
+          "usageBearingTurns": 1,
+          "durationMs": 143515,
+          "exitStatus": "success"
+        },
+        {
+          "iteration": 1,
+          "agentId": "worker-a",
+          "model": "openrouter/openai/gpt-oss-20b:free",
+          "firstTurnInputTokens": 4895,
+          "usageBearingTurns": 1,
+          "durationMs": 143515,
+          "exitStatus": "success"
+        },
+        {
+          "iteration": 2,
+          "agentId": "worker-b",
+          "model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+          "firstTurnInputTokens": 5420,
+          "usageBearingTurns": 1,
+          "durationMs": 197020,
+          "exitStatus": "success"
+        },
+        {
+          "iteration": 2,
+          "agentId": "worker-a",
+          "model": "openrouter/openai/gpt-oss-20b:free",
+          "firstTurnInputTokens": 4895,
+          "usageBearingTurns": 1,
+          "durationMs": 197020,
+          "exitStatus": "success"
+        },
+        {
+          "iteration": 3,
+          "agentId": "worker-b",
+          "model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+          "firstTurnInputTokens": 5420,
+          "usageBearingTurns": 1,
+          "durationMs": 225186,
+          "exitStatus": "success"
+        },
+        {
+          "iteration": 3,
+          "agentId": "worker-a",
+          "model": "openrouter/openai/gpt-oss-20b:free",
+          "firstTurnInputTokens": 4895,
+          "usageBearingTurns": 1,
+          "durationMs": 225186,
+          "exitStatus": "success"
+        }
+      ]
+    }
+  },
+  "control_arm_ms": 847605,
+  "lean_arm_ms": 567957,
+  "durationMs": 1415562,
+  "notes": [
+    "pi 0.55.0",
+    "Arms are INTERLEAVED, actual order: control#1, lean#1, control#2, lean#2, control#3, lean#3 — neither arm inherits the other's warm prompt cache.",
+    "n counts iterations that produced at least one observation, not iterations attempted.",
+    "ratio = control mean first-turn input tokens / lean mean, per worker then averaged; deltaTokens is the absolute tokens removed. A large task prompt inflates BOTH arms' first-turn totals and can push the ratio under 5 while the lever worked exactly as claimed — read deltaTokens beside the verdict, not the ratio alone."
+  ],
+  "hypothesisVerdict": "inconclusive",
+  "perWorker": [
+    {
+      "agentId": "worker-a",
+      "models": [
+        "openrouter/openai/gpt-oss-20b:free"
+      ],
+      "controlMeanFirstTurnInputTokens": 0,
+      "leanMeanFirstTurnInputTokens": 4895,
+      "deltaTokens": -4895
+    },
+    {
+      "agentId": "worker-b",
+      "models": [
+        "openrouter/nvidia/nemotron-nano-9b-v2:free"
+      ],
+      "controlMeanFirstTurnInputTokens": 27278,
+      "leanMeanFirstTurnInputTokens": 5420,
+      "deltaTokens": 21858,
+      "ratio": 5.0328413284132845
+    }
+  ],
+  "errors": [
+    {
+      "code": "zero_control_mean",
+      "arm": "control",
+      "agentId": "worker-a",
+      "message": "worker worker-a control-arm mean first-turn input tokens is 0"
+    }
+  ],
+  "iterationOrder": [
+    {
+      "iteration": 1,
+      "arm": "control",
+      "startedAt": "2026-08-15T01:24:02.582Z"
+    },
+    {
+      "iteration": 1,
+      "arm": "lean",
+      "startedAt": "2026-08-15T01:29:08.155Z"
+    },
+    {
+      "iteration": 2,
+      "arm": "control",
+      "startedAt": "2026-08-15T01:31:32.859Z"
+    },
+    {
+      "iteration": 2,
+      "arm": "lean",
+      "startedAt": "2026-08-15T01:36:36.011Z"
+    },
+    {
+      "iteration": 3,
+      "arm": "control",
+      "startedAt": "2026-08-15T01:39:53.706Z"
+    },
+    {
+      "iteration": 3,
+      "arm": "lean",
+      "startedAt": "2026-08-15T01:43:52.586Z"
+    }
+  ]
+}
