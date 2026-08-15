@@ -1,0 +1,13 @@
+story: DF1.2
+story_file: _bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-2-gates-evidence-envelope-adapter.md
+phase: 2-research
+branch: feature/df1-2-gates-envelope-adapter
+base: main
+target: main
+convention: prefix=feature/ base=main target=main  # sentinel in CLAUDE.md
+dirty_carryover: cli-anything/src/index.ts (mode-only 100644->100755, user said leave dirty)
+research:
+  context7: skipped (no new external libs)
+  cross_track: skipped (solo)
+  agents_spawned: [codebase-explore, specs-researcher, sssf-patterns-researcher]
+guardrail_log: []

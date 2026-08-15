@@ -162,10 +162,136 @@ function assertBeneath(rootReal: string, candidate: string, what: string): void 
   }
 }
 
+/**
+ * FIFO-safe realpath: resolves with lstat/readlink only, never open(2).
+ *
+ * Bun's native `fs.realpathSync` blocks forever on a FIFO planted anywhere on
+ * the path (reproduced: macOS, Bun 1.2.22) — the loader's own
+ * "refused instead of blocking" promise (the FIFO test) then hangs. This
+ * walker is Node's recursive realpath algorithm: parent resolved fully first,
+ * symlink targets re-walked from their root, 40-hop ELOOP ceiling.
+ */
+function realpathNoOpen(input: string): string {
+  const walk = (abs: string, depth: number): string => {
+    if (depth > 40) {
+      throw new Error(`too many levels of symbolic links: ${input}`);
+    }
+    const parent = path.dirname(abs);
+    if (parent === abs) return abs; // reached the filesystem root
+    const parentReal = walk(parent, depth);
+    const cur = path.join(parentReal, path.basename(abs));
+    const st = fs.lstatSync(cur); // ENOENT propagates to the caller's catch
+    if (!st.isSymbolicLink()) return cur;
+    return walk(path.resolve(parentReal, fs.readlinkSync(cur)), depth + 1);
+  };
+  return walk(path.resolve(input), 0);
+}
+
+/**
+ * DF1.2 gate artifact read — the identical four-step walk as the manifest read
+ * above (realpath → beneath-root re-assert → `O_NOFOLLOW` open + fd-path
+ * verification → read through the descriptor), over any declared artifact
+ * beneath the same pinned run root. It lives in this module, beside the
+ * primitives it shares (`assertBeneath`, `fdRealPath`), so the gate library
+ * never grows a second, weaker resolver (DF1.2 INV-3). `readArtifactBeneathRoot`
+ * in `gates/library.ts` is a thin caller; this is the one mechanism.
+ *
+ * Any refusal — missing artifact, escape outside the root, unavailable
+ * fd-path facility — throws; the caller turns that into a failed gate check.
+ * Size ceiling reuses `MANIFEST_MAX_BYTES`: gate-examined artifacts are
+ * manifests' peers (small JSON evidence), not unbounded logs.
+ */
+export function readArtifactBeneathRoot(
+  artifactPath: string,
+  runRoot: string,
+): { bytes: Buffer; resolvedPath: string; size: number } {
+  let rootReal: string;
+  try {
+    rootReal = realpathNoOpen(path.resolve(runRoot));
+  } catch (err) {
+    throw new ManifestError(`run root is not resolvable: ${runRoot}`, { cause: err });
+  }
+
+  let fileReal: string;
+  try {
+    fileReal = realpathNoOpen(path.resolve(artifactPath));
+  } catch (err) {
+    throw new ManifestError(`artifact is not resolvable: ${artifactPath}`, { cause: err });
+  }
+  assertBeneath(rootReal, fileReal, "artifact");
+
+  let fd: number;
+  try {
+    fd = fs.openSync(
+      fileReal,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+    );
+  } catch (err) {
+    throw new ManifestError(`artifact could not be opened: ${fileReal}`, { cause: err });
+  }
+  try {
+    const openedAs = fdRealPath(fd);
+    if (openedAs === null) {
+      throw new ManifestError(
+        `post-open fd-path verification is unavailable on ${process.platform}; refusing the read (INV-5)`,
+      );
+    }
+    assertBeneath(rootReal, openedAs, "opened artifact descriptor");
+    if (path.resolve(openedAs) !== fileReal) {
+      throw new ManifestError(
+        `artifact path changed between resolution and open: expected ${fileReal}, opened ${openedAs} (INV-1)`,
+      );
+    }
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      throw new ManifestError(`artifact is not a regular file: ${fileReal}`);
+    }
+    if (stat.size > MANIFEST_MAX_BYTES) {
+      throw new ManifestError(
+        `artifact is ${stat.size} bytes, above the ${MANIFEST_MAX_BYTES}-byte ceiling`,
+      );
+    }
+    let bytes: Buffer;
+    try {
+      bytes = fs.readFileSync(fd);
+    } catch (err) {
+      throw new ManifestError(`artifact could not be read: ${fileReal}`, { cause: err });
+    }
+    if (bytes.byteLength > MANIFEST_MAX_BYTES) {
+      throw new ManifestError(
+        `artifact read ${bytes.byteLength} bytes, above the ${MANIFEST_MAX_BYTES}-byte ceiling`,
+      );
+    }
+    return { bytes, resolvedPath: fileReal, size: stat.size };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /** darwin `fcntl` command that writes the fd's own path into the supplied buffer. */
 const F_GETPATH = 50;
 
 let darwinFcntl: ((fd: number, cmd: number, buf: Uint8Array) => number) | null | undefined;
+
+/**
+ * darwin's `proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO)` — the fixed-arity
+ * alternative to `fcntl(F_GETPATH)`. `bun:ffi` trampolines are fixed-arity and
+ * cannot express `fcntl`'s variadic ABI on arm64 (there the kernel reads the
+ * buffer pointer from the variadic save area, which a fixed-arity call never
+ * populates, so `F_GETPATH` "succeeds" writing nothing); `proc_pidfdinfo` has
+ * no variadic tail and works through the same FFI. Path bytes start at
+ * `sizeof(struct vnode_fdinfo)` = 176 in `struct vnode_fdinfowithpath`
+ * (verified against the SDK's `sys/proc_info.h`; a probe re-validates the
+ * layout at bind time below, so an SDK change degrades to refusal, not to a
+ * wrong path).
+ */
+const PROC_PIDFDVNODEPATHINFO = 2;
+const VNODE_PATH_OFFSET = 176;
+
+let darwinProcFdPath:
+  | ((pid: number, fd: number, flavor: number, buf: Uint8Array, size: number) => number)
+  | null
+  | undefined;
 
 /**
  * The fd's own path, or `null` where the running platform cannot supply it.
@@ -181,17 +307,30 @@ function fdRealPath(fd: number): string | null {
   }
   if (process.platform === "darwin") {
     const fcntl = loadDarwinFcntl();
-    if (!fcntl) return null;
-    // The kernel writes a NUL-terminated path of at most PATH_MAX.
-    const buf = new Uint8Array(1024);
+    if (fcntl) {
+      // The kernel writes a NUL-terminated path of at most PATH_MAX.
+      const buf = new Uint8Array(1024);
+      try {
+        if (fcntl(fd, F_GETPATH, buf) === 0) {
+          const end = buf.indexOf(0);
+          if (end > 0) return new TextDecoder().decode(buf.subarray(0, end));
+        }
+      } catch {
+        // Fall through to the fixed-arity facility below.
+      }
+    }
+    const procFdPath = loadDarwinProcFdPath();
+    if (!procFdPath) return null;
+    const buf = new Uint8Array(2048);
     try {
-      if (fcntl(fd, F_GETPATH, buf) !== 0) return null;
+      const rc = procFdPath(process.pid, fd, PROC_PIDFDVNODEPATHINFO, buf, buf.length);
+      if (rc <= VNODE_PATH_OFFSET || rc > buf.length) return null;
+      const end = buf.indexOf(0, VNODE_PATH_OFFSET);
+      if (end <= VNODE_PATH_OFFSET) return null;
+      return new TextDecoder().decode(buf.subarray(VNODE_PATH_OFFSET, end));
     } catch {
       return null;
     }
-    const end = buf.indexOf(0);
-    if (end <= 0) return null;
-    return new TextDecoder().decode(buf.subarray(0, end));
   }
   return null;
 }
@@ -237,6 +376,48 @@ function probeFcntlPath(bound: (fd: number, cmd: number, buf: Uint8Array) => num
   }
 }
 
+function loadDarwinProcFdPath(): ((pid: number, fd: number, flavor: number, buf: Uint8Array, size: number) => number) | null {
+  if (darwinProcFdPath !== undefined) return darwinProcFdPath;
+  try {
+    const lib = dlopen("libSystem.B.dylib", {
+      proc_pidfdinfo: {
+        args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.u32],
+        returns: FFIType.i32,
+      },
+    });
+    const bound = (pid: number, fd: number, flavor: number, buf: Uint8Array, size: number) =>
+      lib.symbols.proc_pidfdinfo(pid, fd, flavor, ptr(buf), size) as number;
+    // Same discipline as the fcntl probe: prove the binding and the struct
+    // offset against a path we already know, so a mismatched SDK layout means
+    // "facility unavailable" (refusal, INV-5) rather than a wrong path.
+    const fd = fs.openSync("/", fs.constants.O_RDONLY);
+    try {
+      const buf = new Uint8Array(2048);
+      const rc = bound(process.pid, fd, PROC_PIDFDVNODEPATHINFO, buf, buf.length);
+      if (rc <= VNODE_PATH_OFFSET || rc > buf.length) {
+        darwinProcFdPath = null;
+        return null;
+      }
+      const end = buf.indexOf(0, VNODE_PATH_OFFSET);
+      if (end <= VNODE_PATH_OFFSET) {
+        darwinProcFdPath = null;
+        return null;
+      }
+      const probed = new TextDecoder().decode(buf.subarray(VNODE_PATH_OFFSET, end));
+      if (probed !== "/") {
+        darwinProcFdPath = null;
+        return null;
+      }
+      darwinProcFdPath = bound;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    darwinProcFdPath = null;
+  }
+  return darwinProcFdPath;
+}
+
 /**
  * Seams the suite needs to exercise INV-1's resolve-to-open window and INV-5's
  * fail-closed branch. Deliberately **not** re-exported from `index.ts`: they can
@@ -267,7 +448,7 @@ function readBeneathRoot(
   let rootReal: string;
   let rootIsDir: boolean;
   try {
-    rootReal = fs.realpathSync(path.resolve(runRoot));
+    rootReal = realpathNoOpen(path.resolve(runRoot));
     // Inside the try, so a root deleted mid-resolution still surfaces as a
     // ManifestError — the loader promises nothing else escapes it.
     rootIsDir = fs.statSync(rootReal).isDirectory();
@@ -281,7 +462,7 @@ function readBeneathRoot(
   // Step 1 — resolve the full candidate path.
   let fileReal: string;
   try {
-    fileReal = fs.realpathSync(path.resolve(manifestPath));
+    fileReal = realpathNoOpen(path.resolve(manifestPath));
   } catch (err) {
     throw new ManifestError(`manifest is not resolvable: ${manifestPath}`, { cause: err });
   }
