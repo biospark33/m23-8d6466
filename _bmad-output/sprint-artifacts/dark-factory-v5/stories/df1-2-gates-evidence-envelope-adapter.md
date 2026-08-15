@@ -272,3 +272,13 @@ post-edit `lsp_diagnostics` gate.
 4. [DESIGN] `commandGate` redaction env is now `opts.env ?? ctx.env ?? parent` (it ignored `GateContext.env`, whose doc says it is the redaction input).
 5. Signal-death exit (`proc.exited` = null) renders `exit -1` instead of `exit null`.
 Reviewer verdict was FIX-FIRST on 1+2; both applied and re-verified. Findings 6-10 (NIT/RISK) accepted as documented trade-offs: read-failure notes keep the SSSF wording (fail-closed holds, cause granularity deferred), `readArtifactBeneathRoot` shares primitives with the manifest walk by living in the same module (structural dedup deferred to avoid reworking DF1.1 seams), `looksLikeEnvelope` duck-check is contained (worst case a fail, never a false pass).
+
+### Review Findings (BMad 3-layer review, 2026-08-15: Blind Hunter + Edge Case Hunter + Acceptance Auditor)
+
+Auditor: 0 findings — all 5 ACs, 6 invariants, 13 DoD items verified satisfied. Blind+edge layers raised 33; triage: 5 patch, 28 dismissed as noise/documented fail-closed designs.
+
+- [x] [Review][Patch] `commandGate` empty argv → explicit failed check "argv is empty" (fail-closed already via spawn error, but evidence should say why) [src/phase-engine/gates/command-gate.ts:50]
+- [x] [Review][Patch] Signal death renders `exit -1` without naming the signal — use `proc.signalCode` for truthful evidence + add test [src/phase-engine/gates/command-gate.ts:98]
+- [x] [Review][Patch] `filesNonEmpty` passes on impossible-but-corrupt negative `stat.size` (`!== 0` → `> 0`) [src/phase-engine/gates/library.ts:106]
+- [x] [Review][Patch] `gate_report_ms` hardcoded 0 though gate ran — measure report derivation [src/phase-engine/gates/library.ts:268]
+- [x] [Review][Patch] Fully-redacted command output yields empty diagnostic tail — fall back to "(all output redacted)" [src/phase-engine/gates/command-gate.ts:99]

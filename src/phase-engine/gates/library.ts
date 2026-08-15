@@ -103,7 +103,7 @@ export const filesNonEmpty: Gate = {
       } catch {
         continue;
       }
-      report.check(item, stat.size !== 0, stat.size === 0 ? "declared artifact is empty" : size(stat.size));
+      report.check(item, stat.size > 0, stat.size <= 0 ? "declared artifact is empty" : size(stat.size));
     }
     return report;
   },
@@ -256,6 +256,12 @@ export function gatedBody<T>(
         );
       }
       const gateExecMs = performance.now() - started;
+      // Measure report derivation: violations shallow copy + checks map copy.
+      const reportStarted = performance.now();
+      const violations = report.violations;
+      const checks = report.checks.map((c) => ({ ...c }));
+      const gateReportMs = performance.now() - reportStarted;
+      // Sub-millisecond work may round to 0; that's observably accurate.
       journal.writeGateEvent({
         runId: bodyCtx.ctx.runId,
         phaseId: bodyCtx.phaseId,
@@ -265,17 +271,17 @@ export function gatedBody<T>(
         phase: bodyCtx.params.name,
         attempt: opts?.attempt ?? 1,
         gate_exec_ms: Math.round(gateExecMs),
-        gate_report_ms: 0,
-        violations: report.violations,
-        checks: report.checks.map((c) => ({ ...c })),
+        gate_report_ms: Math.round(gateReportMs),
+        violations,
+        checks,
       });
       // Keyed on `passed`, not on violations: a zero-check report is
       // `passed: false` with an EMPTY violations list (INV-5), and it must
       // still fail the phase.
       if (!report.passed) {
         failures.push(
-          ...(report.violations.length > 0
-            ? report.violations
+          ...(violations.length > 0
+            ? violations
             : [`${gate.name}: examined nothing`]),
         );
       }

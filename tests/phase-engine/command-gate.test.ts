@@ -126,4 +126,34 @@ describe("commandGate (INV-1, AC5)", () => {
       expect(gate.name).toContain(script);
     }
   });
+
+  test("empty argv returns a failed check with 'argv is empty' note", async () => {
+    const gate = commandGate([]);
+    const report = await gate.run(undefined, gateCtx);
+    expect(report.passed).toBe(false);
+    expect(report.checks).toHaveLength(1);
+    expect(report.checks[0]!.ok).toBe(false);
+    expect(report.checks[0]!.note).toContain("argv is empty");
+  });
+
+  test("signal death is reported with signal name in note", async () => {
+    const gate = commandGate([process.execPath, "-e", "process.kill(process.pid, 'SIGKILL')"]);
+    const report = await gate.run(undefined, gateCtx);
+    expect(report.passed).toBe(false);
+    expect(report.checks).toHaveLength(1);
+    expect(report.checks[0]!.ok).toBe(false);
+    expect(report.checks[0]!.note).toContain("killed by signal");
+  });
+
+  test("when all output is redacted, note contains fallback text", async () => {
+    const secret = "df12-all-redacted-secret-27182818";
+    const gate = commandGate(
+      [process.execPath, "-e", "console.log(process.env.ALL_REDACTED_SECRET); process.exit(1)"],
+      { env: { PATH: process.env.PATH ?? "", ALL_REDACTED_SECRET: secret } },
+    );
+    const report = await gate.run(undefined, gateCtx);
+    expect(report.passed).toBe(false);
+    expect(report.checks[0]!.note).toContain("(all output redacted)");
+    expect(report.checks[0]!.note).not.toContain(secret);
+  });
 });

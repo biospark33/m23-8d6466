@@ -56,6 +56,10 @@ export function commandGate(argv: string[], opts: CommandGateOptions = {}): Gate
       const item = opts.label ?? argv.join(" ");
       const signal = opts.signal ?? ctx.signal;
 
+      if (argv.length === 0) {
+        return report.check(item, false, "argv is empty");
+      }
+
       let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
       try {
         // INV-1: argv array, never a shell string. The argv originates from a
@@ -92,14 +96,16 @@ export function commandGate(argv: string[], opts: CommandGateOptions = {}): Gate
       // INV-2: redact the FULL output before cutting the tail window — a
       // secret straddling the cut no longer matches the full-value pattern,
       // so truncating first would leak its partial suffix into the journal.
-      // (Same order as the envelope adapter; `exitCode` is null when the
-      // process died by signal, which fails closed as a non-zero exit.)
       const redactionEnv = opts.env ?? ctx.env ?? parentEnvStrings();
-      const code = exitCode ?? -1;
-      const tail = redactSecrets(`${stdout}${stderr}`, redactionEnv).slice(
-        -GATE_NOTE_TAIL_CHARS,
-      );
-      return report.check(item, false, `exit ${code}\n${tail}`);
+      const raw = `${stdout}${stderr}`;
+      const redacted = redactSecrets(raw, redactionEnv);
+      const tailSlice = redacted.slice(-GATE_NOTE_TAIL_CHARS);
+      // Use fallback when the tail is empty or holds only redaction markers
+      // (one or more) — no original content survived to be evidence.
+      const isOnlyRedacted = /^(\s*\[REDACTED:[^\]]*\])+\s*$/.test(tailSlice);
+      const tail = tailSlice.length > 0 && !isOnlyRedacted ? tailSlice : raw.length > 0 ? "(all output redacted)" : "";
+      const notePrefix = proc.signalCode ? `killed by signal ${proc.signalCode}` : `exit ${exitCode ?? -1}`;
+      return report.check(item, false, `${notePrefix}\n${tail}`);
     },
   };
 }
