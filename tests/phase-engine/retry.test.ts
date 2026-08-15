@@ -576,7 +576,9 @@ describe("e2e demo (DoD, MANDATORY) — retries: 1, 3 sends, one session, summed
     expect(out.record.envelopeValid).toBe(true);
 
     // The artifact: the emitted event stream (log lines + journal gate events),
-    // written next to the other DF evidence artifacts.
+    // written next to the other DF evidence artifacts. The write is opt-in
+    // (DF13_REFRESH_ARTIFACT=1) so normal test runs stay read-only; every
+    // assertion above is on in-memory state and runs unconditionally.
     const artifact = {
       story: "DF1.3",
       scenario: "retries: 1 — prose-wrapped invalid JSON, then gate violation, then pass",
@@ -585,9 +587,11 @@ describe("e2e demo (DoD, MANDATORY) — retries: 1, 3 sends, one session, summed
       logLines: h.lines,
       gateEvents: events,
     };
-    const dir = path.resolve(import.meta.dir, "../../artifacts");
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "df1-3-e2e-event-stream.json"), `${JSON.stringify(artifact, null, 2)}\n`);
+    if (process.env.DF13_REFRESH_ARTIFACT === "1") {
+      const dir = path.resolve(import.meta.dir, "../../artifacts");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "df1-3-e2e-event-stream.json"), `${JSON.stringify(artifact, null, 2)}\n`);
+    }
   });
 });
 

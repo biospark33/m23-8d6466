@@ -71,7 +71,7 @@ returned `PhaseAttemptRecord`.
    `contextWindow` come from the last send only, and a send whose turn reports
    `stopReason: aborted | error` does not overwrite the last good occupancy reading.
 4. Given a budget is exhausted, When the last correction still fails, Then the phase raises
-   `EnvelopeParseExhausted` (Loop A) or `GateFailure` naming every unresolved violation (Loop B),
+   `EnvelopeParseExhausted` (Loop A) or `GateFailureError` naming every unresolved violation (Loop B),
    the phase status remains `fail`, and the final invalid response is retained as an
    invalid-envelope record rather than discarded.
 5. Given the default `retries: 0`, When the first parsed envelope passes its gates, Then exactly one
@@ -222,7 +222,7 @@ returned `PhaseAttemptRecord`.
       lower count and MUST fail this test; `retries: 6` and `retries: -1` are rejected at
       construction (INV-1), not clamped.
 - [x] **Test (unit boundary):** a phase accumulating `2_500_000` µ$ over three sends surfaces
-      `2_500_000` on `agent_end` and exactly `2.5` at the `runner.ts:707` call site — one conversion,
+      `2_500_000` on `agent_end` and exactly `2.5` at the `runner.ts:803` call site — one conversion,
       no rounding drift. An implementation passing the raw µ$ integer into the USD guard MUST fail
       this test, and so must one that stores dollars anywhere inside `src/phase-engine/`.
 - [x] **Test (occupancy asymmetry):** a 3-send phase where send 3 reports `stopReason: "aborted"` →
@@ -232,7 +232,7 @@ returned `PhaseAttemptRecord`.
       but whose `model` changes also mints a new id — an implementation keying on `(agentId, model)`
       alone reuses the same session across the provider change and MUST fail this test.
 - [x] **Test (exhaustion):** invalid JSON on every send → `EnvelopeParseExhausted`, phase `fail`,
-      final invalid response retained; gate-violating envelope on every attempt → `GateFailure`
+      final invalid response retained; gate-violating envelope on every attempt → `GateFailureError`
       naming every unresolved violation.
 - [x] **Test (e2e demo — MANDATORY):** run the `retries: 1` scenario end to end and capture the
       emitted event stream as an artifact showing 3 sends, one session id, `gate_fail(1)` →
@@ -317,6 +317,12 @@ returned `PhaseAttemptRecord`.
   `(agentId, provider, model)` session key, INV-2-safe issue lines.
 - Local gates: 300 pass / 0 fail focal (tests/phase-engine, includes DF1.1+DF1.2 suites — no
   regressions), `tsc --noEmit` clean, `biome check` clean on engine + tests.
+- GitNexus: pre-edit `impact` on the DF1.3 symbols — index predates this branch's new files, so
+  the graph resolves none of them; grep-verified blast radius instead (`runAgentPhase` has no src
+  callers yet — DF1.6 wires it; `parseAttempts` = 1 counter + 1 type field + 3 test asserts).
+  Pre-commit `detect_changes()` (round 6): 8 changed files, 0 changed symbols, 0 affected
+  processes, risk **low**. Round-2 run on the then-current diff also reported 4 files / no
+  affected processes / low risk.
 - e2e demo artifact: `artifacts/df1-3-e2e-event-stream.json` (3 sends, one session id,
   `gate_fail(1)` → `gate_pass(2)`, summed usage, `contextTokens` from send 3).
 - Docker container tests: N/A — no `docker-compose.test.yml`/test Dockerfile exists in this repo
@@ -356,8 +362,8 @@ returned `PhaseAttemptRecord`.
 - 2026-08-15: DF1.3 implemented — dual retry discipline (Loop A parse-fix bounded by
   `PARSE_FIX_ATTEMPTS`, Loop B gate retries bounded by `retries`, fresh parse budget per gate
   correction), session identity keyed `(agentId, provider, model)`, µ$ usage accumulator with
-  last-send occupancy, `PhaseAttemptRecord` + widened `agent_end`, INV-1..INV-5 enforced, 53 new
-  tests + e2e event-stream artifact.
+  last-send occupancy, `PhaseAttemptRecord` + widened `agent_end`, INV-1..INV-5 enforced, 57 new
+  tests (16 envelope-parse + 31 retry + 10 usage, runtime-verified) + e2e event-stream artifact.
 
 ## Status
 

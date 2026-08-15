@@ -5,11 +5,14 @@
 # so stacked-PR merge conflicts surface before the push instead of at merge
 # time (learning D018). Overlapping files are printed with the competing PR
 # number; exit is nonzero on overlap unless --warn downgrades it to advisory.
+# Tool failures (git diff, gh pr list, gh pr diff) stop the script — a silent
+# empty scan would print OK without having checked anything (review round 6);
+# --warn softens only confirmed overlap findings, never tool failures.
 #
 # Usage:
 #   scripts/dev/check-pr-conflicts.sh [--base <ref>] [--warn]
 #
-# Requires: git, gh (authenticated). Skips itself when no open PRs exist.
+# Requires: git, gh (authenticated). Exits OK when no other open PRs exist.
 
 set -euo pipefail
 
@@ -26,7 +29,12 @@ done
 cd "$(git rev-parse --show-toplevel)"
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-mapfile -t MINE < <(git diff --name-only "${BASE}" | sort -u || true)
+CHANGED="$(git diff --name-only "${BASE}" | sort -u)"
+if [[ -n "$CHANGED" ]]; then
+  mapfile -t MINE <<< "$CHANGED"
+else
+  MINE=()
+fi
 
 if [[ ${#MINE[@]} -eq 0 ]]; then
   echo "OK: no changed files vs ${BASE}; nothing to check."
@@ -35,18 +43,23 @@ fi
 
 OVERLAPS=0
 
-while IFS=$'\t' read -r number head; do
-  [[ "$head" == "$BRANCH" ]] && continue  # this branch's own PR
-  while IFS= read -r file; do
-    [[ -z "$file" ]] && continue
-    for mine in "${MINE[@]}"; do
-      if [[ "$file" == "$mine" ]]; then
-        echo "CONFLICT RISK: ${file} also touched by PR #${number} (${head})"
-        OVERLAPS=$((OVERLAPS + 1))
-      fi
-    done
-  done < <(gh pr diff "$number" --name-only 2>/dev/null || true)
-done < <(gh pr list --state open --limit 1000 --json number,headRefName --jq '.[] | "\(.number)\t\(.headRefName)"' 2>/dev/null || true)
+PR_LIST="$(gh pr list --state open --limit 1000 --json number,headRefName --jq '.[] | "\(.number)\t\(.headRefName)"')"
+if [[ -n "$PR_LIST" ]]; then
+  while IFS=$'\t' read -r number head; do
+    [[ -z "${number:-}" ]] && continue
+    [[ "$head" == "$BRANCH" ]] && continue  # this branch's own PR
+    PR_FILES="$(gh pr diff "$number" --name-only)"
+    while IFS= read -r file; do
+      [[ -z "$file" ]] && continue
+      for mine in "${MINE[@]}"; do
+        if [[ "$file" == "$mine" ]]; then
+          echo "CONFLICT RISK: ${file} also touched by PR #${number} (${head})"
+          OVERLAPS=$((OVERLAPS + 1))
+        fi
+      done
+    done <<< "$PR_FILES"
+  done <<< "$PR_LIST"
+fi
 
 if [[ $OVERLAPS -gt 0 ]]; then
   echo "FAIL: ${OVERLAPS} overlapping file(s) with open PRs — coordinate or rebase first."

@@ -107,6 +107,60 @@ describe("UsageAccumulator — occupancy reads the last send only", () => {
 describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV-3)", () => {
   const engineRoot = path.resolve(import.meta.dir, "../../src/phase-engine");
 
+  /**
+   * Code-only view of a source file (review round 6): blanks // and
+   * block comments AND string/template/char literals (escape-aware, block
+   * state carries across lines) so the invariant scans executable code,
+   * not prose, comments, or literal text. Regex literals are not lexed —
+   * a known ceiling shared with the dp gate's blanker.
+   */
+  function codeOnly(text: string): string {
+    let inBlock = false;
+    let inStr: '"' | "'" | "`" | null = null;
+    return text
+      .split("\n")
+      .map((line) => {
+        let out = "";
+        for (let i = 0; i < line.length; i += 1) {
+          const c = line[i]!;
+          const two = line.slice(i, i + 2);
+          if (inBlock) {
+            if (two === "*/") {
+              inBlock = false;
+              out += "  ";
+              i += 1;
+            } else out += " ";
+            continue;
+          }
+          if (inStr) {
+            if (c === "\\") {
+              out += "  ";
+              i += 1; // skip the escaped char
+            } else if (c === inStr) {
+              inStr = null;
+              out += " ";
+            } else out += " ";
+            continue;
+          }
+          if (two === "//") break; // rest of the line is a comment
+          if (two === "/*") {
+            inBlock = true;
+            out += "  ";
+            i += 1;
+            continue;
+          }
+          if (c === '"' || c === "'" || c === "`") {
+            inStr = c;
+            out += " ";
+            continue;
+          }
+          out += c;
+        }
+        return out;
+      })
+      .join("\n");
+  }
+
   test("no float-dollar field exists anywhere inside src/phase-engine", () => {
     const offenders: string[] = [];
     const walk = (dir: string): void => {
@@ -114,8 +168,8 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
         else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
-          const text = fs.readFileSync(full, "utf8");
-          if (/costUsd|costCents|usd:\s|dollars/.test(text)) offenders.push(full);
+          const code = codeOnly(fs.readFileSync(full, "utf8"));
+          if (/costUsd|costCents|usd:\s|dollars/.test(code)) offenders.push(full);
         }
       }
     };
@@ -124,14 +178,8 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
   });
 
   test("exactly one micros→USD DIVISION exists in the engine, in usage.ts", () => {
-    const usage = fs.readFileSync(path.join(engineRoot, "usage.ts"), "utf8");
-    // Comments excluded, same as the walk below: the invariant is about the
-    // one EXECUTABLE conversion (review round 1).
-    const code = usage
-      .split("\n")
-      .filter((l) => !l.trimStart().startsWith("*") && !l.trimStart().startsWith("//"))
-      .join("\n");
-    expect((code.match(/\/\s*1_000_000/g) ?? []).length).toBe(1);
+    const usage = codeOnly(fs.readFileSync(path.join(engineRoot, "usage.ts"), "utf8"));
+    expect((usage.match(/\/\s*1_000_000/g) ?? []).length).toBe(1);
     // No other engine file divides by a million (DF1.5's roster rate math
     // multiplies tokens into µ$ — different direction, different unit contract).
     const others: string[] = [];
@@ -140,14 +188,7 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
         else if (entry.name.endsWith(".ts") && path.resolve(dir, entry.name) !== path.join(engineRoot, "usage.ts")) {
-          // Comments excluded: DF1.5's roster docs mention the projection
-          // formula; the invariant is about executable conversions.
-          const code = fs
-            .readFileSync(full, "utf8")
-            .split("\n")
-            .filter((l) => !l.trimStart().startsWith("*") && !l.trimStart().startsWith("//"))
-            .join("\n");
-          if (/\/\s*1_000_000/.test(code)) others.push(full);
+          if (/\/\s*1_000_000/.test(codeOnly(fs.readFileSync(full, "utf8")))) others.push(full);
         }
       }
     };

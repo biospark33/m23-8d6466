@@ -71,13 +71,16 @@ describe("parseEnvelope", () => {
     }
   });
 
-  test("unrecognized key is rejected (closed schema) and its name is sanitized in the issue", () => {
+  test("unrecognized key is rejected (closed schema) and its name never reaches the issue text", () => {
     const out = parseEnvelope(JSON.stringify({ ...valid, "bad\nkey": 1 }));
     expect(out.ok).toBe(false);
     if (!out.ok) {
-      // A raw newline in the offending key must not survive into the issue
-      // text — it could forge lines in a correction prompt (INV-2).
-      expect(out.issues.join(" ")).not.toContain("\n");
+      // The offending key itself — including its newline-containing name —
+      // must be absent from the issue text: a raw newline or the key's own
+      // text could forge instruction content in a correction prompt (INV-2).
+      const joined = out.issues.join(" ");
+      expect(joined).not.toContain("\n");
+      expect(joined).not.toContain("bad");
     }
   });
 

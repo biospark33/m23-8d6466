@@ -156,7 +156,6 @@ export async function runAgentPhase(opts: AgentPhaseOptions): Promise<AgentPhase
   let loop: "parse" | "gate" = "parse";
   let envelope: Envelope | undefined;
   let sends = 0;
-  let parseAttempts = 0;
 
   try {
     // Loop B — outer. Each iteration gets a fresh Loop A budget below.
@@ -167,7 +166,6 @@ export async function runAgentPhase(opts: AgentPhaseOptions): Promise<AgentPhase
         const res = await opts.sender.send({ prompt, sessionId, signal: opts.signal });
         const sendMs = performance.now() - sendStarted;
         sends += 1;
-        parseAttempts += 1;
         const parseStarted = performance.now();
         const outcome = parseEnvelope(res.text);
         const parseMs = performance.now() - parseStarted;
@@ -270,7 +268,9 @@ export async function runAgentPhase(opts: AgentPhaseOptions): Promise<AgentPhase
         const record: PhaseAttemptRecord = {
           attempt: gateAttempt,
           sends,
-          parseAttempts,
+          // Every send is one parse attempt — one counter tracks both (the
+          // separate counter was removed as redundant; review round 6).
+          parseAttempts: sends,
           gateReports,
           envelopeValid: true,
         };
@@ -284,7 +284,7 @@ export async function runAgentPhase(opts: AgentPhaseOptions): Promise<AgentPhase
         envelope = undefined;
       } else {
         throw new GateFailureError(
-          `phase '${sanitizeForMessage(params.name)}' failed gate(s) after ${params.retries + 1} attempt(s):\n- ${failures.join("\n- ")}`,
+          `phase '${sanitizeForMessage(params.name)}' failed gate(s) after ${params.retries + 1} attempt(s):\n- ${failures.map((f) => sanitizeForMessage(f)).join("\n- ")}`,
           failures,
         );
       }
