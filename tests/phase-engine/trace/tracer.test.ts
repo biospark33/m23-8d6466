@@ -17,7 +17,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 // ponytail: src/ does not exist yet — this import fails red as expected
-import { Tracer, TracerError } from "../../../src/phase-engine/trace/tracer.ts";
+import {
+  Tracer,
+  TracerError,
+  serializeTraceError,
+} from "../../../src/phase-engine/trace/tracer.ts";
 import {
   applyWriterPragmas,
   TRACE_PRAGMAS,
@@ -781,5 +785,46 @@ describe("F5: pid guard", () => {
     db.close();
 
     tracer.close();
+  });
+});
+
+describe("serializeTraceError (shared sink contract)", () => {
+  test("maps full TracerError to snake_case log fields verbatim", () => {
+    const full = new TracerError({
+      code: "SQLITE_WRITE",
+      message: "database is closed",
+      table: "phases",
+      statement: "INSERT INTO phases (...) VALUES (...)",
+      phase: "plan",
+      agentId: "agent-1",
+      timestamp: "2024-01-01T00:00:00.000Z",
+      durationMs: 42,
+      jsonlWriteMs: 1,
+      sqliteInsertMs: 2,
+    });
+    expect(serializeTraceError(full)).toEqual({
+      phase: "plan",
+      agentId: "agent-1",
+      table: "phases",
+      statement: "INSERT INTO phases (...) VALUES (...)",
+      timestamp: "2024-01-01T00:00:00.000Z",
+      durationMs: 42,
+      jsonl_write_ms: 1,
+      sqlite_insert_ms: 2,
+    });
+  });
+
+  test("fills defaults for absent optional fields (null / 0 / clock timestamp)", () => {
+    const bare = new TracerError({ code: "SQLITE_WRITE", message: "boom" });
+    const out = serializeTraceError(bare);
+    expect(out.phase).toBeNull();
+    expect(out.agentId).toBeNull();
+    expect(out.table).toBeNull();
+    expect(out.statement).toBeNull();
+    expect(out.durationMs).toBe(0);
+    expect(out.jsonl_write_ms).toBe(0);
+    expect(out.sqlite_insert_ms).toBe(0);
+    // Filled from wall clock when absent — ISO-8601 shape
+    expect(out.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
   });
 });

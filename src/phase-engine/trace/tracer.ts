@@ -88,6 +88,36 @@ export function coherentStartedAt(
   return startedAt ?? endedAt ?? new Date().toISOString();
 }
 
+/**
+ * Shared TracerError → log-fields serialization (F2 observability contract).
+ * Both error sinks — journal-bridge.ts onTraceError (stderr) and the runner's
+ * run-level failure log in scripts/pipeline-run.ts — must emit the same field
+ * names and defaults; a drift between them breaks downstream log parsing.
+ * Envelope fields (level, event, correlation ids, code/message placement)
+ * are sink-specific and deliberately not shared.
+ */
+export function serializeTraceError(err: TracerError): {
+  phase: string | null;
+  agentId: string | null;
+  table: string | null;
+  statement: string | null;
+  timestamp: string;
+  durationMs: number;
+  jsonl_write_ms: number;
+  sqlite_insert_ms: number;
+} {
+  return {
+    phase: err.phase ?? null,
+    agentId: err.agentId ?? null,
+    table: err.table ?? null,
+    statement: err.statement ?? null,
+    timestamp: err.timestamp ?? new Date().toISOString(),
+    durationMs: err.durationMs ?? 0,
+    jsonl_write_ms: err.jsonlWriteMs ?? 0,
+    sqlite_insert_ms: err.sqliteInsertMs ?? 0,
+  };
+}
+
 /** Generate a nanoid-style envelope_id. */
 function envelopeId(): string {
   return randomBytes(12).toString("base64url");

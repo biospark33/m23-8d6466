@@ -44,7 +44,11 @@ import {
   type RunContext,
   looksLikeEnvelope,
 } from "../src/phase-engine/index.ts";
-import { Tracer, TracingJournal } from "../src/phase-engine/index.ts";
+import {
+  serializeTraceError,
+  Tracer,
+  TracingJournal,
+} from "../src/phase-engine/index.ts";
 import type { Envelope } from "../src/phase-engine/envelopes/types.ts";
 import { parseValueFlags } from "./lib/cli-args.ts";
 
@@ -277,15 +281,10 @@ async function main(argv: readonly string[]): Promise<number> {
           runId,
           pipelineId: manifest.pipelineId,
           code: err.code,
-          table: err.table,
-          statement: err.statement,
           message: err.message,
-          phase: err.phase ?? null,
-          agentId: err.agentId ?? null,
-          timestamp: err.timestamp ?? new Date().toISOString(),
-          durationMs: err.durationMs ?? 0,
-          jsonl_write_ms: err.jsonlWriteMs ?? 0,
-          sqlite_insert_ms: err.sqliteInsertMs ?? 0,
+          // Shared field names/defaults come from serializeTraceError so
+          // this sink cannot drift from journal-bridge's stderr sink.
+          ...serializeTraceError(err),
         })}\n`,
       );
     },

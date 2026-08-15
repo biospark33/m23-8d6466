@@ -75,6 +75,7 @@ export { GATE_NOTE_TAIL_CHARS, commandGate, type CommandGateOptions } from "./ga
 export {
   Tracer,
   TracerError,
+  serializeTraceError,
   type TracerOptions,
 } from "./trace/tracer.ts";
 export {

@@ -10,7 +10,7 @@
 import type { PhaseJournal } from "../journal.ts";
 import type { GateEvent, PhaseRecord, PhaseStatus, RunContext } from "../types.ts";
 import type { Tracer, TracerError } from "./tracer.ts";
-import { coherentStartedAt } from "./tracer.ts";
+import { coherentStartedAt, serializeTraceError } from "./tracer.ts";
 
 // AC5: a broken/closed stderr (EPIPE — piped to head, fd closed by a
 // supervisor) reports its failure asynchronously via the stream's 'error'
@@ -31,19 +31,14 @@ export function onTraceError(err: TracerError, requestId: string): void {
   try {
     // Log structured error to stderr, never throw — and a closed/broken
     // stderr (EPIPE) must not turn a tracer failure into a run failure.
+    // Shared field names/defaults come from serializeTraceError so this sink
+    // cannot drift from the runner's run-level failure log.
     process.stderr.write(
       `${JSON.stringify({
         requestId,
-        phase: err.phase ?? null,
-        agentId: err.agentId ?? null,
-        table: err.table ?? null,
-        statement: err.statement ?? null,
-        timestamp: err.timestamp ?? new Date().toISOString(),
-        durationMs: err.durationMs ?? 0,
-        jsonl_write_ms: err.jsonlWriteMs ?? 0,
-        sqlite_insert_ms: err.sqliteInsertMs ?? 0,
         level: "warn",
         event: "trace_error",
+        ...serializeTraceError(err),
         error: {
           code: err.code,
           message: err.message,
