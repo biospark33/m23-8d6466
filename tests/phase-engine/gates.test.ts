@@ -5,7 +5,7 @@
  * passes as well as failures, violations and passed derived — never authored.
  * A report that examined nothing is not green (INV-5).
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,6 +13,7 @@ import * as path from "node:path";
 import {
   FileJournal,
   GateReport,
+  type GateCheck,
   type GateContext,
   type Envelope,
   type PhaseBodyContext,
@@ -33,6 +34,7 @@ const reviewCases = JSON.parse(
 ) as Record<string, Envelope>;
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df1-2-gates-")));
+afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
 let markerRoot = "";
 
 beforeEach(() => {
@@ -77,6 +79,20 @@ describe("GateReport derivation (AC1, INV-4, INV-5)", () => {
     const report = new GateReport().check("a", true, "exit 0");
     expect(report.passed).toBe(true);
     expect(report.violations).toEqual([]);
+  });
+
+  test("recorded checks are immutable: flipping one after the fact throws (INV-4)", () => {
+    const report = new GateReport().check("gone.txt", false, "declared artifact does not exist");
+    // Frozen at check(): editing a recorded check would manufacture a pass
+    // with no new evidence. ESM is strict mode, so the assignment throws.
+    expect(() => {
+      (report.checks[0] as GateCheck).ok = true;
+    }).toThrow();
+    // The getter hands out a copy: appending cannot grow the report either.
+    const exposed = report.checks as GateCheck[];
+    exposed.push({ item: "forged", ok: true, note: "self-certified" });
+    expect(report.checks).toHaveLength(1);
+    expect(report.passed).toBe(false);
   });
 });
 

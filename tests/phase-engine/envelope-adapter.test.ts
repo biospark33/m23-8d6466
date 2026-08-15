@@ -5,7 +5,7 @@
  * through the same door an agent report uses, redacted at the boundary, with
  * `spawnEnv` dropped before anything is serialized.
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,9 +15,11 @@ import {
   type Envelope,
   type QualityCheckResult,
   asEnvelope,
+  truncateTail,
 } from "../../src/phase-engine/index.ts";
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df1-2-adapter-")));
+afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
 
 function result(over: Partial<QualityCheckResult> = {}): QualityCheckResult {
   return {
@@ -106,6 +108,24 @@ describe("redaction at the adapter boundary (INV-2)", () => {
     expect(envelope.outputTail).toContain("[REDACTED:CUSTOM_SECRET_TOKEN]");
     expect(envelope.outputTail).not.toContain(token);
   });
+
+  test("redaction precedes truncation: a token straddling the 4,000-char cut leaves no partial", () => {
+    // The token is 303 chars at the head and the output is 4,108 chars, so
+    // the 4,000-char cut would open 108 chars INTO the token if truncation
+    // ran first — stranding its unmatched tail past the redactor.
+    const token = `df12-straddle-${"v".repeat(280)}-ENDMARK9`;
+    const envelope = asEnvelope(
+      result({
+        spawnEnv: { STRADDLE_TOKEN: token },
+        outputTail: `${token}${"y".repeat(3_800)}TRAIL`,
+      }),
+      "tests",
+    );
+    expect(envelope.outputTail).toContain("[REDACTED:STRADDLE_TOKEN]");
+    expect(envelope.outputTail).not.toContain(token);
+    expect(envelope.outputTail).not.toContain("-ENDMARK9");
+    expect(envelope.outputTail).toContain("TRAIL");
+  });
 });
 
 describe("outputTail ceiling (INV-2)", () => {
@@ -122,6 +142,14 @@ describe("outputTail ceiling (INV-2)", () => {
   test("short tails ride along verbatim with no suffix", () => {
     const envelope = asEnvelope(result({ outputTail: "clean run" }), "tests");
     expect(envelope.outputTail).toBe("clean run");
+  });
+
+  test("the ceiling holds even when it is smaller than the truncation suffix", () => {
+    // `[truncated, N chars total]` is ~30 chars; a ceiling below that must
+    // still bound the result — the suffix is cut to fit, never overrun.
+    expect(truncateTail("x".repeat(50), 10)).toHaveLength(10);
+    expect(truncateTail("x".repeat(50), 10)).toContain("[trun");
+    expect(truncateTail("x".repeat(50), 0)).toBe("");
   });
 });
 

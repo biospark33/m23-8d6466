@@ -26,10 +26,13 @@ export const OUTPUT_TAIL_CHARS = 4_000;
  * cutting, so `result.length <= ceiling` always holds.
  */
 export function truncateTail(text: string, ceiling: number = OUTPUT_TAIL_CHARS): string {
-  if (text.length <= ceiling) return text;
+  const limit = Math.max(0, ceiling);
+  if (text.length <= limit) return text;
   const suffix = `[truncated, ${text.length} chars total]`;
-  const reserve = Math.max(0, ceiling - suffix.length);
-  return `${text.slice(text.length - reserve)}${suffix}`;
+  // A ceiling smaller than the suffix cannot hold text plus suffix; the
+  // invariant is on the RESULT, so the suffix itself is cut to fit.
+  if (limit <= suffix.length) return suffix.slice(0, limit);
+  return `${text.slice(text.length - (limit - suffix.length))}${suffix}`;
 }
 
 /**

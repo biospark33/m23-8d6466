@@ -300,7 +300,15 @@ let darwinProcFdPath:
 function fdRealPath(fd: number): string | null {
   if (process.platform === "linux") {
     try {
-      return fs.readlinkSync(`/proc/self/fd/${fd}`);
+      const link = fs.readlinkSync(`/proc/self/fd/${fd}`);
+      // Linux appends " (deleted)" when the open file has been unlinked; the
+      // fd still pins the inode that passed beneath-root verification, so the
+      // marker is stripped before the equality/prefix comparisons use the
+      // path. A file legitimately NAMED "x (deleted)" that is NOT deleted
+      // loses its real suffix to this strip and fails the equality check —
+      // a refusal, which is INV-5's fail-closed direction, never a wrong-file
+      // pass.
+      return link.endsWith(" (deleted)") ? link.slice(0, -" (deleted)".length) : link;
     } catch {
       return null;
     }

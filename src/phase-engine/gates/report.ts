@@ -26,12 +26,17 @@ export class GateReport {
 
   /** Appends one `GateCheck` per item examined and returns itself. */
   check(item: string, ok: boolean, note: string): this {
-    this.#checks.push({ item, ok, note });
+    // Frozen at entry: a check, once recorded, is evidence that cannot be
+    // edited afterwards — flipping `ok` on a failed check would manufacture a
+    // pass with no new evidence (INV-4).
+    this.#checks.push(Object.freeze({ item, ok, note }));
     return this;
   }
 
-  get checks(): readonly GateCheck[] {
-    return this.#checks;
+  get checks(): readonly Readonly<GateCheck>[] {
+    // A copy, not the live array: a caller cannot append or reorder its way to
+    // a greener report either. The elements are already frozen at `check()`.
+    return this.#checks.map((c) => c);
   }
 
   /** The failed checks, as `"item: note"` (or `"item: failed"` when the note is empty). */

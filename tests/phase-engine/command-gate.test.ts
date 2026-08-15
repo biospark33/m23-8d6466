@@ -4,7 +4,7 @@
  * INV-1: argv array, never a shell string. AC5: a subprocess that cannot be
  * spawned at all is a failed check — never a pass, never a skip.
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { commandGate } from "../../src/phase-engine/index.ts";
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df1-2-cmdgate-")));
+afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
 const gateCtx = { runRoot: tmpRoot };
 
 describe("commandGate (INV-1, AC5)", () => {
@@ -58,6 +59,29 @@ describe("commandGate (INV-1, AC5)", () => {
     expect(report.passed).toBe(false);
     expect(report.checks[0]!.note).toContain("[REDACTED:GATE_TEST_TOKEN]");
     expect(report.checks[0]!.note).not.toContain(token);
+  });
+
+  test("redaction precedes the tail cut: a token straddling the 1,000-char window leaves no partial (INV-2)", async () => {
+    const token = "df12-cut-straddle-token-24682468";
+    // Geometry: the token spans [202, 234) of a 1,205-char output, so the
+    // 1,000-char tail window opens at 205 — 3 chars INTO the token. Truncating
+    // before redacting would strand its unmatched tail in the note; redacting
+    // first shrinks the text so the window opens before the replacement
+    // marker instead, which must ride along whole.
+    const gate = commandGate(
+      [
+        process.execPath,
+        "-e",
+        `console.log('x'.repeat(200) + 'p=' + process.env.GATE_CUT_TOKEN + 'y'.repeat(967) + 'END'); process.exit(1)`,
+      ],
+      { env: { PATH: process.env.PATH ?? "", GATE_CUT_TOKEN: token } },
+    );
+    const report = await gate.run(undefined, gateCtx);
+    const note = report.checks[0]!.note;
+    expect(note).toContain("[REDACTED:GATE_CUT_TOKEN]");
+    expect(note).not.toContain(token);
+    expect(note).not.toContain("24682468");
+    expect(note).toContain("END");
   });
 
   test("a binary that cannot be spawned is a failed check naming the error (AC5)", async () => {
