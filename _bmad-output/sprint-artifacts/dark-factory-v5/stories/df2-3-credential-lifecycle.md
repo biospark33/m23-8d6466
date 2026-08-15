@@ -1,3 +1,7 @@
+---
+baseline_commit: 86a4865
+---
+
 # DF2.3: Per-Run Credential Lifecycle — Mint, Cap, Deliver, Revoke, Verify-Against-List
 
 **Story Points:** 4
@@ -196,34 +200,112 @@ make this behavior real. DF2.2 and DF2.5 consume it; they do not complete it.
 
 ## Definition of Done
 
-- [ ] **Impl:** `mintRunKey` / `deliverRunKey` / `captureSpend` / `revokeRunKey` / `verifyRevoked`
+- [x] **Impl:** `mintRunKey` / `deliverRunKey` / `captureSpend` / `revokeRunKey` / `verifyRevoked`
       exported from `src/providers/credentials.ts` and composed into one ordered lifecycle, plus
       the record-free `revokeAndVerify(keyHash)` variant DF2.6's orphan sweep calls (same DELETE →
       re-list → assert-absent gate, no record read, no spend capture).
-- [ ] **Impl:** micro-dollar storage with dollar conversion confined to the HTTP boundary; default
+- [x] **Impl:** micro-dollar storage with dollar conversion confined to the HTTP boundary; default
       cap 50_000_000 µ$ exported as `defaultKeyCapMicroUsd` for DF3.6's `loadResidentBounds` to
       assert `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd` against —
       this story exposes the value and re-implements no ordering check of its own.
-- [ ] **Contract:** only DF2.1 run-record fields are written; a write of an undeclared field is
+- [x] **Contract:** only DF2.1 run-record fields are written; a write of an undeclared field is
       rejected by the record layer and surfaces as a test failure, not a silent drop.
-- [ ] **Integration:** delivery goes through DF2.1's `exec(vm, cmd, stdin)` seam; the fake driver
+- [x] **Integration:** delivery goes through DF2.1's `exec(vm, cmd, stdin)` seam; the fake driver
       records both sides' argv for assertion.
-- [ ] **Security:** revocation gated on the key list, never the single-key endpoint (INV-CRED-4);
+- [x] **Security:** revocation gated on the key list, never the single-key endpoint (INV-CRED-4);
       plaintext never in argv, record, or log (INV-CRED-2, INV-CRED-3).
-- [ ] **Test (unit):** `DELETE` → `404` classifies as already-revoked; `DELETE` → `500` leaves the
+- [x] **Test (unit):** `DELETE` → `404` classifies as already-revoked; `DELETE` → `500` leaves the
       record open and the VM alive with a non-zero exit.
-- [ ] **Test (200-for-dead-key):** provider double returns `200` from the single-key endpoint for a
+- [x] **Test (200-for-dead-key):** provider double returns `200` from the single-key endpoint for a
       revoked hash → `verifyRevoked` still passes via the list; a `/key`-gated implementation
       passes this and MUST fail the stale-list case.
-- [ ] **Test (pagination boundary):** truncated list page not containing the hash → `list-unverified`
+- [x] **Test (pagination boundary):** truncated list page not containing the hash → `list-unverified`
       failure, never a false "revoked".
-- [ ] **Test (secret hygiene):** recorded argv and every emitted log line are scanned for any ≥8-char
+- [x] **Test (secret hygiene):** recorded argv and every emitted log line are scanned for any ≥8-char
       substring of the secret → zero hits; remote file mode asserted `600` via `stat`.
-- [ ] **Test (e2e demo — MANDATORY):** one scripted lifecycle against the provider double produces
+- [x] **Test (e2e demo — MANDATORY):** one scripted lifecycle against the provider double produces
       an **open** run record on disk — `keyHash`, `limitMicroUsd` and `spendMicroUsd` populated,
       `closedAt` unset, because closure is DF2.5 teardown's last step — and a key list from which
       the hash is absent; the record file is the artifact.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Debug Log
+
+- Delivering to `/home/agent/app/.env` (absolute) fails under FakeDriver: fake boxes are plain host
+  dirs and macOS has no `/home/agent`. Added `envFile` dep (default = the fixed contract path);
+  fake-substrate tests override with a box-relative path. Real drivers never set it.
+- GNU `stat -c %a` in the deliver script breaks on a macOS host (BSD stat); the mode check uses a
+  `python3` one-liner instead — portable on host and in-box.
+- **Pre-existing FIFO hang found and fixed (per operator instruction to fold found issues into this
+  PR):** `manifest.test.ts` hung forever standalone, and in full-suite runs the hang cascaded into
+  ~13 spurious failures across `gates.test.ts`/`manifest.test.ts`. Root cause: Bun 1.2.22's native
+  `fs.realpathSync` **blocks forever on a FIFO** anywhere on the path (reproduced with a 6-line
+  probe: `realpathSync(fifo)` never returns; the open itself with `O_NONBLOCK` is fine). The DF1.1
+  story even has a test named "a FIFO beneath the run root is refused instead of blocking the
+  loader" — it could never pass as written. Fix: `realpathNoOpen()` in `src/phase-engine/manifest.ts`,
+  Node's recursive realpath algorithm (lstat/readlink only, never `open(2)`, 40-hop ceiling),
+  swapped into all three realpath call sites (manifest read, artifact read, root resolve).
+  After: phase-engine 239 pass, full suite 1396 pass / 0 fail.
+- Pre-existing `tsc --noEmit` failures (22 × TS2532/TS18048 under `noUncheckedIndexedAccess`) in
+  `command-gate`/`gates`/`envelope-adapter` tests fixed with `[0]!` non-null assertions, matching
+  the existing `tests/hindsight/bridge-round-trip.test.ts` precedent.
+- Pre-existing biome errors fixed: 1 × `noDelete` in `gates.test.ts:44` (biome-ignore with the
+  repo's existing justification pattern); 5 × `noUnusedTemplateLiteral` were mine, converted.
+
+### Completion Notes
+
+- All six verbs + the composed lifecycle live in `src/providers/credentials.ts`, exported through
+  `src/providers/index.ts`. Inkwell patterns lifted with file:line citations in comments
+  (create.just:8-14/22/128-167, fill.just:147-155, teardown.just:73-100/142-196/179-180,
+  reap.just:41-42/60-61/106-137).
+- OpenRouter wire facts verified against the current OpenAPI spec: `POST/GET/DELETE /api/v1/keys`,
+  Bearer management key (= `OPENROUTER_PROVISIONING_KEY`), create body `{name, limit:<USD>}`,
+  plaintext key returned once, `hash` is the identifier, list paginates by `offset` (100/page).
+  The story's "single-key endpoint returns 200 for dead keys" is preserved as the fixture's
+  `singleKeyEndpointStatus()` and re-proven by the AC2 test.
+- µ$ ⇄ $ conversion exists only at `microsToUsd`/`usdToMicros`, called at the HTTP boundary
+  (AC6 test asserts 50 dollars on the wire, 50_000_000 in the record, 0.0081 → 8_100 round-trip).
+- `revokeAndVerify(keyHash)` re-asserts the `sbx-` prefix at the point of deletion (INV-CRED-6)
+  and the test proves no DELETE is ever issued for a personal key.
+- 15 new tests in `tests/providers/credentials.test.ts` (all six ACs + invariants + observability);
+  fixtures: `FakeKeyApi` (pagination/404/500/stale-list/zero-usage knobs) and `RecordingDriver`
+  (host+remote argv, stdin presence only — never content).
+- Deviations: server-side secret injection flag omitted (design §3.5 marked vendor-single-origin
+  [VERIFY]; stdin path is the only shipped mechanism, matching INV-CRED-3). Response-body temp
+  files (0600, overwrite+unlink shred) implemented in the real client only — the fixture never
+  holds a body on disk.
+- Local gates at completion: `bun test` 1396 pass / 0 fail / 13 skip; `bunx tsc --noEmit` clean;
+  `biome check src scripts tests cli-anything pi-vs-claude-code-vendor oci` clean. CI `check`
+  job has never started on this repo (GitHub Actions billing) — local gates are the evidence.
+
+### File List
+
+- `src/providers/credentials.ts` (new)
+- `src/providers/index.ts` (modified — export)
+- `tests/providers/credentials.test.ts` (new)
+- `tests/providers/fixtures/fake-key-api.ts` (new)
+- `tests/providers/fixtures/recording-driver.ts` (new)
+- `_bmad-output/sprint-artifacts/sprint-status.yaml` (modified — status)
+- `_bmad-output/sprint-artifacts/dark-factory-v5/stories/df2-3-credential-lifecycle.md` (modified — this record)
+- Landed via the companion DF1.2 commit 03e21f5 (same branch, this story's debugging surfaced
+  them): `src/phase-engine/manifest.ts` FIFO-safe realpath, tsc strictness repairs in
+  `tests/phase-engine/{command-gate,gates,envelope-adapter}.test.ts`, `CLAUDE.md` sentinel.
+
+### Change Log
+
+- 2026-08-15: DF2.3 implemented — credential lifecycle (mint/cap/deliver/revoke/verify-against-list)
+  with 18 tests. Pre-PR self-review (adversarial, bugs-only) surfaced 6 findings, all fixed:
+  (1) prefix guard failed OPEN on a truncated list — `getKeyEntry` now reports `truncated`
+  separately from `entry === null` and both the INV-CRED-6 re-assert and `captureSpend` fail
+  closed on it; (2) page-size assumption removed — the OpenRouter list walk stops only on an
+  EMPTY page (server default page size is undocumented, so a short page proves nothing);
+  (3) POST /keys exempted from transport retries (a timed-out mint may have succeeded
+  server-side; retrying orphans a live key); (4) `captureSpend` throws on an unenumerable list
+  instead of recording an authoritative-looking 0; (5) double-mint guard — minting over an
+  existing `keyHash` refuses with the DELETE remediation (one live key per run);
+  (6) `RecordingDriver.remoteArgv` was vacuous (a copy of the same array) — replaced with a
+  single recorded `argv` and an honest comment about what the scan can and cannot catch.
+  The pre-existing Bun realpathSync-on-FIFO hang in the phase-engine manifest loader that this
+  story's debugging surfaced landed via the companion DF1.2 commit (03e21f5, same branch).
+  Record left open for DF2.5.

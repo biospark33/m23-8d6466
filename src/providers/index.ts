@@ -121,4 +121,5 @@ registerDriver("fake", () => new FakeDriver());
 
 export * from "./driver.ts";
 export * from "./run-record.ts";
+export * from "./credentials.ts";
 export { FakeDriver } from "./fake-driver.ts";
