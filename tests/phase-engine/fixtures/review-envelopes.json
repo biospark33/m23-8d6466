@@ -1,0 +1,56 @@
+{
+  "approvedWithBlocking": {
+    "kind": "review",
+    "label": "review",
+    "status": "success",
+    "summary": "Approved but still carries a blocking item",
+    "approved": true,
+    "blocking": ["The auth module must be rewritten before merge"],
+    "findings": [
+      { "requirement": "Auth flows through the session cache", "met": true, "note": "covered by tests/auth.test.ts" }
+    ]
+  },
+  "approvedWithUnmet": {
+    "kind": "review",
+    "label": "review",
+    "status": "success",
+    "summary": "Approved while a requirement is marked unmet",
+    "approved": true,
+    "blocking": [],
+    "findings": [
+      { "requirement": "All acceptance criteria covered by tests", "met": false, "note": "AC4 has no test" }
+    ]
+  },
+  "rejectionNamesNothing": {
+    "kind": "review",
+    "label": "review",
+    "status": "success",
+    "summary": "Rejected without naming any problem",
+    "approved": false,
+    "blocking": [],
+    "findings": [
+      { "requirement": "Schema is closed", "met": true, "note": "strict mode verified" }
+    ]
+  },
+  "consistentApproval": {
+    "kind": "review",
+    "label": "review",
+    "status": "success",
+    "summary": "Clean approval",
+    "approved": true,
+    "blocking": [],
+    "findings": [
+      { "requirement": "Schema is closed", "met": true, "note": "strict mode verified" },
+      { "requirement": "Redaction at the boundary", "met": true, "note": "INV-2 test" }
+    ]
+  },
+  "consistentRejection": {
+    "kind": "review",
+    "label": "review",
+    "status": "success",
+    "summary": "Rejection that names its problem",
+    "approved": false,
+    "blocking": ["Schema drifted from the manifest contract"],
+    "findings": []
+  }
+}

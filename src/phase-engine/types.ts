@@ -12,6 +12,7 @@
  */
 import type { ZodIssue } from "zod";
 import type { ExitStatus } from "../../cli-anything/src/types.ts";
+import type { Envelope } from "./envelopes/types.ts";
 
 export type { ExitStatus };
 
@@ -168,6 +169,12 @@ export interface PhaseSpec {
  */
 export interface PhaseParams extends PhaseSpec {
   agent?: PhaseAgent;
+  /**
+   * DF1.2 region — the one slot both code results and agent reports flow
+   * through: the prior phase's envelope, handed to this phase's body through
+   * the identical `previous:` position (AC2/AC3).
+   */
+  previous?: Envelope;
 }
 
 export interface PipelineManifest {
