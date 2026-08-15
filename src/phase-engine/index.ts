@@ -12,6 +12,7 @@ export {
   PhaseSpecSchema,
   PipelineManifestSchema,
   loadManifest,
+  readArtifactBeneathRoot,
   requiredBudgetMs,
   type LoadedManifest,
 } from "./manifest.ts";
@@ -43,3 +44,29 @@ export {
   type RunOptions,
 } from "./phase.ts";
 export * from "./types.ts";
+// DF1.2: gates with evidence + the unified envelope adapter.
+export {
+  OUTPUT_TAIL_CHARS,
+  asEnvelope,
+  truncateTail,
+} from "./envelopes/adapter.ts";
+export type {
+  Envelope,
+  EnvelopeKind,
+  QualityCheckResult,
+  ReviewFinding,
+} from "./envelopes/types.ts";
+export {
+  GateFailureError,
+  artifactsExist,
+  diffMatchesClaims,
+  filesNonEmpty,
+  gatedBody,
+  jsonParses,
+  verdictConsistent,
+  type Gate,
+  type GateContext,
+  type GatedBodyOptions,
+} from "./gates/library.ts";
+export { GateReport, type GateCheck } from "./gates/report.ts";
+export { GATE_NOTE_TAIL_CHARS, commandGate, type CommandGateOptions } from "./gates/command-gate.ts";

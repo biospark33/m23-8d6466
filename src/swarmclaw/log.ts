@@ -1,10 +1,10 @@
 /**
  * Structured JSONL logging (CC-9) — the shared, transport-neutral sink.
  *
- * Lives outside mcp/stdio-transport.ts so low-level packages (providers,
- * run-record) can log without reaching into the MCP subsystem: the dependency
- * direction must stay providers → log, never providers → transport. The
- * stdio transport re-exports these for its existing consumers.
+ * Lives outside mcp/stdio-transport.ts so non-MCP modules (the providers
+ * store, its CLI, run-record) can log without reaching into the MCP subsystem:
+ * the dependency direction must stay providers → log, never providers →
+ * transport. The stdio transport re-exports these for its existing consumers.
  */
 
 export interface LogEntry {

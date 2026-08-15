@@ -18,8 +18,15 @@
  * that happens to parse as a number.
  */
 
-import { EXTENSION_NAMESPACES, RunRecordStore, newId, type RunRecordPatch } from "../src/providers/run-record.ts";
-import { newRequestId, setLogSink } from "../src/swarmclaw/mcp/stdio-transport.ts";
+import {
+  CORE_FIELDS,
+  EXTENSION_NAMESPACES,
+  RunRecordStore,
+  SETTABLE_FIELDS,
+  newId,
+  type RunRecordPatch,
+} from "../src/providers/run-record.ts";
+import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags } from "./lib/cli-args.ts";
 
 // Structured logs go to stderr so stdout carries only the command's output.
@@ -29,26 +36,16 @@ if (import.meta.main) {
   });
 }
 
-/** Per-field coercion at the CLI boundary. Everything not listed stays a string. */
-const COERCE: Readonly<Record<string, "int" | "ports">> = {
-  pid: "int",
-  limitMicroUsd: "int",
-  spendMicroUsd: "int",
-  ports: "ports",
-};
+/**
+ * Per-field coercion at the CLI boundary, derived from the store's schema —
+ * everything not listed stays a string.
+ */
+const COERCE: Readonly<Record<string, "int" | "ports">> = Object.fromEntries(
+  Object.entries(CORE_FIELDS).filter(([, kind]) => kind !== "string"),
+) as Readonly<Record<string, "int" | "ports">>;
 
-/** Writable core fields — `runId` and `createdAt` are immutable, `closedAt` is `close`'s. */
-const SET_FIELDS = [
-  "vmName",
-  "httpsUrl",
-  "keyHash",
-  "limitMicroUsd",
-  "spendMicroUsd",
-  "sessionId",
-  "commitSha",
-  "ports",
-  "pid",
-] as const;
+/** Writable core fields — the store's settable-field policy, verbatim. */
+const SET_FIELDS = [...SETTABLE_FIELDS];
 
 const SET_FLAGS = SET_FIELDS.map((f) => `--${f}`);
 const ALL_FLAGS = [...SET_FLAGS, "--dir", "--ext"];
@@ -221,13 +218,7 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
 }
 
 function isKnownField(field: string): boolean {
-  return (
-    field === "runId" ||
-    field === "createdAt" ||
-    field === "closedAt" ||
-    field === "extensions" ||
-    (SET_FIELDS as readonly string[]).includes(field)
-  );
+  return field === "extensions" || Object.hasOwn(CORE_FIELDS, field);
 }
 
 if (import.meta.main) {

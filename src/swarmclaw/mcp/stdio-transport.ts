@@ -14,10 +14,8 @@ import { resolve } from "node:path";
 // direction must stay providers → log, never providers → MCP transport.
 // logMuted is deliberately absent: it has always been module-private (never
 // exported from here or ../log.ts) and has no consumers.
-import { log, logSink, newRequestId, setLogSink, type LogEntry } from "../log.ts";
-
-export { log, logSink, setLogSink, newRequestId };
-export type { LogEntry };
+import { log, newRequestId } from "../log.ts";
+export { log, logSink, newRequestId, setLogSink, type LogEntry } from "../log.ts";
 
 // ---------------------------------------------------------------------------
 // INV-SC2: command allowlist + code-injection arg rules.
