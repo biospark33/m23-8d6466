@@ -17,7 +17,8 @@
 #
 # Findings are reported with file:line; exit is nonzero unless --warn
 # downgrades to advisory. False positives are resolved by fixing the code or
-# adding a `# dp:ok <reason>` trailing comment on the flagged line.
+# adding a `dp:ok <reason>` trailing comment on the flagged line (`// dp:ok
+# ...` or `/* dp:ok ... */` in TypeScript — `#` is not a TS comment).
 #
 # Usage:
 #   scripts/dev/check-defensive-programming.sh [--base <ref>] [--warn]
@@ -43,6 +44,14 @@ FINDINGS=0
 D018_RE='(\?\?|\|\|)[[:space:]]*(""|'"''"')'
 D019_RE='catch[[:space:]]*(\(.*\))?[[:space:]]*\{[[:space:]]*\}[[:space:]]*$'
 D020_RE='JSON\.parse\('
+# D020 — a `try {` opening on, or within a few lines above, the flagged line
+# counts as guarded. Same-line `try { JSON.parse(x) }`, indented try, and the
+# common multi-line try are all covered; a try deeper than the window falls
+# back to a dp:ok annotation.
+dp020_guarded() { # file lineno
+  local start=$(( $2 > 5 ? $2 - 5 : 1 ))
+  sed -n "${start},${2}p" "$1" | grep -Eq '^[[:space:]]*try[[:space:]]*\{'
+}
 report() { # file line rule text
   if grep -q "dp:ok" <(sed -n "$2p" "$1") 2>/dev/null; then return 0; fi
   echo "FINDING [$3] $1:$2 — $4"
@@ -70,11 +79,12 @@ for f in "${FILES[@]}"; do
     if [[ "$text" =~ $D019_RE ]]; then
       report "$f" "$lineno" "D019" "empty catch block swallows the failure"
     fi
-    if [[ "$text" =~ $D020_RE ]] && [[ "$text" != try* ]]; then
+    if [[ "$text" =~ $D020_RE ]] && ! dp020_guarded "$f" "$lineno"; then
       report "$f" "$lineno" "D020" "unguarded JSON.parse on non-literal input"
     fi
   done < <(git diff "${BASE}" -- "$f" | awk '
-    /^@@ / { match($0, /\+[0-9]+/); n = substr($0, RSTART + 1, RLENGTH - 1); next }
+    /^@@ / { match($0, /\+[0-9]+/); n = substr($0, RSTART + 1, RLENGTH - 1) - 1; next }
+    /^ / { n++ }
     /^\+/ && !/^\+\+\+/ { n++; print n "\t" substr($0, 2) }
   ')
 
@@ -89,7 +99,7 @@ for f in "${FILES[@]}"; do
 done
 
 if [[ $FINDINGS -gt 0 ]]; then
-  echo "FAIL: ${FINDINGS} defensive-programming finding(s). Fix, or annotate with '# dp:ok <reason>'."
+  echo "FAIL: ${FINDINGS} defensive-programming finding(s). Fix, or annotate with '// dp:ok <reason>' (or /* dp:ok ... */)."
   [[ $WARN -eq 1 ]] && { echo "(--warn: advisory only)"; exit 0; }
   exit 1
 fi

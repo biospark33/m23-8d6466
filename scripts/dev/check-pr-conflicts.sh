@@ -33,7 +33,6 @@ if [[ ${#MINE[@]} -eq 0 ]]; then
   exit 0
 fi
 
-declare -A OWNERS
 OVERLAPS=0
 
 while IFS=$'\t' read -r number head; do
@@ -47,7 +46,7 @@ while IFS=$'\t' read -r number head; do
       fi
     done
   done < <(gh pr diff "$number" --name-only 2>/dev/null || true)
-done < <(gh pr list --state open --json number,headRefName --jq '.[] | "\(.number)\t\(.headRefName)"' 2>/dev/null || true)
+done < <(gh pr list --state open --limit 1000 --json number,headRefName --jq '.[] | "\(.number)\t\(.headRefName)"' 2>/dev/null || true)
 
 if [[ $OVERLAPS -gt 0 ]]; then
   echo "FAIL: ${OVERLAPS} overlapping file(s) with open PRs — coordinate or rebase first."
