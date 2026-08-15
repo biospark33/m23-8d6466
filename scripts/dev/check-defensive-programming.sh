@@ -50,18 +50,48 @@ D020_RE='JSON\.parse\('
 # closes. Guarded = at least one try still on the stack. This keeps the outer
 # scope when a nested try closes, and does not treat a closed try as a guard
 # for a later parse. Same-line `try { JSON.parse(x) }` counts as guarded.
-# Braces inside string/template literals can miscount — when in doubt the
-# answer is "unguarded", and the dp:ok annotation is the escape hatch.
+# String/char/template literals and comments are blanked before counting, so
+# braces inside them cannot skew the depth walk. Known ceilings (rare, drift
+# in either direction): regex literals (/[{]/) and nested template
+# interpolations are not lexed; the dp:ok annotation is the escape hatch.
 dp020_guarded() { # file lineno
   awk -v target="$2" '
-    NR == target {
-      exit (sp > 0 || $0 ~ /^[[:space:]]*try[[:space:]]*[{]/) ? 0 : 1
-    }
-    /^[[:space:]]*try[[:space:]]*[{]/ { stack[++sp] = d + 1 }
     {
+      # Blank literal/comment contents (→ spaces). State carries across
+      # lines for block comments, multi-line templates, and backslash
+      # continuations, so `cl` is the code-only view of the line.
+      cl = ""
       n = length($0)
       for (i = 1; i <= n; i++) {
         c = substr($0, i, 1)
+        if (in_lc) break
+        if (in_bc) {
+          cl = cl " "
+          if (substr($0, i, 2) == "*/") { in_bc = 0; i++ }
+          continue
+        }
+        if (in_str || in_chr || in_tpl) {
+          cl = cl " "
+          if (esc) esc = 0
+          else if (c == "\\") esc = 1
+          else if (in_str && c == "\"") in_str = 0
+          else if (in_chr && c == "\47") in_chr = 0
+          else if (in_tpl && c == "`") in_tpl = 0
+          continue
+        }
+        if (substr($0, i, 2) == "//") { in_lc = 1; cl = cl "  "; i++ }
+        else if (substr($0, i, 2) == "/*") { in_bc = 1; cl = cl "  "; i++ }
+        else if (c == "\"") { in_str = 1; cl = cl " " }
+        else if (c == "\47") { in_chr = 1; cl = cl " " }
+        else if (c == "`") { in_tpl = 1; cl = cl " " }
+        else cl = cl c
+      }
+      in_lc = 0
+      if (cl ~ /^[[:space:]]*try[[:space:]]*[{]/) stack[++sp] = d + 1
+      if (NR == target) exit (sp > 0 || cl ~ /^[[:space:]]*try[[:space:]]*[{]/) ? 0 : 1
+      n = length(cl)
+      for (i = 1; i <= n; i++) {
+        c = substr(cl, i, 1)
         if (c == "{") d++
         else if (c == "}") {
           d--
