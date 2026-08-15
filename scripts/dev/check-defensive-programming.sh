@@ -262,16 +262,28 @@ fi
 for f in "${FILES[@]}"; do
   [[ -f "$f" ]] || continue
 
+  # Code-only view, line-indexed: blank_code preserves line count 1:1, so
+  # BLANKED[n-1] is the code-only text of added line n. D016 matches cast
+  # keywords against this view (round 9) — a mention of `as any` in a
+  # comment or string literal is not a cast. Real casts keep their keywords;
+  # ${...} interpolation code stays visible. Regex literals remain a lexer
+  # ceiling — dp:ok is the hatch.
+  mapfile -t BLANKED < <(blank_code "$f")
+
   # Walk added hunks with their line numbers.
   while IFS=$'\t' read -r lineno text; do
     [[ -z "$lineno" ]] && continue
+    # dp:ok is written in a comment, so this check must see the RAW line.
     [[ "$text" =~ dp:ok ]] && continue
 
-    if [[ "$text" =~ $D016_RE ]]; then
+    if [[ "${BLANKED[$((lineno - 1))]}" =~ $D016_RE ]]; then
       report "$f" "$lineno" "D016" "type-erasing cast on an added line"
     fi
     # Empty-string literal ONLY (`?? ""` / `|| ''`); a fallback to a real
-    # default value is normal code.
+    # default value is normal code. D018/D019 deliberately match the RAW
+    # line: the "" / '' IS a string literal (blanking would erase the very
+    # thing D018 detects), and D019 on a blanked line would newly flag
+    # `catch (e) { /* ... */ }` as an empty block.
     if [[ "$text" =~ $D018_RE ]]; then
       report "$f" "$lineno" "D018" "silent empty-string fallback — validate instead of blanking"
     fi
