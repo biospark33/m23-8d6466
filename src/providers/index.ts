@@ -9,6 +9,7 @@
  */
 
 import { FakeDriver } from "./fake-driver.ts";
+import { ExeDevDriver } from "./exedev/driver.ts";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import type { ProviderDriver } from "./driver.ts";
 
@@ -16,7 +17,7 @@ export type DriverFactory = () => ProviderDriver;
 
 const REGISTRY = new Map<string, DriverFactory>();
 
-/** Register a driver under a name. DF2.2 registers `exe` the same way. */
+/** Register a driver under a name. DF2.2 registers `exedev` the same way. */
 export function registerDriver(name: string, factory: DriverFactory): void {
   REGISTRY.set(name, factory);
 }
@@ -118,8 +119,14 @@ function errCode(e: unknown): string {
 }
 
 registerDriver("fake", () => new FakeDriver());
+// DF2.2: the exe.dev driver constructs with the production ssh runner; tests
+// inject the fake substrate at the command seam instead of a second registry
+// name, so "exedev" always means the real driver.
+registerDriver("exedev", () => new ExeDevDriver());
 
 export * from "./driver.ts";
 export * from "./run-record.ts";
 export * from "./credentials.ts";
 export { FakeDriver } from "./fake-driver.ts";
+export { ExeDevDriver, ExeDevDriverError, sshCommand } from "./exedev/driver.ts";
+export type { ExeCommand, CreateProvenance, ExeDevDriverOptions } from "./exedev/driver.ts";
