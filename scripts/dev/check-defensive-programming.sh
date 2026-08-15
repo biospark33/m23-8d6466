@@ -44,25 +44,29 @@ FINDINGS=0
 D018_RE='(\?\?|\|\|)[[:space:]]*(""|'"''"')'
 D019_RE='catch[[:space:]]*(\(.*\))?[[:space:]]*\{[[:space:]]*\}[[:space:]]*$'
 D020_RE='JSON\.parse\('
-# D020 — true if the flagged line sits inside an open try block. Walks the
-# file from the top with brace tracking: each `try {` line resets the state,
-# and the matching close brace ends it, so a try that already closed does NOT
-# guard a later parse. Same-line `try { JSON.parse(x) }` counts as guarded.
+# D020 — true if the flagged line sits inside an open try block. Depth-stack
+# model: `d` is the absolute brace depth walked from the top of the file; a
+# `try {` line pushes the depth of its body, and any `}` pops try blocks it
+# closes. Guarded = at least one try still on the stack. This keeps the outer
+# scope when a nested try closes, and does not treat a closed try as a guard
+# for a later parse. Same-line `try { JSON.parse(x) }` counts as guarded.
 # Braces inside string/template literals can miscount — when in doubt the
 # answer is "unguarded", and the dp:ok annotation is the escape hatch.
 dp020_guarded() { # file lineno
   awk -v target="$2" '
     NR == target {
-      if (!inside && $0 ~ /^[[:space:]]*try[[:space:]]*[{]/) inside = 1
-      exit inside ? 0 : 1
+      exit (sp > 0 || $0 ~ /^[[:space:]]*try[[:space:]]*[{]/) ? 0 : 1
     }
-    /^[[:space:]]*try[[:space:]]*[{]/ { inside = 1; depth = 0 }
-    inside {
+    /^[[:space:]]*try[[:space:]]*[{]/ { stack[++sp] = d + 1 }
+    {
       n = length($0)
-      for (i = 1; i <= n && inside; i++) {
+      for (i = 1; i <= n; i++) {
         c = substr($0, i, 1)
-        if (c == "{") depth++
-        else if (c == "}") { depth--; if (depth <= 0) inside = 0 }
+        if (c == "{") d++
+        else if (c == "}") {
+          d--
+          while (sp > 0 && stack[sp] > d) sp--
+        }
       }
     }
   ' "$1"
