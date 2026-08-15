@@ -371,7 +371,7 @@ describe("DF2.3 credential lifecycle", () => {
     expect(rec.closedAt).toBeUndefined();
   });
 
-  test("INV-CRED-2: openRouterKeyApi hard-exits on a missing provisioning key, by env-var name only", () => {
+  test("INV-CRED-2: openRouterKeyApi refuses at construction on a missing provisioning key, by env-var name only", () => {
     const had = process.env.OPENROUTER_PROVISIONING_KEY;
     // delete is the only correct way to restore "not set" for the env probe.
     // biome-ignore lint/performance/noDelete: see above
@@ -411,6 +411,13 @@ describe("DF2.3 credential lifecycle", () => {
     // the delivery cannot reach the box.
     const failing = Object.create(recording) as typeof recording;
     failing.exec = () => Promise.reject(new Error("box unreachable"));
+    // Track DELETE calls to assert the compensating action
+    const originalDelete = api.deleteKey.bind(api);
+    const deleted: string[] = [];
+    api.deleteKey = async (hash) => {
+      deleted.push(hash);
+      return originalDelete(hash);
+    };
     let err: unknown;
     try {
       await runCredentialLifecycle(deps({ driver: failing }), runId);
@@ -422,6 +429,7 @@ describe("DF2.3 credential lifecycle", () => {
     // the minted key was revoked and verified absent — not stranded live
     const hash = store.get(runId).keyHash as string;
     expect(hash).toBeString();
+    expect(deleted).toContain(hash);
     const list = await api.listAllKeys(20);
     expect(list.entries.some((k) => k.hash === hash)).toBeFalse();
     expect(list.truncated).toBeFalse();
@@ -488,6 +496,85 @@ describe("DF2.3 credential lifecycle", () => {
     const spend = await captureSpend(deps(), runId);
     expect(spend).toBe(0); // nothing was ever stored — no authoritative 0 written
     expect(store.get(runId).spendMicroUsd).toBeUndefined();
+  });
+
+  test("hash-malformed refusal: provider returns hash with shell metachars", async () => {
+    const runId = "df23-malformed-hash";
+    await makeRun(runId);
+    api = new FakeKeyApi({ returnedHash: "abc; rm -rf /tmp" });
+    let err: unknown;
+    try {
+      await mintRunKey(deps(), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("mint-malformed");
+    expect((err as CredentialLifecycleError).remediation).not.toContain("abc; rm -rf");
+    expect((err as CredentialLifecycleError).remediation).toContain(`key named ${SBX_KEY_PREFIX}${runId}`);
+    // record still carries keyHash for manual cleanup
+    const rec = store.get(runId);
+    expect(rec.keyHash).toBe("abc; rm -rf /tmp");
+  });
+
+  test("mint transport timeout compensation: orphaned server-side key is revoked", async () => {
+    const runId = "df23-transport-comp";
+    await makeRun(runId);
+    api = new FakeKeyApi({ mintTransportErrorAfterCreate: true });
+    let err: unknown;
+    try {
+      await mintRunKey(deps(), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("transport");
+    // the key was revoked server-side by compensation — not stranded live
+    const list = await api.listAllKeys(20);
+    expect(list.entries.some((k) => k.name === `${SBX_KEY_PREFIX}${runId}`)).toBeFalse();
+    expect(list.truncated).toBeFalse();
+  });
+
+  test("mint transport timeout compensation failure: list truncated, still rethrows original", async () => {
+    const runId = "df23-transport-comp-fail";
+    await makeRun(runId);
+    api = new FakeKeyApi({ mintTransportErrorAfterCreate: true, listTruncated: true });
+    let err: unknown;
+    try {
+      await mintRunKey(deps(), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("transport");
+    // compensation failed (list truncated), but original error still thrown
+    expect((err as CredentialLifecycleError).message).toContain("timed out");
+  });
+
+  test("maxPages validation: openRouterKeyApi().listAllKeys throws for non-positive maxPages", async () => {
+    const realEnv = process.env.OPENROUTER_PROVISIONING_KEY;
+    process.env.OPENROUTER_PROVISIONING_KEY = "test-key";
+    try {
+      const api = openRouterKeyApi();
+      for (const bad of [0, -1, -5]) {
+        let err: unknown;
+        try {
+          await api.listAllKeys(bad);
+        } catch (e) {
+          err = e;
+        }
+        expect(err).toBeInstanceOf(CredentialLifecycleError);
+        expect((err as CredentialLifecycleError).code).toBe("max-pages-invalid");
+        expect((err as CredentialLifecycleError).message).toContain(String(bad));
+      }
+    } finally {
+      if (realEnv === undefined) {
+        // biome-ignore lint/performance/noDelete: restoring test state
+        delete process.env.OPENROUTER_PROVISIONING_KEY;
+      } else {
+        process.env.OPENROUTER_PROVISIONING_KEY = realEnv;
+      }
+    }
   });
 
   test("fixture fidelity: exactly-maxPages full pages is truncation — only a budgeted empty page proves exhaustion", async () => {

@@ -332,3 +332,36 @@ make this behavior real. DF2.2 and DF2.5 consume it; they do not complete it.
   Rejected: "no null check on store.get" — `RunRecordStore.get` returns `RunRecord` (never
   null) and throws its own descriptive error for a missing record; the suggested guard is
   unreachable.
+- 2026-08-15: PR review round 4 (bmad 3-layer: Blind Hunter + Edge Case Hunter + Acceptance
+  Auditor) — 23 findings, 10 dismissed as false positives after source verification, 1
+  deferred, 6 patched (+2 hardening follow-ups found during patching). Auditor: all 6 ACs,
+  6 invariants satisfied, zero violations. Full suite 285/285, tsc + biome clean.
+  Patched: (a) mint POST transport-timeout compensation — the deterministic `sbx-<runId>`
+  name is swept from the key list and any name-matching orphan is best-effort
+  `revokeAndVerify`d before the original transport error rethrows (failed per-orphan
+  revokes are logged, never silent); (b) keyHash charset validation
+  (`/^[A-Za-z0-9_-]+$/`) BEFORE any remediation interpolation — the uncapped-key refusal
+  interpolates the provider-supplied hash into a copy-paste curl, so a metachar hash is now
+  refused as `mint-malformed` with a NAME-referencing remediation (validation ordered after
+  `store.set` so a refused-but-live key stays recorded); (c) delivery-failure compensation
+  revoke failure now logged (`credential.delivery_compensation`) instead of swallowed
+  silently; (d) `openRouterKeyApi.listAllKeys` validates `maxPages` (positive integer)
+  at the boundary — `max-pages-invalid`; (e) orphan-delivery test now asserts the
+  compensating DELETE actually fired (deleteKey spy), not just final absence; (f) INV-CRED-2
+  test title "hard-exits" corrected to "refuses at construction" (it throws, not exits);
+  (g) `newRequestId` documents its WebCrypto floor; FakeKeyApi gains `returnedHash` +
+  mint-transport-error knobs for the two new failure-injection tests. 4 new tests (37 total
+  in the credentials suite).
+  Deferred: concurrent same-run mint race (two processes past the keyHash check before
+  either writes) — cross-process locking is new machinery; serialized dispatch and DF2.6's
+  orphan sweep own this failure mode today.
+  Dismissed (verified false positives against source): captureSpend "stale spend" (entry
+  null ⇒ usage genuinely unobservable; last-known-spend return is round-2 design);
+  usdToMicros-before-validation (validation at :200 precedes arithmetic at :208);
+  verifyHash "never in list" (absent-from-list = not-live is the correct semantics);
+  envFile-directory chmod (cat-into-dir fails, && chain stops, fails closed);
+  DELETE-3xx-passes (status < 300 excludes 3xx); deleteKey status contract (production
+  returns raw status, comment accurate); `==` null-coalescence (documented deliberate);
+  >2^53 µ$ precision; double-set window (documented, readers tolerate); generic
+  revoke-failed message (status included, tested); fixture truncation comment (accurate);
+  EPIPE catch (already commented as deliberate).

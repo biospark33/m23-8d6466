@@ -54,5 +54,7 @@ export function log(entry: LogEntry): void {
 }
 
 export function newRequestId(): string {
+  // Node's built-in WebCrypto (≥14.17 / ≥16.5 LTS) — no feature detection:
+  // the toolchain floor (bun, modern node) always provides it.
   return crypto.randomUUID();
 }

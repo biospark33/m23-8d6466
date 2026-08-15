@@ -13,7 +13,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 
-import { MAX_VERIFY_PAGES } from "../../../src/providers/credentials.ts";
+import { CredentialLifecycleError, MAX_VERIFY_PAGES } from "../../../src/providers/credentials.ts";
 
 export interface FakeKey {
   hash: string;
@@ -38,6 +38,12 @@ export interface FakeKeyApiOptions {
   createStatus?: number;
   /** Override the limitUsd the mint RESPONSE reports (null ⇒ uncapped refusal). */
   returnedLimitUsd?: number | null;
+  /** Override the hash the mint RESPONSE reports (for injection-guard testing). */
+  returnedHash?: string;
+  /** createKey registers the key server-side, then throws CredentialLifecycleError code "transport". */
+  mintTransportErrorAfterCreate?: boolean;
+  /** listAllKeys returns truncated=true (pagination budget exhausted). */
+  listTruncated?: boolean;
 }
 
 export interface RecordedRequest {
@@ -69,16 +75,25 @@ export class FakeKeyApi {
       throw new Error(`fake key api: POST /keys returned ${this.opts.createStatus}`);
     }
     const key = `sk-or-fake-${randomBytes(24).toString("hex")}`;
-    const hash = createHash("sha256").update(key).digest("hex");
+    const realHash = createHash("sha256").update(key).digest("hex");
+    const hash = this.opts.returnedHash ?? realHash;
     this.keys.push({
-      hash,
+      hash: realHash, // always store the real hash for deletion/verification
       name,
       limitUsd,
       usageUsd: this.opts.usageOnCreateUsd ?? 0,
       deleted: false,
     });
-    this.plaintexts.set(hash, key);
+    this.plaintexts.set(realHash, key);
     const reportedLimit = this.opts.returnedLimitUsd !== undefined ? this.opts.returnedLimitUsd : limitUsd;
+    // mintTransportErrorAfterCreate: key exists server-side but transport "timed out"
+    if (this.opts.mintTransportErrorAfterCreate === true) {
+      throw new CredentialLifecycleError(
+        "transport",
+        "fake key api: POST /keys timed out after 1 attempt: connection reset",
+        "check network/provider status, then re-run — no state was changed",
+      );
+    }
     return { key, hash, limitUsd: reportedLimit, usageUsd: this.opts.usageOnCreateUsd ?? 0 };
   }
 
@@ -88,6 +103,9 @@ export class FakeKeyApi {
   }
 
   async listAllKeys(maxPages: number): Promise<{ entries: FakeKey[]; truncated: boolean }> {
+    if (this.opts.listTruncated === true) {
+      return { entries: this.visible(), truncated: true };
+    }
     const all = this.visible();
     const pageSize = Math.max(1, this.opts.pageSize ?? 100);
     // Mirror production exactly: exhaustion is proven ONLY by an empty page

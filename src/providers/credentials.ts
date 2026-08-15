@@ -205,13 +205,85 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
     );
   }
   const name = `${SBX_KEY_PREFIX}${runId}`;
-  const res = await timed(ctx, "mint", () => deps.keyApi.createKey(name, microsToUsd(capMicroUsd)));
+  let res: Awaited<ReturnType<typeof deps.keyApi.createKey>>;
+  const started = Date.now();
+  try {
+    res = await timed(ctx, "mint", () => deps.keyApi.createKey(name, microsToUsd(capMicroUsd)));
+  } catch (e) {
+    const err = e as CredentialLifecycleError;
+    // Mint timeout compensation: a POST /keys transport timeout may have
+    // SUCCEEDED server-side, leaving an untracked live key. Run best-effort
+    // compensation before rethrowing.
+    if (err?.code === "transport") {
+      const compCtx: StepContext = { requestId: ctx.requestId, runId, keyHash: undefined };
+      try {
+        const { entries, truncated } = await deps.keyApi.listAllKeys(MAX_VERIFY_PAGES);
+        if (!truncated) {
+          const orphans = entries.filter((k) => k.name === name);
+          for (const orphan of orphans) {
+            try {
+              await revokeAndVerify(deps, orphan.hash);
+            } catch (revErr) {
+              // Best-effort — the original transport error stays the reported
+              // failure — but a failed orphan revoke must be observable, not
+              // silent: the key is live and known only to this log line.
+              const revErrCred = revErr as CredentialLifecycleError;
+              log({
+                requestId: compCtx.requestId,
+                operation: "credential.mint_compensation",
+                agentId: null,
+                timestamp: new Date().toISOString(),
+                duration: 0,
+                status: "error",
+                error: { code: revErrCred.code ?? "compensation_failed", message: revErrCred.message },
+                runId,
+                step: "mint_compensation",
+                keyHashPrefix: keyHashPrefix(orphan.hash),
+                outcome: "error",
+              });
+            }
+          }
+          if (orphans.length > 0) {
+            const compDurationMs = Date.now() - started;
+            log({
+              requestId: compCtx.requestId,
+              operation: "credential.mint_compensation",
+              agentId: null,
+              timestamp: new Date().toISOString(),
+              duration: compDurationMs,
+              status: "ok",
+              runId,
+              step: "mint_compensation",
+              outcome: "ok",
+              compensated: orphans.length,
+              mint_compensation_ms: compDurationMs,
+            });
+          }
+        }
+      } catch {
+        // list failed — nothing to compensate, swallow and rethrow original
+      }
+    }
+    throw e;
+  }
   // Record the mint BEFORE judging the returned cap: if the refusal below
   // fires, a live key exists at the provider, and an UNRECORDED live key is
   // exactly the orphan the lifecycle exists to prevent — with keyHash in the
   // record, revokeRunKey (or a re-run) can still reach it.
   ctx.keyHash = res.hash;
   deps.store.set(runId, { keyHash: res.hash });
+  // Hash format validation (injection guard): the provider-supplied hash flows
+  // into copy-paste shell remediation strings below, so its charset is asserted
+  // BEFORE any interpolation — a metachar-carrying hash must never reach an
+  // operator's terminal. Remediation for THIS refusal references the key NAME
+  // (runId-derived, charset-checked by the caller) instead of the hash.
+  if (!/^[A-Za-z0-9_-]+$/.test(res.hash)) {
+    throw new CredentialLifecycleError(
+      "mint-malformed",
+      `provider returned a malformed hash (rejected charset) for ${name}`,
+      `inspect the provider console for the key named ${name}, revoke it by hand, then re-run`,
+    );
+  }
   // INV-CRED-1: an uncapped key must never be minted-and-kept. The same
   // refusal covers a malformed limit (NaN/±Infinity/non-positive): a number
   // that cannot be trusted as a cap is treated as no cap at all.
@@ -432,9 +504,30 @@ export async function runCredentialLifecycle(deps: CredentialDeps, runId: string
     // delivery error remains the reported failure.
     try {
       await revokeAndVerify(deps, minted.hash);
-    } catch {
-      // revokeAndVerify's own remediation is lost here; the record still
+    } catch (compErr) {
+      // Log the failed compensation so it's observable; the record still
       // carries keyHash, so DF2.6's orphan sweep or a manual re-run reaches it.
+      const compErrCred = compErr as CredentialLifecycleError;
+      const compCtx: StepContext = {
+        requestId: deps.requestId ?? newRequestId(),
+        runId,
+        keyHash: minted.hash,
+      };
+      const compDurationMs = 0; // compensation failure has no meaningful duration
+      log({
+        requestId: compCtx.requestId,
+        operation: "credential.delivery_compensation",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: compDurationMs,
+        status: "error",
+        error: { code: compErrCred.code ?? "compensation_failed", message: compErrCred.message },
+        runId,
+        step: "delivery_compensation",
+        keyHashPrefix: keyHashPrefix(compCtx.keyHash),
+        outcome: "error",
+        delivery_compensation_ms: compDurationMs,
+      });
     }
     throw e;
   }
@@ -612,6 +705,13 @@ export function openRouterKeyApi(opts: OpenRouterKeyApiOptions = {}): KeyApi {
     },
 
     async listAllKeys(maxPages) {
+      if (!Number.isInteger(maxPages) || maxPages <= 0) {
+        throw new CredentialLifecycleError(
+          "max-pages-invalid",
+          `maxPages must be a positive integer, got ${maxPages}`,
+          "pass a positive integer page budget",
+        );
+      }
       const entries: KeyEntry[] = [];
       let offset = 0;
       // Only an EMPTY page proves exhaustion. A short page proves nothing —
