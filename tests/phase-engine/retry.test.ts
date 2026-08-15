@@ -253,7 +253,13 @@ describe("session identity (AC2, INV-4)", () => {
     const cache = new SessionCache();
     const h1 = harness({ sessionCache: cache, responses: [{ text: envelopeJson({ approved: true }) }] });
     await h1.result;
-    const h2 = harness({ sessionCache: cache, responses: [{ text: envelopeJson({ approved: true }) }] });
+    // A distinct-but-equal agent object: the cache must key on the
+    // (agentId, provider, model) CONTENT, not object identity (review round 1).
+    const h2 = harness({
+      sessionCache: cache,
+      params: { agent: { ...AGENT } },
+      responses: [{ text: envelopeJson({ approved: true }) }],
+    });
     await h2.result;
     expect(h1.scripted.sessionIds[0]).toBe(h2.scripted.sessionIds[0]);
   });
@@ -269,7 +275,7 @@ describe("session identity (AC2, INV-4)", () => {
       responses: ok,
     });
     await b.result;
-    const a2 = harness({ sessionCache: cache, responses: ok });
+    const a2 = harness({ sessionCache: cache, params: { agent: { ...AGENT } }, responses: ok });
     await a2.result;
     expect(a2.scripted.sessionIds[0]).toBe(a1.scripted.sessionIds[0]);
   });
@@ -281,7 +287,7 @@ describe("session identity (AC2, INV-4)", () => {
     expect(first).not.toBe(second);
   });
 
-  test("absent PhaseParams.agent: no session reuse — every send gets its own id, none invented from a roster", async () => {
+  test("absent PhaseParams.agent: no session identifier is minted or passed — every send runs sessionless", async () => {
     const h = harness({
       params: { agent: undefined, retries: 1 },
       responses: [

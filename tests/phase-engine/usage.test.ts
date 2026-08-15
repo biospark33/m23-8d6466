@@ -125,7 +125,13 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
 
   test("exactly one micros→USD DIVISION exists in the engine, in usage.ts", () => {
     const usage = fs.readFileSync(path.join(engineRoot, "usage.ts"), "utf8");
-    expect((usage.match(/\/\s*1_000_000/g) ?? []).length).toBe(1);
+    // Comments excluded, same as the walk below: the invariant is about the
+    // one EXECUTABLE conversion (review round 1).
+    const code = usage
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("*") && !l.trimStart().startsWith("//"))
+      .join("\n");
+    expect((code.match(/\/\s*1_000_000/g) ?? []).length).toBe(1);
     // No other engine file divides by a million (DF1.5's roster rate math
     // multiplies tokens into µ$ — different direction, different unit contract).
     const others: string[] = [];

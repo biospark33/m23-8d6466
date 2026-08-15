@@ -14,11 +14,10 @@ import { z, type ZodIssue } from "zod";
 import type { Envelope } from "../envelopes/types.ts";
 import { sanitizeForMessage } from "../types.ts";
 
-// Keep both literal enums in sync with their declaration sites: ExitStatus is
-// the CC-1 5-value taxonomy in cli-anything/src/types.ts, the kind union is
-// DF1.2's EnvelopeKind in envelopes/types.ts. A sixth CC-1 status must be
-// added here in the same change (no shared const exists across the two
-// packages without widening this story's file scope).
+// ExitStatus is the CC-1 5-value taxonomy in cli-anything/src/types.ts; the
+// kind union is DF1.2's EnvelopeKind in envelopes/types.ts. A sixth CC-1
+// status must be added here in the same change — the assertion below makes
+// forgetting a compile error, not a silent shape divergence.
 const ExitStatusSchema = z.enum(["success", "transient", "overflow", "logic", "lead_failure"]);
 
 const ReviewFindingSchema = z.object({
@@ -46,6 +45,17 @@ export const EnvelopeSchema = z
     findings: z.array(ReviewFindingSchema).optional(),
   })
   .strict();
+
+/**
+ * Compile-time drift tripwire (review round 1): DF1.2 declares `Envelope` as a
+ * TypeScript interface, not a zod schema, so there is nothing to import and
+ * derive from — instead this exact-type-equality assertion makes any drift
+ * (an added, renamed, or re-typed field on either side — even an optional
+ * one, which mutual assignability would let through) fail `tsc --noEmit`.
+ */
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+type AssertTrue<T extends true> = T;
+export type _EnvelopeMirrorMatchesDF1_2 = AssertTrue<Equals<z.infer<typeof EnvelopeSchema>, Envelope>>;
 
 /** The fields a correction prompt may tell the model about. */
 export const REQUIRED_ENVELOPE_FIELDS = ["kind", "label", "status", "summary"] as const;
