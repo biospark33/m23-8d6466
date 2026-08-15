@@ -235,8 +235,10 @@ predecessor.
       (control 27,278 → lean 5,420 first-turn input tokens, ratio 5.03, deltaTokens 21,858 —
       the extension/skill overhead term, matching the 37,279-token model's shape), but
       worker-a (gpt-oss-20b:free) reported zero first-turn usage in all control runs
-      (`zero_control_mean` error, AC4's exact fail-closed path: exit non-zero, no ratio in
-      aggregate, no fallback to the surviving arm). A free-slug usage-reporting gap, not a
+      (`zero_control_mean` error — a distinct trigger from AC4's zero-usage-bearing-turns case,
+      since every worker-a control observation had `usageBearingTurns: 4` with zero-valued usage;
+      the fail-closed outcome is the same as AC4/INV-5: exit non-zero, no ratio in aggregate, no
+      fallback to the surviving arm). A free-slug usage-reporting gap, not a
       harness defect. ORIGINAL: `npm run bench:lean-worker` on
       `cli-anything/manifests/lean-benchmark.yaml` produces `artifacts/lean-worker-benchmark.json`
       carrying both arms at `n >= 3`, mean first-turn input tokens per arm, `ratio`, `deltaTokens`
