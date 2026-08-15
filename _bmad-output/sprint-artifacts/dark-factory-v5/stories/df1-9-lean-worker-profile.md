@@ -313,10 +313,16 @@ spent). Artifact: `../evidence/df1-9-lean-worker-benchmark-funded-run.json`.
   hypothesis, the other produced no data. A re-run with a paid worker-a slug (usage reported
   from turn 1) would close it cleanly if a formal `supported` verdict is ever needed.
 
-Host note: before this run, `pi` itself hung at startup on this machine — root cause was the
-`packages` entries (`npm:pi-lens`, `npm:pi-gitnexus-plus@0.7.0`) in
-`~/.pi/agent/settings.json` hanging at load under every runtime; they were removed (backup:
-`settings.json.bak-packages`). Re-add only after that package-load hang is diagnosed.
+Host note (diagnosed + resolved 2026-08-15): `pi` appeared to hang at startup on this machine.
+Root cause was NOT a hang: pi synchronously `npm install -g`s any `settings.json` package
+missing from the *active* npm root before it even parses `--version`. The packages were
+installed under the old `/usr/local` npm root, but the active npm root had moved to
+`~/.local/node-arm64`, so pi reinstalled both (~50 s each) on every startup — a 100 s+
+"hang". Installing them at the active root pulled pi-lens **4.0.0** (latest), which kills pi
+silently at load (exit 0, no output); the repo's tooling pins the 3.8.x line (P0.5/P1.7: do
+not re-pin). Resolution: `pi-lens@3.8.50` + `pi-gitnexus-plus@0.7.0` installed at the active
+npm root and pinned in `~/.pi/agent/settings.json`. pi startup ≈ 25–40 s with pi-lens loaded
+(extension load cost, historical); ≈ 3 s bare.
 
 Original warning, kept for the record:
 
