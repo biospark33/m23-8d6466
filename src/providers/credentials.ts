@@ -183,6 +183,10 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
   // One live key per run: a re-run after a partial lifecycle must revoke the
   // existing key, not mint a second one whose predecessor stays live and
   // unrecorded — the exact orphan the lifecycle exists to prevent.
+  // The full hash in the remediation is deliberate: a keyHash is a non-secret
+  // provider-side identifier (DF2.1 persists it in the plaintext run record);
+  // the remediation must be a copy-pasteable command, and only the plaintext
+  // key is credential material.
   const existing = deps.store.get(runId).keyHash;
   if (existing) {
     throw new CredentialLifecycleError(
@@ -192,6 +196,13 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
     );
   }
   const capMicroUsd = deps.capMicroUsd ?? defaultKeyCapMicroUsd;
+  if (!Number.isInteger(capMicroUsd) || capMicroUsd <= 0) {
+    throw new CredentialLifecycleError(
+      "cap-invalid",
+      `capMicroUsd must be a positive integer of micro-dollars, got ${capMicroUsd}`,
+      "pass an integer µ$ ceiling (e.g. 50_000_000), or omit it for the default",
+    );
+  }
   const name = `${SBX_KEY_PREFIX}${runId}`;
   const res = await timed(ctx, "mint", () => deps.keyApi.createKey(name, microsToUsd(capMicroUsd)));
   // INV-CRED-1: an uncapped key must never be minted-and-kept
@@ -223,9 +234,30 @@ function deliverScript(envFile: string): string {
   );
 }
 
+/**
+ * The delivery target becomes part of a `sh -c` script, so it is validated
+ * against a strict path grammar (charset allow-list, no `..` segments, not
+ * empty) BEFORE interpolation — a caller-supplied `envFile` carrying shell
+ * metacharacters must fail closed here, never reach the box.
+ */
+function assertEnvFileSafe(envFile: string): void {
+  const wellFormed = /^[A-Za-z0-9._/-]+$/.test(envFile) && envFile.length > 0;
+  const noTraversal = envFile
+    .split("/")
+    .every((segment) => segment !== "..");
+  if (!wellFormed || !noTraversal) {
+    throw new CredentialLifecycleError(
+      "env-file-invalid",
+      `envFile ${JSON.stringify(envFile)} is not a plain path (charset [A-Za-z0-9._/-], no ".." segments) — refusing to build a shell script from it`,
+      "pass an absolute in-box path or a box-relative path without shell metacharacters",
+    );
+  }
+}
+
 export async function deliverRunKey(deps: CredentialDeps, vm: string, key: string): Promise<void> {
   const ctx: StepContext = { requestId: deps.requestId ?? newRequestId(), runId: null };
   const envFile = deps.envFile ?? KEY_ENV_FILE;
+  assertEnvFileSafe(envFile);
   const stdin = `${KEY_ENV_VAR}=${key}\n`;
   const res = await timed(ctx, "deliver", () => deps.driver.exec(vm, ["sh", "-c", deliverScript(envFile)], stdin));
   const mode = res.stdout.trim();

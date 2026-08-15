@@ -19,6 +19,7 @@ import {
   SBX_KEY_PREFIX,
   CredentialLifecycleError,
   defaultKeyCapMicroUsd,
+  deliverRunKey,
   mintRunKey,
   openRouterKeyApi,
   revokeAndVerify,
@@ -300,6 +301,40 @@ describe("DF2.3 credential lifecycle", () => {
     // keyHash IS written (mint ran); the record stays open, the VM stays alive
     expect(store.get(runId).keyHash).toBeString();
     expect((await driver.list()).some((v) => v.name === runId)).toBeTrue();
+  });
+
+  test("security: a shell-metacharacter or .. envFile is refused before any script is built", async () => {
+    const runId = "df23-envfile";
+    await makeRun(runId);
+    const minted = await mintRunKey(deps(), runId);
+    for (const bad of ["app/.env; touch /tmp/pwned", "app/$(whoami).env", "../../etc/passwd", ""]) {
+      let err: unknown;
+      try {
+        await deliverRunKey(deps({ envFile: bad }), runId, minted.key);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(CredentialLifecycleError);
+      expect((err as CredentialLifecycleError).code).toBe("env-file-invalid");
+    }
+    // nothing was ever exec'd with a forged script
+    expect(recording.execCalls).toHaveLength(0);
+  });
+
+  test("security: a non-positive or non-integer cap is refused before the provider is called", async () => {
+    const runId = "df23-cap";
+    await makeRun(runId);
+    for (const bad of [0, -5, 12.5]) {
+      let err: unknown;
+      try {
+        await mintRunKey(deps({ capMicroUsd: bad }), runId);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(CredentialLifecycleError);
+      expect((err as CredentialLifecycleError).code).toBe("cap-invalid");
+    }
+    expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
   });
 
   test("one live key per run: minting over an existing keyHash is refused", async () => {
