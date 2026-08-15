@@ -28,17 +28,35 @@ export class TracerError extends Error {
   declare code: string;
   declare table?: string;
   declare statement?: string;
+  declare phase?: string;
+  declare agentId?: string;
+  declare timestamp?: string;
+  declare durationMs?: number;
+  declare jsonlWriteMs?: number;
+  declare sqliteInsertMs?: number;
 
   constructor(options: {
     code: string;
     message: string;
     table?: string;
     statement?: string;
+    phase?: string;
+    agentId?: string;
+    timestamp?: string;
+    durationMs?: number;
+    jsonlWriteMs?: number;
+    sqliteInsertMs?: number;
   }) {
     super(options.message);
     this.code = options.code;
     if (options.table) this.table = options.table;
     if (options.statement) this.statement = options.statement;
+    if (options.phase) this.phase = options.phase;
+    if (options.agentId) this.agentId = options.agentId;
+    if (options.timestamp) this.timestamp = options.timestamp;
+    if (options.durationMs !== undefined) this.durationMs = options.durationMs;
+    if (options.jsonlWriteMs !== undefined) this.jsonlWriteMs = options.jsonlWriteMs;
+    if (options.sqliteInsertMs !== undefined) this.sqliteInsertMs = options.sqliteInsertMs;
   }
 }
 
@@ -58,9 +76,16 @@ function eventId(): string {
   return randomBytes(12).toString("base64url");
 }
 
-/** Generate a nanoid-style phase_id. */
-function phaseId(): string {
-  return randomBytes(12).toString("base64url");
+/**
+ * Coherent timestamp helper: started_at must never be stamped from a clock
+ * read later than ended_at (a single read for end-only events). Used by both
+ * tracer.ts and journal-bridge.ts to enforce the same invariant.
+ */
+export function coherentStartedAt(
+  startedAt: string | undefined,
+  endedAt: string | undefined,
+): string {
+  return startedAt ?? endedAt ?? new Date().toISOString();
 }
 
 /** Generate a nanoid-style envelope_id. */
@@ -162,7 +187,18 @@ export class Tracer {
     this.dataDirPin = pinPathNoFollow(fs.realpathSync(this.dataDir), "dir");
     this.assertDataDirIdentity();
 
-    this.openWriter();
+    try {
+      this.openWriter();
+    } catch (e) {
+      // F3: close db handle if opened during a failing openWriter()
+      if (this.db !== undefined) {
+        try {
+          this.db.close();
+        } catch {}
+        this.db = undefined;
+      }
+      throw e;
+    }
   }
 
   /**
@@ -369,9 +405,15 @@ export class Tracer {
 
   /**
    * AC5: deliver a structured error to the callback without letting a throwing
-   * callback break the run either.
+   * callback break the run either. Fill default observability fields per spec.
    */
   private emitTraceError(err: TracerError): void {
+    // F2: fill defaults for observability contract
+    if (!err.timestamp) err.timestamp = new Date().toISOString();
+    if (err.durationMs === undefined) err.durationMs = 0;
+    if (err.jsonlWriteMs === undefined) err.jsonlWriteMs = 0;
+    if (err.sqliteInsertMs === undefined) err.sqliteInsertMs = 0;
+
     try {
       this.onTraceError?.(err);
     } catch {
@@ -425,10 +467,8 @@ export class Tracer {
     endedAt?: string;
   }): void {
     const eventIdStr = eventId();
-    // One event timestamp: the caller's start if given, else its end. An
-    // end-only event (phase_end) stamps started_at from ended_at, so the two
-    // never come from separate clock reads that can invert (started > ended).
-    const now = event.startedAt ?? event.endedAt ?? new Date().toISOString();
+    // F4: use shared coherentStartedAt helper
+    const now = coherentStartedAt(event.startedAt, event.endedAt);
     const jsonlLine = JSON.stringify({
       event_id: eventIdStr,
       request_id: event.requestId,
@@ -442,12 +482,15 @@ export class Tracer {
       ended_at: event.endedAt ?? null,
     });
 
+    // F2: time JSONL append+flush (writeSync+fsync)
+    const jsonlStart = performance.now();
     // JSONL append FIRST, then flush (AC5: on disk before SQLite)
     if (this.jsonlFd !== undefined) {
       const buf = Buffer.from(`${jsonlLine}\n`, "utf-8");
       fs.writeSync(this.jsonlFd, buf);
       fs.fsyncSync(this.jsonlFd);
     }
+    const jsonlWriteMs = Math.round(performance.now() - jsonlStart);
 
     // SQLite insert — failure surfaces via callback, never throws
     if (!this.db) return;
@@ -463,17 +506,24 @@ export class Tracer {
     }
 
     if (!dbWritable) {
+      const durationMs = Math.round(jsonlWriteMs + 0); // sqlite insert not attempted
+
       this.emitTraceError(
         new TracerError({
           code: "SQLITE_WRITE",
           message: "database file is not writable",
           table: "events",
           statement: "INSERT INTO events",
+          phase: event.phaseId,
+          durationMs,
+          jsonlWriteMs,
+          sqliteInsertMs: 0,
         }),
       );
       return;
     }
 
+    const sqliteStart = performance.now();
     try {
       this.db
         .prepare(
@@ -494,12 +544,23 @@ export class Tracer {
           now,
           event.endedAt ?? null,
         );
+      // No error — no need to emit anything
     } catch (e) {
+      // The insert consumed real time before failing — report the measured
+      // partial duration, not a hardcoded 0 (spec: sub-timings are reported,
+      // 0 only when no breakdown exists at all).
+      const sqliteInsertMs = Math.round(performance.now() - sqliteStart);
+      const durationMs = jsonlWriteMs + sqliteInsertMs;
+
       const err = new TracerError({
         code: "SQLITE_WRITE",
         message: (e as Error).message,
         table: "events",
         statement: "INSERT INTO events",
+        phase: event.phaseId,
+        durationMs,
+        jsonlWriteMs,
+        sqliteInsertMs,
       });
       this.emitTraceError(err);
     }
@@ -516,6 +577,9 @@ export class Tracer {
   }): void {
     if (!this.db) return;
 
+    // F6: normalize attempt before binding (match journal-bridge pattern)
+    const attempt = Number.isFinite(e.attempt) ? Math.trunc(e.attempt) : 1;
+
     try {
       this.db
         .prepare(
@@ -526,7 +590,7 @@ export class Tracer {
         .run(
           e.requestId,
           e.phaseId,
-          e.attempt,
+          attempt,
           e.gate,
           e.passed ? 1 : 0,
           JSON.stringify(e.violations),
@@ -539,6 +603,7 @@ export class Tracer {
           message: (err as Error).message,
           table: "gate_results",
           statement: "INSERT INTO gate_results",
+          phase: e.phaseId,
         }),
       );
     }
@@ -555,6 +620,9 @@ export class Tracer {
   }): void {
     if (!this.db) return;
 
+    // F6: normalize attempt before binding (match journal-bridge pattern)
+    const attempt = Number.isFinite(e.attempt) ? Math.trunc(e.attempt) : 1;
+
     try {
       this.db
         .prepare(
@@ -570,7 +638,7 @@ export class Tracer {
           e.outputType,
           e.payloadJson,
           e.valid ? 1 : 0,
-          e.attempt,
+          attempt,
         );
     } catch (err) {
       this.emitTraceError(
@@ -579,6 +647,7 @@ export class Tracer {
           message: (err as Error).message,
           table: "envelopes",
           statement: "INSERT INTO envelopes",
+          phase: e.phaseId,
         }),
       );
     }
@@ -591,6 +660,19 @@ export class Tracer {
     command: string;
   }): void {
     if (!this.db) return;
+
+    // F5: pid guard - reject non-positive or non-integer pids
+    if (!Number.isInteger(e.pid) || e.pid <= 0) {
+      this.emitTraceError(
+        new TracerError({
+          code: "INVALID_INPUT",
+          message: `invalid pid: ${e.pid} (must be positive integer)`,
+          table: "processes",
+          statement: "INSERT INTO processes",
+        }),
+      );
+      return;
+    }
 
     try {
       this.db
@@ -784,8 +866,8 @@ export class Tracer {
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(phase_id) DO UPDATE SET
             status = excluded.status,
-            ended_at = excluded.ended_at,
-            error = excluded.error`,
+            ended_at = COALESCE(excluded.ended_at, phases.ended_at),
+            error = COALESCE(excluded.error, phases.error)`,
         )
         .run(
           e.requestId,
@@ -808,6 +890,7 @@ export class Tracer {
           message: (err as Error).message,
           table: "phases",
           statement: "UPSERT phases",
+          phase: e.phaseId,
         }),
       );
     }

@@ -361,6 +361,89 @@ describe("TracingJournal delegation + forwarding", () => {
     expect(innerCalls[1]?.op).toBe("promotePhase");
   });
 
+  test("onTraceError emits structured payload with requestId, table, statement, timestamp, durationMs, jsonl_write_ms, sqlite_insert_ms", () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { onTraceError } = require("../../../src/phase-engine/trace/journal-bridge.ts");
+
+    // Capture stderr writes to validate the JSON payload
+    const stderrChunks: string[] = [];
+    const originalWrite = process.stderr.write;
+    // Spy on stderr.write
+    process.stderr.write = ((chunk: unknown) => {
+      if (typeof chunk === "string") {
+        stderrChunks.push(chunk);
+      } else if (Buffer.isBuffer(chunk)) {
+        stderrChunks.push(chunk.toString("utf-8"));
+      }
+      return true;
+    }) as typeof process.stderr.write;
+
+    try {
+      // Create a mock TracerError with all relevant fields
+      const mockError: {
+        name: string;
+        code: string;
+        message: string;
+        stack?: string;
+        table?: string;
+        statement?: string;
+        phase?: string;
+        agentId?: string;
+        timestamp?: string;
+        durationMs?: number;
+        jsonlWriteMs?: number;
+        sqliteInsertMs?: number;
+      } = {
+        name: "TracerError",
+        code: "SQLITE_WRITE",
+        message: "database is closed",
+        stack: "Error: database is closed\n    at test",
+        table: "phases",
+        statement: "INSERT INTO phases (...) VALUES (...)",
+        phase: "plan",
+        agentId: "agent-1",
+        timestamp: "2024-01-01T00:00:00.000Z",
+        durationMs: 42,
+        jsonlWriteMs: 1,
+        sqliteInsertMs: 2,
+      };
+
+      const requestId = "test-req-123";
+
+      // Call onTraceError directly
+      onTraceError(mockError, requestId);
+    } finally {
+      // Restore stderr
+      process.stderr.write = originalWrite;
+    }
+
+    // Parse the captured JSON
+    const stderrOutput = stderrChunks.join("");
+    const errorLine = stderrOutput
+      .split("\n")
+      .find((line) => line.includes('"event":"trace_error"') || line.includes('"event": "trace_error"'));
+    expect(errorLine).toBeDefined();
+
+    const parsed = JSON.parse(errorLine!);
+    // Spec-required fields
+    expect(parsed.requestId).toBe("test-req-123");
+    expect(parsed.level).toBe("warn");
+    expect(parsed.event).toBe("trace_error");
+    expect(parsed.phase).toBe("plan");
+    expect(parsed.agentId).toBe("agent-1");
+    expect(parsed.table).toBe("phases");
+    expect(parsed.statement).toBe("INSERT INTO phases (...) VALUES (...)");
+    expect(parsed.timestamp).toBe("2024-01-01T00:00:00.000Z");
+    expect(parsed.durationMs).toBe(42);
+    expect(parsed.jsonl_write_ms).toBe(1);
+    expect(parsed.sqlite_insert_ms).toBe(2);
+    // Error block
+    expect(parsed.error).toBeDefined();
+    expect(parsed.error.code).toBe("SQLITE_WRITE");
+    expect(parsed.error.message).toBe("database is closed");
+    expect(parsed.error.stack).toBeDefined();
+  });
+
   test("finish calls finishSession and processesEndAll", () => {
     const ws = workspace();
 

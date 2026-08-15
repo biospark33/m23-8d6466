@@ -9,29 +9,46 @@
  */
 import type { PhaseJournal } from "../journal.ts";
 import type { GateEvent, PhaseRecord, PhaseStatus, RunContext } from "../types.ts";
-import type { Tracer } from "./tracer.ts";
+import type { Tracer, TracerError } from "./tracer.ts";
+import { coherentStartedAt } from "./tracer.ts";
 
 // AC5: a broken/closed stderr (EPIPE — piped to head, fd closed by a
 // supervisor) reports its failure asynchronously via the stream's 'error'
 // event; a synchronous try/catch around write() never sees it, and an
 // unhandled 'error' kills the process. One listener at module scope makes
 // tracer error reporting unable to break the run.
+//
+// This no-op listener is process-wide: importing this module installs it on
+// process.stderr for the lifetime of the process. That is intentional AC5
+// defense (an unhandled 'error' event on a stream kills the process), and it
+// suppresses crash-on-EPIPE for every stderr writer in the process, not just
+// this module — it also guards phase.ts's default logger and any other stderr
+// writer.
 process.stderr.on("error", () => {});
 
-/** Error handler for tracer failures (AC5). */
-function onTraceError(err: Error): void {  try {
+/** Error handler for tracer failures (AC5). Exported for testing. */
+export function onTraceError(err: TracerError, requestId: string): void {
+  try {
     // Log structured error to stderr, never throw — and a closed/broken
     // stderr (EPIPE) must not turn a tracer failure into a run failure.
     process.stderr.write(
       `${JSON.stringify({
+        requestId,
+        phase: err.phase ?? null,
+        agentId: err.agentId ?? null,
+        table: err.table ?? null,
+        statement: err.statement ?? null,
+        timestamp: err.timestamp ?? new Date().toISOString(),
+        durationMs: err.durationMs ?? 0,
+        jsonl_write_ms: err.jsonlWriteMs ?? 0,
+        sqlite_insert_ms: err.sqliteInsertMs ?? 0,
         level: "warn",
         event: "trace_error",
         error: {
-          code: err.name,
+          code: err.code,
           message: err.message,
-          ...(err instanceof Error && err.stack ? { stack: err.stack } : {}),
+          ...(err.stack ? { stack: err.stack } : {}),
         },
-        timestamp: new Date().toISOString(),
       })}\n`,
     );
   } catch {
@@ -97,7 +114,7 @@ export class TracingJournal implements PhaseJournal {
         });
       }
     } catch (err) {
-      onTraceError(err as Error);
+      onTraceError(err as TracerError, this.ctx.requestId);
     }
   }
 
@@ -129,9 +146,9 @@ export class TracingJournal implements PhaseJournal {
         kind: "code", // default, will be ignored on update
         status, // upsertPhase accepts string
         // One clock read per promote: on the insert path (promote without a
-        // prior writePhase) a second fresh stamp here could land after
-        // ended_at and store a negative-duration phase.
-        startedAt: endedAt, // required for upsert
+        // prior writePhase) we need started_at; using the same read as
+        // ended_at via coherentStartedAt prevents storing a negative duration.
+        startedAt: coherentStartedAt(undefined, endedAt),
         endedAt,
       });
 
@@ -145,7 +162,7 @@ export class TracingJournal implements PhaseJournal {
         endedAt,
       });
     } catch (err) {
-      onTraceError(err as Error);
+      onTraceError(err as TracerError, this.ctx.requestId);
     }
   }
 
@@ -201,7 +218,7 @@ export class TracingJournal implements PhaseJournal {
         }),
       });
     } catch (err) {
-      onTraceError(err as Error);
+      onTraceError(err as TracerError, this.ctx.requestId);
     }
   }
 
@@ -218,7 +235,7 @@ export class TracingJournal implements PhaseJournal {
         status: outcome.ok ? "ok" : "fail",
       });
     } catch (err) {
-      onTraceError(err as Error);
+      onTraceError(err as TracerError, this.ctx.requestId);
     }
 
     return outcome;

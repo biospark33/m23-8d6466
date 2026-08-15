@@ -257,9 +257,12 @@ async function main(argv: readonly string[]): Promise<number> {
   }
 
   // DF1.4: Open Tracer (applies schema+migrations at construction).
-  // AC5: the tracer never throws SQLite failures to the run — without a sink
-  // here they would vanish silently. Structured record to stderr, run context
-  // included, never throws (a broken sink must not fail the run either).
+  // AC5: per-write SQLite failures are reported through this sink and never break
+  // the run; open-time integrity failures (boundary violation, dir/db file mode,
+  // WAL refusal, migration failure) throw from the constructor and are fatal by
+  // design (INV-1 hard open refusal, INV-5 fail-closed). Structured record to
+  // stderr, run context included, never throws (a broken sink must not fail the
+  // run either).
   const tracer = new Tracer({
     dataDir: traceDir,
     requestId,
@@ -277,6 +280,12 @@ async function main(argv: readonly string[]): Promise<number> {
           table: err.table,
           statement: err.statement,
           message: err.message,
+          phase: err.phase ?? null,
+          agentId: err.agentId ?? null,
+          timestamp: err.timestamp ?? new Date().toISOString(),
+          durationMs: err.durationMs ?? 0,
+          jsonl_write_ms: err.jsonlWriteMs ?? 0,
+          sqlite_insert_ms: err.sqliteInsertMs ?? 0,
         })}\n`,
       );
     },

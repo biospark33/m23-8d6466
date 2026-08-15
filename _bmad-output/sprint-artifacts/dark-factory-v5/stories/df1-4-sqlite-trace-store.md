@@ -321,8 +321,30 @@ and `VIZ/server/db.ts:77-124, 362-384`, `adw_id`→`request_id` throughout):
 - `_bmad-output/evidence/df1-4/e2e-two-phase-trace.db` (new, artifact)
 - `_bmad-output/evidence/df1-4/two-page-read.json` (new, artifact)
 
+### Review Findings (BMAD code review round 4, 2026-08-15)
+
+- [x] [Review][Patch] promotePhase upsert clobbers settled `error` via `error = excluded.error` (null) [src/phase-engine/trace/tracer.ts] — fixed: ON CONFLICT now `error = COALESCE(excluded.error, phases.error)`, `ended_at = COALESCE(excluded.ended_at, phases.ended_at)`; 2 regression tests
+- [x] [Review][Patch] Observability contract: failure logs missing `phase`, `agentId`, `timestamp`, `durationMs`, `jsonl_write_ms`, `sqlite_insert_ms` [tracer.ts + journal-bridge.ts + scripts/pipeline-run.ts] — fixed: TracerError carries the fields, emitTraceError fills defaults (report-0 rule), trace() times JSONL write + SQLite insert, both sinks serialize the full shape; contract test added
+- [x] [Review][Patch] Module-scope `process.stderr.on("error")` lacks contract documentation of process-wide effect [journal-bridge.ts] — fixed: comment states the process-wide scope as deliberate AC5 defense
+- [x] [Review][Patch] Tracer constructor leaks open db handle when openWriter throws after `this.db` assignment [tracer.ts] — fixed: constructor closes db on openWriter failure, rethrows
+- [x] [Review][Patch] pipeline-run comment overclaims "tracer never throws SQLite failures to the run" — open-time failures fatal by design [scripts/pipeline-run.ts] — fixed: comment states both contracts (per-write non-fatal, open-time fatal INV-1/INV-5)
+- [x] [Review][Patch] Timestamp-coherence rule duplicated between tracer.ts trace() and journal-bridge.ts promotePhase [tracer.ts] — fixed: shared `coherentStartedAt()` exported from tracer.ts, used by both
+- [x] [Review][Patch] recordProcess accepts pid ≤ 0 / non-integer [tracer.ts] — fixed: INVALID_INPUT guard, test added
+- [x] [Review][Patch] recordEnvelope / recordGateResult bind `attempt` without finite-number normalization [tracer.ts] — fixed: Math.trunc + finite check, degrade to 1
+- [x] [Review][Patch] journal-bridge.ts onTraceError malformed brace line [journal-bridge.ts] — fixed in rewrite
+
+24 findings dismissed as noise/false-positive after code verification (notably: Sift's `started_at` overwrite claim — ON CONFLICT never touches `started_at`; sessions column-count mismatch; `-Infinity` cursor bypass; `processesEndAll` double-stamp; circular-payload crash claims — all stringify sites guarded; missing boundary-refusal test — exists at tracer.test.ts:336; migrations Object.freeze redundancy — `as const` is compile-time only).
+
+Gates after round 4: 71/71 trace suites, 318/318 phase-engine, tsc clean, biome clean on changed files.
+
 ### Change Log
 
+- 2026-08-15: BMAD review round 4 (3 adversarial layers + Sift round-4 + orchestrator
+  verification) — 9 fixed, 24 dismissed with code-verified rationale. Key fixes:
+  upsertPhase error/ended_at preservation via COALESCE, observability-contract fields
+  (phase/agentId/timestamp/durationMs/jsonl_write_ms/sqlite_insert_ms) through
+  TracerError → both sinks, constructor db-leak guard on failed open, shared
+  coherentStartedAt() helper, recordProcess pid guard, attempt normalization.
 - 2026-08-15: DF1.4 implemented — 7-table SQLite trace store, WAL writer with
   JSONL-first dual write, additive migrations + index DDL, readonly
   rowid-cursor reader, PhaseJournal bridge wiring, e2e demo artifacts.

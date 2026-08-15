@@ -552,3 +552,234 @@ describe("Dual-write order: JSONL then SQLite", () => {
     tracer.close();
   });
 });
+
+describe("F1: upsertPhase error preservation", () => {
+  test("writePhase with error followed by promotePhase without error preserves error and ended_at", () => {
+    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const phaseId = "phase-error-test";
+
+    // Simulate writePhase (settle with error)
+    tracer.upsertPhase({
+      requestId,
+      phaseId,
+      seq: 1,
+      name: "build",
+      kind: "build",
+      description: "build phase",
+      status: "fail",
+      attempt: 1,
+      retries: 0,
+      error: "compilation failed",
+      startedAt: "2026-08-15T10:00:00.000Z",
+      endedAt: "2026-08-15T10:05:00.000Z",
+    });
+
+    // Simulate promotePhase (without error, with new endedAt)
+    tracer.upsertPhase({
+      requestId,
+      phaseId,
+      seq: 1,
+      name: "build",
+      kind: "build",
+      status: "fail",
+      attempt: 1,
+      retries: 0,
+      // No error passed - should NOT clobber the settled error
+      startedAt: "2026-08-15T10:00:00.000Z",
+      endedAt: "2026-08-15T10:06:00.000Z", // New endedAt
+    });
+
+    const db = new Database(path.join(dataDir, "trace.db"), { readonly: true });
+    const row = db
+      .prepare("SELECT error, ended_at FROM phases WHERE phase_id=?")
+      .get(phaseId) as { error: string | null; ended_at: string | null };
+
+    expect(row).toBeDefined();
+    // Error from settle should be preserved (not clobbered to NULL)
+    expect(row.error).toBe("compilation failed");
+    // ended_at from promote should be set (new endedAt preserved)
+    expect(row.ended_at).toBe("2026-08-15T10:06:00.000Z");
+
+    db.close();
+    tracer.close();
+  });
+
+  test("upsertPhase preserves ended_at when later call omits it", () => {
+    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const phaseId = "phase-ended-at-test";
+
+    // First call with endedAt
+    tracer.upsertPhase({
+      requestId,
+      phaseId,
+      seq: 1,
+      name: "test",
+      kind: "test",
+      status: "success",
+      startedAt: "2026-08-15T11:00:00.000Z",
+      endedAt: "2026-08-15T11:10:00.000Z",
+    });
+
+    // Second call without endedAt (should preserve)
+    tracer.upsertPhase({
+      requestId,
+      phaseId,
+      seq: 1,
+      name: "test",
+      kind: "test",
+      status: "success",
+      startedAt: "2026-08-15T11:00:00.000Z",
+      // No endedAt
+    });
+
+    const db = new Database(path.join(dataDir, "trace.db"), { readonly: true });
+    const row = db
+      .prepare("SELECT ended_at FROM phases WHERE phase_id=?")
+      .get(phaseId) as { ended_at: string };
+
+    expect(row.ended_at).toBe("2026-08-15T11:10:00.000Z");
+
+    db.close();
+    tracer.close();
+  });
+});
+
+describe("F2: observability contract", () => {
+  test("SQLite failure emits error with timestamp, durationMs, jsonlWriteMs, sqliteInsertMs, and phase", () => {
+    let receivedError: TracerError | null = null;
+    const tracer = new Tracer({
+      dataDir,
+      requestId,
+      pipelineName,
+      onTraceError: (err: TracerError) => {
+        receivedError = err;
+      },
+    });
+
+    const dbPath = path.join(dataDir, "trace.db");
+    fs.chmodSync(dbPath, 0o444);
+
+    tracer.trace({
+      requestId,
+      phaseId: "phase-obs-test",
+      type: "log",
+      name: "obs-test",
+      payloadJson: JSON.stringify({ test: "observability" }),
+    });
+
+    fs.chmodSync(dbPath, 0o600);
+
+    expect(receivedError).toBeDefined();
+    expect(receivedError!.code).toBe("SQLITE_WRITE");
+    expect(receivedError!.table).toBe("events");
+
+    // F2: timestamp should be ISO string
+    expect(receivedError!.timestamp).toBeDefined();
+    const timestamp = new Date(receivedError!.timestamp!);
+    expect(Number.isNaN(timestamp.getTime())).toBe(false);
+
+    // F2: durationMs, jsonlWriteMs, sqliteInsertMs all >= 0
+    expect(receivedError!.durationMs).toBeGreaterThanOrEqual(0);
+    expect(receivedError!.jsonlWriteMs).toBeGreaterThanOrEqual(0);
+    expect(receivedError!.sqliteInsertMs).toBeGreaterThanOrEqual(0);
+
+    // F2: phase should equal the event's phaseId
+    expect(receivedError!.phase).toBe("phase-obs-test");
+
+    tracer.close();
+  });
+});
+
+describe("F5: pid guard", () => {
+  test("recordProcess rejects pid 0, pid -1, and pid 1.5 with INVALID_INPUT", () => {
+    let receivedError: TracerError | null = null;
+    const tracer = new Tracer({
+      dataDir,
+      requestId,
+      pipelineName,
+      onTraceError: (err: TracerError) => {
+        receivedError = err;
+      },
+    });
+
+    // Test pid 0
+    receivedError = null;
+    tracer.recordProcess({
+      requestId,
+      kind: "agent",
+      pid: 0,
+      command: "test-zero",
+    });
+    expect(receivedError).toBeDefined();
+    expect(receivedError!.code).toBe("INVALID_INPUT");
+    expect(receivedError!.message).toContain("0");
+
+    // Test pid -1
+    receivedError = null;
+    tracer.recordProcess({
+      requestId,
+      kind: "agent",
+      pid: -1,
+      command: "test-negative",
+    });
+    expect(receivedError).toBeDefined();
+    expect(receivedError!.code).toBe("INVALID_INPUT");
+    expect(receivedError!.message).toContain("-1");
+
+    // Test pid 1.5 (non-integer)
+    receivedError = null;
+    tracer.recordProcess({
+      requestId,
+      kind: "agent",
+      pid: 1.5,
+      command: "test-float",
+    });
+    expect(receivedError).toBeDefined();
+    expect(receivedError!.code).toBe("INVALID_INPUT");
+    expect(receivedError!.message).toContain("1.5");
+
+    // Verify no rows inserted for invalid pids
+    const db = new Database(path.join(dataDir, "trace.db"), { readonly: true });
+    const rows = db
+      .prepare("SELECT COUNT(*) as count FROM processes WHERE request_id=?")
+      .get(requestId) as { count: number };
+    expect(rows.count).toBe(0);
+    db.close();
+
+    tracer.close();
+  });
+
+  test("recordProcess accepts valid pid 1", () => {
+    let receivedError: TracerError | null = null;
+    const tracer = new Tracer({
+      dataDir,
+      requestId,
+      pipelineName,
+      onTraceError: (err: TracerError) => {
+        receivedError = err;
+      },
+    });
+
+    tracer.recordProcess({
+      requestId,
+      kind: "agent",
+      pid: 1,
+      command: "test-valid",
+    });
+
+    // No error should be emitted
+    expect(receivedError).toBeNull();
+
+    // Verify row inserted
+    const db = new Database(path.join(dataDir, "trace.db"), { readonly: true });
+    const row = db
+      .prepare("SELECT pid, command FROM processes WHERE request_id=?")
+      .get(requestId) as { pid: number; command: string } | undefined;
+    expect(row).toBeDefined();
+    expect(row!.pid).toBe(1);
+    expect(row!.command).toBe("test-valid");
+    db.close();
+
+    tracer.close();
+  });
+});
