@@ -289,6 +289,45 @@ describe("INV-1: boundary refusal and file modes", () => {
     fs.rmSync(outsideDir, { recursive: true, force: true });
   });
 
+  test("symlinked final data-dir component is rejected even when it resolves inside the boundary", () => {
+    // An alias resolving INSIDE the boundary passes the realpath containment
+    // check — the no-follow pin must still refuse it: a final component that
+    // is a symlink today can be re-pointed outside tomorrow, and every later
+    // open must go through the verified, non-symlinked directory.
+    const realRun = path.join(markerRoot, "real-run");
+    fs.mkdirSync(realRun, { recursive: true });
+    const alias = path.join(markerRoot, "alias");
+    fs.symlinkSync(realRun, alias);
+
+    expect(
+      () =>
+        new Tracer({
+          dataDir: alias,
+          requestId,
+          pipelineName,
+        }),
+    ).toThrow(TracerError);
+  });
+
+  test("pre-existing trace.db symlink is rejected before sqlite opens it", () => {
+    fs.mkdirSync(dataDir, { recursive: true });
+    const outsideDb = path.join(os.tmpdir(), `outside-db-${Date.now()}`);
+    fs.writeFileSync(outsideDb, "not a real db");
+    fs.symlinkSync(outsideDb, path.join(dataDir, "trace.db"));
+
+    expect(
+      () =>
+        new Tracer({
+          dataDir,
+          requestId,
+          pipelineName,
+        }),
+    ).toThrow(TracerError);
+
+    expect(fs.existsSync(path.join(dataDir, "trace.db"))).toBe(true); // symlink untouched
+    fs.rmSync(outsideDb, { force: true });
+  });
+
   test("data dir created with mode 0700, db and jsonl mode 0600", () => {
     const tracer = new Tracer({ dataDir, requestId, pipelineName });
 

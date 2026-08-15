@@ -105,6 +105,79 @@ describe("TracingJournal delegation + forwarding", () => {
     db.close();
   });
 
+  test("writePhase settle re-write does not re-emit phase_start; seq stable per phaseId", () => {
+    const ws = workspace();
+    const innerJournal: PhaseJournal = {
+      writePhase: () => {},
+      promotePhase: () => {},
+      writeGateEvent: () => {},
+      finish: () => ({ ok: true, completedAt: new Date().toISOString() }),
+      phases: () => [],
+    };
+
+    const tracer = new Tracer({
+      dataDir: path.join(ws.dir, "trace"),
+      requestId: "test-req-dedup",
+      pipelineName: "test-pipeline",
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { TracingJournal } = require("../../../src/phase-engine/trace/journal-bridge.ts");
+
+    const journal = new TracingJournal(innerJournal, tracer, {
+      runId: "test-run-dedup",
+      requestId: "test-req-dedup",
+      pipelineId: "test-pipeline",
+    });
+
+    const base: PhaseRecord = {
+      runId: "test-run-dedup",
+      requestId: "test-req-dedup",
+      pipelineId: "test-pipeline",
+      phaseId: "test-run-dedup:0:plan",
+      name: "plan",
+      kind: "code",
+      status: "fail",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    // Open write, then the settled re-write (phase.ts writes each phase twice)
+    journal.writePhase(base);
+    journal.writePhase({
+      ...base,
+      updatedAt: new Date().toISOString(),
+      error: { code: "ERR", message: "boom" },
+    });
+    journal.promotePhase(base.phaseId, "fail", "logic");
+
+    // A second, distinct phase — also written twice
+    const second: PhaseRecord = { ...base, phaseId: "test-run-dedup:1:build", name: "build" };
+    journal.writePhase(second);
+    journal.writePhase(second);
+
+    tracer.close();
+    const db = new Database(ws.traceDb, { readonly: true });
+
+    // Exactly one phase_start per phaseId, seq assigned in first-observation order
+    const starts = db
+      .query("SELECT name, payload_json FROM events WHERE type = 'phase_start' ORDER BY rowid")
+      .all() as { name: string; payload_json: string }[];
+    expect(starts).toHaveLength(2);
+    expect(starts[0]?.name).toBe("plan");
+    expect(JSON.parse(starts[0]!.payload_json).seq).toBe(0);
+    expect(starts[1]?.name).toBe("build");
+    expect(JSON.parse(starts[1]!.payload_json).seq).toBe(1);
+
+    // One phases row per phaseId, stable seq
+    const phases = db
+      .query("SELECT phase_id, seq FROM phases ORDER BY seq")
+      .all() as { phase_id: string; seq: number }[];
+    expect(phases).toHaveLength(2);
+    expect(phases[0]?.seq).toBe(0);
+    expect(phases[1]?.seq).toBe(1);
+    db.close();
+  });
+
   test("promotePhase updates phases row status and ended_at", () => {
     const ws = workspace();
     const innerCalls: { op: string; args: unknown[] }[] = [];
@@ -430,10 +503,14 @@ describe("e2e-lite: full engine run with trace", () => {
     const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
       if (fs.existsSync(ws.traceDb)) {
-        const db = new Database(ws.traceDb, { readonly: true });
-        const events = db.query("SELECT * FROM events WHERE type = 'phase_start'").all() as { type: string }[];
-        db.close();
-        if (events.length >= 2) break;
+        try {
+          const db = new Database(ws.traceDb, { readonly: true });
+          const events = db.query("SELECT * FROM events WHERE type = 'phase_start'").all() as { type: string }[];
+          db.close();
+          if (events.length >= 2) break;
+        } catch {
+          // readonly observer of a live WAL db — transient open/busy, retry
+        }
       }
       await Bun.sleep(50);
     }
@@ -487,6 +564,72 @@ describe("e2e-lite: full engine run with trace", () => {
     const page2 = reader.readEvents(requestId, page1.cursor, 2);
     expect(page2.rows.length).toBeGreaterThan(0);
     reader.close();
+  }, 60_000);
+
+  test("runner surfaces structured trace_store_error when db becomes unwritable mid-run", async () => {
+    const ws = workspace();
+    const manifest = path.join(ws.dir, "pipeline.json");
+    const journalPath = path.join(ws.dir, "out.json");
+
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({
+        version: "1.0.0",
+        pipelineId: "sink-pipeline",
+        runBudgetMs: 100_000,
+        phases: [
+          { name: "plan", kind: "code", description: "p1", maxDurationMs: 15_000, retries: 0, command: ["echo", "ok"] },
+          { name: "build", kind: "code", description: "p2", maxDurationMs: 15_000, retries: 0, command: ["sleep", "12"] },
+        ],
+      }),
+    );
+
+    const REPO_ROOT = path.resolve(import.meta.dir, "..", "..", "..");
+    const RUNNER = path.join(REPO_ROOT, "scripts", "pipeline-run.ts");
+
+    const proc = Bun.spawn({
+      cmd: [process.execPath, RUNNER, "--manifest", manifest, "--budget-ms", "120000", "--journal", journalPath, "--run-root", ws.dir],
+      cwd: REPO_ROOT,
+      env: { ...process.env, QDS_RUN_ROOT: ws.dir },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    // Wait until both phases have opened (post-dedup: 2 phase_start events).
+    // The poll is a readonly observer of a live WAL db — transient open/busy
+    // failures are retried on the next tick, not fatal.
+    const deadline = Date.now() + 20_000;
+    let requestId = "";
+    while (Date.now() < deadline) {
+      if (fs.existsSync(ws.traceDb)) {
+        try {
+          const db = new Database(ws.traceDb, { readonly: true });
+          const events = db.query("SELECT * FROM events WHERE type = 'phase_start'").all() as { type: string }[];
+          const session = db.query("SELECT request_id FROM sessions").get() as { request_id: string } | null;
+          db.close();
+          if (session) requestId = session.request_id;
+          if (events.length >= 2 && requestId !== "") break;
+        } catch {
+          // writer mid-commit — retry
+        }
+      }
+      await Bun.sleep(50);
+    }
+    expect(requestId).not.toBe("");
+
+    // Drop write permission on the db path — the next trace() must route a
+    // structured error to the runner's onTraceError sink, not lose it.
+    fs.chmodSync(ws.traceDb, 0o400);
+    await Bun.sleep(500);
+    proc.kill("SIGTERM");
+    const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+
+    expect(stderr).toContain("trace_store_error");
+    expect(stderr).toContain(requestId);
+    expect(stderr).toContain("SQLITE_WRITE");
+    // The run settles rather than crashing on the trace failure.
+    expect(exitCode).not.toBe(0); // SIGTERM → terminated run, marker path says fail
+    fs.chmodSync(ws.traceDb, 0o600);
   }, 60_000);
 
   test("e2e demo artifact: copies trace.db and two-page read to evidence dir", async () => {

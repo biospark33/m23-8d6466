@@ -34,6 +34,13 @@ function onTraceError(err: Error): void {
  */
 export class TracingJournal implements PhaseJournal {
   private phaseSeq = 0;
+  /**
+   * phaseId → seq assigned at first observation. phase.ts writes each phase
+   * twice (open, then the settled record) — the second write is a row update,
+   * not a new phase, so it must reuse the seq and must not re-emit
+   * phase_start.
+   */
+  private readonly phaseSeqs = new Map<string, number>();
 
   constructor(
     private readonly inner: PhaseJournal,
@@ -47,9 +54,14 @@ export class TracingJournal implements PhaseJournal {
 
     // Forward to tracer — never let tracer errors break the run
     try {
-      const seq = this.phaseSeq++;
+      const existingSeq = this.phaseSeqs.get(record.phaseId);
+      const isFirstObservation = existingSeq === undefined;
+      const seq = existingSeq ?? this.phaseSeq++;
+      if (isFirstObservation) {
+        this.phaseSeqs.set(record.phaseId, seq);
+      }
 
-      // Upsert phases row + record phase_start event
+      // Upsert phases row (insert on first observation, update on settle)
       this.tracer.upsertPhase({
         requestId: this.ctx.requestId,
         phaseId: record.phaseId,
@@ -61,15 +73,18 @@ export class TracingJournal implements PhaseJournal {
         error: record.error ? JSON.stringify(record.error) : undefined,
       });
 
-      // Record phase_start event
-      this.tracer.trace({
-        requestId: this.ctx.requestId,
-        phaseId: record.phaseId,
-        type: "phase_start",
-        name: record.name,
-        payloadJson: JSON.stringify({ kind: record.kind, seq }),
-        startedAt: record.startedAt,
-      });
+      // phase_start is emitted once per phase, at first observation — later
+      // writePhase calls settle the same phase, they do not start a new one.
+      if (isFirstObservation) {
+        this.tracer.trace({
+          requestId: this.ctx.requestId,
+          phaseId: record.phaseId,
+          type: "phase_start",
+          name: record.name,
+          payloadJson: JSON.stringify({ kind: record.kind, seq }),
+          startedAt: record.startedAt,
+        });
+      }
     } catch (err) {
       onTraceError(err as Error);
     }
@@ -83,10 +98,14 @@ export class TracingJournal implements PhaseJournal {
     try {
       const endedAt = new Date().toISOString();
 
-      // Update phases row status + ended_at
-      // Extract seq from phaseId (format: runId:seq:name)
+      // Update phases row status + ended_at.
+      // seq comes from the map when writePhase was seen (authoritative); the
+      // phaseId parse (format: runId:index:name) is only a fallback for a
+      // promote without a prior write.
       const parts = phaseId.split(":");
-      const seq = parts.length >= 2 ? Number.parseInt(parts[1]!, 10) : 0;
+      const seq =
+        this.phaseSeqs.get(phaseId) ??
+        (parts.length >= 2 ? Number.parseInt(parts[1]!, 10) : 0);
       const phaseName = parts.length >= 3 ? parts.slice(2).join(":") : parts[0] ?? "";
 
       this.tracer.upsertPhase({

@@ -245,11 +245,30 @@ async function main(argv: readonly string[]): Promise<number> {
     throw new Error(`trace dir is mode 0o${dirMode.toString(8)}, not 0700`);
   }
 
-  // DF1.4: Open Tracer (applies schema+migrations at construction)
+  // DF1.4: Open Tracer (applies schema+migrations at construction).
+  // AC5: the tracer never throws SQLite failures to the run — without a sink
+  // here they would vanish silently. Structured record to stderr, run context
+  // included, never throws (a broken sink must not fail the run either).
   const tracer = new Tracer({
     dataDir: traceDir,
     requestId,
     pipelineName: manifest.pipelineId,
+    onTraceError: (err) => {
+      fs.writeSync(
+        2,
+        `${JSON.stringify({
+          level: "error",
+          event: "trace_store_error",
+          requestId,
+          runId,
+          pipelineId: manifest.pipelineId,
+          code: err.code,
+          table: err.table,
+          statement: err.statement,
+          message: err.message,
+        })}\n`,
+      );
+    },
   });
 
   // DF1.4: Wrap FileJournal with TracingJournal

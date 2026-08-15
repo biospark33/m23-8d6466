@@ -19,16 +19,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 import { SCHEMA_DDL, SCHEMA_INDEX_DDL } from "./schema.ts";
-
-// ponytail: migrations import pattern — try-catch for missing sibling module
-let applyMigrations: ((db: Database) => void) | null = null;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-reassignment
-  const mod = await import("./migrations.ts");
-  applyMigrations = typeof mod.applyMigrations === "function" ? mod.applyMigrations : null;
-} catch {
-  // migrations.ts not written yet — skip, per contract
-}
+import { applyMigrations } from "./migrations.ts";
 
 /** Structured error carrying SQL context. */
 export class TracerError extends Error {
@@ -76,6 +67,55 @@ function envelopeId(): string {
   return randomBytes(12).toString("base64url");
 }
 
+/**
+ * INV-1 (TOCTOU guard): lstat-walk every component of an already-resolved
+ * path from the filesystem root and reject symlinks anywhere on the way.
+ * `realpathSync` only proves where a path resolves at check time — it cannot
+ * see a component being swapped for a symlink after the check. Returns the
+ * pinned identity (dev+ino) of the final component so callers can detect a
+ * check/use swap by comparing what later path-based opens actually land on.
+ */
+function pinPathNoFollow(
+  resolvedPath: string,
+  expect: "dir" | "file",
+): { dev: number; ino: number } {
+  const segments = path.resolve(resolvedPath).split(path.sep).filter(Boolean);
+  let current: string = path.sep;
+  let stats: fs.Stats | undefined;
+  for (let i = 0; i < segments.length; i++) {
+    current = path.join(current, segments[i]!);
+    try {
+      stats = fs.lstatSync(current);
+    } catch {
+      throw new TracerError({
+        code: "BOUNDARY",
+        message: `path component missing during no-follow walk: ${current}`,
+      });
+    }
+    if (stats.isSymbolicLink()) {
+      throw new TracerError({
+        code: "BOUNDARY",
+        message: `symlink component in trace path (TOCTOU guard): ${current}`,
+      });
+    }
+    const isLast = i === segments.length - 1;
+    if (isLast && expect === "file") {
+      if (!stats.isFile()) {
+        throw new TracerError({
+          code: "BOUNDARY",
+          message: `expected regular file, found other type: ${current}`,
+        });
+      }
+    } else if (!stats.isDirectory()) {
+      throw new TracerError({
+        code: "BOUNDARY",
+        message: `expected directory component, found other type: ${current}`,
+      });
+    }
+  }
+  return { dev: stats!.dev, ino: stats!.ino };
+}
+
 export class Tracer {
   readonly dataDir: string;
   readonly requestId: string;
@@ -84,6 +124,12 @@ export class Tracer {
   private db?: Database;
   private jsonlFd?: number;
   private jsonlPath: string;
+  /**
+   * INV-1: pinned identity of the (realpath-resolved) data dir from the
+   * no-follow walk. Re-verified after every later path-based open so a
+   * component swapped mid-initialization fails closed.
+   */
+  private dataDirPin?: { dev: number; ino: number };
 
   constructor(options: TracerOptions) {
     this.dataDir = options.dataDir;
@@ -106,7 +152,55 @@ export class Tracer {
       });
     }
 
+    // INV-1 (TOCTOU): the pre-mkdir containment check above proves where the
+    // path resolved then — not where it resolves now. Re-check containment on
+    // the post-mkdir path, then pin the directory identity and re-verify it
+    // after every later open, so a component swapped between check and use
+    // fails closed instead of writing outside the boundary.
+    this.assertWithinBoundary();
+    this.dataDirPin = pinPathNoFollow(fs.realpathSync(this.dataDir), "dir");
+    this.assertDataDirIdentity();
+
     this.openWriter();
+  }
+
+  /**
+   * INV-1: re-resolve dataDir by path and confirm it is still the pinned
+   * directory. O_NOFOLLOW|O_DIRECTORY makes a swapped final component fail
+   * the open itself; an intermediate swap lands on a different inode and
+   * fails the identity compare. All later writes flow through descriptors
+   * opened inside this verified window.
+   */
+  private assertDataDirIdentity(): void {
+    const O_DIRECTORY = fs.constants.O_DIRECTORY ?? 0;
+    const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
+    let fd: number;
+    try {
+      fd = fs.openSync(
+        this.dataDir,
+        fs.constants.O_RDONLY | O_DIRECTORY | O_NOFOLLOW,
+      );
+    } catch (e) {
+      throw new TracerError({
+        code: "BOUNDARY",
+        message: `cannot open verified data dir (possible path swap): ${this.dataDir}: ${(e as Error).message}`,
+      });
+    }
+    try {
+      const st = fs.fstatSync(fd);
+      if (
+        this.dataDirPin === undefined ||
+        st.dev !== this.dataDirPin.dev ||
+        st.ino !== this.dataDirPin.ino
+      ) {
+        throw new TracerError({
+          code: "BOUNDARY",
+          message: `data dir identity changed since verification (possible path swap): ${this.dataDir}`,
+        });
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
   }
 
   /** INV-1: refuse configured paths resolving outside the data boundary. */
@@ -170,17 +264,68 @@ export class Tracer {
     // INV-1: create the db file 0600 BEFORE sqlite opens it — sqlite's own
     // create honors the process umask, so pre-create with an explicit mode and
     // let sqlite open the already-0600 file.
+    // TOCTOU: if the file already exists, pin its identity first and confirm
+    // the create-open below lands on the same inode.
+    let existingPin: { dev: number; ino: number } | null = null;
+    try {
+      const st = fs.lstatSync(dbPath);
+      if (st.isSymbolicLink()) {
+        throw new TracerError({
+          code: "BOUNDARY",
+          message: `trace.db is a symlink: ${dbPath}`,
+        });
+      }
+      if (!st.isFile()) {
+        throw new TracerError({
+          code: "BOUNDARY",
+          message: `trace.db exists but is not a regular file: ${dbPath}`,
+        });
+      }
+      existingPin = { dev: st.dev, ino: st.ino };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+
     const preFd = fs.openSync(dbPath, "a", 0o600);
+    const preStats = fs.fstatSync(preFd);
     fs.closeSync(preFd);
+    if (
+      existingPin !== null &&
+      (existingPin.dev !== preStats.dev || existingPin.ino !== preStats.ino)
+    ) {
+      throw new TracerError({
+        code: "BOUNDARY",
+        message: `trace.db identity changed between check and create: ${dbPath}`,
+      });
+    }
+
     this.db = new Database(dbPath, { create: true });
 
-    // Ensure db file is mode 0600 (umask may have interfered)
-    this.chmod0600(dbPath);
+    // TOCTOU: the path handed to sqlite must still resolve to the file just
+    // created. sqlite writes through its own descriptor from here on, so a
+    // later swap redirects nothing — but a divergence here fails closed.
+    const dbPin = pinPathNoFollow(fs.realpathSync(dbPath), "file");
+    if (dbPin.dev !== preStats.dev || dbPin.ino !== preStats.ino) {
+      throw new TracerError({
+        code: "BOUNDARY",
+        message: `trace.db path diverged from the file created for it: ${dbPath}`,
+      });
+    }
+    this.assertDataDirIdentity();
+
+    // INV-1: db must be 0600 regardless of umask
+    this.enforceModes0600(true);
 
     // AC2: writer pragmas
     this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec("PRAGMA synchronous=NORMAL");
     this.db.exec("PRAGMA busy_timeout=5000");
+
+    // INV-1: WAL activation materializes -wal/-shm sidecars — enforce and
+    // verify 0600 on them immediately, not only at close (bun's sqlite
+    // already creates them 0600; this enforces it as a contract instead of
+    // relying on that behavior).
+    this.enforceModes0600(true);
 
     // Apply schema DDL
     for (const ddl of SCHEMA_DDL) {
@@ -192,23 +337,26 @@ export class Tracer {
       this.db.exec(ddl);
     }
 
-    // Apply migrations if available (may be null if sibling module not written)
-    if (applyMigrations) {
-      try {
-        applyMigrations(this.db);
-      } catch (e) {
-        throw new TracerError({
-          code: "MIGRATION",
-          message: `migration failed: ${(e as Error).message}`,
-          table: "migrations",
-        });
-      }
+    // INV-5: additive migrations — a load failure is a compile-time import
+    // error, not a silently skipped migration list; an apply failure is a
+    // hard open failure.
+    try {
+      applyMigrations(this.db);
+    } catch (e) {
+      throw new TracerError({
+        code: "MIGRATION",
+        message: `migration failed: ${(e as Error).message}`,
+        table: "migrations",
+      });
     }
+
+    // First write transactions may (re)grow the sidecars — final strict pass
+    // covers everything before the writer goes live.
+    this.enforceModes0600(true);
 
     // Open JSONL for append (mode 0600, create if not exists)
     this.jsonlFd = fs.openSync(this.jsonlPath, "a", 0o600);
-    // Also chmod in case it existed before (defensive)
-    this.chmod0600(this.jsonlPath);
+    this.enforceModes0600(true);
   }
 
   /**
@@ -223,12 +371,33 @@ export class Tracer {
     }
   }
 
-  /** Mode 0600 enforcement helper. */
-  private chmod0600(filePath: string): void {
-    try {
-      fs.chmodSync(filePath, 0o600);
-    } catch {
-      // Best-effort — ignore failure
+  /**
+   * INV-1: enforce 0600 on the db, its WAL/SHM sidecars, and events.jsonl.
+   * Strict during initialization — a chmod or verify failure is a hard open
+   * failure, matching the data-dir mode check. Best-effort at close, where a
+   * failure must not mask the run's outcome (defense in depth).
+   */
+  private enforceModes0600(strict: boolean): void {
+    const dbPath = path.join(this.dataDir, "trace.db");
+    for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, this.jsonlPath]) {
+      try {
+        if (!fs.existsSync(p)) continue;
+        fs.chmodSync(p, 0o600);
+        if (strict && (fs.statSync(p).mode & 0o777) !== 0o600) {
+          throw new TracerError({
+            code: "FILE_MODE",
+            message: `${p} is not mode 0600 after chmod`,
+          });
+        }
+      } catch (err) {
+        if (!strict) continue;
+        throw err instanceof TracerError
+          ? err
+          : new TracerError({
+              code: "FILE_MODE",
+              message: `failed to enforce 0600 on ${p}: ${(err as Error).message}`,
+            });
+      }
     }
   }
 
@@ -569,19 +738,7 @@ export class Tracer {
       // Best-effort — ignore failure
     }
 
-    const dbPath = path.join(this.dataDir, "trace.db");
-    const walPath = `${dbPath}-wal`;
-    const shmPath = `${dbPath}-shm`;
-
-    for (const p of [dbPath, walPath, shmPath, this.jsonlPath]) {
-      try {
-        if (fs.existsSync(p)) {
-          fs.chmodSync(p, 0o600);
-        }
-      } catch {
-        // Best-effort — ignore failure
-      }
-    }
+    this.enforceModes0600(false);
 
     this.db.close();
     this.db = undefined;

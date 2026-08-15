@@ -1,32 +1,32 @@
 {
-  "requestId": "f8a63c50-2fcd-4f74-b090-0422dd77f98a",
+  "requestId": "76a972e0-4e57-4cff-bf4a-33868c98e4a2",
   "page1": {
     "rows": [
       {
         "rowid": 1,
-        "event_id": "KCSO2MKLF2smZRh4",
-        "request_id": "f8a63c50-2fcd-4f74-b090-0422dd77f98a",
-        "phase_id": "1a2818ec-81f8-4826-b2d1-6d1ee2f60c74:0:plan",
+        "event_id": "TbuIahHpQWIuEXHf",
+        "request_id": "76a972e0-4e57-4cff-bf4a-33868c98e4a2",
+        "phase_id": "98f3030e-2621-44da-9459-e863bacdee3e:0:plan",
         "parent_id": null,
         "type": "phase_start",
         "name": "plan",
         "payload_json": "{\"kind\":\"code\",\"seq\":0}",
         "tokens": null,
-        "started_at": "2026-08-15T14:39:27.997Z",
+        "started_at": "2026-08-15T15:20:57.137Z",
         "ended_at": null
       },
       {
         "rowid": 2,
-        "event_id": "hjsLbScDfVzrc31b",
-        "request_id": "f8a63c50-2fcd-4f74-b090-0422dd77f98a",
-        "phase_id": "1a2818ec-81f8-4826-b2d1-6d1ee2f60c74:0:plan",
+        "event_id": "-7NuECK1uc2FadBf",
+        "request_id": "76a972e0-4e57-4cff-bf4a-33868c98e4a2",
+        "phase_id": "98f3030e-2621-44da-9459-e863bacdee3e:0:plan",
         "parent_id": null,
-        "type": "phase_start",
+        "type": "phase_end",
         "name": "plan",
-        "payload_json": "{\"kind\":\"code\",\"seq\":1}",
+        "payload_json": "{\"status\":\"success\",\"exitStatus\":\"success\"}",
         "tokens": null,
-        "started_at": "2026-08-15T14:39:27.997Z",
-        "ended_at": null
+        "started_at": "2026-08-15T15:20:57.142Z",
+        "ended_at": "2026-08-15T15:20:57.142Z"
       }
     ],
     "cursor": 2,
@@ -36,29 +36,29 @@
     "rows": [
       {
         "rowid": 3,
-        "event_id": "rK9VTtDATS6hTdph",
-        "request_id": "f8a63c50-2fcd-4f74-b090-0422dd77f98a",
-        "phase_id": "1a2818ec-81f8-4826-b2d1-6d1ee2f60c74:0:plan",
-        "parent_id": null,
-        "type": "phase_end",
-        "name": "plan",
-        "payload_json": "{\"status\":\"success\",\"exitStatus\":\"success\"}",
-        "tokens": null,
-        "started_at": "2026-08-15T14:39:28.026Z",
-        "ended_at": "2026-08-15T14:39:28.026Z"
-      },
-      {
-        "rowid": 4,
-        "event_id": "vHCJs83UWIw9EoHK",
-        "request_id": "f8a63c50-2fcd-4f74-b090-0422dd77f98a",
-        "phase_id": "1a2818ec-81f8-4826-b2d1-6d1ee2f60c74:1:build",
+        "event_id": "52Nuxpe4nCgy3KmH",
+        "request_id": "76a972e0-4e57-4cff-bf4a-33868c98e4a2",
+        "phase_id": "98f3030e-2621-44da-9459-e863bacdee3e:1:build",
         "parent_id": null,
         "type": "phase_start",
         "name": "build",
-        "payload_json": "{\"kind\":\"code\",\"seq\":2}",
+        "payload_json": "{\"kind\":\"code\",\"seq\":1}",
         "tokens": null,
-        "started_at": "2026-08-15T14:39:28.027Z",
+        "started_at": "2026-08-15T15:20:57.143Z",
         "ended_at": null
+      },
+      {
+        "rowid": 4,
+        "event_id": "yNr9QwIEvxcRxLX2",
+        "request_id": "76a972e0-4e57-4cff-bf4a-33868c98e4a2",
+        "phase_id": "98f3030e-2621-44da-9459-e863bacdee3e:1:build",
+        "parent_id": null,
+        "type": "phase_end",
+        "name": "build",
+        "payload_json": "{\"status\":\"fail\",\"exitStatus\":\"transient\"}",
+        "tokens": null,
+        "started_at": "2026-08-15T15:21:00.107Z",
+        "ended_at": "2026-08-15T15:21:00.107Z"
       }
     ],
     "cursor": 4,
