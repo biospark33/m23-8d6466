@@ -102,12 +102,18 @@ dp020_guarded() { # file lineno
       in_lc = 0
       if (cl ~ /^[[:space:]]*try[[:space:]]*[{]/) stack[++sp] = d + 1
       if (NR == target) {
-        # Evaluate the stack at the parse call, not line start: braces
-        # earlier on this line may have closed the try before JSON.parse.
-        p = match(cl, /JSON\.parse/)
-        if (p == 0) exit 0 # token only inside a blanked literal — not a call
-        walk(substr(cl, 1, p - 1))
-        exit (sp > 0) ? 0 : 1
+        # Evaluate the stack at EVERY parse token, not just the first: a
+        # line can hold several calls, and one after the try closes is
+        # unguarded even if an earlier one was guarded. Line is guarded
+        # only if every JSON.parse (in the code-only view) sits inside an
+        # open try. No token at all → it only existed in a blanked literal.
+        rest = cl
+        while (match(rest, /JSON\.parse/)) {
+          walk(substr(rest, 1, RSTART - 1))
+          if (sp <= 0) exit 1
+          rest = substr(rest, RSTART + RLENGTH)
+        }
+        exit 0
       }
       walk(cl)
     }
