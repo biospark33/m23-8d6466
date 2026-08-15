@@ -1,0 +1,108 @@
+{
+  "story": "DF1.3",
+  "scenario": "retries: 1 — prose-wrapped invalid JSON, then gate violation, then pass",
+  "sessionIds": [
+    "qds-03ff09ab-6608-4eaa-b11d-ef42d33e9581",
+    "qds-03ff09ab-6608-4eaa-b11d-ef42d33e9581",
+    "qds-03ff09ab-6608-4eaa-b11d-ef42d33e9581"
+  ],
+  "sendCount": 3,
+  "logLines": [
+    {
+      "event": "agent_send",
+      "requestId": "req-df13",
+      "phase": "review",
+      "agentId": "reviewer-1",
+      "sessionId": "qds-03ff09ab-6608-4eaa-b11d-ef42d33e9581",
+      "loop": "parse",
+      "attempt": 1,
+      "timestamp": "2026-08-15T13:33:37.272Z",
+      "durationMs": 1,
+      "send_ms": 0,
+      "parse_ms": 1
+    },
+    {
+      "event": "invalid_envelope",
+      "requestId": "req-df13",
+      "phase": "review",
+      "agentId": "reviewer-1",
+      "sessionId": "qds-03ff09ab-6608-4eaa-b11d-ef42d33e9581",
+      "attempt": 1,
+      "parseAttempt": 1,
+      "issues": [
+        "status: expected type 'success' | 'transient' | 'overflow' | 'logic' | 'lead_failure', received type undefined",
+        "summary: expected type string, received type undefined"
+      ],
+      "textTail": "Here is my report:\n```json\n{\"kind\": \"review\", \"label\": \"x\"}\n```",
+      "timestamp": "2026-08-15T13:33:37.273Z"
+    },
+    {
+      "event": "agent_send",
+      "requestId": "req-df13",
+      "phase": "review",
+      "agentId": "reviewer-1",
+      "sessionId": "qds-03ff09ab-6608-4eaa-b11d-ef42d33e9581",
+      "loop": "parse",
+      "attempt": 1,
+      "timestamp": "2026-08-15T13:33:37.273Z",
+      "durationMs": 0,
+      "send_ms": 0,
+      "parse_ms": 0
+    },
+    {
+      "event": "agent_send",
+      "requestId": "req-df13",
+      "phase": "review",
+      "agentId": "reviewer-1",
+      "sessionId": "qds-03ff09ab-6608-4eaa-b11d-ef42d33e9581",
+      "loop": "gate",
+      "attempt": 2,
+      "timestamp": "2026-08-15T13:33:37.273Z",
+      "durationMs": 0,
+      "send_ms": 0,
+      "parse_ms": 0
+    },
+    {
+      "event": "agent_end",
+      "requestId": "req-df13",
+      "phase": "review",
+      "agentId": "reviewer-1",
+      "usage": {
+        "inputTokens": 306,
+        "outputTokens": 36,
+        "cacheReadTokens": 3000,
+        "cacheWriteTokens": 0,
+        "reasoningTokens": 3,
+        "costMicros": 600000,
+        "sends": 3
+      },
+      "contextTokens": 6000,
+      "contextWindow": 131072,
+      "timestamp": "2026-08-15T13:33:37.273Z"
+    }
+  ],
+  "gateEvents": [
+    {
+      "type": "gate_fail",
+      "attempt": 1,
+      "checks": [
+        {
+          "item": "approved vs blocking",
+          "ok": false,
+          "note": "verdict is supported"
+        }
+      ]
+    },
+    {
+      "type": "gate_pass",
+      "attempt": 2,
+      "checks": [
+        {
+          "item": "approved vs blocking",
+          "ok": true,
+          "note": "verdict is supported"
+        }
+      ]
+    }
+  ]
+}

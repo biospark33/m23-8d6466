@@ -235,3 +235,57 @@ export interface RunOutcome {
   ok: boolean;
   completedAt: string;
 }
+
+// ---------------------------------------------------------------------------
+// DF1.3 region — retry-loop types. Appended below DF1.1's declarations and
+// DF1.2's `PhaseParams.previous`; nothing above this line is edited by this
+// story. `PARSE_FIX_ATTEMPTS`, the `retries: 0..5` bound and `PhaseParams.agent`
+// above are DF1.1's and are imported by the retry loop, never re-declared.
+// ---------------------------------------------------------------------------
+
+import type { UsageBreakdown } from "./usage.ts";
+
+/** One gate attempt's outcome, as `PhaseAttemptRecord.gateReports` carries it. */
+export interface GateAttemptReport {
+  attempt: number;
+  passed: boolean;
+  violations: string[];
+  checks: Array<{ item: string; ok: boolean; note: string }>;
+}
+
+/**
+ * The result of one agent phase attempt: send and parse accounting plus every
+ * gate report, each with its attempt number.
+ */
+export interface PhaseAttemptRecord {
+  /** The gate attempt the phase reached. */
+  attempt: number;
+  sends: number;
+  parseAttempts: number;
+  gateReports: GateAttemptReport[];
+  envelopeValid: boolean;
+}
+
+/** A response that failed Loop A, retained as data — never as instruction text (INV-2). */
+export interface InvalidEnvelopeRecord {
+  attempt: number;
+  parseAttempt: number;
+  issues: string[];
+  textTail: string;
+}
+
+/**
+ * The widened `agent_end` payload (DF1.3's addition to the DF1.1 log contract):
+ * phase-total usage — a retried phase paid for every attempt — plus the LAST
+ * send's occupancy (`contextTokens`) against the declared `contextWindow`
+ * (0 = unknown, never full).
+ */
+export interface AgentEndEvent {
+  event: "agent_end";
+  requestId: string;
+  phase: string;
+  agentId: string;
+  usage: UsageBreakdown;
+  contextTokens: number;
+  contextWindow: number;
+}

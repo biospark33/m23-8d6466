@@ -1,3 +1,7 @@
+---
+baseline_commit: f7af48e5b49f5e8d5e1dc22211440bae4083f626
+---
+
 # DF1.3: Dual Retry Discipline — Separately Bounded Parse and Gate Retries
 
 **Story Points:** 3
@@ -201,39 +205,152 @@ returned `PhaseAttemptRecord`.
 
 ## Definition of Done
 
-- [ ] **Impl:** Loop A parse retries bounded by `PARSE_FIX_ATTEMPTS`, each failure re-sending the
+- [x] **Impl:** Loop A parse retries bounded by `PARSE_FIX_ATTEMPTS`, each failure re-sending the
       validator's structured error and retaining the invalid response as a record.
-- [ ] **Impl:** Loop B gate retries bounded by `PhaseParams.retries`, nested outside Loop A so each
+- [x] **Impl:** Loop B gate retries bounded by `PhaseParams.retries`, nested outside Loop A so each
       correction gets a fresh parse budget.
-- [ ] **Impl:** one session id per `(PhaseParams.agent.agentId, PhaseParams.agent.provider, PhaseParams.agent.model)` across every send; a provider or model change mints a new id; absent `PhaseParams.agent` means no session reuse.
-- [ ] **Contract:** `PARSE_FIX_ATTEMPTS`, the `retries: 0..5` bound and `PhaseParams.agent` are **imported** from DF1.1's `src/phase-engine/types.ts` — this diff declares none of them, and a reviewer can confirm the file's DF1.1-owned region is unmodified.
-- [ ] **Contract:** `agent_end` carries phase-total usage plus last-send `contextTokens`/`contextWindow`;
+- [x] **Impl:** one session id per `(PhaseParams.agent.agentId, PhaseParams.agent.provider, PhaseParams.agent.model)` across every send; a provider or model change mints a new id; absent `PhaseParams.agent` means no session reuse.
+- [x] **Contract:** `PARSE_FIX_ATTEMPTS`, the `retries: 0..5` bound and `PhaseParams.agent` are **imported** from DF1.1's `src/phase-engine/types.ts` — this diff declares none of them, and a reviewer can confirm the file's DF1.1-owned region is unmodified.
+- [x] **Contract:** `agent_end` carries phase-total usage plus last-send `contextTokens`/`contextWindow`;
       `input` excludes cache reads and `reasoningTokens` is nested under output.
-- [ ] **Integration:** DF1.2 `GateReport` consumed unchanged; each attempt's report emitted with its
+- [x] **Integration:** DF1.2 `GateReport` consumed unchanged; each attempt's report emitted with its
       attempt number.
-- [ ] **Security:** retry spend accumulates monotonically and is visible to the budget guard (INV-3);
+- [x] **Security:** retry spend accumulates monotonically and is visible to the budget guard (INV-3);
       correction prompts contain no model-authored text (INV-2).
-- [ ] **Test (unit):** send-count matrix over `retries ∈ {0,1,2}` × parse-failure counts asserts the
+- [x] **Test (unit):** send-count matrix over `retries ∈ {0,1,2}` × parse-failure counts asserts the
       exact ceiling `(R+1)×(P+1)` — an implementation sharing one budget across both loops produces a
       lower count and MUST fail this test; `retries: 6` and `retries: -1` are rejected at
       construction (INV-1), not clamped.
-- [ ] **Test (unit boundary):** a phase accumulating `2_500_000` µ$ over three sends surfaces
+- [x] **Test (unit boundary):** a phase accumulating `2_500_000` µ$ over three sends surfaces
       `2_500_000` on `agent_end` and exactly `2.5` at the `runner.ts:707` call site — one conversion,
       no rounding drift. An implementation passing the raw µ$ integer into the USD guard MUST fail
       this test, and so must one that stores dollars anywhere inside `src/phase-engine/`.
-- [ ] **Test (occupancy asymmetry):** a 3-send phase where send 3 reports `stopReason: "aborted"` →
+- [x] **Test (occupancy asymmetry):** a 3-send phase where send 3 reports `stopReason: "aborted"` →
       usage sums all 3 sends, `contextTokens` equals send 2's reading, not send 3's and not zero.
-- [ ] **Test (session identity, INV-4):** two phases sharing `agentId` and `model` but differing
+- [x] **Test (session identity, INV-4):** two phases sharing `agentId` and `model` but differing
       `provider` mint distinct session ids; a phase whose `provider` matches the prior send's session
       but whose `model` changes also mints a new id — an implementation keying on `(agentId, model)`
       alone reuses the same session across the provider change and MUST fail this test.
-- [ ] **Test (exhaustion):** invalid JSON on every send → `EnvelopeParseExhausted`, phase `fail`,
+- [x] **Test (exhaustion):** invalid JSON on every send → `EnvelopeParseExhausted`, phase `fail`,
       final invalid response retained; gate-violating envelope on every attempt → `GateFailure`
       naming every unresolved violation.
-- [ ] **Test (e2e demo — MANDATORY):** run the `retries: 1` scenario end to end and capture the
+- [x] **Test (e2e demo — MANDATORY):** run the `retries: 1` scenario end to end and capture the
       emitted event stream as an artifact showing 3 sends, one session id, `gate_fail(1)` →
       `gate_pass(2)`, and summed usage.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Implementation Plan (as built)
+
+- `src/phase-engine/agents/retry.ts` — `runAgentPhase(opts)` implements both loops over an
+  injected `AgentSender` port (the pi-backed sender is DF1.6's dispatch seam; the suite drives a
+  deterministic scripted sender, per Technical Notes). Loop B outer (`gateAttempt 1..retries+1`),
+  Loop A inner (`parseAttempt 1..PARSE_FIX_ATTEMPTS+1`, both bounds imported from DF1.1's
+  `types.ts`). Every send logs `agent_send {requestId, phase, agentId, sessionId, loop, attempt,
+  timestamp, durationMs, send_ms, parse_ms}`; parse failures emit `invalid_envelope` records;
+  gate outcomes flow through DF1.1's journal port in DF1.2's event shape with the attempt number;
+  `agent_end` is emitted on EVERY exit path (INV-3 holds on failure too).
+- `src/phase-engine/agents/envelope-parse.ts` — `extractJsonCandidate` (fenced-block-first,
+  then first balanced object — SSSF `_extract_json` port), a `.strict()` zod mirror of DF1.2's
+  `Envelope`, and `parseCorrectionPrompt` built from harness text only.
+- `src/phase-engine/agents/session.ts` — `SessionCache` keyed on the exact
+  `(agentId, provider, model)` triple (INV-4; deliberate hardening over SSSF's model-only key).
+- `src/phase-engine/usage.ts` — `UsageAccumulator` (monotonic `spent` merge + `latest`
+  occupancy pointer that skips `aborted|error` turns) and `usdFromMicros`, the one µ$→USD
+  conversion (DD-9/INV-3).
+- `src/phase-engine/types.ts` — DF1.3 region appended (54 insertions, 0 deletions):
+  `GateAttemptReport`, `PhaseAttemptRecord`, `InvalidEnvelopeRecord`, `AgentEndEvent`.
+
+### Debug Log
+
+- **Self-review round (pre-push, sub-agent on the staged diff — 8 findings, 5 fixed, 3
+  dispositioned):**
+  1. FIXED [INVARIANT] INV-2 leak the zod fix missed: `JSON.parse`'s error message echoes the
+     raw offending token on some engines — carried verbatim into the correction prompt on the
+     malformed-candidate path. Issue is now harness text only ("the extracted JSON candidate is
+     not valid JSON"); regression test uses a syntactically malformed candidate with a marker.
+  2. FIXED literal NUL bytes as the session-key separator made session.ts read as binary to
+     git (invisible diff, no scan coverage) and admitted separator collisions. Key is now
+     `JSON.stringify([agentId, provider, model])`; collision test added.
+  3. FIXED single-slot SessionCache: an A→B→A run silently evicted A's context and paid a
+     re-context on the third phase. Now a Map keyed by triple; A→B→A rejoins A's session.
+  4. FIXED usage validation ran before the `agent_send` log line: a sender reporting
+     impossible usage made the paid send vanish from the event stream, and the rethrown plain
+     `Error` was unclassifiable. Accumulator now runs after the send is logged, and the
+     accumulator throws a typed `UsageIntegrityError`; test asserts send logged + exactly one
+     `agent_end`.
+  5. FIXED optional `usage` on `AgentSendResult` let `agent_end.usage.sends` under-count
+     `record.sends` when a sender omitted it. Usage is now required (unpriced senders report
+     zeros, never omit — INV-3).
+  6. NOTED zero declared gates + valid envelope passes vacuously — identical to DF1.2's
+     `gatedBody` behavior (a registered gate examining nothing fails; registering no gates
+     passes). Kept for consistency with DF1.2; if the asymmetry is unwanted it is a DF1.2-level
+     decision, not this story's.
+  7. NOTED ExitStatus/EnvelopeKind enums duplicated literally in `EnvelopeSchema` (verified in
+     sync with `cli-anything/src/types.ts` and `envelopes/types.ts` today). Deriving a shared
+     const across packages would widen this story's file scope; a sync-source comment marks it.
+  8. FIXED types.ts import + comment sat above DF1.1's declarations, breaking the strict
+     append-only claim. Moved inside the DF1.3 region (imports hoist); the diff above DF1.1's
+     code is now byte-identical.
+  Probes confirmed: no path exceeds the send ceiling; no stale-envelope leakage between gate
+  attempts; loop labels correct; no double `agent_end` emission.
+
+- RED→GREEN: 3 test files written first (confirmed failing on missing modules), then impl.
+- Fix 1: zod issue messages echo model input (`invalid_enum_value` carries the received value;
+  `unrecognized_keys` the raw key) — INV-2 leak into correction prompts. Replaced message use
+  with `safeIssueLine`: sanitized path + issue code + harness-only extras (type names, enum
+  option lists, numeric bounds). Received values never reach a prompt.
+- Fix 2: initial all-parse-fail matrix rows asserted the full `(R+1)×(P+1)` count, but Loop A
+  exhaustion raises on the first gate attempt (AC4) — the ceiling is an "at most". Matrix
+  reworked per DoD: retries × parse-failure counts with gates failing until the last attempt;
+  ceiling rows assert the exact `(R+1)×(P+1)` and that a shared `R+P+1` budget is strictly fewer.
+- Fix 3: lint (template literals) and one unit-scan over-reach (DF1.5's roster rate math
+  multiplies by 10⁶ — the invariant is about the micros→USD DIVISION, comments excluded).
+
+### Completion Notes
+
+- SSSF fidelity verified against the cloned source
+  (`~/reference-repos/super-simple-software-factory/.../adw_modules/agents.py`): loop bounds
+  (`range(1, JSON_FIX_ATTEMPTS+2)`), per-failure invalid-envelope persistence, raise-on-exhaust,
+  correction shape (error + field list + "ONLY … JSON"), and the `spent`-merge vs `latest`
+  asymmetry all match. Divergences are the story's own: typed `EnvelopeParseExhausted`,
+  `(agentId, provider, model)` session key, INV-2-safe issue lines.
+- Local gates: 300 pass / 0 fail focal (tests/phase-engine, includes DF1.1+DF1.2 suites — no
+  regressions), `tsc --noEmit` clean, `biome check` clean on engine + tests.
+- e2e demo artifact: `artifacts/df1-3-e2e-event-stream.json` (3 sends, one session id,
+  `gate_fail(1)` → `gate_pass(2)`, summed usage, `contextTokens` from send 3).
+- Docker container tests: N/A — no `docker-compose.test.yml`/test Dockerfile exists in this repo
+  (skill reference is generic); matches the local-gates precedent of DF1.1/DF1.2/DF2.7.
+- Advisory scripts `check-defensive-programming.sh` / `check-pr-conflicts.sh` do not exist in
+  this repo; zero open PRs and the only sibling at the same base is DF1.4 (types.ts
+  append-only regions, no overlap).
+- `runner.ts:707` in the story is stale line numbering: the live budget-kill compare is
+  `cli-anything/src/runner.ts:803` (`cumulativeCostUsd >= killThresholdUsd`). The conversion
+  this story owns is `usdFromMicros` in `usage.ts`; DF1.6's spawn seam is the call site that
+  applies it.
+
+## File List
+
+- `src/phase-engine/agents/retry.ts` (new)
+- `src/phase-engine/agents/envelope-parse.ts` (new)
+- `src/phase-engine/agents/session.ts` (new)
+- `src/phase-engine/usage.ts` (new)
+- `src/phase-engine/types.ts` (modified — DF1.3 region appended only)
+- `tests/phase-engine/retry.test.ts` (new)
+- `tests/phase-engine/envelope-parse.test.ts` (new)
+- `tests/phase-engine/usage.test.ts` (new)
+- `artifacts/df1-3-e2e-event-stream.json` (new — e2e demo artifact)
+- `_bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-3-dual-retry-discipline.md` (modified — this record)
+- `_bmad-output/sprint-artifacts/sprint-status.yaml` (modified — status)
+
+## Change Log
+
+- 2026-08-15: DF1.3 implemented — dual retry discipline (Loop A parse-fix bounded by
+  `PARSE_FIX_ATTEMPTS`, Loop B gate retries bounded by `retries`, fresh parse budget per gate
+  correction), session identity keyed `(agentId, provider, model)`, µ$ usage accumulator with
+  last-send occupancy, `PhaseAttemptRecord` + widened `agent_end`, INV-1..INV-5 enforced, 53 new
+  tests + e2e event-stream artifact.
+
+## Status
+
+review
