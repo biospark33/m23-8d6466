@@ -49,13 +49,26 @@ D020_RE='JSON\.parse\('
 # `try {` line pushes the depth of its body, and any `}` pops try blocks it
 # closes. Guarded = at least one try still on the stack. This keeps the outer
 # scope when a nested try closes, and does not treat a closed try as a guard
-# for a later parse. Same-line `try { JSON.parse(x) }` counts as guarded.
-# String/char/template literals and comments are blanked before counting, so
+# for a later parse. The target line is walked only up to the JSON.parse
+# token before evaluating the stack, so a try/catch that closes earlier on
+# that same line no longer counts as a guard. String/char/template literals
+# and comments are blanked before counting, so
 # braces inside them cannot skew the depth walk. Known ceilings (rare, drift
 # in either direction): regex literals (/[{]/) and nested template
 # interpolations are not lexed; the dp:ok annotation is the escape hatch.
 dp020_guarded() { # file lineno
   awk -v target="$2" '
+    function walk(str) { # update brace depth / try stack across a code-only string
+      n = length(str)
+      for (i = 1; i <= n; i++) {
+        c = substr(str, i, 1)
+        if (c == "{") d++
+        else if (c == "}") {
+          d--
+          while (sp > 0 && stack[sp] > d) sp--
+        }
+      }
+    }
     {
       # Blank literal/comment contents (→ spaces). State carries across
       # lines for block comments, multi-line templates, and backslash
@@ -88,16 +101,15 @@ dp020_guarded() { # file lineno
       }
       in_lc = 0
       if (cl ~ /^[[:space:]]*try[[:space:]]*[{]/) stack[++sp] = d + 1
-      if (NR == target) exit (sp > 0 || cl ~ /^[[:space:]]*try[[:space:]]*[{]/) ? 0 : 1
-      n = length(cl)
-      for (i = 1; i <= n; i++) {
-        c = substr(cl, i, 1)
-        if (c == "{") d++
-        else if (c == "}") {
-          d--
-          while (sp > 0 && stack[sp] > d) sp--
-        }
+      if (NR == target) {
+        # Evaluate the stack at the parse call, not line start: braces
+        # earlier on this line may have closed the try before JSON.parse.
+        p = match(cl, /JSON\.parse/)
+        if (p == 0) exit 0 # token only inside a blanked literal — not a call
+        walk(substr(cl, 1, p - 1))
+        exit (sp > 0) ? 0 : 1
       }
+      walk(cl)
     }
   ' "$1"
 }
