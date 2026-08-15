@@ -146,7 +146,7 @@ export function parseEnvelope(raw: string): ParseOutcome {
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(candidate);
+    parsed = JSON.parse(candidate); // dp:ok guarded — the catch below returns a structured no_json outcome
   } catch {
     // INV-2: the parse error's message is NOT used — engines echo the raw
     // offending token verbatim ("Unexpected identifier '<model text>'"), which

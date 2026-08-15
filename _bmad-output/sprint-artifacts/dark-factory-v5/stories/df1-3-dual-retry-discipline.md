@@ -321,9 +321,15 @@ returned `PhaseAttemptRecord`.
   `gate_fail(1)` → `gate_pass(2)`, summed usage, `contextTokens` from send 3).
 - Docker container tests: N/A — no `docker-compose.test.yml`/test Dockerfile exists in this repo
   (skill reference is generic); matches the local-gates precedent of DF1.1/DF1.2/DF2.7.
-- Advisory scripts `check-defensive-programming.sh` / `check-pr-conflicts.sh` do not exist in
-  this repo; zero open PRs and the only sibling at the same base is DF1.4 (types.ts
-  append-only regions, no overlap).
+- Advisory scripts `check-defensive-programming.sh` / `check-pr-conflicts.sh` were missing from
+  this repo and are ADDED by this PR under `scripts/dev/` (the qds-dev Phase 5 pre-PR gates the
+  workflow expects). First run on this branch: conflict gate OK (no open-PR overlap); the
+  defensive-programming scanner reported 5 findings, all deliberate patterns — annotated
+  `dp:ok` (guarded JSON.parse in envelope-parse.ts; fixture round-trip parses and the
+  FileJournal private-field test seam in the suites). Scanner scans the working tree vs base
+  (`git diff <base>`, not `<base>...HEAD`) so it gates uncommitted work; its D018 rule matches
+  empty-string fallbacks only (an unquoted `''` in a bash `[[ =~ ]]` collapses to empty and
+  degrades the pattern to "any `??`" — regexes live in variables, found the hard way).
 - `runner.ts:707` in the story is stale line numbering: the live budget-kill compare is
   `cli-anything/src/runner.ts:803` (`cumulativeCostUsd >= killThresholdUsd`). The conversion
   this story owns is `usdFromMicros` in `usage.ts`; DF1.6's spawn seam is the call site that
@@ -340,6 +346,8 @@ returned `PhaseAttemptRecord`.
 - `tests/phase-engine/envelope-parse.test.ts` (new)
 - `tests/phase-engine/usage.test.ts` (new)
 - `artifacts/df1-3-e2e-event-stream.json` (new — e2e demo artifact)
+- `scripts/dev/check-defensive-programming.sh` (new — qds-dev Phase 5 gate, was missing)
+- `scripts/dev/check-pr-conflicts.sh` (new — qds-dev Phase 5 gate, was missing)
 - `_bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-3-dual-retry-discipline.md` (modified — this record)
 - `_bmad-output/sprint-artifacts/sprint-status.yaml` (modified — status)
 

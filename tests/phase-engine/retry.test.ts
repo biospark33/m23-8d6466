@@ -588,7 +588,7 @@ describe("e2e demo (DoD, MANDATORY) — retries: 1, 3 sends, one session, summed
 // --- helpers -----------------------------------------------------------
 
 function readGateEvents(journal: FileJournal): Array<{ type: string; attempt: number; checks: Array<{ item: string; ok: boolean; note: string }> }> {
-  return (journal as unknown as { events: Array<Record<string, unknown>> }).events.map((e) => ({
+  return (journal /* dp:ok test seam: reads FileJournal events through the private field */ as unknown as { events: Array<Record<string, unknown>> }).events.map((e) => ({
     type: e.type as string,
     attempt: e.attempt as number,
     checks: (e.checks ?? []) as Array<{ item: string; ok: boolean; note: string }>,

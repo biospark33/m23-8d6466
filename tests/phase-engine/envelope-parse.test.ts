@@ -28,17 +28,17 @@ describe("extractJsonCandidate", () => {
 
   test("fenced code block", () => {
     const text = `Here is my report:\n\`\`\`json\n${JSON.stringify(valid)}\n\`\`\`\nDone.`;
-    expect(JSON.parse(extractJsonCandidate(text) ?? "null")).toEqual(valid);
+    expect(JSON.parse(extractJsonCandidate(text) ?? "null") /* dp:ok known-valid fixture; a throw is the test failing */).toEqual(valid);
   });
 
   test("prose-wrapped", () => {
     const text = `Sure! My report follows. ${JSON.stringify(valid)} hope that helps`;
-    expect(JSON.parse(extractJsonCandidate(text) ?? "null")).toEqual(valid);
+    expect(JSON.parse(extractJsonCandidate(text) ?? "null") /* dp:ok known-valid fixture; a throw is the test failing */).toEqual(valid);
   });
 
   test("nested braces inside strings do not end the candidate early", () => {
     const obj = { ...valid, summary: "checked {nested} braces \"quoted\"" };
-    expect(JSON.parse(extractJsonCandidate(JSON.stringify(obj)) ?? "null")).toEqual(obj);
+    expect(JSON.parse(extractJsonCandidate(JSON.stringify(obj)) ?? "null") /* dp:ok round-trips a known-valid fixture */).toEqual(obj);
   });
 
   test("no JSON anywhere returns undefined", () => {
