@@ -27,6 +27,7 @@
  */
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import {
   FileJournal,
   Run,
@@ -35,7 +36,12 @@ import {
   walkPhases,
   type PhaseBody,
   type PhaseSpec,
+  type PhaseParams,
+  type RunContext,
+  looksLikeEnvelope,
 } from "../src/phase-engine/index.ts";
+import { Tracer, TracingJournal } from "../src/phase-engine/index.ts";
+import type { Envelope } from "../src/phase-engine/envelopes/types.ts";
 import { parseValueFlags } from "./lib/cli-args.ts";
 
 const HELP = [
@@ -64,10 +70,19 @@ function childEnv(): NodeJS.ProcessEnv {
  * requires owned subprocess trees to terminate before the phase is recorded, and
  * the promise settles only once the child is really gone.
  *
- * DF1.2's `commandGate` is the intended gate on this argv; until it lands, the
- * command runs with a scrubbed environment and a cwd pinned to the run root.
+ * DF1.2's `commandGate` gates this argv where a caller composes it (see
+ * makeBodyFactory); the command itself runs with a scrubbed environment and a
+ * cwd pinned to the run root.
+ *
+ * DF1.4: recordProcess/endProcess calls for tracer.
  */
-function runCommand(cmd: readonly string[], signal: AbortSignal, cwd: string): Promise<number> {
+function runCommand(
+  cmd: readonly string[],
+  signal: AbortSignal,
+  cwd: string,
+  tracer: Tracer,
+  requestId: string,
+): Promise<number> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd[0] as string, cmd.slice(1), {
       cwd,
@@ -80,6 +95,17 @@ function runCommand(cmd: readonly string[], signal: AbortSignal, cwd: string): P
     });
     child.stdout?.on("data", (b: Buffer) => fs.writeSync(2, b));
     child.stderr?.on("data", (b: Buffer) => fs.writeSync(2, b));
+
+    // DF1.4: Record process spawn
+    const pid = child.pid;
+    if (pid !== undefined) {
+      tracer.recordProcess({
+        requestId,
+        kind: "command",
+        pid,
+        command: cmd.join(" "),
+      });
+    }
 
     let killed = false;
     const killTree = () => {
@@ -105,6 +131,19 @@ function runCommand(cmd: readonly string[], signal: AbortSignal, cwd: string): P
       // child is reaped, so a recycled pgid is a residual (not closed) race —
       // narrowing it further needs a supervisor this story does not own.
       if (!killed) killTree();
+
+      // DF1.4: End process
+      if (pid !== undefined) {
+        try {
+          tracer.endProcess({
+            requestId,
+            pid,
+            endedAt: new Date().toISOString(),
+          });
+        } catch {
+          /* ignore */
+        }
+      }
     };
     child.on("error", (err) => {
       done();
@@ -122,7 +161,7 @@ function runCommand(cmd: readonly string[], signal: AbortSignal, cwd: string): P
   });
 }
 
-function makeBodyFactory(cwd: string) {
+function makeBodyFactory(cwd: string, tracer: Tracer, requestId: string) {
   return (spec: PhaseSpec): PhaseBody<unknown> => {
     if (spec.kind === "code") {
       const cmd = spec.command ?? [];
@@ -136,7 +175,11 @@ function makeBodyFactory(cwd: string) {
           throw new Error(`phase '${sanitizeForMessage(spec.name)}': kind 'code' declares no command`);
         };
       }
-      return async ({ signal }) => ({ exitCode: await runCommand(cmd, signal, cwd) });
+      // No blanket gate here: DF1.2 AC4 — a command's exit code is data, not a
+      // phase verdict — so gates are composed by the caller that wants them
+      // (gatedBody over this factory's bodies); the tracer then sees their
+      // events through the journal port this run already decorates.
+      return async ({ signal }) => ({ exitCode: await runCommand(cmd, signal, cwd, tracer, requestId) });
     }
     return () => {
       throw new Error(
@@ -190,12 +233,38 @@ async function main(argv: readonly string[]): Promise<number> {
   if (!journalPath) throw new Error("--journal is required");
 
   const { manifest, manifestLoadMs } = loadManifest(manifestPath, budgetMs, runRoot);
-  const journal = new FileJournal(journalPath, runId);
+
+  // DF1.4: Claim trace data dir under marker root (QDS_RUN_ROOT) with 0700
+  // Default marker root is /run when QDS_RUN_ROOT not set
+  const markerRoot = process.env.QDS_RUN_ROOT ?? "/run";
+  const traceDir = path.join(markerRoot, "trace");
+  fs.mkdirSync(traceDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(traceDir, 0o700);
+  const dirMode = fs.statSync(traceDir).mode & 0o777;
+  if (dirMode !== 0o700) {
+    throw new Error(`trace dir is mode 0o${dirMode.toString(8)}, not 0700`);
+  }
+
+  // DF1.4: Open Tracer (applies schema+migrations at construction)
+  const tracer = new Tracer({
+    dataDir: traceDir,
+    requestId,
+    pipelineName: manifest.pipelineId,
+  });
+
+  // DF1.4: Wrap FileJournal with TracingJournal
+  const innerJournal = new FileJournal(journalPath, runId);
+  const ctx: RunContext = { runId, pipelineId: manifest.pipelineId, requestId };
+  const journal = new TracingJournal(innerJournal, tracer, ctx);
+
   const run = new Run({
-    ctx: { runId, pipelineId: manifest.pipelineId, requestId },
+    ctx,
     journal,
     manifestLoadMs,
   });
+
+  // DF1.4: Start session at run start
+  tracer.startSession({ requestId, request: manifest.pipelineId });
 
   // A signal becomes a terminating exception so the run closes and its rows
   // settle, rather than leaving the journal claiming work that is already dead.
@@ -207,6 +276,13 @@ async function main(argv: readonly string[]): Promise<number> {
       fs.writeSync(2, `pipeline-run: ${sig} again — exiting immediately\n`);
       // 2, not 1: the run never reached `finish`, so no marker was written and
       // the exit code must not claim the run settled.
+      // DF1.4: Close tracer before exit
+      try {
+        tracer.processesEndAll(requestId);
+        tracer.close();
+      } catch {
+        /* ignore */
+      }
       process.exit(2);
     }
     terminated = true;
@@ -215,8 +291,32 @@ async function main(argv: readonly string[]): Promise<number> {
   process.on("SIGTERM", () => onSignal("SIGTERM"));
   process.on("SIGINT", () => onSignal("SIGINT"));
 
-  await walkPhases(run, manifest.phases, makeBodyFactory(runRoot));
+  const outcomes = await walkPhases(run, manifest.phases, makeBodyFactory(runRoot, tracer, requestId));
+
+  // DF1.4: Record envelopes after each phase settles
+  for (const outcome of outcomes) {
+    if (looksLikeEnvelope(outcome.value)) {
+      const envelope = outcome.value as Envelope;
+      const phaseSpec = manifest.phases.find((p) => p.name === outcome.name);
+      const phaseParams = phaseSpec as PhaseParams | undefined;
+      tracer.recordEnvelope({
+        requestId,
+        phaseId: outcome.phaseId,
+        agent: phaseParams?.agent?.agentId ?? "engine",
+        outputType: envelope.kind,
+        payloadJson: JSON.stringify(envelope),
+        valid: envelope.status === "success",
+        attempt: 1,
+      });
+    }
+  }
+
   const result = run.finish(!terminated);
+
+  // DF1.4: run.finish flowed through TracingJournal, which already ended all
+  // processes and finished the session — close the writer.
+  tracer.close();
+
   // Written straight to fd 1 so the banner is on disk before the exit below, and
   // non-fatally: the run is already settled and its marker written, so an EPIPE
   // on stdout must not downgrade a settled run to "never settled".

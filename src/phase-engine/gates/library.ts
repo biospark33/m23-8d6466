@@ -207,6 +207,8 @@ function looksLikeEnvelope(value: unknown): value is Envelope {
   );
 }
 
+export { looksLikeEnvelope };
+
 export interface GatedBodyOptions<T> {
   /** How the body's value becomes the envelope the gates examine. */
   toEnvelope?: (value: T) => Envelope | undefined;
