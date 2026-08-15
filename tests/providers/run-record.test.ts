@@ -240,12 +240,17 @@ describe("set (AC2)", () => {
     // The export is the CLI's flag table, so it must track the store's actual
     // behavior — a field the CLI would offer as a flag but set() rejects (the
     // next operation-managed field added like closedAt) is a command that can
-    // only ever fail.
+    // only ever fail. The rejected set is the complement of the exported
+    // policy, NOT a hardcoded list: a field later added to IMMUTABLE_FIELDS (or
+    // rejected like closedAt) must land in one loop or the other, never in a
+    // silent gap between them.
     for (const f of SETTABLE_FIELDS) {
       const v = CORE_FIELDS[f] === "int" ? 1 : CORE_FIELDS[f] === "ports" ? [1] : "x";
       expect(() => store.set("run-c", { [f]: v } as never)).not.toThrow();
     }
-    for (const f of ["runId", "createdAt", "closedAt"]) {
+    const rejected = Object.keys(CORE_FIELDS).filter((k) => !SETTABLE_FIELDS.includes(k));
+    expect(rejected.length).toBeGreaterThan(0); // the complement is never empty
+    for (const f of rejected) {
       expect(() => store.set("run-c", { [f]: "x" } as never)).toThrow();
     }
   });
