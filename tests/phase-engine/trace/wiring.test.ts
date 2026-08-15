@@ -221,6 +221,17 @@ describe("TracingJournal delegation + forwarding", () => {
     expect(phase).not.toBeNull();
     expect(phase?.status).toBe("success");
     expect(phase?.ended_at).not.toBeNull();
+
+    // Coherence: promote stamps one clock read — started_at can never exceed
+    // ended_at on the phases row (insert path) or the phase_end event row.
+    const phaseRow = db
+      .query("SELECT started_at, ended_at FROM phases WHERE phase_id = ?")
+      .get("phase-1") as { started_at: string; ended_at: string };
+    expect(phaseRow.started_at <= phaseRow.ended_at).toBe(true);
+    const endEvent = db
+      .query("SELECT started_at, ended_at FROM events WHERE type = 'phase_end'")
+      .get() as { started_at: string; ended_at: string };
+    expect(endEvent.started_at <= endEvent.ended_at).toBe(true);
     db.close();
   });
 

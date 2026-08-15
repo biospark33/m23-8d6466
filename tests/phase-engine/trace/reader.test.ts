@@ -18,6 +18,7 @@ import {
   openTraceReader,
   type TraceReader,
 } from "../../../src/phase-engine/trace/reader.ts";
+import { applyReaderPragmas } from "../../../src/phase-engine/trace/pragmas.ts";
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df1-4-reader-")));
 afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
@@ -492,6 +493,12 @@ describe("reader pragmas and WAL assertion (AC2)", () => {
     expect(journalMode.journal_mode).toBe("delete");
 
     reader.close();
+  });
+
+  test("applyReaderPragmas never throws — a broken connection reports 'unknown'", () => {
+    const db = new Database(":memory:");
+    db.close();
+    expect(applyReaderPragmas(db)).toBe("unknown");
   });
 });
 

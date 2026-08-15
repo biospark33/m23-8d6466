@@ -137,6 +137,39 @@ describe("AC2: writer pragmas", () => {
     expect(TRACE_PRAGMAS.synchronous).toBe("NORMAL");
     expect(TRACE_PRAGMAS.busyTimeoutMs).toBe(5000);
   });
+
+  test("applyWriterPragmas throws when WAL is refused, never silently degrades", () => {
+    // :memory: reports "memory" — WAL is impossible there, a faithful
+    // stand-in for any connection where the SET does not take effect.
+    const db = new Database(":memory:");
+    expect(() => applyWriterPragmas(db)).toThrow(/journal_mode=WAL refused/);
+    db.close();
+  });
+});
+
+describe("event timestamp coherence", () => {
+  test("end-only event stamps started_at from ended_at — never a later clock read", () => {
+    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const endedAt = new Date().toISOString();
+    tracer.trace({
+      requestId,
+      phaseId: "p-1",
+      type: "phase_end",
+      name: "build",
+      endedAt,
+    });
+    tracer.close();
+
+    const db = new Database(path.join(dataDir, "trace.db"), { readonly: true });
+    const row = db
+      .prepare("SELECT started_at, ended_at FROM events WHERE type = 'phase_end'")
+      .get() as { started_at: string; ended_at: string };
+    expect(row.ended_at).toBe(endedAt);
+    // started_at === ended_at: the event timestamp is the end, not a second
+    // clock read taken after it (which once produced started > ended).
+    expect(row.started_at).toBe(endedAt);
+    db.close();
+  });
 });
 
 describe("DoD unit: gate_results round-trip", () => {

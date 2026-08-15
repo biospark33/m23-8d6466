@@ -18,7 +18,18 @@ export const TRACE_PRAGMAS = {
  * Writer connection: set every pragma; any refusal is a hard open failure.
  */
 export function applyWriterPragmas(db: Database): void {
-  db.exec(`PRAGMA journal_mode=${TRACE_PRAGMAS.journalMode}`);
+  // journal_mode is a contract with the reader (rowid-cursor reads during
+  // writes), and the SET returns the mode actually in effect — a silent
+  // refusal (a build without WAL, an in-memory db reporting "memory") breaks
+  // that contract and must fail the open, not degrade it.
+  const mode = db
+    .query(`PRAGMA journal_mode=${TRACE_PRAGMAS.journalMode}`)
+    .get() as { journal_mode?: string } | undefined;
+  if (mode?.journal_mode?.toLowerCase() !== TRACE_PRAGMAS.journalMode.toLowerCase()) {
+    throw new Error(
+      `journal_mode=${TRACE_PRAGMAS.journalMode} refused — got "${mode?.journal_mode ?? "none"}"; the reader's WAL contract cannot hold`,
+    );
+  }
   db.exec(`PRAGMA synchronous=${TRACE_PRAGMAS.synchronous}`);
   db.exec(`PRAGMA busy_timeout=${TRACE_PRAGMAS.busyTimeoutMs}`);
 }
@@ -40,7 +51,13 @@ export function applyReaderPragmas(db: Database): string {
     }
   }
 
-  // ASSERT journal_mode (read only, never set)
-  const mode = db.query("PRAGMA journal_mode").get() as { journal_mode?: string };
-  return mode?.journal_mode ?? "unknown";
+  // ASSERT journal_mode (read only, never set). Best-effort like the pragmas
+  // above: a closed or broken connection reports "unknown" — the caller
+  // warns, and reader configuration never throws to the run (AC5).
+  try {
+    const mode = db.query("PRAGMA journal_mode").get() as { journal_mode?: string };
+    return mode?.journal_mode ?? "unknown";
+  } catch {
+    return "unknown";
+  }
 }

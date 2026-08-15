@@ -11,9 +11,15 @@ import type { PhaseJournal } from "../journal.ts";
 import type { GateEvent, PhaseRecord, PhaseStatus, RunContext } from "../types.ts";
 import type { Tracer } from "./tracer.ts";
 
+// AC5: a broken/closed stderr (EPIPE — piped to head, fd closed by a
+// supervisor) reports its failure asynchronously via the stream's 'error'
+// event; a synchronous try/catch around write() never sees it, and an
+// unhandled 'error' kills the process. One listener at module scope makes
+// tracer error reporting unable to break the run.
+process.stderr.on("error", () => {});
+
 /** Error handler for tracer failures (AC5). */
-function onTraceError(err: Error): void {
-  try {
+function onTraceError(err: Error): void {  try {
     // Log structured error to stderr, never throw — and a closed/broken
     // stderr (EPIPE) must not turn a tracer failure into a run failure.
     process.stderr.write(
@@ -122,7 +128,10 @@ export class TracingJournal implements PhaseJournal {
         name: phaseName,
         kind: "code", // default, will be ignored on update
         status, // upsertPhase accepts string
-        startedAt: new Date().toISOString(), // required for upsert
+        // One clock read per promote: on the insert path (promote without a
+        // prior writePhase) a second fresh stamp here could land after
+        // ended_at and store a negative-duration phase.
+        startedAt: endedAt, // required for upsert
         endedAt,
       });
 

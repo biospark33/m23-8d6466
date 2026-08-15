@@ -425,7 +425,10 @@ export class Tracer {
     endedAt?: string;
   }): void {
     const eventIdStr = eventId();
-    const now = event.startedAt ?? new Date().toISOString();
+    // One event timestamp: the caller's start if given, else its end. An
+    // end-only event (phase_end) stamps started_at from ended_at, so the two
+    // never come from separate clock reads that can invert (started > ended).
+    const now = event.startedAt ?? event.endedAt ?? new Date().toISOString();
     const jsonlLine = JSON.stringify({
       event_id: eventIdStr,
       request_id: event.requestId,
