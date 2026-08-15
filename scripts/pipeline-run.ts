@@ -24,6 +24,10 @@
  * whatever the command returns. `engineer` and `agent` phases have no executor
  * until DF1.6 lands the tier-3 spawn seam, and throw — which is exactly what the
  * default-fail promotion rule exists to show.
+ *
+ * DF1.4: the trace store claims <QDS_RUN_ROOT>/trace (0700). The root matches
+ * the terminal marker's (journal.ts): /run in the box, QDS_RUN_ROOT on dev/CI
+ * hosts where /run is root-owned or absent.
  */
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
@@ -96,15 +100,22 @@ function runCommand(
     child.stdout?.on("data", (b: Buffer) => fs.writeSync(2, b));
     child.stderr?.on("data", (b: Buffer) => fs.writeSync(2, b));
 
-    // DF1.4: Record process spawn
+    // DF1.4: Record process spawn. Tracer methods are non-throwing by
+    // contract (AC5); the guard is defense in depth — at this point the child
+    // exists but its abort wiring and exit handlers are not yet registered, so
+    // a throw here would reject the phase and orphan an owned subprocess.
     const pid = child.pid;
     if (pid !== undefined) {
-      tracer.recordProcess({
-        requestId,
-        kind: "command",
-        pid,
-        command: cmd.join(" "),
-      });
+      try {
+        tracer.recordProcess({
+          requestId,
+          kind: "command",
+          pid,
+          command: cmd.join(" "),
+        });
+      } catch {
+        /* tracer is a sidecar; never let it fail the phase or orphan the child */
+      }
     }
 
     let killed = false;
@@ -312,9 +323,14 @@ async function main(argv: readonly string[]): Promise<number> {
 
   const outcomes = await walkPhases(run, manifest.phases, makeBodyFactory(runRoot, tracer, requestId));
 
-  // DF1.4: Record envelopes after each phase settles
+  // DF1.4: Record envelopes after each phase settles. Guarded like every
+  // other tracer call — and the JSON.stringify sits inside the guard too: a
+  // circular structure in an agent-produced envelope must not abort the loop
+  // before run.finish writes the terminal marker (a fully executed run would
+  // then read as never settled).
   for (const outcome of outcomes) {
-    if (looksLikeEnvelope(outcome.value)) {
+    if (!looksLikeEnvelope(outcome.value)) continue;
+    try {
       const envelope = outcome.value as Envelope;
       const phaseSpec = manifest.phases.find((p) => p.name === outcome.name);
       const phaseParams = phaseSpec as PhaseParams | undefined;
@@ -327,14 +343,22 @@ async function main(argv: readonly string[]): Promise<number> {
         valid: envelope.status === "success",
         attempt: 1,
       });
+    } catch {
+      /* tracer is a sidecar; run settlement belongs to the journal */
     }
   }
 
   const result = run.finish(!terminated);
 
   // DF1.4: run.finish flowed through TracingJournal, which already ended all
-  // processes and finished the session — close the writer.
-  tracer.close();
+  // processes and finished the session — close the writer. Guarded: the run
+  // is already settled and its marker written, so a failing checkpoint/close
+  // must not downgrade a settled run to "never settled" (exit 2).
+  try {
+    tracer.close();
+  } catch {
+    /* the terminal marker is the commitment, not the trace close */
+  }
 
   // Written straight to fd 1 so the banner is on disk before the exit below, and
   // non-fatally: the run is already settled and its marker written, so an EPIPE

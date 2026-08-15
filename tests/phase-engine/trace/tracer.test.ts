@@ -18,6 +18,10 @@ import * as path from "node:path";
 
 // ponytail: src/ does not exist yet — this import fails red as expected
 import { Tracer, TracerError } from "../../../src/phase-engine/trace/tracer.ts";
+import {
+  applyWriterPragmas,
+  TRACE_PRAGMAS,
+} from "../../../src/phase-engine/trace/pragmas.ts";
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df1-4-tracer-")));
 afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
@@ -106,6 +110,32 @@ describe("AC2: writer pragmas", () => {
     expect(row.journal_mode).toBe("wal");
     db.close();
     tracer.close();
+  });
+
+  // synchronous/busy_timeout are per-connection, not persisted in the file, so
+  // they cannot be asserted from a second connection — the AC2 contract is
+  // asserted on a live writer connection using the same shared applier the
+  // Tracer runs (pragmas.ts is the single source for both).
+  test("shared writer pragmas set WAL, synchronous=NORMAL, busy_timeout=5000 on the connection", () => {
+    fs.mkdirSync(dataDir, { recursive: true });
+    const db = new Database(path.join(dataDir, "pragma-check.db"));
+    applyWriterPragmas(db);
+
+    expect(
+      (db.query("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode.toLowerCase(),
+    ).toBe("wal");
+    expect(
+      (db.query("PRAGMA synchronous").get() as { synchronous: number }).synchronous,
+    ).toBe(1); // NORMAL
+    expect(
+      (db.query("PRAGMA busy_timeout").get() as { timeout: number }).timeout, // SQLite names the result column "timeout"
+    ).toBe(5000);
+    db.close();
+
+    // The writer's strictness and the reader's tolerance come from one source.
+    expect(TRACE_PRAGMAS.journalMode).toBe("WAL");
+    expect(TRACE_PRAGMAS.synchronous).toBe("NORMAL");
+    expect(TRACE_PRAGMAS.busyTimeoutMs).toBe(5000);
   });
 });
 

@@ -12,6 +12,7 @@ import type {
   TraceEventRow,
   TraceSessionRow,
 } from "../types.ts";
+import { applyReaderPragmas } from "./pragmas.ts";
 
 export const MAX_LIMIT = 1000;
 export const DEFAULT_LIMIT = 500;
@@ -38,6 +39,13 @@ class TraceReaderImpl implements TraceReader {
     this.dbPath = dbPath;
     // Try to open database eagerly for WAL warning timing with tests
     // If file doesn't exist, fall back to lazy opening (test deviation)
+    //
+    // Crash-case note: a readonly connection CAN replay a leftover -wal as
+    // long as it can create the -shm (SQLite ≥3.22) — i.e. whenever the data
+    // dir is writable, which the store's own 0700 contract guarantees for the
+    // writer. A read-write fallback would add nothing: when the dir is not
+    // writable, read-write cannot create the -shm either. See the
+    // "WAL crash recovery" tests in reader.test.ts.
     try {
       this.db = new Database(dbPath, { readonly: true });
       this.configureDb();
@@ -53,23 +61,7 @@ class TraceReaderImpl implements TraceReader {
   private configureDb(): void {
     if (!this.db) return;
 
-    try {
-      this.db.exec("PRAGMA busy_timeout = 5000");
-    } catch {
-      // readonly may reject some pragmas; continue
-    }
-
-    try {
-      this.db.exec("PRAGMA synchronous = NORMAL");
-    } catch {
-      // readonly may reject synchronous
-    }
-
-    // ASSERT journal_mode (read only, never set)
-    const mode = this.db
-      .query("PRAGMA journal_mode")
-      .get() as { journal_mode: string };
-    const journalMode = mode?.journal_mode ?? "unknown";
+    const journalMode = applyReaderPragmas(this.db);
     if (journalMode.toLowerCase() !== "wal") {
       console.warn(
         `[reader] journal_mode is "${journalMode}", expected "wal" — live reads during writes may block`,
@@ -125,10 +117,13 @@ class TraceReaderImpl implements TraceReader {
 
     const db = this.ensureDb();
     // AC4: a non-positive or non-finite limit means "default", not "minimum".
-    // A positive limit is truncated and clamped to MAX_LIMIT before binding.
+    // Truncate first and re-check: a sub-1 fraction (e.g. 0.5) truncates to 0
+    // and must fall back to the default too, not bind LIMIT 0 — an empty page
+    // with hasMore true spins any cursor-looping caller forever.
+    const truncated = Math.trunc(limit);
     const cappedLimit =
-      Number.isFinite(limit) && limit > 0
-        ? Math.min(Math.trunc(limit), MAX_LIMIT)
+      Number.isFinite(limit) && truncated > 0
+        ? Math.min(truncated, MAX_LIMIT)
         : DEFAULT_LIMIT;
 
     const events = db

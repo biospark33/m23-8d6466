@@ -20,6 +20,7 @@ import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 import { SCHEMA_DDL, SCHEMA_INDEX_DDL } from "./schema.ts";
 import { applyMigrations } from "./migrations.ts";
+import { applyWriterPragmas } from "./pragmas.ts";
 
 /** Structured error carrying SQL context. */
 export class TracerError extends Error {
@@ -316,16 +317,19 @@ export class Tracer {
     // INV-1: db must be 0600 regardless of umask
     this.enforceModes0600(true);
 
-    // AC2: writer pragmas
-    this.db.exec("PRAGMA journal_mode=WAL");
-    this.db.exec("PRAGMA synchronous=NORMAL");
-    this.db.exec("PRAGMA busy_timeout=5000");
+    // AC2: writer pragmas (single source shared with the reader — pragmas.ts)
+    applyWriterPragmas(this.db);
 
     // INV-1: WAL activation materializes -wal/-shm sidecars — enforce and
     // verify 0600 on them immediately, not only at close (bun's sqlite
     // already creates them 0600; this enforces it as a contract instead of
     // relying on that behavior).
     this.enforceModes0600(true);
+
+    // INV-1 (TOCTOU): WAL activation materializes the sidecars via path-based
+    // opens of the tracer's own — the pinned data-dir identity must still
+    // hold after those operations, or fail closed.
+    this.assertDataDirIdentity();
 
     // Apply schema DDL
     for (const ddl of SCHEMA_DDL) {
@@ -357,6 +361,10 @@ export class Tracer {
     // Open JSONL for append (mode 0600, create if not exists)
     this.jsonlFd = fs.openSync(this.jsonlPath, "a", 0o600);
     this.enforceModes0600(true);
+
+    // INV-1 (TOCTOU): re-verify after the last path-based open — every later
+    // write flows through the descriptors opened inside this verified window.
+    this.assertDataDirIdentity();
   }
 
   /**

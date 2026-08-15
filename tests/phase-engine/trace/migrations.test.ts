@@ -205,8 +205,9 @@ describe("MIGRATIONS list hygiene", () => {
         );
       }
     }
-    // All passed
-    expect(true).toBe(true);
+    // The loop above is the assertion (it throws on violation); this guards
+    // the vacuous pass where MIGRATIONS itself is empty.
+    expect(MIGRATIONS.length).toBeGreaterThan(0);
   });
 
   test("list has no duplicate [table, column] pairs", () => {

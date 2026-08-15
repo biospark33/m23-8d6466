@@ -13,19 +13,24 @@ import type { Tracer } from "./tracer.ts";
 
 /** Error handler for tracer failures (AC5). */
 function onTraceError(err: Error): void {
-  // Log structured error to stderr, never throw
-  process.stderr.write(
-    `${JSON.stringify({
-      level: "warn",
-      event: "trace_error",
-      error: {
-        code: err.name,
-        message: err.message,
-        ...(err instanceof Error && err.stack ? { stack: err.stack } : {}),
-      },
-      timestamp: new Date().toISOString(),
-    })}\n`,
-  );
+  try {
+    // Log structured error to stderr, never throw — and a closed/broken
+    // stderr (EPIPE) must not turn a tracer failure into a run failure.
+    process.stderr.write(
+      `${JSON.stringify({
+        level: "warn",
+        event: "trace_error",
+        error: {
+          code: err.name,
+          message: err.message,
+          ...(err instanceof Error && err.stack ? { stack: err.stack } : {}),
+        },
+        timestamp: new Date().toISOString(),
+      })}\n`,
+    );
+  } catch {
+    /* nowhere left to report — swallowing is the AC5 contract */
+  }
 }
 
 /**
@@ -101,11 +106,13 @@ export class TracingJournal implements PhaseJournal {
       // Update phases row status + ended_at.
       // seq comes from the map when writePhase was seen (authoritative); the
       // phaseId parse (format: runId:index:name) is only a fallback for a
-      // promote without a prior write.
+      // promote without a prior write — and a malformed index degrades to 0,
+      // never NaN (NaN binds as NULL and breaks seq ordering).
       const parts = phaseId.split(":");
+      const parsedSeq = parts.length >= 2 ? Number.parseInt(parts[1]!, 10) : 0;
       const seq =
         this.phaseSeqs.get(phaseId) ??
-        (parts.length >= 2 ? Number.parseInt(parts[1]!, 10) : 0);
+        (Number.isFinite(parsedSeq) ? parsedSeq : 0);
       const phaseName = parts.length >= 3 ? parts.slice(2).join(":") : parts[0] ?? "";
 
       this.tracer.upsertPhase({

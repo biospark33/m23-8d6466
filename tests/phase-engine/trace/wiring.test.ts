@@ -410,6 +410,7 @@ describe("TracingJournal delegation + forwarding", () => {
   });
 
   test("phases() delegates to inner journal", () => {
+    const ws = workspace();
     const innerPhases: PhaseRecord[] = [
       {
         runId: "test-run",
@@ -433,7 +434,7 @@ describe("TracingJournal delegation + forwarding", () => {
     };
 
     const tracer = new Tracer({
-      dataDir: path.join(tmpRoot, "trace"),
+      dataDir: path.join(ws.dir, "trace"),
       requestId: "test-req",
       pipelineName: "test-pipeline",
     });
@@ -698,9 +699,11 @@ describe("e2e-lite: full engine run with trace", () => {
     // Generate two-page read
     const reader = openTraceReader(traceDbSource);
     const db2 = new Database(traceDbSource, { readonly: true });
-    const session = reader.readSession(
-      (db2.query("SELECT request_id FROM sessions").get() as { request_id: string }).request_id,
-    );
+    const sessionRow = db2
+      .query("SELECT request_id FROM sessions")
+      .get() as { request_id: string } | undefined;
+    expect(sessionRow).toBeDefined();
+    const session = reader.readSession(sessionRow!.request_id);
     db2.close();
     expect(session).not.toBeNull();
 

@@ -273,6 +273,18 @@ describe("limit clamping (AC4, MAX_LIMIT=1000, DEFAULT_LIMIT=500)", () => {
     expect(page.hasMore).toBe(true);
     reader.close();
   });
+
+  test("fractional limit below 1 falls back to DEFAULT_LIMIT, never LIMIT 0", () => {
+    // 0.5 passes a raw >0 check but truncates to 0 — it must mean "default",
+    // not bind LIMIT 0 (an empty page with hasMore true spins cursor loops).
+    const { dbPath } = createWalFixture(testDir, ["req-frac"], 3);
+    const reader = openTraceReader(dbPath);
+    const page = reader.readEvents("req-frac", undefined, 0.5);
+
+    expect(page.rows).toHaveLength(3); // full default page (500 > 3)
+    expect(page.hasMore).toBe(false);
+    reader.close();
+  });
 });
 
 describe("unknown requestId (AC4)", () => {
@@ -564,6 +576,50 @@ describe("readSession", () => {
     expect(session!.total_tokens).toBe(5000);
     expect(session!.total_cost).toBe(250);
 
+    reader.close();
+  });
+});
+
+describe("WAL crash recovery (killed writer)", () => {
+  test("reader reads committed frames from a leftover -wal with no -shm", () => {
+    // Simulate a killed run: copy db + -wal while the writer is still open,
+    // then close the writer — its close checkpoints the ORIGINALS, leaving the
+    // copies frozen pre-checkpoint: committed frames in -wal, no -shm, no live
+    // connection. The readonly reader must still surface those rows —
+    // SQLite ≥3.22 lets a readonly connection replay the WAL by creating the
+    // -shm itself, which works wherever the data dir is writable (the store's
+    // own 0700 contract).
+    const liveDir = path.join(testDir, "live");
+    fs.mkdirSync(liveDir);
+    const liveDbPath = path.join(liveDir, "trace.db");
+    const liveDb = new Database(liveDbPath);
+    liveDb.exec("PRAGMA journal_mode = WAL");
+    liveDb.exec(`
+      CREATE TABLE events (
+        event_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        type TEXT
+      )
+    `);
+    liveDb
+      .prepare("INSERT INTO events (event_id, request_id, type) VALUES ('evt-crash-1', 'req-crash', 'log')")
+      .run();
+
+    const crashedDir = path.join(testDir, "crashed");
+    fs.mkdirSync(crashedDir);
+    const crashedDbPath = path.join(crashedDir, "trace.db");
+    fs.copyFileSync(liveDbPath, crashedDbPath);
+    fs.copyFileSync(`${liveDbPath}-wal`, `${crashedDbPath}-wal`);
+    liveDb.close(); // checkpoints + removes the originals' sidecars
+
+    // Exactly the state a killed run leaves behind.
+    expect(fs.existsSync(`${crashedDbPath}-wal`)).toBe(true);
+    expect(fs.existsSync(`${crashedDbPath}-shm`)).toBe(false);
+
+    const reader = openTraceReader(crashedDbPath);
+    const page = reader.readEvents("req-crash");
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]!.event_id).toBe("evt-crash-1");
     reader.close();
   });
 });
