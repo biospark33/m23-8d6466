@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --base) BASE="$2"; shift 2 ;;
     --warn) WARN=1; shift ;;
-    *) echo "unknown flag: $1" >&2; exit 2 ;;
+    *) echo "unknown flag: $1" >&2; echo "usage: $0 [--base <ref>] [--warn]" >&2; exit 2 ;;
   esac
 done
 
