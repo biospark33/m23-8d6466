@@ -136,7 +136,10 @@ describe("commandGate (INV-1, AC5)", () => {
     expect(report.checks[0]!.note).toContain("argv is empty");
   });
 
-  test("signal death is reported with signal name in note", async () => {
+  // POSIX-only: on Windows libuv emulates SIGKILL via TerminateProcess, so the
+  // child exits with a numeric code and signalCode is null — the gate then
+  // truthfully reports the exit-code branch instead of "killed by signal".
+  test.skipIf(process.platform === "win32")("signal death is reported with signal name in note", async () => {
     const gate = commandGate([process.execPath, "-e", "process.kill(process.pid, 'SIGKILL')"]);
     const report = await gate.run(undefined, gateCtx);
     expect(report.passed).toBe(false);
