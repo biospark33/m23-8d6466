@@ -44,13 +44,28 @@ FINDINGS=0
 D018_RE='(\?\?|\|\|)[[:space:]]*(""|'"''"')'
 D019_RE='catch[[:space:]]*(\(.*\))?[[:space:]]*\{[[:space:]]*\}[[:space:]]*$'
 D020_RE='JSON\.parse\('
-# D020 — a `try {` opening on, or within a few lines above, the flagged line
-# counts as guarded. Same-line `try { JSON.parse(x) }`, indented try, and the
-# common multi-line try are all covered; a try deeper than the window falls
-# back to a dp:ok annotation.
+# D020 — true if the flagged line sits inside an open try block. Walks the
+# file from the top with brace tracking: each `try {` line resets the state,
+# and the matching close brace ends it, so a try that already closed does NOT
+# guard a later parse. Same-line `try { JSON.parse(x) }` counts as guarded.
+# Braces inside string/template literals can miscount — when in doubt the
+# answer is "unguarded", and the dp:ok annotation is the escape hatch.
 dp020_guarded() { # file lineno
-  local start=$(( $2 > 5 ? $2 - 5 : 1 ))
-  sed -n "${start},${2}p" "$1" | grep -Eq '^[[:space:]]*try[[:space:]]*\{'
+  awk -v target="$2" '
+    NR == target {
+      if (!inside && $0 ~ /^[[:space:]]*try[[:space:]]*[{]/) inside = 1
+      exit inside ? 0 : 1
+    }
+    /^[[:space:]]*try[[:space:]]*[{]/ { inside = 1; depth = 0 }
+    inside {
+      n = length($0)
+      for (i = 1; i <= n && inside; i++) {
+        c = substr($0, i, 1)
+        if (c == "{") depth++
+        else if (c == "}") { depth--; if (depth <= 0) inside = 0 }
+      }
+    }
+  ' "$1"
 }
 report() { # file line rule text
   if grep -q "dp:ok" <(sed -n "$2p" "$1") 2>/dev/null; then return 0; fi
