@@ -33,21 +33,24 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { log, newRequestId } from "../swarmclaw/mcp/stdio-transport.ts";
+import { log, newRequestId } from "../swarmclaw/log.ts";
 
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
 
 /** Value shapes the core schema admits. */
-type FieldKind = "string" | "int" | "ports";
+export type FieldKind = "string" | "int" | "ports";
 
 /**
  * The twelve core fields. These camelCase spellings are the only ones any
  * consumer writes or asserts against — the snake_case forms belong to DF2.8's
  * SQLite ledger columns, a different store with its own schema.
+ *
+ * Exported so the CLI derives its coercion/flag tables from this one table
+ * instead of duplicating it.
  */
-const CORE_FIELDS: Readonly<Record<string, FieldKind>> = {
+export const CORE_FIELDS: Readonly<Record<string, FieldKind>> = {
   runId: "string",
   vmName: "string",
   httpsUrl: "string",
@@ -63,7 +66,17 @@ const CORE_FIELDS: Readonly<Record<string, FieldKind>> = {
 };
 
 /** Set once at `create()`; never rewritable. */
-const IMMUTABLE_FIELDS: ReadonlySet<string> = new Set(["runId", "createdAt"]);
+export const IMMUTABLE_FIELDS: ReadonlySet<string> = new Set(["runId", "createdAt"]);
+
+/**
+ * Core fields a caller may write via `set()`: the twelve minus `runId`/`createdAt`
+ * (immutable) and `closedAt` (`close()`'s alone). Exported so the CLI derives its
+ * flag table from this one constant — the writable-field policy lives only here,
+ * not half-here and half in the CLI.
+ */
+export const SETTABLE_FIELDS: readonly string[] = Object.keys(CORE_FIELDS).filter(
+  (f) => !IMMUTABLE_FIELDS.has(f) && f !== "closedAt",
+);
 
 /** Costs are integer micro-dollars — sub-cent role splits are not float-representable (DD-9). */
 export interface RunRecord {
