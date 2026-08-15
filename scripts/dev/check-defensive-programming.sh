@@ -24,14 +24,20 @@
 #
 # Usage:
 #   scripts/dev/check-defensive-programming.sh [--base <ref>] [--warn]
+#   scripts/dev/check-defensive-programming.sh --code-only <file>
+#       (emits the blanked code-only view of one file; shared with
+#       tests/phase-engine/usage.test.ts so scanner and invariant test use
+#       ONE blanker)
 
 set -euo pipefail
 
 BASE="origin/main"
 WARN=0
+CODE_ONLY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --base) BASE="$2"; shift 2 ;;
+    --code-only) CODE_ONLY="$2"; shift 2 ;;
     --warn) WARN=1; shift ;;
     *) echo "unknown flag: $1" >&2; echo "usage: $0 [--base <ref>] [--warn]" >&2; exit 2 ;;
   esac
@@ -49,11 +55,14 @@ D020_RE='JSON\.parse\('
 
 # Code-only view of a file: blanks string/char/template literals and
 # line/block comments (state carries across lines), so braces and keywords
-# inside them cannot skew the walkers below. Known ceilings: regex literals
-# and nested template interpolations are not lexed.
+# inside them cannot skew the walkers below. ${...} interpolation expressions
+# are executable code and stay VISIBLE, with braces inside them blanked so
+# the frame/depth walkers stay true (review round 7). Known ceilings: regex
+# literals; nested templates and string literals inside an interpolation are
+# emitted verbatim.
 blank_code() { # file
   awk '
-    BEGIN { in_bc = in_str = in_chr = in_tpl = esc = 0 }
+    BEGIN { in_bc = in_str = in_chr = in_tpl = in_itp = d_itp = esc = 0 }
     {
       out = ""
       n = length($0)
@@ -65,6 +74,18 @@ blank_code() { # file
           if (substr($0, i, 2) == "*/") { in_bc = 0; i++ }
           continue
         }
+        if (in_itp) {
+          # Inside a template ${...} interpolation: executable code. Emit it
+          # verbatim so D017/D020 and the usage invariant scan see it, but
+          # blank braces so the frame and depth walkers stay true (round 7).
+          if (c == "{") { d_itp++; out = out " " }
+          else if (c == "}") {
+            if (d_itp > 0) { d_itp--; out = out " " }
+            else { in_itp = 0; out = out " " }
+          }
+          else out = out c
+          continue
+        }
         if (in_str || in_chr || in_tpl) {
           out = out " "
           if (esc) esc = 0
@@ -72,6 +93,9 @@ blank_code() { # file
           else if (in_str && c == "\"") in_str = 0
           else if (in_chr && c == "\47") in_chr = 0
           else if (in_tpl && c == "`") in_tpl = 0
+          # ${ opens an interpolation (an escaped \${ stays literal); the "$"
+          # was blanked above and the "{" is consumed here (review round 7).
+          else if (in_tpl && substr($0, i, 2) == "${") { in_itp = 1; d_itp = 0; i++ }
           continue
         }
         if (substr($0, i, 2) == "//") { in_lc = 1; out = out "  "; i++ }
@@ -187,6 +211,13 @@ d017_scan() { # file added_line_csv
         else if (c == "{") { openFrame(pd == 0 && pend_async); pend_async = 0 }
         else if (c == "}") closeFrame()
       }
+      # A keyword ending the line is still only in the w buffer — flush it
+      # or the last word of every line is silently dropped (round 7): async
+      # at end-of-line armed nothing, so the frame opened by the next line
+      # escaped D017 even while awaiting with no try/catch.
+      if (w == "async") pend_async = 1
+      else if (w == "try" && sp > 0) tr[sp] = 1
+      else if (w == "await") onAwait()
     }
     END { exit bad ? 1 : 0 }
   '
@@ -197,6 +228,15 @@ report() { # file line rule text
   echo "FINDING [$3] $1:$2 — $4"
   FINDINGS=$((FINDINGS + 1))
 }
+
+# Emit the code-only view of one file and exit — consumed by
+# tests/phase-engine/usage.test.ts so the invariant scan and this gate share
+# ONE blanker implementation; a lexer fix lands in both at once (round 7).
+if [[ -n "${CODE_ONLY:-}" ]]; then
+  [[ -f "$CODE_ONLY" ]] || { echo "not a file: $CODE_ONLY" >&2; exit 2; }
+  blank_code "$CODE_ONLY"
+  exit 0
+fi
 
 # Tool failures propagate (review round 6): a failed git diff must stop the
 # gate, not silently scan an empty file set and print OK.
@@ -215,7 +255,7 @@ for f in "${FILES[@]}"; do
     [[ -z "$lineno" ]] && continue
     [[ "$text" =~ dp:ok ]] && continue
 
-    if [[ "$text" =~ as\ any|as\ unknown\ as ]]; then
+    if [[ "$text" =~ as[[:space:]]+any|as[[:space:]]+unknown[[:space:]]+as ]]; then
       report "$f" "$lineno" "D016" "type-erasing cast on an added line"
     fi
     # Empty-string literal ONLY (`?? ""` / `|| ''`); a fallback to a real

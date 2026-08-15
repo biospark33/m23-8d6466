@@ -10,7 +10,9 @@
  * exactly one conversion to USD at the phase-engine → runner call site.
  */
 import { describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 import {
@@ -108,58 +110,36 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
   const engineRoot = path.resolve(import.meta.dir, "../../src/phase-engine");
 
   /**
-   * Code-only view of a source file (review round 6): blanks // and
-   * block comments AND string/template/char literals (escape-aware, block
-   * state carries across lines) so the invariant scans executable code,
-   * not prose, comments, or literal text. Regex literals are not lexed —
-   * a known ceiling shared with the dp gate's blanker.
+   * Code-only view of a source file, SINGLE-SOURCED with the dp gate's
+   * blanker (review round 7): shells out to
+   * `check-defensive-programming.sh --code-only`, so a lexer fix lands in
+   * the D017/D020 gate and this invariant scan at once — the previous local
+   * copy had already drifted from the awk one. Blanks // and block comments
+   * and string/char/template literals (escape-aware, state carries across
+   * lines) while KEEPING ${...} interpolation expressions visible — the
+   * scan sees executable code, not prose. Known ceilings: regex literals;
+   * nested templates inside an interpolation.
    */
-  function codeOnly(text: string): string {
-    let inBlock = false;
-    let inStr: '"' | "'" | "`" | null = null;
-    return text
-      .split("\n")
-      .map((line) => {
-        let out = "";
-        for (let i = 0; i < line.length; i += 1) {
-          const c = line[i]!;
-          const two = line.slice(i, i + 2);
-          if (inBlock) {
-            if (two === "*/") {
-              inBlock = false;
-              out += "  ";
-              i += 1;
-            } else out += " ";
-            continue;
-          }
-          if (inStr) {
-            if (c === "\\") {
-              out += "  ";
-              i += 1; // skip the escaped char
-            } else if (c === inStr) {
-              inStr = null;
-              out += " ";
-            } else out += " ";
-            continue;
-          }
-          if (two === "//") break; // rest of the line is a comment
-          if (two === "/*") {
-            inBlock = true;
-            out += "  ";
-            i += 1;
-            continue;
-          }
-          if (c === '"' || c === "'" || c === "`") {
-            inStr = c;
-            out += " ";
-            continue;
-          }
-          out += c;
-        }
-        return out;
-      })
-      .join("\n");
+  function codeOnly(file: string): string {
+    return execFileSync(
+      path.resolve(import.meta.dir, "../../scripts/dev/check-defensive-programming.sh"),
+      ["--code-only", file],
+      { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+    );
   }
+
+  test("code-only view keeps interpolation code visible and template text blanked (round 7 — single-sourced with the dp gate)", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "df13-codeonly-"));
+    const fixture = path.join(dir, "fixture.ts");
+    try {
+      fs.writeFileSync(fixture, 'const msg = `Cost: ${cost / 1_000_000} USD`;\n');
+      const firstLine = codeOnly(fixture).split("\n")[0]!;
+      expect(/\/\s*1_000_000/.test(firstLine)).toBe(true);
+      expect(firstLine.includes("USD")).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   test("no float-dollar field exists anywhere inside src/phase-engine", () => {
     const offenders: string[] = [];
@@ -168,7 +148,7 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
         else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
-          const code = codeOnly(fs.readFileSync(full, "utf8"));
+          const code = codeOnly(full);
           if (/costUsd|costCents|usd:\s|dollars/.test(code)) offenders.push(full);
         }
       }
@@ -178,7 +158,7 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
   });
 
   test("exactly one micros→USD DIVISION exists in the engine, in usage.ts", () => {
-    const usage = codeOnly(fs.readFileSync(path.join(engineRoot, "usage.ts"), "utf8"));
+    const usage = codeOnly(path.join(engineRoot, "usage.ts"));
     expect((usage.match(/\/\s*1_000_000/g) ?? []).length).toBe(1);
     // No other engine file divides by a million (DF1.5's roster rate math
     // multiplies tokens into µ$ — different direction, different unit contract).
@@ -188,7 +168,7 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
         else if (entry.name.endsWith(".ts") && path.resolve(dir, entry.name) !== path.join(engineRoot, "usage.ts")) {
-          if (/\/\s*1_000_000/.test(codeOnly(fs.readFileSync(full, "utf8")))) others.push(full);
+          if (/\/\s*1_000_000/.test(codeOnly(full))) others.push(full);
         }
       }
     };

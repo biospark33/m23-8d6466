@@ -250,6 +250,9 @@ export async function runAgentPhase(opts: AgentPhaseOptions): Promise<AgentPhase
           attempt: gateAttempt,
           gate_exec_ms: Math.round(gateExecMs),
           gate_report_ms: Math.round(gateReportMs),
+          // Spec §Observability names `gate_ms`; the exec/report split above
+          // is finer detail beneath it (review round 7).
+          gate_ms: Math.round(gateExecMs + gateReportMs),
           violations,
           checks,
         });
