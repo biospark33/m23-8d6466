@@ -1,7 +1,7 @@
 story: df1-4
 story_key: df1-4
 title: SQLite Trace Store (7-Table Schema, WAL, Rowid-Cursor Reads)
-phase: 5-pr-prep
+phase: complete-pr-113
 mode: standard
 track: A
 branch: feature/df1-4-sqlite-trace-store
@@ -26,4 +26,4 @@ research:
     - "tests: bun:test, mkdtemp+realpathSync, QDS_RUN_ROOT env, seq marker dirs, process.execPath not 'bun'"
     - "review lessons: charset escapes U+2028..., Windows compat, dead fallbacks, temp-dir leaks, stale evidence"
 guardrail_log: []
-updated: 2026-08-15 phase5
+updated: 2026-08-15 complete
