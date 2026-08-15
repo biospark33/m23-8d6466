@@ -13,8 +13,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 
-/** Must match MAX_VERIFY_PAGES in src/providers/credentials.ts. */
-const MAX_VERIFY_PAGES = 20;
+import { MAX_VERIFY_PAGES } from "../../../src/providers/credentials.ts";
 
 export interface FakeKey {
   hash: string;
@@ -37,6 +36,8 @@ export interface FakeKeyApiOptions {
   deleteStatus?: number;
   /** Override the status createKey fails with (non-2xx mint). */
   createStatus?: number;
+  /** Override the limitUsd the mint RESPONSE reports (null ⇒ uncapped refusal). */
+  returnedLimitUsd?: number | null;
 }
 
 export interface RecordedRequest {
@@ -77,7 +78,8 @@ export class FakeKeyApi {
       deleted: false,
     });
     this.plaintexts.set(hash, key);
-    return { key, hash, limitUsd, usageUsd: this.opts.usageOnCreateUsd ?? 0 };
+    const reportedLimit = this.opts.returnedLimitUsd !== undefined ? this.opts.returnedLimitUsd : limitUsd;
+    return { key, hash, limitUsd: reportedLimit, usageUsd: this.opts.usageOnCreateUsd ?? 0 };
   }
 
   /** Visible list membership: live keys, plus dead ones when the list is stale. */
@@ -88,8 +90,13 @@ export class FakeKeyApi {
   async listAllKeys(maxPages: number): Promise<{ entries: FakeKey[]; truncated: boolean }> {
     const all = this.visible();
     const pageSize = Math.max(1, this.opts.pageSize ?? 100);
-    const pages = Math.ceil(all.length / pageSize);
-    if (pages > maxPages) {
+    // Mirror production exactly: exhaustion is proven ONLY by an empty page
+    // fetched within the budget. Data needing exactly maxPages full pages
+    // leaves no budget for that empty proof page — so it is truncation too,
+    // even though every entry "fits". truncated:false requires maxPages-1
+    // full pages (or fewer) plus one empty page inside the budget.
+    const fullPages = all.length === 0 ? 0 : Math.ceil(all.length / pageSize);
+    if (fullPages >= maxPages) {
       return { entries: all.slice(0, maxPages * pageSize), truncated: true };
     }
     return { entries: all, truncated: false };

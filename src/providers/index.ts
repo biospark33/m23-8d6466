@@ -9,7 +9,7 @@
  */
 
 import { FakeDriver } from "./fake-driver.ts";
-import { log, newRequestId } from "../swarmclaw/mcp/stdio-transport.ts";
+import { log, newRequestId } from "../swarmclaw/log.ts";
 import type { ProviderDriver } from "./driver.ts";
 
 export type DriverFactory = () => ProviderDriver;
@@ -121,5 +121,4 @@ registerDriver("fake", () => new FakeDriver());
 
 export * from "./driver.ts";
 export * from "./run-record.ts";
-export * from "./credentials.ts";
 export { FakeDriver } from "./fake-driver.ts";

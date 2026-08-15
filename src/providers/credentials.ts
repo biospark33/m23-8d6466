@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 
-import { log, newRequestId } from "../swarmclaw/mcp/stdio-transport.ts";
+import { log, newRequestId } from "../swarmclaw/log.ts";
 import type { ProviderDriver } from "./driver.ts";
 import type { RunRecordStore } from "./run-record.ts";
 
@@ -39,6 +39,7 @@ export const KEY_ENV_VAR = "OPENROUTER_API_KEY";
 const MICRO_PER_USD = 1_000_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_TRANSPORT_RETRIES = 2;
+const RETRY_BACKOFF_MS = 100;
 /** Verification lists at most 20 pages before failing closed (list-unverified). */
 export const MAX_VERIFY_PAGES = 20;
 
@@ -205,16 +206,23 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
   }
   const name = `${SBX_KEY_PREFIX}${runId}`;
   const res = await timed(ctx, "mint", () => deps.keyApi.createKey(name, microsToUsd(capMicroUsd)));
-  // INV-CRED-1: an uncapped key must never be minted-and-kept
-  if (res.limitUsd === null) {
+  // Record the mint BEFORE judging the returned cap: if the refusal below
+  // fires, a live key exists at the provider, and an UNRECORDED live key is
+  // exactly the orphan the lifecycle exists to prevent — with keyHash in the
+  // record, revokeRunKey (or a re-run) can still reach it.
+  ctx.keyHash = res.hash;
+  deps.store.set(runId, { keyHash: res.hash });
+  // INV-CRED-1: an uncapped key must never be minted-and-kept. The same
+  // refusal covers a malformed limit (NaN/±Infinity/non-positive): a number
+  // that cannot be trusted as a cap is treated as no cap at all.
+  if (res.limitUsd === null || !Number.isFinite(res.limitUsd) || res.limitUsd <= 0) {
     throw new CredentialLifecycleError(
       "uncapped-key",
-      `provider returned a null limit for ${name} despite a ${microsToUsd(capMicroUsd)} USD request`,
+      `provider returned an unusable limit for ${name} despite a ${microsToUsd(capMicroUsd)} USD request`,
       `re-run teardown after revoking by hand: curl -X DELETE .../keys/${res.hash} -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
     );
   }
-  ctx.keyHash = res.hash;
-  deps.store.set(runId, { keyHash: res.hash, limitMicroUsd: usdToMicros(res.limitUsd) });
+  deps.store.set(runId, { limitMicroUsd: usdToMicros(res.limitUsd) });
   return { key: res.key, hash: res.hash };
 }
 
@@ -225,12 +233,15 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
  * `stat` mode, never by echoing the value back.
  */
 function deliverScript(envFile: string): string {
+  // Single quotes are safe AND sufficient: assertEnvFileSafe's charset excludes
+  // every character (space, quote, $, ...) that could escape them. Belt over
+  // braces — the validator is the primary defense, this is the secondary.
   return (
-    `umask 077 && mkdir -p $(dirname ${envFile}) && cat > ${envFile} && ` +
-    `chmod 600 ${envFile} && ` +
+    `umask 077 && mkdir -p "$(dirname '${envFile}')" && cat > '${envFile}' && ` +
+    `chmod 600 '${envFile}' && ` +
     // python3 rather than GNU `stat -c`: the fake driver runs on the host, which
     // may be macOS (BSD stat has no -c); inside a real box either works.
-    `python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode)[-3:])' ${envFile}`
+    `python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode)[-3:])' '${envFile}'`
   );
 }
 
@@ -293,7 +304,13 @@ export async function captureSpend(deps: CredentialDeps, runId: string): Promise
       `re-list by hand with paging: curl 'https://openrouter.ai/api/v1/keys?offset=0' -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
     );
   }
-  const spendMicroUsd = usdToMicros(entry?.usageUsd ?? 0);
+  if (entry === null) {
+    // The key is absent from a fully-enumerated list (revoked out-of-band): its
+    // usage is unobservable, and recording 0 here would be an authoritative-
+    // looking lie. Return the last stored spend untouched.
+    return rec.spendMicroUsd ?? 0;
+  }
+  const spendMicroUsd = usdToMicros(entry.usageUsd);
   deps.store.set(runId, { spendMicroUsd });
   return spendMicroUsd;
 }
@@ -402,8 +419,25 @@ export async function runCredentialLifecycle(deps: CredentialDeps, runId: string
       `re-run the create phase for ${runId} before minting`,
     );
   }
+  // Validate the delivery target BEFORE minting: it is pure config checking,
+  // so a bad envFile must fail while no key exists, not after one is live.
+  assertEnvFileSafe(deps.envFile ?? KEY_ENV_FILE);
   const minted = await mintRunKey(deps, runId);
-  await deliverRunKey(deps, rec.vmName, minted.key);
+  try {
+    await deliverRunKey(deps, rec.vmName, minted.key);
+  } catch (e) {
+    // A minted key must never outlive a failed delivery: the mint and revoke
+    // guarantees must bracket the unhappy path too, or a spend-capable key is
+    // stranded at the provider with nothing to revoke it. Best-effort — the
+    // delivery error remains the reported failure.
+    try {
+      await revokeAndVerify(deps, minted.hash);
+    } catch {
+      // revokeAndVerify's own remediation is lost here; the record still
+      // carries keyHash, so DF2.6's orphan sweep or a manual re-run reaches it.
+    }
+    throw e;
+  }
   await captureSpend(deps, runId);
   await revokeRunKey(deps, runId);
   await verifyRevoked(deps, runId);
@@ -446,6 +480,8 @@ export function openRouterKeyApi(opts: OpenRouterKeyApiOptions = {}): KeyApi {
    * response, never a transport error, and is never retried. POST /keys is
    * deliberately exempt: a timed-out mint may have SUCCEEDED server-side, and
    * retrying would mint a second live key whose predecessor nobody records.
+   * A short backoff separates attempts (never after the last) so a blipped
+   * provider is not hammered three times in a row.
    */
   async function http(method: string, url: string, body?: string): Promise<Response> {
     const attempts = method === "POST" ? 1 : MAX_TRANSPORT_RETRIES + 1;
@@ -461,10 +497,14 @@ export function openRouterKeyApi(opts: OpenRouterKeyApiOptions = {}): KeyApi {
       } catch (e) {
         lastError = e;
       }
+      if (attempt + 1 < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS * (attempt + 1)));
+      }
     }
+    const detail = lastError instanceof Error ? lastError.message : String(lastError);
     throw new CredentialLifecycleError(
       "transport",
-      `${method} ${url} failed after ${attempts} attempt${attempts === 1 ? "" : "s"}: ${(lastError as Error).message}`,
+      `${method} ${url} failed after ${attempts} attempt${attempts === 1 ? "" : "s"}: ${detail}`,
       "check network/provider status, then re-run — no state was changed",
     );
   }
@@ -485,7 +525,17 @@ export function openRouterKeyApi(opts: OpenRouterKeyApiOptions = {}): KeyApi {
       } finally {
         closeSync(fd);
       }
-      return JSON.parse(readFileSync(bodyPath, "utf8")) as Record<string, unknown>;
+      try {
+        return JSON.parse(readFileSync(bodyPath, "utf8")) as Record<string, unknown>;
+      } catch {
+        // Generic message by design: the body may embed provider echoes of
+        // credential material, and a SyntaxError's text is not for logs.
+        throw new CredentialLifecycleError(
+          "response-unparseable",
+          "provider response body was not valid JSON",
+          "re-run; if it repeats, inspect the provider console — no state was changed by this call",
+        );
+      }
     } finally {
       shred(bodyPath);
       rmSync(tmpDir, { recursive: true, force: true });
@@ -496,7 +546,10 @@ export function openRouterKeyApi(opts: OpenRouterKeyApiOptions = {}): KeyApi {
   function shred(path: string): void {
     try {
       const size = statSync(path).size;
-      const fd = openSync(path, "w");
+      // "r+" (not "w"): truncating first would leave a zero-length file behind
+      // if the write then failed — an overwrite pass must not destroy before it
+      // has something to write over the old bytes with.
+      const fd = openSync(path, "r+");
       try {
         writeSync(fd, randomBytes(size));
       } finally {
@@ -551,7 +604,9 @@ export function openRouterKeyApi(opts: OpenRouterKeyApiOptions = {}): KeyApi {
       return {
         key,
         hash,
-        limitUsd: data.limit === undefined ? null : Number(data.limit),
+        // null (unlimited) and absent both stay null; numeric strings convert.
+        // Note the == — Number(null) is 0, which would masquerade as a real cap.
+        limitUsd: data.limit == null ? null : Number(data.limit),
         usageUsd: Number(data.usage ?? 0),
       };
     },
@@ -582,7 +637,9 @@ export function openRouterKeyApi(opts: OpenRouterKeyApiOptions = {}): KeyApi {
     },
 
     async deleteKey(hash) {
-      const response = await http("DELETE", `${baseUrl}/keys/${hash}`);
+      // revokeAndVerify accepts a caller-supplied hash — encode it so any
+      // path-breaking character it carries cannot forge a different endpoint.
+      const response = await http("DELETE", `${baseUrl}/keys/${encodeURIComponent(hash)}`);
       return response.status;
     },
   };

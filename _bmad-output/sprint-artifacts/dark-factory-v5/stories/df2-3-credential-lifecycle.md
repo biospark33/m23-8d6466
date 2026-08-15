@@ -268,9 +268,13 @@ make this behavior real. DF2.2 and DF2.5 consume it; they do not complete it.
   (AC6 test asserts 50 dollars on the wire, 50_000_000 in the record, 0.0081 → 8_100 round-trip).
 - `revokeAndVerify(keyHash)` re-asserts the `sbx-` prefix at the point of deletion (INV-CRED-6)
   and the test proves no DELETE is ever issued for a personal key.
-- 15 new tests in `tests/providers/credentials.test.ts` (all six ACs + invariants + observability);
+- 32 tests in `tests/providers/credentials.test.ts` (all six ACs + invariants + observability,
+  plus review-round additions: orphan-prevention on failed delivery, uncapped/malformed-limit
+  refusal with recorded keyHash, absent-entry captureSpend, fixture pagination boundary, and a
+  fetch-double suite for the production `openRouterKeyApi` client);
   fixtures: `FakeKeyApi` (pagination/404/500/stale-list/zero-usage knobs) and `RecordingDriver`
-  (host+remote argv, stdin presence only — never content).
+  (records the exec argv as passed to the driver — FakeDriver's contract passes it verbatim to
+  Bun.spawn, so it is what the remote `ps` sees; stdin presence only — never content).
 - Deviations: server-side secret injection flag omitted (design §3.5 marked vendor-single-origin
   [VERIFY]; stdin path is the only shipped mechanism, matching INV-CRED-3). Response-body temp
   files (0600, overwrite+unlink shred) implemented in the real client only — the fixture never
@@ -295,7 +299,7 @@ make this behavior real. DF2.2 and DF2.5 consume it; they do not complete it.
 ### Change Log
 
 - 2026-08-15: DF2.3 implemented — credential lifecycle (mint/cap/deliver/revoke/verify-against-list)
-  with 18 tests. Pre-PR self-review (adversarial, bugs-only) surfaced 6 findings, all fixed:
+  with 18 tests (32 after the PR review rounds). Pre-PR self-review (adversarial, bugs-only) surfaced 6 findings, all fixed:
   (1) prefix guard failed OPEN on a truncated list — `getKeyEntry` now reports `truncated`
   separately from `entry === null` and both the INV-CRED-6 re-assert and `captureSpend` fail
   closed on it; (2) page-size assumption removed — the OpenRouter list walk stops only on an
@@ -309,3 +313,22 @@ make this behavior real. DF2.2 and DF2.5 consume it; they do not complete it.
   The pre-existing Bun realpathSync-on-FIFO hang in the phase-engine manifest loader that this
   story's debugging surfaced landed via the companion DF1.2 commit (03e21f5, same branch).
   Record left open for DF2.5.
+- 2026-08-15: PR review round 2 (Sift/Gemini) — 13 findings addressed, 1 rejected.
+  Fixed: (a) orphan key on failed delivery — `runCredentialLifecycle` validates `envFile`
+  BEFORE minting and wraps delivery in a best-effort compensating `revokeAndVerify`;
+  (b) uncapped/malformed mint limit — keyHash is persisted BEFORE the INV-CRED-1 refusal
+  (a refused-but-live key must stay recorded), and 0/NaN/±Infinity limits are refused like
+  null; `data.limit == null` guards the `Number(null) === 0` trap; (c) `captureSpend` on an
+  absent-but-enumerable entry records nothing and returns the last stored spend (no
+  authoritative-looking 0); (d) providers decoupled from the MCP transport — log sink moved
+  to transport-neutral `src/swarmclaw/log.ts`, re-exported by stdio-transport for compat;
+  (e) deliverScript single-quotes every expansion (belt over the `assertEnvFileSafe` braces);
+  (f) `parseBody` wraps JSON.parse as `response-unparseable` with a body-free message;
+  (g) shred opens `r+` (no truncate-before-overwrite); (h) transport retries back off 100ms
+  linearly and format non-Error rejections readably; (i) `deleteKey` URL-encodes the hash;
+  (j) FakeKeyApi truncation boundary mirrors production (exactly-maxPages full pages ⇒
+  truncated — only a budgeted empty page proves exhaustion) and imports MAX_VERIFY_PAGES;
+  (k) 6 client-level fetch-double tests; (l) this record's test count corrected to 32.
+  Rejected: "no null check on store.get" — `RunRecordStore.get` returns `RunRecord` (never
+  null) and throws its own descriptive error for a missing record; the suggested guard is
+  unreachable.

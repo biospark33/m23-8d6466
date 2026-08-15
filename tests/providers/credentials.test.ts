@@ -14,10 +14,11 @@ import { join } from "node:path";
 import { createRun } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
-import { setLogSink, type LogEntry } from "../../src/swarmclaw/mcp/stdio-transport.ts";
+import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import {
   SBX_KEY_PREFIX,
   CredentialLifecycleError,
+  captureSpend,
   defaultKeyCapMicroUsd,
   deliverRunKey,
   mintRunKey,
@@ -401,6 +402,213 @@ describe("DF2.3 credential lifecycle", () => {
     for (const t of timings) {
       expect(steps.some((l) => l[t] !== undefined)).toBeTrue();
     }
+  });
+
+  test("orphan prevention: a failed delivery after a successful mint is compensated by revoke+verify", async () => {
+    const runId = "df23-deliver-orphan";
+    await makeRun(runId);
+    // exec fails for every call after the box-create phase: the mint succeeded,
+    // the delivery cannot reach the box.
+    const failing = Object.create(recording) as typeof recording;
+    failing.exec = () => Promise.reject(new Error("box unreachable"));
+    let err: unknown;
+    try {
+      await runCredentialLifecycle(deps({ driver: failing }), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe("box unreachable");
+    // the minted key was revoked and verified absent — not stranded live
+    const hash = store.get(runId).keyHash as string;
+    expect(hash).toBeString();
+    const list = await api.listAllKeys(20);
+    expect(list.entries.some((k) => k.hash === hash)).toBeFalse();
+    expect(list.truncated).toBeFalse();
+  });
+
+  test("orphan prevention: an invalid envFile is refused by the lifecycle BEFORE any mint", async () => {
+    const runId = "df23-envfile-early";
+    await makeRun(runId);
+    let err: unknown;
+    try {
+      await runCredentialLifecycle(deps({ envFile: "app/.env; touch /tmp/pwned" }), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("env-file-invalid");
+    expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
+    expect(store.get(runId).keyHash).toBeUndefined();
+  });
+
+  test("INV-CRED-1: an uncapped mint is refused AND its keyHash stays recorded for revoke", async () => {
+    api = new FakeKeyApi({ returnedLimitUsd: null });
+    const runId = "df23-uncapped";
+    await makeRun(runId);
+    let err: unknown;
+    try {
+      await runCredentialLifecycle(deps(), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("uncapped-key");
+    // the refused-but-live key is RECORDED — an unrecorded live key is the orphan
+    const hash = store.get(runId).keyHash;
+    expect(hash).toBeString();
+    // and the record is enough to reach it: revokeRunKey reads keyHash
+    await revokeAndVerify(deps(), hash as string);
+    expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeFalse();
+  });
+
+  test("INV-CRED-1: a malformed limit (0/NaN) is refused like an uncapped one", async () => {
+    for (const [i, bad] of [0, Number.NaN].entries()) {
+      api = new FakeKeyApi({ returnedLimitUsd: bad });
+      const runId = `df23-badlimit-${i}`;
+      await makeRun(runId);
+      let err: unknown;
+      try {
+        await mintRunKey(deps(), runId);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(CredentialLifecycleError);
+      expect((err as CredentialLifecycleError).code).toBe("uncapped-key");
+      expect(store.get(runId).keyHash).toBeString();
+    }
+  });
+
+  test("captureSpend on a key absent from a fully-enumerated list records nothing, returns last spend", async () => {
+    const runId = "df23-absent";
+    await makeRun(runId);
+    const hash = await mintFor(runId);
+    // revoked out-of-band: absent from the list, but the list IS enumerable
+    await api.deleteKey(hash);
+    const spend = await captureSpend(deps(), runId);
+    expect(spend).toBe(0); // nothing was ever stored — no authoritative 0 written
+    expect(store.get(runId).spendMicroUsd).toBeUndefined();
+  });
+
+  test("fixture fidelity: exactly-maxPages full pages is truncation — only a budgeted empty page proves exhaustion", async () => {
+    const boundary = new FakeKeyApi({ pageSize: 1 });
+    for (let i = 0; i < 4; i++) await boundary.createKey(`${SBX_KEY_PREFIX}b-${i}`, 1);
+    const exact = await boundary.listAllKeys(4);
+    expect(exact.truncated).toBeTrue(); // 4 full pages, no budget for the empty proof page
+    expect(exact.entries).toHaveLength(4);
+    const roomy = await boundary.listAllKeys(5);
+    expect(roomy.truncated).toBeFalse();
+    expect(roomy.entries).toHaveLength(4);
+  });
+});
+
+describe("openRouterKeyApi (production client, fetch double)", () => {
+  const realFetch = globalThis.fetch;
+
+  /** Minimal fetch double — Bun's typeof fetch demands preconnect etc. */
+  function setFetch(fn: (input?: unknown) => Promise<Response>): void {
+    globalThis.fetch = fn as unknown as typeof fetch;
+  }
+
+  function jsonResponse(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), { status });
+  }
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    // delete is the only correct way to restore "not set" for an env probe.
+    // biome-ignore lint/performance/noDelete: see above
+    delete process.env.QDS_TEST_PROVISIONING_KEY;
+  });
+
+  function client(): ReturnType<typeof openRouterKeyApi> {
+    process.env.QDS_TEST_PROVISIONING_KEY = "prov-key";
+    return openRouterKeyApi({ provisioningKeyEnv: "QDS_TEST_PROVISIONING_KEY" });
+  }
+
+  test("POST /keys is never retried on transport failure — one attempt only", async () => {
+    const api = client();
+    let calls = 0;
+    setFetch(async () => {
+      calls++;
+      throw new Error("connection reset");
+    });
+    let err: unknown;
+    try {
+      await api.createKey("sbx-x", 50);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("transport");
+    expect(calls).toBe(1);
+  });
+
+  test("GET retries transport failures then succeeds; non-Error rejections yield readable text", async () => {
+    const api = client();
+    let calls = 0;
+    setFetch(async () => {
+      calls++;
+      if (calls < 3) throw "network glitch"; // non-Error rejection value
+      return jsonResponse({ data: [] });
+    });
+    const list = await api.listAllKeys(20);
+    expect(list.truncated).toBeFalse();
+    expect(list.entries).toHaveLength(0);
+    expect(calls).toBe(3);
+  });
+
+  test("pagination walks to the EMPTY page and advances offset by page length", async () => {
+    const api = client();
+    const offsets: number[] = [];
+    setFetch(async (input: unknown) => {
+      const url = new URL(String(input));
+      offsets.push(Number(url.searchParams.get("offset")));
+      const page = offsets.length;
+      return jsonResponse(page === 1 ? { data: [{ hash: "h1", name: "sbx-a", usage: 0.5 }] } : { data: [] });
+    });
+    const list = await api.listAllKeys(20);
+    expect(list.truncated).toBeFalse();
+    expect(list.entries).toHaveLength(1);
+    expect(offsets).toEqual([0, 1]);
+  });
+
+  test("limit normalization: null stays null, numeric strings convert, usage passes through", async () => {
+    for (const [wire, expected] of [[null, null], ["50", 50], [12.5, 12.5]] as const) {
+      const api = client();
+      setFetch(async () =>
+        jsonResponse({ data: { key: "sk-or-1", hash: "h1", limit: wire, usage: 0.0081 } }));
+      const res = await api.createKey("sbx-x", 50);
+      expect(res.limitUsd).toBe(expected);
+      expect(res.usageUsd).toBe(0.0081);
+    }
+  });
+
+  test("a non-JSON body fails as response-unparseable without leaking body text", async () => {
+    const api = client();
+    setFetch(async () => new Response("<html>secret-key-echo</html>", { status: 200 }));
+    let err: unknown;
+    try {
+      await api.createKey("sbx-x", 50);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    const cle = err as CredentialLifecycleError;
+    expect(cle.code).toBe("response-unparseable");
+    expect(cle.message).not.toContain("secret-key-echo");
+  });
+
+  test("deleteKey URL-encodes the hash as a single path segment", async () => {
+    const api = client();
+    let deletedPath = "";
+    setFetch(async (input: unknown) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes("/keys/")) deletedPath = `/${url.pathname.split("/").pop()}`;
+      return jsonResponse({ data: [] });
+    });
+    await api.deleteKey("a b/c?x=1");
+    expect(deletedPath).toBe("/a%20b%2Fc%3Fx%3D1");
   });
 });
 

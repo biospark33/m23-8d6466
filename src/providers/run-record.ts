@@ -33,7 +33,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { log, newRequestId } from "../swarmclaw/mcp/stdio-transport.ts";
+import { log, newRequestId } from "../swarmclaw/log.ts";
 
 // ---------------------------------------------------------------------------
 // Schema
