@@ -70,8 +70,19 @@ export const DEFAULT_EXEC_TIMEOUT_MS = 120_000;
  */
 export function sshCommand(defaultTimeoutMs: number = DEFAULT_EXEC_TIMEOUT_MS): ExeCommand {
   return async (argv, opts) => { /* dp:ok a rejection IS the error contract: non-zero exits are content-checked below, spawn errors propagate through the registry proxy's error log */
+    // Headless host-key handling (official exe.dev skill + docs/faq/host-key):
+    // first contact with a fresh `<vm>.exe.xyz` prompts for a host key, and with
+    // stdin ignored the prompt is unreadable — every exec to a NEW VM would die
+    // "Host key verification failed" (exit 255). TOFU via accept-new is the
+    // skill's own recommendation for non-interactive agents. (Fingerprint
+    // pinning — SHA256:JJOP/lwiBGOMilfONPWZCXUrfK154cnJFXcqlsi6lPo — is
+    // deployment hardening, an ssh_config/known_hosts concern, not the driver's.)
+    const cmd =
+      argv[0] === "ssh" || argv[0] === "scp"
+        ? [argv[0], "-o", "StrictHostKeyChecking=accept-new", ...argv.slice(1)]
+        : argv;
     const proc = Bun.spawn({
-      cmd: argv,
+      cmd,
       env: process.env,
       stdin: opts?.stdin === undefined ? "ignore" : new TextEncoder().encode(opts.stdin),
       stdout: "pipe",
