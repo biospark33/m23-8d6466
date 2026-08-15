@@ -1,8 +1,10 @@
 /**
- * Structured-log primitives (CC-9) — JSONL log sink + request ids.
+ * Structured JSONL logging (CC-9) — the shared, transport-neutral sink.
  *
- * Lifted out of mcp/stdio-transport.ts so non-MCP modules (the providers
- * store, its CLI) can log without importing an MCP transport.
+ * Lives outside mcp/stdio-transport.ts so non-MCP modules (the providers
+ * store, its CLI, run-record) can log without reaching into the MCP subsystem:
+ * the dependency direction must stay providers → log, never providers →
+ * transport. The stdio transport re-exports these for its existing consumers.
  */
 
 export interface LogEntry {
@@ -31,7 +33,12 @@ function logMuted(): boolean {
 /** Sink is overridable so tests can capture logs deterministically. */
 export let logSink: (entry: LogEntry) => void = (entry) => {
   if (logMuted()) return;
-  process.stdout.write(`${JSON.stringify(entry)}\n`);
+  try {
+    process.stdout.write(`${JSON.stringify(entry)}\n`);
+  } catch {
+    // stdout closed (EPIPE / client disconnect / stream destroyed): a log line
+    // must never crash the process or its caller — drop the line.
+  }
 };
 
 export function setLogSink(sink: (entry: LogEntry) => void): () => void {
@@ -47,5 +54,7 @@ export function log(entry: LogEntry): void {
 }
 
 export function newRequestId(): string {
+  // Node's built-in WebCrypto (≥14.17 / ≥16.5 LTS) — no feature detection:
+  // the toolchain floor (bun, modern node) always provides it.
   return crypto.randomUUID();
 }
