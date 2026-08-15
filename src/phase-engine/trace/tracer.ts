@@ -95,6 +95,15 @@ export function coherentStartedAt(
  * names and defaults; a drift between them breaks downstream log parsing.
  * Envelope fields (level, event, correlation ids, code/message placement)
  * are sink-specific and deliberately not shared.
+ *
+ * Key-naming convention (pinned by the DF1.4 story spec — do not "fix"):
+ * log-payload fields are camelCase (`agentId`, `durationMs`, matching the
+ * spec's `{ requestId, phase, agentId, table, statement, timestamp,
+ * durationMs }` failure-log shape), EXCEPT the sub-timings `jsonl_write_ms`
+ * and `sqlite_insert_ms`, which the spec names snake_case. snake_case is the
+ * DB-column convention (`request_id`, `agent_id`, `duration_ms` in the
+ * seven-table schema), not the log convention — the two are intentionally
+ * distinct contracts.
  */
 export function serializeTraceError(err: TracerError): {
   phase: string | null;
