@@ -33,7 +33,12 @@ function logMuted(): boolean {
 /** Sink is overridable so tests can capture logs deterministically. */
 export let logSink: (entry: LogEntry) => void = (entry) => {
   if (logMuted()) return;
-  process.stdout.write(`${JSON.stringify(entry)}\n`);
+  try {
+    process.stdout.write(`${JSON.stringify(entry)}\n`);
+  } catch {
+    // stdout closed (EPIPE / client disconnect / stream destroyed): a log line
+    // must never crash the process or its caller — drop the line.
+  }
 };
 
 export function setLogSink(sink: (entry: LogEntry) => void): () => void {

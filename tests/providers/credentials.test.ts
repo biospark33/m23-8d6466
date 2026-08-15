@@ -311,7 +311,7 @@ describe("DF2.3 credential lifecycle", () => {
     for (const bad of ["app/.env; touch /tmp/pwned", "app/$(whoami).env", "../../etc/passwd", ""]) {
       let err: unknown;
       try {
-        await deliverRunKey(deps({ envFile: bad }), runId, minted.key);
+        await deliverRunKey(deps({ envFile: bad }), "vm-df23-envfile", minted.key);
       } catch (e) {
         err = e;
       }
@@ -555,6 +555,26 @@ describe("openRouterKeyApi (production client, fetch double)", () => {
     const list = await api.listAllKeys(20);
     expect(list.truncated).toBeFalse();
     expect(list.entries).toHaveLength(0);
+    expect(calls).toBe(3);
+  });
+
+  test("GET exhausts retries on a persistent non-Error rejection, message keeps the raw text", async () => {
+    const api = client();
+    let calls = 0;
+    setFetch(async () => {
+      calls++;
+      throw "network glitch"; // non-Error rejection value, every attempt
+    });
+    let err: unknown;
+    try {
+      await api.listAllKeys(20);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("transport");
+    expect((err as CredentialLifecycleError).message).toContain("network glitch");
+    expect((err as CredentialLifecycleError).message).toContain("3 attempts");
     expect(calls).toBe(3);
   });
 
