@@ -1,3 +1,7 @@
+---
+baseline_commit: f7af48e5b49f5e8d5e1dc22211440bae4083f626
+---
+
 # DF1.4: SQLite Trace Store (7-Table Schema, WAL, Rowid-Cursor Reads)
 
 **Story Points:** 4
@@ -202,37 +206,145 @@ these rows to a browser is DF4.1; this story's reader is an in-process API.
 
 ## Definition of Done
 
-- [ ] **Impl:** seven tables created with the DDL in Technical Notes, `phases.status DEFAULT 'fail'`,
+- [x] **Impl:** seven tables created with the DDL in Technical Notes, `phases.status DEFAULT 'fail'`,
       `request_id` on every table.
-- [ ] **Impl:** dual write — JSONL appended and flushed before the SQLite insert, per event.
-- [ ] **Impl:** additive migration list applied at init; reader `optionalColumn` probe re-runs while
+- [x] **Impl:** dual write — JSONL appended and flushed before the SQLite insert, per event.
+- [x] **Impl:** additive migration list applied at init; reader `optionalColumn` probe re-runs while
       the column is missing and latches once seen.
-- [ ] **Contract:** rowid-cursor reader returns `{ rows, cursor, hasMore }`, ordered by rowid, limit
+- [x] **Contract:** rowid-cursor reader returns `{ rows, cursor, hasMore }`, ordered by rowid, limit
       clamped to `MAX_LIMIT = 1000` / default 500.
-- [ ] **Integration:** DF1.1 lifecycle hooks and DF1.2 gate/envelope records land in their tables;
+- [x] **Integration:** DF1.1 lifecycle hooks and DF1.2 gate/envelope records land in their tables;
       `processes_end_all` runs on session finish.
-- [ ] **Security:** db path confined to the run data boundary with `0600`/`0700` modes and a hard
+- [x] **Security:** db path confined to the run data boundary with `0600`/`0700` modes and a hard
       open failure outside it (INV-1); reader connection is genuinely read-only (INV-3).
-- [ ] **Test (WAL/SHM sidecar permissions, INV-1):** a write that forces WAL/SHM sidecars to
+- [x] **Test (WAL/SHM sidecar permissions, INV-1):** a write that forces WAL/SHM sidecars to
       exist (`trace.db-wal`, `trace.db-shm`) → both sidecars, `trace.db`, and the JSONL file all
       assert mode `0600`; an implementation that mode-checks `trace.db` alone and never triggers
       or inspects the sidecars MUST fail this test.
-- [ ] **Test (unit):** `gate_results` round-trips both `violations_json` **and** `checks_json`, and an
+- [x] **Test (unit):** `gate_results` round-trips both `violations_json` **and** `checks_json`, and an
       invalid envelope is retained with `valid = 0` — an implementation that stores violations only,
       or drops invalid attempts, MUST fail this test.
-- [ ] **Test (prompt round-trip):** a `prompt` event for each role round-trips through `events` —
+- [x] **Test (prompt round-trip):** a `prompt` event for each role round-trips through `events` —
       written with `{ role: "system" | "user", agent, phase_id, text }` and read back byte-identical
       by `readEvents` for that `requestId`, ordered with the other events by rowid. An implementation
       routing prompts to a side table or dropping `role` MUST fail this test.
-- [ ] **Test (schema drift):** open a db fixture missing a migrated column → column added, existing
+- [x] **Test (schema drift):** open a db fixture missing a migrated column → column added, existing
       rows intact, reader returns real values after the ALTER lands mid-process (not NULL forever).
-- [ ] **Test (index DDL):** schema-init applies an additive `CREATE UNIQUE INDEX IF NOT EXISTS` alongside `ADD COLUMN` migrations; re-running init on an already-indexed db is a no-op (DF1.8's `sessions(repo_slug, request_id)` index).
-- [ ] **Test (degraded write):** SQLite insert fails → the JSONL line is already on disk, a structured
+- [x] **Test (index DDL):** schema-init applies an additive `CREATE UNIQUE INDEX IF NOT EXISTS` alongside `ADD COLUMN` migrations; re-running init on an already-indexed db is a no-op (DF1.8's `sessions(repo_slug, request_id)` index).
+- [x] **Test (degraded write):** SQLite insert fails → the JSONL line is already on disk, a structured
       error is surfaced, and the run continues; db path outside the data boundary → open refused.
-- [ ] **Test (e2e demo — MANDATORY):** run the two-phase pipeline of the E2E Slice and capture
+- [x] **Test (e2e demo — MANDATORY):** run the two-phase pipeline of the E2E Slice and capture
       `trace.db` plus a two-page rowid-cursor read as artifacts, showing the killed phase reading
       `status = 'fail'` and its `processes` row closed.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Implementation Plan (as executed)
+
+Test-first TypeScript port of SSSF's tracer (reference-only per D10; mechanics
+lifted from `~/reference-repos/super-simple-software-factory` `tracer.py:17-136`
+and `VIZ/server/db.ts:77-124, 362-384`, `adw_id`→`request_id` throughout):
+
+1. **Contract layer** — trace types appended to `src/phase-engine/types.ts`
+   (DF1.4 region only; no sibling declaration touched).
+2. **RED** — three suites authored first (migrations / tracer / reader, 47 tests).
+3. **GREEN** — `trace/schema.ts` (7-table DDL + `SCHEMA_INDEX_DDL`),
+   `trace/migrations.ts` (append-only `MIGRATIONS`, SSSF-ported list),
+   `trace/tracer.ts` (WAL writer, JSONL-first dual write, boundary refusal,
+   0700/0600 modes), `trace/reader.ts` (readonly, journal-mode assert-not-set,
+   optionalColumn probe with latch, rowid-cursor paging).
+4. **Wiring** — `trace/journal-bridge.ts` `TracingJournal` decorates the
+   `PhaseJournal` port (journal.ts header's reserved seam): every op delegates
+   to the inner journal AND forwards to the tracer; tracer failures never break
+   the run. `scripts/pipeline-run.ts` claims the data dir (0700), opens the
+   tracer before phase 1, records process spawn/exit, ends all processes on
+   SIGTERM/SIGINT/finish, records envelopes when a phase value is one.
+   `phase.ts` untouched (DF1.3 lane safety).
+
+### Deviation Notes
+
+- **No blanket `commandGate` in the runner.** Wiring `commandGate` onto every
+  code phase made a non-zero command exit fail its gate → contradicts DF1.2
+  AC4 ("exit code is data, not a phase verdict") and broke three DF1.1 tests.
+  Gates compose at the caller via `gatedBody`; `TracingJournal.writeGateEvent`
+  lands their results in `gate_results` (covered by wiring + unit tests).
+- **Envelope rows:** `recordEnvelope` + retention are unit-tested; the engine
+  seam records an envelope when a phase value is one, but no DF1.1/DF1.2 body
+  produces envelopes yet (DF1.6 lands the spawn seam that will).
+- **Limit semantics:** non-positive/non-finite limit = default 500 (AC4
+  "default 500"), positive limits truncate-then-clamp to 1000.
+- **Reader probe breadth:** optionalColumn probes every non-key SELECT column
+  (reference probes a fixed set); DF1.4's drifted-fixture tests require NULL
+  substitution for any missing column.
+
+### Debug Log
+
+- Wave-agent churn: schema.ts clobbered twice by concurrent migration-agent
+  rewrites (re-export lost) — resolved by serial ownership; migration tests had
+  three authoring bugs (IF NOT EXISTS no-op vs drift fixture, sqlite_autoindex
+  counting, a NOT-NULL ALTER that bun's SQLite accepts on empty tables) — fixed
+  to deterministic forms (DROP-then-trim, `name NOT LIKE 'sqlite_%'`,
+  duplicate-column conflict).
+- Evidence artifact originally written to a deleted tmpdir; now durable under
+  `_bmad-output/evidence/df1-4/` with a WAL checkpoint before copy.
+
+### Completion Notes
+
+- Local gates: 55/55 trace suites (8 migrations + 13 tracer + 26 reader + 8
+  wiring), 302/302 phase-engine dir, tsc 0 errors, biome clean on all changed
+  files. Full repo: 3 pre-existing env failures (lean-worker-benchmark
+  OPENROUTER_API_KEY, roster-check live-probe/QDS_PI_CATALOG_DIR) — files
+  untouched by this story, failing on main-era code paths.
+- E2E demo artifacts: `_bmad-output/evidence/df1-4/e2e-two-phase-trace.db`
+  (1 session, 2 phases — killed phase `status='fail'`, 2 processes with
+  `ended_at` set) + `two-page-read.json` (rowid-ordered two-page read).
+- Reuse mandate honored: schema DDL, migration list, WAL pragmas, JSONL-first
+  dual write, reader pragmas/probe/paging all lifted from the SSSF reference
+  implementation and re-expressed test-first in TypeScript (D10: no vendored
+  Python).
+
+### File List
+
+- `src/phase-engine/trace/schema.ts` (new)
+- `src/phase-engine/trace/migrations.ts` (new)
+- `src/phase-engine/trace/tracer.ts` (new)
+- `src/phase-engine/trace/reader.ts` (new)
+- `src/phase-engine/trace/journal-bridge.ts` (new)
+- `src/phase-engine/types.ts` (DF1.4 region appended)
+- `src/phase-engine/index.ts` (trace exports)
+- `src/phase-engine/gates/library.ts` (one-line re-export of `looksLikeEnvelope`)
+- `scripts/pipeline-run.ts` (tracer wiring)
+- `tests/phase-engine/trace/migrations.test.ts` (new)
+- `tests/phase-engine/trace/tracer.test.ts` (new)
+- `tests/phase-engine/trace/reader.test.ts` (new)
+- `tests/phase-engine/trace/wiring.test.ts` (new)
+- `_bmad-output/evidence/df1-4/e2e-two-phase-trace.db` (new, artifact)
+- `_bmad-output/evidence/df1-4/two-page-read.json` (new, artifact)
+
+### Review Findings (BMAD code review round 4, 2026-08-15)
+
+- [x] [Review][Patch] promotePhase upsert clobbers settled `error` via `error = excluded.error` (null) [src/phase-engine/trace/tracer.ts] — fixed: ON CONFLICT now `error = COALESCE(excluded.error, phases.error)`, `ended_at = COALESCE(excluded.ended_at, phases.ended_at)`; 2 regression tests
+- [x] [Review][Patch] Observability contract: failure logs missing `phase`, `agentId`, `timestamp`, `durationMs`, `jsonl_write_ms`, `sqlite_insert_ms` [tracer.ts + journal-bridge.ts + scripts/pipeline-run.ts] — fixed: TracerError carries the fields, emitTraceError fills defaults (report-0 rule), trace() times JSONL write + SQLite insert, both sinks serialize the full shape; contract test added
+- [x] [Review][Patch] Module-scope `process.stderr.on("error")` lacks contract documentation of process-wide effect [journal-bridge.ts] — fixed: comment states the process-wide scope as deliberate AC5 defense
+- [x] [Review][Patch] Tracer constructor leaks open db handle when openWriter throws after `this.db` assignment [tracer.ts] — fixed: constructor closes db on openWriter failure, rethrows
+- [x] [Review][Patch] pipeline-run comment overclaims "tracer never throws SQLite failures to the run" — open-time failures fatal by design [scripts/pipeline-run.ts] — fixed: comment states both contracts (per-write non-fatal, open-time fatal INV-1/INV-5)
+- [x] [Review][Patch] Timestamp-coherence rule duplicated between tracer.ts trace() and journal-bridge.ts promotePhase [tracer.ts] — fixed: shared `coherentStartedAt()` exported from tracer.ts, used by both
+- [x] [Review][Patch] recordProcess accepts pid ≤ 0 / non-integer [tracer.ts] — fixed: INVALID_INPUT guard, test added
+- [x] [Review][Patch] recordEnvelope / recordGateResult bind `attempt` without finite-number normalization [tracer.ts] — fixed: Math.trunc + finite check, degrade to 1
+- [x] [Review][Patch] journal-bridge.ts onTraceError malformed brace line [journal-bridge.ts] — fixed in rewrite
+
+24 findings dismissed as noise/false-positive after code verification (notably: Sift's `started_at` overwrite claim — ON CONFLICT never touches `started_at`; sessions column-count mismatch; `-Infinity` cursor bypass; `processesEndAll` double-stamp; circular-payload crash claims — all stringify sites guarded; missing boundary-refusal test — exists at tracer.test.ts:336; migrations Object.freeze redundancy — `as const` is compile-time only).
+
+Gates after round 4: 71/71 trace suites, 318/318 phase-engine, tsc clean, biome clean on changed files.
+
+### Change Log
+
+- 2026-08-15: BMAD review round 4 (3 adversarial layers + Sift round-4 + orchestrator
+  verification) — 9 fixed, 24 dismissed with code-verified rationale. Key fixes:
+  upsertPhase error/ended_at preservation via COALESCE, observability-contract fields
+  (phase/agentId/timestamp/durationMs/jsonl_write_ms/sqlite_insert_ms) through
+  TracerError → both sinks, constructor db-leak guard on failed open, shared
+  coherentStartedAt() helper, recordProcess pid guard, attempt normalization.
+- 2026-08-15: DF1.4 implemented — 7-table SQLite trace store, WAL writer with
+  JSONL-first dual write, additive migrations + index DDL, readonly
+  rowid-cursor reader, PhaseJournal bridge wiring, e2e demo artifacts.

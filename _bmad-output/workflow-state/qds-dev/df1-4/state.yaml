@@ -1,0 +1,29 @@
+story: df1-4
+story_key: df1-4
+title: SQLite Trace Store (7-Table Schema, WAL, Rowid-Cursor Reads)
+phase: complete-pr-113
+mode: standard
+track: A
+branch: feature/df1-4-sqlite-trace-store
+branch_convention: {prefix: feature/, base: main, target: main}
+worktree: .claude/worktrees/df1-4
+deps: [DF1.1 done, DF1.2 done]
+team: partner on DF1.3 in separate worktree (/Users/steve/QDS-Factory, feature/df1-3-dual-retry-discipline); no remote branches pushed; types.ts append-only regions both sides
+research:
+  confidence: 0.95
+  tracks_done: [A-context7, B-codebase, C-examples(v2), D-specs, E-deps, F-crosstrack]
+  key_findings:
+    - "PhaseJournal port (journal.ts:47) = chokepoint; header grants DF1.4 storage swap behind 4 ops"
+    - "No lifecycle hook API exists; tracer wiring must be added (decorating PhaseJournal or RunOptions)"
+    - "gate events concrete shape at library.ts:265-277 (GateEvent open index type is de-facto contract)"
+    - "envelope persisted shape = Envelope (kind/label/status/summary/outputTail...); agent/output_type/valid/attempt are DF1.4 trace-layer names"
+    - "No token usage producer exists; persist timings only"
+    - "0700 dir claim pattern: run-record.ts:365-412 (mkdir->chmod->verify + O_EXCL probe)"
+    - "realpath containment: manifest.ts assertBeneath/realpathNoOpen; no shared helper; FIFO-safe realpath required"
+    - "redactSecrets + sanitizeForMessage mandatory on persisted strings"
+    - "bun:sqlite: readonly option, db.run -> {lastInsertRowid}, $named params, PRAGMA journal_mode=WAL; busy_timeout ms; table_info shape verify empirically"
+    - "reference impl verified: ~/reference-repos/super-simple-software-factory .../adw_modules/tracer.py:17-136 + visualizer/server/db.ts:77-124,362-384"
+    - "tests: bun:test, mkdtemp+realpathSync, QDS_RUN_ROOT env, seq marker dirs, process.execPath not 'bun'"
+    - "review lessons: charset escapes U+2028..., Windows compat, dead fallbacks, temp-dir leaks, stale evidence"
+guardrail_log: []
+updated: 2026-08-15 complete

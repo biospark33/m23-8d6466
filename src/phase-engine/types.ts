@@ -289,3 +289,84 @@ export interface AgentEndEvent {
   contextTokens: number;
   contextWindow: number;
 }
+
+// ---------------------------------------------------------------------------
+// DF1.4 region: trace-layer types. Append-only — DF1.4 adds the event-type
+// union (including `prompt`), the trace row shapes, and the reader's
+// cursor/page types. No sibling story's declaration is edited here.
+// ---------------------------------------------------------------------------
+
+/** Event types the trace store persists (spec: DF1.4 Technical Notes). */
+export type TraceEventType =
+  | "phase_start"
+  | "agent_start"
+  | "prompt"
+  | "tool_call"
+  | "handoff"
+  | "gate_pass"
+  | "gate_fail"
+  | "log"
+  | "agent_end"
+  | "phase_end"
+  | "error";
+
+/**
+ * Payload of a `prompt` event — the single owner of compiled-prompt
+ * persistence. `text` is full client source code and is bound by INV-1.
+ */
+export interface PromptEventPayload {
+  role: "system" | "user";
+  agent: string;
+  phase_id: string;
+  text: string;
+}
+
+/** Input to `Tracer.trace()` — dual-written JSONL-first, then SQLite. */
+export interface TraceEventInput {
+  requestId: string;
+  phaseId?: string;
+  parentId?: string;
+  type: TraceEventType;
+  name: string;
+  payloadJson?: string;
+  tokens?: number;
+  startedAt?: string;
+  endedAt?: string;
+}
+
+/** A row of `events` as returned by the reader. */
+export interface TraceEventRow {
+  rowid: number;
+  event_id: string;
+  request_id: string;
+  phase_id: string | null;
+  parent_id: string | null;
+  type: TraceEventType;
+  name: string;
+  payload_json: string | null;
+  tokens: number | null;
+  started_at: string | null;
+  ended_at: string | null;
+}
+
+/** One bounded page of `events` rows, rowid-ordered (AC4). */
+export interface EventPage {
+  rows: TraceEventRow[];
+  cursor: number;
+  hasMore: boolean;
+}
+
+/** A row of `sessions` as returned by the reader. */
+export interface TraceSessionRow {
+  request_id: string;
+  request: string | null;
+  status: string | null;
+  engineer: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_ms: number | null;
+  total_tokens: number | null;
+  total_cost: number | null;
+  pipeline_name: string | null;
+  archived: number | null;
+}

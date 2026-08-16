@@ -63,6 +63,7 @@ export {
   filesNonEmpty,
   gatedBody,
   jsonParses,
+  looksLikeEnvelope,
   verdictConsistent,
   type Gate,
   type GateContext,
@@ -70,3 +71,17 @@ export {
 } from "./gates/library.ts";
 export { GateReport, type GateCheck } from "./gates/report.ts";
 export { GATE_NOTE_TAIL_CHARS, commandGate, type CommandGateOptions } from "./gates/command-gate.ts";
+// DF1.4: trace store — writer, reader, and journal bridge
+export {
+  Tracer,
+  TracerError,
+  serializeTraceError,
+  type TracerOptions,
+} from "./trace/tracer.ts";
+export {
+  openTraceReader,
+  MAX_LIMIT,
+  DEFAULT_LIMIT,
+  type TraceReader,
+} from "./trace/reader.ts";
+export { TracingJournal } from "./trace/journal-bridge.ts";
