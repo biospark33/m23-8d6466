@@ -567,6 +567,76 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     const e = result.assertions.find((a) => a.item === "E");
     expect(e?.ok).toBe(true);
   }, 60_000);
+
+  test("round-4 regression: E rejects non-finite and boolean credit values (NaN passes isinstance; NaN <= 0 is false)", async () => {
+    // python json.load accepts bare NaN, and isinstance(NaN, (int, float)) is
+    // True — so {"limit": NaN} sailed past the old numeric check and NaN <= 0
+    // never fired (round-4 review). bool is an int subclass in python, so a
+    // JSON true limit computed remaining = 1. All four shapes must now fail E.
+    const cases: Array<{ name: string; rawBody: string; note: RegExp }> = [
+      { name: "gate-e-nan-limit", rawBody: '{"data":{"limit":NaN,"usage":0}}', note: /limit is not a finite number/ },
+      { name: "gate-e-nan-usage", rawBody: '{"data":{"limit":20,"usage":NaN}}', note: /usage is not a finite number/ },
+      { name: "gate-e-bool-limit", rawBody: '{"data":{"limit":true,"usage":0}}', note: /limit is not a finite number/ },
+      { name: "gate-e-bool-usage", rawBody: '{"data":{"limit":20,"usage":true}}', note: /usage is not a finite number/ },
+    ];
+    for (const c of cases) {
+      const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+      const box = await makeBox(fake, driver, c.name, originDir, rosterDir);
+      // keyRawBody, not keyBody: JSON.stringify turns NaN into null — the raw
+      // knob is the only way to serve a bare NaN through the fake substrate.
+      fake.configure(box.vm, { keyRawBody: c.rawBody });
+      deliverKey(fake, box.vm);
+
+      const result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+      expect(result.ready).toBe(false);
+      expect(result.failedItem).toBe("E");
+      expect(result.assertionCode).toBe(4);
+      const e = result.assertions.find((a) => a.item === "E");
+      expect(e?.ok).toBe(false);
+      expect(e?.note).toMatch(c.note);
+    }
+  }, 60_000);
+
+  test("round-4 regression: C/D/E starting with <1 s remaining gets the remaining time, never the 1 s floor", async () => {
+    // Seven seam calls precede the C/D/E script (3 provisioning + 2 for A + 2
+    // for B); a 500 ms tax on each puts the script's start a few hundred ms
+    // before the deadline — inside the 1-999 ms window where the old
+    // deadline-derived 1,000 ms floor granted a FULL second of spend past the
+    // whole-gate budget (INV-2). The fix must hand the seam exactly the
+    // remainder: assert the gate-script call saw timeoutMs < 1_000.
+    const floorFake = fakeExeDev();
+    const seen: Array<{ gateScript: boolean; timeoutMs?: number }> = [];
+    const taxingRun: FakeCommand = async (argv, o) => {
+      await new Promise((res) => setTimeout(res, 500));
+      const res = await floorFake.run(argv, o);
+      seen.push({
+        gateScript: argv.some((a) => a.includes("DF2.2 — setup-gate assertions")),
+        timeoutMs: o?.timeoutMs,
+      });
+      return res;
+    };
+    const taxingDriver = new ExeDevDriver({ run: taxingRun });
+    try {
+      const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+      const box = await makeBox(floorFake, taxingDriver, "gate-cde-floor", originDir, rosterDir);
+      deliverKey(floorFake, box.vm);
+
+      // 7 × 500 ms of tax + ~0.1-0.5 s of real exec time ≈ 3.6-4.0 s consumed;
+      // the deadline at 4.55 s leaves ≈ 0.35-0.95 s at C/D/E — inside the window.
+      const result = await taxingDriver.setup(
+        box.vm,
+        gateOpts(box, { commitSha: sha, gateTimeoutMs: 4_550 }),
+      );
+      expect(result.assertions.map((a) => a.item)).toContain("C"); // C/D/E phase ran
+
+      const gateCall = seen.find((c) => c.gateScript);
+      expect(gateCall).toBeDefined(); // the phase guard let it start: 0 < remaining
+      expect(gateCall?.timeoutMs).toBeLessThan(1_000); // the floor used to make this exactly 1_000
+      expect(gateCall?.timeoutMs).toBeGreaterThanOrEqual(1);
+    } finally {
+      floorFake.cleanup();
+    }
+  }, 60_000);
 });
 
 describe("setup gate — defaults are the story's constants", () => {

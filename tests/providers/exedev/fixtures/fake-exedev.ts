@@ -49,6 +49,12 @@ export interface FakeBoxConfig {
   /** Override the entire /api/v1/key response body (E regression testing). */
   keyBody?: unknown;
   /**
+   * Raw `/api/v1/key` body printed VERBATIM (E hardening). `keyBody` rides
+   * JSON.stringify, which turns NaN into null — this knob serves payloads
+   * Python json.load accepts but JSON.stringify cannot carry, like bare NaN.
+   */
+  keyRawBody?: string;
+  /**
    * `chat/completions` answers by bare model id (C). Omit a model to fall back
    * to `default`. Set an entry to `null` to make that model's ping fail.
    */
@@ -173,7 +179,9 @@ if url.endswith("/chat/completions"):
     sys.exit(0)
 
 if url.endswith("/api/v1/key"):
-    if cfg.get("keyBody") is not None:
+    if cfg.get("keyRawBody") is not None:
+        print(cfg["keyRawBody"])
+    elif cfg.get("keyBody") is not None:
         print(json.dumps(cfg["keyBody"]))
     else:
         key = cfg.get("key", {})

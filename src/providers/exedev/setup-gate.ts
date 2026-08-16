@@ -224,18 +224,26 @@ export async function setupGate(
   const host = driver.boxHost(vm);
 
   // ── timing budget: per-assertion AND whole-gate deadline (INV-2: no spend past budget)
-  const budget = () => Math.min(assertTimeoutMs, Math.max(1_000, deadline - Date.now()));
+  // Free phases (provision/A/B) keep a 1 s floor: they spend nothing, and a
+  // deadline-truncated kill there would surface as a cryptic exit-137 rather
+  // than the named "budget exhausted" notes the phase guards below emit. The
+  // C/D/E script has NO floor — it starts real model requests (assertion C),
+  // so it never gets a millisecond past the deadline (round-4 review: the old
+  // deadline-derived 1 s floor handed the script 1,000 ms when 1-999 ms
+  // remained, a spend window past the whole-gate budget).
+  const budgetFree = () => Math.min(assertTimeoutMs, Math.max(1_000, deadline - Date.now()));
+  const budgetSpend = () => Math.min(assertTimeoutMs, Math.max(1, deadline - Date.now()));
 
   // ── provision: stale readiness is never read as this run's (AC6) ──────────
-  await driver.execTimed(vm, ["rm", "-f", sentinelPath], budget());
+  await driver.execTimed(vm, ["rm", "-f", sentinelPath], budgetFree());
   // AC7: QDS_TEAM_RUNNER=local beside DF2.3's key line — the environment the
   // in-box engine inherits. Idempotent append, then verified by CONTENT.
   const writeRunner = `mkdir -p "$(dirname ${shQuote(envFile)})" && grep -qx 'QDS_TEAM_RUNNER=local' ${shQuote(envFile)} 2>/dev/null || printf 'QDS_TEAM_RUNNER=local\\n' >> ${shQuote(envFile)}`;
-  await driver.execTimed(vm, ["sh", "-c", writeRunner], budget());
+  await driver.execTimed(vm, ["sh", "-c", writeRunner], budgetFree());
   const runnerCheck = await driver.execTimed(
     vm,
     ["sh", "-c", `grep -qx 'QDS_TEAM_RUNNER=local' ${shQuote(envFile)}`],
-    budget(),
+    budgetFree(),
   );
   if (runnerCheck.exitCode !== 0) {
     throw new ExeDevDriverError(
@@ -247,11 +255,11 @@ export async function setupGate(
 
   // ── A: git integrity by content (runs before anything that spends — INV-2) ─
   let t = Date.now();
-  const head = await driver.execTimed(vm, ["git", "-C", workdir, "rev-parse", "HEAD"], budget());
+  const head = await driver.execTimed(vm, ["git", "-C", workdir, "rev-parse", "HEAD"], budgetFree());
   const porcelain = await driver.execTimed(
     vm,
     ["git", "-C", workdir, "status", "--porcelain"],
-    budget(),
+    budgetFree(),
   );
   const headSha = head.stdout.trim();
   const dirty = porcelain.stdout.trim();
@@ -287,11 +295,11 @@ export async function setupGate(
       assertions.push({ item: "B", ok: false, note: `B: gate budget exhausted before B ran (earlier phases consumed gateTimeoutMs=${gateTimeoutMs}ms)` });
       emitGate(driver.requestId, g, vm, "gate_b", Date.now() - t, "error");
     } else {
-      const piPath = await driver.execTimed(vm, ["sh", "-c", "command -v pi"], budget());
+      const piPath = await driver.execTimed(vm, ["sh", "-c", "command -v pi"], budgetFree());
       if (piPath.exitCode !== 0 || piPath.stdout.trim().length === 0) {
         assertions.push({ item: "B", ok: false, note: "B: pi is not on the box PATH (command -v pi failed) — the image contract requires pi 0.55.0" });
       } else {
-        const listed = await driver.execTimed(vm, ["pi", "--list-models"], budget());
+        const listed = await driver.execTimed(vm, ["pi", "--list-models"], budgetFree());
         const out = listed.stdout.trim();
         if (out.length === 0) {
           assertions.push({ item: "B", ok: false, note: "B: pi --list-models printed nothing (content check — exit status is not the instrument)" });
@@ -321,7 +329,7 @@ export async function setupGate(
       const res = await driver.execTimed(
         vm,
         ["sh", "-c", script, "sh", opts.rosterPath, envFile, ...models],
-        budget(),
+        budgetSpend(), // NEVER the 1 s free-phase floor — C/D/E spends (INV-2)
       );
       const KNOWN: ReadonlySet<string> = new Set(["A", "B", "C", "D", "E"]);
       const results = res.stdout

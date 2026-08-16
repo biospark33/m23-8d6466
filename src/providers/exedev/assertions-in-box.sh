@@ -162,21 +162,29 @@ emit D 1 "D: pi cost.total $d_total > 0; $d_scan"
 key_json="$(printf 'header = "Authorization: Bearer %s"\n' "$OPENROUTER_API_KEY" \
   | curl -s --max-time 30 -K - https://openrouter.ai/api/v1/key)"
 e_note="$(printf '%s' "$key_json" | python3 -c '
-import json, sys
+import json, math, sys
 try:
     d = json.load(sys.stdin).get("data", {})
 except Exception:
     print("key endpoint body unparseable"); sys.exit(1)
 if not isinstance(d, dict):
     print("key endpoint body has no data object"); sys.exit(1)
+def finite_number(v):
+    # python bool IS an int (True == 1) and json.load accepts bare NaN/Infinity
+    # (round-4 review: {"limit": NaN} passed E because NaN <= 0 is false, and
+    # NaN - anything is NaN, so remaining <= 0 never fired) — a credit value
+    # must be a real, finite number or remaining cannot be computed at all.
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 limit, usage = d.get("limit"), d.get("usage", 0)
 # usage: null → treat as 0 (nothing spent). limit: null → UNCAPPED fail (existing behavior).
-if not isinstance(usage, (int, float)):
+if usage is None:
     usage = 0
+if not finite_number(usage):
+    print("usage is not a finite number — credit remaining cannot be computed"); sys.exit(1)
 if limit is None:
     print("limit is null — UNCAPPED key; DF2.3 INV-CRED-1 requires a capped key"); sys.exit(1)
-if not isinstance(limit, (int, float)):
-    print("limit is not numeric"); sys.exit(1)
+if not finite_number(limit):
+    print("limit is not a finite number — credit remaining cannot be computed"); sys.exit(1)
 remaining = limit - usage
 if remaining <= 0:
     print(f"no credit remaining: limit {limit} - usage {usage} = {remaining}"); sys.exit(1)
