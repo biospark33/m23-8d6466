@@ -9,7 +9,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
@@ -69,6 +69,93 @@ async function makeBox(
   }
   return { vm: runId, rosterPath };
 }
+
+describe("setup gate — defaults are the story's constants", () => {
+  test("the fill workdir and DF2.3's env file never share a directory", async () => {
+    const mod = await import("../../../src/providers/exedev/fill.ts");
+    const { KEY_ENV_FILE } = await import("../../../src/providers/credentials.ts");
+    // .env must sit OUTSIDE the clone: key-then-fill breaks the clone;
+    // fill-then-key makes .env an untracked file A would false-fail on.
+    const envDir = KEY_ENV_FILE.replace(/\/[^/]*$/, "");
+    expect(mod.DEFAULT_FILL_WORKDIR).not.toBe(envDir);
+    expect(mod.DEFAULT_FILL_WORKDIR.startsWith(`${envDir}/`)).toBe(false);
+  });
+
+  test("assertion timeout 60s, whole gate 300s, sentinel and env paths are the contract", async () => {
+    const mod = await import("../../../src/providers/exedev/setup-gate.ts");
+    expect(mod.DEFAULT_ASSERT_TIMEOUT_MS).toBe(60_000);
+    expect(mod.DEFAULT_GATE_TIMEOUT_MS).toBe(300_000);
+    expect(mod.DEFAULT_SENTINEL_PATH).toBe("/tmp/PROVISION_READY");
+    // The env-file contract is DF2.3's constant, imported — not re-typed.
+    expect(mod.DEFAULT_ENV_FILE).toBe("/home/agent/app/.env");
+  });
+});
+
+describe("setup gate — fill regression tests", () => {
+  let fake: FakeExeDev;
+  let driver: ExeDevDriver;
+  let tempDir: string;
+  let originDir: string;
+
+  beforeAll(async () => {
+    fake = fakeExeDev();
+    driver = new ExeDevDriver({ run: fake.run });
+    tempDir = mkdtempSync(join(tmpdir(), "qds-exedev-fill-"));
+    originDir = join(tempDir, "origin");
+    mkdirSync(originDir, { recursive: true });
+    await runLocal(["git", "init", "-q", "-b", "main", originDir]);
+    await runLocal(["git", "-C", originDir, "-c", "user.email=test@qds", "-c", "user.name=test", "commit", "-q", "--allow-empty", "-m", "base"]);
+    writePostureAttestation(tempDir);
+  });
+
+  afterAll(() => {
+    fake.cleanup();
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test("round-6 regression: fill rejects symlinked workdir with code workdir-symlink (round-6)", async () => {
+    await driver.create("fill-symlink");
+    // Create a real symlink inside the box's home
+    const linkTarget = join(fake.homeDir("fill-symlink"), "real-dir");
+    const linkPath = join(fake.homeDir("fill-symlink"), "symlink-work");
+    mkdirSync(linkTarget, { recursive: true });
+    symlinkSync(linkTarget, linkPath);
+
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    await expect(
+      driver.fill("fill-symlink", {
+        runId: "fill-symlink",
+        repoUrl: `file://${originDir}`,
+        commitSha: sha,
+        workdir: linkPath,
+      }),
+    ).rejects.toThrow(/is a symlink.*fill requires a regular directory/);
+  }, 60_000);
+
+  test("round-6 regression: fill rejects repoUrl with semicolon (shell-hostile char)", async () => {
+    await driver.create("fill-semi");
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    await expect(
+      driver.fill("fill-semi", {
+        runId: "fill-semi",
+        repoUrl: "https://x.com/a;b",
+        commitSha: sha,
+      }),
+    ).rejects.toThrow(/contains characters outside the plain-URL charset/);
+  }, 60_000);
+
+  test("round-6 regression: fill rejects repoUrl with ampersand (shell-hostile char)", async () => {
+    await driver.create("fill-amp");
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    await expect(
+      driver.fill("fill-amp", {
+        runId: "fill-amp",
+        repoUrl: "https://x.com/a&b",
+        commitSha: sha,
+      }),
+    ).rejects.toThrow(/contains characters outside the plain-URL charset/);
+  }, 60_000);
+});
 
 describe("setup gate — E2E chain (create → fill → setup)", () => {
   let fake: FakeExeDev;
@@ -489,10 +576,10 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
 
     await expect(
       driver.setup(box.vm, gateOpts(box, { commitSha: sha, assertTimeoutMs: 0 })),
-    ).rejects.toThrow(/must each be >= 1 ms/i);
+    ).rejects.toThrow(/must each be a finite number >= 1 ms/);
     await expect(
       driver.setup(box.vm, gateOpts(box, { commitSha: sha, gateTimeoutMs: 0 })),
-    ).rejects.toThrow(/must each be >= 1 ms/i);
+    ).rejects.toThrow(/must each be a finite number >= 1 ms/);
   }, 60_000);
 
   test("P1 budget: deterministic whole-gate budget enforcement", async () => {
@@ -638,6 +725,94 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     }
   }, 60_000);
 
+  test("round-6 regression: gate timeout validation — NaN and Infinity reject (round-6)", async () => {
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    const box = await makeBox(fake, driver, "gate-timeout-nan", originDir, rosterDir);
+    deliverKey(fake, box.vm);
+
+    // assertTimeoutMs: NaN — non-finite rejects (matches the actual error format from setup-gate.ts:218)
+    await expect(
+      driver.setup(box.vm, gateOpts(box, { commitSha: sha, assertTimeoutMs: Number.NaN })),
+    ).rejects.toThrow(/must each be a finite number >= 1 ms/);
+    // gateTimeoutMs: Infinity — non-finite rejects
+    await expect(
+      driver.setup(box.vm, gateOpts(box, { commitSha: sha, gateTimeoutMs: Number.POSITIVE_INFINITY })),
+    ).rejects.toThrow(/must each be a finite number >= 1 ms/);
+  }, 60_000);
+
+  test("round-6 regression: multiple missing deps — all named in one note (round-6)", async () => {
+    // The fake substrate cannot make TWO C-phase deps vanish (piMissing fails B
+    // first; python3 is the host's own /usr/bin/python3), so the script's dep
+    // loop is proven directly: run assertions-in-box.sh under an EMPTY PATH —
+    // command -v finds none of curl/python3/pi, and the round-6 loop must name
+    // ALL of them in ONE exit-125 line (sequential discovery wasted cycles).
+    const script = join(import.meta.dir, "../../../src/providers/exedev/assertions-in-box.sh");
+    const rosterFile = join(rosterDir, "gate-roster.yaml");
+    const proc = Bun.spawn({
+      cmd: ["/bin/sh", script, rosterFile, "/dev/null", "irrelevant-model"],
+      env: { PATH: "", HOME: process.env.HOME ?? "/tmp" },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    expect(exitCode).toBe(125);
+    expect(stderr).toMatch(/missing dependency: curl python3 pi/);
+    expect(stdout).not.toMatch(/^\{/m); // no evidence lines — the gate did not run
+  }, 60_000);
+
+  test("round-6 regression: E rejects negative limit (limit -5) — not positive (round-6)", async () => {
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    const box = await makeBox(fake, driver, "gate-e-neg-limit", originDir, rosterDir);
+    // keyRawBody: the stub prints this verbatim, Python json.load parses -5 as int
+    fake.configure(box.vm, { keyRawBody: '{"data":{"limit":-5,"usage":0}}' });
+    deliverKey(fake, box.vm);
+
+    const result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    expect(result.ready).toBe(false);
+    expect(result.failedItem).toBe("E");
+    expect(result.assertionCode).toBe(4);
+    const e = result.assertions.find((a) => a.item === "E");
+    expect(e?.ok).toBe(false);
+    expect(e?.note).toMatch(/limit.*is not positive/);
+  }, 60_000);
+
+  test("round-6 regression: E rejects negative usage (usage -10) — negative (round-6)", async () => {
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    const box = await makeBox(fake, driver, "gate-e-neg-usage", originDir, rosterDir);
+    fake.configure(box.vm, { keyRawBody: '{"data":{"limit":100,"usage":-10}}' });
+    deliverKey(fake, box.vm);
+
+    const result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    expect(result.ready).toBe(false);
+    expect(result.failedItem).toBe("E");
+    expect(result.assertionCode).toBe(4);
+    const e = result.assertions.find((a) => a.item === "E");
+    expect(e?.ok).toBe(false);
+    expect(e?.note).toMatch(/usage.*is negative/);
+  }, 60_000);
+
+  test("round-6 regression: D rejects Infinity cost.total — non-finite (round-6)", async () => {
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    const box = await makeBox(fake, driver, "gate-d-inf-cost", originDir, rosterDir);
+    // costTotalRaw: the stub emits bare Infinity — Python json.load parses it
+    // as float("inf"), which used to pass D's bare `> 0` check (round 6).
+    fake.configure(box.vm, { pi: { mode: "table", costTotal: 0, costTotalRaw: "Infinity" } });
+    deliverKey(fake, box.vm);
+
+    const result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    expect(result.ready).toBe(false);
+    expect(result.failedItem).toBe("D");
+    expect(result.assertionCode).toBe(3);
+    const d = result.assertions.find((a) => a.item === "D");
+    expect(d?.ok).toBe(false);
+    expect(d?.note).toMatch(/cost\.total = inf/);
+  }, 60_000);
+
   test("round-5 regression: no time left at C/D/E — launch refused, never a clamped 1 ms spend past the deadline", async () => {
     // MUST STAY LAST IN THIS FILE: bun's setSystemTime is FROZEN (probed:
     // 0 ms advance across real sleeps) and is not unmocked by mock.restore(),
@@ -682,25 +857,4 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       edgeFake.cleanup();
     }
   }, 60_000);
-});
-
-describe("setup gate — defaults are the story's constants", () => {
-  test("the fill workdir and DF2.3's env file never share a directory", async () => {
-    const mod = await import("../../../src/providers/exedev/fill.ts");
-    const { KEY_ENV_FILE } = await import("../../../src/providers/credentials.ts");
-    // .env must sit OUTSIDE the clone: key-then-fill breaks the clone;
-    // fill-then-key makes .env an untracked file A would false-fail on.
-    const envDir = KEY_ENV_FILE.replace(/\/[^/]*$/, "");
-    expect(mod.DEFAULT_FILL_WORKDIR).not.toBe(envDir);
-    expect(mod.DEFAULT_FILL_WORKDIR.startsWith(`${envDir}/`)).toBe(false);
-  });
-
-  test("assertion timeout 60s, whole gate 300s, sentinel and env paths are the contract", async () => {
-    const mod = await import("../../../src/providers/exedev/setup-gate.ts");
-    expect(mod.DEFAULT_ASSERT_TIMEOUT_MS).toBe(60_000);
-    expect(mod.DEFAULT_GATE_TIMEOUT_MS).toBe(300_000);
-    expect(mod.DEFAULT_SENTINEL_PATH).toBe("/tmp/PROVISION_READY");
-    // The env-file contract is DF2.3's constant, imported — not re-typed.
-    expect(mod.DEFAULT_ENV_FILE).toBe("/home/agent/app/.env");
-  });
 });

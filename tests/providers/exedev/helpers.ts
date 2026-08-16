@@ -11,6 +11,6 @@ export async function runLocal(argv: string[]): Promise<string> { /* dp:ok a rej
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
-  if (code !== 0) throw new Error(`runLocal ${argv.join(" ")} exited ${code}: ${stderr}`);
+  if (code !== 0) throw new Error(`runLocal ${argv.join(" ")} exited ${code}: ${stderr}${stdout ? ` (stdout: ${stdout})` : ""}`);
   return stdout;
 }

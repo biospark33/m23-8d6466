@@ -125,10 +125,12 @@ const SLUG_RE = /^[A-Za-z0-9._/-]+$/;
 
 /** A path that will be interpolated into a remote sh command or its argv. */
 function assertPathSafe(kind: string, p: string): void {
-  if (!/^[A-Za-z0-9._/-]+$/.test(p) || p.split("/").includes("..")) {
+  const segments = p.split("/");
+  // round 6: // and trailing-slash segments are not plain paths
+  if (!/^[A-Za-z0-9._/-]+$/.test(p) || segments.includes("..") || segments.slice(1).includes("")) {
     throw new ExeDevDriverError(
       `${kind}-invalid`,
-      `${kind} ${JSON.stringify(p)} is not a plain path (charset [A-Za-z0-9._/-], no "..")`,
+      `${kind} ${JSON.stringify(p)} is not a plain path (charset [A-Za-z0-9._/-], no "..", no empty segments)`,
       `pass a plain ${kind} without shell metacharacters`,
     );
   }
@@ -208,11 +210,14 @@ export async function setupGate(
   assertPathSafe("workdir", workdir);
   const assertTimeoutMs = opts.assertTimeoutMs ?? DEFAULT_ASSERT_TIMEOUT_MS;
   const gateTimeoutMs = opts.gateTimeoutMs ?? DEFAULT_GATE_TIMEOUT_MS;
-  if (assertTimeoutMs < 1 || gateTimeoutMs < 1) {
+  if (
+    !Number.isFinite(assertTimeoutMs) || !Number.isFinite(gateTimeoutMs) ||
+    assertTimeoutMs < 1 || gateTimeoutMs < 1
+  ) {
     throw new ExeDevDriverError(
       "gate-timeout-invalid",
-      `assertTimeoutMs (${assertTimeoutMs} ms) and gateTimeoutMs (${gateTimeoutMs} ms) must each be >= 1 ms`,
-      "pass timeouts >= 1 ms",
+      `assertTimeoutMs (${assertTimeoutMs} ms) and gateTimeoutMs (${gateTimeoutMs} ms) must each be a finite number >= 1 ms`,
+      "pass finite timeouts >= 1 ms",
     );
   }
   const models = rosterModels(opts.rosterPath); // throws on a malformed roster — before any spend
@@ -235,7 +240,15 @@ export async function setupGate(
   const budgetFree = () => Math.min(assertTimeoutMs, Math.max(1_000, deadline - Date.now()));
 
   // ── provision: stale readiness is never read as this run's (AC6) ──────────
-  await driver.execTimed(vm, ["rm", "-f", sentinelPath], budgetFree());
+  // round 6 + AC6: if the sentinel is a directory (or rm fails otherwise), stale readiness silently survives
+  const rmResult = await driver.execTimed(vm, ["rm", "-f", sentinelPath], budgetFree());
+  if (rmResult.exitCode !== 0) {
+    throw new ExeDevDriverError(
+      "sentinel-clear-failed",
+      `could not remove sentinel ${sentinelPath} on ${host} (exit ${rmResult.exitCode}): ${rmResult.stderr.trim() || "no stderr"} — AC6 violated`,
+      `ssh ${host} "rm -f ${sentinelPath}" and inspect the box by hand`,
+    );
+  }
   // AC7: QDS_TEAM_RUNNER=local beside DF2.3's key line — the environment the
   // in-box engine inherits. Idempotent append, then verified by CONTENT.
   const writeRunner = `mkdir -p "$(dirname ${shQuote(envFile)})" && grep -qx 'QDS_TEAM_RUNNER=local' ${shQuote(envFile)} 2>/dev/null || printf 'QDS_TEAM_RUNNER=local\\n' >> ${shQuote(envFile)}`;
@@ -370,11 +383,11 @@ export async function setupGate(
         // 127: /bin/sh itself exits 127 for command-not-found, so a bare 127 must
         // remain free to mean "the gate did not run" — the fail-closed branch
         // below owns it.
-        const dep = /missing dependency: (\S+)/.exec(res.stderr)?.[1] ?? "unknown";
+        const deps = /missing dependency: (.+)/.exec(res.stderr)?.[1] ?? "unknown";
         assertions.push({
           item: "C",
           ok: false,
-          note: `missing in-box dependency: ${dep} (125-mapped) — the gate names it rather than false-failing`,
+          note: `missing in-box dependency:${deps} (125-mapped) — the gate names it rather than false-failing`,
         });
       } else {
         // A CONTROLLED stop: the script's own contract is "exit = the first

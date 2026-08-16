@@ -398,3 +398,48 @@ describe("ExeDevDriver — control-plane parsing", () => {
     await expect(driver.copyFile("copy-1", "/etc/passwd", local)).rejects.toThrow();
   });
 });
+
+describe("ExeDevDriver — BMAD review round 6", () => {
+  test("F5: exec + execTimed throw on empty argv elements", async () => {
+    const fake = fakeExeDev();
+    try {
+      const driver = new ExeDevDriver({ run: fake.run });
+      await expect(driver.exec("any", [""] as string[])).rejects.toThrow("exec requires a non-empty argv");
+      await expect(driver.exec("any", ["git", ""] as string[])).rejects.toThrow("exec requires a non-empty argv");
+      await expect(driver.execTimed("any", [""] as string[], 1000)).rejects.toThrow("exec requires a non-empty argv");
+      await expect(driver.execTimed("any", ["git", ""] as string[], 1000)).rejects.toThrow("exec requires a non-empty argv");
+    } finally {
+      fake.cleanup();
+    }
+  });
+
+  test("F6: create with empty new-shape https_url returns derived URL", async () => {
+    const fake = fakeExeDev({ newShape: "empty-url" });
+    try {
+      const driver = new ExeDevDriver({ run: fake.run });
+      const vm = await driver.create("f6-box");
+      expect(vm.httpsUrl).toBe("https://f6-box.exe.xyz");
+    } finally {
+      fake.cleanup();
+    }
+  });
+
+  test("F7: constructor validates execTimeoutMs and hostSuffix", () => {
+    expect(() => new ExeDevDriver({ execTimeoutMs: Number.NaN })).toThrow("must be a finite number");
+    expect(() => new ExeDevDriver({ execTimeoutMs: 0 })).toThrow("must be a finite number");
+    expect(() => new ExeDevDriver({ execTimeoutMs: -1 })).toThrow("must be a finite number");
+    expect(() => new ExeDevDriver({ hostSuffix: ".exe.xyz" })).toThrow("is not a plain suffix");
+    expect(() => new ExeDevDriver({ hostSuffix: "exe.xyz/x" })).toThrow("is not a plain suffix");
+  });
+
+  test("F8: boxHost validates runId (defense-in-depth)", async () => {
+    const fake = fakeExeDev();
+    try {
+      const driver = new ExeDevDriver({ run: fake.run });
+      await driver.create("f8-box");
+      expect(() => driver.boxHost("bad name!")).toThrow("invalid run id");
+    } finally {
+      fake.cleanup();
+    }
+  });
+});

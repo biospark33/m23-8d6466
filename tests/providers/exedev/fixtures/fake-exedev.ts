@@ -28,7 +28,7 @@ export type FakeCommand = (
 ) => Promise<ExecResult>;
 
 /** What `ssh exe.dev new --json` pretends to return (its real shape is UNVERIFIED). */
-export type NewShapeMode = "recognized" | "unrecognized";
+export type NewShapeMode = "recognized" | "unrecognized" | "empty-url";
 
 /** Stub-`pi` behaviour for `pi --list-models` (B) — content, not exit status. */
 export type PiMode = "table" | "no-models";
@@ -41,6 +41,12 @@ export interface FakeBoxConfig {
     mode: PiMode;
     /** `cost.total` a `pi -p --mode json` run reports (D's first half). */
     costTotal: number;
+    /**
+     * Raw `cost.total` emitted VERBATIM in the pi JSON (round 6). `costTotal`
+     * rides Python json.dumps, which cannot emit bare Infinity — this knob
+     * serves payloads json.load parses as float("inf") (D non-finite guard).
+     */
+    costTotalRaw?: string;
   };
   /** Planted verbatim at `<home>/.pi/agent/models.json` (D's second half). */
   modelsJson: Record<string, unknown>;
@@ -108,6 +114,11 @@ if "--list-models" in args:
     print("openrouter  deepseek/deepseek-v4-flash-0731  64k  8k  off  no")
     sys.exit(0)
 if "-p" in args:
+    raw = pi.get("costTotalRaw")
+    if raw is not None:
+        # round 6: hand-built JSON so bare Infinity reaches json.load as float("inf")
+        print('{"content": "ok", "cost": {"total": ' + str(raw) + '}, "usage": {"cost": {"total": ' + str(raw) + '}}}')
+        sys.exit(0)
     total = pi.get("costTotal", 0)
     print(json.dumps({"content": "ok", "cost": {"total": total}, "usage": {"cost": {"total": total}}}))
     sys.exit(0)
@@ -286,9 +297,14 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
 
   /** `ssh exe.dev new --name N --tag T --json` — UNVERIFIED shape, mode-selectable. */
   function newJson(name: string, tag: string | undefined): string {
-    if ((readConfig(name).newShape ?? "recognized") === "unrecognized") {
+    const mode = readConfig(name).newShape ?? "recognized";
+    if (mode === "unrecognized") {
       // Keys no recognized reader would accept.
       return JSON.stringify({ instance: { displayName: name, kind: "vm" }, ...(tag ? { labels: [tag] } : {}) });
+    }
+    if (mode === "empty-url") {
+      // Recognized shape (vm_name present) but empty https_url — exercises create's derived provenance (F6).
+      return JSON.stringify({ vm_name: name, https_url: "", ssh_dest: `${name}.exe.xyz` });
     }
     return JSON.stringify({ vm_name: name, https_url: `https://${name}.exe.xyz`, ssh_dest: `${name}.exe.xyz` });
   }

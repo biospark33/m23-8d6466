@@ -90,6 +90,13 @@ export class ExeDevDriver implements ProviderDriver {
   private readonly hostSuffix: string;
 
   constructor(opts: ExeDevDriverOptions = {}) {
+    // round 6: constructor is the injection point — validate at the trust boundary
+    if (opts.execTimeoutMs !== undefined && (!Number.isFinite(opts.execTimeoutMs) || opts.execTimeoutMs < 1)) {
+      throw new ExeDevDriverError("exec-timeout-invalid", `execTimeoutMs ${opts.execTimeoutMs} must be a finite number >= 1 ms`, "pass a positive millisecond ceiling");
+    }
+    if (opts.hostSuffix !== undefined && !/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(opts.hostSuffix)) {
+      throw new ExeDevDriverError("host-suffix-invalid", `hostSuffix ${JSON.stringify(opts.hostSuffix)} is not a plain suffix (charset [A-Za-z0-9.-], no leading dot/dash)`, "pass a suffix like exe.xyz");
+    }
     this.run = opts.run ?? sshCommand();
     this.postureFile = opts.postureFile ?? ".sandbox/exedev-posture.json";
     this.execTimeoutMs = opts.execTimeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
@@ -99,6 +106,8 @@ export class ExeDevDriver implements ProviderDriver {
 
   /** `<name>.exe.xyz` — the MEASURED derivation (create.just:121-122). */
   boxHost(vm: string): string {
+    // round 6: hostname construction is the trust boundary
+    assertValidRunId(vm);
     return `${vm}.${this.hostSuffix}`;
   }
 
@@ -162,11 +171,10 @@ export class ExeDevDriver implements ProviderDriver {
       pickObject(parsed?.data) ??
       pickObject(parsed?.vm);
     if (raw?.vm_name === name) {
-      const httpsUrl =
-        typeof raw.https_url === "string" && raw.https_url.length > 0
-          ? raw.https_url
-          : this.derivedUrl(name);
-      this.emit("create_shape", { vm: name, verified: "new-shape" });
+      // round 6: the log must state where the URL actually came from
+      const rawUrl = typeof raw.https_url === "string" && raw.https_url.length > 0 ? raw.https_url : null;
+      const httpsUrl = rawUrl ?? this.derivedUrl(name);
+      this.emit("create_shape", { vm: name, verified: rawUrl ? "new-shape" : "derived" });
       return { name, httpsUrl };
     }
     // Fallback 1: re-read the one VERIFIED shape.
@@ -312,7 +320,9 @@ export class ExeDevDriver implements ProviderDriver {
    */
   async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
     assertValidRunId(vm);
-    if (argv.length === 0) throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv", "pass the command argv");
+    // round 6: an empty element ships a no-op ssh command
+    if (argv.length === 0 || argv.some((a) => a.length === 0))
+      throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv with no empty elements", "pass the command argv");
     const command = argv.map(shQuote).join(" ");
     return this.run(["ssh", this.boxHost(vm), command], {
       ...(stdin === undefined ? {} : { stdin }),
@@ -323,7 +333,9 @@ export class ExeDevDriver implements ProviderDriver {
   /** Same as {@link exec} with a per-call timeout — the gate's per-assertion budget. */
   async execTimed(vm: string, argv: string[], timeoutMs: number, stdin?: string): Promise<ExecResult> {
     assertValidRunId(vm);
-    if (argv.length === 0) throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv", "pass the command argv");
+    // round 6: an empty element ships a no-op ssh command
+    if (argv.length === 0 || argv.some((a) => a.length === 0))
+      throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv with no empty elements", "pass the command argv");
     const command = argv.map(shQuote).join(" ");
     return this.run(["ssh", this.boxHost(vm), command], {
       ...(stdin === undefined ? {} : { stdin }),

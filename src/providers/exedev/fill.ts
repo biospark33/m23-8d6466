@@ -47,12 +47,20 @@ function assertRepoUrl(repoUrl: string): void {
   // this driver refuses to carry (INV-CRED-1: no second secret in a box). The
   // host segment may not contain "/" or "@"; a PATH after the host is normal
   // (every real clone URL carries one) and is admitted whitespace-free.
+  // round 6: reject shell-hostile chars beyond RFC 3986 URL grammar (minus userinfo).
   const okProto = /^https:\/\/[^\s/@]+[^\s@]*$/i.test(repoUrl) || /^file:\/\/\/[^\s@]*$/i.test(repoUrl);
   if (!okProto || repoUrl.includes("@")) {
     throw new ExeDevDriverError(
       "repo-url-invalid",
       `repoUrl ${JSON.stringify(repoUrl)} is not a plain public clone source (https:// or file:// without userinfo or whitespace)`,
       "pass an unauthenticated https:// clone URL",
+    );
+  }
+  if (!/^[A-Za-z0-9._~:/?#[\]%+-]+$/.test(repoUrl)) {
+    throw new ExeDevDriverError(
+      "repo-url-invalid",
+      `repoUrl ${JSON.stringify(repoUrl)} contains characters outside the plain-URL charset (RFC 3986 minus userinfo)`,
+      "pass a clean https:// URL with no shell metacharacters",
     );
   }
 }
@@ -95,13 +103,22 @@ export async function fillExeDev(driver: ExeDevDriver, vm: string, opts: FillOpt
 
   // Clone only when the workdir is not already a git checkout; a re-fill
   // fetches instead, so the existing sandbox branch (the run's output) is
-  // never re-created or reset.
-  const fresh = await driver.exec(vm, ["sh", "-c", `test ! -d ${shQuote(`${work}/.git`)} && echo fresh || echo refill`]);
+  // never re-created or reset. round 6: test -d follows symlinks; fill must
+  // write only where it was pointed.
+  const probe = `if test -L ${shQuote(work)}; then echo symlink; elif test ! -d ${shQuote(`${work}/.git`)}; then echo fresh; else echo refill; fi`;
+  const fresh = await driver.exec(vm, ["sh", "-c", probe]);
   if (fresh.exitCode !== 0) {
     throw new ExeDevDriverError(
       "fill-failed",
       `fill could not inspect ${work} (exit ${fresh.exitCode}): ${fresh.stderr.trim()}`,
       `ssh ${vm}.exe.xyz "ls -la ${work}" and inspect the box by hand`,
+    );
+  }
+  if (fresh.stdout.trim() === "symlink") {
+    throw new ExeDevDriverError(
+      "workdir-symlink",
+      `fill workdir ${work} on ${vm}.exe.xyz is a symlink; fill requires a regular directory`,
+      `ssh ${vm}.exe.xyz "ls -la ${work}" and inspect by hand`,
     );
   }
   if (fresh.stdout.trim() === "fresh") {

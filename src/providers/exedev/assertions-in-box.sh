@@ -29,12 +29,15 @@ shift 2
 Models="$*"
 
 # ── dependencies: named, up front (Infra Prerequisites row 5) ───────────────
+# round 6: name every missing dep in one pass — sequential discovery wasted operator cycles
+missing=""
 for dep in curl python3 pi; do
-  if ! command -v "$dep" >/dev/null 2>&1; then
-    echo "missing dependency: $dep" >&2
-    exit 125
-  fi
+  command -v "$dep" >/dev/null 2>&1 || missing="$missing $dep"
 done
+if [ -n "$missing" ]; then
+  echo "missing dependency:$missing" >&2
+  exit 125
+fi
 
 # ── the runtime key: box-local only — never printed, never in a note, never
 # in a curl argv (it rides stdin via `curl -K -`, invisible to `ps`) ─────────
@@ -144,9 +147,9 @@ if ! printf '%s' "$d_scan" | grep -q " models priced$"; then
   exit 3
 fi
 if ! printf '%s' "$d_total" | python3 -c '
-import sys
+import sys, math
 v = float(sys.stdin.read().strip() or 0)
-sys.exit(0 if v > 0 else 1)
+sys.exit(0 if math.isfinite(v) and v > 0 else 1)
 '; then
   emit D 0 "a real pi -p call reported cost.total = $d_total (must be > 0) — rates default to zero when models.json carries no cost block; the factory would report \$0.0000 while spending"
   exit 3
@@ -160,7 +163,7 @@ emit D 1 "D: pi cost.total $d_total > 0; $d_scan"
 # headroom, never liveness: the endpoint answers 200 for a dead key, which is
 # why C above is the liveness proof and runs first.
 key_json="$(printf 'header = "Authorization: Bearer %s"\n' "$OPENROUTER_API_KEY" \
-  | curl -s --max-time 30 -K - https://openrouter.ai/api/v1/key)"
+  | curl -s --max-time 30 -K - https://openrouter.ai/api/v1/key)"  # round 6: a hung key endpoint burned the whole gate budget instead of failing fast
 e_note="$(printf '%s' "$key_json" | python3 -c '
 import json, math, sys
 try:
@@ -185,6 +188,11 @@ if limit is None:
     print("limit is null — UNCAPPED key; DF2.3 INV-CRED-1 requires a capped key"); sys.exit(1)
 if not finite_number(limit):
     print("limit is not a finite number — credit remaining cannot be computed"); sys.exit(1)
+# round 6: limit=-5, usage=-10 computed remaining=+5 and passed E
+if limit <= 0:
+    print(f"limit {limit:g} is not positive — remaining cannot be meaningful"); sys.exit(1)
+if usage < 0:
+    print(f"usage {usage:g} is negative — credit remaining cannot be computed"); sys.exit(1)
 remaining = limit - usage
 if remaining <= 0:
     print(f"no credit remaining: limit {limit} - usage {usage} = {remaining}"); sys.exit(1)
