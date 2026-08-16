@@ -211,6 +211,12 @@ export interface FakeExeDevOptions {
    * partial evidence.
    */
   truncateScript?: boolean;
+  /**
+   * The in-box gate script EXITS 0 but emits fabricated evidence — "c-only"
+   * (C's line alone) or "duplicates" (C twice + D). Exit 0 is not proof of
+   * completeness: the host must fail closed on the unproven remainder.
+   */
+  fabricateScriptEvidence?: "c-only" | "duplicates";
 }
 
 export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
@@ -374,6 +380,16 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
       if (opts.truncateScript && command.includes("DF2.2 — setup-gate assertions")) {
         const cLine = JSON.stringify({ item: "C", ok: true, note: "C: simulated line before the drop" });
         return { stdout: `${cLine}\n`, stderr: "ssh: connection closed by remote host\n", exitCode: 255 };
+      }
+      // Fabricated completeness: the script exits 0 but did NOT prove all of
+      // C/D/E — the host's acceptance predicate must refuse the evidence.
+      if (opts.fabricateScriptEvidence && command.includes("DF2.2 — setup-gate assertions")) {
+        const line = (item: string) => JSON.stringify({ item, ok: true, note: `simulated ${item} line` });
+        const stdout =
+          opts.fabricateScriptEvidence === "c-only"
+            ? `${line("C")}\n`
+            : `${line("C")}\n${line("C")}\n${line("D")}\n`;
+        return { stdout, stderr: "", exitCode: 0 };
       }
       return spawnLocal(["sh", "-c", command], box, callOpts?.stdin, timeoutMs);
     }

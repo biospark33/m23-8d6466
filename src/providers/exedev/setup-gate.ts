@@ -320,6 +320,14 @@ export async function setupGate(
         }
         return [];
       });
+    // Exit-0 acceptance demands EXACTLY one well-formed result per C/D/E.
+    // results.length === 3 with all three present pins "exactly one each" by
+    // pigeonhole — partial evidence (exit 0 after only C's line) or duplicates
+    // (a buggy/hostile box replaying a line) fall through to fail-closed below
+    // (round-2 review: both shapes used to gate green).
+    const cdeComplete =
+      results.length === 3 &&
+      (["C", "D", "E"] as const).every((it) => results.some((r) => r.item === it));
     if (res.exitCode === 125) {
       // A named missing dependency, never a false fail (Infra row 5). 125, not
       // 127: /bin/sh itself exits 127 for command-not-found, so a bare 127 must
@@ -342,7 +350,7 @@ export async function setupGate(
         results.some((r) => !r.ok && r.item === ({ 2: "C", 3: "D", 4: "E" } as const)[code]);
       if (controlled) {
         assertions.push(...results);
-      } else if (res.exitCode === 0 && results.length > 0) {
+      } else if (res.exitCode === 0 && cdeComplete) {
         assertions.push(...results);
       } else {
         // FAIL-CLOSED (AC1/INV-5): anything else — a SIGKILLed ssh, a dropped
@@ -373,8 +381,10 @@ export async function setupGate(
     }
     // The label states the gate's own conclusion, not the exit code alone:
     // exit 0 with NO evidence lines is the fail-closed branch above — an exit-0
-    // script that proved nothing is never an "ok" (round-1 review).
-    const cdeOk = res.exitCode === 0 && results.length > 0 && results.every((r) => r.ok);
+    // script that proved nothing is never an "ok" (round-1 review). Round 2:
+    // PARTIAL or DUPLICATED evidence is equally unproven — the same
+    // complete-evidence predicate that admits the results decides the label.
+    const cdeOk = res.exitCode === 0 && cdeComplete && results.every((r) => r.ok);
     emitGate(driver.requestId, g, vm, "gate_cde", Date.now() - t, cdeOk ? "ok" : "error");
   }
 

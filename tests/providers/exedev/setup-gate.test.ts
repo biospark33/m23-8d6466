@@ -383,6 +383,50 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     }
   }, 60_000);
 
+  test("fail-closed: exit 0 with only C's line is NOT ready — partial evidence is not proof (round-2)", async () => {
+    // Exit 0 used to be accepted on results.length > 0 alone: a script that
+    // proved C and stopped gated green with D/E never evidenced.
+    const partialFake = fakeExeDev({ fabricateScriptEvidence: "c-only" });
+    try {
+      const partialDriver = new ExeDevDriver({ run: partialFake.run });
+      const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+      const box = await makeBox(partialFake, partialDriver, "gate-partial-c", originDir, rosterDir);
+      deliverKey(partialFake, box.vm);
+
+      const result = await partialDriver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+      expect(result.ready).toBe(false);
+      expect(result.failedItem).toBe("D"); // first UNPROVEN item after the partial evidence
+      expect(result.assertionCode).toBe(3);
+      expect(result.assertions.map((a) => a.item)).toEqual(["A", "B", "C", "D", "E"]);
+      const d = result.assertions.find((a) => a.item === "D");
+      expect(d?.note).toMatch(/exited 0 before this assertion produced evidence/);
+    } finally {
+      partialFake.cleanup();
+    }
+  }, 60_000);
+
+  test("fail-closed: exit 0 with duplicate lines is NOT ready — duplicates are not proof (round-2)", async () => {
+    // A buggy or hostile box replays C twice plus D and exits 0: every line is
+    // `ok`, but E was never proven and C was "proven" twice — not completeness.
+    const dupFake = fakeExeDev({ fabricateScriptEvidence: "duplicates" });
+    try {
+      const dupDriver = new ExeDevDriver({ run: dupFake.run });
+      const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+      const box = await makeBox(dupFake, dupDriver, "gate-dup-c", originDir, rosterDir);
+      deliverKey(dupFake, box.vm);
+
+      const result = await dupDriver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+      expect(result.ready).toBe(false);
+      expect(result.failedItem).toBe("E"); // the never-proven item
+      expect(result.assertionCode).toBe(4);
+      expect(result.assertions.map((a) => a.item)).toEqual(["A", "B", "C", "C", "D", "E"]);
+      const e = result.assertions.find((a) => a.item === "E");
+      expect(e?.note).toMatch(/exited 0 before this assertion produced evidence/);
+    } finally {
+      dupFake.cleanup();
+    }
+  }, 60_000);
+
   test("assertion codes are source-fixed: A/B share 1, C=2, D=3, E=4", () => {
     expect(ASSERTION_CODE).toEqual({ A: 1, B: 1, C: 2, D: 3, E: 4 });
   });

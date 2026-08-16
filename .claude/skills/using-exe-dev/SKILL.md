@@ -16,7 +16,7 @@ The index is organized for progressive discovery: start there and follow links a
 
 ## Quick reference
 
-```
+```sh
 ssh exe.dev help             # show commands
 ssh exe.dev help <command>   # show command details
 ssh exe.dev new --json       # create VM
@@ -43,7 +43,7 @@ Coding agents often run SSH in non-interactive shells or sandboxes. Common issue
 
 **SSH config**: Check whether both destinations are configured to use the right key:
 
-```
+```sshconfig
 Host exe.dev *.exe.xyz
   IdentitiesOnly yes
   IdentityFile ~/.ssh/id_ed25519
