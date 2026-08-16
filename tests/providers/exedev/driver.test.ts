@@ -20,18 +20,7 @@ import {
   writePostureAttestation,
   type FakeExeDev,
 } from "./fixtures/fake-exedev.ts";
-
-/** Run argv on the test host, returning stdout (git plumbing for the origin repo). */
-async function runLocal(argv: string[]): Promise<string> { /* dp:ok a rejection here is the test failing — there is nothing to recover */
-  const proc = Bun.spawn({ cmd: argv, stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  if (code !== 0) throw new Error(`runLocal ${argv.join(" ")} exited ${code}: ${stderr}`);
-  return stdout;
-}
+import { runLocal } from "./helpers.ts";
 
 describe("ExeDevDriver — DF2.1 contract suite (unmodified)", () => {
   const fake = fakeExeDev();
@@ -284,12 +273,13 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
     const driver = new ExeDevDriver({ run: fake.run });
     await driver.create("fill-https");
     // A path-carrying https URL must pass the GRAMMAR: the failure below is
-    // the clone itself (the fake box has no network), named "fill clone", NOT
-    // "repo-url-invalid" — that distinction is the regression.
+    // the clone itself, named "fill clone", NOT "repo-url-invalid" — that
+    // distinction is the regression. The origin is loopback port 9 (discard):
+    // connection refused instantly, no DNS, no egress — hermetic in CI.
     await expect(
       driver.fill("fill-https", {
         runId: "fill-https",
-        repoUrl: "https://github.com/example/qds-factory.git",
+        repoUrl: "https://127.0.0.1:9/example/qds-factory.git",
         commitSha: "0123456789abcdef0123456789abcdef01234567",
         workdir: "work",
       }),

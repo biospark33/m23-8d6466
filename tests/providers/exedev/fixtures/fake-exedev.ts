@@ -122,6 +122,11 @@ url = ""
 method = "GET"
 body = None
 args = sys.argv[1:]
+# The auth header must ride STDIN (curl -K -), never argv — an argv-carried
+# Authorization is exactly the ps-visible leak the real script guards against.
+if any(a.lower().startswith("authorization:") for a in args):
+    print("fake curl: Authorization header in argv — must ride stdin via -K -", file=sys.stderr)
+    sys.exit(21)
 i = 0
 while i < len(args):
     a = args[i]
@@ -130,6 +135,11 @@ while i < len(args):
             i += 1  # swallow the value
         elif a == "-H":
             i += 1  # swallow the header value (never echo it back)
+    elif a in ("-K", "--config"):
+        # Config file arg; with "-" it is STDIN — consumed and never echoed.
+        if i + 1 < len(args) and args[i + 1] == "-":
+            sys.stdin.read()
+        i += 1  # swallow the config source
     elif a in ("-X", "--request"):
         method = args[i + 1]; i += 1
     elif a in ("-d", "--data"):
@@ -282,19 +292,24 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
     stdin?: string,
     timeoutMs?: number,
   ): Promise<ExecResult> { /* dp:ok a rejection here is the test failing — there is nothing to recover */
+    // Strip host credentials a box must not inherit: a leaked host
+    // OPENROUTER_API_KEY would let E pass without DF2.3's delivery file,
+    // masking a missing-key bug as a green gate.
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      HOME: box.home,
+      // Hermetic PATH: the stub bin, then ONLY the system dirs. The host
+      // developing this repo has a real `pi` and `curl` on its own PATH —
+      // leaking them into a "box" would let B pass with the host's registry
+      // exactly the way a $?-trusting implementation does.
+      PATH: `${box.bin}:/usr/bin:/bin`,
+      FAKE_EXEDEV_CONFIG: join(box.home, ".fake-exedev.json"),
+    };
+    env.OPENROUTER_API_KEY = undefined;
     const proc = Bun.spawn({
       cmd: argv,
       cwd: box.dir,
-      env: {
-        ...process.env,
-        HOME: box.home,
-        // Hermetic PATH: the stub bin, then ONLY the system dirs. The host
-        // developing this repo has a real `pi` and `curl` on its own PATH —
-        // leaking them into a "box" would let B pass with the host's registry
-        // exactly the way a $?-trusting implementation does.
-        PATH: `${box.bin}:/usr/bin:/bin`,
-        FAKE_EXEDEV_CONFIG: join(box.home, ".fake-exedev.json"),
-      },
+      env,
       stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
       stdout: "pipe",
       stderr: "pipe",

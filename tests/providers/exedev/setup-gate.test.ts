@@ -19,6 +19,7 @@ import {
   writePostureAttestation,
   type FakeExeDev,
 } from "./fixtures/fake-exedev.ts";
+import { runLocal } from "./helpers.ts";
 
 const ROSTER = `
 defaults:
@@ -32,19 +33,7 @@ roles:
 /** A local git origin + the roster file + a fill'd box — the gate's preconditions. */
 interface Box {
   vm: string;
-  sha: string;
   rosterPath: string;
-}
-
-async function runLocal(argv: string[]): Promise<string> { /* dp:ok a rejection here is the test failing — there is nothing to recover */
-  const proc = Bun.spawn({ cmd: argv, stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  if (code !== 0) throw new Error(`runLocal ${argv.join(" ")} exited ${code}: ${stderr}`);
-  return stdout;
 }
 
 /** DF2.3 already delivered the key BEFORE setup (Infra ordering). Planted
@@ -77,7 +66,7 @@ async function makeBox(
     // an unsynced clone produced 5,641 zero-byte files and reported success.
     await driver.exec(runId, ["sh", "-c", `printf '%s' '${opts.fileContent}' > work/tracked.txt`]);
   }
-  return { vm: runId, sha: "", rosterPath };
+  return { vm: runId, rosterPath };
 }
 
 describe("setup gate — E2E chain (create → fill → setup)", () => {
@@ -273,7 +262,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     expect(result.assertions.map((a) => a.item)).toEqual(["A", "B", "C"]);
   }, 60_000);
 
-  test("missing dependency is named, never a false fail (127-mapped)", async () => {
+  test("missing dependency is named, never a false fail (125-mapped)", async () => {
     const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
     const box = await makeBox(fake, driver, "gate-dep-curl", originDir, rosterDir);
     fake.configure(box.vm, { curlMissing: true });

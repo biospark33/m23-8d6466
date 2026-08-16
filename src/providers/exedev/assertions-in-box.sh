@@ -12,7 +12,9 @@
 #
 # stdout: one JSON line {"item","ok","note"} per executed assertion (C, D, E)
 # exit:   0 all pass · 2=C · 3=D · 4=E (first failure stops the gate — spend
-#         ordering, INV-2) · 127 = a named missing dependency, never a false fail
+#         ordering, INV-2) · 125 = a named missing dependency, never a false
+#         fail. 125, not 127: /bin/sh's own command-not-found IS 127, and the
+#         host must keep a bare 127 meaning "the gate did not run" (fail-closed).
 #
 # Content over exit status (INV-3): every check inspects WHAT came back.
 # pi --list-models exits 0 while printing "No models available" — that trap is
@@ -30,20 +32,21 @@ Models="$*"
 for dep in curl python3 pi; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     echo "missing dependency: $dep" >&2
-    exit 127
+    exit 125
   fi
 done
 
-# ── the runtime key: box-local only, never printed, never in a note ─────────
+# ── the runtime key: box-local only — never printed, never in a note, never
+# in a curl argv (it rides stdin via `curl -K -`, invisible to `ps`) ─────────
 if [ ! -r "$EnvFile" ]; then
   echo "missing dependency: env file $EnvFile (DF2.3 key delivery)" >&2
-  exit 127
+  exit 125
 fi
 # shellcheck disable=SC1090
 . "$EnvFile"
 if [ -z "${OPENROUTER_API_KEY:-}" ]; then
   echo "missing dependency: OPENROUTER_API_KEY in $EnvFile" >&2
-  exit 127
+  exit 125
 fi
 
 emit() {
@@ -61,8 +64,8 @@ c_fail=""
 c_count=0
 for m in $Models; do
   c_count=$((c_count + 1))
-  resp="$(curl -s --max-time 30 https://openrouter.ai/api/v1/chat/completions \
-    -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+  resp="$(printf 'header = "Authorization: Bearer %s"\n' "$OPENROUTER_API_KEY" \
+    | curl -s --max-time 30 -K - https://openrouter.ai/api/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"reply with the single word: ready\"}],\"provider\":{\"zdr\":true,\"data_collection\":\"deny\"}}")"
   if ! printf '%s' "$resp" | python3 -c '
@@ -144,7 +147,8 @@ emit D 1 "D: pi cost.total $d_total > 0; $d_scan"
 # UNCAPPED — DF2.3 INV-CRED-1 requires a capped key, so E fails. This proves
 # headroom, never liveness: the endpoint answers 200 for a dead key, which is
 # why C above is the liveness proof and runs first.
-key_json="$(curl -s --max-time 30 https://openrouter.ai/api/v1/key -H "Authorization: Bearer $OPENROUTER_API_KEY")"
+key_json="$(printf 'header = "Authorization: Bearer %s"\n' "$OPENROUTER_API_KEY" \
+  | curl -s --max-time 30 -K - https://openrouter.ai/api/v1/key)"
 e_note="$(printf '%s' "$key_json" | python3 -c '
 import json, sys
 try:
@@ -159,7 +163,8 @@ if remaining <= 0:
     print(f"no credit remaining: limit {limit} - usage {usage} = {remaining}"); sys.exit(1)
 print(f"credit remaining {remaining:g} (limit {limit:g} - usage {usage:g}, computed — never limit_remaining)")
 ')"
-if [ $? -ne 0 ]; then
+e_status=$?
+if [ "$e_status" -ne 0 ]; then
   emit E 0 "$e_note"
   exit 4
 fi

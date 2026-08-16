@@ -16,7 +16,8 @@
 
 import { log } from "../../swarmclaw/log.ts";
 import { assertValidRunId } from "../run-record.ts";
-import { ExeDevDriverError, type ExeDevDriver } from "./driver.ts";
+import type { ExeDevDriver } from "./driver.ts";
+import { ExeDevDriverError, shQuote } from "./transport.ts";
 
 export interface FillOptions {
   /** The run id — becomes the `sbx/<run-id>` branch name. */
@@ -95,7 +96,7 @@ export async function fillExeDev(driver: ExeDevDriver, vm: string, opts: FillOpt
   // Clone only when the workdir is not already a git checkout; a re-fill
   // fetches instead, so the existing sandbox branch (the run's output) is
   // never re-created or reset.
-  const fresh = await driver.exec(vm, ["sh", "-c", `test ! -d ${shq(`${work}/.git`)} && echo fresh || echo refill`]);
+  const fresh = await driver.exec(vm, ["sh", "-c", `test ! -d ${shQuote(`${work}/.git`)} && echo fresh || echo refill`]);
   if (fresh.exitCode !== 0) {
     throw new ExeDevDriverError(
       "fill-failed",
@@ -134,9 +135,4 @@ export async function fillExeDev(driver: ExeDevDriver, vm: string, opts: FillOpt
     commitSha: opts.commitSha,
     fill_ms: fillMs,
   });
-}
-
-/** Inline twin of driver.ts's shQuote — keep the two spellings identical. */
-function shq(s: string): string {
-  return `'${s.replaceAll("'", `'\\''`)}'`;
 }

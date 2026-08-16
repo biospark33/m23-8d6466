@@ -49,7 +49,8 @@ import { parseRoster } from "../../phase-engine/roster/schema.ts";
 import { assertValidRunId } from "../run-record.ts";
 import { KEY_ENV_FILE } from "../credentials.ts";
 import { DEFAULT_FILL_WORKDIR } from "./fill.ts";
-import { ExeDevDriverError, shQuote, type ExeDevDriver } from "./driver.ts";
+import type { ExeDevDriver } from "./driver.ts";
+import { ExeDevDriverError, shQuote } from "./transport.ts";
 
 // ─── the contract ───────────────────────────────────────────────────────────
 
@@ -195,6 +196,9 @@ export async function setupGate(
       "pass the run record's commitSha verbatim",
     );
   }
+  // SHA_RE is case-insensitive, but `git rev-parse HEAD` prints lowercase —
+  // normalize ONCE so an uppercase recorded SHA still prefix-matches (A).
+  const wantSha = opts.commitSha.toLowerCase();
   assertPathSafe("rosterPath", opts.rosterPath);
   const envFile = opts.envFile ?? DEFAULT_ENV_FILE;
   assertPathSafe("envFile", envFile);
@@ -240,7 +244,7 @@ export async function setupGate(
   );
   const headSha = head.stdout.trim();
   const dirty = porcelain.stdout.trim();
-  const aOk = head.exitCode === 0 && porcelain.exitCode === 0 && headSha.startsWith(opts.commitSha) && dirty.length === 0;
+  const aOk = head.exitCode === 0 && porcelain.exitCode === 0 && headSha.startsWith(wantSha) && dirty.length === 0;
   emitGate(driver.requestId, g, vm, "gate_a", Date.now() - t, aOk ? "ok" : "error");
   if (head.exitCode !== 0) {
     assertions.push({ item: "A", ok: false, note: `A: git rev-parse HEAD failed (exit ${head.exitCode}): ${head.stderr.trim()}` });
@@ -252,8 +256,8 @@ export async function setupGate(
       ok: false,
       note: `A: git status --porcelain exited ${porcelain.exitCode} with empty output: ${porcelain.stderr.trim() || "the clone's index is unreadable — truncated or mutated"}`,
     });
-  } else if (!headSha.startsWith(opts.commitSha)) {
-    assertions.push({ item: "A", ok: false, note: `A: HEAD ${headSha.slice(0, 7)} does not prefix-match the recorded ${opts.commitSha.slice(0, 7)}` });
+  } else if (!headSha.startsWith(wantSha)) {
+    assertions.push({ item: "A", ok: false, note: `A: HEAD ${headSha.slice(0, 7)} does not prefix-match the recorded ${wantSha.slice(0, 7)}` });
   } else if (dirty.length > 0) {
     const lines = dirty.split("\n");
     assertions.push({
@@ -316,13 +320,16 @@ export async function setupGate(
         }
         return [];
       });
-    if (res.exitCode === 127) {
-      // A named missing dependency, never a false fail (Infra row 5).
+    if (res.exitCode === 125) {
+      // A named missing dependency, never a false fail (Infra row 5). 125, not
+      // 127: /bin/sh itself exits 127 for command-not-found, so a bare 127 must
+      // remain free to mean "the gate did not run" — the fail-closed branch
+      // below owns it.
       const dep = /missing dependency: (\S+)/.exec(res.stderr)?.[1] ?? "unknown";
       assertions.push({
         item: "C",
         ok: false,
-        note: `missing in-box dependency: ${dep} (127-mapped) — the gate names it rather than false-failing`,
+        note: `missing in-box dependency: ${dep} (125-mapped) — the gate names it rather than false-failing`,
       });
     } else {
       // A CONTROLLED stop: the script's own contract is "exit = the first
@@ -364,7 +371,11 @@ export async function setupGate(
         assertions.push(...unproven);
       }
     }
-    emitGate(driver.requestId, g, vm, "gate_cde", Date.now() - t, res.exitCode === 0 ? "ok" : "error");
+    // The label states the gate's own conclusion, not the exit code alone:
+    // exit 0 with NO evidence lines is the fail-closed branch above — an exit-0
+    // script that proved nothing is never an "ok" (round-1 review).
+    const cdeOk = res.exitCode === 0 && results.length > 0 && results.every((r) => r.ok);
+    emitGate(driver.requestId, g, vm, "gate_cde", Date.now() - t, cdeOk ? "ok" : "error");
   }
 
   // ── assemble: fail-closed, VM alive, evidence retained ────────────────────
