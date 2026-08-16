@@ -8,7 +8,7 @@
  * inside the fake box, so C/D/E are exercised end to end.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -635,6 +635,51 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       expect(gateCall?.timeoutMs).toBeGreaterThanOrEqual(1);
     } finally {
       floorFake.cleanup();
+    }
+  }, 60_000);
+
+  test("round-5 regression: no time left at C/D/E — launch refused, never a clamped 1 ms spend past the deadline", async () => {
+    // MUST STAY LAST IN THIS FILE: bun's setSystemTime is FROZEN (probed:
+    // 0 ms advance across real sleeps) and is not unmocked by mock.restore(),
+    // only reset between test FILES — every test after this one would share a
+    // frozen clock, breaking the real-time budget tests above.
+    //
+    // Advancing exactly gateTimeoutMs across the 7 pre-C/D/E seam calls pins
+    // remaining = 0 at the C/D/E check: the launch must be REFUSED with the
+    // named exhaustion notes and the spend script must never reach the seam.
+    // (The guard→budget TOCTOU window itself — microseconds inside
+    // assertionsInBox's cached synchronous read — cannot be driven from
+    // outside the process; this pins the refusal the late remaining read
+    // guarantees, which is the code the round-5 fix changed.)
+    const edgeFake = fakeExeDev();
+    const gateScriptLaunches: boolean[] = [];
+    const frozenRun: FakeCommand = async (argv, o) => {
+      const res = await edgeFake.run(argv, o);
+      gateScriptLaunches.push(argv.some((a) => a.includes("DF2.2 — setup-gate assertions")));
+      setSystemTime(new Date(Date.now() + 500)); // frozen clock: exact 7 × 500 ms schedule
+      return res;
+    };
+    const frozenDriver = new ExeDevDriver({ run: frozenRun });
+    try {
+      const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+      const box = await makeBox(edgeFake, frozenDriver, "gate-cde-expired", originDir, rosterDir);
+      deliverKey(edgeFake, box.vm);
+
+      const result = await frozenDriver.setup(
+        box.vm,
+        gateOpts(box, { commitSha: sha, gateTimeoutMs: 3_500 }), // 7 × 500 ms → 0 ms left at C/D/E
+      );
+      expect(result.ready).toBe(false);
+      expect(result.failedItem).toBe("C");
+      expect(result.assertionCode).toBe(2);
+      for (const item of ["C", "D", "E"] as const) {
+        expect(result.assertions.find((a) => a.item === item)?.note).toMatch(
+          /budget exhausted before C\/D\/E ran/,
+        );
+      }
+      expect(gateScriptLaunches.some((launched) => launched)).toBe(false); // spend script NEVER launched
+    } finally {
+      edgeFake.cleanup();
     }
   }, 60_000);
 });

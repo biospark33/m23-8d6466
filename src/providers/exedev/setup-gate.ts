@@ -227,12 +227,12 @@ export async function setupGate(
   // Free phases (provision/A/B) keep a 1 s floor: they spend nothing, and a
   // deadline-truncated kill there would surface as a cryptic exit-137 rather
   // than the named "budget exhausted" notes the phase guards below emit. The
-  // C/D/E script has NO floor — it starts real model requests (assertion C),
-  // so it never gets a millisecond past the deadline (round-4 review: the old
-  // deadline-derived 1 s floor handed the script 1,000 ms when 1-999 ms
-  // remained, a spend window past the whole-gate budget).
+  // C/D/E script has NO floor — its remaining time is read immediately before
+  // launch and the launch is REFUSED when none is left, so it never starts a
+  // millisecond past the deadline (rounds 4-5: a 1 s floor used to hand the
+  // script 1,000 ms when 1-999 ms remained, and a clamped max(1, …) would
+  // launch a 1 ms spend after the deadline).
   const budgetFree = () => Math.min(assertTimeoutMs, Math.max(1_000, deadline - Date.now()));
-  const budgetSpend = () => Math.min(assertTimeoutMs, Math.max(1, deadline - Date.now()));
 
   // ── provision: stale readiness is never read as this run's (AC6) ──────────
   await driver.execTimed(vm, ["rm", "-f", sentinelPath], budgetFree());
@@ -316,7 +316,13 @@ export async function setupGate(
   // ── C/D/E: ONE in-box script — the runtime key never crosses the wire ─────
   if (assertions.every((a) => a.ok)) {
     t = Date.now();
-    if (Date.now() >= deadline) {
+    const script = assertionsInBox();
+    // Remaining is read HERE — after the adjacent synchronous script read, as
+    // late as possible — and the launch is REFUSED when none is left: a
+    // deadline expiring between the phase entry and this point must never be
+    // clamped into a 1 ms post-deadline spend launch (round-5 review).
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
       const note = `gate budget exhausted before C/D/E ran (earlier phases consumed gateTimeoutMs=${gateTimeoutMs}ms)`;
       assertions.push(
         { item: "C", ok: false, note },
@@ -325,11 +331,10 @@ export async function setupGate(
       );
       emitGate(driver.requestId, g, vm, "gate_cde", Date.now() - t, "error");
     } else {
-      const script = assertionsInBox();
       const res = await driver.execTimed(
         vm,
         ["sh", "-c", script, "sh", opts.rosterPath, envFile, ...models],
-        budgetSpend(), // NEVER the 1 s free-phase floor — C/D/E spends (INV-2)
+        Math.min(assertTimeoutMs, remaining), // positive by the check above — never floored past the deadline
       );
       const KNOWN: ReadonlySet<string> = new Set(["A", "B", "C", "D", "E"]);
       const results = res.stdout
