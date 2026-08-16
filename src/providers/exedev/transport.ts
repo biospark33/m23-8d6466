@@ -67,7 +67,7 @@ export function sshCommand(defaultTimeoutMs: number = DEFAULT_EXEC_TIMEOUT_MS): 
       stdin: opts?.stdin === undefined ? "ignore" : new TextEncoder().encode(opts.stdin),
       stdout: "pipe",
       stderr: "pipe",
-      timeout: opts?.timeoutMs ?? defaultTimeoutMs,
+      timeout: Math.max(1, opts?.timeoutMs ?? defaultTimeoutMs), /* dp:ok defensive clamp; callers pass validated budgets */
       killSignal: "SIGKILL",
     });
     const [stdout, stderr, exitCode] = await Promise.all([

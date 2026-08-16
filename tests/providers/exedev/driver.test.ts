@@ -162,6 +162,29 @@ describe("ExeDevDriver — INV-1 / INV-2 guards", () => {
     // assertValidRunId is the shared grammar — same error text as the store's.
     expect(() => assertValidRunId("../evil")).toThrow(/invalid run id/);
   });
+
+  test("tag guard: unsafe tags reject before any seam call", async () => {
+    const driver = new ExeDevDriver({ run: fake.run });
+    const before = fake.calls.length;
+    for (const bad of ["a; rm -rf /", "-leading-dash", ".leading-dot", "with space", "tag\nnewline", "tag'quote", "tab\tthere"]) {
+      try {
+        await driver.create("tag-guard-box", bad);
+        throw new Error(`should have rejected tag ${JSON.stringify(bad)}`);
+      } catch (e) {
+        expect((e as { code?: string }).code).toBe("tag-invalid");
+      }
+    }
+    expect(fake.calls.length).toBe(before);
+  });
+
+  test("tag guard: a good tag passes through and reaches the substrate", async () => {
+    const driver = new ExeDevDriver({ run: fake.run });
+    const vm = await driver.create("tag-ok-box", "v5.sprint-1");
+    expect(vm.name).toBe("tag-ok-box");
+    expect(vm.httpsUrl).toBe("https://tag-ok-box.exe.xyz");
+    const control = fake.calls.filter((a) => a[0] === "ssh" && a[1] === "exe.dev");
+    expect(control.some((a) => a.slice(2).join(" ").includes("--tag v5.sprint-1"))).toBe(true);
+  });
 });
 
 describe("ExeDevDriver — exec serialization", () => {

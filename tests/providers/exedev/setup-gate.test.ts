@@ -17,6 +17,7 @@ import { ASSERTION_CODE } from "../../../src/providers/exedev/setup-gate.ts";
 import {
   fakeExeDev,
   writePostureAttestation,
+  type FakeCommand,
   type FakeExeDev,
 } from "./fixtures/fake-exedev.ts";
 import { runLocal } from "./helpers.ts";
@@ -465,6 +466,107 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       }
     },
   );
+
+  test("P3: workdir validation — ../evil and spaces reject", async () => {
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    const box = await makeBox(fake, driver, "gate-workdir", originDir, rosterDir);
+    deliverKey(fake, box.vm);
+
+    // evil: parent directory escape
+    await expect(
+      driver.setup(box.vm, gateOpts(box, { commitSha: sha, workdir: "../evil" })),
+    ).rejects.toThrow(/workdir.*not a plain path/i);
+    // space: shell metacharacter
+    await expect(
+      driver.setup(box.vm, gateOpts(box, { commitSha: sha, workdir: "work dir" })),
+    ).rejects.toThrow(/workdir.*not a plain path/i);
+  }, 60_000);
+
+  test("P5b: gate timeout validation — zero timeouts reject", async () => {
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    const box = await makeBox(fake, driver, "gate-timeout", originDir, rosterDir);
+    deliverKey(fake, box.vm);
+
+    await expect(
+      driver.setup(box.vm, gateOpts(box, { commitSha: sha, assertTimeoutMs: 0 })),
+    ).rejects.toThrow(/must each be >= 1 ms/i);
+    await expect(
+      driver.setup(box.vm, gateOpts(box, { commitSha: sha, gateTimeoutMs: 0 })),
+    ).rejects.toThrow(/must each be >= 1 ms/i);
+  }, 60_000);
+
+  test("P1 budget: deterministic whole-gate budget enforcement", async () => {
+    // Construct a slow driver: every execTimed call pays a 400ms tax before the
+    // real seam. The seam delegates to slowFake — the SAME substrate the key is
+    // delivered to and the spend scan reads — so both are non-vacuous.
+    const slowFake = fakeExeDev();
+    const slowRun: FakeCommand = async (argv, o) => {
+      await new Promise((res) => setTimeout(res, 400)); // per-call delay
+      return slowFake.run(argv, o);
+    };
+    const slowDriver = new ExeDevDriver({ run: slowRun });
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    await slowDriver.create("gate-budget");
+    const rosterPath = join(rosterDir, "roster-gate-budget.yaml");
+    writeFileSync(rosterPath, ROSTER, { mode: 0o600 });
+    await slowDriver.fill("gate-budget", { runId: "gate-budget", repoUrl: `file://${originDir}`, commitSha: sha, workdir: "work" });
+    deliverKey(slowFake, "gate-budget");
+
+    try {
+      // 3 provisioning calls + A (2 calls) at ~400 ms each ≈ 2.0 s > 1.5 s deadline
+      const result = await slowDriver.setup("gate-budget", {
+        runId: "gate-budget",
+        rosterPath,
+        commitSha: sha,
+        workdir: "work",
+        envFile: "home/app/.env",
+        sentinelPath: "tmp/PROVISION_READY",
+        evidenceDir,
+        assertTimeoutMs: 30_000, // per-assertion budget is generous
+        gateTimeoutMs: 1_500, // whole-gate deadline is tight — forces B to see exhaustion
+      });
+      expect(result.ready).toBe(false);
+      expect(result.failedItem).toBe("B");
+      expect(result.assertions.find((a) => a.item === "B")?.note).toMatch(/budget exhausted/i);
+      // No chat/completions (spend) ran — filter fake.calls like malformed-roster test
+      const boxCmds = slowFake.calls.filter((a) => a[1] === `${"gate-budget"}.exe.xyz`).flatMap((a) =>
+        typeof a[2] === "string" ? [a[2]] : [],
+      );
+      expect(boxCmds.some((c) => c.includes("chat/completions"))).toBe(false);
+    } finally {
+      slowFake.cleanup();
+    }
+  }, 60_000);
+
+  test("P2 regression: E hardening — data non-dict fails with note", async () => {
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    const box = await makeBox(fake, driver, "gate-e-data-null", originDir, rosterDir);
+    fake.configure(box.vm, { keyBody: { data: null } });
+    deliverKey(fake, box.vm);
+
+    const result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    expect(result.ready).toBe(false);
+    expect(result.failedItem).toBe("E");
+    const e = result.assertions.find((a) => a.item === "E");
+    expect(e?.ok).toBe(false);
+    // Script printed "data object" or similar; ensure note is non-empty
+    expect(e?.note.length).toBeGreaterThan(0);
+    expect(e?.note).toMatch(/data object|unparseable|limit/i);
+  }, 60_000);
+
+  test("P2 regression: E hardening — usage null is treated as 0, passes when limit - 0 > 0", async () => {
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    const box = await makeBox(fake, driver, "gate-e-usage-null", originDir, rosterDir);
+    // limit 20 - usage(null→0) = 20 > 0, so E passes
+    fake.configure(box.vm, { keyBody: { data: { limit: 20, usage: null } } });
+    deliverKey(fake, box.vm);
+
+    const result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    expect(result.ready).toBe(true);
+    expect(result.failedItem).toBeUndefined();
+    const e = result.assertions.find((a) => a.item === "E");
+    expect(e?.ok).toBe(true);
+  }, 60_000);
 });
 
 describe("setup gate — defaults are the story's constants", () => {

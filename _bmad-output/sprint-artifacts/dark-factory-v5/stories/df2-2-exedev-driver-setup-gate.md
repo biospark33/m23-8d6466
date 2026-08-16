@@ -316,6 +316,20 @@ this behavior real. DF2.5 harvests from such a box; DF3.1 dispatches to one.
   new-shape + lsOmitHttps); copyFile test reads the LOCAL artifact; the live-fire scaffold throws
   on half-configured env instead of asserting `true`.
 
+### Review Findings (round 3 — BMAD adversarial review, PR #114)
+
+Three parallel reviewers (Blind Hunter / Edge Case Hunter / Acceptance Auditor); 58 raw
+findings triaged to 7 patches + 51 dismissed (speculative size/OOM limits, shell-semantics
+misreads, working-as-designed items). Auditor: 0 AC violations, all 7 ACs satisfied.
+
+- [x] [Review][Patch] Whole-gate budget never enforced across provision/A/B — only C/D/E see the deadline (spec: whole gate 300_000 ms) [src/providers/exedev/setup-gate.ts:219-290] — fixed: `budget()` = min(assertTimeout, max(1s, deadline-now)) on every exec; hard stop at B and C/D/E phase boundaries records budget-exhausted failures, no spend past deadline
+- [x] [Review][Patch] E's python raises uncaught TypeError on `usage: null` / `data: null` → empty fail note [src/providers/exedev/assertions-in-box.sh:152-165] — fixed: non-dict data → named fail; non-numeric usage (incl. null) → 0; non-numeric limit → named fail; null limit unchanged (uncapped)
+- [x] [Review][Patch] `workdir` is the one unvalidated path arg (rosterPath/envFile/sentinelPath all get `assertPathSafe`) and interpolates unquoted into debugCommands [src/providers/exedev/setup-gate.ts:207,400] — fixed: `assertPathSafe("workdir", …)`
+- [x] [Review][Patch] `create` tag flows unvalidated into ssh argv → remote command line (injection hygiene at trust boundary) [src/providers/exedev/driver.ts:134-140] — fixed: tag regex `^[A-Za-z0-9][A-Za-z0-9._-]*$`, `tag-invalid` error before any command
+- [x] [Review][Patch] `timeoutMs <= 0` unclamped in `sshCommand`; `assertTimeoutMs`/`gateTimeoutMs` accept < 1 [src/providers/exedev/transport.ts:70, src/providers/exedev/setup-gate.ts:208] — fixed: `Math.max(1, …)` clamp + `gate-timeout-invalid` validation
+- [x] [Review][Patch] pi fallback has no timeout when coreutils `timeout` absent (macOS hits this branch today) [src/providers/exedev/assertions-in-box.sh:97] — fixed: python3 `subprocess.call(timeout=60)` wrapper (python3 is a checked dep), timeout → exit 124
+- [x] [Review][Patch] Empty model list → C passes vacuously ("0/0"); host parser guards, standalone script does not [src/providers/exedev/assertions-in-box.sh:65] — fixed: guard after emit() definition (placement matters — before it, `emit` is undefined → exit 127 loses the note), C fails + exit 2
+
 ### Debug Log
 
 - RED→GREEN per module (driver → fill → gate), each cycle observed failing first.
@@ -351,3 +365,8 @@ this behavior real. DF2.5 harvests from such a box; DF3.1 dispatches to one.
 
 - 2026-08-15: DF2.2 implemented via qds-dev (research 0.95 → TDD driver/fill/gate → suite green,
   gates clean). Story status → review.
+- 2026-08-16: BMAD round-3 review (Blind Hunter + Edge Case Hunter + Acceptance Auditor in
+  parallel; 58 raw findings triaged → 7 patches, 51 dismissed with rationale, 0 AC violations).
+  Fixed: whole-gate budget enforcement, E python null-safety, workdir validation, create tag
+  guard, timeout clamps, pi fallback timeout, vacuous-C guard. 7 new regression tests;
+  exedev suite 60 pass / 0 fail / 1 todo; tsc + biome clean.

@@ -46,6 +46,8 @@ export interface FakeBoxConfig {
   modelsJson: Record<string, unknown>;
   /** `GET /api/v1/key` answer (E). `limit: null` = uncapped key. */
   key: { limit: number | null; usage: number };
+  /** Override the entire /api/v1/key response body (E regression testing). */
+  keyBody?: unknown;
   /**
    * `chat/completions` answers by bare model id (C). Omit a model to fall back
    * to `default`. Set an entry to `null` to make that model's ping fail.
@@ -171,8 +173,11 @@ if url.endswith("/chat/completions"):
     sys.exit(0)
 
 if url.endswith("/api/v1/key"):
-    key = cfg.get("key", {})
-    print(json.dumps({"data": {"limit": key.get("limit"), "usage": key.get("usage", 0)}}))
+    if cfg.get("keyBody") is not None:
+        print(json.dumps(cfg["keyBody"]))
+    else:
+        key = cfg.get("key", {})
+        print(json.dumps({"data": {"limit": key.get("limit"), "usage": key.get("usage", 0)}}))
     sys.exit(0)
 
 print(f"fake curl: unhandled url {url}", file=sys.stderr)

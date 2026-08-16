@@ -205,8 +205,16 @@ export async function setupGate(
   const sentinelPath = opts.sentinelPath ?? DEFAULT_SENTINEL_PATH;
   assertPathSafe("sentinelPath", sentinelPath);
   const workdir = opts.workdir ?? DEFAULT_FILL_WORKDIR;
+  assertPathSafe("workdir", workdir);
   const assertTimeoutMs = opts.assertTimeoutMs ?? DEFAULT_ASSERT_TIMEOUT_MS;
   const gateTimeoutMs = opts.gateTimeoutMs ?? DEFAULT_GATE_TIMEOUT_MS;
+  if (assertTimeoutMs < 1 || gateTimeoutMs < 1) {
+    throw new ExeDevDriverError(
+      "gate-timeout-invalid",
+      `assertTimeoutMs (${assertTimeoutMs} ms) and gateTimeoutMs (${gateTimeoutMs} ms) must each be >= 1 ms`,
+      "pass timeouts >= 1 ms",
+    );
+  }
   const models = rosterModels(opts.rosterPath); // throws on a malformed roster — before any spend
 
   const gateStart = Date.now();
@@ -215,16 +223,19 @@ export async function setupGate(
   const g = opts.runId;
   const host = driver.boxHost(vm);
 
+  // ── timing budget: per-assertion AND whole-gate deadline (INV-2: no spend past budget)
+  const budget = () => Math.min(assertTimeoutMs, Math.max(1_000, deadline - Date.now()));
+
   // ── provision: stale readiness is never read as this run's (AC6) ──────────
-  await driver.execTimed(vm, ["rm", "-f", sentinelPath], assertTimeoutMs);
+  await driver.execTimed(vm, ["rm", "-f", sentinelPath], budget());
   // AC7: QDS_TEAM_RUNNER=local beside DF2.3's key line — the environment the
   // in-box engine inherits. Idempotent append, then verified by CONTENT.
   const writeRunner = `mkdir -p "$(dirname ${shQuote(envFile)})" && grep -qx 'QDS_TEAM_RUNNER=local' ${shQuote(envFile)} 2>/dev/null || printf 'QDS_TEAM_RUNNER=local\\n' >> ${shQuote(envFile)}`;
-  await driver.execTimed(vm, ["sh", "-c", writeRunner], assertTimeoutMs);
+  await driver.execTimed(vm, ["sh", "-c", writeRunner], budget());
   const runnerCheck = await driver.execTimed(
     vm,
     ["sh", "-c", `grep -qx 'QDS_TEAM_RUNNER=local' ${shQuote(envFile)}`],
-    assertTimeoutMs,
+    budget(),
   );
   if (runnerCheck.exitCode !== 0) {
     throw new ExeDevDriverError(
@@ -236,11 +247,11 @@ export async function setupGate(
 
   // ── A: git integrity by content (runs before anything that spends — INV-2) ─
   let t = Date.now();
-  const head = await driver.execTimed(vm, ["git", "-C", workdir, "rev-parse", "HEAD"], assertTimeoutMs);
+  const head = await driver.execTimed(vm, ["git", "-C", workdir, "rev-parse", "HEAD"], budget());
   const porcelain = await driver.execTimed(
     vm,
     ["git", "-C", workdir, "status", "--porcelain"],
-    assertTimeoutMs,
+    budget(),
   );
   const headSha = head.stdout.trim();
   const dirty = porcelain.stdout.trim();
@@ -272,120 +283,134 @@ export async function setupGate(
   // ── B: pi registry loaded — content, never $? (AC2's negative control) ────
   if (assertions[0]?.ok === true) {
     t = Date.now();
-    const piPath = await driver.execTimed(vm, ["sh", "-c", "command -v pi"], assertTimeoutMs);
-    if (piPath.exitCode !== 0 || piPath.stdout.trim().length === 0) {
-      assertions.push({ item: "B", ok: false, note: "B: pi is not on the box PATH (command -v pi failed) — the image contract requires pi 0.55.0" });
+    if (Date.now() >= deadline) {
+      assertions.push({ item: "B", ok: false, note: `B: gate budget exhausted before B ran (earlier phases consumed gateTimeoutMs=${gateTimeoutMs}ms)` });
+      emitGate(driver.requestId, g, vm, "gate_b", Date.now() - t, "error");
     } else {
-      const listed = await driver.execTimed(vm, ["pi", "--list-models"], assertTimeoutMs);
-      const out = listed.stdout.trim();
-      if (out.length === 0) {
-        assertions.push({ item: "B", ok: false, note: "B: pi --list-models printed nothing (content check — exit status is not the instrument)" });
-      } else if (/no models available/i.test(out)) {
-        assertions.push({ item: "B", ok: false, note: `B: pi --list-models says: ${out.split("\n")[0]} (exits 0 — the registry did NOT load; content decides, never $?)` });
+      const piPath = await driver.execTimed(vm, ["sh", "-c", "command -v pi"], budget());
+      if (piPath.exitCode !== 0 || piPath.stdout.trim().length === 0) {
+        assertions.push({ item: "B", ok: false, note: "B: pi is not on the box PATH (command -v pi failed) — the image contract requires pi 0.55.0" });
       } else {
-        assertions.push({ item: "B", ok: true, note: "B: pi registry loaded — list-models content present" });
+        const listed = await driver.execTimed(vm, ["pi", "--list-models"], budget());
+        const out = listed.stdout.trim();
+        if (out.length === 0) {
+          assertions.push({ item: "B", ok: false, note: "B: pi --list-models printed nothing (content check — exit status is not the instrument)" });
+        } else if (/no models available/i.test(out)) {
+          assertions.push({ item: "B", ok: false, note: `B: pi --list-models says: ${out.split("\n")[0]} (exits 0 — the registry did NOT load; content decides, never $?)` });
+        } else {
+          assertions.push({ item: "B", ok: true, note: "B: pi registry loaded — list-models content present" });
+        }
       }
+      emitGate(driver.requestId, g, vm, "gate_b", Date.now() - t, assertions.at(-1)?.ok ? "ok" : "error");
     }
-    emitGate(driver.requestId, g, vm, "gate_b", Date.now() - t, assertions.at(-1)?.ok ? "ok" : "error");
   }
 
   // ── C/D/E: ONE in-box script — the runtime key never crosses the wire ─────
   if (assertions.every((a) => a.ok)) {
     t = Date.now();
-    const budget = Math.max(1_000, deadline - Date.now());
-    const script = assertionsInBox();
-    const res = await driver.execTimed(
-      vm,
-      ["sh", "-c", script, "sh", opts.rosterPath, envFile, ...models],
-      budget,
-    );
-    const KNOWN: ReadonlySet<string> = new Set(["A", "B", "C", "D", "E"]);
-    const results = res.stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.startsWith("{"))
-      .flatMap((line) => {
-        try {
-          const v = JSON.parse(line) as { item?: unknown; ok?: unknown; note?: unknown };
-          if (
-            typeof v.item === "string" &&
-            KNOWN.has(v.item) && // an unknown item can never index ASSERTION_CODE — dropped, and the exit-code gate below stays closed
-            typeof v.ok === "boolean" &&
-            typeof v.note === "string"
-          ) {
-            return [{ item: v.item as AssertionItem, ok: v.ok, note: v.note }];
-          }
-        } catch {
-          // a non-JSON line is script noise, not evidence — skipped, not fatal
-        }
-        return [];
-      });
-    // Exit-0 acceptance demands EXACTLY one well-formed result per C/D/E.
-    // results.length === 3 with all three present pins "exactly one each" by
-    // pigeonhole — partial evidence (exit 0 after only C's line) or duplicates
-    // (a buggy/hostile box replaying a line) fall through to fail-closed below
-    // (round-2 review: both shapes used to gate green).
-    const cdeComplete =
-      results.length === 3 &&
-      (["C", "D", "E"] as const).every((it) => results.some((r) => r.item === it));
-    if (res.exitCode === 125) {
-      // A named missing dependency, never a false fail (Infra row 5). 125, not
-      // 127: /bin/sh itself exits 127 for command-not-found, so a bare 127 must
-      // remain free to mean "the gate did not run" — the fail-closed branch
-      // below owns it.
-      const dep = /missing dependency: (\S+)/.exec(res.stderr)?.[1] ?? "unknown";
-      assertions.push({
-        item: "C",
-        ok: false,
-        note: `missing in-box dependency: ${dep} (125-mapped) — the gate names it rather than false-failing`,
-      });
+    if (Date.now() >= deadline) {
+      const note = `gate budget exhausted before C/D/E ran (earlier phases consumed gateTimeoutMs=${gateTimeoutMs}ms)`;
+      assertions.push(
+        { item: "C", ok: false, note },
+        { item: "D", ok: false, note },
+        { item: "E", ok: false, note },
+      );
+      emitGate(driver.requestId, g, vm, "gate_cde", Date.now() - t, "error");
     } else {
-      // A CONTROLLED stop: the script's own contract is "exit = the first
-      // failing item's code (2/3/4)". An exit that matches a FAILED line for
-      // exactly that item is the designed sequential stop (INV-2) — the
-      // remaining items simply never ran and are not fabricated.
-      const code = res.exitCode as 2 | 3 | 4;
-      const controlled =
-        (code === 2 || code === 3 || code === 4) &&
-        results.some((r) => !r.ok && r.item === ({ 2: "C", 3: "D", 4: "E" } as const)[code]);
-      if (controlled) {
-        assertions.push(...results);
-      } else if (res.exitCode === 0 && cdeComplete) {
-        assertions.push(...results);
+      const script = assertionsInBox();
+      const res = await driver.execTimed(
+        vm,
+        ["sh", "-c", script, "sh", opts.rosterPath, envFile, ...models],
+        budget(),
+      );
+      const KNOWN: ReadonlySet<string> = new Set(["A", "B", "C", "D", "E"]);
+      const results = res.stdout
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith("{"))
+        .flatMap((line) => {
+          try {
+            const v = JSON.parse(line) as { item?: unknown; ok?: unknown; note?: unknown };
+            if (
+              typeof v.item === "string" &&
+              KNOWN.has(v.item) && // an unknown item can never index ASSERTION_CODE — dropped, and the exit-code gate below stays closed
+              typeof v.ok === "boolean" &&
+              typeof v.note === "string"
+            ) {
+              return [{ item: v.item as AssertionItem, ok: v.ok, note: v.note }];
+            }
+          } catch {
+            // a non-JSON line is script noise, not evidence — skipped, not fatal
+          }
+          return [];
+        });
+      // Exit-0 acceptance demands EXACTLY one well-formed result per C/D/E.
+      // results.length === 3 with all three present pins "exactly one each" by
+      // pigeonhole — partial evidence (exit 0 after only C's line) or duplicates
+      // (a buggy/hostile box replaying a line) fall through to fail-closed below
+      // (round-2 review: both shapes used to gate green).
+      const cdeComplete =
+        results.length === 3 &&
+        (["C", "D", "E"] as const).every((it) => results.some((r) => r.item === it));
+      if (res.exitCode === 125) {
+        // A named missing dependency, never a false fail (Infra row 5). 125, not
+        // 127: /bin/sh itself exits 127 for command-not-found, so a bare 127 must
+        // remain free to mean "the gate did not run" — the fail-closed branch
+        // below owns it.
+        const dep = /missing dependency: (\S+)/.exec(res.stderr)?.[1] ?? "unknown";
+        assertions.push({
+          item: "C",
+          ok: false,
+          note: `missing in-box dependency: ${dep} (125-mapped) — the gate names it rather than false-failing`,
+        });
       } else {
-        // FAIL-CLOSED (AC1/INV-5): anything else — a SIGKILLed ssh, a dropped
-        // connection (255), a crashed helper, an exit that disagrees with the
-        // evidence — is NOT a pass. Everything not PROVEN is recorded failed:
-        // all emitted lines first (pass and fail alike), then every missing
-        // item, or the last item when the exit is non-zero despite full
-        // evidence (incoherent evidence is unproven evidence).
-        const emitted = results.map((r) => r.item);
-        assertions.push(...results);
-        const missing = (["C", "D", "E"] as const).filter((it) => !emitted.includes(it));
-        const unproven: AssertionResult[] =
-          missing.length > 0
-            ? missing.map((it) => ({
-                item: it,
-                ok: false,
-                note: `in-box gate script exited ${res.exitCode} before this assertion produced evidence: ${res.stderr.trim().slice(0, 120) || "(no stderr — likely killed or disconnected)"}`,
-              }))
-            : [
-                {
-                  item: "E",
+        // A CONTROLLED stop: the script's own contract is "exit = the first
+        // failing item's code (2/3/4)". An exit that matches a FAILED line for
+        // exactly that item is the designed sequential stop (INV-2) — the
+        // remaining items simply never ran and are not fabricated.
+        const code = res.exitCode as 2 | 3 | 4;
+        const controlled =
+          (code === 2 || code === 3 || code === 4) &&
+          results.some((r) => !r.ok && r.item === ({ 2: "C", 3: "D", 4: "E" } as const)[code]);
+        if (controlled) {
+          assertions.push(...results);
+        } else if (res.exitCode === 0 && cdeComplete) {
+          assertions.push(...results);
+        } else {
+          // FAIL-CLOSED (AC1/INV-5): anything else — a SIGKILLed ssh, a dropped
+          // connection (255), a crashed helper, an exit that disagrees with the
+          // evidence — is NOT a pass. Everything not PROVEN is recorded failed:
+          // all emitted lines first (pass and fail alike), then every missing
+          // item, or the last item when the exit is non-zero despite full
+          // evidence (incoherent evidence is unproven evidence).
+          const emitted = results.map((r) => r.item);
+          assertions.push(...results);
+          const missing = (["C", "D", "E"] as const).filter((it) => !emitted.includes(it));
+          const unproven: AssertionResult[] =
+            missing.length > 0
+              ? missing.map((it) => ({
+                  item: it,
                   ok: false,
-                  note: `in-box gate script exited ${res.exitCode} despite complete evidence — treated as unproven, fail-closed`,
-                },
-              ];
-        assertions.push(...unproven);
+                  note: `in-box gate script exited ${res.exitCode} before this assertion produced evidence: ${res.stderr.trim().slice(0, 120) || "(no stderr — likely killed or disconnected)"}`,
+                }))
+              : [
+                  {
+                    item: "E",
+                    ok: false,
+                    note: `in-box gate script exited ${res.exitCode} despite complete evidence — treated as unproven, fail-closed`,
+                  },
+                ];
+          assertions.push(...unproven);
+        }
       }
-    }
-    // The label states the gate's own conclusion, not the exit code alone:
-    // exit 0 with NO evidence lines is the fail-closed branch above — an exit-0
-    // script that proved nothing is never an "ok" (round-1 review). Round 2:
-    // PARTIAL or DUPLICATED evidence is equally unproven — the same
-    // complete-evidence predicate that admits the results decides the label.
-    const cdeOk = res.exitCode === 0 && cdeComplete && results.every((r) => r.ok);
-    emitGate(driver.requestId, g, vm, "gate_cde", Date.now() - t, cdeOk ? "ok" : "error");
+      // The label states the gate's own conclusion, not the exit code alone:
+      // exit 0 with NO evidence lines is the fail-closed branch above — an exit-0
+      // script that proved nothing is never an "ok" (round-1 review). Round 2:
+      // PARTIAL or DUPLICATED evidence is equally unproven — the same
+      // complete-evidence predicate that admits the results decides the label.
+      const cdeOk = res.exitCode === 0 && cdeComplete && results.every((r) => r.ok);
+      emitGate(driver.requestId, g, vm, "gate_cde", Date.now() - t, cdeOk ? "ok" : "error");
+      }
   }
 
   // ── assemble: fail-closed, VM alive, evidence retained ────────────────────

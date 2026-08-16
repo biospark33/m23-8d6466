@@ -131,6 +131,15 @@ export class ExeDevDriver implements ProviderDriver {
   async create(name: string, tag?: string): Promise<ProviderVm> { /* dp:ok a rejection IS the error contract: non-zero exits are content-checked below, spawn errors propagate through the registry proxy's error log */
     // INV-2: the name becomes a public hostname; refuse before any command.
     assertValidRunId(name);
+    // INV-2 (same trust boundary): tag interpolates into ssh argv, which ssh
+    // concatenates into the remote command line — validate before any command.
+    if (tag !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(tag)) {
+      throw new ExeDevDriverError(
+        "tag-invalid",
+        `tag ${JSON.stringify(tag)} is not a plain token (charset [A-Za-z0-9._-], must start alphanumeric)`,
+        "pass a plain tag: letters, digits, dot, underscore, dash; must start alphanumeric",
+      );
+    }
     const res = await this.control([
       "new",
       "--name",

@@ -55,6 +55,14 @@ emit() {
     "$1" "$2" "$3"
 }
 
+# ── empty roster is a wiring bug: the host-side parser guarantees ≥1 model, so
+# an empty list here means C would "pass" vacuously (0/0 answered). Fail C —
+# nothing was proven (placed after emit's definition for obvious reasons).
+if [ -z "$Models" ]; then
+  emit C 0 "no models in the roster — nothing was proven; the host-side parser guarantees at least one model, so an empty list here is a wiring bug"
+  exit 2
+fi
+
 # ── C: live model ping per roster model (setup.just:169-201) ────────────────
 # A real chat/completions POST per model, ZDR + no data collection on the
 # route, accepting `content` OR `reasoning` — reasoning models answer with
@@ -94,7 +102,11 @@ emit C 1 "C: $c_count/$c_count roster models answered over chat/completions (con
 # four keys: a partial cost block fails pi validation and drops the WHOLE
 # roster; a missing/zero cost.input means the factory reports $0.0000 forever
 # while genuinely spending (measured on a 463.6k-token run).
-pi_json="$(if command -v timeout >/dev/null 2>&1; then timeout 60 pi -p --mode json "reply with the single word: ready" 2>/dev/null; else pi -p --mode json "reply with the single word: ready" 2>/dev/null; fi)"
+pi_json="$(if command -v timeout >/dev/null 2>&1; then timeout 60 pi -p --mode json "reply with the single word: ready" 2>/dev/null; else python3 -c 'import subprocess,sys
+try:
+    sys.exit(subprocess.call(["pi","-p","--mode","json","reply with the single word: ready"], timeout=60))
+except Exception:
+    sys.exit(124)' 2>/dev/null; fi)"
 d_total="$(printf '%s' "$pi_json" | python3 -c '
 import json, sys
 try:
@@ -155,9 +167,16 @@ try:
     d = json.load(sys.stdin).get("data", {})
 except Exception:
     print("key endpoint body unparseable"); sys.exit(1)
+if not isinstance(d, dict):
+    print("key endpoint body has no data object"); sys.exit(1)
 limit, usage = d.get("limit"), d.get("usage", 0)
+# usage: null → treat as 0 (nothing spent). limit: null → UNCAPPED fail (existing behavior).
+if not isinstance(usage, (int, float)):
+    usage = 0
 if limit is None:
     print("limit is null — UNCAPPED key; DF2.3 INV-CRED-1 requires a capped key"); sys.exit(1)
+if not isinstance(limit, (int, float)):
+    print("limit is not numeric"); sys.exit(1)
 remaining = limit - usage
 if remaining <= 0:
     print(f"no credit remaining: limit {limit} - usage {usage} = {remaining}"); sys.exit(1)
