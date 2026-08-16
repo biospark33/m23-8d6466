@@ -316,6 +316,19 @@ this behavior real. DF2.5 harvests from such a box; DF3.1 dispatches to one.
   new-shape + lsOmitHttps); copyFile test reads the LOCAL artifact; the live-fire scaffold throws
   on half-configured env instead of asserting `true`.
 
+### Review Findings (round 7 — BMAD wave review, PR #114; rounds 4–6 recorded in commits 94c1bbf/3d16bd5/cd5e888)
+
+Three parallel reviewers (Blind Hunter / Edge Case Hunter retry / Acceptance Auditor retry
+after two context-limit deaths); 15 raw findings triaged → 5 patches + 13 dismissed.
+Auditor verdict: ACCEPT — 0 AC violations, 0 INV violations; round-6 fixes verified present.
+
+- [x] [Review][Patch] fill's symlink guard checked only the FINAL workdir component — a symlinked PARENT (`link/src` where `link` is a symlink) let clone/fetch write outside the intended tree [src/providers/exedev/fill.ts] — fixed: POSIX per-component prefix walk in the probe (IFS=/ split, relative paths supported); regression tests F10 (symlinked parent) + F11 (final component) (CodeRabbit finding, confirmed)
+- [x] [Review][Patch] exec/execTimed accepted whitespace-only argv elements (only length-0 was rejected) [src/providers/exedev/driver.ts] — fixed: `a.trim().length === 0` rejected in both; F9 regression test
+- [x] [Review][Patch] in-box script sourced the DF2.3 env file without re-checking mode 0600 — delivery-time verification existed, post-delivery drift did not [src/providers/exedev/assertions-in-box.sh] — fixed: portable python3 `oct(os.stat)` mode check beside the readability check; wrong mode → named 125 dependency exit; regression test plants 0644
+- [x] [Review][Patch] in-box script inherited IFS/locale from the ssh environment — a polluted IFS or non-C locale could perturb word splitting/matching [src/providers/exedev/assertions-in-box.sh] — fixed: `IFS=' \t\n'` + `LC_ALL=C` reset after `set -u`
+- [x] [Review][Patch] fill probe's `set -- $w` could pathname-expand a workdir component containing a glob char (fill does not charset-validate workdir) [src/providers/exedev/fill.ts] — fixed: `set -f` before the split
+- Dismissed (13, with rationale): assertPathSafe empty-segment "bypass" (false — `slice(1)` intentionally admits only the leading `/` of absolute paths; middle/trailing empties and `..` are caught); tag regex admitting `.`/`-` (false — first char must be alphanumeric); budget-free 1 s floor (documented design — floor applies only to free phases, the paid C/D/E launch is refused at `remaining <= 0`); assertBoxPathSafe fragility (self-retracted by the reviewer); fill URL empty-path (URL-linter scope — git layer rejects harmlessly); boxHost defense-in-depth (assertValidRunId is called); `new-shape` provenance label (the CreateProvenance categorical type IS the Measured-vs-fallback record, and the shape is honestly named); timeout-validation test gap (P5b exists, 4 variants); fixture config-read KeyError (caught); slice(1) "redundancy" (rides the false positive); env-file TOCTOU (single-tenant box, outside threat model); evidence-dir umask weakening (false — 0o700/0o600 carry owner-only bits, umask can only remove).
+
 ### Review Findings (round 3 — BMAD adversarial review, PR #114)
 
 Three parallel reviewers (Blind Hunter / Edge Case Hunter / Acceptance Auditor); 58 raw
@@ -370,3 +383,9 @@ misreads, working-as-designed items). Auditor: 0 AC violations, all 7 ACs satisf
   Fixed: whole-gate budget enforcement, E python null-safety, workdir validation, create tag
   guard, timeout clamps, pi fallback timeout, vacuous-C guard. 7 new regression tests;
   exedev suite 60 pass / 0 fail / 1 todo; tsc + biome clean.
+- 2026-08-16: BMAD round-7 wave review (3-layer parallel + CodeRabbit external finding;
+  15 raw findings → 5 patches incl. LOW, 13 dismissed; auditor ACCEPT). Fixed: fill
+  symlinked-parent walk (CodeRabbit HIGH), whitespace-argv rejection, env-file 0600
+  re-check, in-box IFS/LC_ALL hermeticity, probe noglob guard. 4 new regression tests
+  (F9–F11, round-7 env-mode); exedev suite 79 pass / 0 fail / 1 todo; full suite
+  1550 pass / 3 pre-existing fails; tsc + biome clean; detect_changes LOW.

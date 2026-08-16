@@ -22,6 +22,10 @@
 # computes credit rather than trusting any single field name.
 
 set -u
+# round 7: hermetic parsing — a polluted IFS or non-C locale inherited from the
+# ssh environment must not perturb word splitting or string matching below
+IFS=' \t\n'
+export LC_ALL=C
 
 Roster="${1:?usage: assertions-in-box.sh <rosterPath> <envFile> <model>...}"
 EnvFile="${2:?missing envFile argument}"
@@ -43,6 +47,15 @@ fi
 # in a curl argv (it rides stdin via `curl -K -`, invisible to `ps`) ─────────
 if [ ! -r "$EnvFile" ]; then
   echo "missing dependency: env file $EnvFile (DF2.3 key delivery)" >&2
+  exit 125
+fi
+# round 7: DF2.3 delivers mode 0600 — drift to 0644 before sourcing is a contract violation
+env_mode="$(python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode)[-3:])' "$EnvFile" 2>/dev/null)" || {
+  echo "missing dependency: python3 (0600 mode check)" >&2
+  exit 125
+}
+if [ "$env_mode" != "600" ]; then
+  echo "missing dependency: env file $EnvFile mode is $env_mode not 0600 (DF2.3 contract violation)" >&2
   exit 125
 fi
 # shellcheck disable=SC1090

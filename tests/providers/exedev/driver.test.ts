@@ -443,3 +443,92 @@ describe("ExeDevDriver — BMAD review round 6", () => {
     }
   });
 });
+
+describe("ExeDevDriver — BMAD review round 7", () => {
+  test("F9: exec + execTimed throw on whitespace-only argv elements", async () => {
+    const fake = fakeExeDev();
+    try {
+      const driver = new ExeDevDriver({ run: fake.run });
+      await expect(driver.exec("any", ["   "] as string[])).rejects.toThrow("exec requires a non-empty argv");
+      await expect(driver.exec("any", ["git", "  \t  "] as string[])).rejects.toThrow("exec requires a non-empty argv");
+      await expect(driver.exec("any", ["\n"] as string[])).rejects.toThrow("exec requires a non-empty argv");
+      await expect(driver.execTimed("any", ["   "] as string[], 1000)).rejects.toThrow("exec requires a non-empty argv");
+      await expect(driver.execTimed("any", ["git", "  \t  "] as string[], 1000)).rejects.toThrow("exec requires a non-empty argv");
+    } finally {
+      fake.cleanup();
+    }
+  });
+
+  test("F10: fill rejects workdir with a symlinked PARENT component", async () => {
+    const fake = fakeExeDev();
+    const tempDir = mkdtempSync(join(tmpdir(), "qds-f10-"));
+    let originDir: string;
+    let sha: string;
+
+    try {
+      // Set up a git repo on the HOST (like other fill tests)
+      originDir = join(tempDir, "origin");
+      mkdirSync(originDir, { recursive: true });
+      await runLocal(["git", "init", "-q", "-b", "main", originDir]);
+      await runLocal(["git", "-C", originDir, "-c", "user.email=test@qds", "-c", "user.name=test", "commit", "-q", "--allow-empty", "-m", "init"]);
+      sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+
+      const driver = new ExeDevDriver({ run: fake.run });
+      await driver.create("f10-box");
+
+      // Create a symlinked PARENT directory structure inside the box
+      // The box's working dir is /home/agent/<box-name>/ — create symlink under that
+      await driver.exec("f10-box", ["mkdir", "-p", "real-target"]);
+      await driver.exec("f10-box", ["ln", "-s", "real-target", "link"]);
+
+      // Workdir whose FINAL component is regular but PARENT is symlinked → must reject
+      await expect(
+        driver.fill("f10-box", {
+          runId: "f10-run",
+          repoUrl: `file://${originDir}`,
+          commitSha: sha,
+          workdir: "link/src", // parent "link" is the symlink
+        }),
+      ).rejects.toThrow(/symlink.*fill requires a regular directory/);
+    } finally {
+      fake.cleanup();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("F11: fill rejects workdir with FINAL component symlinked (existing check)", async () => {
+    const fake = fakeExeDev();
+    const tempDir = mkdtempSync(join(tmpdir(), "qds-f11-"));
+    let originDir: string;
+    let sha: string;
+
+    try {
+      // Set up a git repo on the HOST (like other fill tests)
+      originDir = join(tempDir, "origin");
+      mkdirSync(originDir, { recursive: true });
+      await runLocal(["git", "init", "-q", "-b", "main", originDir]);
+      await runLocal(["git", "-C", originDir, "-c", "user.email=test@qds", "-c", "user.name=test", "commit", "-q", "--allow-empty", "-m", "init"]);
+      sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+
+      const driver = new ExeDevDriver({ run: fake.run });
+      await driver.create("f11-box");
+
+      // Create a symlink as the FINAL component inside the box
+      await driver.exec("f11-box", ["mkdir", "-p", "target"]);
+      await driver.exec("f11-box", ["ln", "-s", "target", "direct-link"]);
+
+      // Workdir whose FINAL component is the symlink → must reject (existing check)
+      await expect(
+        driver.fill("f11-box", {
+          runId: "f11-run",
+          repoUrl: `file://${originDir}`,
+          commitSha: sha,
+          workdir: "direct-link",
+        }),
+      ).rejects.toThrow(/symlink.*fill requires a regular directory/);
+    } finally {
+      fake.cleanup();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});

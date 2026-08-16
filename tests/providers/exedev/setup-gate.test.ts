@@ -40,8 +40,8 @@ interface Box {
 /** DF2.3 already delivered the key BEFORE setup (Infra ordering). Planted
  *  HOST-side so the key never appears in the seam's argv corpus — which is
  *  exactly what the INV-4 leak scan asserts against. */
-function deliverKey(fake: FakeExeDev, vm: string, key = "sk-test-0000000000000000000000"): void {
-  writeFileSync(join(fake.homeDir(vm), "app", ".env"), `OPENROUTER_API_KEY=${key}\n`, { mode: 0o600 });
+function deliverKey(fake: FakeExeDev, vm: string, key = "sk-test-0000000000000000000000", mode = 0o600): void {
+  writeFileSync(join(fake.homeDir(vm), "app", ".env"), `OPENROUTER_API_KEY=${key}\n`, { mode });
 }
 
 /** The full create → fill chain on the fake substrate; returns the pinned SHA. */
@@ -763,6 +763,21 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     expect(exitCode).toBe(125);
     expect(stderr).toMatch(/missing dependency: curl python3 pi/);
     expect(stdout).not.toMatch(/^\{/m); // no evidence lines — the gate did not run
+  }, 60_000);
+
+  test("round 7: env file mode 0644 fails C with 0600/DF2.3 violation note", async () => {
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    const box = await makeBox(fake, driver, "gate-env-mode", originDir, rosterDir);
+    // Plant env file with mode 0644 — DF2.3 delivers 0600, drift is a violation
+    deliverKey(fake, box.vm, "sk-test-0000000000000000000000", 0o644);
+
+    const result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    expect(result.ready).toBe(false);
+    expect(result.failedItem).toBe("C");
+    expect(result.assertionCode).toBe(ASSERTION_CODE.C);
+    const c = result.assertions.find((a) => a.item === "C");
+    expect(c?.ok).toBe(false);
+    expect(c?.note).toMatch(/0600.*DF2\.3 contract violation/i);
   }, 60_000);
 
   test("round-6 regression: E rejects negative limit (limit -5) — not positive (round-6)", async () => {

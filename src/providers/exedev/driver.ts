@@ -321,8 +321,9 @@ export class ExeDevDriver implements ProviderDriver {
   async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
     assertValidRunId(vm);
     // round 6: an empty element ships a no-op ssh command
-    if (argv.length === 0 || argv.some((a) => a.length === 0))
-      throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv with no empty elements", "pass the command argv");
+    // round 7: reject whitespace-only elements (no-op substrings)
+    if (argv.length === 0 || argv.some((a) => a.length === 0 || a.trim().length === 0))
+      throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv with no empty or whitespace-only elements", "pass the command argv");
     const command = argv.map(shQuote).join(" ");
     return this.run(["ssh", this.boxHost(vm), command], {
       ...(stdin === undefined ? {} : { stdin }),
@@ -334,8 +335,9 @@ export class ExeDevDriver implements ProviderDriver {
   async execTimed(vm: string, argv: string[], timeoutMs: number, stdin?: string): Promise<ExecResult> {
     assertValidRunId(vm);
     // round 6: an empty element ships a no-op ssh command
-    if (argv.length === 0 || argv.some((a) => a.length === 0))
-      throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv with no empty elements", "pass the command argv");
+    // round 7: reject whitespace-only elements (no-op substrings)
+    if (argv.length === 0 || argv.some((a) => a.length === 0 || a.trim().length === 0))
+      throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv with no empty or whitespace-only elements", "pass the command argv");
     const command = argv.map(shQuote).join(" ");
     return this.run(["ssh", this.boxHost(vm), command], {
       ...(stdin === undefined ? {} : { stdin }),

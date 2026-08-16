@@ -105,7 +105,21 @@ export async function fillExeDev(driver: ExeDevDriver, vm: string, opts: FillOpt
   // fetches instead, so the existing sandbox branch (the run's output) is
   // never re-created or reset. round 6: test -d follows symlinks; fill must
   // write only where it was pointed.
-  const probe = `if test -L ${shQuote(work)}; then echo symlink; elif test ! -d ${shQuote(`${work}/.git`)}; then echo fresh; else echo refill; fi`;
+  // round 7: walk EVERY path component (parent symlinks escape the tree).
+  // POSIX-portable: IFS=/ splits; leading / produces empty first element,
+  // so we start p at / for absolute paths. For each non-empty component,
+  // build the prefix incrementally and check for symlink-ness.
+  const probe = `w=${shQuote(work)}
+p=
+case $w in /*) p=/ ;; esac
+IFS=/; set -f; set -- $w  # -f: a workdir component with a glob char must not expand against the filesystem
+for part in "$@"; do
+  [ -z "$part" ] && continue
+  p="$p$part"
+  [ -L "$p" ] && echo symlink && exit 0
+  p="$p/"
+done
+[ ! -d ${shQuote(`${work}/.git`)} ] && echo fresh || echo refill`;
   const fresh = await driver.exec(vm, ["sh", "-c", probe]);
   if (fresh.exitCode !== 0) {
     throw new ExeDevDriverError(
