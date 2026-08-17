@@ -402,13 +402,15 @@ async function expectArtifactsAbort(
 ): Promise<HarvestError> {
   const evil = join(driver.root, s.runId, "evil-artifacts.tgz");
   await write(evil);
+  const servedBefore = BoxTmpDriver.artifactsServed;
   const err = await harvestWithArtifacts(s.runId, s.hostDir, evil);
   expect(err).toBeInstanceOf(HarvestError);
   const he = err as HarvestError;
   expect(he.code).toBe(code);
-  // The crafted tgz really crossed the seam — not a false green against the
-  // box's own (absent) artifacts.
-  expect(BoxTmpDriver.artifactsServed).toBeGreaterThan(0);
+  // The crafted tgz really crossed the seam THIS invocation — not a false
+  // green against the box's own (absent) artifacts, and not a leftover count
+  // from an earlier serve (asserted relative to the pre-call baseline).
+  expect(BoxTmpDriver.artifactsServed).toBeGreaterThan(servedBefore);
   expect(destClean(artifactsDir(s.runId))).toBeTrue();
   return he;
 }
