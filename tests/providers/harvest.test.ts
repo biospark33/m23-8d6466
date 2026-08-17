@@ -700,6 +700,40 @@ describe("DF2.5 harvest — INV-3: evil artifacts tgzs abort with nothing extrac
     );
   }, 30_000);
 
+  test("alias duplicates (a + ./a, a/b + a//b) → tar-unsafe-entry, dest empty", async () => {
+    const s = await boxSetup("hvst-tar-alias1", 1);
+    await expectArtifactsAbort(
+      s,
+      (p) => writeFileSync(p, gzipSync(buildTar([
+        { name: "a.txt", data: Buffer.from("x") },
+        { name: "./a.txt", data: Buffer.from("y") },
+      ]))),
+      "tar-unsafe-entry",
+    );
+    const s2 = await boxSetup("hvst-tar-alias2", 1);
+    await expectArtifactsAbort(
+      s2,
+      (p) => writeFileSync(p, gzipSync(buildTar([
+        { name: "d/inner.txt", data: Buffer.from("x") },
+        { name: "d//inner.txt", data: Buffer.from("y") },
+      ]))),
+      "tar-unsafe-entry",
+    );
+  }, 30_000);
+
+  test("lone ./ and // segments are canonicalized, not rejected: entry lands at its clean path", async () => {
+    const runId = "hvst-tar-dot";
+    const s = await boxSetup(runId, 1);
+    const tgz = join(driver.root, runId, "evil-artifacts.tgz");
+    writeFileSync(tgz, gzipSync(buildTar([{ name: "./sub//ok.txt", data: Buffer.from("payload") }])));
+    const res = await harvestRun(
+      { driver: new BoxTmpDriver(driver, tgz), store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app" },
+      runId,
+    );
+    expect(mustHarvest(res).count).toBe(1);
+    expect(readFileSync(join(artifactsDir(runId), "sub", "ok.txt"), "utf8")).toBe("payload");
+  }, 30_000);
+
   test("ustar prefix field: full name parses and the file lands at prefix/name", async () => {
     const runId = "hvst-tar-prefix";
     const s = await boxSetup(runId, 1);

@@ -542,10 +542,16 @@ function nulStr(field: Buffer): string {
   return field.toString("utf8").replace(/\0.*$/s, "");
 }
 
-/** Absolute, ".."-segment and empty names are refused — linknames too. */
+/**
+ * Absolute, ".."-segment and empty names are refused — linknames too. The name
+ * is canonicalized (".", "" and repeated "/" segments dropped) so aliases like
+ * "./a" vs "a" or "a//b" vs "a/b" cannot slip past the duplicate/ancestor
+ * checks in pass 1 and collide as a raw EEXIST mid-extraction in pass 2 —
+ * `join(destDir, name)` normalizes, so the validated name must be canonical.
+ */
 function assertPathSafe(kind: "name" | "linkname", raw: string): string {
-  const name = raw.replace(/\/+$/, "");
-  if (name === "" || name.startsWith("/") || name.split("/").includes("..")) {
+  const name = raw.replace(/\/+$/, "").split("/").filter((s) => s !== "" && s !== ".").join("/");
+  if (name === "" || raw.startsWith("/") || raw.split("/").includes("..")) {
     throw new HarvestError(
       "tar-unsafe-entry",
       `artifacts tar ${kind} ${JSON.stringify(raw)} is absolute, empty, or traverses ".." — refusing to extract`,
