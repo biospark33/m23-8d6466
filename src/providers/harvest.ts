@@ -36,6 +36,7 @@ import { createGunzip } from "node:zlib";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import type { ExecResult, ProviderDriver } from "./driver.ts";
 import { DEFAULT_RUNS_DIR, type RunRecord, type RunRecordStore } from "./run-record.ts";
+import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 
 /** Bundle received-bytes cap (INV-3-style bomb defense, host-side). */
 export const BUNDLE_MAX_BYTES = 512 * 1024 * 1024;
@@ -80,6 +81,13 @@ function sanitizeBoxOutput(text: string): string {
 /** Injectable host-git runner — tests spy ordering + inject failures. */
 export type GitRunner = (argv: readonly string[], cwd: string) => Promise<ExecResult>;
 
+/**
+ * Hard ceiling per host-git call — the same bound + signal the seam's
+ * sshCommand enforces (transport.ts): a hung host git (gpg agent prompt, wedged
+ * fs) must die, not hang harvest forever.
+ */
+const GIT_TIMEOUT_MS = 120_000;
+
 /** Default GitRunner: Bun.spawn with an argv ARRAY — never a shell string. */
 export const bunGitRunner: GitRunner = async (argv, cwd) => {
   const proc = Bun.spawn({
@@ -88,6 +96,8 @@ export const bunGitRunner: GitRunner = async (argv, cwd) => {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
+    timeout: GIT_TIMEOUT_MS,
+    killSignal: "SIGKILL",
   });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -122,66 +132,28 @@ export interface ArtifactsOutcome {
 
 // ─── observability ───────────────────────────────────────────────────────────
 
-interface StepCtx {
-  requestId: string;
-  runId: string;
-  driver: string;
-}
-
 type HarvestStep = "bundle_create" | "transfer" | "verify" | "fetch" | "artifacts";
 
 function stepCtx(deps: HarvestDeps, runId: string): StepCtx {
   return { requestId: deps.requestId ?? newRequestId(), runId, driver: deps.driver.name };
 }
 
-/** Same shape as credentials.ts `timed`: one line per step, sub-timing key included. */
-async function timedStep<T>(ctx: StepCtx, step: HarvestStep, fn: () => Promise<T>): Promise<T> {
-  const started = Date.now();
-  const base = {
-    requestId: ctx.requestId,
-    operation: `harvest.${step}`,
-    agentId: null,
-    timestamp: new Date().toISOString(),
-    runId: ctx.runId,
-    step,
-    driver: ctx.driver,
-  };
-  try {
-    const result = await fn();
-    const durationMs = Date.now() - started;
-    log({ ...base, duration: durationMs, durationMs, status: "ok", outcome: "ok", [`${step}_ms`]: durationMs });
-    return result;
-  } catch (e) {
-    const durationMs = Date.now() - started;
-    const err = e as HarvestError;
-    log({
-      ...base,
-      duration: durationMs,
-      durationMs,
-      status: "error",
-      error: { code: err.code ?? "harvest_error", message: err.message },
-      remediation: err.remediation ?? null, // env-var names only, never expanded
-      outcome: "error",
-      [`${step}_ms`]: durationMs,
-    });
-    throw e;
-  }
+/** Harvest's outcome vocabulary for the shared step logger (step-log.ts). */
+const STEP_LABELS = { ok: "ok", error: "error", errorCode: "harvest_error" };
+
+/** One timed, logged harvest step — credentials.ts `timed` shape. */
+function timedStep<T>(ctx: StepCtx, step: HarvestStep, fn: () => Promise<T>): Promise<T> {
+  return timedLoggedStep(ctx, "harvest", step, STEP_LABELS, fn);
 }
 
 function logPreflightError(ctx: StepCtx, err: HarvestError): void {
   log({
-    requestId: ctx.requestId,
-    operation: "harvest.preflight",
-    agentId: null,
-    timestamp: new Date().toISOString(),
+    ...stepBase(ctx, "harvest", "preflight"),
     duration: 0,
+    durationMs: 0,
     status: "error",
     error: { code: err.code, message: err.message },
     remediation: err.remediation,
-    runId: ctx.runId,
-    step: "preflight",
-    driver: ctx.driver,
-    durationMs: 0,
     outcome: "error",
   });
 }
@@ -292,14 +264,35 @@ interface StepA {
   count?: number;
 }
 
-export async function harvestRun(deps: HarvestDeps, runId: string): Promise<HarvestResult> {
+export interface HarvestRunOptions {
+  /**
+   * Ownership signal for the artifact pipeline: teardown pulls artifacts as
+   * its own step 2 BEFORE invoking harvestRun, so it passes this to make
+   * harvestRun skip its Step E — exactly one artifact pull per successful
+   * teardown. Standalone harvestRun calls leave it unset and always pull.
+   */
+  artifactsOwnedByCaller?: boolean;
+}
+
+export async function harvestRun(
+  deps: HarvestDeps,
+  runId: string,
+  opts: HarvestRunOptions = {},
+): Promise<HarvestResult> {
   const started = Date.now();
   const ctx = stepCtx(deps, runId);
   const rec = getRecord(deps, runId);
-  // inkwell prerequisites: a run that never got a VM or a pinned base has
-  // nothing to harvest — exit 0 "none", not an error.
-  if (!rec.vmName || !rec.commitSha) {
+  // inkwell prerequisite: a run that never got a VM has nothing to harvest and
+  // no box to pull artifacts from — exit 0 "none", not an error.
+  if (!rec.vmName) {
     logSummary(ctx, started, { outcome: "none" }, { artifacts: "none" });
+    return { outcome: "none" };
+  }
+  // A VM without a pinned base (a FILL that died mid-flight) can still hold
+  // artifacts: no bundle steps, but Step E runs — the work must not be lost.
+  if (!rec.commitSha) {
+    const art = opts.artifactsOwnedByCaller ? { artifacts: "none" as const } : await pullArtifacts(deps, runId);
+    logSummary(ctx, started, { outcome: "none" }, art);
     return { outcome: "none" };
   }
   const vm = rec.vmName;
@@ -361,9 +354,11 @@ export async function harvestRun(deps: HarvestDeps, runId: string): Promise<Harv
       try {
         await deps.driver.copyFile(vm, "harvest.bundle", hostBundle);
       } catch (e) {
+        // copyFile may reject with a non-Error — coerce, or sanitizeBoxOutput
+        // would itself throw on undefined inside this catch.
         throw new HarvestError(
           "bundle-copy-failed",
-          `copying harvest.bundle out of ${vm} failed: ${sanitizeBoxOutput((e as Error).message)}`,
+          `copying harvest.bundle out of ${vm} failed: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))}`,
           "re-run harvest — the box is still alive; if it repeats, copy the bundle out by hand",
         );
       }
@@ -422,7 +417,10 @@ export async function harvestRun(deps: HarvestDeps, runId: string): Promise<Harv
   }
 
   // Step E — artifacts (not gated on commits; runs even when outcome is none).
-  const art = await pullArtifacts(deps, runId);
+  // Skipped when the caller (teardown's step 2) already owns the pipeline.
+  const art: ArtifactsOutcome = opts.artifactsOwnedByCaller
+    ? { artifacts: "none" } // the caller's own artifacts step did the pull
+    : await pullArtifacts(deps, runId);
   logSummary(ctx, started, result, art);
   return result;
 }
@@ -487,7 +485,7 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
     } catch (e) {
       throw new HarvestError(
         "artifacts-failed",
-        `copying harvest-artifacts.tgz out of ${vm} failed: ${sanitizeBoxOutput((e as Error).message)}`,
+        `copying harvest-artifacts.tgz out of ${vm} failed: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))}`,
         "re-run harvest — the box is still alive; if it repeats, copy the tar out by hand",
       );
     }
@@ -779,6 +777,12 @@ async function streamTar(tgzPath: string, handlers: TarHandlers): Promise<void> 
     }
   };
   const parser = makeTarParser(handlers, fail);
+  // A read-side error (EIO, file swapped mid-read) must not escape as an
+  // unhandled 'error' event on src: route it through fail so out is destroyed
+  // and the race below settles with the structured HarvestError.
+  src.on("error", (e: Error) => {
+    fail(new HarvestError("tar-invalid", `artifacts stream could not be read: ${e.message}`, tarRemediation));
+  });
   out.on("data", (c: Buffer) => {
     if (failure === undefined) parser.push(c);
   });
@@ -848,14 +852,21 @@ async function validateAndExtractTgz(tgzPath: string, destDir: string): Promise<
   }
   let files = 0;
   await streamTar(tgzPath, {
-    onEntry: () => {
-      files++;
+    // Count regular files only — '5' directory entries are not files.
+    onEntry: (header) => {
+      if (header.typeflag !== "5") files++;
     },
     onData: () => {},
     onEntryEnd: () => {},
   });
   rmSync(destDir, { recursive: true, force: true });
   mkdirSync(destDir, { recursive: true, mode: 0o700 });
-  await streamTar(tgzPath, extractHandlers(destDir));
+  // Atomic extraction: a failed pass 2 leaves no partial destination.
+  try {
+    await streamTar(tgzPath, extractHandlers(destDir));
+  } catch (e) {
+    rmSync(destDir, { recursive: true, force: true });
+    throw e;
+  }
   return files;
 }

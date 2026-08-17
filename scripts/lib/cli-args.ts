@@ -84,6 +84,56 @@ export function parseValueFlags(argv: readonly string[], spec: ValueFlagSpec): v
   }
 }
 
+export interface TokenizeSpec {
+  /** Value-taking flags: a following non-flag token is consumed as their value. */
+  valueFlags: readonly string[];
+  /** Boolean flags: recognized and reported via `bools`, never value-consuming. */
+  boolFlags?: readonly string[];
+}
+
+export interface Tokenized {
+  /** argv tokens not starting with `-`, in order. */
+  positionals: string[];
+  /** Flag tokens (+ consumed values), ready for `parseValueFlags`. */
+  flagTokens: string[];
+  /** Which `boolFlags` appeared. */
+  bools: Set<string>;
+}
+
+/**
+ * Split argv into positionals, boolean flags, and value-flag tokens — the
+ * tokenization `sandbox-teardown.ts` and `run-record.ts` each carried inline
+ * (the same loop twice is how the two copies drifted: one got the
+ * trailing-flag fix, the other did not).
+ *
+ * A known value flag consumes the next token ONLY when that token is not
+ * itself a flag: `--driver --no-harvest` must leave `--no-harvest` for bool
+ * parsing so the missing `--driver` value is reported (by `parseValueFlags`,
+ * which owns that error) instead of the flag being silently eaten as a value.
+ * A trailing value flag passes through bare for the same reason.
+ */
+export function tokenizeArgs(argv: readonly string[], spec: TokenizeSpec): Tokenized {
+  const positionals: string[] = [];
+  const flagTokens: string[] = [];
+  const bools = new Set<string>();
+  const knownValues = new Set(spec.valueFlags);
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i] as string;
+    if (!a.startsWith("-")) {
+      positionals.push(a);
+      continue;
+    }
+    if (spec.boolFlags?.includes(a)) {
+      bools.add(a);
+      continue;
+    }
+    flagTokens.push(a);
+    const next = argv[i + 1];
+    if (knownValues.has(a) && next !== undefined && !next.startsWith("-")) flagTokens.push(argv[++i] as string);
+  }
+  return { positionals, flagTokens, bools };
+}
+
 /**
  * Writes a `<prefix>` header plus an indented `- ` line per message to
  * stderr, then `process.exit(code)`. `generate-notice.ts` and

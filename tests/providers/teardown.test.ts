@@ -398,6 +398,35 @@ describe("DF2.5 teardownSandbox", () => {
     expect(existsSync(join(store.dir, `${runId}.bundle`))).toBeFalse();
   }, 30_000);
 
+  // ─── 7b. Artifact-pipeline ownership — exactly one pull per teardown ──────
+
+  test("teardown owns the artifact pipeline: exactly one artifacts exec per successful teardown", async () => {
+    const runId = "df25-onepull";
+    const origin = await makeOrigin();
+    await makeRun(runId);
+    await mintFor(runId);
+    store.set(runId, { commitSha: origin.baseSha });
+    await fillBox(runId, runId, origin.originDir, 3, true);
+
+    // Count in-box artifacts-tar execs by their script content (the recording
+    // fixture keeps only argv + hadStdin, so wrap exec to see stdin).
+    let artifactsPulls = 0;
+    const driverW = Object.create(recording) as RecordingDriver;
+    const innerExec = recording.exec.bind(recording);
+    driverW.exec = (vm: string, argv: string[], stdin?: string) => {
+      if (stdin?.includes("harvest-artifacts.tgz")) artifactsPulls++;
+      return innerExec(vm, argv, stdin);
+    };
+
+    await teardownSandbox(deps({ gitCwd: origin.originDir, driver: driverW }), runId);
+
+    // Step 2 (teardown.artifacts) pulled once; harvestRun skipped its Step E
+    // via artifactsOwnedByCaller — a second pull here is the regression.
+    expect(artifactsPulls).toBe(1);
+    expect(store.get(runId).closedAt).toBeString();
+    expect(existsSync(join(store.dir, `${runId}-artifacts`, "run.log"))).toBeTrue();
+  }, 30_000);
+
   // ─── 8. Idempotent re-run ─────────────────────────────────────────────────
 
   test("idempotent re-run: second teardown is all-skipped, exit ok, closedAt unchanged (first-close-wins)", async () => {
@@ -444,17 +473,29 @@ describe("DF2.5 teardownSandbox", () => {
       exitCode: number;
     }
 
-    async function cli(args: string[], cwd: string): Promise<CliResult> {
+    /**
+     * Run the CLI as a subprocess. `envOverrides` merges last; a value of
+     * `undefined` STRIPS the variable (how a test simulates a missing
+     * $OPENROUTER_PROVISIONING_KEY even when the host shell exports one).
+     */
+    async function cli(
+      args: string[],
+      cwd: string,
+      envOverrides: Record<string, string | undefined> = {},
+    ): Promise<CliResult> {
+      const env: Record<string, string> = { ...process.env } as Record<string, string>;
+      for (const [k, v] of Object.entries(envOverrides)) {
+        if (v === undefined) delete env[k];
+        else env[k] = v;
+      }
+      env.QDS_RUNS_DIR = store.dir;
+      env.QDS_FAKE_BOXES_DIR = join(dir, "boxes");
+      env.QDS_PROVIDER_DRIVER = "fake";
+      env.PATH = process.env.PATH ?? "";
       const proc = Bun.spawn({
         cmd: ["bun", SCRIPT, ...args],
         cwd,
-        env: {
-          ...process.env,
-          QDS_RUNS_DIR: store.dir,
-          QDS_FAKE_BOXES_DIR: join(dir, "boxes"),
-          QDS_PROVIDER_DRIVER: "fake",
-          PATH: process.env.PATH ?? "",
-        },
+        env,
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -495,6 +536,59 @@ describe("DF2.5 teardownSandbox", () => {
       expect(res.exitCode).toBe(0);
       expect(`${res.stdout}${res.stderr}`).toContain("harvested");
       // harvest-only: the record stays open — closure is teardown's last step
+      expect(store.get(runId).closedAt).toBeUndefined();
+    }, 60_000);
+
+    test("unknown run id → structured no-record on stdout, exit 1", async () => {
+      const host = await makeHostRepo();
+      const res = await cli(["no-such-run"], host);
+      expect(res.exitCode).toBe(1);
+      expect(res.stdout).toContain("!! no-record:");
+      expect(res.stdout).toContain("next:");
+    }, 60_000);
+
+    test("harvest <id> --no-harvest → rejected with exit 1 (the gate waiver is teardown-only)", async () => {
+      const host = await makeHostRepo();
+      const res = await cli(["harvest", "some-run", "--no-harvest"], host);
+      expect(res.exitCode).toBe(1);
+      expect(`${res.stdout}${res.stderr}`).toContain("--no-harvest is a teardown flag");
+    }, 60_000);
+
+    test("--dir overrides $QDS_RUNS_DIR for record storage AND bundle/artifact output", async () => {
+      const runId = "df25-script-dir";
+      const origin = await makeOrigin();
+      // The record lives in a SECOND store the env var does not point at:
+      // without --dir the CLI would fail no-record against $QDS_RUNS_DIR.
+      const altDir = join(dir, "alt-runs");
+      const altStore = new RunRecordStore(altDir);
+      await createRun(recording, altStore, { runId });
+      altStore.set(runId, { commitSha: origin.baseSha });
+      await fillBox(runId, runId, origin.originDir, 3, true);
+
+      const res = await cli([runId, "--dir", altDir], origin.originDir);
+
+      expect(res.exitCode).toBe(0);
+      expect(altStore.get(runId).closedAt).toBeString();
+      // both output surfaces landed under --dir, not under $QDS_RUNS_DIR
+      expect(existsSync(join(altDir, `${runId}.bundle`))).toBeTrue();
+      expect(existsSync(join(altDir, `${runId}-artifacts`, "run.log"))).toBeTrue();
+      expect(existsSync(join(store.dir, `${runId}.bundle`))).toBeFalse();
+    }, 60_000);
+
+    test("harvest mode stays credential-free: keyed record, no $OPENROUTER_PROVISIONING_KEY → exit 0", async () => {
+      const runId = "df25-script-keyed-hv";
+      const origin = await makeOrigin();
+      await makeRun(runId);
+      await mintFor(runId); // the record now carries keyHash
+      store.set(runId, { commitSha: origin.baseSha });
+      await fillBox(runId, runId, origin.originDir, 2, true);
+
+      // If the CLI ever built openRouterKeyApi() in harvest mode, the missing
+      // env var would abort with provisioning-key-missing before any work.
+      const res = await cli(["harvest", runId], origin.originDir, { OPENROUTER_PROVISIONING_KEY: undefined });
+
+      expect(res.exitCode).toBe(0);
+      expect(res.stdout).toContain("harvested");
       expect(store.get(runId).closedAt).toBeUndefined();
     }, 60_000);
   });

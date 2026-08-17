@@ -30,7 +30,7 @@ import {
   type TeardownDeps,
 } from "../src/providers/index.ts";
 import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
-import { parseValueFlags } from "./lib/cli-args.ts";
+import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 
 // Structured logs go to stderr so stdout carries only the command's output.
 if (import.meta.main) {
@@ -54,7 +54,7 @@ const HELP = [
 ];
 
 const VALUE_FLAGS = ["--driver", "--dir"] as const;
-const BOOL_FLAGS = new Set(["--no-harvest"]);
+const BOOL_FLAGS = ["--no-harvest"] as const;
 
 export interface ParsedArgs {
   mode: "harvest" | "teardown";
@@ -65,29 +65,15 @@ export interface ParsedArgs {
 }
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
-  const positionals: string[] = [];
-  const flagTokens: string[] = [];
-  let noHarvest = false;
-  const known = new Set<string>(VALUE_FLAGS);
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i] as string;
-    if (!a.startsWith("-")) {
-      positionals.push(a);
-      continue;
-    }
-    if (BOOL_FLAGS.has(a)) {
-      noHarvest = true;
-      continue;
-    }
-    flagTokens.push(a);
-    if (known.has(a) && i + 1 < argv.length) flagTokens.push(argv[++i] as string);
-  }
-
+  // Shared tokenizer: a value flag consumes the next token only when it is not
+  // itself a flag, so `--driver --no-harvest` still recognizes --no-harvest and
+  // parseValueFlags reports the missing --driver value.
+  const { positionals, flagTokens, bools } = tokenizeArgs(argv, { valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS });
   const isHarvest = positionals[0] === "harvest";
   const out: ParsedArgs = {
     mode: isHarvest ? "harvest" : "teardown",
     runId: isHarvest ? positionals[1] : positionals[0],
-    noHarvest,
+    noHarvest: bools.has("--no-harvest"),
   };
   parseValueFlags(flagTokens, {
     flags: VALUE_FLAGS,

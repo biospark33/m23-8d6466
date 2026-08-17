@@ -36,6 +36,7 @@ import { captureSpend, revokeRunKey, verifyRevoked, type CredentialDeps, type Ke
 import type { ProviderDriver } from "./driver.ts";
 import { bunGitRunner, harvestRun, pullArtifacts, type GitRunner } from "./harvest.ts";
 import type { RunRecord, RunRecordStore } from "./run-record.ts";
+import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 
 export class TeardownError extends Error {
   /** Machine-readable failure class; also the `code` in every log line. */
@@ -75,51 +76,16 @@ type TeardownStep = "spend" | "artifacts" | "harvest" | "revoke" | "verify" | "d
 
 const STEPS: readonly TeardownStep[] = ["spend", "artifacts", "harvest", "revoke", "verify", "destroy", "close"];
 
-interface StepCtx {
-  requestId: string;
-  runId: string;
-  driver: string;
-}
+/** Teardown's outcome vocabulary for the shared step logger (step-log.ts). */
+const STEP_LABELS = { ok: "ran", error: "failed", errorCode: "teardown_error" };
 
-function stepBase(ctx: StepCtx, step: TeardownStep) {
-  return {
-    requestId: ctx.requestId,
-    operation: `teardown.${step}`,
-    agentId: null,
-    timestamp: new Date().toISOString(),
-    runId: ctx.runId,
-    step,
-    driver: ctx.driver,
-  };
-}
-
-/** Same shape as credentials.ts `timed`: one line per step, outcome ran|failed. */
-async function runStep<T>(ctx: StepCtx, step: TeardownStep, fn: () => Promise<T>): Promise<T> {
-  const started = Date.now();
-  try {
-    const result = await fn();
-    const durationMs = Date.now() - started;
-    log({ ...stepBase(ctx, step), duration: durationMs, durationMs, status: "ok", outcome: "ran", [`${step}_ms`]: durationMs });
-    return result;
-  } catch (e) {
-    const durationMs = Date.now() - started;
-    const err = e as TeardownError;
-    log({
-      ...stepBase(ctx, step),
-      duration: durationMs,
-      durationMs,
-      status: "error",
-      error: { code: err.code ?? "teardown_error", message: err.message },
-      remediation: err.remediation ?? null, // env-var names only, never expanded
-      outcome: "failed",
-      [`${step}_ms`]: durationMs,
-    });
-    throw e;
-  }
+/** One timed, logged teardown step — credentials.ts `timed` shape. */
+function runStep<T>(ctx: StepCtx, step: TeardownStep, fn: () => Promise<T>): Promise<T> {
+  return timedLoggedStep(ctx, "teardown", step, STEP_LABELS, fn);
 }
 
 function skipStep(ctx: StepCtx, step: TeardownStep, reason: string): void {
-  log({ ...stepBase(ctx, step), duration: 0, durationMs: 0, status: "ok", outcome: "skipped", reason, [`${step}_ms`]: 0 });
+  log({ ...stepBase(ctx, "teardown", step), duration: 0, durationMs: 0, status: "ok", outcome: "skipped", reason, [`${step}_ms`]: 0 });
 }
 
 // ─── preflight probe ─────────────────────────────────────────────────────────
@@ -204,7 +170,7 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   // NEVER the record (INV-5). It waives the harvest gate only.
   if (opts.noHarvest) {
     log({
-      ...stepBase(ctx, "harvest"),
+      ...stepBase(ctx, "teardown", "harvest"),
       operation: "teardown.harvest_waived",
       duration: 0,
       durationMs: 0,
@@ -248,7 +214,9 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
     skipStep(ctx, "harvest", "waived by --no-harvest");
   } else {
     await runStep(ctx, "harvest", async () => {
-      await harvestRun(deps, runId);
+      // Teardown already pulled artifacts as its own step 2 — harvestRun skips
+      // its Step E so exactly one artifact pipeline runs per teardown.
+      await harvestRun(deps, runId, { artifactsOwnedByCaller: true });
     });
   }
 
@@ -274,18 +242,25 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   // 6. destroy — the driver confirms internally; a throw is an UNCONFIRMED
   // destroy and aborts with the record open (AC6). No host-side key file
   // exists to shred — the in-box .env dies with the box, so destroy IS the
-  // shred (recorded deviation; DF2.3 owns shred).
-  await runStep(ctx, "destroy", async () => {
-    try {
-      await deps.driver.destroy(rec.vmName ?? runId);
-    } catch (e) {
-      throw new TeardownError(
-        "destroy-unconfirmed",
-        `driver could not confirm destruction of ${rec.vmName ?? runId}: ${(e as Error).message} — the box may still be alive`,
-        "destroy the box by hand via the driver, then re-run teardown — the record stays open until destroy is confirmed",
-      );
-    }
-  });
+  // shred (recorded deviation; DF2.3 owns shred). A record with no vmName
+  // never had a box: skip destroy entirely (never fall back to destroying by
+  // runId) so the run can still close.
+  const vmName = rec.vmName;
+  if (vmName === undefined) {
+    skipStep(ctx, "destroy", "no box was ever created for this run");
+  } else {
+    await runStep(ctx, "destroy", async () => {
+      try {
+        await deps.driver.destroy(vmName);
+      } catch (e) {
+        throw new TeardownError(
+          "destroy-unconfirmed",
+          `driver could not confirm destruction of ${vmName}: ${(e as Error).message} — the box may still be alive`,
+          "destroy the box by hand via the driver, then re-run teardown — the record stays open until destroy is confirmed",
+        );
+      }
+    });
+  }
 
   // 7. close — LAST. (extensions stay writable post-close; we write none.)
   await runStep(ctx, "close", async () => {

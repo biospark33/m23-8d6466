@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as path from "node:path";
 
-import { parseValueFlags, type ValueFlagSpec } from "../../scripts/lib/cli-args.ts";
+import { parseValueFlags, tokenizeArgs, type ValueFlagSpec } from "../../scripts/lib/cli-args.ts";
 
 const HELP = ["usage: thing --repo-slug <slug>", "  --repo-slug  the slug"];
 
@@ -178,5 +178,50 @@ describe("parseValueFlags — `--help` exits 0 (subprocess: process.exit)", () =
   test("an unknown flag exits non-zero rather than exiting 0 like help", () => {
     const r = runHelp("--nope");
     expect(r.status).not.toBe(0);
+  });
+});
+
+describe("tokenizeArgs — the shared positional/flag split for the per-script CLIs", () => {
+  test("value flag consumes a non-flag token; positionals and bools separate out", () => {
+    const t = tokenizeArgs(["harvest", "run-1", "--driver", "exedev", "--no-harvest"], {
+      valueFlags: ["--driver"],
+      boolFlags: ["--no-harvest"],
+    });
+    expect(t.positionals).toEqual(["harvest", "run-1"]);
+    expect(t.flagTokens).toEqual(["--driver", "exedev"]);
+    expect([...t.bools]).toEqual(["--no-harvest"]);
+  });
+
+  test("a flag-looking next token is NOT consumed — bool still recognized, missing value reported downstream", () => {
+    // `--driver --no-harvest run-1`: the old inline loops ate `--no-harvest` as
+    // the driver value, silently dropping the bool. The tokenizer leaves it
+    // free; parseValueFlags then reports the missing --driver value.
+    const t = tokenizeArgs(["--driver", "--no-harvest", "run-1"], {
+      valueFlags: ["--driver"],
+      boolFlags: ["--no-harvest"],
+    });
+    expect(t.flagTokens).toEqual(["--driver"]);
+    expect([...t.bools]).toEqual(["--no-harvest"]);
+    expect(t.positionals).toEqual(["run-1"]);
+    expect(() =>
+      parseValueFlags(t.flagTokens, { flags: ["--driver"], onValue: () => {}, help: HELP }),
+    ).toThrow("--driver requires a non-empty value");
+  });
+
+  test("a trailing value flag passes through bare (parseValueFlags owns that error)", () => {
+    const t = tokenizeArgs(["--dir"], { valueFlags: ["--dir"] });
+    expect(t.flagTokens).toEqual(["--dir"]);
+    expect(() =>
+      parseValueFlags(t.flagTokens, { flags: ["--dir"], onValue: () => {}, help: HELP }),
+    ).toThrow("--dir requires a non-empty value");
+  });
+
+  test("unknown flags are forwarded, and their next token stays positional", () => {
+    const t = tokenizeArgs(["--wat", "x", "pos"], { valueFlags: ["--dir"] });
+    expect(t.flagTokens).toEqual(["--wat"]); // --wat is unknown → consumes nothing
+    expect(t.positionals).toEqual(["x", "pos"]);
+    expect(() =>
+      parseValueFlags(t.flagTokens, { flags: ["--dir"], onValue: () => {}, help: HELP }),
+    ).toThrow("unknown flag: --wat");
   });
 });

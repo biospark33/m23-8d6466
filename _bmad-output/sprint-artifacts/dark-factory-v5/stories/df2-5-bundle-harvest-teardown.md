@@ -240,33 +240,51 @@ All DoD items implemented and verified on `feature/df2-5-bundle-harvest-teardown
   `ran|skipped|failed`, every abort prints the literal next command and leaves box alive +
   record open (AC3/AC6/INV-5). `--no-harvest` waiver logged to the run log only.
 - `scripts/sandbox-teardown.ts` (NEW): `[harvest] <run-id> [--no-harvest] [--driver] [--dir]`,
-  follows the `run-record.ts` CLI shape; `keyApi` constructed lazily only when the record
+  follows the `run-record.ts` CLI shape — both now tokenize through a shared
+  `tokenizeArgs` in `scripts/lib/cli-args.ts` (a value flag never swallows a following
+  flag as its value); `keyApi` constructed lazily only when the record
   carries `keyHash` (keyless runs work offline).
 - `src/providers/index.ts`: re-exports harvest + teardown.
-- Tests: `tests/providers/harvest.test.ts` (19), `tests/providers/teardown.test.ts` (12),
+- `src/providers/step-log.ts` (NEW): the shared timed/logged-step shape behind harvest's
+  `timedStep` and teardown's `runStep` (per-stream outcome vocabulary, one implementation).
+- Tests: `tests/providers/harvest.test.ts` (21), `tests/providers/teardown.test.ts` (17) —
+  38 combined; `tests/scripts/cli-args.test.ts` gained the `tokenizeArgs` contract describe;
   `tests/providers/fixtures/git-fixture.ts` (shared fixture; commit messages are slug-stamped
   so two repos minted in the same wall-clock second can never collide on a root sha).
 
 ### E2E demo evidence (DoD, mandatory)
 
-`bun test tests/providers/teardown.test.ts` — captured fresh on final run:
+Final run — `bun test tests/providers/teardown.test.ts`:
+
+```
+ 17 pass
+ 0 fail
+ 85 expect() calls
+Ran 17 tests across 1 file. [30.48s]
+```
+
+Evidence bundle captured from the same run (the demo asserts `artifactsDir` is set and
+`artifactEntries` carries `run.log`; on darwin the fake substrate's host `tar` adds
+AppleDouble `._*` entries — recorded deviation 6):
 
 ```json
 {
   "runId": "df25-demo",
-  "baseSha": "f5ca58342ff6fdfd1d409b0750355a9d080fc385",
+  "baseSha": "a26c08758a4fae719e0e149bfe771f6808dc17cd",
   "originCommits": 3,
   "boxCommits": 3,
   "revListRangedCount": 3,
   "revListTotalCount": 6,
   "porcelainEmpty": true,
   "branchListUnchanged": true,
-  "sandboxRef": "3180a6971d07f25a001b1739e5cc5b70f00a8add",
+  "sandboxRef": "a8b811cf74264da561b3b9b4900eee1595da3cf3",
   "spendMicroUsd": 8100,
   "keyRevoked": true,
   "boxDirGone": true,
   "bundlePresent": true,
-  "closedAt": "2026-08-17T00:32:53.173Z",
+  "artifactsDir": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-df25-td-I2NHhI/runs/df25-demo-artifacts",
+  "artifactEntries": ["._app_docs", "._run.log", "._specs", "app_docs", "run.log", "specs"],
+  "closedAt": "2026-08-17T02:26:28.342Z",
   "leak": null
 }
 ```
@@ -277,7 +295,8 @@ includes base ancestry (6 here). Both captured above.
 
 ### Verification summary
 
-- `bun test tests/providers/`: 220 pass / 0 fail / 1 todo (8 files). One load-induced flake
+- `bun test tests/providers/`: 227 pass / 0 fail / 1 todo (8 files, final round-2 run;
+  review round 2 added one harvest test, five teardown tests). One load-induced flake
   observed once in DF2.2's frozen-clock setup-gate test under full-dir parallelism; passes
   standalone 3/3 and on directory re-run.
 - Repo-wide: `bunx tsc --noEmit` clean; `bun run lint` clean; all other test dirs green
@@ -332,8 +351,24 @@ includes base ancestry (6 here). Both captured above.
     mid-write with a partial destination; (c) `--dir` propagates to `deps.runsDir` (no
     split-brain between record location and bundle/artifacts output); (d) `harvest` mode
     never constructs the key API — the credential-free path stays credential-free.
+12. **Review round 2 (post-PR #115, fixed in follow-up commit)**: (a) the harvestRun early
+    guard split on `vmName` vs `commitSha` — a VM without a pinned base still runs the
+    artifacts step (Step E was always ungated on commits; only a record with no VM at all
+    short-circuits to `none`); (b) teardown is the sole owner of the artifact pipeline —
+    it passes `artifactsOwnedByCaller` into harvestRun so exactly one pull runs per
+    successful teardown (a test counts the in-box tar execs); (c) destroy is skipped
+    entirely when the record has no `vmName` (no `runId` fallback into
+    `driver.destroy`), so a box-less run can still close; (d) `bunGitRunner` carries the
+    same `timeout`/`SIGKILL` ceiling as the seam's `sshCommand`; (e) a read-side error on
+    the artifacts source stream routes through the structured fail path instead of an
+    unhandled `error` event; (f) pass-2 tar extraction is atomic (failed extraction
+    removes the destination) and the file count excludes directory entries; (g) both
+    operator CLIs tokenize through shared `tokenizeArgs` so `--driver --no-harvest`
+    reports the missing value instead of eating the bool flag.
+
 ### Change log
 
 | Date | Change |
 |---|---|
 | 2026-08-16 | Story implemented via 5-wave subagent pipeline (fixture → red tests → harvest impl → teardown+CLI → verification); fixture sha-collision flake fixed (slug-stamped commit messages) |
+| 2026-08-16 | Review round 2 (PR #115, CodeRabbit/Gemini/Sift): harvestRun guard split (vmName vs commitSha) + `artifactsOwnedByCaller` single-pull contract; destroy skipped for box-less records; shared `tokenizeArgs` + `step-log.ts`; `bunGitRunner` hard timeout; atomic pass-2 tar extraction + regular-file counting; source-stream error routing; non-Error catch coercion; CLI coverage (no-record / harvest+--no-harvest / --dir / credential-free keyed harvest) |

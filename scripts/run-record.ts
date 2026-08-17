@@ -27,7 +27,7 @@ import {
   type RunRecordPatch,
 } from "../src/providers/run-record.ts";
 import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
-import { parseValueFlags } from "./lib/cli-args.ts";
+import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 
 // Structured logs go to stderr so stdout carries only the command's output.
 if (import.meta.main) {
@@ -113,24 +113,13 @@ function applyExt(patch: RunRecordPatch, raw: string): void {
 }
 
 /**
- * Split argv into positionals and flag tokens, then hand the flag tokens to the
- * shared grammar in `scripts/lib/cli-args.ts`. A known value flag consumes the
- * following token; anything else starting with `--` is forwarded so the shared
- * parser can reject it as an unknown flag.
+ * Split argv into positionals and flag tokens (shared tokenizer in
+ * `scripts/lib/cli-args.ts` — a value flag consumes the following token only
+ * when it is not itself a flag), then hand the flag tokens to the shared
+ * grammar so unknown flags are rejected with the shared errors.
  */
 export function parseArgs(argv: readonly string[]): ParsedArgs {
-  const positionals: string[] = [];
-  const flagTokens: string[] = [];
-  const known = new Set(ALL_FLAGS);
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i] as string;
-    if (!a.startsWith("-")) {
-      positionals.push(a);
-      continue;
-    }
-    flagTokens.push(a);
-    if (known.has(a) && i + 1 < argv.length) flagTokens.push(argv[++i] as string);
-  }
+  const { positionals, flagTokens } = tokenizeArgs(argv, { valueFlags: ALL_FLAGS });
 
   const out: ParsedArgs = { positionals, patch: {} };
   parseValueFlags(flagTokens, {

@@ -71,6 +71,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "qds-hvst-"));
   store = new RunRecordStore(join(dir, "runs"));
   driver = new FakeDriver(join(dir, "boxes"));
+  BoxTmpDriver.artifactsServed = 0;
 });
 
 afterEach(() => {
@@ -171,6 +172,14 @@ async function boxTip(runId: string): Promise<string> {
 // ---------------------------------------------------------------------------
 
 class BoxTmpDriver implements ProviderDriver {
+  /**
+   * Times exec served the crafted tgz. The INV-3 tests assert this is > 0:
+   * if the short-circuit detector above ever stopped matching, the evil tgz
+   * would never cross the seam and the suite would false-green against the
+   * box's own (benign) artifacts instead.
+   */
+  static artifactsServed = 0;
+
   /** When set, the artifacts step is short-circuited and this tgz is served. */
   private readonly artifactsTgz?: string;
 
@@ -212,6 +221,7 @@ class BoxTmpDriver implements ProviderDriver {
   async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
     if (this.artifactsTgz !== undefined && stdin !== undefined && stdin.includes("harvest-artifacts.tgz")) {
       // The box-side tar build is not what INV-3 tests — the validator is.
+      BoxTmpDriver.artifactsServed++;
       return { stdout: "TARBUILT\n", stderr: "", exitCode: 0 };
     }
     return this.inner.exec(vm, argv, stdin);
@@ -334,6 +344,9 @@ async function expectArtifactsAbort(
   expect(err).toBeInstanceOf(HarvestError);
   const he = err as HarvestError;
   expect(he.code).toBe(code);
+  // The crafted tgz really crossed the seam — not a false green against the
+  // box's own (absent) artifacts.
+  expect(BoxTmpDriver.artifactsServed).toBeGreaterThan(0);
   expect(destClean(artifactsDir(s.runId))).toBeTrue();
   return he;
 }
@@ -701,6 +714,7 @@ describe("DF2.5 harvest — INV-3: evil artifacts tgzs abort with nothing extrac
       runId,
     );
     expect(mustHarvest(res).count).toBe(1);
+    expect(BoxTmpDriver.artifactsServed).toBeGreaterThan(0);
     const dest = artifactsDir(runId);
     expect(readFileSync(join(dest, "long-prefix-directory", "leaf.txt"), "utf8")).toBe("payload");
   }, 30_000);
@@ -750,5 +764,42 @@ describe("DF2.5 harvest — box never got a repo", () => {
     const res = await harvestRun(hd(hostDir), runId);
     expect(res).toEqual({ outcome: "none" });
     expect(existsSync(bundlePath(runId))).toBeFalse();
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// VM without a pinned base — artifacts still pulled (Step E is not gated on
+// commitSha; only a record with no VM at all short-circuits)
+// ---------------------------------------------------------------------------
+
+describe("DF2.5 harvest — vmName without commitSha still pulls artifacts", () => {
+  test("record with a vm but no pinned base: outcome none, artifacts pulled, no bundle steps", async () => {
+    const runId = "hvst-nobase";
+    const origin = await makeOriginRepo({ commits: 1 });
+    tmpRoots.push(origin.root);
+    const hostRoot = mkdtempSync(join(tmpdir(), "qds-hvst-nobase-"));
+    tmpRoots.push(hostRoot);
+    const hostDir = join(hostRoot, "host");
+    await runLocal(["git", "clone", "-q", `file://${origin.originDir}`, hostDir]);
+
+    // FILL died after box creation but before pinning the base: vmName set,
+    // commitSha never written (set() cannot unset, so build it that way).
+    await driver.create(runId);
+    store.create(runId);
+    store.set(runId, { vmName: runId });
+    await driver.exec(runId, [
+      "sh",
+      "-c",
+      "mkdir -p app/specs && printf plan > app/specs/plan.md && printf log > app/run.log",
+    ]);
+
+    const res = await harvestRun(hd(hostDir), runId);
+
+    expect(res).toEqual({ outcome: "none" });
+    expect(existsSync(bundlePath(runId))).toBeFalse();
+    // Step E ran with the vm it had: the artifacts landed on the host.
+    const dest = artifactsDir(runId);
+    expect(readFileSync(join(dest, "specs", "plan.md"), "utf8")).toBe("plan");
+    expect(readFileSync(join(dest, "run.log"), "utf8")).toBe("log");
   }, 30_000);
 });
