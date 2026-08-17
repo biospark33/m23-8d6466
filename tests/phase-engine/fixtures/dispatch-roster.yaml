@@ -1,0 +1,15 @@
+# Minimal test roster for dispatch-task tests (DF1.6).
+# Two roles: lead + one worker, using models that exist in pi's catalog.
+defaults:
+  provider: anthropic
+  thinking: off
+  tools: null
+  writes: []
+  harness_engineering: []
+
+roles:
+  - name: lead
+    model: claude-haiku-4-5
+
+  - name: worker
+    model: claude-haiku-4-5

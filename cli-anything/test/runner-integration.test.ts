@@ -19,15 +19,22 @@ function teamEnv(scenario: string): Record<string, string> {
 }
 
 const MERGED_KEYS = [
-  "result",
-  "changedFiles",
-  "partial",
-  "exitStatus",
-  "durationMs",
-  "waivers",
   "agentOutputs",
+  "artifacts",
+  "changedFiles",
   "comsLog",
+  "durationMs",
   "error",
+  "exitStatus",
+  "mulchPrimeError",
+  "mulchPrimed",
+  "partial",
+  "partialOutput",
+  "result",
+  "summary",
+  "testResults",
+  "testsExecuted",
+  "waivers",
 ].sort();
 
 function expectUniformSchema(out: MergedOutput): void {

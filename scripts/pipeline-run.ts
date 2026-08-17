@@ -51,6 +51,7 @@ import {
 } from "../src/phase-engine/index.ts";
 import type { Envelope } from "../src/phase-engine/envelopes/types.ts";
 import { parseValueFlags } from "./lib/cli-args.ts";
+import { dispatchTask } from "../src/phase-engine/phases/dispatch-task.ts";
 
 const HELP = [
   "Usage: bun scripts/pipeline-run.ts --manifest <path> --budget-ms <n> --journal <path>",
@@ -195,6 +196,12 @@ function makeBodyFactory(cwd: string, tracer: Tracer, requestId: string) {
       // (gatedBody over this factory's bodies); the tracer then sees their
       // events through the journal port this run already decorates.
       return async ({ signal }) => ({ exitCode: await runCommand(cmd, signal, cwd, tracer, requestId) });
+    }
+    // DF1.6 T7: dispatch_task registration — the factory closes over the
+    // run's tracer + requestId so prompt events (pre-spawn) and adapted team
+    // events land in the trace store (DD-8, Observability Contract).
+    if (spec.kind === "dispatch_task") {
+      return dispatchTask(spec, { tracer, requestId });
     }
     return () => {
       throw new Error(

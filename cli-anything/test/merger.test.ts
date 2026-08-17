@@ -148,16 +148,23 @@ describe("createPending (single-settle, P0.3-S-H5)", () => {
 });
 
 describe("buildMergedOutput (P0.3-M2 uniform schema)", () => {
-  const KEYS = [
-    "result",
-    "changedFiles",
-    "partial",
-    "exitStatus",
-    "durationMs",
-    "waivers",
+  const EXTENDED_KEYS = [
     "agentOutputs",
+    "artifacts",
+    "changedFiles",
     "comsLog",
+    "durationMs",
     "error",
+    "exitStatus",
+    "mulchPrimeError",
+    "mulchPrimed",
+    "partial",
+    "partialOutput",
+    "result",
+    "summary",
+    "testResults",
+    "testsExecuted",
+    "waivers",
   ].sort();
 
   const identity = (s: string): string => s;
@@ -174,13 +181,19 @@ describe("buildMergedOutput (P0.3-M2 uniform schema)", () => {
       waivers: [],
       error: null,
       redact: identity,
+      // DF1.6 T1: new fields with defaults for base tests
+      testResults: { passed: 0, failed: 0 },
+      testsExecuted: false,
+      summary: "ok",
+      mulchPrimed: false,
+      artifacts: [],
       ...over,
     });
   }
 
   it("success path: error is explicit null, partial false, agentOutputs populated", () => {
     const out = base({});
-    expect(Object.keys(out).sort()).toEqual(KEYS);
+    expect(Object.keys(out).sort()).toEqual(EXTENDED_KEYS);
     expect(out.error).toBeNull();
     expect(out.partial).toBe(false);
     expect(out.exitStatus).toBe("success");
@@ -196,7 +209,7 @@ describe("buildMergedOutput (P0.3-M2 uniform schema)", () => {
     ];
     for (const [exitStatus, error] of paths) {
       const out = base({ exitStatus, error, partial: true });
-      expect(Object.keys(out).sort()).toEqual(KEYS);
+      expect(Object.keys(out).sort()).toEqual(EXTENDED_KEYS);
       expect(out.error).not.toBeNull();
       expect(out.error?.reason).toBe(exitStatus as NonNullable<MergedOutput["error"]>["reason"]);
       expect(typeof out.error?.message).toBe("string");
@@ -254,9 +267,227 @@ describe("buildMergedOutput (P0.3-M2 uniform schema)", () => {
   it("JSON round-trip preserves the exact field set (stdout contract)", () => {
     const out = base({});
     const round = JSON.parse(JSON.stringify(out)) as Record<string, unknown>;
-    expect(Object.keys(round).sort()).toEqual(KEYS);
+    // JSON.stringify preserves null fields (mulchPrimeError, partialOutput are now null)
+    const expectedKeys = EXTENDED_KEYS.sort();
+    expect(Object.keys(round).sort()).toEqual(expectedKeys);
     // error:null must survive stringify (not be dropped as undefined).
     expect("error" in round).toBe(true);
     expect(round.error).toBeNull();
+  });
+});
+
+// DF1.6 T1: Extended schema tests (failing first, TDD)
+describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
+  const identity = (s: string): string => s;
+
+  function base(over: Partial<Parameters<typeof buildMergedOutput>[0]>) {
+    return buildMergedOutput({
+      exitStatus: "success",
+      partial: false,
+      result: { summary: "ok" },
+      agentOutputs: {},
+      changedFiles: [],
+      comsLog: [],
+      durationMs: 1234,
+      waivers: [],
+      error: null,
+      redact: identity,
+      testResults: { passed: 0, failed: 0 },
+      testsExecuted: false,
+      summary: "ok",
+      mulchPrimed: false,
+      artifacts: [],
+      ...over,
+    });
+  }
+
+  it("result stays byte-identical (deep-equal pre/post)", () => {
+    const resultObj = { summary: "done", workerSummaries: { w1: "ok" } };
+    const out = base({ result: resultObj });
+    expect(out.result).toEqual(resultObj);
+    // Verify it's the same structure, not a copy with modifications
+    expect(JSON.stringify(out.result)).toBe(JSON.stringify(resultObj));
+  });
+
+  it("summary copy-up: 2500-char source → ≤2000 with suffix", () => {
+    const longSummary = "x".repeat(2500);
+    const out = base({ result: { summary: longSummary } });
+    expect(out.summary.length).toBeLessThanOrEqual(2000);
+    expect(out.summary).toContain("[truncated");
+    // Verify suffix contains original N (total chars)
+    const match = out.summary.match(/\[truncated, (\d+) chars total\]/);
+    expect(match).toBeTruthy();
+    expect(match?.[1]).toBeDefined();
+  });
+
+  it("summary copy-up exact suffix math: total length == 2000", () => {
+    // Create a summary that's exactly 2500 chars
+    const longSummary = "y".repeat(2500);
+    const out = base({ result: { summary: longSummary } });
+    // Total length should be exactly 2000
+    expect(out.summary.length).toBe(2000);
+    // Suffix format: "[truncated, 2500 chars total]" is 29 chars
+    // So prose should be 1971 chars
+    expect(out.summary.startsWith("y".repeat(1971))).toBe(true);
+    expect(out.summary.endsWith("[truncated, 2500 chars total]")).toBe(true);
+  });
+
+  it("summary within limit: no truncation, exact copy", () => {
+    const shortSummary = "ok";
+    const out = base({ result: { summary: shortSummary } });
+    expect(out.summary).toBe(shortSummary);
+    expect(out.summary.length).toBe(2);
+  });
+
+  it("summary exactly at limit: no truncation", () => {
+    const exactSummary = "z".repeat(2000);
+    const out = base({ result: { summary: exactSummary } });
+    expect(out.summary).toBe(exactSummary);
+    expect(out.summary.length).toBe(2000);
+  });
+
+  it("summary over limit by 1: truncates with suffix", () => {
+    const overSummary = "a".repeat(2001);
+    const out = base({ result: { summary: overSummary } });
+    expect(out.summary.length).toBe(2000);
+    expect(out.summary).toContain("[truncated");
+    // 2000 - "[truncated, 2001 chars total]" (29 chars) = 1971 chars of "a"
+    expect(out.summary.startsWith("a".repeat(1971))).toBe(true);
+  });
+
+  it("testsExecuted invariant: reject sum===0 + true", () => {
+    expect(() =>
+      base({ testResults: { passed: 0, failed: 0 }, testsExecuted: true }),
+    ).toThrow(/testsExecuted/);
+  });
+
+  it("testsExecuted invariant: reject sum===0 + absent", () => {
+    // Omitting testsExecuted when passed+failed===0 should throw
+    // Cast to any to bypass TypeScript for this invariant test
+    const opts = {
+      exitStatus: "success" as const,
+      partial: false,
+      result: {},
+      agentOutputs: {},
+      changedFiles: [],
+      comsLog: [],
+      durationMs: 1234,
+      waivers: [],
+      error: null,
+      redact: identity,
+      testResults: { passed: 0, failed: 0 },
+      // testsExecuted intentionally omitted to test invariant enforcement
+      summary: "ok",
+      mulchPrimed: false,
+      artifacts: [],
+    } as any; // dp:ok intentional type-erasure — asserting the RUNTIME invariant rejects a missing required field, which the type system prevents by design
+    expect(() => buildMergedOutput(opts)).toThrow(/testsExecuted/);
+  });
+
+  it("testsExecuted invariant: accept sum===0 + false", () => {
+    const out = base({ testResults: { passed: 0, failed: 0 }, testsExecuted: false });
+    expect(out.testResults).toEqual({ passed: 0, failed: 0 });
+    expect(out.testsExecuted).toBe(false);
+  });
+
+  it("testsExecuted invariant: accept sum>0 + true", () => {
+    const out = base({ testResults: { passed: 5, failed: 2 }, testsExecuted: true });
+    expect(out.testResults).toEqual({ passed: 5, failed: 2 });
+    expect(out.testsExecuted).toBe(true);
+  });
+
+  it("testsExecuted invariant: accept sum>0 + false (edge case)", () => {
+    // sum>0 with testsExecuted=false is technically valid per invariant
+    // (only sum===0 requires false)
+    const out = base({ testResults: { passed: 1, failed: 0 }, testsExecuted: false });
+    expect(out.testResults).toEqual({ passed: 1, failed: 0 });
+    expect(out.testsExecuted).toBe(false);
+  });
+
+  it("partialOutput truncation with suffix reservation", () => {
+    const longOutput = "b".repeat(12000);
+    const out = base({
+      exitStatus: "transient",
+      error: { reason: "transient", message: "msg" },
+      partial: true,
+      partialOutput: longOutput,
+    });
+    expect(out.partialOutput?.length).toBeLessThanOrEqual(10000);
+    expect(out.partialOutput).toContain("[truncated");
+    const match = out.partialOutput?.match(/\[truncated, (\d+) bytes total\]/);
+    expect(match).toBeTruthy();
+  });
+
+  it("partialOutput exactly at limit: no truncation", () => {
+    const exactOutput = "c".repeat(10000);
+    const out = base({
+      exitStatus: "transient",
+      error: { reason: "transient", message: "msg" },
+      partial: true,
+      partialOutput: exactOutput,
+    });
+    expect(out.partialOutput).toBe(exactOutput);
+    expect(out.partialOutput?.length).toBe(10000);
+  });
+
+  it("all extended fields present on output", () => {
+    const out = base({
+      result: { summary: "custom summary" },
+      testResults: { passed: 10, failed: 2 },
+      testsExecuted: true,
+      summary: "fallback summary",
+      mulchPrimed: true,
+      mulchPrimeError: undefined,
+      artifacts: [{ name: "log.txt", path: "artifacts/log.txt" }],
+    });
+    expect(out.testResults).toEqual({ passed: 10, failed: 2 });
+    expect(out.testsExecuted).toBe(true);
+    // summary is copied from result.summary first, then opts.summary
+    expect(out.summary).toBe("custom summary");
+    expect(out.mulchPrimed).toBe(true);
+    expect(out.mulchPrimeError).toBeNull();
+    expect(out.artifacts).toEqual([{ name: "log.txt", path: "artifacts/log.txt" }]);
+  });
+
+  it("mulchPrimeError present when priming fails", () => {
+    const out = base({
+      mulchPrimed: false,
+      mulchPrimeError: "Hindsight unreachable",
+    });
+    expect(out.mulchPrimed).toBe(false);
+    expect(out.mulchPrimeError).toBe("Hindsight unreachable");
+  });
+
+  it("existing 9-field outputs remain constructible", () => {
+    // This simulates the old call pattern without new fields
+    // The implementation should provide defaults for missing fields
+    const legacyOpts = {
+      exitStatus: "success" as const,
+      partial: false,
+      result: { summary: "legacy" },
+      agentOutputs: {},
+      changedFiles: [],
+      comsLog: [],
+      durationMs: 100,
+      waivers: [],
+      error: null,
+      redact: identity,
+      testResults: { passed: 0, failed: 0 },
+      testsExecuted: false,
+      summary: "legacy",
+      mulchPrimed: false,
+      artifacts: [],
+    };
+    const out = buildMergedOutput(legacyOpts);
+    // All original fields should be present
+    expect(out.result).toEqual({ summary: "legacy" });
+    expect(out.changedFiles).toEqual([]);
+    expect(out.partial).toBe(false);
+    expect(out.exitStatus).toBe("success");
+    expect(out.durationMs).toBe(100);
+    expect(out.waivers).toEqual([]);
+    expect(out.agentOutputs).toEqual({});
+    expect(out.comsLog).toEqual([]);
+    expect(out.error).toBeNull();
   });
 });

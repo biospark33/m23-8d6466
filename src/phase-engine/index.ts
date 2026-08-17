@@ -85,3 +85,9 @@ export {
   type TraceReader,
 } from "./trace/reader.ts";
 export { TracingJournal } from "./trace/journal-bridge.ts";
+// DF1.6: dispatch_task phase body + phases surface
+export {
+  dispatchTask,
+  type DispatchTaskDeps,
+  type DispatchTaskValue,
+} from "./phases/dispatch-task.ts";

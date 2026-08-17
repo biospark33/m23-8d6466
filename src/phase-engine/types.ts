@@ -134,7 +134,7 @@ export function descriptionDefect(name: string, description: string): string | n
   return null;
 }
 
-export type PhaseKind = "engineer" | "agent" | "code";
+export type PhaseKind = "engineer" | "agent" | "code" | "dispatch_task";
 
 /** A phase row is `fail` until the clean-exit branch earns `success`. */
 export type PhaseStatus = "fail" | "success";
@@ -161,6 +161,10 @@ export interface PhaseSpec {
   command?: string[];
   /** Optional on any kind; absent means `testsExecuted: false`, never a zero. */
   testCommand?: string[];
+  /** Required iff `kind === "dispatch_task"`; path to DF1.5 roster file. */
+  roster?: string;
+  /** Required iff `kind === "dispatch_task"`; task brief for the team. */
+  task?: string;
 }
 
 /**
@@ -205,6 +209,11 @@ export interface PhaseSubTimings {
   manifest_load_ms: number;
   phase_body_ms: number;
   journal_write_ms: number;
+  /** DF1.6 v5 names — optional for backward compatibility */
+  mulch_prime_ms?: number;
+  box_setup_ms?: number;
+  team_execution_ms?: number;
+  gate_validation_ms?: number;
 }
 
 /** A persisted phase row. `status` is `fail` at construction, by two independent defaults. */
@@ -222,6 +231,9 @@ export interface PhaseRecord {
   durationMs?: number;
   error?: { code: string; message: string; stack?: string };
   subTimings?: PhaseSubTimings;
+  /** DF1.6 stream health counters — optional, emitted as 0 when absent */
+  malformedLines?: number;
+  droppedOversizeLines?: number;
 }
 
 /** DF1.2 owns this event's shape; the port accepts it append-only from this story on. */
