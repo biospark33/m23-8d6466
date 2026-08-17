@@ -315,9 +315,13 @@ export function getRecord(deps: Pick<HarvestDeps, "store">, runId: string): RunR
     // `store.get` throws plain Errors today; normalize anyway — a nullish
     // throw must not escape the classifier as a TypeError.
     const err = e instanceof Error ? e : new Error(String(e));
-    // The store signals genuine absence as an ENOENT-annotated unreadable
-    // record (readRecord embeds the errno in the message).
-    if ((err as NodeJS.ErrnoException).code === "ENOENT" || err.message.includes("ENOENT")) {
+    // The store signals genuine absence as an errno-annotated unreadable
+    // record (readRecord re-attaches the fs error's `code`). Classified by
+    // the TYPED code only, never by message text: a malformed record's error
+    // message echoes caller-controlled key names ("unknown key: ENOENT"), and
+    // a substring match would misroute that present-but-corrupt record into
+    // no-record's unsafe create-the-run remediation.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       throw new HarvestError(
         "no-record",
         `no run record for ${runId}: ${err.message}`,

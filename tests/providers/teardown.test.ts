@@ -541,12 +541,10 @@ describe("DF2.5 teardownSandbox", () => {
     await mintFor(runId);
     store.set(runId, { commitSha: origin.baseSha });
     await fillBox(runId, runId, origin.originDir, 3, true);
-    rmSync(boxDir(runId), { recursive: true, force: true });
-
-    // exedev shape: exec does NOT throw — it returns a non-zero exit whose
-    // stderr embeds the marker BEYOND the 200-char first-line sanitizer cap,
-    // so the wrapped message alone cannot carry it. The typed noSuchBox flag
-    // (computed on raw stderr at the wrap point) must still drive the skip.
+    // The box directory deliberately stays ALIVE: teardown has no
+    // directory-existence gate, and keeping the physical box present means the
+    // fake driver's raw-throw no-such-box path can never fire here — the skip
+    // below is reachable ONLY through the exedev-shaped exec return.
     const noise = "x".repeat(220);
     const exedevShape = Object.create(recording) as RecordingDriver;
     exedevShape.exec = () =>

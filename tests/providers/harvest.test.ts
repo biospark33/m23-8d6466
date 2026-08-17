@@ -1113,6 +1113,31 @@ describe("DF2.5 harvest — round 4 hardening", () => {
     expect(he.remediation).not.toMatch(/create the run first/);
   }, 30_000);
 
+  test("malformed record whose error text contains ENOENT → record-read-failed (never no-record)", async () => {
+    const runId = "hvst-enoent-key";
+    const s = await boxSetup(runId, 1);
+    // An unknown core key literally named ENOENT: assertWellFormed's message
+    // echoes it ("malformed run record <id>.json: unknown key: ENOENT"), so a
+    // message-substring absence check would misroute this present-but-corrupt
+    // record into no-record's unsafe create-the-run remediation. The typed
+    // errno code (readRecord re-attaches it) must be the only classifier.
+    writeFileSync(
+      store.path(runId),
+      JSON.stringify({ runId, createdAt: new Date().toISOString(), ENOENT: 1 }),
+    );
+    let err: unknown = undefined;
+    try {
+      await harvestRun(hd(s.hostDir), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(HarvestError);
+    const he = err as HarvestError;
+    expect(he.code).toBe("record-read-failed");
+    expect(he.message).toContain("unknown key: ENOENT");
+    expect(he.remediation).not.toMatch(/create the run first/);
+  }, 30_000);
+
   test("genuinely missing record → no-record", async () => {
     const runId = "hvst-ghost";
     const s = await boxSetup(runId, 1);

@@ -697,7 +697,14 @@ function readRecord(p: string, id: string): RunRecord {
   try {
     raw = readFileSync(p, "utf8");
   } catch (e) {
-    throw new Error(`unreadable run record ${id}.json: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`);
+    const code = (e as NodeJS.ErrnoException).code;
+    const err = new Error(`unreadable run record ${id}.json: ${code ?? (e as Error).message}`);
+    // Preserve the errno on the wrapped error: consumers classify absence
+    // (ENOENT) vs other read failures off the TYPED code, never off message
+    // text — a malformed record's own error message echoes caller-controlled
+    // key names ("unknown key: ENOENT") that a substring match would trip on.
+    if (code !== undefined) (err as NodeJS.ErrnoException).code = code;
+    throw err;
   }
   let parsed: unknown;
   try {
