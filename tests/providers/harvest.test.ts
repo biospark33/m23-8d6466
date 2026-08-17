@@ -855,6 +855,30 @@ describe("DF2.5 harvest — INV-3: evil artifacts tgzs abort with nothing extrac
     expect(readFileSync(join(artifactsDir(runId), "sub", "ok.txt"), "utf8")).toBe("payload");
   }, 30_000);
 
+  test("non-zero trailing bytes after EOF block → tar-invalid, dest empty", async () => {
+    const s = await boxSetup("hvst-tar-trail", 1);
+    const base = buildTar([{ name: "a.txt", data: Buffer.from("x") }], { eof: true }); // valid tar + EOF
+    const evil = Buffer.concat([base, Buffer.from([0xff])]); // append garbage after EOF
+    await expectArtifactsAbort(s, (p) => writeFileSync(p, gzipSync(evil)), "tar-invalid");
+    expect(destClean(artifactsDir(s.runId))).toBeTrue();
+  }, 30_000);
+
+  test("zero padding after EOF block is accepted → extracts OK", async () => {
+    const runId = "hvst-tar-zpad";
+    const s = await boxSetup(runId, 1);
+    const tgz = join(driver.root, runId, "evil-artifacts.tgz");
+    // Valid tar + EOF + zero padding (to next block boundary, common from dd/padded writes)
+    const base = buildTar([{ name: "ok.txt", data: Buffer.from("payload") }], { eof: true });
+    const padded = Buffer.concat([base, Buffer.alloc(512)]); // one block of zero padding
+    writeFileSync(tgz, gzipSync(padded));
+    const res = await harvestRun(
+      { driver: new BoxTmpDriver(driver, tgz), store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app" },
+      runId,
+    );
+    expect(mustHarvest(res).count).toBe(1);
+    expect(readFileSync(join(artifactsDir(runId), "ok.txt"), "utf8")).toBe("payload");
+  }, 30_000);
+
   test("ustar prefix field: full name parses and the file lands at prefix/name", async () => {
     const runId = "hvst-tar-prefix";
     const s = await boxSetup(runId, 1);
@@ -1149,5 +1173,69 @@ describe("DF2.5 harvest — round 4 hardening", () => {
     }
     expect(err).toBeInstanceOf(HarvestError);
     expect((err as HarvestError).code).toBe("no-record");
+  }, 30_000);
+
+  test("bundle copyFile failure mid-copy leaves no partial hostBundle", async () => {
+    const runId = "hvst-copy-fail";
+    const s = await boxSetup(runId, 1);
+    const hostBundle = bundlePath(runId);
+
+    // Wrap the real driver to fail copyFile after writing partial bytes
+    let writes = 0;
+    class PartialCopyDriver implements ProviderDriver {
+      constructor(private readonly inner: ProviderDriver) {}
+
+      get name(): string {
+        return this.inner.name;
+      }
+
+      create(name: string, tag?: string): Promise<ProviderVm> {
+        return this.inner.create(name, tag);
+      }
+
+      list(name?: string): Promise<ProviderVm[]> {
+        return this.inner.list(name);
+      }
+
+      destroy(vm: string): Promise<void> {
+        return this.inner.destroy(vm);
+      }
+
+      expose(vm: string, port: number): Promise<string> {
+        return this.inner.expose(vm, port);
+      }
+
+      setPublic(vm: string): Promise<void> {
+        return this.inner.setPublic(vm);
+      }
+
+      whoami(): Promise<string> {
+        return this.inner.whoami();
+      }
+
+      async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
+        return this.inner.exec(vm, argv, stdin);
+      }
+
+      async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+        writes++;
+        // Write a partial bundle header so a partial file would exist if we didn't clean up
+        writeFileSync(localPath, "BUNDLE-v2");
+        throw new Error("mid-copy failure");
+      }
+    }
+
+    const failingDriver = new PartialCopyDriver(driver);
+
+    let err: unknown = undefined;
+    try {
+      await harvestRun({ driver: failingDriver, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app" }, runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(HarvestError);
+    expect((err as HarvestError).code).toBe("bundle-copy-failed");
+    expect(existsSync(hostBundle)).toBeFalse(); // partial bundle was removed
+    expect(writes).toBe(1); // we did attempt the copy
   }, 30_000);
 });

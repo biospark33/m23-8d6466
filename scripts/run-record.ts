@@ -18,6 +18,8 @@
  * that happens to parse as a number.
  */
 
+import { writeSync } from "node:fs";
+
 import {
   CORE_FIELDS,
   EXTENSION_NAMESPACES,
@@ -212,9 +214,11 @@ function isKnownField(field: string): boolean {
 
 if (import.meta.main) {
   try {
-    process.exit(run(process.argv.slice(2), (s) => process.stdout.write(s)));
+    // writeSync, not process.stdout.write: piped stdout can still be pending
+    // when process.exit tears the process down and the diagnostics are lost.
+    process.exit(run(process.argv.slice(2), (s) => writeSync(1, s)));
   } catch (e) {
-    process.stderr.write(`${(e as Error).message}\n`);
+    writeSync(2, `${(e as Error).message}\n`);
     process.exit(1);
   }
 }

@@ -391,6 +391,29 @@ includes base ancestry (6 here). Both captured above.
     probes relative names first so the fake substrate stops touching host-absolute paths;
     (l) main-sink output uses `writeSync` so piped diagnostics survive `process.exit`.
 
+14. **Review round 7 (BMAD 3-layer adversarial re-run of PR #115: Blind ×2 + Edge ×2 + Acceptance Auditor + test auditor — 35 findings → 10 fixed, 25 dismissed as false premises)**: (a) a partial
+    bundle copy left at `<runId>.bundle` by a FAILED `copyFile` now removed before the throw — the
+    bundle file's presence IS the harvest record, so a truncated leftover read as "already
+    harvested" (the post-copy over-cap path still deliberately keeps the file for inspection); same
+    cleanup for a partial artifacts staging tgz; (b) the tar parser now rejects non-zero trailing
+    bytes after the EOF block (`tar-invalid` "trailing garbage") instead of silently dropping them —
+    zero blocking-factor padding still passes (pinned by two new tests); (c) an unparseable
+    (base-256/NaN) checksum field gets a distinct `tar-invalid` message instead of the generic
+    checksum-mismatch one; (d) `GitRunner` docblock now states the LC_ALL=C/LANG=C contract an
+    injected runner must reproduce (AC2's missing-sha grammar); (e) `ancestorsOf` documents its
+    canonicalized-input precondition; (f) `run-record.ts` main block writes through `writeSync`
+    (piped stdout/stderr vs `process.exit`, same reasoning as sandbox-teardown + cli-args); (g)
+    AC3 test additionally pins that the run's own verify argv ran (probe argv never carries the run
+    id) before the abort; (h) cli-args test renamed to claim exactly what it pins; e2e evidence
+    builder comment explains revListTotalCount=6. Notable dismissals (verified false premises):
+    Node `writeFileSync(fd, …)` does NOT close the fd (the lock's catch-close is correct); the
+    artifacts `$P` expansion can only ever contain the five fixed literal `ls -d` names, not
+    attacker-controlled names; concurrent CLI teardowns are already serialized by the O_EXCL
+    `<runId>.lock` (the pre-lock record read is fail-fast only — the authoritative read happens
+    inside the lock); double-precision `summed`/`total` cannot wrap at these magnitudes; bare `--`
+    throwing is the documented tokenizeArgs contract (#56/#88); run-record's single-dash-as-value
+    grammar divergence is the registered deviation.
+
 ### Change log
 
 | Date | Change |
@@ -399,3 +422,4 @@ includes base ancestry (6 here). Both captured above.
 | 2026-08-16 | Review round 2 (PR #115, CodeRabbit/Gemini/Sift): harvestRun guard split (vmName vs commitSha) + `artifactsOwnedByCaller` single-pull contract; destroy skipped for box-less records; shared `tokenizeArgs` + `step-log.ts`; `bunGitRunner` hard timeout; atomic pass-2 tar extraction + regular-file counting; source-stream error routing; non-Error catch coercion; CLI coverage (no-record / harvest+--no-harvest / --dir / credential-free keyed harvest) |
 | 2026-08-16 | Review round 4 (BMAD 3-layer adversarial: Blind Hunter + Edge Case Hunter + Acceptance Auditor, 25 findings → 23 fixed, 2 dismissed): pre-copy size caps, sanitizer on all untrusted embeds + encoded-key redaction, LC_ALL=C git, probe hardening + skip rules, dead-box skip semantics, CLI lock + arity + stray-dash rejection, `.partial` atomic extraction + fd close + name folding + base-256 rejection, NOREPO bundle retention, `record-read-failed` classification, relative-first workdir probes, writeSync sinks; +18 tests (57 provider combined, 42 CLI) |
 | 2026-08-17 | Review round 5 (Sift + Gemini inline + CodeRabbit follow-ups): shared `getRecord` classifier consumed by harvest/teardown/CLI (teardown's preflight no longer maps corrupt records to `no-record`); typed `HarvestError.noSuchBox` flag computed on raw seam output (dead-box skip immune to sanitizer truncation); backslash rejection in `assertPathSafe`; bool-flag `awaitingValue` reset in `tokenizeArgs`; lock cleanup on post-create failure; nullish-safe catch normalization; +5 tests (61 provider combined, 43 CLI) |
+| 2026-08-17 | Review round 7 (BMAD 3-layer adversarial re-run, 6 reviewers, 35 findings → 10 fixed / 25 dismissed): partial-copy cleanup for bundle + staging tgz (bundle presence IS the harvest record), tar trailing-garbage rejection with zero-padding pinned OK, distinct unparseable-checksum error, GitRunner LC_ALL=C contract doc, ancestorsOf precondition doc, run-record writeSync sinks, AC3 run-verify-ran pin, cli-args test rename, e2e count comment; +3 tests (64 provider combined, 38 cli-args) |

@@ -251,6 +251,8 @@ describe("DF2.5 teardownSandbox", () => {
     expect(store.get(runId).closedAt).toBeUndefined();
     // the failed verify never reached a fetch: no refs/sandbox/, no fetch argv
     expect(argvs.some((a) => a.includes("fetch"))).toBeFalse();
+    // verify ran but failed (the run bundle verify aborted before fetch)
+    expect(argvs.some((a) => a.includes("verify") && a.some((x) => x.includes(runId)))).toBeTrue();
     expect(await hostGit(origin.originDir, ["for-each-ref", "--format=%(refname)", "refs/sandbox/"])).toBe("");
   }, 30_000);
 
@@ -802,6 +804,8 @@ async function runE2eDemo(): Promise<TeardownDemoEvidence> {
     revListRangedCount: Number(
       await hostGit(origin.originDir, ["rev-list", "--count", `${origin.baseSha}..refs/sandbox/${runId}`]),
     ),
+    // origin seeded 3 commits (all ancestors of baseSha); the box adds 3 more.
+    // revListTotalCount=6 includes base ancestry, while the RANGED count is the story's literal 3.
     revListTotalCount: Number(
       await hostGit(origin.originDir, ["rev-list", "--count", `refs/sandbox/${runId}`]),
     ),

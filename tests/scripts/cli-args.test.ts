@@ -267,7 +267,7 @@ describe("tokenizeArgs — stray single-dash tokens (opt-in strictness)", () => 
     expect(() => tokenizeArgs(["--driver", "--no-harvest", "-n"], strict)).toThrow("unknown flag: -n");
   });
 
-  test("without the option, single-dash tokens still pass through (run-record.ts unchanged)", () => {
+  test("without the option, single-dash tokens pass through — the run-record.ts grammar relies on this default", () => {
     const t = tokenizeArgs(["-n", "x"], { valueFlags: ["--dir"] });
     expect(t.flagTokens).toEqual(["-n"]);
     expect(t.positionals).toEqual(["x"]);

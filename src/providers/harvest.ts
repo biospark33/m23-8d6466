@@ -133,7 +133,12 @@ export function isNoSuchBox(e: unknown): boolean {
   );
 }
 
-/** Injectable host-git runner — tests spy ordering + inject failures. */
+/**
+ * Injectable host-git runner — tests spy ordering + inject failures.
+ * An injected gitRunner MUST reproduce bunGitRunner's LC_ALL=C/LANG=C env — the AC2
+ * missing-sha extraction matches git's C-locale "error: <sha>" grammar, so a
+ * localized runner silently misclassifies missing-prerequisite as bundle-verify-failed.
+ */
 export type GitRunner = (argv: readonly string[], cwd: string) => Promise<ExecResult>;
 
 /**
@@ -462,6 +467,7 @@ export async function harvestRun(
       } catch (e) {
         // copyFile may reject with a non-Error — coerce, or sanitizeBoxOutput
         // would itself throw on undefined inside this catch.
+        rmSync(hostBundle, { force: true }); // partial copy must not linger — the bundle's presence IS the harvest record
         throw new HarvestError(
           "bundle-copy-failed",
           `copying harvest.bundle out of ${vm} failed: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))}`,
@@ -613,6 +619,7 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
     try {
       await deps.driver.copyFile(vm, "harvest-artifacts.tgz", staging);
     } catch (e) {
+      rmSync(staging, { force: true }); // partial tgz has no inspection value; a later pull overwrites it anyway
       throw new HarvestError(
         "artifacts-failed",
         `copying harvest-artifacts.tgz out of ${vm} failed: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))}`,
@@ -665,14 +672,6 @@ function parseOctal(field: Buffer): number {
   return Number.parseInt(s, 8);
 }
 
-/** Checksum: all 512 bytes summed with the chksum field (148..156) as spaces. */
-function checksumOk(block: Buffer): boolean {
-  let sum = 0;
-  for (let i = 0; i < BLOCK; i++) sum += i >= 148 && i < 156 ? 32 : block[i] ?? 0;
-  const stored = parseOctal(block.subarray(148, 156));
-  return sum === stored;
-}
-
 function nulStr(field: Buffer): string {
   return field.toString("utf8").replace(/\0.*$/s, "");
 }
@@ -699,7 +698,11 @@ function assertPathSafe(kind: "name" | "linkname", raw: string): string {
   return name;
 }
 
-/** Ancestor directory paths of a validated name: "a/b/c" → ["a", "a/b"]. */
+/**
+ * Ancestor directory paths of a validated name: "a/b/c" → ["a", "a/b"].
+ * PRECONDITION: input must already be canonicalized (assertPathSafe output — no trailing slash,
+ * no empty segments); on a raw "a/b/" it would wrongly include the full path among its own ancestors.
+ */
 function ancestorsOf(name: string): string[] {
   const out: string[] = [];
   for (let i = name.indexOf("/"); i !== -1; i = name.indexOf("/", i + 1)) out.push(name.slice(0, i));
@@ -726,7 +729,13 @@ function parseHeader(block: Buffer): ParsedHeader {
   if (nulStr(block.subarray(257, 262)) !== "ustar") {
     throw new HarvestError("tar-invalid", "artifacts tar entry has no ustar magic", tarRemediation);
   }
-  if (!checksumOk(block)) {
+  const stored = parseOctal(block.subarray(148, 156));
+  if (!Number.isFinite(stored)) {
+    throw new HarvestError("tar-invalid", "artifacts tar entry has an unparseable checksum field", tarRemediation);
+  }
+  let sum = 0;
+  for (let i = 0; i < BLOCK; i++) sum += i >= 148 && i < 156 ? 32 : block[i] ?? 0;
+  if (sum !== stored) {
     throw new HarvestError("tar-invalid", "artifacts tar entry failed its header checksum", tarRemediation);
   }
   const size = parseOctal(block.subarray(124, 136));
@@ -785,7 +794,21 @@ function makeTarParser(handlers: TarHandlers, fail: (e: HarvestError) => void): 
 
   return {
     push(chunk: Buffer): void {
-      if (failed || sawEof) return;
+      if (failed) return;
+      if (sawEof) {
+        // Once EOF is seen, any subsequent non-zero byte is garbage — zero padding to blocking factor is OK.
+        if (chunk.some((b) => b !== 0)) {
+          failed = true;
+          fail(
+            new HarvestError(
+              "tar-invalid",
+              "artifacts tar has non-zero trailing bytes after the EOF block — refusing to extract",
+              tarRemediation,
+            ),
+          );
+        }
+        return;
+      }
       try {
         total += chunk.length;
         if (total > TAR_MAX_BYTES) {
@@ -805,7 +828,16 @@ function makeTarParser(handlers: TarHandlers, fail: (e: HarvestError) => void): 
             if (buf.length < BLOCK) return;
             const block = buf.subarray(0, BLOCK);
             if (block.every((b) => b === 0)) {
-              sawEof = true; // trailing bytes after the EOF block are ignored
+              // EOF block found — check the remainder of this chunk for non-zero bytes.
+              const remainder = buf.subarray(BLOCK);
+              if (remainder.some((b) => b !== 0)) {
+                throw new HarvestError(
+                  "tar-invalid",
+                  "artifacts tar has non-zero trailing bytes after the EOF block — refusing to extract",
+                  tarRemediation,
+                );
+              }
+              sawEof = true;
               return;
             }
             const parsed = parseHeader(block);
