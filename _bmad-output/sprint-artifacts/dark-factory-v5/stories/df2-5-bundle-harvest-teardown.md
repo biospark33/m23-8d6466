@@ -247,21 +247,23 @@ All DoD items implemented and verified on `feature/df2-5-bundle-harvest-teardown
 - `src/providers/index.ts`: re-exports harvest + teardown.
 - `src/providers/step-log.ts` (NEW): the shared timed/logged-step shape behind harvest's
   `timedStep` and teardown's `runStep` (per-stream outcome vocabulary, one implementation).
-- Tests: `tests/providers/harvest.test.ts` (38), `tests/providers/teardown.test.ts` (23) —
-  61 combined; `tests/scripts/cli-args.test.ts` gained the `tokenizeArgs` contract describe and
-  `tests/scripts/sandbox-teardown-cli.test.ts` (NEW, 5) covers the CLI lock + record-read
-  classification; `tests/providers/fixtures/git-fixture.ts` (shared fixture; commit messages are
+- Tests: `tests/providers/harvest.test.ts` (49), `tests/providers/teardown.test.ts` (25) —
+  74 combined (counts refreshed at review round 10; the implementation wave landed 38 + 23 and
+  rounds 2–10 added the rest); `tests/scripts/cli-args.test.ts` gained the `tokenizeArgs`
+  contract describe and `tests/scripts/sandbox-teardown-cli.test.ts` (NEW, now 14) covers the
+  CLI lock, record-read classification, runId guard, and lock-release paths;
+  `tests/providers/fixtures/git-fixture.ts` (shared fixture; commit messages are
   slug-stamped so two repos minted in the same wall-clock second can never collide on a root sha).
 
 ### E2E demo evidence (DoD, mandatory)
 
-Final run — `bun test tests/providers/teardown.test.ts`:
+Final round-10 run — `bun test tests/providers/teardown.test.ts`:
 
 ```text
- 23 pass
+ 25 pass
  0 fail
- 112 expect() calls
-Ran 23 tests across 1 file. [42.06s]
+ 126 expect() calls
+Ran 25 tests across 1 file. [80.37s]
 ```
 
 Evidence bundle captured from the same run (the demo asserts `artifactsDir` is set and
@@ -296,9 +298,15 @@ includes base ancestry (6 here). Both captured above.
 
 ### Verification summary
 
-- `bun test tests/providers/`: 250 pass / 0 fail / 1 todo (8 files, final round-5 run;
-  review rounds 2–5 added four harvest tests, six teardown tests — the round-5 run is
-  green with no flake). One load-induced flake observed once in DF2.2's frozen-clock
+- Focal suites at review round 10 (this branch head): `bun test
+  tests/providers/harvest.test.ts tests/providers/teardown.test.ts` → 74 pass / 0 fail
+  (49 + 25); `bun test tests/scripts/sandbox-teardown-cli.test.ts` → 14 pass / 0 fail.
+  Rounds 7–9 added the trailing-garbage/checksum/base-256 pins and the two rm-masking
+  regression tests; round 10 added the isNoSuchBox flag-only pin, the metadata-cap tar
+  test, and the lock-release-failure test. No flakes across the rounds 7–10 focal runs.
+- Full-dir run at round 5 (superseded by the focal runs above for these files, retained
+  as the last whole-directory evidence): `bun test tests/providers/`: 250 pass / 0 fail /
+  1 todo (8 files). One load-induced flake observed once in DF2.2's frozen-clock
   setup-gate test under full-dir parallelism; passes standalone 3/3 and on directory re-run.
 - Repo-wide: `bunx tsc --noEmit` clean; `bun run lint` clean; all other test dirs green
   chunked (phase-engine/scripts/gate/gitnexus/hindsight/swarmclaw/vendor/root).
@@ -342,8 +350,11 @@ includes base ancestry (6 here). Both captured above.
    to destroy. Mitigated by the probe order pinning DF2.2's layouts (`/home/agent/app`,
    `/home/agent/src`, `app`) and the explicit `deps.workdir` override; a caller whose repo
    lives elsewhere must pass it.
-10. **Metadata memory bound (self-review, accepted)**: pax/GNU `L`/`K` payloads buffer in
-    memory during validation, bounded by the 512 MiB summed cap (real records are KBs).
+10. **Metadata memory bound (self-review; closed in review round 10)**: pax/GNU `L`/`K`
+    payloads buffer in memory during validation — originally accepted under the 512 MiB
+    summed cap; round 10 added the independent `TAR_METADATA_MAX_BYTES` (64 KiB) cap,
+    checked at the header before any chunk buffers, so the ceiling for metadata names and
+    link targets is ~250× a real name, not the full tar cap.
 11. **Self-review round (post-PR #115, fixed in follow-up commit)**: (a) untrusted in-box
     stderr is now bounded to one redacted line (200-char cap, `sk-` tokens replaced) before
     touching any error message — a compromised box can no longer exfiltrate the run key
@@ -454,3 +465,5 @@ includes base ancestry (6 here). Both captured above.
 | 2026-08-17 | Review round 5 (Sift + Gemini inline + CodeRabbit follow-ups): shared `getRecord` classifier consumed by harvest/teardown/CLI (teardown's preflight no longer maps corrupt records to `no-record`); typed `HarvestError.noSuchBox` flag computed on raw seam output (dead-box skip immune to sanitizer truncation); backslash rejection in `assertPathSafe`; bool-flag `awaitingValue` reset in `tokenizeArgs`; lock cleanup on post-create failure; nullish-safe catch normalization; +5 tests (61 provider combined, 43 CLI) |
 | 2026-08-17 | Review round 7 (BMAD 3-layer adversarial re-run, 6 reviewers, 35 findings → 10 fixed / 25 dismissed): partial-copy cleanup for bundle + staging tgz (bundle presence IS the harvest record), tar trailing-garbage rejection with zero-padding pinned OK, distinct unparseable-checksum error, GitRunner LC_ALL=C contract doc, ancestorsOf precondition doc, run-record writeSync sinks, AC3 run-verify-ran pin, cli-args test rename, e2e count comment; +3 tests (64 provider combined, 38 cli-args) |
 | 2026-08-17 | Review round 8 (BMAD 3-layer adversarial re-run, 7 reviewers, 45 findings → 10 fixed / 35 dismissed): streamTar sniff-fd try/finally, runId RUN_ID_RE charset guard in parseArgs (path-injection), parse-error `!!`+help surface with stderr main catch retained, HELP text restored on missing-run-id; +12 tests: tar checksum mismatch / unparseable checksum / garbage-octal size, lock malformed+empty body + missing-runs-dir ENOENT + deep-failure release (git stub probe fail), held-lock vs vmName record, no-key + no-VM call-order pins, step-log rejection contracts (new step-log.test.ts) |
+| 2026-08-17 | Review round 9 (Sift/CodeRabbit warning): a bare `rmSync` in a catch/finally could replace the typed error and its noSuchBox classification — shared `rmBestEffort` helper now wraps all four cleanup sites (harvestRun bundle-copy catch, pullArtifacts staging catch, validateAndExtractTgz partial-dir catch, teardown probe finally); +2 harvest regression tests using the directory-at-target trick (72 provider combined) |
+| 2026-08-17 | Review round 10 (CodeRabbit/Gemini-Code-Assist inline): `isNoSuchBox` now classifies a HarvestError solely by its typed `noSuchBox` flag (message fallback only for raw non-HarvestError driver throws); independent 64 KiB `TAR_METADATA_MAX_BYTES` cap closes deviation 10 (header-time check, covers pax `x`/`g` records and GNU `L`/`K` names/link targets); sandbox-teardown lock cleanup guarded on both sites (acquireRunLock: `lock-cleanup-failed` stderr diagnostic + original error rethrown; run() finally: `lock-release-failed` diagnostic that cannot replace the teardown result or exit code); tests: shared `DelegatingDriver` base replaces the three duplicated driver doubles; +3 tests (74 provider combined, 14 CLI) |

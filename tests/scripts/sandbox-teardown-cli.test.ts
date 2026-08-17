@@ -10,7 +10,7 @@
  * themselves are covered by tests/providers/teardown.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -217,5 +217,36 @@ describe("sandbox-teardown run() — lock release after TeardownError mid-teardo
     }
     expect(existsSync(join(runs, "probe-fail.lock"))).toBeFalse();
     expect(store.get("probe-fail").closedAt).toBeUndefined();
+  });
+});
+
+describe("sandbox-teardown run() — lock release failure never masks the primary result", () => {
+  test("a release failure after a deep teardown error is its own diagnostic, exit code untouched", async () => {
+    // Same deep-failure shape as the P6 test (failing `git` stub →
+    // bundle-verify-unavailable), but the stub ALSO strips write permission
+    // from the runs dir, so the finally's rmSync(lock) fails EACCES. Before
+    // the round-10 guard, that throw replaced the reported teardown failure;
+    // now both diagnostics surface and the exit code reflects the teardown.
+    // (chmod by ABSOLUTE path — PATH holds only the stub dir.)
+    const stubDir = join(dir, "stub-bin");
+    mkdirSync(stubDir, { recursive: true });
+    writeFileSync(join(stubDir, "git"), `#!/bin/sh\n/bin/chmod 555 ${runs}\nexit 1\n`, { mode: 0o755 });
+    store.create("release-fail");
+    store.set("release-fail", { vmName: "release-fail-box" });
+    const savedPath = process.env.PATH;
+    process.env.PATH = stubDir;
+    try {
+      const code = await run(["release-fail", "--dir", runs], sink);
+      expect(code).toBe(1); // the teardown failed — the cleanup failure must not change that
+      const text = lines.join("");
+      expect(text).toContain("!! bundle-verify-unavailable:"); // primary failure survives
+      expect(text).toContain("!! lock-release-failed:"); // cleanup failure reported separately
+      expect(text).toContain("next: ");
+      expect(existsSync(join(runs, "release-fail.lock"))).toBeTrue(); // release really failed
+      expect(store.get("release-fail").closedAt).toBeUndefined();
+    } finally {
+      process.env.PATH = savedPath;
+      chmodSync(runs, 0o755); // afterEach sweeps dir — restore write permission first
+    }
   });
 });

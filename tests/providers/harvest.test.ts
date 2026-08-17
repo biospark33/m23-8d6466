@@ -40,8 +40,10 @@ import {
   BUNDLE_MAX_BYTES,
   HarvestError,
   TAR_MAX_BYTES,
+  TAR_METADATA_MAX_BYTES,
   bunGitRunner,
   harvestRun,
+  isNoSuchBox,
   sanitizeBoxOutput,
   type GitRunner,
   type HarvestDeps,
@@ -175,24 +177,12 @@ async function boxTip(runId: string): Promise<string> {
 // BoxTmpDriver — inject crafted artifacts tgzs (INV-3 only; see header)
 // ---------------------------------------------------------------------------
 
-class BoxTmpDriver implements ProviderDriver {
-  /**
-   * Times exec served the crafted tgz. The INV-3 tests assert this is > 0:
-   * if the short-circuit detector above ever stopped matching, the evil tgz
-   * would never cross the seam and the suite would false-green against the
-   * box's own (benign) artifacts instead.
-   */
-  static artifactsServed = 0;
-
-  /** When set, the artifacts step is short-circuited and this tgz is served. */
-  private readonly artifactsTgz?: string;
-
-  constructor(inner: ProviderDriver, artifactsTgz?: string) {
-    this.inner = inner;
-    this.artifactsTgz = artifactsTgz;
-  }
-
-  private readonly inner: ProviderDriver;
+/**
+ * Delegates every ProviderDriver method to `inner` — the shared base for the
+ * test doubles below, which override only the method they spy on or hijack.
+ */
+class DelegatingDriver implements ProviderDriver {
+  constructor(protected readonly inner: ProviderDriver) {}
 
   get name(): string {
     return this.inner.name;
@@ -222,7 +212,33 @@ class BoxTmpDriver implements ProviderDriver {
     return this.inner.whoami();
   }
 
-  async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
+  exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
+    return this.inner.exec(vm, argv, stdin);
+  }
+
+  copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+    return this.inner.copyFile(vm, remotePath, localPath);
+  }
+}
+
+class BoxTmpDriver extends DelegatingDriver {
+  /**
+   * Times exec served the crafted tgz. The INV-3 tests assert this is > 0:
+   * if the short-circuit detector above ever stopped matching, the evil tgz
+   * would never cross the seam and the suite would false-green against the
+   * box's own (benign) artifacts instead.
+   */
+  static artifactsServed = 0;
+
+  /** When set, the artifacts step is short-circuited and this tgz is served. */
+  private readonly artifactsTgz?: string;
+
+  constructor(inner: ProviderDriver, artifactsTgz?: string) {
+    super(inner);
+    this.artifactsTgz = artifactsTgz;
+  }
+
+  override async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
     if (this.artifactsTgz !== undefined && stdin !== undefined && stdin.includes("harvest-artifacts.tgz")) {
       // The box-side tar build is not what INV-3 tests — the validator is.
       // Report the served tgz's real size (the protocol's pre-copy probe field).
@@ -232,7 +248,7 @@ class BoxTmpDriver implements ProviderDriver {
     return this.inner.exec(vm, argv, stdin);
   }
 
-  async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+  override async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
     if (remotePath === "harvest-artifacts.tgz" && this.artifactsTgz !== undefined) {
       copyFileSync(this.artifactsTgz, localPath);
       return;
@@ -246,51 +262,24 @@ class BoxTmpDriver implements ProviderDriver {
  * stdout rewriter for the harvest protocol scripts — used to make the box
  * lie about sizes (pre-copy probe) or fail the artifacts step.
  */
-class SpyDriver implements ProviderDriver {
+class SpyDriver extends DelegatingDriver {
   readonly copies: string[] = [];
   private readonly rewrite?: (stdin: string, res: ExecResult) => ExecResult;
 
   constructor(
-    private readonly inner: ProviderDriver,
+    inner: ProviderDriver,
     rewrite?: (stdin: string, res: ExecResult) => ExecResult,
   ) {
+    super(inner);
     this.rewrite = rewrite;
   }
 
-  get name(): string {
-    return this.inner.name;
-  }
-
-  create(name: string, tag?: string): Promise<ProviderVm> {
-    return this.inner.create(name, tag);
-  }
-
-  list(name?: string): Promise<ProviderVm[]> {
-    return this.inner.list(name);
-  }
-
-  destroy(vm: string): Promise<void> {
-    return this.inner.destroy(vm);
-  }
-
-  expose(vm: string, port: number): Promise<string> {
-    return this.inner.expose(vm, port);
-  }
-
-  setPublic(vm: string): Promise<void> {
-    return this.inner.setPublic(vm);
-  }
-
-  whoami(): Promise<string> {
-    return this.inner.whoami();
-  }
-
-  async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
+  override async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
     const res = await this.inner.exec(vm, argv, stdin);
     return stdin !== undefined && this.rewrite !== undefined ? this.rewrite(stdin, res) : res;
   }
 
-  async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+  override async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
     this.copies.push(remotePath);
     return this.inner.copyFile(vm, remotePath, localPath);
   }
@@ -758,6 +747,20 @@ describe("DF2.5 harvest — INV-3: evil artifacts tgzs abort with nothing extrac
     await expectArtifactsAbort(s, (p) => writeBombTgz(p), "tar-over-cap");
   }, 60_000);
 
+  test("metadata entry ('L') declaring an over-cap payload → tar-over-cap, dest empty", async () => {
+    const s = await boxSetup("hvst-tar-meta-cap", 1);
+    // Only the header's declared size lies (no data blocks follow) — the
+    // validator must reject at the header, before a single chunk buffers.
+    // Without the independent metadata cap this payload could legally buffer
+    // up to the full 512 MiB tar cap (deviation 10, closed in round 10).
+    await expectArtifactsAbort(
+      s,
+      (p) =>
+        writeFileSync(p, gzipSync(buildTar([{ name: "long", typeflag: "L", size: TAR_METADATA_MAX_BYTES + 1 }]))),
+      "tar-over-cap",
+    );
+  }, 30_000);
+
   test("truncated tar (no EOF block) → tar-truncated, dest empty", async () => {
     const s = await boxSetup("hvst-tar-trunc", 1);
     await expectArtifactsAbort(
@@ -1060,6 +1063,25 @@ describe("sanitizeBoxOutput", () => {
 // failure-path summary, record-read classification
 // ---------------------------------------------------------------------------
 
+describe("isNoSuchBox", () => {
+  test("a HarvestError is classified solely by its typed flag — message text cannot override it", () => {
+    // The wrap points compute noSuchBox on RAW seam output; a flagged-false
+    // HarvestError whose sanitized message merely QUOTES the marker (a path,
+    // an echoed diagnostic) must not route teardown into the box-gone skip.
+    expect(
+      isNoSuchBox(
+        new HarvestError("bundle-copy-failed", "copying harvest.bundle out of vm failed: no such box: vm", "r"),
+      ),
+    ).toBeFalse();
+    expect(isNoSuchBox(new HarvestError("artifacts-failed", "boom", "r", { noSuchBox: true }))).toBeTrue();
+    // Raw driver throws that never passed a wrap point (a rejecting exec, a
+    // transport error) keep the text fallback.
+    expect(isNoSuchBox(new Error("exec failed: no such box: vm-1"))).toBeTrue();
+    expect(isNoSuchBox(new Error("plain failure"))).toBeFalse();
+    expect(isNoSuchBox("no such box")).toBeFalse(); // non-Error never classifies
+  });
+});
+
 describe("DF2.5 harvest — round 4 hardening", () => {
   test("bunGitRunner spawns git with LC_ALL=C and LANG=C (argv-array spawn)", async () => {
     const root = mkdtempSync(join(tmpdir(), "qds-hvst-env-"));
@@ -1211,42 +1233,8 @@ describe("DF2.5 harvest — round 4 hardening", () => {
 
     // Wrap the real driver to fail copyFile after writing partial bytes
     let writes = 0;
-    class PartialCopyDriver implements ProviderDriver {
-      constructor(private readonly inner: ProviderDriver) {}
-
-      get name(): string {
-        return this.inner.name;
-      }
-
-      create(name: string, tag?: string): Promise<ProviderVm> {
-        return this.inner.create(name, tag);
-      }
-
-      list(name?: string): Promise<ProviderVm[]> {
-        return this.inner.list(name);
-      }
-
-      destroy(vm: string): Promise<void> {
-        return this.inner.destroy(vm);
-      }
-
-      expose(vm: string, port: number): Promise<string> {
-        return this.inner.expose(vm, port);
-      }
-
-      setPublic(vm: string): Promise<void> {
-        return this.inner.setPublic(vm);
-      }
-
-      whoami(): Promise<string> {
-        return this.inner.whoami();
-      }
-
-      async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
-        return this.inner.exec(vm, argv, stdin);
-      }
-
-      async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+    class PartialCopyDriver extends DelegatingDriver {
+      override async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
         writes++;
         // Write a partial bundle header so a partial file would exist if we didn't clean up
         writeFileSync(localPath, "BUNDLE-v2");

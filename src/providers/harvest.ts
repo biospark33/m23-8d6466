@@ -52,6 +52,15 @@ import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 export const BUNDLE_MAX_BYTES = 512 * 1024 * 1024;
 /** Artifacts tar cap — enforced on received bytes AND summed entry sizes. */
 export const TAR_MAX_BYTES = 512 * 1024 * 1024;
+/**
+ * Independent cap for buffered metadata payloads (pax 'x'/'g' records, GNU
+ * 'L'/'K' long names). Metadata never hits disk but DOES buffer whole in
+ * memory (chunks + final concat) — without its own cap, a hostile tar could
+ * declare a metadata entry up to the full TAR_MAX_BYTES and hold ~1 GiB
+ * resident during validation. Real metadata is bytes-to-KBs (it carries a
+ * name or a link target); 64 KiB is ~250× a max-length path component.
+ */
+export const TAR_METADATA_MAX_BYTES = 64 * 1024;
 
 /**
  * In-box repo workdir candidates, in probe order: box-relative names first
@@ -128,9 +137,14 @@ const boxGone = (raw: string): boolean => raw.includes(NO_SUCH_BOX);
  * through a harvest wrap point.
  */
 export function isNoSuchBox(e: unknown): boolean {
-  return (
-    e instanceof Error && ((e instanceof HarvestError && e.noSuchBox) || e.message.includes(NO_SUCH_BOX))
-  );
+  if (!(e instanceof Error)) return false;
+  // A HarvestError is classified SOLELY by its typed flag: every wrap point
+  // that embeds driver output computes it on RAW seam text, so a flagged-false
+  // HarvestError whose sanitized message merely happens to carry the marker
+  // from another context must not route teardown into the box-gone skip
+  // (that skip bypasses nothing — but it must reflect the seam, not a quote).
+  if (e instanceof HarvestError) return e.noSuchBox;
+  return e.message.includes(NO_SUCH_BOX);
 }
 
 /**
@@ -865,6 +879,15 @@ function makeTarParser(handlers: TarHandlers, fail: (e: HarvestError) => void): 
               );
             }
             if (METADATA_TYPEFLAGS.has(parsed.typeflag)) {
+              // Header-time check (pass 1, nothing written): the declared
+              // size bounds the whole buffer before a single chunk lands.
+              if (parsed.size > TAR_METADATA_MAX_BYTES) {
+                throw new HarvestError(
+                  "tar-over-cap",
+                  `artifacts tar metadata entry (${parsed.typeflag}) declares ${parsed.size} bytes, over the ${TAR_METADATA_MAX_BYTES}-byte metadata cap — nothing extracted`,
+                  tarRemediation,
+                );
+              }
               meta = { kind: parsed.typeflag, chunks: [] };
             } else if (ALLOWED_TYPEFLAGS.has(parsed.typeflag)) {
               // The override path (pax 'path=' / GNU longname) replaces the

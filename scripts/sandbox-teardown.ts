@@ -177,7 +177,18 @@ export function acquireRunLock(runsDir: string, runId: string): string {
         // the close itself failed; nothing further to release
       }
     }
-    if (created) rmSync(lock, { force: true });
+    if (created) {
+      try {
+        rmSync(lock, { force: true });
+      } catch (cleanup) {
+        // The acquisition error is the story: report the cleanup failure as
+        // its OWN stderr diagnostic and rethrow the original regardless. A
+        // wedged lock resurfaces on the next invocation's run-locked refusal.
+        console.error(
+          `!! lock-cleanup-failed: could not remove ${lock} after failed acquisition: ${(cleanup as Error).message}\nnext: rm ${lock} once the acquisition failure is understood`,
+        );
+      }
+    }
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     let held = "";
     try {
@@ -267,8 +278,21 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     return 1;
   } finally {
     // Release only OUR lock: a refused invocation (EEXIST) must never unlink
-    // the holder's lock file.
-    if (lock !== undefined) rmSync(lock, { force: true });
+    // the holder's lock file. A release failure is its own diagnostic — it
+    // must not replace a successful teardown (or the failure already
+    // reported): the exit code reflects the teardown, never the cleanup.
+    if (lock !== undefined) {
+      try {
+        rmSync(lock, { force: true });
+      } catch (e) {
+        fail(
+          out,
+          "lock-release-failed",
+          `could not release ${lock}: ${(e as Error).message}`,
+          `rm ${lock} by hand once no other invocation holds it — until then every later teardown of this run refuses`,
+        );
+      }
+    }
   }
 }
 
