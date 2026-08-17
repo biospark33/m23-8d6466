@@ -897,6 +897,35 @@ describe("DF2.5 harvest — INV-3: evil artifacts tgzs abort with nothing extrac
     const dest = artifactsDir(runId);
     expect(readFileSync(join(dest, "long-prefix-directory", "leaf.txt"), "utf8")).toBe("payload");
   }, 30_000);
+
+  test("checksum mismatch → tar-invalid, dest empty", async () => {
+    const s = await boxSetup("hvst-tar-csum", 1);
+    const valid = buildTar([{ name: "ok.txt", data: Buffer.from("x") }], { eof: true });
+    // Corrupt the checksum field (bytes 148-155) of the first header
+    valid[148] = (valid[148] ?? 0) ^ 1; // flip one bit in the checksum octal field
+    await expectArtifactsAbort(s, (p) => writeFileSync(p, gzipSync(valid)), "tar-invalid");
+  }, 30_000);
+
+  test("unparseable checksum field (non-octal garbage) → tar-invalid, dest empty", async () => {
+    const s = await boxSetup("hvst-tar-csum-bad", 1);
+    const h = tarHeader({ name: "ok.txt", data: Buffer.from("x") });
+    // Overwrite checksum field with garbage (z's not octal)
+    h.fill("z".charCodeAt(0), 148, 156);
+    await expectArtifactsAbort(s, (p) => writeFileSync(p, gzipSync(Buffer.concat([h, EOF_BLOCKS]))), "tar-invalid");
+  }, 30_000);
+
+  test("unparseable size field (non-octal garbage, valid checksum) → tar-invalid, dest empty", async () => {
+    const s = await boxSetup("hvst-tar-size-bad", 1);
+    const b = tarHeader({ name: "ok.txt", data: Buffer.from("x") });
+    // Overwrite size field with garbage
+    b.fill("z".charCodeAt(0), 124, 136);
+    // Recompute checksum with the garbage size (checksum field treated as spaces)
+    b.fill(" ".charCodeAt(0), 148, 156);
+    let sum = 0;
+    for (const byte of b) sum += byte;
+    b.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, "utf8");
+    await expectArtifactsAbort(s, (p) => writeFileSync(p, gzipSync(Buffer.concat([b, EOF_BLOCKS]))), "tar-invalid");
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------

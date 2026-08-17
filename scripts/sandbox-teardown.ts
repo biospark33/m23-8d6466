@@ -106,6 +106,17 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (positionals.length > arity) {
     throw new Error(`unexpected argument: ${positionals[positionals.length - 1]}\n${HELP.join("\n")}`);
   }
+  // Path-injection guard: runId is joined into filesystem paths, so reject
+  // characters that escape the runs directory. Run IDs are minted by
+  // newId() as `<slug>-<YYYYMMDD>-<6 hex>` and validated by
+  // RUN_ID_RE = /^[a-z0-9][a-z0-9-]*$/.
+  if (out.runId !== undefined) {
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(out.runId)) {
+      throw new Error(
+        `invalid run-id: ${JSON.stringify(out.runId)} (must match /^[a-z0-9][a-z0-9-]*$/)\n${HELP.join("\n")}`,
+      );
+    }
+  }
   return out;
 }
 
@@ -185,12 +196,21 @@ export function acquireRunLock(runsDir: string, runId: string): string {
 }
 
 export async function run(argv: readonly string[], out: (s: string) => void): Promise<number> {
-  const parsed = parseArgs(argv);
+  let parsed: ParsedArgs;
+  try {
+    parsed = parseArgs(argv);
+  } catch (e) {
+    // parseArgs throws with help text; print it and exit 1
+    out((e as Error).message);
+    return 1;
+  }
   if (parsed.runId === undefined) {
-    throw new Error(`missing <run-id>\n${HELP.join("\n")}`);
+    fail(out, "error", `missing <run-id>\n${HELP.join("\n")}`);
+    return 1;
   }
   if (parsed.mode === "harvest" && parsed.noHarvest) {
-    throw new Error(`harvest mode has no harvest gate to waive: --no-harvest is a teardown flag\n${HELP.join("\n")}`);
+    fail(out, "error", `harvest mode has no harvest gate to waive: --no-harvest is a teardown flag\n${HELP.join("\n")}`);
+    return 1;
   }
   const requestId = newRequestId();
   const driver = resolveDriver(parsed.driver ?? process.env.QDS_PROVIDER_DRIVER ?? "fake", {
@@ -259,6 +279,8 @@ if (import.meta.main) {
     // the same reasoning as exitWithFailure in scripts/lib/cli-args.ts.
     process.exit(await run(process.argv.slice(2), (s) => writeSync(1, s)));
   } catch (e) {
+    // Residual throws run() does not map itself (driver resolution, store
+    // construction): stderr + exit 1, never an unhandled rejection.
     writeSync(2, `${(e as Error).message}\n`);
     process.exit(1);
   }

@@ -467,6 +467,30 @@ describe("DF2.5 teardownSandbox", () => {
     expect(existsSync(boxDir(runId))).toBeFalse();
   }, 30_000);
 
+  test("no-key run call order: spend/revoke/verify absent from harness, artifacts/harvest/destroy/close ran (logs + harness)", async () => {
+    const runId = "df25-nokey-order";
+    const host = await makeHostRepo();
+    await makeRun(runId);
+    store.set(runId, { commitSha: "0123456789abcdef0123456789abcdef01234567" });
+    // orderDeps provides wrapped driver/store; we omit keyApi entirely (no key = no spend/revoke/verify)
+    const h = orderDeps({ gitCwd: host });
+    // keyApi is optional in TeardownDeps; unsetting it simulates a keyless run
+    h.deps.keyApi = undefined;
+
+    await teardownSandbox(h.deps, runId);
+
+    // harness records destroy/close, not artifacts/harvest (those are git ops)
+    expect(h.calls).toContain("destroy");
+    expect(h.calls).toContain("close");
+    // spend/revoke/verify NEVER appear — no keyApi, so these steps skip
+    expect(h.calls).not.toContain("spend");
+    expect(h.calls).not.toContain("revoke");
+    expect(h.calls).not.toContain("verify");
+    // artifacts + harvest steps ran (logged, not in harness)
+    expect(logs.some((l) => l.operation === "teardown.artifacts")).toBeTrue();
+    expect(logs.some((l) => l.operation === "teardown.harvest")).toBeTrue();
+  }, 30_000);
+
   // ─── 9a. No-VM guard ───────────────────────────────────────────────────────
 
   test("no-VM record: teardown completes, destroy skipped with the no-box reason, record closes", async () => {
@@ -482,6 +506,25 @@ describe("DF2.5 teardownSandbox", () => {
     const destroy = logs.find((l) => l.operation === "teardown.destroy");
     expect(destroy?.outcome).toBe("skipped");
     expect(String(destroy?.reason)).toContain("no box was ever created");
+  }, 30_000);
+
+  test("no-VM record call order: destroy absent, close present, key lifecycle runs", async () => {
+    const runId = "df25-novm-order";
+    store.create(runId); // no vmName — destroy skips
+    const hash = await mintFor(runId);
+    const h = orderDeps();
+
+    await teardownSandbox(h.deps, runId);
+
+    // destroy NEVER appears — no box was ever created
+    expect(h.calls).not.toContain("destroy");
+    // close still runs (last)
+    expect(h.calls[h.calls.length - 1]).toBe("close");
+    // key lifecycle still ran
+    expect(h.calls).toContain("spend");
+    expect(h.calls).toContain("revoke");
+    expect(h.calls).toContain("verify");
+    expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeFalse();
   }, 30_000);
 
   // ─── 9b. Crash between destroy and close — dead box, open record ──────────

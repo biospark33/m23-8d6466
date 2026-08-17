@@ -10,7 +10,7 @@
  * themselves are covered by tests/providers/teardown.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -63,6 +63,7 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
 
   test("a held lock fails run-locked naming pid/age and the literal rm, and mutates nothing", async () => {
     store.create("held-run");
+    store.set("held-run", { vmName: "held-run-box" }); // P10: give it a vmName so teardown would do real work
     const other = process.pid + 1; // not us — the CLI must fail closed, never steal
     const lock = join(runs, "held-run.lock");
     writeFileSync(lock, `${other} ${new Date(Date.now() - 5_000).toISOString()}\n`, { flag: "wx" });
@@ -75,9 +76,11 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     expect(text).toContain(`pid ${other}`);
     expect(text).toContain("next: ");
     expect(text).toContain(`rm ${lock}`);
-    // the refused invocation neither tore down nor released the holder's lock
+    // P10: the refused invocation neither tore down nor released the holder's lock
     expect(store.get("held-run").closedAt).toBeUndefined();
     expect(existsSync(lock)).toBeTrue();
+    // P10: record is still open (not closed by refused invocation)
+    expect(store.get("held-run").closedAt).toBeUndefined();
   });
 
   test("the lock is released after a failed dispatch (keyed run, no provisioning key)", async () => {
@@ -112,5 +115,107 @@ describe("sandbox-teardown run() — record-read failure classification", () => 
     // re-creation
     expect(text).toContain("inspect");
     expect(text).not.toContain("create the run first");
+  });
+});
+
+describe("sandbox-teardown run() — runId path-injection guard (P2)", () => {
+  test("rejects runId containing path separator characters", async () => {
+    const badIds = ["../../etc/passwd", "foo/bar", "foo\\bar", "foo/../bar"];
+    for (const badId of badIds) {
+      lines.length = 0;
+      const code = await run([badId, "--dir", runs], sink);
+      expect(code).toBe(1);
+      expect(lines.join("")).toContain("invalid run-id");
+    }
+  });
+
+  test("rejects runId with .. path traversal", async () => {
+    const code = await run(["..", "--dir", runs], sink);
+    expect(code).toBe(1);
+    expect(lines.join("")).toContain("invalid run-id");
+  });
+
+  test("accepts valid runId format (lowercase alphanumeric with hyphens)", async () => {
+    // Valid minted format: slug-date-hex like "test-20260817-abc123"
+    const validId = "test-20260817-abc123";
+    const code = await run([validId, "--dir", runs], sink);
+    // Should fail with no-record (expected), NOT with invalid run-id
+    expect(code).toBe(1);
+    expect(lines.join("")).toContain("no-record");
+  });
+
+  test("rejects uppercase letters (minted IDs are lowercase only)", async () => {
+    const code = await run(["Test-Run", "--dir", runs], sink);
+    expect(code).toBe(1);
+    expect(lines.join("")).toContain("invalid run-id");
+  });
+});
+
+describe("sandbox-teardown run() — lock edge cases (P5)", () => {
+  test("malformed lock body reports holder unknown", async () => {
+    store.create("malformed-lock");
+    const lock = join(runs, "malformed-lock.lock");
+    writeFileSync(lock, "not a pid at all\n");
+
+    const code = await run(["malformed-lock", "--dir", runs], sink);
+
+    expect(code).toBe(1);
+    const text = lines.join("");
+    expect(text).toContain("!! run-locked:");
+    expect(text).toContain("holder unknown");
+  });
+
+  test("empty lock body reports holder unknown", async () => {
+    store.create("empty-lock");
+    const lock = join(runs, "empty-lock.lock");
+    writeFileSync(lock, "");
+
+    const code = await run(["empty-lock", "--dir", runs], sink);
+
+    expect(code).toBe(1);
+    const text = lines.join("");
+    expect(text).toContain("!! run-locked:");
+    expect(text).toContain("holder unknown");
+  });
+
+  test("missing runs dir propagates ENOENT from acquireRunLock", async () => {
+    const missingRuns = join(dir, "no-such-runs");
+    expect(() => acquireRunLock(missingRuns, "any-id")).toThrow();
+    try {
+      acquireRunLock(missingRuns, "any-id");
+      expect(false).toBeTrue(); // should not reach here
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException;
+      expect(err.code).toBe("ENOENT");
+    }
+  });
+});
+
+describe("sandbox-teardown run() — lock release after TeardownError mid-teardown (P6)", () => {
+  test("lock is released after a failure deep inside teardown (probe step)", async () => {
+    // The keyed-run test above proves release on provisioning-key-missing
+    // (post-lock, pre-mutation). This one fails DEEPER: a record with a vmName
+    // runs the git-bundle-verify probe inside teardownSandbox, and a PATH
+    // holding only a failing `git` stub makes the probe exit non-zero — the
+    // lock's finally must still release and the record must stay open. (An
+    // EMPTY PATH is no good: posix_spawnp falls back to the system default
+    // path and the real git is found again.)
+    const stubDir = join(dir, "stub-bin");
+    mkdirSync(stubDir, { recursive: true });
+    writeFileSync(join(stubDir, "git"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    store.create("probe-fail");
+    store.set("probe-fail", { vmName: "probe-fail-box" });
+    const savedPath = process.env.PATH;
+    process.env.PATH = stubDir;
+    try {
+      const code = await run(["probe-fail", "--dir", runs], sink);
+      expect(code).toBe(1);
+      const text = lines.join("");
+      expect(text).toContain("!! bundle-verify-unavailable:");
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    expect(existsSync(join(runs, "probe-fail.lock"))).toBeFalse();
+    expect(store.get("probe-fail").closedAt).toBeUndefined();
   });
 });

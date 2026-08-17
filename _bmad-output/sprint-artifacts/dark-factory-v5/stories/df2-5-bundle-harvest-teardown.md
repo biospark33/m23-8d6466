@@ -414,6 +414,36 @@ includes base ancestry (6 here). Both captured above.
     throwing is the documented tokenizeArgs contract (#56/#88); run-record's single-dash-as-value
     grammar divergence is the registered deviation.
 
+15. **Review round 8 (BMAD 3-layer adversarial re-run of PR #115: Blind ×2 + Edge ×2 + Acceptance
+    Auditor + Test Auditor ×2 — 45 findings → 10 fixed, 35 dismissed as false premises or
+    documented contracts)**: (a) `streamTar`'s gzip-sniff `readSync` wrapped in try/finally so an
+    EIO cannot leak the fd; (b) `parseArgs` gains the store's own `RUN_ID_RE` charset guard
+    (`/^[a-z0-9][a-z0-9-]*$/`, same as run-record.ts) so a runId carrying `/`/`\`/`..` can never be
+    joined into a lock/record/bundle path — parse errors now print via the `!!`/help surface and
+    exit 1, and the main entry keeps its stderr catch for residual throws (driver resolution);
+    (c) `run()`'s missing-run-id and harvest-mode `--no-harvest` messages keep their HELP text.
+    New tests: checksum-mismatch and unparseable-checksum-field tars (the two parseHeader
+    checksum branches were untested), garbage-octal size field with a valid recomputed checksum,
+    lock malformed/empty body → "holder unknown", missing runs dir ENOENT passthrough, lock
+    released after a DEEP teardown failure (probe `git` stub exiting 1 →
+    `bundle-verify-unavailable`), held-lock refusal now proven against a record with a vmName
+    (the refusal blocks real work, not a no-op), no-key run call-order (spend/revoke/verify
+    absent from the harness), no-VM destroy-skip call-order, and `timedLoggedStep`
+    null/undefined/non-Error rejection contracts (new tests/providers/step-log.test.ts).
+    Notable dismissals (verified against code): the GNU 'K' linkname "override leak" — the
+    override is consumed at the header line BEFORE the clear, and only typeflags '0'/'5' survive
+    pass 1 so linkname has no functional path; `finish()` cannot double-error — `failure` is
+    thrown at 986/993 before `parser.finish()` is reachable; the ustar-magic slice is length-safe
+    (`buf.length < BLOCK` returns first); an all-zero header is the EOF block (checked before
+    parseHeader) and any non-zero-sum header auto-fails checksum vs stored 0; entry count is
+    bounded because header bytes count toward the decompressed cap; the pre-lock record read is
+    fail-fast only with ALL mutations post-lock (round-7 dismissal restated and re-verified);
+    post-O_EXCL write-failure cleanup rethrows the ORIGINAL errno-coded error; step-log's
+    `duration`/`durationMs` numeric pair matches credentials.ts `timed` verbatim;
+    `asTeardownError` preserves incoming `code`/`remediation` via `??`; the ≥40-char mixed-class
+    redaction heuristic is the documented tradeoff that keeps 40-char lowercase-hex git shas
+    visible for AC2's missing-prerequisite remediation.
+
 ### Change log
 
 | Date | Change |
@@ -423,3 +453,4 @@ includes base ancestry (6 here). Both captured above.
 | 2026-08-16 | Review round 4 (BMAD 3-layer adversarial: Blind Hunter + Edge Case Hunter + Acceptance Auditor, 25 findings → 23 fixed, 2 dismissed): pre-copy size caps, sanitizer on all untrusted embeds + encoded-key redaction, LC_ALL=C git, probe hardening + skip rules, dead-box skip semantics, CLI lock + arity + stray-dash rejection, `.partial` atomic extraction + fd close + name folding + base-256 rejection, NOREPO bundle retention, `record-read-failed` classification, relative-first workdir probes, writeSync sinks; +18 tests (57 provider combined, 42 CLI) |
 | 2026-08-17 | Review round 5 (Sift + Gemini inline + CodeRabbit follow-ups): shared `getRecord` classifier consumed by harvest/teardown/CLI (teardown's preflight no longer maps corrupt records to `no-record`); typed `HarvestError.noSuchBox` flag computed on raw seam output (dead-box skip immune to sanitizer truncation); backslash rejection in `assertPathSafe`; bool-flag `awaitingValue` reset in `tokenizeArgs`; lock cleanup on post-create failure; nullish-safe catch normalization; +5 tests (61 provider combined, 43 CLI) |
 | 2026-08-17 | Review round 7 (BMAD 3-layer adversarial re-run, 6 reviewers, 35 findings → 10 fixed / 25 dismissed): partial-copy cleanup for bundle + staging tgz (bundle presence IS the harvest record), tar trailing-garbage rejection with zero-padding pinned OK, distinct unparseable-checksum error, GitRunner LC_ALL=C contract doc, ancestorsOf precondition doc, run-record writeSync sinks, AC3 run-verify-ran pin, cli-args test rename, e2e count comment; +3 tests (64 provider combined, 38 cli-args) |
+| 2026-08-17 | Review round 8 (BMAD 3-layer adversarial re-run, 7 reviewers, 45 findings → 10 fixed / 35 dismissed): streamTar sniff-fd try/finally, runId RUN_ID_RE charset guard in parseArgs (path-injection), parse-error `!!`+help surface with stderr main catch retained, HELP text restored on missing-run-id; +12 tests: tar checksum mismatch / unparseable checksum / garbage-octal size, lock malformed+empty body + missing-runs-dir ENOENT + deep-failure release (git stub probe fail), held-lock vs vmName record, no-key + no-VM call-order pins, step-log rejection contracts (new step-log.test.ts) |

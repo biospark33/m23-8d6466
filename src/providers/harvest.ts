@@ -950,8 +950,12 @@ function makeTarParser(handlers: TarHandlers, fail: (e: HarvestError) => void): 
 async function streamTar(tgzPath: string, handlers: TarHandlers): Promise<void> {
   const fd = openSync(tgzPath, "r");
   const head = Buffer.alloc(2);
-  const n = readSync(fd, head, 0, 2, 0);
-  closeSync(fd);
+  let n = 0;
+  try {
+    n = readSync(fd, head, 0, 2, 0);
+  } finally {
+    closeSync(fd);
+  }
   const isGzip = n === 2 && head[0] === 0x1f && head[1] === 0x8b;
 
   const src = createReadStream(tgzPath);
