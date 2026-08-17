@@ -12,7 +12,10 @@ import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as path from "node:path";
 
-import { parseValueFlags, type ValueFlagSpec } from "../../scripts/lib/cli-args.ts";
+import { parseValueFlags, tokenizeArgs, type ValueFlagSpec } from "../../scripts/lib/cli-args.ts";
+// The script module is side-effect free outside import.meta.main; parseArgs is
+// the unit under test for the CLI's own argv contract.
+import { parseArgs as parseTeardownArgs } from "../../scripts/sandbox-teardown.ts";
 
 const HELP = ["usage: thing --repo-slug <slug>", "  --repo-slug  the slug"];
 
@@ -178,5 +181,124 @@ describe("parseValueFlags — `--help` exits 0 (subprocess: process.exit)", () =
   test("an unknown flag exits non-zero rather than exiting 0 like help", () => {
     const r = runHelp("--nope");
     expect(r.status).not.toBe(0);
+  });
+});
+
+describe("tokenizeArgs — the shared positional/flag split for the per-script CLIs", () => {
+  test("value flag consumes a non-flag token; positionals and bools separate out", () => {
+    const t = tokenizeArgs(["harvest", "run-1", "--driver", "exedev", "--no-harvest"], {
+      valueFlags: ["--driver"],
+      boolFlags: ["--no-harvest"],
+    });
+    expect(t.positionals).toEqual(["harvest", "run-1"]);
+    expect(t.flagTokens).toEqual(["--driver", "exedev"]);
+    expect([...t.bools]).toEqual(["--no-harvest"]);
+  });
+
+  test("a flag-looking next token is NOT consumed — bool still recognized, missing value reported downstream", () => {
+    // `--driver --no-harvest run-1`: the old inline loops ate `--no-harvest` as
+    // the driver value, silently dropping the bool. The tokenizer leaves it
+    // free; parseValueFlags then reports the missing --driver value.
+    const t = tokenizeArgs(["--driver", "--no-harvest", "run-1"], {
+      valueFlags: ["--driver"],
+      boolFlags: ["--no-harvest"],
+    });
+    expect(t.flagTokens).toEqual(["--driver"]);
+    expect([...t.bools]).toEqual(["--no-harvest"]);
+    expect(t.positionals).toEqual(["run-1"]);
+    expect(() =>
+      parseValueFlags(t.flagTokens, { flags: ["--driver"], onValue: () => {}, help: HELP }),
+    ).toThrow("--driver requires a non-empty value");
+  });
+
+  test("a trailing value flag passes through bare (parseValueFlags owns that error)", () => {
+    const t = tokenizeArgs(["--dir"], { valueFlags: ["--dir"] });
+    expect(t.flagTokens).toEqual(["--dir"]);
+    expect(() =>
+      parseValueFlags(t.flagTokens, { flags: ["--dir"], onValue: () => {}, help: HELP }),
+    ).toThrow("--dir requires a non-empty value");
+  });
+
+  test("unknown flags are forwarded, and their next token stays positional", () => {
+    const t = tokenizeArgs(["--wat", "x", "pos"], { valueFlags: ["--dir"] });
+    expect(t.flagTokens).toEqual(["--wat"]); // --wat is unknown → consumes nothing
+    expect(t.positionals).toEqual(["x", "pos"]);
+    expect(() =>
+      parseValueFlags(t.flagTokens, { flags: ["--dir"], onValue: () => {}, help: HELP }),
+    ).toThrow("unknown flag: --wat");
+  });
+});
+
+describe("tokenizeArgs — stray single-dash tokens (opt-in strictness)", () => {
+  const strict = {
+    valueFlags: ["--driver", "--dir"],
+    boolFlags: ["--no-harvest"],
+    rejectStraySingleDash: true,
+  } as const;
+
+  test("a stray single-dash token throws unknown flag instead of being dropped", () => {
+    // The destructive case: `sandbox-teardown -n run-1` used to drop `-n`
+    // (parseValueFlags only inspects `--`-prefixed flags) and tear the run
+    // down anyway.
+    expect(() => tokenizeArgs(["-n", "run-1"], strict)).toThrow("unknown flag: -n");
+  });
+
+  test("a single-dash token still serves as a pending value (the value grammar is unchanged)", () => {
+    // `--driver -n`: `-n` follows a value flag still awaiting its value, so it
+    // is a value continuation — parseValueFlags' documented "single-dash token
+    // IS accepted as a value" contract keeps holding under strictness.
+    const t = tokenizeArgs(["--driver", "-n"], strict);
+    expect(t.flagTokens).toEqual(["--driver", "-n"]);
+  });
+
+  test("a bool flag between a value flag and its would-be value keeps the pair intact", () => {
+    const t = tokenizeArgs(["--driver", "--no-harvest", "run-1"], strict);
+    expect(t.flagTokens).toEqual(["--driver"]);
+    expect([...t.bools]).toEqual(["--no-harvest"]);
+    expect(() =>
+      parseValueFlags(t.flagTokens, { flags: ["--driver"], onValue: () => {}, help: HELP }),
+    ).toThrow("--driver requires a non-empty value");
+  });
+
+  test("a bool flag clears the pending-value state — a later single-dash token still rejects", () => {
+    // `--driver --no-harvest -n`: a stale awaitingValue let `-n` ride through
+    // as --driver's value, silently defeating rejectStraySingleDash. The bool
+    // flag terminates the continuation; `-n` is then the stray it always was.
+    expect(() => tokenizeArgs(["--driver", "--no-harvest", "-n"], strict)).toThrow("unknown flag: -n");
+  });
+
+  test("without the option, single-dash tokens pass through — the run-record.ts grammar relies on this default", () => {
+    const t = tokenizeArgs(["-n", "x"], { valueFlags: ["--dir"] });
+    expect(t.flagTokens).toEqual(["-n"]);
+    expect(t.positionals).toEqual(["x"]);
+  });
+});
+
+describe("sandbox-teardown parseArgs — positional arity and flag strictness", () => {
+  test("a second positional in teardown mode is an error, not a silent ignore", () => {
+    // `sandbox-teardown run-a run-b` used to tear down run-a and exit 0.
+    expect(() => parseTeardownArgs(["run-a", "run-b"])).toThrow("unexpected argument: run-b");
+  });
+
+  test("a third positional in harvest mode is an error", () => {
+    expect(() => parseTeardownArgs(["harvest", "run-a", "run-b"])).toThrow("unexpected argument: run-b");
+  });
+
+  test("the legal shapes still parse", () => {
+    expect(parseTeardownArgs(["run-a"])).toEqual({ mode: "teardown", runId: "run-a", noHarvest: false });
+    expect(parseTeardownArgs(["harvest", "run-a", "--driver", "fake"])).toEqual({
+      mode: "harvest",
+      runId: "run-a",
+      noHarvest: false,
+      driver: "fake",
+    });
+  });
+
+  test("a stray single-dash flag is rejected at parse time", () => {
+    expect(() => parseTeardownArgs(["-n", "run-a"])).toThrow("unknown flag: -n");
+  });
+
+  test("an unknown double-dash flag is still reported by the shared grammar", () => {
+    expect(() => parseTeardownArgs(["run-a", "--driver-name", "fake"])).toThrow("unknown flag: --driver-name");
   });
 });

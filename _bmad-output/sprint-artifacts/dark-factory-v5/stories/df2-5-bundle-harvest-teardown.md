@@ -224,4 +224,246 @@ repository rather than a mock.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Completion notes
+
+All DoD items implemented and verified on `feature/df2-5-bundle-harvest-teardown`:
+
+- `src/providers/harvest.ts` (NEW): `harvestRun` (ranged bundle in-box → `copyFile` down →
+  verify-before-fetch → `git fetch --force` into `refs/sandbox/<run-id>` only), `pullArtifacts`
+  (one tar round trip + two-pass INV-3 validator: ustar header parse, hardlink/symlink/device/
+  fifo/absolute/`..` rejection before any byte is written, 512 MiB received-bytes AND
+  summed-entry AND streaming-decompressed caps, EOF-block requirement, `wx`/0600 extraction),
+  `HarvestError{code,remediation}`, injectable `GitRunner`. Zero `store.set` calls.
+- `src/providers/teardown.ts` (NEW): `teardownSandbox` — preflight (record present, closedAt
+  empty, functional `git bundle verify` availability probe whose argv never contains the run
+  id), then spend → artifacts → harvest → revoke → verify → destroy → close, each step logged
+  `ran|skipped|failed`, every abort prints the literal next command and leaves box alive +
+  record open (AC3/AC6/INV-5). `--no-harvest` waiver logged to the run log only.
+- `scripts/sandbox-teardown.ts` (NEW): `[harvest] <run-id> [--no-harvest] [--driver] [--dir]`,
+  follows the `run-record.ts` CLI shape — both now tokenize through a shared
+  `tokenizeArgs` in `scripts/lib/cli-args.ts` (a value flag never swallows a following
+  flag as its value); `keyApi` constructed lazily only when the record
+  carries `keyHash` (keyless runs work offline).
+- `src/providers/index.ts`: re-exports harvest + teardown.
+- `src/providers/step-log.ts` (NEW): the shared timed/logged-step shape behind harvest's
+  `timedStep` and teardown's `runStep` (per-stream outcome vocabulary, one implementation).
+- Tests: `tests/providers/harvest.test.ts` (49), `tests/providers/teardown.test.ts` (25) —
+  74 combined (counts refreshed at review round 10; the implementation wave landed 38 + 23 and
+  rounds 2–10 added the rest); `tests/scripts/cli-args.test.ts` gained the `tokenizeArgs`
+  contract describe and `tests/scripts/sandbox-teardown-cli.test.ts` (NEW, now 14) covers the
+  CLI lock, record-read classification, runId guard, and lock-release paths;
+  `tests/providers/fixtures/git-fixture.ts` (shared fixture; commit messages are
+  slug-stamped so two repos minted in the same wall-clock second can never collide on a root sha).
+
+### E2E demo evidence (DoD, mandatory)
+
+Final round-10 run — `bun test tests/providers/teardown.test.ts`:
+
+```text
+ 25 pass
+ 0 fail
+ 126 expect() calls
+Ran 25 tests across 1 file. [80.37s]
+```
+
+Evidence bundle captured from the same run (the demo asserts `artifactsDir` is set and
+`artifactEntries` carries `run.log`; on darwin the fake substrate's host `tar` adds
+AppleDouble `._*` entries — recorded deviation 6):
+
+```json
+{
+  "runId": "df25-demo",
+  "baseSha": "db59e5cbb9fffbeb2f7a764d59d3089cd8673ea8",
+  "originCommits": 3,
+  "boxCommits": 3,
+  "revListRangedCount": 3,
+  "revListTotalCount": 6,
+  "porcelainEmpty": true,
+  "branchListUnchanged": true,
+  "sandboxRef": "42d60c9b6843687819cbd3cda375328665a8aedf",
+  "spendMicroUsd": 8100,
+  "keyRevoked": true,
+  "boxDirGone": true,
+  "bundlePresent": true,
+  "artifactsDir": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-df25-td-QDGiaX/runs/df25-demo-artifacts",
+  "artifactEntries": ["._app_docs", "._run.log", "._specs", "app_docs", "run.log", "specs"],
+  "closedAt": "2026-08-17T12:01:18.051Z",
+  "leak": null
+}
+```
+
+Story's literal "`git rev-list --count refs/sandbox/<run-id>` prints 3" reads as the RANGED
+count `<base>..refs/sandbox/<run-id>` (the run's own commits); plain count necessarily
+includes base ancestry (6 here). Both captured above.
+
+### Verification summary
+
+- Focal suites at review round 10 (this branch head): `bun test
+  tests/providers/harvest.test.ts tests/providers/teardown.test.ts` → 74 pass / 0 fail
+  (49 + 25); `bun test tests/scripts/sandbox-teardown-cli.test.ts` → 14 pass / 0 fail.
+  Rounds 7–9 added the trailing-garbage/checksum/base-256 pins and the two rm-masking
+  regression tests; round 10 added the isNoSuchBox flag-only pin, the metadata-cap tar
+  test, and the lock-release-failure test. No flakes across the rounds 7–10 focal runs.
+- Full-dir run at round 5 (superseded by the focal runs above for these files, retained
+  as the last whole-directory evidence): `bun test tests/providers/`: 250 pass / 0 fail /
+  1 todo (8 files). One load-induced flake observed once in DF2.2's frozen-clock
+  setup-gate test under full-dir parallelism; passes standalone 3/3 and on directory re-run.
+- Repo-wide: `bunx tsc --noEmit` clean; `bun run lint` clean; all other test dirs green
+  chunked (phase-engine/scripts/gate/gitnexus/hindsight/swarmclaw/vendor/root).
+- Pre-existing on main, unrelated to this story (verified against a pristine main worktree
+  with `.env` present): `tests/scripts/roster-check.test.ts` 2 live-network e2e failures,
+  `tests/lean-worker-benchmark.test.ts` 1 `.env`-gated failure. CI has no `.env`, so these
+  skip there.
+- Advisory gates: `check-defensive-programming.sh` OK; `check-pr-conflicts.sh` OK (no open-PR
+  overlap). Docker container tests N/A — repo defines no `docker-compose.test.yml`; CI parity
+  target is `bun run typecheck && bun run lint && bun test`.
+
+### Verified deviations / interpretation register
+
+1. **No host-side key file** (story step 6 "record closed + key file shredded"): DF2.3
+   delivers the key via `exec` stdin; plaintext exists only in a shredded 0600 mint temp and
+   the in-box `.env`, which dies with the box. `driver.destroy()` IS the shred; DF2.3 owns
+   shred ownership. A test asserts no `<run-id>.key` appears under the runs dir.
+2. **`captureSpend` writes `spendMicroUsd` itself** (DF2.3) — teardown adds no write; the
+   closed record carries the value the verb recorded.
+3. **In-box staging is box-root-relative** (`harvest.bundle`, `harvest-artifacts.tgz`), not
+   inkwell's `/tmp/...`: exedev's `assertBoxPathSafe` rejects absolute remote paths, so
+   `/tmp` cannot cross the driver seam. The remote scripts run inside the workdir and write
+   `../harvest*.tgz`.
+4. **`workdir` deps knob** (default probes `/home/agent/app`, `/home/agent/src`, `app`):
+   DF2.2's fill clones to `/home/agent/src`; the 12-field record cannot carry the path, so
+   explicit `deps.workdir` (charset-guarded) wins, probe order covers real + fake layouts.
+5. **pax/GNU `L`/`K` metadata records are consumed, not extracted**: macOS bsdtar emits pax
+   records on every real archive; their `path=` overrides re-validate through the same
+   safe-path gate, so INV-3's property (reject hardlink/symlink/device/fifo/traversal) is
+   intact — all six evil-tar tests green.
+6. **Artifacts host dir**: `.sandbox/runs/<run-id>-artifacts/` (inkwell naming; spec leaves
+   this implementer's call). On darwin the fake substrate's host `tar` adds AppleDouble
+   `._*` entries — accepted as regular safe-relative entries.
+7. **Empty classification** uses in-box `git rev-list --count <base>..<branch>` == 0
+   (locale-stable) rather than stderr matching on "Refusing to create empty bundle".
+8. **Known CLI limitation (self-review)**: the `harvest` subcommand shadows a run literally
+   named `harvest` (`sandbox-teardown harvest` parses as subcommand + missing run-id). Fails
+   safe with a clear error; `newId()`-generated ids (slug-date-hex) can never collide.
+9. **NOREPO workdir contract (self-review, accepted)**: a workdir-probe miss is classified
+   `none` (inkwell semantics — "a missing piece is the normal path"); teardown then proceeds
+   to destroy. Mitigated by the probe order pinning DF2.2's layouts (`/home/agent/app`,
+   `/home/agent/src`, `app`) and the explicit `deps.workdir` override; a caller whose repo
+   lives elsewhere must pass it.
+10. **Metadata memory bound (self-review; closed in review round 10)**: pax/GNU `L`/`K`
+    payloads buffer in memory during validation — originally accepted under the 512 MiB
+    summed cap; round 10 added the independent `TAR_METADATA_MAX_BYTES` (64 KiB) cap,
+    checked at the header before any chunk buffers, so the ceiling for metadata names and
+    link targets is ~250× a real name, not the full tar cap.
+11. **Self-review round (post-PR #115, fixed in follow-up commit)**: (a) untrusted in-box
+    stderr is now bounded to one redacted line (200-char cap, `sk-` tokens replaced) before
+    touching any error message — a compromised box can no longer exfiltrate the run key
+    through failure diagnostics; (b) tar pass-1 now rejects ancestor/descendant path
+    conflicts (file `a` + file `a/b`) as `tar-unsafe-entry`, so extraction can never fail
+    mid-write with a partial destination; (c) `--dir` propagates to `deps.runsDir` (no
+    split-brain between record location and bundle/artifacts output); (d) `harvest` mode
+    never constructs the key API — the credential-free path stays credential-free.
+12. **Review round 2 (post-PR #115, fixed in follow-up commit)**: (a) the harvestRun early
+    guard split on `vmName` vs `commitSha` — a VM without a pinned base still runs the
+    artifacts step (Step E was always ungated on commits; only a record with no VM at all
+    short-circuits to `none`); (b) teardown is the sole owner of the artifact pipeline —
+    it passes `artifactsOwnedByCaller` into harvestRun so exactly one pull runs per
+    successful teardown (a test counts the in-box tar execs); (c) destroy is skipped
+    entirely when the record has no `vmName` (no `runId` fallback into
+    `driver.destroy`), so a box-less run can still close; (d) `bunGitRunner` carries the
+    same `timeout`/`SIGKILL` ceiling as the seam's `sshCommand`; (e) a read-side error on
+    the artifacts source stream routes through the structured fail path instead of an
+    unhandled `error` event; (f) pass-2 tar extraction is atomic (failed extraction
+    removes the destination) and the file count excludes directory entries; (g) both
+    operator CLIs tokenize through shared `tokenizeArgs` so `--driver --no-harvest`
+    reports the missing value instead of eating the bool flag.
+13. **Review round 4 (BMAD 3-layer adversarial review of PR #115)**: (a) received-size caps
+    are now ALSO probed in-box before `copyFile` (`bundle-over-cap`/`tar-over-cap` pre-reject;
+    the post-copy stat remains authoritative — a true stream cap needs a driver-seam change,
+    marked `ponytail:`); (b) every untrusted-output embed (protocol stdout, verify/fetch stderr)
+    routes through the sanitizer, which now also redacts ≥40-char mixed-case base64/hex runs
+    (encoded-key exfiltration; lowercase-hex shas still surface for AC2); (c) git spawns pin
+    `LC_ALL=C` so `missing-prerequisite` classification is locale-stable; (d) the bundle-verify
+    probe commit pins `commit.gpgsign=false` + `core.hooksPath=` (host git config can no longer
+    fail the probe) and is skipped entirely for box-less+key-less records; (e) a
+    destroyed-box/record-open crash no longer dead-ends: artifacts + harvest steps treat
+    no-such-box as skip ("box already gone") while destroy keeps its fail-closed INV-5 path;
+    (f) CLI takes a `<runId>.lock` (wx, pid+timestamp, `run-locked` on contention, no steal),
+    rejects extra positionals, and opts into stray-single-dash rejection (run-record's
+    single-dash-as-value grammar preserved); (g) pass-2 tar extraction goes through a
+    `.partial` sibling + rename, closes fds on write failure, folds names
+    (NFC+lowercase) in pass-1 conflict sets, and rejects GNU base-256 size fields as
+    `tar-invalid` (they previously parsed as 0); (h) NOREPO no longer deletes a previously
+    harvested bundle (the bundle file IS the harvest record; NOCOMMITS/AC4 still removes it);
+    (i) NOARTIFACTS sweeps the stale staging tgz; artifacts-step failure still logs
+    `harvested: <n>, artifacts: "failed"` before rethrowing; (j) store read failures are
+    classified `record-read-failed` (not `no-record`) at all three call sites so a corrupt
+    record behind a live box/key never suggests re-creating the run; (k) `DEFAULT_WORKDIRS`
+    probes relative names first so the fake substrate stops touching host-absolute paths;
+    (l) main-sink output uses `writeSync` so piped diagnostics survive `process.exit`.
+
+14. **Review round 7 (BMAD 3-layer adversarial re-run of PR #115: Blind ×2 + Edge ×2 + Acceptance Auditor + test auditor — 35 findings → 10 fixed, 25 dismissed as false premises)**: (a) a partial
+    bundle copy left at `<runId>.bundle` by a FAILED `copyFile` now removed before the throw — the
+    bundle file's presence IS the harvest record, so a truncated leftover read as "already
+    harvested" (the post-copy over-cap path still deliberately keeps the file for inspection); same
+    cleanup for a partial artifacts staging tgz; (b) the tar parser now rejects non-zero trailing
+    bytes after the EOF block (`tar-invalid` "trailing garbage") instead of silently dropping them —
+    zero blocking-factor padding still passes (pinned by two new tests); (c) an unparseable
+    (base-256/NaN) checksum field gets a distinct `tar-invalid` message instead of the generic
+    checksum-mismatch one; (d) `GitRunner` docblock now states the LC_ALL=C/LANG=C contract an
+    injected runner must reproduce (AC2's missing-sha grammar); (e) `ancestorsOf` documents its
+    canonicalized-input precondition; (f) `run-record.ts` main block writes through `writeSync`
+    (piped stdout/stderr vs `process.exit`, same reasoning as sandbox-teardown + cli-args); (g)
+    AC3 test additionally pins that the run's own verify argv ran (probe argv never carries the run
+    id) before the abort; (h) cli-args test renamed to claim exactly what it pins; e2e evidence
+    builder comment explains revListTotalCount=6. Notable dismissals (verified false premises):
+    Node `writeFileSync(fd, …)` does NOT close the fd (the lock's catch-close is correct); the
+    artifacts `$P` expansion can only ever contain the five fixed literal `ls -d` names, not
+    attacker-controlled names; concurrent CLI teardowns are already serialized by the O_EXCL
+    `<runId>.lock` (the pre-lock record read is fail-fast only — the authoritative read happens
+    inside the lock); double-precision `summed`/`total` cannot wrap at these magnitudes; bare `--`
+    throwing is the documented tokenizeArgs contract (#56/#88); run-record's single-dash-as-value
+    grammar divergence is the registered deviation.
+
+15. **Review round 8 (BMAD 3-layer adversarial re-run of PR #115: Blind ×2 + Edge ×2 + Acceptance
+    Auditor + Test Auditor ×2 — 45 findings → 10 fixed, 35 dismissed as false premises or
+    documented contracts)**: (a) `streamTar`'s gzip-sniff `readSync` wrapped in try/finally so an
+    EIO cannot leak the fd; (b) `parseArgs` gains the store's own `RUN_ID_RE` charset guard
+    (`/^[a-z0-9][a-z0-9-]*$/`, same as run-record.ts) so a runId carrying `/`/`\`/`..` can never be
+    joined into a lock/record/bundle path — parse errors now print via the `!!`/help surface and
+    exit 1, and the main entry keeps its stderr catch for residual throws (driver resolution);
+    (c) `run()`'s missing-run-id and harvest-mode `--no-harvest` messages keep their HELP text.
+    New tests: checksum-mismatch and unparseable-checksum-field tars (the two parseHeader
+    checksum branches were untested), garbage-octal size field with a valid recomputed checksum,
+    lock malformed/empty body → "holder unknown", missing runs dir ENOENT passthrough, lock
+    released after a DEEP teardown failure (probe `git` stub exiting 1 →
+    `bundle-verify-unavailable`), held-lock refusal now proven against a record with a vmName
+    (the refusal blocks real work, not a no-op), no-key run call-order (spend/revoke/verify
+    absent from the harness), no-VM destroy-skip call-order, and `timedLoggedStep`
+    null/undefined/non-Error rejection contracts (new tests/providers/step-log.test.ts).
+    Notable dismissals (verified against code): the GNU 'K' linkname "override leak" — the
+    override is consumed at the header line BEFORE the clear, and only typeflags '0'/'5' survive
+    pass 1 so linkname has no functional path; `finish()` cannot double-error — `failure` is
+    thrown at 986/993 before `parser.finish()` is reachable; the ustar-magic slice is length-safe
+    (`buf.length < BLOCK` returns first); an all-zero header is the EOF block (checked before
+    parseHeader) and any non-zero-sum header auto-fails checksum vs stored 0; entry count is
+    bounded because header bytes count toward the decompressed cap; the pre-lock record read is
+    fail-fast only with ALL mutations post-lock (round-7 dismissal restated and re-verified);
+    post-O_EXCL write-failure cleanup rethrows the ORIGINAL errno-coded error; step-log's
+    `duration`/`durationMs` numeric pair matches credentials.ts `timed` verbatim;
+    `asTeardownError` preserves incoming `code`/`remediation` via `??`; the ≥40-char mixed-class
+    redaction heuristic is the documented tradeoff that keeps 40-char lowercase-hex git shas
+    visible for AC2's missing-prerequisite remediation.
+
+### Change log
+
+| Date | Change |
+|---|---|
+| 2026-08-16 | Story implemented via 5-wave subagent pipeline (fixture → red tests → harvest impl → teardown+CLI → verification); fixture sha-collision flake fixed (slug-stamped commit messages) |
+| 2026-08-16 | Review round 2 (PR #115, CodeRabbit/Gemini/Sift): harvestRun guard split (vmName vs commitSha) + `artifactsOwnedByCaller` single-pull contract; destroy skipped for box-less records; shared `tokenizeArgs` + `step-log.ts`; `bunGitRunner` hard timeout; atomic pass-2 tar extraction + regular-file counting; source-stream error routing; non-Error catch coercion; CLI coverage (no-record / harvest+--no-harvest / --dir / credential-free keyed harvest) |
+| 2026-08-16 | Review round 4 (BMAD 3-layer adversarial: Blind Hunter + Edge Case Hunter + Acceptance Auditor, 25 findings → 23 fixed, 2 dismissed): pre-copy size caps, sanitizer on all untrusted embeds + encoded-key redaction, LC_ALL=C git, probe hardening + skip rules, dead-box skip semantics, CLI lock + arity + stray-dash rejection, `.partial` atomic extraction + fd close + name folding + base-256 rejection, NOREPO bundle retention, `record-read-failed` classification, relative-first workdir probes, writeSync sinks; +18 tests (57 provider combined, 42 CLI) |
+| 2026-08-17 | Review round 5 (Sift + Gemini inline + CodeRabbit follow-ups): shared `getRecord` classifier consumed by harvest/teardown/CLI (teardown's preflight no longer maps corrupt records to `no-record`); typed `HarvestError.noSuchBox` flag computed on raw seam output (dead-box skip immune to sanitizer truncation); backslash rejection in `assertPathSafe`; bool-flag `awaitingValue` reset in `tokenizeArgs`; lock cleanup on post-create failure; nullish-safe catch normalization; +5 tests (61 provider combined, 43 CLI) |
+| 2026-08-17 | Review round 7 (BMAD 3-layer adversarial re-run, 6 reviewers, 35 findings → 10 fixed / 25 dismissed): partial-copy cleanup for bundle + staging tgz (bundle presence IS the harvest record), tar trailing-garbage rejection with zero-padding pinned OK, distinct unparseable-checksum error, GitRunner LC_ALL=C contract doc, ancestorsOf precondition doc, run-record writeSync sinks, AC3 run-verify-ran pin, cli-args test rename, e2e count comment; +3 tests (64 provider combined, 38 cli-args) |
+| 2026-08-17 | Review round 8 (BMAD 3-layer adversarial re-run, 7 reviewers, 45 findings → 10 fixed / 35 dismissed): streamTar sniff-fd try/finally, runId RUN_ID_RE charset guard in parseArgs (path-injection), parse-error `!!`+help surface with stderr main catch retained, HELP text restored on missing-run-id; +12 tests: tar checksum mismatch / unparseable checksum / garbage-octal size, lock malformed+empty body + missing-runs-dir ENOENT + deep-failure release (git stub probe fail), held-lock vs vmName record, no-key + no-VM call-order pins, step-log rejection contracts (new step-log.test.ts) |
+| 2026-08-17 | Review round 9 (Sift/CodeRabbit warning): a bare `rmSync` in a catch/finally could replace the typed error and its noSuchBox classification — shared `rmBestEffort` helper now wraps all four cleanup sites (harvestRun bundle-copy catch, pullArtifacts staging catch, validateAndExtractTgz partial-dir catch, teardown probe finally); +2 harvest regression tests using the directory-at-target trick (72 provider combined) |
+| 2026-08-17 | Review round 10 (CodeRabbit/Gemini-Code-Assist inline): `isNoSuchBox` now classifies a HarvestError solely by its typed `noSuchBox` flag (message fallback only for raw non-HarvestError driver throws); independent 64 KiB `TAR_METADATA_MAX_BYTES` cap closes deviation 10 (header-time check, covers pax `x`/`g` records and GNU `L`/`K` names/link targets); sandbox-teardown lock cleanup guarded on both sites (acquireRunLock: `lock-cleanup-failed` stderr diagnostic + original error rethrown; run() finally: `lock-release-failed` diagnostic that cannot replace the teardown result or exit code); tests: shared `DelegatingDriver` base replaces the three duplicated driver doubles; +3 tests (74 provider combined, 14 CLI) |

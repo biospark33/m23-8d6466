@@ -75,13 +75,100 @@ export function parseValueFlags(argv: readonly string[], spec: ValueFlagSpec): v
       }
       spec.onValue(a, v);
     } else if (a === "--help" || a === "-h") {
-      process.stdout.write(spec.help.join("\n"));
+      // writeSync, not process.stdout.write: piped stdout can still be pending
+      // when the process.exit below tears the process down (same reasoning as
+      // exitWithFailure).
+      writeSync(1, spec.help.join("\n"));
       process.exit(0);
     } else if (a.startsWith("--")) {
       // Unknown flag — surface typos loudly (e.g. `--bankid` vs `--bank-id`).
       throw new Error(`unknown flag: ${a}`);
     }
   }
+}
+
+export interface TokenizeSpec {
+  /** Value-taking flags: a following non-flag token is consumed as their value. */
+  valueFlags: readonly string[];
+  /** Boolean flags: recognized and reported via `bools`, never value-consuming. */
+  boolFlags?: readonly string[];
+  /**
+   * Throw `unknown flag: <token>` on a single-dash token that is neither a
+   * bool flag nor the pending value of a value flag.
+   *
+   * Without this, such a token reaches `parseValueFlags`, which only inspects
+   * `--`-prefixed flags — a `-n` typo is silently DROPPED while the command
+   * proceeds (unacceptable when the command is destructive, e.g.
+   * `sandbox-teardown -n <run-id>`). Opt-in because single-dash tokens are
+   * legal bare values in the other consumer's grammar (`run-record.ts`'s
+   * `--vmName -foo` relies on the pass-through), and `--`-prefixed unknowns
+   * already throw in `parseValueFlags` for every consumer.
+   */
+  rejectStraySingleDash?: boolean;
+}
+
+export interface Tokenized {
+  /** argv tokens not starting with `-`, in order. */
+  positionals: string[];
+  /** Flag tokens (+ consumed values), ready for `parseValueFlags`. */
+  flagTokens: string[];
+  /** Which `boolFlags` appeared. */
+  bools: Set<string>;
+}
+
+/**
+ * Split argv into positionals, boolean flags, and value-flag tokens — the
+ * tokenization `sandbox-teardown.ts` and `run-record.ts` each carried inline
+ * (the same loop twice is how the two copies drifted: one got the
+ * trailing-flag fix, the other did not).
+ *
+ * A known value flag consumes the next token ONLY when that token is not
+ * itself a flag: `--driver --no-harvest` must leave `--no-harvest` for bool
+ * parsing so the missing `--driver` value is reported (by `parseValueFlags`,
+ * which owns that error) instead of the flag being silently eaten as a value.
+ * A trailing value flag passes through bare for the same reason.
+ *
+ * With `rejectStraySingleDash`, a `-`-prefixed token that cannot be a value
+ * continuation throws instead of being forwarded — see the spec field.
+ */
+export function tokenizeArgs(argv: readonly string[], spec: TokenizeSpec): Tokenized {
+  const positionals: string[] = [];
+  const flagTokens: string[] = [];
+  const bools = new Set<string>();
+  const knownValues = new Set(spec.valueFlags);
+  // True while the last flagTokens entry is a known value flag whose value has
+  // not arrived yet — the ONE state in which a `-`-prefixed token is a legal
+  // value continuation (parseValueFlags will pair it) rather than a flag.
+  let awaitingValue = false;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i] as string;
+    if (!a.startsWith("-")) {
+      positionals.push(a);
+      continue;
+    }
+    if (spec.boolFlags?.includes(a)) {
+      bools.add(a);
+      // The bool flag terminates any pending value-flag continuation: leaving
+      // awaitingValue set would let a LATER single-dash token ride through as
+      // the missing value, silently defeating rejectStraySingleDash
+      // (`--driver --no-harvest -n` must reject `-n`, not adopt it). The bare
+      // value flag is left for parseValueFlags, which owns the missing-value
+      // error.
+      awaitingValue = false;
+      continue;
+    }
+    if (spec.rejectStraySingleDash && !a.startsWith("--") && !awaitingValue) {
+      throw new Error(`unknown flag: ${a}`);
+    }
+    flagTokens.push(a);
+    awaitingValue = knownValues.has(a);
+    const next = argv[i + 1];
+    if (awaitingValue && next !== undefined && !next.startsWith("-")) {
+      flagTokens.push(argv[++i] as string);
+      awaitingValue = false;
+    }
+  }
+  return { positionals, flagTokens, bools };
 }
 
 /**
