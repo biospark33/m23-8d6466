@@ -1267,4 +1267,44 @@ describe("DF2.5 harvest — round 4 hardening", () => {
     expect(existsSync(hostBundle)).toBeFalse(); // partial bundle was removed
     expect(writes).toBe(1); // we did attempt the copy
   }, 30_000);
+
+  // A directory at the copy destination makes BOTH copyFileSync and the
+  // catch's non-recursive rmSync fail (EISDIR/ERR_FS_EISDIR) — before the
+  // rmBestEffort guard, the cleanup error replaced the typed error and its
+  // noSuchBox classification.
+  test("staging-cleanup failure does not mask the typed artifacts error", async () => {
+    const runId = "hvst-rm-mask-art";
+    const s = await boxSetup(runId, 1);
+    // Plant an artifact so the in-box step reports TARBUILT and copyFile runs.
+    const plant = await driver.exec(runId, ["bash", "-c", "echo x > app/run.log"]);
+    if (plant.exitCode !== 0) throw new Error(`plant failed: ${plant.stderr}`);
+    const staging = join(store.dir, `${runId}-artifacts.tgz`);
+    mkdirSync(staging); // copyFile dest AND cleanup target both fail on a dir
+
+    let err: unknown = undefined;
+    try {
+      await harvestRun(hd(s.hostDir), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(HarvestError);
+    expect((err as HarvestError).code).toBe("artifacts-failed");
+    expect((err as HarvestError).message).toContain("copying harvest-artifacts.tgz");
+  }, 30_000);
+
+  test("hostBundle-cleanup failure does not mask the typed bundle-copy error", async () => {
+    const runId = "hvst-rm-mask-bnd";
+    const s = await boxSetup(runId, 1);
+    mkdirSync(bundlePath(runId)); // copyFile dest AND cleanup target both fail on a dir
+
+    let err: unknown = undefined;
+    try {
+      await harvestRun(hd(s.hostDir), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(HarvestError);
+    expect((err as HarvestError).code).toBe("bundle-copy-failed");
+    expect((err as HarvestError).message).toContain("copying harvest.bundle");
+  }, 30_000);
 });

@@ -134,6 +134,21 @@ export function isNoSuchBox(e: unknown): boolean {
 }
 
 /**
+ * Best-effort cleanup for catch/finally paths, shared with teardown: a
+ * cleanup failure must never replace the real error (or a successful
+ * return). rmSync's `force` suppresses only ENOENT — EPERM/EACCES/EISDIR
+ * still throw, and a bare rmSync in a catch block would mask the typed
+ * error and its noSuchBox classification.
+ */
+export function rmBestEffort(path: string, opts: { recursive?: boolean } = {}): void {
+  try {
+    rmSync(path, { force: true, ...opts });
+  } catch {
+    // Cleanup failure is non-fatal — the original error is the story.
+  }
+}
+
+/**
  * Injectable host-git runner — tests spy ordering + inject failures.
  * An injected gitRunner MUST reproduce bunGitRunner's LC_ALL=C/LANG=C env — the AC2
  * missing-sha extraction matches git's C-locale "error: <sha>" grammar, so a
@@ -467,7 +482,7 @@ export async function harvestRun(
       } catch (e) {
         // copyFile may reject with a non-Error — coerce, or sanitizeBoxOutput
         // would itself throw on undefined inside this catch.
-        rmSync(hostBundle, { force: true }); // partial copy must not linger — the bundle's presence IS the harvest record
+        rmBestEffort(hostBundle); // partial copy must not linger — the bundle's presence IS the harvest record
         throw new HarvestError(
           "bundle-copy-failed",
           `copying harvest.bundle out of ${vm} failed: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))}`,
@@ -619,7 +634,7 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
     try {
       await deps.driver.copyFile(vm, "harvest-artifacts.tgz", staging);
     } catch (e) {
-      rmSync(staging, { force: true }); // partial tgz has no inspection value; a later pull overwrites it anyway
+      rmBestEffort(staging); // partial tgz has no inspection value; a later pull overwrites it anyway
       throw new HarvestError(
         "artifacts-failed",
         `copying harvest-artifacts.tgz out of ${vm} failed: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))}`,
@@ -1068,7 +1083,7 @@ async function validateAndExtractTgz(tgzPath: string, destDir: string): Promise<
   try {
     await streamTar(tgzPath, extractHandlers(partial));
   } catch (e) {
-    rmSync(partial, { recursive: true, force: true });
+    rmBestEffort(partial, { recursive: true });
     throw e;
   }
   rmSync(destDir, { recursive: true, force: true });

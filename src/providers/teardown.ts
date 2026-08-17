@@ -30,14 +30,22 @@
  *    teardown adds no second write.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { captureSpend, revokeRunKey, verifyRevoked, type CredentialDeps, type KeyApi } from "./credentials.ts";
 import type { ProviderDriver } from "./driver.ts";
-import { bunGitRunner, getRecord, harvestRun, isNoSuchBox, pullArtifacts, type GitRunner } from "./harvest.ts";
+import {
+  bunGitRunner,
+  getRecord,
+  harvestRun,
+  isNoSuchBox,
+  pullArtifacts,
+  rmBestEffort,
+  type GitRunner,
+} from "./harvest.ts";
 import type { RunRecordStore } from "./run-record.ts";
 import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 
@@ -167,7 +175,9 @@ async function probeBundleVerify(gitRunner: GitRunner): Promise<void> {
       }
     }
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    // Best-effort: a probe-dir cleanup failure must not mask the probe's own
+    // error — or corrupt a successful probe into a teardown failure.
+    rmBestEffort(dir, { recursive: true });
   }
 }
 
