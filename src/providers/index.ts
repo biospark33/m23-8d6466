@@ -130,3 +130,7 @@ export * from "./credentials.ts";
 export { FakeDriver } from "./fake-driver.ts";
 export { ExeDevDriver, ExeDevDriverError, sshCommand } from "./exedev/driver.ts";
 export type { ExeCommand, CreateProvenance, ExeDevDriverOptions } from "./exedev/driver.ts";
+// DF2.5: harvest + teardown join the seam's exported surface — the CLI and the
+// dispatcher reach them through the same front door as everything else.
+export * from "./harvest.ts";
+export * from "./teardown.ts";

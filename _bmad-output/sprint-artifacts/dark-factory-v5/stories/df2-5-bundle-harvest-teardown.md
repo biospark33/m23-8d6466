@@ -224,4 +224,102 @@ repository rather than a mock.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Completion notes
+
+All DoD items implemented and verified on `feature/df2-5-bundle-harvest-teardown`:
+
+- `src/providers/harvest.ts` (NEW): `harvestRun` (ranged bundle in-box → `copyFile` down →
+  verify-before-fetch → `git fetch --force` into `refs/sandbox/<run-id>` only), `pullArtifacts`
+  (one tar round trip + two-pass INV-3 validator: ustar header parse, hardlink/symlink/device/
+  fifo/absolute/`..` rejection before any byte is written, 512 MiB received-bytes AND
+  summed-entry AND streaming-decompressed caps, EOF-block requirement, `wx`/0600 extraction),
+  `HarvestError{code,remediation}`, injectable `GitRunner`. Zero `store.set` calls.
+- `src/providers/teardown.ts` (NEW): `teardownSandbox` — preflight (record present, closedAt
+  empty, functional `git bundle verify` availability probe whose argv never contains the run
+  id), then spend → artifacts → harvest → revoke → verify → destroy → close, each step logged
+  `ran|skipped|failed`, every abort prints the literal next command and leaves box alive +
+  record open (AC3/AC6/INV-5). `--no-harvest` waiver logged to the run log only.
+- `scripts/sandbox-teardown.ts` (NEW): `[harvest] <run-id> [--no-harvest] [--driver] [--dir]`,
+  follows the `run-record.ts` CLI shape; `keyApi` constructed lazily only when the record
+  carries `keyHash` (keyless runs work offline).
+- `src/providers/index.ts`: re-exports harvest + teardown.
+- Tests: `tests/providers/harvest.test.ts` (19), `tests/providers/teardown.test.ts` (12),
+  `tests/providers/fixtures/git-fixture.ts` (shared fixture; commit messages are slug-stamped
+  so two repos minted in the same wall-clock second can never collide on a root sha).
+
+### E2E demo evidence (DoD, mandatory)
+
+`bun test tests/providers/teardown.test.ts` — captured fresh on final run:
+
+```json
+{
+  "runId": "df25-demo",
+  "baseSha": "f5ca58342ff6fdfd1d409b0750355a9d080fc385",
+  "originCommits": 3,
+  "boxCommits": 3,
+  "revListRangedCount": 3,
+  "revListTotalCount": 6,
+  "porcelainEmpty": true,
+  "branchListUnchanged": true,
+  "sandboxRef": "3180a6971d07f25a001b1739e5cc5b70f00a8add",
+  "spendMicroUsd": 8100,
+  "keyRevoked": true,
+  "boxDirGone": true,
+  "bundlePresent": true,
+  "closedAt": "2026-08-17T00:32:53.173Z",
+  "leak": null
+}
+```
+
+Story's literal "`git rev-list --count refs/sandbox/<run-id>` prints 3" reads as the RANGED
+count `<base>..refs/sandbox/<run-id>` (the run's own commits); plain count necessarily
+includes base ancestry (6 here). Both captured above.
+
+### Verification summary
+
+- `bun test tests/providers/`: 220 pass / 0 fail / 1 todo (8 files). One load-induced flake
+  observed once in DF2.2's frozen-clock setup-gate test under full-dir parallelism; passes
+  standalone 3/3 and on directory re-run.
+- Repo-wide: `bunx tsc --noEmit` clean; `bun run lint` clean; all other test dirs green
+  chunked (phase-engine/scripts/gate/gitnexus/hindsight/swarmclaw/vendor/root).
+- Pre-existing on main, unrelated to this story (verified against a pristine main worktree
+  with `.env` present): `tests/scripts/roster-check.test.ts` 2 live-network e2e failures,
+  `tests/lean-worker-benchmark.test.ts` 1 `.env`-gated failure. CI has no `.env`, so these
+  skip there.
+- Advisory gates: `check-defensive-programming.sh` OK; `check-pr-conflicts.sh` OK (no open-PR
+  overlap). Docker container tests N/A — repo defines no `docker-compose.test.yml`; CI parity
+  target is `bun run typecheck && bun run lint && bun test`.
+
+### Verified deviations / interpretation register
+
+1. **No host-side key file** (story step 6 "record closed + key file shredded"): DF2.3
+   delivers the key via `exec` stdin; plaintext exists only in a shredded 0600 mint temp and
+   the in-box `.env`, which dies with the box. `driver.destroy()` IS the shred; DF2.3 owns
+   shred ownership. A test asserts no `<run-id>.key` appears under the runs dir.
+2. **`captureSpend` writes `spendMicroUsd` itself** (DF2.3) — teardown adds no write; the
+   closed record carries the value the verb recorded.
+3. **In-box staging is box-root-relative** (`harvest.bundle`, `harvest-artifacts.tgz`), not
+   inkwell's `/tmp/...`: exedev's `assertBoxPathSafe` rejects absolute remote paths, so
+   `/tmp` cannot cross the driver seam. The remote scripts run inside the workdir and write
+   `../harvest*.tgz`.
+4. **`workdir` deps knob** (default probes `/home/agent/app`, `/home/agent/src`, `app`):
+   DF2.2's fill clones to `/home/agent/src`; the 12-field record cannot carry the path, so
+   explicit `deps.workdir` (charset-guarded) wins, probe order covers real + fake layouts.
+5. **pax/GNU `L`/`K` metadata records are consumed, not extracted**: macOS bsdtar emits pax
+   records on every real archive; their `path=` overrides re-validate through the same
+   safe-path gate, so INV-3's property (reject hardlink/symlink/device/fifo/traversal) is
+   intact — all six evil-tar tests green.
+6. **Artifacts host dir**: `.sandbox/runs/<run-id>-artifacts/` (inkwell naming; spec leaves
+   this implementer's call). On darwin the fake substrate's host `tar` adds AppleDouble
+   `._*` entries — accepted as regular safe-relative entries.
+7. **Empty classification** uses in-box `git rev-list --count <base>..<branch>` == 0
+   (locale-stable) rather than stderr matching on "Refusing to create empty bundle".
+8. **Known CLI limitation (self-review)**: the `harvest` subcommand shadows a run literally
+   named `harvest` (`sandbox-teardown harvest` parses as subcommand + missing run-id). Fails
+   safe with a clear error; `newId()`-generated ids (slug-date-hex) can never collide.
+
+### Change log
+
+| Date | Change |
+|---|---|
+| 2026-08-16 | Story implemented via 5-wave subagent pipeline (fixture → red tests → harvest impl → teardown+CLI → verification); fixture sha-collision flake fixed (slug-stamped commit messages) |
