@@ -414,8 +414,23 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
     });
     expect(out.partialOutput?.length).toBeLessThanOrEqual(10000);
     expect(out.partialOutput).toContain("[truncated");
-    const match = out.partialOutput?.match(/\[truncated, (\d+) bytes total\]/);
+    // The cap and the suffix both count UTF-16 chars (text.length), never bytes.
+    const match = out.partialOutput?.match(/\[truncated, (\d+) chars total\]/);
     expect(match).toBeTruthy();
+    expect(match?.[1]).toBe("12000");
+  });
+
+  it("partialOutput empty string stays empty — never collapsed to null", () => {
+    // "" is a failure-path output (ran, captured nothing) and must not become
+    // null, which is the success-path contract.
+    const out = base({
+      exitStatus: "transient",
+      error: { reason: "transient", message: "msg" },
+      partial: true,
+      partialOutput: "",
+    });
+    expect(out.partialOutput).toBe("");
+    expect(out.partialOutput).not.toBeNull();
   });
 
   it("partialOutput exactly at limit: no truncation", () => {

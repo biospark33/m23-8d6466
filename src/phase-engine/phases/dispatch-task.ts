@@ -54,6 +54,13 @@ export interface DispatchTaskDeps {
   tracer?: Tracer;
   requestId?: string;
   rosterValidateDeps?: ValidateDeps;
+  /**
+   * Canonical run root for artifact reads (INV-1/2). The pipeline runner
+   * passes its --run-root; falls back to QDS_RUN_ROOT then cwd. Without
+   * this, a --run-root invocation would validate artifacts against the
+   * process cwd — a different canonical root.
+   */
+  rootDir?: string;
 }
 
 // ponytail: minimal runner injection seam for tests — default is real runTeamManifest
@@ -170,7 +177,7 @@ export function dispatchTask(
     }
 
     const roles = roster.roles;
-    if (roles.length === 0 || roles.length < 2) {
+    if (roles.length < 2) {
       return refuse("roster must declare a lead role and at least one worker", redact);
     }
     const leadRole = roles[0]!;
@@ -209,7 +216,7 @@ export function dispatchTask(
     }
 
     // runTeamManifest takes a manifest FILE path.
-    const runRoot = process.env.QDS_RUN_ROOT ?? process.cwd();
+    const runRoot = deps.rootDir ?? process.env.QDS_RUN_ROOT ?? process.cwd();
     const manifestDir = join(runRoot, ".qds-manifests");
     mkdirSync(manifestDir, { recursive: true });
     const manifestFile = join(
@@ -235,6 +242,9 @@ export function dispatchTask(
       const runResult = await _runTeamManifest(manifestFile, {
         forceLocalRunner: true,
         effectiveCeilingMicros: runCtx.effectiveCeilingMicros,
+        // Phase-overflow cancellation kills the team tree at the abort, not
+        // at the team's own wall-clock cap (resource-leak guard).
+        abortSignal: signal,
         onTeamEvent: (event, meta) => {
           if (meta.droppedOversize) {
             streamHealth.dropped();

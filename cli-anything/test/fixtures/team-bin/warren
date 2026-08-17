@@ -99,6 +99,17 @@ async function main(): Promise<void> {
       await sleep(60_000);
       break;
     }
+    // DF1.6 T5: one cost event whose session total clears the RAISED
+    // ceilings (4.5 and 9.0 USD kill thresholds) but not the un-raised 0.45
+    // one — exercises effectiveCeilingMicros end to end through the budget
+    // guard's real kill path.
+    case "big_cost": {
+      say(coms(1, "lead", "worker-a"));
+      say(cost("worker-a", "openrouter/model-a", 9.5));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      await sleep(60_000);
+      break;
+    }
     // DF2.7 / INV-COST-5: same spend as budget_overflow, but the worker's
     // cost record is KNOWN-PARTIAL — some turns were never priced. The
     // cumulative total is therefore under-counted and the budget state must

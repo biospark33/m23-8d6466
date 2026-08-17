@@ -270,11 +270,16 @@ export function buildMergedOutput(
   );
   const summary = truncateWithSuffix(rawSummary, MAX_SUMMARY_CHARS);
 
-  // DF1.6: Truncate partialOutput if present, otherwise null — redacted for
-  // the same reason (every string leaving the phase passes redact once).
-  const partialOutput = opts.partialOutput
-    ? truncateWithSuffix(redact(opts.partialOutput), MAX_PARTIAL_OUTPUT_CHARS, "bytes")
-    : null;
+  // DF1.6: Truncate partialOutput when the field is a string, otherwise null —
+  // redacted for the same reason (every string leaving the phase passes redact
+  // once). Null/undefined-checked, not truthiness: an EMPTY failure output
+  // must survive as "" — collapsing it to null would conflate "failure with no
+  // partial output" with the success contract (null on success). Undefined is
+  // tolerated because older call sites omit the field entirely.
+  const partialOutput =
+    opts.partialOutput !== undefined && opts.partialOutput !== null
+      ? truncateWithSuffix(redact(opts.partialOutput), MAX_PARTIAL_OUTPUT_CHARS, "chars")
+      : null;
 
   return {
     result: redactDeep(opts.result, redact) as Record<string, unknown>,

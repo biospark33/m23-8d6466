@@ -199,9 +199,10 @@ function makeBodyFactory(cwd: string, tracer: Tracer, requestId: string) {
     }
     // DF1.6 T7: dispatch_task registration — the factory closes over the
     // run's tracer + requestId so prompt events (pre-spawn) and adapted team
-    // events land in the trace store (DD-8, Observability Contract).
+    // events land in the trace store (DD-8, Observability Contract). rootDir
+    // pins artifact reads to the SAME --run-root the code phases use.
     if (spec.kind === "dispatch_task") {
-      return dispatchTask(spec, { tracer, requestId });
+      return dispatchTask(spec, { tracer, requestId, rootDir: cwd });
     }
     return () => {
       throw new Error(

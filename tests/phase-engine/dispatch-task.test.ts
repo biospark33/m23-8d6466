@@ -232,14 +232,26 @@ describe("dispatch-task: roster gates refuse pre-spawn", () => {
     process.env.QDS_TEAM_RUNNER = "local";
     process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
     // loadRoster confines rosters to the repo root, so the one-role variant
-    // must live INSIDE the repo (fixtures dir, cleaned in afterEach).
+    // must live INSIDE the repo (fixtures dir, cleaned in afterEach). Written
+    // as an explicit minimal roster — regex-deriving it from the two-role
+    // fixture couples this test to that fixture's exact formatting.
     const oneRole = join(import.meta.dir, "fixtures", ".tmp-one-role.yaml");
     writeFileSync(
       oneRole,
-      readFileSync(FIXTURE_ROSTER, "utf8").replace(
-        /\n {2}- name: worker\n {4}model: claude-haiku-4-5\n?$/,
-        "\n",
-      ),
+      [
+        "# Single-role roster: lead only — must refuse (needs >= 1 worker).",
+        "defaults:",
+        "  provider: anthropic",
+        "  thinking: off",
+        "  tools: null",
+        "  writes: []",
+        "  harness_engineering: []",
+        "",
+        "roles:",
+        "  - name: lead",
+        "    model: claude-haiku-4-5",
+        "",
+      ].join("\n"),
     );
     try {
       const result = await runDispatch({ roster: oneRole });
@@ -534,7 +546,9 @@ describe("dispatch-task: INV-2 path validation", () => {
   });
 
   it("artifacts: intermediate-symlink traversal rejected by beneath-root walk, not O_NOFOLLOW", () => {
-    const outside = mkdtempSync("qds-outside-");
+    // System tmpdir, NOT cwd: a bare prefix makes mkdtempSync create the
+    // directory relative to the process cwd (the repo root).
+    const outside = mkdtempSync(join(tmpdir(), "qds-outside-"));
     try {
       const realFile = join(tmpRoot, "real.txt");
       writeFileSync(realFile, "legit");

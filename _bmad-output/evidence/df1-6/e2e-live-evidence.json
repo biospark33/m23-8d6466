@@ -26,7 +26,7 @@
         "costEvents": 3,
         "costMicrosFirstEvent": 2670,
         "traceEvents": "3 prompt (pre-spawn) + 6 coms + 3 cost + 2 worker_output = 12 team events — the F6 shape, 0 malformed",
-        "pipelineTail": "engineer placeholder phase threw (expected — unregistered kind); pipeline ok=false from tail only"
+        "pipelineTail": "dispatch phase succeeded; the engineer placeholder TAIL phase threw (expected — unregistered kind), so pipeline ok=false from the tail only. Run 1 is phase-level green, NOT full-pipeline green — run 2 is the full-pipeline green run"
       }
     },
     {

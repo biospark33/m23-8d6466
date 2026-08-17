@@ -328,3 +328,76 @@ describe("runTeamManifest", () => {
     expect(JSON.stringify(out)).not.toContain(secret);
   }, 15_000);
 });
+
+describe("DF1.6 T5: spawn seam budget ceiling raise (real runs)", () => {
+  // These replace four arithmetic-only tests that asserted constants
+  // (5_000_000/1e6 === 5) — they exercised none of runTeamManifest. Each
+  // test below drives the REAL budget guard through its kill path and
+  // asserts on the cap surfaced in the overflow error message.
+
+  it("effectiveCeilingMicros=5M raises the harness cap to $5 (budget kill reports cap $5.00)", async () => {
+    const out = await runTeamManifest(TEAM_MANIFEST, {
+      env: teamEnv("big_cost"),
+      effectiveCeilingMicros: 5_000_000,
+      graceMs: 200,
+    });
+    expectUniformSchema(out);
+    expect(out.exitStatus).toBe("overflow");
+    // 9.50 spend ≥ 0.9×$5 threshold → killed at the RAISED cap.
+    expect(out.error?.message).toContain("(cap $5.00)");
+    const details = out.error?.details as { cumulativeCostUsd?: number };
+    expect(details.cumulativeCostUsd).toBeCloseTo(9.5, 5);
+  }, 20_000);
+
+  it("ceiling above the schema max clamps to $10 (never raised above the ceiling)", async () => {
+    const out = await runTeamManifest(TEAM_MANIFEST, {
+      env: teamEnv("big_cost"),
+      effectiveCeilingMicros: 15_000_000,
+      graceMs: 200,
+    });
+    expect(out.exitStatus).toBe("overflow");
+    // 9.50 ≥ 0.9×$10 → killed at the CLAMPED cap, not $15.
+    expect(out.error?.message).toContain("(cap $10.00)");
+  }, 20_000);
+
+  it("absent effectiveCeilingMicros leaves the manifest cap untouched (S1 default)", async () => {
+    const out = await runTeamManifest(TEAM_MANIFEST, {
+      env: teamEnv("budget_overflow"),
+      graceMs: 200,
+    });
+    expect(out.exitStatus).toBe("overflow");
+    expect(out.error?.message).toContain("(cap $0.50)");
+  }, 20_000);
+
+  it("invalid ceiling (0 / negative / NaN) falls back to the manifest cap", async () => {
+    for (const bad of [0, -1, Number.NaN]) {
+      const out = await runTeamManifest(TEAM_MANIFEST, {
+        env: teamEnv("budget_overflow"),
+        effectiveCeilingMicros: bad,
+        graceMs: 200,
+      });
+      expect(out.exitStatus).toBe("overflow");
+      expect(out.error?.message).toContain("(cap $0.50)");
+    }
+  }, 60_000);
+
+  it("forceLocalRunner puts QDS_TEAM_RUNNER=local in the CHILD env only", async () => {
+    // local-bin/bun is a fake `bun` FIRST on PATH: it reports the
+    // QDS_TEAM_RUNNER it received via coms_init_error, proving the child
+    // env (not the parent object, not process.env) was forced.
+    const parentEnv: Record<string, string> = {
+      PATH: `${join(FIXTURES, "local-bin")}:${join(FIXTURES, "team-bin")}:${process.env.PATH ?? ""}`,
+      HOME: process.env.HOME ?? "/tmp",
+      QDS_TEAM_RUNNER: "warren",
+    };
+    const out = await runTeamManifest(TEAM_MANIFEST, {
+      env: parentEnv,
+      forceLocalRunner: true,
+    });
+    expect(out.exitStatus).toBe("transient");
+    expect(out.error?.message).toContain("coms init failed: runner=local");
+    // Parent env object not mutated; process.env untouched.
+    expect(parentEnv.QDS_TEAM_RUNNER).toBe("warren");
+    expect(process.env.QDS_TEAM_RUNNER ?? "unset").not.toBe("local");
+  }, 15_000);
+});

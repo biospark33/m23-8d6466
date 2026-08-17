@@ -195,8 +195,10 @@ describe("team-event-adapter: coms payload redaction", () => {
       phaseId: "phase-1",
       redact: (s: string) => s.replace(/sk-1234567890/g, "[REDACTED]"),
     };
-    // Coms event with fake secret in payload
-    const comsLine = `{"type":"coms","requestId":"req-1","sessionId":"sess-1","phaseId":"phase-1","channel":"test","direction":"send","senderAgent":"a","receiverAgent":"b","payloadSize":256,"durationMs":45,"timestamp":"2026-08-17T12:00:00.000Z"}`;
+    // Coms event with fake secret riding an extra payload field — without a
+    // secret in the INPUT, the not.toContain assertion below cannot detect a
+    // regression that skips ctx.redact entirely.
+    const comsLine = `{"type":"coms","requestId":"req-1","sessionId":"sess-1","phaseId":"phase-1","channel":"test","direction":"send","senderAgent":"a","receiverAgent":"b","payloadSize":256,"durationMs":45,"timestamp":"2026-08-17T12:00:00.000Z","message":"token is sk-1234567890"}`;
     const parsed = parseTeamEventLine(comsLine);
     expect(parsed).toBeTruthy();
     if (!parsed || parsed.kind !== "coms") throw new Error("Parse failed");
@@ -204,7 +206,7 @@ describe("team-event-adapter: coms payload redaction", () => {
     const adapted = adaptTeamEvent(parsed, ctx);
     if (adapted.type !== "coms") throw new Error(`expected coms, got ${adapted.type}`);
     // The raw coms payload is passed through ctx.redact in payloadJson
-    // Verify the redacted form contains no secret chars
+    expect(adapted.payloadJson).toContain("[REDACTED]");
     expect(adapted.payloadJson).not.toContain("sk-1234567890");
   });
 });
@@ -333,18 +335,11 @@ describe("team-event-adapter: classifyRun precedence", () => {
   });
 
   it("array merged result (rejected upstream) arrives as null -> lead_failure", () => {
-    // parseTeamEventLine rejects arrays, so classifyRun receives null
-    const result = classifyRun({
-      exitCode: 0,
-      termSignal: null,
-      mergedResult: null,
-      comsInitError: false,
-      killOrigin: null,
-    });
-    expect(result).toBe("lead_failure");
-  });
-
-  it("null merged result (rejected upstream) with exit 0 -> lead_failure", () => {
+    // Genuinely exercise the upstream rejection: a merged event whose result
+    // is an array is dropped by parseTeamEventLine, so classifyRun receives
+    // null and the run classifies lead_failure at exit 0.
+    const arrayMerged = parseTeamEventLine(`{"type":"merged","result":[1,2]}`);
+    expect(arrayMerged).toBeNull();
     const result = classifyRun({
       exitCode: 0,
       termSignal: null,
@@ -398,6 +393,33 @@ describe("team-event-adapter: adaptTeamEvent individual types", () => {
     expect(adapted.kind).toBe("generic");
     expect(adapted.label).toBe("worker-1");
     expect(adapted.status).toBe("success"); // from output status
+  });
+
+  it("honors every valid ExitStatus a worker declares — none rewritten to success", () => {
+    // Regression: the derivation used to recognize only logic/overflow, so a
+    // worker's real "transient"/"lead_failure" was silently rewritten to
+    // "success", masking the failure.
+    for (const status of ["logic", "overflow", "transient", "lead_failure"] as const) {
+      const line = `{"type":"worker_output","agentId":"worker-1","output":{"status":"${status}"}}`;
+      const parsed = parseTeamEventLine(line);
+      if (!parsed || parsed.kind !== "worker_output") throw new Error("Parse failed");
+      const adapted = adaptTeamEvent(parsed, ctx);
+      if (adapted.type !== "envelope") throw new Error(`expected envelope, got ${adapted.type}`);
+      expect(adapted.status).toBe(status);
+    }
+    // Unknown/absent status still defaults to success.
+    const okLine = `{"type":"worker_output","agentId":"worker-1","output":{"summary":"done"}}`;
+    const okParsed = parseTeamEventLine(okLine);
+    if (!okParsed || okParsed.kind !== "worker_output") throw new Error("Parse failed");
+    const okAdapted = adaptTeamEvent(okParsed, ctx);
+    if (okAdapted.type !== "envelope") throw new Error("expected envelope");
+    expect(okAdapted.status).toBe("success");
+    const bogusLine = `{"type":"worker_output","agentId":"worker-1","output":{"status":"bogus"}}`;
+    const bogusParsed = parseTeamEventLine(bogusLine);
+    if (!bogusParsed || bogusParsed.kind !== "worker_output") throw new Error("Parse failed");
+    const bogusAdapted = adaptTeamEvent(bogusParsed, ctx);
+    if (bogusAdapted.type !== "envelope") throw new Error("expected envelope");
+    expect(bogusAdapted.status).toBe("success");
   });
 
   it("adapts merged to terminal marker", () => {

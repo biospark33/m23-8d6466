@@ -23,8 +23,7 @@ import {
 import {
   startRssWatchdog,
   type WatchdogHandle,
-  DEFAULT_THRESHOLD_BYTES,
-  DEFAULT_POLL_MS,
+  WATCHDOG_GRACE_MS,
 } from "./watchdog.ts";
 import {
   capExcerpt,
@@ -80,8 +79,12 @@ export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
 const PROBE_KEY = "QDS_PROBE=";
 
-/** Watchdog grace after a kill before force-settling (grandchild stdout-hold). */
-export const WATCHDOG_GRACE_MS = 5000;
+/**
+ * Watchdog grace after a kill before force-settling (grandchild stdout-hold).
+ * Single source: watchdog.ts (re-exported so existing `from "./runner.ts"`
+ * imports keep working).
+ */
+export { WATCHDOG_GRACE_MS };
 
 /**
  * Kill a whole child tree: process group on POSIX (SIGKILL, not
@@ -562,8 +565,13 @@ export interface TeamRunOptions {
   /**
    * DF1.6 T7: raw exit facts for the phase layer's precedence classification
    * (story Technical Notes: how the process died > envelope > exit code).
-   * Fired once when the lead child closes. killOrigin is "watchdog" only when
-   * the RSS watchdog escalated; comsInitError is the parsed reason or null.
+   * Fired EXACTLY ONCE, from settle() — covering `close`, the wall-clock and
+   * budget force-settles, and the stdout/spawn error paths (a force-settled
+   * run whose `close` never arrives still reports facts). exitCode/termSignal
+   * are the best-known values at settle time (null when the child never
+   * reported an exit). killOrigin is "watchdog" only when the RSS watchdog
+   * escalated; comsInitError is the parsed reason or null. The callback is
+   * invoked inside a try/catch: a throwing observer must not hang the run.
    */
   onRunFacts?: (facts: {
     exitCode: number | null;
@@ -571,6 +579,12 @@ export interface TeamRunOptions {
     killOrigin: "watchdog" | null;
     comsInitError: string | null;
   }) => void;
+  /**
+   * DF1.6 T7: parent-side cancellation. When the signal fires (or has already
+   * fired), the whole child tree is killed and the run settles transient —
+   * a phase abort must not leave the team running until its own wall-clock cap.
+   */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -597,11 +611,19 @@ export async function runTeamManifest(
   const env = mergeEnv(parent, manifest.env);
 
   // DF1.6 T5: Apply effective ceiling to budgetCapUsd
-  // When effectiveCeilingMicros is provided, set budgetCapUsd = ceiling / 1e6,
-  // clamped to TeamManifestSchema max (10 USD). Never raises cap above ceiling.
+  // When effectiveCeilingMicros is provided (and finite + positive), set
+  // budgetCapUsd = ceiling / 1e6, clamped to TeamManifestSchema max (10 USD).
+  // Never raises cap above ceiling. A zero/negative/NaN ceiling is invalid at
+  // this boundary: zero would arm the kill on the first cost poll
+  // (0 >= 0.9*0) and NaN would disable it for the whole run
+  // (cumulative >= NaN is always false) — both fall back to the manifest cap.
   // This is the DF2.7 boundary where the tier-3 harness cap matches the outer guard.
   let budgetCapUsd = opts.budgetCapUsd ?? manifest.team.budgetCapUsd;
-  if (opts.effectiveCeilingMicros !== undefined) {
+  if (
+    opts.effectiveCeilingMicros !== undefined &&
+    Number.isFinite(opts.effectiveCeilingMicros) &&
+    opts.effectiveCeilingMicros > 0
+  ) {
     const ceilingUsd = opts.effectiveCeilingMicros / 1e6;
     // Clamp to schema maximum (10) — never above the ceiling
     budgetCapUsd = Math.min(ceilingUsd, 10);
@@ -680,6 +702,10 @@ export async function runTeamManifest(
     let settled = false;
     let child: ChildProcess | null = null;
     const timers: Array<ReturnType<typeof setTimeout>> = [];
+    // Best-known exit facts, updated by `exit`/`close`; emitted once from
+    // settle() so force-settled runs (close never arrived) still report them.
+    let lastExitCode: number | null = null;
+    let lastTermSignal: NodeJS.Signals | null = null;
 
     // DF1.6 T1: Collect partial output for failure paths (capped at 10KB)
     let partialOutputBuffer = "";
@@ -726,6 +752,19 @@ export async function runTeamManifest(
         watchdog = null;
       }
       removeSignalHandlers();
+      // DF1.6 T7: exit facts exactly once per run, from HERE — every settle
+      // path (close, force-settle, stream/spawn error) reports them. A
+      // throwing observer must not prevent the resolve below.
+      try {
+        opts.onRunFacts?.({
+          exitCode: lastExitCode,
+          termSignal: lastTermSignal,
+          killOrigin: watchdogKilled ? "watchdog" : null,
+          comsInitError: comsInitError ?? null,
+        });
+      } catch (err) {
+        console.error("cli-anything: onRunFacts callback threw", err);
+      }
 
       const validated: WorkerOutput[] = [];
       for (const [agentId, raw] of workerOutputs) {
@@ -806,14 +845,12 @@ export async function runTeamManifest(
 
       // DF1.6 T4: Start RSS watchdog after successful spawn
       // The child is the process group leader (detached:true on POSIX)
-      // pgidOrGroup = child.pid for process group sampling
+      // pgidOrGroup = child.pid for process group sampling. Threshold/poll/
+      // grace come from startRssWatchdog's defaults (4 GB / 200 ms / 5 s).
       if (process.platform !== "win32" && child.pid !== undefined) {
         watchdog = startRssWatchdog({
           child,
           pgidOrGroup: child.pid,
-          thresholdBytes: DEFAULT_THRESHOLD_BYTES, // 4 GB
-          pollMs: DEFAULT_POLL_MS, // 200 ms
-          graceMs: WATCHDOG_GRACE_MS, // 5 s
           onEscalate: (_info) => {
             watchdogKilled = true;
             // RSS watchdog fires → overflow precedence (Technical Notes step 1)
@@ -837,6 +874,25 @@ export async function runTeamManifest(
         message: `warren spawn failed${code !== undefined ? ` (${code})` : ""}`,
       });
       return;
+    }
+
+    // DF1.6 T7: parent-side cancellation — a phase abort kills the team tree
+    // instead of letting it run to its own wall-clock cap. Mirrors the
+    // wall-clock leg: kill, then force-settle transient if `close` never
+    // arrives (grandchild stdout-hold).
+    if (opts.abortSignal !== undefined) {
+      const abortTeam = (): void => {
+        if (settled) return;
+        killTree(child);
+        arm(WATCHDOG_GRACE_MS, () => {
+          settle("transient", false, {
+            reason: "transient",
+            message: "run aborted by parent signal",
+          });
+        });
+      };
+      if (opts.abortSignal.aborted) abortTeam();
+      else opts.abortSignal.addEventListener("abort", abortTeam, { once: true });
     }
 
     // Wall-clock hard cap (INV-2): wall-clock wins over coms_await.
@@ -893,7 +949,14 @@ export async function runTeamManifest(
       {
         const event = parseTeamEventLine(line);
         // DF1.6 T7: observe every surviving line (null = parser rejection).
-        opts.onTeamEvent?.(event, { droppedOversize: false });
+        // Observer failures must not take down the internal event loop — a
+        // throwing callback inside a stream `data` handler is an uncaught
+        // exception for the whole process.
+        try {
+          opts.onTeamEvent?.(event, { droppedOversize: false });
+        } catch (err) {
+          console.error("cli-anything: onTeamEvent callback threw", err);
+        }
         if (event !== null) {
           switch (event.kind) {
             case "cost": {
@@ -981,7 +1044,11 @@ export async function runTeamManifest(
         );
         // DF1.6 T7 (AC2): a cap-dropped line never reaches the parser — count
         // it as droppedOversize, never as malformed.
-        opts.onTeamEvent?.(null, { droppedOversize: true });
+        try {
+          opts.onTeamEvent?.(null, { droppedOversize: true });
+        } catch (err) {
+          console.error("cli-anything: onTeamEvent callback threw", err);
+        }
         lineBuffer = "";
         teamStdoutBytes = 0;
         // Reset the decoder: earlier chunks of THIS oversized line may have
@@ -1184,6 +1251,8 @@ export async function runTeamManifest(
     // cap. Mirror runManifest: on `exit`, arm an unref'd watchdog that
     // force-finalizes after WATCHDOG_GRACE_MS if `close` hasn't arrived.
     child.on("exit", (code, signal) => {
+      lastExitCode = code;
+      lastTermSignal = signal;
       if (settled || closed) return;
       arm(WATCHDOG_GRACE_MS, () => {
         if (!closed) finalize(code, signal);
@@ -1192,13 +1261,8 @@ export async function runTeamManifest(
 
     child.on("close", (code, signal) => {
       closed = true;
-      // DF1.6 T7: raw exit facts for the phase layer's precedence rule.
-      opts.onRunFacts?.({
-        exitCode: code,
-        termSignal: signal,
-        killOrigin: watchdogKilled ? "watchdog" : null,
-        comsInitError: comsInitError ?? null,
-      });
+      lastExitCode = code;
+      lastTermSignal = signal;
       finalize(code, signal);
     });
   });

@@ -260,7 +260,10 @@ describe("rosterToTeamManifest", () => {
     expect(TeamManifestSchema.safeParse(m3).success).toBe(true);
   });
 
-  test("rejects >3 workers per TeamManifestSchema", () => {
+  test("rejects >3 workers: THROWS at the adapter boundary (schema.parse inside)", () => {
+    // The parse now lives INSIDE rosterToTeamManifest: an over-wide roster
+    // must fail before manifest persistence or runTeamManifest, not at the
+    // first downstream safeParse.
     const baseRole: Omit<ResolvedRole, "name"> = {
       model: "claude-haiku-4-5",
       provider: "anthropic",
@@ -284,16 +287,15 @@ describe("rosterToTeamManifest", () => {
       warnings: [],
     };
 
-    const manifest = rosterToTeamManifest(roster, {
-      name: "too-many",
-      project: "p",
-      leadRoleName: "lead",
-      workerRoleNames: ["w1", "w2", "w3", "w4"],
-      prompts: { lead: "x", w1: "y", w2: "z", w3: "a", w4: "b" },
-    });
-
-    const parsed = TeamManifestSchema.safeParse(manifest);
-    expect(parsed.success).toBe(false);
+    expect(() =>
+      rosterToTeamManifest(roster, {
+        name: "too-many",
+        project: "p",
+        leadRoleName: "lead",
+        workerRoleNames: ["w1", "w2", "w3", "w4"],
+        prompts: { lead: "x", w1: "y", w2: "z", w3: "a", w4: "b" },
+      }),
+    ).toThrow();
   });
 
   test("omits optional caps when not provided — schema defaults apply", () => {

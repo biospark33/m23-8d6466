@@ -7,7 +7,7 @@
  * - Parses passed/failed counts from bun test output format
  * - Returns fail-closed results when spawn fails, signal kills, or output unparseable
  */
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -182,6 +182,116 @@ describe("runTestCommand", () => {
     expect(result.reason!.length).toBeLessThanOrEqual(200);
     // Should not contain verbatim script output
     expect(result.reason).not.toContain("AAAAAAAAAA");
+  });
+});
+
+describe("runTestCommand — reporter formats, output cap, group kill (review round)", () => {
+  const cwd2 = freshRoot();
+
+  test("parses green vitest default reporter output (colon-less, no failed clause)", async () => {
+    // "Tests  7 passed (7)" — an all-green vitest run. The old parser
+    // required a colon AND a failed clause, so green vitest failed closed.
+    const script = path.join(cwd2, "vitest-green.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho ' Test Files  2 passed (2)'\necho '      Tests  7 passed (7)'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd2 });
+    expect(result.testsExecuted).toBe(true);
+    expect(result.testResults).toEqual({ passed: 7, failed: 0 });
+  });
+
+  test("parses green jest output (colon, ', N total' instead of failed)", async () => {
+    const script = path.join(cwd2, "jest-green.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho 'Tests:       7 passed, 7 total'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd2 });
+    expect(result.testsExecuted).toBe(true);
+    expect(result.testResults).toEqual({ passed: 7, failed: 0 });
+  });
+
+  test("parses failing vitest output: 'Tests  7 passed | 3 failed'", async () => {
+    const script = path.join(cwd2, "vitest-fail.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho '      Tests  7 passed | 3 failed (10)'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd2 });
+    expect(result.testsExecuted).toBe(true);
+    expect(result.testResults).toEqual({ passed: 7, failed: 3 });
+  });
+
+  test("output beyond the capture cap fails closed with a cap reason", async () => {
+    // ~90 bytes/line × 8000 lines ≈ 720 KiB > 512 KiB cap on ONE stream.
+    const script = path.join(cwd2, "flood.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\nfor i in $(seq 1 8000); do echo 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'; done\necho ' 7 pass'\necho ' 0 fail'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd2 });
+    expect(result.testsExecuted).toBe(false);
+    expect(result.testResults).toEqual({ passed: 0, failed: 0 });
+    expect(result.reason).toMatch(/cap/i);
+  }, 20_000);
+
+  test("abort terminates the command even when it ignores SIGTERM (grace → SIGKILL)", async () => {
+    // SIGTERM-ignoring leader (perl — macOS sh/bash do not honor TERM traps
+    // while waiting on a foreground child): the abort path must fall through
+    // to SIGKILL within TERM_GRACE_MS instead of hanging. (Group-wide kill is
+    // a documented limitation — see the ponytail note in test-results.ts:
+    // Bun.spawn exposes no process-group control.)
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 200);
+    const started = Date.now();
+
+    const result = await runTestCommand(
+      ["perl", "-e", '$SIG{TERM}="IGNORE"; sleep 100'],
+      { cwd: cwd2, signal: controller.signal },
+    );
+    expect(result.testsExecuted).toBe(false);
+    expect(result.reason).toMatch(/abort/i);
+    // SIGKILL backstop lands after the grace window, not after sleep 100.
+    expect(Date.now() - started).toBeLessThan(15_000);
+  }, 20_000);
+
+  test("already-aborted signal is observed immediately (child never lingers)", async () => {
+    const script = path.join(cwd2, "pre-aborted.sh");
+    fs.writeFileSync(script, "#!/bin/sh\nsleep 100\n", { mode: 0o755 });
+    const controller = new AbortController();
+    controller.abort(); // BEFORE the call — the listener-only path would hang
+    const result = await runTestCommand([script], { cwd: cwd2, signal: controller.signal });
+    expect(result.testsExecuted).toBe(false);
+    expect(result.reason).toMatch(/abort/i);
+  }, 15_000);
+
+  test("provider API keys are not passed to the test command", async () => {
+    const script = path.join(cwd2, "env-probe.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\nif [ -n \"${ANTHROPIC_API_KEY:-}\" ] || [ -n \"${OPENROUTER_API_KEY:-}\" ]; then echo 'LEAK'; else echo ' 1 pass\\n 0 fail'; fi\n",
+      { mode: 0o755 },
+    );
+    const prevAnthropic = process.env.ANTHROPIC_API_KEY;
+    const prevOpenrouter = process.env.OPENROUTER_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "sk-test-do-not-leak";
+    try {
+      const result = await runTestCommand([script], { cwd: cwd2 });
+      expect(result.testsExecuted).toBe(true);
+      expect(result.testResults).toEqual({ passed: 1, failed: 0 });
+    } finally {
+      // `= undefined` would stringify to "undefined" — delete is the only
+      // correct unset for process.env.
+      // biome-ignore lint/performance/noDelete: env unset semantics
+      if (prevAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prevAnthropic;
+      if (prevOpenrouter !== undefined) process.env.OPENROUTER_API_KEY = prevOpenrouter;
+    }
   });
 });
 

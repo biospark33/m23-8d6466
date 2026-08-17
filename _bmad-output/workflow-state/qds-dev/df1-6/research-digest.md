@@ -2,7 +2,7 @@
 
 ## Verified dependency surfaces (Track E — zero gaps)
 - DF1.1: Run.phase() phase.ts:176; PhaseBodyContext {signal, phaseId, params, ctx}; RunContext{runId,pipelineId,requestId,effectiveCeilingMicros?} types.ts:196-201 ("DF1.6's spawn seam is the first consumer" per docs); PhaseSpec.testCommand?: string[] EXISTS manifest.ts:62-87; PhaseRecord{...subTimings} types.ts:210-225; readArtifactBeneathRoot exported manifest.ts:204-268 (INV-1 resolver: realpathNoOpen -> assertBeneath -> O_NOFOLLOW open -> fd verify).
-- PhaseKind enum TODAY: ["engineer","agent","code"] — dispatch_task NOT registered (GAP: decide enum extension vs agent-kind body; check pipeline-run.ts wiring).
+- PhaseKind enum at research time: ["engineer","agent","code"] — dispatch_task NOT registered (GAP: decide enum extension vs agent-kind body; check pipeline-run.ts wiring). UPDATE 2026-08-17 (post-implementation): dispatch_task IS now registered — `src/phase-engine/types.ts` PhaseKind + `scripts/pipeline-run.ts` makeBodyFactory (`kind === "dispatch_task"` → `dispatchTask`).
 - DF1.2: Envelope envelopes/types.ts:40-54 {kind,label,status,summary,outputTail?,artifacts?,changedFiles?,approved?,blocking?,findings?}; asEnvelope(result:QualityCheckResult,label) adapter.ts:45; QualityCheckResult{name,exitCode,outputTail,outputArtifact,spawnEnv}.
 - DF1.5: loadRoster(path,opts)->ResolvedRoster schema.ts:73-79; validateRoster(roster,opts)->{verdict,report} validate.ts:952; ResolvedRole{name,model,provider,...,slug=`${provider}/${model}`} schema.ts:46-64; resolveRate validate.ts:471.
 - DF2.2: setup-gate.ts:252-267 writes QDS_TEAM_RUNNER=local into box .env + content-verify; error names DF1.6.

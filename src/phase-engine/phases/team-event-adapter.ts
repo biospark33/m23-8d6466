@@ -12,6 +12,19 @@
 import type { TeamEvent } from "../../../cli-anything/src/team-events.ts";
 import type { ExitStatus } from "../types.ts";
 
+/** The closed ExitStatus set — membership check for untrusted worker status. */
+const EXIT_STATUSES: ReadonlySet<string> = new Set([
+  "success",
+  "logic",
+  "overflow",
+  "transient",
+  "lead_failure",
+]);
+
+function isExitStatus(value: unknown): value is ExitStatus {
+  return typeof value === "string" && EXIT_STATUSES.has(value);
+}
+
 /**
  * Adapted event output from adaptTeamEvent. Discriminated union covering:
  * - coms, cost, coms_init_error: trace events
@@ -58,7 +71,8 @@ export interface WorkerEnvelope {
   label: string;
   status: ExitStatus;
   summary: string;
-  output?: unknown;
+  /** Serialized (redacted) worker output — always a JSON string. */
+  output?: string;
 }
 
 /** Terminal marker for merged result — phase validates schema, not adapter. */
@@ -158,11 +172,12 @@ export function adaptTeamEvent(
 
     case "worker_output": {
       const output = event.output as Record<string, unknown> | null;
-      // Follow asEnvelope precedent: status derived from output content
-      // If output has explicit status, use it; default to success for non-null
-      const status = output?.status === "logic" || output?.status === "overflow"
-        ? (output.status as ExitStatus)
-        : "success";
+      // Follow asEnvelope precedent: status derived from output content.
+      // ANY valid ExitStatus the worker declared is honored — recognizing only
+      // a subset would silently rewrite a worker's real "transient" or
+      // "lead_failure" into "success". Unknown/absent → "success".
+      const declared = output?.status;
+      const status = isExitStatus(declared) ? declared : "success";
       return {
         type: "envelope",
         kind: "generic",

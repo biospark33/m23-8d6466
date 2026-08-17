@@ -10,8 +10,8 @@
  * - Default constants
  */
 
-import { describe, expect, it } from "bun:test";
-import { spawn } from "node:child_process";
+import { afterEach, describe, expect, it } from "bun:test";
+import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,6 +23,33 @@ import {
 } from "../src/watchdog.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Every detached child the suite spawns, killed group-wide in afterEach.
+ * Without this, any test that stops the watchdog before escalation leaves a
+ * `sleep 10` (and its group) running for the rest of the suite's lifetime.
+ */
+const spawned: ChildProcess[] = [];
+function trackChild(child: ChildProcess): ChildProcess {
+  spawned.push(child);
+  return child;
+}
+afterEach(() => {
+  for (const child of spawned) {
+    if (child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        try {
+          process.kill(child.pid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+    }
+  }
+  spawned.length = 0;
+});
 
 describe("watchdog constants", () => {
   it("exports default poll interval of 200ms", () => {
@@ -42,7 +69,7 @@ describe("RSS watchdog", () => {
   it("returns running status immediately after start", async () => {
     const logs: string[] = [];
     const handle = startRssWatchdog({
-      child: spawn("sleep", ["10"], { detached: true, stdio: "ignore" }),
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
       pgidOrGroup: process.pid,
       thresholdBytes: DEFAULT_THRESHOLD_BYTES,
       pollMs: 50,
@@ -59,7 +86,7 @@ describe("RSS watchdog", () => {
 
   it("returns stopped status after stop", () => {
     const handle = startRssWatchdog({
-      child: spawn("sleep", ["10"], { detached: true, stdio: "ignore" }),
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
       pgidOrGroup: process.pid,
       onEscalate: () => {},
       onUnwatchable: () => {},
@@ -73,7 +100,7 @@ describe("RSS watchdog", () => {
 
   it("returns null killOrigin when never escalated", () => {
     const handle = startRssWatchdog({
-      child: spawn("sleep", ["10"], { detached: true, stdio: "ignore" }),
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
       pgidOrGroup: process.pid,
       onEscalate: () => {},
       onUnwatchable: () => {},
@@ -88,7 +115,7 @@ describe("RSS watchdog", () => {
   it("samples RSS at the configured poll interval", async () => {
     let sampleCount = 0;
     const handle = startRssWatchdog({
-      child: spawn("sleep", ["10"], { detached: true, stdio: "ignore" }),
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
       pgidOrGroup: process.pid,
       pollMs: 50,
       onEscalate: () => {},
@@ -100,10 +127,10 @@ describe("RSS watchdog", () => {
       },
     });
 
-    await sleep(175); // Should get ~3-4 samples
+    await sleep(275); // Should get ~4-5 samples (extra headroom for load)
     handle.stop();
     expect(sampleCount).toBeGreaterThanOrEqual(3);
-    expect(sampleCount).toBeLessThanOrEqual(5);
+    expect(sampleCount).toBeLessThanOrEqual(6);
   });
 
   it("escalates when RSS exceeds threshold", async () => {
@@ -112,7 +139,7 @@ describe("RSS watchdog", () => {
     const escalateInfo: { rssBytes: number; samples: number }[] = [];
 
     // Spawn a proper child process with its own process group
-    const child = spawn("sleep", ["10"], { detached: true, stdio: "ignore" });
+    const child = trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" }));
     const pgid = child.pid!; // With detached:true, child.pid is the PGID
 
     const handle = startRssWatchdog({
@@ -162,10 +189,10 @@ sleep 100
 `,
     );
 
-    const child = spawn("bash", [scriptPath], {
+    const child = trackChild(spawn("bash", [scriptPath], {
       detached: true,
       stdio: ["ignore", "pipe", "ignore"],
-    });
+    }));
 
     await sleep(100); // Let the script start and spawn child
 
@@ -199,13 +226,23 @@ sleep 100
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("does NOT SIGKILL if tree exits during grace period", async () => {
-    // Track if we ever try to SIGKILL - we don't in this test
-    // because the handle is stopped before grace expires
-    let sigkillAttempted = false;
-
-    const child = spawn("sleep", ["10"], { detached: true, stdio: "ignore" });
+  it("does NOT SIGKILL when stopped during grace period — tree survives past grace", async () => {
+    // A vacuous `sigkillAttempted` flag can never fail; this version asserts
+    // REAL liveness. The child must survive the escalation SIGTERM (perl with
+    // the signal ignored — macOS bash does not honor `trap "" TERM` while
+    // waiting on a foreground child), stop() must land inside the grace
+    // window, and the group must still be alive well AFTER grace expiry —
+    // proving stop() cleared the armed SIGKILL leg instead of letting it fire.
+    const child = trackChild(spawn("perl", ["-e", '$SIG{TERM}="IGNORE"; sleep 100'], {
+      detached: true,
+      stdio: "ignore",
+    }));
     const pgid = child.pid!;
+
+    // Let perl boot and install the TERM handler BEFORE the watchdog starts —
+    // under load, forking perl can outlast the first poll, and the escalation
+    // SIGTERM would hit the default disposition and kill it.
+    await sleep(300);
 
     const handle = startRssWatchdog({
       child,
@@ -216,19 +253,24 @@ sleep 100
       onEscalate: () => {},
       onUnwatchable: () => {},
       log: () => {},
-      sampleRss: async () => 10 * 1024 ** 2,
+      sampleRss: async () => 10 * 1024 ** 2, // 10 MB — over threshold
     });
 
-    // Stop the watchdog during grace period to simulate tree exit
-    // This prevents the grace timer from ever firing SIGKILL
-    setTimeout(() => {
-      handle.stop();
-      // Verify we stopped before grace expired
-      sigkillAttempted = false; // Explicitly set, since stop() prevented SIGKILL
-    }, 100);
+    await sleep(100); // escalation + group SIGTERM happened; grace ends ~250ms
+    handle.stop(); // stop BEFORE grace expiry
+    expect(handle.status).toBe("stopped");
 
-    await sleep(300);
-    expect(sigkillAttempted).toBe(false);
+    await sleep(300); // well past grace expiry — SIGKILL leg must NOT have fired
+    // The leader ignores SIGTERM, so it is alive UNLESS a stale grace timer
+    // SIGKILLed the group after stop().
+    let alive = false;
+    try {
+      process.kill(-pgid, 0);
+      alive = true;
+    } catch {
+      alive = false;
+    }
+    expect(alive).toBe(true);
 
     // Cleanup
     try {
@@ -242,7 +284,7 @@ sleep 100
     const unwatchableReasons: string[] = [];
 
     const handle = startRssWatchdog({
-      child: spawn("sleep", ["10"], { detached: true, stdio: "ignore" }),
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
       pgidOrGroup: process.pid,
       pollMs: 50,
       onEscalate: () => {},
@@ -267,7 +309,7 @@ sleep 100
     const logs: string[] = [];
 
     const handle = startRssWatchdog({
-      child: spawn("sleep", ["10"], { detached: true, stdio: "ignore" }),
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
       pgidOrGroup: process.pid,
       pollMs: 50,
       onEscalate: () => {},
@@ -291,7 +333,7 @@ sleep 100
     };
 
     const handle = startRssWatchdog({
-      child: spawn("sleep", ["10"], { detached: true, stdio: "ignore" }),
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
       pgidOrGroup: process.pid,
       pollMs: 50,
       onEscalate: () => {},
@@ -310,7 +352,7 @@ sleep 100
     let sampleCount = 0;
     let escalated = false;
 
-    const child = spawn("sleep", ["10"], { detached: true, stdio: "ignore" });
+    const child = trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" }));
     const pgid = child.pid!;
 
     const handle = startRssWatchdog({
@@ -348,10 +390,10 @@ sleep 100
   describe.skipIf(process.platform === "win32")("real process group sampling", () => {
     it("samples aggregate RSS from a real process group", async () => {
       // Create a process group with a child
-      const child = spawn("sleep", ["1"], {
+      const child = trackChild(spawn("sleep", ["1"], {
         detached: true,
         stdio: "ignore",
-      });
+      }));
 
       const pgid = child.pid!;
       const samples: number[] = [];

@@ -11,7 +11,7 @@
  * join must preserve the original pair verbatim.
  */
 
-import type { TeamRole } from "../../../cli-anything/src/types.ts";
+import { TeamManifestSchema, type TeamManifest, type TeamRole } from "../../../cli-anything/src/types.ts";
 import type { ResolvedRole, ResolvedRoster } from "../roster/schema.ts";
 
 /**
@@ -70,16 +70,16 @@ export interface RosterToManifestOptions {
 /**
  * Convert a validated DF1.5 roster to a cli-anything TeamManifest.
  *
- * Validates the result through TeamManifestSchema before returning. Callers
- * should handle Zod validation errors (typically surfaced as a logic exitStatus).
- *
- * The worker count must be 1-3 per TeamManifestSchema — manifests with >3
- * workers will fail validation.
+ * The constructed manifest is VALIDATED through TeamManifestSchema.parse and
+ * the parsed TeamManifest returned — an invalid roster-derived manifest
+ * (e.g. >3 workers) throws HERE, before persistence or runTeamManifest,
+ * rather than surfacing as a zod error deep in the harness. Callers should
+ * handle ZodError (typically surfaced as a logic exitStatus).
  */
 export function rosterToTeamManifest(
   roster: ResolvedRoster,
   opts: RosterToManifestOptions,
-): object {
+): TeamManifest {
   const roleByName = new Map(roster.roles.map((r) => [r.name, r]));
 
   const leadRole = roleByName.get(opts.leadRoleName);
@@ -103,13 +103,13 @@ export function rosterToTeamManifest(
     prompt: opts.prompts[opts.leadRoleName] ?? "",
   });
 
-  return {
+  return TeamManifestSchema.parse({
     name: opts.name,
     team: {
       lead,
       workers,
       project: opts.project,
-      // Pass through optional caps — let Zod defaults apply when omitted
+      // Pass through optional caps — Zod defaults apply when omitted
       ...(opts.budgetCapUsd !== undefined && { budgetCapUsd: opts.budgetCapUsd }),
       ...(opts.turnCap !== undefined && { turnCap: opts.turnCap }),
       ...(opts.wallClockCapMs !== undefined && { wallClockCapMs: opts.wallClockCapMs }),
@@ -117,5 +117,5 @@ export function rosterToTeamManifest(
         comsAwaitTimeoutMs: opts.comsAwaitTimeoutMs,
       }),
     },
-  };
+  });
 }

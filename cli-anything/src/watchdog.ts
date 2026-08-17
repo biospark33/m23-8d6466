@@ -26,7 +26,12 @@ export interface WatchdogHandle {
 }
 
 export interface WatchdogOptions {
-  /** The lead child process (must be spawned as process group leader). */
+  /**
+   * The lead child process. Kept for call-site symmetry and future
+   * per-process diagnostics; liveness is tracked via the process GROUP
+   * (`pgidOrGroup`), not this handle — the lead may exit before its
+   * descendants during escalation.
+   */
   child: ChildProcess;
   /** Process group ID (negative-pid target, equals child.pid on detached spawn). */
   pgidOrGroup: number;
@@ -64,7 +69,8 @@ export interface WatchdogOptions {
  */
 export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
   const {
-    child,
+    // `opts.child` stays in the interface for callers/tests; the poll loop
+    // keys off liveness via the process group, not the lead's exit state.
     pgidOrGroup,
     thresholdBytes = DEFAULT_THRESHOLD_BYTES,
     pollMs = DEFAULT_POLL_MS,
@@ -82,30 +88,46 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
   let samples = 0;
 
   /**
-   * Default RSS sampler using `ps -o rss= -g <pgid>`.
-   * Returns aggregate RSS in KB, or null if sampling fails.
+   * Default RSS sampler. Platform-specific process-group selection:
+   * - darwin (BSD ps): `ps -o rss= -g <pgid>` — `-g` selects by process
+   *   group ID.
+   * - linux (procps): `ps -g` selects by SESSION leader, not pgid — there is
+   *   no pgid selector, so enumerate `ps -o pgid=,rss= -e` and filter lines
+   *   by the requested pgid. Unrelated processes in the child's session are
+   *   thereby excluded.
+   * Returns aggregate RSS in bytes, or null if sampling fails.
    */
   const defaultSampler = async (): Promise<number | null> => {
     if (process.platform === "win32") {
-      return null; // Windows not supported for ps -g
+      return null; // Windows not supported
     }
+    const darwin = process.platform === "darwin";
     return new Promise((resolve) => {
-      execFile("ps", ["-o", "rss=", "-g", String(pgidOrGroup)], (err, stdout) => {
-        if (err) {
-          return resolve(null);
-        }
-        // Sum all RSS values (one line per process in the group)
-        const lines = stdout.trim().split(/\s+/);
-        let sumKb = 0;
-        for (const line of lines) {
-          const kb = Number.parseInt(line, 10);
-          if (Number.isFinite(kb)) {
-            sumKb += kb;
+      execFile(
+        "ps",
+        darwin
+          ? ["-o", "rss=", "-g", String(pgidOrGroup)]
+          : ["-o", "pgid=,rss=", "-e"],
+        (err, stdout) => {
+          if (err) {
+            return resolve(null);
           }
-        }
-        // Convert KB to bytes
-        resolve(sumKb * 1024);
-      });
+          let sumKb = 0;
+          for (const line of stdout.split("\n")) {
+            const trimmed = line.trim();
+            if (trimmed === "") continue;
+            const fields = trimmed.split(/\s+/);
+            const rss = darwin ? fields[0] : fields[1];
+            if (!darwin && fields[0] !== String(pgidOrGroup)) continue;
+            const kb = Number.parseInt(rss ?? "", 10);
+            if (Number.isFinite(kb)) {
+              sumKb += kb;
+            }
+          }
+          // Convert KB to bytes
+          resolve(sumKb * 1024);
+        },
+      );
     });
   };
 
@@ -116,10 +138,10 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
   let graceTimer: ReturnType<typeof setTimeout> | null = null;
   const handle: WatchdogHandle = {
     stop: (): void => {
-      // No-op if already stopped
+      // Idempotent no-op if already stopped — but NOT if the child already
+      // exited: a dead child must not leave `running` true and the poll timer
+      // armed, spinning samples against a dead pgid forever (leaked timer).
       if (!running) return;
-      // No-op if child already exited
-      if (child.exitCode !== null || child.signalCode !== null) return;
       running = false;
       handle.status = "stopped";
       if (timer !== null) {
@@ -178,10 +200,13 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
       // Wait grace period, then SIGKILL if still alive
       graceTimer = setTimeout(() => {
         if (!running) return;
-        // Check if child/process group still exists before SIGKILL
+        // Check the PROCESS GROUP (negative target), not the lead PID: the
+        // SIGTERM above went to the group, and the lead commonly honors it
+        // and exits before its descendants. Polling +pgid would test only the
+        // (dead) leader, skip the SIGKILL, and leak the surviving tree.
         try {
-          process.kill(pgidOrGroup, 0); // Poll, don't signal
-          // Still alive — send SIGKILL via process group
+          process.kill(-pgidOrGroup, 0); // Poll, don't signal
+          // Group still has members — send SIGKILL to the group
           log("cli-anything: RSS watchdog SIGKILL after grace period");
           try {
             process.kill(-pgidOrGroup, "SIGKILL");

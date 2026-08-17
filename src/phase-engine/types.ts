@@ -231,7 +231,8 @@ export interface PhaseRecord {
   durationMs?: number;
   error?: { code: string; message: string; stack?: string };
   subTimings?: PhaseSubTimings;
-  /** DF1.6 stream health counters — optional, emitted as 0 when absent */
+  /** DF1.6 stream health counters — optional; omitted from the record when
+   * the phase value does not carry them (Run.phase never fabricates a 0). */
   malformedLines?: number;
   droppedOversizeLines?: number;
 }

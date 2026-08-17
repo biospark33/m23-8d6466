@@ -13,5 +13,6 @@ deps: [DF1.1, DF1.2, DF1.5, DF2.2, DF2.7, P0.2, P0.3]
 deps_status: all-merged (DF2.2=PR114, DF2.5=PR115, DF2.7=PR103)
 guardrail_log: []
 updated: 2026-08-17T14:05:00-04:00
-- pr: https://github.com/biospark33/QDS-Factory/pull/116
-- commit: dad40a8
+pr:
+  url: https://github.com/biospark33/QDS-Factory/pull/116
+  commit: 59ddc7b
