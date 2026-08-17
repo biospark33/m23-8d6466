@@ -270,10 +270,11 @@ describe("DF2.5 teardownSandbox", () => {
     // the empty-bundle refusal is a successful no-op: no ref, no bundle file
     expect(await hostGit(origin.originDir, ["for-each-ref", "--format=%(refname)", "refs/sandbox/"])).toBe("");
     expect(existsSync(join(store.dir, `${runId}.bundle`))).toBeFalse();
-    // and it is logged as none, not silently swallowed
-    const serialized = JSON.stringify(logs);
-    expect(serialized).toContain("harvested");
-    expect(serialized).toContain("none");
+    // and it is logged as none, not silently swallowed — parsed off the
+    // harvest summary line, never substring-matched against the whole stream
+    const summary = logs.filter((l) => "harvested" in l);
+    expect(summary.length).toBeGreaterThan(0);
+    expect(String(summary[0]?.harvested)).toBe("none");
   }, 30_000);
 
   // ─── 4. AC6 — preflight: bundle verify unavailable ────────────────────────
@@ -462,6 +463,88 @@ describe("DF2.5 teardownSandbox", () => {
 
     expect(store.get(runId).closedAt).toBeString();
     expect(existsSync(boxDir(runId))).toBeFalse();
+  }, 30_000);
+
+  // ─── 9a. No-VM guard ───────────────────────────────────────────────────────
+
+  test("no-VM record: teardown completes, destroy skipped with the no-box reason, record closes", async () => {
+    const runId = "df25-novm";
+    store.create(runId); // a record that never got a VM — but it DID get a key
+    const hash = await mintFor(runId);
+
+    await teardownSandbox(deps(), runId);
+
+    expect(store.get(runId).closedAt).toBeString();
+    // the key lifecycle still ran end to end on the way past (spend → revoke → verify)
+    expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeFalse();
+    const destroy = logs.find((l) => l.operation === "teardown.destroy");
+    expect(destroy?.outcome).toBe("skipped");
+    expect(String(destroy?.reason)).toContain("no box was ever created");
+  }, 30_000);
+
+  // ─── 9b. Crash between destroy and close — dead box, open record ──────────
+
+  test("box already destroyed before the re-run: artifacts+harvest skip 'box already gone', run still closes", async () => {
+    const runId = "df25-deadbox";
+    const origin = await makeOrigin();
+    await makeRun(runId);
+    const hash = await mintFor(runId);
+    store.set(runId, { commitSha: origin.baseSha });
+    await fillBox(runId, runId, origin.originDir, 3, true);
+    // the crash: destroy landed, close never did — the re-run execs a dead box
+    rmSync(boxDir(runId), { recursive: true, force: true });
+
+    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId);
+
+    // the run CLOSES — no permanent abort loop on a box that cannot exist
+    expect(store.get(runId).closedAt).toBeString();
+    for (const step of ["artifacts", "harvest"]) {
+      const skip = logs.find((l) => l.operation === `teardown.${step}` && l.outcome === "skipped");
+      expect(skip).toBeDefined();
+      expect(String(skip?.reason)).toContain("box already gone");
+    }
+    // the key lifecycle still completed on the way past
+    expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeFalse();
+    // nothing was fetched from a dead box
+    expect(await hostGit(origin.originDir, ["for-each-ref", "--format=%(refname)", "refs/sandbox/"])).toBe("");
+  }, 30_000);
+
+  // ─── 9c. Probe argv — host git config must not decide availability ────────
+
+  test("probe commit argv neutralizes host git config: -c commit.gpgsign=false -c core.hooksPath=", async () => {
+    const runId = "df25-probe-argv";
+    await makeRun(runId); // vmName present → the probe runs
+    const argvs: string[][] = [];
+    const spy: GitRunner = async (argv, cwd) => {
+      argvs.push([...argv]);
+      return bunGitRunner(argv, cwd);
+    };
+
+    await teardownSandbox(deps({ gitRunner: spy }), runId);
+
+    const commit = argvs.find((a) => a.includes("commit"));
+    expect(commit).toBeDefined();
+    expect(commit).toContain("commit.gpgsign=false");
+    expect(commit).toContain("core.hooksPath=");
+    expect(store.get(runId).closedAt).toBeString();
+  }, 30_000);
+
+  // ─── 9d. Box-less + key-less — the probe guards paths that cannot run ─────
+
+  test("box-less + key-less record: broken host git cannot block close — the probe never runs", async () => {
+    const runId = "df25-nothing-to-do";
+    store.create(runId); // no vmName, no keyHash — every step skips
+
+    let gitCalls = 0;
+    const broken: GitRunner = async () => {
+      gitCalls++;
+      return { stdout: "", stderr: "sh: git: command not found", exitCode: 127 };
+    };
+
+    await teardownSandbox(deps({ gitRunner: broken }), runId);
+
+    expect(store.get(runId).closedAt).toBeString();
+    expect(gitCalls).toBe(0); // the probe was skipped, not survived
   }, 30_000);
 
   // ─── 10. SCRIPT e2e — the trigger surface ─────────────────────────────────

@@ -17,7 +17,10 @@
  * next command as remediation (env-var NAMES only, never key material),
  * leaving the box alive and the record open so DF2.6's reaper finds it. A
  * harvest failure aborts BEFORE revoke/destroy (AC3) — destroying a box whose
- * commits were never pulled is the one irreversible mistake available.
+ * commits were never pulled is the one irreversible mistake available. The
+ * one carve-out: artifacts/harvest hitting an ALREADY-GONE box skip instead
+ * of aborting (a crash between destroy and close must not wedge the record
+ * open forever); destroy itself never waives (INV-5).
  *
  * Two verified deviations from the story wording (design.md register):
  *  - "key file shredded": no host-side key file exists in this architecture —
@@ -88,6 +91,35 @@ function skipStep(ctx: StepCtx, step: TeardownStep, reason: string): void {
   log({ ...stepBase(ctx, "teardown", step), duration: 0, durationMs: 0, status: "ok", outcome: "skipped", reason, [`${step}_ms`]: 0 });
 }
 
+/**
+ * A driver rejection meaning the box is GONE — a crash between a successful
+ * destroy and close, a reaper race, or a hand destroy. The pre-destroy steps
+ * that exec the box treat it as a skip so the run can still reach revoke/close
+ * (the box is already in its goal state) instead of wedging the record open
+ * forever on an exec that can never succeed again.
+ */
+function isNoSuchBox(e: unknown): boolean {
+  // ponytail: message-matching is the seam's only not-found signal — the
+  // driver contract has no structured not-found error code; tighten it when
+  // one is added (fake: "no such box: <vm>"; wrapped exedev stderr embeds it).
+  return e instanceof Error && e.message.includes("no such box");
+}
+
+/**
+ * Artifacts/harvest against a box that is already gone → skip, not abort. The
+ * destroy step NEVER goes through here (INV-5): a destroy it cannot CONFIRM
+ * still fails closed — only the earlier steps' exec-against-missing-box
+ * aborts become skips.
+ */
+async function runBoxStep(ctx: StepCtx, step: "artifacts" | "harvest", fn: () => Promise<unknown>): Promise<void> {
+  try {
+    await runStep(ctx, step, fn);
+  } catch (e) {
+    if (!isNoSuchBox(e)) throw e;
+    skipStep(ctx, step, "box already gone — destroyed before this step ran; nothing left to pull");
+  }
+}
+
 // ─── preflight probe ─────────────────────────────────────────────────────────
 
 /**
@@ -97,10 +129,30 @@ function skipStep(ctx: StepCtx, step: TeardownStep, reason: string): void {
  * rather than text-matching stderr, and its argv NEVER carries the run id (a
  * fixed `probe.bundle` name inside a private mkdtemp) so a caller-injected
  * gitRunner can tell the probe apart from the run's own verify (AC3).
+ *
+ * The probe's commit neutralizes host git config — `commit.gpgsign=true` or a
+ * broken `core.hooksPath` would fail the commit and abort EVERY teardown as
+ * bundle-verify-unavailable on a host where verify works. Scoped to the probe
+ * argv only; the run's own commits in the box are untouched.
  */
 const PROBE_SEQUENCE: readonly (readonly string[])[] = [
   ["git", "init", "-q"],
-  ["git", "-c", "user.email=qds-probe@invalid", "-c", "user.name=qds-probe", "commit", "-q", "--allow-empty", "-m", "probe"],
+  [
+    "git",
+    "-c",
+    "user.email=qds-probe@invalid",
+    "-c",
+    "user.name=qds-probe",
+    "-c",
+    "commit.gpgsign=false",
+    "-c",
+    "core.hooksPath=",
+    "commit",
+    "-q",
+    "--allow-empty",
+    "-m",
+    "probe",
+  ],
   ["git", "bundle", "create", "probe.bundle", "--all"],
   ["git", "bundle", "verify", "probe.bundle"],
 ];
@@ -164,7 +216,12 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
     return;
   }
 
-  await probeBundleVerify(deps.gitRunner ?? bunGitRunner);
+  // ponytail: the probe guards the harvest/destroy machinery below; with
+  // neither a box nor a key that machinery cannot run, and a host with broken
+  // git must still be able to close such a record.
+  if (rec.vmName !== undefined || rec.keyHash !== undefined) {
+    await probeBundleVerify(deps.gitRunner ?? bunGitRunner);
+  }
 
   // The waiver goes to the RUN LOG (observability stream + CLI stdout),
   // NEVER the record (INV-5). It waives the harvest gate only.
@@ -206,14 +263,16 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   }
 
   // 2. artifacts — not gated on commits; runs even when the harvest is waived.
-  await runStep(ctx, "artifacts", () => pullArtifacts(deps, runId));
+  // A box that is already gone is a skip (see runBoxStep): the artifacts died
+  // with the box, and the run must still be able to reach revoke/close.
+  await runBoxStep(ctx, "artifacts", () => pullArtifacts(deps, runId));
 
   // 3. harvest — a throw aborts BEFORE revoke/destroy (AC3): box alive, record
   // open, remediation printed.
   if (opts.noHarvest) {
     skipStep(ctx, "harvest", "waived by --no-harvest");
   } else {
-    await runStep(ctx, "harvest", async () => {
+    await runBoxStep(ctx, "harvest", async () => {
       // Teardown already pulled artifacts as its own step 2 — harvestRun skips
       // its Step E so exactly one artifact pipeline runs per teardown.
       await harvestRun(deps, runId, { artifactsOwnedByCaller: true });

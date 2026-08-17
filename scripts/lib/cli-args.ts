@@ -75,7 +75,10 @@ export function parseValueFlags(argv: readonly string[], spec: ValueFlagSpec): v
       }
       spec.onValue(a, v);
     } else if (a === "--help" || a === "-h") {
-      process.stdout.write(spec.help.join("\n"));
+      // writeSync, not process.stdout.write: piped stdout can still be pending
+      // when the process.exit below tears the process down (same reasoning as
+      // exitWithFailure).
+      writeSync(1, spec.help.join("\n"));
       process.exit(0);
     } else if (a.startsWith("--")) {
       // Unknown flag — surface typos loudly (e.g. `--bankid` vs `--bank-id`).
@@ -89,6 +92,19 @@ export interface TokenizeSpec {
   valueFlags: readonly string[];
   /** Boolean flags: recognized and reported via `bools`, never value-consuming. */
   boolFlags?: readonly string[];
+  /**
+   * Throw `unknown flag: <token>` on a single-dash token that is neither a
+   * bool flag nor the pending value of a value flag.
+   *
+   * Without this, such a token reaches `parseValueFlags`, which only inspects
+   * `--`-prefixed flags — a `-n` typo is silently DROPPED while the command
+   * proceeds (unacceptable when the command is destructive, e.g.
+   * `sandbox-teardown -n <run-id>`). Opt-in because single-dash tokens are
+   * legal bare values in the other consumer's grammar (`run-record.ts`'s
+   * `--vmName -foo` relies on the pass-through), and `--`-prefixed unknowns
+   * already throw in `parseValueFlags` for every consumer.
+   */
+  rejectStraySingleDash?: boolean;
 }
 
 export interface Tokenized {
@@ -111,12 +127,19 @@ export interface Tokenized {
  * parsing so the missing `--driver` value is reported (by `parseValueFlags`,
  * which owns that error) instead of the flag being silently eaten as a value.
  * A trailing value flag passes through bare for the same reason.
+ *
+ * With `rejectStraySingleDash`, a `-`-prefixed token that cannot be a value
+ * continuation throws instead of being forwarded — see the spec field.
  */
 export function tokenizeArgs(argv: readonly string[], spec: TokenizeSpec): Tokenized {
   const positionals: string[] = [];
   const flagTokens: string[] = [];
   const bools = new Set<string>();
   const knownValues = new Set(spec.valueFlags);
+  // True while the last flagTokens entry is a known value flag whose value has
+  // not arrived yet — the ONE state in which a `-`-prefixed token is a legal
+  // value continuation (parseValueFlags will pair it) rather than a flag.
+  let awaitingValue = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i] as string;
     if (!a.startsWith("-")) {
@@ -127,9 +150,16 @@ export function tokenizeArgs(argv: readonly string[], spec: TokenizeSpec): Token
       bools.add(a);
       continue;
     }
+    if (spec.rejectStraySingleDash && !a.startsWith("--") && !awaitingValue) {
+      throw new Error(`unknown flag: ${a}`);
+    }
     flagTokens.push(a);
+    awaitingValue = knownValues.has(a);
     const next = argv[i + 1];
-    if (knownValues.has(a) && next !== undefined && !next.startsWith("-")) flagTokens.push(argv[++i] as string);
+    if (awaitingValue && next !== undefined && !next.startsWith("-")) {
+      flagTokens.push(argv[++i] as string);
+      awaitingValue = false;
+    }
   }
   return { positionals, flagTokens, bools };
 }

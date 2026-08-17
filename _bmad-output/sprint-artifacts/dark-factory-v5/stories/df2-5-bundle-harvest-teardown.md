@@ -247,10 +247,11 @@ All DoD items implemented and verified on `feature/df2-5-bundle-harvest-teardown
 - `src/providers/index.ts`: re-exports harvest + teardown.
 - `src/providers/step-log.ts` (NEW): the shared timed/logged-step shape behind harvest's
   `timedStep` and teardown's `runStep` (per-stream outcome vocabulary, one implementation).
-- Tests: `tests/providers/harvest.test.ts` (21), `tests/providers/teardown.test.ts` (17) —
-  38 combined; `tests/scripts/cli-args.test.ts` gained the `tokenizeArgs` contract describe;
-  `tests/providers/fixtures/git-fixture.ts` (shared fixture; commit messages are slug-stamped
-  so two repos minted in the same wall-clock second can never collide on a root sha).
+- Tests: `tests/providers/harvest.test.ts` (36), `tests/providers/teardown.test.ts` (21) —
+  57 combined; `tests/scripts/cli-args.test.ts` gained the `tokenizeArgs` contract describe and
+  `tests/scripts/sandbox-teardown-cli.test.ts` (NEW, 5) covers the CLI lock + record-read
+  classification; `tests/providers/fixtures/git-fixture.ts` (shared fixture; commit messages are
+  slug-stamped so two repos minted in the same wall-clock second can never collide on a root sha).
 
 ### E2E demo evidence (DoD, mandatory)
 
@@ -365,6 +366,30 @@ includes base ancestry (6 here). Both captured above.
     removes the destination) and the file count excludes directory entries; (g) both
     operator CLIs tokenize through shared `tokenizeArgs` so `--driver --no-harvest`
     reports the missing value instead of eating the bool flag.
+13. **Review round 4 (BMAD 3-layer adversarial review of PR #115)**: (a) received-size caps
+    are now ALSO probed in-box before `copyFile` (`bundle-over-cap`/`tar-over-cap` pre-reject;
+    the post-copy stat remains authoritative — a true stream cap needs a driver-seam change,
+    marked `ponytail:`); (b) every untrusted-output embed (protocol stdout, verify/fetch stderr)
+    routes through the sanitizer, which now also redacts ≥40-char mixed-case base64/hex runs
+    (encoded-key exfiltration; lowercase-hex shas still surface for AC2); (c) git spawns pin
+    `LC_ALL=C` so `missing-prerequisite` classification is locale-stable; (d) the bundle-verify
+    probe commit pins `commit.gpgsign=false` + `core.hooksPath=` (host git config can no longer
+    fail the probe) and is skipped entirely for box-less+key-less records; (e) a
+    destroyed-box/record-open crash no longer dead-ends: artifacts + harvest steps treat
+    no-such-box as skip ("box already gone") while destroy keeps its fail-closed INV-5 path;
+    (f) CLI takes a `<runId>.lock` (wx, pid+timestamp, `run-locked` on contention, no steal),
+    rejects extra positionals, and opts into stray-single-dash rejection (run-record's
+    single-dash-as-value grammar preserved); (g) pass-2 tar extraction goes through a
+    `.partial` sibling + rename, closes fds on write failure, folds names
+    (NFC+lowercase) in pass-1 conflict sets, and rejects GNU base-256 size fields as
+    `tar-invalid` (they previously parsed as 0); (h) NOREPO no longer deletes a previously
+    harvested bundle (the bundle file IS the harvest record; NOCOMMITS/AC4 still removes it);
+    (i) NOARTIFACTS sweeps the stale staging tgz; artifacts-step failure still logs
+    `harvested: <n>, artifacts: "failed"` before rethrowing; (j) store read failures are
+    classified `record-read-failed` (not `no-record`) at all three call sites so a corrupt
+    record behind a live box/key never suggests re-creating the run; (k) `DEFAULT_WORKDIRS`
+    probes relative names first so the fake substrate stops touching host-absolute paths;
+    (l) main-sink output uses `writeSync` so piped diagnostics survive `process.exit`.
 
 ### Change log
 
@@ -372,3 +397,4 @@ includes base ancestry (6 here). Both captured above.
 |---|---|
 | 2026-08-16 | Story implemented via 5-wave subagent pipeline (fixture → red tests → harvest impl → teardown+CLI → verification); fixture sha-collision flake fixed (slug-stamped commit messages) |
 | 2026-08-16 | Review round 2 (PR #115, CodeRabbit/Gemini/Sift): harvestRun guard split (vmName vs commitSha) + `artifactsOwnedByCaller` single-pull contract; destroy skipped for box-less records; shared `tokenizeArgs` + `step-log.ts`; `bunGitRunner` hard timeout; atomic pass-2 tar extraction + regular-file counting; source-stream error routing; non-Error catch coercion; CLI coverage (no-record / harvest+--no-harvest / --dir / credential-free keyed harvest) |
+| 2026-08-16 | Review round 4 (BMAD 3-layer adversarial: Blind Hunter + Edge Case Hunter + Acceptance Auditor, 25 findings → 23 fixed, 2 dismissed): pre-copy size caps, sanitizer on all untrusted embeds + encoded-key redaction, LC_ALL=C git, probe hardening + skip rules, dead-box skip semantics, CLI lock + arity + stray-dash rejection, `.partial` atomic extraction + fd close + name folding + base-256 rejection, NOREPO bundle retention, `record-read-failed` classification, relative-first workdir probes, writeSync sinks; +18 tests (57 provider combined, 42 CLI) |

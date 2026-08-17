@@ -26,6 +26,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -36,9 +37,12 @@ import { createGzip, gzipSync } from "node:zlib";
 import type { ExecResult, ProviderDriver, ProviderVm } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import {
+  BUNDLE_MAX_BYTES,
   HarvestError,
+  TAR_MAX_BYTES,
   bunGitRunner,
   harvestRun,
+  sanitizeBoxOutput,
   type GitRunner,
   type HarvestDeps,
   type HarvestResult,
@@ -221,8 +225,9 @@ class BoxTmpDriver implements ProviderDriver {
   async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
     if (this.artifactsTgz !== undefined && stdin !== undefined && stdin.includes("harvest-artifacts.tgz")) {
       // The box-side tar build is not what INV-3 tests — the validator is.
+      // Report the served tgz's real size (the protocol's pre-copy probe field).
       BoxTmpDriver.artifactsServed++;
-      return { stdout: "TARBUILT\n", stderr: "", exitCode: 0 };
+      return { stdout: `TARBUILT ${statSync(this.artifactsTgz).size}\n`, stderr: "", exitCode: 0 };
     }
     return this.inner.exec(vm, argv, stdin);
   }
@@ -232,6 +237,61 @@ class BoxTmpDriver implements ProviderDriver {
       copyFileSync(this.artifactsTgz, localPath);
       return;
     }
+    return this.inner.copyFile(vm, remotePath, localPath);
+  }
+}
+
+/**
+ * Wraps a driver recording every copyFile remote path, with an optional
+ * stdout rewriter for the harvest protocol scripts — used to make the box
+ * lie about sizes (pre-copy probe) or fail the artifacts step.
+ */
+class SpyDriver implements ProviderDriver {
+  readonly copies: string[] = [];
+  private readonly rewrite?: (stdin: string, res: ExecResult) => ExecResult;
+
+  constructor(
+    private readonly inner: ProviderDriver,
+    rewrite?: (stdin: string, res: ExecResult) => ExecResult,
+  ) {
+    this.rewrite = rewrite;
+  }
+
+  get name(): string {
+    return this.inner.name;
+  }
+
+  create(name: string, tag?: string): Promise<ProviderVm> {
+    return this.inner.create(name, tag);
+  }
+
+  list(name?: string): Promise<ProviderVm[]> {
+    return this.inner.list(name);
+  }
+
+  destroy(vm: string): Promise<void> {
+    return this.inner.destroy(vm);
+  }
+
+  expose(vm: string, port: number): Promise<string> {
+    return this.inner.expose(vm, port);
+  }
+
+  setPublic(vm: string): Promise<void> {
+    return this.inner.setPublic(vm);
+  }
+
+  whoami(): Promise<string> {
+    return this.inner.whoami();
+  }
+
+  async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
+    const res = await this.inner.exec(vm, argv, stdin);
+    return stdin !== undefined && this.rewrite !== undefined ? this.rewrite(stdin, res) : res;
+  }
+
+  async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+    this.copies.push(remotePath);
     return this.inner.copyFile(vm, remotePath, localPath);
   }
 }
@@ -292,6 +352,19 @@ function buildTar(entries: TarEntrySpec[], opts: { eof?: boolean } = {}): Buffer
   }
   if (opts.eof !== false) parts.push(EOF_BLOCKS);
   return Buffer.concat(parts);
+}
+
+/** A header whose size field carries a GNU base-256 value (byte 0 high bit set),
+ * with the checksum recomputed so only the encoding is invalid. */
+function base256Header(e: TarEntrySpec): Buffer {
+  const b = tarHeader({ ...e, size: 0 });
+  b[124] = 0x80;
+  b[127] = 0x01; // base-256 ≈ 65536
+  b.fill(" ", 148, 156);
+  let sum = 0;
+  for (const byte of b) sum += byte;
+  b.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, "utf8");
+  return b;
 }
 
 /** ~600 MiB of zeros in one entry — gzips to ~600 KB on disk, stays under the
@@ -721,6 +794,37 @@ describe("DF2.5 harvest — INV-3: evil artifacts tgzs abort with nothing extrac
     );
   }, 30_000);
 
+  test("GNU base-256 size field → tar-invalid, dest empty (not silently size 0)", async () => {
+    const s = await boxSetup("hvst-tar-b256", 1);
+    await expectArtifactsAbort(
+      s,
+      (p) => writeFileSync(p, gzipSync(Buffer.concat([base256Header({ name: "big.bin" }), EOF_BLOCKS]))),
+      "tar-invalid",
+    );
+  }, 30_000);
+
+  test("case-fold duplicate (plan.md + PLAN.MD) and NFD/NFC duplicate → tar-unsafe-entry", async () => {
+    const s = await boxSetup("hvst-tar-case", 1);
+    await expectArtifactsAbort(
+      s,
+      (p) => writeFileSync(p, gzipSync(buildTar([
+        { name: "plan.md", data: Buffer.from("x") },
+        { name: "PLAN.MD", data: Buffer.from("y") },
+      ]))),
+      "tar-unsafe-entry",
+    );
+    // NFC "café" vs its NFD decomposition: distinct bytes, same folded name.
+    const s2 = await boxSetup("hvst-tar-nfd", 1);
+    await expectArtifactsAbort(
+      s2,
+      (p) => writeFileSync(p, gzipSync(buildTar([
+        { name: "café.txt", data: Buffer.from("x") },
+        { name: "café.txt", data: Buffer.from("y") },
+      ]))),
+      "tar-unsafe-entry",
+    );
+  }, 30_000);
+
   test("lone ./ and // segments are canonicalized, not rejected: entry lands at its clean path", async () => {
     const runId = "hvst-tar-dot";
     const s = await boxSetup(runId, 1);
@@ -799,6 +903,23 @@ describe("DF2.5 harvest — box never got a repo", () => {
     expect(res).toEqual({ outcome: "none" });
     expect(existsSync(bundlePath(runId))).toBeFalse();
   }, 30_000);
+
+  test("NOREPO re-harvest keeps an existing earlier-harvest bundle (its presence is the record)", async () => {
+    const runId = "hvst-norepo-keep";
+    const hostRoot = mkdtempSync(join(tmpdir(), "qds-hvst-norepo-"));
+    tmpRoots.push(hostRoot);
+    const hostDir = join(hostRoot, "host");
+    await runLocal(["git", "init", "-q", "-b", "main", hostDir]);
+
+    await driver.create(runId);
+    store.create(runId);
+    store.set(runId, { vmName: runId, commitSha: "0123456789abcdef0123456789abcdef01234567" });
+    writeFileSync(bundlePath(runId), "prior harvest bundle bytes");
+
+    const res = await harvestRun(hd(hostDir), runId);
+    expect(res).toEqual({ outcome: "none" });
+    expect(readFileSync(bundlePath(runId), "utf8")).toBe("prior harvest bundle bytes");
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -835,5 +956,156 @@ describe("DF2.5 harvest — vmName without commitSha still pulls artifacts", () 
     const dest = artifactsDir(runId);
     expect(readFileSync(join(dest, "specs", "plan.md"), "utf8")).toBe("plan");
     expect(readFileSync(join(dest, "run.log"), "utf8")).toBe("log");
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// sanitizeBoxOutput — untrusted-output bounding + redaction (unit)
+// ---------------------------------------------------------------------------
+
+describe("sanitizeBoxOutput", () => {
+  test("sk- token redacted", () => {
+    const out = sanitizeBoxOutput("boom: sk-AbCdEf1234567890 tail");
+    expect(out).not.toContain("AbCdEf");
+    expect(out).toContain("sk-[REDACTED]");
+  });
+
+  test("encoded (mixed-class ≥40) key redacted, plain lowercase-hex sha survives", () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    expect(sanitizeBoxOutput(`error: ${sha} missing`)).toBe(`error: ${sha} missing`);
+    // base64-shaped: upper + lower + digit, 44 chars → redacted
+    const b64 = "QUJDZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU2Nzg5";
+    expect(sanitizeBoxOutput(`wrote ${b64} to stderr`)).not.toContain(b64);
+    expect(sanitizeBoxOutput(`wrote ${b64} to stderr`)).toContain("[REDACTED]");
+  });
+
+  test("first line only, 200-char cap", () => {
+    expect(sanitizeBoxOutput("line one\nline two sk-xyz")).toBe("line one");
+    expect(sanitizeBoxOutput("x".repeat(250))).toHaveLength(201); // 200 + ellipsis
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-4 hardening — locale pin, pre-copy size probes, stale-file cleanup,
+// failure-path summary, record-read classification
+// ---------------------------------------------------------------------------
+
+describe("DF2.5 harvest — round 4 hardening", () => {
+  test("bunGitRunner spawns git with LC_ALL=C and LANG=C (argv-array spawn)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "qds-hvst-env-"));
+    tmpRoots.push(root);
+    const repoDir = join(root, "r");
+    await runLocal(["git", "init", "-q", "-b", "main", repoDir]);
+    const res = await bunGitRunner(
+      ["git", "-c", "alias.qdslocale=!printenv LC_ALL && printenv LANG", "qdslocale"],
+      repoDir,
+    );
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe("C\nC\n");
+  }, 30_000);
+
+  test("box-reported bundle size over cap → bundle-over-cap BEFORE any copyFile", async () => {
+    const runId = "hvst-probe-bundle";
+    const s = await boxSetup(runId, 2);
+    const spy = new SpyDriver(driver, (stdin, res) =>
+      stdin.includes("harvest.bundle") && res.exitCode === 0
+        ? { ...res, stdout: res.stdout.replace(/^(OK \S+ \d+) \d+$/m, `$1 ${BUNDLE_MAX_BYTES + 1}`) }
+        : res,
+    );
+    let err: unknown = undefined;
+    try {
+      await harvestRun({ driver: spy, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app" }, runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(HarvestError);
+    expect((err as HarvestError).code).toBe("bundle-over-cap");
+    expect(spy.copies.length).toBe(0); // nothing crossed the seam
+    expect(existsSync(bundlePath(runId))).toBeFalse();
+  }, 30_000);
+
+  test("box-reported artifacts tgz size over cap → tar-over-cap BEFORE any copyFile", async () => {
+    const runId = "hvst-probe-tgz";
+    const s = await boxSetup(runId, 1);
+    const spy = new SpyDriver(driver, (stdin, res) =>
+      stdin.includes("harvest-artifacts.tgz")
+        ? { ...res, stdout: `TARBUILT ${TAR_MAX_BYTES + 1}\n` }
+        : res,
+    );
+    let err: unknown = undefined;
+    try {
+      await harvestRun({ driver: spy, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app" }, runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(HarvestError);
+    expect((err as HarvestError).code).toBe("tar-over-cap");
+    expect(spy.copies).not.toContain("harvest-artifacts.tgz");
+    expect(existsSync(join(store.dir, `${runId}-artifacts.tgz`))).toBeFalse();
+  }, 30_000);
+
+  test("NOARTIFACTS sweeps a stale staging tgz and the artifacts dest dir", async () => {
+    const runId = "hvst-noart-clean";
+    const s = await boxSetup(runId, 1); // app exists but holds no artifact paths
+    const staging = join(store.dir, `${runId}-artifacts.tgz`);
+    writeFileSync(staging, "stale tgz");
+    mkdirSync(artifactsDir(runId), { recursive: true });
+    writeFileSync(join(artifactsDir(runId), "stale.txt"), "old");
+
+    const res = await harvestRun(hd(s.hostDir), runId);
+    expect(mustHarvest(res).count).toBe(1);
+    expect(existsSync(staging)).toBeFalse();
+    expect(existsSync(artifactsDir(runId))).toBeFalse();
+  }, 30_000);
+
+  test("standalone harvest: artifacts failure after a successful fetch still emits the summary", async () => {
+    const runId = "hvst-artfail";
+    const s = await boxSetup(runId, 2);
+    const failing = new SpyDriver(driver, (stdin, res) =>
+      stdin.includes("harvest-artifacts.tgz") ? { stdout: "", stderr: "tar exploded", exitCode: 1 } : res,
+    );
+    let err: unknown = undefined;
+    try {
+      await harvestRun({ driver: failing, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app" }, runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(HarvestError);
+    expect((err as HarvestError).code).toBe("artifacts-failed");
+    // The fetch DID succeed first — the summary names both facts.
+    expect(existsSync(bundlePath(runId))).toBeTrue();
+    const summary = logs.filter((l) => "harvested" in l);
+    expect(summary).toHaveLength(1);
+    expect(summary[0]?.harvested).toBe(2);
+    expect(summary[0]?.artifacts).toBe("failed");
+  }, 30_000);
+
+  test("unreadable-but-present record → record-read-failed (not no-record)", async () => {
+    const runId = "hvst-badrec";
+    const s = await boxSetup(runId, 1);
+    writeFileSync(store.path(runId), "{ not json");
+    let err: unknown = undefined;
+    try {
+      await harvestRun(hd(s.hostDir), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(HarvestError);
+    const he = err as HarvestError;
+    expect(he.code).toBe("record-read-failed");
+    expect(he.remediation).not.toMatch(/create the run first/);
+  }, 30_000);
+
+  test("genuinely missing record → no-record", async () => {
+    const runId = "hvst-ghost";
+    const s = await boxSetup(runId, 1);
+    let err: unknown = undefined;
+    try {
+      await harvestRun(hd(s.hostDir), `${runId}-nope`);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(HarvestError);
+    expect((err as HarvestError).code).toBe("no-record");
   }, 30_000);
 });

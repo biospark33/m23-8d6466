@@ -27,7 +27,17 @@
  * they never ran against a guarded driver).
  */
 
-import { closeSync, createReadStream, mkdirSync, openSync, readSync, rmSync, statSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  createReadStream,
+  mkdirSync,
+  openSync,
+  readSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeSync,
+} from "node:fs";
 import { once } from "node:events";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -44,12 +54,16 @@ export const BUNDLE_MAX_BYTES = 512 * 1024 * 1024;
 export const TAR_MAX_BYTES = 512 * 1024 * 1024;
 
 /**
- * In-box repo workdir candidates, in probe order. Production fill clones to
- * /home/agent/app (DF2.2's KEY_ENV_FILE contract); /home/agent/src is kept for
- * design.md's spelling; `app` is the box-relative layout the fake substrate
- * and its tests use. An explicit `deps.workdir` replaces the whole list.
+ * In-box repo workdir candidates, in probe order: box-relative names first
+ * (`app` is the layout the fake substrate and its tests use), then the
+ * absolute production spellings (DF2.2's KEY_ENV_FILE contract clones to
+ * /home/agent/app; /home/agent/src is design.md's). An explicit
+ * `deps.workdir` replaces the whole list.
  */
-const DEFAULT_WORKDIRS = ["/home/agent/app", "/home/agent/src", "app"];
+// ponytail: relative-first, but the absolute fallbacks can still probe HOST
+// dirs when the fake substrate executes scripts on the host and the repo lives
+// elsewhere — a substrate-aware probe is the real fix if that ever bites.
+const DEFAULT_WORKDIRS = ["app", "src", "/home/agent/app", "/home/agent/src"];
 
 export class HarvestError extends Error {
   /** Machine-readable failure class; also the `code` in every log line. */
@@ -72,10 +86,19 @@ export class HarvestError extends Error {
  * is replaced — a compromised workload must not be able to exfiltrate the
  * run key through a failure's diagnostics.
  */
-function sanitizeBoxOutput(text: string): string {
+export function sanitizeBoxOutput(text: string): string {
   const firstLine = text.split("\n")[0] ?? "";
   const capped = firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine;
-  return capped.replace(/sk-[A-Za-z0-9_-]+/g, "sk-[REDACTED]").trim();
+  return capped
+    .replace(/sk-[A-Za-z0-9_-]+/g, "sk-[REDACTED]")
+    // ponytail: heuristic entropy redaction, not proof — a ≥40-char token with
+    // an upper AND a lower AND a digit stands in for "encoded key". The
+    // mixed-class requirement is what keeps plain lowercase-hex git shas
+    // visible (AC2 must still name the missing prerequisite).
+    .replace(/[A-Za-z0-9+/=_-]{40,}/g, (tok) =>
+      /[A-Z]/.test(tok) && /[a-z]/.test(tok) && /\d/.test(tok) ? "[REDACTED]" : tok,
+    )
+    .trim();
 }
 
 /** Injectable host-git runner — tests spy ordering + inject failures. */
@@ -93,6 +116,10 @@ export const bunGitRunner: GitRunner = async (argv, cwd) => {
   const proc = Bun.spawn({
     cmd: [...argv],
     cwd,
+    // C locale or the "error:"-line grammar (AC2's missing-sha extraction) is
+    // at the mercy of the host's locale — a localized git spells failures
+    // differently and the parse silently misses.
+    env: { ...process.env, LC_ALL: "C", LANG: "C" },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -126,7 +153,8 @@ export type HarvestResult =
   | { outcome: "none" };
 
 export interface ArtifactsOutcome {
-  artifacts: "none" | "pulled";
+  /** "failed" is a summary-log-only value: pullArtifacts THROWS on failure. */
+  artifacts: "none" | "pulled" | "failed";
   files?: number;
 }
 
@@ -205,7 +233,11 @@ count=$(git rev-list --count "$base..refs/heads/$branch")
 if [ "$count" -eq 0 ]; then echo "NOCOMMITS"; exit 0; fi
 git bundle create ../harvest.bundle "$base..refs/heads/$branch" >&2 || { echo "BUNDLEFAIL"; exit 0; }
 tip=$(git rev-parse "refs/heads/$branch")
-printf 'OK %s %s\\n' "$tip" "$count"
+# Byte size of the staged bundle, so the host can refuse an over-cap copy
+# before streaming a single byte across the seam. Arithmetic collapses any
+# wc padding.
+bytes=$(( $(wc -c < ../harvest.bundle) ))
+printf 'OK %s %s %s\\n' "$tip" "$count" "$bytes"
 `.trim();
 }
 
@@ -227,7 +259,7 @@ cd "$wd"
 P=$(ls -d specs app_docs adws/adw_data/ssmf.db trace.db run.log 2>/dev/null || true)
 if [ -z "$P" ]; then echo "NOARTIFACTS"; exit 0; fi
 tar czf ../harvest-artifacts.tgz $P
-echo "TARBUILT"
+echo "TARBUILT $(( $(wc -c < ../harvest-artifacts.tgz) ))"
 `.trim();
 }
 
@@ -237,10 +269,21 @@ function getRecord(deps: HarvestDeps, runId: string): RunRecord {
   try {
     return deps.store.get(runId);
   } catch (e) {
+    // The store signals genuine absence as an ENOENT-annotated unreadable
+    // record (readRecord embeds the errno). Anything else — malformed JSON,
+    // EACCES, ... — is a read failure, and its remediation must NOT send the
+    // operator off creating a run over a record that may still be there.
+    if ((e as NodeJS.ErrnoException).code === "ENOENT" || (e as Error).message.includes("ENOENT")) {
+      throw new HarvestError(
+        "no-record",
+        `no run record for ${runId}: ${(e as Error).message}`,
+        "check the run id; records live under $QDS_RUNS_DIR (default .sandbox/runs) — create the run first",
+      );
+    }
     throw new HarvestError(
-      "no-record",
-      `no run record for ${runId}: ${(e as Error).message}`,
-      "check the run id; records live under $QDS_RUNS_DIR (default .sandbox/runs) — create the run first",
+      "record-read-failed",
+      `run record for ${runId} could not be read: ${(e as Error).message}`,
+      "inspect the record under $QDS_RUNS_DIR (permissions, malformed JSON) and repair it in place — the box may still be alive",
     );
   }
 }
@@ -262,6 +305,8 @@ interface StepA {
   protocol: "OK" | "NOREPO" | "NOCOMMITS";
   tip?: string;
   count?: number;
+  /** Box-reported bundle size (pre-copy cap probe; the host stat is authoritative). */
+  bytes?: number;
 }
 
 export interface HarvestRunOptions {
@@ -334,16 +379,16 @@ export async function harvestRun(
         "inspect the box repo by hand via the driver, then re-run harvest — the box is still alive",
       );
     }
-    const m = /^OK ([0-9a-f]{40,64}) (\d+)$/.exec(line);
+    const m = /^OK ([0-9a-f]{40,64}) (\d+) (\d+)$/.exec(line);
     if (!m) {
-      // Untrusted box stdout — quote at most the first line, never more.
+      // Untrusted box stdout — bounded + redacted first line, never more.
       throw new HarvestError(
         "remote-protocol",
-        `unexpected in-box protocol output for ${runId}: ${JSON.stringify(line.split("\n")[0] ?? "")}`,
+        `unexpected in-box protocol output for ${runId}: ${JSON.stringify(sanitizeBoxOutput(line))}`,
         "inspect the box by hand (stdout broke the harvest protocol), then re-run",
       );
     }
-    return { protocol: "OK", tip: m[1] ?? "", count: Number(m[2]) };
+    return { protocol: "OK", tip: m[1] ?? "", count: Number(m[2]), bytes: Number(m[3]) };
   });
 
   let result: HarvestResult = { outcome: "none" };
@@ -351,6 +396,18 @@ export async function harvestRun(
     // Step B — copy down (box-root-relative remote path; the seam's path guard
     // rejects absolutes on real substrates).
     await timedStep(ctx, "transfer", async () => {
+      // Pre-copy size probe: the box reported the bundle's byte count, so a
+      // cooperative box never streams an over-cap file at all.
+      // ponytail: driver copyFile streams unbounded — the pre-probe bounds
+      // cooperative boxes, the post-copy stat bounds hostile ones after the
+      // write; a true stream cap needs a driver-seam change (future story).
+      if ((stepA.bytes ?? 0) > BUNDLE_MAX_BYTES) {
+        throw new HarvestError(
+          "bundle-over-cap",
+          `box reports harvest.bundle at ${stepA.bytes} bytes, over the ${BUNDLE_MAX_BYTES}-byte cap — refusing the copy`,
+          "inspect the bundle in-box via the driver, split the run's work, then re-run harvest",
+        );
+      }
       try {
         await deps.driver.copyFile(vm, "harvest.bundle", hostBundle);
       } catch (e) {
@@ -389,7 +446,7 @@ export async function harvestRun(
         }
         throw new HarvestError(
           "bundle-verify-failed",
-          `git bundle verify failed for ${hostBundle}: ${v.stderr.trim()}`,
+          `git bundle verify failed for ${hostBundle}: ${sanitizeBoxOutput(v.stderr)}`,
           `run git bundle verify ${hostBundle} by hand in the host repo, then re-run`,
         );
       }
@@ -405,22 +462,33 @@ export async function harvestRun(
       if (f.exitCode !== 0) {
         throw new HarvestError(
           "fetch-failed",
-          `git fetch from ${hostBundle} into refs/sandbox/${runId} failed: ${f.stderr.trim()}`,
+          `git fetch from ${hostBundle} into refs/sandbox/${runId} failed: ${sanitizeBoxOutput(f.stderr)}`,
           `run git fetch --force ${hostBundle} refs/heads/${branch}:refs/sandbox/${runId} by hand in the host repo, then re-run`,
         );
       }
     });
     result = { outcome: "harvested", count: stepA.count ?? 0, tip: stepA.tip ?? "" };
-  } else {
+  } else if (stepA.protocol === "NOCOMMITS") {
     // AC4: an empty range is a successful no-op — no ref, no bundle file left.
     rmSync(hostBundle, { force: true });
   }
+  // NOREPO deliberately falls through WITHOUT touching hostBundle: the box
+  // holds no repo, but a bundle from an EARLIER harvest is the run's only
+  // record (its presence IS the record) and must survive a re-harvest.
 
   // Step E — artifacts (not gated on commits; runs even when outcome is none).
   // Skipped when the caller (teardown's step 2) already owns the pipeline.
-  const art: ArtifactsOutcome = opts.artifactsOwnedByCaller
-    ? { artifacts: "none" } // the caller's own artifacts step did the pull
-    : await pullArtifacts(deps, runId);
+  let art: ArtifactsOutcome;
+  try {
+    art = opts.artifactsOwnedByCaller
+      ? { artifacts: "none" } // the caller's own artifacts step did the pull
+      : await pullArtifacts(deps, runId);
+  } catch (e) {
+    // The fetch already succeeded — the summary must still emit so the run's
+    // terminal line exists, mirroring every other terminal path.
+    logSummary(ctx, started, result, { artifacts: "failed" });
+    throw e;
+  }
   logSummary(ctx, started, result, art);
   return result;
 }
@@ -469,15 +537,26 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
     }
     const line = res.stdout.trim();
     if (line === "NOARTIFACTS") {
-      // Absent artifacts: the host dir must not exist afterwards.
+      // Absent artifacts: neither the host dir NOR a stale staging tgz from an
+      // earlier pull may survive.
       rmSync(dest, { recursive: true, force: true });
+      rmSync(staging, { force: true });
       return { artifacts: "none" };
     }
-    if (line !== "TARBUILT") {
+    const m = /^TARBUILT (\d+)$/.exec(line);
+    if (!m) {
       throw new HarvestError(
         "remote-protocol",
-        `unexpected in-box artifacts protocol output for ${runId}: ${JSON.stringify(line.split("\n")[0] ?? "")}`,
+        `unexpected in-box artifacts protocol output for ${runId}: ${JSON.stringify(sanitizeBoxOutput(line))}`,
         "inspect the box by hand (stdout broke the harvest protocol), then re-run",
+      );
+    }
+    // Pre-copy size probe (see the transfer step's ponytail ceiling note).
+    if (Number(m[1]) > TAR_MAX_BYTES) {
+      throw new HarvestError(
+        "tar-over-cap",
+        `box reports harvest-artifacts.tgz at ${m[1]} bytes, over the ${TAR_MAX_BYTES}-byte cap — refusing the copy`,
+        "inspect the tar in-box via the driver before re-running; the box is still alive",
       );
     }
     try {
@@ -524,6 +603,10 @@ interface TarHandlers {
 }
 
 function parseOctal(field: Buffer): number {
+  // GNU base-256 sizes (high bit of byte 0 set) decode as ascii-masked NULs
+  // below and would silently parse as 0, misframing every later block — fail
+  // closed instead.
+  if (((field[0] ?? 0) & 0x80) !== 0) return Number.NaN;
   const s = field.toString("ascii").replace(/[\0 ].*$/s, "").trim();
   if (s === "") return 0;
   if (!/^[0-7]+$/.test(s)) return Number.NaN;
@@ -567,6 +650,15 @@ function ancestorsOf(name: string): string[] {
   for (let i = name.indexOf("/"); i !== -1; i = name.indexOf("/", i + 1)) out.push(name.slice(0, i));
   return out;
 }
+
+/**
+ * Fold for the pass-1 collision sets: NFC + lowercase. Applied on ALL platforms
+ * so pass-2 `wx` never hits a surprise EEXIST from case or NFD variants.
+ * ponytail: over-strict on case-sensitive hosts (two legitimately distinct
+ * "a.txt"/"A.txt" are refused) — deterministic cross-platform behavior is
+ * worth more than per-filesystem exactness here.
+ */
+const foldName = (n: string): string => n.normalize("NFC").toLowerCase();
 
 interface ParsedHeader {
   rawName: string;
@@ -678,7 +770,10 @@ function makeTarParser(handlers: TarHandlers, fail: (e: HarvestError) => void): 
               const name = assertPathSafe("name", pendingName ?? globalPath ?? parsed.rawName);
               const linkname = pendingLinkname ?? parsed.rawLinkname;
               if (linkname !== "") assertPathSafe("linkname", linkname);
-              if (names.has(name)) {
+              // Collision sets are keyed by the FOLDED name (see foldName);
+              // extraction below still uses the raw canonical name.
+              const folded = foldName(name);
+              if (names.has(folded)) {
                 throw new HarvestError(
                   "tar-unsafe-entry",
                   `artifacts tar lists duplicate path ${JSON.stringify(name)} — no overwrite`,
@@ -687,17 +782,18 @@ function makeTarParser(handlers: TarHandlers, fail: (e: HarvestError) => void): 
               }
               // A file at a path that must be a directory (or the reverse) would fail mid-extraction with a raw errno — reject in pass 1 so nothing is written.
               const isDir = parsed.typeflag === "5";
-              const fileAncestor = ancestorsOf(name).find((a) => filePaths.has(a));
-              if (fileAncestor !== undefined || (isDir ? filePaths : dirPaths).has(name)) {
+              const foldedAncestors = ancestorsOf(folded);
+              const fileAncestor = foldedAncestors.find((a) => filePaths.has(a));
+              if (fileAncestor !== undefined || (isDir ? filePaths : dirPaths).has(folded)) {
                 throw new HarvestError(
                   "tar-unsafe-entry",
-                  `artifacts tar entry ${JSON.stringify(name)} conflicts with an earlier file at ${JSON.stringify(fileAncestor ?? name)} — no overwrite`,
+                  `artifacts tar entry ${JSON.stringify(name)} conflicts with an earlier file at ${JSON.stringify(fileAncestor ?? folded)} — no overwrite`,
                   tarRemediation,
                 );
               }
-              for (const a of ancestorsOf(name)) dirPaths.add(a);
-              (isDir ? dirPaths : filePaths).add(name);
-              names.add(name);
+              for (const a of foldedAncestors) dirPaths.add(a);
+              (isDir ? dirPaths : filePaths).add(folded);
+              names.add(folded);
               handlers.onEntry({ name, typeflag: parsed.typeflag, size: parsed.size });
             } else {
               // Hard links, symlinks, char/block devices, FIFOs, and anything
@@ -830,7 +926,14 @@ function extractHandlers(destDir: string): TarHandlers {
       fd = openSync(target, "wx", 0o600);
     },
     onData(chunk: Buffer): void {
-      if (fd !== null) writeAll(fd, chunk);
+      if (fd === null) return;
+      try {
+        writeAll(fd, chunk);
+      } catch (e) {
+        closeSync(fd); // a mid-entry write failure must not leak the fd
+        fd = null;
+        throw e;
+      }
     },
     onEntryEnd(): void {
       if (fd !== null) {
@@ -865,14 +968,19 @@ async function validateAndExtractTgz(tgzPath: string, destDir: string): Promise<
     onData: () => {},
     onEntryEnd: () => {},
   });
-  rmSync(destDir, { recursive: true, force: true });
-  mkdirSync(destDir, { recursive: true, mode: 0o700 });
-  // Atomic extraction: a failed pass 2 leaves no partial destination.
+  // Atomic extraction: pass 2 builds a SIBLING and is renamed into place, so
+  // process death mid-extraction never leaves a half-written tree at the
+  // visible path. (rename over an existing dir fails — clear it first.)
+  const partial = `${destDir}.partial`;
+  rmSync(partial, { recursive: true, force: true });
+  mkdirSync(partial, { recursive: true, mode: 0o700 });
   try {
-    await streamTar(tgzPath, extractHandlers(destDir));
+    await streamTar(tgzPath, extractHandlers(partial));
   } catch (e) {
-    rmSync(destDir, { recursive: true, force: true });
+    rmSync(partial, { recursive: true, force: true });
     throw e;
   }
+  rmSync(destDir, { recursive: true, force: true });
+  renameSync(partial, destDir);
   return files;
 }

@@ -15,10 +15,16 @@
  * The provider key API is built lazily, only in teardown mode and only when
  * the record carries a keyHash (harvest mode is credential-free, D8) —
  * keyless runs work offline, and a keyed run without
- * $OPENROUTER_PROVISIONING_KEY fails before anything is mutated. Errors print
+ * $OPENROUTER_PROVISIONING_KEY fails before anything is mutated. One
+ * invocation per run at a time: `<runsDir>/<runId>.lock` serializes concurrent
+ * CLI calls; a stale lock is reported (never stolen) with the holder's pid and
+ * the exact `rm` that clears it. Errors print
  * `!! <code>: <message>` plus `next: <remediation>` and exit 1; remediation
  * references env-var NAMES only and key material is never printed.
  */
+
+import { closeSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { join } from "node:path";
 
 import {
   RunRecordStore,
@@ -67,8 +73,14 @@ export interface ParsedArgs {
 export function parseArgs(argv: readonly string[]): ParsedArgs {
   // Shared tokenizer: a value flag consumes the next token only when it is not
   // itself a flag, so `--driver --no-harvest` still recognizes --no-harvest and
-  // parseValueFlags reports the missing --driver value.
-  const { positionals, flagTokens, bools } = tokenizeArgs(argv, { valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS });
+  // parseValueFlags reports the missing --driver value. Stray single-dash
+  // tokens throw here — this CLI is destructive, so a dropped `-n` typo must
+  // not become a surprise teardown.
+  const { positionals, flagTokens, bools } = tokenizeArgs(argv, {
+    valueFlags: VALUE_FLAGS,
+    boolFlags: BOOL_FLAGS,
+    rejectStraySingleDash: true,
+  });
   const isHarvest = positionals[0] === "harvest";
   const out: ParsedArgs = {
     mode: isHarvest ? "harvest" : "teardown",
@@ -83,12 +95,74 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     },
     help: HELP,
   });
+  // Extra positionals are a mistyped invocation, not a default: `run-a run-b`
+  // tearing down run-a and exiting 0 would report success while run-b still
+  // spends. `harvest` itself consumes one positional. Checked AFTER the flag
+  // grammar so an unknown flag is reported as itself (an unknown `--` flag's
+  // value lands as a positional, which would otherwise mask it).
+  const arity = isHarvest ? 2 : 1;
+  if (positionals.length > arity) {
+    throw new Error(`unexpected argument: ${positionals[positionals.length - 1]}\n${HELP.join("\n")}`);
+  }
   return out;
 }
 
 function fail(out: (s: string) => void, code: string, message: string, remediation?: string): void {
   out(`!! ${code}: ${message}\n`);
   if (remediation !== undefined) out(`next: ${remediation}\n`);
+}
+
+/**
+ * `<runId>.lock` is already held by another invocation. Carries the
+ * code/remediation shape `run()`'s catch already maps onto `!! <code>` +
+ * `next:` — thrown between the record read and any mutation, so a refused
+ * invocation touches nothing.
+ */
+class RunLockedError extends Error {
+  readonly code = "run-locked";
+  readonly remediation: string;
+  constructor(lockPath: string, who: string) {
+    super(`another sandbox-teardown holds ${lockPath} (${who})`);
+    this.remediation = `wait for that invocation to finish — or, only if ${who} is gone: rm ${lockPath}`;
+  }
+}
+
+/**
+ * Claim `<runsDir>/<runId>.lock` (O_EXCL) for the duration of one invocation,
+ * writing `<pid> <createdAt-ISO>` so a refused invocation can name the holder.
+ *
+ * Two concurrent `sandbox-teardown <run-id>` invocations both pass the closedAt
+ * gate inside harvest/teardown (a check-then-act) and then double-revoke,
+ * double-destroy and interleave writes to the fixed `<runId>.bundle` /
+ * `<runId>-artifacts` paths. Unlike the store's per-write lock, this one never
+ * steals: a stale lock means an uncertain teardown state, which is exactly the
+ * moment an operator — not a heuristic — should decide.
+ *
+ * ponytail: library callers bypass the lock — the CLI is the operator surface.
+ */
+export function acquireRunLock(runsDir: string, runId: string): string {
+  const lock = join(runsDir, `${runId}.lock`);
+  try {
+    const fd = openSync(lock, "wx", 0o600);
+    writeFileSync(fd, `${process.pid} ${new Date().toISOString()}\n`);
+    closeSync(fd);
+    return lock;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    let held = "";
+    try {
+      held = readFileSync(lock, "utf8").trim();
+    } catch {
+      // present but unreadable — fail closed below with what we do know
+    }
+    const [pid, iso] = held.split(/\s+/);
+    const at = Date.parse(iso ?? "");
+    const who =
+      /^\d+$/.test(pid ?? "") && !Number.isNaN(at)
+        ? `pid ${pid}, held ${Math.max(0, Math.round((Date.now() - at) / 1000))}s`
+        : `holder unknown, lock body ${JSON.stringify(held)}`;
+    throw new RunLockedError(lock, who);
+  }
 }
 
 export async function run(argv: readonly string[], out: (s: string) => void): Promise<number> {
@@ -110,11 +184,20 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
   try {
     rec = store.get(parsed.runId);
   } catch (e) {
+    // The store signals genuine absence as `unreadable run record …: ENOENT`;
+    // every other read failure (malformed JSON, bad field shape, EACCES, …) is
+    // a read FAILURE. A corrupt record can still have a live box and a live
+    // key behind it, so its remediation must point at inspection — telling the
+    // operator to re-create the run would orphan both.
+    const message = (e as Error).message;
+    const absent = /^unreadable run record .*: ENOENT$/.test(message);
     fail(
       out,
-      "no-record",
-      `no run record for ${parsed.runId}: ${(e as Error).message}`,
-      "check the run id; records live under $QDS_RUNS_DIR (default .sandbox/runs) — create the run first",
+      absent ? "no-record" : "record-read-failed",
+      `${absent ? "no run record" : "cannot read run record"} for ${parsed.runId}: ${message}`,
+      absent
+        ? "check the run id; records live under $QDS_RUNS_DIR (default .sandbox/runs) — create the run first"
+        : "inspect the record under $QDS_RUNS_DIR (default .sandbox/runs) before touching the run — a live box and key may sit behind it; do not re-create the run",
     );
     return 1;
   }
@@ -126,7 +209,9 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     gitCwd: process.cwd(),
     ...(parsed.dir === undefined ? {} : { runsDir: parsed.dir }),
   };
+  let lock: string | undefined;
   try {
+    lock = acquireRunLock(store.dir, parsed.runId);
     if (parsed.mode === "harvest") {
       // D8: harvest is credential-free — no keyApi is built, so a missing
       // $OPENROUTER_PROVISIONING_KEY cannot block it.
@@ -147,14 +232,21 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     const err = e as { code?: string; remediation?: string; message?: string };
     fail(out, err.code ?? "error", err.message ?? String(e), err.remediation);
     return 1;
+  } finally {
+    // Release only OUR lock: a refused invocation (EEXIST) must never unlink
+    // the holder's lock file.
+    if (lock !== undefined) rmSync(lock, { force: true });
   }
 }
 
 if (import.meta.main) {
   try {
-    process.exit(await run(process.argv.slice(2), (s) => process.stdout.write(s)));
+    // writeSync, not process.stdout.write: piped stdout can still be pending
+    // when process.exit tears the process down and the diagnostics are lost —
+    // the same reasoning as exitWithFailure in scripts/lib/cli-args.ts.
+    process.exit(await run(process.argv.slice(2), (s) => writeSync(1, s)));
   } catch (e) {
-    process.stderr.write(`${(e as Error).message}\n`);
+    writeSync(2, `${(e as Error).message}\n`);
     process.exit(1);
   }
 }
