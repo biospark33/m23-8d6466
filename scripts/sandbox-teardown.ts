@@ -12,8 +12,9 @@
  * step. `--driver` defaults to $QDS_PROVIDER_DRIVER or "fake"; `--dir` (or
  * $QDS_RUNS_DIR) selects the records directory; the host git repo is the cwd.
  *
- * The provider key API is built lazily, only when the record carries a
- * keyHash — keyless runs work offline, and a keyed run without
+ * The provider key API is built lazily, only in teardown mode and only when
+ * the record carries a keyHash (harvest mode is credential-free, D8) —
+ * keyless runs work offline, and a keyed run without
  * $OPENROUTER_PROVISIONING_KEY fails before anything is mutated. Errors print
  * `!! <code>: <message>` plus `next: <remediation>` and exit 1; remediation
  * references env-var NAMES only and key material is never printed.
@@ -132,23 +133,25 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     return 1;
   }
 
+  const deps: TeardownDeps = {
+    driver,
+    store,
+    requestId,
+    gitCwd: process.cwd(),
+    ...(parsed.dir === undefined ? {} : { runsDir: parsed.dir }),
+  };
   try {
-    // Keyed records need the key API (spend/revoke/verify); keyless runs work
-    // offline. openRouterKeyApi throws its own provisioning-key-missing
-    // remediation before anything is mutated.
-    const keyApi = rec.keyHash === undefined ? undefined : openRouterKeyApi();
-    const deps: TeardownDeps = {
-      driver,
-      store,
-      ...(keyApi === undefined ? {} : { keyApi }),
-      requestId,
-      gitCwd: process.cwd(),
-    };
     if (parsed.mode === "harvest") {
+      // D8: harvest is credential-free — no keyApi is built, so a missing
+      // $OPENROUTER_PROVISIONING_KEY cannot block it.
       const res = await harvestRun(deps, parsed.runId);
       out(res.outcome === "harvested" ? `harvested: ${res.count}\n` : "harvested: none\n");
       return 0;
     }
+    // Keyed records need the key API (spend/revoke/verify); keyless runs work
+    // offline. openRouterKeyApi throws its own provisioning-key-missing
+    // remediation before anything is mutated.
+    if (rec.keyHash !== undefined) deps.keyApi = openRouterKeyApi();
     // The waiver goes to the run log + stdout, never the record (INV-5).
     if (parsed.noHarvest) out(`teardown.harvest_waived ${parsed.runId}\n`);
     await teardownSandbox(deps, parsed.runId, { noHarvest: parsed.noHarvest });

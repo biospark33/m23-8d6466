@@ -64,6 +64,19 @@ export class HarvestError extends Error {
   }
 }
 
+/**
+ * Untrusted box output bounded + credential-redacted before it touches an
+ * error message (the message lands in the run log and the operator's
+ * terminal). First line only, hard 200-char cap, and any sk-…-style token
+ * is replaced — a compromised workload must not be able to exfiltrate the
+ * run key through a failure's diagnostics.
+ */
+function sanitizeBoxOutput(text: string): string {
+  const firstLine = text.split("\n")[0] ?? "";
+  const capped = firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine;
+  return capped.replace(/sk-[A-Za-z0-9_-]+/g, "sk-[REDACTED]").trim();
+}
+
 /** Injectable host-git runner — tests spy ordering + inject failures. */
 export type GitRunner = (argv: readonly string[], cwd: string) => Promise<ExecResult>;
 
@@ -315,7 +328,7 @@ export async function harvestRun(deps: HarvestDeps, runId: string): Promise<Harv
       // sha is unknown in-box) — a real failure, box evidence included.
       throw new HarvestError(
         "bundle-create-failed",
-        `in-box bundle creation for ${runId} exited ${res.exitCode}: ${res.stderr.trim()}`,
+        `in-box bundle creation for ${runId} exited ${res.exitCode}: ${sanitizeBoxOutput(res.stderr)}`,
         "inspect the box repo by hand via the driver, then re-run harvest — the box is still alive",
       );
     }
@@ -324,7 +337,7 @@ export async function harvestRun(deps: HarvestDeps, runId: string): Promise<Harv
     if (line === "BUNDLEFAIL") {
       throw new HarvestError(
         "bundle-create-failed",
-        `git bundle create failed in-box for ${runId}: ${res.stderr.trim()}`,
+        `git bundle create failed in-box for ${runId}: ${sanitizeBoxOutput(res.stderr)}`,
         "inspect the box repo by hand via the driver, then re-run harvest — the box is still alive",
       );
     }
@@ -350,7 +363,7 @@ export async function harvestRun(deps: HarvestDeps, runId: string): Promise<Harv
       } catch (e) {
         throw new HarvestError(
           "bundle-copy-failed",
-          `copying harvest.bundle out of ${vm} failed: ${(e as Error).message}`,
+          `copying harvest.bundle out of ${vm} failed: ${sanitizeBoxOutput((e as Error).message)}`,
           "re-run harvest — the box is still alive; if it repeats, copy the bundle out by hand",
         );
       }
@@ -452,7 +465,7 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
     if (res.exitCode !== 0) {
       throw new HarvestError(
         "artifacts-failed",
-        `in-box artifacts tar for ${runId} exited ${res.exitCode}: ${res.stderr.trim()}`,
+        `in-box artifacts tar for ${runId} exited ${res.exitCode}: ${sanitizeBoxOutput(res.stderr)}`,
         "inspect the box's artifacts by hand via the driver, then re-run harvest — the box is still alive",
       );
     }
@@ -474,7 +487,7 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
     } catch (e) {
       throw new HarvestError(
         "artifacts-failed",
-        `copying harvest-artifacts.tgz out of ${vm} failed: ${(e as Error).message}`,
+        `copying harvest-artifacts.tgz out of ${vm} failed: ${sanitizeBoxOutput((e as Error).message)}`,
         "re-run harvest — the box is still alive; if it repeats, copy the tar out by hand",
       );
     }
@@ -544,6 +557,13 @@ function assertPathSafe(kind: "name" | "linkname", raw: string): string {
   return name;
 }
 
+/** Ancestor directory paths of a validated name: "a/b/c" → ["a", "a/b"]. */
+function ancestorsOf(name: string): string[] {
+  const out: string[] = [];
+  for (let i = name.indexOf("/"); i !== -1; i = name.indexOf("/", i + 1)) out.push(name.slice(0, i));
+  return out;
+}
+
 interface ParsedHeader {
   rawName: string;
   rawLinkname: string;
@@ -588,6 +608,8 @@ function makeTarParser(handlers: TarHandlers, fail: (e: HarvestError) => void): 
   let total = 0; // decompressed bytes seen
   let summed = 0; // summed declared entry sizes
   const names = new Set<string>();
+  const filePaths = new Set<string>(); // accepted regular-file names
+  const dirPaths = new Set<string>(); // '5' entry names + implicit ancestors
   let meta: { kind: string; chunks: Buffer[] } | null = null;
   let pendingName: string | null = null; // next-entry override from 'x'/'L'
   let pendingLinkname: string | null = null; // next-entry override from 'K'
@@ -659,6 +681,18 @@ function makeTarParser(handlers: TarHandlers, fail: (e: HarvestError) => void): 
                   tarRemediation,
                 );
               }
+              // A file at a path that must be a directory (or the reverse) would fail mid-extraction with a raw errno — reject in pass 1 so nothing is written.
+              const isDir = parsed.typeflag === "5";
+              const fileAncestor = ancestorsOf(name).find((a) => filePaths.has(a));
+              if (fileAncestor !== undefined || (isDir ? filePaths : dirPaths).has(name)) {
+                throw new HarvestError(
+                  "tar-unsafe-entry",
+                  `artifacts tar entry ${JSON.stringify(name)} conflicts with an earlier file at ${JSON.stringify(fileAncestor ?? name)} — no overwrite`,
+                  tarRemediation,
+                );
+              }
+              for (const a of ancestorsOf(name)) dirPaths.add(a);
+              (isDir ? dirPaths : filePaths).add(name);
               names.add(name);
               handlers.onEntry({ name, typeflag: parsed.typeflag, size: parsed.size });
             } else {

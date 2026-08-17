@@ -664,6 +664,29 @@ describe("DF2.5 harvest — INV-3: evil artifacts tgzs abort with nothing extrac
     );
   }, 30_000);
 
+  test("file/dir path conflict (file then its child, and the reverse) → tar-unsafe-entry, dest empty", async () => {
+    const s = await boxSetup("hvst-tar-conflict", 1);
+    await expectArtifactsAbort(
+      s,
+      (p) => writeFileSync(p, gzipSync(buildTar([
+        { name: "run.log", data: Buffer.from("x") },
+        { name: "run.log/x", data: Buffer.from("y") },
+      ]))),
+      "tar-unsafe-entry",
+    );
+    // Mirror: the child arrives first, so "run.log" is an implicit DIRECTORY
+    // when a later entry claims it as a file.
+    const s2 = await boxSetup("hvst-tar-conflict2", 1);
+    await expectArtifactsAbort(
+      s2,
+      (p) => writeFileSync(p, gzipSync(buildTar([
+        { name: "run.log/x", data: Buffer.from("y") },
+        { name: "run.log", data: Buffer.from("x") },
+      ]))),
+      "tar-unsafe-entry",
+    );
+  }, 30_000);
+
   test("ustar prefix field: full name parses and the file lands at prefix/name", async () => {
     const runId = "hvst-tar-prefix";
     const s = await boxSetup(runId, 1);

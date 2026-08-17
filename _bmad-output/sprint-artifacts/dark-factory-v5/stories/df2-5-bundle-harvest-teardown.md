@@ -317,7 +317,21 @@ includes base ancestry (6 here). Both captured above.
 8. **Known CLI limitation (self-review)**: the `harvest` subcommand shadows a run literally
    named `harvest` (`sandbox-teardown harvest` parses as subcommand + missing run-id). Fails
    safe with a clear error; `newId()`-generated ids (slug-date-hex) can never collide.
-
+9. **NOREPO workdir contract (self-review, accepted)**: a workdir-probe miss is classified
+   `none` (inkwell semantics — "a missing piece is the normal path"); teardown then proceeds
+   to destroy. Mitigated by the probe order pinning DF2.2's layouts (`/home/agent/app`,
+   `/home/agent/src`, `app`) and the explicit `deps.workdir` override; a caller whose repo
+   lives elsewhere must pass it.
+10. **Metadata memory bound (self-review, accepted)**: pax/GNU `L`/`K` payloads buffer in
+    memory during validation, bounded by the 512 MiB summed cap (real records are KBs).
+11. **Self-review round (post-PR #115, fixed in follow-up commit)**: (a) untrusted in-box
+    stderr is now bounded to one redacted line (200-char cap, `sk-` tokens replaced) before
+    touching any error message — a compromised box can no longer exfiltrate the run key
+    through failure diagnostics; (b) tar pass-1 now rejects ancestor/descendant path
+    conflicts (file `a` + file `a/b`) as `tar-unsafe-entry`, so extraction can never fail
+    mid-write with a partial destination; (c) `--dir` propagates to `deps.runsDir` (no
+    split-brain between record location and bundle/artifacts output); (d) `harvest` mode
+    never constructs the key API — the credential-free path stays credential-free.
 ### Change log
 
 | Date | Change |
