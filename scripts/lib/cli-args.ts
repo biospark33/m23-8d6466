@@ -148,6 +148,13 @@ export function tokenizeArgs(argv: readonly string[], spec: TokenizeSpec): Token
     }
     if (spec.boolFlags?.includes(a)) {
       bools.add(a);
+      // The bool flag terminates any pending value-flag continuation: leaving
+      // awaitingValue set would let a LATER single-dash token ride through as
+      // the missing value, silently defeating rejectStraySingleDash
+      // (`--driver --no-harvest -n` must reject `-n`, not adopt it). The bare
+      // value flag is left for parseValueFlags, which owns the missing-value
+      // error.
+      awaitingValue = false;
       continue;
     }
     if (spec.rejectStraySingleDash && !a.startsWith("--") && !awaitingValue) {

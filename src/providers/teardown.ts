@@ -37,8 +37,8 @@ import { join } from "node:path";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { captureSpend, revokeRunKey, verifyRevoked, type CredentialDeps, type KeyApi } from "./credentials.ts";
 import type { ProviderDriver } from "./driver.ts";
-import { bunGitRunner, harvestRun, pullArtifacts, type GitRunner } from "./harvest.ts";
-import type { RunRecord, RunRecordStore } from "./run-record.ts";
+import { bunGitRunner, getRecord, harvestRun, isNoSuchBox, pullArtifacts, type GitRunner } from "./harvest.ts";
+import type { RunRecordStore } from "./run-record.ts";
 import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 
 export class TeardownError extends Error {
@@ -96,14 +96,10 @@ function skipStep(ctx: StepCtx, step: TeardownStep, reason: string): void {
  * destroy and close, a reaper race, or a hand destroy. The pre-destroy steps
  * that exec the box treat it as a skip so the run can still reach revoke/close
  * (the box is already in its goal state) instead of wedging the record open
- * forever on an exec that can never succeed again.
+ * forever on an exec that can never succeed again. Detected via harvest's
+ * isNoSuchBox: the typed HarvestError.noSuchBox flag set at the wrap points on
+ * RAW seam output, with a message fallback for raw driver throws.
  */
-function isNoSuchBox(e: unknown): boolean {
-  // ponytail: message-matching is the seam's only not-found signal — the
-  // driver contract has no structured not-found error code; tighten it when
-  // one is added (fake: "no such box: <vm>"; wrapped exedev stderr embeds it).
-  return e instanceof Error && e.message.includes("no such box");
-}
 
 /**
  * Artifacts/harvest against a box that is already gone → skip, not abort. The
@@ -199,16 +195,11 @@ export async function teardownSandbox(deps: TeardownDeps, runId: string, opts: T
 
 async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOptions, ctx: StepCtx): Promise<void> {
   // Preflight — all before ANY mutation; the box stays untouched throughout.
-  let rec: RunRecord;
-  try {
-    rec = deps.store.get(runId);
-  } catch (e) {
-    throw new TeardownError(
-      "no-record",
-      `no run record for ${runId}: ${(e as Error).message}`,
-      "check the run id; records live under $QDS_RUNS_DIR (default .sandbox/runs) — create the run first",
-    );
-  }
+  // Shared classifier (harvest.ts getRecord): genuine absence → no-record,
+  // any other read failure → record-read-failed with inspect-don't-recreate
+  // guidance (a corrupt record may still have a live box and key behind it).
+  // teardownSandbox's asTeardownError preserves the code + remediation.
+  const rec = getRecord(deps, runId);
 
   // Idempotent re-run: first-close-wins already applied — every step skipped.
   if (rec.closedAt !== undefined) {

@@ -700,6 +700,23 @@ describe("DF2.5 harvest — INV-3: evil artifacts tgzs abort with nothing extrac
     await expectArtifactsAbort(s, (p) => writeFileSync(p, gzipSync(buildTar([{ name: "/tmp/evil.txt", data: Buffer.from("x") }]))), "tar-unsafe-entry");
   }, 30_000);
 
+  test("backslash in a regular name → tar-unsafe-entry (win32 separator escapes the fold gates), dest empty", async () => {
+    // On win32 Node's path join treats `\` as a separator: `..\\evil` would
+    // traverse and `a/b` vs `a\\b` would collide past the folded-duplicate
+    // check — refuse any raw backslash up front.
+    const s = await boxSetup("hvst-tar-bslash", 1);
+    await expectArtifactsAbort(s, (p) => writeFileSync(p, gzipSync(buildTar([{ name: "..\\evil.txt", data: Buffer.from("x") }]))), "tar-unsafe-entry");
+  }, 30_000);
+
+  test("backslash in a linkname → tar-unsafe-entry, dest empty", async () => {
+    const s = await boxSetup("hvst-tar-bslash-link", 1);
+    await expectArtifactsAbort(
+      s,
+      (p) => writeFileSync(p, gzipSync(buildTar([{ name: "link", typeflag: "2", linkname: "..\\evil" }]))),
+      "tar-unsafe-entry",
+    );
+  }, 30_000);
+
   test("absolute symlink entry (typeflag 2) → tar-unsafe-entry, dest empty", async () => {
     const s = await boxSetup("hvst-tar-sym", 1);
     await expectArtifactsAbort(

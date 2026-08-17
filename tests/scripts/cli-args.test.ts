@@ -260,6 +260,13 @@ describe("tokenizeArgs — stray single-dash tokens (opt-in strictness)", () => 
     ).toThrow("--driver requires a non-empty value");
   });
 
+  test("a bool flag clears the pending-value state — a later single-dash token still rejects", () => {
+    // `--driver --no-harvest -n`: a stale awaitingValue let `-n` ride through
+    // as --driver's value, silently defeating rejectStraySingleDash. The bool
+    // flag terminates the continuation; `-n` is then the stray it always was.
+    expect(() => tokenizeArgs(["--driver", "--no-harvest", "-n"], strict)).toThrow("unknown flag: -n");
+  });
+
   test("without the option, single-dash tokens still pass through (run-record.ts unchanged)", () => {
     const t = tokenizeArgs(["-n", "x"], { valueFlags: ["--dir"] });
     expect(t.flagTokens).toEqual(["-n"]);

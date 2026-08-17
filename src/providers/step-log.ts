@@ -61,7 +61,10 @@ export async function timedLoggedStep<T>(
     return result;
   } catch (e) {
     const durationMs = Date.now() - started;
-    const err = e as { code?: string; message?: string; remediation?: string };
+    // `fn` may reject with a non-Error — even null/undefined. Normalize so the
+    // logger cannot itself throw (and mask the original failure) while
+    // reporting one.
+    const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
     log({
       ...base,
       duration: durationMs,

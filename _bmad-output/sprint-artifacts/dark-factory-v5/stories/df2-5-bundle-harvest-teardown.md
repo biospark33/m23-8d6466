@@ -247,8 +247,8 @@ All DoD items implemented and verified on `feature/df2-5-bundle-harvest-teardown
 - `src/providers/index.ts`: re-exports harvest + teardown.
 - `src/providers/step-log.ts` (NEW): the shared timed/logged-step shape behind harvest's
   `timedStep` and teardown's `runStep` (per-stream outcome vocabulary, one implementation).
-- Tests: `tests/providers/harvest.test.ts` (36), `tests/providers/teardown.test.ts` (21) —
-  57 combined; `tests/scripts/cli-args.test.ts` gained the `tokenizeArgs` contract describe and
+- Tests: `tests/providers/harvest.test.ts` (38), `tests/providers/teardown.test.ts` (23) —
+  61 combined; `tests/scripts/cli-args.test.ts` gained the `tokenizeArgs` contract describe and
   `tests/scripts/sandbox-teardown-cli.test.ts` (NEW, 5) covers the CLI lock + record-read
   classification; `tests/providers/fixtures/git-fixture.ts` (shared fixture; commit messages are
   slug-stamped so two repos minted in the same wall-clock second can never collide on a root sha).
@@ -257,11 +257,11 @@ All DoD items implemented and verified on `feature/df2-5-bundle-harvest-teardown
 
 Final run — `bun test tests/providers/teardown.test.ts`:
 
-```
- 17 pass
+```text
+ 23 pass
  0 fail
- 85 expect() calls
-Ran 17 tests across 1 file. [30.48s]
+ 112 expect() calls
+Ran 23 tests across 1 file. [42.06s]
 ```
 
 Evidence bundle captured from the same run (the demo asserts `artifactsDir` is set and
@@ -271,21 +271,21 @@ AppleDouble `._*` entries — recorded deviation 6):
 ```json
 {
   "runId": "df25-demo",
-  "baseSha": "a26c08758a4fae719e0e149bfe771f6808dc17cd",
+  "baseSha": "db59e5cbb9fffbeb2f7a764d59d3089cd8673ea8",
   "originCommits": 3,
   "boxCommits": 3,
   "revListRangedCount": 3,
   "revListTotalCount": 6,
   "porcelainEmpty": true,
   "branchListUnchanged": true,
-  "sandboxRef": "a8b811cf74264da561b3b9b4900eee1595da3cf3",
+  "sandboxRef": "42d60c9b6843687819cbd3cda375328665a8aedf",
   "spendMicroUsd": 8100,
   "keyRevoked": true,
   "boxDirGone": true,
   "bundlePresent": true,
-  "artifactsDir": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-df25-td-I2NHhI/runs/df25-demo-artifacts",
+  "artifactsDir": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-df25-td-QDGiaX/runs/df25-demo-artifacts",
   "artifactEntries": ["._app_docs", "._run.log", "._specs", "app_docs", "run.log", "specs"],
-  "closedAt": "2026-08-17T02:26:28.342Z",
+  "closedAt": "2026-08-17T12:01:18.051Z",
   "leak": null
 }
 ```
@@ -296,10 +296,10 @@ includes base ancestry (6 here). Both captured above.
 
 ### Verification summary
 
-- `bun test tests/providers/`: 227 pass / 0 fail / 1 todo (8 files, final round-2 run;
-  review round 2 added one harvest test, five teardown tests). One load-induced flake
-  observed once in DF2.2's frozen-clock setup-gate test under full-dir parallelism; passes
-  standalone 3/3 and on directory re-run.
+- `bun test tests/providers/`: 250 pass / 0 fail / 1 todo (8 files, final round-5 run;
+  review rounds 2–5 added four harvest tests, six teardown tests — the round-5 run is
+  green with no flake). One load-induced flake observed once in DF2.2's frozen-clock
+  setup-gate test under full-dir parallelism; passes standalone 3/3 and on directory re-run.
 - Repo-wide: `bunx tsc --noEmit` clean; `bun run lint` clean; all other test dirs green
   chunked (phase-engine/scripts/gate/gitnexus/hindsight/swarmclaw/vendor/root).
 - Pre-existing on main, unrelated to this story (verified against a pristine main worktree
@@ -398,3 +398,4 @@ includes base ancestry (6 here). Both captured above.
 | 2026-08-16 | Story implemented via 5-wave subagent pipeline (fixture → red tests → harvest impl → teardown+CLI → verification); fixture sha-collision flake fixed (slug-stamped commit messages) |
 | 2026-08-16 | Review round 2 (PR #115, CodeRabbit/Gemini/Sift): harvestRun guard split (vmName vs commitSha) + `artifactsOwnedByCaller` single-pull contract; destroy skipped for box-less records; shared `tokenizeArgs` + `step-log.ts`; `bunGitRunner` hard timeout; atomic pass-2 tar extraction + regular-file counting; source-stream error routing; non-Error catch coercion; CLI coverage (no-record / harvest+--no-harvest / --dir / credential-free keyed harvest) |
 | 2026-08-16 | Review round 4 (BMAD 3-layer adversarial: Blind Hunter + Edge Case Hunter + Acceptance Auditor, 25 findings → 23 fixed, 2 dismissed): pre-copy size caps, sanitizer on all untrusted embeds + encoded-key redaction, LC_ALL=C git, probe hardening + skip rules, dead-box skip semantics, CLI lock + arity + stray-dash rejection, `.partial` atomic extraction + fd close + name folding + base-256 rejection, NOREPO bundle retention, `record-read-failed` classification, relative-first workdir probes, writeSync sinks; +18 tests (57 provider combined, 42 CLI) |
+| 2026-08-17 | Review round 5 (Sift + Gemini inline + CodeRabbit follow-ups): shared `getRecord` classifier consumed by harvest/teardown/CLI (teardown's preflight no longer maps corrupt records to `no-record`); typed `HarvestError.noSuchBox` flag computed on raw seam output (dead-box skip immune to sanitizer truncation); backslash rejection in `assertPathSafe`; bool-flag `awaitingValue` reset in `tokenizeArgs`; lock cleanup on post-create failure; nullish-safe catch normalization; +5 tests (61 provider combined, 43 CLI) |

@@ -28,10 +28,12 @@ import { join } from "node:path";
 
 import {
   RunRecordStore,
+  getRecord,
   harvestRun,
   openRouterKeyApi,
   resolveDriver,
   teardownSandbox,
+  type HarvestError,
   type RunRecord,
   type TeardownDeps,
 } from "../src/providers/index.ts";
@@ -142,12 +144,29 @@ class RunLockedError extends Error {
  */
 export function acquireRunLock(runsDir: string, runId: string): string {
   const lock = join(runsDir, `${runId}.lock`);
+  let fd: number | undefined;
+  let created = false;
   try {
-    const fd = openSync(lock, "wx", 0o600);
+    fd = openSync(lock, "wx", 0o600);
+    created = true;
     writeFileSync(fd, `${process.pid} ${new Date().toISOString()}\n`);
     closeSync(fd);
+    fd = undefined;
     return lock;
   } catch (e) {
+    // A failure AFTER our own O_EXCL create (ENOSPC/EIO on the write, a failed
+    // close) must not wedge the lock on disk for every later invocation: close
+    // the fd and remove exactly the file THIS invocation created, then rethrow
+    // the original error. EEXIST never arrives with created=true — the other
+    // holder's lock stays untouched.
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // the close itself failed; nothing further to release
+      }
+    }
+    if (created) rmSync(lock, { force: true });
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     let held = "";
     try {
@@ -182,23 +201,15 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
 
   let rec: RunRecord;
   try {
-    rec = store.get(parsed.runId);
+    // Shared classifier (harvest.ts getRecord — the same one harvestRun and
+    // teardownSteps use): genuine ENOENT absence → no-record + create-the-run
+    // guidance; every other read failure → record-read-failed + inspect-first
+    // guidance, because a corrupt record can still have a live box and a live
+    // key behind it.
+    rec = getRecord({ store }, parsed.runId);
   } catch (e) {
-    // The store signals genuine absence as `unreadable run record …: ENOENT`;
-    // every other read failure (malformed JSON, bad field shape, EACCES, …) is
-    // a read FAILURE. A corrupt record can still have a live box and a live
-    // key behind it, so its remediation must point at inspection — telling the
-    // operator to re-create the run would orphan both.
-    const message = (e as Error).message;
-    const absent = /^unreadable run record .*: ENOENT$/.test(message);
-    fail(
-      out,
-      absent ? "no-record" : "record-read-failed",
-      `${absent ? "no run record" : "cannot read run record"} for ${parsed.runId}: ${message}`,
-      absent
-        ? "check the run id; records live under $QDS_RUNS_DIR (default .sandbox/runs) — create the run first"
-        : "inspect the record under $QDS_RUNS_DIR (default .sandbox/runs) before touching the run — a live box and key may sit behind it; do not re-create the run",
-    );
+    const err = e as HarvestError;
+    fail(out, err.code ?? "record-read-failed", err.message ?? String(e), err.remediation);
     return 1;
   }
 
@@ -229,7 +240,9 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     out(`torn down: ${parsed.runId}\n`);
     return 0;
   } catch (e) {
-    const err = e as { code?: string; remediation?: string; message?: string };
+    // Non-Error rejections normalize to {} so the printer cannot itself throw
+    // while reporting one.
+    const err = (e ?? {}) as { code?: string; remediation?: string; message?: string };
     fail(out, err.code ?? "error", err.message ?? String(e), err.remediation);
     return 1;
   } finally {

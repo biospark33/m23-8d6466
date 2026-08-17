@@ -14,7 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -507,6 +507,59 @@ describe("DF2.5 teardownSandbox", () => {
     expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeFalse();
     // nothing was fetched from a dead box
     expect(await hostGit(origin.originDir, ["for-each-ref", "--format=%(refname)", "refs/sandbox/"])).toBe("");
+  }, 30_000);
+
+  // ─── 9b2. Shared record classifier — corrupt ≠ absent ────────────────────
+
+  test("corrupt record: teardownSandbox aborts record-read-failed (never no-record), record untouched", async () => {
+    const runId = "df25-corrupt";
+    await makeRun(runId);
+    writeFileSync(store.path(runId), "{ not json\n");
+
+    let err: unknown;
+    try {
+      await teardownSandbox(deps(), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(TeardownError);
+    const te = err as TeardownError;
+    // a live box + live key may sit behind a record that will not parse:
+    // inspect-first guidance, never "create the run first"
+    expect(te.code).toBe("record-read-failed");
+    expect(te.remediation).toContain("inspect");
+    expect(te.remediation).not.toContain("create the run first");
+    expect(readFileSync(store.path(runId), "utf8")).toBe("{ not json\n");
+  });
+
+  // ─── 9b3. Typed dead-box signal survives sanitizer truncation ─────────────
+
+  test("dead box whose no-such-box stderr lands past the sanitizer's 200-char cap still skips (typed flag)", async () => {
+    const runId = "df25-deadbox-typed";
+    const origin = await makeOrigin();
+    await makeRun(runId);
+    await mintFor(runId);
+    store.set(runId, { commitSha: origin.baseSha });
+    await fillBox(runId, runId, origin.originDir, 3, true);
+    rmSync(boxDir(runId), { recursive: true, force: true });
+
+    // exedev shape: exec does NOT throw — it returns a non-zero exit whose
+    // stderr embeds the marker BEYOND the 200-char first-line sanitizer cap,
+    // so the wrapped message alone cannot carry it. The typed noSuchBox flag
+    // (computed on raw stderr at the wrap point) must still drive the skip.
+    const noise = "x".repeat(220);
+    const exedevShape = Object.create(recording) as RecordingDriver;
+    exedevShape.exec = () =>
+      Promise.resolve({ stdout: "", stderr: `${noise} no such box: ${runId}\n`, exitCode: 255 });
+
+    await teardownSandbox(deps({ gitCwd: origin.originDir, driver: exedevShape }), runId);
+
+    expect(store.get(runId).closedAt).toBeString();
+    for (const step of ["artifacts", "harvest"]) {
+      const skip = logs.find((l) => l.operation === `teardown.${step}` && l.outcome === "skipped");
+      expect(skip).toBeDefined();
+      expect(String(skip?.reason)).toContain("box already gone");
+    }
   }, 30_000);
 
   // ─── 9c. Probe argv — host git config must not decide availability ────────

@@ -70,12 +70,20 @@ export class HarvestError extends Error {
   readonly code: string;
   /** The literal next command, secrets referenced by env-var NAME, never expanded. */
   readonly remediation: string;
+  /**
+   * Typed dead-box signal: set by the wrap points that saw the seam's
+   * no-such-box marker in RAW driver output — immune to the sanitizer's
+   * first-line/200-char shaping of the wrapped message. Teardown branches on
+   * this via isNoSuchBox, never on wrapped message text from another module.
+   */
+  readonly noSuchBox: boolean;
 
-  constructor(code: string, message: string, remediation: string) {
+  constructor(code: string, message: string, remediation: string, opts: { noSuchBox?: boolean } = {}) {
     super(message);
     this.name = "HarvestError";
     this.code = code;
     this.remediation = remediation;
+    this.noSuchBox = opts.noSuchBox ?? false;
   }
 }
 
@@ -99,6 +107,30 @@ export function sanitizeBoxOutput(text: string): string {
       /[A-Z]/.test(tok) && /[a-z]/.test(tok) && /\d/.test(tok) ? "[REDACTED]" : tok,
     )
     .trim();
+}
+
+/**
+ * The seam's only box-gone marker. The driver contract has no structured
+ * not-found code (the fake driver throws `no such box: <vm>`; exedev returns
+ * a non-zero exit whose stderr embeds it), so raw-text detection at harvest's
+ * wrap points IS the seam interpretation — done here, once, while the driver
+ * output is still unsanitized.
+ */
+const NO_SUCH_BOX = "no such box";
+
+const boxGone = (raw: string): boolean => raw.includes(NO_SUCH_BOX);
+
+/**
+ * Dead-box detector for teardown's box-step skip. Prefers the typed
+ * HarvestError.noSuchBox flag (computed on raw seam output at the wrap point,
+ * before sanitizeBoxOutput can truncate the marker out of the message) and
+ * falls back to the message only for raw driver throws that never passed
+ * through a harvest wrap point.
+ */
+export function isNoSuchBox(e: unknown): boolean {
+  return (
+    e instanceof Error && ((e instanceof HarvestError && e.noSuchBox) || e.message.includes(NO_SUCH_BOX))
+  );
 }
 
 /** Injectable host-git runner — tests spy ordering + inject failures. */
@@ -265,25 +297,37 @@ echo "TARBUILT $(( $(wc -c < ../harvest-artifacts.tgz) ))"
 
 // ─── preflight ───────────────────────────────────────────────────────────────
 
-function getRecord(deps: HarvestDeps, runId: string): RunRecord {
+/**
+ * Read a run record with the ONE shared absence/read-failure classification:
+ * genuine ENOENT absence → HarvestError "no-record" (+ create-the-run
+ * guidance); every other read failure (malformed JSON, EACCES, …) →
+ * "record-read-failed" (+ inspect-first guidance — a live box and key may sit
+ * behind a record that merely will not parse, and telling the operator to
+ * re-create the run would orphan both).
+ *
+ * Consumed by harvestRun, pullArtifacts, teardownSteps and the CLI's run() —
+ * the classification must never drift per call site.
+ */
+export function getRecord(deps: Pick<HarvestDeps, "store">, runId: string): RunRecord {
   try {
     return deps.store.get(runId);
   } catch (e) {
+    // `store.get` throws plain Errors today; normalize anyway — a nullish
+    // throw must not escape the classifier as a TypeError.
+    const err = e instanceof Error ? e : new Error(String(e));
     // The store signals genuine absence as an ENOENT-annotated unreadable
-    // record (readRecord embeds the errno). Anything else — malformed JSON,
-    // EACCES, ... — is a read failure, and its remediation must NOT send the
-    // operator off creating a run over a record that may still be there.
-    if ((e as NodeJS.ErrnoException).code === "ENOENT" || (e as Error).message.includes("ENOENT")) {
+    // record (readRecord embeds the errno in the message).
+    if ((err as NodeJS.ErrnoException).code === "ENOENT" || err.message.includes("ENOENT")) {
       throw new HarvestError(
         "no-record",
-        `no run record for ${runId}: ${(e as Error).message}`,
+        `no run record for ${runId}: ${err.message}`,
         "check the run id; records live under $QDS_RUNS_DIR (default .sandbox/runs) — create the run first",
       );
     }
     throw new HarvestError(
       "record-read-failed",
-      `run record for ${runId} could not be read: ${(e as Error).message}`,
-      "inspect the record under $QDS_RUNS_DIR (permissions, malformed JSON) and repair it in place — the box may still be alive",
+      `run record for ${runId} could not be read: ${err.message}`,
+      "inspect the record under $QDS_RUNS_DIR (default .sandbox/runs; permissions, malformed JSON) and repair it in place — a live box and key may sit behind it; do not re-create the run",
     );
   }
 }
@@ -368,6 +412,7 @@ export async function harvestRun(
         "bundle-create-failed",
         `in-box bundle creation for ${runId} exited ${res.exitCode}: ${sanitizeBoxOutput(res.stderr)}`,
         "inspect the box repo by hand via the driver, then re-run harvest — the box is still alive",
+        { noSuchBox: boxGone(res.stderr) },
       );
     }
     const line = res.stdout.trim();
@@ -417,6 +462,7 @@ export async function harvestRun(
           "bundle-copy-failed",
           `copying harvest.bundle out of ${vm} failed: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))}`,
           "re-run harvest — the box is still alive; if it repeats, copy the bundle out by hand",
+          { noSuchBox: boxGone(e instanceof Error ? e.message : String(e)) },
         );
       }
     });
@@ -533,6 +579,7 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
         "artifacts-failed",
         `in-box artifacts tar for ${runId} exited ${res.exitCode}: ${sanitizeBoxOutput(res.stderr)}`,
         "inspect the box's artifacts by hand via the driver, then re-run harvest — the box is still alive",
+        { noSuchBox: boxGone(res.stderr) },
       );
     }
     const line = res.stdout.trim();
@@ -566,6 +613,7 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
         "artifacts-failed",
         `copying harvest-artifacts.tgz out of ${vm} failed: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))}`,
         "re-run harvest — the box is still alive; if it repeats, copy the tar out by hand",
+        { noSuchBox: boxGone(e instanceof Error ? e.message : String(e)) },
       );
     }
     const files = await validateAndExtractTgz(staging, dest);
@@ -626,18 +674,21 @@ function nulStr(field: Buffer): string {
 }
 
 /**
- * Absolute, ".."-segment and empty names are refused — linknames too. The name
- * is canonicalized (".", "" and repeated "/" segments dropped) so aliases like
- * "./a" vs "a" or "a//b" vs "a/b" cannot slip past the duplicate/ancestor
- * checks in pass 1 and collide as a raw EEXIST mid-extraction in pass 2 —
- * `join(destDir, name)` normalizes, so the validated name must be canonical.
+ * Absolute, ".."-segment, backslash-containing and empty names are refused —
+ * linknames too. The name is canonicalized (".", "" and repeated "/" segments
+ * dropped) so aliases like "./a" vs "a" or "a//b" vs "a/b" cannot slip past
+ * the duplicate/ancestor checks in pass 1 and collide as a raw EEXIST
+ * mid-extraction in pass 2 — `join(destDir, name)` normalizes, so the
+ * validated name must be canonical. A raw backslash is refused BEFORE
+ * normalization: on win32 Node treats it as a separator, so `..\evil` would
+ * traverse and `a/b` vs `a\b` would collide past the folded-duplicate gate.
  */
 function assertPathSafe(kind: "name" | "linkname", raw: string): string {
   const name = raw.replace(/\/+$/, "").split("/").filter((s) => s !== "" && s !== ".").join("/");
-  if (name === "" || raw.startsWith("/") || raw.split("/").includes("..")) {
+  if (name === "" || raw.includes("\\") || raw.startsWith("/") || raw.split("/").includes("..")) {
     throw new HarvestError(
       "tar-unsafe-entry",
-      `artifacts tar ${kind} ${JSON.stringify(raw)} is absolute, empty, or traverses ".." — refusing to extract`,
+      `artifacts tar ${kind} ${JSON.stringify(raw)} is absolute, empty, contains a backslash, or traverses ".." — refusing to extract`,
       "inspect the staging tar by hand before re-running; the box is still alive",
     );
   }
