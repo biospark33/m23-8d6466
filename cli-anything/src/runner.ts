@@ -875,7 +875,7 @@ export async function runTeamManifest(
           agentOutputs,
           changedFiles,
           comsLog: comsLog.entries,
-          durationMs: Date.now() - startedAt,
+          durationMs: Math.max(0, Date.now() - startedAt),
           waivers,
           error: abortDowngraded
             ? { reason: "transient", message: "run aborted by parent signal" }

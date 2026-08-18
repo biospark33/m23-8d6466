@@ -225,18 +225,24 @@ describe("RSS watchdog", () => {
 
   it("R9: stop() after escalation reports stopped (not running); killOrigin preserved", async () => {
     const child = trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" }));
+    let escalated = false;
     const handle = startRssWatchdog({
       child,
       pgidOrGroup: child.pid!, // escalation SIGTERMs the sleep's group, not ours
       thresholdBytes: DEFAULT_THRESHOLD_BYTES,
       pollMs: 20,
       graceMs: 60_000, // keep the SIGKILL leg far away; only the status matters here
-      onEscalate: () => {},
+      onEscalate: () => { escalated = true; },
       onUnwatchable: () => {},
       log: () => {},
       sampleRss: async () => DEFAULT_THRESHOLD_BYTES + 1, // always over
     });
-    await sleep(80); // let an escalation fire (child dies to the group SIGTERM)
+    // P6a: poll bounded (2s cap) for escalation evidence before proceeding
+    const startedAt = Date.now();
+    while (!escalated && Date.now() - startedAt < 2000) {
+      await sleep(10);
+    }
+    expect(escalated).toBe(true); // prove escalation fired
     handle.stop();
     expect(handle.status).toBe("stopped"); // was left "running" before R9
     expect(handle.killOrigin).toBe("watchdog");
@@ -265,11 +271,15 @@ describe("RSS watchdog", () => {
     // call stays pending while we stop the watchdog, and ONLY THEN rejects —
     // without the catch-path running-guard this would be failure 3/3:
     // onUnwatchable fires and "unwatchable" overwrites the terminal status.
-    await sleep(140);
+    // P6b: wait for 2 rejections (40ms at 20ms poll) before stopping
+    await new Promise((resolve) => setTimeout(resolve, 50));
     handle.stop();
+    // P6b: ensure stop() processed (microtask flush) before rejection
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(handle.status).toBe("stopped");
     rejectThird?.(new Error("late boom"));
-    await sleep(100);
+    // Flush macrotasks to ensure any late handlers ran
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(handle.status).toBe("stopped");
     expect(unwatchableReported).toBe(false);
   });
@@ -379,10 +389,16 @@ describe("RSS watchdog", () => {
       sampleRss: async () => 600 * 1024 ** 2, // 600 MB — over threshold
     });
 
-    await sleep(150); // Time for first poll + escalation
+    // P7: poll bounded (2s cap) for escalation evidence before asserting
+    const startedAt = Date.now();
+    while (!escalated && Date.now() - startedAt < 2000) {
+      await sleep(10);
+    }
+    expect(escalated).toBe(true); // prove escalation fired
+    // Note: regular `sleep` dies to SIGTERM immediately, so we don't assert "alive within grace"
+    // (unlike the SIGTERM-ignoring perl tests). The escalation evidence above is sufficient.
     handle.stop();
 
-    expect(escalated).toBe(true);
     expect(escalateInfo).toHaveLength(1);
     expect(escalateInfo[0]!.rssBytes).toBe(600 * 1024 ** 2);
     expect(escalateInfo[0]!.samples).toBeGreaterThanOrEqual(1);
@@ -612,11 +628,14 @@ describe("RSS watchdog", () => {
     });
 
     // W4: External sampler needs 3 consecutive failures for unwatchable
-    // At 50ms poll interval, 3 failures = 150ms minimum
-    await sleep(200);
+    // BC12: bounded poll-until-flag loop (~2s cap) instead of blind sleep
+    const startedAt = Date.now();
+    while (!unwatchableCalled && Date.now() - startedAt < 2000) {
+      await sleep(10);
+    }
+    expect(unwatchableCalled).toBe(true); // prove unwatchable was reported
     handle.stop();
 
-    expect(unwatchableCalled).toBe(true);
     expect(unwatchableReasons).toHaveLength(1);
     expect(unwatchableReasons[0]).toMatch(/3.*consecutive/i);
     expect(handle.status).toBe("unwatchable");
@@ -775,8 +794,8 @@ describe("RSS watchdog", () => {
     handle.stop();
     const countAtStop = sampleCount;
 
-    // Wait for 2× pollMs — sampling should NOT increase
-    await sleep(120);
+    // BC8: frozen window check — wait ≥ 2× pollMs, assert count did not increase
+    await sleep(100); // 2× 50ms = 100ms
     expect(sampleCount).toBe(countAtStop);
   });
 
@@ -872,12 +891,17 @@ describe("RSS watchdog", () => {
     // Sleep well past the escalation point
     await sleep(300);
     handle.stop();
+    const countAtStop = sampleCount;
 
     expect(escalated).toBe(true);
     // sampleCount should NOT have grown significantly after escalation
     // (max ~3-4 samples before escalation at 50ms interval)
     expect(sampleCount).toBeLessThan(10);
     expect(sampleCount).toBe(countAtEscalation);
+
+    // BC9: follow-up window after stop — assert sampling stopped (post-escalation behavior)
+    await sleep(100); // 2× pollMs = 100ms
+    expect(sampleCount).toBe(countAtStop); // frozen after stop
 
     // Cleanup
     try {

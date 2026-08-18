@@ -391,8 +391,7 @@ describe("rosterToTeamManifest: garbage-structure input handling", () => {
     // The adapter does NOT validate roster structure at the boundary — it
     // trusts the ResolvedRoster type. When a null entry is present (which can
     // only happen via type-erasure at runtime, bypassing TypeScript), accessing
-    // role.name in rosterRoleToTeamRole throws a TypeError: "Cannot read
-    // properties of null (reading 'provider')". This is a runtime crash, not
+    // role.name in rosterRoleToTeamRole throws a TypeError: "null is not an object (evaluating 'r.name')". This is a runtime crash, not
     // a clean ZodError.
     // NOTE: This is observable behavior, not ideal — a ZodError at the
     // boundary would be cleaner. Documented here for pre-dev contract clarity.
@@ -402,15 +401,21 @@ describe("rosterToTeamManifest: garbage-structure input handling", () => {
       warnings: [],
     } as ResolvedRoster;
 
-    expect(() =>
+    let thrownError: Error | undefined;
+    try {
       rosterToTeamManifest(badRoster, {
         name: "bad",
         project: "p",
         leadRoleName: "w1",
         workerRoleNames: [],
         prompts: { w1: "x" },
-      }),
-    ).toThrow(TypeError);
+      });
+    } catch (e) {
+      thrownError = e as Error;
+    }
+    expect(thrownError).toBeDefined();
+    expect(thrownError).toBeInstanceOf(TypeError);
+    expect(thrownError?.message).toMatch(/null.*not an object/i);
   });
 
   test("role missing name: Map lookup fails with Error (not ZodError)", () => {
@@ -461,6 +466,39 @@ describe("rosterToTeamManifest: garbage-structure input handling", () => {
         prompts: { lead: "x" },
       }),
     ).toThrow(/role provider must be a non-empty string \(got undefined\)/);
+  });
+
+  test("empty workers array is rejected by TeamManifestSchema (min 1 required)", () => {
+    // TeamManifestSchema requires at least 1 worker: .min(1).max(3).
+    // Empty workerRoleNames triggers ZodError at parse boundary.
+    const baseRole: Omit<ResolvedRole, "name"> = {
+      model: "claude-haiku-4-5",
+      provider: "anthropic",
+      thinking: "off",
+      tools: null,
+      writes: [],
+      harness_engineering: [],
+      slug: "anthropic/claude-haiku-4-5",
+      warnings: [],
+    };
+
+    const roster: ResolvedRoster = {
+      path: "/fake.yaml",
+      roles: [
+        { ...baseRole, name: "lead" },
+      ],
+      warnings: [],
+    };
+
+    expect(() =>
+      rosterToTeamManifest(roster, {
+        name: "no-workers",
+        project: "p",
+        leadRoleName: "lead",
+        workerRoleNames: [], // Empty — should reject
+        prompts: { lead: "x" },
+      }),
+    ).toThrow(/at least 1.*element/i);
   });
 });
 

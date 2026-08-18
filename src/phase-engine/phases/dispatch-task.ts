@@ -120,7 +120,8 @@ export function dispatchTask(
     const secretEnv: Record<string, string> = {};
     for (const key of ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]) {
       const v = process.env[key];
-      if (v !== undefined) secretEnv[key] = v;
+      // Empty or whitespace-only values don't count as present — they'd fail at spawn
+      if (v !== undefined && v.trim().length > 0) secretEnv[key] = v;
     }
     const redact = (s: string): string => redactSecrets(s, secretEnv);
 
@@ -163,8 +164,8 @@ export function dispatchTask(
     // D6: cardinality checks BEFORE dual-gate (pi spawn ~180s) — local checks first
     // D9: anchor roster path at runRoot, not process.cwd()
     const rosterRunRoot = deps.rootDir ?? process.env.QDS_RUN_ROOT ?? process.cwd();
-    // S2: hoist empty check before expensive loadRoster + dual-gate (~180s)
-    if (rosterRunRoot === "") {
+    // S2: hoist empty/whitespace check before expensive loadRoster + dual-gate (~180s)
+    if (rosterRunRoot.trim() === "") {
       return refuse("QDS_RUN_ROOT is empty (use unset or a non-empty path)", redact);
     }
     let roster: ResolvedRoster;
@@ -235,8 +236,8 @@ export function dispatchTask(
 
     // runTeamManifest takes a manifest FILE path.
     const runRoot = deps.rootDir ?? process.env.QDS_RUN_ROOT ?? process.cwd();
-    // D14: treat empty string as unset for QDS_RUN_ROOT
-    if (runRoot === "") {
+    // D14: treat empty/whitespace string as unset for QDS_RUN_ROOT
+    if (runRoot.trim() === "") {
       return refuse("QDS_RUN_ROOT is empty (use unset or a non-empty path)", redact);
     }
     const manifestDir = join(runRoot, ".qds-manifests");
@@ -473,10 +474,7 @@ export function dispatchTask(
         malformedLines: health.malformedLines,
         droppedOversizeLines: health.droppedOversizeLines,
         dispatchSubTimings: {
-          mulch_prime_ms: 0,
-          box_setup_ms: 0,
           team_execution_ms: durationMs,
-          gate_validation_ms: 0,
         },
       };
     } finally {

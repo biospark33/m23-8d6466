@@ -209,6 +209,17 @@ describe("dispatch-task: AC5 QDS_TEAM_RUNNER refusal", () => {
     expect(spy.calls).toBe(0); // refusal BEFORE any spawn
   });
 
+  it("whitespace-only QDS_RUN_ROOT refuses pre-spawn with logic status, zero spawns", async () => {
+    process.env.QDS_TEAM_RUNNER = "local"; // must be valid to hit the runRoot check
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    process.env.QDS_RUN_ROOT = "   \t  "; // whitespace-only triggers refusal
+    const spy = injectFake(() => successResult());
+    const result = await runDispatch();
+    expect(result.exitStatus).toBe("logic");
+    expect(result.error?.message).toBe("QDS_RUN_ROOT is empty (use unset or a non-empty path)");
+    expect(spy.calls).toBe(0); // refusal BEFORE any spawn
+  });
+
   it("unset refuses pre-spawn, names the variable, never spawns", async () => {
     // biome-ignore lint/performance/noDelete: unset is the semantic — assignment would leave "undefined" in the env.
     delete process.env.QDS_TEAM_RUNNER;
@@ -300,6 +311,28 @@ describe("dispatch-task: manifest schema refusal", () => {
 describe("dispatch-task: provider key presence", () => {
   it("missing both keys refuses pre-spawn, names keys by name only", async () => {
     process.env.QDS_TEAM_RUNNER = "local";
+    const spy = injectFake(() => successResult());
+    const result = await runDispatch();
+    expect(result.exitStatus).toBe("logic");
+    expect(result.error?.message).toContain("ANTHROPIC_API_KEY");
+    expect(result.error?.message).toContain("OPENROUTER_API_KEY");
+    expect(spy.calls).toBe(0);
+  });
+
+  it("empty-string API key refuses pre-spawn (not counted as present)", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = ""; // empty string, not a valid key
+    const spy = injectFake(() => successResult());
+    const result = await runDispatch();
+    expect(result.exitStatus).toBe("logic");
+    expect(result.error?.message).toContain("ANTHROPIC_API_KEY");
+    expect(result.error?.message).toContain("OPENROUTER_API_KEY");
+    expect(spy.calls).toBe(0);
+  });
+
+  it("whitespace-only API key refuses pre-spawn (not counted as present)", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "   \t  "; // whitespace-only, not a valid key
     const spy = injectFake(() => successResult());
     const result = await runDispatch();
     expect(result.exitStatus).toBe("logic");

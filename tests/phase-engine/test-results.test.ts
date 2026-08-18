@@ -594,8 +594,9 @@ echo ' 1 pass'\n`,
       const result = await runTestCommand([script], { cwd: cwd3 });
       expect(result.testsExecuted).toBe(true);
       expect(result.testResults).toEqual({ passed: 1, failed: 0 });
-      // CRITICAL: verify key was NOT restored as "undefined" string
+      // CRITICAL: verify key was NOT restored as "undefined" string AND was actually deleted
       expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
+      expect("ANTHROPIC_API_KEY" in process.env).toBe(false); // proves deletion, not just undefined value
     } finally {
       // Restore original state
       // biome-ignore lint/performance/noDelete: unset is the semantic
@@ -614,13 +615,37 @@ echo ' 1 pass'\n`,
     const script = path.join(freshRoot(), "slow-suite.sh");
     fs.writeFileSync(
       script,
-      // > DRAIN_TIMEOUT_MS (2s) of runtime BEFORE the summary is printed
-      "#!/bin/sh\nsleep 2.3\necho 'Tests: 5 passed, 1 failed'\n",
+      // > DRAIN_TIMEOUT_MS (2s) of runtime BEFORE the summary is printed.
+      // 3s sleep gives 1s margin over DRAIN_TIMEOUT_MS=2000ms to avoid CI flakiness.
+      "#!/bin/sh\nsleep 3\necho 'Tests: 5 passed, 1 failed'\n",
       { mode: 0o755 },
     );
     const result = await runTestCommand([script], { cwd: path.dirname(script) });
     expect(result.testsExecuted).toBe(true);
     expect(result.testResults).toEqual({ passed: 5, failed: 1 });
+  }, 15_000);
+
+  test("drain backstop FIRES when a descendant holds the pipe open after exit", async () => {
+    // Round 11: the R9 test above proves the timer does NOT arm early; this
+    // one proves it DOES fire when needed. The script's foreground work ends
+    // immediately, but a backgrounded sleep inherits stdout and keeps the
+    // pipe open past DRAIN_TIMEOUT_MS — without the backstop, readCapped
+    // would hang until the 3s holder exits; with it, the reader is cancelled
+    // ~2s after exit and the already-captured summary still parses.
+    const script = path.join(freshRoot(), "pipe-holder.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\nsleep 3 &\necho 'Tests: 4 passed, 2 failed'\n",
+      { mode: 0o755 },
+    );
+    const startedAt = Date.now();
+    const result = await runTestCommand([script], { cwd: path.dirname(script) });
+    const elapsedMs = Date.now() - startedAt;
+    // Backstop fired: returned well before the 3s holder released the pipe
+    // (drain at ~2s post-exit), and the captured summary line still parsed.
+    expect(elapsedMs).toBeLessThan(3_000);
+    expect(result.testsExecuted).toBe(true);
+    expect(result.testResults).toEqual({ passed: 4, failed: 2 });
   }, 15_000);
 
   test("reused non-aborted AbortSignal keeps abort listeners balanced across runs (R9)", async () => {

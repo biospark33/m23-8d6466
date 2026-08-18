@@ -127,12 +127,20 @@ describe("team-event-adapter: fixture parsing", () => {
 
   it("StreamHealth counters show zero after all valid lines", () => {
     const health = makeStreamHealth();
+    const ctx = {
+      requestId: "req-1",
+      phaseId: "phase-1",
+      redact: (s: string) => s,
+    };
     for (const line of fixtureLines) {
       const parsed = parseTeamEventLine(line);
       if (!parsed) {
         health.malformed(line);
+        continue;
       }
-      // Adapt normally (no cap check here)
+      // Adapt normally through the real adapter path
+      const adapted = adaptTeamEvent(parsed, ctx);
+      // Adapt succeeded — counters remain zero
     }
     const snapshot = health.snapshot();
     expect(snapshot.malformedLines).toBe(0);
@@ -407,16 +415,16 @@ describe("team-event-adapter: classifyRun precedence", () => {
     expect(result).toBe("logic");
   });
 
-  it("array merged result (rejected upstream) arrives as null -> lead_failure", () => {
-    // Genuinely exercise the upstream rejection: a merged event whose result
-    // is an array is dropped by parseTeamEventLine, so classifyRun receives
-    // null and the run classifies lead_failure at exit 0.
+  it("classifyRun: null mergedResult + exit 0 -> lead_failure", () => {
+    // Tests classifyRun behavior when mergedResult is null. (Array-type
+    // merged events are rejected upstream by parseTeamEventLine, so they
+    // never reach classifyRun as arrays — they arrive here as null.)
     const arrayMerged = parseTeamEventLine(`{"type":"merged","result":[1,2]}`);
-    expect(arrayMerged).toBeNull();
+    expect(arrayMerged).toBeNull(); // Upstream parser rejects arrays
     const result = classifyRun({
       exitCode: 0,
       termSignal: null,
-      mergedResult: null,
+      mergedResult: null, // What arrives after upstream rejection
       comsInitError: false,
       killOrigin: null,
     });
@@ -609,6 +617,31 @@ describe("team-event-adapter: review-round hardening (A12-A17)", () => {
     if (adapted.type !== "coms") throw new Error(`expected coms, got ${adapted.type}`);
     expect(adapted.name).toBe("cost_skipped_nonfinite");
     expect(adapted.payloadJson).toContain("non-finite");
+  });
+
+  it("adapter unsafe-integer guard (>MAX_SAFE_INTEGER micros) → coms trace with skip note", () => {
+    // Cost values >$9B (~9,007,199,254 USD) exceed Number.MAX_SAFE_INTEGER when converted
+    // to micros and silently corrupt. The adapter treats them as malformed.
+    const hugeCost = {
+      kind: "cost" as const,
+      event: {
+        agentId: "w1",
+        model: "m",
+        inputTokens: 100,
+        outputTokens: 50,
+        turnCount: 1,
+        unpricedTurns: 0,
+        durationMs: 1234,
+        // 10_000_000_000 USD → 10_000_000_000_000_000_000 micros > MAX_SAFE_INTEGER (9,007,199,254,740,991)
+        costUsd: 10000000000,
+        timestamp: "2026-08-17T12:00:10.000Z",
+      },
+    };
+    const adapted = adaptTeamEvent(hugeCost, ctx);
+    // Unsafe integer guard → coms trace event with skip note, NOT cost trace
+    if (adapted.type !== "coms") throw new Error(`expected coms, got ${adapted.type}`);
+    expect(adapted.name).toBe("cost_skipped_unsafe");
+    expect(adapted.payloadJson).toContain("safe integer");
   });
 
   it("A17: inline CRLF-content test (not fixture) — parser handles CRLF in valid JSON", () => {

@@ -248,6 +248,10 @@ describe("runTeamManifest", () => {
     // let it slip past. Spy on the harness's own cap log to prove the
     // byte-accurate cap fired, and assert the trailing `merged` still parsed
     // (proving parsing resumed after the oversized line was discarded).
+    // BC5: inline assertion proving fixture line exceeds cap
+    const oversizedLine = "あ".repeat(1000);
+    expect(Buffer.byteLength(oversizedLine, "utf8")).toBe(3000);
+    expect(Buffer.byteLength(oversizedLine, "utf8")).toBeGreaterThan(2048);
     const capError = spyOn(console, "error").mockImplementation(() => {});
     try {
       const out = await runTeamManifest(TEAM_MANIFEST, {
@@ -335,6 +339,7 @@ describe("runTeamManifest", () => {
     // non-overflow status at settle time.
     const controller = new AbortController();
     const killOrigins: ("watchdog" | "budget" | "wallClock" | "requestedShutdown" | null)[] = [];
+    let firstEvent = false;
     const run = runTeamManifest(TEAM_MANIFEST, {
       env: teamEnv("abort_graceful_exit0"),
       abortSignal: controller.signal,
@@ -342,8 +347,14 @@ describe("runTeamManifest", () => {
       onRunFacts: (facts) => {
         killOrigins.push(facts.killOrigin);
       },
+      onTeamEvent: () => { firstEvent = true; },
     });
-    await new Promise((r) => setTimeout(r, 400)); // let the stream preamble land
+    // P6c: wait for observable signal (firstTeamEvent) with bounded timeout, then abort
+    const startedAt = Date.now();
+    while (!firstEvent && Date.now() - startedAt < 2000) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(firstEvent).toBe(true); // prove we observed activity before abort
     controller.abort();
     const out = await run;
     expectUniformSchema(out);
@@ -517,6 +528,10 @@ describe("DF1.6 T4: RSS watchdog overflow regression test", () => {
 
     const out = await runTeamManifest(TEAM_MANIFEST, {
       env: teamEnv("watchdog_kill"),
+      // BC13: disable budget and wall-clock caps so ONLY watchdog can kill
+      // Use large finite values that don't overflow setTimeout (max 32-bit signed int)
+      budgetCapUsd: 999_999_999, // Effectively infinite for test duration
+      wallClockCapMs: 2_147_483_647, // max 32-bit signed int, ~24 days
       // BT23: Inject sampler that reports over-threshold RSS on first poll,
       // then below-threshold values after escalation (null is the unwatchable signal)
       watchdogSampleRss: async () => {

@@ -164,6 +164,11 @@ export function adaptTeamEvent(
         // Event dropped; cost stream will have a gap but trace corruption avoided
         return { type: "coms", name: "cost_skipped_nonfinite", payloadJson: '{"note":"costMicros non-finite, event skipped"}' };
       }
+      // Guard unsafe integer values (>MAX_SAFE_INTEGER micros, ~$9B) — treat as malformed
+      if (!Number.isSafeInteger(costMicros)) {
+        // Event dropped; cost stream will have a gap but trace corruption avoided
+        return { type: "coms", name: "cost_skipped_unsafe", payloadJson: '{"note":"costMicros exceeds safe integer range, event skipped"}' };
+      }
       return {
         type: "cost",
         name: "cost",
