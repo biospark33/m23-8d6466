@@ -27,6 +27,7 @@ import {
   MAX_MAX_DURATION_MS,
   type PhaseParams,
   type PhaseRecord,
+  type PhaseSubTimings,
   type PhaseSpec,
   type RunContext,
   type RunOutcome,
@@ -303,12 +304,65 @@ export class Run {
             ? (controller.signal.reason ?? new Error(`phase '${safeName}' was aborted`))
             : undefined;
 
+    // DF1.6 Observability Contract: a clean body whose value carries
+    // stream-health counters and/or dispatch sub-timings (as the
+    // dispatch_task phase body's value does) gets them merged onto the phase
+    // record. Additive: values without those fields are recorded unchanged.
+    const metricsValue =
+      clean && outcome !== "unsettled" && "value" in outcome && typeof outcome.value === "object" && outcome.value !== null
+        ? (outcome.value as unknown)
+        : null;
+    const metrics =
+      metricsValue !== null && typeof metricsValue === "object"
+        ? (metricsValue as {
+            malformedLines?: number;
+            droppedOversizeLines?: number;
+            dispatchSubTimings?: Partial<PhaseSubTimings>;
+          })
+        : {};
     const settledRecord: PhaseRecord = {
       ...record,
       updatedAt: new Date().toISOString(),
       durationMs: Math.round(bodyMs),
       ...(error === undefined ? {} : { error: toErrorShape(error) }),
+      ...(metrics.malformedLines !== undefined &&
+        Number.isFinite(metrics.malformedLines) &&
+        metrics.malformedLines >= 0 &&
+        Number.isInteger(metrics.malformedLines)
+        ? { malformedLines: metrics.malformedLines }
+        : {}),
+      ...(metrics.droppedOversizeLines !== undefined &&
+        Number.isFinite(metrics.droppedOversizeLines) &&
+        metrics.droppedOversizeLines >= 0 &&
+        Number.isInteger(metrics.droppedOversizeLines)
+        ? { droppedOversizeLines: metrics.droppedOversizeLines }
+        : {}),
       subTimings: {
+        // Body-supplied dispatch timings first — the engine-owned trio below
+        // is authoritative and cannot be clobbered by a body value that
+        // (buggily) repeats one of these keys. Whitelist only the four documented
+        // PhaseSubTimings keys (mulch_prime_ms, box_setup_ms, team_execution_ms,
+        // gate_validation_ms); unknown keys are dropped rather than spread.
+        ...(metrics.dispatchSubTimings?.mulch_prime_ms !== undefined &&
+        Number.isFinite(metrics.dispatchSubTimings.mulch_prime_ms) &&
+        metrics.dispatchSubTimings.mulch_prime_ms >= 0
+          ? { mulch_prime_ms: metrics.dispatchSubTimings.mulch_prime_ms }
+          : {}),
+        ...(metrics.dispatchSubTimings?.box_setup_ms !== undefined &&
+        Number.isFinite(metrics.dispatchSubTimings.box_setup_ms) &&
+        metrics.dispatchSubTimings.box_setup_ms >= 0
+          ? { box_setup_ms: metrics.dispatchSubTimings.box_setup_ms }
+          : {}),
+        ...(metrics.dispatchSubTimings?.team_execution_ms !== undefined &&
+        Number.isFinite(metrics.dispatchSubTimings.team_execution_ms) &&
+        metrics.dispatchSubTimings.team_execution_ms >= 0
+          ? { team_execution_ms: metrics.dispatchSubTimings.team_execution_ms }
+          : {}),
+        ...(metrics.dispatchSubTimings?.gate_validation_ms !== undefined &&
+        Number.isFinite(metrics.dispatchSubTimings.gate_validation_ms) &&
+        metrics.dispatchSubTimings.gate_validation_ms >= 0
+          ? { gate_validation_ms: metrics.dispatchSubTimings.gate_validation_ms }
+          : {}),
         // `this.index` was incremented above, so `1` identifies the first phase —
         // the only one whose wall-clock includes the manifest load.
         manifest_load_ms: Math.round(this.index === 1 ? this.manifestLoadMs : 0),

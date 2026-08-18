@@ -1,0 +1,9 @@
+#!/bin/bash
+# Fake `bun` for the forceLocalRunner test: with QDS_TEAM_RUNNER=local,
+# runTeamManifest spawns `bun <team-lead-driver.ts>`. This shim reports the
+# QDS_TEAM_RUNNER value it RECEIVED back through a coms_init_error event, so
+# the test can assert on the child env actually used at spawn. Bash on
+# purpose: a `#!/usr/bin/env bun` shebang would resolve `bun` back to this
+# shim (local-bin is first on PATH) and recurse.
+echo "{\"type\":\"coms_init_error\",\"reason\":\"runner=${QDS_TEAM_RUNNER:-unset}\"}"
+exit 1

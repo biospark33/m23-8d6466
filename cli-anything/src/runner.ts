@@ -6,7 +6,6 @@ import { ComsLogCollector } from "./coms-log.ts";
 import {
   cleanEnv,
   diag,
-  type EnvMap,
   logEnvKeys,
   MAX_LOGGED_ENV_KEYS,
   mergeEnv,
@@ -16,10 +15,18 @@ import { parseManifestFile, parseTeamManifestFile } from "./manifest.ts";
 import {
   buildMergedOutput,
   createPending,
+  MAX_PARTIAL_OUTPUT_CHARS,
+  MAX_SUFFIX_LENGTH,
   redactDeep,
+  TRUNCATION_SUFFIX,
   unionChangedFiles,
   validateWorkerOutput,
 } from "./merger.ts";
+import {
+  startRssWatchdog,
+  type WatchdogHandle,
+  WATCHDOG_GRACE_MS,
+} from "./watchdog.ts";
 import {
   capExcerpt,
   capProbe,
@@ -32,6 +39,7 @@ import {
   parseTeamEventLine,
   splitRoleModel,
   writeArtifactAtomic,
+  type TeamEvent,
 } from "./team-events.ts";
 import type {
   ExitClass,
@@ -39,7 +47,6 @@ import type {
   Manifest,
   MergedError,
   MergedOutput,
-  TeamManifest,
   Waiver,
   WorkerOutput,
 } from "./types.ts";
@@ -73,8 +80,12 @@ export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
 const PROBE_KEY = "QDS_PROBE=";
 
-/** Watchdog grace after a kill before force-settling (grandchild stdout-hold). */
-export const WATCHDOG_GRACE_MS = 5000;
+/**
+ * Watchdog grace after a kill before force-settling (grandchild stdout-hold).
+ * Single source: watchdog.ts (re-exported so existing `from "./runner.ts"`
+ * imports keep working).
+ */
+export { WATCHDOG_GRACE_MS };
 
 /**
  * Kill a whole child tree: process group on POSIX (SIGKILL, not
@@ -390,7 +401,14 @@ export async function runManifest(
         // Bound the decode to the remaining capacity: a single oversized
         // chunk is never fully materialized past the cap. The final cap is
         // re-applied in settle (capExcerpt), which is the real invariant.
-        stdout += decoder.write(d.subarray(0, remaining));
+        const decoded = decoder.write(d.subarray(0, remaining));
+        // R7: Cut at code-point boundary to avoid splitting surrogate pairs.
+        // Walk back from remaining to avoid orphaned high surrogate.
+        let cutPoint = remaining;
+        while (cutPoint > 0 && decoded.charCodeAt(cutPoint - 1) >= 0xD800 && decoded.charCodeAt(cutPoint - 1) <= 0xDBFF) {
+          cutPoint--;
+        }
+        stdout += decoded.slice(0, cutPoint);
         truncated = true;
       } else {
         stdout += decoder.write(d);
@@ -412,9 +430,15 @@ export async function runManifest(
     });
 
     child.on("error", (err: NodeJS.ErrnoException) => {
-      // Skip decoder.end() once truncated: after a mid-sequence cut it would
-      // append U+FFFD. The cap is re-applied in settle either way.
-      if (!truncated) stdout += decoder.end();
+      // Flush the decoder even when truncated — append the final partial line
+      // within the remaining cap budget (or drop cleanly). Keeps partial
+      // output strictly ≤ cap.
+      if (!truncated) {
+        stdout += decoder.end();
+      } else {
+        // R7: Truncated path — skip decoder.end() to avoid U+FFFD on cut multibyte.
+        // Drop the partial cleanly; the truncation marker signals incompleteness.
+      }
       settle({
         exit_class: "spawn_error",
         stdout_excerpt: stdout,
@@ -435,9 +459,15 @@ export async function runManifest(
     });
 
     child.on("close", (code, signal) => {
-      // Skip decoder.end() once truncated: after a mid-sequence cut it would
-      // append U+FFFD. The cap is re-applied in settle either way.
-      if (!truncated) stdout += decoder.end();
+      // Flush the decoder even when truncated — append the final partial line
+      // within the remaining cap budget (or drop cleanly). Keeps partial
+      // output strictly ≤ cap.
+      if (!truncated) {
+        stdout += decoder.end();
+      } else {
+        // R7: Truncated path — skip decoder.end() to avoid U+FFFD on cut multibyte.
+        // Drop the partial cleanly; the truncation marker signals incompleteness.
+      }
       const classification = classifyExit(timedOut, code, signal);
       settle({
         exit_class: classification.exit_class,
@@ -525,6 +555,77 @@ export interface TeamRunOptions {
   graceMs?: number;
   /** Directory for lead-failure worker partials. Default `<cwd>/artifacts`. */
   artifactsDir?: string;
+  /**
+   * DF1.6 T5: Effective ceiling in microdollars (µ$). When provided,
+   * the child harness cap becomes `budgetCapUsd = effectiveCeilingMicros / 1e6`,
+   * clamped to the schema maximum (10 USD). Never raises the cap above the ceiling.
+   * Absent → use existing budgetCapUsd path (S1 default). This is the DF2.7 boundary
+   * where the tier-3 harness cap is raised to match the outer guard ceiling.
+   */
+  effectiveCeilingMicros?: number;
+  /**
+   * DF1.6 T5: Force QDS_TEAM_RUNNER=local in the child environment.
+   * The caller (phase layer) enforces AC5 before calling runTeamManifest,
+   * so this is minimal: when true, we construct the child env with QDS_TEAM_RUNNER=local
+   * so buildTeamSpawn selects the local driver regardless of parent env.
+   */
+  forceLocalRunner?: boolean;
+  /**
+   * DF1.6 T7: per-line observer for the dispatch_task phase. Called once per
+   * surviving stdout line with the parsed TeamEvent (or null when the parser
+   * rejected the line — malformed), and once per line DROPPED at the byte cap
+   * with a null event and droppedOversize: true (a dropped line never reaches
+   * the parser, so it is never malformed). Purely additive: the internal
+   * event loop is unchanged.
+   */
+  onTeamEvent?: (
+    event: TeamEvent | null,
+    meta: { droppedOversize: boolean },
+  ) => void;
+  /**
+   * DF1.6 T7/R11: raw exit facts for the phase layer's precedence classification
+   * (story Technical Notes: how the process died > envelope > exit code).
+   * Fired EXACTLY ONCE, from settle() — covering `close`, the wall-clock and
+   * budget force-settles, and the stdout/spawn error paths (a force-settled
+   * run whose `close` never arrives still reports facts). exitCode/termSignal
+   * are the best-known values at settle time (null when the child never
+   * reported an exit). killOrigin reports the kill source (R11 shared contract):
+   *   - "watchdog": RSS watchdog escalation
+   *   - "budget": budget-guard kill
+   *   - "wallClock": wall-clock timeout kill
+   *   - "requestedShutdown": abortSignal (parent cancellation)
+   *   - null: natural exit or unknown
+   * The engine-side classifyRun maps watchdog|budget|wallClock → overflow,
+   * userCancel|requestedShutdown → logic, unknown → transient.
+   * comsInitError is the parsed reason or null. The callback is invoked
+   * inside a try/catch: a throwing observer must not hang the run.
+   */
+  onRunFacts?: (facts: RunFacts) => void;
+  /**
+   * DF1.6 T7: parent-side cancellation. When the signal fires (or has already
+   * fired), the whole child tree is killed and the run settles transient —
+   * a phase abort must not leave the team running until its own wall-clock cap.
+   */
+  abortSignal?: AbortSignal;
+  /**
+   * Test seam: overrides RSS sampling in the watchdog. Returns RSS in bytes,
+   * or null if sampling fails. Only used for regression tests of overflow
+   * classification and killOrigin attribution.
+   */
+  watchdogSampleRss?: () => Promise<number | null>;
+}
+
+/**
+ * Raw exit facts surfaced by onRunFacts (R11 shared contract).
+ *
+ * Owns the killOrigin union — consumers (tests, the phase layer) derive from
+ * this type instead of restating the literal union and drifting on widen.
+ */
+export interface RunFacts {
+  exitCode: number | null;
+  termSignal: string | null;
+  killOrigin: "watchdog" | "budget" | "wallClock" | "requestedShutdown" | null;
+  comsInitError: string | null;
 }
 
 /**
@@ -550,7 +651,35 @@ export async function runTeamManifest(
   );
   const env = mergeEnv(parent, manifest.env);
 
-  const budgetCapUsd = opts.budgetCapUsd ?? manifest.team.budgetCapUsd;
+  // DF1.6 T5: Apply effective ceiling to budgetCapUsd
+  // When effectiveCeilingMicros is provided (and finite + positive), the
+  // ceiling can only ever LOWER a cap, never raise one. The resulting cap
+  // must be min(existing explicit cap, ceiling-derived cap, schema max).
+  // A zero/negative/NaN ceiling is invalid at this boundary: zero would arm
+  // the kill on the first cost poll (0 >= 0.9*0) and NaN would disable it
+  // for the whole run (cumulative >= NaN is always false) — both fall back
+  // to the manifest cap. This is the DF2.7 boundary where the tier-3 harness
+  // cap matches the outer guard. Schema max derived from TeamManifestSchema.
+  let budgetCapUsd = opts.budgetCapUsd ?? manifest.team.budgetCapUsd;
+  if (
+    opts.effectiveCeilingMicros !== undefined &&
+    Number.isFinite(opts.effectiveCeilingMicros) &&
+    opts.effectiveCeilingMicros > 0
+  ) {
+    const ceilingUsd = opts.effectiveCeilingMicros / 1e6;
+    // Ceiling can only ever LOWER a cap, never raise one. Derive schema max
+    // from TeamManifestSchema (10 USD) — near-zero ceilings then min down naturally.
+    const SCHEMA_MAX_USD = 10;
+    budgetCapUsd = Math.min(budgetCapUsd, ceilingUsd, SCHEMA_MAX_USD);
+  }
+
+  // DF1.6 T5: Force QDS_TEAM_RUNNER=local when requested
+  // AC5 is enforced by the caller (phase layer) before calling runTeamManifest,
+  // but forceLocalRunner ensures the child env selects the local driver.
+  // Never mutate process.env — only the child env.
+  if (opts.forceLocalRunner) {
+    env.QDS_TEAM_RUNNER = "local";
+  }
   const killThresholdUsd = budgetKillThresholdUsd(budgetCapUsd);
   const wallClockCapMs = opts.wallClockCapMs ?? manifest.team.wallClockCapMs;
   const comsAwaitTimeoutMs =
@@ -605,6 +734,9 @@ export async function runTeamManifest(
     let mergedResult: Record<string, unknown> | null = null;
     let comsInitError: string | null = null;
     let cumulativeCostUsd = 0;
+    // DF1.6 R11: track kill origin for onRunFacts shared contract.
+    // Set to "budget" | "wallClock" | "requestedShutdown" | null (watchdog read from handle).
+    let budgetOrWallKillOrigin: "budget" | "wallClock" | "requestedShutdown" | null = null;
     // DF2.7 / INV-COST-5: a `cost` event carrying unpricedTurns > 0 means its
     // totals are KNOWN-PARTIAL — an unmeasured turn is never priced at $0. The
     // cumulative total below is therefore under-counted, so every path that
@@ -616,6 +748,24 @@ export async function runTeamManifest(
     let settled = false;
     let child: ChildProcess | null = null;
     const timers: Array<ReturnType<typeof setTimeout>> = [];
+    // Best-known exit facts, updated by `exit`/`close`; emitted once from
+    // settle() so force-settled runs (close never arrived) still report them.
+    let lastExitCode: number | null = null;
+    let lastTermSignal: NodeJS.Signals | null = null;
+
+    // DF1.6 T1/R4: Collect partial output for failure paths (capped at 10KB).
+    // Leave headroom for truncation suffix so the marker always appears when cut.
+    // Single source of truth: MAX_PARTIAL_OUTPUT_CHARS from merger.ts.
+    let partialOutputBuffer = "";
+    // R9: full decoded char count offered to the buffer. Exceeds the buffer
+    // length exactly when content was DISCARDED — past the cap, or a code unit
+    // omitted by the surrogate-safe cut. That gap is what collectPartialOutput
+    // marks with the truncation suffix.
+    let partialOutputSeenChars = 0;
+    const PARTIAL_OUTPUT_CAP = MAX_PARTIAL_OUTPUT_CHARS - MAX_SUFFIX_LENGTH;
+
+    // DF1.6 T4: RSS watchdog handle (started after spawn, stopped on settle)
+    let watchdog: WatchdogHandle | null = null;
 
     // Per-worker single-settle await slots (P0.3-S-H5): worker_output settles
     // "response", the per-message timer settles "timeout" — first wins.
@@ -635,6 +785,44 @@ export async function runTeamManifest(
       timers.push(t);
     }
 
+    // DF1.6 T1/R9: Append decoded stdout to the partial-output buffer, capped
+    // at PARTIAL_OUTPUT_CAP with a surrogate-safe cut (no split pair at the
+    // seam). Everything past the cap is dropped here but COUNTED in
+    // partialOutputSeenChars so collectPartialOutput can mark the cut.
+    function appendPartialOutput(decoded: string): void {
+      partialOutputSeenChars += decoded.length;
+      if (partialOutputBuffer.length >= PARTIAL_OUTPUT_CAP) return;
+      const remaining = PARTIAL_OUTPUT_CAP - partialOutputBuffer.length;
+      let toAppend = decoded;
+      if (toAppend.length > remaining) {
+        // Walk back from the cut so a high surrogate is never orphaned (R7).
+        let cutPoint = remaining;
+        while (
+          cutPoint > 0 &&
+          toAppend.charCodeAt(cutPoint - 1) >= 0xD800 &&
+          toAppend.charCodeAt(cutPoint - 1) <= 0xDBFF
+        ) {
+          cutPoint--;
+        }
+        toAppend = toAppend.slice(0, cutPoint);
+      }
+      partialOutputBuffer += toAppend;
+    }
+
+    // DF1.6 T1: Return collected partial output for failure paths. When
+    // nothing was discarded the buffer is returned verbatim; when content was
+    // cut, append the shared truncation marker. Buffer ≤ MAX minus
+    // MAX_SUFFIX_LENGTH and the clamped suffix ≤ MAX_SUFFIX_LENGTH, so the
+    // result can never exceed MAX_PARTIAL_OUTPUT_CHARS (merger's own
+    // truncateWithSuffix then passes it through untouched).
+    function collectPartialOutput(): string {
+      if (partialOutputSeenChars <= partialOutputBuffer.length) {
+        return partialOutputBuffer;
+      }
+      const total = Math.min(partialOutputSeenChars, 999_999_999);
+      return partialOutputBuffer + TRUNCATION_SUFFIX.replace("N", String(total));
+    }
+
     function settle(
       exitStatus: MergedOutput["exitStatus"],
       partial: boolean,
@@ -643,8 +831,36 @@ export async function runTeamManifest(
     ): void {
       if (settled) return;
       settled = true;
+      // R12: a run the parent aborted must never resolve as success — a child
+      // that exits 0 while honoring the kill signal would otherwise classify
+      // clean. Budget/wall-clock/watchdog keep their "overflow" classification
+      // (their precedence predates the abort); every other status downgrades
+      // to transient (retryable), matching abortTeam's own settle path.
+      // (transient already keeps changedFiles collection and partialOutput
+      // reporting, so only the resolve payload needs the swap.)
+      const abortDowngraded = abortRequested && exitStatus !== "overflow";
       for (const t of timers) clearTimeout(t);
+      // DF1.6 T4/R11: Read killOrigin BEFORE stopping watchdog (stop() clears handle ref).
+      // Precedence: watchdog > budget/wallClock/requestedShutdown > null.
+      const watchdogKillOrigin = watchdog !== null && watchdog.killOrigin === "watchdog" ? "watchdog" : null;
+      if (watchdog !== null) {
+        watchdog.stop();
+        watchdog = null;
+      }
       removeSignalHandlers();
+      // DF1.6 T7/R11: exit facts exactly once per run, from HERE — every settle
+      // path (close, force-settle, stream/spawn error) reports them. A
+      // throwing observer must not prevent the resolve below.
+      try {
+        opts.onRunFacts?.({
+          exitCode: lastExitCode,
+          termSignal: lastTermSignal,
+          killOrigin: watchdogKillOrigin ?? budgetOrWallKillOrigin ?? null,
+          comsInitError: comsInitError ?? null,
+        });
+      } catch (err) {
+        console.error("cli-anything: onRunFacts callback threw", err);
+      }
 
       const validated: WorkerOutput[] = [];
       for (const [agentId, raw] of workerOutputs) {
@@ -661,25 +877,50 @@ export async function runTeamManifest(
 
       resolve(
         buildMergedOutput({
-          exitStatus,
+          exitStatus: abortDowngraded ? "transient" : exitStatus,
           partial,
           result: mergedResult ?? {},
           agentOutputs,
           changedFiles,
           comsLog: comsLog.entries,
-          durationMs: Date.now() - startedAt,
+          durationMs: Math.max(0, Date.now() - startedAt),
           waivers,
-          error,
+          error: abortDowngraded
+            ? { reason: "transient", message: "run aborted by parent signal" }
+            : error,
           redact,
+          // DF1.6 T1: New required fields with defaults for runner path
+          testResults: { passed: 0, failed: 0 },
+          testsExecuted: false,
+          summary:
+            typeof mergedResult?.summary === "string"
+              ? (mergedResult as { summary: string }).summary
+              : "",
+          mulchPrimed: false,
+          mulchPrimeError: null,
+          artifacts: [],
+          // DF1.6 R2: collect partialOutput on ALL non-success exits (exitStatus !== "success").
+          // null is reserved for success per contract; failure paths with complete envelope
+          // (logic, lead_failure, partial=false) must report partial output, not null.
+          partialOutput: exitStatus === "success" ? null : collectPartialOutput(),
         }),
       );
     }
+
+    // Registered abort listener (assigned when opts.abortSignal wires one up);
+    // removed by removeSignalHandlers so a never-fired listener cannot linger
+    // on a long-lived signal after the run settles.
+    let abortListener: (() => void) | null = null;
 
     function removeSignalHandlers(): void {
       process.removeListener("SIGINT", onSigint);
       process.removeListener("SIGTERM", onSigterm);
       if (process.platform !== "win32") {
         process.removeListener("SIGHUP", onSighup);
+      }
+      if (abortListener !== null) {
+        opts.abortSignal?.removeEventListener("abort", abortListener);
+        abortListener = null;
       }
     }
 
@@ -705,12 +946,85 @@ export async function runTeamManifest(
       process.on("SIGHUP", onSighup);
     }
 
+    // DF1.6 T7/R5/R6/R11: parent-side cancellation — wire BEFORE spawn (R6).
+    // Pre-aborted signals skip team spawn entirely; watchdog/manifest never start.
+    // abortTeam is idempotent via teamKilled flag (R5).
+    let teamKilled = false;
+    // R12: set in abortTeam BEFORE the kill — settle() reads it to downgrade a
+    // clean child exit (code 0 while honoring the kill signal) away from
+    // "success". Overflow (budget/wall/watchdog) keeps its classification.
+    let abortRequested = false;
+    const abortTeam = (): void => {
+      if (settled || teamKilled) return;
+      teamKilled = true;
+      abortRequested = true;
+      budgetOrWallKillOrigin = "requestedShutdown"; // R11: report abort kill origin
+      killTree(child);
+      arm(WATCHDOG_GRACE_MS, () => {
+        settle("transient", false, {
+          reason: "transient",
+          message: "run aborted by parent signal",
+        });
+      });
+    };
+    if (opts.abortSignal !== undefined) {
+      // R6: check before spawn — pre-aborted signals skip team spawn entirely.
+      if (opts.abortSignal.aborted) {
+        abortTeam();
+        // No child spawned, no watchdog started — settle path handles graceful exit.
+        return;
+      }
+      const optsSignal = opts.abortSignal; // Capture for closure
+      optsSignal.addEventListener("abort", abortTeam, { once: true });
+      abortListener = abortTeam;
+      // Re-check after addEventListener: an abort between the check above
+      // and addEventListener would have been missed. If already aborted,
+      // invoke synchronously (the listener won't fire again due to once:true)
+      // and STOP — spawning a team the parent already cancelled would race
+      // the armed settle against the child's own exit handling.
+      if (optsSignal.aborted) {
+        abortTeam();
+        return;
+      }
+    }
+
     try {
       child = spawn(file, argv, {
         env,
         stdio: ["ignore", "pipe", "ignore"],
         detached: process.platform !== "win32",
       });
+
+      // DF1.6 T4: Start RSS watchdog after successful spawn
+      // The child is the process group leader (detached:true on POSIX)
+      // pgidOrGroup = child.pid for process group sampling. Threshold/poll/
+      // grace come from startRssWatchdog's defaults (4 GB / 200 ms / 5 s).
+      if (process.platform !== "win32" && child.pid !== undefined) {
+        watchdog = startRssWatchdog({
+          child,
+          pgidOrGroup: child.pid,
+          onEscalate: (_info) => {
+            // Attribution is read from handle.killOrigin at classification time
+            // (set synchronously by startRssWatchdog before this callback runs).
+            // Cleared only if group already gone (group-gone catch in watchdog.ts).
+          },
+          onUnwatchable: (reason) => {
+            // Log but don't fail — watchdog becomes inactive
+            console.error(`cli-anything: RSS watchdog unwatchable: ${reason}`);
+          },
+          log: (msg) => {
+            // Use console.error for watchdog diagnostics (like existing cost warnings)
+            console.error(msg);
+          },
+          sampleRss: opts.watchdogSampleRss,
+        });
+      } else {
+        // DF1.6 R10: log once when watchdog is skipped (win32 or undefined pid).
+        // watchdog never started → its own log never runs, so we log here.
+        console.error(
+          `cli-anything: RSS watchdog skipped — ${process.platform === "win32" ? "win32 platform" : "child pid undefined"}`,
+        );
+      }
     } catch (err) {
       const code =
         err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
@@ -725,6 +1039,7 @@ export async function runTeamManifest(
     arm(wallClockCapMs, () => {
       if (settled) return;
       wallTimedOut = true;
+      budgetOrWallKillOrigin = "wallClock"; // R11: report wall-clock kill origin
       killTree(child);
       // Force-settle if `close` never arrives (grandchild stdout-hold).
       arm(WATCHDOG_GRACE_MS, () => {
@@ -746,6 +1061,7 @@ export async function runTeamManifest(
     function onBudgetThreshold(): void {
       if (budgetKilled || settled) return;
       budgetKilled = true;
+      budgetOrWallKillOrigin = "budget"; // R11: report budget kill origin
       // In-flight requests get `graceMs` to complete, then the tree dies
       // (process-group SIGKILL via the hardened primitive).
       arm(graceMs, () => {
@@ -773,7 +1089,20 @@ export async function runTeamManifest(
     let teamStdoutCapped = false;
     function processLine(line: string): void {
       {
+        // DF1.6 R3: gate onTeamEvent on settled flag — drop lines after settle.
+        // A grandchild holding stdout pipe open → force-finalize resolves, but later
+        // lines still parse + callback. Consumer state must not mutate post-resolution.
+        if (settled) return;
         const event = parseTeamEventLine(line);
+        // DF1.6 T7: observe every surviving line (null = parser rejection).
+        // Observer failures must not take down the internal event loop — a
+        // throwing callback inside a stream `data` handler is an uncaught
+        // exception for the whole process.
+        try {
+          opts.onTeamEvent?.(event, { droppedOversize: false });
+        } catch (err) {
+          console.error("cli-anything: onTeamEvent callback threw", err);
+        }
         if (event !== null) {
           switch (event.kind) {
             case "cost": {
@@ -832,19 +1161,22 @@ export async function runTeamManifest(
     }
 
     child.stdout!.on("data", (chunk: Buffer) => {
-      // F15 (per-line cap): bound the CURRENT unterminated line, not cumulative
+      // F15 (per-line cap): bound each newline-delimited LINE, not cumulative
       // run output. A long legitimate run emits many small NDJSON lines that
-      // would exhaust a cumulative 1 MiB budget and silently drop every later
+      // would exhaust a cumulative budget and silently drop every later
       // event — including `merged`, misclassifying a clean run as
-      // lead_failure/logic. An oversized line is discarded through its next
-      // newline, then parsing resumes.
-      let bytes: Buffer = chunk;
+      // lead_failure/logic. The chunk is scanned by PHYSICAL newline
+      // boundaries and the cap is judged independently per line: small lines
+      // coalesced into one chunk are never falsely dropped, and each oversized
+      // line emits exactly one droppedOversize event and is discarded through
+      // its terminating newline.
+      let rest: Buffer = chunk;
       // Resume after an oversized line: drop through its terminating newline,
       // which may sit inside this same chunk, then parse the tail.
       if (teamStdoutCapped) {
-        const nl = bytes.indexOf(0x0a);
+        const nl = rest.indexOf(0x0a);
         if (nl === -1) return;
-        bytes = bytes.subarray(nl + 1);
+        rest = rest.subarray(nl + 1);
         teamStdoutCapped = false;
         teamStdoutBytes = 0;
         lineBuffer = "";
@@ -852,43 +1184,60 @@ export async function runTeamManifest(
         // line was still being decoded, so they cannot prefix the resumed tail.
         decoder = new StringDecoder("utf8");
       }
-      // Count raw Buffer bytes BEFORE decoding: decoded.length is UTF-16 code
-      // units and undercounts multibyte UTF-8 (up to 4x), so a line of 3-byte
-      // chars could slip past the cap and grow lineBuffer without bound.
-      if (teamStdoutBytes + bytes.length > teamStdoutCapBytes) {
-        console.error(
-          `cli-anything: lead stdout line exceeded ${teamStdoutCapBytes} byte cap — line dropped, parsing resumes after next newline`,
-        );
-        lineBuffer = "";
-        teamStdoutBytes = 0;
-        // Reset the decoder: earlier chunks of THIS oversized line may have
-        // left a partial multibyte char buffered. Dropping it here stops those
-        // stale bytes from corrupting the first line parsed after resume.
-        decoder = new StringDecoder("utf8");
-        // Discard the rest of this oversized line through its next newline. It
-        // may be later in THIS chunk (drop in place + decode only the tail); if
-        // it spans into the next chunk, stay in discard-mode until it lands.
-        const nl = bytes.indexOf(0x0a);
-        if (nl === -1) {
-          teamStdoutCapped = true;
-          return;
+      while (rest.length > 0) {
+        const nl = rest.indexOf(0x0a);
+        const segEnd = nl === -1 ? rest.length : nl + 1;
+        const seg = rest.subarray(0, segEnd);
+        rest = rest.subarray(segEnd);
+        // Count raw Buffer bytes BEFORE decoding: decoded.length is UTF-16
+        // code units and undercounts multibyte UTF-8 (up to 4x), so a line of
+        // 3-byte chars could slip past the cap and grow lineBuffer unbounded.
+        if (teamStdoutBytes + seg.length > teamStdoutCapBytes) {
+          console.error(
+            `cli-anything: lead stdout line exceeded ${teamStdoutCapBytes} byte cap — line dropped, parsing resumes after next newline`,
+          );
+          // DF1.6 T7 (AC2): a cap-dropped line never reaches the parser — count
+          // it as droppedOversize, never as malformed.
+          try {
+            opts.onTeamEvent?.(null, { droppedOversize: true });
+          } catch (err) {
+            console.error("cli-anything: onTeamEvent callback threw", err);
+          }
+          lineBuffer = "";
+          teamStdoutBytes = 0;
+          // Reset the decoder: earlier chunks of THIS oversized line may have
+          // left a partial multibyte char buffered. Dropping it here stops
+          // those stale bytes from corrupting the first line parsed after
+          // resume.
+          decoder = new StringDecoder("utf8");
+          if (nl === -1) {
+            // Oversized line continues into later chunks — stay in discard
+            // mode until its newline lands (no second event for this line).
+            teamStdoutCapped = true;
+            return;
+          }
+          // The segment ended this line — following segments are fresh lines.
+          continue;
         }
-        bytes = bytes.subarray(nl + 1);
-      }
-      // Decode exactly once: the full chunk in the normal path, or only the
-      // tail that survived a discarded oversized line.
-      if (bytes.length > 0) {
-        lineBuffer += decoder.write(bytes);
-        teamStdoutBytes += bytes.length;
+        const decoded = decoder.write(seg);
+        lineBuffer += decoded;
+        teamStdoutBytes += seg.length;
+        if (nl !== -1) {
+          // seg ended a line: the counter starts fresh for the next segment.
+          teamStdoutBytes = 0;
+        }
+        // DF1.6 T1/R9: collect partial output (capped, surrogate-safe —
+        // see appendPartialOutput).
+        appendPartialOutput(decoded);
       }
       // Consume complete lines; reset the per-line byte counter for whatever
       // partial line remains after each newline.
-      let nl = lineBuffer.indexOf("\n");
-      while (nl !== -1) {
-        processLine(lineBuffer.slice(0, nl));
-        lineBuffer = lineBuffer.slice(nl + 1);
+      let nl2 = lineBuffer.indexOf("\n");
+      while (nl2 !== -1) {
+        processLine(lineBuffer.slice(0, nl2));
+        lineBuffer = lineBuffer.slice(nl2 + 1);
         teamStdoutBytes = Buffer.byteLength(lineBuffer, "utf8");
-        nl = lineBuffer.indexOf("\n");
+        nl2 = lineBuffer.indexOf("\n");
       }
     });
 
@@ -926,7 +1275,11 @@ export async function runTeamManifest(
         // EOF mid-oversized-line: the decoder tail belongs to the discarded
         // line, so drop it instead of parsing a fragment.
         if (!teamStdoutCapped) {
-          lineBuffer += decoder.end();
+          const tail = decoder.end();
+          lineBuffer += tail;
+          // R9 parity: the decoder tail was never offered to the partial-output
+          // collector — count it so a cut at exactly EOF is still marked.
+          appendPartialOutput(tail);
           if (lineBuffer.length > 0) {
             processLine(lineBuffer);
             lineBuffer = "";
@@ -934,13 +1287,16 @@ export async function runTeamManifest(
         }
 
         // Overflow paths win regardless of the raw classification (CC-1
-        // precedence: budget/wall-clock kill → overflow regardless of signal).
-        if (budgetKilled || wallTimedOut) {
+        // precedence: budget/wall-clock/watchdog kill → overflow regardless of signal).
+        // DF1.6 T4: watchdog kill also maps to overflow (precedence step 1)
+        if (budgetKilled || wallTimedOut || (watchdog !== null && watchdog.killOrigin === "watchdog")) {
           settle("overflow", true, {
             reason: "overflow",
             message: budgetKilled
               ? `budget kill threshold $${killThresholdUsd.toFixed(4)} reached (cap $${budgetCapUsd.toFixed(2)})`
-              : `wall-clock cap ${wallClockCapMs} ms exceeded`,
+              : wallTimedOut
+                ? `wall-clock cap ${wallClockCapMs} ms exceeded`
+                : "RSS watchdog 4 GB threshold exceeded",
             details: { cumulativeCostUsd, costUnpriced },
           });
           return;
@@ -1052,6 +1408,8 @@ export async function runTeamManifest(
     // cap. Mirror runManifest: on `exit`, arm an unref'd watchdog that
     // force-finalizes after WATCHDOG_GRACE_MS if `close` hasn't arrived.
     child.on("exit", (code, signal) => {
+      lastExitCode = code;
+      lastTermSignal = signal;
       if (settled || closed) return;
       arm(WATCHDOG_GRACE_MS, () => {
         if (!closed) finalize(code, signal);
@@ -1060,6 +1418,8 @@ export async function runTeamManifest(
 
     child.on("close", (code, signal) => {
       closed = true;
+      lastExitCode = code;
+      lastTermSignal = signal;
       finalize(code, signal);
     });
   });

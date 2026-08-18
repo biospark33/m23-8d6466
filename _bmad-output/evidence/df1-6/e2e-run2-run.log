@@ -1,0 +1,14 @@
+cli-anything: ANTHROPIC_API_KEY: unset
+cli-anything: OPENROUTER_API_KEY: set
+{"requestId":"3ffdf79e-256b-4174-9cd1-a5f207759146","pipelineId":"df16-e2e","phase":"dispatch-fix","kind":"dispatch_task","timestamp":"2026-08-17T20:52:22.339Z","durationMs":73303,"status":"success","exitStatus":"success","subTimings":{"manifest_load_ms":22,"phase_body_ms":73303,"journal_write_ms":3,"mulch_prime_ms":0,"box_setup_ms":0,"team_execution_ms":52943,"gate_validation_ms":0}}
+bun test v1.2.22 (6bafe260)
+
+tests/calc.test.ts:
+(pass) add sums two numbers
+
+ 1 pass
+ 0 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [9.00ms]
+{"requestId":"3ffdf79e-256b-4174-9cd1-a5f207759146","pipelineId":"df16-e2e","phase":"verify-suite","kind":"code","timestamp":"2026-08-17T20:52:22.360Z","durationMs":18,"status":"success","exitStatus":"success","subTimings":{"manifest_load_ms":0,"phase_body_ms":18,"journal_write_ms":2}}
+RUN d27b32d2-cbcc-4d4e-a0bf-a3c0c29e9b51 pipeline=df16-e2e ok=true accepted=true phases=2 completedAt=2026-08-17T20:52:22.361Z

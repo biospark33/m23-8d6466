@@ -143,11 +143,14 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
 
   test("no float-dollar field exists anywhere inside src/phase-engine", () => {
     const offenders: string[] = [];
+    const adapterPath = path.join(engineRoot, "phases", "team-event-adapter.ts");
     const walk = (dir: string): void => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
         else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
+          // Adapter is exempt: contains ONE sanctioned USD→µ$ conversion at DF1.3 boundary
+          if (full === adapterPath) continue;
           const code = codeOnly(full);
           if (/costUsd|costCents|usd:\s|dollars/.test(code)) offenders.push(full);
         }
@@ -174,6 +177,15 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
     };
     walk(engineRoot);
     expect(others).toEqual([]);
+  });
+
+  test("exactly one USD→µ$ MULTIPLICATION exists in the engine, in team-event-adapter.ts (DF1.3 boundary)", () => {
+    const adapterPath = path.join(engineRoot, "phases", "team-event-adapter.ts");
+    const adapter = codeOnly(adapterPath);
+    // Exactly ONE costUsd reference (the sanctioned inbound conversion site)
+    expect((adapter.match(/costUsd/g) ?? []).length).toBe(1);
+    // Exactly ONE multiplication by 1_000_000 (the USD→µ$ conversion)
+    expect((adapter.match(/\*\s*1_000_000/g) ?? []).length).toBe(1);
   });
 
   test("usdFromMicros never rounds and never converts back", () => {

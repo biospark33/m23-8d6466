@@ -62,7 +62,7 @@ const argv = z.array(z.string().min(1)).min(1);
 export const PhaseSpecSchema = z
   .object({
     name: z.string().min(1),
-    kind: z.enum(["engineer", "agent", "code"]),
+    kind: z.enum(["engineer", "agent", "code", "dispatch_task"]),
     description: z.string().min(1),
     maxDurationMs: z
       .number()
@@ -73,6 +73,9 @@ export const PhaseSpecSchema = z
     retries: z.number().int().min(MIN_RETRIES).max(MAX_RETRIES).default(MIN_RETRIES),
     command: argv.optional(),
     testCommand: argv.optional(),
+    // DF1.6 dispatch_task fields
+    roster: z.string().min(1).optional(),
+    task: z.string().min(1).optional(),
   })
   .strict()
   .superRefine((spec, ctx) => {
@@ -83,6 +86,22 @@ export const PhaseSpecSchema = z
     }
     if (spec.kind !== "code" && spec.command !== undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `command is forbidden when kind is '${spec.kind}'` });
+    }
+    // DF1.6: roster and task required when kind === "dispatch_task", forbidden otherwise
+    if (spec.kind === "dispatch_task") {
+      if (spec.roster === undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "roster is required when kind is 'dispatch_task'" });
+      }
+      if (spec.task === undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "task is required when kind is 'dispatch_task'" });
+      }
+    } else {
+      if (spec.roster !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `roster is forbidden when kind is '${spec.kind}'` });
+      }
+      if (spec.task !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `task is forbidden when kind is '${spec.kind}'` });
+      }
     }
   });
 

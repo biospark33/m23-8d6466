@@ -1,0 +1,55 @@
+{
+  "story": "DF1.6",
+  "date": "2026-08-17",
+  "host": "macOS (darwin 22.6.0), pi 0.55.0, bun 1.2.22",
+  "env": {
+    "QDS_TEAM_RUNNER": "local",
+    "QDS_PI_CATALOG_DIR": "/tmp/qds-pi-catalog (hand-built catalog override — host pi 0.55.0 ships no @earendil-works pi-ai data dir; see DIVERGENCE note)",
+    "provider": "openrouter (free/low-tier slugs from qds-default proven set)"
+  },
+  "roster": "config/rosters/df16-e2e.roster.yaml (lead anthropic/claude-haiku-4.5, fixer deepseek/deepseek-v3.2, analyst qwen/qwen3-30b-a3b-instruct-2507)",
+  "runs": [
+    {
+      "run": 1,
+      "runId": "2f92bbbc-70d7-493e-b1fd-c9c3cabfe1ef",
+      "scenario": "seeded failing test (src/calc.ts add() subtracted); fixer worker edits code",
+      "outcome": {
+        "phase": "dispatch-fix",
+        "status": "success",
+        "exitStatus": "success",
+        "durationMs": 268222,
+        "team_execution_ms": 257092,
+        "malformedLines": 0,
+        "droppedOversizeLines": 0,
+        "changedFiles": ["src/calc.ts"],
+        "workerFix": "src/calc.ts now returns a + b; seeded bun test passes after run",
+        "costEvents": 3,
+        "costMicrosFirstEvent": 2670,
+        "traceEvents": "3 prompt (pre-spawn) + 6 coms + 3 cost + 2 worker_output = 12 team events — the F6 shape, 0 malformed",
+        "pipelineTail": "dispatch phase succeeded; the engineer placeholder TAIL phase threw (expected — unregistered kind), so pipeline ok=false from the tail only. Run 1 is phase-level green, NOT full-pipeline green — run 2 is the full-pipeline green run"
+      }
+    },
+    {
+      "run": 2,
+      "runId": "d27b32d2-cbcc-4d4e-a0bf-a3c0c29e9b51",
+      "scenario": "already-fixed repo; dispatch phase + code-phase tail (bun test)",
+      "outcome": {
+        "pipeline": "RUN ok=true accepted=true phases=2",
+        "dispatch-fix": "success/success, malformedLines 0, droppedOversizeLines 0, durationMs 73303",
+        "verify-suite": "success/success (engine-side bun test green)",
+        "traceEvents": "3 prompt (pre-spawn) + coms + 3 cost + worker_output events",
+        "artifacts": ["e2e-run2-journal.json", "e2e-run2-events.jsonl", "e2e-run2-run.log"]
+      }
+    }
+  ],
+  "dodMapping": {
+    "AC1": "merged step output success via dispatch_task phase; testCommand engine-side",
+    "AC2": "malformedLines 0 + droppedOversizeLines 0 on live stream; distinct counters unit-tested",
+    "AC3": "precedence ladder unit-tested incl watchdog-kill negative control",
+    "AC4": "mulchPrimed false + success (no priming integration in S1)",
+    "AC5": "refusals unit-tested (unset + warren), never spawns",
+    "AC6": "run 1: fixer claim ignored, engine-side testCommand ran (run 2 verify-suite green); both branches unit-tested",
+    "AC7": "RSS watchdog live-armed on real process group (ps -g sampling), escalation legs unit-tested"
+  },
+  "notes": "QDS_PI_CATALOG_DIR override needed because pi 0.55.0's @mariozechner/pi-ai package ships no dist/providers/data directory (the DF1.5-era @earendil-works layout). Rate-table location drift is an environment issue, not a DF1.6 defect."
+}

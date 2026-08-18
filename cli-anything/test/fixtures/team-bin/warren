@@ -99,6 +99,17 @@ async function main(): Promise<void> {
       await sleep(60_000);
       break;
     }
+    // DF1.6 T5: one cost event whose session total clears the RAISED
+    // ceilings (4.5 and 9.0 USD kill thresholds) but not the un-raised 0.45
+    // one — exercises effectiveCeilingMicros end to end through the budget
+    // guard's real kill path.
+    case "big_cost": {
+      say(coms(1, "lead", "worker-a"));
+      say(cost("worker-a", "openrouter/model-a", 9.5));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      await sleep(60_000);
+      break;
+    }
     // DF2.7 / INV-COST-5: same spend as budget_overflow, but the worker's
     // cost record is KNOWN-PARTIAL — some turns were never priced. The
     // cumulative total is therefore under-counted and the budget state must
@@ -197,6 +208,86 @@ async function main(): Promise<void> {
       process.stdout.write(chunkB);
       await sleep(50);
       say({ type: "merged", result: { summary: "resumed after split multibyte line" } });
+      process.exit(0);
+      break;
+    }
+    case "many_small_lines_one_chunk": {
+      // F15 per-LINE cap regression: several complete NDJSON lines coalesced
+      // into a SINGLE write, whose SUM exceeds the cap but where NO line does.
+      // A chunk-level cap check would drop the first line (and log a false
+      // breach); the per-line scan must keep every line. Padded worker
+      // summaries (~800 B each) push the total past the 2048-byte test cap.
+      const lines = [
+        coms(1, "lead", "worker-a"),
+        coms(2, "worker-a", "lead"),
+        { ...workerOutput("worker-a", ["src/a.ts"]), output: { changedFiles: ["src/a.ts"], result: { summary: `worker-a done ${"x".repeat(700)}` } } },
+        { ...workerOutput("worker-b", ["src/b.ts"]), output: { changedFiles: ["src/b.ts"], result: { summary: `worker-b done ${"x".repeat(700)}` } } },
+        { type: "merged", result: { summary: "all small lines survived one chunk" } },
+      ];
+      process.stdout.write(lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+      process.exit(0);
+      break;
+    }
+    case "partial_output_over_cap": {
+      // DF1.6 T1/R9 regression: emit >10KB of valid NDJSON, then die without
+      // a merged event. partialOutput must come back capped at
+      // MAX_PARTIAL_OUTPUT_CHARS AND end with the shared truncation marker —
+      // silently-clipped output (no marker) is the bug this guards against.
+      for (let i = 0; i < 20; i++) {
+        say({ ...coms(i + 1, "lead", "worker-a"), channel: `lead:worker-a:${"p".repeat(700)}` });
+      }
+      process.exit(1);
+      break;
+    }
+    case "abort_graceful_exit0": {
+      // R12 regression: emits the full success stream, then idles. On SIGTERM
+      // (the abort kill) it emits merged and exits 0 — a child honoring the
+      // abort kill cleanly. The runner must still classify the run transient,
+      // not success.
+      say(coms(1, "lead", "worker-a"));
+      say(coms(2, "worker-a", "lead"));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      say(workerOutput("worker-b", ["src/b.ts"]));
+      process.on("SIGTERM", () => {
+        say({ type: "merged", result: { summary: "graceful shutdown" } });
+        process.exit(0);
+      });
+      await sleep(60_000);
+      break;
+    }
+    case "watchdog_kill": {
+      // Stay alive for watchdog to escalate. Emit a cost event first to match
+      // production pattern and let budget-vs-watchdog races surface.
+      say(cost("lead", "anthropic/claude-x", 0.01));
+      await sleep(60_000);
+      break;
+    }
+    // T10: emit a cost read from QDS_FAKE_THRESHOLD_COST so the test derives
+    // the exact kill threshold from budgetKillThresholdUsd() in runner.ts —
+    // one source of truth for the 0.9 kill fraction instead of a hardcoded
+    // 0.45 that silently stops being the boundary if the fraction changes.
+    case "threshold_exact": {
+      const exactCostUsd = Number(process.env["QDS_FAKE_THRESHOLD_COST"] ?? "0.45");
+      say(coms(1, "lead", "worker-a"));
+      say(cost("lead", "anthropic/claude-x", exactCostUsd));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      await sleep(60_000);
+      break;
+    }
+    // T11 boundary: ONE line of exactly QDS_FAKE_LINE_BYTES raw bytes
+    // (trailing newline included), driven by env so the test can probe the
+    // cap's exact edge (kept at N == cap, dropped at N == cap + 1). The
+    // line's content is parse-rejected noise — only its byte length matters.
+    case "cap_boundary_line": {
+      const lineBytes = Number(process.env["QDS_FAKE_LINE_BYTES"] ?? "2048");
+      say(coms(1, "lead", "worker-a"));
+      say(coms(2, "worker-a", "lead"));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      say(workerOutput("worker-b", ["src/b.ts"]));
+      await sleep(50); // own data event, so the line is judged alone
+      process.stdout.write("x".repeat(lineBytes - 1) + "\n");
+      await sleep(50);
+      say({ type: "merged", result: { summary: "boundary line processed" } });
       process.exit(0);
       break;
     }

@@ -173,6 +173,75 @@ export interface BuildMergedOutputOptions {
   error: MergedError | null;
   /** Secret redaction fn (runner's redactSecrets bound to the parent env). */
   redact: (s: string) => string;
+  /** DF1.6: Test results from engine-side test runner. */
+  testResults: { passed: number; failed: number };
+  /** DF1.6: Must be present; false when passed+failed===0 (p1-6:62). */
+  testsExecuted: boolean;
+  /** DF1.6: Top-level summary (copied from result.summary with 2000-char cap). */
+  summary: string;
+  /** DF1.6: Mulch priming success flag. */
+  mulchPrimed: boolean;
+  /** DF1.6: Mulch priming error, null when priming succeeded or not attempted. */
+  mulchPrimeError: string | null;
+  /** DF1.6: Artifacts produced by the team. */
+  artifacts: Array<{ name: string; path: string }>;
+  /** DF1.6: Partial output for failure paths (≤10000 chars with suffix), null on success. */
+  partialOutput: string | null;
+}
+
+/** Max UTF-16 length of top-level summary field (p1-6:65). */
+const MAX_SUMMARY_CHARS = 2000;
+
+/**
+ * Max UTF-16 length of partialOutput field (p1-6:65).
+ * Exported for single-source-of-truth with runner (R4).
+ */
+export const MAX_PARTIAL_OUTPUT_CHARS = 10000;
+
+/**
+ * Suffix appended by truncateWithSuffix when truncation occurs.
+ * Exported so runner can leave headroom for it (R4).
+ */
+export const TRUNCATION_SUFFIX = "[truncated, N chars total]";
+
+/**
+ * Length of the longest possible truncation suffix ([truncated, 999999999 chars total]).
+ * Used by runner to reserve headroom so the marker always appears when truncation happened.
+ * Exported for single-source-of-truth (R4).
+ */
+export const MAX_SUFFIX_LENGTH = TRUNCATION_SUFFIX.replace("N", "999999999").length;
+
+/**
+ * Truncate a string to a max length, reserving space for suffix before cutting.
+ * Suffix format: "[truncated, N chars total]" where N is the original length.
+ */
+function truncateWithSuffix(
+  text: string,
+  maxLength: number,
+  suffixLabel = "chars",
+): string {
+  if (text.length <= maxLength) return text;
+  const suffix = `[truncated, ${text.length} ${suffixLabel} total]`;
+  const proseBudget = maxLength - suffix.length;
+  if (proseBudget < 0) {
+    // R8: When maxLength is smaller than the suffix, return a marker-bearing fallback.
+    // Keep at least "[…]" visible; trim the suffix itself if needed.
+    const minimalMarker = "[…]";
+    if (maxLength >= 3) return minimalMarker;
+    // Even smaller: return minimal marker trimmed to maxLength (may be just "[").
+    return minimalMarker.slice(0, maxLength);
+  }
+  // Walk back from proseBudget to avoid splitting a UTF-16 surrogate pair
+  // (mirrors runner.ts partial-output handling, R7).
+  let cutPoint = proseBudget;
+  while (
+    cutPoint > 0 &&
+    text.charCodeAt(cutPoint - 1) >= 0xD800 &&
+    text.charCodeAt(cutPoint - 1) <= 0xDBFF
+  ) {
+    cutPoint--;
+  }
+  return text.slice(0, cutPoint) + suffix;
 }
 
 /**
@@ -183,11 +252,18 @@ export interface BuildMergedOutputOptions {
  *   - lead_failure → agentOutputs forced to {} (never absent);
  *   - every path emits the identical field set;
  *   - redaction applied deep to result/agentOutputs/comsLog/error (INV-3).
+ * DF1.6 extensions:
+ *   - summary copied from result.summary with 2000-char ceiling including suffix;
+ *   - testsExecuted invariant: must be present and false when passed+failed===0;
+ *   - partialOutput truncated to 10000 chars with suffix;
+ *   - result stays byte-identical.
  */
 export function buildMergedOutput(
   opts: BuildMergedOutputOptions,
 ): MergedOutput {
-  const { exitStatus } = opts;
+  const { exitStatus, testResults, testsExecuted } = opts;
+
+  // Existing invariants
   if (exitStatus === "success") {
     if (opts.error !== null) {
       throw new Error("merged output: success path must carry error:null");
@@ -200,6 +276,35 @@ export function buildMergedOutput(
       `merged output: ${exitStatus} path requires error{reason,message}`,
     );
   }
+
+  // DF1.6 testsExecuted invariant (p1-6:62, R9)
+  // R9: Reject negative/non-integer counts; reject testsExecuted === false when passed+failed > 0.
+  // Keep existing sum===0 rule.
+  const { passed, failed } = testResults;
+  if (!Number.isInteger(passed) || passed < 0) {
+    throw new Error(
+      `merged output: passed must be a non-negative integer, got ${passed}`,
+    );
+  }
+  if (!Number.isInteger(failed) || failed < 0) {
+    throw new Error(
+      `merged output: failed must be a non-negative integer, got ${failed}`,
+    );
+  }
+  const sum = passed + failed;
+  if (sum === 0) {
+    if (testsExecuted !== false) {
+      throw new Error(
+        `merged output: testsExecuted must be false when passed+failed===0, got ${testsExecuted}`,
+      );
+    }
+  } else if (testsExecuted === false) {
+    // R9: When tests ran (sum > 0), testsExecuted must be true.
+    throw new Error(
+      `merged output: testsExecuted must be true when passed+failed > 0 (got ${sum}), got false`,
+    );
+  }
+
   const agentOutputs =
     exitStatus === "lead_failure" ? {} : opts.agentOutputs;
   // lead_failure carries changedFiles:[] by contract (path 5) — forced here,
@@ -207,6 +312,31 @@ export function buildMergedOutput(
   const changedFiles =
     exitStatus === "lead_failure" ? [] : opts.changedFiles;
   const redact = opts.redact;
+
+  // DF1.6: Copy summary from result.summary with truncation. Redact BEFORE
+  // truncating (INV-4): the top-level summary is an outbound string — a
+  // secret echoed in result.summary must not survive the copy-up.
+  const rawSummary = redact(
+    typeof opts.result.summary === "string" ? opts.result.summary : opts.summary,
+  );
+  const summary = truncateWithSuffix(rawSummary, MAX_SUMMARY_CHARS);
+
+  // DF1.6: Truncate partialOutput when the field is a string, otherwise null —
+  // redacted for the same reason (every string leaving the phase passes redact
+  // once). Null/undefined-checked, not truthiness: an EMPTY failure output
+  // must survive as "" — collapsing it to null would erase the distinction
+  // between "failure with no partial output" and "field omitted" (undefined
+  // is tolerated because older call sites omit it). Success is FORCED to
+  // null, mirroring changedFiles/agentOutputs on lead_failure: the contract
+  // "null on success" is enforced at this construction site, not by caller
+  // discipline.
+  const partialOutput =
+    exitStatus === "success"
+      ? null
+      : opts.partialOutput !== undefined && opts.partialOutput !== null
+        ? truncateWithSuffix(redact(opts.partialOutput), MAX_PARTIAL_OUTPUT_CHARS, "chars")
+        : null;
+
   return {
     result: redactDeep(opts.result, redact) as Record<string, unknown>,
     changedFiles: changedFiles.map((f) => redact(f)),
@@ -222,5 +352,16 @@ export function buildMergedOutput(
       opts.error === null
         ? null
         : (redactDeep(opts.error, redact) as MergedError),
+    // DF1.6: Extended fields
+    testResults: { passed: testResults.passed, failed: testResults.failed },
+    testsExecuted,
+    summary,
+    mulchPrimed: opts.mulchPrimed,
+    mulchPrimeError: opts.mulchPrimeError ?? null,
+    artifacts: opts.artifacts.map((a) => ({
+      name: redact(a.name),
+      path: redact(a.path),
+    })),
+    partialOutput,
   };
 }

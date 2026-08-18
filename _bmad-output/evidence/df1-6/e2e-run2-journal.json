@@ -1,0 +1,51 @@
+{
+  "version": "1.0.0",
+  "runId": "d27b32d2-cbcc-4d4e-a0bf-a3c0c29e9b51",
+  "ok": true,
+  "completedAt": "2026-08-17T20:52:22.361Z",
+  "phases": [
+    {
+      "runId": "d27b32d2-cbcc-4d4e-a0bf-a3c0c29e9b51",
+      "requestId": "3ffdf79e-256b-4174-9cd1-a5f207759146",
+      "pipelineId": "df16-e2e",
+      "phaseId": "d27b32d2-cbcc-4d4e-a0bf-a3c0c29e9b51:0:dispatch-fix",
+      "name": "dispatch-fix",
+      "kind": "dispatch_task",
+      "status": "success",
+      "startedAt": "2026-08-17T20:51:09.034Z",
+      "updatedAt": "2026-08-17T20:52:22.340Z",
+      "durationMs": 73303,
+      "malformedLines": 0,
+      "droppedOversizeLines": 0,
+      "subTimings": {
+        "manifest_load_ms": 22,
+        "phase_body_ms": 73303,
+        "journal_write_ms": 1,
+        "mulch_prime_ms": 0,
+        "box_setup_ms": 0,
+        "team_execution_ms": 52943,
+        "gate_validation_ms": 0
+      },
+      "exitStatus": "success"
+    },
+    {
+      "runId": "d27b32d2-cbcc-4d4e-a0bf-a3c0c29e9b51",
+      "requestId": "3ffdf79e-256b-4174-9cd1-a5f207759146",
+      "pipelineId": "df16-e2e",
+      "phaseId": "d27b32d2-cbcc-4d4e-a0bf-a3c0c29e9b51:1:verify-suite",
+      "name": "verify-suite",
+      "kind": "code",
+      "status": "success",
+      "startedAt": "2026-08-17T20:52:22.341Z",
+      "updatedAt": "2026-08-17T20:52:22.360Z",
+      "durationMs": 18,
+      "subTimings": {
+        "manifest_load_ms": 0,
+        "phase_body_ms": 18,
+        "journal_write_ms": 0
+      },
+      "exitStatus": "success"
+    }
+  ],
+  "gateEvents": []
+}

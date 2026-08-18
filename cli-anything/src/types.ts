@@ -90,13 +90,22 @@ export const TeamManifestSchema = z
 export type TeamManifest = z.infer<typeof TeamManifestSchema>;
 export type TeamRole = z.infer<typeof TeamRoleSchema>;
 
-/** Post-pivot exitStatus taxonomy (CC-1, 5-value enum). */
-export type ExitStatus =
-  | "success"
-  | "transient"
-  | "overflow"
-  | "logic"
-  | "lead_failure";
+/**
+ * Post-pivot exitStatus taxonomy (CC-1, 5-value enum). Single source of truth:
+ * the array is the source; the union derives from it via `as const`. Adding a
+ * status to the array automatically widens the type — guards that iterate the
+ * array stay in sync without manual type updates.
+ */
+export const EXIT_STATUSES = [
+  "success",
+  "transient",
+  "overflow",
+  "logic",
+  "lead_failure",
+] as const;
+
+/** ExitStatus type derives from EXIT_STATUSES array above. */
+export type ExitStatus = (typeof EXIT_STATUSES)[number];
 
 /** Structured budget/model override — audit-only in Phase 0 (P0.3-S-M5). */
 export interface Waiver {
@@ -163,6 +172,11 @@ export interface MergedError {
  * Every exit path emits the SAME field set (P0.3-M2): `error` is null
  * (explicit) on success, populated otherwise; `agentOutputs` is `{}` on
  * lead_failure / coms-init transient, never absent.
+ *
+ * DF1.6: Extended with top-level testResults, testsExecuted, summary,
+ * durationMs (moved), mulchPrimed, mulchPrimeError, and artifacts.
+ * `result` stays byte-identical; `result.summary` is copied up to top-level
+ * `summary` with a 2000-char ceiling including truncation suffix.
  */
 export interface MergedOutput {
   result: Record<string, unknown>;
@@ -174,6 +188,20 @@ export interface MergedOutput {
   agentOutputs: Record<string, unknown>;
   comsLog: ComsLogEntry[];
   error: MergedError | null;
+  /** DF1.6: Test execution results from engine-side test runner. */
+  testResults: { passed: number; failed: number };
+  /** DF1.6: Must be false when passed+failed===0 (p1-6:62). */
+  testsExecuted: boolean;
+  /** DF1.6: Copied from result.summary, ≤2000 chars including suffix. */
+  summary: string;
+  /** DF1.6: Mulch priming success flag. */
+  mulchPrimed: boolean;
+  /** DF1.6: Mulch priming error (null when priming succeeded or not attempted). */
+  mulchPrimeError: string | null;
+  /** DF1.6: Artifacts produced by the team. */
+  artifacts: Array<{ name: string; path: string }>;
+  /** DF1.6: Partial output on failure paths (≤10000 chars with suffix), null on success. */
+  partialOutput: string | null;
 }
 
 /** A worker's structured reply; `changedFiles` is mandatory (CORRECTNESS-C). */

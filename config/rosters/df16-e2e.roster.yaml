@@ -1,0 +1,24 @@
+# DF1.6 e2e roster: lead + fixer + read-only analyst (the F6 shape —
+# one fixer editing code, one read-only analyst, the lead verifies).
+# Slugs are the qds-default proven-live pairs (DF1.5 dual-gate green on
+# this host with OPENROUTER_API_KEY set).
+defaults:
+  provider: openrouter
+  thinking: medium
+  tools: null
+  writes: []
+  harness_engineering: []
+
+roles:
+  - name: lead
+    model: anthropic/claude-haiku-4.5
+    thinking: high
+
+  - name: fixer
+    model: deepseek/deepseek-v3.2
+    writes: ["src/", "tests/"]
+
+  - name: analyst
+    model: qwen/qwen3-30b-a3b-instruct-2507
+    thinking: low
+    tools: ["read", "grep"]
