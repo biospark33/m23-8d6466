@@ -262,6 +262,14 @@ async function main(): Promise<void> {
       await sleep(60_000);
       break;
     }
+    // T10: emit cost that is EXACTLY 90% of a 0.50 cap (0.45 USD)
+    case "threshold_exact": {
+      say(coms(1, "lead", "worker-a"));
+      say(cost("lead", "anthropic/claude-x", 0.45)); // exactly 0.45 (90% of 0.50)
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      await sleep(60_000);
+      break;
+    }
     default: {
       console.error(`warren-team-shim: unknown scenario '${scenario}'`);
       process.exit(70);

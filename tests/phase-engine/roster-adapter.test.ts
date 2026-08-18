@@ -326,10 +326,10 @@ describe("rosterToTeamManifest", () => {
     expect(parsed.success).toBe(true);
     if (parsed.success) {
       // Schema defaults should be applied by Zod during parse
-      expect(parsed.data.team.budgetCapUsd).toBeDefined();
-      expect(parsed.data.team.turnCap).toBeDefined();
-      expect(parsed.data.team.wallClockCapMs).toBeDefined();
-      expect(parsed.data.team.comsAwaitTimeoutMs).toBeDefined();
+      expect(parsed.data.team.budgetCapUsd).toBe(0.5);
+      expect(parsed.data.team.turnCap).toBe(5);
+      expect(parsed.data.team.wallClockCapMs).toBe(300_000);
+      expect(parsed.data.team.comsAwaitTimeoutMs).toBe(240_000);
     }
   });
 
@@ -533,6 +533,35 @@ describe("rosterToTeamManifest: RA-tests — negative tests for new roster-adapt
       thrownError = e as Error;
     }
     expect(thrownError).toBeDefined();
+    expect(thrownError?.message).toContain("fixer");
+  });
+
+  test("empty-string worker prompt throws clean Error (S5)", () => {
+    // Adapter guards against empty/whitespace prompts per S5 hardening.
+    // Empty prompt string throws a clean Error, not a ZodError.
+    const roster: ResolvedRoster = {
+      path: "/fake.yaml",
+      roles: [
+        { ...baseRole, name: "lead" },
+        { ...baseRole, name: "fixer" },
+      ],
+      warnings: [],
+    };
+
+    let thrownError: Error | undefined;
+    try {
+      rosterToTeamManifest(roster, {
+        name: "empty-prompt",
+        project: "p",
+        leadRoleName: "lead",
+        workerRoleNames: ["fixer"],
+        prompts: { lead: "Lead", fixer: "" }, // Empty prompt
+      });
+    } catch (e) {
+      thrownError = e as Error;
+    }
+    expect(thrownError).toBeDefined();
+    expect(thrownError?.message).toMatch(/missing or empty prompt/i);
     expect(thrownError?.message).toContain("fixer");
   });
 

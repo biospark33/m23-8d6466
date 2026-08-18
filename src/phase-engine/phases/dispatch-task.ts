@@ -28,13 +28,14 @@ import {
   adaptTeamEvent,
   classifyRun,
   makeStreamHealth,
+  isExitStatus,
 } from "./team-event-adapter.ts";
 import { buildMergedOutput } from "../../../cli-anything/src/merger.ts";
 import { redactSecrets } from "../../../cli-anything/src/redact.ts";
 import { runTeamManifest } from "../../../cli-anything/src/runner.ts";
 import type { MergedOutput, TeamManifest } from "../../../cli-anything/src/types.ts";
 import type { PhaseBody, PhaseBodyContext } from "../phase.ts";
-import type { PhaseSpec, PhaseSubTimings } from "../types.ts";
+import type { PhaseSpec, PhaseSubTimings, ExitStatus } from "../types.ts";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -162,6 +163,10 @@ export function dispatchTask(
     // D6: cardinality checks BEFORE dual-gate (pi spawn ~180s) — local checks first
     // D9: anchor roster path at runRoot, not process.cwd()
     const rosterRunRoot = deps.rootDir ?? process.env.QDS_RUN_ROOT ?? process.cwd();
+    // S2: hoist empty check before expensive loadRoster + dual-gate (~180s)
+    if (rosterRunRoot === "") {
+      return refuse("QDS_RUN_ROOT is empty (use unset or a non-empty path)", redact);
+    }
     let roster: ResolvedRoster;
     try {
       roster = loadRoster(rosterPath, { cwd: rosterRunRoot });
@@ -406,15 +411,23 @@ export function dispatchTask(
       // D2: Spawn/stream failure → runner settles transient, but dispatch classifies lead_failure
       // when there's no exit signal evidence. Prefer runResult.exitStatus when it exists.
       let finalExitStatus = exitStatus;
+      // S1: Validate runResultStatus before use — garbage from buggy/compromised runner
+      // must not flow into finalExitStatus → envelope exitStatus + partialOutput.message
+      const validatedRunResultStatus: ExitStatus = isExitStatus(runResultStatus)
+        ? runResultStatus
+        : (() => {
+            console.warn(`[dispatch-task] invalid runResult.exitStatus (using lead_failure): ${redact(String(runResultStatus))}`);
+            return "lead_failure" as const;
+          })();
       if (runFacts.exitCode === null && runFacts.termSignal === null && runFacts.killOrigin === null &&
-          runResultStatus !== "success" && runResultStatus !== "lead_failure") {
-        finalExitStatus = runResultStatus;
+          validatedRunResultStatus !== "success" && validatedRunResultStatus !== "lead_failure") {
+        finalExitStatus = validatedRunResultStatus;
       }
 
       // D3: When classification would return success but runResult.exitStatus is non-success,
       // take runResult.exitStatus and keep its error + partial.
-      if (finalExitStatus === "success" && runResultStatus !== "success") {
-        finalExitStatus = runResultStatus;
+      if (finalExitStatus === "success" && validatedRunResultStatus !== "success") {
+        finalExitStatus = validatedRunResultStatus;
       }
 
       const error =
@@ -565,6 +578,7 @@ export function validateArtifacts(
     }
     // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security check
     if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(artifact.name) || artifact.name.includes("\n")) {
+      // S8: regex excludes \x0a/\x0d; explicit newline check yields a clearer error message
       console.warn("[dispatch-task] artifact dropped: name contains control chars or newline");
       continue;
     }

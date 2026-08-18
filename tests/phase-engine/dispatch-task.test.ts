@@ -198,6 +198,17 @@ function runDispatch(
 }
 
 describe("dispatch-task: AC5 QDS_TEAM_RUNNER refusal", () => {
+  it("empty QDS_RUN_ROOT refuses pre-spawn with logic status, zero spawns", async () => {
+    process.env.QDS_TEAM_RUNNER = "local"; // must be valid to hit the runRoot check
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    process.env.QDS_RUN_ROOT = ""; // S2: empty string triggers early refusal
+    const spy = injectFake(() => successResult());
+    const result = await runDispatch();
+    expect(result.exitStatus).toBe("logic");
+    expect(result.error?.message).toBe("QDS_RUN_ROOT is empty (use unset or a non-empty path)");
+    expect(spy.calls).toBe(0); // refusal BEFORE any spawn
+  });
+
   it("unset refuses pre-spawn, names the variable, never spawns", async () => {
     // biome-ignore lint/performance/noDelete: unset is the semantic — assignment would leave "undefined" in the env.
     delete process.env.QDS_TEAM_RUNNER;
@@ -218,6 +229,21 @@ describe("dispatch-task: AC5 QDS_TEAM_RUNNER refusal", () => {
     expect(result.error?.message).toContain("QDS_TEAM_RUNNER");
     expect(result.error?.message).toContain("warren");
     expect(spy.calls).toBe(0);
+  });
+});
+
+describe("dispatch-task: manifest directory creation failure", () => {
+  it("manifest directory blocked by file refuses with logic, zero spawns", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    // Block .qds-manifests directory creation by placing a file at that path
+    const manifestDir = join(tmpRoot, ".qds-manifests");
+    writeFileSync(manifestDir, "this is a file, not a directory");
+    const spy = injectFake(() => successResult());
+    const result = await runDispatch();
+    expect(result.exitStatus).toBe("logic");
+    expect(result.error?.message).toMatch(/manifest directory/i);
+    expect(spy.calls).toBe(0); // refused BEFORE any spawn
   });
 });
 
@@ -483,6 +509,25 @@ describe("dispatch-task: AC3 precedence rule", () => {
 });
 
 describe("dispatch-task: round-6 hardening", () => {
+  it("invalid durationMs values clamp to zero with console.warn", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (msg?: unknown) => {
+      warns.push(String(msg));
+    };
+    try {
+      injectFake(() => successResult({ durationMs: Number.POSITIVE_INFINITY }));
+      const result = await runDispatch();
+      expect(result.durationMs).toBe(0);
+      // At least one warn about invalid durationMs
+      expect(warns.some((w) => w.includes("durationMs") || w.includes("Invalid"))).toBe(true);
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+
   it("duplicate merged event: first wins, warns once per duplicate, asserts surfaced summary is FIRST", async () => {
     process.env.QDS_TEAM_RUNNER = "local";
     process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
@@ -637,7 +682,7 @@ describe("dispatch-task: AC6 testCommand", () => {
 
   it("declared testCommand exits non-zero → failed counts parsed, classification success-per-contract", async () => {
     process.env.QDS_TEAM_RUNNER = "local";
-    process.env.ANTHROPIC_API_KEY = "sk-test-key-longough";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
     const script = writeTestScript();
     injectFake((opts) => {
       feedLine(opts, '{"type":"merged","result":{"summary":"ok"}}');
@@ -740,7 +785,7 @@ describe("dispatch-task: INV-2 path validation", () => {
     expect(valid).toEqual(["ok.ts"]);
   });
 
-  it("artifacts: intermediate-symlink traversal rejected by beneath-root walk, not O_NOFOLLOW", () => {
+  test.skipIf(process.platform === "win32")("artifacts: intermediate-symlink traversal rejected by beneath-root walk, not O_NOFOLLOW", () => {
     // System tmpdir, NOT cwd: a bare prefix makes mkdtempSync create the
     // directory relative to the process cwd (the repo root).
     const outside = mkdtempSync(join(tmpdir(), "qds-outside-"));
@@ -814,11 +859,13 @@ describe("dispatch-task: INV-4 redaction at adapter boundary", () => {
     expect(result.artifacts).toHaveLength(2);
     const artifactNames = (result.artifacts ?? []).map((a) => a.name).join(" ");
     expect(artifactNames).not.toContain(secretKey);
-    // Safe artifact name unchanged
-    expect(result.artifacts?.[0]?.name).toBe("safe-artifact.txt");
-    // Secret-containing name carries REDACTED marker
-    expect(result.artifacts?.[1]?.name).toContain("REDACTED:");
-    expect(result.artifacts?.[1]?.name).not.toContain(secretKey);
+    // Safe artifact found by name
+    const safeArtifact = (result.artifacts ?? []).find((a) => a.name === "safe-artifact.txt");
+    expect(safeArtifact?.name).toBe("safe-artifact.txt");
+    // Secret-containing name carries REDACTED marker, found by REDACTED prefix
+    const redactedArtifact = (result.artifacts ?? []).find((a) => a.name.includes("REDACTED:"));
+    expect(redactedArtifact?.name).toContain("REDACTED:");
+    expect(redactedArtifact?.name).not.toContain(secretKey);
   });
 
   it("changedFiles path embedding secret is redacted (validateChangedFiles + redactSecrets)", async () => {

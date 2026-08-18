@@ -17,7 +17,7 @@ import type { ExitStatus } from "../types.ts";
  * (cli-anything/src/types.ts) — it can never drift from the ExitStatus union. */
 const EXIT_STATUS_SET: ReadonlySet<string> = new Set(EXIT_STATUSES);
 
-function isExitStatus(value: unknown): value is ExitStatus {
+export function isExitStatus(value: unknown): value is ExitStatus {
   return typeof value === "string" && EXIT_STATUS_SET.has(value);
 }
 

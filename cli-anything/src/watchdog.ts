@@ -263,9 +263,17 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
       if (failureCount >= threshold) {
         const which = isExternal ? "external sampler" : "ps";
         log(`cli-anything: RSS watchdog unwatchable (${failureCount} consecutive ${which} failures for pgid ${pgidOrGroup})`);
-        onUnwatchable(`${which} failed ${failureCount} times consecutively`);
+        // Set state synchronously BEFORE invoking the callback, matching the
+        // onEscalate ordering so classification reads the flag atomically.
         unwatchable = true;
         handle.status = "unwatchable";
+        // Non-throwing guard: a throwing onUnwatchable callback must not abort
+        // the poll — the unwatchable state and stop() flow run regardless.
+        try {
+          onUnwatchable(`${which} failed ${failureCount} times consecutively`);
+        } catch (err) {
+          console.error("cli-anything: RSS watchdog onUnwatchable callback threw", err);
+        }
         // Mid-grace sampling loss: the tree is already SIGTERMed and the grace
         // timer is armed — stopping now would cancel the SIGKILL leg.
         // Keep the escalation machinery; only halt future polls.

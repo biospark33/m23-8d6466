@@ -803,6 +803,46 @@ describe("RSS watchdog", () => {
     expect(externalSamplerCalled).toBe(true);
   });
 
+  it("T8: external sampler failure counter resets on VALID sample (3 consecutive required)", async () => {
+    // Source resets both consecutiveSampleFailures and externalSamplerFailures
+    // on success (line 293-295 in watchdog.ts). Inject pattern: fail, fail, VALID,
+    // then stop before 3 consecutive failures accumulate. Unwatchable NEVER fires
+    // because the VALID sample reset the counter.
+    let sampleCount = 0;
+    let unwatchableCalled = false;
+
+    const handle = startRssWatchdog({
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
+      pgidOrGroup: process.pid,
+      pollMs: 50, // Slower polls for cleaner timing (less variance in sample count)
+      onEscalate: () => {},
+      onUnwatchable: () => { unwatchableCalled = true; },
+      log: () => {},
+      sampleRss: async () => {
+        sampleCount++;
+        // Pattern: fail, fail, VALID (under threshold), then stop
+        // After VALID resets counter, we stop BEFORE 3 consecutive failures can accumulate
+        if (sampleCount <= 2) return null; // First 2 failures
+        if (sampleCount === 3) return 100 * 1024 ** 2; // VALID (100 MB << 4 GB threshold)
+        // After reset, return valid values to avoid ever hitting 3 consecutive failures
+        return 100 * 1024 ** 2;
+      },
+    });
+
+    // Sleep for exactly 3 samples: fail, fail, VALID at 50ms intervals = 150ms minimum
+    // Use 200ms for headroom — we should have exactly 3 samples (variance: 4 max)
+    await sleep(200);
+    handle.stop();
+
+    // Should have sampled 3-4 times (fail, fail, VALID, maybe one more)
+    expect(sampleCount).toBeGreaterThanOrEqual(3);
+    expect(sampleCount).toBeLessThan(6);
+    // Unwatchable NEVER fired — the VALID sample reset the counter
+    expect(unwatchableCalled).toBe(false);
+    expect(handle.status).toBe("stopped");
+    expect(handle.killOrigin).toBeNull();
+  });
+
   it("stops polling after escalation", async () => {
     let sampleCount = 0;
     let escalated = false;

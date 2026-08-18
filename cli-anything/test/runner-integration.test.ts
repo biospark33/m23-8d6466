@@ -334,9 +334,14 @@ describe("runTeamManifest", () => {
     // explicitly cancelled resolved clean. abortRequested downgrades every
     // non-overflow status at settle time.
     const controller = new AbortController();
+    const killOrigins: ("watchdog" | "budget" | "wallClock" | "requestedShutdown" | null)[] = [];
     const run = runTeamManifest(TEAM_MANIFEST, {
       env: teamEnv("abort_graceful_exit0"),
       abortSignal: controller.signal,
+      // Capture killOrigin to verify watchdog did NOT escalate
+      onRunFacts: (facts) => {
+        killOrigins.push(facts.killOrigin);
+      },
     });
     await new Promise((r) => setTimeout(r, 400)); // let the stream preamble land
     controller.abort();
@@ -344,6 +349,9 @@ describe("runTeamManifest", () => {
     expectUniformSchema(out);
     expect(out.exitStatus).toBe("transient");
     expect(out.error?.message).toBe("run aborted by parent signal");
+    // T9: verify watchdog did NOT escalate (killOrigin should be null or requestedShutdown,
+    // NEVER "watchdog" on an abort-only run)
+    expect(killOrigins).not.toContain("watchdog");
   }, 15_000);
 
   it("CLI: `cli-anything run --manifest <team.yaml>` emits MergedOutput and exit 0 (AC1 wiring)", async () => {
@@ -539,4 +547,66 @@ describe("DF1.6 T4: RSS watchdog overflow regression test", () => {
     // Verify the sampler was called at least once (escalation happened)
     expect(sampleCount).toBeGreaterThanOrEqual(1);
   }, 15_000);
+
+  // T10: budget kill near-threshold boundary
+  describe("T10: budget kill near-threshold boundary (cumulative cost at/just-below kill threshold)", () => {
+    // Source uses `>=` for threshold check (line 1124 in runner.ts): AT threshold fires the kill
+    // TEAM_MANIFEST has budgetCapUsd: 0.5, kill threshold is 0.9×0.5 = 0.45
+
+    it("cumulative cost EXACTLY at threshold triggers budget kill (discovered semantics: >=, not >)", async () => {
+      // At EXACT threshold (0.45 = 90% of 0.50), the kill fires (>= semantics)
+      const out = await runTeamManifest(TEAM_MANIFEST, {
+        env: teamEnv("threshold_exact"), // new fixture: emits exactly 0.45
+        budgetCapUsd: 0.5,
+        graceMs: 200,
+      });
+      // Budget kill fires at EXACT threshold (>= semantics)
+      expectUniformSchema(out);
+      expect(out.exitStatus).toBe("overflow");
+      expect(out.error?.reason).toBe("overflow");
+      expect(out.error?.message).toContain("(cap $0.50)");
+      const details = out.error?.details as { cumulativeCostUsd?: number };
+      expect(details.cumulativeCostUsd).toBeCloseTo(0.45, 5);
+    }, 20_000);
+
+    it("cumulative cost just below threshold does NOT kill (0.03 vs 0.45)", async () => {
+      // Well below threshold: success scenario emits 0.01 + 0.02 = 0.03 << 0.45
+      // No budget kill, run completes normally
+      const out = await runTeamManifest(TEAM_MANIFEST, {
+        env: teamEnv("success"), // emits 0.01 + 0.02 = 0.03 < 0.45
+        budgetCapUsd: 0.5,
+      });
+      // Should complete successfully (no budget kill)
+      expectUniformSchema(out);
+      expect(out.exitStatus).toBe("success");
+    }, 15_000);
+  });
+
+  // T11: per-line cap exact boundary (2048 bytes)
+  describe("T11: per-line cap exact boundary (teamStdoutCapBytes: 2048)", () => {
+    const CAP_BYTES = 2048;
+
+    it("oversized line (>2048 bytes) is dropped with console.error logged (F15 pattern)", async () => {
+      // Cap unit is raw Buffer bytes (line 1187: `seg.length`), includes trailing newline
+      // Use existing oversized_multibyte_line scenario which emits 3000 bytes > 2048
+      // This proves the byte-accurate cap fires and parsing resumes
+      const capError = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const out = await runTeamManifest(TEAM_MANIFEST, {
+          env: teamEnv("oversized_multibyte_line"), // 3000 bytes > 2048, triggers drop
+          teamStdoutCapBytes: CAP_BYTES,
+        });
+        expectUniformSchema(out);
+        expect(out.exitStatus).toBe("success");
+        expect(out.result).toEqual({ summary: "resumed after oversized line" });
+        // The oversized line (3000 bytes) should have triggered the cap
+        const capFired = capError.mock.calls.some((c) =>
+          String(c[0]).includes("lead stdout line exceeded"),
+        );
+        expect(capFired).toBe(true);
+      } finally {
+        capError.mockRestore();
+      }
+    }, 15_000);
+  });
 });

@@ -101,8 +101,8 @@ export function rosterToTeamManifest(
     }
     // RA2: explicit missing prompt check — avoids misleading ZodError "prompt must be at least 1 character"
     const prompt = opts.prompts[name];
-    if (prompt === undefined || prompt === null) {
-      throw new Error(`missing prompt for worker role "${name}"`);
+    if (prompt === undefined || prompt === null || prompt.trim().length === 0) {
+      throw new Error(`missing or empty prompt for worker role "${name}"`);
     }
     return rosterRoleToTeamRole(role, {
       agentId: name,
@@ -112,8 +112,8 @@ export function rosterToTeamManifest(
 
   // RA2: explicit missing prompt check for lead role
   const leadPrompt = opts.prompts[opts.leadRoleName];
-  if (leadPrompt === undefined || leadPrompt === null) {
-    throw new Error(`missing prompt for lead role "${opts.leadRoleName}"`);
+  if (leadPrompt === undefined || leadPrompt === null || leadPrompt.trim().length === 0) {
+    throw new Error(`missing or empty prompt for lead role "${opts.leadRoleName}"`);
   }
   const lead = rosterRoleToTeamRole(leadRole, {
     agentId: opts.leadRoleName,

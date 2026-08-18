@@ -65,7 +65,7 @@ async function readCapped(
   signal: AbortSignal | undefined,
   exited: Promise<number>,
 ): Promise<{ text: string; capped: boolean }> {
-  if (stream === undefined || typeof stream === "number") {
+  if (stream === undefined || stream === null || typeof stream === "number") {
     return { text: "", capped: false };
   }
   const reader = stream.getReader();
@@ -371,10 +371,12 @@ function parseTestOutput(output: string): { passed: number; failed: number } | n
   const bunFailMatch = Array.from(bunFailMatches).at(-1);
 
   if (bunPassMatch || bunFailMatch) {
-    return {
-      passed: bunPassMatch ? Number.parseInt(bunPassMatch[1] ?? "0", 10) : 0,
-      failed: bunFailMatch ? Number.parseInt(bunFailMatch[1] ?? "0", 10) : 0,
-    };
+    const bunPassed = bunPassMatch ? Number.parseInt(bunPassMatch[1] ?? "0", 10) : 0;
+    const bunFailed = bunFailMatch ? Number.parseInt(bunFailMatch[1] ?? "0", 10) : 0;
+    if (!Number.isSafeInteger(bunPassed) || !Number.isSafeInteger(bunFailed)) {
+      return null;
+    }
+    return { passed: bunPassed, failed: bunFailed };
   }
 
   // Jest/Vitest summary: capture ALL "Tests" lines, then read every
@@ -389,6 +391,7 @@ function parseTestOutput(output: string): { passed: number; failed: number } | n
     let lineFailed: number | undefined;
     for (const clause of line.matchAll(/(\d+)\s+(passed|failed)/g)) {
       const count = Number.parseInt(clause[1] ?? "0", 10);
+      if (!Number.isSafeInteger(count)) continue; // skip unsafe integers
       if (clause[2] === "passed") {
         if (linePassed === undefined) linePassed = count;
       } else if (lineFailed === undefined) {

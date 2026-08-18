@@ -309,7 +309,7 @@ export class Run {
     // dispatch_task phase body's value does) gets them merged onto the phase
     // record. Additive: values without those fields are recorded unchanged.
     const metricsValue =
-      clean && outcome !== "unsettled" && "value" in outcome
+      clean && outcome !== "unsettled" && "value" in outcome && typeof outcome.value === "object" && outcome.value !== null
         ? (outcome.value as unknown)
         : null;
     const metrics =
