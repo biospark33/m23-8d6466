@@ -465,7 +465,12 @@ async function main(argv: readonly string[]): Promise<number> {
         markerRoot,
         {
           repoSlug: repoSlug ?? null,
-          issueId: issue !== undefined && /^\d+$/.test(issue) ? Number(issue) : null,
+          // Digits alone are not a settled id: --issue 0 parses as 0, and a
+          // fabricated 0 would read as a real correlation (INV-RUN-4). Only an
+          // in-bounds value the ladder itself would have accepted is echoed.
+          issueId: issue !== undefined && /^\d+$/.test(issue) && Number(issue) >= 1
+            ? Number(issue)
+            : null,
           requestId: null, // resolve threw: nothing was settled (INV-RUN-4)
         },
         err,

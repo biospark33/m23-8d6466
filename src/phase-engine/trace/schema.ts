@@ -101,9 +101,10 @@ export const SCHEMA_DDL: readonly string[] = [
 
 /**
  * Additive index DDL applied in the same schema-init step as CREATE TABLE IF
- * NOT EXISTS. Append-only and order-stable like MIGRATIONS — DF1.8 appends its
- * `sessions(repo_slug, request_id)` unique index here; existing entries are
- * never edited or reordered. Re-apply is a no-op (`IF NOT EXISTS`).
+ * NOT EXISTS. Append-only and order-stable like MIGRATIONS — DF1.8 appends
+ * its two sessions indexes here (the pk-pair consistency assertion and the
+ * AC2 covering path); existing entries are never edited or reordered.
+ * Re-apply is a no-op (`IF NOT EXISTS`).
  */
 export const SCHEMA_INDEX_DDL: readonly string[] = [
   // (request_id, event_id) is unique by construction — event_id is the table's
@@ -114,13 +115,21 @@ export const SCHEMA_INDEX_DDL: readonly string[] = [
   // UPDATE when the same pid was recorded twice.
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_events_request_event
   ON events (request_id, event_id)`,
-  // DF1.8 — the covering path for the AC2 query (`readRunsByIssue` filters on
-  // repo_slug first). NOT the idempotency mechanism: request_id is already
-  // unique alone as the sessions pk, so this composite can never reject a row
-  // the pk would have accepted (INV-RUN-1); it is a cheap consistency
-  // assertion over a pk-derived pair that backs the cross-repo-scoped read.
+  // DF1.8 — NOT the idempotency mechanism and NOT a covering index for the
+  // AC2 query: request_id is already unique alone as the sessions pk, so this
+  // composite can never reject a row the pk would have accepted (INV-RUN-1),
+  // and readRunsByIssue never filters on request_id. It serves only the
+  // repo_slug PREFIX of that query and exercises the additive-index
+  // mechanism; the index below carries the actual AC2 covering path.
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_repo_request
   ON sessions (repo_slug, request_id)`,
+  // DF1.8 — the covering path for the AC2 query: readRunsByIssue predicates
+  // on (repo_slug, issue_id) with a rowid cursor, and every SQLite index
+  // implicitly ends in rowid, so this seeks both equality predicates and
+  // feeds ORDER BY rowid with no sort. Non-unique: one (repo, issue) pair
+  // legitimately has many runs (every replay/re-attempt is a new requestId).
+  `CREATE INDEX IF NOT EXISTS idx_sessions_repo_issue
+  ON sessions (repo_slug, issue_id)`,
 ];
 
 // Re-exports from migrations.ts for test convenience

@@ -341,13 +341,26 @@ describe("DF1.8 migrations and schema", () => {
       )
       .get("legacy-req-1");
     expect(row?.request).toBe("pre-DF1.8 row");
-    // The AC2 backing index exists.
-    const idx = db
-      .query<{ name: string }, [string]>(
-        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+    // The AC2 backing index exists — the (repo_slug, issue_id) covering path
+    // readRunsByIssue predicates on, not just the pk-pair assertion.
+    for (const name of ["idx_sessions_repo_request", "idx_sessions_repo_issue"]) {
+      const idx = db
+        .query<{ name: string }, [string]>(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+        )
+        .get(name);
+      expect(idx?.name).toBe(name);
+    }
+    // And it is the one the AC2 query actually seeks: EXPLAIN QUERY PLAN must
+    // name idx_sessions_repo_issue for the readRunsByIssue predicate shape
+    // (repo_slug AND issue_id equality + rowid cursor), not a table scan.
+    const plan = db
+      .query<{ detail: string }, [string, number, number, number]>(
+        "EXPLAIN QUERY PLAN SELECT rowid FROM sessions WHERE repo_slug = ? AND issue_id = ? AND rowid > ? ORDER BY rowid LIMIT ?",
       )
-      .get("idx_sessions_repo_request");
-    expect(idx?.name).toBe("idx_sessions_repo_request");
+      .all("qds/demo", 42, 0, 50);
+    const detail = plan.map((r) => r.detail).join(" | ");
+    expect(detail).toContain("idx_sessions_repo_issue");
     db.close();
   });
 
@@ -696,6 +709,42 @@ describe("appendDispatchFailure", () => {
     expect(Object.keys(first)).not.toContain("task");
     const second = JSON.parse(lines[1]!);
     expect(second.requestId).toBeNull();
+  });
+
+  test("a symlinked parent dir is refused — the append never follows it out of the boundary", () => {
+    const realParent = fs.realpathSync(fs.mkdtempSync(path.join(tmpRoot, "real-parent-")));
+    fs.writeFileSync(path.join(realParent, "dispatch-failures.log"), "attacker-controlled");
+    const linkParent = path.join(tmpRoot, "link-parent");
+    fs.symlinkSync(realParent, linkParent);
+
+    expect(() =>
+      appendDispatchFailure(path.join(linkParent, "dispatch-failures.log"), {
+        repoSlug: "qds/demo",
+        issueId: 42,
+        requestId: null,
+        code: "INVALID_ISSUE_ID",
+        message: "issueId must be a positive integer",
+      }),
+    ).toThrow("symlink");
+    // O_NOFOLLOW pinned the final component; the lstat parent guard pinned the
+    // walk to it — the target file is byte-identical to what the attacker left.
+    expect(fs.readFileSync(path.join(realParent, "dispatch-failures.log"), "utf-8")).toBe(
+      "attacker-controlled",
+    );
+  });
+
+  test("a parent that exists but is not a directory is refused", () => {
+    const notDir = path.join(tmpRoot, "not-a-dir");
+    fs.writeFileSync(notDir, "regular file");
+    expect(() =>
+      appendDispatchFailure(path.join(notDir, "dispatch-failures.log"), {
+        repoSlug: "qds/demo",
+        issueId: 42,
+        requestId: null,
+        code: "INVALID_ISSUE_ID",
+        message: "issueId must be a positive integer",
+      }),
+    ).toThrow("not a directory");
   });
 });
 

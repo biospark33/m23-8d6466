@@ -408,6 +408,46 @@ export interface ResolvedRunCorrelation {
   issueUrl: string | null;
 }
 
+/**
+ * AC3 refusal: the requestId is already spoken for by a different
+ * (repoSlug, issueId) pair — a different slug OR the same slug under a
+ * different issue (both are re-pointing attempts, INV-RUN-2). Names BOTH
+ * slugs and BOTH issue ids (existing first) so the operator can see the
+ * collision; a silent accept would violate INV-RUN-1.
+ *
+ * The one runtime export of this types region, by necessity: the trace
+ * store's `initiateSession` throws it, so it must live at a layer trace/
+ * may depend on — issue-correlation.ts (dispatch-level, owns fs logging)
+ * re-exports it unchanged for its existing callers.
+ */
+export class RequestIdRepoMismatchError extends Error {
+  name = "RequestIdRepoMismatchError";
+  readonly code = "REQUEST_ID_REPO_MISMATCH";
+  readonly requestId: string;
+  readonly existingRepoSlug: string;
+  readonly attemptedRepoSlug: string;
+  /** Issue the row is already correlated to; null only on a malformed row. */
+  readonly existingIssueId: number | null;
+  readonly attemptedIssueId: number | null;
+
+  constructor(e: {
+    requestId: string;
+    existingRepoSlug: string;
+    attemptedRepoSlug: string;
+    existingIssueId?: number | null;
+    attemptedIssueId?: number | null;
+  }) {
+    super(
+      `requestId ${e.requestId} is already correlated to repo "${e.existingRepoSlug}" issue #${e.existingIssueId ?? "?"} (attempted repo "${e.attemptedRepoSlug}" issue #${e.attemptedIssueId ?? "?"})`,
+    );
+    this.requestId = e.requestId;
+    this.existingRepoSlug = e.existingRepoSlug;
+    this.attemptedRepoSlug = e.attemptedRepoSlug;
+    this.existingIssueId = e.existingIssueId ?? null;
+    this.attemptedIssueId = e.attemptedIssueId ?? null;
+  }
+}
+
 /** A row of `phases` as returned by the correlated reader, with the phase's
  *  latest persisted envelope payload (its "persisted output") or null. */
 export interface TracePhaseRow {

@@ -21,10 +21,14 @@ import { randomBytes } from "node:crypto";
 import { SCHEMA_DDL, SCHEMA_INDEX_DDL } from "./schema.ts";
 import { applyMigrations } from "./migrations.ts";
 import { applyWriterPragmas } from "./pragmas.ts";
+// DF1.8: RequestIdRepoMismatchError (thrown by initiateSession below) and the
+// ResolvedRunCorrelation type both come from the types layer — trace/ imports
+// nothing from the dispatch-level issue-correlation module, in either layer's
+// direction.
 import {
   RequestIdRepoMismatchError,
   type ResolvedRunCorrelation,
-} from "../issue-correlation.ts";
+} from "../types.ts";
 
 /** Structured error carrying SQL context. */
 export class TracerError extends Error {
@@ -418,7 +422,7 @@ export class Tracer {
     // INV-5: additive migrations — a load failure is a compile-time import
     // error, not a silently skipped migration list; an apply failure is a
     // hard open failure. These run BEFORE the index DDL below: DF1.8's
-    // idx_sessions_repo_request covers migration-added columns, and SQLite
+    // sessions indexes cover migration-added columns, and SQLite
     // rejects an index on a column that does not exist yet ("no such column")
     // on both fresh and pre-DF1.8 stores.
     try {

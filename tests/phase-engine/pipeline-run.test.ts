@@ -698,12 +698,14 @@ describe("pipeline-run DF1.8 issue correlation", () => {
   }, 60_000);
 
   test("half-pair, malformed and duplicate-identifier correlation flags are refused before any session row", async () => {
-    const cases: { name: string; args: string[]; code?: string; stderrEvent?: boolean }[] = [
+    const cases: { name: string; args: string[]; code?: string; stderrEvent?: boolean; issueId?: number | null }[] = [
       { name: "--issue without --repo-slug (pair required, never defaulted)", args: ["--issue", "42"] },
       { name: "--repo-slug without --issue (pair required)", args: ["--repo-slug", "qds/demo"] },
       { name: "repo slug with a space", args: ["--repo-slug=bad slug", "--issue", "42"], code: "INVALID_REPO_SLUG", stderrEvent: true },
-      { name: "--issue 0", args: ["--repo-slug", "qds/demo", "--issue", "0"], code: "INVALID_ISSUE_ID", stderrEvent: true },
-      { name: "--issue abc", args: ["--repo-slug", "qds/demo", "--issue", "abc"], code: "INVALID_ISSUE_ID", stderrEvent: true },
+      // 0 and a non-numeric value alike must log issueId: null — never a
+      // fabricated 0 (INV-RUN-4): digits alone are not a settled issue id.
+      { name: "--issue 0", args: ["--repo-slug", "qds/demo", "--issue", "0"], code: "INVALID_ISSUE_ID", stderrEvent: true, issueId: null },
+      { name: "--issue abc", args: ["--repo-slug", "qds/demo", "--issue", "abc"], code: "INVALID_ISSUE_ID", stderrEvent: true, issueId: null },
       { name: "--request-id not a uuid v4", args: ["--repo-slug", "qds/demo", "--issue", "42", "--request-id", "not-uuid"], code: "INVALID_REQUEST_ID", stderrEvent: true },
       { name: "--run-id together with --repo-slug (no second identifier)", args: ["--repo-slug", "qds/demo", "--issue", "42", "--run-id", crypto.randomUUID()] },
     ];
@@ -723,6 +725,7 @@ describe("pipeline-run DF1.8 issue correlation", () => {
       const entry = lastFailureEntry(ws.markerRoot);
       expect(typeof entry.code === "string" && entry.code.length > 0, c.name).toBe(true);
       if (c.code) expect(entry.code, c.name).toBe(c.code);
+      if (c.issueId !== undefined) expect(entry.issueId, c.name).toBe(c.issueId);
       expect(typeof entry.message === "string" && entry.message.length > 0, c.name).toBe(true);
       expect(entry.runId ?? null, c.name).toBeNull();
     }

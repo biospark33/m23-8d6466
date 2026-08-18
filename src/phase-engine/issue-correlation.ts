@@ -13,9 +13,10 @@
  * `#42` exists in every repo the factory touches, so every guard here
  * requires the pair and a brief omitting repoSlug is refused, never defaulted.
  *
- * Deliberately imports nothing from trace/ — the tracer imports
- * RequestIdRepoMismatchError from here, so this module must stay free of that
- * cycle. The trace-store half of DF1.8 (three columns, composite index,
+ * Deliberately imports nothing from trace/ — and since the trace store's
+ * initiateSession throws RequestIdRepoMismatchError, that class lives in
+ * types.ts so trace/ never imports this module either: no edge in either
+ * direction. The trace-store half of DF1.8 (three columns, composite index,
  * initiateSession upsert) lives in trace/ on DF1.4's additive mechanisms.
  */
 import { randomUUID } from "node:crypto";
@@ -56,39 +57,12 @@ export class CorrelationError extends Error {
 }
 
 /**
- * AC3 refusal: the requestId is already spoken for by a different
- * (repoSlug, issueId) pair — a different slug OR the same slug under a
- * different issue (both are re-pointing attempts, INV-RUN-2). Names BOTH
- * slugs and BOTH issue ids (existing first) so the operator can see the
- * collision; a silent accept would violate INV-RUN-1.
+ * AC3 refusal (RequestIdRepoMismatchError) lives in types.ts, not here: the
+ * trace store's initiateSession throws it, and trace/ must not depend on this
+ * dispatch-level module (which owns fs logging). Re-exported below so the
+ * correlation API's callers keep importing it from this one module.
  */
-export class RequestIdRepoMismatchError extends Error {
-  name = "RequestIdRepoMismatchError";
-  readonly code = "REQUEST_ID_REPO_MISMATCH";
-  readonly requestId: string;
-  readonly existingRepoSlug: string;
-  readonly attemptedRepoSlug: string;
-  /** Issue the row is already correlated to; null only on a malformed row. */
-  readonly existingIssueId: number | null;
-  readonly attemptedIssueId: number | null;
-
-  constructor(e: {
-    requestId: string;
-    existingRepoSlug: string;
-    attemptedRepoSlug: string;
-    existingIssueId?: number | null;
-    attemptedIssueId?: number | null;
-  }) {
-    super(
-      `requestId ${e.requestId} is already correlated to repo "${e.existingRepoSlug}" issue #${e.existingIssueId ?? "?"} (attempted repo "${e.attemptedRepoSlug}" issue #${e.attemptedIssueId ?? "?"})`,
-    );
-    this.requestId = e.requestId;
-    this.existingRepoSlug = e.existingRepoSlug;
-    this.attemptedRepoSlug = e.attemptedRepoSlug;
-    this.existingIssueId = e.existingIssueId ?? null;
-    this.attemptedIssueId = e.attemptedIssueId ?? null;
-  }
-}
+export { RequestIdRepoMismatchError } from "./types.ts";
 
 /** Strict UUID v4 check (the pattern itself is exported for tests and DF3.1). */
 export function isValidUuidV4(value: string): boolean {
@@ -170,7 +144,17 @@ export function appendDispatchFailure(
   },
 ): void {
   const parent = path.dirname(logPath);
-  if (!fs.existsSync(parent)) {
+  let parentStat: fs.Stats | undefined;
+  try {
+    // lstat, not stat: the parent itself must be a real directory. stat/exists
+    // follow a symlinked parent out of the boundary, and O_NOFOLLOW below only
+    // pins the FINAL component (logPath), never the directory walk to it — a
+    // symlinked parent would redirect every append to an attacker-chosen file.
+    parentStat = fs.lstatSync(parent);
+  } catch {
+    /* missing → created below */
+  }
+  if (parentStat === undefined) {
     // mode is umask-masked, so chmod after mkdir and verify — the contract is
     // 0700, not "0700 modulo umask".
     fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
@@ -178,7 +162,11 @@ export function appendDispatchFailure(
     if ((fs.statSync(parent).mode & 0o777) !== 0o700) {
       throw new Error(`dispatch-log parent dir ${parent} is not mode 0700 after chmod`);
     }
-  } else if ((fs.statSync(parent).mode & 0o022) !== 0) {
+  } else if (parentStat.isSymbolicLink()) {
+    throw new Error(`dispatch-log parent dir ${parent} is a symlink`);
+  } else if (!parentStat.isDirectory()) {
+    throw new Error(`dispatch-log parent dir ${parent} is not a directory`);
+  } else if ((parentStat.mode & 0o022) !== 0) {
     // Same boundary discipline as the tracer's data-dir guards (tracer.ts):
     // a group/world-writable parent lets any uid swap the log between this
     // stat and the open below — refuse rather than append through it.
