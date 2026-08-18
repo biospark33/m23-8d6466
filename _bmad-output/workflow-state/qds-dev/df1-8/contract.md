@@ -139,8 +139,17 @@ export class RequestIdRepoMismatchError extends Error {
   requestId: string;
   existingRepoSlug: string;
   attemptedRepoSlug: string;
-  // message MUST name both slugs
+  existingIssueId: number | null;   // null only on a malformed row
+  attemptedIssueId: number | null;
+  // message MUST name both slugs AND both issue numbers (existing first)
 }
+```
+
+The class is **declared in `types.ts`**, not this module (round 1): trace/ throws it
+from `initiateSession` and must not import this dispatch-level module, which owns fs
+logging. `issue-correlation.ts` re-exports it so callers keep one import site.
+
+```ts
 
 export function isValidUuidV4(value: string): boolean;
 export function resolveRunCorrelation(brief: IssueRef & { requestId?: string }): ResolvedRunCorrelation;
@@ -181,11 +190,11 @@ initiateSession(e: {
 ```
 
 Semantics (single `db.transaction(...).immediate()` round):
-1. `SELECT repo_slug FROM sessions WHERE request_id = ?` (bound).
+1. `SELECT repo_slug, issue_id FROM sessions WHERE request_id = ?` (bound).
 2. Row found:
-   - `repo_slug === correlation.repoSlug` → return `{ requestId, runId: requestId, replayed: true }` (no writes).
+   - `(repo_slug, issue_id) === (correlation.repoSlug, correlation.issueId)` → return `{ requestId, runId: requestId, replayed: true }` (no writes). The FULL pair, never the slug alone: a reused requestId for the same repo under a different issue is a re-point and refuses exactly like a different repo (INV-RUN-2 on the issue axis).
    - `repo_slug === null` (bare DF1.4 row) → `UPDATE sessions SET repo_slug=?, issue_id=?, issue_url=? WHERE request_id=?` (the one and only write of these columns — INV-RUN-2 fill-once) → `{..., replayed: true}`.
-   - else → throw `RequestIdRepoMismatchError` naming both slugs (existing first). Transaction rolls back; no row written, no second row.
+   - else → throw `RequestIdRepoMismatchError` naming both slugs AND both issue numbers (existing first). Transaction rolls back; no row written, no second row.
 3. No row → `INSERT INTO sessions (request_id, request, status, engineer, started_at, pipeline_name, repo_slug, issue_id, issue_url) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?) ON CONFLICT(request_id) DO NOTHING` (all bound).
    - `changes === 1` → `{ requestId, runId: requestId, replayed: false }`.
    - `changes === 0` (racing writer won) → re-SELECT and apply step-2 logic once.
