@@ -301,7 +301,7 @@ class TraceReaderImpl implements TraceReader {
       const phaseRows = db
         .query<TracePhaseRow, string[]>(
           `${this.phaseSelect()}
-            WHERE phases.request_id IN (${placeholders}) AND phases.rowid > 0
+            WHERE phases.request_id IN (${placeholders})
             ORDER BY phases.rowid`,
         )
         .all(...sessions.map((s) => s.request_id));
