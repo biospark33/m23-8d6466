@@ -178,6 +178,14 @@ describe("team-event-adapter: malformed handling", () => {
     expect(snapshot.droppedOversizeLines).toBe(1);
   });
 
+  it("unknown type field returns null from parser", () => {
+    // The default case in parseTeamEventLine returns null for any unrecognized
+    // type field. This prevents unknown event types from entering the stream.
+    const unknownLine = '{"type":"definitely_not_a_kind","agentId":"w1"}';
+    const parsed = parseTeamEventLine(unknownLine);
+    expect(parsed).toBe(null);
+  });
+
   it("counters persist across multiple calls", () => {
     const health = makeStreamHealth();
     health.malformed("bad1");
@@ -188,6 +196,28 @@ describe("team-event-adapter: malformed handling", () => {
     const snapshot = health.snapshot();
     expect(snapshot.malformedLines).toBe(2);
     expect(snapshot.droppedOversizeLines).toBe(3);
+  });
+
+  it("all-invalid stream: N malformed lines counted correctly", () => {
+    // Feed multiple malformed lines through the stream-health counter to
+    // verify the malformedLines counter accumulates correctly while dropped
+    // stays at zero.
+    const health = makeStreamHealth();
+    const malformedLines = [
+      '{garbage',
+      'not json at all',
+      '{"type":"merged","result":[]}',
+      '{"type":"unknown","data":123}',
+    ];
+    for (const line of malformedLines) {
+      const parsed = parseTeamEventLine(line);
+      if (!parsed) {
+        health.malformed(line);
+      }
+    }
+    const snapshot = health.snapshot();
+    expect(snapshot.malformedLines).toBe(4);
+    expect(snapshot.droppedOversizeLines).toBe(0);
   });
 });
 

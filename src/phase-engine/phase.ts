@@ -337,16 +337,24 @@ export class Run {
         // (buggily) repeats one of these keys. Whitelist only the four documented
         // PhaseSubTimings keys (mulch_prime_ms, box_setup_ms, team_execution_ms,
         // gate_validation_ms); unknown keys are dropped rather than spread.
-        ...(metrics.dispatchSubTimings?.mulch_prime_ms !== undefined
+        ...(metrics.dispatchSubTimings?.mulch_prime_ms !== undefined &&
+        Number.isFinite(metrics.dispatchSubTimings.mulch_prime_ms) &&
+        metrics.dispatchSubTimings.mulch_prime_ms >= 0
           ? { mulch_prime_ms: metrics.dispatchSubTimings.mulch_prime_ms }
           : {}),
-        ...(metrics.dispatchSubTimings?.box_setup_ms !== undefined
+        ...(metrics.dispatchSubTimings?.box_setup_ms !== undefined &&
+        Number.isFinite(metrics.dispatchSubTimings.box_setup_ms) &&
+        metrics.dispatchSubTimings.box_setup_ms >= 0
           ? { box_setup_ms: metrics.dispatchSubTimings.box_setup_ms }
           : {}),
-        ...(metrics.dispatchSubTimings?.team_execution_ms !== undefined
+        ...(metrics.dispatchSubTimings?.team_execution_ms !== undefined &&
+        Number.isFinite(metrics.dispatchSubTimings.team_execution_ms) &&
+        metrics.dispatchSubTimings.team_execution_ms >= 0
           ? { team_execution_ms: metrics.dispatchSubTimings.team_execution_ms }
           : {}),
-        ...(metrics.dispatchSubTimings?.gate_validation_ms !== undefined
+        ...(metrics.dispatchSubTimings?.gate_validation_ms !== undefined &&
+        Number.isFinite(metrics.dispatchSubTimings.gate_validation_ms) &&
+        metrics.dispatchSubTimings.gate_validation_ms >= 0
           ? { gate_validation_ms: metrics.dispatchSubTimings.gate_validation_ms }
           : {}),
         // `this.index` was incremented above, so `1` identifies the first phase —

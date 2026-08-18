@@ -17,6 +17,8 @@ import {
   mkdirSync,
   symlinkSync,
   unlinkSync,
+  existsSync,
+  readdirSync,
 } from "node:fs";
 import { join } from "node:path";
 import type { PhaseSpec } from "../../src/phase-engine/types.ts";
@@ -459,6 +461,48 @@ describe("dispatch-task: AC3 precedence rule", () => {
     });
     const result = await runDispatch();
     expect(result.exitStatus).toBe("transient");
+  });
+});
+
+describe("dispatch-task: round-6 hardening", () => {
+  it("duplicate merged event: first wins, warns once per duplicate", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (msg?: unknown) => {
+      warns.push(String(msg));
+    };
+    try {
+      injectFake((opts) => {
+        feedLine(opts, '{"type":"merged","result":{"summary":"first"}}');
+        feedLine(opts, '{"type":"merged","result":{"summary":"second"}}');
+        opts.onRunFacts?.({
+          exitCode: 0,
+          termSignal: null,
+          killOrigin: null,
+          comsInitError: null,
+        });
+        return successResult();
+      });
+      const result = await runDispatch();
+      expect(result.exitStatus).toBe("success");
+      expect(warns.filter((w) => w.includes("duplicate merged"))).toHaveLength(1);
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+
+  it("runner throws: manifest file cleaned up despite the throw", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    injectFake(() => {
+      throw new Error("runner exploded");
+    });
+    await expect(runDispatch()).rejects.toThrow("runner exploded");
+    const dir = join(tmpRoot, ".qds-manifests");
+    const leftover = existsSync(dir) ? readdirSync(dir).length : 0;
+    expect(leftover).toBe(0);
   });
 });
 

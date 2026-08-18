@@ -35,7 +35,7 @@ import { runTeamManifest } from "../../../cli-anything/src/runner.ts";
 import type { MergedOutput, TeamManifest } from "../../../cli-anything/src/types.ts";
 import type { PhaseBody, PhaseBodyContext } from "../phase.ts";
 import type { PhaseSpec, PhaseSubTimings } from "../types.ts";
-import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -232,8 +232,6 @@ export function dispatchTask(
       manifestDir,
       `manifest-${runId}-${phaseId}-${randomBytes(8).toString("hex")}.json`,
     );
-    writeFileSync(manifestFile, JSON.stringify(manifest), { mode: 0o600 });
-
     // AC2 stream health: malformed (parser rejections) and droppedOversize
     // (cap drops that never reach the parser) are distinct counters.
     const streamHealth = makeStreamHealth();
@@ -250,6 +248,7 @@ export function dispatchTask(
     } = { exitCode: null, termSignal: null, killOrigin: null };
 
     try {
+      writeFileSync(manifestFile, JSON.stringify(manifest), { mode: 0o600 });
       const runResult = await _runTeamManifest(manifestFile, {
         forceLocalRunner: true,
         effectiveCeilingMicros: runCtx.effectiveCeilingMicros,
@@ -295,8 +294,9 @@ export function dispatchTask(
               if (!mergedSeen) {
                 mergedResult = adapted.result;
                 mergedSeen = true;
+              } else {
+                console.warn(`[dispatch-task] duplicate merged event ignored (requestId=${requestId}, phaseId=${phaseId})`);
               }
-              // else: ignore silently — stream-health marker for duplicate terminal events
               // Continue processing events after merged for stream health (malformed/dropped counters)
               break;
           }
@@ -407,7 +407,7 @@ export function dispatchTask(
       };
     } finally {
       try {
-        unlinkSync(manifestFile);
+        rmSync(manifestFile, { force: true });
       } catch (err) {
         // cleanup is best-effort; never masks the typed result
         // ponytail: warn but don't throw — orphaned manifests are benign

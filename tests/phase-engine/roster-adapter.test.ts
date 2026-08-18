@@ -407,3 +407,81 @@ describe("rosterToTeamManifest", () => {
     }
   });
 });
+
+describe("rosterToTeamManifest: garbage-structure input handling", () => {
+  test("null role entry throws TypeError (not schema error)", () => {
+    // The adapter does NOT validate roster structure at the boundary — it
+    // trusts the ResolvedRoster type. When a null entry is present (which can
+    // only happen via type-erasure at runtime, bypassing TypeScript), accessing
+    // role.name in rosterRoleToTeamRole throws a TypeError: "Cannot read
+    // properties of null (reading 'provider')". This is a runtime crash, not
+    // a clean ZodError.
+    // NOTE: This is observable behavior, not ideal — a ZodError at the
+    // boundary would be cleaner. Documented here for pre-dev contract clarity.
+    const badRoster = {
+      path: "/fake.yaml",
+      roles: [null, { name: "w1", model: "m", provider: "p", thinking: "off", tools: null, writes: [], harness_engineering: [], slug: "p/m", warnings: [] }] as ResolvedRole[],
+      warnings: [],
+    } as ResolvedRoster;
+
+    expect(() =>
+      rosterToTeamManifest(badRoster, {
+        name: "bad",
+        project: "p",
+        leadRoleName: "w1",
+        workerRoleNames: [],
+        prompts: { w1: "x" },
+      }),
+    ).toThrow(TypeError);
+  });
+
+  test("role missing name: Map lookup fails with Error (not ZodError)", () => {
+    // A role object with missing/undefined name still goes into the Map, but
+    // the name key becomes undefined. When the adapter looks up the role by
+    // name (e.g., "lead"), Map.get("lead") returns undefined, and the adapter
+    // throws a clean Error with message "Lead role 'lead' not found in roster".
+    // This is better than a TypeError but still not a ZodError.
+    const badRoster: ResolvedRoster = {
+      path: "/fake.yaml",
+      roles: [
+        { name: undefined as unknown as string, model: "m", provider: "p", thinking: "off", tools: null, writes: [], harness_engineering: [], slug: "p/m", warnings: [] },
+      ],
+      warnings: [],
+    };
+
+    expect(() =>
+      rosterToTeamManifest(badRoster, {
+        name: "bad",
+        project: "p",
+        leadRoleName: "lead",
+        workerRoleNames: [],
+        prompts: {},
+      }),
+    ).toThrow(/Lead role "lead" not found in roster/);
+  });
+
+  test("role missing provider: creates invalid model field, Zod catches it at parse", () => {
+    // A role with missing provider/model pair causes rosterRoleToTeamRole to
+    // construct model as "undefined/m" (undefined coerced to string). The
+    // resulting manifest fails TeamManifestSchema.parse with a ZodError about
+    // the invalid model field. This is the CLEANEST error path among the
+    // garbage-structure cases — Zod validates at the boundary.
+    const badRoster: ResolvedRoster = {
+      path: "/fake.yaml",
+      roles: [
+        { name: "lead", model: "m", provider: undefined as unknown as string, thinking: "off", tools: null, writes: [], harness_engineering: [], slug: "undefined/m", warnings: [] },
+      ],
+      warnings: [],
+    };
+
+    expect(() =>
+      rosterToTeamManifest(badRoster, {
+        name: "bad",
+        project: "p",
+        leadRoleName: "lead",
+        workerRoleNames: [],
+        prompts: { lead: "x" },
+      }),
+    ).toThrow(); // ZodError from TeamManifestSchema.parse
+  });
+});

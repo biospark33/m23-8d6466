@@ -211,6 +211,12 @@ async function main(): Promise<void> {
       process.exit(0);
       break;
     }
+    case "watchdog_kill": {
+      // Stay alive for watchdog to escalate. No output needed — we're testing
+      // that the watchdog escalation sets killOrigin and classifies as overflow.
+      await sleep(60_000);
+      break;
+    }
     default: {
       console.error(`warren-team-shim: unknown scenario '${scenario}'`);
       process.exit(70);

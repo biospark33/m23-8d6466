@@ -407,3 +407,41 @@ describe("DF1.6 T5: spawn seam budget ceiling raise (real runs)", () => {
     expect(process.env.QDS_TEAM_RUNNER).toBe(ambientRunner);
   }, 15_000);
 });
+
+describe("DF1.6 T4: RSS watchdog overflow regression test", () => {
+  it("watchdog escalation → exitStatus overflow AND killOrigin watchdog (onRunFacts wiring)", async () => {
+    let capturedKillOrigin: "watchdog" | null = null;
+    let sampleCount = 0;
+    const OVER_THRESHOLD_RSS = 5 * 1024 ** 3; // 5 GB (exceeds 4 GB default)
+
+    const out = await runTeamManifest(TEAM_MANIFEST, {
+      env: teamEnv("watchdog_kill"),
+      // Inject sampler that reports over-threshold RSS on first poll
+      watchdogSampleRss: async () => {
+        sampleCount++;
+        // First poll returns over-threshold → triggers escalation
+        if (sampleCount === 1) {
+          return OVER_THRESHOLD_RSS;
+        }
+        // After escalation, return null so we don't keep polling
+        return null;
+      },
+      // Capture killOrigin from onRunFacts callback
+      onRunFacts: (facts) => {
+        capturedKillOrigin = facts.killOrigin;
+      },
+      // Short grace so test completes fast (default 5s, we don't need to wait)
+      graceMs: 100,
+    });
+
+    // Primary assertions: the overflow classification and watchdog attribution
+    expect(out.exitStatus).toBe("overflow");
+    expect(out.error?.reason).toBe("overflow");
+    expect(out.error?.message).toContain("RSS watchdog 4 GB threshold exceeded");
+    // DF1.6 wave-1 fix: killOrigin is now read from the live watchdog handle
+    expect(capturedKillOrigin).toBe("watchdog");
+
+    // Verify the sampler was called at least once (escalation happened)
+    expect(sampleCount).toBeGreaterThanOrEqual(1);
+  }, 15_000);
+});

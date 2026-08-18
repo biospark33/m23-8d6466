@@ -609,6 +609,12 @@ export interface TeamRunOptions {
    * a phase abort must not leave the team running until its own wall-clock cap.
    */
   abortSignal?: AbortSignal;
+  /**
+   * Test seam: overrides RSS sampling in the watchdog. Returns RSS in bytes,
+   * or null if sampling fails. Only used for regression tests of overflow
+   * classification and killOrigin attribution.
+   */
+  watchdogSampleRss?: () => Promise<number | null>;
 }
 
 /**
@@ -722,7 +728,6 @@ export async function runTeamManifest(
     let costUnpriced = false;
     let budgetKilled = false;
     let wallTimedOut = false;
-    const watchdogKilled = false; // DF1.6 T4: RSS watchdog kill flag
     let settled = false;
     let child: ChildProcess | null = null;
     const timers: Array<ReturnType<typeof setTimeout>> = [];
@@ -770,7 +775,8 @@ export async function runTeamManifest(
       if (settled) return;
       settled = true;
       for (const t of timers) clearTimeout(t);
-      // DF1.6 T4: Stop RSS watchdog on settle (no kill after clean exit)
+      // DF1.6 T4: Read killOrigin BEFORE stopping watchdog (stop() clears handle ref)
+      const watchdogKillOrigin = watchdog !== null && watchdog.killOrigin === "watchdog" ? "watchdog" : null;
       if (watchdog !== null) {
         watchdog.stop();
         watchdog = null;
@@ -783,7 +789,7 @@ export async function runTeamManifest(
         opts.onRunFacts?.({
           exitCode: lastExitCode,
           termSignal: lastTermSignal,
-          killOrigin: watchdogKilled ? "watchdog" : null,
+          killOrigin: watchdogKillOrigin,
           comsInitError: comsInitError ?? null,
         });
       } catch (err) {
@@ -885,9 +891,9 @@ export async function runTeamManifest(
           child,
           pgidOrGroup: child.pid,
           onEscalate: (_info) => {
-            // watchdogKilled is now set synchronously by startRssWatchdog
-            // before this callback runs (overflow-precedence fix).
-            // The flag is already visible at classification decision time.
+            // Attribution is read from handle.killOrigin at classification time
+            // (set synchronously by startRssWatchdog before this callback runs).
+            // Cleared only if group already gone (group-gone catch in watchdog.ts).
           },
           onUnwatchable: (reason) => {
             // Log but don't fail — watchdog becomes inactive
@@ -897,6 +903,7 @@ export async function runTeamManifest(
             // Use console.error for watchdog diagnostics (like existing cost warnings)
             console.error(msg);
           },
+          sampleRss: opts.watchdogSampleRss,
         });
       }
     } catch (err) {
@@ -1174,7 +1181,7 @@ export async function runTeamManifest(
         // Overflow paths win regardless of the raw classification (CC-1
         // precedence: budget/wall-clock/watchdog kill → overflow regardless of signal).
         // DF1.6 T4: watchdog kill also maps to overflow (precedence step 1)
-        if (budgetKilled || wallTimedOut || watchdogKilled) {
+        if (budgetKilled || wallTimedOut || (watchdog !== null && watchdog.killOrigin === "watchdog")) {
           settle("overflow", true, {
             reason: "overflow",
             message: budgetKilled

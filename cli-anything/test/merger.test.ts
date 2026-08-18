@@ -304,8 +304,6 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
     const resultObj = { summary: "done", workerSummaries: { w1: "ok" } };
     const out = base({ result: resultObj });
     expect(out.result).toEqual(resultObj);
-    // Verify it's the same structure, not a copy with modifications
-    expect(JSON.stringify(out.result)).toBe(JSON.stringify(resultObj));
   });
 
   it("summary copy-up: 2500-char source → ≤2000 with suffix", () => {
@@ -432,13 +430,7 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
     expect(out.partialOutput).not.toBeNull();
   });
 
-  it("truncateWithSuffix edge case: tiny maxLength returns trimmed marker", () => {
-    // When maxLength is smaller than the suffix itself, the function returns
-    // a fixed marker "[…]" trimmed to maxLength. This is theoretical for
-    // current caps (2000 for summary, 10000 for partialOutput) since the
-    // suffix is ~29 chars and always fits. Verified via code inspection of
-    // truncateWithSuffix: `const marker = "[…]"; return marker.slice(0, maxLength);`
-    // Here we verify normal truncation works correctly with realistic lengths.
+  it("truncateWithSuffix: normal truncation with exact suffix content", () => {
     const out = base({
       result: { summary: "a".repeat(3000) },
     });
@@ -452,6 +444,14 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
     // changedFiles/agentOutputs on lead_failure — a caller passing "" (or any
     // string) with exitStatus success gets null, not a failure-detail value.
     const out = base({ partialOutput: "" });
+    expect(out.partialOutput).toBeNull();
+  });
+
+  it("partialOutput forced to null on the success path with non-empty input", () => {
+    // The null-on-success forcing must hold for ANY string, not just "".
+    // A caller passing a non-empty partialOutput with exitStatus success gets
+    // null — the contract is enforced at construction, not by caller discipline.
+    const out = base({ partialOutput: "this non-empty output must be nulled on success" });
     expect(out.partialOutput).toBeNull();
   });
 
