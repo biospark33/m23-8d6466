@@ -17,24 +17,12 @@ import {
 import { TeamManifestSchema } from "../../cli-anything/src/types.ts";
 import { splitRoleModel } from "../../cli-anything/src/team-events.ts";
 
-const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df1-6-adapter-")));
+// ponytail: tmpRoot removed — dead fixture created, realpath'd, never used
 afterEach(() => {
-  // Clean up any test artifacts
-  if (fs.existsSync(tmpRoot)) {
-    const entries = fs.readdirSync(tmpRoot);
-    for (const entry of entries) {
-      const p = path.join(tmpRoot, entry);
-      fs.rmSync(p, { recursive: true, force: true });
-    }
-  }
+  // Cleanup now inline for any temp files created during tests
 });
 afterAll(() => {
-  try {
-    fs.rmSync(tmpRoot, { recursive: true, force: true });
-  } catch (e) {
-    // best-effort cleanup — warn so orphaned temp dirs are visible
-    console.warn(`roster-adapter.test cleanup failed: ${tmpRoot}`, e instanceof Error ? e.message : String(e));
-  }
+  // Global cleanup moved inline
 });
 
 describe("rosterRoleToTeamRole", () => {
@@ -483,5 +471,130 @@ describe("rosterToTeamManifest: garbage-structure input handling", () => {
         prompts: { lead: "x" },
       }),
     ).toThrow(); // ZodError from TeamManifestSchema.parse
+  });
+});
+
+describe("rosterToTeamManifest: RA-tests — negative tests for new roster-adapter guards", () => {
+  const baseRole: Omit<ResolvedRole, "name"> = {
+    model: "claude-haiku-4-5",
+    provider: "anthropic",
+    thinking: "off",
+    tools: null,
+    writes: [],
+    harness_engineering: [],
+    slug: "anthropic/claude-haiku-4-5",
+    warnings: [],
+  };
+
+  test("empty provider throws clean Error (NOT undefined/m passing schema)", () => {
+    // Empty string provider fails at the adapter boundary with a clean Error,
+    // not as a Zod schema pass with "undefined/m" model.
+    const badRoster: ResolvedRoster = {
+      path: "/fake.yaml",
+      roles: [
+        { ...baseRole, name: "lead", provider: "" as unknown as string, slug: "/claude-haiku-4-5" },
+        { ...baseRole, name: "w1" },
+      ],
+      warnings: [],
+    };
+
+    // ponytail: Bun test doesn't support predicates in .toThrow(), check error message directly
+    let thrownError: Error | undefined;
+    try {
+      rosterToTeamManifest(badRoster, {
+        name: "bad",
+        project: "p",
+        leadRoleName: "lead",
+        workerRoleNames: ["w1"],
+        prompts: { lead: "x", w1: "y" },
+      });
+    } catch (e) {
+      thrownError = e as Error;
+    }
+    expect(thrownError).toBeDefined();
+    // Clean Error about provider, not "undefined/m" Zod message
+    expect(thrownError?.message).toContain("provider");
+    expect(thrownError?.message).not.toContain("undefined");
+  });
+
+  test("missing prompts[worker] entry throws Error containing the role name", () => {
+    // Adapter checks prompts map has entries for each worker role name.
+    // Missing entry throws Error mentioning the specific role.
+    const roster: ResolvedRoster = {
+      path: "/fake.yaml",
+      roles: [
+        { ...baseRole, name: "lead" },
+        { ...baseRole, name: "fixer" },
+      ],
+      warnings: [],
+    };
+
+    // ponytail: Bun test doesn't support predicates in .toThrow(), check error message directly
+    let thrownError: Error | undefined;
+    try {
+      rosterToTeamManifest(roster, {
+        name: "missing-prompt",
+        project: "p",
+        leadRoleName: "lead",
+        workerRoleNames: ["fixer"],
+        prompts: { lead: "Lead the team" }, // Missing "fixer" prompt
+      });
+    } catch (e) {
+      thrownError = e as Error;
+    }
+    expect(thrownError).toBeDefined();
+    expect(thrownError?.message).toContain("fixer");
+  });
+
+  test("duplicate workerRoleNames throws clean Error", () => {
+    // Duplicate worker names in the array should throw a clean Error.
+    const roster: ResolvedRoster = {
+      path: "/fake.yaml",
+      roles: [
+        { ...baseRole, name: "lead" },
+        { ...baseRole, name: "w1" },
+      ],
+      warnings: [],
+    };
+
+    expect(() =>
+      rosterToTeamManifest(roster, {
+        name: "dup-workers",
+        project: "p",
+        leadRoleName: "lead",
+        workerRoleNames: ["w1", "w1"], // Duplicate
+        prompts: { lead: "x", w1: "y" },
+      }),
+    ).toThrow(/duplicate/i);
+  });
+
+  test("worker listed that also appears as lead-in-workers throws clean Error", () => {
+    // When a worker is also the lead (lead-in-workers pattern), it should
+    // throw a clean Error. Use valid second worker so min(1) isn't the issue.
+    const roster: ResolvedRoster = {
+      path: "/fake.yaml",
+      roles: [
+        { ...baseRole, name: "lead" },
+        { ...baseRole, name: "w1" },
+        { ...baseRole, name: "w2" },
+      ],
+      warnings: [],
+    };
+
+    // ponytail: Bun test doesn't support predicates in .toThrow(), check error message directly
+    let thrownError: Error | undefined;
+    try {
+      rosterToTeamManifest(roster, {
+        name: "lead-in-workers",
+        project: "p",
+        leadRoleName: "lead",
+        workerRoleNames: ["lead", "w1", "w2"], // lead appears in workers
+        prompts: { lead: "x", w1: "y", w2: "z" },
+      });
+    } catch (e) {
+      thrownError = e as Error;
+    }
+    expect(thrownError).toBeDefined();
+    expect(thrownError?.message).toMatch(/duplicate/i);
   });
 });

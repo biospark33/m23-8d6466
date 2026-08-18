@@ -221,6 +221,46 @@ describe("team-event-adapter: malformed handling", () => {
   });
 });
 
+describe("team-event-adapter: review-round hardening (A5, A6)", () => {
+  const ctx = {
+    requestId: "req-1",
+    phaseId: "phase-1",
+    redact: (s: string) => s,
+  };
+
+  it("A5: coms event with no fields (only type) produces trace event without throwing", () => {
+    // Pin current lenient behavior: {"type":"coms"} with no other fields
+    // should adapt to a trace event without throwing.
+    const comsLine = '{"type":"coms"}';
+    const parsed = parseTeamEventLine(comsLine);
+    expect(parsed).toBeTruthy();
+    if (!parsed || parsed.kind !== "coms") throw new Error("Parse failed");
+
+    // Should NOT throw — adapts with lenient defaults
+    const adapted = adaptTeamEvent(parsed, ctx);
+    expect(adapted.type).toBe("coms");
+  });
+
+  it("A6: StreamHealth zero after valid lines (actually adapts, counters checked)", () => {
+    // Original test claimed "Adapt normally" but never called adaptTeamEvent.
+    // Now actually adapts a valid line and counters still zero.
+    const health = makeStreamHealth();
+    const validLine = '{"type":"coms","requestId":"req-1","sessionId":"sess-1","phaseId":"phase-1","channel":"test","direction":"send","senderAgent":"a","receiverAgent":"b","payloadSize":256,"durationMs":45,"timestamp":"2026-08-17T12:00:00.000Z"}';
+    const parsed = parseTeamEventLine(validLine);
+    expect(parsed).toBeTruthy();
+    if (!parsed || parsed.kind !== "coms") throw new Error("Parse failed");
+
+    // Actually adapt — this is what the comment claimed but didn't do
+    const adapted = adaptTeamEvent(parsed, ctx);
+    expect(adapted.type).toBe("coms");
+
+    // Counters remain zero after processing valid lines
+    const snapshot = health.snapshot();
+    expect(snapshot.malformedLines).toBe(0);
+    expect(snapshot.droppedOversizeLines).toBe(0);
+  });
+});
+
 describe("team-event-adapter: coms payload redaction", () => {
   it("redacts secret values in coms payload", () => {
     const ctx = {

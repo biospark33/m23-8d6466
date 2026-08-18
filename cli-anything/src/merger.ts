@@ -192,8 +192,24 @@ export interface BuildMergedOutputOptions {
 /** Max UTF-16 length of top-level summary field (p1-6:65). */
 const MAX_SUMMARY_CHARS = 2000;
 
-/** Max UTF-16 length of partialOutput field (p1-6:65). */
-const MAX_PARTIAL_OUTPUT_CHARS = 10000;
+/**
+ * Max UTF-16 length of partialOutput field (p1-6:65).
+ * Exported for single-source-of-truth with runner (R4).
+ */
+export const MAX_PARTIAL_OUTPUT_CHARS = 10000;
+
+/**
+ * Suffix appended by truncateWithSuffix when truncation occurs.
+ * Exported so runner can leave headroom for it (R4).
+ */
+export const TRUNCATION_SUFFIX = "[truncated, N chars total]";
+
+/**
+ * Length of the longest possible truncation suffix ([truncated, 999999999 chars total]).
+ * Used by runner to reserve headroom so the marker always appears when truncation happened.
+ * Exported for single-source-of-truth (R4).
+ */
+export const MAX_SUFFIX_LENGTH = TRUNCATION_SUFFIX.replace("N", "999999999").length;
 
 /**
  * Truncate a string to a max length, reserving space for suffix before cutting.
@@ -208,9 +224,12 @@ function truncateWithSuffix(
   const suffix = `[truncated, ${text.length} ${suffixLabel} total]`;
   const proseBudget = maxLength - suffix.length;
   if (proseBudget < 0) {
-    // When maxLength is smaller than the suffix, return a fixed marker trimmed to fit.
-    const marker = "[…]";
-    return marker.slice(0, maxLength);
+    // R8: When maxLength is smaller than the suffix, return a marker-bearing fallback.
+    // Keep at least "[…]" visible; trim the suffix itself if needed.
+    const minimalMarker = "[…]";
+    if (maxLength >= 3) return minimalMarker;
+    // Even smaller: return minimal marker trimmed to maxLength (may be just "[").
+    return minimalMarker.slice(0, maxLength);
   }
   return text.slice(0, proseBudget) + suffix;
 }
@@ -248,14 +267,32 @@ export function buildMergedOutput(
     );
   }
 
-  // DF1.6 testsExecuted invariant (p1-6:62)
-  const sum = testResults.passed + testResults.failed;
+  // DF1.6 testsExecuted invariant (p1-6:62, R9)
+  // R9: Reject negative/non-integer counts; reject testsExecuted === false when passed+failed > 0.
+  // Keep existing sum===0 rule.
+  const { passed, failed } = testResults;
+  if (!Number.isInteger(passed) || passed < 0) {
+    throw new Error(
+      `merged output: passed must be a non-negative integer, got ${passed}`,
+    );
+  }
+  if (!Number.isInteger(failed) || failed < 0) {
+    throw new Error(
+      `merged output: failed must be a non-negative integer, got ${failed}`,
+    );
+  }
+  const sum = passed + failed;
   if (sum === 0) {
     if (testsExecuted !== false) {
       throw new Error(
         `merged output: testsExecuted must be false when passed+failed===0, got ${testsExecuted}`,
       );
     }
+  } else if (testsExecuted === false) {
+    // R9: When tests ran (sum > 0), testsExecuted must be true.
+    throw new Error(
+      `merged output: testsExecuted must be true when passed+failed > 0 (got ${sum}), got false`,
+    );
   }
 
   const agentOutputs =

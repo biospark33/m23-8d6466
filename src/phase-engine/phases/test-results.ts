@@ -41,6 +41,14 @@ const MAX_CAPTURE_BYTES = 512 * 1024;
 /** Grace between SIGTERM and SIGKILL on the abort path. */
 const TERM_GRACE_MS = 5000;
 
+/** Bounded drain timeout for stream reads after proc.exited resolves — prevents
+ * hanging when a descendant holds the pipe open. */
+const DRAIN_TIMEOUT_MS = 2000;
+
+/** ANSI escape sequence regex for stripping before parsing test output. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional ANSI escape sequence
+const ANSI_ESCAPE = /\x1b\[[0-9;]*m/g;
+
 /**
  * Read a piped stdio stream to text, stopping hard at `cap` bytes.
  *
@@ -51,6 +59,7 @@ const TERM_GRACE_MS = 5000;
 async function readCapped(
   stream: ReadableStream<Uint8Array> | number | undefined,
   cap: number,
+  signal?: AbortSignal,
 ): Promise<{ text: string; capped: boolean }> {
   if (stream === undefined || typeof stream === "number") {
     return { text: "", capped: false };
@@ -60,21 +69,46 @@ async function readCapped(
   let text = "";
   let bytes = 0;
   let capped = false;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    bytes += value.byteLength;
-    if (bytes > cap) {
-      capped = true;
-      await reader.cancel().catch(() => {
-        // stream already closed
-      });
-      break;
+
+  // Race the read loop against a drain timeout — if a descendant holds the
+  // pipe open after proc.exited resolves, cancel the reader and return what we
+  // captured rather than hanging forever.
+  const drainPromise = (async () => {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > cap) {
+        capped = true;
+        await reader.cancel().catch(() => {
+          // stream already closed
+        });
+        break;
+      }
+      text += decoder.decode(value, { stream: true });
     }
-    text += decoder.decode(value, { stream: true });
-  }
-  if (!capped) {
-    text += decoder.decode(); // flush any trailing partial multibyte char
+    if (!capped) {
+      text += decoder.decode(); // flush any trailing partial multibyte char
+    }
+  })();
+
+  // DRAIN_TIMEOUT_MS backstop — if the stream never closes, we abort and
+  // return partial text. The abort race below (which races proc.exited) is the
+  // PRIMARY guard; this is for pathological processes that never close the pipe.
+  const timeout = new Promise<"timeout">((resolve) => {
+    const timer = setTimeout(() => resolve("timeout"), DRAIN_TIMEOUT_MS);
+    timer.unref();
+    // Allow signal to cut the timeout short
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      resolve("timeout");
+    }, { once: true });
+  });
+
+  const result = await Promise.race([drainPromise, timeout]);
+  if (result === "timeout") {
+    // Drain timed out — cancel the reader and accept partial data
+    await reader.cancel().catch(() => {});
   }
   return { text, capped };
 }
@@ -130,8 +164,9 @@ export async function runTestCommand(
     });
 
     // Read BOTH streams immediately (see readCapped) — before any exit wait.
-    const stdoutRead = readCapped(proc.stdout, MAX_CAPTURE_BYTES);
-    const stderrRead = readCapped(proc.stderr, MAX_CAPTURE_BYTES);
+    // Pass the abort signal so drain timeouts respect aborts.
+    const stdoutRead = readCapped(proc.stdout, MAX_CAPTURE_BYTES, signal);
+    const stderrRead = readCapped(proc.stderr, MAX_CAPTURE_BYTES, signal);
 
     if (signal) {
       // Named handler removed after the race: a long-lived AbortSignal reused
@@ -159,8 +194,23 @@ export async function runTestCommand(
         // SIGTERM, grace, then SIGKILL: a test command that traps or ignores
         // SIGTERM (or sits in uninterruptible sleep) must not hang the abort
         // path — the exact case aborts exist to recover from.
+        //
+        // NOTE: Bun.spawn has no process-group API; we signal only the lead pid.
+        // A backgrounded grandchild may outlive SIGTERM and hold the pipe open,
+        // but DRAIN_TIMEOUT_MS (in readCapped) bounds the drain wait so we never
+        // hang forever.
         try {
-          proc.kill("SIGTERM");
+          // Try process-group kill first (-pid) — may not work on all platforms,
+          // fall back to direct pid if group kill throws.
+          try {
+            if (proc.pid !== undefined) {
+              process.kill(-proc.pid, "SIGTERM");
+            } else {
+              proc.kill("SIGTERM");
+            }
+          } catch {
+            proc.kill("SIGTERM");
+          }
         } catch {
           // already gone
         }
@@ -175,14 +225,23 @@ export async function runTestCommand(
         ]);
         if (graceTimer !== undefined) clearTimeout(graceTimer);
         if (!exitedDuringGrace) {
+          // Grace expired — force-kill the process group (or direct pid)
           try {
-            proc.kill("SIGKILL");
+            try {
+              if (proc.pid !== undefined) {
+                process.kill(-proc.pid, "SIGKILL");
+              } else {
+                proc.kill("SIGKILL");
+              }
+            } catch {
+              proc.kill("SIGKILL");
+            }
           } catch {
             // already gone
           }
         }
           await proc.exited; // reap the child before returning
-          // Drain the readers (bounded by the cap) so no fd leaks.
+          // Drain the readers (bounded by the cap AND DRAIN_TIMEOUT_MS) so no fd leaks.
           await Promise.allSettled([stdoutRead, stderrRead]);
           return {
             testsExecuted: false,
@@ -202,14 +261,9 @@ export async function runTestCommand(
     const [{ text: stdout, capped: stdoutCapped }, { text: stderr, capped: stderrCapped }] =
       await Promise.all([stdoutRead, stderrRead]);
 
-    // Fail-closed when the command exited on a signal. NOT proc.killed: Bun
-    // reports killed === true after ANY awaited exit (observed with exit code
-    // 0), so it cannot distinguish a signal death from a clean one.
-    // signalCode is null exactly when the process exited under its own control.
-    if (proc.signalCode !== null) {
-      return failClosed(`Test command exited on signal ${proc.signalCode}`);
-    }
-
+    // Fail-closed when the output cap was breached (checked before signal — a cap
+    // breach during SIGTERM after reader.cancel() should report the cap reason,
+    // not the signal).
     if (stdoutCapped || stderrCapped) {
       // Stop the producer, then refuse to parse a truncated summary.
       try {
@@ -222,8 +276,17 @@ export async function runTestCommand(
       );
     }
 
-    // Parse the output
-    const parsed = parseTestOutput(`${stdout}\n${stderr}`);
+    // Fail-closed when the command exited on a signal. NOT proc.killed: Bun
+    // reports killed === true after ANY awaited exit (observed with exit code
+    // 0), so it cannot distinguish a signal death from a clean one.
+    // signalCode is null exactly when the process exited under its own control.
+    if (proc.signalCode !== null) {
+      return failClosed(`Test command exited on signal ${proc.signalCode}`);
+    }
+
+    // Parse the output (ANSI-stripped first)
+    const combined = `${stdout}\n${stderr}`.replace(ANSI_ESCAPE, "");
+    const parsed = parseTestOutput(combined);
     if (!parsed) {
       return failClosed("Failed to parse test output");
     }
@@ -252,16 +315,22 @@ function failClosed(reason: string): TestCommandResult {
  * Parse passed/failed counts from test output.
  *
  * Matches bun test format: dedicated " 7 pass" / " 2 fail" summary lines.
- * Matches jest/vitest format: one "Tests" summary line ("Tests: 7 passed,
+ * Matches jest/vitest format: ALL "Tests" summary lines ("Tests: 7 passed,
  * 2 failed" or colon-less "Tests  2 failed | 4 passed") scanned for every
- * "<n> passed|failed" clause on that line. Zero categories are omitted by
+ * "<n> passed|failed" clause ON those lines. Zero categories are omitted by
  * both reporters (a green run has no failed clause, an all-failing run no
  * passed clause — the omitted count defaults to 0), and non-pass/fail
  * categories (skipped/todo) may precede them because jest's summary order
  * is failed → skipped → todo → passed: "Tests: 1 skipped, 2 passed,
  * 3 total" must parse, not fail closed.
  *
- * @param output - Combined stdout+stderr from the test command
+ * T2: Collects ALL lines matching the Tests anchor (handles vitest banners like
+ * "⎯ Failed Tests 2 ⎯" before the summary) and prefers the LAST line with
+ * passed/failed clauses (the real summary is terminal).
+ *
+ * T3: Bun format uses LAST match per category (summary is terminal).
+ *
+ * @param output - Combined stdout+stderr from the test command (ANSI-stripped)
  * @returns Parsed counts or null if unparseable
  */
 function parseTestOutput(output: string): { passed: number; failed: number } | null {
@@ -269,9 +338,13 @@ function parseTestOutput(output: string): { passed: number; failed: number } | n
   // Line-anchored + word-bounded so prose like "7 passed" (jest/vitest) or a
   // filename containing "pass" can never satisfy the bun branch.
   // Real output: " 7 pass\n 0 fail\n 7 expect() calls\nRan 7 tests..."
-  // Accept either pass or fail line; missing count → 0 (all-pass or all-fail runs).
-  const bunPassMatch = output.match(/^\s*(\d+)\s+pass\b/m);
-  const bunFailMatch = output.match(/^\s*(\d+)\s+fail\b/m);
+  // T3: Use LAST match per category — bun's summary is terminal.
+  const bunPassMatches = output.matchAll(/^\s*(\d+)\s+pass\b/mg);
+  const bunFailMatches = output.matchAll(/^\s*(\d+)\s+fail\b/mg);
+
+  // Convert to array and take last match
+  const bunPassMatch = Array.from(bunPassMatches).at(-1);
+  const bunFailMatch = Array.from(bunFailMatches).at(-1);
 
   if (bunPassMatch || bunFailMatch) {
     return {
@@ -280,30 +353,32 @@ function parseTestOutput(output: string): { passed: number; failed: number } | n
     };
   }
 
-  // Jest/Vitest summary: capture the single "Tests" line, then read every
-  // "<n> passed|failed" clause ON that line. A clause scan (not an anchor on
-  // the first number) is required because non-pass/fail categories sit
-  // between/ before the counts: jest prints "Tests: 1 skipped, 2 passed,
-  // 3 total" (skipped first on green-with-skips) and "Tests: 2 failed,
-  // 1 todo, 3 total"; vitest prints "Tests  1 skipped | 2 passed (3)".
-  // "Test Suites"/"Test Files" lines contain no "Tests" word, and the
-  // [^\n]* slice keeps the scan from crossing a newline, so those lines
-  // cannot donate their failed counts. First clause per category wins.
-  const testsLine = output.match(/Tests[:\s][^\n]*/)?.[0];
-  if (testsLine !== undefined) {
-    let passed: number | undefined;
-    let failed: number | undefined;
-    for (const clause of testsLine.matchAll(/(\d+)\s+(passed|failed)/g)) {
+  // Jest/Vitest summary: capture ALL "Tests" lines, then read every
+  // "<n> passed|failed" clause ON those lines. T2: A banner line like
+  // "⎯ Failed Tests 2 ⎯" matches the anchor but has no clauses — we skip
+  // those and prefer the LAST line with actual passed/failed data.
+  const testsLines = output.match(/Tests[:\s][^\n]*/g) ?? [];
+  let passed: number | undefined;
+  let failed: number | undefined;
+  for (const line of testsLines) {
+    let linePassed: number | undefined;
+    let lineFailed: number | undefined;
+    for (const clause of line.matchAll(/(\d+)\s+(passed|failed)/g)) {
       const count = Number.parseInt(clause[1] ?? "0", 10);
       if (clause[2] === "passed") {
-        if (passed === undefined) passed = count;
-      } else if (failed === undefined) {
-        failed = count;
+        if (linePassed === undefined) linePassed = count;
+      } else if (lineFailed === undefined) {
+        lineFailed = count;
       }
     }
-    if (passed !== undefined || failed !== undefined) {
-      return { passed: passed ?? 0, failed: failed ?? 0 };
+    // If this line has real data (not just a banner), remember it
+    if (linePassed !== undefined || lineFailed !== undefined) {
+      passed = linePassed;
+      failed = lineFailed;
     }
+  }
+  if (passed !== undefined || failed !== undefined) {
+    return { passed: passed ?? 0, failed: failed ?? 0 };
   }
 
   // No match

@@ -65,12 +65,15 @@ export interface DispatchTaskDeps {
 
 // ponytail: minimal runner injection seam for tests — default is real runTeamManifest
 let _runTeamManifest = runTeamManifest;
-export function _injectRunner(fn: typeof runTeamManifest): void {
-  _runTeamManifest = fn;
+export function _injectRunner(fn: typeof runTeamManifest | null): void {
+  _runTeamManifest = fn ?? runTeamManifest;
+}
+export function _resetRunner(): void {
+  _runTeamManifest = runTeamManifest;
 }
 
 /** Build a refusal-shaped value. Never spawns anything; counters are
- * truthfully zero (nothing was parsed) and sub-timings all 0 (never ran). */
+ * truthfully zero (nothing was parsed) and sub-timings omitted (never ran). */
 function refuse(message: string, redact: (s: string) => string): DispatchTaskValue {
   const merged = buildMergedOutput({
     exitStatus: "logic",
@@ -95,12 +98,7 @@ function refuse(message: string, redact: (s: string) => string): DispatchTaskVal
     ...merged,
     malformedLines: 0,
     droppedOversizeLines: 0,
-    dispatchSubTimings: {
-      mulch_prime_ms: 0,
-      box_setup_ms: 0,
-      team_execution_ms: 0,
-      gate_validation_ms: 0,
-    },
+    dispatchSubTimings: {},
   };
 }
 
@@ -158,15 +156,25 @@ export function dispatchTask(
         redact,
       );
     }
+    // D4: log refusal reason for observability
+    console.warn(`[dispatch-task] refused: phase '${spec.name}' — dispatch_task requires roster and task`);
 
-    // Resolve + dual-gate the roster (DF1.5). An unverified gate refuses the
-    // dispatch rather than spawning.
+    // D6: cardinality checks BEFORE dual-gate (pi spawn ~180s) — local checks first
+    // D9: anchor roster path at runRoot, not process.cwd()
+    const rosterRunRoot = deps.rootDir ?? process.env.QDS_RUN_ROOT ?? process.cwd();
     let roster: ResolvedRoster;
     try {
-      roster = loadRoster(rosterPath);
+      roster = loadRoster(rosterPath, { cwd: rosterRunRoot });
     } catch (err) {
       return refuse(err instanceof Error ? err.message : String(err), redact);
     }
+    const roles = roster.roles;
+    if (roles.length < 2) {
+      return refuse("roster must declare a lead role and at least one worker", redact);
+    }
+
+    // Resolve + dual-gate the roster (DF1.5). An unverified gate refuses the
+    // dispatch rather than spawning.
     const gate = await validateRoster(roster, deps.rosterValidateDeps);
     if (gate.exitCode !== 0) {
       const first = gate.problems[0];
@@ -176,10 +184,6 @@ export function dispatchTask(
       );
     }
 
-    const roles = roster.roles;
-    if (roles.length < 2) {
-      return refuse("roster must declare a lead role and at least one worker", redact);
-    }
     const leadRole = roles[0]!;
     const workerRoles = roles.slice(1);
     const prompts: Record<string, string> = {};
@@ -226,8 +230,20 @@ export function dispatchTask(
 
     // runTeamManifest takes a manifest FILE path.
     const runRoot = deps.rootDir ?? process.env.QDS_RUN_ROOT ?? process.cwd();
+    // D14: treat empty string as unset for QDS_RUN_ROOT
+    if (runRoot === "") {
+      return refuse("QDS_RUN_ROOT is empty (use unset or a non-empty path)", redact);
+    }
     const manifestDir = join(runRoot, ".qds-manifests");
-    mkdirSync(manifestDir, { recursive: true });
+    // D7: wrap mkdirSync to refuse logic on EACCES/ENOTDIR/disk-full
+    try {
+      mkdirSync(manifestDir, { recursive: true });
+    } catch (err) {
+      return refuse(
+        `failed to create manifest directory ${manifestDir}: ${err instanceof Error ? err.message : String(err)}`,
+        redact,
+      );
+    }
     const manifestFile = join(
       manifestDir,
       `manifest-${runId}-${phaseId}-${randomBytes(8).toString("hex")}.json`,
@@ -244,7 +260,7 @@ export function dispatchTask(
     let runFacts: {
       exitCode: number | null;
       termSignal: string | null;
-      killOrigin: "watchdog" | null;
+      killOrigin: "watchdog" | "budget" | "wallClock" | "requestedShutdown" | null;
     } = { exitCode: null, termSignal: null, killOrigin: null };
 
     try {
@@ -315,30 +331,52 @@ export function dispatchTask(
 
       // Precedence classification (AC3) — the phase owns it; the harness's
       // own exitStatus is not the classifier here.
+      // D1: pass killOrigin through per SHARED CONTRACT — map known origins:
+      // watchdog/budget/wallClock → overflow; requestedShutdown → logic;
+      // foreign strings → unknown → transient (fail-safe).
+      // NOTE: userCancel is in the shared contract but runner doesn't emit it yet.
+      let normalizedKillOrigin: "watchdog" | "budget" | "wallClock" | "requestedShutdown" | "unknown" | null = runFacts.killOrigin;
+      if (normalizedKillOrigin !== null && normalizedKillOrigin !== "watchdog" &&
+          normalizedKillOrigin !== "budget" && normalizedKillOrigin !== "wallClock" &&
+          normalizedKillOrigin !== "requestedShutdown") {
+        // Foreign string → treat as unknown (fail-safe)
+        normalizedKillOrigin = "unknown";
+      }
+
       const exitStatus = classifyRun({
         exitCode: runFacts.exitCode,
         termSignal: runFacts.termSignal,
         mergedResult,
         comsInitError: comsInitError !== null,
-        killOrigin:
-          runFacts.killOrigin === "watchdog"
-            ? "watchdog"
-            : runFacts.termSignal !== null
-              ? "unknown"
-              : null,
+        killOrigin: normalizedKillOrigin,
       });
 
       // AC6: the PHASE runs testCommand engine-side — in-box, in this
       // process, outside the team it just supervised. Never derived from the
       // driver stream, worker_output, or the merged envelope.
+      // D5: if signal.aborted before the test step, skip the spawn.
       let testResult = ZERO_TEST_RESULTS;
       if (spec.testCommand !== undefined && spec.testCommand.length > 0) {
-        try {
+        if (signal.aborted) {
+          // D5: guard — don't spawn when already aborted
+          const abortReason = signal.reason instanceof Error ? signal.reason.message : "aborted";
+          console.warn(`[dispatch-task] testCommand skipped (phase aborted: ${abortReason})`);
+          testResult = { testsExecuted: false, testResults: { passed: 0, failed: 0 }, reason: `aborted: ${abortReason}` };
+        } else {
           testResult = coerceTestsExecuted(
             await runTestCommand(spec.testCommand, { cwd: runRoot, signal }),
           );
-        } catch {
-          testResult = ZERO_TEST_RESULTS; // fail-closed, never fabricated
+          // D4: log testCommand failure reason for observability
+          if (testResult.reason) {
+            console.warn(`[dispatch-task] testCommand failed: ${testResult.reason}`);
+            tracer?.trace({
+              requestId,
+              phaseId,
+              type: "test_result",
+              name: "testCommand_failure",
+              payloadJson: JSON.stringify({ reason: testResult.reason }),
+            });
+          }
         }
       }
 
@@ -355,26 +393,44 @@ export function dispatchTask(
       // the harness's: success requires error=null/partial=false; non-success
       // requires a populated error; lead_failure forces empty agentOutputs
       // and changedFiles.
+      // D3: dispatch must not force success over a non-success runner verdict.
+      // D2: when runner settles lead_failure with no exit signal evidence, prefer runResult.exitStatus.
       const health = streamHealth.snapshot();
+      const runResultStatus = runResult.exitStatus ?? "lead_failure";
+
+      // D2: Spawn/stream failure → runner settles transient, but dispatch classifies lead_failure
+      // when there's no exit signal evidence. Prefer runResult.exitStatus when it exists.
+      let finalExitStatus = exitStatus;
+      if (runFacts.exitCode === null && runFacts.termSignal === null && runFacts.killOrigin === null &&
+          runResultStatus !== "success" && runResultStatus !== "lead_failure") {
+        finalExitStatus = runResultStatus;
+      }
+
+      // D3: When classification would return success but runResult.exitStatus is non-success,
+      // take runResult.exitStatus and keep its error + partial.
+      if (finalExitStatus === "success" && runResultStatus !== "success") {
+        finalExitStatus = runResultStatus;
+      }
+
       const error =
-        exitStatus === "success"
+        finalExitStatus === "success"
           ? null
           : (runResult.error ?? {
-              reason: exitStatus === "lead_failure" ? "lead_failure" : exitStatus,
-              message: `run classified ${exitStatus} (exit=${runFacts.exitCode ?? "null"} signal=${runFacts.termSignal ?? "none"} malformed=${health.malformedLines} dropped=${health.droppedOversizeLines})`,
+              reason: finalExitStatus,
+              message: `run classified ${finalExitStatus} (exit=${runFacts.exitCode ?? "null"} signal=${runFacts.termSignal ?? "none"} malformed=${health.malformedLines} dropped=${health.droppedOversizeLines})`,
             });
       const partialOutput =
         runResult.partialOutput ??
-        (exitStatus === "success"
+        (finalExitStatus === "success"
           ? null
-          : `run ended ${exitStatus}: exit=${runFacts.exitCode ?? "null"} signal=${runFacts.termSignal ?? "none"}`);
+          : `run ended ${finalExitStatus}: exit=${runFacts.exitCode ?? "null"} signal=${runFacts.termSignal ?? "none"}`);
 
       const merged = buildMergedOutput({
-        exitStatus,
-        partial: exitStatus === "success" ? false : runResult.partial,
+        exitStatus: finalExitStatus,
+        partial: finalExitStatus === "success" ? false : runResult.partial,
         result: runResult.result,
-        agentOutputs: exitStatus === "lead_failure" ? {} : runResult.agentOutputs,
-        changedFiles: exitStatus === "lead_failure" ? [] : changedFiles,
+        agentOutputs: finalExitStatus === "lead_failure" ? {} : runResult.agentOutputs,
+        changedFiles: finalExitStatus === "lead_failure" ? [] : changedFiles,
         comsLog: runResult.comsLog,
         durationMs,
         waivers: runResult.waivers,
@@ -451,7 +507,13 @@ export function validateChangedFiles(paths: string[]): string[] {
     try {
       decoded = decodeURIComponent(raw).normalize("NFC");
     } catch {
-      continue; // invalid encoding — reject
+      // D8: on URIError, treat the raw string as unencoded and continue validation
+      decoded = raw;
+    }
+    // D11: after decode, re-run the control-character rejection on the decoded value
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security check
+    if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(decoded)) {
+      continue;
     }
     const segments = decoded.split(/[/\\]/);
     if (segments.includes("..") || decoded.startsWith("/") || /^[a-zA-Z]:/.test(decoded)) {
@@ -468,6 +530,10 @@ export function validateChangedFiles(paths: string[]): string[] {
  * (realpath + prefix re-assert + fd read). A path whose walk throws is
  * dropped — including the intermediate-symlink case O_NOFOLLOW alone would
  * miss. Names are preserved.
+ *
+ * D10: Artifacts larger than MANIFEST_MAX_BYTES are silently dropped — add
+ * console.warn + trace record for observability.
+ * D15: Artifact `name` field must be validated (non-empty, no control chars/newlines, ≤200 chars).
  */
 export function validateArtifacts(
   artifacts: Array<{ name: string; path: string }>,
@@ -476,6 +542,21 @@ export function validateArtifacts(
   const valid: Array<{ name: string; path: string }> = [];
   const claimOk = new Set(validateChangedFiles(artifacts.map((a) => a.path)));
   for (const artifact of artifacts) {
+    // D15: validate artifact name
+    if (!artifact.name || typeof artifact.name !== "string" || artifact.name.trim().length === 0) {
+      console.warn("[dispatch-task] artifact dropped: invalid name (empty or non-string)");
+      continue;
+    }
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security check
+    if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(artifact.name) || artifact.name.includes("\n")) {
+      console.warn("[dispatch-task] artifact dropped: name contains control chars or newline");
+      continue;
+    }
+    if (artifact.name.length > 200) {
+      console.warn("[dispatch-task] artifact dropped: name exceeds 200 chars");
+      continue;
+    }
+
     if (!claimOk.has(artifact.path)) continue;
     try {
       // The read IS the validation: through the one canonical root, via the
@@ -488,7 +569,8 @@ export function validateArtifacts(
       readArtifactBeneathRoot(isAbsolute(artifact.path) ? artifact.path : join(runRoot, artifact.path), runRoot);
       valid.push(artifact);
     } catch {
-      // walk refusal (escape, unresolvable, INV-5) — artifact dropped
+      // D10: log dropped artifacts for observability
+      console.warn(`[dispatch-task] artifact dropped: ${artifact.name} (${artifact.path}) — validation or read failed`);
     }
   }
   return valid;

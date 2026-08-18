@@ -158,10 +158,16 @@ export function adaptTeamEvent(
 
     case "cost": {
       const e = event.event;
+      const costMicros = Math.round(e.costUsd * 1_000_000); // DF1.3 Tech Notes µ$ boundary rule: USD→µ$ once, at the adapter
+      // Guard non-finite values (Infinity from malformed costUsd) — skip event with trace note
+      if (!Number.isFinite(costMicros)) {
+        // Event dropped; cost stream will have a gap but trace corruption avoided
+        return { type: "coms", name: "cost_skipped_nonfinite", payloadJson: '{"note":"costMicros non-finite, event skipped"}' };
+      }
       return {
         type: "cost",
         name: "cost",
-        costMicros: Math.round(e.costUsd * 1_000_000), // DF1.3 Tech Notes µ$ boundary rule: USD→µ$ once, at the adapter
+        costMicros,
         tokens: e.inputTokens + e.outputTokens,
       };
     }
@@ -197,7 +203,7 @@ export function adaptTeamEvent(
       return {
         type: "coms_init_error",
         name: "coms_init_error",
-        reason: event.reason,
+        reason: ctx.redact(event.reason),
       };
     }
 
@@ -218,11 +224,11 @@ export function adaptTeamEvent(
  *   - watchdog → "overflow"
  *   - userCancel or requestedShutdown → "logic"
  *   - unknown or null → "transient"
- * Step 2: valid merged present → "success"
- * Step 3: exit-code table (when no merged):
+ * Step 2: exit-code table (when no merged):
  *   - 64 → "logic" (driver config error, UNCONDITIONAL per story exit table)
  *   - any other non-zero → "transient"
  *   - 0 → "lead_failure" (merged null with exit 0)
+ * Step 3: valid merged present → "success"
  *
  * "valid" = parseTeamEventLine accepted it (upstream validation).
  * classifyRun receives mergedResult as already-parsed-or-null.
@@ -235,7 +241,7 @@ export function classifyRun(input: {
   termSignal: string | null;
   mergedResult: Record<string, unknown> | null;
   comsInitError: boolean;
-  killOrigin: "watchdog" | "userCancel" | "requestedShutdown" | "unknown" | null;
+  killOrigin: "watchdog" | "budget" | "wallClock" | "userCancel" | "requestedShutdown" | "unknown" | null;
 }): ExitStatus {
   // Step 0: coms_init_error beats everything
   if (input.comsInitError) {
@@ -246,6 +252,8 @@ export function classifyRun(input: {
   if (input.termSignal !== null) {
     switch (input.killOrigin) {
       case "watchdog":
+      case "budget":
+      case "wallClock":
         return "overflow";
       case "userCancel":
       case "requestedShutdown":
@@ -253,6 +261,11 @@ export function classifyRun(input: {
       case "unknown":
       case null:
         return "transient";
+      default: {
+        // Fail-safe for foreign/unmatched origins → transient (not permanent lead_failure)
+        const _exhaust: never = input.killOrigin;
+        return "transient";
+      }
     }
   }
 

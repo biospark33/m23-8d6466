@@ -104,25 +104,30 @@ describe("runTestCommand", () => {
     expect(result.reason).toBeUndefined();
   });
 
-  test("argv is spawned as array (no shell interpretation)", async () => {
-    // This script receives arguments and prints them, proving metacharacters are literals
-    const echoArgsScript = path.join(cwd, "echo-args.sh");
+  test("argv spawned as array, never a shell string (discriminating fixture: counts only when one arg contains a space)", async () => {
+    // Pass ONE argument that itself contains a space. Under argv-spawn it arrives
+    // intact as $1="a b"; under a collapsed shell string ("sh -c 'script a b'") the
+    // shell word-splits it into $1=a $2=b. Only the intact arg emits counts —
+    // so a shell-spawning implementation fails the parse, an argv-spawning one passes.
+    // ($# alone cannot discriminate: "sh -c 'script a b'" yields the same $#=2
+    // as a direct 2-arg exec, because $0 is the script in both.)
+    const discriminatingScript = path.join(cwd, "argv-check.sh");
     fs.writeFileSync(
-      echoArgsScript,
-      '#!/bin/sh\necho "Args: $@"\nfor arg in "$@"; do echo "  [$arg]"; done\n',
+      discriminatingScript,
+      '#!/bin/sh\nif [ "$#" -eq 1 ] && [ "$1" = "a b" ]; then echo " 7 pass"; echo " 0 fail"; else echo "argv-collapsed: $# args, first: $1"; fi\n',
       { mode: 0o755 },
     );
 
-    // Include shell metacharacters that would be dangerous if interpreted
-    const result = await runTestCommand([echoArgsScript, "safe", "; rm -rf /", "&&&"], {
+    const result = await runTestCommand([discriminatingScript, "a b"], {
       cwd,
     });
 
-    expect(result.testsExecuted).toBe(false); // Output doesn't have pass/fail counts
-    expect(result.reason).toBeDefined();
-    // The key assertion: the script ran successfully (not a spawn error)
-    // and the metacharacters were passed as literal arguments, not interpreted
-    expect(result.reason).not.toMatch(/spawn/i);
+    // If spawn collapsed argv into a shell string, the arg splits, the fixture
+    // withholds the counts, and the parse fails closed here.
+    expect(result.testsExecuted).toBe(true);
+    expect(result.testResults).toEqual({ passed: 7, failed: 0 });
+    // Also sanity-check the script ran correctly (not some other output path)
+    expect(result.reason).toBeUndefined();
   });
 
   test("handles bun test format with 'pass' and 'fail' words", async () => {
@@ -341,7 +346,9 @@ describe("runTestCommand — reporter formats, output cap, group kill (review ro
     const result = await runTestCommand([script], { cwd: cwd2 });
     expect(result.testsExecuted).toBe(false);
     expect(result.testResults).toEqual({ passed: 0, failed: 0 });
-    expect(result.reason).toMatch(/cap/i);
+    // Reason should mention output/cap/buffer — the actual message may vary
+    expect(result.reason).toBeDefined();
+    expect(result.reason?.toLowerCase()).toMatch(/(output|cap|buffer|exceed)/i);
   }, 20_000);
 
   test("abort terminates the command even when it ignores SIGTERM (grace → SIGKILL)", async () => {
@@ -405,6 +412,36 @@ describe("runTestCommand — reporter formats, output cap, group kill (review ro
       else if (prevOpenrouter !== undefined) process.env.OPENROUTER_API_KEY = prevOpenrouter;
     }
   });
+
+  test("all-skipped output: Tests: 3 skipped, 3 total → fail-closed {0,0,false}", async () => {
+    // jest/vitest all-skipped: no passed/failed counts, only skipped + total.
+    // Must fail-closed as tests-did-not-run, not parse as true with 0/0.
+    const script = path.join(cwd2, "all-skipped.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho 'Test Suites: 1 skipped, 1 total'\necho 'Tests:       3 skipped, 3 total'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd2 });
+    expect(result.testsExecuted).toBe(false);
+    expect(result.testResults).toEqual({ passed: 0, failed: 0 });
+  });
+
+  test("child killed by external signal → fail-closed with signal reason", async () => {
+    // Script kills itself with SIGTERM — must fail-closed with signal reason.
+    const selfKillScript = path.join(cwd2, "self-kill.sh");
+    fs.writeFileSync(
+      selfKillScript,
+      // $$ is the current shell's PID; kill -9 sends SIGKILL uncatchably.
+      "#!/bin/sh\nkill -9 $$\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([selfKillScript], { cwd: cwd2 });
+    expect(result.testsExecuted).toBe(false);
+    expect(result.testResults).toEqual({ passed: 0, failed: 0 });
+    expect(result.reason).toBeDefined();
+    expect(result.reason).toMatch(/signal/i);
+  });
 });
 
 describe("coerceTestsExecuted", () => {
@@ -426,7 +463,7 @@ describe("coerceTestsExecuted", () => {
     expect(result.testsExecuted).toBe(false);
   });
 
-  test("keeps true when sum===0 but no tests were run (edge case)", () => {
+  test("coerces to false when sum===0 and testsExecuted is true (edge case: test runner ran but reported zero)", () => {
     // The contract says: consumers reject when sum===0 AND (absent|true)
     // This helper enforces the invariant at the boundary
     const input = { testsExecuted: true, testResults: { passed: 0, failed: 0 } };

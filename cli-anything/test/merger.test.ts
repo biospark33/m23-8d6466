@@ -147,49 +147,51 @@ describe("createPending (single-settle, P0.3-S-H5)", () => {
   });
 });
 
+// Shared test factory — BT18: consolidated to one base() helper
+const identity = (s: string): string => s;
+
+const EXTENDED_KEYS = [
+  "agentOutputs",
+  "artifacts",
+  "changedFiles",
+  "comsLog",
+  "durationMs",
+  "error",
+  "exitStatus",
+  "mulchPrimeError",
+  "mulchPrimed",
+  "partial",
+  "partialOutput",
+  "result",
+  "summary",
+  "testResults",
+  "testsExecuted",
+  "waivers",
+].sort();
+
+function base(over: Partial<Parameters<typeof buildMergedOutput>[0]>) {
+  return buildMergedOutput({
+    exitStatus: "success",
+    partial: false,
+    result: { summary: "ok" },
+    agentOutputs: { "worker-a": { done: true } },
+    changedFiles: [],
+    comsLog: [COMS_ENTRY],
+    durationMs: 1234,
+    waivers: [],
+    error: null,
+    redact: identity,
+    // DF1.6 T1: new fields with defaults for base tests
+    testResults: { passed: 0, failed: 0 },
+    testsExecuted: false,
+    summary: "ok",
+    mulchPrimed: false,
+    artifacts: [],
+    ...over,
+  });
+}
+
 describe("buildMergedOutput (P0.3-M2 uniform schema)", () => {
-  const EXTENDED_KEYS = [
-    "agentOutputs",
-    "artifacts",
-    "changedFiles",
-    "comsLog",
-    "durationMs",
-    "error",
-    "exitStatus",
-    "mulchPrimeError",
-    "mulchPrimed",
-    "partial",
-    "partialOutput",
-    "result",
-    "summary",
-    "testResults",
-    "testsExecuted",
-    "waivers",
-  ].sort();
-
-  const identity = (s: string): string => s;
-
-  function base(over: Partial<Parameters<typeof buildMergedOutput>[0]>) {
-    return buildMergedOutput({
-      exitStatus: "success",
-      partial: false,
-      result: { summary: "ok" },
-      agentOutputs: { "worker-a": { done: true } },
-      changedFiles: [],
-      comsLog: [COMS_ENTRY],
-      durationMs: 1234,
-      waivers: [],
-      error: null,
-      redact: identity,
-      // DF1.6 T1: new fields with defaults for base tests
-      testResults: { passed: 0, failed: 0 },
-      testsExecuted: false,
-      summary: "ok",
-      mulchPrimed: false,
-      artifacts: [],
-      ...over,
-    });
-  }
 
   it("success path: error is explicit null, partial false, agentOutputs populated", () => {
     const out = base({});
@@ -393,12 +395,12 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
     expect(out.testsExecuted).toBe(true);
   });
 
-  it("testsExecuted invariant: accept sum>0 + false (edge case)", () => {
-    // sum>0 with testsExecuted=false is technically valid per invariant
-    // (only sum===0 requires false)
-    const out = base({ testResults: { passed: 1, failed: 0 }, testsExecuted: false });
-    expect(out.testResults).toEqual({ passed: 1, failed: 0 });
-    expect(out.testsExecuted).toBe(false);
+  it("testsExecuted invariant: reject sum>0 + false (R9 stricter)", () => {
+    // R9 behavior change: sum>0 with testsExecuted=false now throws.
+    // Previously allowed, now stricter invariant: tests ran → testsExecuted must be true.
+    expect(() =>
+      base({ testResults: { passed: 1, failed: 0 }, testsExecuted: false }),
+    ).toThrow("testsExecuted must be true when passed+failed > 0");
   });
 
   it("partialOutput truncation with suffix reservation", () => {
@@ -495,13 +497,13 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
     expect(out.mulchPrimeError).toBe("Hindsight unreachable");
   });
 
-  it("existing 9-field outputs remain constructible", () => {
-    // This simulates the old call pattern without new fields
-    // The implementation should provide defaults for missing fields
-    const legacyOpts = {
+  it("throws when testsExecuted is omitted with passed+failed===0 (sum===0 + absent invariant)", () => {
+    // The old contract allowed omitting testsExecuted; the new contract REQUIRES
+    // it when passed+failed===0. Omitting it should throw.
+    const opts = {
       exitStatus: "success" as const,
       partial: false,
-      result: { summary: "legacy" },
+      result: { summary: "x" },
       agentOutputs: {},
       changedFiles: [],
       comsLog: [],
@@ -509,22 +511,13 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
       waivers: [],
       error: null,
       redact: identity,
+      // testResults present but testsExecuted omitted — should throw
       testResults: { passed: 0, failed: 0 },
-      testsExecuted: false,
-      summary: "legacy",
+      // testsExecuted intentionally omitted
+      summary: "x",
       mulchPrimed: false,
       artifacts: [],
-    };
-    const out = buildMergedOutput(legacyOpts);
-    // All original fields should be present
-    expect(out.result).toEqual({ summary: "legacy" });
-    expect(out.changedFiles).toEqual([]);
-    expect(out.partial).toBe(false);
-    expect(out.exitStatus).toBe("success");
-    expect(out.durationMs).toBe(100);
-    expect(out.waivers).toEqual([]);
-    expect(out.agentOutputs).toEqual({});
-    expect(out.comsLog).toEqual([]);
-    expect(out.error).toBeNull();
+    } as any; // Type-erasure to test runtime guard
+    expect(() => buildMergedOutput(opts)).toThrow(/testsExecuted/);
   });
 });

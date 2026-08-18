@@ -325,12 +325,18 @@ export class Run {
       updatedAt: new Date().toISOString(),
       durationMs: Math.round(bodyMs),
       ...(error === undefined ? {} : { error: toErrorShape(error) }),
-      ...(metrics.malformedLines === undefined
-        ? {}
-        : { malformedLines: metrics.malformedLines }),
-      ...(metrics.droppedOversizeLines === undefined
-        ? {}
-        : { droppedOversizeLines: metrics.droppedOversizeLines }),
+      ...(metrics.malformedLines !== undefined &&
+        Number.isFinite(metrics.malformedLines) &&
+        metrics.malformedLines >= 0 &&
+        Number.isInteger(metrics.malformedLines)
+        ? { malformedLines: metrics.malformedLines }
+        : {}),
+      ...(metrics.droppedOversizeLines !== undefined &&
+        Number.isFinite(metrics.droppedOversizeLines) &&
+        metrics.droppedOversizeLines >= 0 &&
+        Number.isInteger(metrics.droppedOversizeLines)
+        ? { droppedOversizeLines: metrics.droppedOversizeLines }
+        : {}),
       subTimings: {
         // Body-supplied dispatch timings first — the engine-owned trio below
         // is authoritative and cannot be clobbered by a body value that

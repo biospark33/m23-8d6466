@@ -32,6 +32,13 @@ export function rosterRoleToTeamRole(
   role: ResolvedRole,
   opts: { agentId: string; prompt: string },
 ): TeamRole {
+  // Guard: provider and model must be non-empty strings (RA1: "undefined/m" garbage passes refinement)
+  if (!role.provider || typeof role.provider !== "string" || role.provider.trim().length === 0) {
+    throw new Error(`role provider must be a non-empty string (got ${JSON.stringify(role.provider)})`);
+  }
+  if (!role.model || typeof role.model !== "string" || role.model.trim().length === 0) {
+    throw new Error(`role model must be a non-empty string (got ${JSON.stringify(role.model)})`);
+  }
   return {
     agentId: opts.agentId,
     // Join: never split here. splitRoleModel decomposes.
@@ -92,16 +99,33 @@ export function rosterToTeamManifest(
     if (!role) {
       throw new Error(`Worker role "${name}" not found in roster`);
     }
+    // RA2: explicit missing prompt check — avoids misleading ZodError "prompt must be at least 1 character"
+    const prompt = opts.prompts[name];
+    if (prompt === undefined || prompt === null) {
+      throw new Error(`missing prompt for worker role "${name}"`);
+    }
     return rosterRoleToTeamRole(role, {
       agentId: name,
-      prompt: opts.prompts[name] ?? "",
+      prompt,
     });
   });
 
+  // RA2: explicit missing prompt check for lead role
+  const leadPrompt = opts.prompts[opts.leadRoleName];
+  if (leadPrompt === undefined || leadPrompt === null) {
+    throw new Error(`missing prompt for lead role "${opts.leadRoleName}"`);
+  }
   const lead = rosterRoleToTeamRole(leadRole, {
     agentId: opts.leadRoleName,
-    prompt: opts.prompts[opts.leadRoleName] ?? "",
+    prompt: leadPrompt,
   });
+
+  // RA3: dedup guard — duplicate agentIds cause cname/artifact collisions
+  const agentIds = new Set([opts.leadRoleName, ...opts.workerRoleNames]);
+  if (agentIds.size !== opts.workerRoleNames.length + 1) {
+    const dup = [opts.leadRoleName, ...opts.workerRoleNames].filter((id, i, arr) => arr.indexOf(id) !== i);
+    throw new Error(`duplicate agentIds: ${dup.join(", ")}`);
+  }
 
   return TeamManifestSchema.parse({
     name: opts.name,

@@ -329,13 +329,13 @@ describe("runTeamManifest", () => {
   }, 15_000);
 });
 
-describe("DF1.6 T5: spawn seam budget ceiling raise (real runs)", () => {
-  // These replace four arithmetic-only tests that asserted constants
-  // (5_000_000/1e6 === 5) — they exercised none of runTeamManifest. Each
-  // test below drives the REAL budget guard through its kill path and
-  // asserts on the cap surfaced in the overflow error message.
+describe("DF1.6 T5/R1: spawn seam budget ceiling behavior (real runs)", () => {
+  // These tests drive the REAL budget guard through its kill path and
+  // assert on the cap surfaced in the overflow error message. R1 fix ensures
+  // ceiling can only LOWER a cap, never raise it. TEAM_MANIFEST has budgetCapUsd: 0.5,
+  // so when ceiling is 5 or 15, the result stays at 0.5 (the lower value wins).
 
-  it("effectiveCeilingMicros=5M raises the harness cap to $5 (budget kill reports cap $5.00)", async () => {
+  it("effectiveCeilingMicros=5M respects manifest cap when lower (R1: ceiling can only LOWER)", async () => {
     const out = await runTeamManifest(TEAM_MANIFEST, {
       env: teamEnv("big_cost"),
       effectiveCeilingMicros: 5_000_000,
@@ -343,21 +343,22 @@ describe("DF1.6 T5: spawn seam budget ceiling raise (real runs)", () => {
     });
     expectUniformSchema(out);
     expect(out.exitStatus).toBe("overflow");
-    // 9.50 spend ≥ 0.9×$5 threshold → killed at the RAISED cap.
-    expect(out.error?.message).toContain("(cap $5.00)");
+    // 9.50 spend ≥ 0.9×$0.5 threshold → killed at MANIFEST cap.
+    // R1: ceiling (5) is HIGHER than manifest cap (0.5), so manifest cap wins.
+    expect(out.error?.message).toContain("(cap $0.50)");
     const details = out.error?.details as { cumulativeCostUsd?: number };
     expect(details.cumulativeCostUsd).toBeCloseTo(9.5, 5);
   }, 20_000);
 
-  it("ceiling above the schema max clamps to $10 (never raised above the ceiling)", async () => {
+  it("ceiling above schema max clamps to $10; manifest cap still wins when lower (R1)", async () => {
     const out = await runTeamManifest(TEAM_MANIFEST, {
       env: teamEnv("big_cost"),
       effectiveCeilingMicros: 15_000_000,
       graceMs: 200,
     });
     expect(out.exitStatus).toBe("overflow");
-    // 9.50 ≥ 0.9×$10 → killed at the CLAMPED cap, not $15.
-    expect(out.error?.message).toContain("(cap $10.00)");
+    // R1: min(manifest 0.5, ceiling 15, schema 10) = 0.5 → manifest cap wins.
+    expect(out.error?.message).toContain("(cap $0.50)");
   }, 20_000);
 
   it("absent effectiveCeilingMicros leaves the manifest cap untouched (S1 default)", async () => {
@@ -367,6 +368,22 @@ describe("DF1.6 T5: spawn seam budget ceiling raise (real runs)", () => {
     });
     expect(out.exitStatus).toBe("overflow");
     expect(out.error?.message).toContain("(cap $0.50)");
+  }, 20_000);
+
+  // R1: Test that ceiling CAN lower a cap when it's LOWER than the manifest cap.
+  it("ceiling LOWER than manifest cap wins (R1: min of explicit + ceiling + schema)", async () => {
+    const out = await runTeamManifest(TEAM_MANIFEST, {
+      env: teamEnv("big_cost"),
+      budgetCapUsd: 5, // Set a higher manifest cap to see ceiling lower it
+      effectiveCeilingMicros: 300_000, // $0.30 ceiling — LOWER than manifest
+      graceMs: 200,
+    });
+    expectUniformSchema(out);
+    expect(out.exitStatus).toBe("overflow");
+    // R1: min(manifest 5, ceiling 0.3, schema 10) = 0.3 → ceiling wins.
+    expect(out.error?.message).toContain("(cap $0.30)");
+    const details = out.error?.details as { cumulativeCostUsd?: number };
+    expect(details.cumulativeCostUsd).toBeCloseTo(9.5, 5);
   }, 20_000);
 
   // One it() per bad ceiling: a shared loop emits identical failures with no
@@ -410,21 +427,22 @@ describe("DF1.6 T5: spawn seam budget ceiling raise (real runs)", () => {
 
 describe("DF1.6 T4: RSS watchdog overflow regression test", () => {
   it("watchdog escalation → exitStatus overflow AND killOrigin watchdog (onRunFacts wiring)", async () => {
-    let capturedKillOrigin: "watchdog" | null = null;
+    let capturedKillOrigin: "watchdog" | "budget" | "wallClock" | "requestedShutdown" | null = null;
     let sampleCount = 0;
     const OVER_THRESHOLD_RSS = 5 * 1024 ** 3; // 5 GB (exceeds 4 GB default)
 
     const out = await runTeamManifest(TEAM_MANIFEST, {
       env: teamEnv("watchdog_kill"),
-      // Inject sampler that reports over-threshold RSS on first poll
+      // BT23: Inject sampler that reports over-threshold RSS on first poll,
+      // then below-threshold values after escalation (null is the unwatchable signal)
       watchdogSampleRss: async () => {
         sampleCount++;
         // First poll returns over-threshold → triggers escalation
         if (sampleCount === 1) {
           return OVER_THRESHOLD_RSS;
         }
-        // After escalation, return null so we don't keep polling
-        return null;
+        // After escalation, return below-threshold values (NOT null, which signals unwatchable)
+        return 100 * 1024 ** 2; // 100 MB — well below 4 GB threshold
       },
       // Capture killOrigin from onRunFacts callback
       onRunFacts: (facts) => {
