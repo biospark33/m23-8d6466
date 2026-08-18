@@ -294,6 +294,14 @@ Adversarial sub-agent review of the full working-tree diff (bugs only, categoriz
 
 Gates after the fix wave: 126 focal tests pass (6 files), `tsc --noEmit` 0 errors, defensive-programming scanner OK, biome clean; e2e artifacts re-harvested (`replay-proof.json` now shows the true no-op: zero history mutation).
 
+### Review Findings (BMAD round 3, 2026-08-18)
+
+Full bmad-code-review workflow (3 adversarial layers, parallel subagents) over the PR #117 diff. Blind Hunter: 0 findings. Edge Case Hunter (source): 1. Edge Case Hunter (tests): 0. Acceptance Auditor (diff vs contract.md + story): 0 — fully compliant.
+
+- [x] Review — Patch [LOW] `trace/reader.ts:304` `readRunsByIssue` phases sub-query carried a dead `AND phases.rowid > 0` predicate — the query binds no rowid cursor and SQLite rowids are always >= 1, so it matched every row and filtered nothing. Fix (fa7383c): removed; `request_id IN (...)` + `ORDER BY phases.rowid` are the real query.
+
+Gates: 84 focal tests pass (reader + issue-correlation + pipeline-run), `tsc --noEmit` 0 errors, gitnexus detect_changes low risk. Status stays `review` until PR #117 merges.
+
 ### File List
 
 **(new)**
@@ -320,3 +328,4 @@ Gates after the fix wave: 126 focal tests pass (6 files), `tsc --noEmit` 0 error
 ### Change Log
 
 - 2026-08-18: DF1.8 implemented — issue correlation on the DF1.4 trace store (3 columns, 1 unique index, `resolveRunCorrelation`, idempotent `initiateSession`, `readRunsByIssue`/`readRunPhases`, CLI `--repo-slug`/`--issue` wiring, host dispatch-failure log). 41 new tests; tsc + biome clean; e2e evidence captured.
+- 2026-08-18: BMAD review round 3 (fa7383c) — 1 LOW fixed (dead `phases.rowid > 0` filter in `readRunsByIssue`); 0 findings from the other 3 layers.
