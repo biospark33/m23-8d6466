@@ -283,6 +283,50 @@ describe("runTestCommand — reporter formats, output cap, group kill (review ro
     expect(result.testResults).toEqual({ passed: 0, failed: 2 });
   });
 
+  test("jest green run with skips: skipped clause precedes passed", async () => {
+    // jest's summary order is failed → skipped → todo → passed, so a green
+    // run with skips prints the skipped count FIRST: "Tests: 1 skipped,
+    // 2 passed, 3 total". The old parser anchored on the first number after
+    // "Tests" and required passed/failed there — this line failed closed as
+    // "tests did not run".
+    const script = path.join(cwd2, "jest-skipped-first.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho 'Test Suites: 1 skipped, 1 total'\necho 'Tests:       1 skipped, 2 passed, 3 total'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd2 });
+    expect(result.testsExecuted).toBe(true);
+    expect(result.testResults).toEqual({ passed: 2, failed: 0 });
+  });
+
+  test("jest run with todo clause first still parses the passed count", async () => {
+    // todo (test.fixme/'todo' tests) also precedes passed in jest's order.
+    const script = path.join(cwd2, "jest-todo-first.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho 'Tests:       2 todo, 3 passed, 5 total'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd2 });
+    expect(result.testsExecuted).toBe(true);
+    expect(result.testResults).toEqual({ passed: 3, failed: 0 });
+  });
+
+  test("vitest run with leading skipped clause: 'Tests  1 skipped | 2 passed (3)'", async () => {
+    // vitest puts skipped between the (omitted) failed and passed counts,
+    // so a no-failure run with skips leads with skipped.
+    const script = path.join(cwd2, "vitest-skipped-first.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho ' Test Files  1 passed (1)'\necho '      Tests  1 skipped | 2 passed (3)'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd2 });
+    expect(result.testsExecuted).toBe(true);
+    expect(result.testResults).toEqual({ passed: 2, failed: 0 });
+  });
+
   test("output beyond the capture cap fails closed with a cap reason", async () => {
     // ~90 bytes/line × 8000 lines ≈ 720 KiB > 512 KiB cap on ONE stream.
     const script = path.join(cwd2, "flood.sh");

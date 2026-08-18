@@ -7,12 +7,17 @@
  *
  * Supported output formats:
  * - Bun test: " 7 pass\n 2 fail" (leading spaces, exact words, own lines)
- * - Jest: "Tests: 7 passed, 2 failed" (passed first; green runs omit the
- *   failed clause)
+ * - Jest: "Tests: 7 passed, 2 failed" (failed leads when present, then
+ *   skipped/todo, then passed; zero categories are omitted, so a green run
+ *   has no failed clause)
  * - Vitest default reporter: "Tests  2 failed | 4 passed (6)" (failed first,
  *   no colon; an all-green run prints only "Tests  7 passed (7)" and an
  *   all-failing run prints only "Tests  2 failed (2)" — the omitted count
  *   defaults to 0)
+ *
+ * Non-pass/fail categories on the Tests line (skipped/todo) are ignored:
+ * jest's summary order puts them BEFORE passed, so "Tests: 1 skipped,
+ * 2 passed, 3 total" parses as {passed: 2, failed: 0}.
  *
  * Fail-closed: any spawn failure, signal kill, output-cap breach, or
  * unparseable output returns {testsExecuted: false, testResults: {passed:0,
@@ -236,11 +241,14 @@ function failClosed(reason: string): TestCommandResult {
  * Parse passed/failed counts from test output.
  *
  * Matches bun test format: dedicated " 7 pass" / " 2 fail" summary lines.
- * Matches jest/vitest format: "Tests: 7 passed, 2 failed" (jest, passed
- * first) or "Tests  2 failed | 4 passed" (vitest default reporter, failed
- * first, colon-less); a green run omits the failed clause and an all-failing
- * run omits the passed clause — the omitted count defaults to 0 in both
- * directions.
+ * Matches jest/vitest format: one "Tests" summary line ("Tests: 7 passed,
+ * 2 failed" or colon-less "Tests  2 failed | 4 passed") scanned for every
+ * "<n> passed|failed" clause on that line. Zero categories are omitted by
+ * both reporters (a green run has no failed clause, an all-failing run no
+ * passed clause — the omitted count defaults to 0), and non-pass/fail
+ * categories (skipped/todo) may precede them because jest's summary order
+ * is failed → skipped → todo → passed: "Tests: 1 skipped, 2 passed,
+ * 3 total" must parse, not fail closed.
  *
  * @param output - Combined stdout+stderr from the test command
  * @returns Parsed counts or null if unparseable
@@ -260,34 +268,30 @@ function parseTestOutput(output: string): { passed: number; failed: number } | n
     };
   }
 
-  // Jest/Vitest summary. Jest puts passed first ("Tests:       7 passed,
-  // 2 failed, 9 total"); vitest puts failed first ("Tests  2 failed |
-  // 4 passed (6)"). The failed clause is optional on green runs ("Tests:
-  // 7 passed, 7 total", "Tests  7 passed (7)") — a green suite must parse
-  // with failed=0, not fail closed. Both counts anchor to the SAME "Tests"
-  // line and never cross a newline: jest's earlier "Test Suites: 1 failed"
-  // and vitest's "Test Files  2 failed" lines must not donate their counts.
-  const passedFirst = output.match(
-    /Tests[:\s]+(\d+)\s+passed(?:[^\n\d]+(\d+)\s+failed)?/,
-  );
-  if (passedFirst) {
-    return {
-      passed: Number.parseInt(passedFirst[1] ?? "0", 10),
-      failed: passedFirst[2] ? Number.parseInt(passedFirst[2], 10) : 0,
-    };
-  }
-  // The passed clause is optional here too: an all-failing run omits the
-  // zero "passed" count (jest: "Tests: 2 failed, 9 total"; vitest: "Tests
-  // 2 failed (2)"), and passed defaults to 0 — the DF1.6 seeded-failing-test
-  // path must parse, not fail closed as "tests did not run".
-  const failedFirst = output.match(
-    /Tests[:\s]+(\d+)\s+failed(?:[^\n\d]+(\d+)\s+passed)?/,
-  );
-  if (failedFirst) {
-    return {
-      passed: failedFirst[2] ? Number.parseInt(failedFirst[2], 10) : 0,
-      failed: Number.parseInt(failedFirst[1] ?? "0", 10),
-    };
+  // Jest/Vitest summary: capture the single "Tests" line, then read every
+  // "<n> passed|failed" clause ON that line. A clause scan (not an anchor on
+  // the first number) is required because non-pass/fail categories sit
+  // between/ before the counts: jest prints "Tests: 1 skipped, 2 passed,
+  // 3 total" (skipped first on green-with-skips) and "Tests: 2 failed,
+  // 1 todo, 3 total"; vitest prints "Tests  1 skipped | 2 passed (3)".
+  // "Test Suites"/"Test Files" lines contain no "Tests" word, and the
+  // [^\n]* slice keeps the scan from crossing a newline, so those lines
+  // cannot donate their failed counts. First clause per category wins.
+  const testsLine = output.match(/Tests[:\s][^\n]*/)?.[0];
+  if (testsLine !== undefined) {
+    let passed: number | undefined;
+    let failed: number | undefined;
+    for (const clause of testsLine.matchAll(/(\d+)\s+(passed|failed)/g)) {
+      const count = Number.parseInt(clause[1] ?? "0", 10);
+      if (clause[2] === "passed") {
+        if (passed === undefined) passed = count;
+      } else if (failed === undefined) {
+        failed = count;
+      }
+    }
+    if (passed !== undefined || failed !== undefined) {
+      return { passed: passed ?? 0, failed: failed ?? 0 };
+    }
   }
 
   // No match
