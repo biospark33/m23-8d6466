@@ -386,3 +386,74 @@ export interface TraceSessionRow {
   pipeline_name: string | null;
   archived: number | null;
 }
+
+// ---------------------------------------------------------------------------
+// DF1.8 region: issue-correlation types. Append-only — adds the
+// (repoSlug, issueId) correlation shape, the resolved-requestId result type,
+// and the correlated reader row/page types. No sibling declaration is edited.
+// ---------------------------------------------------------------------------
+
+/** The dispatch brief's issue reference. `issueUrl` optional (derivable from slug+id). */
+export interface IssueRef {
+  repoSlug: string;
+  issueId: number;
+  issueUrl?: string;
+}
+
+/** Correlation settled once at dispatch: requestId resolved, pair validated. */
+export interface ResolvedRunCorrelation {
+  requestId: string;
+  repoSlug: string;
+  issueId: number;
+  issueUrl: string | null;
+}
+
+/** A row of `phases` as returned by the correlated reader, with the phase's
+ *  latest persisted envelope payload (its "persisted output") or null. */
+export interface TracePhaseRow {
+  rowid: number;
+  phase_id: string;
+  request_id: string;
+  seq: number | null;
+  name: string | null;
+  kind: string | null;
+  owner: string | null;
+  description: string | null;
+  status: string;
+  attempt: number | null;
+  retries: number | null;
+  error: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  output_payload_json: string | null;
+}
+
+/** One correlated run as returned by readRunsByIssue: session fields + phases. */
+export interface CorrelatedRunRow {
+  rowid: number;
+  request_id: string;
+  request: string | null;
+  status: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_ms: number | null;
+  total_tokens: number | null;
+  total_cost: number | null;
+  pipeline_name: string | null;
+  repo_slug: string;
+  issue_id: number;
+  issue_url: string | null;
+  phases: TracePhaseRow[];
+}
+
+export interface CorrelatedRunPage {
+  rows: CorrelatedRunRow[];
+  cursor: number;
+  hasMore: boolean;
+}
+
+export interface TracePhasePage {
+  rows: TracePhaseRow[];
+  cursor: number;
+  hasMore: boolean;
+}

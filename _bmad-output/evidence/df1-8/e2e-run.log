@@ -1,0 +1,7 @@
+{"level":"info","event":"run_initiated","runId":"8f14e45f-ceea-4baf-a3a4-11e7d3b0e4a1","requestId":"8f14e45f-ceea-4baf-a3a4-11e7d3b0e4a1","repoSlug":"qds/demo","issueId":42,"replayed":false,"correlation_resolve_ms":0,"session_upsert_ms":0}
+correlated plan for qds/demo#42
+{"requestId":"8f14e45f-ceea-4baf-a3a4-11e7d3b0e4a1","pipelineId":"df1-8-demo","phase":"plan","kind":"code","timestamp":"2026-08-18T21:09:56.146Z","durationMs":5,"status":"success","exitStatus":"success","subTimings":{"manifest_load_ms":6,"phase_body_ms":5,"journal_write_ms":1}}
+verify done
+{"requestId":"8f14e45f-ceea-4baf-a3a4-11e7d3b0e4a1","pipelineId":"df1-8-demo","phase":"verify","kind":"code","timestamp":"2026-08-18T21:09:56.148Z","durationMs":1,"status":"success","exitStatus":"success","subTimings":{"manifest_load_ms":0,"phase_body_ms":1,"journal_write_ms":1}}
+RUN 8f14e45f-ceea-4baf-a3a4-11e7d3b0e4a1 pipeline=df1-8-demo ok=true accepted=true phases=2 completedAt=2026-08-18T21:09:56.149Z
+{"level":"info","event":"run_initiated","runId":"8f14e45f-ceea-4baf-a3a4-11e7d3b0e4a1","requestId":"8f14e45f-ceea-4baf-a3a4-11e7d3b0e4a1","repoSlug":"qds/demo","issueId":42,"replayed":true,"correlation_resolve_ms":0,"session_upsert_ms":0}

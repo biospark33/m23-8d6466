@@ -27,6 +27,12 @@ export const MIGRATIONS: readonly Migration[] = [
   ["agent_sessions", "context_tokens", "INTEGER"],
   ["agent_sessions", "context_window", "INTEGER"],
   ["sessions", "archived", "INTEGER DEFAULT 0"],
+  // DF1.8 — issue correlation on the sessions row. All nullable: a bare DF1.4
+  // run carries NULL repo_slug, mints no key, and is returned by no correlated
+  // reader (INV-RUN-1/INV-RUN-3).
+  ["sessions", "repo_slug", "TEXT"],
+  ["sessions", "issue_id", "INTEGER"],
+  ["sessions", "issue_url", "TEXT"],
 ] as const;
 
 // Freeze to prevent runtime mutation — the array AND each tuple, so the

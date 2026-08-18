@@ -19,6 +19,14 @@ import {
   type TraceReader,
 } from "../../../src/phase-engine/trace/reader.ts";
 import { applyReaderPragmas } from "../../../src/phase-engine/trace/pragmas.ts";
+// DF1.8 correlated reader types — do not exist yet, so this import fails the
+// typecheck (RED) until types.ts grows the DF1.8 region.
+import type {
+  CorrelatedRunPage,
+  CorrelatedRunRow,
+  TracePhasePage,
+  TracePhaseRow,
+} from "../../../src/phase-engine/types.ts";
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df1-4-reader-")));
 afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
@@ -638,5 +646,414 @@ describe("constants (MAX_LIMIT, DEFAULT_LIMIT)", () => {
 
   test("DEFAULT_LIMIT equals 500 per contract", () => {
     expect(DEFAULT_LIMIT).toBe(500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DF1.8 — issue-correlated reader additions (readRunsByIssue / readRunPhases).
+// Tests target the locked DF1.8 contract; implementation does not exist yet,
+// so every block below is RED until reader.ts grows the two methods.
+// ---------------------------------------------------------------------------
+
+/** Post-DF1.8-migration sessions shape: repo_slug/issue_id/issue_url present. */
+const CORRELATED_SESSIONS_DDL = `
+  CREATE TABLE IF NOT EXISTS sessions (
+    request_id TEXT PRIMARY KEY,
+    request TEXT,
+    status TEXT,
+    engineer TEXT,
+    started_at TEXT,
+    ended_at TEXT,
+    duration_ms INTEGER,
+    total_tokens INTEGER,
+    total_cost INTEGER,
+    pipeline_name TEXT,
+    archived INTEGER DEFAULT 0,
+    repo_slug TEXT,
+    issue_id INTEGER,
+    issue_url TEXT
+  )
+`;
+
+const CORRELATED_PHASES_DDL = `
+  CREATE TABLE IF NOT EXISTS phases (
+    phase_id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    seq INTEGER,
+    name TEXT,
+    kind TEXT,
+    owner TEXT,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'fail',
+    attempt INTEGER,
+    retries INTEGER,
+    error TEXT,
+    started_at TEXT,
+    ended_at TEXT
+  )
+`;
+
+const CORRELATED_ENVELOPES_DDL = `
+  CREATE TABLE IF NOT EXISTS envelopes (
+    envelope_id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    phase_id TEXT,
+    agent TEXT,
+    output_type TEXT,
+    payload_json TEXT,
+    valid INTEGER NOT NULL DEFAULT 0,
+    attempt INTEGER
+  )
+`;
+
+/**
+ * Helper: correlated fixture. Same issue_id (42) in two repos:
+ *   qds/demo#42  → req-demo-a (3 phases) + req-demo-b (no phases)
+ *   qds/other#42 → req-other (1 phase — must never leak into demo pages)
+ * Phase envelope coverage on req-demo-a:
+ *   phase-a1 — envelopes attempt 2 AND attempt 1 (a2 inserted FIRST)
+ *   phase-a2 — no envelope
+ *   phase-a3 — single envelope attempt 1
+ */
+function createCorrelatedFixture(dir: string): {
+  dbPath: string;
+  sessionRowids: { demoA: number; demoB: number; other: number };
+  phaseRowids: { a1: number; a2: number; a3: number; o1: number };
+} {
+  const dbPath = path.join(dir, "trace.db");
+  const db = new Database(dbPath);
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec(CORRELATED_SESSIONS_DDL);
+  db.exec(CORRELATED_PHASES_DDL);
+  db.exec(CORRELATED_ENVELOPES_DDL);
+
+  const insSession = db.prepare(
+    "INSERT INTO sessions (request_id, request, status, started_at, pipeline_name, repo_slug, issue_id, issue_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  const demoA = Number(
+    insSession.run("req-demo-a", "demo request A", "completed", "2026-01-01T00:00:00Z", "test-pipeline", "qds/demo", 42, "https://git.example.com/qds/demo/issues/42").lastInsertRowid,
+  );
+  const demoB = Number(
+    insSession.run("req-demo-b", "demo request B", "running", "2026-01-02T00:00:00Z", "test-pipeline", "qds/demo", 42, null).lastInsertRowid,
+  );
+  const other = Number(
+    insSession.run("req-other", "other repo run", "completed", "2026-01-03T00:00:00Z", null, "qds/other", 42, null).lastInsertRowid,
+  );
+
+  const insPhase = db.prepare(
+    "INSERT INTO phases (phase_id, request_id, seq, name, kind, owner, status, attempt, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  const a1 = Number(insPhase.run("phase-a1", "req-demo-a", 0, "plan", "plan", "engine", "ok", 1, "2026-01-01T00:00:01Z").lastInsertRowid);
+  const a2 = Number(insPhase.run("phase-a2", "req-demo-a", 1, "build", "work", "worker", "ok", 1, "2026-01-01T00:00:02Z").lastInsertRowid);
+  const a3 = Number(insPhase.run("phase-a3", "req-demo-a", 2, "check", "work", "worker", "fail", 2, "2026-01-01T00:00:03Z").lastInsertRowid);
+  const o1 = Number(insPhase.run("phase-o1", "req-other", 0, "plan", "plan", "engine", "ok", 1, "2026-01-03T00:00:01Z").lastInsertRowid);
+
+  // Attempt-2 envelope inserted FIRST on purpose: an impl that takes the
+  // last-inserted envelope instead of MAX(attempt) returns the attempt-1
+  // payload and fails the latest-attempt assertions below.
+  const insEnvelope = db.prepare(
+    "INSERT INTO envelopes (envelope_id, request_id, phase_id, agent, output_type, payload_json, valid, attempt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  insEnvelope.run("env-a1-at2", "req-demo-a", "phase-a1", "worker", "text", '{"phase":"a1","attempt":2}', 1, 2);
+  insEnvelope.run("env-a1-at1", "req-demo-a", "phase-a1", "worker", "text", '{"phase":"a1","attempt":1}', 1, 1);
+  insEnvelope.run("env-a3-at1", "req-demo-a", "phase-a3", "checker", "text", '{"phase":"a3","attempt":1}', 1, 1);
+
+  db.close();
+  return {
+    dbPath,
+    sessionRowids: { demoA, demoB, other },
+    phaseRowids: { a1, a2, a3, o1 },
+  };
+}
+
+/**
+ * Helper: N bare session rows for one (repoSlug, issueId) — limit/cap tests.
+ */
+function createRunsFixture(dir: string, repoSlug: string, issueId: number, count: number): { dbPath: string; rowids: number[] } {
+  const dbPath = path.join(dir, "trace.db");
+  const db = new Database(dbPath);
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec(CORRELATED_SESSIONS_DDL);
+
+  const insert = db.prepare(
+    "INSERT INTO sessions (request_id, request, status, repo_slug, issue_id) VALUES (?, ?, ?, ?, ?)",
+  );
+  const rowids: number[] = [];
+  for (let i = 0; i < count; i++) {
+    rowids.push(Number(insert.run(`req-bulk-${i}`, `bulk ${i}`, "completed", repoSlug, issueId).lastInsertRowid));
+  }
+  db.close();
+  return { dbPath, rowids };
+}
+
+describe("readRunsByIssue correlation (DF1.8, INV-RUN-3)", () => {
+  test("returns only the named repo's runs — same issue_id in another repo excluded", () => {
+    const { dbPath, sessionRowids } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+
+    const page = reader.readRunsByIssue("qds/demo", 42);
+
+    expect(page.rows.map((r: CorrelatedRunRow) => r.request_id)).toEqual(["req-demo-a", "req-demo-b"]);
+    expect(
+      page.rows.every((row: CorrelatedRunRow) => row.repo_slug === "qds/demo" && row.issue_id === 42),
+    ).toBe(true);
+    expect(page.hasMore).toBe(false);
+    expect(page.cursor).toBe(sessionRowids.demoB);
+    reader.close();
+  });
+
+  test("limit=1: first page hasMore true with cursor=first rowid; walk exhausts", () => {
+    const { dbPath, sessionRowids } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+
+    const page1 = reader.readRunsByIssue("qds/demo", 42, 0, 1);
+    expect(page1.rows).toHaveLength(1);
+    expect(page1.rows[0]!.request_id).toBe("req-demo-a");
+    expect(page1.cursor).toBe(sessionRowids.demoA);
+    expect(page1.hasMore).toBe(true);
+
+    // Page-full heuristic per contract (`hasMore = rows.length === cappedLimit`,
+    // identical to readEvents): a full single-row page reports hasMore true
+    // even when it was the last row — the next page is the authoritative check.
+    const page2 = reader.readRunsByIssue("qds/demo", 42, page1.cursor, 1);
+    expect(page2.rows).toHaveLength(1);
+    expect(page2.rows[0]!.request_id).toBe("req-demo-b");
+    expect(page2.hasMore).toBe(true);
+
+    const page3 = reader.readRunsByIssue("qds/demo", 42, page2.cursor, 1);
+    expect(page3.rows).toEqual([]);
+    expect(page3.cursor).toBe(page2.cursor);
+    expect(page3.hasMore).toBe(false);
+    reader.close();
+  });
+
+  test("limit=2 over 3 runs: second page under-full, hasMore false, cursor=last rowid", () => {
+    const { dbPath, rowids } = createRunsFixture(testDir, "qds/page", 42, 3);
+    const reader = openTraceReader(dbPath);
+
+    const page1 = reader.readRunsByIssue("qds/page", 42, 0, 2);
+    expect(page1.rows.map((r: CorrelatedRunRow) => r.request_id)).toEqual(["req-bulk-0", "req-bulk-1"]);
+    expect(page1.hasMore).toBe(true);
+    expect(page1.cursor).toBe(rowids[1]!);
+
+    const page2 = reader.readRunsByIssue("qds/page", 42, page1.cursor, 2);
+    expect(page2.rows.map((r: CorrelatedRunRow) => r.request_id)).toEqual(["req-bulk-2"]);
+    expect(page2.hasMore).toBe(false);
+    expect(page2.cursor).toBe(rowids[2]!);
+    reader.close();
+  });
+
+  test("unknown (repoSlug, issueId): empty page, cursor unchanged, hasMore false — not an error", () => {
+    const { dbPath } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+
+    const page = reader.readRunsByIssue("qds/ghost", 42, 42, 10);
+    expect(page.rows).toEqual([]);
+    expect(page.cursor).toBe(42);
+    expect(page.hasMore).toBe(false);
+    reader.close();
+  });
+
+  test("rows carry phases ordered by rowid with latest-attempt output_payload_json", () => {
+    const { dbPath, phaseRowids } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+
+    const page = reader.readRunsByIssue("qds/demo", 42);
+    const runA = page.rows.find((r) => r.request_id === "req-demo-a")!;
+
+    expect(runA.phases.map((p: TracePhaseRow) => p.phase_id)).toEqual(["phase-a1", "phase-a2", "phase-a3"]);
+    expect(runA.phases[0]!.rowid).toBe(phaseRowids.a1);
+    expect(runA.phases[0]!.status).toBe("ok");
+    // Latest attempt wins (attempt 2), not the last-inserted envelope.
+    expect(runA.phases[0]!.output_payload_json).toBe('{"phase":"a1","attempt":2}');
+    // Phase with no envelope → null, never a synthetic payload.
+    expect(runA.phases[1]!.output_payload_json).toBeNull();
+    expect(runA.phases[2]!.output_payload_json).toBe('{"phase":"a3","attempt":1}');
+
+    // Run without phases still has the array (empty), not undefined.
+    const runB = page.rows.find((r) => r.request_id === "req-demo-b")!;
+    expect(runB.phases).toEqual([]);
+    reader.close();
+  });
+});
+
+describe("readRunsByIssue limit handling (DF1.8 — identical to readEvents)", () => {
+  test("limit=0 with 3 rows falls back to DEFAULT_LIMIT: all rows, hasMore false", () => {
+    const { dbPath } = createRunsFixture(testDir, "qds/zero", 42, 3);
+    const reader = openTraceReader(dbPath);
+
+    const page = reader.readRunsByIssue("qds/zero", 42, 0, 0);
+    expect(page.rows).toHaveLength(3);
+    expect(page.hasMore).toBe(false);
+    reader.close();
+  });
+
+  test("non-finite limits (NaN, Infinity) fall back to DEFAULT_LIMIT", () => {
+    const { dbPath } = createRunsFixture(testDir, "qds/nan", 42, 3);
+    const reader = openTraceReader(dbPath);
+
+    const nanPage = reader.readRunsByIssue("qds/nan", 42, 0, Number.NaN);
+    expect(nanPage.rows).toHaveLength(3);
+    expect(nanPage.hasMore).toBe(false);
+
+    const infPage = reader.readRunsByIssue("qds/nan", 42, 0, Number.POSITIVE_INFINITY);
+    expect(infPage.rows).toHaveLength(3);
+    expect(infPage.hasMore).toBe(false);
+    reader.close();
+  });
+
+  test("limit above MAX_LIMIT capped at 1000 with 1001 matching runs", () => {
+    const { dbPath, rowids } = createRunsFixture(testDir, "qds/cap", 42, 1001);
+    const reader = openTraceReader(dbPath);
+
+    const page = reader.readRunsByIssue("qds/cap", 42, 0, 2000);
+    expect(page.rows).toHaveLength(1000);
+    expect(page.hasMore).toBe(true);
+    expect(page.cursor).toBe(rowids[999]!);
+
+    const rest = reader.readRunsByIssue("qds/cap", 42, page.cursor, 2000);
+    expect(rest.rows).toHaveLength(1);
+    expect(rest.hasMore).toBe(false);
+    reader.close();
+  });
+});
+
+describe("readRunsByIssue cursor validation (DF1.8 — same rule as readEvents)", () => {
+  test("negative cursor throws", () => {
+    const { dbPath } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+    expect(() => reader.readRunsByIssue("qds/demo", 42, -1)).toThrow("cursor");
+    reader.close();
+  });
+
+  test("non-integer cursor (1.5) throws", () => {
+    const { dbPath } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+    expect(() => reader.readRunsByIssue("qds/demo", 42, 1.5)).toThrow("cursor");
+    reader.close();
+  });
+});
+
+describe("readRunPhases (DF1.8)", () => {
+  test("returns only the named request's phases — other run's phases excluded", () => {
+    const { dbPath, phaseRowids } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+
+    const page = reader.readRunPhases("req-demo-a");
+    expect(page.rows.map((p: TracePhaseRow) => p.phase_id)).toEqual(["phase-a1", "phase-a2", "phase-a3"]);
+    expect(
+      page.rows.every((phase: TracePhaseRow) => phase.request_id === "req-demo-a" && phase.rowid !== phaseRowids.o1),
+    ).toBe(true);
+    expect(page.hasMore).toBe(false);
+    expect(page.cursor).toBe(phaseRowids.a3);
+    reader.close();
+  });
+
+  test("output_payload_json join: latest-attempt envelope payload; no envelope → null", () => {
+    const { dbPath } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+
+    const page = reader.readRunPhases("req-demo-a");
+    expect(page.rows[0]!.output_payload_json).toBe('{"phase":"a1","attempt":2}');
+    expect(page.rows[1]!.output_payload_json).toBeNull();
+    expect(page.rows[2]!.output_payload_json).toBe('{"phase":"a3","attempt":1}');
+    reader.close();
+  });
+
+  test("two envelopes sharing one attempt: phase returned exactly ONCE, payload = last-inserted (max rowid)", () => {
+    const dbPath = path.join(testDir, "trace.db");
+    const db = new Database(dbPath);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec(CORRELATED_SESSIONS_DDL);
+    db.exec(CORRELATED_PHASES_DDL);
+    db.exec(CORRELATED_ENVELOPES_DDL);
+    db.prepare(
+      "INSERT INTO sessions (request_id, request, status, started_at, repo_slug, issue_id) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run("req-dup", "duplicate-envelope run", "completed", "2026-01-04T00:00:00Z", "qds/demo", 42);
+    db.prepare(
+      "INSERT INTO phases (phase_id, request_id, seq, name, kind, owner, status, attempt, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run("phase-d1", "req-dup", 0, "plan", "plan", "engine", "ok", 1, "2026-01-04T00:00:01Z");
+    const insEnvelope = db.prepare(
+      "INSERT INTO envelopes (envelope_id, request_id, phase_id, agent, output_type, payload_json, valid, attempt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    // Same attempt, distinct payloads, second inserted later (higher rowid):
+    // an equality join on attempt would fan out to TWO phase-d1 rows; the
+    // rowid tiebreak must collapse them to the LAST-inserted payload.
+    insEnvelope.run("env-d1-first", "req-dup", "phase-d1", "worker", "text", '{"phase":"d1","copy":"first"}', 1, 1);
+    insEnvelope.run("env-d1-second", "req-dup", "phase-d1", "worker", "text", '{"phase":"d1","copy":"second"}', 1, 1);
+    db.close();
+
+    const reader = openTraceReader(dbPath);
+    const page = reader.readRunPhases("req-dup");
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]!.phase_id).toBe("phase-d1");
+    expect(page.rows[0]!.output_payload_json).toBe('{"phase":"d1","copy":"second"}');
+
+    const runPage = reader.readRunsByIssue("qds/demo", 42);
+    expect(runPage.rows).toHaveLength(1);
+    expect(runPage.rows[0]!.phases).toHaveLength(1);
+    expect(runPage.rows[0]!.phases[0]!.output_payload_json).toBe('{"phase":"d1","copy":"second"}');
+    reader.close();
+  });
+
+  test("rowid-cursor paging: limit=2 first page full hasMore true; second page rest", () => {
+    const { dbPath, phaseRowids } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+
+    const page1 = reader.readRunPhases("req-demo-a", 0, 2);
+    expect(page1.rows.map((p: TracePhaseRow) => p.phase_id)).toEqual(["phase-a1", "phase-a2"]);
+    expect(page1.hasMore).toBe(true);
+    expect(page1.cursor).toBe(phaseRowids.a2);
+
+    const page2 = reader.readRunPhases("req-demo-a", page1.cursor, 2);
+    expect(page2.rows.map((p: TracePhaseRow) => p.phase_id)).toEqual(["phase-a3"]);
+    expect(page2.hasMore).toBe(false);
+    expect(page2.cursor).toBe(phaseRowids.a3);
+    reader.close();
+  });
+
+  test("requestId with no phases: empty page, cursor unchanged, hasMore false", () => {
+    const { dbPath } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+
+    const page = reader.readRunPhases("req-demo-b", 7, 10);
+    expect(page.rows).toEqual([]);
+    expect(page.cursor).toBe(7);
+    expect(page.hasMore).toBe(false);
+    reader.close();
+  });
+
+  test("negative cursor throws (same rule as readEvents)", () => {
+    const { dbPath } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+    expect(() => reader.readRunPhases("req-demo-a", -1)).toThrow("cursor");
+    reader.close();
+  });
+
+  test("non-integer cursor (1.5) throws (same rule as readEvents)", () => {
+    const { dbPath } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+    expect(() => reader.readRunPhases("req-demo-a", 1.5)).toThrow("cursor");
+    reader.close();
+  });
+});
+
+describe("DF1.8 reader type surface (typecheck-level RED)", () => {
+  // INV-RUN-3 negative control: TraceReader exposes NO issueId-only entry
+  // point. The only correlation lookup takes (repoSlug, issueId) together
+  // (readRunsByIssue) and the only phase lookup takes a requestId
+  // (readRunPhases) — every call in the blocks above compiles against exactly
+  // those signatures, which is the compile-time proof. Review grep:
+  //   grep -n "readRunsByIssue\|readRunPhases" src/phase-engine/trace/reader.ts
+  // must show no single-issueId-argument form. No runtime gymnastics needed.
+  test("correlated reader types exist with the contract shape", () => {
+    const _runCursor: CorrelatedRunPage["cursor"] = 0;
+    const _phaseCursor: TracePhasePage["cursor"] = 0;
+    const _runPhases: CorrelatedRunRow["phases"] = [];
+    const _payload: TracePhaseRow["output_payload_json"] = null;
+    expect(_runCursor).toBe(0);
+    expect(_phaseCursor).toBe(0);
+    expect(_runPhases).toEqual([]);
+    expect(_payload).toBeNull();
   });
 });

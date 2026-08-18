@@ -21,6 +21,10 @@ import { randomBytes } from "node:crypto";
 import { SCHEMA_DDL, SCHEMA_INDEX_DDL } from "./schema.ts";
 import { applyMigrations } from "./migrations.ts";
 import { applyWriterPragmas } from "./pragmas.ts";
+import {
+  RequestIdRepoMismatchError,
+  type ResolvedRunCorrelation,
+} from "../issue-correlation.ts";
 
 /** Structured error carrying SQL context. */
 export class TracerError extends Error {
@@ -411,14 +415,12 @@ export class Tracer {
       this.db.exec(ddl);
     }
 
-    // Apply index DDL
-    for (const ddl of SCHEMA_INDEX_DDL) {
-      this.db.exec(ddl);
-    }
-
     // INV-5: additive migrations — a load failure is a compile-time import
     // error, not a silently skipped migration list; an apply failure is a
-    // hard open failure.
+    // hard open failure. These run BEFORE the index DDL below: DF1.8's
+    // idx_sessions_repo_request covers migration-added columns, and SQLite
+    // rejects an index on a column that does not exist yet ("no such column")
+    // on both fresh and pre-DF1.8 stores.
     try {
       applyMigrations(this.db);
     } catch (e) {
@@ -427,6 +429,11 @@ export class Tracer {
         message: `migration failed: ${(e as Error).message}`,
         table: "migrations",
       });
+    }
+
+    // Apply index DDL (after migrations — see note above)
+    for (const ddl of SCHEMA_INDEX_DDL) {
+      this.db.exec(ddl);
     }
 
     // First write transactions may (re)grow the sidecars — final strict pass
@@ -933,5 +940,117 @@ export class Tracer {
         }),
       );
     }
+  }
+
+  /**
+   * DF1.8 correlated session initiation. UNLIKE the sidecar write methods
+   * (AC5), this is an initiation GATE and throws by design: a
+   * RequestIdRepoMismatch refusal must stop the run before a box or key is
+   * minted, not be swallowed as a trace error. Documented deviation from the
+   * per-write AC5 contract.
+   *
+   * One `transaction(...).immediate()` round (INV-RUN-1 — idempotency rests on
+   * the `request_id` primary key, never a second identifier):
+   *
+   * 1. SELECT (repo_slug, issue_id) by request_id (bound).
+   * 2. Row found: equal (repoSlug, issueId) PAIR → replayed, no writes; NULL
+   *    slug (a bare DF1.4 row) → the ONE fill of the correlation columns
+   *    (INV-RUN-2 write-once); anything else — different slug, OR same slug
+   *    under a different issueId, both re-pointing attempts — →
+   *    RequestIdRepoMismatchError naming both slugs and both issue ids — the
+   *    transaction rolls back, no row written, no second row.
+   * 3. No row → INSERT ... ON CONFLICT(request_id) DO NOTHING. If a racing
+   *    writer won (changes === 0), re-SELECT once and apply step 2 to it.
+   *
+   * `runId` is ALWAYS the resolved requestId.
+   *
+   * @throws {RequestIdRepoMismatchError} same requestId claimed by another repo.
+   * @throws {TracerError} store closed or the sessions row vanished mid-initiation.
+   */
+  initiateSession(e: {
+    correlation: ResolvedRunCorrelation;
+    request: string;
+    engineer?: string;
+    pipelineName?: string;
+  }): { requestId: string; runId: string; replayed: boolean } {
+    if (!this.db) {
+      throw new TracerError({
+        code: "SQLITE_WRITE",
+        message: "initiateSession called on a closed trace store",
+        table: "sessions",
+        statement: "INSERT INTO sessions",
+      });
+    }
+    const db = this.db;
+    const c = e.correlation;
+
+    const selectSlug = db.prepare<
+      { repo_slug: string | null; issue_id: number | null },
+      [string]
+    >("SELECT repo_slug, issue_id FROM sessions WHERE request_id = ?");
+
+    /** Step 2 logic shared by the found-row and racing-winner paths. */
+    const replayOrRefuse = (
+      existing: { repo_slug: string | null; issue_id: number | null },
+    ): { requestId: string; runId: string; replayed: boolean } => {
+      // Full-pair compare: same slug under a different issueId is a re-point
+      // exactly like a different slug — the requestId is spoken for by
+      // (repo, issue), never by the repo alone (INV-RUN-2).
+      if (existing.repo_slug === c.repoSlug && existing.issue_id === c.issueId) {
+        return { requestId: c.requestId, runId: c.requestId, replayed: true };
+      }
+      if (existing.repo_slug === null) {
+        // The one and only write of the correlation columns (INV-RUN-2).
+        db.prepare(
+          "UPDATE sessions SET repo_slug = ?, issue_id = ?, issue_url = ? WHERE request_id = ?",
+        ).run(c.repoSlug, c.issueId, c.issueUrl, c.requestId);
+        return { requestId: c.requestId, runId: c.requestId, replayed: true };
+      }
+      throw new RequestIdRepoMismatchError({
+        requestId: c.requestId,
+        existingRepoSlug: existing.repo_slug,
+        attemptedRepoSlug: c.repoSlug,
+        existingIssueId: existing.issue_id,
+        attemptedIssueId: c.issueId,
+      });
+    };
+
+    const settle = (): { requestId: string; runId: string; replayed: boolean } => {
+      const existing = selectSlug.get(c.requestId);
+      if (existing !== null) return replayOrRefuse(existing);
+
+      const inserted = db
+        .prepare(
+          `INSERT INTO sessions (
+             request_id, request, status, engineer, started_at, pipeline_name,
+             repo_slug, issue_id, issue_url
+           ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(request_id) DO NOTHING`,
+        )
+        .run(
+          c.requestId,
+          e.request,
+          e.engineer ?? null,
+          new Date().toISOString(),
+          e.pipelineName ?? this.pipelineName ?? null,
+          c.repoSlug,
+          c.issueId,
+          c.issueUrl,
+        );
+      if (inserted.changes === 1) {
+        return { requestId: c.requestId, runId: c.requestId, replayed: false };
+      }
+      // Racing writer won the insert — apply step 2 to their row, once.
+      const raced = selectSlug.get(c.requestId);
+      if (raced !== null) return replayOrRefuse(raced);
+      throw new TracerError({
+        code: "SQLITE_WRITE",
+        message: `sessions row for ${c.requestId} vanished mid-initiation`,
+        table: "sessions",
+        statement: "INSERT INTO sessions",
+      });
+    };
+
+    return db.transaction(settle).immediate();
   }
 }

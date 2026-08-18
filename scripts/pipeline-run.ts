@@ -14,6 +14,10 @@
  *   --run-root <path>    root the manifest read is anchored at (default: cwd)
  *   --run-id <id>        default: a fresh uuid
  *   --request-id <id>    propagated unchanged onto every phase record and log line
+ *   --repo-slug <slug>   owner/name; opts into issue-correlated mode (DF1.8)
+ *                        and requires --issue — the pair is never defaulted
+ *   --issue <n>          GitHub issue number, 1..2^31-1; requires --repo-slug
+ *   --issue-url <url>    optional issue link (derivable from slug+id)
  *
  * Exit: 0 run ok / 1 run settled not-ok / 2 the run could not be settled at all
  * (manifest refused, journal unwritable) — nothing was recorded, so a poller
@@ -28,6 +32,13 @@
  * DF1.4: the trace store claims <QDS_RUN_ROOT>/trace (0700). The root matches
  * the terminal marker's (journal.ts): /run in the box, QDS_RUN_ROOT on dev/CI
  * hosts where /run is root-owned or absent.
+ *
+ * DF1.8: --repo-slug/--issue correlate the run with its GitHub issue.
+ * resolveRunCorrelation settles the requestId once (a strict UUID v4 is
+ * honoured, else one is generated) and the DF1.4 sessions row is created
+ * through tracer.initiateSession carrying (repo_slug, issue_id, issue_url);
+ * a refusal at any initiation step lands in <marker-root>/dispatch-failures.log
+ * with runId: null and exits 2 — never a fabricated id.
  */
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
@@ -52,10 +63,20 @@ import {
 import type { Envelope } from "../src/phase-engine/envelopes/types.ts";
 import { parseValueFlags } from "./lib/cli-args.ts";
 import { dispatchTask } from "../src/phase-engine/phases/dispatch-task.ts";
+import {
+  appendDispatchFailure,
+  CorrelationError,
+  MAX_ISSUE_ID,
+  resolveRunCorrelation,
+} from "../src/phase-engine/issue-correlation.ts";
+// ExitStatus comes through the types.ts re-export — the single source of truth
+// lives in cli-anything/src/types.ts and is never re-spelled here (DF1.8).
+import type { ExitStatus, ResolvedRunCorrelation } from "../src/phase-engine/types.ts";
 
 const HELP = [
   "Usage: bun scripts/pipeline-run.ts --manifest <path> --budget-ms <n> --journal <path>",
   "       [--run-root <path>] [--run-id <id>] [--request-id <id>]",
+  "       [--repo-slug <owner/name> --issue <n> [--issue-url <url>]]",
   "",
 ];
 
@@ -177,8 +198,59 @@ function runCommand(
   });
 }
 
-function makeBodyFactory(cwd: string, tracer: Tracer, requestId: string) {
-  return (spec: PhaseSpec): PhaseBody<unknown> => {
+/**
+ * DF1.8: the correlated dispatch-failure sink (AC4). Appends the refusal to
+ * the host-side dispatch log, writes the structured stderr line, and returns
+ * the exit code — the caller never continues, and no runId is ever fabricated
+ * (INV-RUN-4). A failure to write the log is itself reported but never masks
+ * the original refusal.
+ */
+function dispatchFail(
+  markerRoot: string,
+  ctx: { repoSlug: string | null; issueId: number | null; requestId: string | null },
+  err: unknown,
+): number {
+  const rawCode = err instanceof Error ? (err as Error & { code?: unknown }).code : undefined;
+  const code = typeof rawCode === "string" && rawCode.length > 0 ? rawCode : "RUN_INIT_FAILED";
+  const message = err instanceof Error ? err.message : String(err);
+  try {
+    appendDispatchFailure(path.join(markerRoot, "dispatch-failures.log"), {
+      // An unknown half of the pair is recorded as null — never ""/0, which
+      // would read as a fabricated (empty) correlation.
+      repoSlug: ctx.repoSlug,
+      issueId: ctx.issueId,
+      requestId: ctx.requestId,
+      code,
+      message,
+    });
+  } catch (logErr) {
+    fs.writeSync(
+      2,
+      `pipeline-run: dispatch-failure log unwritable: ${logErr instanceof Error ? logErr.message : String(logErr)}\n`,
+    );
+  }
+  fs.writeSync(
+    2,
+    `${JSON.stringify({
+      level: "error",
+      event: "dispatch_failed",
+      runId: null,
+      requestId: ctx.requestId,
+      repoSlug: ctx.repoSlug,
+      issueId: ctx.issueId,
+      error: { code, message },
+    })}\n`,
+  );
+  return 2;
+}
+
+function makeBodyFactory(
+  cwd: string,
+  tracer: Tracer,
+  requestId: string,
+  correlation?: { runId: string; repoSlug: string; issueId: number },
+) {
+  const makeBody = (spec: PhaseSpec): PhaseBody<unknown> => {
     if (spec.kind === "code") {
       const cmd = spec.command ?? [];
       // The manifest schema requires a non-empty `command` for a 'code' phase, so
@@ -210,6 +282,63 @@ function makeBodyFactory(cwd: string, tracer: Tracer, requestId: string) {
       );
     };
   };
+  if (!correlation) return makeBody;
+  // DF1.8: correlated runs also emit phase_state transitions (Observability
+  // Contract; the p1-8:34 surviving field set). The wrapper is observability
+  // only — the wrapped body's result/error passes through untouched, and a
+  // trace failure never fails the phase (tracer.trace is non-throwing by AC5;
+  // the guard is the same defense-in-depth as runCommand's).
+  return (spec: PhaseSpec): PhaseBody<unknown> => {
+    const inner = makeBody(spec);
+    return async (bodyCtx) => {
+      const state = (
+        phaseId: string,
+        status: "start" | "end",
+        durationMs: number,
+        exitStatus: ExitStatus | null,
+      ) => {
+        try {
+          tracer.trace({
+            type: "log",
+            name: "phase_state",
+            requestId,
+            phaseId,
+            payloadJson: JSON.stringify({
+              runId: correlation.runId,
+              repoSlug: correlation.repoSlug,
+              issueId: correlation.issueId,
+              requestId,
+              phase: spec.name,
+              status,
+              timestamp: new Date().toISOString(),
+              durationMs,
+              exitStatus,
+            }),
+          });
+        } catch {
+          /* observability is a sidecar; the phase owns the run's verdict */
+        }
+      };
+      state(bodyCtx.phaseId, "start", 0, null);
+      const startedAt = performance.now();
+      let settled: unknown;
+      try {
+        settled = await inner(bodyCtx);
+        return settled;
+      } catch (err) {
+        settled = err;
+        throw err;
+      } finally {
+        // The settled value's exitStatus when it carries one (an envelope or
+        // report), else null — absent (no outcome) never reads as a verdict.
+        const exitStatus =
+          settled && typeof settled === "object" && "exitStatus" in settled
+            ? ((settled as { exitStatus?: ExitStatus }).exitStatus ?? null)
+            : null;
+        state(bodyCtx.phaseId, "end", Math.round(performance.now() - startedAt), exitStatus);
+      }
+    };
+  };
 }
 
 async function main(argv: readonly string[]): Promise<number> {
@@ -219,9 +348,25 @@ async function main(argv: readonly string[]): Promise<number> {
   let runRoot: string = process.cwd();
   let runId: string = crypto.randomUUID();
   let requestId: string = crypto.randomUUID();
+  // DF1.8: the correlation brief as it arrives on the flags — validated (and
+  // possibly refused) only once the pair is together, never defaulted.
+  let repoSlug: string | undefined;
+  let issue: string | undefined;
+  let issueUrl: string | undefined;
+  let runIdGiven = false;
 
   parseValueFlags(argv, {
-    flags: ["--manifest", "--budget-ms", "--journal", "--run-root", "--run-id", "--request-id"],
+    flags: [
+      "--manifest",
+      "--budget-ms",
+      "--journal",
+      "--run-root",
+      "--run-id",
+      "--request-id",
+      "--repo-slug",
+      "--issue",
+      "--issue-url",
+    ],
     help: HELP,
     onValue: (flag, value) => {
       switch (flag) {
@@ -244,6 +389,16 @@ async function main(argv: readonly string[]): Promise<number> {
           break;
         case "--run-id":
           runId = value;
+          runIdGiven = true;
+          break;
+        case "--repo-slug":
+          repoSlug = value;
+          break;
+        case "--issue":
+          issue = value;
+          break;
+        case "--issue-url":
+          issueUrl = value;
           break;
         default:
           requestId = value;
@@ -257,46 +412,163 @@ async function main(argv: readonly string[]): Promise<number> {
 
   const { manifest, manifestLoadMs } = loadManifest(manifestPath, budgetMs, runRoot);
 
-  // DF1.4: Claim trace data dir under marker root (QDS_RUN_ROOT) with 0700
-  // Default marker root is /run when QDS_RUN_ROOT not set
+  // DF1.8: the marker root is derived before anything can refuse — a
+  // correlation failure can precede the trace claim entirely, and its dispatch
+  // log still needs a home (AC4: the log outlives a trace store that could not
+  // even open).
   const markerRoot = process.env.QDS_RUN_ROOT ?? "/run";
-  const traceDir = path.join(markerRoot, "trace");
-  fs.mkdirSync(traceDir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(traceDir, 0o700);
-  const dirMode = fs.statSync(traceDir).mode & 0o777;
-  if (dirMode !== 0o700) {
-    throw new Error(`trace dir is mode 0o${dirMode.toString(8)}, not 0700`);
+
+  // DF1.8: correlated mode. Any of the three correlation flags opts in; the
+  // (repoSlug, issueId) pair must arrive whole (issue identity is never
+  // defaulted, AC2) and --run-id must not ride along (the resolved requestId
+  // is the run's one identifier). Every refusal below is a dispatch failure —
+  // logged host-side, reported on stderr with runId: null, exit 2 — all
+  // before any session row, box or key exists.
+  const correlated = repoSlug !== undefined || issue !== undefined || issueUrl !== undefined;
+  let resolved: ResolvedRunCorrelation | undefined;
+  let correlationResolveMs = 0;
+  if (correlated) {
+    try {
+      if (repoSlug === undefined || issue === undefined) {
+        throw new CorrelationError(
+          "CORRELATION_PAIR_REQUIRED",
+          "--repo-slug and --issue must arrive together: issue identity is (repoSlug, issueId), never defaulted",
+        );
+      }
+      if (runIdGiven) {
+        throw new CorrelationError(
+          "RUN_ID_CONFLICT",
+          "--run-id cannot be combined with --repo-slug: a correlated run is identified by its resolved requestId alone",
+        );
+      }
+      // Strict integer parse (the parseTimeoutMs pattern): decimal digits
+      // only, then 1..2^31-1 — resolveRunCorrelation re-validates the bounds.
+      if (!/^\d+$/.test(issue)) {
+        throw new CorrelationError("INVALID_ISSUE_ID", `--issue must be a positive integer, got ${issue}`);
+      }
+      const issueId = Number(issue);
+      if (!Number.isInteger(issueId) || issueId < 1 || issueId > MAX_ISSUE_ID) {
+        throw new CorrelationError("INVALID_ISSUE_ID", `--issue must be in 1..${MAX_ISSUE_ID}, got ${issue}`);
+      }
+      const resolveStart = performance.now();
+      resolved = resolveRunCorrelation({
+        repoSlug,
+        issueId,
+        ...(issueUrl !== undefined ? { issueUrl } : {}),
+        requestId,
+      });
+      correlationResolveMs = Math.round(performance.now() - resolveStart);
+      // One identifier: the run's id IS the resolved requestId, never a second.
+      runId = requestId = resolved.requestId;
+    } catch (err) {
+      return dispatchFail(
+        markerRoot,
+        {
+          repoSlug: repoSlug ?? null,
+          issueId: issue !== undefined && /^\d+$/.test(issue) ? Number(issue) : null,
+          requestId: null, // resolve threw: nothing was settled (INV-RUN-4)
+        },
+        err,
+      );
+    }
   }
 
-  // DF1.4: Open Tracer (applies schema+migrations at construction).
-  // AC5: per-write SQLite failures are reported through this sink and never break
-  // the run; open-time integrity failures (boundary violation, dir/db file mode,
-  // WAL refusal, migration failure) throw from the constructor and are fatal by
-  // design (INV-1 hard open refusal, INV-5 fail-closed). Structured record to
-  // stderr, run context included, never throws (a broken sink must not fail the
-  // run either).
-  const tracer = new Tracer({
-    dataDir: traceDir,
-    requestId,
-    pipelineName: manifest.pipelineId,
-    onTraceError: (err) => {
+  // DF1.8: in correlated mode every initiation step below the session row is
+  // ladder-shaped — a refusal lands in the dispatch log with runId: null and
+  // exits 2 (AC4). Bare mode keeps DF1.4's plain throws, unchanged.
+  let tracer: Tracer;
+  try {
+    // DF1.4: Claim trace data dir under marker root (QDS_RUN_ROOT) with 0700
+    // Default marker root is /run when QDS_RUN_ROOT not set
+    const traceDir = path.join(markerRoot, "trace");
+    fs.mkdirSync(traceDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(traceDir, 0o700);
+    const dirMode = fs.statSync(traceDir).mode & 0o777;
+    if (dirMode !== 0o700) {
+      throw new Error(`trace dir is mode 0o${dirMode.toString(8)}, not 0700`);
+    }
+
+    // DF1.4: Open Tracer (applies schema+migrations at construction).
+    // AC5: per-write SQLite failures are reported through this sink and never break
+    // the run; open-time integrity failures (boundary violation, dir/db file mode,
+    // WAL refusal, migration failure) throw from the constructor and are fatal by
+    // design (INV-1 hard open refusal, INV-5 fail-closed). Structured record to
+    // stderr, run context included, never throws (a broken sink must not fail the
+    // run either).
+    tracer = new Tracer({
+      dataDir: traceDir,
+      requestId,
+      pipelineName: manifest.pipelineId,
+      onTraceError: (err) => {
+        fs.writeSync(
+          2,
+          `${JSON.stringify({
+            level: "error",
+            event: "trace_store_error",
+            requestId,
+            runId,
+            pipelineId: manifest.pipelineId,
+            code: err.code,
+            message: err.message,
+            // Shared field names/defaults come from serializeTraceError so
+            // this sink cannot drift from journal-bridge's stderr sink.
+            ...serializeTraceError(err),
+          })}\n`,
+        );
+      },
+    });
+
+    if (resolved) {
+      // DF1.8: initiateSession is the initiation gate — unlike every tracer
+      // write it throws by design (a RequestIdRepoMismatch must stop the run
+      // before a box or key is minted), so it sits in the ladder and replaces
+      // DF1.4's startSession for correlated runs.
+      const sessionStart = performance.now();
+      const initiated = tracer.initiateSession({
+        correlation: resolved,
+        request: manifest.pipelineId,
+        pipelineName: manifest.pipelineId,
+      });
+      const sessionUpsertMs = Math.round(performance.now() - sessionStart);
+      // The dispatcher reads the run back from this line; sub-timings are
+      // whole-ms (Observability Contract: absent a breakdown, report 0).
       fs.writeSync(
         2,
         `${JSON.stringify({
-          level: "error",
-          event: "trace_store_error",
-          requestId,
+          level: "info",
+          event: "run_initiated",
           runId,
-          pipelineId: manifest.pipelineId,
-          code: err.code,
-          message: err.message,
-          // Shared field names/defaults come from serializeTraceError so
-          // this sink cannot drift from journal-bridge's stderr sink.
-          ...serializeTraceError(err),
+          requestId,
+          repoSlug: resolved.repoSlug,
+          issueId: resolved.issueId,
+          replayed: initiated.replayed,
+          correlation_resolve_ms: correlationResolveMs,
+          session_upsert_ms: sessionUpsertMs,
         })}\n`,
       );
-    },
-  });
+      if (initiated.replayed) {
+        // INV-RUN-1 (first-close-wins): the run already exists, so a replay
+        // acks the existing runId and MUST NOT walk the phases again — the
+        // upserts and finishSession below would rewrite the historical record
+        // the first run closed (INV-RUN-2 append-only). Nothing to settle, so
+        // close the store and exit 0. Guarded like every other close: a
+        // failing checkpoint must not turn an acked replay into exit 2.
+        try {
+          tracer.close();
+        } catch {
+          /* the replay ack is already on stderr; no run was settled here */
+        }
+        return 0;
+      }
+    }
+  } catch (err) {
+    if (!resolved) throw err;
+    return dispatchFail(
+      markerRoot,
+      { repoSlug: resolved.repoSlug, issueId: resolved.issueId, requestId: resolved.requestId },
+      err,
+    );
+  }
 
   // DF1.4: Wrap FileJournal with TracingJournal
   const innerJournal = new FileJournal(journalPath, runId);
@@ -309,8 +581,11 @@ async function main(argv: readonly string[]): Promise<number> {
     manifestLoadMs,
   });
 
-  // DF1.4: Start session at run start
-  tracer.startSession({ requestId, request: manifest.pipelineId });
+  // DF1.4: Start session at run start — bare mode only; a correlated run
+  // initiated its session through the DF1.8 ladder above instead.
+  if (!resolved) {
+    tracer.startSession({ requestId, request: manifest.pipelineId });
+  }
 
   // A signal becomes a terminating exception so the run closes and its rows
   // settle, rather than leaving the journal claiming work that is already dead.
@@ -337,7 +612,16 @@ async function main(argv: readonly string[]): Promise<number> {
   process.on("SIGTERM", () => onSignal("SIGTERM"));
   process.on("SIGINT", () => onSignal("SIGINT"));
 
-  const outcomes = await walkPhases(run, manifest.phases, makeBodyFactory(runRoot, tracer, requestId));
+  const outcomes = await walkPhases(
+    run,
+    manifest.phases,
+    makeBodyFactory(
+      runRoot,
+      tracer,
+      requestId,
+      resolved ? { runId, repoSlug: resolved.repoSlug, issueId: resolved.issueId } : undefined,
+    ),
+  );
 
   // DF1.4: Record envelopes after each phase settles. Guarded like every
   // other tracer call — and the JSON.stringify sits inside the guard too: a

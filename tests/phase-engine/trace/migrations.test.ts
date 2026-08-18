@@ -111,6 +111,11 @@ describe("DoD index DDL: CREATE UNIQUE INDEX IF NOT EXISTS", () => {
       db.exec(ddl);
     }
 
+    // DF1.8: idx_sessions_repo_request covers migration-added columns
+    // (sessions.repo_slug), so migrations must land before index DDL — the
+    // same order Tracer.openWriter applies.
+    applyMigrations(db);
+
     // Verify no indexes yet for our tables
     const beforeIndexes = db
       .prepare(

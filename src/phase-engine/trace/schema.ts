@@ -114,6 +114,13 @@ export const SCHEMA_INDEX_DDL: readonly string[] = [
   // UPDATE when the same pid was recorded twice.
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_events_request_event
   ON events (request_id, event_id)`,
+  // DF1.8 — the covering path for the AC2 query (`readRunsByIssue` filters on
+  // repo_slug first). NOT the idempotency mechanism: request_id is already
+  // unique alone as the sessions pk, so this composite can never reject a row
+  // the pk would have accepted (INV-RUN-1); it is a cheap consistency
+  // assertion over a pk-derived pair that backs the cross-repo-scoped read.
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_repo_request
+  ON sessions (repo_slug, request_id)`,
 ];
 
 // Re-exports from migrations.ts for test convenience
