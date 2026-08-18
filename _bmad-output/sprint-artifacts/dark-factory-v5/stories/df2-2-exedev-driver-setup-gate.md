@@ -7,7 +7,7 @@ baseline_commit: 041b834
 **Story Points:** 5
 **Sprint:** v5-S1 (track B, provider)
 
-**Status:** review
+**Status:** done — PR #114 merged 2026-08-16 (94bf349)
 
 ## Spec Reference
 

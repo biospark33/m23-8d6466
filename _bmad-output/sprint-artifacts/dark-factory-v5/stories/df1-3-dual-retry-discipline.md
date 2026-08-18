@@ -367,4 +367,4 @@ returned `PhaseAttemptRecord`.
 
 ## Status
 
-review
+done — PR #112 merged 2026-08-15 (041b834)

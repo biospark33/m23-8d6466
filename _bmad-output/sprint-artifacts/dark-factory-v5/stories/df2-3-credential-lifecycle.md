@@ -7,6 +7,8 @@ baseline_commit: 86a4865
 **Story Points:** 4
 **Sprint:** v5-S1 (track B, provider)
 
+**Status:** done — PR #111 merged 2026-08-15 (f7af48e)
+
 ## Spec Reference
 
 - `docs/superpowers/specs/2026-08-11-dark-factory-v5-architecture-design.md` §3.4, §5.3, §6 items 2/4

@@ -1,0 +1,50 @@
+# qds-dev workflow state — DF2.2
+story: df2-2-exedev-driver-setup-gate
+story_points: 5
+track: B (provider)
+mode: standard
+phase: merged  # PR #114 merged 2026-08-16 (94bf349) — story complete; stale research-phase marker corrected 2026-08-18
+branch:
+  name: feature/df2-2-exedev-driver-setup-gate
+  base: main
+  target: main
+  created_from: main @ 041b834
+dependencies:
+  df2_1: merged (PR #102, #108)
+  df2_3: merged (PR #111)
+constraints:
+  - df1-4 in separate worktree .claude/worktrees/df1-4 — DO NOT touch branch/worktree
+  - dirty unrelated files on branch (skill docs, artifacts) — never stage
+learnings: none (.claude/learnings/qds-dev/ absent)
+guardrail_log: []
+research:
+  confidence: 0.95
+  tracks_done: [A-context7, B-codebase, C-exemplars, D-spec, E-deps, F-crosstrack]
+  decisions:
+    registry_name: exedev  # story:88 binds; index.ts:19 comment updated in-story
+    setup_shape: extra fill()/setup() methods on ExeDevDriver (8 primitives unchanged)
+    evidence_path: .sandbox/setup-gate/<run-id>.json  # DEVIATION: story's .sandbox/runs/<id>-setup.json bricks RunRecordStore.list()
+    command_seam: constructor-injected runner; fake substrate w/ real host exec + stub pi/curl on PATH
+  landmines:
+    - models.json partial cost block drops whole roster (D)
+    - pi --list-models exit 0 + "No models available" (content-assert only)
+    - roster = argument, never env
+    - sentinel cleared pre-provision; timeouts injectable; no process.exit; fail leaves VM alive
+    - roster format: verify DF1.5 loader during impl
+phase: complete
+pr:
+  url: https://github.com/biospark33/QDS-Factory/pull/114
+  branch: feature/df2-2-exedev-driver-setup-gate
+  commit: d767471
+self_review_outcome: FIX-FIRST verdict; 2 HIGH + 2 MED fixed w/ regression tests, 1 MED accepted-documented, 3 LOW test-strength fixes; suite 51/51 after
+story_status: review (DOD 10/11; live-fire item = operator evidence run, env-gated)
+verification:
+  story_tests: 47/47 pass (driver 32, setup-gate 15+1 todo)
+  full_suite: 1518 pass / 3 fail (PRE-EXISTING, proven via git stash on clean main: lean-worker AC4 env test, roster-check live-gate x2 network) / 1 todo
+  tsc: clean (0 exedev errors)
+  biome: clean
+  dp_gate: OK (7 files, D018 fixed, D017/D020 dp:ok-annotated w/ rationale)
+  pr_conflicts: OK (no open PR overlap)
+  detect_changes: LOW risk, 0 affected processes, additive only
+  dod: 10/11 checked; live-fire e2e item = operator evidence run (env-gated scaffold)
+self_review: dispatched (self-review-df22 agent)

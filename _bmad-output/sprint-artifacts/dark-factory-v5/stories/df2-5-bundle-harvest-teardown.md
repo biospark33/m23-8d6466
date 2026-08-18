@@ -3,6 +3,8 @@
 **Story Points:** 4
 **Sprint:** v5-S1 (track B, provider; closes S1's provider chain)
 
+**Status:** done — PR #115 merged 2026-08-17 (ee388d0), after 10 review rounds (see Change log)
+
 ## Spec Reference
 
 - `docs/superpowers/specs/2026-08-11-dark-factory-v5-architecture-design.md` §3.4, §5.3, §6 items 2/4/6

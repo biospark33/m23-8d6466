@@ -1,0 +1,37 @@
+story: df1-3-dual-retry-discipline
+story_path: _bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-3-dual-retry-discipline.md
+developer_track: A
+mode: standard
+phase: 5-done
+branch:
+  convention: {prefix: "feature/", base: main, target: main}
+  current: feature/df1-3-dual-retry-discipline
+  base_commit: f7af48e5b49f5e8d5e1dc22211440bae4083f626
+research:
+  confidence: 0.85
+  auto_approved: true  # >= 0.8 threshold
+  track_a:
+    status: done
+    key: "zod ^3.24 pinned (NOT v4 — no prettifyError/flattenError); safeParse error.issues[] {code,message,path}; manual issues.map for correction prompts; bun:test test.each object rows for send-count matrix"
+  track_b:
+    status: done
+    key: "src/phase-engine/agents/ does NOT exist (DF1.3 creates); no runAgentPhase yet (Run.phase() is lifecycle); no UsageBreakdown type (CostEvent in cli-anything/src/types.ts:132-150); constants in types.ts:27-31 (PARSE_FIX_ATTEMPTS=2, MIN/MAX_RETRIES); PhaseAgent types.ts:146-151; DF1.2 previous field types.ts:172-177; GateCheck/GateReport gates/report.ts:15-56; asEnvelope envelopes/adapter.ts:45-56; error shape toErrorShape phase.ts:130-139; test pattern newRun() phase-lifecycle.test.ts:62-71; relative imports in-engine, barrel out; biome noExplicitAny off"
+  track_c:
+    status: pending  # agent idle twice without delivery; pinged
+  track_d:
+    status: done
+    key: "adopt clause §3.3 verbatim confirmed; §5.2 observability + F12 resident-agent bounds; DD-9 fixes UNIT only (conversion-site rule is story/INV-3 authored); P1.9 boundary §4 exact; R5 facts 1/4/7 confirmed (OpenRouter only path; cost events synthetic-stream test strategy supported); R4 §1.9/§1.10 full port map from ~/reference-repos/super-simple-software-factory; SSSF keys session on model-match ONLY — (agentId,provider,model) triple is deliberate story hardening; SSSF raises RuntimeError, EnvelopeParseExhausted name story-authored"
+  track_e:
+    status: done
+    key: "DF1.1/DF1.2/DF2.7 all done, zero open PRs, no interface mismatches; DF1.4 parallel worktree at same base commit — types.ts is the only shared file, append-only regions, risk LOW"
+  track_f:
+    status: done
+    key: "worktree .claude/worktrees/df1-4 on feature/df1-4-sqlite-trace-store, same base commit f7af48e; types.ts append-only collision risk LOW; no check-pr-conflicts.sh script exists; downstream: DF1.6 (PhaseAttemptRecord + usage), DF3.6 (µ$ accumulator INV-3), DF5.5"
+corrections:
+  runner_guard: "story's runner.ts:707 reference is stale — actual compare at cli-anything/src/runner.ts:803 (cumulativeCostUsd >= killThresholdUsd), applyCostEvent at :789, budgetKillThresholdUsd exported :466"
+guardrail_log: []
+overrides_used: 0
+dev_story:
+  started: 2026-08-15T13:00:00Z
+  tasks_completed: []
+pr: https://github.com/biospark33/QDS-Factory/pull/112

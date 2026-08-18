@@ -1,0 +1,30 @@
+story: df2-5-bundle-harvest-teardown
+title: "DF2.5: Bundle Harvest + Tested Teardown"
+phase: merged  # PR #115 merged 2026-08-17 (ee388d0) — story complete; stale research-phase marker corrected 2026-08-18
+branch: feature/df2-5-bundle-harvest-teardown
+base: main
+target: main
+created: 2026-08-16T19:02:00-04:00
+predecessors:
+  df2-1: merged (#107/#108)
+  df2-2: merged (#114)
+  df2-3: merged (#111)
+git:
+  stashed: "pre-df2-5 unrelated skill-file changes (5 .claude/skills files, on main)"
+guardrails:
+  - branch-integrity: ok
+  - scope: pending
+  - tdd: pending
+research:
+  confidence: 0.95
+  completed: 2026-08-16T19:15:00-04:00
+  tracks:
+    spec: full digest
+    inkwell: teardown.just/reap.just/harvest.just extracted verbatim
+    super-simple: nothing liftable (docs-only guidance)
+    codebase: patterns mapped
+    deps: signatures verified, 2 mismatches resolved
+    git-semantics: empirically verified git 2.54 + tar offsets + Bun 1.2.22 gotchas
+  design_brief: _bmad-output/workflow-state/qds-dev/df2-5/design.md
+phase: 5-complete
+pr: "#115"

@@ -7,6 +7,8 @@ baseline_commit: f7af48e5b49f5e8d5e1dc22211440bae4083f626
 **Story Points:** 4
 **Sprint:** v5-S1 (track A, engine)
 
+**Status:** done — PR #113 merged 2026-08-16 (433420b)
+
 ## Spec Reference
 
 - `docs/superpowers/specs/2026-08-11-dark-factory-v5-architecture-design.md` §3.3 ("Adopt (code, with hardening): the visualizer + trace schema"), §5.2 (observability contract), §6 clause 7 (trace confidentiality)
