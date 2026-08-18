@@ -7,9 +7,11 @@
  *
  * Supported output formats:
  * - Bun test: " 7 pass\n 2 fail" (leading spaces, exact words, own lines)
- * - Jest: "Tests: 7 passed, 2 failed" (green runs omit the failed clause)
- * - Vitest default reporter: "Tests  7 passed | 2 failed" (no colon; an
- *   all-green run prints only "Tests  7 passed (7)" — failed defaults to 0)
+ * - Jest: "Tests: 7 passed, 2 failed" (passed first; green runs omit the
+ *   failed clause)
+ * - Vitest default reporter: "Tests  2 failed | 4 passed (6)" (failed first,
+ *   no colon; an all-green run prints only "Tests  7 passed (7)" — failed
+ *   defaults to 0)
  *
  * Fail-closed: any spawn failure, signal kill, output-cap breach, or
  * unparseable output returns {testsExecuted: false, testResults: {passed:0,
@@ -126,16 +128,22 @@ export async function runTestCommand(
     const stderrRead = readCapped(proc.stderr, MAX_CAPTURE_BYTES);
 
     if (signal) {
+      // Named handler removed after the race: a long-lived AbortSignal reused
+      // across many runs would otherwise accumulate one dead listener (and
+      // its closure) per completed run.
+      let onAbort: (() => void) | undefined;
       const aborted = new Promise<void>((resolve) => {
         // An AbortSignal never re-fires: an already-aborted signal must be
         // observed NOW, not after a listener that will never run.
         if (signal.aborted) return resolve();
-        signal.addEventListener("abort", () => resolve(), { once: true });
+        onAbort = () => resolve();
+        signal.addEventListener("abort", onAbort, { once: true });
       });
       const exitedFirst = await Promise.race([
         proc.exited.then(() => true),
         aborted.then(() => false),
       ]);
+      if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
       if (!exitedFirst) {
         // SIGTERM, grace, then SIGKILL: a test command that traps or ignores
         // SIGTERM (or sits in uninterruptible sleep) must not hang the abort
@@ -227,9 +235,10 @@ function failClosed(reason: string): TestCommandResult {
  * Parse passed/failed counts from test output.
  *
  * Matches bun test format: dedicated " 7 pass" / " 2 fail" summary lines.
- * Matches jest/vitest format: "Tests: 7 passed, 2 failed" (jest, colon) or
- * "Tests  7 passed | 2 failed" (vitest default reporter, colon-less); a
- * green run omits the failed clause, which defaults to 0.
+ * Matches jest/vitest format: "Tests: 7 passed, 2 failed" (jest, passed
+ * first) or "Tests  2 failed | 4 passed" (vitest default reporter, failed
+ * first, colon-less); a green run omits the failed clause, which defaults
+ * to 0.
  *
  * @param output - Combined stdout+stderr from the test command
  * @returns Parsed counts or null if unparseable
@@ -249,18 +258,29 @@ function parseTestOutput(output: string): { passed: number; failed: number } | n
     };
   }
 
-  // Jest/Vitest summary: "Tests" + optional colon + N passed; the failed
-  // clause is optional ("Tests: 7 passed, 7 total" on green jest runs,
-  // "Tests  7 passed (7)" on green vitest runs) — a green suite must parse
-  // with failed=0, not fail closed.
-  const summaryMatch = output.match(/Tests[:\s]+(\d+)\s+passed/);
-  if (summaryMatch) {
-    const failedMatch = output.match(/(\d+)\s+failed/);
+  // Jest/Vitest summary. Jest puts passed first ("Tests:       7 passed,
+  // 2 failed, 9 total"); vitest puts failed first ("Tests  2 failed |
+  // 4 passed (6)"). The failed clause is optional on green runs ("Tests:
+  // 7 passed, 7 total", "Tests  7 passed (7)") — a green suite must parse
+  // with failed=0, not fail closed. Both counts anchor to the SAME "Tests"
+  // line and never cross a newline: jest's earlier "Test Suites: 1 failed"
+  // and vitest's "Test Files  2 failed" lines must not donate their counts.
+  const passedFirst = output.match(
+    /Tests[:\s]+(\d+)\s+passed(?:[^\n\d]+(\d+)\s+failed)?/,
+  );
+  if (passedFirst) {
     return {
-      passed: Number.parseInt(summaryMatch[1] ?? "0", 10),
-      failed: failedMatch
-        ? Number.parseInt(failedMatch[1] ?? "0", 10)
-        : 0,
+      passed: Number.parseInt(passedFirst[1] ?? "0", 10),
+      failed: passedFirst[2] ? Number.parseInt(passedFirst[2], 10) : 0,
+    };
+  }
+  const failedFirst = output.match(
+    /Tests[:\s]+(\d+)\s+failed[^\n\d]+(\d+)\s+passed/,
+  );
+  if (failedFirst) {
+    return {
+      passed: Number.parseInt(failedFirst[2] ?? "0", 10),
+      failed: Number.parseInt(failedFirst[1] ?? "0", 10),
     };
   }
 

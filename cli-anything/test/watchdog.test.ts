@@ -256,9 +256,14 @@ sleep 100
       sampleRss: async () => 10 * 1024 ** 2, // 10 MB — over threshold
     });
 
-    await sleep(100); // escalation + group SIGTERM happened; grace ends ~250ms
+    await sleep(150); // escalation + group SIGTERM happened; grace ends ~250ms
     handle.stop(); // stop BEFORE grace expiry
     expect(handle.status).toBe("stopped");
+    // Escalation (and its group SIGTERM) really happened BEFORE stop() —
+    // killOrigin is set only on a delivered signal and survives stop().
+    // Without this, a delayed first sample leaves the SIGKILL leg unarmed
+    // and the survival probe below passes vacuously.
+    expect(handle.killOrigin).toBe("watchdog");
 
     await sleep(300); // well past grace expiry — SIGKILL leg must NOT have fired
     // The leader ignores SIGTERM, so it is alive UNLESS a stale grace timer

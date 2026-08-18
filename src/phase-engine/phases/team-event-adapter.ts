@@ -10,19 +10,15 @@
  * - makeStreamHealth: factory for stream health counters
  */
 import type { TeamEvent } from "../../../cli-anything/src/team-events.ts";
+import { EXIT_STATUSES } from "../../../cli-anything/src/types.ts";
 import type { ExitStatus } from "../types.ts";
 
-/** The closed ExitStatus set — membership check for untrusted worker status. */
-const EXIT_STATUSES: ReadonlySet<string> = new Set([
-  "success",
-  "logic",
-  "overflow",
-  "transient",
-  "lead_failure",
-]);
+/** Runtime membership set derived from the canonical EXIT_STATUSES array
+ * (cli-anything/src/types.ts) — it can never drift from the ExitStatus union. */
+const EXIT_STATUS_SET: ReadonlySet<string> = new Set(EXIT_STATUSES);
 
 function isExitStatus(value: unknown): value is ExitStatus {
-  return typeof value === "string" && EXIT_STATUSES.has(value);
+  return typeof value === "string" && EXIT_STATUS_SET.has(value);
 }
 
 /**

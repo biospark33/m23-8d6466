@@ -90,13 +90,21 @@ export const TeamManifestSchema = z
 export type TeamManifest = z.infer<typeof TeamManifestSchema>;
 export type TeamRole = z.infer<typeof TeamRoleSchema>;
 
-/** Post-pivot exitStatus taxonomy (CC-1, 5-value enum). */
-export type ExitStatus =
-  | "success"
-  | "transient"
-  | "overflow"
-  | "logic"
-  | "lead_failure";
+/**
+ * Post-pivot exitStatus taxonomy (CC-1, 5-value enum). Single source of truth:
+ * the union type AND every runtime membership check derive from this array,
+ * so a status added to the type can never fail a guard that still lists the
+ * old set (which would silently rewrite a worker's real status).
+ */
+export const EXIT_STATUSES = [
+  "success",
+  "transient",
+  "overflow",
+  "logic",
+  "lead_failure",
+] as const;
+
+export type ExitStatus = (typeof EXIT_STATUSES)[number];
 
 /** Structured budget/model override — audit-only in Phase 0 (P0.3-S-M5). */
 export interface Waiver {

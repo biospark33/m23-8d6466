@@ -206,6 +206,36 @@ describe("dispatch-task: AC5 QDS_TEAM_RUNNER refusal", () => {
   });
 });
 
+describe("dispatch-task: manifest schema refusal", () => {
+  it("roster with >3 workers refuses (logic) instead of throwing out of the body", async () => {
+    // lead + 4 workers passes the offline dual-gate (which verifies models,
+    // not counts) but violates TeamManifestSchema's workers max(3) — the
+    // adapter's schema.parse throws, and the phase must translate that into
+    // a schema-validated refusal, never a body throw.
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    const lines = [
+      "defaults:",
+      "  provider: anthropic",
+      "  thinking: off",
+      "  tools: null",
+      "  writes: []",
+      "  harness_engineering: []",
+      "roles:",
+    ];
+    for (const name of ["lead", "w1", "w2", "w3", "w4"]) {
+      lines.push(`  - name: ${name}`, "    model: claude-haiku-4-5");
+    }
+    const rosterPath = join(tmpRoot, "five-worker-roster.yaml");
+    writeFileSync(rosterPath, `${lines.join("\n")}\n`);
+    const spy = injectFake(() => successResult());
+    const result = await runDispatch({ roster: rosterPath });
+    expect(result.exitStatus).toBe("logic");
+    expect(result.error?.message).toMatch(/worker/i);
+    expect(spy.calls).toBe(0); // refused BEFORE any spawn
+  });
+});
+
 describe("dispatch-task: provider key presence", () => {
   it("missing both keys refuses pre-spawn, names keys by name only", async () => {
     process.env.QDS_TEAM_RUNNER = "local";

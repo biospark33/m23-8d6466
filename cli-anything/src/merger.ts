@@ -273,13 +273,18 @@ export function buildMergedOutput(
   // DF1.6: Truncate partialOutput when the field is a string, otherwise null —
   // redacted for the same reason (every string leaving the phase passes redact
   // once). Null/undefined-checked, not truthiness: an EMPTY failure output
-  // must survive as "" — collapsing it to null would conflate "failure with no
-  // partial output" with the success contract (null on success). Undefined is
-  // tolerated because older call sites omit the field entirely.
+  // must survive as "" — collapsing it to null would erase the distinction
+  // between "failure with no partial output" and "field omitted" (undefined
+  // is tolerated because older call sites omit it). Success is FORCED to
+  // null, mirroring changedFiles/agentOutputs on lead_failure: the contract
+  // "null on success" is enforced at this construction site, not by caller
+  // discipline.
   const partialOutput =
-    opts.partialOutput !== undefined && opts.partialOutput !== null
-      ? truncateWithSuffix(redact(opts.partialOutput), MAX_PARTIAL_OUTPUT_CHARS, "chars")
-      : null;
+    exitStatus === "success"
+      ? null
+      : opts.partialOutput !== undefined && opts.partialOutput !== null
+        ? truncateWithSuffix(redact(opts.partialOutput), MAX_PARTIAL_OUTPUT_CHARS, "chars")
+        : null;
 
   return {
     result: redactDeep(opts.result, redact) as Record<string, unknown>,

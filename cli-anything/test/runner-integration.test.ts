@@ -369,8 +369,10 @@ describe("DF1.6 T5: spawn seam budget ceiling raise (real runs)", () => {
     expect(out.error?.message).toContain("(cap $0.50)");
   }, 20_000);
 
-  it("invalid ceiling (0 / negative / NaN) falls back to the manifest cap", async () => {
-    for (const bad of [0, -1, Number.NaN]) {
+  // One it() per bad ceiling: a shared loop emits identical failures with no
+  // indication of which value (0 / -1 / NaN) broke.
+  for (const bad of [0, -1, Number.NaN]) {
+    it(`invalid ceiling (${bad}) falls back to the manifest cap`, async () => {
       const out = await runTeamManifest(TEAM_MANIFEST, {
         env: teamEnv("budget_overflow"),
         effectiveCeilingMicros: bad,
@@ -378,8 +380,8 @@ describe("DF1.6 T5: spawn seam budget ceiling raise (real runs)", () => {
       });
       expect(out.exitStatus).toBe("overflow");
       expect(out.error?.message).toContain("(cap $0.50)");
-    }
-  }, 60_000);
+    }, 20_000);
+  }
 
   it("forceLocalRunner puts QDS_TEAM_RUNNER=local in the CHILD env only", async () => {
     // local-bin/bun is a fake `bun` FIRST on PATH: it reports the
@@ -390,6 +392,10 @@ describe("DF1.6 T5: spawn seam budget ceiling raise (real runs)", () => {
       HOME: process.env.HOME ?? "/tmp",
       QDS_TEAM_RUNNER: "warren",
     };
+    // Snapshot, not "not local": an ambient QDS_TEAM_RUNNER=local (now a
+    // user-selectable seam) would fail a not-local assertion spuriously, and
+    // any other ambient value makes it pass vacuously.
+    const ambientRunner = process.env.QDS_TEAM_RUNNER;
     const out = await runTeamManifest(TEAM_MANIFEST, {
       env: parentEnv,
       forceLocalRunner: true,
@@ -398,6 +404,6 @@ describe("DF1.6 T5: spawn seam budget ceiling raise (real runs)", () => {
     expect(out.error?.message).toContain("coms init failed: runner=local");
     // Parent env object not mutated; process.env untouched.
     expect(parentEnv.QDS_TEAM_RUNNER).toBe("warren");
-    expect(process.env.QDS_TEAM_RUNNER ?? "unset").not.toBe("local");
+    expect(process.env.QDS_TEAM_RUNNER).toBe(ambientRunner);
   }, 15_000);
 });

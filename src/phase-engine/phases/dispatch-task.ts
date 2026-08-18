@@ -32,7 +32,7 @@ import {
 import { buildMergedOutput } from "../../../cli-anything/src/merger.ts";
 import { redactSecrets } from "../../../cli-anything/src/redact.ts";
 import { runTeamManifest } from "../../../cli-anything/src/runner.ts";
-import type { MergedOutput } from "../../../cli-anything/src/types.ts";
+import type { MergedOutput, TeamManifest } from "../../../cli-anything/src/types.ts";
 import type { PhaseBody, PhaseBodyContext } from "../phase.ts";
 import type { PhaseSpec, PhaseSubTimings } from "../types.ts";
 import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
@@ -187,15 +187,24 @@ export function dispatchTask(
       prompts[role.name] = taskBrief;
     }
 
-    const manifest = rosterToTeamManifest(roster, {
-      name: `${pipelineId}-${phaseId}`,
-      // ponytail: the local driver branch ignores `project` (TeamManifestSchema
-      // still requires it); pipelineId keeps the trace line honest.
-      project: pipelineId,
-      leadRoleName: leadRole.name,
-      workerRoleNames: workerRoles.map((r) => r.name),
-      prompts,
-    });
+    // A schema-invalid derived manifest (e.g. >3 workers passing the roster
+    // gate) refuses the phase with a logic step output — the adapter's
+    // ZodError never escapes the body, so the output stays schema-validated
+    // (roster-adapter's caller contract) with a redacted reason.
+    let manifest: TeamManifest;
+    try {
+      manifest = rosterToTeamManifest(roster, {
+        name: `${pipelineId}-${phaseId}`,
+        // ponytail: the local driver branch ignores `project` (TeamManifestSchema
+        // still requires it); pipelineId keeps the trace line honest.
+        project: pipelineId,
+        leadRoleName: leadRole.name,
+        workerRoleNames: workerRoles.map((r) => r.name),
+        prompts,
+      });
+    } catch (err) {
+      return refuse(err instanceof Error ? err.message : String(err), redact);
+    }
 
     // DD-8 prompt persistence (NET-NEW): every compiled prompt is written to
     // the trace BEFORE the spawn that consumes it — a run killed mid-phase

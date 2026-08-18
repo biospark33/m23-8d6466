@@ -433,6 +433,14 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
     expect(out.partialOutput).not.toBeNull();
   });
 
+  it("partialOutput forced to null on the success path (contract enforced here)", () => {
+    // "null on success" is enforced at the construction site like
+    // changedFiles/agentOutputs on lead_failure — a caller passing "" (or any
+    // string) with exitStatus success gets null, not a failure-detail value.
+    const out = base({ partialOutput: "" });
+    expect(out.partialOutput).toBeNull();
+  });
+
   it("partialOutput exactly at limit: no truncation", () => {
     const exactOutput = "c".repeat(10000);
     const out = base({

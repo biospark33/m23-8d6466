@@ -226,6 +226,34 @@ describe("runTestCommand — reporter formats, output cap, group kill (review ro
     expect(result.testResults).toEqual({ passed: 7, failed: 3 });
   });
 
+  test("failing jest run: failed count anchors to the Tests line, not Test Suites", async () => {
+    // Real jest order: the "Test Suites: 1 failed" line precedes the "Tests:"
+    // line. An output-wide /(\\d+)\\s+failed/ scan grabs the SUITE count (1)
+    // instead of the test count (2).
+    const script = path.join(cwd2, "jest-suites-failed.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho 'Test Suites: 1 failed, 1 total'\necho 'Tests:       7 passed, 2 failed, 9 total'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd2 });
+    expect(result.testsExecuted).toBe(true);
+    expect(result.testResults).toEqual({ passed: 7, failed: 2 });
+  });
+
+  test("failing vitest run prints failed first: 'Tests  2 failed | 4 passed (6)'", async () => {
+    // vitest's default reporter lists failures first on both summary lines.
+    const script = path.join(cwd2, "vitest-failed-first.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho ' Test Files  1 failed (1)'\necho '      Tests  2 failed | 4 passed (6)'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd2 });
+    expect(result.testsExecuted).toBe(true);
+    expect(result.testResults).toEqual({ passed: 4, failed: 2 });
+  });
+
   test("output beyond the capture cap fails closed with a cap reason", async () => {
     // ~90 bytes/line × 8000 lines ≈ 720 KiB > 512 KiB cap on ONE stream.
     const script = path.join(cwd2, "flood.sh");
@@ -274,7 +302,10 @@ describe("runTestCommand — reporter formats, output cap, group kill (review ro
     const script = path.join(cwd2, "env-probe.sh");
     fs.writeFileSync(
       script,
-      "#!/bin/sh\nif [ -n \"${ANTHROPIC_API_KEY:-}\" ] || [ -n \"${OPENROUTER_API_KEY:-}\" ]; then echo 'LEAK'; else echo ' 1 pass\\n 0 fail'; fi\n",
+      // Two real echo lines, not one '...\n...' line: a literal \n inside
+      // single quotes is NOT expanded by bash-as-sh (macOS), only by dash —
+      // the old fixture's parse depended on which /bin/sh ran it.
+      "#!/bin/sh\nif [ -n \"${ANTHROPIC_API_KEY:-}\" ] || [ -n \"${OPENROUTER_API_KEY:-}\" ]; then echo 'LEAK'; else echo ' 1 pass'; echo ' 0 fail'; fi\n",
       { mode: 0o755 },
     );
     const prevAnthropic = process.env.ANTHROPIC_API_KEY;
