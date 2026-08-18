@@ -1,0 +1,57 @@
+{
+  "rows": [
+    {
+      "rowid": 1,
+      "request_id": "8f14e45f-ceea-4baf-a3a4-11e7d3b0e4a1",
+      "request": "df1-8-demo",
+      "status": "ok",
+      "started_at": "2026-08-18T21:09:56.139Z",
+      "ended_at": "2026-08-18T21:09:56.149Z",
+      "duration_ms": null,
+      "total_tokens": null,
+      "total_cost": null,
+      "pipeline_name": "df1-8-demo",
+      "repo_slug": "qds/demo",
+      "issue_id": 42,
+      "issue_url": null,
+      "phases": [
+        {
+          "rowid": 1,
+          "phase_id": "8f14e45f-ceea-4baf-a3a4-11e7d3b0e4a1:0:plan",
+          "request_id": "8f14e45f-ceea-4baf-a3a4-11e7d3b0e4a1",
+          "seq": 0,
+          "name": "plan",
+          "kind": "code",
+          "owner": null,
+          "description": null,
+          "status": "success",
+          "attempt": null,
+          "retries": null,
+          "error": null,
+          "started_at": "2026-08-18T21:09:56.141Z",
+          "ended_at": "2026-08-18T21:09:56.146Z",
+          "output_payload_json": null
+        },
+        {
+          "rowid": 2,
+          "phase_id": "8f14e45f-ceea-4baf-a3a4-11e7d3b0e4a1:1:verify",
+          "request_id": "8f14e45f-ceea-4baf-a3a4-11e7d3b0e4a1",
+          "seq": 1,
+          "name": "verify",
+          "kind": "code",
+          "owner": null,
+          "description": null,
+          "status": "success",
+          "attempt": null,
+          "retries": null,
+          "error": null,
+          "started_at": "2026-08-18T21:09:56.147Z",
+          "ended_at": "2026-08-18T21:09:56.149Z",
+          "output_payload_json": null
+        }
+      ]
+    }
+  ],
+  "cursor": 1,
+  "hasMore": false
+}

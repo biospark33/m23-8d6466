@@ -1,0 +1,13 @@
+{
+  "requestId": "8f14e45f-ceea-4baf-a3a4-11e7d3b0e4a1",
+  "divergentRowsPerTable": {
+    "sessions": 0,
+    "phases": 0,
+    "events": 0,
+    "envelopes": 0,
+    "gate_results": 0,
+    "processes": 0,
+    "agent_sessions": 0
+  },
+  "totalDivergent": 0
+}

@@ -386,3 +386,114 @@ export interface TraceSessionRow {
   pipeline_name: string | null;
   archived: number | null;
 }
+
+// ---------------------------------------------------------------------------
+// DF1.8 region: issue-correlation types. Append-only — adds the
+// (repoSlug, issueId) correlation shape, the resolved-requestId result type,
+// and the correlated reader row/page types. No sibling declaration is edited.
+// ---------------------------------------------------------------------------
+
+/** The dispatch brief's issue reference. `issueUrl` optional (derivable from slug+id). */
+export interface IssueRef {
+  repoSlug: string;
+  issueId: number;
+  issueUrl?: string;
+}
+
+/** Correlation settled once at dispatch: requestId resolved, pair validated. */
+export interface ResolvedRunCorrelation {
+  requestId: string;
+  repoSlug: string;
+  issueId: number;
+  issueUrl: string | null;
+}
+
+/**
+ * AC3 refusal: the requestId is already spoken for by a different
+ * (repoSlug, issueId) pair — a different slug OR the same slug under a
+ * different issue (both are re-pointing attempts, INV-RUN-2). Names BOTH
+ * slugs and BOTH issue ids (existing first) so the operator can see the
+ * collision; a silent accept would violate INV-RUN-1.
+ *
+ * The one runtime export of this types region, by necessity: the trace
+ * store's `initiateSession` throws it, so it must live at a layer trace/
+ * may depend on — issue-correlation.ts (dispatch-level, owns fs logging)
+ * re-exports it unchanged for its existing callers.
+ */
+export class RequestIdRepoMismatchError extends Error {
+  name = "RequestIdRepoMismatchError";
+  readonly code = "REQUEST_ID_REPO_MISMATCH";
+  readonly requestId: string;
+  readonly existingRepoSlug: string;
+  readonly attemptedRepoSlug: string;
+  /** Issue the row is already correlated to; null only on a malformed row. */
+  readonly existingIssueId: number | null;
+  readonly attemptedIssueId: number | null;
+
+  constructor(e: {
+    requestId: string;
+    existingRepoSlug: string;
+    attemptedRepoSlug: string;
+    existingIssueId?: number | null;
+    attemptedIssueId?: number | null;
+  }) {
+    super(
+      `requestId ${e.requestId} is already correlated to repo "${e.existingRepoSlug}" issue #${e.existingIssueId ?? "?"} (attempted repo "${e.attemptedRepoSlug}" issue #${e.attemptedIssueId ?? "?"})`,
+    );
+    this.requestId = e.requestId;
+    this.existingRepoSlug = e.existingRepoSlug;
+    this.attemptedRepoSlug = e.attemptedRepoSlug;
+    this.existingIssueId = e.existingIssueId ?? null;
+    this.attemptedIssueId = e.attemptedIssueId ?? null;
+  }
+}
+
+/** A row of `phases` as returned by the correlated reader, with the phase's
+ *  latest persisted envelope payload (its "persisted output") or null. */
+export interface TracePhaseRow {
+  rowid: number;
+  phase_id: string;
+  request_id: string;
+  seq: number | null;
+  name: string | null;
+  kind: string | null;
+  owner: string | null;
+  description: string | null;
+  status: string;
+  attempt: number | null;
+  retries: number | null;
+  error: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  output_payload_json: string | null;
+}
+
+/** One correlated run as returned by readRunsByIssue: session fields + phases. */
+export interface CorrelatedRunRow {
+  rowid: number;
+  request_id: string;
+  request: string | null;
+  status: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_ms: number | null;
+  total_tokens: number | null;
+  total_cost: number | null;
+  pipeline_name: string | null;
+  repo_slug: string;
+  issue_id: number;
+  issue_url: string | null;
+  phases: TracePhaseRow[];
+}
+
+export interface CorrelatedRunPage {
+  rows: CorrelatedRunRow[];
+  cursor: number;
+  hasMore: boolean;
+}
+
+export interface TracePhasePage {
+  rows: TracePhaseRow[];
+  cursor: number;
+  hasMore: boolean;
+}

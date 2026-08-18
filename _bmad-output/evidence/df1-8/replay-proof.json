@@ -1,0 +1,6 @@
+{
+  "scenario": "identical (repoSlug=qds/demo, issueId=42, requestId) dispatched twice; second dispatch AFTER the first run completed",
+  "firstRun": { "exit": 0, "sessions": "ok|2026-08-18T21:09:56.149Z", "phases": 2, "phase_state_events": 4 },
+  "replay":   { "exit": 0, "sessions": "ok|2026-08-18T21:09:56.149Z (unchanged)", "phases": 2, "phase_state_events": 4 },
+  "result": "second initiation returned the existing runId (run_initiated replayed:true in e2e-run.log), re-executed nothing, mutated nothing — INV-RUN-1 first-close-wins, INV-RUN-2 append-only"
+}
