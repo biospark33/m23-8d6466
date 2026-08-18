@@ -231,7 +231,17 @@ function truncateWithSuffix(
     // Even smaller: return minimal marker trimmed to maxLength (may be just "[").
     return minimalMarker.slice(0, maxLength);
   }
-  return text.slice(0, proseBudget) + suffix;
+  // Walk back from proseBudget to avoid splitting a UTF-16 surrogate pair
+  // (mirrors runner.ts partial-output handling, R7).
+  let cutPoint = proseBudget;
+  while (
+    cutPoint > 0 &&
+    text.charCodeAt(cutPoint - 1) >= 0xD800 &&
+    text.charCodeAt(cutPoint - 1) <= 0xDBFF
+  ) {
+    cutPoint--;
+  }
+  return text.slice(0, cutPoint) + suffix;
 }
 
 /**

@@ -151,13 +151,13 @@ export function dispatchTask(
     const rosterPath = spec.roster;
     const taskBrief = spec.task;
     if (rosterPath === undefined || taskBrief === undefined) {
+      // D4: log refusal reason for observability
+      console.warn(`[dispatch-task] refused: phase '${spec.name}' — dispatch_task requires roster and task`);
       return refuse(
         `phase '${spec.name}': dispatch_task requires roster and task`,
         redact,
       );
     }
-    // D4: log refusal reason for observability
-    console.warn(`[dispatch-task] refused: phase '${spec.name}' — dispatch_task requires roster and task`);
 
     // D6: cardinality checks BEFORE dual-gate (pi spawn ~180s) — local checks first
     // D9: anchor roster path at runRoot, not process.cwd()
@@ -387,7 +387,12 @@ export function dispatchTask(
       const changedFiles = validateChangedFiles(runResult.changedFiles);
       const artifacts = validateArtifacts(runResult.artifacts ?? [], runRoot);
 
-      const durationMs = runResult.durationMs;
+      // Fail-safe: reject non-finite or negative values from malformed merged events
+      let durationMs = runResult.durationMs;
+      if (!Number.isFinite(durationMs) || durationMs < 0) {
+        console.warn(`[dispatch-task] invalid durationMs (${runResult.durationMs}), using 0`);
+        durationMs = 0;
+      }
 
       // Uniformity invariants (merger.ts) keyed on OUR classification, not
       // the harness's: success requires error=null/partial=false; non-success
@@ -516,7 +521,8 @@ export function validateChangedFiles(paths: string[]): string[] {
       continue;
     }
     const segments = decoded.split(/[/\\]/);
-    if (segments.includes("..") || decoded.startsWith("/") || /^[a-zA-Z]:/.test(decoded)) {
+    // Reject UNC paths (\\server\share) as defense-in-depth (POSIX realpath+prefix gate blocks later)
+    if (segments.includes("..") || decoded.startsWith("/") || decoded.startsWith("\\\\") || /^[a-zA-Z]:/.test(decoded)) {
       continue;
     }
     valid.push(raw);
@@ -540,10 +546,20 @@ export function validateArtifacts(
   runRoot: string,
 ): Array<{ name: string; path: string }> {
   const valid: Array<{ name: string; path: string }> = [];
-  const claimOk = new Set(validateChangedFiles(artifacts.map((a) => a.path)));
+  // Fail-closed: null/non-object entries are dropped before the claimOk map —
+  // `a.path` on a null entry would throw before the loop's own guard runs.
+  const objectArtifacts = artifacts.filter(
+    (a): a is { name: string; path: string } => a !== null && typeof a === "object",
+  );
+  const claimOk = new Set(validateChangedFiles(objectArtifacts.map((a) => a.path)));
   for (const artifact of artifacts) {
-    // D15: validate artifact name
-    if (!artifact.name || typeof artifact.name !== "string" || artifact.name.trim().length === 0) {
+    // Fail-closed: filter out null/undefined or non-object entries from malformed merged events
+    if (artifact === null || typeof artifact !== "object") {
+      console.warn("[dispatch-task] artifact dropped: malformed entry (null or non-object)");
+      continue;
+    }
+    // D15: validate artifact name (with type guard since we filtered objects above)
+    if (!artifact || typeof artifact.name !== "string" || artifact.name.trim().length === 0) {
       console.warn("[dispatch-task] artifact dropped: invalid name (empty or non-string)");
       continue;
     }

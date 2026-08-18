@@ -11,7 +11,7 @@
  * - Default constants
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -66,7 +66,131 @@ describe("watchdog constants", () => {
   });
 });
 
+describe("watchdog validation guards (wave-1)", () => {
+  it("thresholdBytes=0 warns and uses default", () => {
+    const logs: string[] = [];
+    const handle = startRssWatchdog({
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
+      pgidOrGroup: process.pid,
+      thresholdBytes: 0,
+      onEscalate: () => {},
+      onUnwatchable: () => {},
+      log: (msg) => logs.push(msg),
+      sampleRss: async () => 100 * 1024 ** 2,
+    });
+
+    expect(logs.some((l) => l.includes("invalid thresholdBytes") && l.includes("0"))).toBe(true);
+    handle.stop();
+  });
+
+  it("thresholdBytes=-1 warns and uses default", () => {
+    const logs: string[] = [];
+    const handle = startRssWatchdog({
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
+      pgidOrGroup: process.pid,
+      thresholdBytes: -1,
+      onEscalate: () => {},
+      onUnwatchable: () => {},
+      log: (msg) => logs.push(msg),
+      sampleRss: async () => 100 * 1024 ** 2,
+    });
+
+    expect(logs.some((l) => l.includes("invalid thresholdBytes") && l.includes("-1"))).toBe(true);
+    handle.stop();
+  });
+
+  it("thresholdBytes=NaN warns and uses default", () => {
+    const logs: string[] = [];
+    const handle = startRssWatchdog({
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
+      pgidOrGroup: process.pid,
+      thresholdBytes: Number.NaN,
+      onEscalate: () => {},
+      onUnwatchable: () => {},
+      log: (msg) => logs.push(msg),
+      sampleRss: async () => 100 * 1024 ** 2,
+    });
+
+    expect(logs.some((l) => l.includes("invalid thresholdBytes") && l.includes("NaN"))).toBe(true);
+    handle.stop();
+  });
+
+  it("pollMs=0 warns and uses default", () => {
+    const logs: string[] = [];
+    const handle = startRssWatchdog({
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
+      pgidOrGroup: process.pid,
+      pollMs: 0,
+      onEscalate: () => {},
+      onUnwatchable: () => {},
+      log: (msg) => logs.push(msg),
+      sampleRss: async () => 100 * 1024 ** 2,
+    });
+
+    expect(logs.some((l) => l.includes("invalid pollMs") && l.includes("0"))).toBe(true);
+    handle.stop();
+  });
+
+  it("pollMs=-1 warns and uses default", () => {
+    const logs: string[] = [];
+    const handle = startRssWatchdog({
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
+      pgidOrGroup: process.pid,
+      pollMs: -1,
+      onEscalate: () => {},
+      onUnwatchable: () => {},
+      log: (msg) => logs.push(msg),
+      sampleRss: async () => 100 * 1024 ** 2,
+    });
+
+    expect(logs.some((l) => l.includes("invalid pollMs") && l.includes("-1"))).toBe(true);
+    handle.stop();
+  });
+
+  it("graceMs=NaN warns and uses default", () => {
+    const logs: string[] = [];
+    const handle = startRssWatchdog({
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
+      pgidOrGroup: process.pid,
+      graceMs: Number.NaN,
+      onEscalate: () => {},
+      onUnwatchable: () => {},
+      log: (msg) => logs.push(msg),
+      sampleRss: async () => 100 * 1024 ** 2,
+    });
+
+    expect(logs.some((l) => l.includes("invalid graceMs") && l.includes("NaN"))).toBe(true);
+    handle.stop();
+  });
+
+  it("undefined values use defaults silently (no warning)", () => {
+    const logs: string[] = [];
+    const handle = startRssWatchdog({
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
+      pgidOrGroup: process.pid,
+      onEscalate: () => {},
+      onUnwatchable: () => {},
+      log: (msg) => logs.push(msg),
+      sampleRss: async () => 100 * 1024 ** 2,
+    });
+
+    // No warnings for undefined (they take the default via destructuring)
+    expect(logs.filter((l) => l.includes("invalid")).length).toBe(0);
+    handle.stop();
+  });
+});
+
 describe("RSS watchdog", () => {
+  // Detect perl availability for SIGTERM-ignore tests
+  let perlAvailable = false;
+  beforeAll(async () => {
+    const result = await new Promise<{ exitCode: number | null }>((resolve) => {
+      const proc = spawn("perl", ["--version"], { stdio: "ignore" });
+      proc.on("exit", (code) => resolve({ exitCode: code }));
+      proc.on("error", () => resolve({ exitCode: -1 }));
+    });
+    perlAvailable = result.exitCode === 0;
+  });
   it("returns running status immediately after start", async () => {
     const logs: string[] = [];
     const handle = startRssWatchdog({
@@ -131,7 +255,29 @@ describe("RSS watchdog", () => {
     await sleep(350); // Order-of-magnitude bounds, not exact (CI load variance)
     handle.stop();
     expect(sampleCount).toBeGreaterThanOrEqual(1);
-    expect(sampleCount).toBeLessThan(20);
+    // Defensible ceiling: 350ms / 50ms poll = 7 polls max, CI load adds ~1-2
+    expect(sampleCount).toBeLessThan(10);
+  });
+
+  it("does NOT escalate when RSS exactly equals thresholdBytes (source uses `>` not `>=`)", async () => {
+    let escalated = false;
+    const handle = startRssWatchdog({
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
+      pgidOrGroup: process.pid,
+      thresholdBytes: 500 * 1024 ** 2, // 500 MB
+      pollMs: 50,
+      onEscalate: () => { escalated = true; },
+      onUnwatchable: () => {},
+      log: () => {},
+      // Sample returns exactly the threshold — should NOT escalate
+      sampleRss: async () => 500 * 1024 ** 2,
+    });
+
+    await sleep(150); // Multiple polls
+    handle.stop();
+
+    expect(escalated).toBe(false);
+    expect(handle.killOrigin).toBeNull();
   });
 
   it("escalates when RSS exceeds threshold", async () => {
@@ -174,7 +320,7 @@ describe("RSS watchdog", () => {
     } catch {}
   }, 5000); // Explicit 5s timeout
 
-  it("SIGTERMs the process group on escalation — validates signal delivery", async () => {
+  it.skipIf(!perlAvailable)("SIGTERMs the process group on escalation — validates signal delivery", async () => {
     // Use a perl process that ignores SIGTERM to verify escalation
     // Perl sets SIGTERM to IGNORE, so the process survives the SIGTERM
     const child = trackChild(spawn("perl", ["-e", '$SIG{TERM}="IGNORE"; sleep 100'], {
@@ -228,7 +374,7 @@ describe("RSS watchdog", () => {
     } catch {}
   });
 
-  it("stopped during grace WITHOUT escalation → no SIGKILL, status becomes stopped", async () => {
+  it.skipIf(!perlAvailable)("stopped during grace WITHOUT escalation → no SIGKILL, status becomes stopped", async () => {
     // Stop the watchdog before it ever escalates — it should cleanly
     // stop and the group should survive.
     const child = trackChild(spawn("perl", ["-e", '$SIG{TERM}="IGNORE"; sleep 100'], {
@@ -273,7 +419,7 @@ describe("RSS watchdog", () => {
     } catch {}
   }, 5000);
 
-  it("escalated grace timer SIGKILLs the group if still alive (W1 invariant)", async () => {
+  it.skipIf(!perlAvailable)("escalated grace timer SIGKILLs the group if still alive (W1 invariant)", async () => {
     // W1: After escalation, the grace timer checks PROCESS GROUP liveness.
     // If group is alive after grace → SIGKILL. If group is gone → clean return.
     // This test verifies the SIGKILL actually fires when the group survives.
@@ -321,7 +467,7 @@ describe("RSS watchdog", () => {
     } catch {}
   }, 5000);
 
-  it("escalated grace timer returns cleanly if group already gone", async () => {
+  it.skipIf(!perlAvailable)("escalated grace timer returns cleanly if group already gone", async () => {
     // W1: If the process group exits during grace (e.g., lead honored SIGTERM),
     // the grace timer checks group liveness and returns without SIGKILL.
     const child = trackChild(spawn("perl", ["-e", '$SIG{TERM}="IGNORE"; exec("sleep 0.01")'], {
@@ -424,6 +570,7 @@ describe("RSS watchdog", () => {
 
   it("does NOT report unwatchable after 1-2 failures (W4)", async () => {
     let unwatchableCalled = false;
+    let sampleCount = 0;
 
     const handle = startRssWatchdog({
       child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
@@ -436,8 +583,10 @@ describe("RSS watchdog", () => {
       log: () => {},
       // Fail twice, then succeed
       sampleRss: async () => {
-        handle.killOrigin !== null ? null : null;
-        return null;
+        sampleCount++;
+        // First 2 calls fail (null), then succeed
+        if (sampleCount < 3) return null;
+        return 100 * 1024 ** 2;
       },
     });
 
@@ -446,6 +595,114 @@ describe("RSS watchdog", () => {
     handle.stop();
 
     expect(unwatchableCalled).toBe(false);
+  });
+
+  it("sampler returns null twice then breach value → escalation wins (W4)", async () => {
+    // Two null returns (below unwatchable threshold) followed by a breach:
+    // escalation should fire because the nulls were just temporary failures,
+    // not the 3-consecutive threshold that triggers unwatchable.
+    let escalated = false;
+    let sampleCount = 0;
+
+    const child = trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" }));
+    const pgid = child.pid!;
+
+    const handle = startRssWatchdog({
+      child,
+      pgidOrGroup: pgid,
+      thresholdBytes: 500 * 1024 ** 2, // 500 MB
+      pollMs: 50,
+      graceMs: 100,
+      onEscalate: () => { escalated = true; },
+      onUnwatchable: () => {},
+      log: () => {},
+      sampleRss: async () => {
+        sampleCount++;
+        if (sampleCount < 3) return null; // Two nulls (not enough for unwatchable)
+        return 600 * 1024 ** 2; // Then breach
+      },
+    });
+
+    await sleep(200); // Time for 3+ polls
+    handle.stop();
+
+    expect(escalated).toBe(true);
+    expect(handle.killOrigin).toBe("watchdog");
+
+    // Cleanup
+    try {
+      process.kill(-pgid, "SIGKILL");
+    } catch {}
+  }, 5000);
+
+  it("stop() called DURING grace window → SIGKILL leg still fires (W1)", async () => {
+    // Verify that once escalated, the SIGKILL leg survives stop() — the
+    // watchdog must clean up even if the runner calls stop() during grace.
+    const child = trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" }));
+    const pgid = child.pid!;
+    let escalated = false;
+
+    const handle = startRssWatchdog({
+      child,
+      pgidOrGroup: pgid,
+      thresholdBytes: 1,
+      pollMs: 50,
+      graceMs: 200,
+      onEscalate: () => { escalated = true; },
+      onUnwatchable: () => {},
+      log: () => {},
+      sampleRss: async () => 10 * 1024 ** 2,
+    });
+
+    // Wait for escalation
+    await sleep(100);
+    expect(escalated).toBe(true);
+
+    // Call stop() DURING grace window — SIGKILL should still fire
+    handle.stop();
+
+    // Wait past grace period — SIGKILL should have fired
+    await sleep(150);
+
+    let alive = false;
+    try {
+      process.kill(-pgid, 0);
+      alive = true;
+    } catch {
+      alive = false;
+    }
+    // Process should be dead (SIGKILL fired despite stop())
+    expect(alive).toBe(false);
+    expect(handle.killOrigin).toBe("watchdog");
+
+    // Cleanup (idempotent)
+    try {
+      process.kill(-pgid, "SIGKILL");
+    } catch {}
+  }, 5000);
+
+  it("after stop(), polling actually stops — sample count frozen", async () => {
+    let sampleCount = 0;
+    const handle = startRssWatchdog({
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
+      pgidOrGroup: process.pid,
+      pollMs: 50,
+      onEscalate: () => {},
+      onUnwatchable: () => {},
+      log: () => {},
+      sampleRss: async () => {
+        sampleCount++;
+        return 100 * 1024 ** 2;
+      },
+    });
+
+    await sleep(150); // Some polling happens
+    handle.stop();
+    const countAtStop = sampleCount;
+
+    // Wait for 2× pollMs — sampling should NOT increase
+    await sleep(120);
+    expect(sampleCount).toBe(countAtStop);
   });
 
   it("uses external sampler when provided", async () => {

@@ -4,9 +4,7 @@
  * Tests the conversion between DF1.5's ResolvedRole and cli-anything's
  * TeamRole, plus the manifest construction.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
-import * as fs from "node:fs";
-import * as os from "node:os";
+import { beforeEach, describe, expect, test } from "bun:test";
 import * as path from "node:path";
 
 import type { ResolvedRole, ResolvedRoster } from "../../src/phase-engine/roster/schema.ts";
@@ -16,14 +14,6 @@ import {
 } from "../../src/phase-engine/phases/roster-adapter.ts";
 import { TeamManifestSchema } from "../../cli-anything/src/types.ts";
 import { splitRoleModel } from "../../cli-anything/src/team-events.ts";
-
-// ponytail: tmpRoot removed — dead fixture created, realpath'd, never used
-afterEach(() => {
-  // Cleanup now inline for any temp files created during tests
-});
-afterAll(() => {
-  // Global cleanup moved inline
-});
 
 describe("rosterRoleToTeamRole", () => {
   test("joins provider and model with single slash", () => {
@@ -596,5 +586,74 @@ describe("rosterToTeamManifest: RA-tests — negative tests for new roster-adapt
     }
     expect(thrownError).toBeDefined();
     expect(thrownError?.message).toMatch(/duplicate/i);
+  });
+});
+
+describe("rosterToTeamManifest: review-round hardening (A19, A20)", () => {
+  const baseRole: Omit<ResolvedRole, "name"> = {
+    model: "claude-haiku-4-5",
+    provider: "anthropic",
+    thinking: "off",
+    tools: null,
+    writes: [],
+    harness_engineering: [],
+    slug: "anthropic/claude-haiku-4-5",
+    warnings: [],
+  };
+
+  test("A19: role with empty model field → rejected per adapter contract", () => {
+    // Empty model string fails the guard in rosterRoleToTeamRole
+    const badRoster: ResolvedRoster = {
+      path: "/fake.yaml",
+      roles: [
+        { ...baseRole, name: "lead", model: "" as unknown as string, slug: "/claude-haiku-4-5" },
+        { ...baseRole, name: "w1" },
+      ],
+      warnings: [],
+    };
+
+    // Adapter checks model is non-empty string before joining
+    let thrownError: Error | undefined;
+    try {
+      rosterToTeamManifest(badRoster, {
+        name: "bad",
+        project: "p",
+        leadRoleName: "lead",
+        workerRoleNames: ["w1"],
+        prompts: { lead: "x", w1: "y" },
+      });
+    } catch (e) {
+      thrownError = e as Error;
+    }
+    expect(thrownError).toBeDefined();
+    expect(thrownError?.message).toContain("model");
+    expect(thrownError?.message).toMatch(/non-empty|string/i);
+  });
+
+  test("A20: single-slash model id round-trips provider/model correctly", () => {
+    // Complement to existing multi-slash test — verify simple case works
+    const role: ResolvedRole = {
+      name: "lead",
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      thinking: "off",
+      tools: null,
+      writes: [],
+      harness_engineering: [],
+      slug: "anthropic/claude-sonnet-4-5",
+      warnings: [],
+    };
+
+    const teamRole = rosterRoleToTeamRole(role, {
+      agentId: "lead-1",
+      prompt: "Lead",
+    });
+
+    expect(teamRole.model).toBe("anthropic/claude-sonnet-4-5");
+
+    // Verify round-trip through splitRoleModel
+    const split = splitRoleModel(teamRole.model);
+    expect(split.provider).toBe("anthropic");
+    expect(split.model).toBe("claude-sonnet-4-5");
   });
 });

@@ -634,6 +634,29 @@ describe("dispatch-task: AC6 testCommand", () => {
     expect(result.testResults).toEqual({ passed: 0, failed: 0 }); // agent claim ignored
     expect(result.testsExecuted).toBe(false);
   });
+
+  it("declared testCommand exits non-zero → failed counts parsed, classification success-per-contract", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-longough";
+    const script = writeTestScript();
+    injectFake((opts) => {
+      feedLine(opts, '{"type":"merged","result":{"summary":"ok"}}');
+      opts.onRunFacts?.({
+        exitCode: 1, // Non-zero exit from test runner
+        termSignal: null,
+        killOrigin: null,
+        comsInitError: null,
+      });
+      return successResult(); // exitStatus=success from runner
+    });
+    const result = await runDispatch({ testCommand: ["sh", script] });
+    // testResult carries parsed counts (2 failed)
+    expect(result.testResults).toEqual({ passed: 7, failed: 2 });
+    expect(result.testsExecuted).toBe(true);
+    // Classification follows precedence rule: exit 0 + valid merged → success
+    // (runner's success verdict is NOT overridden by testCommand exit code)
+    expect(result.exitStatus).toBe("success");
+  });
 });
 
 describe("dispatch-task: prompt persistence pre-spawn (XC)", () => {
@@ -652,6 +675,44 @@ describe("dispatch-task: prompt persistence pre-spawn (XC)", () => {
       .map((t) => t.name)
       .sort();
     expect(names).toEqual(["lead", "worker"]);
+  });
+
+  it("empty changedFiles: [] from merged event surfaces as [] on step output", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    injectFake((opts) => {
+      feedLine(opts, '{"type":"merged","result":{"summary":"ok"}}');
+      opts.onRunFacts?.({
+        exitCode: 0,
+        termSignal: null,
+        killOrigin: null,
+        comsInitError: null,
+      });
+      return successResult({ changedFiles: [] });
+    });
+    const result = await runDispatch();
+    expect(result.exitStatus).toBe("success");
+    expect(result.changedFiles).toEqual([]);
+  });
+
+  it("multiple oversize lines (>1 MiB each) dropped → droppedOversizeLines accumulates", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    injectFake((opts) => {
+      // Two separate oversize line drops
+      opts.onTeamEvent?.(null, { droppedOversize: true });
+      opts.onTeamEvent?.(null, { droppedOversize: true });
+      opts.onRunFacts?.({
+        exitCode: 0,
+        termSignal: null,
+        killOrigin: null,
+        comsInitError: null,
+      });
+      return successResult();
+    });
+    const result = await runDispatch();
+    expect(result.droppedOversizeLines).toBe(2);
+    expect(result.malformedLines).toBe(0);
   });
 
   it("run killed mid-phase still shows prompts (runner throws)", async () => {
@@ -704,7 +765,6 @@ describe("dispatch-task: INV-2 path validation", () => {
       const valid = validateArtifacts(artifacts, tmpRoot);
       const names = valid.map((a: { name: string }) => a.name).sort();
       expect(names).toEqual(["legit", "real"]); // evil dropped by the WALK
-      expect(names).not.toContain("evil");
       // Assert CONTENT of each validated artifact, not just names — a regression
       // that reads a different file or empty content will fail.
       for (const a of valid) {

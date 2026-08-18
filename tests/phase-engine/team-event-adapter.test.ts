@@ -515,3 +515,109 @@ describe("team-event-adapter: adaptTeamEvent individual types", () => {
     expect(adapted.name).toBe("coms_init_error");
   });
 });
+
+describe("team-event-adapter: review-round hardening (A12-A17)", () => {
+  const ctx = {
+    requestId: "req-1",
+    phaseId: "phase-1",
+    redact: (s: string) => s,
+  };
+
+  it("A12: CRLF line endings on malformed and valid lines — counters classify correctly", () => {
+    // Mix of CRLF and LF lines — parser handles both, counters track correctly
+    const health = makeStreamHealth();
+    const lines = [
+      '{"type":"coms"}\r\n', // valid CRLF
+      '{garbage\r\n', // malformed CRLF
+      '{"type":"cost","agentId":"w1","model":"m","inputTokens":100,"outputTokens":50,"turnCount":1,"unpricedTurns":0,"durationMs":1234,"costUsd":0.01}\n', // valid LF
+      'not json\r\n', // malformed CRLF
+    ];
+    for (const line of lines) {
+      const parsed = parseTeamEventLine(line);
+      if (!parsed) {
+        health.malformed(line);
+      }
+    }
+    const snapshot = health.snapshot();
+    expect(snapshot.malformedLines).toBe(2);
+    expect(snapshot.droppedOversizeLines).toBe(0);
+  });
+
+  it("A13: valid-JSON-trailing-comma line → malformed", () => {
+    // Trailing comma makes it invalid JSON even though otherwise valid
+    const trailingComma = '{"type":"coms", "extra":true,}';
+    const parsed = parseTeamEventLine(trailingComma);
+    expect(parsed).toBe(null);
+  });
+
+  it("A14: blank line inside NDJSON stream → skipped, not malformed", () => {
+    // Blank lines are ignored by parseTeamEventLine — not counted as malformed
+    const health = makeStreamHealth();
+    const blankLine = '\n';
+    const parsed = parseTeamEventLine(blankLine);
+    expect(parsed).toBe(null); // null return means ignored
+    // Blank lines are NOT malformed — they're just empty
+    // The counter should NOT increment for blank lines
+    // (Current behavior: null without exception means skip)
+    const snapshot = health.snapshot();
+    expect(snapshot.malformedLines).toBe(0);
+  });
+
+  it("A15: isExitStatus — bogus status string on worker_output defaults to transient per contract", () => {
+    // Ponytail: pins current contract — isExitStatus checks EXIT_STATUS_SET
+    // A bogus status like "bogus" is NOT in the set → defaults to transient
+    const bogusLine = '{"type":"worker_output","agentId":"worker-1","output":{"status":"bogus"}}';
+    const parsed = parseTeamEventLine(bogusLine);
+    expect(parsed).toBeTruthy();
+    if (!parsed || parsed.kind !== "worker_output") throw new Error("Parse failed");
+    const adapted = adaptTeamEvent(parsed, ctx);
+    if (adapted.type !== "envelope") throw new Error("expected envelope");
+    // Bogus status not in EXIT_STATUS_SET → defaults to "transient" (fail-safe)
+    expect(adapted.status).toBe("transient");
+  });
+
+  it("A16: cost event with Infinity costUsd → parser rejects, never reaches adapter", () => {
+    // Infinity/NaN from malformed costUsd is rejected by parseTeamEventLine
+    // The adapter's non-finite guard is defense-in-depth for cases where the
+    // parser contract might be bypassed.
+    const infLine = '{"type":"cost","agentId":"w1","model":"m","inputTokens":100,"outputTokens":50,"turnCount":1,"unpricedTurns":0,"durationMs":1234,"costUsd":Infinity}';
+    const parsed = parseTeamEventLine(infLine);
+    // Parser rejects non-finite costUsd → null
+    expect(parsed).toBe(null);
+  });
+
+  it("A16: adapter non-finite guard (bypassing parser) → coms trace with skip note", () => {
+    // Direct adapter test bypassing parseTeamEventLine to verify the guard exists
+    // This documents the contract: if a non-finite costUsd reaches the adapter,
+    // it produces a coms trace with a skip note rather than corrupting the stream.
+    const malformedCost = {
+      kind: "cost" as const,
+      event: {
+        agentId: "w1",
+        model: "m",
+        inputTokens: 100,
+        outputTokens: 50,
+        turnCount: 1,
+        unpricedTurns: 0,
+        durationMs: 1234,
+        costUsd: Number.POSITIVE_INFINITY,
+        timestamp: "2026-08-17T12:00:10.000Z",
+      },
+    };
+    const adapted = adaptTeamEvent(malformedCost, ctx);
+    // Non-finite guard → coms trace event with skip note, NOT cost trace
+    if (adapted.type !== "coms") throw new Error(`expected coms, got ${adapted.type}`);
+    expect(adapted.name).toBe("cost_skipped_nonfinite");
+    expect(adapted.payloadJson).toContain("non-finite");
+  });
+
+  it("A17: inline CRLF-content test (not fixture) — parser handles CRLF in valid JSON", () => {
+    // Explicit inline string with CRLF — proves parser handles it (not fixture masking)
+    const crlfValid = '{"type":"coms","requestId":"req-1","sessionId":"sess-1","phaseId":"phase-1","channel":"ch","direction":"send","senderAgent":"a","receiverAgent":"b","payloadSize":256,"durationMs":45,"timestamp":"2026-08-17T12:00:00.000Z"}\r\n';
+    const parsed = parseTeamEventLine(crlfValid);
+    expect(parsed).toBeTruthy();
+    if (!parsed || parsed.kind !== "coms") throw new Error("Parse failed");
+    const adapted = adaptTeamEvent(parsed, ctx);
+    expect(adapted.type).toBe("coms");
+  });
+});

@@ -212,8 +212,9 @@ async function main(): Promise<void> {
       break;
     }
     case "watchdog_kill": {
-      // Stay alive for watchdog to escalate. No output needed — we're testing
-      // that the watchdog escalation sets killOrigin and classifies as overflow.
+      // Stay alive for watchdog to escalate. Emit a cost event first to match
+      // production pattern and let budget-vs-watchdog races surface.
+      say(cost("lead", "anthropic/claude-x", 0.01));
       await sleep(60_000);
       break;
     }

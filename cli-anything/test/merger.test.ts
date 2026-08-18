@@ -170,6 +170,7 @@ const EXTENDED_KEYS = [
 ].sort();
 
 function base(over: Partial<Parameters<typeof buildMergedOutput>[0]>) {
+  const { mulchPrimeError: mpError, partialOutput: pOutput, ...restOver } = over;
   return buildMergedOutput({
     exitStatus: "success",
     partial: false,
@@ -187,7 +188,9 @@ function base(over: Partial<Parameters<typeof buildMergedOutput>[0]>) {
     summary: "ok",
     mulchPrimed: false,
     artifacts: [],
-    ...over,
+    mulchPrimeError: mpError ?? null, // Convert undefined to null
+    partialOutput: pOutput ?? null, // Convert undefined to null
+    ...restOver,
   });
 }
 
@@ -282,6 +285,7 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
   const identity = (s: string): string => s;
 
   function base(over: Partial<Parameters<typeof buildMergedOutput>[0]>) {
+    const { mulchPrimeError: mpError, partialOutput: pOutput, ...restOver } = over;
     return buildMergedOutput({
       exitStatus: "success",
       partial: false,
@@ -298,7 +302,9 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
       summary: "ok",
       mulchPrimed: false,
       artifacts: [],
-      ...over,
+      mulchPrimeError: mpError ?? null,
+      partialOutput: pOutput ?? null,
+      ...restOver,
     });
   }
 
@@ -319,6 +325,28 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
     expect(match?.[1]).toBe("2500");
   });
 
+  // Parametrized boundary test: 1999 unchanged, 2000 unchanged, 2001/2002 truncated
+  const summaryBoundaryCases = [
+    { len: 1999, truncated: false, desc: "below limit" },
+    { len: 2000, truncated: false, desc: "at limit" },
+    { len: 2001, truncated: true, desc: "over by 1" },
+    { len: 2002, truncated: true, desc: "over by 2" },
+  ];
+  for (const { len, truncated, desc } of summaryBoundaryCases) {
+    it(`summary truncation boundary: ${len} chars → ${desc}`, () => {
+      const summary = "x".repeat(len);
+      const out = base({ result: { summary } });
+      if (truncated) {
+        expect(out.summary.length).toBe(2000);
+        expect(out.summary).toContain("[truncated");
+        expect(out.summary).toContain(`${len} chars total`);
+      } else {
+        expect(out.summary).toBe(summary);
+        expect(out.summary.length).toBe(len);
+      }
+    });
+  }
+
   it("summary copy-up exact suffix math: total length == 2000", () => {
     // Create a summary that's exactly 2500 chars
     const longSummary = "y".repeat(2500);
@@ -336,13 +364,6 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
     const out = base({ result: { summary: shortSummary } });
     expect(out.summary).toBe(shortSummary);
     expect(out.summary.length).toBe(2);
-  });
-
-  it("summary exactly at limit: no truncation", () => {
-    const exactSummary = "z".repeat(2000);
-    const out = base({ result: { summary: exactSummary } });
-    expect(out.summary).toBe(exactSummary);
-    expect(out.summary.length).toBe(2000);
   });
 
   it("summary over limit by 1: truncates with suffix", () => {
@@ -432,6 +453,22 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
     expect(out.partialOutput).not.toBeNull();
   });
 
+  // partialOutput "" preserved across ALL non-success exitStatuses
+  const nonSuccessStatuses: Exclude<MergedOutput["exitStatus"], "success">[] = ["transient", "overflow", "logic", "lead_failure"];
+  for (const status of nonSuccessStatuses) {
+    it(`partialOutput "" preserved on ${status} exitStatus`, () => {
+      const out = base({
+        exitStatus: status,
+        error: { reason: status, message: "test" },
+        partial: status !== "lead_failure", // lead_failure path ignores partial
+        partialOutput: "",
+      });
+      // Empty string must stay empty, not become null
+      expect(out.partialOutput).toBe("");
+      expect(out.partialOutput).not.toBeNull();
+    });
+  }
+
   it("truncateWithSuffix: normal truncation with exact suffix content", () => {
     const out = base({
       result: { summary: "a".repeat(3000) },
@@ -486,6 +523,33 @@ describe("buildMergedOutput (DF1.6 T1 extended schema)", () => {
     expect(out.mulchPrimed).toBe(true);
     expect(out.mulchPrimeError).toBeNull();
     expect(out.artifacts).toEqual([{ name: "log.txt", path: "artifacts/log.txt" }]);
+  });
+
+  it("truncateWithSuffix handles astral-plane chars without splitting surrogate pairs", () => {
+    // Use a char that's in the astral plane (requires a surrogate pair)
+    // "𝕏" (U+1D54D) is represented as two UTF-16 code units: 0xD835 0xDD4D
+    const astralChar = "𝕏";
+    expect(astralChar.length).toBe(2); // Confirms it's a surrogate pair
+    // Create a string of 1500 such chars (3000 UTF-16 code units total)
+    const longAstral = astralChar.repeat(1500);
+    const out = base({
+      result: { summary: longAstral },
+    });
+    // Summary should be truncated to 2000 chars, but NOT end on a lone high surrogate
+    expect(out.summary.length).toBeLessThanOrEqual(2000);
+    // Verify the last char before the suffix is NOT a high surrogate
+    const suffixStart = out.summary.indexOf("[truncated");
+    expect(suffixStart).toBeGreaterThan(0);
+    // The char immediately before the suffix should not be a lone high surrogate
+    const beforeSuffix = out.summary.charCodeAt(suffixStart - 1);
+    const isHighSurrogate = beforeSuffix >= 0xD800 && beforeSuffix <= 0xDBFF;
+    expect(isHighSurrogate).toBe(false);
+    // Verify the prose part round-trips JSON.stringify without lone-surrogate escapes
+    const prose = out.summary.slice(0, suffixStart);
+    // JSON.stringify would replace lone surrogates with \uXXXX escapes
+    // If round-trip produces the same string, no lone surrogates were present
+    const roundTripped = JSON.parse(JSON.stringify(prose));
+    expect(roundTripped).toBe(prose);
   });
 
   it("mulchPrimeError present when priming fails", () => {

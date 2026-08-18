@@ -73,14 +73,39 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
     // `opts.child` stays in the interface for callers/tests; the poll loop
     // keys off liveness via the process group, not the lead's exit state.
     pgidOrGroup,
-    thresholdBytes = DEFAULT_THRESHOLD_BYTES,
-    pollMs = DEFAULT_POLL_MS,
-    graceMs = WATCHDOG_GRACE_MS,
+    thresholdBytes,
+    pollMs,
+    graceMs,
     onEscalate,
     onUnwatchable,
     log,
     sampleRss: externalSampler,
   } = opts;
+
+  // Validate numeric options: 0, negative, and NaN are rejected with a fallback
+  // to the default. Destructuring defaults only handle undefined.
+  const safeThresholdBytes =
+    Number.isFinite(thresholdBytes) && thresholdBytes! > 0
+      ? thresholdBytes!
+      : DEFAULT_THRESHOLD_BYTES;
+  const safePollMs =
+    Number.isFinite(pollMs) && pollMs! > 0 ? pollMs! : DEFAULT_POLL_MS;
+  const safeGraceMs =
+    Number.isFinite(graceMs) && graceMs! > 0 ? graceMs! : WATCHDOG_GRACE_MS;
+
+  // Warn when a bad value was supplied (undefined took the default silently)
+  if (
+    thresholdBytes !== undefined &&
+    (!Number.isFinite(thresholdBytes) || thresholdBytes <= 0)
+  ) {
+    log(`cli-anything: invalid thresholdBytes ${thresholdBytes}, using default ${DEFAULT_THRESHOLD_BYTES}`);
+  }
+  if (pollMs !== undefined && (!Number.isFinite(pollMs) || pollMs <= 0)) {
+    log(`cli-anything: invalid pollMs ${pollMs}, using default ${DEFAULT_POLL_MS}`);
+  }
+  if (graceMs !== undefined && (!Number.isFinite(graceMs) || graceMs <= 0)) {
+    log(`cli-anything: invalid graceMs ${graceMs}, using default ${WATCHDOG_GRACE_MS}`);
+  }
 
   let running = true;
   let escalated = false;
@@ -246,7 +271,7 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
       log(`cli-anything: RSS watchdog sample failed (${failureCount}/${threshold}, retrying...)`);
       // Schedule next poll even on failure — will retry until threshold
       if (running && !escalated) {
-        timer = setTimeout(poll, pollMs);
+        timer = setTimeout(poll, safePollMs);
         if (timer) timer.unref();
       }
       return;
@@ -256,10 +281,10 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
     externalSamplerFailures = 0;
 
     samples++;
-    if (rssBytes > thresholdBytes && !escalated) {
+    if (rssBytes > safeThresholdBytes && !escalated) {
       escalated = true;
       const info = { rssBytes, samples };
-      const thresholdGigabytes = (thresholdBytes / 1024 ** 3).toFixed(2);
+      const thresholdGigabytes = (safeThresholdBytes / 1024 ** 3).toFixed(2);
       log(`cli-anything: RSS watchdog escalation at ${rssBytes} bytes (${(rssBytes / 1024 ** 3).toFixed(2)} GB, threshold ${thresholdGigabytes} GB)`);
       // Set escalation state synchronously BEFORE invoking the callback,
       // so classification reads the flag atomically at decision time.
@@ -303,19 +328,19 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
         } catch {
           // Group already gone
         }
-      }, graceMs);
+      }, safeGraceMs);
       graceTimer.unref(); // Don't keep process alive for grace timer
     }
 
     // Schedule next poll
     if (running && !escalated) {
-      timer = setTimeout(poll, pollMs);
+      timer = setTimeout(poll, safePollMs);
       if (timer) timer.unref();
     }
   };
 
   // Start polling
-  timer = setTimeout(poll, pollMs);
+  timer = setTimeout(poll, safePollMs);
   if (timer) timer.unref();
 
   return handle;

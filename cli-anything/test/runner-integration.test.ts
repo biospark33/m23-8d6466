@@ -423,11 +423,31 @@ describe("DF1.6 T5/R1: spawn seam budget ceiling behavior (real runs)", () => {
     expect(parentEnv.QDS_TEAM_RUNNER).toBe("warren");
     expect(process.env.QDS_TEAM_RUNNER).toBe(ambientRunner);
   }, 15_000);
+
+  it("forceLocalRunner NEGATIVE: without flag, child report shows NO runner=local", async () => {
+    // Without forceLocalRunner, the fake bun (first on PATH) receives the
+    // default warren runner selection, NOT "local".
+    const parentEnv: Record<string, string> = {
+      PATH: `${join(FIXTURES, "local-bin")}:${join(FIXTURES, "team-bin")}:${process.env.PATH ?? ""}`,
+      HOME: process.env.HOME ?? "/tmp",
+      QDS_TEAM_RUNNER: "warren",
+    };
+    // Run WITHOUT forceLocalRunner flag
+    const out = await runTeamManifest(TEAM_MANIFEST, {
+      env: parentEnv,
+      // forceLocalRunner intentionally omitted
+    });
+    // The fake bun should report runner=warren, NOT runner=local
+    expect(out.exitStatus).toBe("transient");
+    expect(out.error?.message).toContain("coms init failed: runner=warren");
+    // Verify runner=local is NOT mentioned
+    expect(out.error?.message).not.toContain("runner=local");
+  }, 15_000);
 });
 
 describe("DF1.6 T4: RSS watchdog overflow regression test", () => {
   it("watchdog escalation → exitStatus overflow AND killOrigin watchdog (onRunFacts wiring)", async () => {
-    let capturedKillOrigin: "watchdog" | "budget" | "wallClock" | "requestedShutdown" | null = null;
+    const killOrigins: ("watchdog" | "budget" | "wallClock" | "requestedShutdown" | null)[] = [];
     let sampleCount = 0;
     const OVER_THRESHOLD_RSS = 5 * 1024 ** 3; // 5 GB (exceeds 4 GB default)
 
@@ -446,7 +466,7 @@ describe("DF1.6 T4: RSS watchdog overflow regression test", () => {
       },
       // Capture killOrigin from onRunFacts callback
       onRunFacts: (facts) => {
-        capturedKillOrigin = facts.killOrigin;
+        killOrigins.push(facts.killOrigin);
       },
       // Short grace so test completes fast (default 5s, we don't need to wait)
       graceMs: 100,
@@ -457,7 +477,8 @@ describe("DF1.6 T4: RSS watchdog overflow regression test", () => {
     expect(out.error?.reason).toBe("overflow");
     expect(out.error?.message).toContain("RSS watchdog 4 GB threshold exceeded");
     // DF1.6 wave-1 fix: killOrigin is now read from the live watchdog handle
-    expect(capturedKillOrigin).toBe("watchdog");
+    expect(killOrigins).toHaveLength(1);
+    expect(killOrigins[0]).toBe("watchdog");
 
     // Verify the sampler was called at least once (escalation happened)
     expect(sampleCount).toBeGreaterThanOrEqual(1);
