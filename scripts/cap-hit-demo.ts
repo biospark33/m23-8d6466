@@ -1,0 +1,859 @@
+#!/usr/bin/env bun
+/**
+ * DF2.4 — cap-hit demo: provider cap detection, overflow classification,
+ * wall-clock race, teardown on every verdict, artifact redaction, and the
+ * mandatory e2e demo (live: real capped key, real spend, verified kill).
+ *
+ * Usage:
+ *   cap-hit-demo [--cap µ$] [--roster path] [--driver name] [--dir runs-dir]
+ *                 [--repo-url url] [--sha commit] [--wall-clock-ms ms]
+ *                 [--budget-cap µ$] [--ceiling µ$]
+ *
+ * Evidence artifact written to .sandbox/evidence/df2-4-cap-hit-<runId>.json
+ * (dir 0700, file 0600, atomic tmp+rename).
+ */
+
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
+import { writeSync } from "node:fs";
+import { join } from "node:path";
+import { parse } from "yaml";
+
+import {
+  captureSpend,
+  createRun,
+  deliverRunKey,
+  executeRun,
+  mintRunKey,
+  openRouterKeyApi,
+  resolveDriver,
+  teardownSandbox,
+  type KeyApi,
+  type ProviderDriver,
+  type ExecResult,
+} from "../src/providers/index.ts";
+import { newId, RunRecordStore } from "../src/providers/run-record.ts";
+import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
+import {
+  classifyRunExit,
+  redactWithKey,
+  type InBoxExit,
+  type TerminationProvenance,
+} from "../src/providers/cap-rejection.ts";
+
+// Structured logs go to stderr so stdout carries only the result JSON.
+if (import.meta.main) {
+  setLogSink((entry) => {
+    process.stderr.write(`${JSON.stringify(entry)}\n`);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Public contracts (tests import these)
+// ---------------------------------------------------------------------------
+
+export interface CapHitDemoDeps {
+  driver: ProviderDriver;
+  keyApi: KeyApi;
+  store: RunRecordStore;
+  requestId?: string;
+  evidenceDir?: string;
+  now?: () => Date;
+  /** Override envFile path for key delivery (default: /home/agent/app/.env). */
+  envFile?: string;
+  /**
+   * Host-side re-probe override (AC2): one cheap chat call with the retained
+   * runtime key after the workload ends and BEFORE revoke. Default resolution:
+   * deps.probe ?? keyApi.chatComplete (fake substrate) ?? openRouterChatProbe
+   * (production — the provider the key lives on).
+   */
+  probe?: (key: string, model: string) => Promise<{ status: number; body: string }>;
+}
+
+export interface CapHitDemoOptions {
+  /** Key cap in microdollars (default 50_000 = $0.05). */
+  capMicroUsd?: number;
+  /** Wall-clock ceiling in ms (default 900_000 = 15 min). */
+  wallClockMs?: number;
+  /** Inner control: run budget cap (artifact field only). */
+  runBudgetCapMicros?: number;
+  /** Inner control: resident ceiling (artifact field only). */
+  residentCeilingMicros?: number;
+  /** Workload argv (default: fake substrate uses ["true"], live loads from fixture). */
+  workloadArgv?: string[];
+  /** Fixture path for live substrate workload YAML (default: loopy-workload.yaml). */
+  fixturePath?: string;
+  /** Repo URL for live substrate fill/setup. */
+  repoUrl?: string;
+  /** Commit SHA for live substrate fill/setup. */
+  commitSha?: string;
+  /** Roster path for live substrate setup. */
+  rosterPath?: string;
+  /** Evidence directory path for artifact output. */
+  evidenceDir?: string;
+}
+
+export interface CapHitTimings {
+  mint_ms: number;
+  setup_ms: number;
+  workload_ms: number;
+  reprobe_ms: number;
+  capture_spend_ms: number;
+  teardown_ms: number;
+}
+
+export interface CapHitArtifact {
+  story: "df2-4";
+  runId: string;
+  requestId: string;
+  substrate: string;
+  capMicroUsd: number;
+  spendMicroUsd: number;
+  turnsCompleted: number;
+  turnsSource: "in-box";
+  rejectionStatus: string | null;
+  providerCapRejected: boolean;
+  terminationProvenance: TerminationProvenance;
+  /** Workload exit classification; null when no workload exit ever happened. */
+  exitStatus: InBoxExit | null;
+  killOrigin: "provider-cap" | "wall-clock" | "host-error" | null;
+  revocationVerified: boolean;
+  closedAt: string | null;
+  verdict: "demonstrated" | "inconclusive";
+  reason: string | null;
+  runBudgetCapMicros: number;
+  residentCeilingMicros: number;
+  keyHash: string;
+  timings: CapHitTimings;
+  recordedAt: string;
+}
+
+export interface CapHitDemoResult {
+  runId: string;
+  verdict: "demonstrated" | "inconclusive";
+  reason: string | null;
+  artifactPath: string;
+  artifact: CapHitArtifact;
+}
+
+// ponytail: defaults inline — no separate defaults object
+const DEFAULT_CAP_MICRO_USD = 50_000;
+const DEFAULT_WALL_CLOCK_MS = 900_000;
+const DEFAULT_RUN_BUDGET_CAP = 40_000;
+const DEFAULT_RESIDENT_CEILING = 30_000;
+const DEFAULT_FIXTURE_PATH = "tests/providers/fixtures/loopy-workload.yaml";
+
+// ---------------------------------------------------------------------------
+// Core demo function
+// ---------------------------------------------------------------------------
+
+/** Atomic artifact write: tmp file (0600) + rename. Dir created 0700. */
+function writeArtifactFile(evidenceDir: string, artifact: CapHitArtifact): string {
+  mkdirSync(evidenceDir, { recursive: true });
+  chmodSync(evidenceDir, 0o700);
+  const filename = `df2-4-cap-hit-${artifact.runId}.json`;
+  const path = join(evidenceDir, filename);
+  const tmp = join(evidenceDir, `.tmp-${filename}`);
+  writeFileSync(tmp, JSON.stringify(artifact, null, 2), { mode: 0o600 });
+  renameSync(tmp, path);
+  return path;
+}
+
+/** Cheap probe model (fixture model on the live path overrides this). */
+const DEFAULT_PROBE_MODEL = "deepseek/deepseek-v4-flash-0731";
+const PROBE_TIMEOUT_MS = 15_000;
+
+/**
+ * Production host-side re-probe (AC2): one minimal chat call with the retained
+ * RUNTIME key, after the workload terminates and before revoke. The provider's
+ * cap-rejection answer (HTTP 402 + error body, Track A / docs/api_reference/
+ * limits) sets providerCapRejected; any other outcome leaves it false. The
+ * probe's own cost is inside the cap by construction (the key is exhausted).
+ */
+async function openRouterChatProbe(key: string, model: string): Promise<{ status: number; body: string }> {
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model, messages: [{ role: "user", content: "1" }], max_tokens: 1 }),
+    signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+  });
+  return { status: res.status, body: await res.text() };
+}
+
+export async function runCapHitDemo(
+  deps: CapHitDemoDeps,
+  opts: CapHitDemoOptions = {},
+): Promise<CapHitDemoResult> {
+  const nowFn = (() => new Date());
+  const requestId = deps.requestId ?? newRequestId();
+  const substrate = deps.driver.name;
+  const isLive = substrate === "exedev";
+
+  // Resolve opts with defaults
+  const capMicroUsd = opts.capMicroUsd ?? DEFAULT_CAP_MICRO_USD;
+  const wallClockMs = opts.wallClockMs ?? DEFAULT_WALL_CLOCK_MS;
+  const runBudgetCapMicros = opts.runBudgetCapMicros ?? DEFAULT_RUN_BUDGET_CAP;
+  const residentCeilingMicros = opts.residentCeilingMicros ?? DEFAULT_RESIDENT_CEILING;
+  const evidenceDir = deps.evidenceDir ?? opts.evidenceDir ?? process.env.QDS_EVIDENCE_DIR ?? ".sandbox/evidence";
+
+  // ---- 1. VM creation (INV-1: record → VM → key) ----
+  // createRun does store.create internally
+  const runId = newId("df2-4-cap-hit", nowFn());
+  const vm = await createRun(deps.driver, deps.store, { runId });
+  const vmName = vm.vmName ?? runId;
+
+  // Teardown + artifact write for any verdict — or failure — reached BEFORE
+  // the workload ran (AC3: no path skips the teardown call; where teardown
+  // itself aborts, DF2.5 semantics leave the box alive and the record open for
+  // DF2.6's reaper, and the artifact says teardown-aborted). exitStatus is
+  // null: no workload exit ever happened (INV-2 honesty — assert no box exit).
+  const finishEarly = async (reason: string, setupElapsedMs: number): Promise<CapHitDemoResult> => {
+    let teardownOk = true;
+    try {
+      await teardownSandbox(
+        { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+        runId,
+        {},
+      );
+    } catch {
+      teardownOk = false;
+    }
+    const recAfter = deps.store.get(runId);
+    const finalReason = teardownOk ? reason : "teardown-aborted";
+    const artifact: CapHitArtifact = {
+      story: "df2-4",
+      runId,
+      requestId,
+      substrate,
+      capMicroUsd: recAfter.limitMicroUsd ?? capMicroUsd,
+      spendMicroUsd: recAfter.spendMicroUsd ?? 0,
+      turnsCompleted: 0,
+      turnsSource: "in-box",
+      rejectionStatus: null,
+      providerCapRejected: false,
+      terminationProvenance: null,
+      exitStatus: null,
+      killOrigin: null,
+      revocationVerified: teardownOk && recAfter.keyHash !== undefined && recAfter.closedAt !== undefined,
+      closedAt: recAfter.closedAt ?? null,
+      verdict: "inconclusive",
+      reason: finalReason,
+      runBudgetCapMicros,
+      residentCeilingMicros,
+      keyHash: recAfter.keyHash ?? keyHash,
+      timings: { mint_ms: mintMs, setup_ms: setupElapsedMs, workload_ms: 0, reprobe_ms: 0, capture_spend_ms: 0, teardown_ms: 0 },
+      recordedAt: nowFn().toISOString(),
+    };
+    return {
+      runId,
+      verdict: "inconclusive",
+      reason: finalReason,
+      artifactPath: writeArtifactFile(evidenceDir, artifact),
+      artifact,
+    };
+  };
+
+  // ---- 3. Mint key ----
+  let keyHash = "";
+  let key = "";
+  let mintMs = 0;
+  {
+    const started = Date.now();
+    try {
+      const minted = await mintRunKey(
+        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, capMicroUsd, envFile: deps.envFile },
+        runId,
+      );
+      key = minted.key;
+      keyHash = minted.hash;
+      mintMs = Date.now() - started;
+      log({
+        requestId,
+        operation: "demo.mint",
+        agentId: null,
+        timestamp: nowFn().toISOString(),
+        runId,
+        step: "mint",
+        keyHashPrefix: keyHash.slice(0, 8),
+        duration: mintMs,
+        durationMs: mintMs,
+        status: "ok",
+        outcome: "ok",
+        mint_ms: mintMs,
+      });
+    } catch (e) {
+      mintMs = Date.now() - started;
+      const err = e as { code?: string; message?: string; remediation?: string };
+      log({
+        requestId,
+        operation: "demo.mint",
+        agentId: null,
+        timestamp: nowFn().toISOString(),
+        runId,
+        step: "mint",
+        duration: mintMs,
+        durationMs: mintMs,
+        status: "error",
+        error: { code: err.code ?? "mint_error", message: err.message ?? String(e) },
+        remediation: err.remediation ?? null,
+        outcome: "error",
+        mint_ms: mintMs,
+      });
+      // Mint failed: nothing is spendable (no key material exists host-side),
+      // but the box from step 1 is live — teardown destroys it and closes the
+      // record rather than orphaning it to the reaper.
+      return finishEarly("mint-failed", mintMs);
+    }
+  }
+
+  // ---- 4. Deliver key ----
+  {
+    const started = Date.now();
+    try {
+      await deliverRunKey(
+        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, envFile: deps.envFile },
+        vmName,
+        key,
+      );
+    } catch (e) {
+      // The key IS minted and live here — teardown's spend→revoke→verify
+      // bracket is exactly DF2.3's delivery-failure compensation, so route
+      // through it instead of rethrowing past a spendable key.
+      log({
+        requestId,
+        operation: "demo.deliver",
+        agentId: null,
+        timestamp: nowFn().toISOString(),
+        runId,
+        step: "deliver",
+        duration: Date.now() - started,
+        durationMs: Date.now() - started,
+        status: "error",
+        error: { code: "deliver-failed", message: (e as Error).message },
+        outcome: "error",
+      });
+      return finishEarly("deliver-failed", Date.now() - started);
+    }
+  }
+
+  // ---- 5. Substrate-specific setup ----
+  let setupMs = 0;
+  if (isLive) {
+    const started = Date.now();
+    try {
+      const exedevDriver = deps.driver as { fill?: (vm: string, opts: { runId: string; repoUrl: string; commitSha: string }) => Promise<void>; setup?: (vm: string, opts: { runId: string; rosterPath: string; commitSha: string }) => Promise<{ ready: boolean }> };
+      if (!opts.repoUrl || !opts.commitSha || !opts.rosterPath) {
+        // Missing live params — teardown and record an inconclusive artifact
+        return finishEarly("setup-gate-not-ready", Date.now() - started);
+      }
+      await exedevDriver.fill?.(vmName, { runId, repoUrl: opts.repoUrl, commitSha: opts.commitSha });
+      const setupResult = await exedevDriver.setup?.(vmName, { runId, rosterPath: opts.rosterPath, commitSha: opts.commitSha });
+      setupMs = Date.now() - started;
+      log({
+        requestId,
+        operation: "demo.setup",
+        agentId: null,
+        timestamp: nowFn().toISOString(),
+        runId,
+        step: "setup",
+        keyHashPrefix: keyHash.slice(0, 8),
+        duration: setupMs,
+        durationMs: setupMs,
+        status: "ok",
+        outcome: setupResult?.ready ? "ok" : "not-ready",
+        setup_ms: setupMs,
+      });
+      // Defensive: if !ready, teardown and inconclusive
+      if (!setupResult?.ready) {
+        return finishEarly("setup-gate-not-ready", Date.now() - started);
+      }
+    } catch (e) {
+      setupMs = Date.now() - started;
+      log({
+        requestId,
+        operation: "demo.setup",
+        agentId: null,
+        timestamp: nowFn().toISOString(),
+        runId,
+        step: "setup",
+        keyHashPrefix: keyHash.slice(0, 8),
+        duration: setupMs,
+        durationMs: setupMs,
+        status: "error",
+        error: { code: "setup-error", message: (e as Error).message },
+        outcome: "error",
+        setup_ms: setupMs,
+      });
+      // Setup error — teardown and inconclusive
+      return finishEarly("setup-failed", Date.now() - started);
+    }
+  } else {
+    setupMs = 0; // fake: no-op
+  }
+
+  // ---- 6. Workload argv ----
+  let argv: string[];
+  let probeModel = DEFAULT_PROBE_MODEL;
+  if (opts.workloadArgv) {
+    argv = opts.workloadArgv;
+  } else if (isLive) {
+    // Load from fixture YAML. A malformed fixture here would strand a live key
+    // on a live box — route through finishEarly, never rethrow past the mint.
+    try {
+      const fixturePath = opts.fixturePath ?? DEFAULT_FIXTURE_PATH;
+      const fixtureContent = readFileSync(fixturePath, "utf8");
+      const fixture = parse(fixtureContent) as { model: string; provider: string; prompt: string };
+      probeModel = fixture.model;
+      argv = [
+        "pi",
+        "-p",
+        "--mode",
+        "json",
+        "--provider",
+        fixture.provider,
+        "--model",
+        fixture.model,
+        fixture.prompt,
+      ];
+    } catch (e) {
+      return finishEarly("workload-fixture-invalid", setupMs);
+    }
+  } else {
+    argv = ["true"]; // fake substrate default
+  }
+
+  // ---- 7. Workload execution with wall-clock race ----
+  let workloadMs = 0;
+  let terminationProvenance: TerminationProvenance = null;
+  let inBoxExit: InBoxExit = "success";
+  let turnsCompleted = 0;
+
+  {
+    const started = Date.now();
+    try {
+      // The wall-clock ceiling must KILL the workload, not merely stop waiting
+      // (INV-3). On the live substrate the budget goes into the exec itself
+      // (`execTimed` → Bun.spawn timeout + SIGKILL), so the loser dies with the
+      // race; the race timer is a +1s backstop for substrates without a
+      // per-call timeout (fake). Bun reports a SIGKILLed child as exit 137
+      // (128+9), never null — that is the kill signature below.
+      const execWithBudget = (
+        deps.driver as ProviderDriver & {
+          execTimed?: (vm: string, argv: readonly string[], timeoutMs: number, stdin?: string) => Promise<ExecResult>;
+        }
+      ).execTimed;
+      const workloadPromise = execWithBudget
+        ? execWithBudget.call(deps.driver, vmName, argv, wallClockMs)
+        : executeRun(deps.driver, vmName, argv);
+
+      const wallClockMarker = new Promise<"wall-clock">((resolve) => {
+        setTimeout(() => resolve("wall-clock"), wallClockMs + 1_000);
+      });
+
+      // Race between workload and wall-clock
+      const raceResult = await Promise.race<{ type: "workload" | "wall-clock"; result?: ExecResult }>([
+        workloadPromise.then(
+          (res) => ({ type: "workload" as const, result: res }),
+          (err: unknown) => {
+            // Guard: if the wall-clock marker already won the race, the loser's
+            // late rejection must not overwrite the recorded provenance.
+            if (terminationProvenance === null) {
+              terminationProvenance = "host-error";
+              workloadMs = Date.now() - started;
+            }
+            throw err;
+          },
+        ),
+        wallClockMarker.then(() => ({ type: "wall-clock" as const })),
+      ]);
+
+      if (raceResult.type === "wall-clock") {
+        terminationProvenance = "wall-clock";
+        inBoxExit = "success"; // no actual exit; classification keeps provenance
+      } else {
+        workloadMs = Date.now() - started;
+        const res = raceResult.result!;
+        if (res.exitCode === 137) {
+          // SIGKILL from the exec budget = the wall-clock guard fired on the
+          // substrate that supports per-call timeouts.
+          terminationProvenance = "wall-clock";
+          inBoxExit = "transient";
+        } else {
+          inBoxExit = res.exitCode === 0 ? "success" : "transient";
+        }
+        // Count turns (if any) — the artifact's one box-reported figure
+        if (typeof res.stdout === "string") {
+          turnsCompleted = (res.stdout.match(/turn_end/g) ?? []).length;
+        }
+      }
+    } catch (e) {
+      workloadMs = Date.now() - started;
+      // host-error was set by the workload rejection handler above; anything
+      // else that escapes the race is treated as a wall-clock bound.
+      if (terminationProvenance === null) {
+        terminationProvenance = "wall-clock";
+      }
+    }
+    log({
+      requestId,
+      operation: "demo.workload",
+      agentId: null,
+      timestamp: nowFn().toISOString(),
+      runId,
+      step: "workload",
+      keyHashPrefix: keyHash.slice(0, 8),
+      duration: workloadMs,
+      durationMs: workloadMs,
+      status: "ok",
+      outcome: "completed",
+      workload_ms: workloadMs,
+      terminationProvenance,
+      inBoxExit,
+    });
+  }
+
+  // ---- 8. Re-probe (BEFORE revoke, key still live) ----
+  // Both classifier inputs here are HOST-produced (AC2/INV-2): the probe is a
+  // host-side chat call with the retained run key — never the box's output.
+  // Resolution order: explicit deps.probe, then the fake substrate's
+  // chatComplete, then the production OpenRouter probe.
+  let providerCapRejected = false;
+  let rejectionStatus: string | null = null;
+  let reprobeMs = 0;
+  {
+    const started = Date.now();
+    const fakeChat = (deps.keyApi as KeyApi & { chatComplete?: (key: string) => Promise<{ status: number; body: string }> }).chatComplete;
+    const probeFn = deps.probe ?? (fakeChat ? (k: string) => fakeChat.call(deps.keyApi, k) : openRouterChatProbe);
+    try {
+      const probeResult = await probeFn(key, probeModel);
+      reprobeMs = Date.now() - started;
+      providerCapRejected = probeResult.status === 402;
+      // Verbatim provider status + redacted body — the redaction input is the
+      // run key itself (AC5).
+      rejectionStatus = `${probeResult.status}: ${redactWithKey(probeResult.body, key)}`;
+    } catch {
+      reprobeMs = Date.now() - started;
+      // A probe that cannot be issued leaves both fields at false/null, which
+      // the classifier maps to inconclusive (AC2) — fail-closed.
+    }
+    log({
+      requestId,
+      operation: "demo.reprobe",
+      agentId: null,
+      timestamp: nowFn().toISOString(),
+      runId,
+      step: "reprobe",
+      keyHashPrefix: keyHash.slice(0, 8),
+      duration: reprobeMs,
+      durationMs: reprobeMs,
+      status: "ok",
+      outcome: "completed",
+      reprobe_ms: reprobeMs,
+      providerCapRejected,
+    });
+  }
+
+  // ---- 9. Capture spend ----
+  let spendMicroUsd = 0;
+  let captureSpendMs = 0;
+  {
+    const started = Date.now();
+    try {
+      spendMicroUsd = await captureSpend(
+        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId },
+        runId,
+      );
+      captureSpendMs = Date.now() - started;
+    } catch (e) {
+      captureSpendMs = Date.now() - started;
+      // Spend capture failure — leave at 0
+    }
+    log({
+      requestId,
+      operation: "demo.capture_spend",
+      agentId: null,
+      timestamp: nowFn().toISOString(),
+      runId,
+      step: "capture_spend",
+      keyHashPrefix: keyHash.slice(0, 8),
+      duration: captureSpendMs,
+      durationMs: captureSpendMs,
+      status: "ok",
+      outcome: "completed",
+      capture_spend_ms: captureSpendMs,
+      spendMicroUsd,
+    });
+  }
+
+  // ---- 10. Classification ----
+  // The cap the verdict rests on is the provider-ECHOED limit DF2.3 mint wrote
+  // to the record (DF2.1 limitMicroUsd — DOD: "read from DF2.1's
+  // limitMicroUsd"), never the operator's requested --cap: a provider that
+  // clamps or rounds the limit would otherwise be judged against a cap that
+  // was never enforced (INV-2).
+  const effectiveCapMicroUsd = deps.store.get(runId).limitMicroUsd ?? capMicroUsd;
+  const classification = classifyRunExit({
+    inBoxExit,
+    usageMicroUsd: spendMicroUsd,
+    capMicroUsd: effectiveCapMicroUsd,
+    providerCapRejected,
+    terminationProvenance,
+  });
+
+  // ---- 11. Teardown (ALWAYS) ----
+  let teardownMs = 0;
+  let teardownOk = true;
+  {
+    const started = Date.now();
+    try {
+      await teardownSandbox(
+        { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+        runId,
+        {},
+      );
+      teardownMs = Date.now() - started;
+    } catch (e) {
+      teardownMs = Date.now() - started;
+      teardownOk = false;
+    }
+    log({
+      requestId,
+      operation: "demo.teardown",
+      agentId: null,
+      timestamp: nowFn().toISOString(),
+      runId,
+      step: "teardown",
+      keyHashPrefix: keyHash.slice(0, 8),
+      duration: teardownMs,
+      durationMs: teardownMs,
+      status: teardownOk ? "ok" : "error",
+      outcome: teardownOk ? "ok" : "error",
+      teardown_ms: teardownMs,
+    });
+  }
+
+  // ---- 12. Read final record for revocation verification ----
+  const rec = deps.store.get(runId);
+  const revocationVerified = teardownOk && rec.keyHash !== undefined && rec.closedAt !== undefined;
+  const closedAt = rec.closedAt ?? null;
+
+  // ---- 13. Verdict ----
+  let verdict: "demonstrated" | "inconclusive";
+  let reason: string | null = null;
+
+  if (teardownOk && classification.exitStatus === "overflow" && classification.killOrigin === "provider-cap" && turnsCompleted >= 1) {
+    verdict = "demonstrated";
+    reason = null;
+  } else {
+    verdict = "inconclusive";
+    // Reason priority: teardown-aborted > host-error > wall-clock-first > cap-below-first-turn > no-rejection
+    if (!teardownOk) {
+      reason = "teardown-aborted";
+    } else if ((terminationProvenance as TerminationProvenance) === "host-error") {
+      reason = "host-error";
+    } else if ((terminationProvenance as TerminationProvenance) === "wall-clock") {
+      reason = "wall-clock-first";
+    } else if (turnsCompleted === 0 && classification.exitStatus === "overflow") {
+      reason = "cap-below-first-turn";
+    } else if (classification.exitStatus !== "overflow") {
+      // Classification was NOT overflow (even if providerCapRejected true, spend < cap)
+      reason = "no-rejection";
+    } else if (!providerCapRejected) {
+      reason = "no-rejection";
+    } else {
+      reason = "no-live-account"; // fallback
+    }
+  }
+
+  // ---- 14. Build artifact ----
+  const artifact: CapHitArtifact = {
+    story: "df2-4",
+    runId,
+    requestId,
+    substrate,
+    capMicroUsd: effectiveCapMicroUsd,
+    spendMicroUsd,
+    turnsCompleted,
+    turnsSource: "in-box",
+    rejectionStatus,
+    providerCapRejected,
+    terminationProvenance,
+    exitStatus: classification.exitStatus,
+    killOrigin: classification.killOrigin,
+    revocationVerified,
+    closedAt,
+    verdict,
+    reason,
+    runBudgetCapMicros,
+    residentCeilingMicros,
+    keyHash: rec.keyHash ?? keyHash,
+    timings: {
+      mint_ms: mintMs,
+      setup_ms: setupMs,
+      workload_ms: workloadMs,
+      reprobe_ms: reprobeMs,
+      capture_spend_ms: captureSpendMs,
+      teardown_ms: teardownMs,
+    },
+    recordedAt: nowFn().toISOString(),
+  };
+
+  // ---- 15. Write artifact (atomic tmp + rename; dir 0700, file 0600) ----
+  return {
+    runId,
+    verdict,
+    reason,
+    artifactPath: writeArtifactFile(evidenceDir, artifact),
+    artifact,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// CLI main()
+// ---------------------------------------------------------------------------
+
+const HELP = [
+  "Usage: cap-hit-demo [options]",
+  "",
+  "  --cap <µ$>              Key cap in microdollars (default 50000 = $0.05)",
+  "  --roster <path>         Roster path for live substrate setup",
+  "  --driver <name>         Provider driver (default $QDS_PROVIDER_DRIVER or exedev)",
+  "  --dir <path>            Records directory (default $QDS_RUNS_DIR)",
+  "  --repo-url <url>        Repo URL for live substrate fill/setup",
+  "  --sha <commit>          Commit SHA for live substrate fill/setup",
+  "  --wall-clock-ms <ms>    Wall-clock ceiling in ms (default 900000)",
+  "  --budget-cap <µ$>       Run budget cap (artifact field only, default 40000)",
+  "  --ceiling <µ$>          Resident ceiling (artifact field only, default 30000)",
+  "  --help                  Show this help",
+  "",
+  "Env: QDS_EVIDENCE_DIR (artifact dir), QDS_RUNS_DIR (records),",
+  "     QDS_PROVIDER_DRIVER (default driver), OPENROUTER_PROVISIONING_KEY",
+  "     (live mint), QDS_FAKE_KEY_API=1 (TEST-ONLY: use the in-repo FakeKeyApi",
+  "     substrate instead of the real provider; requires tests/ to exist).",
+];
+
+const VALUE_FLAGS = [
+  "--cap",
+  "--roster",
+  "--driver",
+  "--dir",
+  "--repo-url",
+  "--sha",
+  "--wall-clock-ms",
+  "--budget-cap",
+  "--ceiling",
+] as const;
+
+interface ParsedArgs {
+  capMicroUsd?: string;
+  rosterPath?: string;
+  driver?: string;
+  dir?: string;
+  repoUrl?: string;
+  commitSha?: string;
+  wallClockMs?: string;
+  runBudgetCapMicros?: string;
+  residentCeilingMicros?: string;
+}
+
+async function parseArgs(argv: readonly string[]): Promise<ParsedArgs> {
+  const out: ParsedArgs = {};
+  const { tokenizeArgs, parseValueFlags } = await import("./lib/cli-args.ts");
+  const { flagTokens } = tokenizeArgs(argv, { valueFlags: VALUE_FLAGS });
+  parseValueFlags(flagTokens, {
+    flags: VALUE_FLAGS,
+    onValue: (flag, value) => {
+      if (flag === "--cap") out.capMicroUsd = value;
+      else if (flag === "--roster") out.rosterPath = value;
+      else if (flag === "--driver") out.driver = value;
+      else if (flag === "--dir") out.dir = value;
+      else if (flag === "--repo-url") out.repoUrl = value;
+      else if (flag === "--sha") out.commitSha = value;
+      else if (flag === "--wall-clock-ms") out.wallClockMs = value;
+      else if (flag === "--budget-cap") out.runBudgetCapMicros = value;
+      else if (flag === "--ceiling") out.residentCeilingMicros = value;
+    },
+    help: HELP,
+  });
+  return out;
+}
+
+async function main(argv: readonly string[]): Promise<number> {
+  const args = await parseArgs(argv);
+  const requestId = newRequestId();
+
+  const driverName = args.driver ?? process.env.QDS_PROVIDER_DRIVER ?? "exedev";
+  const driver = resolveDriver(driverName, { requestId });
+
+  const store = new RunRecordStore({
+    ...(args.dir === undefined ? {} : { dir: args.dir }),
+    requestId,
+  });
+
+  // Resolve keyApi
+  let keyApi: KeyApi;
+  if (process.env.QDS_FAKE_KEY_API === "1") {
+    // TEST-ONLY seam (default off; see HELP): swap the provider client for the
+    // in-repo FakeKeyApi substrate so the script can be exercised end-to-end
+    // without a live OpenRouter account. Requires tests/ to be present — a
+    // deployment without tests/ must not set this flag.
+    const { FakeKeyApi } = await import("../tests/providers/fixtures/fake-key-api.ts");
+    keyApi = new FakeKeyApi() as KeyApi;
+  } else {
+    keyApi = openRouterKeyApi();
+  }
+
+  const evidenceDir = process.env.QDS_EVIDENCE_DIR ?? ".sandbox/evidence";
+  // Fake driver uses box-relative paths; live substrate uses absolute contract
+  const envFile = driverName === "fake" ? "app/.env" : undefined;
+
+  // Numeric flags fail closed: a NaN wall-clock would fire ~immediately and a
+  // NaN budget/ceiling would render as null in the artifact.
+  const positiveInt = (raw: string | undefined, flag: string): number | undefined => {
+    if (raw === undefined) return undefined;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= 0) {
+      const err = new Error(`--${flag} must be a positive integer, got '${raw}'`) as Error & { code: string; remediation: string };
+      err.code = "invalid-value";
+      err.remediation = `re-run with a positive integer for --${flag}`;
+      throw err;
+    }
+    return n;
+  };
+
+  const result = await runCapHitDemo(
+    { driver, keyApi, store, requestId, evidenceDir, envFile },
+    {
+      capMicroUsd: positiveInt(args.capMicroUsd, "cap"),
+      wallClockMs: positiveInt(args.wallClockMs, "wall-clock-ms"),
+      runBudgetCapMicros: positiveInt(args.runBudgetCapMicros, "budget-cap"),
+      residentCeilingMicros: positiveInt(args.residentCeilingMicros, "ceiling"),
+      repoUrl: args.repoUrl,
+      commitSha: args.commitSha,
+      rosterPath: args.rosterPath,
+    },
+  );
+
+  // Single-line JSON: stdout's last line is machine-parsed (tests/CI); humans
+  // read the stderr step log.
+  const output = { runId: result.runId, verdict: result.verdict, reason: result.reason, artifactPath: result.artifactPath, artifact: result.artifact };
+  writeSync(1, `${JSON.stringify(output)}\n`);
+
+  return 0;
+}
+
+if (import.meta.main) {
+  try {
+    process.exit(await main(process.argv.slice(2)));
+  } catch (e) {
+    const err = e as { code?: string; message?: string; remediation?: string };
+    writeSync(2, `!! ${err.code ?? "error"}: ${err.message ?? String(e)}\n`);
+    if (err.remediation !== undefined) writeSync(2, `next: ${err.remediation}\n`);
+    process.exit(1);
+  }
+}

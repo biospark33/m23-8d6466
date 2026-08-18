@@ -44,6 +44,8 @@ export interface FakeKeyApiOptions {
   mintTransportErrorAfterCreate?: boolean;
   /** listAllKeys returns truncated=true (pagination budget exhausted). */
   listTruncated?: boolean;
+  /** Override the status every chatComplete returns, without touching state. */
+  chatStatus?: number;
 }
 
 export interface RecordedRequest {
@@ -156,5 +158,54 @@ export class FakeKeyApi {
   /** Test helper: read current usage for a hash. */
   usageOf(hash: string): number {
     return this.keys.find((k) => k.hash === hash)?.usageUsd ?? 0;
+  }
+
+  /**
+   * Simulated POST /chat/completions with a RUNTIME key (the demo's host-side
+   * re-probe substrate). OpenRouter answers 402 {"error":{"code":402,...}} when
+   * the key's spend has reached its limit; 200 otherwise. Uncapped keys (null
+   * limit) never reject. The key material itself never appears in the body.
+   */
+  async chatComplete(key: string): Promise<{ status: number; body: string }> {
+    this.requests.push({ method: "POST", path: "/chat/completions" });
+
+    // Forced override mode
+    if (this.opts.chatStatus !== undefined) {
+      return {
+        status: this.opts.chatStatus,
+        body: `{"error":{"code":${this.opts.chatStatus},"message":"forced"}}`,
+      };
+    }
+
+    // Reverse-lookup the key to find its hash
+    let foundEntry: FakeKey | null = null;
+    for (const [hash, plaintext] of this.plaintexts.entries()) {
+      if (plaintext === key) {
+        foundEntry = this.keys.find((k) => k.hash === hash) ?? null;
+        break;
+      }
+    }
+
+    // Unknown key → 401
+    if (!foundEntry) {
+      return {
+        status: 401,
+        body: '{"error":{"code":401,"message":"invalid key"}}',
+      };
+    }
+
+    // Key found: check limit
+    if (foundEntry.limitUsd !== null && foundEntry.usageUsd >= foundEntry.limitUsd) {
+      return {
+        status: 402,
+        body: '{"error":{"code":402,"message":"Insufficient credits. Add more using https://openrouter.ai/credits"}}',
+      };
+    }
+
+    // Uncapped or under-limit → 200
+    return {
+      status: 200,
+      body: '{"choices":[]}',
+    };
   }
 }

@@ -1,3 +1,7 @@
+---
+baseline_commit: 3830a2f0e5f9ebab0e8593c27f8684100c967685
+---
+
 # DF2.4: Live Cap-Hit Kill Demonstration — Real Key, Real Spend, Recorded Evidence
 
 **Story Points:** 3
@@ -218,32 +222,32 @@ not be sequenced before it.
 
 ## Definition of Done
 
-- [ ] **Impl:** `scripts/cap-hit-demo.ts` composes mint → fill → setup → loopy workload → host-side
+- [x] **Impl:** `scripts/cap-hit-demo.ts` composes mint → fill → setup → loopy workload → host-side
       spend read → classify → teardown, with `--cap` and `--roster` as inputs.
-- [ ] **Impl:** `classifyRunExit({ inBoxExit, usageMicroUsd, capMicroUsd, providerCapRejected,
+- [x] **Impl:** `classifyRunExit({ inBoxExit, usageMicroUsd, capMicroUsd, providerCapRejected,
       terminationProvenance })` overrides any in-box classification to `overflow` (`killOrigin:
       "provider-cap"`) iff `usageMicroUsd ≥ capMicroUsd` and `providerCapRejected` and the
       `terminationProvenance` is neither `wall-clock` nor `host-error`; `capMicroUsd` is read from
       DF2.1's `limitMicroUsd`.
-- [ ] **Contract:** the evidence artifact schema is fixed and asserted — `capMicroUsd`,
+- [x] **Contract:** the evidence artifact schema is fixed and asserted — `capMicroUsd`,
       `spendMicroUsd`, `turnsCompleted`, provider rejection status, `exitStatus`, `killOrigin`,
       `revocationVerified`, `closedAt`, `verdict`; DF2.1's record gains no field (INV-2, key-set diff).
-- [ ] **Integration:** teardown is DF2.5's, unchanged; spend capture and revoke-verify are DF2.3's,
+- [x] **Integration:** teardown is DF2.5's, unchanged; spend capture and revoke-verify are DF2.3's,
       unchanged — the demo adds no second credential path.
-- [ ] **Security:** rejection bodies are redacted against the run key before storage and the artifact
+- [x] **Security:** rejection bodies are redacted against the run key before storage and the artifact
       is scanned for any ≥8-char substring of the key → zero hits (AC5, INV-4).
-- [ ] **Test (unit):** `classifyRunExit` maps `usageMicroUsd ≥ capMicroUsd` **plus `providerCapRejected`
+- [x] **Test (unit):** `classifyRunExit` maps `usageMicroUsd ≥ capMicroUsd` **plus `providerCapRejected`
       and a non-`wall-clock`/`host-error` `terminationProvenance`** to `overflow` for `inBoxExit`
       values of `transient`, `logic`, and `lead_failure` alike; `usageMicroUsd ≥ capMicroUsd` without
       `providerCapRejected`, or with a `wall-clock`/`host-error` provenance, yields `inconclusive`.
-- [ ] **Test (self-report trap):** box reports `transient`, provider usage exceeds cap → `overflow`;
+- [x] **Test (self-report trap):** box reports `transient`, provider usage exceeds cap → `overflow`;
       an implementation trusting the box's self-report MUST fail this test (AC2).
-- [ ] **Test (host-produced classifier inputs):** `providerCapRejected` is set only by the host's
+- [x] **Test (host-produced classifier inputs):** `providerCapRejected` is set only by the host's
       post-termination re-probe of the provider with the retained key, and `terminationProvenance`
       only by the host-side guard that fired; a fixture whose in-box output claims a cap rejection
       the re-probe does not reproduce yields `inconclusive`, and an implementation reading either
       field from the box MUST fail this test (AC2, INV-2)
-- [ ] **Test (inconclusive paths):** wall-clock-first and `turnsCompleted: 0` each produce
+- [x] **Test (inconclusive paths):** wall-clock-first and `turnsCompleted: 0` each produce
       `verdict: "inconclusive"` with the named reason, and teardown is still invoked (AC3, AC4).
 - [ ] **Test (e2e demo — MANDATORY):** one live run against a real exe.dev box and a real capped
       OpenRouter key produces `.sandbox/evidence/df2-4-cap-hit-<run-id>.json` with
@@ -253,4 +257,72 @@ not be sequenced before it.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Implementation Plan (as built)
+
+- `src/providers/cap-rejection.ts` — the story's ONE new mechanism: `classifyRunExit` (pure,
+  AC2 truth table) + `redactWithKey` (AC5; ≥8-char boundary rule from `cli-anything/src/redact.ts:23-27`,
+  reimplemented because `src/providers/` imports no tier-3 workspace code). `InBoxExit` mirrors the
+  CC-1 enum (`cli-anything/src/types.ts:99-108`); a mirror-sync test guards drift.
+- `scripts/cap-hit-demo.ts` — composition only: `createRun` → `mintRunKey(--cap)` → `deliverRunKey`
+  → (exedev only) `fill` + five-assertion `setup` gate → loopy workload via `executeRun` bounded by
+  the wall-clock ceiling (budget passed into `execTimed` → Bun SIGKILL/exit-137; +1 s race backstop)
+  → host re-probe (`deps.probe` ?? fake `chatComplete` ?? production `openRouterChatProbe` — one
+  minimal `POST /chat/completions` with the retained runtime key, BEFORE revoke) → `captureSpend`
+  → `classifyRunExit` (cap = the provider-echoed `limitMicroUsd` DF2.3 wrote to the record, never
+  the operator's request) → `teardownSandbox` on EVERY path (early failures route through a
+  `finishEarly` helper that still tears down and writes an artifact) → atomic artifact write
+  (0700 dir / 0600 file / tmp+rename) to `.sandbox/evidence/df2-4-cap-hit-<runId>.json`.
+- Fake substrate (`--driver fake` + `QDS_FAKE_KEY_API=1` test seam) drives the full verdict matrix
+  in tests; live path gated by `test.todoIf(!QDS_EXEDEV_LIVE)` with half-set-env refusal.
+
+### Debug Log
+
+- Wave-built via parallel subagents (tests first, RED confirmed, then impl). Two impl agents hit
+  context-window limits mid-flight; draft finished + hardened in main thread.
+- Self-review (adversarial, pre-push) found 10 issues, all fixed: BLOCKER — production KeyApi had
+  no chat probe (live `demonstrated` structurally unreachable; added `openRouterChatProbe` + probe
+  resolution); HIGH — classifier/artifact used requested cap instead of record's provider-echoed
+  `limitMicroUsd`; HIGH — mint/deliver/fixture throw paths skipped teardown+artifact (now
+  `finishEarly`); MED — race-loser could overwrite wall-clock provenance with host-error (guarded);
+  MED — DOD's box-claims-rejection tripwire test missing (added); plus LOW fixes (137-SIGKILL
+  comment, `status: body` rejection format, NaN flag validation, test-seam docs, null exitStatus
+  on pre-workload artifacts).
+
+### Completion Notes
+
+- 42 story tests green (41 + 1 live-gated todo); full `tests/providers/` suite green (309 tests,
+  0 fail); `bun run typecheck` exit 0; `bun run lint` exit 0; both pre-PR advisory gates clean
+  (`check-defensive-programming.sh`, `check-pr-conflicts.sh`); no open PRs overlap.
+- Repo-wide `bun test` shows 3 pre-existing failures unrelated to this story (verified by
+  re-running them on a stashed clean baseline: 2× roster e2e network-dependent, 1× bench env
+  test; plus one flaky timing test) — not introduced here.
+- Cap-overshoot bound (Technical Notes): `AC1` asserts `≥ cap`; the artifact records
+  `spendMicroUsd` so the real overshoot is measured, not assumed.
+- `turnsCompleted` is parsed from workload stdout `turn_end` events — the artifact's one in-box
+  figure, `turnsSource: "in-box"`, downgrade-only (AC4 enforced at the verdict gate).
+- Unit note: provider API speaks USD dollars; µ$ conversion stays inside DF2.3's HTTP boundary
+  (DD-9) — the demo never converts. `captureSpend` reads the provisioning LIST entry (the
+  DF2.3 verb, mandated unchanged by the DOD's Integration clause), which is host-side provider
+  data and satisfies AC1's "read host-side from the provider".
+- LIVE RUN PENDING: the mandatory e2e demo item is unchecked until a live run is executed with a
+  real exe.dev box + real capped OpenRouter key (needs `OPENROUTER_PROVISIONING_KEY`,
+  `QDS_EXEDEV_LIVE`, `QDS_EXEDEV_REPO_URL`/`SHA`/`ROSTER`). Story deviation clause applies until
+  then: verdict would be `inconclusive`/`no-live-account`, never claimed on the fake driver.
+
+### File List
+
+- `src/providers/cap-rejection.ts` (new)
+- `src/providers/index.ts` (barrel export, +2 lines)
+- `scripts/cap-hit-demo.ts` (new)
+- `tests/providers/cap-rejection.test.ts` (new)
+- `tests/providers/cap-hit-demo.test.ts` (new)
+- `tests/providers/fixtures/loopy-workload.yaml` (new)
+- `tests/providers/fixtures/loopy-workload.test.ts` (new)
+- `tests/providers/fixtures/fake-key-api.ts` (additive `chatComplete` substrate knob)
+- `_bmad-output/sprint-artifacts/dark-factory-v5/evidence/df2-4-cap-hit.md` (pending live run)
+
+### Change Log
+
+- 2026-08-18: story implemented (composition of DF2.1/2.2/2.3/2.5 verbs + `classifyRunExit`
+  mechanism); TDD red→green; adversarial self-review round applied (10 findings fixed);
+  status → in-progress → review-pending-live-run.

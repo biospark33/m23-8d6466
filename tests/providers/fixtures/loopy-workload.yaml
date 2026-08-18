@@ -1,0 +1,12 @@
+# DF2.4 loopy workload fixture — non-terminating by construction.
+# Shape inherited from P0.4's never-run loopy manifest (story DF2.4 Infra
+# Prerequisites): the demo ships the fixture and asserts it non-terminating in
+# unit test BEFORE any live run. The prompt must contain an explicit
+# never-stop instruction and no termination condition.
+model: deepseek/deepseek-v4-flash-0731
+provider: openrouter
+prompt: |-
+  Count aloud from 1 upward, one number per line, forever. Never stop. Never
+  summarize. Never ask a question. Do not exit. Your only task is to keep
+  counting until you are stopped from outside.
+wall_clock_cap_ms: 900000

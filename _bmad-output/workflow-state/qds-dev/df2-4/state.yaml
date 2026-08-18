@@ -1,0 +1,27 @@
+story: df2-4-live-cap-hit-kill
+title: "DF2.4: Live Cap-Hit Kill Demonstration — Real Key, Real Spend, Recorded Evidence"
+phase: dev-story
+branch: feature/df2-4-live-cap-hit-kill
+base: main
+target: main
+created: 2026-08-18T18:45:00-04:00
+predecessors:
+  df2-1: merged (#107/#108)
+  df2-2: merged (#114)
+  df2-3: merged (#111)
+  df2-5: merged (#115)
+git:
+  stashed: "pre-df2-4 unrelated skill-file + df1-4 evidence changes (on main)"
+guardrails:
+  - branch-integrity: ok
+  - scope: pending
+  - tdd: pending
+research:
+  confidence: 0.97
+  completed: 2026-08-18T18:50:00-04:00
+  gate: auto-approved (>=0.8)
+  design_brief: _bmad-output/workflow-state/qds-dev/df2-4/design.md
+notes: >
+  Live-run story: real OpenRouter key at --cap 50000 u$, real exe.dev box. Devdan reference repos
+  must be surveyed (inkwell + super-simple under ~/reference-repos/) for liftable code — user
+  directive: lift/copy, minimize new code. classifyRunExit is the ONLY new mechanism.
