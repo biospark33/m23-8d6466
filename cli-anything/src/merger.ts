@@ -207,7 +207,11 @@ function truncateWithSuffix(
   if (text.length <= maxLength) return text;
   const suffix = `[truncated, ${text.length} ${suffixLabel} total]`;
   const proseBudget = maxLength - suffix.length;
-  if (proseBudget < 0) return suffix.substring(0, maxLength);
+  if (proseBudget < 0) {
+    // When maxLength is smaller than the suffix, return a fixed marker trimmed to fit.
+    const marker = "[…]";
+    return marker.slice(0, maxLength);
+  }
   return text.slice(0, proseBudget) + suffix;
 }
 

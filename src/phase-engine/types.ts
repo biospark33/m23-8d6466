@@ -209,7 +209,10 @@ export interface PhaseSubTimings {
   manifest_load_ms: number;
   phase_body_ms: number;
   journal_write_ms: number;
-  /** DF1.6 v5 names — optional for backward compatibility */
+  /** DF1.6 v5 names — optional for backward compatibility.
+   *  undefined = stage not measured (omitted from record)
+   *  0 = stage measured and took zero time
+   */
   mulch_prime_ms?: number;
   box_setup_ms?: number;
   team_execution_ms?: number;

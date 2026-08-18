@@ -27,12 +27,14 @@ describe("team-event-adapter: fixture parsing", () => {
   const fixtureLines = readFileSync(fixturePath, "utf-8").trim().split("\n");
 
   it("parses all 12 fixture lines without null returns", () => {
+    // 12 = F6-proven event-count invariant: 6 coms, 3 cost, 2 worker_output, 1 merged.
     const results = fixtureLines.map((line) => parseTeamEventLine(line));
     expect(results).toHaveLength(12);
     expect(results.every((r) => r !== null)).toBe(true);
   });
 
   it("adapts all parsed events without throwing", () => {
+    // 12 = F6-proven event-count invariant: 6 coms, 3 cost, 2 worker_output, 1 merged.
     const ctx = {
       requestId: "req-1",
       phaseId: "phase-1",
@@ -44,7 +46,8 @@ describe("team-event-adapter: fixture parsing", () => {
       return adaptTeamEvent(parsed, ctx);
     });
     expect(results).toHaveLength(12);
-    // No throws means successful adaptation
+    // No throws means successful adaptation — this test exercises the real
+    // adapter path (parseTeamEventLine + adaptTeamEvent), not just counters.
   });
 
   it("produces 6 coms trace events", () => {
@@ -392,7 +395,7 @@ describe("team-event-adapter: adaptTeamEvent individual types", () => {
     if (adapted.type !== "envelope") throw new Error(`expected envelope, got ${adapted.type}`);
     expect(adapted.kind).toBe("generic");
     expect(adapted.label).toBe("worker-1");
-    expect(adapted.status).toBe("success"); // from output status
+    expect(adapted.status).toBe("transient"); // output has no top-level status → defaults to transient (fail-safe)
   });
 
   it("honors every valid ExitStatus a worker declares — none rewritten to success", () => {
@@ -407,19 +410,19 @@ describe("team-event-adapter: adaptTeamEvent individual types", () => {
       if (adapted.type !== "envelope") throw new Error(`expected envelope, got ${adapted.type}`);
       expect(adapted.status).toBe(status);
     }
-    // Unknown/absent status still defaults to success.
+    // Unknown/absent status defaults to transient (fail-safe).
     const okLine = `{"type":"worker_output","agentId":"worker-1","output":{"summary":"done"}}`;
     const okParsed = parseTeamEventLine(okLine);
     if (!okParsed || okParsed.kind !== "worker_output") throw new Error("Parse failed");
     const okAdapted = adaptTeamEvent(okParsed, ctx);
     if (okAdapted.type !== "envelope") throw new Error("expected envelope");
-    expect(okAdapted.status).toBe("success");
+    expect(okAdapted.status).toBe("transient");
     const bogusLine = `{"type":"worker_output","agentId":"worker-1","output":{"status":"bogus"}}`;
     const bogusParsed = parseTeamEventLine(bogusLine);
     if (!bogusParsed || bogusParsed.kind !== "worker_output") throw new Error("Parse failed");
     const bogusAdapted = adaptTeamEvent(bogusParsed, ctx);
     if (bogusAdapted.type !== "envelope") throw new Error("expected envelope");
-    expect(bogusAdapted.status).toBe("success");
+    expect(bogusAdapted.status).toBe("transient");
   });
 
   it("adapts merged to terminal marker", () => {

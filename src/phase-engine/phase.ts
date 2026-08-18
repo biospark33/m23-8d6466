@@ -334,8 +334,21 @@ export class Run {
       subTimings: {
         // Body-supplied dispatch timings first — the engine-owned trio below
         // is authoritative and cannot be clobbered by a body value that
-        // (buggily) repeats one of these keys.
-        ...(metrics.dispatchSubTimings ?? {}),
+        // (buggily) repeats one of these keys. Whitelist only the four documented
+        // PhaseSubTimings keys (mulch_prime_ms, box_setup_ms, team_execution_ms,
+        // gate_validation_ms); unknown keys are dropped rather than spread.
+        ...(metrics.dispatchSubTimings?.mulch_prime_ms !== undefined
+          ? { mulch_prime_ms: metrics.dispatchSubTimings.mulch_prime_ms }
+          : {}),
+        ...(metrics.dispatchSubTimings?.box_setup_ms !== undefined
+          ? { box_setup_ms: metrics.dispatchSubTimings.box_setup_ms }
+          : {}),
+        ...(metrics.dispatchSubTimings?.team_execution_ms !== undefined
+          ? { team_execution_ms: metrics.dispatchSubTimings.team_execution_ms }
+          : {}),
+        ...(metrics.dispatchSubTimings?.gate_validation_ms !== undefined
+          ? { gate_validation_ms: metrics.dispatchSubTimings.gate_validation_ms }
+          : {}),
         // `this.index` was incremented above, so `1` identifies the first phase —
         // the only one whose wall-clock includes the manifest load.
         manifest_load_ms: Math.round(this.index === 1 ? this.manifestLoadMs : 0),

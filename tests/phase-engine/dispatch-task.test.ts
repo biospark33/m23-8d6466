@@ -78,11 +78,11 @@ beforeEach(() => {
   // not remap relative argv paths, so a relative root breaks sh <script>.
   tmpRoot = mkdtempSync(join(tmpdir(), "qds-dispatch-test-"));
   process.env.QDS_RUN_ROOT = tmpRoot;
-  // biome-ignore lint/performance/noDelete: unset is the semantic — assignment would leave "undefined" in the env.
+  // biome-ignore lint/performance/noDelete: unset is the semantic — delete removes the key, assignment sets it to "undefined" string.
   delete process.env.QDS_TEAM_RUNNER;
-  // biome-ignore lint/performance/noDelete: unset is the semantic — assignment would leave "undefined" in the env.
+  // biome-ignore lint/performance/noDelete: unset is the semantic — delete removes the key, assignment sets it to "undefined" string.
   delete process.env.ANTHROPIC_API_KEY;
-  // biome-ignore lint/performance/noDelete: unset is the semantic — assignment would leave "undefined" in the env.
+  // biome-ignore lint/performance/noDelete: unset is the semantic — delete removes the key, assignment sets it to "undefined" string.
   delete process.env.OPENROUTER_API_KEY;
   traceLog = [];
   fakeTracer = { trace: (event) => void traceLog.push(event) };
@@ -92,18 +92,19 @@ afterEach(() => {
   // CRITICAL: a leaked injected runner makes later tests spawn the REAL
   // team-lead-driver. Always restore.
   _injectRunner(runTeamManifest);
-  // biome-ignore lint/performance/noDelete: unset is the semantic — assignment would leave "undefined" in the env.
+  // biome-ignore lint/performance/noDelete: unset is the semantic — delete removes the key, assignment sets it to "undefined" string.
   delete process.env.QDS_RUN_ROOT;
-  // biome-ignore lint/performance/noDelete: unset is the semantic — assignment would leave "undefined" in the env.
+  // biome-ignore lint/performance/noDelete: unset is the semantic — delete removes the key, assignment sets it to "undefined" string.
   delete process.env.QDS_TEAM_RUNNER;
-  // biome-ignore lint/performance/noDelete: unset is the semantic — assignment would leave "undefined" in the env.
+  // biome-ignore lint/performance/noDelete: unset is the semantic — delete removes the key, assignment sets it to "undefined" string.
   delete process.env.ANTHROPIC_API_KEY;
-  // biome-ignore lint/performance/noDelete: unset is the semantic — assignment would leave "undefined" in the env.
+  // biome-ignore lint/performance/noDelete: unset is the semantic — delete removes the key, assignment sets it to "undefined" string.
   delete process.env.OPENROUTER_API_KEY;
   try {
     rmSync(tmpRoot, { recursive: true, force: true });
-  } catch {
-    // best-effort
+  } catch (e) {
+    // best-effort cleanup — warn so orphaned temp dirs are visible
+    console.warn(`dispatch-task.test cleanup failed: ${tmpRoot}`, e instanceof Error ? e.message : String(e));
   }
 });
 
@@ -240,12 +241,13 @@ describe("dispatch-task: manifest schema refusal", () => {
     } finally {
       try {
         unlinkSync(rosterPath);
-      } catch {
-        // best-effort cleanup
+      } catch (e) {
+        // best-effort cleanup — warn so orphaned temp files are visible
+        console.warn(`dispatch-task.test cleanup failed: ${rosterPath}`, e instanceof Error ? e.message : String(e));
       }
     }
     expect(result.exitStatus).toBe("logic");
-    expect(result.error?.message).toMatch(/worker/i);
+    expect(result.error?.message).toMatch(/at most 3.*element/i);
     // Pin the refusal to the manifest-schema path: the /worker/i match alone
     // once passed VACUOUSLY when the roster sat in tmpRoot — the confinement
     // error echoes the roster path, and the filename contained "worker".
@@ -307,8 +309,9 @@ describe("dispatch-task: roster gates refuse pre-spawn", () => {
     } finally {
       try {
         unlinkSync(oneRole);
-      } catch {
-        // best-effort
+      } catch (e) {
+        // best-effort cleanup — warn so orphaned temp files are visible
+        console.warn(`dispatch-task.test cleanup failed: ${oneRole}`, e instanceof Error ? e.message : String(e));
       }
     }
   });
@@ -618,11 +621,19 @@ describe("dispatch-task: INV-2 path validation", () => {
       const names = valid.map((a: { name: string }) => a.name).sort();
       expect(names).toEqual(["legit", "real"]); // evil dropped by the WALK
       expect(names).not.toContain("evil");
+      // Assert CONTENT of each validated artifact, not just names — a regression
+      // that reads a different file or empty content will fail.
+      for (const a of valid) {
+        const content = readFileSync(join(tmpRoot, a.path), "utf-8");
+        if (a.name === "real") expect(content).toBe("legit"); // real.txt contains "legit"
+        if (a.name === "legit") expect(content).toBe("artifact"); // artifact.txt contains "artifact"
+      }
     } finally {
       try {
         rmSync(outside, { recursive: true, force: true });
-      } catch {
-        // best-effort
+      } catch (e) {
+        // best-effort cleanup — warn so orphaned temp dirs are visible
+        console.warn(`dispatch-task.test cleanup failed: ${outside}`, e instanceof Error ? e.message : String(e));
       }
     }
   });
@@ -649,6 +660,37 @@ describe("dispatch-task: INV-4 redaction at adapter boundary", () => {
     expect(result.partialOutput ?? "").not.toContain(secretKey);
     const artifactNames = (result.artifacts ?? []).map((a) => a.name).join(" ");
     expect(artifactNames).not.toContain(secretKey);
+  });
+
+  it("changedFiles path embedding secret is redacted (validateChangedFiles + redactSecrets)", async () => {
+    // validateChangedFiles rejects malformed paths but passes through
+    // plausible paths; redactSecrets then scans the output and redacts
+    // any secret-looking substrings. A path like "src/secret-sk-ant.ts"
+    // survives validation but gets redacted.
+    const secretKey = "sk-ant-secret-val-redaction-test-key";
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = secretKey;
+    injectFake((opts) => {
+      feedLine(opts, '{"type":"merged","result":{"summary":"ok"}}');
+      opts.onRunFacts?.({
+        exitCode: 0,
+        termSignal: null,
+        killOrigin: null,
+        comsInitError: null,
+      });
+      return successResult({
+        result: { summary: "ok" },
+        // Path embeds secret — validateChangedFiles passes it (safe chars),
+        // redactSecrets must redact the secret substring.
+        changedFiles: [`src/auth/${secretKey}.ts`, "src/normal.ts"],
+      });
+    });
+    const result = await runDispatch();
+    const joined = result.changedFiles.join(" ");
+    expect(joined).not.toContain(secretKey);
+    expect(joined).toContain("REDACTED:");
+    // Normal file unchanged
+    expect(result.changedFiles).toContain("src/normal.ts");
   });
 
   it("prompt payload is redacted before persisting", async () => {

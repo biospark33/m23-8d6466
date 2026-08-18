@@ -317,10 +317,34 @@ Issue correlation is DF1.8's.
 
 ## Dev Agent Record
 
-**Status: complete — implemented, tested, live e2e green (2026-08-17). Implementation complete; acceptance review pending (PR #116) — DoD boxes below are checked by the acceptance pass, not by the dev record.**
+**Status: complete — implemented, tested, live e2e green (2026-08-17). Code-review round 5 (2026-08-17): 49/49 patch findings applied, gates green — see Review Findings below. Awaiting PR #116 merge.**
 
 - **Files delivered:** `src/phase-engine/phases/{dispatch-task,team-event-adapter,roster-adapter,test-results}.ts`, `cli-anything/src/watchdog.ts` (net-new RSS watchdog, AC7), widened `cli-anything/src/{types,merger}.ts` (top-level step-output siblings, `result` untouched, `result.summary` copied up), `cli-anything/src/runner.ts` (seam read + child-env construction + `budgetCapUsd` raise + additive `onTeamEvent`/`onRunFacts` hooks + watchdog wiring), `src/phase-engine/{manifest,types,phase,index}.ts` (additive: `dispatch_task` kind + `roster`/`task` fields, PhaseRecord counters + v5 sub-timings, barrel exports), `scripts/pipeline-run.ts` (makeBodyFactory registration, tracer/requestId closure), `config/rosters/df16-e2e.roster.yaml` (e2e), fixtures + 5 test files.
 - **Tests:** 26 dispatch-task (all AC/INV branches incl. story negative controls: watchdog-kill precedence, prompt-persisted-pre-spawn read-back, parent-symlink walk, wrong-split roster negative controls) + 31 team-event-adapter + 15 watchdog + 38 merger + 14 test-results + 9 roster-adapter. Repo: 704 pass / 1 fail (the one fail is the pre-existing environmental `usage.test.ts` catalog-scan flake — fails identically on clean main). tsc 0, biome clean, `check-defensive-programming.sh` OK (one `dp:ok`-annotated intentional type-erasure), `check-pr-conflicts.sh` OK.
 - **Live e2e (MANDATORY DoD item):** two live `QDS_TEAM_RUNNER=local` runs through `scripts/pipeline-run.ts` over a seeded failing test — run 1: PHASE-LEVEL green only: fixer worker edited `src/calc.ts`, `exitStatus: "success"`, `changedFiles: ["src/calc.ts"]`, 12-event NDJSON stream (3 pre-spawn prompt + 6 coms + 3 cost + 2 worker_output), `malformedLines: 0`, `droppedOversizeLines: 0`, non-zero cost (2670 µ$ first event); the dispatch phase succeeded while the placeholder tail phase expectedly failed (`pipeline ok=false` from the tail). Run 2 is the full-pipeline green run: `ok=true accepted=true` with engine-side `verify-suite` green. Evidence: `_bmad-output/evidence/df1-6/`.
 - **Self-review:** 15 findings; 5 applied (watchdog killOrigin set only after successful group SIGTERM; grace-timer cleared on stop; mid-grace unwatchable no longer cancels the SIGKILL leg; test-command abort path reaps the child; engine-owned sub-timings cannot be clobbered by body values). 10 rejected with reasoning against story text (NFC is p1-6:112-verbatim; coms_init_error is precedence step 0 by story; exit-64 row is step 3; `command` already forbidden on non-code kinds; close-handler ordering drains before facts; redact-then-truncate cap math holds by construction; manifest temp file is created after every refusal; consumer-side testsExecuted validation is DF5.1's; budget precedence already story-correct; oversize multibyte boundary is F15-tested).
 - **Environment note:** DF1.5's rate-table loader expects `@earendil-works/pi-ai/dist/providers/data`, which pi 0.55.0's `@mariozechner` packaging does not ship — e2e used the documented `QDS_PI_CATALOG_DIR` override with a hand-built catalog. Host layout drift, not a story defect; flag to DF1.5 follow-up.
+
+### Review Findings (code review 2026-08-17, PR #116 round 5)
+
+3-layer adversarial review (Blind Hunter ×3, Edge Case Hunter ×3, Acceptance Auditor — auditor: all ACs pass, zero findings). 49 patch findings, 0 decision-needed, 0 deferred, 19 dismissed as noise. All patches applied in two parallel waves; gates green (focal suites 163+81 tests pass, biome clean, tsc clean).
+
+- [x] [Review][Patch] Abort-registration races (check→addEventListener window) — runner.ts abortTeam + test-results.ts runTestCommand re-check `signal.aborted` after registration
+- [x] [Review][Patch] Abort listener lifecycle — runner.ts `abortListener` removed in `removeSignalHandlers`; test-results.ts try/finally guarantees `removeEventListener` on all exit paths
+- [x] [Review][Patch] Watchdog kill-attribution TOCTOU — killOrigin set synchronously at escalation, cleared only if group SIGTERM fails (watchdog.ts)
+- [x] [Review][Patch] Watchdog precedence race — escalation state visible at classify time, not only in async callback
+- [x] [Review][Patch] Grace-timer pgid-reuse hazard — leader-pid liveness check before group SIGKILL; skip if leader dead (documented tradeoff: may leak stragglers, never kills innocent group)
+- [x] [Review][Patch] Transient ps failure no longer permanently unwatchable — 3 consecutive failures required
+- [x] [Review][Patch] Partial-output cap — decoder.end() flushed within remaining budget at finalize; output stays ≤ cap
+- [x] [Review][Patch] Windows watchdog no-op now logs once; Linux O(N) sampler ceiling documented in place
+- [x] [Review][Patch] truncateWithSuffix: marker always meaningful when maxLength < suffix length (merger.ts + new test)
+- [x] [Review][Patch] Path validation hardening — reject null bytes/control chars, backslashes (UNC), empty/whitespace paths in validateChangedFiles/validateArtifacts (dispatch-task.ts)
+- [x] [Review][Patch] Invalid worker_output status now defaults "transient" (fail-safe) instead of "success" — intentional behavior change, tests updated (team-event-adapter.ts)
+- [x] [Review][Patch] Duplicate merged events first-wins; comsInitError unified to adapted value; events-after-merge documented as intentional (stream health)
+- [x] [Review][Patch] Bun parser accepts pass OR fail line (missing → 0) (test-results.ts)
+- [x] [Review][Patch] dispatchSubTimings whitelist (phase.ts) — body values cannot inject arbitrary sub-timing keys
+- [x] [Review][Patch] Manifest unlink failure warns on stderr; PhaseSubTimings undefined-vs-zero contract documented (types.ts)
+- [x] [Review][Patch] ExitStatus derives from EXIT_STATUSES const (cli-anything types.ts) — union cannot drift from runtime guard
+- [x] [Review][Patch] Test hardening: pinned Zod max-3 error messages (dispatch-task + roster-adapter), asymmetric Tests/Test-Suites counts, exact env restore (unset vs "" vs value), artifact content assertions, changedFiles secret-redaction test, fixture-12 invariant comment, cleanup warns, corrected comments (delete semantics, output-cap math, type-erasure), relaxed watchdog timing test (350ms/≥2)
+- Verified false-positives (skipped): partialOutput cap math (suffix already budgeted), opts.summary fallback (declared in interface), spawn-error null exit facts (spawn_error_code distinguishes), warren big_cost 60s sleep (budget-kill terminates <1s, evidence in triage), $! backgrounding fixture (correct shell), pipeline-run rootDir comment (matches code)
+- Pre-existing, not touched: usage.test.ts catalog-scan timeouts (fail identically on clean HEAD; file not in this PR's diff)

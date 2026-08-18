@@ -86,6 +86,8 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
   let unwatchable = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let samples = 0;
+  let consecutiveSampleFailures = 0; // Track consecutive failures for unwatchable
+  const CONSECUTIVE_FAILURES_THRESHOLD = 3; // Require 3 failures before unwatchable
 
   /**
    * Default RSS sampler. Platform-specific process-group selection:
@@ -99,9 +101,17 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
    */
   const defaultSampler = async (): Promise<number | null> => {
     if (process.platform === "win32") {
-      return null; // Windows not supported
+      // ponytail: Windows not supported — ps process-group selection unavailable.
+      // Upgrade path: use Windows-specific counter APIs (GetProcessMemoryInfo)
+      // or WMI queries. Current ceiling: RSS watchdog inactive on Windows.
+      console.error("cli-anything: RSS watchdog not supported on Windows (ps -o rss= -g unavailable)");
+      return null;
     }
     const darwin = process.platform === "darwin";
+    // ponytail: Linux uses `ps -o pgid=,rss= -e` (enumerates every process, O(N)),
+    // then filters by pgid. Darwin uses `-g` for direct pgid selection.
+    // Upgrade path: pgrep-based pre-filter (`pgrep -g <pgid>`) to reduce
+    // enumeration. Current ceiling: full process table scan on Linux.
     return new Promise((resolve) => {
       execFile(
         "ps",
@@ -165,41 +175,77 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
     const rssBytes = await sampler();
 
     if (rssBytes === null) {
-      // Sampling failed — mark unwatchable and stop escalation
-      log(`cli-anything: RSS watchdog unwatchable (ps failed for pgid ${pgidOrGroup})`);
-      onUnwatchable(`ps -o rss= -g ${pgidOrGroup} failed`);
-      unwatchable = true;
-      handle.status = "unwatchable";
-      // Mid-grace sampling loss: the tree is already SIGTERMed and the grace
-      // timer is armed — stopping now would cancel the SIGKILL leg (#14).
-      // Keep the escalation machinery; only halt future polls.
-      if (!escalated) handle.stop();
+      // Sampling failed — require consecutive failures before marking unwatchable
+      // Only applies to the default sampler (real ps calls). External samplers
+      // (for testing) return null intentionally and should trigger immediately.
+      if (externalSampler) {
+        log(`cli-anything: RSS watchdog unwatchable (ps failed for pgid ${pgidOrGroup})`);
+        onUnwatchable(`ps -o rss= -g ${pgidOrGroup} failed`);
+        unwatchable = true;
+        handle.status = "unwatchable";
+        if (!escalated) handle.stop();
+        return;
+      }
+      consecutiveSampleFailures++;
+      if (consecutiveSampleFailures >= CONSECUTIVE_FAILURES_THRESHOLD) {
+        log(`cli-anything: RSS watchdog unwatchable (${consecutiveSampleFailures} consecutive ps failures for pgid ${pgidOrGroup})`);
+        onUnwatchable(`ps sampling failed ${consecutiveSampleFailures} times consecutively`);
+        unwatchable = true;
+        handle.status = "unwatchable";
+        // Mid-grace sampling loss: the tree is already SIGTERMed and the grace
+        // timer is armed — stopping now would cancel the SIGKILL leg (#14).
+        // Keep the escalation machinery; only halt future polls.
+        if (!escalated) handle.stop();
+        return;
+      }
+      // Below threshold — log and continue polling
+      log(`cli-anything: RSS watchdog sample failed (${consecutiveSampleFailures}/${CONSECUTIVE_FAILURES_THRESHOLD}, retrying...)`);
+      // Schedule next poll even on failure — will retry until threshold
+      if (running && !escalated) {
+        timer = setTimeout(poll, pollMs);
+        if (timer) timer.unref();
+      }
       return;
     }
+    consecutiveSampleFailures = 0; // Reset on success
 
     samples++;
     if (rssBytes > thresholdBytes && !escalated) {
       escalated = true;
       const info = { rssBytes, samples };
       log(`cli-anything: RSS watchdog escalation at ${rssBytes} bytes (${(rssBytes / 1024 ** 3).toFixed(2)} GB)`);
+      // Set escalation state synchronously BEFORE invoking the callback,
+      // so classification reads the flag atomically at decision time.
+      handle.killOrigin = "watchdog";
       onEscalate(info);
 
-      // SIGTERM to the process group. killOrigin is set ONLY after the signal
-      // is actually delivered — a natural exit between the escalation decision
-      // and a failed kill(2) must not be attributed to the watchdog
-      // (precedence step 1 reads this flag as "the watchdog killed it").
+      // SIGTERM to the process group. killOrigin was already set synchronously
+      // when escalation began (above). This delivery only fails if the group
+      // is already gone — in that case, clear attribution since the watchdog
+      // did not actually kill it.
       try {
         process.kill(-pgidOrGroup, "SIGTERM");
-        handle.killOrigin = "watchdog";
       } catch {
-        // Group already gone — nothing to kill, no watchdog attribution
+        // Group already gone — nothing to kill, clear watchdog attribution
+        handle.killOrigin = null;
         handle.stop();
         return;
       }
 
       // Wait grace period, then SIGKILL if still alive
       graceTimer = setTimeout(() => {
+        // Must check running FIRST — stop() may have cleared this timer.
+        // The pgid-reuse check below should only run when still active.
         if (!running) return;
+        // Before SIGKILLing the group, check the ORIGINAL child pid is still
+        // alive (process.kill(pid, 0) style). If the child is dead, the pgid
+        // may have been reused by an unrelated process — skip the group SIGKILL.
+        try {
+          process.kill(pgidOrGroup, 0); // Check original leader liveness
+        } catch {
+          // Original child dead — pgid may be reused, do not SIGKILL the group
+          return;
+        }
         // Check the PROCESS GROUP (negative target), not the lead PID: the
         // SIGTERM above went to the group, and the lead commonly honors it
         // and exits before its descendants. Polling +pgid would test only the

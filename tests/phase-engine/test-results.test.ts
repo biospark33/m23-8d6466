@@ -140,15 +140,18 @@ describe("runTestCommand", () => {
   });
 
   test("handles jest/vitest style: 'Tests: 7 passed, 2 failed'", async () => {
+    // ponytail: asymmetric counts from Test Suites line ensure the regex doesn't
+    // mistakenly match the wrong line (the real jest order has Test Suites first).
     const jestFormatScript = path.join(cwd, "jest-format.sh");
     fs.writeFileSync(
       jestFormatScript,
-      "#!/bin/sh\necho 'Tests: 7 passed, 2 failed'\n",
+      "#!/bin/sh\necho 'Test Suites: 3 passed, 1 failed'\necho 'Tests: 7 passed, 2 failed'\n",
       { mode: 0o755 },
     );
 
     const result = await runTestCommand([jestFormatScript], { cwd });
     expect(result.testsExecuted).toBe(true);
+    // These counts match the Tests line only, not the Test Suites line.
     expect(result.testResults.passed).toBe(7);
     expect(result.testResults.failed).toBe(2);
   });
@@ -328,7 +331,7 @@ describe("runTestCommand — reporter formats, output cap, group kill (review ro
   });
 
   test("output beyond the capture cap fails closed with a cap reason", async () => {
-    // ~90 bytes/line × 8000 lines ≈ 720 KiB > 512 KiB cap on ONE stream.
+    // 98 A's + newline = 99 bytes/line × 8000 lines = 792,000 bytes ≈ 773 KiB > 512 KiB cap on ONE stream.
     const script = path.join(cwd2, "flood.sh");
     fs.writeFileSync(
       script,
@@ -389,12 +392,17 @@ describe("runTestCommand — reporter formats, output cap, group kill (review ro
       expect(result.testsExecuted).toBe(true);
       expect(result.testResults).toEqual({ passed: 1, failed: 0 });
     } finally {
-      // `= undefined` would stringify to "undefined" — delete is the only
-      // correct unset for process.env.
+      // ponytail: exact restore — undefined→delete, ""→"", value→assign value.
+      // `= undefined` would stringify to "undefined"; treating "" as falsy
+      // leaves the key deleted. The saved value tells us which case we have.
       // biome-ignore lint/performance/noDelete: env unset semantics
       if (prevAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else if (prevAnthropic === "") process.env.ANTHROPIC_API_KEY = "";
       else process.env.ANTHROPIC_API_KEY = prevAnthropic;
-      if (prevOpenrouter !== undefined) process.env.OPENROUTER_API_KEY = prevOpenrouter;
+      // biome-ignore lint/performance/noDelete: env unset semantics
+      if (prevOpenrouter === undefined) delete process.env.OPENROUTER_API_KEY;
+      else if (prevOpenrouter === "") process.env.OPENROUTER_API_KEY = "";
+      else if (prevOpenrouter !== undefined) process.env.OPENROUTER_API_KEY = prevOpenrouter;
     }
   });
 });

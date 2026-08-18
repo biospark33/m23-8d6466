@@ -138,19 +138,24 @@ export async function runTestCommand(
       // across many runs would otherwise accumulate one dead listener (and
       // its closure) per completed run.
       let onAbort: (() => void) | undefined;
-      const aborted = new Promise<void>((resolve) => {
-        // An AbortSignal never re-fires: an already-aborted signal must be
-        // observed NOW, not after a listener that will never run.
-        if (signal.aborted) return resolve();
-        onAbort = () => resolve();
-        signal.addEventListener("abort", onAbort, { once: true });
-      });
-      const exitedFirst = await Promise.race([
-        proc.exited.then(() => true),
-        aborted.then(() => false),
-      ]);
-      if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
-      if (!exitedFirst) {
+      try {
+        const aborted = new Promise<void>((resolve) => {
+          // An AbortSignal never re-fires: an already-aborted signal must be
+          // observed NOW, not after a listener that will never run.
+          if (signal.aborted) return resolve();
+          onAbort = () => resolve();
+          signal.addEventListener("abort", onAbort, { once: true });
+          // ponytail: re-check after addEventListener to close the race between
+          // the early check above and the listener registration. If the signal
+          // aborted during this window, resolve synchronously; the { once: true }
+          // listener will simply never fire (that's fine — it can't fire twice).
+          if (signal.aborted) resolve();
+        });
+        const exitedFirst = await Promise.race([
+          proc.exited.then(() => true),
+          aborted.then(() => false),
+        ]);
+        if (!exitedFirst) {
         // SIGTERM, grace, then SIGKILL: a test command that traps or ignores
         // SIGTERM (or sits in uninterruptible sleep) must not hang the abort
         // path — the exact case aborts exist to recover from.
@@ -176,14 +181,20 @@ export async function runTestCommand(
             // already gone
           }
         }
-        await proc.exited; // reap the child before returning
-        // Drain the readers (bounded by the cap) so no fd leaks.
-        await Promise.allSettled([stdoutRead, stderrRead]);
-        return {
-          testsExecuted: false,
-          testResults: { passed: 0, failed: 0 },
-          reason: "Test command aborted by signal",
-        };
+          await proc.exited; // reap the child before returning
+          // Drain the readers (bounded by the cap) so no fd leaks.
+          await Promise.allSettled([stdoutRead, stderrRead]);
+          return {
+            testsExecuted: false,
+            testResults: { passed: 0, failed: 0 },
+            reason: "Test command aborted by signal",
+          };
+        }
+      } finally {
+        // ponytail: guaranteed removal on ALL exit paths (spawn throw, reader
+        // setup throw, normal resolve, abort resolve). A long-lived signal would
+        // otherwise accumulate dead listeners.
+        if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
       }
     }
 
@@ -258,13 +269,14 @@ function parseTestOutput(output: string): { passed: number; failed: number } | n
   // Line-anchored + word-bounded so prose like "7 passed" (jest/vitest) or a
   // filename containing "pass" can never satisfy the bun branch.
   // Real output: " 7 pass\n 0 fail\n 7 expect() calls\nRan 7 tests..."
+  // Accept either pass or fail line; missing count → 0 (all-pass or all-fail runs).
   const bunPassMatch = output.match(/^\s*(\d+)\s+pass\b/m);
   const bunFailMatch = output.match(/^\s*(\d+)\s+fail\b/m);
 
-  if (bunPassMatch && bunFailMatch) {
+  if (bunPassMatch || bunFailMatch) {
     return {
-      passed: Number.parseInt(bunPassMatch[1] ?? "0", 10),
-      failed: Number.parseInt(bunFailMatch[1] ?? "0", 10),
+      passed: bunPassMatch ? Number.parseInt(bunPassMatch[1] ?? "0", 10) : 0,
+      failed: bunFailMatch ? Number.parseInt(bunFailMatch[1] ?? "0", 10) : 0,
     };
   }
 

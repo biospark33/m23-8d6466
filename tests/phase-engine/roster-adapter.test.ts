@@ -28,7 +28,14 @@ afterEach(() => {
     }
   }
 });
-afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+afterAll(() => {
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch (e) {
+    // best-effort cleanup — warn so orphaned temp dirs are visible
+    console.warn(`roster-adapter.test cleanup failed: ${tmpRoot}`, e instanceof Error ? e.message : String(e));
+  }
+});
 
 describe("rosterRoleToTeamRole", () => {
   test("joins provider and model with single slash", () => {
@@ -295,7 +302,7 @@ describe("rosterToTeamManifest", () => {
         workerRoleNames: ["w1", "w2", "w3", "w4"],
         prompts: { lead: "x", w1: "y", w2: "z", w3: "a", w4: "b" },
       }),
-    ).toThrow();
+    ).toThrow(/at most 3.*element/i);
   });
 
   test("omits optional caps when not provided — schema defaults apply", () => {

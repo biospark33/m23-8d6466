@@ -171,9 +171,10 @@ export function adaptTeamEvent(
       // Follow asEnvelope precedent: status derived from output content.
       // ANY valid ExitStatus the worker declared is honored — recognizing only
       // a subset would silently rewrite a worker's real "transient" or
-      // "lead_failure" into "success". Unknown/absent → "success".
+      // "lead_failure" into "success". Unknown/absent → "transient" (fail-safe:
+      // assumes environmental issue rather than silently assuming success).
       const declared = output?.status;
-      const status = isExitStatus(declared) ? declared : "success";
+      const status = isExitStatus(declared) ? declared : "transient";
       return {
         type: "envelope",
         kind: "generic",

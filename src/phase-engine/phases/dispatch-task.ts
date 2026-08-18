@@ -239,7 +239,9 @@ export function dispatchTask(
     const streamHealth = makeStreamHealth();
     // Precedence inputs collected from the run (story Technical Notes):
     // how the process died > envelope presence > exit code.
+    // First-wins for merged: later duplicates are ignored (stream-health marker).
     let mergedResult: Record<string, unknown> | null = null;
+    let mergedSeen = false;
     let comsInitError: string | null = null;
     let runFacts: {
       exitCode: number | null;
@@ -290,10 +292,16 @@ export function dispatchTask(
               });
               break;
             case "merged":
-              mergedResult = adapted.result;
+              if (!mergedSeen) {
+                mergedResult = adapted.result;
+                mergedSeen = true;
+              }
+              // else: ignore silently — stream-health marker for duplicate terminal events
+              // Continue processing events after merged for stream health (malformed/dropped counters)
               break;
           }
-          if (event.kind === "coms_init_error") comsInitError = event.reason;
+          // Unify to read from adapted value for coms_init_error (type-safe, matches adapter contract)
+          if (adapted.type === "coms_init_error") comsInitError = adapted.reason;
         },
         onRunFacts: (facts) => {
           runFacts = {
@@ -400,8 +408,10 @@ export function dispatchTask(
     } finally {
       try {
         unlinkSync(manifestFile);
-      } catch {
+      } catch (err) {
         // cleanup is best-effort; never masks the typed result
+        // ponytail: warn but don't throw — orphaned manifests are benign
+        console.error(`manifest cleanup failed: ${manifestFile}`, err instanceof Error ? err.message : String(err));
       }
     }
   };
@@ -416,6 +426,19 @@ export function dispatchTask(
 export function validateChangedFiles(paths: string[]): string[] {
   const valid: string[] = [];
   for (const raw of paths) {
+    // Empty or whitespace-only paths are rejected (null-byte, whitespace-only checks)
+    if (raw.trim().length === 0) {
+      continue;
+    }
+    // Null byte and other C0 control chars (except tab, newline, carriage return) are rejected
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security check
+    if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(raw)) {
+      continue;
+    }
+    // Windows UNC/backslash paths are rejected (any path containing a backslash)
+    if (raw.includes("\\")) {
+      continue;
+    }
     // Pre-decode stage.
     if (
       /%2e%2e/i.test(raw) ||
@@ -460,6 +483,8 @@ export function validateArtifacts(
       // root validation used (INV-1: one canonical root, never cwd). INV-5 —
       // if the walk cannot be performed, this throws and the artifact is
       // refused, never silently accepted.
+      // Defense-in-depth: validateChangedFiles already rejects absolute paths,
+      // but we keep this branch for explicitness and in case that check evolves.
       readArtifactBeneathRoot(isAbsolute(artifact.path) ? artifact.path : join(runRoot, artifact.path), runRoot);
       valid.push(artifact);
     } catch {

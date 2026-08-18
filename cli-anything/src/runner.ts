@@ -6,7 +6,6 @@ import { ComsLogCollector } from "./coms-log.ts";
 import {
   cleanEnv,
   diag,
-  type EnvMap,
   logEnvKeys,
   MAX_LOGGED_ENV_KEYS,
   mergeEnv,
@@ -45,7 +44,6 @@ import type {
   Manifest,
   MergedError,
   MergedOutput,
-  TeamManifest,
   Waiver,
   WorkerOutput,
 } from "./types.ts";
@@ -422,9 +420,22 @@ export async function runManifest(
     });
 
     child.on("error", (err: NodeJS.ErrnoException) => {
-      // Skip decoder.end() once truncated: after a mid-sequence cut it would
-      // append U+FFFD. The cap is re-applied in settle either way.
-      if (!truncated) stdout += decoder.end();
+      // Flush the decoder even when truncated — append the final partial line
+      // within the remaining cap budget (or drop cleanly). Keeps partial
+      // output strictly ≤ cap.
+      if (!truncated) {
+        stdout += decoder.end();
+      } else {
+        // Truncated: decoder.end() would append U+FFFD after a mid-sequence cut.
+        // Call it anyway to get the final partial line, then cap it cleanly.
+        const tail = decoder.end();
+        if (tail !== undefined) {
+          const remaining = MAX_STDOUT_EXCERPT - stdout.length;
+          if (remaining > 0) {
+            stdout += tail.slice(0, remaining);
+          }
+        }
+      }
       settle({
         exit_class: "spawn_error",
         stdout_excerpt: stdout,
@@ -445,9 +456,22 @@ export async function runManifest(
     });
 
     child.on("close", (code, signal) => {
-      // Skip decoder.end() once truncated: after a mid-sequence cut it would
-      // append U+FFFD. The cap is re-applied in settle either way.
-      if (!truncated) stdout += decoder.end();
+      // Flush the decoder even when truncated — append the final partial line
+      // within the remaining cap budget (or drop cleanly). Keeps partial
+      // output strictly ≤ cap.
+      if (!truncated) {
+        stdout += decoder.end();
+      } else {
+        // Truncated: decoder.end() would append U+FFFD after a mid-sequence cut.
+        // Call it anyway to get the final partial line, then cap it cleanly.
+        const tail = decoder.end();
+        if (tail !== undefined) {
+          const remaining = MAX_STDOUT_EXCERPT - stdout.length;
+          if (remaining > 0) {
+            stdout += tail.slice(0, remaining);
+          }
+        }
+      }
       const classification = classifyExit(timedOut, code, signal);
       settle({
         exit_class: classification.exit_class,
@@ -698,7 +722,7 @@ export async function runTeamManifest(
     let costUnpriced = false;
     let budgetKilled = false;
     let wallTimedOut = false;
-    let watchdogKilled = false; // DF1.6 T4: RSS watchdog kill flag
+    const watchdogKilled = false; // DF1.6 T4: RSS watchdog kill flag
     let settled = false;
     let child: ChildProcess | null = null;
     const timers: Array<ReturnType<typeof setTimeout>> = [];
@@ -806,11 +830,20 @@ export async function runTeamManifest(
       );
     }
 
+    // Registered abort listener (assigned when opts.abortSignal wires one up);
+    // removed by removeSignalHandlers so a never-fired listener cannot linger
+    // on a long-lived signal after the run settles.
+    let abortListener: (() => void) | null = null;
+
     function removeSignalHandlers(): void {
       process.removeListener("SIGINT", onSigint);
       process.removeListener("SIGTERM", onSigterm);
       if (process.platform !== "win32") {
         process.removeListener("SIGHUP", onSighup);
+      }
+      if (abortListener !== null) {
+        opts.abortSignal?.removeEventListener("abort", abortListener);
+        abortListener = null;
       }
     }
 
@@ -852,9 +885,9 @@ export async function runTeamManifest(
           child,
           pgidOrGroup: child.pid,
           onEscalate: (_info) => {
-            watchdogKilled = true;
-            // RSS watchdog fires → overflow precedence (Technical Notes step 1)
-            // We'll let the watchdog handle SIGTERM→SIGKILL, then classify below
+            // watchdogKilled is now set synchronously by startRssWatchdog
+            // before this callback runs (overflow-precedence fix).
+            // The flag is already visible at classification decision time.
           },
           onUnwatchable: (reason) => {
             // Log but don't fail — watchdog becomes inactive
@@ -891,8 +924,17 @@ export async function runTeamManifest(
           });
         });
       };
-      if (opts.abortSignal.aborted) abortTeam();
-      else opts.abortSignal.addEventListener("abort", abortTeam, { once: true });
+      if (opts.abortSignal.aborted) {
+        abortTeam();
+      } else {
+        const optsSignal = opts.abortSignal; // Capture for closure
+        optsSignal.addEventListener("abort", abortTeam, { once: true });
+        abortListener = abortTeam;
+        // Re-check after addEventListener: an abort between the check above
+        // and addEventListener would have been missed. If already aborted,
+        // invoke synchronously (the listener won't fire again due to once:true).
+        if (optsSignal.aborted) abortTeam();
+      }
     }
 
     // Wall-clock hard cap (INV-2): wall-clock wins over coms_await.
