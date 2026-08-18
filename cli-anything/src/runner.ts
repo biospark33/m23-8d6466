@@ -600,12 +600,7 @@ export interface TeamRunOptions {
    * comsInitError is the parsed reason or null. The callback is invoked
    * inside a try/catch: a throwing observer must not hang the run.
    */
-  onRunFacts?: (facts: {
-    exitCode: number | null;
-    termSignal: string | null;
-    killOrigin: "watchdog" | "budget" | "wallClock" | "requestedShutdown" | null;
-    comsInitError: string | null;
-  }) => void;
+  onRunFacts?: (facts: RunFacts) => void;
   /**
    * DF1.6 T7: parent-side cancellation. When the signal fires (or has already
    * fired), the whole child tree is killed and the run settles transient —
@@ -618,6 +613,19 @@ export interface TeamRunOptions {
    * classification and killOrigin attribution.
    */
   watchdogSampleRss?: () => Promise<number | null>;
+}
+
+/**
+ * Raw exit facts surfaced by onRunFacts (R11 shared contract).
+ *
+ * Owns the killOrigin union — consumers (tests, the phase layer) derive from
+ * this type instead of restating the literal union and drifting on widen.
+ */
+export interface RunFacts {
+  exitCode: number | null;
+  termSignal: string | null;
+  killOrigin: "watchdog" | "budget" | "wallClock" | "requestedShutdown" | null;
+  comsInitError: string | null;
 }
 
 /**

@@ -503,6 +503,39 @@ describe("runTestCommand — review-round hardening", () => {
     expect(result.testsExecuted).toBe(true);
   });
 
+  test("jest unsafe-integer passed count alongside safe failed count fails closed", async () => {
+    // 2^53 is above Number.MAX_SAFE_INTEGER: the passed clause is unsafe.
+    // Regression (review round 12): the parser used to skip just the unsafe
+    // clause, fabricate passed: 0, keep failed: 1, and report
+    // testsExecuted: true — violating the fail-closed rule. The whole parse
+    // must now fail closed.
+    const script = path.join(cwd3, "unsafe-passed.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho 'Tests: 9007199254740992 passed, 1 failed'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd3 });
+    expect(result.testsExecuted).toBe(false);
+    expect(result.testResults).toEqual({ passed: 0, failed: 0 });
+    expect(result.reason).toBeDefined();
+  });
+
+  test("vitest unsafe-integer failed count alongside safe passed count fails closed", async () => {
+    // Mirror of the above on the failed clause, vitest pipe format: the safe
+    // passed count must not rescue an unsafe failed count either.
+    const script = path.join(cwd3, "unsafe-failed.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho 'Tests  9007199254740992 failed | 4 passed (9007199254740996)'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd3 });
+    expect(result.testsExecuted).toBe(false);
+    expect(result.testResults).toEqual({ passed: 0, failed: 0 });
+    expect(result.reason).toBeDefined();
+  });
+
   test("bun output with exactly one pass line and no fail line → passed N / failed 0", async () => {
     // Minimal bun test output: only a pass line
     const script = path.join(cwd3, "one-pass.sh");

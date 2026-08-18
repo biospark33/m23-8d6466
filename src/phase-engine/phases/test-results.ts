@@ -391,7 +391,11 @@ function parseTestOutput(output: string): { passed: number; failed: number } | n
     let lineFailed: number | undefined;
     for (const clause of line.matchAll(/(\d+)\s+(passed|failed)/g)) {
       const count = Number.parseInt(clause[1] ?? "0", 10);
-      if (!Number.isSafeInteger(count)) continue; // skip unsafe integers
+      // Fail closed on ANY non-safe-integer count (same rule as the bun
+      // branch above): skipping the clause here would fabricate a 0 for the
+      // unsafe category while a sibling safe count still parses — the run
+      // would report testsExecuted:true with invented numbers.
+      if (!Number.isSafeInteger(count)) return null;
       if (clause[2] === "passed") {
         if (linePassed === undefined) linePassed = count;
       } else if (lineFailed === undefined) {

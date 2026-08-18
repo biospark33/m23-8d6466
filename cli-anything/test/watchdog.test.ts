@@ -252,6 +252,13 @@ describe("RSS watchdog", () => {
     let calls = 0;
     let rejectThird: ((err: Error) => void) | undefined;
     let unwatchableReported = false;
+    // Deterministic handshake: resolved inside the third sampler invocation,
+    // synchronously after rejectThird is assigned. A fixed sleep could let
+    // handle.stop() run before the third invocation even happened, leaving
+    // rejectThird undefined — the late rejection would never fire and the
+    // test would pass without exercising the post-stop path at all.
+    let signalThirdInvoked!: () => void;
+    const thirdInvoked = new Promise<void>((resolve) => { signalThirdInvoked = resolve; });
     const handle = startRssWatchdog({
       child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
       pgidOrGroup: process.pid,
@@ -262,22 +269,27 @@ describe("RSS watchdog", () => {
       sampleRss: () => {
         calls++;
         if (calls <= 2) return Promise.reject(new Error("fail"));
-        return new Promise<number | null>((_resolve, reject) => {
+        const pending = new Promise<number | null>((_resolve, reject) => {
           rejectThird = reject;
         });
+        signalThirdInvoked();
+        return pending;
       },
     });
-    // Two consecutive rejections land (failures 1/2), then the third sampler
-    // call stays pending while we stop the watchdog, and ONLY THEN rejects —
-    // without the catch-path running-guard this would be failure 3/3:
-    // onUnwatchable fires and "unwatchable" overwrites the terminal status.
-    // P6b: wait for 2 rejections (40ms at 20ms poll) before stopping
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Two consecutive rejections land (failures 1/2 — the poll loop awaits
+    // each sample before scheduling the next, so the third invocation cannot
+    // start before both are counted), then the third sampler call stays
+    // pending while we stop the watchdog, and ONLY THEN rejects — without
+    // the catch-path running-guard this would be failure 3/3: onUnwatchable
+    // fires and "unwatchable" overwrites the terminal status.
+    await thirdInvoked; // third sampler invocation has assigned rejectThird
+    expect(calls).toBe(3);
     handle.stop();
-    // P6b: ensure stop() processed (microtask flush) before rejection
+    // Ensure stop() processed (microtask flush) before rejection
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(handle.status).toBe("stopped");
-    rejectThird?.(new Error("late boom"));
+    expect(rejectThird).toBeDefined();
+    rejectThird!(new Error("late boom"));
     // Flush macrotasks to ensure any late handlers ran
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(handle.status).toBe("stopped");
@@ -824,7 +836,8 @@ describe("RSS watchdog", () => {
 
   it("T8: external sampler failure counter resets on VALID sample (3 consecutive required)", async () => {
     // Source resets both consecutiveSampleFailures and externalSamplerFailures
-    // on success (line 293-295 in watchdog.ts). Inject pattern: fail, fail, VALID,
+    // on success (the counter-reset block at the top of poll()'s success path
+    // in watchdog.ts). Inject pattern: fail, fail, VALID,
     // then stop before 3 consecutive failures accumulate. Unwatchable NEVER fires
     // because the VALID sample reset the counter.
     let sampleCount = 0;

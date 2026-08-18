@@ -262,12 +262,33 @@ async function main(): Promise<void> {
       await sleep(60_000);
       break;
     }
-    // T10: emit cost that is EXACTLY 90% of a 0.50 cap (0.45 USD)
+    // T10: emit a cost read from QDS_FAKE_THRESHOLD_COST so the test derives
+    // the exact kill threshold from budgetKillThresholdUsd() in runner.ts —
+    // one source of truth for the 0.9 kill fraction instead of a hardcoded
+    // 0.45 that silently stops being the boundary if the fraction changes.
     case "threshold_exact": {
+      const exactCostUsd = Number(process.env["QDS_FAKE_THRESHOLD_COST"] ?? "0.45");
       say(coms(1, "lead", "worker-a"));
-      say(cost("lead", "anthropic/claude-x", 0.45)); // exactly 0.45 (90% of 0.50)
+      say(cost("lead", "anthropic/claude-x", exactCostUsd));
       say(workerOutput("worker-a", ["src/a.ts"]));
       await sleep(60_000);
+      break;
+    }
+    // T11 boundary: ONE line of exactly QDS_FAKE_LINE_BYTES raw bytes
+    // (trailing newline included), driven by env so the test can probe the
+    // cap's exact edge (kept at N == cap, dropped at N == cap + 1). The
+    // line's content is parse-rejected noise — only its byte length matters.
+    case "cap_boundary_line": {
+      const lineBytes = Number(process.env["QDS_FAKE_LINE_BYTES"] ?? "2048");
+      say(coms(1, "lead", "worker-a"));
+      say(coms(2, "worker-a", "lead"));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      say(workerOutput("worker-b", ["src/b.ts"]));
+      await sleep(50); // own data event, so the line is judged alone
+      process.stdout.write("x".repeat(lineBytes - 1) + "\n");
+      await sleep(50);
+      say({ type: "merged", result: { summary: "boundary line processed" } });
+      process.exit(0);
       break;
     }
     default: {

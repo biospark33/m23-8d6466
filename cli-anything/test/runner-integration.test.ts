@@ -2,7 +2,13 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildTeamSpawn, runTeamManifest, splitRoleModel } from "../src/runner.ts";
+import {
+  buildTeamSpawn,
+  budgetKillThresholdUsd,
+  runTeamManifest,
+  splitRoleModel,
+  type RunFacts,
+} from "../src/runner.ts";
 import { parseTeamManifestFile } from "../src/manifest.ts";
 import type { MergedOutput } from "../src/types.ts";
 
@@ -338,7 +344,9 @@ describe("runTeamManifest", () => {
     // explicitly cancelled resolved clean. abortRequested downgrades every
     // non-overflow status at settle time.
     const controller = new AbortController();
-    const killOrigins: ("watchdog" | "budget" | "wallClock" | "requestedShutdown" | null)[] = [];
+    // Derived from the runner's RunFacts contract — a restated literal would
+    // silently drift if the union ever widens.
+    const killOrigins: RunFacts["killOrigin"][] = [];
     let firstEvent = false;
     const run = runTeamManifest(TEAM_MANIFEST, {
       env: teamEnv("abort_graceful_exit0"),
@@ -361,7 +369,10 @@ describe("runTeamManifest", () => {
     expect(out.exitStatus).toBe("transient");
     expect(out.error?.message).toBe("run aborted by parent signal");
     // T9: verify watchdog did NOT escalate (killOrigin should be null or requestedShutdown,
-    // NEVER "watchdog" on an abort-only run)
+    // NEVER "watchdog" on an abort-only run). The length guard first proves
+    // onRunFacts actually fired — without it the not-toContain assertion passes
+    // vacuously on an empty array.
+    expect(killOrigins.length).toBeGreaterThan(0);
     expect(killOrigins).not.toContain("watchdog");
   }, 15_000);
 
@@ -522,7 +533,7 @@ describe("DF1.6 T5/R1: spawn seam budget ceiling behavior (real runs)", () => {
 
 describe("DF1.6 T4: RSS watchdog overflow regression test", () => {
   it("watchdog escalation → exitStatus overflow AND killOrigin watchdog (onRunFacts wiring)", async () => {
-    const killOrigins: ("watchdog" | "budget" | "wallClock" | "requestedShutdown" | null)[] = [];
+    const killOrigins: RunFacts["killOrigin"][] = [];
     let sampleCount = 0;
     const OVER_THRESHOLD_RSS = 5 * 1024 ** 3; // 5 GB (exceeds 4 GB default)
 
@@ -565,14 +576,20 @@ describe("DF1.6 T4: RSS watchdog overflow regression test", () => {
 
   // T10: budget kill near-threshold boundary
   describe("T10: budget kill near-threshold boundary (cumulative cost at/just-below kill threshold)", () => {
-    // Source uses `>=` for threshold check (line 1124 in runner.ts): AT threshold fires the kill
-    // TEAM_MANIFEST has budgetCapUsd: 0.5, kill threshold is 0.9×0.5 = 0.45
+    // The kill fires when cumulativeCostUsd >= budgetKillThresholdUsd(cap)
+    // (the `>=` check in processLine's cost case) — AT the threshold counts.
+    // Cost and threshold both derive from budgetKillThresholdUsd(), so the
+    // boundary this test probes moves with the factor if it ever changes.
 
     it("cumulative cost EXACTLY at threshold triggers budget kill (discovered semantics: >=, not >)", async () => {
-      // At EXACT threshold (0.45 = 90% of 0.50), the kill fires (>= semantics)
+      const cap = 0.5;
+      const exactThreshold = budgetKillThresholdUsd(cap);
       const out = await runTeamManifest(TEAM_MANIFEST, {
-        env: teamEnv("threshold_exact"), // new fixture: emits exactly 0.45
-        budgetCapUsd: 0.5,
+        // Fixture emits QDS_FAKE_THRESHOLD_COST verbatim as its one cost
+        // event — same double the guard compares against, after the
+        // JSON round-trip.
+        env: { ...teamEnv("threshold_exact"), QDS_FAKE_THRESHOLD_COST: String(exactThreshold) },
+        budgetCapUsd: cap,
         graceMs: 200,
       });
       // Budget kill fires at EXACT threshold (>= semantics)
@@ -581,14 +598,14 @@ describe("DF1.6 T4: RSS watchdog overflow regression test", () => {
       expect(out.error?.reason).toBe("overflow");
       expect(out.error?.message).toContain("(cap $0.50)");
       const details = out.error?.details as { cumulativeCostUsd?: number };
-      expect(details.cumulativeCostUsd).toBeCloseTo(0.45, 5);
+      expect(details.cumulativeCostUsd).toBeCloseTo(exactThreshold, 5);
     }, 20_000);
 
-    it("cumulative cost just below threshold does NOT kill (0.03 vs 0.45)", async () => {
-      // Well below threshold: success scenario emits 0.01 + 0.02 = 0.03 << 0.45
-      // No budget kill, run completes normally
+    it("cumulative cost just below threshold does NOT kill (success spend 0.03)", async () => {
+      // Well below threshold: success scenario emits 0.01 + 0.02 = 0.03,
+      // far under budgetKillThresholdUsd(0.5). No budget kill, run completes.
       const out = await runTeamManifest(TEAM_MANIFEST, {
-        env: teamEnv("success"), // emits 0.01 + 0.02 = 0.03 < 0.45
+        env: teamEnv("success"),
         budgetCapUsd: 0.5,
       });
       // Should complete successfully (no budget kill)
@@ -597,24 +614,43 @@ describe("DF1.6 T4: RSS watchdog overflow regression test", () => {
     }, 15_000);
   });
 
-  // T11: per-line cap exact boundary (2048 bytes)
+  // T11: per-line cap exact boundary — the drop check is
+  // `teamStdoutBytes + seg.length > teamStdoutCapBytes` on RAW Buffer bytes
+  // (newline included), so a line of exactly cap bytes is KEPT and cap+1 is
+  // DROPPED. Distinct from the F15 tests above (3000-byte multibyte line):
+  // this probes the off-by-one edge itself.
   describe("T11: per-line cap exact boundary (teamStdoutCapBytes: 2048)", () => {
     const CAP_BYTES = 2048;
 
-    it("oversized line (>2048 bytes) is dropped with console.error logged (F15 pattern)", async () => {
-      // Cap unit is raw Buffer bytes (line 1187: `seg.length`), includes trailing newline
-      // Use existing oversized_multibyte_line scenario which emits 3000 bytes > 2048
-      // This proves the byte-accurate cap fires and parsing resumes
+    it("line of EXACTLY cap bytes is kept (boundary is strictly-greater, not ≥)", async () => {
       const capError = spyOn(console, "error").mockImplementation(() => {});
       try {
         const out = await runTeamManifest(TEAM_MANIFEST, {
-          env: teamEnv("oversized_multibyte_line"), // 3000 bytes > 2048, triggers drop
+          env: { ...teamEnv("cap_boundary_line"), QDS_FAKE_LINE_BYTES: String(CAP_BYTES) },
           teamStdoutCapBytes: CAP_BYTES,
         });
         expectUniformSchema(out);
         expect(out.exitStatus).toBe("success");
-        expect(out.result).toEqual({ summary: "resumed after oversized line" });
-        // The oversized line (3000 bytes) should have triggered the cap
+        expect(out.result).toEqual({ summary: "boundary line processed" });
+        const capFired = capError.mock.calls.some((c) =>
+          String(c[0]).includes("lead stdout line exceeded"),
+        );
+        expect(capFired).toBe(false);
+      } finally {
+        capError.mockRestore();
+      }
+    }, 15_000);
+
+    it("line of cap+1 bytes is dropped and parsing resumes (one byte over the edge)", async () => {
+      const capError = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const out = await runTeamManifest(TEAM_MANIFEST, {
+          env: { ...teamEnv("cap_boundary_line"), QDS_FAKE_LINE_BYTES: String(CAP_BYTES + 1) },
+          teamStdoutCapBytes: CAP_BYTES,
+        });
+        expectUniformSchema(out);
+        expect(out.exitStatus).toBe("success");
+        expect(out.result).toEqual({ summary: "boundary line processed" });
         const capFired = capError.mock.calls.some((c) =>
           String(c[0]).includes("lead stdout line exceeded"),
         );
