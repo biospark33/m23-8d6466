@@ -699,8 +699,8 @@ describe("pipeline-run DF1.8 issue correlation", () => {
 
   test("half-pair, malformed and duplicate-identifier correlation flags are refused before any session row", async () => {
     const cases: { name: string; args: string[]; code?: string; stderrEvent?: boolean; issueId?: number | null }[] = [
-      { name: "--issue without --repo-slug (pair required, never defaulted)", args: ["--issue", "42"] },
-      { name: "--repo-slug without --issue (pair required)", args: ["--repo-slug", "qds/demo"] },
+      { name: "--issue without --repo-slug (pair required, never defaulted)", args: ["--issue", "42"], code: "CORRELATION_PAIR_REQUIRED" },
+      { name: "--repo-slug without --issue (pair required)", args: ["--repo-slug", "qds/demo"], code: "CORRELATION_PAIR_REQUIRED" },
       { name: "repo slug with a space", args: ["--repo-slug=bad slug", "--issue", "42"], code: "INVALID_REPO_SLUG", stderrEvent: true },
       // 0, a non-numeric value, and an out-of-bounds value alike must log
       // issueId: null — never a fabricated id (INV-RUN-4): digits alone are
@@ -709,7 +709,7 @@ describe("pipeline-run DF1.8 issue correlation", () => {
       { name: "--issue abc", args: ["--repo-slug", "qds/demo", "--issue", "abc"], code: "INVALID_ISSUE_ID", stderrEvent: true, issueId: null },
       { name: "--issue MAX_ISSUE_ID + 1", args: ["--repo-slug", "qds/demo", "--issue", "2147483648"], code: "INVALID_ISSUE_ID", stderrEvent: true, issueId: null },
       { name: "--request-id not a uuid v4", args: ["--repo-slug", "qds/demo", "--issue", "42", "--request-id", "not-uuid"], code: "INVALID_REQUEST_ID", stderrEvent: true },
-      { name: "--run-id together with --repo-slug (no second identifier)", args: ["--repo-slug", "qds/demo", "--issue", "42", "--run-id", crypto.randomUUID()] },
+      { name: "--run-id together with --repo-slug (no second identifier)", args: ["--repo-slug", "qds/demo", "--issue", "42", "--run-id", crypto.randomUUID()], code: "RUN_ID_CONFLICT" },
     ];
     for (const c of cases) {
       const ws = workspace();

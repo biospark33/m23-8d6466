@@ -196,11 +196,16 @@ export function appendDispatchFailure(
   );
   try {
     fs.writeSync(fd, line);
+    // fd-scoped chmod+verify: the assertion holds for the descriptor just
+    // written through. Path-based chmod/stat here would re-resolve the path
+    // after the close — a swap window between write and check this fd form
+    // cannot have. (fstat BEFORE closeSync: the fd, not the name, is the
+    // thing whose mode was just enforced.)
+    fs.fchmodSync(fd, 0o600);
+    if ((fs.fstatSync(fd).mode & 0o777) !== 0o600) {
+      throw new Error(`dispatch log ${logPath} is not mode 0600 after chmod`);
+    }
   } finally {
     fs.closeSync(fd);
-  }
-  fs.chmodSync(logPath, 0o600);
-  if ((fs.statSync(logPath).mode & 0o777) !== 0o600) {
-    throw new Error(`dispatch log ${logPath} is not mode 0600 after chmod`);
   }
 }

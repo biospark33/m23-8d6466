@@ -245,14 +245,21 @@ class TraceReaderImpl implements TraceReader {
    * (request_id, phase_id, attempt) would: two envelope rows sharing an
    * attempt (a re-recorded output) fan out to two phase rows. A phase with
    * no envelope joins NULL; nothing synthetic is filled in.
+   *
+   * `joinEnvelopes` false (a store whose `envelopes` table is absent — the
+   * table-level drift hasTable already tolerates for `phases`) skips the
+   * join entirely and selects `NULL AS output_payload_json`: the phase rows
+   * are still returned, their persisted outputs are simply not there to read.
    */
-  private phaseSelect(): string {
-    return `SELECT phases.rowid, phases.phase_id, phases.request_id, phases.seq,
+  private phaseSelect(joinEnvelopes: boolean): string {
+    const columns = `SELECT phases.rowid, phases.phase_id, phases.request_id, phases.seq,
                    phases.name, phases.kind, phases.owner, phases.description,
                    phases.status, phases.attempt, phases.retries, phases.error,
                    phases.started_at, phases.ended_at,
-                   en.payload_json AS output_payload_json
-              FROM phases
+                   ${joinEnvelopes ? "en.payload_json" : "NULL"} AS output_payload_json
+              FROM phases`;
+    if (!joinEnvelopes) return columns;
+    return `${columns}
               LEFT JOIN envelopes en
                 ON en.rowid = (SELECT e2.rowid FROM envelopes e2
                                  WHERE e2.request_id = phases.request_id
@@ -267,6 +274,15 @@ class TraceReaderImpl implements TraceReader {
    * query for the whole page — the IN placeholders are generated, the values
    * are bound parameters. An empty result is a page, not an error: cursor
    * unchanged, hasMore false (AC5).
+   *
+   * Embedded phases are deliberately the run's FULL set, never truncated:
+   * a run's phase count is bounded by its manifest (a handful of phase
+   * specs), not by user input, so a per-run phase LIMIT would only hide
+   * data. `readRunPhases` is the continuation contract — its rowid cursor
+   * pages one run's phases independently of this embedding. Table drift is
+   * tolerated on both halves: no `phases` table → rows carry `phases: []`;
+   * `phases` without `envelopes` → phase rows carry `output_payload_json`
+   * null (the join is skipped, not the rows).
    */
   readRunsByIssue(
     repoSlug: string,
@@ -295,12 +311,15 @@ class TraceReaderImpl implements TraceReader {
       .all(repoSlug, issueId, safeCursor, cappedLimit);
 
     const phasesByRequest = new Map<string, TracePhaseRow[]>();
-    if (sessions.length > 0 && this.hasTable("phases") && this.hasTable("envelopes")) {
+    if (sessions.length > 0 && this.hasTable("phases")) {
       // Dynamic placeholders only — values stay bound, never interpolated.
+      // The envelope join is gated independently below: a phases-without-
+      // envelopes store still embeds its phase rows, payload-less.
+      const joinEnvelopes = this.hasTable("envelopes");
       const placeholders = sessions.map(() => "?").join(", ");
       const phaseRows = db
         .query<TracePhaseRow, string[]>(
-          `${this.phaseSelect()}
+          `${this.phaseSelect(joinEnvelopes)}
             WHERE phases.request_id IN (${placeholders})
             ORDER BY phases.rowid`,
         )
@@ -341,9 +360,16 @@ class TraceReaderImpl implements TraceReader {
     const { cursor: safeCursor, cappedLimit } = this.pageParams(cursor, limit);
     const db = this.ensureDb();
 
+    // A sessions-only store has no phases to page — the table-level drift
+    // hasTable tolerates reads as "no phases" (an empty page, cursor
+    // unchanged), not a prepare-time error on a missing table.
+    if (!this.hasTable("phases")) {
+      return { rows: [], cursor: safeCursor, hasMore: false };
+    }
+
     const rows = db
       .query<TracePhaseRow, [string, number, number]>(
-        `${this.phaseSelect()}
+        `${this.phaseSelect(this.hasTable("envelopes"))}
           WHERE phases.request_id = ? AND phases.rowid > ?
           ORDER BY phases.rowid
           LIMIT ?`,

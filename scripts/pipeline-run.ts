@@ -486,7 +486,12 @@ async function main(argv: readonly string[]): Promise<number> {
   // DF1.8: in correlated mode every initiation step below the session row is
   // ladder-shaped — a refusal lands in the dispatch log with runId: null and
   // exits 2 (AC4). Bare mode keeps DF1.4's plain throws, unchanged.
-  let tracer: Tracer;
+  // `undefined` until the Tracer constructor succeeds: the catch below must
+  // be able to tell "never opened" from "opened, then a ladder step threw"
+  // (e.g. a RequestIdRepoMismatch from initiateSession) and close only the
+  // latter. Every catch path exits, so past this statement the type is
+  // definitely Tracer again.
+  let tracer: Tracer | undefined;
   try {
     // DF1.4: Claim trace data dir under marker root (QDS_RUN_ROOT) with 0700
     // Default marker root is /run when QDS_RUN_ROOT not set
@@ -573,6 +578,15 @@ async function main(argv: readonly string[]): Promise<number> {
     }
   } catch (err) {
     if (!resolved) throw err;
+    // The failure may postdate the Tracer's construction (initiateSession
+    // sits inside this try): close before the exit so an open WAL store is
+    // not leaked across dispatchFail. Guarded — a failing checkpoint must
+    // not mask the initiation error the ladder is about to record.
+    try {
+      tracer?.close();
+    } catch {
+      /* the initiation error outranks a close failure */
+    }
     return dispatchFail(
       markerRoot,
       { repoSlug: resolved.repoSlug, issueId: resolved.issueId, requestId: resolved.requestId },
@@ -607,10 +621,12 @@ async function main(argv: readonly string[]): Promise<number> {
       fs.writeSync(2, `pipeline-run: ${sig} again — exiting immediately\n`);
       // 2, not 1: the run never reached `finish`, so no marker was written and
       // the exit code must not claim the run settled.
-      // DF1.4: Close tracer before exit
+      // DF1.4: Close tracer before exit. Optional chaining because this
+      // closure captures the `Tracer | undefined` declaration above (it is
+      // always assigned by the time the handler is registered).
       try {
-        tracer.processesEndAll(requestId);
-        tracer.close();
+        tracer?.processesEndAll(requestId);
+        tracer?.close();
       } catch {
         /* ignore */
       }

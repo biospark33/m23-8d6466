@@ -875,6 +875,71 @@ describe("readRunsByIssue correlation (DF1.8, INV-RUN-3)", () => {
     expect(runB.phases).toEqual([]);
     reader.close();
   });
+
+  test("schema drift: sessions-only store — readRunPhases is an empty page, phases embed as []", () => {
+    const { dbPath } = createRunsFixture(testDir, "qds/drift", 42, 2);
+    const reader = openTraceReader(dbPath);
+
+    // No phases table at all: an empty page with the cursor unchanged, not a
+    // prepare-time error on a missing table (the hasTable drift contract).
+    const page = reader.readRunPhases("req-bulk-0");
+    expect(page.rows).toEqual([]);
+    expect(page.cursor).toBe(0);
+    expect(page.hasMore).toBe(false);
+
+    // And the correlated page embeds phases: [] rather than failing.
+    const runPage = reader.readRunsByIssue("qds/drift", 42);
+    expect(runPage.rows).toHaveLength(2);
+    expect(runPage.rows.every((r: CorrelatedRunRow) => r.phases.length === 0)).toBe(true);
+    reader.close();
+  });
+
+  test("schema drift: phases without envelopes — phase rows still embed, output_payload_json null", () => {
+    const dbPath = path.join(testDir, "trace.db");
+    const db = new Database(dbPath);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec(CORRELATED_SESSIONS_DDL);
+    db.exec(CORRELATED_PHASES_DDL);
+    db.prepare(
+      "INSERT INTO sessions (request_id, request, status, repo_slug, issue_id) VALUES (?, ?, ?, ?, ?)",
+    ).run("req-noenv", "no envelopes", "completed", "qds/noenv", 42);
+    db.prepare(
+      "INSERT INTO phases (phase_id, request_id, seq, name, kind, owner, status, attempt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run("phase-ne1", "req-noenv", 0, "plan", "plan", "engine", "ok", 1);
+    db.close();
+
+    const reader = openTraceReader(dbPath);
+    const page = reader.readRunsByIssue("qds/noenv", 42);
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]!.phases).toHaveLength(1);
+    expect(page.rows[0]!.phases[0]!.phase_id).toBe("phase-ne1");
+    // The envelope join is skipped for a missing envelopes table — the phase
+    // row is still returned, its persisted output simply reads null.
+    expect(page.rows[0]!.phases[0]!.output_payload_json).toBeNull();
+
+    // Same tolerance on the direct phases reader.
+    const phasePage = reader.readRunPhases("req-noenv");
+    expect(phasePage.rows).toHaveLength(1);
+    expect(phasePage.rows[0]!.output_payload_json).toBeNull();
+    reader.close();
+  });
+
+  test("same repo, different issue_id: both predicates filter, not just repo_slug", () => {
+    const { dbPath } = createRunsFixture(testDir, "qds/same", 42, 2);
+    const db = new Database(dbPath);
+    db.prepare(
+      "INSERT INTO sessions (request_id, request, status, repo_slug, issue_id) VALUES (?, ?, ?, ?, ?)",
+    ).run("req-issue-43", "neighbor issue", "completed", "qds/same", 43);
+    db.close();
+
+    const reader = openTraceReader(dbPath);
+    const page42 = reader.readRunsByIssue("qds/same", 42);
+    expect(page42.rows.map((r: CorrelatedRunRow) => r.request_id)).toEqual(["req-bulk-0", "req-bulk-1"]);
+
+    const page43 = reader.readRunsByIssue("qds/same", 43);
+    expect(page43.rows.map((r: CorrelatedRunRow) => r.request_id)).toEqual(["req-issue-43"]);
+    reader.close();
+  });
 });
 
 describe("readRunsByIssue limit handling (DF1.8 — identical to readEvents)", () => {

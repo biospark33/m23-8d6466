@@ -191,9 +191,11 @@ manually; P1.2 automates that intake and remains KEEP, repointed by DF5.5.)*
   provisions a box, so a double-create costs real money and leaves a second live credential.
   **`sessions(repo_slug, request_id)` adds no uniqueness** and must not be described as the
   idempotency mechanism: `request_id` is already unique alone, so the composite index can never
-  reject a row the pk would have accepted. It exists to **back the AC2 query** — `readRunsByIssue`
-  and every cross-repo-scoped read filter on `repo_slug` first, and this index is the covering path
-  for that filter. Declaring it `UNIQUE` is a cheap consistency assertion over a pk-derived pair, not
+  reject a row the pk would have accepted. It exists to **back the AC2 query's `repo_slug` prefix** —
+  `readRunsByIssue` and every cross-repo-scoped read filter on `repo_slug` first. (Review round 1
+  added the dedicated covering index for the AC2 equality pair, `idx_sessions_repo_issue` on
+  `(repo_slug, issue_id)`; this unique index remains the pk-pair consistency assertion and prefix
+  server.) Declaring it `UNIQUE` is a cheap consistency assertion over a pk-derived pair, not
   a constraint doing work. The repoSlug half of identity is enforced by AC3's
   `RequestIdRepoMismatch` check, not by the index. A `sessions` row from a bare DF1.4 run with no
   issue carries a NULL `repo_slug`, mints no key, and is returned by no reader here.
@@ -217,9 +219,10 @@ manually; P1.2 automates that intake and remains KEEP, repointed by DF5.5.)*
 
 - [x] **Impl:** `resolveRunCorrelation` settles the requestId (strict UUID v4 honoured, else
       generated) and validates `(repoSlug, issueId)` before any session row, box or key exists.
-- [x] **Impl:** DF1.4 `MIGRATIONS` extended with the three `ADD COLUMN` entries and the
-      `sessions(repo_slug, request_id)` unique index appended to DF1.4's existing `SCHEMA_INDEX_DDL`;
-      an existing `trace.db` fixture migrates intact and re-applying the migration is a no-op.
+- [x] **Impl:** DF1.4 `MIGRATIONS` extended with the three `ADD COLUMN` entries and two indexes
+      appended to DF1.4's existing `SCHEMA_INDEX_DDL` — `idx_sessions_repo_request` (UNIQUE on
+      `(repo_slug, request_id)`) and `idx_sessions_repo_issue` (covering `(repo_slug, issue_id)`,
+      added review round 1); an existing `trace.db` fixture migrates intact and re-applying the migration is a no-op.
 - [x] **Contract:** `readRunsByIssue(repoSlug, issueId, cursor?)` returns `{ rows, cursor, hasMore }`
       on DF1.4's rowid-cursor shape; no reader accepts `issueId` alone.
 - [x] **Integration:** DF1.6 `dispatch_task` step outputs land against the run's issue on the same
@@ -253,7 +256,7 @@ RED → GREEN → WIRING, via parallel subagent waves (3 test writers, then 2 im
 pinned to a locked contract file (`_bmad-output/workflow-state/qds-dev/df1-8/contract.md`):
 
 - **RED:** `tests/phase-engine/issue-correlation.test.ts` (18 tests), `tests/phase-engine/trace/reader.test.ts` (+17), `tests/phase-engine/pipeline-run.test.ts` (+6) — all confirmed failing before any implementation existed (import errors / missing methods / contract gaps).
-- **GREEN engine core:** `types.ts` DF1.8 region (`IssueRef`, `ResolvedRunCorrelation`, `TracePhaseRow`, `CorrelatedRunRow`, `CorrelatedRunPage`, `TracePhasePage`); `migrations.ts` +3 entries (`sessions.repo_slug TEXT`, `.issue_id INTEGER`, `.issue_url TEXT`); `schema.ts` `SCHEMA_INDEX_DDL` +`idx_sessions_repo_request`; net-new `issue-correlation.ts` (`REPO_SLUG_PATTERN`, `UUID_V4_PATTERN`, `MAX_ISSUE_ID`, `CorrelationError`, `RequestIdRepoMismatchError`, `isValidUuidV4`, `resolveRunCorrelation` (pure), `appendDispatchFailure` (0600 JSONL)); `tracer.ts` +`initiateSession` (`db.transaction().immediate()`, SELECT → equal-slug replay / NULL-slug fill-once UPDATE / different-slug throw, INSERT … ON CONFLICT(request_id) DO NOTHING with `changes===0` re-SELECT); `reader.ts` +`readRunsByIssue` / `readRunPhases` (rowid-cursor pages, latest-attempt envelope join, optionalColumn probes, bound params, no issueId-only entry point).
+- **GREEN engine core:** `types.ts` DF1.8 region (`IssueRef`, `ResolvedRunCorrelation`, `TracePhaseRow`, `CorrelatedRunRow`, `CorrelatedRunPage`, `TracePhasePage`); `migrations.ts` +3 entries (`sessions.repo_slug TEXT`, `.issue_id INTEGER`, `.issue_url TEXT`); `schema.ts` `SCHEMA_INDEX_DDL` +`idx_sessions_repo_request` +`idx_sessions_repo_issue` (round 1); net-new `issue-correlation.ts` (`REPO_SLUG_PATTERN`, `UUID_V4_PATTERN`, `MAX_ISSUE_ID`, `CorrelationError`, `RequestIdRepoMismatchError`, `isValidUuidV4`, `resolveRunCorrelation` (pure), `appendDispatchFailure` (0600 JSONL)); `tracer.ts` +`initiateSession` (`db.transaction().immediate()`, SELECT → equal-slug replay / NULL-slug fill-once UPDATE / different-slug throw, INSERT … ON CONFLICT(request_id) DO NOTHING with `changes===0` re-SELECT); `reader.ts` +`readRunsByIssue` / `readRunPhases` (rowid-cursor pages, latest-attempt envelope join, optionalColumn probes, bound params, no issueId-only entry point).
 - **WIRING:** `scripts/pipeline-run.ts` — `--repo-slug`/`--issue`/`--issue-url` flags (pair required, strict issue-int parse, `--run-id`+`--repo-slug` = two-identifier refusal), timed resolve (`correlation_resolve_ms`), `runId = requestId =` resolved id (no second identifier), `initiateSession` replaces `startSession` on the correlated path (`session_upsert_ms`), failure ladder (resolve / trace-open / initiate → `appendDispatchFailure(<QDS_RUN_ROOT>/dispatch-failures.log)` + stderr `dispatch_failed` with `runId: null`, exit 2), success line `run_initiated` (runId, replayed, both sub-timings), per-phase `phase_state` log events carrying the p1-8:34 field set. Bare mode byte-identical to DF1.4 behavior.
 
 ### Deviation Notes
@@ -261,7 +264,7 @@ pinned to a locked contract file (`_bmad-output/workflow-state/qds-dev/df1-8/con
 1. **`initiateSession` throws by design** — unlike every sidecar write method (AC5), correlated
    initiation is a gate: a `RequestIdRepoMismatch` refusal must stop the run before box/key
    minting, not be swallowed as a trace error. Documented in the method JSDoc.
-2. **`openWriter` order: migrations now apply BEFORE `SCHEMA_INDEX_DDL`** (statements byte-identical, order only). Required: `idx_sessions_repo_request` references `repo_slug`, which exists only after the DF1.8 migration entries. Without the reorder every Tracer open throws.
+2. **`openWriter` order: migrations now apply BEFORE `SCHEMA_INDEX_DDL`** (statements byte-identical, order only). Required: both appended indexes reference migration-only columns — `idx_sessions_repo_request` needs `repo_slug`, and `idx_sessions_repo_issue` (round 1) needs `repo_slug` AND `issue_id` — which exist only after the DF1.8 migration entries. Without the reorder every Tracer open throws.
 3. **`tests/phase-engine/trace/migrations.test.ts` one-line edit** (add `applyMigrations(db)` in the index-DDL test): the DF1.4 test applied index DDL to a SCHEMA_DDL-only DB; that premise is invalidated by an index over migrated columns. The edit restores representativeness of the real init order; original assertions untouched.
 4. **UUID v4 variant group `[89ab][0-9a-f]{3}`** (spec text said the pattern; the locked working contract briefly carried `{4}` — a 37-char pattern rejecting all real UUIDs; the tests pinned correct 36-char strict-v4 semantics and the implementation matches them).
 5. **FLAG-1 (deliberate drop, from spec research):** p1-8:78's one-live-run-per-`(repoSlug,issueId)` partial unique index (`WHERE status='running'`) is NOT carried. v5's D3 fan-out (DF3.2) legitimately runs N concurrent runs per issue; enforcing it would break that story. Idempotency here is per-requestId only, as INV-RUN-1 specifies.
@@ -285,11 +288,11 @@ pinned to a locked contract file (`_bmad-output/workflow-state/qds-dev/df1-8/con
 
 Adversarial sub-agent review of the full working-tree diff (bugs only, categorized, verified against code before reporting). 5 findings, all applied; 0 dismissed.
 
-- [x] Review — Patch [INVARIANT][HIGH] `scripts/pipeline-run.ts` — a replayed correlated invocation re-executed every phase: `finishSession` overwrote the completed run's status/ended_at (last-close-wins), `upsertPhase` overwrote historical rows, phase_state events doubled — violating INV-RUN-1 "a late replay cannot re-open it" and DoD "first-close-wins". Fix: `replayed:true` → `run_initiated` line, guarded tracer close, exit 0 **before** FileJournal/Run/walkPhases are constructed. Live-verified: sessions row byte-identical after replay, phases 2→2, phase_state 4→4.
-- [x] Review — Patch [LOGIC][HIGH] `trace/reader.ts` — the latest-attempt envelope join had no tiebreaker; two envelope rows sharing `(request_id, phase_id, attempt)` (e.g. produced by the pre-fix replay path) duplicated the phase in `readRunPhases`/`readRunsByIssue`. Fix: scalar-subselect join (`ORDER BY e2.attempt DESC, e2.rowid DESC LIMIT 1`) — exactly one envelope per phase by construction. New tie test pins it.
-- [x] Review — Patch [EDGE CASE/INVARIANT][HIGH] `trace/tracer.ts` `initiateSession` — mismatch check compared `repo_slug` only; same slug + different `issueId` under the same requestId was silently accepted as a replay (cross-issue attribution — INV-RUN-2's "cannot be re-pointed at a different issue" on the issue axis). Fix: full `(repo_slug, issue_id)` pair compare; `RequestIdRepoMismatchError` extended with `existingIssueId`/`attemptedIssueId`, message names both slugs AND both issue numbers. (Root cause: the working contract itself specified slug-only — contract gap realized in code; story text was always the authority.)
-- [x] Review — Patch [EDGE CASE][MED] `trace/reader.ts` `readRunsByIssue` — `optionalColumn` probes for the correlation columns in the SELECT were dead (the WHERE hard-references them), implying drift tolerance the query cannot deliver. Fix: reference directly; an unmigrated store fails loudly at prepare (fail-closed), one-line comment.
-- [x] Review — Patch [SECURITY][MED] `issue-correlation.ts` `appendDispatchFailure` — none of the tracer's same-boundary symlink/TOCTOU hardening: followed a symlinked log path, never mode-checked a pre-existing parent. Fix: open with `O_NOFOLLOW` (0600), refuse group/world-writable parents (`mode & 0o022`), comments citing the tracer's guards.
+- [x] Review — Patch `[INVARIANT][HIGH]` `scripts/pipeline-run.ts` — a replayed correlated invocation re-executed every phase: `finishSession` overwrote the completed run's status/ended_at (last-close-wins), `upsertPhase` overwrote historical rows, phase_state events doubled — violating INV-RUN-1 "a late replay cannot re-open it" and DoD "first-close-wins". Fix: `replayed:true` → `run_initiated` line, guarded tracer close, exit 0 **before** FileJournal/Run/walkPhases are constructed. Live-verified: sessions row byte-identical after replay, phases 2→2, phase_state 4→4.
+- [x] Review — Patch `[LOGIC][HIGH]` `trace/reader.ts` — the latest-attempt envelope join had no tiebreaker; two envelope rows sharing `(request_id, phase_id, attempt)` (e.g. produced by the pre-fix replay path) duplicated the phase in `readRunPhases`/`readRunsByIssue`. Fix: scalar-subselect join (`ORDER BY e2.attempt DESC, e2.rowid DESC LIMIT 1`) — exactly one envelope per phase by construction. New tie test pins it.
+- [x] Review — Patch `[EDGE CASE/INVARIANT][HIGH]` `trace/tracer.ts` `initiateSession` — mismatch check compared `repo_slug` only; same slug + different `issueId` under the same requestId was silently accepted as a replay (cross-issue attribution — INV-RUN-2's "cannot be re-pointed at a different issue" on the issue axis). Fix: full `(repo_slug, issue_id)` pair compare; `RequestIdRepoMismatchError` extended with `existingIssueId`/`attemptedIssueId`, message names both slugs AND both issue numbers. (Root cause: the working contract itself specified slug-only — contract gap realized in code; story text was always the authority.)
+- [x] Review — Patch `[EDGE CASE][MED]` `trace/reader.ts` `readRunsByIssue` — `optionalColumn` probes for the correlation columns in the SELECT were dead (the WHERE hard-references them), implying drift tolerance the query cannot deliver. Fix: reference directly; an unmigrated store fails loudly at prepare (fail-closed), one-line comment.
+- [x] Review — Patch `[SECURITY][MED]` `issue-correlation.ts` `appendDispatchFailure` — none of the tracer's same-boundary symlink/TOCTOU hardening: followed a symlinked log path, never mode-checked a pre-existing parent. Fix: open with `O_NOFOLLOW` (0600), refuse group/world-writable parents (`mode & 0o022`), comments citing the tracer's guards.
 - Verified clean (hunted, not reported): concurrent-initiation races (immediate transaction + DO NOTHING + re-SELECT), SQL injection (all values bound; IN-placeholders ≤ limit cap), paging math parity with `readEvents`, flag-parsing edges, bare-mode byte-identity, wrapper pass-through of abort/verdict semantics, IN-clause bind-count ceiling.
 
 Gates after the fix wave: 126 focal tests pass (6 files), `tsc --noEmit` 0 errors, defensive-programming scanner OK, biome clean; e2e artifacts re-harvested (`replay-proof.json` now shows the true no-op: zero history mutation).
@@ -298,7 +301,7 @@ Gates after the fix wave: 126 focal tests pass (6 files), `tsc --noEmit` 0 error
 
 Full bmad-code-review workflow (3 adversarial layers, parallel subagents) over the PR #117 diff. Blind Hunter: 0 findings. Edge Case Hunter (source): 1. Edge Case Hunter (tests): 0. Acceptance Auditor (diff vs contract.md + story): 0 — fully compliant.
 
-- [x] Review — Patch [LOW] `trace/reader.ts:304` `readRunsByIssue` phases sub-query carried a dead `AND phases.rowid > 0` predicate — the query binds no rowid cursor and SQLite rowids are always >= 1, so it matched every row and filtered nothing. Fix (fa7383c): removed; `request_id IN (...)` + `ORDER BY phases.rowid` are the real query.
+- [x] Review — Patch `[LOW]` `trace/reader.ts:304` `readRunsByIssue` phases sub-query carried a dead `AND phases.rowid > 0` predicate — the query binds no rowid cursor and SQLite rowids are always >= 1, so it matched every row and filtered nothing. Fix (fa7383c): removed; `request_id IN (...)` + `ORDER BY phases.rowid` are the real query.
 
 Gates: 84 focal tests pass (reader + issue-correlation + pipeline-run), `tsc --noEmit` 0 errors, gitnexus detect_changes low risk. Status stays `review` until PR #117 merges.
 
@@ -315,7 +318,7 @@ Gates: 84 focal tests pass (reader + issue-correlation + pipeline-run), `tsc --n
 
 **(additive)**
 - `src/phase-engine/trace/migrations.ts` (+3 entries)
-- `src/phase-engine/trace/schema.ts` (+1 index DDL in `SCHEMA_INDEX_DDL`)
+- `src/phase-engine/trace/schema.ts` (+2 index DDLs in `SCHEMA_INDEX_DDL`: `idx_sessions_repo_request` UNIQUE, `idx_sessions_repo_issue` covering — the latter review round 1)
 - `src/phase-engine/trace/tracer.ts` (+`initiateSession`; openWriter order change per Deviation 2)
 - `src/phase-engine/trace/reader.ts` (+2 methods)
 - `scripts/pipeline-run.ts` (flags + correlation wiring; bare path unchanged)
@@ -327,5 +330,5 @@ Gates: 84 focal tests pass (reader + issue-correlation + pipeline-run), `tsc --n
 
 ### Change Log
 
-- 2026-08-18: DF1.8 implemented — issue correlation on the DF1.4 trace store (3 columns, 1 unique index, `resolveRunCorrelation`, idempotent `initiateSession`, `readRunsByIssue`/`readRunPhases`, CLI `--repo-slug`/`--issue` wiring, host dispatch-failure log). 41 new tests; tsc + biome clean; e2e evidence captured.
+- 2026-08-18: DF1.8 implemented — issue correlation on the DF1.4 trace store (3 columns, 2 indexes — unique `idx_sessions_repo_request` + covering `idx_sessions_repo_issue` — `resolveRunCorrelation`, idempotent `initiateSession`, `readRunsByIssue`/`readRunPhases`, CLI `--repo-slug`/`--issue` wiring, host dispatch-failure log). 41 new tests; tsc + biome clean; e2e evidence captured.
 - 2026-08-18: BMAD review round 3 (fa7383c) — 1 LOW fixed (dead `phases.rowid > 0` filter in `readRunsByIssue`); 0 findings from the other 3 layers.

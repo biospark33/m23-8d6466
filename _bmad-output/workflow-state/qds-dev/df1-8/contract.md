@@ -111,11 +111,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_repo_request
 ON sessions (repo_slug, request_id)
 ```
 
+Review round 1 appended a second entry (the actual covering path for the AC2
+query — `readRunsByIssue` predicates on `(repo_slug, issue_id)` with a rowid
+cursor; non-unique because a `(repo, issue)` pair legitimately has many runs):
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_sessions_repo_issue
+ON sessions (repo_slug, issue_id)
+```
+
 ## issue-correlation.ts (NET-NEW)
 
 ```ts
 export const REPO_SLUG_PATTERN = /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/;
-export const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const MAX_ISSUE_ID = 2 ** 31 - 1;
 
 export class CorrelationError extends Error {
@@ -147,11 +156,11 @@ export function resolveRunCorrelation(brief: IssueRef & { requestId?: string }):
 ```ts
 export function appendDispatchFailure(
   logPath: string,
-  entry: { repoSlug: string; issueId: number; requestId: string | null; code: string; message: string },
+  entry: { repoSlug: string | null; issueId: number | null; requestId: string | null; code: string; message: string },
 ): void;
 ```
-- Appends one JSON line `{ timestamp: <iso>, repoSlug, issueId, requestId, code, message }`.
-- Never prompt content. File mode 0600 (open "a" 0o600; chmod+verify), parent dir mkdir 0700 if missing.
+- Appends one JSON line `{ timestamp: <iso>, repoSlug, issueId, requestId, code, message }`. `repoSlug`/`issueId` are **nullable**: null when the refusal fired before that half of the pair was settled (invalid slug, non-numeric or out-of-bounds `--issue`) — never `""`/`0`, which would read as a real correlation (INV-RUN-4).
+- Never prompt content. File mode 0600 (open `O_APPEND|O_CREAT|O_NOFOLLOW` 0o600; fd-scoped chmod+verify), parent dir mkdir 0700 if missing.
 - Must succeed when the trace store could not even open (AC4). Throws on hard fs failure (caller logs to stderr then exits 2).
 
 ## tracer.ts — append method (keep every existing method byte-identical)
@@ -190,7 +199,7 @@ readRunPhases(requestId: string, cursor?: number, limit?: number): TracePhasePag
 ```
 
 - Cursor validation + limit capping IDENTICAL to `readEvents` (non-negative-integer cursor else throw; trunc → min MAX_LIMIT, non-positive/non-finite → DEFAULT_LIMIT).
-- `readRunsByIssue`: `SELECT rowid, request_id, request, status, started_at, ended_at, duration_ms, total_tokens, <optionalColumn probes: total_cost, pipeline_name, repo_slug, issue_id, issue_url> FROM sessions WHERE repo_slug = ? AND issue_id = ? AND rowid > ? ORDER BY rowid LIMIT ?`. Then one second query fetches `readRunPhases`-shaped rows for the page's request_ids (`WHERE request_id IN (...) AND rowid > 0` — same join) and groups them onto rows. Page shape: `cursor` = last rowid or prior cursor; `hasMore = rows.length === cappedLimit`. Empty page → `{ rows: [], cursor: Math.max(0, cursor), hasMore: false }` — NOT an error.
+- `readRunsByIssue`: `SELECT rowid, request_id, request, status, started_at, ended_at, duration_ms, total_tokens, <optionalColumn probes: total_cost, pipeline_name, repo_slug, issue_id, issue_url> FROM sessions WHERE repo_slug = ? AND issue_id = ? AND rowid > ? ORDER BY rowid LIMIT ?`. Then one second query fetches `readRunPhases`-shaped rows for the page's request_ids (`WHERE request_id IN (...)` — same join) and groups them onto rows. Embedded phases are the run's full set (bounded by its manifest, never truncated); `readRunPhases` is the per-run continuation cursor. Table drift is tolerated independently: no `phases` table → every row's `phases: []`; `phases` without `envelopes` → phase rows still embed, with `output_payload_json` null (join skipped). Page shape: `cursor` = last rowid or prior cursor; `hasMore = rows.length === cappedLimit`. Empty page → `{ rows: [], cursor: Math.max(0, cursor), hasMore: false }` — NOT an error. `readRunPhases` on a store with no `phases` table returns that same empty page, not an error.
 - `readRunPhases`: phases rows + `output_payload_json` = the phase's LATEST-attempt envelope payload:
   `LEFT JOIN envelopes en ON en.request_id = phases.request_id AND en.phase_id = phases.phase_id AND en.attempt = (SELECT MAX(e2.attempt) FROM envelopes e2 WHERE e2.request_id = en.request_id AND e2.phase_id = en.phase_id)` selecting `en.payload_json AS output_payload_json`. rowid-cursor paging on `phases.rowid`, same page shape.
 - There is deliberately NO reader method taking `issueId` alone (INV-RUN-3). All values bound parameters.

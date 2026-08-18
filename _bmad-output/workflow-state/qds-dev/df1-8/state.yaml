@@ -1,5 +1,7 @@
 story: df1-8-run-capture-issue-correlation
-phase: dev-story
+phase: complete
+pr: https://github.com/biospark33/QDS-Factory/pull/117
+commit: b625128
 branch: feature/df1-8-run-capture-issue-correlation
 base: main
 target: main
@@ -12,20 +14,20 @@ research:
   auto_approved: true  # >= 0.8 per skill
   summary:
     upsert: ON CONFLICT(request_id) DO NOTHING + changes===0 = no-op; db.transaction().immediate() for race; identifiers inlined (track A, empirically verified Bun 1.2.22)
-    blast_radius: LOW everywhere (GitNexus); startSession single caller pipeline-run.ts:313 (track B)
+    blast_radius: "LOW everywhere (GitNexus); startSession single caller pipeline-run.ts:313 (track B)"
     guards: fail-closed, deterministic tests, no as any, negative controls, EXIT_STATUSES discipline, MAX_SAFE_INTEGER guards, cleanup on all paths (track C)
-    specs: all clauses honored; FLAG-1 one-live-run-per-issue partial index dropped (deliberate: D3 fan-out runs N per issue — record as deviation); FLAG-2/3 note-only (track D)
+    specs: "all clauses honored; FLAG-1 one-live-run-per-issue partial index dropped (deliberate: D3 fan-out runs N per issue — record as deviation); FLAG-2/3 note-only (track D)"
     exports: MIGRATIONS/SCHEMA_INDEX_DDL/reader/TraceSessionRow/ExitStatus all present HEAD; baseline 73 trace tests pass, tsc clean (track E)
     lift: int-bounds check (cli-anything/src/index.ts:115-119 parseTimeoutMs pattern), TracerError class pattern, cursor-page shape, 0600 enforcement reusable; uuid-v4 + repoSlug regexes new (~2 lines, spec'd) (track F)
   design_decisions:
     - MIGRATIONS appends ["sessions","repo_slug","TEXT"], ["sessions","issue_id","INTEGER"], ["sessions","issue_url","TEXT"]
-    - SCHEMA_INDEX_DDL appends CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_repo_request ON sessions (repo_slug, request_id)
-    - types.ts new DF1.8 region: correlation input shape + resolved-requestId result type + correlated row/page types; TraceSessionRow appends 3 fields
-    - resolveRunCorrelation in new src/phase-engine/issue-correlation.ts: settles requestId (strict UUID v4 honoured else crypto.randomUUID()), validates (repoSlug, issueId), RequestIdRepoMismatch structured error, refusal before any session row/box/key
+    - SCHEMA_INDEX_DDL appends idx_sessions_repo_request (UNIQUE, repo_slug+request_id) and — review round 1 — idx_sessions_repo_issue (covering, repo_slug+issue_id, backs the AC2 query)
+    - "types.ts new DF1.8 region: correlation input shape + resolved-requestId result type + correlated row/page types; TraceSessionRow unchanged (the 3 new columns live on the sessions table via MIGRATIONS), reader returns CorrelatedRunRow"
+    - "resolveRunCorrelation in new src/phase-engine/issue-correlation.ts: settles requestId (strict UUID v4 honoured else crypto.randomUUID()), validates (repoSlug, issueId), RequestIdRepoMismatch structured error, refusal before any session row/box/key"
     - correlated session create: transactional upsert DO NOTHING; changes===0 -> existing row -> repo_slug match check -> return existing runId; runId === resolved requestId on correlated path (no second identifier)
     - explicit --run-id together with --repo-slug = refusal (two identifiers)
     - readRunsByIssue(repoSlug, issueId, cursor?, limit?) -> {rows, cursor, hasMore} rowid-cursor; rows carry session + phases + persisted output payload; readRunPhases(requestId, ...) phases page; no reader accepts issueId alone
-    - host dispatch log: append-only 0600, records failure against (repoSlug, issueId) + error code, never prompt content; survives trace open failure
+    - "host dispatch log: append-only 0600, records failure against (repoSlug, issueId) + error code, never prompt content; survives trace open failure"
     - sub-timings correlation_resolve_ms / session_upsert_ms, 0 when absent
     - DF3.1 imports resolveRunCorrelation; RequestIdRepoMismatch -> exit 2 (interface contract)
     - DF2.8 keys (repo_slug, issue_id, request_id)
