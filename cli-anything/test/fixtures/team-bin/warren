@@ -211,6 +211,50 @@ async function main(): Promise<void> {
       process.exit(0);
       break;
     }
+    case "many_small_lines_one_chunk": {
+      // F15 per-LINE cap regression: several complete NDJSON lines coalesced
+      // into a SINGLE write, whose SUM exceeds the cap but where NO line does.
+      // A chunk-level cap check would drop the first line (and log a false
+      // breach); the per-line scan must keep every line. Padded worker
+      // summaries (~800 B each) push the total past the 2048-byte test cap.
+      const lines = [
+        coms(1, "lead", "worker-a"),
+        coms(2, "worker-a", "lead"),
+        { ...workerOutput("worker-a", ["src/a.ts"]), output: { changedFiles: ["src/a.ts"], result: { summary: `worker-a done ${"x".repeat(700)}` } } },
+        { ...workerOutput("worker-b", ["src/b.ts"]), output: { changedFiles: ["src/b.ts"], result: { summary: `worker-b done ${"x".repeat(700)}` } } },
+        { type: "merged", result: { summary: "all small lines survived one chunk" } },
+      ];
+      process.stdout.write(lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+      process.exit(0);
+      break;
+    }
+    case "partial_output_over_cap": {
+      // DF1.6 T1/R9 regression: emit >10KB of valid NDJSON, then die without
+      // a merged event. partialOutput must come back capped at
+      // MAX_PARTIAL_OUTPUT_CHARS AND end with the shared truncation marker —
+      // silently-clipped output (no marker) is the bug this guards against.
+      for (let i = 0; i < 20; i++) {
+        say({ ...coms(i + 1, "lead", "worker-a"), channel: `lead:worker-a:${"p".repeat(700)}` });
+      }
+      process.exit(1);
+      break;
+    }
+    case "abort_graceful_exit0": {
+      // R12 regression: emits the full success stream, then idles. On SIGTERM
+      // (the abort kill) it emits merged and exits 0 — a child honoring the
+      // abort kill cleanly. The runner must still classify the run transient,
+      // not success.
+      say(coms(1, "lead", "worker-a"));
+      say(coms(2, "worker-a", "lead"));
+      say(workerOutput("worker-a", ["src/a.ts"]));
+      say(workerOutput("worker-b", ["src/b.ts"]));
+      process.on("SIGTERM", () => {
+        say({ type: "merged", result: { summary: "graceful shutdown" } });
+        process.exit(0);
+      });
+      await sleep(60_000);
+      break;
+    }
     case "watchdog_kill": {
       // Stay alive for watchdog to escalate. Emit a cost event first to match
       // production pattern and let budget-vs-watchdog races surface.

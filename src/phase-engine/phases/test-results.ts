@@ -55,11 +55,15 @@ const ANSI_ESCAPE = /\x1b\[[0-9;]*m/g;
  * Started IMMEDIATELY after spawn: awaiting the exit race first would leave
  * the pipe undrained — a chatty test binary fills the 64 KiB pipe buffer,
  * blocks on write, and the exit being awaited never happens (deadlock).
+ *
+ * The DRAIN_TIMEOUT_MS backstop inside is armed only once `exited` (the
+ * child's exit promise) resolves — see the timer block for why.
  */
 async function readCapped(
   stream: ReadableStream<Uint8Array> | number | undefined,
   cap: number,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  exited: Promise<number>,
 ): Promise<{ text: string; capped: boolean }> {
   if (stream === undefined || typeof stream === "number") {
     return { text: "", capped: false };
@@ -95,17 +99,36 @@ async function readCapped(
   // DRAIN_TIMEOUT_MS backstop — if the stream never closes, we abort and
   // return partial text. The abort race below (which races proc.exited) is the
   // PRIMARY guard; this is for pathological processes that never close the pipe.
+  //
+  // The timer is ARMED ONLY AFTER `exited` resolves: readers start at spawn,
+  // but the backstop exists for a descendant holding the pipe open after the
+  // child exits. Arming it at read start would cancel both readers mid-run on
+  // any legitimate suite longer than DRAIN_TIMEOUT_MS, losing the terminal
+  // summary line and failing closed (review round 9).
+  let drainTimer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  let readerSettled = false;
   const timeout = new Promise<"timeout">((resolve) => {
-    const timer = setTimeout(() => resolve("timeout"), DRAIN_TIMEOUT_MS);
-    timer.unref();
-    // Allow signal to cut the timeout short
-    signal?.addEventListener("abort", () => {
-      clearTimeout(timer);
+    onAbort = () => {
+      if (drainTimer !== undefined) clearTimeout(drainTimer);
       resolve("timeout");
-    }, { once: true });
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    void exited.then(() => {
+      if (readerSettled) return; // drain finished before exit — nothing to arm
+      drainTimer = setTimeout(() => resolve("timeout"), DRAIN_TIMEOUT_MS);
+      drainTimer.unref();
+    });
   });
 
   const result = await Promise.race([drainPromise, timeout]);
+  readerSettled = true;
+  if (drainTimer !== undefined) clearTimeout(drainTimer);
+  // Balanced listener lifecycle: remove on EVERY settle path. On the abort path
+  // { once: true } already consumed it (removal is then a harmless no-op); on
+  // every other path this is what keeps a reused non-aborted signal from
+  // accumulating two dead listeners per runTestCommand call.
+  if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
   if (result === "timeout") {
     // Drain timed out — cancel the reader and accept partial data
     await reader.cancel().catch(() => {});
@@ -164,9 +187,10 @@ export async function runTestCommand(
     });
 
     // Read BOTH streams immediately (see readCapped) — before any exit wait.
-    // Pass the abort signal so drain timeouts respect aborts.
-    const stdoutRead = readCapped(proc.stdout, MAX_CAPTURE_BYTES, signal);
-    const stderrRead = readCapped(proc.stderr, MAX_CAPTURE_BYTES, signal);
+    // Pass the abort signal so drain timeouts respect aborts, and proc.exited
+    // so the drain backstop arms only once the child is gone.
+    const stdoutRead = readCapped(proc.stdout, MAX_CAPTURE_BYTES, signal, proc.exited);
+    const stderrRead = readCapped(proc.stderr, MAX_CAPTURE_BYTES, signal, proc.exited);
 
     if (signal) {
       // Named handler removed after the race: a long-lived AbortSignal reused

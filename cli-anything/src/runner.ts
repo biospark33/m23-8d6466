@@ -749,6 +749,11 @@ export async function runTeamManifest(
     // Leave headroom for truncation suffix so the marker always appears when cut.
     // Single source of truth: MAX_PARTIAL_OUTPUT_CHARS from merger.ts.
     let partialOutputBuffer = "";
+    // R9: full decoded char count offered to the buffer. Exceeds the buffer
+    // length exactly when content was DISCARDED — past the cap, or a code unit
+    // omitted by the surrogate-safe cut. That gap is what collectPartialOutput
+    // marks with the truncation suffix.
+    let partialOutputSeenChars = 0;
     const PARTIAL_OUTPUT_CAP = MAX_PARTIAL_OUTPUT_CHARS - MAX_SUFFIX_LENGTH;
 
     // DF1.6 T4: RSS watchdog handle (started after spawn, stopped on settle)
@@ -772,9 +777,42 @@ export async function runTeamManifest(
       timers.push(t);
     }
 
-    // DF1.6 T1: Return collected partial output for failure paths
+    // DF1.6 T1/R9: Append decoded stdout to the partial-output buffer, capped
+    // at PARTIAL_OUTPUT_CAP with a surrogate-safe cut (no split pair at the
+    // seam). Everything past the cap is dropped here but COUNTED in
+    // partialOutputSeenChars so collectPartialOutput can mark the cut.
+    function appendPartialOutput(decoded: string): void {
+      partialOutputSeenChars += decoded.length;
+      if (partialOutputBuffer.length >= PARTIAL_OUTPUT_CAP) return;
+      const remaining = PARTIAL_OUTPUT_CAP - partialOutputBuffer.length;
+      let toAppend = decoded;
+      if (toAppend.length > remaining) {
+        // Walk back from the cut so a high surrogate is never orphaned (R7).
+        let cutPoint = remaining;
+        while (
+          cutPoint > 0 &&
+          toAppend.charCodeAt(cutPoint - 1) >= 0xD800 &&
+          toAppend.charCodeAt(cutPoint - 1) <= 0xDBFF
+        ) {
+          cutPoint--;
+        }
+        toAppend = toAppend.slice(0, cutPoint);
+      }
+      partialOutputBuffer += toAppend;
+    }
+
+    // DF1.6 T1: Return collected partial output for failure paths. When
+    // nothing was discarded the buffer is returned verbatim; when content was
+    // cut, append the shared truncation marker. Buffer ≤ MAX minus
+    // MAX_SUFFIX_LENGTH and the clamped suffix ≤ MAX_SUFFIX_LENGTH, so the
+    // result can never exceed MAX_PARTIAL_OUTPUT_CHARS (merger's own
+    // truncateWithSuffix then passes it through untouched).
     function collectPartialOutput(): string {
-      return partialOutputBuffer;
+      if (partialOutputSeenChars <= partialOutputBuffer.length) {
+        return partialOutputBuffer;
+      }
+      const total = Math.min(partialOutputSeenChars, 999_999_999);
+      return partialOutputBuffer + TRUNCATION_SUFFIX.replace("N", String(total));
     }
 
     function settle(
@@ -785,6 +823,14 @@ export async function runTeamManifest(
     ): void {
       if (settled) return;
       settled = true;
+      // R12: a run the parent aborted must never resolve as success — a child
+      // that exits 0 while honoring the kill signal would otherwise classify
+      // clean. Budget/wall-clock/watchdog keep their "overflow" classification
+      // (their precedence predates the abort); every other status downgrades
+      // to transient (retryable), matching abortTeam's own settle path.
+      // (transient already keeps changedFiles collection and partialOutput
+      // reporting, so only the resolve payload needs the swap.)
+      const abortDowngraded = abortRequested && exitStatus !== "overflow";
       for (const t of timers) clearTimeout(t);
       // DF1.6 T4/R11: Read killOrigin BEFORE stopping watchdog (stop() clears handle ref).
       // Precedence: watchdog > budget/wallClock/requestedShutdown > null.
@@ -823,7 +869,7 @@ export async function runTeamManifest(
 
       resolve(
         buildMergedOutput({
-          exitStatus,
+          exitStatus: abortDowngraded ? "transient" : exitStatus,
           partial,
           result: mergedResult ?? {},
           agentOutputs,
@@ -831,7 +877,9 @@ export async function runTeamManifest(
           comsLog: comsLog.entries,
           durationMs: Date.now() - startedAt,
           waivers,
-          error,
+          error: abortDowngraded
+            ? { reason: "transient", message: "run aborted by parent signal" }
+            : error,
           redact,
           // DF1.6 T1: New required fields with defaults for runner path
           testResults: { passed: 0, failed: 0 },
@@ -894,9 +942,14 @@ export async function runTeamManifest(
     // Pre-aborted signals skip team spawn entirely; watchdog/manifest never start.
     // abortTeam is idempotent via teamKilled flag (R5).
     let teamKilled = false;
+    // R12: set in abortTeam BEFORE the kill — settle() reads it to downgrade a
+    // clean child exit (code 0 while honoring the kill signal) away from
+    // "success". Overflow (budget/wall/watchdog) keeps its classification.
+    let abortRequested = false;
     const abortTeam = (): void => {
       if (settled || teamKilled) return;
       teamKilled = true;
+      abortRequested = true;
       budgetOrWallKillOrigin = "requestedShutdown"; // R11: report abort kill origin
       killTree(child);
       arm(WATCHDOG_GRACE_MS, () => {
@@ -918,8 +971,13 @@ export async function runTeamManifest(
       abortListener = abortTeam;
       // Re-check after addEventListener: an abort between the check above
       // and addEventListener would have been missed. If already aborted,
-      // invoke synchronously (the listener won't fire again due to once:true).
-      if (optsSignal.aborted) abortTeam();
+      // invoke synchronously (the listener won't fire again due to once:true)
+      // and STOP — spawning a team the parent already cancelled would race
+      // the armed settle against the child's own exit handling.
+      if (optsSignal.aborted) {
+        abortTeam();
+        return;
+      }
     }
 
     try {
@@ -1095,19 +1153,22 @@ export async function runTeamManifest(
     }
 
     child.stdout!.on("data", (chunk: Buffer) => {
-      // F15 (per-line cap): bound the CURRENT unterminated line, not cumulative
+      // F15 (per-line cap): bound each newline-delimited LINE, not cumulative
       // run output. A long legitimate run emits many small NDJSON lines that
-      // would exhaust a cumulative 1 MiB budget and silently drop every later
+      // would exhaust a cumulative budget and silently drop every later
       // event — including `merged`, misclassifying a clean run as
-      // lead_failure/logic. An oversized line is discarded through its next
-      // newline, then parsing resumes.
-      let bytes: Buffer = chunk;
+      // lead_failure/logic. The chunk is scanned by PHYSICAL newline
+      // boundaries and the cap is judged independently per line: small lines
+      // coalesced into one chunk are never falsely dropped, and each oversized
+      // line emits exactly one droppedOversize event and is discarded through
+      // its terminating newline.
+      let rest: Buffer = chunk;
       // Resume after an oversized line: drop through its terminating newline,
       // which may sit inside this same chunk, then parse the tail.
       if (teamStdoutCapped) {
-        const nl = bytes.indexOf(0x0a);
+        const nl = rest.indexOf(0x0a);
         if (nl === -1) return;
-        bytes = bytes.subarray(nl + 1);
+        rest = rest.subarray(nl + 1);
         teamStdoutCapped = false;
         teamStdoutBytes = 0;
         lineBuffer = "";
@@ -1115,69 +1176,60 @@ export async function runTeamManifest(
         // line was still being decoded, so they cannot prefix the resumed tail.
         decoder = new StringDecoder("utf8");
       }
-      // Count raw Buffer bytes BEFORE decoding: decoded.length is UTF-16 code
-      // units and undercounts multibyte UTF-8 (up to 4x), so a line of 3-byte
-      // chars could slip past the cap and grow lineBuffer without bound.
-      if (teamStdoutBytes + bytes.length > teamStdoutCapBytes) {
-        console.error(
-          `cli-anything: lead stdout line exceeded ${teamStdoutCapBytes} byte cap — line dropped, parsing resumes after next newline`,
-        );
-        // DF1.6 T7 (AC2): a cap-dropped line never reaches the parser — count
-        // it as droppedOversize, never as malformed.
-        try {
-          opts.onTeamEvent?.(null, { droppedOversize: true });
-        } catch (err) {
-          console.error("cli-anything: onTeamEvent callback threw", err);
-        }
-        lineBuffer = "";
-        teamStdoutBytes = 0;
-        // Reset the decoder: earlier chunks of THIS oversized line may have
-        // left a partial multibyte char buffered. Dropping it here stops those
-        // stale bytes from corrupting the first line parsed after resume.
-        decoder = new StringDecoder("utf8");
-        // Discard the rest of this oversized line through its next newline. It
-        // may be later in THIS chunk (drop in place + decode only the tail); if
-        // it spans into the next chunk, stay in discard-mode until it lands.
-        const nl = bytes.indexOf(0x0a);
-        if (nl === -1) {
-          teamStdoutCapped = true;
-          return;
-        }
-        bytes = bytes.subarray(nl + 1);
-      }
-      // Decode exactly once: the full chunk in the normal path, or only the
-      // tail that survived a discarded oversized line.
-      if (bytes.length > 0) {
-        const decoded = decoder.write(bytes);
-        lineBuffer += decoded;
-        teamStdoutBytes += bytes.length;
-        // DF1.6 T1/R7: Collect partial output for failure paths (capped at 10KB).
-        // Cut at code-point boundary to avoid splitting surrogate pairs.
-        if (partialOutputBuffer.length < PARTIAL_OUTPUT_CAP) {
-          const remaining = PARTIAL_OUTPUT_CAP - partialOutputBuffer.length;
-          let toAppend = decoded;
-          if (decoded.length > remaining) {
-            // Find a safe cut point: walk back from remaining to avoid orphaned surrogate.
-            let cutPoint = remaining;
-            // A lone high surrogate (0xD800-0xDBFF) means we cut a surrogate pair.
-            // Back up one code unit to leave the high surrogate for the next chunk.
-            // This is conservative but safe — we may leave one extra character.
-            while (cutPoint > 0 && toAppend.charCodeAt(cutPoint - 1) >= 0xD800 && toAppend.charCodeAt(cutPoint - 1) <= 0xDBFF) {
-              cutPoint--;
-            }
-            toAppend = toAppend.slice(0, cutPoint);
+      while (rest.length > 0) {
+        const nl = rest.indexOf(0x0a);
+        const segEnd = nl === -1 ? rest.length : nl + 1;
+        const seg = rest.subarray(0, segEnd);
+        rest = rest.subarray(segEnd);
+        // Count raw Buffer bytes BEFORE decoding: decoded.length is UTF-16
+        // code units and undercounts multibyte UTF-8 (up to 4x), so a line of
+        // 3-byte chars could slip past the cap and grow lineBuffer unbounded.
+        if (teamStdoutBytes + seg.length > teamStdoutCapBytes) {
+          console.error(
+            `cli-anything: lead stdout line exceeded ${teamStdoutCapBytes} byte cap — line dropped, parsing resumes after next newline`,
+          );
+          // DF1.6 T7 (AC2): a cap-dropped line never reaches the parser — count
+          // it as droppedOversize, never as malformed.
+          try {
+            opts.onTeamEvent?.(null, { droppedOversize: true });
+          } catch (err) {
+            console.error("cli-anything: onTeamEvent callback threw", err);
           }
-          partialOutputBuffer += toAppend;
+          lineBuffer = "";
+          teamStdoutBytes = 0;
+          // Reset the decoder: earlier chunks of THIS oversized line may have
+          // left a partial multibyte char buffered. Dropping it here stops
+          // those stale bytes from corrupting the first line parsed after
+          // resume.
+          decoder = new StringDecoder("utf8");
+          if (nl === -1) {
+            // Oversized line continues into later chunks — stay in discard
+            // mode until its newline lands (no second event for this line).
+            teamStdoutCapped = true;
+            return;
+          }
+          // The segment ended this line — following segments are fresh lines.
+          continue;
         }
+        const decoded = decoder.write(seg);
+        lineBuffer += decoded;
+        teamStdoutBytes += seg.length;
+        if (nl !== -1) {
+          // seg ended a line: the counter starts fresh for the next segment.
+          teamStdoutBytes = 0;
+        }
+        // DF1.6 T1/R9: collect partial output (capped, surrogate-safe —
+        // see appendPartialOutput).
+        appendPartialOutput(decoded);
       }
       // Consume complete lines; reset the per-line byte counter for whatever
       // partial line remains after each newline.
-      let nl = lineBuffer.indexOf("\n");
-      while (nl !== -1) {
-        processLine(lineBuffer.slice(0, nl));
-        lineBuffer = lineBuffer.slice(nl + 1);
+      let nl2 = lineBuffer.indexOf("\n");
+      while (nl2 !== -1) {
+        processLine(lineBuffer.slice(0, nl2));
+        lineBuffer = lineBuffer.slice(nl2 + 1);
         teamStdoutBytes = Buffer.byteLength(lineBuffer, "utf8");
-        nl = lineBuffer.indexOf("\n");
+        nl2 = lineBuffer.indexOf("\n");
       }
     });
 
@@ -1215,7 +1267,11 @@ export async function runTeamManifest(
         // EOF mid-oversized-line: the decoder tail belongs to the discarded
         // line, so drop it instead of parsing a fragment.
         if (!teamStdoutCapped) {
-          lineBuffer += decoder.end();
+          const tail = decoder.end();
+          lineBuffer += tail;
+          // R9 parity: the decoder tail was never offered to the partial-output
+          // collector — count it so a cut at exactly EOF is still marked.
+          appendPartialOutput(tail);
           if (lineBuffer.length > 0) {
             processLine(lineBuffer);
             lineBuffer = "";

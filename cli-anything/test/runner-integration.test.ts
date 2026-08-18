@@ -290,6 +290,62 @@ describe("runTeamManifest", () => {
     }
   }, 15_000);
 
+  it("F15: many complete small lines coalesced into ONE chunk are not falsely dropped (per-line cap)", async () => {
+    // Regression (review round 9): the cap used to be judged once per data
+    // chunk against the whole chunk, so several legitimate sub-cap lines
+    // coalesced into a single write > cap lost their first line to a false
+    // "oversized" drop. The per-line scan must keep every physical line.
+    const capError = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const out = await runTeamManifest(TEAM_MANIFEST, {
+        env: teamEnv("many_small_lines_one_chunk"),
+        teamStdoutCapBytes: 2048,
+      });
+      expectUniformSchema(out);
+      expect(out.exitStatus).toBe("success");
+      expect(out.comsLog.length).toBe(2);
+      const capFired = capError.mock.calls.some((c) =>
+        String(c[0]).includes("lead stdout line exceeded"),
+      );
+      expect(capFired).toBe(false);
+    } finally {
+      capError.mockRestore();
+    }
+  }, 15_000);
+
+  it("partial output over the 10KB cap is marked with the truncation suffix (R9)", async () => {
+    // Regression (review round 9): output past PARTIAL_OUTPUT_CAP was
+    // discarded silently — the buffer never exceeded the cap so the merger's
+    // truncateWithSuffix never fired, and consumers could not tell a complete
+    // output from a clipped one. The runner must mark the cut itself.
+    const out = await runTeamManifest(TEAM_MANIFEST, {
+      env: teamEnv("partial_output_over_cap"),
+    });
+    expectUniformSchema(out);
+    expect(out.exitStatus).toBe("logic");
+    expect(out.partialOutput).not.toBeNull();
+    expect(out.partialOutput!.length).toBeLessThanOrEqual(10_000);
+    expect(out.partialOutput).toMatch(/\[truncated, \d+ chars total\]$/);
+  }, 15_000);
+
+  it("R12: parent abort during a graceful (exit-0) shutdown resolves transient, not success", async () => {
+    // Regression (review round 9): a child that traps the abort SIGTERM,
+    // emits merged, and exits 0 classified "success" — a run the parent
+    // explicitly cancelled resolved clean. abortRequested downgrades every
+    // non-overflow status at settle time.
+    const controller = new AbortController();
+    const run = runTeamManifest(TEAM_MANIFEST, {
+      env: teamEnv("abort_graceful_exit0"),
+      abortSignal: controller.signal,
+    });
+    await new Promise((r) => setTimeout(r, 400)); // let the stream preamble land
+    controller.abort();
+    const out = await run;
+    expectUniformSchema(out);
+    expect(out.exitStatus).toBe("transient");
+    expect(out.error?.message).toBe("run aborted by parent signal");
+  }, 15_000);
+
   it("CLI: `cli-anything run --manifest <team.yaml>` emits MergedOutput and exit 0 (AC1 wiring)", async () => {
     const proc = Bun.spawn(
       ["bun", join(import.meta.dir, "..", "src", "index.ts"), "run", "--manifest", TEAM_MANIFEST],

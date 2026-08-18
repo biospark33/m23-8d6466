@@ -417,7 +417,7 @@ describe("rosterToTeamManifest: garbage-structure input handling", () => {
     // A role object with missing/undefined name still goes into the Map, but
     // the name key becomes undefined. When the adapter looks up the role by
     // name (e.g., "lead"), Map.get("lead") returns undefined, and the adapter
-    // throws a clean Error with message "Lead role 'lead' not found in roster".
+    // throws a clean Error with message `Lead role "lead" not found in roster`.
     // This is better than a TypeError but still not a ZodError.
     const badRoster: ResolvedRoster = {
       path: "/fake.yaml",
@@ -438,12 +438,12 @@ describe("rosterToTeamManifest: garbage-structure input handling", () => {
     ).toThrow(/Lead role "lead" not found in roster/);
   });
 
-  test("role missing provider: creates invalid model field, Zod catches it at parse", () => {
-    // A role with missing provider/model pair causes rosterRoleToTeamRole to
-    // construct model as "undefined/m" (undefined coerced to string). The
-    // resulting manifest fails TeamManifestSchema.parse with a ZodError about
-    // the invalid model field. This is the CLEANEST error path among the
-    // garbage-structure cases — Zod validates at the boundary.
+  test("role missing provider: adapter throws clean Error at the provider guard", () => {
+    // A role with provider undefined hits rosterRoleToTeamRole's RA guard
+    // (roster-adapter.ts:37) BEFORE any "undefined/m" model can be built — a
+    // plain Error with the provider name in the message, not a ZodError from
+    // TeamManifestSchema.parse. (The ZodError-at-parse path this test used to
+    // describe was superseded by that guard in review round 6/7 hardening.)
     const badRoster: ResolvedRoster = {
       path: "/fake.yaml",
       roles: [
@@ -460,7 +460,7 @@ describe("rosterToTeamManifest: garbage-structure input handling", () => {
         workerRoleNames: [],
         prompts: { lead: "x" },
       }),
-    ).toThrow(); // ZodError from TeamManifestSchema.parse
+    ).toThrow(/role provider must be a non-empty string \(got undefined\)/);
   });
 });
 

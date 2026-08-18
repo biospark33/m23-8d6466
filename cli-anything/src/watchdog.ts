@@ -206,9 +206,11 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
         const avgCpu = totalCpuPercent / cpuSamples;
         log(`cli-anything: RSS watchdog CPU stats (advisory): ${cpuSamples} samples, avg ${avgCpu.toFixed(2)}%`);
       }
-      // Preserve terminal states (unwatchable, escalated) — only set "stopped"
-      // when in a non-terminal state.
-      if (handle.status !== "unwatchable" && !escalated) {
+      // Preserve ONLY the terminal "unwatchable" state. An escalated stop is
+      // still a stop — reporting "running" after the SIGKILL leg has been
+      // armed misleads callers polling status (escalation is observable via
+      // killOrigin, not via status).
+      if (handle.status !== "unwatchable") {
         handle.status = "stopped";
       }
       if (timer !== null) {
@@ -242,6 +244,10 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
       // Recheck running after await — poll in flight when stop() runs must bail
       if (!running) return;
     } catch {
+      // Stopped mid-sample: failure accounting here could still trip the
+      // unwatchable threshold and overwrite the terminal "stopped" status —
+      // bail exactly like the success path does.
+      if (!running) return;
       // External sampler rejected (W5): treat as a sampling failure
       rssBytes = null;
     }
@@ -285,11 +291,22 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
       escalated = true;
       const info = { rssBytes, samples };
       const thresholdGigabytes = (safeThresholdBytes / 1024 ** 3).toFixed(2);
-      log(`cli-anything: RSS watchdog escalation at ${rssBytes} bytes (${(rssBytes / 1024 ** 3).toFixed(2)} GB, threshold ${thresholdGigabytes} GB)`);
+      // Non-throwing guards: a throwing log or onEscalate callback must not
+      // abort the poll and leave the tree alive — the SIGTERM/SIGKILL flow
+      // below runs regardless.
+      try {
+        log(`cli-anything: RSS watchdog escalation at ${rssBytes} bytes (${(rssBytes / 1024 ** 3).toFixed(2)} GB, threshold ${thresholdGigabytes} GB)`);
+      } catch (err) {
+        console.error("cli-anything: RSS watchdog log callback threw", err);
+      }
       // Set escalation state synchronously BEFORE invoking the callback,
       // so classification reads the flag atomically at decision time.
       handle.killOrigin = "watchdog";
-      onEscalate(info);
+      try {
+        onEscalate(info);
+      } catch (err) {
+        console.error("cli-anything: RSS watchdog onEscalate callback threw", err);
+      }
 
       // SIGTERM to the process group. killOrigin was already set synchronously
       // when escalation began (above). This delivery only fails if the group

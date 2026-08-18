@@ -223,6 +223,81 @@ describe("RSS watchdog", () => {
     expect(handle.status).toBe("stopped");
   });
 
+  it("R9: stop() after escalation reports stopped (not running); killOrigin preserved", async () => {
+    const child = trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" }));
+    const handle = startRssWatchdog({
+      child,
+      pgidOrGroup: child.pid!, // escalation SIGTERMs the sleep's group, not ours
+      thresholdBytes: DEFAULT_THRESHOLD_BYTES,
+      pollMs: 20,
+      graceMs: 60_000, // keep the SIGKILL leg far away; only the status matters here
+      onEscalate: () => {},
+      onUnwatchable: () => {},
+      log: () => {},
+      sampleRss: async () => DEFAULT_THRESHOLD_BYTES + 1, // always over
+    });
+    await sleep(80); // let an escalation fire (child dies to the group SIGTERM)
+    handle.stop();
+    expect(handle.status).toBe("stopped"); // was left "running" before R9
+    expect(handle.killOrigin).toBe("watchdog");
+  });
+
+  it("R9: sampler rejection landing after stop() does not count toward unwatchable", async () => {
+    let calls = 0;
+    let rejectThird: ((err: Error) => void) | undefined;
+    let unwatchableReported = false;
+    const handle = startRssWatchdog({
+      child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),
+      pgidOrGroup: process.pid,
+      pollMs: 20,
+      onEscalate: () => {},
+      onUnwatchable: () => { unwatchableReported = true; },
+      log: () => {},
+      sampleRss: () => {
+        calls++;
+        if (calls <= 2) return Promise.reject(new Error("fail"));
+        return new Promise<number | null>((_resolve, reject) => {
+          rejectThird = reject;
+        });
+      },
+    });
+    // Two consecutive rejections land (failures 1/2), then the third sampler
+    // call stays pending while we stop the watchdog, and ONLY THEN rejects —
+    // without the catch-path running-guard this would be failure 3/3:
+    // onUnwatchable fires and "unwatchable" overwrites the terminal status.
+    await sleep(140);
+    handle.stop();
+    expect(handle.status).toBe("stopped");
+    rejectThird?.(new Error("late boom"));
+    await sleep(100);
+    expect(handle.status).toBe("stopped");
+    expect(unwatchableReported).toBe(false);
+  });
+
+  it("R9: throwing log/onEscalate callbacks do not abort the SIGTERM escalation flow", async () => {
+    const child = trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" }));
+    const exited = new Promise<void>((resolve) => {
+      child.on("exit", () => resolve());
+    });
+    const handle = startRssWatchdog({
+      child,
+      pgidOrGroup: child.pid!, // escalation signals THIS group
+      thresholdBytes: 1,
+      pollMs: 20,
+      graceMs: 60_000,
+      onEscalate: () => { throw new Error("callback boom"); },
+      onUnwatchable: () => {},
+      log: () => { throw new Error("log boom"); },
+      sampleRss: async () => 1024 ** 3,
+    });
+    const exitedWithin = await Promise.race([
+      exited.then(() => true),
+      sleep(3_000).then(() => false),
+    ]);
+    expect(exitedWithin).toBe(true); // group SIGTERM still delivered
+    expect(handle.killOrigin).toBe("watchdog");
+  });
+
   it("returns null killOrigin when never escalated", () => {
     const handle = startRssWatchdog({
       child: trackChild(spawn("sleep", ["10"], { detached: true, stdio: "ignore" })),

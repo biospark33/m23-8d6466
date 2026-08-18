@@ -7,7 +7,7 @@
  * - Parses passed/failed counts from bun test output format
  * - Returns fail-closed results when spawn fails, signal kills, or output unparseable
  */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -601,6 +601,56 @@ echo ' 1 pass'\n`,
       // biome-ignore lint/performance/noDelete: unset is the semantic
       if (prevAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = prevAnthropic;
+    }
+  });
+
+  test("drain backstop arms only after exit — a suite longer than DRAIN_TIMEOUT_MS still parses (R9)", async () => {
+    // Regression (review round 9): the 2s drain timer used to arm at read
+    // START (right after spawn), so any legitimate suite running longer than
+    // DRAIN_TIMEOUT_MS had both readers cancelled before the terminal summary
+    // line existed — output came back partial with capped:false and the parser
+    // failed closed. The timer must arm only once proc.exited resolves, while
+    // reads keep starting immediately (pipe-backpressure deadlock guard).
+    const script = path.join(freshRoot(), "slow-suite.sh");
+    fs.writeFileSync(
+      script,
+      // > DRAIN_TIMEOUT_MS (2s) of runtime BEFORE the summary is printed
+      "#!/bin/sh\nsleep 2.3\necho 'Tests: 5 passed, 1 failed'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: path.dirname(script) });
+    expect(result.testsExecuted).toBe(true);
+    expect(result.testResults).toEqual({ passed: 5, failed: 1 });
+  }, 15_000);
+
+  test("reused non-aborted AbortSignal keeps abort listeners balanced across runs (R9)", async () => {
+    // Regression (review round 9): readCapped registered a { once: true }
+    // abort listener and removed it only when the signal FIRED — a long-lived
+    // pipeline signal reused across runs accumulated two dead listeners (and
+    // their closures) per completed runTestCommand call. Adds and removes must
+    // balance on the normal-completion path.
+    const script = path.join(freshRoot(), "quick-suite.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho 'Tests: 2 passed'\n",
+      { mode: 0o755 },
+    );
+    const controller = new AbortController();
+    const signal = controller.signal;
+    const addSpy = spyOn(signal, "addEventListener");
+    const removeSpy = spyOn(signal, "removeEventListener");
+    try {
+      for (let i = 0; i < 3; i++) {
+        const result = await runTestCommand([script], { cwd: path.dirname(script), signal });
+        expect(result.testsExecuted).toBe(true);
+      }
+      const abortAdds = addSpy.mock.calls.filter((c) => c[0] === "abort").length;
+      const abortRemoves = removeSpy.mock.calls.filter((c) => c[0] === "abort").length;
+      expect(abortAdds).toBeGreaterThan(0);
+      expect(abortRemoves).toBe(abortAdds);
+    } finally {
+      addSpy.mockRestore();
+      removeSpy.mockRestore();
     }
   });
 });
