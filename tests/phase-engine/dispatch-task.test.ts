@@ -226,13 +226,30 @@ describe("dispatch-task: manifest schema refusal", () => {
     for (const name of ["lead", "w1", "w2", "w3", "w4"]) {
       lines.push(`  - name: ${name}`, "    model: claude-haiku-4-5");
     }
-    const rosterPath = join(tmpRoot, "five-worker-roster.yaml");
+    // loadRoster confines rosters to the repo root (tmpRoot is outside it),
+    // so this roster must live INSIDE the repo (fixtures dir, cleaned in
+    // finally) — otherwise the refusal is the confinement error, not the
+    // manifest-schema error this test exists to exercise.
+    const rosterPath = join(import.meta.dir, "fixtures", ".tmp-five-worker-roster.yaml");
     writeFileSync(rosterPath, `${lines.join("\n")}\n`);
-    const spy = injectFake(() => successResult());
-    const result = await runDispatch({ roster: rosterPath });
+    let result: Awaited<ReturnType<typeof runDispatch>>;
+    try {
+      const spy = injectFake(() => successResult());
+      result = await runDispatch({ roster: rosterPath });
+      expect(spy.calls).toBe(0); // refused BEFORE any spawn
+    } finally {
+      try {
+        unlinkSync(rosterPath);
+      } catch {
+        // best-effort cleanup
+      }
+    }
     expect(result.exitStatus).toBe("logic");
     expect(result.error?.message).toMatch(/worker/i);
-    expect(spy.calls).toBe(0); // refused BEFORE any spawn
+    // Pin the refusal to the manifest-schema path: the /worker/i match alone
+    // once passed VACUOUSLY when the roster sat in tmpRoot — the confinement
+    // error echoes the roster path, and the filename contained "worker".
+    expect(result.error?.message).not.toContain("outside the repo root");
   });
 });
 

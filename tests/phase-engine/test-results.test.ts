@@ -254,6 +254,35 @@ describe("runTestCommand — reporter formats, output cap, group kill (review ro
     expect(result.testResults).toEqual({ passed: 4, failed: 2 });
   });
 
+  test("all-failing jest run omits the zero passed clause", async () => {
+    // jest omits zero categories: when every test fails the "Tests:" line has
+    // no "passed" clause. This is the DF1.6 seeded-failing-test path when
+    // testCommand uses jest — it must parse as tests-run (failed>0), not
+    // fail closed as "tests did not run".
+    const script = path.join(cwd2, "jest-all-fail.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho 'Test Suites: 1 failed, 1 total'\necho 'Tests:       2 failed, 2 total'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd2 });
+    expect(result.testsExecuted).toBe(true);
+    expect(result.testResults).toEqual({ passed: 0, failed: 2 });
+  });
+
+  test("all-failing vitest run omits the zero passed clause", async () => {
+    // vitest likewise: "Tests  2 failed (2)" with no passed clause.
+    const script = path.join(cwd2, "vitest-all-fail.sh");
+    fs.writeFileSync(
+      script,
+      "#!/bin/sh\necho ' Test Files  1 failed (1)'\necho '      Tests  2 failed (2)'\n",
+      { mode: 0o755 },
+    );
+    const result = await runTestCommand([script], { cwd: cwd2 });
+    expect(result.testsExecuted).toBe(true);
+    expect(result.testResults).toEqual({ passed: 0, failed: 2 });
+  });
+
   test("output beyond the capture cap fails closed with a cap reason", async () => {
     // ~90 bytes/line × 8000 lines ≈ 720 KiB > 512 KiB cap on ONE stream.
     const script = path.join(cwd2, "flood.sh");

@@ -10,7 +10,8 @@
  * - Jest: "Tests: 7 passed, 2 failed" (passed first; green runs omit the
  *   failed clause)
  * - Vitest default reporter: "Tests  2 failed | 4 passed (6)" (failed first,
- *   no colon; an all-green run prints only "Tests  7 passed (7)" — failed
+ *   no colon; an all-green run prints only "Tests  7 passed (7)" and an
+ *   all-failing run prints only "Tests  2 failed (2)" — the omitted count
  *   defaults to 0)
  *
  * Fail-closed: any spawn failure, signal kill, output-cap breach, or
@@ -237,8 +238,9 @@ function failClosed(reason: string): TestCommandResult {
  * Matches bun test format: dedicated " 7 pass" / " 2 fail" summary lines.
  * Matches jest/vitest format: "Tests: 7 passed, 2 failed" (jest, passed
  * first) or "Tests  2 failed | 4 passed" (vitest default reporter, failed
- * first, colon-less); a green run omits the failed clause, which defaults
- * to 0.
+ * first, colon-less); a green run omits the failed clause and an all-failing
+ * run omits the passed clause — the omitted count defaults to 0 in both
+ * directions.
  *
  * @param output - Combined stdout+stderr from the test command
  * @returns Parsed counts or null if unparseable
@@ -274,12 +276,16 @@ function parseTestOutput(output: string): { passed: number; failed: number } | n
       failed: passedFirst[2] ? Number.parseInt(passedFirst[2], 10) : 0,
     };
   }
+  // The passed clause is optional here too: an all-failing run omits the
+  // zero "passed" count (jest: "Tests: 2 failed, 9 total"; vitest: "Tests
+  // 2 failed (2)"), and passed defaults to 0 — the DF1.6 seeded-failing-test
+  // path must parse, not fail closed as "tests did not run".
   const failedFirst = output.match(
-    /Tests[:\s]+(\d+)\s+failed[^\n\d]+(\d+)\s+passed/,
+    /Tests[:\s]+(\d+)\s+failed(?:[^\n\d]+(\d+)\s+passed)?/,
   );
   if (failedFirst) {
     return {
-      passed: Number.parseInt(failedFirst[2] ?? "0", 10),
+      passed: failedFirst[2] ? Number.parseInt(failedFirst[2], 10) : 0,
       failed: Number.parseInt(failedFirst[1] ?? "0", 10),
     };
   }
