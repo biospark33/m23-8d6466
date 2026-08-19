@@ -186,7 +186,20 @@ if url.endswith("/chat/completions"):
         msg["reasoning"] = entry["reasoning"]
     if not msg:
         msg["content"] = None  # both-null: C must fail on content, not crash
-    print(json.dumps({"choices": [{"message": msg}]}))
+    # Mirror the real provider shape for gate D: usage.cost.total on the chat
+    # response (sourced from the same costTotal / costTotalRaw knobs the old
+    # fake-pi served — D's instrument is the provider-computed cost).
+    pi = cfg.get("pi", {})
+    raw = pi.get("costTotalRaw")
+    if raw is not None:
+        # round 6: hand-built JSON so bare Infinity reaches the parser verbatim
+        print('{"choices": [{"message": ' + json.dumps(msg) + '}], "usage": {"cost": {"total": ' + str(raw) + '}}}')
+        sys.exit(0)
+    total = pi.get("costTotal")
+    resp = {"choices": [{"message": msg}]}
+    if total is not None:
+        resp["usage"] = {"cost": {"total": total}}
+    print(json.dumps(resp))
     sys.exit(0)
 
 if url.endswith("/api/v1/key"):

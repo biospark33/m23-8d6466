@@ -1,0 +1,16 @@
+# DF2.4 live demo roster — ONE role on the story's named cheap model.
+#
+# The demo mints the run key at --cap 50_000 µ$ ($0.05): every gate C ping
+# spends against that same cap, so a multi-model roster (qds-default) would
+# eat the budget before the loopy workload ever ran. One role, one model,
+# priced in the shipped models.json (gate D asserts the cost table).
+defaults:
+  provider: openrouter
+  thinking: medium
+  tools: null
+  writes: []
+  harness_engineering: []
+
+roles:
+  - name: runner
+    model: deepseek/deepseek-v3.2

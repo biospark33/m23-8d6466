@@ -118,16 +118,28 @@ emit C 1 "C: $c_count/$c_count roster models answered over chat/completions (con
 # four keys: a partial cost block fails pi validation and drops the WHOLE
 # roster; a missing/zero cost.input means the factory reports $0.0000 forever
 # while genuinely spending (measured on a 463.6k-token run).
-pi_json="$(if command -v timeout >/dev/null 2>&1; then timeout 60 pi -p --mode json "reply with the single word: ready" 2>/dev/null; else python3 -c 'import subprocess,sys
-try:
-    sys.exit(subprocess.call(["pi","-p","--mode","json","reply with the single word: ready"], timeout=60))
-except Exception:
-    sys.exit(124)' 2>/dev/null; fi)"
-d_total="$(printf '%s' "$pi_json" | python3 -c '
+# D's instrument is the provider's own usage.cost from a real curl chat call
+# (same seam as C), NOT `pi -p`: pi's node streaming client stalls
+# nondeterministically on exe.dev boxes (measured 2026-08-19, runs 9-17: gate
+# D hung or returned cost.total = 0 on cold/stalled calls while curl-based C
+# passed every run), and the provider-computed cost is the stronger proof
+# that rates flow — it is the number the key is actually billed on.
+d_body='{"model":"'"$(printf '%s' "$Models" | awk '{print $1}')"'","messages":[{"role":"user","content":"reply with the single word: ready"}],"max_tokens":8}'
+d_resp="$(printf 'header = "Authorization: Bearer %s"\n' "$OPENROUTER_API_KEY" \
+  | curl -sS --max-time 60 -K - -H "Content-Type: application/json" -d "$d_body" https://openrouter.ai/api/v1/chat/completions)"
+d_total="$(printf '%s' "$d_resp" | python3 -c '
 import json, sys
+# usage.cost shape is route-dependent: {"total": x} on some upstreams, a bare
+# float on others (measured 2026-08-19: GMICloud returns the scalar).
 try:
-    print(json.load(sys.stdin).get("cost", {}).get("total", 0))
+    c = (json.load(sys.stdin).get("usage") or {}).get("cost")
 except Exception:
+    c = None
+if isinstance(c, dict):
+    print(c.get("total") or 0)
+elif isinstance(c, (int, float)):
+    print(c)
+else:
     print(0)
 ')"
 d_scan="$(python3 -c '

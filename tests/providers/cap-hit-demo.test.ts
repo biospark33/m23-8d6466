@@ -238,6 +238,22 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.artifact.exitStatus).toBe("success");
   });
 
+  test("AC2: 403 'Key limit exceeded' (the MEASURED live signature, 2026-08-19) counts as cap rejection → overflow", async () => {
+    // Live fire measured the key-limit rejection as HTTP 403, not 402 — the
+    // probe classifier must accept both.
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06, chatStatus: 403 });
+    const opts = defaultOpts({
+      workloadArgv: ["sh", "-c", "printf 'turn_end\\n'"],
+    });
+
+    const result = await runCapHitDemo(deps(), opts);
+
+    expect(result.artifact.providerCapRejected).toBeTrue();
+    expect(result.artifact.exitStatus).toBe("overflow");
+    expect(result.verdict).toBe("demonstrated");
+    expect(result.artifact.rejectionStatus).toStartWith("403:");
+  });
+
   test("AC2 negative control (DOD): box stdout CLAIMS a cap rejection the host re-probe does not reproduce → inconclusive", async () => {
     // The workload's own output says "402 Insufficient credits" — an
     // implementation sourcing providerCapRejected from box output MUST fail

@@ -249,11 +249,15 @@ not be sequenced before it.
       field from the box MUST fail this test (AC2, INV-2)
 - [x] **Test (inconclusive paths):** wall-clock-first and `turnsCompleted: 0` each produce
       `verdict: "inconclusive"` with the named reason, and teardown is still invoked (AC3, AC4).
-- [ ] **Test (e2e demo — MANDATORY):** one live run against a real exe.dev box and a real capped
+- [x] **Test (e2e demo — MANDATORY):** one live run against a real exe.dev box and a real capped
       OpenRouter key produces `.sandbox/evidence/df2-4-cap-hit-<run-id>.json` with
       `verdict: "demonstrated"`; the artifact is committed to
       `_bmad-output/sprint-artifacts/dark-factory-v5/evidence/df2-4-cap-hit.md` and is the
       discharge of audit §6 hole 6.
+      **Done 2026-08-19**: run `df2-4-cap-hit-20260819-fc8f12` — spend 53 447 µ$ ≥ cap 50 000 µ$,
+      25 paid turns, host re-probe observed `403 Key limit exceeded`, exitStatus `overflow`,
+      killOrigin `provider-cap`, revocation verified against the key list, record closed,
+      verdict `demonstrated`. Every verdict number host-side.
 
 ## Dev Agent Record
 
@@ -287,27 +291,54 @@ not be sequenced before it.
   MED — DOD's box-claims-rejection tripwire test missing (added); plus LOW fixes (137-SIGKILL
   comment, `status: body` rejection format, NaN flag validation, test-seam docs, null exitStatus
   on pre-workload artifacts).
+- **Live-fire campaign (19 runs, 2026-08-18/19)** — each failure fail-closed (teardown ran, keys
+  revoked+verified, boxes destroyed, $0 orphaned at rest) and each taught a measured fact:
+  1. runs 1–4: exe.dev image has no `/home/agent` (user `exedev`) — corrected paths via the
+     DF2.2/DF2.3 override knobs, and the image ships no models.json → demo places a transformed
+     cost catalog via DF2.1's `fillRun`.
+  2. runs 4–8: gate D's `pi -p` instrument — cold-start >60 s killed by the script budget
+     (widened), then nondeterministic streaming stalls → D's instrument replaced with the
+     provider's own `usage.cost` from a curl call (route-dependent scalar-or-object shape
+     handled). GR-002 scope override: DF2.2's in-box script repaired (3 edits, each a
+     measured-incompatibility fix enabling this story's Infra Prereq; DF2.2's fake-substrate
+     suite stayed green throughout).
+  3. runs 9–13: workload shape — `pi -p` is single-turn (loop wrapped), reasoning-model endless
+     turns never complete inside 900 s (input-heavy turns), output-token burn loses the wall-clock
+     race at 84% of cap.
+  4. run 15 + isolated scratch-key experiments: **enforcement lag measured** — first refusal at
+     1.8× a $0.01 limit; the demo's run crossed at 1.07× with ~$1.6K µ$ turns. Manual kill +
+     revoke contained run 15's overshoot.
+  5. runs 16–17: pi stalls under sustained looping → workload rebuilt as a raw curl loop
+     (gate C's seam, which never stalled once in 19 runs).
+  6. run 18: `usage.cost` scalar shape → parser fixed. **Run 19: demonstrated.**
 
 ### Completion Notes
 
-- 42 story tests green (41 + 1 live-gated todo); full `tests/providers/` suite green (309 tests,
-  0 fail); `bun run typecheck` exit 0; `bun run lint` exit 0; both pre-PR advisory gates clean
-  (`check-defensive-programming.sh`, `check-pr-conflicts.sh`); no open PRs overlap.
-- Repo-wide `bun test` shows 3 pre-existing failures unrelated to this story (verified by
-  re-running them on a stashed clean baseline: 2× roster e2e network-dependent, 1× bench env
-  test; plus one flaky timing test) — not introduced here.
-- Cap-overshoot bound (Technical Notes): `AC1` asserts `≥ cap`; the artifact records
-  `spendMicroUsd` so the real overshoot is measured, not assumed.
-- `turnsCompleted` is parsed from workload stdout `turn_end` events — the artifact's one in-box
-  figure, `turnsSource: "in-box"`, downgrade-only (AC4 enforced at the verdict gate).
+- **The live run is the story's deliverable** — see
+  `evidence/df2-4-cap-hit.md` (run `df2-4-cap-hit-20260819-fc8f12`, verdict `demonstrated`,
+  spend 53 447 ≥ cap 50 000 µ$, 25 turns, 403 refusal host-observed, teardown complete).
+  Audit §6 hole 6 discharged (DD-6).
+- All six `[VERIFY]`-class story assumptions live-tested; four came back different from the
+  story's model and are now measurements recorded in the evidence file: rejection is **403**
+  (not 402); enforcement **lags ~2–4 requests** (overshoot is cadence×cost, not one request);
+  overshoot on the demonstrated run = 6.9%; `usage.cost` shape is route-dependent. The
+  `[VERIFY]` "overshoot bounded by one request" is falsified for large requests and preserved
+  approximately by sizing turns small — the artifact records the real number either way (AC1
+  asserts `≥ cap`, never `== cap`).
+- 43 story tests green (+1 live-gated todo); `tests/providers/` 311/0; setup-gate suite 38/0;
+  `bun run typecheck` 0; `bun run lint` 0; defensive-programming + PR-conflict gates clean;
+  GitNexus detect_changes LOW, 0 affected processes.
+- Repo-wide `bun test` has 3 pre-existing failures unrelated to this story (verified on a
+  stashed clean baseline: 2× roster e2e network-dependent, 1× bench env test).
+- **Spend disclosure:** 19 demo runs + 6 scratch/probe keys against OpenRouter, all revoked and
+  verified absent; every box destroyed; ~$0.75 total burned across the campaign (the delivered
+  run itself: $0.0534). exe.dev: 1 account (personal), all VMs reaped (0 remain).
+- `turnsCompleted` is the artifact's one in-box figure (`turnsSource: "in-box"`, downgrade-only).
 - Unit note: provider API speaks USD dollars; µ$ conversion stays inside DF2.3's HTTP boundary
-  (DD-9) — the demo never converts. `captureSpend` reads the provisioning LIST entry (the
-  DF2.3 verb, mandated unchanged by the DOD's Integration clause), which is host-side provider
-  data and satisfies AC1's "read host-side from the provider".
-- LIVE RUN PENDING: the mandatory e2e demo item is unchecked until a live run is executed with a
-  real exe.dev box + real capped OpenRouter key (needs `OPENROUTER_PROVISIONING_KEY`,
-  `QDS_EXEDEV_LIVE`, `QDS_EXEDEV_REPO_URL`/`SHA`/`ROSTER`). Story deviation clause applies until
-  then: verdict would be `inconclusive`/`no-live-account`, never claimed on the fake driver.
+  (DD-9). `captureSpend` reads the provisioning LIST entry (the DF2.3 verb, mandated unchanged),
+  which is host-side provider data and satisfies AC1's "read host-side from the provider".
+- Operational residue: `OPENROUTER_PROVISIONING_KEY` now lives in the gitignored `.env`
+  (user-directed; bun auto-loads it). exe.dev ssh config entries added for `exe.dev`/`*.exe.xyz`.
 
 ### File List
 
@@ -318,11 +349,18 @@ not be sequenced before it.
 - `tests/providers/cap-hit-demo.test.ts` (new)
 - `tests/providers/fixtures/loopy-workload.yaml` (new)
 - `tests/providers/fixtures/loopy-workload.test.ts` (new)
+- `tests/providers/fixtures/df2-4-demo.roster.yaml` (new — single-model demo roster)
+- `tests/providers/fixtures/df2-4-models.json` (new — declared-rate cost catalog for the gate)
 - `tests/providers/fixtures/fake-key-api.ts` (additive `chatComplete` substrate knob)
-- `_bmad-output/sprint-artifacts/dark-factory-v5/evidence/df2-4-cap-hit.md` (pending live run)
+- `src/providers/exedev/assertions-in-box.sh` (DF2.2 repair: curl-based D instrument, both
+  `usage.cost` shapes — scope-overridden, justified in Debug Log)
+- `tests/providers/exedev/fixtures/fake-exedev.ts` (stub curl mirrors provider `usage.cost` shape)
+- `_bmad-output/sprint-artifacts/dark-factory-v5/evidence/df2-4-cap-hit.md` (the deliverable)
 
 ### Change Log
 
 - 2026-08-18: story implemented (composition of DF2.1/2.2/2.3/2.5 verbs + `classifyRunExit`
-  mechanism); TDD red→green; adversarial self-review round applied (10 findings fixed);
-  status → in-progress → review-pending-live-run.
+  mechanism); TDD red→green; adversarial self-review round applied (10 findings fixed).
+- 2026-08-19: 19-run live-fire campaign; DF2.2 gate-D instrument repaired for the real image;
+  workload rebuilt as curl paid-until-refusal loop; **live demonstration recorded** (verdict
+  `demonstrated`, audit §6 hole 6 discharged); all keys/boxes cleaned up; status → review.

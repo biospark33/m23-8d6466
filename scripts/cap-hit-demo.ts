@@ -21,6 +21,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { writeSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
 
@@ -29,15 +30,18 @@ import {
   createRun,
   deliverRunKey,
   executeRun,
+  fillRun,
   mintRunKey,
   openRouterKeyApi,
   resolveDriver,
   teardownSandbox,
+  type BoxFile,
   type KeyApi,
   type ProviderDriver,
   type ExecResult,
 } from "../src/providers/index.ts";
 import { newId, RunRecordStore } from "../src/providers/run-record.ts";
+import { shQuote } from "../src/providers/exedev/transport.ts";
 import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import {
   classifyRunExit,
@@ -148,6 +152,14 @@ const DEFAULT_RUN_BUDGET_CAP = 40_000;
 const DEFAULT_RESIDENT_CEILING = 30_000;
 const DEFAULT_FIXTURE_PATH = "tests/providers/fixtures/loopy-workload.yaml";
 
+// Live-substrate layout, measured on the exe.dev image (boldsoftware/exeuntu,
+// 2026-08-19 probe): the user is `exedev`, home /home/exedev — there is NO
+// /home/agent (the inkwell layout DF2.2/DF2.3 defaults assume). Their override
+// knobs carry the corrected paths; no predecessor code changes.
+const LIVE_HOME = "/home/exedev";
+const LIVE_ENV_FILE = `${LIVE_HOME}/.env`;
+const LIVE_WORKDIR = `${LIVE_HOME}/src`;
+
 // ---------------------------------------------------------------------------
 // Core demo function
 // ---------------------------------------------------------------------------
@@ -200,6 +212,10 @@ export async function runCapHitDemo(
   const runBudgetCapMicros = opts.runBudgetCapMicros ?? DEFAULT_RUN_BUDGET_CAP;
   const residentCeilingMicros = opts.residentCeilingMicros ?? DEFAULT_RESIDENT_CEILING;
   const evidenceDir = deps.evidenceDir ?? opts.evidenceDir ?? process.env.QDS_EVIDENCE_DIR ?? ".sandbox/evidence";
+  // Substrate-correct key file: DF2.3's default (/home/agent/app/.env) is the
+  // inkwell layout; the exe.dev image has no /home/agent. The fake substrate
+  // keeps its box-relative path.
+  const envFile = deps.envFile ?? (isLive ? LIVE_ENV_FILE : "app/.env");
 
   // ---- 1. VM creation (INV-1: record → VM → key) ----
   // createRun does store.create internally
@@ -266,7 +282,7 @@ export async function runCapHitDemo(
     const started = Date.now();
     try {
       const minted = await mintRunKey(
-        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, capMicroUsd, envFile: deps.envFile },
+        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, capMicroUsd, envFile },
         runId,
       );
       key = minted.key;
@@ -316,7 +332,7 @@ export async function runCapHitDemo(
     const started = Date.now();
     try {
       await deliverRunKey(
-        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, envFile: deps.envFile },
+        { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId, envFile },
         vmName,
         key,
       );
@@ -346,13 +362,96 @@ export async function runCapHitDemo(
   if (isLive) {
     const started = Date.now();
     try {
-      const exedevDriver = deps.driver as { fill?: (vm: string, opts: { runId: string; repoUrl: string; commitSha: string }) => Promise<void>; setup?: (vm: string, opts: { runId: string; rosterPath: string; commitSha: string }) => Promise<{ ready: boolean }> };
+      const exedevDriver = deps.driver as {
+        fill?: (vm: string, opts: { runId: string; repoUrl: string; commitSha: string; workdir?: string }) => Promise<void>;
+        setup?: (vm: string, opts: { runId: string; rosterPath: string; commitSha: string; workdir?: string; envFile?: string; assertTimeoutMs?: number; gateTimeoutMs?: number }) => Promise<{ ready: boolean }>;
+      };
       if (!opts.repoUrl || !opts.commitSha || !opts.rosterPath) {
         // Missing live params — teardown and record an inconclusive artifact
         return finishEarly("setup-gate-not-ready", Date.now() - started);
       }
-      await exedevDriver.fill?.(vmName, { runId, repoUrl: opts.repoUrl, commitSha: opts.commitSha });
-      const setupResult = await exedevDriver.setup?.(vmName, { runId, rosterPath: opts.rosterPath, commitSha: opts.commitSha });
+      // The image ships NO ~/.pi/agent/models.json (measured 2026-08-19) but
+      // gate D asserts its cost table in-box: place the host's priced catalog
+      // (public data, no secret) via DF2.1's generic file verb before the gate.
+      // Shape: the D-check (and the pi line it mirrors) reads
+      // {models:{<slug>:{cost:{input,output,cacheRead,cacheWrite}}}} — the
+      // host's pi 0.55.0 writes {providers:{openrouter:{models:[...]}}} — so
+      // transform here. pi 0.84.2 in the box ignores the file (its live cost
+      // reporting is D's first half); the file is the declared cost table.
+      const modelsJsonPath = process.env.QDS_MODELS_JSON ?? join(homedir(), ".pi", "agent", "models.json");
+      try {
+        const parsed = JSON.parse(readFileSync(modelsJsonPath, "utf8")) as {
+          providers?: Record<string, { models?: Array<Record<string, unknown>> }>;
+          models?: unknown;
+        };
+        const list = parsed.providers?.openrouter?.models;
+        let content: string;
+        if (Array.isArray(list)) {
+          const byslug: Record<string, Record<string, unknown>> = {};
+          for (const m of list) {
+            if (typeof m.id === "string") byslug[m.id] = m;
+          }
+          content = JSON.stringify({ models: byslug });
+        } else {
+          // already the dict-by-slug shape — place verbatim
+          content = JSON.stringify({ models: parsed.models ?? {} });
+        }
+        const files: BoxFile[] = [{ path: ".pi/agent/models.json", content }];
+        await fillRun(deps.driver, vmName, files);
+      } catch {
+        return finishEarly("models-json-missing", Date.now() - started);
+      }
+      await exedevDriver.fill?.(vmName, { runId, repoUrl: opts.repoUrl, commitSha: opts.commitSha, workdir: LIVE_WORKDIR });
+      // Warm pi's streaming path BEFORE the gate: on a FRESH box the first pi
+      // calls nondeterministically stall (no request timeout in pi's client);
+      // curl-based paths never stall, and a box that has run pi once stops
+      // stalling (measured runs 9-12 + probe box, 2026-08-19). Loop until one
+      // pi turn succeeds (≤4 × 120 s), then proceed.
+      {
+        const warmCmd =
+          `set -a; . ${shQuote(envFile)}; set +a; timeout 120 pi -p --mode json --thinking off --provider ${shQuote("openrouter")} --model ${shQuote("deepseek/deepseek-v3.2")} 'Reply with the single word: warm' >/dev/null 2>&1; exit \$?`;
+        const execTimedFn = (deps.driver as ProviderDriver & { execTimed?: (vm: string, argv: readonly string[], timeoutMs: number) => Promise<ExecResult> }).execTimed;
+        for (let attempt = 1; attempt <= 4; attempt++) {
+          const r = await (execTimedFn
+            ? execTimedFn.call(deps.driver, vmName, ["sh", "-c", warmCmd], 150_000)
+            : executeRun(deps.driver, vmName, ["true"]));
+          if (r.exitCode === 0) break;
+          log({
+            requestId,
+            operation: "demo.pi_warmup",
+            agentId: null,
+            timestamp: nowFn().toISOString(),
+            runId,
+            step: "pi_warmup",
+            keyHashPrefix: keyHash.slice(0, 8),
+            duration: 0,
+            durationMs: 0,
+            status: "ok",
+            outcome: `stall-retry-${attempt}`,
+          });
+        }
+      }
+      // Cold-start pi (first invocation: extension init + catalog fetch) is
+      // slow on a fresh box — measured >55 s. The gate's 60 s per-assertion
+      // default SIGKILLs the C/D/E script mid-D (exit 137). Widen the knobs:
+      // D's own internal budget still bounds the pi call itself.
+      const gateOpts = {
+        runId,
+        rosterPath: opts.rosterPath,
+        commitSha: opts.commitSha,
+        workdir: LIVE_WORKDIR,
+        envFile,
+        assertTimeoutMs: 180_000,
+        gateTimeoutMs: 600_000,
+      } as const;
+      let setupResult = await exedevDriver.setup?.(vmName, gateOpts);
+      // One retry after a pause: a not-ready D from a stalled fresh-box pi
+      // call is substrate flake, not an unreadied box — the gate itself stays
+      // the gate (its evidence file is overwritten by the retry).
+      if (!setupResult?.ready) {
+        await new Promise((resolve) => setTimeout(resolve, 60_000));
+        setupResult = await exedevDriver.setup?.(vmName, gateOpts);
+      }
       setupMs = Date.now() - started;
       log({
         requestId,
@@ -409,16 +508,23 @@ export async function runCapHitDemo(
       const fixtureContent = readFileSync(fixturePath, "utf8");
       const fixture = parse(fixtureContent) as { model: string; provider: string; prompt: string };
       probeModel = fixture.model;
+      // The workload is a raw curl chat loop, not pi: pi's node streaming
+      // client stalls nondeterministically on exe.dev boxes (runs 9-16), while
+      // gate C's curl path never stalled once. Each turn = one chat POST with
+      // fresh random padding (fixture `paddingBytes`, cache-busting, sized so
+      // the cap arrives well inside the 900 s ceiling). The key rides curl's
+      // stdin config (-K -), never argv (INV-CRED-3). The loop ends on the
+      // provider's refusal (402/403 — MEASURED 2026-08-19: the key-limit
+      // rejection is 403 "Key limit exceeded", lagging the crossing by ~4
+      // requests); any other non-200 gets a short backoff and a retry. One
+      // `turn_end` marker per completed paid turn — the artifact's only in-box
+      // figure (INV-2: downgrade-only; classification still uses ONLY the
+      // host-side re-probe).
+      const paddingBytes = Math.max(0, Number((fixture as { paddingBytes?: number }).paddingBytes ?? 0));
       argv = [
-        "pi",
-        "-p",
-        "--mode",
-        "json",
-        "--provider",
-        fixture.provider,
-        "--model",
-        fixture.model,
-        fixture.prompt,
+        "sh",
+        "-c",
+        `set -a; . ${shQuote(envFile)}; set +a; n=0; while :; do head -c ${paddingBytes} /dev/urandom | base64 | tr -d '\\n' > /tmp/df24-pad.txt; python3 -c 'import json,sys; json.dump({"model": sys.argv[1], "messages": [{"role": "user", "content": open(sys.argv[2]).read() + " " + sys.argv[3]}], "max_tokens": 16}, open(sys.argv[4], "w"))' ${shQuote(fixture.model)} /tmp/df24-pad.txt ${shQuote(fixture.prompt)} /tmp/df24-req.json; code=$(printf 'header = "Authorization: Bearer %s"\\nheader = "Content-Type: application/json"\\n' "\$OPENROUTER_API_KEY" | curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -K - -X POST https://openrouter.ai/api/v1/chat/completions -d @/tmp/df24-req.json); case "\$code" in 200) n=\$((n+1)); echo turn_end;; 402|403) break;; *) sleep 2;; esac; done; echo "loop ended after \$n turns (HTTP \$code)"; exit 0`,
       ];
     } catch (e) {
       return finishEarly("workload-fixture-invalid", setupMs);
@@ -522,6 +628,11 @@ export async function runCapHitDemo(
   // host-side chat call with the retained run key — never the box's output.
   // Resolution order: explicit deps.probe, then the fake substrate's
   // chatComplete, then the production OpenRouter probe.
+  // MEASURED (2026-08-19): the key-limit rejection is HTTP 403
+  // {"error":{"message":"Key limit exceeded (total limit)..."}}, not the 402
+  // "Insufficient credits" the account-level docs describe; enforcement lags
+  // the crossing by ~4 requests / 15-30 s. Both signatures count.
+  const isCapRejection = (status: number): boolean => status === 402 || status === 403;
   let providerCapRejected = false;
   let rejectionStatus: string | null = null;
   let reprobeMs = 0;
@@ -532,7 +643,7 @@ export async function runCapHitDemo(
     try {
       const probeResult = await probeFn(key, probeModel);
       reprobeMs = Date.now() - started;
-      providerCapRejected = probeResult.status === 402;
+      providerCapRejected = isCapRejection(probeResult.status);
       // Verbatim provider status + redacted body — the redaction input is the
       // run key itself (AC5).
       rejectionStatus = `${probeResult.status}: ${redactWithKey(probeResult.body, key)}`;
@@ -810,7 +921,7 @@ async function main(argv: readonly string[]): Promise<number> {
 
   const evidenceDir = process.env.QDS_EVIDENCE_DIR ?? ".sandbox/evidence";
   // Fake driver uses box-relative paths; live substrate uses absolute contract
-  const envFile = driverName === "fake" ? "app/.env" : undefined;
+  // envFile is substrate-resolved inside runCapHitDemo (live: /home/exedev/.env).
 
   // Numeric flags fail closed: a NaN wall-clock would fire ~immediately and a
   // NaN budget/ceiling would render as null in the artifact.
@@ -827,7 +938,7 @@ async function main(argv: readonly string[]): Promise<number> {
   };
 
   const result = await runCapHitDemo(
-    { driver, keyApi, store, requestId, evidenceDir, envFile },
+    { driver, keyApi, store, requestId, evidenceDir },
     {
       capMicroUsd: positiveInt(args.capMicroUsd, "cap"),
       wallClockMs: positiveInt(args.wallClockMs, "wall-clock-ms"),
