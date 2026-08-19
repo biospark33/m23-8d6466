@@ -393,6 +393,97 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(existsSync(join(dir, "boxes", store.get(result.runId).vmName ?? ""))).toBeFalse();
   });
 
+  // ─── 4d. Cancel failure → fail-closed: probe never issued ────────────────────
+
+  test("cancel destroy-failed: NO probe while the workload may be active, teardown still closes the run", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06 });
+    // First destroy (the cancel verb) throws; teardown's own destroy (second
+    // call) succeeds so the record still closes.
+    let destroyCalls = 0;
+    class FirstDestroyThrowsDriver implements ProviderDriver {
+      readonly name = recording.name;
+
+      constructor(private readonly inner: ProviderDriver) {}
+
+      create(name: string, tag?: string): Promise<import("../../src/providers/driver").ProviderVm> {
+        return this.inner.create(name, tag);
+      }
+      list(name?: string): Promise<import("../../src/providers/driver").ProviderVm[]> {
+        return this.inner.list(name);
+      }
+      destroy(vm: string): Promise<void> {
+        destroyCalls++;
+        if (destroyCalls === 1) return Promise.reject(new Error("destroy refused"));
+        return this.inner.destroy(vm);
+      }
+      expose(vm: string, port: number): Promise<string> {
+        return this.inner.expose(vm, port);
+      }
+      setPublic(vm: string): Promise<void> {
+        return this.inner.setPublic(vm);
+      }
+      whoami(): Promise<string> {
+        return this.inner.whoami();
+      }
+      exec(vm: string, argv: string[], stdin?: string): Promise<import("../../src/providers/driver").ExecResult> {
+        return this.inner.exec(vm, argv, stdin);
+      }
+      copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+        return this.inner.copyFile(vm, remotePath, localPath);
+      }
+    }
+    let probeCalls = 0;
+    const probe = async (): Promise<{ status: number; body: string }> => {
+      probeCalls++;
+      return { status: 403, body: "Key limit exceeded" };
+    };
+
+    const opts = defaultOpts({ wallClockMs: 300, workloadArgv: ["sleep", "2"] });
+    const result = await runCapHitDemo(deps({ driver: new FirstDestroyThrowsDriver(recording), probe }), opts);
+
+    // The probe was never issued — no provider evidence read while the
+    // workload's termination was unconfirmed.
+    expect(probeCalls).toBe(0);
+    expect(result.artifact.providerCapRejected).toBeFalse();
+    expect(result.artifact.rejectionStatus).toBeNull();
+    expect(result.verdict).toBe("inconclusive");
+    expect(result.artifact.reason).toBe("workload-cancel-failed");
+    expect(result.artifact.terminationProvenance).toBe("wall-clock");
+    // Teardown still ran (AC3): its destroy succeeded on the retry, the
+    // record closed, and the artifact's spend is teardown's own pre-revoke
+    // read off the record (not the skipped explicit capture).
+    expect(destroyCalls).toBe(2);
+    expect(result.artifact.closedAt).toBeString();
+    expect(result.artifact.spendMicroUsd).toBe(60_000);
+  });
+
+  test("cancel grace-expired: workload still pending past the grace → NO probe, reason workload-cancel-failed", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06 });
+    let probeCalls = 0;
+    const probe = async (): Promise<{ status: number; body: string }> => {
+      probeCalls++;
+      return { status: 403, body: "Key limit exceeded" };
+    };
+
+    // 300ms ceiling → marker at ~1.3s; 200ms grace expires while the 4s
+    // sleep is still pending (termination unconfirmed) — the demo must skip
+    // the probe rather than read evidence against an active workload.
+    const opts = defaultOpts({ wallClockMs: 300, workloadArgv: ["sleep", "4"] });
+    const result = await runCapHitDemo(deps({ probe, cancelGraceMs: 200 }), opts);
+
+    expect(probeCalls).toBe(0);
+    expect(result.artifact.providerCapRejected).toBeFalse();
+    expect(result.artifact.rejectionStatus).toBeNull();
+    expect(result.verdict).toBe("inconclusive");
+    expect(result.artifact.reason).toBe("workload-cancel-failed");
+    expect(result.artifact.terminationProvenance).toBe("wall-clock");
+    // The cancel destroy DID land here, so teardown proceeds normally and
+    // the run closes on every path (AC3).
+    expect(result.artifact.closedAt).toBeString();
+    expect(result.artifact.revocationVerified).toBeTrue();
+    expect(result.artifact.spendMicroUsd).toBe(60_000);
+  });
+
   // ─── 5. AC4 cap-below-first-turn ─────────────────────────────────────────────
 
   test("AC4 cap-below-first-turn: exhausted at birth, zero turns → inconclusive", async () => {

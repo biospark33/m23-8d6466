@@ -73,6 +73,8 @@ export interface CapHitDemoDeps {
   now?: () => Date;
   /** Override envFile path for key delivery (default: /home/agent/app/.env). */
   envFile?: string;
+  /** Test seam: grace bound for the wall-clock cancel settlement await (default 10s). */
+  cancelGraceMs?: number;
   /**
    * Host-side re-probe override (AC2): one cheap chat call with the retained
    * runtime key after the workload ends and BEFORE revoke. Default resolution:
@@ -249,6 +251,7 @@ export async function runCapHitDemo(
   // inkwell layout; the exe.dev image has no /home/agent. The fake substrate
   // keeps its box-relative path.
   const envFile = deps.envFile ?? (isLive ? LIVE_ENV_FILE : "app/.env");
+  const cancelGraceMs = deps.cancelGraceMs ?? CANCEL_GRACE_MS;
 
   // ---- 1. VM creation (INV-1: record → VM → key) ----
   // createRun does store.create internally
@@ -605,6 +608,13 @@ export async function runCapHitDemo(
 
   // ---- 7. Workload execution with wall-clock race ----
   let workloadMs = 0;
+  // True when the wall-clock cancel could NOT confirm the workload's death
+  // (destroy threw, or settlement never arrived inside the grace): the probe
+  // and the explicit spend capture are then SKIPPED — provider evidence must
+  // not be read while the workload may still be spending — and the run routes
+  // straight to teardown (AC3), whose own spend-before-revoke bracket (INV-4)
+  // is the approved way to stop the spend without contested evidence.
+  let workloadStillActive = false;
   let terminationProvenance: TerminationProvenance = null;
   let inBoxExit: InBoxExit = "success";
   let turnsCompleted = 0;
@@ -667,8 +677,11 @@ export async function runCapHitDemo(
           // then await the exec's settlement (bounded grace: a driver whose
           // promise never notices the dead box must not hang the demo) BEFORE
           // the probe reads the key, so a still-spending workload cannot race
-          // the re-probe's evidence. A cancellation failure does NOT skip any
-          // later step (AC3): teardown stays the backstop either way.
+          // the re-probe's evidence. A cancellation failure is FAIL-CLOSED:
+          // the probe and the explicit spend capture are skipped entirely
+          // (unconfirmed termination ⇒ no evidence read), teardown runs (AC3)
+          // and revokes the key through its own lifecycle bracket, and the
+          // verdict says workload-cancel-failed.
           let cancelOutcome = "workload-cancelled";
           let graceTimer: ReturnType<typeof setTimeout> | undefined;
           try {
@@ -679,7 +692,7 @@ export async function runCapHitDemo(
                 () => true, // a rejected exec has also terminated
               ),
               new Promise<boolean>((resolve) => {
-                graceTimer = setTimeout(() => resolve(false), CANCEL_GRACE_MS);
+                graceTimer = setTimeout(() => resolve(false), cancelGraceMs);
               }),
             ]);
             if (!settled) cancelOutcome = "cancel-grace-expired";
@@ -688,6 +701,7 @@ export async function runCapHitDemo(
           } finally {
             clearTimeout(graceTimer);
           }
+          if (cancelOutcome !== "workload-cancelled") workloadStillActive = true;
           log({
             requestId,
             operation: "demo.workload_cancel",
@@ -761,7 +775,26 @@ export async function runCapHitDemo(
   let providerCapRejected = false;
   let rejectionStatus: string | null = null;
   let reprobeMs = 0;
-  {
+  if (workloadStillActive) {
+    // Fail-closed: the workload's termination is unconfirmed — issuing the
+    // probe now would read provider evidence while the box may still be
+    // spending through the live key. Skip it (rejectionStatus stays null,
+    // providerCapRejected stays false) and let teardown revoke the key.
+    log({
+      requestId,
+      operation: "demo.reprobe",
+      agentId: null,
+      timestamp: nowFn().toISOString(),
+      runId,
+      step: "reprobe",
+      keyHashPrefix: keyHash.slice(0, 8),
+      duration: 0,
+      durationMs: 0,
+      status: "ok",
+      outcome: "skipped",
+      reason: "workload-cancel-failed: termination unconfirmed, probe not issued",
+    });
+  } else {
     const started = Date.now();
     const fakeChat = (deps.keyApi as KeyApi & { chatComplete?: (key: string) => Promise<{ status: number; body: string }> }).chatComplete;
     const probeFn = deps.probe ?? (fakeChat ? (k: string) => fakeChat.call(deps.keyApi, k) : openRouterChatProbe);
@@ -805,7 +838,28 @@ export async function runCapHitDemo(
   let spendMicroUsd = 0;
   let captureSpendMs = 0;
   let spendCaptureError: string | null = null;
-  {
+  if (workloadStillActive) {
+    // Fail-closed twin of the probe skip: an explicit spend read here would
+    // be a provider request against a possibly-active workload. Teardown's
+    // own spend step (INV-4 bracket, pre-revoke) supplies the record's figure
+    // and the artifact reads it from there.
+    log({
+      requestId,
+      operation: "demo.capture_spend",
+      agentId: null,
+      timestamp: nowFn().toISOString(),
+      runId,
+      step: "capture_spend",
+      keyHashPrefix: keyHash.slice(0, 8),
+      duration: 0,
+      durationMs: 0,
+      status: "ok",
+      outcome: "skipped",
+      reason: "workload-cancel-failed: termination unconfirmed, spend read deferred to teardown",
+      capture_spend_ms: 0,
+      spendMicroUsd: 0,
+    });
+  } else {
     const started = Date.now();
     try {
       spendMicroUsd = await captureSpend(
@@ -894,6 +948,9 @@ export async function runCapHitDemo(
   const rec = readRecordSafe();
   const revocationVerified = teardownOk && rec.keyHash !== undefined && rec.closedAt !== undefined;
   const closedAt = rec.closedAt ?? null;
+  // On the fail-closed cancel path the explicit capture was skipped, so the
+  // artifact's spend figure is teardown's own pre-revoke read off the record.
+  const finalSpendMicroUsd = workloadStillActive ? rec.spendMicroUsd ?? 0 : spendMicroUsd;
 
   // ---- 13. Verdict ----
   let verdict: "demonstrated" | "inconclusive";
@@ -904,9 +961,14 @@ export async function runCapHitDemo(
     reason = null;
   } else {
     verdict = "inconclusive";
-    // Reason priority: teardown-aborted > host-error > wall-clock-first > cap-below-first-turn > no-rejection
+    // Reason priority: teardown-aborted > workload-cancel-failed > host-error > wall-clock-first > cap-below-first-turn > no-rejection
     if (!teardownOk) {
       reason = "teardown-aborted";
+    } else if (workloadStillActive) {
+      // Fail-closed: no probe evidence exists because the workload's
+      // termination was never confirmed — the verdict says so instead of
+      // implying a clean no-rejection answer.
+      reason = "workload-cancel-failed";
     } else if ((terminationProvenance as TerminationProvenance) === "host-error") {
       reason = "host-error";
     } else if ((terminationProvenance as TerminationProvenance) === "wall-clock") {
@@ -934,7 +996,7 @@ export async function runCapHitDemo(
     requestId,
     substrate,
     capMicroUsd: effectiveCapMicroUsd,
-    spendMicroUsd,
+    spendMicroUsd: finalSpendMicroUsd,
     turnsCompleted,
     turnsSource: "in-box",
     rejectionStatus,
