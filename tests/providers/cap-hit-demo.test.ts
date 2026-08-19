@@ -125,6 +125,46 @@ async function cli(args: string[], envOverrides: Record<string, string | undefin
   return { stdout, stderr, exitCode };
 }
 
+/**
+ * Reaps the workload child on the paths where the demo closes the run while
+ * the exec is still pending (grace-expired, cancel destroy-failed): FakeDriver
+ * exec spawns a real child the demo then abandons — without awaiting it here
+ * the sleep outlives the test and can hold the bun test process open.
+ */
+class WorkloadReapDriver implements ProviderDriver {
+  readonly name: string;
+  workloadSettled: Promise<unknown> = Promise.resolve();
+  constructor(private readonly inner: ProviderDriver) {
+    this.name = inner.name;
+  }
+  create(name: string, tag?: string): Promise<import("../../src/providers/driver").ProviderVm> {
+    return this.inner.create(name, tag);
+  }
+  list(name?: string): Promise<import("../../src/providers/driver").ProviderVm[]> {
+    return this.inner.list(name);
+  }
+  destroy(vm: string): Promise<void> {
+    return this.inner.destroy(vm);
+  }
+  expose(vm: string, port: number): Promise<string> {
+    return this.inner.expose(vm, port);
+  }
+  setPublic(vm: string): Promise<void> {
+    return this.inner.setPublic(vm);
+  }
+  whoami(): Promise<string> {
+    return this.inner.whoami();
+  }
+  exec(vm: string, argv: string[], stdin?: string): Promise<import("../../src/providers/driver").ExecResult> {
+    const p = this.inner.exec(vm, argv, stdin);
+    if (argv[0] === "sleep") this.workloadSettled = p.then(() => undefined, () => undefined);
+    return p;
+  }
+  copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+    return this.inner.copyFile(vm, remotePath, localPath);
+  }
+}
+
 // ─── 1. AC1/DOD e2e (fake substrate) — demonstrated path ────────────────────────
 
 describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
@@ -288,7 +328,7 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(rec.closedAt).toBeString();
     expect(rec.vmName).toBeDefined();
     // FakeDriver box destroyed: boxes dir empty or recording saw destroy
-    expect(existsSync(join(dir, "boxes", rec.vmName ?? ""))).toBeFalse();
+    expect(existsSync(join(dir, "boxes", rec.vmName!))).toBeFalse();
   });
 
   // ─── 4b. Entry validation (programmatic callers) ─────────────────────────────
@@ -390,7 +430,9 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(workloadEndAt).toBeLessThan(probeAt);
     // Teardown still completed on every path (AC3).
     expect(result.artifact.closedAt).toBeString();
-    expect(existsSync(join(dir, "boxes", store.get(result.runId).vmName ?? ""))).toBeFalse();
+    const rec4c = store.get(result.runId);
+    expect(rec4c.vmName).toBeDefined();
+    expect(existsSync(join(dir, "boxes", rec4c.vmName!))).toBeFalse();
   });
 
   // ─── 4d. Cancel failure → fail-closed: probe never issued ────────────────────
@@ -439,7 +481,11 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     };
 
     const opts = defaultOpts({ wallClockMs: 300, workloadArgv: ["sleep", "2"] });
-    const result = await runCapHitDemo(deps({ driver: new FirstDestroyThrowsDriver(recording), probe }), opts);
+    // WorkloadReapDriver sits INSIDE the destroy-throwing wrapper so the demo's
+    // abandoned sleep child is still reaped at test end (this path closes the
+    // run without awaiting the exec's settlement).
+    const reaper = new WorkloadReapDriver(recording);
+    const result = await runCapHitDemo(deps({ driver: new FirstDestroyThrowsDriver(reaper), probe }), opts);
 
     // The probe was never issued — no provider evidence read while the
     // workload's termination was unconfirmed.
@@ -455,6 +501,8 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(destroyCalls).toBe(2);
     expect(result.artifact.closedAt).toBeString();
     expect(result.artifact.spendMicroUsd).toBe(60_000);
+    // Reap the abandoned sleep child (see WorkloadReapDriver).
+    await reaper.workloadSettled;
   });
 
   test("cancel grace-expired: workload still pending past the grace → NO probe, reason workload-cancel-failed", async () => {
@@ -469,7 +517,8 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     // sleep is still pending (termination unconfirmed) — the demo must skip
     // the probe rather than read evidence against an active workload.
     const opts = defaultOpts({ wallClockMs: 300, workloadArgv: ["sleep", "4"] });
-    const result = await runCapHitDemo(deps({ probe, cancelGraceMs: 200 }), opts);
+    const reaper = new WorkloadReapDriver(recording);
+    const result = await runCapHitDemo(deps({ driver: reaper, probe, cancelGraceMs: 200 }), opts);
 
     expect(probeCalls).toBe(0);
     expect(result.artifact.providerCapRejected).toBeFalse();
@@ -482,6 +531,61 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.artifact.closedAt).toBeString();
     expect(result.artifact.revocationVerified).toBeTrue();
     expect(result.artifact.spendMicroUsd).toBe(60_000);
+    // Reap the still-pending sleep child the demo correctly stopped waiting on.
+    await reaper.workloadSettled;
+  });
+
+  // ─── 4e. Invalid classifier inputs → fail-closed, teardown still runs ───────
+
+  test("negative record cap: classification skipped, inconclusive classification-invalid, teardown revokes the live key", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06 }); // probe answers 403 naturally
+    // A record file corrupted after mint (mint's INV-CRED-1 cannot produce a
+    // negative cap): every read reports limitMicroUsd -1 — finite, so the
+    // echoed-cap fallback alone does not catch it.
+    class CorruptCapStore extends RunRecordStore {
+      get(runId: string) {
+        return { ...super.get(runId), limitMicroUsd: -1 };
+      }
+    }
+    const corruptStore = new CorruptCapStore(store.dir);
+    const opts = defaultOpts({ workloadArgv: ["sh", "-c", "printf 'turn_end\\n'"] });
+
+    const result = await runCapHitDemo(deps({ store: corruptStore }), opts);
+
+    // Fail-closed: a corrupt cap earns no verdict, even with a real 403 probe.
+    expect(result.verdict).toBe("inconclusive");
+    expect(result.artifact.reason).toBe("classification-invalid");
+    expect(result.artifact.exitStatus).toBe("success"); // box-reported exit kept
+    expect(result.artifact.providerCapRejected).toBeTrue(); // evidence retained
+    expect(result.artifact.spendMicroUsd).toBe(60_000);
+    // Teardown ran anyway: record closed, key revoked — no live key survives.
+    expect(result.artifact.closedAt).toBeString();
+    expect(result.artifact.revocationVerified).toBeTrue();
+    expect(api.keys.filter((k) => !k.deleted)).toHaveLength(0);
+  });
+
+  test("negative captureSpend result (provider refund): inconclusive classification-invalid, teardown revokes the live key", async () => {
+    // A negative usage read is REACHABLE provider behavior (refunds) and passes
+    // the record's integer validation — without the guard, classifyRunExit
+    // throws here, BEFORE teardown, stranding the live key.
+    class RefundApi extends FakeKeyApi {
+      async getKeyEntry(hash: string, maxPages?: number) {
+        const { entry, truncated } = await super.getKeyEntry(hash, maxPages);
+        return { entry: entry === null ? entry : { ...entry, usageUsd: -0.000002 }, truncated };
+      }
+    }
+    api = new RefundApi({ usageOnCreateUsd: 0.06 });
+    const opts = defaultOpts({ workloadArgv: ["sh", "-c", "printf 'turn_end\\n'"] });
+
+    const result = await runCapHitDemo(deps(), opts);
+
+    expect(result.verdict).toBe("inconclusive");
+    expect(result.artifact.reason).toBe("classification-invalid");
+    // The corrupt spend never reaches the artifact as a figure — 0, fail-closed.
+    expect(result.artifact.spendMicroUsd).toBe(0);
+    expect(result.artifact.closedAt).toBeString();
+    expect(result.artifact.revocationVerified).toBeTrue();
+    expect(api.keys.filter((k) => !k.deleted)).toHaveLength(0);
   });
 
   // ─── 5. AC4 cap-below-first-turn ─────────────────────────────────────────────
@@ -708,7 +812,9 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.artifact.timings.workload_ms).toBe(0);
     expect(result.artifact.timings.reprobe_ms).toBe(0);
     expect(result.artifact.timings.capture_spend_ms).toBe(0);
-    expect(result.artifact.timings.teardown_ms).toBeGreaterThanOrEqual(0);
+    // teardown really ran on this path, but its elapsed is clock-granular —
+    // assert the field is a populated number, not a fake positive bound.
+    expect(result.artifact.timings.teardown_ms).toBeNumber();
   });
 
   test("mint compensation failure: the provider key stays live AND recoverable by its run-scoped name", async () => {

@@ -20,6 +20,18 @@ export type InBoxExit = "success" | "transient" | "overflow" | "logic" | "lead_f
 /** Runtime enum validation for InBoxExit. */
 export const IN_BOX_EXITS: readonly InBoxExit[] = ["success", "transient", "overflow", "logic", "lead_failure"];
 
+/**
+ * Domain invariant for every µ$ figure crossing the classifier boundary (DD-9):
+ * finite and non-negative. NaN/±Infinity/negative inputs are corrupt —
+ * classifyRunExit throws on them, while cap-hit-demo's artifact paths fall back
+ * to a safe figure. One predicate so both failure semantics agree on WHAT is
+ * invalid and cannot drift (round 2→3 had already guarded the classification
+ * path but not the artifact path).
+ */
+export function isValidMicroUsd(v: number | undefined | null): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0;
+}
+
 /** Provenance of run termination — host-side guard or null. */
 export type TerminationProvenance = "provider-cap" | "wall-clock" | "host-error" | null;
 
@@ -70,12 +82,7 @@ export function classifyRunExit(input: ClassifyRunExitInput): RunExitClassificat
   } = input;
 
   // input validation — non-finite or negative figures are corrupt
-  if (
-    !Number.isFinite(usageMicroUsd) ||
-    !Number.isFinite(capMicroUsd) ||
-    usageMicroUsd < 0 ||
-    capMicroUsd < 0
-  ) {
+  if (!isValidMicroUsd(usageMicroUsd) || !isValidMicroUsd(capMicroUsd)) {
     throw new Error(
       `classifyRunExit: usageMicroUsd and capMicroUsd must be finite non-negative integers (DD-9), got usage=${usageMicroUsd} cap=${capMicroUsd}`
     );

@@ -46,6 +46,7 @@ import { shQuote } from "../src/providers/exedev/transport.ts";
 import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import {
   classifyRunExit,
+  isValidMicroUsd,
   redactKeyManagementUrls,
   redactWithKey,
   type InBoxExit,
@@ -301,9 +302,11 @@ export async function runCapHitDemo(
     const teardownEarlyMs = Date.now() - teardownStarted;
     const recAfter = readRecordSafe();
     const finalReason = teardownOk ? reason : "teardown-aborted";
-    // Guard mirrors classification path: only use record value when finite, else fall back.
-    const safeCap = recAfter.limitMicroUsd !== undefined && Number.isFinite(recAfter.limitMicroUsd) ? recAfter.limitMicroUsd : capMicroUsd;
-    const safeSpend = recAfter.spendMicroUsd !== undefined && Number.isFinite(recAfter.spendMicroUsd) ? recAfter.spendMicroUsd : 0;
+    // Guard mirrors the classification path via the shared µ$ predicate: only
+    // a finite non-negative record figure is a measurement — a negative or
+    // non-finite value is corruption, so fall back instead of publishing it.
+    const safeCap = isValidMicroUsd(recAfter.limitMicroUsd) ? recAfter.limitMicroUsd : capMicroUsd;
+    const safeSpend = isValidMicroUsd(recAfter.spendMicroUsd) ? recAfter.spendMicroUsd : 0;
     const artifact: CapHitArtifact = {
       story: "df2-4",
       runId,
@@ -815,6 +818,17 @@ export async function runCapHitDemo(
     });
   } else {
     const started = Date.now();
+    // Redaction failure must never abort the run: redactWithKey throws
+    // (fail-closed) on a pathological body, and an escaping throw — here or
+    // from the catch below re-redacting an error message — would bypass
+    // teardown with a live key. Fail to a marker; never emit raw text.
+    const safeRedact = (text: string): string => {
+      try {
+        return redactKeyManagementUrls(redactWithKey(text, key));
+      } catch {
+        return "[redaction-error]";
+      }
+    };
     const fakeChat = (deps.keyApi as KeyApi & { chatComplete?: (key: string) => Promise<{ status: number; body: string }> }).chatComplete;
     const probeFn = deps.probe ?? (fakeChat ? (k: string) => fakeChat.call(deps.keyApi, k) : openRouterChatProbe);
     try {
@@ -833,7 +847,7 @@ export async function runCapHitDemo(
       // run key itself (AC5), plus the key-management URL strip: the 403 body
       // embeds openrouter.ai/.../keys/<hash>; the hash stays published in the
       // structured keyHash field, the deep-link does not.
-      rejectionStatus = `${probeResult.status}: ${redactKeyManagementUrls(redactWithKey(probeResult.body, key))}`;
+      rejectionStatus = `${probeResult.status}: ${safeRedact(probeResult.body)}`;
     } catch (e) {
       reprobeMs = Date.now() - started;
       // A probe that cannot be issued fails closed: providerCapRejected stays
@@ -842,7 +856,7 @@ export async function runCapHitDemo(
       // no-rejection answer. Message redacted with the run key AND the
       // key-management URL strip (AC5): a thrown error can embed the request
       // URL, whose /keys/<id> segment is a management deep-link.
-      rejectionStatus = `probe-error: ${redactKeyManagementUrls(redactWithKey(String((e as Error).message ?? e), key))}`;
+      rejectionStatus = `probe-error: ${safeRedact(String((e as Error).message ?? e))}`;
     }
     log({
       requestId,
@@ -931,13 +945,23 @@ export async function runCapHitDemo(
   const echoedCap = readRecordSafe().limitMicroUsd;
   const effectiveCapMicroUsd =
     echoedCap !== undefined && Number.isFinite(echoedCap) ? echoedCap : capMicroUsd;
-  const classification = classifyRunExit({
-    inBoxExit,
-    usageMicroUsd: spendMicroUsd,
-    capMicroUsd: effectiveCapMicroUsd,
-    providerCapRejected,
-    terminationProvenance,
-  });
+  // classifyRunExit throws on non-finite/negative figures, and this call sits
+  // BEFORE teardown — an escaping throw would strand a live key on an
+  // allocated box after real spend. Invalid figures (a negative record cap
+  // from corruption; a negative spend read — provider refunds make that
+  // reachable) skip the classifier, keep the box-reported exit, and the
+  // verdict below says classification-invalid.
+  const classificationValid =
+    isValidMicroUsd(spendMicroUsd) && isValidMicroUsd(effectiveCapMicroUsd);
+  const classification = classificationValid
+    ? classifyRunExit({
+        inBoxExit,
+        usageMicroUsd: spendMicroUsd,
+        capMicroUsd: effectiveCapMicroUsd,
+        providerCapRejected,
+        terminationProvenance,
+      })
+    : { exitStatus: inBoxExit, killOrigin: terminationProvenance };
 
   // ---- 11. Teardown (ALWAYS) ----
   let teardownMs = 0;
@@ -977,13 +1001,16 @@ export async function runCapHitDemo(
   const closedAt = rec.closedAt ?? null;
   // On the fail-closed cancel path the explicit capture was skipped, so the
   // artifact's spend figure is teardown's own pre-revoke read off the record.
-  const finalSpendMicroUsd = workloadStillActive ? rec.spendMicroUsd ?? 0 : spendMicroUsd;
+  // The shared µ$ predicate rejects a corrupt figure either way — a NaN here
+  // would serialize as null in the artifact JSON and masquerade as data.
+  const rawFinalSpend = workloadStillActive ? rec.spendMicroUsd : spendMicroUsd;
+  const finalSpendMicroUsd = isValidMicroUsd(rawFinalSpend) ? rawFinalSpend : 0;
 
   // ---- 13. Verdict ----
   let verdict: "demonstrated" | "inconclusive";
   let reason: string | null = null;
 
-  if (teardownOk && classification.exitStatus === "overflow" && classification.killOrigin === "provider-cap" && turnsCompleted >= 1) {
+  if (classificationValid && teardownOk && classification.exitStatus === "overflow" && classification.killOrigin === "provider-cap" && turnsCompleted >= 1) {
     verdict = "demonstrated";
     reason = null;
   } else {
@@ -1000,6 +1027,10 @@ export async function runCapHitDemo(
       reason = "host-error";
     } else if ((terminationProvenance as TerminationProvenance) === "wall-clock") {
       reason = "wall-clock-first";
+    } else if (!classificationValid) {
+      // Fail-closed: the classifier's inputs were corrupt (negative or
+      // non-finite spend/cap) — no verdict is awarded on them.
+      reason = "classification-invalid";
     } else if (spendCaptureError !== null) {
       // Spend is unproven (0 by failure, not by measurement) — say so instead
       // of the misleading "no-rejection".
