@@ -395,3 +395,7 @@ case-sensitivity mirrors sanctioned cli-anything redactor; spend `?? 0` safe def
   charset, fake-API direct hash lookup, negative-control + probe-failure tests, precedence
   comment + a pre-existing typecheck error in the keyHash assertion fixed); 19 findings
   dismissed as code-verified false positives; providers 314/0, typecheck 0, lint 0.
+- 2026-08-19: Sift review — key-management-URL rule moved to the shared gate
+  (`KEY_MANAGEMENT_URL_RE` + `redactKeyManagementUrls` exported from cap-rejection.ts;
+  leakScan/scanArtifactForLeak flag deep-links; script regex removed); unit + e2e
+  shared-gate tests added; providers 317/0, typecheck 0.

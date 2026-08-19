@@ -45,6 +45,7 @@ import { shQuote } from "../src/providers/exedev/transport.ts";
 import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import {
   classifyRunExit,
+  redactKeyManagementUrls,
   redactWithKey,
   type InBoxExit,
   type TerminationProvenance,
@@ -179,16 +180,6 @@ function writeArtifactFile(evidenceDir: string, artifact: CapHitArtifact): strin
 /** Cheap probe model (fixture model on the live path overrides this). */
 const DEFAULT_PROBE_MODEL = "deepseek/deepseek-v4-flash-0731";
 const PROBE_TIMEOUT_MS = 15_000;
-
-/**
- * OpenRouter key-management URL (embeds the key hash). Stripped from
- * rejectionStatus in addition to run-key redaction: the hash is published
- * deliberately in the artifact's keyHash field, but a live management
- * deep-link has no place in a committed artifact (defense-in-depth).
- * Charset broadened (hex + alnum + percent-encoding + hyphen) so an
- * encoding or format drift degrades to over-redaction, never a leak.
- */
-const KEY_MANAGEMENT_URL_RE = /https:\/\/openrouter\.ai\/[^\s"'}]*\/keys\/[0-9a-zA-Z%-]{16,}/g;
 
 /**
  * Production host-side re-probe (AC2): one minimal chat call with the retained
@@ -677,7 +668,7 @@ export async function runCapHitDemo(
       // run key itself (AC5), plus the key-management URL strip: the 403 body
       // embeds openrouter.ai/.../keys/<hash>; the hash stays published in the
       // structured keyHash field, the deep-link does not.
-      rejectionStatus = `${probeResult.status}: ${redactWithKey(probeResult.body, key).replace(KEY_MANAGEMENT_URL_RE, "[REDACTED]")}`;
+      rejectionStatus = `${probeResult.status}: ${redactKeyManagementUrls(redactWithKey(probeResult.body, key))}`;
     } catch (e) {
       reprobeMs = Date.now() - started;
       // A probe that cannot be issued fails closed: providerCapRejected stays

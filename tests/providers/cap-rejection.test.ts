@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { classifyRunExit, redactWithKey, MIN_REDACTABLE_LEN, type InBoxExit, type TerminationProvenance } from "../../src/providers/cap-rejection.ts";
+import { classifyRunExit, redactKeyManagementUrls, redactWithKey, MIN_REDACTABLE_LEN, type InBoxExit, type TerminationProvenance } from "../../src/providers/cap-rejection.ts";
 import { EXIT_STATUSES } from "../../cli-anything/src/types.ts";
 import { MIN_REDACTABLE_VALUE_LEN } from "../../cli-anything/src/redact.ts";
 import { scanArtifactForLeak } from "./fixtures/leak-scan.ts";
@@ -246,6 +246,23 @@ describe("AC5: redactWithKey replaces >=8-char secret substrings with [REDACTED]
     const leak = scanArtifactForLeak(secret, unsafe);
     expect(leak).toBeTruthy();
     expect(leak).toHaveLength(8);
+  });
+
+  test("key-management URL: shared gate strips it and the scanner flags it", () => {
+    // Live-measured 403 body shape (openrouter.ai/.../keys/<64-hex hash>) —
+    // design.md's "key-management-URL redacted" contract enforced by the
+    // shared primitives, not per-test assertions.
+    const urlHash = "e04ffb6c8731607617a7bd457c38d272bdb840fe7efdc5ba0e8c71651648f784";
+    const url = `https://openrouter.ai/workspaces/default/keys/${urlHash}`;
+    const stripped = redactKeyManagementUrls(`Key limit exceeded. Manage it using ${url}`);
+    expect(stripped).not.toContain(url);
+    expect(stripped).toContain("[REDACTED]");
+    expect(stripped).toContain("Key limit exceeded");
+    // Scanner side: any corpus carrying the deep-link fails the shared scan.
+    expect(scanArtifactForLeak(secret, { rejectionStatus: `403: ${url}` })).toBe(url);
+    // The URL survives a scan only when absent — no false positive on the
+    // deliberately published keyHash field.
+    expect(scanArtifactForLeak(secret, { keyHash: urlHash })).toBeNull();
   });
 });
 

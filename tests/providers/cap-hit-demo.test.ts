@@ -433,6 +433,9 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.artifact.rejectionStatus).toContain("Key limit exceeded");
     expect(result.artifact.rejectionStatus).not.toContain("openrouter.ai/workspaces");
     expect(result.artifact.rejectionStatus).not.toContain(urlHash);
+    // The rule holds at the SHARED gate too, not just these assertions —
+    // the fixture scanner flags management URLs alongside key fragments.
+    expect(leakScan("any-secret", JSON.stringify(result.artifact))).toBeNull();
     // ...while the structured keyHash field keeps the deliberate identifier.
     // keyHash is optional on the record type; a missing record hash must FAIL
     // this equality (artifact falls back to the mint-time hash ≠ "").
