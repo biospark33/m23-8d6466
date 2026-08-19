@@ -42,6 +42,12 @@ const META = ".box.json";
 export class FakeDriver implements ProviderDriver {
   readonly name = "fake";
   readonly root: string;
+  /**
+   * Live exec children per box. Destroy kills them: a real box destroy kills
+   * the box's processes, and an exec abandoned by a caller (the demo's
+   * fail-closed close paths) must not leave an orphan host child behind.
+   */
+  private readonly execChildren = new Map<string, Set<{ kill: () => void }>>();
 
   constructor(root?: string) {
     this.root = root ?? process.env.QDS_FAKE_BOXES_DIR ?? DEFAULT_FAKE_BOXES_DIR;
@@ -117,6 +123,8 @@ export class FakeDriver implements ProviderDriver {
 
   /** Idempotent: teardown and reap both retry, and a missing box is the goal state. */
   async destroy(vm: string): Promise<void> {
+    for (const proc of this.execChildren.get(vm) ?? []) proc.kill();
+    this.execChildren.delete(vm);
     rmSync(this.boxDir(vm), { recursive: true, force: true });
   }
 
@@ -157,12 +165,20 @@ export class FakeDriver implements ProviderDriver {
       stdout: "pipe",
       stderr: "pipe",
     });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    return { stdout, stderr, exitCode };
+    const children = this.execChildren.get(vm) ?? new Set<{ kill: () => void }>();
+    children.add(proc);
+    this.execChildren.set(vm, children);
+    try {
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      return { stdout, stderr, exitCode };
+    } finally {
+      children.delete(proc);
+      if (children.size === 0) this.execChildren.delete(vm);
+    }
   }
 
   /** Box → host only. Nothing in this interface pushes a file into a box. */

@@ -344,13 +344,13 @@ describe("classifyRunExit validates usageMicroUsd and capMicroUsd are finite non
 
   test("NaN usageMicroUsd throws", () => {
     expect(() =>
-      classifyRunExit({ ...validInput, usageMicroUsd: NaN })
+      classifyRunExit({ ...validInput, usageMicroUsd: Number.NaN })
     ).toThrowError("must be finite non-negative integers");
   });
 
   test("Infinity capMicroUsd throws", () => {
     expect(() =>
-      classifyRunExit({ ...validInput, capMicroUsd: Infinity })
+      classifyRunExit({ ...validInput, capMicroUsd: Number.POSITIVE_INFINITY })
     ).toThrowError("must be finite non-negative integers");
   });
 
@@ -400,7 +400,12 @@ describe("classifyRunExit validates inBoxExit at runtime", () => {
     ).toThrowError("invalid inBoxExit");
   });
 
-  test("all valid InBoxExit values are accepted", () => {
+  test("all valid InBoxExit values are accepted, and IN_BOX_EXITS mirrors EXIT_STATUSES exactly", () => {
+    // The runtime validation list must be exactly the canonical CC-1 set: a
+    // member dropped from IN_BOX_EXITS (but not from the union/canonical)
+    // would silently narrow this loop and make classifyRunExit reject a valid
+    // exit at runtime while the type system stays silent.
+    expect([...IN_BOX_EXITS].sort()).toEqual([...EXIT_STATUSES].sort());
     for (const exit of IN_BOX_EXITS) {
       expect(() =>
         classifyRunExit({ ...validInput, inBoxExit: exit })

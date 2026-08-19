@@ -639,6 +639,10 @@ export async function runCapHitDemo(
   let terminationProvenance: TerminationProvenance = null;
   let inBoxExit: InBoxExit = "success";
   let turnsCompleted = 0;
+  // The workload exec itself, retained past the race: the close paths that
+  // stop waiting on it (grace-expired, destroy-failed) still settle it after
+  // teardown (11b) so no driver call outlives the demo.
+  let workloadPromise: Promise<ExecResult> | null = null;
 
   {
     const started = Date.now();
@@ -658,7 +662,7 @@ export async function runCapHitDemo(
           execTimed?: (vm: string, argv: readonly string[], timeoutMs: number, stdin?: string) => Promise<ExecResult>;
         }
       ).execTimed;
-      const workloadPromise = execWithBudget
+      workloadPromise = execWithBudget
         ? execWithBudget.call(deps.driver, vmName, argv, wallClockMs)
         : executeRun(deps.driver, vmName, argv);
 
@@ -793,7 +797,13 @@ export async function runCapHitDemo(
   // {"error":{"message":"Key limit exceeded (total limit)..."}}, not the 402
   // "Insufficient credits" the account-level docs describe; enforcement lags
   // the crossing by ~4 requests / 15-30 s. Both signatures count.
-  const isCapRejection = (status: number): boolean => status === 402 || status === 403;
+  // 402 is unambiguous (account credits). 403 is overloaded — authorization,
+  // model-access and region refusals share the code — so it counts only with
+  // the per-key spend-cap body signal ("Key limit exceeded", the MEASURED
+  // live shape). Any other 403 leaves providerCapRejected false (fail-closed:
+  // a false negative costs the verdict, a false positive would fabricate one).
+  const isCapRejection = (status: number, body: string): boolean =>
+    status === 402 || (status === 403 && body.includes("Key limit exceeded"));
   let providerCapRejected = false;
   let rejectionStatus: string | null = null;
   let reprobeMs = 0;
@@ -833,7 +843,7 @@ export async function runCapHitDemo(
     const probeFn = deps.probe ?? (fakeChat ? (k: string) => fakeChat.call(deps.keyApi, k) : openRouterChatProbe);
     try {
       // Retry once on thrown errors (transport failure). A completed HTTP response (any status) is a real answer, never retried.
-      let probeResult;
+      let probeResult: { status: number; body: string };
       try {
         probeResult = await probeFn(key, probeModel);
       } catch (firstErr) {
@@ -842,7 +852,7 @@ export async function runCapHitDemo(
         probeResult = await probeFn(key, probeModel); // second and final call
       }
       reprobeMs = Date.now() - started;
-      providerCapRejected = isCapRejection(probeResult.status);
+      providerCapRejected = isCapRejection(probeResult.status, probeResult.body);
       // Verbatim provider status + redacted body — the redaction input is the
       // run key itself (AC5), plus the key-management URL strip: the 403 body
       // embeds openrouter.ai/.../keys/<hash>; the hash stays published in the
@@ -943,16 +953,23 @@ export async function runCapHitDemo(
   // cap makes every `>=` false and silently buries the verdict; fall back to
   // the operator's requested cap instead (fail-closed direction).
   const echoedCap = readRecordSafe().limitMicroUsd;
-  const effectiveCapMicroUsd =
-    echoedCap !== undefined && Number.isFinite(echoedCap) ? echoedCap : capMicroUsd;
+  // The echo is judged by the shared µ$ predicate, not just finiteness: a
+  // negative (or non-finite) record figure is corruption and must neither be
+  // published to the artifact nor earn a verdict. The PUBLISHED cap falls back
+  // to the operator's requested cap; the verdict still fails closed below
+  // (capEchoValid) — judging spend against a cap that was never echoed judges
+  // against a cap that was never enforced (INV-2).
+  const capEchoValid = isValidMicroUsd(echoedCap);
+  const effectiveCapMicroUsd = capEchoValid ? echoedCap : capMicroUsd;
   // classifyRunExit throws on non-finite/negative figures, and this call sits
   // BEFORE teardown — an escaping throw would strand a live key on an
   // allocated box after real spend. Invalid figures (a negative record cap
   // from corruption; a negative spend read — provider refunds make that
   // reachable) skip the classifier, keep the box-reported exit, and the
   // verdict below says classification-invalid.
-  const classificationValid =
-    isValidMicroUsd(spendMicroUsd) && isValidMicroUsd(effectiveCapMicroUsd);
+  // effectiveCapMicroUsd is valid by construction (the fallback cap was
+  // validated at entry), so the classifier gate is the echo's own validity.
+  const classificationValid = isValidMicroUsd(spendMicroUsd) && capEchoValid;
   const classification = classificationValid
     ? classifyRunExit({
         inBoxExit,
@@ -993,6 +1010,31 @@ export async function runCapHitDemo(
       outcome: teardownOk ? "ok" : "error",
       teardown_ms: teardownMs,
     });
+  }
+
+  // ---- 11b. Settle the abandoned workload exec ----
+  // The fail-closed close paths (grace-expired, destroy-failed) stopped
+  // waiting on the workload exec; teardown has since destroyed the box (or
+  // made its second best-effort attempt), so the exec has every reason to
+  // settle now — await it once more, still bounded by the same grace, so no
+  // path returns from the demo with a driver call still outstanding. A second
+  // expiry is the documented fail-closed contract (the workload outlives the
+  // demo), never an unawaited accident.
+  if (workloadStillActive && workloadPromise !== null) {
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        workloadPromise.then(
+          () => undefined,
+          () => undefined,
+        ),
+        new Promise<undefined>((resolve) => {
+          settleTimer = setTimeout(() => resolve(undefined), cancelGraceMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(settleTimer);
+    }
   }
 
   // ---- 12. Read final record for revocation verification ----
