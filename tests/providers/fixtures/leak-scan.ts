@@ -23,7 +23,10 @@ export function findKeyManagementUrl(...corpora: string[]): string | null {
   return null;
 }
 
-/** Any >=MIN_REDACTABLE_LEN-char substring of the secret found in any corpus, else null. */
+/**
+ * Any >=MIN_REDACTABLE_LEN-char substring of the secret found in any corpus,
+ * or any key-management URL found in the corpora, else null.
+ */
 export function leakScan(secret: string, ...corpora: string[]): string | null {
   for (let i = 0; i + MIN_REDACTABLE_LEN <= secret.length; i++) {
     const frag = secret.slice(i, i + MIN_REDACTABLE_LEN);
@@ -34,7 +37,7 @@ export function leakScan(secret: string, ...corpora: string[]): string | null {
   return findKeyManagementUrl(...corpora);
 }
 
-/** Scan JSON-stringified artifact for leaked secret fragments. */
+/** Scan JSON-stringified artifact for leaked secret fragments or key-management URLs. */
 export function scanArtifactForLeak(secret: string, artifact: unknown): string | null {
   return leakScan(secret, JSON.stringify(artifact));
 }
