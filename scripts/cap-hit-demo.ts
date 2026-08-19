@@ -674,9 +674,10 @@ export async function runCapHitDemo(
       // A probe that cannot be issued fails closed: providerCapRejected stays
       // false and the classifier maps that to inconclusive (AC2). rejectionStatus
       // records WHY there is no provider signal — transport failure is not a
-      // no-rejection answer. Message redacted with the run key (belt: transport
-      // errors don't echo headers, the scan still runs).
-      rejectionStatus = `probe-error: ${redactWithKey(String((e as Error).message ?? e), key)}`;
+      // no-rejection answer. Message redacted with the run key AND the
+      // key-management URL strip (AC5): a thrown error can embed the request
+      // URL, whose /keys/<id> segment is a management deep-link.
+      rejectionStatus = `probe-error: ${redactKeyManagementUrls(redactWithKey(String((e as Error).message ?? e), key))}`;
     }
     log({
       requestId,

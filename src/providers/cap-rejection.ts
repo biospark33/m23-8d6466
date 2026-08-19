@@ -139,10 +139,10 @@ export function redactWithKey(text: string, secret: string): string {
  * rejectionStatus in addition to run-key redaction: the hash is published
  * deliberately in the artifact's keyHash field, but a live management
  * deep-link has no place in a committed artifact (defense-in-depth).
- * Charset broadened (hex + alnum + percent-encoding + hyphen) so an
- * encoding or format drift degrades to over-redaction, never a leak.
+ * Charset broadened (hex + alnum + percent-encoding + URL-safe Base64 `-`/`_`)
+ * so an encoding or format drift degrades to over-redaction, never a leak.
  */
-export const KEY_MANAGEMENT_URL_RE = /https:\/\/openrouter\.ai\/[^\s"'}]*\/keys\/[0-9a-zA-Z%-]{16,}/g;
+export const KEY_MANAGEMENT_URL_RE = /https:\/\/openrouter\.ai\/[^\s"'}]*\/keys\/[0-9a-zA-Z%_-]{16,}/g;
 
 /** Strip key-management deep-links from provider rejection text. */
 export function redactKeyManagementUrls(text: string): string {

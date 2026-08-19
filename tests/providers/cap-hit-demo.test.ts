@@ -455,6 +455,27 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.artifact.rejectionStatus).toContain("fetch failed");
   });
 
+  test("AC2/AC5: probe-error redacts a management deep-link in the thrown error text", async () => {
+    // Companion to the fail-closed test above: the error message a probe
+    // throws can embed the request URL, and its /keys/<id> segment is a
+    // management deep-link — the error path gets the SAME redaction the 403
+    // body path gets, and this test pins it (placeholder present, raw
+    // URL/hash absent, whole artifact scans clean).
+    const urlHash = "e04ffb6c8731607617a7bd457c38d272bdb840fe7efdc5ba0e8c71651648f784";
+    const probe = async (): Promise<{ status: number; body: string }> => {
+      throw new Error(`fetch failed: request to https://openrouter.ai/workspaces/default/keys/${urlHash} aborted`);
+    };
+    const opts = defaultOpts({ workloadArgv: ["sh", "-c", "printf 'turn_end\\n'"] });
+    const result = await runCapHitDemo(deps({ probe }), opts);
+    expect(result.verdict).toBe("inconclusive");
+    expect(result.artifact.rejectionStatus).toStartWith("probe-error:");
+    expect(result.artifact.rejectionStatus).toContain("fetch failed");
+    expect(result.artifact.rejectionStatus).toContain("[REDACTED]");
+    expect(result.artifact.rejectionStatus).not.toContain("openrouter.ai/workspaces");
+    expect(result.artifact.rejectionStatus).not.toContain(urlHash);
+    expect(leakScan("any-secret", JSON.stringify(result.artifact))).toBeNull();
+  });
+
   // ─── 9. turnsCompleted only downgrades ────────────────────────────────────────
 
   // Covered by test 5: turnsCompleted 0 → inconclusive despite overflow inputs.

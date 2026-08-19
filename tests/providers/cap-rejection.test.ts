@@ -264,6 +264,21 @@ describe("AC5: redactWithKey replaces >=8-char secret substrings with [REDACTED]
     // deliberately published keyHash field.
     expect(scanArtifactForLeak(secret, { keyHash: urlHash })).toBeNull();
   });
+
+  test("key-management URL: URL-safe Base64 identifier (`_`) still redacted", () => {
+    // A `_` inside a URL-safe Base64 identifier must not split the match —
+    // the class covers the full alphabet or a format drift leaks the id
+    // (review 9f322fe round: the doc contract is drift → over-redact, never leak).
+    const underscoredId = "abcd_efghijklmnop";
+    const url = `https://openrouter.ai/workspaces/default/keys/${underscoredId}`;
+    const stripped = redactKeyManagementUrls(`Key limit exceeded. Manage it using ${url}`);
+    expect(stripped).not.toContain(underscoredId);
+    expect(stripped).not.toContain("openrouter.ai/workspaces");
+    expect(stripped).toContain("[REDACTED]");
+    // Scanner side stays aligned: the raw URL is a finding, the stripped text is not.
+    expect(scanArtifactForLeak(secret, { rejectionStatus: url })).toBe(url);
+    expect(scanArtifactForLeak(secret, { rejectionStatus: stripped })).toBeNull();
+  });
 });
 
 // ─── Classifier purity ───────────────────────────────────────────────────────

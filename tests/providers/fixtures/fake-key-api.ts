@@ -177,9 +177,10 @@ export class FakeKeyApi {
       };
     }
 
-    // Direct hash lookup — the map's keys are sha256(plaintext), so hashing the
-    // presented key is the O(1) path and drops the reverse-scan's silent
-    // arbitrary-match behavior on duplicate values.
+    // Exact-hash match on the presented key: hashing first drops the
+    // reverse-scan's silent arbitrary-match on duplicate values. The lookup
+    // itself is a linear scan over a test-sized table — a hash-keyed Map
+    // would buy nothing at this scale.
     const presentedHash = createHash("sha256").update(key).digest("hex");
     const foundEntry: FakeKey | null = this.keys.find((k) => k.hash === presentedHash) ?? null;
 
