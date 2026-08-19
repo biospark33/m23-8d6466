@@ -1,6 +1,7 @@
 story: df2-4-live-cap-hit-kill
 title: "DF2.4: Live Cap-Hit Kill Demonstration — Real Key, Real Spend, Recorded Evidence"
-phase: live-run-pending  # code committed ea4e6d5 + pushed; waiting on exe.dev account + OPENROUTER_PROVISIONING_KEY (user setup in progress)
+phase: 5-complete
+pr: "#118"
 branch: feature/df2-4-live-cap-hit-kill
 base: main
 target: main
