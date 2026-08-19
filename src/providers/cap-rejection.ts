@@ -17,6 +17,9 @@
  */
 export type InBoxExit = "success" | "transient" | "overflow" | "logic" | "lead_failure";
 
+/** Runtime enum validation for InBoxExit. */
+export const IN_BOX_EXITS: readonly InBoxExit[] = ["success", "transient", "overflow", "logic", "lead_failure"];
+
 /** Provenance of run termination — host-side guard or null. */
 export type TerminationProvenance = "provider-cap" | "wall-clock" | "host-error" | null;
 
@@ -52,6 +55,10 @@ export interface RunExitClassification {
  *
  * Otherwise passes through the inBoxExit with terminationProvenance as killOrigin.
  * Integer µ$ inputs (DD-9).
+ *
+ * NOTE: Invalid usageMicroUsd or capMicroUsd (non-finite or negative) now throw
+ * rather than classify — callers treat a throw as a host-side failure, never a
+ * no-rejection answer.
  */
 export function classifyRunExit(input: ClassifyRunExitInput): RunExitClassification {
   const {
@@ -61,6 +68,25 @@ export function classifyRunExit(input: ClassifyRunExitInput): RunExitClassificat
     providerCapRejected,
     terminationProvenance,
   } = input;
+
+  // input validation — non-finite or negative figures are corrupt
+  if (
+    !Number.isFinite(usageMicroUsd) ||
+    !Number.isFinite(capMicroUsd) ||
+    usageMicroUsd < 0 ||
+    capMicroUsd < 0
+  ) {
+    throw new Error(
+      `classifyRunExit: usageMicroUsd and capMicroUsd must be finite non-negative integers (DD-9), got usage=${usageMicroUsd} cap=${capMicroUsd}`
+    );
+  }
+
+  // runtime enum validation
+  if (!IN_BOX_EXITS.includes(inBoxExit)) {
+    throw new Error(
+      `classifyRunExit: invalid inBoxExit "${inBoxExit}" — must be one of ${IN_BOX_EXITS.join(", ")}`
+    );
+  }
 
   const overCap = usageMicroUsd >= capMicroUsd;
   const validProvenance = terminationProvenance !== "wall-clock" && terminationProvenance !== "host-error";
@@ -98,11 +124,19 @@ export const MIN_REDACTABLE_LEN = 8;
  * output instead would let a generated "[REDACTED]" be selected (or re-split)
  * as a later match whenever the secret itself contains marker text.
  *
+ * NOTE: iteration-budget exhaustion throws rather than returning
+ * under-redacted text. Adversarial input or pathological cases trigger the
+ * throw; callers (cap-hit-demo.ts probe catch) wrap thrown errors into
+ * redacted probe-error strings, so throwing is the fail-closed direction.
+ *
  * ponytail: O(n·m) ceiling where n=text.length and m=secret.length, but bodies
  * are <1KB so this is acceptable. A more efficient approach (Aho-Corasick,
  * suffix automaton) is not needed at this scale.
  */
 export function redactWithKey(text: string, secret: string): string {
+  // real run keys are OpenRouter `sk-or-v1-…` (>=8 chars by construction,
+  // ~73 chars measured). The 8-char verbatim-return boundary is the sanctioned
+  // cli-anything policy mirrored here; the mirror-sync test pins it.
   if (secret.length < MIN_REDACTABLE_LEN) return text;
 
   // Mask char must be absent from the secret, or masked spans could re-match:
@@ -153,6 +187,19 @@ export function redactWithKey(text: string, secret: string): string {
       at = probe.indexOf(foundSubstring, at + foundSubstring.length);
     }
     iteration++;
+  }
+
+  // fail-closed on budget exhaustion — if any >=8-char secret substring
+  // remains, the input is adversarial or pathological; throw rather than leak.
+  if (iteration === MAX_ITERATIONS) {
+    const probe = work.join("");
+    for (let len = secret.length; len >= MIN_REDACTABLE_LEN; len--) {
+      for (let start = 0; start + len <= secret.length; start++) {
+        if (probe.includes(secret.slice(start, start + len))) {
+          throw new Error("redactWithKey: iteration budget exhausted — refusing to return under-redacted text");
+        }
+      }
+    }
   }
 
   // Splice markers back-to-front so earlier indices stay valid.

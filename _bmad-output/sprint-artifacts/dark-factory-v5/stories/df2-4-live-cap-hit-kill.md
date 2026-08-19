@@ -399,3 +399,38 @@ case-sensitivity mirrors sanctioned cli-anything redactor; spend `?? 0` safe def
   (`KEY_MANAGEMENT_URL_RE` + `redactKeyManagementUrls` exported from cap-rejection.ts;
   leakScan/scanArtifactForLeak flag deep-links; script regex removed); unit + e2e
   shared-gate tests added; providers 317/0, typecheck 0.
+
+### Review Findings — round 3 (2026-08-19, BMAD 3-layer: Blind Hunter / Edge Case Hunter A+B / Acceptance Auditor)
+
+Sources: Blind Hunter 14, Edge Case Hunter A 3, Edge Case Hunter B 6, Acceptance Auditor 0 (all 5 ACs + invariants PASS, CC-1 mirror verified).
+After code-verified triage: 0 decision-needed, 13 patch, 0 defer, 9 dismissed.
+
+- [ ] `[Review][Patch]` finishEarly reads `recAfter.limitMicroUsd ?? capMicroUsd` / `spendMicroUsd ?? 0` without finite guard — corrupted NaN record figures ship to artifact (round-2 guard covered only the classification path) [scripts/cap-hit-demo.ts:307-308]
+- [ ] `[Review][Patch]` mint-failure artifact publishes `keyHash: ""`; `revocationVerified` treats empty-string keyHash as a verified id [scripts/cap-hit-demo.ts:316,322,336,949]
+- [ ] `[Review][Patch]` fixture `paddingBytes` unbounded — `head -c ${paddingBytes}` interpolates fixture-scaled huge values into the live shell (self-DoS); clamp ≤1 MiB [scripts/cap-hit-demo.ts:588-590,600]
+- [ ] `[Review][Patch]` `readRecordSafe` swallows store errors with no observable trace — add error log so record corruption is surfaced, not silent [scripts/cap-hit-demo.ts:262-268]
+- [ ] `[Review][Patch]` probe transport failure gets zero retries — one network hiccup wastes an entire live-spend run; retry once on thrown transport error (fail-closed preserved) [scripts/cap-hit-demo.ts:205-213,801-819]
+- [ ] `[Review][Patch]` `turn_end` counted as bare substring — non-marker occurrences inflate turnsCompleted; anchor to own line `/^turn_end$/gm` [scripts/cap-hit-demo.ts:732]
+- [ ] `[Review][Patch]` fixture `provider` field declared in YAML but never validated — schema drift invisible; require "openrouter" when present [scripts/cap-hit-demo.ts:570, tests/providers/fixtures/loopy-workload.yaml:12]
+- [ ] `[Review][Patch]` fixture `paddingBytes`/`wall_clock_cap_ms` Number()-coerced — string values silently accepted; strict typeof-number validation [scripts/cap-hit-demo.ts:588,594]
+- [ ] `[Review][Patch]` `classifyRunExit` accepts negative/non-finite usage/cap — corrupted negative usage buries overflow; validate + throw [src/providers/cap-rejection.ts:56-73]
+- [ ] `[Review][Patch]` `classifyRunExit` passes through runtime-invalid `inBoxExit` (TS-bypass caller) — validate against CC-1 enum + throw [src/providers/cap-rejection.ts:72]
+- [ ] `[Review][Patch]` `redactWithKey` MAX_ITERATIONS exhaustion returns under-redacted text — throw on exhaustion instead (fail-closed) [src/providers/cap-rejection.ts:129-156]
+- [ ] `[Review][Patch]` `<8-char` secret returned verbatim lacks key-format justification comment (OpenRouter keys ≥8 by construction; boundary mirrors sanctioned policy) [src/providers/cap-rejection.ts:106]
+- [ ] `[Review][Patch]` `shQuote` — the shell-injection boundary for live argv — has zero unit tests; add edge-case suite (quotes, backslash, newline, `$`, backtick) [src/providers/exedev/transport.ts:83]
+
+Dismissed (9, code-verified / documented design): workload-still-active after grace settle is documented
+intentional fail-closed (comment at use site); destroy-without-list-verify accepted and documented;
+Windows chmod non-atomic — Unix-only demo (darwin/linux); evidenceDir precedence already
+inline-commented (round 2); key-management-URL over-redaction is documented defense-in-depth; `sleep`
+in tests is fine for the Unix-centric project; leak-scan overlap detection complete for its purpose
+(any ≥8 hit is a leak); broad fixture catch routes fail-closed to finishEarly; test subprocess cleanup
+bounded by Bun test timeout.
+- 2026-08-19: BMAD round-3 review (Blind/Edge A+B/Auditor; auditor re-audited all 5 ACs
+  PASS) — 13 patches applied: finishEarly finite guards; keyHash null-not-"" +
+  non-empty revocation check; paddingBytes 1 MiB clamp; readRecordSafe store-error
+  surfacing; probe retry-once on transport error; turn_end line-anchored count;
+  fixture provider/numeric-type validation; classifyRunExit non-negative-finite +
+  inBoxExit runtime validation (throws); redactWithKey exhaustion throw;
+  key-format justification comment; shQuote edge-case suite (38 tests);
+  9 findings dismissed as documented/false-positive; providers 382/0, typecheck 0.

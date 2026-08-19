@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -700,7 +700,7 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.verdict).toBe("inconclusive");
     expect(result.artifact.reason).toBe("mint-failed");
     expect(api.keys.filter((k) => !k.deleted)).toHaveLength(0);
-    expect(result.artifact.keyHash).toBe(""); // honest: no hash was ever recorded
+    expect(result.artifact.keyHash).toBeNull(); // null, not empty string
     // Phase-specific timings on the early-failure artifact: the mint duration
     // lives in mint_ms ONLY (never parked in setup_ms), phases that never ran
     // stay 0, and teardown_ms carries the actually-measured early teardown.
@@ -724,6 +724,83 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(orphan).toBeDefined();
     expect(orphan?.name).toContain(result.runId);
     expect(result.artifact.revocationVerified).toBeFalse();
+  });
+
+  // ─── keyHash null on mint-fail, revocationVerified requires non-empty string ────
+
+  test("mint-fail artifact emits keyHash null, not empty string", async () => {
+    api = new FakeKeyApi({ mintTransportErrorAfterCreate: true });
+    const result = await runCapHitDemo(deps(), defaultOpts());
+
+    expect(result.artifact.reason).toBe("mint-failed");
+    // keyHash is null when no key was minted (not "")
+    expect(result.artifact.keyHash).toBeNull();
+    // revocationVerified is false because keyHash is null/missing
+    expect(result.artifact.revocationVerified).toBeFalse();
+  });
+
+  // ─── probe retry-once on transport error ───────────────────────────────────────
+
+  // ─── probe retry-once on transport error ───────────────────────────────────────
+
+  test("probe that throws once then returns 403 still yields providerCapRejected true", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06 });
+    let calls = 0;
+    const probe = async (): Promise<{ status: number; body: string }> => {
+      calls++;
+      if (calls === 1) throw new Error("connection reset");
+      return { status: 403, body: "Key limit exceeded" };
+    };
+    const opts = defaultOpts({ workloadArgv: ["sh", "-c", "printf 'turn_end\\n'"] });
+    const result = await runCapHitDemo(deps({ probe }), opts);
+
+    expect(calls).toBe(2); // first throw, then retry succeeds
+    expect(result.artifact.providerCapRejected).toBeTrue();
+    expect(result.artifact.rejectionStatus).toStartWith("403:");
+    expect(result.verdict).toBe("demonstrated");
+  });
+
+  test("probe that throws twice yields probe-error + providerCapRejected false", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06 });
+    const probe = async (): Promise<{ status: number; body: string }> => {
+      throw new Error("network unreachable");
+    };
+    const opts = defaultOpts({ workloadArgv: ["sh", "-c", "printf 'turn_end\\n'"] });
+    const result = await runCapHitDemo(deps({ probe }), opts);
+
+    expect(result.artifact.providerCapRejected).toBeFalse();
+    expect(result.artifact.rejectionStatus).toStartWith("probe-error:");
+    expect(result.artifact.rejectionStatus).toContain("network unreachable");
+    expect(result.verdict).toBe("inconclusive");
+  });
+
+  // ─── turn_end anchored count (line boundaries) ─────────────────────────────────────
+
+  test("stdout 'xturn_endy\\n' not counted; 'turn_end\\n' counted", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06, chatStatus: 403 });
+    const opts = defaultOpts({
+      workloadArgv: ["sh", "-c", "printf 'xturn_endy\\nturn_end\\n'"],
+    });
+    const result = await runCapHitDemo(deps(), opts);
+
+    // Only the standalone "turn_end" line counts; embedded substring ignored
+    expect(result.artifact.turnsCompleted).toBe(1);
+  });
+
+  test("fixture paddingBytes string '10000' → workload-fixture-invalid", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06 });
+    const fixturePath = join(dir, "string-padding.yaml");
+    writeFileSync(fixturePath, `model: deepseek/deepseek-v3.2
+prompt: test
+paddingBytes: "10000"
+wall_clock_cap_ms: 900000
+provider: openrouter
+`);
+    const opts = defaultOpts({ fixturePath, workloadArgv: undefined });
+    const result = await runCapHitDemo(deps(), opts);
+
+    expect(result.artifact.reason).toBe("workload-fixture-invalid");
+    expect(result.verdict).toBe("inconclusive");
   });
 
   // ─── 10. Live gate (DOD MANDATORY e2e) ─────────────────────────────────────────

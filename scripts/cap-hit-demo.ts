@@ -137,7 +137,7 @@ export interface CapHitArtifact {
   reason: string | null;
   runBudgetCapMicros: number;
   residentCeilingMicros: number;
-  keyHash: string;
+  keyHash: string | null;
   timings: CapHitTimings;
   recordedAt: string;
 }
@@ -263,6 +263,8 @@ export async function runCapHitDemo(
     try {
       return deps.store.get(runId);
     } catch {
+      // Surface, never rethrow — teardown must still run.
+      log({ requestId, operation: "demo.record_read", agentId: null, timestamp: nowFn().toISOString(), duration: 0, runId, step: "record_read", status: "error", outcome: "store-read-failed" });
       return {};
     }
   };
@@ -299,13 +301,16 @@ export async function runCapHitDemo(
     const teardownEarlyMs = Date.now() - teardownStarted;
     const recAfter = readRecordSafe();
     const finalReason = teardownOk ? reason : "teardown-aborted";
+    // Guard mirrors classification path: only use record value when finite, else fall back.
+    const safeCap = recAfter.limitMicroUsd !== undefined && Number.isFinite(recAfter.limitMicroUsd) ? recAfter.limitMicroUsd : capMicroUsd;
+    const safeSpend = recAfter.spendMicroUsd !== undefined && Number.isFinite(recAfter.spendMicroUsd) ? recAfter.spendMicroUsd : 0;
     const artifact: CapHitArtifact = {
       story: "df2-4",
       runId,
       requestId,
       substrate,
-      capMicroUsd: recAfter.limitMicroUsd ?? capMicroUsd,
-      spendMicroUsd: recAfter.spendMicroUsd ?? 0,
+      capMicroUsd: safeCap,
+      spendMicroUsd: safeSpend,
       turnsCompleted: 0,
       turnsSource: "in-box",
       rejectionStatus: null,
@@ -313,13 +318,13 @@ export async function runCapHitDemo(
       terminationProvenance: null,
       exitStatus: null,
       killOrigin: null,
-      revocationVerified: teardownOk && recAfter.keyHash !== undefined && recAfter.closedAt !== undefined,
+      revocationVerified: teardownOk && typeof recAfter.keyHash === "string" && recAfter.keyHash !== "" && recAfter.closedAt !== undefined,
       closedAt: recAfter.closedAt ?? null,
       verdict: "inconclusive",
       reason: finalReason,
       runBudgetCapMicros,
       residentCeilingMicros,
-      keyHash: recAfter.keyHash ?? keyHash,
+      keyHash: recAfter.keyHash ?? (keyHash === "" ? null : keyHash),
       timings: { mint_ms: mintMs, setup_ms: setupMs, workload_ms: 0, reprobe_ms: 0, capture_spend_ms: 0, teardown_ms: teardownEarlyMs },
       recordedAt: nowFn().toISOString(),
     };
@@ -561,15 +566,20 @@ export async function runCapHitDemo(
   let probeModel = DEFAULT_PROBE_MODEL;
   if (opts.workloadArgv) {
     argv = opts.workloadArgv;
-  } else if (isLive) {
-    // Load from fixture YAML. A malformed fixture here would strand a live key
-    // on a live box — route through finishEarly, never rethrow past the mint.
+  } else if (isLive || opts.fixturePath) {
+    // Load from fixture YAML (live substrate or explicit fixturePath for test coverage).
+    // A malformed fixture here would strand a live key on a live box — route
+    // through finishEarly, never rethrow past the mint.
     try {
       const fixturePath = opts.fixturePath ?? DEFAULT_FIXTURE_PATH;
       const fixtureContent = readFileSync(fixturePath, "utf8");
       const fixture = parse(fixtureContent) as { model?: unknown; provider?: unknown; prompt?: unknown; paddingBytes?: unknown; wall_clock_cap_ms?: unknown };
       if (typeof fixture.model !== "string" || fixture.model === "" ||
           typeof fixture.prompt !== "string" || fixture.prompt === "") {
+        return finishEarly("workload-fixture-invalid");
+      }
+      // Demo is openrouter-only; a drifted provider label must fail closed.
+      if (fixture.provider !== undefined && fixture.provider !== "openrouter") {
         return finishEarly("workload-fixture-invalid");
       }
       probeModel = fixture.model;
@@ -585,9 +595,17 @@ export async function runCapHitDemo(
       // `turn_end` marker per completed paid turn — the artifact's only in-box
       // figure (INV-2: downgrade-only; classification still uses ONLY the
       // host-side re-probe).
+      // Validate types before coercion; strings must fail closed.
+      if (fixture.paddingBytes !== undefined && typeof fixture.paddingBytes !== "number") {
+        return finishEarly("workload-fixture-invalid");
+      }
+      if (fixture.wall_clock_cap_ms !== undefined && typeof fixture.wall_clock_cap_ms !== "number") {
+        return finishEarly("workload-fixture-invalid");
+      }
       const rawPadding = Number(fixture.paddingBytes ?? 0);
       // Integer bytes: `head -c 10000.5` is a shell error, not a smaller pad.
-      const paddingBytes = Number.isFinite(rawPadding) ? Math.max(0, Math.floor(rawPadding)) : 0;
+      // Clamp so a malformed fixture cannot demand an exabyte read (1 MiB bound).
+      const paddingBytes = Number.isFinite(rawPadding) ? Math.max(0, Math.min(Math.floor(rawPadding), 1_048_576)) : 0;
       // Fixture-declared ceiling becomes the default wall-clock limit unless
       // the operator passed --wall-clock-ms explicitly.
       if (opts.wallClockMs === undefined) {
@@ -727,9 +745,10 @@ export async function runCapHitDemo(
         } else {
           inBoxExit = res.exitCode === 0 ? "success" : "transient";
         }
-        // Count turns (if any) — the artifact's one box-reported figure
+        // Count turns (if any) — the artifact's one box-reported figure.
+        // Anchor to line boundaries so "xturn_endy" mid-line is not counted.
         if (typeof res.stdout === "string") {
-          turnsCompleted = (res.stdout.match(/turn_end/g) ?? []).length;
+          turnsCompleted = (res.stdout.match(/^turn_end$/gm) ?? []).length;
         }
       }
     } catch (e) {
@@ -799,7 +818,15 @@ export async function runCapHitDemo(
     const fakeChat = (deps.keyApi as KeyApi & { chatComplete?: (key: string) => Promise<{ status: number; body: string }> }).chatComplete;
     const probeFn = deps.probe ?? (fakeChat ? (k: string) => fakeChat.call(deps.keyApi, k) : openRouterChatProbe);
     try {
-      const probeResult = await probeFn(key, probeModel);
+      // Retry once on thrown errors (transport failure). A completed HTTP response (any status) is a real answer, never retried.
+      let probeResult;
+      try {
+        probeResult = await probeFn(key, probeModel);
+      } catch (firstErr) {
+        // Transport-layer throw — retry exactly once.
+        log({ requestId, operation: "demo.reprobe", agentId: null, timestamp: nowFn().toISOString(), duration: 0, runId, step: "reprobe", status: "ok", outcome: "retrying-after-transport-error" });
+        probeResult = await probeFn(key, probeModel); // second and final call
+      }
       reprobeMs = Date.now() - started;
       providerCapRejected = isCapRejection(probeResult.status);
       // Verbatim provider status + redacted body — the redaction input is the
@@ -946,7 +973,7 @@ export async function runCapHitDemo(
 
   // ---- 12. Read final record for revocation verification ----
   const rec = readRecordSafe();
-  const revocationVerified = teardownOk && rec.keyHash !== undefined && rec.closedAt !== undefined;
+  const revocationVerified = teardownOk && typeof rec.keyHash === "string" && rec.keyHash !== "" && rec.closedAt !== undefined;
   const closedAt = rec.closedAt ?? null;
   // On the fail-closed cancel path the explicit capture was skipped, so the
   // artifact's spend figure is teardown's own pre-revoke read off the record.
@@ -1010,7 +1037,7 @@ export async function runCapHitDemo(
     reason,
     runBudgetCapMicros,
     residentCeilingMicros,
-    keyHash: rec.keyHash ?? keyHash,
+    keyHash: rec.keyHash ?? (keyHash === "" ? null : keyHash),
     timings: {
       mint_ms: mintMs,
       setup_ms: setupMs,
