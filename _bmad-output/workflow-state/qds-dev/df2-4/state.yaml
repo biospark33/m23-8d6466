@@ -1,6 +1,6 @@
 story: df2-4-live-cap-hit-kill
 title: "DF2.4: Live Cap-Hit Kill Demonstration — Real Key, Real Spend, Recorded Evidence"
-phase: dev-story
+phase: live-run-pending  # code committed ea4e6d5 + pushed; waiting on exe.dev account + OPENROUTER_PROVISIONING_KEY (user setup in progress)
 branch: feature/df2-4-live-cap-hit-kill
 base: main
 target: main
@@ -25,3 +25,12 @@ notes: >
   Live-run story: real OpenRouter key at --cap 50000 u$, real exe.dev box. Devdan reference repos
   must be surveyed (inkwell + super-simple under ~/reference-repos/) for liftable code — user
   directive: lift/copy, minimize new code. classifyRunExit is the ONLY new mechanism.
+live_run:
+  command: >
+    OPENROUTER_PROVISIONING_KEY=$(cat ~/.openrouter-provisioning-key)
+    bun scripts/cap-hit-demo.ts --driver exedev
+    --repo-url https://github.com/octocat/Hello-World.git
+    --sha 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d
+    --roster config/rosters/qds-default.roster.yaml --cap 50000
+  fill_repo_note: repo is private; box fills from public Hello-World at pinned sha (gate A needs A repo, not this one; INV-CRED-1 forbids a git credential in the box)
+  blocked_on: [exe.dev account + ssh key (~/.ssh/exedev_ed25519 + ssh config), ~/.openrouter-provisioning-key file]
