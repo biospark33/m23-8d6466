@@ -177,14 +177,11 @@ export class FakeKeyApi {
       };
     }
 
-    // Reverse-lookup the key to find its hash
-    let foundEntry: FakeKey | null = null;
-    for (const [hash, plaintext] of this.plaintexts.entries()) {
-      if (plaintext === key) {
-        foundEntry = this.keys.find((k) => k.hash === hash) ?? null;
-        break;
-      }
-    }
+    // Direct hash lookup — the map's keys are sha256(plaintext), so hashing the
+    // presented key is the O(1) path and drops the reverse-scan's silent
+    // arbitrary-match behavior on duplicate values.
+    const presentedHash = createHash("sha256").update(key).digest("hex");
+    const foundEntry: FakeKey | null = this.keys.find((k) => k.hash === presentedHash) ?? null;
 
     // Unknown key → 401
     if (!foundEntry) {

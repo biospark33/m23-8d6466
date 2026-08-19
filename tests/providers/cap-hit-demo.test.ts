@@ -264,6 +264,9 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.artifact.exitStatus).not.toBe("overflow");
     // The artifact's rejection status is the HOST probe's (500), not the box's claim
     expect(result.artifact.rejectionStatus).toStartWith("500:");
+    // …and the box's CLAIMED rejection never entered it (INV-2: host-produced only)
+    expect(result.artifact.rejectionStatus).not.toContain("402");
+    expect(result.artifact.rejectionStatus).not.toContain("Insufficient credits");
   });
 
   // ─── 4. AC3 wall-clock-first ─────────────────────────────────────────────────
@@ -431,8 +434,22 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.artifact.rejectionStatus).not.toContain("openrouter.ai/workspaces");
     expect(result.artifact.rejectionStatus).not.toContain(urlHash);
     // ...while the structured keyHash field keeps the deliberate identifier.
+    // keyHash is optional on the record type; a missing record hash must FAIL
+    // this equality (artifact falls back to the mint-time hash ≠ "").
     const rec = store.get(result.runId);
-    expect(result.artifact.keyHash).toBe(rec.keyHash);
+    expect(result.artifact.keyHash).toBe(rec.keyHash ?? "");
+  });
+
+  test("AC2 fail-closed: probe transport failure → probe-error status, verdict inconclusive", async () => {
+    const probe = async (): Promise<{ status: number; body: string }> => {
+      throw new Error("fetch failed: connection reset");
+    };
+    const opts = defaultOpts({ workloadArgv: ["sh", "-c", "printf 'turn_end\\n'"] });
+    const result = await runCapHitDemo(deps({ probe }), opts);
+    expect(result.verdict).toBe("inconclusive");
+    expect(result.artifact.providerCapRejected).toBeFalse();
+    expect(result.artifact.rejectionStatus).toStartWith("probe-error:");
+    expect(result.artifact.rejectionStatus).toContain("fetch failed");
   });
 
   // ─── 9. turnsCompleted only downgrades ────────────────────────────────────────

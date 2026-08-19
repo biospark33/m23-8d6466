@@ -40,7 +40,7 @@ import {
   type ProviderDriver,
   type ExecResult,
 } from "../src/providers/index.ts";
-import { newId, RunRecordStore } from "../src/providers/run-record.ts";
+import { newId, RunRecordStore, type RunRecord } from "../src/providers/run-record.ts";
 import { shQuote } from "../src/providers/exedev/transport.ts";
 import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import {
@@ -185,8 +185,10 @@ const PROBE_TIMEOUT_MS = 15_000;
  * rejectionStatus in addition to run-key redaction: the hash is published
  * deliberately in the artifact's keyHash field, but a live management
  * deep-link has no place in a committed artifact (defense-in-depth).
+ * Charset broadened (hex + alnum + percent-encoding + hyphen) so an
+ * encoding or format drift degrades to over-redaction, never a leak.
  */
-const KEY_MANAGEMENT_URL_RE = /https:\/\/openrouter\.ai\/[^\s"'}]*\/keys\/[0-9a-f]{16,}/g;
+const KEY_MANAGEMENT_URL_RE = /https:\/\/openrouter\.ai\/[^\s"'}]*\/keys\/[0-9a-zA-Z%-]{16,}/g;
 
 /**
  * Production host-side re-probe (AC2): one minimal chat call with the retained
@@ -221,6 +223,7 @@ export async function runCapHitDemo(
   const wallClockMs = opts.wallClockMs ?? DEFAULT_WALL_CLOCK_MS;
   const runBudgetCapMicros = opts.runBudgetCapMicros ?? DEFAULT_RUN_BUDGET_CAP;
   const residentCeilingMicros = opts.residentCeilingMicros ?? DEFAULT_RESIDENT_CEILING;
+  // Precedence: injected deps (test seam) beat opts beat env — the seam wins.
   const evidenceDir = deps.evidenceDir ?? opts.evidenceDir ?? process.env.QDS_EVIDENCE_DIR ?? ".sandbox/evidence";
   // Substrate-correct key file: DF2.3's default (/home/agent/app/.env) is the
   // inkwell layout; the exe.dev image has no /home/agent. The fake substrate
@@ -230,6 +233,17 @@ export async function runCapHitDemo(
   // ---- 1. VM creation (INV-1: record → VM → key) ----
   // createRun does store.create internally
   const runId = newId("df2-4-cap-hit", nowFn());
+
+  // A record read that must never strand a live key: mid-run store/corruption
+  // errors fall back to a shell so teardown + revocation still run (AC3).
+  const readRecordSafe = (): Partial<RunRecord> => {
+    try {
+      return deps.store.get(runId);
+    } catch {
+      return {};
+    }
+  };
+
   const vm = await createRun(deps.driver, deps.store, { runId });
   const vmName = vm.vmName ?? runId;
 
@@ -249,7 +263,7 @@ export async function runCapHitDemo(
     } catch {
       teardownOk = false;
     }
-    const recAfter = deps.store.get(runId);
+    const recAfter = readRecordSafe();
     const finalReason = teardownOk ? reason : "teardown-aborted";
     const artifact: CapHitArtifact = {
       story: "df2-4",
@@ -516,7 +530,11 @@ export async function runCapHitDemo(
     try {
       const fixturePath = opts.fixturePath ?? DEFAULT_FIXTURE_PATH;
       const fixtureContent = readFileSync(fixturePath, "utf8");
-      const fixture = parse(fixtureContent) as { model: string; provider: string; prompt: string };
+      const fixture = parse(fixtureContent) as { model?: unknown; provider?: unknown; prompt?: unknown; paddingBytes?: unknown };
+      if (typeof fixture.model !== "string" || fixture.model === "" ||
+          typeof fixture.prompt !== "string" || fixture.prompt === "") {
+        return finishEarly("workload-fixture-invalid", setupMs);
+      }
       probeModel = fixture.model;
       // The workload is a raw curl chat loop, not pi: pi's node streaming
       // client stalls nondeterministically on exe.dev boxes (runs 9-16), while
@@ -530,7 +548,8 @@ export async function runCapHitDemo(
       // `turn_end` marker per completed paid turn — the artifact's only in-box
       // figure (INV-2: downgrade-only; classification still uses ONLY the
       // host-side re-probe).
-      const paddingBytes = Math.max(0, Number((fixture as { paddingBytes?: number }).paddingBytes ?? 0));
+      const rawPadding = Number(fixture.paddingBytes ?? 0);
+      const paddingBytes = Number.isFinite(rawPadding) ? Math.max(0, rawPadding) : 0;
       argv = [
         "sh",
         "-c",
@@ -659,10 +678,14 @@ export async function runCapHitDemo(
       // embeds openrouter.ai/.../keys/<hash>; the hash stays published in the
       // structured keyHash field, the deep-link does not.
       rejectionStatus = `${probeResult.status}: ${redactWithKey(probeResult.body, key).replace(KEY_MANAGEMENT_URL_RE, "[REDACTED]")}`;
-    } catch {
+    } catch (e) {
       reprobeMs = Date.now() - started;
-      // A probe that cannot be issued leaves both fields at false/null, which
-      // the classifier maps to inconclusive (AC2) — fail-closed.
+      // A probe that cannot be issued fails closed: providerCapRejected stays
+      // false and the classifier maps that to inconclusive (AC2). rejectionStatus
+      // records WHY there is no provider signal — transport failure is not a
+      // no-rejection answer. Message redacted with the run key (belt: transport
+      // errors don't echo headers, the scan still runs).
+      rejectionStatus = `probe-error: ${redactWithKey(String((e as Error).message ?? e), key)}`;
     }
     log({
       requestId,
@@ -719,7 +742,12 @@ export async function runCapHitDemo(
   // limitMicroUsd"), never the operator's requested --cap: a provider that
   // clamps or rounds the limit would otherwise be judged against a cap that
   // was never enforced (INV-2).
-  const effectiveCapMicroUsd = deps.store.get(runId).limitMicroUsd ?? capMicroUsd;
+  // `??` alone does not catch NaN/Infinity (a corrupted record) — a non-finite
+  // cap makes every `>=` false and silently buries the verdict; fall back to
+  // the operator's requested cap instead (fail-closed direction).
+  const echoedCap = readRecordSafe().limitMicroUsd;
+  const effectiveCapMicroUsd =
+    echoedCap !== undefined && Number.isFinite(echoedCap) ? echoedCap : capMicroUsd;
   const classification = classifyRunExit({
     inBoxExit,
     usageMicroUsd: spendMicroUsd,
@@ -761,7 +789,7 @@ export async function runCapHitDemo(
   }
 
   // ---- 12. Read final record for revocation verification ----
-  const rec = deps.store.get(runId);
+  const rec = readRecordSafe();
   const revocationVerified = teardownOk && rec.keyHash !== undefined && rec.closedAt !== undefined;
   const closedAt = rec.closedAt ?? null;
 
