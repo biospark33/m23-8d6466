@@ -372,14 +372,14 @@ not be sequenced before it.
 Sources: Blind Hunter 11 findings, Edge Case Hunter 16, Acceptance Auditor 0 (all ACs PASS).
 After code-verified triage: 0 decision-needed, 8 patch, 0 defer, 19 dismissed.
 
-- [x] [Review][Patch] Bare post-mint `deps.store.get(runId)` reads can throw past a live key [scripts/cap-hit-demo.ts:252,722,764] — record corruption would skip teardown/revocation; route reads through a fail-safe helper
-- [x] [Review][Patch] `effectiveCapMicroUsd` NaN/Infinity passes `??` unchecked [scripts/cap-hit-demo.ts:722] — non-finite record cap must fall back to requested cap (fail-closed)
-- [x] [Review][Patch] Live fixture fields unvalidated before shell construction [scripts/cap-hit-demo.ts:517-537] — non-string/empty `model`/`prompt` and non-finite `paddingBytes` must route to `finishEarly("workload-fixture-invalid")`, never into argv
-- [x] [Review][Patch] Probe transport failure indistinguishable from true no-rejection [scripts/cap-hit-demo.ts:662-666] — catch must set `rejectionStatus = "probe-error: …"` (redacted) while staying fail-closed
-- [x] [Review][Patch] `KEY_MANAGEMENT_URL_RE` hash charset hex-only [scripts/cap-hit-demo.ts:189] — broaden to `[0-9a-zA-Z%-]{16,}` so encoding/format drift cannot leak a management deep-link
-- [x] [Review][Patch] `FakeKeyApi.chatComplete` reverse-scans plaintext map [tests/providers/fixtures/fake-key-api.ts:180-187] — direct sha256 lookup, drop O(n) value scan + uniqueness assumption
-- [x] [Review][Patch] AC2 negative control doesn't assert box's claimed rejection stayed out of `rejectionStatus` [tests/providers/cap-hit-demo.test.ts:249-266] — add not-contains assertions; add probe-transport-failure test
-- [x] [Review][Patch] `evidenceDir` precedence (deps > opts > env) undocumented at use site [scripts/cap-hit-demo.ts:224] — one comment line
+- [x] `[Review][Patch]`Bare post-mint `deps.store.get(runId)` reads can throw past a live key [scripts/cap-hit-demo.ts:252,722,764] — record corruption would skip teardown/revocation; route reads through a fail-safe helper
+- [x] `[Review][Patch]``effectiveCapMicroUsd` NaN/Infinity passes `??` unchecked [scripts/cap-hit-demo.ts:722] — non-finite record cap must fall back to requested cap (fail-closed)
+- [x] `[Review][Patch]`Live fixture fields unvalidated before shell construction [scripts/cap-hit-demo.ts:517-537] — non-string/empty `model`/`prompt` and non-finite `paddingBytes` must route to `finishEarly("workload-fixture-invalid")`, never into argv
+- [x] `[Review][Patch]`Probe transport failure indistinguishable from true no-rejection [scripts/cap-hit-demo.ts:662-666] — catch must set `rejectionStatus = "probe-error: …"` (redacted) while staying fail-closed
+- [x] `[Review][Patch]``KEY_MANAGEMENT_URL_RE` hash charset hex-only [scripts/cap-hit-demo.ts:189] — broaden to `[0-9a-zA-Z%-]{16,}` so encoding/format drift cannot leak a management deep-link
+- [x] `[Review][Patch]``FakeKeyApi.chatComplete` reverse-scans plaintext map [tests/providers/fixtures/fake-key-api.ts:180-187] — direct sha256 lookup, drop O(n) value scan + uniqueness assumption
+- [x] `[Review][Patch]`AC2 negative control doesn't assert box's claimed rejection stayed out of `rejectionStatus` [tests/providers/cap-hit-demo.test.ts:249-266] — add not-contains assertions; add probe-transport-failure test
+- [x] `[Review][Patch]``evidenceDir` precedence (deps > opts > env) undocumented at use site [scripts/cap-hit-demo.ts:224] — one comment line
 
 Dismissed (19, code-verified false positives / documented design): wall-clock-vs-host-error race
 settle order is correct (both hunters flagged same theory); ≥8-char redaction boundary is the

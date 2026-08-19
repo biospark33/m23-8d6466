@@ -15,7 +15,7 @@ provider: openrouter
 # boxes (fresh-box first calls AND sustained loops — runs 9-16 lost 15-minute
 # workloads to stalls), while gate C's curl path never stalled once across
 # every run. Each turn is one chat/completions POST with ~10 KB of fresh
-# random padding (~$1.6K µ$/turn, cache-busted): the $50K µ$ cap arrives in
+# random padding (~1 600 µ$/turn, cache-busted): the 50 000 µ$ cap arrives in
 # ~35 turns ≈ 2-3 min, inside the 900 s ceiling, and OpenRouter's lagging
 # enforcement (~4 requests / 15-30 s behind the crossing; rejection is HTTP
 # 403 "Key limit exceeded", not 402) adds roughly one request of overshoot.

@@ -92,9 +92,11 @@ export const MIN_REDACTABLE_LEN = 8;
  * length >= 8 is replaced by `[REDACTED]`. Longest match wins. Secret shorter
  * than 8 chars → text verbatim.
  *
- * Implementation: iterative replacement — repeat: find the longest secret
- * substring present in text (try lengths secret.length..8, first indexOf hit wins),
- * replace ALL its occurrences, loop until no >=8 substring found.
+ * Implementation: one pass over the ORIGINAL text — substring search runs
+ * against a NUL-masked working copy (matched spans are blanked as they are
+ * found), and the markers are spliced once at the end. Searching the evolving
+ * output instead would let a generated "[REDACTED]" be selected (or re-split)
+ * as a later match whenever the secret itself contains marker text.
  *
  * ponytail: O(n·m) ceiling where n=text.length and m=secret.length, but bodies
  * are <1KB so this is acceptable. A more efficient approach (Aho-Corasick,
@@ -103,34 +105,48 @@ export const MIN_REDACTABLE_LEN = 8;
 export function redactWithKey(text: string, secret: string): string {
   if (secret.length < MIN_REDACTABLE_LEN) return text;
 
-  let result = text;
+  // Mask char must be absent from the secret, or masked spans could re-match.
+  const mask = secret.includes("\x00") ? "\x01" : "\x00";
+  const work = text.split("");
+  const spans: Array<[number, number]> = [];
   let iteration = 0;
-  const MAX_ITERATIONS = 4096; // Guard: each iteration removes >=8 chars
+  const MAX_ITERATIONS = 4096; // Guard: each iteration masks >=8 chars
 
   while (iteration < MAX_ITERATIONS) {
-    let foundLen = 0;
+    const probe = work.join("");
+    // Find the longest secret substring (length down to 8) present in the
+    // not-yet-masked text.
     let foundSubstring = "";
-
-    // Find the longest substring (secret length down to 8) present in result
+    search:
     for (let len = secret.length; len >= MIN_REDACTABLE_LEN; len--) {
       for (let start = 0; start + len <= secret.length; start++) {
         const substr = secret.slice(start, start + len);
-        if (result.includes(substr)) {
-          foundLen = len;
+        if (probe.includes(substr)) {
           foundSubstring = substr;
-          break;
+          break search;
         }
       }
-      if (foundLen > 0) break;
     }
 
-    if (foundLen === 0) break; // No >=8-char substring found
+    if (foundSubstring === "") break; // No >=8-char substring left
 
-    // Replace ALL occurrences of the found substring
-    result = result.split(foundSubstring).join("[REDACTED]");
+    // Mask ALL its occurrences (left-to-right, non-overlapping — matching the
+    // split/join semantics this replaces).
+    let at = probe.indexOf(foundSubstring);
+    while (at !== -1) {
+      spans.push([at, at + foundSubstring.length]);
+      for (let i = at; i < at + foundSubstring.length; i++) work[i] = mask;
+      at = probe.indexOf(foundSubstring, at + foundSubstring.length);
+    }
     iteration++;
   }
 
+  // Splice markers back-to-front so earlier indices stay valid.
+  spans.sort((a, b) => b[0] - a[0]);
+  let result = text;
+  for (const [start, end] of spans) {
+    result = `${result.slice(0, start)}[REDACTED]${result.slice(end)}`;
+  }
   return result;
 }
 

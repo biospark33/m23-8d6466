@@ -13,9 +13,16 @@ describe("loopy-workload.yaml fixture", () => {
     expect(fixture).not.toBeNull();
   });
 
-  test("model is non-empty string", () => {
+  test("model is non-empty string, matches the demo roster, and is priced in the shipped catalog", () => {
     expect(fixture.model).toBeString();
     expect(fixture.model.length).toBeGreaterThan(0);
+    // Slug consistency across all three fixtures: the workload model must be
+    // the roster's runner model AND an entry in the placed models.json —
+    // anything else and the demo bills a model the cost table never priced.
+    const roster = parse(readFileSync(join(import.meta.dir, "df2-4-demo.roster.yaml"), "utf-8"));
+    const catalog = JSON.parse(readFileSync(join(import.meta.dir, "df2-4-models.json"), "utf-8"));
+    expect(fixture.model).toBe(roster.roles[0].model);
+    expect(catalog.providers.openrouter.models.map((m: { id: string }) => m.id)).toContain(fixture.model);
   });
 
   test("provider is openrouter", () => {
@@ -26,7 +33,7 @@ describe("loopy-workload.yaml fixture", () => {
     expect(fixture.wall_clock_cap_ms).toBe(900000);
   });
 
-  test("workload is non-terminating by construction (Infra Prereq)", () => {
+  test("fixture turns always spend and the prompt carries no termination phrasing (Infra Prereq inputs)", () => {
     // The non-terminating shape is the paid-until-refusal LOOP in
     // cap-hit-demo.ts, not an endless per-turn reply (measured 2026-08-19: a
     // "count forever" turn on a 65K-maxTokens reasoning model never completes

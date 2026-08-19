@@ -65,6 +65,8 @@ export interface FakeBoxConfig {
    * to `default`. Set an entry to `null` to make that model's ping fail.
    */
   chat: { default?: { content?: string; reasoning?: string }; byModel?: Record<string, { content?: string; reasoning?: string } | null> };
+  /** HTTP status the chat endpoint reports to `-w '%{http_code}'` (D). Default 200. */
+  chatHttpCode?: number;
   /** Delete the stub `pi` from PATH — "command not found" for B. */
   piMissing?: boolean;
   /** Delete the stub `curl` — assertion C/E missing-dependency path. */
@@ -76,10 +78,13 @@ export function passingBoxConfig(): FakeBoxConfig {
   return {
     newShape: "recognized",
     pi: { mode: "table", costTotal: 4.3e-05 },
+    // USD-per-million-token rates, matching the catalog the demo ships
+    // (tests/providers/fixtures/df2-4-models.json) — the in-box twin must
+    // carry the same units the placed file does.
     modelsJson: {
       models: {
         "deepseek/deepseek-v4-flash-0731": {
-          cost: { input: 1.4e-07, output: 1.4e-07, cacheRead: 1.4e-08, cacheWrite: 1.4e-07 },
+          cost: { input: 0.14, output: 0.28, cacheRead: 0.014, cacheWrite: 0.14 },
           provider: { zdr: true, data_collection: "deny" },
         },
       },
@@ -140,6 +145,8 @@ except Exception:
 url = ""
 method = "GET"
 body = None
+out_path = None
+write_out = None
 args = sys.argv[1:]
 # The auth header must ride STDIN (curl -K -), never argv — an argv-carried
 # Authorization is exactly the ps-visible leak the real script guards against.
@@ -163,9 +170,24 @@ while i < len(args):
         method = args[i + 1]; i += 1
     elif a in ("-d", "--data"):
         body = args[i + 1]; i += 1
+    elif a in ("-o", "--output"):
+        out_path = args[i + 1]; i += 1
+    elif a in ("-w", "--write-out"):
+        write_out = args[i + 1]; i += 1
     elif a.startswith("http://") or a.startswith("https://"):
         url = a
     i += 1
+
+def respond(body_text, status="200"):
+    # Real-curl semantics: -o sinks the body, -w appends the write-out string
+    # to stdout (only %{http_code} is interpolated — all the script asks for).
+    if out_path is not None:
+        with open(out_path, "w") as f:
+            f.write(body_text)
+    if write_out is not None:
+        sys.stdout.write(write_out.replace("%{http_code}", status))
+    else:
+        print(body_text)
 
 if url.endswith("/chat/completions"):
     model = ""
@@ -177,6 +199,8 @@ if url.endswith("/chat/completions"):
     chat = cfg.get("chat", {})
     entry = chat.get("byModel", {}).get(model, chat.get("default", {}))
     if entry is None:
+        if write_out is not None:
+            sys.stdout.write(write_out.replace("%{http_code}", "000"))
         print(json.dumps({"error": {"message": f"provider refused {model}"}}), file=sys.stderr)
         sys.exit(1)
     msg = {}
@@ -191,27 +215,30 @@ if url.endswith("/chat/completions"):
     # fake-pi served — D's instrument is the provider-computed cost).
     pi = cfg.get("pi", {})
     raw = pi.get("costTotalRaw")
+    code = str(cfg.get("chatHttpCode", 200))
     if raw is not None:
         # round 6: hand-built JSON so bare Infinity reaches the parser verbatim
-        print('{"choices": [{"message": ' + json.dumps(msg) + '}], "usage": {"cost": {"total": ' + str(raw) + '}}}')
+        respond('{"choices": [{"message": ' + json.dumps(msg) + '}], "usage": {"cost": {"total": ' + str(raw) + '}}}', code)
         sys.exit(0)
     total = pi.get("costTotal")
     resp = {"choices": [{"message": msg}]}
     if total is not None:
         resp["usage"] = {"cost": {"total": total}}
-    print(json.dumps(resp))
+    respond(json.dumps(resp), code)
     sys.exit(0)
 
 if url.endswith("/api/v1/key"):
     if cfg.get("keyRawBody") is not None:
-        print(cfg["keyRawBody"])
+        respond(cfg["keyRawBody"])
     elif cfg.get("keyBody") is not None:
-        print(json.dumps(cfg["keyBody"]))
+        respond(json.dumps(cfg["keyBody"]))
     else:
         key = cfg.get("key", {})
-        print(json.dumps({"data": {"limit": key.get("limit"), "usage": key.get("usage", 0)}}))
+        respond(json.dumps({"data": {"limit": key.get("limit"), "usage": key.get("usage", 0)}}))
     sys.exit(0)
 
+if write_out is not None:
+    sys.stdout.write(write_out.replace("%{http_code}", "000"))
 print(f"fake curl: unhandled url {url}", file=sys.stderr)
 sys.exit(22)
 `;

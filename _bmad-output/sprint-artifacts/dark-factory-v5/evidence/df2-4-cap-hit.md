@@ -77,10 +77,10 @@ These were `[VERIFY]` items in the story; they are now measurements:
    demo's probe accepts both signatures.
 2. **Enforcement lags the crossing by ~2–4 requests / 15–30 s** (isolated with
    dedicated scratch keys: a $0.01 key first refused at $0.0178 ≈ 1.8×; this
-   run crossed $0.05 and stopped at $53 447 µ$ ≈ +7%). The story's "[VERIFY]
+   run crossed $0.05 and stopped at 53 447 µ$ ≈ +7%). The story's "[VERIFY]
    overshoot bounded by one request" is therefore optimistic for large
    requests: overshoot ≈ (lag ÷ request cadence) × request cost. Sizing turns
-   at ~$1.6K µ$ kept this run's overshoot to ~2 requests.
+   at ~1 600 µ$ kept this run's overshoot to ~2 requests.
 3. **`usage.cost` is route-dependent in shape** — `{"total": x}` on some
    upstreams, a bare float on others (GMICloud observed).
 4. **pi's node streaming client stalls nondeterministically on exe.dev boxes**
@@ -112,4 +112,6 @@ ssh access to exe.dev (`~/.ssh/config` entries for `exe.dev` / `*.exe.xyz`).
 Costs one key at the cap plus the measured enforcement-lag overshoot; the
 workload is ~35 two-second turns. The fill repo is any public repo at a
 pinned SHA — the box never sees this (private) repo, and no git credential
-ever enters it (INV-CRED-1).
+ever enters it (INV-CRED-1). The roster above is the one the recorded run
+used (`df2-4-demo.roster.yaml`, the single-model demo roster — a multi-model
+roster would eat the cap in gate C pings before the workload ran).

@@ -7,9 +7,6 @@
  * inputs provenance (AC2 INV-2), wall-clock-first (AC3), cap-below-first-turn (AC4),
  * teardown on host-error, record schema invariants, leak scan (INV-4), script smoke,
  * and the live gate (DOD).
- *
- * The script `scripts/cap-hit-demo.ts` does not exist when these tests are written
- * (TDD RED) — imports will fail until implementation.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -29,8 +26,7 @@ import { leakScan } from "./fixtures/leak-scan.ts";
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "cap-hit-demo.ts");
 
-// ponytail: module import of missing script is RED by design — implementation follows
-import { runCapHitDemo, type CapHitDemoDeps, type CapHitDemoOptions, type CapHitDemoResult } from "../../scripts/cap-hit-demo.ts";
+import { runCapHitDemo, type CapHitDemoDeps, type CapHitDemoOptions } from "../../scripts/cap-hit-demo.ts";
 
 let dir: string;
 let store: RunRecordStore;
@@ -133,7 +129,7 @@ async function cli(args: string[], envOverrides: Record<string, string | undefin
 // ─── 1. AC1/DOD e2e (fake substrate) — demonstrated path ────────────────────────
 
 describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
-  test("demonstrated: exhausted key + 2 turns + 402 re-probe → overflow, verdict demonstrated", async () => {
+  test("demonstrated: exhausted key + 2 turns + 403 re-probe → overflow, verdict demonstrated", async () => {
     // usageOnCreateUsd 0.06 ≥ cap 0.05 → key born exhausted
     api = new FakeKeyApi({ usageOnCreateUsd: 0.06 });
     const opts = defaultOpts({
@@ -284,6 +280,8 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.artifact.reason).toBe("wall-clock-first");
     expect(result.artifact.terminationProvenance).toBe("wall-clock");
     expect(result.artifact.exitStatus).not.toBe("overflow");
+    // The wall-clock branch records the elapsed ceiling, not a default zero.
+    expect(result.artifact.timings.workload_ms).toBeGreaterThanOrEqual(300);
 
     // Teardown STILL invoked — assert record closed and box destroyed
     expect(result.artifact.closedAt).toBeString();
@@ -480,6 +478,54 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
 
   // Covered by test 5: turnsCompleted 0 → inconclusive despite overflow inputs.
 
+  // ─── 9b. FakeKeyApi.chatComplete contract (the host re-probe substrate) ───────
+
+  test("chatComplete natural path: capped exhausted key → 403 Key limit exceeded (the MEASURED per-key shape)", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06 });
+    const minted = await api.createKey("df24-chat-contract", 0.05);
+    const res = await api.chatComplete(minted.key);
+    expect(res.status).toBe(403);
+    expect(res.body).toContain("Key limit exceeded");
+  });
+
+  test("chatComplete: a revoked (deleted) key authenticates as 401 invalid-key", async () => {
+    api = new FakeKeyApi();
+    const minted = await api.createKey("df24-chat-revoked", 0.05);
+    await api.deleteKey(minted.hash);
+    const res = await api.chatComplete(minted.key);
+    expect(res.status).toBe(401);
+  });
+
+  // ─── 9c. Mint transport failure vs orphan compensation ────────────────────────
+
+  test("mint transport failure after provider-side create: compensation revokes the orphan, verdict inconclusive mint-failed", async () => {
+    // The provider registered the key, then the transport "timed out" —
+    // mintRunKey's compensation sweep (list by run-scoped name → revoke)
+    // must leave NO live orphan, and the demo must fail honestly.
+    api = new FakeKeyApi({ mintTransportErrorAfterCreate: true });
+    const result = await runCapHitDemo(deps(), defaultOpts());
+
+    expect(result.verdict).toBe("inconclusive");
+    expect(result.artifact.reason).toBe("mint-failed");
+    expect(api.keys.filter((k) => !k.deleted)).toHaveLength(0);
+    expect(result.artifact.keyHash).toBe(""); // honest: no hash was ever recorded
+  });
+
+  test("mint compensation failure: the provider key stays live AND recoverable by its run-scoped name", async () => {
+    // DELETE answers 500, so compensation's revoke fails — the orphan stays
+    // live. The record closes with no keyHash (nothing was recorded to revoke),
+    // so recovery is by NAME: the provider list still carries the entry keyed
+    // to this runId, which is exactly what mintRunKey's sweep matches on.
+    api = new FakeKeyApi({ mintTransportErrorAfterCreate: true, deleteStatus: 500 });
+    const result = await runCapHitDemo(deps(), defaultOpts());
+
+    expect(result.artifact.reason).toBe("mint-failed");
+    const orphan = api.keys.find((k) => !k.deleted);
+    expect(orphan).toBeDefined();
+    expect(orphan?.name).toContain(result.runId);
+    expect(result.artifact.revocationVerified).toBeFalse();
+  });
+
   // ─── 10. Live gate (DOD MANDATORY e2e) ─────────────────────────────────────────
 
   test.todoIf(!process.env.QDS_EXEDEV_LIVE)(
@@ -525,11 +571,27 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
         stderr: "pipe",
       });
 
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        Promise.race([proc.exited, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 1_200_000))]),
-      ]);
+      // The timeout handle is cleared on every path, and a timeout rejection
+      // kills the subprocess before propagating (no orphaned live-fire run).
+      let liveTimer: ReturnType<typeof setTimeout> | undefined;
+      let stdout = "";
+      let stderr = "";
+      let exitCode: number | null = null;
+      try {
+        [stdout, stderr, exitCode] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          Promise.race([
+            proc.exited,
+            new Promise<never>((_, reject) => {
+              liveTimer = setTimeout(() => reject(new Error("timeout")), 1_200_000);
+            }),
+          ]),
+        ]);
+      } finally {
+        clearTimeout(liveTimer);
+        proc.kill();
+      }
 
       expect(exitCode).toBe(0);
 
@@ -549,10 +611,13 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
 
   // ─── 11. Script smoke (subprocess) ────────────────────────────────────────────
 
-  test("script smoke: subprocess exits 0, artifact exists, verdict valid enum", async () => {
+  test("script smoke: exit code tracks verdict, artifact exists, verdict valid enum", async () => {
     const res = await cli(["--driver", "fake", "--cap", "50000"]);
 
-    expect(res.exitCode).toBe(0);
+    // The fake substrate's fresh key is under its cap and the probe answers
+    // 200 — inconclusive, and since the exit-code contract only pays out on a
+    // demonstrated verdict, the process must fail.
+    expect(res.exitCode).toBe(1);
 
     // Parse last line as JSON
     const lines = res.stdout.trim().split("\n");
@@ -562,7 +627,8 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(existsSync(result.artifactPath)).toBeTrue();
     expect(result.artifactPath.startsWith(evidenceDir)).toBeTrue();
 
-    // Verdict is valid enum
+    // Verdict is valid enum (and matches the exit code above)
     expect(["demonstrated", "inconclusive"]).toContain(result.verdict);
+    expect(result.verdict).toBe("inconclusive");
   });
 });

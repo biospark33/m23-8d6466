@@ -4,8 +4,6 @@
  * AC2: overflow classification iff usage >= cap AND providerCapRejected===true
  *      AND terminationProvenance is NOT "wall-clock" or "host-error".
  * AC5: redactWithKey replaces >=8-char substrings of secret with [REDACTED].
- *
- * Module under test does NOT exist yet — this is TDD RED phase.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -245,7 +243,23 @@ describe("AC5: redactWithKey replaces >=8-char secret substrings with [REDACTED]
     const unsafe = { key: secret };
     const leak = scanArtifactForLeak(secret, unsafe);
     expect(leak).toBeTruthy();
-    expect(leak).toHaveLength(8);
+    // The scanner returns the first secret-derived fragment window it finds —
+    // assert it IS a fragment of the secret (boundary-tracked), not just any
+    // 8-char string.
+    expect(leak).toBe(secret.slice(0, MIN_REDACTABLE_LEN));
+    expect(secret.includes(leak ?? "")).toBeTrue();
+  });
+
+  test("marker feedback: a secret containing marker text cannot re-match generated [REDACTED] markers", () => {
+    // Old implementation searched the evolving output: after one replacement
+    // the inserted "[REDACTED]" contains "REDACTED" — an 8-char substring of
+    // THIS secret — so the next pass selected (and re-split) the marker,
+    // corrupting it into "[[REDACTED]]" and burning iterations.
+    const markerSecret = "abcdefghREDACTED12345678";
+    const text = "XabcdefghY REDACTEDTAIL Z";
+    const result = redactWithKey(text, markerSecret);
+    expect(result).toBe("X[REDACTED]Y [REDACTED]TAIL Z");
+    expect(result).not.toContain("[[REDACTED]]");
   });
 
   test("key-management URL: shared gate strips it and the scanner flags it", () => {

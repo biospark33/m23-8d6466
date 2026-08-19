@@ -18,6 +18,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { writeSync } from "node:fs";
@@ -68,6 +69,7 @@ export interface CapHitDemoDeps {
   store: RunRecordStore;
   requestId?: string;
   evidenceDir?: string;
+  /** Clock seam for tests — recordedAt and log timestamps (default: real time). */
   now?: () => Date;
   /** Override envFile path for key delivery (default: /home/agent/app/.env). */
   envFile?: string;
@@ -173,7 +175,13 @@ function writeArtifactFile(evidenceDir: string, artifact: CapHitArtifact): strin
   const path = join(evidenceDir, filename);
   const tmp = join(evidenceDir, `.tmp-${filename}`);
   writeFileSync(tmp, JSON.stringify(artifact, null, 2), { mode: 0o600 });
-  renameSync(tmp, path);
+  try {
+    renameSync(tmp, path);
+  } catch (e) {
+    // A failed rename must not leave the 0600 tmp artifact behind.
+    rmSync(tmp, { force: true });
+    throw e;
+  }
   return path;
 }
 
@@ -204,14 +212,16 @@ export async function runCapHitDemo(
   deps: CapHitDemoDeps,
   opts: CapHitDemoOptions = {},
 ): Promise<CapHitDemoResult> {
-  const nowFn = (() => new Date());
+  const nowFn = deps.now ?? (() => new Date());
   const requestId = deps.requestId ?? newRequestId();
   const substrate = deps.driver.name;
   const isLive = substrate === "exedev";
 
-  // Resolve opts with defaults
+  // Resolve opts with defaults. wallClockMs stays mutable: the live fixture's
+  // wall_clock_cap_ms (step 6) overrides the built-in default when the operator
+  // passed no explicit --wall-clock-ms.
   const capMicroUsd = opts.capMicroUsd ?? DEFAULT_CAP_MICRO_USD;
-  const wallClockMs = opts.wallClockMs ?? DEFAULT_WALL_CLOCK_MS;
+  let wallClockMs = opts.wallClockMs ?? DEFAULT_WALL_CLOCK_MS;
   const runBudgetCapMicros = opts.runBudgetCapMicros ?? DEFAULT_RUN_BUDGET_CAP;
   const residentCeilingMicros = opts.residentCeilingMicros ?? DEFAULT_RESIDENT_CEILING;
   // Precedence: injected deps (test seam) beat opts beat env — the seam wins.
@@ -394,13 +404,16 @@ export async function runCapHitDemo(
       // transform here. pi 0.84.2 in the box ignores the file (its live cost
       // reporting is D's first half); the file is the declared cost table.
       const modelsJsonPath = process.env.QDS_MODELS_JSON ?? join(homedir(), ".pi", "agent", "models.json");
+      // Only the load/parse/transform belongs to the models-json catch: a
+      // placement (fillRun) failure below must report setup-failed, not
+      // misattribute the catalog as missing.
+      let content: string;
       try {
         const parsed = JSON.parse(readFileSync(modelsJsonPath, "utf8")) as {
           providers?: Record<string, { models?: Array<Record<string, unknown>> }>;
           models?: unknown;
         };
         const list = parsed.providers?.openrouter?.models;
-        let content: string;
         if (Array.isArray(list)) {
           const byslug: Record<string, Record<string, unknown>> = {};
           for (const m of list) {
@@ -411,11 +424,11 @@ export async function runCapHitDemo(
           // already the dict-by-slug shape — place verbatim
           content = JSON.stringify({ models: parsed.models ?? {} });
         }
-        const files: BoxFile[] = [{ path: ".pi/agent/models.json", content }];
-        await fillRun(deps.driver, vmName, files);
       } catch {
         return finishEarly("models-json-missing", Date.now() - started);
       }
+      const files: BoxFile[] = [{ path: ".pi/agent/models.json", content }];
+      await fillRun(deps.driver, vmName, files);
       await exedevDriver.fill?.(vmName, { runId, repoUrl: opts.repoUrl, commitSha: opts.commitSha, workdir: LIVE_WORKDIR });
       // Warm pi's streaming path BEFORE the gate: on a FRESH box the first pi
       // calls nondeterministically stall (no request timeout in pi's client);
@@ -521,7 +534,7 @@ export async function runCapHitDemo(
     try {
       const fixturePath = opts.fixturePath ?? DEFAULT_FIXTURE_PATH;
       const fixtureContent = readFileSync(fixturePath, "utf8");
-      const fixture = parse(fixtureContent) as { model?: unknown; provider?: unknown; prompt?: unknown; paddingBytes?: unknown };
+      const fixture = parse(fixtureContent) as { model?: unknown; provider?: unknown; prompt?: unknown; paddingBytes?: unknown; wall_clock_cap_ms?: unknown };
       if (typeof fixture.model !== "string" || fixture.model === "" ||
           typeof fixture.prompt !== "string" || fixture.prompt === "") {
         return finishEarly("workload-fixture-invalid", setupMs);
@@ -540,11 +553,18 @@ export async function runCapHitDemo(
       // figure (INV-2: downgrade-only; classification still uses ONLY the
       // host-side re-probe).
       const rawPadding = Number(fixture.paddingBytes ?? 0);
-      const paddingBytes = Number.isFinite(rawPadding) ? Math.max(0, rawPadding) : 0;
+      // Integer bytes: `head -c 10000.5` is a shell error, not a smaller pad.
+      const paddingBytes = Number.isFinite(rawPadding) ? Math.max(0, Math.floor(rawPadding)) : 0;
+      // Fixture-declared ceiling becomes the default wall-clock limit unless
+      // the operator passed --wall-clock-ms explicitly.
+      if (opts.wallClockMs === undefined) {
+        const capMs = Number(fixture.wall_clock_cap_ms);
+        if (Number.isFinite(capMs) && capMs > 0) wallClockMs = capMs;
+      }
       argv = [
         "sh",
         "-c",
-        `set -a; . ${shQuote(envFile)}; set +a; n=0; while :; do head -c ${paddingBytes} /dev/urandom | base64 | tr -d '\\n' > /tmp/df24-pad.txt; python3 -c 'import json,sys; json.dump({"model": sys.argv[1], "messages": [{"role": "user", "content": open(sys.argv[2]).read() + " " + sys.argv[3]}], "max_tokens": 16}, open(sys.argv[4], "w"))' ${shQuote(fixture.model)} /tmp/df24-pad.txt ${shQuote(fixture.prompt)} /tmp/df24-req.json; code=$(printf 'header = "Authorization: Bearer %s"\\nheader = "Content-Type: application/json"\\n' "\$OPENROUTER_API_KEY" | curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -K - -X POST https://openrouter.ai/api/v1/chat/completions -d @/tmp/df24-req.json); case "\$code" in 200) n=\$((n+1)); echo turn_end;; 402|403) break;; *) sleep 2;; esac; done; echo "loop ended after \$n turns (HTTP \$code)"; exit 0`,
+        `set -a; . ${shQuote(envFile)}; set +a; n=0; err=0; while :; do head -c ${paddingBytes} /dev/urandom | base64 | tr -d '\\n' > /tmp/df24-pad.txt; python3 -c 'import json,sys; json.dump({"model": sys.argv[1], "messages": [{"role": "user", "content": open(sys.argv[2]).read() + " " + sys.argv[3]}], "max_tokens": 16}, open(sys.argv[4], "w"))' ${shQuote(fixture.model)} /tmp/df24-pad.txt ${shQuote(fixture.prompt)} /tmp/df24-req.json; code=$(printf 'header = "Authorization: Bearer %s"\\nheader = "Content-Type: application/json"\\n' "\$OPENROUTER_API_KEY" | curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -K - -X POST https://openrouter.ai/api/v1/chat/completions -d @/tmp/df24-req.json); case "\$code" in 200) n=\$((n+1)); err=0; echo turn_end;; 402|403) break;; *) err=\$((err+1)); if [ "\$err" -ge 8 ]; then echo "loop aborted: \$err consecutive non-refusal errors (last HTTP \$code)" >&2; break; fi; sleep 2;; esac; done; echo "loop ended after \$n turns (HTTP \$code)"; exit 0`,
       ];
     } catch (e) {
       return finishEarly("workload-fixture-invalid", setupMs);
@@ -561,6 +581,7 @@ export async function runCapHitDemo(
 
   {
     const started = Date.now();
+    let wallClockTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       // The wall-clock ceiling must KILL the workload, not merely stop waiting
       // (INV-3). On the live substrate the budget goes into the exec itself
@@ -578,7 +599,7 @@ export async function runCapHitDemo(
         : executeRun(deps.driver, vmName, argv);
 
       const wallClockMarker = new Promise<"wall-clock">((resolve) => {
-        setTimeout(() => resolve("wall-clock"), wallClockMs + 1_000);
+        wallClockTimer = setTimeout(() => resolve("wall-clock"), wallClockMs + 1_000);
       });
 
       // Race between workload and wall-clock
@@ -600,6 +621,9 @@ export async function runCapHitDemo(
 
       if (raceResult.type === "wall-clock") {
         terminationProvenance = "wall-clock";
+        // The ceiling, not zero: when the marker wins the race the workload
+        // consumed (and was killed at) the full budget.
+        workloadMs = Date.now() - started;
         inBoxExit = "success"; // no actual exit; classification keeps provenance
       } else {
         workloadMs = Date.now() - started;
@@ -624,6 +648,10 @@ export async function runCapHitDemo(
       if (terminationProvenance === null) {
         terminationProvenance = "wall-clock";
       }
+    } finally {
+      // The losing timer must not hold the event loop open for the rest of
+      // the ceiling after the race already settled.
+      clearTimeout(wallClockTimer);
     }
     log({
       requestId,
@@ -699,6 +727,7 @@ export async function runCapHitDemo(
   // ---- 9. Capture spend ----
   let spendMicroUsd = 0;
   let captureSpendMs = 0;
+  let spendCaptureError: string | null = null;
   {
     const started = Date.now();
     try {
@@ -709,7 +738,10 @@ export async function runCapHitDemo(
       captureSpendMs = Date.now() - started;
     } catch (e) {
       captureSpendMs = Date.now() - started;
-      // Spend capture failure — leave at 0
+      // Fail-closed: spend stays 0 and the verdict cannot be demonstrated on
+      // it — but the failure is RETAINED so a zero read is never mistaken for
+      // a successful zero-spend answer (reflected in the log and `reason`).
+      spendCaptureError = (e as Error).message ?? String(e);
     }
     log({
       requestId,
@@ -721,8 +753,9 @@ export async function runCapHitDemo(
       keyHashPrefix: keyHash.slice(0, 8),
       duration: captureSpendMs,
       durationMs: captureSpendMs,
-      status: "ok",
-      outcome: "completed",
+      status: spendCaptureError === null ? "ok" : "error",
+      ...(spendCaptureError === null ? {} : { error: { code: "capture-spend-failed", message: spendCaptureError } }),
+      outcome: spendCaptureError === null ? "completed" : "error",
       capture_spend_ms: captureSpendMs,
       spendMicroUsd,
     });
@@ -801,6 +834,10 @@ export async function runCapHitDemo(
       reason = "host-error";
     } else if ((terminationProvenance as TerminationProvenance) === "wall-clock") {
       reason = "wall-clock-first";
+    } else if (spendCaptureError !== null) {
+      // Spend is unproven (0 by failure, not by measurement) — say so instead
+      // of the misleading "no-rejection".
+      reason = "spend-capture-failed";
     } else if (turnsCompleted === 0 && classification.exitStatus === "overflow") {
       reason = "cap-below-first-turn";
     } else if (classification.exitStatus !== "overflow") {
@@ -987,7 +1024,9 @@ async function main(argv: readonly string[]): Promise<number> {
   const output = { runId: result.runId, verdict: result.verdict, reason: result.reason, artifactPath: result.artifactPath, artifact: result.artifact };
   writeSync(1, `${JSON.stringify(output)}\n`);
 
-  return 0;
+  // Only a demonstrated run is success: an inconclusive (or unknown) verdict
+  // must fail the process, not just say so in JSON.
+  return result.verdict === "demonstrated" ? 0 : 1;
 }
 
 if (import.meta.main) {

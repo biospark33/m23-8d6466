@@ -309,6 +309,22 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     expect(d?.note).toMatch(/input/);
   }, 60_000);
 
+  test("D: a provider HTTP error is distinct from a genuine zero-cost response", async () => {
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    const box = await makeBox(fake, driver, "gate-d-http", originDir, rosterDir);
+    fake.configure(box.vm, { chatHttpCode: 500 });
+    deliverKey(fake, box.vm);
+
+    const result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    expect(result.failedItem).toBe("D");
+    expect(result.assertionCode).toBe(3);
+    const d = result.assertions.find((a) => a.item === "D");
+    // The note must name the HTTP failure — not the misleading zero-cost
+    // diagnosis a curl/transport error used to collapse into.
+    expect(d?.note).toMatch(/HTTP 500/);
+    expect(d?.note).toMatch(/provider\/transport error|unproven/i);
+  }, 60_000);
+
   test("AC6: a stale /tmp/PROVISION_READY is cleared before provisioning", async () => {
     const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
     const box = await makeBox(fake, driver, "gate-sentinel", originDir, rosterDir);

@@ -125,8 +125,22 @@ emit C 1 "C: $c_count/$c_count roster models answered over chat/completions (con
 # passed every run), and the provider-computed cost is the stronger proof
 # that rates flow — it is the number the key is actually billed on.
 d_body='{"model":"'"$(printf '%s' "$Models" | awk '{print $1}')"'","messages":[{"role":"user","content":"reply with the single word: ready"}],"max_tokens":8}'
-d_resp="$(printf 'header = "Authorization: Bearer %s"\n' "$OPENROUTER_API_KEY" \
-  | curl -sS --max-time 60 -K - -H "Content-Type: application/json" -d "$d_body" https://openrouter.ai/api/v1/chat/completions)"
+# Body and HTTP status captured from ONE call: status via -w, body via -o. A
+# transport-level curl failure leaves d_code empty/000 — distinct below from a
+# genuine (200) zero-cost answer.
+d_tmp="${TMPDIR:-/tmp}/df24-d-resp.$$"
+d_code="$(printf 'header = "Authorization: Bearer %s"\n' "$OPENROUTER_API_KEY" \
+  | curl -sS --max-time 60 -K - -H "Content-Type: application/json" -d "$d_body" \
+    -o "$d_tmp" -w '%{http_code}' https://openrouter.ai/api/v1/chat/completions)" || true
+d_resp="$(cat "$d_tmp" 2>/dev/null || printf '')"
+rm -f "$d_tmp"
+case "$d_code" in
+  2*) : ;;
+  *)
+    emit D 0 "provider chat call failed (HTTP ${d_code:-none}) — the cost flow is unproven; this is a provider/transport error, NOT a genuine zero-cost response"
+    exit 3
+    ;;
+esac
 d_total="$(printf '%s' "$d_resp" | python3 -c '
 import json, sys
 # usage.cost shape is route-dependent: {"total": x} on some upstreams, a bare

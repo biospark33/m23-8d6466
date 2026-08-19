@@ -162,9 +162,15 @@ export class FakeKeyApi {
 
   /**
    * Simulated POST /chat/completions with a RUNTIME key (the demo's host-side
-   * re-probe substrate). OpenRouter answers 402 {"error":{"code":402,...}} when
-   * the key's spend has reached its limit; 200 otherwise. Uncapped keys (null
-   * limit) never reject. The key material itself never appears in the body.
+   * re-probe substrate). Two DISTINCT rejection shapes (the demo's classifier
+   * accepts both):
+   * - HTTP 403 "Key limit exceeded" — the PER-KEY spend-cap refusal, the shape
+   *   MEASURED live 2026-08-19. This is the natural answer for a capped key
+   *   whose usage has reached its limit.
+   * - HTTP 402 "Insufficient credits" — the ACCOUNT-level credits refusal the
+   *   provider docs describe; reachable in tests via the chatStatus override.
+   * 200 for uncapped or under-limit keys; 401 for unknown or deleted (revoked)
+   * keys. The key material itself never appears in the body.
    */
   async chatComplete(key: string): Promise<{ status: number; body: string }> {
     this.requests.push({ method: "POST", path: "/chat/completions" });
@@ -178,13 +184,14 @@ export class FakeKeyApi {
     }
 
     // Exact-hash match on the presented key: hashing first drops the
-    // reverse-scan's silent arbitrary-match on duplicate values. The lookup
-    // itself is a linear scan over a test-sized table — a hash-keyed Map
-    // would buy nothing at this scale.
+    // reverse-scan's silent arbitrary-match on duplicate values. Deleted
+    // (revoked) entries are excluded — a revoked key must authenticate as
+    // invalid, not as a live key. The lookup itself is a linear scan over a
+    // test-sized table — a hash-keyed Map would buy nothing at this scale.
     const presentedHash = createHash("sha256").update(key).digest("hex");
-    const foundEntry: FakeKey | null = this.keys.find((k) => k.hash === presentedHash) ?? null;
+    const foundEntry: FakeKey | null = this.keys.find((k) => !k.deleted && k.hash === presentedHash) ?? null;
 
-    // Unknown key → 401
+    // Unknown or revoked key → 401
     if (!foundEntry) {
       return {
         status: 401,
@@ -192,11 +199,11 @@ export class FakeKeyApi {
       };
     }
 
-    // Key found: check limit
+    // Key found: check limit — refusal is the per-key 403 shape (MEASURED)
     if (foundEntry.limitUsd !== null && foundEntry.usageUsd >= foundEntry.limitUsd) {
       return {
-        status: 402,
-        body: '{"error":{"code":402,"message":"Insufficient credits. Add more using https://openrouter.ai/credits"}}',
+        status: 403,
+        body: '{"error":{"message":"Key limit exceeded (total limit)","code":403}}',
       };
     }
 
