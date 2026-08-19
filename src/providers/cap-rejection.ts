@@ -105,8 +105,22 @@ export const MIN_REDACTABLE_LEN = 8;
 export function redactWithKey(text: string, secret: string): string {
   if (secret.length < MIN_REDACTABLE_LEN) return text;
 
-  // Mask char must be absent from the secret, or masked spans could re-match.
-  const mask = secret.includes("\x00") ? "\x01" : "\x00";
+  // Mask char must be absent from the secret, or masked spans could re-match:
+  // a secret carrying BOTH \x00 and an >=8-char \x01 run would keep matching
+  // its own mask until MAX_ITERATIONS, splicing duplicate [REDACTED]s over the
+  // same span. Scan for the first UTF-16 code unit the secret never uses — a
+  // finite secret cannot contain all 65,536, so this always terminates (in
+  // practice at code 0: real keys carry no NULs).
+  let mask = "";
+  for (let code = 0; code < 0x10000 && mask === ""; code++) {
+    const ch = String.fromCharCode(code);
+    if (!secret.includes(ch)) mask = ch;
+  }
+  if (mask === "") {
+    // Unreachable for any secret shorter than the full UTF-16 code space;
+    // fail loudly rather than corrupt the text with empty-string masking.
+    throw new Error("redactWithKey: secret uses every UTF-16 code unit — no mask character available");
+  }
   const work = text.split("");
   const spans: Array<[number, number]> = [];
   let iteration = 0;

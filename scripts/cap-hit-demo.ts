@@ -188,6 +188,8 @@ function writeArtifactFile(evidenceDir: string, artifact: CapHitArtifact): strin
 /** Cheap probe model (fixture model on the live path overrides this). */
 const DEFAULT_PROBE_MODEL = "deepseek/deepseek-v4-flash-0731";
 const PROBE_TIMEOUT_MS = 15_000;
+/** Bound on awaiting workload settlement after the wall-clock cancel destroy. */
+const CANCEL_GRACE_MS = 10_000;
 
 /**
  * Production host-side re-probe (AC2): one minimal chat call with the retained
@@ -217,13 +219,30 @@ export async function runCapHitDemo(
   const substrate = deps.driver.name;
   const isLive = substrate === "exedev";
 
-  // Resolve opts with defaults. wallClockMs stays mutable: the live fixture's
-  // wall_clock_cap_ms (step 6) overrides the built-in default when the operator
-  // passed no explicit --wall-clock-ms.
-  const capMicroUsd = opts.capMicroUsd ?? DEFAULT_CAP_MICRO_USD;
-  let wallClockMs = opts.wallClockMs ?? DEFAULT_WALL_CLOCK_MS;
-  const runBudgetCapMicros = opts.runBudgetCapMicros ?? DEFAULT_RUN_BUDGET_CAP;
-  const residentCeilingMicros = opts.residentCeilingMicros ?? DEFAULT_RESIDENT_CEILING;
+  // Resolve opts with defaults — validating any PROVIDED numeric option at
+  // this entry point, not just in main()'s CLI parsing: runCapHitDemo is an
+  // exported contract (tests, future dispatchers) and must not reach createRun
+  // or mintRunKey with a bad number. A NaN wallClockMs would fire ~immediately
+  // (setTimeout(NaN) → 0), a NaN budget/ceiling renders as null in the
+  // artifact JSON. Number.isInteger rejects NaN and ±Infinity; nothing exists
+  // yet to tear down, so throwing (not finishEarly) is the honest failure.
+  // wallClockMs stays mutable: the live fixture's wall_clock_cap_ms (step 6)
+  // overrides the built-in default when the operator passed no explicit
+  // --wall-clock-ms.
+  const positiveIntOpt = (name: string, v: number | undefined, fallback: number): number => {
+    if (v === undefined) return fallback;
+    if (!Number.isInteger(v) || v <= 0) {
+      const err = new Error(`${name} must be a positive integer, got '${v}'`) as Error & { code: string; remediation: string };
+      err.code = "invalid-value";
+      err.remediation = `pass a positive integer for ${name}`;
+      throw err;
+    }
+    return v;
+  };
+  const capMicroUsd = positiveIntOpt("capMicroUsd", opts.capMicroUsd, DEFAULT_CAP_MICRO_USD);
+  let wallClockMs = positiveIntOpt("wallClockMs", opts.wallClockMs, DEFAULT_WALL_CLOCK_MS);
+  const runBudgetCapMicros = positiveIntOpt("runBudgetCapMicros", opts.runBudgetCapMicros, DEFAULT_RUN_BUDGET_CAP);
+  const residentCeilingMicros = positiveIntOpt("residentCeilingMicros", opts.residentCeilingMicros, DEFAULT_RESIDENT_CEILING);
   // Precedence: injected deps (test seam) beat opts beat env — the seam wins.
   const evidenceDir = deps.evidenceDir ?? opts.evidenceDir ?? process.env.QDS_EVIDENCE_DIR ?? ".sandbox/evidence";
   // Substrate-correct key file: DF2.3's default (/home/agent/app/.env) is the
@@ -248,13 +267,23 @@ export async function runCapHitDemo(
   const vm = await createRun(deps.driver, deps.store, { runId });
   const vmName = vm.vmName ?? runId;
 
+  // Per-phase elapsed trackers. setupMs is declared here — before finishEarly,
+  // which reads it — so the closure never hits a TDZ window on the mint/deliver
+  // failure paths that run before the setup block assigns it.
+  let setupMs = 0;
+
   // Teardown + artifact write for any verdict — or failure — reached BEFORE
   // the workload ran (AC3: no path skips the teardown call; where teardown
   // itself aborts, DF2.5 semantics leave the box alive and the record open for
   // DF2.6's reaper, and the artifact says teardown-aborted). exitStatus is
   // null: no workload exit ever happened (INV-2 honesty — assert no box exit).
-  const finishEarly = async (reason: string, setupElapsedMs: number): Promise<CapHitDemoResult> => {
+  // Timings are phase-specific: mint_ms/setup_ms carry only their own phase's
+  // measured elapsed (phases that never ran stay 0 — a mint or deliver
+  // duration is NOT parked in setup_ms), and teardown_ms is measured here
+  // because teardownSandbox really does run on this path.
+  const finishEarly = async (reason: string): Promise<CapHitDemoResult> => {
     let teardownOk = true;
+    const teardownStarted = Date.now();
     try {
       await teardownSandbox(
         { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
@@ -264,6 +293,7 @@ export async function runCapHitDemo(
     } catch {
       teardownOk = false;
     }
+    const teardownEarlyMs = Date.now() - teardownStarted;
     const recAfter = readRecordSafe();
     const finalReason = teardownOk ? reason : "teardown-aborted";
     const artifact: CapHitArtifact = {
@@ -287,7 +317,7 @@ export async function runCapHitDemo(
       runBudgetCapMicros,
       residentCeilingMicros,
       keyHash: recAfter.keyHash ?? keyHash,
-      timings: { mint_ms: mintMs, setup_ms: setupElapsedMs, workload_ms: 0, reprobe_ms: 0, capture_spend_ms: 0, teardown_ms: 0 },
+      timings: { mint_ms: mintMs, setup_ms: setupMs, workload_ms: 0, reprobe_ms: 0, capture_spend_ms: 0, teardown_ms: teardownEarlyMs },
       recordedAt: nowFn().toISOString(),
     };
     return {
@@ -348,7 +378,7 @@ export async function runCapHitDemo(
       // Mint failed: nothing is spendable (no key material exists host-side),
       // but the box from step 1 is live — teardown destroys it and closes the
       // record rather than orphaning it to the reaper.
-      return finishEarly("mint-failed", mintMs);
+      return finishEarly("mint-failed");
     }
   }
 
@@ -378,12 +408,11 @@ export async function runCapHitDemo(
         error: { code: "deliver-failed", message: (e as Error).message },
         outcome: "error",
       });
-      return finishEarly("deliver-failed", Date.now() - started);
+      return finishEarly("deliver-failed");
     }
   }
 
   // ---- 5. Substrate-specific setup ----
-  let setupMs = 0;
   if (isLive) {
     const started = Date.now();
     try {
@@ -393,7 +422,8 @@ export async function runCapHitDemo(
       };
       if (!opts.repoUrl || !opts.commitSha || !opts.rosterPath) {
         // Missing live params — teardown and record an inconclusive artifact
-        return finishEarly("setup-gate-not-ready", Date.now() - started);
+        setupMs = Date.now() - started;
+        return finishEarly("setup-gate-not-ready");
       }
       // The image ships NO ~/.pi/agent/models.json (measured 2026-08-19) but
       // gate D asserts its cost table in-box: place the host's priced catalog
@@ -425,7 +455,8 @@ export async function runCapHitDemo(
           content = JSON.stringify({ models: parsed.models ?? {} });
         }
       } catch {
-        return finishEarly("models-json-missing", Date.now() - started);
+        setupMs = Date.now() - started;
+        return finishEarly("models-json-missing");
       }
       const files: BoxFile[] = [{ path: ".pi/agent/models.json", content }];
       await fillRun(deps.driver, vmName, files);
@@ -497,7 +528,7 @@ export async function runCapHitDemo(
       });
       // Defensive: if !ready, teardown and inconclusive
       if (!setupResult?.ready) {
-        return finishEarly("setup-gate-not-ready", Date.now() - started);
+        return finishEarly("setup-gate-not-ready");
       }
     } catch (e) {
       setupMs = Date.now() - started;
@@ -517,11 +548,10 @@ export async function runCapHitDemo(
         setup_ms: setupMs,
       });
       // Setup error — teardown and inconclusive
-      return finishEarly("setup-failed", Date.now() - started);
+      return finishEarly("setup-failed");
     }
-  } else {
-    setupMs = 0; // fake: no-op
   }
+  // else: fake substrate — no setup phase, setupMs stays 0.
 
   // ---- 6. Workload argv ----
   let argv: string[];
@@ -537,7 +567,7 @@ export async function runCapHitDemo(
       const fixture = parse(fixtureContent) as { model?: unknown; provider?: unknown; prompt?: unknown; paddingBytes?: unknown; wall_clock_cap_ms?: unknown };
       if (typeof fixture.model !== "string" || fixture.model === "" ||
           typeof fixture.prompt !== "string" || fixture.prompt === "") {
-        return finishEarly("workload-fixture-invalid", setupMs);
+        return finishEarly("workload-fixture-invalid");
       }
       probeModel = fixture.model;
       // The workload is a raw curl chat loop, not pi: pi's node streaming
@@ -567,7 +597,7 @@ export async function runCapHitDemo(
         `set -a; . ${shQuote(envFile)}; set +a; n=0; err=0; while :; do head -c ${paddingBytes} /dev/urandom | base64 | tr -d '\\n' > /tmp/df24-pad.txt; python3 -c 'import json,sys; json.dump({"model": sys.argv[1], "messages": [{"role": "user", "content": open(sys.argv[2]).read() + " " + sys.argv[3]}], "max_tokens": 16}, open(sys.argv[4], "w"))' ${shQuote(fixture.model)} /tmp/df24-pad.txt ${shQuote(fixture.prompt)} /tmp/df24-req.json; code=$(printf 'header = "Authorization: Bearer %s"\\nheader = "Content-Type: application/json"\\n' "\$OPENROUTER_API_KEY" | curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -K - -X POST https://openrouter.ai/api/v1/chat/completions -d @/tmp/df24-req.json); case "\$code" in 200) n=\$((n+1)); err=0; echo turn_end;; 402|403) break;; *) err=\$((err+1)); if [ "\$err" -ge 8 ]; then echo "loop aborted: \$err consecutive non-refusal errors (last HTTP \$code)" >&2; break; fi; sleep 2;; esac; done; echo "loop ended after \$n turns (HTTP \$code)"; exit 0`,
       ];
     } catch (e) {
-      return finishEarly("workload-fixture-invalid", setupMs);
+      return finishEarly("workload-fixture-invalid");
     }
   } else {
     argv = ["true"]; // fake substrate default
@@ -586,9 +616,12 @@ export async function runCapHitDemo(
       // The wall-clock ceiling must KILL the workload, not merely stop waiting
       // (INV-3). On the live substrate the budget goes into the exec itself
       // (`execTimed` → Bun.spawn timeout + SIGKILL), so the loser dies with the
-      // race; the race timer is a +1s backstop for substrates without a
-      // per-call timeout (fake). Bun reports a SIGKILLed child as exit 137
-      // (128+9), never null — that is the kill signature below.
+      // race. Substrates WITHOUT a per-call timeout get a cancellable fallback
+      // contract: the race timer marks expiry (+1s backstop) and the branch
+      // below then destroys the box — the driver seam's only kill verb — and
+      // awaits the workload's settlement before the probe reads the key. Bun
+      // reports a SIGKILLed child as exit 137 (128+9), never null — that is
+      // the kill signature below.
       const execWithBudget = (
         deps.driver as ProviderDriver & {
           execTimed?: (vm: string, argv: readonly string[], timeoutMs: number, stdin?: string) => Promise<ExecResult>;
@@ -625,6 +658,50 @@ export async function runCapHitDemo(
         // consumed (and was killed at) the full budget.
         workloadMs = Date.now() - started;
         inBoxExit = "success"; // no actual exit; classification keeps provenance
+        if (!execWithBudget) {
+          // Cancellable fallback (INV-3): this substrate's exec has no budget,
+          // so the workload is STILL RUNNING. Destroy the box — the only kill
+          // verb on the ProviderDriver seam, idempotent by contract, so
+          // teardown's own destroy step re-runs harmlessly and its
+          // artifacts/harvest steps treat the already-gone box as a skip —
+          // then await the exec's settlement (bounded grace: a driver whose
+          // promise never notices the dead box must not hang the demo) BEFORE
+          // the probe reads the key, so a still-spending workload cannot race
+          // the re-probe's evidence. A cancellation failure does NOT skip any
+          // later step (AC3): teardown stays the backstop either way.
+          let cancelOutcome = "workload-cancelled";
+          let graceTimer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await deps.driver.destroy(vmName);
+            const settled = await Promise.race([
+              workloadPromise.then(
+                () => true,
+                () => true, // a rejected exec has also terminated
+              ),
+              new Promise<boolean>((resolve) => {
+                graceTimer = setTimeout(() => resolve(false), CANCEL_GRACE_MS);
+              }),
+            ]);
+            if (!settled) cancelOutcome = "cancel-grace-expired";
+          } catch {
+            cancelOutcome = "destroy-failed";
+          } finally {
+            clearTimeout(graceTimer);
+          }
+          log({
+            requestId,
+            operation: "demo.workload_cancel",
+            agentId: null,
+            timestamp: nowFn().toISOString(),
+            runId,
+            step: "workload_cancel",
+            keyHashPrefix: keyHash.slice(0, 8),
+            duration: 0,
+            durationMs: 0,
+            status: cancelOutcome === "workload-cancelled" ? "ok" : "error",
+            outcome: cancelOutcome,
+          });
+        }
       } else {
         workloadMs = Date.now() - started;
         const res = raceResult.result!;

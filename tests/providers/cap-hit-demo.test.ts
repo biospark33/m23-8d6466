@@ -14,11 +14,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { executeRun, type ProviderDriver } from "../../src/providers/driver.ts";
+import type { ProviderDriver } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore, CORE_FIELDS } from "../../src/providers/run-record.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
-import { teardownSandbox, type TeardownDeps } from "../../src/providers/teardown.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RecordingDriver } from "./fixtures/recording-driver.ts";
 import { leakScan } from "./fixtures/leak-scan.ts";
@@ -292,6 +291,108 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(existsSync(join(dir, "boxes", rec.vmName ?? ""))).toBeFalse();
   });
 
+  // ─── 4b. Entry validation (programmatic callers) ─────────────────────────────
+
+  test("entry validation: bad numeric options reject before createRun — no run is ever created", async () => {
+    // runCapHitDemo is an exported contract, not just main()'s CLI path: a
+    // NaN/∞/zero/negative option must throw at the entry point (NaN wallClockMs
+    // would fire ~immediately; NaN budget/ceiling render as null in JSON)
+    // BEFORE createRun, so no record or box exists to strand.
+    const badOpts: Partial<CapHitDemoOptions>[] = [
+      { capMicroUsd: 0 },
+      { capMicroUsd: -1 },
+      { capMicroUsd: Number.NaN },
+      { capMicroUsd: Number.POSITIVE_INFINITY },
+      { wallClockMs: 0 },
+      { wallClockMs: Number.NaN },
+      { runBudgetCapMicros: -5 },
+      { runBudgetCapMicros: Number.NaN },
+      { residentCeilingMicros: 0 },
+      { residentCeilingMicros: Number.NEGATIVE_INFINITY },
+    ];
+    for (const bad of badOpts) {
+      await expect(runCapHitDemo(deps(), { ...defaultOpts(), ...bad })).rejects.toThrow(
+        /must be a positive integer, got/,
+      );
+    }
+    // Nothing was created — the throw happened before store.create.
+    expect(store.list()).toHaveLength(0);
+  });
+
+  // ─── 4c. Wall-clock cancel on a no-execTimed substrate ───────────────────────
+
+  test("wall-clock cancel: workload destroyed and settled BEFORE the probe reads the key", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06 });
+    // FakeDriver has no execTimed, so the workload runs through the plain
+    // executeRun fallback — the path whose wall-clock expiry must cancel.
+    // Observe the ordering through the seam: destroy (the cancel verb) and
+    // the workload exec's settlement must both precede the probe.
+    const events: string[] = [];
+    class OrderingDriver implements ProviderDriver {
+      readonly name = recording.name;
+
+      constructor(private readonly inner: ProviderDriver) {}
+
+      create(name: string, tag?: string): Promise<import("../../src/providers/driver").ProviderVm> {
+        return this.inner.create(name, tag);
+      }
+      list(name?: string): Promise<import("../../src/providers/driver").ProviderVm[]> {
+        return this.inner.list(name);
+      }
+      destroy(vm: string): Promise<void> {
+        return this.inner.destroy(vm).then(() => {
+          events.push("destroy");
+        });
+      }
+      expose(vm: string, port: number): Promise<string> {
+        return this.inner.expose(vm, port);
+      }
+      setPublic(vm: string): Promise<void> {
+        return this.inner.setPublic(vm);
+      }
+      whoami(): Promise<string> {
+        return this.inner.whoami();
+      }
+      exec(vm: string, argv: string[], stdin?: string): Promise<import("../../src/providers/driver").ExecResult> {
+        const p = this.inner.exec(vm, argv, stdin);
+        if (argv[0] === "sleep") {
+          events.push("workload-start");
+          return p.then((res) => {
+            events.push("workload-end");
+            return res;
+          });
+        }
+        return p;
+      }
+      copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+        return this.inner.copyFile(vm, remotePath, localPath);
+      }
+    }
+    const probe = async (): Promise<{ status: number; body: string }> => {
+      events.push("probe");
+      return { status: 403, body: "Key limit exceeded" };
+    };
+
+    const opts = defaultOpts({ wallClockMs: 300, workloadArgv: ["sleep", "2"] });
+    const result = await runCapHitDemo(deps({ driver: new OrderingDriver(recording), probe }), opts);
+
+    expect(result.artifact.terminationProvenance).toBe("wall-clock");
+    expect(result.artifact.reason).toBe("wall-clock-first");
+    const destroyAt = events.indexOf("destroy");
+    const workloadEndAt = events.indexOf("workload-end");
+    const probeAt = events.indexOf("probe");
+    expect(destroyAt).toBeGreaterThan(-1);
+    expect(workloadEndAt).toBeGreaterThan(-1);
+    expect(probeAt).toBeGreaterThan(-1);
+    // Cancel verb fired at expiry…
+    expect(destroyAt).toBeGreaterThan(events.indexOf("workload-start"));
+    // …and settlement was awaited to completion BEFORE the probe ran.
+    expect(workloadEndAt).toBeLessThan(probeAt);
+    // Teardown still completed on every path (AC3).
+    expect(result.artifact.closedAt).toBeString();
+    expect(existsSync(join(dir, "boxes", store.get(result.runId).vmName ?? ""))).toBeFalse();
+  });
+
   // ─── 5. AC4 cap-below-first-turn ─────────────────────────────────────────────
 
   test("AC4 cap-below-first-turn: exhausted at birth, zero turns → inconclusive", async () => {
@@ -509,6 +610,14 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.artifact.reason).toBe("mint-failed");
     expect(api.keys.filter((k) => !k.deleted)).toHaveLength(0);
     expect(result.artifact.keyHash).toBe(""); // honest: no hash was ever recorded
+    // Phase-specific timings on the early-failure artifact: the mint duration
+    // lives in mint_ms ONLY (never parked in setup_ms), phases that never ran
+    // stay 0, and teardown_ms carries the actually-measured early teardown.
+    expect(result.artifact.timings.setup_ms).toBe(0);
+    expect(result.artifact.timings.workload_ms).toBe(0);
+    expect(result.artifact.timings.reprobe_ms).toBe(0);
+    expect(result.artifact.timings.capture_spend_ms).toBe(0);
+    expect(result.artifact.timings.teardown_ms).toBeGreaterThanOrEqual(0);
   });
 
   test("mint compensation failure: the provider key stays live AND recoverable by its run-scoped name", async () => {

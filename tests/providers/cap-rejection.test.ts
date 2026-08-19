@@ -262,6 +262,22 @@ describe("AC5: redactWithKey replaces >=8-char secret substrings with [REDACTED]
     expect(result).not.toContain("[[REDACTED]]");
   });
 
+  test("mask selection: a secret containing both \\x00 and a mask-length \\x01 run still redacts exactly once", () => {
+    // Old mask choice was a two-way ternary (\\x00 else \\x01): a secret
+    // carrying BOTH control chars AND an >=8-char run of the chosen mask char
+    // made the masked span re-match itself every iteration — 4096 duplicate
+    // [REDACTED]s spliced over one span. The mask is now scanned for the
+    // first code unit the secret never uses.
+    const maskSecret = "A\x00B\x01\x01\x01\x01\x01\x01\x01\x01C"; // 12 chars, 8-char \x01 run
+    const text = `before ${maskSecret} after`;
+    const result = redactWithKey(text, maskSecret);
+    expect(result).toBe("before [REDACTED] after");
+    // And no >=8-char window of the secret survives anywhere in the output.
+    for (let i = 0; i + MIN_REDACTABLE_LEN <= maskSecret.length; i++) {
+      expect(result).not.toContain(maskSecret.slice(i, i + MIN_REDACTABLE_LEN));
+    }
+  });
+
   test("key-management URL: shared gate strips it and the scanner flags it", () => {
     // Live-measured 403 body shape (openrouter.ai/.../keys/<64-hex hash>) —
     // design.md's "key-management-URL redacted" contract enforced by the
