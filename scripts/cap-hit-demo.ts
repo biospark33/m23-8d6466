@@ -181,11 +181,21 @@ const DEFAULT_PROBE_MODEL = "deepseek/deepseek-v4-flash-0731";
 const PROBE_TIMEOUT_MS = 15_000;
 
 /**
+ * OpenRouter key-management URL (embeds the key hash). Stripped from
+ * rejectionStatus in addition to run-key redaction: the hash is published
+ * deliberately in the artifact's keyHash field, but a live management
+ * deep-link has no place in a committed artifact (defense-in-depth).
+ */
+const KEY_MANAGEMENT_URL_RE = /https:\/\/openrouter\.ai\/[^\s"'}]*\/keys\/[0-9a-f]{16,}/g;
+
+/**
  * Production host-side re-probe (AC2): one minimal chat call with the retained
  * RUNTIME key, after the workload terminates and before revoke. The provider's
- * cap-rejection answer (HTTP 402 + error body, Track A / docs/api_reference/
- * limits) sets providerCapRejected; any other outcome leaves it false. The
- * probe's own cost is inside the cap by construction (the key is exhausted).
+ * cap-rejection answer sets providerCapRejected — two modes count: HTTP 402
+ * "Insufficient credits" (account-level, docs/api_reference/limits) and HTTP
+ * 403 "Key limit exceeded" (per-key spend cap, MEASURED live 2026-08-19); any
+ * other outcome leaves it false. The probe's own cost is inside the cap by
+ * construction (the key is exhausted).
  */
 async function openRouterChatProbe(key: string, model: string): Promise<{ status: number; body: string }> {
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -645,8 +655,10 @@ export async function runCapHitDemo(
       reprobeMs = Date.now() - started;
       providerCapRejected = isCapRejection(probeResult.status);
       // Verbatim provider status + redacted body — the redaction input is the
-      // run key itself (AC5).
-      rejectionStatus = `${probeResult.status}: ${redactWithKey(probeResult.body, key)}`;
+      // run key itself (AC5), plus the key-management URL strip: the 403 body
+      // embeds openrouter.ai/.../keys/<hash>; the hash stays published in the
+      // structured keyHash field, the deep-link does not.
+      rejectionStatus = `${probeResult.status}: ${redactWithKey(probeResult.body, key).replace(KEY_MANAGEMENT_URL_RE, "[REDACTED]")}`;
     } catch {
       reprobeMs = Date.now() - started;
       // A probe that cannot be issued leaves both fields at false/null, which

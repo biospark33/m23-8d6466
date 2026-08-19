@@ -20,7 +20,7 @@ Confidence 0.97 (A 1.0 · B 1.0 · C 0.9 · D 1.0 · E 0.9 · F 1.0). Baseline `
 ## OpenRouter facts (live, doc-verified)
 
 - `POST /keys {name:"sbx-<runId>", limit: <USD dollars>}` → `{data:{hash,limit,usage}, key}` — plaintext key returned ONCE.
-- Cap rejection on `POST /chat/completions`: **HTTP 402** `{"error":{"code":402,"message":"Insufficient credits..."}}`.
+- Cap rejection on `POST /chat/completions`: TWO modes. **HTTP 402** `{"error":{"code":402,"message":"Insufficient credits..."}}` (account credits exhausted; the doc-verified mode) and — MEASURED live 2026-08-19 for per-key spend limits — **HTTP 403** `{"error":{"message":"Key limit exceeded (total limit). …","code":403}}`. Both count as cap rejection; the 403 body embeds a key-management URL that is stripped from artifacts.
 - `GET /key` (runtime key): `{data:{usage, limit, limit_remaining}}` in USD dollars.
 - µ$ conversion ONLY at HTTP boundary via `usdToMicros/microsToUsd` (DD-9; DF2.3 owns it — demo never converts).
 
@@ -38,7 +38,7 @@ classifyRunExit({ inBoxExit, usageMicroUsd, capMicroUsd, providerCapRejected, te
 
 ## providerCapRejected + terminationProvenance — host-produced only
 
-- After workload terminates, BEFORE revoke (key still live): host re-probe = one `POST /chat/completions` (cheap model, max_tokens minimal) with retained runtime key. 402 → `providerCapRejected: true`, verbatim status recorded. Any other outcome → false. Probe failure to issue → false (→ inconclusive).
+- After workload terminates, BEFORE revoke (key still live): host re-probe = one `POST /chat/completions` (cheap model, max_tokens minimal) with retained runtime key. 402 or 403 → `providerCapRejected: true`, verbatim status recorded (key-material and key-management-URL redacted). Any other outcome → false. Probe failure to issue → false (→ inconclusive).
 - terminationProvenance: `wall-clock` (900_000 ms ceiling fired), `host-error` (host call path failed), `provider-cap` (re-probe rejected), `null` (workload self-exited).
 - NOTHING read from box output. turnsCompleted is the only in-box figure, `source:"in-box"`, can only downgrade (AC4).
 
@@ -59,7 +59,7 @@ Flow: requestId=`crypto.randomUUID()` → record create → mint (cap=--cap, def
 ## Tests (TDD — write FIRST)
 
 1. `tests/providers/cap-rejection.test.ts` — classifier truth table (transient/logic/lead_failure × cap-hit → overflow; missing providerCapRejected → NOT overflow; wall-clock/host-error provenance → NOT overflow; usage<cap → inBoxExit passthrough; CC-1 mirror sync).
-2. `tests/providers/cap-hit-demo.test.ts` — script-level with FakeDriver+FakeKeyApi substrate: happy path (fake key api exhaustible → cap hit, 402 re-probe) → artifact schema exact key-set; self-report trap (box claims transient / box output claims cap-reject → re-probe false → inconclusive); wall-clock-first → inconclusive + teardown invoked; turnsCompleted 0 → cap-below-first-turn; teardown invoked on EVERY verdict incl. host-error; record gains no field (key-set diff); leak scan; fixture non-termination.
+2. `tests/providers/cap-hit-demo.test.ts` — script-level with FakeDriver+FakeKeyApi substrate: happy path (fake key api exhaustible → cap hit, cap-rejection re-probe — both 402 and 403 signatures covered) → artifact schema exact key-set; self-report trap (box claims transient / box output claims cap-reject → re-probe false → inconclusive); wall-clock-first → inconclusive + teardown invoked; turnsCompleted 0 → cap-below-first-turn; teardown invoked on EVERY verdict incl. host-error; record gains no field (key-set diff); leak scan; key-management-URL redaction; fixture non-termination.
    Live: `test.todoIf(!QDS_EXEDEV_LIVE)` + half-set-env refusal (setup-gate.test.ts:522-535 convention).
 3. Fake substrate extension: FakeKeyApi needs a cap-rejecting chat endpoint seam for the probe — add `chatComplete?(key, model)` knob to fake-key-api.ts IF absent (scope: tests/fixtures, allowed).
 

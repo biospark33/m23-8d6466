@@ -2,8 +2,11 @@
 
 **Verdict: `demonstrated`.** This is the discharge of audit §6 hole 6 (DD-6):
 a real capped OpenRouter key on a real exe.dev box was spent to its ceiling,
-the run was killed by the provider's cap, and every number the verdict rests
-on was read host-side from the provider — never out of the box.
+the run was killed by the provider's cap, and every number the classification
+rests on was read host-side from the provider — never out of the box. One
+in-box figure exists — `turnsCompleted` (`turnsSource: "in-box"`), a
+downgrade-only verdict gate (`0 turns → cap-below-first-turn`); see the AC1
+table.
 
 Run: `df2-4-cap-hit-20260819-fc8f12` · recorded 2026-08-19T06:57:00Z ·
 branch `feature/df2-4-live-cap-hit-kill`.
@@ -20,7 +23,7 @@ branch `feature/df2-4-live-cap-hit-kill`.
   "spendMicroUsd": 53447,
   "turnsCompleted": 25,
   "turnsSource": "in-box",
-  "rejectionStatus": "403: {\"error\":{\"message\":\"Key limit exceeded (total limit). Manage it using https://openrouter.ai/workspaces/default/keys/e04ffb6c8731607617a7bd457c38d272bdb840fe7efdc5ba0e8c71651648f784\",\"code\":403}}",
+  "rejectionStatus": "403: {\"error\":{\"message\":\"Key limit exceeded (total limit). Manage it using [REDACTED]\",\"code\":403}}",
   "providerCapRejected": true,
   "terminationProvenance": null,
   "exitStatus": "overflow",
@@ -44,6 +47,12 @@ branch `feature/df2-4-live-cap-hit-kill`.
 }
 ```
 
+> Post-review note (2026-08-19): the verbatim 403 body's key-management URL
+> (`openrouter.ai/.../keys/<hash>`) is redacted here and in the script's
+> redaction pass. The key hash itself remains published deliberately — it is
+> the artifact's `keyHash` identifier (not key material; the key was revoked
+> and the revocation verified host-side).
+
 ## AC1 checklist, field by field
 
 | AC1 clause | Evidence |
@@ -55,8 +64,8 @@ branch `feature/df2-4-live-cap-hit-kill`.
 | `revocationVerified: true` | teardown's list-absence proof after DELETE |
 | closed run record | `closedAt` set; DF2.1 twelve-field schema untouched |
 | `verdict: "demonstrated"` | all of the above |
-| every number host-side | spend = provider list entry; cap = provider-echoed `limitMicroUsd`; revocation = key list; refusal = host re-probe. The box contributed exactly one figure — `turnsCompleted` (`turnsSource: "in-box"`), which can only downgrade |
-| no key material | artifact scanned: no `sk-or` substring, no `OPENROUTER_API_KEY=` line; only `keyHash` identifies the credential |
+| every number host-side | spend = provider list entry; cap = provider-echoed `limitMicroUsd`; revocation = key list; refusal = host re-probe. The box contributed exactly one figure — `turnsCompleted` (`turnsSource: "in-box"`), a downgrade-only gate: `0 turns → cap-below-first-turn`; it can never upgrade a verdict on truthful box output |
+| no key material | artifact scanned: no `sk-or` substring, no `OPENROUTER_API_KEY=` line; only `keyHash` identifies the credential; no key-management URL (redacted, post-review) |
 
 ## Measured facts this live fire established (all 2026-08-19)
 

@@ -73,6 +73,15 @@ export function classifyRunExit(input: ClassifyRunExitInput): RunExitClassificat
 }
 
 /**
+ * Minimum secret-fragment length redactWithKey replaces.
+ *
+ * Boundary mirrors cli-anything/src/redact.ts MIN_REDACTABLE_VALUE_LEN; the
+ * mirror-sync test in tests/providers/cap-rejection.test.ts asserts the two
+ * constants stay equal and that this redactor honors the boundary behaviorally.
+ */
+export const MIN_REDACTABLE_LEN = 8;
+
+/**
  * Redact text by replacing any >=8-char substring of secret with [REDACTED].
  *
  * Pattern and >=8-char boundary from cli-anything/src/redact.ts:23-27
@@ -92,7 +101,7 @@ export function classifyRunExit(input: ClassifyRunExitInput): RunExitClassificat
  * suffix automaton) is not needed at this scale.
  */
 export function redactWithKey(text: string, secret: string): string {
-  if (secret.length < 8) return text;
+  if (secret.length < MIN_REDACTABLE_LEN) return text;
 
   let result = text;
   let iteration = 0;
@@ -103,7 +112,7 @@ export function redactWithKey(text: string, secret: string): string {
     let foundSubstring = "";
 
     // Find the longest substring (secret length down to 8) present in result
-    for (let len = secret.length; len >= 8; len--) {
+    for (let len = secret.length; len >= MIN_REDACTABLE_LEN; len--) {
       for (let start = 0; start + len <= secret.length; start++) {
         const substr = secret.slice(start, start + len);
         if (result.includes(substr)) {

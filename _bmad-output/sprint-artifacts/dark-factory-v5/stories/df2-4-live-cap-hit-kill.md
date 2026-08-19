@@ -257,7 +257,9 @@ not be sequenced before it.
       **Done 2026-08-19**: run `df2-4-cap-hit-20260819-fc8f12` — spend 53 447 µ$ ≥ cap 50 000 µ$,
       25 paid turns, host re-probe observed `403 Key limit exceeded`, exitStatus `overflow`,
       killOrigin `provider-cap`, revocation verified against the key list, record closed,
-      verdict `demonstrated`. Every verdict number host-side.
+      verdict `demonstrated`. Every verdict number host-side — sole exception:
+      `turnsCompleted` (in-box-sourced per `turnsSource`, a downgrade-only gate;
+      0 turns → `cap-below-first-turn`).
 
 ## Dev Agent Record
 

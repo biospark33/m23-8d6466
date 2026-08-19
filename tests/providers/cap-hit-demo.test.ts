@@ -24,6 +24,7 @@ import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import { teardownSandbox, type TeardownDeps } from "../../src/providers/teardown.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RecordingDriver } from "./fixtures/recording-driver.ts";
+import { leakScan } from "./fixtures/leak-scan.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "cap-hit-demo.ts");
@@ -98,15 +99,6 @@ const ARTIFACT_KEYS = [
   "timings",
   "recordedAt",
 ] as const;
-
-/** Leak scan: every 8-char substring of key must NOT appear in artifact. */
-function leakScan(key: string, artifactText: string): string | null {
-  for (let i = 0; i + 8 <= key.length; i++) {
-    const frag = key.slice(i, i + 8);
-    if (artifactText.includes(frag)) return frag;
-  }
-  return null;
-}
 
 /** Subprocess runner for script-e2e tests. */
 async function cli(args: string[], envOverrides: Record<string, string | undefined> = {}): Promise<{
@@ -415,6 +407,32 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     // keyHash present and NOT the key
     expect(artifactText).toContain(hash);
     expect(artifactText).not.toContain(key);
+  });
+
+  test("AC5 hygiene: key-management URL stripped from rejectionStatus, hash stays in keyHash", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06 });
+    // Live-measured 403 body shape: the message embeds the key-management URL
+    // (openrouter.ai/.../keys/<64-hex hash>).
+    const urlHash = "e04ffb6c8731607617a7bd457c38d272bdb840fe7efdc5ba0e8c71651648f784";
+    const probe = async () => ({
+      status: 403,
+      body: `{"error":{"message":"Key limit exceeded (total limit). Manage it using https://openrouter.ai/workspaces/default/keys/${urlHash}","code":403}}`,
+    });
+    const opts = defaultOpts({
+      workloadArgv: ["sh", "-c", "printf 'turn_end\\n'"],
+    });
+
+    const result = await runCapHitDemo(deps({ probe }), opts);
+
+    expect(result.verdict).toBe("demonstrated");
+    expect(result.artifact.providerCapRejected).toBeTrue();
+    // Management deep-link (and the hash inside it) gone from rejectionStatus...
+    expect(result.artifact.rejectionStatus).toContain("Key limit exceeded");
+    expect(result.artifact.rejectionStatus).not.toContain("openrouter.ai/workspaces");
+    expect(result.artifact.rejectionStatus).not.toContain(urlHash);
+    // ...while the structured keyHash field keeps the deliberate identifier.
+    const rec = store.get(result.runId);
+    expect(result.artifact.keyHash).toBe(rec.keyHash);
   });
 
   // ─── 9. turnsCompleted only downgrades ────────────────────────────────────────

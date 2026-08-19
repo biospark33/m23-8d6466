@@ -9,26 +9,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { classifyRunExit, redactWithKey, type InBoxExit, type TerminationProvenance } from "../../src/providers/cap-rejection.ts";
+import { classifyRunExit, redactWithKey, MIN_REDACTABLE_LEN, type InBoxExit, type TerminationProvenance } from "../../src/providers/cap-rejection.ts";
 import { EXIT_STATUSES } from "../../cli-anything/src/types.ts";
-
-// ─── helpers ─────────────────────────────────────────────────────────────────
-
-/** Any >=8-char substring of the secret found in any corpus, else null. */
-function leakScan(secret: string, ...corpora: string[]): string | null {
-  for (let i = 0; i + 8 <= secret.length; i++) {
-    const frag = secret.slice(i, i + 8);
-    for (const corpus of corpora) {
-      if (corpus.includes(frag)) return frag;
-    }
-  }
-  return null;
-}
-
-/** Scan JSON-stringified artifact for leaked secret fragments. */
-function scanArtifactForLeak(secret: string, artifact: unknown): string | null {
-  return leakScan(secret, JSON.stringify(artifact));
-}
+import { MIN_REDACTABLE_VALUE_LEN } from "../../cli-anything/src/redact.ts";
+import { scanArtifactForLeak } from "./fixtures/leak-scan.ts";
 
 // ─── AC2: overflow classification truth table ────────────────────────────────
 
@@ -175,6 +159,34 @@ describe("CC-1 mirror sync: InBoxExit union matches cli-anything EXIT_STATUSES",
     const expected = ["lead_failure", "logic", "overflow", "success", "transient"] as const;
     const actual = [...EXIT_STATUSES].sort(); // spread to allow sort
     expect(actual as readonly string[]).toEqual(expected);
+  });
+});
+
+// ─── AC5 mirror sync: redaction boundary tracks cli-anything ──────────────────
+
+describe("AC5 mirror sync: redactWithKey boundary tracks cli-anything MIN_REDACTABLE_VALUE_LEN", () => {
+  // The two redactors have deliberately DIFFERENT semantics — redactWithKey
+  // replaces any >=N-char substring of one secret with [REDACTED]; cli-anything
+  // redactSecrets replaces full values of secret-named env keys with
+  // [REDACTED:key] — so an identical-output corpus comparison cannot pass.
+  // What IS mirrored is the boundary rule; assert it against the imported
+  // constant so a change on either side fails here.
+  const secret = "sk-or-v1-abcdefgh1234567890";
+
+  test("MIN_REDACTABLE_LEN equals cli-anything MIN_REDACTABLE_VALUE_LEN", () => {
+    expect(MIN_REDACTABLE_LEN).toBe(MIN_REDACTABLE_VALUE_LEN);
+  });
+
+  test("fragment one below the cli-anything boundary passes through", () => {
+    const below = secret.slice(0, MIN_REDACTABLE_VALUE_LEN - 1);
+    const text = `Contains ${below} inside`;
+    expect(redactWithKey(text, secret)).toBe(text);
+  });
+
+  test("fragment exactly at the cli-anything boundary is redacted", () => {
+    const at = secret.slice(0, MIN_REDACTABLE_VALUE_LEN);
+    const text = `Contains ${at} inside`;
+    expect(redactWithKey(text, secret)).toBe("Contains [REDACTED] inside");
   });
 });
 
