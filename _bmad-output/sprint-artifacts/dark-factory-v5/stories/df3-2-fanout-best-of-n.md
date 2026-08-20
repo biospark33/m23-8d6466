@@ -205,7 +205,10 @@ assumed. Driver registration cites `src/providers/index.ts`'s `resolveDriver(nam
   every single dispatch, each arm is dispatched as `dispatch(brief, { admitted: true })` from inside
   the lock — that flag exists so a fan-out of N still makes exactly **one** `checkHeadroom(N)` and
   never N checks of 1 (AC1). DF3.1's per-issue budget gate (its AC7 `assertWithinBudget`) is **not**
-  suppressed: it reserves nothing, so each arm consults it independently.
+  suppressed: each arm consults it independently, and each consult **reserves** — DF2.8's serialized
+  admission (BEGIN IMMEDIATE over the append-only `gate_admissions` reservations, per its dev
+  deviation note) takes one reservation per arm, so N arms place N reservations against the
+  per-issue cap and aggregate exposure stays bounded by it.
 - **The fan-out record is a real artifact (AC9), not a notion.** `.sandbox/fanouts/<fanout-id>.json`
   is the store `rank <fanout-id>` reads and the race winner transition writes; it lives beside
   DF2.1's `.sandbox/runs/` under the same `0700`/`0600` discipline and the same `O_EXCL`-then-
