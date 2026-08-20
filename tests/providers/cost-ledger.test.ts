@@ -549,15 +549,40 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     expect(second.reservedMicroUsd).toBe(cap);
   });
 
-  test("the reservation retires once the run's first ledger row lands", () => {
+  test("the reservation retires once the run's first priced ledger row lands", () => {
     seedRecord("run-a1");
     ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 50_000_000);
-    ledger.ingestCostEvent(mkEvent({ costUsd: 0.01 }), mkCtx()); // run-a1 now has rows
+    ledger.ingestCostEvent(mkEvent({ costUsd: 0.01 }), mkCtx()); // run-a1 now has priced rows
     const next = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a2", requestId: "req-2" }, cap, 50_000_000);
     if (!next.admitted) throw new Error("expected admission after retirement");
     expect(next.reservedMicroUsd).toBe(0);
     expect(next.spentMicroUsd).toBe(10_000);
     expect(next.admittedCeilingMicroUsd).toBe(4_990_000);
+  });
+
+  test("an unpriced row does not retire the reservation — unpriced traffic cannot silently restore headroom", () => {
+    seedRecord("run-a1");
+    ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 50_000_000);
+    // Unpriced (partial usage): persists, is excluded from the priced SUM, and
+    // by design does NOT retire run-a1's reservation — its spend is not
+    // observable, so the full ceiling stays counted until a priced row lands.
+    ledger.ingestCostEvent(mkEvent({ costUsd: 0.01, unpricedTurns: 1 }), mkCtx());
+    const next = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a2", requestId: "req-2" }, cap, 50_000_000);
+    expect(next.admitted).toBe(false);
+    expect(next.reservedMicroUsd).toBe(cap);
+  });
+
+  test("an unwired readRunRecord counts every outstanding reservation (fail-safe default)", () => {
+    const bare = new CostLedger({ path: join(dir, "bare.db") });
+    const a = bare.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-b1", requestId: "req-b1" }, cap, 50_000_000);
+    if (!a.admitted) throw new Error("expected first admission");
+    // The default seam resolves a (keyless) record for every runId, so the
+    // orphan guard never expires run-b1's reservation on an unwired ledger —
+    // over-reserving is the fail-safe direction (INV-COST-6).
+    const b = bare.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-b2", requestId: "req-b2" }, cap, 50_000_000);
+    expect(b.admitted).toBe(false);
+    expect(b.reservedMicroUsd).toBe(cap);
+    bare.close();
   });
 
   test("admission is serialized: the concurrent second dispatch refuses where a bare read-compare would pass both", () => {

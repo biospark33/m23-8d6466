@@ -442,6 +442,20 @@ additions, not changed symbols.
   `assertQueryable` probes the real btree; `DEFAULT_COST_CONFIG` frozen;
   teardown attribution rejects non-primitive values; driver gate `finally`
   close wrapped. Focal suites 104/104; tsc clean on touched files.
+- 2026-08-20 (Sift review round, PR #121) — both WARNINGs verified then fixed.
+  W1 (unwired `readRunRecord` silently zeroed reservations): confirmed latent —
+  the production `admitIssue` caller wires the seam; the default now returns a
+  keyless truthy record so an unwired ledger counts every outstanding
+  reservation (fail-safe direction, INV-COST-6) while ingest paths still
+  refuse on the stub (no keyHash/closedAt). W2 (unpriced spend never erodes
+  headroom): confirmed — the retirement filter accepted ANY cost row, so an
+  unpriced-only run retired its full-ceiling reservation and restored
+  headroom on spend it never priced; retirement now requires a **priced** row
+  (`ce.unpriced = 0` in the NOT EXISTS), keeping an unpriced-only run's
+  ceiling counted until real spend is observable (box_hours rows are priced,
+  so teardown still retires). Sift's refuse-on-unpricedRows suggestion was
+  rejected — AC4 pins surfacing, not blocking. cost-ledger 52, budget-gate 10,
+  qds-cost 11 green.
 
 ### Review Findings
 

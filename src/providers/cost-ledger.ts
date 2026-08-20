@@ -350,7 +350,12 @@ export class CostLedger {
 
   constructor(deps: CostLedgerDeps = {}) {
     this.path = deps.path ?? process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE;
-    this.readRunRecord = deps.readRunRecord ?? (() => undefined);
+    // Fail-safe default (INV-COST-6): an unwired seam must not expire
+    // reservations — a truthy stub keeps every outstanding admission counted
+    // (over-reserving, never under-counting). The ingest paths stay fail-closed
+    // on the stub: it carries no keyHash/closedAt, so token ingest and
+    // box-hours pricing still refuse rather than persist under guessed keys.
+    this.readRunRecord = deps.readRunRecord ?? (() => ({ createdAt: "" }));
     this.config = deps.config ?? loadCostConfig().config;
     const dir = dirname(this.path);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -715,8 +720,12 @@ export class CostLedger {
    * the one ceiling handed to DF2.3's mint (AC3). `remainingMicroUsd` is the
    * headroom AFTER spend and reservations (the same `committed` the refusal
    * check uses), so an admitted ceiling can never over-commit the issue past
-   * its cap. The reservation retires by itself once the run's first ledger row
-   * lands, so a finished run's admission never blocks the next dispatch. A run
+   * its cap. The reservation retires by itself once the run's first **priced**
+   * ledger row lands, so a finished run's admission never blocks the next
+   * dispatch — and an unpriced row is not observable spend: a run reporting
+   * only unpriced rows keeps its full ceiling counted, so unpriced traffic
+   * never silently restores headroom the cap was holding (a box_hours row is
+   * priced, so teardown still retires it). A run
    * that never reports ANY row keeps its reservation — by design: that run is
    * still open, and its teardown (or the DF2.6 reaper, which routes through
    * teardownSandbox) is what writes the retiring box_hours row, so a
@@ -746,7 +755,10 @@ export class CostLedger {
           `SELECT a.ceiling_micro_usd AS ceiling, a.run_id AS runId
            FROM gate_admissions a
            WHERE a.repo_slug = ? AND a.issue_id = ?
-             AND NOT EXISTS (SELECT 1 FROM cost_events ce WHERE ce.run_id = a.run_id)`,
+             AND NOT EXISTS (
+               SELECT 1 FROM cost_events ce
+               WHERE ce.run_id = a.run_id AND ce.unpriced = 0
+             )`,
         )
         .all(input.repoSlug, input.issueId) as { ceiling: number; runId: string }[];
       let reservedMicroUsd = 0;
