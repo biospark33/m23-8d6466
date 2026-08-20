@@ -106,6 +106,12 @@ export interface CapHitDemoOptions {
   rosterPath?: string;
   /** Evidence directory path for artifact output. */
   evidenceDir?: string;
+  /**
+   * Callback to register a cleanup thunk for signal handling. The thunk is
+   * updated as state progresses (VM created, key minted, etc.). The CLI entry
+   * uses this to wire SIGTERM/SIGINT handlers that teardown before exit.
+   */
+  registerCleanup?: (cleanup: () => Promise<void>) => void;
 }
 
 export interface CapHitTimings {
@@ -258,6 +264,26 @@ export async function runCapHitDemo(
   // createRun does store.create internally
   const runId = newId("df2-4-cap-hit", nowFn());
 
+  // ponytail: cleanup thunk for signal handling — registered via opts.registerCleanup
+  // and updated as state progresses. Idempotent, never throws, logs via the requestId.
+  let cleanupCalled = false;
+  const makeCleanup = (): (() => Promise<void>) => {
+    return async () => {
+      if (cleanupCalled) return;
+      cleanupCalled = true;
+      try {
+        await teardownSandbox(
+          { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+          runId,
+          {},
+        );
+      } catch {
+        // Cleanup must never throw — swallow and continue to exit.
+      }
+    };
+  };
+  opts.registerCleanup?.(makeCleanup());
+
   // A record read that must never strand a live key: mid-run store/corruption
   // errors fall back to a shell so teardown + revocation still run (AC3).
   const readRecordSafe = (): Partial<RunRecord> => {
@@ -391,6 +417,8 @@ export async function runCapHitDemo(
       // record rather than orphaning it to the reaper.
       return finishEarly("mint-failed");
     }
+    // Signal handler now covers the live key.
+    opts.registerCleanup?.(makeCleanup());
   }
 
   // ---- 4. Deliver key ----
@@ -847,8 +875,9 @@ export async function runCapHitDemo(
       try {
         probeResult = await probeFn(key, probeModel);
       } catch (firstErr) {
-        // Transport-layer throw — retry exactly once.
+        // Transport-layer throw — retry exactly once after a short backoff.
         log({ requestId, operation: "demo.reprobe", agentId: null, timestamp: nowFn().toISOString(), duration: 0, runId, step: "reprobe", status: "ok", outcome: "retrying-after-transport-error" });
+        await new Promise((resolve) => setTimeout(resolve, 1000)); // 1s backoff before retry
         probeResult = await probeFn(key, probeModel); // second and final call
       }
       reprobeMs = Date.now() - started;
@@ -1231,6 +1260,34 @@ async function main(argv: readonly string[]): Promise<number> {
   // Fake driver uses box-relative paths; live substrate uses absolute contract
   // envFile is substrate-resolved inside runCapHitDemo (live: /home/exedev/.env).
 
+  // ponytail: signal handling — register cleanup thunk updated as state progresses.
+  // Idempotent, never throws, exits 1 with inconclusive log after cleanup.
+  let currentCleanup: (() => Promise<void>) | undefined;
+  const onSignal = async (signal: string) => {
+    setLogSink(() => {}); // suppress logs during teardown
+    if (currentCleanup) {
+      try {
+        await currentCleanup();
+      } catch {
+        // Cleanup must never throw — already guarded by the thunk, but belt-and-suspenders.
+      }
+    }
+    process.stderr.write(`!! received ${signal}, teardown complete, exiting inconclusive\n`);
+    process.exitCode = 1;
+    process.exit(1);
+  };
+  let unregisterHandlers: (() => void) | undefined;
+  const registerHandlers = () => {
+    const onSigterm = () => onSignal("SIGTERM").catch(() => {});
+    const onSigint = () => onSignal("SIGINT").catch(() => {});
+    process.on("SIGTERM", onSigterm);
+    process.on("SIGINT", onSigint);
+    unregisterHandlers = () => {
+      process.off("SIGTERM", onSigterm);
+      process.off("SIGINT", onSigint);
+    };
+  };
+
   // Numeric flags fail closed: a NaN wall-clock would fire ~immediately and a
   // NaN budget/ceiling would render as null in the artifact.
   const positiveInt = (raw: string | undefined, flag: string): number | undefined => {
@@ -1245,6 +1302,9 @@ async function main(argv: readonly string[]): Promise<number> {
     return n;
   };
 
+  // Register signal handlers before the run starts.
+  registerHandlers();
+
   const result = await runCapHitDemo(
     { driver, keyApi, store, requestId, evidenceDir },
     {
@@ -1255,8 +1315,12 @@ async function main(argv: readonly string[]): Promise<number> {
       repoUrl: args.repoUrl,
       commitSha: args.commitSha,
       rosterPath: args.rosterPath,
+      registerCleanup: (cleanup) => { currentCleanup = cleanup; },
     },
   );
+
+  // Normal completion: unregister signal handlers so a late signal doesn't re-trigger cleanup.
+  unregisterHandlers?.();
 
   // Single-line JSON: stdout's last line is machine-parsed (tests/CI); humans
   // read the stderr step log.

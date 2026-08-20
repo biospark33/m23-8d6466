@@ -225,8 +225,12 @@ export function redactWithKey(text: string, secret: string): string {
  * deep-link has no place in a committed artifact (defense-in-depth).
  * Charset broadened (hex + alnum + percent-encoding + URL-safe Base64 `-`/`_`)
  * so an encoding or format drift degrades to over-redaction, never a leak.
+ *
+ * Floor set to 8 (matching MIN_REDACTABLE_LEN) for defense-in-depth against
+ * future key-id format changes — shorter identifiers still redact rather than
+ * leak.
  */
-export const KEY_MANAGEMENT_URL_RE = /https:\/\/openrouter\.ai\/[^\s"'}]*\/keys\/[0-9a-zA-Z%_-]{16,}/g;
+export const KEY_MANAGEMENT_URL_RE = /https:\/\/openrouter\.ai\/[^\s"'}]*\/keys\/[0-9a-zA-Z%_-]{8,}/g;
 
 /** Strip key-management deep-links from provider rejection text. */
 export function redactKeyManagementUrls(text: string): string {

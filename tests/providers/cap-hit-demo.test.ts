@@ -1009,6 +1009,11 @@ provider: openrouter
       // Artifact file exists
       expect(existsSync(resultJson.artifactPath)).toBeTrue();
     },
+    // Bun's default per-test timeout is 5000 ms — the live flow needs minutes.
+    // Without this override the DOD-mandatory test dies at 5 s (observed
+    // 2026-08-20: "timed out after 5001ms") before the internal 20-min ceiling
+    // is ever reached.
+    1_200_000,
   );
 
   // ─── 11. Script smoke (subprocess) ────────────────────────────────────────────

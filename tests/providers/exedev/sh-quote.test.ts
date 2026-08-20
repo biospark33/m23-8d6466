@@ -97,6 +97,10 @@ describe("shQuote — shell injection attempts", () => {
     expect(shQuote("good && evil")).toBe("'good && evil'");
   });
 
+  test("double-bar is neutralized", () => {
+    expect(shQuote("good || evil")).toBe("'good || evil'");
+  });
+
   test("command substitution with backticks neutralized", () => {
     expect(shQuote("prefix`whoami`suffix")).toBe("'prefix`whoami`suffix'");
   });
@@ -107,6 +111,72 @@ describe("shQuote — shell injection attempts", () => {
 
   test("newline injection attempt neutralized", () => {
     expect(shQuote("arg1\nevil")).toBe("'arg1\nevil'");
+  });
+
+  // Extended metacharacter coverage per DF2.4 hardening
+  test("history expansion (!) neutralized", () => {
+    expect(shQuote("echo !$")).toBe("'echo !$'");
+  });
+
+  test("comment start (#) neutralized", () => {
+    expect(shQuote("# comment to hide")).toBe("'# comment to hide'");
+  });
+
+  test("brace expansion ({}) neutralized", () => {
+    expect(shQuote("a{1..3}b")).toBe("'a{1..3}b'");
+  });
+
+  test("glob character set ([]) neutralized", () => {
+    expect(shQuote("[a-z]*")).toBe("'[a-z]*'");
+  });
+
+  test("subshell (()) neutralized", () => {
+    expect(shQuote("(echo hi)")).toBe("'(echo hi)'");
+  });
+
+  test("tilde expansion (~) neutralized", () => {
+    expect(shQuote("~root")).toBe("'~root'");
+  });
+
+  test("job control (%) neutralized", () => {
+    expect(shQuote("echo %1")).toBe("'echo %1'");
+  });
+
+  // Combination hostile inputs
+  test("combined metacharacters neutralized", () => {
+    expect(shQuote("a;b|c&&d||e")).toBe("'a;b|c&&d||e'");
+  });
+
+  test("embedded single quote in hostile string", () => {
+    expect(shQuote("it's dangerous")).toBe("'it'\\''s dangerous'");
+  });
+
+  test("backslash-newline neutralized", () => {
+    expect(shQuote("cmd\\\nevil")).toBe("'cmd\\\nevil'");
+  });
+
+  test("nested command substitution forms", () => {
+    expect(shQuote("$(pwd)`id`")).toBe("'$(pwd)`id`'");
+  });
+
+  test("tilde with username expansion attempt", () => {
+    expect(shQuote("~root/.ssh")).toBe("'~root/.ssh'");
+  });
+
+  test("history expansion with word designator", () => {
+    expect(shQuote("!!")).toBe("'!!'");
+  });
+
+  test("comment with newline injection attempt", () => {
+    expect(shQuote("#comment\nevil")).toBe("'#comment\nevil'");
+  });
+
+  test("glob pattern with injection attempt", () => {
+    expect(shQuote("[a-z]*; rm -rf /")).toBe("'[a-z]*; rm -rf /'");
+  });
+
+  test("subshell with nested commands", () => {
+    expect(shQuote("(cd /tmp && rm -rf *)")).toBe("'(cd /tmp && rm -rf *)'");
   });
 });
 
@@ -226,5 +296,67 @@ describe("shQuote — edge cases", () => {
 
   test("mixed quote types", () => {
     expect(shQuote('He said "don\'t"')).toBe("'He said \"don'\\''t\"'");
+  });
+});
+
+describe("shQuote — real-shell round-trip safety", () => {
+  // Comprehensive hostile inputs covering all metacharacter classes
+  const hostileInputs = [
+    // Basic metacharacters already in coverage
+    "cmd; evil",
+    "cmd | evil",
+    "cmd && evil",
+    "cmd || evil",
+    "$(evil)",
+    "`evil`",
+    "$HOME",
+    "${VAR}",
+    "a*b",
+    "a?b",
+    "cmd < input",
+    "cmd > output",
+    // Extended per DF2.4 hardening
+    "echo !$",              // history expansion
+    "# comment to hide",     // comment start
+    "a{1..3}b",             // brace expansion
+    "[a-z]*",               // glob character set
+    "(echo hi)",            // subshell
+    "~root",                // tilde expansion
+    "echo %1",              // job control
+    // Combinations and edge cases
+    "a;b|c&&d||e",          // chained operators
+    "it's dangerous",       // embedded single quote
+    "cmd\\\nevil",          // backslash-newline
+    "$(pwd)`id`",           // nested command substitution
+    "~root/.ssh",           // tilde with path
+    "!!",                   // history expansion double-bang
+    "#comment\nevil",       // comment with newline
+    "[a-z]*; rm -rf /",     // glob with injection
+    "(cd /tmp && rm -rf *)",// subshell with commands
+  ];
+
+  test("all hostile inputs round-trip safely through real /bin/sh", async () => {
+    for (const input of hostileInputs) {
+      const quoted = shQuote(input);
+      // Build sh command: printf %s 'quoted' → exact input, no extra newlines
+      const shellCmd = ["/bin/sh", "-c", `printf %s ${quoted}`];
+
+      const proc = Bun.spawn({
+        cmd: shellCmd,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+
+      // Assert exact round-trip and clean exit
+      expect(exitCode).toBe(0);
+      expect(stdout).toBe(input);
+      expect(stderr).toBe("");
+    }
   });
 });
