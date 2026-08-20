@@ -157,7 +157,7 @@ export interface CostConfig {
   boxHourRateMicroUsd?: number;
 }
 
-export const DEFAULT_COST_CONFIG: Readonly<CostConfig> = { defaultCapMicroUsd: 5_000_000 };
+export const DEFAULT_COST_CONFIG: Readonly<CostConfig> = Object.freeze({ defaultCapMicroUsd: 5_000_000 });
 
 export const DEFAULT_COST_CONFIG_FILE = ".sandbox/cost-config.json";
 
@@ -177,8 +177,8 @@ function configInvalid(file: string, detail: string): CostConfigError {
 }
 
 function assertMicros(file: string, key: string, value: unknown): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-    throw configInvalid(file, `${key} must be a positive integer of micro-dollars (got ${JSON.stringify(value)})`);
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > Number.MAX_SAFE_INTEGER) {
+    throw configInvalid(file, `${key} must be a positive safe integer of micro-dollars (got ${JSON.stringify(value)})`);
   }
   return value;
 }
@@ -395,7 +395,11 @@ export class CostLedger {
       // chmod/stat/db.exec can all throw after the handle exists but before
       // this.db is assigned — close the handle here so no failure path leaks
       // the fd and SQLite memory (the file-mode throw above rides this too).
-      db.close();
+      try {
+        db.close();
+      } catch {
+        // The handle dies with the process; the original error is the diagnosis.
+      }
       throw e;
     }
   }
@@ -434,10 +438,10 @@ export class CostLedger {
     const costInvalid = !Number.isFinite(event.costUsd) || event.costUsd < 0;
     const unpriced = costInvalid || (event.unpricedTurns ?? 0) > 0;
     const costMicroUsd = costInvalid ? 0 : usdToMicros(event.costUsd);
-    if (!Number.isInteger(costMicroUsd) || costMicroUsd < 0) {
+    if (!Number.isSafeInteger(costMicroUsd) || costMicroUsd < 0) {
       throw new CostLedgerError(
         "cost-convert-invalid",
-        `costUsd ${event.costUsd} did not convert to a non-negative integer of µ$ (got ${costMicroUsd})`,
+        `costUsd ${event.costUsd} did not convert to a non-negative safe integer of µ$ (got ${costMicroUsd})`,
         "fix the producer's cost event, or the row persists as unpriced only for the known-partial cases (non-finite/negative cost, unpricedTurns>0)",
       );
     }
@@ -558,6 +562,13 @@ export class CostLedger {
     }
     const hours = Math.ceil((closed - created) / MS_PER_HOUR);
     const costMicroUsd = hours * rate;
+    if (!Number.isSafeInteger(costMicroUsd)) {
+      throw new CostLedgerError(
+        "box-hours-cost-invalid",
+        `run ${ctx.runId} box-hours cost is not a safe integer (lifetime ${hours}h × rate ${rate} µ$/h = ${costMicroUsd}) — refusing to store a silently wrong figure`,
+        "repair the run record's createdAt/closedAt or lower boxHourRateMicroUsd in .sandbox/cost-config.json, then re-run teardown",
+      );
+    }
     const eventId = boxHoursEventId(ctx.runId, record.closedAt);
     const { changes } = this.db
       .prepare(
@@ -683,7 +694,8 @@ export class CostLedger {
 
   private assertQueryable(): void {
     try {
-      this.db.prepare("SELECT 1").get();
+      // Probe must touch the btree — a bare SELECT 1 never opens cost_events, so page-level corruption would pass.
+      this.db.prepare("SELECT 1 FROM cost_events LIMIT 1").get();
     } catch (e) {
       throw new CostLedgerError(
         "ledger-unqueryable",
@@ -793,7 +805,20 @@ export class CostLedger {
         admittedCeilingMicroUsd: ceiling,
       };
     });
-    const decision = decide.immediate();
+    let decision: AdmissionDecision;
+    try {
+      decision = decide.immediate();
+    } catch (e) {
+      const msg = (e as Error).message ?? String(e);
+      if (/database is (locked|busy)|database table is locked/i.test(msg)) {
+        throw new CostLedgerError(
+          "ledger-busy",
+          `the cost ledger stayed write-locked past the 5s busy timeout (${msg}) — transient contention, not corruption`,
+          "retry the dispatch; if it persists, check for a process holding .sandbox/cost-ledger.db open",
+        );
+      }
+      throw e;
+    }
     const durationMs = Date.now() - started;
     log({
       requestId: input.requestId,

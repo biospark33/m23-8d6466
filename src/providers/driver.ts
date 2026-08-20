@@ -174,7 +174,11 @@ export async function createRun(
         issueId: issue.issueId,
       };
     } finally {
-      ledger.close();
+      try {
+        ledger.close();
+      } catch {
+        // A close failure must not mask the gate's own error; the WAL handle dies with the process.
+      }
     }
   }
   // Record first. If this throws (EEXIST, bad id) no box is ever created.

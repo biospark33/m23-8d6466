@@ -220,11 +220,12 @@ export async function teardownSandbox(deps: TeardownDeps, runId: string, opts: T
 /**
  * DF2.8: price this run's box hours from the record's budget attribution —
  * the shared body of the two ingest points (the already-closed early path and
- * the close step). Validates the attribution fields, coerces repoSlug/issueId
- * with String() (the extension entry's index signature is string | number),
- * and hands the shared context to ingestBoxHours, which does the logging.
- * Returns false when the record carries no issue attribution so each call
- * site surfaces the omission its own way.
+ * the close step). Validates the attribution fields are primitive string|number
+ * (the extension entry's index signature is string | number, but a hand-edited
+ * record could carry an object — truthiness passes and String({}) produces
+ * "[object Object]", which would write a nonsense attribution row). Non-primitive
+ * values count as no attribution. Returns false when the record carries no valid
+ * issue attribution so each call site surfaces the omission its own way.
  */
 function ingestBoxHoursIfAttributed(
   costLedger: CostLedgerHook,
@@ -233,11 +234,13 @@ function ingestBoxHoursIfAttributed(
   requestId: string,
 ): boolean {
   const budget = rec.extensions?.budget;
-  if (!budget?.repoSlug || !budget?.issueId) return false;
+  const { repoSlug, issueId } = budget ?? {};
+  if (typeof repoSlug !== "string" && typeof repoSlug !== "number") return false;
+  if (typeof issueId !== "string" && typeof issueId !== "number") return false;
   costLedger.ingestBoxHours({
     runId,
-    repoSlug: String(budget.repoSlug),
-    issueId: String(budget.issueId),
+    repoSlug: String(repoSlug),
+    issueId: String(issueId),
     requestId,
   });
   return true;

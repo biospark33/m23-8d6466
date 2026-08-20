@@ -431,5 +431,37 @@ additions, not changed symbols.
   scope-labeled and its writer moved off the repo working tree; focal suites
   green (cost-ledger 44, budget-gate 12, qds-cost 13, teardown 32,
   sandbox-teardown-cli 12).
+- 2026-08-20 (BMAD code review round, PR #121) — three parallel adversarial
+  layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor; auditor PASS on
+  all 6 ACs + 6 INVs). 21 raw findings → 9 patches applied, 8 dismissed as
+  noise/false-premise/deliberate (see Review Findings). Fixes: constructor
+  cleanup close never masks the original error; box-hours `hours × rate`
+  safe-integer guard (`box-hours-cost-invalid`); µ$ conversion rejects
+  unsafe integers; SQLITE_BUSY classified as retryable `ledger-busy`;
+  `assertMicros` upper bound at `Number.MAX_SAFE_INTEGER`;
+  `assertQueryable` probes the real btree; `DEFAULT_COST_CONFIG` frozen;
+  teardown attribution rejects non-primitive values; driver gate `finally`
+  close wrapped. Focal suites 104/104; tsc clean on touched files.
 
-**Status:** review — implemented, 2280-test full suite green, evidence captured; awaiting PR review
+### Review Findings
+
+- [x] [Review][Patch] Constructor cleanup `db.close()` can throw and mask the original error [src/providers/cost-ledger.ts:394]
+- [x] [Review][Patch] Box-hours `hours × rate` can exceed `Number.MAX_SAFE_INTEGER` — silent wrong figure (BLOCKER) [src/providers/cost-ledger.ts:559]
+- [x] [Review][Patch] `usdToMicros` accepts precision-loss values above $9B [src/providers/cost-ledger.ts:437]
+- [x] [Review][Patch] SQLITE_BUSY in `admitIssue` propagates unclassified — transient vs fatal indistinguishable [src/providers/cost-ledger.ts:796]
+- [x] [Review][Patch] `assertMicros` lacks upper bound — SQLite 64-bit INTEGER overflow [src/providers/cost-ledger.ts:179]
+- [x] [Review][Patch] `assertQueryable` probe `SELECT 1` never touches the btree — corruption passes [src/providers/cost-ledger.ts:684]
+- [x] [Review][Patch] `DEFAULT_COST_CONFIG` mutable at runtime despite `Readonly` type [src/providers/cost-ledger.ts:160]
+- [x] [Review][Patch] `String()` coercion turns a hand-edited object into `"[object Object]"` attribution [src/providers/teardown.ts:229]
+- [x] [Review][Patch] Driver gate `finally { ledger.close() }` can mask OverBudgetError [src/providers/driver.ts:176]
+
+Dismissed (8): concurrent-ceiling race — `BEGIN IMMEDIATE` serializes writers
+(blind hunter had no project context); corrupt-record read refusal — deliberate
+INV-COST-6 fail-closed, documented; box-hours hook after `store.close` —
+idempotent re-run heals via the already-closed early path, tested; JSON.parse
+error narrowing; perRole NULL sum — STRICT NOT NULL column; transaction return
+typing; sandbox-teardown best-effort ledger close — deliberate policy mirroring
+lock release; ledger dir permissions — false premise (`mkdirSync` passes
+`mode: 0o700` at creation).
+
+**Status:** review — implemented, BMAD review round complete (9/9 patches applied, 104/104 focal green); awaiting PR #121 merge

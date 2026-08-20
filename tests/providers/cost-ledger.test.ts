@@ -647,4 +647,68 @@ describe("DF2.8 cost config", () => {
     writeFileSync(file2, JSON.stringify({ boxHourRateMicroUsd: -5 }));
     expect(() => loadCostConfig(file2)).toThrow(CostConfigError);
   });
+
+  test("a cap exceeding MAX_SAFE_INTEGER is rejected — unsafe integers store wrong in SQLite 64-bit", () => {
+    const file = join(dir, "bad-overflow.json");
+    writeFileSync(file, JSON.stringify({ defaultCapMicroUsd: Number.MAX_SAFE_INTEGER + 1 }));
+    let code = "";
+    try {
+      loadCostConfig(file);
+    } catch (e) {
+      code = (e as CostConfigError).code;
+    }
+    expect(code).toBe("cost-config-invalid");
+  });
+});
+
+// ─── P2/P3/P5: safe-integer guards (precision loss / overflow BLOCKERs) ──────────
+
+describe("DF2.8 safe-integer guards (P2, P3, P5)", () => {
+  test("box-hours cost overflow (P2 BLOCKER): huge rate × lifetime → box-hours-cost-invalid, zero rows", () => {
+    const hugeRate = new CostLedger({
+      path: ledgerPath,
+      readRunRecord: (id) => RECORDS.get(id),
+      config: { defaultCapMicroUsd: 5_000_000, boxHourRateMicroUsd: Number.MAX_SAFE_INTEGER },
+    });
+    // Lifetime ≥ 2h to overflow: 2 × MAX_SAFE_INTEGER exceeds MAX_SAFE_INTEGER.
+    seedRecord("run-a1", { createdAt: "2026-08-20T12:00:00.000Z", closedAt: "2026-08-20T14:30:00.000Z" });
+    let code = "";
+    try {
+      hugeRate.ingestBoxHours({ runId: "run-a1", repoSlug: "qds/demo", issueId: "42", requestId: "req-1" });
+    } catch (e) {
+      code = (e as CostLedgerError).code;
+    }
+    expect(code).toBe("box-hours-cost-invalid");
+    const db = rawDb();
+    expect(rowCount(db, "cost_events")).toBe(0);
+    db.close();
+    hugeRate.close();
+  });
+
+  test("costUsd that exceeds MAX_SAFE_INTEGER on µ$ conversion (P3) → cost-convert-invalid", () => {
+    seedRecord("run-a1");
+    const hugeCost = { costUsd: 1e15 }; // finite, non-negative, but × 1e6 overflows
+    let code = "";
+    try {
+      ledger.ingestCostEvent(mkEvent(hugeCost), mkCtx());
+    } catch (e) {
+      code = (e as CostLedgerError).code;
+    }
+    expect(code).toBe("cost-convert-invalid");
+    const db = rawDb();
+    expect(rowCount(db, "cost_events")).toBe(0);
+    db.close();
+  });
+
+  test("cap exceeding MAX_SAFE_INTEGER via config file (P5) → cost-config-invalid", () => {
+    const file = join(dir, "cap-overflow.json");
+    writeFileSync(file, JSON.stringify({ defaultCapMicroUsd: Number.MAX_SAFE_INTEGER * 2 }));
+    let code = "";
+    try {
+      loadCostConfig(file);
+    } catch (e) {
+      code = (e as CostConfigError).code;
+    }
+    expect(code).toBe("cost-config-invalid");
+  });
 });

@@ -854,6 +854,46 @@ describe("DF2.5 teardownSandbox", () => {
       expect(hook.ingestCount).toBe(1);
       expect(hook.calls[0]?.runId).toBe(runId);
     }, 30_000);
+
+    // Test 8: non-primitive budget values (object/array) → treated as no attribution, ingest never called
+    test("non-primitive budget values (object) → treated as unattributed, ingestBoxHours never called, teardown succeeds", async () => {
+      const runId = "df28-nonprimitive";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      const hook = new MockCostLedgerHook();
+
+      // Simulate a hand-edited record by writing directly to JSON (bypasses validation)
+      const recPath = store.path(runId);
+      const rec = JSON.parse(readFileSync(recPath, "utf8")) as Record<string, unknown>;
+      (rec as { extensions: Record<string, unknown> }).extensions = {
+        budget: {
+          schemaVersion: 1,
+          repoSlug: { evil: true }, // Non-primitive value that bypasses type guard
+          issueId: "42",
+          capMicroUsd: 5_000_000,
+          spentMicroUsd: 0,
+          reservedMicroUsd: 0,
+          admittedCeilingMicroUsd: 5_000_000,
+        },
+      };
+      writeFileSync(recPath, JSON.stringify(rec));
+
+      await teardownSandbox(
+        deps({
+          gitCwd: host,
+          costLedger: hook,
+        }),
+        runId,
+      );
+
+      // ingestBoxHours NEVER called - non-primitive values count as no attribution
+      expect(hook.ingestCount).toBe(0);
+      expect(hook.calls).toHaveLength(0);
+
+      // Teardown still completes successfully
+      expect(store.get(runId).closedAt).toBeString();
+    }, 30_000);
   });
 
   // ─── 9b. Crash between destroy and close — dead box, open record ──────────
