@@ -60,8 +60,9 @@ export interface ParsedArgs {
 }
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
-  // Shared tokenizer; this CLI is destructive, so stray single-dash tokens and
-  // unknown flags throw rather than being dropped.
+  // Shared tokenizer; this CLI is destructive, so stray single-dash tokens
+  // (except the -h help alias, which the shared grammar routes to HELP +
+  // exit 0) and unknown flags throw rather than being dropped.
   const { positionals, flagTokens, bools } = tokenizeArgs(argv, {
     valueFlags: VALUE_FLAGS,
     boolFlags: BOOL_FLAGS,

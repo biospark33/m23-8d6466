@@ -140,6 +140,34 @@ function invalidFile(file: string, detail: string): QuotaLimitsError {
   );
 }
 
+// ─── enumeration bound ───────────────────────────────────────────────────────
+
+/** Shared per-call enumeration budget — checkHeadroom and the reaper sweep. */
+export const LIST_TIMEOUT_MS = 15_000;
+
+/**
+ * Bound one provider call. The losing promise's late rejection is attached a
+ * no-op catch BEFORE the race so it can never surface as an unhandled
+ * rejection after the timeout has already refused the caller.
+ *
+ * Lives here, not reaper.ts, so checkHeadroom can share the same mechanism
+ * and duration (a driver.list() that never settles must refuse both callers,
+ * not hang createRun while the sweep times out cleanly) without an import
+ * cycle — D4 runs one way: driver.ts → quota.ts, reaper.ts → quota.ts.
+ */
+export async function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  void p.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 // ─── headroom ────────────────────────────────────────────────────────────────
 
 /**
@@ -172,14 +200,18 @@ export interface HeadroomResult {
 /**
  * Count the live population and refuse on EITHER ceiling. Boundary inclusive:
  * `liveVms + n === maxVms` is allowed, and landing exactly on the pooled-disk
- * total is allowed. A driver.list() throw ⇒ `{ allowed: false, reason:
- * "list-unverified", headroom: 0, verified: false }` — never full headroom
- * from an uncounted population (AC4).
+ * total is allowed. A driver.list() throw — or a list() that never settles,
+ * bounded here by the same withTimeout/LIST_TIMEOUT_MS the reaper's sweep
+ * uses — ⇒ `{ allowed: false, reason: "list-unverified", headroom: 0,
+ * verified: false }` — never full headroom from an uncounted population
+ * (AC4). `listTimeoutMs` exists so tests can exercise that refusal without
+ * parking on the real 15s budget.
  */
 export async function checkHeadroom(
   driver: HeadroomInput,
   requested: number,
   limits: LoadedQuotaLimits = loadQuotaLimits(),
+  listTimeoutMs: number = LIST_TIMEOUT_MS,
 ): Promise<HeadroomResult> {
   const { limits: L } = limits;
   const base = {
@@ -190,7 +222,7 @@ export async function checkHeadroom(
   };
   let vms: { name: string }[];
   try {
-    vms = await driver.list();
+    vms = await withTimeout(driver.list(), listTimeoutMs, "driver.list()");
   } catch {
     return {
       ...base,

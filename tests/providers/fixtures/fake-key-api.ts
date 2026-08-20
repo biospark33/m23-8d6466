@@ -169,6 +169,12 @@ export class FakeKeyApi {
   backdateKey(name: string, iso: string): void {
     const entry = this.keys.find((k) => k.name === name);
     if (!entry) throw new Error(`fake key api: no key named ${name} to back-date`);
+    // The provider contract (D2) is a parseable ISO timestamp or absence — a
+    // fixture storing garbage here would test nothing (Date.parse ⇒ NaN ⇒
+    // never aged), so reject it at the seam.
+    if (Number.isNaN(Date.parse(iso))) {
+      throw new Error(`fake key api: backdateKey(${name}) got an unparseable timestamp: ${JSON.stringify(iso)}`);
+    }
     entry.createdAt = iso;
   }
 

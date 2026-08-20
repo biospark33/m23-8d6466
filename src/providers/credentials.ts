@@ -678,10 +678,10 @@ export function openRouterKeyApi(opts: OpenRouterKeyApiOptions = {}): KeyApi {
   function keyEntryOf(raw: unknown): KeyEntry {
     const k = (raw ?? {}) as Record<string, unknown>;
     // [VERIFY] upstream: whether GET /keys reports a creation field (or its
-    // name) is unverified — pass a string through when present, absent
-    // otherwise. Absence must degrade to `key-age-unavailable`, never to an
-    // assumed age (DF2.6 D2).
-    const created = k.createdAt ?? k.creation_time;
+    // name) is unverified — pass a string through when present under any of
+    // the candidate names, absent otherwise. Absence must degrade to
+    // `key-age-unavailable`, never to an assumed age (DF2.6 D2).
+    const created = k.createdAt ?? k.creation_time ?? k.created_at;
     return {
       hash: String(k.hash ?? ""),
       name: String(k.name ?? k.label ?? ""),

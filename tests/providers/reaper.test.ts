@@ -15,7 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -708,9 +708,106 @@ describe("DF2.6 sweep", () => {
       const hr = await checkHeadroom(fleet.driver, 2, LIMITS);
       expect(hr.allowed).toBeTrue();
       expect(hr.liveVms).toBe(1);
-      expect(lines.join("")).toContain(String(1)); // summary lines reached stdout
+      // the summary and report-file lines reached stdout — exact counts and
+      // mode prefixes, not just any digit (a bare "1" matches nearly
+      // anything); dry-run lists the same PREDICTIONS --yes executes
+      const stdout = lines.join("");
+      expect(stdout).toContain("dry-run: teardown 1, destroy 1, revoke 1");
+      expect(stdout).toContain("apply: teardown 1, destroy 1, revoke 1");
+      expect(stdout).toContain("report: ");
     } finally {
       process.chdir(prevCwd);
     }
+  });
+
+  // ─── 20. review round 2 — wedged providers, budget, late record claim ──────
+
+  test("review 6: a wedged pre-destroy recheck times out — failure recorded with the unit's identity, box alive", async () => {
+    const fleet = await seedFleet(dir, { vms: [{ name: VM_ORPHAN }] }, NOW);
+    // classification list() answers; the single-box recheck never settles
+    const wedged = Object.create(fleet.driver) as FakeDriver;
+    wedged.list = (name?: string) => (name === undefined ? fleet.driver.list() : new Promise(() => {}));
+
+    const report = await sweep(deps(fleet, { driver: wedged, actionTimeoutMs: 25 }), { yes: true });
+
+    expect(report.executed.destroy).toEqual([]);
+    const failure = report.failures.find((f) => f.vm === VM_ORPHAN);
+    expect(failure?.code).toBe("destroy-failed");
+    expect(failure?.message).toContain("timed out");
+    expect(failure?.message).toContain(VM_ORPHAN);
+    expect(existsSync(join(fleet.boxesDir, VM_ORPHAN))).toBeTrue(); // never destroyed
+  });
+
+  test("review 7: reap-phase budget expiry stops starting units — rows skipped, not failed", async () => {
+    const fleet = await seedFleet(dir, {
+      vms: [
+        { name: "bud25-20260820-000001" },
+        { name: "bud25-20260820-000002" },
+      ],
+    }, NOW);
+    let destroys = 0;
+    const slow = Object.create(fleet.driver) as FakeDriver;
+    slow.destroy = (vm: string) => {
+      destroys++;
+      return new Promise<void>(() => {}); // wedged: runs to the action timeout
+    };
+
+    const report = await sweep(deps(fleet, { driver: slow, actionTimeoutMs: 30, reapBudgetMs: 5 }), { yes: true });
+
+    // unit 1 started (its destroy was issued and timed out — a failure with
+    // identity); unit 2 was never started — skipped like a cap-overflow row
+    expect(destroys).toBe(1);
+    expect(report.failures.find((f) => f.vm === "bud25-20260820-000001")?.message).toContain("timed out");
+    const row2 = report.rows.find((r) => r.id === "bud25-20260820-000002");
+    expect(row2?.action).toBe("skipped");
+    expect(report.failures.some((f) => f.vm === "bud25-20260820-000002")).toBeFalse();
+    expect(await fleet.driver.list()).toHaveLength(2); // both boxes survive
+  });
+
+  test("review 8 (AC6): a record landing between classification and destroy refuses the destroy", async () => {
+    const fleet = await seedFleet(dir, { vms: [{ name: VM_ORPHAN }] }, NOW);
+    // classification sees the plain fleet; the single-box recheck first LANDS
+    // an open record (the createRun race window), then answers
+    const claimed = Object.create(fleet.driver) as FakeDriver;
+    claimed.list = async (name?: string) => {
+      if (name === undefined) return fleet.driver.list();
+      fleet.store.create(name); // an open record now claims the box
+      return fleet.driver.list(name);
+    };
+
+    const report = await sweep(deps(fleet, { driver: claimed }), { yes: true });
+
+    expect(report.executed.destroy).toEqual([]);
+    const failure = report.failures.find((f) => f.code === "record-claim-refused");
+    expect(failure?.vm).toBe(VM_ORPHAN);
+    expect(failure?.remediation).toBeString();
+    expect(existsSync(join(fleet.boxesDir, VM_ORPHAN))).toBeTrue();
+    expect(fleet.store.get(VM_ORPHAN).closedAt).toBeUndefined(); // the claim survives
+  });
+
+  test("quota-limits load failure ⇒ SweepError quota-limits-error, before any enumeration or deletion", async () => {
+    const fleet = await seedFleet(dir, e2eState(), NOW);
+    // cwd pins the default .sandbox/quota-limits.json the sweep falls back to
+    // when deps.limits is absent; the malformed body must refuse the sweep
+    const sandbox = mkdtempSync(join(tmpdir(), "qds-df26-qlim-"));
+    roots.push(sandbox);
+    process.chdir(sandbox);
+    mkdirSync(join(sandbox, ".sandbox"), { recursive: true });
+    writeFileSync(join(sandbox, ".sandbox", "quota-limits.json"), "{ not json\n");
+
+    let err: unknown;
+    try {
+      await sweep(deps(fleet, { limits: undefined }), { yes: true });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(SweepError);
+    const se = err as SweepError;
+    expect(se.code).toBe("quota-limits-error");
+    expect(se.message).toContain("quota-limits.json");
+    expect(se.remediation).toContain("maxVms"); // the copy-pasteable limits body
+    // the fleet is untouched — the refusal precedes enumeration and reaping
+    expect(await fleet.driver.list()).toHaveLength(3);
+    expect((await fleet.keyApi.listAllKeys(20)).entries).toHaveLength(4);
   });
 });

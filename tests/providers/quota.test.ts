@@ -197,6 +197,19 @@ describe("DF2.6 quota limits", () => {
     expect(r.headroom).toBe(0);
   });
 
+  test("AC4: a list() that never settles times out to the same list-unverified refusal", async () => {
+    // The enumeration is bounded by the same withTimeout/LIST_TIMEOUT_MS the
+    // reaper's sweep uses — a wedged driver must refuse here, not hang
+    // createRun. Tiny injected budget so the test doesn't park on 15s.
+    const hung: HeadroomInput = { list: () => new Promise(() => {}) };
+    const r = await checkHeadroom(hung, 1, loaded(), 25);
+    expect(r.allowed).toBeFalse();
+    expect(r.reason).toBe("list-unverified");
+    expect(r.liveVms).toBe(0);
+    expect(r.verified).toBeFalse();
+    expect(r.headroom).toBe(0);
+  });
+
   test("AC5: empty fleet ⇒ full configured ceiling as headroom — a normal state", async () => {
     const r = await checkHeadroom(fleetOf(0), 3, loaded());
     expect(r.allowed).toBeTrue();
@@ -235,17 +248,19 @@ describe("DF2.6 quota limits", () => {
     expect((await driver.list()).map((v) => v.name).sort()).toEqual(["seed1-20260820-000001", "seed2-20260820-000002"]);
   });
 
-  test("createRun under the ceiling proceeds; every box carries SBX_OWNERSHIP_TAG unless a tag is given", async () => {
+  test("createRun under the ceiling proceeds; every box carries the canonical SBX_OWNERSHIP_TAG", async () => {
     expect(SBX_OWNERSHIP_TAG).toBe("qds-sbx");
     const driver = new FakeDriver(join(dir, "boxes"));
     const store = new RunRecordStore(join(dir, "runs"));
 
     await createRun(driver, store, { runId: "df26tag-20260820-000001" });
-    await createRun(driver, store, { runId: "df26tag-20260820-000002", tag: "custom-tag" });
+    await createRun(driver, store, { runId: "df26tag-20260820-000002" });
 
     const vms = await driver.list();
-    expect(vms.find((v) => v.name === "df26tag-20260820-000001")?.tag).toBe(SBX_OWNERSHIP_TAG);
-    expect(vms.find((v) => v.name === "df26tag-20260820-000002")?.tag).toBe("custom-tag");
+    // The ownership marker is canonical and non-displaceable: a factory box
+    // tagged anything else would classify `foreign` in the reaper (reported,
+    // never destroyed) — an unreapable leak by construction.
+    expect(vms.map((v) => v.tag)).toEqual([SBX_OWNERSHIP_TAG, SBX_OWNERSHIP_TAG]);
     expect(store.get("df26tag-20260820-000001").vmName).toBe("df26tag-20260820-000001");
   });
 });

@@ -32,7 +32,15 @@ import {
   type KeyEntry,
 } from "./credentials.ts";
 import { SBX_OWNERSHIP_TAG, type ProviderDriver, type ProviderVm } from "./driver.ts";
-import { loadQuotaLimits, type QuotaLimitsError, type LoadedQuotaLimits, type QuotaLimits, type QuotaLimitsSource } from "./quota.ts";
+import {
+  LIST_TIMEOUT_MS,
+  loadQuotaLimits,
+  withTimeout,
+  type QuotaLimitsError,
+  type LoadedQuotaLimits,
+  type QuotaLimits,
+  type QuotaLimitsSource,
+} from "./quota.ts";
 import type { RunRecord, RunRecordStore } from "./run-record.ts";
 import { teardownSandbox, type TeardownDeps } from "./teardown.ts";
 
@@ -102,6 +110,10 @@ export interface SweepDeps {
   requestId?: string;
   /** D6: no fake timers — the clock is injectable instead. */
   now?: () => Date;
+  /** Default REAP_ACTION_TIMEOUT_MS — per-unit provider-op budget in --yes. */
+  actionTimeoutMs?: number;
+  /** Default REAP_PHASE_BUDGET_MS — wall-clock cap on the whole apply phase. */
+  reapBudgetMs?: number;
 }
 
 export interface SweepOptions {
@@ -128,31 +140,34 @@ export class SweepError extends Error {
 }
 
 const DEFAULT_REAP_DIR = ".sandbox/reap";
-const LIST_TIMEOUT_MS = 15_000;
 /** At most 25 executed reap actions per sweep; the rest report as skipped. */
 const MAX_ACTIONS_PER_SWEEP = 25;
 /** ≥3 consecutive failed reap attempts per runId ⇒ reap-blocked (zero calls). */
 const REAP_BLOCKED_AFTER = 3;
+/**
+ * Per-unit budget in the apply loop — one teardown/destroy/revoke, including
+ * its pre-destroy rechecks. Generous over the enumeration budget because a
+ * teardown is multi-step (harvest fetch + destroy + revoke). A unit that
+ * exceeds it lands in `failures` with its counter identity, like any thrown
+ * provider error.
+ */
+const REAP_ACTION_TIMEOUT_MS = 60_000;
+/**
+ * Wall-clock budget for the whole apply phase. Without it, 25 capped units ×
+ * a wedged provider each waiting its full action timeout is a 25-minute
+ * sweep; expiry stops STARTING new units (their rows report `skipped`, the
+ * same semantics as the action cap — retry targets, not failures).
+ */
+const REAP_PHASE_BUDGET_MS = 300_000;
+/**
+ * Only the newest N report files feed the streak counters (countReapBlocked)
+ * — a streak needs 3 consecutive failures, so evidence older than N
+ * operator-invoked sweeps is stale, and unbounded parsing grows with the
+ * reap dir forever.
+ */
+const REAP_HISTORY_MAX_REPORTS = 200;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
-
-/**
- * Bound one enumeration call. The losing promise's late rejection is attached
- * a no-op catch BEFORE the race so it can never surface as an unhandled
- * rejection after the timeout has already refused the sweep.
- */
-async function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
-  void p.catch(() => {});
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
-  });
-  try {
-    return await Promise.race([p, timeout]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
 
 interface ReapUnit {
   type: "teardown" | "destroy" | "revoke";
@@ -179,7 +194,11 @@ function recordKeyHash(deps: Pick<SweepDeps, "store">, runId: string): string | 
  * report files in reapDir (a dry-run attempts nothing, so its reports never
  * move the counter). Files are ordered by mtime — the report filename's
  * timestamp is only millisecond-granular, and a fixed test clock can mint
- * several files under the same name stem. A prior file that is missing or
+ * several files under the same name stem — and only the newest
+ * REAP_HISTORY_MAX_REPORTS are read. mtimes are precomputed with a guarded
+ * statSync (a report can vanish between readdir and sort/read), and the
+ * cached values do the sorting — statSync inside a comparator re-stats per
+ * comparison and throws on a vanished file. A prior file that is missing or
  * unparseable is skipped: the worst it can hide is a failure we would have
  * counted, and one unreadable report must not stop the sweep from reaping
  * everything else.
@@ -191,11 +210,17 @@ function countReapBlocked(reapDir: string): Map<string, { count: number; last: R
   if (!existsSync(reapDir)) return streaks;
   const files = readdirSync(reapDir)
     .filter((f) => f.endsWith(".json"))
-    .map((f) => ({ f, p: join(reapDir, f) }))
-    .sort((a, b) => {
-      const d = statSync(a.p).mtimeMs - statSync(b.p).mtimeMs;
-      return d !== 0 ? d : a.f < b.f ? -1 : 1;
-    });
+    .map((f) => {
+      const p = join(reapDir, f);
+      try {
+        return { f, p, mtimeMs: statSync(p).mtimeMs };
+      } catch {
+        return undefined; // vanished between readdir and stat — skip it
+      }
+    })
+    .filter((x): x is { f: string; p: string; mtimeMs: number } => x !== undefined)
+    .sort((a, b) => (a.mtimeMs !== b.mtimeMs ? a.mtimeMs - b.mtimeMs : a.f < b.f ? -1 : 1))
+    .slice(-REAP_HISTORY_MAX_REPORTS);
   for (const { p } of files) {
     let body: SweepReport;
     try {
@@ -481,8 +506,18 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
   const credDeps: CredentialDeps = { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId };
 
   const tReap = Date.now();
+  const actionTimeoutMs = deps.actionTimeoutMs ?? REAP_ACTION_TIMEOUT_MS;
+  const reapBudgetMs = deps.reapBudgetMs ?? REAP_PHASE_BUDGET_MS;
   if (opts.yes) {
     for (const unit of capped) {
+      // Wall-clock budget: a provider wedging one action to its full timeout
+      // must not wedge the sweep for (capped units × timeout). Units not
+      // started by expiry report `skipped` — the action-cap semantics: retry
+      // targets for the next sweep, not failures.
+      if (Date.now() - tReap > reapBudgetMs) {
+        for (const row of unit.rows) row.action = "skipped";
+        continue;
+      }
       const started = Date.now();
       // The unit's full key hash, in memory only — used to scrub it out of any
       // failure this unit records (credential errors embed it verbatim, and a
@@ -498,7 +533,7 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           // teardown skips every step, so the sweep records the failed
           // attempt with operator remediation instead of revoking itself.
           const wasClosed = deps.store.get(unit.id).closedAt !== undefined;
-          await teardownSandbox(teardownDeps, unit.id);
+          await withTimeout(teardownSandbox(teardownDeps, unit.id), actionTimeoutMs, `teardownSandbox(${unit.id})`);
           if (wasClosed) {
             failures.push({
               runId: unit.id,
@@ -512,7 +547,21 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           // was proven at classification time, but classification and action
           // are separated by every other sweep step — a box whose provenance
           // changed in between (or vanished) is refused, not destroyed.
-          const current = (await deps.driver.list(unit.id))[0];
+          const current = (await withTimeout(deps.driver.list(unit.id), actionTimeoutMs, `driver.list(${unit.id})`))[0];
+          // Store re-read AFTER the provider re-read — the order is the whole
+          // point. INV-1 writes the record before the VM, so any VM the
+          // provider recheck just confirmed has a record that predates this
+          // later read and is guaranteed to be seen here; a createRun that
+          // landed between classification and now is refused instead of
+          // destroyed out from under its claim. A closed record still means
+          // leaked: teardown destroys before closing, so closed + live ⇒ the
+          // destroy never landed.
+          let claimed: RunRecord | undefined;
+          try {
+            claimed = deps.store.get(unit.id);
+          } catch {
+            // absent/unreadable record — the classification-time verdict stands
+          }
           if (current === undefined || !RUN_ID_SHAPE.test(current.name) || current.tag !== SBX_OWNERSHIP_TAG) {
             failures.push({
               vm: unit.id,
@@ -520,15 +569,22 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
               message: `VM ${unit.id} failed the ownership re-check immediately before destroy (present: ${current !== undefined}, tag: ${JSON.stringify(current?.tag)}) — not destroyed`,
               remediation: `inspect ${unit.id} by hand and destroy it via the driver once its provenance is understood`,
             });
+          } else if (claimed !== undefined && claimed.closedAt === undefined) {
+            failures.push({
+              vm: unit.id,
+              code: "record-claim-refused",
+              message: `VM ${unit.id} was record-less (or closed-record) at classification, but an open run record now claims it — not destroyed`,
+              remediation: `re-run the sweep later; teardown owns ${unit.id} through its record now`,
+            });
           } else {
             executed.destroy.push(unit.id);
-            await deps.driver.destroy(unit.id);
+            await withTimeout(deps.driver.destroy(unit.id), actionTimeoutMs, `driver.destroy(${unit.id})`);
           }
         } else if (unit.hash !== undefined) {
           executed.revoke.push(unit.id);
           // Full hash in memory only; the sbx- prefix re-assert happens inside
           // revokeHash (credentials.ts:429-435) — not reimplemented here.
-          await revokeAndVerify(credDeps, unit.hash);
+          await withTimeout(revokeAndVerify(credDeps, unit.hash), actionTimeoutMs, `revokeAndVerify(${unit.id})`);
         }
       } catch (e) {
         const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
@@ -611,17 +667,28 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
 
   // ── report file, both modes. Dir 0700, file 0600 — reports carry key-hash
   // prefixes and failure detail, not secrets, but they are not public either
-  // (reap.just umask posture). The ISO-with-dashes name is millisecond-
-  // granularity, so a same-stamp collision (e.g. a fixed test clock) gets a
-  // -<n> suffix instead of overwriting a prior sweep's evidence.
+  // (reap.just umask posture). The filename is claimed ATOMICALLY with the wx
+  // (exclusive-create) flag: the previous existsSync loop was check-then-act,
+  // so two concurrent sweeps under the same millisecond stamp could both pick
+  // the same name and one silently overwrote the other's evidence. EEXIST ⇒
+  // retry with the next -<n> suffix. The body is serialized after the winning
+  // name is known, so the persisted JSON includes report.reportFile; 0o600
+  // applies to every file this loop creates.
   const reapDir = deps.reapDir ?? DEFAULT_REAP_DIR;
   mkdirSync(reapDir, { recursive: true, mode: 0o700 });
   chmodSync(reapDir, 0o700);
   const stamp = now().toISOString().replace(/:/g, "-");
   let name = `${stamp}.json`;
-  for (let i = 1; existsSync(join(reapDir, name)); i++) name = `${stamp}-${i}.json`;
-  report.reportFile = join(reapDir, name);
-  writeFileSync(report.reportFile, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  for (let i = 1; ; i++) {
+    report.reportFile = join(reapDir, name);
+    try {
+      writeFileSync(report.reportFile, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      name = `${stamp}-${i}.json`;
+    }
+  }
 
   return report;
 }

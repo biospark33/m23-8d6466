@@ -96,7 +96,6 @@ export interface BoxFile {
 
 export interface CreateRunOptions {
   runId: string;
-  tag?: string;
   /** When set, the box is exposed on this port and made public after create. */
   port?: number;
 }
@@ -125,9 +124,12 @@ export async function createRun(
   if (!headroom.allowed) throw new HeadroomRefusedError(headroom);
   // Record first. If this throws (EEXIST, bad id) no box is ever created.
   store.create(opts.runId);
-  // D1: every factory-provisioned VM carries provenance unless the caller
-  // overrides the tag.
-  const vm = await driver.create(opts.runId, opts.tag ?? SBX_OWNERSHIP_TAG);
+  // D1: every factory-provisioned VM carries the canonical ownership tag —
+  // not caller-displaceable. A custom tag would make a factory box classify
+  // `foreign` in the DF2.6 reaper (tag !== SBX_OWNERSHIP_TAG ⇒ reported,
+  // never destroyed), i.e. an unreapable leak by construction. Callers with
+  // extra metadata to attach belong in the run record, not the VM tag.
+  const vm = await driver.create(opts.runId, SBX_OWNERSHIP_TAG);
   let httpsUrl = vm.httpsUrl;
   if (opts.port !== undefined) {
     httpsUrl = await driver.expose(vm.name, opts.port);

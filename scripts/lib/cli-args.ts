@@ -94,7 +94,8 @@ export interface TokenizeSpec {
   boolFlags?: readonly string[];
   /**
    * Throw `unknown flag: <token>` on a single-dash token that is neither a
-   * bool flag nor the pending value of a value flag.
+   * bool flag, the exact help alias `-h`, nor the pending value of a value
+   * flag.
    *
    * Without this, such a token reaches `parseValueFlags`, which only inspects
    * `--`-prefixed flags — a `-n` typo is silently DROPPED while the command
@@ -103,6 +104,11 @@ export interface TokenizeSpec {
    * legal bare values in the other consumer's grammar (`run-record.ts`'s
    * `--vmName -foo` relies on the pass-through), and `--`-prefixed unknowns
    * already throw in `parseValueFlags` for every consumer.
+   *
+   * `-h` is exempted so the shared help contract (`--help` / `-h` → help +
+   * exit 0, stated above) survives this strictness: rejecting `-h` here means
+   * `parseValueFlags` never sees it, and a destructive CLI answers a help
+   * request with `unknown flag: -h` + exit 2 instead of its usage.
    */
   rejectStraySingleDash?: boolean;
 }
@@ -157,7 +163,7 @@ export function tokenizeArgs(argv: readonly string[], spec: TokenizeSpec): Token
       awaitingValue = false;
       continue;
     }
-    if (spec.rejectStraySingleDash && !a.startsWith("--") && !awaitingValue) {
+    if (spec.rejectStraySingleDash && !a.startsWith("--") && a !== "-h" && !awaitingValue) {
       throw new Error(`unknown flag: ${a}`);
     }
     flagTokens.push(a);
