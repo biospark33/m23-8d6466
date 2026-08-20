@@ -375,22 +375,29 @@ export class CostLedger {
         `fix the permissions on ${this.path} or remove the file if it is not a ledger, then re-run`,
       );
     }
-    if (isNew) chmodSync(this.path, 0o600); // SQLite propagates the main file's mode to -wal/-shm
-    const fileMode = statSync(this.path).mode & 0o777;
-    if (fileMode !== 0o600) {
+    try {
+      if (isNew) chmodSync(this.path, 0o600); // SQLite propagates the main file's mode to -wal/-shm
+      const fileMode = statSync(this.path).mode & 0o777;
+      if (fileMode !== 0o600) {
+        throw new CostLedgerError(
+          "ledger-file-mode",
+          `cost ledger ${this.path} is mode 0${fileMode.toString(8)}, not 0600`,
+          `chmod 0600 ${this.path}`,
+        );
+      }
+      // Lifted pragma posture from inkwell's tracer.py:108-113 / visualizer db.ts:77-93.
+      db.exec("PRAGMA journal_mode = WAL;");
+      db.exec("PRAGMA synchronous = NORMAL;");
+      db.exec("PRAGMA busy_timeout = 5000;");
+      db.exec(SCHEMA);
+      this.db = db;
+    } catch (e) {
+      // chmod/stat/db.exec can all throw after the handle exists but before
+      // this.db is assigned — close the handle here so no failure path leaks
+      // the fd and SQLite memory (the file-mode throw above rides this too).
       db.close();
-      throw new CostLedgerError(
-        "ledger-file-mode",
-        `cost ledger ${this.path} is mode 0${fileMode.toString(8)}, not 0600`,
-        `chmod 0600 ${this.path}`,
-      );
+      throw e;
     }
-    // Lifted pragma posture from inkwell's tracer.py:108-113 / visualizer db.ts:77-93.
-    db.exec("PRAGMA journal_mode = WAL;");
-    db.exec("PRAGMA synchronous = NORMAL;");
-    db.exec("PRAGMA busy_timeout = 5000;");
-    db.exec(SCHEMA);
-    this.db = db;
   }
 
   close(): void {

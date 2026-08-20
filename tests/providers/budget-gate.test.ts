@@ -22,7 +22,7 @@ import { join } from "node:path";
 
 import { createRun } from "../../src/providers/driver.ts";
 import { assertWithinBudget, mintCapMicroUsd, OverBudgetError } from "../../src/providers/budget-gate.ts";
-import { CostLedger, capForIssue } from "../../src/providers/cost-ledger.ts";
+import { CostLedger, CostLedgerError, capForIssue } from "../../src/providers/cost-ledger.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
@@ -415,18 +415,20 @@ describe("INV-COST-6: unopenable ledger refuses", () => {
     mkdirSync(badPath, { recursive: true });
     process.env.QDS_COST_LEDGER_FILE = badPath;
 
-    let message = "";
+    let err: CostLedgerError | undefined;
     try {
       await createRun(driver, store, {
         runId: "badledger-20260820-000001",
         issue: { repoSlug: "qds/demo", issueId: "42", requestId: "req-bad" },
       });
     } catch (e) {
-      message = (e as Error).message;
+      err = e as CostLedgerError;
     }
-    // Error propagates from CostLedger (ledger-unopenable)
-    expect(message).toContain("cannot open");
-    expect(message).toContain(badPath);
+    // Classification rides the typed code, never message text (INV-COST-6) —
+    // the message is prose; the code is the contract.
+    expect(err).toBeInstanceOf(CostLedgerError);
+    expect(err?.code).toBe("ledger-unopenable");
+    expect(err?.message).toContain(badPath);
 
     // Zero creates — the gate refused before driver.create
     const boxes = await driver.list();
@@ -482,6 +484,10 @@ describe("E2E demo: lead+2-worker run → second dispatch over cap refused", () 
     expect(keyApi.keys[keyApi.keys.length - 1]!.limitUsd).toBe(0.1);
 
     // The lead+2-worker run emits three cost events totalling 300,000 µ$.
+    // Direct ingest — no key in the path. This is NOT an overspend demo:
+    // FakeKeyApi enforces no limit, but a real provider refuses past the
+    // minted $0.10 (the ceiling is the provider-side key limit). The demo's
+    // point is that cumulative spend crosses the cap, so dispatch 2 refuses.
     const mk = (agentId: string, role: "lead" | "worker", seq: number, usd: number) =>
       ledger.ingestCostEvent({
         agentId, model: "cheap/model", inputTokens: 1_000, outputTokens: 500,

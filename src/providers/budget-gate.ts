@@ -88,6 +88,19 @@ export function assertWithinBudget(
 /**
  * Extract the admitted ceiling from a decision — the one number handed to DF2.3's mint.
  * Returns decision.admittedCeilingMicroUsd (the min(defaultKeyCapMicroUsd, remainingMicroUsd)).
+ *
+ * Enforcement locus (documented, deliberate): this ceiling becomes the minted
+ * key's provider-side hard USD limit — mintRunKey passes it as capMicroUsd,
+ * keyApi.createKey mints with limitUsd, and the mint REFUSES a provider echo
+ * that does not carry the requested limit (credentials.ts). So an in-flight
+ * run's token spend is bounded at the provider, not at ingest: the ledger
+ * records post-hoc what was spent and never rejects a row for exceeding a
+ * ceiling, because by ingest time the provider has already enforced it. What
+ * the ledger itself enforces is BETWEEN dispatches — admitIssue's reservation
+ * accounting sums outstanding admitted ceilings so concurrent runs cannot
+ * each win the same remaining headroom. Box hours are the one term no key
+ * bounds; teardown prices them from the record's own timestamps, and their
+ * lifetime is bounded by the teardown/DF2.6-reaper hygiene, not by this cap.
  */
 export function mintCapMicroUsd(decision: Extract<AdmissionDecision, { admitted: true }>): number {
   return decision.admittedCeilingMicroUsd;

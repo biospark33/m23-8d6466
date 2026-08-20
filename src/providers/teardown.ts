@@ -373,6 +373,13 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   }
 
   // 7. close — LAST. (extensions stay writable post-close; we write none.)
+  // A cost-ingest throw inside this step (unconfigured box-hour rate, an
+  // unopenable ledger) cannot strand billable resources: the box is already
+  // destroyed (step 6), the key revoked+verified (steps 4-5), and the record
+  // is closed. The TeardownError exists to surface the unpriced row loudly —
+  // and re-running teardown heals it through the closed-record path at the
+  // top of teardownSteps, which retries this exact ingest idempotently (the
+  // deterministic event_id makes the second attempt a no-op once it lands).
   await runStep(ctx, "close", async () => {
     deps.store.close(runId);
     // DF2.8: price box hours into the cost ledger, now that the record's

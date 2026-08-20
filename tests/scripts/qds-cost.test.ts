@@ -86,7 +86,7 @@ describe("qds-cost CLI", () => {
       const res = spawnSync(CLI, ["qds/demo#42"], { env: process.env });
       expect(res.status).toBe(0);
       const out = res.stdout.toString();
-      expect(out).toContain("0");
+      expect(out).toContain("0 µ$"); // the TOTAL line's µ$ figure is exactly zero
       expect(out).toContain("no ledger rows for this issue");
     });
   });
