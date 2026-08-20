@@ -136,3 +136,7 @@ export * from "./cap-rejection.ts";
 // dispatcher reach them through the same front door as everything else.
 export * from "./harvest.ts";
 export * from "./teardown.ts";
+// DF2.6: quota ceilings (createRun's headroom gate) and the fleet-wide orphan
+// reaper join the exported surface — same front door as teardown.
+export * from "./quota.ts";
+export * from "./reaper.ts";

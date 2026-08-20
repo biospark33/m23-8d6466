@@ -15,6 +15,15 @@
  */
 
 import type { RunRecord, RunRecordStore } from "./run-record.ts";
+import { checkHeadroom, HeadroomRefusedError, loadQuotaLimits } from "./quota.ts";
+
+/**
+ * Create-time provenance marker (DF2.6 D1): every factory-provisioned VM is
+ * tagged with this, and the reaper never destroys a shape-matching VM that
+ * lacks it. Charset-safe for substrates that interpolate the tag into a
+ * `--tag` flag.
+ */
+export const SBX_OWNERSHIP_TAG = "qds-sbx";
 
 export interface ProviderVm {
   /** Box name — also the public hostname, hence the run-id grammar. */
@@ -22,6 +31,13 @@ export interface ProviderVm {
   /** Public URL once the box is exposed, when the substrate reports one. */
   httpsUrl?: string;
   status?: string;
+  /**
+   * Ownership provenance (`SBX_OWNERSHIP_TAG` on factory-created boxes).
+   * Optional by necessity: exedev's `ls --json` reports no tag field
+   * (3-origin verified), so shape-matching exedev VMs classify `foreign` in
+   * the DF2.6 reaper — fail-safe, never destroyed.
+   */
+  tag?: string;
 }
 
 export interface ExecResult {
@@ -100,9 +116,18 @@ export async function createRun(
   store: RunRecordStore,
   opts: CreateRunOptions,
 ): Promise<RunRecord> {
+  // DF2.6: read-only headroom gate FIRST — a refusal lands before store.create
+  // and driver.create, so a refused create leaves zero boxes and zero records.
+  // checkHeadroom is a read, not a lock; the ceiling is a backstop, not
+  // admission control. An unenumerable VM list refuses (never full headroom
+  // from an uncounted population); a broken limits file refuses here too.
+  const headroom = await checkHeadroom(driver, 1, loadQuotaLimits());
+  if (!headroom.allowed) throw new HeadroomRefusedError(headroom);
   // Record first. If this throws (EEXIST, bad id) no box is ever created.
   store.create(opts.runId);
-  const vm = await driver.create(opts.runId, opts.tag);
+  // D1: every factory-provisioned VM carries provenance unless the caller
+  // overrides the tag.
+  const vm = await driver.create(opts.runId, opts.tag ?? SBX_OWNERSHIP_TAG);
   let httpsUrl = vm.httpsUrl;
   if (opts.port !== undefined) {
     httpsUrl = await driver.expose(vm.name, opts.port);

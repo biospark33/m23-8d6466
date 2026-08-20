@@ -125,6 +125,7 @@ export class FakeDriver implements ProviderDriver {
       out.push({
         name: meta.name,
         status: "running",
+        ...(meta.tag !== undefined ? { tag: meta.tag } : {}),
         ...(meta.ports.length > 0 ? { httpsUrl: fakeUrl(meta.name, meta.ports[0] as number) } : {}),
       });
     }
