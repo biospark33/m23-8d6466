@@ -241,9 +241,10 @@ function fakeUrl(vm: string, port: number): string {
  * reserved for the group while ANY member lives: an orphaned process group
  * keeps its pgid, and a new group can only take the number through a new
  * leader PROCESS with that pid. So in the dead-leader case a positive-pid
- * probe decides — `kill(pid, 0)` answering means some process owns the
- * number and this exec's group is gone (recycled: never signal `-pid`);
- * ESRCH means no process owns it, so any group holding the number is
+ * probe decides — `kill(pid, 0)` answering (or refusing with EPERM: either
+ * way a process owns it) means this exec's group is gone (recycled: never
+ * signal `-pid`); ESRCH means no process owns it, so any group holding the
+ * number is
  * provably this exec's orphaned group (`kill(-pgid, 0)` success alone could
  * never authorize that — it proves a group EXISTS with that id, not that it
  * is OURS). SIGKILLing that group is what lets destroy() settle an exec kept
@@ -283,11 +284,12 @@ function killTree(proc: Bun.Subprocess): () => void {
       // A process owns the pid — it was recycled after this exec's group
       // emptied. Signalling -pid could hit an unrelated group; never do.
       return;
-    } catch {
-      // ESRCH: no process owns the number, so it is either free or still
-      // reserved by this exec's orphaned group. (EPERM lands here too and
-      // means "an existing process we may not probe" — continuing would be
-      // wrong, but the group probe below fails closed on that as well.)
+    } catch (e) {
+      // Only ESRCH proves no process owns the number. EPERM means one does —
+      // a process this caller may not signal, typically a privileged recycled
+      // pid, possibly leading an unrelated group whose weaker members a group
+      // SIGKILL could still reach. Not provably ours → never signal -pid.
+      if ((e as NodeJS.ErrnoException).code !== "ESRCH") return;
     }
     try {
       process.kill(-proc.pid, 0); // probe first: authorizes the SIGKILL

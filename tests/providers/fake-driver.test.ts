@@ -221,6 +221,42 @@ describe("FakeDriver accountability and boundaries", () => {
     }
   });
 
+  test("a positive-pid probe answering EPERM never authorizes a group signal", async () => {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-eperm-"));
+    const origKill = process.kill;
+    const groupSignals: Array<{ pid: number; signal: string | number }> = [];
+    (process as { kill: typeof process.kill }).kill = (pid, signal?) => {
+      if (pid > 0 && signal === 0) {
+        // The dead-leader identity probe: pretend the recycled pid belongs to
+        // a process this caller may not signal. EPERM is "owned by someone
+        // else", the same verdict as a successful probe — not ESRCH.
+        throw Object.assign(new Error("kill() failed: EPERM: Operation not permitted"), { code: "EPERM" });
+      }
+      if (pid < 0) groupSignals.push({ pid, signal: signal ?? 0 });
+      return origKill(pid, signal);
+    };
+    try {
+      const d = new FakeDriver(boxes);
+      await d.create("eperm-box");
+      // Leader exits, descendant redirects its output: the exec settles on
+      // its own, the eager prune keeps the entry (the group is still alive),
+      // and destroy's closure reaches the dead-leader branch under the mock.
+      await d.exec("eperm-box", ["sh", "-c", "sleep 5 >/dev/null 2>&1 &"]);
+      // The eager prune's own group probe (signal 0) is exec-settle logic
+      // and expected here; snapshot so only destroy's calls are asserted.
+      const before = groupSignals.length;
+      await d.destroy("eperm-box");
+      // EPERM must short-circuit the closure before ANY -pid call — not even
+      // a probe — or a mixed-privilege recycled group could lose signalable
+      // members to the SIGKILL that follows a successful group probe.
+      expect(groupSignals.length).toBe(before);
+      expect(groupSignals.every((s) => s.signal === 0)).toBe(true);
+    } finally {
+      (process as { kill: typeof process.kill }).kill = origKill;
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
   test("copyFile refuses a symlink pointing out of the box", async () => {
     const boxes = mkdtempSync(join(tmpdir(), "qds-fake-symlink-"));
     const host = mkdtempSync(join(tmpdir(), "qds-fake-symlink-host-"));

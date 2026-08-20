@@ -45,10 +45,14 @@ export interface ExecResult {
  * exec's whole process group (descendants included), which also settles its
  * in-flight execs — a killed live exec exits 137; an exec pending over an
  * already-exited leader (a descendant holds its pipe) settles with the
- * leader's own exit code — but that settle guarantee is per-driver, not a
- * seam-wide promise: a caller awaiting an exec that can remain pending after
- * destroy must bound that wait itself (see cap-hit-demo's `cancelGraceMs`
- * races).
+ * leader's own exit code — but that destroy-settles-execs guarantee is
+ * per-driver, not a seam-wide promise. As of DF2.4 the concrete split:
+ * FakeDriver upholds it (group kill closes the pipes); ExeDevDriver does NOT
+ * signal exec children from destroy — its destroy is a control-plane `rm` of
+ * the box, its execs settle on their own transport timeout (the box's death
+ * cutting the ssh connection only incidentally helps), so a caller awaiting
+ * an exec that can remain pending after destroy must bound that wait itself
+ * (see cap-hit-demo's `cancelGraceMs` races).
  */
 export interface ProviderDriver {
   /** Registry name, e.g. `"fake"`, `"exe"`. */
