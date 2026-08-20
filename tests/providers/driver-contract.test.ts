@@ -174,7 +174,10 @@ export function runDriverContract(opts: DriverContractOptions): void {
 
       // 1. create — record first (INV-1), then the box, then the record learns
       //    its vmName/httpsUrl.
-      const rec = await createRun(driver, store, { runId: id, tag: "contract", port: 8080 });
+      // No `tag` here by design: the ownership tag is createRun's alone (D1 —
+      // not caller-displaceable), and exedev's `ls --json` reports no tag
+      // field at all, so a tag assertion has no place in the shared suite.
+      const rec = await createRun(driver, store, { runId: id, port: 8080 });
       expect(rec.vmName).toBe(id);
       expect(rec.httpsUrl).toMatch(/^https:\/\//);
       expect(rec.ports).toEqual([8080]);

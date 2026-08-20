@@ -21,6 +21,8 @@
 
 import { readFileSync } from "node:fs";
 
+import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
+
 export interface QuotaLimits {
   /** Concurrent provider VMs (D5: foreign VMs burn the same ceiling). */
   maxVms: number;
@@ -146,34 +148,6 @@ function invalidFile(file: string, detail: string): QuotaLimitsError {
     `quota limits file ${file}: ${detail}`,
     `write a partial-or-full override object whose keys are a subset of the known limits, e.g. ${EXAMPLE_BODY}`,
   );
-}
-
-// ─── enumeration bound ───────────────────────────────────────────────────────
-
-/** Shared per-call enumeration budget — checkHeadroom and the reaper sweep. */
-export const LIST_TIMEOUT_MS = 15_000;
-
-/**
- * Bound one provider call. The losing promise's late rejection is attached a
- * no-op catch BEFORE the race so it can never surface as an unhandled
- * rejection after the timeout has already refused the caller.
- *
- * Lives here, not reaper.ts, so checkHeadroom can share the same mechanism
- * and duration (a driver.list() that never settles must refuse both callers,
- * not hang createRun while the sweep times out cleanly) without an import
- * cycle — D4 runs one way: driver.ts → quota.ts, reaper.ts → quota.ts.
- */
-export async function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
-  void p.catch(() => {});
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
-  });
-  try {
-    return await Promise.race([p, timeout]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
 }
 
 // ─── headroom ────────────────────────────────────────────────────────────────

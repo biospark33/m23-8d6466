@@ -809,6 +809,33 @@ describe("DF2.6 sweep", () => {
     expect(fleet.store.get(VM_ORPHAN).closedAt).toBeUndefined(); // the claim survives
   });
 
+  test("review 9: a record going UNREADABLE between classification and destroy refuses the destroy", async () => {
+    const fleet = await seedFleet(dir, { vms: [{ name: VM_ORPHAN }] }, NOW);
+    // classification sees the plain fleet (record-less owned VM ⇒ destroy);
+    // the single-box recheck first LANDS a record claiming the box, then
+    // truncates it mid-write — malformed JSON, so readRecord throws with NO
+    // errno. The recheck must refuse: an unreadable record is not an absent
+    // one, and the fallback to the classification-time verdict would destroy
+    // a live run's VM out from under a record the sweep merely failed to read.
+    const corrupted = Object.create(fleet.driver) as FakeDriver;
+    corrupted.list = async (name?: string) => {
+      if (name === undefined) return fleet.driver.list();
+      fleet.store.create(name); // the claim lands…
+      writeFileSync(join(fleet.runsDir, `${name}.json`), "{ not json"); // …then corrupts
+      return fleet.driver.list(name);
+    };
+
+    const report = await sweep(deps(fleet, { driver: corrupted }), { yes: true });
+
+    expect(report.executed.destroy).toEqual([]);
+    const failure = report.failures.find((f) => f.code === "record-recheck-failed");
+    expect(failure?.vm).toBe(VM_ORPHAN);
+    expect(failure?.message).toContain(VM_ORPHAN);
+    expect(failure?.message).toContain("not destroyed");
+    expect(failure?.remediation).toBeString();
+    expect(existsSync(join(fleet.boxesDir, VM_ORPHAN))).toBeTrue(); // the box survives
+  });
+
   test("quota-limits load failure ⇒ SweepError quota-limits-error, before any enumeration or deletion", async () => {
     const fleet = await seedFleet(dir, e2eState(), NOW);
     // cwd pins the default .sandbox/quota-limits.json the sweep falls back to

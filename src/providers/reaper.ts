@@ -33,9 +33,7 @@ import {
 } from "./credentials.ts";
 import { SBX_OWNERSHIP_TAG, type ProviderDriver, type ProviderVm } from "./driver.ts";
 import {
-  LIST_TIMEOUT_MS,
   loadQuotaLimits,
-  withTimeout,
   type QuotaLimitsError,
   type LoadedQuotaLimits,
   type QuotaLimits,
@@ -43,6 +41,7 @@ import {
 } from "./quota.ts";
 import type { RunRecord, RunRecordStore } from "./run-record.ts";
 import { teardownSandbox, type TeardownDeps } from "./teardown.ts";
+import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
 
 /**
  * The generated run-id grammar (`<slug>-<YYYYMMDD>-<6 hex>`, run-record.ts
@@ -557,10 +556,19 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           // leaked: teardown destroys before closing, so closed + live ⇒ the
           // destroy never landed.
           let claimed: RunRecord | undefined;
+          let recordError: string | undefined;
           try {
             claimed = deps.store.get(unit.id);
-          } catch {
-            // absent/unreadable record — the classification-time verdict stands
+          } catch (e) {
+            // readRecord preserves the errno on the wrapped error, so a typed
+            // ENOENT is a KNOWN-absent record and the classification-time
+            // verdict stands. Malformed JSON and other read failures carry no
+            // code — the claim state is UNKNOWN, and treating unknown as
+            // absent here would destroy a live run's VM out from under a
+            // record the sweep merely failed to read. Fail closed instead.
+            if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+              recordError = (e as Error).message ?? String(e);
+            }
           }
           if (current === undefined || !RUN_ID_SHAPE.test(current.name) || current.tag !== SBX_OWNERSHIP_TAG) {
             failures.push({
@@ -568,6 +576,13 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
               code: "ownership-recheck-refused",
               message: `VM ${unit.id} failed the ownership re-check immediately before destroy (present: ${current !== undefined}, tag: ${JSON.stringify(current?.tag)}) — not destroyed`,
               remediation: `inspect ${unit.id} by hand and destroy it via the driver once its provenance is understood`,
+            });
+          } else if (recordError !== undefined) {
+            failures.push({
+              vm: unit.id,
+              code: "record-recheck-failed",
+              message: `record ${unit.id}.json could not be re-read before destroy (${recordError}) — not destroyed`,
+              remediation: `repair or delete ${unit.id}.json by hand, then re-run the sweep — the next sweep also refuses to enumerate a malformed record (record-unreadable), so it cannot be worked around by retrying`,
             });
           } else if (claimed !== undefined && claimed.closedAt === undefined) {
             failures.push({
