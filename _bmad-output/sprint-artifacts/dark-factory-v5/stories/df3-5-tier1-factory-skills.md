@@ -34,14 +34,14 @@ Four skills sit on top of DF3.1/DF3.2/DF3.4's CLI: `factory-dispatch` (dispatch,
 `factory-observe` (status, attach), `factory-harvest` (harvest, teardown), and
 `factory-guide` (the index, the preflight, and the commercial-terms statement). Each skill body
 holds judgment — which verb, how to read the exit code, when to stop — and nothing else. The verbs
-and flags themselves come from `src/fleet/verbs.ts` — the registry **DF3.1 AC6 creates** and its
-"verb registry" DoD item makes the sole source for `fleet --help` — and a contract test parses every
-fenced command in every skill file against that registry. A skill
+and flags themselves come from **DF3.1's verb registry** (`src/fleet/verbs.ts`) — the registry DF3.1
+creates under its AC6 and its "verb registry" DoD item makes the sole source for `fleet --help`
+— and a contract test parses every fenced command in every skill file against that registry. A skill
 that documents a verb or flag the CLI does not export fails the build.
 
 ## E2E Slice
 
-**Demonstrable behavior:** Given the four skill files and the DF3.1 verb registry, When
+**Demonstrable behavior:** Given the four skill files and DF3.1's verb registry, When
 `tests/fleet/skill-contract.test.ts` runs, it extracts every `fleet …` invocation from every
 `.claude/skills/factory/*/SKILL.md` fenced block → resolves each verb and each flag against
 `listVerbs()` → fails on the first unknown token, naming the file, line and token. Adding
@@ -135,24 +135,19 @@ export the verb. No skill file is edited to "wait for" DF3.2, and none documents
 | Component | Service (compose/k8s/provider) | Lifecycle Hook Verified |
 |-----------|-------------------------------|-------------------------|
 | Skill loader | Claude Code on the operator machine, reading `.claude/skills/factory/*/SKILL.md` | each file parses as valid frontmatter + body; asserted by the contract test, not by hand-loading |
-| Fleet CLI | `scripts/fleet.ts` (DF3.1), invoked through the repo's package script | `fleet --help` exits `0` and renders the registry; this **is** the documented preflight |
+| Fleet CLI | `scripts/fleet.ts` (DF3.1), invoked as `bun scripts/fleet.ts` (matching DF3.1's documented invocation surface) | `fleet --help` exits `0` and renders the registry; this **is** the documented preflight |
 | Verb registry | `src/fleet/verbs.ts` — **created by DF3.1 AC6** | `listVerbs()` is exported and consumed by both `--help` and the contract test — one source, not two |
 | Fan-out verb | `fleet fanout` (DF3.2) | present in the registry before `factory-dispatch` documents it; absence fails AC1, not review |
 | Decision verbs | `fleet approve` / `reject` / `attach` (DF3.4) | present in the registry before `factory-observe` documents them |
 
 ## Technical Notes
 
-- **Thin skill, fat recipes** (orchestrator `SKILL.md:13-25`). The skill holds the judgment about which verb to
-  run and how to read the result; the verb holds the knowledge. Re-implementing what a verb already
-  does is forbidden because the verbs encode measured facts — mint ordering, the revocation gate,
-  the teardown sequence — and a hand-rolled version drops one silently. If a verb is wrong, the fix
-  is the verb, not a route around it. This is D3's rejected alternative stated as a build check.
 - **The registry is the contract, and DF3.1's AC6 is what puts it there.** DF3.1 creates
   `src/fleet/verbs.ts` and exports `listVerbs()` to render `--help` (its "verb registry" DoD item);
   DF3.2 and DF3.4 register their own verbs into it under their DoD. This story adds a second
-  consumer, not a second source. The contract test is the whole
-  mechanism — there is no skill-linting framework, no schema for skill bodies, and no generated
-  documentation. Roughly one regex, one resolve loop and an assertion.
+  consumer, not a second source. The contract test is the whole mechanism — there is no
+  skill-linting framework, no schema for skill bodies, and no generated documentation. Roughly
+  one regex, one resolve loop and an assertion.
 - **Guards/limits:** each `SKILL.md` body stays under 200 lines; the contract test parses fenced
   blocks only (prose mentioning a verb name is not a command); flags are matched exactly, so a
   renamed flag in DF3.1 breaks the skills at build time rather than at 2am.
@@ -200,14 +195,16 @@ export the verb. No skill file is edited to "wait for" DF3.2, and none documents
   and are always supplied by the operator over stdin (DF2.3 INV-CRED-3, DF3.4 INV-APPROVE-6).
 - **INV-SKILL-2 (authorization stays in code):** the approval check lives in DF3.4's gate. A skill
   may route to `fleet approve` and may not carry, cache, generate or infer an approver token —
-  prompt text is never an authorization boundary, because a skill body is not a trust boundary.
+  prompt text is never an authorization boundary, because a skill body is not a trust boundary. The
+  hashed allowlist (`.factory/approvers.json`, DF3.4 AC4) is the auth surface; skills never bypass it.
 - **INV-SKILL-3 (no hand-rolled privileged command):** no skill instructs the agent to compose a key
   mint, a key revoke, a VM destroy, an `ssh` into a box, or a git push. Those encode measured guards
-  and a hand-rolled version drops one silently (orchestrator `SKILL.md:19-22`); they are reachable
-  only through a registry verb.
+  and a hand-rolled version drops one silently; they are reachable only through a registry verb.
+  The `thin-skill-fat-recipes` pattern is enforced by the contract test — any skill body reaching for a
+  privileged operation directly fails against the empty verb registry (D3's rejected alternative).
 - **INV-SKILL-4 (fail-closed on the unknown):** an unrecognised verb, a missing prerequisite, or a
-  failing preflight ends in report-and-stop. No skill offers a workaround path, a fallback command,
-  or a retry the CLI did not itself offer.
+  failing preflight ends in report-and-stop (R3 FAIL-CLOSED DISCIPLINE). No skill offers a workaround
+  path, a fallback command, or a retry the CLI did not itself offer.
 - **INV-SKILL-5 (commercial containment):** no Max-subscription-derived rate appears in any file
   this story adds, and no file implies a personal subscription covers client work. Client
   deployments are stated once, in `factory-guide`, as org-owned API key under Commercial Terms §A.1
@@ -253,3 +250,16 @@ export the verb. No skill file is edited to "wait for" DF3.2, and none documents
 ## Dev Agent Record
 
 <!-- Empty placeholder — filled during development. -->
+
+---
+
+## Hardening Revision — 2026-08-20
+
+**Revision summary:** Verb registry cross-citation corrected to DF3.1's contract ("DF3.1's registry"
+as a cross-story dependency). Skills location cites existing `.claude/skills/` structure. R3
+FAIL-CLOSED doctrine encoded in security invariants. DOD verified at 10 high-signal items (no trim
+needed). Commercial terms and containment wording preserved per R5 §6 fact 10 and DD-11.
+**Campaign fixes 2026-08-20:** DF3.5-L1.
+as a cross-story dependency). Skills location cites existing `.claude/skills/` structure. R3
+FAIL-CLOSED doctrine encoded in security invariants. DOD verified at 10 high-signal items (no trim
+needed). Commercial terms and containment wording preserved per R5 §6 fact 10 and DD-11.

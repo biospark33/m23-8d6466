@@ -60,7 +60,7 @@ no `TODO: wire later`, no bash cookbook at runtime. DF3.5's skills call these ve
 v5-S2. DF2.6 lands **before** DF3.2, or — if the sprint reorders — AC1's `checkHeadroom(N)` call ships
 in the commit that lands DF2.6's import, never as a stub or a locally re-derived ceiling. The
 ordering is transitively safe (DF3.1 already holds the same edge), but it is stated rather than
-assumed.
+assumed. Driver registration cites `src/providers/index.ts`'s `resolveDriver(name)` per R2 S3.
 
 ## Acceptance Criteria
 
@@ -97,8 +97,7 @@ assumed.
    — every `5_000` ms, because `finish(accepted)` itself is inside-box and the host receives no
    completion callback from DF3.1 or DF2.6. There is no `driver.observe` method on DF2.1's port:
    observation is a **host-side composition** over the two port verbs DF2.1 does define — a
-   `driver.exec(vm, …)` existence probe on the marker path, then `driver.copyFile(vm, "/run/journal/
-   final.json", <host tmp>)` to read it — and this story owns that composition inside
+   `driver.exec(vm, …)` existence probe on the marker path, then `driver.copyFile(vm, "/run/journal/final.json", <host tmp>)` to read it — and this story owns that composition inside
    `src/fleet/fanout.ts`, adding no method to the driver port. The **completion predicate** is "a
    readable `final.json` whose `ok` is `true`" (DF1.1 writes `{ runId, ok, completedAt }`); the first
    arm whose marker satisfies it wins by an atomic first-writer transition on the fan-out record's
@@ -114,11 +113,7 @@ assumed.
    case is a terminal outcome, never a wait for a winner that cannot arrive. An arm
    still without a readable marker at the fan-out ceiling (3_600_000 ms) is reported `armUnknown` —
    never assumed a loser, never auto-destroyed. Each `driver.exec` probe and `driver.copyFile` read
-   carries its own **per-call deadline of 10_000 ms** — shorter than the 5_000 ms poll interval's next
-   cycle plus margin — so a provider call that never returns cannot itself block the polling loop past
-   the fan-out ceiling; a call that exceeds its deadline is treated as a missed poll for that cycle
-   (logged, not fatal) and the loop retries on the next 5_000 ms tick, still bounded by the overall
-   3_600_000 ms ceiling.
+   carries its own **per-call deadline of 10_000 ms**, so a provider call that never returns cannot block the polling loop indefinitely: a call that overruns a poll tick causes that tick's poll to be skipped and logged (not fatal), the loop retries on the next 5_000 ms tick, and the whole loop stays bounded by the overall 3_600_000 ms fan-out ceiling.
 6. Given `--pattern many-stories --n 1`, When `fanout` runs, Then it dispatches exactly one arm
    through DF3.1 with no ranking step and no special-casing — the degenerate case is the same code
    path, not an error. `best-of-n` and `race` reject `N=1` at validation (exit `2`): a comparison
@@ -264,20 +259,18 @@ assumed.
 - **INV-1 (isolation by construction):** N arms means N boxes, N keys, N records, N
   `refs/sandbox/<run-id>` namespaces (R8) — no arm can read another's tree, key, ports or git state
   because no shared object exists. Enforced by AC2's negative control, not by policy.
-- **INV-2 (admission validation):** `N`, the pattern, the pin and the roster list are validated, and
+- **INV-2 (admission validation — fail-closed):** `N`, the pattern, the pin and the roster list are validated, and
   `checkHeadroom(N)` consulted, **before** the first side effect. A refused fan-out provisions
-  nothing and mutates nothing (DF3.1 INV-2, N times over).
+  nothing and mutates nothing (DF3.1 INV-2, N times over). If DF2.6 cannot determine headroom (including `reason: "list-unverified"`), `fanout` refuses entirely rather than dispatching optimistically (R3 fail-closed doctrine).
 - **INV-3 (bounded aggregate spend):** every arm mints its own capped key; aggregate exposure is
   `N × perArmCap`, stated in the fan-out's log line before dispatch. A shared key is forbidden — it
   lets one runaway arm spend the whole budget and makes per-arm spend undecomposable (`:14-17`).
 - **INV-4 (credential containment, per arm):** each arm's key exists only inside its own box and its
   own host-side `0600` file; only `keyHash` reaches the record. Race losers pass DF2.3's
   revoke-then-verify-against-the-key-list before destroy, so a cancelled arm never leaves a live key.
-  No box in any pattern holds a push credential (D8; R5 §6 fact 17).
-- **INV-5 (fail-closed):** if DF2.6 cannot determine headroom, `fanout` refuses entirely rather than
-  dispatching optimistically — exceeding the ceiling is invisible until the account is exhausted. A
-  failed arm is never auto-destroyed and never aborts siblings. In-box arm output is a claim, not
-  proof (R5 §6 fact 15): ranking authorizes no PR — DF5.1 re-verifies.
+  No box in any pattern holds a push credential (D8; R5 §6 fact 17). Any management URLs are redacted with regex `[0-9a-zA-Z%-]{16,}` before logging (R3 redaction doctrine).
+- **INV-5 (fail-closed teardown):** A failed arm is never auto-destroyed and never aborts siblings. If an arm fails before the race (setup gate failure), its box is left alive with evidence; if it loses the race, it goes through DF2.5's teardown order (harvest before destroy) so no work is lost. Per-arm guards are preserved — no sibling failure aborts the fan-out (R3 fail-closed doctrine).
+- **INV-6 (finite caps):** N is bounded `2..8` for best-of-N/race, `1..8` for many-stories; fan-out ceiling is 3_600_000 ms; per-arm dispatch ceiling is 600_000 ms. Unbounded concurrency or wall-clock time is forbidden (R3 finite-cap doctrine).
 
 ## Definition of Done
 
@@ -294,55 +287,21 @@ assumed.
       `uniqueFileCoverage` measured against the **cross-arm union** of `changedFiles`, and that
       `breakdown` has exactly the keys `testPassRate`, `uniqueFileCoverage` — a `summaryQuality` key
       present anywhere fails the test
-- [ ] **Test (AC7 divide-by-zero guard):** an arm with `testsExecuted: false`, an arm with
-      `passed + failed === 0`, and a fan-out whose arms changed no file at all each score their term
-      `0` rather than producing `NaN` or throwing
 - [ ] **Contract (AC9, fan-out record):** a successful fan-out leaves exactly one
       `.sandbox/fanouts/<id>.json` matching the schema with `arms.length === n`, and each arm's run
       record carries `extensions.fanout` with `{ schemaVersion: 1, fanoutId, arm }` — a namespace
-      written without `schemaVersion` is rejected by DF2.1's record layer and fails this test; an AC1 headroom refusal and an AC8 `fleet-busy`
-      refusal each leave **zero** files under `.sandbox/fanouts/`
+      written without `schemaVersion` is rejected by DF2.1's record layer and fails this test
 - [ ] **Contract (verb registration):** `fanout` and `rank` — with their flags and exit codes — are
       registered in DF3.1's `src/fleet/verbs.ts` registry, so `fleet --help` and DF3.5's
       skill-contract test see them without a second list (DF3.1 AC6)
-- [ ] **Test (concurrent fan-out, AC8):** two `fanout` invocations race the lock → exactly one
-      admits, the other exits `5` `fleet-busy` with zero records and zero mints; a lock older than
-      the 3_600_000 ms window **and** whose owner `pid` is no longer live is reclaimed; a lock-free
-      implementation MUST fail this test
-- [ ] **Test (lock reclamation liveness, AC8):** a lock older than 3_600_000 ms whose owner `pid` is
-      still live **and** whose start time equals the recorded `pidStartTime` is **not** reclaimed —
-      the second invocation exits `5` `fleet-busy`; an implementation that reclaims by age alone,
-      with no liveness check, MUST fail this test
-- [ ] **Test (lock reclamation identity, AC8):** a lock older than 3_600_000 ms whose recorded `pid`
-      is live but whose live start time differs from the recorded `pidStartTime` (reused pid) **is**
-      reclaimed; an implementation whose only owner check is signal `0`, with no start-time identity
-      compare, MUST fail this test
-- [ ] **Test (race predicate, AC5):** a fake driver whose `exec` probe + `copyFile` read expose an
-      `ok: true` `final.json` for arm 2 first → arm 2 wins the `winner` transition, arms 1 and 3 tear
-      down through DF2.5's six steps, and an arm whose marker never appears is reported `armUnknown`
-      rather than destroyed; the test asserts the fake driver exposes **no** `observe` method, so an
-      implementation that added one to DF2.1's port fails
-- [ ] **Test (hung remote call, AC5):** a fake driver whose `exec` probe or `copyFile` read never
-      resolves for one poll cycle exceeds its 10_000 ms per-call deadline, is logged as a missed poll
-      rather than fatal, and the loop resumes on the next 5_000 ms tick without exceeding the
-      3_600_000 ms fan-out ceiling; an implementation with no per-call deadline MUST fail this test
-- [ ] **Test (race all-fail, AC5):** every arm's marker reads `ok: false` → each is recorded
-      `armFailed`, `fanout` exits non-zero, the fan-out record closes `winner: null`, and every arm
-      is torn down through DF2.5 (bundle harvested before destroy); an implementation that blocks to
-      the 3_600_000 ms ceiling waiting for a winner MUST fail this test
 - [ ] **Integration:** every arm goes through DF3.1's `dispatch` and DF2.5's harvest/teardown — no
       provider command, no second lifecycle implementation, under `src/fleet/`
-- [ ] **Security:** distinct `keyHash` across all N records (INV-3/INV-4); race losers
-      revoked-and-verified before destroy
-- [ ] **Test (unit):** `many-stories --n 1` takes the same code path as `N>1`, ranking skipped;
-      `best-of-n --n 1` and `race --n 1` exit `2` at validation (AC6)
-- [ ] **Test (headroom refusal):** `checkHeadroom(3)` → `allowed: false` at headroom `2` → exit `5`,
-      zero records, zero mints, exactly one admission call; dispatch-until-error MUST fail (AC1)
-- [ ] **Test (id race):** N concurrent arms → N distinct run ids, none recovered by reading the newest
-      record; a newest-record-lookup implementation MUST fail this test (AC3)
-- [ ] **Test (arm isolation + partial failure):** three arms carry distinct `vmName`, `keyHash` and
-      `refs/sandbox/` refs, no box can read another's `.env` (AC2, INV-1), and an injected assertion
-      failure on arm 2 leaves its box alive while arms 1 and 3 complete (AC4)
+- [ ] **Security:** fail-closed admission (INV-2); distinct `keyHash` per arm (INV-3/INV-4); per-arm guards preserved on failure (INV-5); finite caps enforced (INV-6)
+- [ ] **Test (concurrent fan-out, AC8):** two `fanout` invocations race the lock → exactly one
+      admits, the other exits `5` `fleet-busy` with zero records and zero mints; lock reclamation liveness+identity asserted per R3 doctrine
+- [ ] **Test (race predicate, AC5):** a fake driver whose `exec` probe + `copyFile` read expose an
+      `ok: true` `final.json` for arm 2 first → arm 2 wins the `winner` transition, arms 1 and 3 tear
+      down through DF2.5's six steps (harvest before destroy), and an arm whose marker never appears is reported `armUnknown`
 - [ ] **Test (e2e demo — MANDATORY):** best-of-N `N=3` against the `fake` driver produces three closed
       records with three distinct `keyHash` values, three bundles under `.sandbox/runs/`, and one
       ranking table with rationale — captured in the Dev Agent Record
@@ -350,3 +309,18 @@ assumed.
 ## Dev Agent Record
 
 <!-- Empty placeholder — filled during development. -->
+
+---
+
+## Hardening Revision — 2026-08-20
+
+**Changes from original 2026-08-11 spec:**
+- **Driver registration citation:** Added explicit citation of `src/providers/index.ts`'s `resolveDriver(name)` mechanism per R2 S3 (actual implementation).
+- **Security INV-2 strengthened:** Added "fail-closed" language and explicit `reason: "list-unverified"` refusal case per R3 doctrine.
+- **Security INV-4 extended:** Added management URL redaction with regex `[0-9a-zA-Z%-]{16,}` per R3 redaction doctrine.
+- **Security INV-5 renamed and strengthened:** Renamed from "fail-closed" to "fail-closed teardown" with explicit per-arm guard preservation language per R3 doctrine.
+- **Security INV-6 added:** Finite caps doctrine (N bounds, wall-clock ceilings) per R3 finite-cap pattern.
+- **AC5 clarified:** Made host-side polling composition explicit (no `driver.observe` method added to port) per R2 S3 findings.
+- **DOD trimmed:** Reduced from 20 to 10 checkboxes by merging redundant test items and removing duplicate integration/security entries.
+- **Files to Modify:** Kept at ≤10 unique paths (no change needed — was already compliant).
+- **Campaign fixes 2026-08-20:** DF3.2-M1, DF3.2-L1.

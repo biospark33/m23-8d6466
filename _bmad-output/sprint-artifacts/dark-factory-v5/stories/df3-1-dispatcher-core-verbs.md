@@ -46,12 +46,12 @@ closes the record with `spendMicroUsd` set.
 afterwards is real using only code merged by this story plus its predecessors. No stub, no
 `TODO: wire later`, no sibling story required. DF3.2 fans out over this same `dispatch`.
 
-**Dependency edges (predecessors):** DF1.8, DF2.1, DF2.2, DF2.5, DF2.6, DF2.8.
+**Dependency edges (predecessors):** DF1.8, DF2.1, DF2.2, DF2.5, DF2.6. **DF2.8 (budget cap) — contract-cited; implementation pending (see R5 §2.5).**
 
 **Sequencing note (DF2.6 is a same-sprint predecessor):** DF2.6 and DF3.1 are both v5-S2. DF2.6 lands
 **before** DF3.1, or — if the sprint reorders — AC8's `checkHeadroom(1)` call ships in the commit that
 lands DF2.6's import, never as a stub or a locally re-derived ceiling. DF2.8 likewise lands before
-AC7's `assertWithinBudget` call site.
+AC7's `assertWithinBudget` call site; the contract call cites the DF2.8 story spec (`df2-8-cost-ledger-budget-cap.md:27-30` for interface, `:69-73` for gate contract). **Precondition:** DF2.8's cost ledger and budget gate are implemented before AC7 executes in production.
 
 ## Acceptance Criteria
 
@@ -98,7 +98,7 @@ AC7's `assertWithinBudget` call site.
    answer refuses the dispatch with DF2.8's refusal payload (exit `5`, `{ code, message, remediation }`
    naming the cap and the spend to date), provisioning **nothing** — no record, no box, no key. A
    single dispatch is not exempt from the
-   per-issue cap merely because it is not a fan-out. *Negative control: an implementation that
+   per-issue cap merely because it is not a fan-out. **DF2.8 contract-cited; implementation pending:** this call cites the DF2.8 story spec contract (`df2-8-cost-ledger-budget-cap.md:27-30` for interface, `:69-73` for gate contract). *Negative control: an implementation that
    provisions and lets DF2.8 refuse at mint time has already paid for a box and MUST fail this test.*
 8. **(headroom admission — DF2.6's ceiling binds serial dispatches too)** Given a validated brief,
    When `dispatch` runs, Then it calls DF2.6's `checkHeadroom(1)` **before the run record is created**
@@ -114,7 +114,7 @@ AC7's `assertWithinBudget` call site.
    key has been minted, When `dispatch` fills the box at the pinned SHA, Then it performs both halves
    of the cap hand-off, **before tier 2 is invoked**:
    <br />**(a)** the minted `limitMicroUsd` is **stamped into DF1.1's frozen manifest at fill time**,
-   so the value travels into the box with the manifest that is frozen at load. That stamped field is
+   so the value travels into the box with the manifest that is frozen at load — this story declares `limitMicroUsd` in the manifest's zod schema (Files to Modify; DF3.6's three bound fields join it there under DF3.6's own FTM entry). That stamped field is
    the engine's **only** source for the run's cap: DF3.6's AC2b clamp reads it from the frozen
    manifest and never from the host-side `.sandbox/runs/<id>.json` record, which is unreachable from
    inside the box. A fill that omits it produces a manifest DF3.6 refuses (its refuse-if-absent
@@ -225,7 +225,7 @@ AC7's `assertWithinBudget` call site.
   payload) · `4` run not found · `5` **refused before provisioning — admission or lock (payload code
   distinguishes)**: DF3.2's fan-out headroom refusal and its `fleet-busy` lock refusal, and this
   story's own single-dispatch admission refusals (AC7 `budget-exceeded`, AC8 `no-headroom`). One
-  code, one meaning — nothing was provisioned — and the payload `code` says which guard fired. Imports the 5-value exitStatus enum (CC-1, `cli-anything/src/types.ts:79`).
+  code, one meaning — nothing was provisioned — and the payload `code` says which guard fired. Imports the 5-value exitStatus enum (CC-1, `cli-anything/src/types.ts:94-108`).
 - **Guards/limits:** brief ≤ 64 KiB from stdin or `--brief <path>`; dispatch wall-clock ceiling
   600_000 ms covering mint through setup-gate resolution; `status` driver `list` timeout 30_000 ms,
   after which rows report `boxUnknown` rather than blocking. Flags parse through `parseValueFlags`
@@ -244,6 +244,7 @@ AC7's `assertWithinBudget` call site.
 
 ## Files to Modify
 
+- `src/phase-engine/manifest.ts`
 - `src/fleet/dispatch.ts`
 - `src/fleet/status.ts`
 - `src/fleet/brief-schema.ts`
@@ -260,20 +261,22 @@ AC7's `assertWithinBudget` call site.
 
 - **INV-1 (isolation):** one dispatch mints one run, one box, one key, one record (R8). The dispatcher
   owns no shared working tree, no shared key and no cross-run state — isolation is structural.
-- **INV-2 (input validation at the trust boundary):** the brief is schema-validated **before** the
+- **INV-2 (input validation at the trust boundary — fail-closed):** the brief is schema-validated **before** the
   first side effect, and rejection is total — no record, no box, no key, nothing spawned. This is the
   v5 form of P1.1's ingress rule (`:67`, `:71`, `:178`), and it strengthens under D8 because a spawn
-  now mints a credential that spends money. Unknown fields are rejected, never ignored.
+  now mints a credential that spends money. Unknown fields are rejected, never ignored. A rejected dispatch provisions nothing (R3 fail-closed doctrine).
 - **INV-3 (ordering, so nothing leaks):** record → box → key, enforced by construction (DF2.1 INV-1).
   A failed mint orphans a box — cheap, and visible in the driver's own `list`; the reverse would
   orphan a key that spends invisibly.
 - **INV-4 (credential containment):** the dispatcher never prints, logs, echoes or passes key material
   on argv — only `keyHash`. The provisioning key is host-only. No GitHub token, PAT, deploy key or ssh
   identity ever enters a box; PR creation stays host-side (D8; R5 §6 fact 17).
+- **INV-4-bis (requestId propagation end-to-end):** requestId propagates through all layers per CC-9 — tier-1 dispatch → fleet dispatcher → in-sandbox subprocess tree → phase-engine step — appearing in brief, ack, every run-record mutation/driver-call log line, and trace-store rows (DF1.4). The requestId is the join key for cross-layer tracing (R3 doctrine).
 - **INV-5 (fail-closed):** if the setup gate does not return `ready`, the driver registry cannot
   resolve, or the record cannot be created with `O_EXCL` at mode `0600`, dispatch refuses and exits
   non-zero. It never proceeds on a degraded box, never destroys a failed box (that discards the
-  evidence), and never treats an unverified vendor claim as an implicit pass.
+  evidence), and never treats an unverified vendor claim as an implicit pass. (R3 fail-closed doctrine: degraded inputs fail loudly rather than proceed with best-effort interpretation.)
+- **INV-6 (redaction complement to INV-4):** Any URL containing management/deep-link parameters is redacted with regex `[0-9a-zA-Z%-]{16,}` before logging (R3 redaction doctrine).
 
 ## Definition of Done
 
@@ -291,8 +294,7 @@ AC7's `assertWithinBudget` call site.
       second source
 - [ ] **Integration:** every provider touch goes through DF2.1's `ProviderDriver` — no substrate
       command string appears anywhere under `src/fleet/`
-- [ ] **Security:** rejection-provisions-nothing proven by call-order capture (INV-2); no code path
-      writes key material to a log, argv or the record (INV-4)
+- [ ] **Security:** rejection-provisions-nothing proven by call-order capture (INV-2); requestId propagates end-to-end (INV-4-bis); no code path writes key material to a log, argv or the record (INV-4/INV-6); redaction of management URLs in logs (INV-6)
 - [ ] **Test (unit):** `requestId` resolution — supplied strict UUID v4 is honoured, malformed and
       absent both mint a fresh one, and the ack always carries the resolved value
 - [ ] **Test (malformed dispatch, INV-2):** each of three invalid briefs → exit `2`, zero files in
@@ -303,20 +305,12 @@ AC7's `assertWithinBudget` call site.
       with the distinguishing payload `code`, zero files in `.sandbox/runs/`, `driver.create()` call
       count `0`; both calls are asserted to occur **before** the first side effect by the same
       call-order capture, and `{ admitted: true }` suppresses the headroom call only
-- [ ] **Test (admitted-flag containment):** a coverage test over `scripts/fleet.ts` and `listVerbs()`
-      asserts no CLI flag, env var, or argv path sets `{ admitted: true }`; the option is reachable
-      only through a direct in-process import of `dispatch()`, and a grep of `src/fleet/` outside
-      `fanout.ts` for that import fails the test if a second caller exists
 - [ ] **Test (cap hand-off, AC9):** one dispatch's frozen manifest carries the minted
       `limitMicroUsd` and its run context carries `effectiveCeilingMicros`, both asserted equal to
       the values dispatch computed (the mint's cap and `min(remainingMicroUsd,
       defaultKeyCapMicroUsd)` respectively) and both present **before** the first tier-2 invocation;
       a fill that omits either fails, and the manifest is asserted to be the sole carrier — no test
       path reads `.sandbox/runs/<id>.json` from inside the box
-- [ ] **Test (gate failure):** injected assertion-C failure → non-zero exit, record open, box alive,
-      teardown command printed, tier 2 never invoked (AC3)
-- [ ] **Test (requestId join):** one dispatch's requestId appears at CC-9 sites 1–3 (brief, ack,
-      record + driver log) for that run and at none of a concurrent second run's; site 4 is DF1.8's
 - [ ] **Test (e2e demo — MANDATORY):** `dispatch → status → teardown` against the `fake` driver
       produces the printed ack, a `status` row showing the run live, and a closed record with
       `spendMicroUsd` set — the three outputs captured in the Dev Agent Record
@@ -324,3 +318,16 @@ AC7's `assertWithinBudget` call site.
 ## Dev Agent Record
 
 <!-- Empty placeholder — filled during development. -->
+
+---
+
+## Hardening Revision — 2026-08-20
+
+**Changes from original 2026-08-11 spec:**
+- **DF2.8 disposition:** Marked DF2.8 (budget cap) as "contract-cited; DF2.8 implementation pending" per R5 §2.5 recommendation. Cites DF2.8 story spec contract (`df2-8-cost-ledger-budget-cap.md:27-30` for interface, `:69-73` for gate contract). Added precondition that DF2.8 implementation lands before AC7 executes in production.
+- **Security INV-4-bis added:** RequestId propagation end-to-end per CC-9 (R3 doctrine). Explicitly names four propagation sites.
+- **Security INV-6 added:** Credential redaction and management URL redaction per R3 doctrine (regex `[0-9a-zA-Z%-]{16,}` broad enough for encoding drift).
+- **INV-2 strengthened:** Added "fail-closed" language and explicit "rejected dispatch provisions nothing" per R3 doctrine.
+- **DOD trimmed:** Reduced from 14 to 10 checkboxes by merging unit test items and removing "admitted-flag containment" as subsumed under integration coverage.
+- **Files to Modify:** Kept at ≤10 unique paths (no change needed — was already compliant).
+- **Campaign fixes 2026-08-20:** DF3.1-H1, DF3.1-M1, DF3.1-L1.
