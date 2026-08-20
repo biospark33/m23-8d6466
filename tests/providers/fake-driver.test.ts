@@ -235,13 +235,18 @@ describe("FakeDriver accountability and boundaries", () => {
       if (pid < 0) groupSignals.push({ pid, signal: signal ?? 0 });
       return origKill(pid, signal);
     };
+    let sleeper: number | undefined;
     try {
       const d = new FakeDriver(boxes);
       await d.create("eperm-box");
       // Leader exits, descendant redirects its output: the exec settles on
       // its own, the eager prune keeps the entry (the group is still alive),
       // and destroy's closure reaches the dead-leader branch under the mock.
-      await d.exec("eperm-box", ["sh", "-c", "sleep 5 >/dev/null 2>&1 &"]);
+      // The echo hands back the descendant's pid — the redirected sleep holds
+      // no pipe, so stdout settles with it — for the finally-block cleanup
+      // this deliberately-blinded destroy cannot do itself.
+      const res = await d.exec("eperm-box", ["sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"]);
+      sleeper = Number(res.stdout.trim());
       // The eager prune's own group probe (signal 0) is exec-settle logic
       // and expected here; snapshot so only destroy's calls are asserted.
       const before = groupSignals.length;
@@ -253,6 +258,17 @@ describe("FakeDriver accountability and boundaries", () => {
       expect(groupSignals.every((s) => s.signal === 0)).toBe(true);
     } finally {
       (process as { kill: typeof process.kill }).kill = origKill;
+      // destroy was a no-op for this entry on purpose; the real kill (never
+      // the mock) terminates the survivor now rather than at sleep's expiry.
+      // Reaping needs no help: sh is dead, so the sleeper is reparented to
+      // init and reaped there once the SIGKILL lands.
+      if (sleeper !== undefined) {
+        try {
+          process.kill(sleeper, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
       rmSync(boxes, { recursive: true, force: true });
     }
   });
