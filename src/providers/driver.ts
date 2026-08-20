@@ -36,12 +36,23 @@ export interface ExecResult {
  *
  * `copyFile` is **box → host only**. Nothing pushes a file into a box — that is
  * why DF2.3's credential arrives on `exec` stdin.
+ *
+ * Termination contract (DF2.4): every `exec` is independently bounded — a
+ * driver enforces its own ceiling and the promise resolves or rejects at it
+ * (exedev: transport-level timeout + SIGKILL on the ssh child; fake: the
+ * child's own exit or the destroy kill). `destroy` kills the box's processes
+ * (a real box destroy does) but makes NO promise about settling in-flight
+ * `exec` promises — a caller that keeps awaiting an exec past a destroy must
+ * bound that wait itself (see cap-hit-demo's `cancelGraceMs` races).
  */
 export interface ProviderDriver {
   /** Registry name, e.g. `"fake"`, `"exe"`. */
   readonly name: string;
   create(name: string, tag?: string): Promise<ProviderVm>;
   list(name?: string): Promise<ProviderVm[]>;
+  /** Idempotent (teardown and reap both retry; a missing box is the goal
+   * state). Kills the box's processes but does NOT settle in-flight `exec`
+   * promises — bound any post-destroy exec await (see interface docs). */
   destroy(vm: string): Promise<void>;
   expose(vm: string, port: number): Promise<string>;
   setPublic(vm: string): Promise<void>;
