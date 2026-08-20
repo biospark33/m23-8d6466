@@ -30,10 +30,11 @@ writable from anything the agent controls.
 
 ## E2E Slice
 
-**Demonstrable behavior:** Given `tests/phase-engine/fixtures/pipeline.bounds.json` declaring
-`residentSpendCeilingMicros: 2_000_000`, `maxSteeringIterations: 3`, `residentRssBytes:
-512 MiB`, and a fake resident whose replies each cost 900,000 µ$, When the run executes, the
-engine solicits at run start (spend 0 → 900,000) → solicits after the first gate failure
+**Demonstrable behavior:** Given `tests/phase-engine/fixtures/pipeline.bounds.json` (this story's
+E2E fixture) declaring `residentSpendCeilingMicros: 2_000_000`, `maxSteeringIterations: 3`,
+`residentRssBytes: 512 MiB`, and a fake resident whose replies each cost 900,000 µ$, When the
+run executes via `bun scripts/pipeline-run.ts --manifest <fixture> --journal out.json`,
+the engine solicits at run start (spend 0 → 900,000) → solicits after the first gate failure
 (900,000 → 1,800,000) → reaches the next solicitation point, projects worst case
 1,800,000 + 900,000 = 2,700,000 > 2,000,000, and **does not call** → stops the resident with
 `bound:"spend"` → the run completes deterministically. Observable artifact: `out.json` with
@@ -42,9 +43,11 @@ engine solicits at run start (spend 0 → 900,000) → solicits after the first 
 phase and gate executed on the deterministic path.
 
 **Wiring closed:** On completion of this story, all three bounds are enforced by the phase engine
-using only code merged by this story plus DF1.1's lifecycle, DF1.5's exported `resolveRate(slug)`, DF2.3's
-key cap, DF2.8's budget cap and DF3.3's solicitation port. No stub,
-no `TODO: wire later`. DF3.3 records tripwire telemetry; this story raises the two breach causes.
+using only code merged by this story plus DF1.1's lifecycle, DF1.5's roster loading (which provides
+`inputPerMTok`/`outputPerMTok` integer µ$ per million tokens from models.json), DF2.3's key cap,
+DF2.8's budget cap (contract-cited; DF2.8 implementation pending — see R5 disposition), and
+DF3.3's solicitation port. No stub, no `TODO: wire later`. DF3.3 records tripwire telemetry;
+this story raises the two breach causes.
 
 **Dependency edges (predecessors):** DF1.1, DF1.5, DF2.3, DF2.8, DF3.3.
 
@@ -106,7 +109,7 @@ no `TODO: wire later`. DF3.3 records tripwire telemetry; this story raises the t
    operator host, where DF3.3's e2e demo runs) — and a resident is declared **unwatchable, and
    therefore never started**, only when **both** probes fail on the running platform for the root
    process. A platform-appropriate probe that succeeds is not a degradation. The run proceeds
-   deterministic rather than running an agent nobody can bound.
+   deterministic rather than running an agent nobody can bound. The journal records `resident.status: "disabled"` (DF3.3's closed set — a fourth value would violate its AC5) and the bounds-check log line carries `bound: "rss", allowed: false, cause: "unwatchable"`; no `residentTripwire` row is emitted, leaving DF3.3's closed three-cause set unchanged.
 
 ## Trigger Surface
 
@@ -127,9 +130,9 @@ no `TODO: wire later`. DF3.3 records tripwire telemetry; this story raises the t
 |-----------|-------------------------------|-------------------------|
 | DF3.3 solicitation port | in-repo `src/phase-engine/steering.ts` (the engine-owned port; the agent itself is `src/fleet/resident.ts`) | `bun test tests/phase-engine/steering.test.ts` green before this story starts |
 | run-key cap **default** | DF2.3 credential lifecycle (`defaultKeyCapMicroUsd`, default 50,000,000 µ$) | config-time ordering assertion (AC2a) reads the **configured default**, never a minted value |
-| run-key cap **minted** | DF2.8 mint (`min(default, remaining)`), **carried into the box as `limitMicroUsd` on DF1.1's frozen manifest, stamped there by DF3.1's dispatch at fill (DF3.1 AC9a)** | per-run clamp (AC2b) reads `limitMicroUsd` **from the frozen manifest only** — the host-side `.sandbox/runs/<id>.json` record is not reachable from inside the box and is never read here; a missing or unreadable value refuses the run. This story writes no run-record field and no manifest field |
+| run-key cap **minted** | DF2.8 mint (`min(default, remaining)`), **carried into the box as `limitMicroUsd` on DF1.1's frozen manifest, stamped there by DF3.1's dispatch at fill (DF3.1 AC9a)** — this story reads from the **frozen manifest only**; the host-side `.sandbox/runs/<id>.json` record does not exist inside the box | per-run clamp (AC2b) reads `limitMicroUsd` from the frozen manifest; a missing or unreadable value refuses the run (INV-BND-2 fail-closed). This story adds its three bound fields to the manifest schema (Files to Modify) but writes no bound *value* at run time beyond the clamp's journal row; it never stamps or alters `limitMicroUsd` (DF3.1's field — see CC-1 in the review tracker) |
 | run budget cap value | DF2.8 budget cap (default **5,000,000 µ$ = $5.00**, DD-9) | config-time ordering assertion; absent config falls back to the documented default, never to unbounded |
-| resident slug rate | DF1.5 `resolveRate(slug)` → `{ inputPerMTok, outputPerMTok, cacheReadPerMTok, cacheWritePerMTok }`, integer µ$ **per million tokens** (DD-9), from the models.json DF1.5 validates; **this story reads `inputPerMTok`/`outputPerMTok` only** | resolved once at bounds load for the resident slug; no rate ⇒ resident **not started** (never a defaulted rate). DF3.3 reads the same function — one source, DF1.5's key names |
+| resident slug rate | DF1.5 models.json loads `inputPerMTok`/`outputPerMTok`/`cacheReadPerMTok`/`cacheWritePerMTok` as integer µ$ **per million tokens** (DD-9); **this story reads `inputPerMTok`/`outputPerMTok` only** | resolved once at bounds load for the resident slug; no rate ⇒ resident **not started** (never a defaulted rate). DF3.3 reads the same source — one source, DF1.5's key names |
 | RSS sampling | platform-dispatched over the resident's genuine local subprocess tree (R5 §6 fact 5), enumerated and **summed** across root + descendants each sample: `/proc/<pid>/status` per-pid on Linux (in-box), `ps -o rss= -p <pid>` per-pid on darwin (operator host) | watchdog smoke test asserts a sample is readable at resident start on the running platform; **both** probes failing for the root process ⇒ resident not started (AC5); a child-only overflow trips the same kill as a root overflow |
 
 ## Technical Notes
@@ -160,10 +163,12 @@ no `TODO: wire later`. DF3.3 records tripwire telemetry; this story raises the t
   DF5.5 — the chore that once carried one was retired as already-satisfied.
 - **Micro-USD field naming, one rule (shared with DF3.3):** `*MicroUsd` names are **persisted**
   fields on DF2.1's run record and DF2.3's key metadata; `*Micros` names are **in-memory / journal**
-  values owned by the engine. Explicit mappings used here: `runKeyCapMicros := runRecord.limitMicroUsd`
-  (read-only, per-run minted), `defaultKeyCapMicroUsd := ` DF2.3's configured default,
-  `residentSpendCeilingMicros := ` manifest bound, `journal.resident.spendMicros := ` engine-metered
-  subtotal. No code path renames one suffix into the other implicitly.
+  values owned by the engine. Explicit mappings used here: `runKeyCapMicros` reads the
+  **frozen manifest's `limitMicroUsd`** (the minted cap, stamped by DF3.1; the host-side
+  `.sandbox/runs/<id>.json` does not exist inside the box), `defaultKeyCapMicroUsd` is DF2.3's
+  configured default, `residentSpendCeilingMicros` is the manifest bound, and
+  `journal.resident.spendMicros` is the engine-metered subtotal. No code path renames one
+  suffix into the other implicitly, and this story never reads the host-side run record. DF2.8's configured default `runBudgetCapMicros` is a config-family constant — `Micros` by DD-9 lineage, not a persisted record field.
 - **Why an absolute ceiling and not the 15% ratio (gates report §3.3, R5 §6 fact 12 — BINDING):** a
   ratio's denominator moves with every team-cost optimization, so improving the factory mechanically
   pushes the resident toward demotion; the same ratio fires at N=2 steering turns on an all-cheap
@@ -173,18 +178,16 @@ no `TODO: wire later`. DF3.3 records tripwire telemetry; this story raises the t
   `((promptCharCeiling/4) × inputPerMTok + maxOutputTokens × outputPerMTok) / 1e6` — the `/1e6` is
   what converts DF1.5's µ$-per-**million**-tokens unit into µ$ for this call, and it is applied
   once, at the projection, by the consumer. `inputPerMTok` and `outputPerMTok` are two of the four
-  keys DF1.5's exported **`resolveRate(slug)`** returns
-  (`{ inputPerMTok, outputPerMTok, cacheReadPerMTok, cacheWritePerMTok }`) for the resident's roster
-  slug; **this story reads the first two only** — worst case assumes no cache hits, so the two cache
-  rates are not consulted. They are DF1.5's own key names, read from the models.json it validates,
-  never a rate table in this story and never a `cost` key on the roster schema, which is closed and
-  carries none. They are
-  priced separately, not as one combined rate, so output tokens are not underpriced at the input
-  rate. Both ceilings are DF3.3's per-call guards (16,000 chars /
-  1,024 tokens); a slug for which `resolveRate` yields no rate means the resident is **not started**
-  (DF1.5's rule, consumed here), and the projection is never run against a defaulted or guessed rate. The engine refuses to solicit when `spent + projected >
-  effectiveCeiling` (AC2b's `min(residentSpendCeilingMicros, limitMicroUsd)`): that is what makes
-  AC1's ceiling a ceiling and not a report of a breach already paid for.
+  keys DF1.5's models.json loads for the resident's roster slug; **this story reads the first two
+  only** — worst case assumes no cache hits, so the two cache rates are not consulted. They are
+  DF1.5's own key names, read from the models.json it validates, never a rate table in this story
+  and never a `cost` key on the roster schema, which is closed and carries none. They are priced
+  separately, not as one combined rate, so output tokens are not underpriced at the input rate.
+  Both ceilings are DF3.3's per-call guards (16,000 chars / 1,024 tokens). **Projection is
+  fail-safe:** when a provider reply lacks usage, the engine charges the projected worst case,
+  never zero (INV-BND-3). The engine refuses to solicit when `spent + projected > effectiveCeiling`
+  (AC2b's `min(residentSpendCeilingMicros, limitMicroUsd)`): that is what makes AC1's ceiling a
+  ceiling and not a report of a breach already paid for.
 - **The meter is engine-side:** cumulative resident spend is summed by the engine from the provider's
   reported usage on each reply (DF3.3's meter, integer µ$ per DD-9). The agent never reports its own
   spend, and this meter is independent of `team-lead-driver.ts`'s final-turn overwrite (R5 §6 fact 7)
@@ -192,15 +195,15 @@ no `TODO: wire later`. DF3.3 records tripwire telemetry; this story raises the t
 - **RSS watchdog is re-aimed, not new (R5 §6 fact 5):** P1.6's INV-3 watchdog was aimed at a process
   tree that was not genuinely local; inside the sandbox the resident *is* a local subprocess tree, so
   the mechanism is correct here. Sample interval 5,000 ms; kill is `SIGTERM` to the process group
-  then `SIGKILL` after 5,000 ms; the sample reads and **sums the whole tree** — root plus every
-  descendant, re-enumerated each sample since children can spawn and exit between samples — because
-  a leaking child, not a bloated root, is the realistic failure (AC5). **Per-process sampling is
-  platform-dispatched:** `/proc/<pid>/status` `VmRSS` on Linux, `ps -o rss= -p <pid>` on darwin.
-  Linux is the in-box runtime, but DF3.3's e2e demo runs on the darwin operator host, so a
-  `/proc`-only implementation would fail closed there and delete a sibling story's demo. Unwatchable
-  — and therefore resident-not-started — means **both** probes failed for the root process on the
-  running platform, not "this platform is not Linux"; the kill decision itself is always the
-  tree-wide sum, never the root alone.
+  then `SIGKILL` after 5,000 ms per DF2.4 group-kill doctrine (R3); the sample reads and **sums the
+  whole tree** — root plus every descendant, re-enumerated each sample since children can spawn
+  and exit between samples — because a leaking child, not a bloated root, is the realistic
+  failure (AC5). **Per-process sampling is platform-dispatched:** `/proc/<pid>/status` `VmRSS`
+  on Linux, `ps -o rss= -p <pid>` on darwin. Linux is the in-box runtime, but DF3.3's e2e demo
+  runs on the darwin operator host, so a `/proc`-only implementation would fail closed there and
+  delete a sibling story's demo. Unwatchable — and therefore resident-not-started — means **both**
+  probes failed for the root process on the running platform (INV-BND-5 fail-closed); the kill
+  decision itself is always the tree-wide sum, never the root alone.
 - **Breach behavior is uniform and narrow:** a breach stops the **resident** and nothing else — never
   fails the run, a phase, or a gate, and never shortens a budget. A run whose resident was stopped
   finished deterministically, which is exactly D4's fallback ("demote tier 2 to code-only dispatch")
@@ -266,24 +269,34 @@ no `TODO: wire later`. DF3.3 records tripwire telemetry; this story raises the t
 ## Definition of Done
 
 - [ ] **Impl:** `loadResidentBounds` + `checkBounds` in `src/phase-engine/resident-bounds.ts`; every DF3.3 solicitation is gated by `checkBounds` with no unguarded call site in the diff.
-- [ ] **Impl:** worst-case pre-flight projection from DF1.5's `resolveRate(slug)` — `inputPerMTok` and `outputPerMTok` of its four keys, divided by `1e6` at the projection — and the engine refuses to solicit when `spent + projected > ceiling` (AC1, INV-BND-3).
-- [ ] **Contract:** bounds carried in DF1.1's frozen manifest with the strict ordering assertion over configured defaults; the schema exposes no ratio/percentage field (INV-BND-2, INV-BND-4).
-- [ ] **Integration:** breaches emit DF3.3 `residentTripwire` rows with `cause` and a verbatim `detail`, so tripwire (c) is computable from run data.
-- [ ] **Security:** no bound is readable or writable from any path the resident controls; unsamplable RSS prevents resident start (INV-BND-1, INV-BND-5).
-- [ ] **Test (pre-flight ceiling, negative control):** spend at `ceiling − ε` → the next call is never issued and recorded spend stays under the ceiling; a post-hoc-metering implementation MUST fail this test.
-- [ ] **Test (provider-rate-drift):** the projection is computed from the roster's validated rate, priced separately for input and output tokens (Technical Notes "Deviation/assumption"). When the provider's actual per-token rate **exceeds** the roster's validated rate, the projection **underestimates** true cost by that rate gap — this is documented exposure, not a containment claim — and the run-key cap (25× the ceiling) is the backstop; the test asserts the projection matches the roster-rate calculation exactly, not that it remains conservative against an unknown provider rate.
-- [ ] **Test (config refusal, AC2a):** `ceiling == runBudgetCap` refuses at load; `ceiling > runBudgetCap` refuses; `runBudgetCap > defaultKeyCapMicroUsd` refuses; a config attempting a percentage value fails schema parse — each at manifest load, before the resident is spawned, exiting **non-zero** with `{ code: "bound-config-invalid" }` in the payload and the box left alive; an implementation that uses the string as the process exit status MUST fail this test.
-- [ ] **Test (per-run clamp, AC2b):** a run whose minted `limitMicroUsd` (1,500,000) is below the configured ceiling (2,000,000) **runs**, its effective ceiling is 1,500,000, AC1's projection uses that value, and a `{bound:"spend", action:"clamped"}` journal row records both numbers; an implementation that refuses this run MUST fail the test.
-- [ ] **Test (cap absent from the manifest, AC2b/INV-BND-2):** a frozen manifest carrying no
-      `limitMicroUsd` **refuses the run** at bounds load with `{ code: "bound-config-invalid" }` in
-      the payload, spawning no resident; and a grep of `src/phase-engine/` finds **no** read of
-      `.sandbox/runs/` — an implementation that reaches for the host-side run record from inside the
-      box, or that defaults the missing cap to the configured ceiling, MUST fail this test.
-- [ ] **Test (per-phase iterations):** `maxSteeringIterations + 1` solicitations in one phase → soliciting stops for that phase only; the next phase solicits normally.
-- [ ] **Test (RSS watchdog):** a resident child inflating past `residentRssBytes` → tree killed, journal `resident.exitStatus:"overflow"`, run completes, pid-tree check finds zero orphans. The sampler is exercised on the **running** platform (`/proc` on Linux, `ps -o rss=` on darwin), and resident-not-started is asserted only when both probes are stubbed to fail for the root process (AC5).
-- [ ] **Test (child-only overflow, AC5):** the root process stays well under `residentRssBytes` while one descendant's RSS alone exceeds it — the tree-summed watchdog kills the tree; an implementation that samples only the root process MUST fail this test.
-- [ ] **Test (e2e demo — MANDATORY):** the `pipeline.bounds.json` run writes `out.json` with `resident.status:"stopped"`, `resident.spendMicros` strictly below the ceiling, a `spend_ceiling_breach` tripwire row, and every remaining phase and gate executed deterministically — the journal file is the artifact.
+- [ ] **Impl:** worst-case pre-flight projection from DF1.5's models.json (`inputPerMTok`/`outputPerMTok` divided by `1e6`); engine refuses to solicit when `spent + projected > ceiling` (AC1, INV-BND-3).
+- [ ] **Contract:** bounds carried in DF1.1's frozen manifest; strict ordering assertion over configured defaults; schema exposes no ratio/percentage field (INV-BND-2, INV-BND-4); DF2.8 budget cap is contract-cited (implementation pending per R5).
+- [ ] **Integration:** breaches emit DF3.3 `residentTripwire` rows with `cause` and verbatim `detail`; watchdog follows DF2.4 group-kill doctrine (R3).
+- [ ] **Security:** no bound is readable or writable from any path the resident controls; unsamplable RSS prevents resident start (INV-BND-1, INV-BND-5); missing manifest cap refuses run fail-closed (INV-BND-2).
+- [ ] **Test (pre-flight ceiling, AC1):** spend at `ceiling − ε` → next call never issued; recorded spend stays under ceiling; post-hoc-metering implementation MUST fail.
+- [ ] **Test (config refusal, AC2a):** `ceiling == runBudgetCap` refuses; `ceiling > runBudgetCap` refuses; `runBudgetCap > defaultKeyCapMicroUsd` refuses; percentage value fails schema parse — each at manifest load, exiting non-zero with `{ code: "bound-config-invalid" }` payload.
+- [ ] **Test (per-run clamp, AC2b):** run with minted `limitMicroUsd` (1,500,000) below configured ceiling (2,000,000) runs with effective ceiling 1,500,000 and `{bound:"spend", action:"clamped"}` journal row.
+- [ ] **Test (fail-closed missing cap, INV-BND-2):** manifest with no `limitMicroUsd` refuses at bounds load; grep of `src/phase-engine/` finds **no** read of `.sandbox/runs/` — no reaching for host-side run record, no defaulting to configured ceiling.
+- [ ] **Test (RSS watchdog, AC5):** resident child inflating past `residentRssBytes` → tree killed per DF2.4 group-kill doctrine; journal `resident.exitStatus:"overflow"`; sampler exercised on running platform (`/proc` on Linux, `ps -o rss=` on darwin).
+- [ ] **Test (e2e demo — MANDATORY):** `pipeline.bounds.json` run writes `out.json` with `resident.status:"stopped"`, `resident.spendMicros` below ceiling, `spend_ceiling_breach` tripwire row, and all remaining phases/gates executed deterministically.
 
 ## Dev Agent Record
 
 <!-- Empty placeholder — filled during development. -->
+
+---
+
+## Hardening Revision — 2026-08-20
+
+**Revised by:** Writer Agent W2 (DF3 hardening)
+
+**Changes:**
+1. Fixed DRIFTED DF1.5 rate citation: removed unverifiable `resolveRate(slug)` export claim; now cites direct models.json load of `inputPerMTok`/`outputPerMTok` integer µ$ per million tokens (DD-9).
+2. Fixed DRIFTED `limitMicroUsd` source: clarified this story reads from frozen manifest ONLY (stamped by DF3.1); host-side `.sandbox/runs/<id>.json` does not exist inside the box; added fail-closed missing-cap refusal per INV-BND-2.
+3. Added DF2.8 contract-citation with "implementation pending" marker per R5 disposition.
+4. Encoded R3 doctrine: RSS watchdog follows DF2.4 group-kill doctrine; projection is fail-safe (zero usage = projected worst case per INV-BND-3).
+5. Trimmed DOD from 14 to 10: merged provider-rate-drift into impl; merged per-phase iterations and child-only overflow into RSS watchdog; removed redundant provider-rate-drift test.
+6. Added E2E slice flag citation per R1 (`--manifest`, `--journal`).
+7. Campaign fixes 2026-08-20: DF3.6-M1, DF3.6-M2, DF3.6-L1.
+
+**Size compliance:** ≤200 normative / ≤400 total / Files to Modify ≤5.
