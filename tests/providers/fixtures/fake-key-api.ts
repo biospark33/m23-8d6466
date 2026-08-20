@@ -21,6 +21,8 @@ export interface FakeKey {
   limitUsd: number | null;
   usageUsd: number;
   deleted: boolean;
+  /** ISO creation time (DF2.6 D2). Undefined when the provider reports no age. */
+  createdAt?: string;
 }
 
 export interface FakeKeyApiOptions {
@@ -46,6 +48,8 @@ export interface FakeKeyApiOptions {
   listTruncated?: boolean;
   /** Override the status every chatComplete returns, without touching state. */
   chatStatus?: number;
+  /** Minted entries carry NO createdAt — the provider-reports-no-age fixture (DF2.6 AC7). */
+  omitCreatedAt?: boolean;
 }
 
 export interface RecordedRequest {
@@ -85,6 +89,7 @@ export class FakeKeyApi {
       limitUsd,
       usageUsd: this.opts.usageOnCreateUsd ?? 0,
       deleted: false,
+      ...(this.opts.omitCreatedAt === true ? {} : { createdAt: new Date().toISOString() }),
     });
     this.plaintexts.set(realHash, key);
     const reportedLimit = this.opts.returnedLimitUsd !== undefined ? this.opts.returnedLimitUsd : limitUsd;
@@ -158,6 +163,24 @@ export class FakeKeyApi {
   /** Test helper: read current usage for a hash. */
   usageOf(hash: string): number {
     return this.keys.find((k) => k.hash === hash)?.usageUsd ?? 0;
+  }
+
+  /** Test helper (DF2.6 D2): back-date a key's creation time by NAME — age fixtures. */
+  backdateKey(name: string, iso: string): void {
+    const entry = this.keys.find((k) => k.name === name);
+    if (!entry) throw new Error(`fake key api: no key named ${name} to back-date`);
+    // The provider contract (D2) is a parseable ISO timestamp or absence — a
+    // fixture storing garbage here would test nothing (Date.parse ⇒ NaN ⇒
+    // never aged), so reject it at the seam. Future timestamps are also
+    // rejected — they have no provider meaning (AGE models provider-reported
+    // past only).
+    if (Number.isNaN(Date.parse(iso))) {
+      throw new Error(`fake key api: backdateKey(${name}) got an unparseable timestamp: ${JSON.stringify(iso)}`);
+    }
+    if (Date.parse(iso) > Date.now()) {
+      throw new Error(`fake key api: backdateKey(${name}) got a future timestamp: ${JSON.stringify(iso)}`);
+    }
+    entry.createdAt = iso;
   }
 
   /**

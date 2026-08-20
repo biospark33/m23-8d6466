@@ -70,6 +70,12 @@ export interface KeyEntry {
   hash: string;
   name: string;
   usageUsd: number;
+  /**
+   * ISO creation time when the provider list reports one (DF2.6 D2). Absent is
+   * a first-class state, not an error: the reaper classifies such keys
+   * `key-age-unavailable` and never revokes them (fail-safe).
+   */
+  createdAt?: string;
 }
 
 /**
@@ -671,10 +677,16 @@ export function openRouterKeyApi(opts: OpenRouterKeyApiOptions = {}): KeyApi {
 
   function keyEntryOf(raw: unknown): KeyEntry {
     const k = (raw ?? {}) as Record<string, unknown>;
+    // [VERIFY] upstream: whether GET /keys reports a creation field (or its
+    // name) is unverified — pass a non-empty string through when present under
+    // any of the candidate names, absent otherwise. Absence must degrade to
+    // `key-age-unavailable`, never to an assumed age (DF2.6 D2).
+    const created = k.createdAt ?? k.creation_time ?? k.created_at;
     return {
       hash: String(k.hash ?? ""),
       name: String(k.name ?? k.label ?? ""),
       usageUsd: Number(k.usage ?? 0),
+      ...(typeof created === "string" && created !== "" ? { createdAt: created } : {}),
     };
   }
 

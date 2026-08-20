@@ -344,6 +344,11 @@ function assertWellFormed(rec: unknown, id: string): asserts rec is RunRecord {
   if (typeof r.createdAt !== "string") {
     throw new Error(`malformed run record ${id}.json: createdAt missing`);
   }
+  // DF2.6's reaper uses Date.parse() on createdAt; an unparseable value produces NaN,
+  // which makes the record appear permanently young (never reaped, silent leak).
+  if (Number.isNaN(Date.parse(r.createdAt))) {
+    throw new Error(`malformed run record ${id}.json: createdAt is not a parseable ISO timestamp`);
+  }
 }
 
 // ---------------------------------------------------------------------------

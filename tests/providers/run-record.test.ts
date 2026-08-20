@@ -352,6 +352,14 @@ describe("list (AC3, INV-4)", () => {
     expect(() => store.list()).toThrow(/run-x\.json/);
   });
 
+  test("a record with an unparseable createdAt is a hard error", () => {
+    store.create("run-good");
+    writeFileSync(join(dir, "run-bad-ts.json"), JSON.stringify({ runId: "run-bad-ts", createdAt: "not-a-timestamp" }), {
+      mode: 0o600,
+    });
+    expect(() => store.list()).toThrow(/malformed run record run-bad-ts\.json.*createdAt/);
+  });
+
   test("a .json whose name is not a valid run id is a hard error", () => {
     writeFileSync(join(dir, "Bad Name.json"), JSON.stringify({ runId: "x", createdAt: "y" }), { mode: 0o600 });
     expect(() => store.list()).toThrow(/Bad Name\.json/);

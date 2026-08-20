@@ -272,6 +272,39 @@ describe("tokenizeArgs — stray single-dash tokens (opt-in strictness)", () => 
     expect(t.flagTokens).toEqual(["-n"]);
     expect(t.positionals).toEqual(["x"]);
   });
+
+  test("the exact help alias `-h` is forwarded, not rejected — parseValueFlags owns help + exit 0", () => {
+    // Without the exemption, rejectStraySingleDash answered `sandbox-reap -h`
+    // (and `sandbox-teardown -h`) with `unknown flag: -h` + exit 2, so the
+    // shared `--help` / `-h` contract was unreachable in exactly the CLIs
+    // that documented it.
+    const t = tokenizeArgs(["-h"], strict);
+    expect(t.flagTokens).toEqual(["-h"]);
+  });
+});
+
+describe("strict CLIs — `-h` help alias vs stray single-dash (subprocess)", () => {
+  const reapScript = path.resolve(import.meta.dir, "../../scripts/sandbox-reap.ts");
+  const teardownScript = path.resolve(import.meta.dir, "../../scripts/sandbox-teardown.ts");
+
+  test("`sandbox-reap -h` prints usage and exits 0", () => {
+    const r = spawnSync("bun", [reapScript, "-h"], { encoding: "utf8" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("Usage: sandbox-reap [--yes] [--driver <name>]");
+    expect(r.stdout).toContain("--yes");
+  });
+
+  test("`sandbox-teardown -h` prints usage and exits 0", () => {
+    const r = spawnSync("bun", [teardownScript, "-h"], { encoding: "utf8" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("Usage: sandbox-teardown");
+  });
+
+  test("other single-dash tokens are still rejected as usage errors", () => {
+    const r = spawnSync("bun", [reapScript, "-n"], { encoding: "utf8" });
+    expect(r.status).toBe(2);
+    expect(r.stdout).toContain("unknown flag: -n");
+  });
 });
 
 describe("sandbox-teardown parseArgs — positional arity and flag strictness", () => {
