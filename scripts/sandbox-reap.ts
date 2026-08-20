@@ -87,8 +87,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 }
 
 function fail(out: (s: string) => void, code: string, message: string, remediation?: string): void {
-  out(`!! ${code}: ${message}\n`);
-  if (remediation !== undefined) out(`next: ${remediation}\n`);
+  // Frames must stay one-line to stay greppable — scrub embedded newlines.
+  const cleanMessage = message.replace(/[\r\n]+/g, "; ");
+  out(`!! ${code}: ${cleanMessage}\n`);
+  if (remediation !== undefined) {
+    const cleanRemediation = remediation.replace(/[\r\n]+/g, "; ");
+    out(`next: ${cleanRemediation}\n`);
+  }
 }
 
 /**

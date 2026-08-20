@@ -85,6 +85,7 @@ export async function seedFleet(
   const vmNames = new Set<string>();
   for (const vm of state.vms ?? []) {
     if (!vm.name) throw new Error(`FleetVm needs a name (got ${JSON.stringify(vm)})`);
+    if (vmNames.has(vm.name)) throw new Error(`duplicate FleetVm name: ${vm.name}`);
     // undefined ⇒ owned default; null ⇒ deliberately untagged (foreign control)
     const tag = vm.tag === null ? undefined : vm.tag ?? SBX_OWNERSHIP_TAG;
     await driver.create(vm.name, tag);

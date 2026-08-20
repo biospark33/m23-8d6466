@@ -195,6 +195,10 @@ export async function checkHeadroom(
   limits: LoadedQuotaLimits = loadQuotaLimits(),
   listTimeoutMs: number = LIST_TIMEOUT_MS,
 ): Promise<HeadroomResult> {
+  // Guard against caller bugs: negative or zero requested makes headroom nonsense
+  if (!Number.isFinite(requested) || !Number.isInteger(requested) || requested < 1) {
+    throw new Error(`checkHeadroom: requested must be a positive integer (got ${requested})`);
+  }
   const { limits: L } = limits;
   const base = {
     requested,

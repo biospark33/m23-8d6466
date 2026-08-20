@@ -63,6 +63,7 @@ const LIMITS: LoadedQuotaLimits = {
 
 let dir: string;
 let prevCwd: string;
+let prevQuotaEnv: string | undefined;
 let logs: LogEntry[];
 let restoreLog: (() => void) | undefined;
 /** mkdtemp roots to clean in afterEach (the test dir + any host/demo repos). */
@@ -72,12 +73,22 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "qds-df26-reap-"));
   roots.push(dir);
   prevCwd = process.cwd();
+  // The default quota path (and createRun's loadQuotaLimits()) resolves
+  // against cwd — pin it to this test's tmpdir for the whole test. The env
+  // override tier is cleared for the same reason: a developer's exported
+  // $QDS_QUOTA_LIMITS_FILE must never leak into the implicit-path tests.
+  prevQuotaEnv = process.env.QDS_QUOTA_LIMITS_FILE;
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  if (prevQuotaEnv !== undefined) delete process.env.QDS_QUOTA_LIMITS_FILE;
   logs = [];
   restoreLog = setLogSink((entry) => logs.push(entry));
 });
 
 afterEach(() => {
   restoreLog?.();
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  if (prevQuotaEnv === undefined) delete process.env.QDS_QUOTA_LIMITS_FILE;
+  else process.env.QDS_QUOTA_LIMITS_FILE = prevQuotaEnv;
   process.chdir(prevCwd);
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -562,6 +573,7 @@ describe("DF2.6 sweep", () => {
   test("fixture: invalid seeds throw with the offending item named", async () => {
     await expect(seedFleet(dir, { keys: [{}] }, NOW)).rejects.toThrow(/runId or a name/);
     await expect(seedFleet(dir, { records: [{ runId: "" }] }, NOW)).rejects.toThrow(/FleetRecord needs a runId/);
+    await expect(seedFleet(dir, { vms: [{ name: RUN_A }, { name: RUN_A }] }, NOW)).rejects.toThrow(/duplicate/);
   });
 
   // ─── 18. self-review round — regression tests for the five findings ────────
@@ -696,6 +708,7 @@ describe("DF2.6 sweep", () => {
       driver: fleet.driver,
       store: fleet.store,
       keyApi: fleet.keyApi,
+      limits: LIMITS,
       reapDir: join(sandbox, ".sandbox", "reap"),
       // The fleet is dated relative to the fixed NOW above; without the
       // injected clock the script would sweep it with the wall clock, and any

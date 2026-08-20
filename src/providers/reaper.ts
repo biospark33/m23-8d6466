@@ -165,6 +165,13 @@ const REAP_PHASE_BUDGET_MS = 300_000;
  * reap dir forever.
  */
 const REAP_HISTORY_MAX_REPORTS = 200;
+/**
+ * Max retry attempts for an atomic report-file write under the same timestamp.
+ * A pathological same-stamp collision storm (frozen clock + concurrent writer)
+ * could otherwise loop forever — each retry uses a fresh name, so the loop
+ * terminates in practice, but this guards against the theoretical unbounded case.
+ */
+const REPORT_NAME_ATTEMPTS = 1000;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -626,7 +633,7 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
             keyHashPrefix: unit.id,
             code: "revoke-target-vanished",
             message: `revoke unit ${unit.id} has no recoverable hash — target vanished between classification and apply`,
-            remediation: `inspect the provider console for the key by prefix and revoke by hand`,
+            remediation: "inspect the provider console for the key by prefix and revoke by hand",
           });
         }
       } catch (e) {
@@ -722,13 +729,18 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
   chmodSync(reapDir, 0o700);
   const stamp = now().toISOString().replace(/:/g, "-");
   let name = `${stamp}.json`;
-  for (let i = 1; ; i++) {
+  for (let i = 1; i <= REPORT_NAME_ATTEMPTS; i++) {
     report.reportFile = join(reapDir, name);
     try {
       writeFileSync(report.reportFile, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600, flag: "wx" });
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      if (i === REPORT_NAME_ATTEMPTS) {
+        throw new Error(
+          `report-file write exhausted ${REPORT_NAME_ATTEMPTS} name attempts for stamp ${stamp} in reap dir ${reapDir} — pathological collision storm`,
+        );
+      }
       name = `${stamp}-${i}.json`;
     }
   }

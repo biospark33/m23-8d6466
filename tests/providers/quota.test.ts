@@ -257,6 +257,21 @@ describe("DF2.6 quota limits", () => {
     expect(r.ceiling).toBe(50);
   });
 
+  test("requested < 1 or non-integer or non-finite throws", async () => {
+    const bad = [0, -1, -5, 1.5, Number.NaN, Number.POSITIVE_INFINITY];
+    for (const n of bad) {
+      let err: unknown;
+      try {
+        await checkHeadroom(fleetOf(0), n, loaded());
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain("requested");
+      expect((err as Error).message).toContain(String(n));
+    }
+  });
+
   // ─── the create path ────────────────────────────────────────────────────────
 
   test("createRun refuses at the ceiling BEFORE store.create — zero boxes, zero records, HeadroomRefusedError", async () => {
