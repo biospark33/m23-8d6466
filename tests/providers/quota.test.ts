@@ -236,6 +236,19 @@ describe("DF2.6 quota limits", () => {
     expect(r.headroom).toBe(0);
   });
 
+  test("AC4: a list() that resolves a non-array (undefined/null/garbage) returns list-unverified, never a TypeError crash", async () => {
+    // AC4's fail-closed posture: an unenumerable list is a refusal, not a
+    // crash. The same shape as the catch path — allowed:false, verified:false,
+    // headroom:0, reason:list-unverified.
+    const nonArray: HeadroomInput = { list: async () => undefined as never };
+    const r = await checkHeadroom(nonArray, 1, loaded());
+    expect(r.allowed).toBeFalse();
+    expect(r.reason).toBe("list-unverified");
+    expect(r.verified).toBeFalse();
+    expect(r.liveVms).toBe(0);
+    expect(r.headroom).toBe(0);
+  });
+
   test("AC5: empty fleet ⇒ full configured ceiling as headroom — a normal state", async () => {
     const r = await checkHeadroom(fleetOf(0), 3, loaded());
     expect(r.allowed).toBeTrue();

@@ -283,18 +283,25 @@ describe("tokenizeArgs — stray single-dash tokens (opt-in strictness)", () => 
   });
 });
 
-describe("sandbox-reap — `-h` help alias vs stray single-dash (subprocess)", () => {
-  const script = path.resolve(import.meta.dir, "../../scripts/sandbox-reap.ts");
+describe("strict CLIs — `-h` help alias vs stray single-dash (subprocess)", () => {
+  const reapScript = path.resolve(import.meta.dir, "../../scripts/sandbox-reap.ts");
+  const teardownScript = path.resolve(import.meta.dir, "../../scripts/sandbox-teardown.ts");
 
   test("`sandbox-reap -h` prints usage and exits 0", () => {
-    const r = spawnSync("bun", [script, "-h"], { encoding: "utf8" });
+    const r = spawnSync("bun", [reapScript, "-h"], { encoding: "utf8" });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("Usage: sandbox-reap [--yes] [--driver <name>]");
     expect(r.stdout).toContain("--yes");
   });
 
+  test("`sandbox-teardown -h` prints usage and exits 0", () => {
+    const r = spawnSync("bun", [teardownScript, "-h"], { encoding: "utf8" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("Usage: sandbox-teardown");
+  });
+
   test("other single-dash tokens are still rejected as usage errors", () => {
-    const r = spawnSync("bun", [script, "-n"], { encoding: "utf8" });
+    const r = spawnSync("bun", [reapScript, "-n"], { encoding: "utf8" });
     expect(r.status).toBe(2);
     expect(r.stdout).toContain("unknown flag: -n");
   });

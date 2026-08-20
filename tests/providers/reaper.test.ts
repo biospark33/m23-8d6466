@@ -846,9 +846,16 @@ describe("DF2.6 sweep", () => {
     mkdirSync(join(sandbox, ".sandbox"), { recursive: true });
     writeFileSync(join(sandbox, ".sandbox", "quota-limits.json"), "{ not json\n");
 
+    let listCalls = 0;
+    const counting = Object.create(fleet.driver) as FakeDriver;
+    counting.list = (name?: string) => {
+      listCalls++;
+      return fleet.driver.list(name);
+    };
+
     let err: unknown;
     try {
-      await sweep(deps(fleet, { limits: undefined }), { yes: true });
+      await sweep(deps(fleet, { driver: counting, limits: undefined }), { yes: true });
     } catch (e) {
       err = e;
     }
@@ -857,8 +864,29 @@ describe("DF2.6 sweep", () => {
     expect(se.code).toBe("quota-limits-error");
     expect(se.message).toContain("quota-limits.json");
     expect(se.remediation).toContain("maxVms"); // the copy-pasteable limits body
+    // the refusal precedes enumeration — driver.list() MUST NOT be called
+    expect(listCalls).toBe(0);
     // the fleet is untouched — the refusal precedes enumeration and reaping
     expect(await fleet.driver.list()).toHaveLength(3);
     expect((await fleet.keyApi.listAllKeys(20)).entries).toHaveLength(4);
+  });
+
+  test("review 10: unparseable key createdAt (malformed ISO timestamp) ⇒ key-age-unavailable, reported, key stays live under --yes", async () => {
+    const fleet = await seedFleet(dir, {
+      keys: [{ runId: RUN_ORPHAN_KEY, createdAt: iso(NOW.getTime() - OLD) }],
+    }, NOW);
+    // Corrupt the age directly — the fixture's backdateKey rightly rejects garbage,
+    // so mutate the entry after seeding.
+    fleet.keyApi.keys.find((k) => k.name === keyName(RUN_ORPHAN_KEY))!.createdAt = "not-a-timestamp";
+    const orphanHash = hashOf(fleet, keyName(RUN_ORPHAN_KEY));
+
+    const report = await sweep(deps(fleet), { yes: true });
+
+    const row = report.rows.find((r) => r.id === keyName(RUN_ORPHAN_KEY));
+    expect(row?.class).toBe("key-age-unavailable");
+    expect(row?.action).toBe("report");
+    // revoke executed list is empty — the key was never revoked
+    expect(report.executed.revoke).toEqual([]);
+    expect(await keyLive(fleet, orphanHash)).toBeTrue(); // key still live
   });
 });

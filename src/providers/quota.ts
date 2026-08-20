@@ -216,6 +216,18 @@ export async function checkHeadroom(
       reason: "list-unverified",
     };
   }
+  // AC4: fail-closed — a contract-violating non-array list is unenumerable (list-unverified), never a crash
+  if (!Array.isArray(vms)) {
+    return {
+      ...base,
+      allowed: false,
+      liveVms: 0,
+      headroom: 0,
+      usedDiskGiB: 0,
+      verified: false,
+      reason: "list-unverified",
+    };
+  }
   const liveVms = vms.length;
   const result = {
     ...base,

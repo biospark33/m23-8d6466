@@ -171,9 +171,14 @@ export class FakeKeyApi {
     if (!entry) throw new Error(`fake key api: no key named ${name} to back-date`);
     // The provider contract (D2) is a parseable ISO timestamp or absence — a
     // fixture storing garbage here would test nothing (Date.parse ⇒ NaN ⇒
-    // never aged), so reject it at the seam.
+    // never aged), so reject it at the seam. Future timestamps are also
+    // rejected — they have no provider meaning (AGE models provider-reported
+    // past only).
     if (Number.isNaN(Date.parse(iso))) {
       throw new Error(`fake key api: backdateKey(${name}) got an unparseable timestamp: ${JSON.stringify(iso)}`);
+    }
+    if (Date.parse(iso) > Date.now()) {
+      throw new Error(`fake key api: backdateKey(${name}) got a future timestamp: ${JSON.stringify(iso)}`);
     }
     entry.createdAt = iso;
   }

@@ -12,7 +12,9 @@ export const LIST_TIMEOUT_MS = 15_000;
 /**
  * Bound one provider call. The losing promise's late rejection is attached a
  * no-op catch BEFORE the race so it can never surface as an unhandled
- * rejection after the timeout has already refused the caller.
+ * rejection after the timeout has already refused the caller. This relies on
+ * standard promise-reaction scheduling: the catch reaction is registered at
+ * attach time, not on microtask ordering between the race and the rejection.
  */
 export async function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   void p.catch(() => {});

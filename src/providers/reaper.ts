@@ -370,10 +370,14 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
     const rec = recordsByRun.get(runId);
     if (rec === undefined) {
       // No record ⇒ age is the only discriminator, and an age the provider
-      // never reported is UNKNOWN, not young: report, never revoke (AC7).
-      if (key.createdAt === undefined) {
+      // never reported — or reported in a form Date.parse cannot read (NaN) —
+      // is UNKNOWN, not young: report, never revoke (AC7). An unparseable
+      // timestamp classed paired-pending would be an orphan the sweep never
+      // escalates, so it rides the same fail-safe branch as absence.
+      const keyAgeMs = key.createdAt !== undefined ? Date.parse(key.createdAt) : Number.NaN;
+      if (Number.isNaN(keyAgeMs)) {
         rows.push({ ...base, class: "key-age-unavailable", action: "report" });
-      } else if (aged(key.createdAt)) {
+      } else if (nowMs - keyAgeMs >= staleAfterMs) {
         rows.push({ ...base, runId, class: "leaked-key", action: "revoke" });
       } else {
         rows.push({ ...base, runId, class: "paired-pending", action: "report" });
@@ -546,7 +550,22 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           // was proven at classification time, but classification and action
           // are separated by every other sweep step — a box whose provenance
           // changed in between (or vanished) is refused, not destroyed.
-          const current = (await withTimeout(deps.driver.list(unit.id), actionTimeoutMs, `driver.list(${unit.id})`))[0];
+          const listed = await withTimeout(deps.driver.list(unit.id), actionTimeoutMs, `driver.list(${unit.id})`);
+          // Contract violation: a non-array list is unenumerable, and indexing
+          // it would surface as an opaque TypeError — refuse with a named
+          // failure instead. An EMPTY array is different: it means the box
+          // vanished, which the present:false refusal below already covers.
+          if (!Array.isArray(listed)) {
+            unit.durationMs = Date.now() - started; // the continue below would skip the loop-tail assignment
+            failures.push({
+              vm: unit.id,
+              code: "ownership-recheck-refused",
+              message: `VM ${unit.id} failed the ownership re-check immediately before destroy (driver.list(${unit.id}) returned a non-array — not destroyed)`,
+              remediation: `inspect ${unit.id} by hand and destroy it via the driver once its provenance is understood`,
+            });
+            continue;
+          }
+          const current = listed[0];
           // Store re-read AFTER the provider re-read — the order is the whole
           // point. INV-1 writes the record before the VM, so any VM the
           // provider recheck just confirmed has a record that predates this
@@ -600,6 +619,15 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           // Full hash in memory only; the sbx- prefix re-assert happens inside
           // revokeHash (credentials.ts:429-435) — not reimplemented here.
           await withTimeout(revokeAndVerify(credDeps, unit.hash), actionTimeoutMs, `revokeAndVerify(${unit.id})`);
+        } else {
+          // Dead-branch guard: the hash is captured from the classification-time
+          // list, so this only fires on a driver/list contract break.
+          failures.push({
+            keyHashPrefix: unit.id,
+            code: "revoke-target-vanished",
+            message: `revoke unit ${unit.id} has no recoverable hash — target vanished between classification and apply`,
+            remediation: `inspect the provider console for the key by prefix and revoke by hand`,
+          });
         }
       } catch (e) {
         const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
