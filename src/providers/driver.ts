@@ -36,12 +36,34 @@ export interface ExecResult {
  *
  * `copyFile` is **box → host only**. Nothing pushes a file into a box — that is
  * why DF2.3's credential arrives on `exec` stdin.
+ *
+ * Termination contract (DF2.4): `exec` boundedness is per-driver. ExeDevDriver
+ * enforces a transport-level timeout + SIGKILL on the ssh child (`execTimed`
+ * carries a per-call budget), so its execs settle on their own. FakeDriver's
+ * exec has NO ceiling of its own: it stays pending until the child's process
+ * group exits or a `destroy()` kills it. FakeDriver's destroy SIGKILLs every
+ * exec's whole process group (descendants included), which also settles its
+ * in-flight execs — a killed live exec exits 137; an exec pending over an
+ * already-exited leader (a descendant holds its pipe) settles with the
+ * leader's own exit code — but that destroy-settles-execs guarantee is
+ * per-driver, not a seam-wide promise. As of DF2.4 the concrete split:
+ * FakeDriver upholds it (group kill closes the pipes); ExeDevDriver does NOT
+ * signal exec children from destroy — its destroy is a control-plane `rm` of
+ * the box, its execs settle on their own transport timeout (the box's death
+ * cutting the ssh connection only incidentally helps), so a caller awaiting
+ * an exec that can remain pending after destroy must bound that wait itself
+ * (see cap-hit-demo's `cancelGraceMs` races).
  */
 export interface ProviderDriver {
   /** Registry name, e.g. `"fake"`, `"exe"`. */
   readonly name: string;
   create(name: string, tag?: string): Promise<ProviderVm>;
   list(name?: string): Promise<ProviderVm[]>;
+  /** Idempotent (teardown and reap both retry; a missing box is the goal
+   * state). Kills the box's processes — FakeDriver kills each exec's whole
+   * process group, settling its in-flight execs; whether OTHER drivers'
+   * execs settle is per-driver — bound any post-destroy exec await (see
+   * interface docs). */
   destroy(vm: string): Promise<void>;
   expose(vm: string, port: number): Promise<string>;
   setPublic(vm: string): Promise<void>;

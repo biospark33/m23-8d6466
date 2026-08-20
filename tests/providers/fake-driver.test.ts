@@ -131,6 +131,148 @@ describe("FakeDriver accountability and boundaries", () => {
     }
   });
 
+  test("destroy kills an exec's whole process tree and settles its pending exec", async () => {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-tree-"));
+    try {
+      const d = new FakeDriver(boxes);
+      await d.create("tree-box");
+      // Two descendants: if destroy killed only the direct sh, they would be
+      // reparented and keep running — and the one holding the stdout pipe
+      // would keep the exec's Promise.all unsettled past the destroy.
+      const pending = d.exec("tree-box", [
+        "sh",
+        "-c",
+        'sleep 30 & p1=$!; sleep 30 & p2=$!; echo "$p1 $p2"; wait',
+      ]);
+      await new Promise((r) => setTimeout(r, 400)); // let the descendants spawn
+      await d.destroy("tree-box");
+      const res = await pending; // settles at the destroy, not 30s later
+      expect(res.exitCode).toBe(137); // group SIGKILL — the demo's kill signature
+      const [p1, p2] = res.stdout.trim().split(/\s+/).map(Number);
+      // Signal 0 is a liveness probe only; a throw means no such process.
+      expect(() => process.kill(p1!, 0)).toThrow();
+      expect(() => process.kill(p2!, 0)).toThrow();
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
+  test("destroy never signals a process group a completed exec no longer owns", async () => {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-stale-"));
+    // Record every negative-pid (whole-group) signal request the driver makes.
+    const origKill = process.kill;
+    const groupSignals: Array<{ pid: number; signal: string | number }> = [];
+    (process as { kill: typeof process.kill }).kill = (pid, signal?) => {
+      if (pid < 0) groupSignals.push({ pid, signal: signal ?? 0 });
+      return origKill(pid, signal);
+    };
+    try {
+      const d = new FakeDriver(boxes);
+      // A completed exec's group is gone; after any pid rollover its old pgid
+      // could name an unrelated process group — destroy must not signal it.
+      await d.create("stale-box");
+      await d.exec("stale-box", ["sh", "-c", "printf done"]);
+      await d.destroy("stale-box");
+
+      // The live-leader counterpart: a pending exec's destroy DOES signal its
+      // group — the kernel guarantees the leader's pid is still this exec's
+      // while the child is unreaped — and only that group.
+      await d.create("live-box");
+      const pending = d.exec("live-box", ["sh", "-c", "sleep 30 & sleep 30 & wait"]);
+      await new Promise((r) => setTimeout(r, 400)); // let the descendants spawn
+      await d.destroy("live-box");
+      await pending;
+
+      const groupKills = groupSignals.filter((s) => s.signal === "SIGKILL");
+      expect(groupKills.length).toBe(1); // live-box's group; stale-box signaled nothing
+    } finally {
+      (process as { kill: typeof process.kill }).kill = origKill;
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
+  test("destroy kills a surviving descendant after the leader exits and settles its pending exec", async () => {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-orphan-"));
+    try {
+      const d = new FakeDriver(boxes);
+      await d.create("orphan-box");
+      // The direct sh exits on its own; the background sleep it spawned stays
+      // in the detached process group holding the stdout pipe, so the exec is
+      // pending over a leader that is already reaped. The identity gate must
+      // not blind destroy() to the group: the descendant is still ours to kill
+      // (the orphaned group keeps its pgid reserved), and killing it is what
+      // settles the exec.
+      const pending = d.exec("orphan-box", ["sh", "-c", "sleep 10 & echo $!"]);
+      await new Promise((r) => setTimeout(r, 400)); // let sh exit, sleep spawn
+      await d.destroy("orphan-box");
+      // Bounded wait: a destroy that cannot reach the descendant leaves the
+      // exec pending forever, and an unguarded await would hang the suite.
+      const res = await Promise.race([
+        pending,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("exec still pending 2s after destroy")), 2000),
+        ),
+      ]);
+      expect(res.exitCode).toBe(0); // the leader exited cleanly before the kill
+      // The spawned descendant must be dead, not reparented and running.
+      expect(() => process.kill(Number(res.stdout.trim()), 0)).toThrow();
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
+  test("a positive-pid probe answering EPERM never authorizes a group signal", async () => {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-eperm-"));
+    const origKill = process.kill;
+    const groupSignals: Array<{ pid: number; signal: string | number }> = [];
+    (process as { kill: typeof process.kill }).kill = (pid, signal?) => {
+      if (pid > 0 && signal === 0) {
+        // The dead-leader identity probe: pretend the recycled pid belongs to
+        // a process this caller may not signal. EPERM is "owned by someone
+        // else", the same verdict as a successful probe — not ESRCH.
+        throw Object.assign(new Error("kill() failed: EPERM: Operation not permitted"), { code: "EPERM" });
+      }
+      if (pid < 0) groupSignals.push({ pid, signal: signal ?? 0 });
+      return origKill(pid, signal);
+    };
+    let sleeper: number | undefined;
+    try {
+      const d = new FakeDriver(boxes);
+      await d.create("eperm-box");
+      // Leader exits, descendant redirects its output: the exec settles on
+      // its own, the eager prune keeps the entry (the group is still alive),
+      // and destroy's closure reaches the dead-leader branch under the mock.
+      // The echo hands back the descendant's pid — the redirected sleep holds
+      // no pipe, so stdout settles with it — for the finally-block cleanup
+      // this deliberately-blinded destroy cannot do itself.
+      const res = await d.exec("eperm-box", ["sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"]);
+      sleeper = Number(res.stdout.trim());
+      // The eager prune's own group probe (signal 0) is exec-settle logic
+      // and expected here; snapshot so only destroy's calls are asserted.
+      const before = groupSignals.length;
+      await d.destroy("eperm-box");
+      // EPERM must short-circuit the closure before ANY -pid call — not even
+      // a probe — or a mixed-privilege recycled group could lose signalable
+      // members to the SIGKILL that follows a successful group probe.
+      expect(groupSignals.length).toBe(before);
+      expect(groupSignals.every((s) => s.signal === 0)).toBe(true);
+    } finally {
+      (process as { kill: typeof process.kill }).kill = origKill;
+      // destroy was a no-op for this entry on purpose; the real kill (never
+      // the mock) terminates the survivor now rather than at sleep's expiry.
+      // Reaping needs no help: sh is dead, so the sleeper is reparented to
+      // init and reaped there once the SIGKILL lands.
+      if (sleeper !== undefined) {
+        try {
+          process.kill(sleeper, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
   test("copyFile refuses a symlink pointing out of the box", async () => {
     const boxes = mkdtempSync(join(tmpdir(), "qds-fake-symlink-"));
     const host = mkdtempSync(join(tmpdir(), "qds-fake-symlink-host-"));

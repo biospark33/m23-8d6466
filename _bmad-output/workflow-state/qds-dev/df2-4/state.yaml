@@ -1,0 +1,37 @@
+story: df2-4-live-cap-hit-kill
+title: "DF2.4: Live Cap-Hit Kill Demonstration — Real Key, Real Spend, Recorded Evidence"
+phase: 5-complete
+pr: "#118"
+branch: feature/df2-4-live-cap-hit-kill
+base: main
+target: main
+created: 2026-08-18T18:45:00-04:00
+predecessors:
+  df2-1: merged (#107/#108)
+  df2-2: merged (#114)
+  df2-3: merged (#111)
+  df2-5: merged (#115)
+git:
+  stashed: "pre-df2-4 unrelated skill-file + df1-4 evidence changes (on main)"
+guardrails:
+  - branch-integrity: ok
+  - scope: ok
+  - tdd: ok
+research:
+  confidence: 0.97
+  completed: 2026-08-18T18:50:00-04:00
+  gate: auto-approved (>=0.8)
+  design_brief: _bmad-output/workflow-state/qds-dev/df2-4/design.md
+notes: >
+  Live-run story: real OpenRouter key at --cap 50000 u$, real exe.dev box. Devdan reference repos
+  must be surveyed (inkwell + super-simple under ~/reference-repos/) for liftable code — user
+  directive: lift/copy, minimize new code. classifyRunExit is the ONLY new mechanism.
+live_run:
+  command: >
+    OPENROUTER_PROVISIONING_KEY=$(cat ~/.openrouter-provisioning-key)
+    bun scripts/cap-hit-demo.ts --driver exedev
+    --repo-url https://github.com/octocat/Hello-World.git
+    --sha 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d
+    --roster tests/providers/fixtures/df2-4-demo.roster.yaml --cap 50000
+  fill_repo_note: repo is private; box fills from public Hello-World at pinned sha (gate A needs A repo, not this one; INV-CRED-1 forbids a git credential in the box)
+  roster_note: executed with the single-model demo roster (df2-4-demo.roster.yaml) — the planned qds-default.roster.yaml would have spent the cap on gate C's multi-model pings before the workload ran

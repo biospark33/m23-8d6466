@@ -44,6 +44,8 @@ export interface FakeKeyApiOptions {
   mintTransportErrorAfterCreate?: boolean;
   /** listAllKeys returns truncated=true (pagination budget exhausted). */
   listTruncated?: boolean;
+  /** Override the status every chatComplete returns, without touching state. */
+  chatStatus?: number;
 }
 
 export interface RecordedRequest {
@@ -156,5 +158,59 @@ export class FakeKeyApi {
   /** Test helper: read current usage for a hash. */
   usageOf(hash: string): number {
     return this.keys.find((k) => k.hash === hash)?.usageUsd ?? 0;
+  }
+
+  /**
+   * Simulated POST /chat/completions with a RUNTIME key (the demo's host-side
+   * re-probe substrate). Two DISTINCT rejection shapes (the demo's classifier
+   * accepts both):
+   * - HTTP 403 "Key limit exceeded" — the PER-KEY spend-cap refusal, the shape
+   *   MEASURED live 2026-08-19. This is the natural answer for a capped key
+   *   whose usage has reached its limit.
+   * - HTTP 402 "Insufficient credits" — the ACCOUNT-level credits refusal the
+   *   provider docs describe; reachable in tests via the chatStatus override.
+   * 200 for uncapped or under-limit keys; 401 for unknown or deleted (revoked)
+   * keys. The key material itself never appears in the body.
+   */
+  async chatComplete(key: string): Promise<{ status: number; body: string }> {
+    this.requests.push({ method: "POST", path: "/chat/completions" });
+
+    // Forced override mode
+    if (this.opts.chatStatus !== undefined) {
+      return {
+        status: this.opts.chatStatus,
+        body: `{"error":{"code":${this.opts.chatStatus},"message":"forced"}}`,
+      };
+    }
+
+    // Exact-hash match on the presented key: hashing first drops the
+    // reverse-scan's silent arbitrary-match on duplicate values. Deleted
+    // (revoked) entries are excluded — a revoked key must authenticate as
+    // invalid, not as a live key. The lookup itself is a linear scan over a
+    // test-sized table — a hash-keyed Map would buy nothing at this scale.
+    const presentedHash = createHash("sha256").update(key).digest("hex");
+    const foundEntry: FakeKey | null = this.keys.find((k) => !k.deleted && k.hash === presentedHash) ?? null;
+
+    // Unknown or revoked key → 401
+    if (!foundEntry) {
+      return {
+        status: 401,
+        body: '{"error":{"code":401,"message":"invalid key"}}',
+      };
+    }
+
+    // Key found: check limit — refusal is the per-key 403 shape (MEASURED)
+    if (foundEntry.limitUsd !== null && foundEntry.usageUsd >= foundEntry.limitUsd) {
+      return {
+        status: 403,
+        body: '{"error":{"message":"Key limit exceeded (total limit)","code":403}}',
+      };
+    }
+
+    // Uncapped or under-limit → 200
+    return {
+      status: 200,
+      body: '{"choices":[]}',
+    };
   }
 }

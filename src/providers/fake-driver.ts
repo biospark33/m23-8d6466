@@ -42,6 +42,22 @@ const META = ".box.json";
 export class FakeDriver implements ProviderDriver {
   readonly name = "fake";
   readonly root: string;
+  /**
+   * Every exec's tree-kill closure per box. Destroy runs them: a real box
+   * destroy kills the box's processes — the exec's whole process tree, not
+   * just its direct child — and an exec abandoned by a caller (the demo's
+   * fail-closed close paths) must not leave descendants running on the host
+   * or keep its exec promise pending (a surviving descendant holds the stdout
+   * pipe open, which is what keeps the `Response` read — and so the exec —
+   * unsettled).
+   *
+   * Each closure is identity-gated on its leader's liveness (see `killTree`),
+   * so a completed exec's retained entry is inert, and the entry is dropped
+   * eagerly when the exec settles with its group already gone (the common
+   * no-descendants case): a later destroy can never signal a process-group id
+   * the OS has recycled.
+   */
+  private readonly execChildren = new Map<string, Set<() => void>>();
 
   constructor(root?: string) {
     this.root = root ?? process.env.QDS_FAKE_BOXES_DIR ?? DEFAULT_FAKE_BOXES_DIR;
@@ -117,6 +133,8 @@ export class FakeDriver implements ProviderDriver {
 
   /** Idempotent: teardown and reap both retry, and a missing box is the goal state. */
   async destroy(vm: string): Promise<void> {
+    for (const killTree of this.execChildren.get(vm) ?? []) killTree();
+    this.execChildren.delete(vm);
     rmSync(this.boxDir(vm), { recursive: true, force: true });
   }
 
@@ -153,15 +171,39 @@ export class FakeDriver implements ProviderDriver {
       // dropped, unlike a real remote exec, which always reflects the
       // current call's environment.
       env: process.env,
+      // The child becomes its own session and process-group leader
+      // (pgid === pid), so `destroy` can kill the exec's WHOLE tree with
+      // `kill(-pid)`. SIGKILL to the direct child alone would leave
+      // grandchildren running — and any descendant still holding the stdout
+      // pipe would keep this exec's `Promise.all` unsettled past the
+      // destroy, exactly the pending-abandoned-exec case the demo's close
+      // paths must not leak.
+      detached: true,
       stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
       stdout: "pipe",
       stderr: "pipe",
     });
+    const kills = this.execChildren.get(vm) ?? new Set<() => void>();
+    const kill = killTree(proc);
+    kills.add(kill);
+    this.execChildren.set(vm, kills);
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited,
     ]);
+    // Eager prune: an exec that settled with its group already fully gone
+    // (the no-descendants common case) drops its entry now, so a later
+    // destroy finds nothing left to run for it. Signal 0 only ever removes
+    // an entry (a group that is gone cannot come back); it never authorizes
+    // a kill — see killTree's identity gate. A rejecting exec skips this and
+    // keeps its entry: its leader may still be alive and destroyable.
+    try {
+      process.kill(-proc.pid, 0);
+    } catch {
+      kills.delete(kill);
+      if (kills.size === 0) this.execChildren.delete(vm);
+    }
     return { stdout, stderr, exitCode };
   }
 
@@ -182,4 +224,78 @@ export class FakeDriver implements ProviderDriver {
 
 function fakeUrl(vm: string, port: number): string {
   return `https://${vm}-${port}.fake.local`;
+}
+
+/**
+ * Kill a whole exec tree: the process group on POSIX (the `detached` spawn
+ * made the child its group leader, pgid === pid). Straight SIGKILL, not
+ * SIGTERM→SIGKILL — a TERM-ignoring workload must not survive a box destroy
+ * (the same call cli-anything's `killTree` makes). ESRCH on a dead group is
+ * the goal state, never an error.
+ *
+ * Identity gate: `kill(-pgid)` is only safe while the pid provably still
+ * belongs to this exec. Two provable windows, both anchored in how the kernel
+ * hands out ids. While `exited` is unsettled the leader is unreaped, so it
+ * OWNS the pid — the kernel cannot reuse the number — and `-pid` names this
+ * exec's group and nothing else. After the leader is reaped the number stays
+ * reserved for the group while ANY member lives: an orphaned process group
+ * keeps its pgid, and a new group can only take the number through a new
+ * leader PROCESS with that pid. So in the dead-leader case a positive-pid
+ * probe decides — `kill(pid, 0)` answering (or refusing with EPERM: either
+ * way a process owns it) means this exec's group is gone (recycled: never
+ * signal `-pid`); ESRCH means no process owns it, so any group holding the
+ * number is
+ * provably this exec's orphaned group (`kill(-pgid, 0)` success alone could
+ * never authorize that — it proves a group EXISTS with that id, not that it
+ * is OURS). SIGKILLing that group is what lets destroy() settle an exec kept
+ * pending by a descendant holding the pipe (`sh -c 'sleep 30 &'`). The
+ * microseconds between the probe and the signal are the one residual window
+ * (the group would have to empty and the pid fully recycle between two
+ * adjacent syscalls) — strictly narrower than the leader-alive branch's own
+ * accepted dead-but-unreaped window below.
+ */
+function killTree(proc: Bun.Subprocess): () => void {
+  let leaderAlive = true;
+  // exited settles only after waitpid reaps the child — resolution order
+  // guarantees the flag never says alive for a reaped leader (it may briefly
+  // say alive for a dead-but-unreaped one, during which -pid is still safe:
+  // the pid is unowned for mere milliseconds and cannot have been recycled).
+  proc.exited.then(
+    () => {
+      leaderAlive = false;
+    },
+    () => {
+      leaderAlive = false;
+    },
+  );
+  return () => {
+    if (leaderAlive) {
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        // group already gone
+      }
+      return;
+    }
+    // Dead leader, group maybe not: a surviving descendant keeps the number
+    // reserved, and only the group signal can reach it.
+    try {
+      process.kill(proc.pid, 0);
+      // A process owns the pid — it was recycled after this exec's group
+      // emptied. Signalling -pid could hit an unrelated group; never do.
+      return;
+    } catch (e) {
+      // Only ESRCH proves no process owns the number. EPERM means one does —
+      // a process this caller may not signal, typically a privileged recycled
+      // pid, possibly leading an unrelated group whose weaker members a group
+      // SIGKILL could still reach. Not provably ours → never signal -pid.
+      if ((e as NodeJS.ErrnoException).code !== "ESRCH") return;
+    }
+    try {
+      process.kill(-proc.pid, 0); // probe first: authorizes the SIGKILL
+      process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      // group already gone
+    }
+  };
 }

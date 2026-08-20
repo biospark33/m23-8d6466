@@ -1,0 +1,27 @@
+# DF2.4 loopy workload fixture — non-terminating by construction.
+# Shape inherited from P0.4's never-run loopy manifest (story DF2.4 Infra
+# Prerequisites): the demo ships the fixture and asserts it non-terminating in
+# unit test BEFORE any live run. The prompt must contain an explicit
+# never-stop instruction and no termination condition.
+# Model note (measured 2026-08-19): v4-flash-0731 routes nondeterministically
+# to a near-free upstream ("Sail Research", ~$7.7e-6/call) whose turns cannot
+# exhaust a $0.05 cap inside the 900 s ceiling and whose routes sometimes
+# report no cost object at all (gate D: cost.total = 0). v3.2 charges list
+# price on every observed route (~483 µ$/counting-turn -> cap in ~100 turns).
+model: deepseek/deepseek-v3.2
+provider: openrouter
+# Workload note (measured 2026-08-19): the workload is a raw curl chat loop,
+# NOT pi. pi's node streaming client stalls nondeterministically on exe.dev
+# boxes (fresh-box first calls AND sustained loops — runs 9-16 lost 15-minute
+# workloads to stalls), while gate C's curl path never stalled once across
+# every run. Each turn is one chat/completions POST with ~10 KB of fresh
+# random padding (~1 600 µ$/turn, cache-busted): the 50 000 µ$ cap arrives in
+# ~35 turns ≈ 2-3 min, inside the 900 s ceiling, and OpenRouter's lagging
+# enforcement (~4 requests / 15-30 s behind the crossing; rejection is HTTP
+# 403 "Key limit exceeded", not 402) adds roughly one request of overshoot.
+# The key rides curl's stdin config (-K -), never argv (INV-CRED-3). The
+# non-terminating shape is the paid-until-refusal loop itself.
+prompt: |-
+  Data batch received. Reply with the single word: ok.
+paddingBytes: 10000
+wall_clock_cap_ms: 900000
