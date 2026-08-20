@@ -157,6 +157,40 @@ describe("FakeDriver accountability and boundaries", () => {
     }
   });
 
+  test("destroy never signals a process group a completed exec no longer owns", async () => {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-stale-"));
+    // Record every negative-pid (whole-group) signal request the driver makes.
+    const origKill = process.kill;
+    const groupSignals: Array<{ pid: number; signal: string | number }> = [];
+    (process as { kill: typeof process.kill }).kill = (pid, signal?) => {
+      if (pid < 0) groupSignals.push({ pid, signal: signal ?? 0 });
+      return origKill(pid, signal);
+    };
+    try {
+      const d = new FakeDriver(boxes);
+      // A completed exec's group is gone; after any pid rollover its old pgid
+      // could name an unrelated process group — destroy must not signal it.
+      await d.create("stale-box");
+      await d.exec("stale-box", ["sh", "-c", "printf done"]);
+      await d.destroy("stale-box");
+
+      // The live-leader counterpart: a pending exec's destroy DOES signal its
+      // group — the kernel guarantees the leader's pid is still this exec's
+      // while the child is unreaped — and only that group.
+      await d.create("live-box");
+      const pending = d.exec("live-box", ["sh", "-c", "sleep 30 & sleep 30 & wait"]);
+      await new Promise((r) => setTimeout(r, 400)); // let the descendants spawn
+      await d.destroy("live-box");
+      await pending;
+
+      const groupKills = groupSignals.filter((s) => s.signal === "SIGKILL");
+      expect(groupKills.length).toBe(1); // live-box's group; stale-box signaled nothing
+    } finally {
+      (process as { kill: typeof process.kill }).kill = origKill;
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
   test("copyFile refuses a symlink pointing out of the box", async () => {
     const boxes = mkdtempSync(join(tmpdir(), "qds-fake-symlink-"));
     const host = mkdtempSync(join(tmpdir(), "qds-fake-symlink-host-"));

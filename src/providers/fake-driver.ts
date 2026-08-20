@@ -51,12 +51,11 @@ export class FakeDriver implements ProviderDriver {
    * pipe open, which is what keeps the `Response` read — and so the exec —
    * unsettled).
    *
-   * Entries are retained past the exec's own settlement and cleared only by
-   * `destroy`: a workload whose direct child exits while leaving a descendant
-   * behind must still have that descendant reachable by a later destroy.
-   * ponytail: `kill(-pgid)` after the group died and the host pid counter
-   * wrapped could hit a recycled pgid; if this driver ever hosts long-lived
-   * boxes through thousands of execs, gate the kill on pid non-reuse.
+   * Each closure is identity-gated on its leader's liveness (see `killTree`),
+   * so a completed exec's retained entry is inert, and the entry is dropped
+   * eagerly when the exec settles with its group already gone (the common
+   * no-descendants case): a later destroy can never signal a process-group id
+   * the OS has recycled.
    */
   private readonly execChildren = new Map<string, Set<() => void>>();
 
@@ -185,13 +184,26 @@ export class FakeDriver implements ProviderDriver {
       stderr: "pipe",
     });
     const kills = this.execChildren.get(vm) ?? new Set<() => void>();
-    kills.add(killTree(proc));
+    const kill = killTree(proc);
+    kills.add(kill);
     this.execChildren.set(vm, kills);
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited,
     ]);
+    // Eager prune: an exec that settled with its group already fully gone
+    // (the no-descendants common case) drops its entry now, so a later
+    // destroy finds nothing left to run for it. Signal 0 only ever removes
+    // an entry (a group that is gone cannot come back); it never authorizes
+    // a kill — see killTree's identity gate. A rejecting exec skips this and
+    // keeps its entry: its leader may still be alive and destroyable.
+    try {
+      process.kill(-proc.pid, 0);
+    } catch {
+      kills.delete(kill);
+      if (kills.size === 0) this.execChildren.delete(vm);
+    }
     return { stdout, stderr, exitCode };
   }
 
@@ -216,17 +228,44 @@ function fakeUrl(vm: string, port: number): string {
 
 /**
  * Kill a whole exec tree: the process group on POSIX (the `detached` spawn
- * made the child its group leader, pgid === pid), falling back to the direct
- * child when the group is already gone or the platform has no groups. Straight
- * SIGKILL, not SIGTERM→SIGKILL — a TERM-ignoring workload must not survive a
- * box destroy (the same call cli-anything's `killTree` makes). ESRCH on a
- * dead group is the goal state, never an error.
+ * made the child its group leader, pgid === pid). Straight SIGKILL, not
+ * SIGTERM→SIGKILL — a TERM-ignoring workload must not survive a box destroy
+ * (the same call cli-anything's `killTree` makes). ESRCH on a dead group is
+ * the goal state, never an error.
+ *
+ * Identity gate: `kill(-pgid)` is only safe while the pid provably still
+ * belongs to this exec's child. A live child owns its pid — the kernel cannot
+ * reuse it until the child is reaped — so while `exited` is unsettled, `-pid`
+ * names this exec's group and nothing else. Once the child has exited, the
+ * pid is unowned and the OS is free to hand it to an unrelated process group,
+ * so the closure must never signal `-pid` again; it falls back to Bun's own
+ * kill on its (dead) child, a safe no-op. This is why a completed exec's
+ * retained entry cannot become a stale kill target after a pid rollover —
+ * and why `kill(-pgid, 0)` is never used to authorize a signal: signal 0
+ * proves a group EXISTS with that id, not that it is OURS.
  */
 function killTree(proc: Bun.Subprocess): () => void {
+  let leaderAlive = true;
+  // exited settles only after waitpid reaps the child — resolution order
+  // guarantees the flag never says alive for a reaped leader (it may briefly
+  // say alive for a dead-but-unreaped one, during which -pid is still safe:
+  // the pid is unowned for mere milliseconds and cannot have been recycled).
+  proc.exited.then(
+    () => {
+      leaderAlive = false;
+    },
+    () => {
+      leaderAlive = false;
+    },
+  );
   return () => {
-    try {
-      process.kill(-proc.pid, "SIGKILL");
-    } catch {
+    if (leaderAlive) {
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        // group already gone
+      }
+    } else {
       try {
         proc.kill("SIGKILL");
       } catch {
