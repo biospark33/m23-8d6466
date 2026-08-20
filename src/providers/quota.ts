@@ -54,6 +54,12 @@ export interface LoadedQuotaLimits {
   file?: string;
 }
 
+/**
+ * Cwd-relative default — the `.sandbox/` tree is per-project by design (records
+ * `.sandbox/runs`, reap reports `.sandbox/reap`). Resolution order mirrors
+ * run-record.ts's `$QDS_RUNS_DIR` tier: explicit argument → `$QDS_QUOTA_LIMITS_FILE`
+ * → this cwd-relative default.
+ */
 export const DEFAULT_QUOTA_LIMITS_FILE = ".sandbox/quota-limits.json";
 
 const LIMIT_KEYS: readonly (keyof QuotaLimits)[] = [
@@ -93,7 +99,9 @@ export class QuotaLimitsError extends Error {
  * non-positive/non-number values ⇒ QuotaLimitsError — a config that cannot be
  * trusted never falls back to defaults silently.
  */
-export function loadQuotaLimits(file: string = DEFAULT_QUOTA_LIMITS_FILE): LoadedQuotaLimits {
+export function loadQuotaLimits(
+  file: string = process.env.QDS_QUOTA_LIMITS_FILE ?? DEFAULT_QUOTA_LIMITS_FILE,
+): LoadedQuotaLimits {
   let raw: string;
   try {
     raw = readFileSync(file, "utf8");

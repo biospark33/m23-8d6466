@@ -33,16 +33,25 @@ import {
 
 let dir: string;
 let prevCwd: string;
+let prevQuotaEnv: string | undefined;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "qds-df26-quota-"));
   prevCwd = process.cwd();
   // The default quota path (and createRun's loadQuotaLimits()) resolves
-  // against cwd — pin it to this test's tmpdir for the whole test.
+  // against cwd — pin it to this test's tmpdir for the whole test. The env
+  // override tier is cleared for the same reason: a developer's exported
+  // $QDS_QUOTA_LIMITS_FILE must never leak into the implicit-path tests.
+  prevQuotaEnv = process.env.QDS_QUOTA_LIMITS_FILE;
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  if (prevQuotaEnv !== undefined) delete process.env.QDS_QUOTA_LIMITS_FILE;
   process.chdir(dir);
 });
 
 afterEach(() => {
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  if (prevQuotaEnv === undefined) delete process.env.QDS_QUOTA_LIMITS_FILE;
+  else process.env.QDS_QUOTA_LIMITS_FILE = prevQuotaEnv;
   process.chdir(prevCwd);
   rmSync(dir, { recursive: true, force: true });
 });
@@ -109,6 +118,23 @@ describe("DF2.6 quota limits", () => {
     expect(refused.ceiling).toBe(5);
     expect(refused.reason).toBe("vm-ceiling");
     expect(refused.limitsSource).toBe("file");
+  });
+
+  test("$QDS_QUOTA_LIMITS_FILE re-points the implicit path; an explicit argument still outranks it", () => {
+    const file = limitsFile('{"maxVms": 7}\n');
+    process.env.QDS_QUOTA_LIMITS_FILE = file;
+    try {
+      // no argument — the implicit resolution createRun/sweep use
+      const res = loadQuotaLimits();
+      expect(res.source).toBe("file");
+      expect(res.file).toBe(file);
+      expect(res.limits.maxVms).toBe(7);
+      // explicit argument > env var > cwd-relative default
+      expect(loadQuotaLimits(join(dir, "no-such-quota-limits.json")).source).toBe("default");
+    } finally {
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.QDS_QUOTA_LIMITS_FILE;
+    }
   });
 
   test("malformed JSON ⇒ QuotaLimitsError quota-limits-unreadable, remediation names the JSON body to write", () => {

@@ -49,6 +49,8 @@ const HELP = [
   "",
   "  --driver <name>         provider driver (default $QDS_PROVIDER_DRIVER or fake)",
   "",
+  "Env: QDS_QUOTA_LIMITS_FILE (limits file; default .sandbox/quota-limits.json under cwd)",
+  "",
 ];
 
 const VALUE_FLAGS = ["--driver"] as const;

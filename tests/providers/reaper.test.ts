@@ -47,6 +47,7 @@ const RUN_A = "df26a-20260820-aaaa01"; // open, young — paired, in flight
 const RUN_B = "df26b-20260820-bbbb02"; // open, aged — its teardown died
 const VM_ORPHAN = "df26v-20260820-cccc03"; // owned VM, no record
 const RUN_ORPHAN_KEY = "df26k-20260820-dddd04"; // record-less sbx- key, aged
+const RUN_CUSTOM_PREFIX = "df26p-20260820-1a2b07"; // custom-prefix key + record (fixture join)
 const RUN_MINT = "df26m-20260820-eeee05"; // record-less sbx- key, young (AC7)
 const RUN_NOAGE = "df26n-20260820-ffff06"; // record-less sbx- key, no createdAt (AC7)
 const RUN_WINDOW = "df26w-20260820-0e0f10"; // record + VM young, key absent (AC6 mint window)
@@ -231,6 +232,29 @@ describe("DF2.6 sweep", () => {
     // the ONE destroy is the tagged record-less VM; both operator VMs survive
     expect(report.executed.destroy).toEqual([VM_ORPHAN]);
     expect((await fleet.driver.list()).map((v) => v.name).sort()).toEqual([OPERATOR_VM, OPERATOR_VM_SHAPED].sort());
+  });
+
+  // ─── 3b. fixture contract: prefix-aware key→record join ────────────────────
+
+  test("seedFleet links a custom-prefix key into its record's keyHash; the sweep still calls it foreign", async () => {
+    const fleet = await seedFleet(dir, {
+      keys: [{ runId: RUN_CUSTOM_PREFIX, prefix: "mine-" }],
+      records: [{ runId: RUN_CUSTOM_PREFIX, ageMs: YOUNG }],
+    }, NOW);
+
+    // the join the fixture promises: the record carries the custom-prefix key's hash
+    expect(fleet.store.get(RUN_CUSTOM_PREFIX).keyHash).toBe(hashOf(fleet, `mine-${RUN_CUSTOM_PREFIX}`));
+
+    // while the sweep itself never joins it — a non-sbx- name is foreign,
+    // never a revoke candidate (the prefix defense, reap.just:7-9)
+    const report = await sweep(deps(fleet));
+    expect(report.rows).toContainEqual({
+      kind: "key",
+      id: `mine-${RUN_CUSTOM_PREFIX}`,
+      class: "foreign",
+      action: "report",
+      keyHashPrefix: hashOf(fleet, `mine-${RUN_CUSTOM_PREFIX}`).slice(0, 12),
+    });
   });
 
   // ─── 4. AC6 — in-flight + mint-to-record window ────────────────────────────

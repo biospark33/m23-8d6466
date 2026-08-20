@@ -45,7 +45,7 @@ export interface FleetRecord {
   runId: string;
   /** Defaults to the seeded VM named `runId` when one exists. */
   vmName?: string;
-  /** Defaults to the joined `sbx-<runId>` key's real hash when one exists. */
+  /** Defaults to the joined `sbx-<runId>` key's real hash — or, failing that, any key seeded by `runId` (custom prefix). */
   keyHash?: string;
   ageMs?: number;
   closed?: boolean;
@@ -93,6 +93,9 @@ export async function seedFleet(
 
   // key name -> hash the provider list reports (post any custom-hash mutation)
   const hashesByName = new Map<string, string>();
+  // runId -> hash for keys seeded BY runId (any prefix) — the record join's
+  // fallback when no canonical `sbx-<runId>` key exists
+  const hashesByRunId = new Map<string, string>();
   for (const k of state.keys ?? []) {
     if (k.name === undefined && k.runId === undefined) {
       throw new Error(`FleetKey needs a runId or a name (got ${JSON.stringify(k)})`);
@@ -110,6 +113,7 @@ export async function seedFleet(
       hash = k.hash;
     }
     hashesByName.set(name, hash);
+    if (k.runId !== undefined) hashesByRunId.set(k.runId, hash);
   }
 
   for (const r of state.records ?? []) {
@@ -121,7 +125,9 @@ export async function seedFleet(
     else if (vmNames.has(r.runId)) patch.vmName = r.runId;
     if (r.keyHash !== undefined) patch.keyHash = r.keyHash;
     else {
-      const joined = hashesByName.get(`${SBX_KEY_PREFIX}${r.runId}`);
+      // canonical sbx-<runId> name first (the sweep's own join key), then any
+      // key seeded by runId under a custom prefix
+      const joined = hashesByName.get(`${SBX_KEY_PREFIX}${r.runId}`) ?? hashesByRunId.get(r.runId);
       if (joined !== undefined) patch.keyHash = joined;
     }
     if (patch.vmName !== undefined || patch.keyHash !== undefined) store.set(r.runId, patch);
