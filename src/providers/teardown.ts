@@ -37,6 +37,7 @@ import { join } from "node:path";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { captureSpend, revokeRunKey, verifyRevoked, type CredentialDeps, type KeyApi } from "./credentials.ts";
 import type { ProviderDriver } from "./driver.ts";
+import type { BoxHoursCtx } from "./cost-ledger.ts";
 import {
   bunGitRunner,
   getRecord,
@@ -48,6 +49,14 @@ import {
 } from "./harvest.ts";
 import type { RunRecordStore } from "./run-record.ts";
 import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
+
+/**
+ * DF2.8: structural handle so teardown does not depend on the whole CostLedger type.
+ * cost-ledger.ts imports nothing from teardown, so this import creates no cycle.
+ */
+export interface CostLedgerHook {
+  ingestBoxHours(ctx: BoxHoursCtx): { eventId: string; inserted: boolean; unpriced: boolean };
+}
 
 export class TeardownError extends Error {
   /** Machine-readable failure class; also the `code` in every log line. */
@@ -74,6 +83,11 @@ export interface TeardownDeps {
   gitRunner?: GitRunner;
   runsDir?: string;
   workdir?: string;
+  /**
+   * DF2.8: when present, the close step prices this run's box hours into the cost ledger
+   * (exactly once — the deterministic event_id makes a repeated close a no-op).
+   */
+  costLedger?: CostLedgerHook;
 }
 
 export interface TeardownOptions {
@@ -214,6 +228,21 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   // Idempotent re-run: first-close-wins already applied — every step skipped.
   if (rec.closedAt !== undefined) {
     for (const step of STEPS) skipStep(ctx, step, "record already closed (first-close-wins)");
+    // DF2.8 crash-window fix: if store.close succeeded but the process died before ingestBoxHours ran,
+    // a re-run would skip everything and the row would never land. Run the hook here — it's
+    // idempotent by eventId, so a repeated close is a no-op.
+    if (deps.costLedger && rec.extensions?.budget?.repoSlug && rec.extensions?.budget?.issueId) {
+      try {
+        deps.costLedger.ingestBoxHours({
+          runId,
+          repoSlug: String(rec.extensions.budget.repoSlug),
+          issueId: String(rec.extensions.budget.issueId),
+          requestId: ctx.requestId,
+        });
+      } catch (e) {
+        throw asTeardownError(e);
+      }
+    }
     return;
   }
 
@@ -325,5 +354,21 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   // 7. close — LAST. (extensions stay writable post-close; we write none.)
   await runStep(ctx, "close", async () => {
     deps.store.close(runId);
+    // DF2.8: price box hours into the cost ledger, now that the record's lifetime is final.
+    // If costLedger is present and the record carries budget attribution, ingest the box hours.
+    if (deps.costLedger) {
+      const closedRec = deps.store.get(runId);
+      const budgetExt = closedRec.extensions?.budget;
+      if (budgetExt?.repoSlug && budgetExt?.issueId) {
+        deps.costLedger.ingestBoxHours({
+          runId,
+          repoSlug: String(budgetExt.repoSlug),
+          issueId: String(budgetExt.issueId),
+          requestId: ctx.requestId,
+        });
+      } else {
+        skipStep(ctx, "close", "no issue attribution — box hours not priced for this run");
+      }
+    }
   });
 }

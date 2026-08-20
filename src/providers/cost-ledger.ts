@@ -1,0 +1,822 @@
+/**
+ * The micro-dollar cost ledger (DF2.8).
+ *
+ * Host-side SQLite beside the run records, so it survives box destruction
+ * (§6 item 4). One append-only row per DF2.7 `cost` event, keyed by a
+ * deterministic digest: a redelivered line digests identically and lands on
+ * `INSERT … ON CONFLICT DO NOTHING`, never an update. Money is integer
+ * micro-dollars everywhere (DD-9); the one float→µ$ conversion happens here at
+ * ingest and nowhere else. Per-issue spend is always `SUM(cost_micro_usd)`
+ * over priced rows — derived on demand, never denormalized (INV-COST-2) — and
+ * the gate reads that same SUM inside a BEGIN IMMEDIATE admission
+ * transaction, because a bare read-and-compare is a TOCTOU two concurrent
+ * dispatches can both win (R2 §6 serialized-admission mandate).
+ *
+ * The float accumulator this design exists to NOT be: inkwell's tracer keeps
+ * `total_cost REAL` and does `total_cost = total_cost + ?` per turn (tracer.py
+ * session_add_usage) — mutable, drift-prone, and unattributable. Every figure
+ * here is recomputed from immutable rows instead.
+ */
+
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { dirname } from "node:path";
+
+import { Database } from "bun:sqlite";
+
+import type { CostEvent } from "../../cli-anything/src/types.ts";
+import { log } from "../swarmclaw/log.ts";
+
+// ─── units ───────────────────────────────────────────────────────────────────
+
+const MICRO_PER_USD = 1_000_000;
+const MS_PER_HOUR = 3_600_000;
+
+/** DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up. */
+function usdToMicros(usd: number): number {
+  return Math.round(usd * MICRO_PER_USD);
+}
+
+// ─── schema ──────────────────────────────────────────────────────────────────
+
+/**
+ * `event_id` is a sha256 over the event's stable fields — stable across
+ * redelivery, distinct from the ingest-time `created_at`. Two digests exist:
+ * token rows digest `run_id, agent_id, kind, invocation_seq, turn_count,
+ * cost_micro_usd, timestamp` (the WIRE event's emission time); box-hour rows
+ * digest `run_id, kind='box_hours', closed_at` (the record's own close
+ * timestamp, fixed once close runs). `invocation_seq` is what keeps two genuine
+ * invocations of one agent in one run from ever digesting identically — DF2.7
+ * emits one `cost` event per pi subprocess, and keying on
+ * `(run_id, agent_id, kind)` would silently drop the second one.
+ */
+function tokenEventId(input: {
+  runId: string;
+  agentId: string;
+  invocationSeq: number;
+  turnCount: number;
+  costMicroUsd: number;
+  timestamp: string;
+}): string {
+  const h = new Bun.CryptoHasher("sha256");
+  h.update(`${input.runId}|${input.agentId}|tokens|${input.invocationSeq}|${input.turnCount}|${input.costMicroUsd}|${input.timestamp}`);
+  return h.digest("hex");
+}
+
+function boxHoursEventId(runId: string, closedAt: string): string {
+  const h = new Bun.CryptoHasher("sha256");
+  h.update(`${runId}|box_hours|box_hours|${closedAt}`);
+  return h.digest("hex");
+}
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS cost_events (
+  event_id           TEXT PRIMARY KEY,
+  run_id             TEXT NOT NULL,
+  repo_slug          TEXT NOT NULL,
+  issue_id           TEXT NOT NULL,
+  request_id         TEXT NOT NULL,
+  role               TEXT CHECK (role IN ('lead','worker','resident','tier1')),
+  agent_id           TEXT,
+  provider           TEXT,
+  model              TEXT,
+  kind               TEXT NOT NULL CHECK (kind IN ('tokens','box_hours')),
+  invocation_seq     INTEGER NOT NULL,
+  input_tokens       INTEGER,
+  output_tokens      INTEGER,
+  cache_read_tokens  INTEGER,
+  cache_write_tokens INTEGER,
+  turn_count         INTEGER,
+  cost_micro_usd     INTEGER NOT NULL,
+  unpriced           INTEGER NOT NULL DEFAULT 0,
+  key_hash           TEXT,
+  key_limit_micro_usd INTEGER,
+  created_at         TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS cost_events_issue ON cost_events (repo_slug, issue_id, unpriced);
+CREATE INDEX IF NOT EXISTS cost_events_run ON cost_events (run_id);
+CREATE TRIGGER IF NOT EXISTS cost_events_no_update
+BEFORE UPDATE ON cost_events
+BEGIN SELECT RAISE(ABORT, 'cost_events is append-only (INV-COST-1)'); END;
+CREATE TRIGGER IF NOT EXISTS cost_events_no_delete
+BEFORE DELETE ON cost_events
+BEGIN SELECT RAISE(ABORT, 'cost_events is append-only (INV-COST-1)'); END;
+
+CREATE TABLE IF NOT EXISTS gate_admissions (
+  request_id        TEXT NOT NULL,
+  run_id            TEXT NOT NULL,
+  repo_slug         TEXT NOT NULL,
+  issue_id          TEXT NOT NULL,
+  ceiling_micro_usd INTEGER NOT NULL,
+  decided_at        TEXT NOT NULL,
+  PRIMARY KEY (request_id, run_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS gate_admissions_issue ON gate_admissions (repo_slug, issue_id);
+CREATE TRIGGER IF NOT EXISTS gate_admissions_no_update
+BEFORE UPDATE ON gate_admissions
+BEGIN SELECT RAISE(ABORT, 'gate_admissions is append-only (INV-COST-1)'); END;
+CREATE TRIGGER IF NOT EXISTS gate_admissions_no_delete
+BEFORE DELETE ON gate_admissions
+BEGIN SELECT RAISE(ABORT, 'gate_admissions is append-only (INV-COST-1)'); END;
+`;
+
+// ─── errors ──────────────────────────────────────────────────────────────────
+
+export class CostLedgerError extends Error {
+  /** Machine-readable failure class; also the `code` in every log line. */
+  readonly code: string;
+  /** The literal next command, secrets referenced by env-var NAME, never expanded. */
+  readonly remediation: string;
+
+  constructor(code: string, message: string, remediation: string) {
+    super(message);
+    this.name = "CostLedgerError";
+    this.code = code;
+    this.remediation = remediation;
+  }
+}
+
+export class CostConfigError extends CostLedgerError {
+  constructor(code: string, message: string, remediation: string) {
+    super(code, message, remediation);
+    this.name = "CostConfigError";
+  }
+}
+
+// ─── config ──────────────────────────────────────────────────────────────────
+
+export interface CostConfig {
+  /** Default per-issue spend cap, µ$. 5,000,000 µ$ = $5.00 (DD-9 restatement). */
+  defaultCapMicroUsd: number;
+  /** Per-issue overrides keyed `owner/repo#N`. */
+  perIssueOverrides?: Record<string, number>;
+  /**
+   * Box-hour rate, µ$/h. exe.dev pricing is vendor-single-origin [VERIFY]
+   * (R5 §6 fact 11), so the rate is configuration, never a compiled constant.
+   * Required before any box-hours row can be priced.
+   */
+  boxHourRateMicroUsd?: number;
+}
+
+export const DEFAULT_COST_CONFIG: Readonly<CostConfig> = { defaultCapMicroUsd: 5_000_000 };
+
+export const DEFAULT_COST_CONFIG_FILE = ".sandbox/cost-config.json";
+
+const ISSUE_KEY_RE = /^[\w.-]+\/[\w.-]+#\d+$/;
+
+const CONFIG_KEYS: readonly (keyof CostConfig)[] = ["defaultCapMicroUsd", "perIssueOverrides", "boxHourRateMicroUsd"];
+
+function configInvalid(file: string, detail: string): CostConfigError {
+  return new CostConfigError(
+    "cost-config-invalid",
+    `cost config ${file}: ${detail}`,
+    `write a partial-or-full override object, e.g. {"defaultCapMicroUsd": 5000000, "boxHourRateMicroUsd": 3600000, "perIssueOverrides": {"owner/repo#1": 1000000}}`,
+  );
+}
+
+function assertMicros(file: string, key: string, value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw configInvalid(file, `${key} must be a positive integer of micro-dollars (got ${JSON.stringify(value)})`);
+  }
+  return value;
+}
+
+export interface LoadedCostConfig {
+  config: CostConfig;
+  source: "default" | "file";
+  file?: string;
+}
+
+/** Mirrors quota.ts's loader: absent file ⇒ defaults; a config that cannot be trusted never falls back silently. */
+export function loadCostConfig(
+  file: string = process.env.QDS_COST_CONFIG_FILE ?? DEFAULT_COST_CONFIG_FILE,
+): LoadedCostConfig {
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") return { config: { ...DEFAULT_COST_CONFIG }, source: "default" };
+    throw new CostConfigError(
+      "cost-config-unreadable",
+      `cannot read the cost config file ${file} (${err.message ?? String(e)}) — refusing to guess caps`,
+      `fix the permissions on ${file}, or remove it to fall back to the built-in defaults`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new CostConfigError(
+      "cost-config-unreadable",
+      `cost config file ${file} is not valid JSON: ${(e as Error).message} — refusing to guess caps`,
+      `write a valid JSON object over it, e.g. {"defaultCapMicroUsd": 5000000}`,
+    );
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw configInvalid(file, "the body is not a JSON object");
+  }
+  const over: CostConfig = { ...DEFAULT_COST_CONFIG };
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!(CONFIG_KEYS as readonly string[]).includes(key)) {
+      throw configInvalid(file, `unknown key ${JSON.stringify(key)}`);
+    }
+    if (key === "perIssueOverrides") {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw configInvalid(file, "perIssueOverrides must be an object keyed owner/repo#N");
+      }
+      const overrides: Record<string, number> = {};
+      for (const [issueKey, cap] of Object.entries(value as Record<string, unknown>)) {
+        if (!ISSUE_KEY_RE.test(issueKey)) {
+          throw configInvalid(file, `perIssueOverrides key ${JSON.stringify(issueKey)} is not of the form owner/repo#N`);
+        }
+        overrides[issueKey] = assertMicros(file, `perIssueOverrides.${issueKey}`, cap);
+      }
+      over.perIssueOverrides = overrides;
+    } else {
+      (over as unknown as Record<string, unknown>)[key] = assertMicros(file, key, value);
+    }
+  }
+  return { config: over, source: "file", file };
+}
+
+/** The cap that governs one issue: its override when present, the default otherwise. */
+export function capForIssue(config: CostConfig, repoSlug: string, issueId: string): number {
+  return config.perIssueOverrides?.[`${repoSlug}#${issueId}`] ?? config.defaultCapMicroUsd;
+}
+
+// ─── ledger ──────────────────────────────────────────────────────────────────
+
+/** The DF2.7 wire event as this module receives it — float USD on the wire, µ$ never. */
+export type CostWireEvent = CostEvent;
+
+export type CostRole = "lead" | "worker" | "resident" | "tier1";
+
+/**
+ * The attribution context only the spawning dispatcher knows: DF2.7's event
+ * carries agent/model/tokens/cost and nothing else, so run/issue/request/role
+ * and the invocation counter arrive here. `role` is read from the roster entry
+ * the dispatcher spawned under — never inferred from the model slug, the agent
+ * name, or emission order.
+ */
+export interface IngestCtx {
+  runId: string;
+  repoSlug: string;
+  issueId: string;
+  requestId: string;
+  role: CostRole;
+  /** Dispatcher's monotonic per-(run_id, agent_id) counter, fixed at spawn. */
+  invocationSeq: number;
+}
+
+export interface BoxHoursCtx {
+  runId: string;
+  repoSlug: string;
+  issueId: string;
+  requestId: string;
+}
+
+/** What the ledger needs to resolve a run's DF2.3 credential linkage (INV-COST-5). */
+export interface RunCostRecord {
+  keyHash?: string;
+  limitMicroUsd?: number;
+  createdAt: string;
+  closedAt?: string;
+}
+
+export interface CostLedgerDeps {
+  /** Defaults to `.sandbox/cost-ledger.db` (cwd-relative, like every `.sandbox/` path). */
+  path?: string;
+  /** Resolves run_id → the DF2.1 record's credential/lifetime fields. */
+  readRunRecord?: (runId: string) => RunCostRecord | undefined;
+  /** Explicit config; otherwise `loadCostConfig()` (env tier → `.sandbox/cost-config.json` → defaults). */
+  config?: CostConfig;
+}
+
+/** One shared schema for every view — `qds cost` and the audit chain read the same field names. */
+export interface CostView {
+  totalMicroUsd: number;
+  /** Priced spend by role; box-hours surface under the literal `"box-hours"` key (explicit unattributed line). */
+  perRole: Record<string, number>;
+  tokenTotals: { inputTokens: number; outputTokens: number };
+  cacheTotals: { cacheReadTokens: number; cacheWriteTokens: number };
+  unpricedRows: number;
+  /** `false` distinguishes a run/issue with no ledger rows from one that spent nothing. */
+  hasEvents: boolean;
+}
+
+export interface IngestResult {
+  eventId: string;
+  inserted: boolean;
+  unpriced: boolean;
+}
+
+export interface AdmissionInput {
+  repoSlug: string;
+  issueId: string;
+  runId: string;
+  requestId: string;
+}
+
+export type AdmissionDecision =
+  | {
+      admitted: true;
+      status: "within-budget";
+      capMicroUsd: number;
+      spentMicroUsd: number;
+      reservedMicroUsd: number;
+      remainingMicroUsd: number;
+      unpricedRows: number;
+      /** min(keyCapMicroUsd, remainingMicroUsd) — the one number handed to DF2.3's mint. */
+      admittedCeilingMicroUsd: number;
+    }
+  | {
+      admitted: false;
+      status: "over-budget";
+      reason: "spend-cap-exceeded";
+      capMicroUsd: number;
+      spentMicroUsd: number;
+      reservedMicroUsd: number;
+      unpricedRows: number;
+    };
+
+export class CostLedger {
+  private readonly db: Database;
+  private readonly readRunRecord: (runId: string) => RunCostRecord | undefined;
+  readonly config: CostConfig;
+  readonly path: string;
+
+  constructor(deps: CostLedgerDeps = {}) {
+    this.path = deps.path ?? process.env.QDS_COST_LEDGER_FILE ?? ".sandbox/cost-ledger.db";
+    this.readRunRecord = deps.readRunRecord ?? (() => undefined);
+    this.config = deps.config ?? loadCostConfig().config;
+    const dir = dirname(this.path);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    const dirMode = statSync(dir).mode & 0o777;
+    if (dirMode !== 0o700) {
+      throw new CostLedgerError(
+        "ledger-dir-mode",
+        `cost ledger dir ${dir} is mode 0${dirMode.toString(8)}, not 0700`,
+        `chmod 0700 ${dir}`,
+      );
+    }
+    const isNew = !existsSync(this.path);
+    let db: Database;
+    try {
+      db = new Database(this.path);
+    } catch (e) {
+      // INV-COST-6: an unopenable ledger is never read as zero spend.
+      throw new CostLedgerError(
+        "ledger-unopenable",
+        `cannot open the cost ledger ${this.path} (${(e as Error).message}) — refusing to treat spend as zero`,
+        `fix the permissions on ${this.path} or remove the file if it is not a ledger, then re-run`,
+      );
+    }
+    if (isNew) chmodSync(this.path, 0o600); // SQLite propagates the main file's mode to -wal/-shm
+    const fileMode = statSync(this.path).mode & 0o777;
+    if (fileMode !== 0o600) {
+      db.close();
+      throw new CostLedgerError(
+        "ledger-file-mode",
+        `cost ledger ${this.path} is mode 0${fileMode.toString(8)}, not 0600`,
+        `chmod 0600 ${this.path}`,
+      );
+    }
+    // Lifted pragma posture from inkwell's tracer.py:108-113 / visualizer db.ts:77-93.
+    db.exec("PRAGMA journal_mode = WAL;");
+    db.exec("PRAGMA synchronous = NORMAL;");
+    db.exec("PRAGMA busy_timeout = 5000;");
+    db.exec(SCHEMA);
+    this.db = db;
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  // ─── ingest ────────────────────────────────────────────────────────────────
+
+  /**
+   * One row per emitted event. A malformed event — non-finite or negative
+   * `costUsd`, or `unpricedTurns > 0` (which is how DF2.7 marks absent/malformed
+   * usage upstream) — persists with `unpriced = 1` and `cost_micro_usd = 0`,
+   * never dropped: an unrecorded cost is an unenforceable cap (AC4).
+   */
+  ingestCostEvent(event: CostWireEvent, ctx: IngestCtx): IngestResult {
+    const started = Date.now();
+    assertIngestCtx(ctx);
+    const record = this.readRunRecord(ctx.runId);
+    // INV-COST-5: every token-kind row carries the DF2.3 key's hash and cap —
+    // spend is attributable to the one credential that could have produced it.
+    const keyHash = record?.keyHash;
+    const keyLimit = record?.limitMicroUsd;
+    if (keyHash === undefined || keyLimit === undefined) {
+      throw new CostLedgerError(
+        "key-hash-missing",
+        `run ${ctx.runId} has no resolvable keyHash/limitMicroUsd — token spend is unattributable, refusing to persist under a guessed key`,
+        `re-run the ingest after mintRunKey records the run's key (see scripts/run-record.ts ${ctx.runId}), or pass the record through readRunRecord`,
+      );
+    }
+    const unpriced =
+      !Number.isFinite(event.costUsd) || event.costUsd < 0 || ((event.unpricedTurns ?? 0) > 0);
+    const costMicroUsd = unpriced ? 0 : usdToMicros(event.costUsd);
+    if (!Number.isInteger(costMicroUsd) || costMicroUsd < 0) {
+      throw new CostLedgerError(
+        "cost-convert-invalid",
+        `costUsd ${event.costUsd} did not convert to a non-negative integer of µ$ (got ${costMicroUsd})`,
+        "fix the producer's cost event, or the row persists as unpriced only for the known-partial cases (non-finite/negative/unpricedTurns>0)",
+      );
+    }
+    const eventId = tokenEventId({
+      runId: ctx.runId,
+      agentId: event.agentId,
+      invocationSeq: ctx.invocationSeq,
+      turnCount: event.turnCount ?? 0,
+      costMicroUsd,
+      timestamp: event.timestamp,
+    });
+    const { changes } = this.db
+      .prepare(
+        `INSERT INTO cost_events (
+           event_id, run_id, repo_slug, issue_id, request_id, role, agent_id,
+           kind, invocation_seq, input_tokens, output_tokens, cache_read_tokens,
+           cache_write_tokens, turn_count, cost_micro_usd, unpriced,
+           key_hash, key_limit_micro_usd, created_at
+         ) VALUES (?,?,?,?,?,?,?, 'tokens', ?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(event_id) DO NOTHING`,
+      )
+      .run(
+        eventId,
+        ctx.runId,
+        ctx.repoSlug,
+        ctx.issueId,
+        ctx.requestId,
+        ctx.role,
+        event.agentId,
+        ctx.invocationSeq,
+        event.inputTokens ?? 0,
+        event.outputTokens ?? 0,
+        event.cacheReadTokens ?? 0,
+        event.cacheWriteTokens ?? 0,
+        event.turnCount ?? 0,
+        costMicroUsd,
+        unpriced ? 1 : 0,
+        keyHash,
+        keyLimit,
+        new Date().toISOString(),
+      );
+    const durationMs = Date.now() - started;
+    log({
+      requestId: ctx.requestId,
+      operation: "cost-ledger.ingest",
+      agentId: event.agentId,
+      timestamp: new Date().toISOString(),
+      duration: durationMs,
+      status: "ok",
+      runId: ctx.runId,
+      repoSlug: ctx.repoSlug,
+      issueId: ctx.issueId,
+      role: ctx.role,
+      kind: "tokens",
+      costMicroUsd,
+      unpriced: unpriced ? 1 : 0,
+      durationMs,
+      outcome: "inserted",
+      ingest_ms: durationMs,
+    });
+    return { eventId, inserted: changes === 1, unpriced };
+  }
+
+  /**
+   * The box-hours row: ceil(VM lifetime) × boxHourRateMicroUsd, from the DF2.1
+   * record's own timestamps, written at teardown's close step — the one point
+   * at which the destroy is confirmed and the lifetime is final. Never from
+   * `captureSpend`: that reads the same token money DF2.7 already priced, and
+   * ingesting it would double-count inside the SUM the gate reads.
+   */
+  ingestBoxHours(ctx: BoxHoursCtx): IngestResult {
+    const started = Date.now();
+    for (const field of ["runId", "repoSlug", "issueId", "requestId"] as const) {
+      const v = (ctx as unknown as Record<string, unknown>)[field];
+      if (typeof v !== "string" || v.length === 0) {
+        throw new CostLedgerError(
+          "ingest-ctx-invalid",
+          `box-hours ctx is missing ${field}`,
+          "supply { runId, repoSlug, issueId, requestId } from the dispatch that owns the run",
+        );
+      }
+    }
+    const record = this.readRunRecord(ctx.runId);
+    if (record === undefined) {
+      throw new CostLedgerError(
+        "record-missing",
+        `no run record resolves for ${ctx.runId} — the box-hours lifetime has no source`,
+        `re-run teardown with readRunRecord wired to the DF2.1 store (see .sandbox/runs/${ctx.runId}.json)`,
+      );
+    }
+    if (record.closedAt === undefined) {
+      // A teardown that aborts before close never reaches this call by design;
+      // reaching it with an open record means the caller jumped the gun — a
+      // billed box may still be alive (AC6 negative control).
+      throw new CostLedgerError(
+        "box-hours-record-open",
+        `run ${ctx.runId} is not closed — the VM lifetime is not final and the destroy is unconfirmed`,
+        're-run teardown to completion; qds cost reports this run as box-hours-pending until then',
+      );
+    }
+    const created = Date.parse(record.createdAt);
+    const closed = Date.parse(record.closedAt);
+    if (!Number.isFinite(created) || !Number.isFinite(closed) || closed < created) {
+      throw new CostLedgerError(
+        "box-hours-lifetime-invalid",
+        `run ${ctx.runId} lifetime is not computable (createdAt ${record.createdAt}, closedAt ${record.closedAt})`,
+        `repair the run record's timestamps, then re-run teardown — the row is pending until then`,
+      );
+    }
+    const rate = this.config.boxHourRateMicroUsd;
+    if (rate === undefined) {
+      throw new CostConfigError(
+        "box-hour-rate-unconfigured",
+        "boxHourRateMicroUsd is not configured — an unpriced box hour must surface, not silently cost 0",
+        `write {"boxHourRateMicroUsd": <integer µ$/h>} to .sandbox/cost-config.json (exe.dev figures are vendor-single-origin [VERIFY] — R5 §6 fact 11), then re-run teardown`,
+      );
+    }
+    const hours = Math.ceil((closed - created) / MS_PER_HOUR);
+    const costMicroUsd = hours * rate;
+    const eventId = boxHoursEventId(ctx.runId, record.closedAt);
+    const { changes } = this.db
+      .prepare(
+        `INSERT INTO cost_events (
+           event_id, run_id, repo_slug, issue_id, request_id, role, agent_id,
+           kind, invocation_seq, cost_micro_usd, unpriced, created_at
+         ) VALUES (?,?,?,?,?, NULL, NULL, 'box_hours', 0, ?, 0, ?)
+         ON CONFLICT(event_id) DO NOTHING`,
+      )
+      .run(eventId, ctx.runId, ctx.repoSlug, ctx.issueId, ctx.requestId, costMicroUsd, new Date().toISOString());
+    const durationMs = Date.now() - started;
+    log({
+      requestId: ctx.requestId,
+      operation: "cost-ledger.ingest",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: durationMs,
+      status: "ok",
+      runId: ctx.runId,
+      repoSlug: ctx.repoSlug,
+      issueId: ctx.issueId,
+      role: null,
+      kind: "box_hours",
+      costMicroUsd,
+      unpriced: 0,
+      durationMs,
+      outcome: "inserted",
+      ingest_ms: durationMs,
+    });
+    return { eventId, inserted: changes === 1, unpriced: false };
+  }
+
+  // ─── views ─────────────────────────────────────────────────────────────────
+
+  /** The run-keyed view (DF5.3 audit hop 3 / DF5.4 C10) — same schema as the issue view. */
+  readRunCost(runId: string): CostView {
+    return this.view("run_id = ?", [runId], "run_id = ? AND unpriced = 0", [runId], "run_id = ? AND unpriced = 1", [runId]);
+  }
+
+  /** The issue-keyed view — the same SUM the gate reads (INV-COST-2). */
+  readIssueCost(repoSlug: string, issueId: string): CostView {
+    const all = "repo_slug = ? AND issue_id = ?";
+    const priced = `${all} AND unpriced = 0`;
+    const unpricedQ = `${all} AND unpriced = 1`;
+    const keys = [repoSlug, issueId];
+    return this.view(all, keys, priced, keys, unpricedQ, keys);
+  }
+
+  private view(
+    allWhere: string,
+    allKeys: string[],
+    pricedWhere: string,
+    pricedKeys: string[],
+    unpricedWhere: string,
+    unpricedKeys: string[],
+  ): CostView {
+    this.assertQueryable();
+    const totalRow = this.db
+      .prepare(`SELECT COALESCE(SUM(cost_micro_usd), 0) AS total FROM cost_events WHERE ${pricedWhere}`)
+      .get(...pricedKeys) as { total: number };
+    const roleRows = this.db
+      .prepare(
+        `SELECT CASE WHEN kind = 'box_hours' THEN 'box-hours' ELSE role END AS bucket,
+                SUM(cost_micro_usd) AS sum
+         FROM cost_events WHERE ${pricedWhere} GROUP BY bucket`,
+      )
+      .all(...pricedKeys) as { bucket: string | null; sum: number }[];
+    const tokenRow = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(input_tokens), 0) AS inputTokens,
+                COALESCE(SUM(output_tokens), 0) AS outputTokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
+                COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens
+         FROM cost_events WHERE ${pricedWhere} AND kind = 'tokens'`,
+      )
+      .get(...pricedKeys) as {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheWriteTokens: number;
+    };
+    const unpricedRow = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${unpricedWhere}`)
+      .get(...unpricedKeys) as { n: number };
+    const anyRow = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere}`)
+      .get(...allKeys) as { n: number };
+    const perRole: Record<string, number> = {};
+    for (const row of roleRows) perRole[row.bucket ?? "unknown"] = row.sum;
+    return {
+      totalMicroUsd: totalRow.total,
+      perRole,
+      tokenTotals: { inputTokens: tokenRow.inputTokens, outputTokens: tokenRow.outputTokens },
+      cacheTotals: { cacheReadTokens: tokenRow.cacheReadTokens, cacheWriteTokens: tokenRow.cacheWriteTokens },
+      unpricedRows: unpricedRow.n,
+      hasEvents: anyRow.n > 0,
+    };
+  }
+
+  /**
+   * Per-run breakdown rows for the CLI: every run with priced token spend plus
+   * its box-hours state — `boxHoursPending` when no box_hours row exists yet
+   * (an aborted teardown is pending, never zero).
+   */
+  readIssueRuns(repoSlug: string, issueId: string): {
+    runId: string;
+    totalMicroUsd: number;
+    hasBoxHours: boolean;
+  }[] {
+    this.assertQueryable();
+    const rows = this.db
+      .prepare(
+        `SELECT run_id,
+                COALESCE(SUM(CASE WHEN unpriced = 0 THEN cost_micro_usd ELSE 0 END), 0) AS total,
+                MAX(CASE WHEN kind = 'box_hours' THEN 1 ELSE 0 END) AS hasBox
+         FROM cost_events WHERE repo_slug = ? AND issue_id = ?
+         GROUP BY run_id ORDER BY MIN(created_at)`,
+      )
+      .all(repoSlug, issueId) as { run_id: string; total: number; hasBox: number }[];
+    return rows.map((r) => ({ runId: r.run_id, totalMicroUsd: r.total, hasBoxHours: r.hasBox === 1 }));
+  }
+
+  private assertQueryable(): void {
+    try {
+      this.db.prepare("SELECT 1").get();
+    } catch (e) {
+      throw new CostLedgerError(
+        "ledger-unqueryable",
+        `the cost ledger cannot be queried (${(e as Error).message}) — refusing to treat spend as zero`,
+        `repair or remove ${this.path} (it is append-only state; a fresh file under-counts), then re-run`,
+      );
+    }
+  }
+
+  // ─── serialized admission (R2 §6) ──────────────────────────────────────────
+
+  /**
+   * The cap decision, inside one BEGIN IMMEDIATE transaction: read the priced
+   * SUM, add the ceilings of outstanding admissions (runs admitted but not yet
+   * reporting spend), and if committed ≥ cap refuse — otherwise insert this
+   * dispatch's admission and return `min(keyCapMicroUsd, remainingMicroUsd)`,
+   * the one ceiling handed to DF2.3's mint (AC3). The reservation retires by
+   * itself once the run's first ledger row lands, so a finished run's admission
+   * never blocks the next dispatch. A run that never reports ANY row keeps its
+   * reservation — by design: that run is still open, and its teardown (or the
+   * DF2.6 reaper, which routes through teardownSandbox) is what writes the
+   * retiring box_hours row, so a reservation's lifetime is bounded by the same
+   * fleet hygiene that bounds an open record with a live box.
+   */
+  admitIssue(input: AdmissionInput, capMicroUsd: number, keyCapMicroUsd: number): AdmissionDecision {
+    const started = Date.now();
+    this.assertQueryable();
+    if (!Number.isInteger(capMicroUsd) || capMicroUsd <= 0) {
+      throw new CostConfigError(
+        "cost-config-invalid",
+        `capMicroUsd must be a positive integer of micro-dollars, got ${capMicroUsd}`,
+        "fix defaultCapMicroUsd / perIssueOverrides in .sandbox/cost-config.json",
+      );
+    }
+    const decide = this.db.transaction((): AdmissionDecision => {
+      const spentRow = this.db
+        .prepare(
+          "SELECT COALESCE(SUM(cost_micro_usd), 0) AS total, COUNT(*) AS n FROM cost_events WHERE repo_slug = ? AND issue_id = ? AND unpriced = 0",
+        )
+        .get(input.repoSlug, input.issueId) as { total: number; n: number };
+      const reservedRow = this.db
+        .prepare(
+          `SELECT COALESCE(SUM(a.ceiling_micro_usd), 0) AS total
+           FROM gate_admissions a
+           WHERE a.repo_slug = ? AND a.issue_id = ?
+             AND NOT EXISTS (SELECT 1 FROM cost_events ce WHERE ce.run_id = a.run_id)`,
+        )
+        .get(input.repoSlug, input.issueId) as { total: number };
+      const unpricedRow = this.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM cost_events WHERE repo_slug = ? AND issue_id = ? AND unpriced = 1",
+        )
+        .get(input.repoSlug, input.issueId) as { n: number };
+      const spentMicroUsd = spentRow.total;
+      const reservedMicroUsd = reservedRow.total;
+      const unpricedRows = unpricedRow.n;
+      const cap = capMicroUsd;
+      const committed = spentMicroUsd + reservedMicroUsd;
+      if (committed >= cap) {
+        return {
+          admitted: false,
+          status: "over-budget",
+          reason: "spend-cap-exceeded",
+          capMicroUsd: cap,
+          spentMicroUsd,
+          reservedMicroUsd,
+          unpricedRows,
+        };
+      }
+      const remainingMicroUsd = cap - spentMicroUsd;
+      const ceiling = Math.min(keyCapMicroUsd, remainingMicroUsd);
+      this.db
+        .prepare(
+          `INSERT INTO gate_admissions (request_id, run_id, repo_slug, issue_id, ceiling_micro_usd, decided_at)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(request_id, run_id) DO NOTHING`,
+        )
+        .run(input.requestId, input.runId, input.repoSlug, input.issueId, ceiling, new Date().toISOString());
+      return {
+        admitted: true,
+        status: "within-budget",
+        capMicroUsd: cap,
+        spentMicroUsd,
+        reservedMicroUsd,
+        remainingMicroUsd,
+        unpricedRows,
+        admittedCeilingMicroUsd: ceiling,
+      };
+    });
+    const decision = decide.immediate();
+    const durationMs = Date.now() - started;
+    log({
+      requestId: input.requestId,
+      operation: "cost-ledger.gate",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: durationMs,
+      status: "ok",
+      runId: input.runId,
+      repoSlug: input.repoSlug,
+      issueId: input.issueId,
+      decision: decision.status,
+      capMicroUsd: decision.capMicroUsd,
+      spentMicroUsd: decision.spentMicroUsd,
+      reservedMicroUsd: decision.reservedMicroUsd,
+      unpricedRows: decision.unpricedRows,
+      ...(decision.admitted ? { remainingMicroUsd: decision.remainingMicroUsd, admittedCeilingMicroUsd: decision.admittedCeilingMicroUsd } : {}),
+      durationMs,
+      outcome: decision.status,
+      sum_query_ms: durationMs,
+    });
+    return decision;
+  }
+}
+
+// ─── ctx validation ──────────────────────────────────────────────────────────
+
+const COST_ROLES: ReadonlySet<string> = new Set(["lead", "worker", "resident", "tier1"]);
+
+function assertIngestCtx(ctx: IngestCtx): void {
+  const strings = ["runId", "repoSlug", "issueId", "requestId", "role"] as const;
+  for (const field of strings) {
+    const v = (ctx as unknown as Record<string, unknown>)[field];
+    if (typeof v !== "string" || v.length === 0) {
+      throw new CostLedgerError(
+        "ingest-ctx-invalid",
+        `ingest ctx is missing ${field} — an unattributable cost is not persisted under a guessed key (INV-COST-6)`,
+        "supply { runId, repoSlug, issueId, requestId, role, invocationSeq } from the dispatch that spawned the agent",
+      );
+    }
+  }
+  if (!COST_ROLES.has(ctx.role)) {
+    // The schema's CHECK is the backstop; this is the error surface — a raw
+    // SQLITE_CONSTRAINT would name no field and suggest no next command.
+    throw new CostLedgerError(
+      "ingest-ctx-invalid",
+      `ingest ctx role must be one of lead|worker|resident|tier1 (got ${JSON.stringify(ctx.role)})`,
+      "pass the roster entry's role verbatim — it is never inferred from the model slug or agent name",
+    );
+  }
+  if (
+    typeof ctx.invocationSeq !== "number" ||
+    !Number.isInteger(ctx.invocationSeq) ||
+    ctx.invocationSeq < 0
+  ) {
+    throw new CostLedgerError(
+      "ingest-ctx-invalid",
+      "ingest ctx invocationSeq must be a non-negative integer (the dispatcher's per-(run, agent) spawn counter)",
+      "pass the invocationSeq fixed at spawn — it is what keeps two invocations of one agent from digesting identically",
+    );
+  }
+}

@@ -142,3 +142,8 @@ export * from "./teardown.ts";
 export * from "./quota.ts";
 export * from "./reaper.ts";
 export * from "./timeout.ts";
+// DF2.8: the micro-dollar cost ledger (append-only, host-side) and the
+// pre-spawn budget gate join the exported surface — the dispatcher (DF3.1)
+// reaches them through the same front door as every other verb.
+export * from "./cost-ledger.ts";
+export * from "./budget-gate.ts";

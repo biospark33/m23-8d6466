@@ -130,6 +130,23 @@ export const EXTENSION_NAMESPACES: Readonly<
   fixLoop: { schemaVersion: 1, fields: { fixContext: "string", fixOutcome: "string" } },
   /** DF3.2 */
   fanout: { schemaVersion: 1, fields: { fanoutId: "string", arm: "string" } },
+  /**
+   * DF2.8: the budget gate's admission decision, written by `createRun` when the
+   * dispatch carries an issue ref. `admittedCeilingMicroUsd` is the one clamped
+   * ceiling handed to DF2.3's mint; `repoSlug`/`issueId` are what teardown's
+   * box-hours hook reads to attribute the run's box-hours row.
+   */
+  budget: {
+    schemaVersion: 1,
+    fields: {
+      repoSlug: "string",
+      issueId: "string",
+      capMicroUsd: "int",
+      spentMicroUsd: "int",
+      reservedMicroUsd: "int",
+      admittedCeilingMicroUsd: "int",
+    },
+  },
 };
 
 // ---------------------------------------------------------------------------

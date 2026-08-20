@@ -1,3 +1,7 @@
+---
+baseline_commit: 9c93c56c1fa833e89b813af91603eabaf9cf0f16
+---
+
 # DF2.8: Micro-Dollar Cost Ledger with Budget Cap and Pre-Spawn Dispatch Refusal
 
 **Story Points:** 4
@@ -255,10 +259,10 @@ DF1.8 uses.)*
 
 ## Definition of Done
 
-- [ ] **Impl:** `ingestCostEvent(event, ctx)` / `assertWithinBudget` / `readIssueCost` exported from
+- [x] **Impl:** `ingestCostEvent(event, ctx)` / `assertWithinBudget` / `readIssueCost` exported from
       `src/providers/`, with the deterministic `event_id` PK + `ON CONFLICT DO NOTHING` making
       redelivery a no-op without collapsing two invocations of one agent into one row.
-- [ ] **Impl:** `readRunCost(runId)` and `readIssueCost(repoSlug, issueId)` share **one** result
+- [x] **Impl:** `readRunCost(runId)` and `readIssueCost(repoSlug, issueId)` share **one** result
       schema — `{ totalMicroUsd, perRole, tokenTotals: { inputTokens, outputTokens }, cacheTotals: {
       cacheReadTokens, cacheWriteTokens }, unpricedRows, hasEvents }` — over `WHERE run_id = ? AND
       unpriced = 0` and `WHERE repo_slug = ? AND issue_id = ? AND unpriced = 0` respectively.
@@ -267,42 +271,129 @@ DF1.8 uses.)*
       `NOT NULL` on every row (AC1) — these views change the query key, not the schema. `hasEvents:
       false` is what distinguishes a run or issue with no ledger rows from one that spent nothing.
       `qds cost` and any downstream audit consumer read the same field names from either function.
-- [ ] **Impl:** integer micro-dollars throughout; single half-up conversion at ingest; default cap
+- [x] **Impl:** integer micro-dollars throughout; single half-up conversion at ingest; default cap
       **5,000,000 µ$** with per-issue overrides keyed `owner/repo#N`.
-- [ ] **Contract:** `qds cost <owner/repo>#<N>` prints total, per-role split, per-run breakdown,
+- [x] **Contract:** `qds cost <owner/repo>#<N>` prints total, per-role split, per-run breakdown,
       cache tokens and unpriced count, all derived from the SUM — a bare issue number is rejected.
-- [ ] **Integration:** the gate runs on the DF2.1 `create` seam and hands
+- [x] **Integration:** the gate runs on the DF2.1 `create` seam and hands
       `min(defaultKeyCapMicroUsd, remainingMicroUsd)` to DF2.3's mint; box-hour rows written at
       teardown from the run record's VM lifetime × `boxHourRateMicroUsd`, never from
       `captureSpend`.
-- [ ] **Security:** append-only enforced by store triggers (INV-COST-1); `key_hash` on every token
+- [x] **Security:** append-only enforced by store triggers (INV-COST-1); `key_hash` on every token
       row and plaintext absent from every row and log line (INV-COST-5).
-- [ ] **Test (unit):** three DF2.7 events for one run → three rows split by role summing exactly to
+- [x] **Test (unit):** three DF2.7 events for one run → three rows split by role summing exactly to
       the issue total; replaying all three adds zero rows, while a second invocation of the same
       agent in the same run records a second row rather than colliding into the first.
-- [ ] **Test (attribution context):** an `ingestCostEvent` call whose `ctx` omits any of `runId` /
+- [x] **Test (attribution context):** an `ingestCostEvent` call whose `ctx` omits any of `runId` /
       `repoSlug` / `issueId` / `requestId` / `role` → structured error naming the field and **zero**
       rows written; a `role` supplied by the dispatcher from the roster is stored verbatim and no
       code path derives it from the model slug or agent name.
-- [ ] **Test (box-hours single row):** one torn-down run → exactly one `box_hours` row equal to
+- [x] **Test (box-hours single row):** one torn-down run → exactly one `box_hours` row equal to
       lifetime × `boxHourRateMicroUsd`, `captureSpend`'s figure ingested nowhere, and the issue SUM
       equal to the token rows plus that one row exactly — a `captureSpend`-ingesting implementation
       double-counts token spend and MUST fail this test. A teardown aborted before its close step
       (injected harvest failure, DF2.5 AC3) writes **zero** `box_hours` rows and `qds cost` reports
       that run `box-hours-pending`, never `0` (AC6); re-running teardown to completion then writes
       exactly one row.
-- [ ] **Test (unit-change negative control):** a cent-denominated or float-valued store fails; a
+- [x] **Test (unit-change negative control):** a cent-denominated or float-valued store fails; a
       sub-cent per-role split (all-cheap roster) round-trips without loss of precision.
-- [ ] **Test (refusal before spawn):** over-cap issue → refusal payload and the recording driver
+- [x] **Test (refusal before spawn):** over-cap issue → refusal payload and the recording driver
       registers zero `create` and zero mint calls; an implementation gating after `create` passes
       the refusal assertion and MUST fail the zero-call assertion.
-- [ ] **Test (malformed event):** non-finite / negative / absent-usage / `unpricedTurns > 0` → row
+- [x] **Test (malformed event):** non-finite / negative / absent-usage / `unpricedTurns > 0` → row
       persisted with `unpriced = 1`, excluded from the priced SUM, counted in the view and the gate
       decision record; zero events dropped.
-- [ ] **Test (e2e demo — MANDATORY):** drive a lead+2-worker run's cost events into a fresh ledger,
+- [x] **Test (e2e demo — MANDATORY):** drive a lead+2-worker run's cost events into a fresh ledger,
       then attempt a second dispatch over the cap — capture `qds cost qds/demo#42` output and the
       refusal record as artifacts, showing the per-role split in µ$ and a box never created.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Implementation Plan (as executed)
+
+TDD red→green per module, in dependency order. The load-bearing store
+(`cost-ledger.ts`) was authored first against a failing 44-test suite, then the
+budget gate + `createRun` seam, the teardown close hook, and the `qds cost` CLI.
+Wave-parallel subagents executed the three dependent modules against frozen
+contracts; the store and all cross-cutting integration were lead-authored.
+
+### Debug Log
+
+- `event_id` INSERT placeholder ordering: `kind` is column 8 — the literal must
+  sit at position 8 in VALUES, not 11 (caught red, fixed green).
+- bun `SUM` on an empty set returns `null`, not 0 — every aggregate uses
+  `COALESCE(SUM(...), 0)` (integer µ$ math never sees null).
+- bun `new Database(path)` creates the file 0644 — chmod 0600 immediately after
+  first open; SQLite propagates the main file's mode to `-wal`/`-shm`.
+- bun:test `expect(fn).toThrow()` returns void — payload assertions use try/catch.
+- Teardown's already-closed early path skipped EVERYTHING, including the
+  box-hours hook: a teardown whose `store.close` committed but whose process
+  died before ingest would never write the row. The early path now still fires
+  the hook (idempotent by `event_id`) — the crash window is closed.
+- `createdAt`/`closedAt` are not settable through `RunRecordStore.set()` —
+  fixtures close with an explicit `new Date(...)` and supply the matching
+  backdated `createdAt` via the ledger's `readRunRecord` seam.
+
+### Completion Notes
+
+- **R2 §6 serialized-admission mandate implemented** (the story prose's "single
+  read-and-compare" is stale against its own cited authority): the cap decision
+  runs inside one `BEGIN IMMEDIATE` transaction over the priced SUM **plus the
+  ceilings of outstanding `gate_admissions`** — append-only reservations that
+  retire themselves when the run's first ledger row lands. Two concurrent
+  dispatches can no longer both read sub-cap and overshoot; the concurrent test
+  proves the second refusal where a bare read-compare admits both. Over-reservation
+  is the fail-safe direction: an admitted run's full clamped ceiling counts
+  against the cap until its real spend is observable.
+- **`gate_admissions` table** joins the schema (append-only triggers like
+  `cost_events`) — keyed `(request_id, run_id)` so a dispatch retry is a no-op.
+- **`perRole` reports box-hours under the literal `"box-hours"` key** — the
+  explicit unattributed line AC1's note requires; no invented role.
+- **`boxHourRateMicroUsd` is config-required**: an unconfigured rate is a
+  structured `CostConfigError` at ingestBoxHours (remediation names the config
+  write), never a silent $0 box row.
+- **`budget` extension namespace** (run-record.ts): `createRun` writes
+  `{ repoSlug, issueId, capMicroUsd, spentMicroUsd, reservedMicroUsd,
+  admittedCeilingMicroUsd }` — the dispatcher's mint reads `admittedCeilingMicroUsd`
+  (`min(defaultKeyCapMicroUsd, remainingMicroUsd)`), teardown's box-hours hook
+  reads the issue attribution. `CreateRunOptions.issue?: { repoSlug, issueId,
+  requestId? }` gates the seam; all five existing `createRun` callers unchanged
+  (absent issue ⇒ pre-DF2.8 behavior).
+- **Rate provenance (F8/R6)**: no rate constant exists in the ledger; priced
+  rows carry DF2.7's provider-reported cost verbatim (µ$), box-hours carry the
+  configured API rate only.
+- Reference lifts (IndyDevDan repos, per derivation lineage): WAL/synchronous/
+  busy_timeout pragma block (inkwell tracer.py:108-113), strict-schema +
+  reject-unknown-key discipline (run_record.py), fixed-width CLI renderer
+  (runs_table.py), teardown ordering taxonomy (teardown.just). Genuinely new
+  (no upstream exists): deterministic sha256 `event_id` idempotency, append-only
+  RAISE(ABORT) triggers, integer micro-dollars, host-side pre-spawn gate,
+  box-hours.
+- Evidence: `_bmad-output/evidence/df2-8/e2e-cost-demo.json` (mode 0600) — the
+  DoD's mandatory E2E artifacts (qds cost output + refusal record, box never
+  created, zero mints on refusal).
+
+### File List
+
+- `src/providers/cost-ledger.ts` (NEW)
+- `src/providers/budget-gate.ts` (NEW)
+- `scripts/qds-cost.ts` (NEW)
+- `tests/providers/cost-ledger.test.ts` (NEW)
+- `tests/providers/budget-gate.test.ts` (NEW)
+- `tests/scripts/qds-cost.test.ts` (NEW)
+- `src/providers/driver.ts` (MODIFIED — CreateRunOptions.issue + budget gate before store.create)
+- `src/providers/run-record.ts` (MODIFIED — `budget` EXTENSION_NAMESPACES entry)
+- `src/providers/teardown.ts` (MODIFIED — CostLedgerHook + close-step hook + early-path crash-window fix)
+- `scripts/sandbox-teardown.ts` (MODIFIED — costLedger wired by default)
+- `src/providers/index.ts` (MODIFIED — cost-ledger + budget-gate exports)
+- `tests/providers/teardown.test.ts` (MODIFIED — 7 new DF2.8 tests)
+- `_bmad-output/evidence/df2-8/e2e-cost-demo.json` (NEW — evidence artifact)
+
+### Change Log
+
+- 2026-08-20 — DF2.8 implemented: micro-dollar cost ledger (append-only,
+  deterministic event_id, idempotent replay), serialized-admission budget gate
+  on the create seam, teardown close-step box-hours hook, `qds cost` CLI;
+  44+10+9+32(new-context) tests green, 198 across all seven affected suites.
+
+**Status:** review — implemented, 2280-test full suite green, evidence captured; awaiting PR review

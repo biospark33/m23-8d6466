@@ -37,6 +37,7 @@ import {
   type RunRecord,
   type TeardownDeps,
 } from "../src/providers/index.ts";
+import { CostLedger } from "../src/providers/cost-ledger.ts";
 import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 
@@ -265,6 +266,17 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     // offline. openRouterKeyApi throws its own provisioning-key-missing
     // remediation before anything is mutated.
     if (rec.keyHash !== undefined) deps.keyApi = openRouterKeyApi();
+    // DF2.8: wire the cost ledger by default — it prices box hours at close.
+    deps.costLedger = new CostLedger({
+      readRunRecord: (id) => {
+        try {
+          const r = store.get(id);
+          return { createdAt: r.createdAt, closedAt: r.closedAt, keyHash: r.keyHash, limitMicroUsd: r.limitMicroUsd };
+        } catch {
+          return undefined; // ledger surfaces its own structured record-missing error
+        }
+      },
+    });
     // The waiver goes to the run log + stdout, never the record (INV-5).
     if (parsed.noHarvest) out(`teardown.harvest_waived ${parsed.runId}\n`);
     await teardownSandbox(deps, parsed.runId, { noHarvest: parsed.noHarvest });
