@@ -147,7 +147,21 @@ export async function createRun(
     | undefined;
   if (opts.issue !== undefined) {
     const issue = opts.issue;
-    const ledger = new CostLedger({ readRunRecord: (id) => store.get(id) });
+    const ledger = new CostLedger({
+      // ENOENT → undefined so the gate's orphan-admission expiry can see a run
+      // whose store.create failed (its reservation must stop counting); every
+      // other read failure propagates and refuses the dispatch — the same
+      // typed-code classification harvest.ts getRecord applies, never message
+      // text.
+      readRunRecord: (id) => {
+        try {
+          return store.get(id);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+          throw e;
+        }
+      },
+    });
     try {
       admitted = {
         decision: assertWithinBudget(ledger, {

@@ -18,7 +18,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
 import { createRun } from "../../src/providers/driver.ts";
 import { assertWithinBudget, mintCapMicroUsd, OverBudgetError } from "../../src/providers/budget-gate.ts";
@@ -27,8 +27,6 @@ import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { mintRunKey } from "../../src/providers/credentials.ts";
-
-const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 
 let dir: string;
 let prevCwd: string;
@@ -531,16 +529,27 @@ describe("E2E demo: lead+2-worker run → second dispatch over cap refused", () 
     expect(output).toContain("worker");
     expect(output).toContain("pending"); // run-1 box hours not yet torn down
 
-    // Artifacts: the DoD demands the qds cost output + refusal record on disk.
-    const evidenceDir = join(REPO_ROOT, "_bmad-output", "evidence", "df2-8");
+    // Artifacts: the DoD evidence payload, written under the per-test tmpdir so
+    // a normal test run never mutates the repository working tree (the
+    // committed copy in _bmad-output/evidence/df2-8/ carries the same shape).
+    // Every figure is scope-labeled: dispatch-1 figures vs issue-cumulative.
+    const evidenceDir = join(dir, "evidence", "df2-8");
     mkdirSync(evidenceDir, { recursive: true });
     writeFileSync(join(evidenceDir, "e2e-cost-demo.json"), JSON.stringify({
       story: "df2-8",
       capturedAt: new Date().toISOString(),
       issue: "qds/demo#42",
       capMicroUsd: 5_000_000,
-      dispatch1: { runId: run1, remainingMicroUsd: 100_000, mintedCeilingMicroUsd: ceiling },
-      spend: { lead: 100_000, worker: 200_000, totalMicroUsd: 5_200_000 },
+      dispatch1: {
+        runId: run1,
+        headroomBeforeDispatchMicroUsd: 100_000,
+        mintedCeilingMicroUsd: ceiling,
+      },
+      spend: {
+        dispatch1MicroUsd: { lead: 100_000, worker: 200_000 },
+        priorIssueSpendMicroUsd: 4_900_000,
+        issueCumulativeMicroUsd: 5_200_000,
+      },
       dispatch2Refusal: {
         status: "over-budget", reason: "spend-cap-exceeded",
         capMicroUsd: 5_000_000, spentMicroUsd: 5_200_000,

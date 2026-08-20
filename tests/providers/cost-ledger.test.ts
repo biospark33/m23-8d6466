@@ -27,6 +27,7 @@ import {
   DEFAULT_COST_CONFIG,
   capForIssue,
   loadCostConfig,
+  type RunCostRecord,
 } from "../../src/providers/cost-ledger.ts";
 
 // ─── fixtures ────────────────────────────────────────────────────────────────
@@ -38,8 +39,8 @@ let ledgerPath: string;
 let ledger: CostLedger;
 
 /** The record the ledger resolves run_id → key through (DF2.3's mint wrote it). */
-const RECORDS = new Map<string, { keyHash?: string; limitMicroUsd?: number; createdAt: string; closedAt?: string }>();
-function seedRecord(runId: string, over: Partial<(typeof RECORDS)["get"] extends undefined ? never : NonNullable<ReturnType<typeof RECORDS.get>>> = {}): void {
+const RECORDS = new Map<string, RunCostRecord>();
+function seedRecord(runId: string, over: Partial<RunCostRecord> = {}): void {
   RECORDS.set(runId, {
     keyHash: "sha256:deadbeef",
     limitMicroUsd: 50_000_000,
@@ -258,8 +259,7 @@ describe("DF2.8 malformed events (AC4)", () => {
   test.each([
     ["non-finite costUsd", { costUsd: Number.NaN }],
     ["negative costUsd", { costUsd: -0.01 }],
-    ["unpricedTurns > 0", { unpricedTurns: 2 }],
-  ] as const)("malformed event (%s) → row persisted unpriced=1, cost 0, excluded from SUM, counted", (_label, over) => {
+  ] as const)("malformed cost (%s) → row persisted unpriced=1, cost 0, excluded from SUM, counted", (_label, over) => {
     seedRecord("run-a1");
     const res = ledger.ingestCostEvent(mkEvent(over as Partial<CostEvent>), mkCtx());
     expect(res.unpriced).toBe(true);
@@ -276,6 +276,25 @@ describe("DF2.8 malformed events (AC4)", () => {
     };
     db.close();
     expect(row.cost_micro_usd).toBe(0);
+    expect(row.unpriced).toBe(1);
+  });
+
+  test("finite non-negative costUsd with unpricedTurns > 0 → flagged unpriced, converted partial cost kept", () => {
+    seedRecord("run-a1");
+    const res = ledger.ingestCostEvent(mkEvent({ costUsd: 0.05, unpricedTurns: 2 }), mkCtx());
+    expect(res.unpriced).toBe(true);
+
+    const view = ledger.readIssueCost("qds/demo", "42");
+    expect(view.totalMicroUsd).toBe(0); // still excluded — partial usage would undercount the cap
+    expect(view.unpricedRows).toBe(1); // surfaced, not silent
+
+    const db = rawDb();
+    const row = db.prepare("SELECT cost_micro_usd, unpriced FROM cost_events").get() as {
+      cost_micro_usd: number;
+      unpriced: number;
+    };
+    db.close();
+    expect(row.cost_micro_usd).toBe(50_000); // the recorded partial figure, not zeroed
     expect(row.unpriced).toBe(1);
   });
 
@@ -396,13 +415,8 @@ describe("DF2.8 store invariants (INV-COST-1/2/4)", () => {
     expect(view.totalMicroUsd).toBe(15_000);
   });
 
-  test("the ledger file is 0600 inside a 0700 directory", () => {
-    seedRecord("run-a1");
-    ledger.ingestCostEvent(mkEvent(), mkCtx());
+  test("the ledger file is 0600", () => {
     expect(statSync(ledgerPath).mode & 0o777).toBe(0o600);
-    const sandboxDir = join(dir, ".sandbox");
-    mkdirSync(sandboxDir, { recursive: true }); // no-op if present
-    // The default-path constructor makes .sandbox itself 0700 (checked separately below).
   });
 
   test("default path opens .sandbox/cost-ledger.db with a 0700 directory", () => {
@@ -570,6 +584,36 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     const db = rawDb();
     expect(() => db.run("DELETE FROM gate_admissions")).toThrow(/append-only/);
     db.close();
+  });
+
+  test("an admitted ceiling subtracts outstanding reservations from headroom — never over-commits the cap", () => {
+    seedRecord("run-a0");
+    seedRecord("run-a1");
+    seedRecord("run-a2");
+    ledger.ingestCostEvent(mkEvent({ agentId: "lead-0", costUsd: 1.0 }), mkCtx({ runId: "run-a0", requestId: "r0" })); // 1M spent
+    // Dispatch 1: keyCap (500k) below the 4M headroom — the key-cap clamp wins.
+    const first = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "r1" }, cap, 500_000);
+    if (!first.admitted) throw new Error("expected first admission");
+    expect(first.admittedCeilingMicroUsd).toBe(500_000);
+    // Dispatch 2: headroom is cap − spent − reserved (3.5M), the same committed
+    // figure the refusal check uses — not cap − spent (4M).
+    const second = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a2", requestId: "r2" }, cap, 4_000_000);
+    if (!second.admitted) throw new Error("expected second admission");
+    expect(second.reservedMicroUsd).toBe(500_000);
+    expect(second.remainingMicroUsd).toBe(cap - 1_000_000 - 500_000);
+    expect(second.admittedCeilingMicroUsd).toBe(cap - 1_000_000 - 500_000); // never above cap − committed
+  });
+
+  test("an admission whose run record never existed (store.create failed) expires — it cannot consume the issue cap", () => {
+    seedRecord("run-real");
+    // Orphaned admission: dispatched, admitted, then store.create threw
+    // (EEXIST / invalid id) — no run record, so no run can ever report spend.
+    const orphan = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-orphan", requestId: "r1" }, cap, 50_000_000);
+    expect(orphan.admitted).toBe(true);
+    // A later dispatch for a real run is not refused by the orphan's reservation.
+    const after = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-real", requestId: "r2" }, cap, 50_000_000);
+    if (!after.admitted) throw new Error("expected admission past the expired orphan reservation");
+    expect(after.reservedMicroUsd).toBe(0);
   });
 });
 

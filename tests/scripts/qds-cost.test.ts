@@ -19,7 +19,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -31,16 +31,25 @@ const CLI = join(process.cwd(), "scripts", "qds-cost.ts");
 
 let dir: string;
 let prevEnv: string | undefined;
+let prevConfigEnv: string | undefined;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "qds-cost-"));
   prevEnv = process.env.QDS_COST_LEDGER_FILE;
+  prevConfigEnv = process.env.QDS_COST_CONFIG_FILE;
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  delete process.env.QDS_COST_CONFIG_FILE;
   process.env.QDS_COST_LEDGER_FILE = join(dir, "cost-ledger.db");
 });
 
 afterEach(() => {
-  if (prevEnv === undefined) process.env.QDS_COST_LEDGER_FILE = undefined;
+  // Assigning `undefined` would store the string "undefined" — delete restores absence.
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  if (prevEnv === undefined) delete process.env.QDS_COST_LEDGER_FILE;
   else process.env.QDS_COST_LEDGER_FILE = prevEnv;
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  if (prevConfigEnv === undefined) delete process.env.QDS_COST_CONFIG_FILE;
+  else process.env.QDS_COST_CONFIG_FILE = prevConfigEnv;
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -72,7 +81,8 @@ describe("qds-cost CLI", () => {
     });
 
     test("valid ref `qds/demo#42` with zero rows → exit 0, prints 0 µ$, no-rows line", () => {
-      // Fresh ledger has no rows
+      // An existing-but-empty ledger: the absent-file case is its own refusal (below).
+      new CostLedger({ path: join(dir, "cost-ledger.db"), config: { defaultCapMicroUsd: 5_000_000 } }).close();
       const res = spawnSync(CLI, ["qds/demo#42"], { env: process.env });
       expect(res.status).toBe(0);
       const out = res.stdout.toString();
@@ -321,13 +331,37 @@ describe("qds-cost CLI", () => {
       // Create a directory at the ledger path (SQLite will fail to open it)
       const badPath = join(dir, "bad-ledger");
       process.env.QDS_COST_LEDGER_FILE = badPath;
-      const { mkdirSync } = require("node:fs");
       mkdirSync(badPath);
 
       const res = spawnSync(CLI, ["qds/demo#42"], { env: process.env });
       expect(res.status).toBe(1);
       const out = res.stdout.toString();
       expect(out).toContain("ledger-unopenable");
+      expect(out).toContain("next:");
+    });
+
+    test("absent ledger file → exit 1, ledger-missing + next: remediation (never zero spend)", () => {
+      process.env.QDS_COST_LEDGER_FILE = join(dir, "does-not-exist.db");
+
+      const res = spawnSync(CLI, ["qds/demo#42"], { env: process.env });
+      expect(res.status).toBe(1);
+      const out = res.stdout.toString();
+      expect(out).toContain("ledger-missing");
+      expect(out).toContain("does-not-exist.db");
+      expect(out).toContain("next:");
+    });
+  });
+
+  describe("config errors", () => {
+    test("unparseable cost config → exit 1, cost-config-unreadable + next: remediation", () => {
+      const configFile = join(dir, "bad-config.json");
+      writeFileSync(configFile, "{not json");
+      process.env.QDS_COST_CONFIG_FILE = configFile;
+
+      const res = spawnSync(CLI, ["qds/demo#42"], { env: process.env });
+      expect(res.status).toBe(1);
+      const out = res.stdout.toString();
+      expect(out).toContain("cost-config-unreadable");
       expect(out).toContain("next:");
     });
   });

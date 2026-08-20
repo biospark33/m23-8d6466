@@ -16,17 +16,26 @@
  * - Unpriced row count
  *
  * Zero-row issue: prints 0 µ$, empty split, "no ledger rows for this issue",
- * exit 0 (not an error, AC5).
+ * exit 0 (not an error, AC5) — for an EXISTING ledger file; an absent one
+ * refuses with `ledger-missing` (INV-COST-6: a reporting CLI must not invent
+ * an empty ledger and read it as zero spend).
  *
  * Bare issue numbers, `#42`, `demo#42` (no owner), or empty argv are rejected
  * with `cost-ref-invalid` and exit 2.
  *
- * Ledger errors (unopenable/dir-mode/file-mode) exit 1 with code + remediation.
+ * Config errors (unreadable/invalid) and ledger errors (missing/unopenable/
+ * dir-mode/file-mode) exit 1 with code + remediation.
  */
 
-import { writeSync } from "node:fs";
+import { existsSync, writeSync } from "node:fs";
 
-import { CostLedger, loadCostConfig, type CostView } from "../src/providers/cost-ledger.ts";
+import {
+  CostLedger,
+  DEFAULT_COST_LEDGER_FILE,
+  loadCostConfig,
+  type CostConfig,
+  type CostView,
+} from "../src/providers/cost-ledger.ts";
 
 const ISSUE_REF_RE = /^[\w.-]+\/[\w.-]+#\d+$/;
 
@@ -99,12 +108,12 @@ function printView(out: (s: string) => void, issueRef: string, view: CostView, r
   }
 
   // Token totals
-  if (view.hasEvents || view.tokenTotals.inputTokens > 0 || view.tokenTotals.outputTokens > 0) {
+  if (view.hasEvents) {
     out(`TOKENS:  input ${formatNumber(view.tokenTotals.inputTokens)}  output ${formatNumber(view.tokenTotals.outputTokens)}\n`);
   }
 
   // Cache totals
-  if (view.hasEvents || view.cacheTotals.cacheReadTokens > 0 || view.cacheTotals.cacheWriteTokens > 0) {
+  if (view.hasEvents) {
     out(`CACHE:   read ${formatNumber(view.cacheTotals.cacheReadTokens)}  write ${formatNumber(view.cacheTotals.cacheWriteTokens)}\n`);
   }
 
@@ -146,7 +155,28 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
     return 2;
   }
 
-  const config = loadCostConfig().config;
+  let config: CostConfig;
+  try {
+    config = loadCostConfig().config;
+  } catch (e) {
+    const err = e as { code?: string; message?: string; remediation?: string };
+    fail(out, err.code ?? "cost-config-error", err.message ?? String(e), err.remediation);
+    return 1;
+  }
+
+  // INV-COST-6 for the reporting side: an absent ledger refuses instead of
+  // materializing an empty one — a typo'd $QDS_COST_LEDGER_FILE must not read
+  // as "nothing spent".
+  const ledgerPath = process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE;
+  if (!existsSync(ledgerPath)) {
+    fail(
+      out,
+      "ledger-missing",
+      `no cost ledger at ${ledgerPath} — refusing to report zero spend from a file that does not exist`,
+      `dispatch a run first (the budget gate creates the ledger), or point QDS_COST_LEDGER_FILE at the existing ledger file`,
+    );
+    return 1;
+  }
   let ledger: CostLedger;
   try {
     ledger = new CostLedger({ config });
@@ -159,15 +189,15 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
   try {
     const view = ledger.readIssueCost(issueRef.repoSlug, issueRef.issueId);
     const runs = ledger.readIssueRuns(issueRef.repoSlug, issueRef.issueId);
-    ledger.close();
 
     printView(out, `${issueRef.repoSlug}#${issueRef.issueId}`, view, runs);
     return 0;
   } catch (e) {
     const err = e as { code?: string; message?: string; remediation?: string };
     fail(out, err.code ?? "ledger-error", err.message ?? String(e), err.remediation);
-    ledger.close();
     return 1;
+  } finally {
+    ledger.close();
   }
 }
 

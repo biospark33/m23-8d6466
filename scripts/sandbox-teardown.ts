@@ -253,6 +253,7 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     ...(parsed.dir === undefined ? {} : { runsDir: parsed.dir }),
   };
   let lock: string | undefined;
+  let ledger: CostLedger | undefined;
   try {
     lock = acquireRunLock(store.dir, parsed.runId);
     if (parsed.mode === "harvest") {
@@ -267,16 +268,24 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     // remediation before anything is mutated.
     if (rec.keyHash !== undefined) deps.keyApi = openRouterKeyApi();
     // DF2.8: wire the cost ledger by default — it prices box hours at close.
-    deps.costLedger = new CostLedger({
+    ledger = new CostLedger({
       readRunRecord: (id) => {
         try {
-          const r = store.get(id);
+          const r = getRecord({ store }, id);
           return { createdAt: r.createdAt, closedAt: r.closedAt, keyHash: r.keyHash, limitMicroUsd: r.limitMicroUsd };
-        } catch {
-          return undefined; // ledger surfaces its own structured record-missing error
+        } catch (e) {
+          // Only a genuine missing record maps to undefined — the shared
+          // getRecord classifier distinguishes it by typed code; the ledger
+          // surfaces its own structured record-missing error for that. A
+          // corrupt or unreadable record (record-read-failed) propagates: a
+          // live box and key may sit behind it, and swallowing the failure
+          // would let the ledger treat the run as never-existing.
+          if ((e as HarvestError).code === "no-record") return undefined;
+          throw e;
         }
       },
     });
+    deps.costLedger = ledger;
     // The waiver goes to the run log + stdout, never the record (INV-5).
     if (parsed.noHarvest) out(`teardown.harvest_waived ${parsed.runId}\n`);
     await teardownSandbox(deps, parsed.runId, { noHarvest: parsed.noHarvest });
@@ -289,6 +298,17 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     fail(out, err.code ?? "error", err.message ?? String(e), err.remediation);
     return 1;
   } finally {
+    // Close the ledger handle here so every exit path (success, teardown
+    // failure, harvest return) releases it — same policy as the lock below: a
+    // cleanup failure is its own diagnostic and must not replace the teardown
+    // result already reported.
+    if (ledger !== undefined) {
+      try {
+        ledger.close();
+      } catch (e) {
+        fail(out, "ledger-close-failed", `could not close the cost ledger: ${(e as Error).message}`, "the ledger is WAL-mode and the handle dies with the process; re-run to confirm it still reads");
+      }
+    }
     // Release only OUR lock: a refused invocation (EEXIST) must never unlink
     // the holder's lock file. A release failure is its own diagnostic — it
     // must not replace a successful teardown (or the failure already

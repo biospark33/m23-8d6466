@@ -161,6 +161,9 @@ export const DEFAULT_COST_CONFIG: Readonly<CostConfig> = { defaultCapMicroUsd: 5
 
 export const DEFAULT_COST_CONFIG_FILE = ".sandbox/cost-config.json";
 
+/** The ledger's default path — shared with the reporting CLI's existence check. */
+export const DEFAULT_COST_LEDGER_FILE = ".sandbox/cost-ledger.db";
+
 const ISSUE_KEY_RE = /^[\w.-]+\/[\w.-]+#\d+$/;
 
 const CONFIG_KEYS: readonly (keyof CostConfig)[] = ["defaultCapMicroUsd", "perIssueOverrides", "boxHourRateMicroUsd"];
@@ -346,7 +349,7 @@ export class CostLedger {
   readonly path: string;
 
   constructor(deps: CostLedgerDeps = {}) {
-    this.path = deps.path ?? process.env.QDS_COST_LEDGER_FILE ?? ".sandbox/cost-ledger.db";
+    this.path = deps.path ?? process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE;
     this.readRunRecord = deps.readRunRecord ?? (() => undefined);
     this.config = deps.config ?? loadCostConfig().config;
     const dir = dirname(this.path);
@@ -398,9 +401,13 @@ export class CostLedger {
 
   /**
    * One row per emitted event. A malformed event — non-finite or negative
-   * `costUsd`, or `unpricedTurns > 0` (which is how DF2.7 marks absent/malformed
-   * usage upstream) — persists with `unpriced = 1` and `cost_micro_usd = 0`,
-   * never dropped: an unrecorded cost is an unenforceable cap (AC4).
+   * `costUsd` — persists with `unpriced = 1` and `cost_micro_usd = 0`, never
+   * dropped: an unrecorded cost is an unenforceable cap (AC4). An event with
+   * `unpricedTurns > 0` (how DF2.7 marks absent/malformed usage upstream) is
+   * flagged `unpriced = 1` — excluded from the priced SUM, because partial
+   * usage undercounts — but its finite, non-negative `costUsd` still converts
+   * and persists, so the recorded partial figure stays visible instead of
+   * being zeroed.
    */
   ingestCostEvent(event: CostWireEvent, ctx: IngestCtx): IngestResult {
     const started = Date.now();
@@ -417,14 +424,14 @@ export class CostLedger {
         `re-run the ingest after mintRunKey records the run's key (see scripts/run-record.ts ${ctx.runId}), or pass the record through readRunRecord`,
       );
     }
-    const unpriced =
-      !Number.isFinite(event.costUsd) || event.costUsd < 0 || ((event.unpricedTurns ?? 0) > 0);
-    const costMicroUsd = unpriced ? 0 : usdToMicros(event.costUsd);
+    const costInvalid = !Number.isFinite(event.costUsd) || event.costUsd < 0;
+    const unpriced = costInvalid || (event.unpricedTurns ?? 0) > 0;
+    const costMicroUsd = costInvalid ? 0 : usdToMicros(event.costUsd);
     if (!Number.isInteger(costMicroUsd) || costMicroUsd < 0) {
       throw new CostLedgerError(
         "cost-convert-invalid",
         `costUsd ${event.costUsd} did not convert to a non-negative integer of µ$ (got ${costMicroUsd})`,
-        "fix the producer's cost event, or the row persists as unpriced only for the known-partial cases (non-finite/negative/unpricedTurns>0)",
+        "fix the producer's cost event, or the row persists as unpriced only for the known-partial cases (non-finite/negative cost, unpricedTurns>0)",
       );
     }
     const eventId = tokenEventId({
@@ -466,6 +473,7 @@ export class CostLedger {
         new Date().toISOString(),
       );
     const durationMs = Date.now() - started;
+    const inserted = changes === 1;
     log({
       requestId: ctx.requestId,
       operation: "cost-ledger.ingest",
@@ -481,10 +489,10 @@ export class CostLedger {
       costMicroUsd,
       unpriced: unpriced ? 1 : 0,
       durationMs,
-      outcome: "inserted",
+      outcome: inserted ? "inserted" : "duplicate",
       ingest_ms: durationMs,
     });
-    return { eventId, inserted: changes === 1, unpriced };
+    return { eventId, inserted, unpriced };
   }
 
   /**
@@ -554,6 +562,7 @@ export class CostLedger {
       )
       .run(eventId, ctx.runId, ctx.repoSlug, ctx.issueId, ctx.requestId, costMicroUsd, new Date().toISOString());
     const durationMs = Date.now() - started;
+    const inserted = changes === 1;
     log({
       requestId: ctx.requestId,
       operation: "cost-ledger.ingest",
@@ -569,10 +578,10 @@ export class CostLedger {
       costMicroUsd,
       unpriced: 0,
       durationMs,
-      outcome: "inserted",
+      outcome: inserted ? "inserted" : "duplicate",
       ingest_ms: durationMs,
     });
-    return { eventId, inserted: changes === 1, unpriced: false };
+    return { eventId, inserted, unpriced: false };
   }
 
   // ─── views ─────────────────────────────────────────────────────────────────
@@ -684,13 +693,18 @@ export class CostLedger {
    * SUM, add the ceilings of outstanding admissions (runs admitted but not yet
    * reporting spend), and if committed ≥ cap refuse — otherwise insert this
    * dispatch's admission and return `min(keyCapMicroUsd, remainingMicroUsd)`,
-   * the one ceiling handed to DF2.3's mint (AC3). The reservation retires by
-   * itself once the run's first ledger row lands, so a finished run's admission
-   * never blocks the next dispatch. A run that never reports ANY row keeps its
-   * reservation — by design: that run is still open, and its teardown (or the
-   * DF2.6 reaper, which routes through teardownSandbox) is what writes the
-   * retiring box_hours row, so a reservation's lifetime is bounded by the same
-   * fleet hygiene that bounds an open record with a live box.
+   * the one ceiling handed to DF2.3's mint (AC3). `remainingMicroUsd` is the
+   * headroom AFTER spend and reservations (the same `committed` the refusal
+   * check uses), so an admitted ceiling can never over-commit the issue past
+   * its cap. The reservation retires by itself once the run's first ledger row
+   * lands, so a finished run's admission never blocks the next dispatch. A run
+   * that never reports ANY row keeps its reservation — by design: that run is
+   * still open, and its teardown (or the DF2.6 reaper, which routes through
+   * teardownSandbox) is what writes the retiring box_hours row, so a
+   * reservation's lifetime is bounded by the same fleet hygiene that bounds an
+   * open record with a live box. The one expiry: an admission whose run record
+   * no longer resolves through readRunRecord (createRun's store.create failed,
+   * so no run can ever exist) stops counting — see the orphan guard below.
    */
   admitIssue(input: AdmissionInput, capMicroUsd: number, keyCapMicroUsd: number): AdmissionDecision {
     const started = Date.now();
@@ -708,21 +722,33 @@ export class CostLedger {
           "SELECT COALESCE(SUM(cost_micro_usd), 0) AS total, COUNT(*) AS n FROM cost_events WHERE repo_slug = ? AND issue_id = ? AND unpriced = 0",
         )
         .get(input.repoSlug, input.issueId) as { total: number; n: number };
-      const reservedRow = this.db
+      const reservedRows = this.db
         .prepare(
-          `SELECT COALESCE(SUM(a.ceiling_micro_usd), 0) AS total
+          `SELECT a.ceiling_micro_usd AS ceiling, a.run_id AS runId
            FROM gate_admissions a
            WHERE a.repo_slug = ? AND a.issue_id = ?
              AND NOT EXISTS (SELECT 1 FROM cost_events ce WHERE ce.run_id = a.run_id)`,
         )
-        .get(input.repoSlug, input.issueId) as { total: number };
+        .all(input.repoSlug, input.issueId) as { ceiling: number; runId: string }[];
+      let reservedMicroUsd = 0;
+      for (const row of reservedRows) {
+        // Orphan guard: a reservation counts only while its run record still
+        // resolves. createRun admits BEFORE store.create (INV-COST-3), so an
+        // admission whose store.create failed (EEXIST, invalid run id) belongs
+        // to a run that can never report spend — and gate_admissions is
+        // append-only (INV-COST-1), so the expiry lives here in the read, not
+        // in a row mutation. readRunRecord's contract does the classifying:
+        // undefined ⇒ no record (expired reservation); a throw — e.g. a corrupt
+        // record — propagates and refuses this dispatch rather than undercount.
+        if (this.readRunRecord(row.runId) === undefined) continue;
+        reservedMicroUsd += row.ceiling;
+      }
       const unpricedRow = this.db
         .prepare(
           "SELECT COUNT(*) AS n FROM cost_events WHERE repo_slug = ? AND issue_id = ? AND unpriced = 1",
         )
         .get(input.repoSlug, input.issueId) as { n: number };
       const spentMicroUsd = spentRow.total;
-      const reservedMicroUsd = reservedRow.total;
       const unpricedRows = unpricedRow.n;
       const cap = capMicroUsd;
       const committed = spentMicroUsd + reservedMicroUsd;
@@ -737,7 +763,10 @@ export class CostLedger {
           unpricedRows,
         };
       }
-      const remainingMicroUsd = cap - spentMicroUsd;
+      // Headroom after spend AND outstanding reservations — the same
+      // `committed` the refusal check uses, so an admitted ceiling can never
+      // over-commit the issue past its cap.
+      const remainingMicroUsd = cap - committed;
       const ceiling = Math.min(keyCapMicroUsd, remainingMicroUsd);
       this.db
         .prepare(

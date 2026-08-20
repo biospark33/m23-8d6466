@@ -217,6 +217,32 @@ export async function teardownSandbox(deps: TeardownDeps, runId: string, opts: T
   }
 }
 
+/**
+ * DF2.8: price this run's box hours from the record's budget attribution —
+ * the shared body of the two ingest points (the already-closed early path and
+ * the close step). Validates the attribution fields, coerces repoSlug/issueId
+ * with String() (the extension entry's index signature is string | number),
+ * and hands the shared context to ingestBoxHours, which does the logging.
+ * Returns false when the record carries no issue attribution so each call
+ * site surfaces the omission its own way.
+ */
+function ingestBoxHoursIfAttributed(
+  costLedger: CostLedgerHook,
+  rec: { extensions?: { budget?: { repoSlug?: string | number; issueId?: string | number } } },
+  runId: string,
+  requestId: string,
+): boolean {
+  const budget = rec.extensions?.budget;
+  if (!budget?.repoSlug || !budget?.issueId) return false;
+  costLedger.ingestBoxHours({
+    runId,
+    repoSlug: String(budget.repoSlug),
+    issueId: String(budget.issueId),
+    requestId,
+  });
+  return true;
+}
+
 async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOptions, ctx: StepCtx): Promise<void> {
   // Preflight — all before ANY mutation; the box stays untouched throughout.
   // Shared classifier (harvest.ts getRecord): genuine absence → no-record,
@@ -231,14 +257,9 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
     // DF2.8 crash-window fix: if store.close succeeded but the process died before ingestBoxHours ran,
     // a re-run would skip everything and the row would never land. Run the hook here — it's
     // idempotent by eventId, so a repeated close is a no-op.
-    if (deps.costLedger && rec.extensions?.budget?.repoSlug && rec.extensions?.budget?.issueId) {
+    if (deps.costLedger) {
       try {
-        deps.costLedger.ingestBoxHours({
-          runId,
-          repoSlug: String(rec.extensions.budget.repoSlug),
-          issueId: String(rec.extensions.budget.issueId),
-          requestId: ctx.requestId,
-        });
+        ingestBoxHoursIfAttributed(deps.costLedger, rec, runId, ctx.requestId);
       } catch (e) {
         throw asTeardownError(e);
       }
@@ -354,20 +375,22 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   // 7. close — LAST. (extensions stay writable post-close; we write none.)
   await runStep(ctx, "close", async () => {
     deps.store.close(runId);
-    // DF2.8: price box hours into the cost ledger, now that the record's lifetime is final.
-    // If costLedger is present and the record carries budget attribution, ingest the box hours.
+    // DF2.8: price box hours into the cost ledger, now that the record's
+    // lifetime is final. The no-attribution omission logs under its own
+    // operation — a second "close" step line marked skipped would contradict
+    // the close that just succeeded above.
     if (deps.costLedger) {
       const closedRec = deps.store.get(runId);
-      const budgetExt = closedRec.extensions?.budget;
-      if (budgetExt?.repoSlug && budgetExt?.issueId) {
-        deps.costLedger.ingestBoxHours({
-          runId,
-          repoSlug: String(budgetExt.repoSlug),
-          issueId: String(budgetExt.issueId),
-          requestId: ctx.requestId,
+      if (!ingestBoxHoursIfAttributed(deps.costLedger, closedRec, runId, ctx.requestId)) {
+        log({
+          ...stepBase(ctx, "teardown", "close"),
+          operation: "teardown.box_hours",
+          duration: 0,
+          durationMs: 0,
+          status: "ok",
+          outcome: "skipped",
+          reason: "no issue attribution — box hours not priced for this run",
         });
-      } else {
-        skipStep(ctx, "close", "no issue attribution — box hours not priced for this run");
       }
     }
   });

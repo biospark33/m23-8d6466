@@ -5,13 +5,13 @@
   "capMicroUsd": 5000000,
   "dispatch1": {
     "runId": "e2e-run-1",
-    "remainingMicroUsd": 100000,
+    "headroomBeforeDispatchMicroUsd": 100000,
     "mintedCeilingMicroUsd": 100000
   },
   "spend": {
-    "lead": 100000,
-    "worker": 200000,
-    "totalMicroUsd": 5200000
+    "dispatch1MicroUsd": { "lead": 100000, "worker": 200000 },
+    "priorIssueSpendMicroUsd": 4900000,
+    "issueCumulativeMicroUsd": 5200000
   },
   "dispatch2Refusal": {
     "status": "over-budget",

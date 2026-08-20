@@ -389,11 +389,47 @@ contracts; the store and all cross-cutting integration were lead-authored.
 - `tests/providers/teardown.test.ts` (MODIFIED — 7 new DF2.8 tests)
 - `_bmad-output/evidence/df2-8/e2e-cost-demo.json` (NEW — evidence artifact)
 
+### Change-Scope Verification (GitNexus)
+
+Upstream impact before editing (this branch's two load-bearing seams):
+
+- **`createRun`** (`src/providers/driver.ts`) — risk **LOW**: 1 direct caller
+  (`runCapHitDemo`, `scripts/cap-hit-demo.ts`), 1 affected process. The DF2.8
+  gate and the review-round `readRunRecord` ENOENT classification are
+  additive inside the `opts.issue` branch; no signature change.
+- **`teardownSandbox`** (`src/providers/teardown.ts`) — risk **CRITICAL**:
+  5 direct callers (`runCapHitDemo`, `makeCleanup`, `finishEarly` in
+  `scripts/cap-hit-demo.ts`; `run` in `scripts/sandbox-teardown.ts`; `sweep`
+  in `src/providers/reaper.ts`), 6 affected processes, depth-3 reach into
+  `scripts/sandbox-reap.ts` / `scripts/cap-hit-demo.ts`. Zero signature or
+  step-order change — DF2.8 hooks the close step, and the review round only
+  extracted the shared `ingestBoxHoursIfAttributed` helper and renamed the
+  no-attribution log to its own `teardown.box_hours` operation.
+
+`detect_changes` (scope `compare`, base `main`): 24 changed symbols across 20
+files, risk critical — the branch-wide diff (includes the DF2.6 quota/reaper
+merge), with the changed set matching the File List plus DF2.6's
+`assertValidRunId`/`fillRun` touches. DF2.8's new files (`cost-ledger.ts`,
+`budget-gate.ts`, `qds-cost.ts`) postdate the index and surface as unindexed
+additions, not changed symbols.
+
 ### Change Log
 
 - 2026-08-20 — DF2.8 implemented: micro-dollar cost ledger (append-only,
   deterministic event_id, idempotent replay), serialized-admission budget gate
   on the create seam, teardown close-step box-hours hook, `qds cost` CLI;
   44+10+9+32(new-context) tests green, 198 across all seven affected suites.
+- 2026-08-20 (review round, PR #121) — CodeRabbit/Gemini remediation: admitted
+  ceiling now subtracts outstanding reservations from cap headroom; finite
+  costUsd with unpricedTurns>0 keeps its converted cost under the unpriced
+  flag; orphaned gate admissions (store.create failed) expire via a
+  read-side record-existence filter; `qds cost` refuses absent ledger files
+  and wraps config errors with structured output; sandbox-teardown closes its
+  ledger handle in `finally` and classifies record reads through `getRecord`;
+  teardown's box-hours attribution deduplicated into one helper with the
+  no-attribution omission logged as `teardown.box_hours`; evidence artifact
+  scope-labeled and its writer moved off the repo working tree; focal suites
+  green (cost-ledger 44, budget-gate 12, qds-cost 13, teardown 32,
+  sandbox-teardown-cli 12).
 
 **Status:** review — implemented, 2280-test full suite green, evidence captured; awaiting PR review

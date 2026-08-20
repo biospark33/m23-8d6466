@@ -556,33 +556,6 @@ describe("DF2.5 teardownSandbox", () => {
         }
         return { eventId: `event-${ctx.runId}`, inserted: true, unpriced: false };
       }
-
-      /** Simulates a real CostLedger with idempotent ingest (same eventId on retry) */
-      ingestBoxHoursIdempotent(ctx: IngestCall) {
-        return this.ingestBoxHours(ctx);
-      }
-    }
-
-    /** Helper: write budget extension via store (only if budget namespace is registered) */
-    function tryWriteBudget(runId: string, repoSlug: string, issueId: number): boolean {
-      try {
-        store.set(runId, {
-          extensions: {
-            budget: {
-              schemaVersion: 1,
-              repoSlug,
-              issueId: String(issueId),
-              capMicroUsd: 5_000_000,
-              spentMicroUsd: 0,
-              reservedMicroUsd: 0,
-              admittedCeilingMicroUsd: 5_000_000,
-            },
-          },
-        });
-        return true;
-      } catch {
-        return false; // budget namespace not yet registered
-      }
     }
 
     // Test 1: close step calls ingestBoxHours exactly once AFTER store.close, with budget attribution
@@ -600,13 +573,21 @@ describe("DF2.5 teardownSandbox", () => {
         requestId,
       });
 
-      // Write budget extension if namespace is registered
-      const budgetWritten = tryWriteBudget(runId, "qds/demo", 42);
-      if (!budgetWritten) {
-        // Skip test if budget namespace not registered yet - parallel agent's responsibility
-        console.log("budget namespace not yet registered; skipping test that requires it");
-        return;
-      }
+      // Budget extension: the DF2.8 namespace is registered — a failure here
+      // must fail the test, not silently skip it.
+      store.set(runId, {
+        extensions: {
+          budget: {
+            schemaVersion: 1,
+            repoSlug: "qds/demo",
+            issueId: "42",
+            capMicroUsd: 5_000_000,
+            spentMicroUsd: 0,
+            reservedMicroUsd: 0,
+            admittedCeilingMicroUsd: 5_000_000,
+          },
+        },
+      });
 
       await teardownSandbox(deps_, runId);
 
@@ -634,11 +615,19 @@ describe("DF2.5 teardownSandbox", () => {
       await fillBox(runId, runId, origin.originDir, 3, true);
 
       const hook = new MockCostLedgerHook();
-      const budgetWritten = tryWriteBudget(runId, "qds/demo", 42);
-      if (!budgetWritten) {
-        console.log("budget namespace not yet registered; skipping test");
-        return;
-      }
+      store.set(runId, {
+        extensions: {
+          budget: {
+            schemaVersion: 1,
+            repoSlug: "qds/demo",
+            issueId: "42",
+            capMicroUsd: 5_000_000,
+            spentMicroUsd: 0,
+            reservedMicroUsd: 0,
+            admittedCeilingMicroUsd: 5_000_000,
+          },
+        },
+      });
 
       // Fail bundle verify at harvest (same pattern as existing AC3 test)
       const failRunVerify: GitRunner = async (argv: readonly string[], cwd: string) => {
@@ -677,11 +666,19 @@ describe("DF2.5 teardownSandbox", () => {
       const host = await makeHostRepo();
       await makeRun(runId);
       await mintFor(runId);
-      const budgetWritten = tryWriteBudget(runId, "qds/demo", 42);
-      if (!budgetWritten) {
-        console.log("budget namespace not yet registered; skipping test");
-        return;
-      }
+      store.set(runId, {
+        extensions: {
+          budget: {
+            schemaVersion: 1,
+            repoSlug: "qds/demo",
+            issueId: "42",
+            capMicroUsd: 5_000_000,
+            spentMicroUsd: 0,
+            reservedMicroUsd: 0,
+            admittedCeilingMicroUsd: 5_000_000,
+          },
+        },
+      });
 
       // Fixed clock: 30 minutes of VM lifetime. `createdAt` is immutable through
       // set() and close() owns `closedAt`, so close with an explicit date and let
@@ -721,9 +718,11 @@ describe("DF2.5 teardownSandbox", () => {
       // Exactly ONE row across both runs — idempotent by eventId
       expect(boxRows().n).toBe(1);
 
-      // Verify cost = ceil(30min) × rate = 1h × 1M µ$/h
-      const row = rawDb.query("SELECT cost_micro_usd FROM cost_events WHERE kind = 'box_hours' AND run_id = ?").get(runId) as { cost_micro_usd: number };
+      // Verify cost = ceil(30min) × rate = 1h × 1M µ$/h, attributed to the run's issue
+      const row = rawDb.query("SELECT cost_micro_usd, repo_slug, issue_id FROM cost_events WHERE kind = 'box_hours' AND run_id = ?").get(runId) as { cost_micro_usd: number; repo_slug: string; issue_id: string };
       expect(row.cost_micro_usd).toBe(1_000_000);
+      expect(row.repo_slug).toBe("qds/demo");
+      expect(row.issue_id).toBe("42");
       rawDb.close();
       costLedger.close();
     }, 30_000);
@@ -749,11 +748,19 @@ describe("DF2.5 teardownSandbox", () => {
       const host = await makeHostRepo();
       await makeRun(runId);
       await mintFor(runId);
-      const budgetWritten = tryWriteBudget(runId, "qds/demo", 42);
-      if (!budgetWritten) {
-        console.log("budget namespace not yet registered; skipping test");
-        return;
-      }
+      store.set(runId, {
+        extensions: {
+          budget: {
+            schemaVersion: 1,
+            repoSlug: "qds/demo",
+            issueId: "42",
+            capMicroUsd: 5_000_000,
+            spentMicroUsd: 0,
+            reservedMicroUsd: 0,
+            admittedCeilingMicroUsd: 5_000_000,
+          },
+        },
+      });
 
       const hook = new MockCostLedgerHook();
       hook.error = {
@@ -813,11 +820,19 @@ describe("DF2.5 teardownSandbox", () => {
       const host = await makeHostRepo();
       await makeRun(runId);
       await mintFor(runId);
-      const budgetWritten = tryWriteBudget(runId, "qds/demo", 42);
-      if (!budgetWritten) {
-        console.log("budget namespace not yet registered; skipping test");
-        return;
-      }
+      store.set(runId, {
+        extensions: {
+          budget: {
+            schemaVersion: 1,
+            repoSlug: "qds/demo",
+            issueId: "42",
+            capMicroUsd: 5_000_000,
+            spentMicroUsd: 0,
+            reservedMicroUsd: 0,
+            admittedCeilingMicroUsd: 5_000_000,
+          },
+        },
+      });
 
       const hook = new MockCostLedgerHook();
 
