@@ -131,6 +131,32 @@ describe("FakeDriver accountability and boundaries", () => {
     }
   });
 
+  test("destroy kills an exec's whole process tree and settles its pending exec", async () => {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-tree-"));
+    try {
+      const d = new FakeDriver(boxes);
+      await d.create("tree-box");
+      // Two descendants: if destroy killed only the direct sh, they would be
+      // reparented and keep running — and the one holding the stdout pipe
+      // would keep the exec's Promise.all unsettled past the destroy.
+      const pending = d.exec("tree-box", [
+        "sh",
+        "-c",
+        'sleep 30 & p1=$!; sleep 30 & p2=$!; echo "$p1 $p2"; wait',
+      ]);
+      await new Promise((r) => setTimeout(r, 400)); // let the descendants spawn
+      await d.destroy("tree-box");
+      const res = await pending; // settles at the destroy, not 30s later
+      expect(res.exitCode).toBe(137); // group SIGKILL — the demo's kill signature
+      const [p1, p2] = res.stdout.trim().split(/\s+/).map(Number);
+      // Signal 0 is a liveness probe only; a throw means no such process.
+      expect(() => process.kill(p1!, 0)).toThrow();
+      expect(() => process.kill(p2!, 0)).toThrow();
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
   test("copyFile refuses a symlink pointing out of the box", async () => {
     const boxes = mkdtempSync(join(tmpdir(), "qds-fake-symlink-"));
     const host = mkdtempSync(join(tmpdir(), "qds-fake-symlink-host-"));

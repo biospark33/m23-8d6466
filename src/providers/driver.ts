@@ -40,11 +40,13 @@ export interface ExecResult {
  * Termination contract (DF2.4): `exec` boundedness is per-driver. ExeDevDriver
  * enforces a transport-level timeout + SIGKILL on the ssh child (`execTimed`
  * carries a per-call budget), so its execs settle on their own. FakeDriver's
- * exec has NO ceiling of its own: it stays pending until the child exits or a
- * `destroy()` kills it. `destroy` kills the box's processes (a real box
- * destroy does) but makes NO promise about settling in-flight `exec`
- * promises — a caller awaiting an exec that can remain pending after destroy
- * must bound that wait itself (see cap-hit-demo's `cancelGraceMs` races).
+ * exec has NO ceiling of its own: it stays pending until the child's process
+ * group exits or a `destroy()` kills it. FakeDriver's destroy SIGKILLs every
+ * exec's whole process group (descendants included), which also settles its
+ * in-flight execs (exit 137) — but that settle guarantee is per-driver, not a
+ * seam-wide promise: a caller awaiting an exec that can remain pending after
+ * destroy must bound that wait itself (see cap-hit-demo's `cancelGraceMs`
+ * races).
  */
 export interface ProviderDriver {
   /** Registry name, e.g. `"fake"`, `"exe"`. */
@@ -52,8 +54,10 @@ export interface ProviderDriver {
   create(name: string, tag?: string): Promise<ProviderVm>;
   list(name?: string): Promise<ProviderVm[]>;
   /** Idempotent (teardown and reap both retry; a missing box is the goal
-   * state). Kills the box's processes but does NOT settle in-flight `exec`
-   * promises — bound any post-destroy exec await (see interface docs). */
+   * state). Kills the box's processes — FakeDriver kills each exec's whole
+   * process group, settling its in-flight execs; whether OTHER drivers'
+   * execs settle is per-driver — bound any post-destroy exec await (see
+   * interface docs). */
   destroy(vm: string): Promise<void>;
   expose(vm: string, port: number): Promise<string>;
   setPublic(vm: string): Promise<void>;

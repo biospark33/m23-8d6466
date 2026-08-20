@@ -488,7 +488,7 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(await workloadSettled).toBeTrue();
   });
 
-  test("cancel grace-expired: workload still pending past the grace → NO probe, reason workload-cancel-failed", async () => {
+  test("cancel grace-expired: destroy kills the real workload tree, a promise that never notices → NO probe, reason workload-cancel-failed", async () => {
     api = new FakeKeyApi({ usageOnCreateUsd: 0.06 });
     let probeCalls = 0;
     const probe = async (): Promise<{ status: number; body: string }> => {
@@ -498,13 +498,15 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
 
     // 300ms ceiling → marker at ~1.3s; 200ms grace expires while the workload
     // exec is still pending (termination unconfirmed) — the demo must skip the
-    // probe rather than read evidence against an active workload. The pending
-    // exec is modeled directly as a never-settling promise: FakeDriver.destroy
-    // now kills the box's exec children (a real box destroy kills the box's
-    // processes), so a REAL sleep would settle at the cancel destroy and never
-    // exercise the grace — the never-settling promise is the documented reason
-    // the grace exists ("a driver whose promise never notices the dead box").
-    class NeverSettlingWorkloadDriver implements ProviderDriver {
+    // probe rather than read evidence against an active workload. The workload
+    // is a REAL child that spawns two REAL descendants and reports their pids
+    // to a host-side file; the wrapper still hands the demo a never-settling
+    // promise — the documented reason the grace exists ("a driver whose
+    // promise never notices the dead box") — so the grace path is exercised
+    // while the tree teardown underneath it is real and verifiable.
+    const pidFile = join(dir, "tree-pids");
+    const WORKLOAD_SCRIPT = 'sleep 30 & p1=$!; sleep 30 & p2=$!; echo "$p1 $p2" > ' + JSON.stringify(pidFile) + "; wait";
+    class TreeUnsettledDriver implements ProviderDriver {
       readonly name = recording.name;
 
       constructor(private readonly inner: ProviderDriver) {}
@@ -528,15 +530,16 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
         return this.inner.whoami();
       }
       exec(vm: string, argv: string[], stdin?: string): Promise<import("../../src/providers/driver").ExecResult> {
-        if (argv[0] === "sleep") return new Promise(() => {});
-        return this.inner.exec(vm, argv, stdin);
+        const p = this.inner.exec(vm, argv, stdin); // real child, real descendants
+        if (argv[0] === "sh" && argv[2] === WORKLOAD_SCRIPT) return new Promise(() => {});
+        return p;
       }
       copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
         return this.inner.copyFile(vm, remotePath, localPath);
       }
     }
-    const opts = defaultOpts({ wallClockMs: 300, workloadArgv: ["sleep", "4"] });
-    const result = await runCapHitDemo(deps({ driver: new NeverSettlingWorkloadDriver(recording), probe, cancelGraceMs: 200 }), opts);
+    const opts = defaultOpts({ wallClockMs: 300, workloadArgv: ["sh", "-c", WORKLOAD_SCRIPT] });
+    const result = await runCapHitDemo(deps({ driver: new TreeUnsettledDriver(recording), probe, cancelGraceMs: 200 }), opts);
 
     expect(probeCalls).toBe(0);
     expect(result.artifact.providerCapRejected).toBeFalse();
@@ -549,6 +552,15 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.artifact.closedAt).toBeString();
     expect(result.artifact.revocationVerified).toBeTrue();
     expect(result.artifact.spendMicroUsd).toBe(60_000);
+    // The destroy killed the workload's WHOLE process group: both descendants
+    // — verified by pid from inside the box, not by the wrapper's (never
+    // settling) promise — are gone from the host. Signal 0 is a liveness
+    // probe only; a throw means no such process.
+    const [p1, p2] = readFileSync(pidFile, "utf8").trim().split(/\s+/).map(Number);
+    expect(Number.isInteger(p1)).toBeTrue();
+    expect(Number.isInteger(p2)).toBeTrue();
+    expect(() => process.kill(p1!, 0)).toThrow();
+    expect(() => process.kill(p2!, 0)).toThrow();
   });
 
   // ─── 4e. Invalid classifier inputs → fail-closed, teardown still runs ───────

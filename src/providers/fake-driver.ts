@@ -43,11 +43,22 @@ export class FakeDriver implements ProviderDriver {
   readonly name = "fake";
   readonly root: string;
   /**
-   * Live exec children per box. Destroy kills them: a real box destroy kills
-   * the box's processes, and an exec abandoned by a caller (the demo's
-   * fail-closed close paths) must not leave an orphan host child behind.
+   * Every exec's tree-kill closure per box. Destroy runs them: a real box
+   * destroy kills the box's processes — the exec's whole process tree, not
+   * just its direct child — and an exec abandoned by a caller (the demo's
+   * fail-closed close paths) must not leave descendants running on the host
+   * or keep its exec promise pending (a surviving descendant holds the stdout
+   * pipe open, which is what keeps the `Response` read — and so the exec —
+   * unsettled).
+   *
+   * Entries are retained past the exec's own settlement and cleared only by
+   * `destroy`: a workload whose direct child exits while leaving a descendant
+   * behind must still have that descendant reachable by a later destroy.
+   * ponytail: `kill(-pgid)` after the group died and the host pid counter
+   * wrapped could hit a recycled pgid; if this driver ever hosts long-lived
+   * boxes through thousands of execs, gate the kill on pid non-reuse.
    */
-  private readonly execChildren = new Map<string, Set<{ kill: () => void }>>();
+  private readonly execChildren = new Map<string, Set<() => void>>();
 
   constructor(root?: string) {
     this.root = root ?? process.env.QDS_FAKE_BOXES_DIR ?? DEFAULT_FAKE_BOXES_DIR;
@@ -123,7 +134,7 @@ export class FakeDriver implements ProviderDriver {
 
   /** Idempotent: teardown and reap both retry, and a missing box is the goal state. */
   async destroy(vm: string): Promise<void> {
-    for (const proc of this.execChildren.get(vm) ?? []) proc.kill();
+    for (const killTree of this.execChildren.get(vm) ?? []) killTree();
     this.execChildren.delete(vm);
     rmSync(this.boxDir(vm), { recursive: true, force: true });
   }
@@ -161,24 +172,27 @@ export class FakeDriver implements ProviderDriver {
       // dropped, unlike a real remote exec, which always reflects the
       // current call's environment.
       env: process.env,
+      // The child becomes its own session and process-group leader
+      // (pgid === pid), so `destroy` can kill the exec's WHOLE tree with
+      // `kill(-pid)`. SIGKILL to the direct child alone would leave
+      // grandchildren running — and any descendant still holding the stdout
+      // pipe would keep this exec's `Promise.all` unsettled past the
+      // destroy, exactly the pending-abandoned-exec case the demo's close
+      // paths must not leak.
+      detached: true,
       stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
       stdout: "pipe",
       stderr: "pipe",
     });
-    const children = this.execChildren.get(vm) ?? new Set<{ kill: () => void }>();
-    children.add(proc);
-    this.execChildren.set(vm, children);
-    try {
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ]);
-      return { stdout, stderr, exitCode };
-    } finally {
-      children.delete(proc);
-      if (children.size === 0) this.execChildren.delete(vm);
-    }
+    const kills = this.execChildren.get(vm) ?? new Set<() => void>();
+    kills.add(killTree(proc));
+    this.execChildren.set(vm, kills);
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, exitCode };
   }
 
   /** Box → host only. Nothing in this interface pushes a file into a box. */
@@ -198,4 +212,26 @@ export class FakeDriver implements ProviderDriver {
 
 function fakeUrl(vm: string, port: number): string {
   return `https://${vm}-${port}.fake.local`;
+}
+
+/**
+ * Kill a whole exec tree: the process group on POSIX (the `detached` spawn
+ * made the child its group leader, pgid === pid), falling back to the direct
+ * child when the group is already gone or the platform has no groups. Straight
+ * SIGKILL, not SIGTERM→SIGKILL — a TERM-ignoring workload must not survive a
+ * box destroy (the same call cli-anything's `killTree` makes). ESRCH on a
+ * dead group is the goal state, never an error.
+ */
+function killTree(proc: Bun.Subprocess): () => void {
+  return () => {
+    try {
+      process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+  };
 }
