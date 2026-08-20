@@ -191,6 +191,36 @@ describe("FakeDriver accountability and boundaries", () => {
     }
   });
 
+  test("destroy kills a surviving descendant after the leader exits and settles its pending exec", async () => {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-orphan-"));
+    try {
+      const d = new FakeDriver(boxes);
+      await d.create("orphan-box");
+      // The direct sh exits on its own; the background sleep it spawned stays
+      // in the detached process group holding the stdout pipe, so the exec is
+      // pending over a leader that is already reaped. The identity gate must
+      // not blind destroy() to the group: the descendant is still ours to kill
+      // (the orphaned group keeps its pgid reserved), and killing it is what
+      // settles the exec.
+      const pending = d.exec("orphan-box", ["sh", "-c", "sleep 10 & echo $!"]);
+      await new Promise((r) => setTimeout(r, 400)); // let sh exit, sleep spawn
+      await d.destroy("orphan-box");
+      // Bounded wait: a destroy that cannot reach the descendant leaves the
+      // exec pending forever, and an unguarded await would hang the suite.
+      const res = await Promise.race([
+        pending,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("exec still pending 2s after destroy")), 2000),
+        ),
+      ]);
+      expect(res.exitCode).toBe(0); // the leader exited cleanly before the kill
+      // The spawned descendant must be dead, not reparented and running.
+      expect(() => process.kill(Number(res.stdout.trim()), 0)).toThrow();
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
   test("copyFile refuses a symlink pointing out of the box", async () => {
     const boxes = mkdtempSync(join(tmpdir(), "qds-fake-symlink-"));
     const host = mkdtempSync(join(tmpdir(), "qds-fake-symlink-host-"));

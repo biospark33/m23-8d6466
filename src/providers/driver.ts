@@ -43,7 +43,9 @@ export interface ExecResult {
  * exec has NO ceiling of its own: it stays pending until the child's process
  * group exits or a `destroy()` kills it. FakeDriver's destroy SIGKILLs every
  * exec's whole process group (descendants included), which also settles its
- * in-flight execs (exit 137) — but that settle guarantee is per-driver, not a
+ * in-flight execs — a killed live exec exits 137; an exec pending over an
+ * already-exited leader (a descendant holds its pipe) settles with the
+ * leader's own exit code — but that settle guarantee is per-driver, not a
  * seam-wide promise: a caller awaiting an exec that can remain pending after
  * destroy must bound that wait itself (see cap-hit-demo's `cancelGraceMs`
  * races).

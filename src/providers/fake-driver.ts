@@ -234,15 +234,24 @@ function fakeUrl(vm: string, port: number): string {
  * the goal state, never an error.
  *
  * Identity gate: `kill(-pgid)` is only safe while the pid provably still
- * belongs to this exec's child. A live child owns its pid — the kernel cannot
- * reuse it until the child is reaped — so while `exited` is unsettled, `-pid`
- * names this exec's group and nothing else. Once the child has exited, the
- * pid is unowned and the OS is free to hand it to an unrelated process group,
- * so the closure must never signal `-pid` again; it falls back to Bun's own
- * kill on its (dead) child, a safe no-op. This is why a completed exec's
- * retained entry cannot become a stale kill target after a pid rollover —
- * and why `kill(-pgid, 0)` is never used to authorize a signal: signal 0
- * proves a group EXISTS with that id, not that it is OURS.
+ * belongs to this exec. Two provable windows, both anchored in how the kernel
+ * hands out ids. While `exited` is unsettled the leader is unreaped, so it
+ * OWNS the pid — the kernel cannot reuse the number — and `-pid` names this
+ * exec's group and nothing else. After the leader is reaped the number stays
+ * reserved for the group while ANY member lives: an orphaned process group
+ * keeps its pgid, and a new group can only take the number through a new
+ * leader PROCESS with that pid. So in the dead-leader case a positive-pid
+ * probe decides — `kill(pid, 0)` answering means some process owns the
+ * number and this exec's group is gone (recycled: never signal `-pid`);
+ * ESRCH means no process owns it, so any group holding the number is
+ * provably this exec's orphaned group (`kill(-pgid, 0)` success alone could
+ * never authorize that — it proves a group EXISTS with that id, not that it
+ * is OURS). SIGKILLing that group is what lets destroy() settle an exec kept
+ * pending by a descendant holding the pipe (`sh -c 'sleep 30 &'`). The
+ * microseconds between the probe and the signal are the one residual window
+ * (the group would have to empty and the pid fully recycle between two
+ * adjacent syscalls) — strictly narrower than the leader-alive branch's own
+ * accepted dead-but-unreaped window below.
  */
 function killTree(proc: Bun.Subprocess): () => void {
   let leaderAlive = true;
@@ -265,12 +274,26 @@ function killTree(proc: Bun.Subprocess): () => void {
       } catch {
         // group already gone
       }
-    } else {
-      try {
-        proc.kill("SIGKILL");
-      } catch {
-        // already gone
-      }
+      return;
+    }
+    // Dead leader, group maybe not: a surviving descendant keeps the number
+    // reserved, and only the group signal can reach it.
+    try {
+      process.kill(proc.pid, 0);
+      // A process owns the pid — it was recycled after this exec's group
+      // emptied. Signalling -pid could hit an unrelated group; never do.
+      return;
+    } catch {
+      // ESRCH: no process owns the number, so it is either free or still
+      // reserved by this exec's orphaned group. (EPERM lands here too and
+      // means "an existing process we may not probe" — continuing would be
+      // wrong, but the group probe below fails closed on that as well.)
+    }
+    try {
+      process.kill(-proc.pid, 0); // probe first: authorizes the SIGKILL
+      process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      // group already gone
     }
   };
 }
