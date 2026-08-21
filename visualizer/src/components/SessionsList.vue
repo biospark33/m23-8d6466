@@ -19,8 +19,13 @@ const MAX_POLL_MS = 30_000
  *  twice a second for as long as the tab stays open. */
 let fails = 0
 
-function startPolling(ms: number = POLL_MS) {
+function stopPolling() {
   clearInterval(timer)
+  timer = undefined
+}
+
+function startPolling(ms: number = POLL_MS) {
+  stopPolling()
   timer = setInterval(() => void tick(), ms)
 }
 
@@ -34,12 +39,14 @@ async function tick() {
     loaded.value = true
     if (fails) {
       fails = 0
-      startPolling()
+      // Re-arm only if a timer is still live: a tick that resolves after
+      // onUnmounted would otherwise install an interval nothing ever clears.
+      if (timer) startPolling()
     }
   } catch (err) {
     apiError.value = err instanceof Error ? err.message : String(err)
     fails++
-    startPolling(Math.min(POLL_MS * 2 ** Math.min(fails, 6), MAX_POLL_MS))
+    if (timer) startPolling(Math.min(POLL_MS * 2 ** Math.min(fails, 6), MAX_POLL_MS))
   } finally {
     inflight = false
   }
@@ -50,7 +57,7 @@ onMounted(() => {
   startPolling()
 })
 
-onUnmounted(() => clearInterval(timer))
+onUnmounted(stopPolling)
 
 /** Optimistic removal; an empty id means the write failed, so re-sync instead. */
 function onArchived(requestId: string) {

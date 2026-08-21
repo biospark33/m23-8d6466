@@ -603,7 +603,11 @@ components were type-checked and linted by nothing. `typecheck:visualizer` and a
 `lint:visualizer` are now wired into CI, `visualizer/test/**` is inside the type-check, and
 `noUncheckedIndexedAccess` is on.
 
-**Tests** — 2407 → 2455 (+48). AC0 gained its first executable verification at all (22 tests
+**Tests** — full-repo total ran 2407 → 2455 (+48). Bun's total counts every outcome, so the
+post-round breakdown is **2444 pass + 7 skip + 2 todo + 2 fail = 2455**; the pre-round baseline
+was 2395 pass + 7 skip + 2 todo + 3 fail = 2407. (The "2,382 tests" figure recorded earlier in
+this file is the total at the *pre-PR self-review* round, before this round's +48 and before
+DF1.4-era additions — it is a different snapshot, not a disagreeing count of the same run.) AC0 gained its first executable verification at all (22 tests
 over the pin-rejection, same-pin no-op, refusal and hardening-guard branches, no network); the
 static branch is now exercised authenticated with traversal cases; anti-CORS is asserted on a
 200; wrong-**length** credentials are pinned (a `timingSafeEqual` over raw strings would 500,
@@ -659,7 +663,8 @@ now exit at startup).
 with a usage error (`--tree is required`) on `main` as well; the sweep's real gate is
 `build:image`.
 
-**Gate results:** `bun test` 2444 pass / 2 fail (both the pre-existing GitNexus timeouts) ·
+**Gate results:** `bun test` 2444 pass / 7 skip / 2 todo / 2 fail of 2455 run — both failures
+are the pre-existing GitNexus CLI timeouts ·
 `bunx tsc --noEmit` clean · `bun run typecheck:visualizer` clean · `bun run lint:visualizer`
 clean · `bunx @biomejs/biome check visualizer` clean · AC0 same-pin re-vendor re-run against the
 pinned inputs → exit 0, no-op, hardening intact · `detect_changes` vs the working tree → 89
