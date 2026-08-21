@@ -149,10 +149,6 @@ describe("startup validation (INV-1/INV-5, AC5)", () => {
     ).toThrow(VizError);
   });
 
-  // The dev:all preflight is the only thing standing between a rejected token
-  // and a vite dev server proxying /api to a process that refused to bind.
-  // `${VAR:?}` alone only catches unset/empty, so the SHORT-token case is the
-  // one that matters here: it is a live token value that still fails startup.
   // The dev:all preflight is the only thing standing between a rejected
   // startup env and a vite dev server proxying /api to a process that refused
   // to bind. `${VAR:?}` alone only catches unset/empty, so the cases that
