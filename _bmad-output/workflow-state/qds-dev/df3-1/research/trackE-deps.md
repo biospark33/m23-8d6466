@@ -1,0 +1,4 @@
+# Track E — Dependency interfaces (reconstructed from Track B + direct reads; agent died x2 context-overflow)
+- resolveRunCorrelation(brief: IssueRef & {requestId?}) -> {requestId, repoSlug, issueId, issueUrl} @ issue-correlation.ts:85 PURE; throws CorrelationError INVALID_REPO_SLUG|INVALID_ISSUE_ID|INVALID_REQUEST_ID; isValidUuidV4 exported FOR DF3.1 — malformed requestId must be dropped to undefined BEFORE resolver call (AC1 mint-fresh rule + DF1.8 unchanged)
+- initiateSession({correlation, request, engineer?, pipelineName?}) -> {requestId, runId, replayed} @ trace/tracer.ts:974; throws RequestIdRepoMismatchError (maps to exit 2); trace runId === requestId (distinct from fleet runId)
+- All provider APIs: see trackB-codebase.md (createRun/fillRun/setupRun/teardownRun, RunRecordStore, mintRunKey, checkHeadroom, assertWithinBudget, teardownSandbox, harvestRun, setupGate, fillExeDev, EXIT_STATUSES)

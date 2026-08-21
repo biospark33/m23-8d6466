@@ -31,6 +31,7 @@ import { FFIType, dlopen, ptr } from "bun:ffi";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { z } from "zod";
+import * as YAML from "yaml";
 import {
   DEFAULT_MAX_DURATION_MS,
   MANIFEST_VERSION,
@@ -124,6 +125,8 @@ export const PipelineManifestSchema = z
     version: z.literal(MANIFEST_VERSION),
     pipelineId: z.string().regex(PIPELINE_ID_PATTERN, "pipelineId must match ^[a-z][a-z0-9-]{1,63}$"),
     runBudgetMs: z.number().int().positive(),
+    // DF3.1 AC9a: stamped by dispatch for box fill
+    limitMicroUsd: z.number().int().positive().optional(),
     phases: z.array(PhaseSpecSchema).min(MIN_PHASES, `phaseCount < ${MIN_PHASES}`),
   })
   .strict();
@@ -675,4 +678,29 @@ export function loadManifestWithSeams(
     manifestLoadMs: performance.now() - started,
     resolvedPath,
   };
+}
+
+/**
+ * DF3.1 AC9a: Stamp limitMicroUsd into a manifest for fill.
+ * Returns a frozen copy that validates against the extended schema.
+ *
+ * @param manifest — the loaded manifest to stamp
+ * @param limitMicroUsd — positive integer ceiling (rejects 0, negative, float)
+ * @throws {z.ZodError} if the stamped manifest fails schema validation
+ */
+export function stampManifestLimit(manifest: LoadedManifest, limitMicroUsd: number): LoadedManifest {
+  const stamped = { ...manifest.manifest, limitMicroUsd };
+  const validated = PipelineManifestSchema.parse(stamped) as PipelineManifest;
+  return { ...manifest, manifest: deepFreeze(validated) };
+}
+
+/**
+ * DF3.1 AC9a: Serialize manifest to YAML for fill.
+ * LoadManifest reads JSON; this exports YAML for the in-box copy.
+ *
+ * @param manifest — the loaded manifest (may be stamped)
+ * @returns YAML string suitable for BoxFile delivery
+ */
+export function serializeManifest(manifest: LoadedManifest): string {
+  return YAML.stringify(manifest.manifest);
 }

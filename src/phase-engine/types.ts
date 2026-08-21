@@ -185,6 +185,8 @@ export interface PipelineManifest {
   version: typeof MANIFEST_VERSION;
   pipelineId: string;
   runBudgetMs: number;
+  /** DF3.1 AC9a: stamped by dispatch at fill; the engine's only cap source. */
+  limitMicroUsd?: number;
   phases: PhaseSpec[];
 }
 

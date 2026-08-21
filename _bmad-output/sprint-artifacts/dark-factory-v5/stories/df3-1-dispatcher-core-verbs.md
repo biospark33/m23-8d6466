@@ -317,7 +317,42 @@ AC7's `assertWithinBudget` call site; the contract call cites the DF2.8 story sp
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Implemented:** 2026-08-21, branch `feature/df3-1-fleet-dispatcher-core-verbs`, waves of parallel subagents (research ×7 → architect → 3 TDD implementation agents → orchestrator finish).
+
+**Files (11, exactly FTM + 1 declared type completion):**
+- `src/fleet/brief-schema.ts` (net-new): zod v3 `.strictObject` — repoSlug/issueId/issueUrl?/commitSha(40-hex)/requestId?/manifestPath/repoUrl; `extractZodErrorField` names the offending field for exit 2.
+- `src/fleet/dispatch.ts` (net-new): `dispatch()` composes DF2.1 primitives directly (C1 — see Decision 1), `FleetError`, `mintRunId()` = `newId("qds")`, `fakeGate` (five real dir-box probes), 600s wall-clock seam, sub-timings, INV-6 URL redaction, `run-context.json` + stamped `pipeline.yaml` fill.
+- `src/fleet/status.ts` (net-new): `statusAll`/`statusRun` — live/boxMissing/boxUnknown/closed join, 30s list timeout, listOk tracked separately from empty list (unknown ≠ gone doctrine, lifted from indydevdan inkwell `runs_table.py`).
+- `src/fleet/verbs.ts` (net-new): `listVerbs()` exact story shape + `renderHelp` — sole source for `--help`.
+- `src/fleet/index.ts` (net-new): barrel per C5 (no harvest/teardown modules).
+- `scripts/fleet.ts` (net-new): verb CLI per repo idiom (tokenizeArgs/parseValueFlags, run(argv,out,deps) DI, writeSync entry, stderr log sink); harvest/teardown delegate to DF2.5 with the per-run lock replicated verbatim; exit table 0/1/2/3/4/5.
+- `src/phase-engine/manifest.ts` (additive): `limitMicroUsd` optional top-level + `stampManifestLimit` + `serializeManifest` (YAML round-trip).
+- `src/phase-engine/types.ts` (additive, **FTM deviation — 1 line**): `limitMicroUsd?: number` on `PipelineManifest` — the interface lives here, not manifest.ts; the schema edit is incomplete without the matching declaration. Justification: AC9a's "declares limitMicroUsd in the manifest's zod schema" spans schema+type; strictly additive, no consumer changes.
+- `tests/fleet/{brief-schema,dispatch,verbs,cli}.test.ts` (net-new): 84 tests.
+
+**Decision 1 (D1 overturned, verified against source):** `createRun` (driver.ts:134) calls `checkHeadroom(driver, 1, ...)` unconditionally with no skip option, and driver.ts is not in FTM — routing `{admitted:true}` through it would make an N-arm fan-out do N headroom checks of 1, violating AC8/DF3.2-AC1. Dispatch therefore mirrors createRun's post-admission body itself (store.create O_EXCL → budget-ext write → driver.create(TAG) → expose/setPublic → store.set) with the two admission call sites dispatch-owned exactly as the story's boundary note specifies. No ceiling or limit is re-derived: the mint cap, manifest stamp and run-context value are all `decision.admittedCeilingMicroUsd` — DF2.8's `min(keyCap, remaining)`, computed once.
+
+**Decision 2:** requestId is loose at the schema layer (a non-UUID string is not a schema failure, AC1); dispatch drops a non-v4 requestId to `undefined` before `resolveRunCorrelation`, which then mints — DF1.8's INVALID_REQUEST_ID path stays intact for direct callers. `initiateSession` is NOT called by dispatch (engine-side owns the trace store; D9); requestId reaches DF1.4 rows via the in-box run context and every log line (INV-4-bis).
+
+**Decision 3 (fake gate honesty):** the real `setupGate` requires ExeDevDriver's `execTimed`/`boxHost`. The fake path runs `fakeGate` — five REAL `driver.exec` probes of the box's on-disk state (reachable / manifest carries limitMicroUsd / env file mode 600 / manifest non-empty / phases declared), one per DF2.2 assertion item, A/B sharing code 1. No simulated ready verdicts; a probe that fails reports its note.
+
+**Decision 4 (CLI teardown lock):** DF2.5's per-run `acquireRunLock` lives in `scripts/sandbox-teardown.ts` (not importable, not in FTM). It is replicated verbatim in `scripts/fleet.ts` (no-steal, holder reporting) so AC5's "every guard intact" holds; both copies must stay in sync.
+
+**Tests:** `tests/fleet/` 84/84 green · full `tests/providers/ + tests/phase-engine/` 1106 green (one first-run usage.test.ts env flake did not reproduce on rerun; passes solo) · `bunx tsc --noEmit` clean · `bunx biome check` clean (12 files) · advisory gates OK (`check-defensive-programming.sh` 0 findings on 2 changed .ts; `check-pr-conflicts.sh` 0 open-PR overlaps).
+
+**E2E demo (DoD, fake driver, captured verbatim):**
+```
+$ bun scripts/fleet.ts dispatch --driver fake < brief.json   → exit 0
+{"runId":"qds-20260821-12a82a","requestId":"d578c4b0-042a-4952-81b5-124c5f8e5e21","state":"ready","vmName":"qds-20260821-12a82a"}
+$ bun scripts/fleet.ts status --driver fake                  → exit 0
+{"runId":"qds-20260821-12a82a","state":"live","vmName":"qds-20260821-12a82a","createdAt":"2026-08-21T12:32:21.517Z","limitMicroUsd":50000000}
+$ bun scripts/fleet.ts teardown --driver fake qds-20260821-12a82a → exit 0
+torn down: qds-20260821-12a82a
+# record: closedAt=2026-08-21T12:32:21.887Z spendMicroUsd=0 (captureSpend wrote it; fake key usage 0); box_hours 3600000 µ$ ingested by DF2.8's close hook
+```
+Teardown log shows the full seven-step order (spend→artifacts→harvest→revoke→verify→destroy→close) and dispatch's log carries `validate_ms/mint_ms/create_ms/fill_ms/setup_gate_ms` with requestId propagated onto every line.
+
+**Research provenance:** integration spec + 6-track research cached at `_bmad-output/workflow-state/qds-dev/df3-1/` (indydevdan mining verdict: both repos Python/MIT; our DF2.1 run-record.ts is the hardened TS descendant of inkwell's `run_record.py` — doctrine lifted (three-state status), no Python re-ported).
 
 ---
 
