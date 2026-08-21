@@ -1,3 +1,7 @@
+---
+baseline_commit: 9c93c56c1fa833e89b813af91603eabaf9cf0f16
+---
+
 # DF2.8: Micro-Dollar Cost Ledger with Budget Cap and Pre-Spawn Dispatch Refusal
 
 **Story Points:** 4
@@ -255,10 +259,10 @@ DF1.8 uses.)*
 
 ## Definition of Done
 
-- [ ] **Impl:** `ingestCostEvent(event, ctx)` / `assertWithinBudget` / `readIssueCost` exported from
+- [x] **Impl:** `ingestCostEvent(event, ctx)` / `assertWithinBudget` / `readIssueCost` exported from
       `src/providers/`, with the deterministic `event_id` PK + `ON CONFLICT DO NOTHING` making
       redelivery a no-op without collapsing two invocations of one agent into one row.
-- [ ] **Impl:** `readRunCost(runId)` and `readIssueCost(repoSlug, issueId)` share **one** result
+- [x] **Impl:** `readRunCost(runId)` and `readIssueCost(repoSlug, issueId)` share **one** result
       schema — `{ totalMicroUsd, perRole, tokenTotals: { inputTokens, outputTokens }, cacheTotals: {
       cacheReadTokens, cacheWriteTokens }, unpricedRows, hasEvents }` — over `WHERE run_id = ? AND
       unpriced = 0` and `WHERE repo_slug = ? AND issue_id = ? AND unpriced = 0` respectively.
@@ -267,42 +271,243 @@ DF1.8 uses.)*
       `NOT NULL` on every row (AC1) — these views change the query key, not the schema. `hasEvents:
       false` is what distinguishes a run or issue with no ledger rows from one that spent nothing.
       `qds cost` and any downstream audit consumer read the same field names from either function.
-- [ ] **Impl:** integer micro-dollars throughout; single half-up conversion at ingest; default cap
+- [x] **Impl:** integer micro-dollars throughout; single half-up conversion at ingest; default cap
       **5,000,000 µ$** with per-issue overrides keyed `owner/repo#N`.
-- [ ] **Contract:** `qds cost <owner/repo>#<N>` prints total, per-role split, per-run breakdown,
+- [x] **Contract:** `qds cost <owner/repo>#<N>` prints total, per-role split, per-run breakdown,
       cache tokens and unpriced count, all derived from the SUM — a bare issue number is rejected.
-- [ ] **Integration:** the gate runs on the DF2.1 `create` seam and hands
+- [x] **Integration:** the gate runs on the DF2.1 `create` seam and hands
       `min(defaultKeyCapMicroUsd, remainingMicroUsd)` to DF2.3's mint; box-hour rows written at
       teardown from the run record's VM lifetime × `boxHourRateMicroUsd`, never from
       `captureSpend`.
-- [ ] **Security:** append-only enforced by store triggers (INV-COST-1); `key_hash` on every token
+- [x] **Security:** append-only enforced by store triggers (INV-COST-1); `key_hash` on every token
       row and plaintext absent from every row and log line (INV-COST-5).
-- [ ] **Test (unit):** three DF2.7 events for one run → three rows split by role summing exactly to
+- [x] **Test (unit):** three DF2.7 events for one run → three rows split by role summing exactly to
       the issue total; replaying all three adds zero rows, while a second invocation of the same
       agent in the same run records a second row rather than colliding into the first.
-- [ ] **Test (attribution context):** an `ingestCostEvent` call whose `ctx` omits any of `runId` /
+- [x] **Test (attribution context):** an `ingestCostEvent` call whose `ctx` omits any of `runId` /
       `repoSlug` / `issueId` / `requestId` / `role` → structured error naming the field and **zero**
       rows written; a `role` supplied by the dispatcher from the roster is stored verbatim and no
       code path derives it from the model slug or agent name.
-- [ ] **Test (box-hours single row):** one torn-down run → exactly one `box_hours` row equal to
+- [x] **Test (box-hours single row):** one torn-down run → exactly one `box_hours` row equal to
       lifetime × `boxHourRateMicroUsd`, `captureSpend`'s figure ingested nowhere, and the issue SUM
       equal to the token rows plus that one row exactly — a `captureSpend`-ingesting implementation
       double-counts token spend and MUST fail this test. A teardown aborted before its close step
       (injected harvest failure, DF2.5 AC3) writes **zero** `box_hours` rows and `qds cost` reports
       that run `box-hours-pending`, never `0` (AC6); re-running teardown to completion then writes
       exactly one row.
-- [ ] **Test (unit-change negative control):** a cent-denominated or float-valued store fails; a
+- [x] **Test (unit-change negative control):** a cent-denominated or float-valued store fails; a
       sub-cent per-role split (all-cheap roster) round-trips without loss of precision.
-- [ ] **Test (refusal before spawn):** over-cap issue → refusal payload and the recording driver
+- [x] **Test (refusal before spawn):** over-cap issue → refusal payload and the recording driver
       registers zero `create` and zero mint calls; an implementation gating after `create` passes
       the refusal assertion and MUST fail the zero-call assertion.
-- [ ] **Test (malformed event):** non-finite / negative / absent-usage / `unpricedTurns > 0` → row
+- [x] **Test (malformed event):** non-finite / negative / absent-usage / `unpricedTurns > 0` → row
       persisted with `unpriced = 1`, excluded from the priced SUM, counted in the view and the gate
       decision record; zero events dropped.
-- [ ] **Test (e2e demo — MANDATORY):** drive a lead+2-worker run's cost events into a fresh ledger,
+- [x] **Test (e2e demo — MANDATORY):** drive a lead+2-worker run's cost events into a fresh ledger,
       then attempt a second dispatch over the cap — capture `qds cost qds/demo#42` output and the
       refusal record as artifacts, showing the per-role split in µ$ and a box never created.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Implementation Plan (as executed)
+
+TDD red→green per module, in dependency order. The load-bearing store
+(`cost-ledger.ts`) was authored first against a failing 44-test suite, then the
+budget gate + `createRun` seam, the teardown close hook, and the `qds cost` CLI.
+Wave-parallel subagents executed the three dependent modules against frozen
+contracts; the store and all cross-cutting integration were lead-authored.
+
+### Debug Log
+
+- `event_id` INSERT placeholder ordering: `kind` is column 8 — the literal must
+  sit at position 8 in VALUES, not 11 (caught red, fixed green).
+- bun `SUM` on an empty set returns `null`, not 0 — every aggregate uses
+  `COALESCE(SUM(...), 0)` (integer µ$ math never sees null).
+- bun `new Database(path)` creates the file 0644 — chmod 0600 immediately after
+  first open; SQLite propagates the main file's mode to `-wal`/`-shm`.
+- bun:test `expect(fn).toThrow()` returns void — payload assertions use try/catch.
+- Teardown's already-closed early path skipped EVERYTHING, including the
+  box-hours hook: a teardown whose `store.close` committed but whose process
+  died before ingest would never write the row. The early path now still fires
+  the hook (idempotent by `event_id`) — the crash window is closed.
+- `createdAt`/`closedAt` are not settable through `RunRecordStore.set()` —
+  fixtures close with an explicit `new Date(...)` and supply the matching
+  backdated `createdAt` via the ledger's `readRunRecord` seam.
+
+### Completion Notes
+
+- **R2 §6 serialized-admission mandate implemented** (the story prose's "single
+  read-and-compare" is stale against its own cited authority): the cap decision
+  runs inside one `BEGIN IMMEDIATE` transaction over the priced SUM **plus the
+  ceilings of outstanding `gate_admissions`** — append-only reservations that
+  retire themselves when the run's first ledger row lands. Two concurrent
+  dispatches can no longer both read sub-cap and overshoot; the concurrent test
+  proves the second refusal where a bare read-compare admits both. Over-reservation
+  is the fail-safe direction: an admitted run's full clamped ceiling counts
+  against the cap until its real spend is observable.
+- **`gate_admissions` table** joins the schema (append-only triggers like
+  `cost_events`) — keyed `(request_id, run_id)` so a dispatch retry is a no-op.
+- **`perRole` reports box-hours under the literal `"box-hours"` key** — the
+  explicit unattributed line AC1's note requires; no invented role.
+- **`boxHourRateMicroUsd` is config-required**: an unconfigured rate is a
+  structured `CostConfigError` at ingestBoxHours (remediation names the config
+  write), never a silent $0 box row.
+- **`budget` extension namespace** (run-record.ts): `createRun` writes
+  `{ repoSlug, issueId, capMicroUsd, spentMicroUsd, reservedMicroUsd,
+  admittedCeilingMicroUsd }` — the dispatcher's mint reads `admittedCeilingMicroUsd`
+  (`min(defaultKeyCapMicroUsd, remainingMicroUsd)`), teardown's box-hours hook
+  reads the issue attribution. `CreateRunOptions.issue?: { repoSlug, issueId,
+  requestId? }` gates the seam; all five existing `createRun` callers unchanged
+  (absent issue ⇒ pre-DF2.8 behavior).
+- **Rate provenance (F8/R6)**: no rate constant exists in the ledger; priced
+  rows carry DF2.7's provider-reported cost verbatim (µ$), box-hours carry the
+  configured API rate only.
+- Reference lifts (IndyDevDan repos, per derivation lineage): WAL/synchronous/
+  busy_timeout pragma block (inkwell tracer.py:108-113), strict-schema +
+  reject-unknown-key discipline (run_record.py), fixed-width CLI renderer
+  (runs_table.py), teardown ordering taxonomy (teardown.just). Genuinely new
+  (no upstream exists): deterministic sha256 `event_id` idempotency, append-only
+  RAISE(ABORT) triggers, integer micro-dollars, host-side pre-spawn gate,
+  box-hours.
+- Evidence: `_bmad-output/evidence/df2-8/e2e-cost-demo.json` (mode 0600) — the
+  DoD's mandatory E2E artifacts (qds cost output + refusal record, box never
+  created, zero mints on refusal).
+
+### File List
+
+- `src/providers/cost-ledger.ts` (NEW)
+- `src/providers/budget-gate.ts` (NEW)
+- `scripts/qds-cost.ts` (NEW)
+- `tests/providers/cost-ledger.test.ts` (NEW)
+- `tests/providers/budget-gate.test.ts` (NEW)
+- `tests/scripts/qds-cost.test.ts` (NEW)
+- `src/providers/driver.ts` (MODIFIED — CreateRunOptions.issue + budget gate before store.create)
+- `src/providers/run-record.ts` (MODIFIED — `budget` EXTENSION_NAMESPACES entry)
+- `src/providers/teardown.ts` (MODIFIED — CostLedgerHook + close-step hook + early-path crash-window fix)
+- `scripts/sandbox-teardown.ts` (MODIFIED — costLedger wired by default)
+- `src/providers/index.ts` (MODIFIED — cost-ledger + budget-gate exports)
+- `tests/providers/teardown.test.ts` (MODIFIED — 7 new DF2.8 tests)
+- `_bmad-output/evidence/df2-8/e2e-cost-demo.json` (NEW — evidence artifact)
+
+### Change-Scope Verification (GitNexus)
+
+Upstream impact before editing (this branch's two load-bearing seams):
+
+- **`createRun`** (`src/providers/driver.ts`) — risk **LOW**: 1 direct caller
+  (`runCapHitDemo`, `scripts/cap-hit-demo.ts`), 1 affected process. The DF2.8
+  gate and the review-round `readRunRecord` ENOENT classification are
+  additive inside the `opts.issue` branch; no signature change.
+- **`teardownSandbox`** (`src/providers/teardown.ts`) — risk **CRITICAL**:
+  5 direct callers (`runCapHitDemo`, `makeCleanup`, `finishEarly` in
+  `scripts/cap-hit-demo.ts`; `run` in `scripts/sandbox-teardown.ts`; `sweep`
+  in `src/providers/reaper.ts`), 6 affected processes, depth-3 reach into
+  `scripts/sandbox-reap.ts` / `scripts/cap-hit-demo.ts`. Zero signature or
+  step-order change — DF2.8 hooks the close step, and the review round only
+  extracted the shared `ingestBoxHoursIfAttributed` helper and renamed the
+  no-attribution log to its own `teardown.box_hours` operation.
+
+`detect_changes` (scope `compare`, base `main`): 24 changed symbols across 20
+files, risk critical — the branch-wide diff (includes the DF2.6 quota/reaper
+merge), with the changed set matching the File List plus DF2.6's
+`assertValidRunId`/`fillRun` touches. DF2.8's new files (`cost-ledger.ts`,
+`budget-gate.ts`, `qds-cost.ts`) postdate the index and surface as unindexed
+additions, not changed symbols.
+
+### Change Log
+
+- 2026-08-20 — DF2.8 implemented: micro-dollar cost ledger (append-only,
+  deterministic event_id, idempotent replay), serialized-admission budget gate
+  on the create seam, teardown close-step box-hours hook, `qds cost` CLI;
+  44+10+9+32(new-context) tests green, 198 across all seven affected suites.
+- 2026-08-20 (review round, PR #121) — CodeRabbit/Gemini remediation: admitted
+  ceiling now subtracts outstanding reservations from cap headroom; finite
+  costUsd with unpricedTurns>0 keeps its converted cost under the unpriced
+  flag; orphaned gate admissions (store.create failed) expire via a
+  read-side record-existence filter; `qds cost` refuses absent ledger files
+  and wraps config errors with structured output; sandbox-teardown closes its
+  ledger handle in `finally` and classifies record reads through `getRecord`;
+  teardown's box-hours attribution deduplicated into one helper with the
+  no-attribution omission logged as `teardown.box_hours`; evidence artifact
+  scope-labeled and its writer moved off the repo working tree; focal suites
+  green (cost-ledger 44, budget-gate 12, qds-cost 13, teardown 32,
+  sandbox-teardown-cli 12).
+- 2026-08-20 (BMAD code review round, PR #121) — three parallel adversarial
+  layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor; auditor PASS on
+  all 6 ACs + 6 INVs). 21 raw findings → 9 patches applied, 8 dismissed as
+  noise/false-premise/deliberate (see Review Findings). Fixes: constructor
+  cleanup close never masks the original error; box-hours `hours × rate`
+  safe-integer guard (`box-hours-cost-invalid`); µ$ conversion rejects
+  unsafe integers; SQLITE_BUSY classified as retryable `ledger-busy`;
+  `assertMicros` upper bound at `Number.MAX_SAFE_INTEGER`;
+  `assertQueryable` probes the real btree; `DEFAULT_COST_CONFIG` frozen;
+  teardown attribution rejects non-primitive values; driver gate `finally`
+  close wrapped. Focal suites 104/104; tsc clean on touched files.
+- 2026-08-20 (Sift review round, PR #121) — both WARNINGs verified then fixed.
+  W1 (unwired `readRunRecord` silently zeroed reservations): confirmed latent —
+  the production `admitIssue` caller wires the seam; the default now returns a
+  keyless truthy record so an unwired ledger counts every outstanding
+  reservation (fail-safe direction, INV-COST-6) while ingest paths still
+  refuse on the stub (no keyHash/closedAt). W2 (unpriced spend never erodes
+  headroom): confirmed — the retirement filter accepted ANY cost row, so an
+  unpriced-only run retired its full-ceiling reservation and restored
+  headroom on spend it never priced; retirement now requires a **priced** row
+  (`ce.unpriced = 0` in the NOT EXISTS), keeping an unpriced-only run's
+  ceiling counted until real spend is observable (box_hours rows are priced,
+  so teardown still retires). Sift's refuse-on-unpricedRows suggestion was
+  rejected — AC4 pins surfacing, not blocking. cost-ledger 52, budget-gate 10,
+  qds-cost 11 green.
+- 2026-08-20 (fresh 3-layer pass, PR #121) — Blind Hunter + Edge Case Hunter (src / scripts+tests, two scoped runs after context-overflow retries) + Acceptance Auditor (0 violations; all 6 ACs + 6 INVs PASS). 35 raw → 19 patched, 1 deferred (zombie-run reservation retirement policy), 5 dismissed/already-fixed (driver ENOENT + close guards were prior-round work; ctor-context noise; impossible negative-µ$; open-run reservation expiry verified bounded). Fixes: reservation-sum `ledger-overflow` guard; `committed > cap` → over-budget refusal instead of negative ceiling; positive-safe-integer validation at config load + admitIssue entry; `usdToMicros` finite/safe-product guards; per-field keyHash/limitMicroUsd error; `assertMicros` dead-clause simplification; pre-1970 `created > 0`; DEFAULT_COST_CONFIG omission comment; `qds cost` view-total validation (`cost-view-invalid`) + finally-close error precedence with stderr warning; multi-`#` issue-ref rejection; teardown attribution string-only; TeardownError `cause` preservation; run-record ceiling-formula doc. Tests: +MAX_SAFE conversion boundary, corrupt-ledger CLI (negative + unsafe totals), config-path-is-directory, multi-`#`, same-requestId-second-run (refused on real headroom; orphan filter requires `store.create`), deterministic eventId re-run, chmod 0600/0400 tolerance; committed evidence artifact reconciled + per-test schema-assert. 119/119 focal green (cost-ledger 54, budget-gate 11, teardown 32, qds-cost 18, +4 in-file), tsc clean; detect_changes: teardownSteps only (cause-wrap), same blast radius as prior rounds.
+
+### Review Findings
+
+- [x] [Review][Patch] Constructor cleanup `db.close()` can throw and mask the original error [src/providers/cost-ledger.ts:394]
+- [x] [Review][Patch] Box-hours `hours × rate` can exceed `Number.MAX_SAFE_INTEGER` — silent wrong figure (BLOCKER) [src/providers/cost-ledger.ts:559]
+- [x] [Review][Patch] `usdToMicros` accepts precision-loss values above $9B [src/providers/cost-ledger.ts:437]
+- [x] [Review][Patch] SQLITE_BUSY in `admitIssue` propagates unclassified — transient vs fatal indistinguishable [src/providers/cost-ledger.ts:796]
+- [x] [Review][Patch] `assertMicros` lacks upper bound — SQLite 64-bit INTEGER overflow [src/providers/cost-ledger.ts:179]
+- [x] [Review][Patch] `assertQueryable` probe `SELECT 1` never touches the btree — corruption passes [src/providers/cost-ledger.ts:684]
+- [x] [Review][Patch] `DEFAULT_COST_CONFIG` mutable at runtime despite `Readonly` type [src/providers/cost-ledger.ts:160]
+- [x] [Review][Patch] `String()` coercion turns a hand-edited object into `"[object Object]"` attribution [src/providers/teardown.ts:229]
+- [x] [Review][Patch] Driver gate `finally { ledger.close() }` can mask OverBudgetError [src/providers/driver.ts:176]
+
+Dismissed (8): concurrent-ceiling race — `BEGIN IMMEDIATE` serializes writers
+(blind hunter had no project context); corrupt-record read refusal — deliberate
+INV-COST-6 fail-closed, documented; box-hours hook after `store.close` —
+idempotent re-run heals via the already-closed early path, tested; JSON.parse
+error narrowing; perRole NULL sum — STRICT NOT NULL column; transaction return
+typing; sandbox-teardown best-effort ledger close — deliberate policy mirroring
+lock release; ledger dir permissions — false premise (`mkdirSync` passes
+`mode: 0o700` at creation).
+
+### Review Findings — fresh 3-layer pass (2026-08-20)
+
+Layers: Blind Hunter (blind), Edge Case Hunter ×2 (src / scripts+tests), Acceptance Auditor (0 violations — all 6 ACs + 6 INVs PASS). Raw 35 findings → triaged below.
+
+- [x] [Review][Patch] Admission `reservedMicroUsd` sum can overflow MAX_SAFE_INTEGER (blind+edge) — fixed: in-loop `ledger-overflow` throw + test [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] `committed > cap` yields negative `remainingMicroUsd` → negative ceiling handed to mint (edge) — fixed: `remaining <= 0` → over-budget refusal + test [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] Config caps/rates not validated positive at `loadCostConfig`; `admitIssue` lacks `keyCapMicroUsd > 0` entry guard (edge) — fixed: every numeric key via `assertMicros`; admitIssue validates cap at entry [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] `usdToMicros` input-range guard: explicit upper bound + clearer error than generic unsafe-integer (blind) — fixed: finite + safe-product guards, `cost-convert-invalid` + tests [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] keyHash/keyLimit guard error message ambiguous when only one missing (edge) — fixed: names the missing field [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] `assertMicros` trailing `> Number.MAX_SAFE_INTEGER` clause dead after `isSafeInteger` (edge) — fixed: simplified to isSafeInteger + positive [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] `Date.parse` accepts pre-1970 timestamps — add `created > 0` (blind) — fixed [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] `DEFAULT_COST_CONFIG` intentional omission of `boxHourRateMicroUsd` undocumented (blind) — fixed: comment [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] `qds cost` view: formatCost lacks non-finite/negative/unsafe-total guard (edge) — fixed: `assertValidMicroTotal` on issue + role totals, `cost-view-invalid` + 2 corrupt-ledger tests [scripts/qds-cost.ts]
+- [x] [Review][Patch] `qds cost` finally-block `close()` masks original query error; close-failed diagnostic to stdout not stderr (edge) — fixed: `primaryError` precedence, close-after-error → stderr warning; success-path close failure is its own `fail()` [scripts/qds-cost.ts]
+- [x] [Review][Patch] `parseIssueRef` silently drops extra `#` segments (`owner/repo#1#2`) (edge) — fixed: reject ≠2 parts + numeric check + test [scripts/qds-cost.ts]
+- [x] [Review][Patch] existsSync-then-open race — open directly and classify ENOENT vs unopenable (edge) — documented-keep: CostLedger creates missing files, so the pre-check IS the refuse-absent behavior; comment added [scripts/qds-cost.ts]
+- [x] [Review][Patch] Driver `store.get` treats any error as no-prior-record — non-ENOENT must be fatal-with-context (edge) — already-fixed in prior round: ENOENT→undefined, others rethrow [src/providers/driver.ts:156-163]
+- [x] [Review][Patch] Driver `store.set` failure post-admission orphans reservation — verify TTL bound, add cleanup if missing (edge) — deferred: zombie run with record-but-no-extension never retires; needs a retirement policy (cancelAdmission / on-close retire), not an unambiguous patch
+- [x] [Review][Patch] Driver bare `ledger.close()` at :178 — verify it cannot mask OverBudgetError (edge) — already-fixed in prior round: inner try/catch with mask-prevention comment [src/providers/driver.ts:176-182]
+- [x] [Review][Patch] Teardown attribution still coerces numeric repoSlug/issueId (`123` ≠ `"123"`) — tighten to string-only (blind+edge) — fixed [src/providers/teardown.ts]
+- [x] [Review][Patch] TeardownError wrap drops CostLedgerError class/cause — preserve cause for retry classification (edge) — fixed: `cause` preserved through `asTeardownError` [src/providers/teardown.ts]
+- [x] [Review][Patch] run-record budget doc block omits ceiling formula `min(keyCap, remaining)` (blind) — fixed [src/providers/run-record.ts]
+- [x] [Review][Patch] sandbox-teardown: CostLedger ctor throw masks which-record context (edge) — dismissed: runId is the CLI argument the operator just typed; ctor errors are config-global and already carry structured code+remediation via `fail()` [scripts/sandbox-teardown.ts]
+- [x] [Review][Patch] Tests: MAX_SAFE µ$ conversion boundary; same-requestId second dispatch; teardown re-run asserts deterministic eventId; config-path-is-directory; chmod 0600/0400 tolerance (edge) — all added; same-requestId test corrected to real semantics (second dispatch refused: 4.9M spent + 100k reserved ≥ 5M cap; reservation requires `store.create` or the orphan filter expires it) [tests/]
+- [x] [Review][Patch] Committed `_bmad-output/evidence/df2-8/e2e-cost-demo.json` drifted from test-produced shape (spend.lead 100k vs 5M) — fixed: reconciled + per-test schema-assert of the committed copy (D8) [tests/providers/budget-gate.test.ts]
+
+Deferred (1): internal retry/backoff for `ledger-busy` under >10 concurrent dispatch storms — busy already classified retryable; speculative load scaling (blind).
+
+Dismissed (4): box-hour rate late-fail at teardown — spec-mandated surfacing, not silent default (blind); positive-USD→negative-µ$ — mathematically impossible in safe range (edge); open-run reservation persistence — verify-only, expiry path exists from prior round (edge, pending verifier verdict); INFO confirmations ×2 (append-only triggers, serialized admission).
+
+
+**Status:** review — implemented, four review rounds complete (this pass: 19/19 actionable patches applied, 119/119 focal green); awaiting PR #121 merge

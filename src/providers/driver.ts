@@ -16,6 +16,8 @@
 
 import type { RunRecord, RunRecordStore } from "./run-record.ts";
 import { checkHeadroom, HeadroomRefusedError, loadQuotaLimits } from "./quota.ts";
+import { CostLedger } from "./cost-ledger.ts";
+import { assertWithinBudget } from "./budget-gate.ts";
 
 /**
  * Create-time provenance marker (DF2.6 D1): every factory-provisioned VM is
@@ -98,6 +100,19 @@ export interface CreateRunOptions {
   runId: string;
   /** When set, the box is exposed on this port and made public after create. */
   port?: number;
+  /**
+   * DF2.8: the operator-supplied issue ref that authorizes the spend. When
+   * present, `createRun` runs the budget gate (INV-COST-3) — an issue at or
+   * over its cap refuses BEFORE the record, the box and the key exist, and the
+   * admission decision (including the clamped mint ceiling) lands on the
+   * record's `extensions.budget`. Absent ⇒ no budget accounting, exactly the
+   * pre-DF2.8 behavior (P1.2 automates issue intake; DF3.1 supplies this).
+   */
+  issue?: {
+    repoSlug: string;
+    issueId: string;
+    requestId?: string;
+  };
 }
 
 /**
@@ -122,8 +137,66 @@ export async function createRun(
   // from an uncounted population); a broken limits file refuses here too.
   const headroom = await checkHeadroom(driver, 1, loadQuotaLimits());
   if (!headroom.allowed) throw new HeadroomRefusedError(headroom);
+  // DF2.8: the budget gate (INV-COST-3) runs beside the headroom gate — an
+  // over-cap issue refuses with zero records, zero boxes and zero keys, and
+  // the serialized admission reserves the clamped ceiling so a concurrent
+  // dispatch cannot both-win the read-compare race (R2 §6). An unopenable
+  // ledger refuses here too (INV-COST-6) — never read as zero spend.
+  let admitted:
+    | { decision: ReturnType<typeof assertWithinBudget>; repoSlug: string; issueId: string }
+    | undefined;
+  if (opts.issue !== undefined) {
+    const issue = opts.issue;
+    const ledger = new CostLedger({
+      // ENOENT → undefined so the gate's orphan-admission expiry can see a run
+      // whose store.create failed (its reservation must stop counting); every
+      // other read failure propagates and refuses the dispatch — the same
+      // typed-code classification harvest.ts getRecord applies, never message
+      // text.
+      readRunRecord: (id) => {
+        try {
+          return store.get(id);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+          throw e;
+        }
+      },
+    });
+    try {
+      admitted = {
+        decision: assertWithinBudget(ledger, {
+          repoSlug: issue.repoSlug,
+          issueId: issue.issueId,
+          runId: opts.runId,
+          requestId: issue.requestId ?? `gate-${opts.runId}`,
+        }),
+        repoSlug: issue.repoSlug,
+        issueId: issue.issueId,
+      };
+    } finally {
+      try {
+        ledger.close();
+      } catch {
+        // A close failure must not mask the gate's own error; the WAL handle dies with the process.
+      }
+    }
+  }
   // Record first. If this throws (EEXIST, bad id) no box is ever created.
   store.create(opts.runId);
+  if (admitted !== undefined) {
+    store.set(opts.runId, {
+      extensions: {
+        budget: {
+          repoSlug: admitted.repoSlug,
+          issueId: admitted.issueId,
+          capMicroUsd: admitted.decision.capMicroUsd,
+          spentMicroUsd: admitted.decision.spentMicroUsd,
+          reservedMicroUsd: admitted.decision.reservedMicroUsd,
+          admittedCeilingMicroUsd: admitted.decision.admittedCeilingMicroUsd,
+        },
+      },
+    });
+  }
   // D1: every factory-provisioned VM carries the canonical ownership tag —
   // not caller-displaceable. A custom tag would make a factory box classify
   // `foreign` in the DF2.6 reaper (tag !== SBX_OWNERSHIP_TAG ⇒ reported,

@@ -37,6 +37,7 @@ import { join } from "node:path";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { captureSpend, revokeRunKey, verifyRevoked, type CredentialDeps, type KeyApi } from "./credentials.ts";
 import type { ProviderDriver } from "./driver.ts";
+import type { BoxHoursCtx } from "./cost-ledger.ts";
 import {
   bunGitRunner,
   getRecord,
@@ -48,6 +49,14 @@ import {
 } from "./harvest.ts";
 import type { RunRecordStore } from "./run-record.ts";
 import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
+
+/**
+ * DF2.8: structural handle so teardown does not depend on the whole CostLedger type.
+ * cost-ledger.ts imports nothing from teardown, so this import creates no cycle.
+ */
+export interface CostLedgerHook {
+  ingestBoxHours(ctx: BoxHoursCtx): { eventId: string; inserted: boolean; unpriced: boolean };
+}
 
 export class TeardownError extends Error {
   /** Machine-readable failure class; also the `code` in every log line. */
@@ -74,6 +83,11 @@ export interface TeardownDeps {
   gitRunner?: GitRunner;
   runsDir?: string;
   workdir?: string;
+  /**
+   * DF2.8: when present, the close step prices this run's box hours into the cost ledger
+   * (exactly once — the deterministic event_id makes a repeated close a no-op).
+   */
+  costLedger?: CostLedgerHook;
 }
 
 export interface TeardownOptions {
@@ -203,6 +217,38 @@ export async function teardownSandbox(deps: TeardownDeps, runId: string, opts: T
   }
 }
 
+/**
+ * DF2.8: price this run's box hours from the record's budget attribution —
+ * the shared body of the two ingest points (the already-closed early path and
+ * the close step). Validates the attribution fields are primitive string|number
+ * (the extension entry's index signature is string | number, but a hand-edited
+ * record could carry an object — truthiness passes and String({}) produces
+ * "[object Object]", which would write a nonsense attribution row). Non-primitive
+ * values count as no attribution. Returns false when the record carries no valid
+ * issue attribution so each call site surfaces the omission its own way.
+ */
+function ingestBoxHoursIfAttributed(
+  costLedger: CostLedgerHook,
+  rec: { extensions?: { budget?: { repoSlug?: string | number; issueId?: string | number } } },
+  runId: string,
+  requestId: string,
+): boolean {
+  const budget = rec.extensions?.budget;
+  const { repoSlug, issueId } = budget ?? {};
+  // String-only: numeric values from hand-edited records are rejected as invalid attribution.
+  // The extension index signature admits string|number, but a hand-edited {repoSlug: 123}
+  // would mis-attributing spend as "123" rather than the intended repo.
+  if (typeof repoSlug !== "string") return false;
+  if (typeof issueId !== "string") return false;
+  costLedger.ingestBoxHours({
+    runId,
+    repoSlug,
+    issueId,
+    requestId,
+  });
+  return true;
+}
+
 async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOptions, ctx: StepCtx): Promise<void> {
   // Preflight — all before ANY mutation; the box stays untouched throughout.
   // Shared classifier (harvest.ts getRecord): genuine absence → no-record,
@@ -214,6 +260,19 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   // Idempotent re-run: first-close-wins already applied — every step skipped.
   if (rec.closedAt !== undefined) {
     for (const step of STEPS) skipStep(ctx, step, "record already closed (first-close-wins)");
+    // DF2.8 crash-window fix: if store.close succeeded but the process died before ingestBoxHours ran,
+    // a re-run would skip everything and the row would never land. Run the hook here — it's
+    // idempotent by eventId, so a repeated close is a no-op.
+    if (deps.costLedger) {
+      try {
+        ingestBoxHoursIfAttributed(deps.costLedger, rec, runId, ctx.requestId);
+      } catch (e) {
+        // Preserve the original error as cause so CostLedgerError classification survives the wrap.
+        const wrapped = asTeardownError(e);
+        (wrapped as Error & { cause: unknown }).cause = e;
+        throw wrapped;
+      }
+    }
     return;
   }
 
@@ -323,7 +382,32 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   }
 
   // 7. close — LAST. (extensions stay writable post-close; we write none.)
+  // A cost-ingest throw inside this step (unconfigured box-hour rate, an
+  // unopenable ledger) cannot strand billable resources: the box is already
+  // destroyed (step 6), the key revoked+verified (steps 4-5), and the record
+  // is closed. The TeardownError exists to surface the unpriced row loudly —
+  // and re-running teardown heals it through the closed-record path at the
+  // top of teardownSteps, which retries this exact ingest idempotently (the
+  // deterministic event_id makes the second attempt a no-op once it lands).
   await runStep(ctx, "close", async () => {
     deps.store.close(runId);
+    // DF2.8: price box hours into the cost ledger, now that the record's
+    // lifetime is final. The no-attribution omission logs under its own
+    // operation — a second "close" step line marked skipped would contradict
+    // the close that just succeeded above.
+    if (deps.costLedger) {
+      const closedRec = deps.store.get(runId);
+      if (!ingestBoxHoursIfAttributed(deps.costLedger, closedRec, runId, ctx.requestId)) {
+        log({
+          ...stepBase(ctx, "teardown", "close"),
+          operation: "teardown.box_hours",
+          duration: 0,
+          durationMs: 0,
+          status: "ok",
+          outcome: "skipped",
+          reason: "no issue attribution — box hours not priced for this run",
+        });
+      }
+    }
   });
 }
