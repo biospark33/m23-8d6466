@@ -70,8 +70,10 @@ checksums — those go stale on the next commit.
 
 **Categories of modification to vendored files:**
 
-1. **Token auth gate** — every route requires a bearer token; `server/auth.ts`
-   and its `VizError` are new, and `server/index.ts` routes through them.
+1. **Token auth gate** — every route requires a valid credential, either
+   `Bearer <token>` or `Basic base64(":"+token)` (same single secret; the Basic
+   form exists for browser navigation); `server/auth.ts` and its `VizError`
+   are new, and `server/index.ts` routes through them.
 2. **Loopback bind** — the server binds `127.0.0.1` rather than all interfaces.
 3. **Environment-variable namespacing** — upstream's generic names are prefixed
    so they cannot collide with the host process: `PORT` → `QDS_VIZ_PORT`
