@@ -7,11 +7,12 @@
   "scripts": {
     "dev": "vite",
     "server": "bun run server/index.ts",
-    "dev:all": ": \"${QDS_VIZ_TOKEN:?set QDS_VIZ_TOKEN to a secret of at least 32 bytes (openssl rand -hex 32); the visualizer never serves unauthenticated, and starting vite against a server that refused to bind only proxies to a dead API}\" && { bun run server/index.ts & vite; }",
+    "dev:all": "bun run --silent preflight && { bun run server/index.ts & vite; }",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "bun run server/index.ts",
     "typecheck": "vue-tsc --noEmit",
-    "lint": "oxlint ."
+    "lint": "oxlint .",
+    "preflight": "bun --eval \"const { validateToken } = await import('./server/auth.ts'); try { validateToken(process.env) } catch (e) { console.error(e.message); if (e.remediation) console.error(e.remediation); process.exit(1) }\""
   },
   "dependencies": {
     "@fontsource/play": "^5.3.0",

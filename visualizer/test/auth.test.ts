@@ -7,6 +7,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { connect } from "node:net";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { seedTrace, FIXTURE_REQUEST_ID } from "./fixtures/trace-fixture.ts";
@@ -146,6 +147,42 @@ describe("startup validation (INV-1/INV-5, AC5)", () => {
     expect(() =>
       startVisualizer({ dbPath: seeded.dbPath, token: TOKEN, port: 80 }),
     ).toThrow(VizError);
+  });
+
+  // The dev:all preflight is the only thing standing between a rejected token
+  // and a vite dev server proxying /api to a process that refused to bind.
+  // `${VAR:?}` alone only catches unset/empty, so the SHORT-token case is the
+  // one that matters here: it is a live token value that still fails startup.
+  describe("dev:all preflight blocks vite on every token-validation failure", () => {
+    const run = (token: string | undefined) =>
+      spawnSync("bun", ["run", "--silent", "preflight"], {
+        cwd: path.join(import.meta.dir, ".."),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          ...(token === undefined ? {} : { QDS_VIZ_TOKEN: token }),
+          ...(token === undefined ? { QDS_VIZ_TOKEN: "" } : {}),
+        },
+      });
+
+    test("an unset token fails the preflight", () => {
+      const r = run(undefined);
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain("QDS_VIZ_TOKEN is unset");
+    });
+
+    test("a NON-EMPTY 31-byte token fails the preflight", () => {
+      const r = run("x".repeat(31));
+      expect(r.status).not.toBe(0);
+      // Proves the preflight enforces the byte minimum, not just presence:
+      // this token would sail past a bare `${QDS_VIZ_TOKEN:?}` guard.
+      expect(r.stderr).toContain("31 bytes, minimum is 32");
+    });
+
+    test("a valid 32-byte token passes the preflight", () => {
+      const r = run("x".repeat(32));
+      expect(r.status).toBe(0);
+    });
   });
 
   test("AC1(b)/INV-5: the listener binds 127.0.0.1, never a wildcard", () => {
