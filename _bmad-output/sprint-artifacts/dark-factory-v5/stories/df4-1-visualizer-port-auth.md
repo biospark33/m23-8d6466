@@ -512,3 +512,156 @@ from the vendored copy before first commit, so they never land).
 - **2026-08-21** — pre-PR self-review round: 3 FIX-FIRST bugs fixed with regression tests
   (pre-gate decode crash, archive fail-open on malformed JSON, usage-split camelCase contract)
   + SessionTrace terminal-status polling gate; 81/81 green, vue-tsc/tsc/biome clean.
+
+---
+
+### Review Round 1
+
+Eight-agent adversarial review of PR #124 (four blind chunk reviewers, two repo-aware edge
+reviewers, a vendoring/provenance parity reviewer, a spec/AC auditor), plus the 13 findings the
+Sift bot left on the PR. CodeRabbit produced no review on this PR — it hit its Fair-Usage review
+limit before running. Findings were deduped to a triage ledger, then fixed by six disjoint
+file-cluster agents (wave 1: source) and two test agents (wave 2: tests).
+
+**Patched — BLOCKER**
+
+- [x] **L3 cost table was dead against every real trace.** `visualizer/shared/types.ts`'s
+  `UsageBreakdown` was the un-ported upstream SSSF shape — snake_case with five per-component
+  costs. DF1.4 actually writes `{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens,
+  reasoningTokens, costMicros, sends}` (`src/phase-engine/usage.ts:41-49`, emitted at
+  `src/phase-engine/agents/retry.ts:142-151`) — camelCase, and **one** cost figure, not five.
+  Every row of the cost table rendered the literal string `NaN` and the `thinking` row computed
+  `undefined * undefined / undefined`. This falsified the E2E Slice's own stated behaviour
+  ("phase detail showing … the cost table") and spec §3.3's "cost breakdown". The Debug Log's
+  round-3 fix corrected the *server* half only; the client half and the shared type were never
+  touched, and nothing caught it — there are no client tests, and `vue-tsc` was green because
+  the type was a self-consistent lie. Type corrected to the real shape (camelCase-first, snake
+  heritage fallback, matching the precedent `db.ts` already set); the panel now renders
+  per-component **token** rows with a single total cost, omits rows the tracer never wrote
+  rather than inventing zeros, and reports `partial` truthfully.
+- [x] **Runaway cursor-pagination loop** in `SessionTrace.vue` and `SessionCard.vue`. Nothing
+  required the cursor to advance, so a page with `hasMore: true` and a non-advancing cursor
+  spun forever at 1000 rows per iteration inside a 500 ms interval — one runaway loop per
+  rendered card. A non-numeric `page.cursor` also poisoned it to `NaN` permanently, refetching
+  the entire history every 500 ms. Now requires a finite, strictly-increasing cursor and bounds
+  the loop.
+- [x] **AC1(b) loopback bind was unasserted.** Deleting `hostname: "127.0.0.1"` from
+  `Bun.serve` left the whole suite green — every request targets loopback anyway, so a
+  `0.0.0.0` bind is indistinguishable. INV-2's confidentiality claim rested on an untested
+  line. Now pinned.
+
+**Patched — HIGH**
+
+- [x] **Unauthenticated source disclosure via a missing `Host` header.** Found by the test wave
+  and confirmed live: `new URL(req.url)` sat ahead of `handle()`'s `try`, so `GET /api/health
+  HTTP/1.0` with no Host (or `Host:` empty) threw before the gate — 500 carrying ~67 KB of
+  Bun's error overlay including absolute filesystem paths and dispatcher source lines, on a
+  pre-auth path reachable with one socket write and no credential, and with no `viz_request`
+  log line at all. Now answered as the bodyless 403 the Host gate owes it, and logged.
+- [x] `/api/sessions/:id/prompts` was an unbounded read of the largest blobs in the trace — no
+  LIMIT, no cursor, while `events()` immediately above it clamped correctly. Introduced by our
+  port (upstream read two files off disk). Now clamped like `events()` and honours `?limit=`.
+- [x] `router.ts` threw `URIError` at module evaluation on a malformed hash (`#/%`), before
+  `createApp().mount()` — a white screen from a pasted link, no auth required.
+- [x] `serveStatic` was the one branch outside `safely()`, and `handle()` had a `finally` but
+  no `catch`, so a static-path throw escaped into Bun's default error handler.
+- [x] No polling path backed off on failure: 2 requests/second per mounted component, forever,
+  against a dead server.
+- [x] `SessionTrace` never reset on a `requestId` prop change — rendered session A's events and
+  cursor under session B's phases with `loaded` still true.
+- [x] The vendoring script's own recovery instruction (`rm -rf visualizer/`) silently stripped
+  all 13 hardened files while the regenerated `PROVENANCE.md` kept asserting the hardening was
+  present. Made destructive-path costs explicit and guarded.
+- [x] **AC5's exposure assert was vacuously green.** It greps `src/providers/**` for
+  `QDS_VIZ_PORT` / `viz-port` / `4600` and requires `assertNeverPublic` in any matching file —
+  but zero files match, so the `expect` inside the loop never executed; the only live assertion
+  was "the directory contains .ts files". A positive control now proves the detector fires.
+
+**Patched — MEDIUM / LOW** (28 further items)
+
+F11 hardening (500 bodies no longer echo exception text, SQL or paths — detail stays in the
+server log; route-404 no longer reflects the pathname); archive write handle opened
+`{create:false, readwrite:true}` so a vanished trace can no longer be silently re-materialised
+as an empty db; `TOKEN_MIN_BYTES` measured with `Buffer.byteLength`; db handle closed when
+`Bun.serve` throws; archive body refused on the declared `content-length` before it is read;
+`hasColumn` identifiers validated; static responses carry `no-store` + `nosniff`, decode
+defensively, and 404 asset-looking paths instead of answering HTML; `after=` past
+`MAX_SAFE_INTEGER` rejected rather than silently coerced (INV-3); `SIGTERM` handled alongside
+`SIGINT`; `GET /api` classified as API (no browser Basic prompt); client fetch timeout and
+JSON-parse errors that no longer carry response-body text into the error surface (F11 —
+`/prompts` bodies *are* prompt content); `fmtDuration` "2m 60s" rollover; `axisTicks` honouring
+`maxTicks` and guarding a non-finite span; `toSorted` replaced for browser baseline; unknown
+session status no longer rendered as a red "fail"; `shallowRef` for the largest event array;
+vendor pin verification, repo-URL normalisation, and a completed divergence inventory in
+`PROVENANCE.md`.
+
+**Gates that existed on paper but never ran** — the visualizer shipped behind three checks that
+were declared and then never invoked: CI ran root `typecheck` (whose tsconfig excludes
+`visualizer/`), `biome.json` ignored `**/*.vue` repo-wide, and the vendored `.oxlintrc.json`
+gate was never called from anywhere. So the security-relevant port boundary and ~3,500 lines of
+components were type-checked and linted by nothing. `typecheck:visualizer` and a new
+`lint:visualizer` are now wired into CI, `visualizer/test/**` is inside the type-check, and
+`noUncheckedIndexedAccess` is on.
+
+**Tests** — 2407 → 2455 (+48). AC0 gained its first executable verification at all (22 tests
+over the pin-rejection, same-pin no-op, refusal and hardening-guard branches, no network); the
+static branch is now exercised authenticated with traversal cases; anti-CORS is asserted on a
+200; wrong-**length** credentials are pinned (a `timingSafeEqual` over raw strings would 500,
+not 401); `limit=-1|0|abc` is covered on all three paged routes (the clamp's *lower* bound is
+the only thing stopping `LIMIT -1` from meaning unbounded); the snake_case heritage arm and the
+read/write derivation rule are covered instead of a magic constant. Every new test was verified
+red against a deliberate product mutation.
+
+**Pushback — reported, not patched**
+
+- **`checkHost` pins the `Host` port to the server's bound port**, so `ssh -L 8080:127.0.0.1:4600`
+  403s every request. Two independent reviewers filed this as HIGH. It is not a defect: AC1(c)
+  mandates the Host header be exactly `127.0.0.1:<port>` / `localhost:<port>` against the
+  resolved port. Kept as specified (conservative resolution). **Operator constraint worth
+  documenting:** the local forward port must equal the remote one — the story's own example
+  (`ssh -L 4600:127.0.0.1:4600`) does this, so the failure only bites an operator who picks a
+  different local port, and it surfaces as a blank page (403, empty body).
+- **403 before 401** — reported as "not every route 401s on a missing credential". AC1 mandates
+  the DNS-rebinding gate run first, ahead of the credential check. Working as specified.
+- **Four `v-html` sinks / markdown link-href XSS** (one filed by Sift as SECURITY). False
+  positives, verified in source: `escapeHtml` escapes `"` and `'`, `inline()` only ever receives
+  already-escaped text, `renderMarkdown` and `highlightJson` escape before emitting tags and
+  have no raw-HTML passthrough. The markdown file is byte-identical to upstream.
+- **`prettyJson` returns unescaped text** — real hazard only via a `v-html` caller; it has zero
+  callers in the tree.
+- **`setToken` is dead code** — documented programmatic escape hatch; the browser path uses the
+  Basic 401 challenge by design.
+- **Health reports degraded while other routes 500** — AC3 defines exactly that split.
+
+**New finding — evidence is not replayable (owner: DF4.2)**
+
+`_bmad-output/evidence/df4-1/demo-trace.db` is a WAL database committed without its `-wal` /
+`-shm` sidecars. SQLite cannot open a WAL db read-only when it must create the `-shm`, so the
+server this evidence exists to demonstrate **cannot open its own demo trace**:
+`new Database(path, {readonly: true})` → `SQLITE_CANTOPEN`, reproducible on a fresh writable
+copy. The captured JSON in `e2e-demo.json` remains accurate — none of the shapes it asserts
+(prompt rows, gate rows with both json columns, 401 empty body, refusal on a routable address)
+changed in this round, and all of them are now covered by the regression suite instead. But the
+artifact cannot be replayed, so it is evidence that cannot be re-verified. Not silently
+regenerated: the `ssh -L` capture in it was taken against real sshd on the author's machine and
+cannot be honestly reproduced here.
+
+**Deferred to DF4.2** (its story owns the test suite, the Bun-API inventory and per-box deploy):
+client-side/DOM test infrastructure (so AC2's render half and `api.ts`'s credential claims stay
+untested by machine), the `main()` process-exit test, the trace-locked-past-`busy_timeout` test,
+`resolveDbPath` and the `journal_mode` warn path, event-list windowing, and the vendored
+`package.json` dev scripts that the mandatory startup token broke (`bun run server` / `dev:all`
+now exit at startup).
+
+**Pre-existing, untouched by this PR:** 5 biome errors (`scripts/qds-cost.ts`,
+`src/providers/budget-gate.ts`, `tests/providers/*`) and 2 GitNexus tests that shell out to the
+`gitnexus` CLI and time out at 5 s — all byte-identical to `main`. `bun run notice:sweep` fails
+with a usage error (`--tree is required`) on `main` as well; the sweep's real gate is
+`build:image`.
+
+**Gate results:** `bun test` 2444 pass / 2 fail (both the pre-existing GitNexus timeouts) ·
+`bunx tsc --noEmit` clean · `bun run typecheck:visualizer` clean · `bun run lint:visualizer`
+clean · `bunx @biomejs/biome check visualizer` clean · AC0 same-pin re-vendor re-run against the
+pinned inputs → exit 0, no-op, hardening intact · `detect_changes` vs the working tree → 89
+symbols across 13 processes, all inside `visualizer/**` and `scripts/vendor-visualizer.ts`, no
+out-of-scope module.

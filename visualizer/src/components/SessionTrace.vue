@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch, watchEffect } from 'vue'
 import type {
   AgentSession,
   AgentStartPayload,
@@ -27,7 +27,7 @@ const session = ref<Session | null>(null)
 const phases = ref<Phase[]>([])
 const agents = ref<AgentSession[]>([])
 const usage = ref<SessionUsage>({ read: 0, written: 0 })
-const events = ref<EventRow[]>([])
+const events = shallowRef<EventRow[]>([])
 const envelopes = ref<Envelope[]>([])
 const gates = ref<GateResult[]>([])
 const apiError = ref<string | null>(null)
@@ -38,36 +38,53 @@ let cursor = 0
 let inflight = false
 let timer: ReturnType<typeof setInterval> | undefined
 
+const POLL_MS = 500
+/** Hard ceiling on pages drained per tick — a server that keeps saying
+ *  hasMore must not hold the tick (and the ui) hostage. */
+const MAX_PAGES = 50
+const MAX_POLL_MS = 30_000
+/** Consecutive failed ticks — backs the poll off so a dead api is not hammered
+ *  twice a second for as long as the tab stays open. */
+let fails = 0
+
 const SIDE_TABLE_TYPES = new Set(['gate_pass', 'gate_fail', 'handoff', 'agent_end', 'phase_end', 'error'])
 
 async function tick() {
   if (inflight) return
   inflight = true
   try {
-    const detail = await fetchSession(props.requestId)
+    // The prop can change mid-flight; anything that resolves for the previous
+    // run is dropped rather than written over the new one's state.
+    const id = props.requestId
+    const detail = await fetchSession(id)
+    if (id !== props.requestId) return
     session.value = detail.session
-    phases.value = detail.phases.toSorted((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+    phases.value = [...detail.phases].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
     agents.value = detail.agents
     usage.value = detail.usage
 
     const fresh: EventRow[] = []
-    let page
-    do {
+    for (let round = 0; round < MAX_PAGES; round++) {
       // Cursor pagination is inherently sequential: each request needs the previous cursor.
       // oxlint-disable-next-line no-await-in-loop
-      page = await fetchEvents(props.requestId, cursor, 1000)
-      cursor = Math.max(cursor, page.cursor)
+      const page = await fetchEvents(id, cursor, 1000)
+      if (id !== props.requestId) return
       fresh.push(...page.rows)
-    } while (page.hasMore)
+      // Advance from the rows actually taken, never from the reported cursor: a
+      // server cursor that does not move (or is not a number) would otherwise
+      // spin this loop forever, or stick at NaN and refetch all history a tick.
+      const next = Math.max(cursor, ...page.rows.map((r) => r.rowid).filter(Number.isFinite))
+      if (next <= cursor) break
+      cursor = next
+      if (!page.hasMore) break
+    }
     if (fresh.length) events.value = [...events.value, ...fresh]
 
     // Envelopes and gates only gain rows around phase/agent boundaries — refetch
     // on those events instead of every tick.
     if (!loaded.value || fresh.some((e) => e.type !== null && SIDE_TABLE_TYPES.has(e.type))) {
-      const [env, g] = await Promise.all([
-        fetchEnvelopes(props.requestId),
-        fetchGates(props.requestId),
-      ])
+      const [env, g] = await Promise.all([fetchEnvelopes(id), fetchGates(id)])
+      if (id !== props.requestId) return
       envelopes.value = env
       gates.value = g
     }
@@ -75,8 +92,14 @@ async function tick() {
     nowMs.value = Date.now()
     apiError.value = null
     loaded.value = true
+    if (fails) {
+      fails = 0
+      if (timer) startPolling()
+    }
   } catch (err) {
     apiError.value = err instanceof Error ? err.message : String(err)
+    fails++
+    if (timer) startPolling(Math.min(POLL_MS * 2 ** Math.min(fails, 6), MAX_POLL_MS))
   } finally {
     inflight = false
   }
@@ -87,9 +110,14 @@ function stopPolling() {
   timer = undefined
 }
 
+function startPolling(ms: number = POLL_MS) {
+  stopPolling()
+  timer = setInterval(() => void tick(), ms)
+}
+
 onMounted(() => {
   void tick()
-  timer = setInterval(() => void tick(), 500)
+  startPolling()
 })
 
 onUnmounted(() => {
@@ -104,8 +132,33 @@ onUnmounted(() => {
 watch(
   () => session.value?.status,
   (status) => {
-    if (status === 'running' && !timer) timer = setInterval(() => void tick(), 500)
-    else if (status !== 'running') stopPolling()
+    if (status === 'running' && !timer) startPolling()
+    // A null status is "not known yet" (first tick pending, or the run switched
+    // out from under us), never a terminal state — stopping there would freeze
+    // the view before the first successful poll.
+    else if (status) stopPolling()
+  },
+)
+
+// The parent reuses this component across runs by swapping the prop, so every
+// piece of per-run state has to go — a stale cursor would silently skip the new
+// run's early events, and stale rows would render under the new run's phases.
+watch(
+  () => props.requestId,
+  () => {
+    cursor = 0
+    fails = 0
+    session.value = null
+    phases.value = []
+    agents.value = []
+    usage.value = { read: 0, written: 0 }
+    events.value = []
+    envelopes.value = []
+    gates.value = []
+    apiError.value = null
+    loaded.value = false
+    startPolling()
+    void tick()
   },
 )
 
@@ -334,7 +387,7 @@ const blockLayout = computed<Record<string, { left: number; width: number }>>(()
         width: ((Math.max(end, start) - start) / span) * avail,
       }
     })
-    .toSorted((a, b) => a.start - b.start)
+    .sort((a, b) => a.start - b.start)
 
   let shift = 0
   let prevEdge = 0
@@ -452,7 +505,7 @@ function selectPhase(p: Phase) {
 
     <div v-if="session" class="run-strip">
       <span class="request" :title="session.request ?? ''">{{ session.request }}</span>
-      <StatusChip :status="session.status ?? 'fail'" />
+      <StatusChip :status="session.status ?? 'unknown'" />
       <span class="dim">started {{ fmtDate(session.started_at) }}</span>
       <span class="run-stats">
         <StatChip kind="cost" :value="session.total_cost" />

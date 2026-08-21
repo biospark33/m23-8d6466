@@ -46,10 +46,21 @@ function startFixture(requestId: string): FixtureBase {
   return { root, dbPath: path.join(dataDir, "trace.db"), tracer, prevRunRoot };
 }
 
-function finishFixture(base: FixtureBase, requestId: string): { cleanup: () => void } {
+function finishFixture(base: FixtureBase): { cleanup: () => void } {
+  let done = false;
   return {
     cleanup: () => {
-      base.tracer.close();
+      // Teardown runs from a caller's `finally` and some seeders close the
+      // tracer early: a second close must never throw out of here, or it
+      // replaces the failure the test was actually reporting AND leaks the
+      // temp root by skipping the rm below.
+      if (done) return;
+      done = true;
+      try {
+        base.tracer.close();
+      } catch {
+        /* already closed — teardown is idempotent by design */
+      }
       fs.rmSync(base.root, { recursive: true, force: true });
       if (base.prevRunRoot === undefined) {
         // biome-ignore lint/performance/noDelete: delete is the only correct way to restore "not set"
@@ -248,7 +259,7 @@ export function seedTrace(): SeededTrace {
     );
   aux.close();
 
-  const { cleanup } = finishFixture(base, requestId);
+  const { cleanup } = finishFixture(base);
   return {
     root: base.root,
     dbPath: base.dbPath,
@@ -263,9 +274,11 @@ export function seedTrace(): SeededTrace {
 /**
  * A run whose only payload is `count` events, bulk-inserted in one raw
  * transaction (fsync-per-event through Tracer is impractical past ~1000).
- * Used to observe the MAX_LIMIT=1000 clamp with limit=99999.
+ * Used to observe the MAX_LIMIT=1000 clamp with limit=99999. `type` selects
+ * the event type so the same bulk seed serves /events ("log") and the
+ * equally-bounded /prompts ("prompt").
  */
-export function seedManyEvents(count: number): SeededTrace {
+export function seedManyEvents(count: number, type = "log"): SeededTrace {
   const requestId = MANY_REQUEST_ID;
   const base = startFixture(requestId);
   base.tracer.startSession({ requestId, request: "bulk events", engineer: "fixture" });
@@ -284,16 +297,22 @@ export function seedManyEvents(count: number): SeededTrace {
     `INSERT INTO events (
        event_id, request_id, phase_id, parent_id, type, name,
        payload_json, tokens, started_at, ended_at
-     ) VALUES (?, ?, NULL, NULL, 'log', 'bulk', NULL, NULL, ?, NULL)`,
+     ) VALUES (?, ?, NULL, NULL, ?, 'bulk', ?, NULL, ?, NULL)`,
   );
   aux.transaction(() => {
     for (let i = 0; i < count; i++) {
-      ins.run(`evt-${i}`, requestId, "2026-08-21T10:00:00.000Z");
+      ins.run(
+        `evt-${i}`,
+        requestId,
+        type,
+        JSON.stringify({ agentId: "bulk", prompt: `compiled ${i}`, model: "qds/test-max" }),
+        "2026-08-21T10:00:00.000Z",
+      );
     }
   })();
   aux.close();
 
-  const { cleanup } = finishFixture(base, requestId);
+  const { cleanup } = finishFixture(base);
   return {
     root: base.root,
     dbPath: base.dbPath,
@@ -302,4 +321,28 @@ export function seedManyEvents(count: number): SeededTrace {
     eventCount: count,
     cleanup,
   };
+}
+
+/**
+ * Append `agent_end` events to an already-seeded trace, payload_json verbatim
+ * (so a malformed blob or a payload with no `usage` key can be seeded too).
+ * usage() derives the read/written split from exactly these rows.
+ */
+export function appendAgentEnds(
+  dbPath: string,
+  requestId: string,
+  payloads: Array<string | null>,
+): void {
+  const aux = new Database(dbPath);
+  aux.exec("PRAGMA busy_timeout=5000");
+  const ins = aux.prepare(
+    `INSERT INTO events (
+       event_id, request_id, phase_id, parent_id, type, name,
+       payload_json, tokens, started_at, ended_at
+     ) VALUES (?, ?, NULL, NULL, 'agent_end', 'builder', ?, NULL, ?, NULL)`,
+  );
+  payloads.forEach((payload, i) => {
+    ins.run(`evt-end-${requestId}-${i}`, requestId, payload, "2026-08-21T10:00:00.000Z");
+  });
+  aux.close();
 }

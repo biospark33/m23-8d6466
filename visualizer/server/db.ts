@@ -38,6 +38,9 @@ import type {
 const MAX_LIMIT = 1000;
 const DEFAULT_LIMIT = 500;
 
+/** Plain SQL identifier — the only shape hasColumn will interpolate. */
+const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 /**
  * The declared optionalColumn (AC3): sessions.pipeline_name — DF1.4's port of
  * upstream's adw_name probe (src/phase-engine/trace/migrations.ts seeds it
@@ -152,6 +155,12 @@ export class TraceDb {
    * gets this treatment (AC3); every other missing column is a 500.
    */
   private hasColumn(table: string, column: string): boolean {
+    // These two are the only identifiers in this file that are concatenated
+    // rather than bound, so the charset is enforced here rather than trusted
+    // to every future caller.
+    if (!IDENTIFIER.test(table) || !IDENTIFIER.test(column)) {
+      throw new Error(`invalid identifier in column probe: ${table}.${column}`);
+    }
     const key = `${table}.${column}`;
     if (!this.columnCache.get(key)) {
       const cols = this.db
@@ -203,7 +212,7 @@ export class TraceDb {
       throw new Error("this db predates the archived column — run any pipeline once to migrate it");
     }
     if (!this.writer) {
-      this.writer = new Database(this.path);
+      this.writer = new Database(this.path, { create: false, readwrite: true });
       this.writer.exec("PRAGMA busy_timeout=5000;");
     }
     this.writer
@@ -482,15 +491,22 @@ export class TraceDb {
    * omitting it returns every prompt for the run. Upstream's filesystem read
    * is deleted — the trace is the record.
    */
-  prompts(requestId: string, phaseId?: string): PromptEvent[] {
+  prompts(requestId: string, phaseId?: string, limit = DEFAULT_LIMIT): PromptEvent[] {
+    // Prompt payloads are the largest blobs in a trace, so this read is
+    // bounded exactly like events() — unbounded, a long run would load every
+    // compiled prompt into memory to serialize it.
+    const cappedLimit = clamp(limit, 1, MAX_LIMIT);
     const filter = phaseId === undefined ? "" : "AND phase_id = ?";
     const sql = `SELECT event_id, phase_id, name, payload_json, tokens, started_at
                    FROM events
                   WHERE request_id = ? AND type = 'prompt' ${filter}
-                  ORDER BY rowid`;
+                  ORDER BY rowid
+                  LIMIT ?`;
     return phaseId === undefined
-      ? this.db.query<PromptEvent, [string]>(sql).all(requestId)
-      : this.db.query<PromptEvent, [string, string]>(sql).all(requestId, phaseId);
+      ? this.db.query<PromptEvent, [string, number]>(sql).all(requestId, cappedLimit)
+      : this.db
+          .query<PromptEvent, [string, string, number]>(sql)
+          .all(requestId, phaseId, cappedLimit);
   }
 
   sessionCount(): number {

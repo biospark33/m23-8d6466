@@ -6,12 +6,23 @@ export interface Route {
   phaseId: string | null
 }
 
+// A hand-edited or pasted hash can hold a malformed escape (`#/%zz`), which
+// makes decodeURIComponent throw. parse() runs at module evaluation, so a throw
+// here would white-screen the app before mount; degrade to the raw segment.
+function decodeSegment(part: string): string {
+  try {
+    return decodeURIComponent(part)
+  } catch {
+    return part
+  }
+}
+
 function parse(): Route {
   const parts = window.location.hash
     .replace(/^#\/?/, '')
     .split('/')
     .filter(Boolean)
-    .map(decodeURIComponent)
+    .map(decodeSegment)
   return { requestId: parts[0] ?? null, phaseId: parts[1] ?? null }
 }
 

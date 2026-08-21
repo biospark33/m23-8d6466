@@ -70,11 +70,19 @@ export function startVisualizer(options: StartOptions): VisualizerHandle {
 
   const db = new TraceDb(options.dbPath); // throws VizError when absent/unreadable
 
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port,
-    fetch: (req, srv) => handle(req, { db, token, srv }),
-  });
+  let server: ReturnType<typeof Bun.serve>;
+  try {
+    server = Bun.serve({
+      hostname: "127.0.0.1",
+      port,
+      fetch: (req, srv) => handle(req, { db, token, srv }),
+    });
+  } catch (error) {
+    // The bind can still fail (EADDRINUSE) after the readonly handle is open,
+    // and no caller ever receives it — so close it here rather than leak it.
+    db.close();
+    throw error;
+  }
   return { server, db };
 }
 
@@ -115,7 +123,9 @@ function safely(
           stack: (error as Error).stack,
         }),
       );
-      return json({ error: (error as Error).message } satisfies ApiError, 500);
+      // F11: nothing from the exception crosses the boundary — no message, no
+      // SQL, no path. The full detail stays in the console.error above.
+      return json({ error: "internal error" } satisfies ApiError, 500);
     }
   };
 }
@@ -162,7 +172,11 @@ function afterQuery(req: Request): { ok: true; value: number } | { ok: false } {
   const raw = new URL(req.url).searchParams.get("after");
   if (raw === null || raw === "") return { ok: true, value: 0 };
   if (!/^\d+$/.test(raw)) return { ok: false };
-  return { ok: true, value: Number(raw) };
+  const value = Number(raw);
+  // Past MAX_SAFE_INTEGER the digits parse to a float, which would bind to
+  // SQLite as a real — exactly the coercion INV-3 forbids.
+  if (!Number.isSafeInteger(value)) return { ok: false };
+  return { ok: true, value };
 }
 
 /** Serve the built SPA if it has been built; otherwise point at the dev server. */
@@ -174,26 +188,56 @@ async function serveStatic(req: Request): Promise<Response> {
       "QDS visualizer API is running.\n\n" +
         `No ./dist build found. Run "bun run dev" for the Vite dev server ` +
         `(it proxies /api here), or "bun run build" to serve the UI from this process.\n`,
-      { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } },
+      { status: 200, headers: { ...STATIC_HEADERS, "content-type": "text/plain; charset=utf-8" } },
     );
   }
 
-  // Reject traversal before touching the filesystem.
-  const candidate = resolve(join(DIST_DIR, pathname));
-  if (candidate === DIST_DIR || candidate.startsWith(`${DIST_DIR}/`)) {
-    if (existsSync(candidate) && statSync(candidate).isFile()) {
-      return new Response(Bun.file(candidate));
+  // The path on disk is the DECODED path — an asset whose name carries an
+  // encoded character is otherwise unreachable. A malformed %-sequence is not
+  // a filename, so it falls through rather than throwing.
+  const decoded = decodeSegment(pathname);
+  if (decoded !== null) {
+    // Reject traversal before touching the filesystem.
+    const candidate = resolve(join(DIST_DIR, decoded));
+    if (candidate === DIST_DIR || candidate.startsWith(`${DIST_DIR}/`)) {
+      // TOCTOU: `bun run build` empties dist wholesale, so the file can vanish
+      // between the check and the stat — that is a 404, not a 500.
+      try {
+        if (existsSync(candidate) && statSync(candidate).isFile()) {
+          return new Response(Bun.file(candidate), { headers: STATIC_HEADERS });
+        }
+      } catch {
+        return notFound("not found");
+      }
     }
   }
 
-  // SPA fallback: breadcrumb routes are client-side.
+  // SPA fallback: breadcrumb routes are client-side. A request that names a
+  // file (a stale hashed asset) gets a 404 — answering a script request with
+  // HTML surfaces as an unreadable MIME error instead of a missing file.
   const indexHtml = join(DIST_DIR, "index.html");
-  if (existsSync(indexHtml)) {
+  if (!looksLikeFile(pathname) && existsSync(indexHtml)) {
     return new Response(Bun.file(indexHtml), {
-      headers: { "content-type": "text/html; charset=utf-8" },
+      headers: { ...STATIC_HEADERS, "content-type": "text/html; charset=utf-8" },
     });
   }
   return notFound("not found");
+}
+
+/**
+ * no-store: the shell renders trace content and outlives the per-start token,
+ * so a cached copy must never be served to the next start. nosniff: the JSON
+ * routes' equivalent, applied to the branch that actually serves bytes.
+ */
+const STATIC_HEADERS = {
+  "cache-control": "no-store",
+  "x-content-type-options": "nosniff",
+} as const;
+
+/** A dotted last segment is an asset request, not a client-side route. */
+function looksLikeFile(pathname: string): boolean {
+  const last = pathname.slice(pathname.lastIndexOf("/") + 1);
+  return last.includes(".");
 }
 
 // ── route table ──────────────────────────────────────────────────────────────
@@ -269,7 +313,8 @@ const ROUTES: readonly RouteRule[] = [
       if (phaseId !== null && !isSafeSegment(phaseId)) {
         return json({ error: "invalid phaseId" } satisfies ApiError, 400);
       }
-      return json(db.prompts(requestId, phaseId ?? undefined));
+      // Bounded like events(): default 500, MAX 1000.
+      return json(db.prompts(requestId, phaseId ?? undefined, intQuery(req, "limit", 500)));
     },
   },
   {
@@ -280,6 +325,13 @@ const ROUTES: readonly RouteRule[] = [
     label: "/api/sessions/:requestId/archive",
     write: true,
     handler: async (req, requestId, db) => {
+      // Refuse on the declared length first: reading then measuring bounds the
+      // response but not the memory. The post-read check stays as the backstop
+      // for a chunked body that declares nothing.
+      const declared = Number(req.headers.get("content-length"));
+      if (Number.isFinite(declared) && declared > 1024) {
+        return json({ error: "body exceeds 1 KB cap" } satisfies ApiError, 413);
+      }
       const body = await req.text();
       if (Buffer.byteLength(body, "utf8") > 1024) {
         return json({ error: "body exceeds 1 KB cap" } satisfies ApiError, 413);
@@ -319,9 +371,30 @@ interface GateContext {
  */
 async function handle(req: Request, ctx: GateContext): Promise<Response> {
   const started = performance.now();
+  // A request with no (or an empty) Host header leaves `req.url` a bare target
+  // that `new URL` rejects, and that parse sits ahead of the try/finally — so an
+  // unauthenticated caller could throw past the gate into Bun's default error
+  // page (source paths and all) with no log line. The Host gate already owes
+  // this request a bodyless 403; answer it here, before anything is parsed.
+  const hostHeader = req.headers.get("host");
+  if (hostHeader === null || hostHeader === "") {
+    console.log(
+      JSON.stringify({
+        event: "viz_request",
+        requestId: mintRequestId(),
+        route: "-",
+        authOutcome: "host_rejected",
+        status: 403,
+        durationMs: Math.round(performance.now() - started),
+        auth_ms: 0,
+        query_ms: 0,
+      }),
+    );
+    return emptyStatus(403);
+  }
   const url = new URL(req.url);
   const { pathname } = url;
-  const isApi = pathname.startsWith("/api/");
+  const isApi = pathname === "/api" || pathname.startsWith("/api/");
 
   const candidates = ROUTES.flatMap((rule) => {
     const m = rule.pattern.exec(pathname);
@@ -386,13 +459,26 @@ async function handle(req: Request, ctx: GateContext): Promise<Response> {
         response = await safely((r) => rule.handler(r, segment ?? "", ctx.db))(req);
       }
     } else if (isApi) {
-      response = notFound(`no route ${pathname}`);
+      response = notFound("no route");
     } else {
-      response = await serveStatic(req);
+      response = await safely(serveStatic)(req);
     }
     queryMs = performance.now() - queryStart;
     status = response.status;
     return response;
+  } catch (error) {
+    // Nothing reaches Bun's default error handler: every response on an
+    // authenticated path comes from this module.
+    console.error(
+      JSON.stringify({
+        event: "viz_error",
+        code: (error as { code?: string }).code ?? "DISPATCH",
+        message: (error as Error).message,
+        stack: (error as Error).stack,
+      }),
+    );
+    status = 500;
+    return json({ error: "internal error" } satisfies ApiError, 500);
   } finally {
     // Sub-timings report 0 when there is no breakdown to report (a refused
     // request never reaches the query leg).
@@ -464,10 +550,13 @@ export function main(): void {
       : `[viz] no ./dist — use "bun run dev" for the Vite dev server`,
   );
 
-  process.on("SIGINT", () => {
-    db.close();
-    process.exit(0);
-  });
+  // SIGTERM is what a supervisor sends; without it the db handles never close.
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => {
+      db.close();
+      process.exit(0);
+    });
+  }
 }
 
 if (import.meta.main) {

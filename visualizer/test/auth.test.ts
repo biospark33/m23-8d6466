@@ -74,11 +74,36 @@ function rawHttp(
   });
 }
 
+/**
+ * A header-less response would make a `for (key of headers)` loop assert
+ * nothing at all, so the named keys are checked explicitly first — that half
+ * runs even on an empty Headers — and the sweep then catches any
+ * Access-Control-Allow-* spelling not on the list.
+ */
 function expectNoAca(headers: Headers): void {
+  for (const key of [
+    "access-control-allow-origin",
+    "access-control-allow-credentials",
+    "access-control-allow-methods",
+    "access-control-allow-headers",
+  ]) {
+    expect(headers.get(key)).toBe(null);
+  }
   for (const key of headers.keys()) {
     expect(key.toLowerCase().startsWith("access-control-allow")).toBe(false);
   }
 }
+
+/**
+ * AC5 detector, shared by the src/providers walk and its positive control:
+ * the resolved QDS_VIZ_PORT (or its default literal) can only enter a file
+ * through one of these tokens. File granularity, not call-site granularity.
+ */
+const VIZ_PORT_TOKENS = [/QDS_VIZ_PORT/i, /viz[-_]?port/i, /\b4600\b/];
+const carriesVizPortOperand = (src: string): boolean =>
+  VIZ_PORT_TOKENS.some((re) => re.test(src));
+const isUnguardedVizPortUse = (src: string): boolean =>
+  carriesVizPortOperand(src) && !src.includes("assertNeverPublic");
 
 describe("startup validation (INV-1/INV-5, AC5)", () => {
   test("validateToken refuses an unset token with a named error", () => {
@@ -122,6 +147,15 @@ describe("startup validation (INV-1/INV-5, AC5)", () => {
       startVisualizer({ dbPath: seeded.dbPath, token: TOKEN, port: 80 }),
     ).toThrow(VizError);
   });
+
+  test("AC1(b)/INV-5: the listener binds 127.0.0.1, never a wildcard", () => {
+    // Every request in this suite reaches the server identically on a
+    // 0.0.0.0 bind, so the bind itself has to be asserted on the server
+    // object. Bun reports the requested hostname verbatim; dropping the
+    // `hostname:` key from startVisualizer makes it "localhost" here.
+    expect(handle.server.hostname).toBe("127.0.0.1");
+    expect(handle.server.url.hostname).toBe("127.0.0.1");
+  });
 });
 
 describe("assertNeverPublic (AC5)", () => {
@@ -139,6 +173,23 @@ describe("assertNeverPublic (AC5)", () => {
       expect(error).toBeInstanceOf(VizError);
       expect((error as VizError).name).toBe("VizError");
     }
+  });
+
+  test("positive control: the viz-port detector fires, and demands a guard when it does", () => {
+    // Without this, the walk below is vacuous: zero files under src/providers
+    // currently match, so a broken regex or a mis-resolved directory would be
+    // invisible. These pin the predicate itself.
+    expect(carriesVizPortOperand("const p = process.env.QDS_VIZ_PORT;")).toBe(true);
+    expect(carriesVizPortOperand("const vizPort = resolvePort();")).toBe(true);
+    expect(carriesVizPortOperand("const viz_port = resolvePort();")).toBe(true);
+    expect(carriesVizPortOperand("box.sharePort(4600);")).toBe(true);
+    expect(carriesVizPortOperand("box.sharePort(3000);")).toBe(false);
+
+    expect(isUnguardedVizPortUse("box.sharePort(4600);")).toBe(true);
+    expect(
+      isUnguardedVizPortUse("assertNeverPublic(4600);\nbox.sharePort(4600);"),
+    ).toBe(false);
+    expect(isUnguardedVizPortUse("box.sharePort(3000);")).toBe(false);
   });
 
   test("port-scoped static assert: no viz-port operand reaches src/providers unguarded", () => {
@@ -159,16 +210,13 @@ describe("assertNeverPublic (AC5)", () => {
     walk(providersDir);
     expect(files.length).toBeGreaterThan(0);
 
-    const vizPortTokens = [/QDS_VIZ_PORT/i, /viz[-_]?port/i, /\b4600\b/];
     for (const file of files) {
-      const src = fs.readFileSync(file, "utf8");
-      if (!vizPortTokens.some((re) => re.test(src))) continue;
       // The operand reached src/providers — only a same-file assertNeverPublic
       // guard can keep this green; any unguarded use goes red.
       expect(
-        src.includes("assertNeverPublic"),
+        isUnguardedVizPortUse(fs.readFileSync(file, "utf8")),
         `${file} carries a visualizer-port operand without an assertNeverPublic guard`,
-      ).toBe(true);
+      ).toBe(false);
     }
   });
 });
@@ -374,5 +422,333 @@ describe("redaction: the token is never logged (Observability Contract)", () => 
       expect(line.includes(TOKEN.slice(0, 16))).toBe(false);
       expect(line.includes(TOKEN.slice(0, 8))).toBe(false);
     }
+  });
+});
+
+describe("credential compare handles wrong LENGTHS (INV-1)", () => {
+  // A timingSafeEqual over the raw strings throws on unequal lengths — which
+  // would turn a wrong-length credential into a 500 (leaking that the length
+  // was wrong) instead of the 401 it is owed. The sha256-both-sides
+  // normalisation is what keeps these at 401. This pins that crash path; it
+  // does not measure timing.
+  const cases: Array<[string, string]> = [
+    ["short Bearer", "abc"],
+    ["long Bearer", "f".repeat(64)],
+    ["Bearer one byte short", TOKEN.slice(0, 31)],
+    ["Bearer one byte long", `${TOKEN}f`],
+  ];
+  for (const [label, credential] of cases) {
+    test(`${label} → 401 empty body, never 500`, async () => {
+      const res = await fetch(`${base()}/api/health`, { headers: bearer(credential) });
+      expect(res.status).toBe(401);
+      expect(await res.text()).toBe("");
+    });
+  }
+
+  for (const [label, credential] of cases) {
+    test(`Basic form, ${label} → 401 empty body, never 500`, async () => {
+      const res = await fetch(`${base()}/api/health`, { headers: basic(credential) });
+      expect(res.status).toBe(401);
+      expect(await res.text()).toBe("");
+    });
+  }
+
+  test("an empty Bearer value → 401 empty body", async () => {
+    const res = await fetch(`${base()}/api/health`, {
+      headers: { authorization: "Bearer " },
+    });
+    expect(res.status).toBe(401);
+    expect(await res.text()).toBe("");
+  });
+});
+
+describe("no CORS header on SUCCESSFUL responses either (INV-1)", () => {
+  // INV-1's threat rides on 200s: a permissive header lets a hostile origin
+  // read the trace with a cached Basic credential. Asserting it only on 401s
+  // leaves `json()` free to grow an Access-Control-Allow-Origin.
+  test("200 on a JSON read route carries no Access-Control-Allow-*", async () => {
+    const res = await fetch(`${base()}/api/health`, { headers: bearer() });
+    expect(res.status).toBe(200);
+    expectNoAca(res.headers);
+  });
+
+  test("200 on the write route carries no Access-Control-Allow-*", async () => {
+    const res = await fetch(`${base()}/api/sessions/${FIXTURE_REQUEST_ID}/archive`, {
+      method: "POST",
+      headers: bearer(),
+      body: JSON.stringify({ archived: false }),
+    });
+    expect(res.status).toBe(200);
+    expectNoAca(res.headers);
+  });
+
+  test("404 and 400 error responses carry no Access-Control-Allow-*", async () => {
+    const missing = await fetch(`${base()}/api/nope`, { headers: bearer() });
+    expect(missing.status).toBe(404);
+    expectNoAca(missing.headers);
+
+    const bad = await fetch(
+      `${base()}/api/sessions/${FIXTURE_REQUEST_ID}/events?after=-1`,
+      { headers: bearer() },
+    );
+    expect(bad.status).toBe(400);
+    expectNoAca(bad.headers);
+  });
+});
+
+describe("API/static classification of the 401 challenge (A12)", () => {
+  test("GET /api exactly is an API path — bare 401, no WWW-Authenticate", async () => {
+    const res = await fetch(`${base()}/api`);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toBe(null);
+    expect(await res.text()).toBe("");
+  });
+
+  test("a non-/api path still gets the Basic challenge", async () => {
+    const res = await fetch(`${base()}/x`);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toBe('Basic realm="qds-viz"');
+  });
+
+  test("/apifoo is NOT an API path — prefix match is on /api/ or /api exactly", async () => {
+    const res = await fetch(`${base()}/apifoo`);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toBe('Basic realm="qds-viz"');
+  });
+});
+
+describe("Host gate parser edges (AC1c, DNS rebinding)", () => {
+  const authed = (host: string | null) =>
+    rawHttp(port, [
+      "GET /api/health HTTP/1.1",
+      ...(host === null ? [] : [`Host: ${host}`]),
+      `Authorization: Bearer ${TOKEN}`,
+    ]);
+
+  test("no Host header at all → 403 empty body", async () => {
+    const res = await rawHttp(port, [
+      "GET /api/health HTTP/1.0",
+      `Authorization: Bearer ${TOKEN}`,
+    ]);
+    expect(res.status).toBe(403);
+    expect(res.body).toBe("");
+  });
+
+  test("Host with no port → 403 (the port is part of the identity)", async () => {
+    const res = await authed("127.0.0.1");
+    expect(res.status).toBe(403);
+    expect(res.body).toBe("");
+  });
+
+  test("Host: [::1]:<port> is not an allowed spelling → 403", async () => {
+    const res = await authed(`[::1]:${port}`);
+    expect(res.status).toBe(403);
+    expect(res.body).toBe("");
+  });
+
+  test("right hostname, wrong port → 403", async () => {
+    const res = await authed(`127.0.0.1:${port === 65535 ? 1024 : port + 1}`);
+    expect(res.status).toBe(403);
+    expect(res.body).toBe("");
+  });
+
+  test("Host is case-insensitive on the hostname → LOCALHOST:<port> is allowed", async () => {
+    const res = await authed(`LOCALHOST:${port}`);
+    expect(res.status).toBe(200);
+  });
+
+  test("a hostname that merely ends in localhost → 403 (no suffix confusion)", async () => {
+    const res = await authed(`notlocalhost:${port}`);
+    expect(res.status).toBe(403);
+    expect(res.body).toBe("");
+  });
+
+  test("empty Host value → 403", async () => {
+    const res = await authed("");
+    expect(res.status).toBe(403);
+    expect(res.body).toBe("");
+  });
+});
+
+describe("CSRF origin parser edges (AC1)", () => {
+  const post = (headers: Record<string, string>) =>
+    fetch(`${base()}/api/sessions/${FIXTURE_REQUEST_ID}/archive`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ archived: false }),
+    });
+
+  test("https://127.0.0.1:<port> Origin → 403 (scheme is compared, not just host)", async () => {
+    const res = await post({ origin: `https://127.0.0.1:${port}`, ...bearer() });
+    expect(res.status).toBe(403);
+    expect(await res.text()).toBe("");
+  });
+
+  test("suffix-confusion Origin 127.0.0.1.evil.com → 403", async () => {
+    const res = await post({ origin: `http://127.0.0.1.evil.com:${port}`, ...bearer() });
+    expect(res.status).toBe(403);
+    expect(await res.text()).toBe("");
+  });
+
+  test("loopback Origin on the WRONG port → 403", async () => {
+    const other = port === 65535 ? 1024 : port + 1;
+    const res = await post({ origin: `http://127.0.0.1:${other}`, ...bearer() });
+    expect(res.status).toBe(403);
+    expect(await res.text()).toBe("");
+  });
+
+  test("Origin whose hostname merely ENDS in localhost → 403", async () => {
+    // endsWith-style matching would let evil.localhost through.
+    const res = await post({ origin: `http://evil.localhost:${port}`, ...bearer() });
+    expect(res.status).toBe(403);
+    expect(await res.text()).toBe("");
+  });
+
+  test("suffix-confusion Referer (no Origin) → 403", async () => {
+    const res = await post({ referer: `http://localhost.evil.com:${port}/x`, ...bearer() });
+    expect(res.status).toBe(403);
+    expect(await res.text()).toBe("");
+  });
+});
+
+/**
+ * DIST_DIR is a module constant (`resolve(server/.., "dist")`), so the static
+ * branch can only be exercised by putting a real directory there. Under
+ * `bun test` it does not exist, which is why every static assertion above this
+ * point silently hits the "no ./dist build" early return instead of the
+ * file-serving body. These two describes cover both modes, in declaration
+ * order: the no-dist branch first, then the fixture that creates dist.
+ */
+const DIST_DIR = path.resolve(import.meta.dir, "..", "dist");
+const INDEX_BODY = '<!doctype html><title>viz-dist-fixture</title><div id="app"></div>';
+const ASSET_BODY = "console.log('viz-fixture-asset');";
+const ENCODED_ASSET_BODY = "encoded-name-asset";
+
+describe("static branch with NO ./dist build", () => {
+  // Skipped when a developer has actually run `bun run build`.
+  test.if(!fs.existsSync(DIST_DIR))(
+    "authenticated GET / → plaintext hint carrying the static headers",
+    async () => {
+      const res = await fetch(`${base()}/`, { headers: bearer() });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(await res.text()).toContain("No ./dist build found");
+    },
+  );
+});
+
+describe("static branch WITH a ./dist build (INV-3 confinement)", () => {
+  const written: string[] = [];
+  let createdDist = false;
+  let indexBody = INDEX_BODY;
+
+  const write = (rel: string, body: string): void => {
+    const full = path.join(DIST_DIR, rel);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    if (fs.existsSync(full)) throw new Error(`refusing to clobber ${full}`);
+    fs.writeFileSync(full, body);
+    written.push(full);
+  };
+
+  beforeAll(() => {
+    createdDist = !fs.existsSync(DIST_DIR);
+    fs.mkdirSync(DIST_DIR, { recursive: true });
+    const index = path.join(DIST_DIR, "index.html");
+    // A real build's index.html is left alone and used as the expectation.
+    if (fs.existsSync(index)) indexBody = fs.readFileSync(index, "utf8");
+    else write("index.html", INDEX_BODY);
+    write("assets/viz-fixture.js", ASSET_BODY);
+    write("assets/viz fixture.txt", ENCODED_ASSET_BODY);
+  });
+
+  afterAll(() => {
+    if (createdDist) {
+      fs.rmSync(DIST_DIR, { recursive: true, force: true });
+      return;
+    }
+    for (const full of written) fs.rmSync(full, { force: true });
+  });
+
+  test("a real asset is served with the static headers", async () => {
+    const res = await fetch(`${base()}/assets/viz-fixture.js`, { headers: bearer() });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(ASSET_BODY);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expectNoAca(res.headers);
+  });
+
+  test("an asset whose name needs percent-encoding is reachable", async () => {
+    const res = await fetch(`${base()}/assets/viz%20fixture.txt`, { headers: bearer() });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(ENCODED_ASSET_BODY);
+  });
+
+  test("the static branch is still gated — no credential → 401, no bytes", async () => {
+    const res = await fetch(`${base()}/assets/viz-fixture.js`);
+    expect(res.status).toBe(401);
+    expect(await res.text()).toBe("");
+  });
+
+  test("SPA fallback: an extensionless route serves index.html as html", async () => {
+    const res = await fetch(`${base()}/session/${FIXTURE_REQUEST_ID}`, {
+      headers: bearer(),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(await res.text()).toBe(indexBody);
+  });
+
+  test("a missing dotted asset is a JSON 404, never the SPA shell", async () => {
+    const res = await fetch(`${base()}/assets/gone.js`, { headers: bearer() });
+    expect(res.status).toBe(404);
+    expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    expect(await res.json()).toEqual({ error: "not found" });
+  });
+
+  test("percent-encoded traversal /..%2fpackage.json → JSON 404, never the file", async () => {
+    const res = await rawHttp(port, [
+      "GET /..%2fpackage.json HTTP/1.1",
+      `Host: 127.0.0.1:${port}`,
+      `Authorization: Bearer ${TOKEN}`,
+    ]);
+    expect(res.body.includes("sssf-visualizer")).toBe(false);
+    expect(res.status).toBe(404);
+    expect(res.body).toBe(JSON.stringify({ error: "not found" }));
+  });
+
+  test("plain-dot traversal never serves /etc/passwd", async () => {
+    // Bun normalises dot segments out of the request target before the
+    // handler sees it (this arrives as "/etc/passwd", joined back under
+    // dist), so this pins the normalisation + the absence of a leak; the
+    // percent-encoded variants below are what actually reach the
+    // confinement check.
+    const up = "/..".repeat(8);
+    const res = await rawHttp(port, [
+      `GET ${up}/etc/passwd HTTP/1.1`,
+      `Host: 127.0.0.1:${port}`,
+      `Authorization: Bearer ${TOKEN}`,
+    ]);
+    // The last segment has no dot, so the shell answers — the point is that
+    // the bytes of /etc/passwd never do.
+    expect(res.body.includes("root:")).toBe(false);
+    expect(res.status).toBe(200);
+    expect(res.body).toBe(indexBody);
+  });
+
+  test("percent-encoded traversal to /etc/hosts → JSON 404, never the file", async () => {
+    const up = "/..%2f".repeat(8);
+    const res = await rawHttp(port, [
+      `GET ${up}etc%2fhosts HTTP/1.1`,
+      `Host: 127.0.0.1:${port}`,
+      `Authorization: Bearer ${TOKEN}`,
+    ]);
+    expect(res.body.includes("localhost")).toBe(false);
+    expect(res.status).toBe(404);
+    expect(res.body).toBe(JSON.stringify({ error: "not found" }));
   });
 });

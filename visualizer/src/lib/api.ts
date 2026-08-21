@@ -23,18 +23,34 @@ export function setToken(value: string): void {
   token = value
 }
 
+// This UI is reached through an SSH forward, where a half-open connection would
+// otherwise leave a request unsettled forever (spinner with no error, no retry).
+const REQUEST_TIMEOUT_MS = 30_000
+
 async function authedFetch(url: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers)
   if (token && !headers.has('authorization')) {
     headers.set('authorization', `Bearer ${token}`)
   }
-  return fetch(url, { ...init, headers })
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
+  return fetch(url, { ...init, headers, signal })
+}
+
+// A response body is never allowed into an error message: on /prompts the body
+// IS compiled prompt content, and SyntaxError embeds a prefix of it verbatim.
+async function parseJson(res: Response, what: string): Promise<unknown> {
+  try {
+    return await res.json()
+  } catch {
+    throw new Error(`${what} → invalid JSON response`)
+  }
 }
 
 async function getJson(url: string): Promise<unknown> {
   const res = await authedFetch(url)
   if (!res.ok) throw new Error(`GET ${url} → ${res.status}`)
-  return res.json()
+  return parseJson(res, `GET ${url}`)
 }
 
 export function fetchSessions(): Promise<SessionSummary[]> {
@@ -56,10 +72,14 @@ export async function fetchEvents(
   after: number,
   limit = 500,
 ): Promise<EventsPage> {
+  // `number` does not exclude NaN — a non-numeric server cursor can round-trip
+  // back here as one, so clamp both to sane integers at the boundary.
+  const from = Number.isFinite(after) ? Math.max(0, Math.trunc(after)) : 0
+  const size = Number.isFinite(limit) ? Math.max(1, Math.trunc(limit)) : 500
   const page = (await getJson(
-    `/api/sessions/${encodeURIComponent(requestId)}/events?after=${after}&limit=${limit}`,
+    `/api/sessions/${encodeURIComponent(requestId)}/events?after=${from}&limit=${size}`,
   )) as EventsPage
-  return { rows: page.rows ?? [], cursor: page.cursor ?? after, hasMore: page.hasMore ?? false }
+  return { rows: page.rows ?? [], cursor: page.cursor ?? from, hasMore: page.hasMore ?? false }
 }
 
 /** Archive a run out of the review list (or restore it with archived=false). */
@@ -92,7 +112,7 @@ export async function fetchPrompts(requestId: string, phaseId: string): Promise<
   // Not recorded (or endpoint not deployed yet) renders as "no prompts", not an error.
   if (res.status === 404) return []
   if (!res.ok) throw new Error(`GET prompts → ${res.status}`)
-  return (await res.json()) as PromptEvent[]
+  return (await parseJson(res, 'GET prompts')) as PromptEvent[]
 }
 
 export function fetchEnvelopes(requestId: string): Promise<Envelope[]> {

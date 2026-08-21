@@ -188,25 +188,41 @@ export interface AgentStartPayload {
 
 /**
  * Tokens per component for one agent phase, summed across every send it made
- * (a retried phase paid more than once). Costs are integer micro-dollars.
+ * (a retried phase paid more than once).
+ *
+ * This is what the tracer actually writes: `src/phase-engine/usage.ts:41-49`,
+ * emitted verbatim as `agent_end.usage` by
+ * `src/phase-engine/agents/retry.ts:142-151`. Note there is exactly ONE cost
+ * figure — `costMicros`, integer µ$ (DD-9). Per-component costs do not exist;
+ * the tracer never computes them.
+ *
+ * Keys are read camelCase-first with the vendored SSSF snake_case spelling as
+ * a heritage fallback — the precedent `Db.usage()` set (`server/db.ts:395-431`).
+ * Every field is optional because a payload is only ever as complete as the
+ * tracer that wrote it.
  */
 export interface UsageBreakdown {
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cache_write_tokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   /**
-   * Thinking tokens — the reasoning SHARE of `output_tokens`, not a fifth
-   * component. Absent (undefined) on runs predating the field.
+   * Thinking tokens — the reasoning SHARE of `outputTokens`, not a fifth
+   * component. Never added to a total.
    */
+  reasoningTokens?: number;
+  /** Integer micro-dollars (DD-9) — the phase's only cost figure. */
+  costMicros?: number;
+  /** How many sends the phase paid for (a retried phase paid more than once). */
+  sends?: number;
+
+  // Heritage SSSF spellings, still present in older payloads.
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
   reasoning_tokens?: number;
-  total_tokens: number;
-  input_cost: number;
-  output_cost: number;
-  cache_read_cost: number;
-  cache_write_cost: number;
-  /** Integer micro-dollars (DD-9). */
-  total_cost: number;
+  total_cost?: number;
 }
 
 /** Parsed `agent_end` payload — closes out a call with its cost and context use. */
@@ -215,9 +231,14 @@ export interface AgentEndPayload {
   cost?: number;
   /** Absent on runs predating the breakdown; `cost` alone survives there. */
   usage?: UsageBreakdown;
-  /** Window occupancy after the final turn, and the model's ceiling. */
-  context_tokens?: number;
-  context_window?: number;
+  /**
+   * Window occupancy after the final turn, and the model's ceiling — camelCase
+   * because that is what the tracer writes (`src/phase-engine/types.ts:299-306`).
+   * Not to be confused with the agent_sessions COLUMNS of the same meaning,
+   * which are genuinely `context_tokens`/`context_window` (see `AgentSession`).
+   */
+  contextTokens?: number;
+  contextWindow?: number;
 }
 
 /**

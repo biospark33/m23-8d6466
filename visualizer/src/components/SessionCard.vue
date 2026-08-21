@@ -33,9 +33,23 @@ let cursor = 0
 let inflight = false
 let timer: ReturnType<typeof setInterval> | undefined
 
+const POLL_MS = 500
+const MAX_POLL_MS = 30_000
+/** Hard ceiling on pages drained per pull — a server that keeps saying hasMore
+ *  must not hold the card hostage. */
+const MAX_PAGES = 50
+/** Consecutive failed pulls — backs the poll off so a dead api is not hammered
+ *  twice a second per card for as long as the tab stays open. */
+let fails = 0
+
 function stopPolling() {
   clearInterval(timer)
   timer = undefined
+}
+
+function startPolling(ms: number = POLL_MS) {
+  stopPolling()
+  timer = setInterval(() => void pull(), ms)
 }
 
 async function pull() {
@@ -43,18 +57,29 @@ async function pull() {
   inflight = true
   try {
     const fresh: EventRow[] = []
-    let page
-    do {
+    for (let round = 0; round < MAX_PAGES; round++) {
       // Cursor pagination is inherently sequential: each request needs the previous cursor.
       // oxlint-disable-next-line no-await-in-loop
-      page = await fetchEvents(props.session.request_id, cursor, 1000)
-      cursor = Math.max(cursor, page.cursor)
+      const page = await fetchEvents(props.session.request_id, cursor, 1000)
       fresh.push(...page.rows)
-    } while (page.hasMore)
+      // Advance from the rows actually taken, never from the reported cursor: a
+      // server cursor that does not move (or is not a number) would otherwise
+      // spin this loop forever, or stick at NaN and refetch all history a poll.
+      const next = Math.max(cursor, ...page.rows.map((r) => r.rowid).filter(Number.isFinite))
+      if (next <= cursor) break
+      cursor = next
+      if (!page.hasMore) break
+    }
     if (fresh.length) events.value = [...events.value, ...fresh]
+    if (fails) {
+      fails = 0
+      if (timer) startPolling()
+    }
     if (props.session.status !== 'running') stopPolling()
   } catch {
-    /* the list view surfaces api errors; a card just retries next poll */
+    /* the list view surfaces api errors; a card just backs off and retries */
+    fails++
+    if (timer) startPolling(Math.min(POLL_MS * 2 ** Math.min(fails, 6), MAX_POLL_MS))
   } finally {
     inflight = false
   }
@@ -62,7 +87,7 @@ async function pull() {
 
 onMounted(() => {
   void pull()
-  if (props.session.status === 'running') timer = setInterval(() => void pull(), 500)
+  if (props.session.status === 'running') startPolling()
 })
 
 onUnmounted(stopPolling)
@@ -70,9 +95,14 @@ onUnmounted(stopPolling)
 watch(
   () => props.session.status,
   (status) => {
-    if (status === 'running' && !timer) timer = setInterval(() => void pull(), 500)
-    // On the transition out of running, one last pull drains the tail and stops the timer.
-    else if (status !== 'running') void pull()
+    if (status === 'running' && !timer) startPolling()
+    // On the transition out of running the timer goes unconditionally — a pull
+    // that short-circuits on `inflight` must not leave it firing forever — and
+    // one last pull drains the tail (the in-flight one, if any, drains it).
+    else if (status !== 'running') {
+      stopPolling()
+      void pull()
+    }
   },
 )
 
@@ -235,7 +265,7 @@ const hiddenRowCount = computed(() =>
 
     <div class="card-foot">
       <span class="foot-status">
-        <StatusChip :status="session.status ?? 'fail'" />
+        <StatusChip :status="session.status ?? 'unknown'" />
         <PhaseDots :phases="session.phases ?? []" />
       </span>
       <span class="dim">{{ fmtDate(session.started_at) }}</span>

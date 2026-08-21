@@ -4,7 +4,7 @@ import type { Phase } from '../lib/types'
 
 const props = defineProps<{ phases: Phase[] }>()
 
-const ordered = computed(() => props.phases.toSorted((a, b) => (a.seq ?? 0) - (b.seq ?? 0)))
+const ordered = computed(() => [...props.phases].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)))
 
 const glyph: Record<string, string> = {
   success: '●',

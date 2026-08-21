@@ -13,6 +13,17 @@ const nowMs = ref(Date.now())
 let timer: ReturnType<typeof setInterval> | undefined
 let inflight = false
 
+const POLL_MS = 500
+const MAX_POLL_MS = 30_000
+/** Consecutive failed ticks — backs the poll off so a dead api is not hammered
+ *  twice a second for as long as the tab stays open. */
+let fails = 0
+
+function startPolling(ms: number = POLL_MS) {
+  clearInterval(timer)
+  timer = setInterval(() => void tick(), ms)
+}
+
 async function tick() {
   if (inflight) return
   inflight = true
@@ -21,8 +32,14 @@ async function tick() {
     nowMs.value = Date.now()
     apiError.value = null
     loaded.value = true
+    if (fails) {
+      fails = 0
+      startPolling()
+    }
   } catch (err) {
     apiError.value = err instanceof Error ? err.message : String(err)
+    fails++
+    startPolling(Math.min(POLL_MS * 2 ** Math.min(fails, 6), MAX_POLL_MS))
   } finally {
     inflight = false
   }
@@ -30,7 +47,7 @@ async function tick() {
 
 onMounted(() => {
   void tick()
-  timer = setInterval(() => void tick(), 500)
+  startPolling()
 })
 
 onUnmounted(() => clearInterval(timer))
@@ -45,7 +62,7 @@ function onArchived(requestId: string) {
 }
 
 const ordered = computed(() =>
-  sessions.value.toSorted((a, b) => (ts(b.started_at) || 0) - (ts(a.started_at) || 0)),
+  [...sessions.value].sort((a, b) => (ts(b.started_at) || 0) - (ts(a.started_at) || 0)),
 )
 </script>
 

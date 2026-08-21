@@ -8,8 +8,10 @@ export function fmtDuration(ms: number): string {
   if (ms < 1000) return `${(ms / 1000).toFixed(2)}s`
   const s = ms / 1000
   if (s < 60) return `${s.toFixed(1)}s`
-  const m = Math.floor(s / 60)
-  const rem = Math.round(s % 60)
+  // Round to whole seconds first, else a 59.5s remainder renders as "2m 60s".
+  const total = Math.round(s)
+  const m = Math.floor(total / 60)
+  const rem = total % 60
   if (m < 60) return `${m}m ${String(rem).padStart(2, '0')}s`
   const h = Math.floor(m / 60)
   return `${h}h ${String(m % 60).padStart(2, '0')}m`
@@ -68,8 +70,12 @@ const TICK_STEPS_MS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600]
 
 /** Evenly-stepped time-axis ticks over a span, ≤ maxTicks of them. */
 export function axisTicks(spanMs: number, maxTicks = 8): { pct: number; label: string }[] {
-  const span = Math.max(spanMs, 1)
-  const step = TICK_STEPS_MS.find((s) => span / s <= maxTicks) ?? 3_600_000
+  // A non-finite span (bad timestamp pair) would make the loop below never end.
+  const span = Number.isFinite(spanMs) ? Math.max(spanMs, 1) : 1
+  // Past the largest preset step the contract still holds: widen the step so the
+  // tick count stays within maxTicks instead of emitting span/1h ticks.
+  const step =
+    TICK_STEPS_MS.find((s) => span / s <= maxTicks) ?? Math.max(1, Math.ceil(span / maxTicks))
   const out: { pct: number; label: string }[] = []
   for (let t = 0; t <= span; t += step) {
     out.push({ pct: (t / span) * 100, label: fmtOffset(t) })

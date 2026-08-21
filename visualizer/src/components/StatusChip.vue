@@ -1,9 +1,10 @@
 <script setup lang="ts">
+import type { Component } from 'vue'
 import { Check, Circle, LoaderCircle, X } from 'lucide-vue-next'
 
 defineProps<{ status: string }>()
 
-const ICONS: Record<string, unknown> = {
+const ICONS: Record<string, Component> = {
   success: Check,
   fail: X,
   running: LoaderCircle,

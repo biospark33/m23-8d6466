@@ -59,10 +59,13 @@ export function validateToken(env: Record<string, string | undefined>): string {
       "Set QDS_VIZ_TOKEN to a secret of at least 32 bytes (e.g. openssl rand -hex 32) and restart.",
     );
   }
-  if (token.length < TOKEN_MIN_BYTES) {
+  // Bytes, not UTF-16 code units: a 20-character token of 2-byte characters
+  // is 40 bytes of entropy, and a surrogate pair is 4 bytes in one .length of 2.
+  const tokenBytes = Buffer.byteLength(token, "utf8");
+  if (tokenBytes < TOKEN_MIN_BYTES) {
     throw new VizError(
       "VIZ_TOKEN_SHORT",
-      `QDS_VIZ_TOKEN is ${token.length} bytes, minimum is ${TOKEN_MIN_BYTES} — refusing to bind`,
+      `QDS_VIZ_TOKEN is ${tokenBytes} bytes, minimum is ${TOKEN_MIN_BYTES} — refusing to bind`,
       "Mint a fresh secret of at least 32 bytes (e.g. openssl rand -hex 32) and restart.",
     );
   }

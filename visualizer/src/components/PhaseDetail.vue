@@ -8,6 +8,7 @@ import type {
   GateResult,
   Phase,
   ToolCallPayload,
+  UsageBreakdown,
 } from '../lib/types'
 import {
   Activity,
@@ -68,10 +69,24 @@ const agentConfig = computed(() => {
 interface UsageRow {
   label: string
   tokens: number
-  cost: number
+  /** Undefined where no cost was recorded — rendered as an em dash, never a 0. */
+  cost?: number
   /** Total gets a rule above it; reasoning is indented under output. */
   kind?: 'total' | 'nested'
   title?: string
+}
+
+/**
+ * One usage field, camelCase-first with the heritage snake_case spelling as a
+ * fallback — the same precedent the server reads payloads by (server/db.ts
+ * `usage()`). Undefined means the tracer never wrote it.
+ */
+function usageNum(u: UsageBreakdown, ...keys: (keyof UsageBreakdown)[]): number | undefined {
+  for (const k of keys) {
+    const v = u[k]
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+  }
+  return undefined
 }
 
 /**
@@ -92,35 +107,53 @@ const phaseUsage = computed<{ rows: UsageRow[]; partial: boolean } | null>(() =>
     // A malformed payload is a missing panel, never a broken detail view.
   }
   const u = payload.usage
-  if (!u) {
-    // Pre-breakdown run: the event's own token count and the lump cost still hold.
-    return {
-      partial: true,
-      rows: [{ label: 'total', tokens: end.tokens ?? 0, cost: payload.cost ?? 0, kind: 'total' }],
+  // The phase has exactly ONE cost figure — the tracer records no per-component
+  // costs (src/phase-engine/usage.ts). So only the total row carries a cost.
+  const cost = payload.cost ?? (u && usageNum(u, 'costMicros', 'total_cost'))
+  const rows: UsageRow[] = []
+  let totalTokens = 0
+  let missing = false
+  if (u) {
+    const components: Array<[string, number | undefined]> = [
+      ['input', usageNum(u, 'inputTokens', 'input_tokens')],
+      ['output', usageNum(u, 'outputTokens', 'output_tokens')],
+      ['cache read', usageNum(u, 'cacheReadTokens', 'cache_read_tokens')],
+      ['cache write', usageNum(u, 'cacheWriteTokens', 'cache_write_tokens')],
+    ]
+    for (const [label, tokens] of components) {
+      // A component the tracer never wrote is omitted, not rendered as NaN or 0.
+      if (tokens === undefined) {
+        missing = true
+        continue
+      }
+      totalTokens += tokens
+      rows.push({ label, tokens })
+      if (label === 'output') {
+        // Thinking is the reasoning SHARE of output above, not a fifth
+        // component — never added to the total. Its cost share is
+        // uncomputable without a per-component output cost, so it has none.
+        const think = usageNum(u, 'reasoningTokens', 'reasoning_tokens')
+        if (think) {
+          rows.push({
+            label: 'thinking',
+            tokens: think,
+            kind: 'nested',
+            title: 'Thinking tokens — part of output above, billed at the output rate. Not added to the total.',
+          })
+        }
+      }
     }
   }
-  const rows: UsageRow[] = [
-    { label: 'input', tokens: u.input_tokens, cost: u.input_cost },
-    { label: 'output', tokens: u.output_tokens, cost: u.output_cost },
-  ]
-  if (u.reasoning_tokens) {
-    // Thinking bills at the output rate, so its share of the output cost is
-    // exact arithmetic — but it is already INSIDE the output row above.
-    const share = u.output_tokens ? (u.output_cost * u.reasoning_tokens) / u.output_tokens : 0
-    rows.push({
-      label: 'thinking',
-      tokens: u.reasoning_tokens,
-      cost: share,
-      kind: 'nested',
-      title: 'Thinking tokens — part of output above, billed at the output rate. Not added to the total.',
-    })
+  if (!rows.length) {
+    // Pre-breakdown run (or a payload with no component tokens at all): the
+    // event's own token count and the lump cost are all that was recorded.
+    return {
+      partial: true,
+      rows: [{ label: 'total', tokens: end.tokens ?? 0, cost, kind: 'total' }],
+    }
   }
-  rows.push(
-    { label: 'cache read', tokens: u.cache_read_tokens, cost: u.cache_read_cost },
-    { label: 'cache write', tokens: u.cache_write_tokens, cost: u.cache_write_cost },
-    { label: 'total', tokens: u.total_tokens, cost: u.total_cost, kind: 'total' },
-  )
-  return { rows, partial: false }
+  rows.push({ label: 'total', tokens: totalTokens, cost, kind: 'total' })
+  return { rows, partial: missing }
 })
 
 const NUM = new Intl.NumberFormat('en-US')
@@ -586,7 +619,7 @@ function togglePanel(id: string) {
             </tbody>
           </table>
           <p v-if="phaseUsage.partial" class="faint u-note">
-            this run predates the per-component breakdown — only the total was recorded
+            this run predates the full per-component breakdown — the rows above are all that was recorded
           </p>
         </DetailSection>
 
