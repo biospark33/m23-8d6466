@@ -55,6 +55,23 @@ function fail(out: (s: string) => void, code: string, message: string, remediati
 }
 
 /**
+ * Validate a micro-dollar total from the ledger SUM. Throws if the total
+ * is corrupt (non-finite, negative, or not a safe integer) — this must never
+ * print "$NaN" or negative money.
+ */
+function assertValidMicroTotal(microUsd: number, context: string): void {
+  if (!Number.isFinite(microUsd)) {
+    throw new Error(`!! cost-view-invalid: ${context} total is not finite (${microUsd}) — ledger corruption detected\nnext: re-create the ledger from source events after diagnosing the corruption`);
+  }
+  if (microUsd < 0) {
+    throw new Error(`!! cost-view-invalid: ${context} total is negative (${microUsd} µ$) — ledger corruption detected\nnext: re-create the ledger from source events after diagnosing the corruption`);
+  }
+  if (!Number.isSafeInteger(microUsd)) {
+    throw new Error(`!! cost-view-invalid: ${context} total is not a safe integer (${microUsd}) — ledger corruption detected\nnext: re-create the ledger from source events after diagnosing the corruption`);
+  }
+}
+
+/**
  * Two-tier money formatting (ponytail: lifted from inkwell's tracer.py).
  * - >= $1.00 → 2 decimal places
  * - < $1.00 → 4 decimal places (sub-cent precision)
@@ -79,6 +96,7 @@ function pad(s: string, width: number): string {
  * Print the cost view to stdout.
  */
 function printView(out: (s: string) => void, issueRef: string, view: CostView, runs: Array<{runId: string; totalMicroUsd: number; hasBoxHours: boolean}>): void {
+  assertValidMicroTotal(view.totalMicroUsd, `issue ${issueRef}`);
   out(`${issueRef}\n\n`);
 
   // Total line: µ$ + $
@@ -88,6 +106,7 @@ function printView(out: (s: string) => void, issueRef: string, view: CostView, r
   if (Object.keys(view.perRole).length > 0) {
     out("PER ROLE:\n");
     for (const [role, microUsd] of Object.entries(view.perRole)) {
+      assertValidMicroTotal(microUsd, `role ${role} in issue ${issueRef}`);
       const label = role === "box-hours" ? "box-hours (unattributed)" : role;
       out(`  ${pad(label, 24)} ${pad(formatNumber(microUsd), 15)} µ$  ${formatCost(microUsd)}\n`);
     }
@@ -136,8 +155,12 @@ function parseIssueRef(arg: string | undefined): { repoSlug: string; issueId: st
   if (!ISSUE_REF_RE.test(arg)) {
     throw new Error(`!! cost-ref-invalid: invalid issue reference ${JSON.stringify(arg)} (must match owner/repo#N)\nnext: provide an issue reference matching owner/repo#N\n${HELP.join("\n")}`);
   }
-  const [repoSlug, issueId] = arg.split("#");
-  if (repoSlug === undefined || issueId === undefined) {
+  const parts = arg.split("#");
+  if (parts.length !== 2) {
+    throw new Error(`!! cost-ref-invalid: invalid issue reference ${JSON.stringify(arg)} (must match owner/repo#N, got ${parts.length - 1} '#' separators)\nnext: provide an issue reference matching owner/repo#N\n${HELP.join("\n")}`);
+  }
+  const [repoSlug, issueId] = parts;
+  if (repoSlug === undefined || issueId === undefined || !/^\d+$/.test(issueId)) {
     throw new Error(`!! cost-ref-invalid: invalid issue reference ${JSON.stringify(arg)} (must match owner/repo#N)\nnext: provide an issue reference matching owner/repo#N\n${HELP.join("\n")}`);
   }
   return { repoSlug, issueId };
@@ -166,7 +189,8 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
 
   // INV-COST-6 for the reporting side: an absent ledger refuses instead of
   // materializing an empty one — a typo'd $QDS_COST_LEDGER_FILE must not read
-  // as "nothing spent".
+  // as "nothing spent". C5 notes: existsSync()-then-open race exists; CostLedger
+  // creates missing files, so we must pre-check for the "refuse absent" behavior.
   const ledgerPath = process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE;
   if (!existsSync(ledgerPath)) {
     fail(
@@ -179,13 +203,14 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
   }
   let ledger: CostLedger;
   try {
-    ledger = new CostLedger({ config });
+    ledger = new CostLedger({ config, path: ledgerPath });
   } catch (e) {
     const err = e as { code?: string; message?: string; remediation?: string };
     fail(out, err.code ?? "ledger-unopenable", err.message ?? String(e), err.remediation);
     return 1;
   }
 
+  let primaryError: unknown;
   try {
     const view = ledger.readIssueCost(issueRef.repoSlug, issueRef.issueId);
     const runs = ledger.readIssueRuns(issueRef.repoSlug, issueRef.issueId);
@@ -193,11 +218,25 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
     printView(out, `${issueRef.repoSlug}#${issueRef.issueId}`, view, runs);
     return 0;
   } catch (e) {
+    primaryError = e;
     const err = e as { code?: string; message?: string; remediation?: string };
     fail(out, err.code ?? "ledger-error", err.message ?? String(e), err.remediation);
     return 1;
   } finally {
-    ledger.close();
+    try {
+      ledger.close();
+    } catch (closeErr) {
+      // If close fails while an original error is in flight, the original takes
+      // precedence (the close failure is a stderr warning). If close fails on
+      // the success path, the close failure IS the error.
+      if (primaryError !== undefined) {
+        process.stderr.write(`warning: ledger close failed after error: ${(closeErr as Error).message}\n`);
+      } else {
+        const cerr = closeErr as { code?: string; message?: string; remediation?: string };
+        fail(out, cerr.code ?? "ledger-close-failed", cerr.message ?? String(closeErr), cerr.remediation);
+        return 1;
+      }
+    }
   }
 }
 

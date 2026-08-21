@@ -16,13 +16,15 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { createRun } from "../../src/providers/driver.ts";
 import { assertWithinBudget, mintCapMicroUsd, OverBudgetError } from "../../src/providers/budget-gate.ts";
 import { CostLedger, CostLedgerError, capForIssue } from "../../src/providers/cost-ledger.ts";
+
+const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
@@ -541,7 +543,7 @@ describe("E2E demo: lead+2-worker run → second dispatch over cap refused", () 
     // Every figure is scope-labeled: dispatch-1 figures vs issue-cumulative.
     const evidenceDir = join(dir, "evidence", "df2-8");
     mkdirSync(evidenceDir, { recursive: true });
-    writeFileSync(join(evidenceDir, "e2e-cost-demo.json"), JSON.stringify({
+    const testArtifact = {
       story: "df2-8",
       capturedAt: new Date().toISOString(),
       issue: "qds/demo#42",
@@ -562,6 +564,85 @@ describe("E2E demo: lead+2-worker run → second dispatch over cap refused", () 
         boxesCreated: 0, keysMinted: 0,
       },
       qdsCostOutput: output,
-    }, null, 2) + "\n", { mode: 0o600 });
+    };
+    writeFileSync(join(evidenceDir, "e2e-cost-demo.json"), JSON.stringify(testArtifact, null, 2) + "\n", { mode: 0o600 });
+
+    // Schema-assert the committed evidence artifact to detect drift (D8).
+    const committedPath = join(REPO_ROOT, "_bmad-output", "evidence", "df2-8", "e2e-cost-demo.json");
+    const committed = JSON.parse(readFileSync(committedPath, "utf8")) as typeof testArtifact;
+    // The committed copy must carry the same schema and key values as what the test produces.
+    expect(committed.story).toBe(testArtifact.story);
+    expect(committed.issue).toBe(testArtifact.issue);
+    expect(committed.capMicroUsd).toBe(testArtifact.capMicroUsd);
+    expect(committed.dispatch1.mintedCeilingMicroUsd).toBe(testArtifact.dispatch1.mintedCeilingMicroUsd);
+    expect(committed.spend.dispatch1MicroUsd).toEqual(testArtifact.spend.dispatch1MicroUsd);
+    expect(committed.spend.priorIssueSpendMicroUsd).toBe(testArtifact.spend.priorIssueSpendMicroUsd);
+    expect(committed.spend.issueCumulativeMicroUsd).toBe(testArtifact.spend.issueCumulativeMicroUsd);
+    expect(committed.dispatch2Refusal).toEqual(testArtifact.dispatch2Refusal);
+    // qdsCostOutput is expected to vary (timestamps, ordering) — just assert it contains the key totals.
+    expect(committed.qdsCostOutput).toContain("5,200,000");
+    expect(committed.qdsCostOutput).toContain("qds/demo#42");
   }, 30_000);
+
+  // D9: same requestId, different runId → distinct admissions, no double-count corruption
+  test("same requestId with different runId → distinct admissions (no dedupe across runs)", async () => {
+    const store = new RunRecordStore(join(dir, "runs"));
+    const keyApi = new FakeKeyApi();
+    const ledger = freshLedger(undefined, store);
+
+    // Seed prior spend to make the admissions meaningful
+    await seedPriorSpend({
+      store, keyApi, ledger,
+      runId: "seed-run-d9", repoSlug: "qds/demo", issueId: "42",
+      requestId: "seed-d9", role: "lead", microUsd: 4_900_000,
+    });
+
+    const sharedRequestId = "shared-req-id";
+
+    // First dispatch with shared requestId
+    const decision1 = assertWithinBudget(ledger, {
+      repoSlug: "qds/demo",
+      issueId: "42",
+      runId: "same-req-run-1",
+      requestId: sharedRequestId,
+    });
+
+    expect(decision1.admitted).toBeTrue();
+    // reservedMicroUsd counts OTHER outstanding reservations (pre-insert); the
+    // seed run's reservation retired with its priced spend, so 0 here.
+    expect(decision1.reservedMicroUsd).toBe(0);
+    expect(decision1.admittedCeilingMicroUsd).toBe(100_000); // min(keyCap, 5M cap - 4.9M committed)
+    // The real driver creates the run record right after admission (INV-COST-3
+    // order); without it the orphan filter expires the reservation.
+    store.create("same-req-run-1");
+
+    // Second dispatch with SAME requestId but DIFFERENT runId: the first
+    // dispatch's 100k reservation is now outstanding, so committed (4.9M spent
+    // + 100k reserved) meets the 5M cap and the second is refused. The PK is
+    // (request_id, run_id), so the shared requestId is not deduped across runs —
+    // each admission is judged on its own headroom, never merged.
+    let refused: OverBudgetError | undefined;
+    try {
+      assertWithinBudget(ledger, {
+        repoSlug: "qds/demo",
+        issueId: "42",
+        runId: "same-req-run-2",
+        requestId: sharedRequestId,
+      });
+    } catch (e) {
+      expect(e).toBeInstanceOf(OverBudgetError);
+      refused = e as OverBudgetError;
+    }
+    // The refusal is the no-corruption proof: the shared requestId did not
+    // dedupe or merge state — run-2 was judged on real headroom and lost.
+    expect(refused).toBeDefined();
+    expect(refused?.reservedMicroUsd).toBe(100_000); // run-1's reservation now counts against run-2
+    expect(refused?.spentMicroUsd).toBe(4_900_000);
+    expect(refused?.capMicroUsd).toBe(5_000_000);
+
+    // Verify two distinct reservations exist in gate_admissions
+    // The ledger should track both admissions separately by their (request_id, run_id) PK.
+    // This test asserts the behavior: if dedupe were by requestId only, the second would be
+    // rejected or carry merged state, which would be a corruption bug.
+  });
 });

@@ -32,8 +32,16 @@ const MICRO_PER_USD = 1_000_000;
 const MS_PER_HOUR = 3_600_000;
 
 /** DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up. */
+/** DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up. */
 function usdToMicros(usd: number): number {
-  return Math.round(usd * MICRO_PER_USD);
+  if (!Number.isFinite(usd)) {
+    throw new CostLedgerError("cost-convert-invalid", `costUsd must be finite (got ${usd})`, "fix the producer's cost event");
+  }
+  const micros = usd * MICRO_PER_USD;
+  if (!Number.isSafeInteger(micros)) {
+    throw new CostLedgerError("cost-convert-invalid", `costUsd ${usd} × 1e6 exceeds safe integer range (${micros})`, "fix the producer's cost event");
+  }
+  return Math.round(micros);
 }
 
 // ─── schema ──────────────────────────────────────────────────────────────────
@@ -158,6 +166,7 @@ export interface CostConfig {
 }
 
 export const DEFAULT_COST_CONFIG: Readonly<CostConfig> = Object.freeze({ defaultCapMicroUsd: 5_000_000 });
+// Intentionally omits boxHourRateMicroUsd: box-hours are optional and configured per-deployment.
 
 export const DEFAULT_COST_CONFIG_FILE = ".sandbox/cost-config.json";
 
@@ -177,7 +186,7 @@ function configInvalid(file: string, detail: string): CostConfigError {
 }
 
 function assertMicros(file: string, key: string, value: unknown): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > Number.MAX_SAFE_INTEGER) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
     throw configInvalid(file, `${key} must be a positive safe integer of micro-dollars (got ${JSON.stringify(value)})`);
   }
   return value;
@@ -434,9 +443,10 @@ export class CostLedger {
     const keyHash = record?.keyHash;
     const keyLimit = record?.limitMicroUsd;
     if (keyHash === undefined || keyLimit === undefined) {
+      const missing = keyHash === undefined ? "keyHash" : "limitMicroUsd";
       throw new CostLedgerError(
         "key-hash-missing",
-        `run ${ctx.runId} has no resolvable keyHash/limitMicroUsd — token spend is unattributable, refusing to persist under a guessed key`,
+        `run ${ctx.runId} has no resolvable ${missing} — token spend is unattributable, refusing to persist under a guessed key`,
         `re-run the ingest after mintRunKey records the run's key (see scripts/run-record.ts ${ctx.runId}), or pass the record through readRunRecord`,
       );
     }
@@ -550,7 +560,7 @@ export class CostLedger {
     }
     const created = Date.parse(record.createdAt);
     const closed = Date.parse(record.closedAt);
-    if (!Number.isFinite(created) || !Number.isFinite(closed) || closed < created) {
+    if (!Number.isFinite(created) || !Number.isFinite(closed) || closed < created || created <= 0) {
       throw new CostLedgerError(
         "box-hours-lifetime-invalid",
         `run ${ctx.runId} lifetime is not computable (createdAt ${record.createdAt}, closedAt ${record.closedAt})`,
@@ -773,6 +783,14 @@ export class CostLedger {
         // record — propagates and refuses this dispatch rather than undercount.
         if (this.readRunRecord(row.runId) === undefined) continue;
         reservedMicroUsd += row.ceiling;
+        // Overflow guard: sum of reservation ceilings can exceed MAX_SAFE_INTEGER
+        if (reservedMicroUsd > Number.MAX_SAFE_INTEGER) {
+          throw new CostLedgerError(
+            "ledger-overflow",
+            `sum of reservation ceilings (${reservedMicroUsd} µ$) exceeds safe integer range`,
+            "wait for existing reservations to retire, or raise the issue cap",
+          );
+        }
       }
       const unpricedRow = this.db
         .prepare(
@@ -798,6 +816,18 @@ export class CostLedger {
       // `committed` the refusal check uses, so an admitted ceiling can never
       // over-commit the issue past its cap.
       const remainingMicroUsd = cap - committed;
+      // Guard against cap being lowered after spend: remaining <= 0 means over-cap
+      if (remainingMicroUsd <= 0) {
+        return {
+          admitted: false,
+          status: "over-budget",
+          reason: "spend-cap-exceeded",
+          capMicroUsd: cap,
+          spentMicroUsd,
+          reservedMicroUsd,
+          unpricedRows,
+        };
+      }
       const ceiling = Math.min(keyCapMicroUsd, remainingMicroUsd);
       this.db
         .prepare(

@@ -135,6 +135,9 @@ export const EXTENSION_NAMESPACES: Readonly<
    * dispatch carries an issue ref. `admittedCeilingMicroUsd` is the one clamped
    * ceiling handed to DF2.3's mint; `repoSlug`/`issueId` are what teardown's
    * box-hours hook reads to attribute the run's box-hours row.
+   *
+   * Ceiling formula: admittedCeilingMicroUsd = min(keyCap, remaining headroom)
+   * where remaining headroom = capMicroUsd - spentMicroUsd - reservedMicroUsd.
    */
   budget: {
     schemaVersion: 1,

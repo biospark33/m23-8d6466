@@ -713,10 +713,18 @@ describe("DF2.5 teardownSandbox", () => {
       await teardownSandbox(deps_, runId);
       expect(boxRows().n).toBe(1);
 
+      // D10: verify eventId is deterministic across re-runs
+      const firstRow = rawDb.query("SELECT event_id FROM cost_events WHERE kind = 'box_hours' AND run_id = ?").get(runId) as { event_id: string };
+      const firstEventId = firstRow.event_id;
+
       // Second run (already-closed early path again)
       await teardownSandbox(deps_, runId);
       // Exactly ONE row across both runs — idempotent by eventId
       expect(boxRows().n).toBe(1);
+
+      // D10: strengthen to assert deterministic eventId across re-runs
+      const secondRow = rawDb.query("SELECT event_id FROM cost_events WHERE kind = 'box_hours' AND run_id = ?").get(runId) as { event_id: string };
+      expect(secondRow.event_id).toBe(firstEventId);
 
       // Verify cost = ceil(30min) × rate = 1h × 1M µ$/h, attributed to the run's issue
       const row = rawDb.query("SELECT cost_micro_usd, repo_slug, issue_id FROM cost_events WHERE kind = 'box_hours' AND run_id = ?").get(runId) as { cost_micro_usd: number; repo_slug: string; issue_id: string };

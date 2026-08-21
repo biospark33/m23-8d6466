@@ -21,5 +21,6 @@
     "boxesCreated": 0,
     "keysMinted": 0
   },
-  "qdsCostOutput": "qds/demo#42\n\nTOTAL: 5,200,000 µ$  $5.20\n\nPER ROLE:\n  lead                     5,000,000       µ$  $5.00\n  worker                   200,000         µ$  $0.2000\n\nPER RUN:\n  RUN                            SPEND µ$        BOX HOURS   \n  ------------------------------ --------------- ------------\n  seed-run-1                     4,900,000       pending     \n  e2e-run-1                      300,000         pending     \n\nTOKENS:  input 4,000  output 2,000\nCACHE:   read 600  write 300\nunpriced rows: 0\n"
+  "qdsCostOutput": "qds/demo#42\n\nTOTAL: 5,200,000 µ$  $5.20\n\nPER ROLE:\n  lead                     5,000,000       µ$  $5.00\n  worker                   200,000         µ$  $0.2000\n\nPER RUN:\n  RUN                            SPEND µ$        BOX HOURS   \n  ------------------------------ --------------- ------------\n  seed-run-1                     4,900,000       pending     \n  e2e-run-1                      300,000         pending     \n\nTOKENS:  input 4,000  output 2,000\nCACHE:   read 600  write 300\nunpriced rows: 0\n",
+  "_note": "This file is an evidence artifact. The test at tests/providers/budget-gate.test.ts writes a per-test copy and schema-asserts this committed copy to detect drift."
 }

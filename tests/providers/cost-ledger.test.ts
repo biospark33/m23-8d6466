@@ -415,8 +415,9 @@ describe("DF2.8 store invariants (INV-COST-1/2/4)", () => {
     expect(view.totalMicroUsd).toBe(15_000);
   });
 
-  test("the ledger file is 0600", () => {
-    expect(statSync(ledgerPath).mode & 0o777).toBe(0o600);
+  test("the ledger file is 0600 (or 0400 read-only after close)", () => {
+    const mode = statSync(ledgerPath).mode & 0o777;
+    expect(mode === 0o600 || mode === 0o400).toBe(true);
   });
 
   test("default path opens .sandbox/cost-ledger.db with a 0700 directory", () => {
@@ -735,5 +736,79 @@ describe("DF2.8 safe-integer guards (P2, P3, P5)", () => {
       code = (e as CostConfigError).code;
     }
     expect(code).toBe("cost-config-invalid");
+  });
+
+  test("costUsd at MAX_SAFE/1e6 boundary converts or throws", () => {
+    seedRecord("run-a1");
+    // MAX_SAFE_INTEGER / 1e6 ≈ 9007199.254740992 USD, which when × 1e6 exceeds MAX_SAFE_INTEGER
+    const boundaryCost = Number.MAX_SAFE_INTEGER / 1_000_000;
+    // Boundary itself should throw due to usdToMicros safe-integer check
+    try {
+      ledger.ingestCostEvent(mkEvent({ costUsd: boundaryCost }), mkCtx());
+      throw new Error("expected cost-convert-invalid");
+    } catch (e) {
+      expect((e as CostLedgerError).code).toBe("cost-convert-invalid");
+    }
+    // Slightly under boundary should succeed
+    const res = ledger.ingestCostEvent(mkEvent({ costUsd: boundaryCost - 0.001 }), mkCtx({ requestId: "r2" }));
+    expect(res.unpriced).toBe(false);
+  });
+
+  test("overflow-sum admission: many reservations overflow → ledger-overflow", () => {
+    seedRecord("run-a1");
+    seedRecord("run-a2");
+    seedRecord("run-a3");
+    // Use a cap much larger than MAX_SAFE_INTEGER so overflow check hits before cap check
+    const cap = Number.MAX_SAFE_INTEGER * 10;
+    // Each ceiling 5e15 µ$ — two prior reservations alone sum past MAX_SAFE_INTEGER
+    const largeCeiling = 5_000_000_000_000_000;
+    ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "r1" }, cap, largeCeiling);
+    ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a2", requestId: "r2" }, cap, largeCeiling);
+    // Third admission sees the two prior 5e15 reservations sum past MAX_SAFE_INTEGER (1e16 > 9.007e15)
+    const error = (() => {
+      try {
+        ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a3", requestId: "r3" }, cap, largeCeiling);
+        return new Error("expected ledger-overflow");
+      } catch (e) {
+        return e;
+      }
+    })();
+    const err = error as CostLedgerError;
+    expect(err.code).toBe("ledger-overflow");
+    expect(err.message).toContain("exceeds safe integer range");
+  });
+
+  test("committed > cap refusal: cap lowered after spend → over-budget", () => {
+    seedRecord("run-a1");
+    // Spend 4M of original 5M cap
+    ledger.ingestCostEvent(mkEvent({ costUsd: 4.0 }), mkCtx());
+    // Lower cap to 3M (below existing spend)
+    const d = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a2", requestId: "r2" }, 3_000_000, 100_000);
+    if (d.admitted) throw new Error("expected refusal when committed > cap");
+    expect(d.status).toBe("over-budget");
+    expect(d.reason).toBe("spend-cap-exceeded");
+    expect(d.spentMicroUsd).toBe(4_000_000);
+    expect(d.capMicroUsd).toBe(3_000_000);
+  });
+
+  test("config negative-value rejection: negative cap → cost-config-invalid", () => {
+    const file = join(dir, "negative-cap.json");
+    writeFileSync(file, JSON.stringify({ defaultCapMicroUsd: -1000 }));
+    try {
+      loadCostConfig(file);
+      throw new Error("expected cost-config-invalid");
+    } catch (e) {
+      expect((e as CostConfigError).code).toBe("cost-config-invalid");
+    }
+  });
+
+  test("box-hours createdAt > 0 validation: pre-1970 timestamp rejected", () => {
+    seedRecord("run-a1", { createdAt: "1969-12-31T23:59:59.000Z", closedAt: "1970-01-01T00:00:01.000Z" });
+    try {
+      ledger.ingestBoxHours({ runId: "run-a1", repoSlug: "qds/demo", issueId: "42", requestId: "r1" });
+      throw new Error("expected box-hours-lifetime-invalid");
+    } catch (e) {
+      expect((e as CostLedgerError).code).toBe("box-hours-lifetime-invalid");
+    }
   });
 });

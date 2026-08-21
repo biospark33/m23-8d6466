@@ -456,6 +456,7 @@ additions, not changed symbols.
   so teardown still retires). Sift's refuse-on-unpricedRows suggestion was
   rejected — AC4 pins surfacing, not blocking. cost-ledger 52, budget-gate 10,
   qds-cost 11 green.
+- 2026-08-20 (fresh 3-layer pass, PR #121) — Blind Hunter + Edge Case Hunter (src / scripts+tests, two scoped runs after context-overflow retries) + Acceptance Auditor (0 violations; all 6 ACs + 6 INVs PASS). 35 raw → 19 patched, 1 deferred (zombie-run reservation retirement policy), 5 dismissed/already-fixed (driver ENOENT + close guards were prior-round work; ctor-context noise; impossible negative-µ$; open-run reservation expiry verified bounded). Fixes: reservation-sum `ledger-overflow` guard; `committed > cap` → over-budget refusal instead of negative ceiling; positive-safe-integer validation at config load + admitIssue entry; `usdToMicros` finite/safe-product guards; per-field keyHash/limitMicroUsd error; `assertMicros` dead-clause simplification; pre-1970 `created > 0`; DEFAULT_COST_CONFIG omission comment; `qds cost` view-total validation (`cost-view-invalid`) + finally-close error precedence with stderr warning; multi-`#` issue-ref rejection; teardown attribution string-only; TeardownError `cause` preservation; run-record ceiling-formula doc. Tests: +MAX_SAFE conversion boundary, corrupt-ledger CLI (negative + unsafe totals), config-path-is-directory, multi-`#`, same-requestId-second-run (refused on real headroom; orphan filter requires `store.create`), deterministic eventId re-run, chmod 0600/0400 tolerance; committed evidence artifact reconciled + per-test schema-assert. 119/119 focal green (cost-ledger 54, budget-gate 11, teardown 32, qds-cost 18, +4 in-file), tsc clean; detect_changes: teardownSteps only (cause-wrap), same blast radius as prior rounds.
 
 ### Review Findings
 
@@ -478,4 +479,35 @@ typing; sandbox-teardown best-effort ledger close — deliberate policy mirrorin
 lock release; ledger dir permissions — false premise (`mkdirSync` passes
 `mode: 0o700` at creation).
 
-**Status:** review — implemented, BMAD review round complete (9/9 patches applied, 104/104 focal green); awaiting PR #121 merge
+### Review Findings — fresh 3-layer pass (2026-08-20)
+
+Layers: Blind Hunter (blind), Edge Case Hunter ×2 (src / scripts+tests), Acceptance Auditor (0 violations — all 6 ACs + 6 INVs PASS). Raw 35 findings → triaged below.
+
+- [x] [Review][Patch] Admission `reservedMicroUsd` sum can overflow MAX_SAFE_INTEGER (blind+edge) — fixed: in-loop `ledger-overflow` throw + test [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] `committed > cap` yields negative `remainingMicroUsd` → negative ceiling handed to mint (edge) — fixed: `remaining <= 0` → over-budget refusal + test [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] Config caps/rates not validated positive at `loadCostConfig`; `admitIssue` lacks `keyCapMicroUsd > 0` entry guard (edge) — fixed: every numeric key via `assertMicros`; admitIssue validates cap at entry [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] `usdToMicros` input-range guard: explicit upper bound + clearer error than generic unsafe-integer (blind) — fixed: finite + safe-product guards, `cost-convert-invalid` + tests [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] keyHash/keyLimit guard error message ambiguous when only one missing (edge) — fixed: names the missing field [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] `assertMicros` trailing `> Number.MAX_SAFE_INTEGER` clause dead after `isSafeInteger` (edge) — fixed: simplified to isSafeInteger + positive [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] `Date.parse` accepts pre-1970 timestamps — add `created > 0` (blind) — fixed [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] `DEFAULT_COST_CONFIG` intentional omission of `boxHourRateMicroUsd` undocumented (blind) — fixed: comment [src/providers/cost-ledger.ts]
+- [x] [Review][Patch] `qds cost` view: formatCost lacks non-finite/negative/unsafe-total guard (edge) — fixed: `assertValidMicroTotal` on issue + role totals, `cost-view-invalid` + 2 corrupt-ledger tests [scripts/qds-cost.ts]
+- [x] [Review][Patch] `qds cost` finally-block `close()` masks original query error; close-failed diagnostic to stdout not stderr (edge) — fixed: `primaryError` precedence, close-after-error → stderr warning; success-path close failure is its own `fail()` [scripts/qds-cost.ts]
+- [x] [Review][Patch] `parseIssueRef` silently drops extra `#` segments (`owner/repo#1#2`) (edge) — fixed: reject ≠2 parts + numeric check + test [scripts/qds-cost.ts]
+- [x] [Review][Patch] existsSync-then-open race — open directly and classify ENOENT vs unopenable (edge) — documented-keep: CostLedger creates missing files, so the pre-check IS the refuse-absent behavior; comment added [scripts/qds-cost.ts]
+- [x] [Review][Patch] Driver `store.get` treats any error as no-prior-record — non-ENOENT must be fatal-with-context (edge) — already-fixed in prior round: ENOENT→undefined, others rethrow [src/providers/driver.ts:156-163]
+- [x] [Review][Patch] Driver `store.set` failure post-admission orphans reservation — verify TTL bound, add cleanup if missing (edge) — deferred: zombie run with record-but-no-extension never retires; needs a retirement policy (cancelAdmission / on-close retire), not an unambiguous patch
+- [x] [Review][Patch] Driver bare `ledger.close()` at :178 — verify it cannot mask OverBudgetError (edge) — already-fixed in prior round: inner try/catch with mask-prevention comment [src/providers/driver.ts:176-182]
+- [x] [Review][Patch] Teardown attribution still coerces numeric repoSlug/issueId (`123` ≠ `"123"`) — tighten to string-only (blind+edge) — fixed [src/providers/teardown.ts]
+- [x] [Review][Patch] TeardownError wrap drops CostLedgerError class/cause — preserve cause for retry classification (edge) — fixed: `cause` preserved through `asTeardownError` [src/providers/teardown.ts]
+- [x] [Review][Patch] run-record budget doc block omits ceiling formula `min(keyCap, remaining)` (blind) — fixed [src/providers/run-record.ts]
+- [x] [Review][Patch] sandbox-teardown: CostLedger ctor throw masks which-record context (edge) — dismissed: runId is the CLI argument the operator just typed; ctor errors are config-global and already carry structured code+remediation via `fail()` [scripts/sandbox-teardown.ts]
+- [x] [Review][Patch] Tests: MAX_SAFE µ$ conversion boundary; same-requestId second dispatch; teardown re-run asserts deterministic eventId; config-path-is-directory; chmod 0600/0400 tolerance (edge) — all added; same-requestId test corrected to real semantics (second dispatch refused: 4.9M spent + 100k reserved ≥ 5M cap; reservation requires `store.create` or the orphan filter expires it) [tests/]
+- [x] [Review][Patch] Committed `_bmad-output/evidence/df2-8/e2e-cost-demo.json` drifted from test-produced shape (spend.lead 100k vs 5M) — fixed: reconciled + per-test schema-assert of the committed copy (D8) [tests/providers/budget-gate.test.ts]
+
+Deferred (1): internal retry/backoff for `ledger-busy` under >10 concurrent dispatch storms — busy already classified retryable; speculative load scaling (blind).
+
+Dismissed (4): box-hour rate late-fail at teardown — spec-mandated surfacing, not silent default (blind); positive-USD→negative-µ$ — mathematically impossible in safe range (edge); open-run reservation persistence — verify-only, expiry path exists from prior round (edge, pending verifier verdict); INFO confirmations ×2 (append-only triggers, serialized admission).
+
+
+**Status:** review — implemented, four review rounds complete (this pass: 19/19 actionable patches applied, 119/119 focal green); awaiting PR #121 merge

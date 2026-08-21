@@ -235,12 +235,15 @@ function ingestBoxHoursIfAttributed(
 ): boolean {
   const budget = rec.extensions?.budget;
   const { repoSlug, issueId } = budget ?? {};
-  if (typeof repoSlug !== "string" && typeof repoSlug !== "number") return false;
-  if (typeof issueId !== "string" && typeof issueId !== "number") return false;
+  // String-only: numeric values from hand-edited records are rejected as invalid attribution.
+  // The extension index signature admits string|number, but a hand-edited {repoSlug: 123}
+  // would mis-attributing spend as "123" rather than the intended repo.
+  if (typeof repoSlug !== "string") return false;
+  if (typeof issueId !== "string") return false;
   costLedger.ingestBoxHours({
     runId,
-    repoSlug: String(repoSlug),
-    issueId: String(issueId),
+    repoSlug,
+    issueId,
     requestId,
   });
   return true;
@@ -264,7 +267,10 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
       try {
         ingestBoxHoursIfAttributed(deps.costLedger, rec, runId, ctx.requestId);
       } catch (e) {
-        throw asTeardownError(e);
+        // Preserve the original error as cause so CostLedgerError classification survives the wrap.
+        const wrapped = asTeardownError(e);
+        (wrapped as Error & { cause: unknown }).cause = e;
+        throw wrapped;
       }
     }
     return;
