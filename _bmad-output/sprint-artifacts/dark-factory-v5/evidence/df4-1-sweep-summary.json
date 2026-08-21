@@ -1,0 +1,11 @@
+{
+  "imageRef": "qds-factory:local",
+  "treePackageCount": 48,
+  "coveredCount": 45,
+  "uncoveredCount": 3,
+  "deniedHits": [],
+  "piVersions": {},
+  "noticeBytes": 4533,
+  "sweptAt": "2026-08-21T11:36:43.240Z",
+  "exitCode": 0
+}

@@ -5,14 +5,17 @@
   "type": "module",
   "workspaces": [
     "pi-vs-claude-code-vendor",
-    "cli-anything"
+    "cli-anything",
+    "visualizer"
   ],
   "scripts": {
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
+    "typecheck:visualizer": "bun run --cwd visualizer typecheck",
+    "lint:visualizer": "bun run --cwd visualizer lint",
     "smoke:coms": "bun scripts/coms-smoke-test.ts",
     "verify:pi-lens": "bun scripts/pi-lens-verify.ts",
-    "lint": "bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor oci 2>/dev/null || bunx @biomejs/biome check .",
+    "lint": "bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor visualizer oci 2>/dev/null || bunx @biomejs/biome check .",
     "build:image": "bun scripts/build-image.ts",
     "notice:sweep": "bun scripts/generate-notice.ts",
     "smoke:team": "QDS_TEAM_RUNNER=local bun cli-anything/src/index.ts run --manifest cli-anything/manifests/research-trio.yaml",

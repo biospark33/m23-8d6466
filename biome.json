@@ -2,7 +2,7 @@
   "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
   "organizeImports": { "enabled": false },
   "files": {
-    "ignore": ["node_modules", "_bmad-output", ".gitnexus", ".claude", ".swarm", "docs"]
+    "ignore": ["node_modules", "_bmad-output", ".gitnexus", ".claude", ".swarm", "docs", "visualizer/**/*.vue"]
   },
   "linter": {
     "enabled": true,
