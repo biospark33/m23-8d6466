@@ -18,3 +18,5 @@ checkpoints:
   - phase4-wave0: integration-spec.md locked + orchestrator corrections C1-C10 (createRun bypass verified against source)
   - phase4-wave1: agents A/B/C parallel TDD (brief-schema+manifest / dispatch / verbs+status)
   - phase4-wave1-result: A green (brief-schema+manifest 51 tests w/ C); C green (verbs+status); B died post-tests (defective dispatch.test.ts); D relaunched for dispatch.ts+CLI+e2e
+  - phase5-done: 2026-08-21 commit ec4b5f7 pushed, PR #123 opened (CodeRabbit auto-review pending)
+  - status: review

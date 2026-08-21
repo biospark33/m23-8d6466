@@ -125,7 +125,7 @@ epics:
     points: 24
     stories_dir: sprint-artifacts/dark-factory-v5/stories
     stories:
-      DF3.1: { title: "Fleet Dispatcher Core Verbs (dispatch, status, harvest, teardown)", points: 5, status: ready-for-dev, deps: [DF1.8, DF2.1, DF2.2, DF2.5, DF2.6, DF2.8] }  # v5-S2 — dispatch calls DF2.6's checkHeadroom(1) and DF2.8's assertWithinBudget pre-create. Sequence first, unblocks four stories; DF1.8 lands ahead of it inside the sprint (DF3.1 calls resolveRunCorrelation)
+      DF3.1: { title: "Fleet Dispatcher Core Verbs (dispatch, status, harvest, teardown)", points: 5, status: review, deps: [DF1.8, DF2.1, DF2.2, DF2.5, DF2.6, DF2.8] }  # in review 2026-08-21: PR #123 (ec4b5f7) — dispatch composes DF2.1 primitives (createRun headroom unskippable, AC8 admitted:true); fakeGate = 5 real exec probes; 84 fleet tests, tsc+biome clean, detect_changes LOW  # v5-S2 — dispatch calls DF2.6's checkHeadroom(1) and DF2.8's assertWithinBudget pre-create. Sequence first, unblocks four stories; DF1.8 lands ahead of it inside the sprint (DF3.1 calls resolveRunCorrelation)
       DF3.2: { title: "Fleet Patterns as Code — fan-out N, best-of-N, race",       points: 4, status: ready-for-dev, deps: [DF1.1, DF2.1, DF2.6, DF3.1] }  # v5-S2 — first cut if the sprint compresses
       DF3.3: { title: "Resident Orchestrator Agent — Interprets the Brief, Steers the Engine, Never Holds Gate Authority", points: 4, status: ready-for-dev, deps: [DF1.1, DF1.5, DF1.6, DF2.2, DF3.1] }  # v5-S2
       DF3.4: { title: "Tier-1 Pre-PR Approval Gate + attach Steering",             points: 6, status: ready-for-dev, deps: [DF2.1, DF2.3, DF2.5, DF3.1, DF3.3] }  # v5-S2
