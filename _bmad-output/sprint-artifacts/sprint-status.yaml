@@ -137,7 +137,7 @@ epics:
     points: 10
     stories_dir: sprint-artifacts/dark-factory-v5/stories
     stories:
-      DF4.1: { title: "Visualizer Port + Tunneled Auth Gate",                      points: 6, status: ready-for-dev, deps: [DF1.4, DF2.9] }  # v5-S3 — consumer of DF2.9's NOTICE sweep, which the vendored tree must keep green
+      DF4.1: { title: "Visualizer Port + Tunneled Auth Gate",                      points: 6, status: review, deps: [DF1.4, DF2.9] }  # v5-S3 — consumer of DF2.9's NOTICE sweep, which the vendored tree must keep green
       DF4.2: { title: "Visualizer Test Suite from Zero, Bun-API Inventory, Per-Box Deploy", points: 4, status: ready-for-dev, deps: [DF4.1, DF2.2, DF1.4, DF1.6, DF2.3, DF2.5] }  # v5-S3
   df5:
     name: Lights-on PR (§8 step 5)

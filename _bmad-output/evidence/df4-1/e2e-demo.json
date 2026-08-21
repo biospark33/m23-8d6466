@@ -1,0 +1,96 @@
+{
+  "story": "DF4.1 e2e demo",
+  "date": "2026-08-21T11:38:55Z",
+  "pipeline": "trace seeded through DF1.4 Tracer (visualizer/test/fixtures/trace-fixture.ts): 2 phases, 4 prompt events, 2 gate results, 1 envelope, 1 agent_session, agent_start/agent_end usage, total_cost 250000 micro-usd / 430 tokens",
+  "server": {
+    "bind": "127.0.0.1:4600",
+    "tokenBytes": 96,
+    "tokenValueRedacted": true,
+    "db": "evidence/df4-1/demo-trace.db"
+  },
+  "captures": {
+    "a-l3-phase-detail-via-gate": {
+      "requestId": "req-df41-fixture",
+      "phaseId": "phase-agent-2",
+      "prompts": [
+        {
+          "event_id": "F-UW-dZrkXqVgVvl",
+          "phase_id": "phase-agent-2",
+          "name": "builder",
+          "payload_json": "{\"agentId\":\"builder\",\"prompt\":\"compiled prompt for builder in phase-agent-2\",\"model\":\"qds/test-max\"}",
+          "tokens": null,
+          "started_at": "2026-08-21T11:38:31.958Z"
+        },
+        {
+          "event_id": "vtgw6R1bD-gWchQf",
+          "phase_id": "phase-agent-2",
+          "name": "reviewer",
+          "payload_json": "{\"agentId\":\"reviewer\",\"prompt\":\"compiled prompt for reviewer in phase-agent-2\",\"model\":\"qds/test-max\"}",
+          "tokens": null,
+          "started_at": "2026-08-21T11:38:31.958Z"
+        }
+      ],
+      "gates": [
+        {
+          "id": 1,
+          "request_id": "req-df41-fixture",
+          "phase_id": "phase-engineer-1",
+          "attempt": 1,
+          "gate": "plan-review",
+          "passed": 1,
+          "violations_json": "[]",
+          "checks_json": "[{\"item\":\"manifest\",\"ok\":true,\"note\":\"loads\"}]"
+        },
+        {
+          "id": 2,
+          "request_id": "req-df41-fixture",
+          "phase_id": "phase-agent-2",
+          "attempt": 1,
+          "gate": "build-review",
+          "passed": 0,
+          "violations_json": "[\"lint failed\"]",
+          "checks_json": "[{\"item\":\"tests\",\"ok\":true,\"note\":\"3 passed\"},{\"item\":\"lint\",\"ok\":false,\"note\":\"1 error\"}]"
+        }
+      ],
+      "session-cost-micro-usd": 250000,
+      "usage-split": {
+        "read": 150,
+        "written": 80
+      }
+    },
+    "b-no-credential": {
+      "status": 401,
+      "bodyBytes": 0,
+      "expectation": "401 with empty body"
+    },
+    "c-routable-address": {
+      "address": "http://192.168.1.7:4600/api/health",
+      "curlExitCode": 7,
+      "expectation": "connection refused (7) - loopback-only bind"
+    }
+  },
+  "ssh-forward-capture": {
+    "transport": "real ssh -L forward through macOS Remote Login sshd: ssh -f -N -L 14600:127.0.0.1:4600 steve@localhost",
+    "hostHeaderNote": "operator flow is ssh -L 4600:127.0.0.1:4600 on the operator machine (local 4600 free there); single-machine capture forwards 14600 with Host pinned to 127.0.0.1:4600 exactly as the operator's browser sends it - byte-identical at the server socket",
+    "through-forward-bearer-200": {
+      "url": "http://127.0.0.1:14600/api/sessions/req-df41-fixture/prompts?phaseId=phase-agent-2",
+      "status": 200,
+      "promptNames": [
+        "builder",
+        "reviewer"
+      ],
+      "promptCount": 2,
+      "gatesStatus": 200,
+      "gateRows": 2,
+      "checksJsonPresent": true,
+      "violationsJsonPresent": true
+    },
+    "through-forward-no-credential": {
+      "status": 401,
+      "bodyBytes": 0,
+      "expectation": "401 empty body"
+    },
+    "hostCheckNote": "an earlier forward attempt WITHOUT the pinned Host header (Host: 127.0.0.1:14600) returned 403 empty - the DNS-rebinding gate rejecting a foreign Host before credentials, as designed",
+    "tokenValueRedacted": true
+  }
+}

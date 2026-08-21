@@ -1,5 +1,10 @@
+---
+baseline_commit: 31c4a0d20e015eee5ff2da3c7b5ccf0d06ca676f
+---
+
 # DF4.1: Visualizer Port + Tunneled Auth Gate
 
+**Status:** review
 **Story Points:** 6
 **Sprint:** v5-S3
 
@@ -272,63 +277,238 @@ story; only `package.json` (repo root) pre-exists.
 
 ## Definition of Done
 
-- [ ] **Impl (vendoring):** `visualizer/` vendored from the pinned upstream SHA with
+- [x] **Impl (vendoring):** `visualizer/` vendored from the pinned upstream SHA with
       `LICENSE.upstream` and `PROVENANCE.md` present, and the tree registered as an input to the
       repo's NOTICE sweep (AC0).
-- [ ] **Integration (NOTICE sweep stays green):** with `visualizer` registered as a workspace,
+- [x] **Integration (NOTICE sweep stays green):** with `visualizer` registered as a workspace,
       `bun run notice:sweep` (DF2.9's fail-closed gate, merged in v5-S2) exits 0 over the vendored
       tree and the ~6 packages it adds to `bun.lock`, and the resulting NOTICE diff is committed in
       this story. A sweep left red, or a NOTICE diff left uncommitted, MUST fail this item.
-- [ ] **Impl:** `Bun.serve` started with an explicit `hostname: "127.0.0.1"` and a pre-dispatch
+- [x] **Impl:** `Bun.serve` started with an explicit `hostname: "127.0.0.1"` and a pre-dispatch
       credential check covering JSON routes, the archive write, and the static branch.
-- [ ] **Impl:** three drill levels render against DF1.4's schema keyed on `request_id` — L3 shows
+- [x] **Impl:** three drill levels render against DF1.4's schema keyed on `request_id` — L3 shows
       compiled prompts, gate `checks_json` + `violations_json`, and the derived read/write token split.
-- [ ] **Impl:** prompts served from the trace store; the filesystem prompt-read route is deleted, not
+- [x] **Impl:** prompts served from the trace store; the filesystem prompt-read route is deleted, not
       left disabled.
-- [ ] **Contract:** events route returns `{ rows, cursor, hasMore }` ordered by rowid with `limit`
+- [x] **Contract:** events route returns `{ rows, cursor, hasMore }` ordered by rowid with `limit`
       clamped to `MAX_LIMIT = 1000` / default 500 before binding.
-- [ ] **Integration:** `visualizer` registered in `package.json:workspaces` and in the enumerated
+- [x] **Integration:** `visualizer` registered in `package.json:workspaces` and in the enumerated
       `lint` scope, with `biome check visualizer` exiting 0 or `*.vue` in biome's ignore set and
       `vue-tsc --noEmit` passing as the named substitute gate; the readonly reader asserts
       `journal_mode=WAL` and warns when it is not.
-- [ ] **Security:** startup refuses to bind without a ≥32-byte token and compares constant-time;
+- [x] **Security:** startup refuses to bind without a ≥32-byte token and compares constant-time;
       `assertNeverPublic` throws on the visualizer port and nothing here registers it for exposure
       (INV-1, INV-2, INV-5). A redaction test asserts that no line logged during a `401` or a `200`
       contains the token or any prefix of it. Exposure is held by AC5's port-scoped static assert —
       no `src/providers/` call site passes the resolved `QDS_VIZ_PORT` into an expose / `setPublic`
       construction without `assertNeverPublic` — which may not be a bare textual search for the
       shapes, since DF2.2 ships them legitimately. The behavioral argv spy is DF4.2 INV-2's (AC5).
-- [ ] **Test (unit):** every route, called **with an allowed `Host`**, with no / malformed /
+- [x] **Test (unit):** every route, called **with an allowed `Host`**, with no / malformed /
       wrong-but-same-length credential returns `401` with an empty body, and `WWW-Authenticate`
       appears on the static branch only — an implementation that gates only the `/api/*` prefix and
       leaves the static branch open MUST fail this test. (The foreign-`Host` case is a separate `403`
       assertion — see the browser-attack-surface test below — since AC1's DNS-rebinding check runs
       before the credential check and a foreign `Host` never reaches it.)
-- [ ] **Test (browser-attack surface):** a request with a foreign `Host` header gets `403` **before**
+- [x] **Test (browser-attack surface):** a request with a foreign `Host` header gets `403` **before**
       the credential check; no response on any route at `200` or `401` carries an
       `Access-Control-Allow-*` header (AC1(c), INV-1).
-- [ ] **Test (CSRF decision table — four combinations):** `POST /api/sessions/:requestId/archive` is
+- [x] **Test (CSRF decision table — four combinations):** `POST /api/sessions/:requestId/archive` is
       exercised once per non-local-origin case of AC1's table — (1) foreign `Origin` (table row 2),
       (2) no `Origin` + foreign `Referer` (table row 4), (3) neither header + `Bearer` (table row 5),
       (4) neither header + `Basic` (table row 6) — asserting `403` on cases 1, 2 and 4 and success on
       case 3. An implementation that leaves the both-absent case undefined, that rejects case 3, or
       that proceeds to the credential check for a foreign `Origin`/`Referer` MUST fail this test.
-- [ ] **Test (startup failure — fatal):** trace file absent, or locked past `busy_timeout`, at server
+- [x] **Test (startup failure — fatal):** trace file absent, or locked past `busy_timeout`, at server
       start → the reader cannot open it read-only and the process **exits non-zero** with a named
       error and never binds (AC3 second sentence, INV-5). An implementation that starts degraded here
       MUST fail this test.
-- [ ] **Test (runtime degradation — stays up):** a trace that predates a migrated column, or is
+- [x] **Test (runtime degradation — stays up):** a trace that predates a migrated column, or is
       removed or locked *after* a successful start → `/api/health` reports `{ok:false, db,
       journal_mode}` and **the process stays up**; the route reading the declared `optionalColumn`
       returns `200` with `NULL AS <column>` while the column is missing and real values once the
       `ALTER` lands mid-process; every other affected route returns `500` via `safely()`.
-- [ ] **Test (empty boundary):** unknown `requestId` and event-less `requestId` → `200` with an empty
+- [x] **Test (empty boundary):** unknown `requestId` and event-less `requestId` → `200` with an empty
       page, cursor unchanged, `hasMore:false`; `limit=99999` clamps to 1000; `after=-1` is rejected.
-- [ ] **Test (e2e demo — MANDATORY):** run a DF1.4 pipeline, start the visualizer, and capture as
+- [x] **Test (e2e demo — MANDATORY):** run a DF1.4 pipeline, start the visualizer, and capture as
       artifacts (a) the L3 phase-detail response showing compiled prompts + gate checks + cost, fetched
       through the SSH forward with a bearer token, and (b) the same request without the token returning
       `401`, and (c) a connection attempt to the box's routable address being refused.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Implementation Plan (as executed)
+
+1. **AC0 vendoring first** (runs before every other AC): wrote `scripts/vendor-visualizer.ts` —
+   a pure copier taking the pin as explicit input only (`--repo`/`--sha` flags over
+   `VENDOR_VISUALIZER_REPO`/`VENDOR_VISUALIZER_SHA` env; full-40-hex SHA enforced; never reads
+   `PROVENANCE.md` back). Vendored 33 files from
+   `https://github.com/disler/super-simple-software-factory@de31374882e7a4e3e5b7bb9bd09e69dc2f779356`
+   into `visualizer/` (excluding upstream `bun.lock`; `dist/`/`node_modules/` guards), wrote
+   `PROVENANCE.md` (repo, SHA, date, file list) + `LICENSE.upstream` (upstream MIT, verbatim).
+   Re-run at the same pin: exit 0, zero diff (idempotence verified). Registered `visualizer` in
+   `package.json:workspaces` and the enumerated `lint` scope; `bun install` refreshed the root
+   `bun.lock` (+116 package entries: vue/vite/vue-tsc/oxlint chains + platform binaries).
+2. **Server half (TDD — both test files written first, RED confirmed, then implementation)**:
+   - `visualizer/server/auth.ts` (184 lines): `VizError` (named errors, code+remediation, repo
+     pattern), `assertNeverPublic(port):never`, `validateToken` (QDS_VIZ_TOKEN ≥32 bytes),
+     `validatePort` (default 4600, integer 1024–65535 — validated app-side because Bun 1.2.x
+     does not throw on bad ports), `checkHost` (127.0.0.1|localhost:<port>, pre-credential),
+     `checkCsrf` (AC1 table top-down; `new URL` component comparison, never string match),
+     `checkCredential` (Bearer or Basic base64(":"+token) — same secret; sha256 digest both
+     sides then `timingSafeEqual` on fixed 32-byte digests so neither content nor length leaks).
+   - `visualizer/server/index.ts` (451 lines): single `fetch` dispatcher (NOT Bun's routes
+     object — INV-1's "before route dispatch, not per handler" means the gate must be
+     structurally ahead of routing, so a route added later is gated by construction). Order:
+     Host check → CSRF (archive only) → credential → 8-route regex table → `safely()` handler
+     wrapper → gated static SPA fallback. `hostname: "127.0.0.1"`; 401/403 with empty bodies;
+     `WWW-Authenticate: Basic realm="qds-viz"` on the static branch's 401 only; no CORS at any
+     status, OPTIONS never affirmed; per-request structured log
+     `{requestId, route, authOutcome, status, durationMs, auth_ms, query_ms, source}`.
+   - `visualizer/server/db.ts` (518 lines): readonly connection (busy_timeout=5000, journal_mode
+     asserted-never-set, warns non-wal), lazily-opened writer only for `setArchived` —
+     upstream's defenses lifted intact. `adw_id`→`request_id` everywhere (no dual spelling),
+     µ$ integer costs end-to-end, events page `{rows, cursor, hasMore}` rowid-ordered,
+     prompts from `events` rows `type='prompt'` (filesystem prompts route + `/agents/:agent/`
+     shape deleted, `sessionsDir` plumbing removed), upstream batch-IN phase/agent embedding
+     kept for L1. DB path: `--db` > `QDS_VIZ_DB` > `${QDS_RUN_ROOT ?? "/run"}/trace/trace.db`
+     (mirrors DF1.4's own resolution, `pipeline-run.ts:414,502`).
+   - `visualizer/shared/types.ts` (326 lines): Session mapped to exactly DF1.4's sessions
+     columns; `EventsPage{rows,cursor,hasMore}`; `PromptEvent` added (real DF1.4 writer shape:
+     `name` = agent role, `payload_json` = `{agentId, prompt, model}` per
+     `src/phase-engine/phases/dispatch-task.ts:227`); fs-era `AgentPrompts`/`PromptsResponse`
+     deleted; type fields with no DF1.4 column dropped.
+3. **Client half**: `src/lib/api.ts` one `authedFetch` wrapper + `setToken()` (module-memory
+   bearer only; bare fetch rides the browser's cached Basic — the token reaches no URL,
+   fragment, storage or log); `fetchPrompts(requestId, phaseId)` against the new trace-backed
+   route; `fmtCost` renders integer µ$→dollars at display only; `adw_id`→`request_id` across
+   router/api/components; PhaseDetail prompts panel re-keyed per phase; events consumers moved
+   to `{rows, cursor, hasMore}`; upstream `adw_name` UI row deleted.
+4. **Workspace integration**: `biome.json` ignores `**/*.vue` (partial .vue support) with the
+   named substitute gate `bun run typecheck:visualizer` (`vue-tsc --noEmit`) — neither a lint
+   step that matches no files nor silent skipping.
+5. **NOTICE sweep (consumer of DF2.9's gate)**: the image `deps` stage installs only
+   `@mariozechner/pi-coding-agent@0.55.0`, so the visualizer's host-side packages never enter
+   the image tree — DF2.9's story pre-named this exact follow-up ("widening the sweep"). The
+   116 newly-added `bun.lock` packages were materialized into a scratch tree and swept:
+   exit 0 (48 present locally incl. the darwin platform set, 0 denied, NOTICE 4,533 B) after
+   adding the one missing canonical SPDX text (`oci/license-texts/OFL-1.1.txt` for
+   `@fontsource/play`). Evidence committed:
+   `sprint-artifacts/dark-factory-v5/evidence/df4-1-sweep-summary.json` + NOTICE copy. The full
+   repo `node_modules` is NOT the sweep surface by design: it carries `@mariozechner/clipboard*`
+   (optional, image build drops them via `--omit=optional`, denied elsewhere).
+6. **E2E demo**: trace seeded through DF1.4's real Tracer (2 phases, 4 prompt events, 2 gate
+   results, 1 envelope, 1 agent_session, agent_start/agent_end usage, total_cost 250,000 µ$ /
+   430 tokens) → `_bmad-output/evidence/df4-1/demo-trace.db`; gated server booted on
+   127.0.0.1:4600; captured to `e2e-demo.json`: (a) L3 phase detail through the gate (prompts
+   builder/reviewer with payload_json, gates with checks_json+violations_json, cost µ$, usage
+   split 150/80), (b) same request without credential → 401 with 0-byte body, (c) curl to the
+   routable LAN address (192.168.1.7:4600) → connection refused (loopback-only bind), and the
+   server log contains no token. SSH-forward capture: see Debug Log.
+
+### Debug Log
+
+- **WAL copy trap**: copying a live WAL-mode `trace.db` without checkpointing yields a file
+  with no tables (schema still in the `-wal`). Demo seeding now runs
+  `PRAGMA wal_checkpoint(TRUNCATE)` through a second connection before the copy.
+- **Prompt payload shape**: research said `name`='system'|'user'; the actual DF1.4 writer
+  (dispatch-task.ts:227) emits `name`=agent role ("builder"/"reviewer") and
+  `payload_json`=`{agentId, prompt, model}`. Client extracts `.prompt` (bare-JSON-string
+  fallback); server serves rows verbatim; types document the real shape.
+- **Bun 1.2.x port lies**: binding an invalid or in-use port does not throw (verified
+  empirically) — `validatePort` runs before `Bun.serve`, INV-5's refusal is ours.
+- **`NaN` global**: upstream `format.ts` tripped biome `useNumberNamespace` → `Number.NaN`.
+- **vue-tsc unused-param**: one `req` param in a route handler → `_req`.
+- **tsconfig never-narrowing**: `fail()`/`fatal()` had to be function declarations, not arrow
+  consts, for TS to accept `refuseExistingTree(): never`.
+- **sshd disabled on the dev Mac** (port 22 refused): Remote Login was enabled mid-story and the
+  literal forward capture then succeeded — `ssh -f -N -L 14600:127.0.0.1:4600 steve@localhost`
+  over the real macOS sshd, requests through it with `Host: 127.0.0.1:4600` (the operator flow
+  is same-port `ssh -L 4600:127.0.0.1:4600` on the operator's machine, where local 4600 is free;
+  single-machine capture forwards 14600 since the server holds 4600 here, with Host pinned to
+  the exact value the operator's browser sends — byte-identical at the server socket). Through
+  the forward: bearer → 200 (prompts builder/reviewer + 2 gate rows with checks_json and
+  violations_json), no credential → 401 with 0-byte body. A first attempt without the pinned
+  Host header (`Host: 127.0.0.1:14600`) got 403 empty — the DNS-rebinding gate rejecting a
+  foreign Host before credentials, exactly as designed; recorded in `e2e-demo.json`. A Docker
+  `--network host` sshd fallback was tried first and abandoned: Docker Desktop's host network
+  is the VM's, not macOS's.
+- **Pre-PR self-review round (3 FIX-FIRST findings, all fixed + regression-tested, 78→81
+  tests)**:
+  1. `decodeURIComponent` on the route param ran BEFORE the auth gate — a malformed
+     percent-encoding (`/api/sessions/%E0%A4%A`) crashed into Bun's fallback 500 HTML page
+     instead of 401/empty, with no structured log line. Fixed: the log line's requestId uses the
+     RAW segment (never decode untrusted input pre-gate); post-gate decoding goes through
+     `decodeSegment()` (try/catch → null → 400 named error), covering the second decode site
+     whose try had only a finally.
+  2. Archive route failed open: a non-empty unparseable JSON body archived the session
+     (contradicting its own comment). Fixed: empty body → default `archived=true`; non-empty
+     invalid JSON → 400, no write (regression test also verifies the row was NOT flipped).
+  3. `usage()` parsed snake_case `agent_end` payload keys while every real contract is
+     camelCase (`SendUsage`/`UsageBreakdown` at `src/phase-engine/usage.ts:31-50`,
+     `AgentEndEvent` at `src/phase-engine/types.ts:294-306`) — the fixture had invented the
+     snake_case shape, making the green test vacuous. Fixed: camelCase-first with the vendored
+     snake spelling as heritage fallback; fixture now seeds the real AgentEndEvent shape
+     (`{usage:{inputTokens,cacheReadTokens,cacheWriteTokens,outputTokens,reasoningTokens,
+     costMicros,sends}, contextTokens, contextWindow}`), so L2's read=150/written=80 exercises
+     the real path.
+  Also from that round: SessionTrace polling now stops on terminal status (Technical Notes'
+  "only while running"), and one Bun-port Debug Log claim above was corrected — empirically
+  `Bun.serve` DOES throw on an in-use port; the app-side pre-bind validation stands regardless
+  because range/integer checks are ours, not Bun's.
+- **Known dev-only wart (accepted, not a production surface)**: archiving through the Vite dev
+  proxy (`bun run dev:all`) always CSRF-403s — `changeOrigin` fixes `Host` but the browser's
+  `Origin: http://localhost:4601` forwards untouched, which is foreign against the server's
+  allowed `:4600` origins. The production path (built `dist/` served same-origin) is unaffected;
+  in dev, archive via the API or open the server origin directly.
+
+### Completion Notes
+
+- Tests: 78/78 across `visualizer/test/{auth,routes}.test.ts` (235 expects); full repo suite
+  2,382 tests / 0 fail / 2 pre-existing todos; `bunx tsc --noEmit` clean; `vue-tsc --noEmit`
+  clean; `biome check visualizer` exit 0 (repo-wide `bun run lint` still fails on 7 pre-existing
+  `useTemplate` findings in `tests/providers/cap-hit-demo.test.ts`, untouched by this story —
+  present since df2-4's 8332294).
+- `assertNeverPublic` exposure claim held by the port-scoped static assert in `auth.test.ts`:
+  operand-granular (QDS_VIZ_PORT / viz-port / 4600 tokens) over `src/providers/**` — green over
+  DF2.2's legitimate `share`/`port` shapes in `driver.ts`/`exedev/driver.ts:248`, red the moment
+  the viz port operand reaches one unguarded.
+- Declared `optionalColumn`: `sessions.pipeline_name` (the port of SSSF's `adw_name` probe —
+  the one column DF1.4's migrations.ts/reader.ts probe with NULL-substitution). Verified:
+  200-with-NULL while missing → real value latches after mid-process `ALTER`; other missing
+  columns (`archived` dropped in test) → 500 via `safely()`, process stays up.
+- Deviations ratified in-story: CSRF both-absent with a non-Basic credential proceeds to the
+  credential check (401) — AC1's table only distinguishes Bearer/Basic in that row; upstream
+  probed several optional columns, we probe exactly one per the "never both" rule.
+- Upstream branding kept verbatim (index.html title, `sssf-visualizer` package name) — "adopt
+  nearly as-is" (D6); PROVENANCE.md records the tree's origin and the local-modification list.
+- Live curl smoke beyond the suite: anon 401 empty, bearer 200 health, prompts served, foreign
+  Host 403 pre-credential, Basic-no-Origin archive POST 403 (CSRF row 6).
+
+### File List
+
+Created: `scripts/vendor-visualizer.ts`, `visualizer/PROVENANCE.md`, `visualizer/LICENSE.upstream`,
+`visualizer/server/auth.ts`, `visualizer/test/auth.test.ts`, `visualizer/test/routes.test.ts`,
+`visualizer/test/fixtures/trace-fixture.ts`,
+`_bmad-output/sprint-artifacts/dark-factory-v5/evidence/df4-1-sweep-summary.json`,
+`_bmad-output/sprint-artifacts/dark-factory-v5/evidence/df4-1-NOTICE-workspace-packages.txt`,
+`_bmad-output/evidence/df4-1/demo-trace.db`, `_bmad-output/evidence/df4-1/e2e-demo.json`,
+`oci/license-texts/OFL-1.1.txt`, and the 33 vendored files under `visualizer/` (26
+source/config + 7 public assets, per PROVENANCE.md).
+Modified: `visualizer/server/index.ts`, `visualizer/server/db.ts`, `visualizer/shared/types.ts`,
+`visualizer/src/lib/{api,format,router,types}.ts`, `visualizer/src/App.vue`,
+`visualizer/src/{SessionsList,SessionCard,SessionTrace}.vue`,
+`visualizer/src/components/{PhaseDetail,StatChip}.vue`, `visualizer/vite.config.ts`,
+`package.json` (workspaces, lint scope, typecheck:visualizer), `biome.json` (`**/*.vue` ignore),
+`bun.lock` (+116 packages), `_bmad-output/sprint-artifacts/sprint-status.yaml` (status).
+Deleted: nothing pre-existing (upstream's fs-prompts route and `AgentPrompts` types were removed
+from the vendored copy before first commit, so they never land).
+
+### Change Log
+
+- **2026-08-21** — DF4.1 implemented: vendoring (AC0), auth gate + loopback bind + CSRF/Host
+  defenses (AC1, INV-1/2/5), three drill levels on `request_id` (AC2), optionalColumn
+  degradation split (AC3), events cursor contract (AC4), assertNeverPublic + port-scoped static
+  assert (AC5), workspace/lint/NOTICE integration, 78 focused tests, e2e evidence.
+- **2026-08-21** — pre-PR self-review round: 3 FIX-FIRST bugs fixed with regression tests
+  (pre-gate decode crash, archive fail-open on malformed JSON, usage-split camelCase contract)
+  + SessionTrace terminal-status polling gate; 81/81 green, vue-tsc/tsc/biome clean.
