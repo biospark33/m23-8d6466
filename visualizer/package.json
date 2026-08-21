@@ -3,11 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Read-only observability UI for the Super Simple Software Factory — polls sssf.db in a target repo.",
+  "description": "Read-only observability UI for the Super Simple Software Factory \u2014 polls sssf.db in a target repo.",
   "scripts": {
     "dev": "vite",
     "server": "bun run server/index.ts",
-    "dev:all": "bun run server/index.ts & vite",
+    "dev:all": ": \"${QDS_VIZ_TOKEN:?set QDS_VIZ_TOKEN to a secret of at least 32 bytes (openssl rand -hex 32); the visualizer never serves unauthenticated, and starting vite against a server that refused to bind only proxies to a dead API}\" && { bun run server/index.ts & vite; }",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "bun run server/index.ts",
     "typecheck": "vue-tsc --noEmit",

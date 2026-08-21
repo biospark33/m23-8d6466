@@ -101,4 +101,12 @@ checksums — those go stale on the next commit.
     (a 59.5s remainder rendered as `2m 60s`), `NaN` → `Number.NaN` and similar
     Biome-rule conformance.
 
+12. **Dev-script guard for the mandatory startup token** (`package.json`) —
+    the auth gate makes `QDS_VIZ_TOKEN` mandatory, so upstream's
+    `dev:all` ("server & vite") left vite running against a server that had
+    refused to bind, proxying to a dead API. The script now refuses up front
+    with the remediation, and starts neither process. `server` and `preview`
+    are unchanged: they already exit non-zero with a named `VIZ_TOKEN_MISSING`
+    error and remediation text, which is the correct behaviour.
+
 Upstream license: MIT — see LICENSE.upstream (copied verbatim from the upstream repo root).
