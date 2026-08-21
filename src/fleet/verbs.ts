@@ -7,6 +7,12 @@
  *
  * C6: flags list = dashed flags only (positionals like runId are per-verb
  * CLI grammar, not registry flags). exitCodes are story-normative.
+ *
+ * The registry is a CONTRACT, not documentation: the CLI validates the flags it
+ * accepts against these entries, and DF3.5's skill-contract test compares the
+ * declared exit codes against the ones the verbs actually return. Every verb
+ * takes `--help` and every verb can refuse with 2 (usage/schema) — an id that
+ * fails the grammar, an extra positional, or a flag the verb does not take.
  */
 export interface VerbFlag {
   name: string;
@@ -34,14 +40,22 @@ export function listVerbs(): VerbEntry[] {
         { name: "--driver", required: false, valueType: "string" },
         { name: "--brief", required: false, valueType: "path" },
         { name: "--dir", required: false, valueType: "path" },
+        // The only route to DispatchDeps.port, hence the only way the ack can
+        // carry an httpsUrl. "string": the CLI range-checks it as 1-65535.
+        { name: "--port", required: false, valueType: "string" },
+        { name: "--help", required: false, valueType: "boolean" },
       ],
       exitCodes: [0, 1, 2, 3, 5],
     },
     {
       verb: "status",
       summary: "List fleet state or single-run status",
-      flags: [{ name: "--driver", required: false, valueType: "string" }],
-      exitCodes: [0, 1, 4],
+      flags: [
+        { name: "--driver", required: false, valueType: "string" },
+        { name: "--dir", required: false, valueType: "path" },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      exitCodes: [0, 1, 2, 4],
     },
     {
       verb: "harvest",
@@ -49,8 +63,9 @@ export function listVerbs(): VerbEntry[] {
       flags: [
         { name: "--driver", required: false, valueType: "string" },
         { name: "--dir", required: false, valueType: "path" },
+        { name: "--help", required: false, valueType: "boolean" },
       ],
-      exitCodes: [0, 1, 4],
+      exitCodes: [0, 1, 2, 4],
     },
     {
       verb: "teardown",
@@ -59,8 +74,9 @@ export function listVerbs(): VerbEntry[] {
         { name: "--driver", required: false, valueType: "string" },
         { name: "--dir", required: false, valueType: "path" },
         { name: "--no-harvest", required: false, valueType: "boolean" },
+        { name: "--help", required: false, valueType: "boolean" },
       ],
-      exitCodes: [0, 1, 4],
+      exitCodes: [0, 1, 2, 4],
     },
   ];
 }

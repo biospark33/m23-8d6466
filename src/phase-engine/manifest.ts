@@ -31,7 +31,6 @@ import { FFIType, dlopen, ptr } from "bun:ffi";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { z } from "zod";
-import * as YAML from "yaml";
 import {
   DEFAULT_MAX_DURATION_MS,
   MANIFEST_VERSION,
@@ -465,8 +464,13 @@ export interface LoadedManifest {
   manifest: Readonly<PipelineManifest>;
   /** `manifest_load_ms` for the observability contract. */
   manifestLoadMs: number;
-  /** The verified absolute path the manifest was read from. */
-  resolvedPath: string;
+  /**
+   * The verified absolute path the manifest was read from — provenance for
+   * the exact bytes in `manifest`. Absent when the content was derived in
+   * memory rather than read (`stampManifestLimit`), because those bytes match
+   * no file on disk.
+   */
+  resolvedPath?: string;
 }
 
 /** Bytes read through a verified descriptor anchored beneath `runRoot`. */
@@ -684,23 +688,54 @@ export function loadManifestWithSeams(
  * DF3.1 AC9a: Stamp limitMicroUsd into a manifest for fill.
  * Returns a frozen copy that validates against the extended schema.
  *
+ * The result carries no `resolvedPath`: its bytes exist at no path, and
+ * inheriting the unstamped file's would claim provenance the content no
+ * longer has.
+ *
  * @param manifest — the loaded manifest to stamp
- * @param limitMicroUsd — positive integer ceiling (rejects 0, negative, float)
+ * @param limitMicroUsd — positive safe integer ceiling (rejects 0, negative,
+ *   float, and anything past `Number.MAX_SAFE_INTEGER`)
+ * @throws {ManifestError} if the ceiling is not a positive safe integer, or if
+ *   the stamp did not land
  * @throws {z.ZodError} if the stamped manifest fails schema validation
  */
 export function stampManifestLimit(manifest: LoadedManifest, limitMicroUsd: number): LoadedManifest {
+  // `z.number().int()` accepts 1e300 — `Number.isInteger` is true for it — and
+  // the value then round-trips through the delivered manifest as `1e+300`,
+  // i.e. an in-box cap that is not the ceiling admission actually granted.
+  // Bound it here, where the ceiling is still comparable to the admitted one.
+  if (!Number.isSafeInteger(limitMicroUsd) || limitMicroUsd <= 0) {
+    throw new ManifestError(
+      `limitMicroUsd must be a positive integer <= ${Number.MAX_SAFE_INTEGER}; got ${limitMicroUsd}`,
+    );
+  }
   const stamped = { ...manifest.manifest, limitMicroUsd };
   const validated = PipelineManifestSchema.parse(stamped) as PipelineManifest;
-  return { ...manifest, manifest: deepFreeze(validated) };
+  // `limitMicroUsd` is optional on the schema — existing uncapped manifests
+  // must still load — so validation alone does not prove the stamp landed.
+  // Assert it here rather than let a dispatch deliver an uncapped manifest.
+  // (Engine-side mandatory enforcement is DF3.x; this closes the producer.)
+  if (validated.limitMicroUsd === undefined) {
+    throw new ManifestError("stamp did not land: the manifest carries no limitMicroUsd");
+  }
+  return { manifest: deepFreeze(validated), manifestLoadMs: manifest.manifestLoadMs };
 }
 
 /**
- * DF3.1 AC9a: Serialize manifest to YAML for fill.
- * LoadManifest reads JSON; this exports YAML for the in-box copy.
+ * DF3.1 AC9a: Serialize a manifest for `fill` delivery into the box.
+ *
+ * Emits **JSON**, despite the `.yaml` filename the dispatcher delivers it
+ * under. `loadManifest` above is the authoritative reader of this file and it
+ * `JSON.parse`s; JSON is a subset of YAML, so a YAML reader accepts this too,
+ * while the reverse does not hold — `YAML.stringify` emits unquoted keys that
+ * no JSON parser will take, which made the delivered manifest unreadable by
+ * this repo's own loader. Emitting JSON is therefore the only output both
+ * accept. It also moots YAML's default `lineWidth: 80` scalar folding, which
+ * re-parsed a long phase command as a subtly different string.
  *
  * @param manifest — the loaded manifest (may be stamped)
- * @returns YAML string suitable for BoxFile delivery
+ * @returns a string suitable for BoxFile delivery, readable by `loadManifest`
  */
 export function serializeManifest(manifest: LoadedManifest): string {
-  return YAML.stringify(manifest.manifest);
+  return JSON.stringify(manifest.manifest, null, 2);
 }

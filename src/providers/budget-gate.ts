@@ -34,8 +34,7 @@ export class OverBudgetError extends Error {
     unpricedRows: number;
   }) {
     super(
-      `issue over budget: spent ${refused.spentMicroUsd} / ${refused.capMicroUsd} µ$ (${refused.unpricedRows} unpriced rows)` +
-        " — raise the cap via .sandbox/cost-config.json perIssueOverrides or pick another issue",
+      `issue over budget: spent ${refused.spentMicroUsd} / ${refused.capMicroUsd} µ$ (${refused.unpricedRows} unpriced rows) — raise the cap via .sandbox/cost-config.json perIssueOverrides or pick another issue`,
     );
     this.name = "OverBudgetError";
     this.capMicroUsd = refused.capMicroUsd;

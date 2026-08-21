@@ -3,24 +3,33 @@
  * fleet — the factory's front door (Story DF3.1, D3/DD-1).
  *
  * Four verbs over the tested provider layer: dispatch, status, harvest,
- * teardown. The verb table and --help render from src/fleet/verbs.ts's
- * registry (AC6) — no second list lives here. Exit codes (this CLI's own
- * table, F3): 0 success · 1 run/provider failure · 2 usage/schema ·
- * 3 setup-gate failure (assertion code in the payload) · 4 run-not-found ·
- * 5 refused before provisioning (payload code says which guard fired).
+ * teardown. The verb table, --help AND the per-verb flag grammar all render
+ * from src/fleet/verbs.ts's registry (AC6) — no second list lives here, and a
+ * flag the registry does not declare for a verb is refused, not ignored.
+ * Exit codes (this CLI's own table, F3): 0 success · 1 run/provider failure ·
+ * 2 usage/schema · 3 setup-gate failure (assertion code in the payload) ·
+ * 4 run-not-found · 5 refused before provisioning (payload code says which
+ * guard fired).
+ *
+ * stdout carries the command's OUTPUT only (ack JSON, status rows, the
+ * teardown lines); every diagnostic — error envelopes and the structured log
+ * — goes to stderr as JSON lines.
  *
  * Harvest/teardown are thin, guard-preserving front doors onto DF2.5
  * (AC5): verify-before-fetch, the refs/sandbox/ refspec and the fixed
  * teardown order all stay inside harvestRun/teardownSandbox; the per-run
  * invocation lock is shared with DF2.5's CLI (scripts/lib/run-lock.ts) so
- * both entry points enforce identical teardown safety semantics.
+ * both entry points enforce identical teardown safety semantics — acquire
+ * AND release, including release on SIGINT/SIGTERM.
  */
-import { writeSync } from "node:fs";
-import { readFileSync, rmSync, statSync } from "node:fs";
-
+import { readFileSync, statSync, writeSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 import {
   CostLedger,
+  DEFAULT_COST_CONFIG_FILE,
+  DEFAULT_COST_LEDGER_FILE,
+  loadCostConfig,
   getRecord,
   harvestRun,
   openRouterKeyApi,
@@ -32,26 +41,47 @@ import {
   type TeardownDeps,
 } from "../src/providers/index.ts";
 import { RunRecordStore } from "../src/providers/index.ts";
+import { RUN_ID_MAX, RUN_ID_RE } from "../src/providers/run-record.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
-import { acquireRunLock } from "./lib/run-lock.ts";
-import { setLogSink, newRequestId } from "../src/swarmclaw/log.ts";
-import { dispatch, FleetError, type DispatchDeps, type LedgerLike } from "../src/fleet/dispatch.ts";
-import { listVerbs, renderHelp } from "../src/fleet/verbs.ts";
+import { acquireRunLock, releaseRunLock } from "./lib/run-lock.ts";
+import { log, setLogSink, newRequestId } from "../src/swarmclaw/log.ts";
+import {
+  dispatch,
+  FleetError,
+  resolveBriefRequestId,
+  type DispatchDeps,
+  type LedgerLike,
+} from "../src/fleet/dispatch.ts";
+import { listVerbs, renderHelp, type VerbEntry } from "../src/fleet/verbs.ts";
 import { statusAll, statusRun } from "../src/fleet/status.ts";
 import type { KeyApi } from "../src/providers/credentials.ts";
+import type { ExitStatus } from "../cli-anything/src/types.ts";
 
 const HELP = renderHelp(listVerbs());
 
 /** Brief ingress cap (story Guards): 64 KiB from stdin or --brief <path>. */
 const MAX_BRIEF_BYTES = 64 * 1024;
 
-const VALUE_FLAGS = ["--driver", "--brief", "--dir"];
+const VALUE_FLAGS = ["--driver", "--brief", "--dir", "--port"];
 const BOOL_FLAGS = ["--no-harvest"];
 
-const RUN_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
-
-/** Injectable seams (repo DI idiom; tests override without module mocks). */
-export interface FleetDeps {
+/**
+ * Injectable seams (repo DI idiom; tests override without module mocks).
+ *
+ * Inherits DispatchDeps' optional seams instead of restating them — repoRoot,
+ * quotaLimits, clock, timeoutMs, dispatchLogPath, setupGate — so a seam added
+ * there is reachable through the CLI without a second edit here. The keys the
+ * CLI derives itself are omitted: driver/keyApi/store/ledgerFactory are
+ * re-declared as REQUIRED below, and requestId/port come from the brief and
+ * argv respectively.
+ *
+ * Every inherited seam is caller-only. `repoRoot` is INV-1's manifest
+ * containment root, so it is deliberately NOT a CLI flag: the operator-facing
+ * surface keeps defaulting to process.cwd(), and no brief- or argv-derived
+ * value may ever reach it.
+ */
+export interface FleetDeps
+  extends Omit<DispatchDeps, "driver" | "keyApi" | "store" | "ledgerFactory" | "requestId" | "port"> {
   driver: ProviderDriver;
   keyApi: KeyApi;
   store: RunRecordStore;
@@ -59,211 +89,425 @@ export interface FleetDeps {
   readBrief: () => Promise<string>;
 }
 
-function usage(out: (s: string) => void): number {
-  out(HELP);
-  out("\n");
-  return 0;
+/** Every refusal is a FleetError so ONE renderer owns the envelope + exit code. */
+function usageError(message: string, remediation: string): FleetError {
+  return new FleetError(2, "usage", message, remediation);
 }
 
-function printError(out: (s: string) => void, code: string, message: string, remediation?: string): void {
-  const payload: Record<string, unknown> = { code, message };
-  if (remediation !== undefined) payload.remediation = remediation;
-  out(`${JSON.stringify(payload)}\n`);
+/**
+ * `--dir` moves the whole `.sandbox/` set together. The ledger and the cost
+ * config are SIBLINGS of the records directory, so without this a --dir-scoped
+ * run reserved its budget against one ledger at dispatch and settled its box
+ * hours against another at teardown — whichever the operator's cwd happened to
+ * name. Both call sites resolve through here so the two halves of a run's
+ * money can never land in different files.
+ *
+ * The store's own resolution, one level up from store.dir, exactly as runsDir
+ * is derived. With no --dir nothing is passed: CostLedger's env tier
+ * ($QDS_COST_LEDGER_FILE / $QDS_COST_CONFIG_FILE) and its cwd-relative
+ * defaults stand unchanged, so a default install looks where it always did.
+ */
+function costLedgerOpts(dir: string | undefined, storeDir: string) {
+  if (dir === undefined) return {};
+  const sandboxDir = dirname(storeDir);
+  return {
+    path: join(sandboxDir, basename(DEFAULT_COST_LEDGER_FILE)),
+    // An absent cost-config.json under --dir falls back to DEFAULT_COST_CONFIG
+    // (loadCostConfig maps ENOENT to defaults); an unreadable one still throws.
+    config: loadCostConfig(join(sandboxDir, basename(DEFAULT_COST_CONFIG_FILE))).config,
+  };
+}
+
+/**
+ * NO verb defaults to a driver. `fleet teardown <id>` with no --driver used to
+ * "destroy" a FAKE box, print `torn down`, exit 0 and close the record while
+ * the real box kept billing; `fleet dispatch` minted a fake run a CI script
+ * believed it had provisioned. An injected driver (tests, embedders) is an
+ * explicit choice already, so it satisfies the requirement without the flag.
+ */
+function assertDriverChosen(verb: string, driverName: string | undefined, injected: ProviderDriver | undefined): void {
+  if (driverName !== undefined || injected !== undefined) return;
+  throw usageError(
+    `${verb} requires --driver <name>`,
+    "pass --driver fake for a local dry run, or the provider driver to act on the real fleet",
+  );
+}
+
+/**
+ * One JSON line per refusal. The envelope fields are written LAST so a typed
+ * payload (assertionCode, DF2.8 fields, reason…) can never overwrite the
+ * `code`/`message` the caller switches on.
+ */
+function printError(
+  err: (s: string) => void,
+  code: string,
+  message: string,
+  remediation?: string,
+  payload?: Record<string, unknown>,
+): void {
+  const line: Record<string, unknown> = { ...(payload ?? {}), code, message };
+  if (remediation !== undefined) line.remediation = remediation;
+  err(`${JSON.stringify(line)}\n`);
+}
+
+/** Render any throw as the envelope + this CLI's exit code. */
+function report(err: (s: string) => void, e: unknown): number {
+  if (e instanceof FleetError) {
+    printError(err, e.code, e.message, e.remediation, e.payload);
+    return e.exitCode;
+  }
+  // Non-Error rejections normalize to {} so the printer cannot itself throw
+  // while reporting one.
+  const x = (e ?? {}) as { code?: string; message?: string; remediation?: string };
+  printError(err, x.code ?? "error", x.message ?? String(e), x.remediation);
+  return 1;
+}
+
+interface Parsed {
+  entry: VerbEntry;
+  positionals: string[];
+  flags: Map<string, string>;
+  bools: Set<string>;
+}
+
+/**
+ * argv → verb + validated flags. Every parser failure becomes a usage
+ * FleetError (exit 2 with an envelope) rather than escaping run() as a bare
+ * throw the top-level catch turns into a silent exit 1.
+ */
+function parseArgv(argv: readonly string[]): Parsed {
+  let tokens: ReturnType<typeof tokenizeArgs>;
+  try {
+    tokens = tokenizeArgs(argv, {
+      valueFlags: VALUE_FLAGS,
+      boolFlags: BOOL_FLAGS,
+      rejectStraySingleDash: true,
+    });
+  } catch (e) {
+    throw usageError((e as Error).message, HELP);
+  }
+  const { positionals, flagTokens, bools } = tokens;
+  const verb = positionals[0];
+  // A bare `fleet` is a mistyped invocation, not a help request: the exit
+  // table says usage = 2, and `fleet --help` is the way to ask for help.
+  if (verb === undefined) throw usageError("no verb given", HELP);
+
+  const flags = new Map<string, string>();
+  try {
+    parseValueFlags(flagTokens, {
+      flags: VALUE_FLAGS,
+      onValue: (flag, value) => {
+        // Last-win silently discards the first value — for `--dir` that means
+        // acting on a different runs directory than the one the operator saw
+        // themselves type. Refuse instead.
+        if (flags.has(flag)) throw new Error(`${flag} given more than once`);
+        flags.set(flag, value);
+      },
+      help: [HELP],
+    });
+  } catch (e) {
+    throw usageError((e as Error).message, HELP);
+  }
+
+  const entry = listVerbs().find((v) => v.verb === verb);
+  if (entry === undefined) {
+    throw new FleetError(2, "unknown-verb", `unknown verb ${JSON.stringify(verb)}`, HELP);
+  }
+  // AC6 parity in BOTH directions: the registry says which flags a verb takes,
+  // so `fleet status --brief x` is refused rather than silently accepted.
+  const allowed = new Set(entry.flags.map((f) => f.name));
+  for (const flag of [...flags.keys(), ...bools]) {
+    if (!allowed.has(flag)) {
+      const list = [...allowed].join(" ");
+      throw usageError(`${verb} does not take ${flag}`, `flags for ${verb}: ${list === "" ? "(none)" : list}`);
+    }
+  }
+  return { entry, positionals, flags, bools };
+}
+
+/** Read stdin, refusing AS IT STREAMS — buffering first turns `yes |` into an OOM. */
+async function readCappedStdin(): Promise<string> {
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  for await (const chunk of Bun.stdin.stream()) {
+    bytes += chunk.byteLength;
+    if (bytes > MAX_BRIEF_BYTES) {
+      throw new FleetError(
+        2,
+        "brief-too-large",
+        `brief exceeds the ${MAX_BRIEF_BYTES} byte cap`,
+        "trim the brief or split payload out of it",
+      );
+    }
+    chunks.push(chunk);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+
+/** `--brief <path>`: a regular file, under the cap, with the errno named. */
+function readBriefFile(briefPath: string): string {
+  const unreadable = (why: string): FleetError =>
+    new FleetError(
+      2,
+      "brief-unreadable",
+      `cannot read --brief ${briefPath}: ${why}`,
+      "point --brief at a readable regular JSON file",
+    );
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(briefPath);
+  } catch (e) {
+    // ENOENT / EACCES / ELOOP are not "invalid JSON" — the file was never read.
+    throw unreadable((e as NodeJS.ErrnoException).code ?? (e as Error).message);
+  }
+  // A directory, /dev/zero or a FIFO all report size 0: the cap would be
+  // vacuous and the read unbounded. Only a regular file has a size worth
+  // trusting, and only a regular file can be refused before it is opened.
+  if (!st.isFile()) throw unreadable("not a regular file");
+  if (st.size > MAX_BRIEF_BYTES) {
+    throw new FleetError(
+      2,
+      "brief-too-large",
+      `brief is ${st.size} bytes; the cap is ${MAX_BRIEF_BYTES}`,
+      "trim the brief or split payload out of it",
+    );
+  }
+  try {
+    return readFileSync(briefPath, "utf8");
+  } catch (e) {
+    throw unreadable((e as NodeJS.ErrnoException).code ?? (e as Error).message);
+  }
+}
+
+/**
+ * Every verb logs one structured line (CC-9 observability contract):
+ * {requestId, runId, verb, phase, timestamp, durationMs, exitStatus}.
+ */
+function logVerb(requestId: string, verb: string, runId: string | undefined, startedAt: number, code: number): number {
+  const durationMs = Date.now() - startedAt;
+  log({
+    requestId,
+    operation: `fleet.${verb}`,
+    agentId: null,
+    timestamp: new Date().toISOString(),
+    duration: durationMs,
+    durationMs,
+    status: code === 0 ? "ok" : "error",
+    runId: runId ?? null,
+    verb,
+    phase: "complete",
+    exitCode: code,
+    exitStatus: (code === 0 ? "success" : "logic") as ExitStatus,
+  });
+  return code;
 }
 
 export async function run(
   argv: readonly string[],
   out: (s: string) => void,
   deps?: Partial<FleetDeps>,
+  /**
+   * Diagnostics sink. Defaults to `out` so a caller that captures one stream
+   * still sees everything; `import.meta.main` binds it to stderr, which is
+   * what keeps stdout pure output.
+   */
+  err: (s: string) => void = out,
 ): Promise<number> {
-  const { positionals, flagTokens, bools } = tokenizeArgs(argv, {
-    valueFlags: VALUE_FLAGS,
-    boolFlags: BOOL_FLAGS,
-    rejectStraySingleDash: true,
-  });
+  const startedAt = Date.now();
+  // Help wins over every other reading of argv, so `fleet <verb> --help`
+  // (which renderHelp advertises) answers with usage instead of a refusal.
+  if (argv[0] === "help" || argv.includes("--help") || argv.includes("-h")) {
+    out(`${HELP}\n`);
+    return 0;
+  }
 
-  const verb = positionals[0];
-  if (verb === undefined) return usage(out);
-
-  let driverName = "fake";
-  let briefPath: string | undefined;
-  let dir: string | undefined;
-  parseValueFlags(flagTokens, {
-    flags: VALUE_FLAGS,
-    onValue: (flag, value) => {
-      if (flag === "--driver") driverName = value;
-      else if (flag === "--brief") briefPath = value;
-      else if (flag === "--dir") dir = value;
-    },
-    help: [HELP],
-  });
-
-  const requestId = newRequestId();
+  let parsed: Parsed;
+  try {
+    parsed = parseArgv(argv);
+  } catch (e) {
+    return report(err, e);
+  }
+  const { entry, positionals, flags, bools } = parsed;
+  const verb = entry.verb;
+  const briefPath = flags.get("--brief");
+  const dir = flags.get("--dir");
+  const storeOpts = { ...(dir === undefined ? {} : { dir }) };
 
   // ── dispatch ────────────────────────────────────────────────────────────────
   if (verb === "dispatch") {
-    if (positionals.length > 1) {
-      printError(out, "usage", "dispatch takes no positional arguments", "pass the brief on stdin or via --brief <path>");
-      return 2;
-    }
-    const readBrief: () => Promise<string> =
-      deps?.readBrief ??
-      (async () => {
-        const raw =
-          briefPath === undefined
-            ? await Bun.stdin.text()
-            : (() => {
-                // stat, not read-then-measure: the cap is on bytes, and a
-                // path-sourced brief is refused before it is ever parsed.
-                const size = statSync(briefPath).size;
-                if (size > MAX_BRIEF_BYTES) {
-                  throw new FleetError(
-                    2,
-                    "brief-too-large",
-                    `brief is ${size} bytes; the cap is ${MAX_BRIEF_BYTES}`,
-                    "trim the brief or split payload out of it",
-                  );
-                }
-                return readFileSync(briefPath, "utf8");
-              })();
-        if (raw.length > MAX_BRIEF_BYTES) {
-          throw new FleetError(
-            2,
-            "brief-too-large",
-            `brief is ${raw.length} bytes; the cap is ${MAX_BRIEF_BYTES}`,
-            "trim the brief or split payload out of it",
-          );
-        }
-        return raw;
-      });
-
-    let briefJson: unknown;
     try {
+      if (positionals.length > 1) {
+        throw usageError("dispatch takes no positional arguments", "pass the brief on stdin or via --brief <path>");
+      }
+      // Refused before the brief is read: a missing --driver must not make the
+      // operator pipe a brief in only to be told the invocation was never valid.
+      const driverName = flags.get("--driver");
+      assertDriverChosen("dispatch", driverName, deps?.driver);
+      const portRaw = flags.get("--port");
+      let port: number | undefined;
+      if (portRaw !== undefined) {
+        port = Number(portRaw);
+        if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+          throw usageError(`--port ${JSON.stringify(portRaw)} is not a TCP port`, "--port takes an integer 1-65535");
+        }
+      }
+
+      // INV-2: the brief is read and parsed — both side-effect free — before
+      // anything is constructed. `new RunRecordStore` mkdirs and chmods the
+      // records directory, which is a side effect an invalid brief must not
+      // cause.
+      const readBrief: () => Promise<string> =
+        deps?.readBrief ??
+        (async () => {
+          if (briefPath !== undefined) return readBriefFile(briefPath);
+          // No prompt, no timeout: a TTY here means the operator typed `fleet
+          // dispatch` and would wait forever for a pipe that never arrives.
+          if (process.stdin.isTTY) {
+            throw usageError("no brief on stdin", "pipe the brief JSON in, or pass --brief <path>");
+          }
+          return readCappedStdin();
+        });
+
+      let briefJson: unknown;
       const rawBrief = await readBrief();
-      // 64 KiB cap on the INGRESS text whichever source produced it (stdin,
-      // --brief path, or an injected test seam).
-      if (rawBrief.length > MAX_BRIEF_BYTES) {
-        printError(
-          out,
+      // The cap is on BYTES whichever source produced the text — `.length`
+      // counts UTF-16 code units, which under-measures every non-ASCII brief.
+      const briefBytes = Buffer.byteLength(rawBrief, "utf8");
+      if (briefBytes > MAX_BRIEF_BYTES) {
+        throw new FleetError(
+          2,
           "brief-too-large",
-          `brief is ${rawBrief.length} bytes; the cap is ${MAX_BRIEF_BYTES}`,
+          `brief is ${briefBytes} bytes; the cap is ${MAX_BRIEF_BYTES}`,
           "trim the brief or split payload out of it",
         );
-        return 2;
       }
-      briefJson = JSON.parse(rawBrief);
-    } catch (e) {
-      // readBrief's own guard throws FleetError (brief-too-large) before any
-      // parsing happens — re-emit it as itself, never as a JSON parse error.
-      if (e instanceof FleetError) {
-        printError(out, e.code, e.message, e.remediation);
-        return e.exitCode;
+      try {
+        briefJson = JSON.parse(rawBrief);
+      } catch (e) {
+        throw new FleetError(
+          2,
+          "invalid-brief",
+          `brief is not valid JSON: ${(e as Error).message}`,
+          "fix the JSON on stdin or in --brief <path>",
+        );
       }
-      printError(out, "invalid-brief", `brief is not valid JSON: ${(e as Error).message}`, "fix the JSON on stdin or in --brief <path>");
-      return 2;
-    }
 
-    const driver = deps?.driver ?? resolveDriver(driverName, { requestId });
-    const store = deps?.store ?? new RunRecordStore({ ...(dir === undefined ? {} : { dir }), requestId });
-    const ledgerFactory =
-      deps?.ledgerFactory ??
-      ((): LedgerLike => {
-        // Mirrors createRun's wiring: only a genuine missing record reads as
-        // undefined; every other read failure refuses the dispatch.
-        const ledger = new CostLedger({
-          readRunRecord: (id: string) => {
-            try {
-              return store.get(id);
-            } catch (e) {
-              if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-              throw e;
-            }
-          },
+      // INV-4-bis: the brief owns the correlation id. Minting one here and
+      // letting dispatch() resolve a different one from the brief breaks the
+      // join key between the CLI's records/driver logs and the run's own.
+      const requestId = resolveBriefRequestId(briefJson) ?? newRequestId();
+      const driver = deps?.driver ?? resolveDriver(driverName as string, { requestId });
+      const store = deps?.store ?? new RunRecordStore({ ...storeOpts, requestId });
+      const ledgerFactory =
+        deps?.ledgerFactory ??
+        ((): LedgerLike => {
+          // Mirrors createRun's wiring: only a genuine missing record reads as
+          // undefined; every other read failure refuses the dispatch.
+          const ledger = new CostLedger({
+            ...costLedgerOpts(dir, store.dir),
+            readRunRecord: (id: string) => {
+              try {
+                return store.get(id);
+              } catch (e) {
+                if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+                throw e;
+              }
+            },
+          });
+          return ledger as unknown as LedgerLike;
         });
-        return ledger as unknown as LedgerLike;
-      });
-    const dispatchDeps: DispatchDeps = {
-      driver,
-      keyApi: deps?.keyApi ?? openRouterKeyApi(),
-      store,
-      ledgerFactory,
-    };
+      // `readBrief` is the CLI's own seam; everything left is a DispatchDeps
+      // seam forwarded verbatim, so one added there is never silently dropped.
+      // The explicit keys below win over the spread.
+      const { readBrief: _readBrief, ...seams } = deps ?? {};
+      const dispatchDeps: DispatchDeps = {
+        ...seams,
+        driver,
+        keyApi: deps?.keyApi ?? openRouterKeyApi(),
+        store,
+        ledgerFactory,
+        requestId,
+        ...(port === undefined ? {} : { port }),
+      };
 
-    try {
       const ack = await dispatch(briefJson, dispatchDeps);
       out(`${JSON.stringify(ack)}\n`);
       return 0;
     } catch (e) {
-      if (e instanceof FleetError) {
-        // One JSON line: the error envelope merged with the typed payload
-        // (assertionCode, DF2.8 fields, reason…) — never two.
-        const payload: Record<string, unknown> = { code: e.code, message: e.message, remediation: e.remediation, ...(e.payload ?? {}) };
-        out(`${JSON.stringify(payload)}\n`);
-        return e.exitCode;
-      }
-      const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
-      printError(out, err.code ?? "error", err.message ?? String(e), err.remediation);
-      return 1;
+      // resolveDriver, RunRecordStore and openRouterKeyApi throw typed errors
+      // with their own remediation; constructing them inside the try is what
+      // keeps that fidelity in the envelope instead of a bare exit 1.
+      return report(err, e);
     }
   }
 
   // status / harvest / teardown all take an optional-or-required runId.
   const runIdArg = positionals[1];
+  const driverName = flags.get("--driver");
+  const requestId = newRequestId();
 
   // ── status ──────────────────────────────────────────────────────────────────
   if (verb === "status") {
-    if (positionals.length > 2) {
-      printError(out, "usage", "status takes at most one <run-id>", "fleet status [run-id]");
-      return 2;
-    }
-    const driver = deps?.driver ?? resolveDriver(driverName, { requestId });
-    const store = deps?.store ?? new RunRecordStore({ ...(dir === undefined ? {} : { dir }), requestId });
-    const statusDeps = { driver, store };
     try {
+      if (positionals.length > 2) {
+        throw usageError("status takes at most one <run-id>", "fleet status [run-id]");
+      }
+      // The same grammar harvest/teardown enforce: an over-long or malformed
+      // id must not reach the store as an untyped path error.
+      if (runIdArg !== undefined) assertRunId(runIdArg);
+      assertDriverChosen("status", driverName, deps?.driver);
+      const driver = deps?.driver ?? resolveDriver(driverName as string, { requestId });
+      const store = deps?.store ?? new RunRecordStore({ ...storeOpts, requestId });
+      const statusDeps = { driver, store };
       const rows = runIdArg === undefined ? await statusAll(statusDeps) : [await statusRun(statusDeps, runIdArg)];
       for (const row of rows) out(`${JSON.stringify(row)}\n`);
-      return 0; // no runs is a state, not an error (AC4)
+      return logVerb(requestId, verb, runIdArg, startedAt, 0); // no runs is a state, not an error (AC4)
     } catch (e) {
-      if (e instanceof FleetError) {
-        printError(out, e.code, e.message, e.remediation);
-        return e.exitCode;
-      }
-      const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
-      printError(out, err.code ?? "error", err.message ?? String(e), err.remediation);
-      return 1;
+      return logVerb(requestId, verb, runIdArg, startedAt, report(err, e));
     }
   }
 
   // ── harvest / teardown (AC5: thin front doors onto DF2.5, guards intact) ──
-  if (verb === "harvest" || verb === "teardown") {
+  let lock: string | undefined;
+  let ledger: CostLedger | undefined;
+  // Assigned on every path, then possibly downgraded by the finally: a release
+  // failure leaves the run locked against every later harvest/teardown while
+  // the box and the key stay live, and `return 0` inside the try would have
+  // committed the exit code before the cleanup could say so.
+  let code: number;
+  try {
+    if (positionals.length > 2) {
+      throw usageError(`${verb} takes exactly one <run-id>`, `fleet ${verb} <run-id>`);
+    }
     if (runIdArg === undefined) {
-      printError(out, "usage", `${verb} requires <run-id>\n${HELP}`, `fleet ${verb} <run-id>`);
-      return 2;
+      throw usageError(`${verb} requires <run-id>`, `fleet ${verb} <run-id>`);
     }
-    if (!RUN_ID_RE.test(runIdArg)) {
-      printError(out, "invalid-run-id", `invalid run-id: ${JSON.stringify(runIdArg)}`, "run ids match the hostname grammar [a-z0-9][a-z0-9-]*");
-      return 2;
-    }
-    const noHarvest = bools.has("--no-harvest");
-    if (verb === "harvest" && noHarvest) {
-      printError(out, "usage", "harvest has no harvest gate to waive: --no-harvest is a teardown flag");
-      return 2;
-    }
+    assertRunId(runIdArg);
+    // Before the lock and before the record read: a refusal here has mutated
+    // nothing, so there is no lock to release and no box left half-torn-down.
+    assertDriverChosen(verb, driverName, deps?.driver);
 
-    const driver = deps?.driver ?? resolveDriver(driverName, { requestId, runId: runIdArg });
-    const store = deps?.store ?? new RunRecordStore({ ...(dir === undefined ? {} : { dir }), requestId });
+    const driver = deps?.driver ?? resolveDriver(driverName as string, { requestId, runId: runIdArg });
+    const store = deps?.store ?? new RunRecordStore({ ...storeOpts, requestId });
+    // The lock comes BEFORE the record read: reading first is a check-then-act
+    // across the lock boundary — a concurrent teardown closes the run and
+    // revokes its key while we hold a record that still names the keyHash.
+    lock = acquireRunLock(store.dir, runIdArg);
 
     let rec: RunRecord;
     try {
       rec = getRecord({ store }, runIdArg);
     } catch (e) {
-      const err = e as HarvestError;
-      if (err.code === "no-record") {
-        printError(out, "run-not-found", `no run record for ${runIdArg}`, "check the id (fleet status) — nothing was mutated");
-        return 4;
+      const err2 = e as HarvestError;
+      if (err2.code === "no-record") {
+        throw new FleetError(
+          4,
+          "run-not-found",
+          `no run record for ${runIdArg}`,
+          "check the id (fleet status) — nothing was mutated",
+        );
       }
-      printError(out, err.code ?? "record-read-failed", err.message ?? String(e), err.remediation);
-      return 1;
+      throw e;
     }
 
     const tdeps: TeardownDeps = {
@@ -271,20 +515,20 @@ export async function run(
       store,
       requestId,
       gitCwd: process.cwd(),
-      ...(dir === undefined ? {} : { runsDir: dir }),
+      // The store's own resolution, not a second copy of the same `?? env ??
+      // default` chain: the lock guards `<store.dir>/<runId>.lock`, so the
+      // bundle/artifact paths must be under exactly that directory.
+      runsDir: store.dir,
     };
-    let lock: string | undefined;
-    let ledger: CostLedger | undefined;
-    try {
-      lock = acquireRunLock(store.dir, runIdArg);
-      if (verb === "harvest") {
-        // D8: harvest is credential-free — no keyApi is built.
-        const res = await harvestRun(tdeps, runIdArg);
-        out(res.outcome === "harvested" ? `harvested: ${res.count}\n` : "harvested: none\n");
-        return 0;
-      }
+    if (verb === "harvest") {
+      // D8: harvest is credential-free — no keyApi is built.
+      const res = await harvestRun(tdeps, runIdArg);
+      out(res.outcome === "harvested" ? `harvested: ${res.count}\n` : "harvested: none\n");
+      code = 0;
+    } else {
       if (rec.keyHash !== undefined) tdeps.keyApi = deps?.keyApi ?? openRouterKeyApi();
       ledger = new CostLedger({
+        ...costLedgerOpts(dir, store.dir),
         readRunRecord: (id: string) => {
           try {
             const r = getRecord({ store }, id);
@@ -296,50 +540,85 @@ export async function run(
         },
       });
       tdeps.costLedger = ledger;
-      if (noHarvest) out(`teardown.harvest_waived ${runIdArg}\n`);
+      const noHarvest = bools.has("--no-harvest");
       await teardownSandbox(tdeps, runIdArg, { noHarvest });
+      // Reported AFTER the teardown ran: printed first, it claims a waiver for
+      // a teardown that may never have happened.
+      if (noHarvest) out(`teardown.harvest_waived ${runIdArg}\n`);
       out(`torn down: ${runIdArg}\n`);
-      return 0;
-    } catch (e) {
-      const err = (e ?? {}) as { code?: string; remediation?: string; message?: string };
-      printError(out, err.code ?? "error", err.message ?? String(e), err.remediation);
-      return 1;
-    } finally {
-      if (ledger !== undefined) {
-        try {
-          ledger.close();
-        } catch (e) {
-          printError(out, "ledger-close-failed", `could not close the cost ledger: ${(e as Error).message}`, "the handle dies with the process; re-run to confirm it still reads");
-        }
+      code = 0;
+    }
+  } catch (e) {
+    code = report(err, e);
+  } finally {
+    if (ledger !== undefined) {
+      try {
+        ledger.close();
+      } catch (e) {
+        printError(
+          err,
+          "ledger-close-failed",
+          `could not close the cost ledger: ${(e as Error).message}`,
+          "the handle dies with the process; re-run to confirm it still reads",
+        );
       }
-      if (lock !== undefined) {
-        try {
-          rmSync(lock, { force: true });
-        } catch (e) {
-          printError(
-            out,
-            "lock-release-failed",
-            `could not release ${lock}: ${(e as Error).message}`,
-            `rm ${lock} by hand once no other invocation holds it`,
-          );
-        }
+    }
+    // releaseRunLock re-reads the body and unlinks it only while it is still
+    // this invocation's claim, so a refused invocation — or one whose lock was
+    // cleared and re-taken — never unlinks a live holder's file.
+    if (lock !== undefined) {
+      try {
+        releaseRunLock(lock);
+      } catch (e) {
+        printError(
+          err,
+          "lock-release-failed",
+          `could not release ${lock}: ${(e as Error).message}`,
+          `rm ${lock} by hand once no other invocation holds it — until then every later harvest or teardown of this run refuses`,
+        );
+        code = 1;
       }
     }
   }
+  return logVerb(requestId, verb, runIdArg, startedAt, code);
+}
 
-  printError(out, "unknown-verb", `unknown verb ${JSON.stringify(verb)}`, HELP);
-  return 2;
+/** The store's grammar, not a third copy of it (63-char cap included). */
+function assertRunId(runId: string): void {
+  if (runId.length > RUN_ID_MAX || !RUN_ID_RE.test(runId)) {
+    throw new FleetError(
+      2,
+      "invalid-run-id",
+      `invalid run-id: ${JSON.stringify(runId)}`,
+      `run ids match ${RUN_ID_RE.source} and are at most ${RUN_ID_MAX} chars`,
+    );
+  }
+}
+
+/** writeSync can write short; a truncated ack is worse than a slow one. */
+function writeAll(fd: number, s: string): void {
+  const buf = Buffer.from(s, "utf8");
+  let off = 0;
+  while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off);
 }
 
 if (import.meta.main) {
   try {
     // stdout = output only; diagnostics stream as JSON lines on stderr.
     setLogSink((entry) => {
-      process.stderr.write(`${JSON.stringify(entry)}\n`);
+      writeAll(2, `${JSON.stringify(entry)}\n`);
     });
-    process.exit(await run(process.argv.slice(2), (s) => writeSync(1, s)));
+    process.exit(
+      await run(
+        process.argv.slice(2),
+        (s) => writeAll(1, s),
+        undefined,
+        (s) => writeAll(2, s),
+      ),
+    );
   } catch (e) {
-    writeSync(2, `${(e as Error).message}\n`);
+    // A non-Error throw printed `undefined` and told the operator nothing.
+    writeAll(2, `${(e as Error)?.message ?? String(e)}\n`);
     process.exit(1);
   }
 }

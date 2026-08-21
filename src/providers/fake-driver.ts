@@ -22,10 +22,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { ExecResult, ProviderDriver, ProviderVm } from "./driver.ts";
-import { assertValidRunId } from "./run-record.ts";
-
-/** The box-name grammar, mirrored from the run-id grammar `boxDir` enforces. */
-const RUN_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+import { assertValidRunId, RUN_ID_MAX, RUN_ID_RE } from "./run-record.ts";
 
 export const DEFAULT_FAKE_BOXES_DIR = ".sandbox/fake-boxes";
 
@@ -110,8 +107,11 @@ export class FakeDriver implements ProviderDriver {
       if (!statSync(join(this.root, entry)).isDirectory()) continue;
       // A name outside the hostname grammar cannot be a box this driver made,
       // and reporting it would abort reap: `destroy` re-validates and throws, so
-      // one stray directory would stop the fleet-wide reaper.
-      if (!RUN_ID_RE.test(entry) || entry.length > 63) continue;
+      // one stray directory would stop the fleet-wide reaper. The canonical
+      // constants, never a local copy — the filter has to admit exactly what
+      // `assertValidRunId` admits, and a copy that drifts looser lists a name
+      // destroy then refuses, which is the reaper outage this guard prevents.
+      if (!RUN_ID_RE.test(entry) || entry.length > RUN_ID_MAX) continue;
       let meta: BoxMeta;
       try {
         meta = this.readMeta(entry);

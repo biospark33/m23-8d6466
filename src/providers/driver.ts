@@ -15,6 +15,7 @@
  */
 
 import type { RunRecord, RunRecordStore } from "./run-record.ts";
+import { assertValidRunId } from "./run-record.ts";
 import { checkHeadroom, HeadroomRefusedError, loadQuotaLimits } from "./quota.ts";
 import { CostLedger } from "./cost-ledger.ts";
 import { assertWithinBudget } from "./budget-gate.ts";
@@ -133,57 +134,118 @@ export interface ProvisionedRun {
 
 /**
  * The post-admission provisioning sequence — INV-1's single owner: **record →
- * VM → key**.
+ * VM**. (No key is minted here: DF2.3's credential delivery is a separate
+ * step the callers run after this returns, so "record before anything
+ * billable" is the whole of what this function owns.)
  *
  * The run record is written to the host before any driver call that can create
  * billable infrastructure, and `driver.create()` is unreachable from here
  * without an open record id. A failed create therefore orphans nothing worse
  * than an open record; a crash after it leaves teardown a handle. The reverse
- * ordering — VM or key first — is the defect this invariant exists to prevent
- * (a failed VM after a mint orphans a key that spends money invisibly).
+ * ordering — VM first — is the defect this invariant exists to prevent (a
+ * failed VM after a mint orphans a key that spends money invisibly).
  *
- * `createRun` (below) and the fleet dispatcher (`src/fleet/dispatch.ts`) both
- * compose this function after their own admission gates, so the record-before-
- * VM invariant has exactly one implementation to change.
+ * **Admission is the CALLER's responsibility.** This function runs no headroom
+ * gate, no budget gate and no fleet-side rate check — deliberately, because
+ * each caller owns a different one: `createRun` (below) runs the DF2.6
+ * headroom check plus the DF2.8 budget gate, and the fleet dispatcher
+ * (`src/fleet/dispatch.ts`) runs its own admission before it calls here. Both
+ * compose this function *after* their gates, so the record-before-VM
+ * invariant has exactly one implementation to change. The only gate here is
+ * the run-id and port grammar, which every path needs regardless.
  */
 export async function provisionAdmittedRun(
   driver: ProviderDriver,
   store: RunRecordStore,
   opts: { runId: string; port?: number; budget?: AdmittedBudget },
 ): Promise<ProvisionedRun> {
+  // Before the record exists: the id becomes both the filename and the box
+  // name, so a malformed one must never reach either. `store.create` would
+  // catch it too, but this is exported public API — refuse at the boundary.
+  assertValidRunId(opts.runId);
+  // `!== undefined` alone admits `0`, which is not a port but is persisted as
+  // one; expose it and the record carries a `ports: [0]` no verb can act on.
+  if (
+    opts.port !== undefined &&
+    (!Number.isInteger(opts.port) || opts.port < 1 || opts.port > 65_535)
+  ) {
+    throw new Error(`invalid port: ${JSON.stringify(opts.port)} (must be an integer 1-65535)`);
+  }
   // Record first. If this throws (EEXIST, bad id) no box is ever created.
   store.create(opts.runId);
   if (opts.budget !== undefined) {
-    store.set(opts.runId, {
-      extensions: {
-        budget: {
-          repoSlug: opts.budget.repoSlug,
-          issueId: opts.budget.issueId,
-          capMicroUsd: opts.budget.capMicroUsd,
-          spentMicroUsd: opts.budget.spentMicroUsd,
-          reservedMicroUsd: opts.budget.reservedMicroUsd,
-          admittedCeilingMicroUsd: opts.budget.admittedCeilingMicroUsd,
+    // The store writes one field set per call, so the cap cannot land in the
+    // same write as the record itself. If it fails, close the record rather
+    // than hand the caller an open run with no cap on it — nothing billable
+    // exists yet, so closing costs nothing and keeps the ledger's
+    // orphan-admission expiry from counting a reservation forever.
+    // ponytail: residual window is a crash between the two writes, which
+    // leaves an open capless record; the DF2.6 reaper still reclaims its box
+    // (there is none yet) and the gate's expiry releases the reservation.
+    try {
+      store.set(opts.runId, {
+        extensions: {
+          budget: {
+            repoSlug: opts.budget.repoSlug,
+            issueId: opts.budget.issueId,
+            capMicroUsd: opts.budget.capMicroUsd,
+            spentMicroUsd: opts.budget.spentMicroUsd,
+            reservedMicroUsd: opts.budget.reservedMicroUsd,
+            admittedCeilingMicroUsd: opts.budget.admittedCeilingMicroUsd,
+          },
         },
-      },
-    });
+      });
+    } catch (e) {
+      closeQuietly(store, opts.runId);
+      throw e;
+    }
   }
   // D1: every factory-provisioned VM carries the canonical ownership tag —
   // not caller-displaceable. A custom tag would make a factory box classify
   // `foreign` in the DF2.6 reaper (tag !== SBX_OWNERSHIP_TAG ⇒ reported,
   // never destroyed), i.e. an unreapable leak by construction. Callers with
   // extra metadata to attach belong in the run record, not the VM tag.
-  const vm = await driver.create(opts.runId, SBX_OWNERSHIP_TAG);
+  let vm: ProviderVm;
+  try {
+    vm = await driver.create(opts.runId, SBX_OWNERSHIP_TAG);
+  } catch (e) {
+    // An open record with no vmName is claimed by `reapRuns` under its runId
+    // forever: if the create actually stood a box up before failing, that
+    // claim is what stops the reaper reclaiming it. Closing hands the reaper
+    // the handle instead of leaking the record and the box together. We do
+    // NOT destroy here — reclamation is DF2.6's, and a destroy on this path
+    // would race the very create that just failed.
+    closeQuietly(store, opts.runId);
+    throw e;
+  }
+  // vmName BEFORE expose/setPublic. Both can throw against a box that is
+  // already live and already billing; until the name is on the record the
+  // only handle to it is `teardownRun`'s runId fallback, which holds only
+  // while the box happens to be named after the run.
+  let record = store.set(opts.runId, {
+    vmName: vm.name,
+    ...(vm.httpsUrl === undefined ? {} : { httpsUrl: vm.httpsUrl }),
+  });
   let httpsUrl = vm.httpsUrl;
   if (opts.port !== undefined) {
     httpsUrl = await driver.expose(vm.name, opts.port);
     await driver.setPublic(vm.name);
+    record = store.set(opts.runId, { httpsUrl, ports: [opts.port] });
   }
-  const record = store.set(opts.runId, {
-    vmName: vm.name,
-    ...(httpsUrl === undefined ? {} : { httpsUrl }),
-    ...(opts.port === undefined ? {} : { ports: [opts.port] }),
-  });
   return { record, vm, ...(httpsUrl === undefined ? {} : { httpsUrl }) };
+}
+
+/**
+ * Close a record on a provisioning failure path. The close is best-effort by
+ * construction: its failure must never mask the error that triggered it, and
+ * the record it could not close is exactly the one `reapRuns` reports.
+ */
+function closeQuietly(store: RunRecordStore, runId: string): void {
+  try {
+    store.close(runId);
+  } catch {
+    // Deliberately swallowed — see above.
+  }
 }
 
 /**

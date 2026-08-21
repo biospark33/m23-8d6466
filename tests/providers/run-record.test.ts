@@ -435,7 +435,7 @@ describe("list (AC3, INV-4)", () => {
 // ---------------------------------------------------------------------------
 
 describe("id validation (AC6)", () => {
-  const bad = ["../evil", "A-b", "a".repeat(64), "-lead", "", "run_id", "run/id", "run.id"];
+  const bad = ["../evil", "A-b", "a".repeat(64), "-lead", "", "run_id", "run/id", "run.id", "trailing-", "a--"];
 
   test("path() refuses every illegal id", () => {
     for (const id of bad) expect(() => store.path(id)).toThrow(/invalid run id/);
@@ -455,6 +455,23 @@ describe("id validation (AC6)", () => {
     const ok = "a".repeat(63);
     expect(() => assertValidRunId(ok)).not.toThrow();
     expect(() => assertValidRunId(`${ok}a`)).toThrow(/invalid run id/);
+  });
+
+  test("the hyphen rule is the RFC 1123 one: interior only, never either end", () => {
+    // A trailing hyphen is not a hostname label, so a box can never be named
+    // it. Refusing only the LEADING one deferred that to the provider — after
+    // a record existed. Both ends refuse here, before any path is built.
+    for (const id of ["trailing-", "a--", "-leading", "-", "--"]) {
+      expect(() => assertValidRunId(id)).toThrow(/invalid run id/);
+    }
+    // Interior hyphens are the whole point of the grammar (`<slug>-<day>-<hex>`),
+    // and a single character is a legal label.
+    for (const id of ["a", "7", "a-b", "qds-20260821-a1b2c3", `a-${"b".repeat(59)}-c`]) {
+      expect(() => assertValidRunId(id)).not.toThrow();
+    }
+    // The 63-char cap still applies at both ends of the grammar.
+    expect(() => assertValidRunId(`a-${"b".repeat(61)}`)).not.toThrow(); // exactly 63
+    expect(() => assertValidRunId(`a-${"b".repeat(62)}`)).toThrow(/invalid run id/); // 64
   });
 
   test("newId generates a validated <slug>-<YYYYMMDD>-<6 hex> id", () => {
@@ -761,5 +778,43 @@ describe("concurrent set", () => {
     expect(store.set(id, { vmName: "box-2" }).vmName).toBe("box-2");
     expect(Date.now() - started).toBeLessThan(2_000); // not the 5s lock timeout
     expect(existsSync(`${store.path(id)}.lock`)).toBe(false);
+  });
+
+  test("an unreadable lock body is held, never stolen as junk", () => {
+    // The exact state the old two-step claim (create, THEN write the pid)
+    // exposed: a contender landing in that window read an empty body, scored
+    // the owner as 0, judged the lock junk and stole it from a live holder —
+    // and two read-modify-writes then dropped a field. An owner that cannot be
+    // proved dead means WAIT, even if that ends in a fail-closed timeout.
+    const id = "empty-lock-run";
+    store.create(id);
+    const lock = `${store.path(id)}.lock`;
+    writeFileSync(lock, "", { mode: 0o600 });
+    const started = Date.now();
+    expect(() => store.set(id, { vmName: "box-3" })).toThrow(/timed out waiting for the run record lock/);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(4_000); // waited out LOCK_TIMEOUT_MS
+    expect(existsSync(lock)).toBe(true); // still held by whoever wrote it
+    expect(store.get(id).vmName).toBeUndefined();
+    rmSync(lock, { force: true });
+  }, 15_000);
+
+  test("release never unlinks a lock this process no longer owns", () => {
+    // An unconditional `rm` in the finally deletes whatever sits at the path —
+    // including the lock a second writer legitimately holds after ours was
+    // cleared by hand. That reopens the lost update from the other side.
+    const id = "release-proof-run";
+    const lock = join(dir, `${id}.lock`);
+    const foreign = `${process.pid + 1} deadbeefcafe\n`;
+    const s = new RunRecordStore({
+      dir,
+      beforeRename: () => {
+        rmSync(lock, { force: true });
+        writeFileSync(lock, foreign, { mode: 0o600 });
+      },
+    });
+    s.create(id);
+    expect(s.set(id, { vmName: "box-4" }).vmName).toBe("box-4");
+    expect(readFileSync(lock, "utf8")).toBe(foreign);
+    rmSync(lock, { force: true });
   });
 });

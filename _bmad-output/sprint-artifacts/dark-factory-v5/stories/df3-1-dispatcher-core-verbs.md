@@ -257,6 +257,31 @@ AC7's `assertWithinBudget` call site; the contract call cites the DF2.8 story sp
 - `tests/fleet/verbs.test.ts`
 - `tests/fleet/cli.test.ts`
 
+### Declared FTM deviations (2026-08-21, review round 2)
+
+The list above was written pre-implementation and is **not** what shipped. Every path below is
+outside it; each is recorded here rather than left as silent drift. Decisions 1 and 4 in the Dev
+Agent Record described the opposite of the shipped design and have been corrected in place.
+
+| Path | Why it had to change | Kind |
+|------|---------------------|------|
+| `src/phase-engine/types.ts` | `limitMicroUsd?: number` on `PipelineManifest` — the interface lives here, not in manifest.ts | additive (already declared) |
+| `src/providers/driver.ts` | `provisionAdmittedRun` — the post-admission body dispatch composes (see corrected Decision 1) | additive export + hardening |
+| `scripts/lib/run-lock.ts` | **net-new.** DF2.5's per-run lock extracted to one shared module (see corrected Decision 4) | net-new |
+| `scripts/sandbox-teardown.ts` | loses its private lock copy to the shared module; run-id guard now delegates to the store's validator | refactor + corrective |
+| `src/providers/run-record.ts` | `gate` extension namespace (AC3); `RUN_ID_RE`/`RUN_ID_MAX` exported to end a 4-way duplication; `requestId` core field (INV-4-bis); **`withLock` lost-update race fixed**; `RUN_ID_RE` tightened to the RFC 1123 grammar it documents | corrective — see Review round 2 |
+| `src/providers/cost-ledger.ts` | `ADMISSION_GRACE_MS` closes an admission double-grant race; `admitIssue` doc states the reservation invariant | corrective |
+| `src/providers/fake-driver.ts` | private run-id regex → canonical import (its copy had become *looser* than the validator, risking a reaper stall) | corrective |
+| `src/providers/budget-gate.ts` | lint only (`useTemplate`) | corrective |
+| `scripts/qds-cost.ts` | same `noUnsafeFinally` money-path defect fixed under F4-2, in DF2.8's ledger CLI | corrective, out-of-PR |
+| `tests/fleet/helpers.ts` | net-new shared fixtures | net-new |
+| `tests/providers/run-record.test.ts`, `tests/providers/cost-ledger.test.ts` | permanent coverage for the two races above | additive |
+| `tests/scripts/sandbox-teardown-cli.test.ts` | lock extraction + validator delegation | additive |
+
+Four of these (`run-record.ts`, `cost-ledger.ts`, `fake-driver.ts`, `qds-cost.ts`) are **pre-existing
+defects outside this story's scope**, fixed here because they are the same defect classes this
+story's review surfaced and leaving them would have meant shipping a fix beside its unfixed twin.
+
 ## Security Invariants
 
 - **INV-1 (isolation):** one dispatch mints one run, one box, one key, one record (R8). The dispatcher
@@ -319,7 +344,9 @@ AC7's `assertWithinBudget` call site; the contract call cites the DF2.8 story sp
 
 **Implemented:** 2026-08-21, branch `feature/df3-1-fleet-dispatcher-core-verbs`, waves of parallel subagents (research ×7 → architect → 3 TDD implementation agents → orchestrator finish).
 
-**Files (11, exactly FTM + 1 declared type completion):**
+**Files (11 at implementation; 23 after review round 2 — see "Declared FTM deviations" above. The
+claim "exactly FTM + 1 declared type completion" was already false when written: `src/providers/driver.ts`,
+`scripts/lib/run-lock.ts` and `scripts/sandbox-teardown.ts` were all outside FTM.):**
 - `src/fleet/brief-schema.ts` (net-new): zod v3 `.strictObject` — repoSlug/issueId/issueUrl?/commitSha(40-hex)/requestId?/manifestPath/repoUrl; `extractZodErrorField` names the offending field for exit 2.
 - `src/fleet/dispatch.ts` (net-new): `dispatch()` composes DF2.1 primitives directly (C1 — see Decision 1), `FleetError`, `mintRunId()` = `newId("qds")`, `fakeGate` (five real dir-box probes), 600s wall-clock seam, sub-timings, INV-6 URL redaction, `run-context.json` + stamped `pipeline.yaml` fill.
 - `src/fleet/status.ts` (net-new): `statusAll`/`statusRun` — live/boxMissing/boxUnknown/closed join, 30s list timeout, listOk tracked separately from empty list (unknown ≠ gone doctrine, lifted from indydevdan inkwell `runs_table.py`).
@@ -330,13 +357,45 @@ AC7's `assertWithinBudget` call site; the contract call cites the DF2.8 story sp
 - `src/phase-engine/types.ts` (additive, **FTM deviation — 1 line**): `limitMicroUsd?: number` on `PipelineManifest` — the interface lives here, not manifest.ts; the schema edit is incomplete without the matching declaration. Justification: AC9a's "declares limitMicroUsd in the manifest's zod schema" spans schema+type; strictly additive, no consumer changes.
 - `tests/fleet/{brief-schema,dispatch,verbs,cli}.test.ts` (net-new): 84 tests.
 
-**Decision 1 (D1 overturned, verified against source):** `createRun` (driver.ts:134) calls `checkHeadroom(driver, 1, ...)` unconditionally with no skip option, and driver.ts is not in FTM — routing `{admitted:true}` through it would make an N-arm fan-out do N headroom checks of 1, violating AC8/DF3.2-AC1. Dispatch therefore mirrors createRun's post-admission body itself (store.create O_EXCL → budget-ext write → driver.create(TAG) → expose/setPublic → store.set) with the two admission call sites dispatch-owned exactly as the story's boundary note specifies. No ceiling or limit is re-derived: the mint cap, manifest stamp and run-context value are all `decision.admittedCeilingMicroUsd` — DF2.8's `min(keyCap, remaining)`, computed once.
+**Decision 1 (D1 overturned, verified against source — CORRECTED 2026-08-21, review round 2):** `createRun` (driver.ts:134) calls `checkHeadroom(driver, 1, ...)` unconditionally with no skip option — routing `{admitted:true}` through it would make an N-arm fan-out do N headroom checks of 1, violating AC8/DF3.2-AC1. Dispatch therefore mirrors createRun's post-admission body itself
+
+> **Correction:** the original text justified this by "and driver.ts is not in FTM", which the shipped
+> code contradicts — `provisionAdmittedRun` was **added to** `src/providers/driver.ts` and is imported
+> by `dispatch.ts:27`. The headroom argument stands on its own and is the real reason; the FTM clause
+> was wrong and is withdrawn. `src/providers/driver.ts` is now a declared FTM deviation (see the table
+> above). Review round 2 additionally hardened `provisionAdmittedRun`: it persists `vmName` before
+> expose/setPublic so a failure cannot orphan a billable box with no teardown handle, validates
+> `runId` and `port` at entry, and its doc comment no longer claims a key-minting step it never had. (store.create O_EXCL → budget-ext write → driver.create(TAG) → expose/setPublic → store.set) with the two admission call sites dispatch-owned exactly as the story's boundary note specifies. No ceiling or limit is re-derived: the mint cap, manifest stamp and run-context value are all `decision.admittedCeilingMicroUsd` — DF2.8's `min(keyCap, remaining)`, computed once.
 
 **Decision 2:** requestId is loose at the schema layer (a non-UUID string is not a schema failure, AC1); dispatch drops a non-v4 requestId to `undefined` before `resolveRunCorrelation`, which then mints — DF1.8's INVALID_REQUEST_ID path stays intact for direct callers. `initiateSession` is NOT called by dispatch (engine-side owns the trace store; D9); requestId reaches DF1.4 rows via the in-box run context and every log line (INV-4-bis).
 
 **Decision 3 (fake gate honesty):** the real `setupGate` requires ExeDevDriver's `execTimed`/`boxHost`. The fake path runs `fakeGate` — five REAL `driver.exec` probes of the box's on-disk state (reachable / manifest carries limitMicroUsd / env file mode 600 / manifest non-empty / phases declared), one per DF2.2 assertion item, A/B sharing code 1. No simulated ready verdicts; a probe that fails reports its note.
 
-**Decision 4 (CLI teardown lock):** DF2.5's per-run `acquireRunLock` lives in `scripts/sandbox-teardown.ts` (not importable, not in FTM). It is replicated verbatim in `scripts/fleet.ts` (no-steal, holder reporting) so AC5's "every guard intact" holds; both copies must stay in sync.
+**Decision 4 (CLI teardown lock) — SUPERSEDED 2026-08-21, review round 2.** The original text read:
+*"DF2.5's per-run `acquireRunLock` lives in `scripts/sandbox-teardown.ts` (not importable, not in FTM).
+It is replicated verbatim in `scripts/fleet.ts` (no-steal, holder reporting) so AC5's 'every guard
+intact' holds; both copies must stay in sync."*
+
+That is not what shipped, and "both copies must stay in sync" was the defect: a lock guarding
+irreversible operations (box destroy, key revoke, spend write) cannot depend on two hand-maintained
+copies. `acquireRunLock` was extracted to a net-new **`scripts/lib/run-lock.ts`** that both CLIs
+import. Review round 2 then found the extraction had taken only *acquire*, leaving each CLI to
+hand-roll release — so release now lives there too, and the module owns the full lifecycle:
+
+- acquire is atomic and the lock is never observable with an empty body (temp file + `linkSync`), so
+  a contender can no longer parse a half-written lock as unowned and steal it;
+- release **proves ownership** before unlinking — the previous `rmSync(lock, {force:true})` would
+  delete a *different* live invocation's lock, causing the exact double-teardown the lock exists to prevent;
+- stale detection checks whether the holder pid is actually **alive**, so PID reuse no longer produces
+  a remediation the operator cannot follow;
+- SIGINT/SIGTERM release the lock — previously one Ctrl-C left a run permanently un-teardownable while
+  its box and key stayed live and billing;
+- a release failure now affects the exit code, where the CLI previously printed success and exited 0
+  on a wedged run.
+
+The identical defect class was found in the canonical `RunRecordStore.withLock` and fixed there too
+(see Review round 2). `sandbox-teardown`'s user-facing holder wording is preserved by parameterising
+the holder name rather than letting a refactor change a shipped CLI's output.
 
 **Tests:** `tests/fleet/` 84/84 green · full `tests/providers/ + tests/phase-engine/` 1106 green (one first-run usage.test.ts env flake did not reproduce on rerun; passes solo) · `bunx tsc --noEmit` clean · `bunx biome check` clean (12 files) · advisory gates OK (`check-defensive-programming.sh` 0 findings on 2 changed .ts; `check-pr-conflicts.sh` 0 open-PR overlaps).
 
@@ -366,3 +425,87 @@ Teardown log shows the full seven-step order (spend→artifacts→harvest→revo
 - **DOD trimmed:** Reduced from 14 to 10 checkboxes by merging unit test items and removing "admitted-flag containment" as subsumed under integration coverage.
 - **Files to Modify:** Kept at ≤10 unique paths (no change needed — was already compliant).
 - **Campaign fixes 2026-08-20:** DF3.1-H1, DF3.1-M1, DF3.1-L1.
+
+---
+
+## Review round 2 — BMAD adversarial code review, 2026-08-21
+
+**Method.** 9 parallel review agents over a chunked PR diff (3 blind-adversarial, 3 edge-case with
+repo access, 2 test-quality auditors, 1 acceptance auditor against this spec). 197 raw findings →
+after dedupe and triage: **138 patched (every LOW included), 4 deferred, 5 dismissed.** Fixes ran in
+three waves over disjoint file clusters (source → hardening → tests), each wave verified before the
+next began.
+
+### The five defects the review found that the findings ledger had NOT flagged
+
+These came out of fixing root causes rather than the symptoms as written. All five were real, and
+none would have been caught by patching the original findings.
+
+1. **Lost update in `RunRecordStore.withLock`** (`src/providers/run-record.ts`) — pre-existing at
+   HEAD, in the canonical run-record store. `openSync(…,"wx")` then a separate write left a window
+   where the lock existed with an empty body; a contender parsed `Number("") === 0`, failed the
+   `owner > 0` liveness guard, and **stole a live holder's lock**. Two concurrent read-modify-writes
+   then dropped a field with every process exiting 0. Proven with a 3-process stress harness against
+   a pristine `git archive HEAD` checkout: **HEAD 5 lost updates / 200 iterations** (`sessionId` ×2,
+   `keyHash` ×2, `vmName` ×1); **fixed 0 / 200**. At 40 iterations neither version failed — the
+   earlier short runs proved nothing.
+2. **Admission double-grant** (`src/providers/cost-ledger.ts`) — the reservation orphan guard could
+   not distinguish *never created* from *not created yet*, so two concurrent dispatches for one issue
+   could each win the full remaining headroom. Closed with `ADMISSION_GRACE_MS`, scoped to the read
+   where the existing expiry already lives — INV-COST-1 and INV-COST-3 both intact, and DF3.2's
+   N-arm fan-out is not serialized.
+3. **`fake-driver` run-id filter became looser than the validator.** `list` filters names so it only
+   reports ids `destroy` will accept; after the `RUN_ID_RE` tightening its private copy would have
+   listed a `trailing-` box that then threw on destroy, **aborting the reaper mid-sweep**. A
+   "harmless duplicate" that was a live fleet-wide reap-outage vector.
+4. **`within()` abandoned an in-flight promise** (`src/fleet/dispatch.ts`) — on the deadline
+   early-throw nothing subscribed to the already-running provider call, so a later rejection was an
+   **unhandled rejection**. Found by the test wave, which reproduced it hanging the test runner and
+   misattributing an ENOENT to the following test.
+5. **Six `DispatchDeps` seams silently dropped by the CLI** — `repoRoot`, `quotaLimits`, `clock`,
+   `timeoutMs`, `dispatchLogPath`, `setupGate`. Fixed structurally (`FleetDeps` inherits via `Omit` +
+   rest-spread) so seam number seven forwards with no edit.
+
+### Themes across the patched findings
+
+- **Lock discipline (the largest cluster).** The extraction had taken only *acquire*, leaving each
+  CLI to hand-roll release. Release now proves ownership before unlinking (it previously deleted a
+  *different* live invocation's lock), stale detection checks pid liveness, SIGINT/SIGTERM release,
+  and a release failure affects the exit code. See the superseded Decision 4 above.
+- **Money-invisible states.** `fleet status` was a left join, so a still-billing box with no record
+  was invisible; it is now a real union with an `orphan` state. A `closed` record no longer
+  short-circuits the driver join, so a live box behind a closed record surfaces via `boxAlive`.
+- **Ambient `process.cwd()` as a trust anchor.** Three separate "test pollution" findings traced to
+  one root cause: security-relevant configuration inherited from the process cwd instead of injected.
+  The manifest containment root and the teardown cost-ledger path are now explicit seams; the PR's
+  test suite contains **no `process.chdir`**.
+- **`--driver` no longer defaults to `fake` on any verb.** `fleet teardown <id>` with no `--driver`
+  used to "destroy" a fake box, print `torn down`, close the record and exit 0 while the real box
+  kept billing.
+- **One run-id grammar.** Four copies collapsed to the canonical export, and `RUN_ID_RE` was
+  tightened to the RFC 1123 hostname grammar its own doc comment claims (it accepted a trailing
+  hyphen, which becomes an invalid box hostname). Verified against every id-shaped literal in the
+  tree: no real id shape is newly rejected.
+- **Test quality.** ~60 audit findings fixed: tautological assertions, self-referential `--help`
+  comparisons, substring assertions that passed a 10× unit error, mocks that ignored their
+  arguments, missing negative controls. `tests/fleet/` went 59 → **176 pass**, `expect()` calls
+  roughly tripled.
+
+### Deferred (filed, not fixed here)
+
+| Item | Why |
+|------|-----|
+| Engine-side mandatory `limitMicroUsd` | Needs an engine change outside this story's FTM; the in-scope guard (assert the stamp landed) is applied |
+| `driver.list()` `AbortSignal` | Requires a DF2.x driver-interface change |
+| Cross-process dispatch serialization | Would defeat DF3.2's fan-out; `ADMISSION_GRACE_MS` closes the actual race |
+| AC2 run-id provenance | Now enforced at **compile** time via a branded `MintedRunId`; a runtime mint registry remains out of scope |
+
+### Verification
+
+- `bun test` — **2444 pass, 0 fail** (81 files; 17 skip, 2 todo, all pre-existing)
+- `bunx tsc --noEmit` — clean
+- `bunx @biomejs/biome check src scripts tests` — clean, **187 files** (including two pre-existing
+  errors in `qds-cost.ts` and one in `budget-gate.ts` that were fixed rather than left)
+- `detect_changes` — CRITICAL, expected and accepted: driven by `assertValidRunId` (48 dependents,
+  12 flows) and `withLock`, both deliberately touched. Every affected process is in
+  `providers`/`phase-engine`/`scripts`; no fallout in `hindsight/`, `swarmclaw/` or `cli-anything/`.

@@ -197,7 +197,7 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
       out,
       "ledger-missing",
       `no cost ledger at ${ledgerPath} — refusing to report zero spend from a file that does not exist`,
-      `dispatch a run first (the budget gate creates the ledger), or point QDS_COST_LEDGER_FILE at the existing ledger file`,
+      "dispatch a run first (the budget gate creates the ledger), or point QDS_COST_LEDGER_FILE at the existing ledger file",
     );
     return 1;
   }
@@ -210,18 +210,24 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
     return 1;
   }
 
-  let primaryError: unknown;
+  // Assigned on every path, then possibly downgraded by the finally — the same
+  // shape scripts/fleet.ts and scripts/sandbox-teardown.ts use. `return 1`
+  // inside the finally overwrote the try/catch's own control flow, so a close
+  // failure could discard the real outcome; and `return 0` inside the try
+  // committed the exit code before the cleanup could say anything. Seeded to
+  // failure because the finally READS it: only a completed print sets 0, so a
+  // throw the catch cannot itself survive never reads as success.
+  let code = 1;
   try {
     const view = ledger.readIssueCost(issueRef.repoSlug, issueRef.issueId);
     const runs = ledger.readIssueRuns(issueRef.repoSlug, issueRef.issueId);
 
     printView(out, `${issueRef.repoSlug}#${issueRef.issueId}`, view, runs);
-    return 0;
+    code = 0;
   } catch (e) {
-    primaryError = e;
     const err = e as { code?: string; message?: string; remediation?: string };
     fail(out, err.code ?? "ledger-error", err.message ?? String(e), err.remediation);
-    return 1;
+    code = 1;
   } finally {
     try {
       ledger.close();
@@ -229,15 +235,16 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
       // If close fails while an original error is in flight, the original takes
       // precedence (the close failure is a stderr warning). If close fails on
       // the success path, the close failure IS the error.
-      if (primaryError !== undefined) {
+      if (code !== 0) {
         process.stderr.write(`warning: ledger close failed after error: ${(closeErr as Error).message}\n`);
       } else {
         const cerr = closeErr as { code?: string; message?: string; remediation?: string };
         fail(out, cerr.code ?? "ledger-close-failed", cerr.message ?? String(closeErr), cerr.remediation);
-        return 1;
+        code = 1;
       }
     }
   }
+  return code;
 }
 
 if (import.meta.main) {

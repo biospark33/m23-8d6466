@@ -3,16 +3,27 @@
  * requestId loose (C3), and manifest stamp round-trip.
  *
  * TDD: tests written first, then implementation.
+ *
+ * Every rejection names the FIELD and the ISSUE CODE it failed on: a bare
+ * `.toThrow()` is satisfied by a schema that rejects the fixture for an
+ * unrelated newly-required field, which is exactly the drift these cases exist
+ * to catch.
  */
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as YAML from "yaml";
 
 import { BriefSchema, extractZodErrorField, type Brief } from "../../src/fleet/brief-schema.ts";
-import { loadManifest, stampManifestLimit, serializeManifest } from "../../src/phase-engine/manifest.ts";
-import type { ZodError } from "zod";
+import {
+  loadManifest,
+  ManifestError,
+  PipelineManifestSchema,
+  stampManifestLimit,
+  serializeManifest,
+} from "../../src/phase-engine/manifest.ts";
+import type { ZodError, ZodIssueCode } from "zod";
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df3-1-brief-")));
 afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
@@ -28,6 +39,29 @@ function validBrief(over: Record<string, unknown> = {}): Record<string, unknown>
   };
 }
 
+/**
+ * Assert a brief is refused for the REASON claimed, not merely refused.
+ *
+ * `extractZodErrorField` is the CLI's own field extractor (AC1 "exits 2 naming
+ * the offending field"), so asserting through it pins the operator-visible
+ * name, and the issue code pins WHY — a schema that starts rejecting this
+ * fixture for a different field or a different reason fails here instead of
+ * passing a bare `.toThrow()`.
+ */
+function expectRejected(
+  brief: Record<string, unknown>,
+  expected: { field: string; code: keyof typeof ZodIssueCode | string; message?: RegExp },
+): void {
+  const result = BriefSchema.safeParse(brief);
+  expect(result.success).toBe(false);
+  const error = (result as { error: ZodError }).error;
+  expect(extractZodErrorField(error)).toBe(expected.field);
+  const issue = error.issues[0];
+  expect(issue).toBeDefined();
+  expect(issue?.code).toBe(expected.code as never);
+  if (expected.message !== undefined) expect(issue?.message).toMatch(expected.message);
+}
+
 describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
   test("valid minimal brief parses", () => {
     const brief = validBrief();
@@ -36,10 +70,8 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
   });
 
   test("unknown top-level key rejected (exit-path: parse throws with the key named)", () => {
-    const brief = {
-      ...validBrief(),
-      unknownField: "should-reject",
-    };
+    const brief = { ...validBrief(), unknownField: "should-reject" };
+    expectRejected(brief, { field: "unknownField", code: "unrecognized_keys", message: /unknownField/ });
     expect(() => BriefSchema.parse(brief)).toThrow();
   });
 
@@ -54,54 +86,75 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     }
   });
 
-  test("missing repoSlug rejected", () => {
-    const brief = { ...validBrief(), repoSlug: undefined };
-    expect(() => BriefSchema.parse(brief)).toThrow();
+  test("missing repoSlug rejected (the KEY is absent, not set to undefined)", () => {
+    // `{...brief, repoSlug: undefined}` is a present key: it exercises a
+    // different zod path from the brief an operator actually sends, which
+    // simply omits the field. Both must be refused, so both are asserted.
+    const { repoSlug, ...absent } = validBrief();
+    expect(repoSlug).toBe("owner/repo"); // it was there; the rest omits it
+    expect(Object.hasOwn(absent, "repoSlug")).toBe(false);
+    expectRejected(absent, { field: "repoSlug", code: "invalid_type", message: /Required/ });
+    expectRejected(validBrief({ repoSlug: undefined }), {
+      field: "repoSlug",
+      code: "invalid_type",
+      message: /Required/,
+    });
   });
 
   test("commitSha not-40-hex rejected: 39 chars", () => {
-    const brief = validBrief({ commitSha: "a".repeat(39) });
-    expect(() => BriefSchema.parse(brief)).toThrow();
+    expectRejected(validBrief({ commitSha: "a".repeat(39) }), { field: "commitSha", code: "invalid_string" });
   });
 
   test("commitSha not-40-hex rejected: 41 chars", () => {
-    const brief = validBrief({ commitSha: "a".repeat(41) });
-    expect(() => BriefSchema.parse(brief)).toThrow();
+    expectRejected(validBrief({ commitSha: "a".repeat(41) }), { field: "commitSha", code: "invalid_string" });
   });
 
   test("commitSha not-40-hex rejected: uppercase", () => {
-    const brief = validBrief({ commitSha: "A".repeat(40) });
-    expect(() => BriefSchema.parse(brief)).toThrow();
+    expectRejected(validBrief({ commitSha: "A".repeat(40) }), { field: "commitSha", code: "invalid_string" });
   });
 
   test("commitSha not-40-hex rejected: non-hex", () => {
-    const brief = validBrief({ commitSha: "g".repeat(40) });
-    expect(() => BriefSchema.parse(brief)).toThrow();
+    expectRejected(validBrief({ commitSha: "g".repeat(40) }), { field: "commitSha", code: "invalid_string" });
   });
 
   test("issueId 0 rejected", () => {
-    const brief = validBrief({ issueId: 0 });
-    expect(() => BriefSchema.parse(brief)).toThrow();
+    expectRejected(validBrief({ issueId: 0 }), { field: "issueId", code: "too_small", message: /greater than 0/ });
   });
 
   test("issueId -1 rejected", () => {
-    const brief = validBrief({ issueId: -1 });
-    expect(() => BriefSchema.parse(brief)).toThrow();
+    expectRejected(validBrief({ issueId: -1 }), { field: "issueId", code: "too_small", message: /greater than 0/ });
   });
 
   test("issueId non-int rejected", () => {
-    const brief = validBrief({ issueId: "not-an-int" });
-    expect(() => BriefSchema.parse(brief)).toThrow();
+    expectRejected(validBrief({ issueId: "not-an-int" }), {
+      field: "issueId",
+      code: "invalid_type",
+      message: /Expected number/,
+    });
+    expectRejected(validBrief({ issueId: 1.5 }), { field: "issueId", code: "invalid_type", message: /integer/ });
   });
 
   test("issueId 2^31 rejected (max is 2^31-1)", () => {
-    const brief = validBrief({ issueId: 2 ** 31 });
-    expect(() => BriefSchema.parse(brief)).toThrow();
+    expectRejected(validBrief({ issueId: 2 ** 31 }), {
+      field: "issueId",
+      code: "too_big",
+      message: /2147483647/,
+    });
+  });
+
+  test("issueId 2^31-1 ACCEPTED (the bound is the max, not a rejection)", () => {
+    // The rejecting side alone lets the max be tightened to anything at all —
+    // 200 would reject every real GitHub issue number and still pass.
+    const result = BriefSchema.parse(validBrief({ issueId: 2 ** 31 - 1 }));
+    expect(result.issueId).toBe(2 ** 31 - 1);
   });
 
   test("issueUrl invalid rejected", () => {
-    const brief = validBrief({ issueUrl: "not-a-url" });
-    expect(() => BriefSchema.parse(brief)).toThrow();
+    expectRejected(validBrief({ issueUrl: "not-a-url" }), {
+      field: "issueUrl",
+      code: "invalid_string",
+      message: /url/i,
+    });
   });
 
   test("issueUrl valid URL accepted (optional)", () => {
@@ -129,18 +182,44 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
   });
 
   test("manifestPath empty string rejected", () => {
-    const brief = validBrief({ manifestPath: "" });
-    expect(() => BriefSchema.parse(brief)).toThrow();
+    expectRejected(validBrief({ manifestPath: "" }), {
+      field: "manifestPath",
+      code: "too_small",
+      message: /at least 1 character/,
+    });
   });
 
   test("repoUrl non-url rejected", () => {
-    const brief = validBrief({ repoUrl: "not-a-url" });
-    expect(() => BriefSchema.parse(brief)).toThrow();
+    expectRejected(validBrief({ repoUrl: "not-a-url" }), {
+      field: "repoUrl",
+      code: "invalid_string",
+      message: /url/i,
+    });
+  });
+
+  test("repoUrl http:// rejected (the scheme is allow-listed to https)", () => {
+    expectRejected(validBrief({ repoUrl: "http://github.com/owner/repo" }), {
+      field: "repoUrl",
+      code: "invalid_string",
+      message: /https:\/\//,
+    });
   });
 
   test("repoSlug invalid pattern rejected (no slash)", () => {
-    const brief = validBrief({ repoSlug: "justowner" });
-    expect(() => BriefSchema.parse(brief)).toThrow();
+    expectRejected(validBrief({ repoSlug: "justowner" }), { field: "repoSlug", code: "invalid_string" });
+  });
+
+  test("repoSlug dot segment rejected (it reaches join() on the ledger key)", () => {
+    expectRejected(validBrief({ repoSlug: "../repo" }), {
+      field: "repoSlug",
+      code: "custom",
+      message: /may not be '\.' or '\.\.'/,
+    });
+    expectRejected(validBrief({ repoSlug: "./repo" }), {
+      field: "repoSlug",
+      code: "custom",
+      message: /may not be '\.' or '\.\.'/,
+    });
   });
 
   test("repoSlug valid pattern accepted", () => {
@@ -153,10 +232,12 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
 describe("manifest stamp helpers (DF3.1 AC9a)", () => {
   let manifestDir: string;
   let manifestPath: string;
+  /** The exact object written to disk — the round-trip's expected value. */
+  let manifestObj: Record<string, unknown>;
 
   beforeEach(() => {
     manifestDir = fs.mkdtempSync(path.join(tmpRoot, "manifest-"));
-    const manifestObj = {
+    manifestObj = {
       version: "1.0.0",
       pipelineId: "test-pipeline",
       runBudgetMs: 120_000,
@@ -182,6 +263,10 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
     fs.writeFileSync(manifestPath, JSON.stringify(manifestObj));
   });
 
+  // Each case mkdtemps its own fixture dir; without this they accumulate under
+  // tmpRoot for the whole run.
+  afterEach(() => fs.rmSync(manifestDir, { recursive: true, force: true }));
+
   test("stampManifestLimit stamps limitMicroUsd onto a loaded manifest", () => {
     // Use manifestDir as runRoot so INV-1 "beneath root" check passes
     const manifest = loadManifest(manifestPath, 120_000, manifestDir);
@@ -190,52 +275,86 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
     expect(Object.isFrozen(stamped.manifest)).toBe(true);
   });
 
+  test("stampManifestLimit does not mutate the caller's manifest", () => {
+    // The same loaded manifest is reused across the stamp/serialize call sites;
+    // an implementation that stamped in place would leak one run's ceiling into
+    // the next caller's copy while still returning a frozen result.
+    const manifest = loadManifest(manifestPath, 120_000, manifestDir);
+    const before = structuredClone(manifest.manifest) as Record<string, unknown>;
+    const stamped = stampManifestLimit(manifest, 777_000);
+    expect(stamped.manifest.limitMicroUsd).toBe(777_000);
+    expect(manifest.manifest.limitMicroUsd).toBeUndefined();
+    expect(manifest.manifest).toEqual(before as never);
+  });
+
   test("stamped value must be int >0 (reject 0)", () => {
     const manifest = loadManifest(manifestPath, 120_000, manifestDir);
-    expect(() => stampManifestLimit(manifest, 0)).toThrow();
+    expect(() => stampManifestLimit(manifest, 0)).toThrow(ManifestError);
+    expect(() => stampManifestLimit(manifest, 0)).toThrow(/limitMicroUsd must be a positive integer/);
   });
 
   test("stamped value must be int >0 (reject negative)", () => {
     const manifest = loadManifest(manifestPath, 120_000, manifestDir);
-    expect(() => stampManifestLimit(manifest, -100)).toThrow();
+    expect(() => stampManifestLimit(manifest, -100)).toThrow(ManifestError);
+    expect(() => stampManifestLimit(manifest, -100)).toThrow(/positive integer/);
   });
 
   test("stamped value must be int >0 (reject float)", () => {
     const manifest = loadManifest(manifestPath, 120_000, manifestDir);
-    expect(() => stampManifestLimit(manifest, 1.5)).toThrow();
+    expect(() => stampManifestLimit(manifest, 1.5)).toThrow(ManifestError);
+    expect(() => stampManifestLimit(manifest, 1.5)).toThrow(/positive integer/);
   });
 
-  test("serializeManifest outputs YAML string", () => {
+  test("serializeManifest outputs 2-space-indented JSON (readable as YAML too)", () => {
     const manifest = loadManifest(manifestPath, 120_000, manifestDir);
     const stamped = stampManifestLimit(manifest, 500_000);
-    const yaml = serializeManifest(stamped);
+    const text = serializeManifest(stamped);
 
-    // Should be parseable YAML
-    const reparsed = YAML.parse(yaml);
+    // JSON is what loadManifest reads back, so JSON is what must come out —
+    // quoted keys, not YAML's bare `limitMicroUsd:`.
+    expect(text).toContain('"limitMicroUsd": 500000');
+    expect(text.split("\n")[1]).toMatch(/^ {2}"/);
+    const reparsed = JSON.parse(text) as Record<string, unknown>;
     expect(reparsed.limitMicroUsd).toBe(500_000);
     expect(reparsed.version).toBe("1.0.0");
     expect(reparsed.pipelineId).toBe("test-pipeline");
+    // The dispatcher delivers this text under a `.yaml` name (AC9a), so a YAML
+    // reader in the box must see the same document.
+    expect(YAML.parse(text)).toEqual(reparsed);
   });
 
-  test("serializeManifest round-trips: parse(serialize(stamped)) validates and carries limitMicroUsd", () => {
+  test("serializeManifest round-trips: loadManifest(serialize(stamped)) validates and carries every phase", () => {
     const manifest = loadManifest(manifestPath, 120_000, manifestDir);
     const stamped = stampManifestLimit(manifest, 500_000);
-    const yaml = serializeManifest(stamped);
+    const text = serializeManifest(stamped);
 
-    // Parse back as JSON (loadManifest format) — should still validate
-    const reparsedObj = JSON.parse(JSON.stringify(YAML.parse(yaml)));
-    expect(typeof reparsedObj).toBe("object");
+    // The real round trip: the delivered bytes go back through the loader the
+    // phase engine uses. A serializer that drops `phases` or flattens
+    // `command: ["echo","build"]` into a string ships a manifest the engine
+    // cannot run — and the previous `typeof reparsed === "object"` check could
+    // not fail for either.
+    const deliveredPath = path.join(manifestDir, "delivered.json");
+    fs.writeFileSync(deliveredPath, text);
+    const reloaded = loadManifest(deliveredPath, 120_000, manifestDir);
+    expect(reloaded.manifest).toEqual(stamped.manifest);
 
-    // BriefSchema won't parse manifest structure, but YAML round-trip holds
-    const parsedYaml = YAML.parse(yaml);
-    expect(parsedYaml.limitMicroUsd).toBe(500_000);
-    expect(parsedYaml.version).toBe("1.0.0");
+    // …and the whole document validates against the manifest schema itself,
+    // phase-by-phase, not just the two scalars the stamp touched.
+    const validated = PipelineManifestSchema.parse(JSON.parse(text));
+    expect(validated).toEqual({ ...manifestObj, limitMicroUsd: 500_000 } as never);
+    expect(validated.phases).toHaveLength(2);
+    expect(validated.phases[1]?.command).toEqual(["echo", "build"]);
+    expect(validated.limitMicroUsd).toBe(500_000);
+    expect(validated.version).toBe("1.0.0");
   });
 
-  test("stampManifestLimit preserves manifestLoadMs and resolvedPath", () => {
+  test("stampManifestLimit preserves manifestLoadMs and DROPS resolvedPath", () => {
     const manifest = loadManifest(manifestPath, 120_000, manifestDir);
     const stamped = stampManifestLimit(manifest, 123_456);
     expect(stamped.manifestLoadMs).toBe(manifest.manifestLoadMs);
-    expect(stamped.resolvedPath).toBe(manifest.resolvedPath);
+    // The stamped bytes exist at no path: inheriting the unstamped file's
+    // resolvedPath would claim provenance this content no longer has.
+    expect(manifest.resolvedPath).toBe(fs.realpathSync(manifestPath));
+    expect(stamped.resolvedPath).toBeUndefined();
   });
 });

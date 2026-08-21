@@ -185,7 +185,14 @@ export interface PipelineManifest {
   version: typeof MANIFEST_VERSION;
   pipelineId: string;
   runBudgetMs: number;
-  /** DF3.1 AC9a: stamped by dispatch at fill; the engine's only cap source. */
+  /**
+   * DF3.1 AC9a: stamped by dispatch at fill; the engine's only cap source.
+   *
+   * Optional so pre-DF3.1 manifests with no cap still load. The producer side
+   * is closed instead — `stampManifestLimit` refuses to return a manifest the
+   * stamp did not land on, so a dispatch cannot deliver an uncapped one.
+   * Making it mandatory engine-side is DF3.x.
+   */
   limitMicroUsd?: number;
   phases: PhaseSpec[];
 }

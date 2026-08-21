@@ -15,7 +15,7 @@
  *  - INV-5 fail-closed: if O_EXCL or mode 0600 cannot be honoured on the running
  *    platform, the constructor throws and no run starts.
  *
- * The twelve core fields are closed. The single sanctioned additive surface is
+ * The core fields are closed. The single sanctioned additive surface is
  * `extensions`, an allow-listed per-namespace map (not an open map).
  */
 
@@ -23,6 +23,9 @@ import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  fstatSync,
+  fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -43,7 +46,7 @@ import { log, newRequestId } from "../swarmclaw/log.ts";
 export type FieldKind = "string" | "int" | "ports";
 
 /**
- * The twelve core fields. These camelCase spellings are the only ones any
+ * The core fields. These camelCase spellings are the only ones any
  * consumer writes or asserts against — the snake_case forms belong to DF2.8's
  * SQLite ledger columns, a different store with its own schema.
  *
@@ -59,6 +62,7 @@ export const CORE_FIELDS: Readonly<Record<string, FieldKind>> = {
   spendMicroUsd: "int",
   sessionId: "string",
   commitSha: "string",
+  requestId: "string",
   ports: "ports",
   pid: "int",
   createdAt: "string",
@@ -69,8 +73,10 @@ export const CORE_FIELDS: Readonly<Record<string, FieldKind>> = {
 export const IMMUTABLE_FIELDS: ReadonlySet<string> = new Set(["runId", "createdAt"]);
 
 /**
- * Core fields a caller may write via `set()`: the twelve minus `runId`/`createdAt`
- * (immutable) and `closedAt` (`close()`'s alone). Exported so the CLI derives its
+ * Core fields a caller may write via `set()`: every core field minus
+ * `runId`/`createdAt` (immutable) and `closedAt` (`close()`'s alone). Derived,
+ * never listed twice — a core field added above is settable here by
+ * construction. Exported so the CLI derives its
  * flag table from this one constant — the writable-field policy lives only here,
  * not half-here and half in the CLI.
  */
@@ -89,6 +95,15 @@ export interface RunRecord {
   spendMicroUsd?: number;
   sessionId?: string;
   commitSha?: string;
+  /**
+   * INV-4-bis: the correlation id the dispatch ran under — the join key that
+   * ties this record to the host-side dispatch log and the ledger's
+   * `request_id` column. A core field beside `sessionId`/`commitSha`, not an
+   * extension namespace: it is a cross-layer attribute of the run itself, not
+   * one story's payload hung off it, and `fleet status` reads it back for every
+   * run regardless of which story created it.
+   */
+  requestId?: string;
   ports?: number[];
   pid?: number;
   closedAt?: string;
@@ -150,6 +165,15 @@ export const EXTENSION_NAMESPACES: Readonly<
       admittedCeilingMicroUsd: "int",
     },
   },
+  /**
+   * DF3.1 AC3: the setup gate's refusal, written by the fleet dispatcher when
+   * the gate fails. The record stays OPEN and the box ALIVE (INV-5) — this is
+   * the record-side half of the evidence the host-side dispatch log carries.
+   */
+  gate: {
+    schemaVersion: 1,
+    fields: { outcome: "string", failedItem: "string", assertionCode: "int", failedAt: "string" },
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -157,12 +181,18 @@ export const EXTENSION_NAMESPACES: Readonly<
 // ---------------------------------------------------------------------------
 
 /**
- * Hostname grammar. The id becomes the box name and the box name becomes a
- * public hostname, so anything outside this grammar is refused before a path is
- * built — `path()` is the one function every verb routes through.
+ * Hostname grammar — an RFC 1123 label, in full. The id becomes the box name
+ * and the box name becomes a public hostname, so anything outside this grammar
+ * is refused before a path is built — `path()` is the one function every verb
+ * routes through.
+ *
+ * BOTH ends are anchored on `[a-z0-9]`, not just the first: a label may not end
+ * with a hyphen either. Enforcing only the leading character let `trailing-`
+ * through here and refused it at the provider instead — after a record existed
+ * and with an id no box could ever be named. A single character stays legal.
  */
-const RUN_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
-const RUN_ID_MAX = 63;
+export const RUN_ID_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+export const RUN_ID_MAX = 63;
 
 /** How long a writer waits for another process's record lock before giving up. */
 const LOCK_TIMEOUT_MS = 5_000;
@@ -452,8 +482,11 @@ export class RunRecordStore {
    */
   private cleanStaleTemps(): void {
     for (const name of readdirSync(this.dir)) {
-      // `<runId>.json.<pid>.<hex>.tmp` and `.probe-<pid>-<hex>` — the two shapes
-      // an unclean death can leave behind, both carrying their owner's pid.
+      // `<runId>.json[.lock].<pid>.<hex>.tmp` and `.probe-<pid>-<hex>` — the
+      // shapes an unclean death leaves behind, each carrying its owner's pid.
+      // A steal witness (`<runId>.json.lock.<ino>.tmp`) rides the same sweep:
+      // its pid field parses as NaN, so it is swept unconditionally, which is
+      // what keeps a death mid-steal from stranding a lock generation.
       const isTemp = name.endsWith(".tmp");
       const isProbe = name.startsWith(".probe-");
       if (!isTemp && !isProbe) continue;
@@ -588,46 +621,143 @@ export class RunRecordStore {
    * wholesale. A dropped `keyHash` is INV-4's failure mode exactly: a key that
    * keeps spending with nobody able to revoke it.
    *
-   * The lock is itself O_EXCL, and it names its owner so a lock left by an
-   * unclean death is stolen rather than deadlocking the fleet.
+   * The lock is exclusive by `link(2)`, and it names its owner so a lock left by
+   * an unclean death is stolen rather than deadlocking the fleet. Every step is
+   * ownership-proving: a lock is never observable half-written, never unlinked
+   * by a process that cannot show it still holds it, and never stolen from an
+   * owner that is not provably dead.
    */
   private withLock<T>(p: string, fn: () => T): T {
     const lock = `${p}.lock`;
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    // `<pid> <nonce>`: the pid is what a contender probes for liveness, the
+    // nonce is what release compares back before it unlinks anything.
+    const body = `${process.pid} ${randomBytes(4).toString("hex")}\n`;
     for (;;) {
-      try {
-        const fd = openSync(lock, "wx", 0o600);
-        writeFileSync(fd, `${process.pid}\n`);
-        closeSync(fd);
-        break;
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-        if (this.stealIfOwnerGone(lock)) continue;
-        if (Date.now() >= deadline) {
-          throw new Error(`timed out waiting for the run record lock: ${lock}`);
-        }
-        sleepMs(5);
+      if (this.claimLock(lock, body)) break;
+      // Checked on every failed claim, including the ones a steal follows, so
+      // the loop is bounded by LOCK_TIMEOUT_MS however the contention resolves.
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for the run record lock: ${lock}`);
       }
+      // A successful steal means the path is free now — retry without sleeping.
+      if (!this.stealIfOwnerGone(lock)) sleepMs(5);
     }
     try {
       return fn();
     } finally {
-      rmSync(lock, { force: true });
+      this.releaseLock(lock, body);
     }
   }
 
-  /** True if a stale lock was removed and the caller should retry immediately. */
-  private stealIfOwnerGone(lock: string): boolean {
-    let owner: number;
+  /**
+   * Claim `lock`, or report it already held.
+   *
+   * The body is written, fsynced and `link`ed into place rather than created
+   * with O_EXCL and written afterwards — `atomicReplace`'s write-then-publish
+   * shape, and what `scripts/lib/run-lock.ts` gives its own lock. `link` is
+   * exactly as exclusive as O_EXCL, but the lock is COMPLETE the instant the
+   * path exists. With the two-step version a contender landing between the
+   * create and the write read an empty body, scored the owner as `0`, judged
+   * the lock junk and stole it from a live holder — two `setLocked`
+   * read-modify-writes then dropped a field, which is the lost update this lock
+   * exists to prevent.
+   */
+  private claimLock(lock: string, body: string): boolean {
+    const tmp = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+    const fd = openSync(tmp, "wx", 0o600);
+    let fdOpen = true;
     try {
-      owner = Number(readFileSync(lock, "utf8").trim());
-    } catch {
-      return true; // the holder released it between our open and this read
+      writeFileSync(fd, body);
+      fsyncSync(fd);
+      closeSync(fd);
+      fdOpen = false;
+      linkSync(tmp, lock);
+    } catch (e) {
+      // Guarded, not try/catch'd: fd numbers are recycled (see atomicReplace).
+      if (fdOpen) closeSync(fd);
+      rmSync(tmp, { force: true });
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw e;
     }
-    // See cleanStaleTemps: an owner that parsed as `0` must not read as alive.
-    if (Number.isInteger(owner) && owner > 0 && owner !== process.pid && isAlive(owner)) return false;
-    rmSync(lock, { force: true });
+    rmSync(tmp, { force: true });
     return true;
+  }
+
+  /**
+   * True if a lock left by a dead owner was removed and the caller should retry
+   * immediately; false means the lock counts as HELD and the caller waits.
+   *
+   * Anything that does not read as a live-or-dead pid is HELD, never junk —
+   * stealing on an unreadable body is how a live holder's lock gets taken out
+   * from under it, and a dropped `keyHash` is worse than a 5s timeout.
+   *
+   * The steal itself is compare-and-swap, not a bare `rm`: two contenders that
+   * both find the same corpse would otherwise both unlink and both claim, the
+   * second one's `rm` deleting the first one's LIVE lock. So the inode that was
+   * judged — read from one fd, so the body and the inode are the same
+   * generation — is hard-linked to a witness path derived from it. `link` is
+   * exclusive, so exactly one contender per generation is authorised to unlink,
+   * and the lock cannot change generation underneath it: changing it means
+   * unlinking it, which means winning the witness this process holds.
+   */
+  private stealIfOwnerGone(lock: string): boolean {
+    let fd: number;
+    try {
+      fd = openSync(lock, "r");
+    } catch {
+      return true; // the holder released it between our claim and this read
+    }
+    let ino: number;
+    let raw: string;
+    try {
+      ino = fstatSync(fd).ino;
+      raw = readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
+    }
+    const owner = Number(raw.trim().split(/\s+/)[0]);
+    // See cleanStaleTemps: an owner that parsed as `0` must not read as alive.
+    // Unparseable, empty or non-positive ⇒ held, wait — never stolen.
+    if (!Number.isInteger(owner) || owner <= 0) return false;
+    if (owner !== process.pid && isAlive(owner)) return false;
+    // `.tmp`-suffixed so a death between the link and the unlink below cannot
+    // strand the generation forever: cleanStaleTemps sweeps it (its pid field
+    // parses as NaN, i.e. no live owner) at the next store construction.
+    const witness = `${lock}.${ino}.tmp`;
+    try {
+      linkSync(lock, witness);
+    } catch {
+      return false; // another contender owns this generation's steal, or it is gone
+    }
+    try {
+      // The witness is a link to whatever `lock` pointed at when we linked it;
+      // a different inode means the lock moved on and is not ours to take.
+      if (statSync(witness).ino !== ino) return false;
+      rmSync(lock, { force: true });
+      return true;
+    } finally {
+      rmSync(witness, { force: true });
+    }
+  }
+
+  /**
+   * Release, but only if the lock on disk is still this process's own claim.
+   *
+   * An unconditional `rm` unlinks whatever sits at the path — including the
+   * lock a later writer legitimately holds after ours was stolen or cleared by
+   * hand — which is the same lost update entered through the other door. A
+   * foreign body is left alone rather than thrown on: this runs in a `finally`,
+   * where a throw would replace the caller's real error with this one.
+   */
+  private releaseLock(lock: string, body: string): void {
+    let onDisk: string;
+    try {
+      onDisk = readFileSync(lock, "utf8");
+    } catch {
+      return; // already gone
+    }
+    if (onDisk === body) rmSync(lock, { force: true });
   }
 
   /** Write-temp-then-rename. There is no in-place partial-write path (INV-3). */

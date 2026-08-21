@@ -107,6 +107,24 @@ function rawDb(): Database {
   return new Database(ledgerPath);
 }
 
+/**
+ * Write a gate_admissions row aged `ageMs` into the past. gate_admissions is
+ * append-only, so an admission older than the gate's grace window can only be
+ * inserted, never back-dated — and the window is deliberately not injectable,
+ * so the clock cannot be faked either.
+ */
+function admitAged(runId: string, requestId: string, ceiling: number, ageMs: number, issueId = "42"): void {
+  const db = rawDb();
+  try {
+    db.prepare(
+      `INSERT INTO gate_admissions (request_id, run_id, repo_slug, issue_id, ceiling_micro_usd, decided_at)
+       VALUES (?,?,?,?,?,?)`,
+    ).run(requestId, runId, "qds/demo", issueId, ceiling, new Date(Date.now() - ageMs).toISOString());
+  } finally {
+    db.close();
+  }
+}
+
 function rowCount(db: Database, table: string): number {
   return (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 }
@@ -634,12 +652,52 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     seedRecord("run-real");
     // Orphaned admission: dispatched, admitted, then store.create threw
     // (EEXIST / invalid id) — no run record, so no run can ever report spend.
-    const orphan = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-orphan", requestId: "r1" }, cap, 50_000_000);
-    expect(orphan.admitted).toBe(true);
+    // Aged past the grace window by INSERTing it directly: gate_admissions is
+    // append-only, so an old admission can only be created, never back-dated.
+    admitAged("run-orphan", "r1", cap, 10 * 60_000);
     // A later dispatch for a real run is not refused by the orphan's reservation.
     const after = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-real", requestId: "r2" }, cap, 50_000_000);
     if (!after.admitted) throw new Error("expected admission past the expired orphan reservation");
     expect(after.reservedMicroUsd).toBe(0);
+  });
+
+  test("two dispatches racing one issue cannot both win the full remaining headroom", () => {
+    // The real interleaving: A's admission COMMITs, and A has NOT yet reached
+    // store.create — so A's run record does not resolve when B walks the
+    // reservations. Without the grace window B reads A's reservation as an
+    // orphan, skips it, and both are granted the whole 5M cap.
+    const a = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-race-a", requestId: "ra" }, cap, 50_000_000);
+    if (!a.admitted) throw new Error("expected the first dispatch to be admitted");
+    expect(a.admittedCeilingMicroUsd).toBe(cap);
+    expect(RECORDS.has("run-race-a")).toBe(false); // store.create has not run yet
+
+    const b = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-race-b", requestId: "rb" }, cap, 50_000_000);
+    // A holds the entire cap, so B has no headroom at all.
+    expect(b.admitted).toBe(false);
+    expect(b.reservedMicroUsd).toBe(cap);
+
+    // And with room for both, the second ceiling is the REMAINDER — never the
+    // full headroom a second time.
+    const c = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "7", runId: "run-race-c", requestId: "rc" }, cap, 2_000_000);
+    const d = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "7", runId: "run-race-d", requestId: "rd" }, cap, 2_000_000);
+    if (!c.admitted || !d.admitted) throw new Error("expected both dispatches on the fresh issue to be admitted");
+    expect(c.admittedCeilingMicroUsd).toBe(2_000_000);
+    expect(d.reservedMicroUsd).toBe(2_000_000);
+    expect(c.admittedCeilingMicroUsd + d.admittedCeilingMicroUsd).toBeLessThanOrEqual(cap);
+  });
+
+  test("a reservation younger than the grace window counts even with no run record; an older one does not", () => {
+    admitAged("run-young", "ry", 1_000_000, 5_000); // 5s old — its dispatch is still in flight
+    const withYoung = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-x", requestId: "rx" }, cap, 500_000);
+    if (!withYoung.admitted) throw new Error("expected admission alongside the young reservation");
+    expect(withYoung.reservedMicroUsd).toBe(1_000_000);
+
+    admitAged("run-old", "ro", 1_000_000, 10 * 60_000); // 10min old, no record — orphaned
+    const withOld = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-y", requestId: "ryy" }, cap, 500_000);
+    if (!withOld.admitted) throw new Error("expected admission past the expired reservation");
+    // run-young (still young) + run-x's own 500k reservation. run-old is not
+    // counted, so adding it left the reserved figure unchanged.
+    expect(withOld.reservedMicroUsd).toBe(1_500_000);
   });
 });
 

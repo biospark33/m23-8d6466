@@ -31,6 +31,28 @@ import { log } from "../swarmclaw/log.ts";
 const MICRO_PER_USD = 1_000_000;
 const MS_PER_HOUR = 3_600_000;
 
+/**
+ * How long an admission counts toward `reservedMicroUsd` before a missing run
+ * record is read as "never created" rather than "not created yet".
+ *
+ * Dispatch admits BEFORE `store.create` (INV-COST-3), so between the admission
+ * COMMIT and the record appearing on disk there is a real interval in which
+ * that reservation resolves to no record. Without a floor on the interval, two
+ * concurrent dispatches for one issue each see the other's reservation as an
+ * orphan, each skip it, and both are granted the full remaining headroom — the
+ * cap exceeded by design gap, not by rounding.
+ *
+ * The path between the two is a `ledger.close()`, a handful of integer checks
+ * and `store.create`'s couple of syscalls: single-digit milliseconds, low
+ * hundreds on a loaded host. 60s is ~1000× that, because the two error
+ * directions are not symmetric — too short double-allocates real money, too
+ * long merely holds a genuinely orphaned reservation against the cap for one
+ * minute. Over-reserving is the fail-safe direction INV-COST-6 takes
+ * everywhere else. Deliberately not configurable: a deployment tuning this
+ * number is tuning its own odds of overspending.
+ */
+const ADMISSION_GRACE_MS = 60_000;
+
 /** DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up. */
 /** DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up. */
 function usdToMicros(usd: number): number {
@@ -730,19 +752,33 @@ export class CostLedger {
    * the one ceiling handed to DF2.3's mint (AC3). `remainingMicroUsd` is the
    * headroom AFTER spend and reservations (the same `committed` the refusal
    * check uses), so an admitted ceiling can never over-commit the issue past
-   * its cap. The reservation retires by itself once the run's first **priced**
-   * ledger row lands, so a finished run's admission never blocks the next
-   * dispatch — and an unpriced row is not observable spend: a run reporting
-   * only unpriced rows keeps its full ceiling counted, so unpriced traffic
-   * never silently restores headroom the cap was holding (a box_hours row is
-   * priced, so teardown still retires it). A run
-   * that never reports ANY row keeps its reservation — by design: that run is
-   * still open, and its teardown (or the DF2.6 reaper, which routes through
-   * teardownSandbox) is what writes the retiring box_hours row, so a
-   * reservation's lifetime is bounded by the same fleet hygiene that bounds an
-   * open record with a live box. The one expiry: an admission whose run record
-   * no longer resolves through readRunRecord (createRun's store.create failed,
-   * so no run can ever exist) stops counting — see the orphan guard below.
+   * its cap.
+   *
+   * **What a reservation means.** It is OUTSTANDING UNSPENT EXPOSURE: money the
+   * issue's cap has already committed to a run that has not yet reported
+   * spending it. It is not a bookkeeping artefact and it is not a leak, so no
+   * caller should ever "release" one on a failure path. In particular, a
+   * dispatch that fails AFTER provisioning still holds its reservation
+   * correctly: INV-5 deliberately leaves the box alive and — past the mint —
+   * the key live at the FULL admitted ceiling so an operator can diagnose the
+   * failure, so the exposure the reservation represents is entirely real. A
+   * compensating release there would under-report live risk and let the next
+   * dispatch overcommit the same cap.
+   *
+   * **How it retires.** By itself, once the run's first **priced** ledger row
+   * lands — so a finished run's admission never blocks the next dispatch. An
+   * unpriced row is not observable spend: a run reporting only unpriced rows
+   * keeps its full ceiling counted, so unpriced traffic never silently restores
+   * headroom the cap was holding. A run that never reports ANY row keeps its
+   * reservation, by design: that run is still open, and teardown's box-hours
+   * ingest (or the DF2.6 reaper, which routes through teardownSandbox) is what
+   * writes the priced `box_hours` row that retires it. A reservation's lifetime
+   * is therefore bounded by the same fleet hygiene that bounds an open record
+   * with a live box — that is the retirement path for a failed dispatch too.
+   *
+   * The one expiry: an admission older than `ADMISSION_GRACE_MS` whose run
+   * record does not resolve through readRunRecord (createRun's store.create
+   * failed, so no run can ever exist) stops counting — see the orphan guard.
    */
   admitIssue(input: AdmissionInput, capMicroUsd: number, keyCapMicroUsd: number): AdmissionDecision {
     const started = Date.now();
@@ -762,7 +798,7 @@ export class CostLedger {
         .get(input.repoSlug, input.issueId) as { total: number; n: number };
       const reservedRows = this.db
         .prepare(
-          `SELECT a.ceiling_micro_usd AS ceiling, a.run_id AS runId
+          `SELECT a.ceiling_micro_usd AS ceiling, a.run_id AS runId, a.decided_at AS decidedAt
            FROM gate_admissions a
            WHERE a.repo_slug = ? AND a.issue_id = ?
              AND NOT EXISTS (
@@ -770,18 +806,29 @@ export class CostLedger {
                WHERE ce.run_id = a.run_id AND ce.unpriced = 0
              )`,
         )
-        .all(input.repoSlug, input.issueId) as { ceiling: number; runId: string }[];
+        .all(input.repoSlug, input.issueId) as { ceiling: number; runId: string; decidedAt: string }[];
+      const graceCutoff = Date.now() - ADMISSION_GRACE_MS;
       let reservedMicroUsd = 0;
       for (const row of reservedRows) {
-        // Orphan guard: a reservation counts only while its run record still
-        // resolves. createRun admits BEFORE store.create (INV-COST-3), so an
-        // admission whose store.create failed (EEXIST, invalid run id) belongs
-        // to a run that can never report spend — and gate_admissions is
-        // append-only (INV-COST-1), so the expiry lives here in the read, not
-        // in a row mutation. readRunRecord's contract does the classifying:
-        // undefined ⇒ no record (expired reservation); a throw — e.g. a corrupt
-        // record — propagates and refuses this dispatch rather than undercount.
-        if (this.readRunRecord(row.runId) === undefined) continue;
+        // Orphan guard: a reservation counts while its run record resolves —
+        // and, for the first ADMISSION_GRACE_MS, whether it resolves or not.
+        // createRun admits BEFORE store.create (INV-COST-3), so a missing
+        // record means one of two things the record alone cannot tell apart:
+        // NEVER created (store.create failed with EEXIST or an invalid run id —
+        // that run can never report spend) or NOT created YET (the admitting
+        // dispatch is still in flight). Only the older one is an orphan; a
+        // young one still counts, which is what stops two concurrent dispatches
+        // from each skipping the other's reservation and both winning the full
+        // remaining headroom. gate_admissions is append-only (INV-COST-1), so
+        // the expiry lives here in the read, not in a row mutation.
+        // readRunRecord's contract does the classifying: undefined ⇒ no record
+        // (expired reservation); a throw — e.g. a corrupt record — propagates
+        // and refuses this dispatch rather than undercount.
+        const decidedAt = Date.parse(row.decidedAt);
+        // An unparseable decided_at counts as young for the same fail-safe
+        // reason the whole guard is conservative: over-reserve, never expire.
+        const young = !Number.isFinite(decidedAt) || decidedAt > graceCutoff;
+        if (!young && this.readRunRecord(row.runId) === undefined) continue;
         reservedMicroUsd += row.ceiling;
         // Overflow guard: sum of reservation ceilings can exceed MAX_SAFE_INTEGER
         if (reservedMicroUsd > Number.MAX_SAFE_INTEGER) {

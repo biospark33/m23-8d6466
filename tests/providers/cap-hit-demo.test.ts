@@ -505,7 +505,7 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     // promise never notices the dead box") — so the grace path is exercised
     // while the tree teardown underneath it is real and verifiable.
     const pidFile = join(dir, "tree-pids");
-    const WORKLOAD_SCRIPT = 'sleep 30 & p1=$!; sleep 30 & p2=$!; echo "$p1 $p2" > ' + JSON.stringify(pidFile) + "; wait";
+    const WORKLOAD_SCRIPT = `sleep 30 & p1=$!; sleep 30 & p2=$!; echo "$p1 $p2" > ${JSON.stringify(pidFile)}; wait`;
     class TreeUnsettledDriver implements ProviderDriver {
       readonly name = recording.name;
 

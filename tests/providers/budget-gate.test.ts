@@ -565,7 +565,7 @@ describe("E2E demo: lead+2-worker run → second dispatch over cap refused", () 
       },
       qdsCostOutput: output,
     };
-    writeFileSync(join(evidenceDir, "e2e-cost-demo.json"), JSON.stringify(testArtifact, null, 2) + "\n", { mode: 0o600 });
+    writeFileSync(join(evidenceDir, "e2e-cost-demo.json"), `${JSON.stringify(testArtifact, null, 2)}\n`, { mode: 0o600 });
 
     // Schema-assert the committed evidence artifact to detect drift (D8).
     const committedPath = join(REPO_ROOT, "_bmad-output", "evidence", "df2-8", "e2e-cost-demo.json");

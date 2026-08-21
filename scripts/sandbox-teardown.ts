@@ -23,10 +23,11 @@
  * references env-var NAMES only and key material is never printed.
  */
 
-import { rmSync, writeSync } from "node:fs";
+import { writeSync } from "node:fs";
 
 import {
   RunRecordStore,
+  assertValidRunId,
   getRecord,
   harvestRun,
   openRouterKeyApi,
@@ -39,7 +40,11 @@ import {
 import { CostLedger } from "../src/providers/cost-ledger.ts";
 import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
-import { acquireRunLock } from "./lib/run-lock.ts";
+import { acquireRunLock, releaseRunLock } from "./lib/run-lock.ts";
+
+// The lock moved to scripts/lib/run-lock.ts (shared with scripts/fleet.ts);
+// re-exported here because this CLI has always exported both symbols.
+export { acquireRunLock, RunLockedError } from "./lib/run-lock.ts";
 
 // Structured logs go to stderr so stdout carries only the command's output.
 if (import.meta.main) {
@@ -108,14 +113,16 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     throw new Error(`unexpected argument: ${positionals[positionals.length - 1]}\n${HELP.join("\n")}`);
   }
   // Path-injection guard: runId is joined into filesystem paths, so reject
-  // characters that escape the runs directory. Run IDs are minted by
-  // newId() as `<slug>-<YYYYMMDD>-<6 hex>` and validated by
-  // RUN_ID_RE = /^[a-z0-9][a-z0-9-]*$/.
+  // characters that escape the runs directory. Run IDs are minted by newId()
+  // as `<slug>-<YYYYMMDD>-<6 hex>`. The store's own validator, not a copy of
+  // its pattern: a restated regex printed a grammar the store no longer
+  // enforced (it now rejects a trailing hyphen — the id becomes a box name and
+  // then an RFC 1123 hostname label). Rethrown only to append this CLI's help.
   if (out.runId !== undefined) {
-    if (!/^[a-z0-9][a-z0-9-]*$/.test(out.runId)) {
-      throw new Error(
-        `invalid run-id: ${JSON.stringify(out.runId)} (must match /^[a-z0-9][a-z0-9-]*$/)\n${HELP.join("\n")}`,
-      );
+    try {
+      assertValidRunId(out.runId);
+    } catch (e) {
+      throw new Error(`${(e as Error).message}\n${HELP.join("\n")}`);
     }
   }
   return out;
@@ -150,72 +157,78 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
   });
   const store = new RunRecordStore({ ...(parsed.dir === undefined ? {} : { dir: parsed.dir }), requestId });
 
-  let rec: RunRecord;
-  try {
-    // Shared classifier (harvest.ts getRecord — the same one harvestRun and
-    // teardownSteps use): genuine ENOENT absence → no-record + create-the-run
-    // guidance; every other read failure → record-read-failed + inspect-first
-    // guidance, because a corrupt record can still have a live box and a live
-    // key behind it.
-    rec = getRecord({ store }, parsed.runId);
-  } catch (e) {
-    const err = e as HarvestError;
-    fail(out, err.code ?? "record-read-failed", err.message ?? String(e), err.remediation);
-    return 1;
-  }
-
   const deps: TeardownDeps = {
     driver,
     store,
     requestId,
     gitCwd: process.cwd(),
-    ...(parsed.dir === undefined ? {} : { runsDir: parsed.dir }),
+    // The store's own resolution, not a second copy of the same `?? env ??
+    // default` chain: the lock guards `<store.dir>/<runId>.lock`, so the
+    // bundle/artifact paths must be under exactly that directory.
+    runsDir: store.dir,
   };
   let lock: string | undefined;
   let ledger: CostLedger | undefined;
+  // Assigned on every path, then possibly downgraded by the finally: a release
+  // failure leaves the run wedged, and `return 0` inside the try would have
+  // committed the exit code before the cleanup could say so.
+  let outcome: number;
   try {
-    lock = acquireRunLock(store.dir, parsed.runId);
+    // The lock comes BEFORE the record read: reading first is a check-then-act
+    // across the lock boundary — a concurrent teardown closes the run and
+    // revokes its key while this invocation still holds a record that names
+    // the keyHash, and the revoke runs twice.
+    lock = acquireRunLock(store.dir, parsed.runId, "sandbox-teardown");
+    // Shared classifier (harvest.ts getRecord — the same one harvestRun and
+    // teardownSteps use): genuine ENOENT absence → no-record + create-the-run
+    // guidance; every other read failure → record-read-failed + inspect-first
+    // guidance, because a corrupt record can still have a live box and a live
+    // key behind it. Both codes reach the catch below unchanged.
+    const rec: RunRecord = getRecord({ store }, parsed.runId);
     if (parsed.mode === "harvest") {
       // D8: harvest is credential-free — no keyApi is built, so a missing
       // $OPENROUTER_PROVISIONING_KEY cannot block it.
       const res = await harvestRun(deps, parsed.runId);
       out(res.outcome === "harvested" ? `harvested: ${res.count}\n` : "harvested: none\n");
-      return 0;
+      outcome = 0;
+    } else {
+      // Keyed records need the key API (spend/revoke/verify); keyless runs work
+      // offline. openRouterKeyApi throws its own provisioning-key-missing
+      // remediation before anything is mutated.
+      if (rec.keyHash !== undefined) deps.keyApi = openRouterKeyApi();
+      // DF2.8: wire the cost ledger by default — it prices box hours at close.
+      ledger = new CostLedger({
+        readRunRecord: (id) => {
+          try {
+            const r = getRecord({ store }, id);
+            return { createdAt: r.createdAt, closedAt: r.closedAt, keyHash: r.keyHash, limitMicroUsd: r.limitMicroUsd };
+          } catch (e) {
+            // Only a genuine missing record maps to undefined — the shared
+            // getRecord classifier distinguishes it by typed code; the ledger
+            // surfaces its own structured record-missing error for that. A
+            // corrupt or unreadable record (record-read-failed) propagates: a
+            // live box and key may sit behind it, and swallowing the failure
+            // would let the ledger treat the run as never-existing.
+            if ((e as HarvestError).code === "no-record") return undefined;
+            throw e;
+          }
+        },
+      });
+      deps.costLedger = ledger;
+      await teardownSandbox(deps, parsed.runId, { noHarvest: parsed.noHarvest });
+      // The waiver goes to the run log + stdout, never the record (INV-5), and
+      // AFTER the teardown ran: printed first, it claims a waiver for a
+      // teardown that may never have happened. Same order as scripts/fleet.ts.
+      if (parsed.noHarvest) out(`teardown.harvest_waived ${parsed.runId}\n`);
+      out(`torn down: ${parsed.runId}\n`);
+      outcome = 0;
     }
-    // Keyed records need the key API (spend/revoke/verify); keyless runs work
-    // offline. openRouterKeyApi throws its own provisioning-key-missing
-    // remediation before anything is mutated.
-    if (rec.keyHash !== undefined) deps.keyApi = openRouterKeyApi();
-    // DF2.8: wire the cost ledger by default — it prices box hours at close.
-    ledger = new CostLedger({
-      readRunRecord: (id) => {
-        try {
-          const r = getRecord({ store }, id);
-          return { createdAt: r.createdAt, closedAt: r.closedAt, keyHash: r.keyHash, limitMicroUsd: r.limitMicroUsd };
-        } catch (e) {
-          // Only a genuine missing record maps to undefined — the shared
-          // getRecord classifier distinguishes it by typed code; the ledger
-          // surfaces its own structured record-missing error for that. A
-          // corrupt or unreadable record (record-read-failed) propagates: a
-          // live box and key may sit behind it, and swallowing the failure
-          // would let the ledger treat the run as never-existing.
-          if ((e as HarvestError).code === "no-record") return undefined;
-          throw e;
-        }
-      },
-    });
-    deps.costLedger = ledger;
-    // The waiver goes to the run log + stdout, never the record (INV-5).
-    if (parsed.noHarvest) out(`teardown.harvest_waived ${parsed.runId}\n`);
-    await teardownSandbox(deps, parsed.runId, { noHarvest: parsed.noHarvest });
-    out(`torn down: ${parsed.runId}\n`);
-    return 0;
   } catch (e) {
     // Non-Error rejections normalize to {} so the printer cannot itself throw
     // while reporting one.
     const err = (e ?? {}) as { code?: string; remediation?: string; message?: string };
     fail(out, err.code ?? "error", err.message ?? String(e), err.remediation);
-    return 1;
+    outcome = 1;
   } finally {
     // Close the ledger handle here so every exit path (success, teardown
     // failure, harvest return) releases it — same policy as the lock below: a
@@ -228,13 +241,15 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
         fail(out, "ledger-close-failed", `could not close the cost ledger: ${(e as Error).message}`, "the ledger is WAL-mode and the handle dies with the process; re-run to confirm it still reads");
       }
     }
-    // Release only OUR lock: a refused invocation (EEXIST) must never unlink
-    // the holder's lock file. A release failure is its own diagnostic — it
-    // must not replace a successful teardown (or the failure already
-    // reported): the exit code reflects the teardown, never the cleanup.
+    // Release only OUR lock: releaseRunLock re-reads the body and unlinks it
+    // only while it is still this invocation's claim, so a refused invocation
+    // (EEXIST) — or one whose lock was cleared and re-taken — never unlinks a
+    // live holder's file. A release failure keeps the run locked for every
+    // later teardown, so it must show up in the exit code, not only in the
+    // diagnostic.
     if (lock !== undefined) {
       try {
-        rmSync(lock, { force: true });
+        releaseRunLock(lock);
       } catch (e) {
         fail(
           out,
@@ -242,9 +257,11 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
           `could not release ${lock}: ${(e as Error).message}`,
           `rm ${lock} by hand once no other invocation holds it — until then every later teardown of this run refuses`,
         );
+        outcome = 1;
       }
     }
   }
+  return outcome;
 }
 
 if (import.meta.main) {
