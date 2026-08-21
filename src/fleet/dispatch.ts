@@ -2,14 +2,16 @@
  * Fleet dispatch verb (Story DF3.1) — the factory's front door (D3, DD-1).
  *
  * Tested TypeScript with a schema at its ingress; a tier-1 agent invokes this
- * verb and never composes provider commands itself. The sequence below mirrors
- * DF2.1's `createRun` body with the admission gates owned HERE (C1): driver.ts
- * is not editable by this story and its internal `checkHeadroom(1)` has no
+ * verb and never composes provider commands itself. The admission gates are
+ * owned HERE (C1): driver.ts's `createRun` runs `checkHeadroom(1)` with no
  * skip option, so `{ admitted: true }` (DF3.2's fan-out seam) can only be
- * honoured by composing the lifecycle primitives directly. No ceiling or limit
- * is re-derived — DF2.6 owns the fleet ceiling, DF2.8 owns the per-issue cap,
- * and this module owns exactly the two call sites (AC7/AC8) plus the mapping
- * of a refusal onto exit 5.
+ * honoured by composing the lifecycle primitives directly. The post-admission
+ * provisioning sequence (record → box) is the SAME `provisionAdmittedRun`
+ * body `createRun` composes, so the INV-1 ordering invariant has a single
+ * owner in the providers layer. No ceiling or limit is re-derived — DF2.6
+ * owns the fleet ceiling, DF2.8 owns the per-issue cap, and this module owns
+ * exactly the two call sites (AC7/AC8) plus the mapping of a refusal onto
+ * exit 5.
  *
  * Ordering (INV-1/INV-3): validate → resolve → admit → record → box → key →
  * fill → setup gate → ack. A rejected dispatch provisions nothing (INV-2);
@@ -22,7 +24,7 @@ import { appendDispatchFailure } from "../phase-engine/issue-correlation.ts";
 import { isValidUuidV4, resolveRunCorrelation } from "../phase-engine/issue-correlation.ts";
 import { CorrelationError } from "../phase-engine/issue-correlation.ts";
 import { loadManifest, serializeManifest, stampManifestLimit } from "../phase-engine/manifest.ts";
-import { SBX_OWNERSHIP_TAG, fillRun, type ProviderDriver, type ProviderVm } from "../providers/driver.ts";
+import { fillRun, provisionAdmittedRun, type ProviderDriver } from "../providers/driver.ts";
 import { mintRunKey, deliverRunKey, type KeyApi } from "../providers/credentials.ts";
 import { assertWithinBudget, OverBudgetError } from "../providers/budget-gate.ts";
 import { checkHeadroom, type LoadedQuotaLimits } from "../providers/quota.ts";
@@ -337,27 +339,23 @@ export async function dispatch(
   // AC9b: the ONE ceiling — DF2.8 computed min(keyCap, remaining); propagate.
   const effectiveCeilingMicros = decision.admittedCeilingMicroUsd;
 
-  // ── 5. record (INV-3: record → box → key, enforced by construction) ────────
-  const tMint = Date.now();
-  deps.store.create(runId);
-  deps.store.set(runId, {
-    extensions: {
-      budget: {
-        repoSlug: valid.repoSlug,
-        issueId: String(valid.issueId),
-        capMicroUsd: decision.capMicroUsd,
-        spentMicroUsd: decision.spentMicroUsd,
-        reservedMicroUsd: decision.reservedMicroUsd,
-        admittedCeilingMicroUsd: decision.admittedCeilingMicroUsd,
-      },
+  // ── 5+6. record → box (INV-3: record → box → key, enforced by construction).
+  // The sequence is provisionAdmittedRun — the same body createRun composes —
+  // so the record-before-VM invariant cannot drift between the two callers.
+  const tProvision = Date.now();
+  const { vm, httpsUrl } = await provisionAdmittedRun(deps.driver, deps.store, {
+    runId,
+    ...(deps.port === undefined ? {} : { port: deps.port }),
+    budget: {
+      repoSlug: valid.repoSlug,
+      issueId: String(valid.issueId),
+      capMicroUsd: decision.capMicroUsd,
+      spentMicroUsd: decision.spentMicroUsd,
+      reservedMicroUsd: decision.reservedMicroUsd,
+      admittedCeilingMicroUsd: decision.admittedCeilingMicroUsd,
     },
   });
-  phase("mint_ms", Date.now() - tMint);
-
-  // ── 6. box ──────────────────────────────────────────────────────────────────
-  const tCreate = Date.now();
-  const vm: ProviderVm = await deps.driver.create(runId, SBX_OWNERSHIP_TAG);
-  phase("create_ms", Date.now() - tCreate);
+  phase("provision_ms", Date.now() - tProvision);
   if (expired()) {
     throw new FleetError(
       1,
@@ -367,16 +365,6 @@ export async function dispatch(
       { runId, vmName: vm.name },
     );
   }
-  let httpsUrl = vm.httpsUrl;
-  const patch: { vmName: string; httpsUrl?: string; ports?: number[] } = { vmName: vm.name };
-  if (httpsUrl !== undefined) patch.httpsUrl = httpsUrl;
-  if (deps.port !== undefined) {
-    httpsUrl = await deps.driver.expose(vm.name, deps.port);
-    await deps.driver.setPublic(vm.name);
-    patch.httpsUrl = httpsUrl;
-    patch.ports = [deps.port];
-  }
-  deps.store.set(runId, patch);
 
   // ── 7. key (INV-4: plaintext exists in the mint return and nowhere else) ───
   const credEnvFile = envFileFor(deps.driver);

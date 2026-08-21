@@ -21,7 +21,6 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { defaultKeyCapMicroUsd } from "../../src/providers/credentials.ts";
 import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
 
 /** Fresh limits — NEVER mutate DEFAULT_QUOTA_LIMITS (shared, unfrozen reference). */
@@ -42,28 +41,11 @@ import {
   type DispatchDeps,
   type LedgerLike,
 } from "../../src/fleet/dispatch.ts";
+import { goodLedger } from "./helpers.ts";
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "df3-1-dispatch-"));
 
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
-
-/** A ledger that admits at `ceiling` µ$ (the DF2.8 admitted decision shape). */
-function goodLedger(ceilingMicroUsd: number = defaultKeyCapMicroUsd): LedgerLike {
-  return {
-    config: { defaultCapMicroUsd: ceilingMicroUsd, perIssueOverrides: {} },
-    admitIssue: () => ({
-      admitted: true as const,
-      status: "within-budget" as const,
-      admittedCeilingMicroUsd: ceilingMicroUsd,
-      capMicroUsd: ceilingMicroUsd,
-      spentMicroUsd: 0,
-      reservedMicroUsd: 0,
-      remainingMicroUsd: ceilingMicroUsd,
-      unpricedRows: 0,
-    }),
-    close: () => {},
-  };
-}
 
 /** A ledger whose issue is over cap (the DF2.8 refused decision shape). */
 function overBudgetLedger(): LedgerLike {
@@ -411,11 +393,16 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       }),
     );
 
-    // Subsequence: record < box < mint < first sh-exec (deliver/fill) < gate
-    expect(callOrder.indexOf("store.create")).toBeLessThan(callOrder.indexOf("driver.create"));
-    expect(callOrder.indexOf("driver.create")).toBeLessThan(callOrder.indexOf("mint"));
-    expect(callOrder.indexOf("mint")).toBeLessThan(callOrder.indexOf("sh-exec"));
-    expect(callOrder.indexOf("sh-exec")).toBeLessThan(callOrder.indexOf("gate"));
+    // Subsequence: record < box < mint < first sh-exec (deliver/fill) < gate.
+    // Containment asserted first — indexOf's -1 would otherwise satisfy any
+    // comparison for a call that never happened.
+    const expectInOrder = (calls: string[], ...names: string[]): void => {
+      for (const name of names) expect(calls).toContain(name);
+      for (let i = 1; i < names.length; i++) {
+        expect(calls.indexOf(names[i - 1] as string)).toBeLessThan(calls.indexOf(names[i] as string));
+      }
+    };
+    expectInOrder(callOrder, "store.create", "driver.create", "mint", "sh-exec", "gate");
   });
 
   // ─── Cap hand-off (AC9) ─────────────────────────────────────────────────────────

@@ -17,12 +17,14 @@ import { listVerbs, renderHelp } from "../../src/fleet/verbs.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
-import { defaultKeyCapMicroUsd } from "../../src/providers/credentials.ts";
 import type { FleetDeps, } from "../../scripts/fleet.ts";
-import type { LedgerLike } from "../../src/fleet/dispatch.ts";
+import { goodLedger } from "./helpers.ts";
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "df3-1-cli-"));
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
+
+/** Brief ingress cap, mirrored from scripts/fleet.ts for the path-based test. */
+const MAX_BRIEF_BYTES = 64 * 1024;
 
 function validBriefJson(dir: string): string {
   const manifestDir = join(dir, "manifests");
@@ -47,23 +49,6 @@ function validBriefJson(dir: string): string {
     manifestPath,
     repoUrl: "https://github.com/owner/repo",
   });
-}
-
-function goodLedger(ceilingMicroUsd: number = defaultKeyCapMicroUsd): LedgerLike {
-  return {
-    config: { defaultCapMicroUsd: ceilingMicroUsd, perIssueOverrides: {} },
-    admitIssue: () => ({
-      admitted: true as const,
-      status: "within-budget" as const,
-      admittedCeilingMicroUsd: ceilingMicroUsd,
-      capMicroUsd: ceilingMicroUsd,
-      spentMicroUsd: 0,
-      reservedMicroUsd: 0,
-      remainingMicroUsd: ceilingMicroUsd,
-      unpricedRows: 0,
-    }),
-    close: () => {},
-  };
 }
 
 describe("scripts/fleet.ts (DF3.1 CLI)", () => {
@@ -164,6 +149,17 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(captured.join("")).toContain("brief-too-large");
   });
 
+  test("--brief <path> over 64 KiB → exit 2 brief-too-large, never invalid-brief", async () => {
+    // Path-sourced oversize is refused by readBrief's stat BEFORE any JSON
+    // parse — the catch must re-emit the FleetError, not relabel it.
+    const bigPath = join(dir, "big-brief.json");
+    writeFileSync(bigPath, "x".repeat(MAX_BRIEF_BYTES + 1));
+    const code = await run(["dispatch", "--brief", bigPath], out, {});
+    expect(code).toBe(2);
+    expect(captured.join("")).toContain("brief-too-large");
+    expect(captured.join("")).not.toContain("invalid-brief");
+  });
+
   test("invalid JSON brief → exit 2", async () => {
     const code = await run(["dispatch"], out, deps("{not json"));
     expect(code).toBe(2);
@@ -174,7 +170,10 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
 
   test("status <unknown-runId> → exit 4 run-not-found, no driver list call", async () => {
     const driver = new FakeDriver(boxesDir);
-    const listSpy = mock(() => driver.list.bind(driver)());
+    // Bind BEFORE overwriting: reading driver.list inside the mock after the
+    // reassignment would recurse into the mock itself.
+    const originalList = driver.list.bind(driver);
+    const listSpy = mock(() => originalList());
     driver.list = listSpy;
     const d = deps(validBriefJson(dir));
     (d as { driver?: FakeDriver }).driver = driver;

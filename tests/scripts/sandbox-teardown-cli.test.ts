@@ -15,7 +15,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { RunRecordStore } from "../../src/providers/run-record.ts";
-import { acquireRunLock, run } from "../../scripts/sandbox-teardown.ts";
+import { run } from "../../scripts/sandbox-teardown.ts";
+import { acquireRunLock } from "../../scripts/lib/run-lock.ts";
 
 let dir: string;
 let runs: string;
@@ -56,7 +57,7 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     const first = acquireRunLock(runs, "lock-unit");
     expect(first).toBe(join(runs, "lock-unit.lock"));
     expect(readFileSync(first, "utf8")).toMatch(new RegExp(`^${process.pid} \\d{4}-\\d{2}-\\d{2}T`));
-    expect(() => acquireRunLock(runs, "lock-unit")).toThrow("another sandbox-teardown holds");
+    expect(() => acquireRunLock(runs, "lock-unit")).toThrow("another invocation holds");
     rmSync(first);
     expect(acquireRunLock(runs, "lock-unit")).toBe(first);
   });

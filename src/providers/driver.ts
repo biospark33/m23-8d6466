@@ -115,8 +115,25 @@ export interface CreateRunOptions {
   };
 }
 
+/** DF2.8 budget-admission facts, as they land on the record's budget extension. */
+export interface AdmittedBudget {
+  repoSlug: string;
+  issueId: string;
+  capMicroUsd: number;
+  spentMicroUsd: number;
+  reservedMicroUsd: number;
+  admittedCeilingMicroUsd: number;
+}
+
+export interface ProvisionedRun {
+  record: RunRecord;
+  vm: ProviderVm;
+  httpsUrl?: string;
+}
+
 /**
- * Lifecycle verb `create` — INV-1: **record → VM → key**.
+ * The post-admission provisioning sequence — INV-1's single owner: **record →
+ * VM → key**.
  *
  * The run record is written to the host before any driver call that can create
  * billable infrastructure, and `driver.create()` is unreachable from here
@@ -124,6 +141,54 @@ export interface CreateRunOptions {
  * than an open record; a crash after it leaves teardown a handle. The reverse
  * ordering — VM or key first — is the defect this invariant exists to prevent
  * (a failed VM after a mint orphans a key that spends money invisibly).
+ *
+ * `createRun` (below) and the fleet dispatcher (`src/fleet/dispatch.ts`) both
+ * compose this function after their own admission gates, so the record-before-
+ * VM invariant has exactly one implementation to change.
+ */
+export async function provisionAdmittedRun(
+  driver: ProviderDriver,
+  store: RunRecordStore,
+  opts: { runId: string; port?: number; budget?: AdmittedBudget },
+): Promise<ProvisionedRun> {
+  // Record first. If this throws (EEXIST, bad id) no box is ever created.
+  store.create(opts.runId);
+  if (opts.budget !== undefined) {
+    store.set(opts.runId, {
+      extensions: {
+        budget: {
+          repoSlug: opts.budget.repoSlug,
+          issueId: opts.budget.issueId,
+          capMicroUsd: opts.budget.capMicroUsd,
+          spentMicroUsd: opts.budget.spentMicroUsd,
+          reservedMicroUsd: opts.budget.reservedMicroUsd,
+          admittedCeilingMicroUsd: opts.budget.admittedCeilingMicroUsd,
+        },
+      },
+    });
+  }
+  // D1: every factory-provisioned VM carries the canonical ownership tag —
+  // not caller-displaceable. A custom tag would make a factory box classify
+  // `foreign` in the DF2.6 reaper (tag !== SBX_OWNERSHIP_TAG ⇒ reported,
+  // never destroyed), i.e. an unreapable leak by construction. Callers with
+  // extra metadata to attach belong in the run record, not the VM tag.
+  const vm = await driver.create(opts.runId, SBX_OWNERSHIP_TAG);
+  let httpsUrl = vm.httpsUrl;
+  if (opts.port !== undefined) {
+    httpsUrl = await driver.expose(vm.name, opts.port);
+    await driver.setPublic(vm.name);
+  }
+  const record = store.set(opts.runId, {
+    vmName: vm.name,
+    ...(httpsUrl === undefined ? {} : { httpsUrl }),
+    ...(opts.port === undefined ? {} : { ports: [opts.port] }),
+  });
+  return { record, vm, ...(httpsUrl === undefined ? {} : { httpsUrl }) };
+}
+
+/**
+ * Lifecycle verb `create` — INV-1: **record → VM → key** (the sequence itself
+ * lives in `provisionAdmittedRun` above; this function owns the gates).
  */
 export async function createRun(
   driver: ProviderDriver,
@@ -181,38 +246,24 @@ export async function createRun(
       }
     }
   }
-  // Record first. If this throws (EEXIST, bad id) no box is ever created.
-  store.create(opts.runId);
-  if (admitted !== undefined) {
-    store.set(opts.runId, {
-      extensions: {
-        budget: {
-          repoSlug: admitted.repoSlug,
-          issueId: admitted.issueId,
-          capMicroUsd: admitted.decision.capMicroUsd,
-          spentMicroUsd: admitted.decision.spentMicroUsd,
-          reservedMicroUsd: admitted.decision.reservedMicroUsd,
-          admittedCeilingMicroUsd: admitted.decision.admittedCeilingMicroUsd,
-        },
-      },
-    });
-  }
-  // D1: every factory-provisioned VM carries the canonical ownership tag —
-  // not caller-displaceable. A custom tag would make a factory box classify
-  // `foreign` in the DF2.6 reaper (tag !== SBX_OWNERSHIP_TAG ⇒ reported,
-  // never destroyed), i.e. an unreapable leak by construction. Callers with
-  // extra metadata to attach belong in the run record, not the VM tag.
-  const vm = await driver.create(opts.runId, SBX_OWNERSHIP_TAG);
-  let httpsUrl = vm.httpsUrl;
-  if (opts.port !== undefined) {
-    httpsUrl = await driver.expose(vm.name, opts.port);
-    await driver.setPublic(vm.name);
-  }
-  return store.set(opts.runId, {
-    vmName: vm.name,
-    ...(httpsUrl === undefined ? {} : { httpsUrl }),
-    ...(opts.port === undefined ? {} : { ports: [opts.port] }),
-  });
+  return (
+    await provisionAdmittedRun(driver, store, {
+      runId: opts.runId,
+      ...(opts.port === undefined ? {} : { port: opts.port }),
+      ...(admitted === undefined
+        ? {}
+        : {
+            budget: {
+              repoSlug: admitted.repoSlug,
+              issueId: admitted.issueId,
+              capMicroUsd: admitted.decision.capMicroUsd,
+              spentMicroUsd: admitted.decision.spentMicroUsd,
+              reservedMicroUsd: admitted.decision.reservedMicroUsd,
+              admittedCeilingMicroUsd: admitted.decision.admittedCeilingMicroUsd,
+            },
+          }),
+    })
+  ).record;
 }
 
 /**

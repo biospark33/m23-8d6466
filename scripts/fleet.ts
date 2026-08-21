@@ -12,11 +12,11 @@
  * Harvest/teardown are thin, guard-preserving front doors onto DF2.5
  * (AC5): verify-before-fetch, the refs/sandbox/ refspec and the fixed
  * teardown order all stay inside harvestRun/teardownSandbox; the per-run
- * invocation lock from DF2.5's CLI is replicated verbatim below.
+ * invocation lock is shared with DF2.5's CLI (scripts/lib/run-lock.ts) so
+ * both entry points enforce identical teardown safety semantics.
  */
-import { closeSync, openSync, writeSync } from "node:fs";
+import { writeSync } from "node:fs";
 import { readFileSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
 
 
 import {
@@ -33,6 +33,7 @@ import {
 } from "../src/providers/index.ts";
 import { RunRecordStore } from "../src/providers/index.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
+import { acquireRunLock } from "./lib/run-lock.ts";
 import { setLogSink, newRequestId } from "../src/swarmclaw/log.ts";
 import { dispatch, FleetError, type DispatchDeps, type LedgerLike } from "../src/fleet/dispatch.ts";
 import { listVerbs, renderHelp } from "../src/fleet/verbs.ts";
@@ -152,6 +153,12 @@ export async function run(
       }
       briefJson = JSON.parse(rawBrief);
     } catch (e) {
+      // readBrief's own guard throws FleetError (brief-too-large) before any
+      // parsing happens — re-emit it as itself, never as a JSON parse error.
+      if (e instanceof FleetError) {
+        printError(out, e.code, e.message, e.remediation);
+        return e.exitCode;
+      }
       printError(out, "invalid-brief", `brief is not valid JSON: ${(e as Error).message}`, "fix the JSON on stdin or in --brief <path>");
       return 2;
     }
@@ -322,51 +329,6 @@ export async function run(
 
   printError(out, "unknown-verb", `unknown verb ${JSON.stringify(verb)}`, HELP);
   return 2;
-}
-
-// ─── per-run invocation lock — DF2.5's guard, replicated verbatim ────────────
-// (scripts/sandbox-teardown.ts is not in this story's Files-to-Modify set, so
-// its acquireRunLock is copied here rather than imported; behavior is identical
-// and both must stay in sync.)
-
-class RunLockedError extends Error {
-  constructor(
-    public readonly lockPath: string,
-    public readonly holder: string,
-  ) {
-    super(`run ${JSON.stringify(lockPath)} is locked (${holder})`);
-    this.name = "RunLockedError";
-  }
-}
-
-function acquireRunLock(runsDir: string, runId: string): string {
-  const lock = join(runsDir, `${runId}.lock`);
-  // "wx" = O_EXCL: fails if ANY file (live lock, stale lock, debris) exists.
-  // No-steal policy: a stale lock is reported with its holder info, never
-  // silently unlinked — the holder may still be mid-teardown.
-  try {
-    const handle = openSync(lock, "wx", 0o600);
-    const body = `${process.pid} ${new Date().toISOString()}`;
-    writeSync(handle, body);
-    closeSync(handle);
-    return lock;
-  } catch (e) {
-    const err = e as NodeJS.ErrnoException;
-    if (err.code !== "EEXIST") throw err;
-    let held = "";
-    try {
-      held = readFileSync(lock, "utf8").trim();
-    } catch {
-      /* unreadable lock — report it as unknown-held */
-    }
-    const [pid, iso] = held.split(/\s+/);
-    const at = Date.parse(iso ?? "");
-    const who =
-      /^\d+$/.test(pid ?? "") && !Number.isNaN(at)
-        ? `pid ${pid}, held ${Math.max(0, Math.round((Date.now() - at) / 1000))}s`
-        : `holder unknown, lock body ${JSON.stringify(held)}`;
-    throw new RunLockedError(lock, who);
-  }
 }
 
 if (import.meta.main) {
