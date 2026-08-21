@@ -153,35 +153,99 @@ describe("startup validation (INV-1/INV-5, AC5)", () => {
   // and a vite dev server proxying /api to a process that refused to bind.
   // `${VAR:?}` alone only catches unset/empty, so the SHORT-token case is the
   // one that matters here: it is a live token value that still fails startup.
-  describe("dev:all preflight blocks vite on every token-validation failure", () => {
-    const run = (token: string | undefined) =>
-      spawnSync("bun", ["run", "--silent", "preflight"], {
-        cwd: path.join(import.meta.dir, ".."),
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          ...(token === undefined ? {} : { QDS_VIZ_TOKEN: token }),
-          ...(token === undefined ? { QDS_VIZ_TOKEN: "" } : {}),
-        },
-      });
+  // The dev:all preflight is the only thing standing between a rejected
+  // startup env and a vite dev server proxying /api to a process that refused
+  // to bind. `${VAR:?}` alone only catches unset/empty, so the cases that
+  // matter are the ones with a PRESENT value that still fails validation.
+  describe("dev:all preflight blocks vite on startup-validation failure", () => {
+    const VIZ_DIR = path.join(import.meta.dir, "..");
 
-    test("an unset token fails the preflight", () => {
-      const r = run(undefined);
+    /** `token`/`port` omitted = variable genuinely absent from the child env. */
+    const run = (vars: { token?: string; port?: string }) => {
+      // Built by FILTERING, not by `delete` or an `= undefined` assignment:
+      // the unset case has to hand the child a genuinely absent variable, and
+      // an explicit undefined value is a different thing to the spawn layer.
+      const env: Record<string, string | undefined> = Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([k]) => k !== "QDS_VIZ_TOKEN" && k !== "QDS_VIZ_PORT",
+        ),
+      );
+      if (vars.token !== undefined) env.QDS_VIZ_TOKEN = vars.token;
+      if (vars.port !== undefined) env.QDS_VIZ_PORT = vars.port;
+      return spawnSync("bun", ["run", "--silent", "preflight"], {
+        cwd: VIZ_DIR,
+        encoding: "utf8",
+        env,
+      });
+    };
+
+    const OK_TOKEN = "x".repeat(32);
+
+    test("an UNSET token fails (variable absent, not merely empty)", () => {
+      const r = run({});
       expect(r.status).not.toBe(0);
       expect(r.stderr).toContain("QDS_VIZ_TOKEN is unset");
     });
 
-    test("a NON-EMPTY 31-byte token fails the preflight", () => {
-      const r = run("x".repeat(31));
+    test("an EMPTY token fails — a distinct state from unset", () => {
+      const r = run({ token: "" });
       expect(r.status).not.toBe(0);
-      // Proves the preflight enforces the byte minimum, not just presence:
-      // this token would sail past a bare `${QDS_VIZ_TOKEN:?}` guard.
+      expect(r.stderr).toContain("QDS_VIZ_TOKEN is unset");
+    });
+
+    test("a NON-EMPTY 31-byte token fails", () => {
+      const r = run({ token: "x".repeat(31) });
+      expect(r.status).not.toBe(0);
+      // Would sail past a bare `${QDS_VIZ_TOKEN:?}` guard — this is the case
+      // that made round 3's fix incomplete.
       expect(r.stderr).toContain("31 bytes, minimum is 32");
     });
 
-    test("a valid 32-byte token passes the preflight", () => {
-      const r = run("x".repeat(32));
-      expect(r.status).toBe(0);
+    test("the minimum is UTF-8 BYTES, not code units", () => {
+      // 11 code units, 33 bytes → accepted. A `token.length < 32` check would
+      // reject it, so this is the regression barrier for that specific bug.
+      const wide = "\u6f22".repeat(11);
+      expect(wide.length).toBe(11);
+      expect(Buffer.byteLength(wide, "utf8")).toBe(33);
+      expect(run({ token: wide }).status).toBe(0);
+
+      // 10 code units, 30 bytes → rejected. A code-unit check would also
+      // reject it, so the pair is what pins byte semantics, not either alone.
+      const narrow = "\u6f22".repeat(10);
+      expect(Buffer.byteLength(narrow, "utf8")).toBe(30);
+      const r = run({ token: narrow });
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain("30 bytes, minimum is 32");
+    });
+
+    test("a valid token with an INVALID PORT still fails the preflight", () => {
+      // preflight validates the port too: otherwise a bad QDS_VIZ_PORT passes,
+      // the backgrounded server exits, and vite comes up against a dead API.
+      const r = run({ token: OK_TOKEN, port: "80" });
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain("QDS_VIZ_PORT");
+    });
+
+    test("a valid token and port pass", () => {
+      expect(run({ token: OK_TOKEN, port: "4601" }).status).toBe(0);
+      expect(run({ token: OK_TOKEN }).status).toBe(0);
+    });
+
+    test("dev:all is actually WIRED to preflight, not just parallel to it", () => {
+      // Every test above invokes `preflight` directly; none of them would
+      // notice if dev:all stopped depending on it. This asserts the wiring.
+      const pkg = JSON.parse(
+        fs.readFileSync(path.join(VIZ_DIR, "package.json"), "utf8"),
+      ) as { scripts: Record<string, string> };
+      const devAll = pkg.scripts["dev:all"] ?? "";
+      expect(devAll).toContain("preflight");
+      // The gate must precede the launch, and the launch must be grouped:
+      // `guard && server & vite` parses as `(guard && server) & vite`, which
+      // starts vite regardless — the exact trap this fix had to avoid.
+      expect(devAll).toMatch(/preflight\s*&&\s*\{.*vite.*\}/s);
+      expect(devAll.indexOf("preflight")).toBeLessThan(devAll.indexOf("vite"));
+      expect(pkg.scripts.preflight ?? "").toContain("validateToken");
+      expect(pkg.scripts.preflight ?? "").toContain("validatePort");
     });
   });
 

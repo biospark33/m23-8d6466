@@ -105,11 +105,16 @@ checksums — those go stale on the next commit.
     the auth gate makes `QDS_VIZ_TOKEN` mandatory, so upstream's
     `dev:all` ("server & vite") left vite running against a server that had
     refused to bind, proxying to a dead API. A new `preflight` script runs
-    `validateToken` from `server/auth.ts` and `dev:all` is gated on it, so
-    vite starts only when startup validation would actually succeed —
-    covering a short-but-present token, not just an unset one. The preflight
-    calls the real validator rather than restating the byte rule in shell,
+    `validateToken` and `validatePort` from `server/auth.ts`, and `dev:all` is
+    gated on it, so vite does not start when either of those refuses — which
+    covers a short-but-present token, not just an unset one. The preflight
+    calls the real validators rather than restating the byte rule in shell,
     which would drift from `auth.ts` the moment the rule changes.
+    **Scope, precisely:** the preflight covers the two pure env validators
+    only. Startup can still fail afterwards on things it cannot check without
+    side effects — the trace db missing or unreadable, or `Bun.serve` failing
+    to bind (`EADDRINUSE`) — and in those cases the backgrounded server exits
+    while vite keeps running, as it did upstream.
     `server` and `preview` are unchanged: they already exit non-zero with a
     named `VIZ_TOKEN_MISSING` / `VIZ_TOKEN_SHORT` error and remediation text,
     which is the correct behaviour for a foreground process.

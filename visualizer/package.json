@@ -12,7 +12,7 @@
     "preview": "bun run server/index.ts",
     "typecheck": "vue-tsc --noEmit",
     "lint": "oxlint .",
-    "preflight": "bun --eval \"const { validateToken } = await import('./server/auth.ts'); try { validateToken(process.env) } catch (e) { console.error(e.message); if (e.remediation) console.error(e.remediation); process.exit(1) }\""
+    "preflight": "bun --eval \"const { validateToken, validatePort } = await import('./server/auth.ts'); try { validateToken(process.env); validatePort(process.env) } catch (e) { console.error(e.message); if (e.remediation) console.error(e.remediation); process.exit(1) }\""
   },
   "dependencies": {
     "@fontsource/play": "^5.3.0",
