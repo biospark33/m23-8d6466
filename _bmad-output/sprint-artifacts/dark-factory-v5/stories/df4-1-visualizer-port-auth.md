@@ -653,9 +653,9 @@ cannot be honestly reproduced here.
 **Deferred to DF4.2** (its story owns the test suite, the Bun-API inventory and per-box deploy):
 client-side/DOM test infrastructure (so AC2's render half and `api.ts`'s credential claims stay
 untested by machine), the `main()` process-exit test, the trace-locked-past-`busy_timeout` test,
-`resolveDbPath` and the `journal_mode` warn path, event-list windowing, and the vendored
-`package.json` dev scripts that the mandatory startup token broke (`bun run server` / `dev:all`
-now exit at startup).
+`resolveDbPath` and the `journal_mode` warn path, and event-list windowing. The vendored
+`package.json` dev scripts were listed here as deferred; rounds 3-6 resolved that instead — see
+the merge record below.
 
 **Pre-existing, untouched by this PR:** 5 biome errors (`scripts/qds-cost.ts`,
 `src/providers/budget-gate.ts`, `tests/providers/*`) and 2 GitNexus tests that shell out to the
@@ -670,3 +670,32 @@ clean · `bunx @biomejs/biome check visualizer` clean · AC0 same-pin re-vendor 
 pinned inputs → exit 0, no-op, hardening intact · `detect_changes` vs the working tree → 89
 symbols across 13 processes, all inside `visualizer/**` and `scripts/vendor-visualizer.ts`, no
 out-of-scope module.
+
+### Review Rounds 2-7 (autonomous PR monitor, 2026-08-21)
+
+Round 1 was the 8-agent adversarial wave recorded above. Rounds 2-7 ran under `qds-pr-monitor`
+against PR #124, driven by CodeRabbit and Sift. Every round is dispositioned; nothing was
+deferred out of these six.
+
+| Round | Head | Finding | Disposition |
+|---|---|---|---|
+| 2 | `7d46808` | `SessionsList.vue` poll timer never cleared on unmount, and the backoff path re-armed a second interval | Fixed — single `stopPolling()`/`startPolling()` pair, `onUnmounted(stopPolling)`. Self-inflicted regression from the round-1 backoff patch. |
+| 3 | `6f90777` | `dev:all` started vite even when `QDS_VIZ_TOKEN` was absent | Fixed with a `${VAR:?}` guard. **Incomplete** — see round 4. |
+| 4 | `8c3ff0b` | CodeRabbit: `${VAR:?}` catches only unset/empty, so a present-but-invalid 31-byte token still reached vite | Fixed properly — a `preflight` script that calls the real `validateToken`, rather than restating the rule in shell. The lesson: a guard that re-implements a validator will drift from it. |
+| 5 | `e053aff` | CodeRabbit: preflight validated only the token, so a bad `QDS_VIZ_PORT` still let vite start; the "unset" test actually set `""`; tokens were ASCII-only so nothing pinned byte-vs-code-unit semantics | All three fixed — added `validatePort`; separated unset from empty by *filtering* the child env (biome's `noDelete` autofix to `= undefined` would have silently gutted the unset case); added the 漢x11 (33 bytes, passes) / 漢x10 (30 bytes, fails) pair; added a wiring assertion so a script reordering fails a test. PROVENANCE narrowed to name what preflight still does not cover (missing trace db, `EADDRINUSE`). |
+| 6 | `001dd36` | Duplicated rationale comment block in `auth.test.ts` (round 5 rewrote it and left the old copy) | Fixed. |
+| 7 | `85a71f3` | PROVENANCE's auth inventory named only Bearer, but the gate also accepts `Basic base64(":"+token)` — the deliberate browser-navigation fallback | Fixed. Verified against `credentialScheme()` before editing. Arrived as a **review body**, not an inline or issue comment: CodeRabbit posts "outside diff range" findings there, so a monitor polling only the two comment namespaces would have missed it entirely. |
+
+**Merge record.** PR #124 merged to `main` 2026-08-21 as `65bc73b` (merge commit, author
+`i3creations`). Head at merge `85a71f3`. Final gates: visualizer 136/136, vendor 22/22,
+`typecheck:visualizer` clean, `lint:visualizer` 0 errors, AC0 same-pin re-vendor re-run exit 0
+and no-op. CodeRabbit assessed the PR merge-ready excluding CI; Sift closed with three
+consecutive clean passes.
+
+**CI was RED at merge and this was accepted deliberately.** The `check` job fails in ~5 s with
+zero steps and no logs, annotated *"The job was not started because recent account payments have
+failed or your spending limit needs to be increased."* It fails identically on `main`, so it is
+a GitHub Actions billing block on the account, not a defect in this branch. No branch protection
+exists on `main` (protection endpoint 404), so nothing mechanically gated the merge. **The
+consequence to carry forward: no CI-verified green exists for this story, and none will for any
+QDS-Factory PR until the billing block is cleared.** The gates above were all run locally.

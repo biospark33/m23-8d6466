@@ -2,7 +2,7 @@ story: df4-1
 title: "Visualizer Port + Tunneled Auth Gate"
 points: 6
 sprint: v5-S3
-phase: 5-review
+phase: 6-merged
 baseline_commit: 31c4a0d20e015eee5ff2da3c7b5ccf0d06ca676f
 ac0:
   vendored: 33 files from https://github.com/disler/super-simple-software-factory@de31374882e7a4e3e5b7bb9bd09e69dc2f779356
@@ -27,4 +27,20 @@ upstream:
 research_wave:
   launched: 2026-08-21
   tracks: [A-libs, B-codebase, C-examples, D-specs, E-deps, F-crosstrack, G-upstream]
+merge:
+  pr: 124
+  merged_commit: 65bc73b        # merge commit on main
+  head_at_merge: 85a71f3
+  merged_at: 2026-08-21
+  merged_by: i3creations
+  review_rounds: 7              # round 1 = 8-agent adversarial wave; rounds 2-7 = qds-pr-monitor (CodeRabbit + Sift)
+  final_gates:
+    visualizer_tests: "136/136"
+    vendor_tests: "22/22"
+    typecheck_visualizer: clean
+    lint_visualizer: clean
+    revendor_same_pin: "exit 0, no-op"
+  ci_at_merge: red-non-code     # GitHub Actions billing block on the account; fails identically on main
+  ci_caveat: "No CI-verified green exists for this story. All gates above were run locally. No branch protection on main (404), so nothing mechanically gated the merge."
+  branches_deleted: {local: true, remote: true}
 guardrail_log: []
