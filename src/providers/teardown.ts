@@ -36,7 +36,7 @@ import { join } from "node:path";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { captureSpend, revokeRunKey, verifyRevoked, type CredentialDeps, type KeyApi } from "./credentials.ts";
-import type { ProviderDriver } from "./driver.ts";
+import { stopVisualizer, type ProviderDriver } from "./driver.ts";
 import type { BoxHoursCtx } from "./cost-ledger.ts";
 import {
   bunGitRunner,
@@ -97,9 +97,18 @@ export interface TeardownOptions {
 
 // ─── observability ───────────────────────────────────────────────────────────
 
-type TeardownStep = "spend" | "artifacts" | "harvest" | "revoke" | "verify" | "destroy" | "close";
+type TeardownStep = "stopVisualizer" | "spend" | "artifacts" | "harvest" | "revoke" | "verify" | "destroy" | "close";
 
-const STEPS: readonly TeardownStep[] = ["spend", "artifacts", "harvest", "revoke", "verify", "destroy", "close"];
+const STEPS: readonly TeardownStep[] = [
+  "stopVisualizer",
+  "spend",
+  "artifacts",
+  "harvest",
+  "revoke",
+  "verify",
+  "destroy",
+  "close",
+];
 
 /** Teardown's outcome vocabulary for the shared step logger (step-log.ts). */
 const STEP_LABELS = { ok: "ran", error: "failed", errorCode: "teardown_error" };
@@ -135,6 +144,70 @@ async function runBoxStep(ctx: StepCtx, step: "artifacts" | "harvest", fn: () =>
   } catch (e) {
     if (!isNoSuchBox(e)) throw e;
     skipStep(ctx, step, "box already gone — destroyed before this step ran; nothing left to pull");
+  }
+}
+
+/**
+ * DF4.2's prepended step — stop the visualizer before anything else runs.
+ * Deliberately NOT `runStep`: every other step here is fail-closed (a throw
+ * aborts the whole sequence, box left alive, record left open), but AC6
+ * requires the opposite for this one specifically — a stop failure is
+ * logged with its cause and teardown CONTINUES past it, because a stray
+ * visualizer process must never be able to wedge a run open or block the
+ * box from coming down. This is a deliberate, visible carve-out from the
+ * ambient fail-closed rule, not an accidental swallow.
+ */
+async function runVizStopStep(ctx: StepCtx, driver: ProviderDriver, vmName: string | undefined): Promise<void> {
+  if (vmName === undefined) {
+    skipStep(ctx, "stopVisualizer", "no box was ever created for this run");
+    return;
+  }
+  const started = Date.now();
+  const base = stepBase(ctx, "teardown", "stopVisualizer");
+  try {
+    const result = await stopVisualizer(driver, vmName);
+    const durationMs = Date.now() - started;
+    log({
+      ...base,
+      duration: durationMs,
+      durationMs,
+      status: "ok",
+      outcome: result.stopped ? "ran" : "skipped",
+      reason: result.reason,
+      stopVisualizer_ms: durationMs,
+    });
+  } catch (e) {
+    const durationMs = Date.now() - started;
+    // `e` may reject with a non-Error — even null/undefined (step-log.ts's
+    // timedLoggedStep normalizes the same way) — so read through a fallback
+    // object rather than off `e` directly.
+    const err = (e ?? {}) as { code?: string; message?: string };
+    if (isNoSuchBox(e)) {
+      // Every other pre-destroy step that execs the box routes "box is
+      // gone" through this classifier and records a skip (see the comment
+      // above runBoxStep) so the expected crash-between-destroy-and-close
+      // and reaper-race cases don't alarm. Mirror that here instead of
+      // emitting status:"error" on a routine condition.
+      log({
+        ...base,
+        duration: durationMs,
+        durationMs,
+        status: "ok",
+        outcome: "skipped",
+        reason: "box already gone — nothing to stop",
+        stopVisualizer_ms: durationMs,
+      });
+      return;
+    }
+    log({
+      ...base,
+      duration: durationMs,
+      durationMs,
+      status: "error",
+      outcome: "failed",
+      error: { code: err.code ?? "stopVisualizer-failed", message: err.message ?? String(e) },
+      stopVisualizer_ms: durationMs,
+    });
   }
 }
 
@@ -275,6 +348,12 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
     }
     return;
   }
+
+  // 0. stopVisualizer — DF4.2, prepended ahead of every existing step (AC6:
+  // non-aborting, see runVizStopStep). Runs even ahead of the bundle-verify
+  // preflight below: stopping a stray visualizer process must not depend on
+  // the host's git being usable.
+  await runVizStopStep(ctx, deps.driver, rec.vmName);
 
   // ponytail: the probe guards the harvest/destroy machinery below; with
   // neither a box nor a key that machinery cannot run, and a host with broken

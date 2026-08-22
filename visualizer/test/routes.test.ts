@@ -6,10 +6,13 @@
  */
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
   seedTrace,
   seedManyEvents,
+  seedEmptyTrace,
   EMPTY_REQUEST_ID,
   FIXTURE_REQUEST_ID,
   MANY_REQUEST_ID,
@@ -18,7 +21,10 @@ import {
   PHASE_ENGINEER,
 } from "./fixtures/trace-fixture.ts";
 import { startVisualizer } from "../server/index.ts";
+import * as indexMod from "../server/index.ts";
+import { resolveDbPath, TraceDb } from "../server/db.ts";
 import { VizError } from "../server/auth.ts";
+import * as authMod from "../server/auth.ts";
 
 const TOKEN = "0123456789abcdef0123456789abcdef";
 
@@ -817,4 +823,433 @@ describe("usage() derivation from agent_end payloads (G-fixture-fallback)", () =
       variant.cleanup();
     }
   });
+});
+
+/** Save/restore a set of env vars around `fn`, so a case can't leak into a
+ * test that runs after it in the same process. */
+function withEnv(vars: Record<string, string | undefined>, fn: () => void): void {
+  const prev: Record<string, string | undefined> = {};
+  for (const key of Object.keys(vars)) prev[key] = process.env[key];
+  try {
+    for (const [key, value] of Object.entries(vars)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fn();
+  } finally {
+    for (const [key, value] of Object.entries(prev)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+describe("resolveDbPath precedence (db.ts, AC1 reader surface)", () => {
+  // --db flag > --db=inline > QDS_VIZ_DB > QDS_RUN_ROOT/trace/trace.db > /run.
+
+  test("default: QDS_RUN_ROOT unset falls back to /run/trace/trace.db", () => {
+    withEnv({ QDS_RUN_ROOT: undefined, QDS_VIZ_DB: undefined }, () => {
+      expect(resolveDbPath([])).toBe(path.join("/run", "trace", "trace.db"));
+    });
+  });
+
+  test("QDS_RUN_ROOT relocates the default path", () => {
+    withEnv({ QDS_RUN_ROOT: "/custom/run", QDS_VIZ_DB: undefined }, () => {
+      expect(resolveDbPath([])).toBe(path.join("/custom/run", "trace", "trace.db"));
+    });
+  });
+
+  test("QDS_VIZ_DB wins over the QDS_RUN_ROOT default", () => {
+    withEnv({ QDS_RUN_ROOT: "/custom/run", QDS_VIZ_DB: "/env/db.sqlite" }, () => {
+      expect(resolveDbPath([])).toBe("/env/db.sqlite");
+    });
+  });
+
+  test("--db=<path> inline wins over QDS_VIZ_DB", () => {
+    withEnv({ QDS_VIZ_DB: "/env/db.sqlite" }, () => {
+      expect(
+        resolveDbPath(["bun", "run", "server/index.ts", "--db=/inline/db.sqlite"]),
+      ).toBe("/inline/db.sqlite");
+    });
+  });
+
+  test("--db <path> flag wins over --db=inline", () => {
+    expect(
+      resolveDbPath([
+        "bun",
+        "run",
+        "server/index.ts",
+        "--db=/inline/db.sqlite",
+        "--db",
+        "/flag/db.sqlite",
+      ]),
+    ).toBe("/flag/db.sqlite");
+  });
+
+  test("a relative --db path resolves against process.cwd(), not left relative", () => {
+    expect(resolveDbPath(["bun", "--db", "relative/db.sqlite"])).toBe(
+      path.resolve(process.cwd(), "relative/db.sqlite"),
+    );
+  });
+
+  test("an absolute --db path passes through unchanged", () => {
+    expect(resolveDbPath(["bun", "--db", "/abs/db.sqlite"])).toBe("/abs/db.sqlite");
+  });
+});
+
+describe("bind failure after a successful db open (A-EADDRINUSE)", () => {
+  test("a second bind on the same port throws and closes the db handle it just opened", () => {
+    // Reuse the already-bound port from a live server — Bun.serve's second
+    // bind on it fails after startVisualizer has already opened db readonly,
+    // exercising the close-then-rethrow branch (never a leaked handle).
+    expect(() => startVisualizer({ dbPath: seeded.dbPath, token: TOKEN, port })).toThrow();
+  });
+});
+
+describe("dispatch-level failure never reaches Bun's default handler (F11)", () => {
+  // Every gate function (checkHost/checkCsrf/checkCredential) is documented
+  // to return false rather than throw — but handle()'s own try/catch exists
+  // specifically so a bug in one of them still fails closed as a logged 500,
+  // not an unhandled exception leaking Bun's default error page. This pins
+  // that fail-closed behavior by injecting the fault the comment guards
+  // against, rather than waiting for a real bug in auth.ts to prove it.
+  test("a gate function that throws surfaces as 500 with a DISPATCH-coded log line, not a crash", async () => {
+    const logged = captureConsoleError();
+    const spy = spyOn(authMod, "checkCredential").mockImplementation(() => {
+      throw new Error("injected-gate-failure");
+    });
+    let res: Response;
+    try {
+      res = await fetch(`${base()}/api/health`, { headers: bearer });
+    } finally {
+      spy.mockRestore();
+      logged.restore();
+    }
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "internal error" });
+    expect(logged.text()).toContain("DISPATCH");
+    expect(logged.text()).toContain("injected-gate-failure");
+  });
+
+  test("a requestIP lookup failure falls back to logging the request with no source, not a crash", async () => {
+    const spy = spyOn(handle.server, "requestIP").mockImplementation(() => {
+      throw new Error("injected-requestIP-failure");
+    });
+    try {
+      const res = await fetch(`${base()}/api/health`, { headers: bearer });
+      expect(res.status).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("AC5 boundary: a trace with zero sessions (L1 empty list, not an error)", () => {
+  test("GET /api/sessions on a freshly-schema'd, session-less trace → 200 []", async () => {
+    const empty = seedEmptyTrace();
+    try {
+      await withServer(empty.dbPath, async (emptyPort) => {
+        const res = await fetch(`http://127.0.0.1:${emptyPort}/api/sessions`, {
+          headers: bearer,
+        });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual([]);
+
+        // health still reports ok on a session-less-but-well-formed trace.
+        const health = await fetch(`http://127.0.0.1:${emptyPort}/api/health`, {
+          headers: bearer,
+        });
+        const healthBody = (await health.json()) as { ok: boolean; sessions: number };
+        expect(healthBody.ok).toBe(true);
+        expect(healthBody.sessions).toBe(0);
+      });
+    } finally {
+      empty.cleanup();
+    }
+  });
+});
+
+describe("archive body backstop when no Content-Length is declared (A7-cont)", () => {
+  test("chunked body with no Content-Length header still 413s once the read exceeds 1 KB", async () => {
+    // A client that streams the body (Transfer-Encoding: chunked) never sends
+    // Content-Length at all, so line 332's pre-read refusal is a no-op for
+    // it — this is what the post-read Buffer.byteLength check backstops.
+    const body = JSON.stringify({ archived: true, pad: "x".repeat(2000) });
+    const head = [
+      `POST /api/sessions/${EMPTY_REQUEST_ID}/archive HTTP/1.1`,
+      `Host: 127.0.0.1:${port}`,
+      `Authorization: Bearer ${TOKEN}`,
+      "Content-Type: application/json",
+      "Transfer-Encoding: chunked",
+      "",
+      "",
+    ].join("\r\n");
+
+    const statusLine = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("no response")), 5000);
+      void Bun.connect({
+        hostname: "127.0.0.1",
+        port,
+        socket: {
+          open: (socket) => {
+            socket.write(head);
+            for (let i = 0; i < body.length; i += 200) {
+              const chunk = body.slice(i, i + 200);
+              socket.write(`${chunk.length.toString(16)}\r\n${chunk}\r\n`);
+            }
+            socket.write("0\r\n\r\n");
+          },
+          data: (socket, chunk) => {
+            clearTimeout(timer);
+            socket.end();
+            resolve(new TextDecoder().decode(chunk).split("\r\n")[0] ?? "");
+          },
+          error: (_socket, error) => {
+            clearTimeout(timer);
+            reject(error);
+          },
+        },
+      }).catch(reject);
+    });
+
+    expect(statusLine).toContain("413");
+    expect(archivedFlag(seeded.dbPath, EMPTY_REQUEST_ID)).toBe(0);
+  });
+});
+
+/** Sentinel thrown by the mocked process.exit, so a "refused" main() unwinds
+ * the way the real exit would instead of falling through past its own
+ * uninitialized handleResult (main() has no early return after the catch). */
+class ExitCalled extends Error {
+  constructor(readonly code: number | undefined) {
+    super(`process.exit(${code})`);
+  }
+}
+
+describe("main() entry point (INV-1/INV-5, only reachable via `bun run server/index.ts`)", () => {
+  // main() is the CLI entry: import.meta.main is false for every test file
+  // (Bun only sets it true for the process's actual entry script), so the
+  // module-level `if (import.meta.main) main();` never calls it under `bun
+  // test`. main() itself is exported and callable directly, and everything
+  // it does — validate, call startVisualizer, log, wire signal handlers, or
+  // log-and-exit(1) on refusal — is real behavior worth pinning; the two
+  // seams mocked below (startVisualizer, process.exit) are precisely the
+  // ones that would otherwise bind a real port or kill this test process.
+  // `process.env.X = undefined` stores the string "undefined", not an
+  // absent var (Bun's env is a proxy over a string-keyed object) — a
+  // later test reading QDS_VIZ_TOKEN/QDS_VIZ_PORT would see that stale
+  // literal instead of an unset value. Route the restore through `withEnv`
+  // (defined below), which already deletes rather than assigns undefined.
+  const withTokenAndPort = (envPort: string, fn: () => void) =>
+    withEnv({ QDS_VIZ_TOKEN: TOKEN, QDS_VIZ_PORT: envPort }, fn);
+
+  test("success path: validates, calls startVisualizer once, logs, and wires SIGINT/SIGTERM — without ever binding a real port", () => {
+    let dbClosed = false;
+    const fakeDb = { close: () => { dbClosed = true; }, path: "/fake/trace.db", journalMode: "wal" };
+    const fakeServer = { port: 4601, stop: async () => {} };
+    const spy = spyOn(indexMod, "startVisualizer").mockImplementation(
+      () => ({ server: fakeServer, db: fakeDb }) as unknown as ReturnType<typeof startVisualizer>,
+    );
+    const prevSigint = process.listeners("SIGINT");
+    const prevSigterm = process.listeners("SIGTERM");
+    try {
+      withTokenAndPort("4601", () => indexMod.main());
+      expect(spy).toHaveBeenCalledTimes(1);
+      // Signal handlers were registered by this call — proven by the
+      // listener count growing over the pre-call baseline, not just assumed.
+      const addedSigint = process.listeners("SIGINT").filter((fn) => !prevSigint.includes(fn));
+      const addedSigterm = process.listeners("SIGTERM").filter((fn) => !prevSigterm.includes(fn));
+      expect(addedSigint.length).toBeGreaterThan(0);
+      expect(addedSigterm.length).toBeGreaterThan(0);
+
+      // Fire the registered SIGINT handler directly (never a real OS signal)
+      // and prove its body — db.close() then process.exit(0) — actually
+      // runs, not just that the listener was attached.
+      const exitSpy = spyOn(process, "exit").mockImplementation((() => undefined) as never);
+      try {
+        (addedSigint[0] as () => void)();
+        expect(dbClosed).toBe(true);
+        expect(exitSpy).toHaveBeenCalledWith(0);
+      } finally {
+        exitSpy.mockRestore();
+      }
+    } finally {
+      // Strip exactly the listeners this call added — a real SIGINT/SIGTERM
+      // on this test process must never reach a handler closing a fake db.
+      for (const fn of process.listeners("SIGINT")) {
+        if (!prevSigint.includes(fn)) process.removeListener("SIGINT", fn as NodeJS.SignalsListener);
+      }
+      for (const fn of process.listeners("SIGTERM")) {
+        if (!prevSigterm.includes(fn)) process.removeListener("SIGTERM", fn as NodeJS.SignalsListener);
+      }
+      spy.mockRestore();
+    }
+  });
+
+  test("refusal path: a startup validation failure logs viz_startup_refused and exits 1, never reaching startVisualizer", () => {
+    const spy = spyOn(indexMod, "startVisualizer");
+    const logged = captureConsoleError();
+    const exitSpy = spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new ExitCalled(code);
+    }) as never);
+    try {
+      withTokenAndPort("80", () => {
+        // 80 is privileged — validatePort refuses it before startVisualizer
+        // is ever called, so this exercises main()'s catch/log/exit path on
+        // a plain VizError without touching startVisualizer at all.
+        expect(() => indexMod.main()).toThrow(ExitCalled);
+      });
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      exitSpy.mockRestore();
+      spy.mockRestore();
+      logged.restore();
+    }
+    expect(logged.text()).toContain("viz_startup_refused");
+    expect(logged.text()).toContain("VIZ_PORT_INVALID");
+  });
+
+  test("refusal path wraps a non-VizError thrown by startVisualizer into a named VIZ_STARTUP error", () => {
+    // main()'s catch coerces ANY thrown error to a named VizError before
+    // logging — this pins that coercion for the non-VizError case, which the
+    // VIZ_PORT_INVALID case above does not exercise (that one is already a
+    // VizError and passes straight through the `error instanceof VizError`
+    // branch).
+    const spy = spyOn(indexMod, "startVisualizer").mockImplementation(() => {
+      throw new Error("plain-error-from-startVisualizer");
+    });
+    const logged = captureConsoleError();
+    const exitSpy = spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new ExitCalled(code);
+    }) as never);
+    try {
+      withTokenAndPort("4602", () => {
+        expect(() => indexMod.main()).toThrow(ExitCalled);
+      });
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      exitSpy.mockRestore();
+      spy.mockRestore();
+      logged.restore();
+    }
+    expect(logged.text()).toContain("viz_startup_refused");
+    expect(logged.text()).toContain("VIZ_STARTUP");
+    expect(logged.text()).toContain("plain-error-from-startVisualizer");
+  });
+});
+
+/** A temp dir per case, never a shared file — mirrors trace-fixture.ts's own
+ * temp-root-per-test property so nothing here leaks state between cases. */
+function tempTrace(): { dir: string; dbPath: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "df42-unopenable-"));
+  return { dir, dbPath: path.join(dir, "trace.db") };
+}
+
+describe("AC5 boundary: a trace db that cannot be opened (INV-5, named failure)", () => {
+  test("corrupt/garbage bytes: VIZ_TRACE_DB_OPEN naming the path, and the failed attempt leaves nothing locked behind it", () => {
+    const { dir, dbPath } = tempTrace();
+    try {
+      fs.writeFileSync(dbPath, "not a sqlite file at all, just garbage bytes");
+      let first: VizError | undefined;
+      try {
+        const opened = new TraceDb(dbPath);
+        opened.close(); // safety net only — unreachable when the throw fires
+        throw new Error("expected TraceDb to refuse a corrupt file");
+      } catch (error) {
+        expect(error).toBeInstanceOf(VizError);
+        first = error as VizError;
+      }
+      expect(first?.code).toBe("VIZ_TRACE_DB_OPEN");
+      expect(first?.message).toContain(dbPath);
+
+      // Fail-closed: db?.close() runs in the constructor's catch before the
+      // VizError is thrown. If it didn't — a leaked readonly handle — this
+      // second attempt would still see the SAME plain corruption error; it
+      // would not degrade into a locking error, so this alone doesn't prove
+      // much for a corrupt file. What it does prove: the failure is
+      // deterministic and repeatable, never "works the second time" from
+      // stale state left by the first attempt.
+      try {
+        const openedAgain = new TraceDb(dbPath);
+        openedAgain.close();
+        throw new Error("expected the second attempt to refuse identically");
+      } catch (error) {
+        expect(error).toBeInstanceOf(VizError);
+        expect((error as VizError).code).toBe("VIZ_TRACE_DB_OPEN");
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("permission-denied (chmod 000): VIZ_TRACE_DB_OPEN naming the path", () => {
+    // Mode bits do not restrict uid 0, and CI containers commonly run as
+    // root — in that case the chmod 000 file still opens readonly, so this
+    // case is not meaningful there.
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    const { dir, dbPath } = tempTrace();
+    try {
+      fs.writeFileSync(dbPath, "");
+      fs.chmodSync(dbPath, 0o000);
+      try {
+        const opened = new TraceDb(dbPath);
+        opened.close();
+        throw new Error("expected TraceDb to refuse an unreadable file");
+      } catch (error) {
+        expect(error).toBeInstanceOf(VizError);
+        const named = error as VizError;
+        expect(named.code).toBe("VIZ_TRACE_DB_OPEN");
+        expect(named.message).toContain(dbPath);
+      }
+    } finally {
+      // chmod back before rm — an 0o000 file/dir can otherwise refuse cleanup.
+      fs.chmodSync(dbPath, 0o600);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a genuine cross-connection EXCLUSIVE lock past busy_timeout: VIZ_TRACE_DB_OPEN, and releasing it proves nothing leaked", () => {
+    // Deterministic, not a race: a real writer holds BEGIN EXCLUSIVE on a
+    // non-WAL db, so TraceDb's own busy_timeout=5000 pragma genuinely blocks
+    // until sqlite gives up and throws "database is locked" — this reliably
+    // takes ~5s, hence the longer per-test timeout below.
+    const { dir, dbPath } = tempTrace();
+    const setup = new Database(dbPath, { create: true });
+    setup.exec("PRAGMA journal_mode = DELETE");
+    setup.exec("CREATE TABLE sessions (request_id TEXT)");
+    setup.close();
+
+    const locker = new Database(dbPath);
+    locker.exec("BEGIN EXCLUSIVE");
+    locker.exec("INSERT INTO sessions VALUES ('x')");
+    try {
+      try {
+        const opened = new TraceDb(dbPath);
+        opened.close();
+        throw new Error("expected TraceDb to refuse a locked db");
+      } catch (error) {
+        expect(error).toBeInstanceOf(VizError);
+        const named = error as VizError;
+        expect(named.code).toBe("VIZ_TRACE_DB_OPEN");
+        expect(named.message).toContain(dbPath);
+      }
+    } finally {
+      locker.exec("ROLLBACK");
+      locker.close();
+    }
+
+    try {
+      // Fail-closed, concretely: with the real lock now released, a fresh
+      // open succeeds immediately — nothing from the failed attempt (a
+      // leaked fd or a stray lock) is left behind to block it. (health()
+      // isn't asserted here: this fixture's hand-rolled `sessions` table is
+      // deliberately minimal and would report schema-drift-degraded
+      // regardless — the point is that opening itself no longer throws.)
+      const recovered = new TraceDb(dbPath);
+      recovered.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15000);
 });

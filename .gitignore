@@ -20,3 +20,11 @@ oci/.build/
 
 # DF2.1: host run records + fake-driver boxes are per-run scratch, never committed.
 .sandbox/
+
+# DF4.2: outputs of the visualizer coverage gate and the component build gate.
+# `bun run --cwd visualizer test:coverage` writes coverage/lcov.info (the file
+# scripts/check-lcov.ts parses in the next CI step) and `build:check` writes
+# dist/. Both are regenerated every run; the committed evidence copy lives
+# under _bmad-output/evidence/df4-2/.
+visualizer/coverage/
+visualizer/dist/

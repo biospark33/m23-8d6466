@@ -5,7 +5,7 @@
  * by default; forged Host headers need a raw socket (Host is the one header
  * fetch will not reliably carry).
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { connect } from "node:net";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -847,5 +847,25 @@ describe("static branch WITH a ./dist build (INV-3 confinement)", () => {
     expect(res.body.includes("localhost")).toBe(false);
     expect(res.status).toBe(404);
     expect(res.body).toBe(JSON.stringify({ error: "not found" }));
+  });
+
+  test("a stat failure between existsSync and statSync (TOCTOU) is a 404, not a 500", async () => {
+    // The comment on serveStatic calls this out by name: "bun run build"
+    // empties dist wholesale, so the file can vanish between the check and
+    // the stat. That race is not reliably reproducible by timing alone, so
+    // the fault is injected directly at the one call this branch makes —
+    // this is exactly the failure the surrounding try/catch exists to
+    // convert into a 404 instead of an unhandled throw.
+    const spy = spyOn(fs, "statSync").mockImplementation(() => {
+      throw new Error("ENOENT: injected TOCTOU race");
+    });
+    try {
+      const res = await fetch(`${base()}/assets/viz-fixture.js`, { headers: bearer() });
+      expect(res.status).toBe(404);
+      expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
+      expect(await res.json()).toEqual({ error: "not found" });
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

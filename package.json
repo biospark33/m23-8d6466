@@ -13,6 +13,8 @@
     "typecheck": "bunx tsc --noEmit",
     "typecheck:visualizer": "bun run --cwd visualizer typecheck",
     "lint:visualizer": "bun run --cwd visualizer lint",
+    "test:visualizer": "bun run --cwd visualizer test:coverage",
+    "check:lcov": "bun run --cwd visualizer scripts/check-lcov.ts",
     "smoke:coms": "bun scripts/coms-smoke-test.ts",
     "verify:pi-lens": "bun scripts/pi-lens-verify.ts",
     "lint": "bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor visualizer oci 2>/dev/null || bunx @biomejs/biome check .",

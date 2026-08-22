@@ -1,0 +1,2 @@
+floor 0.999 -> exit 1 (expect 1)
+floor 0.90  -> exit 0 (expect 0)

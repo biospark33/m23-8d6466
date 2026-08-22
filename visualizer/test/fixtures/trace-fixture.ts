@@ -346,3 +346,17 @@ export function appendAgentEnds(
   });
   aux.close();
 }
+
+/**
+ * A freshly-schema'd trace with ZERO session rows (AC5): the Tracer's
+ * constructor applies the full DDL/migrations before any session is ever
+ * started, so closing it right away leaves a real, well-formed trace.db with
+ * an empty `sessions` table — the "brand new run, nothing written yet" case
+ * L1 has to answer with `200 []`, not a 404 or an error.
+ */
+export function seedEmptyTrace(): { dbPath: string; cleanup(): void } {
+  const base = startFixture("req-df42-unused");
+  base.tracer.close();
+  const { cleanup } = finishFixture(base);
+  return { dbPath: base.dbPath, cleanup };
+}

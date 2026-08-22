@@ -13,36 +13,15 @@
  * leaks neither the token nor its length.
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-
-/** Named error carrying a machine code and the remediation (cost-ledger pattern). */
-export class VizError extends Error {
-  readonly code: string;
-  /** The literal next step; secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
-
-  constructor(code: string, message: string, remediation: string) {
-    super(message);
-    this.name = "VizError";
-    this.code = code;
-    this.remediation = remediation;
-  }
-}
+// VizError and assertNeverPublic are owned by the provider seam (INV-2 must
+// be enforceable from src/providers/ without importing from visualizer/, see
+// src/providers/viz-guard.ts) and re-exported here so existing imports from
+// this module are unaffected.
+export { VizError, assertNeverPublic } from "../../src/providers/viz-guard.ts";
+import { VizError } from "../../src/providers/viz-guard.ts";
 
 export const DEFAULT_VIZ_PORT = 4600;
 export const TOKEN_MIN_BYTES = 32;
-
-/**
- * INV-2: the box's one anonymous public port is never the visualizer's.
- * Any exposure path (share port / set-public) must route its port operand
- * through this guard — it raises rather than registers.
- */
-export function assertNeverPublic(port: number): never {
-  throw new VizError(
-    "VIZ_PORT_PUBLIC",
-    `refusing to expose port ${port}: the visualizer is loopback-only (INV-2)`,
-    "Reach the visualizer through an SSH forward to 127.0.0.1; never through share port / set-public.",
-  );
-}
 
 /**
  * QDS_VIZ_TOKEN, host-side only, minted fresh per server start. An unset or

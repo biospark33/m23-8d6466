@@ -108,34 +108,43 @@ export class TraceDb {
       );
     }
     this.path = path;
-    this.db = new Database(path, { readonly: true });
 
-    // WAL is set by the tracer when it creates the db; a readonly connection
-    // cannot change it, so we assert rather than set, and always take the
-    // busy_timeout so a concurrent writer never turns into a failed request.
-    this.db.exec("PRAGMA busy_timeout = 5000");
-    this.db.exec("PRAGMA synchronous = NORMAL");
-    const mode = this.db
-      .query<{ journal_mode: string }, []>("PRAGMA journal_mode")
-      .get();
-    this.journalMode = mode?.journal_mode ?? "unknown";
-    if (this.journalMode.toLowerCase() !== "wal") {
-      console.warn(
-        `[viz] journal_mode is "${this.journalMode}", expected "wal" — live reads during pipeline writes may block`,
-      );
-    }
-
-    // INV-5: the reader must be able to actually read — a db locked past
-    // busy_timeout (or a corrupt file) is a fatal startup failure, not a
-    // degraded-but-running state.
+    // INV-5 / AC5: the reader must be able to actually open AND read — a db
+    // locked past busy_timeout, unreadable, or corrupt is a fatal startup
+    // failure with a NAMED cause, not a degraded-but-running state and not a
+    // raw SQLiteError escaping to the caller.
+    //
+    // DF4.2: the guard opens at `new Database` rather than at the table_info
+    // probe. sqlite is lazy — it does not touch the file's header until the
+    // first statement, so a corrupt db survives the constructor and throws at
+    // the FIRST pragma ("file is not a database", measured on bun 1.3.13).
+    // With the guard starting below that pragma, every such failure escaped
+    // unnamed and the catch below was unreachable for any sqlite-level fault.
+    let db: Database | undefined;
     try {
-      this.db.query<{ name: string }, []>("PRAGMA table_info(sessions)").all();
+      db = new Database(path, { readonly: true });
+
+      // WAL is set by the tracer when it creates the db; a readonly connection
+      // cannot change it, so we assert rather than set, and always take the
+      // busy_timeout so a concurrent writer never turns into a failed request.
+      db.exec("PRAGMA busy_timeout = 5000");
+      db.exec("PRAGMA synchronous = NORMAL");
+      const mode = db.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get();
+      this.journalMode = mode?.journal_mode ?? "unknown";
+      db.query<{ name: string }, []>("PRAGMA table_info(sessions)").all();
     } catch (error) {
-      this.db.close();
+      db?.close();
       throw new VizError(
         "VIZ_TRACE_DB_OPEN",
         `cannot read trace db at ${path}: ${(error as Error).message}`,
         "Free the lock on the trace db (or let the running pipeline finish) and restart.",
+      );
+    }
+    this.db = db;
+
+    if (this.journalMode.toLowerCase() !== "wal") {
+      console.warn(
+        `[viz] journal_mode is "${this.journalMode}", expected "wal" — live reads during pipeline writes may block`,
       );
     }
   }
