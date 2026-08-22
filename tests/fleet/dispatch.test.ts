@@ -930,6 +930,70 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(result.state).toBe("ready");
   });
 
+  // ─── a non-Error throw still refuses, instead of crashing the error path ─────────────
+
+  test("a driver that throws a non-Error still produces a typed refusal", async () => {
+    // `throw` takes any value, and the driver is third-party code from
+    // dispatch's point of view. Reading `.message` off `null` throws a
+    // TypeError from INSIDE the catch block, which replaces the refusal the
+    // operator needs — exit code, remediation, dispatch-log entry and all —
+    // with an unrelated crash out of the error path itself.
+    driver.create = async () => {
+      throw null;
+    };
+
+    try {
+      await dispatch(validBrief(), deps());
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(FleetError);
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(1);
+      // The untyped throw carries no `code`/`remediation`, so both fall back.
+      expect(err.code).toBe("provision-failed");
+      expect(err.remediation).toBeTruthy();
+      // The value itself is surfaced rather than swallowed.
+      expect(err.message).toContain("null");
+    }
+  });
+
+  // ─── fakeGate probe B: the two failure arms are told apart ───────────────────────────
+
+  test("gate item B distinguishes a missing manifest from an unstamped one", async () => {
+    // Probe B fires BEFORE item D (which owns "manifest non-empty"), so it has
+    // to name both of its own failures. The arms previously shared `exit 2`
+    // with `grep`'s own operational-error code, and an existing-but-unstamped
+    // manifest and a manifest that never landed are opposite diagnoses: one
+    // sends the operator to the stamping step, the other to the fill step.
+    const opts = { runId: "gate-probe-run" } as Parameters<typeof fakeGate>[2];
+
+    const missing = await driver.create("box-probe-missing");
+    const noManifest = await fakeGate(driver, missing.name, opts);
+    const bMissing = noManifest.assertions.find((a) => a.item === "B");
+    expect(bMissing?.ok).toBeFalse();
+    expect(bMissing?.note).toContain("pipeline.yaml missing or empty");
+    expect(bMissing?.note).not.toContain("limitMicroUsd absent");
+
+    const unstamped = await driver.create("box-probe-unstamped");
+    await driver.exec(unstamped.name, ["sh", "-c", "printf '%s\\n' '{\"phases\":[]}' > pipeline.yaml"]);
+    const noStamp = await fakeGate(driver, unstamped.name, opts);
+    const bUnstamped = noStamp.assertions.find((a) => a.item === "B");
+    expect(bUnstamped?.ok).toBeFalse();
+    expect(bUnstamped?.note).toContain("limitMicroUsd absent");
+    expect(bUnstamped?.note).not.toContain("missing or empty");
+
+    // And the stamped manifest still passes B — without this the assertions
+    // above are satisfied by a probe that fails unconditionally.
+    const stamped = await driver.create("box-probe-stamped");
+    await driver.exec(stamped.name, [
+      "sh",
+      "-c",
+      "printf '%s\\n' '{\"limitMicroUsd\":1,\"phases\":[]}' > pipeline.yaml",
+    ]);
+    const ok = await fakeGate(driver, stamped.name, opts);
+    expect(ok.assertions.find((a) => a.item === "B")?.ok).toBeTrue();
+  });
+
   // ─── INV-4: no key material in logs, records or the ack ──────────────────────────────
 
   test("INV-4: no key material in log lines", async () => {

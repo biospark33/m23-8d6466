@@ -773,11 +773,11 @@ describe("concurrent set", () => {
   test("a lock left by a dead process is stolen, not waited on", () => {
     const id = "stale-lock-run";
     store.create(id);
-    writeFileSync(`${store.path(id)}.lock`, "999999999\n", { mode: 0o600 });
+    writeFileSync(store.lockPath(id), "999999999\n", { mode: 0o600 });
     const started = Date.now();
     expect(store.set(id, { vmName: "box-2" }).vmName).toBe("box-2");
     expect(Date.now() - started).toBeLessThan(2_000); // not the 5s lock timeout
-    expect(existsSync(`${store.path(id)}.lock`)).toBe(false);
+    expect(existsSync(store.lockPath(id))).toBe(false);
   });
 
   test("an unreadable lock body is held, never stolen as junk", () => {
@@ -788,7 +788,7 @@ describe("concurrent set", () => {
     // proved dead means WAIT, even if that ends in a fail-closed timeout.
     const id = "empty-lock-run";
     store.create(id);
-    const lock = `${store.path(id)}.lock`;
+    const lock = store.lockPath(id);
     writeFileSync(lock, "", { mode: 0o600 });
     const started = Date.now();
     expect(() => store.set(id, { vmName: "box-3" })).toThrow(/timed out waiting for the run record lock/);
@@ -803,11 +803,12 @@ describe("concurrent set", () => {
     // including the lock a second writer legitimately holds after ours was
     // cleared by hand. That reopens the lost update from the other side.
     const id = "release-proof-run";
-    // `${path(id)}.lock`, NOT `join(dir, id + ".lock")` — `path()` appends
-    // `.json`, so the shorter spelling names a file the lock code never touches
-    // and the assertion below only reads back what this test itself wrote.
+    // `store.lockPath(id)`, never a hand-spelled `join(dir, id + ".lock")` —
+    // the lock hangs off `path()`, which appends `.json`, so the shorter
+    // spelling names a file the lock code never touches and the assertion below
+    // would only read back what this test itself wrote.
     const s0 = new RunRecordStore({ dir });
-    const lock = `${s0.path(id)}.lock`;
+    const lock = s0.lockPath(id);
     const foreign = `${process.pid + 1} deadbeefcafe\n`;
     const s = new RunRecordStore({
       dir,
@@ -830,7 +831,7 @@ describe("concurrent set", () => {
     // legitimately claim the now-free path. A bare `rm` there deletes that live
     // writer's lock and lets two read-modify-writes overlap.
     const id = "steal-proof-run";
-    const lock = `${store.path(id)}.lock`;
+    const lock = store.lockPath(id);
     // `process.ppid` is a pid that is genuinely alive and is not ours, so every
     // steal attempt AFTER the swap must judge this lock held and wait it out.
     const live = `${process.ppid} deadbeefcafe\n`;

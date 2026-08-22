@@ -115,7 +115,7 @@ export function assertFleetRunId(runId: unknown): asserts runId is string {
   try {
     assertValidRunId(runId);
   } catch (e) {
-    throw new FleetError(2, "invalid-run-id", (e as Error).message, "run ids come from `fleet dispatch`; list them with `fleet status`");
+    throw new FleetError(2, "invalid-run-id", errorMessage(e), "run ids come from `fleet dispatch`; list them with `fleet status`");
   }
 }
 
@@ -269,15 +269,27 @@ export async function fakeGate(
         // (which is the one that owns "manifest non-empty"): without it, a
         // manifest that never landed reported "limitMicroUsd absent" and sent
         // the operator to look at a stamp on a file that does not exist.
+        //
+        // Both arms exit on codes `grep` itself never returns. Reusing grep's
+        // own 1/2 collided: grep exits 2 on an OPERATIONAL error (unreadable
+        // file, I/O failure), which is the same 2 the `test` arm used, so a
+        // manifest that existed but could not be read was reported as
+        // "missing or empty" — a diagnosis the operator can disprove with one
+        // `ls`, sending them down the wrong path. 3 and 4 are unambiguous.
         const r = await driver.exec(vm, [
           "sh",
           "-c",
-          `test -s pipeline.yaml || exit 2; grep -qE '"?limitMicroUsd"?[[:space:]]*:' pipeline.yaml`,
+          `test -s pipeline.yaml || exit 3; grep -qE '"?limitMicroUsd"?[[:space:]]*:' pipeline.yaml || exit 4`,
         ]);
-        return {
-          ok: r.exitCode === 0,
-          detail: r.exitCode === 0 ? "stamped" : r.exitCode === 2 ? "pipeline.yaml missing or empty" : "limitMicroUsd absent",
-        };
+        const detail =
+          r.exitCode === 0
+            ? "stamped"
+            : r.exitCode === 3
+              ? "pipeline.yaml missing or empty"
+              : r.exitCode === 4
+                ? "limitMicroUsd absent"
+                : `manifest unreadable (grep exit ${r.exitCode})`;
+        return { ok: r.exitCode === 0, detail };
       },
     },
     {
@@ -360,19 +372,37 @@ function recordExists(store: RunRecordStore, runId: string): boolean {
     store.get(runId);
     return true;
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if ((e as NodeJS.ErrnoException | null | undefined)?.code === "ENOENT") return false;
     throw e;
   }
 }
 
-/** Typed provider errors carry `code`/`remediation`; a bare throw carries neither. */
+/**
+ * The one way this module turns a caught value into operator-facing text.
+ *
+ * `throw` takes any value, and a driver, key API or store is third-party code
+ * from this module's point of view: `throw null` and `throw "boom"` are both
+ * legal. A bare `(e as Error).message` read on those throws a TypeError from
+ * inside the catch block, which replaces the real refusal — the diagnosis the
+ * operator needs — with an unrelated crash out of the error path itself.
+ */
+function errorMessage(e: unknown): string {
+  const message = (e as { message?: unknown } | null | undefined)?.message;
+  return typeof message === "string" ? message : String(e);
+}
+
+/**
+ * Typed provider errors carry `code`/`remediation`; a bare throw carries
+ * neither — and a `null`/`undefined` throw carries no properties to read at
+ * all, so the access itself is optional (see `errorMessage`).
+ */
 function errorCode(e: unknown, fallback: string): string {
-  const code = (e as { code?: unknown }).code;
+  const code = (e as { code?: unknown } | null | undefined)?.code;
   return typeof code === "string" ? code : fallback;
 }
 
 function errorRemediation(e: unknown, fallback: string): string {
-  const remediation = (e as { remediation?: unknown }).remediation;
+  const remediation = (e as { remediation?: unknown } | null | undefined)?.remediation;
   return typeof remediation === "string" ? remediation : fallback;
 }
 
@@ -442,7 +472,7 @@ export async function dispatch(
       // The log must never mask the refusal it records — but swallowing it is
       // how AC4 evidence goes missing, so it is named on stderr (the fallback
       // appendDispatchFailure's own contract documents).
-      process.stderr.write(`dispatch-log append to ${dispatchLog} failed (${code}): ${(e as Error).message}\n`);
+      process.stderr.write(`dispatch-log append to ${dispatchLog} failed (${code}): ${errorMessage(e)}\n`);
     }
     const durationMs = now() - wallStart;
     log({
@@ -525,7 +555,7 @@ export async function dispatch(
           // Secondary to the timeout that was already thrown: the abandoned
           // provider call failed too, which is what an operator needs to see
           // when the timeout alone does not explain the run.
-          error: { code: "abandoned-step-failed", message: redactUrls((e as Error)?.message ?? String(e)) },
+          error: { code: "abandoned-step-failed", message: redactUrls(errorMessage(e)) },
           runId: ctxRunId,
           verb: "dispatch",
           phase: "abandoned",
@@ -672,7 +702,7 @@ export async function dispatch(
     throw refuse(
       2,
       "manifest-rejected",
-      `manifest rejected: ${(e as Error).message}`,
+      `manifest rejected: ${errorMessage(e)}`,
       `fix the manifest, or point manifestPath at one beneath ${repoRoot}`,
       { manifestPath },
     );
@@ -728,7 +758,7 @@ export async function dispatch(
       throw refuse(
         1,
         errorCode(e, "record-read-failed"),
-        `cannot read the run record for ${runId}: ${(e as Error).message}`,
+        `cannot read the run record for ${runId}: ${errorMessage(e)}`,
         errorRemediation(e, "fix or move the run-record directory, then retry — nothing was provisioned"),
       );
     }
@@ -871,7 +901,7 @@ export async function dispatch(
     throw refuse(
       1,
       errorCode(e, "provision-failed"),
-      `provisioning failed for run ${runId}: ${(e as Error).message}`,
+      `provisioning failed for run ${runId}: ${errorMessage(e)}`,
       errorRemediation(
         e,
         // Deliberately not "the box is alive": whether it exists depends on which
@@ -1019,7 +1049,7 @@ export async function dispatch(
           },
         });
       } catch (e) {
-        process.stderr.write(`gate outcome not recorded on run ${runId}: ${(e as Error).message}\n`);
+        process.stderr.write(`gate outcome not recorded on run ${runId}: ${errorMessage(e)}\n`);
       }
       throw refuse(
         3,
@@ -1051,7 +1081,7 @@ export async function dispatch(
     throw refuse(
       1,
       errorCode(e, "dispatch-failed"),
-      `dispatch failed after the box was created: ${(e as Error).message}`,
+      `dispatch failed after the box was created: ${errorMessage(e)}`,
       errorRemediation(
         e,
         "the run record is OPEN and the box is ALIVE (INV-5) — inspect it, then tear it down",

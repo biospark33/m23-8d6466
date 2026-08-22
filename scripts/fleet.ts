@@ -87,8 +87,8 @@ const MAX_BRIEF_BYTES = 64 * 1024;
  * remembered to edit this file too.
  */
 const REGISTRY_FLAGS = listVerbs().flatMap((v) => v.flags);
-const flagNames = (boolean: boolean): string[] => [
-  ...new Set(REGISTRY_FLAGS.filter((f) => (f.valueType === "boolean") === boolean).map((f) => f.name)),
+const flagNames = (wantBoolean: boolean): string[] => [
+  ...new Set(REGISTRY_FLAGS.filter((f) => (f.valueType === "boolean") === wantBoolean).map((f) => f.name)),
 ];
 const VALUE_FLAGS = flagNames(false);
 // `--help` rides along harmlessly: `run` answers it from argv before parsing.

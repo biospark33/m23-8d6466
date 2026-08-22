@@ -513,6 +513,21 @@ export class RunRecordStore {
     return join(this.dir, `${runId}.json`);
   }
 
+  /**
+   * The write lock guarding `path(runId)` — the one spelling, exported so no
+   * caller has to know it.
+   *
+   * It is `<runId>.json.lock`, NOT `<runId>.lock`: `path()` appends `.json` and
+   * the lock hangs off that. Re-deriving it by hand is how a test asserts on a
+   * file the lock code never touches and passes vacuously, and `<runId>.lock`
+   * is a live path in the same directory — `scripts/lib/run-lock.ts`'s
+   * invocation lock — so the wrong spelling names a REAL file belonging to a
+   * different mutual-exclusion contract rather than failing loudly.
+   */
+  lockPath(runId: string): string {
+    return `${this.path(runId)}.lock`;
+  }
+
   /** INV-3: O_EXCL, not a check-then-write. A second create rejects with EEXIST. */
   create(runId: string, now: Date = new Date()): RunRecord {
     return this.traced(runId, "create", () => this.createUnlogged(runId, now));
@@ -550,7 +565,7 @@ export class RunRecordStore {
   }
 
   private setUnlogged(runId: string, patch: RunRecordPatch): RunRecord {
-    return this.withLock(this.path(runId), () => this.setLocked(runId, patch));
+    return this.withLock(runId, () => this.setLocked(runId, patch));
   }
 
   private setLocked(runId: string, patch: RunRecordPatch): RunRecord {
@@ -586,7 +601,7 @@ export class RunRecordStore {
   /** First-close-wins: a second close succeeds and keeps the original `closedAt`. */
   close(runId: string, now: Date = new Date()): RunRecord {
     return this.traced(runId, "close", () =>
-      this.withLock(this.path(runId), () => {
+      this.withLock(runId, () => {
         const current = this.get(runId);
         if (typeof current.closedAt === "string") return current;
         const next: RunRecord = { ...current, closedAt: now.toISOString() };
@@ -635,8 +650,8 @@ export class RunRecordStore {
    * by a process that cannot show it still holds it, and never stolen from an
    * owner that is not provably dead.
    */
-  private withLock<T>(p: string, fn: () => T): T {
-    const lock = `${p}.lock`;
+  private withLock<T>(runId: string, fn: () => T): T {
+    const lock = this.lockPath(runId);
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     // `<pid> <nonce>`: the pid is what a contender probes for liveness, the
     // nonce is what release compares back before it unlinks anything.
