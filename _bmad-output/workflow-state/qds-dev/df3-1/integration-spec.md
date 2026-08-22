@@ -652,13 +652,22 @@ Harvest/teardown verbs are thin front doors implemented INSIDE scripts/fleet.ts 
 flags list = dashed flags only (positionals like runId are per-verb CLI grammar, not registry flags). exitCodes: dispatch [0,1,2,3,5]; status [0,1,2,4]; harvest [0,1,2,4]; teardown [0,1,2,4] (sketch's 3 on teardown wrong — 3 is setup-gate-only).
 
 > **AMENDED (review B8)** — status/harvest/teardown were specified `[0,1,4]`; the
-> shipped registry declares `[0,1,2,4]` and the shipped registry is the accurate
-> one. All three verbs really do refuse with **2**: a run id that fails the
-> canonical grammar or the length cap (`assertFleetRunId`), an extra positional,
-> a missing required `<run-id>`, a flag the verb does not take, or a repeated
-> value flag — every one of those is a usage refusal raised by `parseArgv` before
-> the verb runs, and `tests/fleet/verbs.test.ts` demonstrates each. DF3.5's
-> contract test must be written against `[0,1,2,4]`; the code is correct here.
+> shipped registry is the accurate one and declares status `[0,1,2,4]`,
+> harvest `[0,1,2,4,5,6]`, teardown `[0,1,2,4,5,6]`. All three verbs really do
+> refuse with **2**: a run id that fails the canonical grammar or the length cap
+> (`assertFleetRunId`), an extra positional, a missing required `<run-id>`, a
+> flag the verb does not take, or a repeated value flag — every one of those is a
+> usage refusal raised by `parseArgv` before the verb runs, and
+> `tests/fleet/verbs.test.ts` demonstrates each.
+>
+> Harvest and teardown carry **two more** that status cannot: **5**, the run lock
+> already held by another invocation (`run-locked`), and **6**, a cleanup failure
+> on an otherwise-successful path — a cost ledger that would not close or a run
+> lock that would not release, which `scripts/fleet.ts` deliberately keeps out of
+> the retryable range because nothing will ever clear it. Status takes no lock and
+> opens no ledger, so neither reaches it. DF3.5's contract test must be written
+> against each verb's OWN declared set, read from the registry — the three do not
+> share one.
 >
 > **AMENDED (review B2)** — `--driver` is `required: true` on all four entries
 > (it was declared `required: false`). `assertDriverChosen` in `scripts/fleet.ts`

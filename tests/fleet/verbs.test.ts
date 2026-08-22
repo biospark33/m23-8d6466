@@ -45,6 +45,7 @@ import {
   type RunRecordPatch,
 } from "../../src/providers/run-record.ts";
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
+import { rejection } from "./helpers.ts";
 
 /** Await a refusal and hand back the typed error — never a bare "something threw". */
 async function refusal(
@@ -66,24 +67,6 @@ async function refusal(
   expect(err.exitCode).toBe(exitCode);
   expect(err.code).toBe(code);
   return err;
-}
-
-/**
- * Await a rejection to COMPLETION and hand back the error.
- *
- * NOT `await expect(p).rejects.toThrow(…)`: bun's `rejects` matcher returns
- * `undefined`, so that `await` yields a single microtask tick and lets the work
- * under test race whatever the test asserts next (here: reading back the record
- * the failed call was supposed to leave behind). The matcher still reports a
- * mismatch, but the sequencing it reads as is not the sequencing it has.
- */
-async function rejection(work: Promise<unknown>): Promise<Error> {
-  const settled = await work.then(
-    () => null,
-    (e: unknown) => (e instanceof Error ? e : new Error(`non-Error rejection: ${String(e)}`)),
-  );
-  expect(settled).toBeInstanceOf(Error); // null ⇒ it resolved, which is the bug
-  return settled as Error;
 }
 
 /**

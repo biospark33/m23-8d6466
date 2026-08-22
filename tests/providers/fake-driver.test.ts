@@ -31,6 +31,9 @@ import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { resolveDriver } from "../../src/providers/index.ts";
 import { setLogSink } from "../../src/swarmclaw/mcp/stdio-transport.ts";
 import { runDriverContract } from "./driver-contract.test.ts";
+// The block below drives FLEET-layer entry points (`provisionAdmittedRun`,
+// `reapRuns`) against this driver, so it shares the fleet suite's fixtures.
+import { rejection } from "../fleet/helpers.ts";
 
 const boxesDir = mkdtempSync(join(tmpdir(), "qds-fake-boxes-"));
 process.env.QDS_FAKE_BOXES_DIR = boxesDir;
@@ -171,6 +174,30 @@ describe("FakeDriver accountability and boundaries", () => {
     } finally {
       rmSync(boxes, { recursive: true, force: true });
       rmSync(runs, { recursive: true, force: true });
+    }
+  });
+
+  test("an unstat-able entry does not take the whole listing down: ENOENT drops, other errno rides out as an anomaly", async () => {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-stat-"));
+    try {
+      const d = new FakeDriver(boxes);
+      await d.create("good-box");
+      // A dangling symlink: `statSync` FOLLOWS links, so this is the ENOENT an
+      // entry unlinked between `readdir` and `stat` produces. Nothing is there
+      // to reach, so it is not a box and not an anomaly — but an unguarded
+      // `statSync` threw it out of the whole call, and one stray link then hid
+      // every box in the fleet from `status` and from `reapRuns` alike.
+      symlinkSync(join(boxes, "nowhere"), join(boxes, "dangling"));
+      // A self-referential symlink: ELOOP, not ENOENT. Nothing proves this is
+      // NOT a live box, so it must ride out as an anomaly for `reapRuns` to
+      // refuse on rather than being silently dropped.
+      symlinkSync(join(boxes, "loop"), join(boxes, "loop"));
+
+      const listing = await d.listWithAnomalies();
+      expect(listing.vms.map((v) => v.name)).toEqual(["good-box"]);
+      expect(listing.skipped).toEqual(["loop"]);
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
     }
   });
 
@@ -447,16 +474,6 @@ describe("FakeDriver accountability and boundaries", () => {
  * suite DF2.2 and the OCI story import stays substrate-honest.
  */
 describe("provisioning refusals and fail-safe reap", () => {
-  /** The rejection itself, so a test can assert on its type and code. */
-  async function rejection(p: Promise<unknown>): Promise<Error> {
-    try {
-      await p;
-    } catch (e) {
-      return e as Error;
-    }
-    throw new Error("expected a rejection, got a resolution");
-  }
-
   function tmp(): { boxes: string; runs: string; driver: FakeDriver; store: RunRecordStore } {
     const boxes = mkdtempSync(join(tmpdir(), "qds-df31-boxes-"));
     const runs = mkdtempSync(join(tmpdir(), "qds-df31-runs-"));

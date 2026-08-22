@@ -130,7 +130,42 @@ export class FakeDriver implements ProviderDriver {
     const requestId = newRequestId();
     for (const entry of readdirSync(this.root).sort()) {
       if (name !== undefined && entry !== name) continue;
-      if (!statSync(join(this.root, entry)).isDirectory()) continue;
+      // `readdir` and `stat` are two calls, and the entry can stop being
+      // stat-able between them: a concurrent `destroy` unlinks it (ENOENT), a
+      // dangling symlink never had a target (ENOENT), a directory made
+      // unreadable by hand refuses (EACCES), a failing mount errors (EIO). An
+      // unguarded `statSync` threw all of those out of the WHOLE listing, so
+      // one stray link took every box in the fleet out of `status` — and out of
+      // `reapRuns`, which then had nothing to refuse on.
+      //
+      // ENOENT is not a box: nothing is there to reach, so it is logged and
+      // dropped. Every other errno is an entry that MIGHT be a live box and
+      // could not be read, so it rides out as an anomaly for `reapRuns` to
+      // refuse on — the same fail-closed posture as the name filter below.
+      let isDir: boolean;
+      try {
+        isDir = statSync(join(this.root, entry)).isDirectory();
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT") skipped.push(entry);
+        log({
+          requestId,
+          operation: "fake-driver.list.unstatable",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: 0,
+          status: "error",
+          error: {
+            code: "unstatable_box_entry",
+            message: `box directory could not be stat'ed: ${entry} (${code ?? (e as Error).message})`,
+          },
+          driver: this.name,
+          verb: "list",
+          outcome: "skipped",
+        });
+        continue;
+      }
+      if (!isDir) continue;
       // A name outside the hostname grammar cannot be a box this driver made,
       // and reporting it would abort reap: `destroy` re-validates and throws, so
       // one stray directory would stop the fleet-wide reaper. The canonical

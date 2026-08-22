@@ -126,3 +126,29 @@ export function closeThrowsLedger(): RecordingLedger {
   };
   return ledger;
 }
+
+/**
+ * Await a rejection to COMPLETION and hand back the error, so a test can assert
+ * on its type, code and payload.
+ *
+ * NOT `await expect(p).rejects.toThrow(…)`: bun's `rejects` matcher returns
+ * `undefined`, so that `await` yields a single microtask tick and lets the work
+ * under test race whatever the test asserts next (typically: reading back the
+ * record the failed call was supposed to leave behind). The matcher still
+ * reports a mismatch, but the sequencing it reads as is not the sequencing it
+ * has.
+ *
+ * One copy, shared: `tests/fleet/verbs.test.ts` and
+ * `tests/providers/fake-driver.test.ts` each had their own, and the second was
+ * the naive `try/await/catch` shape whose docstring above explains why it is
+ * the wrong one to keep.
+ */
+export async function rejection(work: Promise<unknown>): Promise<Error> {
+  const settled = await work.then(
+    () => null,
+    (e: unknown) => (e instanceof Error ? e : new Error(`non-Error rejection: ${String(e)}`)),
+  );
+  // `null` ⇒ it RESOLVED, which is the bug the caller is asserting against.
+  if (settled === null) throw new Error("expected a rejection, got a resolution");
+  return settled;
+}

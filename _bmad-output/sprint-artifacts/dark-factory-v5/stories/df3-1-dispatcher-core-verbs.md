@@ -896,7 +896,10 @@ The three test-quality reviewers found the suite was green in places it should n
   `swarmclaw/` or `cli-anything/`. **Note:** the index is stale for this branch — it returns
   `Target not found` for every DF3.1 symbol and surfaces story-file headings as `driver.ts` symbols,
   so the `critical` risk label reflects breadth, not a verified regression. Reindex with
-  `bash scripts/install-gitnexus-plus.sh` before the next round's `impact` calls are meaningful.
+  `bash scripts/install-gitnexus-plus.sh` before the next round's `impact` calls are meaningful —
+  or `GITNEXUS_SKIP_INSTALL=1 bash scripts/install-gitnexus-plus.sh` to re-analyze against the
+  already-installed GitNexus without reinstalling it. Never a bare `gitnexus analyze`: it skips the
+  transient `.gitnexusignore` negation and drops the test fixtures from the graph (CLAUDE.md, #46/#47).
 
 ## Review round 5 — BMAD adversarial code review, 2026-08-22
 

@@ -53,6 +53,7 @@
 import { basename, dirname, join, resolve } from "node:path";
 
 import {
+  type CostLedgerDeps,
   DEFAULT_COST_CONFIG_FILE,
   DEFAULT_COST_LEDGER_FILE,
   loadCostConfig,
@@ -69,7 +70,15 @@ function envPath(value: string | undefined): string | undefined {
   return value === undefined || value.trim() === "" ? undefined : value;
 }
 
-export function costLedgerOpts(storeDir: string) {
+/**
+ * Typed against `CostLedgerDeps` — the constructor's OWN option shape — so a
+ * field renamed or retyped there is a compile error here rather than an option
+ * silently ignored at runtime: `new CostLedger({ ...costLedgerOpts(dir) })`
+ * takes excess and misspelled keys without complaint through the spread, and a
+ * dropped `path` is a run whose money lands in the cwd-relative default. Both
+ * halves are always set, hence `Required<>`.
+ */
+export function costLedgerOpts(storeDir: string): Required<Pick<CostLedgerDeps, "path" | "config">> {
   const dir = resolve(storeDir);
   // The default layout is the one place the ledger stays a sibling.
   const ledgerDir = dir === resolve(DEFAULT_RUNS_DIR) ? dirname(dir) : dir;
