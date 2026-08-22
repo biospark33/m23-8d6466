@@ -8,10 +8,29 @@
  * clears it. This is a concurrency guard for destructive verbs, so the two
  * entry points share ONE implementation — acquire AND release both live here
  * so the semantics cannot drift per CLI.
+ *
+ * Lock body: `<pid> <host> <createdAt-ISO> <nonce>`. The host field is what
+ * makes the pid meaningful: `kill(pid, 0)` answers about THIS host's process
+ * table, and a shared runs directory (an NFS mount, a bind-mounted volume, a CI
+ * runner and a laptop) makes that answer about a stranger. Bodies written
+ * before the field existed are `<pid> <ISO> <nonce>` and still parse — the
+ * field that looks like an ISO timestamp tells the two layouts apart.
  */
 
 import { randomBytes } from "node:crypto";
-import { closeSync, fsyncSync, linkSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  fsyncSync,
+  linkSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 
 import { assertValidRunId } from "../../src/providers/run-record.ts";
@@ -38,6 +57,20 @@ export class RunLockedError extends Error {
 }
 
 /**
+ * The run lock is NOT re-entrant, and the refusal for a second acquire in the
+ * SAME process used to read "another invocation holds … (pid <self>)" — telling
+ * the operator to wait for themselves. Its own code so a caller can tell a
+ * programming error apart from a genuine contention refusal.
+ */
+export class RunLockReentrantError extends Error {
+  readonly code = "run-lock-reentrant";
+  readonly remediation = "release the lock before acquiring it again — the run lock is not re-entrant";
+  constructor(lockPath: string) {
+    super(`this process already holds ${lockPath}`);
+  }
+}
+
+/**
  * Locks THIS process created and has not released yet: path → the exact body
  * written into it. Release compares the body back before unlinking, so a lock
  * re-created by a different invocation (ours crashed, theirs claimed the path)
@@ -45,10 +78,17 @@ export class RunLockedError extends Error {
  */
 const held = new Map<string, string>();
 
+/** This host's name, with whitespace folded — the body is whitespace-delimited. */
+function lockHost(): string {
+  return hostname().replace(/\s+/g, "_") || "unknown-host";
+}
+
 /**
  * Same probe `RunRecordStore` uses for its stale temps (run-record.ts's
  * `isAlive`): signal 0 tests existence, EPERM means alive but not ours.
  * Duplicated rather than imported because that copy is module-private.
+ *
+ * Host-local by construction — only ever called for a body this host wrote.
  */
 function isAlive(pid: number): boolean {
   try {
@@ -95,44 +135,181 @@ function installSignalRelease(): void {
   }
 }
 
+/**
+ * Full write to fd 2, the same loop `scripts/fleet.ts` uses for its own
+ * diagnostics. `console.error` bypassed that sink: its line could interleave
+ * with a partially written JSON log line, and a short write silently truncated
+ * the remediation an operator has to follow.
+ */
+function writeStderr(s: string): void {
+  const buf = Buffer.from(s, "utf8");
+  let off = 0;
+  while (off < buf.length) off += writeSync(2, buf, off, buf.length - off);
+}
+
 /** Release every lock this process still holds, reporting failures to stderr. */
 export function releaseHeldRunLocks(): void {
   for (const lock of [...held.keys()]) {
     try {
       releaseRunLock(lock);
     } catch (e) {
-      console.error(
-        `!! lock-release-failed: could not release ${lock}: ${(e as Error).message}\nnext: rm ${lock} by hand once no other invocation holds it — until then every later teardown of this run refuses`,
+      writeStderr(
+        `!! lock-release-failed: could not release ${lock}: ${(e as Error).message}\nnext: rm ${lock} by hand once no other invocation holds it — until then every later teardown of this run refuses\n`,
       );
     }
   }
 }
 
-/** Describe the invocation currently holding `lock` for the refusal message. */
-function refuse(lock: string, holder: string): RunLockedError {
+/** `<pid> <host> <ISO> <nonce>`, or the pre-host `<pid> <ISO> <nonce>` layout. */
+function parseLockBody(body: string): { pid?: string; host?: string; at: number } {
+  const [pid, second, third] = body.trim().split(/\s+/);
+  // The discriminator is the shape of field 2: only `toISOString()` output can
+  // be there in the old layout, and no hostname matches it.
+  const preHost = /^\d{4}-\d{2}-\d{2}T/.test(second ?? "");
+  return {
+    pid,
+    host: preHost ? undefined : second,
+    at: Date.parse((preHost ? second : third) ?? ""),
+  };
+}
+
+/**
+ * Describe the invocation currently holding `lock` for the refusal message, or
+ * `undefined` when the lock VANISHED between the caller's EEXIST and this read
+ * — a free run, not an unreadable one, so the caller retries rather than
+ * printing an `rm` for a path that no longer exists.
+ */
+function refuse(lock: string, holder: string): RunLockedError | undefined {
   let body = "";
   try {
     body = readFileSync(lock, "utf8").trim();
-  } catch {
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     // present but unreadable — fail closed below with what we do know
   }
-  const [pid, iso] = body.split(/\s+/);
-  const at = Date.parse(iso ?? "");
+  const { pid, host, at } = parseLockBody(body);
   if (!/^\d+$/.test(pid ?? "") || Number.isNaN(at)) {
     return new RunLockedError(lock, `holder unknown, lock body ${JSON.stringify(body)}`, holder);
+  }
+  const age = Math.max(0, Math.round((Date.now() - at) / 1000));
+  // A pid is only meaningful on the host that minted it. Probing our own
+  // process table for a foreign host's pid returns either a false "not running"
+  // — and the remediation then tells the operator to rm a LIVE holder's lock,
+  // re-opening the double teardown — or a false "alive" via pid reuse. Say
+  // "unknown" instead, and never mark a foreign lock stale.
+  if (host !== undefined && host !== lockHost()) {
+    return new RunLockedError(lock, `pid ${pid} on host ${host}, liveness unknown from here, held ${age}s`, holder);
   }
   // PID liveness, not just the number: without it the printed remediation
   // ("only if that pid is gone") is unfollowable, and pid reuse makes it wrong.
   const alive = isAlive(Number(pid));
-  const age = Math.max(0, Math.round((Date.now() - at) / 1000));
   const who = `pid ${pid}${alive ? "" : " is not running"}, held ${age}s`;
   return new RunLockedError(lock, who, holder, !alive);
 }
 
 /**
+ * Reap `<runId>.lock.<pid>.<hex>.tmp` left by a process that died between the
+ * temp's creation and its unlink (SIGKILL, ENOSPC, power loss). Nothing else
+ * removes them and they accumulate in the same directory the record/bundle
+ * listings glob over. Only temps whose recorded pid is gone are removed — a
+ * live pid's temp is mid-acquire.
+ */
+function reapStaleTemps(runsDir: string, runId: string): void {
+  const prefix = `${runId}.lock.`;
+  let names: string[];
+  try {
+    names = readdirSync(runsDir);
+  } catch {
+    return; // the acquire below reports a missing/unreadable directory properly
+  }
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
+    const pid = Number(name.slice(prefix.length).split(".")[0]);
+    if (!Number.isInteger(pid) || pid <= 0 || isAlive(pid)) continue;
+    try {
+      rmSync(join(runsDir, name), { force: true });
+    } catch {
+      // Best effort: a temp we cannot remove is litter, never a correctness bug.
+    }
+  }
+}
+
+/**
+ * Create `lock` holding `body`, exclusively. Returns false when the path is
+ * already claimed; every other failure throws with its errno intact.
+ *
+ * `link(2)` from a complete, fsynced temp rather than O_EXCL-then-write: link
+ * is equally exclusive and equally atomic, but the file is already whole when
+ * it appears, so a concurrent reader can never observe an empty body and report
+ * "holder unknown".
+ *
+ * Not every filesystem HAS hard links, though: FUSE and overlay mounts, some
+ * macOS Docker bind-mount configs, exFAT and SMB shares return EPERM / ENOSYS /
+ * EOPNOTSUPP from `link(2)` rather than EEXIST. That used to escape as a raw
+ * errno with no remediation, making every harvest and teardown on such a host
+ * permanently impossible — so fall back to O_EXCL, which works everywhere.
+ *
+ * ponytail: the fallback re-opens the empty-body window the link avoids (a
+ * reader between create and write sees ""), which `refuse` already renders as
+ * "holder unknown". Correct, just less informative — and only on filesystems
+ * that leave no other option.
+ */
+function claim(lock: string, body: string): boolean {
+  const tmp = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  let fd: number | undefined;
+  try {
+    // Inside the try (not before it): a missing runs directory, EACCES, or a
+    // pid+nonce collision is cleaned up and classified like every other failure
+    // here instead of escaping around the cleanup.
+    fd = openSync(tmp, "wx", 0o600);
+    writeFileSync(fd, body);
+    fsyncSync(fd);
+    // Cleared BEFORE the call, not after: `close(2)` consumes the descriptor
+    // whether it returns or fails (POSIX), so a throwing close still leaves the
+    // number free for reuse — closing it again could land on a stranger's handle.
+    const open = fd;
+    fd = undefined;
+    closeSync(open);
+    try {
+      linkSync(tmp, lock);
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+      return writeLockDirect(lock, body);
+    }
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // The lock may already be OURS at this point; throwing here would abandon
+      // it with nothing registered to release it. reapStaleTemps sweeps later.
+    }
+  }
+}
+
+/** The no-hard-links fallback: O_EXCL create, then write. */
+function writeLockDirect(lock: string, body: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(lock, "wx", 0o600);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw e;
+  }
+  try {
+    writeFileSync(fd, body);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  return true;
+}
+
+/**
  * Claim `<runsDir>/<runId>.lock` for the duration of one invocation, writing
- * `<pid> <createdAt-ISO> <nonce>` so a refused invocation can name the holder
- * and so `releaseRunLock` can prove the lock it unlinks is still ours.
+ * `<pid> <host> <createdAt-ISO> <nonce>` so a refused invocation can name the
+ * holder and so `releaseRunLock` can prove the lock it unlinks is still ours.
  *
  * Two concurrent invocations for the same run both pass the closedAt gate
  * inside harvest/teardown (a check-then-act) and then double-revoke,
@@ -141,46 +318,59 @@ function refuse(lock: string, holder: string): RunLockedError {
  * steals: a stale lock means an uncertain teardown state, which is exactly the
  * moment an operator — not a heuristic — should decide.
  *
- * Written into a temp file and `link(2)`ed into place rather than created with
- * O_EXCL and written after: link is equally exclusive and equally atomic, but
- * the file is already complete and fsynced when it appears, so a concurrent
- * reader can never observe an empty body and report "holder unknown".
- *
  * ponytail: library callers bypass the lock — the CLIs are the operator surface.
  */
 export function acquireRunLock(runsDir: string, runId: string, holder = "invocation"): string {
   // The id is joined into a filesystem path: validate BEFORE the join, on the
   // same grammar the record store enforces, not after the path exists.
   assertValidRunId(runId);
-  const lock = join(runsDir, `${runId}.lock`);
-  const body = `${process.pid} ${new Date().toISOString()} ${randomBytes(4).toString("hex")}\n`;
-  const tmp = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-  const fd = openSync(tmp, "wx", 0o600);
-  let fdOpen = true;
-  try {
-    writeFileSync(fd, body);
-    fsyncSync(fd);
-    // Cleared BEFORE the call, not after: `close(2)` consumes the descriptor
-    // whether it returns or fails (POSIX), so a throwing close still leaves the
-    // number free for reuse. Clearing after meant a failed close fell into the
-    // catch with `fdOpen` still true and closed the number a second time.
-    fdOpen = false;
-    closeSync(fd);
-    linkSync(tmp, lock);
-  } catch (e) {
-    // Guarded, not try/catch'd (the store's atomicReplace idiom): once
-    // closeSync has been reached the fd is gone, and fd numbers are recycled —
-    // a second close could land on a stranger's handle.
-    if (fdOpen) closeSync(fd);
-    rmSync(tmp, { force: true });
-    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    throw refuse(lock, holder);
-  }
-  rmSync(tmp, { force: true });
-  fsyncDir(runsDir);
-  held.set(lock, body);
+  // FIRST, before a lock can exist: a SIGINT (or a throw) after the link but
+  // before the handler was registered left `<runId>.lock` on disk with nothing
+  // to release it, and this module never steals — every later harvest/teardown
+  // of that run refused forever while the box and the key stayed live and
+  // billing. Releasing an empty `held` is a no-op, so installing early is free.
   installSignalRelease();
-  return lock;
+  const lock = join(runsDir, `${runId}.lock`);
+  if (held.has(lock)) throw new RunLockReentrantError(lock);
+  reapStaleTemps(runsDir, runId);
+  // Two attempts, not a loop: the second covers a holder that finished between
+  // our EEXIST and refuse()'s read (the lock is genuinely free again). A third
+  // contender taking it in that same window is real contention, and the refusal
+  // it produces is the truthful answer.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const body = `${process.pid} ${lockHost()} ${new Date().toISOString()} ${randomBytes(4).toString("hex")}\n`;
+    if (claim(lock, body)) {
+      // Registered the instant the lock is ours, BEFORE the fsync: everything
+      // after this point can throw or be interrupted, and an unregistered lock
+      // is one nothing will ever release.
+      held.set(lock, body);
+      fsyncDir(runsDir);
+      return lock;
+    }
+    const refusal = refuse(lock, holder);
+    if (refusal !== undefined) throw refusal;
+  }
+  throw new RunLockedError(lock, "the lock is being taken and released repeatedly", holder);
+}
+
+/**
+ * Put a body this process took aside but does not own back at `lock`, and say
+ * whether it landed. `link`, never `rename` — rename would overwrite a lock a
+ * third invocation claimed at the path while this one was held aside.
+ *
+ * The taken copy is removed ONLY when the restore succeeded. An unproven body
+ * is never deleted: it may be a live holder's claim, and nothing else in the
+ * system would put it back.
+ */
+function restore(claimed: string, lock: string): string {
+  try {
+    linkSync(claimed, lock);
+  } catch (e) {
+    const why = (e as NodeJS.ErrnoException).code ?? (e as Error).message;
+    return `it could not be put back (${why}) and is now at ${claimed} — mv it back to ${lock} once no other invocation holds it`;
+  }
+  rmSync(claimed, { force: true });
+  return "it was put back";
 }
 
 /**
@@ -192,16 +382,23 @@ export function acquireRunLock(runsDir: string, runId: string, holder = "invocat
  * path this process never held is a no-op; finding a foreign body there throws,
  * because the caller's own exit code should say the run was left locked.
  *
- * TAKE, THEN COMPARE — not compare, then take. Reading the body and unlinking
- * the path as two calls is a TOCTOU: a lock cleared by hand and re-claimed
- * between them gets its LIVE holder's file unlinked by this process, which
- * re-enables the double harvest/teardown the lock exists to prevent. `rename`
- * moves whatever the path points at in one step, so the bytes compared below
- * are provably the bytes removed and the comparison cannot be raced.
+ * READ FIRST, then take. `rename` moves whatever the path points at, so taking
+ * before comparing meant a lock that is no longer ours — cleared by hand,
+ * reaped, then re-claimed by a live invocation — was moved out from under its
+ * holder, leaving the path EMPTY for a third invocation to acquire while the
+ * restore raced it; a failed restore then deleted the second holder's body for
+ * good and both survivors believed they held the run. A body that is not ours
+ * is now left exactly where it is, untouched.
+ *
+ * The read alone would still be a check-then-act (cleared and re-claimed
+ * between the read and the unlink), so the unlink is a `rename` and the taken
+ * bytes are compared again: the body proved below is provably the body removed.
+ * That second comparison can only fail in the narrow window after our own bytes
+ * were seen, and it restores rather than deletes.
  *
  * ponytail: no POSIX call unlinks a path conditionally on its inode, and
  * neither Node's nor Bun's `fs` exposes `flock(2)`/`fcntl` locks, so
- * take-verify-restore is the strongest release this runtime affords. If a
+ * read-verify-take-verify is the strongest release this runtime affords. If a
  * kernel-held lock ever becomes reachable (a native binding, or `fs` growing
  * one), that is the upgrade path — it would make the restore branch dead code.
  */
@@ -210,6 +407,23 @@ export function releaseRunLock(lock: string): void {
   if (body === undefined) return;
   // Dropped first: a failed release must not be retried by the signal handler.
   held.delete(lock);
+
+  let before: string;
+  try {
+    before = readFileSync(lock, "utf8");
+  } catch (e) {
+    // ENOENT: already gone (reaped, or cleared by hand and not yet re-taken) —
+    // a no-op release. Any other errno means the body is UNKNOWN, and an
+    // unknown body is precisely the one that must not be deleted.
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw e;
+  }
+  if (before !== body) {
+    throw new Error(
+      `refusing to release ${lock}: it holds ${JSON.stringify(before.trim())}, not this invocation's claim — left untouched`,
+    );
+  }
+
   const claimed = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   try {
     renameSync(lock, claimed);
@@ -221,26 +435,15 @@ export function releaseRunLock(lock: string): void {
   try {
     onDisk = readFileSync(claimed, "utf8");
   } catch (e) {
-    rmSync(claimed, { force: true });
-    throw e;
+    throw new Error(`could not read ${lock} while releasing it (${(e as Error).message}) — ${restore(claimed, lock)}`);
   }
   if (onDisk === body) {
     rmSync(claimed, { force: true });
     return;
   }
-  // Foreign body: put it back rather than keep a live holder's claim hostage.
-  // `link`, never `rename` — rename would overwrite a lock a third invocation
-  // claimed at the path while this one was held aside.
-  let restored = true;
-  try {
-    linkSync(claimed, lock);
-  } catch {
-    restored = false;
-  }
-  rmSync(claimed, { force: true });
+  // Re-claimed inside the rename window — vanishingly narrow, but the body is
+  // someone else's and must go back rather than be deleted.
   throw new Error(
-    `refusing to release ${lock}: it now holds ${JSON.stringify(onDisk.trim())}, not this invocation's claim${
-      restored ? "" : " — and the path was re-claimed before it could be put back"
-    }`,
+    `refusing to release ${lock}: it now holds ${JSON.stringify(onDisk.trim())}, not this invocation's claim — ${restore(claimed, lock)}`,
   );
 }

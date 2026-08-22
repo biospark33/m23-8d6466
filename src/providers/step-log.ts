@@ -10,6 +10,41 @@
  */
 
 import { log } from "../swarmclaw/log.ts";
+import { SECRET_PREFIXES } from "./run-record.ts";
+
+/**
+ * INV-2 in the other direction: `assertNoSecret` REFUSES these shapes on the
+ * way into a record; this masks them on the way into a log line.
+ *
+ * Load-bearing on the credentials path. `deliverRunKey` writes the minted
+ * OpenRouter key into the box through `driver.exec`, and an exec wrapper that
+ * echoes the failed argv — the ordinary way one reports a failure — puts the
+ * key plaintext into `err.message`, which this module then writes out. INV-4
+ * says the plaintext exists in the mint return and nowhere else. Dispatch's
+ * `redactUrls` is no help here and could not be reused anyway: it only matches
+ * `https?://…`, a bare `sk-…` has no scheme, and `src/providers/` does not
+ * import from `src/fleet/`.
+ *
+ * Two arms, both lifted from `assertNoSecret`'s reasoning:
+ *  - the known prefixes, matched at a token boundary so `task-runner` does not
+ *    trip on `sk-`;
+ *  - a long mixed-class token, for an issuer whose prefix is not on the list.
+ *    The mixed-class requirement is what keeps a 40-char all-hex git SHA and an
+ *    all-lowercase run id — the fields these lines exist to carry — readable.
+ */
+const SECRET_PREFIX_RE = new RegExp(
+  `(^|[^A-Za-z0-9])(?:${SECRET_PREFIXES.map((p) => p.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("|")})[A-Za-z0-9+/=_.:-]*`,
+  "g",
+);
+const LONG_TOKEN_RE = /[A-Za-z0-9+/=_.:-]{40,}/g;
+
+export function redactSecrets(text: string): string {
+  return text
+    .replace(SECRET_PREFIX_RE, (_m, lead: string) => `${lead}«redacted»`)
+    .replace(LONG_TOKEN_RE, (t) =>
+      /[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t) ? "«redacted»" : t,
+    );
+}
 
 /** Per-step log context — propagated ids plus the driver name. */
 export interface StepCtx {
@@ -43,7 +78,9 @@ export interface StepLogLabels {
 /**
  * Run `fn` as one timed, logged step. A throw is logged (code + remediation,
  * env-var NAMES only, never expanded) and re-thrown unchanged — the logger
- * never swallows or reshapes a failure.
+ * never swallows or reshapes a failure. The message and remediation are
+ * secret-redacted on the way OUT (see `redactSecrets`); the re-thrown error is
+ * untouched, so a caller that needs the raw text still has it.
  */
 export async function timedLoggedStep<T>(
   ctx: StepCtx,
@@ -70,8 +107,13 @@ export async function timedLoggedStep<T>(
       duration: durationMs,
       durationMs,
       status: "error",
-      error: { code: err.code ?? labels.errorCode, message: err.message ?? String(e) },
-      remediation: err.remediation ?? null, // env-var names only, never expanded
+      // Redacted, not dropped: the free text is how an operator diagnoses a
+      // failed step, and every step here can carry provider text. The code is
+      // ours and never carries a value.
+      error: { code: err.code ?? labels.errorCode, message: redactSecrets(err.message ?? String(e)) },
+      // `typeof`, not `??`: `fn` may reject with a non-Error carrying a null
+      // remediation, and that must not reach the redactor.
+      remediation: typeof err.remediation === "string" ? redactSecrets(err.remediation) : null,
       outcome: labels.error,
       [`${step}_ms`]: durationMs,
     });

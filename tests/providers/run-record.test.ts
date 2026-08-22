@@ -26,6 +26,7 @@ import { teardownRun } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import {
   CORE_FIELDS,
+  LOCK_TIMEOUT_MS,
   RunRecordStore,
   SETTABLE_FIELDS,
   assertValidRunId,
@@ -34,6 +35,13 @@ import {
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const CLI = join(REPO_ROOT, "scripts/run-record.ts");
+
+/**
+ * A pid no OS will ever allocate — above PID_MAX on every platform this runs
+ * on, so `kill(pid, 0)` is ESRCH and the "dead owner" fixtures are decided by
+ * the kernel, not by a race against pid recycling.
+ */
+const DEAD_PID = 999_999_999;
 
 let dir: string;
 let store: RunRecordStore;
@@ -360,9 +368,23 @@ describe("list (AC3, INV-4)", () => {
     expect(() => store.list()).toThrow(/malformed run record run-bad-ts\.json.*createdAt/);
   });
 
-  test("a .json whose name is not a valid run id is a hard error", () => {
+  test("a .json whose name is not a valid run id is REPORTED, not fatal to the whole listing", () => {
+    // Not a name this store could ever have written, and no verb can act on it.
+    // Throwing for it took `list()` — `fleet status`, the DF2.6 reaper's record
+    // sweep — down for the entire directory, which is a bigger INV-4 violation
+    // than the one file. It is named on the log line instead of vanishing.
+    store.create("run-good");
     writeFileSync(join(dir, "Bad Name.json"), JSON.stringify({ runId: "x", createdAt: "y" }), { mode: 0o600 });
-    expect(() => store.list()).toThrow(/Bad Name\.json/);
+    const lines: Record<string, unknown>[] = [];
+    const restore = setLogSink((e) => {
+      lines.push(e as unknown as Record<string, unknown>);
+    });
+    try {
+      expect(store.list().map((r) => r.runId)).toEqual(["run-good"]);
+    } finally {
+      restore();
+    }
+    expect(lines.some((l) => JSON.stringify(l).includes("Bad Name.json"))).toBe(true);
   });
 
   test("an unreadable record is a hard error too, not a skipped entry", () => {
@@ -435,10 +457,18 @@ describe("list (AC3, INV-4)", () => {
 // ---------------------------------------------------------------------------
 
 describe("id validation (AC6)", () => {
-  const bad = ["../evil", "A-b", "a".repeat(64), "-lead", "", "run_id", "run/id", "run.id", "trailing-", "a--"];
+  const bad = ["../evil", "A-b", "a".repeat(64), "-lead", "", "run_id", "run/id", "run.id"];
+  /**
+   * Illegal to CREATE, but legal to reach on a read/write path: any earlier
+   * build could name a record this way, and a record no verb can open is a box
+   * that keeps billing with no route to teardown.
+   */
+  const legacyOnly = ["trailing-", "a--"];
 
   test("path() refuses every illegal id", () => {
     for (const id of bad) expect(() => store.path(id)).toThrow(/invalid run id/);
+    // …but not the legacy tail — `path()` is the read/write door.
+    for (const id of legacyOnly) expect(() => store.path(id)).not.toThrow();
   });
 
   test("create/get/set/close all refuse illegal ids and write nothing", () => {
@@ -449,6 +479,22 @@ describe("id validation (AC6)", () => {
       expect(() => store.close(id)).toThrow(/invalid run id/);
     }
     expect(readdirSync(dir)).toEqual([]);
+  });
+
+  test("a legacy-named record is uncreatable but fully readable, writable and closable", () => {
+    const id = "trailing-";
+    // Creation is strict: no NEW record can be named this way.
+    expect(() => store.create(id)).toThrow(/invalid run id/);
+    expect(readdirSync(dir)).toEqual([]);
+    // One that already exists (any pre-tightening build) stays serviceable —
+    // otherwise the run can never be closed and the box keeps billing.
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify({ runId: id, createdAt: new Date().toISOString() }), {
+      mode: 0o600,
+    });
+    expect(store.get(id).runId).toBe(id);
+    expect(store.set(id, { vmName: "box-legacy" }).vmName).toBe("box-legacy");
+    expect(typeof store.close(id).closedAt).toBe("string");
+    expect(store.list().map((r) => r.runId)).toEqual([id]);
   });
 
   test("63 chars is legal, 64 is not", () => {
@@ -654,19 +700,42 @@ describe("stale temp sweep", () => {
     store.create("run-t");
     const live = Bun.spawn({ cmd: ["sleep", "30"], stdout: "ignore", stderr: "ignore" });
     try {
-      // A pid that is genuinely gone. 999_999 is not portable: Linux's default
-      // pid_max is 4194304, so the constant can name a live process — and if it
-      // belongs to another user, kill(0) raises EPERM, which reads as alive.
-      const corpse = Bun.spawn({ cmd: ["true"], stdout: "ignore", stderr: "ignore" });
-      await corpse.exited;
-      const deadPid = corpse.pid;
-      writeFileSync(join(dir, `run-t.json.${deadPid}.aaaa1111.tmp`), "{}", { mode: 0o600 });
+      // `DEAD_PID`, not a spawned-and-reaped corpse: a reaped pid can be recycled
+      // by a forking CI box between the reap and this write, and the sweep then
+      // correctly spares a "stale" temp the assertion demands be gone. It is not
+      // 999_999 either — Linux's default pid_max is 4194304, so SIX digits can
+      // name a live process, and another user's pid answers kill(0) with EPERM,
+      // which reads as alive. DEAD_PID is above pid_max everywhere.
+      writeFileSync(join(dir, `run-t.json.${DEAD_PID}.aaaa1111.tmp`), "{}", { mode: 0o600 });
       writeFileSync(join(dir, `run-t.json.${live.pid}.bbbb2222.tmp`), "{}", { mode: 0o600 });
 
       new RunRecordStore({ dir });
 
       const temps = readdirSync(dir).filter((f) => f.endsWith(".tmp"));
       expect(temps).toEqual([`run-t.json.${live.pid}.bbbb2222.tmp`]);
+    } finally {
+      live.kill();
+      await live.exited;
+    }
+  });
+
+  // The SIX-part lock-aside name (`<runId>.json.lock.<pid>.<hex>.tmp`), not the
+  // five-part record temp above. A death between the steal/release `rename` and
+  // the `rm` strands a lock generation unless this sweeps, and a sweep that
+  // mis-parses the pid the other way deletes a LIVE writer's in-flight claim.
+  test("a dead owner's lock-aside temp is swept; a live owner's is left alone", async () => {
+    store.create("run-la");
+    const live = Bun.spawn({ cmd: ["sleep", "30"], stdout: "ignore", stderr: "ignore" });
+    try {
+      const dead = `run-la.json.lock.${DEAD_PID}.aaaa1111.tmp`;
+      const alive = `run-la.json.lock.${live.pid}.bbbb2222.tmp`;
+      writeFileSync(join(dir, dead), `${DEAD_PID} deadbeef\n`, { mode: 0o600 });
+      writeFileSync(join(dir, alive), `${live.pid} cafebabe\n`, { mode: 0o600 });
+
+      new RunRecordStore({ dir });
+
+      const temps = readdirSync(dir).filter((f) => f.endsWith(".tmp"));
+      expect(temps).toEqual([alive]);
     } finally {
       live.kill();
       await live.exited;
@@ -773,10 +842,12 @@ describe("concurrent set", () => {
   test("a lock left by a dead process is stolen, not waited on", () => {
     const id = "stale-lock-run";
     store.create(id);
-    writeFileSync(store.lockPath(id), "999999999\n", { mode: 0o600 });
+    writeFileSync(store.lockPath(id), `${DEAD_PID}\n`, { mode: 0o600 });
     const started = Date.now();
     expect(store.set(id, { vmName: "box-2" }).vmName).toBe("box-2");
-    expect(Date.now() - started).toBeLessThan(2_000); // not the 5s lock timeout
+    // Well inside the timeout, expressed against the constant: a steal that
+    // started waiting it out is the regression, not a slow fsync.
+    expect(Date.now() - started).toBeLessThan(LOCK_TIMEOUT_MS / 2);
     expect(existsSync(store.lockPath(id))).toBe(false);
   });
 
@@ -792,7 +863,15 @@ describe("concurrent set", () => {
     writeFileSync(lock, "", { mode: 0o600 });
     const started = Date.now();
     expect(() => store.set(id, { vmName: "box-3" })).toThrow(/timed out waiting for the run record lock/);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(4_000); // waited out LOCK_TIMEOUT_MS
+    // The FULL window, not "a while": the loop only throws once `Date.now()`
+    // has passed `start + LOCK_TIMEOUT_MS`, so anything short of it is a
+    // shortened fail-closed window, not a fast machine. Derived from the import,
+    // so it holds at whatever the timeout is set to — which also means a retune
+    // moves this assertion with it. The line below is what notices the retune:
+    // shortening the wait shortens the window in which a contender proves an
+    // owner dead, and raises the odds two writers overlap.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(LOCK_TIMEOUT_MS);
+    expect(LOCK_TIMEOUT_MS).toBe(5_000);
     expect(existsSync(lock)).toBe(true); // still held by whoever wrote it
     expect(store.get(id).vmName).toBeUndefined();
     rmSync(lock, { force: true });
@@ -809,16 +888,25 @@ describe("concurrent set", () => {
     // would only read back what this test itself wrote.
     const s0 = new RunRecordStore({ dir });
     const lock = s0.lockPath(id);
-    const foreign = `${process.pid + 1} deadbeefcafe\n`;
+    // `process.ppid`: a pid that is genuinely alive and genuinely not ours.
+    // `process.pid + 1` is frequently a live process too, but only by accident —
+    // and it can equally be free, which makes the fixture's premise a coin flip.
+    const foreign = `${process.ppid} deadbeefcafe\n`;
+    let fired = false;
     const s = new RunRecordStore({
       dir,
       beforeRename: () => {
+        fired = true;
         rmSync(lock, { force: true });
         writeFileSync(lock, foreign, { mode: 0o600 });
       },
     });
     s.create(id);
     expect(s.set(id, { vmName: "box-4" }).vmName).toBe("box-4");
+    // The seam really ran. Without this a refactor that moves the rename out of
+    // `beforeRename`'s reach stops opening the window at all, and the assertion
+    // below degrades into an ENOENT instead of naming what broke.
+    expect(fired).toBe(true);
     expect(readFileSync(lock, "utf8")).toBe(foreign);
     rmSync(lock, { force: true });
   });
@@ -846,7 +934,7 @@ describe("concurrent set", () => {
       },
     });
     s.create(id);
-    writeFileSync(lock, "999999999\n", { mode: 0o600 }); // the corpse
+    writeFileSync(lock, `${DEAD_PID}\n`, { mode: 0o600 }); // the corpse
 
     // Fail-closed: the live lock is never stolen, so the write times out.
     expect(() => s.set(id, { vmName: "box-5" })).toThrow(/timed out waiting for the run record lock/);

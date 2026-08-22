@@ -17,7 +17,7 @@ export interface StatusRow {
   /**
    * `orphan` is an owned box no record claims — unattributed spend, which is
    * precisely what the documented union exists to surface (it has no record,
-   * hence no createdAt: the field is empty and the row sorts first).
+   * hence no createdAt: the field is ABSENT and the row sorts first).
    */
   state: "live" | "boxMissing" | "boxUnknown" | "closed" | "orphan";
   /**
@@ -36,7 +36,15 @@ export interface StatusRow {
    * destroy never landed and the box is still billing.
    */
   boxAlive?: boolean;
-  createdAt: string;
+  /**
+   * The record's creation instant. Optional because an `orphan` row has no
+   * record to take one from, and only there. A placeholder `""` was worse than
+   * an absence: it is a required field a renderer trusts, so
+   * `new Date(row.createdAt).toISOString()` threw and `toLocaleString()` printed
+   * "Invalid Date" — on the one row class the sort floats to the top for
+   * operator attention. Absent forces the consumer to handle the absence.
+   */
+  createdAt?: string;
   closedAt?: string;
   spendMicroUsd?: number;
   limitMicroUsd?: number;
@@ -49,15 +57,26 @@ export interface StatusDeps {
 }
 
 /**
- * Ownership filter. `driver.list()` reports the whole account, so a foreign VM
- * whose name collides with a run id must not make that run report `live`.
+ * Ownership filter, stated as the policy it actually implements: **untagged ⇒
+ * treated as ours**. Only an explicit *other* tag is proof of foreign
+ * ownership; a missing tag is no evidence either way and is admitted.
  *
- * Tag EQUALITY is not the test: exedev's `ls --json` carries no tag field at
- * all (see `ProviderVm.tag`), so requiring the tag would classify every real
- * box foreign and report the entire fleet as `boxMissing` — a live box hidden
- * from the operator, the failure this verb exists to prevent. Only an explicit
- * *other* tag is proof of foreign ownership. Same fail-safe reading the DF2.6
- * reaper takes: untagged ⇒ reported, never destroyed.
+ * Tag EQUALITY is not the test, because exedev's `ls --json` carries no tag
+ * field at all (see `ProviderVm.tag`): requiring the tag would classify every
+ * real box foreign and report the entire fleet as `boxMissing` — a live box
+ * hidden from the operator, the failure this verb exists to prevent. Same
+ * fail-safe reading the DF2.6 reaper takes: untagged ⇒ reported, never
+ * destroyed.
+ *
+ * The two costs of that default are real and accepted, because both are
+ * over-reporting and the alternative is under-reporting live spend:
+ *  - an UNTAGGED foreign VM whose name collides with a run id makes that run
+ *    report `live`; and
+ *  - on a tag-blind substrate every box in the account is admitted, so every
+ *    unclaimed one lands as an `orphan` row.
+ * Narrowing this needs the substrate to say whether its list carries tags at
+ * all — a driver-interface capability that does not exist today (`ProviderDriver`
+ * has no such flag), not a guess made here.
  */
 function isOwnedVm(vm: ProviderVm): boolean {
   return vm.tag === undefined || vm.tag === SBX_OWNERSHIP_TAG;
@@ -103,6 +122,13 @@ async function listWithTimeout(
  * The shaping runs INSIDE the try: a driver that answers with a non-array (or
  * with entries that are not VMs) must degrade to boxUnknown like any other
  * list failure, not throw out of the status verb.
+ *
+ * `StatusDeps.driver` is a structural interface, so "entries that are not VMs"
+ * is not hypothetical: any injected or test driver satisfies the type while
+ * answering with nameless entries. A nameless entry keyed the Map under
+ * `undefined` and reached `statusAll` as an orphan row with no runId, which the
+ * comparator then dereferenced. It is dropped here instead — an entry with no
+ * name is not a box any verb could act on (teardown targets it BY name).
  */
 async function listOwnedBoxes(
   deps: StatusDeps,
@@ -111,7 +137,16 @@ async function listOwnedBoxes(
 ): Promise<Map<string, ProviderVm> | null> {
   try {
     const vms = await listWithTimeout(deps.driver, timeoutMs, name);
-    return new Map(vms.filter(isOwnedVm).map((v) => [v.name, v] as const));
+    // ponytail: last-wins on a duplicate `name`, which hides the earlier box's
+    // row. The name IS the join key across records, driver and teardown, so two
+    // boxes sharing one is a substrate that has already broken the addressing
+    // every verb depends on; carrying `Map<string, ProviderVm[]>` through the
+    // record join to report both is the upgrade if a substrate ever allows it.
+    return new Map(
+      vms
+        .filter((v) => typeof v?.name === "string" && v.name.length > 0 && isOwnedVm(v))
+        .map((v) => [v.name, v] as const),
+    );
   } catch {
     return null;
   }
@@ -163,17 +198,38 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
   return { ...base, state: box === undefined ? "boxMissing" : "live" };
 }
 
+/**
+ * An owned box no record claims: billing with nobody accountable for it.
+ *
+ * The box name is the run id by construction, so it is the row's identity. No
+ * record ⇒ no `requestId` and no `createdAt`: both are omitted deliberately,
+ * because there is nothing to join an unclaimed box to and no instant to
+ * report (see StatusRow.requestId / StatusRow.createdAt).
+ *
+ * Shared by both entry points — `statusAll`'s unclaimed-box sweep and
+ * `statusRun`'s recordless fallback — so the two can never disagree about what
+ * an orphan row looks like.
+ */
+function orphanRow(vm: ProviderVm): StatusRow {
+  return { runId: vm.name, state: "orphan", vmName: vm.name, httpsUrl: vm.httpsUrl };
+}
+
 /** Newest-first by createdAt, `runId` breaking ties so the order is total. */
 function byCreatedAtDesc(a: StatusRow, b: StatusRow): number {
   // Numeric, never localeCompare: createdAt is an instant, and ICU collation on
   // mixed ISO shapes ("…Z" vs "…+00:00") orders them by text, not by time.
-  // Unparseable (orphan rows carry none) sorts first — unowned spend is the row
-  // an operator most needs to see.
+  // Absent or unparseable (orphan rows carry none) sorts first — unowned spend
+  // is the row an operator most needs to see.
   const ts = (r: StatusRow): number => {
-    const t = Date.parse(r.createdAt);
+    const t = r.createdAt === undefined ? Number.NaN : Date.parse(r.createdAt);
     return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
   };
-  return ts(b) - ts(a) || a.runId.localeCompare(b.runId);
+  // Two rows that both sort first give `Infinity - Infinity` = NaN, which is
+  // falsy and falls through to the tie-break — so the tie-break runs on the
+  // rows least likely to have a well-formed runId, and must not throw there.
+  // `?? ""` over a declared-string field on purpose: rows are built from a
+  // structural driver/store interface, not from a validated type.
+  return ts(b) - ts(a) || (a.runId ?? "").localeCompare(b.runId ?? "");
 }
 
 /**
@@ -215,11 +271,7 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
     }
     for (const [name, vm] of boxes) {
       if (claimed.has(name)) continue;
-      // An owned box no record claims: billing with nobody accountable for it.
-      // The box name is the run id by construction, so it is the row's identity.
-      // No record ⇒ no requestId: the field is omitted deliberately, because
-      // there is nothing to join an unclaimed box to (see StatusRow.requestId).
-      rows.push({ runId: name, state: "orphan", vmName: name, httpsUrl: vm.httpsUrl, createdAt: "" });
+      rows.push(orphanRow(vm));
     }
   }
 
@@ -229,9 +281,17 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
 }
 
 /**
- * Single-run status. Validates runId (path safety), throws typed error on ENOENT.
+ * Single-run status. Validates runId (path safety), throws typed error only
+ * when NEITHER a record nor a box exists for the id.
  *
- * Mutates NOTHING when not found (no driver calls; per C4: assert in D's tests).
+ * Mutates NOTHING when not found — the driver is read, never written. It is
+ * read because the record and the box are separately losable: the box outlives
+ * operator record cleanup, a `--dir` mismatch between dispatch and this query,
+ * and the crash window `provisionAdmittedRun` documents. `statusAll` already
+ * classifies exactly that box as `orphan`; exiting 4 here for the same id would
+ * make the one query an operator types when they KNOW the run id deny the
+ * existence of a box that is alive and spending.
+ *
  * Found records use same join logic as statusAll.
  */
 export async function statusRun(deps: StatusDeps, runId: string): Promise<StatusRow> {
@@ -249,6 +309,14 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
     // TypeError in the handler that is supposed to classify it.
     const code = (e as NodeJS.ErrnoException | null)?.code;
     if (code === "ENOENT") {
+      // No record is not the same as no box. Ask the substrate under the run id
+      // — the name `createRun` gives the box — before denying it exists. A hit
+      // is the `orphan` state, i.e. the unattributed spend this verb exists to
+      // surface; a list failure is NOT a hit, so it still refuses as 4 rather
+      // than inventing a box out of a timeout.
+      const boxes = await listOwnedBoxes(deps, timeoutMs, runId);
+      const box = boxes?.get(runId);
+      if (box !== undefined) return orphanRow(box);
       throw new FleetError(
         4,
         "run-not-found",

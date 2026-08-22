@@ -193,13 +193,47 @@ export const EXTENSION_NAMESPACES: Readonly<
 export const RUN_ID_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 export const RUN_ID_MAX = 63;
 
-/** How long a writer waits for another process's record lock before giving up. */
-const LOCK_TIMEOUT_MS = 5_000;
+/**
+ * The grammar a run id ALREADY ON DISK may carry — the pre-tightening rule,
+ * which anchored only the leading character.
+ *
+ * `create()` takes a caller-supplied id, so `trailing-` records exist by
+ * construction from any earlier build. Applying the strict grammar on the READ
+ * paths made those records unreadable, unclosable and un-teardown-able: the box
+ * keeps billing with no route to reclaim it, and `list()` — `fleet status`, the
+ * DF2.6 reaper's record sweep — threw for the whole directory over one
+ * filename. That is the unbounded-spend outage INV-4 exists to prevent, entered
+ * through the filename door instead of the schema door, and it is the same
+ * read/write split `validateExtensions` already makes.
+ *
+ * Path safety is unchanged: neither grammar admits `/`, `.` or `..`, and the
+ * length bound is the same. Only CREATION is strict, so no NEW record can be
+ * named outside `RUN_ID_RE`.
+ */
+export const LEGACY_RUN_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * How long a writer waits for another process's record lock before giving up.
+ *
+ * Exported for tests ONLY, so the lock-timing assertions track the real value
+ * rather than a mirrored `5_000`. Shortening this narrows the fail-closed window
+ * and raises the double-writer risk, so a regression here must fail a test.
+ */
+export const LOCK_TIMEOUT_MS = 5_000;
 
 export function assertValidRunId(id: unknown): asserts id is string {
   if (typeof id !== "string" || id.length === 0 || id.length > RUN_ID_MAX || !RUN_ID_RE.test(id)) {
     throw new Error(
       `invalid run id: ${JSON.stringify(id)} (must match ${RUN_ID_RE.source} and be <= ${RUN_ID_MAX} chars)`,
+    );
+  }
+}
+
+/** The read/write-path admission rule: `assertValidRunId` plus the legacy tail. */
+export function assertExistingRunId(id: unknown): asserts id is string {
+  if (typeof id !== "string" || id.length === 0 || id.length > RUN_ID_MAX || !LEGACY_RUN_ID_RE.test(id)) {
+    throw new Error(
+      `invalid run id: ${JSON.stringify(id)} (must match ${LEGACY_RUN_ID_RE.source} and be <= ${RUN_ID_MAX} chars)`,
     );
   }
 }
@@ -218,7 +252,13 @@ export function newId(slug: string, now: Date = new Date()): string {
 // INV-2: no key material, anywhere in the record
 // ---------------------------------------------------------------------------
 
-const SECRET_PREFIXES = [
+/**
+ * The credential shapes this factory actually mints or handles. Exported so a
+ * redactor (`src/providers/step-log.ts`) matches exactly what `assertNoSecret`
+ * refuses — a second copy is a list that drifts, and the half that drifts is
+ * the half that leaks.
+ */
+export const SECRET_PREFIXES = [
   "sk-",
   "sk_live_",
   "sk_test_",
@@ -449,11 +489,26 @@ export class RunRecordStore {
     this.cleanStaleTemps();
   }
 
-  /** INV-5: prove O_EXCL and mode 0600 before any run starts. Never degrade. */
+  /**
+   * INV-5: prove O_EXCL, mode 0600 and `link(2)` before any run starts. Never
+   * degrade.
+   *
+   * `link` is probed because `claimLock` is built on it, not on O_EXCL. On a
+   * filesystem that refuses hard links (SMB/CIFS, some FUSE and overlay bind
+   * mounts return EPERM or EOPNOTSUPP, not EEXIST) the store used to construct
+   * cleanly and every run started — then the first `set()`/`close()` died with
+   * a bare `EPERM: operation not permitted, link …`, mid-lifecycle, after
+   * `driver.create` had stood billable infrastructure up, with no remediation
+   * string. Probing here is the honest fix rather than falling back to
+   * `openSync(lock, "wx")`: the fallback re-opens the empty-body window
+   * `claimLock`'s comment describes, and it hides an unsupported platform
+   * instead of naming it.
+   */
   private assertExclusiveCreateSupported(): void {
     // Deliberately NOT `.tmp`-suffixed: the stale-temp sweep must never see a
     // concurrently-constructing store's probe file.
     const probe = join(this.dir, `.probe-${process.pid}-${randomBytes(4).toString("hex")}`);
+    const probeLink = `${probe}-link`;
     try {
       closeSync(openSync(probe, "wx", 0o600));
       const mode = statSync(probe).mode & 0o777;
@@ -467,10 +522,18 @@ export class RunRecordStore {
         sawEexist = (e as NodeJS.ErrnoException).code === "EEXIST";
       }
       if (!sawEexist) throw new Error("O_EXCL creation not honoured");
+      try {
+        linkSync(probe, probeLink);
+      } catch (e) {
+        throw new Error(
+          `hard links are not supported here (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); the record lock needs link(2)`,
+        );
+      }
     } catch (e) {
       throw new Error(`run record store cannot start in ${this.dir}: ${(e as Error).message}`);
     } finally {
       rmSync(probe, { force: true });
+      rmSync(probeLink, { force: true });
     }
   }
 
@@ -507,9 +570,16 @@ export class RunRecordStore {
     }
   }
 
-  /** The one function every verb routes through to turn an id into a filename. */
+  /**
+   * The one function every verb routes through to turn an id into a filename.
+   *
+   * The LEGACY grammar, deliberately: this is the read/write path, and a record
+   * an earlier build created must stay readable, closable and tearable-down.
+   * `create()` applies the strict `RUN_ID_RE` on top (see `createUnlogged`), so
+   * the tightening still holds where it can act — before a record exists.
+   */
   path(runId: string): string {
-    assertValidRunId(runId);
+    assertExistingRunId(runId);
     return join(this.dir, `${runId}.json`);
   }
 
@@ -534,6 +604,9 @@ export class RunRecordStore {
   }
 
   private createUnlogged(runId: string, now: Date): RunRecord {
+    // Creation is the one moment the strict grammar can act without stranding
+    // anything: no record exists yet, so refusing costs nothing.
+    assertValidRunId(runId);
     const p = this.path(runId);
     const rec: RunRecord = { runId, createdAt: now.toISOString() };
     const fd = openSync(p, "wx", 0o600);
@@ -615,6 +688,13 @@ export class RunRecordStore {
    * INV-4: every `.json` in the directory must parse and validate. A malformed or
    * unreadable record throws naming the file — it is never skipped, because a
    * record quietly dropped is a key that quietly keeps spending.
+   *
+   * The one exception is a filename outside even the LEGACY id grammar: that is
+   * not a record this store could ever have written, no verb can act on it, and
+   * throwing for it took the whole directory down — `fleet status` and the DF2.6
+   * reaper's record sweep return nothing at all, which is a bigger INV-4
+   * violation than the one file. It is reported on the log line instead of being
+   * dropped silently.
    */
   list(): RunRecord[] {
     return this.traced(null, "list", () => this.listUnlogged());
@@ -626,9 +706,13 @@ export class RunRecordStore {
       if (!name.endsWith(".json")) continue;
       const id = name.slice(0, -".json".length);
       try {
-        assertValidRunId(id);
+        assertExistingRunId(id);
       } catch {
-        throw new Error(`malformed run record ${name}: filename is not a valid run id`);
+        this.emit(null, "list.anomaly", Date.now(), "error", {
+          code: "malformed_record_name",
+          message: `malformed run record ${name}: filename is not a valid run id`,
+        });
+        continue;
       }
       out.push(readRecord(join(this.dir, name), id));
     }
@@ -656,15 +740,23 @@ export class RunRecordStore {
     // `<pid> <nonce>`: the pid is what a contender probes for liveness, the
     // nonce is what release compares back before it unlinks anything.
     const body = `${process.pid} ${randomBytes(4).toString("hex")}\n`;
+    // Why the last attempt did not get the lock. Carried into the timeout so an
+    // EACCES/EIO lock (a permissions or mount problem) is not reported as
+    // contention, which is what sent an operator looking for a phantom writer.
+    let heldReason = "contended";
     for (;;) {
       if (this.claimLock(lock, body)) break;
       // Checked on every failed claim, including the ones a steal follows, so
       // the loop is bounded by LOCK_TIMEOUT_MS however the contention resolves.
       if (Date.now() >= deadline) {
-        throw new Error(`timed out waiting for the run record lock: ${lock}`);
+        throw new Error(`timed out waiting for the run record lock: ${lock} (${heldReason})`);
       }
       // A successful steal means the path is free now — retry without sleeping.
-      if (!this.stealIfOwnerGone(lock)) sleepMs(5);
+      const why = this.stealIfOwnerGone(lock, body);
+      if (why !== null) {
+        heldReason = why;
+        sleepMs(5);
+      }
     }
     try {
       return fn();
@@ -688,7 +780,18 @@ export class RunRecordStore {
    */
   private claimLock(lock: string, body: string): boolean {
     const tmp = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-    const fd = openSync(tmp, "wx", 0o600);
+    let fd: number;
+    try {
+      fd = openSync(tmp, "wx", 0o600);
+    } catch (e) {
+      // An EEXIST here is a TEMP-name collision — a 4-byte nonce landing on a
+      // temp left by a crashed process that had our pid (cleanStaleTemps only
+      // runs at store construction). Reporting contention lets withLock retry
+      // with a fresh nonce; letting it escape aborted a lifecycle write with a
+      // raw `EEXIST … .tmp` that reads as a duplicate RECORD.
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw e;
+    }
     let fdOpen = true;
     try {
       writeFileSync(fd, body);
@@ -711,12 +814,25 @@ export class RunRecordStore {
   }
 
   /**
-   * True if a lock left by a dead owner was removed and the caller should retry
-   * immediately; false means the lock counts as HELD and the caller waits.
+   * `null` if the path is free and the caller should retry immediately; a short
+   * reason string means the lock counts as HELD and the caller waits (the reason
+   * rides the eventual timeout message).
    *
    * Anything that does not read as a live-or-dead pid is HELD, never junk —
    * stealing on an unreadable body is how a live holder's lock gets taken out
-   * from under it, and a dropped `keyHash` is worse than a 5s timeout.
+   * from under it, and a dropped `keyHash` is worse than a 5s timeout. That
+   * covers an unreadable PATH too: only ENOENT proves the holder released it.
+   * Any other errno (EACCES on a lock written by another user, EIO on a failing
+   * mount, EISDIR) used to report "free", and `withLock` then retried with NO
+   * sleep — a tight busy loop pegging a core for the full LOCK_TIMEOUT_MS on a
+   * `sleepMs` that blocks the event loop anyway.
+   *
+   * A lock owned by THIS pid is not automatically a corpse either. Two JS
+   * threads (`node:worker_threads` / `Bun.Worker`) share `process.pid`, and the
+   * `beforeRename` seam runs INSIDE the lock and can re-enter `set()`. Only our
+   * OWN body is stealable under our own pid; any other body belongs to a live
+   * sibling holder, and taking it lets two `setLocked` read-modify-writes
+   * overlap and drop a field — INV-4's named failure mode.
    *
    * TAKE, THEN COMPARE — `releaseLock`'s protocol exactly, and for the same
    * reason. Judging the body and unlinking the path as two calls is a TOCTOU:
@@ -738,18 +854,22 @@ export class RunRecordStore {
    * inode equality does not prove generation. The body carries a random nonce
    * (see `withLock`), which does.
    */
-  private stealIfOwnerGone(lock: string): boolean {
+  private stealIfOwnerGone(lock: string, body: string): string | null {
     let raw: string;
     try {
       raw = readFileSync(lock, "utf8");
-    } catch {
-      return true; // the holder released it between our claim and this read
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      // ENOENT alone proves the path is free: the holder released it between
+      // our claim and this read.
+      if (code === "ENOENT") return null;
+      return `lock unreadable: ${code ?? (e as Error).message}`;
     }
     const owner = Number(raw.trim().split(/\s+/)[0]);
     // See cleanStaleTemps: an owner that parsed as `0` must not read as alive.
     // Unparseable, empty or non-positive ⇒ held, wait — never stolen.
-    if (!Number.isInteger(owner) || owner <= 0) return false;
-    if (owner !== process.pid && isAlive(owner)) return false;
+    if (!Number.isInteger(owner) || owner <= 0) return "lock body names no pid";
+    if (owner === process.pid ? raw !== body : isAlive(owner)) return "held by a live owner";
     this.beforeStealTake?.(lock);
     // `.tmp`-suffixed and pid-stamped so a death between the take and the
     // unlink cannot strand the generation: cleanStaleTemps sweeps it at the
@@ -758,30 +878,25 @@ export class RunRecordStore {
     try {
       renameSync(lock, claimed);
     } catch {
-      return true; // gone: the path is free, so retry the claim immediately
+      return null; // gone: the path is free, so retry the claim immediately
     }
     let onDisk: string;
     try {
       onDisk = readFileSync(claimed, "utf8");
     } catch {
       rmSync(claimed, { force: true });
-      return true; // took it and it is unreadable — it is off the path either way
+      return null; // took it and it is unreadable — it is off the path either way
     }
     if (onDisk === raw) {
       rmSync(claimed, { force: true });
-      return true; // provably the corpse that was judged
+      return null; // provably the corpse that was judged
     }
     // A different body: the corpse was cleared and a NEW writer claimed the
     // path between the judgement and the take. Put it back — `link`, never
     // `rename`, so a claim made at the path while this one was held aside is
     // not overwritten (EEXIST ⇒ that newer claim supersedes this body anyway).
-    try {
-      linkSync(claimed, lock);
-    } catch {
-      // any other errno is swept by cleanStaleTemps
-    }
-    rmSync(claimed, { force: true });
-    return false; // a live lock is HELD — wait, never steal
+    if (putBack(claimed, lock)) rmSync(claimed, { force: true });
+    return "held by a live owner"; // a live lock is HELD — wait, never steal
   }
 
   /**
@@ -822,13 +937,7 @@ export class RunRecordStore {
     // Foreign body: put it back. `link`, never `rename` — rename would
     // overwrite a lock claimed at the path while this one was held aside. A
     // failure here stays silent for the reason above: this runs in a `finally`.
-    try {
-      linkSync(claimed, lock);
-    } catch {
-      // EEXIST ⇒ the path already carries a newer claim, which supersedes this
-      // body anyway; any other errno is swept by cleanStaleTemps.
-    }
-    rmSync(claimed, { force: true });
+    if (putBack(claimed, lock)) rmSync(claimed, { force: true });
   }
 
   /** Write-temp-then-rename. There is no in-place partial-write path (INV-3). */
@@ -898,6 +1007,31 @@ export class RunRecordStore {
       outcome,
       record_write_ms: durationMs,
     });
+  }
+}
+
+/**
+ * Re-link a lock body held aside at `claimed` back to `lock`. True when the
+ * caller may unlink `claimed`.
+ *
+ * The return value is the whole point. `link` succeeding puts the body back;
+ * EEXIST means the path already carries a NEWER claim, which supersedes this
+ * body anyway — both leave the live lock reachable, so `claimed` is redundant.
+ * Any OTHER errno (ENOSPC, EMLINK, EDQUOT, EPERM on a mount without hardlink
+ * support, EIO) means the put-back did NOT happen, and `claimed` is then the
+ * ONLY remaining link to that body: unlinking it destroys a lock a live holder
+ * is still inside, letting two `setLocked` read-modify-writes overlap and drop
+ * a field. Leave it on disk instead — it is pid-stamped, so `cleanStaleTemps`
+ * really does sweep it once this process is gone.
+ *
+ * Same shape as `scripts/lib/run-lock.ts`'s release, for the same reason.
+ */
+function putBack(claimed: string, lock: string): boolean {
+  try {
+    linkSync(claimed, lock);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EEXIST";
   }
 }
 

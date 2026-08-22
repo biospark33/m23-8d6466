@@ -128,6 +128,16 @@ export const PipelineManifestSchema = z
     // `z.number().int()` accepts 1e300 (Number.isInteger is true for it) — a
     // hand-authored manifest could otherwise declare a cap the engine can
     // neither compare against an admitted ceiling nor round-trip as an integer.
+    // NOT authoritative to the host, and `loadManifest` deliberately does not
+    // strip it: the read path IS the delivery path — the dispatcher stamps,
+    // serializes and `fill`s this file into the box, and the in-box engine
+    // reads it back through the same loader (round trip pinned by
+    // tests/fleet/brief-schema.test.ts). Dropping it on read would make AC9a's
+    // delivery a no-op. What stops a hand-authored cap from mattering is that
+    // nothing HOST-side reads this field: the enforced ceiling is the DF2.3
+    // key cap recorded as the run record's `limitMicroUsd`. When engine-side
+    // enforcement lands (DF3.x) it must reconcile this value against that
+    // admitted ceiling rather than treat the file as the cap's source.
     limitMicroUsd: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
     phases: z.array(PhaseSpecSchema).min(MIN_PHASES, `phaseCount < ${MIN_PHASES}`),
   })
@@ -685,6 +695,27 @@ export function loadManifestWithSeams(
     manifestLoadMs: performance.now() - started,
     resolvedPath,
   };
+}
+
+/**
+ * DF3.1 AC9a: drop an author-supplied `limitMicroUsd` before stamping.
+ *
+ * For the DISPATCH-side read only. `loadManifest` is deliberately neutral —
+ * it is the reader on BOTH sides of the box boundary, and the runner
+ * (`scripts/pipeline-run.ts`) reads the already-stamped `pipeline.yaml` back
+ * through it, so stripping there would delete the dispatcher's own ceiling and
+ * run the engine uncapped. A stamped cap and an authored cap are byte-identical
+ * in the file; the loader cannot tell them apart and must not try.
+ *
+ * The dispatcher can, because it knows which read is which: it calls this on
+ * the pre-stamp host read, then `stampManifestLimit` supplies the admitted
+ * ceiling. Harmless even without the strip — `stampManifestLimit` spreads
+ * `limitMicroUsd` last, so the stamp already wins — but this closes the path
+ * where dispatch does NOT stamp and an authored cap would reach the box.
+ */
+export function stripAuthoredLimit(loaded: LoadedManifest): LoadedManifest {
+  const { limitMicroUsd: _authored, ...rest } = loaded.manifest;
+  return { ...loaded, manifest: deepFreeze(rest as PipelineManifest) };
 }
 
 /**

@@ -21,7 +21,7 @@ import {
 } from "../../src/phase-engine/index.ts";
 // Imported from the module, not the barrel: the seams can weaken INV-1, so they
 // are deliberately absent from the package's public surface.
-import { loadManifestWithSeams } from "../../src/phase-engine/manifest.ts";
+import { loadManifestWithSeams, stripAuthoredLimit } from "../../src/phase-engine/manifest.ts";
 import { sanitizeForMessage } from "../../src/phase-engine/types.ts";
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df1-1-manifest-")));
@@ -582,6 +582,23 @@ describe("loadManifest — beneath-root walk (INV-1, INV-5)", () => {
     const root = freshRoot();
     const p = writeManifest(root, manifestObject());
     expect(loadManifest(p, 10_000_000, root).resolvedPath).toBe(fs.realpathSync(p));
+  });
+
+  test("loadManifest KEEPS a file's limitMicroUsd; stripAuthoredLimit is what drops it", () => {
+    // The loader reads both sides of the box boundary — the runner reads the
+    // stamped pipeline.yaml back through it — so it must not strip. The
+    // dispatch-side read strips, because only it knows the value is the
+    // author's rather than the dispatcher's.
+    const root = freshRoot();
+    const p = writeManifest(root, { ...manifestObject(), limitMicroUsd: 999_000_000 });
+    const loaded = loadManifest(p, 10_000_000, root);
+    expect(loaded.manifest.limitMicroUsd).toBe(999_000_000);
+
+    const stripped = stripAuthoredLimit(loaded);
+    expect(stripped.manifest.limitMicroUsd).toBeUndefined();
+    expect("limitMicroUsd" in stripped.manifest).toBe(false);
+    expect(stripped.manifest.pipelineId).toBe(loaded.manifest.pipelineId);
+    expect(stripped.manifest.phases).toHaveLength(loaded.manifest.phases.length);
   });
 
   test("a final-component swap surfaces as a ManifestError, not a raw ELOOP", () => {

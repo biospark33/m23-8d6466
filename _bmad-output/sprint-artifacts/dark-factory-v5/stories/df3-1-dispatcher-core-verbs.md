@@ -509,3 +509,150 @@ none would have been caught by patching the original findings.
 - `detect_changes` — CRITICAL, expected and accepted: driven by `assertValidRunId` (48 dependents,
   12 flows) and `withLock`, both deliberately touched. Every affected process is in
   `providers`/`phase-engine`/`scripts`; no fallout in `hindsight/`, `swarmclaw/` or `cli-anything/`.
+
+## Review round 3 — BMAD adversarial code review, 2026-08-22
+
+**10 review layers** against the PR #123 diff, chunked by file cluster (≤1331 diff lines each) so no
+reviewer read the 8652-line whole: 5 Blind Hunters (diff only, zero repo access), 4 Edge Case
+Hunters (diff + targeted repo reads), 1 Acceptance Auditor (story + integration spec).
+**146 raw findings → 129 unique** after cross-layer dedupe → **117 patched, 6 false-positives,
+5 deferred, 1 dismissed**. Fixes applied in two waves — four source clusters in parallel, then four
+test-hardening agents once source behaviour had settled, so every test-expectation update saw final
+behaviour.
+
+### The defects that mattered
+
+- [x] **A live foreign lock could be deleted outright.** `releaseRunLock` (and `run-record.ts`'s
+      `releaseLock`/`stealIfOwnerGone`) ran `rmSync(claimed)` unconditionally after a failed
+      `linkSync` put-back. Any non-EEXIST errno — ENOSPC, EPERM, EIO, EMLINK — destroyed the only
+      remaining link to a body a *live* holder still owned, so two invocations then both entered
+      `teardownSandbox`: double revoke, double destroy, interleaved bundle writes. The comment
+      claiming "any other errno is swept by `cleanStaleTemps`" was false — nothing swept it. Now the
+      body is only removed when the put-back landed or the path was legitimately re-claimed.
+- [x] **A SIGINT could strand a run's lock forever.** `installSignalRelease()` ran *after*
+      `linkSync`, with `held.set` after `rmSync`+`fsyncDir` — a real `fsync(2)` wide. A signal in that
+      window (or a throw from `rmSync`) left `<runId>.lock` on disk with no `held` entry and, on a
+      process's first acquire, no handler at all. Every later harvest/teardown of that run refused
+      permanently while the box and the OpenRouter key kept billing. Handler now installs first,
+      `held.set` immediately follows the link.
+- [x] **`--help` anywhere in argv made destructive commands exit 0 doing nothing.**
+      `argv.includes("--help")` ran before tokenization, so `fleet teardown <id> --dir --help`
+      (a `--dir` fat-fingered with no value) printed usage to stdout and exited **0** with no
+      CC-9 log line. `fleet teardown … || alert` recorded success while the box stayed live.
+      Help is now resolved from the parsed bool set after tokenization; that argv exits 2.
+- [x] **A wedged lock was reported as retryable.** A teardown that succeeded and then failed to
+      release its lock was downgraded to exit 1, which `logVerb` classifies `transient` — so
+      automation retried forever, hitting `run-locked` every time. New exit **6** (cleanup failed on
+      an otherwise-successful path), classified `logic`. It also no longer clobbers an already-reported
+      exit 4/2. Declared in the registry and demonstrated by a test, which nothing did before.
+- [x] **Minted key plaintext reached the logs.** Two sinks. `src/providers/step-log.ts` logged
+      `err.message` verbatim; `src/providers/credentials.ts` had its *own* private `timed` that did
+      the same and did not route through step-log at all — so hardening step-log alone did not close
+      it. `deliverRunKey` puts the key on **stdin**, and an exec wrapper reporting a failed invocation
+      echoes it. Both now redact through one chokepoint (`redactSecrets`, built from
+      `SECRET_PREFIXES` exported from `run-record.ts`). The regression test was **verified
+      non-vacuous in both directions** — red with redaction stubbed, green restored.
+- [x] **A tightened `RUN_ID_RE` could take `list()` down fleet-wide.** The stricter grammar was
+      applied to read paths too, and `listUnlogged` turns a filename that fails validation into a
+      throw for the *whole directory*. One legacy trailing-hyphen record — creatable by any pre-diff
+      build — made `fleet status` and the DF2.6 reaper's sweep return nothing at all, and made that
+      record permanently unteardownable while its box billed. Strict for creation only; read/list
+      paths accept the legacy grammar and report an unparseable name as a non-fatal anomaly.
+- [x] **`admitIssue` could grant an uncounted second ceiling.** `INSERT … ON CONFLICT DO NOTHING`
+      discarded the reservation while still returning `admitted: true` with a fresh
+      `admittedCeilingMicroUsd` — a ceiling handed to DF2.3's mint that appeared in no
+      `gate_admissions` row, so the next dispatch granted the same headroom again. Now checked on
+      `changes === 0`; a repeated `(requestId, runId)` is idempotent.
+- [x] **`fleet status <runId>` denied a live, billing, unattributed box.** `statusRun`'s ENOENT
+      branch threw exit 4 before ever consulting the driver, while `statusAll` classified the same
+      box `orphan`. The one query an operator types when they know the run id could not return the
+      state the verb exists to surface. It now probes the driver and returns `orphan`; exit 4 only
+      when neither record nor box exists.
+- [x] **`link(2)` became a hard runtime dependency with no fail-closed proof.** The constructor
+      probed O_EXCL, which the lock no longer uses. On a filesystem refusing hard links the store
+      constructed cleanly and every run started, then the first `set()`/`close()` died with a bare
+      `EPERM` — mid-lifecycle, after billable infrastructure existed. The probe now covers `link(2)`.
+- [x] **Untyped throws escaped `refuse`.** Bare `throw e` on the ledger and correlation paths, and an
+      unguarded `checkHeadroom` whose default `loadQuotaLimits()` throws on a malformed
+      `quota-limits.json`, produced exit 1 with **no dispatch-log entry and no structured line** —
+      the AC4 evidence the module's own comments say every exit owes the operator. All routed through
+      `refuse` with fleet-literal codes; provider errnos moved to `payload.providerCode` so grepping
+      the log for `provision-failed` no longer misses every real infrastructure failure.
+- [x] **INV-6 redaction covered only `message`.** `remediation` and payload string leaves went out
+      raw, and `redactUrls` skipped path segments under 16 chars. Redaction moved to the `refuse`
+      chokepoint and now takes every path segment after the host.
+
+### Themes across the patched findings
+
+- **Comments that had drifted from the code.** A recurring shape: a comment asserting an invariant
+  the code no longer delivered — `cleanStaleTemps` "sweeps" a file that was already deleted, `young &&`
+  short-circuiting the corrupt-record refusal the comment still promised, `fakeGate` item D "owning"
+  an assertion item B had taken over and which could no longer fail, `isOwnedVm` promising the
+  opposite of what it did for untagged VMs. Each was either fixed or the comment corrected; none was
+  left contradicting itself.
+- **Tests that could not fail.** ~51 test findings: assertions against `join(dir,"runs")` rather than
+  `store.dir` (16 sites, one store-layout change from going vacuous), `toBeDefined()` where the
+  fixture always populates the field, exact-array-equality over a globally patched `setTimeout` that
+  recorded every unrelated timer, a schema suite where only `repoSlug`'s required-ness was tested —
+  making `commitSha` optional broke nothing. `harvest` had **no functional test at all**; the
+  `invalid-run-id` refusal — the only thing between an operator positional and path construction —
+  was never exercised. Test agents mutation-verified the new assertions actually go red.
+- **Constants mirrored instead of imported.** `ADMISSION_GRACE_MS` and `LOCK_TIMEOUT_MS` are now
+  exported and imported by their tests, *plus* a literal value-lock: deriving fixtures from the
+  import alone made the tests self-consistent at any window value, which would have let a silent
+  retune through. Both properties are pinned.
+
+### False positives (reported, refuted with evidence, no code change)
+
+| Finding | Why it was wrong |
+|---------|------------------|
+| `Date.parse(row.decidedAt)` is timezone-dependent | `decided_at` has exactly one writer, `cost-ledger.ts:891`, using `new Date().toISOString()` — always Z-suffixed. No `CURRENT_TIMESTAMP` writer exists. |
+| Brief `repoUrl`/`commitSha` flow unvalidated into the clone | Already pinned in `brief-schema.ts`: `commitSha` to `/^[0-9a-f]{40}$/`, `repoUrl` to `.url()` + `startsWith("https://")`. Every named vector is refused at ingress. |
+| `provisionAdmittedRun` writes `httpsUrl: undefined` into the record | `setLocked`'s merge starts `if (value === undefined) continue`, so the key is skipped — it can neither throw nor clobber. The conditional spread was restored anyway for shape-consistency. |
+| `cleanStaleTemps` mis-parses the new six-part lock name | The parser already reads `split(".").at(-3)` — correct for both the five- and six-part shapes, and already guarded by `Number.isInteger(owner) && owner > 0`. A regression test was added regardless. |
+| `LoadedManifest.resolvedPath` optional breaks consumers | Refuted against the real consumer set. |
+| Bare `.toThrow()` is the only ENOENT guard | Two lines below already catch and assert `err.code === "ENOENT"`. Tightened anyway. |
+
+### One finding that was wrong in the *fix*, caught before it shipped
+
+`limitMicroUsd` being accepted on the manifest read path was a real gap, and the first fix stripped
+it inside `loadManifest`. That is the delivery path: `scripts/pipeline-run.ts:413` reads the
+delivered, **stamped** `pipeline.yaml` back through the same loader, so the strip deleted the
+dispatcher's own ceiling and the engine would have run uncapped — strictly worse than the finding.
+Caught by a red round-trip test and by two agents independently. The loader is neutral; the rule now
+lives at the dispatch-side read, where `stampManifestLimit` follows immediately.
+
+### Deferred (filed, not fixed here)
+
+| Item | Why |
+|------|-----|
+| Releasing a *losing* admission's reservation | Two racing dispatches use different request ids, so the loser writes a real row. It is not leaked permanently — retirement keys on `run_id`, so the winner's first priced row retires both — but it double-counts one ceiling until then. Fixing properly means keying the orphan rule on the admitting request; a ledger redesign, not a review-round change. |
+| `beforeRename` / `beforeStealTake` are production constructor options | Test-only hooks running inside the lock-critical section. Gating them behind a non-exported symbol changes the `RunRecordStore` constructor surface — too wide for this round. Mitigated: `expect(fired).toBe(true)` means a refactor that stops invoking them fails loudly and attributably. |
+| `help` as an unregistered dispatchable verb (AC6 parity) | Both resolutions cost more than the finding: dropping the alias breaks a documented green path, registering it breaks three tests pinned to a 4-entry registry. Mitigated — `help` is now the only pre-tokenization argv read and is anchored to `argv[0]`, so it cannot fire from a stray token inside a destructive invocation. |
+| Ledger-path mismatch as a library-consumer footgun | Both in-repo constructors already bind `readRunRecord` to the store whose `dir` feeds `costLedgerOpts`. The unwired default over-reserves, which is the fail-safe direction. Closing it properly needs a `gate_admissions` schema column. |
+| Dropping dispatch's `as CostLedger` cast | `BudgetLedger` is now exported from `budget-gate.ts` for it; the call-site cleanup is a one-line follow-up. |
+
+### Decisions taken (conservative/fail-safe, per standing authorization)
+
+- **expose/setPublic stays after the setup gate**, against the integration spec's step 8. A box made
+  public before the gate proves it is reachable while unproven (INV-5). Spec amended, with the
+  consequence recorded: on a gate failure the record carries no `httpsUrl` and no `ports`.
+- **`pipeline.yaml` is JSON-encoded by contract.** Renaming the in-box artifact is a consumer-visible
+  break for an unshipped benefit; recorded rather than changed.
+- **`CostLedgerError` keeps exit 5.** Nothing was provisioned on that path, so 5 is the honest
+  "nothing was created" signal; re-mapping to 1 would tell automation to retry a broken ledger.
+- **AC5's "six-step" and AC7's `brief.issueRef`** are stale prose — the shipped seven-step order and
+  `issueId` are correct. Spec amended, code untouched.
+
+### Verification
+
+- `bun test` — **2507 pass, 0 fail** (81 files; 17 skip, 2 todo, all pre-existing). Up from 2444;
+  `expect()` calls 9155.
+- `bunx tsc --noEmit` — clean, project-wide.
+- `bunx biome check` — clean across all 33 touched files.
+- `detect_changes` — **CRITICAL, expected and accepted**, as in round 2: 56 changed symbols, 38
+  affected processes, driven by the deliberately-touched `withLock`, `setLocked`, `assertValidRunId`,
+  `timedLoggedStep` and `timed`. Every affected process is in `providers`/`phase-engine`/`scripts`/
+  `fleet`; no fallout in `hindsight/`, `swarmclaw/` or `cli-anything/`.
+- Pre-existing nit left alone: a duplicated `DD-9` doc comment at `cost-ledger.ts:61-62` is present
+  in `main` and is not part of this PR's diff.

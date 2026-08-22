@@ -21,6 +21,7 @@ import { Database } from "bun:sqlite";
 
 import type { CostEvent } from "../../cli-anything/src/types.ts";
 import {
+  ADMISSION_GRACE_MS,
   CostConfigError,
   CostLedger,
   CostLedgerError,
@@ -112,6 +113,10 @@ function rawDb(): Database {
  * append-only, so an admission older than the gate's grace window can only be
  * inserted, never back-dated — and the window is deliberately not injectable,
  * so the clock cannot be faked either.
+ *
+ * The `decided_at` encoding here is hand-written, so it is only as good as the
+ * writer it imitates: "the reader's age predicate is applied to the format the
+ * WRITER actually writes" below pins the two together.
  */
 function admitAged(runId: string, requestId: string, ceiling: number, ageMs: number, issueId = "42"): void {
   const db = rawDb();
@@ -568,6 +573,21 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     expect(second.reservedMicroUsd).toBe(cap);
   });
 
+  test("a repeated (requestId, runId) returns the RECORDED ceiling, never a second uncounted one", () => {
+    seedRecord("run-a1");
+    const first = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 1_000_000);
+    if (!first.admitted) throw new Error("expected first admission");
+    // A retried dispatch reusing its correlation id: `ON CONFLICT DO NOTHING`
+    // writes no row, so a freshly-computed ceiling here would be handed to the
+    // mint while holding NO reservation — and the next dispatch would grant the
+    // same headroom all over again.
+    const retry = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 1_000_000);
+    if (!retry.admitted) throw new Error("expected the retry to be admitted");
+    expect(retry.admittedCeilingMicroUsd).toBe(first.admittedCeilingMicroUsd);
+    // Exactly one reservation on the books, not two.
+    expect(retry.reservedMicroUsd).toBe(first.admittedCeilingMicroUsd);
+  });
+
   test("the reservation retires once the run's first priced ledger row lands", () => {
     seedRecord("run-a1");
     ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 50_000_000);
@@ -654,7 +674,7 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     // (EEXIST / invalid id) — no run record, so no run can ever report spend.
     // Aged past the grace window by INSERTing it directly: gate_admissions is
     // append-only, so an old admission can only be created, never back-dated.
-    admitAged("run-orphan", "r1", cap, 10 * 60_000);
+    admitAged("run-orphan", "r1", cap, ADMISSION_GRACE_MS * 2);
     // A later dispatch for a real run is not refused by the orphan's reservation.
     const after = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-real", requestId: "r2" }, cap, 50_000_000);
     if (!after.admitted) throw new Error("expected admission past the expired orphan reservation");
@@ -672,32 +692,88 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     expect(RECORDS.has("run-race-a")).toBe(false); // store.create has not run yet
 
     const b = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-race-b", requestId: "rb" }, cap, 50_000_000);
-    // A holds the entire cap, so B has no headroom at all.
-    expect(b.admitted).toBe(false);
+    // A holds the entire cap, so B has no headroom at all — and for THAT
+    // reason. `admitted: false` alone is every refusal shape the ledger has, so
+    // a refusal on some unrelated ground would read as "the reservation held".
+    if (b.admitted) throw new Error("expected the second dispatch to be refused");
+    expect(b.status).toBe("over-budget");
+    expect(b.reason).toBe("spend-cap-exceeded");
     expect(b.reservedMicroUsd).toBe(cap);
 
     // And with room for both, the second ceiling is the REMAINDER — never the
-    // full headroom a second time.
+    // full headroom a second time. `d`'s keyCap is deliberately ABOVE the 3M
+    // remainder: with a keyCap at or below it, `min(keyCap, remaining)` returns
+    // the keyCap and a bug handing `d` the whole remaining headroom is
+    // indistinguishable from correct.
     const c = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "7", runId: "run-race-c", requestId: "rc" }, cap, 2_000_000);
-    const d = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "7", runId: "run-race-d", requestId: "rd" }, cap, 2_000_000);
+    const d = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "7", runId: "run-race-d", requestId: "rd" }, cap, 4_000_000);
     if (!c.admitted || !d.admitted) throw new Error("expected both dispatches on the fresh issue to be admitted");
-    expect(c.admittedCeilingMicroUsd).toBe(2_000_000);
+    expect(c.admittedCeilingMicroUsd).toBe(2_000_000); // the keyCap clamp
     expect(d.reservedMicroUsd).toBe(2_000_000);
-    expect(c.admittedCeilingMicroUsd + d.admittedCeilingMicroUsd).toBeLessThanOrEqual(cap);
+    expect(d.admittedCeilingMicroUsd).toBe(cap - 2_000_000); // the remainder, not 4M and not the full cap
+    expect(c.admittedCeilingMicroUsd + d.admittedCeilingMicroUsd).toBe(cap);
   });
 
   test("a reservation younger than the grace window counts even with no run record; an older one does not", () => {
-    admitAged("run-young", "ry", 1_000_000, 5_000); // 5s old — its dispatch is still in flight
+    admitAged("run-young", "ry", 1_000_000, ADMISSION_GRACE_MS / 2); // its dispatch is still in flight
     const withYoung = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-x", requestId: "rx" }, cap, 500_000);
     if (!withYoung.admitted) throw new Error("expected admission alongside the young reservation");
     expect(withYoung.reservedMicroUsd).toBe(1_000_000);
 
-    admitAged("run-old", "ro", 1_000_000, 10 * 60_000); // 10min old, no record — orphaned
+    admitAged("run-old", "ro", 1_000_000, ADMISSION_GRACE_MS * 2); // no record, past the window — orphaned
     const withOld = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-y", requestId: "ryy" }, cap, 500_000);
     if (!withOld.admitted) throw new Error("expected admission past the expired reservation");
     // run-young (still young) + run-x's own 500k reservation. run-old is not
     // counted, so adding it left the reserved figure unchanged.
     expect(withOld.reservedMicroUsd).toBe(1_500_000);
+  });
+
+  test("the expiry boundary is the grace window itself, not merely 'a while'", () => {
+    // Two separate properties, and importing the constant only buys the first:
+    //
+    // 1. The boundary IS the constant. The /2 and *2 ages above pass for any
+    //    window strictly between them; these two rows straddle it by a second
+    //    in each direction, so an expiry that drifts off the constant fails.
+    //    Derived from the import, so this holds at whatever the window is set to.
+    // 2. The constant is 60s. Ages derived from the import move WITH a retune,
+    //    which is what stops the tests going flaky — and also what stops them
+    //    noticing. This line is the noticing: the window is a money knob (too
+    //    short double-allocates the cap under the dispatch race, too long wedges
+    //    an issue for minutes), so retuning it should be a deliberate two-file
+    //    change a reviewer sees, not a silent one.
+    expect(ADMISSION_GRACE_MS).toBe(60_000);
+    admitAged("run-just-young", "rjy", 1_000_000, ADMISSION_GRACE_MS - 1_000, "101");
+    const young = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "101", runId: "run-jy", requestId: "rjy2" }, cap, 500_000);
+    if (!young.admitted) throw new Error("expected admission alongside the just-young reservation");
+    expect(young.reservedMicroUsd).toBe(1_000_000);
+
+    admitAged("run-just-old", "rjo", 1_000_000, ADMISSION_GRACE_MS + 1_000, "102");
+    const old = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "102", runId: "run-jo", requestId: "rjo2" }, cap, 500_000);
+    if (!old.admitted) throw new Error("expected admission past the just-old reservation");
+    expect(old.reservedMicroUsd).toBe(0);
+  });
+
+  test("the reader's age predicate is applied to the format the WRITER actually writes", () => {
+    // Every grace-window case above hand-INSERTs `decided_at`, so the reader's
+    // `Date.parse` is only ever tried against test-authored bytes. If the real
+    // insert switched to SQLite CURRENT_TIMESTAMP ("2026-08-22 12:00:00", no
+    // offset ⇒ parsed as LOCAL time) or to an epoch integer, the window would
+    // silently never expire, or expire instantly, and every test above would
+    // still be green.
+    ledger.admitIssue({ repoSlug: "qds/demo", issueId: "77", runId: "run-fmt", requestId: "rf" }, cap, 500_000);
+    const db = rawDb();
+    const { decidedAt } = db
+      .prepare("SELECT decided_at AS decidedAt FROM gate_admissions WHERE run_id = ?")
+      .get("run-fmt") as { decidedAt: string };
+    db.close();
+    // The reader's own predicate: Date.parse(...) against a `Date.now() - ADMISSION_GRACE_MS` cutoff.
+    const parsed = Date.parse(decidedAt);
+    expect(Number.isFinite(parsed)).toBe(true);
+    expect(parsed).toBeGreaterThan(Date.now() - ADMISSION_GRACE_MS);
+    expect(parsed).toBeLessThanOrEqual(Date.now());
+    // …and it is byte-for-byte the encoding admitAged imitates, so the ages
+    // those tests fabricate are the ages production actually produces.
+    expect(decidedAt).toBe(new Date(parsed).toISOString());
   });
 });
 

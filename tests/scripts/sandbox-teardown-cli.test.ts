@@ -16,21 +16,45 @@ import { join } from "node:path";
 
 import { RunRecordStore, RUN_ID_MAX, RUN_ID_RE } from "../../src/providers/run-record.ts";
 import { run } from "../../scripts/sandbox-teardown.ts";
-import { acquireRunLock, releaseRunLock, RunLockedError } from "../../scripts/lib/run-lock.ts";
+import { acquireRunLock, releaseRunLock, RunLockedError, RunLockReentrantError } from "../../scripts/lib/run-lock.ts";
 
 /** The shared lock module, by absolute path, for the signal subprocess below. */
 const RUN_LOCK_MODULE = join(import.meta.dir, "../../scripts/lib/run-lock.ts");
 
 /**
- * A pid that is certainly NOT running: spawned, waited on, reaped. (There is no
- * such thing as a permanently dead pid — this is the closest a test can get,
- * and the window before the OS recycles it is the whole test.)
+ * A pid that is certainly NOT running. Above PID_MAX on every platform this
+ * runs on, so `kill(pid, 0)` is ESRCH by construction. The previous fixture
+ * spawned and reaped a real process, which races the OS recycling that pid onto
+ * a live one before the test reads it back — the "reported STALE" assertion
+ * then fails on entirely correct behaviour. Six digits is not enough: Linux's
+ * default pid_max is 4194304.
  */
-async function deadPid(): Promise<number> {
-  const proc = Bun.spawn(["true"], { stdout: "ignore", stderr: "ignore" });
-  const { pid } = proc;
-  await proc.exited;
-  return pid;
+const DEAD_PID = 999_999_999;
+
+/**
+ * A pid that is certainly running and is certainly not us. pid 1 exists on
+ * every POSIX host; `kill(1, 0)` from a normal user raises EPERM, which the
+ * liveness probe reads (correctly) as alive.
+ */
+const LIVE_FOREIGN_PID = 1;
+
+/** Drain `stream` until `needle` appears, or fail with the child's stderr. */
+async function readUntil(proc: Bun.Subprocess<"pipe", "pipe", "pipe">, needle: string): Promise<void> {
+  const reader = proc.stdout.getReader();
+  try {
+    let seen = "";
+    while (!seen.includes(needle)) {
+      const { value, done } = await reader.read();
+      // A partial write, an import error, a throwing acquire: `value` is
+      // undefined and `decode(undefined)` is "", so a single read() reports
+      // `expected "" to contain "locked"` and never surfaces the stderr that
+      // was piped precisely for this.
+      if (done) throw new Error(`child exited before "${needle}": ${await new Response(proc.stderr).text()}`);
+      seen += new TextDecoder().decode(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 let dir: string;
@@ -68,42 +92,110 @@ afterEach(() => {
 });
 
 describe("sandbox-teardown run() — the per-run operator lock", () => {
-  test("acquireRunLock is exclusive, writes pid+timestamp, and reacquires after release", () => {
+  /** A foreign holder's body at `lock` — contention, without a second process. */
+  function foreignLock(runId: string, pid = 1): string {
+    const lock = join(runs, `${runId}.lock`);
+    writeFileSync(lock, `${pid} ${new Date().toISOString()} feedface\n`, { flag: "wx" });
+    return lock;
+  }
+
+  test("acquireRunLock is exclusive, writes pid+host+timestamp, and reacquires after release", () => {
     const first = acquireRunLock(runs, "lock-unit");
     expect(first).toBe(join(runs, "lock-unit.lock"));
-    expect(readFileSync(first, "utf8")).toMatch(new RegExp(`^${process.pid} \\d{4}-\\d{2}-\\d{2}T`));
+    // The host field is what makes the pid meaningful: `kill(pid, 0)` answers
+    // about THIS host's process table, and a shared runs directory makes that
+    // answer about a stranger.
+    expect(readFileSync(first, "utf8")).toMatch(new RegExp(`^${process.pid} \\S+ \\d{4}-\\d{2}-\\d{2}T`));
     // The CLASS and its code, not a prose substring: the message is
     // parameterised by holder name, and a catch block switching on `.code` is
     // what the CLIs actually do.
-    expect(() => acquireRunLock(runs, "lock-unit")).toThrow(RunLockedError);
+    const lock = foreignLock("exclusive-unit");
+    expect(() => acquireRunLock(runs, "exclusive-unit")).toThrow(RunLockedError);
     try {
-      acquireRunLock(runs, "lock-unit");
+      acquireRunLock(runs, "exclusive-unit");
       expect.unreachable("the second acquire must refuse");
     } catch (e) {
       expect(e).toBeInstanceOf(RunLockedError);
       expect((e as RunLockedError).code).toBe("run-locked");
     }
+    rmSync(lock);
     releaseRunLock(first);
     expect(existsSync(first)).toBeFalse();
     expect(acquireRunLock(runs, "lock-unit")).toBe(first);
     releaseRunLock(first);
   });
 
+  test("a SECOND acquire in the same process is a distinct error, not advice to wait for ourselves", () => {
+    // The lock is not re-entrant. Reported as contention it read "another
+    // invocation holds … (pid <self>)" — telling the operator to wait for the
+    // process printing the message, or to rm a lock it is actively using.
+    const lock = acquireRunLock(runs, "reentrant-unit");
+    try {
+      expect(() => acquireRunLock(runs, "reentrant-unit")).toThrow(RunLockReentrantError);
+      try {
+        acquireRunLock(runs, "reentrant-unit");
+        expect.unreachable("the re-acquire must refuse");
+      } catch (e) {
+        expect((e as RunLockReentrantError).code).toBe("run-lock-reentrant");
+        expect((e as Error).message).toContain("this process already holds");
+      }
+    } finally {
+      releaseRunLock(lock);
+    }
+  });
+
+  test("a lock body written before the host field still parses (backwards compatibility)", () => {
+    // `<pid> <ISO> <nonce>` is what the previous implementation wrote. A lock
+    // left on disk by it must still name its holder rather than degrade to
+    // "holder unknown" — that wording tells the operator the file is garbage.
+    foreignLock("legacy-body");
+    expect(() => acquireRunLock(runs, "legacy-body")).toThrow(/pid 1, held \d+s/);
+  });
+
+  test("a lock held on ANOTHER host is never called stale (its pid is not ours to probe)", () => {
+    // `kill(pid, 0)` is host-local. On a shared runs directory (NFS, a mounted
+    // volume, a CI runner beside a laptop) probing our own process table for a
+    // foreign pid answers about a stranger — and a false "not running" makes
+    // the CLI actively instruct the operator to rm a LIVE holder's lock.
+    const lock = join(runs, "other-host.lock");
+    writeFileSync(lock, `4711 some-other-box ${new Date(Date.now() - 7_000).toISOString()} c0ffee\n`, { flag: "wx" });
+    try {
+      acquireRunLock(runs, "other-host");
+      expect.unreachable("a foreign host's lock must still refuse");
+    } catch (e) {
+      expect(e).toBeInstanceOf(RunLockedError);
+      expect((e as Error).message).toContain("pid 4711 on host some-other-box");
+      expect((e as Error).message).toContain("liveness unknown from here");
+      expect((e as RunLockedError).remediation).not.toContain("stale lock");
+    }
+  });
+
   test("the refusal names the HOLDER each entry point passes (fleet vs sandbox-teardown)", () => {
     // One implementation, two operator vocabularies: `fleet` takes the default
     // ("another invocation holds"), `sandbox-teardown` passes its own name. A
     // holder argument silently ignored would print the wrong CLI to go look at.
-    const fleetLock = acquireRunLock(runs, "holder-fleet");
-    const teardownLock = acquireRunLock(runs, "holder-teardown", "sandbox-teardown");
-    try {
-      expect(() => acquireRunLock(runs, "holder-fleet")).toThrow(/another invocation holds/);
-      expect(() => acquireRunLock(runs, "holder-teardown", "sandbox-teardown")).toThrow(
-        /another sandbox-teardown holds/,
-      );
-    } finally {
-      releaseRunLock(fleetLock);
-      releaseRunLock(teardownLock);
-    }
+    foreignLock("holder-fleet");
+    foreignLock("holder-teardown");
+    expect(() => acquireRunLock(runs, "holder-fleet")).toThrow(/another invocation holds/);
+    expect(() => acquireRunLock(runs, "holder-teardown", "sandbox-teardown")).toThrow(/another sandbox-teardown holds/);
+  });
+
+  test("a stale `<runId>.lock.<pid>.<hex>.tmp` is reaped on acquire; a live pid's temp is left alone", () => {
+    // Nothing else removes these: a process SIGKILLed between the temp's
+    // creation and its unlink leaves one forever, in the same directory the
+    // record and bundle listings glob over.
+    const stale = join(runs, `reap-run.lock.${DEAD_PID}.deadbeef.tmp`);
+    const live = join(runs, `reap-run.lock.${process.pid}.c0ffee.tmp`);
+    const otherRun = join(runs, `other-run.lock.${DEAD_PID}.abc123.tmp`);
+    for (const p of [stale, live, otherRun]) writeFileSync(p, "x\n");
+
+    releaseRunLock(acquireRunLock(runs, "reap-run"));
+
+    expect(existsSync(stale)).toBeFalse();
+    expect(existsSync(live)).toBeTrue(); // mid-acquire, not litter
+    expect(existsSync(otherRun)).toBeTrue(); // a different run's temp is not ours to reap
+    rmSync(live);
+    rmSync(otherRun);
   });
 
   test("the lock is released when the guarded operation throws, and the run is lockable again", () => {
@@ -129,7 +221,10 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     // unconditional `rm` here deletes THEIR lock and re-opens the exact
     // double-teardown window the lock exists to close.
     const lock = acquireRunLock(runs, "foreign-lock");
-    writeFileSync(lock, `${process.pid + 1} ${new Date().toISOString()} deadbeef\n`);
+    // A LIVE foreign holder, which is what the scenario in the comment above
+    // describes; `process.pid + 1` left it a coin flip whether the "re-taken by
+    // a live invocation" premise held at all.
+    writeFileSync(lock, `${LIVE_FOREIGN_PID} ${new Date().toISOString()} deadbeef\n`);
     expect(() => releaseRunLock(lock)).toThrow(/refusing to release/);
     expect(existsSync(lock)).toBeTrue();
     expect(readFileSync(lock, "utf8")).toContain("deadbeef");
@@ -172,10 +267,11 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     );
     const holder = Bun.spawn(["bun", child, runs, runId], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
     try {
-      const reader = holder.stdout.getReader();
-      const { value } = await reader.read();
-      expect(new TextDecoder().decode(value)).toContain("locked");
-      reader.releaseLock();
+      // Drained until the readiness line, never a single chunk: a child that
+      // died before locking would otherwise leave `readFileSync(lock)` reading
+      // the body THIS process wrote, quietly inverting what the release
+      // assertions below prove.
+      await readUntil(holder, "locked");
       const theirs = readFileSync(lock, "utf8");
       expect(theirs).toContain(String(holder.pid));
 
@@ -214,17 +310,19 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     });
     try {
       // Wait on the child's own readiness line, never on the clock.
-      const reader = proc.stdout.getReader();
-      let seen = "";
-      while (!seen.includes("locked")) {
-        const { value, done } = await reader.read();
-        if (done) throw new Error(`child exited before locking: ${await new Response(proc.stderr).text()}`);
-        seen += new TextDecoder().decode(value);
-      }
+      await readUntil(proc, "locked");
       expect(existsSync(lock)).toBeTrue();
       proc.kill("SIGINT");
-      expect(await proc.exited).toBe(130); // 128 + SIGINT, not a swallowed 0
+      await proc.exited;
+      // `signalCode` is the portable half of the contract and the property this
+      // test exists to protect: the handler releases and then RE-RAISES, so the
+      // process still dies of the signal. Pinning `exited === 130` alongside it
+      // pins Bun's coercion of a signal-terminated child instead — under POSIX
+      // semantics that same correct child reports exitCode null, and a Bun
+      // upgrade turning this red invites "fixing" it with `process.exit(130)`,
+      // which is exactly the swallowed-signal behaviour being guarded against.
       expect(proc.signalCode).toBe("SIGINT");
+      expect(proc.exitCode === null || proc.exitCode === 130).toBeTrue(); // never a swallowed 0
       expect(existsSync(lock)).toBeFalse();
     } finally {
       proc.kill("SIGKILL"); // no orphan, whatever happened above
@@ -235,7 +333,10 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
   test("a held lock fails run-locked naming pid/age and the literal rm, and mutates nothing", async () => {
     store.create("held-run");
     store.set("held-run", { vmName: "held-run-box" }); // P10: give it a vmName so teardown would do real work
-    const other = process.pid + 1; // not us — the CLI must fail closed, never steal
+    // Alive and not us — the CLI must fail closed, never steal. `process.pid + 1`
+    // was a coin flip on whether the holder was live at all, so the test could
+    // silently become the stale-lock case it has its own test for.
+    const other = LIVE_FOREIGN_PID;
     const lock = join(runs, "held-run.lock");
     writeFileSync(lock, `${other} ${new Date(Date.now() - 5_000).toISOString()}\n`, { flag: "wx" });
 
@@ -244,7 +345,9 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     expect(code).toBe(1);
     const text = lines.join("");
     expect(text).toContain("!! run-locked:");
-    expect(text).toContain(`pid ${other}`);
+    // Delimited, not `toContain("pid 1")`: that substring is inside `pid 12345`
+    // too, so a refusal printing some pid other than the HOLDER's reads as correct.
+    expect(text).toMatch(new RegExp(`pid ${other}, held \\d+s`));
     expect(text).toContain("next: ");
     expect(text).toContain(`rm ${lock}`);
     // P10: the refused invocation neither tore down nor released the holder's lock
@@ -385,15 +488,14 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
   test("a lock whose pid is dead is reported STALE, naming the pid and the rm that clears it", async () => {
     store.create("stale-lock");
     const lock = join(runs, "stale-lock.lock");
-    const pid = await deadPid();
-    writeFileSync(lock, `${pid} ${new Date(Date.now() - 9_000).toISOString()} c0ffee\n`, { flag: "wx" });
+    writeFileSync(lock, `${DEAD_PID} ${new Date(Date.now() - 9_000).toISOString()} c0ffee\n`, { flag: "wx" });
 
     const code = await run(["stale-lock", "--dir", runs], sink);
 
     expect(code).toBe(1);
     const text = lines.join("");
     expect(text).toContain("!! run-locked:");
-    expect(text).toContain(`pid ${pid} is not running`);
+    expect(text).toContain(`pid ${DEAD_PID} is not running`);
     expect(text).toContain(`rm ${lock} to clear the stale lock`);
     // Reported, never stolen: the refusal leaves the file and the record alone.
     expect(existsSync(lock)).toBeTrue();
@@ -405,14 +507,17 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
     // an operator follows ("rm the stale lock") must not appear for it.
     store.create("live-lock");
     const lock = join(runs, "live-lock.lock");
-    writeFileSync(lock, `1 ${new Date(Date.now() - 3_000).toISOString()} facade\n`, { flag: "wx" });
+    writeFileSync(lock, `${LIVE_FOREIGN_PID} ${new Date(Date.now() - 3_000).toISOString()} facade\n`, { flag: "wx" });
 
     const code = await run(["live-lock", "--dir", runs], sink);
 
     expect(code).toBe(1);
     const text = lines.join("");
     expect(text).toContain("!! run-locked:");
-    expect(text).toContain("pid 1");
+    // Delimited: `toContain("pid 1")` is satisfied by `pid 12345` / `pid 1000`,
+    // so a refusal naming a pid this CLI had lying around rather than the
+    // HOLDER's would read as correct.
+    expect(text).toMatch(new RegExp(`pid ${LIVE_FOREIGN_PID}, held \\d+s`));
     expect(text).not.toContain("is not running");
     expect(text).not.toContain("stale lock");
     expect(text).toContain("wait for that invocation to finish");
@@ -421,7 +526,12 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
 
   test("missing runs dir propagates ENOENT from acquireRunLock", async () => {
     const missingRuns = join(dir, "no-such-runs");
-    expect(() => acquireRunLock(missingRuns, "any-id")).toThrow();
+    // Not a bare `.toThrow()`: an invalid-run-id refusal, a RunLockedError or a
+    // TypeError from a signature change all satisfy that, while the name here
+    // claims ENOENT. A refactor turning a missing runs dir into a silent
+    // `mkdir -p` — masking a misconfigured `--dir` and writing locks nowhere
+    // useful — must fail this, not merely need some other reason to throw.
+    expect(() => acquireRunLock(missingRuns, "any-id")).toThrow(/ENOENT/);
     try {
       acquireRunLock(missingRuns, "any-id");
       expect(false).toBeTrue(); // should not reach here

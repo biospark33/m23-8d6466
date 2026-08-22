@@ -50,8 +50,13 @@ const MS_PER_HOUR = 3_600_000;
  * minute. Over-reserving is the fail-safe direction INV-COST-6 takes
  * everywhere else. Deliberately not configurable: a deployment tuning this
  * number is tuning its own odds of overspending.
+ *
+ * Exported for tests ONLY so the grace-window assertions derive their ages from
+ * the real value instead of mirroring the literal — a mirrored copy lets the
+ * window be retuned to a value that under-protects against the dispatch race
+ * with every test still green. Not a config knob: nothing reads it but this file.
  */
-const ADMISSION_GRACE_MS = 60_000;
+export const ADMISSION_GRACE_MS = 60_000;
 
 /** DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up. */
 /** DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up. */
@@ -828,7 +833,13 @@ export class CostLedger {
         // An unparseable decided_at counts as young for the same fail-safe
         // reason the whole guard is conservative: over-reserve, never expire.
         const young = !Number.isFinite(decidedAt) || decidedAt > graceCutoff;
-        if (!young && this.readRunRecord(row.runId) === undefined) continue;
+        // Read UNCONDITIONALLY, then let `young` decide how to read the answer.
+        // Short-circuiting on `young` meant a corrupt record was never touched
+        // at admission time for the first ADMISSION_GRACE_MS, so the refusal
+        // the comment above promises did not happen — the corruption surfaced
+        // 60s later, on somebody else's dispatch.
+        const record = this.readRunRecord(row.runId);
+        if (!young && record === undefined) continue;
         reservedMicroUsd += row.ceiling;
         // Overflow guard: sum of reservation ceilings can exceed MAX_SAFE_INTEGER
         if (reservedMicroUsd > Number.MAX_SAFE_INTEGER) {
@@ -875,14 +886,37 @@ export class CostLedger {
           unpricedRows,
         };
       }
-      const ceiling = Math.min(keyCapMicroUsd, remainingMicroUsd);
-      this.db
+      let ceiling = Math.min(keyCapMicroUsd, remainingMicroUsd);
+      const { changes } = this.db
         .prepare(
           `INSERT INTO gate_admissions (request_id, run_id, repo_slug, issue_id, ceiling_micro_usd, decided_at)
            VALUES (?,?,?,?,?,?)
            ON CONFLICT(request_id, run_id) DO NOTHING`,
         )
         .run(input.requestId, input.runId, input.repoSlug, input.issueId, ceiling, new Date().toISOString());
+      if (changes === 0) {
+        // `DO NOTHING` fired: this (request_id, run_id) already holds a
+        // reservation — a retried dispatch reusing its correlation id after a
+        // `store.create` EEXIST, or any caller-level retry. Returning the
+        // freshly-computed `ceiling` handed DF2.3's mint a ceiling that appears
+        // in NO row and therefore holds NO reservation, and the next dispatch
+        // granted the same headroom again (c1 + c2 + c2 against a cap of
+        // c1 + c2). Hand back the ceiling that IS on the row instead: it is
+        // already inside `reservedMicroUsd` above, so it is the one number this
+        // admission actually reserved. gate_admissions is append-only
+        // (INV-COST-1), so re-reading is the whole remedy.
+        const prior = this.db
+          .prepare("SELECT ceiling_micro_usd AS ceiling FROM gate_admissions WHERE request_id = ? AND run_id = ?")
+          .get(input.requestId, input.runId) as { ceiling: number } | undefined;
+        if (prior === undefined) {
+          throw new CostLedgerError(
+            "ledger-admission-lost",
+            `the admission for request ${input.requestId} / run ${input.runId} neither inserted nor resolved — refusing to mint an unreserved ceiling`,
+            "inspect gate_admissions for that (request_id, run_id) and re-run the dispatch with a fresh request id",
+          );
+        }
+        ceiling = prior.ceiling;
+      }
       return {
         admitted: true,
         status: "within-budget",

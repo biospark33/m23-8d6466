@@ -15,6 +15,22 @@ function hasNoDotSegment(slug: string): boolean {
   return !slug.split("/").some((seg) => seg === "." || seg === "..");
 }
 
+/**
+ * `manifestPath` is the one field that IS literally a host filesystem path: the
+ * dispatcher resolves it against the repo root and reads the bytes, which then
+ * land inside the box or get quoted back in an error. A `..` segment walks out
+ * of that root, so it is refused here — INV-2 puts the trust boundary at the
+ * schema, and `dispatch.ts`'s containment root + realpath check is the second
+ * gate, not the first.
+ *
+ * Only `..`, unlike `repoSlug` above: in a slug `.` is an entire owner or
+ * repository name and so is never legitimate, whereas in a path `./pipeline.json`
+ * is an ordinary way to write a path and resolves nowhere new.
+ */
+function hasNoParentSegment(p: string): boolean {
+  return !p.split("/").includes("..");
+}
+
 // DF3.1 AC1, AC2, INV-2: strict object, closed to unknown fields
 export const BriefSchema = z.strictObject({
   // DF3.1 D2: validated owner/name (issue-correlation pattern)
@@ -33,8 +49,11 @@ export const BriefSchema = z.strictObject({
   // C3: requestId is LOOSE — optional string, NOT .uuid() at schema layer
   // Non-UUID strings pass schema; UUID validation happens in dispatch (AC2)
   requestId: z.string().optional(),
-  // DF3.1 D2: host path to pipeline manifest (non-empty)
-  manifestPath: z.string().min(1),
+  // DF3.1 D2: host path to pipeline manifest (non-empty, no parent traversal)
+  manifestPath: z
+    .string()
+    .min(1)
+    .refine(hasNoParentSegment, "manifestPath segments may not be '..'"),
   // DF3.1 D2: for pinned-SHA fill (fill.ts). `.url()` admits every scheme, and
   // this value is handed to a clone inside the box — `file://` would exfiltrate
   // a host path and `ssh://`/`git://` a host key, so the scheme is allow-listed

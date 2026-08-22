@@ -322,6 +322,33 @@ describe("DF2.3 credential lifecycle", () => {
     expect(recording.execCalls).toHaveLength(0);
   });
 
+  test("security: a key echoed by a failing exec never reaches the credential.deliver log line (INV-4)", async () => {
+    const runId = "df23-leak";
+    await makeRun(runId);
+    const minted = await mintRunKey(deps(), runId);
+    // STDIN, not argv: `deliverRunKey` puts the key on stdin and keeps it out
+    // of `["sh","-c",deliverScript(envFile)]` entirely. So the leak arrives via
+    // a driver that echoes the whole invocation — stdin included — when it
+    // reports a failure. An argv-only echo carries no key and proves nothing.
+    const echoing = {
+      ...recording,
+      exec: async (vm: string, argv: string[], stdin?: string) => {
+        throw Object.assign(new Error(`exec failed on ${vm}: ${argv.join(" ")} <<< ${stdin ?? ""}`), {
+          code: "exec-failed",
+          remediation: `re-run: ${argv.join(" ")} <<< ${stdin ?? ""}`,
+        });
+      },
+    } as unknown as typeof recording;
+
+    await expect(deliverRunKey(deps({ driver: echoing }), `vm-${runId}`, minted.key)).rejects.toThrow();
+
+    const deliverLines = logs.filter((l) => l.operation === "credential.deliver");
+    expect(deliverLines.length).toBeGreaterThan(0);
+    expect(leakScan(minted.key, JSON.stringify(deliverLines))).toBeNull();
+    // Redacted, not dropped — the step and its code still diagnose the failure.
+    expect(JSON.stringify(deliverLines)).toContain("exec failed on");
+  });
+
   test("security: a non-positive or non-integer cap is refused before the provider is called", async () => {
     const runId = "df23-cap";
     await makeRun(runId);

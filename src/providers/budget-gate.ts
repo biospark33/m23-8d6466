@@ -47,6 +47,17 @@ export class OverBudgetError extends Error {
   }
 }
 
+/**
+ * The slice of `CostLedger` this gate actually uses.
+ *
+ * Structural, not the class: a caller holding a narrowed handle (dispatch's
+ * `LedgerLike`, a DI fake) had to write `assertWithinBudget(ledger as CostLedger, …)`,
+ * and that cast restores exactly the drift the narrowing exists to prevent —
+ * a fake missing a member compiles and then throws at runtime. Derived from
+ * `CostLedger` with `Pick`, so it cannot drift from the real signatures either.
+ */
+export type BudgetLedger = Pick<CostLedger, "config" | "admitIssue">;
+
 export interface BudgetGateInput {
   repoSlug: string;
   issueId: string;
@@ -66,7 +77,7 @@ export interface BudgetGateInput {
  * @throws OverBudgetError - When the issue is at or over its cap.
  */
 export function assertWithinBudget(
-  ledger: CostLedger,
+  ledger: BudgetLedger,
   input: BudgetGateInput,
   keyCapMicroUsd: number = defaultKeyCapMicroUsd,
 ): Extract<AdmissionDecision, { admitted: true }> {

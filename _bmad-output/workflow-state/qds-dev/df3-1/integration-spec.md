@@ -488,8 +488,38 @@ export function serializeManifest(manifest: LoadedManifest): string {
 - `run-record.ts` CLI precedent prints JSON lines (per sandbox-teardown.ts pattern)
 
 **Output shape**: JSON one-per-line (matches run-record.ts precedent)
-**Row states**: `live | boxMissing | boxUnknown | closed` (AC4)
+**Row states**: `live | boxMissing | boxUnknown | closed | orphan` (AC4 + amendment B6)
+
+> **AMENDED (review B6)** — the shipped `StatusRow` adds one state and one field
+> beyond the four states AC4/D6 listed. Both are normative now; DF3.5's contract
+> test must be written against this list, not the original four.
+>
+> - **`orphan`** — an OWNED box (per the ownership filter: an explicit foreign
+>   tag excludes it, an absent tag does not) that no run record claims, by run id
+>   or by `vmName`. This is unattributed spend: a box that is alive and billing
+>   with nobody accountable for it, which is exactly what joining `store.list()`
+>   with `driver.list()` exists to surface. An orphan row carries no `requestId`
+>   and no `createdAt` — it has no record to take either from — so **`createdAt`
+>   is OPTIONAL on `StatusRow`** and absent on precisely this one row class
+>   (review B7: a placeholder `""` made every renderer's `Date.parse` return
+>   `NaN` on the row the sort deliberately floats to the top). Orphan rows sort
+>   first.
+> - **`boxAlive?: boolean`** — set only on a `closed` row whose box the substrate
+>   still reports. Teardown destroys BEFORE it closes, so a closed record over a
+>   live box means the destroy never landed and the box is still billing. Absent
+>   (not `false`) on every other row, including a closed row whose box is gone.
+
 **Single-run**: `getRecord` typed error → exit 4 with `{code, message, remediation}`
+
+> **AMENDED (review B1)** — exit 4 requires the absence of BOTH halves. The
+> record and the box are separately losable (operator record cleanup, a `--dir`
+> mismatch between dispatch and the query, the INV-1 crash window), and
+> `statusAll` already classifies a recordless box as `orphan`. So on store
+> ENOENT the single-run path runs the same owned-box lookup under the run id and
+> returns an `orphan` row if one exists; it refuses with exit 4 only when neither
+> a record nor an owned box is found. A list failure or timeout is NOT a hit — it
+> still refuses 4 rather than inventing a box out of a timeout. "Mutates nothing"
+> stands: the driver is read, never written.
 
 ### D7. Exit-Code Mapping
 **Verdict**: Fixed mapping with story-mandated codes
@@ -559,11 +589,41 @@ These corrections were verified by direct source reads after the architect agent
 ## C1. D1 OVERTURNED → Option (c): dispatch composes primitives; NEVER calls createRun.
 Evidence: driver.ts:134 `checkHeadroom(driver, 1, loadQuotaLimits())` is UNCONDITIONAL inside createRun — no skip option, and driver.ts is not editable (FTM). Routing {admitted:true} through createRun makes N fan-out arms do N headroom checks of 1 — violates DF3.1 AC8 + DF3.2 AC1 ("a fan-out still makes exactly one headroom call for all N").
 Dispatch's own sequence (mirrors createRun body minus admission, admission dispatch-owned per story: "DF3.1 owns only the two call sites (AC7, AC8), placed before driver.create()"):
-1. validate (zod strict) → 2. requestId drop-rule: if brief.requestId present && !isValidUuidV4(brief.requestId) → set undefined (AC1: malformed mints fresh, NEVER exit 2) → resolveRunCorrelation (throws CorrelationError → CLI exit 2) → 3. if (!admitted) checkHeadroom(driver,1) — allowed:false (any reason incl "list-unverified") → FleetError exit 5 code no-headroom → 4. assertWithinBudget(ledger, {repoSlug, issueId: String(int), runId, requestId}) — ledger constructed EXACTLY like createRun's (readRunRecord: store.get w/ ENOENT→undefined passthrough, other errors rethrow), closed in finally; OverBudgetError → FleetError exit 5 code budget-exceeded carrying DF2.8's literal payload fields (capMicroUsd, spentMicroUsd, reservedMicroUsd, unpricedRows, remediation) → 5. store.create(runId) O_EXCL → 6. store.set budget extension (mirror createRun: repoSlug, issueId, capMicroUsd, spentMicroUsd, reservedMicroUsd, admittedCeilingMicroUsd) → 7. driver.create(runId, SBX_OWNERSHIP_TAG) → 8. expose/setPublic only if port option (default: none; vm.httpsUrl may exist from create) → 9. store.set({vmName, httpsUrl?}) → 10. mintRunKey({...deps, capMicroUsd: mintCapMicroUsd(decision)}, runId) — decision.admittedCeilingMicroUsd IS effectiveCeilingMicros (AC9b), computed by DF2.8, never re-derived → 11. deliverRunKey → 12. stamp manifest limitMicroUsd = SAME ceiling (AC9a) → 13. fill → 14. setup gate → 15. ack {runId, requestId, state:"ready", vmName, httpsUrl}.
+1. validate (zod strict) → 2. requestId drop-rule: if brief.requestId present && !isValidUuidV4(brief.requestId) → set undefined (AC1: malformed mints fresh, NEVER exit 2) → resolveRunCorrelation (throws CorrelationError → CLI exit 2) → 3. if (!admitted) checkHeadroom(driver,1) — allowed:false (any reason incl "list-unverified") → FleetError exit 5 code no-headroom → 4. assertWithinBudget(ledger, {repoSlug, issueId: String(int), runId, requestId}) — ledger constructed EXACTLY like createRun's (readRunRecord: store.get w/ ENOENT→undefined passthrough, other errors rethrow), closed in finally; OverBudgetError → FleetError exit 5 code budget-exceeded carrying DF2.8's literal payload fields (capMicroUsd, spentMicroUsd, reservedMicroUsd, unpricedRows, remediation) → 5. store.create(runId) O_EXCL → 6. store.set budget extension (mirror createRun: repoSlug, issueId, capMicroUsd, spentMicroUsd, reservedMicroUsd, admittedCeilingMicroUsd) → 7. driver.create(runId, SBX_OWNERSHIP_TAG) → 8. **[AMENDED — see DN1 below; expose/setPublic MOVED to after the setup gate]** → 9. store.set({vmName, httpsUrl?}) → 10. mintRunKey({...deps, capMicroUsd: mintCapMicroUsd(decision)}, runId) — decision.admittedCeilingMicroUsd IS effectiveCeilingMicros (AC9b), computed by DF2.8, never re-derived → 11. deliverRunKey → 12. stamp manifest limitMicroUsd = SAME ceiling (AC9a) → 13. fill → 14. setup gate → 15. ack {runId, requestId, state:"ready", vmName, httpsUrl}.
+> **AMENDED (review DN1) — step 8 moves; the SHIPPED order is normative.**
+> The spec put `expose/setPublic` immediately after `driver.create` (step 8).
+> The code deliberately moved it to AFTER the setup gate, and the security
+> ordering is correct and stays. Making a box PUBLIC before the gate has run
+> proves it reachable while it is still unproven — INV-5's whole point is that
+> nothing is exposed until the gate says the box is what we think it is. The
+> normative sequence is therefore:
+>
+> `… → 7. driver.create → 8. store.set({vmName, httpsUrl?}) — vmName lands
+> BEFORE anything that can throw against a live, already-billing box → 9.
+> mintRunKey → 10. deliverRunKey → 11. stamp manifest limitMicroUsd → 12. fill
+> at the pinned SHA → 13. setup gate → 14. expose/setPublic, only if the port
+> option is set AND gate.ready → 15. store.set({httpsUrl, ports}) → 16. ack.`
+> (`vm.httpsUrl` may still exist straight from `create` on substrates that
+> report one; that is not an exposure this step performed.)
+>
+> **Consequence DF3.2 and DF3.4 must build against**: on a gate failure (exit 3)
+> the run record carries **no `httpsUrl` and no `ports`** — the record stays open
+> and the box stays alive (INV-5), but it was never exposed and never made
+> public. Do not treat a missing `httpsUrl` on an open record as a dispatch bug;
+> for a `--port` run it is the signature of a gate refusal.
+
 runId = mintRunId() = newId("qds") re-export from src/fleet/dispatch.ts (DF3.2 imports mintRunId from there). Optional opts.runId only via in-process dispatch(brief,{runId}) — must satisfy assertValidRunId AND be a dispatcher-minted value; caller-invented → reject (AC2).
 
 ## C2. dispatch() NEVER process.exit()s — src throws, CLI maps.
-Define in dispatch.ts: `export class FleetError extends Error { constructor(public readonly exitCode: 2|3|4|5, public readonly code: string, message: string, public readonly remediation: string, public readonly payload?: Record<string, unknown>) }`. All refusal paths throw FleetError; scripts/fleet.ts catches and maps exitCode. (Sketch's exitStatus() calls inside dispatch are wrong.)
+Define in dispatch.ts: `export class FleetError extends Error { constructor(public readonly exitCode: 1|2|3|4|5, public readonly code: string, message: string, public readonly remediation: string, public readonly payload?: Record<string, unknown>) }`. All refusal paths throw FleetError; scripts/fleet.ts catches and maps exitCode. (Sketch's exitStatus() calls inside dispatch are wrong.)
+
+> **AMENDED (review B9)** — the exitCode union was specified `2|3|4|5`; the code
+> ships `1|2|3|4|5` and the widening is the improvement, not a drift. Exit 1 is a
+> real refusal class (`dispatch-timeout`, an unreadable run-record store), and
+> admitting it into `FleetError` is what makes EVERY exit — 1 included — carry a
+> structured `{code, message, remediation, payload?}` envelope and a
+> dispatch-log entry, instead of escaping as an untyped stack trace that the one
+> renderer in `scripts/fleet.ts` never sees. Keep `1` in the union.
 
 ## C3. Brief schema — requestId is LOOSE at schema layer.
 `requestId: z.string().optional()` — NOT .uuid() (a non-UUID string is not a schema failure per AC1; a v1-UUID-shaped string passes schema then gets dropped by the isValidUuidV4 pre-resolver rule). issueId stays z.number().int().positive().max(2**31-1); assertWithinBudget receives String(issueId). Fields: repoSlug, issueId, issueUrl?, commitSha(/^[0-9a-f]{40}$/), requestId?, manifestPath, repoUrl. 64KiB cap enforced by CLI reader BEFORE parse (exit 2 code brief-too-large).
@@ -571,11 +631,42 @@ Define in dispatch.ts: `export class FleetError extends Error { constructor(publ
 ## C4. status.ts — boxUnknown only on list failure; empty list is boxMissing.
 The sketch's `vmSet.size === 0 → boxUnknown` is WRONG (violates inkwell doctrine "a failed lookup must never render as every VM destroyed" and AC4). Track `listOk: boolean` + `vmSet`. closedAt → state "closed" (skip driver join). open + vmName unset → boxMissing. open + listOk && vm in set → live; vm not in set → boxMissing. open + !listOk (throw OR 30s timeout) → boxUnknown. 30s timeout = dispatch-owned Promise.race wrapper around driver.list() (story mandates 30_000; quota's LIST_TIMEOUT_MS=15000 is a different surface — do not reuse). Output: one JSON per line per run-record.ts CLI precedent. StatusRow carries spendMicroUsd?/limitMicroUsd?. Single-run path: store.get typed ENOENT → FleetError exit 4 {code:"run-not-found", message, remediation} mutating nothing. Empty fleet: exit 0, empty output (a state, not an error).
 
+> **AMENDED (reviews B6/B7/B1)** — three additions to the above, all shipped and
+> all normative (see the fuller notes under D6):
+> 1. A fifth row state, **`orphan`**: an owned box (explicit foreign tag excludes
+>    it; absent tag does not) claimed by no record, by run id or by `vmName`.
+>    Unattributed spend, which is the reason the union is a join at all. Plus
+>    **`boxAlive?`** on a `closed` row whose box the substrate still reports.
+> 2. **`createdAt` is optional on `StatusRow`** and absent exactly on `orphan`
+>    rows, which have no record to take it from. Orphan rows sort first.
+> 3. The single-run ENOENT path is **not** unconditional exit 4: it runs the same
+>    owned-box lookup under the run id and returns an `orphan` row when a box
+>    exists, refusing 4 only when NEITHER a record nor an owned box is found. A
+>    list failure/timeout is not a hit (still 4). "Mutating nothing" holds — the
+>    driver is read, never written.
+
 ## C5. index.ts — NO harvest.ts/teardown.ts modules (not in FTM).
 Harvest/teardown verbs are thin front doors implemented INSIDE scripts/fleet.ts directly over providers' harvestRun/teardownSandbox (delegate unmodified, guards intact, no second retry loop). index.ts exports only: brief-schema, dispatch, status, verbs.
 
 ## C6. verbs.ts registry entry shape EXACTLY per story AC6: {verb, summary, flags:[{name,required,valueType}], exitCodes} — no extra keys (default/summary variants in sketch removed; DF3.5's contract test consumes this shape).
-flags list = dashed flags only (positionals like runId are per-verb CLI grammar, not registry flags). exitCodes: dispatch [0,1,2,3,5]; status [0,1,4]; harvest [0,1,4]; teardown [0,1,4] (sketch's 3 on teardown wrong — 3 is setup-gate-only). Registry is a MAP or array — pick array of entries; listVerbs() returns it fresh; --help renders from it; bidirectional coverage test asserts CLI dispatch table ⇄ registry parity both directions.
+flags list = dashed flags only (positionals like runId are per-verb CLI grammar, not registry flags). exitCodes: dispatch [0,1,2,3,5]; status [0,1,2,4]; harvest [0,1,2,4]; teardown [0,1,2,4] (sketch's 3 on teardown wrong — 3 is setup-gate-only).
+
+> **AMENDED (review B8)** — status/harvest/teardown were specified `[0,1,4]`; the
+> shipped registry declares `[0,1,2,4]` and the shipped registry is the accurate
+> one. All three verbs really do refuse with **2**: a run id that fails the
+> canonical grammar or the length cap (`assertFleetRunId`), an extra positional,
+> a missing required `<run-id>`, a flag the verb does not take, or a repeated
+> value flag — every one of those is a usage refusal raised by `parseArgv` before
+> the verb runs, and `tests/fleet/verbs.test.ts` demonstrates each. DF3.5's
+> contract test must be written against `[0,1,2,4]`; the code is correct here.
+>
+> **AMENDED (review B2)** — `--driver` is `required: true` on all four entries
+> (it was declared `required: false`). `assertDriverChosen` in `scripts/fleet.ts`
+> refuses every verb with exit 2 when the flag is absent and no driver is
+> injected, because no verb may ever silently default to the fake driver. A
+> generated DF3.5 skill built from a registry that called `--driver` optional
+> would exit 2 on every call. The injected-driver escape hatch (tests, embedders)
+> is not an argv shape, so it does not make the flag optional in the contract. Registry is a MAP or array — pick array of entries; listVerbs() returns it fresh; --help renders from it; bidirectional coverage test asserts CLI dispatch table ⇄ registry parity both directions.
 
 ## C7. Setup gate honesty rule — no simulated results.
 setupGate(driver, vm, opts) uses driver.exec/execTimed structurally (setup-gate.ts evidence). Dispatch calls the REAL setupGate for every driver (cast the structural surface, not the type). For fake boxes to genuinely pass assertions A–E, dispatch's fake-path fill must place the real files the gate probes (stamped manifest, delivered env file) — read tests/providers/exedev/setup-gate.test.ts BEFORE implementing to mirror exactly how DF2.2's own tests drive the gate, and read setup-gate.ts's assertion internals for what each item probes. If an assertion genuinely cannot be satisfied on fake hardware, surface that to the orchestrator — do NOT stub a ready verdict. Gate result.ready=false → FleetError exit 3 {code:"setup-gate-failed", assertionCode, failedItem, debugCommands, teardownCommand} — record stays OPEN with failure recorded in extensions (namespace: fanout is wrong — use a plain extensions write consistent with store's allow-listed namespaces; check run-record.ts EXTENSION_NAMESPACES and pick/add per its rules — if no namespace fits, record via store.set on existing fields + dispatch log line, and flag to orchestrator).

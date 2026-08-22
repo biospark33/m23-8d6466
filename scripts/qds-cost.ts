@@ -232,9 +232,11 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
     try {
       ledger.close();
     } catch (closeErr) {
-      // If close fails while an original error is in flight, the original takes
-      // precedence (the close failure is a stderr warning). If close fails on
-      // the success path, the close failure IS the error.
+      // The shared cleanup-failure policy (stated in full at scripts/fleet.ts's
+      // finally, and matched by scripts/sandbox-teardown.ts): if close fails
+      // while an original error is in flight, the original takes precedence
+      // (the close failure is a stderr warning); if close fails on the success
+      // path, the close failure IS the error.
       if (code !== 0) {
         process.stderr.write(`warning: ledger close failed after error: ${(closeErr as Error).message}\n`);
       } else {

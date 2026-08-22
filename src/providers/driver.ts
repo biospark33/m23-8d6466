@@ -252,8 +252,20 @@ export async function provisionAdmittedRun(
   let httpsUrl = vm.httpsUrl;
   if (opts.port !== undefined) {
     httpsUrl = await driver.expose(vm.name, opts.port);
+    // Persisted BEFORE setPublic, by the same reasoning as vmName above:
+    // setPublic can throw against a box that is already exposed and already
+    // billing, and until the URL and port are on the record nothing but the
+    // provider knows what the box is reachable on.
+    //
+    // Conditional spread, matching the first `store.set` above. `setLocked`
+    // does skip an explicitly-undefined value rather than validating it, so
+    // this is belt-and-braces — but the shape must not diverge between the two
+    // writes, or the next reader has to go and check which one is load-bearing.
+    record = store.set(opts.runId, {
+      ports: [opts.port],
+      ...(httpsUrl === undefined ? {} : { httpsUrl }),
+    });
     await driver.setPublic(vm.name);
-    record = store.set(opts.runId, { httpsUrl, ports: [opts.port] });
   }
   return { record, vm, ...(httpsUrl === undefined ? {} : { httpsUrl }) };
 }

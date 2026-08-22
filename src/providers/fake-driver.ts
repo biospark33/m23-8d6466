@@ -21,8 +21,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { log, newRequestId } from "../swarmclaw/log.ts";
 import type { ExecResult, ProviderDriver, ProviderVm } from "./driver.ts";
-import { assertValidRunId, RUN_ID_MAX, RUN_ID_RE } from "./run-record.ts";
+import { assertExistingRunId, assertValidRunId, LEGACY_RUN_ID_RE, RUN_ID_MAX } from "./run-record.ts";
 
 export const DEFAULT_FAKE_BOXES_DIR = ".sandbox/fake-boxes";
 
@@ -64,7 +65,13 @@ export class FakeDriver implements ProviderDriver {
   private boxDir(vm: string): string {
     // Box names are hostnames — the same grammar the run id obeys. Validating
     // here is what keeps `../evil` from escaping the boxes root.
-    assertValidRunId(vm);
+    //
+    // The LEGACY grammar on this shared path, and the strict one in `create`
+    // below: a box an earlier build named `trailing-` must stay listable,
+    // exposable and above all DESTROYABLE, or it is an unreapable leak that no
+    // verb can touch. Path safety is identical — neither grammar admits `/`,
+    // `.` or `..`.
+    assertExistingRunId(vm);
     return join(this.root, vm);
   }
 
@@ -91,6 +98,8 @@ export class FakeDriver implements ProviderDriver {
   }
 
   async create(name: string, tag?: string): Promise<ProviderVm> {
+    // Strict at creation: no NEW box gets a name a real provider would refuse.
+    assertValidRunId(name);
     const dir = this.boxDir(name);
     // Non-recursive mkdir: a second create of the same box fails with EEXIST
     // rather than silently adopting someone else's box.
@@ -109,9 +118,30 @@ export class FakeDriver implements ProviderDriver {
       // and reporting it would abort reap: `destroy` re-validates and throws, so
       // one stray directory would stop the fleet-wide reaper. The canonical
       // constants, never a local copy — the filter has to admit exactly what
-      // `assertValidRunId` admits, and a copy that drifts looser lists a name
-      // destroy then refuses, which is the reaper outage this guard prevents.
-      if (!RUN_ID_RE.test(entry) || entry.length > RUN_ID_MAX) continue;
+      // `boxDir` admits, and a copy that drifts looser lists a name destroy then
+      // refuses, which is the reaper outage this guard prevents.
+      //
+      // The LEGACY grammar, matching `assertExistingRunId`: a `trailing-` box
+      // was creatable by any earlier build, and `boxDir` still accepts it, so
+      // filtering it here would hide a real, destroyable box from every fleet
+      // listing. What is still filtered is REPORTED on the log line rather than
+      // vanishing — an invisible box is the driver-side twin of a dropped run
+      // record, and an operator needs the name to clean it up by hand.
+      if (!LEGACY_RUN_ID_RE.test(entry) || entry.length > RUN_ID_MAX) {
+        log({
+          requestId: newRequestId(),
+          operation: "fake-driver.list.skipped",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: 0,
+          status: "error",
+          error: { code: "unlistable_box_name", message: `box directory is not a valid box name: ${entry}` },
+          driver: this.name,
+          verb: "list",
+          outcome: "skipped",
+        });
+        continue;
+      }
       let meta: BoxMeta;
       try {
         meta = this.readMeta(entry);

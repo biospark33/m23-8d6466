@@ -9,7 +9,9 @@
  * Exit codes (this CLI's own table, F3): 0 success · 1 run/provider failure ·
  * 2 usage/schema · 3 setup-gate failure (assertion code in the payload) ·
  * 4 run-not-found · 5 refused before provisioning (payload code says which
- * guard fired).
+ * guard fired) · 6 the verb succeeded but a cleanup after it did not (the
+ * ledger would not close, or the run lock would not release — the run is left
+ * wedged and retrying the verb cannot help).
  *
  * stdout carries the command's OUTPUT only (ack JSON, status rows, the
  * teardown lines); every diagnostic — error envelopes and the structured log
@@ -91,8 +93,16 @@ const flagNames = (wantBoolean: boolean): string[] => [
   ...new Set(REGISTRY_FLAGS.filter((f) => (f.valueType === "boolean") === wantBoolean).map((f) => f.name)),
 ];
 const VALUE_FLAGS = flagNames(false);
-// `--help` rides along harmlessly: `run` answers it from argv before parsing.
-const BOOL_FLAGS = flagNames(true);
+/**
+ * `-h` is the short form of the registry's `--help`. Declared HERE as a bool so
+ * the tokenizer keeps it out of `parseValueFlags` (which answers `-h` by
+ * writing to stdout and calling process.exit(0) — fatal to an embedder and to
+ * the test runner); `parseArgv` immediately normalizes it to `--help`, so the
+ * per-verb `allowed` check sees the flag the registry actually declares rather
+ * than a short form that slips past it.
+ */
+const HELP_ALIAS = "-h";
+const BOOL_FLAGS = [...flagNames(true), HELP_ALIAS];
 
 /**
  * Injectable seams (repo DI idiom; tests override without module mocks).
@@ -124,26 +134,31 @@ function usageError(message: string, remediation: string): FleetError {
 }
 
 /**
- * `--dir` moves the whole `.sandbox/` set together. The ledger and the cost
- * config are SIBLINGS of the records directory, so without this a --dir-scoped
- * run reserved its budget against one ledger at dispatch and settled its box
- * hours against another at teardown — whichever the operator's cwd happened to
- * name. Both call sites resolve through here so the two halves of a run's
- * money can never land in different files.
+ * The ledger and the cost config are SIBLINGS of the records directory, so a
+ * run whose records moved must take its money with it: otherwise the dispatch
+ * reserves budget against one ledger file and the teardown settles box hours
+ * against another. Both call sites resolve through here so the two halves of a
+ * run's money can never land in different files.
  *
- * The store's own resolution, one level up from store.dir, exactly as runsDir
- * is derived. With no --dir nothing is passed: CostLedger's env tier
- * ($QDS_COST_LEDGER_FILE / $QDS_COST_CONFIG_FILE) and its cwd-relative
- * defaults stand unchanged, so a default install looks where it always did.
+ * Keyed on `store.dir` — the directory actually in use — NOT on whether `--dir`
+ * was typed. `QDS_RUNS_DIR=/srv/runs` and an embedder injecting `deps.store`
+ * move the records exactly as `--dir` does, and branching on the flag left both
+ * of those falling back to the cwd-relative default while the records sat
+ * elsewhere.
+ *
+ * $QDS_COST_LEDGER_FILE / $QDS_COST_CONFIG_FILE still win, restated here rather
+ * than left to CostLedger's own tier because the DEFAULT below is no longer the
+ * one CostLedger would pick. An explicit env override is one file for both
+ * halves, so it cannot split a run's money either.
  */
-function costLedgerOpts(dir: string | undefined, storeDir: string) {
-  if (dir === undefined) return {};
+function costLedgerOpts(storeDir: string) {
   const sandboxDir = dirname(storeDir);
   return {
-    path: join(sandboxDir, basename(DEFAULT_COST_LEDGER_FILE)),
-    // An absent cost-config.json under --dir falls back to DEFAULT_COST_CONFIG
+    path: process.env.QDS_COST_LEDGER_FILE ?? join(sandboxDir, basename(DEFAULT_COST_LEDGER_FILE)),
+    // An absent cost-config.json falls back to DEFAULT_COST_CONFIG
     // (loadCostConfig maps ENOENT to defaults); an unreadable one still throws.
-    config: loadCostConfig(join(sandboxDir, basename(DEFAULT_COST_CONFIG_FILE))).config,
+    config: loadCostConfig(process.env.QDS_COST_CONFIG_FILE ?? join(sandboxDir, basename(DEFAULT_COST_CONFIG_FILE)))
+      .config,
   };
 }
 
@@ -179,6 +194,27 @@ function printError(
   err(`${JSON.stringify(line)}\n`);
 }
 
+/**
+ * Construct a provider-layer dependency, mapping its refusal to exit 2.
+ *
+ * `resolveDriver` throws a bare Error for an unknown driver name and
+ * `openRouterKeyApi` a CredentialLifecycleError for an unset provisioning key.
+ * Neither is a FleetError, so both fell through to the generic branch of
+ * `report` as exit 1 — which `logVerb` stamps `transient`, i.e. "retry me". A
+ * typo'd driver and an unset env var are permanent operator errors: automation
+ * reading `exitStatus` retried them forever. Message and remediation are
+ * preserved verbatim; only the classification changes.
+ */
+function asUsage<T>(build: () => T): T {
+  try {
+    return build();
+  } catch (e) {
+    if (e instanceof FleetError) throw e;
+    const x = (e ?? {}) as { message?: string; remediation?: string };
+    throw usageError(x.message ?? String(e), x.remediation ?? HELP);
+  }
+}
+
 /** Render any throw as the envelope + this CLI's exit code. */
 function report(err: (s: string) => void, e: unknown): number {
   if (e instanceof FleetError) {
@@ -187,24 +223,43 @@ function report(err: (s: string) => void, e: unknown): number {
   }
   // Non-Error rejections normalize to {} so the printer cannot itself throw
   // while reporting one.
-  const x = (e ?? {}) as { code?: string; message?: string; remediation?: string };
-  printError(err, x.code ?? "error", x.message ?? String(e), x.remediation);
+  const x = (e ?? {}) as { code?: string; message?: string; remediation?: string; stack?: string; cause?: unknown };
+  // No `code` at all means NOBODY designed this failure: a TypeError out of a
+  // driver, a RangeError from inside teardownSandbox. One bare message for a
+  // failure that may have left a box half-torn-down makes root-causing it
+  // require re-running the destructive command — carry the stack (and the
+  // cause's message) so the first run is enough. Typed refusals (RunLockedError,
+  // the credential and harvest errors) already say what went wrong and where,
+  // and stay the clean one-liners operators read daily.
+  const cause = (x.cause ?? undefined) as { message?: string } | undefined;
+  const debris =
+    x.code !== undefined
+      ? undefined
+      : {
+          ...(typeof x.stack === "string" ? { stack: x.stack } : {}),
+          ...(cause === undefined ? {} : { cause: cause.message ?? String(x.cause) }),
+        };
+  printError(err, x.code ?? "error", x.message ?? String(e), x.remediation, debris);
   return 1;
 }
 
 interface Parsed {
+  help?: false;
   entry: VerbEntry;
   positionals: string[];
   flags: Map<string, string>;
   bools: Set<string>;
 }
 
+/** A help request survives parsing intact; nothing else about argv matters. */
+type ParseResult = Parsed | { help: true };
+
 /**
  * argv → verb + validated flags. Every parser failure becomes a usage
  * FleetError (exit 2 with an envelope) rather than escaping run() as a bare
  * throw the top-level catch turns into a silent exit 1.
  */
-function parseArgv(argv: readonly string[]): Parsed {
+function parseArgv(argv: readonly string[]): ParseResult {
   let tokens: ReturnType<typeof tokenizeArgs>;
   try {
     tokens = tokenizeArgs(argv, {
@@ -216,10 +271,7 @@ function parseArgv(argv: readonly string[]): Parsed {
     throw usageError((e as Error).message, HELP);
   }
   const { positionals, flagTokens, bools } = tokens;
-  const verb = positionals[0];
-  // A bare `fleet` is a mistyped invocation, not a help request: the exit
-  // table says usage = 2, and `fleet --help` is the way to ask for help.
-  if (verb === undefined) throw usageError("no verb given", HELP);
+  if (bools.delete(HELP_ALIAS)) bools.add("--help");
 
   const flags = new Map<string, string>();
   try {
@@ -237,6 +289,21 @@ function parseArgv(argv: readonly string[]): Parsed {
   } catch (e) {
     throw usageError((e as Error).message, HELP);
   }
+
+  // Resolved from the PARSED flags, and only AFTER the value grammar has run.
+  // `argv.includes("--help")` matched the token anywhere in raw argv, so
+  // `fleet teardown <id> --driver fake --dir --help` — a `--dir` fat-fingered
+  // with no value — printed usage to stdout and exited 0: a CI script doing
+  // `fleet teardown … || alert` recorded success while the box and the API key
+  // stayed live and billing, and no log line was emitted to contradict it. The
+  // value grammar now rejects that argv as the typo it is, and only a --help
+  // that survives it is a help request.
+  if (bools.has("--help")) return { help: true };
+
+  const verb = positionals[0];
+  // A bare `fleet` is a mistyped invocation, not a help request: the exit
+  // table says usage = 2, and `fleet --help` is the way to ask for help.
+  if (verb === undefined) throw usageError("no verb given", HELP);
 
   const entry = listVerbs().find((v) => v.verb === verb);
   if (entry === undefined) {
@@ -316,7 +383,8 @@ function readBriefFile(briefPath: string): string {
  * exit 1 is a run/provider failure — the substrate, not the invocation — and is
  * worth retrying, which is what `transient` means to whatever reads these lines
  * (dispatch's own refusal path already classifies its exit 1 the same way).
- * 2-5 are the operator's brief, flags, id or budget: retrying is futile.
+ * 2-5 are the operator's brief, flags, id or budget, and 6 is a wedged cleanup
+ * that no amount of retrying can clear: retrying any of them is futile.
  */
 function logVerb(requestId: string, verb: string, runId: string | undefined, startedAt: number, code: number): number {
   const durationMs = Date.now() - startedAt;
@@ -360,18 +428,29 @@ export async function run(
   err: (s: string) => void = out,
 ): Promise<number> {
   const startedAt = Date.now();
-  // Help wins over every other reading of argv, so `fleet <verb> --help`
-  // (which renderHelp advertises) answers with usage instead of a refusal.
-  if (argv[0] === "help" || argv.includes("--help") || argv.includes("-h")) {
+  // The ONE pre-tokenization reading of argv: `fleet help` names no verb to
+  // tokenize against. Anchored to argv[0], so it cannot fire from a stray token
+  // inside a destructive invocation the way `argv.includes("--help")` did.
+  if (argv[0] === "help") {
     out(`${HELP}\n`);
     return 0;
   }
 
-  let parsed: Parsed;
+  let parsed: ParseResult;
   try {
     parsed = parseArgv(argv);
   } catch (e) {
-    return report(err, e);
+    // CC-9: a usage refusal is still a failed invocation. Routing it around
+    // logVerb left exit 2 with no correlating line, so log-based dashboards
+    // under-counted exactly the failures an operator most needs to see. The
+    // verb is the first positional when there is one — that is what the
+    // operator meant even when the flags around it were refused.
+    const attempted = argv.find((a) => !a.startsWith("-")) ?? "(none)";
+    return logVerb(newRequestId(), attempted, undefined, startedAt, report(err, e));
+  }
+  if (parsed.help === true) {
+    out(`${HELP}\n`);
+    return 0;
   }
   const { entry, positionals, flags, bools } = parsed;
   const verb = entry.verb;
@@ -397,7 +476,13 @@ export async function run(
       const portRaw = flags.get("--port");
       let port: number | undefined;
       if (portRaw !== undefined) {
-        port = Number(portRaw);
+        // Plain decimal ONLY, before Number() gets a say: it accepts hex
+        // (`0x1f4` → 500), exponents (`1e3` → 1000), surrounding whitespace
+        // (`" 8080 "`) and zero padding (`08080`), every one of which is an
+        // integer in 1-65535 and none of which is the port the operator typed.
+        // The CLI must not bind a port they never wrote. The range check below
+        // still owns 0 and 65536+.
+        port = /^[1-9]\d{0,4}$/.test(portRaw) ? Number(portRaw) : Number.NaN;
         if (!Number.isInteger(port) || port < 1 || port > 65_535) {
           throw usageError(`--port ${JSON.stringify(portRaw)} is not a TCP port`, "--port takes an integer 1-65535");
         }
@@ -448,7 +533,7 @@ export async function run(
       // join key between the CLI's records/driver logs and the run's own.
       const requestId = resolveBriefRequestId(briefJson) ?? newRequestId();
       dispatchRequestId = requestId;
-      const driver = deps?.driver ?? resolveDriver(driverName as string, { requestId });
+      const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId }));
       const store = deps?.store ?? new RunRecordStore({ ...storeOpts, requestId });
       const ledgerFactory =
         deps?.ledgerFactory ??
@@ -456,12 +541,14 @@ export async function run(
           // Mirrors createRun's wiring: only a genuine missing record reads as
           // undefined; every other read failure refuses the dispatch.
           const ledger = new CostLedger({
-            ...costLedgerOpts(dir, store.dir),
+            ...costLedgerOpts(store.dir),
             readRunRecord: (id: string) => {
               try {
                 return store.get(id);
               } catch (e) {
-                if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+                // Optional-chained: a `throw null` must not become a TypeError
+                // in the handler that is supposed to classify it.
+                if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
                 throw e;
               }
             },
@@ -475,7 +562,7 @@ export async function run(
       const dispatchDeps: DispatchDeps = {
         ...seams,
         driver,
-        keyApi: deps?.keyApi ?? openRouterKeyApi(),
+        keyApi: deps?.keyApi ?? asUsage(() => openRouterKeyApi()),
         store,
         ledgerFactory,
         requestId,
@@ -521,7 +608,7 @@ export async function run(
       // id must not reach the store as an untyped path error.
       if (runIdArg !== undefined) assertFleetRunId(runIdArg);
       assertDriverChosen("status", driverName, deps?.driver);
-      const driver = deps?.driver ?? resolveDriver(driverName as string, { requestId });
+      const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId }));
       const store = deps?.store ?? new RunRecordStore({ ...storeOpts, requestId });
       const statusDeps = { driver, store };
       const rows = runIdArg === undefined ? await statusAll(statusDeps) : [await statusRun(statusDeps, runIdArg)];
@@ -552,19 +639,15 @@ export async function run(
     // nothing, so there is no lock to release and no box left half-torn-down.
     assertDriverChosen(verb, driverName, deps?.driver);
 
-    const driver = deps?.driver ?? resolveDriver(driverName as string, { requestId, runId: runIdArg });
+    const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId, runId: runIdArg }));
     const store = deps?.store ?? new RunRecordStore({ ...storeOpts, requestId });
-    // The lock comes BEFORE the record read: reading first is a check-then-act
-    // across the lock boundary — a concurrent teardown closes the run and
-    // revokes its key while we hold a record that still names the keyHash.
-    lock = acquireRunLock(store.dir, runIdArg);
 
-    let rec: RunRecord;
-    try {
-      rec = getRecord({ store }, runIdArg);
-    } catch (e) {
-      const err2 = e as HarvestError;
-      if (err2.code === "no-record") {
+    /** exit 4 for a genuine absence; every other read failure propagates. */
+    const notFound = (e: unknown): never => {
+      // Optional-chained (status.ts's form): a `throw null` must not become a
+      // TypeError in the handler that is supposed to classify it — a genuinely
+      // missing record would then surface as a retryable exit 1, not exit 4.
+      if ((e as HarvestError | null)?.code === "no-record") {
         throw new FleetError(
           4,
           "run-not-found",
@@ -573,6 +656,30 @@ export async function run(
         );
       }
       throw e;
+    };
+
+    // AC4: a run that does not exist must exit 4 having mutated NOTHING. The
+    // lock is a real file — created, fsynced, and (on a crash before the
+    // finally) left behind for a phantom run, while a concurrent invocation
+    // sees the run as busy. So probe first, cheaply, and refuse before the
+    // filesystem is touched.
+    try {
+      getRecord({ store }, runIdArg);
+    } catch (e) {
+      throw notFound(e);
+    }
+
+    // Then the lock, and only THEN the read that the verb actually uses: the
+    // probe above is deliberately not trusted across the lock boundary, because
+    // reading first is a check-then-act — a concurrent teardown closes the run
+    // and revokes its key while we hold a record that still names the keyHash.
+    lock = acquireRunLock(store.dir, runIdArg, "fleet invocation");
+
+    let rec: RunRecord;
+    try {
+      rec = getRecord({ store }, runIdArg);
+    } catch (e) {
+      throw notFound(e);
     }
 
     const tdeps: TeardownDeps = {
@@ -591,15 +698,15 @@ export async function run(
       out(res.outcome === "harvested" ? `harvested: ${res.count}\n` : "harvested: none\n");
       code = 0;
     } else {
-      if (rec.keyHash !== undefined) tdeps.keyApi = deps?.keyApi ?? openRouterKeyApi();
+      if (rec.keyHash !== undefined) tdeps.keyApi = deps?.keyApi ?? asUsage(() => openRouterKeyApi());
       ledger = new CostLedger({
-        ...costLedgerOpts(dir, store.dir),
+        ...costLedgerOpts(store.dir),
         readRunRecord: (id: string) => {
           try {
             const r = getRecord({ store }, id);
             return { createdAt: r.createdAt, closedAt: r.closedAt, keyHash: r.keyHash, limitMicroUsd: r.limitMicroUsd };
           } catch (e) {
-            if ((e as HarvestError).code === "no-record") return undefined;
+            if ((e as HarvestError | null)?.code === "no-record") return undefined;
             throw e;
           }
         },
@@ -616,6 +723,22 @@ export async function run(
   } catch (e) {
     code = report(err, e);
   } finally {
+    /**
+     * ONE cleanup-failure policy, stated here and shared with
+     * `scripts/sandbox-teardown.ts` and `scripts/qds-cost.ts` (which had three
+     * different ones between them): on an otherwise-successful path a cleanup
+     * failure IS the error — a spend that may never have been durably committed
+     * and a run left locked against every later verb are not "success" — but it
+     * never overwrites a failure the verb already reported.
+     *
+     * Its own code, not 1. Exit 1 means "the substrate failed, retry", and
+     * `logVerb` classifies it `transient`; a wedged lock retried forever just
+     * hits `run-locked` every time, because nothing will ever clear it. 6 is
+     * outside the retryable range, so it classifies `logic`.
+     */
+    const cleanupFailed = (): void => {
+      if (code === 0) code = 6;
+    };
     if (ledger !== undefined) {
       try {
         ledger.close();
@@ -626,6 +749,7 @@ export async function run(
           `could not close the cost ledger: ${(e as Error).message}`,
           "the handle dies with the process; re-run to confirm it still reads",
         );
+        cleanupFailed();
       }
     }
     // releaseRunLock re-reads the body and unlinks it only while it is still
@@ -641,7 +765,7 @@ export async function run(
           `could not release ${lock}: ${(e as Error).message}`,
           `rm ${lock} by hand once no other invocation holds it — until then every later harvest or teardown of this run refuses`,
         );
-        code = 1;
+        cleanupFailed();
       }
     }
   }
@@ -670,8 +794,11 @@ if (import.meta.main) {
       ),
     );
   } catch (e) {
-    // A non-Error throw printed `undefined` and told the operator nothing.
-    writeAll(2, `${(e as Error)?.message ?? String(e)}\n`);
+    // A non-Error throw printed `undefined` and told the operator nothing. The
+    // stack goes with it: nothing reaches here that `run` was designed to
+    // handle, so this is a bug report and one bare line is not one.
+    const stack = (e as Error)?.stack;
+    writeAll(2, `${stack ?? (e as Error)?.message ?? String(e)}\n`);
     process.exit(1);
   }
 }

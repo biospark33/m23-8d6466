@@ -230,15 +230,28 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     fail(out, err.code ?? "error", err.message ?? String(e), err.remediation);
     outcome = 1;
   } finally {
+    /**
+     * ONE cleanup-failure policy, shared with `scripts/fleet.ts` and
+     * `scripts/qds-cost.ts` (see the fuller statement at fleet.ts's finally):
+     * on an otherwise-successful path a cleanup failure IS the error — a
+     * box-hour spend that may never have been durably committed, or a run left
+     * locked against every later teardown, is not a clean `torn down:` and an
+     * exit 0. It never overwrites a failure the teardown already reported.
+     *
+     * This CLI's table is 0/1 only, so a wedged cleanup is 1 here where
+     * `fleet` can afford its own code (6) for it.
+     */
+    const cleanupFailed = (): void => {
+      if (outcome === 0) outcome = 1;
+    };
     // Close the ledger handle here so every exit path (success, teardown
-    // failure, harvest return) releases it — same policy as the lock below: a
-    // cleanup failure is its own diagnostic and must not replace the teardown
-    // result already reported.
+    // failure, harvest return) releases it.
     if (ledger !== undefined) {
       try {
         ledger.close();
       } catch (e) {
         fail(out, "ledger-close-failed", `could not close the cost ledger: ${(e as Error).message}`, "the ledger is WAL-mode and the handle dies with the process; re-run to confirm it still reads");
+        cleanupFailed();
       }
     }
     // Release only OUR lock: releaseRunLock re-reads the body and unlinks it
@@ -257,7 +270,7 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
           `could not release ${lock}: ${(e as Error).message}`,
           `rm ${lock} by hand once no other invocation holds it — until then every later teardown of this run refuses`,
         );
-        outcome = 1;
+        cleanupFailed();
       }
     }
   }

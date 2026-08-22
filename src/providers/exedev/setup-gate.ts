@@ -89,6 +89,14 @@ export interface SetupGateResult {
 
 export interface SetupGateOptions {
   runId: string;
+  /**
+   * INV-4-bis: the DISPATCH's correlation id, so the gate's log lines join to
+   * the dispatch ack. Falls back to `requestId` — the driver instance's
+   * own id, which is a different id from the ack's whenever the driver was not
+   * constructed by this dispatch, and a run that dies at the gate then cannot
+   * be joined to the dispatch that started it.
+   */
+  requestId?: string;
   /** The ACTIVE roster — an argument, never an environment variable. */
   rosterPath: string;
   /** The recorded commit SHA the clone must be pinned to (assertion A). */
@@ -191,6 +199,7 @@ export async function setupGate(
 ): Promise<SetupGateResult> {
   assertValidRunId(opts.runId);
   assertValidRunId(vm);
+  const requestId = opts.requestId ?? driver.requestId;
   if (!SHA_RE.test(opts.commitSha)) {
     throw new ExeDevDriverError(
       "commit-sha-invalid",
@@ -277,7 +286,7 @@ export async function setupGate(
   const headSha = head.stdout.trim();
   const dirty = porcelain.stdout.trim();
   const aOk = head.exitCode === 0 && porcelain.exitCode === 0 && headSha.startsWith(wantSha) && dirty.length === 0;
-  emitGate(driver.requestId, g, vm, "gate_a", Date.now() - t, aOk ? "ok" : "error");
+  emitGate(requestId, g, vm, "gate_a", Date.now() - t, aOk ? "ok" : "error");
   if (head.exitCode !== 0) {
     assertions.push({ item: "A", ok: false, note: `A: git rev-parse HEAD failed (exit ${head.exitCode}): ${head.stderr.trim()}` });
   } else if (porcelain.exitCode !== 0) {
@@ -306,7 +315,7 @@ export async function setupGate(
     t = Date.now();
     if (Date.now() >= deadline) {
       assertions.push({ item: "B", ok: false, note: `B: gate budget exhausted before B ran (earlier phases consumed gateTimeoutMs=${gateTimeoutMs}ms)` });
-      emitGate(driver.requestId, g, vm, "gate_b", Date.now() - t, "error");
+      emitGate(requestId, g, vm, "gate_b", Date.now() - t, "error");
     } else {
       const piPath = await driver.execTimed(vm, ["sh", "-c", "command -v pi"], budgetFree());
       if (piPath.exitCode !== 0 || piPath.stdout.trim().length === 0) {
@@ -322,7 +331,7 @@ export async function setupGate(
           assertions.push({ item: "B", ok: true, note: "B: pi registry loaded — list-models content present" });
         }
       }
-      emitGate(driver.requestId, g, vm, "gate_b", Date.now() - t, assertions.at(-1)?.ok ? "ok" : "error");
+      emitGate(requestId, g, vm, "gate_b", Date.now() - t, assertions.at(-1)?.ok ? "ok" : "error");
     }
   }
 
@@ -342,7 +351,7 @@ export async function setupGate(
         { item: "D", ok: false, note },
         { item: "E", ok: false, note },
       );
-      emitGate(driver.requestId, g, vm, "gate_cde", Date.now() - t, "error");
+      emitGate(requestId, g, vm, "gate_cde", Date.now() - t, "error");
     } else {
       const res = await driver.execTimed(
         vm,
@@ -435,7 +444,7 @@ export async function setupGate(
       // PARTIAL or DUPLICATED evidence is equally unproven — the same
       // complete-evidence predicate that admits the results decides the label.
       const cdeOk = res.exitCode === 0 && cdeComplete && results.every((r) => r.ok);
-      emitGate(driver.requestId, g, vm, "gate_cde", Date.now() - t, cdeOk ? "ok" : "error");
+      emitGate(requestId, g, vm, "gate_cde", Date.now() - t, cdeOk ? "ok" : "error");
       }
   }
 
@@ -458,7 +467,7 @@ export async function setupGate(
 
   const gateMs = Date.now() - gateStart;
   log({
-    requestId: driver.requestId,
+    requestId: requestId,
     operation: "exedev.gate",
     agentId: null,
     timestamp: new Date().toISOString(),
@@ -485,7 +494,7 @@ export async function setupGate(
     // Retaining the artifact must never turn a red gate green or crash the
     // caller — the evidence lives in the return value; log the write failure.
     log({
-      requestId: driver.requestId,
+      requestId: requestId,
       operation: "exedev.gate",
       agentId: null,
       timestamp: new Date().toISOString(),

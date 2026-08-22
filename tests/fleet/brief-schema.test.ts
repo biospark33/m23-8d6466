@@ -13,7 +13,6 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as YAML from "yaml";
 
 import { BriefSchema, extractZodErrorField, type Brief } from "../../src/fleet/brief-schema.ts";
 import {
@@ -23,7 +22,7 @@ import {
   stampManifestLimit,
   serializeManifest,
 } from "../../src/phase-engine/manifest.ts";
-import type { ZodError, ZodIssueCode } from "zod";
+import { ZodError, type ZodIssueCode } from "zod";
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df3-1-brief-")));
 afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
@@ -38,6 +37,18 @@ function validBrief(over: Record<string, unknown> = {}): Record<string, unknown>
     ...over,
   };
 }
+
+/**
+ * Every key the schema requires. The fixture supplies exactly these (asserted
+ * below), so INV-2's closed validation is pinned for all of them rather than for
+ * `repoSlug` alone: every OTHER rejection case here starts from a complete
+ * fixture and corrupts one value, which cannot fail when a field stops being
+ * required. Make `commitSha` `.optional()` and the 40-hex cases still reject bad
+ * values and the valid-parse case still passes — while a brief carrying no
+ * commitSha at all is admitted and the dispatcher provisions against an
+ * unspecified commit, or reads a `manifestPath` of `undefined`.
+ */
+const REQUIRED_KEYS = ["repoSlug", "issueId", "commitSha", "manifestPath", "repoUrl"] as const;
 
 /**
  * Assert a brief is refused for the REASON claimed, not merely refused.
@@ -77,29 +88,44 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
 
   test("ZodError helper extracts offending field name", () => {
     const brief = { ...validBrief(), unknownField: "x" };
+    // The sentinel is hoisted OUT of the try. Thrown inside it, the same catch
+    // caught it and fed a plain Error to extractZodErrorField — so a schema that
+    // stopped rejecting unknown keys failed here for an accidental reason, and
+    // would pass outright the day the helper grows a fallback.
+    let thrown: unknown;
     try {
       BriefSchema.parse(brief);
-      throw new Error("should have thrown");
     } catch (e) {
-      const fieldName = extractZodErrorField(e as ZodError);
-      expect(fieldName).toBe("unknownField");
+      thrown = e;
     }
+    expect(thrown).toBeInstanceOf(ZodError);
+    expect(extractZodErrorField(thrown as ZodError)).toBe("unknownField");
   });
 
-  test("missing repoSlug rejected (the KEY is absent, not set to undefined)", () => {
-    // `{...brief, repoSlug: undefined}` is a present key: it exercises a
-    // different zod path from the brief an operator actually sends, which
-    // simply omits the field. Both must be refused, so both are asserted.
-    const { repoSlug, ...absent } = validBrief();
-    expect(repoSlug).toBe("owner/repo"); // it was there; the rest omits it
-    expect(Object.hasOwn(absent, "repoSlug")).toBe(false);
-    expectRejected(absent, { field: "repoSlug", code: "invalid_type", message: /Required/ });
-    expectRejected(validBrief({ repoSlug: undefined }), {
-      field: "repoSlug",
-      code: "invalid_type",
-      message: /Required/,
-    });
+  test("the fixture supplies exactly the required keys and nothing optional", () => {
+    // Binds REQUIRED_KEYS to the fixture: a newly required field with no fixture
+    // value fails `valid minimal brief parses`, and a newly OPTIONAL field left
+    // in the fixture fails here instead of silently escaping the loop below.
+    expect(Object.keys(validBrief()).sort()).toEqual([...REQUIRED_KEYS].sort());
   });
+
+  for (const key of REQUIRED_KEYS) {
+    test(`missing ${key} rejected (the KEY is absent, not set to undefined)`, () => {
+      // `{...brief, key: undefined}` is a PRESENT key: it exercises a different
+      // zod path from the brief an operator actually sends, which simply omits
+      // the field. Both must be refused, so both are asserted.
+      const absent = validBrief();
+      expect(absent[key]).toBeDefined(); // it was there; delete removes it
+      delete absent[key];
+      expect(Object.hasOwn(absent, key)).toBe(false);
+      expectRejected(absent, { field: key, code: "invalid_type", message: /Required/ });
+      expectRejected(validBrief({ [key]: undefined }), {
+        field: key,
+        code: "invalid_type",
+        message: /Required/,
+      });
+    });
+  }
 
   test("commitSha not-40-hex rejected: 39 chars", () => {
     expectRejected(validBrief({ commitSha: "a".repeat(39) }), { field: "commitSha", code: "invalid_string" });
@@ -181,12 +207,46 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     expect(result.requestId).toBe("9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d");
   });
 
+  test("requestId LOOSE still means a STRING — a number or an object is refused", () => {
+    // Every other requestId case above asserts acceptance, which `z.any()`
+    // satisfies too. C3 relaxes the FORMAT, not the type: the value rides the
+    // brief into the run record, the ledger keys and the log correlation, where
+    // a `.startsWith`/`join()` on a number or an object throws at dispatch time
+    // — past the trust boundary INV-2 puts here.
+    for (const bad of [123, { evil: true }, ["a"], true]) {
+      expectRejected(validBrief({ requestId: bad }), {
+        field: "requestId",
+        code: "invalid_type",
+        message: /Expected string/,
+      });
+    }
+  });
+
   test("manifestPath empty string rejected", () => {
     expectRejected(validBrief({ manifestPath: "" }), {
       field: "manifestPath",
       code: "too_small",
       message: /at least 1 character/,
     });
+  });
+
+  test("manifestPath parent segment rejected (it is a real host path the dispatcher reads)", () => {
+    for (const bad of ["../../../../etc/shadow", "sub/../../escape.json", ".."]) {
+      expectRejected(validBrief({ manifestPath: bad }), {
+        field: "manifestPath",
+        code: "custom",
+        message: /may not be '\.\.'/,
+      });
+    }
+  });
+
+  test("manifestPath '.' segments stay legal — './pipeline.json' is an ordinary path", () => {
+    // Unlike repoSlug, where '.' is an entire owner/repo name and never valid,
+    // a '.' path segment resolves nowhere new. Over-rejecting here would refuse
+    // briefs that are correct.
+    for (const ok of ["./pipeline.json", "cfg/./pipeline.json", "/abs/path/pipeline.json"]) {
+      expect(BriefSchema.parse(validBrief({ manifestPath: ok })).manifestPath).toBe(ok);
+    }
   });
 
   test("repoUrl non-url rejected", () => {
@@ -324,13 +384,25 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
     expect(() => stampManifestLimit(manifest, tooBig)).toThrow(/positive integer/);
   });
 
+  test("stamped value must be a NUMBER — a numeric string, NaN or null are refused", () => {
+    // Every other rejection case passes a number, so a guard written
+    // `if (v < 1 || v % 1 !== 0)` would accept "500000" after coercion and stamp
+    // a STRING ceiling that the money path then compares with `<` against a
+    // number ("500000" < 600000 is false — the cap silently stops binding).
+    const manifest = loadManifest(manifestPath, 120_000, manifestDir);
+    for (const bad of ["500000", Number.NaN, null, undefined, {}]) {
+      expect(() => stampManifestLimit(manifest, bad as unknown as number)).toThrow(ManifestError);
+      expect(() => stampManifestLimit(manifest, bad as unknown as number)).toThrow(/positive integer/);
+    }
+  });
+
   test("MAX_SAFE_INTEGER itself is accepted — the bound is inclusive", () => {
     const manifest = loadManifest(manifestPath, 120_000, manifestDir);
     const stamped = stampManifestLimit(manifest, Number.MAX_SAFE_INTEGER);
     expect(stamped.manifest.limitMicroUsd).toBe(Number.MAX_SAFE_INTEGER);
   });
 
-  test("serializeManifest outputs 2-space-indented JSON (readable as YAML too)", () => {
+  test("serializeManifest outputs 2-space-indented JSON", () => {
     const manifest = loadManifest(manifestPath, 120_000, manifestDir);
     const stamped = stampManifestLimit(manifest, 500_000);
     const text = serializeManifest(stamped);
@@ -338,14 +410,24 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
     // JSON is what loadManifest reads back, so JSON is what must come out —
     // quoted keys, not YAML's bare `limitMicroUsd:`.
     expect(text).toContain('"limitMicroUsd": 500000');
-    expect(text.split("\n")[1]).toMatch(/^ {2}"/);
     const reparsed = JSON.parse(text) as Record<string, unknown>;
     expect(reparsed.limitMicroUsd).toBe(500_000);
     expect(reparsed.version).toBe("1.0.0");
     expect(reparsed.pipelineId).toBe("test-pipeline");
-    // The dispatcher delivers this text under a `.yaml` name (AC9a), so a YAML
-    // reader in the box must see the same document.
-    expect(YAML.parse(text)).toEqual(reparsed);
+    // The indent asserted STRUCTURALLY, over the whole document. Asserting that
+    // the second physical line starts with two spaces and a quote held only
+    // because `version` is a scalar that happens to come first: any key
+    // reordering, a leading comment or a BOM failed a correct implementation,
+    // while 4-space, tab or minified output past line 2 passed. Re-emitting the
+    // parsed document at indent 2 preserves key order, so this is an exact
+    // byte comparison that only the indent (and nesting) can break.
+    expect(text).toBe(JSON.stringify(reparsed, null, 2));
+
+    // No YAML re-parse here. `expect(YAML.parse(text)).toEqual(reparsed)` was a
+    // tautology — the line above already proves JSON.parse accepts `text`, and
+    // YAML 1.2 is a strict superset of JSON, so it cannot fail. The real concern
+    // (the dispatcher delivers these bytes under a `.yaml` name, AC9a) is about
+    // the DELIVERED artifact, and belongs where delivery happens.
   });
 
   test("serializeManifest round-trips: loadManifest(serialize(stamped)) validates and carries every phase", () => {

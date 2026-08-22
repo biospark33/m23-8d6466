@@ -25,6 +25,13 @@ import { randomBytes } from "node:crypto";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import type { ProviderDriver } from "./driver.ts";
 import type { RunRecordStore } from "./run-record.ts";
+// INV-4: the plaintext key exists in the mint return and nowhere else. Every
+// sink below logs a CAUGHT error's free text, and `deliverRunKey` writes the
+// key through `driver.exec` — an exec wrapper that echoes the argv it ran (the
+// ordinary way one reports a failure) puts the key straight into that text.
+// One redactor, shared with step-log's sink; a second copy is how this was
+// missed the first time.
+import { redactSecrets } from "./step-log.ts";
 
 /** Provider-side backstop cap. DF3.6's `loadResidentBounds` asserts `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd` against this value. */
 export const defaultKeyCapMicroUsd = 50_000_000;
@@ -165,8 +172,11 @@ async function timed<T>(ctx: StepContext, step: string, fn: () => Promise<T>): P
       timestamp: new Date().toISOString(),
       duration: durationMs,
       status: "error",
-      error: { code: err.code ?? "credential_error", message: err.message },
-      remediation: err.remediation ?? null, // env-var names only, never expanded
+      error: { code: err.code ?? "credential_error", message: redactSecrets(err.message ?? String(e)) },
+      // env-var names only, never expanded — and redacted, because a provider's
+      // own text can reach here through a wrapped transport failure. `typeof`,
+      // not `??`: a null remediation must not reach the redactor.
+      remediation: typeof err.remediation === "string" ? redactSecrets(err.remediation) : null,
       runId: ctx.runId,
       step,
       keyHashPrefix: keyHashPrefix(ctx.keyHash),
@@ -241,7 +251,10 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
                 timestamp: new Date().toISOString(),
                 duration: 0,
                 status: "error",
-                error: { code: revErrCred.code ?? "compensation_failed", message: revErrCred.message },
+                error: {
+                  code: revErrCred.code ?? "compensation_failed",
+                  message: redactSecrets(revErrCred.message ?? String(revErr)),
+                },
                 runId,
                 step: "mint_compensation",
                 keyHashPrefix: keyHashPrefix(orphan.hash),
@@ -527,7 +540,10 @@ export async function runCredentialLifecycle(deps: CredentialDeps, runId: string
         timestamp: new Date().toISOString(),
         duration: compDurationMs,
         status: "error",
-        error: { code: compErrCred.code ?? "compensation_failed", message: compErrCred.message },
+        error: {
+          code: compErrCred.code ?? "compensation_failed",
+          message: redactSecrets(compErrCred.message ?? String(compErr)),
+        },
         runId,
         step: "delivery_compensation",
         keyHashPrefix: keyHashPrefix(compCtx.keyHash),
