@@ -305,6 +305,31 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
     expect(() => stampManifestLimit(manifest, 1.5)).toThrow(/positive integer/);
   });
 
+  // Number.isInteger is true for both of these, so they distinguish the
+  // isSafeInteger bound from a plain integer check — the bound dispatch's
+  // ceiling guard and the manifest schema now share.
+  test("stamped value must be a SAFE integer (reject 1e300)", () => {
+    const manifest = loadManifest(manifestPath, 120_000, manifestDir);
+    expect(Number.isInteger(1e300)).toBe(true);
+    expect(() => stampManifestLimit(manifest, 1e300)).toThrow(ManifestError);
+    expect(() => stampManifestLimit(manifest, 1e300)).toThrow(/positive integer/);
+  });
+
+  test("stamped value must be a SAFE integer (reject MAX_SAFE_INTEGER + 2)", () => {
+    const manifest = loadManifest(manifestPath, 120_000, manifestDir);
+    const tooBig = Number.MAX_SAFE_INTEGER + 2;
+    expect(Number.isInteger(tooBig)).toBe(true);
+    expect(Number.isSafeInteger(tooBig)).toBe(false);
+    expect(() => stampManifestLimit(manifest, tooBig)).toThrow(ManifestError);
+    expect(() => stampManifestLimit(manifest, tooBig)).toThrow(/positive integer/);
+  });
+
+  test("MAX_SAFE_INTEGER itself is accepted — the bound is inclusive", () => {
+    const manifest = loadManifest(manifestPath, 120_000, manifestDir);
+    const stamped = stampManifestLimit(manifest, Number.MAX_SAFE_INTEGER);
+    expect(stamped.manifest.limitMicroUsd).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
   test("serializeManifest outputs 2-space-indented JSON (readable as YAML too)", () => {
     const manifest = loadManifest(manifestPath, 120_000, manifestDir);
     const stamped = stampManifestLimit(manifest, 500_000);

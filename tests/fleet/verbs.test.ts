@@ -599,6 +599,83 @@ describe("status.ts (statusAll join logic)", () => {
   });
 });
 
+describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", () => {
+  let dir: string;
+  let store: RunRecordStore;
+  let driver: FakeDriver;
+
+  const budget = {
+    repoSlug: "acme/widgets",
+    issueId: "42",
+    capMicroUsd: 50_000_000,
+    spentMicroUsd: 0,
+    reservedMicroUsd: 0,
+    admittedCeilingMicroUsd: 20_000_000,
+  };
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "qds-provision-"));
+    driver = new FakeDriver(join(dir, "boxes"));
+    store = new RunRecordStore({ dir: join(dir, "runs") });
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a failed driver.create leaves the record OPEN with its budget attribution", async () => {
+    // Closing it here looked tidy and was wrong twice over: the ledger retires
+    // a reservation only when a PRICED cost_event lands, which only teardown
+    // writes from `extensions.budget` — and the reaper routes an aged OPEN
+    // record through teardownSandbox while skipping a closed one outright
+    // (`closed ⇒ nothing to claim`). A closed record therefore pinned the
+    // issue's cap forever, and stranded any box the failing create did stand up.
+    const runId = "create-fails-run";
+    const failing = Object.assign(Object.create(driver) as FakeDriver, {
+      create: async () => {
+        throw new Error("substrate refused the create");
+      },
+    });
+
+    await expect(provisionAdmittedRun(failing, store, { runId, budget })).rejects.toThrow(
+      "substrate refused the create",
+    );
+
+    const rec = store.get(runId);
+    expect(rec.closedAt).toBeUndefined();
+    expect(rec.extensions?.budget?.admittedCeilingMicroUsd).toBe(budget.admittedCeilingMicroUsd);
+    expect(rec.extensions?.budget?.repoSlug).toBe(budget.repoSlug);
+    // No box name to claim, which is exactly what makes the record the handle.
+    expect(rec.vmName).toBeUndefined();
+  });
+
+  test("a failed budget-extension write leaves the record OPEN and no box behind", async () => {
+    // Same reasoning one step earlier. Nothing billable exists yet, so the only
+    // thing at stake is whether the record survives to be swept.
+    const runId = "budget-write-fails";
+    const failing = Object.assign(Object.create(driver) as FakeDriver, {
+      create: async (): Promise<ProviderVm> => {
+        throw new Error("driver.create must never be reached");
+      },
+    });
+    const realSet = store.set.bind(store);
+    let calls = 0;
+    store.set = ((id: string, patch: Parameters<typeof realSet>[1]) => {
+      calls += 1;
+      if (calls === 1) throw new Error("record write failed");
+      return realSet(id, patch);
+    }) as typeof store.set;
+
+    await expect(provisionAdmittedRun(failing, store, { runId, budget })).rejects.toThrow("record write failed");
+
+    store.set = realSet;
+    const rec = store.get(runId);
+    expect(rec.closedAt).toBeUndefined();
+    expect(rec.vmName).toBeUndefined();
+    expect(await driver.list(runId)).toEqual([]);
+  });
+});
+
 describe("status.ts (list timeout)", () => {
   let dir: string;
   let store: RunRecordStore;
@@ -618,6 +695,12 @@ describe("status.ts (list timeout)", () => {
     // Every other test injects a timeout, so `?? 30_000` → `?? 0` (or `?? 1`)
     // stays green while production reports boxUnknown for every run. Observe
     // the delay the race actually arms, and that the losing timer is cleared.
+    // Provision BEFORE the patch: the store's lock retry and the driver both
+    // arm timers of their own, and any one of them landing in `armed` would
+    // make the single-30s-timer assertion below pass or fail for reasons that
+    // have nothing to do with the status timeout under test.
+    await provisionAdmittedRun(driver, store, { runId: "default-timeout-run" });
+
     const realSetTimeout = globalThis.setTimeout;
     const realClearTimeout = globalThis.clearTimeout;
     const armed: { ms: unknown; handle: unknown }[] = [];
@@ -634,8 +717,6 @@ describe("status.ts (list timeout)", () => {
 
     let rows: StatusRow[];
     try {
-      const runId = "default-timeout-run";
-      await provisionAdmittedRun(driver, store, { runId });
       rows = await statusAll({ driver, store });
     } finally {
       globalThis.setTimeout = realSetTimeout;

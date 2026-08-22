@@ -41,13 +41,24 @@ function recordingLedger(ceilingMicroUsd: number, decide: () => AdmissionDecisio
   return ledger;
 }
 
-/** A ledger that admits at `ceiling` µ$ (the DF2.8 admitted decision shape). */
-export function goodLedger(ceilingMicroUsd: number = defaultKeyCapMicroUsd): RecordingLedger {
-  return recordingLedger(ceilingMicroUsd, () => ({
+/**
+ * A ledger that admits at `ceiling` µ$ (the DF2.8 admitted decision shape).
+ *
+ * `capMicroUsd` defaults to the ceiling for the callers that do not care, but
+ * takes its own value so a test can make the two DIFFER. They are different
+ * quantities in production — the ceiling is `min(keyCap, remaining)` — and
+ * while they are equal every assertion that reads one passes if the dispatcher
+ * propagates the other, which is exactly the AC9b confusion worth catching.
+ */
+export function goodLedger(
+  ceilingMicroUsd: number = defaultKeyCapMicroUsd,
+  capMicroUsd: number = ceilingMicroUsd,
+): RecordingLedger {
+  return recordingLedger(capMicroUsd, () => ({
     admitted: true as const,
     status: "within-budget" as const,
     admittedCeilingMicroUsd: ceilingMicroUsd,
-    capMicroUsd: ceilingMicroUsd,
+    capMicroUsd,
     spentMicroUsd: 0,
     reservedMicroUsd: 0,
     remainingMicroUsd: ceilingMicroUsd,

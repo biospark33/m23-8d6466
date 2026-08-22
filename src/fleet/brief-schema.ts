@@ -24,8 +24,10 @@ export const BriefSchema = z.strictObject({
     .refine(hasNoDotSegment, "repoSlug segments may not be '.' or '..'"),
   // DF3.1 D2: int >0, MAX_ISSUE_ID capped (assertWithinBudget receives String(issueId))
   issueId: z.number().int().positive().max(2 ** 31 - 1),
-  // DF3.1 D2: optional string URL
-  issueUrl: z.string().url().optional(),
+  // DF3.1 D2: optional string URL. Same scheme allow-list as repoUrl below:
+  // this value lands in the box's run-context.json and in log lines an operator
+  // clicks, and `.url()` alone admits `file://` and `javascript:`.
+  issueUrl: z.string().url().startsWith("https://", "issueUrl must be an https:// URL").optional(),
   // DF3.1 D2: 40-hex regex (setup-gate, fill)
   commitSha: z.string().regex(/^[0-9a-f]{40}$/),
   // C3: requestId is LOOSE — optional string, NOT .uuid() at schema layer

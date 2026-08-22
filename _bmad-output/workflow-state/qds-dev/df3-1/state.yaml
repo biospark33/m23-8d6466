@@ -1,6 +1,6 @@
 story: df3-1
 title: Fleet Dispatcher Core Verbs (dispatch, status, harvest, teardown)
-phase: research
+phase: 5-complete  # PR #123 open; stale research-phase marker corrected 2026-08-22
 branch: feature/df3-1-fleet-dispatcher-core-verbs
 base: main
 target: main

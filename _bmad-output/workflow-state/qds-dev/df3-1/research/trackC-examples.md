@@ -5,7 +5,7 @@ KEY: newId(slug, now?) @ src/providers/run-record.ts:179 mints `<slug>-YYYYMMDD-
 - DF2.6 sweep deps pattern + fixtures/fleet-state.ts; DF2.8 CostLedger injection; DF2.5 TeardownDeps {driver,store,requestId,gitCwd,runsDir,keyApi,costLedger}
 - Exit codes: 0 ok / 1 error / 2 usage. Dry-run default + --yes (reap). existsSync pre-check fail-closed (qds-cost)
 - O_EXCL 0600 record create (O_WRONLY|O_CREAT|O_EXCL); atomic temp+rename update; record-before-VM ordering INV
-- RUN_ID_RE /^[a-z0-9][a-z0-9-]*$/ validated at parseArgs before path join; 63-char ceiling
+- RUN_ID_RE `/^[a-z0-9][a-z0-9-]*$/` validated at parseArgs before path join; 63-char ceiling
 - assertNoSecret heuristic — record stores keyHash only
 - DF2.5 teardownSandbox(deps, runId, {noHarvest}) @ src/providers/teardown.ts; harvestRun(deps, runId) -> {outcome,count} @ src/providers/harvest.ts; getRecord({store}, runId) typed errors @ index.ts
 - DF2.8 assertWithinBudget(ledger, {repoSlug, issueId, runId, requestId}, keyCapMicroUsd?) throws OverBudgetError

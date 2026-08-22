@@ -101,6 +101,25 @@ export class FleetError extends Error {
 }
 
 /**
+ * The run-id grammar as an exit-2 refusal — the ONE fleet-side enforcement
+ * point (`scripts/fleet.ts`'s verbs and `statusRun` both route through here).
+ *
+ * The grammar itself is the record store's and is never restated: composing
+ * `RUN_ID_RE`/`RUN_ID_MAX` locally gave every entry point its own copy, so
+ * tightening the store's rule (it moved to the RFC 1123 label grammar in this
+ * story) silently left the CLI accepting a different set of ids than
+ * `scripts/sandbox-teardown.ts`, which delegates. `assertValidRunId`'s message
+ * already names the pattern and the cap, so the operator loses nothing.
+ */
+export function assertFleetRunId(runId: unknown): asserts runId is string {
+  try {
+    assertValidRunId(runId);
+  } catch (e) {
+    throw new FleetError(2, "invalid-run-id", (e as Error).message, "run ids come from `fleet dispatch`; list them with `fleet status`");
+  }
+}
+
+/**
  * Structural slice of CostLedger the budget gate reads — enough for DI fakes,
  * and derived from `CostLedger` itself so a fake cannot drift from the real
  * signatures the gate is compiled against (`as never` erased exactly that).
@@ -245,8 +264,20 @@ export async function fakeGate(
         // `.yaml` filename (JSON is a YAML subset, and the repo's own loader
         // JSON.parses it), so an anchored `^limitMicroUsd:` matched neither
         // encoding once the writer settled. This matches both.
-        const r = await driver.exec(vm, ["sh", "-c", `grep -qE '"?limitMicroUsd"?[[:space:]]*:' pipeline.yaml`]);
-        return { ok: r.exitCode === 0, detail: r.exitCode === 0 ? "stamped" : "limitMicroUsd absent" };
+        //
+        // The `test -s` arm runs FIRST because this probe runs before item D
+        // (which is the one that owns "manifest non-empty"): without it, a
+        // manifest that never landed reported "limitMicroUsd absent" and sent
+        // the operator to look at a stamp on a file that does not exist.
+        const r = await driver.exec(vm, [
+          "sh",
+          "-c",
+          `test -s pipeline.yaml || exit 2; grep -qE '"?limitMicroUsd"?[[:space:]]*:' pipeline.yaml`,
+        ]);
+        return {
+          ok: r.exitCode === 0,
+          detail: r.exitCode === 0 ? "stamped" : r.exitCode === 2 ? "pipeline.yaml missing or empty" : "limitMicroUsd absent",
+        };
       },
     },
     {
@@ -627,7 +658,13 @@ export async function dispatch(
   // resolution is repeated here — a second copy would be the weaker one
   // (manifest.ts avoids Bun's `realpathSync`, which hangs on a planted FIFO).
   const repoRoot = deps.repoRoot ?? process.cwd();
-  const manifestPath = resolve(valid.manifestPath);
+  // Resolved against the CONTAINMENT ROOT, not the process cwd. A relative
+  // `manifestPath` is relative to the repo the brief names — resolving it
+  // against wherever the dispatcher happened to be started made an identical
+  // brief refuse or resolve depending on the caller's cwd, and made `repoRoot`
+  // a seam that moved the guard without moving what the guard measures. An
+  // absolute path is unaffected: `resolve` ignores the base for those.
+  const manifestPath = resolve(repoRoot, valid.manifestPath);
   let loaded: ReturnType<typeof loadManifest>;
   try {
     loaded = loadManifest(manifestPath, timeoutMs, repoRoot);
@@ -679,13 +716,30 @@ export async function dispatch(
   // A re-dispatch under an id that already has a record books the issue's cap a
   // SECOND time and then dies on a bare EEXIST from store.create — after the
   // reservation is committed. Refuse before the admission, not after it.
-  if (opts.runId !== undefined && recordExists(deps.store, runId)) {
-    throw refuse(
-      2,
-      "run-id-in-use",
-      `run ${runId} already has a record`,
-      `omit runId for a fresh one, or tear the existing run down: bun scripts/fleet.ts teardown ${runId}`,
-    );
+  if (opts.runId !== undefined) {
+    let exists: boolean;
+    try {
+      exists = recordExists(deps.store, runId);
+    } catch (e) {
+      // A store that cannot be read is not "free to reuse". It also must not
+      // escape as a bare throw: every dispatch exit owes the operator a
+      // dispatch-log entry and a structured line, and the CLI turns an untyped
+      // throw into a bare exit 1 with neither. Nothing is provisioned here.
+      throw refuse(
+        1,
+        errorCode(e, "record-read-failed"),
+        `cannot read the run record for ${runId}: ${(e as Error).message}`,
+        errorRemediation(e, "fix or move the run-record directory, then retry — nothing was provisioned"),
+      );
+    }
+    if (exists) {
+      throw refuse(
+        2,
+        "run-id-in-use",
+        `run ${runId} already has a record`,
+        `omit runId for a fresh one, or tear the existing run down: bun scripts/fleet.ts teardown ${runId}`,
+      );
+    }
   }
 
   // ── 5. admission (AC7/AC8 — both BEFORE store.create/driver.create) ────────
@@ -743,7 +797,12 @@ export async function dispatch(
   // non-positive cap and the manifest stamp rejects 0, so the run would exist,
   // bill box-hours and be unable to spend a micro-dollar. That is a refusal
   // (exit 5), not a provisioning step.
-  if (!Number.isInteger(effectiveCeilingMicros) || effectiveCeilingMicros <= 0) {
+  //
+  // `isSafeInteger`, not `isInteger`: `Number.isInteger(1e300)` is true, so an
+  // unsafe ceiling passed this guard, provisioned a box and a key, and only
+  // then died in `stampManifestLimit` (which does bound it) — INV-2 in reverse.
+  // The same bound is on the manifest schema, so the three agree.
+  if (!Number.isSafeInteger(effectiveCeilingMicros) || effectiveCeilingMicros <= 0) {
     throw refuse(
       5,
       "no-ceiling",

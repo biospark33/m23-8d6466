@@ -11,7 +11,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { closeSync, fsyncSync, linkSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, linkSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { assertValidRunId } from "../../src/providers/run-record.ts";
@@ -160,13 +160,17 @@ export function acquireRunLock(runsDir: string, runId: string, holder = "invocat
   try {
     writeFileSync(fd, body);
     fsyncSync(fd);
-    closeSync(fd);
+    // Cleared BEFORE the call, not after: `close(2)` consumes the descriptor
+    // whether it returns or fails (POSIX), so a throwing close still leaves the
+    // number free for reuse. Clearing after meant a failed close fell into the
+    // catch with `fdOpen` still true and closed the number a second time.
     fdOpen = false;
+    closeSync(fd);
     linkSync(tmp, lock);
   } catch (e) {
     // Guarded, not try/catch'd (the store's atomicReplace idiom): once
-    // closeSync has thrown the fd is gone, and fd numbers are recycled — a
-    // second close could land on a stranger's handle.
+    // closeSync has been reached the fd is gone, and fd numbers are recycled —
+    // a second close could land on a stranger's handle.
     if (fdOpen) closeSync(fd);
     rmSync(tmp, { force: true });
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
@@ -187,23 +191,56 @@ export function acquireRunLock(runsDir: string, runId: string, holder = "invocat
  * which is the exact double-teardown the lock exists to prevent. Releasing a
  * path this process never held is a no-op; finding a foreign body there throws,
  * because the caller's own exit code should say the run was left locked.
+ *
+ * TAKE, THEN COMPARE — not compare, then take. Reading the body and unlinking
+ * the path as two calls is a TOCTOU: a lock cleared by hand and re-claimed
+ * between them gets its LIVE holder's file unlinked by this process, which
+ * re-enables the double harvest/teardown the lock exists to prevent. `rename`
+ * moves whatever the path points at in one step, so the bytes compared below
+ * are provably the bytes removed and the comparison cannot be raced.
+ *
+ * ponytail: no POSIX call unlinks a path conditionally on its inode, and
+ * neither Node's nor Bun's `fs` exposes `flock(2)`/`fcntl` locks, so
+ * take-verify-restore is the strongest release this runtime affords. If a
+ * kernel-held lock ever becomes reachable (a native binding, or `fs` growing
+ * one), that is the upgrade path — it would make the restore branch dead code.
  */
 export function releaseRunLock(lock: string): void {
   const body = held.get(lock);
   if (body === undefined) return;
   // Dropped first: a failed release must not be retried by the signal handler.
   held.delete(lock);
-  let onDisk: string;
+  const claimed = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   try {
-    onDisk = readFileSync(lock, "utf8");
+    renameSync(lock, claimed);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
     throw e;
   }
-  if (onDisk !== body) {
-    throw new Error(
-      `refusing to release ${lock}: it now holds ${JSON.stringify(onDisk.trim())}, not this invocation's claim`,
-    );
+  let onDisk: string;
+  try {
+    onDisk = readFileSync(claimed, "utf8");
+  } catch (e) {
+    rmSync(claimed, { force: true });
+    throw e;
   }
-  rmSync(lock, { force: true });
+  if (onDisk === body) {
+    rmSync(claimed, { force: true });
+    return;
+  }
+  // Foreign body: put it back rather than keep a live holder's claim hostage.
+  // `link`, never `rename` — rename would overwrite a lock a third invocation
+  // claimed at the path while this one was held aside.
+  let restored = true;
+  try {
+    linkSync(claimed, lock);
+  } catch {
+    restored = false;
+  }
+  rmSync(claimed, { force: true });
+  throw new Error(
+    `refusing to release ${lock}: it now holds ${JSON.stringify(onDisk.trim())}, not this invocation's claim${
+      restored ? "" : " — and the path was re-claimed before it could be put back"
+    }`,
+  );
 }

@@ -400,7 +400,10 @@ export function serializeManifest(manifest: LoadedManifest): string {
 
 ## Locked Decisions (D1-D10)
 
-### D1. Admission Architecture
+### D1. Admission Architecture — SUPERSEDED by C1 (see Corrections, below)
+
+> **Overturned.** Dispatch does NOT call `createRun`; it composes the primitives directly. Read C1 before anything in this section.
+
 **Verdict**: Option (b) - dispatch calls admission gates, then calls `createRun` accepting idempotent internal checks.
 
 **Evidence**:
@@ -473,7 +476,10 @@ export function serializeManifest(manifest: LoadedManifest): string {
 
 **Delivery**: `deliverRunKey` works on fake driver via `exec` stdin; key material never logged (INV-4)
 
-### D6. Status Join
+### D6. Status Join — SUPERSEDED in part by C6 (see Corrections, below)
+
+> **Corrected.** The registry entry shape and per-verb exit codes are C6's, not this section's.
+
 **Verdict**: `store.list() ∪ driver.list()` with 30s timeout; JSON lines output
 
 **Evidence**:
@@ -500,7 +506,10 @@ export function serializeManifest(manifest: LoadedManifest): string {
 
 **EXIT_STATUSES**: Import from `cli-anything/src/types.ts` (used in LogEntry.exitStatus)
 
-### D8. Verb Registry + CLI
+### D8. Verb Registry + CLI — SUPERSEDED by C6 and C8 (see Corrections, below)
+
+> **Corrected.** C6 fixes the registry entry shape and the exit-code table; C8 fixes the fill-path discrimination. This section's sketch is stale where they disagree.
+
 **Verdict**: Registry-driven `--help`; verb table in `verbs.ts`
 
 **Evidence**:

@@ -7,10 +7,10 @@
  * FleetError unified: one class in dispatch.ts, re-exported here (C2).
  */
 import { SBX_OWNERSHIP_TAG, type ProviderVm } from "../providers/driver.ts";
-import { RUN_ID_MAX, RUN_ID_RE, type RunRecord, type RunRecordStore } from "../providers/run-record.ts";
+import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 
 export { FleetError } from "./dispatch.ts";
-import { FleetError } from "./dispatch.ts";
+import { assertFleetRunId, FleetError } from "./dispatch.ts";
 
 export interface StatusRow {
   runId: string;
@@ -235,21 +235,10 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
  * Found records use same join logic as statusAll.
  */
 export async function statusRun(deps: StatusDeps, runId: string): Promise<StatusRow> {
-  // Same grammar AND length cap as assertValidRunId — a 400-char id is a path
-  // hazard too, and it has to refuse as exit 2, not as an untyped store error.
-  if (
-    typeof runId !== "string" ||
-    runId.length === 0 ||
-    runId.length > RUN_ID_MAX ||
-    !RUN_ID_RE.test(runId)
-  ) {
-    throw new FleetError(
-      2,
-      "invalid-run-id",
-      `Invalid run ID: ${JSON.stringify(runId)} (must match ${RUN_ID_RE.source} and be <= ${RUN_ID_MAX} chars)`,
-      "Provide a valid run ID matching the hostname grammar",
-    );
-  }
+  // The store's grammar and length cap, not a local copy — a 400-char id is a
+  // path hazard too, and it has to refuse as exit 2, not as an untyped store
+  // error. See assertFleetRunId for why this is not re-composed here.
+  assertFleetRunId(runId);
   const timeoutMs = resolveTimeoutMs(deps);
 
   let rec: RunRecord;

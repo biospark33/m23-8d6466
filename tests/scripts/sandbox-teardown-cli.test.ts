@@ -133,8 +133,63 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     expect(() => releaseRunLock(lock)).toThrow(/refusing to release/);
     expect(existsSync(lock)).toBeTrue();
     expect(readFileSync(lock, "utf8")).toContain("deadbeef");
+    // The release TAKES the path (rename) before it compares, so the foreign
+    // claim is put back rather than merely left alone. Restoring it as an empty
+    // or missing file would hand the run to the next contender while its real
+    // holder still believes it owns it — assert the claim is still enforced.
+    expect(() => acquireRunLock(runs, "foreign-lock")).toThrow(RunLockedError);
     rmSync(lock);
   });
+
+  test("a lock cleared by hand and re-acquired by a LIVE process survives our release", async () => {
+    // The double-teardown scenario end to end, with a real second holder rather
+    // than a hand-written body: the remediation text tells an operator to `rm`
+    // a lock they believe is stale, a second invocation legitimately takes the
+    // freed path, and the first invocation then reaches its own release. If
+    // that release unlinks by path, the live holder loses its lock mid-teardown
+    // and a third invocation walks straight into the same run.
+    //
+    // The release is atomic against this by construction — `renameSync` takes
+    // the path and the bytes in one step, so the body compared IS the body
+    // removed. A test cannot open the compare/unlink window itself: there is no
+    // seam between them to interleave on, which is the point of the fix.
+    const runId = "handoff-run";
+    const lock = join(runs, `${runId}.lock`);
+    const ours = acquireRunLock(runs, runId);
+
+    // The operator's `rm`, then a live second holder claims the freed path.
+    rmSync(lock);
+    const child = join(dir, "handoff-child.ts");
+    writeFileSync(
+      child,
+      [
+        `import { acquireRunLock } from ${JSON.stringify(RUN_LOCK_MODULE)};`,
+        "const [runsDir, runId] = process.argv.slice(2);",
+        "acquireRunLock(runsDir, runId);",
+        'process.stdout.write("locked\\n");',
+        "process.stdin.resume(); // hold it for the duration of the test",
+      ].join("\n"),
+    );
+    const holder = Bun.spawn(["bun", child, runs, runId], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    try {
+      const reader = holder.stdout.getReader();
+      const { value } = await reader.read();
+      expect(new TextDecoder().decode(value)).toContain("locked");
+      reader.releaseLock();
+      const theirs = readFileSync(lock, "utf8");
+      expect(theirs).toContain(String(holder.pid));
+
+      // Our release must refuse, leave THEIR bytes at the path, and leave the
+      // run locked against everyone else.
+      expect(() => releaseRunLock(ours)).toThrow(/refusing to release/);
+      expect(readFileSync(lock, "utf8")).toBe(theirs);
+      expect(() => acquireRunLock(runs, runId)).toThrow(RunLockedError);
+    } finally {
+      holder.kill();
+      await holder.exited;
+      rmSync(lock, { force: true });
+    }
+  }, 15_000);
 
   test("SIGINT releases the lock and the process still dies of the signal (exit 130)", async () => {
     // One Ctrl-C during teardown used to leave the lock on disk forever: every

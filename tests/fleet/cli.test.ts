@@ -22,6 +22,7 @@ import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import type { FleetDeps, } from "../../scripts/fleet.ts";
 import type { LedgerLike } from "../../src/fleet/dispatch.ts";
+import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 import { goodLedger } from "./helpers.ts";
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "df3-1-cli-"));
@@ -716,6 +717,91 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(text()).toContain("destroy-unconfirmed");
     expect(text()).not.toContain("teardown.harvest_waived");
     expect(text()).not.toContain("torn down:");
-  
+
+  });
+
+  // ─── CC-9: one structured line per verb, dispatch included ─────────────────
+
+  describe("the CC-9 observability line", () => {
+    let restoreLog: () => void;
+    let entries: LogEntry[];
+
+    beforeEach(() => {
+      entries = [];
+      restoreLog = setLogSink((e) => {
+        entries.push(e);
+      });
+    });
+
+    afterEach(() => {
+      restoreLog();
+    });
+
+    /** The invocation's own line — `phase: "complete"`, one per run() call. */
+    const verbLines = (): LogEntry[] =>
+      entries.filter((e) => (e as unknown as { phase?: string }).phase === "complete");
+
+    test("dispatch logs its verb line on success, carrying the ack's runId", async () => {
+      const code = await run(["dispatch", "--driver", "fake"], out, deps(validBriefJson(dir)));
+      expect(code).toBe(0);
+      const { runId, requestId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as {
+        runId: string;
+        requestId: string;
+      };
+
+      const lines = verbLines();
+      expect(lines).toHaveLength(1);
+      const line = lines[0] as unknown as Record<string, unknown>;
+      expect(line.verb).toBe("dispatch");
+      expect(line.operation).toBe("fleet.dispatch");
+      expect(line.exitCode).toBe(0);
+      expect(line.exitStatus).toBe("success");
+      // The brief owns the correlation id (INV-4-bis), so the CLI's line joins
+      // the ack and the run's own lines rather than minting a third id.
+      expect(line.requestId).toBe(requestId);
+      expect(line.runId).toBe(runId);
+    });
+
+    test("dispatch logs its verb line on refusal too, with no runId to report", async () => {
+      // Refused at the schema, before an id exists: the line is still owed, and
+      // the runId is `null` rather than a fabricated one.
+      const code = await run(["dispatch", "--driver", "fake"], out, deps('{"repoSlug":"nope"}'));
+      expect(code).toBe(2);
+
+      const lines = verbLines();
+      expect(lines).toHaveLength(1);
+      const line = lines[0] as unknown as Record<string, unknown>;
+      expect(line.verb).toBe("dispatch");
+      expect(line.exitCode).toBe(2);
+      expect(line.exitStatus).toBe("logic");
+      expect(line.runId).toBeNull();
+      expect(typeof line.requestId).toBe("string");
+    });
+
+    test("exit 1 is transient (retryable substrate), 2-5 are logic", async () => {
+      const base = new FakeDriver(boxesDir);
+      const shared: Partial<FleetDeps> = { ...deps(validBriefJson(dir)), driver: base };
+      expect(await run(["dispatch", "--driver", "fake"], out, shared)).toBe(0);
+      const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+      entries.length = 0;
+
+      // exit 1: the substrate refused, not the operator — worth a retry.
+      expect(
+        await run(["teardown", "--driver", "fake", "--dir", runsDir, runId], out, {
+          ...shared,
+          driver: driverWith(base, {
+            destroy: async () => {
+              throw new Error("substrate refused the destroy");
+            },
+          }),
+        }),
+      ).toBe(1);
+      expect((verbLines()[0] as unknown as Record<string, unknown>).exitStatus).toBe("transient");
+
+      // exit 4: the id is wrong, and it will be wrong on every retry.
+      entries.length = 0;
+      expect(await run(["teardown", "--driver", "fake", "--dir", runsDir, "no-such-run"], out, shared)).toBe(4);
+      expect((verbLines()[0] as unknown as Record<string, unknown>).exitStatus).toBe("logic");
+    });
   });
 });

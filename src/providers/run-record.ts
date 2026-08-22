@@ -670,8 +670,11 @@ export class RunRecordStore {
     try {
       writeFileSync(fd, body);
       fsyncSync(fd);
-      closeSync(fd);
+      // Cleared BEFORE the call: `close(2)` consumes the descriptor whether it
+      // returns or fails, so a throwing close still frees the number for reuse.
+      // Clearing after left `fdOpen` true on that path and closed it twice.
       fdOpen = false;
+      closeSync(fd);
       linkSync(tmp, lock);
     } catch (e) {
       // Guarded, not try/catch'd: fd numbers are recycled (see atomicReplace).
@@ -749,15 +752,43 @@ export class RunRecordStore {
    * hand — which is the same lost update entered through the other door. A
    * foreign body is left alone rather than thrown on: this runs in a `finally`,
    * where a throw would replace the caller's real error with this one.
+   *
+   * TAKE, THEN COMPARE. Reading the body and unlinking the path as two calls is
+   * a TOCTOU — `stealIfOwnerGone` can retire this lock and a new writer claim
+   * the path between them, and the `rm` would then delete that live writer's
+   * lock, letting two `setLocked` read-modify-writes overlap and drop a field.
+   * `rename` takes the path in one step, so the bytes compared below are
+   * provably the bytes removed. Same reasoning, and the same runtime limits, as
+   * `releaseRunLock` in scripts/lib/run-lock.ts.
    */
   private releaseLock(lock: string, body: string): void {
-    let onDisk: string;
+    const claimed = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     try {
-      onDisk = readFileSync(lock, "utf8");
+      renameSync(lock, claimed);
     } catch {
       return; // already gone
     }
-    if (onDisk === body) rmSync(lock, { force: true });
+    let onDisk: string;
+    try {
+      onDisk = readFileSync(claimed, "utf8");
+    } catch {
+      rmSync(claimed, { force: true });
+      return;
+    }
+    if (onDisk === body) {
+      rmSync(claimed, { force: true });
+      return;
+    }
+    // Foreign body: put it back. `link`, never `rename` — rename would
+    // overwrite a lock claimed at the path while this one was held aside. A
+    // failure here stays silent for the reason above: this runs in a `finally`.
+    try {
+      linkSync(claimed, lock);
+    } catch {
+      // EEXIST ⇒ the path already carries a newer claim, which supersedes this
+      // body anyway; any other errno is swept by cleanStaleTemps.
+    }
+    rmSync(claimed, { force: true });
   }
 
   /** Write-temp-then-rename. There is no in-place partial-write path (INV-3). */
@@ -768,8 +799,10 @@ export class RunRecordStore {
     let fdOpen = true;
     try {
       writeFileSync(fd, serialize(rec));
-      closeSync(fd);
+      // Cleared BEFORE the call — see claimLock: a throwing close still
+      // consumes the descriptor, so the catch must not close it again.
       fdOpen = false;
+      closeSync(fd);
       this.beforeRename?.(tmp);
       renameSync(tmp, p);
     } catch (e) {

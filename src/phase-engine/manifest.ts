@@ -124,8 +124,11 @@ export const PipelineManifestSchema = z
     version: z.literal(MANIFEST_VERSION),
     pipelineId: z.string().regex(PIPELINE_ID_PATTERN, "pipelineId must match ^[a-z][a-z0-9-]{1,63}$"),
     runBudgetMs: z.number().int().positive(),
-    // DF3.1 AC9a: stamped by dispatch for box fill
-    limitMicroUsd: z.number().int().positive().optional(),
+    // DF3.1 AC9a: stamped by dispatch for box fill. `.max` because
+    // `z.number().int()` accepts 1e300 (Number.isInteger is true for it) — a
+    // hand-authored manifest could otherwise declare a cap the engine can
+    // neither compare against an admitted ceiling nor round-trip as an integer.
+    limitMicroUsd: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
     phases: z.array(PhaseSpecSchema).min(MIN_PHASES, `phaseCount < ${MIN_PHASES}`),
   })
   .strict();
@@ -695,9 +698,9 @@ export function loadManifestWithSeams(
  * @param manifest — the loaded manifest to stamp
  * @param limitMicroUsd — positive safe integer ceiling (rejects 0, negative,
  *   float, and anything past `Number.MAX_SAFE_INTEGER`)
- * @throws {ManifestError} if the ceiling is not a positive safe integer, or if
- *   the stamp did not land
- * @throws {z.ZodError} if the stamped manifest fails schema validation
+ * @throws {ManifestError} if the ceiling is not a positive safe integer, if the
+ *   stamped manifest fails schema validation, or if the stamp did not land —
+ *   every failure of this function, so callers catch one type
  */
 export function stampManifestLimit(manifest: LoadedManifest, limitMicroUsd: number): LoadedManifest {
   // `z.number().int()` accepts 1e300 — `Number.isInteger` is true for it — and
@@ -710,7 +713,17 @@ export function stampManifestLimit(manifest: LoadedManifest, limitMicroUsd: numb
     );
   }
   const stamped = { ...manifest.manifest, limitMicroUsd };
-  const validated = PipelineManifestSchema.parse(stamped) as PipelineManifest;
+  // safeParse, so a schema failure leaves through this module's OWN error type.
+  // `parse` threw a raw ZodError, which every caller of this module (dispatch's
+  // `manifest-rejected` arm included) handles as an unrecognised throw.
+  const result = PipelineManifestSchema.safeParse(stamped);
+  if (!result.success) {
+    const detail = result.error.issues
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("; ");
+    throw new ManifestError(`stamped manifest failed validation: ${detail}`);
+  }
+  const validated = result.data as PipelineManifest;
   // `limitMicroUsd` is optional on the schema — existing uncapped manifests
   // must still load — so validation alone does not prove the stamp landed.
   // Assert it here rather than let a dispatch deliver an uncapped manifest.

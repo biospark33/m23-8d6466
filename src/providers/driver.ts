@@ -132,6 +132,21 @@ export interface ProvisionedRun {
   httpsUrl?: string;
 }
 
+/** `provisionAdmittedRun`'s inputs — named, like `CreateRunOptions` above. */
+export interface ProvisionAdmittedRunOptions {
+  runId: string;
+  /** When set, the box is exposed on this port and made public after create. */
+  port?: number;
+  /**
+   * The admission this provisioning is spending. Written to the record's
+   * `extensions.budget` before `driver.create`, because that attribution is
+   * what lets teardown price the run's box hours — and a priced row is the
+   * ONLY thing that retires the reservation this admission holds against the
+   * issue's cap (see the failure paths below).
+   */
+  budget?: AdmittedBudget;
+}
+
 /**
  * The post-admission provisioning sequence — INV-1's single owner: **record →
  * VM**. (No key is minted here: DF2.3's credential delivery is a separate
@@ -157,7 +172,7 @@ export interface ProvisionedRun {
 export async function provisionAdmittedRun(
   driver: ProviderDriver,
   store: RunRecordStore,
-  opts: { runId: string; port?: number; budget?: AdmittedBudget },
+  opts: ProvisionAdmittedRunOptions,
 ): Promise<ProvisionedRun> {
   // Before the record exists: the id becomes both the filename and the box
   // name, so a malformed one must never reach either. `store.create` would
@@ -175,49 +190,57 @@ export async function provisionAdmittedRun(
   store.create(opts.runId);
   if (opts.budget !== undefined) {
     // The store writes one field set per call, so the cap cannot land in the
-    // same write as the record itself. If it fails, close the record rather
-    // than hand the caller an open run with no cap on it — nothing billable
-    // exists yet, so closing costs nothing and keeps the ledger's
-    // orphan-admission expiry from counting a reservation forever.
-    // ponytail: residual window is a crash between the two writes, which
-    // leaves an open capless record; the DF2.6 reaper still reclaims its box
-    // (there is none yet) and the gate's expiry releases the reservation.
-    try {
-      store.set(opts.runId, {
-        extensions: {
-          budget: {
-            repoSlug: opts.budget.repoSlug,
-            issueId: opts.budget.issueId,
-            capMicroUsd: opts.budget.capMicroUsd,
-            spentMicroUsd: opts.budget.spentMicroUsd,
-            reservedMicroUsd: opts.budget.reservedMicroUsd,
-            admittedCeilingMicroUsd: opts.budget.admittedCeilingMicroUsd,
-          },
+    // same write as the record itself. A failure here is re-thrown with the
+    // record left OPEN — see the note on the create path below for why closing
+    // it was wrong. Nothing billable exists yet, and the DF2.6 reaper's
+    // record-only sweep tears an open, staleness-aged record down; a CLOSED one
+    // it skips outright (`closed ⇒ nothing to claim`), so closing here removed
+    // the record's last route to a teardown.
+    //
+    // ponytail: this record reaches teardown with no `extensions.budget`, so
+    // `ingestBoxHoursIfAttributed` writes no row and the issue's reservation
+    // stays counted against its cap until an operator clears it. Retiring it
+    // from here needs the ledger handle, which this layer deliberately does not
+    // hold; the upgrade is an orphan-guard rule for closed, never-priced runs.
+    store.set(opts.runId, {
+      extensions: {
+        budget: {
+          repoSlug: opts.budget.repoSlug,
+          issueId: opts.budget.issueId,
+          capMicroUsd: opts.budget.capMicroUsd,
+          spentMicroUsd: opts.budget.spentMicroUsd,
+          reservedMicroUsd: opts.budget.reservedMicroUsd,
+          admittedCeilingMicroUsd: opts.budget.admittedCeilingMicroUsd,
         },
-      });
-    } catch (e) {
-      closeQuietly(store, opts.runId);
-      throw e;
-    }
+      },
+    });
   }
   // D1: every factory-provisioned VM carries the canonical ownership tag —
   // not caller-displaceable. A custom tag would make a factory box classify
   // `foreign` in the DF2.6 reaper (tag !== SBX_OWNERSHIP_TAG ⇒ reported,
   // never destroyed), i.e. an unreapable leak by construction. Callers with
   // extra metadata to attach belong in the run record, not the VM tag.
-  let vm: ProviderVm;
-  try {
-    vm = await driver.create(opts.runId, SBX_OWNERSHIP_TAG);
-  } catch (e) {
-    // An open record with no vmName is claimed by `reapRuns` under its runId
-    // forever: if the create actually stood a box up before failing, that
-    // claim is what stops the reaper reclaiming it. Closing hands the reaper
-    // the handle instead of leaking the record and the box together. We do
-    // NOT destroy here — reclamation is DF2.6's, and a destroy on this path
-    // would race the very create that just failed.
-    closeQuietly(store, opts.runId);
-    throw e;
-  }
+  // A failed create is re-thrown with the record left OPEN, and deliberately so.
+  // This used to close it, on the reasoning that an open record "claims" a box
+  // the reaper would otherwise reclaim. Two things make that the wrong trade:
+  //
+  //  - A closed record does not retire the admission. The ledger's orphan guard
+  //    expires a reservation only when the record does not RESOLVE (readRunRecord
+  //    → undefined, i.e. store.create itself failed); a closed record resolves
+  //    fine, so the reservation kept counting against the issue's cap forever.
+  //    Retirement needs a priced `cost_event`, which only teardown writes, from
+  //    the `extensions.budget` written above — and the reaper routes an aged
+  //    OPEN record through `teardownSandbox`, while a closed record with no box
+  //    it skips entirely (`closed ⇒ nothing to claim`).
+  //  - If create DID stand a box up before throwing, an open record keeps that
+  //    box reachable by run id: the aged-record sweep tears it down through the
+  //    same path, which harvests, destroys and prices it. Closing sent it down
+  //    the `leaked-vm` arm instead — a bare destroy, no box-hours row, spend
+  //    unaccounted.
+  //
+  // Nothing is destroyed here either way: reclamation is DF2.6's, and a destroy
+  // on this path would race the very create that just failed.
+  const vm: ProviderVm = await driver.create(opts.runId, SBX_OWNERSHIP_TAG);
   // vmName BEFORE expose/setPublic. Both can throw against a box that is
   // already live and already billing; until the name is on the record the
   // only handle to it is `teardownRun`'s runId fallback, which holds only
@@ -233,19 +256,6 @@ export async function provisionAdmittedRun(
     record = store.set(opts.runId, { httpsUrl, ports: [opts.port] });
   }
   return { record, vm, ...(httpsUrl === undefined ? {} : { httpsUrl }) };
-}
-
-/**
- * Close a record on a provisioning failure path. The close is best-effort by
- * construction: its failure must never mask the error that triggered it, and
- * the record it could not close is exactly the one `reapRuns` reports.
- */
-function closeQuietly(store: RunRecordStore, runId: string): void {
-  try {
-    store.close(runId);
-  } catch {
-    // Deliberately swallowed — see above.
-  }
 }
 
 /**

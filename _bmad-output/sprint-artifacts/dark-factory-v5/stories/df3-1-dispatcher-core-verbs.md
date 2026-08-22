@@ -353,11 +353,11 @@ claim "exactly FTM + 1 declared type completion" was already false when written:
 - `src/fleet/verbs.ts` (net-new): `listVerbs()` exact story shape + `renderHelp` — sole source for `--help`.
 - `src/fleet/index.ts` (net-new): barrel per C5 (no harvest/teardown modules).
 - `scripts/fleet.ts` (net-new): verb CLI per repo idiom (tokenizeArgs/parseValueFlags, run(argv,out,deps) DI, writeSync entry, stderr log sink); harvest/teardown delegate to DF2.5 with the per-run lock replicated verbatim; exit table 0/1/2/3/4/5.
-- `src/phase-engine/manifest.ts` (additive): `limitMicroUsd` optional top-level + `stampManifestLimit` + `serializeManifest` (YAML round-trip).
+- `src/phase-engine/manifest.ts` (additive): `limitMicroUsd` optional top-level + `stampManifestLimit` + `serializeManifest` (emits **JSON** under the `.yaml` filename — `loadManifest` is the authoritative reader and it `JSON.parse`s; JSON is a YAML subset, so a YAML reader accepts it too, while `YAML.stringify` output no JSON parser will take. See the function's own rationale).
 - `src/phase-engine/types.ts` (additive, **FTM deviation — 1 line**): `limitMicroUsd?: number` on `PipelineManifest` — the interface lives here, not manifest.ts; the schema edit is incomplete without the matching declaration. Justification: AC9a's "declares limitMicroUsd in the manifest's zod schema" spans schema+type; strictly additive, no consumer changes.
 - `tests/fleet/{brief-schema,dispatch,verbs,cli}.test.ts` (net-new): 84 tests.
 
-**Decision 1 (D1 overturned, verified against source — CORRECTED 2026-08-21, review round 2):** `createRun` (driver.ts:134) calls `checkHeadroom(driver, 1, ...)` unconditionally with no skip option — routing `{admitted:true}` through it would make an N-arm fan-out do N headroom checks of 1, violating AC8/DF3.2-AC1. Dispatch therefore mirrors createRun's post-admission body itself
+**Decision 1 (D1 overturned, verified against source — CORRECTED 2026-08-21, review round 2):** `createRun` (driver.ts:134) calls `checkHeadroom(driver, 1, ...)` unconditionally with no skip option — routing `{admitted:true}` through it would make an N-arm fan-out do N headroom checks of 1, violating AC8/DF3.2-AC1. Dispatch therefore mirrors createRun's post-admission body itself (store.create O_EXCL → budget-ext write → driver.create(TAG) → expose/setPublic → store.set) with the two admission call sites dispatch-owned exactly as the story's boundary note specifies. No ceiling or limit is re-derived: the mint cap, manifest stamp and run-context value are all `decision.admittedCeilingMicroUsd` — DF2.8's `min(keyCap, remaining)`, computed once.
 
 > **Correction:** the original text justified this by "and driver.ts is not in FTM", which the shipped
 > code contradicts — `provisionAdmittedRun` was **added to** `src/providers/driver.ts` and is imported
@@ -365,7 +365,7 @@ claim "exactly FTM + 1 declared type completion" was already false when written:
 > was wrong and is withdrawn. `src/providers/driver.ts` is now a declared FTM deviation (see the table
 > above). Review round 2 additionally hardened `provisionAdmittedRun`: it persists `vmName` before
 > expose/setPublic so a failure cannot orphan a billable box with no teardown handle, validates
-> `runId` and `port` at entry, and its doc comment no longer claims a key-minting step it never had. (store.create O_EXCL → budget-ext write → driver.create(TAG) → expose/setPublic → store.set) with the two admission call sites dispatch-owned exactly as the story's boundary note specifies. No ceiling or limit is re-derived: the mint cap, manifest stamp and run-context value are all `decision.admittedCeilingMicroUsd` — DF2.8's `min(keyCap, remaining)`, computed once.
+> `runId` and `port` at entry, and its doc comment no longer claims a key-minting step it never had.
 
 **Decision 2:** requestId is loose at the schema layer (a non-UUID string is not a schema failure, AC1); dispatch drops a non-v4 requestId to `undefined` before `resolveRunCorrelation`, which then mints — DF1.8's INVALID_REQUEST_ID path stays intact for direct callers. `initiateSession` is NOT called by dispatch (engine-side owns the trace store; D9); requestId reaches DF1.4 rows via the in-box run context and every log line (INV-4-bis).
 
@@ -400,7 +400,7 @@ the holder name rather than letting a refactor change a shipped CLI's output.
 **Tests:** `tests/fleet/` 84/84 green · full `tests/providers/ + tests/phase-engine/` 1106 green (one first-run usage.test.ts env flake did not reproduce on rerun; passes solo) · `bunx tsc --noEmit` clean · `bunx biome check` clean (12 files) · advisory gates OK (`check-defensive-programming.sh` 0 findings on 2 changed .ts; `check-pr-conflicts.sh` 0 open-PR overlaps).
 
 **E2E demo (DoD, fake driver, captured verbatim):**
-```
+```console
 $ bun scripts/fleet.ts dispatch --driver fake < brief.json   → exit 0
 {"runId":"qds-20260821-12a82a","requestId":"d578c4b0-042a-4952-81b5-124c5f8e5e21","state":"ready","vmName":"qds-20260821-12a82a"}
 $ bun scripts/fleet.ts status --driver fake                  → exit 0

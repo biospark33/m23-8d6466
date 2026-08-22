@@ -663,17 +663,27 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
   test("AC9b: budget extension carries effectiveCeilingMicros = admittedCeilingMicroUsd", async () => {
     const brief = validBrief();
+    // Cap ≠ ceiling on purpose: with the two equal, a dispatcher that
+    // propagated `capMicroUsd` wherever the ceiling belongs passes every
+    // assertion below. The ceiling is min(keyCap, remaining), i.e. the smaller.
     const admittedCeiling = 20_000_000;
+    const cap = 75_000_000;
 
-    const result = await dispatch(brief, deps({ ledgerFactory: () => goodLedger(admittedCeiling) }));
+    const result = await dispatch(brief, deps({ ledgerFactory: () => goodLedger(admittedCeiling, cap) }));
 
     const record = store.get(result.runId);
     expect(record.extensions?.budget?.admittedCeilingMicroUsd).toBe(admittedCeiling);
+    expect(record.extensions?.budget?.capMicroUsd).toBe(cap);
 
     // The run context handed to the box carries the same computed-once value
     const ctxFile = await driver.exec(record.vmName as string, ["cat", "run-context.json"]);
     const ctx = JSON.parse(ctxFile.stdout) as { effectiveCeilingMicros?: number };
     expect(ctx.effectiveCeilingMicros).toBe(admittedCeiling);
+
+    // The manifest is the cap's only in-box source (AC9a) — the CEILING, not
+    // the issue cap, is what the box may spend.
+    const filled = await driver.exec(record.vmName as string, ["cat", "pipeline.yaml"]);
+    expect((JSON.parse(filled.stdout) as { limitMicroUsd?: number }).limitMicroUsd).toBe(admittedCeiling);
   });
 
   // ─── Gate failure (AC3, INV-5) ─────────────────────────────────────────────────────
@@ -844,8 +854,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
             // Time passes ACROSS the gate — the longest await in a dispatch —
             // so the advance lands after the real work, exactly where the
             // ceiling has to be re-sampled. Advancing before the gate promise
-            // reaches `within` instead makes the step abandon an in-flight
-            // gate (see SUSPECTED SOURCE DEFECTS), which is a different bug.
+            // reaches `within` instead makes that step abandon an in-flight
+            // gate and throw dispatch-timeout from `within` rather than from
+            // the post-gate re-sample, which is a different code path.
             const result = await fakeGate(drv, vm, o);
             advance(DEFAULT_TIMEOUT_MS + 1_000);
             return result;

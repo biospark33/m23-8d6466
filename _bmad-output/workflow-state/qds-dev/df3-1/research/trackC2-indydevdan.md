@@ -16,7 +16,11 @@ PONYTAIL VERDICT: direct verbatim TS lifting from these repos NOT applicable (Py
 - Brief schema: NOT present in either repo — build fresh with zod (confirms DD-8 NET-NEW).
 - Dispatch ordering record->box->key present as `just sbx lifecycle create` shell recipe; teardown ordering spend->harvest->revoke->kill->close as shell recipe. Lift ORDER (our TS layer already encodes it: createRun/teardownSandbox).
 - MIT both repos (c) 2026 IndyDevDan. Attribution template for any substantially lifted code:
+
+  ```text
   /* Based on code from indydevdan/inkwell-agent-sandboxes-and-software-factory
      Copyright (c) 2026 IndyDevDan — MIT License. Adapted for QDS-Factory DF3.1. */
+  ```
+
   Use on status.ts (runs_table three-state doctrine) — the one place doctrine is copied.
 - C2's suggested exit-code table CONFLICTS with story's table — story wins (0 ok/1 fail/2 schema/3 gate/4 not-found/5 refused).

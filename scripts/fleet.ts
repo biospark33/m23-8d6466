@@ -17,10 +17,27 @@
  *
  * Harvest/teardown are thin, guard-preserving front doors onto DF2.5
  * (AC5): verify-before-fetch, the refs/sandbox/ refspec and the fixed
- * teardown order all stay inside harvestRun/teardownSandbox; the per-run
- * invocation lock is shared with DF2.5's CLI (scripts/lib/run-lock.ts) so
- * both entry points enforce identical teardown safety semantics — acquire
- * AND release, including release on SIGINT/SIGTERM.
+ * teardown order all stay inside harvestRun/teardownSandbox.
+ *
+ * The safety-critical parts of that front door are SHARED with DF2.5's own CLI
+ * (`scripts/sandbox-teardown.ts`) rather than kept in step by hand, because
+ * "identical semantics maintained by two parallel implementations" is a promise
+ * nothing enforces:
+ *
+ *  - the per-run invocation lock — acquire AND release, including release on
+ *    SIGINT/SIGTERM — is `scripts/lib/run-lock.ts`;
+ *  - the run-id grammar is `assertFleetRunId`, which delegates to the record
+ *    store's `assertValidRunId` (both CLIs now refuse the same set of ids; the
+ *    grammar was tightened once already in this story, and a local copy of the
+ *    pattern is exactly how the two drift);
+ *  - the teardown sequence itself is `teardownSandbox`, one implementation.
+ *
+ * What is NOT shared is each CLI's own surface: argv grammar, exit-code table
+ * (this one is 0-5; sandbox-teardown's is 0/1), error rendering (JSON envelopes
+ * here, `!! code:` lines there) and the operator vocabulary in the lock refusal.
+ * Those differ deliberately, and folding the two `run()` bodies into one would
+ * have to re-introduce them as branches on a caller flag — the duplication that
+ * remains is the part that is supposed to differ.
  */
 import { readFileSync, statSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -41,11 +58,11 @@ import {
   type TeardownDeps,
 } from "../src/providers/index.ts";
 import { RunRecordStore } from "../src/providers/index.ts";
-import { RUN_ID_MAX, RUN_ID_RE } from "../src/providers/run-record.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { acquireRunLock, releaseRunLock } from "./lib/run-lock.ts";
 import { log, setLogSink, newRequestId } from "../src/swarmclaw/log.ts";
 import {
+  assertFleetRunId,
   dispatch,
   FleetError,
   resolveBriefRequestId,
@@ -62,8 +79,20 @@ const HELP = renderHelp(listVerbs());
 /** Brief ingress cap (story Guards): 64 KiB from stdin or --brief <path>. */
 const MAX_BRIEF_BYTES = 64 * 1024;
 
-const VALUE_FLAGS = ["--driver", "--brief", "--dir", "--port"];
-const BOOL_FLAGS = ["--no-harvest"];
+/**
+ * The tokenizer's flag grammar, derived from the SAME registry `parseArgv`
+ * validates against (AC6). Hard-coding the two lists here made the registry
+ * authoritative for what a verb ACCEPTS but not for how argv is split, so a
+ * flag added to a verb entry was tokenized as a positional until someone
+ * remembered to edit this file too.
+ */
+const REGISTRY_FLAGS = listVerbs().flatMap((v) => v.flags);
+const flagNames = (boolean: boolean): string[] => [
+  ...new Set(REGISTRY_FLAGS.filter((f) => (f.valueType === "boolean") === boolean).map((f) => f.name)),
+];
+const VALUE_FLAGS = flagNames(false);
+// `--help` rides along harmlessly: `run` answers it from argv before parsing.
+const BOOL_FLAGS = flagNames(true);
 
 /**
  * Injectable seams (repo DI idiom; tests override without module mocks).
@@ -282,6 +311,12 @@ function readBriefFile(briefPath: string): string {
 /**
  * Every verb logs one structured line (CC-9 observability contract):
  * {requestId, runId, verb, phase, timestamp, durationMs, exitStatus}.
+ *
+ * The exit table splits cleanly on retryability, so `exitStatus` follows it:
+ * exit 1 is a run/provider failure — the substrate, not the invocation — and is
+ * worth retrying, which is what `transient` means to whatever reads these lines
+ * (dispatch's own refusal path already classifies its exit 1 the same way).
+ * 2-5 are the operator's brief, flags, id or budget: retrying is futile.
  */
 function logVerb(requestId: string, verb: string, runId: string | undefined, startedAt: number, code: number): number {
   const durationMs = Date.now() - startedAt;
@@ -297,9 +332,20 @@ function logVerb(requestId: string, verb: string, runId: string | undefined, sta
     verb,
     phase: "complete",
     exitCode: code,
-    exitStatus: (code === 0 ? "success" : "logic") as ExitStatus,
+    exitStatus: (code === 0 ? "success" : code === 1 ? "transient" : "logic") as ExitStatus,
   });
   return code;
+}
+
+/**
+ * The runId a failed verb was acting on, when the throw itself knows it.
+ * `dispatch` mints its id mid-flight, so a refusal after that point carries it
+ * in the FleetError payload — without this the CLI's own log line would report
+ * `null` for a run that demonstrably exists and may still hold a live box.
+ */
+function runIdFromError(e: unknown): string | undefined {
+  const runId = e instanceof FleetError ? e.payload?.runId : undefined;
+  return typeof runId === "string" ? runId : undefined;
 }
 
 export async function run(
@@ -335,6 +381,11 @@ export async function run(
 
   // ── dispatch ────────────────────────────────────────────────────────────────
   if (verb === "dispatch") {
+    // Hoisted for the CC-9 log line below: a refusal before the brief parses
+    // (no --driver, unreadable brief, bad JSON) has no correlation id yet, and
+    // the line must still be emitted. Set to the RESOLVED id the moment there
+    // is one, so the CLI's line joins the run's own (INV-4-bis).
+    let dispatchRequestId: string | undefined;
     try {
       if (positionals.length > 1) {
         throw usageError("dispatch takes no positional arguments", "pass the brief on stdin or via --brief <path>");
@@ -396,6 +447,7 @@ export async function run(
       // letting dispatch() resolve a different one from the brief breaks the
       // join key between the CLI's records/driver logs and the run's own.
       const requestId = resolveBriefRequestId(briefJson) ?? newRequestId();
+      dispatchRequestId = requestId;
       const driver = deps?.driver ?? resolveDriver(driverName as string, { requestId });
       const store = deps?.store ?? new RunRecordStore({ ...storeOpts, requestId });
       const ledgerFactory =
@@ -432,12 +484,25 @@ export async function run(
 
       const ack = await dispatch(briefJson, dispatchDeps);
       out(`${JSON.stringify(ack)}\n`);
-      return 0;
+      return logVerb(requestId, verb, ack.runId, startedAt, 0);
     } catch (e) {
       // resolveDriver, RunRecordStore and openRouterKeyApi throw typed errors
       // with their own remediation; constructing them inside the try is what
       // keeps that fidelity in the envelope instead of a bare exit 1.
-      return report(err, e);
+      //
+      // CC-9: dispatch is a verb like any other, so it logs its one line on
+      // BOTH exits. `dispatch()` emits its own resolved/ready/refused lines —
+      // those are the run's; this is the invocation's, and the other three
+      // verbs would be the only ones with it otherwise. A refusal that fired
+      // before the brief resolved has no correlation id to report, so one is
+      // minted for the invocation rather than a run's id forged for it.
+      return logVerb(
+        dispatchRequestId ?? newRequestId(),
+        verb,
+        runIdFromError(e),
+        startedAt,
+        report(err, e),
+      );
     }
   }
 
@@ -454,7 +519,7 @@ export async function run(
       }
       // The same grammar harvest/teardown enforce: an over-long or malformed
       // id must not reach the store as an untyped path error.
-      if (runIdArg !== undefined) assertRunId(runIdArg);
+      if (runIdArg !== undefined) assertFleetRunId(runIdArg);
       assertDriverChosen("status", driverName, deps?.driver);
       const driver = deps?.driver ?? resolveDriver(driverName as string, { requestId });
       const store = deps?.store ?? new RunRecordStore({ ...storeOpts, requestId });
@@ -482,7 +547,7 @@ export async function run(
     if (runIdArg === undefined) {
       throw usageError(`${verb} requires <run-id>`, `fleet ${verb} <run-id>`);
     }
-    assertRunId(runIdArg);
+    assertFleetRunId(runIdArg);
     // Before the lock and before the record read: a refusal here has mutated
     // nothing, so there is no lock to release and no box left half-torn-down.
     assertDriverChosen(verb, driverName, deps?.driver);
@@ -581,18 +646,6 @@ export async function run(
     }
   }
   return logVerb(requestId, verb, runIdArg, startedAt, code);
-}
-
-/** The store's grammar, not a third copy of it (63-char cap included). */
-function assertRunId(runId: string): void {
-  if (runId.length > RUN_ID_MAX || !RUN_ID_RE.test(runId)) {
-    throw new FleetError(
-      2,
-      "invalid-run-id",
-      `invalid run-id: ${JSON.stringify(runId)}`,
-      `run ids match ${RUN_ID_RE.source} and are at most ${RUN_ID_MAX} chars`,
-    );
-  }
 }
 
 /** writeSync can write short; a truncated ack is worse than a slow one. */
