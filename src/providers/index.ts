@@ -144,6 +144,14 @@ export * from "./teardown.ts";
 // async bounds (withTimeout, LIST_TIMEOUT_MS) ride along from their own leaf.
 export * from "./quota.ts";
 export * from "./reaper.ts";
+// `RUN_ID_SHAPE` arrives through BOTH star exports — it is declared in
+// driver.ts (beside `isFactoryOwnedVm`, which needs it) and re-exported by
+// reaper.ts so that module's existing importers are unchanged. Two star
+// exports offering one name is TS2308 regardless of them resolving to the same
+// declaration, so the barrel names the owner explicitly. Do NOT resolve this by
+// giving reaper.ts its own copy of the regex: the two reapers share one
+// ownership test precisely so they cannot drift apart on what is ours.
+export { RUN_ID_SHAPE } from "./driver.ts";
 export * from "./timeout.ts";
 // DF2.8: the micro-dollar cost ledger (append-only, host-side) and the
 // pre-spawn budget gate join the exported surface — the dispatcher (DF3.1)

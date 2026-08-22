@@ -23,7 +23,7 @@ import {
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import type { ExecResult, ProviderDriver, ProviderVm, ProviderVmListing } from "./driver.ts";
-import { assertExistingRunId, assertValidRunId, LEGACY_RUN_ID_RE, RUN_ID_MAX } from "./run-record.ts";
+import { assertExistingRunId, assertValidRunId } from "./run-record.ts";
 
 export const DEFAULT_FAKE_BOXES_DIR = ".sandbox/fake-boxes";
 
@@ -57,9 +57,16 @@ export class FakeDriver implements ProviderDriver {
    */
   private readonly execChildren = new Map<string, Set<() => void>>();
 
+  /**
+   * Resolves the boxes root and creates NOTHING. AC1 (story
+   * df3-1-dispatcher-core-verbs.md:58-62): "Validation completes before the
+   * first side effect" — and `resolveDriver("fake")` runs during dispatch
+   * setup, before the brief is validated, so a mkdir here left a directory
+   * behind on every brief that was about to exit 2. The root is created lazily
+   * by `create()`, the only method that puts anything in it.
+   */
   constructor(root?: string) {
     this.root = root ?? process.env.QDS_FAKE_BOXES_DIR ?? DEFAULT_FAKE_BOXES_DIR;
-    mkdirSync(this.root, { recursive: true, mode: 0o700 });
   }
 
   private boxDir(vm: string): string {
@@ -101,6 +108,9 @@ export class FakeDriver implements ProviderDriver {
     // Strict at creation: no NEW box gets a name a real provider would refuse.
     assertValidRunId(name);
     const dir = this.boxDir(name);
+    // The root is created HERE, not in the constructor (AC1) — the first side
+    // effect belongs to the first box. Recursive, so it is idempotent.
+    mkdirSync(this.root, { recursive: true, mode: 0o700 });
     // Non-recursive mkdir: a second create of the same box fails with EEXIST
     // rather than silently adopting someone else's box.
     mkdirSync(dir, { mode: 0o700 });
@@ -128,7 +138,19 @@ export class FakeDriver implements ProviderDriver {
     // could group them — and `list()` runs on every status poll, so that is the
     // line an operator sees most often.
     const requestId = newRequestId();
-    for (const entry of readdirSync(this.root).sort()) {
+    // No root yet ⇒ no box was ever created ⇒ an empty population, not an
+    // error. Only ENOENT: every other errno is a root that MIGHT hold boxes
+    // and could not be read, which must propagate rather than report the
+    // fleet empty to a reaper. (The root is created by `create`, not by the
+    // constructor — AC1.)
+    let entries: string[];
+    try {
+      entries = readdirSync(this.root).sort();
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      return { vms: [], skipped: [] };
+    }
+    for (const entry of entries) {
       if (name !== undefined && entry !== name) continue;
       // `readdir` and `stat` are two calls, and the entry can stop being
       // stat-able between them: a concurrent `destroy` unlinks it (ENOENT), a
@@ -166,20 +188,37 @@ export class FakeDriver implements ProviderDriver {
         continue;
       }
       if (!isDir) continue;
-      // A name outside the hostname grammar cannot be a box this driver made,
-      // and reporting it would abort reap: `destroy` re-validates and throws, so
-      // one stray directory would stop the fleet-wide reaper. The canonical
-      // constants, never a local copy — the filter has to admit exactly what
-      // `boxDir` admits, and a copy that drifts looser lists a name destroy then
-      // refuses, which is the reaper outage this guard prevents.
+      // A name outside the box grammar is a name this driver's own `destroy`
+      // refuses (`boxDir` → `assertExistingRunId`), so reporting it as a box
+      // hands `reapRuns` a handle that throws MID-sweep, after it has already
+      // destroyed whatever came earlier in the listing.
+      //
+      // It rides out as an ANOMALY instead, and `reapRuns` refuses to reap at
+      // all while `skipped` is non-empty: the fleet reaper stalls rather than
+      // half-running, which is the accepted trade — an unreachable live box is
+      // worse than a stalled reaper, and an invisible box is the driver-side
+      // twin of a dropped run record. (This comment used to claim the entry was
+      // dropped precisely so reap would not abort; that stopped being true when
+      // the anomaly channel landed and the code below started reporting it.)
+      //
+      // The canonical PREDICATE, never a hand-rebuilt copy of it: sharing the
+      // constants still left two expressions free to drift, and this filter has
+      // to admit exactly what `boxDir` admits or it lists a name `destroy` then
+      // refuses. `ExeDevDriver.listWithAnomalies` applies the same rule against
+      // ITS destroy's grammar, so one input gets one classification across both
+      // drivers instead of two opposite ones.
       //
       // The LEGACY grammar, matching `assertExistingRunId`: a `trailing-` box
       // was creatable by any earlier build, and `boxDir` still accepts it, so
       // filtering it here would hide a real, destroyable box from every fleet
-      // listing. What is still filtered is REPORTED on the log line rather than
-      // vanishing — an invisible box is the driver-side twin of a dropped run
-      // record, and an operator needs the name to clean it up by hand.
-      if (!LEGACY_RUN_ID_RE.test(entry) || entry.length > RUN_ID_MAX) {
+      // listing.
+      let nameOk = true;
+      try {
+        assertExistingRunId(entry);
+      } catch {
+        nameOk = false;
+      }
+      if (!nameOk) {
         skipped.push(entry);
         log({
           requestId,

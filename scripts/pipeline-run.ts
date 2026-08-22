@@ -232,6 +232,29 @@ function runCommand(
  * one, or a disagreement is a refusal — an authored manifest cannot raise
  * DF1.6's harness cap by naming a number.
  *
+ * The witness is consulted whenever one is PRESENT, not only when the manifest
+ * declares a cap. Reconciling only on a declared limit meant an unstamped
+ * manifest discarded a perfectly good admitted ceiling and ran at the harness
+ * default — higher than what was reserved. So: witness + declared limit → they
+ * must agree; witness alone → the witness IS the ceiling; declared limit alone
+ * → refusal; neither → the field stays ABSENT, never defaulted to a number.
+ *
+ * KNOWN ASSUMPTION, and the whole reconciliation rests on it: THE WITNESS IS
+ * NOT AUTHOR-WRITABLE. It is looked for beside the manifest
+ * (`admittedCeilingBeside` joins `run-context.json` onto the manifest's own
+ * dirname), so "they disagree exactly when one of them was authored" holds only
+ * while the manifest's directory is dispatch's to fill. A repo that ships BOTH
+ * `pipeline.yaml` with `limitMicroUsd: 10_000_000` and a sibling
+ * `run-context.json` carrying the matching `effectiveCeilingMicros` reconciles
+ * cleanly and raises the harness cap by naming a number twice. Nothing here
+ * binds the witness to dispatch: it is not signed, it is not compared against
+ * the run record's `limitMicroUsd`, and there is no proof dispatch's fill wrote
+ * it last. The upgrade path is to stop deriving the witness from the manifest's
+ * neighbourhood — read the admitted ceiling from a dispatch-owned location (the
+ * run record, or a path under the marker root that the author's tree cannot
+ * reach) — or to sign it. Until then the guarantee is "an authored manifest
+ * alone cannot raise the cap", not "an authored REPO cannot".
+ *
  * Exported for its test: the field appears in no journal row and no terminal
  * marker, so a spawned end-to-end run has nothing to assert on.
  */
@@ -242,7 +265,20 @@ export function runContextFrom(
   witness: { manifestPath: string; runRoot: string },
 ): RunContext {
   const ctx: RunContext = { runId, pipelineId: manifest.pipelineId, requestId };
-  if (manifest.limitMicroUsd === undefined) return ctx;
+  if (manifest.limitMicroUsd === undefined) {
+    // A WITNESS PRESENT IS DISPATCH'S STATEMENT ABOUT THIS RUN, and it reaches
+    // the context whether or not the manifest says anything. This used to
+    // `return ctx` before it ever looked, which is fail-open in the direction
+    // the bug shipped: a valid witness admitting 250_000 µ$ sat unread beside an
+    // unstamped manifest and the run spawned at DF1.6's $0.50 default — TWICE
+    // the ceiling the ledger reserved against the issue cap. Nothing in the
+    // eight reconciliation cases could see it, because every one of them
+    // declares a limit first. If `stampManifestLimit` ever regresses, or
+    // `stripAuthoredLimit` is applied on the runner side, this is the door the
+    // admitted ceiling walks out of.
+    if (!witnessPresent(witness.manifestPath)) return ctx;
+    return { ...ctx, effectiveCeilingMicros: admittedCeilingBeside(witness.manifestPath, witness.runRoot) };
+  }
   const admitted = admittedCeilingBeside(witness.manifestPath, witness.runRoot);
   if (admitted !== manifest.limitMicroUsd) {
     throw new Error(
@@ -261,8 +297,36 @@ export function runContextFrom(
  * ceiling. A second, weaker reader for the file that vouches for the cap would
  * be the one worth attacking.
  */
+const witnessPathBeside = (manifestPath: string): string =>
+  path.join(path.dirname(manifestPath), "run-context.json");
+
+/**
+ * Is there anything at all where the witness belongs?
+ *
+ * The ONLY question this answers is whether the no-declared-cap path should
+ * consult the witness — a directory with no witness leaves the field absent
+ * (never defaulted to a number), and anything else goes to the hardened reader
+ * below, which refuses whatever it cannot verify. It is deliberately not a
+ * readability check: an unreadable, non-JSON or unspendable witness must
+ * REFUSE, not read as "no cap".
+ *
+ * `lstatSync`, not `existsSync`. `existsSync` follows symlinks and reports a
+ * DANGLING one as absent, which would let an author hide a witness that LOWERS
+ * their ceiling by planting a broken link beside the manifest. `lstat` sees the
+ * link itself. Any errno that is not ENOENT (an EACCES on the directory, say)
+ * is a witness we cannot rule out, so it counts as present and fails closed.
+ */
+function witnessPresent(manifestPath: string): boolean {
+  try {
+    fs.lstatSync(witnessPathBeside(manifestPath));
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
 function admittedCeilingBeside(manifestPath: string, runRoot: string): number {
-  const witnessPath = path.join(path.dirname(manifestPath), "run-context.json");
+  const witnessPath = witnessPathBeside(manifestPath);
   let parsed: unknown;
   try {
     parsed = JSON.parse(readArtifactBeneathRoot(witnessPath, runRoot).bytes.toString("utf8"));
@@ -681,11 +745,35 @@ async function main(argv: readonly string[]): Promise<number> {
   // The witness is looked for beside the manifest we actually READ — the
   // verified realpath, not the argv string, so a symlinked `--manifest` cannot
   // point the cap check at a different directory's run-context.json.
-  // (`loadManifest` always returns it; the `??` is for the optional type.)
-  const ctx: RunContext = runContextFrom(runId, requestId, manifest, {
-    manifestPath: resolvedPath ?? manifestPath,
-    runRoot,
-  });
+  //
+  // A THROW, not `?? manifestPath`. `resolvedPath` is optional on
+  // `LoadedManifest` (`stampManifestLimit` and `stripAuthoredLimit` both drop
+  // it deliberately — their bytes match no file), so the fallback was live type
+  // surface, and it substituted the argv string for the verified path: the
+  // exact redirect the paragraph above forbids. `loadManifest` always sets it,
+  // so this cannot fire today; it fires the day someone routes `main` through
+  // one of the deriving helpers, which is when the silent re-enable would
+  // otherwise happen.
+  //
+  // Inside a guarded region because the Tracer is already open by here: a
+  // refusal from `runContextFrom` (missing witness, mismatched ceiling) used to
+  // escape to the top-level catch, which writes stderr and exits — leaking an
+  // open SQLite/WAL handle and, worse, an unfinished session row that makes a
+  // later `initiateSession` throw RequestIdRepoMismatch for that requestId.
+  let ctx: RunContext;
+  try {
+    if (resolvedPath === undefined) {
+      throw new Error("manifest was derived in memory and has no verified path to anchor the cap witness to");
+    }
+    ctx = runContextFrom(runId, requestId, manifest, { manifestPath: resolvedPath, runRoot });
+  } catch (err) {
+    try {
+      tracer.close();
+    } catch {
+      /* the cap-reconciliation refusal outranks a close failure */
+    }
+    throw err;
+  }
   const journal = new TracingJournal(innerJournal, tracer, ctx);
 
   const run = new Run({

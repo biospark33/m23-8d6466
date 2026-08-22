@@ -218,7 +218,17 @@ describe("DF2.3 credential lifecycle", () => {
     expect(line).toBeDefined();
     expect(line?.error?.code).toBe("revoke-failed");
     expect(line?.error?.message).toContain(MIXED_CASE_HASH);
-    expect(line?.remediation).toContain(MIXED_CASE_HASH);
+    // The remediation is a LIVE key-management deep link, and the deep-link arm
+    // now runs on the genuinely untouched text — it used to run AFTER `keep` was
+    // parked, where the mark's guillemets fell outside `KEY_MANAGEMENT_URL_RE`'s
+    // tail charset and blinded it to every `…/keys/<id>` whose id merely
+    // CONTAINED `keep`. So this line's copy-paste curl goes. The hash — the
+    // thing the operator actually needs — still reaches them three other ways:
+    // the message above, the `keyHashPrefix` field, and the THROWN
+    // CredentialLifecycleError's remediation, which redaction never touches
+    // (pinned by the "curl remediation printed" tests above).
+    expect(line?.remediation).toContain("[REDACTED]");
+    expect(line?.remediation).toContain("$OPENROUTER_PROVISIONING_KEY");
   });
 
   test("AC3 control: the same line still redacts real key material standing beside the kept hash", async () => {

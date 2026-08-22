@@ -9,9 +9,20 @@
  * Exit codes (this CLI's own table, F3): 0 success · 1 run/provider failure ·
  * 2 usage/schema · 3 setup-gate failure (assertion code in the payload) ·
  * 4 run-not-found · 5 refused before provisioning (payload code says which
- * guard fired) · 6 the verb succeeded but a cleanup after it did not (the
- * ledger would not close, or the run lock would not release — the run is left
- * wedged and retrying the verb cannot help).
+ * guard fired) · 6 the verb's own work LANDED but the invocation could not
+ * finish it or report it, and no retry can change that.
+ *
+ * 6 is deliberately wider than "a cleanup failed": the ledger would not close,
+ * the run lock would not release, the ack for a LIVE box could not be written,
+ * a torn-down run's key cannot be attributed to revoke it, stdout refused part
+ * of the output. The shape they share is "already done, still needs an
+ * operator" — where 1 means "nothing landed, retrying is the right move".
+ *
+ * 130/143 sit OUTSIDE this table on purpose, and the table is otherwise closed:
+ * they are 128+SIGINT/SIGTERM, the shell's own convention for "this process was
+ * signalled", and folding them in would report a Ctrl-C as a verb's verdict.
+ * Only `dispatch` produces them — it is the one verb that installs handlers —
+ * and it emits its CC-9 line before it goes.
  *
  * stdout carries the command's OUTPUT only (ack JSON, status rows, the
  * teardown lines); every diagnostic — error envelopes and the structured log
@@ -41,7 +52,7 @@
  *    file and its spend in another.
  *
  * What is NOT shared is each CLI's own surface: argv grammar, exit-code table
- * (this one is 0-5; sandbox-teardown's is 0/1), error rendering (JSON envelopes
+ * (this one is 0-6; sandbox-teardown's is 0/1), error rendering (JSON envelopes
  * here, `!! code:` lines there) and the operator vocabulary in the lock refusal.
  * Those differ deliberately, and folding the two `run()` bodies into one would
  * have to re-introduce them as branches on a caller flag — the duplication that
@@ -61,10 +72,27 @@ import {
   type RunRecord,
   type TeardownDeps,
 } from "../src/providers/index.ts";
-import { RunRecordStore } from "../src/providers/index.ts";
+import { resolveRunsDir, RunRecordStore } from "../src/providers/index.ts";
+/**
+ * The same redactor every `src/` sink runs its text through (INV-4/INV-6).
+ *
+ * Imported HERE because this module is where provider text stops being logged
+ * and starts being PRINTED: `asUsage` copies a driver's or a credential
+ * client's `.message` verbatim into the exit-2 envelope, and `report` attaches
+ * the raw `.stack` and `cause.message` for any untyped throw. A request URL or
+ * a key prefix in either one lands in a CI job log — so the module boundary,
+ * not the provider layer, was where redaction stopped.
+ */
+import { redactSecrets } from "../src/providers/step-log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
-import { acquireRunLock, markRunLockDestructive, releaseRunLock, RunLockedError } from "./lib/run-lock.ts";
+import {
+  acquireRunLock,
+  clearRunLockDestructive,
+  markRunLockDestructive,
+  releaseRunLock,
+  RunLockedError,
+} from "./lib/run-lock.ts";
 import { BriefSchema } from "../src/fleet/brief-schema.ts";
 import { log, setLogSink, newRequestId } from "../src/swarmclaw/log.ts";
 import {
@@ -175,9 +203,85 @@ function unusedKeyApi(): KeyApi {
 }
 
 /**
+ * The READ verbs never create the records directory.
+ *
+ * `new RunRecordStore` mkdirs `--dir` recursively and chmods it 0700 (INV-5),
+ * which is right for `dispatch` — it is the verb that creates runs — and wrong
+ * for status/harvest/teardown, whose contract is that a run they cannot find is
+ * refused having "mutated nothing" (spec df3-1 :88-90). `fleet teardown
+ * qds-nosuchrun --dir /srv/typo` exited 4 having created /srv/typo and every
+ * missing parent, so the operator's next `fleet status --dir /srv/typo` then
+ * reported an empty fleet from a directory that only exists because they typo'd
+ * it once.
+ *
+ * Only a directory the operator NAMED is checked. The default
+ * (`.sandbox/runs`, or $QDS_RUNS_DIR) being created on first use is the
+ * intended bootstrap, and refusing it would break every fresh checkout.
+ *
+ * Skipped entirely for an injected store: an embedder's store is already built,
+ * so there is nothing left to refuse before constructing one.
+ *
+ * 2, not 4. 4 is "that RUN does not exist", which presumes a records directory
+ * to have looked in; a `--dir` that is not there is the invocation being wrong,
+ * it is wrong identically on every retry, and `asUsage` already classifies the
+ * sibling failures the store itself raises (ENOTDIR, EPERM, wrong mode) the
+ * same way.
+ *
+ * Residual, and NOT fixed here: pointed at an EXISTING directory the store
+ * constructor still chmods it 0700 before the record probe can refuse. Only a
+ * no-create/no-chmod mode on RunRecordStore closes that, and it lives in
+ * src/providers/run-record.ts.
+ */
+function assertRecordsDirUsable(dir: string | undefined, injected: RunRecordStore | undefined): void {
+  if (dir === undefined || injected !== undefined) return;
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(dir);
+  } catch (e) {
+    throw usageError(
+      `--dir ${dir} does not exist: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`,
+      "point --dir at the records directory the run was dispatched with — this verb never creates one",
+    );
+  }
+  if (!st.isDirectory()) throw usageError(`--dir ${dir} is not a directory`, "point --dir at the records directory");
+}
+
+/**
+ * Stands in for the record store on a brief `dispatch` is about to refuse at
+ * its schema — the `unusedKeyApi` treatment, one dependency over.
+ *
+ * `dir` is the one thing it answers, because `dispatch()` reads `store.dir`
+ * before it validates anything: that is where the AC4 refusal evidence goes, so
+ * a refusal still needs to know it. Reading a plain string is not a side
+ * effect. Every other member throws rather than answering, so a reordering that
+ * DID reach the store on an invalid brief fails loudly instead of silently
+ * mkdir'ing and chmod'ing a directory the operator only typo'd.
+ */
+function unusedStore(dir: string): RunRecordStore {
+  return new Proxy({ dir } as RunRecordStore, {
+    get: (target, prop) => {
+      if (prop === "dir") return target.dir;
+      // See `unusedKeyApi`: `then` and the well-known symbols are the runtime
+      // asking what this object is, not a USE of the store.
+      if (typeof prop === "symbol" || prop === "then") return undefined;
+      throw new Error(`store.${String(prop)} on a brief that failed validation — the run store was never built`);
+    },
+  });
+}
+
+/**
  * One JSON line per refusal. The envelope fields are written LAST so a typed
  * payload (assertionCode, DF2.8 fields, reason…) can never overwrite the
  * `code`/`message` the caller switches on.
+ *
+ * Redaction happens at the two places FOREIGN text enters this file (`asUsage`
+ * and `report`'s untyped branch), not here. Doing it here instead covers one
+ * more path and breaks a real one: `redactSecrets` blanks any ≥40-char opaque
+ * token, and the messages this file composes itself deliberately ECHO argv —
+ * `fleet teardown $(200KB)` is answered with the first 96 characters of what
+ * the operator typed, which is the whole point of the echo and is exactly the
+ * shape the token rule eats. Text we composed from argv is not a secret sink;
+ * text a driver, a credential client or an errno handed us is.
  */
 function printError(
   err: (s: string) => void,
@@ -201,8 +305,17 @@ function printError(
  * all fell through to the generic branch of `report` as exit 1 — which
  * `logVerb` stamps `transient`, i.e. "retry me". A typo'd driver, an unset env
  * var and a `--dir` pointing at the wrong thing are permanent operator errors:
- * automation reading `exitStatus` retried them forever. Message and remediation
- * are preserved verbatim; only the classification changes.
+ * automation reading `exitStatus` retried them forever. Only the classification
+ * changes — and the redaction below, which is not a change of meaning.
+ *
+ * This is one of the two places text this file did not compose becomes text it
+ * PRINTS, so it is one of the two places `redactSecrets` belongs (the other is
+ * `report`'s untyped branch). A driver constructor or `openRouterKeyApi()` that
+ * throws with the request URL or a key prefix in `.message` used to have it
+ * copied verbatim into the exit-2 envelope — the provider layer's INV-4/INV-6
+ * redaction stopped dead at this module boundary, while every `src/` sink runs
+ * its text through the same helper. `redactSecrets` never throws (it fails
+ * closed to the placeholder), so nothing here can fail while reporting.
  */
 function asUsage<T>(build: () => T): T {
   try {
@@ -218,7 +331,11 @@ function asUsage<T>(build: () => T): T {
     // The HELP-as-remediation default is scoped the same way: the flag list is
     // not the remediation for ENOSPC.
     if (x.code !== undefined && RETRYABLE_ERRNOS.has(x.code)) throw e;
-    throw usageError(x.message ?? String(e), x.remediation ?? HELP);
+    // `?? e`, not `?? String(e)`: `redactSecrets` coerces anything without
+    // throwing, and `String` on a null-prototype throw does not.
+    // HELP is this file's own text and needs no redaction, but running the
+    // default through the same call keeps one expression rather than two.
+    throw usageError(redactSecrets(x.message ?? e), redactSecrets(x.remediation ?? HELP));
   }
 }
 
@@ -233,7 +350,20 @@ function report(err: (s: string) => void, e: unknown): number {
     // 0-255 wraps (256 → 0) and a refusal would report success. Anything off
     // the documented table is a bug in the thrower, and this is the one place
     // that turns a throw into a status, so it is the place to enforce it.
-    return Number.isInteger(e.exitCode) && e.exitCode >= 0 && e.exitCode <= 6 ? e.exitCode : 1;
+    //
+    // The floor is 1, not 0. `report` is only ever reached from a catch, so 0
+    // is not a "code outside the table" the way 256 and −1 are — it is the one
+    // value that defeats the guard by passing it: the envelope goes to stderr
+    // and `logVerb` then stamps the refusal `status:"ok"`/`exitStatus:"success"`.
+    // `new FleetError(0, …)` is a copy-paste or a computed code that defaulted,
+    // and both are exactly the "a refusal would report success" case.
+    //
+    // The fallback is 2, not 1. 1 is `transient` = "retry me", and a thrower
+    // whose exit code is off the table has produced an unclassifiable failure —
+    // there is no evidence a retry helps, and this file argues everywhere that
+    // 1 is the one classification a non-retryable failure must never get. 2 is
+    // "permanently wrong, do not retry", which is the safe read of a bug.
+    return Number.isInteger(e.exitCode) && e.exitCode >= 1 && e.exitCode <= 6 ? e.exitCode : 2;
   }
   // Non-Error rejections normalize to {} so the printer cannot itself throw
   // while reporting one.
@@ -245,15 +375,30 @@ function report(err: (s: string) => void, e: unknown): number {
   // cause's message) so the first run is enough. Typed refusals (RunLockedError,
   // the credential and harvest errors) already say what went wrong and where,
   // and stay the clean one-liners operators read daily.
+  //
+  // This branch and `asUsage` are the two places foreign text enters this
+  // file's output, so both redact here rather than in `printError` — see there
+  // for why the printer itself must not. A stack frame's arguments and a
+  // `cause.message` are where a request URL or a `sk-…` prefix actually rides
+  // out of the provider layer; `x.message` is a driver's or a teardown step's
+  // own words.
   const cause = (x.cause ?? undefined) as { message?: string } | undefined;
   const debris =
     x.code !== undefined
       ? undefined
       : {
-          ...(typeof x.stack === "string" ? { stack: x.stack } : {}),
-          ...(cause === undefined ? {} : { cause: cause.message ?? String(x.cause) }),
+          ...(typeof x.stack === "string" ? { stack: redactSecrets(x.stack) } : {}),
+          // `cause.message ?? x.cause`, not `?? String(x.cause)`: `redactSecrets`
+          // coerces anything without throwing, and `String` on a null-prototype
+          // or hostile-`toString` cause throws inside the reporter.
+          ...(cause === undefined ? {} : { cause: redactSecrets(cause.message ?? x.cause) }),
         };
-  printError(err, x.code ?? "error", x.message ?? String(e), x.remediation, debris);
+  // `remediation` stays ABSENT when there is none — an empty string would put
+  // the key in the envelope with nothing in it, which reads as "we have no
+  // advice" where the missing key reads as "this failure has no remediation
+  // designed for it". Only the present one is redacted.
+  const remediation = x.remediation === undefined ? undefined : redactSecrets(x.remediation);
+  printError(err, x.code ?? "error", redactSecrets(x.message ?? e), remediation, debris);
   return 1;
 }
 
@@ -265,8 +410,14 @@ interface Parsed {
   bools: Set<string>;
 }
 
-/** A help request survives parsing intact; nothing else about argv matters. */
-type ParseResult = Parsed | { help: true };
+/**
+ * A help request survives parsing intact; nothing else about argv matters —
+ * except which verb it was asked about, which the CC-9 line needs. `fleet
+ * teardown <id> --driver fake --help` is an operator who meant to destroy a box
+ * and did not, and a dashboard that sees no line for it cannot tell that
+ * invocation from one that never happened.
+ */
+type ParseResult = Parsed | { help: true; verb?: string };
 
 /**
  * argv → verb + validated flags. Every parser failure becomes a usage
@@ -336,7 +487,7 @@ function parseArgv(argv: readonly string[]): ParseResult {
   // stayed live and billing, and no log line was emitted to contradict it. The
   // value grammar now rejects that argv as the typo it is, and only a --help
   // that survives it is a help request.
-  if (bools.has("--help")) return { help: true };
+  if (bools.has("--help")) return { help: true, ...(positionals[0] === undefined ? {} : { verb: positionals[0] }) };
 
   const verb = positionals[0];
   // A bare `fleet` is a mistyped invocation, not a help request: the exit
@@ -453,6 +604,48 @@ function readBriefFile(briefPath: string): string {
 }
 
 /**
+ * Refuse `--brief <path>` when a brief was ALSO redirected onto stdin.
+ *
+ * `fleet dispatch --brief old.json < new.json` provisioned from old.json and
+ * said nothing — the same "acting on something other than what the operator saw
+ * themselves type" this file refuses `--dir` twice for, except the outcome here
+ * is a billable box built from the wrong brief. Both sources were explicitly
+ * supplied, so neither can be silently preferred.
+ *
+ * The test is fd 0's TYPE, not `isTTY`. A CLI run from cron, systemd or a
+ * container has stdin on /dev/null and no tty, so refusing on `!isTTY` would
+ * break every non-interactive `--brief` invocation there is.
+ *
+ * ALLOW-LIST, not a deny-list, and that is the whole lesson of the bug this
+ * shape replaces. The first version refused fifo-or-regular-file and allowed
+ * everything else, which quietly allowed a SOCKET — and a socket is what fd 0
+ * is under any Node/Bun parent spawning with `stdio: "pipe"`, i.e. the most
+ * common programmatic caller there is. Enumerating the dangerous types means
+ * the next stdio type someone invents is allowed by default; enumerating the
+ * benign ones means it is refused by default, which is the direction a guard
+ * on a billable path should fail.
+ *
+ * Benign, and the complete list: a character device — `/dev/null` (cron,
+ * systemd, containers) and a tty (an operator who typed the command and
+ * redirected nothing) are both one — and a closed fd 0, where `fstat` throws
+ * EBADF. Everything else (fifo, regular file, socket) is a brief someone
+ * deliberately attached to this process.
+ */
+function assertOneBriefSource(briefPath: string): void {
+  let st: ReturnType<typeof fstatSync>;
+  try {
+    st = fstatSync(0);
+  } catch {
+    return; // no fd 0 at all — nothing was attached
+  }
+  if (st.isCharacterDevice()) return;
+  throw usageError(
+    `--brief ${briefPath} was given AND a brief was redirected onto stdin`,
+    "pass the brief exactly one way: `--brief <path>`, or on stdin with no --brief",
+  );
+}
+
+/**
  * Every verb logs one structured line (CC-9 observability contract):
  * {requestId, runId, verb, phase, timestamp, durationMs, exitStatus}.
  *
@@ -521,31 +714,6 @@ export async function run(
 ): Promise<number> {
   const startedAt = Date.now();
   /**
-   * Output writes, EPIPE-tolerant.
-   *
-   * `fleet teardown <id> | head -1` closes the pipe the moment head has its
-   * line, so `out()` — `writeAll(1, …)` under `import.meta.main` — throws
-   * EPIPE. Inside the verb's `try` that throw became `code = report(note, e)` =
-   * 1, which `logVerb` stamps `transient`: automation RETRIED a destructive
-   * verb that had already succeeded. Every write here describes work that is
-   * already done, and a reader who hung up cannot be told anything either way,
-   * so a broken pipe is not the verb's outcome. EAGAIN/EWOULDBLOCK rides along:
-   * an fd 1 the caller left non-blocking (a CI runner, a wrapper) refuses the
-   * bytes exactly the way a hung-up reader does, and a *completed* destructive
-   * teardown must not become exit 1 `transient` because of it either. ENOSPC or
-   * a bad fd is a real write failure and still throws.
-   *
-   * NOT used for the dispatch ack — see the write there.
-   */
-  const tolerated = new Set(["EPIPE", "EAGAIN", "EWOULDBLOCK"]);
-  const emit = (s: string): void => {
-    try {
-      out(s);
-    } catch (e) {
-      if (!tolerated.has((e as NodeJS.ErrnoException | null)?.code ?? "")) throw e;
-    }
-  };
-  /**
    * Diagnostics sink, made unable to change an outcome. `report` and
    * `printError` are called from the harvest/teardown `finally` — where `code`
    * is about to be 6, "wedged, do not retry" — and from the catch blocks that
@@ -561,12 +729,73 @@ export async function run(
       // A diagnostic that cannot be delivered is not the verb's outcome.
     }
   };
+  /**
+   * Output writes: never the verb's OUTCOME, but not silent either.
+   *
+   * `fleet teardown <id> | head -1` closes the pipe the moment head has its
+   * line, so `out()` — `writeAll(1, …)` under `import.meta.main` — throws
+   * EPIPE. Inside the verb's `try` that throw became `code = report(note, e)` =
+   * 1, which `logVerb` stamps `transient`: automation RETRIED a destructive
+   * verb that had already succeeded. Every write here describes work that is
+   * already done, so no failed write may turn a completed teardown into "retry
+   * me". ENOSPC or a bad fd is a real write failure and still throws.
+   *
+   * EPIPE and EAGAIN are both tolerated that far and then part company, because
+   * they say different things about the OUTPUT. A hung-up reader is reading
+   * nothing more either way, so EPIPE is silent. EAGAIN is an fd 1 a wrapper or
+   * CI runner left non-blocking, still open, still being read — and `writeAll`
+   * advances `off` across a partial write before it throws, so `fleet status`
+   * over a fleet large enough to fill the pipe buffer ended mid-token on a
+   * half-written `{"runId":"…`. Exit 0 then said that truncated listing WAS the
+   * fleet — the same lie `listUnavailable` → exit 1 exists to prevent, and a
+   * `| jq` consumer gets a parse error or, worse, a short listing it believes.
+   * So it is recorded here and folded into the exit code by `finish`, rather
+   * than swallowed as success or thrown as a retryable failure.
+   *
+   * NOT used for the dispatch ack — see the write there.
+   */
+  let outputIncomplete = false;
+  const emit = (s: string): void => {
+    try {
+      out(s);
+    } catch (e) {
+      const errno = (e as NodeJS.ErrnoException | null)?.code ?? "";
+      if (errno === "EPIPE") return;
+      if (errno !== "EAGAIN" && errno !== "EWOULDBLOCK") throw e;
+      // One line per invocation, not per refused write: a full pipe refuses
+      // every row after the first, and the diagnostic must not itself be what
+      // floods the operator's stderr.
+      if (outputIncomplete) return;
+      outputIncomplete = true;
+      printError(
+        note,
+        "stdout-truncated",
+        "stdout would not take part of this command's output: what it printed is INCOMPLETE",
+        "stdout was left non-blocking by a wrapper or CI runner — re-run with output to a file or a blocking pipe, and do not parse what was printed",
+      );
+    }
+  };
+  /**
+   * `logVerb`, plus the one thing that can still change an outcome after the
+   * verb has decided it: output that did not all arrive. 6, not 1 — the work
+   * landed, so a retry cannot undo it or redo it, and only the printing failed.
+   * It never touches an already-failing code: what the verb reported is worse
+   * news than a short write, and this is the same rule the cleanup `finally`
+   * below states for the ledger and the lock.
+   */
+  const finish = (rid: string, v: string, runId: string | undefined, code: number): number =>
+    logVerb(rid, v, runId, startedAt, code === 0 && outputIncomplete ? 6 : code);
   // The ONE pre-tokenization reading of argv: `fleet help` names no verb to
   // tokenize against. Anchored to argv[0], so it cannot fire from a stray token
   // inside a destructive invocation the way `argv.includes("--help")` did.
+  //
+  // Logged like every other invocation (CC-9: "every verb logs one structured
+  // line"). Help used to be the exception, which made `fleet teardown <id>
+  // --driver real --help` — an operator who meant to destroy a box and did not
+  // — the one invocation a dashboard could not see at all.
   if (argv[0] === "help") {
     emit(`${HELP}\n`);
-    return 0;
+    return finish(newRequestId(), "help", undefined, 0);
   }
 
   let parsed: ParseResult;
@@ -600,11 +829,14 @@ export async function run(
     } catch {
       // The verb name is worth a best effort and nothing more.
     }
-    return logVerb(newRequestId(), attempted, undefined, startedAt, report(note, e));
+    return finish(newRequestId(), attempted, undefined, report(note, e));
   }
   if (parsed.help === true) {
     emit(`${HELP}\n`);
-    return 0;
+    // `bounded`, and defaulting to the verb the operator effectively invoked:
+    // `fleet --help` names none, and an unbounded `fleet $(200KB) --help` would
+    // otherwise put all of it in the field the dashboards key on.
+    return finish(newRequestId(), bounded(parsed.verb ?? "help"), undefined, 0);
   }
   const { entry, positionals, flags, bools } = parsed;
   const verb = entry.verb;
@@ -631,18 +863,46 @@ export async function run(
      * Scoped to this verb and removed in the `finally`: `run()` is an embeddable
      * function, and a process-wide handler that outlives the call is not ours to
      * leave behind.
+     *
+     * Installed at the TOP of the verb — before the brief is read, before
+     * `--port` is validated, before a driver exists — because the window it
+     * covers has to start before anything can provision. That is also why what
+     * it SAYS is gated on `mayHaveProvisioned`: `sleep 30 | fleet dispatch`
+     * Ctrl-C'd while `readCappedStdin()` is still waiting cannot have created a
+     * box, and sending an operator to audit a provider console for one that
+     * demonstrably does not exist is how a real warning stops being read.
      */
+    let mayHaveProvisioned = false;
     const interruptHandlers = ([
       ["SIGINT", 130],
       ["SIGTERM", 143],
     ] as const).map(([sig, status]) => {
       const handler = (): void => {
-        printError(
-          note,
-          "dispatch-interrupted",
-          "interrupted during dispatch: a box may have been provisioned with no run record",
-          "check the provider for an unattributed box — INV-5 forbids this CLI destroying one it cannot attribute",
-        );
+        if (mayHaveProvisioned) {
+          printError(
+            note,
+            "dispatch-interrupted",
+            "interrupted during dispatch: a box may have been provisioned with no run record",
+            "check the provider for an unattributed box — INV-5 forbids this CLI destroying one it cannot attribute",
+          );
+        } else {
+          printError(
+            note,
+            "dispatch-interrupted",
+            "interrupted before dispatch began provisioning: nothing was created",
+            "re-run when ready — no box, key or record exists for this invocation",
+          );
+        }
+        // CC-9 before the exit, not after: `process.exit` skips the `finally`
+        // and the `return finish(...)` below, so an interrupted dispatch was the
+        // one invocation of any verb that produced no structured line at all —
+        // exactly the invocation an operator most needs to find later. `log`'s
+        // sink is best-effort (writeBestEffort), so this cannot itself throw out
+        // of a signal handler.
+        //
+        // The status is 128+signo, deliberately outside the 0-6 table — see the
+        // exit-code note at the top of this file.
+        logVerb(dispatchRequestId ?? newRequestId(), verb, dispatchRunId, startedAt, status);
         process.exit(status);
       };
       process.on(sig, handler);
@@ -678,7 +938,10 @@ export async function run(
       const readBrief: () => Promise<string> =
         deps?.readBrief ??
         (async () => {
-          if (briefPath !== undefined) return readBriefFile(briefPath);
+          if (briefPath !== undefined) {
+            assertOneBriefSource(briefPath);
+            return readBriefFile(briefPath);
+          }
           // No prompt, no timeout: a TTY here means the operator typed `fleet
           // dispatch` and would wait forever for a pipe that never arrives.
           if (process.stdin.isTTY) {
@@ -717,7 +980,37 @@ export async function run(
       const requestId = resolveBriefRequestId(briefJson) ?? newRequestId();
       dispatchRequestId = requestId;
       const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId }));
-      const store = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, requestId }));
+      // AC1: an invalid brief must exit 2 NAMING THE OFFENDING FIELD, and
+      // `openRouterKeyApi()` reads $OPENROUTER_PROVISIONING_KEY at
+      // construction. Built unconditionally it fired first, so on a host
+      // without that key a malformed brief exited 2 with
+      // `provisioning-key-missing` and no field — the operator set the env var
+      // and re-hit the very same brief.
+      //
+      // It cannot simply be deferred to the mint that uses it: the mint runs
+      // AFTER provisioning, and INV-5 forbids destroying that box, so a missing
+      // env var would leave a billable box alive. So the same schema dispatch
+      // is about to apply decides the order — the client is built only for a
+      // brief that can reach a mint at all. dispatch() re-validates and owns
+      // the refusal envelope either way; this parse only sequences the two.
+      //
+      // Hoisted ABOVE the store for the same reason, one INV further (AC1/AC4:
+      // "validation completes before the first side effect"). The claim three
+      // lines up — that the brief is parsed before anything is constructed —
+      // only ever covered `JSON.parse`: `{"bogus":1}` is valid JSON, so
+      // `fleet dispatch --dir /srv/newdir` exited 2 as promised having already
+      // mkdir'd /srv/newdir and every missing parent, and pointed at an
+      // EXISTING directory it chmod'd the operator's directory to 0700
+      // (run-record.ts's constructor does both, INV-5).
+      const briefCanMint = BriefSchema.safeParse(briefJson).success;
+      const store =
+        deps?.store ??
+        (briefCanMint
+          ? asUsage(() => new RunRecordStore({ ...storeOpts, requestId }))
+          : // Same shape as `unusedKeyApi`, and for the same reason: dispatch()
+            // owns the refusal envelope, so it still needs a `store` to hold —
+            // it just must not be one whose construction touched the disk.
+            unusedStore(resolveRunsDir(dir)));
       const ledgerFactory =
         deps?.ledgerFactory ??
         ((): LedgerLike => {
@@ -744,20 +1037,6 @@ export async function run(
           });
           return ledger as unknown as LedgerLike;
         });
-      // AC1: an invalid brief must exit 2 NAMING THE OFFENDING FIELD, and
-      // `openRouterKeyApi()` reads $OPENROUTER_PROVISIONING_KEY at
-      // construction. Built unconditionally it fired first, so on a host
-      // without that key a malformed brief exited 2 with
-      // `provisioning-key-missing` and no field — the operator set the env var
-      // and re-hit the very same brief.
-      //
-      // It cannot simply be deferred to the mint that uses it: the mint runs
-      // AFTER provisioning, and INV-5 forbids destroying that box, so a missing
-      // env var would leave a billable box alive. So the same schema dispatch
-      // is about to apply decides the order — the client is built only for a
-      // brief that can reach a mint at all. dispatch() re-validates and owns
-      // the refusal envelope either way; this parse only sequences the two.
-      const briefCanMint = BriefSchema.safeParse(briefJson).success;
       // `readBrief` is the CLI's own seam; everything left is a DispatchDeps
       // seam forwarded verbatim, so one added there is never silently dropped.
       // The explicit keys below win over the spread.
@@ -772,6 +1051,9 @@ export async function run(
         ...(port === undefined ? {} : { port }),
       };
 
+      // Everything an interrupt could NOT have orphaned is now behind us; from
+      // here a box may exist, so the handler stops promising it does not.
+      mayHaveProvisioned = true;
       const ack = await dispatch(briefJson, dispatchDeps);
       dispatchRunId = ack.runId;
       dispatchCode = 0;
@@ -782,6 +1064,17 @@ export async function run(
       // before the line lands, and swallowing that reported exit 0 while the box
       // was orphaned. 6, not 1: 1 means "retry me", and retrying dispatch
       // provisions a SECOND box rather than recovering the first.
+      //
+      // The ack is written RAW, `httpsUrl` included, and that is deliberate:
+      // it is this command's OUTPUT, not a log sink. INV-6 governs the sinks —
+      // the dispatch log, the structured lines, the refusal envelopes — because
+      // those are persisted, shipped and read by people the run was never
+      // handed to. The ack goes to the operator who typed the command and asked
+      // for a box on `--port`; a redacted URL there is not a security property,
+      // it is a box they cannot reach. (`dispatch()` logs the same value through
+      // `redact` one line earlier, which is the sink rule doing its job — the
+      // two are not in conflict, and INV-6's own docstring in
+      // src/fleet/dispatch.ts should say which of the two it governs.)
       try {
         out(`${JSON.stringify(ack)}\n`);
       } catch (e) {
@@ -813,7 +1106,7 @@ export async function run(
     // the only ones with it otherwise. A refusal that fired before the brief
     // resolved has no correlation id to report, so one is minted for the
     // invocation rather than a run's id forged for it.
-    return logVerb(dispatchRequestId ?? newRequestId(), verb, dispatchRunId, startedAt, dispatchCode);
+    return finish(dispatchRequestId ?? newRequestId(), verb, dispatchRunId, dispatchCode);
   }
 
   // status / harvest / teardown all take an optional-or-required runId.
@@ -828,11 +1121,23 @@ export async function run(
         throw usageError("status takes at most one <run-id>", "fleet status [run-id]");
       }
       // The same grammar harvest/teardown enforce: an over-long or malformed
-      // id must not reach the store as an untyped path error.
-      if (runIdArg !== undefined) assertFleetRunId(bounded(runIdArg));
+      // id must not reach the store as an untyped path error. RAW — see the
+      // teardown call site for why the cap belongs to the refusal, not here.
+      if (runIdArg !== undefined) assertFleetRunId(runIdArg);
       assertDriverChosen("status", driverName, deps?.driver);
       const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId }));
-      const store = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, requestId }));
+      assertRecordsDirUsable(dir, deps?.store);
+      // `create: dir === undefined`. status only ever READS (statusAll/statusRun
+      // call `get` and `list`), and a read-mode store skips the mkdir AND the
+      // chmod — so `fleet status --dir /srv/existing` stops re-permissioning an
+      // operator's directory to 0700 just to look at it. The DEFAULT directory
+      // keeps its writable store: creating `.sandbox/runs` on first use is the
+      // intended bootstrap, and refusing it would break every fresh checkout.
+      // harvest/teardown deliberately do NOT do this — `teardownSandbox` calls
+      // `store.close`/`set`, which read mode refuses, so they would need a read
+      // probe AND a writable store: two constructions to save a chmod on a
+      // directory the run legitimately owns.
+      const store = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, create: dir === undefined, requestId }));
       const statusDeps = { driver, store };
       const rows = runIdArg === undefined ? await statusAll(statusDeps) : [await statusRun(statusDeps, runIdArg)];
       for (const row of rows) emit(`${JSON.stringify(row)}\n`);
@@ -878,15 +1183,30 @@ export async function run(
       // `finally` uses for exit 6. It wins over `listUnavailable`'s 1 when both
       // fire, because retrying cannot complete the listing either way.
       // …otherwise no runs is a state, not an error (AC4).
-      return logVerb(requestId, verb, runIdArg, startedAt, skipped.length > 0 ? 2 : listFailed ? 1 : 0);
+      return finish(requestId, verb, runIdArg, skipped.length > 0 ? 2 : listFailed ? 1 : 0);
     } catch (e) {
-      return logVerb(requestId, verb, runIdArg, startedAt, report(note, e));
+      return finish(requestId, verb, runIdArg, report(note, e));
     }
   }
 
   // ── harvest / teardown (AC5: thin front doors onto DF2.5, guards intact) ──
   let lock: string | undefined;
   let ledger: CostLedger | undefined;
+  /**
+   * Did this invocation begin destroying the run and NOT finish — i.e. would
+   * releasing the lock hand a half-torn-down run to the next invocation?
+   *
+   * The authoritative refusal lives in `releaseRunLock`, which now declines
+   * while the lock is marked destructive (the CLI clears the mark on its
+   * success path). This flag is the CLI's own side of the same fact, and it is
+   * not redundant: it is what turns a throw mid-teardown into the ONE
+   * diagnostic and exit code the operator should see, instead of the verb's
+   * error followed by a second "could not release" line describing a refusal
+   * this file asked for. It also keeps the two halves independently readable —
+   * the run-lock module decides whether the lock may go, this decides what the
+   * invocation REPORTS.
+   */
+  let destructiveInFlight = false;
   // Assigned on every path, then possibly downgraded by the finally: a release
   // failure leaves the run locked against every later harvest/teardown while
   // the box and the key stay live, and `return 0` inside the try would have
@@ -899,16 +1219,25 @@ export async function run(
     if (runIdArg === undefined) {
       throw usageError(`${verb} requires <run-id>`, `fleet ${verb} <run-id>`);
     }
-    // `bounded`, because the refusal ECHOES the id: `assertValidRunId`'s message
-    // quotes what it rejected, and `fleet teardown $(200KB)` put all of it in
-    // the envelope. A capped id fails the same grammar (nothing ≤ 63 chars is
-    // changed by the cap), so the check is identical and the echo is not.
-    assertFleetRunId(bounded(runIdArg));
+    // RAW, not `bounded`. The refusal ECHOES the id, and `fleet teardown
+    // $(200KB)` must not put all of it in the envelope — but that bound now
+    // lives in `assertFleetRunId`, which caps AND redacts the echo and reports
+    // the true length. Capping first handed it a 108-char string to describe,
+    // so the envelope carried two lengths that contradicted each other, and a
+    // secret pasted into the run-id position could be cut across the 96-char
+    // boundary into two halves neither redaction rule matches. One bound, at
+    // the sink that owns the message. `bounded` still guards the LOG fields
+    // below, which is a different stream with a different owner.
+    assertFleetRunId(runIdArg);
     // Before the lock and before the record read: a refusal here has mutated
     // nothing, so there is no lock to release and no box left half-torn-down.
     assertDriverChosen(verb, driverName, deps?.driver);
 
     const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId, runId: runIdArg }));
+    // Before the store is CONSTRUCTED, for the same reason the record probe
+    // below is before the lock: this verb must not create the directory it was
+    // asked to look in. See `assertRecordsDirUsable`.
+    assertRecordsDirUsable(dir, deps?.store);
     const store = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, requestId }));
 
     /** exit 4 for a genuine absence; every other read failure propagates. */
@@ -983,6 +1312,10 @@ export async function run(
       emit(res.outcome === "harvested" ? `harvested: ${res.count}\n` : "harvested: none\n");
       code = 0;
     } else {
+      // Set by the branch below, read after the teardown: a possibly-live key
+      // this teardown provably cannot revoke is not a success, and it cannot be
+      // reported until the box half has actually run.
+      let keyUnattributable = false;
       if (rec.keyHash !== undefined) {
         tdeps.keyApi = deps?.keyApi ?? asUsage(() => openRouterKeyApi());
       } else if (rec.vmName !== undefined && rec.closedAt === undefined) {
@@ -992,6 +1325,7 @@ export async function run(
         // open run, and no surviving pointer to a key that is still billing.
         // The teardown below is correct for the box and silent about the key,
         // and `torn down:` + exit 0 reads as "nothing left running".
+        keyUnattributable = true;
         printError(
           note,
           "key-unattributable",
@@ -1032,12 +1366,37 @@ export async function run(
       // release would hand it straight to the next teardown, which would re-run
       // against a half-torn-down run.
       markRunLockDestructive(lock);
+      destructiveInFlight = true;
       await teardownSandbox(tdeps, runIdArg, { noHarvest });
+      // The destructive sequence completed: box destroyed, key revoked (or
+      // named as unrevokable above), record closed. From here the lock is safe
+      // to release — there is no half-torn-down state left for it to guard, and
+      // this is the ONLY place that can say so: from inside the release,
+      // "the caller reached its finally" looks the same whether
+      // `teardownSandbox` returned or threw.
+      destructiveInFlight = false;
+      clearRunLockDestructive(lock);
       // Reported AFTER the teardown ran: printed first, it claims a waiver for
       // a teardown that may never have happened.
       if (noHarvest) emit(`teardown.harvest_waived ${runIdArg}\n`);
       emit(`torn down: ${runIdArg}\n`);
-      code = 0;
+      // NOT 0. The box is gone and the record is closed, so the verb's own work
+      // landed — but a key that may still be minting spend was not revoked and
+      // this CLI cannot find it. `torn down:` + exit 0 is what `fleet teardown
+      // … || alert` reads as "nothing left running", which is the one thing
+      // that is not true here. The file resolves the identical "the answer
+      // above may be wrong" condition the same way twice in `status`
+      // (`listUnavailable` → 1, `skippedRecords` → 2): exit 0 lies to
+      // automation, so the exit code carries it.
+      //
+      // 6 rather than 1 or 2, and by the same test the cleanup `finally` below
+      // applies: the work is DONE, so 1 (`transient`, "retry me") would send
+      // automation back to tear down a run that no longer exists, and the
+      // leftover is a live credential no retry of this verb can reach. 6 is
+      // "already done, still needs an operator", which is exactly the manual
+      // key revocation the stderr line just asked for. It is in teardown's
+      // declared set (src/fleet/verbs.ts) already.
+      code = keyUnattributable ? 6 : 0;
     }
   } catch (e) {
     code = report(note, e);
@@ -1074,7 +1433,35 @@ export async function run(
     // releaseRunLock re-reads the body and unlinks it only while it is still
     // this invocation's claim, so a refused invocation — or one whose lock was
     // cleared and re-taken — never unlinks a live holder's file.
-    if (lock !== undefined) {
+    if (lock !== undefined && destructiveInFlight) {
+      // …but "still ours" is not the question on THIS path. `teardownSandbox`
+      // threw partway through destroying the run, so the box may be gone with
+      // the key un-revoked, or the record may still be open against a box that
+      // no longer exists — the state the comment above `markRunLockDestructive`
+      // says only an operator can judge. Releasing hands it to the next
+      // invocation, which re-runs against a half-torn-down run.
+      //
+      // Not even attempted, rather than attempted and refused: `releaseRunLock`
+      // would throw for exactly this reason (the destructive mark is still set,
+      // because only the success path above clears it), and reporting that as
+      // `lock-release-failed` would read as a cleanup that went wrong on top of
+      // the verb's failure. It did not go wrong; it was declined on purpose.
+      printError(
+        note,
+        "lock-held",
+        `${lock} was NOT released: this teardown of ${runIdArg} failed partway through destroying the run`,
+        `check the run's box, key and record before anything else touches it, then rm ${lock} — until then every later harvest or teardown of this run refuses`,
+        { runId: runIdArg },
+      );
+      // Over the failure the verb already reported, which is the one place this
+      // file's "cleanup never overwrites the verb's own code" rule has to bend:
+      // the code being overwritten is `report`'s 1, `transient`, "retry me" —
+      // and the retry it invites cannot do anything but hit `run-locked` (5)
+      // forever, because this invocation just decided nothing will clear the
+      // lock but a human. 6 is the honest classification of what was left
+      // behind: partly done, not retryable, needs an operator.
+      code = 6;
+    } else if (lock !== undefined) {
       try {
         releaseRunLock(lock);
       } catch (e) {
@@ -1088,7 +1475,7 @@ export async function run(
       }
     }
   }
-  return logVerb(requestId, verb, runIdArg, startedAt, code);
+  return finish(requestId, verb, runIdArg, code);
 }
 
 /**

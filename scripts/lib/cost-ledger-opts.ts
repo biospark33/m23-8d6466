@@ -43,14 +43,37 @@
  * The DEFAULT layout is unchanged either way, special-cased rather than
  * migrated: `.sandbox/runs` keeps settling into `.sandbox/cost-ledger.db`,
  * because a lot of existing state is already there and CostLedger's own default
- * tier points at the same file.
+ * tier points at the same file. That test is on the resolved dir's TRAILING
+ * SEGMENTS, not on `resolve(DEFAULT_RUNS_DIR)`: the constant is relative, so
+ * resolving it asks about the CALLER's cwd. `fleet dispatch` from /home/x with
+ * no `--dir` matched and reserved into /home/x/.sandbox/cost-ledger.db, while
+ * `sandbox-teardown --dir /home/x/.sandbox/runs` run from /srv did not match
+ * (there `resolve(".sandbox/runs")` is /srv/.sandbox/runs) and settled into
+ * /home/x/.sandbox/runs/cost-ledger.db — one records directory, two ledgers,
+ * which is the cwd-split this module exists to eliminate, reintroduced in the
+ * comparand after it was fixed in the argument.
+ *
+ * KNOWN LIMIT — a per-issue cap is now enforced per STORE DIR. `fleet dispatch
+ * --dir /srv/runs-a <issue>` and `--dir /srv/runs-b <issue>` write two ledgers,
+ * and `capForIssue` is checked against each independently, so one issue admits
+ * N x its cap across N directories. The move above is justified in the other
+ * direction (a shared parent ledger let caps admit across unrelated fleets),
+ * and over-counting is the safe failure while under-counting is the one that
+ * spends — this trade is deliberate but it is NOT symmetric, and fixing the
+ * cwd accident does not fix it. Worse, the CONFIG stays a sibling at
+ * `dirname(dir)`, so two sibling store dirs read ONE operator cost-config.json
+ * and enforce its caps twice. The upgrade path is an issue-keyed ledger the
+ * store dir cannot partition (a single ledger path derived from the issue's
+ * repo identity, or a cap reservation the dispatcher holds centrally); until
+ * then, one fleet per issue per box is an operator-side invariant nothing in
+ * this file enforces.
  *
  * $QDS_COST_LEDGER_FILE / $QDS_COST_CONFIG_FILE still win, restated here rather
  * than left to CostLedger's own tier because the DEFAULT below is no longer the
  * one CostLedger would pick. An explicit env override is one file for both
  * halves, so it cannot split a run's money either.
  */
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
 import {
   type CostLedgerDeps,
@@ -78,10 +101,18 @@ function envPath(value: string | undefined): string | undefined {
  * dropped `path` is a run whose money lands in the cwd-relative default. Both
  * halves are always set, hence `Required<>`.
  */
+/**
+ * `.sandbox/runs` as a path SUFFIX (`/.sandbox/runs`), which is what "is this
+ * the default layout?" actually means. `resolve(DEFAULT_RUNS_DIR)` answered it
+ * against the caller's cwd instead — see the header: the same records directory
+ * matched from one cwd and not from another, and the run's money split in two.
+ */
+const DEFAULT_RUNS_SUFFIX = sep + DEFAULT_RUNS_DIR.split("/").join(sep);
+
 export function costLedgerOpts(storeDir: string): Required<Pick<CostLedgerDeps, "path" | "config">> {
   const dir = resolve(storeDir);
   // The default layout is the one place the ledger stays a sibling.
-  const ledgerDir = dir === resolve(DEFAULT_RUNS_DIR) ? dirname(dir) : dir;
+  const ledgerDir = dir.endsWith(DEFAULT_RUNS_SUFFIX) ? dirname(dir) : dir;
   return {
     path: envPath(process.env.QDS_COST_LEDGER_FILE) ?? join(ledgerDir, basename(DEFAULT_COST_LEDGER_FILE)),
     // An absent cost-config.json falls back to DEFAULT_COST_CONFIG

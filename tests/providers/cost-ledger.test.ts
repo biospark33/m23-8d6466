@@ -334,6 +334,55 @@ describe("DF2.8 malformed events (AC4)", () => {
     expect(rowCount(db, "cost_events")).toBe(2);
     db.close();
   });
+
+  test("a NONZERO cost that rounds to 0 µ$ is unpriced and says so; a genuine 0 stays priced", () => {
+    // The two are byte-identical in the row — `cost_micro_usd = 0` — and mean
+    // opposite things: 0.0000004 USD is spend this ledger's UNIT cannot express,
+    // a free/cached turn is spend that did not happen. Recorded the same way, the
+    // sub-micro one is invisible in `unpricedRows` and reads as real, fully
+    // priced, zero money. The flag is what keeps the collapse visible; the log
+    // code is what tells an operator WHICH kind of unpriced this row is.
+    seedRecord("run-sub");
+    seedRecord("run-free");
+    const lines: Record<string, unknown>[] = [];
+    const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+    let sub: ReturnType<CostLedger["ingestCostEvent"]>;
+    let free: ReturnType<CostLedger["ingestCostEvent"]>;
+    try {
+      sub = ledger.ingestCostEvent(
+        mkEvent({ agentId: "sub", costUsd: 0.0000004 }),
+        mkCtx({ runId: "run-sub", requestId: "req-sub" }),
+      );
+      free = ledger.ingestCostEvent(
+        mkEvent({ agentId: "free", costUsd: 0 }),
+        mkCtx({ runId: "run-free", requestId: "req-free" }),
+      );
+    } finally {
+      restore();
+    }
+    expect(sub.unpriced).toBe(true);
+    expect(free.unpriced).toBe(false);
+
+    // Distinguishable from the OTHER unpriced classes (`cost-convert-invalid`,
+    // `unpricedTurns`), which is the whole point of giving it its own code.
+    const subLine = lines.find((l) => l.agentId === "sub");
+    expect(subLine?.code).toBe("cost-sub-micro-unpriced");
+    expect(subLine?.costUsd).toBe(0.0000004);
+    // A genuinely free turn carries no code at all — nothing collapsed.
+    expect(lines.find((l) => l.agentId === "free")?.code).toBeUndefined();
+
+    // Both rows store 0 µ$; only the sub-micro one is counted as unpriced.
+    const db = rawDb();
+    const rows = db
+      .prepare("SELECT agent_id AS agent, cost_micro_usd AS micros, unpriced FROM cost_events ORDER BY agent_id")
+      .all() as { agent: string; micros: number; unpriced: number }[];
+    db.close();
+    expect(rows).toEqual([
+      { agent: "free", micros: 0, unpriced: 0 },
+      { agent: "sub", micros: 0, unpriced: 1 },
+    ]);
+    expect(ledger.readIssueCost("qds/demo", "42").unpricedRows).toBe(1);
+  });
 });
 
 // ─── AC5 + views ─────────────────────────────────────────────────────────────
@@ -748,6 +797,160 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     const next = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a2", requestId: "req-2" }, cap, 50_000_000);
     expect(next.admitted).toBe(false);
     expect(next.reservedMicroUsd).toBe(cap);
+  });
+
+  test("a priced ZERO row does not retire the reservation — a free first turn cannot hand out the cap twice", () => {
+    // THE blocker. A cached or free first turn writes a perfectly valid
+    // `cost_micro_usd = 0, unpriced = 0` row, and testing the reservation's
+    // retirement on the EXISTENCE of a priced row retired run-a1's ENTIRE
+    // ceiling while its key was still live at that ceiling: the next dispatch
+    // then read `spent = 0, reserved = 0` and was granted the full cap again,
+    // N times over for N dispatches. `ce.cost_micro_usd > 0` is the difference
+    // between "has reported what it spent" and "has reported something".
+    seedRecord("run-a1");
+    const first = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 50_000_000);
+    if (!first.admitted) throw new Error("expected the first dispatch to be admitted");
+    expect(first.admittedCeilingMicroUsd).toBe(cap);
+
+    ledger.ingestCostEvent(mkEvent({ costUsd: 0 }), mkCtx());
+    // Priced (it is not unpriced traffic — that case is covered above), zero,
+    // and present: the exact row the existence test mistook for spend.
+    const view = ledger.readIssueCost("qds/demo", "42");
+    expect(view.hasEvents).toBe(true);
+    expect(view.unpricedRows).toBe(0);
+    expect(view.totalMicroUsd).toBe(0);
+
+    const next = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a2", requestId: "req-2" }, cap, 50_000_000);
+    if (next.admitted) throw new Error("expected the second dispatch to be refused — run-a1's key is still live at the full cap");
+    expect(next.reservedMicroUsd).toBe(cap);
+    expect(next.spentMicroUsd).toBe(0);
+  });
+
+  test("a CLOSED run record retires the reservation — a genuinely zero-cost run cannot wedge the issue forever", () => {
+    // The other half of "spend, not a row": with retirement keyed on positive
+    // spend, a run that really did cost nothing would hold its ceiling against
+    // the issue for good, and `gate_admissions_no_delete` leaves no manual exit.
+    // A closed record means the box is destroyed and the key revoked, so there
+    // is no unspent exposure left to reserve against.
+    seedRecord("run-a1");
+    const first = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 50_000_000);
+    if (!first.admitted) throw new Error("expected the first dispatch to be admitted");
+    // Still OPEN with a priced-zero row ⇒ still reserved (the case above).
+    ledger.ingestCostEvent(mkEvent({ costUsd: 0 }), mkCtx());
+    const whileOpen = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a2", requestId: "req-2" }, cap, 50_000_000);
+    expect(whileOpen.admitted).toBe(false);
+
+    // Teardown closes the record; the exposure is over.
+    seedRecord("run-a1", { closedAt: "2026-08-20T13:00:00.000Z" });
+    const afterClose = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a3", requestId: "req-3" }, cap, 50_000_000);
+    if (!afterClose.admitted) throw new Error("expected the closed run's reservation to have retired");
+    expect(afterClose.reservedMicroUsd).toBe(0);
+    expect(afterClose.admittedCeilingMicroUsd).toBe(cap);
+  });
+
+  test("two admission rows for ONE run reserve its ceiling ONCE, not twice", () => {
+    // gate_admissions' PRIMARY KEY is (request_id, run_id), so a dispatch
+    // retried under a FRESH request id for the same run inserts a SECOND row.
+    // Ungrouped, both counted: the issue's headroom fell by twice the ceiling
+    // for a single live key, and later legitimate dispatches were refused
+    // against exposure that does not exist.
+    seedRecord("run-a1");
+    const first = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 1_000_000);
+    if (!first.admitted) throw new Error("expected the first admission");
+    expect(first.admittedCeilingMicroUsd).toBe(1_000_000);
+    // Same run, fresh correlation id — not a replay, so `DO NOTHING` does not
+    // fire and a second row lands.
+    const retry = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1b" }, cap, 1_500_000);
+    if (!retry.admitted) throw new Error("expected the re-admission under a fresh request id");
+    const db = rawDb();
+    expect(rowCount(db, "gate_admissions")).toBe(2); // two rows, one run
+    db.close();
+
+    // A third dispatch sees ONE reservation for run-a1, at MAX(ceiling) — the
+    // largest exposure, which is the fail-safe pick — not 1M + 1.5M.
+    seedRecord("run-a2");
+    const third = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a2", requestId: "req-2" }, cap, 50_000_000);
+    if (!third.admitted) throw new Error("expected the third dispatch to be admitted");
+    expect(third.reservedMicroUsd).toBe(1_500_000);
+    expect(third.remainingMicroUsd).toBe(cap - 1_500_000);
+  });
+
+  test("the SELECT and the INSERT run inside ONE write transaction — a concurrent writer is locked out mid-decision", () => {
+    // Every other test here is SEQUENTIAL, so all of them stay green with the
+    // `decide.immediate()` wrapper deleted: one call finishes before the next
+    // begins, and a bare SELECT-then-INSERT is indistinguishable from a
+    // serialized one. What that wrapper buys is the thing sequential calls can
+    // never exercise — that no OTHER connection can commit between this
+    // admission's SUM and its reservation. Two real dispatchers interleaved
+    // there each read the same headroom and each mint the full cap.
+    //
+    // The probe rides `readRunRecord`, which is the one caller-supplied seam
+    // that runs INSIDE the transaction body: reservations are prefetched before
+    // the write lock is taken, so a row that appears after the prefetch is read
+    // live under the lock. `run-late` is inserted from the prefetch callback to
+    // put it in exactly that position.
+    const probePath = ledgerPath;
+    // An array, not a scalar: the seam fires from inside a callback, so a
+    // narrowed `let` is a type error at the assertion — and the length is worth
+    // having anyway. Exactly one probe means the seam fired where it was meant
+    // to and not on some other row.
+    const lockProbe: string[] = [];
+    const probing = new CostLedger({
+      path: probePath,
+      readRunRecord: (id) => {
+        if (id === "run-early") {
+          // Prefetch is OUTSIDE the lock, so this write succeeds — and lands
+          // run-late in the reservation SELECT the transaction is about to run.
+          const w = new Database(probePath);
+          try {
+            w.prepare(
+              `INSERT INTO gate_admissions (request_id, run_id, repo_slug, issue_id, ceiling_micro_usd, decided_at)
+               VALUES ('req-late', 'run-late', 'qds/demo', '42', 1000000, ?)`,
+            ).run(new Date().toISOString());
+          } finally {
+            w.close();
+          }
+          return RECORDS.get(id);
+        }
+        if (id === "run-late") {
+          // Inside `decide.immediate()`. A second connection must not be able to
+          // start writing here: with the wrapper dropped there is no write lock
+          // at all, and with `.deferred()` WAL readers do not block writers
+          // either — both let this BEGIN IMMEDIATE through.
+          const other = new Database(probePath);
+          try {
+            other.exec("PRAGMA busy_timeout = 0;");
+            other.exec("BEGIN IMMEDIATE;");
+            lockProbe.push("acquired");
+            other.exec("ROLLBACK;");
+          } catch (e) {
+            expect((e as Error).message).toMatch(/busy|locked/i);
+            lockProbe.push("busy");
+          } finally {
+            other.close();
+          }
+          return RECORDS.get(id);
+        }
+        return RECORDS.get(id);
+      },
+      config: { defaultCapMicroUsd: cap, boxHourRateMicroUsd: 3_600_000 },
+    });
+    try {
+      seedRecord("run-early");
+      seedRecord("run-late");
+      seedRecord("run-new");
+      // One pre-existing reservation, so the prefetch loop runs at all.
+      admitAged("run-early", "req-early", 1_000_000, 0);
+      const d = probing.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-new", requestId: "req-new" }, cap, 50_000_000);
+      // The seam fired where it was supposed to: under the lock, not before it.
+      expect(lockProbe).toEqual(["busy"]);
+      // …and the late row was in the decision, which is what proves the SELECT
+      // ran inside the same transaction the INSERT did.
+      if (!d.admitted) throw new Error("expected the admission to be granted");
+      expect(d.reservedMicroUsd).toBe(2_000_000); // run-early + run-late
+    } finally {
+      probing.close();
+    }
   });
 
   test("an unwired readRunRecord counts every outstanding reservation (fail-safe default)", () => {
@@ -1326,6 +1529,115 @@ describe("canonical issue identity (cap bypass)", () => {
     ]);
   });
 
+  test("a cost_events row written BEFORE canonicalisation still counts — the predicate folds the COLUMN too", () => {
+    // The load-bearing half, and the one the slug side already had twice. Every
+    // test above writes through `ingestCostEvent`, which canonicalises the BIND
+    // — so they prove the two sides agree, never that a row already ON DISK is
+    // reachable. `cost_events` is append-only (INV-COST-1), so a canonicalising
+    // migration is impossible by construction: a stored `#42` / ` 042 ` / `42 `
+    // was permanently unmatchable, its spend vanished from every SUM the cap
+    // reads, and a silent UNDER-count is a cap bypass.
+    const raw = rawDb();
+    try {
+      for (const [i, stored] of ["#42", " 042 ", "42 "].entries()) {
+        raw.prepare(
+          `INSERT INTO cost_events (event_id, run_id, repo_slug, issue_id, request_id, role,
+                                    agent_id, kind, invocation_seq, cost_micro_usd, unpriced, created_at)
+           VALUES (?, ?, 'qds/demo', ?, 'req-legacy', 'lead', 'lead-1', 'tokens', 0, 1000000, 0, '2026-08-20T12:00:00.000Z')`,
+        ).run(`legacy-${i}`, `run-legacy-${i}`, stored);
+      }
+      // A DIFFERENT issue whose id merely starts with the same digits. Folding
+      // through `Number` or a prefix match would swallow it into #42's balance
+      // and let #42 spend #420's budget.
+      raw.prepare(
+        `INSERT INTO cost_events (event_id, run_id, repo_slug, issue_id, request_id, role,
+                                  agent_id, kind, invocation_seq, cost_micro_usd, unpriced, created_at)
+         VALUES ('legacy-420', 'run-legacy-420', 'qds/demo', '420', 'req-legacy', 'lead',
+                 'lead-1', 'tokens', 0, 7000000, 0, '2026-08-20T12:00:00.000Z')`,
+      ).run();
+    } finally {
+      raw.close();
+    }
+
+    // All three legacy spellings reachable from every spelling of the read.
+    for (const issueId of SPELLINGS) {
+      expect(ledger.readIssueCost("qds/demo", issueId).totalMicroUsd).toBe(3_000_000);
+    }
+    expect(ledger.readIssueCost("qds/demo", "420").totalMicroUsd).toBe(7_000_000);
+
+    // And the gate reads that same recovered spend, so the cap sees it too.
+    seedRecord("run-new");
+    const d = ledger.admitIssue(
+      { repoSlug: "qds/demo", issueId: "42", runId: "run-new", requestId: "req-new" },
+      5_000_000,
+      50_000_000,
+    );
+    expect(d.spentMicroUsd).toBe(3_000_000);
+  });
+
+  test("a gate_admissions row written BEFORE canonicalisation still reserves against a canonical admission", () => {
+    // The reservation half of the same legacy case: an outstanding reservation
+    // the fold cannot reach is exposure the next dispatch is never charged for,
+    // so it is handed headroom a live key is already holding.
+    const raw = rawDb();
+    try {
+      raw.prepare(
+        `INSERT INTO gate_admissions (request_id, run_id, repo_slug, issue_id, ceiling_micro_usd, decided_at)
+         VALUES ('req-legacy', 'run-legacy', 'qds/demo', '#042', 2000000, ?)`,
+      ).run(new Date().toISOString());
+      // Same guard as above on the reservation side — #420 is not #42.
+      raw.prepare(
+        `INSERT INTO gate_admissions (request_id, run_id, repo_slug, issue_id, ceiling_micro_usd, decided_at)
+         VALUES ('req-legacy-420', 'run-legacy-420', 'qds/demo', '420', 4000000, ?)`,
+      ).run(new Date().toISOString());
+    } finally {
+      raw.close();
+    }
+    seedRecord("run-legacy");
+    seedRecord("run-next");
+    const d = ledger.admitIssue(
+      { repoSlug: "qds/demo", issueId: "42", runId: "run-next", requestId: "req-next" },
+      5_000_000,
+      50_000_000,
+    );
+    expect(d.reservedMicroUsd).toBe(2_000_000); // the legacy row only — never #420's 4M
+    if (!d.admitted) throw new Error(`expected admission, got ${d.reason}`);
+    expect(d.admittedCeilingMicroUsd).toBe(3_000_000);
+  });
+
+  test.each(["#", " ", "#  ", " # "])(
+    "issueId %p is REFUSED — it canonicalises to an identity no override can name",
+    (issueId) => {
+      // Validation moved onto the CANONICAL values. A raw non-empty check ran
+      // BEFORE the fold, so all four passed it, all four then bound
+      // `issue_id = ''`, and they shared ONE budget identity. ISSUE_KEY_RE
+      // requires `#\d+`, so no `perIssueOverrides` key can ever name that
+      // identity — the shared bucket always got `defaultCapMicroUsd`, one
+      // default cap covering an unbounded set of malformed dispatches.
+      seedRecord("run-empty");
+      for (const call of [
+        () => ledger.admitIssue({ repoSlug: "qds/demo", issueId, runId: "run-empty", requestId: "req-empty" }, 5_000_000, 50_000_000),
+        () => ledger.ingestCostEvent(mkEvent(), mkCtx({ runId: "run-empty", issueId })),
+        () => ledger.ingestBoxHours({ runId: "run-empty", repoSlug: "qds/demo", issueId, requestId: "req-empty" }),
+      ]) {
+        let err: CostLedgerError | undefined;
+        try {
+          call();
+        } catch (e) {
+          err = e as CostLedgerError;
+        }
+        expect(err).toBeInstanceOf(CostLedgerError);
+        expect(err?.message).toContain("canonicalises to an empty identity");
+      }
+      // Nothing on either table on the way out: a refusal that still wrote the
+      // row would leave the shared bucket in place regardless.
+      const db = rawDb();
+      expect(rowCount(db, "gate_admissions")).toBe(0);
+      expect(rowCount(db, "cost_events")).toBe(0);
+      db.close();
+    },
+  );
+
   test("capForIssue matches an override written with a `#`-decorated or zero-padded id", () => {
     const config = { ...DEFAULT_COST_CONFIG, perIssueOverrides: { "qds/demo#042": 9_000_000 } };
     // The operator padded the key; the brief supplies the bare id (and vice versa).
@@ -1363,6 +1675,34 @@ describe("canonical issue identity (cap bypass)", () => {
     const ok = join(dir, "two-overrides.json");
     writeFileSync(ok, JSON.stringify({ perIssueOverrides: { "qds/demo#42": 1, "qds/demo#43": 2 } }));
     expect(loadCostConfig(ok).config.perIssueOverrides).toEqual({ "qds/demo#42": 1, "qds/demo#43": 2 });
+  });
+
+  test("an ambiguity that reaches capForIssue anyway resolves to the LOWEST cap, not the first key", () => {
+    // The refusal above lives on the PARSE arm only. A `CostConfig` assembled in
+    // code — a test, a caller merging overrides, a default never read from a
+    // file — can still hold two keys naming one issue, with nobody left to ask.
+    // Returning the first match served 20 USD and ignored the very line added to
+    // LOWER the cap, and object iteration order is not a contract anyone
+    // authored. `Math.min` is the direction that cannot overspend: at worst it
+    // ignores a line meant to RAISE a cap, which refuses a dispatch —
+    // recoverable — where the other mistake spends money that is not.
+    const ambiguous = {
+      ...DEFAULT_COST_CONFIG,
+      perIssueOverrides: { "Owner/Repo#42": 20_000_000, "owner/repo#42": 1_000_000 },
+    };
+    expect(capForIssue(ambiguous, "owner/repo", "42")).toBe(1_000_000);
+    // Not an artefact of insertion order: reversed, the answer is the same.
+    const reversed = {
+      ...DEFAULT_COST_CONFIG,
+      perIssueOverrides: { "owner/repo#42": 1_000_000, "Owner/Repo#42": 20_000_000 },
+    };
+    expect(capForIssue(reversed, "OWNER/REPO", "#042")).toBe(1_000_000);
+    // A key naming a DIFFERENT issue is not dragged into the min.
+    const mixed = {
+      ...DEFAULT_COST_CONFIG,
+      perIssueOverrides: { "Owner/Repo#42": 20_000_000, "owner/repo#43": 1 },
+    };
+    expect(capForIssue(mixed, "owner/repo", "42")).toBe(20_000_000);
   });
 });
 

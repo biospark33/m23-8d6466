@@ -910,6 +910,64 @@ describe("pipeline-run DF3.1 AC9b: the admitted ceiling reaches the run context"
     ).toThrow(/run-context\.json is unreadable/);
   });
 
+  test("a witness WITHOUT a stamped manifest still puts the admitted ceiling on the context", () => {
+    // Was a CHARACTERIZATION of the fail-open direction; the direction is now
+    // reversed, deliberately. A present witness is dispatch's statement about
+    // this run and reaches the context whether or not the manifest declares a
+    // limit — otherwise a regressed `stampManifestLimit` (or `stripAuthoredLimit`
+    // applied runner-side) silently discards the admitted ceiling and the run
+    // spawns at DF1.6's $0.50 default, i.e. TWICE what the ledger reserved.
+    const ctx = runContextFrom(
+      "run-8",
+      "req-8",
+      { pipelineId: "witness-without-stamp" },
+      admitted(JSON.stringify({ effectiveCeilingMicros: 250_000 })),
+    );
+    expect(ctx.effectiveCeilingMicros).toBe(250_000);
+  });
+
+  test("a BROKEN witness with no declared limit refuses — present-but-unreadable is never 'uncapped'", () => {
+    // `witnessPresent` only decides whether to LOOK; everything it finds goes to
+    // the hardened reader, which refuses what it cannot verify. The tempting
+    // shortcut is to treat an unparseable witness on the no-declared-cap path as
+    // "nothing to reconcile" and fall through to an absent field — which turns a
+    // corrupt witness into an uncapped run at the harness default, the same
+    // money direction the fix just closed.
+    expect(() =>
+      runContextFrom(
+        "run-9",
+        "req-9",
+        { pipelineId: "broken-witness-no-stamp" },
+        admitted("{ truncated"),
+      ),
+    ).toThrow(/run-context\.json is unreadable/);
+  });
+
+  test("a DANGLING run-context.json symlink is PRESENT, not absent — this is why lstat, not existsSync", () => {
+    // `existsSync` follows symlinks and reports a dangling one as absent, so the
+    // no-declared-cap path would skip the witness entirely and leave the run
+    // uncapped. That hands an author a way to hide a ceiling-LOWERING witness:
+    // plant a broken link named `run-context.json` beside the manifest and the
+    // ceiling dispatch admitted is never consulted. `lstat` sees the LINK, so
+    // the read happens and refuses. Nothing else in the suite pins this choice,
+    // which is exactly how it would get "simplified" back to `existsSync`.
+    const runRoot = path.join(tmpRoot, `ac9b-${seq++}`);
+    fs.mkdirSync(runRoot, { recursive: true });
+    const manifestPath = path.join(runRoot, "pipeline.yaml");
+    fs.writeFileSync(manifestPath, "{}\n");
+    fs.symlinkSync(path.join(runRoot, "no-such-target.json"), path.join(runRoot, "run-context.json"));
+    // The fixture really is the discriminating one: the two calls DISAGREE here.
+    // Without this the link could quietly be replaced by a real file and the
+    // case would keep passing while testing nothing.
+    expect(fs.existsSync(path.join(runRoot, "run-context.json"))).toBe(false);
+
+    // Refused, NOT silently uncapped: reaching the reader at all is the property
+    // under test, and the reader is what turns a link into a refusal.
+    expect(() =>
+      runContextFrom("run-10", "req-10", { pipelineId: "dangling-witness" }, { manifestPath, runRoot }),
+    ).toThrow(/run-context\.json is unreadable/);
+  });
+
   test("a symlinked manifest path cannot aim the check at another directory's witness", () => {
     // The call site hands the VERIFIED resolvedPath from `loadManifest`, but
     // the witness read re-asserts beneath-root on its own: reached through a
@@ -937,4 +995,99 @@ describe("pipeline-run DF3.1 AC9b: the admitted ceiling reaches the run context"
       // pass just as well if the witness were simply missing.
     ).toThrow(/resolves outside the run root/);
   });
+
+  test("an unresolved manifest path THROWS rather than falling back to the argv string", () => {
+    // Why a source assertion and not a call: `resolvedPath` is optional on
+    // `LoadedManifest` — `stampManifestLimit` and `stripAuthoredLimit` both drop
+    // it deliberately, because their bytes match no file on disk — but
+    // `loadManifest`, the only thing `main` routes through today, always sets
+    // it. So there is no runtime path left that reaches the branch. What is
+    // still reachable is the FUTURE caller who routes `main` through one of the
+    // deriving helpers, and the old `?? manifestPath` fallback silently
+    // substituted the argv string for the verified realpath at exactly that
+    // moment — aiming the cap witness at whatever directory a symlinked
+    // `--manifest` pointed into, which is the redirect the symlink case above
+    // refuses. A throw is what keeps the re-enable from being silent.
+    const source = fs.readFileSync(path.join(REPO_ROOT, "scripts", "pipeline-run.ts"), "utf8");
+    // No `?? manifestPath` anywhere near the witness anchor…
+    expect(source).not.toMatch(/resolvedPath\s*\?\?\s*manifestPath/);
+    // …and the undefined case is a throw, not a default.
+    expect(source).toMatch(/if \(resolvedPath === undefined\) \{\s*\n\s*throw new Error\(/);
+  });
+
+  test("the cap refusal closes the tracer — the session it opened does not wedge the requestId", async () => {
+    // `main` opens the Tracer and initiates the session BEFORE it builds the
+    // RunContext, so a refusal out of `runContextFrom` escapes with a live
+    // handle. It used to run straight to the top-level catch, which writes
+    // stderr and exits — leaking an open SQLite/WAL handle and, worse, an
+    // UNFINISHED session row. That row is the damage that outlives the process:
+    // a later `initiateSession` for the same requestId throws
+    // RequestIdRepoMismatch, so one mistyped manifest wedged that correlation id
+    // for good. Driven through the spawned runner, because the guarded region is
+    // in `main` and nothing about it is visible from `runContextFrom` alone.
+    const ws = workspace();
+    const requestId = crypto.randomUUID();
+    // A manifest that DECLARES a cap with no `run-context.json` beside it — the
+    // "authored limit, no dispatch witness" refusal, which is the cheapest way
+    // to make `runContextFrom` throw at exactly that point in `main`.
+    const capped = path.join(ws.dir, `pipeline-capped-${seq++}.json`);
+    fs.writeFileSync(
+      capped,
+      JSON.stringify({
+        version: "1.0.0",
+        pipelineId: "capped-demo",
+        runBudgetMs: 100_000,
+        limitMicroUsd: 250_000,
+        phases: [
+          {
+            name: "plan",
+            kind: "code",
+            description: "Emit the plan artifact for the requested change",
+            maxDurationMs: 15_000,
+            retries: 0,
+            command: ["echo", "planned"],
+          },
+          {
+            name: "build",
+            kind: "code",
+            description: "Apply the reviewed change to the worktree",
+            maxDurationMs: 15_000,
+            retries: 0,
+            command: ["echo", "built"],
+          },
+        ],
+      }),
+    );
+    const correlation = ["--repo-slug", "qds/demo", "--issue", "42", "--request-id", requestId];
+    const refused = spawnRunner(
+      ["--manifest", capped, "--budget-ms", "120000", "--journal", ws.journal, "--run-root", ws.dir, ...correlation],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(refused.stderr).text(), refused.exited]);
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("run-context.json");
+
+    // `Tracer.close()` runs `PRAGMA wal_checkpoint(TRUNCATE)` before it closes
+    // the handle, which leaves the sidecar at ZERO bytes. A handle abandoned to
+    // process exit is never checkpointed — the kernel just closes the fd — so
+    // the WAL keeps the session upsert's frames. SIZE, not existence:
+    // bun:sqlite leaves the `-wal` file on disk after a clean close too, so
+    // `existsSync` proves nothing either way.
+    expect(fs.statSync(`${traceDb(ws.markerRoot)}-wal`).size).toBe(0);
+
+    // And the SAME requestId still works.
+    // A wedged session row makes this second run die on initiateSession instead.
+    const manifest = writeCodeManifest(ws.dir);
+    const after = spawnRunner(
+      [
+        "--manifest", manifest, "--budget-ms", "120000",
+        "--journal", path.join(ws.dir, "out-after.json"), "--run-root", ws.dir,
+        ...correlation,
+      ],
+      ws.markerRoot,
+    );
+    const [afterErr, afterCode] = await Promise.all([new Response(after.stderr).text(), after.exited]);
+    expect(afterErr).not.toContain("RequestIdRepoMismatch");
+    expect(afterCode).toBe(0);
+  }, 60_000);
 });

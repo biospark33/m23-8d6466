@@ -44,16 +44,32 @@ export const REPO_SLUG_PATTERN = /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$
  * that owns (repoSlug, issueId) identity, is what makes the pair a key rather
  * than a string that happens to be compared.
  *
- * ASCII-only on purpose. SQLite's `lower()` folds ASCII and nothing else, and
- * that is what the ledger's one-time row canonicalisation used; a
- * Unicode-aware `toLowerCase()` folds characters SQLite leaves alone (`İ` is
- * the classic one), so JS and SQL would then disagree about identity for any
- * value that reached the ledger without passing REPO_SLUG_PATTERN — a
- * hand-edited run record, for one. Matching SQLite exactly removes that
- * divergence class instead of relying on the charset guard upstream.
+ * Trims first, for the same reason `canonicalIssueId` does: both halves of the
+ * pair are fed from hand-edited records and operator-authored config, and
+ * `" owner/repo"` otherwise opens its own budget identity holding a full
+ * untouched cap while never matching the `owner/repo#N` an override is keyed
+ * by. REPO_SLUG_PATTERN rejects whitespace, so for every slug that came through
+ * `resolveRunCorrelation` this is a no-op; it only folds the values that reach
+ * the ledger around the charset guard.
+ *
+ * ASCII case-folding on purpose. SQLite's `lower()` folds ASCII and nothing
+ * else, and that is what the ledger's row-side predicates use; a Unicode-aware
+ * `toLowerCase()` folds characters SQLite leaves alone (`İ` is the classic
+ * one), so JS and SQL would then disagree about identity for any value that
+ * reached the ledger without passing REPO_SLUG_PATTERN — a hand-edited run
+ * record, for one. Matching SQLite exactly removes that divergence class
+ * instead of relying on the charset guard upstream.
+ *
+ * The cost is that the cap-bypass class is closed for ASCII slugs only:
+ * `Ünïcode/Repo` and `ünïcode/repo` remain two budget identities, each holding
+ * its own cap. Nothing is stranded by that — bind side and column side agree on
+ * both spellings, so no row is unreachable and no spend vanishes — but a
+ * non-ASCII slug retyped in another case is still two budgets. Closing it needs
+ * JS and SQLite to agree on a Unicode folding, which they do not; the charset
+ * guard is what keeps such slugs off the dispatch path in the first place.
  */
 export function canonicalRepoSlug(slug: string): string {
-  return slug.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  return slug.trim().replace(/[A-Z]/g, (c) => c.toLowerCase());
 }
 
 /**

@@ -379,7 +379,11 @@ export async function runCapHitDemo(
   // an exec wrapper that echoes the argv it ran is the ordinary way to report a
   // failure: without this the key lands in the deliver line in plaintext.
   // Reads `key` at call time (a `let` closed over), so it also covers the sinks
-  // that can fire before the mint, where it is still "" and a no-op.
+  // that can fire before the mint, where it is still "" and a no-op — not by
+  // assumption but by `redactWithKey`'s own contract: it returns `text`
+  // verbatim for a secret shorter than MIN_REDACTABLE_LEN
+  // (src/providers/cap-rejection.ts:147), and the mirror-sync test in
+  // tests/providers/cap-rejection.test.ts pins that boundary.
   //
   // Redaction failure must never abort the run: `redactWithKey` throws
   // (fail-closed) on a pathological body, and an escaping throw — here or from

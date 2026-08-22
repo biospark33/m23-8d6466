@@ -169,15 +169,25 @@ let unwinding = false;
  * `markRunLockDestructive`, see `releaseHeldRunLocks` — then exit with the
  * status the signal earned (128+n, not 0).
  *
- * `removeAllListeners`, not `process.once`'s implicit removal. `once` removed
- * only OUR handler and then re-raised, which relies on the default TERMINATE
- * disposition applying — and it does not while ANY other listener for that
- * signal is still registered (a test runner, an embedder, a wrapper). The
+ * Every listener comes OFF before the re-raise, not just ours. `once`'s implicit
+ * removal takes only our handler and then re-raises, which relies on the default
+ * TERMINATE disposition applying — and it does not while ANY other listener for
+ * that signal is still registered (a test runner, an embedder, a wrapper). The
  * signal was swallowed there, with the lock already unlinked and the teardown
- * still in flight. Clearing every listener restores the default disposition, so
+ * still in flight. A listener-free signal restores the default disposition, so
  * the re-raise really does kill the process — `process.exit(128+n)` would look
  * the same to a shell but reports a clean exit rather than a death by signal,
  * and `signalCode` is what the callers of a killed CLI actually read.
+ *
+ * PUT BACK, though, rather than `removeAllListeners`. This module is a library:
+ * `scripts/sandbox-teardown.ts` exports `run()` and `acquireRunLock`, tests
+ * import them, and embedders call them — so a permanent strip meant the first
+ * lock any consumer acquired silently deleted its own SIGINT/SIGTERM handling
+ * (graceful shutdown, coverage flush, `bun test` cleanup) for the rest of the
+ * process. The removal is only needed for the length of the re-raise. On the
+ * path that matters the restore never runs, because the process is already
+ * dead; if the signal was blocked or ignored and we survive it, the host's
+ * disposition is exactly what it was before we touched it.
  *
  * `process.on` plus the `unwinding` latch, not `once`: the handler stays
  * registered until a signal actually arrives, so a SECOND acquire after an
@@ -198,13 +208,22 @@ function installSignalRelease(): void {
   if (signalsInstalled) return;
   signalsInstalled = true;
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
-    process.on(sig, () => {
+    const onSignal = (): void => {
       if (unwinding) return;
       unwinding = true;
       releaseHeldRunLocks();
-      process.removeAllListeners(sig);
-      process.kill(process.pid, sig);
-    });
+      // Ours goes for good (the `unwinding` latch already made it a no-op);
+      // everyone else's is borrowed for the duration of the re-raise.
+      process.removeListener(sig, onSignal);
+      const others = process.listeners(sig);
+      for (const listener of others) process.removeListener(sig, listener as () => void);
+      try {
+        process.kill(process.pid, sig);
+      } finally {
+        for (const listener of others) process.on(sig, listener as () => void);
+      }
+    };
+    process.on(sig, onSignal);
   }
   // Sync by construction (`releaseHeldRunLocks` is all *Sync calls) — an async
   // release here would never run. Releasing an empty `held` is a no-op, so this
@@ -224,11 +243,34 @@ function installSignalRelease(): void {
  * out too. This module's own promise is that "a stale lock means an uncertain
  * teardown state, which is exactly the moment an operator — not a heuristic —
  * should decide", so leave it for the operator and say so on stderr.
+ *
+ * The mark protects the STATE, not just the signal path. It used to be
+ * consulted ONLY by `releaseHeldRunLocks`, while `releaseRunLock` deleted it
+ * and released unconditionally — so a teardown that destroyed the box and THEN
+ * threw hit its caller's `finally { releaseRunLock(lock) }` and handed a
+ * half-torn-down run to the next retry with a clean lock. An interrupt and a
+ * throw leave the run in the same uncertain state; only the exit path differed.
+ * `releaseRunLock` refuses the same way now, and the mark is cleared by the
+ * caller that KNOWS the destructive phase completed.
  */
 const destructive = new Set<string>();
 
 export function markRunLockDestructive(lock: string): void {
   destructive.add(lock);
+}
+
+/**
+ * The destructive phase finished — the box is gone, the key revoked, the record
+ * closed — so `lock` is an ordinary lock again and both release paths may drop
+ * it automatically.
+ *
+ * Called by the CLI on its SUCCESS path only. It is deliberately not something
+ * `releaseRunLock` can infer: from inside the release, "the caller reached its
+ * finally" looks identical whether `teardownSandbox` returned or threw, and
+ * that is the entire distinction the mark exists to draw.
+ */
+export function clearRunLockDestructive(lock: string): void {
+  destructive.delete(lock);
 }
 
 /**
@@ -319,19 +361,29 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
     // present but unreadable — fail closed below with what we do know
   }
   // An EMPTY body is not an unparseable one. Nothing ever writes a lock without
-  // a body, so the only way to observe one is `writeLockDirect`'s window — a
-  // creator SIGKILLed/OOM-killed between the exclusive create and the write
-  // (every throw in there removes the lock itself). Rendered as "holder
+  // a body, so the ways to observe one are `writeLockDirect`'s create-to-write
+  // window (a creator SIGKILLed/OOM-killed in it; every throw in there removes
+  // the lock itself) and a stray `touch <runId>.lock`. Rendered as "holder
   // unknown" it became a lock to WAIT on, nothing in this module steals or
   // expires, and `reapStaleTemps` matches only `.tmp`: the run refused forever
   // while the box and the key kept billing. Name it and give the exact `rm`.
+  //
+  // NOT `stale`, though. An empty body PROVES NOTHING — least of all that its
+  // creator is dead. `writeLockDirect` is the fallback for the filesystems
+  // where hard links do not work at all (SMB, FUSE, NFS bind mounts — see
+  // `claim`'s EPERM/ENOSYS rationale), i.e. exactly the ones where create,
+  // write and fsync each round-trip a network and the "instant" is not one. A
+  // live contender sitting in that window is the ordinary case, and `stale` is
+  // the MACHINE-READABLE claim that no live process holds the lock: it drives
+  // the "rm it, then re-run" remediation, which is the double teardown printed
+  // as advice. Say what is known in the prose and leave the flag alone.
   if (readable && body === "") {
     return new RunLockedError(
       lock,
-      "the lock is empty: its creator died between creating it and writing its body",
+      "an empty lock, holder unknown",
       holder,
-      true,
-      " — if a harvest or teardown of this run started in the last few seconds, wait and re-check first: an empty lock is otherwise only visible for the instant between its creation and its body being written",
+      false,
+      " — an empty lock means either a creator that died between creating it and writing its body, or one still inside that window (on a filesystem without hard links the write and its fsync are not instant). Wait and re-check first; rm it only once you have confirmed no harvest or teardown of this run is running anywhere that shares this directory",
     );
   }
   const { pid, host, at } = parseLockBody(body);
@@ -355,6 +407,31 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
         ? `pid ${pid} from a lock written before the host field existed, liveness unknown from here, held ${age}s`
         : `pid ${pid} on host ${host}, liveness unknown from here, held ${age}s`,
       holder,
+    );
+  }
+  // OUR OWN pid, on our own host, in a body we did not write (`claimedByUs`
+  // compares the nonce and sends the mismatch here). `acquireRunLock` refuses a
+  // lock this process actually holds up front — `held.has(lock)` — so by the
+  // time a claim gets this far, this process does NOT consider itself the
+  // holder. Two ways to arrive, and neither is re-entrancy: a predecessor was
+  // SIGKILLed and the OS recycled its pid onto us, or an earlier claim of ours
+  // outlived a failed release. `claimedByUs` used to raise
+  // RunLockReentrantError for both, whose remediation ("release the lock before
+  // acquiring it again") is unfollowable when `held` is empty and there is
+  // nothing to release — and the run stayed wedged against every later harvest
+  // and teardown while the box and the key billed.
+  //
+  // Marked stale, and this is the ONE place the module can prove it: a pid is
+  // unique among the live processes of one process table, and this one is ours,
+  // so it cannot also name a live holder. `isAlive` would say "yes" (it is us)
+  // and send the operator to wait on themselves forever.
+  if (pid === String(process.pid)) {
+    return new RunLockedError(
+      lock,
+      `pid ${pid} is this invocation's own pid but the claim is not one it registered, held ${age}s`,
+      holder,
+      true,
+      ` — either a dead predecessor's pid was recycled onto this process, or an earlier claim of this process outlived a failed release. No live invocation can hold it: this pid is ours. rm ${lock}, then re-run`,
     );
   }
   // PID liveness, not just the number: without it the printed remediation
@@ -429,10 +506,14 @@ function reapStaleTemps(runsDir: string, runId: string): void {
  * finish" — about ourselves, forever.
  *
  * The body carries a per-attempt nonce, so "the lock holds exactly the bytes we
- * just wrote" is proof the link landed. A body with our pid and our host but a
- * different nonce is this process's own earlier claim that outlived its
- * registration, which is what `RunLockReentrantError` says instead of sending
- * an operator to wait on themselves. Anything else is genuine contention.
+ * just wrote" is proof the link landed. Anything else is not ours, INCLUDING a
+ * body carrying our own pid and host with a different nonce: that used to throw
+ * `RunLockReentrantError` from here, which is wrong twice over — a pid the OS
+ * recycled onto us from a SIGKILLed predecessor produces the identical body,
+ * and genuine re-entrancy never reaches this function because `acquireRunLock`
+ * refuses on `held.has(lock)` before it claims. `refuse` classifies the
+ * pid-matches-us case (it can prove no live invocation holds such a lock);
+ * everything else is genuine contention.
  */
 function claimedByUs(lock: string, body: string): boolean {
   let onDisk = "";
@@ -443,10 +524,7 @@ function claimedByUs(lock: string, body: string): boolean {
     // stranger's and let the caller refuse (which re-reads and reports).
     return false;
   }
-  if (onDisk === body) return true;
-  const { pid, host } = parseLockBody(onDisk);
-  if (pid === String(process.pid) && host === lockHost()) throw new RunLockReentrantError(lock);
-  return false;
+  return onDisk === body;
 }
 
 /**
@@ -502,7 +580,20 @@ function claim(lock: string, body: string): boolean {
       throw e;
     }
   } finally {
-    if (fd !== undefined) closeSync(fd);
+    // Guarded, for the reason `writeLockDirect`'s own catch states: this runs
+    // while the original error is in flight, and an ENOSPC/EIO on the write or
+    // the fsync is exactly the failure whose `close(2)` throws EIO on the same
+    // dying device. An unguarded `closeSync` here REPLACED the caller's errno
+    // with a close error and skipped the `rmSync` below, leaking the temp — the
+    // hazard `writeLockDirect` names this function as avoiding. It does now.
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // The descriptor is consumed either way (POSIX); the original error is
+        // the useful one and it is still in flight.
+      }
+    }
     try {
       rmSync(tmp, { force: true });
     } catch {
@@ -641,24 +732,40 @@ function restore(claimed: string, lock: string): string {
   const discarded = `another invocation holds ${lock}, so the copy at ${claimed} was discarded rather than put back over a live lock`;
   const stranded = (why: string): string =>
     `it could not be put back (${why}) and is now at ${claimed} — mv it back to ${lock} once no other invocation holds it`;
+  // This function is called INLINE inside a `throw new Error(\`… ${restore(…)}\`)`
+  // template, so anything that escapes it replaces the diagnosis ("refusing to
+  // release …", "it now holds …") with a bare fs errno — and the operator loses
+  // both the reason and the `mv` remediation for a rescue file that may be the
+  // only copy of a live holder's claim. `force: true` swallows ENOENT and
+  // nothing else: EROFS, EIO and EACCES all still throw. Every cleanup below is
+  // best-effort by construction — the claim's whereabouts, which is what the
+  // returned sentence reports, does not depend on the tidy-up succeeding.
+  const discard = (): void => {
+    try {
+      rmSync(claimed, { force: true });
+    } catch {
+      // Leftover rescue file: litter, not a correctness bug. The path either
+      // holds a live lock (EEXIST) or the body we just put back.
+    }
+  };
   try {
     linkSync(claimed, lock);
-    rmSync(claimed, { force: true });
+    discard();
     return "it was put back";
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code === "EEXIST") {
-      rmSync(claimed, { force: true });
+      discard();
       return discarded;
     }
     if (code !== "EPERM" && code !== "ENOSYS" && code !== "EOPNOTSUPP") return stranded(code ?? (e as Error).message);
   }
   try {
     if (!writeLockDirect(lock, readFileSync(claimed, "utf8"))) {
-      rmSync(claimed, { force: true });
+      discard();
       return discarded;
     }
-    rmSync(claimed, { force: true });
+    discard();
     return "it was put back";
   } catch (e) {
     return stranded((e as NodeJS.ErrnoException).code ?? (e as Error).message);
@@ -673,6 +780,9 @@ function restore(claimed: string, lock: string): string {
  * which is the exact double-teardown the lock exists to prevent. Releasing a
  * path this process never held is a no-op; finding a foreign body there throws,
  * because the caller's own exit code should say the run was left locked.
+ *
+ * Refuses outright while the lock is marked destructive and `force` is not set
+ * — see `markRunLockDestructive` / `clearRunLockDestructive`.
  *
  * READ FIRST, then take. `rename` moves whatever the path points at, so taking
  * before comparing meant a lock that is no longer ours — cleared by hand,
@@ -694,13 +804,24 @@ function restore(claimed: string, lock: string): string {
  * kernel-held lock ever becomes reachable (a native binding, or `fs` growing
  * one), that is the upgrade path — it would make the restore branch dead code.
  */
-export function releaseRunLock(lock: string): void {
+export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): void {
   const body = held.get(lock);
   if (body === undefined) return;
+  // The destructive mark is NOT cleared by the act of releasing. "The caller
+  // reached its `finally`" is what a deliberate release used to be inferred
+  // from, and it looks identical whether the teardown returned or threw — so a
+  // `fleet teardown` that destroyed the box and then failed released a clean
+  // lock and handed the half-torn-down run to the next retry, which is the
+  // state this module says only an operator can judge. The caller clears the
+  // mark on its SUCCESS path (`clearRunLockDestructive`); `force` exists for a
+  // caller that has judged the state itself and wants the lock gone anyway.
+  if (destructive.has(lock) && opts.force !== true) {
+    throw new Error(
+      `refusing to release ${lock}: this invocation was interrupted or failed after it began destroying the run, so the lock is deliberately left in place — check the run's box, key and record before anything else touches it, then rm ${lock} once you know the teardown state`,
+    );
+  }
   // Dropped first: a failed release must not be retried by the signal handler.
   held.delete(lock);
-  // The destructive phase is over the moment its caller releases deliberately —
-  // that is the whole difference between this and the signal path.
   destructive.delete(lock);
 
   let before: string;

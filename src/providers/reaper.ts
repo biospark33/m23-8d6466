@@ -31,7 +31,15 @@ import {
   type KeyApi,
   type KeyEntry,
 } from "./credentials.ts";
-import { driverListing, SBX_OWNERSHIP_TAG, type ProviderDriver, type ProviderVm } from "./driver.ts";
+import {
+  driverListing,
+  isFactoryOwnedVm,
+  ProvisionRefusedError,
+  RUN_ID_SHAPE,
+  unverifiedVmListingRefusal,
+  type ProviderDriver,
+  type ProviderVm,
+} from "./driver.ts";
 import {
   loadQuotaLimits,
   type QuotaLimitsError,
@@ -44,10 +52,11 @@ import { teardownSandbox, type TeardownDeps } from "./teardown.ts";
 import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
 
 /**
- * The generated run-id grammar (`<slug>-<YYYYMMDD>-<6 hex>`, run-record.ts
- * newId). A VM name outside it can never be a factory box.
+ * The generated run-id grammar — now declared in driver.ts beside
+ * `isFactoryOwnedVm`, which `reapRuns` needs too. Re-exported here so every
+ * existing importer of `reaper.ts` is unchanged.
  */
-export const RUN_ID_SHAPE = /^[a-z0-9][a-z0-9-]*-\d{8}-[0-9a-f]{6}$/;
+export { RUN_ID_SHAPE };
 
 export type RowClass =
   | "paired" | "leaked-vm" | "leaked-key" | "stale-record"
@@ -282,10 +291,17 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
   const tRecords = Date.now();
   let records: RunRecord[];
   try {
+    // `list()`, not `listWithAnomalies()`: this phase has nothing to DO with the
+    // two halves. `list()` already refuses on a non-empty `skipped` and names
+    // each file with the reason it was skipped, which is exactly the refusal
+    // this catch re-wraps — reading the anomaly here would only rebuild that
+    // message by hand, with less detail. `src/fleet/status.ts` reads the halves
+    // because it RENDERS the anomaly; a destructive sweep only ever refuses on
+    // it. (`reapRuns` in driver.ts refuses on the same input the same way.)
     records = deps.store.list();
   } catch (e) {
-    // The store already names the offending file (INV-4). Propagate loudly —
-    // a dropped record is a key nobody revokes.
+    // The store already names the offending file and why (INV-4). Propagate
+    // loudly — a dropped record is a key nobody revokes.
     throw new SweepError(
       "record-unreadable",
       `${(e as Error).message} — refusing to reap anything until every record parses`,
@@ -302,17 +318,24 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
     // on an unverified population. A skipped box is invisible spend — never
     // destroyed (it is never seen), never reported, never reaped.
     const listing = await withTimeout(driverListing(deps.driver), LIST_TIMEOUT_MS, "driver.list()");
-    if (listing.skipped.length > 0) {
-      throw new Error(
-        `the driver skipped ${listing.skipped.length} box(es) in its listing (${listing.skipped.join(", ")})`,
-      );
-    }
+    // The refusal for THIS input has one source (driver.ts) — `reapRuns` raises
+    // the same one on the same listing, and the two used to word it, and its
+    // remediation, differently by hand.
+    if (listing.skipped.length > 0) throw unverifiedVmListingRefusal(deps.driver.name, listing.skipped);
     vms = listing.vms;
   } catch (e) {
+    // The shared refusal already carries the message AND the remediation for an
+    // unverified population; anything else here (a transport failure, the
+    // timeout) gets the enumeration wording and this phase's own remediation.
+    // `SweepError`'s `code` stays `list-unverified` either way — that is what
+    // the CLI classifies on, and the shared refusal's own code is a
+    // ProvisionRefusedError code, not one of this class's three.
+    const shared = e instanceof ProvisionRefusedError ? e : undefined;
     throw new SweepError(
       "list-unverified",
-      `could not enumerate the provider VM list: ${(e as Error).message} — an uncounted population is never reaped`,
-      "re-run once the provider list answers; check the driver/substrate by hand if it repeats",
+      shared?.message ??
+        `could not enumerate the provider VM list: ${(e as Error).message} — an uncounted population is never reaped`,
+      shared?.remediation ?? "re-run once the provider list answers; check the driver/substrate by hand if it repeats",
     );
   }
   const list_vms_ms = Date.now() - tVms;
@@ -354,8 +377,10 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
   for (const vm of vms) {
     // Foreign by grammar, or shape-matching without the ownership tag: reported
     // for manual remediation, NEVER destroyed (INV-1 fail-safe — exedev's ls
-    // reports no tag, so its boxes all land here).
-    if (!RUN_ID_SHAPE.test(vm.name) || vm.tag !== SBX_OWNERSHIP_TAG) {
+    // reports no tag, so its boxes all land here). `isFactoryOwnedVm` is the
+    // shared predicate — `reapRuns` gates its destroy on the same one, so the
+    // two reapers cannot drift into disagreeing about what is ours.
+    if (!isFactoryOwnedVm(vm)) {
       rows.push({ kind: "vm", id: vm.name, class: "foreign", action: "report" });
       continue;
     }
@@ -606,7 +631,7 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
               recordError = (e as Error).message ?? String(e);
             }
           }
-          if (current === undefined || !RUN_ID_SHAPE.test(current.name) || current.tag !== SBX_OWNERSHIP_TAG) {
+          if (current === undefined || !isFactoryOwnedVm(current)) {
             failures.push({
               vm: unit.id,
               code: "ownership-recheck-refused",

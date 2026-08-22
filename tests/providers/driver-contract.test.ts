@@ -21,6 +21,7 @@ import {
   fillRun,
   observeRun,
   reapRuns,
+  SBX_OWNERSHIP_TAG,
   setupRun,
   teardownRun,
   type ProviderDriver,
@@ -207,14 +208,29 @@ export function runDriverContract(opts: DriverContractOptions): void {
       expect(closed.closedAt).toBeString();
       expect((await driver.list(id))).toEqual([]);
 
-      // 7. reap — a box no OPEN record claims is destroyed.
+      // 7. reap — a box no OPEN record claims is destroyed. Tagged, because
+      // reap now destroys only boxes that PROVE they are ours (name grammar +
+      // ownership tag): the listing is account-wide on a real substrate, so an
+      // unclaimed untagged box may be a stranger's.
       const orphan = track(nextId());
-      await driver.create(orphan);
+      await driver.create(orphan, SBX_OWNERSHIP_TAG);
       const keeper = track(nextId());
       await createRun(driver, store, { runId: keeper });
+      // What reap guarantees is now conditional on what the DRIVER can prove,
+      // and the two shipped drivers differ: FakeDriver reports the tag it was
+      // created with, exedev's `ls --json` carries no tag field at all. Assert
+      // the rule, not one driver's outcome — an unclaimed box is destroyed only
+      // when it proves it is ours, and is otherwise left listed and reachable.
+      const listedOrphan = (await driver.list(orphan))[0];
       const destroyed = await reapRuns(driver, store);
-      expect(destroyed).toContain(orphan);
       expect(destroyed).not.toContain(keeper);
+      if (listedOrphan?.tag === SBX_OWNERSHIP_TAG) {
+        expect(destroyed).toContain(orphan);
+      } else {
+        expect(destroyed).not.toContain(orphan);
+        expect((await driver.list(orphan)).map((v) => v.name)).toEqual([orphan]);
+        await driver.destroy(orphan); // what an operator does with a reported box
+      }
       expect((await driver.list(keeper)).map((v) => v.name)).toEqual([keeper]);
       await teardownRun(driver, store, keeper);
     }, 60_000);

@@ -236,6 +236,20 @@ export const LOCK_TIMEOUT_MS = 5_000;
 const LOCK_IMMEDIATE_RETRIES = 8;
 
 /**
+ * How long a temp stamped with OUR OWN pid must sit untouched before
+ * `cleanStaleTemps` treats it as leftover rather than a sibling thread's
+ * in-flight write. See the sweep for why our pid cannot simply be spared.
+ */
+const OWN_TEMP_GRACE_MS = 60_000;
+
+/**
+ * How long a zero-byte `<runId>.json` must sit untouched before `create()`
+ * treats it as an interrupted create's tombstone rather than a sibling's
+ * in-flight one. See `clearCreateTombstone`.
+ */
+const CREATE_TOMBSTONE_GRACE_MS = 5_000;
+
+/**
  * Lock paths this JS thread is currently inside.
  *
  * Module state, so it is per-THREAD by construction — a `node:worker_threads` /
@@ -290,9 +304,39 @@ export const SECRET_PREFIXES: readonly string[] = Object.freeze([
   "sk_test_",
   "ghp_",
   "gho_",
+  // `ghs_` is the one a real clone URL carries: an App-authenticated remote is
+  // `https://x-access-token:ghs_…@github.com/org/repo`, which is exactly the
+  // string a caller writes to `httpsUrl` or `extensions.pr.prUrl`. The shape
+  // heuristic cannot catch it either — anything matching `scheme://` returns
+  // early below — so a missing prefix here is a token persisted forever.
+  // `ghu_`/`ghr_` are the same family (user-to-server, refresh).
+  "ghs_",
+  "ghu_",
+  "ghr_",
   "github_pat_",
   "xoxb-",
   "xoxp-",
+  // Same Slack family as `xoxb-`/`xoxp-`: app-level, app-config and refresh.
+  "xapp-",
+  "xoxa-",
+  "xoxr-",
+  // Stripe's RESTRICTED keys, the pair to `sk_live_`/`sk_test_` above. Both
+  // modes, for the same reason the `sk_` pair carries both.
+  "rk_live_",
+  "rk_test_",
+  // A Google API key is 39 characters — one short of `LONG_TOKEN_RE`'s 40-char
+  // floor in `step-log.ts`, and that floor is load-bearing at 40 because a git
+  // SHA sits there. So the shape heuristic cannot reach this issuer at any
+  // charset, and the prefix is the only thing that catches it. Beware the
+  // false comfort of `GOOGLE_API_KEY=AIza…`, which DOES redact today only
+  // because `=` is inside the token charset and glues the name onto the key
+  // past the floor; delimited by a space, quote or colon it survives intact.
+  //
+  // The one entry here not followed by a separator, so it is also the one most
+  // exposed to a false positive on some future capitalised identifier starting
+  // `AIza`. Nothing in the tree hits that today; if one ever does, the answer is
+  // a longer prefix (`AIzaSy`), not dropping the entry.
+  "AIza",
   "AKIA",
   "ASIA",
   "-----BEGIN",
@@ -517,6 +561,25 @@ export interface RunRecordStoreOptions {
   /** Propagated into every mutation log line. */
   requestId?: string;
   /**
+   * Whether constructing the store may TOUCH the directory. Default `true` —
+   * every existing caller keeps today's behaviour by omission.
+   *
+   * `false` opens the store for READING only, and the point is what it does
+   * NOT do: no `mkdir`, no `chmod`, no O_EXCL/link probe file, no stale-temp
+   * sweep. Pointed at an existing directory the write path re-permissions it to
+   * 0700, so `fleet teardown qds-nosuchrun --dir /srv/existing` exited 4 as
+   * promised while silently re-permissioning an operator's directory — the
+   * "mutates nothing" clause of df3-1-dispatcher-core-verbs.md:88-90 broken by
+   * the probe, not by the verb.
+   *
+   * It is a READ mode, not a lax write mode: the mutating verbs refuse on a
+   * store built this way (see `assertWritable`). INV-5's guarantee is that no
+   * record is ever written to a directory whose 0700 posture and O_EXCL support
+   * were not proven, and skipping the proof to write anyway is exactly the
+   * degradation the constructor throws to prevent.
+   */
+  create?: boolean;
+  /**
    * Fault-injection seam: called after the temp file is written and before the
    * `rename`. Throwing here must leave the prior record byte-identical (AC2).
    */
@@ -540,15 +603,45 @@ export interface RunRecordStoreOptions {
 
 export const DEFAULT_RUNS_DIR = ".sandbox/runs";
 
+/**
+ * The records directory a store WOULD use, as a plain string. The constructor
+ * resolves through this, so there is one copy of the chain.
+ *
+ * Exported because the CLI needs the resolved path for a directory that may not
+ * exist yet — that is the whole case it needs it for, since the read verbs
+ * refuse a nonexistent `--dir` rather than creating it. A `create: false` store
+ * cannot answer: it throws ENOENT on exactly that input. A second copy of the
+ * chain resolves to a DIFFERENT directory the moment either end moves, and on
+ * this path a different directory is a different ledger and a different record
+ * set — the two stores then disagree about which runs exist.
+ */
+export function resolveRunsDir(dir?: string): string {
+  return dir ?? process.env.QDS_RUNS_DIR ?? DEFAULT_RUNS_DIR;
+}
+
 /** What a directory sweep read, and what it refused to read (see `listWithAnomalies`). */
 export interface RunRecordListing {
   records: RunRecord[];
-  /** Filenames skipped because the stem is not a run id, sorted (`readdir` is sorted first). */
+  /**
+   * Filenames the sweep could not turn into a record, sorted (`readdir` is
+   * sorted first). Either the stem is not a run id, or the BODY was unreadable,
+   * unparseable or schema-rejected — from a caller's side both are the same
+   * thing: a `.json` that may hold a live box and cannot be proven not to.
+   */
   skipped: string[];
+  /**
+   * Why each `skipped[i]` was skipped — same order, same length. A parallel
+   * array rather than a shape change, so every existing `skipped` call site
+   * (`src/fleet/status.ts`, `reapOrphans`) keeps working unchanged while
+   * `list()`'s refusal can still name the actual failure and not just the file.
+   */
+  skippedReasons: string[];
 }
 
 export class RunRecordStore {
   readonly dir: string;
+  /** False on a `create: false` store — see `assertWritable`. */
+  private readonly writable: boolean;
   private readonly requestId: string;
   private readonly beforeRename?: (tmpPath: string) => void;
   private readonly beforeStealTake?: (lockPath: string) => void;
@@ -556,11 +649,16 @@ export class RunRecordStore {
 
   constructor(opts: RunRecordStoreOptions | string = {}) {
     const o: RunRecordStoreOptions = typeof opts === "string" ? { dir: opts } : opts;
-    this.dir = o.dir ?? process.env.QDS_RUNS_DIR ?? DEFAULT_RUNS_DIR;
+    this.dir = resolveRunsDir(o.dir);
     this.requestId = o.requestId ?? newRequestId();
     this.beforeRename = o.beforeRename;
     this.beforeStealTake = o.beforeStealTake;
     this.afterLockTake = o.afterLockTake;
+    this.writable = o.create ?? true;
+    if (!this.writable) {
+      this.assertReadable();
+      return;
+    }
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     // mkdir's mode is ignored when the directory already exists, and masked by
     // umask when it does not — set it explicitly, then verify (INV-5).
@@ -571,6 +669,52 @@ export class RunRecordStore {
     }
     this.assertExclusiveCreateSupported();
     this.cleanStaleTemps();
+  }
+
+  /**
+   * The read-mode constructor's ONLY check: the directory is there and is a
+   * directory. It reads; it never creates and never re-permissions.
+   *
+   * Deliberately NOT the 0700 assertion. A read-mode store is pointed at a
+   * directory the caller does not own the posture of — an operator's
+   * `--dir /srv/existing` — and refusing to LIST a 0755 directory helps nobody
+   * while breaking the exit code the verb promised. The 0700 posture is a
+   * guarantee about directories this store WRITES to, and it stays exactly as
+   * strict there.
+   *
+   * The errno rides the thrown error for the same reason `readRecord` preserves
+   * it: the CLI maps a missing `--dir` to its own exit code off the TYPED code,
+   * never off message text, and what it must not get is a bare ENOENT stack out
+   * of the first `readdirSync`.
+   */
+  private assertReadable(): void {
+    let isDir: boolean;
+    try {
+      isDir = statSync(this.dir).isDirectory();
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      const err = new Error(`run records dir ${this.dir} is unreadable: ${code ?? (e as Error).message}`);
+      if (code !== undefined) (err as NodeJS.ErrnoException).code = code;
+      throw err;
+    }
+    if (!isDir) throw new Error(`run records dir ${this.dir} is not a directory`);
+  }
+
+  /**
+   * Refuse a mutation on a store built with `create: false`.
+   *
+   * A read-mode store skipped the `chmod` to 0700, the mode assertion and the
+   * O_EXCL/`link(2)` probe. Letting it write anyway would put records into a
+   * directory whose posture and platform support were never proven — INV-5's
+   * "never degrade" clause reached by omitting the proof rather than by failing
+   * it. A caller that needs to write constructs a writable store; that is one
+   * line at the call site and it re-runs every check.
+   */
+  private assertWritable(): void {
+    if (this.writable) return;
+    throw new Error(
+      `run record store for ${this.dir} was opened read-only (create: false); construct it without create: false to write`,
+    );
   }
 
   /**
@@ -632,9 +776,9 @@ export class RunRecordStore {
    * constructed per CLI invocation, so an unconditional sweep would delete a
    * concurrent `set`'s in-flight temp and lose that mutation — the owner pid is
    * encoded in the temp name precisely so this stays safe under concurrency.
-   * ponytail: pid reuse — and our own pid — can spare a stale temp; it is swept
-   * by the next construction whose pid differs and sees the owner gone, and a
-   * stray temp is inert either way.
+   * ponytail: pid reuse can spare a stale temp; it is swept by the next
+   * construction whose pid differs and sees the owner gone, and a stray temp is
+   * inert either way.
    */
   private cleanStaleTemps(): void {
     for (const name of readdirSync(this.dir)) {
@@ -646,12 +790,13 @@ export class RunRecordStore {
       const isTemp = name.endsWith(".tmp");
       const isProbe = name.startsWith(".probe-");
       if (!isTemp && !isProbe) continue;
+      const full = join(this.dir, name);
       const owner = Number(isTemp ? name.split(".").at(-3) : name.split("-")[1]);
       // `owner > 0`, not just `Number.isInteger`: `process.kill(0, 0)` signals the
       // caller's own process group and succeeds, so an owner that parsed as `0`
       // would read as permanently alive and the temp would never be swept.
       //
-      // OUR OWN pid is spared, not swept. Two JS threads
+      // OUR OWN pid is judged by AGE, not spared outright. Two JS threads
       // (`node:worker_threads` / `Bun.Worker`) share `process.pid` — the exact
       // configuration `stealIfOwnerGone`'s docstring reasons about — so a
       // same-pid temp can be a sibling thread's in-flight `set()` temp, or a
@@ -659,8 +804,21 @@ export class RunRecordStore {
       // live claim: the temp loses that mutation, the held-aside body destroys
       // a lock a live holder is still inside, which is the lost update
       // `putBack` promises never to cause.
-      if (Number.isInteger(owner) && owner > 0 && (owner === process.pid || isAlive(owner))) continue;
-      rmSync(join(this.dir, name), { force: true });
+      //
+      // But sparing our pid unconditionally made the docstring's "swept by the
+      // next construction" true only for a DIFFERENT pid. A long-lived
+      // dispatcher constructs one store at startup, and every temp orphaned
+      // afterwards (an `rmQuiet` swallowing EACCES, a `beforeRename` abort, a
+      // failed `putBack`) carries our LIVE pid and is skipped by every sweep
+      // this process ever runs — unbounded accumulation for the process
+      // lifetime. OWN_TEMP_GRACE_MS is the bound: both live windows above are
+      // a write-and-rename wide (microseconds), so a same-pid temp untouched
+      // for a full minute is leftover, not in flight.
+      if (Number.isInteger(owner) && owner > 0) {
+        const live = owner === process.pid ? !olderThan(full, OWN_TEMP_GRACE_MS) : isAlive(owner);
+        if (live) continue;
+      }
+      rmSync(full, { force: true });
     }
   }
 
@@ -698,12 +856,23 @@ export class RunRecordStore {
   }
 
   private createUnlogged(runId: string, now: Date): RunRecord {
+    this.assertWritable();
     // Creation is the one moment the strict grammar can act without stranding
     // anything: no record exists yet, so refusing costs nothing.
     assertValidRunId(runId);
     const p = this.path(runId);
     const rec: RunRecord = { runId, createdAt: now.toISOString() };
-    const fd = openSync(p, "wx", 0o600);
+    let fd: number;
+    try {
+      fd = openSync(p, "wx", 0o600);
+    } catch (e) {
+      // A tombstone is not a record, and it must not make the id permanently
+      // uncreatable — see `clearCreateTombstone`. One retry only: a second
+      // EEXIST means a real record (or another writer's fresh create) is at the
+      // path, and INV-3's no-overwrite is absolute for those.
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST" || !clearCreateTombstone(p)) throw e;
+      fd = openSync(p, "wx", 0o600);
+    }
     try {
       // writeFileSync loops until the whole buffer lands; a bare writeSync can
       // short-write and leave a truncated record reported as a success.
@@ -718,6 +887,14 @@ export class RunRecordStore {
       throw e;
     }
     closeSync(fd);
+    // …and the DIRECTORY ENTRY, which the fsync above does not persist. This is
+    // the one place the record has no prior version to fall back to: unlike
+    // `atomicReplace`, where a lost rename reverts to the previous complete
+    // record, a lost create leaves NO handle at all while the provider-side box
+    // survives — precisely the orphan the comment above claims to prevent. Best
+    // effort by design (see `fsyncDir`): a platform that cannot sync a
+    // directory must not fail the create.
+    fsyncDir(this.dir);
     return rec;
   }
 
@@ -783,17 +960,21 @@ export class RunRecordStore {
   }
 
   /**
-   * INV-4: every `.json` in the directory must parse and validate. A malformed or
-   * unreadable record throws naming the file — it is never skipped, because a
-   * record quietly dropped is a key that quietly keeps spending.
+   * INV-4: every `.json` in the directory must parse and validate. A malformed
+   * or unreadable record is never quietly dropped — a record dropped is a key
+   * that quietly keeps spending — so this accessor THROWS naming the file and
+   * the reason.
    *
-   * A filename outside even the LEGACY id grammar is the one file this store
-   * can neither read nor act on. It is not thrown from the SWEEP — that took
-   * the whole directory down over one file — but it is thrown from HERE, at the
-   * accessor that returns records with no channel to report the anomaly on. A
-   * caller holding a bare `RunRecord[]` cannot tell "no such box" from "a box
-   * behind a file I refused to read", and `reapRuns` destroys every box not in
-   * that set. So the plain array is only ever handed back when it is COMPLETE.
+   * The throw is raised HERE, not from the sweep. A file this store cannot turn
+   * into a record — a filename outside even the LEGACY id grammar, or a body
+   * that is unreadable, unparseable or schema-rejected — took the whole
+   * directory down when it propagated out of the sweep, which is a fleet-wide
+   * outage over one file (see `listUnlogged`). But it cannot be silently
+   * skipped either: a caller holding a bare `RunRecord[]` cannot tell "no such
+   * box" from "a box behind a file I refused to read", and `reapRuns` destroys
+   * every box not in that set. So the plain array is only ever handed back when
+   * it is COMPLETE, and the anomaly is a value the sweep returns rather than an
+   * exception the sweep raises.
    *
    * A caller that can act on the anomaly calls `listWithAnomalies()` and gets
    * both halves; a caller that cannot gets an error naming the files. Neither
@@ -801,10 +982,16 @@ export class RunRecordStore {
    * line cannot make a caller fail safe.
    */
   list(): RunRecord[] {
-    const { records, skipped } = this.listWithAnomalies();
+    const { records, skipped, skippedReasons } = this.listWithAnomalies();
     if (skipped.length > 0) {
+      // The REASONS ride the message, not just the filenames. This is the only
+      // error an operator sees for a body-level rejection now that the sweep
+      // quarantines instead of propagating `readRecord`'s throw, and
+      // "run-odd.json could not be read" without "unknown key: nope" is a file
+      // to go and stare at rather than a diagnosis.
+      const detail = skipped.map((name, i) => `${name}: ${skippedReasons[i]}`).join("; ");
       throw new Error(
-        `refusing to return a partial run record listing from ${this.dir}: ${skipped.length} file(s) could not be read as a record (${skipped.join(", ")}) — use listWithAnomalies() to handle them, or repair/remove the files named`,
+        `refusing to return a partial run record listing from ${this.dir}: ${skipped.length} file(s) could not be read as a record (${detail}) — use listWithAnomalies() to handle them, or repair/remove the files named`,
       );
     }
     return records;
@@ -816,12 +1003,12 @@ export class RunRecordStore {
    * A skipped file is not an absence, and a caller that cannot tell the two
    * apart fails OPEN. `reapRuns` builds its claim set from the records this
    * returns and destroys every box not in it — so a `.json` skipped for a bad
-   * filename, whose contents are a perfectly valid OPEN record with a `vmName`,
-   * silently drops that box out of the claim set and the reaper destroys a live
-   * box belonging to an open run. A log line cannot prevent that; a value in
-   * the return can. `fleet status` has the same problem in the reporting
-   * direction: "3 runs" and "3 runs and one record I refused to read" must not
-   * render identically.
+   * filename or an unreadable body, whose contents are a perfectly valid OPEN
+   * record with a `vmName`, silently drops that box out of the claim set and
+   * the reaper destroys a live box belonging to an open run. A log line cannot
+   * prevent that; a value in the return can. `fleet status` has the same
+   * problem in the reporting direction: "3 runs" and "3 runs and one record I
+   * refused to read" must not render identically.
    *
    * This is the only accessor that hands back a partial listing, and it hands
    * back the reason it is partial in the same value. `list()` throws instead —
@@ -836,22 +1023,59 @@ export class RunRecordStore {
   private listUnlogged(): RunRecordListing {
     const records: RunRecord[] = [];
     const skipped: string[] = [];
+    const skippedReasons: string[] = [];
     for (const name of readdirSync(this.dir).sort()) {
       if (!name.endsWith(".json")) continue;
       const id = name.slice(0, -".json".length);
+      let nameOk = true;
       try {
         assertExistingRunId(id);
       } catch {
+        nameOk = false;
+      }
+      if (!nameOk) {
+        const message = `malformed run record ${name}: filename is not a valid run id`;
         skipped.push(name);
-        this.emit(null, "list.anomaly", Date.now(), "error", {
-          code: "malformed_record_name",
-          message: `malformed run record ${name}: filename is not a valid run id`,
-        });
+        skippedReasons.push(message);
+        this.emit(null, "list.anomaly", Date.now(), "error", { code: "malformed_record_name", message });
         continue;
       }
-      records.push(readRecord(join(this.dir, name), id));
+      // The BODY is quarantined per file too, not just the filename.
+      //
+      // One unreadable, unparseable or schema-rejected record used to throw the
+      // whole sweep, and that is a fleet-wide outage rather than one bad file:
+      // `listWithAnomalies()` dies, `list()` dies with it, so `reapRuns` reaps
+      // NOTHING and `fleet status` renders NOTHING until an operator deletes
+      // the file by hand — while every live box keeps billing. Three ordinary
+      // events reach it: an interrupted `create()`'s zero-byte tombstone
+      // (`JSON.parse("")`), a record written by a NEWER build carrying a core
+      // field or an extension namespace this one has not registered (a rollback
+      // after a bad deploy, a second checkout, a separately-deployed reaper),
+      // and a transient EIO/EACCES on one file. `assertWellFormed`'s own
+      // docstring names that exact outage as the thing to avoid, and the
+      // read/write split it built only covers unknown FIELDS inside an
+      // already-registered namespace.
+      //
+      // So the ANOMALY is reported rather than the listing dropped: this is
+      // still not a silent skip. `list()` refuses outright on a non-empty
+      // `skipped`, so `reapRuns` stays fail-closed on an unproven population —
+      // it just fails closed with the file NAMED instead of taking the process
+      // down. `get()`/`readRecord()` are untouched: a caller asking for ONE
+      // record by id still gets the hard error, because there the caller knows
+      // which record it wanted and an error is actionable.
+      try {
+        records.push(readRecord(join(this.dir, name), id));
+      } catch (e) {
+        const message = (e as Error).message;
+        skipped.push(name);
+        skippedReasons.push(message);
+        this.emit(null, "list.anomaly", Date.now(), "error", {
+          code: (e as NodeJS.ErrnoException).code ?? "unreadable_record",
+          message,
+        });
+      }
     }
-    return { records, skipped };
+    return { records, skipped, skippedReasons };
   }
 
   /**
@@ -870,6 +1094,9 @@ export class RunRecordStore {
    * owner that is not provably dead.
    */
   private withLock<T>(runId: string, fn: () => T): T {
+    // The one gate covering `set()` and `close()` — both route through here, and
+    // the lock file itself is a write into the unproven directory.
+    this.assertWritable();
     const lock = this.lockPath(runId);
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     // `<pid> <nonce>`: the pid is what a contender probes for liveness, the
@@ -894,8 +1121,15 @@ export class RunRecordStore {
       if (why !== null) {
         heldReason = why;
         sleepMs(5);
-      } else if (++sleepless > LOCK_IMMEDIATE_RETRIES) {
-        sleepMs(5);
+      } else {
+        // `null` means the path was FREE at the probe and the claim simply lost
+        // the race. Whatever the last iteration blamed no longer describes
+        // anything — leaving it set reported a long-gone `lock unreadable: EIO`
+        // (or a stale `held by a live owner`) on the eventual timeout and sent
+        // an operator hunting a phantom writer, which is the same failure the
+        // reason string exists to close.
+        heldReason = "contended";
+        if (++sleepless > LOCK_IMMEDIATE_RETRIES) sleepMs(5);
       }
     }
     heldLocks.add(lock);
@@ -1293,6 +1527,89 @@ function rmQuiet(p: string): void {
 /** Block this thread briefly. The lock wait is short and the callers are sync. */
 function sleepMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Clear a ZERO-BYTE `<runId>.json` so the id is creatable again. True when the
+ * path is now free and the caller may retry its exclusive create.
+ *
+ * A SIGKILL or power loss between `openSync(p, "wx")` and the `writeFileSync`
+ * inside `createUnlogged` leaves an empty file. It is not `.tmp` and not
+ * `.probe-`, so `cleanStaleTemps` never sweeps it, and its stem is a perfectly
+ * valid run id, so nothing else refuses it either — the id became a permanent
+ * `EEXIST` tombstone that only an operator could clear by hand.
+ *
+ * Removing it loses NOTHING, which is what makes this compatible with INV-3's
+ * no-overwrite rule: zero bytes carry no `keyHash`, no `vmName`, no
+ * `createdAt`. There is no run behind an empty file, so there is no key nobody
+ * revokes and no box nobody reaps.
+ *
+ * SIZE ALONE IS NOT ENOUGH. A concurrent `create()` of the same id is
+ * zero-byte too, for the microseconds between its open and its write, and
+ * deleting THAT would let two creates both believe they own the id.
+ * CREATE_TOMBSTONE_GRACE_MS is the separator: an empty file untouched for
+ * seconds is a corpse, an empty file written to this instant is a live writer.
+ * ponytail: an mtime grace, not a lock — `create()` runs before any lock
+ * exists, and the window it has to separate is microseconds wide.
+ */
+function clearCreateTombstone(p: string): boolean {
+  let size: number;
+  try {
+    const st = statSync(p);
+    size = st.size;
+  } catch {
+    return false;
+  }
+  if (size !== 0 || !olderThan(p, CREATE_TOMBSTONE_GRACE_MS)) return false;
+  try {
+    // `force`, so a corpse another sweeper cleared first still counts as done.
+    rmSync(p, { force: true });
+  } catch {
+    // EACCES/EPERM/EBUSY: the tombstone stays. Report the original EEXIST
+    // rather than a second, less recognisable errno.
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Has `p` sat untouched for at least `ms`? A stat that fails answers NO — an
+ * unstat-able file is one we can prove nothing about, and every caller here
+ * uses the answer to decide whether to DELETE.
+ */
+function olderThan(p: string, ms: number): boolean {
+  try {
+    return Date.now() - statSync(p).mtimeMs >= ms;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * fsync the DIRECTORY entry, best effort.
+ *
+ * `fsync` on a file's own fd persists its DATA, not the LINK — on ext4/xfs a
+ * newly created file can be absent entirely after a power loss even though its
+ * bytes were synced. Only a sync of the parent directory persists the name.
+ *
+ * Guarded end to end: a platform that cannot open or fsync a directory
+ * (Windows, some FUSE and network mounts) must not fail a create over it. The
+ * durability is best-effort; the create is not.
+ */
+function fsyncDir(dir: string): void {
+  let fd: number;
+  try {
+    fd = openSync(dir, "r");
+  } catch {
+    return;
+  }
+  try {
+    fsyncSync(fd);
+  } catch {
+    // EINVAL/EPERM/ENOTSUP on a filesystem that does not sync directories.
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Is `pid` still around? Used only to tell a live writer's temp from a corpse. */

@@ -41,7 +41,12 @@ import { CostLedger } from "../src/providers/cost-ledger.ts";
 import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
-import { acquireRunLock, releaseRunLock } from "./lib/run-lock.ts";
+import {
+  acquireRunLock,
+  clearRunLockDestructive,
+  markRunLockDestructive,
+  releaseRunLock,
+} from "./lib/run-lock.ts";
 
 // The lock moved to scripts/lib/run-lock.ts (shared with scripts/fleet.ts);
 // re-exported here because this CLI has always exported both symbols.
@@ -170,6 +175,11 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
   };
   let lock: string | undefined;
   let ledger: CostLedger | undefined;
+  // Mirrors the run lock's destructive mark, so the `finally` below can tell a
+  // release that FAILED from one this module deliberately refused — the two
+  // need opposite remediations, and only the second means "the run's state is
+  // unknown, do not let anything else touch it".
+  let destructivePhase = false;
   // Assigned on every path, then possibly downgraded by the finally: a release
   // failure leaves the run wedged, and `return 0` inside the try would have
   // committed the exit code before the cleanup could say so. Seeded to failure
@@ -238,7 +248,22 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
         },
       });
       deps.costLedger = ledger;
+      // Past this point the lock must NOT be dropped automatically, on ANY exit
+      // path: `teardownSandbox` destroys the box, revokes the key and closes
+      // the record, and a Ctrl-C or a throw partway through leaves a state only
+      // an operator can judge. Releasing it would hand that state straight to
+      // the next teardown, which re-runs against a half-torn-down run. This CLI
+      // never marked at all — `scripts/fleet.ts` did (line ~1034), so the same
+      // destructive verb was protected through one entry point and not the
+      // other, which is precisely what sharing ONE lock implementation is for.
+      markRunLockDestructive(lock);
+      destructivePhase = true;
       await teardownSandbox(deps, parsed.runId, { noHarvest: parsed.noHarvest });
+      // Returned, not threw: the box is gone, the key revoked and the record
+      // closed, so the state is known again and the `finally` below may release
+      // normally. Only the success path clears it — see releaseRunLock.
+      clearRunLockDestructive(lock);
+      destructivePhase = false;
       // The waiver goes to the run log + stdout, never the record (INV-5), and
       // AFTER the teardown ran: printed first, it claims a waiver for a
       // teardown that may never have happened. Same order as scripts/fleet.ts.
@@ -287,11 +312,20 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
       try {
         releaseRunLock(lock);
       } catch (e) {
+        // Two different failures, two different remediations. `destructivePhase`
+        // means the lock was HELD ON PURPOSE: the box may be gone, the key may
+        // be revoked and the record may still be open, and "rm it once no other
+        // invocation holds it" would invite exactly the retry against a
+        // half-torn-down run the mark exists to prevent.
         fail(
           out,
-          "lock-release-failed",
-          `could not release ${lock}: ${(e as Error).message}`,
-          `rm ${lock} by hand once no other invocation holds it — until then every later teardown of this run refuses`,
+          destructivePhase ? "lock-held" : "lock-release-failed",
+          destructivePhase
+            ? `${lock} was NOT released: this invocation failed after it began destroying the run`
+            : `could not release ${lock}: ${(e as Error).message}`,
+          destructivePhase
+            ? `check the run's box, key and record before anything else touches it; rm ${lock} only once you know the teardown state`
+            : `rm ${lock} by hand once no other invocation holds it — until then every later teardown of this run refuses`,
         );
         cleanupFailed();
       }

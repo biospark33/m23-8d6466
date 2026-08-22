@@ -90,10 +90,31 @@ export function isSubstrateFailure(gate: SetupGateResult): boolean {
   );
 }
 
-/** Third-party free text (a driver's thrown message) as a probe detail. */
+/**
+ * Third-party free text (a driver's thrown message) as a probe detail.
+ *
+ * Nothing here may throw. It is called from the `catch (e)` in `fakeGate`'s
+ * probe loop below, whose whole purpose is to keep the assertions accumulated
+ * so far; a throw escaping this function discards them and produces exactly the
+ * generic exit-1 failure that catch exists to prevent.
+ *
+ * Two ways it used to throw, both on values a rejecting `driver.exec` can carry:
+ *  - `String(e)` HERE rather than inside `redactSecrets`. `String` throws on a
+ *    null-prototype value (`Object.create(null)`) and on anything with a
+ *    hostile `toString`/`Symbol.toPrimitive`. `redactSecrets` takes `unknown`
+ *    and has the one guarded stringifier (`asText`), so `e` goes through
+ *    UNCOERCED and the throw lands inside the guard;
+ *  - reading `.message` off a value whose `message` is a throwing getter, which
+ *    happens before `redactSecrets` is even reached.
+ */
 function detailOf(e: unknown): string {
-  const message = (e as { message?: unknown } | null | undefined)?.message;
-  return redactSecrets(typeof message === "string" ? message : String(e));
+  let message: unknown;
+  try {
+    message = (e as { message?: unknown } | null | undefined)?.message;
+  } catch {
+    // a hostile `message` getter is itself not a reason to lose the probe
+  }
+  return redactSecrets(typeof message === "string" ? message : e);
 }
 
 /**

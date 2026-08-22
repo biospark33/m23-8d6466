@@ -37,10 +37,10 @@ import { SECRET_PREFIXES } from "./run-record.ts";
  *    strong signal, so `AKIA…`/`ghp_…` are redacted whatever their character
  *    classes are. Character-class mixing is never the sole test for a token an
  *    issuer has already labelled;
- *  - a long mixed-class token, the fallback for UNPREFIXED tokens only. The
- *    mixed-class requirement is what keeps a 40-char all-hex git SHA and an
- *    all-lowercase run id — the fields these lines exist to carry — readable,
- *    and `PATH_TOKEN_RE` is what keeps an ordinary absolute path readable;
+ *  - a long OPAQUE token, the fallback for UNPREFIXED tokens only. The hex-digest
+ *    exemption is what keeps a 40-char git SHA — the field these lines exist to
+ *    carry — readable, and `PATH_TOKEN_RE` is what keeps an ordinary absolute
+ *    path readable;
  *  - the key-management deep link, composed from DF2.4's own implementation
  *    (see below).
  *
@@ -55,11 +55,16 @@ import { SECRET_PREFIXES } from "./run-record.ts";
  * already composed it by hand for exactly this shape, and per-sink composition
  * is how the other three sinks were missed.
  *
- * Residual gap, accepted: an unprefixed all-lowercase-hex (or all-uppercase)
- * secret from an issuer not on the list is indistinguishable from a git SHA by
- * shape alone, and passes through. Loosening arm 3 to catch it would redact
- * every SHA and run id in these lines — the wrong trade for a log whose job is
- * to carry them. Close it by adding the issuer's prefix to `SECRET_PREFIXES`.
+ * Residual gap, accepted: an unprefixed HEX secret from an issuer not on the
+ * list is indistinguishable from a git SHA by shape alone, and passes through
+ * (see `isLongOpaqueToken` for why that one exemption survives and the other
+ * single-class exemptions did not). Close it by adding the issuer's prefix to
+ * `SECRET_PREFIXES`.
+ *
+ * Fail-safe, not fail-open: the whole body is guarded, and a throw returns the
+ * REDACTED marker rather than the raw text. Every caller here is a CATCH block
+ * logging someone else's failure — a redactor that throws does not merely lose
+ * a diagnostic, it REPLACES the failure being reported with its own.
  */
 const REDACTED = "«redacted»";
 
@@ -68,16 +73,42 @@ const REDACTED = "«redacted»";
  * prefix arm's charset excludes the space in `-----BEGIN RSA PRIVATE KEY-----`,
  * so it stops at the header and leaves the body to the long-token arm — which
  * sees the body one line at a time and passes every line that is under 40
- * characters or single-class, i.e. the last line of essentially every key. A
- * private key is not a token, it is a block, and the block is what has to go.
+ * characters, i.e. the last line of essentially every key. A private key is not
+ * a token, it is a block, and the block is what has to go.
  *
- * The match runs to `-----END …-----` or, failing that, to end of text: a
- * truncated key is still a key. Prose that merely mentions `-----BEGIN` is
- * therefore eaten to the end of the line's text — over-redaction, the safe
- * direction, and the only shape that pays for it is a log message quoting the
- * marker without a key attached.
+ * The match runs to `-----END …-----`, or — a truncated key is still a key —
+ * for `PEM_MAX_BODY` characters, whichever comes first. The tail used to be
+ * `|$`, i.e. UNBOUNDED: one `-----BEGIN` in provider free text with no closing
+ * marker swallowed the message to its end, so a whole multi-KB `driver.exec`
+ * diagnostic came out as the six characters of the placeholder. That text is
+ * whatever the box printed, which makes a whole-message eraser purchasable for
+ * ten literal characters. MEASURED on 1 MB of `-----BEGIN` mentions: 3 bytes
+ * of surviving diagnostic before, 507 KB after.
+ *
+ * The alternation is ordered terminated-first and its SECOND branch cannot
+ * fail, which is what keeps the scan linear. A bounded arm that can fail is
+ * retried at every `-----BEGIN` in the text, paying the full cap each time —
+ * measured at 3.7 s on that same 1 MB input. Here every attempt consumes as
+ * much as it inspects, so the cost is amortised away (1 ms on the same input,
+ * and on END-heavy and long-line shapes).
+ *
+ * The footer label is `[^\n-]*`, not `[^\n]*`: the class stops at the first
+ * `-`, so the required `-----` either matches right there or the attempt dies
+ * without giving characters back. Real PEM labels ("RSA PRIVATE KEY",
+ * "OPENSSH PRIVATE KEY") carry no dash, and one that somehow did falls into
+ * the second branch — bounded, and still redacted.
+ *
+ * `PEM_MAX_BODY` is sized past the largest key anyone mints (an 8192-bit RSA
+ * private key PEM is ~6.5 KB). Residual, accepted: a block LONGER than the cap
+ * keeps its tail — but that tail is 64-char base64 lines, which the long-token
+ * arm now redacts one line at a time (only a sub-40-char final line survives,
+ * as a fragment).
  */
-const PEM_BLOCK_RE = /-----BEGIN[\s\S]*?(?:-----END[^\n]*-----|$)/g;
+const PEM_MAX_BODY = 8192;
+const PEM_BLOCK_RE = new RegExp(
+  `-----BEGIN(?:[\\s\\S]{0,${PEM_MAX_BODY}}?-----END[^\\n-]*-----|[\\s\\S]{0,${PEM_MAX_BODY}})`,
+  "g",
+);
 
 const SECRET_PREFIX_RE = new RegExp(
   `(^|[^A-Za-z0-9])(?:${SECRET_PREFIXES.map((p) => p.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("|")})[A-Za-z0-9+/=_.:-]*`,
@@ -88,15 +119,43 @@ const LONG_TOKEN_RE = /[A-Za-z0-9+/=_.:-]{40,}/g;
 /**
  * The long-token arm's own test, factored out so the path exemption can
  * re-apply it per path segment.
+ *
+ * THE RULE: ≥40 characters and not a hex digest.
+ *
+ * It used to be ≥40 characters AND all three of `[a-z]`, `[A-Z]`, `\d`, which
+ * meant any token missing ONE class passed at ANY length — an all-lowercase
+ * base64url blob, an uppercase+digits token, a 60-char all-digit run. Those are
+ * shapes issuers actually mint, so requiring all three was not the
+ * "all-lowercase-hex residual" the header used to admit to; it was a hole the
+ * width of every single-class alphabet.
+ *
+ * The exemption is narrowed to the ONE shape this log exists to carry: a hex
+ * digest — all `[0-9a-f]` or all `[0-9A-F]`, AND carrying at least one `a-f`
+ * letter. Git SHAs, sha256 digests and content hashes are exactly that and stay
+ * readable. The letter clause is what stops an all-DIGIT token from riding the
+ * exemption: a real 40-char hex digest contains no a–f at probability
+ * (10/16)^40 ≈ 1e-9, so nothing readable is lost and an all-digit secret is now
+ * caught.
+ *
+ * Two classes is NOT the rule, and cannot be: a lowercase-hex git SHA has two
+ * (letters + digits), so "≥2 classes" would redact every SHA in these lines.
+ *
+ * Cost, accepted: a ≥40-char non-hex identifier with no `/` separators — a long
+ * dotted package name, say — is now redacted whole. The long readable tokens
+ * these lines actually carry are paths and SHAs, and both keep an exemption.
  */
-function isLongMixedToken(t: string): boolean {
-  return t.length >= 40 && /[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t);
+const HEX_DIGEST_RE = /^(?:[0-9a-f]+|[0-9A-F]+)$/;
+const HEX_LETTER_RE = /[a-fA-F]/;
+
+function isLongOpaqueToken(t: string): boolean {
+  if (t.length < 40) return false;
+  return !(HEX_DIGEST_RE.test(t) && HEX_LETTER_RE.test(t));
 }
 
 /**
  * The long-token arm's path exemption. `/`, `.`, `-` and `_` are all inside
- * `LONG_TOKEN_RE`'s charset, so an ordinary absolute path is ONE token that
- * mixes all three character classes:
+ * `LONG_TOKEN_RE`'s charset, so an ordinary absolute path is ONE token, and one
+ * no hex-digest exemption will ever cover:
  * `/Users/steve/QDS-Factory/.sandbox/runs/qds-20260822-a1b2c3.json` was
  * redacted whole, and every stack frame with it — every `/Users`-rooted or
  * CamelCase-repo path with a digit in it erased, unevenly, which reads in the
@@ -120,11 +179,11 @@ const PATH_TOKEN_RE = /^(?:[A-Za-z0-9+=_.:-]{0,32}\/){2,}[A-Za-z0-9+=_.:-]{0,64}
 const PATH_PUNCT_RE = /[._:-]/;
 
 function redactLongToken(t: string): string {
-  if (!isLongMixedToken(t)) return t;
+  if (!isLongOpaqueToken(t)) return t;
   if (!PATH_TOKEN_RE.test(t) || !PATH_PUNCT_RE.test(t)) return REDACTED;
   return t
     .split("/")
-    .map((segment) => (isLongMixedToken(segment) ? REDACTED : segment))
+    .map((segment) => (isLongOpaqueToken(segment) ? REDACTED : segment))
     .join("/");
 }
 
@@ -154,22 +213,61 @@ function asText(v: unknown): string {
  *
  * The mark reuses the guillemets of the placeholder itself: neither character
  * is in either token charset, so the mark cannot merge with a neighbouring
- * token — and text that forges one only gets a non-secret hash spliced back in.
+ * token. Text that forges a mark still only gets a non-secret identifier
+ * spliced back in — and only as many times as this call actually parked one,
+ * which is what stops the forgery being an amplifier (see the budget below).
  */
 const KEEP_MARK = "«keep»";
+/** Literal, no metacharacters — `«`, `k`, `e`, `p`, `»` are all inert. */
+const KEEP_MARK_RE = /«keep»/g;
 const MIN_KEEP_LEN = 8;
 
 export function redactSecrets(text: unknown, keep?: string): string {
-  const parked = keep && keep.length >= MIN_KEEP_LEN;
-  const source = parked ? asText(text).split(keep).join(KEEP_MARK) : asText(text);
-  // The deep-link arm runs FIRST, on the untouched text: it is the only arm
-  // that matches a whole URL rather than a token, and it must not have to
-  // recognize one the other three have already partly rewritten.
-  const redacted = redactKeyManagementUrls(source)
-    .replace(PEM_BLOCK_RE, REDACTED)
-    .replace(SECRET_PREFIX_RE, (_m, lead: string) => `${lead}${REDACTED}`)
-    .replace(LONG_TOKEN_RE, redactLongToken);
-  return parked ? redacted.split(KEEP_MARK).join(keep) : redacted;
+  try {
+    // The deep-link arm runs FIRST and on the GENUINELY untouched text — it is
+    // the only arm that matches a whole URL rather than a token, so it must not
+    // have to recognize one anything else has rewritten. Parking `keep` counted
+    // as rewriting: `KEY_MANAGEMENT_URL_RE`'s tail is `[0-9a-zA-Z%_-]{8,}` and
+    // the mark's guillemets are outside that charset, so once `keep` (or any
+    // longer id merely CONTAINING it) had been parked, `…/keys/«keep»…` no
+    // longer matched — and the splice-back then handed the id back inside a
+    // live URL the arm exists to remove. Running before the park is what makes
+    // the arm see the text as the provider wrote it.
+    const linkRedacted = redactKeyManagementUrls(asText(text));
+
+    // The ≥8 floor stops a short `keep` from splitting a real secret into
+    // unmatchable pieces (same boundary as `redactWithKey`'s).
+    const keepToken = keep !== undefined && keep.length >= MIN_KEEP_LEN ? keep : undefined;
+    // How many marks THIS call parked. The splice-back below restores at most
+    // that many: `split(KEEP_MARK).join(keep)` restored at EVERY mark including
+    // ones the SOURCE text supplied, so provider text carrying N forged marks
+    // expanded the log line by N × the hash length — a cheap, attacker-chosen
+    // amplification into the log sink. The forged marks are harmless in
+    // themselves (only a non-secret identifier is ever spliced in); the COUNT
+    // was the problem, and the budget is what bounds it.
+    let budget = 0;
+    let source = linkRedacted;
+    if (keepToken !== undefined) {
+      const parts = linkRedacted.split(keepToken);
+      budget = parts.length - 1;
+      source = parts.join(KEEP_MARK);
+    }
+
+    const redacted = source
+      .replace(PEM_BLOCK_RE, REDACTED)
+      .replace(SECRET_PREFIX_RE, (_m, lead: string) => `${lead}${REDACTED}`)
+      .replace(LONG_TOKEN_RE, redactLongToken);
+
+    if (keepToken === undefined) return redacted;
+    return redacted.replace(KEEP_MARK_RE, () => (budget-- > 0 ? keepToken : KEEP_MARK));
+  } catch {
+    // Fail SAFE, not fail open. Every caller is a catch block logging someone
+    // else's failure, so a throw escaping here would replace that failure with
+    // this function's own — and the fallback can never be the raw text, because
+    // the raw text is exactly what was not yet proven free of key material.
+    // Losing a diagnostic beats leaking a key.
+    return REDACTED;
+  }
 }
 
 /** Per-step log context — propagated ids plus the driver name. */

@@ -3,7 +3,18 @@
  * CLI: qds-cost — operator-facing view of DF2.8 cost ledger (AC2, AC5).
  *
  * Usage:
- *   qds-cost <owner/repo>#<N>
+ *   qds-cost <owner/repo>#<N> [--dir <path>]
+ *
+ * The ledger and the cost config are resolved from the RECORDS directory
+ * through `scripts/lib/cost-ledger-opts.ts` — the same helper `scripts/fleet.ts`
+ * reserves budget through and `scripts/sandbox-teardown.ts` settles box hours
+ * through. Reading `QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE` directly,
+ * as this CLI did, made the REPORTING side the one CLI that did not honour
+ * `--dir` / `$QDS_RUNS_DIR`: with `QDS_RUNS_DIR=/srv/runs` the spend went to
+ * /srv/runs/cost-ledger.db while `qds-cost owner/repo#12` opened the
+ * cwd-relative default — `ledger-missing` at best, and a confident ZERO SPEND
+ * for an issue that has burned budget whenever a stale .sandbox/cost-ledger.db
+ * happened to exist.
  *
  * Prints the cumulative cost view for an issue, all derived from SUM (no
  * denormalized columns):
@@ -29,23 +40,24 @@
 
 import { existsSync, writeSync } from "node:fs";
 
-import {
-  CostLedger,
-  DEFAULT_COST_LEDGER_FILE,
-  loadCostConfig,
-  type CostConfig,
-  type CostView,
-} from "../src/providers/cost-ledger.ts";
+import { CostLedger, type CostConfig, type CostView } from "../src/providers/cost-ledger.ts";
+import { DEFAULT_RUNS_DIR } from "../src/providers/run-record.ts";
+import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
+import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 
 const ISSUE_REF_RE = /^[\w.-]+\/[\w.-]+#\d+$/;
 
+const VALUE_FLAGS = ["--dir"] as const;
+
 const HELP = [
-  "Usage: qds-cost <owner/repo>#<N>",
+  "Usage: qds-cost <owner/repo>#<N> [--dir <path>]",
   "",
   "  <owner/repo>#<N>        issue reference (e.g. qds/demo#42)",
+  "  --dir <path>            records directory (default $QDS_RUNS_DIR)",
   "",
-  "Env: QDS_COST_LEDGER_FILE (default .sandbox/cost-ledger.db)",
-  "     QDS_COST_CONFIG_FILE (default .sandbox/cost-config.json)",
+  "Env: QDS_RUNS_DIR          records directory (default .sandbox/runs)",
+  "     QDS_COST_LEDGER_FILE  overrides the ledger path derived from it",
+  "     QDS_COST_CONFIG_FILE  overrides the cost config path derived from it",
   "",
 ];
 
@@ -171,16 +183,42 @@ function parseIssueRef(arg: string | undefined): { repoSlug: string; issueId: st
  */
 export function run(argv: readonly string[], out: (s: string) => void): number {
   let issueRef: { repoSlug: string; issueId: string };
+  let dir: string | undefined;
   try {
-    issueRef = parseIssueRef(argv[0]);
+    // The shared grammar, so `--dir` means here exactly what it means on
+    // `fleet` and `sandbox-teardown` — including `--dir=<path>` and the missing-
+    // value refusal. The issue ref stays the sole positional.
+    const { positionals, flagTokens } = tokenizeArgs(argv, { valueFlags: VALUE_FLAGS });
+    parseValueFlags(flagTokens, {
+      flags: VALUE_FLAGS,
+      onValue: (_flag, value) => {
+        dir = value;
+      },
+      help: HELP,
+    });
+    if (positionals.length > 1) {
+      throw new Error(
+        `unexpected argument: ${positionals[positionals.length - 1]}\n${HELP.join("\n")}`,
+      );
+    }
+    issueRef = parseIssueRef(positionals[0]);
   } catch (e) {
     out((e as Error).message);
     return 2;
   }
 
+  // The store's own three-tier chain, restated rather than taken from a
+  // `RunRecordStore`: that constructor mkdirs the records directory and chmods
+  // it 0700, and a REPORTING CLI that materializes the directory it is asked
+  // about is the same fail-open INV-COST-6 forbids one level up.
+  const storeDir = dir ?? process.env.QDS_RUNS_DIR ?? DEFAULT_RUNS_DIR;
+
   let config: CostConfig;
+  let ledgerPath: string;
   try {
-    config = loadCostConfig().config;
+    // Both halves from the same helper the money-MOVING CLIs use, so the file
+    // reported on is the file written to (see the header).
+    ({ config, path: ledgerPath } = costLedgerOpts(storeDir));
   } catch (e) {
     const err = e as { code?: string; message?: string; remediation?: string };
     fail(out, err.code ?? "cost-config-error", err.message ?? String(e), err.remediation);
@@ -188,16 +226,16 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
   }
 
   // INV-COST-6 for the reporting side: an absent ledger refuses instead of
-  // materializing an empty one — a typo'd $QDS_COST_LEDGER_FILE must not read
-  // as "nothing spent". C5 notes: existsSync()-then-open race exists; CostLedger
-  // creates missing files, so we must pre-check for the "refuse absent" behavior.
-  const ledgerPath = process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE;
+  // materializing an empty one — a typo'd $QDS_COST_LEDGER_FILE or a wrong
+  // --dir must not read as "nothing spent". C5 notes: existsSync()-then-open
+  // race exists; CostLedger creates missing files, so we must pre-check for the
+  // "refuse absent" behavior.
   if (!existsSync(ledgerPath)) {
     fail(
       out,
       "ledger-missing",
       `no cost ledger at ${ledgerPath} — refusing to report zero spend from a file that does not exist`,
-      "dispatch a run first (the budget gate creates the ledger), or point QDS_COST_LEDGER_FILE at the existing ledger file",
+      "dispatch a run first (the budget gate creates the ledger), or point --dir / QDS_RUNS_DIR at the records directory whose runs you are asking about",
     );
     return 1;
   }

@@ -85,13 +85,65 @@ function isRelativePath(p: string): boolean {
  *     renders without changing a byte, and U+200B/U+FEFF, which hide inside an
  *     identifier that later keys the ledger.
  */
-const NO_CONTROL_CHARS = /^[^\p{Cc}\p{Zl}\p{Zp}\p{Cf}]*$/u;
+const CONTROL_CHAR_CLASS = "\\p{Cc}\\p{Zl}\\p{Zp}\\p{Cf}";
+const NO_CONTROL_CHARS = new RegExp(`^[^${CONTROL_CHAR_CLASS}]*$`, "u");
+/**
+ * The same class as a MATCHER rather than a rejecter, for `sanitizeLabel`. Built
+ * from one shared source string on purpose: the two are the accept and the
+ * repair arm of a single rule, and written as two literals they stop agreeing
+ * the moment either grows a category.
+ */
+const CONTROL_CHARS_G = new RegExp(`[${CONTROL_CHAR_CLASS}]`, "gu");
+
+/**
+ * Attacker-authored text on its way into an operator-facing label: control
+ * characters removed, length capped.
+ *
+ * Every guard above is on a brief VALUE, and that leaves the REJECTION path
+ * uncovered — a key NAME is attacker-chosen, is never matched against any
+ * schema (that is what makes it unrecognized), and comes straight back out
+ * through `extractZodErrorField`. So the one threat this file argues at length,
+ * a forged log line, was reachable through the refusal rather than the
+ * acceptance. Uncapped, so was 4 MB of it landing in the persisted dispatch log
+ * — the same "a 10 MB id in the ledger key" argument the length caps below
+ * already make, applied to the side of the boundary that refuses.
+ *
+ * Applied at the PRODUCER, not left to each consumer. `dispatch.ts` does escape
+ * the name with `JSON.stringify` in its message and remediation, and that
+ * escaping stays — but a rule every caller has to remember is one a caller
+ * eventually forgets, which is the argument `redactDeep` there already makes
+ * for redaction. The label is a name, not a payload; the brief JSON the
+ * operator is being sent back to still holds the byte-exact key.
+ *
+ * STRIPS rather than escapes: an escaped form is only readable if the consumer
+ * renders it, and the cheapest thing that is safe in EVERY consumer — a raw
+ * terminal, a log line, a JSON field — is a string that no longer contains the
+ * characters. Callers that want fidelity keep their own escaping on top.
+ *
+ * Exported because `status.ts` applies the same two rules to substrate-supplied
+ * box names and URLs, which are the LESS trusted of the two sources: a brief is
+ * refused before it can spend, an orphan row describes a box already billing.
+ */
+export function sanitizeLabel(text: string, max: number): string {
+  const stripped = text.replace(CONTROL_CHARS_G, "");
+  return stripped.length > max ? `${stripped.slice(0, max)}…` : stripped;
+}
 
 /**
  * The repository a clone URL identifies, as a CANONICAL slug: pathname,
  * slashes trimmed, a `.git` suffix dropped, case folded. `undefined` when the
- * URL will not parse (the `.url()` check has already refused those, so the
- * cross-check never sees one) or when the path cannot name a slug at all.
+ * URL will not parse — the `.url()` check has already refused those, so the
+ * cross-check never sees one — and ONLY then.
+ *
+ * A path that cannot name a slug is deliberately NOT a second `undefined` arm.
+ * `https://github.com/` yields `""` and `https://host/a/b/c` yields `a/b/c`,
+ * and both are handed on as-is: `canonicalRepoSlug` is a trim-and-fold with no
+ * assertion in it (see its source — it cannot throw), and the caller's
+ * comparison is the guard. `""` and `a/b/c` compare unequal to every value
+ * `REPO_SLUG_PATTERN` admits, so both refuse as exit 2 through the refine, and
+ * a segment-count or charset check here would be a second gate that can only
+ * ever agree with the first. (An earlier revision of this docstring claimed the
+ * missing arm existed; it never did, and nothing depended on it.)
  *
  * Nothing here percent-DECODES, and nothing needs to: `URL.pathname` leaves
  * escapes encoded, and `%` is not in the slug charset `[A-Za-z0-9._-]` — so an
@@ -147,8 +199,31 @@ function hasNoUserinfo(url: string): boolean {
  * below "a megabyte of it lands in a persisted record".
  */
 const MAX_MANIFEST_PATH = 1024;
-const MAX_URL = 2048;
+/** Exported for `status.ts`, which caps substrate-supplied URLs to the same bound. */
+export const MAX_URL = 2048;
 const MAX_REQUEST_ID = 128;
+
+/**
+ * Cap on the field NAME `extractZodErrorField` hands back. Sized like
+ * MAX_REQUEST_ID rather than like a path: this is an identifier an operator
+ * greps their brief for, not a value.
+ */
+const MAX_FIELD_LABEL = 128;
+
+/**
+ * Non-blank, for the two fields whose `.min(1)` was doing the job blankness
+ * defeats.
+ *
+ * `.min(1)` refuses `""` and nothing else, and the reasons it was added — a
+ * falsy-vs-present split on `requestId`, an `fs` path on `manifestPath` — are
+ * both satisfied by `" "`, which is `\p{Zs}` and so passes NO_CONTROL_CHARS
+ * too. `manifestPath: " "` resolves to `<repoRoot>/ ` and fails at `fs` as an
+ * untyped error rather than as the exit 2 this schema exists to produce.
+ * `.trim().length` is what the `.min(1)` comment's own reasoning implies.
+ */
+function isNotBlank(s: string): boolean {
+  return s.trim().length > 0;
+}
 
 // DF3.1 AC1, AC2, INV-2: strict object, closed to unknown fields
 export const BriefSchema = z.strictObject({
@@ -175,6 +250,22 @@ export const BriefSchema = z.strictObject({
   // are case-insensitive, so `.url()` accepts `HTTPS://…` and a case-sensitive
   // `.startsWith` then refused a URL that IS https — a false rejection with a
   // message telling the operator to use the scheme they already used.
+  //
+  // DELIBERATELY UNBOUND to `repoSlug`/`issueId`, unlike `repoUrl` below. The
+  // reason `repoUrl` is bound is spend identity: it is the code that RUNS, and
+  // separable from the slug it lets a brief attribute an attacker's repository
+  // to a trusted slug's budget. `issueUrl` runs nothing, keys nothing and pays
+  // for nothing — `resolveRunCorrelation` carries it through as an opaque
+  // `issueUrl ?? null`, and identity is (repoSlug, issueId) with or without it.
+  // Binding it would also have to name a URL SHAPE, and `/issues/<n>` is
+  // GitHub's; a GitLab subgroup, a self-hosted forge under a path prefix and a
+  // `.../-/issues/<n>` all exit 2 against it, which is the over-rejection the
+  // host half of the `repoUrl` refine is deliberately avoiding one field down.
+  //
+  // The residual is real and accepted: a brief can point the human-facing link
+  // at any repository and any issue number, so an operator who CLICKS the link
+  // in a log line may land somewhere other than the issue that authorized the
+  // spend. Nothing downstream trusts it — it is a link, not a lookup.
   issueUrl: z
     .string()
     .max(MAX_URL)
@@ -200,6 +291,7 @@ export const BriefSchema = z.strictObject({
     .min(1, "requestId may not be empty — omit the key instead")
     .max(MAX_REQUEST_ID)
     .regex(NO_CONTROL_CHARS, "requestId may not contain control characters")
+    .refine(isNotBlank, "requestId may not be blank — omit the key instead")
     .optional(),
   // DF3.1 D2: repo-relative path to the pipeline manifest (non-empty, capped,
   // no control chars, no parent traversal, not absolute)
@@ -208,6 +300,7 @@ export const BriefSchema = z.strictObject({
     .min(1)
     .max(MAX_MANIFEST_PATH)
     .regex(NO_CONTROL_CHARS, "manifestPath may not contain control characters")
+    .refine(isNotBlank, "manifestPath may not be blank")
     .refine(hasNoParentSegment, "manifestPath segments may not be '..'")
     .refine(isRelativePath, "manifestPath must be relative to the repo root, not absolute"),
   // DF3.1 D2: for pinned-SHA fill (fill.ts). `.url()` admits every scheme, and
@@ -239,6 +332,22 @@ export const BriefSchema = z.strictObject({
    * `https://evil.example/x/owner/repo` against a trusted slug, which is the
    * separation this refine exists to close.
    *
+   * RESIDUAL, stated plainly because leaving the host unbound is a choice and
+   * not an oversight: an ATTACKER-CONTROLLED HOST serving a MATCHING PATH
+   * passes. `{repoSlug: "trusted/repo", repoUrl: "https://evil.example/trusted/repo"}`
+   * is accepted, and the box then clones and RUNS evil.example's code while the
+   * ledger, the per-issue cap and `run-context.json` all say `trusted/repo`.
+   * What this refine buys is narrower than "the URL is the slug": it is that a
+   * brief cannot name a DIFFERENT REPOSITORY on the same forge. Closing the
+   * host half needs repository authority to move off the brief entirely, which
+   * is the design below, not a tighter predicate here.
+   *
+   * The narrowing is also not free in the other direction, and that is accepted
+   * too: a forge served under a path prefix (`https://git.example.com/scm/owner/repo`)
+   * and a GitLab subgroup URL both exit 2. Neither was ever expressible as a
+   * two-segment `repoSlug` in the first place (see the field's own comment), so
+   * the refine refuses at the URL what the slug would have refused anyway.
+   *
    * SUPERSEDED BY DESIGN: DF5.2's INV-PR-3 puts repository authority in the
    * host-side allowlist (`.factory/repos.json`) — "the remote and base branch
    * resolve from the allowlist, never from the harvested tree's git config".
@@ -264,6 +373,16 @@ export type Brief = z.infer<typeof BriefSchema>;
  * path, and `field ""` names nothing the operator can act on, so the root is
  * named explicitly. Every return is a non-empty label.
  *
+ * SANITIZED, and this is the only exit through which attacker text leaves this
+ * module. An unrecognized key's NAME is chosen by whoever wrote the brief and
+ * matched against nothing (that is what makes it unrecognized), so it was the
+ * one uncapped, unfiltered string in a file whose every other rule is about
+ * exactly those two properties. See `sanitizeLabel` for why the repair is here
+ * and not left to each consumer. A name that is ENTIRELY control characters
+ * sanitizes to `""`, which is why both arms still fall through to the root
+ * label — "every return is a non-empty label" is the invariant, not a side
+ * effect of zod always having handed back something.
+ *
  * DF3.1 AC1: "exits 2 naming the offending field"
  */
 export const ROOT_FIELD_LABEL = "(root)";
@@ -275,8 +394,14 @@ export function extractZodErrorField(error: z.ZodError): string {
   // z.strict() produces unrecognized_keys with empty path but named keys
   if (firstIssue.code === "unrecognized_keys") {
     const unrecognized = (firstIssue as { keys?: string[] }).keys;
-    return unrecognized?.[0] ?? ROOT_FIELD_LABEL;
+    const key = unrecognized?.[0];
+    return (key === undefined ? "" : sanitizeLabel(key, MAX_FIELD_LABEL)) || ROOT_FIELD_LABEL;
   }
 
-  return firstIssue.path.join(".") || ROOT_FIELD_LABEL;
+  // The path too: for THIS schema every segment is one of the object's own
+  // declared keys, but a `path` element is an `unknown` off a structural error
+  // object, and a nested or array schema would put an input-derived index or key
+  // there. One sanitizer over both exits costs nothing and cannot be forgotten
+  // the day the schema grows a nested field.
+  return sanitizeLabel(firstIssue.path.join("."), MAX_FIELD_LABEL) || ROOT_FIELD_LABEL;
 }

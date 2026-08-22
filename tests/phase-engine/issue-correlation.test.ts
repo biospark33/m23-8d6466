@@ -850,6 +850,23 @@ describe("canonicalRepoSlug", () => {
   test("the canonical form still satisfies REPO_SLUG_PATTERN", () => {
     expect(REPO_SLUG_PATTERN.test(canonicalRepoSlug("BiosparkHealth/QDS-Factory"))).toBe(true);
   });
+
+  test("surrounding whitespace folds too — one repository, not three", () => {
+    // The same class as casing, from a different source: a shell argument, a
+    // copy-paste, a hand-edited run record. Untrimmed, ` qds/demo`, `qds/demo `
+    // and `qds/demo` are three byte-distinct budget identities, each holding a
+    // full untouched per-issue cap. `canonicalIssueId` folds the other half of
+    // the key the same way, so the pair cannot be trimmed on one side only.
+    for (const spelling of [" qds/demo", "qds/demo ", "\tqds/demo\n", " QDS/Demo "]) {
+      expect(canonicalRepoSlug(spelling)).toBe("qds/demo");
+    }
+    // Interior space is NOT whitespace to fold — it is a slug that was never
+    // valid, and silently rewriting it would merge two things a human meant to
+    // keep apart. REPO_SLUG_PATTERN is what refuses it.
+    expect(canonicalRepoSlug("qds / demo")).toBe("qds / demo");
+    // Still idempotent once trimmed.
+    expect(canonicalRepoSlug(canonicalRepoSlug(" QDS/Demo "))).toBe("qds/demo");
+  });
 });
 
 describe("resolveRunCorrelation canonicalises the slug", () => {

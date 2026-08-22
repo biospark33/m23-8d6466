@@ -26,6 +26,7 @@ import {
   PipelineManifestSchema,
   stampManifestLimit,
   serializeManifest,
+  stripAuthoredLimit,
 } from "../../src/phase-engine/manifest.ts";
 import {
   CorrelationError,
@@ -73,7 +74,21 @@ const REQUIRED_KEYS = ["repoSlug", "issueId", "commitSha", "manifestPath", "repo
  */
 function expectRejected(
   brief: Record<string, unknown>,
-  expected: { field: string; code: keyof typeof ZodIssueCode | string; message?: RegExp },
+  expected: {
+    field: string;
+    code: keyof typeof ZodIssueCode | string;
+    message?: RegExp;
+    /**
+     * Other fields this value is EXPECTED to implicate, spelled out per case.
+     *
+     * Only the repoUrl↔repoSlug cross-check produces one: it runs after the
+     * field checks and compares the two, so a corrupted `repoSlug` fails its own
+     * rule AND stops matching a `repoUrl` that was never touched. That coupling
+     * is the refine working, and naming it per case is what keeps the default
+     * (no other field) strict everywhere else.
+     */
+    alsoNames?: readonly string[];
+  },
 ): void {
   const result = BriefSchema.safeParse(brief);
   expect(result.success).toBe(false);
@@ -83,6 +98,20 @@ function expectRejected(
   expect(issue).toBeDefined();
   expect(issue?.code).toBe(expected.code as never);
   if (expected.message !== undefined) expect(issue?.message).toMatch(expected.message);
+  // ONE field, and this one. `issues[0]` is whichever zod happened to emit
+  // first, so every case here survived the schema ALSO rejecting a second,
+  // unrelated field — the corrupted value would keep passing while a rule that
+  // has nothing to do with it did the refusing, and which of the two landed at
+  // index 0 is a function of declaration order.
+  //
+  // A count is the wrong assertion: one value legitimately fails several checks
+  // on ITS OWN field (`requestId: "\t"` is both a control character and blank),
+  // and that is not drift. The invariant is that no OTHER field is implicated.
+  // `unrecognized_keys` carries an empty path by construction, which is exactly
+  // the root-shaped case the paths below already collapse to.
+  expect(new Set(error.issues.map((i) => i.path.join(".")))).toEqual(
+    new Set([issue?.code === "unrecognized_keys" ? "" : expected.field, ...(expected.alsoNames ?? [])]),
+  );
 }
 
 describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
@@ -114,27 +143,51 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     expect(extractZodErrorField(thrown as ZodError)).toBe("unknownField");
   });
 
-  test("a hostile unknown-key NAME is refused, and the extractor returns it VERBATIM", () => {
+  test("a hostile unknown-key NAME is refused, and the extractor STRIPS the control characters", () => {
     // Every other unknown-key case uses a benign name, so nothing here has ever
     // exercised the fact that the key is ATTACKER-CHOSEN: a brief is
     // attacker-authored JSON, and `NO_CONTROL_CHARS` guards VALUES — no rule
-    // anywhere constrains a key NAME. `extractZodErrorField` returns it with no
-    // transformation, and `dispatch.ts` interpolates that twice into the
-    // operator stream (`JSON.stringify(field)` in the message, RAW in the
-    // remediation), while zod's own issue message quotes it raw as well.
+    // anywhere constrained a key NAME. `extractZodErrorField` used to return it
+    // with no transformation at all, which put the one threat this schema argues
+    // at length — a forged operator-facing log line — on the REJECTION path,
+    // reachable by anyone who can hand the CLI a brief.
     //
-    // What this layer OWNS is the refusal, and that is what is asserted: the
-    // brief is rejected before any box, key or ledger row exists, whatever the
-    // name renders as. The verbatim return is pinned so the escaping obligation
-    // sits visibly on the consumer. That obligation is now met — `dispatch.ts`
-    // escapes the name in the message, the remediation AND the issues array;
-    // see the dispatch-layer test that pins it.
-    for (const hostile of ["\u001b[2Jrm -rf", "a\nFLEET dispatch ok runId=fake"]) {
+    // The extractor now sanitizes, so the label is safe in a consumer that does
+    // nothing else with it. `dispatch.ts` still escapes what it interpolates
+    // (`JSON.stringify(field)` in the message and the remediation, and the
+    // issues array too), and that escaping stays: it is what keeps the surviving
+    // text readable. The two are belt and braces, not one instead of the other.
+    for (const [hostile, expected] of [
+      ["\u001b[2Jrm -rf", "[2Jrm -rf"],
+      ["a\nFLEET dispatch ok runId=fake", "aFLEET dispatch ok runId=fake"],
+    ] as const) {
       expectRejected(validBrief({ [hostile]: "x" }), {
-        field: hostile,
+        field: expected,
         code: "unrecognized_keys",
       });
     }
+  });
+
+  test("an unknown-key name is length-capped, and an all-control one still names the root", () => {
+    // The other half of the same uncapped hole: megabytes of attacker text rode
+    // the refusal into the operator stream and into the persisted dispatch log.
+    // The cap is the argument MAX_REQUEST_ID already makes for a brief VALUE,
+    // applied to the side of the trust boundary that REFUSES.
+    const huge = "k".repeat(5000);
+    const field = extractZodErrorField(
+      (BriefSchema.safeParse(validBrief({ [huge]: "x" })) as { error: ZodError }).error,
+    );
+    expect(field.length).toBeLessThanOrEqual(129); // the 128 cap plus one truncation marker
+    expect(field.startsWith("kkkk")).toBe(true);
+
+    // A name that is ENTIRELY control characters sanitizes to "", and "every
+    // return is a non-empty label" has to survive that — it is the invariant,
+    // not something zod's output happened to hand back.
+    expect(
+      extractZodErrorField(
+        (BriefSchema.safeParse(validBrief({ "​‮": "x" })) as { error: ZodError }).error,
+      ),
+    ).toBe(ROOT_FIELD_LABEL);
   });
 
   test("prototype-pollution key names are refused as unknown keys, not absorbed", () => {
@@ -166,15 +219,44 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     // The case the extractor's docblock was written for: a root rejection
     // carries an EMPTY path, and AC1's "exits 2 naming the offending field"
     // becomes `field ` — nothing an operator can act on.
-    for (const notAnObject of ["not an object", null, 42, ["repoSlug"]]) {
+    //
+    // `undefined`, a Date and a function are on the list because they are what
+    // a real carrier produces, not what a test author thinks of: `undefined` is
+    // an unparsed stdin or a missing `--brief`, a Date is what a JSON reviver or
+    // an IPC layer hands back for a date-shaped value, and a function is what an
+    // in-process caller passes when it forgets to CALL its brief builder. Each
+    // takes a different arm of zod's type dispatch on the way to the same label.
+    for (const notAnObject of ["not an object", null, 42, ["repoSlug"], undefined, new Date(), () => {}]) {
       const result = BriefSchema.safeParse(notAnObject);
       expect(result.success).toBe(false);
       const error = (result as { error: ZodError }).error;
       expect(error.issues[0]?.code).toBe("invalid_type");
       expect(error.issues[0]?.path).toEqual([]);
       expect(extractZodErrorField(error)).toBe(ROOT_FIELD_LABEL);
-      expect(ROOT_FIELD_LABEL.length).toBeGreaterThan(0);
     }
+  });
+
+  test("a NULL-PROTOTYPE object is parsed as an object, not waved through and not a crash", () => {
+    // `Object.create(null)` is the other shape a JSON/IPC layer produces, and it
+    // is NOT a root rejection: zod sees an object, so the brief goes through the
+    // ordinary field checks — which is the point. A guard written with
+    // `brief instanceof Object`, `brief.constructor === Object` or a
+    // `hasOwnProperty` call off the prototype throws on this value instead of
+    // refusing it, and a throw past the trust boundary is not the exit 2 INV-2
+    // promises.
+    const bare = Object.create(null) as Record<string, unknown>;
+    Object.assign(bare, validBrief());
+    expect(Object.getPrototypeOf(bare)).toBeNull();
+    expect(BriefSchema.parse(bare)).toEqual(validBrief() as Brief);
+
+    // …and an empty one is refused FIELD BY FIELD, not by type: every required
+    // key is named, which is what an operator needs, rather than one root-level
+    // "not an object" for a value that is one.
+    const empty = BriefSchema.safeParse(Object.create(null));
+    expect(empty.success).toBe(false);
+    const issues = (empty as { error: ZodError }).error.issues;
+    expect(issues.every((i) => i.code === "invalid_type")).toBe(true);
+    expect(new Set(issues.map((i) => i.path.join(".")))).toEqual(new Set(REQUIRED_KEYS));
   });
 
   test("extractZodErrorField never returns an empty label, even for a degenerate ZodError", () => {
@@ -395,6 +477,39 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     });
   });
 
+  test("manifestPath that is only WHITESPACE is rejected — `.min(1)` is not non-blankness", () => {
+    // `NO_CONTROL_CHARS` excludes `\p{Zs}`, deliberately (a space is not a
+    // control character), so `"   "` passed the length cap, the charset, the
+    // parent-segment guard and the relative-path guard — every rule this field
+    // has. `.min(1)` refuses `""` and nothing else, while the reason it exists
+    // (this value is a real host path) is defeated by any run of spaces:
+    // `resolve(repoRoot, "   ")` is `<repoRoot>/   `, which fails at `fs` as an
+    // untyped error rather than as the exit 2 the schema exists to produce.
+    // `.trim().length` is what the `.min(1)` argument actually implies.
+    // Spelled with escapes: NBSP and the ideographic space are `\p{Zs}` like a
+    // plain space, and both are what a copy-paste out of a wiki or an issue
+    // body actually produces. (A tab is refused one rule earlier, as a control
+    // character — that is the sibling case, not this one.)
+    for (const blank of ["   ", "\u00a0", "\u3000", "\u2003"]) {
+      expectRejected(validBrief({ manifestPath: blank }), {
+        field: "manifestPath",
+        code: "custom",
+        message: /may not be blank/,
+      });
+    }
+  });
+
+  test("a manifestPath with a TRAILING space is accepted — trimming it would name a different file", () => {
+    // The boundary the guard above must not cross. A trailing space is legal in
+    // a POSIX filename, so `"cfg/pipeline.json "` and `"cfg/pipeline.json"` are
+    // two different files: a schema that trimmed the VALUE (rather than testing
+    // the trimmed length) would silently redirect the dispatcher to the other
+    // one, and a schema that refused it would reject a brief that is correct.
+    // Blankness is the property being refused, not whitespace.
+    const padded = "cfg/pipeline.json ";
+    expect(BriefSchema.parse(validBrief({ manifestPath: padded })).manifestPath).toBe(padded);
+  });
+
   test("manifestPath parent segment rejected (it is a real host path the dispatcher reads)", () => {
     for (const bad of ["../../../../etc/shadow", "sub/../../escape.json", ".."]) {
       expectRejected(validBrief({ manifestPath: bad }), {
@@ -568,9 +683,7 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     // The reason `NO_CONTROL_CHARS` has to be on the field rather than left to
     // the URL guards: WHATWG `URL` DELETES ASCII tab/LF/CR before parsing, so
     // every downstream check sees a clean URL while the operator log stream sees
-    // the raw one, newline and all. The assertion below is the proof — the
-    // forged value parses to a perfectly ordinary href.
-    expect(new URL("https://git\nhub.com/owner/repo").href).toBe("https://github.com/owner/repo");
+    // the raw one, newline and all.
     for (const raw of [
       "https://git\nhub.com/owner/repo",
       "https://git\rhub.com/owner/repo",
@@ -683,6 +796,24 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     });
   });
 
+  test("a requestId that is only WHITESPACE is refused too — and `.min(1)` alone never saw it", () => {
+    // The empty-string argument above, all of it, applies to `"   "` — with one
+    // difference that makes it WORSE: `""` is falsy, so a downstream
+    // `requestId || mint()` at least rescues it into a fresh id, while `"   "`
+    // is TRUTHY and rides all the way through as the correlation id. Every run
+    // whose brief carries a run of spaces then collapses onto one ledger key and
+    // one log correlation, and no guard anywhere notices: `\p{Zs}` is
+    // deliberately outside `NO_CONTROL_CHARS` (a space is not a control
+    // character), and the cap, the type check and `.min(1)` all pass it.
+    for (const blank of ["   ", "\u00a0", "\u3000", "\u2003"]) {
+      expectRejected(validBrief({ requestId: blank }), {
+        field: "requestId",
+        code: "custom",
+        message: /may not be blank/,
+      });
+    }
+  });
+
   test("every cap counts UTF-16 CODE UNITS — an at-cap value is up to 3× its length in bytes", () => {
     // `.max()` is a `.length` check, and `.length` is UTF-16 units: not bytes,
     // not code points. Every cap case in this file uses ASCII, where all three
@@ -690,14 +821,12 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     // It is a documented ceiling, not a defect — `manifestPath` goes to `fs`,
     // which takes bytes — so it is pinned rather than argued: at the 1024 cap a
     // manifestPath can be 3072 bytes, and 512 astral code points.
-    const bmp3 = "漢".repeat(1024); // 3 bytes each, ONE UTF-16 unit each
-    expect(bmp3.length).toBe(1024);
-    expect(Buffer.byteLength(bmp3)).toBe(3072);
+    const bmp3 = "漢".repeat(1024); // 3 bytes each, ONE UTF-16 unit each → 3072 bytes
+    expect(bmp3.length).toBe(1024); // the fixture is AT the cap, not near it
     expect(BriefSchema.parse(validBrief({ manifestPath: bmp3 })).manifestPath).toBe(bmp3);
 
-    const astral = "\u{1F600}".repeat(512); // 4 bytes each, TWO UTF-16 units each
+    const astral = "\u{1F600}".repeat(512); // 4 bytes each, TWO units each → 512 code points
     expect(astral.length).toBe(1024);
-    expect([...astral]).toHaveLength(512);
     expect(BriefSchema.parse(validBrief({ manifestPath: astral })).manifestPath).toBe(astral);
 
     // One more code point is TWO more units, so the cap binds at 1026 — the
@@ -714,27 +843,32 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     // not: the slug is the ledger key, and `canonicalRepoSlug` folds ASCII only
     // (to match SQLite's `lower()`), so a non-ASCII slug that got through would
     // be a value JS and SQL disagree about the identity of.
+    // The cross-check names `repoUrl` too: `repoSlug` no longer matches a URL
+    // this case did not touch. That is the refine doing its job, not drift.
     expectRejected(validBrief({ repoSlug: "own\u{1F600}er/repo" }), {
       field: "repoSlug",
       code: "invalid_string",
+      alsoNames: ["repoUrl"],
     });
   });
 
   test("repoSlug invalid pattern rejected (no slash)", () => {
-    expectRejected(validBrief({ repoSlug: "justowner" }), { field: "repoSlug", code: "invalid_string" });
+    expectRejected(validBrief({ repoSlug: "justowner" }), {
+      field: "repoSlug",
+      code: "invalid_string",
+      alsoNames: ["repoUrl"], // the cross-check, see the ASCII case above
+    });
   });
 
   test("repoSlug dot segment rejected (it reaches join() on the ledger key)", () => {
-    expectRejected(validBrief({ repoSlug: "../repo" }), {
-      field: "repoSlug",
-      code: "custom",
-      message: /may not be '\.' or '\.\.'/,
-    });
-    expectRejected(validBrief({ repoSlug: "./repo" }), {
-      field: "repoSlug",
-      code: "custom",
-      message: /may not be '\.' or '\.\.'/,
-    });
+    for (const slug of ["../repo", "./repo"]) {
+      expectRejected(validBrief({ repoSlug: slug }), {
+        field: "repoSlug",
+        code: "custom",
+        message: /may not be '\.' or '\.\.'/,
+        alsoNames: ["repoUrl"], // the cross-check, see the ASCII case above
+      });
+    }
   });
 
   test("repoSlug segments at the 100 cap accepted, 101 rejected (both sides)", () => {
@@ -859,7 +993,6 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
   // ceiling guard and the manifest schema now share.
   test("stamped value must be a SAFE integer (reject 1e300)", () => {
     const manifest = loadManifest(manifestPath, 120_000, manifestDir);
-    expect(Number.isInteger(1e300)).toBe(true);
     expect(() => stampManifestLimit(manifest, 1e300)).toThrow(ManifestError);
     expect(() => stampManifestLimit(manifest, 1e300)).toThrow(/positive integer/);
   });
@@ -867,8 +1000,6 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
   test("stamped value must be a SAFE integer (reject MAX_SAFE_INTEGER + 2)", () => {
     const manifest = loadManifest(manifestPath, 120_000, manifestDir);
     const tooBig = Number.MAX_SAFE_INTEGER + 2;
-    expect(Number.isInteger(tooBig)).toBe(true);
-    expect(Number.isSafeInteger(tooBig)).toBe(false);
     expect(() => stampManifestLimit(manifest, tooBig)).toThrow(ManifestError);
     expect(() => stampManifestLimit(manifest, tooBig)).toThrow(/positive integer/);
   });
@@ -942,6 +1073,104 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
     expect(validated.phases[1]?.command).toEqual(["echo", "build"]);
     expect(validated.limitMicroUsd).toBe(500_000);
     expect(validated.version).toBe("1.0.0");
+  });
+
+  /**
+   * The AC9a guard's own fixture: a manifest that ARRIVES with a ceiling in it.
+   *
+   * The shared fixture above never carries `limitMicroUsd`, so every case in
+   * this block stamps onto a manifest that had none — and `stripAuthoredLimit`,
+   * the guard that exists precisely because an author can put one there, was
+   * unexercised. It is not a hypothetical field: `manifestPath` is
+   * repo-relative and the repository is attacker-supplied, so a checked-in
+   * `"limitMicroUsd": 9007199254740991` is money-path input chosen by whoever
+   * opened the issue.
+   */
+  function authoredLimitManifest(limitMicroUsd: number): string {
+    const authoredPath = path.join(manifestDir, "authored.json");
+    fs.writeFileSync(authoredPath, JSON.stringify({ ...manifestObj, limitMicroUsd }));
+    return authoredPath;
+  }
+
+  test("AC9a: an AUTHOR-supplied limitMicroUsd is dropped before the stamp", () => {
+    // The loader is deliberately NEUTRAL about this field — the runner reads the
+    // already-stamped `pipeline.yaml` back through the same `loadManifest`, and
+    // a stamped cap and an authored cap are byte-identical in the file — so the
+    // loader must carry it through, and the DISPATCH-side read is what strips
+    // it. Both halves are asserted here, because "the loader keeps it" is what
+    // makes the strip necessary and is the thing a well-meaning fix would break.
+    const authored = Number.MAX_SAFE_INTEGER;
+    const loaded = loadManifest(authoredLimitManifest(authored), 120_000, manifestDir);
+    expect(loaded.manifest.limitMicroUsd).toBe(authored);
+
+    const stripped = stripAuthoredLimit(loaded);
+    expect(stripped.manifest.limitMicroUsd).toBeUndefined();
+    // Only that field: a strip that rebuilt the manifest from a subset would
+    // silently drop phases, and the engine then runs a different pipeline.
+    expect(stripped.manifest.phases).toEqual(loaded.manifest.phases);
+    expect(stripped.manifest.pipelineId).toBe(loaded.manifest.pipelineId);
+    // Provenance goes with it: these bytes now match no file on disk.
+    expect(stripped.resolvedPath).toBeUndefined();
+    // The caller's copy is untouched — the loaded manifest is shared.
+    expect(loaded.manifest.limitMicroUsd).toBe(authored);
+
+    // End to end: the delivered bytes carry the ADMITTED ceiling and no trace of
+    // the authored one.
+    const delivered = serializeManifest(stampManifestLimit(stripped, 250_000));
+    expect((JSON.parse(delivered) as { limitMicroUsd: number }).limitMicroUsd).toBe(250_000);
+    expect(delivered).not.toContain(String(authored));
+  });
+
+  test("AC9a: the stamp WINS over an authored ceiling even with the strip skipped", () => {
+    // Belt and braces, and the two are independent: `stampManifestLimit` spreads
+    // `limitMicroUsd` LAST, so the stamp overrides an authored value on its own.
+    // Reorder that spread — put `...manifest.manifest` after the stamp — and the
+    // authored ceiling wins on every dispatch that does not strip first. Nothing
+    // else in this file would see it.
+    const loaded = loadManifest(authoredLimitManifest(9_000_000), 120_000, manifestDir);
+    expect(stampManifestLimit(loaded, 250_000).manifest.limitMicroUsd).toBe(250_000);
+  });
+
+  test("serializeManifest does NOT require a stamp — the type system will not catch a caller who forgets", () => {
+    // TRIPWIRE, NOT A SPECIFICATION, and the shape of the gap is the point:
+    // `serializeManifest` takes a `LoadedManifest`, which is the SAME type
+    // `loadManifest` returns, so `serializeManifest(loadManifest(…))` compiles
+    // and ships a manifest with no ceiling in it at all. `stampManifestLimit`
+    // narrows nothing — there is no `StampedManifest` for the serializer to
+    // demand — so the only thing standing between a forgotten stamp and an
+    // uncapped box is dispatch remembering to call it (pinned end to end by
+    // `dispatch.test.ts`'s AC9a/C7 cases and by gate item B, which refuses an
+    // unstamped manifest INSIDE the box).
+    //
+    // If a branded stamped type ever lands, this stops compiling — which is the
+    // signal, not a regression. Read it as "the hole is closed", and delete it.
+    const loaded = loadManifest(manifestPath, 120_000, manifestDir);
+    const unstamped = JSON.parse(serializeManifest(loaded)) as Record<string, unknown>;
+    expect(unstamped.limitMicroUsd).toBeUndefined();
+    expect(unstamped.phases).toHaveLength(2);
+  });
+
+  test("re-stamping is LAST-WINS and unguarded — a second stamp can RAISE the ceiling", () => {
+    // TRIPWIRE, NOT A SPECIFICATION. `stampManifestLimit` accepts an already
+    // stamped manifest and overwrites the ceiling with no comparison against
+    // what is already there, so a retry path that stamps twice — a re-dispatch
+    // reusing a loaded manifest, a caller that stamps defensively "just in
+    // case" — delivers whichever ceiling was applied LAST, including a higher
+    // one than the ledger admitted. Today nothing calls it twice; nothing stops
+    // it either, and no other case here would notice if something started.
+    //
+    // Pinned as behaviour so the day a monotonic guard (or a stamped type)
+    // lands, this line goes red BY DESIGN and gets deleted — rather than the
+    // raise slipping in unobserved. What is asserted is the hazard, not that
+    // raising is correct: it is not.
+    const loaded = loadManifest(manifestPath, 120_000, manifestDir);
+    const once = stampManifestLimit(loaded, 500_000);
+    const twice = stampManifestLimit(once, 9_000_000);
+    expect(once.manifest.limitMicroUsd).toBe(500_000);
+    expect(twice.manifest.limitMicroUsd).toBe(9_000_000); // RAISED, and unremarked
+    // The first stamp is not mutated, so the two ceilings are distinguishable at
+    // all — a stamp that wrote in place would make even this invisible.
+    expect(Object.isFrozen(once.manifest)).toBe(true);
   });
 
   test("stampManifestLimit preserves manifestLoadMs and DROPS resolvedPath", () => {
@@ -1028,5 +1257,36 @@ describe("repoUrl/repoSlug cross-check", () => {
   test("the host is deliberately unconstrained — self-hosted forges stay legitimate", () => {
     const url = "https://git.internal.example.com/owner/repo";
     expect(BriefSchema.parse(validBrief({ repoUrl: url })).repoUrl).toBe(url);
+  });
+
+  test("KNOWN DEFECT: a repository literally NAMED `repo.git` is falsely refused", () => {
+    // SOURCE BUG, pinned rather than accommodated. `repoSlugOfUrl` strips
+    // `/\.git$/i` from the URL PATH but `canonicalRepoSlug` does not strip it
+    // from the SLUG, so the two sides canonicalise asymmetrically:
+    //
+    //   repoUrl  https://github.com/owner/repo.git  →  "owner/repo"
+    //   repoSlug              owner/repo.git        →  "owner/repo.git"
+    //
+    // `.` is inside the slug charset `[A-Za-z0-9._-]` and `owner/repo.git` has
+    // no `.`/`..` segment, so this is an EXPRESSIBLE, correct brief for a
+    // repository whose name ends in `.git` — refused as naming a different
+    // repository, with a message that says so and is wrong. The sibling case
+    // above ("accepts a .git suffix") only ever exercised the URL carrying a
+    // suffix the slug does not have, which is the case the strip is FOR.
+    //
+    // Not fixed here (this file may not touch `src/`), and not asserted as
+    // correct: the assertion below records what the schema does today so the fix
+    // — stripping on both sides, or on neither — shows up as this line going
+    // red. Deleting the test is the last step of that fix, not a workaround for
+    // it.
+    expectRejected(
+      validBrief({ repoSlug: "owner/repo.git", repoUrl: "https://github.com/owner/repo.git" }),
+      { field: "repoUrl", code: "custom", message: /same repository as repoSlug/ },
+    );
+    // The near-miss that makes the diagnosis unambiguous: drop the suffix from
+    // BOTH and the same brief is accepted, so nothing but the asymmetric strip
+    // is refusing it.
+    const plain = validBrief({ repoSlug: "owner/repo", repoUrl: "https://github.com/owner/repo.git" });
+    expect(BriefSchema.parse(plain).repoSlug).toBe("owner/repo");
   });
 });

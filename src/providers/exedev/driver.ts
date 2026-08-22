@@ -55,9 +55,16 @@ export {
 
 // ─── response shapes ────────────────────────────────────────────────────────
 
-/** The one MEASURED shape: `ls --json` → `{"vms":[{vm_name, https_url, …}]}`. */
+/**
+ * The one MEASURED shape: `ls --json` → `{"vms":[{vm_name, https_url, …}]}`.
+ *
+ * The rows are `unknown`, not a field shape: only the ENVELOPE is measured, and
+ * a row that is not an object at all (a bare string, a null) made
+ * `typeof v.vm_name` throw a TypeError that surfaced as an opaque crash instead
+ * of a named anomaly. Row shape is checked where the row is read.
+ */
 interface LsShape {
-  vms?: Array<{ vm_name?: unknown; https_url?: unknown; ssh_dest?: unknown }>;
+  vms?: unknown[];
 }
 
 /** How `create` learned the VM's URL — logged per call (Observability Contract). */
@@ -203,12 +210,31 @@ export class ExeDevDriver implements ProviderDriver {
   /**
    * `list()`, plus the box identifiers this driver refused to name.
    *
-   * exe.dev's `ls --json` can return an entry whose `vm_name` is not a string.
-   * Dropping it from `list()` made it a box `reapRuns` cannot see and cannot
-   * reap — spend nobody is accountable for. The drop still happens (there is
-   * no usable name to hand back), but it is now reported instead of silent.
-   * The placeholder names the index, because that is the only handle the
-   * substrate gave us for the row.
+   * Two unusable rows, two DIFFERENT dispositions, and the split is the whole
+   * design:
+   *
+   *  - `vm_name` UNREADABLE (not a string, absent). Nothing says what this row
+   *    is, so it may be OURS — a live box `reapRuns` cannot see and cannot
+   *    reap, spend nobody is accountable for. It rides out as an ANOMALY and
+   *    the fleet refuses to reap until it is resolved.
+   *  - `vm_name` READABLE but outside the factory grammar. Provably NOT ours:
+   *    every box this driver creates is named from an `assertValidRunId` id.
+   *    It is EXCLUDED from the population and logged — see the call site for
+   *    why refusing here would be the unsafe choice, not the safe one.
+   *
+   * An anomaly has to be FOLLOWABLE, which the bare `vms[3]` placeholder was
+   * not: no box is named `vms[3]`, and this is an ACCOUNT-WIDE listing (no name
+   * filter), so the index is not even stable between calls. Every other
+   * identifying field the row carries — `ssh_dest`, `https_url`, an id, a tag —
+   * rides the anomaly instead of being discarded, because those are what an
+   * operator matches the row back to a real box with.
+   *
+   * `FakeDriver.listWithAnomalies` reports a bad NAME as an anomaly, and that
+   * is not divergence from this — it is the same rule ("anything that might be
+   * ours and is unaccounted-for stops the sweep") over a population of
+   * different provenance. `.sandbox/fake-boxes` is OUR directory, so a stray
+   * entry in it is suspicious by definition; this account is shared with
+   * strangers, so a stranger's box is expected and must not stop anything.
    */
   async listWithAnomalies(name?: string): Promise<ProviderVmListing> { /* dp:ok a rejection IS the error contract: non-zero exits are content-checked below, spawn errors propagate through the registry proxy's error log */
     const res = await this.control(["ls", ...(name === undefined ? [] : [name]), "--json"]);
@@ -228,16 +254,48 @@ export class ExeDevDriver implements ProviderDriver {
       );
     }
     const skipped: string[] = [];
-    const vms = shape.vms.flatMap((v, i) => {
-      const vmName = typeof v.vm_name === "string" ? v.vm_name : null;
+    const vms = shape.vms.flatMap((v, i): ProviderVm[] => {
+      if (typeof v !== "object" || v === null || Array.isArray(v)) {
+        skipped.push(`vms[${i}] (row is not an object: ${truncate(JSON.stringify(v) ?? String(v))})`);
+        return [];
+      }
+      const row = v as Record<string, unknown>;
+      const vmName = typeof row.vm_name === "string" ? row.vm_name : null;
       if (vmName === null) {
-        skipped.push(`vms[${i}] (vm_name is not a string)`);
+        skipped.push(`vms[${i}] (vm_name is not a string; ${rowIdentity(row)})`);
+        return [];
+      }
+      // A READABLE name outside the strict id grammar is provably not ours:
+      // every box this driver creates is named from a `assertValidRunId` id
+      // (`create` asserts it, and so does `provisionAdmittedRun` before it), so
+      // a name that fails it is a stranger's box in the same account. It is
+      // EXCLUDED — not in `vms`, not in `skipped` — and logged.
+      //
+      // Passing it through is worse: `reapRuns` destroys every box no open
+      // record claims, so a stranger's box gets destroyed (and `destroy` would
+      // throw on the name anyway, mid-sweep). Reporting it as an anomaly is
+      // worse still: this listing is ACCOUNT-WIDE, so one stranger's box stalls
+      // the sweep for the whole account and OUR boxes bill forever — trading a
+      // bounded risk for an unbounded one. Exclusion avoids both.
+      let mine = true;
+      try {
+        assertValidRunId(vmName);
+      } catch {
+        mine = false;
+      }
+      if (!mine) {
+        this.emit("list_excluded_foreign_name", {
+          vm: truncate(vmName),
+          verb: "list",
+          outcome: "excluded",
+          reason: "vm_name is outside the factory box-name grammar — not a box this driver created",
+        });
         return [];
       }
       return [
         {
           name: vmName,
-          ...(typeof v.https_url === "string" && v.https_url.length > 0 ? { httpsUrl: v.https_url } : {}),
+          ...(typeof row.https_url === "string" && row.https_url.length > 0 ? { httpsUrl: row.https_url } : {}),
         },
       ];
     });
@@ -399,6 +457,33 @@ export class ExeDevDriver implements ProviderDriver {
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────
+
+/** Anomaly strings land in an error message and a log line — bound their size. */
+const ANOMALY_VALUE_MAX = 120;
+function truncate(s: string): string {
+  return s.length <= ANOMALY_VALUE_MAX ? s : `${s.slice(0, ANOMALY_VALUE_MAX)}…`;
+}
+
+/**
+ * Whatever identifying fields a row this driver refused to name DOES carry.
+ *
+ * The refusal `reapRuns` raises on a skipped entry tells an operator to go find
+ * it — so the entry has to be findable. `vms[3]` is not: no box is named that,
+ * and the account-wide listing's row order is not stable between calls. The
+ * row's remaining string fields (`ssh_dest`, `https_url`, an id, a tag) are the
+ * only handles the substrate gave us, so they are surfaced rather than dropped.
+ * Capped at four fields and truncated per value — this is a diagnostic, not a
+ * dump of a provider payload.
+ */
+function rowIdentity(row: Record<string, unknown>): string {
+  const fields: string[] = [];
+  for (const [k, v] of Object.entries(row)) {
+    if (k === "vm_name" || typeof v !== "string" || v.length === 0) continue;
+    fields.push(`${truncate(k)}=${truncate(JSON.stringify(v))}`);
+    if (fields.length === 4) break;
+  }
+  return fields.length === 0 ? "the row carries no other identifying field" : `row fields: ${fields.join(" ")}`;
+}
 
 /** Parse or fail with the command named — never pass a guess upstream. */
 function parseJson(text: string, what: string): Record<string, unknown> | null {

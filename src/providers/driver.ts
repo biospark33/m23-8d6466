@@ -16,10 +16,8 @@
 
 import { rmSync } from "node:fs";
 import type { RunRecord, RunRecordStore } from "./run-record.ts";
-import { assertValidRunId } from "./run-record.ts";
+import { assertExistingRunId, assertValidRunId } from "./run-record.ts";
 import { checkHeadroom, HeadroomRefusedError, loadQuotaLimits } from "./quota.ts";
-import { CostLedger } from "./cost-ledger.ts";
-import { assertWithinBudget } from "./budget-gate.ts";
 import { TimeoutError, withTimeout } from "./timeout.ts";
 
 /**
@@ -29,6 +27,47 @@ import { TimeoutError, withTimeout } from "./timeout.ts";
  * `--tag` flag.
  */
 export const SBX_OWNERSHIP_TAG = "qds-sbx";
+
+/**
+ * The generated run-id grammar (`<slug>-<YYYYMMDD>-<6 hex>`, run-record.ts
+ * `newId`). A VM name outside it can never be a factory box.
+ *
+ * Lives HERE, not in reaper.ts where it was declared, because `reapRuns` below
+ * needs the same test and driver.ts is the low module (reaper.ts already
+ * imports this one; the reverse edge would be the cycle D4 exists to avoid).
+ * Re-exported from reaper.ts so existing importers are unchanged.
+ */
+export const RUN_ID_SHAPE = /^[a-z0-9][a-z0-9-]*-\d{8}-[0-9a-f]{6}$/;
+
+/**
+ * Is this box provably ours? The ONE ownership test, shared by both reapers.
+ *
+ * Both halves are required and both fail SAFE. The name grammar alone is not
+ * ownership — a stranger could name a box anything — and the tag alone is not
+ * either, so a box is destroyable only when it carries the marker `create`
+ * stamps on every factory box AND a name only `newId` produces.
+ *
+ * The consequence is deliberate and asymmetric: a box that IS ours but does not
+ * prove it (created before the tag existed, or a fake box that crashed between
+ * `mkdir` and its metadata write) is never destroyed here. It stays listed, so
+ * `fleet status` still names it and an operator can tear it down by hand — a
+ * stalled reap on a box we can still name is recoverable, and a destroyed
+ * stranger's box is not.
+ *
+ * KNOWN BLOCKER — exedev cannot be auto-reaped. Its `ls --json` reports no tag
+ * field at all (`ProviderVm.tag`, 3-origin verified), so nothing it lists can
+ * pass this test and `reapRuns` destroys nothing there, ever. That is not a
+ * regression: the DF2.6 sweep already classifies every exedev box `foreign` and
+ * destroys none, so the two paths now agree. What would unblock it is a tag
+ * channel in the exedev listing — `listWithAnomalies` populating `tag` from a
+ * field the substrate actually returns — at which point factory boxes start
+ * passing here with no change to this predicate. Until then exedev boxes are
+ * reported and torn down by hand, and that is the deliberate direction: a box
+ * left listed is recoverable, a destroyed stranger's box is not.
+ */
+export function isFactoryOwnedVm(vm: ProviderVm): boolean {
+  return RUN_ID_SHAPE.test(vm.name) && vm.tag === SBX_OWNERSHIP_TAG;
+}
 
 /**
  * A provisioning refusal, in the shape this cluster's refusals already take
@@ -224,7 +263,46 @@ export interface ProvisionAdmittedRunOptions {
  */
 export async function driverListing(driver: ProviderDriver, name?: string): Promise<ProviderVmListing> {
   if (driver.listWithAnomalies !== undefined) return driver.listWithAnomalies(name);
-  return { vms: await driver.list(name), skipped: [] };
+  // A driver with no anomaly channel has not proven its listing complete — it
+  // has said nothing about completeness at all, and the two callers of this
+  // helper (`reapRuns` below and the DF2.6 sweep) both DESTROY every box their
+  // listing cannot match to an open record. The old `skipped: []` asserted a
+  // completeness this function never observed, so a driver that simply never
+  // implemented the method turned the fail-closed refusal back into a
+  // fail-OPEN sweep — silently, and for every future driver by default. A
+  // claim only some drivers may make is not a default; the unproven population
+  // rides out as the anomaly it is, and the destructive callers refuse on it.
+  return {
+    vms: await driver.list(name),
+    skipped: [`driver ${driver.name} has no listWithAnomalies(): its box listing cannot be proven complete`],
+  };
+}
+
+/**
+ * The ONE refusal for a box population that cannot be proven complete.
+ *
+ * `reapRuns` below and the DF2.6 sweep (`reaper.ts`) both reach a destructive
+ * loop through `driverListing`, and both refuse on exactly this input. The
+ * message and the remediation used to be hand-duplicated across the two files
+ * with nothing keeping them aligned — same input, two different guidances.
+ * This is the single source; `reaper.ts` re-wraps it in a `SweepError` (its own
+ * `code` union is what the CLI classifies on) but carries these strings
+ * verbatim.
+ *
+ * The remediation must be FOLLOWABLE: an entry here is not necessarily a box
+ * with a name — exedev reports a row index plus whatever identifying fields the
+ * row carried — so it points at the entry's own details rather than telling an
+ * operator to rename a box that has no name.
+ */
+export function unverifiedVmListingRefusal(
+  driverName: string,
+  skipped: readonly string[],
+): ProvisionRefusedError {
+  return new ProvisionRefusedError(
+    "reap-vms-unverified",
+    `refusing to reap: driver ${driverName} could not account for ${skipped.length} listing entr${skipped.length === 1 ? "y" : "ies"} (${skipped.join("; ")}), so the box population cannot be proven complete`,
+    "find each entry above from the identifying details it carries (for exedev: `ssh exe.dev ls --json`, match the row), then destroy or repair it by hand and re-run — an entry the driver cannot name is a live box no verb can reach",
+  );
 }
 
 /**
@@ -263,6 +341,42 @@ async function provisionStep<T>(
     }
     throw e;
   }
+}
+
+/**
+ * Did a record write fail WITHOUT the writer ever holding the lock?
+ *
+ * `withLock` (run-record.ts) throws its timeout before it runs the write body,
+ * and only when another owner still holds the lock — so this is the one
+ * `store.set` failure that proves nothing of ours was written and someone else
+ * may still write. Every other failure (EIO, ENOSPC, a schema rejection) is
+ * raised from inside the lock, where this process is the only writer.
+ *
+ * The lock timeout is a bare `Error` with no `code`, so the message is the only
+ * discriminator reachable from here — run-record.ts's own tests already pin
+ * that string, which is what makes it usable at all.
+ * ponytail: message match; replace with `e.code === "lock-timeout"` the day
+ * run-record.ts types that refusal.
+ */
+function isRecordLockTimeout(e: unknown): boolean {
+  return e instanceof Error && e.message.startsWith("timed out waiting for the run record lock:");
+}
+
+/**
+ * An address, or nothing at all.
+ *
+ * The seam types `expose` as `Promise<string>`, but a driver that resolves `""`
+ * has established no address — and `??` catches only null/undefined, so an
+ * empty string used to overwrite the create-time URL, satisfy the "no address
+ * recorded" refusal below (`""` is a string, and is not an address), and land
+ * on the record as an `httpsUrl: ""` while every caller doing
+ * `if (result.httpsUrl)` read it as absent. Empty is ABSENT at every site in
+ * this sequence — the record, the refusal and the return value then agree on
+ * one meaning. Whitespace-only is empty for the same reason: it is not an
+ * address either.
+ */
+function address(url: string | undefined): string | undefined {
+  return url !== undefined && url.trim().length > 0 ? url : undefined;
 }
 
 /**
@@ -330,10 +444,23 @@ export async function provisionAdmittedRun(
     // reservation stops counting after ADMISSION_GRACE_MS). Closing it instead
     // does not work — a closed record resolves just as well as an open one.
     //
-    // Removal is safe only because of where this sits: `store.create`'s O_EXCL
-    // just won this id (no other writer owns the file), and nothing billable
-    // exists yet — `driver.create` is below. The id becomes mintable again,
+    // Removal is safe only when the write failed with the lock in OUR hands:
+    // nothing billable exists yet (`driver.create` is below) and no other
+    // writer can be mid-`rename` on the file. The id becomes mintable again,
     // which is correct: this run never happened.
+    //
+    // The one cause that does NOT clear that bar is the lock TIMEOUT, and it is
+    // the cause this comment used to name as typical. `withLock` throws it
+    // BEFORE it runs the write, and it throws it precisely because someone else
+    // holds the lock — a holder a timeout cannot prove dead. `store.create`'s
+    // O_EXCL proves this process created the file; it proves nothing about who
+    // is inside the lock now (an abandoned claim, a sibling thread, a
+    // re-entrant writer). Removing it there deletes a file a live writer is
+    // about to rename back into place: the record returns OPEN and budgetless
+    // anyway — the exact state this rollback exists to avoid — and the id is
+    // mintable in the meantime, so a second run can claim it. That cause is
+    // refused loudly instead, with the record left where the operator (and the
+    // holder) can still see it.
     try {
       store.set(opts.runId, {
         extensions: {
@@ -348,6 +475,13 @@ export async function provisionAdmittedRun(
         },
       });
     } catch (e) {
+      if (isRecordLockTimeout(e)) {
+        throw new ProvisionRefusedError(
+          "budget-write-lock-timeout",
+          `the budget attribution for run ${opts.runId} could not be written (${(e as Error).message}) — the record is OPEN and BUDGETLESS and was deliberately NOT removed: another writer holds its lock and would recreate it`,
+          `find the writer holding ${store.path(opts.runId)} (its lock file names the pid); once none is running, remove the record by hand so ${opts.budget.repoSlug}#${opts.budget.issueId}'s reservation stops counting against its cap: rm ${store.path(opts.runId)}`,
+        );
+      }
       try {
         rmSync(store.path(opts.runId), { force: true });
       } catch {
@@ -399,39 +533,69 @@ export async function provisionAdmittedRun(
     "provider-timeout-create",
     `check the provider for a box named ${opts.runId} before assuming nothing was created, then tear the run down: bun scripts/fleet.ts teardown ${opts.runId}`,
   );
-  // vmName BEFORE expose/setPublic. Both can throw against a box that is
-  // already live and already billing; until the name is on the record the
-  // only handle to it is `teardownRun`'s runId fallback, which holds only
-  // while the box happens to be named after the run.
+  // The provider's returned name is the authoritative handle for everything
+  // downstream — it is persisted as `vmName`, it is what `expose`/`setPublic`
+  // are called against, and `reapRuns` puts it in the claim set — and it was
+  // the only provider return in this sequence with no shape check. A driver
+  // answering `{name: ""}` recorded an empty handle, called the provider
+  // against `""`, and seeded the claim set with `""`: a live box no verb can
+  // reach, which is the unowned-spend case INV-4 exists to prevent.
+  //
+  // `assertExistingRunId` is the canonical predicate every box-name path
+  // already routes through (the LEGACY grammar, matching `FakeDriver.boxDir`
+  // and `destroy` — a box an earlier build named `trailing-` must stay
+  // destroyable), never a local copy of it. Its bare `Error` is reshaped into
+  // the refusal shape this module's callers classify on. The name is NOT
+  // required to equal the run id: a driver may legitimately name a box
+  // something else, and the recorded `vmName` is what teardown and the reaper
+  // then act on. What is required is that it be a name they CAN act on.
+  try {
+    assertExistingRunId(vm.name);
+  } catch (e) {
+    throw new ProvisionRefusedError(
+      "create-name-invalid",
+      `driver ${driver.name} created a box for run ${opts.runId} but reported an unusable name (${(e as Error).message}) — refusing to record a handle no verb can act on`,
+      `check the provider for a box named ${opts.runId} before assuming nothing was created, then tear the run down: bun scripts/fleet.ts teardown ${opts.runId}`,
+    );
+  }
+  // vmName AND the intended port BEFORE expose/setPublic. Every call below can
+  // throw against a box that is already live and already billing; until the
+  // name is on the record the only handle to it is `teardownRun`'s runId
+  // fallback, which holds only while the box happens to be named after the run.
+  //
+  // The port rides along INTENDED, not confirmed, and that is the honest
+  // record: `withTimeout` ABANDONS the expose call rather than cancelling it,
+  // so a timed-out expose can still open the port afterwards. Written only
+  // after the call, the record described a box with a name and no port — i.e.
+  // not the box that exists. Written before, the worst case is a port recorded
+  // for a box the provider never exposed, which teardown destroys either way.
+  const createUrl = address(vm.httpsUrl);
   let record = store.set(opts.runId, {
     vmName: vm.name,
-    ...(vm.httpsUrl === undefined ? {} : { httpsUrl: vm.httpsUrl }),
+    ...(opts.port === undefined ? {} : { ports: [opts.port] }),
+    ...(createUrl === undefined ? {} : { httpsUrl: createUrl }),
   });
-  let httpsUrl = vm.httpsUrl;
+  let httpsUrl = createUrl;
   if (opts.port !== undefined) {
-    // `?? httpsUrl`: the seam types `expose` as `Promise<string>`, but a driver
-    // that resolves nothing has established no URL — and the assignment used to
-    // make the RETURNED `httpsUrl` undefined while the RECORD kept the one
-    // `create` reported (the conditional spread below skips undefined, and the
-    // store has no way to unset a field). A caller then read no URL off
-    // `result.httpsUrl` and a URL off `result.record.httpsUrl`. Both keep the
-    // create-time value instead: "clear both" is not available, so they agree
-    // on the only value either of them can hold.
-    const exposed: string | undefined = await provisionStep(
-      driver.expose(vm.name, opts.port),
-      actionTimeoutMs,
-      `driver.expose(${vm.name}:${opts.port})`,
-      "provider-timeout-expose",
-      `the box ${vm.name} is live and billing — tear the run down: bun scripts/fleet.ts teardown ${opts.runId}`,
+    // A driver that resolves nothing — or an empty string — has established no
+    // URL, so the create-time value is kept for BOTH the record and the return
+    // (the store has no way to unset a field, and "clear both" is not
+    // available, so they agree on the only value either of them can hold).
+    const exposed = address(
+      await provisionStep(
+        driver.expose(vm.name, opts.port),
+        actionTimeoutMs,
+        `driver.expose(${vm.name}:${opts.port})`,
+        "provider-timeout-expose",
+        `tear the run down: bun scripts/fleet.ts teardown ${opts.runId} — the box ${vm.name} is live and billing, and the expose call was ABANDONED, not cancelled: port ${opts.port} may be opened after this refusal, which is why the record carries it as INTENDED, not confirmed`,
+      ),
     );
     httpsUrl = exposed ?? httpsUrl;
-    // Fail-safe before the box is made PUBLIC: with no URL from either call,
-    // nothing records how to reach it. The conditional spread below would
-    // write nothing, `setLocked` skips an undefined value and has no way to
-    // unset one later, so the record would carry a port and no address — and
-    // `setPublic` would still run, leaving a publicly-reachable box only the
-    // provider knows the address of. Refusing here leaves the box exposed but
-    // NOT public, with an open record naming it, which teardown can reach.
+    // Fail-safe before the box is made PUBLIC: with no address from either
+    // call, nothing records how to reach it — `setPublic` would still run,
+    // leaving a publicly-reachable box only the provider knows the address of.
+    // Refusing here leaves the box exposed but NOT public, with an open record
+    // naming it and carrying the port, which teardown can reach.
     if (httpsUrl === undefined) {
       throw new ProvisionRefusedError(
         "expose-no-url",
@@ -441,14 +605,15 @@ export async function provisionAdmittedRun(
     }
     // Persisted BEFORE setPublic, by the same reasoning as vmName above:
     // setPublic can throw against a box that is already exposed and already
-    // billing, and until the URL and port are on the record nothing but the
-    // provider knows what the box is reachable on.
+    // billing, and until the address is on the record nothing but the provider
+    // knows what the box is reachable on. The port is already there from the
+    // pre-expose write; this write confirms the address beside it.
     //
-    // Unconditional, unlike the first `store.set` above: the refusal directly
-    // overhead has already proven `httpsUrl` is a string here, and that proof
-    // is the whole point — the port and the address land together or the box
-    // never becomes public.
-    record = store.set(opts.runId, { ports: [opts.port], httpsUrl });
+    // Unconditional, unlike the create-time spread above: the refusal directly
+    // overhead has already proven `httpsUrl` is a NON-EMPTY string here, and
+    // that proof is the whole point — an address lands or the box never
+    // becomes public.
+    record = store.set(opts.runId, { httpsUrl });
     await provisionStep(
       driver.setPublic(vm.name),
       actionTimeoutMs,
@@ -463,19 +628,26 @@ export async function provisionAdmittedRun(
 /**
  * AC7: DF2.8's budget gate has exactly ONE production caller — the fleet
  * dispatcher, which admits and then composes `provisionAdmittedRun` directly.
- * `createRun`'s own gate call below is a SECOND live admission call site, and it
- * is dormant only because the one caller it has left (`scripts/cap-hit-demo.ts`)
- * omits `opts.issue`. Any future caller that passed one — after admitting, as
- * dispatch does — would book the same issue against the same cap twice, with
- * nothing in the type system and no failing test to catch it.
+ * `createRun` used to carry a gate call of its own: a SECOND live admission call
+ * site, dormant only because the one caller it has left
+ * (`scripts/cap-hit-demo.ts`) omits `opts.issue`. Any future caller that passed
+ * one — after admitting, as dispatch does — would have booked the same issue
+ * against the same cap twice, with nothing in the type system and no failing
+ * test to catch it.
  *
  * Refused at the entry point rather than deleted: `opts.issue` stays on
  * `CreateRunOptions` so a caller that passes it is TOLD where admission lives
  * instead of having it silently ignored (which would provision a run with no
- * budget attribution at all — the unpriced-teardown shape). Called as a plain
- * function, not an `asserts`, deliberately: narrowing `opts.issue` to
- * `undefined` here would make the gate below uncompilable, and the point is to
- * keep that code intact and one line away from re-enabling.
+ * budget attribution at all — the unpriced-teardown shape).
+ *
+ * `createRun`'s own gate call is GONE, not dormant. It sat behind
+ * `if (opts.issue !== undefined)` — the same condition this refusal throws on —
+ * so `assertWithinBudget`, the `admitted` construction and the `budget:` spread
+ * into `provisionAdmittedRun` were unreachable from the moment the refusal
+ * landed: dead code that still read as a live second admission site, and that
+ * any test could only exercise through an impossible branch. Deleting it is
+ * what keeps it from rotting; the composition it performed lives in
+ * `src/fleet/dispatch.ts` and in the remediation below, both of which are run.
  */
 function assertAdmissionNotDelegated(opts: CreateRunOptions): void {
   if (opts.issue === undefined) return;
@@ -504,66 +676,14 @@ export async function createRun(
   // from an uncounted population); a broken limits file refuses here too.
   const headroom = await checkHeadroom(driver, 1, loadQuotaLimits());
   if (!headroom.allowed) throw new HeadroomRefusedError(headroom);
-  // DF2.8: the budget gate (INV-COST-3) runs beside the headroom gate — an
-  // over-cap issue refuses with zero records, zero boxes and zero keys, and
-  // the serialized admission reserves the clamped ceiling so a concurrent
-  // dispatch cannot both-win the read-compare race (R2 §6). An unopenable
-  // ledger refuses here too (INV-COST-6) — never read as zero spend.
-  let admitted:
-    | { decision: ReturnType<typeof assertWithinBudget>; repoSlug: string; issueId: string }
-    | undefined;
-  if (opts.issue !== undefined) {
-    const issue = opts.issue;
-    const ledger = new CostLedger({
-      // ENOENT → undefined so the gate's orphan-admission expiry can see a run
-      // whose store.create failed (its reservation must stop counting); every
-      // other read failure propagates and refuses the dispatch — the same
-      // typed-code classification harvest.ts getRecord applies, never message
-      // text.
-      readRunRecord: (id) => {
-        try {
-          return store.get(id);
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-          throw e;
-        }
-      },
-    });
-    try {
-      admitted = {
-        decision: assertWithinBudget(ledger, {
-          repoSlug: issue.repoSlug,
-          issueId: issue.issueId,
-          runId: opts.runId,
-          requestId: issue.requestId ?? `gate-${opts.runId}`,
-        }),
-        repoSlug: issue.repoSlug,
-        issueId: issue.issueId,
-      };
-    } finally {
-      try {
-        ledger.close();
-      } catch {
-        // A close failure must not mask the gate's own error; the WAL handle dies with the process.
-      }
-    }
-  }
+  // No budget gate here: `assertAdmissionNotDelegated` above has already
+  // refused every call that carries an issue, so this path provisions without
+  // budget attribution by construction — see its docstring for where DF2.8's
+  // one production admission site lives.
   return (
     await provisionAdmittedRun(driver, store, {
       runId: opts.runId,
       ...(opts.port === undefined ? {} : { port: opts.port }),
-      ...(admitted === undefined
-        ? {}
-        : {
-            budget: {
-              repoSlug: admitted.repoSlug,
-              issueId: admitted.issueId,
-              capMicroUsd: admitted.decision.capMicroUsd,
-              spentMicroUsd: admitted.decision.spentMicroUsd,
-              reservedMicroUsd: admitted.decision.reservedMicroUsd,
-              admittedCeilingMicroUsd: admitted.decision.admittedCeilingMicroUsd,
-            },
-          }),
     })
   ).record;
 }
@@ -776,13 +896,9 @@ export async function reapRuns(driver: ProviderDriver, store: RunRecordStore): P
   // unowned-spend case INV-4 exists to prevent. A population that cannot be
   // proven complete is never reaped from.
   const vmListing = await driverListing(driver);
-  if (vmListing.skipped.length > 0) {
-    throw new ProvisionRefusedError(
-      "reap-vms-unverified",
-      `refusing to reap: driver ${driver.name} skipped ${vmListing.skipped.length} box(es) in its listing (${vmListing.skipped.join(", ")}), so the box population cannot be proven complete`,
-      "rename or destroy the boxes named above by hand, then re-run — a skipped box is a live box no verb can reach",
-    );
-  }
+  // One source for the message and the remediation, shared with the DF2.6
+  // sweep — the two used to word the same refusal differently.
+  if (vmListing.skipped.length > 0) throw unverifiedVmListingRefusal(driver.name, vmListing.skipped);
   const vms = vmListing.vms;
   const listing = store.listWithAnomalies();
   if (listing.skipped.length > 0) {
@@ -801,6 +917,14 @@ export async function reapRuns(driver: ProviderDriver, store: RunRecordStore): P
   const destroyed: string[] = [];
   for (const vm of vms) {
     if (claimed.has(vm.name)) continue;
+    // Unclaimed is not the same as OURS, and this listing is account-wide on
+    // exedev (`driverListing(driver)` passes no name filter), so a stranger's
+    // box in the same account arrives here unclaimed by construction —
+    // destroying it is the worst outcome anywhere in this subsystem, and
+    // unrecoverable. The ownership test is the gate, and it is the SAME
+    // predicate the DF2.6 sweep classifies on: a box that cannot prove it is
+    // ours is `foreign` there and is not an orphan here.
+    if (!isFactoryOwnedVm(vm)) continue;
     await driver.destroy(vm.name);
     destroyed.push(vm.name);
   }

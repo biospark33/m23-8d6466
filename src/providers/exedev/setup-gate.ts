@@ -199,7 +199,12 @@ export async function setupGate(
 ): Promise<SetupGateResult> {
   assertValidRunId(opts.runId);
   assertValidRunId(vm);
-  const requestId = opts.requestId ?? driver.requestId;
+  // Empty is ABSENT: `??` admits `""` (an unset env var, a trimmed field
+  // threaded through by a caller), and an empty `requestId` on every
+  // `emitGate`/`log` line for the run is precisely the un-joinable output this
+  // parameter was added to prevent — worse than the driver's own id, which at
+  // least correlates the gate's own lines to each other.
+  const requestId = opts.requestId !== undefined && opts.requestId.trim().length > 0 ? opts.requestId : driver.requestId;
   if (!SHA_RE.test(opts.commitSha)) {
     throw new ExeDevDriverError(
       "commit-sha-invalid",

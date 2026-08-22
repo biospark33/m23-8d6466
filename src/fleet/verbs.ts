@@ -53,7 +53,23 @@ export function listVerbs(): VerbEntry[] {
         { name: "--port", required: false, valueType: "string" },
         { name: "--help", required: false, valueType: "boolean" },
       ],
-      exitCodes: [0, 1, 2, 3, 5],
+      // 6 = the box is LIVE and the ack could not be written to stdout
+      // (`fleet dispatch … | head -0` closes the pipe before the line lands).
+      // Declared because this registry is a CONTRACT — DF3.5's skill-contract
+      // test compares these against what the verbs actually return, and a
+      // generated skill drops an undeclared code into its default branch. 6 is
+      // the one code whose remediation is "`fleet teardown <id>` now or it keeps
+      // billing", so it is the worst one to lose. See scripts/fleet.ts's
+      // `ack-unwritable`.
+      //
+      // NOTE, not resolved here: fleet.ts's own header defines 6 as "the verb
+      // succeeded but a CLEANUP after it did not (ledger close / lock release)".
+      // An unwritable ack is neither — it is the verb's own OUTPUT failing after
+      // the billable work landed. The shared property that makes 6 right is that
+      // it is NOT retryable (retrying dispatch provisions a second box), which
+      // is the same reason it is not 1. Widening that definition is a taxonomy
+      // change and belongs with the CLI's table, not here.
+      exitCodes: [0, 1, 2, 3, 5, 6],
     },
     {
       verb: "status",

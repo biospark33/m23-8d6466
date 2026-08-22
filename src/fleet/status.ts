@@ -6,12 +6,20 @@
  * two fleet-level rows that describe the listing itself, listUnavailable and
  * recordsSkipped (see FLEET_ROW_ID).
  *
- * FleetError unified: one class in dispatch.ts, re-exported here (C2).
+ * FleetError unified: ONE class, in dispatch.ts (C2). Imported here, never
+ * re-exported — see the import below.
  */
 import { SBX_OWNERSHIP_TAG, type ProviderVm } from "../providers/driver.ts";
 import type { RunRecord, RunRecordListing, RunRecordStore } from "../providers/run-record.ts";
 
-export { FleetError } from "./dispatch.ts";
+import { MAX_URL, sanitizeLabel } from "./brief-schema.ts";
+// NOT re-exported. `FleetError` has ONE owner, `dispatch.ts`, and the barrel
+// star-exports both modules — so a re-export here is the same binding reached
+// twice through `index.ts`. It resolves today only because the two resolve to
+// one symbol; the day `status.ts` declares its own, the barrel has a duplicate
+// star export and every consumer of `src/fleet/index.ts` breaks at once. No
+// caller imports it from here (the CLI and both test files take it from
+// `dispatch.ts`), so the re-export was dead weight on the barrel path.
 import { assertFleetRunId, FleetError } from "./dispatch.ts";
 
 export interface StatusRow {
@@ -96,6 +104,56 @@ function isOwnedVm(vm: ProviderVm): boolean {
   return vm.tag === undefined || vm.tag === SBX_OWNERSHIP_TAG;
 }
 
+/**
+ * Cap on a substrate-supplied box name in a row. A run id is `RUN_ID_MAX` long;
+ * a foreign box on a tag-blind provider is whatever the account named it.
+ */
+const MAX_VM_NAME = 128;
+
+/**
+ * A substrate-supplied name on its way into a row, under the same two rules
+ * `brief-schema.ts` applies to a brief.
+ *
+ * The brief is the MORE trusted of the two sources and gets both rules; the
+ * substrate got neither. A box named `"box\nFLEET teardown ok"` went straight
+ * into `orphanRow`'s `runId` interpolation and out to the operator stream, which
+ * is the forged log line NO_CONTROL_CHARS exists to stop — and on a tag-blind
+ * provider the orphan sweep emits EVERY box in the account (see `isOwnedVm`), so
+ * the names are not even the factory's own.
+ */
+function safeName(name: string): string {
+  return sanitizeLabel(name, MAX_VM_NAME);
+}
+
+/** `safeName` over an optional field, preserving the absence. */
+function sanitizeOptionalName(name: string | undefined): string | undefined {
+  return name === undefined ? undefined : safeName(name);
+}
+
+/**
+ * A substrate- or record-supplied URL as a row field, or ABSENT when it carries
+ * a credential.
+ *
+ * INV-CRED-1's rule, applied on the way OUT as well as on the way in: the brief
+ * schema refuses `https://token@host/…` because userinfo is "a credential by
+ * construction", and a provider `httpsUrl` of that shape reached both
+ * `orphanRow` and every record-backed row untouched. A row cannot refuse, so the
+ * field is OMITTED — `StatusRow.httpsUrl` is already optional, and a missing
+ * link is a smaller loss than a token in whatever an operator pastes the status
+ * output into. An unparseable URL is dropped for the same reason `hasNoUserinfo`
+ * gives: it cannot be shown to be free of one.
+ */
+function safeUrl(url: string | undefined): string | undefined {
+  if (url === undefined) return undefined;
+  try {
+    const parsed = new URL(url);
+    if (parsed.username !== "" || parsed.password !== "") return undefined;
+  } catch {
+    return undefined;
+  }
+  return sanitizeLabel(url, MAX_URL);
+}
+
 /** Story: 30s default. A non-positive value would fire the timer immediately. */
 function resolveTimeoutMs(deps: StatusDeps): number {
   const ms = deps.listTimeoutMs ?? 30_000;
@@ -143,8 +201,37 @@ async function listWithTimeout(
  * `undefined` and reached `statusAll` as an orphan row with no runId, which the
  * comparator then dereferenced. It is dropped here instead — an entry with no
  * name is not a box any verb could act on (teardown targets it BY name).
+ *
+ * A NAMED lookup that fails is RETRIED UNFILTERED before it is called a list
+ * failure, and that retry is the whole difference between "the substrate
+ * answered, nothing matched" and "the substrate could not be asked". On a
+ * driver whose named lookup ERRORS for a box that is not there — the ordinary
+ * shape of a CLI `ls <name>` exiting non-zero, and exactly what
+ * `ExeDevDriver.listWithAnomalies` does with a non-zero `ssh exe.dev ls`
+ * — the catch below cannot tell the two apart, so the commonest state in the
+ * fleet (a torn-down run) came back from `statusRun` as `boxUnknown`, or on a
+ * closed record as "substrate unreachable" with `boxAlive` omitted, while
+ * `statusAll` called the same run `boxMissing`/`boxAlive: false` off the
+ * unfiltered path. Two entry points, opposite verdicts, and the filtered one is
+ * the query an operator types when they already know the id.
+ *
+ * A REAL listing failure is not downgraded by this: the unfiltered list has to
+ * ANSWER for the retry to change the verdict, and if it fails too the result is
+ * `null` exactly as before. The cost is one extra call on the failure path
+ * only, and a wider map than the caller asked for — harmless, because every
+ * caller reads it by `get(name)`.
  */
 async function listOwnedBoxes(
+  deps: StatusDeps,
+  timeoutMs: number,
+  name?: string,
+): Promise<Map<string, ProviderVm> | null> {
+  const boxes = await listOwnedBoxesOnce(deps, timeoutMs, name);
+  if (boxes !== null || name === undefined) return boxes;
+  return listOwnedBoxesOnce(deps, timeoutMs);
+}
+
+async function listOwnedBoxesOnce(
   deps: StatusDeps,
   timeoutMs: number,
   name?: string,
@@ -187,8 +274,13 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
     requestId: rec.requestId,
     // In the crash window the record has no handle but the box does; the box
     // name is what teardown would target (`rec.vmName ?? runId`).
-    vmName: rec.vmName ?? box?.name,
-    httpsUrl: rec.httpsUrl,
+    //
+    // Both candidates go through `safeName`, and `RunRecordStore` being a
+    // structural interface is why the record half needs it too — the same
+    // argument `listOwnedBoxes` makes about `StatusDeps.driver`. `httpsUrl`
+    // originates at the provider on both paths.
+    vmName: sanitizeOptionalName(rec.vmName ?? box?.name),
+    httpsUrl: safeUrl(rec.httpsUrl),
     createdAt: rec.createdAt,
     spendMicroUsd: rec.spendMicroUsd,
     limitMicroUsd: rec.limitMicroUsd,
@@ -238,7 +330,11 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
  * an orphan row looks like.
  */
 function orphanRow(vm: ProviderVm): StatusRow {
-  return { runId: `(orphan ${vm.name})`, state: "orphan", vmName: vm.name, httpsUrl: vm.httpsUrl };
+  // `safeName` FIRST, then the interpolation: the name is substrate-supplied and
+  // this is the one row field that embeds it in a sentence, so a raw newline in
+  // it forges an operator-facing line. See safeName / safeUrl.
+  const name = safeName(vm.name);
+  return { runId: `(orphan ${name})`, state: "orphan", vmName: name, httpsUrl: safeUrl(vm.httpsUrl) };
 }
 
 /**
@@ -290,20 +386,29 @@ function recordsSkippedRow(skipped: string[]): StatusRow {
 }
 
 /**
- * Skipped record filenames, or `[]` when the listing itself could not be read.
+ * Skipped record filenames, or `null` when the listing itself could not be read.
  *
  * `statusRun` consults this from inside an error handler already committed to a
  * typed verdict, so a listing that THROWS — one malformed record body anywhere
  * in the directory — must not turn this run's clean exit 4 into an untyped stack
- * dump about an unrelated run's file. The caveat is dropped on that path;
- * `statusAll` is the entry point that reports the failure, as exit 1
- * `record-store-unreadable`.
+ * dump about an unrelated run's file. That is why the failure is caught.
+ *
+ * It is `null` and not `[]` because the two are opposite answers. `[]` is "the
+ * listing was read and holds no mangled names", which is what lets the exit-4
+ * remediation say the run simply is not there. A failure knows neither, and
+ * returning `[]` for it published the stronger claim: both the caveat AND the
+ * store failure vanished, and the operator heard "check the run ID or create the
+ * run first" — an invitation to re-create a run whose box may be live — about a
+ * directory `statusAll` exits 1 on. The absence itself still stands (ENOENT on
+ * `<runId>.json` is direct evidence about THIS run, not something derived from
+ * the listing), so the verdict stays 4; what the caller owes is saying so.
  */
-function skippedRecordNames(store: RunRecordStore): string[] {
+function skippedRecordNames(store: RunRecordStore): string[] | null {
   try {
-    return store.listWithAnomalies().skipped;
+    const skipped = store.listWithAnomalies().skipped;
+    return Array.isArray(skipped) ? skipped : null;
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -340,6 +445,17 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
   let listing: RunRecordListing;
   try {
     listing = deps.store.listWithAnomalies();
+    // The SHAPE read is inside the guard, not just the call. `RunRecordStore` is
+    // a structural interface exactly like `StatusDeps.driver`, and the same
+    // argument applies: any injected or test store satisfies the type while
+    // answering `{records: […]}` with no `skipped`, or with a non-array
+    // `records`. Read outside, `listing.records.map(…)` and
+    // `listing.skipped.length` threw a TypeError out of `statusAll` untyped —
+    // the precise failure `record-store-unreadable` was added to prevent. The
+    // throw here lands in the catch below and comes out as that error.
+    if (!Array.isArray(listing?.records) || !Array.isArray(listing.skipped)) {
+      throw new Error("listWithAnomalies() did not return {records: [], skipped: []}");
+    }
   } catch (e) {
     // INV-4 makes list() throw on the FIRST unreadable record — untyped, so one
     // corrupt file would hide the whole fleet behind an exit-1 stack trace.
@@ -432,6 +548,8 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
       // THIS run renamed to such a stem is skipped with the rest. Both verdicts
       // below assume no such record exists, so both carry the caveat when one
       // might. Read once, here — the only path where it changes the answer.
+      // `null` ⇒ the listing could not be read at all, which is a THIRD answer
+      // and not the empty one; see skippedRecordNames.
       const skipped = skippedRecordNames(deps.store);
 
       // No record is not the same as no box. The box is named after the run id
@@ -439,15 +557,25 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
       // this verb exists to surface. A list failure is NOT a hit, so it still
       // refuses as 4 rather than inventing a box out of a timeout.
       if (box !== undefined) {
-        return { ...orphanRow(box), ...(skipped.length > 0 ? { skippedRecords: skipped } : {}) };
+        return {
+          ...orphanRow(box),
+          ...(skipped !== null && skipped.length > 0 ? { skippedRecords: skipped } : {}),
+        };
       }
       throw new FleetError(
         4,
         "run-not-found",
         `No run record for ${runId}`,
-        skipped.length === 0
-          ? "Check the run ID or create the run first"
-          : `Check the run ID or create the run first — the listing skipped ${skipped.length} file(s) whose names are not run ids (${skipped.join(", ")}), and one of them may be this run's record under a mangled name`,
+        // Three arms, because there are three states and the middle one used to
+        // render as the first: the listing was read and was clean; the listing
+        // could not be read, so nothing rules out this run's record sitting
+        // under a mangled name; or it was read and named the files in question.
+        // Only the first may tell the operator to create the run.
+        skipped === null
+          ? "Check the run ID — the record listing could not be read, so a record for this run under a mangled name cannot be ruled out. Run `fleet status` (which refuses with record-store-unreadable and names the file) and repair it before creating the run; a box may still be billing behind it"
+          : skipped.length === 0
+            ? "Check the run ID or create the run first"
+            : `Check the run ID or create the run first — the listing skipped ${skipped.length} file(s) whose names are not run ids (${skipped.join(", ")}), and one of them may be this run's record under a mangled name`,
       );
     }
 

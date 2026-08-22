@@ -599,6 +599,21 @@ describe("loadManifest — beneath-root walk (INV-1, INV-5)", () => {
     expect("limitMicroUsd" in stripped.manifest).toBe(false);
     expect(stripped.manifest.pipelineId).toBe(loaded.manifest.pipelineId);
     expect(stripped.manifest.phases).toHaveLength(loaded.manifest.phases.length);
+    // RE-READ the input, AFTER the strip. Asserting `loaded.manifest
+    // .limitMicroUsd` only above proved nothing about aliasing: a
+    // `stripAuthoredLimit` that did `delete input.manifest.limitMicroUsd` and
+    // returned the same object passes every line here, while the runner-side
+    // caller — which holds `loaded`, not `stripped`, and reads the limit back
+    // out of it — silently loses its cap and falls to DF1.6's default. A
+    // "returns a new value" contract has to be checked on the OLD value.
+    expect(loaded.manifest.limitMicroUsd).toBe(999_000_000);
+    expect(stripped.manifest).not.toBe(loaded.manifest);
+    expect(stripped).not.toBe(loaded);
+    // ponytail: the copy is SHALLOW — `phases` is the same array in both — and
+    // that is fine as it stands, because nothing on either side mutates a phase
+    // list. Not asserted either way: pinning a property the source does not
+    // claim would be a test of the implementation rather than the contract. The
+    // contract is that the LIMIT survives on the input, which is the line above.
     // Dropped for the same reason `stampManifestLimit` drops it: once a field
     // has been removed the bytes match no file on disk, so carrying the
     // unstripped file's path forward would claim provenance this content has

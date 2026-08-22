@@ -16,7 +16,14 @@ import { join } from "node:path";
 
 import { RunRecordStore, RUN_ID_MAX, RUN_ID_RE } from "../../src/providers/run-record.ts";
 import { run } from "../../scripts/sandbox-teardown.ts";
-import { acquireRunLock, releaseRunLock, RunLockedError, RunLockReentrantError } from "../../scripts/lib/run-lock.ts";
+import {
+  acquireRunLock,
+  clearRunLockDestructive,
+  markRunLockDestructive,
+  releaseRunLock,
+  RunLockedError,
+  RunLockReentrantError,
+} from "../../scripts/lib/run-lock.ts";
 
 /** The shared lock module, by absolute path, for the signal subprocess below. */
 const RUN_LOCK_MODULE = join(import.meta.dir, "../../scripts/lib/run-lock.ts");
@@ -219,6 +226,124 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     foreignLock("holder-teardown");
     expect(() => acquireRunLock(runs, "holder-fleet")).toThrow(/another invocation holds/);
     expect(() => acquireRunLock(runs, "holder-teardown", "sandbox-teardown")).toThrow(/another sandbox-teardown holds/);
+  });
+
+  test.each([
+    ["a dead pid (the STALE branch)", DEAD_PID],
+    ["a live foreign pid (the CONTENTION branch)", LIVE_FOREIGN_PID],
+  ])("the holder name reaches the modern same-host refusal too — %s", (_label, pid) => {
+    // `foreignLock` writes the LEGACY three-field body, which parses to an
+    // UNKNOWN host and returns from `refuse` before the pid is ever probed. So
+    // the case above only ever proved the holder name on ONE of the four exits,
+    // and the two that matter most — the same-host branches an operator
+    // actually hits — were never checked: a refusal hardcoding "another
+    // invocation holds" passes it and prints the wrong CLI on both.
+    const host = lockHostOf(runs);
+    for (const [i, holderArg] of [undefined, "sandbox-teardown"].entries()) {
+      const runId = `modern-holder-${pid}-${i}`;
+      writeFileSync(
+        join(runs, `${runId}.lock`),
+        `${pid} ${host} ${new Date(Date.now() - 7_000).toISOString()} c0ffee\n`,
+        { flag: "wx" },
+      );
+      let err: RunLockedError | undefined;
+      try {
+        acquireRunLock(runs, runId, holderArg);
+      } catch (e) {
+        err = e as RunLockedError;
+      }
+      expect(err).toBeInstanceOf(RunLockedError);
+      expect(err?.message).toContain(
+        holderArg === undefined ? "another invocation holds" : "another sandbox-teardown holds",
+      );
+      // …and this really is the same-host branch, not the foreign one that the
+      // legacy fixture takes. `held Ns` only appears past the host match.
+      expect(err?.message).not.toContain("liveness unknown from here");
+      expect(err?.message).toMatch(new RegExp(`pid ${pid}`));
+      // The two branches diverge exactly where the remediation does, so pin
+      // that alongside the holder — a single fixture producing both would prove
+      // neither.
+      expect(err?.remediation.includes("stale lock")).toBe(pid === DEAD_PID);
+    }
+  });
+
+  test("our OWN pid under a foreign nonce is STALE, not re-entrancy", () => {
+    // `claimedByUs` compares the whole body, so a lock carrying our pid and our
+    // host but a nonce we did not write is NOT ours. Two ways to get there and
+    // neither is re-entrancy: a predecessor was SIGKILLed and the OS recycled
+    // its pid onto us, or an earlier claim of ours outlived a failed release.
+    // Raising RunLockReentrantError for it gave the operator "release the lock
+    // before acquiring it again" — unfollowable when this process holds nothing
+    // to release — and the run stayed wedged against every later harvest and
+    // teardown while the box and the key billed.
+    //
+    // This is the ONE place the module can PROVE staleness: a pid is unique
+    // among the live processes of one process table and this one is ours, so it
+    // cannot also name a live holder. `isAlive` would answer "yes" (it is us)
+    // and send the operator to wait on themselves forever.
+    const host = lockHostOf(runs);
+    const lock = join(runs, "own-pid-foreign-nonce.lock");
+    writeFileSync(lock, `${process.pid} ${host} ${new Date(Date.now() - 3_000).toISOString()} feedface\n`, {
+      flag: "wx",
+    });
+    let err: Error | undefined;
+    try {
+      acquireRunLock(runs, "own-pid-foreign-nonce");
+    } catch (e) {
+      err = e as Error;
+    }
+    expect(err).toBeInstanceOf(RunLockedError);
+    expect(err).not.toBeInstanceOf(RunLockReentrantError);
+    expect((err as RunLockedError).code).toBe("run-locked");
+    expect(err?.message).toContain("is this invocation's own pid but the claim is not one it registered");
+    // Stale, with the exact `rm` — the whole point is that there IS a way out.
+    expect((err as RunLockedError).remediation).toContain("no live process holds it");
+    expect((err as RunLockedError).remediation).toContain(`rm ${lock}`);
+    // The lock this process ACTUALLY holds still refuses as re-entrancy: the
+    // two cases must not have collapsed into one.
+    const ours = acquireRunLock(runs, "own-pid-real-reentrant");
+    try {
+      expect(() => acquireRunLock(runs, "own-pid-real-reentrant")).toThrow(RunLockReentrantError);
+    } finally {
+      releaseRunLock(ours);
+    }
+  });
+
+  test("releaseRunLock REFUSES while the lock is marked destructive; force and clear are the two exits", () => {
+    // The mark protects the STATE, not just the signal path. It used to be
+    // consulted only by `releaseHeldRunLocks`, while `releaseRunLock` deleted it
+    // and released unconditionally — so a teardown that destroyed the box and
+    // THEN threw hit its caller's `finally { releaseRunLock(lock) }`, released a
+    // CLEAN lock, and handed the half-torn-down run to the next retry. An
+    // interrupt and a throw leave the run in the same uncertain state; only the
+    // exit path differed.
+    const lock = acquireRunLock(runs, "destructive-unit");
+    markRunLockDestructive(lock);
+    expect(() => releaseRunLock(lock)).toThrow(/refusing to release/);
+    // Refused, and the lock is genuinely still on disk holding OUR body — a
+    // refusal that had already unlinked it would be worse than no refusal.
+    expect(existsSync(lock)).toBeTrue();
+    expect(readFileSync(lock, "utf8")).toContain(String(process.pid));
+    // Still refuses on a second attempt: the mark is not consumed by being hit.
+    expect(() => releaseRunLock(lock)).toThrow(/refusing to release/);
+    expect(existsSync(lock)).toBeTrue();
+
+    // Exit 1 — `force`, for a caller that has judged the state itself.
+    releaseRunLock(lock, { force: true });
+    expect(existsSync(lock)).toBeFalse();
+
+    // Exit 2 — the CLI's SUCCESS path clears the mark, and the ordinary release
+    // then works. Deliberately not something `releaseRunLock` can infer: from
+    // inside the release, "the caller reached its finally" looks identical
+    // whether the teardown returned or threw, and that is the whole distinction.
+    const second = acquireRunLock(runs, "destructive-unit");
+    markRunLockDestructive(second);
+    clearRunLockDestructive(second);
+    releaseRunLock(second);
+    expect(existsSync(second)).toBeFalse();
+    // …and the run is lockable again, which is what "the teardown completed"
+    // has to mean for the next invocation.
+    releaseRunLock(acquireRunLock(runs, "destructive-unit"));
   });
 
   test("a stale `<runId>.lock.<hostTag>.<pid>.<hex>.tmp` is reaped on acquire; a live pid's temp is left alone", () => {
@@ -618,13 +743,19 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
     expect(text).toContain("holder unknown");
   });
 
-  test("empty lock body names the creator that died mid-create and gives the rm, not 'holder unknown'", async () => {
-    // "holder unknown" is now reserved for a body that PARSED as garbage and for
-    // a lock we could not read at all. An empty body has exactly one cause —
-    // `writeLockDirect`'s creator SIGKILLed between the exclusive create and the
-    // write — and reporting it as an unknown holder made it a lock to WAIT on:
-    // nothing steals, nothing expires, and `reapStaleTemps` matches only `.tmp`,
+  test("empty lock body is named as empty and is NOT classified stale", async () => {
+    // An empty body is named rather than folded into "holder unknown": the
+    // causes are `writeLockDirect`'s create-to-write window and a stray
+    // `touch`, and reporting it as an unknown holder made it a lock to WAIT on
+    // (nothing steals, nothing expires, `reapStaleTemps` matches only `.tmp`),
     // so the run refused forever while the box and the key kept billing.
+    //
+    // It is NOT `stale`, though. `writeLockDirect` is the fallback for
+    // filesystems WITHOUT hard links (SMB/FUSE/NFS), where create+write+fsync
+    // round-trips a network and that window is not an instant — a live
+    // contender sitting in it is ordinary. `stale` is the machine-readable
+    // claim that no live process holds the lock, and it drives the "rm it, then
+    // re-run" remediation: the double teardown, printed as advice.
     store.create("empty-lock");
     const lock = join(runs, "empty-lock.lock");
     writeFileSync(lock, "");
@@ -634,12 +765,12 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
     expect(code).toBe(1);
     const text = lines.join("");
     expect(text).toContain("!! run-locked:");
-    expect(text).toContain("the lock is empty: its creator died between creating it and writing its body");
-    expect(text).not.toContain("holder unknown");
-    // Stale, so the operator gets a way out — plus the caveat that stops them
-    // racing a harvest that started a moment ago.
-    expect(text).toContain(`rm ${lock} to clear the stale lock`);
-    expect(text).toContain("wait and re-check first");
+    expect(text).toContain("an empty lock, holder unknown");
+    // The stale remediation ("no live process holds it … rm to clear the stale
+    // lock") must NOT appear — an empty body proves nothing about its creator.
+    expect(text).not.toContain("no live process holds it");
+    expect(text).not.toContain("to clear the stale lock");
+    expect(text).toContain("Wait and re-check first");
     // Reported, never stolen.
     expect(existsSync(lock)).toBeTrue();
     expect(store.get("empty-lock").closedAt).toBeUndefined();
@@ -784,15 +915,22 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
   });
 });
 
-describe("sandbox-teardown run() — lock release after TeardownError mid-teardown (P6)", () => {
-  test("lock is released after a failure deep inside teardown (probe step)", async () => {
-    // The keyed-run test above proves release on provisioning-key-missing
-    // (post-lock, pre-mutation). This one fails DEEPER: a record with a vmName
-    // runs the git-bundle-verify probe inside teardownSandbox, and a PATH
-    // holding only a failing `git` stub makes the probe exit non-zero — the
-    // lock's finally must still release and the record must stay open. (An
-    // EMPTY PATH is no good: posix_spawnp falls back to the system default
-    // path and the real git is found again.)
+describe("sandbox-teardown run() — lock is HELD after a TeardownError mid-teardown (P6)", () => {
+  test("lock is deliberately not released after a failure inside teardown (probe step)", async () => {
+    // INVERTED in round 6, deliberately. This used to assert the lock was
+    // RELEASED after a deep teardown failure — which is the asymmetry the
+    // destructive mark exists to close: a Ctrl-C anywhere inside
+    // `teardownSandbox` already strands the lock on purpose
+    // (`releaseHeldRunLocks` refuses a marked lock), while a THROW from the
+    // same sequence released a clean lock and handed a possibly half-torn-down
+    // run to the next retry. `TeardownError` carries no step marker, so this
+    // CLI cannot tell a probe failure from a post-destroy one and takes the
+    // fail-safe reading: the state is unknown, so an operator decides.
+    //
+    // The failure here: a record with a vmName runs the git-bundle-verify probe
+    // inside teardownSandbox, and a PATH holding only a failing `git` stub
+    // makes the probe exit non-zero. (An EMPTY PATH is no good: posix_spawnp
+    // falls back to the system default path and the real git is found again.)
     const stubDir = join(dir, "stub-bin");
     mkdirSync(stubDir, { recursive: true });
     writeFileSync(join(stubDir, "git"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
@@ -805,10 +943,15 @@ describe("sandbox-teardown run() — lock release after TeardownError mid-teardo
       expect(code).toBe(1);
       const text = lines.join("");
       expect(text).toContain("!! bundle-verify-unavailable:");
+      // Held on purpose, and said so — with the remediation that does NOT
+      // invite a blind retry against a run whose state is unknown.
+      expect(text).toContain("!! lock-held:");
+      expect(text).toContain("only once you know the teardown state");
+      expect(text).not.toContain("!! lock-release-failed:");
     } finally {
       process.env.PATH = savedPath;
     }
-    expect(existsSync(join(runs, "probe-fail.lock"))).toBeFalse();
+    expect(existsSync(join(runs, "probe-fail.lock"))).toBeTrue();
     expect(store.get("probe-fail").closedAt).toBeUndefined();
   });
 });
@@ -817,10 +960,19 @@ describe("sandbox-teardown run() — lock release failure never masks the primar
   test("a release failure after a deep teardown error is its own diagnostic, exit code untouched", async () => {
     // Same deep-failure shape as the P6 test (failing `git` stub →
     // bundle-verify-unavailable), but the stub ALSO strips write permission
-    // from the runs dir, so the finally's rmSync(lock) fails EACCES. Before
-    // the round-10 guard, that throw replaced the reported teardown failure;
-    // now both diagnostics surface and the exit code reflects the teardown.
-    // (chmod by ABSOLUTE path — PATH holds only the stub dir.)
+    // from the runs dir. Before the round-10 guard, a throw out of the finally
+    // replaced the reported teardown failure; now both diagnostics surface and
+    // the exit code reflects the teardown. (chmod by ABSOLUTE path — PATH holds
+    // only the stub dir.)
+    //
+    // Round 6: in TEARDOWN mode the release is now REFUSED before it is
+    // attempted (the destructive mark), so the second diagnostic is `lock-held`
+    // rather than the EACCES `lock-release-failed` — the unwritable runs dir no
+    // longer decides the outcome. What this test still pins is the invariant it
+    // was written for: a second cleanup diagnostic never masks the primary
+    // teardown failure and never changes the exit code. A genuine
+    // `lock-release-failed` is now only reachable in harvest mode (no mark),
+    // which wants its own test.
     const stubDir = join(dir, "stub-bin");
     mkdirSync(stubDir, { recursive: true });
     writeFileSync(join(stubDir, "git"), `#!/bin/sh\n/bin/chmod 555 ${runs}\nexit 1\n`, { mode: 0o755 });
@@ -833,9 +985,9 @@ describe("sandbox-teardown run() — lock release failure never masks the primar
       expect(code).toBe(1); // the teardown failed — the cleanup failure must not change that
       const text = lines.join("");
       expect(text).toContain("!! bundle-verify-unavailable:"); // primary failure survives
-      expect(text).toContain("!! lock-release-failed:"); // cleanup failure reported separately
+      expect(text).toContain("!! lock-held:"); // cleanup diagnostic reported separately
       expect(text).toContain("next: ");
-      expect(existsSync(join(runs, "release-fail.lock"))).toBeTrue(); // release really failed
+      expect(existsSync(join(runs, "release-fail.lock"))).toBeTrue(); // the lock really stayed
       expect(store.get("release-fail").closedAt).toBeUndefined();
     } finally {
       process.env.PATH = savedPath;

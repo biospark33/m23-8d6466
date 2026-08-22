@@ -1127,3 +1127,272 @@ The suite was green throughout and proved less than it appeared to. Notable:
   `HarvestRun`, `Dispatch`, `StatusRun`, `SetupGate`. **Zero** affected symbols outside
   `src/{fleet,providers,phase-engine}`, `scripts/` and `tests/` — no fallout in `hindsight/`,
   `swarmclaw/` or `cli-anything/`.
+
+## Review round 6 — BMAD adversarial code review, 2026-08-22
+
+15 chunked review agents over a 19-chunk split (no chunk >1896 lines): 4 blind, 4 edge,
+1 acceptance auditor, 6 test-quality. ~110 raw findings → 78 unique after cross-layer
+dedupe. 8 source fixers + 3 test fixers on disjoint file clusters. Nine bot findings
+(Sift) folded into the same triage.
+
+**Gates:** fleet 350 / providers 640 / phase-engine+scripts 873 = **1,863 pass, 0 fail**
+(was 1,768). `tsc --noEmit` exit 0; biome clean across 39 changed files.
+`detect_changes`: 224 changed symbols, 77 affected processes, every entry point inside
+DF3.1's own surface (`Dispatch`, `StatusAll`, `StatusRun`, `HarvestRun`, `ReapRuns`,
+`Sweep`, `ProvisionAdmittedRun`, `SetupGate`, `DriverListing`, `WithLock`, `Within`).
+Zero symbols outside `src/{fleet,providers,phase-engine}`, `scripts/`, `tests/`.
+
+### Money-path defects (the round's centre of gravity)
+
+- [x] **A zero-cost PRICED row retired the whole reservation.** The `NOT EXISTS` guard
+  tested for the existence of a priced row, not for spend. A first turn reporting
+  `{costUsd: 0, unpricedTurns: 0}` — a cached or free turn — dropped the run's entire
+  ceiling out of `reservedMicroUsd` while it still held a live key at that ceiling, so
+  the next dispatch was granted the full cap again. ~2× overspend, N× for N dispatches.
+  Now requires `ce.cost_micro_usd > 0`.
+- [x] **Closed-record retirement** added alongside it. Without it the fix wedges any run
+  that genuinely costs 0 µ$ forever, because `gate_admissions_no_delete` leaves no manual
+  exit. Beyond the literal brief and deliberately kept: strictly more conservative than
+  the old "any priced row retires".
+- [x] **`issue_id` was canonicalised on the BIND side only.** The slug folded on both
+  sides (`lower()` column + `canonicalRepoSlug` bind); the issue id folded only on the
+  bind. Every row already on disk spelled `#42` / `042` / `42 ` became permanently
+  unmatchable — spend vanished from `spentMicroUsd`, `readIssueCost`, `readIssueRuns`,
+  silently UNDER-counting the cap. No migration is possible: `cost_events` and
+  `gate_admissions` both carry `BEFORE UPDATE`/`BEFORE DELETE` triggers that `RAISE(ABORT)`
+  under INV-COST-1. Fixed with a shared `issueScopeSql()`/`issueScopeKeys()` pair used by
+  all five predicates, raw equality first so canonical rows still hit the index.
+  Documented residual: SQLite `trim()` is ASCII-only, so a `U+00A0`-padded legacy id
+  stays unmatched.
+- [x] **The provider-minted cap was adopted with no upper clamp.** `mintRunKey` requests
+  `effectiveCeilingMicros` but persisted the provider's own answer, checked only for
+  null/finite/positive, then stamped it into `pipeline.yaml` and `run-context.json`. A key
+  API returning MORE than requested authorised the box to spend above what the ledger
+  reserved — and it logged as `status:"ok"`, invisible to alerting. Now
+  `Math.min(...)`, and an over-mint logs `status:"error"` / `mint-cap-over-request`.
+- [x] **AC9b was fail-open in the direction the bug actually shipped.** `runContextFrom`
+  consulted the witness only when the manifest DECLARED a limit, so a witness carrying
+  `effectiveCeilingMicros: 250_000` beside an unstamped manifest was never read and the
+  run spawned at DF1.6's $0.50 default — twice what the ledger reserved. Now consulted
+  whenever a witness is present. Uses `lstatSync`, not `existsSync`: `existsSync` follows
+  symlinks and reports a DANGLING one as absent, which would let an author hide a
+  ceiling-lowering witness behind a broken link.
+- [x] **The ledger path depended on the caller's CWD.** `dir === resolve(DEFAULT_RUNS_DIR)`
+  compared against a relative default, so the same records dir reached from two cwds used
+  two ledgers — the reservation stayed open forever and the box hours landed in a file
+  nobody read.
+- [x] **`qds-cost` read a different ledger than the money was written to** — the one CLI
+  that REPORTS spend was the one left out of `costLedgerOpts`. Worst case it reported a
+  confident zero for an issue that had burned budget.
+- [x] Two admission rows for one `run_id` (retry with a fresh requestId — what the
+  remediation itself advised) double-booked the cap. Reservation query now groups by
+  `run_id` with `MAX(ceiling)`; both remediations corrected.
+- [x] Non-empty validation ran BEFORE canonicalisation, so `"#"`, `" "`, `"#  "` all
+  canonicalised to `""` and shared one unnameable budget identity that no override key
+  could ever name. Validation moved to the canonical values.
+- [x] `capForIssue` returned the FIRST matching override; now the LOWEST. The duplicate-key
+  refusal existed only on the file-parse path, so a config assembled in code could silently
+  ignore the line meant to LOWER a cap.
+- [x] Sub-micro costs (`0.0000004` → 0 µ$) recorded as real, fully-priced, free spend.
+  Now flagged `unpriced` under `cost-sub-micro-unpriced`.
+- [x] File I/O and a log sink ran inside `BEGIN IMMEDIATE`; hoisted out (availability, not
+  correctness — the SUM→INSERT serialization was already right).
+
+### Provisioning, records, reaping
+
+- [x] **`expose()` returning `""` defeated the "no address recorded" guard and the box
+  still went public.** `??` catches only nullish, so `""` overwrote the create-time URL,
+  `=== undefined` was false, and `setPublic` ran — producing exactly the state the guard's
+  own comment forbids. Also reported by Sift.
+- [x] **A zero-byte record from an interrupted `create()` wedged every sweep, fleet-wide.**
+  Not `.tmp`, not `.probe-`, stem a valid run id, so no channel saw it; `JSON.parse("")`
+  killed `list()` AND `listWithAnomalies()`, so nothing reaped and every live box kept
+  billing, and the id was a permanent `EEXIST` tombstone. Now cleared on size PLUS a 5s
+  mtime grace — size alone would race a concurrent create, which is zero-byte for the
+  microseconds between its open and its write.
+- [x] **Body-level rejections took down the whole listing.** This PR added a core field
+  (`requestId`) and a namespace (`gate`) that older builds reject, so a rollback stopped
+  the reaper entirely — the outage the file's own docstring names. Body errors now
+  quarantine per-file into `skipped` + a new `skippedReasons`; `get()` stays strict.
+- [x] `create()`'s `fsync` persisted data but not the directory entry, so a power loss
+  could lose the record while the box survived — the orphan the comment claimed to prevent.
+- [x] `vm.name` from `driver.create` was persisted unvalidated — the one value the whole
+  record-before-VM invariant hangs on.
+- [x] The budget-write rollback deleted the record on a LOCK TIMEOUT, which cannot prove
+  the writer is dead; the in-flight write then recreated it OPEN and budgetless, with the
+  id mintable again.
+- [x] `driverListing`'s fallback asserted a complete population for any driver lacking
+  `listWithAnomalies`, making the destructive reap fail-OPEN.
+- [x] **`reapRuns` destroyed any unclaimed box in an account-wide listing.** Pre-existing,
+  closed this round because #5b made it reachable: exe.dev listings include strangers'
+  boxes. Now gated on `isFactoryOwnedVm` (name grammar AND ownership tag), the same
+  predicate `sweep` uses, extracted so the two cannot drift.
+- [x] exe.dev anomalies were unactionable (`vms[3]`), so one malformed provider row wedged
+  reaping until the provider stopped emitting it.
+
+### Secrets and operator-facing text
+
+- [x] `redactSecrets` was unguarded and is called from catch blocks — a throw masked the
+  original failure. Now fails safe to the REDACTED marker, never raw text.
+- [x] Parking `keep` FIRST defeated the deep-link arm it is documented to run before, so
+  the key-management URL in the revoke remediation was never redacted.
+- [x] `SECRET_PREFIXES` gaps: `ghs_` (the token an App-authenticated clone URL carries),
+  `ghu_`, `ghr_`, `xapp-`, `xoxa-`, `xoxr-`, `rk_live_`, `rk_test_`, `AIza`. A Google key
+  is 39 chars against a 40-char floor that is load-bearing (git SHAs sit there), so the
+  prefix is the only thing that can catch it — verified end-to-end on three delimited
+  shapes. `GOOGLE_API_KEY=AIza…` redacts today for the WRONG reason (`=` is in the token
+  charset and glues the name on past the floor) and is false comfort.
+- [x] `isLongMixedToken` required all three character classes, so any single-class token
+  passed at any length. Rule replaced with a hex-digest exemption.
+- [x] An unterminated `-----BEGIN` swallowed the rest of the message (3 bytes of a 1 MB
+  diagnostic survived; now 507 KB). The claimed quadratic backtracking did NOT reproduce
+  (0–5 ms, the old arm was O(n)) — and the naive bounded fix measured a 3.7 s REGRESSION,
+  because a bounded arm that can fail is retried at every `-----BEGIN`. Final shape is one
+  always-matching regex: 1 ms.
+- [x] `assertFleetRunId` was the only refusal building its `FleetError` directly rather
+  than through `refuse`, so INV-6 never ran over it — a management URL in the run-id
+  position reached stderr with path and query intact. The argv echo is now bounded and
+  redacted, and the CLI's duplicate 96-char pre-cap was removed (it truncated without
+  redacting, and could split a secret across the cut so neither half matched a rule).
+- [x] The dispatch ack spread `httpsUrl` verbatim while every log line redacted it.
+- [x] Gate-supplied `debugCommands`/`teardownCommand` bypassed `redactDeep` in the payload
+  while the operator-facing remediation WAS redacted into unusability — each sink had the
+  wrong half.
+- [x] Control characters from `CorrelationError.message` and box-controlled gate notes
+  reached the operator stream unescaped; `extractZodErrorField` echoed an attacker-chosen
+  key NAME verbatim. Both now sanitised (`sanitizeLabel`, 128-char cap, `(root)` fallback).
+  The RAW name still rides into `payload.issues` (zod builds it from the brief's key), so
+  that string is ESCAPED there rather than stripped.
+- [x] `detailOf` and `errorMessage` pre-coerced with `String(e)` OUTSIDE the guard, so a
+  throwing `toString` escaped the catch that exists to preserve the evidence. A third twin
+  (`escapeText(String(a.note))`) was found while verifying and fixed at the helper.
+
+### CLI, locks, lifecycle
+
+- [x] **A throw mid-teardown released the lock `markRunLockDestructive` exists to hold.**
+  The mark was consulted only on the signal path; `releaseRunLock` ignored it, so the
+  `finally` handed a half-torn-down run to the next retry with a clean lock. New contract:
+  `releaseRunLock` refuses while marked, `clearRunLockDestructive` on clean completion,
+  `{force:true}` as the deliberate override. `sandbox-teardown.ts` never marked at all.
+- [x] `key-unattributable` teardown printed `torn down:` and exited 0, so
+  `teardown … || alert` recorded success while a key may still bill. Now 6. Reachable
+  exactly one way — dispatch died between `create` and the mint's keyHash write; NOT
+  shared with a gate refusal (gate runs after mint) or a budget refusal (before create).
+- [x] **`--brief` + a SOCKET on stdin silently provisioned from the wrong brief.** The
+  guard enumerated `isFIFO() || isFile()`, and a socket is what any Node/Bun parent's
+  `stdio: "pipe"` produces — the commonest programmatic path. Replaced with an allow-list:
+  `st.isCharacterDevice()` (a TTY is one, and `/dev/null` is what cron/systemd/containers
+  hand every process) plus the EBADF catch. Found by the test wave, whose first attempt
+  used a Buffer, believed it was a pipe, and was a socket the guard never looked at.
+- [x] An empty lock body was classified `stale = true`, printing "rm the lock" against a
+  live holder mid-`writeLockDirect` — on exactly the filesystems that fallback exists for.
+- [x] Pid reuse reported a stale lock as re-entrancy with an unfollowable remediation; the
+  nonce already distinguished the two cases and is now used.
+- [x] `AC1/AC4 — side effects before validation.` `RunRecordStore`'s constructor `mkdir`s
+  and `chmod`s 0700, and was built before `BriefSchema.safeParse`, so an invalid brief
+  created directories and re-permissioned an operator's existing one. New `{create:false}`
+  read mode; `status` uses it. `FakeDriver` likewise now creates its box dir lazily.
+- [x] `FleetError(0)` reported success (the clamp caught 256 and −1 but not 0); an
+  out-of-table code fell back to 1, the one classification the file argues must never mean
+  non-retryable.
+- [x] A tolerated EAGAIN left truncated JSON on stdout at exit 0.
+- [x] The dispatch interrupt handler warned about a box that could not exist yet, before
+  `--driver` was even resolved.
+- [x] The CLI ran no redaction on its error paths at all — `asUsage` copied `.message`
+  verbatim and `report` attached raw `.stack`.
+- [x] `dispatch.exitCodes` omitted 6, the one code meaning "a box is live and you have no
+  handle on it". `status`'s declared 4 was unreachable. Help paths emitted no CC-9 line.
+- [x] The `post-gate` deadline refused a run that had fully succeeded and told the operator
+  to tear it down — re-spending the issue's cap on a run that had already worked, the exact
+  hazard the ack-log guard 60 lines below names.
+- [x] An abandoned `mint` left a live key at the full ceiling with nothing recording it:
+  the handler duck-typed only `value.vm`, and the "go look for it" remediation was gated on
+  `step === "create"`. Now step-aware.
+- [x] The roster read was a `statSync`/`readFileSync` TOCTOU that a planted FIFO turned into
+  an unbounded hang no timer could break — a vector the file already documents avoiding two
+  blocks earlier. Now `openSync(O_RDONLY|O_NONBLOCK)` → `fstatSync(fd)` → `readFileSync(fd)`.
+- [x] A create-timeout left a record with no `requestId`, joinable to nothing, forever.
+- [x] `providerCodePayload`'s "one code, one meaning" rule was violated at two call sites,
+  putting a producer's code into `FleetError.code` and coupling the exit table to renames.
+- [x] `statusRun` conflated "no box by that name" with "list failed", so the commonest
+  torn-down run reported `boxUnknown` from one entry point and `boxMissing` from the other.
+- [x] `statusRun` reported "run not found" (exit 4) when the record store was entirely
+  unreadable — inviting an operator to re-create a run whose box may be live.
+- [x] Substrate-supplied `vm.name`/`httpsUrl` reached rows unvalidated, and the store's
+  shape was trusted outside the guard while the driver's was defended.
+- [x] Whitespace-only `requestId`/`manifestPath` passed `.min(1)` (`NO_CONTROL_CHARS`
+  excludes `\p{Zs}`), collapsing concurrent runs onto one ledger key.
+- [x] `repoSlugOfUrl` documented an `undefined` return it could not produce.
+- [x] `process.removeAllListeners(sig)` stripped every other signal handler process-wide
+  from a module used as a library; `claim`'s unguarded `closeSync` in a `finally` replaced
+  the original errno and leaked the temp; `restore()` could throw out of the error message
+  it was interpolated into.
+- [x] The tracer leaked an open SQLite/WAL handle when `runContextFrom` threw (Sift).
+- [x] `resolvedPath ?? manifestPath` performed the symlink substitution its own comment
+  two lines above forbids.
+
+### Test wave
+
+~40 test-quality findings fixed. Additions are mutation-verified — each was confirmed to
+go RED against the pre-fix source. Highlights: legacy non-canonical ledger rows inserted
+raw (never through `ingestCostEvent`, which canonicalises on write and is exactly how the
+gap survived five rounds); serialized admission driven through the one caller seam that
+executes inside `decide.immediate()`, discriminating all three transaction shapes; the
+AC9a drop-before-stamp guard given an authored-limit fixture it never had; `leakScan` used
+in place of prefix-fragment absence checks that a tail-leaking regression would pass.
+
+`rejection` moved from `tests/fleet/helpers.ts` to `tests/helpers.ts` — the provider suite
+was reaching up into the fleet suite's internals, and paying a VALUE import of
+`credentials.ts` → `swarmclaw/log.ts` → `step-log.ts` for a 6-line promise combinator. It
+now FAILS on a non-Error rejection instead of wrapping one, which had made
+`expect(err).toBeInstanceOf(Error)` unfailable at every call site.
+
+### False positives refuted with executed evidence
+
+- `markRunLockDestructive` "exported and never called" — `scripts/fleet.ts:67` imports it,
+  `:1034` calls it. Re-scoped to the real defect (`releaseRunLock` ignored the mark).
+- `extensions.gate` "may be an unregistered namespace" — registered at `run-record.ts:167`
+  with exactly the four fields dispatch writes.
+- `readMeta` failure "drops a live box" — it pushes `{name, status:"unknown"}`; reported,
+  not dropped.
+- `list()` "duplicated across two drivers" — each is a 2-line delegation to its OWN
+  `listWithAnomalies`.
+- "Hardcoded PEM private key" — `PEM_BLOCK_RE`, a redaction pattern with no key bytes.
+- `canonicalIssueId` leading-zero regex — the reporting bot's own text concludes it is
+  correct.
+- `reaper.ts` "left on the throwing accessor" — `reapOrphans` already uses
+  `listWithAnomalies` and refuses identically; both refuse, neither reaps. The fixer that
+  raised it verified the counter-evidence and reverted its own edit.
+- Quadratic PEM backtracking — measured 0–5 ms on three adversarial shapes.
+- `run-record.test.ts` "no real concurrent lost-update test" — `:913` spawns three real
+  subprocesses before the `Promise.all`.
+- A signal landing mid-`releaseRunLock` — impossible: the function is fully synchronous and
+  Node/Bun deliver signals as event-loop callbacks, never preemptive interrupts.
+
+### Deferred by design (no code change)
+
+- **`repoUrl` binds the path but not the host**, so `https://evil.example/trusted/repo`
+  passes against a trusted slug. Binding the host needs an allowlist that would refuse
+  legitimate self-hosted forges; already marked SUPERSEDED BY DESIGN by DF5.2's
+  `.factory/repos.json`. Residual risk stated in-code.
+- **`checkHeadroom` is a bare read with no reservation** — two dispatches inside one
+  `driver.list()` round trip at `liveVms === ceiling - 1` both admit. The comment no longer
+  claims a closure it does not cover, and names what would close it.
+- **Per-`--dir` ledger split is a per-`--dir` cap.** The cwd fix removed the accident, not
+  the design; `cost-config.json` remains a shared sibling read by both fleets.
+- **The cap witness is author-writable** (resolves beside the manifest). Assumption now
+  stated where the code claims two-copies-must-agree.
+- **`reapRuns` is inert against exe.dev** — its `ls --json` carries no ownership tag, so
+  the strict gate destroys nothing there. Not a production change: `sweep` is the reaper
+  that ships and already classified every exe.dev box `foreign`. Unblocked by a tag channel.
+- **A repository literally named `repo.git` is falsely refused** — `repoSlugOfUrl` strips
+  `/\.git$/i` from the URL path, `canonicalRepoSlug` does not strip it from the slug.
+  KNOWN-DEFECT test pins it. Both naive fixes are worse: stripping on the slug side too
+  collapses `owner/repo.git` and `owner/repo` into ONE budget identity; not stripping on
+  the URL side breaks every ordinary clone URL.
+- **`StatusRow.state` ships 7 values against `integration-spec.md:491`'s normative 5.**
+  Spec amendment needed — the two extra states are precisely the ones that stop an operator
+  reading a substrate outage as an empty fleet.
+- **`fleet help` is dispatchable but absent from `listVerbs()`** — knowingly deferred.
+- Read-mode for harvest/teardown: costs a second construction to save a chmod on a
+  directory the run legitimately owns.

@@ -18,6 +18,7 @@
  */
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -25,6 +26,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -39,6 +41,7 @@ import { run as sandboxTeardownRun } from "../../scripts/sandbox-teardown.ts";
 import { listVerbs, renderHelp } from "../../src/fleet/verbs.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
+import { leakScan, MIN_REDACTABLE_LEN } from "../providers/fixtures/leak-scan.ts";
 import { RUN_ID_RE, RunRecordStore } from "../../src/providers/run-record.ts";
 import type { FleetDeps, } from "../../scripts/fleet.ts";
 import type { KeyApi } from "../../src/providers/credentials.ts";
@@ -430,6 +433,22 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
 
   const text = (): string => captured.join("");
 
+  /**
+   * Nothing was provisioned.
+   *
+   * `FakeDriver` creates its box ROOT lazily, in `create()`, rather than in its
+   * constructor — AC1's "validation completes before the first side effect"
+   * (story df3-1 :58-62): building a driver for an invocation that is about to
+   * be refused must not put a directory on disk. So the strongest form of this
+   * claim is that `boxesDir` does not exist AT ALL, and an empty one is the
+   * weakest that still holds (some earlier box in the same case made the root).
+   * Both are "no box was created"; a `readdirSync` of the absent one is an
+   * ENOENT that says nothing about provisioning.
+   */
+  const expectNoBoxes = (): void => {
+    expect(existsSync(boxesDir) ? readdirSync(boxesDir) : []).toHaveLength(0);
+  };
+
   // ─── --help renders from the registry (AC6) ────────────────────────────────
 
   test("--help renders the registry's four verbs and their declared flags", async () => {
@@ -448,6 +467,73 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(helpText).toContain("Exit codes:");
     // No second list: the text IS the registry rendering, byte for byte.
     expect(helpText).toBe(`${renderHelp(listVerbs())}\n`);
+  });
+
+  /**
+   * The exit codes rendered on ONE verb's `Exit codes:` line of the help text.
+   * Scoped per verb: the table is per verb, and a whole-string search for "6"
+   * finds it in another verb's line, in a byte count, or in a run id.
+   */
+  const helpExitCodesFor = (help: string, verb: string): number[] => {
+    const lines = help.split("\n");
+    const start = lines.findIndex((l) => l.startsWith(`  ${verb} `));
+    expect(start).toBeGreaterThanOrEqual(0);
+    const line = lines.slice(start + 1).find((l) => l.includes("Exit codes:")) as string;
+    expect(line).toBeDefined();
+    return (line.split("Exit codes:")[1] as string).split(",").map((n) => Number(n.trim()));
+  };
+
+  test("the help text's per-verb exit-code table is bound to codes the CLI really returns", async () => {
+    // `toBe(renderHelp(listVerbs()))` above compares the CLI's output to the
+    // registry rendering, so ANY registry value renders "correctly" — including
+    // a table missing a code the verb demonstrably returns. That is not a
+    // hypothetical: `dispatch` declared [0,1,2,3,5] while `scripts/fleet.ts`
+    // returned 6 for an unwritable ack, and nothing here paired the two. Both
+    // sides of this file's help coverage were about RENDERING; this one is about
+    // the table being TRUE.
+    //
+    // A code observed per verb, then required to appear on that verb's own line
+    // of the text an operator reads — the printed table, not the array behind
+    // it, because the printed table is the artifact DF3.5 generates a skill's
+    // exit handling from.
+    const observed: [string, number][] = [];
+    const record = async (verb: string, argv: string[], d?: Partial<FleetDeps>): Promise<void> => {
+      reset();
+      observed.push([verb, await runCli(argv, d ?? deps(validBriefJson(dir)))]);
+    };
+
+    // dispatch: 0 (a real provisioning run) and 2 (a brief that will not parse).
+    await record("dispatch", ["dispatch", "--driver", "fake"]);
+    await record("dispatch", ["dispatch", "--driver", "fake"], deps("{not json"));
+    // dispatch 6: the box is LIVE and the ack could not be written. The code
+    // that was missing from the registry, reachable only this way.
+    reset();
+    const brokenStdout = (): never => {
+      throw new Error("EPIPE: broken pipe, write");
+    };
+    observed.push(["dispatch", await run(["dispatch", "--driver", "fake"], brokenStdout, deps(validBriefJson(dir)), errOut)]);
+
+    // status: 0 over the runs the dispatches above left, 4 for an id with no
+    // record and no box, 2 for a malformed one.
+    await record("status", ["status", "--driver", "fake"]);
+    await record("status", ["status", "--driver", "fake", "qds-19990101-000000"]);
+    await record("status", ["status", "--driver", "fake", "NOT_AN_ID"]);
+    // harvest / teardown: 2 (no id), 4 (an id with no record).
+    for (const verb of ["harvest", "teardown"]) {
+      await record(verb, [verb, "--driver", "fake"]);
+      await record(verb, [verb, "--driver", "fake", "--dir", runsDir, "qds-19990101-000000"]);
+    }
+
+    // The text the CLI PRINTS, read back off it — not `renderHelp(listVerbs())`,
+    // which is the tautology this test exists to escape.
+    reset();
+    expect(await runCli(["--help"], deps(""))).toBe(0);
+    const help = outOnly.join("");
+    const undeclared = observed.filter(([verb, code]) => !helpExitCodesFor(help, verb).includes(code));
+    expect(undeclared.map(([verb, code]) => `fleet ${verb} → exit ${code} is not on its help table`)).toEqual([]);
+    // …and the probes really did exercise more than "everything exits 2": a
+    // vacuous set would satisfy the check above for any table at all.
+    expect(new Set(observed.map(([, code]) => code))).toEqual(new Set([0, 2, 4, 6]));
   });
 
   test("every documented help path exits 0 and prints the SAME usage, byte for byte", async () => {
@@ -478,15 +564,27 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     const { repoRoot: _omitted, ...noRoot } = deps(validBriefJson(dir));
     const code = await runCli(["dispatch", "--driver", "fake"], noRoot);
     expect(code).toBe(2);
-    expect(text()).toContain("manifest-rejected");
-    // The remediation names the containment root the manifest was resolved
-    // against: the process cwd, never the tmpdir the brief was written in.
-    expect(text()).toContain(process.cwd());
+    const envelope = JSON.parse(errCaptured[0] as string) as {
+      code: string;
+      remediation: string;
+      manifestPath?: string;
+    };
+    expect(envelope.code).toBe("manifest-rejected");
+    // In the SENTENCE that names the containment root, not merely somewhere in
+    // the output. `toContain(process.cwd())` was satisfied by any message that
+    // happened to embed the repo root — an absolute import path in a stack, a
+    // resolved default elsewhere in the envelope — so a remediation that named
+    // the wrong root, or none, still passed the one assertion that exists to pin
+    // WHICH root the default is.
+    expect(envelope.remediation).toContain(`point manifestPath at one beneath ${process.cwd()}`);
+    // …and the path it refused is the brief's relative `manifestPath` RESOLVED
+    // against that same root — which is the default under test, spelled out as a
+    // path rather than as a sentence. Resolved against the brief's own directory
+    // (the regression this case exists for) it would be the tmpdir's.
+    expect(envelope.manifestPath).toBe(join(process.cwd(), MANIFEST_REL));
     expect(text()).not.toContain(dir);
     expect(readdirSync(runsDir)).toHaveLength(0);
-    // `boxesDir` itself is created by FakeDriver's constructor, so its
-    // existence proves nothing — its emptiness is the assertion that matters.
-    expect(readdirSync(boxesDir)).toHaveLength(0);
+    expectNoBoxes();
   });
 
   test("no verb → exit 2 usage (a bare `fleet` is a mistyped invocation, not a help request)", async () => {
@@ -525,7 +623,7 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       expect(envelope.code).toBe("unknown-verb");
       expect(envelope.message).toBe(`unknown verb ${JSON.stringify(word)}`);
       expect(readdirSync(runsDir)).toHaveLength(0);
-      expect(readdirSync(boxesDir)).toHaveLength(0);
+      expectNoBoxes();
     }
   });
 
@@ -579,6 +677,127 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(text()).toContain("dispatch does not take --no-harvest");
   });
 
+  test("the per-verb flag table is enforced for EVERY wrong pair, not two spot checks", async () => {
+    // `status --brief x` and `dispatch --no-harvest` above are two of the eight
+    // wrong pairs the registry forbids, and the refusal is built from `entry
+    // .flags` per verb — so a verb whose `allowed` set was computed from the
+    // WRONG entry (an off-by-one in the lookup, a shared Set) is refused on the
+    // two pairs that are checked and accepted on the six that are not. `harvest
+    // --port` then silently exposes nothing, and `teardown --brief` reads a
+    // brief the verb has no use for.
+    for (const [verb, flag] of [
+      ["dispatch", "--no-harvest"],
+      ["status", "--brief"],
+      ["status", "--port"],
+      ["status", "--no-harvest"],
+      ["harvest", "--brief"],
+      ["harvest", "--port"],
+      ["harvest", "--no-harvest"],
+      ["teardown", "--brief"],
+      ["teardown", "--port"],
+    ] as const) {
+      // The registry really does withhold it — otherwise this loop asserts a
+      // refusal for a flag the verb is entitled to.
+      expect(listVerbs().find((v) => v.verb === verb)?.flags.map((f) => f.name)).not.toContain(flag);
+      reset();
+      // Boolean flags take no value; the other two consume the token after them.
+      const argv =
+        flag === "--no-harvest"
+          ? [verb, "--driver", "fake", flag]
+          : [verb, "--driver", "fake", flag, flag === "--port" ? "8080" : "x"];
+      expect({ verb, flag, code: await runCli(argv, deps("")) }).toEqual({ verb, flag, code: 2 });
+      expect(text()).toContain(`${verb} does not take ${flag}`);
+      // The remediation lists what the verb DOES take, so the operator is not
+      // sent back to `--help` for it.
+      expect(text()).toContain(`flags for ${verb}:`);
+      expect(outOnly).toHaveLength(0);
+    }
+  });
+
+  test("a boolean flag given a value is `takes no value`, not `unknown flag`", async () => {
+    // `parseValueFlags` evaluates the `=` form first and matches it against the
+    // VALUE flags only, so a DECLARED boolean written `--no-harvest=true` came
+    // back as an unknown flag — sending the operator to look for a flag that
+    // exists and that they spelled correctly. `scripts/fleet.ts` carries a
+    // dedicated loop for exactly this, and nothing exercised it.
+    for (const [argv, flag] of [
+      [["teardown", "--driver", "fake", "--no-harvest=true", "qds-20260101-abcdef"], "--no-harvest"],
+      [["status", "--driver", "fake", "--help=1"], "--help"],
+    ] as const) {
+      reset();
+      expect({ argv, code: await runCli([...argv], deps("")) }).toEqual({ argv, code: 2 });
+      expect(text()).toContain(`${flag} takes no value`);
+      expect(text()).not.toContain("unknown flag");
+      // …and it is a refusal, not a help request that happened to exit 2.
+      expect(outOnly).toHaveLength(0);
+    }
+    // `-h=1` is deliberately NOT in that list: the `=` form is `--`-only
+    // (cli-args.ts's `/^--([^=]+)=(.*)$/`), so a single-dash token that is not
+    // exactly `-h` never reaches the boolean check and is refused one step
+    // earlier by `rejectStraySingleDash`. Same exit, and a more accurate
+    // message — pinned here so the difference is a decision rather than a gap.
+    reset();
+    expect(await runCli(["status", "--driver", "fake", "-h=1"], deps(""))).toBe(2);
+    expect(text()).toContain("unknown flag: -h=1");
+  });
+
+  test("EVERY refusal is a diagnostic: stderr carries it and stdout stays empty", async () => {
+    // The file's own two-sink premise (header), asserted once over the whole
+    // refusal surface. ~20 cases below assert on the MERGED `text()`, which
+    // holds just as well if `printError` wrote the envelope to stdout — and only
+    // two of them pin `outOnly`. A regression routing ONE refusal to stdout
+    // breaks `fleet status | jq` for that path and passes every one of them,
+    // which is precisely why `run()` grew a fourth sink.
+    //
+    // One case per refusal SITE rather than per message: the tokenizer, the
+    // per-verb table, the duplicate guards, the run-id grammar, the driver
+    // registry, the brief reader, the schema, the store constructor and the
+    // record probe each build their envelope through a different call.
+    //
+    // `injected: false` for the two whose refusal comes from a dependency the
+    // default `deps()` would stand in for — an injected driver makes `--driver`
+    // inert, so `status --driver no-such-driver` exits 0 with a fleet listing.
+    const refusals: readonly { argv: string[]; injected?: false }[] = [
+      { argv: [] }, // no verb
+      { argv: ["warp"] }, // unknown verb
+      { argv: ["status", "--verbose"] }, // unknown flag (tokenizer)
+      { argv: ["status", "--driver", "fake", "--brief", "x"] }, // wrong verb for the flag
+      { argv: ["status", "--driver", "fake", "--dir", runsDir, "--dir", runsDir, "x"] }, // duplicate value flag
+      { argv: ["teardown", "--driver", "fake", "--no-harvest", "--no-harvest", "qds-20260101-abcdef"] }, // duplicate bool
+      { argv: ["status", "--driver"] }, // value flag with no value
+      { argv: ["dispatch", "--driver", "fake", "--port", "0"] }, // range check
+      { argv: ["status", "--driver", "fake", "NOT_AN_ID"] }, // run-id grammar
+      { argv: ["status", "--driver", "no-such-driver"], injected: false }, // driver registry
+      { argv: ["dispatch", "--driver", "fake", "--brief", join(dir, "nope.json")], injected: false }, // brief reader
+      { argv: ["dispatch", "--driver", "fake"] }, // schema (the injected brief is not JSON)
+      { argv: ["dispatch", "--driver", "fake", "somefile.json"] }, // extra positional
+      { argv: ["harvest", "--driver", "fake"] }, // missing <run-id>
+      { argv: ["harvest", "--driver", "fake", "--dir", runsDir, "qds-19990101-000000"] }, // record probe → 4
+      { argv: ["teardown", "--driver", "fake", "--dir", runsDir, "qds-19990101-000000"] },
+      { argv: ["status", "--driver", "fake", "qds-19990101-000000"] },
+      { argv: ["status", "--driver", "fake", "--dir", join(dir, "no-such-dir")], injected: false }, // --dir probe
+    ];
+    for (const { argv, injected } of refusals) {
+      reset();
+      const code = await runCli([...argv], injected === false ? {} : deps("{not json"));
+      // A refusal, whatever its code — this is about the SINK, so pinning each
+      // code here would only duplicate the cases that own them.
+      expect({ argv, refused: code !== 0 }).toEqual({ argv, refused: true });
+      expect({ argv, stdout: outOnly.join("") }).toEqual({ argv, stdout: "" });
+      // …and it really did say something: an empty stderr would satisfy the
+      // stdout claim above perfectly.
+      expect({ argv, saidSomething: errCaptured.join("") !== "" }).toEqual({ argv, saidSomething: true });
+      // Parseable JSON lines, every one: `2>&1 | jq` is how these are read, and
+      // a bare sentence on the diagnostics sink breaks that as surely as an
+      // envelope on stdout breaks the other one.
+      for (const line of errCaptured.join("").trimEnd().split("\n")) {
+        expect({ argv, line, code: (JSON.parse(line) as { code?: unknown }).code }).toMatchObject({
+          code: expect.any(String),
+        });
+      }
+    }
+  });
+
   test("a flag no verb declares is refused by the tokenizer, not swallowed", async () => {
     // `status --brief x` above is a flag the REGISTRY knows on the wrong verb —
     // a different check. This one nothing declares, so it must die in
@@ -628,14 +847,21 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     // Without the `startsWith("--")` clause `--dir` swallows `--driver` and the
     // CLI acts on a runs directory literally named "--driver": a fresh empty
     // store, so teardown exits 4 while the real box keeps billing.
-    for (const argv of [
-      ["teardown", "--dir", "--driver", "fake", "qds-20260101-abcdef"],
-      ["status", "--driver"], // trailing, with no value at all
-    ]) {
+    //
+    // The refusal names WHICH flag was left without a value. The bare substring
+    // was identical for both cases here, so a parser that blamed the flag it
+    // swallowed rather than the one that swallowed it — `--driver requires a
+    // non-empty value` for the first argv, which sends the operator to fix the
+    // flag they typed correctly — passed both.
+    const cases: [string[], string][] = [
+      [["teardown", "--dir", "--driver", "fake", "qds-20260101-abcdef"], "--dir requires a non-empty value"],
+      [["status", "--driver"], "--driver requires a non-empty value"], // trailing, no value at all
+    ];
+    for (const [argv, message] of cases) {
       reset();
       const code = await runCli(argv, deps(""));
       expect({ argv, code }).toEqual({ argv, code: 2 });
-      expect(text()).toContain("requires a non-empty value");
+      expect(text()).toContain(message);
       expect(existsSync(join(dir, "--driver"))).toBeFalse();
     }
   });
@@ -730,7 +956,7 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(code).toBe(2);
     expect(text()).toContain("extraField");
     expect(readdirSync(runsDir)).toHaveLength(0);
-    expect(readdirSync(boxesDir)).toHaveLength(0);
+    expectNoBoxes();
   });
 
   test("brief over 64 KiB → exit 2 brief-too-large naming the cap", async () => {
@@ -812,6 +1038,139 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(text()).toContain("ENOENT");
     expect(text()).not.toContain("invalid-brief");
   });
+
+  test("--brief AND a brief redirected onto stdin is refused; /dev/null stdin is not", async () => {
+    // `fleet dispatch --brief old.json < new.json` provisioned from old.json and
+    // said nothing — the same "acting on something other than what the operator
+    // saw themselves type" this CLI refuses `--dir` twice for, except the
+    // outcome is a billable box built from the wrong brief.
+    //
+    // Out of process, because the guard tests fd 0's TYPE and `deps.readBrief`
+    // replaces the whole reader. The BRIEF IS DELIBERATELY MALFORMED, so the two
+    // outcomes separate by CODE rather than by exit status: the source check
+    // runs before `readBriefFile`, so `brief-unreadable`/`invalid-brief` is
+    // positive proof the file was reached and the guard did not fire.
+    const briefPath = join(dir, "one-source.json");
+    writeFileSync(briefPath, "{not json");
+    const q = (s: string): string => JSON.stringify(s);
+
+    // What fd 0 actually IS, reported by a child spawned exactly as the CLI
+    // below is. Every row asserts this first, so a harness change that stops
+    // producing the type the row names fails the test instead of passing it
+    // vacuously — which is precisely how the socket row went missing: the
+    // original spelling of it used `Bun.spawn({stdin: <Buffer>})`, believed it
+    // was making a pipe, and was making a socket the guard never looked at.
+    const probe = join(dir, "fd0-probe.ts");
+    writeFileSync(
+      probe,
+      `import { fstatSync } from "node:fs";
+let t = "closed"; // fstat throws EBADF on a closed fd 0
+try {
+  const s = fstatSync(0);
+  t = s.isSocket() ? "socket" : s.isFIFO() ? "fifo" : s.isFile() ? "file" : s.isCharacterDevice() ? "chardev" : "other";
+} catch {}
+process.stdout.write(t);
+`,
+    );
+
+    // Two ways to produce fd 0, used DELIBERATELY and not interchangeably:
+    //
+    //  - `Bun.spawn({stdin: "pipe"})` gives a SOCKET. Bun (and Node) back their
+    //    "pipe" stdio with a socketpair, so this is what every programmatic
+    //    parent hands a child — and it was the hole: the guard used to test
+    //    `isFIFO() || isFile()`, so `fleet dispatch --brief old.json` under any
+    //    such parent silently provisioned from the wrong brief.
+    //  - `sh -c` gives a real FIFO (`cat x |`), a real regular file (`< f`), a
+    //    character device (`< /dev/null`) or no fd 0 at all (`0<&-`). Nothing
+    //    else produces those.
+    //
+    // The guard is now an ALLOW-list — `if (st.isCharacterDevice()) return;`
+    // plus the EBADF catch — so a stdio type nobody has thought of yet is
+    // refused rather than waved through, which an enumerated deny-list could
+    // not promise.
+    type Spawn = (cmd: string[]) => Bun.Subprocess<"pipe" | "ignore", "pipe", "pipe">;
+    const viaSocket: Spawn = (cmd) => Bun.spawn(cmd, { cwd: dir, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    const viaShell =
+      (wrap: (c: string) => string): Spawn =>
+      (cmd) =>
+        Bun.spawn(["sh", "-c", wrap(`exec ${cmd.map(q).join(" ")}`)], {
+          cwd: dir,
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+
+    const cases: [string, string, Spawn, boolean][] = [
+      ["a socket on stdin", "socket", viaSocket, true],
+      ["a pipe on stdin", "fifo", viaShell((c) => `cat ${q(briefPath)} | ${c}`), true],
+      ["a redirected regular file", "file", viaShell((c) => `${c} < ${q(briefPath)}`), true],
+      // LOAD-BEARING, do not "simplify" to an isTTY check: cron, systemd and
+      // every container give a non-interactive process /dev/null on fd 0 and no
+      // tty, so `!isTTY` would refuse every non-interactive `--brief` invocation
+      // there is. Testing fd 0's TYPE is the whole reason that works, and this
+      // row is what fails when someone swaps it back.
+      ["/dev/null on stdin", "chardev", viaShell((c) => `${c} < /dev/null`), false],
+      // The guard's other allow arm — no fd 0 at all, `fstatSync(0)` throws
+      // EBADF — is NOT here: `bun` reopens a closed fd 0 on /dev/null before
+      // user code runs (measured: `sh -c 'exec bun probe 0<&-'` reports
+      // chardev), so it is unreachable from any test that runs under bun and a
+      // row for it would only re-assert the /dev/null row above.
+    ];
+
+    const fleetArgv = [
+      "bun",
+      join(import.meta.dir, "../../scripts/fleet.ts"),
+      "dispatch",
+      "--driver",
+      "fake",
+      "--brief",
+      briefPath,
+    ];
+
+    for (const [label, fd0Type, spawn, refusedAsTwoSources] of cases) {
+      // 1. the premise: fd 0 really is what this row claims.
+      const probed = spawn(["bun", probe]);
+      try {
+        const [, said] = await within(
+          `the fd 0 probe for ${label}`,
+          30_000,
+          Promise.all([probed.exited, readCapped(probed.stdout)]),
+        );
+        expect({ label, fd0: said }).toEqual({ label, fd0: fd0Type });
+      } finally {
+        probed.kill("SIGKILL");
+        await probed.exited;
+      }
+
+      // 2. the claim. The brief is DELIBERATELY malformed, so the two outcomes
+      // separate by CODE rather than by exit status — both exit 2. The source
+      // check runs before `readBriefFile`, so `invalid-brief` is positive proof
+      // the file was reached and the guard did not fire.
+      const proc = spawn(fleetArgv);
+      try {
+        const [code, stdout, stderr] = await within(
+          `fleet dispatch --brief with ${label}`,
+          30_000,
+          Promise.all([proc.exited, readCapped(proc.stdout), readCapped(proc.stderr)]),
+        );
+        expect({ label, code }).toEqual({ label, code: 2 });
+        expect({ label, stdout }).toEqual({ label, stdout: "" });
+        expect({
+          label,
+          twoSources: stderr.includes("was given AND a brief was redirected onto stdin"),
+        }).toEqual({ label, twoSources: refusedAsTwoSources });
+        // The other side of the same claim: refused as two sources means the
+        // file was never read; not refused means it WAS.
+        expect({ label, read: stderr.includes("invalid-brief") }).toEqual({ label, read: !refusedAsTwoSources });
+        if (refusedAsTwoSources) {
+          expect(stderr).toContain("pass the brief exactly one way: `--brief <path>`, or on stdin with no --brief");
+        }
+      } finally {
+        proc.kill("SIGKILL");
+        await proc.exited;
+      }
+    }
+  }, 60_000);
 
   test("invalid JSON brief → exit 2", async () => {
     const code = await runCli(["dispatch", "--driver", "fake"], deps("{not json"));
@@ -907,7 +1266,7 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       expect({ bad, code }).toEqual({ bad, code: 2 });
       expect(text()).toContain("is not a TCP port");
       expect(readdirSync(runsDir)).toHaveLength(0);
-      expect(readdirSync(boxesDir)).toHaveLength(0);
+      expectNoBoxes();
     }
     // An empty value is refused by the flag parser, one step earlier — same
     // exit, different (and more accurate) message.
@@ -1000,7 +1359,7 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(envelope.capMicroUsd).toBe(10_000_000);
     expect(envelope.spentMicroUsd).toBe(12_000_000);
     expect(readdirSync(runsDir)).toHaveLength(0);
-    expect(readdirSync(boxesDir)).toHaveLength(0);
+    expectNoBoxes();
   });
 
   // ─── the run-id grammar: exit 2 before any path is built ───────────────────
@@ -1018,22 +1377,43 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     // bad id fails a character rule too — `"Q"×300` is rejected on the
     // uppercase rule before its length is ever consulted — which made deleting
     // the `id.length > RUN_ID_MAX` check a green mutation.
-    const badIds = ["../evil", "a/b", "", "Q".repeat(300), "a".repeat(64), "qds-x/../y", "qds-20260101-ABCDEF"];
+    //
+    // `"Q"×300` is the UNBOUNDED-ECHO case, and its envelope is now pinned as a
+    // literal rather than by parts. The CLI's own 96-char pre-cap was removed so
+    // there is exactly ONE bound on the echo and it lives at the sink that owns
+    // the message (`assertFleetRunId` in src/fleet/dispatch.ts): capping first
+    // handed the store a 108-char string to describe, so the envelope carried
+    // two lengths that contradicted each other, and a secret pasted into the
+    // run-id position could be cut across the boundary into two halves neither
+    // redaction rule matches. What survives is a 12-char head, escaped, plus the
+    // TRUE length — and the store's own echo of the whole id is eaten whole by
+    // `redactSecrets`' opaque-token rule, which is the right answer: it tells
+    // the operator they pasted a secret without repeating any of it.
+    const LONG_ID = "Q".repeat(300);
+    const LONG_ID_MESSAGE =
+      'invalid run id: "«redacted»" (must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ and be <= 63 chars)' +
+      ' — supplied: "QQQQQQQQQQQQ…" (300 chars)';
+    const badIds = ["../evil", "a/b", "", LONG_ID, "a".repeat(64), "qds-x/../y", "qds-20260101-ABCDEF"];
     for (const verb of ["status", "harvest", "teardown"]) {
       for (const runId of badIds) {
         reset();
         const code = await runCli([verb, "--driver", "fake", "--dir", runsDir, runId], deps(validBriefJson(dir)));
         expect({ verb, runId, code }).toEqual({ verb, runId, code: 2 });
-        const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+        const envelope = JSON.parse(errCaptured[0] as string) as {
+          code: string;
+          message: string;
+          remediation: string;
+        };
         expect(envelope.code).toBe("invalid-run-id");
-        if (runId.length > 96) {
-          // The echo is capped at 96 chars: `fleet teardown $(200KB)` used to
-          // put all of it in the envelope. The refusal is unchanged (nothing
-          // ≤ 63 chars survives the cap), so the id must appear TRUNCATED, with
-          // its true length named — and the untruncated form must not appear.
-          expect(envelope.message).toContain(`…(${runId.length} chars)`);
-          expect(envelope.message).toContain(runId.slice(0, 96));
-          expect(envelope.message).not.toContain(runId);
+        if (runId === LONG_ID) {
+          // VERBATIM, not `toContain` of the pieces: every part of this string
+          // is load-bearing and each was independently wrong at some point —
+          // the head length, the escaping, the redaction of the store's echo,
+          // and which of the two lengths gets reported.
+          expect(envelope.message).toBe(LONG_ID_MESSAGE);
+          expect(envelope.remediation).toBe("run ids come from `fleet dispatch`; list them with `fleet status`");
+          // Whatever else changes, the id itself never rides out whole.
+          expect(errCaptured.join("")).not.toContain(runId);
         } else {
           expect(envelope.message).toContain(JSON.stringify(runId));
         }
@@ -1379,7 +1759,7 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     rmSync(lock);
   });
 
-  test("teardown releases the run lock when the teardown itself fails", async () => {
+  test("teardown HOLDS the run lock when the teardown itself fails, and says so", async () => {
     const base = new FakeDriver(boxesDir);
     const shared: Partial<FleetDeps> = { ...deps(validBriefJson(dir)), driver: base };
     const store = shared.store as RunRecordStore;
@@ -1399,13 +1779,113 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       }),
     });
 
-    expect(code).toBe(1);
+    // 6, not 1. The throw came from INSIDE the destructive sequence, so the run
+    // may be half-torn-down — and `transient` invites the retry that would run
+    // against it. The lock is what stops that retry, so it is kept and named.
+    expect(code).toBe(6);
     expect(text()).toContain("destroy-unconfirmed");
-    // A lock left on disk here makes the run permanently un-teardownable while
-    // its box keeps billing.
-    expect(existsSync(join(runsDir, `${runId}.lock`))).toBeFalse();
+    // Kept ON PURPOSE, and this is the assertion that used to say the opposite:
+    // releasing here handed the next invocation a run whose box, key and record
+    // are in a state only an operator can judge (scripts/lib/run-lock.ts's
+    // `markRunLockDestructive`, and scripts/fleet.ts's `destructiveInFlight`).
+    // The refusal an operator sees next is `run-locked` (exit 5) with the `rm`
+    // that clears it, not a silent second teardown.
+    expect(existsSync(join(runsDir, `${runId}.lock`))).toBeTrue();
+    expect(text()).toContain("lock-held");
     expect(store.get(runId).closedAt).toBeUndefined();
     expect((await base.list()).map((vm) => vm.name)).toContain(vmName);
+
+    // …and the kept lock DOES what it is kept for. `releaseRunLock` refuses
+    // while the lock is marked destructive and only the success path clears the
+    // mark (`clearRunLockDestructive` runs after `teardownSandbox` returns), so
+    // the next invocation must be REFUSED rather than handed a run that is half
+    // torn down. Without this, "the lock file still exists" is a claim about a
+    // file and not about the guard.
+    //
+    // A real second PROCESS, because in-process the second acquire answers
+    // `run-lock-reentrant` — this process still holds the claim in run-lock.ts's
+    // `held` map — which is a programming-error branch, not the contention an
+    // operator hits. `--driver fake` is resolved for real here (no injected
+    // deps), which is why the boxes dir has to be handed over in the env.
+    const next = Bun.spawn(
+      ["bun", join(import.meta.dir, "../../scripts/fleet.ts"), "teardown", "--driver", "fake", "--dir", runsDir, runId],
+      { cwd: dir, stdout: "pipe", stderr: "pipe", env: { ...process.env, QDS_FAKE_BOXES_DIR: boxesDir } },
+    );
+    try {
+      const [nextCode, nextOut, nextErr] = await within(
+        "the next teardown of a run left locked",
+        30_000,
+        Promise.all([next.exited, readCapped(next.stdout), readCapped(next.stderr)]),
+      );
+      expect(nextCode).toBe(5);
+      expect(nextErr).toContain("run-locked");
+      // The LIVE remediation: this process is still running and still holds it,
+      // so the operator must not be told to `rm` it as stale.
+      expect(nextErr).toContain("wait for that invocation to finish");
+      expect(nextOut).toBe("");
+    } finally {
+      next.kill("SIGKILL");
+      await next.exited;
+    }
+    // The refusal neither stole nor cleared it: only an operator can.
+    expect(existsSync(join(runsDir, `${runId}.lock`))).toBeTrue();
+  }, 30_000);
+
+  test("teardown of a run with a box, an OPEN record and no keyHash exits 6, not 0", async () => {
+    // The record `dispatch` leaves if it dies between `driver.create()`
+    // returning and the mint's `store.set({keyHash})` (src/fleet/dispatch.ts) —
+    // a box that existed, an open run, and no surviving pointer to a key that
+    // may still be billing. Absence of `keyHash` is NOT proof no key exists, so
+    // the box teardown succeeds and the key cannot be revoked: `torn down:` plus
+    // exit 0 is exactly what `fleet teardown … || alert` reads as "nothing left
+    // running", which is the one thing that is not true here.
+    //
+    // Reachable this way ONLY, which is why it has to be constructed: a
+    // setup-gate refusal runs after the mint, so its record carries a keyHash;
+    // a budget refusal fires before `create`, so its record has no `vmName` and
+    // this arm is never entered.
+    const shared = deps(validBriefJson(dir));
+    const base = shared.driver as FakeDriver;
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId, vmName } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as {
+      runId: string;
+      vmName: string;
+    };
+    // Written through the file: `store.set` skips `undefined`, so there is no
+    // other way to DROP the field rather than blank it.
+    const recordPath = join(runsDir, `${runId}.json`);
+    const { keyHash: dropped, ...keyless } = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, unknown>;
+    expect(dropped).toBeString(); // the field really was there to drop
+    writeFileSync(recordPath, JSON.stringify(keyless), { mode: 0o600 });
+
+    reset();
+    const code = await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared);
+    expect(code).toBe(6);
+    // The verb's own work LANDED — that is why 6 and not 1: retrying would send
+    // automation back to tear down a run that no longer exists, and the leftover
+    // is a live credential no retry of this verb can reach.
+    expect(outOnly.join("")).toContain(`torn down: ${runId}`);
+    expect((await base.list()).map((vm) => vm.name)).not.toContain(vmName);
+    expect((shared.store as RunRecordStore).get(runId).closedAt).toBeDefined();
+    // …and the reason exit 0 would be a lie is NAMED, with the id, on stderr.
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("key-unattributable")) as string) as {
+      code: string;
+      runId: string;
+      remediation: string;
+    };
+    expect(envelope.code).toBe("key-unattributable");
+    expect(envelope.runId).toBe(runId);
+    expect(envelope.remediation).toContain("revoke it by hand");
+    // An unrevokable key is not a half-torn-down run: the lock still came off,
+    // so the run stays operable.
+    expect(existsSync(join(runsDir, `${runId}.lock`))).toBeFalse();
+
+    // …and the SAME id again is exit 0, which is how teardown's declared 0 stays
+    // reachable at all: the record is closed now, so first-close-wins skips
+    // every step and there is no key left to fail to attribute.
+    reset();
+    expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(0);
+    expect(errCaptured.join("")).not.toContain("key-unattributable");
   });
 
   test("a teardown that succeeds but cannot release its lock exits 6, not 0", async () => {
@@ -1561,7 +2041,12 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     const io = spawnFallbackAcquirer("EIO", "probe");
     const said = (await within("the EIO acquire", 20_000, readCapped(io.stdout))).trim();
     await io.exited;
-    expect(said).not.toBe("won");
+    // The ERRNO, not merely "not won". `not.toBe("won")` was satisfied by a
+    // child that died for any reason at all — a syntax error in the preload, a
+    // missing runs directory, an OOM — so the one thing this half asserts (that
+    // `claim` re-THREW the EIO instead of falling back on it) was not asserted.
+    // The sibling EPERM case above already pins its exact string.
+    expect(said).toBe("lost EIO");
     expect(existsSync(lock)).toBeFalse();
   }, 30_000);
 
@@ -1885,6 +2370,11 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     // reports as unattributed spend. A --dir the status verb silently ignored
     // would still find the record and call it `live`.
     reset();
+    // Created first: the read verbs refuse a `--dir` that is not there rather
+    // than mkdir'ing it (scripts/fleet.ts `assertRecordsDirUsable`), so an
+    // EMPTY records directory — not an absent one — is what "the same box with
+    // no record to claim it" looks like.
+    mkdirSync(join(dir, "other-runs"), { recursive: true, mode: 0o700 });
     expect(await runCli(["status", "--driver", "fake", "--dir", join(dir, "other-runs")], noStore)).toBe(0);
     // `(orphan <vmName>)` — see the orphan case above; `vmName` still names the
     // box, and it is the box that proves --dir was honoured.
@@ -1945,6 +2435,48 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(errCaptured).toHaveLength(0);
   });
 
+  test("a verb that SUCCEEDED but could not print all of its output exits 6", async () => {
+    // EPIPE and EAGAIN part company here, and only EPIPE was covered. A hung-up
+    // reader is reading nothing more either way, so EPIPE is silent (exit 0
+    // above). EAGAIN is an fd 1 a wrapper or CI runner left non-blocking, still
+    // open, still being read — and `writeAll` advances across a PARTIAL write
+    // before it throws, so `fleet status` over a fleet big enough to fill the
+    // pipe buffer ended mid-token on a half-written `{"runId":"…`. Exit 0 said
+    // that truncated listing WAS the fleet: the same lie `listUnavailable` → 1
+    // exists to prevent, and a `| jq` consumer gets a parse error or, worse, a
+    // short listing it believes.
+    const shared = deps(validBriefJson(dir));
+    // TWO runs, so the "one line per invocation, not per refused write" rule has
+    // something to be wrong about.
+    for (let i = 0; i < 2; i++) expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+
+    reset();
+    let refused = 0;
+    const nonBlocking = (): never => {
+      refused++;
+      const e = new Error("fd 1 accepted 0 of 64 bytes") as NodeJS.ErrnoException;
+      e.code = "EAGAIN";
+      throw e;
+    };
+    const code = await run(["status", "--driver", "fake", "--dir", runsDir], nonBlocking, shared, errOut);
+
+    // 6, not 0 and not 1. The verb's work is done — it is a read — so a retry
+    // cannot undo or redo it; only the printing failed, and what WAS printed
+    // must not be parsed.
+    expect(code).toBe(6);
+    // Every row really was refused, so this is the truncation case and not a
+    // single unlucky write.
+    expect(refused).toBeGreaterThan(1);
+    const truncation = errCaptured.filter((l) => l.includes("stdout-truncated"));
+    // ONE line, not one per refused write: a full pipe refuses every row after
+    // the first, and the diagnostic must not itself flood the operator's stderr.
+    expect(truncation).toHaveLength(1);
+    const envelope = JSON.parse(truncation[0] as string) as { code: string; message: string; remediation: string };
+    expect(envelope.code).toBe("stdout-truncated");
+    expect(envelope.message).toContain("INCOMPLETE");
+    expect(envelope.remediation).toContain("do not parse what was printed");
+  });
+
   test("a write failure that is NOT a broken pipe is still a failure", async () => {
     // The other half of the EPIPE tolerance: ENOSPC means the output was lost
     // to a full disk with a reader still there, and swallowing that would make
@@ -1995,6 +2527,58 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(text()).toContain("--no-harvest given more than once");
     // Refused as a usage error: nothing was torn down.
     expect((shared.store as RunRecordStore).get(runId).closedAt).toBeUndefined();
+  });
+
+  test("a --dir that does not exist is exit 2 on every READ verb, and is not created", async () => {
+    // `new RunRecordStore` mkdirs recursively and chmods 0700, which is right
+    // for `dispatch` — the verb that creates runs — and wrong for the three that
+    // only look. `fleet teardown qds-nosuchrun --dir /srv/typo` exited 4 having
+    // CREATED /srv/typo and every missing parent, so the operator's next `fleet
+    // status --dir /srv/typo` reported a clean empty fleet from a directory that
+    // exists only because they typo'd it once, while the real fleet billed on.
+    //
+    // 2, not 4: 4 is "that RUN does not exist", which presumes a records
+    // directory to have looked in. This is the invocation being wrong, and it is
+    // wrong identically on every retry.
+    const typo = join(dir, "srv", "typo");
+    for (const argv of [
+      ["status", "--driver", "fake", "--dir", typo],
+      ["status", "--driver", "fake", "--dir", typo, "qds-20260101-abcdef"],
+      ["harvest", "--driver", "fake", "--dir", typo, "qds-20260101-abcdef"],
+      ["teardown", "--driver", "fake", "--dir", typo, "qds-20260101-abcdef"],
+    ]) {
+      reset();
+      // `store` deliberately NOT injected — an injected store is already built,
+      // so there is nothing left for this guard to refuse.
+      const code = await runCli(argv, { driver: new FakeDriver(boxesDir) });
+      expect({ argv, code }).toEqual({ argv, code: 2 });
+      expect(text()).toContain(`--dir ${typo} does not exist`);
+      expect(text()).toContain("ENOENT");
+      // Neither the directory nor its missing parent: the refusal mutated nothing.
+      expect({ argv, made: existsSync(typo) || existsSync(join(dir, "srv")) }).toEqual({ argv, made: false });
+    }
+    // The DEFAULT directory is unaffected — creating `.sandbox/runs` on first
+    // use is the intended bootstrap, and refusing it breaks every fresh checkout.
+    reset();
+    expect(await runCli(["status", "--driver", "fake"], { driver: new FakeDriver(boxesDir) })).toBe(0);
+  });
+
+  test("`fleet status --dir <existing>` reads it without re-permissioning it to 0700", async () => {
+    // `status` builds its store with `{create: false}`, which skips the mkdir AND
+    // the chmod. With a writable store, looking at an operator's records
+    // directory silently changed its mode — a read-only query mutating the one
+    // thing it was pointed at. harvest/teardown deliberately still use a
+    // writable store (`teardownSandbox` calls `store.close`/`set`), so this is
+    // about `status` alone.
+    const loose = join(dir, "loose-runs");
+    mkdirSync(loose, { recursive: true });
+    chmodSync(loose, 0o755); // mkdir's mode is masked by the umask; chmod is not
+    expect(statSync(loose).mode & 0o777).toBe(0o755);
+
+    reset();
+    expect(await runCli(["status", "--driver", "fake", "--dir", loose], { driver: new FakeDriver(boxesDir) })).toBe(0);
+    expect(errCaptured).toHaveLength(0);
+    expect(statSync(loose).mode & 0o777).toBe(0o755);
   });
 
   test("a --dir that cannot BE a records dir exits 2, not a retryable 1", async () => {
@@ -2187,10 +2771,21 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     const minted = [...keyApi.plaintexts.values()];
     // The tripwire is only a tripwire if a key was actually minted.
     expect(minted).not.toHaveLength(0);
-    const sinks = `${outOnly.join("")} ${errCaptured.join("")} ${JSON.stringify(entries)}`;
+    const sinks = [outOnly.join(""), errCaptured.join(""), JSON.stringify(entries)];
     for (const secret of minted) {
-      expect(secret.length).toBeGreaterThan(8);
-      expect(sinks).not.toContain(secret);
+      expect(secret.length).toBeGreaterThan(MIN_REDACTABLE_LEN);
+      // `leakScan`, not `not.toContain(secret)`. The whole-string form catches
+      // only a VERBATIM, unescaped copy — so a key logged with its issuer prefix
+      // trimmed, split across two fields, JSON-escaped, or truncated to "the
+      // first 40 chars for debugging" walked straight through the one assertion
+      // that exists to stop it. The repo already owns the right scanner: it
+      // sweeps every MIN_REDACTABLE_LEN-char fragment (the redactor's own
+      // boundary constant, so it tracks the redaction rule instead of
+      // re-hard-coding 8 here) and carries the key-management deep-link rule
+      // with it. The three sinks stay SEPARATE strings so nothing can leak
+      // across a join.
+      const leaked = leakScan(secret, ...sinks);
+      expect({ head: `${secret.slice(0, 4)}…`, leaked }).toEqual({ head: `${secret.slice(0, 4)}…`, leaked: null });
     }
   });
 
@@ -2238,6 +2833,37 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(envelope.code).toBe("error");
     expect(envelope.message).toBe("substrate said no");
     expect(readdirSync(runsDir)).toHaveLength(0);
+  });
+
+  test("dispatch whose ack cannot be written exits 6 with the box LIVE and the run id named", async () => {
+    // `fleet dispatch … | head -0`: the pipe closes before the ack line lands,
+    // `out()` throws EPIPE, and the run id — the ONLY handle on a box that is
+    // live and billing, and on the key just minted for it — is gone. Nothing
+    // reached this arm before, so `dispatch` could not declare 6 in the verb
+    // registry without the ⊇ check in verbs.test.ts calling it unreachable.
+    //
+    // Not 1: `logVerb` stamps 1 `transient` ("retry me"), and retrying dispatch
+    // provisions a SECOND box rather than recovering the first.
+    const shared = deps(validBriefJson(dir));
+    const driver = shared.driver as FakeDriver;
+    const brokenStdout = (): never => {
+      throw new Error("EPIPE: broken pipe, write");
+    };
+    const code = await run(["dispatch", "--driver", "fake"], brokenStdout, shared, errOut);
+    expect(code).toBe(6);
+
+    const envelope = errCaptured
+      .map((l) => JSON.parse(l) as { code: string; message: string; remediation?: string; runId?: string })
+      .find((e) => e.code === "ack-unwritable");
+    expect(envelope).toBeDefined();
+    // The run id is what makes the refusal actionable — an operator who cannot
+    // read it off stdout has to find the box by hand before it stops billing.
+    const runId = envelope!.runId as string;
+    expect(runId).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
+    expect(envelope!.remediation).toContain(`fleet teardown ${runId}`);
+    // The premise: the box really is LIVE. An exit 6 over a box that was never
+    // provisioned would be a different (and much less urgent) failure.
+    expect((await driver.list()).map((vm) => vm.name)).toContain(runId);
   });
 
   test("dispatch at an interactive terminal refuses instead of waiting forever", async () => {
@@ -2303,6 +2929,14 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     // clean JSON, and every other case in this file used to merge the two.
     expect(outOnly).toContain(ackLine);
     expect(errCaptured).toHaveLength(0);
+    // The ack and NOTHING else. `toContain(ackLine)` is satisfied by a stdout
+    // that also carries a progress line, a stray `console.log` or a diagnostic
+    // that leaked across — and `fleet dispatch | jq` reads the whole stream, so
+    // a second line is a parse error rather than an extra one it can skip. The
+    // `status` cases below already hold themselves to this (`outOnly[0]`, and
+    // parse-every-line); dispatch's own output never was.
+    expect(outOnly).toHaveLength(1);
+    expect(JSON.parse(outOnly[0] as string)).toEqual(ack);
     // One admission, one close: the handle the ledger owns does not leak per run.
     expect(ledger.admitCalls).toHaveLength(1);
     expect(ledger.closeCalls).toBe(1);
@@ -2377,7 +3011,9 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
         },
       }),
     });
-    expect(code).toBe(1);
+    // 6, for the reason the lock test above states: the failure happened inside
+    // the destructive sequence, so the lock is held and no retry can clear it.
+    expect(code).toBe(6);
     expect(text()).toContain("destroy-unconfirmed");
     expect(text()).not.toContain("teardown.harvest_waived");
     expect(text()).not.toContain("torn down:");
@@ -2442,6 +3078,60 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       expect(typeof line.requestId).toBe("string");
     });
 
+    test("a help request logs its line too, naming the verb it was asked ABOUT", async () => {
+      // CC-9 says every verb logs one structured line, and help used to be the
+      // exception — which made `fleet teardown <id> --driver real --help` (an
+      // operator who meant to destroy a box and did not) the one invocation a
+      // dashboard could not see at all. The verb is the one they typed, not
+      // "help": a line reporting `help` cannot be told apart from a genuine
+      // `fleet --help` in a per-verb rollup.
+      for (const [argv, verb] of [
+        [["teardown", "qds-20260101-abcdef", "--driver", "fake", "--help"], "teardown"],
+        [["dispatch", "--help"], "dispatch"],
+        // Neither of these names a verb, so the line reports the help path itself.
+        [["--help"], "help"],
+        [["help"], "help"],
+      ] as const) {
+        entries.length = 0;
+        reset();
+        expect({ argv, code: await runCli([...argv], deps("")) }).toEqual({ argv, code: 0 });
+        const lines = verbLines();
+        expect({ argv, lines: lines.length }).toEqual({ argv, lines: 1 });
+        const line = lines[0] as unknown as Record<string, unknown>;
+        expect({ argv, verb: line.verb }).toEqual({ argv, verb });
+        expect({ argv, operation: line.operation }).toEqual({ argv, operation: `fleet.${verb}` });
+        expect(line.exitCode).toBe(0);
+        expect(line.exitStatus).toBe("success");
+        // No run was acted on, so there is none to report — `null`, never a
+        // fabricated or argv-scraped id.
+        expect(line.runId).toBeNull();
+        expect(typeof line.requestId).toBe("string");
+      }
+    });
+
+    test("the log's runId bound is the CLI's own, not the refusal envelope's", async () => {
+      // Two streams, two owners, deliberately NOT collapsed. `assertFleetRunId`
+      // owns the operator-facing echo and cuts it to a 12-char redacted head
+      // plus the true length; `bounded` owns the LOG field and cuts it to 96.
+      // Folding them was tried and was wrong: capping first handed the store a
+      // 108-char string to describe, so the envelope carried two lengths that
+      // contradicted each other. What must hold of both is that neither ever
+      // carries the whole thing.
+      const long = "Q".repeat(300);
+      expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, long], deps(""))).toBe(2);
+      const line = verbLines()[0] as unknown as Record<string, unknown>;
+      expect(line.verb).toBe("teardown");
+      expect(line.runId).toBe(`${"Q".repeat(96)}…(300 chars)`);
+      expect(line.exitCode).toBe(2);
+      // The envelope's echo is the SHORTER, redacted form — the two bounds are
+      // visibly different, which is the thing this pins.
+      const envelope = JSON.parse(errCaptured[0] as string) as { message: string };
+      expect(envelope.message).toContain('supplied: "QQQQQQQQQQQQ…" (300 chars)');
+      expect(envelope.message).not.toContain("Q".repeat(96));
+      // …and 200 KB of argv reaches neither stream.
+      expect(`${JSON.stringify(entries)} ${errCaptured.join("")}`).not.toContain(long);
+    });
+
     test("a parse failure logs the attempted VERB, never a flag's value", async () => {
       // The line exists to be counted, and dashboards key on `verb`. Scanning
       // raw argv for the first token without a leading dash returned
@@ -2464,7 +3154,30 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
       entries.length = 0;
 
-      // exit 1: the substrate refused, not the operator — worth a retry.
+      // exit 1: the substrate refused, not the operator — worth a retry. Read
+      // off `status`, because a failing TEARDOWN is no longer this shape: it
+      // throws inside the destructive phase, where scripts/fleet.ts holds the
+      // run lock on purpose (`destructiveInFlight`) — see the exit-6 case
+      // immediately below. `status` mutates nothing, so a substrate failure
+      // there is exactly "retry me".
+      expect(
+        await runCli(["status", "--driver", "fake", "--dir", runsDir], {
+          ...shared,
+          driver: driverWith(base, {
+            list: async () => {
+              throw new Error("substrate unreachable");
+            },
+          }),
+        }),
+      ).toBe(1);
+      expect((verbLines()[0] as unknown as Record<string, unknown>).exitStatus).toBe("transient");
+
+      // exit 6, and NOT 1: the destroy failed after the teardown had begun
+      // destroying the run, so the box may be gone with the key un-revoked and
+      // the lock is deliberately kept for an operator. `transient` would send
+      // automation back to a run whose every retry can only answer
+      // `run-locked`.
+      entries.length = 0;
       expect(
         await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], {
           ...shared,
@@ -2474,8 +3187,8 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
             },
           }),
         }),
-      ).toBe(1);
-      expect((verbLines()[0] as unknown as Record<string, unknown>).exitStatus).toBe("transient");
+      ).toBe(6);
+      expect((verbLines()[0] as unknown as Record<string, unknown>).exitStatus).toBe("logic");
 
       // exit 4: the id is wrong, and it will be wrong on every retry.
       entries.length = 0;

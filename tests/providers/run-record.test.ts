@@ -16,6 +16,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -495,6 +496,149 @@ describe("list (AC3, INV-4)", () => {
     writeFileSync(join(dir, "README.txt"), "not a record");
     expect(store.list().map((r) => r.runId)).toEqual(["run-1", "run-2"]);
   });
+
+  test("an interrupted create's zero-byte record is quarantined, not allowed to kill the listing", () => {
+    // A SIGKILL between `openSync(p,"wx")` and the write leaves an empty file.
+    // `JSON.parse("")` throws, and one throw out of the sweep is a FLEET-WIDE
+    // outage rather than one bad file: `listWithAnomalies()` dies, `list()`
+    // dies with it, so `reapRuns` reaps NOTHING and `fleet status` renders
+    // NOTHING until an operator deletes the file by hand — while every live box
+    // keeps billing.
+    store.create("run-good");
+    writeFileSync(join(dir, "run-empty.json"), "", { mode: 0o600 });
+
+    const listing = store.listWithAnomalies();
+    // The other record still comes back. That is the whole point.
+    expect(listing.records.map((r) => r.runId)).toEqual(["run-good"]);
+    expect(listing.skipped).toEqual(["run-empty.json"]);
+    // The reason rides along, same index — a caller rendering the anomaly has
+    // to be able to say WHY without re-reading the file itself.
+    expect(listing.skippedReasons).toHaveLength(1);
+    expect(listing.skippedReasons[0]).toContain("run-empty.json");
+  });
+
+  test.each([
+    ["an unknown key", "run-odd", JSON.stringify({ runId: "run-odd", createdAt: "x", nope: 1 }), /nope/],
+    [
+      "an unparseable createdAt",
+      "run-bad-ts",
+      JSON.stringify({ runId: "run-bad-ts", createdAt: "not-a-timestamp" }),
+      /createdAt/,
+    ],
+  ])("a body rejected for %s is ONE skipped entry, and list() names the reason", (_label, id, body, reasonRe) => {
+    // Quarantined per FILE, not per sweep. The hard-error tests above pin that
+    // `list()` still refuses — safety is the default — but they cannot tell a
+    // refusal that named the file from one that took the whole listing down
+    // with it, because both throw. This is the half that distinguishes them.
+    store.create("run-good");
+    writeFileSync(join(dir, `${id}.json`), body, { mode: 0o600 });
+
+    const listing = store.listWithAnomalies();
+    expect(listing.records.map((r) => r.runId)).toEqual(["run-good"]);
+    expect(listing.skipped).toEqual([`${id}.json`]);
+    expect(listing.skippedReasons[0]).toMatch(reasonRe);
+
+    // `list()` still throws on a non-empty `skipped` — and its message now
+    // carries the reason, not just the filename. A caller handed
+    // "run-odd.json could not be read" has to go look; one handed "unknown key:
+    // nope" already knows which build wrote it.
+    let err: Error | undefined;
+    try {
+      store.list();
+    } catch (e) {
+      err = e as Error;
+    }
+    expect(err?.message).toContain(`${id}.json`);
+    expect(err?.message).toMatch(reasonRe);
+  });
+
+  test("an unreadable record is ONE skipped entry too, carrying its errno", () => {
+    if (process.getuid?.() === 0) return; // root reads mode-0000 files; nothing to prove
+    store.create("run-good");
+    store.create("run-locked");
+    chmodSync(join(dir, "run-locked.json"), 0o000);
+    try {
+      // A transient EIO/EACCES on ONE file must not be a fleet-wide outage
+      // either — same quarantine as a bad body.
+      const listing = store.listWithAnomalies();
+      expect(listing.records.map((r) => r.runId)).toEqual(["run-good"]);
+      expect(listing.skipped).toEqual(["run-locked.json"]);
+      expect(listing.skippedReasons[0]).toContain("EACCES");
+      expect(() => store.list()).toThrow(/run-locked\.json.*EACCES/s);
+    } finally {
+      chmodSync(join(dir, "run-locked.json"), 0o600);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An interrupted create's zero-byte tombstone must not make the id permanently
+// uncreatable — while a SIBLING create's zero-byte window stays untouchable
+// ---------------------------------------------------------------------------
+
+describe("create tombstone", () => {
+  /**
+   * The documented grace is 5s (CREATE_TOMBSTONE_GRACE_MS, not exported). Ten
+   * times it, so a modest retune does not turn this into a false failure — the
+   * boundary itself is pinned by the in-grace case below, which back-dates by
+   * nothing at all.
+   */
+  const WELL_PAST_GRACE_MS = 50_000;
+
+  test("a stale zero-byte record is cleared, so the run id is reusable", () => {
+    // The file is not `.tmp` and not `.probe-`, so `cleanStaleTemps` never
+    // sweeps it, and its stem is a perfectly valid run id, so nothing else
+    // refuses it either — the id became a permanent EEXIST tombstone only an
+    // operator could clear by hand. Removing it loses NOTHING: zero bytes carry
+    // no keyHash, no vmName, no createdAt, so there is no key nobody revokes
+    // and no box nobody reaps. That is what makes it compatible with INV-3.
+    const id = "run-tombstone";
+    const p = join(dir, `${id}.json`);
+    writeFileSync(p, "", { mode: 0o600 });
+    const past = new Date(Date.now() - WELL_PAST_GRACE_MS);
+    utimesSync(p, past, past);
+
+    const rec = store.create(id);
+    expect(rec.runId).toBe(id);
+    // A REAL record now sits at the path, not an empty file.
+    expect(statSync(p).size).toBeGreaterThan(0);
+    expect(store.get(id).createdAt).toBe(rec.createdAt);
+  });
+
+  test("a CONCURRENT create's zero-byte window is NOT cleared — size alone is not enough", () => {
+    // A sibling `create()` of the same id is zero-byte too, for the
+    // microseconds between its `openSync` and its write. Clearing on size alone
+    // would let two creates both believe they own the id, which is INV-3
+    // broken by the very guard meant to preserve it. The mtime grace is the
+    // separator: written to this instant ⇒ a live writer.
+    const id = "run-inflight";
+    const p = join(dir, `${id}.json`);
+    writeFileSync(p, "", { mode: 0o600 }); // fresh mtime, i.e. inside the grace
+
+    let err: NodeJS.ErrnoException | undefined;
+    try {
+      store.create(id);
+    } catch (e) {
+      err = e as NodeJS.ErrnoException;
+    }
+    // The ORIGINAL EEXIST, not a second less recognisable errno.
+    expect(err?.code).toBe("EEXIST");
+    // And the sibling's in-flight file is still exactly where it left it.
+    expect(existsSync(p)).toBe(true);
+    expect(statSync(p).size).toBe(0);
+  });
+
+  test("only ONE retry: a real record at the path is never overwritten", () => {
+    // The retry exists for the tombstone and nothing else. A second EEXIST
+    // means a real record (or another writer's fresh create) is there, and
+    // INV-3's no-overwrite is absolute for those.
+    const id = "run-real";
+    const first = store.create(id);
+    const before = snapshot(id);
+    expect(() => store.create(id)).toThrow();
+    expect(snapshot(id)).toEqual(before);
+    expect(store.get(id).createdAt).toBe(first.createdAt);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -596,6 +740,53 @@ describe("store construction (INV-5)", () => {
     const notADir = join(dir, "file");
     writeFileSync(notADir, "x");
     expect(() => new RunRecordStore({ dir: notADir })).toThrow();
+  });
+
+  test("create:false touches nothing — no chmod, no probe, no sweep", () => {
+    // The whole point of the read mode. `fleet teardown qds-nosuchrun --dir
+    // /srv/existing` exits 4 as promised while the probe silently
+    // re-permissioned an operator's directory to 0700 — the "mutates nothing"
+    // clause broken by the constructor, not by the verb.
+    const loose = join(dir, "readonly-probe");
+    mkdirSync(loose, { mode: 0o755 });
+    const orphanTemp = join(loose, `run-x.json.${DEAD_PID}.dead.tmp`);
+    writeFileSync(orphanTemp, "x");
+    const s = new RunRecordStore({ dir: loose, create: false });
+    expect(statSync(loose).mode & 0o777).toBe(0o755);
+    // The stale-temp sweep would have taken this (dead owner) — read mode does not.
+    expect(existsSync(orphanTemp)).toBe(true);
+    // …and the O_EXCL/link probe left nothing behind either.
+    expect(readdirSync(loose)).toEqual([`run-x.json.${DEAD_PID}.dead.tmp`]);
+    // Reading still works.
+    expect(s.listWithAnomalies().records).toEqual([]);
+  });
+
+  test("create:false on a missing directory fails cleanly, with the errno preserved", () => {
+    // The caller maps this to its own exit code off the TYPED code; what it
+    // must not get is a bare ENOENT stack out of the first readdirSync.
+    let err: NodeJS.ErrnoException | undefined;
+    try {
+      new RunRecordStore({ dir: join(dir, "nope"), create: false });
+    } catch (e) {
+      err = e as NodeJS.ErrnoException;
+    }
+    expect(err?.code).toBe("ENOENT");
+    expect(err?.message).toContain("nope");
+    // …and it did not create it on the way past.
+    expect(existsSync(join(dir, "nope"))).toBe(false);
+  });
+
+  test("create:false refuses to WRITE — the 0700/O_EXCL proof was skipped, not passed", () => {
+    // Otherwise `create: false` is a way to write records into a directory
+    // whose posture and platform support were never proven: INV-5 reached by
+    // omitting the proof rather than by failing it.
+    const s = new RunRecordStore({ dir, create: false });
+    expect(() => s.create("run-ro")).toThrow(/read-only/);
+    store.create("run-rw");
+    expect(() => s.set("run-rw", { vmName: "box" })).toThrow(/read-only/);
+    expect(() => s.close("run-rw")).toThrow(/read-only/);
+    // …and the record it refused to touch is untouched.
+    expect(s.get("run-rw").vmName).toBeUndefined();
   });
 });
 

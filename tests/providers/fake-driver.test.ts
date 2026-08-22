@@ -25,6 +25,7 @@ import {
   ProvisionRefusedError,
   provisionAdmittedRun,
   reapRuns,
+  SBX_OWNERSHIP_TAG,
 } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
@@ -33,13 +34,27 @@ import { setLogSink } from "../../src/swarmclaw/mcp/stdio-transport.ts";
 import { runDriverContract } from "./driver-contract.test.ts";
 // The block below drives FLEET-layer entry points (`provisionAdmittedRun`,
 // `reapRuns`) against this driver, so it shares the fleet suite's fixtures.
-import { rejection } from "../fleet/helpers.ts";
+import { rejection } from "../helpers.ts";
 
 const boxesDir = mkdtempSync(join(tmpdir(), "qds-fake-boxes-"));
+/**
+ * Saved and RESTORED, not just overwritten. `resolveDriver("fake")` reads this
+ * at construction, so an unrestored value follows the bun process into every
+ * later suite in the same run: they build FakeDrivers pointed at THIS file's
+ * box directory (deleted below, so nonexistent), and the failure surfaces as an
+ * unrelated test in an unrelated file, order-dependently.
+ */
+const prevBoxesDir = process.env.QDS_FAKE_BOXES_DIR;
 process.env.QDS_FAKE_BOXES_DIR = boxesDir;
 
 afterAll(() => {
   rmSync(boxesDir, { recursive: true, force: true });
+  if (prevBoxesDir === undefined) {
+    // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+    delete process.env.QDS_FAKE_BOXES_DIR;
+  } else {
+    process.env.QDS_FAKE_BOXES_DIR = prevBoxesDir;
+  }
 });
 
 describe("registry", () => {
@@ -132,15 +147,21 @@ describe("observability contract (driver side)", () => {
 });
 
 describe("FakeDriver accountability and boundaries", () => {
-  test("a box with no metadata is still listed, and reap can destroy it", async () => {
+  test("a box with no metadata is still listed, but reap will NOT destroy it", async () => {
     const boxes = mkdtempSync(join(tmpdir(), "qds-fake-orphan-"));
     const runs = mkdtempSync(join(tmpdir(), "qds-fake-orphan-runs-"));
     try {
       const d = new FakeDriver(boxes);
       mkdirSync(join(boxes, "half-built-box")); // crash between mkdir and writeMeta
+      // LISTED is the accountability guarantee: `fleet status` names it, so an
+      // operator can destroy it by hand. REAPING it is a different claim, and
+      // this box cannot support it — no metadata means no ownership tag, and
+      // reap destroys only what proves it is ours. Fail-safe by design: a
+      // stalled reap on a box we can still name is recoverable; destroying a
+      // stranger's box (the same shape, on an account-wide listing) is not.
       expect((await d.list()).map((v) => v.name)).toEqual(["half-built-box"]);
-      expect(await reapRuns(d, new RunRecordStore({ dir: runs }))).toEqual(["half-built-box"]);
-      expect(await d.list()).toEqual([]);
+      expect(await reapRuns(d, new RunRecordStore({ dir: runs }))).toEqual([]);
+      expect((await d.list()).map((v) => v.name)).toEqual(["half-built-box"]);
     } finally {
       rmSync(boxes, { recursive: true, force: true });
       rmSync(runs, { recursive: true, force: true });
@@ -642,35 +663,103 @@ describe("provisioning refusals and fail-safe reap", () => {
     }
   });
 
-  test("expose reporting no URL — and create reporting none either — refuses BEFORE setPublic", async () => {
+  test.each([
+    ["undefined", undefined as unknown as string],
+    ["the empty string", ""],
+    ["whitespace only", "   "],
+  ])(
+    "expose reporting %s — and create reporting none either — refuses BEFORE setPublic",
+    async (_shape, exposed) => {
+      const t = tmp();
+      try {
+        let madePublic = false;
+        const noUrl = Object.assign(Object.create(t.driver) as FakeDriver, {
+          // Neither call establishes an address. The record would then carry a
+          // port and NO address (the store skips an undefined value and has no
+          // way to unset one later), while setPublic still ran — leaving a
+          // publicly reachable box whose address only the provider knows.
+          //
+          // Parameterised over all three shapes because only the FIRST is
+          // caught by a `=== undefined` guard. `""` and `"   "` are what a real
+          // driver returns when its provider answers with an empty field, and
+          // both sailed straight past that guard into `setPublic` — the exact
+          // outcome this refusal exists to prevent, reached by a shape the one
+          // fixture never produced. `address()` normalising on `trim()` is what
+          // the three of them pin together.
+          create: async (name: string): Promise<ProviderVm> => ({ name, status: "running" }),
+          expose: async (): Promise<string> => exposed,
+          setPublic: async (): Promise<void> => {
+            madePublic = true;
+          },
+        });
+        const err = await rejection(
+          provisionAdmittedRun(noUrl, t.store, { runId: "no-url-run", port: 8080 }),
+        );
+        expect(err).toBeInstanceOf(ProvisionRefusedError);
+        expect((err as ProvisionRefusedError).code).toBe("expose-no-url");
+        expect(madePublic).toBe(false);
+        // Exposed but NOT public, with an OPEN record naming the box — the state
+        // teardown can actually reach.
+        const rec = t.store.get("no-url-run");
+        expect(rec.closedAt).toBeUndefined();
+        expect(rec.vmName).toBe("no-url-run");
+        expect(rec.httpsUrl).toBeUndefined();
+      } finally {
+        clean(t);
+      }
+    },
+  );
+
+  test("reap destroys only what proves BOTH name grammar and ownership tag", async () => {
+    // The arm the shared contract suite cannot reach on this driver. Step 7
+    // there asserts the RULE across both drivers, but each one only ever
+    // exercises ONE branch of it: FakeDriver reports its tag so the if-branch
+    // always wins, and exedev's `ls --json` carries no tag field so the else
+    // always does. The untagged-but-grammatical box — created before the tag
+    // existed, or a fake box that crashed between `mkdir` and its metadata
+    // write — is reachable only here.
     const t = tmp();
     try {
-      let madePublic = false;
-      const noUrl = Object.assign(Object.create(t.driver) as FakeDriver, {
-        // Neither call establishes an address. The record would then carry a
-        // port and NO address (the store skips an undefined value and has no
-        // way to unset one later), while setPublic still ran — leaving a
-        // publicly reachable box whose address only the provider knows.
-        create: async (name: string): Promise<ProviderVm> => ({ name, status: "running" }),
-        expose: async (): Promise<string> => undefined as unknown as string,
-        setPublic: async (): Promise<void> => {
-          madePublic = true;
-        },
-      });
-      const err = await rejection(
-        provisionAdmittedRun(noUrl, t.store, { runId: "no-url-run", port: 8080 }),
-      );
-      expect(err).toBeInstanceOf(ProvisionRefusedError);
-      expect((err as ProvisionRefusedError).code).toBe("expose-no-url");
-      expect(madePublic).toBe(false);
-      // Exposed but NOT public, with an OPEN record naming the box — the state
-      // teardown can actually reach.
-      const rec = t.store.get("no-url-run");
-      expect(rec.closedAt).toBeUndefined();
-      expect(rec.vmName).toBe("no-url-run");
-      expect(rec.httpsUrl).toBeUndefined();
+      // RUN_ID_SHAPE, not just a legal box name: the reaper's name half is
+      // `<slug>-<YYYYMMDD>-<6 hex>`, so a plainly-named box fails it and the
+      // tag half would never be reached.
+      const tagged = "reap-20260822-a1b2c3";
+      const untagged = "reap-20260822-d4e5f6";
+      await t.driver.create(tagged, SBX_OWNERSHIP_TAG);
+      await t.driver.create(untagged); // grammatical name, no tag
+
+      const destroyed = await reapRuns(t.driver, t.store);
+      expect(destroyed).toEqual([tagged]);
+      // Left LISTED, not silently spared: a stalled reap on a box we can still
+      // name is recoverable by an operator (`fleet status` shows it, teardown
+      // reaches it); a destroyed stranger's box is not. Auto-reaping on the
+      // name alone is the unrecoverable direction — a stranger can name a box
+      // anything.
+      expect((await t.driver.list()).map((v) => v.name)).toEqual([untagged]);
     } finally {
       clean(t);
+    }
+  });
+
+  test("the boxes root is created by create(), not by the constructor (AC1)", async () => {
+    // "Validation completes before the first side effect": `resolveDriver`
+    // runs during dispatch setup, BEFORE the brief is validated, so a mkdir in
+    // the constructor left a directory behind on every brief that was about to
+    // exit 2. The first side effect belongs to the first box.
+    const root = join(mkdtempSync(join(tmpdir(), "qds-lazy-root-")), "boxes");
+    try {
+      const driver = new FakeDriver(root);
+      expect(existsSync(root)).toBe(false);
+      // …and reading is not a side effect either: no root ⇒ no box was ever
+      // created ⇒ an empty population, not an error and not a mkdir.
+      expect(await driver.list()).toEqual([]);
+      expect(existsSync(root)).toBe(false);
+
+      await driver.create("lazy-box");
+      expect(existsSync(root)).toBe(true);
+      expect((await driver.list()).map((v) => v.name)).toEqual(["lazy-box"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

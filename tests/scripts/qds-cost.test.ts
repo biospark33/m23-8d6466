@@ -484,4 +484,110 @@ describe("qds-cost CLI", () => {
       expect(res.status).toBe(0);
     });
   });
+  // ─── the ledger the money was WRITTEN to is the one this CLI READS ─────────
+  //
+  // Every case above pins `$QDS_COST_LEDGER_FILE`, which is the one tier that
+  // was never in doubt. The reporting CLI used to build its own path, so
+  // `--dir` / `$QDS_RUNS_DIR` moved the records and the money without moving
+  // what `qds cost` looked at: the run's spend landed in one file and the
+  // report read another, and the two disagreements are opposite and both
+  // silent — "no cost ledger at …" for money that exists, or a confident zero.
+  describe("ledger resolution through costLedgerOpts", () => {
+    beforeEach(() => {
+      // These cases are ABOUT the derived path, so the env tier that would
+      // short-circuit it has to be out of the way.
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      delete process.env.QDS_COST_LEDGER_FILE;
+    });
+
+    /** Spend on qds/demo#42, written straight into `ledgerPath`. */
+    function seedSpend(ledgerPath: string): void {
+      const ledger = new CostLedger({
+        path: ledgerPath,
+        config: { defaultCapMicroUsd: 5_000_000 },
+        readRunRecord: () => ({ keyHash: "hash-abc123", limitMicroUsd: 50_000_000, createdAt: "2026-08-20T10:00:00Z" }),
+      });
+      try {
+        ledger.ingestCostEvent(
+          {
+            agentId: "lead-agent",
+            model: "cheap/model",
+            durationMs: 0,
+            inputTokens: 10,
+            outputTokens: 20,
+            turnCount: 1,
+            costUsd: 0.25,
+            timestamp: "2026-08-20T10:05:00Z",
+          } as CostEvent,
+          { runId: "resolve-run", repoSlug: "qds/demo", issueId: "42", requestId: "req-r", role: "lead", invocationSeq: 0 },
+        );
+      } finally {
+        ledger.close();
+      }
+    }
+
+    test("a non-default --dir reads the ledger INSIDE that records directory", () => {
+      // Not a sibling of the records dir: a sibling belongs to every store
+      // under the same parent, so `--dir /srv/runs-prod` and `--dir
+      // /srv/runs-staging` settled into ONE `/srv/cost-ledger.db`.
+      const runs = join(dir, "runs-prod");
+      mkdirSync(runs, { recursive: true, mode: 0o700 });
+      seedSpend(join(runs, "cost-ledger.db"));
+
+      const res = spawnSync(CLI, ["qds/demo#42", "--dir", runs], { env: process.env });
+      expect(res.status).toBe(0);
+      expect(res.stdout.toString()).toContain("TOTAL: 250,000 µ$");
+    });
+
+    test("a sibling records directory is a DIFFERENT ledger, not the same money twice", () => {
+      const prod = join(dir, "runs-prod");
+      const staging = join(dir, "runs-staging");
+      for (const d of [prod, staging]) mkdirSync(d, { recursive: true, mode: 0o700 });
+      seedSpend(join(prod, "cost-ledger.db"));
+      // staging has a ledger, but no spend on this issue.
+      new CostLedger({ path: join(staging, "cost-ledger.db"), config: { defaultCapMicroUsd: 5_000_000 } }).close();
+
+      const res = spawnSync(CLI, ["qds/demo#42", "--dir", staging], { env: process.env });
+      expect(res.status).toBe(0);
+      expect(res.stdout.toString()).toContain("no ledger rows for this issue");
+    });
+
+    test("$QDS_RUNS_DIR moves the ledger exactly as --dir does", () => {
+      // Branching on whether the FLAG was typed left the env tier (and an
+      // embedder-injected store) falling back to the cwd-relative default
+      // while the records sat elsewhere.
+      const runs = join(dir, "runs-env");
+      mkdirSync(runs, { recursive: true, mode: 0o700 });
+      seedSpend(join(runs, "cost-ledger.db"));
+
+      const res = spawnSync(CLI, ["qds/demo#42"], { env: { ...process.env, QDS_RUNS_DIR: runs } });
+      expect(res.status).toBe(0);
+      expect(res.stdout.toString()).toContain("TOTAL: 250,000 µ$");
+    });
+
+    test("the resolution is cwd-INDEPENDENT — two cwds, one ledger", () => {
+      // The cwd split this helper exists to eliminate. The DEFAULT layout is
+      // the sharp case: the "is this `.sandbox/runs`?" test is on the resolved
+      // dir's trailing SEGMENTS, because `resolve(DEFAULT_RUNS_DIR)` asks about
+      // the CALLER's cwd — so the same records directory matched from one cwd
+      // and not from another, and one run's money went into two files.
+      const home = join(dir, "home");
+      const runs = join(home, ".sandbox", "runs");
+      mkdirSync(runs, { recursive: true, mode: 0o700 });
+      // Default layout ⇒ the ledger is the SIBLING `.sandbox/cost-ledger.db`,
+      // which is where a lot of existing state already is.
+      seedSpend(join(home, ".sandbox", "cost-ledger.db"));
+
+      const elsewhere = mkdtempSync(join(tmpdir(), "qds-cost-cwd-"));
+      try {
+        for (const cwd of [home, elsewhere]) {
+          const res = spawnSync(CLI, ["qds/demo#42", "--dir", runs], { env: process.env, cwd });
+          expect(res.status).toBe(0);
+          expect(res.stdout.toString()).toContain("TOTAL: 250,000 µ$");
+        }
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
+    });
+  });
 });

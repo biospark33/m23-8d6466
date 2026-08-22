@@ -23,18 +23,22 @@
  * recomputes a box-naming formula the factory does not use.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listVerbs, renderHelp, type VerbEntry, type VerbFlag } from "../../src/fleet/verbs.ts";
+// `FleetError` from its ONE owner: `status.ts` no longer re-exports it, because
+// the barrel star-exports both modules and a duplicate star export breaks the
+// day `status.ts` declares its own class of that name.
+import { FleetError } from "../../src/fleet/dispatch.ts";
 import {
   FLEET_ROW_ID,
-  FleetError,
   statusAll,
   statusRun,
   type StatusDeps,
   type StatusRow,
 } from "../../src/fleet/status.ts";
+import { CostLedger } from "../../src/providers/index.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { provisionAdmittedRun, SBX_OWNERSHIP_TAG, type ProviderVm } from "../../src/providers/driver.ts";
 import {
@@ -45,28 +49,66 @@ import {
   type RunRecordPatch,
 } from "../../src/providers/run-record.ts";
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
-import { rejection } from "./helpers.ts";
+import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
+import { rejection } from "../helpers.ts";
 
-/** Await a refusal and hand back the typed error — never a bare "something threw". */
+/**
+ * Await a refusal and hand back the TYPED error — never a bare "something threw".
+ *
+ * A thin narrowing layer over `rejection` rather than a second implementation of
+ * it: the two used to differ only in that this one wrapped a non-Error rejection
+ * into an `Error` instead of failing, which made `toBeInstanceOf(FleetError)`
+ * the only thing standing between a `throw "…"` regression and a green suite.
+ * `rejection` now refuses a non-Error itself, so everything above the type
+ * narrowing belongs there and this keeps only the FleetError columns.
+ */
 async function refusal(
   work: Promise<unknown>,
   exitCode: FleetError["exitCode"],
   code: string,
 ): Promise<FleetError> {
-  let caught: unknown;
-  let settled = false;
+  const err = await rejection(work);
+  expect(err).toBeInstanceOf(FleetError);
+  const typed = err as FleetError;
+  expect(typed.exitCode).toBe(exitCode);
+  expect(typed.code).toBe(code);
+  return typed;
+}
+
+/**
+ * The host token `run-lock.ts` writes into a lock body, READ OFF A REAL LOCK
+ * rather than reimplemented here — the same probe `tests/fleet/cli.test.ts`
+ * makes, and for the same reason.
+ *
+ * `lockHost()` is module-private and platform-dependent (`<hostname>` on macOS,
+ * `<hostname>/<pid-ns inode>` on Linux). `refuse` classifies a body whose host
+ * it cannot match as FOREIGN, and a foreign lock is deliberately never probed
+ * for liveness and never marked stale — so a hand-written token that drifts
+ * from the source's collapses the held and stale branches this file
+ * distinguishes into one "liveness unknown from here" arm that says nothing.
+ */
+const LOCK_HOST = ((): string => {
+  const probeDir = mkdtempSync(join(tmpdir(), "qds-verb-lockhost-"));
+  const lock = acquireRunLock(probeDir, "qds-19700101-000000");
+  const host = (readFileSync(lock, "utf8").trim().split(/\s+/)[1] ?? "") as string;
+  releaseRunLock(lock);
+  rmSync(probeDir, { recursive: true, force: true });
+  return host;
+})();
+
+/**
+ * `run-lock.ts`'s own liveness probe (its `isAlive`, which is module-private):
+ * signal 0 tests existence, and ESRCH is the ONLY proof of death — EPERM means
+ * alive but not ours, which is the answer for pid 1 on every host this suite
+ * runs on as a non-root user.
+ */
+function isAlive(pid: number): boolean {
   try {
-    await work;
-    settled = true;
+    process.kill(pid, 0);
+    return true;
   } catch (e) {
-    caught = e;
+    return (e as NodeJS.ErrnoException).code !== "ESRCH";
   }
-  expect(settled).toBe(false);
-  expect(caught).toBeInstanceOf(FleetError);
-  const err = caught as FleetError;
-  expect(err.exitCode).toBe(exitCode);
-  expect(err.code).toBe(code);
-  return err;
 }
 
 /**
@@ -90,6 +132,10 @@ function retagged(driver: FakeDriver, tag: string | null): StatusDeps["driver"] 
  * A numeric RANGE was the wrong shape for this: `<= 5` failed the moment 6 was
  * declared, and `<= 6` would pass an entry declaring 3 for `harvest` — a code
  * that verb has no path to. Membership in the documented set is the claim.
+ *
+ * The array is BOUND to the CLI below rather than hand-maintained here: as a
+ * literal it is every code the CLI can return, so `toContain` could only ever
+ * fail for 7+ — a mutation nobody makes.
  */
 const DOCUMENTED_EXIT_CODES = [0, 1, 2, 3, 4, 5, 6];
 
@@ -128,6 +174,26 @@ function expectFlagLines(help: string, entry: VerbEntry): void {
 }
 
 describe("verbs.ts (registry)", () => {
+  test("DOCUMENTED_EXIT_CODES is the CLI's table, not a copy of it that can drift", () => {
+    // Everything below asserts `DOCUMENTED_EXIT_CODES` CONTAINS each declared
+    // code, and the array is a hand-written copy of the whole table — so the
+    // membership check only ever failed for 7 and up. It is worth having only
+    // while it is bound to the CLI, and `report()` is the one place a throw
+    // becomes a status: it clamps to a literal range that IS the table's extent
+    // (anything outside is documented there as a bug in the thrower).
+    const cli = readFileSync(join(import.meta.dir, "..", "..", "scripts", "fleet.ts"), "utf8");
+    const clamp = /e\.exitCode >= (\d+) && e\.exitCode <= (\d+)/.exec(cli);
+    expect(clamp).not.toBeNull();
+    const [, floor, ceiling] = clamp as RegExpExecArray;
+    // The clamp's floor is 1, not 0: `report` is only ever reached from a catch,
+    // so 0 is the one value it must refuse rather than the bottom of the table.
+    expect(Number(floor)).toBe(1);
+    expect(DOCUMENTED_EXIT_CODES).toEqual([
+      0,
+      ...Array.from({ length: Number(ceiling) }, (_, i) => i + 1),
+    ]);
+  });
+
   test("listVerbs returns exactly 4 entries", () => {
     const verbs: VerbEntry[] = listVerbs();
     expect(verbs).toHaveLength(4);
@@ -211,7 +277,13 @@ describe("verbs.ts (registry)", () => {
 
   const EXPECTED_EXIT_CODES: Record<string, number[]> = {
     // 3 = setup gate, 5 = refused before provisioning; dispatch alone can reach them.
-    dispatch: [0, 1, 2, 3, 5],
+    // 6 = the box is LIVE and its ack could not be written to stdout
+    // (`fleet dispatch … | head -0`). It was missing from the registry while
+    // `scripts/fleet.ts` returned it, which is the one omission that matters
+    // most: 6 is the code whose remediation is "`fleet teardown <id>` now or it
+    // keeps billing", and a DF3.5 skill generated from an incomplete table drops
+    // it into a default branch. See the ack-unwritable case in cli.test.ts.
+    dispatch: [0, 1, 2, 3, 5, 6],
     // 2 is real for all three: a malformed id, an extra positional and a flag
     // the verb does not take are all refused as usage.
     status: [0, 1, 2, 4],
@@ -406,36 +478,58 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
   };
 
   /**
-   * A foreign, LIVE holder's claim at `<store.dir>/<runId>.lock`, in the body
-   * layout `acquireRunLock` writes (`<pid> <host> <ISO> <nonce>`) — this host,
-   * so `refuse()` probes the pid rather than calling its liveness unknowable,
-   * and a pid that is ALIVE but NOT ours, so it reads as held rather than stale.
-   * That is the acquire refusal, and the CLI owes exit 5 for it: the throw sits
-   * between the record probe and any mutation, so nothing was touched, and exit
-   * 1 would stamp it `transient` and tell automation to retry a lock that (in
-   * the stale case) nothing will ever clear.
+   * A claim at `<store.dir>/<runId>.lock` in the body layout `acquireRunLock`
+   * writes (`<pid> <host> <ISO> <nonce>`), under THIS host's token so `refuse()`
+   * probes the pid rather than calling its liveness unknowable.
    *
-   * NOT `process.pid`: the run lock is not re-entrant, so `claimedByUs` refuses
-   * a lock carrying our own pid+host as `run-lock-reentrant` — a programming
-   * error — before `refuse` ever classifies it. That is a different verdict from
-   * the contention this probe is about, so the body has to name a real OTHER
-   * process. The parent is the one every test run is guaranteed to have.
+   * Either way the CLI owes exit 5: the throw sits between the record probe and
+   * any mutation, so nothing was touched, and exit 1 would stamp it `transient`
+   * and tell automation to retry a lock that — in the stale case — nothing will
+   * ever clear. But 5 and the `run-locked` message are IDENTICAL on the two
+   * branches, so a probe asserting only those cannot tell a held lock from a
+   * dead one, and an `isAlive` gutted to a constant passes it while sending an
+   * operator to `rm` the lock of a teardown that is still destroying the run.
+   * The REMEDIATION is the only field that differs, so each probe pins its own.
    *
    * Written by hand rather than by calling `acquireRunLock`: this process would
    * then hold it, and the release inside the verb's `finally` would be a real
    * release of a lock the test still owns.
    */
+  const writeRunLock = (runId: string, pid: number, ageMs: number): void => {
+    writeFileSync(
+      join(store.dir, `${runId}.lock`),
+      `${pid} ${LOCK_HOST} ${new Date(Date.now() - ageMs).toISOString()} beefcafe\n`,
+    );
+  };
+
+  /**
+   * A pid that is ALIVE and is NOT ours. The run lock is not re-entrant, so a
+   * body carrying our own pid+host is refused as `run-lock-reentrant` — a
+   * programming error — before `refuse` ever classifies it as contention. The
+   * parent is the one other process every test run is guaranteed to have; pid 1
+   * is the fallback, and `isAlive` reads its EPERM as alive.
+   */
   const FOREIGN_LIVE_PID = process.ppid > 0 && process.ppid !== process.pid ? process.ppid : 1;
 
   const holdRunLock = (runId: string): void => {
-    // A host with no usable foreign pid is one this probe cannot run on — say so
-    // rather than silently testing re-entrancy instead of contention.
-    expect(FOREIGN_LIVE_PID).not.toBe(process.pid);
-    const host = hostname().replace(/\s+/g, "_") || "unknown-host";
-    writeFileSync(
-      join(store.dir, `${runId}.lock`),
-      `${FOREIGN_LIVE_PID} ${host} ${new Date().toISOString()} beefcafe\n`,
-    );
+    // LIVENESS is the claim, and it is the one that can actually fail: the
+    // ternary above already excludes `process.pid`, so `expect(FOREIGN_LIVE_PID)
+    // .not.toBe(process.pid)` could never fire. A parent that exited between
+    // this process starting and this line makes the probe the STALE case in
+    // disguise, which is the sibling probe's subject, not this one's.
+    expect(isAlive(FOREIGN_LIVE_PID)).toBe(true);
+    writeRunLock(runId, FOREIGN_LIVE_PID, 4_000);
+  };
+
+  /**
+   * The other branch: a pid above every platform's pid_max, so `kill(pid, 0)`
+   * answers ESRCH and `refuse` marks the lock stale. Nothing will ever release
+   * it, which is exactly why the refusal must not be exit 1 `transient`.
+   */
+  const DEAD_PID = 9_999_999;
+  const holdStaleRunLock = (runId: string): void => {
+    expect(isAlive(DEAD_PID)).toBe(false);
+    writeRunLock(runId, DEAD_PID, 90_000);
   };
 
   interface Probe {
@@ -448,10 +542,15 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     code: number;
     /** Deps for it. Default: the working driver + store, brief = invalid JSON. */
     deps?: () => Partial<FleetDeps>;
-    /** Must appear on stderr — and, whatever it is, never on stdout. */
-    stderr?: string;
+    /**
+     * Must appear on stderr — and, whatever it is, never on stdout. A LIST where
+     * one substring cannot separate two refusals that share a code and a
+     * message: the live and stale lock branches differ only in their
+     * remediation, and the teardown waiver rides alongside `torn down:`.
+     */
+    stderr?: string | string[];
     /** Must appear on stdout (the verb's own output). */
-    stdout?: string;
+    stdout?: string | string[];
     /** A run to provision first, so the probe has something real to act on. */
     provision?: string;
     /** Filesystem set-up run after the provisioning and before the invocation. */
@@ -470,7 +569,21 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       { argv: ["dispatch"], code: 2, deps: () => ({ store }), stderr: "dispatch requires --driver" },
     ],
     status: [
-      { argv: ["status"], code: 0 }, // empty fleet is a state, not an error
+      // Empty fleet is a state, not an error (AC4) — and the emptiness is
+      // ASSERTED rather than assumed. Every probe in this file shares ONE store
+      // and they run in `listVerbs()` order, so "no runs yet" is a fact about
+      // what happens to run before this line (dispatch's probes, all refusals)
+      // and nothing pinned it. `before` makes the dependency fail loudly.
+      { argv: ["status"], code: 0, before: () => void expect(store.list()).toEqual([]) },
+      // …and a status that PRINTS. `{code: 0}` over an EMPTY fleet is satisfied
+      // by a status whose rows never reach the emitter at all — the row shape,
+      // the join and the JSON line could all be gone and the code is still 0.
+      {
+        argv: ["status"],
+        code: 0,
+        provision: "status-live",
+        stdout: ['"runId":"status-live"', '"state":"live"'],
+      },
       { argv: ["status", "no-such-run"], code: 4, stderr: "no-such-run" },
       { argv: ["status", "INVALID_ID"], code: 2, stderr: "INVALID_ID" },
       { argv: ["status", "one", "two"], code: 2, stderr: "at most one" },
@@ -506,6 +619,22 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         stderr: "record-read-failed",
       },
       { argv: ["harvest", "harvest-ok"], code: 0, provision: "harvest-ok", stdout: "harvested: " },
+      // The SAME id again: harvest is non-destructive, so a second call over a
+      // run it already answered for must answer identically rather than refuse.
+      // Every other probe here uses a fresh id invoked exactly once, which is
+      // the shape no operator's fleet is ever in.
+      { argv: ["harvest", "harvest-ok"], code: 0, stdout: "harvested: " },
+      // A run whose record is CLOSED — the commonest state a `fleet harvest`
+      // typed after the teardown finds. `harvestRun` keys on `vmName`/`commitSha`
+      // and never reads `closedAt`, so nothing pinned that a closed run is a
+      // clean exit 0 rather than a throw the CLI reports as a retryable 1.
+      {
+        argv: ["harvest", "harvest-closed"],
+        code: 0,
+        provision: "harvest-closed",
+        before: () => void store.close("harvest-closed"),
+        stdout: "harvested: ",
+      },
       {
         argv: ["harvest", "harvest-wedged"],
         code: 6,
@@ -521,7 +650,18 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         code: 5,
         provision: "harvest-locked",
         before: () => holdRunLock("harvest-locked"),
-        stderr: "run-locked",
+        // The LIVE remediation, not just the code and the message: those two are
+        // byte-identical on the stale branch below.
+        stderr: ["run-locked", "wait for that invocation to finish"],
+      },
+      {
+        argv: ["harvest", "harvest-stale"],
+        code: 5,
+        provision: "harvest-stale",
+        before: () => holdStaleRunLock("harvest-stale"),
+        // 5 and not 1 is at its sharpest here: the holder is GONE, so no retry
+        // can ever clear this lock. The remediation is the `rm` that can.
+        stderr: ["run-locked", "no live process holds it"],
       },
     ],
     teardown: [
@@ -536,7 +676,54 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         deps: () => ({ driver, store: unreadableStore() }),
         stderr: "record-read-failed",
       },
-      { argv: ["teardown", "teardown-ok"], code: 0, provision: "teardown-ok", stdout: "torn down: " },
+      // 6, not 0: `provisionAdmittedRun` leaves the record `dispatch` leaves
+      // between provisioning the box and persisting the keyHash — a box, an
+      // OPEN run and no pointer to a key that may have been minted for it. The
+      // box teardown succeeds and the key cannot be revoked, and `fleet
+      // teardown … || alert` reading exit 0 as "nothing left running" is the
+      // one thing that is not true. Same call the status branch makes twice
+      // (`listUnavailable` → 1, `skippedRecords` → 2).
+      {
+        argv: ["teardown", "teardown-ok"],
+        code: 6,
+        provision: "teardown-ok",
+        stdout: "torn down: ",
+        stderr: "key-unattributable",
+      },
+      // …and the SAME id again, which is how teardown still reaches 0: the
+      // record is closed now, so first-close-wins skips every step and there is
+      // no unrevokable key to report. Deliberately positioned after the probe
+      // above — it is that probe's run, re-torn-down. This is also the only
+      // IDEMPOTENCE probe in the file: every other one uses a fresh id with a
+      // live fully-provisioned box, invoked exactly once.
+      { argv: ["teardown", "teardown-ok"], code: 0, stdout: "torn down: " },
+      // A record whose box the provider already reaped — by far the commonest
+      // real teardown, and a shape no probe here produced: the destroy step has
+      // nothing to destroy, and the run must still close rather than abort on a
+      // box that is legitimately gone.
+      {
+        argv: ["teardown", "teardown-boxless"],
+        code: 6,
+        provision: "teardown-boxless",
+        before: () => void driver.destroy("teardown-boxless"),
+        stdout: "torn down: ",
+        stderr: "key-unattributable",
+      },
+      // `--no-harvest` doing something, rather than merely tokenizing. The flag
+      // WAIVES artifact capture, and its only other coverage in this file is the
+      // grammar sweep — so deleting `const noHarvest = bools.has("--no-harvest")`
+      // in scripts/fleet.ts (teardown then always harvests and never emits the
+      // waiver) left the whole file green.
+      {
+        argv: ["teardown", "--no-harvest", "teardown-waived"],
+        code: 6,
+        provision: "teardown-waived",
+        // The waiver AND the completion, because the waiver is printed only
+        // after the teardown actually ran (printed first it claims a waiver for
+        // a teardown that may never have happened).
+        stdout: ["teardown.harvest_waived teardown-waived", "torn down: teardown-waived"],
+        stderr: "key-unattributable",
+      },
       {
         argv: ["teardown", "teardown-wedged"],
         code: 6,
@@ -550,7 +737,16 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         code: 5,
         provision: "teardown-locked",
         before: () => holdRunLock("teardown-locked"),
-        stderr: "run-locked",
+        // See the harvest pair: code + message cannot tell the two lock branches
+        // apart, and the wrong one tells an operator to `rm` a live teardown's lock.
+        stderr: ["run-locked", "wait for that invocation to finish"],
+      },
+      {
+        argv: ["teardown", "teardown-stale"],
+        code: 5,
+        provision: "teardown-stale",
+        before: () => holdStaleRunLock("teardown-stale"),
+        stderr: ["run-locked", "no live process holds it"],
       },
     ],
   };
@@ -586,6 +782,11 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         why: "needs a budget refusal before provisioning — cli.test.ts",
         coveredBy: "an over-budget issue → exit 5 refused BEFORE provisioning (AC7)",
       },
+      {
+        code: 6,
+        why: "needs a SUCCESSFUL dispatch and a stdout sink that throws — cli.test.ts",
+        coveredBy: "dispatch whose ack cannot be written exits 6 with the box LIVE and the run id named",
+      },
     ],
     status: [],
     harvest: [],
@@ -599,20 +800,38 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
    * case left this file green with `dispatch` advertising an unreachable code to
    * DF3.5's generated skill.
    *
-   * The binding this file can make from the outside is the test TITLE: read the
-   * sibling suite and require the named case to still be in it. Not a run of that
-   * test (bun owns that) and not proof it asserts the code — but a deletion or a
-   * rename now turns this red, which is the failure mode that shipped.
+   * The binding this file can make from the outside is the sibling suite's
+   * SOURCE: find the named case and require its BODY to assert the code being
+   * excused. Not a run of that test (bun owns that) — but a deletion, a rename,
+   * or a case that keeps its title while quietly dropping the assertion now
+   * turns this red. Title-existence alone did not: `cli.includes('test("…"')`
+   * was satisfied by a test that had stopped asserting anything about the code
+   * it is here to owe, so both files could be green with `dispatch` advertising
+   * an unreachable exit to DF3.5's generated skill.
    */
-  test("every excused exit code names a cli.test.ts case that still exists", () => {
+  test("every excused exit code names a cli.test.ts case that still ASSERTS it", () => {
     const cli = readFileSync(join(import.meta.dir, "cli.test.ts"), "utf8");
     const missing: string[] = [];
     for (const [verb, excuses] of Object.entries(ONLY_REACHABLE_ELSEWHERE)) {
       for (const { code, coveredBy } of excuses) {
         // The title as `test(...)` writes it, not a loose substring: a comment
         // mentioning the name must not stand in for the case itself.
-        if (!cli.includes(`test(${JSON.stringify(coveredBy)}`)) {
+        const head = `test(${JSON.stringify(coveredBy)}`;
+        const at = cli.indexOf(head);
+        if (at < 0) {
           missing.push(`${verb} exit ${code}: no test named ${JSON.stringify(coveredBy)} in cli.test.ts`);
+          continue;
+        }
+        // The body, bounded by the next top-level `test(` in that file (they are
+        // all indented two spaces inside one describe). Scanning the whole file
+        // instead would let ANY case's `toBe(0)` excuse every other one.
+        const rest = cli.slice(at + head.length);
+        const end = rest.indexOf('\n  test("');
+        const body = end < 0 ? rest : rest.slice(0, end);
+        // The exit code, asserted. `toBe(<code>)` is how every exit assertion in
+        // that file is spelled; `code: <code>` is the object form the loops use.
+        if (!new RegExp(`toBe\\(${code}\\)|\\bcode: ${code}\\b`).test(body)) {
+          missing.push(`${verb} exit ${code}: ${JSON.stringify(coveredBy)} no longer asserts exit ${code}`);
         }
       }
     }
@@ -625,6 +844,14 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
   });
 
   test("the declared exitCodes and the codes the CLI really returns are the SAME set", async () => {
+    // The ~40 probes below share ONE store and ONE driver, in this order. That
+    // is deliberate (they build on each other: teardown's exit-0 probe re-tears
+    // down the run its exit-6 sibling closed), but it means what each probe sees
+    // depends on the registry's iteration order — and the empty-fleet probe was
+    // over an empty fleet only because dispatch's probes happen to precede it.
+    // Pin the order so a registry reshuffle fails HERE rather than silently
+    // changing what half the table is asserting about.
+    expect(listVerbs().map((v) => v.verb)).toEqual(["dispatch", "status", "harvest", "teardown"]);
     for (const entry of listVerbs()) {
       const probes = PROBES[entry.verb]!;
       const observed: number[] = [];
@@ -636,13 +863,15 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         const deps = probe.deps?.() ?? { driver, store, readBrief: async () => "{not json" };
         const res = await invoke(probe.argv, deps);
         observed.push(res.code);
-        if (probe.stderr !== undefined) {
+        for (const want of [probe.stderr ?? []].flat()) {
           // Named on stderr, and NOT on stdout: a caller parsing `fleet status`
           // output must never have to skip an error envelope in it.
-          expect(res.err).toContain(probe.stderr);
-          expect(res.out).not.toContain(probe.stderr);
+          expect({ argv: probe.argv, want, err: res.err }).toMatchObject({ err: expect.stringContaining(want) });
+          expect(res.out).not.toContain(want);
         }
-        if (probe.stdout !== undefined) expect(res.out).toContain(probe.stdout);
+        for (const want of [probe.stdout ?? []].flat()) {
+          expect({ argv: probe.argv, want, out: res.out }).toMatchObject({ out: expect.stringContaining(want) });
+        }
         // Every non-zero exit says something. Silence is the failure mode an
         // exit-code-only assertion cannot see.
         if (res.code !== 0) expect(res.err.length).toBeGreaterThan(0);
@@ -664,6 +893,51 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       // now reaches must be struck from it, not left as a standing exemption.
       expect([...excused].filter((c) => seen.has(c))).toEqual([]);
     }
+  });
+
+  test("exit 6's OTHER documented route: the verb succeeded and the LEDGER would not close", async () => {
+    // teardown/harvest declare 6 for two failures — "the cost ledger would not
+    // close, or the run lock would not release" — and every probe above reaches
+    // it through `lockWedgingStore`. So the ledger arm of the `finally` was
+    // declared, documented and never run: deleting its `cleanupFailed()` left a
+    // teardown whose spend may never have been durably committed reporting a
+    // clean exit 0, which is the same lie the lock arm exits 6 to avoid.
+    //
+    // Through the CLI's OWN ledger, because teardown does not take
+    // `deps.ledgerFactory` — it constructs a `CostLedger` beside the records
+    // itself. The prototype is patched for exactly this call and restored in a
+    // `finally`; the real `close()` still runs first, so nothing is leaked.
+    const runId = "ledger-wedged";
+    await provisionAdmittedRun(driver, store, { runId });
+    // CLOSED first, so `keyUnattributable` cannot be what produces the 6: with a
+    // closed record teardownSandbox short-circuits (first-close-wins) and the
+    // verb's own code is 0, which makes the cleanup the sole cause.
+    store.close(runId);
+
+    const realClose = CostLedger.prototype.close;
+    CostLedger.prototype.close = function wedged(this: CostLedger): void {
+      realClose.call(this);
+      throw new Error("ledger handle wedged");
+    };
+    let res: { code: number; out: string; err: string };
+    try {
+      res = await invoke(["teardown", runId], { driver, store });
+    } finally {
+      CostLedger.prototype.close = realClose;
+    }
+
+    expect(res.code).toBe(6);
+    // The work landed and says so on stdout; the wedge is the diagnostic. Either
+    // one alone would be exit 0.
+    expect(res.out).toContain(`torn down: ${runId}`);
+    expect(res.err).toContain("ledger-close-failed");
+    // NOT the lock arm: this is the route the probes above could not reach, and
+    // a `finally` that reported the wrong one would still be exit 6.
+    expect(res.err).not.toContain("lock-release-failed");
+    // …and the run stays operable — a ledger that will not close is not a reason
+    // to strand the lock.
+    expect(existsSync(join(store.dir, `${runId}.lock`))).toBe(false);
+    expect(listVerbs().find((v) => v.verb === "teardown")?.exitCodes).toContain(6);
   });
 });
 

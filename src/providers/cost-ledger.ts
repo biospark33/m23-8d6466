@@ -65,6 +65,81 @@ export function canonicalIssueId(issueId: string): string {
 }
 
 /**
+ * The COLUMN-side mirror of `canonicalIssueId` — the one thing canonicalising
+ * the bind alone cannot reach: rows already on disk.
+ *
+ * `lower(repo_slug) = ?` folds both sides of the slug half, so a row written
+ * before canonicalisation still matches. The issue half folded on the bind
+ * only, so a stored `#42` / `042` / `42 ` was permanently unmatchable: its
+ * spend vanished from every SUM the cap reads, which is a silent UNDER-count
+ * and therefore a cap bypass. `cost_events` and `gate_admissions` both carry
+ * BEFORE UPDATE/DELETE triggers (INV-COST-1), so a canonicalising migration is
+ * impossible by construction — the fold has to happen in the predicate.
+ *
+ * Mirrors the three foldings exactly: trim, one leading `#`, and leading zeros
+ * ONLY when the remainder is all digits (so `"0"` stays `"0"` and `"0abc"` is
+ * never folded into `"abc"`, which would merge two genuinely distinct issues).
+ * The one divergence is the trim set: JS `.trim()` also folds Unicode spaces,
+ * SQLite's two-arg `trim()` folds only the characters named. ASCII whitespace
+ * is what a hand-edited record or a shell argument actually carries; a row
+ * whose id is padded with U+00A0 stays unmatched, which is the same
+ * under-count this closes — narrowed, not eliminated.
+ */
+function sqlCanonicalIssueId(col: string): string {
+  // Space, tab, LF, VT, FF, CR — JS `.trim()`'s ASCII set.
+  const trimmed = `trim(${col}, char(32,9,10,11,12,13))`;
+  const bare = `(CASE WHEN substr(${trimmed}, 1, 1) = '#' THEN substr(${trimmed}, 2) ELSE ${trimmed} END)`;
+  // GLOB is the case-sensitive, character-class matcher: leading digit AND no
+  // non-digit anywhere ⇒ `/^\d+$/`. `ltrim(…,'0')` empties an all-zero id, so
+  // "000" folds to "0" the way the `(?=\d)` lookahead does.
+  return `(CASE WHEN ${bare} GLOB '[0-9]*' AND ${bare} NOT GLOB '*[^0-9]*'
+             THEN (CASE WHEN ltrim(${bare}, '0') = '' THEN '0' ELSE ltrim(${bare}, '0') END)
+             ELSE ${bare} END)`;
+}
+
+/**
+ * The issue-scope predicate EVERY issue-keyed query in this file shares, so
+ * they cannot drift apart into two definitions of one budget.
+ *
+ * Three binds, in order: canonical slug, canonical issue, canonical issue —
+ * see `issueScopeKeys`. The raw-equality disjunct comes FIRST and unchanged so
+ * canonical rows (every row this code writes) still hit
+ * `cost_events_issue_canonical`; the mirrored expression is the recovery path
+ * for legacy rows only, and over-inclusive in the safe direction — it can add
+ * spend the cap had lost sight of, never subtract any.
+ */
+function issueScopeSql(slugCol = "repo_slug", issueCol = "issue_id"): string {
+  return `lower(${slugCol}) = ? AND (${issueCol} = ? OR ${sqlCanonicalIssueId(issueCol)} = ?)`;
+}
+
+/** The three binds `issueScopeSql` expects, canonicalised once. */
+function issueScopeKeys(repoSlug: string, issueId: string): string[] {
+  const issue = canonicalIssueId(issueId);
+  return [canonicalRepoSlug(repoSlug), issue, issue];
+}
+
+/**
+ * Refuse a pair that canonicalises to nothing — validated on the CANONICAL
+ * values, never the raw ones.
+ *
+ * A raw non-empty check ran before the fold and so passed `"#"`, `" "`, `"#  "`
+ * and `" # "`, every one of which canonicalises to `""`. They then all bound
+ * `issue_id = ''` and shared ONE budget identity; and since ISSUE_KEY_RE
+ * requires `#\d+`, no `perIssueOverrides` key can ever name that identity, so
+ * the shared bucket always got `defaultCapMicroUsd` — one default cap covering
+ * an unbounded set of malformed dispatches.
+ */
+function assertCanonicalIdentity(code: string, repoSlug: string, issueId: string, remediation: string): void {
+  if (canonicalRepoSlug(repoSlug).length === 0 || canonicalIssueId(issueId).length === 0) {
+    throw new CostLedgerError(
+      code,
+      `repoSlug ${JSON.stringify(repoSlug)} / issueId ${JSON.stringify(issueId)} canonicalises to an empty identity — a budget key no override can name and every malformed dispatch shares`,
+      remediation,
+    );
+  }
+}
+
+/**
  * How long an admission counts toward `reservedMicroUsd` before a missing run
  * record is read as "never created" rather than "not created yet".
  *
@@ -424,16 +499,30 @@ export function loadCostConfig(
  * total: a `CostConfig` built in code (tests, callers) gets the same treatment
  * as one parsed from disk, so there is no way to construct a config whose
  * overrides are matched raw. The map is a small operator-authored table.
+ *
+ * AMBIGUITY RESOLVES TO THE LOWEST CAP. `loadCostConfig` REFUSES a file whose
+ * override keys name one issue twice — refusing is the honest answer when an
+ * operator can still be asked. But that guard lives on the parse arm only, and
+ * a `CostConfig` assembled in code (a test, a caller merging overrides, a
+ * default never read from a file) can hold `{"Owner/Repo#42": 20000000,
+ * "owner/repo#42": 1000000}` with nobody left to ask. Returning the FIRST match
+ * then served 20 USD and ignored the line added to LOWER it, and iteration
+ * order is not a contract anyone authored. `Math.min` is the direction that
+ * cannot overspend: at worst it ignores a line meant to RAISE a cap, which
+ * refuses a dispatch — recoverable — where the other mistake spends money that
+ * is not recoverable.
  */
 export function capForIssue(config: CostConfig, repoSlug: string, issueId: string): number {
   const overrides = config.perIssueOverrides;
   if (overrides === undefined) return config.defaultCapMicroUsd;
   const want = canonicalIssueKey(repoSlug, issueId);
-  for (const [key, cap] of Object.entries(overrides)) {
-    const canonicalKey = canonicalOverrideKey(key);
-    if (canonicalKey !== undefined && canonicalKey === want) return cap;
+  let cap: number | undefined;
+  for (const [key, value] of Object.entries(overrides)) {
+    // `undefined` (a key naming no issue) never equals `want`.
+    if (canonicalOverrideKey(key) !== want) continue;
+    cap = cap === undefined ? value : Math.min(cap, value);
   }
-  return config.defaultCapMicroUsd;
+  return cap ?? config.defaultCapMicroUsd;
 }
 
 // ─── ledger ──────────────────────────────────────────────────────────────────
@@ -651,7 +740,14 @@ export class CostLedger {
         convertError = (e as Error).message;
       }
     }
-    const unpriced = costInvalid || (event.unpricedTurns ?? 0) > 0;
+    // A NONZERO cost that rounds to zero µ$ is not free spend — it is spend
+    // this ledger's unit cannot express. `costUsd: 0.0000004` converts to 0 µ$
+    // and would otherwise be recorded as real, fully-priced, zero money:
+    // invisible in `unpricedRows`, and indistinguishable from the genuinely
+    // free cached turn a run reports at exactly 0. Half-up rounding is still
+    // the right conversion (DD-9); the flag is what keeps the collapse visible.
+    const subMicro = !costInvalid && event.costUsd > 0 && costMicroUsd === 0;
+    const unpriced = costInvalid || subMicro || (event.unpricedTurns ?? 0) > 0;
     const eventId = tokenEventId({
       runId: ctx.runId,
       agentId: event.agentId,
@@ -712,6 +808,9 @@ export class CostLedger {
       ...(convertError === undefined
         ? {}
         : { code: "cost-convert-invalid", convertError, costUsd: event.costUsd }),
+      // Mutually exclusive with the branch above (`subMicro` requires a VALID
+      // conversion), so the two spreads can never fight over `code`.
+      ...(subMicro ? { code: "cost-sub-micro-unpriced", costUsd: event.costUsd } : {}),
       durationMs,
       outcome: inserted ? "inserted" : "duplicate",
       ingest_ms: durationMs,
@@ -738,6 +837,12 @@ export class CostLedger {
         );
       }
     }
+    assertCanonicalIdentity(
+      "ingest-ctx-invalid",
+      ctx.repoSlug,
+      ctx.issueId,
+      "supply { runId, repoSlug, issueId, requestId } from the dispatch that owns the run",
+    );
     const record = this.readRunRecord(ctx.runId);
     if (record === undefined) {
       throw new CostLedgerError(
@@ -824,12 +929,13 @@ export class CostLedger {
 
   /** The issue-keyed view — the same SUM the gate reads (INV-COST-2). */
   readIssueCost(repoSlug: string, issueId: string): CostView {
-    const all = "lower(repo_slug) = ? AND issue_id = ?";
+    const all = issueScopeSql();
     const priced = `${all} AND unpriced = 0`;
     const unpricedQ = `${all} AND unpriced = 1`;
-    // Canonical on the bind side, lower() on the column side: a row written
-    // before canonicalisation and one written after both match.
-    const keys = [canonicalRepoSlug(repoSlug), canonicalIssueId(issueId)];
+    // Both halves fold on BOTH sides (issueScopeSql): a row written before
+    // canonicalisation and one written after both match. The OR is parenthesised
+    // inside the fragment, so appending ` AND unpriced = …` stays correct.
+    const keys = issueScopeKeys(repoSlug, issueId);
     return this.view(all, keys, priced, keys, unpricedQ, keys);
   }
 
@@ -900,10 +1006,10 @@ export class CostLedger {
         `SELECT run_id,
                 COALESCE(SUM(CASE WHEN unpriced = 0 THEN cost_micro_usd ELSE 0 END), 0) AS total,
                 MAX(CASE WHEN kind = 'box_hours' THEN 1 ELSE 0 END) AS hasBox
-         FROM cost_events WHERE lower(repo_slug) = ? AND issue_id = ?
+         FROM cost_events WHERE ${issueScopeSql()}
          GROUP BY run_id ORDER BY MIN(created_at)`,
       )
-      .all(canonicalRepoSlug(repoSlug), canonicalIssueId(issueId)) as { run_id: string; total: number; hasBox: number }[];
+      .all(...issueScopeKeys(repoSlug, issueId)) as { run_id: string; total: number; hasBox: number }[];
     return rows.map((r) => ({ runId: r.run_id, totalMicroUsd: r.total, hasBoxHours: r.hasBox === 1 }));
   }
 
@@ -943,16 +1049,33 @@ export class CostLedger {
    * compensating release there would under-report live risk and let the next
    * dispatch overcommit the same cap.
    *
-   * **How it retires.** By itself, once the run's first **priced** ledger row
-   * lands — so a finished run's admission never blocks the next dispatch. An
-   * unpriced row is not observable spend: a run reporting only unpriced rows
-   * keeps its full ceiling counted, so unpriced traffic never silently restores
-   * headroom the cap was holding. A run that never reports ANY row keeps its
-   * reservation, by design: that run is still open, and teardown's box-hours
-   * ingest (or the DF2.6 reaper, which routes through teardownSandbox) is what
-   * writes the priced `box_hours` row that retires it. A reservation's lifetime
-   * is therefore bounded by the same fleet hygiene that bounds an open record
-   * with a live box — that is the retirement path for a failed dispatch too.
+   * **How it retires.** By itself, once the run reports **actual priced spend**
+   * — a priced row whose `cost_micro_usd` is greater than zero — so a finished
+   * run's admission never blocks the next dispatch. SPEND, not the mere
+   * existence of a row: a run whose first event is a free or cached turn writes
+   * a perfectly valid `cost_micro_usd = 0, unpriced = 0` row, and testing for
+   * existence retired that run's ENTIRE ceiling while it still held a live key
+   * at that ceiling — the next dispatch then saw `spent = 0, reserved = 0` and
+   * was granted the full cap, N times over for N dispatches. An unpriced row is
+   * not observable spend either: a run reporting only unpriced rows keeps its
+   * full ceiling counted, so unpriced traffic never silently restores headroom
+   * the cap was holding. A run that never reports priced spend keeps its
+   * reservation while it is still OPEN, by design: teardown's box-hours ingest
+   * (or the DF2.6 reaper, which routes through teardownSandbox) is what writes
+   * the priced `box_hours` row that retires it. A reservation's lifetime is
+   * therefore bounded by the same fleet hygiene that bounds an open record with
+   * a live box — that is the retirement path for a failed dispatch too.
+   *
+   * The second retirement, and the reason "actual spend" is not a wedge: a run
+   * whose record is CLOSED retires too. Every row still in the loop is by
+   * construction a run that has reported no positive spend, and a closed record
+   * means the box is gone and the key revoked — the exposure the reservation
+   * represents is over, and nothing else will ever come to retire it (a
+   * zero-length lifetime prices box-hours at 0 µ$, which is another priced
+   * zero). Without this, a run that genuinely cost nothing would hold its
+   * ceiling against the issue forever, and `gate_admissions_no_delete` leaves no
+   * manual exit. This is strictly more conservative than retiring on any priced
+   * row: it fires later, and only for runs that spent nothing.
    *
    * The one expiry: an admission older than `ADMISSION_GRACE_MS +
    * ADMISSION_SKEW_MARGIN_MS` whose run record does not resolve through
@@ -991,8 +1114,15 @@ export class CostLedger {
     // gate_admissions row all key on the same canonical (slug, issue) pair, so
     // the spend a decision reads and the reservation it writes can never be two
     // identities — and `42`/`#42`/`042` cannot each hold their own full cap.
+    assertCanonicalIdentity(
+      "admission-input-invalid",
+      input.repoSlug,
+      input.issueId,
+      "supply { repoSlug, issueId, runId, requestId } from the dispatch's resolved correlation",
+    );
     const repoSlug = canonicalRepoSlug(input.repoSlug);
     const issueId = canonicalIssueId(input.issueId);
+    const scopeKeys = issueScopeKeys(input.repoSlug, input.issueId);
     this.assertQueryable();
     if (!Number.isInteger(capMicroUsd) || capMicroUsd <= 0) {
       throw new CostConfigError(
@@ -1013,12 +1143,42 @@ export class CostLedger {
         "fix the DF2.3 key cap the gate passes (defaultKeyCapMicroUsd in src/providers/credentials.ts, or the caller's override)",
       );
     }
+    // ── everything that touches the filesystem or a log sink happens HERE,
+    // OUTSIDE the write transaction ────────────────────────────────────────
+    // The reservation loop below needs one run record per outstanding
+    // reservation, and `decide.immediate()` holds the WAL write lock for its
+    // whole body against a 5s busy_timeout. Reading N records (and writing N log
+    // lines) under that lock serializes every concurrent dispatch behind N
+    // syscalls, so a slow FS or a long reservation list turns into SQLITE_BUSY
+    // out of admitIssue — fail-closed, so no money is lost, but an availability
+    // wedge that scales with reservation count. So: read the records first, then
+    // let the transaction consult the map. Rows that appear between this read
+    // and the transaction are still read live inside it — a race that can only
+    // add the odd record, never the whole list. Correctness is untouched: the
+    // SUM→INSERT serialization the gate depends on is all still inside.
+    const prefetched = new Map<string, { record?: RunCostRecord; error?: unknown }>();
+    for (const row of this.db
+      .prepare(`SELECT DISTINCT run_id AS runId FROM gate_admissions WHERE ${issueScopeSql()}`)
+      .all(...scopeKeys) as { runId: string }[]) {
+      try {
+        prefetched.set(row.runId, { record: this.readRunRecord(row.runId) });
+      } catch (error) {
+        // A throw is classified inside the loop below (young ⇒ refuse, aged ⇒
+        // expire), so it is CARRIED there rather than thrown here — reading a
+        // record early must not change which dispatch the failure lands on.
+        prefetched.set(row.runId, { error });
+      }
+    }
+    // Log lines the reservation loop wants to emit, flushed after the write
+    // lock is released. `log` is a sink of unknown cost (fd, stdout, whatever a
+    // deployment wires it to); it has no business inside BEGIN IMMEDIATE.
+    const pendingLogs: Parameters<typeof log>[0][] = [];
     const decide = this.db.transaction((): AdmissionDecision => {
       const spentRow = this.db
         .prepare(
-          "SELECT COALESCE(SUM(cost_micro_usd), 0) AS total, COUNT(*) AS n FROM cost_events WHERE lower(repo_slug) = ? AND issue_id = ? AND unpriced = 0",
+          `SELECT COALESCE(SUM(cost_micro_usd), 0) AS total, COUNT(*) AS n FROM cost_events WHERE ${issueScopeSql()} AND unpriced = 0`,
         )
-        .get(repoSlug, issueId) as { total: number; n: number };
+        .get(...scopeKeys) as { total: number; n: number };
       // The caller's OWN row is excluded from the reservations below: this
       // admission is either fresh (no such row exists, so the exclusion matches
       // nothing) or a retry of the same (request_id, run_id), which must be
@@ -1037,21 +1197,36 @@ export class CostLedger {
       // back still fits the headroom recomputed here.
       const reservedRows = this.db
         .prepare(
-          `SELECT a.ceiling_micro_usd AS ceiling, a.run_id AS runId, a.decided_at AS decidedAt
+          `SELECT MAX(a.ceiling_micro_usd) AS ceiling, a.run_id AS runId, MAX(a.decided_at) AS decidedAt
            FROM gate_admissions a
-           WHERE lower(a.repo_slug) = ? AND a.issue_id = ?
+           WHERE ${issueScopeSql("a.repo_slug", "a.issue_id")}
              -- IS, not =: NULL-safe equality. The guard in admitIssue already
              -- refuses a non-string correlation key, but plain = makes the whole
              -- predicate evaluate to NULL on a NULL bind and silently drops
              -- EVERY reservation, so this query does not rely on that guard
              -- staying put.
              AND NOT (a.request_id IS ? AND a.run_id IS ?)
+             -- SPEND, not a row. "cost_micro_usd > 0" is the difference between
+             -- "this run has reported what it spent" and "this run has reported
+             -- something": a free or cached turn writes a valid priced ZERO row,
+             -- and existence alone retired the run's whole ceiling while its key
+             -- was still live at that ceiling — handing the next dispatch the
+             -- full cap a second time.
              AND NOT EXISTS (
                SELECT 1 FROM cost_events ce
-               WHERE ce.run_id = a.run_id AND ce.unpriced = 0
-             )`,
+               WHERE ce.run_id = a.run_id AND ce.unpriced = 0 AND ce.cost_micro_usd > 0
+             )
+           -- ONE reservation per run, whatever the request id. gate_admissions'
+           -- PRIMARY KEY is (request_id, run_id), so retrying a run under a
+           -- FRESH request id inserts a SECOND row for one run; ungrouped, both
+           -- counted and the issue's headroom fell by twice the ceiling for a
+           -- single live key, refusing later legitimate dispatches. MAX on both
+           -- columns is the fail-safe pick: the largest exposure, and the
+           -- YOUNGEST decided_at (so the reservation ages out no sooner than its
+           -- most recent admission would).
+           GROUP BY a.run_id`,
         )
-        .all(repoSlug, issueId, input.requestId, input.runId) as {
+        .all(...scopeKeys, input.requestId, input.runId) as {
         ceiling: number;
         runId: string;
         decidedAt: string;
@@ -1102,12 +1277,20 @@ export class CostLedger {
         // refusing once is recoverable where over-granting the cap is not.
         let record: RunCostRecord | undefined;
         try {
-          record = this.readRunRecord(row.runId);
+          // Prefetched outside the write lock; read live only for a row that
+          // appeared since (see the hoist above). Either way the classification
+          // below is identical — the map carries a throw rather than swallowing
+          // it, so the failure still lands on this dispatch.
+          const cached = prefetched.get(row.runId);
+          if (cached === undefined) record = this.readRunRecord(row.runId);
+          else if (cached.error !== undefined) throw cached.error;
+          else record = cached.record;
         } catch (e) {
           if (young) throw e;
           // Never silent: the expired row is named, so an operator can tell an
-          // expiry from a reservation that simply retired.
-          log({
+          // expiry from a reservation that simply retired. Queued, not logged —
+          // the sink runs after the write lock is released.
+          pendingLogs.push({
             requestId: input.requestId,
             operation: "cost-ledger.gate",
             agentId: null,
@@ -1127,6 +1310,12 @@ export class CostLedger {
           continue;
         }
         if (!young && record === undefined) continue;
+        // Closed record ⇒ retired. Every row here is a run that has reported no
+        // positive spend, so without this a run that genuinely cost nothing
+        // holds its ceiling against the issue forever and INV-COST-1 leaves no
+        // manual exit. A closed record means the box is destroyed and the key
+        // revoked: there is no unspent exposure left to reserve against.
+        if (record?.closedAt !== undefined) continue;
         reservedMicroUsd += row.ceiling;
         // Overflow guard: sum of reservation ceilings can exceed MAX_SAFE_INTEGER
         if (reservedMicroUsd > Number.MAX_SAFE_INTEGER) {
@@ -1139,9 +1328,9 @@ export class CostLedger {
       }
       const unpricedRow = this.db
         .prepare(
-          "SELECT COUNT(*) AS n FROM cost_events WHERE lower(repo_slug) = ? AND issue_id = ? AND unpriced = 1",
+          `SELECT COUNT(*) AS n FROM cost_events WHERE ${issueScopeSql()} AND unpriced = 1`,
         )
-        .get(repoSlug, issueId) as { n: number };
+        .get(...scopeKeys) as { n: number };
       const spentMicroUsd = spentRow.total;
       const unpricedRows = unpricedRow.n;
       const cap = capMicroUsd;
@@ -1203,7 +1392,13 @@ export class CostLedger {
           throw new CostLedgerError(
             "ledger-admission-lost",
             `the admission for request ${input.requestId} / run ${input.runId} neither inserted nor resolved — refusing to mint an unreserved ceiling`,
-            "inspect gate_admissions for that (request_id, run_id) and re-run the dispatch with a fresh request id",
+            // A FRESH PAIR, not a fresh request id: (request_id, run_id) is the
+            // PRIMARY KEY, so reusing the runId under a new requestId writes a
+            // SECOND admission row for one run. The reservation query now counts
+            // one per run_id so that no longer double-books the cap, but it
+            // still leaves two rows describing one run's exposure — say the
+            // thing that produces clean state.
+            "inspect gate_admissions for that (request_id, run_id) and re-run the dispatch with a fresh requestId AND runId",
           );
         }
         // The PRIMARY KEY is (request_id, run_id) ALONE, so the row this replay
@@ -1223,7 +1418,10 @@ export class CostLedger {
           throw new CostLedgerError(
             "ledger-admission-mismatch",
             `request ${input.requestId} / run ${input.runId} already holds an admission for ${prior.repoSlug}#${prior.issueId}, not ${repoSlug}#${issueId} — refusing to mint against a reservation another issue's cap is holding`,
-            "re-run the dispatch with a fresh request id: a (requestId, runId) pair belongs to exactly one (repoSlug, issueId)",
+            // Fresh PAIR: a new requestId over the same runId only adds a second
+            // admission row for that run (the PRIMARY KEY is the pair), it does
+            // not give the run a reservation under this issue.
+            "re-run the dispatch with a fresh requestId AND runId: a (requestId, runId) pair belongs to exactly one (repoSlug, issueId)",
           );
         }
         // CLAMPED to the headroom recomputed just now, not handed back raw.
@@ -1265,6 +1463,10 @@ export class CostLedger {
         );
       }
       throw e;
+    } finally {
+      // finally, not the success path: a transaction that threw after expiring a
+      // reservation still owes the operator that line.
+      for (const line of pendingLogs) log(line);
     }
     const durationMs = Date.now() - started;
     log({
@@ -1329,4 +1531,12 @@ function assertIngestCtx(ctx: IngestCtx): void {
       "pass the invocationSeq fixed at spawn — it is what keeps two invocations of one agent from digesting identically",
     );
   }
+  // The row this ctx becomes is keyed on the CANONICAL pair, so that is what
+  // has to be non-empty — the raw check above passes `"#"` and `" "`.
+  assertCanonicalIdentity(
+    "ingest-ctx-invalid",
+    ctx.repoSlug,
+    ctx.issueId,
+    "supply { runId, repoSlug, issueId, requestId, role, invocationSeq } from the dispatch that spawned the agent",
+  );
 }
