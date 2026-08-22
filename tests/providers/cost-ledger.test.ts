@@ -1020,3 +1020,161 @@ describe("DF2.8 safe-integer guards (P2, P3, P5)", () => {
     }
   });
 });
+
+// ─── canonical repo identity ─────────────────────────────────────────────────
+
+/**
+ * `repo_slug` is a byte-exact SQL predicate on every spend aggregate and cap
+ * check. Without a canonical form, `Owner/Repo` and `owner/repo` are two budget
+ * identities for one repository — dispatch under each and the per-issue cap is
+ * served twice. These pin that the identity is the repository, not the casing.
+ *
+ * The rows are NOT migrated: `cost_events` and `gate_admissions` are append-only
+ * (INV-COST-1, enforced by triggers). The predicates canonicalise instead, which
+ * is why the "written before canonicalisation" case below is the load-bearing
+ * one — it is the half a migration would have covered.
+ */
+describe("canonical repo identity (cap bypass)", () => {
+  test("spend billed in one casing counts against the cap read in another", () => {
+    seedRecord("run-a1");
+    ledger.ingestCostEvent(mkEvent({ costUsd: 4.0 }), mkCtx({ repoSlug: "QDS/Demo" }));
+
+    // Same repository, every casing, one balance.
+    for (const slug of ["qds/demo", "QDS/Demo", "Qds/DEMO"]) {
+      expect(ledger.readIssueCost(slug, "42").totalMicroUsd).toBe(4_000_000);
+    }
+
+    // And the gate reads that same balance regardless of how the brief spelled it.
+    seedRecord("run-a2");
+    const d = ledger.admitIssue(
+      { repoSlug: "QDS/Demo", issueId: "42", runId: "run-a2", requestId: "req-2" },
+      5_000_000,
+      50_000_000,
+    );
+    expect(d.spentMicroUsd).toBe(4_000_000);
+    if (!d.admitted) throw new Error(`expected admission, got ${d.reason}`);
+    expect(d.admittedCeilingMicroUsd).toBe(1_000_000);
+  });
+
+  test("a row written BEFORE canonicalisation still counts — the append-only tables are never rewritten", () => {
+    // Written straight to the table, as a pre-canonicalisation build would have.
+    // INSERT is the only mutation the triggers permit, which is exactly why the
+    // read side has to do the folding.
+    const raw = rawDb();
+    raw.prepare(
+      `INSERT INTO cost_events (event_id, run_id, repo_slug, issue_id, request_id, role,
+                                agent_id, kind, invocation_seq, cost_micro_usd, unpriced, created_at)
+       VALUES ('legacy-1', 'run-legacy', 'QDS/Demo', '42', 'req-legacy', 'lead',
+               'lead-1', 'tokens', 0, 2500000, 0, '2026-08-20T12:00:00.000Z')`,
+    ).run();
+    raw.close();
+
+    expect(ledger.readIssueCost("qds/demo", "42").totalMicroUsd).toBe(2_500_000);
+
+    seedRecord("run-new");
+    const d = ledger.admitIssue(
+      { repoSlug: "qds/demo", issueId: "42", runId: "run-new", requestId: "req-new" },
+      5_000_000,
+      50_000_000,
+    );
+    expect(d.spentMicroUsd).toBe(2_500_000);
+  });
+
+  test("admitIssue writes its reservation under the canonical slug, so a later admission in any casing sees it", () => {
+    seedRecord("run-r1");
+    ledger.admitIssue(
+      { repoSlug: "QDS/Demo", issueId: "42", runId: "run-r1", requestId: "req-r1" },
+      5_000_000,
+      2_000_000,
+    );
+    seedRecord("run-r2");
+    const second = ledger.admitIssue(
+      { repoSlug: "qds/demo", issueId: "42", runId: "run-r2", requestId: "req-r2" },
+      5_000_000,
+      50_000_000,
+    );
+    expect(second.reservedMicroUsd).toBe(2_000_000);
+    if (!second.admitted) throw new Error(`expected admission, got ${second.reason}`);
+    expect(second.admittedCeilingMicroUsd).toBe(3_000_000);
+  });
+
+  test("a gate_admissions row written BEFORE canonicalisation still reserves against a canonical admission", () => {
+    // The reservation half of the legacy case. admitIssue now WRITES canonical,
+    // so this row can only come from a build that predates that — which is
+    // exactly what the lower() on the reserved-rows predicate is for, and the
+    // only thing that distinguishes it from a plain equality.
+    const raw = rawDb();
+    raw.prepare(
+      `INSERT INTO gate_admissions (request_id, run_id, repo_slug, issue_id, ceiling_micro_usd, decided_at)
+       VALUES ('req-legacy', 'run-legacy', 'QDS/Demo', '42', 2000000, ?)`,
+    ).run(new Date().toISOString());
+    raw.close();
+
+    seedRecord("run-next");
+    const d = ledger.admitIssue(
+      { repoSlug: "qds/demo", issueId: "42", runId: "run-next", requestId: "req-next" },
+      5_000_000,
+      50_000_000,
+    );
+    expect(d.reservedMicroUsd).toBe(2_000_000);
+    if (!d.admitted) throw new Error(`expected admission, got ${d.reason}`);
+    expect(d.admittedCeilingMicroUsd).toBe(3_000_000);
+  });
+
+  test("the ledger persists the canonical slug, so teardown re-reading an old record cannot fork identity", () => {
+    seedRecord("run-t1", {
+      createdAt: "2026-08-20T12:00:00.000Z",
+      closedAt: "2026-08-20T13:30:00.000Z",
+    });
+    // The slug teardown reads back off a run record written before canonicalisation.
+    ledger.ingestBoxHours({
+      runId: "run-t1",
+      repoSlug: "QDS/Demo",
+      issueId: "42",
+      requestId: "req-t1",
+    });
+    const raw = rawDb();
+    const stored = raw
+      .prepare("SELECT DISTINCT repo_slug AS s FROM cost_events WHERE run_id = 'run-t1'")
+      .all() as { s: string }[];
+    raw.close();
+    expect(stored.map((r) => r.s)).toEqual(["qds/demo"]);
+  });
+
+  test("INV-COST-1 still holds — neither table can be updated or deleted", () => {
+    seedRecord("run-a1");
+    ledger.ingestCostEvent(mkEvent(), mkCtx());
+    // Both tables need a row: a BEFORE UPDATE/DELETE trigger that matches
+    // nothing never fires, so an empty table would pass this vacuously.
+    seedRecord("run-adm");
+    ledger.admitIssue(
+      { repoSlug: "qds/demo", issueId: "42", runId: "run-adm", requestId: "req-adm" },
+      5_000_000,
+      50_000_000,
+    );
+    const raw = rawDb();
+    try {
+      expect(() => raw.prepare("UPDATE cost_events SET repo_slug = 'x/y'").run()).toThrow(/append-only/);
+      expect(() => raw.prepare("DELETE FROM cost_events").run()).toThrow(/append-only/);
+      expect(() => raw.prepare("UPDATE gate_admissions SET repo_slug = 'x/y'").run()).toThrow(/append-only/);
+      expect(() => raw.prepare("DELETE FROM gate_admissions").run()).toThrow(/append-only/);
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("capForIssue matches an override across casing on either side", () => {
+    const config = {
+      ...DEFAULT_COST_CONFIG,
+      perIssueOverrides: { "BiosparkHealth/QDS-Factory#42": 9_000_000 },
+    };
+    // The operator authored the key in one casing; the brief spells it another.
+    expect(capForIssue(config, "biosparkhealth/qds-factory", "42")).toBe(9_000_000);
+    expect(capForIssue(config, "BiosparkHealth/QDS-Factory", "42")).toBe(9_000_000);
+    // Still scoped to the issue, and still falls back when nothing matches.
+    expect(capForIssue(config, "biosparkhealth/qds-factory", "43")).toBe(
+      DEFAULT_COST_CONFIG.defaultCapMicroUsd,
+    );
+    expect(capForIssue(config, "other/repo", "42")).toBe(DEFAULT_COST_CONFIG.defaultCapMicroUsd);
+  });
+});

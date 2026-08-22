@@ -6,11 +6,19 @@
  * in dispatch via resolveRunCorrelation.
  */
 import { z } from "zod";
+import { REPO_SLUG_PATTERN, canonicalRepoSlug } from "../phase-engine/issue-correlation.ts";
 
 /**
- * `.` and `..` pass the slug charset but are not repository names — they are
- * path segments, and the slug reaches `join()` on both the ledger key and the
- * host-side log path. Refuse them here rather than downstream.
+ * `.` and `..` pass the slug charset but are not repository names. They are
+ * refused here because the slug is an identity key, not free text: it is the
+ * SQL predicate every spend aggregate filters on and the `${slug}#${issueId}`
+ * lookup key for a per-issue cap override, and neither is a thing `..` should
+ * be able to name.
+ *
+ * (An earlier revision justified this by the slug reaching `join()` on a log
+ * path. It does not — no path anywhere is built from the slug, and the
+ * dispatch log's path is derived from the store dir. The guard is right; the
+ * reason was not.)
  */
 function hasNoDotSegment(slug: string): boolean {
   return !slug.split("/").some((seg) => seg === "." || seg === "..");
@@ -63,16 +71,29 @@ function isRelativePath(p: string): boolean {
 const NO_CONTROL_CHARS = /^[^\p{Cc}]*$/u;
 
 /**
- * The repository a clone URL identifies, as a slug: pathname, slashes trimmed,
- * a `.git` suffix dropped. `undefined` when the URL will not parse — the
- * `.url()` check has already refused those, so the cross-check never sees one.
+ * The repository a clone URL identifies, as a CANONICAL slug: pathname,
+ * slashes trimmed, a `.git` suffix dropped, case folded. `undefined` when the
+ * URL will not parse (the `.url()` check has already refused those, so the
+ * cross-check never sees one) or when the path cannot name a slug at all.
+ *
+ * Nothing here percent-DECODES, and nothing needs to: `URL.pathname` leaves
+ * escapes encoded, and `%` is not in the slug charset `[A-Za-z0-9._-]` — so an
+ * escaped path can never compare equal to a slug and is refused by the
+ * comparison itself. Decoding would only invite the double-encoding question
+ * (`%252e`) for no reachable gain.
+ *
+ * Canonical on both sides, so `github.com/Owner/Repo` satisfies a
+ * `repoSlug: "owner/repo"` — the forge folds that case, and after
+ * `resolveRunCorrelation` so does the ledger.
  */
 function repoSlugOfUrl(url: string): string | undefined {
+  let pathname: string;
   try {
-    return new URL(url).pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+    pathname = new URL(url).pathname;
   } catch {
     return undefined;
   }
+  return canonicalRepoSlug(pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, ""));
 }
 
 /**
@@ -88,10 +109,15 @@ const MAX_REQUEST_ID = 128;
 
 // DF3.1 AC1, AC2, INV-2: strict object, closed to unknown fields
 export const BriefSchema = z.strictObject({
-  // DF3.1 D2: validated owner/name (issue-correlation pattern)
+  // DF3.1 D2: validated owner/name. The pattern is IMPORTED from DF1.8's
+  // issue-correlation, not restated: that module owns (repoSlug, issueId)
+  // identity, and a second copy of the rule here is a second rule the moment
+  // either moves. Note the shape is deliberately two segments — a forge path
+  // with more (a GitLab subgroup) has never been expressible as a repoSlug,
+  // independently of any cross-check below.
   repoSlug: z
     .string()
-    .regex(/^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/)
+    .regex(REPO_SLUG_PATTERN)
     .refine(hasNoDotSegment, "repoSlug segments may not be '.' or '..'"),
   // DF3.1 D2: int >0, MAX_ISSUE_ID capped (assertWithinBudget receives String(issueId))
   issueId: z.number().int().positive().max(2 ** 31 - 1),
@@ -148,11 +174,24 @@ export const BriefSchema = z.strictObject({
    * the box. Separable, they let a brief attribute an attacker's repository to a
    * trusted slug's budget.
    *
-   * Only the PATH is tied. The host deliberately is not: self-hosted forges are
-   * legitimate and a host allow-list here would refuse them, which is a bigger
-   * operational failure than the one this closes.
+   * Only the PATH is tied, and it is tied EXACTLY. The host deliberately is
+   * not: self-hosted forges are legitimate and a host allow-list here would
+   * refuse them, which is a bigger operational failure than the one this
+   * closes. An `endsWith` relaxation — to admit a forge served under a path
+   * prefix — is what it looks like, and it is not safe: it would also admit
+   * `https://evil.example/x/owner/repo` against a trusted slug, which is the
+   * separation this refine exists to close.
+   *
+   * SUPERSEDED BY DESIGN: DF5.2's INV-PR-3 puts repository authority in the
+   * host-side allowlist (`.factory/repos.json`) — "the remote and base branch
+   * resolve from the allowlist, never from the harvested tree's git config".
+   * When that lands, `repoUrl` should be DERIVED from `repoSlug` through it
+   * rather than accepted from the brief, at which point two fields that must
+   * agree collapse into one that cannot disagree, and this refine (and the
+   * field) can go. Until then this is the only thing tying the code that RUNS
+   * to the identity that PAYS.
    */
-  .refine((b) => repoSlugOfUrl(b.repoUrl) === b.repoSlug, {
+  .refine((b) => repoSlugOfUrl(b.repoUrl) === canonicalRepoSlug(b.repoSlug), {
     message: "repoUrl must name the same repository as repoSlug",
     path: ["repoUrl"],
   });

@@ -32,6 +32,31 @@ export type { IssueRef, ResolvedRunCorrelation };
 export const REPO_SLUG_PATTERN = /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/;
 
 /**
+ * Canonical form of a repository slug — the identity every budget key is
+ * written and queried under.
+ *
+ * GitHub folds owner/name case, so `Owner/Repo` and `owner/repo` are ONE
+ * repository. But `repo_slug` is a byte-exact SQL predicate on every spend
+ * aggregate and cap check in the cost ledger, and `capForIssue` looks the
+ * per-issue override up by exact key — so without a canonical form the two
+ * casings open two budget identities, and the per-issue cap is bypassable by
+ * retyping the slug in a different case. Canonicalising here, in the module
+ * that owns (repoSlug, issueId) identity, is what makes the pair a key rather
+ * than a string that happens to be compared.
+ *
+ * ASCII-only on purpose. SQLite's `lower()` folds ASCII and nothing else, and
+ * that is what the ledger's one-time row canonicalisation used; a
+ * Unicode-aware `toLowerCase()` folds characters SQLite leaves alone (`İ` is
+ * the classic one), so JS and SQL would then disagree about identity for any
+ * value that reached the ledger without passing REPO_SLUG_PATTERN — a
+ * hand-edited run record, for one. Matching SQLite exactly removes that
+ * divergence class instead of relying on the charset guard upstream.
+ */
+export function canonicalRepoSlug(slug: string): string {
+  return slug.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+/**
  * Strict UUID v4: version nibble 4, variant nibble [89ab]; case-insensitive.
  * NOTE: the contract's literal sketch had `[89ab][0-9a-f]{4}` — a 5-char
  * variant group (37 chars total) that rejects every real 36-char UUID,
@@ -116,7 +141,11 @@ export function resolveRunCorrelation(
   }
   return {
     requestId,
-    repoSlug,
+    // Validated on the raw value above so the refusal quotes what the operator
+    // typed; canonicalised here so what every downstream row is keyed on is the
+    // repository, not the casing. The pattern is case-blind, so the canonical
+    // form is always still valid.
+    repoSlug: canonicalRepoSlug(repoSlug),
     issueId: brief.issueId,
     issueUrl: brief.issueUrl ?? null,
   };

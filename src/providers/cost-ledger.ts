@@ -24,6 +24,7 @@ import { dirname } from "node:path";
 import { Database } from "bun:sqlite";
 
 import type { CostEvent } from "../../cli-anything/src/types.ts";
+import { canonicalRepoSlug } from "../phase-engine/issue-correlation.ts";
 import { log } from "../swarmclaw/log.ts";
 
 // ─── units ───────────────────────────────────────────────────────────────────
@@ -152,6 +153,12 @@ CREATE TABLE IF NOT EXISTS cost_events (
   created_at         TEXT NOT NULL
 ) STRICT;
 CREATE INDEX IF NOT EXISTS cost_events_issue ON cost_events (repo_slug, issue_id, unpriced);
+-- Identity is the CANONICAL slug (see canonicalRepoSlug): every issue-scoped
+-- predicate below filters on lower(repo_slug), so the index has to be on the
+-- same expression or SQLite falls back to a scan. The raw-column index above is
+-- kept: cost_events_run and per-row lookups still use the stored value.
+CREATE INDEX IF NOT EXISTS cost_events_issue_canonical
+  ON cost_events (lower(repo_slug), issue_id, unpriced);
 CREATE INDEX IF NOT EXISTS cost_events_run ON cost_events (run_id);
 CREATE TRIGGER IF NOT EXISTS cost_events_no_update
 BEFORE UPDATE ON cost_events
@@ -170,6 +177,8 @@ CREATE TABLE IF NOT EXISTS gate_admissions (
   PRIMARY KEY (request_id, run_id)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS gate_admissions_issue ON gate_admissions (repo_slug, issue_id);
+CREATE INDEX IF NOT EXISTS gate_admissions_issue_canonical
+  ON gate_admissions (lower(repo_slug), issue_id);
 CREATE TRIGGER IF NOT EXISTS gate_admissions_no_update
 BEFORE UPDATE ON gate_admissions
 BEGIN SELECT RAISE(ABORT, 'gate_admissions is append-only (INV-COST-1)'); END;
@@ -302,9 +311,35 @@ export function loadCostConfig(
   return { config: over, source: "file", file };
 }
 
-/** The cap that governs one issue: its override when present, the default otherwise. */
+/**
+ * The cap that governs one issue: its override when present, the default
+ * otherwise.
+ *
+ * Both sides of the lookup are canonicalised, because both are typed by a
+ * human: the operator writes `perIssueOverrides` keys in the cost config, and
+ * a brief supplies the slug. Matching raw strings meant an override authored
+ * as `BiosparkHealth/QDS-Factory#42` was silently not applied to a dispatch
+ * that spelled the slug in any other case — the cap quietly reverting to the
+ * default, which is the failure direction that costs money.
+ *
+ * Comparing key-by-key rather than canonicalising the map once keeps this
+ * total: a `CostConfig` built in code (tests, callers) gets the same treatment
+ * as one parsed from disk, so there is no way to construct a config whose
+ * overrides are matched raw. The map is a small operator-authored table.
+ */
 export function capForIssue(config: CostConfig, repoSlug: string, issueId: string): number {
-  return config.perIssueOverrides?.[`${repoSlug}#${issueId}`] ?? config.defaultCapMicroUsd;
+  const overrides = config.perIssueOverrides;
+  if (overrides === undefined) return config.defaultCapMicroUsd;
+  const want = `${canonicalRepoSlug(repoSlug)}#${issueId}`;
+  for (const [key, cap] of Object.entries(overrides)) {
+    // The slug charset excludes '#', so the first one always separates the
+    // pair — the issue id is whatever follows it, matched verbatim.
+    const sep = key.indexOf("#");
+    if (sep === -1) continue;
+    const canonicalKey = `${canonicalRepoSlug(key.slice(0, sep))}#${key.slice(sep + 1)}`;
+    if (canonicalKey === want) return cap;
+  }
+  return config.defaultCapMicroUsd;
 }
 
 // ─── ledger ──────────────────────────────────────────────────────────────────
@@ -532,7 +567,10 @@ export class CostLedger {
       .run(
         eventId,
         ctx.runId,
-        ctx.repoSlug,
+        // Persist the canonical identity: teardown re-reads this slug back out of
+        // the run record on disk, and a record written before canonicalisation
+        // would otherwise mint a second identity on every later ingest.
+        canonicalRepoSlug(ctx.repoSlug),
         ctx.issueId,
         ctx.requestId,
         ctx.role,
@@ -559,7 +597,7 @@ export class CostLedger {
       duration: durationMs,
       status: "ok",
       runId: ctx.runId,
-      repoSlug: ctx.repoSlug,
+      repoSlug: canonicalRepoSlug(ctx.repoSlug),
       issueId: ctx.issueId,
       role: ctx.role,
       kind: "tokens",
@@ -644,7 +682,7 @@ export class CostLedger {
          ) VALUES (?,?,?,?,?, NULL, NULL, 'box_hours', 0, ?, 0, ?)
          ON CONFLICT(event_id) DO NOTHING`,
       )
-      .run(eventId, ctx.runId, ctx.repoSlug, ctx.issueId, ctx.requestId, costMicroUsd, new Date().toISOString());
+      .run(eventId, ctx.runId, canonicalRepoSlug(ctx.repoSlug), ctx.issueId, ctx.requestId, costMicroUsd, new Date().toISOString());
     const durationMs = Date.now() - started;
     const inserted = changes === 1;
     log({
@@ -655,7 +693,7 @@ export class CostLedger {
       duration: durationMs,
       status: "ok",
       runId: ctx.runId,
-      repoSlug: ctx.repoSlug,
+      repoSlug: canonicalRepoSlug(ctx.repoSlug),
       issueId: ctx.issueId,
       role: null,
       kind: "box_hours",
@@ -677,10 +715,12 @@ export class CostLedger {
 
   /** The issue-keyed view — the same SUM the gate reads (INV-COST-2). */
   readIssueCost(repoSlug: string, issueId: string): CostView {
-    const all = "repo_slug = ? AND issue_id = ?";
+    const all = "lower(repo_slug) = ? AND issue_id = ?";
     const priced = `${all} AND unpriced = 0`;
     const unpricedQ = `${all} AND unpriced = 1`;
-    const keys = [repoSlug, issueId];
+    // Canonical on the bind side, lower() on the column side: a row written
+    // before canonicalisation and one written after both match.
+    const keys = [canonicalRepoSlug(repoSlug), issueId];
     return this.view(all, keys, priced, keys, unpricedQ, keys);
   }
 
@@ -751,10 +791,10 @@ export class CostLedger {
         `SELECT run_id,
                 COALESCE(SUM(CASE WHEN unpriced = 0 THEN cost_micro_usd ELSE 0 END), 0) AS total,
                 MAX(CASE WHEN kind = 'box_hours' THEN 1 ELSE 0 END) AS hasBox
-         FROM cost_events WHERE repo_slug = ? AND issue_id = ?
+         FROM cost_events WHERE lower(repo_slug) = ? AND issue_id = ?
          GROUP BY run_id ORDER BY MIN(created_at)`,
       )
-      .all(repoSlug, issueId) as { run_id: string; total: number; hasBox: number }[];
+      .all(canonicalRepoSlug(repoSlug), issueId) as { run_id: string; total: number; hasBox: number }[];
     return rows.map((r) => ({ runId: r.run_id, totalMicroUsd: r.total, hasBoxHours: r.hasBox === 1 }));
   }
 
@@ -816,6 +856,10 @@ export class CostLedger {
    */
   admitIssue(input: AdmissionInput, capMicroUsd: number, keyCapMicroUsd: number): AdmissionDecision {
     const started = Date.now();
+    // Settle identity ONCE for this admission: every predicate below and the
+    // gate_admissions row all key on the same canonical slug, so the spend a
+    // decision reads and the reservation it writes can never be two identities.
+    const repoSlug = canonicalRepoSlug(input.repoSlug);
     this.assertQueryable();
     if (!Number.isInteger(capMicroUsd) || capMicroUsd <= 0) {
       throw new CostConfigError(
@@ -827,9 +871,9 @@ export class CostLedger {
     const decide = this.db.transaction((): AdmissionDecision => {
       const spentRow = this.db
         .prepare(
-          "SELECT COALESCE(SUM(cost_micro_usd), 0) AS total, COUNT(*) AS n FROM cost_events WHERE repo_slug = ? AND issue_id = ? AND unpriced = 0",
+          "SELECT COALESCE(SUM(cost_micro_usd), 0) AS total, COUNT(*) AS n FROM cost_events WHERE lower(repo_slug) = ? AND issue_id = ? AND unpriced = 0",
         )
-        .get(input.repoSlug, input.issueId) as { total: number; n: number };
+        .get(repoSlug, input.issueId) as { total: number; n: number };
       // The caller's OWN row is excluded from the reservations below: this
       // admission is either fresh (no such row exists, so the exclusion matches
       // nothing) or a retry of the same (request_id, run_id), which must be
@@ -850,14 +894,14 @@ export class CostLedger {
         .prepare(
           `SELECT a.ceiling_micro_usd AS ceiling, a.run_id AS runId, a.decided_at AS decidedAt
            FROM gate_admissions a
-           WHERE a.repo_slug = ? AND a.issue_id = ?
+           WHERE lower(a.repo_slug) = ? AND a.issue_id = ?
              AND NOT (a.request_id = ? AND a.run_id = ?)
              AND NOT EXISTS (
                SELECT 1 FROM cost_events ce
                WHERE ce.run_id = a.run_id AND ce.unpriced = 0
              )`,
         )
-        .all(input.repoSlug, input.issueId, input.requestId, input.runId) as {
+        .all(repoSlug, input.issueId, input.requestId, input.runId) as {
         ceiling: number;
         runId: string;
         decidedAt: string;
@@ -906,9 +950,9 @@ export class CostLedger {
       }
       const unpricedRow = this.db
         .prepare(
-          "SELECT COUNT(*) AS n FROM cost_events WHERE repo_slug = ? AND issue_id = ? AND unpriced = 1",
+          "SELECT COUNT(*) AS n FROM cost_events WHERE lower(repo_slug) = ? AND issue_id = ? AND unpriced = 1",
         )
-        .get(input.repoSlug, input.issueId) as { n: number };
+        .get(repoSlug, input.issueId) as { n: number };
       const spentMicroUsd = spentRow.total;
       const unpricedRows = unpricedRow.n;
       const cap = capMicroUsd;
@@ -947,7 +991,7 @@ export class CostLedger {
            VALUES (?,?,?,?,?,?)
            ON CONFLICT(request_id, run_id) DO NOTHING`,
         )
-        .run(input.requestId, input.runId, input.repoSlug, input.issueId, ceiling, new Date().toISOString());
+        .run(input.requestId, input.runId, repoSlug, input.issueId, ceiling, new Date().toISOString());
       if (changes === 0) {
         // `DO NOTHING` fired: this (request_id, run_id) already holds a
         // reservation — a retried dispatch reusing its correlation id after a
@@ -1005,7 +1049,7 @@ export class CostLedger {
       duration: durationMs,
       status: "ok",
       runId: input.runId,
-      repoSlug: input.repoSlug,
+      repoSlug,
       issueId: input.issueId,
       decision: decision.status,
       capMicroUsd: decision.capMicroUsd,

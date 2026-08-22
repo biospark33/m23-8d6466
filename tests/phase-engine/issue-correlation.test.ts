@@ -23,6 +23,7 @@ import * as path from "node:path";
 // RED: issue-correlation.ts does not exist yet — this import is the first failure.
 import {
   REPO_SLUG_PATTERN,
+  canonicalRepoSlug,
   UUID_V4_PATTERN,
   MAX_ISSUE_ID,
   CorrelationError,
@@ -812,6 +813,66 @@ describe("dispatch_task correlation integration (offline)", () => {
       const src = await Bun.file(path.join(import.meta.dir, rel)).text();
       expect(src).not.toContain("'success' | 'transient'");
       expect(src).not.toContain('"success" | "transient"');
+    }
+  });
+});
+
+// ─── canonical identity (review round 4) ─────────────────────────────────────
+
+/**
+ * (repoSlug, issueId) is a KEY, not a pair of strings that get compared. The
+ * cost ledger filters on it byte-exactly, so if this module hands back two
+ * spellings of one repository the per-issue cap is served twice.
+ */
+describe("canonicalRepoSlug", () => {
+  test("folds ASCII case so one repository is one identity", () => {
+    expect(canonicalRepoSlug("Owner/Repo")).toBe("owner/repo");
+    expect(canonicalRepoSlug("BiosparkHealth/QDS-Factory")).toBe("biosparkhealth/qds-factory");
+    expect(canonicalRepoSlug("owner/repo")).toBe("owner/repo");
+  });
+
+  test("is idempotent", () => {
+    const once = canonicalRepoSlug("Owner/Repo");
+    expect(canonicalRepoSlug(once)).toBe(once);
+  });
+
+  test("folds ASCII and ONLY ASCII, so it cannot disagree with SQLite's lower()", () => {
+    // SQLite's lower() is ASCII-only. A Unicode-aware toLowerCase() folds these;
+    // if this ever starts folding them too, JS and SQL would disagree about
+    // identity for any value that reached the ledger without passing
+    // REPO_SLUG_PATTERN — a hand-edited run record, for one.
+    for (const ch of ["İ", "Ä", "Σ"]) {
+      expect(canonicalRepoSlug(ch)).toBe(ch);
+    }
+    expect(canonicalRepoSlug("İ".toLowerCase())).not.toBe(canonicalRepoSlug("İ"));
+  });
+
+  test("the canonical form still satisfies REPO_SLUG_PATTERN", () => {
+    expect(REPO_SLUG_PATTERN.test(canonicalRepoSlug("BiosparkHealth/QDS-Factory"))).toBe(true);
+  });
+});
+
+describe("resolveRunCorrelation canonicalises the slug", () => {
+  test("returns the canonical slug — this is what every downstream row is keyed on", () => {
+    const r = resolveRunCorrelation({ repoSlug: "BiosparkHealth/QDS-Factory", issueId: 42 });
+    expect(r.repoSlug).toBe("biosparkhealth/qds-factory");
+  });
+
+  test("two casings of one repository resolve to ONE identity", () => {
+    const a = resolveRunCorrelation({ repoSlug: "Owner/Repo", issueId: 7 });
+    const b = resolveRunCorrelation({ repoSlug: "owner/repo", issueId: 7 });
+    expect(a.repoSlug).toBe(b.repoSlug);
+  });
+
+  test("the refusal still quotes what the operator actually typed", () => {
+    // Validated on the raw value, canonicalised only on the way out — an error
+    // naming a slug the operator never wrote is not actionable.
+    try {
+      resolveRunCorrelation({ repoSlug: "NoSlashHere", issueId: 1 });
+      throw new Error("expected CorrelationError");
+    } catch (e) {
+      expect((e as CorrelationError).code).toBe("INVALID_REPO_SLUG");
+      expect((e as CorrelationError).message).toContain("NoSlashHere");
     }
   });
 });

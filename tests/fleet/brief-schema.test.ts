@@ -675,3 +675,70 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
     expect(stamped.resolvedPath).toBeUndefined();
   });
 });
+
+// ─── repoUrl ↔ repoSlug, canonical (review round 4) ──────────────────────────
+
+/**
+ * The cross-check ties the identity that PAYS (repoSlug — the ledger key and
+ * the per-issue cap) to the code that RUNS (repoUrl — what gets cloned inside
+ * the box). Comparison is canonical on both sides, and EXACT on the path.
+ */
+describe("repoUrl/repoSlug cross-check", () => {
+  test("a forge that folds case is accepted — the URL names the same repository", () => {
+    const brief = validBrief({
+      repoSlug: "owner/repo",
+      repoUrl: "https://github.com/Owner/Repo",
+    });
+    expect(BriefSchema.parse(brief).repoUrl).toBe("https://github.com/Owner/Repo");
+  });
+
+  test("a slug in one casing and a URL in another still name one repository", () => {
+    expect(() =>
+      BriefSchema.parse(
+        validBrief({ repoSlug: "BiosparkHealth/QDS-Factory", repoUrl: "https://github.com/biosparkhealth/qds-factory" }),
+      ),
+    ).not.toThrow();
+  });
+
+  test("a DIFFERENT repository is still refused, whatever the casing", () => {
+    expectRejected(validBrief({ repoUrl: "https://github.com/owner/other-repo" }), {
+      field: "repoUrl",
+      code: "custom",
+      message: /same repository/,
+    });
+    expectRejected(validBrief({ repoUrl: "https://github.com/Attacker/Repo" }), {
+      field: "repoUrl",
+      code: "custom",
+      message: /same repository/,
+    });
+  });
+
+  test("a path PREFIX does not satisfy the slug — endsWith would admit an attacker's host", () => {
+    // https://evil.example/x/owner/repo is the reason the comparison is exact.
+    expectRejected(validBrief({ repoUrl: "https://evil.example/x/owner/repo" }), {
+      field: "repoUrl",
+      code: "custom",
+      message: /same repository/,
+    });
+    expectRejected(validBrief({ repoUrl: "https://github.com/git/owner/repo" }), {
+      field: "repoUrl",
+      code: "custom",
+      message: /same repository/,
+    });
+  });
+
+  test("a percent-escaped path is refused rather than decoded", () => {
+    // %72 is 'r'. The slug charset never needs an escape, so an escaped path
+    // does not name a slug-shaped repo — and decoding invites %252e.
+    expectRejected(validBrief({ repoUrl: "https://github.com/owner/%72epo" }), {
+      field: "repoUrl",
+      code: "custom",
+      message: /same repository/,
+    });
+  });
+
+  test("the host is deliberately unconstrained — self-hosted forges stay legitimate", () => {
+    const url = "https://git.internal.example.com/owner/repo";
+    expect(BriefSchema.parse(validBrief({ repoUrl: url })).repoUrl).toBe(url);
+  });
+});
