@@ -3397,15 +3397,51 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(err.payload?.debugCommands).toEqual([`bun scripts/fleet.ts status ${runId}`]);
     }
     expect(setPublicCalls).toBe(0);
-    // The port claim landed before the provider calls and is RETRACTED by this
-    // refusal: nothing is in flight (expose resolved, it just resolved nothing),
-    // so a record still advertising 8080 would contradict the refusal's own
-    // "ALIVE but NOT public" and hand port-keyed reapers a port the box does not
-    // have. The URL never lands either, because none was ever established.
+    // The port claim is KEPT, which is the opposite of what this test used to
+    // assert. `expose` RESOLVED here — it just resolved nothing — so unlike the
+    // throwing-expose case above there is every reason to think the tunnel was
+    // opened; a driver returning no URL is violating a `Promise<string>`
+    // signature, not reporting a no-op. Retracting on that reading is the
+    // dangerous direction: the record then denies a port the box is listening
+    // on, and a port-keyed reaper skips a run that is burning money. Over-claim
+    // a port and the worst case is a reaper looking at a box twice.
+    //
+    // It contradicts nothing the refusal says: EXPOSED is not PUBLIC, and
+    // `setPublicCalls === 0` above is what makes "ALIVE but NOT public" true.
     const files = readdirSync(store.dir);
     expect(files).toHaveLength(1);
     const record = store.get((files[0] as string).replace(/\.json$/, ""));
-    expect(record.ports).toEqual([]);
+    expect(record.ports).toEqual([8080]);
+    // The URL never lands, because none was ever established — that half of the
+    // claim is unchanged, and it is what the refusal is FOR.
     expect(record.httpsUrl).toBeUndefined();
+  });
+
+  test("a setPublic failure KEEPS the port claim — the port is open, whatever setPublic did", async () => {
+    // The retraction's blind spot: it fired for any non-timeout error, and by
+    // the time `setPublic` can fail, `expose` has already resolved a URL and the
+    // record already carries it. Retracting there left `httpsUrl` set beside an
+    // EMPTY `ports` on the same record — self-contradictory — while the box sat
+    // listening on 8080. `fleet status` reported no port and port-keyed reapers
+    // missed it entirely, which is the exact under-reporting the pre-claim two
+    // steps earlier exists to prevent.
+    driver.setPublic = async () => {
+      throw Object.assign(new Error("substrate refused to publish"), { code: "EACCES" });
+    };
+
+    try {
+      await dispatch(validBrief(), deps({ port: 8080 }));
+      expect.unreachable();
+    } catch (e) {
+      const err = e as FleetError;
+      expect(err.code).toBe("dispatch-failed");
+      expect(err.payload?.providerCode).toBe("EACCES");
+      const record = store.get(err.payload?.runId as string);
+      // Both halves, together: the port the box really has, and the URL expose
+      // really returned. Asserting `ports` alone would pass on a record that had
+      // dropped the URL instead.
+      expect(record.ports).toEqual([8080]);
+      expect(record.httpsUrl).toBeString();
+    }
   });
 });

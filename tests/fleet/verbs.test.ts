@@ -22,7 +22,7 @@
  * that names the box after the run id and writes `vmName` back — so no test
  * recomputes a box-naming formula the factory does not use.
  */
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,7 +50,7 @@ import {
 } from "../../src/providers/run-record.ts";
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
 import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
-import { rejection } from "../helpers.ts";
+import { liveForeignPid, rejection } from "../helpers.ts";
 
 /**
  * Await a refusal and hand back the TYPED error — never a bare "something threw".
@@ -505,18 +505,22 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
   /**
    * A pid that is ALIVE and is NOT ours. The run lock is not re-entrant, so a
    * body carrying our own pid+host is refused as `run-lock-reentrant` — a
-   * programming error — before `refuse` ever classifies it as contention. The
-   * parent is the one other process every test run is guaranteed to have; pid 1
-   * is the fallback, and `isAlive` reads its EPERM as alive.
+   * programming error — before `refuse` ever classifies it as contention.
+   *
+   * A child THIS suite owns, not a guess at one. `process.ppid` with a fallback
+   * to pid 1 could be wrong in two directions and silent in both: a parent that
+   * exits mid-suite turns the probe into the STALE case in disguise, and in a
+   * container the fallback IS us, so the lock reads as re-entrancy. Neither
+   * fails the assertion below — they just move it onto the wrong branch.
    */
-  const FOREIGN_LIVE_PID = process.ppid > 0 && process.ppid !== process.pid ? process.ppid : 1;
+  const foreignLive = liveForeignPid();
+  afterAll(foreignLive.stop);
+  const FOREIGN_LIVE_PID = foreignLive.pid;
 
   const holdRunLock = (runId: string): void => {
-    // LIVENESS is the claim, and it is the one that can actually fail: the
-    // ternary above already excludes `process.pid`, so `expect(FOREIGN_LIVE_PID)
-    // .not.toBe(process.pid)` could never fire. A parent that exited between
-    // this process starting and this line makes the probe the STALE case in
-    // disguise, which is the sibling probe's subject, not this one's.
+    // Still asserted, now as a precondition rather than a hope: the child is
+    // kept alive for the whole suite, so this can only fail if the spawn itself
+    // did — and that should say so here, not three assertions downstream.
     expect(isAlive(FOREIGN_LIVE_PID)).toBe(true);
     writeRunLock(runId, FOREIGN_LIVE_PID, 4_000);
   };

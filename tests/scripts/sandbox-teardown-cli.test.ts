@@ -9,7 +9,7 @@
  * no git repo is touched and no box is destroyed — the harvest/teardown flows
  * themselves are covered by tests/providers/teardown.test.ts.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +24,7 @@ import {
   RunLockedError,
   RunLockReentrantError,
 } from "../../scripts/lib/run-lock.ts";
+import { liveForeignPid } from "../helpers.ts";
 
 /** The shared lock module, by absolute path, for the signal subprocess below. */
 const RUN_LOCK_MODULE = join(import.meta.dir, "../../scripts/lib/run-lock.ts");
@@ -39,11 +40,21 @@ const RUN_LOCK_MODULE = join(import.meta.dir, "../../scripts/lib/run-lock.ts");
 const DEAD_PID = 999_999_999;
 
 /**
- * A pid that is certainly running and is certainly not us. pid 1 exists on
- * every POSIX host; `kill(1, 0)` from a normal user raises EPERM, which the
- * liveness probe reads (correctly) as alive.
+ * A pid that is certainly running and is certainly not us — a child this file
+ * OWNS, kept alive for the whole suite.
+ *
+ * It used to be the literal `1`, on the reasoning that pid 1 exists on every
+ * POSIX host and answers `kill(1, 0)` with EPERM, which the probe reads as
+ * alive. True everywhere except the place this suite actually runs in CI: inside
+ * a container the test runner IS pid 1, so every fixture below wrote OUR pid
+ * into the lock body. `acquireRunLock` refuses that as re-entrancy — a
+ * programming error, a different class and a different message — before the
+ * contention branch it is supposed to be exercising is ever reached. The
+ * assertions still ran; they just ran against the wrong refusal.
  */
-const LIVE_FOREIGN_PID = 1;
+const liveForeign = liveForeignPid();
+afterAll(liveForeign.stop);
+const LIVE_FOREIGN_PID = liveForeign.pid;
 
 /**
  * This host as the lock body spells it (run-lock.ts's `lockHost`), OBSERVED from

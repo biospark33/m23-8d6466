@@ -648,7 +648,14 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     // schema can refuse must never burn a billing box INV-5 then forbids
     // destroying. The trust boundary is here.
     for (const url of [
-      "https://x-access-token:ghs_16C7e42F292c6912E7710c838347Ae178B4a@github.com/owner/repo",
+      // The password is a PLACEHOLDER, not a token shape: this fixture asserts
+      // on `userinfo` being present at all, so nothing here depends on the value
+      // looking issuable — and a literal `ghs_<36 base62>` is what repository
+      // secret scanners match, so a fixture wearing that shape costs a push
+      // block and a triage cycle for a string that was never a credential. The
+      // underscores keep it off `ghs_[A-Za-z0-9]{36}` while the `ghs_` prefix
+      // keeps the case recognisable as the clone-URL token the comment names.
+      "https://x-access-token:ghs_EXAMPLE_NOT_A_REAL_TOKEN@github.com/owner/repo",
       "https://x-access-token@github.com/owner/repo", // username, no password
       "https://user:@github.com/owner/repo", // password empty but present
     ]) {

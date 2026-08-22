@@ -204,7 +204,13 @@ export async function setupGate(
   // `emitGate`/`log` line for the run is precisely the un-joinable output this
   // parameter was added to prevent — worse than the driver's own id, which at
   // least correlates the gate's own lines to each other.
-  const requestId = opts.requestId !== undefined && opts.requestId.trim().length > 0 ? opts.requestId : driver.requestId;
+  //
+  // `!= null`, not `!== undefined`: the type says `string | undefined`, but this
+  // is a driver-boundary option bag that callers build from JSON and env, where
+  // `null` is what an absent field deserialises to. `!== undefined` let it
+  // through to `.trim()` and turned a missing id into a TypeError out of the
+  // gate — a crash where the fallback was the whole point.
+  const requestId = opts.requestId != null && opts.requestId.trim().length > 0 ? opts.requestId : driver.requestId;
   if (!SHA_RE.test(opts.commitSha)) {
     throw new ExeDevDriverError(
       "commit-sha-invalid",

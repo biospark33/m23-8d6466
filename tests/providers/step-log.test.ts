@@ -221,15 +221,28 @@ describe("redactSecrets", () => {
     expect(redactSecrets(frame)).toBe(frame);
   });
 
+  // Every body is a PLACEHOLDER, deliberately not the issuer's real shape, and
+  // that costs the test nothing: `SECRET_PREFIX_RE` is `<prefix>` followed by
+  // `[A-Za-z0-9+/=_.:-]*` — zero or more — so the arm under test is driven
+  // identically by a 24-character placeholder and a 36-character token. What the
+  // real shapes DID buy was a push block: `ghs_[A-Za-z0-9]{36}` and the Slack
+  // and Stripe patterns are what repository secret scanning matches, so fixtures
+  // wearing them cost a triage cycle each for strings that were never issued.
+  //
+  // The placeholders are also a STRONGER test than the tokens they replace. The
+  // old `xapp-`/`xoxa-`/`xoxr-`/`rk_*` bodies ran past LONG_TOKEN_RE's 40-char
+  // floor, so the shape heuristic would have redacted them with the prefix entry
+  // deleted — the row passed without proving the thing it names. Under the floor
+  // (asserted below) the prefix arm is the ONLY arm that can reach them.
   test.each([
-    ["xapp-", "xapp-1-A012BCDEFGH-1234567890123-abcdef0123456789abcdef0123456789"],
-    ["xoxa-", "xoxa-2-511111111-31111111111-3111111111111-abcdef0123456789abcdef"],
-    ["xoxr-", "xoxr-2-511111111-31111111111-3111111111111-abcdef0123456789abcdef"],
-    ["rk_live_", "rk_live_51H8xQ2KZvKuLPQ7Xabcdefghijklmnopqrstuvwxyz0123"],
-    ["rk_test_", "rk_test_51H8xQ2KZvKuLPQ7Xabcdefghijklmnopqrstuvwxyz0123"],
-    ["ghs_", "ghs_16C7e42F292c6912E7710c838347Ae178B4a"],
-    ["ghu_", "ghu_16C7e42F292c6912E7710c838347Ae178B4a"],
-    ["ghr_", "ghr_16C7e42F292c6912E7710c838347Ae178B4a"],
+    ["xapp-", "xapp-EXAMPLE-NOT-A-REAL-TOKEN"],
+    ["xoxa-", "xoxa-EXAMPLE-NOT-A-REAL-TOKEN"],
+    ["xoxr-", "xoxr-EXAMPLE-NOT-A-REAL-TOKEN"],
+    ["rk_live_", "rk_live_EXAMPLE_NOT_A_REAL_KEY"],
+    ["rk_test_", "rk_test_EXAMPLE_NOT_A_REAL_KEY"],
+    ["ghs_", "ghs_EXAMPLE_NOT_A_REAL_TOKEN"],
+    ["ghu_", "ghu_EXAMPLE_NOT_A_REAL_TOKEN"],
+    ["ghr_", "ghr_EXAMPLE_NOT_A_REAL_TOKEN"],
   ])("the %s issuer prefix is redacted on sight", (_prefix, token) => {
     // The prefix arm is UNCONDITIONAL on character classes: a known issuer
     // prefix is the strong signal, so the shape heuristic is never the sole
@@ -237,6 +250,10 @@ describe("redactSecrets", () => {
     // real clone URL carries (`https://x-access-token:ghs_…@github.com/…`),
     // and the shape heuristic cannot reach it at all — anything matching
     // `scheme://` returns early.
+    // Under LONG_TOKEN_RE's 40-char floor BY CONSTRUCTION, so the assertions
+    // below can only be satisfied by the prefix arm. Without this, re-lengthening
+    // a body would quietly hand the row back to the shape heuristic.
+    expect(token.length).toBeLessThan(40);
     const out = redactSecrets(`auth failed for ${token}`);
     expect(leakScan(token, out)).toBeNull();
     expect(out).toContain("«redacted»");

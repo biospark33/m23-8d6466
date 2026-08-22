@@ -277,9 +277,12 @@ export function runContextFrom(
     // `stripAuthoredLimit` is applied on the runner side, this is the door the
     // admitted ceiling walks out of.
     if (!witnessPresent(witness.manifestPath)) return ctx;
-    return { ...ctx, effectiveCeilingMicros: admittedCeilingBeside(witness.manifestPath, witness.runRoot) };
+    return {
+      ...ctx,
+      effectiveCeilingMicros: admittedCeilingBeside(witness.manifestPath, witness.runRoot, false),
+    };
   }
-  const admitted = admittedCeilingBeside(witness.manifestPath, witness.runRoot);
+  const admitted = admittedCeilingBeside(witness.manifestPath, witness.runRoot, true);
   if (admitted !== manifest.limitMicroUsd) {
     throw new Error(
       `manifest declares limitMicroUsd ${manifest.limitMicroUsd} but dispatch admitted ${admitted}`,
@@ -325,21 +328,33 @@ function witnessPresent(manifestPath: string): boolean {
   }
 }
 
-function admittedCeilingBeside(manifestPath: string, runRoot: string): number {
+/**
+ * `declared` is the CALLER'S state, not a behaviour switch: both refusals read
+ * identically either way, and only the lead-in changes. The witness-only path
+ * reaches this function precisely BECAUSE the manifest declared nothing, so the
+ * old unconditional "manifest declares limitMicroUsd but …" told the operator
+ * the opposite of what happened — sending them to grep a `limitMicroUsd` that
+ * is not in their manifest, when the thing to fix is the witness beside it.
+ */
+function admittedCeilingBeside(manifestPath: string, runRoot: string, declared: boolean): number {
   const witnessPath = witnessPathBeside(manifestPath);
+  // The witness is consulted for opposite reasons on the two paths — to CHECK a
+  // declared limit, or to SUPPLY an undeclared one — and the refusal has to name
+  // the one that actually applies.
+  const because = declared
+    ? "manifest declares limitMicroUsd but its dispatch witness"
+    : "manifest declares no limitMicroUsd and the dispatch witness beside it";
   let parsed: unknown;
   try {
     parsed = JSON.parse(readArtifactBeneathRoot(witnessPath, runRoot).bytes.toString("utf8"));
   } catch (err) {
     throw new Error(
-      `manifest declares limitMicroUsd but its dispatch witness ${witnessPath} is unreadable: ${err instanceof Error ? err.message : String(err)}`,
+      `${because} ${witnessPath} is unreadable: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
   const admitted = (parsed as { effectiveCeilingMicros?: unknown } | null)?.effectiveCeilingMicros;
   if (!Number.isSafeInteger(admitted) || (admitted as number) <= 0) {
-    throw new Error(
-      `manifest declares limitMicroUsd but ${witnessPath} carries no positive integer effectiveCeilingMicros`,
-    );
+    throw new Error(`${because} ${witnessPath} carries no positive integer effectiveCeilingMicros`);
   }
   return admitted as number;
 }

@@ -2240,6 +2240,11 @@ export async function dispatch(
       // status` under-reports a live public box and port-keyed reapers miss it
       // entirely. The record claims the port before anything can open it.
       deps.store.set(runId, { ports: [port] });
+      // `expose` RESOLVING is the moment the port stops being speculative — the
+      // retraction below turns on this and nothing else. It cannot be inferred
+      // from `ctxHttpsUrl`, which is already set from `vm.httpsUrl` at create
+      // time and so is non-undefined on plenty of runs where `expose` never ran.
+      let portOpened = false;
       try {
         ctxHttpsUrl = await within(
           "expose",
@@ -2248,6 +2253,7 @@ export async function dispatch(
           // record could not be told.
           (url) => ({ httpsUrl: typeof url === "string" ? redact(url) : undefined, port }),
         );
+        portOpened = true;
         // The URL was the one state claim still made AFTER the call it describes.
         // Two ways that lost it: a failed — or, by the same abandon-not-cancel
         // reasoning as the `ports` claim above, an ABANDONED — `setPublic` left
@@ -2278,20 +2284,28 @@ export async function dispatch(
           () => ({ vmName: vm.name, publiclyReachable: true }),
         );
       } catch (e) {
-        // RETRACT the speculative `ports` claim — the claim above is justified
-        // by the abandon-not-cancel case alone, and the ordinary case is a
-        // provider error with nothing in flight. Left standing, the record
+        // RETRACT the speculative `ports` claim, but ONLY while it is still
+        // speculative. Left standing on a failed `expose`, the record
         // permanently advertised a port on a box where nothing was opened:
         // port-keyed reapers and `fleet status` both read a port the box does
-        // not have, and the `expose-no-url` refusal's own message ("ALIVE but
-        // NOT public") contradicted the record it pointed at.
+        // not have.
         //
-        // An abandoned call KEEPS the claim, which is what it was written for: a
-        // `dispatch-timeout` is precisely the case where the expose may still
-        // land. `[]` rather than an unset, because the store merges patches and
-        // has no way to remove a field — an empty list is "this run claims no
-        // port", which is what a reaper and `fleet status` both need to read.
-        if (!(e instanceof FleetError && e.code === "dispatch-timeout")) {
+        // Two cases KEEP the claim, and both are ones where the port is real:
+        //
+        //  - An ABANDONED call, which is what the claim was written for: a
+        //    `dispatch-timeout` is precisely the case where the expose may still
+        //    land after the refusal.
+        //  - Anything that failed AFTER `expose` resolved — `expose-no-url` and
+        //    every `setPublic` failure. The port is OPEN on those; retracting
+        //    left the record denying a port the box is listening on, and
+        //    `httpsUrl` (written between the two calls) contradicting the same
+        //    record's empty `ports`. That is the inconsistency this retraction
+        //    exists to prevent, pointed the other way.
+        //
+        // `[]` rather than an unset, because the store merges patches and has no
+        // way to remove a field — an empty list is "this run claims no port",
+        // which is what a reaper and `fleet status` both need to read.
+        if (!portOpened && !(e instanceof FleetError && e.code === "dispatch-timeout")) {
           try {
             deps.store.set(runId, { ports: [] });
           } catch {

@@ -326,6 +326,28 @@ export class CostConfigError extends CostLedgerError {
   }
 }
 
+/**
+ * SQLITE_BUSY → the typed `ledger-busy` refusal; `undefined` for anything else,
+ * so callers rethrow the original rather than reclassify a real fault as
+ * contention.
+ *
+ * ONE definition because `admitIssue` now touches SQLite from two places — the
+ * reservation prefetch, deliberately outside the write transaction, and
+ * `decide.immediate()` itself. Two copies of this test would be two chances for
+ * one of them to drift into throwing a raw driver error, and a caller that
+ * cannot tell "retry me" from "the ledger is broken" either retries a fault or
+ * gives up on a lock.
+ */
+function ledgerBusyError(e: unknown): CostLedgerError | undefined {
+  const msg = (e as Error)?.message ?? String(e);
+  if (!/database is (locked|busy)|database table is locked/i.test(msg)) return undefined;
+  return new CostLedgerError(
+    "ledger-busy",
+    `the cost ledger stayed write-locked past the 5s busy timeout (${msg}) — transient contention, not corruption`,
+    "retry the dispatch; if it persists, check for a process holding .sandbox/cost-ledger.db open",
+  );
+}
+
 // ─── config ──────────────────────────────────────────────────────────────────
 
 export interface CostConfig {
@@ -1157,9 +1179,26 @@ export class CostLedger {
     // add the odd record, never the whole list. Correctness is untouched: the
     // SUM→INSERT serialization the gate depends on is all still inside.
     const prefetched = new Map<string, { record?: RunCostRecord; error?: unknown }>();
-    for (const row of this.db
-      .prepare(`SELECT DISTINCT run_id AS runId FROM gate_admissions WHERE ${issueScopeSql()}`)
-      .all(...scopeKeys) as { runId: string }[]) {
+    // Moving this read OUT of the transaction moved it out of the busy mapping
+    // too: `decide.immediate()` below translates SQLITE_BUSY into the typed
+    // `ledger-busy` refusal, and for as long as the read lived inside it, so did
+    // this query. Out here an untyped better-sqlite3 `SQLITE_BUSY` escaped
+    // `admitIssue` raw — the same transient contention, in a shape the gate's
+    // callers cannot switch on, so a retryable lock read as an unknown ledger
+    // fault. The availability fix must not cost the typed refusal.
+    //
+    // Only the QUERY is wrapped. Per-record `readRunRecord` failures keep the
+    // loop's own classification (young ⇒ refuse, aged ⇒ expire) — they are
+    // filesystem faults about ONE reservation, not ledger contention.
+    let admittedRuns: { runId: string }[];
+    try {
+      admittedRuns = this.db
+        .prepare(`SELECT DISTINCT run_id AS runId FROM gate_admissions WHERE ${issueScopeSql()}`)
+        .all(...scopeKeys) as { runId: string }[];
+    } catch (e) {
+      throw ledgerBusyError(e) ?? e;
+    }
+    for (const row of admittedRuns) {
       try {
         prefetched.set(row.runId, { record: this.readRunRecord(row.runId) });
       } catch (error) {
@@ -1454,15 +1493,7 @@ export class CostLedger {
     try {
       decision = decide.immediate();
     } catch (e) {
-      const msg = (e as Error).message ?? String(e);
-      if (/database is (locked|busy)|database table is locked/i.test(msg)) {
-        throw new CostLedgerError(
-          "ledger-busy",
-          `the cost ledger stayed write-locked past the 5s busy timeout (${msg}) — transient contention, not corruption`,
-          "retry the dispatch; if it persists, check for a process holding .sandbox/cost-ledger.db open",
-        );
-      }
-      throw e;
+      throw ledgerBusyError(e) ?? e;
     } finally {
       // finally, not the success path: a transaction that threw after expiring a
       // reservation still owes the operator that line.

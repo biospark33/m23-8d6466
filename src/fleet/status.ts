@@ -226,9 +226,19 @@ async function listOwnedBoxes(
   timeoutMs: number,
   name?: string,
 ): Promise<Map<string, ProviderVm> | null> {
+  // ONE deadline across BOTH attempts. `timeoutMs` is the caller's bound on this
+  // function, and handing it to each call in turn silently doubled it: the named
+  // lookup timing out is the commonest way to reach the retry, so the path the
+  // retry exists to serve is exactly the one that spent 2 × the budget. A
+  // wedged substrate then held `fleet status` for twice as long as it asked for.
+  const deadline = Date.now() + timeoutMs;
   const boxes = await listOwnedBoxesOnce(deps, timeoutMs, name);
   if (boxes !== null || name === undefined) return boxes;
-  return listOwnedBoxesOnce(deps, timeoutMs);
+  // Exhausted budget still ATTEMPTS rather than short-circuiting to `null`:
+  // `listWithTimeout` races the driver against the timer, so a driver already
+  // holding the answer can still win at 0 ms — and a `null` returned without
+  // asking would claim "the substrate could not be asked" when it never was.
+  return listOwnedBoxesOnce(deps, Math.max(0, deadline - Date.now()));
 }
 
 async function listOwnedBoxesOnce(
