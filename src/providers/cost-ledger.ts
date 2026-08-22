@@ -25,12 +25,44 @@ import { Database } from "bun:sqlite";
 
 import type { CostEvent } from "../../cli-anything/src/types.ts";
 import { canonicalRepoSlug } from "../phase-engine/issue-correlation.ts";
-import { log } from "../swarmclaw/log.ts";
+import { log, newRequestId } from "../swarmclaw/log.ts";
 
 // ─── units ───────────────────────────────────────────────────────────────────
 
 const MICRO_PER_USD = 1_000_000;
 const MS_PER_HOUR = 3_600_000;
+
+// ─── identity ────────────────────────────────────────────────────────────────
+
+/**
+ * Canonical form of an issue id — the OTHER half of the (repoSlug, issueId)
+ * budget key, and the same cap-bypass class `canonicalRepoSlug` closed.
+ *
+ * Every issue-scoped predicate here is a byte-exact SQL comparison on
+ * `issue_id`, and `capForIssue` looks its per-issue override up by the id that
+ * follows the `#`. Canonicalising only the slug left the bypass open on this
+ * side: `42`, `#42`, `042` and `42 ` are four distinct strings, so each one
+ * opens its own budget identity holding a full untouched cap, and an override
+ * an operator wrote as `owner/repo#042` never matched the `"42"` a dispatch
+ * supplies — the cap silently reverting to the default, the direction that
+ * costs money.
+ *
+ * Three foldings, each for a shape a human or a hand-edited record actually
+ * produces: surrounding whitespace, the `#` operators write out of habit, and
+ * leading zeros. Leading zeros are stripped by regex rather than through
+ * `Number`, which would round any id past 2^53 into a different issue.
+ *
+ * TOTAL, like `canonicalRepoSlug`: a non-numeric remainder is passed through
+ * trimmed rather than rejected, so this can canonicalise on every path
+ * (including reads of rows written before it existed) without becoming a
+ * second validation gate. `resolveRunCorrelation` is where an issue id is
+ * validated; this is only where it is made a key.
+ */
+export function canonicalIssueId(issueId: string): string {
+  const bare = issueId.trim().replace(/^#/, "");
+  // `(?=\d)` keeps "0" as "0" instead of folding it to the empty string.
+  return /^\d+$/.test(bare) ? bare.replace(/^0+(?=\d)/, "") : bare;
+}
 
 /**
  * How long an admission counts toward `reservedMicroUsd` before a missing run
@@ -83,17 +115,26 @@ export const ADMISSION_GRACE_MS = 60_000;
  */
 export const ADMISSION_SKEW_MARGIN_MS = 300_000;
 
-/** DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up. */
-/** DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up. */
+/**
+ * DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up.
+ *
+ * ROUND FIRST, then validate the ROUNDED value. Validating the product was the
+ * bug: `usd * 1e6` is a float, and almost no ordinary cost lands on an integer
+ * — `1.005 * 1e6` is `1004999.9999999999`, `0.0000015 * 1e6` is `1.5` — so
+ * `Number.isSafeInteger` on the product threw for the common case, not the
+ * pathological one. Rounding is exactly what the conversion is for; the range
+ * check exists to catch a figure too large to be money, and `Math.round`
+ * preserves that (a value past 2^53 rounds to itself and still fails).
+ */
 function usdToMicros(usd: number): number {
   if (!Number.isFinite(usd)) {
     throw new CostLedgerError("cost-convert-invalid", `costUsd must be finite (got ${usd})`, "fix the producer's cost event");
   }
-  const micros = usd * MICRO_PER_USD;
+  const micros = Math.round(usd * MICRO_PER_USD);
   if (!Number.isSafeInteger(micros)) {
     throw new CostLedgerError("cost-convert-invalid", `costUsd ${usd} × 1e6 exceeds safe integer range (${micros})`, "fix the producer's cost event");
   }
-  return Math.round(micros);
+  return micros;
 }
 
 // ─── schema ──────────────────────────────────────────────────────────────────
@@ -235,6 +276,21 @@ export const DEFAULT_COST_LEDGER_FILE = ".sandbox/cost-ledger.db";
 
 const ISSUE_KEY_RE = /^[\w.-]+\/[\w.-]+#\d+$/;
 
+/** The `<canonical slug>#<canonical issue>` identity both sides of an override lookup are reduced to. */
+function canonicalIssueKey(repoSlug: string, issueId: string): string {
+  return `${canonicalRepoSlug(repoSlug)}#${canonicalIssueId(issueId)}`;
+}
+
+/**
+ * The same identity for an operator-authored override key, or `undefined` when
+ * the key carries no `#` at all and so names no issue. The slug charset
+ * excludes '#', so the FIRST one always separates the pair.
+ */
+function canonicalOverrideKey(key: string): string | undefined {
+  const sep = key.indexOf("#");
+  return sep === -1 ? undefined : canonicalIssueKey(key.slice(0, sep), key.slice(sep + 1));
+}
+
 const CONFIG_KEYS: readonly (keyof CostConfig)[] = ["defaultCapMicroUsd", "perIssueOverrides", "boxHourRateMicroUsd"];
 
 function configInvalid(file: string, detail: string): CostConfigError {
@@ -267,7 +323,28 @@ export function loadCostConfig(
     raw = readFileSync(file, "utf8");
   } catch (e) {
     const err = e as NodeJS.ErrnoException;
-    if (err.code === "ENOENT") return { config: { ...DEFAULT_COST_CONFIG }, source: "default" };
+    if (err.code === "ENOENT") {
+      // Absent is a legitimate layout, but it is NOT the same as "the caps you
+      // configured". `costLedgerOpts` derives this path from the records dir,
+      // so relocating the records (`--dir`, $QDS_RUNS_DIR) silently swaps the
+      // operator's caps for the built-ins — the same spend priced against a
+      // different ceiling, with nothing on stdout or stderr saying so. Name the
+      // path we looked at; the fallback itself stays non-fatal.
+      log({
+        requestId: newRequestId(),
+        operation: "cost-ledger.config",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "ok",
+        code: "cost-config-absent-using-defaults",
+        configFile: file,
+        defaultCapMicroUsd: DEFAULT_COST_CONFIG.defaultCapMicroUsd,
+        message: `no cost config at ${file} — pricing and caps fall back to the built-in defaults`,
+        outcome: "default-config",
+      });
+      return { config: { ...DEFAULT_COST_CONFIG }, source: "default" };
+    }
     throw new CostConfigError(
       "cost-config-unreadable",
       `cannot read the cost config file ${file} (${err.message ?? String(e)}) — refusing to guess caps`,
@@ -297,10 +374,29 @@ export function loadCostConfig(
         throw configInvalid(file, "perIssueOverrides must be an object keyed owner/repo#N");
       }
       const overrides: Record<string, number> = {};
+      // Two keys that name the SAME issue are an operator error, not a value to
+      // resolve. `capForIssue` walks the map and returns the first match, so
+      // `{"Owner/Repo#42": 20000000, "owner/repo#42": 1000000}` silently
+      // returned 20 USD — ignoring the very line the operator added to LOWER
+      // the cap. Picking the lower one instead would be just as wrong: it would
+      // quietly ignore the line added to raise it. In a money table the honest
+      // answer to "which of these did you mean?" is to refuse and let the
+      // operator say, which is what every other malformed-config path here does.
+      const seen = new Map<string, string>();
       for (const [issueKey, cap] of Object.entries(value as Record<string, unknown>)) {
         if (!ISSUE_KEY_RE.test(issueKey)) {
           throw configInvalid(file, `perIssueOverrides key ${JSON.stringify(issueKey)} is not of the form owner/repo#N`);
         }
+        // Non-undefined: ISSUE_KEY_RE already required the '#'.
+        const identity = canonicalOverrideKey(issueKey) as string;
+        const first = seen.get(identity);
+        if (first !== undefined) {
+          throw configInvalid(
+            file,
+            `perIssueOverrides keys ${JSON.stringify(first)} and ${JSON.stringify(issueKey)} both name the issue ${identity} — refusing to pick one cap for it`,
+          );
+        }
+        seen.set(identity, issueKey);
         overrides[issueKey] = assertMicros(file, `perIssueOverrides.${issueKey}`, cap);
       }
       over.perIssueOverrides = overrides;
@@ -315,12 +411,14 @@ export function loadCostConfig(
  * The cap that governs one issue: its override when present, the default
  * otherwise.
  *
- * Both sides of the lookup are canonicalised, because both are typed by a
- * human: the operator writes `perIssueOverrides` keys in the cost config, and
- * a brief supplies the slug. Matching raw strings meant an override authored
- * as `BiosparkHealth/QDS-Factory#42` was silently not applied to a dispatch
- * that spelled the slug in any other case — the cap quietly reverting to the
- * default, which is the failure direction that costs money.
+ * Both sides of the lookup are canonicalised — the WHOLE key, not just the
+ * slug — because both are typed by a human: the operator writes
+ * `perIssueOverrides` keys in the cost config, and a brief supplies the pair.
+ * Matching raw strings meant an override authored as
+ * `BiosparkHealth/QDS-Factory#42` was silently not applied to a dispatch that
+ * spelled the slug in any other case, and an override authored as
+ * `owner/repo#042` was never applied to anything at all — the cap quietly
+ * reverting to the default, which is the failure direction that costs money.
  *
  * Comparing key-by-key rather than canonicalising the map once keeps this
  * total: a `CostConfig` built in code (tests, callers) gets the same treatment
@@ -330,14 +428,10 @@ export function loadCostConfig(
 export function capForIssue(config: CostConfig, repoSlug: string, issueId: string): number {
   const overrides = config.perIssueOverrides;
   if (overrides === undefined) return config.defaultCapMicroUsd;
-  const want = `${canonicalRepoSlug(repoSlug)}#${issueId}`;
+  const want = canonicalIssueKey(repoSlug, issueId);
   for (const [key, cap] of Object.entries(overrides)) {
-    // The slug charset excludes '#', so the first one always separates the
-    // pair — the issue id is whatever follows it, matched verbatim.
-    const sep = key.indexOf("#");
-    if (sep === -1) continue;
-    const canonicalKey = `${canonicalRepoSlug(key.slice(0, sep))}#${key.slice(sep + 1)}`;
-    if (canonicalKey === want) return cap;
+    const canonicalKey = canonicalOverrideKey(key);
+    if (canonicalKey !== undefined && canonicalKey === want) return cap;
   }
   return config.defaultCapMicroUsd;
 }
@@ -536,16 +630,28 @@ export class CostLedger {
         `re-run the ingest after mintRunKey records the run's key (see scripts/run-record.ts ${ctx.runId}), or pass the record through readRunRecord`,
       );
     }
-    const costInvalid = !Number.isFinite(event.costUsd) || event.costUsd < 0;
-    const unpriced = costInvalid || (event.unpricedTurns ?? 0) > 0;
-    const costMicroUsd = costInvalid ? 0 : usdToMicros(event.costUsd);
-    if (!Number.isSafeInteger(costMicroUsd) || costMicroUsd < 0) {
-      throw new CostLedgerError(
-        "cost-convert-invalid",
-        `costUsd ${event.costUsd} did not convert to a non-negative safe integer of µ$ (got ${costMicroUsd})`,
-        "fix the producer's cost event, or the row persists as unpriced only for the known-partial cases (non-finite/negative cost, unpricedTurns>0)",
-      );
+    // An unconvertible cost is a MALFORMED EVENT, not a reason to drop it: a
+    // cost that never reaches a row is spend the cap cannot see, which is the
+    // one outcome AC4 and the docstring above rule out. So the conversion joins
+    // non-finite and negative in the `costInvalid` class — persisted at 0 µ$
+    // with `unpriced = 1`, visible in every unpricedRows count — instead of
+    // throwing out of ingest and taking the event with it.
+    let costInvalid = !Number.isFinite(event.costUsd) || event.costUsd < 0;
+    let costMicroUsd = 0;
+    // Never silently: the reason rides the ingest log line below, so a row that
+    // went unpriced because the FIGURE was unusable is distinguishable from one
+    // that went unpriced because the producer said so (unpricedTurns > 0).
+    let convertError: string | undefined;
+    if (!costInvalid) {
+      try {
+        costMicroUsd = usdToMicros(event.costUsd);
+      } catch (e) {
+        costInvalid = true;
+        costMicroUsd = 0;
+        convertError = (e as Error).message;
+      }
     }
+    const unpriced = costInvalid || (event.unpricedTurns ?? 0) > 0;
     const eventId = tokenEventId({
       runId: ctx.runId,
       agentId: event.agentId,
@@ -571,7 +677,7 @@ export class CostLedger {
         // the run record on disk, and a record written before canonicalisation
         // would otherwise mint a second identity on every later ingest.
         canonicalRepoSlug(ctx.repoSlug),
-        ctx.issueId,
+        canonicalIssueId(ctx.issueId),
         ctx.requestId,
         ctx.role,
         event.agentId,
@@ -598,11 +704,14 @@ export class CostLedger {
       status: "ok",
       runId: ctx.runId,
       repoSlug: canonicalRepoSlug(ctx.repoSlug),
-      issueId: ctx.issueId,
+      issueId: canonicalIssueId(ctx.issueId),
       role: ctx.role,
       kind: "tokens",
       costMicroUsd,
       unpriced: unpriced ? 1 : 0,
+      ...(convertError === undefined
+        ? {}
+        : { code: "cost-convert-invalid", convertError, costUsd: event.costUsd }),
       durationMs,
       outcome: inserted ? "inserted" : "duplicate",
       ingest_ms: durationMs,
@@ -682,7 +791,7 @@ export class CostLedger {
          ) VALUES (?,?,?,?,?, NULL, NULL, 'box_hours', 0, ?, 0, ?)
          ON CONFLICT(event_id) DO NOTHING`,
       )
-      .run(eventId, ctx.runId, canonicalRepoSlug(ctx.repoSlug), ctx.issueId, ctx.requestId, costMicroUsd, new Date().toISOString());
+      .run(eventId, ctx.runId, canonicalRepoSlug(ctx.repoSlug), canonicalIssueId(ctx.issueId), ctx.requestId, costMicroUsd, new Date().toISOString());
     const durationMs = Date.now() - started;
     const inserted = changes === 1;
     log({
@@ -694,7 +803,7 @@ export class CostLedger {
       status: "ok",
       runId: ctx.runId,
       repoSlug: canonicalRepoSlug(ctx.repoSlug),
-      issueId: ctx.issueId,
+      issueId: canonicalIssueId(ctx.issueId),
       role: null,
       kind: "box_hours",
       costMicroUsd,
@@ -720,7 +829,7 @@ export class CostLedger {
     const unpricedQ = `${all} AND unpriced = 1`;
     // Canonical on the bind side, lower() on the column side: a row written
     // before canonicalisation and one written after both match.
-    const keys = [canonicalRepoSlug(repoSlug), issueId];
+    const keys = [canonicalRepoSlug(repoSlug), canonicalIssueId(issueId)];
     return this.view(all, keys, priced, keys, unpricedQ, keys);
   }
 
@@ -794,7 +903,7 @@ export class CostLedger {
          FROM cost_events WHERE lower(repo_slug) = ? AND issue_id = ?
          GROUP BY run_id ORDER BY MIN(created_at)`,
       )
-      .all(canonicalRepoSlug(repoSlug), issueId) as { run_id: string; total: number; hasBox: number }[];
+      .all(canonicalRepoSlug(repoSlug), canonicalIssueId(issueId)) as { run_id: string; total: number; hasBox: number }[];
     return rows.map((r) => ({ runId: r.run_id, totalMicroUsd: r.total, hasBoxHours: r.hasBox === 1 }));
   }
 
@@ -852,16 +961,38 @@ export class CostLedger {
    *
    * A retry reusing the same `(requestId, runId)` is idempotent: it is judged
    * against the headroom its original saw (its own reservation is excluded from
-   * the sum) and hands back the ceiling already ON the row, never a second one.
-   * Idempotent for the SAME `(repoSlug, issueId)` only — the replay branch
-   * refuses a correlation id that resolves to another issue's reservation.
+   * the sum) and hands back the ceiling already ON the row, never a second one
+   * — clamped to the headroom recomputed now, so `admittedCeilingMicroUsd <=
+   * remainingMicroUsd` holds on the replay path too. Idempotent for the SAME
+   * `(repoSlug, issueId)` only — the replay branch refuses a correlation id
+   * that resolves to another issue's reservation.
    */
   admitIssue(input: AdmissionInput, capMicroUsd: number, keyCapMicroUsd: number): AdmissionDecision {
     const started = Date.now();
+    // All four are load-bearing SQL BINDS, not optional decoration. A non-string
+    // `requestId`/`runId` binds as NULL, and SQLite's three-valued logic then
+    // makes `NOT (a.request_id = NULL AND a.run_id = ?)` evaluate to NULL for
+    // EVERY row — which the WHERE clause treats as false, so the reservation
+    // query returns nothing, every outstanding reservation vanishes, and this
+    // admission is handed the entire remaining cap on top of every live one.
+    // The pair are correlation keys; refusing them here is cheaper than the
+    // three-valued reasoning needed to prove any single query safe.
+    for (const field of ["repoSlug", "issueId", "runId", "requestId"] as const) {
+      const v = (input as unknown as Record<string, unknown>)[field];
+      if (typeof v !== "string" || v.length === 0) {
+        throw new CostLedgerError(
+          "admission-input-invalid",
+          `admission input is missing ${field} — refusing to decide a cap against a NULL bind`,
+          "supply { repoSlug, issueId, runId, requestId } from the dispatch's resolved correlation",
+        );
+      }
+    }
     // Settle identity ONCE for this admission: every predicate below and the
-    // gate_admissions row all key on the same canonical slug, so the spend a
-    // decision reads and the reservation it writes can never be two identities.
+    // gate_admissions row all key on the same canonical (slug, issue) pair, so
+    // the spend a decision reads and the reservation it writes can never be two
+    // identities — and `42`/`#42`/`042` cannot each hold their own full cap.
     const repoSlug = canonicalRepoSlug(input.repoSlug);
+    const issueId = canonicalIssueId(input.issueId);
     this.assertQueryable();
     if (!Number.isInteger(capMicroUsd) || capMicroUsd <= 0) {
       throw new CostConfigError(
@@ -870,12 +1001,24 @@ export class CostLedger {
         "fix defaultCapMicroUsd / perIssueOverrides in .sandbox/cost-config.json",
       );
     }
+    // Same validation as capMicroUsd above, for the same reason: this one is
+    // the OTHER operand of the `Math.min` that becomes the minted ceiling, and
+    // it lands in a STRICT INTEGER column. Unvalidated, `-1` returned
+    // `admitted: true` with a negative ceiling handed to the mint, and a float
+    // or NaN failed at the INSERT with a bare SQLITE_CONSTRAINT naming nothing.
+    if (!Number.isInteger(keyCapMicroUsd) || keyCapMicroUsd <= 0) {
+      throw new CostConfigError(
+        "cost-config-invalid",
+        `keyCapMicroUsd must be a positive integer of micro-dollars, got ${keyCapMicroUsd}`,
+        "fix the DF2.3 key cap the gate passes (defaultKeyCapMicroUsd in src/providers/credentials.ts, or the caller's override)",
+      );
+    }
     const decide = this.db.transaction((): AdmissionDecision => {
       const spentRow = this.db
         .prepare(
           "SELECT COALESCE(SUM(cost_micro_usd), 0) AS total, COUNT(*) AS n FROM cost_events WHERE lower(repo_slug) = ? AND issue_id = ? AND unpriced = 0",
         )
-        .get(repoSlug, input.issueId) as { total: number; n: number };
+        .get(repoSlug, issueId) as { total: number; n: number };
       // The caller's OWN row is excluded from the reservations below: this
       // admission is either fresh (no such row exists, so the exclusion matches
       // nothing) or a retry of the same (request_id, run_id), which must be
@@ -897,13 +1040,18 @@ export class CostLedger {
           `SELECT a.ceiling_micro_usd AS ceiling, a.run_id AS runId, a.decided_at AS decidedAt
            FROM gate_admissions a
            WHERE lower(a.repo_slug) = ? AND a.issue_id = ?
-             AND NOT (a.request_id = ? AND a.run_id = ?)
+             -- IS, not =: NULL-safe equality. The guard in admitIssue already
+             -- refuses a non-string correlation key, but plain = makes the whole
+             -- predicate evaluate to NULL on a NULL bind and silently drops
+             -- EVERY reservation, so this query does not rely on that guard
+             -- staying put.
+             AND NOT (a.request_id IS ? AND a.run_id IS ?)
              AND NOT EXISTS (
                SELECT 1 FROM cost_events ce
                WHERE ce.run_id = a.run_id AND ce.unpriced = 0
              )`,
         )
-        .all(repoSlug, input.issueId, input.requestId, input.runId) as {
+        .all(repoSlug, issueId, input.requestId, input.runId) as {
         ceiling: number;
         runId: string;
         decidedAt: string;
@@ -923,8 +1071,9 @@ export class CostLedger {
         // remaining headroom. gate_admissions is append-only (INV-COST-1), so
         // the expiry lives here in the read, not in a row mutation.
         // readRunRecord's contract does the classifying: undefined ⇒ no record
-        // (expired reservation); a throw — e.g. a corrupt record — propagates
-        // and refuses this dispatch rather than undercount.
+        // (expired reservation); a throw — e.g. a corrupt record — refuses this
+        // dispatch rather than undercount, but only while the row is YOUNG (see
+        // the catch below).
         const decidedAt = Date.parse(row.decidedAt);
         // An unparseable decided_at counts as young for the same fail-safe
         // reason the whole guard is conservative: over-reserve, never expire.
@@ -938,7 +1087,45 @@ export class CostLedger {
         // at admission time for the first ADMISSION_GRACE_MS, so the refusal
         // the comment above promises did not happen — the corruption surfaced
         // 60s later, on somebody else's dispatch.
-        const record = this.readRunRecord(row.runId);
+        //
+        // A THROW past the cutoff expires the reservation too. `undefined` and
+        // "the record cannot be read at all" are the same fact — this run will
+        // never report spend — and only the second one used to wedge the issue
+        // FOREVER: an ungrammatical run_id that landed in gate_admissions before
+        // assertValidRunId ever saw it, a corrupt record, or a 0-byte record
+        // caught mid-`createUnlogged` all make readRunRecord throw, and that
+        // throw refused every future dispatch for the issue while
+        // `gate_admissions_no_delete` blocked the manual remedy. A permanent
+        // refusal is not the fail-safe direction — it is a wedge with no exit.
+        // Below the cutoff the throw still propagates: a young unreadable record
+        // is far more likely a real in-flight dispatch than an orphan, and
+        // refusing once is recoverable where over-granting the cap is not.
+        let record: RunCostRecord | undefined;
+        try {
+          record = this.readRunRecord(row.runId);
+        } catch (e) {
+          if (young) throw e;
+          // Never silent: the expired row is named, so an operator can tell an
+          // expiry from a reservation that simply retired.
+          log({
+            requestId: input.requestId,
+            operation: "cost-ledger.gate",
+            agentId: null,
+            timestamp: new Date().toISOString(),
+            duration: Date.now() - started,
+            status: "ok",
+            runId: input.runId,
+            repoSlug,
+            issueId,
+            code: "reservation-unresolvable-expired",
+            orphanRunId: row.runId,
+            orphanDecidedAt: row.decidedAt,
+            orphanCeilingMicroUsd: row.ceiling,
+            message: `reservation for run ${row.runId} is past the grace window and its record cannot be read (${(e as Error).message}) — expiring it rather than wedging the issue's cap`,
+            outcome: "reservation-expired",
+          });
+          continue;
+        }
         if (!young && record === undefined) continue;
         reservedMicroUsd += row.ceiling;
         // Overflow guard: sum of reservation ceilings can exceed MAX_SAFE_INTEGER
@@ -954,7 +1141,7 @@ export class CostLedger {
         .prepare(
           "SELECT COUNT(*) AS n FROM cost_events WHERE lower(repo_slug) = ? AND issue_id = ? AND unpriced = 1",
         )
-        .get(repoSlug, input.issueId) as { n: number };
+        .get(repoSlug, issueId) as { n: number };
       const spentMicroUsd = spentRow.total;
       const unpricedRows = unpricedRow.n;
       const cap = capMicroUsd;
@@ -993,7 +1180,7 @@ export class CostLedger {
            VALUES (?,?,?,?,?,?)
            ON CONFLICT(request_id, run_id) DO NOTHING`,
         )
-        .run(input.requestId, input.runId, repoSlug, input.issueId, ceiling, new Date().toISOString());
+        .run(input.requestId, input.runId, repoSlug, issueId, ceiling, new Date().toISOString());
       if (changes === 0) {
         // `DO NOTHING` fired: this (request_id, run_id) already holds a
         // reservation — a retried dispatch reusing its correlation id after a
@@ -1028,17 +1215,31 @@ export class CostLedger {
         // against a budget holding nothing for it. Idempotency is only
         // idempotency for the SAME identity; a collision under another one is a
         // caller bug, and the fail-closed answer is to mint nothing.
-        // `canonicalRepoSlug` on the stored side too: rows written before repo
-        // identity was canonicalized hold the brief's original casing, and a
-        // legitimate retry against one of those is not a mismatch.
-        if (canonicalRepoSlug(prior.repoSlug) !== repoSlug || prior.issueId !== input.issueId) {
+        // Canonicalized on the STORED side too, both halves: rows written before
+        // identity was canonicalized hold the brief's original casing and issue
+        // spelling, and a legitimate retry against one of those is not a
+        // mismatch.
+        if (canonicalRepoSlug(prior.repoSlug) !== repoSlug || canonicalIssueId(prior.issueId) !== issueId) {
           throw new CostLedgerError(
             "ledger-admission-mismatch",
-            `request ${input.requestId} / run ${input.runId} already holds an admission for ${prior.repoSlug}#${prior.issueId}, not ${repoSlug}#${input.issueId} — refusing to mint against a reservation another issue's cap is holding`,
+            `request ${input.requestId} / run ${input.runId} already holds an admission for ${prior.repoSlug}#${prior.issueId}, not ${repoSlug}#${issueId} — refusing to mint against a reservation another issue's cap is holding`,
             "re-run the dispatch with a fresh request id: a (requestId, runId) pair belongs to exactly one (repoSlug, issueId)",
           );
         }
-        ceiling = prior.ceiling;
+        // CLAMPED to the headroom recomputed just now, not handed back raw.
+        // The recorded ceiling fit the headroom its ORIGINAL admission saw, and
+        // that headroom can only have shrunk since: spend the run has not yet
+        // reported lands as priced rows, and those rows also RETIRE this
+        // reservation, so a replay routinely recomputes a `remainingMicroUsd`
+        // smaller than the number on the row. Cap 100 / keyCap 10: A admits at
+        // 10, B reports 95, and replaying A returned 10 against a remaining of
+        // 5 — breaking the `admittedCeilingMicroUsd <= remainingMicroUsd`
+        // invariant this method's contract states, and handing that 10 straight
+        // to the mint. `min` is the fail-safe direction: a replay can only ever
+        // be authorized for LESS than its original, never more, and the row
+        // itself is untouched (INV-COST-1) so the reservation still stands at
+        // the figure the cap is holding.
+        ceiling = Math.min(prior.ceiling, remainingMicroUsd);
       }
       return {
         admitted: true,
@@ -1075,7 +1276,9 @@ export class CostLedger {
       status: "ok",
       runId: input.runId,
       repoSlug,
-      issueId: input.issueId,
+      // The canonical pair the decision was actually made against — logging the
+      // raw spelling would make two log lines for one budget look like two.
+      issueId,
       decision: decision.status,
       capMicroUsd: decision.capMicroUsd,
       spentMicroUsd: decision.spentMicroUsd,

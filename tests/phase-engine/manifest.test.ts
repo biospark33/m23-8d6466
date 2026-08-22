@@ -599,6 +599,12 @@ describe("loadManifest — beneath-root walk (INV-1, INV-5)", () => {
     expect("limitMicroUsd" in stripped.manifest).toBe(false);
     expect(stripped.manifest.pipelineId).toBe(loaded.manifest.pipelineId);
     expect(stripped.manifest.phases).toHaveLength(loaded.manifest.phases.length);
+    // Dropped for the same reason `stampManifestLimit` drops it: once a field
+    // has been removed the bytes match no file on disk, so carrying the
+    // unstripped file's path forward would claim provenance this content has
+    // lost. Mirrors tests/fleet/brief-schema.test.ts's stamping sibling.
+    expect(loaded.resolvedPath).toBe(fs.realpathSync(p));
+    expect(stripped.resolvedPath).toBeUndefined();
   });
 
   test("a final-component swap surfaces as a ManifestError, not a raw ELOOP", () => {

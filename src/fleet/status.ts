@@ -1,13 +1,15 @@
 /**
  * DF3.1 Agent C: status verb (C4).
  *
- * Joins store.list() ∪ driver.list() with 30s timeout.
- * Row states per AC4: live, boxMissing, boxUnknown, closed, orphan.
+ * Joins store.listWithAnomalies() ∪ driver.list() with 30s timeout.
+ * Row states per AC4: live, boxMissing, boxUnknown, closed, orphan — plus the
+ * two fleet-level rows that describe the listing itself, listUnavailable and
+ * recordsSkipped (see FLEET_ROW_ID).
  *
  * FleetError unified: one class in dispatch.ts, re-exported here (C2).
  */
 import { SBX_OWNERSHIP_TAG, type ProviderVm } from "../providers/driver.ts";
-import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
+import type { RunRecord, RunRecordListing, RunRecordStore } from "../providers/run-record.ts";
 
 export { FleetError } from "./dispatch.ts";
 import { assertFleetRunId, FleetError } from "./dispatch.ts";
@@ -19,7 +21,7 @@ export interface StatusRow {
    * precisely what the documented union exists to surface (it has no record,
    * hence no createdAt: the field is ABSENT and the row sorts first).
    */
-  state: "live" | "boxMissing" | "boxUnknown" | "closed" | "orphan" | "listUnavailable";
+  state: "live" | "boxMissing" | "boxUnknown" | "closed" | "orphan" | "listUnavailable" | "recordsSkipped";
   /**
    * INV-4-bis's cross-layer join key, straight off the record — the id that ties
    * this run's dispatch ack, driver lines and record writes together in the log
@@ -54,6 +56,12 @@ export interface StatusRow {
   closedAt?: string;
   spendMicroUsd?: number;
   limitMicroUsd?: number;
+  /**
+   * Record filenames the listing refused to read (`listWithAnomalies().skipped`).
+   * Present on the `recordsSkipped` row, and on a `statusRun` row whose verdict
+   * those files could contradict — never anywhere else, and never empty.
+   */
+  skippedRecords?: string[];
 }
 
 export interface StatusDeps {
@@ -211,8 +219,17 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
 /**
  * An owned box no record claims: billing with nobody accountable for it.
  *
- * The box name is the run id by construction, so it is the row's identity. No
- * record ⇒ no `requestId` and no `createdAt`: both are omitted deliberately,
+ * The box name is NOT the row's identity, even though `createRun` names a box
+ * after its run: an orphan is by definition a box no record claims, so its name
+ * is whatever the SUBSTRATE called it. On a tag-blind substrate that is every
+ * box in the account (see `isOwnedVm`), so a personal `my-dev-box` is emitted
+ * here — and a bare `"runId": "my-dev-box"` is a string whose next operator
+ * command is `fleet teardown my-dev-box`. Parenthesised exactly like
+ * `FLEET_ROW_ID`, for exactly that reason: `RUN_ID_RE` admits only `[a-z0-9-]`,
+ * so the id can never be mistaken for a real one. The name teardown actually
+ * targets rides on `vmName`, where it always did.
+ *
+ * No record ⇒ no `requestId` and no `createdAt`: both are omitted deliberately,
  * because there is nothing to join an unclaimed box to and no instant to
  * report (see StatusRow.requestId / StatusRow.createdAt).
  *
@@ -221,12 +238,14 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
  * an orphan row looks like.
  */
 function orphanRow(vm: ProviderVm): StatusRow {
-  return { runId: vm.name, state: "orphan", vmName: vm.name, httpsUrl: vm.httpsUrl };
+  return { runId: `(orphan ${vm.name})`, state: "orphan", vmName: vm.name, httpsUrl: vm.httpsUrl };
 }
 
 /**
- * Identity of the one non-run row `statusAll` can emit. Parenthesised so it can
- * never collide with a real run id: `RUN_ID_RE` admits only `[a-z0-9-]`.
+ * Identity of the fleet-level rows `statusAll` can emit — the ones that describe
+ * the listing itself rather than a run (`listUnavailable`, `recordsSkipped`).
+ * Parenthesised so it can never collide with a real run id: `RUN_ID_RE` admits
+ * only `[a-z0-9-]`. The `state` is what tells the two apart.
  */
 export const FLEET_ROW_ID = "(fleet)";
 
@@ -248,6 +267,46 @@ function listUnavailableRow(): StatusRow {
   return { runId: FLEET_ROW_ID, state: "listUnavailable" };
 }
 
+/**
+ * The record listing refused to read one or more files — emitted by `statusAll`
+ * whenever `listWithAnomalies().skipped` is non-empty.
+ *
+ * INV-4 has one exception: a `.json` whose stem is outside the id grammar is
+ * logged and skipped, so a single bad filename cannot take the whole directory
+ * down. But a skipped file can hold an OPEN record naming a live box. Without
+ * this row that run simply vanishes from the listing and its box comes back in
+ * the unclaimed sweep as an unattributed `orphan` — or, if the substrate cannot
+ * be listed either, as nothing at all. `listWithAnomalies` names this verb in
+ * its own docstring for the reason: "3 runs" and "3 runs and one record I
+ * refused to read" must not render identically. `reapRuns` refuses to act at
+ * all in this state; status reports instead, but it must not report a truncated
+ * fleet as the whole fleet.
+ *
+ * No `createdAt`, so it sorts first for the same reason `listUnavailable` does:
+ * it is a row about the completeness of every other row.
+ */
+function recordsSkippedRow(skipped: string[]): StatusRow {
+  return { runId: FLEET_ROW_ID, state: "recordsSkipped", skippedRecords: skipped };
+}
+
+/**
+ * Skipped record filenames, or `[]` when the listing itself could not be read.
+ *
+ * `statusRun` consults this from inside an error handler already committed to a
+ * typed verdict, so a listing that THROWS — one malformed record body anywhere
+ * in the directory — must not turn this run's clean exit 4 into an untyped stack
+ * dump about an unrelated run's file. The caveat is dropped on that path;
+ * `statusAll` is the entry point that reports the failure, as exit 1
+ * `record-store-unreadable`.
+ */
+function skippedRecordNames(store: RunRecordStore): string[] {
+  try {
+    return store.listWithAnomalies().skipped;
+  } catch {
+    return [];
+  }
+}
+
 /** Newest-first by createdAt, `runId` breaking ties so the order is total. */
 function byCreatedAtDesc(a: StatusRow, b: StatusRow): number {
   // Numeric, never localeCompare: createdAt is an instant, and ICU collation on
@@ -267,7 +326,7 @@ function byCreatedAtDesc(a: StatusRow, b: StatusRow): number {
 }
 
 /**
- * Status: store.list() ∪ driver.list() with 30s timeout.
+ * Status: store.listWithAnomalies() ∪ driver.list() with 30s timeout.
  *
  * Per C4: boxUnknown only on list failure/timeout; empty list is boxMissing.
  * Output order: newest-first by createdAt desc.
@@ -275,9 +334,12 @@ function byCreatedAtDesc(a: StatusRow, b: StatusRow): number {
 export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
   const timeoutMs = resolveTimeoutMs(deps);
 
-  let records: RunRecord[];
+  // `listWithAnomalies`, not `list`: the skipped filenames are the difference
+  // between "3 runs" and "3 runs and one record I refused to read", and `list()`
+  // throws that difference away. See recordsSkippedRow.
+  let listing: RunRecordListing;
   try {
-    records = deps.store.list();
+    listing = deps.store.listWithAnomalies();
   } catch (e) {
     // INV-4 makes list() throw on the FIRST unreadable record — untyped, so one
     // corrupt file would hide the whole fleet behind an exit-1 stack trace.
@@ -293,7 +355,13 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
   // record's box can still be alive — neither is visible from the records.
   const boxes = await listOwnedBoxes(deps, timeoutMs);
 
+  const records = listing.records;
   const rows: StatusRow[] = records.map((rec) => rowForRecord(rec, boxes));
+
+  // Independent of the driver: a truncated record listing invalidates the row
+  // COUNT, and (below) makes any orphan verdict unprovable — a skipped file may
+  // be exactly the record that claims the box.
+  if (listing.skipped.length > 0) rows.push(recordsSkippedRow(listing.skipped));
 
   if (boxes === null) {
     // Unconditional, and NOT folded into the per-record rows: the orphan sweep
@@ -359,16 +427,27 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
     const box = boxes?.get(runId);
 
     if (code === "ENOENT") {
+      // A missing FILE is not proof of a missing record: `listWithAnomalies`
+      // skips any `.json` whose stem is outside the id grammar, and a record for
+      // THIS run renamed to such a stem is skipped with the rest. Both verdicts
+      // below assume no such record exists, so both carry the caveat when one
+      // might. Read once, here — the only path where it changes the answer.
+      const skipped = skippedRecordNames(deps.store);
+
       // No record is not the same as no box. The box is named after the run id
       // by `createRun`, so a hit is the `orphan` state — the unattributed spend
       // this verb exists to surface. A list failure is NOT a hit, so it still
       // refuses as 4 rather than inventing a box out of a timeout.
-      if (box !== undefined) return orphanRow(box);
+      if (box !== undefined) {
+        return { ...orphanRow(box), ...(skipped.length > 0 ? { skippedRecords: skipped } : {}) };
+      }
       throw new FleetError(
         4,
         "run-not-found",
         `No run record for ${runId}`,
-        "Check the run ID or create the run first",
+        skipped.length === 0
+          ? "Check the run ID or create the run first"
+          : `Check the run ID or create the run first — the listing skipped ${skipped.length} file(s) whose names are not run ids (${skipped.join(", ")}), and one of them may be this run's record under a mangled name`,
       );
     }
 

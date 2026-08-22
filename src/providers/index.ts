@@ -50,6 +50,7 @@ export function resolveDriver(name: string, ctx: ResolveContext = {}): ProviderD
 const PRIMITIVES: ReadonlySet<string> = new Set([
   "create",
   "list",
+  "listWithAnomalies",
   "destroy",
   "expose",
   "setPublic",
@@ -63,9 +64,11 @@ function instrument(driver: ProviderDriver, ctx: ResolveContext): ProviderDriver
   return new Proxy(driver, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
-      // Only the seam's eight primitives are driver calls. Wrapping every
-      // callable turned `toString()` and a driver's own private helpers into
-      // fake observability lines.
+      // Only the seam's primitives are driver calls. Wrapping every callable
+      // turned `toString()` and a driver's own private helpers into fake
+      // observability lines. `listWithAnomalies` is in the set because the
+      // reaper enumerates through it, not `list` — leaving it out made the one
+      // listing that gates a destructive sweep the only unobserved driver call.
       if (typeof value !== "function" || !PRIMITIVES.has(String(prop))) return value;
       const verb = String(prop);
       return (...args: unknown[]) => {

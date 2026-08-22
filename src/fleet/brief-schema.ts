@@ -6,7 +6,7 @@
  * in dispatch via resolveRunCorrelation.
  */
 import { z } from "zod";
-import { REPO_SLUG_PATTERN, canonicalRepoSlug } from "../phase-engine/issue-correlation.ts";
+import { MAX_ISSUE_ID, REPO_SLUG_PATTERN, canonicalRepoSlug } from "../phase-engine/issue-correlation.ts";
 
 /**
  * `.` and `..` pass the slug charset but are not repository names. They are
@@ -67,8 +67,25 @@ function isRelativePath(p: string): boolean {
  *    than the exit 2 this schema exists to produce; and
  *  - a newline or CR in a value that is interpolated into the operator-facing
  *    log stream forges a log line ("…\nFLEET dispatch ok runId=fake").
+ *
+ * It applies to the URL fields too, and there it is load-bearing rather than
+ * belt-and-braces: WHATWG `URL` STRIPS tab/LF/CR before parsing, so
+ * `https://git\nhub.com/o/r` satisfies `.url()`, the `^https://` regex AND the
+ * `repoSlugOfUrl` cross-check — every guard downstream sees the stripped form
+ * while the log stream sees the raw one. The check has to run on the RAW
+ * string, which is exactly what a `.regex()` on the field does.
  */
-const NO_CONTROL_CHARS = /^[^\p{Cc}]*$/u;
+/*
+ * `\p{Cc}` alone reaches C0/DEL/C1 and stops there, which misses the three
+ * classes that forge the very log line this guard exists to protect:
+ *   \p{Zl} U+2028 and \p{Zp} U+2029 are JS LINE TERMINATORS, so any consumer
+ *     reading the stream through a JS or JSON-ish parser sees a forged record —
+ *     the exact threat named above, reachable without a `\n`.
+ *   \p{Cf} carries U+202E (RTL override), which reorders what a terminal
+ *     renders without changing a byte, and U+200B/U+FEFF, which hide inside an
+ *     identifier that later keys the ledger.
+ */
+const NO_CONTROL_CHARS = /^[^\p{Cc}\p{Zl}\p{Zp}\p{Cf}]*$/u;
 
 /**
  * The repository a clone URL identifies, as a CANONICAL slug: pathname,
@@ -93,7 +110,33 @@ function repoSlugOfUrl(url: string): string | undefined {
   } catch {
     return undefined;
   }
-  return canonicalRepoSlug(pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, ""));
+  // Case-INSENSITIVE, like every other comparison on this path: the strip ran
+  // case-sensitively while `canonicalRepoSlug` around it folds case, so
+  // `https://github.com/owner/repo.GIT` kept the suffix, compared unequal to
+  // `owner/repo` and was refused as naming a different repository.
+  return canonicalRepoSlug(pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, ""));
+}
+
+/**
+ * No `user:pass@host` in a brief-supplied URL — a credential by construction
+ * (INV-CRED-1: no second secret in a box).
+ *
+ * `assertRepoUrl` in `exedev/fill.ts` refuses one too, but that runs AFTER
+ * `driver.create()`: a brief this schema can refuse must never burn a billing
+ * box INV-5 then forbids destroying. The trust boundary is here (INV-2), and
+ * the same rule covers `issueUrl`, which fill never sees at all.
+ *
+ * Parsed, not sliced: `@` is legal in a path (`/@scope/pkg/issues/1`), so the
+ * test is on the parsed userinfo, not on the character. A URL that will not
+ * parse is `.url()`'s refusal, not this one's.
+ */
+function hasNoUserinfo(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.username === "" && parsed.password === "";
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -120,7 +163,11 @@ export const BriefSchema = z.strictObject({
     .regex(REPO_SLUG_PATTERN)
     .refine(hasNoDotSegment, "repoSlug segments may not be '.' or '..'"),
   // DF3.1 D2: int >0, MAX_ISSUE_ID capped (assertWithinBudget receives String(issueId))
-  issueId: z.number().int().positive().max(2 ** 31 - 1),
+  // `MAX_ISSUE_ID` is IMPORTED, not restated: DF1.8's issue-correlation owns the
+  // bound and `resolveRunCorrelation` refuses against its copy, so a literal
+  // here is a second money-adjacent rule that silently stops agreeing the moment
+  // either moves — the same argument `REPO_SLUG_PATTERN` above already makes.
+  issueId: z.number().int().positive().max(MAX_ISSUE_ID),
   // DF3.1 D2: optional string URL. Same scheme allow-list as repoUrl below:
   // this value lands in the box's run-context.json and in log lines an operator
   // clicks, and `.url()` alone admits `file://` and `javascript:`.
@@ -131,8 +178,10 @@ export const BriefSchema = z.strictObject({
   issueUrl: z
     .string()
     .max(MAX_URL)
+    .regex(NO_CONTROL_CHARS, "issueUrl may not contain control characters")
     .url()
     .regex(/^https:\/\//i, "issueUrl must be an https:// URL")
+    .refine(hasNoUserinfo, "issueUrl may not carry userinfo (user:pass@host)")
     .optional(),
   // DF3.1 D2: 40-hex regex (setup-gate, fill)
   commitSha: z.string().regex(/^[0-9a-f]{40}$/),
@@ -141,8 +190,14 @@ export const BriefSchema = z.strictObject({
   // Capped and control-char-free all the same: C3 relaxes the FORMAT, and
   // neither a 10 MB id in the ledger key nor a newline in the log stream is a
   // format question.
+  // `.min(1)` because "" is the one value that is neither absent nor usable:
+  // it is falsy, so a downstream `requestId || mint()` reads it as ABSENT while
+  // `requestId !== undefined` reads it as PRESENT. That split lets the ack, the
+  // run record, the ledger key and the log correlation disagree about one run,
+  // and collapses every concurrent run carrying it onto a single empty key.
   requestId: z
     .string()
+    .min(1, "requestId may not be empty — omit the key instead")
     .max(MAX_REQUEST_ID)
     .regex(NO_CONTROL_CHARS, "requestId may not contain control characters")
     .optional(),
@@ -163,8 +218,10 @@ export const BriefSchema = z.strictObject({
   repoUrl: z
     .string()
     .max(MAX_URL)
+    .regex(NO_CONTROL_CHARS, "repoUrl may not contain control characters")
     .url()
-    .regex(/^https:\/\//i, "repoUrl must be an https:// URL"),
+    .regex(/^https:\/\//i, "repoUrl must be an https:// URL")
+    .refine(hasNoUserinfo, "repoUrl may not carry userinfo (user:pass@host)"),
 })
   /**
    * `repoSlug` and `repoUrl` are two names for one repository, and validating

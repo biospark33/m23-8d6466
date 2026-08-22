@@ -172,8 +172,12 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
   let ledger: CostLedger | undefined;
   // Assigned on every path, then possibly downgraded by the finally: a release
   // failure leaves the run wedged, and `return 0` inside the try would have
-  // committed the exit code before the cleanup could say so.
-  let outcome: number;
+  // committed the exit code before the cleanup could say so. Seeded to failure
+  // because the finally READS it (same as scripts/qds-cost.ts): only a completed
+  // teardown/harvest sets 0, so a throw the catch cannot itself survive never
+  // reads as success — `outcome === 0` on `undefined` is false, which silently
+  // downgraded the cleanup diagnostic to a no-op.
+  let outcome = 1;
   try {
     // A run that does not exist must refuse having touched NOTHING, so probe
     // for the record first: the lock is a real file — created, fsynced, and

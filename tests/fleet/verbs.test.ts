@@ -376,11 +376,17 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     return { code, out: outChunks.join(""), err: errChunks.join("") };
   }
 
-  /** A store whose `list()` is unreadable — status's only route to exit 1. */
+  /**
+   * A store whose directory listing is unreadable — status's only route to exit 1.
+   *
+   * `listWithAnomalies`, the accessor `statusAll` really calls: a stub declaring
+   * only `list` still produced exit 1, but from a TypeError about a missing
+   * method rather than from the store failure it claims to inject.
+   */
   const unlistableStore = (): RunRecordStore =>
     ({
       dir: store.dir,
-      list: (): RunRecord[] => {
+      listWithAnomalies: (): never => {
         throw new Error("malformed run record beta.json: unknown key: nope");
       },
     }) as unknown as RunRecordStore;
@@ -418,20 +424,35 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
 
   /**
    * A foreign, LIVE holder's claim at `<store.dir>/<runId>.lock`, in the body
-   * layout `acquireRunLock` writes (`<pid> <host> <ISO> <nonce>`) — our own pid
-   * and this host, so `refuse()` reads the holder as alive rather than stale.
+   * layout `acquireRunLock` writes (`<pid> <host> <ISO> <nonce>`) — this host,
+   * so `refuse()` probes the pid rather than calling its liveness unknowable,
+   * and a pid that is ALIVE but NOT ours, so it reads as held rather than stale.
    * That is the acquire refusal, and the CLI owes exit 5 for it: the throw sits
    * between the record probe and any mutation, so nothing was touched, and exit
    * 1 would stamp it `transient` and tell automation to retry a lock that (in
    * the stale case) nothing will ever clear.
    *
+   * NOT `process.pid`: the run lock is not re-entrant, so `claimedByUs` refuses
+   * a lock carrying our own pid+host as `run-lock-reentrant` — a programming
+   * error — before `refuse` ever classifies it. That is a different verdict from
+   * the contention this probe is about, so the body has to name a real OTHER
+   * process. The parent is the one every test run is guaranteed to have.
+   *
    * Written by hand rather than by calling `acquireRunLock`: this process would
    * then hold it, and the release inside the verb's `finally` would be a real
    * release of a lock the test still owns.
    */
+  const FOREIGN_LIVE_PID = process.ppid > 0 && process.ppid !== process.pid ? process.ppid : 1;
+
   const holdRunLock = (runId: string): void => {
+    // A host with no usable foreign pid is one this probe cannot run on — say so
+    // rather than silently testing re-entrancy instead of contention.
+    expect(FOREIGN_LIVE_PID).not.toBe(process.pid);
     const host = hostname().replace(/\s+/g, "_") || "unknown-host";
-    writeFileSync(join(store.dir, `${runId}.lock`), `${process.pid} ${host} ${new Date().toISOString()} beefcafe\n`);
+    writeFileSync(
+      join(store.dir, `${runId}.lock`),
+      `${FOREIGN_LIVE_PID} ${host} ${new Date().toISOString()} beefcafe\n`,
+    );
   };
 
   interface Probe {
@@ -701,8 +722,43 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
     const deps: Partial<FleetDeps> = { driver, store, readBrief: async () => "{not json" };
     // valueType "path"/"string" ⇒ the flag consumes a value, and a missing one is
     // the operator's typo, not an empty string to act on.
-    expect(await run(["status", "--dir"], sink, deps, sink)).toBe(2);
-    expect(await run(["dispatch", "--port"], sink, deps, sink)).toBe(2);
+    //
+    // Driven from the REGISTRY, over every verb and every flag: only `--dir` and
+    // `--port` were ever tried, so `--brief`'s value-taking-ness — the column
+    // DF3.5 turns into a generated skill's call signature — was declared and
+    // never observed. Re-declared "boolean" it becomes a flag the tokenizer
+    // consumes alone, leaving the brief's FILENAME behind as a positional, and
+    // `dispatch takes no positional arguments` is the error the operator gets.
+    for (const entry of listVerbs()) {
+      for (const flag of entry.flags) {
+        if (flag.valueType === "boolean") continue;
+        // Trailing, so there is no next token that could be mistaken for a value.
+        const err: string[] = [];
+        expect(await run([entry.verb, flag.name], sink, deps, (s) => void err.push(s))).toBe(2);
+        expect(err.join("")).toContain(flag.name);
+      }
+    }
+
+    // …and the PARTITION itself, by hand, for the two flags the sweep above
+    // cannot defend: it is driven from `valueType`, so a flag re-declared
+    // "boolean" simply moves to the other branch and stops being tested. These
+    // two probe the flag with a value present and assert it was EATEN.
+    //
+    // `--brief` (no `readBrief` injected, so the path is really opened): as a
+    // boolean it consumes nothing and the brief's FILENAME is left behind as a
+    // positional, which dispatch refuses as `takes no positional arguments`.
+    const briefErr: string[] = [];
+    expect(await run(["dispatch", "--brief", "some-brief.json"], sink, { driver, store }, (s) => void briefErr.push(s))).toBe(2);
+    expect(briefErr.join("")).toContain("cannot read --brief some-brief.json");
+    expect(briefErr.join("")).not.toContain("positional");
+
+    // `--driver` (no driver injected, so the NAME is really resolved): as a
+    // boolean the name is left behind as a positional and the refusal becomes
+    // `status requires --driver <name>` — the opposite verdict about the same argv.
+    const driverErr: string[] = [];
+    expect(await run(["status", "--driver", "no-such-driver"], sink, { store }, (s) => void driverErr.push(s))).toBe(2);
+    expect(driverErr.join("")).toContain("no-such-driver");
+    expect(driverErr.join("")).not.toContain("requires --driver");
 
     // valueType "boolean" ⇒ it consumes NOTHING. If `--no-harvest` took a value
     // it would swallow the run id and teardown would refuse as "requires
@@ -717,6 +773,108 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
     expect(await run(["status", "--help", "no-such-run"], (s) => void out.push(s), deps, sink)).toBe(0);
     expect(out.join("")).toContain("Usage: fleet ");
     expect(out.join("")).toContain("status");
+  });
+
+  /**
+   * `path` vs `string` has no TOKENIZER consequence — both consume a value — so
+   * nothing in this file could tell them apart: `expect(flags).toEqual(
+   * EXPECTED_FLAGS[verb])` compares the registry against a literal copy of
+   * itself, and flipping `--dir` to `"string"` updates both in one commit while
+   * DF3.5's generated skill starts emitting the wrong parameter type.
+   *
+   * The claim `path` makes is about the VALUE — the CLI opens it — so that is
+   * what is pinned, per flag, next to the behaviour that justifies it. Flipping
+   * the column now means deleting a demonstration of real filesystem behaviour,
+   * which is friction with a reason attached rather than a table edit.
+   */
+  const flagOf = (verb: string, name: string): VerbFlag =>
+    listVerbs()
+      .find((v) => v.verb === verb)!
+      .flags.find((f) => f.name === name)!;
+
+  test("valueType `path` names a file the CLI really opens; `string` is never opened", async () => {
+    // --dir: opened as a DIRECTORY. Pointed at a regular file it is refused
+    // (ENOTDIR) — a value the CLI merely carried as a string could not notice.
+    // `store` is deliberately NOT injected here: an injected store is what the
+    // flag would otherwise be silently overridden by.
+    expect(flagOf("status", "--dir").valueType).toBe("path");
+    const notADir = join(dir, "regular-file");
+    writeFileSync(notADir, "not a directory\n");
+    const dirErr: string[] = [];
+    expect(await run(["status", "--dir", notADir], sink, { driver }, (s) => void dirErr.push(s))).toBe(2);
+    expect(dirErr.join("")).toContain(notADir);
+
+    // --brief: READ as a file, and the BYTES at that path reach the schema. The
+    // value names the brief; it is not the brief. `readBrief` is not injected,
+    // for the same reason `store` is not above.
+    expect(flagOf("dispatch", "--brief").valueType).toBe("path");
+    const briefPath = join(dir, "brief.json");
+    writeFileSync(briefPath, "{not json");
+    const briefErr: string[] = [];
+    expect(await run(["dispatch", "--brief", briefPath], sink, { driver, store }, (s) => void briefErr.push(s))).toBe(2);
+    expect(briefErr.join("")).toContain("not valid JSON");
+
+    // --port: `string`, and the distinction is not cosmetic — the CLI
+    // range-checks it and never opens it, so a value that IS a readable file is
+    // still refused. Declared `path`, DF3.5 would generate a skill handing it
+    // one.
+    expect(flagOf("dispatch", "--port").valueType).toBe("string");
+    const portErr: string[] = [];
+    expect(await run(["dispatch", "--port", briefPath], sink, { driver, store }, (s) => void portErr.push(s))).toBe(2);
+    expect(portErr.join("")).toContain("is not a TCP port");
+  });
+
+  test("`-h` is the registry's `--help` in short form — accepted, and it eats nothing", async () => {
+    // Implemented in scripts/fleet.ts (HELP_ALIAS, plus the one line normalizing
+    // it to `--help`) and declared in NO registry entry, so nothing bound the
+    // two: deleting that line makes `fleet status -h` an unknown flag the
+    // per-verb `allowed` check refuses as exit 2, and every test still passed.
+    expect(listVerbs().flatMap((v) => v.flags).some((f) => f.name === "-h")).toBe(false);
+    const expected = `${renderHelp(listVerbs())}\n`;
+    for (const entry of listVerbs()) {
+      const out: string[] = [];
+      const err: string[] = [];
+      expect(await run([entry.verb, "-h"], (s) => void out.push(s), { driver, store }, (s) => void err.push(s))).toBe(0);
+      // The SAME text as `--help`, on stdout, with nothing on stderr: a `-h`
+      // that fell through to the verb would exit 0 for `status` over an empty
+      // store too, printing nothing — which the exit code alone cannot tell apart.
+      expect(out.join("")).toBe(expected);
+      expect(err.join("")).toBe("");
+    }
+    // Boolean, like the `--help` it normalizes to: it consumes no value, so a
+    // run id after it survives — and the help path still wins over the verb.
+    const out: string[] = [];
+    expect(await run(["teardown", "-h", "no-such-run"], (s) => void out.push(s), { driver, store }, sink)).toBe(0);
+    expect(out.join("")).toBe(expected);
+    // …and it is still subject to the duplicate-bool guard, so it is a real
+    // registered boolean rather than a token the parser happens to ignore.
+    expect(await run(["status", "-h", "-h"], sink, { driver, store }, sink)).toBe(2);
+  });
+
+  test("`fleet help` is a fifth accepted verb that listVerbs() does not return", async () => {
+    // "exactly 4 entries" is true of the REGISTRY and false of the CLI: argv[0]
+    // === "help" is answered before tokenization, so `help` is a verb DF3.5's
+    // generated skill can never know about. Pinned rather than fixed — the
+    // registry describes flag grammar, and `help` has none — but pinned so a
+    // `version` or `doctor` added the same way cannot stay invisible.
+    expect(listVerbs().map((v) => v.verb)).not.toContain("help");
+    const out: string[] = [];
+    expect(await run(["help"], (s) => void out.push(s), { driver, store }, sink)).toBe(0);
+    expect(out.join("")).toBe(`${renderHelp(listVerbs())}\n`);
+
+    // Any OTHER unregistered verb is still refused, so the acceptance above is
+    // specific to `help` and not a parser that waves any first token through.
+    for (const notAVerb of ["version", "doctor"]) {
+      const err: string[] = [];
+      expect(await run([notAVerb], sink, { driver, store }, (s) => void err.push(s))).toBe(2);
+      expect(err.join("")).toContain("unknown-verb");
+    }
+    // And the CLI grows no more of them unnoticed: its ONLY pre-registry reading
+    // of argv[0] is that one literal. Read from the source because there is no
+    // runtime enumeration of "strings the CLI answers before the registry" —
+    // the same binding the excused-exit-code test makes against cli.test.ts.
+    const cli = readFileSync(join(import.meta.dir, "..", "..", "scripts", "fleet.ts"), "utf8");
+    expect([...cli.matchAll(/argv\[0\]\s*===\s*"([^"]*)"/g)].map((m) => m[1])).toEqual(["help"]);
   });
 
   test("a flag the registry does not give a verb is refused, per verb", async () => {
@@ -918,10 +1076,26 @@ describe("status.ts (statusAll join logic)", () => {
     expect(rows).toEqual([{ runId: FLEET_ROW_ID, state: "listUnavailable" }]);
   });
 
-  test("the listUnavailable row's id can never collide with a real run id", async () => {
+  test("no non-run row's id can ever collide with a real run id", async () => {
     // It is the row's identity in a stream keyed by runId, so a collision would
     // let a run masquerade as the fleet-level failure (and vice versa).
     expect(RUN_ID_RE.test(FLEET_ROW_ID)).toBe(false);
+
+    // The same claim for the OTHER recordless row class, and for a sharper
+    // reason: an orphan's name is whatever the SUBSTRATE called it, and on a
+    // tag-blind substrate that is every box in the account — so a bare
+    // `"runId": "my-dev-box"` is a string whose next operator command is
+    // `fleet teardown my-dev-box`, against a box no run ever owned.
+    await driver.create("plain-box-name", SBX_OWNERSHIP_TAG);
+    const rows = await statusAll({ driver, store, listTimeoutMs: 1000 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.state).toBe("orphan");
+    expect(RUN_ID_RE.test(rows[0]!.runId)).toBe(false);
+    // The box name still rides on `vmName` — that is what teardown targets —
+    // and it IS a legal run id, so the guard above is the parenthesised
+    // wrapping and not an accident of the fixture's name.
+    expect(rows[0]!.vmName).toBe("plain-box-name");
+    expect(RUN_ID_RE.test(rows[0]!.vmName!)).toBe(true);
   });
 
   test("a healthy list emits NO listUnavailable row", async () => {
@@ -933,8 +1107,12 @@ describe("status.ts (statusAll join logic)", () => {
   });
 
   test("store.list() failure surfaces as a typed FleetError, not a bare throw", async () => {
+    // `listWithAnomalies`, not `list`: that is the accessor statusAll reads, and
+    // a stub declaring only `list` was "failing" by being an absent method —
+    // right exit code, wrong message, and it would have passed a statusAll that
+    // never consulted the store at all.
     const brokenStore = {
-      list: (): RunRecord[] => {
+      listWithAnomalies: (): never => {
         throw new Error("malformed run record beta.json: unknown key: nope");
       },
     } as unknown as RunRecordStore;
@@ -948,6 +1126,47 @@ describe("status.ts (statusAll join logic)", () => {
     expect(err.remediation).toContain("fleet status");
   });
 
+  test("a .json whose stem is not a run id is REPORTED as skipped, never silently dropped", async () => {
+    // INV-4's one exception: a `.json` with a bad FILENAME is skipped so that a
+    // single unreadable name cannot take the whole directory down. But a skipped
+    // file can hold an OPEN record naming a live box — so "3 runs" and "3 runs
+    // and one record I refused to read" must not render identically, and a
+    // truncated fleet must not be reported as the whole fleet.
+    //
+    // A real RunRecordStore, not a stub: the skipping happens inside
+    // `listWithAnomalies`, so a stub handing back `{records, skipped}` asserts
+    // the plumbing and not the one thing that decides which files are skipped.
+    await provision("well-named-run");
+    writeFileSync(join(store.dir, "NOT_A_RUN_ID.json"), '{"runId":"NOT_A_RUN_ID"}\n');
+
+    const rows = await statusAll({ driver, store, listTimeoutMs: 1000 });
+    // ALONGSIDE the good rows, never instead of them, and sorted first for the
+    // same reason listUnavailable is: it is a row about every other row.
+    expect(rows.map((r) => [r.runId, r.state])).toEqual([
+      [FLEET_ROW_ID, "recordsSkipped"],
+      ["well-named-run", "live"],
+    ]);
+    // The FILENAME, so the operator can go repair the one file. A bare count
+    // sends them reading the whole directory.
+    expect(rows[0]!.skippedRecords).toEqual(["NOT_A_RUN_ID.json"]);
+
+    // …and the single-run query for a run that is not there carries the caveat
+    // too: the skipped file may be that run's own record under a mangled name,
+    // so a bare "no such run" denies a box that may still be billing.
+    const err = await refusal(
+      statusRun({ driver, store, listTimeoutMs: 1000 }, "no-such-run"),
+      4,
+      "run-not-found",
+    );
+    expect(err.remediation).toContain("NOT_A_RUN_ID.json");
+
+    // A clean directory emits NO such row — without this the row could be
+    // unconditional and everything above still passes by name lookup.
+    rmSync(join(store.dir, "NOT_A_RUN_ID.json"));
+    const clean = await statusAll({ driver, store, listTimeoutMs: 1000 });
+    expect(clean.some((r) => r.state === "recordsSkipped")).toBe(false);
+  });
+
   test("newest-first by createdAt, numeric across mixed ISO shapes, runId breaking ties", async () => {
     // Fed in an order `store.list()` never produces, so deleting the sort fails.
     // Neither lexicographic order nor runId order is the expected answer:
@@ -958,7 +1177,9 @@ describe("status.ts (statusAll join logic)", () => {
       { runId: "a-tied", createdAt: "2026-01-01T01:00:00+01:00" },
       { runId: "c-newest", createdAt: "2026-01-01T00:00:00.500Z" },
     ];
-    const stubStore = { list: () => rows2 } as unknown as RunRecordStore;
+    const stubStore = {
+      listWithAnomalies: () => ({ records: rows2, skipped: [] }),
+    } as unknown as RunRecordStore;
 
     const rows = await statusAll({ driver, store: stubStore, listTimeoutMs: 1000 });
     expect(rows.map((r) => r.runId)).toEqual(["c-newest", "a-tied", "b-oldest"]);
@@ -1050,12 +1271,16 @@ describe("status.ts (statusAll join logic)", () => {
     expect(byId.get("mix-missing")!.state).toBe("boxMissing");
     expect(byId.get("mix-closed")!.state).toBe("closed");
     expect(byId.get("mix-closed")!.boxAlive).toBe(true);
-    expect(byId.get("mix-orphan")!.state).toBe("orphan");
+    // By vmName, never by runId: an orphan's row id is parenthesised, precisely
+    // so it can never be keyed (or pasted into `fleet teardown`) as a run.
+    const orphan = rows.find((r) => r.vmName === "mix-orphan")!;
+    expect(orphan.state).toBe("orphan");
+    expect(RUN_ID_RE.test(orphan.runId)).toBe(false);
     // requestId on every state that HAS a record, and only there.
     expect(byId.get("mix-live")!.requestId).toBe("req-live");
     expect(byId.get("mix-missing")!.requestId).toBe("req-missing");
     expect(byId.get("mix-closed")!.requestId).toBe("req-closed");
-    expect(byId.get("mix-orphan")!).not.toHaveProperty("requestId");
+    expect(orphan).not.toHaveProperty("requestId");
     // The closed record's live box is reported on its own row — never twice.
     expect(rows.filter((r) => r.state === "orphan")).toHaveLength(1);
   });
@@ -1066,11 +1291,16 @@ describe("status.ts (statusAll join logic)", () => {
     await driver.create("orphan-a", SBX_OWNERSHIP_TAG);
 
     const rows = await statusAll({ driver, store, listTimeoutMs: 1000 });
-    expect(rows.map((r) => r.runId)).toEqual(["orphan-a", "orphan-b", "claimed-run"]);
+    expect(rows.map((r) => r.runId)).toEqual(["(orphan orphan-a)", "(orphan orphan-b)", "claimed-run"]);
+    // The ordering claim on its own terms, so a change to the id spelling can
+    // never quietly take the sort with it: both orphans precede the record row.
+    expect(rows.findIndex((r) => r.runId === "claimed-run")).toBe(rows.length - 1);
     for (const name of ["orphan-a", "orphan-b"]) {
-      const row = rows.find((r) => r.runId === name)!;
+      const row = rows.find((r) => r.vmName === name)!;
       expect(row.state).toBe("orphan");
       expect(row.vmName).toBe(name);
+      // Never the bare box name — see the collision test above.
+      expect(RUN_ID_RE.test(row.runId)).toBe(false);
       // ABSENT, not "": a required-but-empty instant makes every renderer's
       // `new Date(row.createdAt)` produce Invalid Date on the one row class the
       // sort floats to the top. (Two such rows also tie at +Infinity here, so
@@ -1097,8 +1327,9 @@ describe("status.ts (statusAll join logic)", () => {
         ] as unknown as ProviderVm[],
     };
     const rows = await statusAll({ driver: junkDriver, store, listTimeoutMs: 1000 });
-    expect(rows.map((r) => r.runId)).toEqual(["real-orphan"]);
+    expect(rows.map((r) => r.runId)).toEqual(["(orphan real-orphan)"]);
     expect(rows[0]!.state).toBe("orphan");
+    expect(rows[0]!.vmName).toBe("real-orphan");
   });
 
   test("a box carrying a FOREIGN tag never makes a run report live", async () => {
@@ -1282,6 +1513,14 @@ describe("status.ts (list timeout)", () => {
     // make the single-30s-timer assertion below pass or fail for reasons that
     // have nothing to do with the status timeout under test.
     await provisionAdmittedRun(driver, store, { runId: "default-timeout-run" });
+    // The driver's real answer, taken before the patch goes in, so the GATED
+    // driver used below does no I/O of its own inside the observation window.
+    const boxes = await driver.list();
+    let release!: (vms: ProviderVm[]) => void;
+    const gate = new Promise<ProviderVm[]>((resolve) => {
+      release = resolve;
+    });
+    const gated = { list: (): Promise<ProviderVm[]> => gate };
 
     const realSetTimeout = globalThis.setTimeout;
     const realClearTimeout = globalThis.clearTimeout;
@@ -1298,24 +1537,40 @@ describe("status.ts (list timeout)", () => {
     }) as unknown as typeof globalThis.clearTimeout;
 
     let rows: StatusRow[];
+    let timer: { ms: unknown; handle: unknown };
     try {
-      rows = await statusAll({ driver, store });
+      // `listWithTimeout` builds `Promise.race([driver.list(name), new
+      // Promise(…)])`, and a Promise executor runs SYNCHRONOUSLY — so with a
+      // driver that yields nothing of its own, the status timer is armed before
+      // this call expression returns. That synchronous window is the whole point:
+      // nothing else can arm a timer inside it, so the timer under test is
+      // identified by WHEN it was armed rather than by its delay.
+      //
+      // Filtering the whole await on `ms === 30_000` was the alternative, and it
+      // reds a correct implementation the moment anything else — the runtime, a
+      // sibling seam, a future retry loop — arms a 30s timer in that window. A
+      // test that gets rerun until green gates nothing at all.
+      const pending = statusAll({ driver: gated, store });
+      const armedByTheRace = armed.splice(0);
+      expect(armedByTheRace).toHaveLength(1);
+      timer = armedByTheRace[0]!;
+      // The delay the race really arms: `?? 30_000` → `?? 0` (or `?? 1`) makes
+      // production report boxUnknown for every run, and every other test in this
+      // file injects a timeout, so this is the only place it is observed.
+      expect(timer.ms).toBe(30_000);
+      release(boxes);
+      rows = await pending;
     } finally {
       globalThis.setTimeout = realSetTimeout;
       globalThis.clearTimeout = realClearTimeout;
     }
 
+    // The losing timer is cleared — by HANDLE, so a `clearTimeout` of some other
+    // timer cannot stand in for it. Left armed, a 30s handle keeps the event
+    // loop alive: `fleet status` printed its rows and then hung for half a minute.
+    expect(cleared).toContain(timer.handle);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.state).toBe("live");
-    // FILTERED, not exhaustive. The patch is global and unfiltered for the whole
-    // await, so `armed` also records whatever the driver's I/O, the record
-    // store's lock retry and Bun's internals happen to arm in that window, and
-    // `cleared` can carry handles armed before the patch went in. Asserting the
-    // exact array made this red intermittently on correct code — and a test that
-    // gets rerun until green gates nothing at all.
-    const armedDefault = armed.filter((a) => a.ms === 30_000);
-    expect(armedDefault).toHaveLength(1);
-    expect(cleared).toContain(armedDefault[0]!.handle);
   });
 
   test("a non-positive or non-finite listTimeoutMs is refused, never handed to setTimeout", async () => {
@@ -1454,13 +1709,18 @@ describe("status.ts (statusRun)", () => {
 
     const row = await statusRun({ driver, store, listTimeoutMs: 1000 }, runId);
     expect(row.state).toBe("orphan");
-    expect(row.runId).toBe(runId);
+    // The BOX name is the assertion that matters — it is what teardown targets.
+    // The row id is parenthesised (never the bare name) even here, where the
+    // caller handed us a legal run id: the row still describes a box no record
+    // claims, and `fleet teardown <that id>` has no record to act on.
     expect(row.vmName).toBe(runId);
+    expect(row.runId).toBe(`(orphan ${runId})`);
+    expect(RUN_ID_RE.test(row.runId)).toBe(false);
     expect(row).not.toHaveProperty("createdAt");
     expect(row).not.toHaveProperty("requestId");
-    // And the same id through the fleet-wide verb agrees.
+    // And the same id through the fleet-wide verb agrees — one shared row shape.
     const rows = await statusAll({ driver, store, listTimeoutMs: 1000 });
-    expect(rows.map((r) => [r.runId, r.state])).toEqual([[runId, "orphan"]]);
+    expect(rows).toEqual([row]);
   });
 
   test("a list failure on the ENOENT path still refuses as 4, never invents a box", async () => {

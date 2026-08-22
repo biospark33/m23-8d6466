@@ -47,10 +47,19 @@ import type { AdmissionDecision, CostLedger } from "../providers/cost-ledger.ts"
 import { newId, assertValidRunId, type RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { setupGate as realSetupGate, type SetupGateResult } from "../providers/exedev/setup-gate.ts";
-import { existsSync } from "node:fs";
+import { fakeGate, isSubstrateFailure } from "../providers/fake-gate.ts";
+import { parseRoster } from "../phase-engine/roster/schema.ts";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { log } from "../swarmclaw/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
+
+/**
+ * The dir-box setup gate, re-exported from the providers layer where its probe
+ * strings live (DoD: no substrate command string under `src/fleet/`). Callers
+ * and tests keep importing it from the module that USES it.
+ */
+export { fakeGate } from "../providers/fake-gate.ts";
 
 /**
  * Host-side dispatch-failure log (DF1.8's appendDispatchFailure target), at the
@@ -63,6 +72,15 @@ export const DISPATCH_FAILURE_LOG = ".sandbox/dispatch-log.jsonl";
 
 /** The minted-runId shape — the only form `opts.runId` accepts (AC2). */
 const MINTED_RUN_ID_RE = /^qds-\d{8}-[a-f0-9]{6}$/;
+
+/**
+ * The exedev gate's plain-path charset (`assertPathSafe`, `rosterModels`),
+ * mirrored so the roster can be refused BEFORE a box is billed rather than as a
+ * failed assertion on a live one INV-5 forbids destroying. Deliberately a
+ * COPY: the gate's own check stays the backstop, and this one exists purely to
+ * move the refusal earlier — it is never allowed to be the looser of the two.
+ */
+const ROSTER_PATH_CHARSET = /^[A-Za-z0-9._/-]+$/;
 
 /**
  * `setTimeout` clamps a delay past the 32-bit signed max to 1 ms, so a ceiling
@@ -264,26 +282,42 @@ function safeOrigin(url: URL): string {
  * module composes (`repoRoot`, `manifestPath`, the dispatch log) are exactly the
  * text a refusal exists to hand over.
  *
- * INV-4 (key material) is NOT enforced here, deliberately: this runs over
- * locally composed strings too, and `redactSecrets`'s long-mixed-token arm eats
- * an ordinary absolute path. Key material arrives only as third-party free text,
- * so it is redacted at that boundary instead — see `errorMessage`.
+ * INV-4 (key material) is enforced here too, by COMPOSING `redactSecrets` — the
+ * same helper `src/providers/step-log.ts` applies to every step line, so a
+ * message cannot be safe in one layer and unsafe in the other. It was left out
+ * on the argument that this also runs over locally composed strings and the
+ * long-mixed-token arm eats an ordinary absolute path. That argument protected
+ * the wrong thing: three paths carry text this module did not compose — zod
+ * issue messages echo the RECEIVED value, `CorrelationError.message` names the
+ * offending field, and an exedev gate assertion `note` is box-controlled text —
+ * and all three reach the dispatch log, the structured line and the FleetError.
+ * A bare `sk-or-v1-…` has no scheme, so the URL rule above never saw it.
+ *
+ * The cost is real and accepted: a long mixed-case path with a digit in it
+ * (`/Users/x/QDS-Factory/pipelines/df3-1/pipeline.yaml`) is redacted out of a
+ * refusal message. A path an operator has to reconstruct is a worse refusal; a
+ * key in a persisted log is a worse incident.
+ *
+ * URLs FIRST, secrets second: the whole-segment rule needs the URL intact to
+ * parse, and `«redacted»` is inert to both arms of `redactSecrets`.
  */
 function redact(text: string): string {
-  return text.replace(URL_IN_TEXT_RE, (raw) => {
-    let url: URL;
-    try {
-      url = new URL(raw);
-    } catch {
-      // Scheme matched but the rest did not parse: redact whole rather than
-      // guess at its structure — fail closed, like every other unverifiable
-      // read in this module.
-      return "«redacted»";
-    }
-    const path = url.pathname === "/" ? "" : url.pathname.replace(/\/[^/]+/g, "/«redacted»");
-    const stripped = url.search === "" && url.hash === "" ? "" : "«redacted»";
-    return `${safeOrigin(url)}${path}${stripped}`;
-  });
+  return redactSecrets(
+    text.replace(URL_IN_TEXT_RE, (raw) => {
+      let url: URL;
+      try {
+        url = new URL(raw);
+      } catch {
+        // Scheme matched but the rest did not parse: redact whole rather than
+        // guess at its structure — fail closed, like every other unverifiable
+        // read in this module.
+        return "«redacted»";
+      }
+      const path = url.pathname === "/" ? "" : url.pathname.replace(/\/[^/]+/g, "/«redacted»");
+      const stripped = url.search === "" && url.hash === "" ? "" : "«redacted»";
+      return `${safeOrigin(url)}${path}${stripped}`;
+    }),
+  );
 }
 
 /**
@@ -295,12 +329,21 @@ function redact(text: string): string {
  * structured lines verbatim — on the same line where the box URL was redacted,
  * and INV-6's own docstring names the query string as the first thing to strip.
  * Userinfo, query and fragment always go; the path stays clickable.
+ *
+ * The path is not kept VERBATIM, though — it goes through `redactSecrets`, so a
+ * token parked in a path segment (`/t/ghs_…/o/r/issues/1`) does not ride into
+ * both structured lines just because it sits where a link's readable part
+ * normally does. The ≥16-char rule `safeOrigin` applies to host labels is
+ * deliberately NOT applied here: an ordinary repository name is often that
+ * long, and a link whose path is redacted is the thing this helper exists to
+ * avoid. Residual, accepted: a short unprefixed path secret still survives —
+ * the same shape-alone gap `redactSecrets` documents for its own arm 2.
  */
 function linkSafe(url: string | null): string | null {
   if (url === null) return null;
   try {
     const parsed = new URL(url);
-    return `${safeOrigin(parsed)}${parsed.pathname === "/" ? "" : parsed.pathname}`;
+    return `${safeOrigin(parsed)}${parsed.pathname === "/" ? "" : redactSecrets(parsed.pathname)}`;
   } catch {
     return "«redacted»";
   }
@@ -331,224 +374,53 @@ function redactDeep(value: unknown): unknown {
   return value;
 }
 
-/** Assertion code table mirrors DF2.2's ASSERTION_CODE (A/B share 1). */
-const FAKE_ASSERTION_CODE: Record<"A" | "B" | "C" | "D" | "E", 1 | 2 | 3 | 4> = {
-  A: 1,
-  B: 1,
-  C: 2,
-  D: 3,
-  E: 4,
-};
-
 /**
- * "The command never ran at all", told apart from "the command ran and failed".
+ * Is this an exedev box? ONE predicate, every exedev-shaped decision.
  *
- * `ExecResult.exitCode` is DECLARED `number`, but it crosses a driver boundary:
- * a signal-killed child carries Node's `null`, and 127 is `/bin/sh`'s own
- * command-not-found. Folded into the ordinary arms, both were reported as a
- * MANIFEST problem ("manifest unreadable (grep exit 127)") — sending the
- * operator to inspect a file when the box is the thing that is broken. Takes
- * `unknown` because the declared type has no overlap with `null`.
- */
-function substrateFailure(exitCode: unknown): string | undefined {
-  if (exitCode === null || exitCode === undefined) {
-    return "the box did not run the probe (killed by a signal) — a substrate failure, not a manifest one";
-  }
-  if (exitCode === 127) {
-    return "exit 127: `sh` or the probe command is not on the box — the probe never ran";
-  }
-  return undefined;
-}
-
-/**
- * The fake-substrate setup gate: five REAL probes of the box's on-disk state,
- * one per DF2.2 assertion item. Not a simulated pass — every item executes a
- * command in the box and reports what it found. The exedev gate stays the
- * authoritative five-assertion gate; this is its dir-box counterpart.
- * Exported for tests and for any caller that needs the dir-box gate directly.
+ * It has to decide which gate runs, whether the roster is pre-checked, where
+ * the key file lands AND whether the repo is cloned at the pinned SHA. Keyed
+ * off different things — gate on `.setup`, clone on `.fill`, key path once on
+ * `name === "fake"` — a driver carrying one primitive and not the other was
+ * handed an incoherent lifecycle: `fill` without `setup` cloned the repo and
+ * then ran the DIR-BOX gate over it, while `setup` without `fill` ran the real
+ * five-assertion gate against a `commitSha` nothing had ever checked out. Both
+ * capabilities, or neither.
  *
- * Probing stops at the first failure: `assertions` is the EXECUTED set, and
- * every later probe would report the state of a box already known unready.
+ * A type PREDICATE, so the narrowed driver goes into `realSetupGate` and
+ * `fillExeDev` as itself. The call sites used to launder it through `as never`
+ * / `as (vm, o) => Promise<unknown>` — the very casts `LedgerLike` was
+ * introduced to eliminate — which switched off checking on the two calls that
+ * most need it.
  */
-export async function fakeGate(
-  driver: ProviderDriver,
-  vm: string,
-  opts: GateOpts,
-): Promise<SetupGateResult> {
-  /**
-   * The box's manifest, read ONCE by item B and inspected structurally by B, D
-   * and E. `serializeManifest` writes `JSON.stringify(…, null, 2)` under the
-   * `.yaml` filename, so the host can parse it rather than grep it — and B/E
-   * previously used unanchored, unscoped greps, which AC9a's "refuse if absent"
-   * was satisfied by a `limitMicroUsd` inside an env-var name, a comment or a
-   * nested object. Anchoring was not available: the writer emits one JSON
-   * document, not one key per line.
-   */
-  let manifest: Record<string, unknown> | undefined;
-
-  const probes: { item: "A" | "B" | "C" | "D" | "E"; note: string; run: () => Promise<{ ok: boolean; detail: string }> }[] = [
-    {
-      item: "A",
-      note: "box reachable (exec true)",
-      run: async () => {
-        const r = await driver.exec(vm, ["true"]);
-        const substrate = substrateFailure(r.exitCode);
-        if (substrate !== undefined) return { ok: false, detail: substrate };
-        return { ok: r.exitCode === 0, detail: `exit ${r.exitCode}` };
-      },
-    },
-    {
-      item: "B",
-      note: "frozen manifest carries a root-level limitMicroUsd (AC9a refuse-if-absent)",
-      run: async () => {
-        const r = await driver.exec(vm, ["sh", "-c", "cat pipeline.yaml 2>/dev/null"]);
-        const substrate = substrateFailure(r.exitCode);
-        if (substrate !== undefined) return { ok: false, detail: substrate };
-        const body = (r.stdout ?? "").trim();
-        // This probe runs before item D, so it has to name BOTH of its own
-        // failures: a manifest that never landed and a manifest that landed
-        // unstamped are opposite diagnoses — one sends the operator to the fill
-        // step, the other to the stamping step.
-        //
-        // A third one rides the exit code. `cat`'s stderr is discarded (a
-        // permission message is not this probe's output), so a manifest that
-        // EXISTS and cannot be read — mode 000, EIO, a directory in its place —
-        // arrives here as an empty body and used to be reported as "missing",
-        // sending the operator to re-run the fill step that already succeeded.
-        if (body.length === 0) {
-          return {
-            ok: false,
-            detail:
-              r.exitCode === 0
-                ? "pipeline.yaml is present but empty"
-                : `pipeline.yaml missing or unreadable (cat exit ${r.exitCode})`,
-          };
-        }
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(body);
-        } catch (e) {
-          return { ok: false, detail: `pipeline.yaml is not parseable: ${errorMessage(e)}` };
-        }
-        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-          return { ok: false, detail: "pipeline.yaml is not a manifest object" };
-        }
-        manifest = parsed as Record<string, unknown>;
-        return manifest.limitMicroUsd === undefined
-          ? { ok: false, detail: "limitMicroUsd absent" }
-          : { ok: true, detail: "stamped" };
-      },
-    },
-    {
-      item: "C",
-      note: "delivered key env file is mode 600 (DF2.3 delivery contract)",
-      run: async () => {
-        // GNU stat, then BSD stat, then give up: the previous probe shelled out
-        // to python3, so any box without an interpreter failed item C for a
-        // reason that has nothing to do with the key's mode. `stat` is in
-        // coreutils/BSD base on every substrate the factory targets.
-        const r = await driver.exec(
-          vm,
-          ["sh", "-c", "stat -c '%a' .env 2>/dev/null || stat -f '%Lp' .env 2>/dev/null || echo none"],
-        );
-        const substrate = substrateFailure(r.exitCode);
-        if (substrate !== undefined) return { ok: false, detail: substrate };
-        const mode = (r.stdout ?? "").trim();
-        return { ok: mode === "600", detail: `mode ${mode || "unknown"}` };
-      },
-    },
-    {
-      item: "D",
-      // CONTENT, never presence — the dir-box counterpart of DF2.2's item D,
-      // which inspects the cost table's content rather than trusting a field
-      // name. This item used to re-test "manifest non-empty", which item B's
-      // own first arm has already proved by the time D runs: it could not fail,
-      // so DF2.2's five-assertion gate was effectively four.
-      note: "stamped limitMicroUsd is a spendable positive integer",
-      run: async () => {
-        const limit = manifest?.limitMicroUsd;
-        return Number.isSafeInteger(limit) && (limit as number) > 0
-          ? { ok: true, detail: `${limit as number} µ$` }
-          : {
-              ok: false,
-              detail: `limitMicroUsd is ${JSON.stringify(limit)}, not a positive integer of micro-dollars`,
-            };
-      },
-    },
-    {
-      item: "E",
-      note: "manifest declares a non-empty phases list (DF1.1 schema shape)",
-      run: async () => {
-        const phases = manifest?.phases;
-        return Array.isArray(phases) && phases.length > 0
-          ? { ok: true, detail: `${phases.length} phases` }
-          : { ok: false, detail: "no non-empty root-level phases list" };
-      },
-    },
-  ];
-  const assertions: SetupGateResult["assertions"] = [];
-  for (const probe of probes) {
-    let outcome: { ok: boolean; detail: string };
-    try {
-      outcome = await probe.run();
-    } catch (e) {
-      // A rejecting `driver.exec` — SSH transport failure, dead box — used to
-      // discard every assertion accumulated so far and escape as a generic
-      // exit-1 "dispatch failed after the box was created", costing the
-      // operator the per-item evidence the exit-3 envelope carries.
-      outcome = { ok: false, detail: errorMessage(e) };
-    }
-    const { ok, detail } = outcome;
-    assertions.push({ item: probe.item, ok, note: ok ? probe.note : `${probe.note} — ${detail}` });
-    if (!ok) break;
-  }
-  const firstFail = assertions.find((a) => !a.ok);
-  return {
-    ready: firstFail === undefined,
-    ...(firstFail !== undefined
-      ? { failedItem: firstFail.item, assertionCode: FAKE_ASSERTION_CODE[firstFail.item] }
-      : {}),
-    assertions,
-    debugCommands: [`bun scripts/fleet.ts status ${opts.runId}`],
-    teardownCommand: `bun scripts/fleet.ts teardown ${opts.runId}`,
-    vm,
+type ExedevCapable = ProviderDriver &
+  Parameters<typeof realSetupGate>[0] & {
+    fill(vm: string, opts: { runId: string; repoUrl: string; commitSha: string }): Promise<void>;
   };
-}
 
-/**
- * Does this driver carry exedev's `setup` primitive?
- *
- * The SAME predicate has to decide which gate runs AND where the key file
- * lands. Keyed off different things — gate on `setup`, key path on
- * `name === "fake"` — any driver that is neither exedev nor literally named
- * `"fake"` got the dir-box gate probing `.env` while its key went to
- * `/home/agent/.env`, so item C failed for every such driver by construction.
- *
- * A type PREDICATE, so the narrowed driver goes into `realSetupGate` as itself.
- * The call site used to launder it through `as never` — the very cast
- * `LedgerLike` was introduced to eliminate — which switched off checking on the
- * gate's driver argument entirely.
- */
-function hasExedevSetup(
-  driver: ProviderDriver,
-): driver is ProviderDriver & Parameters<typeof realSetupGate>[0] {
-  return typeof (driver as ProviderDriver & { setup?: unknown }).setup === "function";
+function isExedevDriver(driver: ProviderDriver): driver is ExedevCapable {
+  const d = driver as ProviderDriver & { setup?: unknown; fill?: unknown };
+  return typeof d.setup === "function" && typeof d.fill === "function";
 }
 
 /** Dir boxes are plain host dirs — the key lands box-relative, not /home/agent. */
 function envFileFor(driver: ProviderDriver): string | undefined {
-  return hasExedevSetup(driver) ? undefined : ".env";
+  return isExedevDriver(driver) ? undefined : ".env";
 }
 
 /**
  * Does a record already exist for this id? `get` is the store's only reader;
  * absence is ENOENT on the typed code, and every other read failure is a real
  * problem that must not be read as "free to reuse".
+ *
+ * The RETURN VALUE is read, not just the absence of a throw. `get` is declared
+ * `RunRecord`, so `undefined` is a driver-boundary guard rather than a modelled
+ * outcome — but a store that ever signals absence by returning it would have
+ * made every mint report "taken", and dispatch bricks with `run-id-unmintable`
+ * for a run directory that is in fact empty.
  */
 function recordExists(store: RunRecordStore, runId: string): boolean {
   try {
-    store.get(runId);
-    return true;
+    return store.get(runId) !== undefined;
   } catch (e) {
     if ((e as NodeJS.ErrnoException | null | undefined)?.code === "ENOENT") return false;
     throw e;
@@ -576,9 +448,10 @@ function recordExists(store: RunRecordStore, runId: string): boolean {
  * `src/providers/step-log.ts` applies to every step line, so a message cannot be
  * safe in one layer and unsafe in the other.
  *
- * Not folded into `redact`: that one also runs over strings this module composes
- * itself, and `redactSecrets`'s long-mixed-token arm eats an ordinary absolute
- * path — which is the operator-facing text a refusal exists to hand over.
+ * `redact` now composes the same helper, so this is defence in depth rather
+ * than the only application of it: this one runs at the point the third-party
+ * text is READ, before it can be interpolated into a string a call site forgets
+ * to route through `refuse`.
  */
 function errorMessage(e: unknown): string {
   const message = (e as { message?: unknown } | null | undefined)?.message;
@@ -641,8 +514,16 @@ export async function dispatch(
   // refusal evidence in whatever the process cwd happened to be. The basename
   // comes from `DISPATCH_FAILURE_LOG` so the documented default and the
   // computed one cannot drift — the constant was exported and never read.
+  //
+  // …and the parent must be a directory an ordinary process may write. `--dir
+  // /runs` puts it at the filesystem ROOT, where the append is EACCES and the
+  // AC4 evidence is lost; the store dir itself is writable by construction, so
+  // that is the fallback. `dirname(p) === p` is the root test.
+  const storeDir = resolve(deps.store.dir);
+  const logDir = dirname(storeDir);
   const dispatchLog =
-    deps.dispatchLogPath ?? join(dirname(resolve(deps.store.dir)), basename(DISPATCH_FAILURE_LOG));
+    deps.dispatchLogPath ??
+    join(dirname(logDir) === logDir ? storeDir : logDir, basename(DISPATCH_FAILURE_LOG));
   const timings: Record<string, number> = {};
   const phase = (name: string, ms: number): void => {
     timings[name] = ms;
@@ -651,7 +532,12 @@ export async function dispatch(
   // Refusal context: filled in as each fact becomes known. A refusal that fires
   // before a fact exists reports `null` for it — never `""`, never a fabricated
   // id (the observability contract).
-  let ctxRequestId: string | null = deps.requestId ?? null;
+  // NOT seeded from `deps.requestId`: that value is UNVALIDATED until step 2's
+  // shape check, and a refusal that fires before it (`timeout-invalid`,
+  // `port-invalid`, `invalid-brief`) would stamp an exit-2-worthy string onto
+  // the correlation key of an AC4 evidence row. Named `unresolved` until the
+  // shape check has passed, like every other fact this context holds.
+  let ctxRequestId: string | null = null;
   let ctxRepoSlug: string | null = null;
   let ctxIssueId: number | null = null;
   let ctxRunId: string | null = null;
@@ -702,6 +588,14 @@ export async function dispatch(
     rawMessage: string,
     rawRemediation: string,
     payload: Record<string, unknown> = {},
+    /**
+     * Override the exit-code-derived retry classification. Exactly one caller
+     * needs it: an exit-3 gate refusal whose failing assertion is a SUBSTRATE
+     * failure (the probe never ran) is retryable, and the default mapping calls
+     * every non-1 exit `logic` — discarding the one distinction `substrateFailure`
+     * exists to surface, one layer above where it was computed.
+     */
+    exitStatusOverride?: ExitStatus,
   ): FleetError => {
     const message = redact(rawMessage);
     const remediation = redact(rawRemediation);
@@ -748,8 +642,9 @@ export async function dispatch(
         verb: "dispatch",
         phase: "refused",
         // exit 1 is a timeout or a substrate failure — retryable, hence
-        // "transient"; every other refusal is the brief's or the budget's own.
-        exitStatus: (exitCode === 1 ? "transient" : "logic") as ExitStatus,
+        // "transient"; every other refusal is the brief's or the budget's own,
+        // unless the caller KNOWS otherwise (see `exitStatusOverride`).
+        exitStatus: exitStatusOverride ?? ((exitCode === 1 ? "transient" : "logic") as ExitStatus),
         // Nested, not spread: `timings` is a `Record<string, number>`, so a
         // spread lets a future `phase("status", …)` overwrite `status`,
         // `runId` or `exitStatus` with a number and no compile error.
@@ -834,6 +729,15 @@ export async function dispatch(
    * Bound one await against what is LEFT of the dispatch ceiling — sampling the
    * clock only between steps lets a single hung provider call run forever.
    *
+   * A ceiling on AWAITED steps, and only those. `loadManifest` and
+   * `assertWithinBudget` are both synchronous, so a slow filesystem or a
+   * SQLITE_BUSY spin inside them cannot be interrupted and `dispatch exceeded
+   * ${timeoutMs} ms` is discovered at the NEXT sampling point, not at the
+   * deadline. The message overstates what the ceiling can promise; closing the
+   * gap means moving that work off the main thread, which is a bigger change
+   * than the guarantee is worth. Sampled either side of both, so the overrun is
+   * at least attributed to the right step.
+   *
    * ponytail: race-and-abandon. The provider seam exposes no AbortSignal, so an
    * expired await is abandoned, not cancelled — which is INV-5's posture
    * anyway (the box stays alive, the operator decides). A real cancel needs a
@@ -853,8 +757,14 @@ export async function dispatch(
    * rejection: under the test runner it was attributed to whichever test ran
    * next and kept the process alive.
    *
+   * BOTH settlements are subscribed, not just the rejection. An abandoned
+   * `create` that later RESOLVES is the expensive one: `ctxVmName` is assigned
+   * after the await, so the refusal named no box, and a billable VM existed with
+   * its name recorded nowhere at all — the timeout's own remediation says to go
+   * looking for it, and this is the line that says what to look for.
+   *
    * The handler only reports; the timeout stays the thrown error. `abandoned`
-   * keeps it silent on the ordinary path, where the race hands the failure to
+   * keeps it silent on the ordinary path, where the race hands the outcome to
    * dispatch and a second line would double-report it.
    */
   const within = async <T>(step: string, work: () => Promise<T>): Promise<T> => {
@@ -862,8 +772,11 @@ export async function dispatch(
     if (left <= 0) throw timedOut(step);
     let abandoned = false;
     const running = work();
-    void running.catch((e: unknown) => {
-      if (!abandoned) return;
+    const logAbandoned = (
+      code: string,
+      message: string,
+      extra: Record<string, unknown> = {},
+    ): void => {
       const durationMs = now() - wallStart;
       try {
         log({
@@ -874,21 +787,42 @@ export async function dispatch(
           duration: durationMs,
           durationMs,
           status: "error",
-          // Secondary to the timeout that was already thrown: the abandoned
-          // provider call failed too, which is what an operator needs to see
-          // when the timeout alone does not explain the run.
-          error: { code: "abandoned-step-failed", message: redact(errorMessage(e)) },
+          error: { code, message },
           runId: ctxRunId,
           verb: "dispatch",
           phase: "abandoned",
           step,
           exitStatus: "transient" as ExitStatus,
+          ...extra,
         });
       } catch {
         // a throwing log sink must not become the unhandled rejection this
         // handler exists to prevent
       }
-    });
+    };
+    void running.then(
+      (value: T) => {
+        if (!abandoned) return;
+        // Duck-typed, because `within` is generic over every step: only the
+        // `create` step resolves a box, and its identity is the only part of a
+        // late success an operator can act on.
+        const vm = (value as { vm?: { name?: unknown; httpsUrl?: unknown } } | null | undefined)?.vm;
+        logAbandoned(
+          "abandoned-step-succeeded",
+          `the abandoned ${step} call COMPLETED after the deadline — whatever it created is live and was not on the refusal`,
+          {
+            ...(typeof vm?.name === "string" ? { vmName: vm.name } : {}),
+            ...(typeof vm?.httpsUrl === "string" ? { httpsUrl: redact(vm.httpsUrl) } : {}),
+          },
+        );
+      },
+      (e: unknown) => {
+        // Secondary to the timeout that was already thrown: the abandoned
+        // provider call failed too, which is what an operator needs to see when
+        // the timeout alone does not explain the run.
+        if (abandoned) logAbandoned("abandoned-step-failed", redact(errorMessage(e)));
+      },
+    );
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
@@ -939,11 +873,21 @@ export async function dispatch(
       2,
       "invalid-brief",
       `brief rejected: field ${JSON.stringify(field)}`,
-      `fix or remove ${field} in the brief JSON`,
+      // JSON.stringify, not raw. The field NAME is attacker-chosen — an
+      // unrecognized key is echoed back verbatim — and `redact` is a secret
+      // redactor, not a control-char escaper. A key like "[2J" or
+      // "a\nFLEET dispatch ok runId=fake" reached the operator stream intact
+      // through this one interpolation while the message above escaped it.
+      `fix or remove ${JSON.stringify(field)} in the brief JSON`,
       {
         field,
+        // zod builds "Unrecognized key(s) in object: '<raw>'" from the same
+        // attacker-chosen name, so the issue strings need the same escaping —
+        // but NOT the surrounding quotes JSON.stringify adds, because these are
+        // already list ELEMENTS. slice(1, -1) keeps the escaping, drops the
+        // wrapping.
         issues: parsed.error.issues.map((i) =>
-          redact(`${i.path.join(".") || "(root)"}: ${i.message}`),
+          redact(JSON.stringify(`${i.path.join(".") || "(root)"}: ${i.message}`).slice(1, -1)),
         ),
       },
     );
@@ -974,11 +918,43 @@ export async function dispatch(
       "pass the value resolveBriefRequestId() returned for this brief, or omit it and let dispatch resolve the brief's own",
     );
   }
+  // Validated now, so it may seed the refusal context (see `ctxRequestId`).
+  ctxRequestId = deps.requestId ?? null;
   // `resolveBriefRequestId` and nothing else: the rule was reimplemented inline
   // here, and the two copies had ALREADY diverged (the helper guards
   // `typeof supplied === "string"`, the inline test did not).
   const { requestId: _briefRequestId, ...briefRest } = valid;
-  const suppliedRequestId = deps.requestId ?? resolveBriefRequestId(valid);
+  const briefRequestId = resolveBriefRequestId(valid);
+  const suppliedRequestId = deps.requestId ?? briefRequestId;
+  // deps WINS — it has to (INV-4-bis: the CLI already built the store and the
+  // driver with it) — but a brief whose own valid id is DIFFERENT is a split
+  // between what the operator wrote and what the run reports, and it used to be
+  // silent. A MALFORMED deps.requestId is exit 2 to prevent exactly this split,
+  // so the survivable version of it must at least be visible. Not a refusal:
+  // overriding is the documented contract of the parameter.
+  if (briefRequestId !== undefined && deps.requestId !== undefined && briefRequestId !== deps.requestId) {
+    try {
+      log({
+        requestId: deps.requestId,
+        operation: "fleet.dispatch",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: now() - wallStart,
+        durationMs: now() - wallStart,
+        status: "ok",
+        error: {
+          code: "request-id-overridden",
+          message: `the brief's requestId ${JSON.stringify(briefRequestId)} was overridden by deps.requestId`,
+        },
+        runId: null,
+        verb: "dispatch",
+        phase: "resolved",
+        exitStatus: "success" as ExitStatus,
+      });
+    } catch {
+      // see `refuse` — a sink failure is never the run's failure
+    }
+  }
   const briefIn =
     suppliedRequestId === undefined ? briefRest : { ...briefRest, requestId: suppliedRequestId };
   let correlation: ReturnType<typeof resolveRunCorrelation>;
@@ -1110,14 +1086,64 @@ export async function dispatch(
   // forbid tearing that box down). Only checked where that gate will actually
   // run: an injected gate and a dir box never read a roster.
   const rosterPath = join(dirname(manifestPath), "roster.yaml");
-  if (deps.setupGate === undefined && hasExedevSetup(deps.driver) && !existsSync(rosterPath)) {
-    throw refuse(
-      2,
-      "roster-missing",
-      `no roster beside the manifest: ${rosterPath}`,
-      "place the active roster at that path, or point manifestPath at a directory that has one",
-      { rosterPath },
-    );
+  if (deps.setupGate === undefined && isExedevDriver(deps.driver)) {
+    if (!existsSync(rosterPath)) {
+      throw refuse(
+        2,
+        "roster-missing",
+        `no roster beside the manifest: ${rosterPath}`,
+        "place the active roster at that path, or point manifestPath at a directory that has one",
+        { rosterPath },
+      );
+    }
+    // CHARSET, host-side. `assertPathSafe` (setup-gate.ts) refuses a roster path
+    // outside `[A-Za-z0-9._/-]` because it is interpolated into a remote `sh`
+    // command — but it runs INSIDE the gate, i.e. after the box exists and is
+    // billing, and INV-5 then forbids tearing that box down. A repo checked out
+    // under `/Users/x/My Projects/…` or any accented path therefore provisioned,
+    // billed, and failed with the record OPEN over a fact knowable at step 1.
+    // `rosterPath` is absolute, so `repoRoot` is inside what is tested.
+    //
+    // The gate keeps its own check — this is the pre-check, not a replacement.
+    if (!ROSTER_PATH_CHARSET.test(rosterPath)) {
+      throw refuse(
+        2,
+        "roster-path-unsafe",
+        `roster path ${JSON.stringify(rosterPath)} is outside the setup gate's plain-path charset [A-Za-z0-9._/-]`,
+        "check the repository out under a path with no spaces or non-ASCII characters, or pass a gate via deps.setupGate",
+        { rosterPath },
+      );
+    }
+    // CONTENT, same argument. The gate reads this file with this same
+    // `parseRoster`, so a `roster.yaml` that is a directory (EISDIR — which
+    // `existsSync` reports as present), unparseable YAML, a roster that fails
+    // the closed schema, or a role slug outside the model-id charset all used to
+    // surface at step 9 on a live box. Every one of them is host-side and
+    // knowable here.
+    let rosterSlugs: string[];
+    try {
+      const st = statSync(rosterPath);
+      if (!st.isFile()) throw new Error(`${rosterPath} is not a regular file`);
+      rosterSlugs = parseRoster(readFileSync(rosterPath, "utf8"), rosterPath).roles.map((r) => r.slug);
+    } catch (e) {
+      throw refuse(
+        2,
+        "roster-rejected",
+        `roster rejected: ${errorMessage(e)}`,
+        "fix the roster beside the manifest, or point manifestPath at a directory with a valid one",
+        { rosterPath },
+      );
+    }
+    const badSlug = rosterSlugs.find((slug) => !ROSTER_PATH_CHARSET.test(slug));
+    if (badSlug !== undefined) {
+      throw refuse(
+        2,
+        "roster-rejected",
+        `roster slug ${JSON.stringify(badSlug)} is outside the model-id charset [A-Za-z0-9._/-]`,
+        "fix the roster entry — the slug is interpolated into the gate's in-box ping",
+        { rosterPath },
+      );
+    }
   }
 
   // ── 4. runId (dispatcher-owned; AC2 opts.runId only accepts minted ids) ────
@@ -1333,7 +1359,17 @@ export async function dispatch(
   //
   // ponytail: this refusal fires AFTER `assertWithinBudget` committed the
   // admission, and cannot be moved before it — the ceiling under test IS the
-  // decision's own output. The reservation is retired by the ledger's orphan
+  // decision's own output.
+  //
+  // It is also, today, UNREACHABLE from this call site, which is why the
+  // reservation it would strand is not worth a compensating release:
+  // `admitIssue` refuses a non-positive `capMicroUsd` before it writes anything,
+  // returns `admitted: false` unless `remainingMicroUsd > 0`, and then computes
+  // `min(keyCapMicroUsd, remaining)` — and dispatch never passes
+  // `keyCapMicroUsd`, so it is `defaultKeyCapMicroUsd`, a positive literal. The
+  // guard stays because it is the one thing standing between a future change to
+  // any of those three and a run that bills box-hours it can never spend.
+  // The reservation is retired by the ledger's orphan
   // guard: `store.create` never runs on this path, so no record ever resolves
   // for this id and the admission stops counting once it ages past the ledger's
   // orphan window (`ADMISSION_GRACE_MS` + `ADMISSION_SKEW_MARGIN_MS`, the margin
@@ -1468,6 +1504,14 @@ export async function dispatch(
   // second dispatch overcommit the same cap.
   ctxHttpsUrl = vm.httpsUrl;
   try {
+    // `store.create` takes only an id, so between it and this line the record
+    // exists WITHOUT a `requestId` — for the whole of `driver.create()`, which
+    // is the longest window in provisioning. A concurrent `fleet status` reads a
+    // record it cannot join to anything. Not fixed here: widening `create` to
+    // take the id and the correlation together is a run-record change, and it is
+    // the right one. Until then this is the first write after provisioning, so
+    // the window is as short as this layer can make it.
+    //
     // INV-4-bis: the correlation id is the cross-layer join key, so it has to be
     // ON the record — `fleet status` is the operator's only inspection surface,
     // and a run that dies at the gate is exactly the one whose logs they need to
@@ -1531,9 +1575,55 @@ export async function dispatch(
     }
     phase("mint_ms", now() - tMint);
 
+    // AC9: what reaches the box is the cap the provider actually MINTED, not the
+    // one that was requested. `mintRunKey` refuses a non-positive or non-finite
+    // `limitUsd` outright and persists `usdToMicros(res.limitUsd)` on the
+    // record, so by the time the fill step runs the record holds the true
+    // figure — while `pipeline.yaml` and `run-context.json` were carrying the
+    // REQUEST. A manifest that names a ceiling the key does not carry is a run
+    // that either dies mid-phase against a provider limit nothing told it about,
+    // or (if the provider minted MORE) advertises headroom the ledger never
+    // reserved.
+    //
+    // Falls back to the requested figure if the record cannot be read or holds
+    // no usable limit: reading it back is diagnosis, and a failure here must not
+    // become the run's failure when the key is already live and delivered.
+    let mintedCeilingMicros = effectiveCeilingMicros;
+    try {
+      const persisted = deps.store.get(runId).limitMicroUsd;
+      if (Number.isSafeInteger(persisted) && (persisted as number) > 0) {
+        mintedCeilingMicros = persisted as number;
+      }
+    } catch {
+      // see above — the requested ceiling stays the stamp
+    }
+    if (mintedCeilingMicros !== effectiveCeilingMicros) {
+      try {
+        log({
+          requestId,
+          operation: "fleet.dispatch",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: now() - wallStart,
+          durationMs: now() - wallStart,
+          status: "ok",
+          error: {
+            code: "mint-cap-differs",
+            message: `provider minted ${mintedCeilingMicros} µ$ against a request of ${effectiveCeilingMicros} µ$ — the box is stamped with the minted figure`,
+          },
+          runId,
+          verb: "dispatch",
+          phase: "minted",
+          exitStatus: "success" as ExitStatus,
+        });
+      } catch {
+        // see `refuse` — a sink failure is never the run's failure
+      }
+    }
+
     // ── 8. fill at the pinned SHA (AC9a: manifest is the cap's only carrier) ─
     const tFill = now();
-    const stamped = stampManifestLimit(loaded, effectiveCeilingMicros);
+    const stamped = stampManifestLimit(loaded, mintedCeilingMicros);
     // AC9: the manifest is the cap's only in-box source (9a); the run context
     // carries the same computed-once ceiling for DF1.6's spawn seam (9b), plus
     // the issue deep link the brief supplied — the box's own back-reference to
@@ -1546,28 +1636,44 @@ export async function dispatch(
           runId,
           pipelineId: stamped.manifest.pipelineId,
           requestId,
-          effectiveCeilingMicros,
+          // The MINTED ceiling, same figure the manifest above is stamped with —
+          // 9a and 9b must not name two different numbers.
+          effectiveCeilingMicros: mintedCeilingMicros,
           repoSlug,
-          issueId: correlation.issueId,
-          ...(correlation.issueUrl === null ? {} : { issueUrl: correlation.issueUrl }),
+          // `String`, the same shape the ledger key and the run record carry.
+          // One identity in two types is two identities to anything that joins
+          // them, and this file is DF1.6's spawn seam.
+          issueId,
+          // `linkSafe`, not verbatim. Step 10 can make this box PUBLIC, and the
+          // schema constrains `issueUrl`'s scheme only — so a brief carrying
+          // `?installation_token=ghs_…` wrote that token to disk for every agent
+          // in the box, on the one copy of the link that was not redacted. The
+          // path stays clickable, which is all the back-reference needs.
+          ...(correlation.issueUrl === null
+            ? {}
+            : { issueUrl: linkSafe(correlation.issueUrl) }),
         }),
       },
     ];
-    const exedevFill = (deps.driver as ProviderDriver & { fill?: unknown }).fill;
-    if (typeof exedevFill === "function") {
+    const exedevDriver = isExedevDriver(deps.driver) ? deps.driver : undefined;
+    if (exedevDriver !== undefined) {
       // exedev: clone the repo at the pinned SHA first, then place the manifest.
       // `repoUrl` and `commitSha` reach a git invocation inside a billable box,
-      // and the brief schema is what constrains them: `repoUrl` is
-      // `z.string().url().startsWith("https://")` (so `file:///etc`, `ssh://`
-      // and an `--upload-pack=…` argument are all refused at ingress) and
-      // `commitSha` is `/^[0-9a-f]{40}$/`. Nothing is re-derived here — a second
-      // copy of a security rule is the one that rots.
+      // and the brief schema is what constrains them: `repoUrl` is an
+      // `https://`-only, control-char-free, userinfo-free URL (so `file:///etc`,
+      // `ssh://` and an `--upload-pack=…` argument are all refused at ingress)
+      // and `commitSha` is `/^[0-9a-f]{40}$/`. Nothing is re-derived here — a
+      // second copy of a security rule is the one that rots.
+      //
+      // Gated on the SAME predicate as the gate below (see `isExedevDriver`):
+      // keyed on `.fill` alone, a driver with `fill` and no `setup` got its repo
+      // cloned and was then handed the dir-box gate, which probes for none of it.
       await within("clone", () =>
-        (exedevFill as (vm: string, o: Record<string, string>) => Promise<unknown>).call(
-          deps.driver,
-          vm.name,
-          { runId, repoUrl: valid.repoUrl, commitSha: valid.commitSha },
-        ),
+        exedevDriver.fill(vm.name, {
+          runId,
+          repoUrl: valid.repoUrl,
+          commitSha: valid.commitSha,
+        }),
       );
     }
     await within("fill", () => fillRun(deps.driver, vm.name, files));
@@ -1578,7 +1684,7 @@ export async function dispatch(
     const gateFn =
       deps.setupGate ??
       ((drv: ProviderDriver, box: string, o: GateOpts) => {
-        if (hasExedevSetup(drv)) {
+        if (isExedevDriver(drv)) {
           // No `as never`, no `as Parameters<…>`: `hasExedevSetup` narrows the
           // driver and `SetupGateOptions` accepts this literal on its own. The
           // casts switched off checking on BOTH arguments of the one call that
@@ -1636,18 +1742,37 @@ export async function dispatch(
           // nothing left to report it on
         }
       }
+      // Every read of the gate's own result is DEFENDED, because the gate is an
+      // injection seam: `deps.setupGate` is caller-supplied, and one returning
+      // `{ready:false, assertions:[]}` threw a TypeError out of the `.join`
+      // below, escaped to the outer catch and became an exit-1
+      // `dispatch-failed` — losing the exit-3 classification and every piece of
+      // assertion evidence this refusal exists to carry. `refuse` already
+      // guards the same two reads (`ctxGate?.debugCommands ?? […]`); this call
+      // site did not, and it is the one that names them to the operator.
+      const debugCommands = gate.debugCommands ?? [`bun scripts/fleet.ts status ${runId}`];
+      const teardownCommand = gate.teardownCommand ?? `bun scripts/fleet.ts teardown ${runId}`;
+      // An empty (or all-passing) `assertions` on a `ready:false` gate yielded
+      // `setup gate failed at item ?: ` — a refusal that keeps a billable box
+      // alive to explain itself and then explains nothing. Name the absence.
+      const failedNote = gate.assertions?.find((a) => !a.ok)?.note;
       throw refuse(
         3,
         "setup-gate-failed",
-        `setup gate failed at item ${gate.failedItem ?? "?"}: ${gate.assertions.find((a) => !a.ok)?.note ?? ""}`,
-        `debug: ${gate.debugCommands.join("; ")} — teardown when done: ${gate.teardownCommand}`,
+        `setup gate failed at item ${gate.failedItem ?? "?"}: ${failedNote ?? "the gate reported no failing assertion — inspect the box directly"}`,
+        `debug: ${debugCommands.join("; ")} — teardown when done: ${teardownCommand}`,
         {
           assertionCode: gate.assertionCode,
           failedItem: gate.failedItem,
           // `refuse` redacts every string leaf of the payload at the choke
           // point, so nothing here (or at any other call site) repeats it.
-          assertions: gate.assertions.map((a) => `${a.item}:${a.ok ? "ok" : a.note}`),
+          assertions: (gate.assertions ?? []).map((a) => `${a.item}:${a.ok ? "ok" : a.note}`),
         },
+        // A gate that failed because the PROBE NEVER RAN is a broken box, not a
+        // bad brief: retryable. The default exit-code mapping calls every non-1
+        // exit `logic` (do-not-retry), which discards the one classification
+        // `substrateFailure` is computed to produce.
+        isSubstrateFailure(gate) ? ("transient" as ExitStatus) : undefined,
       );
     }
     // The ceiling was never sampled after the gate — the single longest await

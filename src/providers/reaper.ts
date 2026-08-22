@@ -31,7 +31,7 @@ import {
   type KeyApi,
   type KeyEntry,
 } from "./credentials.ts";
-import { SBX_OWNERSHIP_TAG, type ProviderDriver, type ProviderVm } from "./driver.ts";
+import { driverListing, SBX_OWNERSHIP_TAG, type ProviderDriver, type ProviderVm } from "./driver.ts";
 import {
   loadQuotaLimits,
   type QuotaLimitsError,
@@ -297,7 +297,17 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
   const tVms = Date.now();
   let vms: ProviderVm[];
   try {
-    vms = await withTimeout(deps.driver.list(), LIST_TIMEOUT_MS, "driver.list()");
+    // `driverListing`, not `list`: a box the driver refused to name is not an
+    // absent box, and this phase's whole contract is that nothing is deleted
+    // on an unverified population. A skipped box is invisible spend — never
+    // destroyed (it is never seen), never reported, never reaped.
+    const listing = await withTimeout(driverListing(deps.driver), LIST_TIMEOUT_MS, "driver.list()");
+    if (listing.skipped.length > 0) {
+      throw new Error(
+        `the driver skipped ${listing.skipped.length} box(es) in its listing (${listing.skipped.join(", ")})`,
+      );
+    }
+    vms = listing.vms;
   } catch (e) {
     throw new SweepError(
       "list-unverified",

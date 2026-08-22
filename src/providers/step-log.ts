@@ -10,6 +10,7 @@
  */
 
 import { log } from "../swarmclaw/log.ts";
+import { redactKeyManagementUrls } from "./cap-rejection.ts";
 import { SECRET_PREFIXES } from "./run-record.ts";
 
 /**
@@ -28,7 +29,9 @@ import { SECRET_PREFIXES } from "./run-record.ts";
  * free text its own rule deliberately does not cover (see `errorMessage` there),
  * and there is exactly one implementation of each rule.
  *
- * Two arms, in this order, both lifted from `assertNoSecret`'s reasoning:
+ * Four arms, in this order, the middle two lifted from `assertNoSecret`'s
+ * reasoning:
+ *  - a PEM block, swallowed whole (see `PEM_BLOCK_RE`);
  *  - the known prefixes, matched at a token boundary so `task-runner` does not
  *    trip on `sk-`. This arm is UNCONDITIONAL: a known issuer prefix is the
  *    strong signal, so `AKIA…`/`ghp_…` are redacted whatever their character
@@ -36,19 +39,94 @@ import { SECRET_PREFIXES } from "./run-record.ts";
  *    issuer has already labelled;
  *  - a long mixed-class token, the fallback for UNPREFIXED tokens only. The
  *    mixed-class requirement is what keeps a 40-char all-hex git SHA and an
- *    all-lowercase run id — the fields these lines exist to carry — readable.
+ *    all-lowercase run id — the fields these lines exist to carry — readable,
+ *    and `PATH_TOKEN_RE` is what keeps an ordinary absolute path readable;
+ *  - the key-management deep link, composed from DF2.4's own implementation
+ *    (see below).
+ *
+ * `redactKeyManagementUrls` is COMPOSED here rather than at each sink, because
+ * the shape it catches is structurally invisible to the three arms above and
+ * every sink needs it: no `SECRET_PREFIXES` entry matches `https`, and
+ * `encodeURIComponent` turns the hash's `+`/`/`/`=` into `%2B`/`%2F`/`%3D`
+ * whose `%` is outside every charset here, so the full deep link is never one
+ * ≥40-char token. Composing it at the ONE shared redactor is what puts it in
+ * front of credentials.ts's `timed`, this module's `timedLoggedStep` and
+ * dispatch's `redact` at once — `scripts/cap-hit-demo.ts`'s `safeRedact`
+ * already composed it by hand for exactly this shape, and per-sink composition
+ * is how the other three sinks were missed.
  *
  * Residual gap, accepted: an unprefixed all-lowercase-hex (or all-uppercase)
  * secret from an issuer not on the list is indistinguishable from a git SHA by
- * shape alone, and passes through. Loosening arm 2 to catch it would redact
+ * shape alone, and passes through. Loosening arm 3 to catch it would redact
  * every SHA and run id in these lines — the wrong trade for a log whose job is
  * to carry them. Close it by adding the issuer's prefix to `SECRET_PREFIXES`.
  */
+const REDACTED = "«redacted»";
+
+/**
+ * A PEM block, swallowed whole. `-----BEGIN` IS in `SECRET_PREFIXES`, but the
+ * prefix arm's charset excludes the space in `-----BEGIN RSA PRIVATE KEY-----`,
+ * so it stops at the header and leaves the body to the long-token arm — which
+ * sees the body one line at a time and passes every line that is under 40
+ * characters or single-class, i.e. the last line of essentially every key. A
+ * private key is not a token, it is a block, and the block is what has to go.
+ *
+ * The match runs to `-----END …-----` or, failing that, to end of text: a
+ * truncated key is still a key. Prose that merely mentions `-----BEGIN` is
+ * therefore eaten to the end of the line's text — over-redaction, the safe
+ * direction, and the only shape that pays for it is a log message quoting the
+ * marker without a key attached.
+ */
+const PEM_BLOCK_RE = /-----BEGIN[\s\S]*?(?:-----END[^\n]*-----|$)/g;
+
 const SECRET_PREFIX_RE = new RegExp(
   `(^|[^A-Za-z0-9])(?:${SECRET_PREFIXES.map((p) => p.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("|")})[A-Za-z0-9+/=_.:-]*`,
   "g",
 );
 const LONG_TOKEN_RE = /[A-Za-z0-9+/=_.:-]{40,}/g;
+
+/**
+ * The long-token arm's own test, factored out so the path exemption can
+ * re-apply it per path segment.
+ */
+function isLongMixedToken(t: string): boolean {
+  return t.length >= 40 && /[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t);
+}
+
+/**
+ * The long-token arm's path exemption. `/`, `.`, `-` and `_` are all inside
+ * `LONG_TOKEN_RE`'s charset, so an ordinary absolute path is ONE token that
+ * mixes all three character classes:
+ * `/Users/steve/QDS-Factory/.sandbox/runs/qds-20260822-a1b2c3.json` was
+ * redacted whole, and every stack frame with it — every `/Users`-rooted or
+ * CamelCase-repo path with a digit in it erased, unevenly, which reads in the
+ * field as a redaction bug and hides the very fields these lines carry.
+ *
+ * A token is a path when it has ≥2 `/` separators, every segment is a
+ * plausible path component (≤32 chars; the leaf ≤64, which is where a
+ * `driver.ts:318:20` frame suffix lands), and it carries at least one of
+ * `.` `_` `:` `-`. That last clause is what keeps a base64 blob out: standard
+ * base64 is `A-Za-z0-9+/=` and holds none of those four, while URL-safe base64
+ * swaps `/` for `_` and so never satisfies the separator count.
+ *
+ * The exemption is not a pass — the segments are re-tested individually, so
+ * `/tmp/keys/<40-char mixed token>` still redacts the leaf and keeps the
+ * directory readable. Residual, accepted: a standard-base64 secret carrying ≥2
+ * `/` AND one of `._:-` (i.e. mixing both alphabets) whose every `/`-delimited
+ * run is under 40 characters would survive. Nothing an issuer mints has that
+ * shape, and the prefix arm covers every issuer we know by name.
+ */
+const PATH_TOKEN_RE = /^(?:[A-Za-z0-9+=_.:-]{0,32}\/){2,}[A-Za-z0-9+=_.:-]{0,64}$/;
+const PATH_PUNCT_RE = /[._:-]/;
+
+function redactLongToken(t: string): string {
+  if (!isLongMixedToken(t)) return t;
+  if (!PATH_TOKEN_RE.test(t) || !PATH_PUNCT_RE.test(t)) return REDACTED;
+  return t
+    .split("/")
+    .map((segment) => (isLongMixedToken(segment) ? REDACTED : segment))
+    .join("/");
+}
 
 /**
  * Anything → a string, without ever throwing: a rejection may carry a
@@ -84,11 +162,13 @@ const MIN_KEEP_LEN = 8;
 export function redactSecrets(text: unknown, keep?: string): string {
   const parked = keep && keep.length >= MIN_KEEP_LEN;
   const source = parked ? asText(text).split(keep).join(KEEP_MARK) : asText(text);
-  const redacted = source
-    .replace(SECRET_PREFIX_RE, (_m, lead: string) => `${lead}«redacted»`)
-    .replace(LONG_TOKEN_RE, (t) =>
-      /[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t) ? "«redacted»" : t,
-    );
+  // The deep-link arm runs FIRST, on the untouched text: it is the only arm
+  // that matches a whole URL rather than a token, and it must not have to
+  // recognize one the other three have already partly rewritten.
+  const redacted = redactKeyManagementUrls(source)
+    .replace(PEM_BLOCK_RE, REDACTED)
+    .replace(SECRET_PREFIX_RE, (_m, lead: string) => `${lead}${REDACTED}`)
+    .replace(LONG_TOKEN_RE, redactLongToken);
   return parked ? redacted.split(KEEP_MARK).join(keep) : redacted;
 }
 

@@ -34,11 +34,12 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 
 import { run } from "../../scripts/fleet.ts";
+import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
 import { run as sandboxTeardownRun } from "../../scripts/sandbox-teardown.ts";
 import { listVerbs, renderHelp } from "../../src/fleet/verbs.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
-import { RunRecordStore } from "../../src/providers/run-record.ts";
+import { RUN_ID_RE, RunRecordStore } from "../../src/providers/run-record.ts";
 import type { FleetDeps, } from "../../scripts/fleet.ts";
 import type { KeyApi } from "../../src/providers/credentials.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
@@ -46,6 +47,196 @@ import { goodLedger, overBudgetLedger, type RecordingLedger } from "./helpers.ts
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "df3-1-cli-"));
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
+
+/**
+ * The host token `run-lock.ts` writes into a lock body, READ OFF A REAL LOCK
+ * rather than reimplemented here.
+ *
+ * `lockHost()` is module-private and platform-dependent (`<hostname>` on macOS,
+ * `<hostname>/<pid-ns inode>` on Linux), and every stale/live fixture in this
+ * file depends on matching it EXACTLY: `refuse` classifies a body whose host it
+ * cannot match as foreign, and a foreign lock is deliberately never probed and
+ * never marked stale. A hand-written token that drifts from the source's turns
+ * every liveness assertion below into a vacuous foreign-host assertion that
+ * passes whatever `isAlive` does.
+ */
+const LOCK_HOST = ((): string => {
+  const probeDir = mkdtempSync(join(tmpRoot, "host-probe-"));
+  const lock = acquireRunLock(probeDir, "qds-19700101-000000");
+  const host = (readFileSync(lock, "utf8").trim().split(/\s+/)[1] ?? "") as string;
+  releaseRunLock(lock);
+  rmSync(probeDir, { recursive: true, force: true });
+  return host;
+})();
+
+/**
+ * A lock body in the CURRENT 4-field layout, `<pid> <host> <ISO> <nonce>`.
+ *
+ * Every fixture in this file used to write the pre-host 3-field layout, which
+ * `refuse` parses to `host === undefined` and treats as foreign — so the stale
+ * branch, the live branch and the whole `isAlive` probe were unreachable from
+ * here and only the "liveness unknown from here" arm was ever exercised.
+ */
+function lockBody(pid: number, ageMs: number, nonce: string, host: string = LOCK_HOST): string {
+  return `${pid} ${host} ${new Date(Date.now() - ageMs).toISOString()} ${nonce}\n`;
+}
+
+/**
+ * A child process that takes the REAL run lock through `acquireRunLock` and
+ * holds it, so a "held lock" in this file can be an actual concurrent holder
+ * rather than a file the test wrote for itself. Modes:
+ *
+ *  - `probe`: acquire, say whether it won, release, exit.
+ *  - `hold` / `destructive`: acquire, print nothing, block forever. The parent
+ *    waits for the lock file, then signals. `destructive` marks the lock past
+ *    the point of no return first, which is what makes the two signal
+ *    outcomes (released vs deliberately kept) distinguishable.
+ *  - `race`: spin to a shared wall-clock instant, then acquire/release in a
+ *    loop, checking MUTUAL EXCLUSION from inside the critical section. Counting
+ *    winners of a single simultaneous round does not work — process start
+ *    jitter serializes them, and a check-then-act `claim` then wins that test
+ *    too (measured). Two holders overlapping is the property, so the critical
+ *    section is what has to notice.
+ */
+function lockChild(dir: string): string {
+  const path = join(dir, "lock-child.ts");
+  writeFileSync(
+    path,
+    `import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { acquireRunLock, markRunLockDestructive, releaseRunLock } from ${JSON.stringify(join(import.meta.dir, "../../scripts/lib/run-lock.ts"))};
+const [runsDir, runId, mode, startAt] = process.argv.slice(2) as string[];
+
+if (mode === "race") {
+  const me = String(process.pid);
+  const marker = join(runsDir as string, "inside-the-critical-section");
+  let acquired = 0;
+  let violations = 0;
+  const t = Number(startAt);
+  while (Date.now() < t) { /* spin to the barrier */ }
+  // Bounded by ROUNDS WON, not by attempts: a loser returns instantly, so an
+  // attempt budget is spent entirely by whoever is not holding the lock and
+  // that process never enters the critical section at all.
+  const deadline = Date.now() + 8_000;
+  while (acquired < 15 && Date.now() < deadline) {
+    let lock: string;
+    try {
+      lock = acquireRunLock(runsDir as string, runId as string, "fleet invocation");
+    } catch {
+      await Bun.sleep(1); // losing is the correct outcome under contention
+      continue;
+    }
+    acquired++;
+    // Only ONE process may ever be here at a time. Both halves matter: an
+    // occupied marker on entry means someone else is already inside, and a
+    // marker that changed under us means someone else came in while we held it.
+    if (existsSync(marker)) violations++;
+    writeFileSync(marker, me);
+    await Bun.sleep(1);
+    if (readFileSync(marker, "utf8") !== me) violations++;
+    rmSync(marker, { force: true });
+    try {
+      releaseRunLock(lock);
+    } catch {
+      violations++; // "it holds someone else's claim" is the same overlap
+    }
+  }
+  process.stdout.write(\`acquired \${acquired} violations \${violations}\\n\`);
+  process.exit(0);
+}
+
+try {
+  const lock = acquireRunLock(runsDir as string, runId as string, "fleet invocation");
+  if (mode === "destructive") markRunLockDestructive(lock);
+  process.stdout.write("won\\n");
+  // \`probe\` reports and LEAVES. \`hold\`/\`destructive\` block, so the parent
+  // decides when the lock comes off — but a probe that blocked on success made
+  // the "a second acquirer is refused" assertion time out instead of failing,
+  // which is the slowest and least legible way to report a stolen lock.
+  if (mode === "probe") { releaseRunLock(lock); process.exit(0); }
+  await new Promise(() => {});
+} catch (e) {
+  process.stdout.write(\`lost \${(e as { code?: string }).code}\\n\`);
+  process.exit(9);
+}
+`,
+  );
+  return path;
+}
+
+/**
+ * A `--preload` that makes `link(2)` fail with `$LINK_FAILS_AS`, so `claim`'s
+ * no-hard-link fallback can be driven at all.
+ *
+ * `writeLockDirect` is the LIVE acquire path on FUSE and overlay mounts, exFAT
+ * and SMB shares and several macOS Docker bind-mount configs — every one of
+ * which answers EPERM/ENOSYS/EOPNOTSUPP from `linkSync` on every call — and no
+ * filesystem primitive a test can reach produces those errnos on demand.
+ * Patching in a CHILD process rather than with `mock.module`: mocking `node:fs`
+ * in THIS file makes Bun re-evaluate the whole `scripts/fleet.ts` module graph
+ * and hang before the first test runs. The child's fs is its own.
+ */
+function linkPreload(dir: string): string {
+  const path = join(dir, "link-preload.ts");
+  writeFileSync(
+    path,
+    `import { createRequire } from "node:module";
+const fs = createRequire(import.meta.url)("node:fs");
+const real = fs.linkSync;
+fs.linkSync = (a: string, b: string): void => {
+  const code = process.env.LINK_FAILS_AS;
+  if (code === undefined || code === "") return real(a, b);
+  const e = new Error(\`link \${code}\`) as NodeJS.ErrnoException;
+  e.code = code;
+  throw e;
+};
+`,
+  );
+  return path;
+}
+
+/** Resolve, or fail with attribution rather than dying on the runner's timeout. */
+async function within<T>(what: string, ms: number, p: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${what} did not finish within ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** Read a stream, stopping at `cap` bytes: an unbounded read of a runaway producer is a hang. */
+async function readCapped(stream: ReadableStream<Uint8Array> | null, cap = 64 * 1024): Promise<string> {
+  if (stream === null) return "";
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (total < cap) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.length;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/** Wait for `path` to appear, bounded. */
+async function awaitPath(path: string, ms = 5_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!existsSync(path)) {
+    if (Date.now() > deadline) throw new Error(`${path} never appeared within ${ms}ms`);
+    await Bun.sleep(10);
+  }
+}
 
 /**
  * Brief ingress cap, as a LITERAL rather than an import of the CLI's own
@@ -259,12 +450,21 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(helpText).toBe(`${renderHelp(listVerbs())}\n`);
   });
 
-  test("every documented help path exits 0 and prints usage", async () => {
+  test("every documented help path exits 0 and prints the SAME usage, byte for byte", async () => {
+    // `toContain("Usage: …")` was satisfied by any output carrying the global
+    // banner, so `fleet dispatch --help` rendering `status`'s flag section —
+    // or a per-verb section that silently dropped half its flags — passed. The
+    // registry's own note is explicit that there IS no verb-specific help: all
+    // six shapes answer with one string. Pin the string.
+    const expected = `${renderHelp(listVerbs())}\n`;
     for (const argv of [["--help"], ["-h"], ["help"], ["dispatch", "--help"], ["status", "-h"], ["teardown", "--help"]]) {
       reset();
       const code = await runCli(argv, deps(""));
-      expect(code).toBe(0);
-      expect(text()).toContain("Usage: fleet <verb> [options]");
+      expect({ argv, code }).toEqual({ argv, code: 0 });
+      // Help is OUTPUT, not a diagnostic: `fleet --help | less` must not need
+      // fd 2, and a refusal must not be able to masquerade as one.
+      expect({ argv, help: outOnly.join("") }).toEqual({ argv, help: expected });
+      expect(errCaptured).toHaveLength(0);
     }
   });
 
@@ -577,6 +777,25 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(text()).not.toContain("invalid-brief");
   });
 
+  test("a --brief file of EXACTLY 64 KiB is accepted — the path reader has its own cap", async () => {
+    // The 64 KiB cap has TWO independent enforcement sites: the stdin reader
+    // (the OOM guard) and `readBriefFile`'s fstat. Only the reject side of the
+    // path reader was covered, and its accept side was covered only through an
+    // INJECTED `deps.readBrief` that replaces both — so a `>=`/`>` flip in
+    // `readBriefFile`, or a cap quietly lowered there, refused every real
+    // `--brief` an operator has and nothing in this file failed.
+    const brief = validBriefJson(dir);
+    const padded = brief + " ".repeat(MAX_BRIEF_BYTES - Buffer.byteLength(brief, "utf8"));
+    expect(Buffer.byteLength(padded, "utf8")).toBe(MAX_BRIEF_BYTES);
+    const path = join(dir, "at-cap.json");
+    writeFileSync(path, padded);
+    // `readBrief` deliberately NOT injected: --brief is the site under test.
+    const { readBrief: _stdinReader, ...fromPath } = deps("");
+    const code = await runCli(["dispatch", "--driver", "fake", "--brief", path], fromPath);
+    expect(text()).not.toContain("brief-too-large");
+    expect(code).toBe(0);
+  });
+
   test("--brief /dev/zero is refused as not a regular file, never read unbounded", async () => {
     // A character device reports size 0: the cap would be vacuous and the read
     // would never end.
@@ -603,16 +822,29 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
   test("`yes | fleet dispatch` hits brief-too-large immediately instead of buffering to OOM", async () => {
     // The one path that must refuse AS IT STREAMS; an in-process test cannot
     // see it, because `deps.readBrief` replaces the stdin reader entirely.
+    // `exec` in the last pipeline element, so `proc.pid` IS the CLI rather than
+    // the wrapping `sh`. Without it `proc.kill` signalled the shell and left
+    // `yes` writing into a pipe nobody closed — one leaked spinning process per
+    // run of this file.
     const proc = Bun.spawn(
-      ["sh", "-c", `yes | bun ${JSON.stringify(join(import.meta.dir, "../../scripts/fleet.ts"))} dispatch --driver fake`],
+      [
+        "sh",
+        "-c",
+        `yes | exec bun ${JSON.stringify(join(import.meta.dir, "../../scripts/fleet.ts"))} dispatch --driver fake`,
+      ],
       { cwd: dir, stdout: "pipe", stderr: "pipe" },
     );
     try {
-      const [code, stdout, stderr] = await Promise.all([
-        proc.exited,
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-      ]);
+      // BOUNDED, and the reads are capped. If the streaming cap regresses —
+      // which is this test's entire subject — the CLI buffers `yes` forever and
+      // an unbounded `await proc.exited` hangs until the runner's global
+      // timeout kills the whole file with no attribution. The failure has to
+      // name itself.
+      const [code, stdout, stderr] = await within(
+        "`yes | fleet dispatch`",
+        30_000,
+        Promise.all([proc.exited, readCapped(proc.stdout), readCapped(proc.stderr)]),
+      );
       expect(code).toBe(2);
       expect(stderr).toContain("brief-too-large");
       expect(stdout).toBe(""); // stdout carries output only
@@ -623,6 +855,44 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       await proc.exited;
     }
   });
+
+  test("the STDIN reader enforces the cap on both sides of the boundary, out of process", async () => {
+    // `yes |` above is the gross case: an infinite producer, refused as it
+    // streams. The BOUNDARY is a different mutation — a `>=`/`>` flip, or a cap
+    // read from the wrong constant — and it is invisible in-process, because
+    // `deps.readBrief` replaces the stdin reader entirely and every in-process
+    // boundary case in this file goes through that injection. This is the one
+    // enforcement site an operator's `cat brief.json | fleet dispatch` actually
+    // hits, and it is the OOM guard.
+    const brief = validBriefJson(dir);
+    const atCap = brief + " ".repeat(MAX_BRIEF_BYTES - Buffer.byteLength(brief, "utf8"));
+    expect(Buffer.byteLength(atCap, "utf8")).toBe(MAX_BRIEF_BYTES);
+    const fleetPath = join(import.meta.dir, "../../scripts/fleet.ts");
+
+    for (const [label, payload, refused] of [
+      ["exactly the cap", atCap, false],
+      ["one byte over", `${atCap} `, true],
+    ] as const) {
+      const proc = Bun.spawn(["bun", fleetPath, "dispatch", "--driver", "fake"], {
+        cwd: dir,
+        stdin: Buffer.from(payload, "utf8"),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      try {
+        const [, , stderr] = await within(
+          `fleet dispatch with a brief of ${label}`,
+          30_000,
+          Promise.all([proc.exited, readCapped(proc.stdout), readCapped(proc.stderr)]),
+        );
+        expect({ label, refused: stderr.includes("brief-too-large") }).toEqual({ label, refused });
+        if (refused) expect(stderr).toContain(String(MAX_BRIEF_BYTES));
+      } finally {
+        proc.kill("SIGKILL");
+        await proc.exited;
+      }
+    }
+  }, 60_000);
 
   // ─── --port grammar and the ack's httpsUrl ─────────────────────────────────
 
@@ -742,7 +1012,13 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     // this file is well-formed and reaches the store as exit 4, so deleting
     // either call site left the suite green while `fleet teardown ../../secrets`
     // became a path-traversal read and unlink.
-    const badIds = ["../evil", "a/b", "", "Q".repeat(300), "qds-x/../y", "qds-20260101-ABCDEF"];
+    //
+    // `a`×64 is the LENGTH cap on its own: it satisfies RUN_ID_RE completely,
+    // so it is the only id here that `RUN_ID_MAX` alone refuses. Every other
+    // bad id fails a character rule too — `"Q"×300` is rejected on the
+    // uppercase rule before its length is ever consulted — which made deleting
+    // the `id.length > RUN_ID_MAX` check a green mutation.
+    const badIds = ["../evil", "a/b", "", "Q".repeat(300), "a".repeat(64), "qds-x/../y", "qds-20260101-ABCDEF"];
     for (const verb of ["status", "harvest", "teardown"]) {
       for (const runId of badIds) {
         reset();
@@ -750,12 +1026,27 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
         expect({ verb, runId, code }).toEqual({ verb, runId, code: 2 });
         const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
         expect(envelope.code).toBe("invalid-run-id");
-        expect(envelope.message).toContain(JSON.stringify(runId));
+        if (runId.length > 96) {
+          // The echo is capped at 96 chars: `fleet teardown $(200KB)` used to
+          // put all of it in the envelope. The refusal is unchanged (nothing
+          // ≤ 63 chars survives the cap), so the id must appear TRUNCATED, with
+          // its true length named — and the untruncated form must not appear.
+          expect(envelope.message).toContain(`…(${runId.length} chars)`);
+          expect(envelope.message).toContain(runId.slice(0, 96));
+          expect(envelope.message).not.toContain(runId);
+        } else {
+          expect(envelope.message).toContain(JSON.stringify(runId));
+        }
         // Refused before the store, the lock and the driver: nothing on disk.
         expect(readdirSync(runsDir)).toHaveLength(0);
         expect(existsSync(join(dir, "evil"))).toBeFalse();
       }
     }
+    // …and the cap really is the reason `a`×64 was refused: one character
+    // shorter is a legal id, which reaches the store and answers exit 4.
+    reset();
+    expect(await runCli(["status", "--driver", "fake", "--dir", runsDir, "a".repeat(63)], deps(""))).toBe(4);
+    expect(errCaptured.join("")).not.toContain("invalid-run-id");
   });
 
   // ─── status unknown run → exit 4, mutates nothing (AC4) ────────────────────
@@ -795,7 +1086,14 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     reset();
     expect(await runCli(["status", "--driver", "fake", runId], shared)).toBe(0);
     const row = JSON.parse(captured[0] as string) as { runId: string; state: string; vmName: string };
-    expect(row).toMatchObject({ runId, state: "orphan", vmName });
+    // An orphan row's `runId` is a LABEL, not an id: there is no record, so
+    // nothing attributes the box to a run, and a bare id in that column reads
+    // as a record that exists. `vmName` is the box the operator must act on and
+    // is unchanged.
+    expect(row).toMatchObject({ runId: `(orphan ${vmName})`, state: "orphan", vmName });
+    // …and the label is deliberately outside the id grammar, so `fleet status |
+    // jq -r .runId | xargs fleet teardown` cannot feed it back as one.
+    expect(RUN_ID_RE.test(row.runId)).toBeFalse();
   });
 
   test("teardown <unknown-runId> → exit 4 run-not-found, refused BEFORE the lock", async () => {
@@ -876,12 +1174,22 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
 
     // A concurrent teardown's lock. If `fleet teardown` stopped acquiring it,
     // two invocations would double-destroy the box and double-write the spend.
+    //
+    // The holder pid is a child this case OWNS and keeps alive for the duration
+    // — not `process.pid + 1`, which is whatever the OS happened to hand out
+    // next and is dead on most runs. A dead "live holder" makes this the stale
+    // case in disguise, and the live/stale remediation split below (the only
+    // thing that distinguishes the two branches, since their MESSAGE is
+    // identical) then asserts nothing.
+    const alive = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+    const holder = alive.pid;
     const lock = join(runsDir, `${runId}.lock`);
-    const holder = process.pid + 1;
-    writeFileSync(lock, `${holder} ${new Date(Date.now() - 4_000).toISOString()} feedface\n`, { flag: "wx" });
+    writeFileSync(lock, lockBody(holder, 4_000, "feedface"), { flag: "wx" });
 
     reset();
     const code = await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared);
+    alive.kill("SIGKILL");
+    await alive.exited;
 
     // 5 ("refused before provisioning"), NOT 1. Exit 1 is `exitStatus:
     // "transient"` — "retry me" — and the STALE case below proves why that is
@@ -895,6 +1203,20 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     // WHICH tool holds the run — `sandbox-teardown` takes the same lock.
     expect(text()).toContain("another fleet invocation holds");
     expect(text()).toContain(`pid ${holder}`);
+    // …and the LIVE remediation, which is the only field that differs from the
+    // stale branch's: gutting `isAlive()` to a constant `false` keeps the code,
+    // the message and the pid identical here and sends the operator to `rm` the
+    // lock of a teardown that is still destroying the run.
+    const live = JSON.parse(errCaptured.find((l) => l.includes("run-locked")) as string) as {
+      message: string;
+      remediation: string;
+    };
+    expect(live.remediation).toContain("wait for that invocation to finish");
+    expect(live.remediation).not.toContain("stale lock");
+    expect(live.remediation).not.toContain("no live process holds it");
+    // The probe answered "alive": the dead branch appends " is not running".
+    expect(live.message).not.toContain("is not running");
+    expect(live.message).not.toContain("liveness unknown from here");
     // The refused invocation neither tore down nor stole the holder's lock.
     expect(readFileSync(lock, "utf8")).toContain("feedface");
     expect(store.get(runId).closedAt).toBeUndefined();
@@ -913,11 +1235,13 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
 
     // A pid above every platform's pid_max, so `kill(pid, 0)` is ESRCH and the
-    // lock reads stale rather than merely foreign. Pre-host body layout (the
-    // one run-lock.ts still parses), because a foreign HOST is deliberately
-    // never marked stale.
+    // lock reads stale. The body carries THIS host's token: a host `refuse`
+    // cannot match is foreign, and a foreign lock is never probed and never
+    // marked stale — so a body without it makes this a foreign-host test
+    // wearing a stale-lock title, and every assertion below holds whatever
+    // `isAlive` answers.
     const lock = join(runsDir, `${runId}.lock`);
-    writeFileSync(lock, `9999999 ${new Date(Date.now() - 90_000).toISOString()} deadbeef\n`, { flag: "wx" });
+    writeFileSync(lock, lockBody(9_999_999, 90_000, "deadbeef"), { flag: "wx" });
 
     reset();
     const code = await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared);
@@ -925,12 +1249,24 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(code).toBe(5);
     const envelope = JSON.parse(errCaptured.find((l) => l.includes("run-locked")) as string) as {
       code: string;
+      message: string;
       remediation: string;
     };
     expect(envelope.code).toBe("run-locked");
-    // The operator's only way out, and the reason a retry is futile.
+    // `message` is IDENTICAL on the live and the stale branch — only
+    // `remediation` differs — so asserting the code and the message is
+    // satisfied by an `isAlive` gutted to always return false, which tells an
+    // operator to `rm` a lock a RUNNING teardown holds. The two remediations
+    // are the only thing that separates them, so both are pinned here and in
+    // the live-holder case above, each excluding the other's wording.
+    expect(envelope.remediation).toContain("no live process holds it");
     expect(envelope.remediation).toContain("stale lock");
     expect(envelope.remediation).toContain(`rm ${lock}`);
+    expect(envelope.remediation).not.toContain("wait for that invocation to finish");
+    // The probe really ran and really answered "dead": the live branch omits
+    // this clause, and the foreign-host branch never reaches it at all.
+    expect(envelope.message).toContain("pid 9999999 is not running");
+    expect(envelope.message).not.toContain("liveness unknown from here");
     // Refused before any mutation: the holder's file is intact and the run is
     // untouched.
     expect(readFileSync(lock, "utf8")).toContain("deadbeef");
@@ -951,9 +1287,13 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
     const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
 
+    // A live holder this case owns, in the current 4-field body layout — see
+    // the teardown case above for why neither `process.pid + 1` nor a pre-host
+    // body exercises the branch this test names.
+    const alive = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+    const holder = alive.pid;
     const lock = join(runsDir, `${runId}.lock`);
-    const holder = process.pid + 1;
-    writeFileSync(lock, `${holder} ${new Date(Date.now() - 4_000).toISOString()} feedface\n`, { flag: "wx" });
+    writeFileSync(lock, lockBody(holder, 4_000, "feedface"), { flag: "wx" });
 
     reset();
     const code = await runCli(["harvest", "--driver", "fake", "--dir", runsDir, runId], {
@@ -962,6 +1302,8 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       // not have reached for credentials on its way there either.
       keyApi: keyApiTripwire(),
     });
+    alive.kill("SIGKILL");
+    await alive.exited;
 
     // 5, the same non-retryable refusal teardown gives — not a 0 with
     // "harvested: none", which is what a lockless harvest of this box prints.
@@ -969,6 +1311,10 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(text()).toContain("run-locked");
     expect(text()).toContain("another fleet invocation holds");
     expect(text()).toContain(`pid ${holder}`);
+    // The LIVE remediation, for the same reason teardown's case pins it: the
+    // message is byte-identical on the stale branch.
+    expect(text()).toContain("wait for that invocation to finish");
+    expect(text()).not.toContain("stale lock");
     // Nothing on stdout at all: a refusal is a diagnostic, and `harvested:`
     // would be a claim about a bundle this invocation never fetched.
     expect(outOnly).toHaveLength(0);
@@ -1004,7 +1350,17 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     symlinkSync(join(dir, "no-such-lock-target"), lock);
 
     reset();
-    const code = await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared);
+    // BOUNDED. The first mutation this case names — `while (true)` instead of
+    // two attempts — makes the CLI spin forever against a lock that can never
+    // become claimable, and an unbounded await turns that into a whole-file
+    // timeout with no attribution. `run()` is in-process and cannot be killed,
+    // so the race only converts the hang into a NAMED failure; that is the
+    // difference between "the retry loop is unbounded" and "the suite died".
+    const code = await within(
+      "teardown against a dangling lock symlink (acquireRunLock's retry loop)",
+      20_000,
+      runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared),
+    );
 
     expect(code).toBe(5);
     const envelope = JSON.parse(errCaptured.find((l) => l.includes("run-locked")) as string) as {
@@ -1097,6 +1453,221 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(existsSync(lock)).toBeTrue();
   });
 
+  test("four REAL acquirers hammer one lock and never overlap inside it", async () => {
+    // Every other "held lock" in this file is a file the test wrote before
+    // invoking the CLI, so `claim` is only ever asked about a path that was
+    // already occupied when it started. Replacing its atomic `linkSync` /
+    // O_EXCL with `existsSync(lock) ? false : writeFileSync(lock, body)` passes
+    // ALL of them — and lets two concurrent teardowns both acquire, then
+    // double-destroy the box and double-write the spend, which is the one thing
+    // this lock exists to prevent.
+    //
+    // Four real processes, 60 acquire/release rounds each, checking mutual
+    // exclusion from INSIDE the critical section. Counting the winners of one
+    // simultaneous round is not enough: process start jitter serializes them,
+    // and the check-then-act claim above passes that version of this test
+    // (measured, not assumed). Overlap is the property, so overlap is what is
+    // detected — and a `releaseRunLock` that finds a stranger's body is the
+    // same overlap seen from the other end.
+    const child = lockChild(dir);
+    const runId = "qds-20260101-abcdef";
+    mkdirSync(runsDir, { recursive: true });
+    const startAt = Date.now() + 800; // enough for four `bun` cold starts
+    const racers = Array.from({ length: 4 }, () =>
+      Bun.spawn(["bun", child, runsDir, runId, "race", String(startAt)], { stdout: "pipe", stderr: "pipe" }),
+    );
+    try {
+      const results = await within(
+        "the four-way lock race",
+        60_000,
+        Promise.all(
+          racers.map(async (p) => ({
+            out: (await readCapped(p.stdout)).trim(),
+            // Carried into the assertion below rather than discarded: a racer
+            // that DIES is itself a mutual-exclusion symptom (a release that
+            // found a stranger's body throws), and without its stderr the
+            // failure reads as an empty string with no cause.
+            err: (await readCapped(p.stderr)).trim().split("\n").slice(-3).join(" | "),
+          })),
+        ),
+      );
+      const parsed = results.map(({ out: r, err }) => {
+        const m = /^acquired (\d+) violations (\d+)$/.exec(r);
+        expect({ said: r, err, parsed: m !== null }).toEqual({ said: r, err, parsed: true });
+        return { acquired: Number((m as RegExpExecArray)[1]), violations: Number((m as RegExpExecArray)[2]) };
+      });
+      expect(parsed.map((p) => p.violations)).toEqual([0, 0, 0, 0]);
+      // …and the lock was genuinely contended rather than trivially free: every
+      // racer got in at least once, so a `claim` that simply never succeeded
+      // cannot pass this by making the critical section unreachable.
+      for (const p of parsed) expect(p.acquired).toBeGreaterThan(0);
+    } finally {
+      for (const p of racers) p.kill("SIGKILL");
+      await Promise.all(racers.map((p) => p.exited));
+      rmSync(join(runsDir, `${runId}.lock`), { force: true });
+    }
+    // Four `bun` cold starts plus 240 contended rounds: past bun's 5s default.
+  }, 60_000);
+
+  test("on a filesystem with no hard links the O_EXCL fallback is still exclusive", async () => {
+    // `claim`'s `writeLockDirect` fallback has no coverage at all, and on FUSE
+    // and overlay mounts, exFAT and SMB shares and several macOS Docker
+    // bind-mount configs it is not a fallback — it is THE acquire path, because
+    // `link(2)` answers EPERM there every time. If it ever loses its `wx` it
+    // silently overwrites a live holder's lock, and every one of those
+    // deployments gets the double teardown with the whole suite green.
+    const child = lockChild(dir);
+    const preload = linkPreload(dir);
+    const runId = "qds-20260101-abcdef";
+    const lock = join(runsDir, `${runId}.lock`);
+    mkdirSync(runsDir, { recursive: true });
+    // Return type INFERRED, not annotated `Bun.Subprocess`: the literal
+    // `stdout: "pipe"` below is what narrows the stream types, and a widening
+    // annotation loses it.
+    const spawnFallbackAcquirer = (linkErrno: string, mode: "hold" | "probe") =>
+      Bun.spawn(["bun", "--preload", preload, child, runsDir, runId, mode], {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, LINK_FAILS_AS: linkErrno },
+      });
+
+    const holder = spawnFallbackAcquirer("EPERM", "hold");
+    try {
+      await within("the no-hard-link holder's acquire", 20_000, awaitPath(lock));
+      // The fallback wrote a COMPLETE body, not just an exclusive create: the
+      // O_EXCL-then-write path re-opens the window where a reader sees "" and
+      // `refuse` renders it as a lock nothing will ever clear.
+      const body = readFileSync(lock, "utf8");
+      expect(body.trim().split(/\s+/)).toHaveLength(4);
+      expect(body.startsWith(`${holder.pid} ${LOCK_HOST} `)).toBeTrue();
+
+      // A second acquirer on the same no-hard-link filesystem must be REFUSED,
+      // not silently overwrite the live holder above.
+      const loser = spawnFallbackAcquirer("EPERM", "probe");
+      const said = (await within("the second no-hard-link acquire", 20_000, readCapped(loser.stdout))).trim();
+      await loser.exited;
+      expect(said).toBe("lost run-locked");
+      expect(readFileSync(lock, "utf8")).toBe(body);
+    } finally {
+      holder.kill("SIGKILL");
+      await holder.exited;
+      rmSync(lock, { force: true });
+    }
+
+    // …and the fallback is reached ONLY for the enumerated no-hard-link errnos.
+    // An EIO from `link(2)` is a failure `openSync(lock, "wx")` will hit too,
+    // and falling back on it reports "already claimed" against the lock we just
+    // created — the same permanent wedge from the other side.
+    const io = spawnFallbackAcquirer("EIO", "probe");
+    const said = (await within("the EIO acquire", 20_000, readCapped(io.stdout))).trim();
+    await io.exited;
+    expect(said).not.toBe("won");
+    expect(existsSync(lock)).toBeFalse();
+  }, 30_000);
+
+  test("a signal releases a lock taken before the destructive phase, and the process dies by signal", async () => {
+    // `installSignalRelease` is entirely uncovered: the only signal anywhere in
+    // this file is a SIGKILL, which is uncatchable and cannot reach a handler.
+    // Delete the whole function and every test still passes — while one Ctrl-C
+    // during a teardown leaves `<runId>.lock` on disk forever, and this module
+    // never steals, so every later harvest and teardown of that run refuses
+    // while the box and the key keep billing.
+    const child = lockChild(dir);
+    const runId = "qds-20260101-abcdef";
+    const lock = join(runsDir, `${runId}.lock`);
+    mkdirSync(runsDir, { recursive: true });
+
+    for (const sig of ["SIGINT", "SIGTERM"] as const) {
+      const holder = Bun.spawn(["bun", child, runsDir, runId, "hold"], { stdout: "pipe", stderr: "pipe" });
+      await within(`the ${sig} holder's acquire`, 20_000, awaitPath(lock));
+      holder.kill(sig);
+      await within(`the ${sig} holder's exit`, 20_000, holder.exited);
+      // The lock is GONE — the whole point of the handler.
+      expect({ sig, lock: existsSync(lock) }).toEqual({ sig, lock: false });
+      // …and it died BY THE SIGNAL: the handler re-raises after clearing every
+      // listener rather than calling `process.exit(128+n)`, so a shell sees a
+      // death by signal and `signalCode` is set. `process.exit` looks the same
+      // to `$?` and is what callers reading `signalCode` cannot see.
+      expect({ sig, signalCode: holder.signalCode }).toEqual({ sig, signalCode: sig });
+      expect(holder.exitCode).toBeNull();
+    }
+
+    // Past `markRunLockDestructive` the handler does the OPPOSITE, deliberately:
+    // the box is being destroyed and the record is half-written, and an
+    // automatic release hands that state to the next teardown. The lock stays,
+    // and stderr says why — so an "always release" simplification fails here.
+    const destructive = Bun.spawn(["bun", child, runsDir, runId, "destructive"], { stdout: "pipe", stderr: "pipe" });
+    await within("the destructive holder's acquire", 20_000, awaitPath(lock));
+    destructive.kill("SIGINT");
+    const [, stderr] = await within(
+      "the destructive holder's exit",
+      20_000,
+      Promise.all([destructive.exited, readCapped(destructive.stderr)]),
+    );
+    expect(existsSync(lock)).toBeTrue();
+    expect(stderr).toContain("lock-held:");
+    expect(stderr).toContain(lock);
+    // The operator is told what to inspect BEFORE clearing it — an unqualified
+    // `rm` here is the double teardown.
+    expect(stderr).toContain("check the run's box, key and record");
+    expect(destructive.signalCode).toBe("SIGINT");
+    rmSync(lock, { force: true });
+  }, 30_000);
+
+  test("fleet and sandbox-teardown exclude each other through the SAME per-run lock", async () => {
+    // The file header claims both CLIs take one shared lock, and nothing showed
+    // it: the two only ever ran sequentially here, asserting `cost_events` and
+    // never the lock. Give `sandbox-teardown` its own lock path — a one-line
+    // change, and the most natural refactor when either CLI grows a second runs
+    // directory — and `fleet teardown <id>` runs concurrently with
+    // `sandbox-teardown <id>`, destroying the same box twice.
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    // Keyless, so `sandbox-teardown` never reaches for a provisioning key on
+    // the success path below (it takes no deps seam).
+    const recordPath = join(runsDir, `${runId}.json`);
+    const { keyHash: _dropped, ...keyless } = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(recordPath, JSON.stringify(keyless), { mode: 0o600 });
+
+    // A THIRD process holds the lock through the real `acquireRunLock`, so this
+    // is the file both CLIs actually compete for and not a fixture shaped like
+    // one. In-process the second acquire would answer `run-lock-reentrant`,
+    // which is a different branch entirely.
+    const lock = join(runsDir, `${runId}.lock`);
+    const holder = Bun.spawn(["bun", lockChild(dir), runsDir, runId, "hold"], { stdout: "pipe", stderr: "pipe" });
+    try {
+      await within("the cross-CLI holder's acquire", 20_000, awaitPath(lock));
+
+      reset();
+      expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(5);
+      expect(text()).toContain("another fleet invocation holds");
+      expect(text()).toContain(`pid ${holder.pid}`);
+
+      reset();
+      // DF2.5's own CLI, refused by the SAME file — and its table is 0/1 only,
+      // so a lock refusal is 1 there where fleet can afford its own 5.
+      expect(await sandboxTeardownRun([runId, "--dir", runsDir, "--driver", "fake"], out)).toBe(1);
+      expect(text()).toContain("run-locked");
+      expect(text()).toContain("another sandbox-teardown holds");
+      expect(text()).toContain(lock);
+      expect((shared.store as RunRecordStore).get(runId).closedAt).toBeUndefined();
+    } finally {
+      // SIGTERM, not SIGKILL: the holder's own signal handler releases the lock
+      // on the way out, which is what makes the success below a statement about
+      // the LOCK rather than about a file this test deleted.
+      holder.kill("SIGTERM");
+      await holder.exited;
+    }
+
+    // The holder is gone and its lock went with it, so the refusals above were
+    // the lock and nothing else: the same invocation now succeeds.
+    expect(existsSync(lock)).toBeFalse();
+    reset();
+    expect(await sandboxTeardownRun([runId, "--dir", runsDir, "--driver", "fake"], out)).toBe(0);
+    expect(text()).toContain(`torn down: ${runId}`);
+  }, 30_000);
+
   // ─── --dir moves the whole .sandbox set, ledger included ───────────────────
 
   test("--dir scopes the cost ledger to the records dir, never the ambient cwd", async () => {
@@ -1141,7 +1712,11 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
 
     expect(await runCli(["dispatch", "--driver", "fake", "--dir", runs], shared)).toBe(0);
     const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
-    expect(existsSync(join(sandbox, "cost-ledger.db"))).toBeTrue();
+    // INSIDE the records dir, not beside it: the ledger is the shared, written
+    // state, so it moves with the records `--dir` named. (`cost-config.json`
+    // stays a sibling — it is the operator's hand-written file, and moving it
+    // made every non-default `--dir` fail teardown as `box-hour-rate-unconfigured`.)
+    expect(existsSync(join(runs, "cost-ledger.db"))).toBeTrue();
     expect(existsSync(join(runs, `${runId}.json`))).toBeTrue();
 
     reset();
@@ -1150,7 +1725,7 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     // Box hours priced into the --dir ledger, and the ambient one untouched —
     // byte for byte, and with no -wal/-shm beside it, which is what a SQLite
     // handle opened on it would have left.
-    expect(existsSync(join(sandbox, "cost-ledger.db"))).toBeTrue();
+    expect(existsSync(join(runs, "cost-ledger.db"))).toBeTrue();
     expect(readFileSync(ambientLedger, "utf8")).toBe(sentinel);
     expect(readdirSync(join(dir, ".sandbox")).filter((f) => f.startsWith("cost-ledger.db"))).toEqual([
       "cost-ledger.db",
@@ -1191,7 +1766,8 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       }),
     ).toBe(0);
     const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
-    const ledgerPath = join(sandbox, "cost-ledger.db");
+    // Inside the records dir — see the --dir case above.
+    const ledgerPath = join(runs, "cost-ledger.db");
     expect(existsSync(ledgerPath)).toBeTrue();
 
     // Make the run KEYLESS before the second CLI touches it. `sandboxTeardownRun`
@@ -1266,12 +1842,20 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
 
     reset();
     expect(await runCli(["teardown", "--driver", "fake", "--dir", runs, runId], shared)).toBe(0);
-    expect(outOnly.join("")).toContain(`torn down: ${runId}`);
+    // NOT `toContain("torn down: <id>")`. That line is what the comment above
+    // condemns — it claims a destroy that did not happen, for a box that has
+    // been gone since the first pass — and pinning it makes an implementation
+    // that finally distinguishes the idempotent re-run FAIL here. A test that
+    // holds a defect in place is worse than no test, so what is asserted is the
+    // property that must hold whatever wording the source settles on: the
+    // second pass is a NO-OP. (The misleading message itself is reported as an
+    // open source defect, not ratcheted in here.)
+    expect(errCaptured).toHaveLength(0);
     // first-close-wins: the record still reports the FIRST teardown's instant,
     // so the second pass re-closed nothing.
     expect(store.get(runId).closedAt).toBe(closedAt);
     // …and the money was settled once, not twice.
-    const db = new Database(join(sandbox, "cost-ledger.db"), { readonly: true });
+    const db = new Database(join(runs, "cost-ledger.db"), { readonly: true });
     try {
       const rows = db.query("SELECT event_id FROM cost_events WHERE run_id = ? AND kind = 'box_hours'").all(runId);
       expect(rows).toHaveLength(1);
@@ -1302,7 +1886,13 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     // would still find the record and call it `live`.
     reset();
     expect(await runCli(["status", "--driver", "fake", "--dir", join(dir, "other-runs")], noStore)).toBe(0);
-    expect(JSON.parse(outOnly[0] as string)).toMatchObject({ runId, state: "orphan" });
+    // `(orphan <vmName>)` — see the orphan case above; `vmName` still names the
+    // box, and it is the box that proves --dir was honoured.
+    expect(JSON.parse(outOnly[0] as string)).toMatchObject({
+      runId: `(orphan ${runId})`,
+      state: "orphan",
+      vmName: runId,
+    });
   });
 
   test("a completed teardown still exits 0 when stdout is a closed pipe", async () => {
@@ -1366,7 +1956,25 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       throw e;
     };
     const code = await run(["dispatch", "--driver", "fake"], enospc, shared, errOut);
-    expect(code).toBe(1);
+    // 6, not 1. A lost dispatch ack means a box was provisioned and its run id
+    // never reached the caller: exit 1 is `exitStatus: "transient"` = "retry
+    // me", and retrying dispatch provisions a SECOND box while the first keeps
+    // billing with nothing pointing at it. 6 is "the work happened, the
+    // bookkeeping is wedged, a human must look".
+    expect(code).toBe(6);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("ack-unwritable")) as string) as {
+      code: string;
+      runId: string;
+      remediation: string;
+    };
+    expect(envelope.code).toBe("ack-unwritable");
+    // The envelope is the operator's ONLY copy of the run id now — the ack that
+    // carried it is the write that failed — so it must name the id and the
+    // exact command that reclaims the box, both keyed to the run that is
+    // actually billing (the record proves the box exists under that id).
+    expect(envelope.runId).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
+    expect(envelope.remediation).toContain(`fleet teardown ${envelope.runId}`);
+    expect((shared.store as RunRecordStore).get(envelope.runId).vmName).toBe(envelope.runId);
     expect(errCaptured.join("")).toContain("ENOSPC");
   });
 
@@ -1439,9 +2047,22 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       repoRoot: dir,
     });
     expect(code).toBe(2);
-    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; field?: string };
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; field?: string; issues?: string[] };
     expect(envelope.code).toBe("invalid-brief");
-    expect(envelope.field).toBeString();
+    // The FIELD, exactly. `toBeString()` is satisfied by `""`, by `"unknown"`
+    // and by the wrong field name — in the one test whose entire subject is
+    // that the operator is told WHICH field to fix.
+    expect(envelope.field).toBe("repoSlug");
+    // …and the field is the first of the issues, not the only one: a brief
+    // this broken has five, and an operator who fixes only `repoSlug` and
+    // re-runs must not discover the other four one round-trip at a time.
+    expect(envelope.issues).toEqual([
+      "repoSlug: Invalid",
+      "issueId: Required",
+      "commitSha: Required",
+      "manifestPath: Required",
+      "repoUrl: Required",
+    ]);
     expect(errCaptured.join("")).not.toContain("provisioning-key-missing");
     // INV-2 either way: an invalid brief provisions nothing.
     expect(readdirSync(runsDir)).toHaveLength(0);
@@ -1499,6 +2120,109 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     // not a thing this row is entitled to claim.
     expect(closed.boxAlive).toBeUndefined();
     expect(errCaptured.join("")).toContain("list-unavailable");
+  });
+
+  test("status exits 2 and says so when a record file could not be read at all", async () => {
+    // The record-side half of `listUnavailable`, and the same argument: a
+    // listing that REFUSED a record file is not the fleet, and exit 0 says it
+    // is. `reapRuns` already treats the identical condition as a hard refusal.
+    // Nothing covered it through the CLI, so the rows printed fine and the
+    // invocation reported a clean fleet with a file it never opened in it.
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    // A `.json` whose stem is not a run id: the store cannot key it, so it is
+    // skipped rather than parsed. (A dispatch happened first so there is a GOOD
+    // row too — "some rows are missing" is the claim, not "nothing was read".)
+    writeFileSync(join(runsDir, "NOT-A-RUN-ID.json"), "{}\n");
+
+    reset();
+    const code = await runCli(["status", "--driver", "fake", "--dir", runsDir], shared);
+
+    // 2, not 1. Exit 1 is `exitStatus: "transient"` = "retry me", and a
+    // malformed record filename is there on every retry — the same reasoning
+    // the teardown `finally` uses for exit 6.
+    expect(code).toBe(2);
+    const rows = outOnly.map((l) => JSON.parse(l) as { runId: string; state: string; skippedRecords?: string[] });
+    // The good row is still printed: the rows are worth having, they are just
+    // not the whole fleet.
+    expect(rows.map((r) => r.runId)).toContain(runId);
+    expect(rows.flatMap((r) => r.skippedRecords ?? [])).toEqual(["NOT-A-RUN-ID.json"]);
+    // …and the reason is a diagnostic, on the sink `fleet status | jq` does not
+    // have to parse around, naming the file so an operator can act on it.
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("records-skipped")) as string) as {
+      code: string;
+      message: string;
+      skippedRecords: string[];
+    };
+    expect(envelope.code).toBe("records-skipped");
+    expect(envelope.message).toContain("are not the whole fleet");
+    expect(envelope.skippedRecords).toEqual(["NOT-A-RUN-ID.json"]);
+  });
+
+  test("no minted key material reaches stdout, stderr or the CC-9 log line", async () => {
+    // INV-2 is enforced on the RECORD, and commit 78c9bd7 took a key out of the
+    // CLI's own log fields — with nothing left behind to keep it out. The three
+    // sinks a `fleet` invocation writes are an operator's terminal, their shell
+    // history's redirect and their log aggregator, and a key printed to any of
+    // them outlives the run it was minted for. `plaintexts` is the fake's
+    // test-side record of exactly what was minted, so this scans for the real
+    // secret rather than for a pattern that resembles one.
+    const keyApi = new FakeKeyApi({ usageOnCreateUsd: 0.25 });
+    const shared: Partial<FleetDeps> = { ...deps(validBriefJson(dir)), keyApi };
+    const entries: LogEntry[] = [];
+    const restore = setLogSink((e) => {
+      entries.push(e);
+    });
+    try {
+      expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+      const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+      expect(await runCli(["status", "--driver", "fake"], shared)).toBe(0);
+      // Teardown too: it is the verb that READS the key back to revoke it.
+      expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(0);
+    } finally {
+      restore();
+    }
+
+    const minted = [...keyApi.plaintexts.values()];
+    // The tripwire is only a tripwire if a key was actually minted.
+    expect(minted).not.toHaveLength(0);
+    const sinks = `${outOnly.join("")} ${errCaptured.join("")} ${JSON.stringify(entries)}`;
+    for (const secret of minted) {
+      expect(secret.length).toBeGreaterThan(8);
+      expect(sinks).not.toContain(secret);
+    }
+  });
+
+  test("run() leaves the process's signal handlers exactly as it found them", async () => {
+    // Two module-latched leaks meet here. `installSignalRelease` registers four
+    // signal handlers plus an `exit` handler in a process it does not own —
+    // this test runner's — and de-latching it (or moving the install into the
+    // acquire loop) grows that set on every teardown until Node warns and then
+    // truncates, silently dropping the release handler the lock depends on.
+    // Dispatch's own SIGINT/SIGTERM pair is scoped to the verb and removed in
+    // its `finally` precisely because `run()` is an embeddable function; drop
+    // the removal and every embedder accumulates a handler per call that exits
+    // the whole process on the next Ctrl-C.
+    const shared = deps(validBriefJson(dir));
+    // Warm both latches first — run-lock's one-time install is not a leak.
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const first = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, first.runId], shared)).toBe(0);
+
+    const signals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT", "exit"] as const;
+    const counts = (): Record<string, number> =>
+      Object.fromEntries(signals.map((s) => [s, process.listenerCount(s)]));
+    const before = counts();
+
+    for (let i = 0; i < 3; i++) {
+      reset();
+      expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+      const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+      expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(0);
+    }
+
+    expect(counts()).toEqual(before);
   });
 
   test("a throw that is not an Error still reports exit 1 with a message", async () => {

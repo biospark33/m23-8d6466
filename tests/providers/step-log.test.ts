@@ -45,6 +45,78 @@ describe("redactSecrets", () => {
     // pieces unredacted — the floor is what refuses that.
     expect(redactSecrets(`token ${key}`, "sk-")).not.toContain(key.slice(9, 25));
   });
+
+  // ── what must SURVIVE ────────────────────────────────────────────────────
+  //
+  // `/`, `.`, `-` and `_` are all inside the long-token charset, so an ordinary
+  // absolute path is ONE ≥40-char token mixing all three character classes.
+  // Every `/Users`-rooted or CamelCase-repo path with a digit in it was erased,
+  // unevenly — which reads in the field as a redaction bug and hides the exact
+  // fields these lines exist to carry. Both cases below are the real shapes.
+
+  test("an absolute path and a stack frame survive intact", () => {
+    const path = "/Users/steve/QDS-Factory/.sandbox/runs/qds-20260822-a1b2c3.json";
+    expect(redactSecrets(`wrote ${path}`)).toBe(`wrote ${path}`);
+    const frame = "    at provisionAdmittedRun (/Users/steve/QDS-Factory/src/providers/driver.ts:318:20)";
+    expect(redactSecrets(frame)).toBe(frame);
+  });
+
+  // ── what must be REDACTED ────────────────────────────────────────────────
+
+  test("an issuer-minted key, an AWS pair, a JWT and a bare base64 blob are all redacted", () => {
+    // The prefix arm (unconditional on character classes) covers the first two;
+    // the long mixed-class arm is the fallback for the unprefixed rest.
+    expect(redactSecrets(`OPENROUTER_API_KEY=${key}`)).toBe("OPENROUTER_API_KEY=«redacted»");
+    // BOTH halves of the AWS pair: the id by prefix, the secret by shape.
+    const awsPair = redactSecrets(
+      "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    );
+    expect(awsPair).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(awsPair).not.toContain("wJalrXUtnFEMI");
+    const jwt =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    expect(redactSecrets(`Authorization: Bearer ${jwt}`)).toBe("Authorization: Bearer «redacted»");
+    expect(redactSecrets("blob dGhpcyBpcyBhIHNlY3JldCB2YWx1ZSB0aGF0IGlzIGxvbmcgZW5vdWdo0123")).toBe("blob «redacted»");
+  });
+
+  test("the path exemption is not a pass: a secret sitting INSIDE a path still redacts", () => {
+    // The segments are re-tested individually against the long-token rule, so
+    // the directory stays readable and the leaf goes. Without this the exemption
+    // would be a hole exactly the width of `scp /tmp/qds-keys/<key>`.
+    const secret = "aB3dEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEf";
+    expect(redactSecrets(`scp /tmp/qds-keys/${secret} box:/etc`)).toBe("scp /tmp/qds-keys/«redacted» box:/etc");
+    // And a path carrying none of `._:-` fails the exemption outright and is
+    // redacted whole — over-redaction is the safe direction here.
+    expect(redactSecrets(`scp /tmp/keys/${secret} box:/etc`)).toBe("scp «redacted» box:/etc");
+  });
+
+  test("a key-management deep link is redacted despite its percent-encoding", () => {
+    // Structurally invisible to all three token arms: no SECRET_PREFIXES entry
+    // matches `https`, and encodeURIComponent turns the hash's `+`/`/`/`=` into
+    // `%2B`/`%2F`/`%3D`, whose `%` is outside every charset here — so the deep
+    // link is never one ≥40-char token. It is caught by DF2.4's own rule,
+    // COMPOSED into this one redactor so all four sinks inherit it at once.
+    const url = "https://openrouter.ai/api/v1/keys/RGvhoNKDIZzs%2BKKEoJm2Y7CDsY2m1S91GtNb3%2FjvbXbfg%3D";
+    expect(redactSecrets(`DELETE ${url} failed`)).toBe("DELETE [REDACTED] failed");
+  });
+
+  test("a PEM block is swallowed whole, including its short tail line", () => {
+    // `-----BEGIN` IS a known prefix, but the prefix arm's charset excludes the
+    // space in `-----BEGIN RSA PRIVATE KEY-----`, so it stopped at the header
+    // and left the body to the long-token arm — which sees the body one LINE at
+    // a time and passes every line under 40 chars or single-class, i.e. the last
+    // line of essentially every key. A private key is a block, not a token.
+    const pem = [
+      "-----BEGIN OPENSSH PRIVATE KEY-----",
+      "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAA",
+      "AbCd", // the short tail line the token arm would have passed
+      "-----END OPENSSH PRIVATE KEY-----",
+    ].join("\n");
+    expect(redactSecrets(pem)).toBe("«redacted»");
+    // A truncated key is still a key: with no END marker the match runs to the
+    // end of the text rather than giving up and leaking the body.
+    expect(redactSecrets("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAx7Vn8sQ2")).toBe("«redacted»");
+  });
 });
 
 describe("timedLoggedStep", () => {

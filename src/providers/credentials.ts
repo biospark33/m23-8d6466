@@ -29,6 +29,14 @@ import type { RunRecordStore } from "./run-record.ts";
 // sink below logs a CAUGHT error's free text, and `deliverRunKey` writes the
 // key through `driver.exec` — an exec wrapper that echoes the argv it ran (the
 // ordinary way one reports a failure) puts the key straight into that text.
+//
+// It also covers the key-management deep link `http()` builds below
+// (`.../keys/<encoded hash>`), which no arm of the token scan can see:
+// `encodeURIComponent` turns the hash's `+`/`/`/`=` into `%2B`/`%2F`/`%3D`,
+// and `%` is outside every charset there, so the URL is never one long token.
+// `redactSecrets` COMPOSES DF2.4's `redactKeyManagementUrls` for exactly that
+// shape — see its header.
+//
 // One redactor, shared with step-log's sink; a second copy is how this was
 // missed the first time.
 import { redactSecrets } from "./step-log.ts";

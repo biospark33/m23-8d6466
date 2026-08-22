@@ -80,6 +80,29 @@ describe("observability contract (driver side)", () => {
     expect((entries[1] as { error: { message: string } }).error.message).toContain("no such box");
   });
 
+  test("listWithAnomalies is an observed primitive, not a pass-through", async () => {
+    // It is what the reaper enumerates through — `list()` is only its wrapper —
+    // so leaving it out of PRIMITIVES made the ONE listing that gates a
+    // destructive fleet-wide sweep the only unobserved driver call. Functionally
+    // it still worked (Reflect.get forwards it), which is exactly why nothing
+    // would have noticed.
+    const entries: Record<string, unknown>[] = [];
+    const restore = setLogSink((e) => entries.push(e as unknown as Record<string, unknown>));
+    try {
+      const d = resolveDriver("fake", { requestId: "req-anom" });
+      await d.listWithAnomalies?.();
+    } finally {
+      restore();
+    }
+    expect(entries.map((e) => e.verb)).toEqual(["listWithAnomalies"]);
+    expect(entries[0]).toMatchObject({
+      requestId: "req-anom",
+      operation: "provider.listWithAnomalies",
+      driver: "fake",
+      outcome: "ok",
+    });
+  });
+
   test("exec stdin never reaches the log stream — it is DF2.3's key channel", async () => {
     const entries: unknown[] = [];
     const restore = setLogSink((e) => {
@@ -121,17 +144,30 @@ describe("FakeDriver accountability and boundaries", () => {
     }
   });
 
-  test("a directory that cannot be a box is skipped, so one stray dir cannot stop reap", async () => {
+  test("a directory that cannot be a box is skipped by list(), and reap REFUSES on it", async () => {
     const boxes = mkdtempSync(join(tmpdir(), "qds-fake-junk-"));
     const runs = mkdtempSync(join(tmpdir(), "qds-fake-junk-runs-"));
     try {
       const d = new FakeDriver(boxes);
       mkdirSync(join(boxes, "Junk_Dir")); // fails the hostname grammar
       await d.create("good-box");
+      // `list()` still filters it: `destroy()` re-validates the name, so
+      // REPORTING the junk dir as a box would throw mid-reap.
       expect((await d.list()).map((v) => v.name)).toEqual(["good-box"]);
-      // destroy() re-validates the name, so reporting the junk dir would throw
-      // here and the reaper would reap nothing at all.
-      expect(await reapRuns(d, new RunRecordStore({ dir: runs }))).toEqual(["good-box"]);
+      // But a directory this driver cannot name can still be a LIVE box, and
+      // reap destroys every box it cannot match to an open record. A population
+      // that cannot be proven complete is never reaped from — otherwise the
+      // stray dir is a box no verb can reach, spending against nobody's cap,
+      // and the operator is never told at the moment it matters.
+      const err = await reapRuns(d, new RunRecordStore({ dir: runs })).then(
+        (v) => new Error(`expected a refusal, got ${JSON.stringify(v)}`),
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      expect((err as ProvisionRefusedError).code).toBe("reap-vms-unverified");
+      expect((err as Error).message).toContain("Junk_Dir");
+      // and it reaped nothing: the good box is untouched.
+      expect((await d.list()).map((v) => v.name)).toEqual(["good-box"]);
     } finally {
       rmSync(boxes, { recursive: true, force: true });
       rmSync(runs, { recursive: true, force: true });
@@ -553,6 +589,74 @@ describe("provisioning refusals and fail-safe reap", () => {
     }
   });
 
+  test("each hung step of the provisioning sequence refuses with its OWN typed code", async () => {
+    // A bare `Error` from withTimeout is the exact unclassified shape
+    // ProvisionRefusedError exists to prevent: the fleet CLI reads `code` and
+    // `remediation` off the thrown value, so a timeout reached an operator as
+    // exit-1 "provisioning failed" naming no cause — while a box may be LIVE,
+    // the record is open and the issue's reservation is still burning cap. One
+    // code per step, because the remediation differs: after `create` you do not
+    // yet know a box exists, after `expose` you know it does.
+    const hang = <T>(): Promise<T> => new Promise<T>(() => {});
+    const steps: [string, Partial<FakeDriver>, string][] = [
+      ["create", { create: hang<ProviderVm> }, "provider-timeout-create"],
+      ["expose", { expose: hang<string> }, "provider-timeout-expose"],
+      ["setPublic", { setPublic: hang<void> }, "provider-timeout-set-public"],
+    ];
+    for (const [step, override, code] of steps) {
+      const t = tmp();
+      try {
+        const hung = Object.assign(Object.create(t.driver) as FakeDriver, override);
+        const runId = `hung-${step.toLowerCase()}-run`;
+        const err = await rejection(
+          provisionAdmittedRun(hung, t.store, { runId, port: 8080, actionTimeoutMs: 5 }),
+        );
+        expect(err).toBeInstanceOf(ProvisionRefusedError);
+        expect((err as ProvisionRefusedError).code).toBe(code);
+        // ABANDONED, not cancelled — the provider may still have acted on it,
+        // which is the whole reason the remediation is a teardown and not a retry.
+        expect(err.message).toContain("ABANDONED");
+        expect((err as ProvisionRefusedError).remediation).toContain(`teardown ${runId}`);
+        // The record is the only handle left to whatever the provider did.
+        expect(t.store.get(runId).closedAt).toBeUndefined();
+      } finally {
+        clean(t);
+      }
+    }
+  });
+
+  test("expose reporting no URL — and create reporting none either — refuses BEFORE setPublic", async () => {
+    const t = tmp();
+    try {
+      let madePublic = false;
+      const noUrl = Object.assign(Object.create(t.driver) as FakeDriver, {
+        // Neither call establishes an address. The record would then carry a
+        // port and NO address (the store skips an undefined value and has no
+        // way to unset one later), while setPublic still ran — leaving a
+        // publicly reachable box whose address only the provider knows.
+        create: async (name: string): Promise<ProviderVm> => ({ name, status: "running" }),
+        expose: async (): Promise<string> => undefined as unknown as string,
+        setPublic: async (): Promise<void> => {
+          madePublic = true;
+        },
+      });
+      const err = await rejection(
+        provisionAdmittedRun(noUrl, t.store, { runId: "no-url-run", port: 8080 }),
+      );
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      expect((err as ProvisionRefusedError).code).toBe("expose-no-url");
+      expect(madePublic).toBe(false);
+      // Exposed but NOT public, with an OPEN record naming the box — the state
+      // teardown can actually reach.
+      const rec = t.store.get("no-url-run");
+      expect(rec.closedAt).toBeUndefined();
+      expect(rec.vmName).toBe("no-url-run");
+      expect(rec.httpsUrl).toBeUndefined();
+    } finally {
+      clean(t);
+    }
+  });
+
   test("reap refuses outright when a run record file was skipped by the listing", async () => {
     const t = tmp();
     try {
@@ -564,7 +668,12 @@ describe("provisioning refusals and fail-safe reap", () => {
       // name missing from it is a box this function would destroy.
       writeFileSync(join(t.runs, "Not_A_Run_Id.json"), "{}\n");
       // The filename is in the refusal: it is what an operator has to go rename.
-      await expect(reapRuns(t.driver, t.store)).rejects.toThrow(/refusing to reap.*Not_A_Run_Id\.json/);
+      const err = await rejection(reapRuns(t.driver, t.store));
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      // Typed, and distinct from the box-side twin (`reap-vms-unverified`): the
+      // fleet CLI classifies on `code`, and the two need different remediations.
+      expect((err as ProvisionRefusedError).code).toBe("reap-records-unverified");
+      expect(err.message).toMatch(/refusing to reap.*Not_A_Run_Id\.json/);
       // Fail-safe: the orphan lives, rather than the claimed box dying.
       expect((await t.driver.list()).map((v) => v.name).sort()).toEqual(["claimed-run", "orphan-box"]);
     } finally {

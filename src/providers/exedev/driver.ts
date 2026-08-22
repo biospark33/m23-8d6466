@@ -28,7 +28,7 @@
 import { readFileSync } from "node:fs";
 import { log, newRequestId } from "../../swarmclaw/log.ts";
 import { assertValidRunId } from "../run-record.ts";
-import type { ExecResult, ProviderDriver, ProviderVm } from "../driver.ts";
+import type { ExecResult, ProviderDriver, ProviderVm, ProviderVmListing } from "../driver.ts";
 import {
   DEFAULT_EXEC_TIMEOUT_MS,
   ExeDevDriverError,
@@ -196,7 +196,21 @@ export class ExeDevDriver implements ProviderDriver {
     );
   }
 
-  async list(name?: string): Promise<ProviderVm[]> { /* dp:ok a rejection IS the error contract: non-zero exits are content-checked below, spawn errors propagate through the registry proxy's error log */
+  async list(name?: string): Promise<ProviderVm[]> {
+    return (await this.listWithAnomalies(name)).vms;
+  }
+
+  /**
+   * `list()`, plus the box identifiers this driver refused to name.
+   *
+   * exe.dev's `ls --json` can return an entry whose `vm_name` is not a string.
+   * Dropping it from `list()` made it a box `reapRuns` cannot see and cannot
+   * reap — spend nobody is accountable for. The drop still happens (there is
+   * no usable name to hand back), but it is now reported instead of silent.
+   * The placeholder names the index, because that is the only handle the
+   * substrate gave us for the row.
+   */
+  async listWithAnomalies(name?: string): Promise<ProviderVmListing> { /* dp:ok a rejection IS the error contract: non-zero exits are content-checked below, spawn errors propagate through the registry proxy's error log */
     const res = await this.control(["ls", ...(name === undefined ? [] : [name]), "--json"]);
     if (res.exitCode !== 0) {
       throw new ExeDevDriverError(
@@ -213,9 +227,13 @@ export class ExeDevDriver implements ProviderDriver {
         "re-run `ssh exe.dev ls --json` by hand and compare the shape",
       );
     }
-    return shape.vms.flatMap((v) => {
+    const skipped: string[] = [];
+    const vms = shape.vms.flatMap((v, i) => {
       const vmName = typeof v.vm_name === "string" ? v.vm_name : null;
-      if (vmName === null) return [];
+      if (vmName === null) {
+        skipped.push(`vms[${i}] (vm_name is not a string)`);
+        return [];
+      }
       return [
         {
           name: vmName,
@@ -223,6 +241,7 @@ export class ExeDevDriver implements ProviderDriver {
         },
       ];
     });
+    return { vms, skipped };
   }
 
   /** Idempotent by contract (teardownRun/reapRuns both retry): a `rm` failure is

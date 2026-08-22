@@ -371,6 +371,41 @@ describe("ExeDevDriver — control-plane parsing", () => {
     expect(one[0]?.httpsUrl).toBe("https://list-2.exe.xyz");
   });
 
+  test("an `ls --json` entry whose vm_name is not a string is REPORTED as skipped, not silently dropped", async () => {
+    // The driver-side twin of a skipped run-record file. `reapRuns` destroys
+    // every box no open record claims and refuses outright on a listing it
+    // cannot prove complete — so a VM dropped from `list()` used to be a live
+    // box no verb could reach, spending against nobody's cap, with nothing in
+    // the return value to say so. The DROP still happens (there is no usable
+    // name to hand back); what changed is that it is now reported.
+    //
+    // A hand-written `run` seam, not the fake substrate: this shape is exactly
+    // what the substrate never produces, so it has to be injected here.
+    const stub = async (argv: string[]) => {
+      expect(argv.slice(0, 3)).toEqual(["ssh", "exe.dev", "ls"]);
+      return {
+        stdout: JSON.stringify({ vms: [{ vm_name: "good-box" }, { vm_name: 42 }, { vm_name: null }] }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+    const driver = new ExeDevDriver({ run: stub });
+    const listing = await driver.listWithAnomalies();
+    expect(listing.vms.map((v) => v.name)).toEqual(["good-box"]);
+    // The INDEX is the placeholder, because it is the only handle the substrate
+    // gave us for the row — there is no name to print.
+    expect(listing.skipped).toEqual(["vms[1] (vm_name is not a string)", "vms[2] (vm_name is not a string)"]);
+    // `list()` is the thin wrapper over it, so the two can never disagree about
+    // which VMs were reported — the dual-entry hazard the split otherwise has.
+    expect(await driver.list()).toEqual(listing.vms);
+    // A clean page reports an empty array, never `undefined`: a caller checking
+    // `.length` must not read "no anomaly channel" as "no anomalies".
+    const clean = new ExeDevDriver({
+      run: async () => ({ stdout: JSON.stringify({ vms: [{ vm_name: "good-box" }] }), stderr: "", exitCode: 0 }),
+    });
+    expect((await clean.listWithAnomalies()).skipped).toEqual([]);
+  });
+
   test("destroy re-reads ls when rm reports not-found — idempotent by content", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
     await driver.create("destroy-1");

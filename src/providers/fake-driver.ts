@@ -22,7 +22,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { log, newRequestId } from "../swarmclaw/log.ts";
-import type { ExecResult, ProviderDriver, ProviderVm } from "./driver.ts";
+import type { ExecResult, ProviderDriver, ProviderVm, ProviderVmListing } from "./driver.ts";
 import { assertExistingRunId, assertValidRunId, LEGACY_RUN_ID_RE, RUN_ID_MAX } from "./run-record.ts";
 
 export const DEFAULT_FAKE_BOXES_DIR = ".sandbox/fake-boxes";
@@ -110,7 +110,19 @@ export class FakeDriver implements ProviderDriver {
   }
 
   async list(name?: string): Promise<ProviderVm[]> {
+    return (await this.listWithAnomalies(name)).vms;
+  }
+
+  /**
+   * `list()`, plus the directory names it refused to report. The log line
+   * below is not enough on its own: `reapRuns` destroys every box its listing
+   * does not account for, so a skipped directory is a live box that no verb
+   * can reach and no operator is told about at the moment it matters. The
+   * anomaly rides in the return value, and `reapRuns` refuses on it.
+   */
+  async listWithAnomalies(name?: string): Promise<ProviderVmListing> {
     const out: ProviderVm[] = [];
+    const skipped: string[] = [];
     // ONE correlation id for the whole call: a per-anomaly id made the N stray
     // directories of a single `list()` look like N unrelated events, so nothing
     // could group them — and `list()` runs on every status poll, so that is the
@@ -133,6 +145,7 @@ export class FakeDriver implements ProviderDriver {
       // vanishing — an invisible box is the driver-side twin of a dropped run
       // record, and an operator needs the name to clean it up by hand.
       if (!LEGACY_RUN_ID_RE.test(entry) || entry.length > RUN_ID_MAX) {
+        skipped.push(entry);
         log({
           requestId,
           operation: "fake-driver.list.skipped",
@@ -164,7 +177,7 @@ export class FakeDriver implements ProviderDriver {
         ...(meta.ports.length > 0 ? { httpsUrl: fakeUrl(meta.name, meta.ports[0] as number) } : {}),
       });
     }
-    return out;
+    return { vms: out, skipped };
   }
 
   /** Idempotent: teardown and reap both retry, and a missing box is the goal state. */

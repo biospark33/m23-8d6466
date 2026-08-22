@@ -27,6 +27,11 @@ import {
   stampManifestLimit,
   serializeManifest,
 } from "../../src/phase-engine/manifest.ts";
+import {
+  CorrelationError,
+  MAX_ISSUE_ID,
+  resolveRunCorrelation,
+} from "../../src/phase-engine/issue-correlation.ts";
 import { ZodError, type ZodIssueCode } from "zod";
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df3-1-brief-")));
@@ -109,6 +114,54 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     expect(extractZodErrorField(thrown as ZodError)).toBe("unknownField");
   });
 
+  test("a hostile unknown-key NAME is refused, and the extractor returns it VERBATIM", () => {
+    // Every other unknown-key case uses a benign name, so nothing here has ever
+    // exercised the fact that the key is ATTACKER-CHOSEN: a brief is
+    // attacker-authored JSON, and `NO_CONTROL_CHARS` guards VALUES — no rule
+    // anywhere constrains a key NAME. `extractZodErrorField` returns it with no
+    // transformation, and `dispatch.ts` interpolates that twice into the
+    // operator stream (`JSON.stringify(field)` in the message, RAW in the
+    // remediation), while zod's own issue message quotes it raw as well.
+    //
+    // What this layer OWNS is the refusal, and that is what is asserted: the
+    // brief is rejected before any box, key or ledger row exists, whatever the
+    // name renders as. The verbatim return is pinned so the escaping obligation
+    // sits visibly on the consumer. That obligation is now met — `dispatch.ts`
+    // escapes the name in the message, the remediation AND the issues array;
+    // see the dispatch-layer test that pins it.
+    for (const hostile of ["\u001b[2Jrm -rf", "a\nFLEET dispatch ok runId=fake"]) {
+      expectRejected(validBrief({ [hostile]: "x" }), {
+        field: hostile,
+        code: "unrecognized_keys",
+      });
+    }
+  });
+
+  test("prototype-pollution key names are refused as unknown keys, not absorbed", () => {
+    // `__proto__` reached through `JSON.parse` — which is how a brief actually
+    // arrives — is a REAL own enumerable key, unlike the object-literal form
+    // `{ __proto__: … }`, which invokes the setter and leaves no own key at all.
+    // So a brief can carry one, and `z.strictObject` is the only thing refusing
+    // it. Relax this schema to `.passthrough()`/`.catchall()` and all three ride
+    // into `parsed.data`, which is spread into the run record and the manifest
+    // stamp — and `constructor`/`prototype` shadow properties every downstream
+    // `obj.constructor` check reads.
+    for (const key of ["__proto__", "constructor", "prototype"]) {
+      const brief = JSON.parse(JSON.stringify({ ...validBrief(), [key]: { polluted: true } })) as Record<
+        string,
+        unknown
+      >;
+      // The premise of the case: the round trip really did produce an own,
+      // enumerable key. Without this the test could pass on a fixture that
+      // never carried the key at all.
+      expect(Object.hasOwn(brief, key)).toBe(true);
+      expect(Object.keys(brief)).toContain(key);
+      expectRejected(brief, { field: key, code: "unrecognized_keys" });
+    }
+    // …and nothing was polluted on the way through.
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
   test("a non-object brief is refused and NAMED — the root label, not an empty field", () => {
     // The case the extractor's docblock was written for: a root rejection
     // carries an EMPTY path, and AC1's "exits 2 naming the offending field"
@@ -161,6 +214,23 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     });
   }
 
+  test("explicit null is refused for every field — required AND optional", () => {
+    // Absent and `undefined` are both covered above precisely because they take
+    // different zod paths. `null` is a THIRD, and it is the one JSON can
+    // actually carry: a templating layer that renders an unset value emits
+    // `"issueUrl": null`, and `.nullish()` is a one-word loosening of
+    // `.optional()` that would let that through — after which `issueUrl.
+    // startsWith(…)` and `new URL(issueUrl)` run on `null` past the trust
+    // boundary INV-2 puts here, not at exit 2.
+    for (const key of [...REQUIRED_KEYS, "issueUrl", "requestId"]) {
+      expectRejected(validBrief({ [key]: null }), {
+        field: key,
+        code: "invalid_type",
+        message: /received null/,
+      });
+    }
+  });
+
   test("commitSha not-40-hex rejected: 39 chars", () => {
     expectRejected(validBrief({ commitSha: "a".repeat(39) }), { field: "commitSha", code: "invalid_string" });
   });
@@ -207,6 +277,50 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     // 200 would reject every real GitHub issue number and still pass.
     const result = BriefSchema.parse(validBrief({ issueId: 2 ** 31 - 1 }));
     expect(result.issueId).toBe(2 ** 31 - 1);
+  });
+
+  test("issueId NaN, ±Infinity and -0 rejected", () => {
+    // Every other issueId case is a finite in-range number, so the three values
+    // that break ORDER COMPARISON itself have never been fed to the bound.
+    // `NaN` compares false against every bound at once, so a guard written
+    // `v < 1 || v > MAX` admits it and `String(NaN)` becomes "NaN" in the
+    // `${slug}#${issueId}` ledger key. `Infinity` passes `> 0` and is not an
+    // integer. `-0` is the subtle one: falsy, signed, `-0 >= 0` is true, and it
+    // `String()`s to "0" — issue zero, which exists nowhere.
+    expectRejected(validBrief({ issueId: Number.NaN }), {
+      field: "issueId",
+      code: "invalid_type",
+      message: /received nan/i,
+    });
+    for (const inf of [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expectRejected(validBrief({ issueId: inf }), {
+        field: "issueId",
+        code: "invalid_type",
+        message: /integer/,
+      });
+    }
+    expectRejected(validBrief({ issueId: -0 }), {
+      field: "issueId",
+      code: "too_small",
+      message: /greater than 0/,
+    });
+  });
+
+  test("the issueId bound is DF1.8's MAX_ISSUE_ID, and BOTH enforcers agree at it", () => {
+    // The schema and `resolveRunCorrelation` refuse against the same bound, and
+    // while the schema restated `2 ** 31 - 1` as a literal the two silently
+    // stopped agreeing the moment either moved — one refusing at exit 2 and the
+    // other throwing a CorrelationError, for the same brief. Imported, not
+    // restated, is the same argument `REPO_SLUG_PATTERN` already makes; this
+    // case is what makes the import load-bearing rather than cosmetic.
+    expect(MAX_ISSUE_ID).toBe(2 ** 31 - 1);
+
+    const atMax = BriefSchema.parse(validBrief({ issueId: MAX_ISSUE_ID }));
+    expect(atMax.issueId).toBe(MAX_ISSUE_ID);
+    expect(resolveRunCorrelation(atMax).issueId).toBe(MAX_ISSUE_ID);
+
+    expectRejected(validBrief({ issueId: MAX_ISSUE_ID + 1 }), { field: "issueId", code: "too_big" });
+    expect(() => resolveRunCorrelation({ ...atMax, issueId: MAX_ISSUE_ID + 1 })).toThrow(CorrelationError);
   });
 
   test("issueUrl invalid rejected", () => {
@@ -398,6 +512,85 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     }
   });
 
+  test("the .git strip is case-INSENSITIVE — repo.GIT names the same repository", () => {
+    // `canonicalRepoSlug` folds case AROUND a strip that ran case-sensitively,
+    // so `…/owner/repo.GIT` kept its suffix, canonicalised to `owner/repo.git`
+    // and was refused as a DIFFERENT repository from `owner/repo` — a false
+    // rejection of a clone URL git itself accepts. The lowercase `.git` case
+    // above passes either way, which is why it could not see this.
+    for (const ok of ["https://github.com/owner/repo.GIT", "https://github.com/owner/repo.Git"]) {
+      expect(BriefSchema.parse(validBrief({ repoUrl: ok })).repoUrl).toBe(ok);
+    }
+  });
+
+  test("repoUrl/issueUrl carrying CREDENTIALS refused — every other guard is blind to userinfo", () => {
+    // `repoSlugOfUrl` compares `URL.pathname`, which EXCLUDES userinfo, so a
+    // GitHub App installation token pasted into the clone URL satisfied
+    // `.url()`, the https scheme regex, the 2048 cap AND the slug cross-check —
+    // a SECOND secret smuggled into the box (INV-CRED-1) through a field that
+    // had passed every check there was. `assertRepoUrl` in `exedev/fill.ts`
+    // refuses one too, but that runs AFTER `driver.create()`: a brief this
+    // schema can refuse must never burn a billing box INV-5 then forbids
+    // destroying. The trust boundary is here.
+    for (const url of [
+      "https://x-access-token:ghs_16C7e42F292c6912E7710c838347Ae178B4a@github.com/owner/repo",
+      "https://x-access-token@github.com/owner/repo", // username, no password
+      "https://user:@github.com/owner/repo", // password empty but present
+    ]) {
+      // The cross-check's ENTIRE view of these URLs — identical to the clean one.
+      expect(new URL(url).pathname).toBe("/owner/repo");
+      expectRejected(validBrief({ repoUrl: url }), {
+        field: "repoUrl",
+        code: "custom",
+        message: /userinfo/,
+      });
+    }
+    // `issueUrl` has no cross-check at all, so nothing else would ever have
+    // looked at it — and it lands in run-context.json and in log lines an
+    // operator clicks, credentials included.
+    expectRejected(validBrief({ issueUrl: "https://user:pw@github.com/owner/repo/issues/1" }), {
+      field: "issueUrl",
+      code: "custom",
+      message: /userinfo/,
+    });
+  });
+
+  test("an '@' in the PATH is not userinfo — the guard parses, it does not scan", () => {
+    // `/@scope/pkg/issues/1` is an ordinary forge path. Implemented as a
+    // `url.includes("@")` scan, the rule above refuses it: a false rejection of
+    // a correct brief, which is the failure mode a character scan always has.
+    const url = "https://github.com/@scope/pkg/issues/1";
+    expect(new URL(url).username).toBe("");
+    expect(BriefSchema.parse(validBrief({ issueUrl: url })).issueUrl).toBe(url);
+  });
+
+  test("control characters in repoUrl/issueUrl rejected on the RAW string — URL STRIPS them", () => {
+    // The reason `NO_CONTROL_CHARS` has to be on the field rather than left to
+    // the URL guards: WHATWG `URL` DELETES ASCII tab/LF/CR before parsing, so
+    // every downstream check sees a clean URL while the operator log stream sees
+    // the raw one, newline and all. The assertion below is the proof — the
+    // forged value parses to a perfectly ordinary href.
+    expect(new URL("https://git\nhub.com/owner/repo").href).toBe("https://github.com/owner/repo");
+    for (const raw of [
+      "https://git\nhub.com/owner/repo",
+      "https://git\rhub.com/owner/repo",
+      "https://git\thub.com/owner/repo",
+      "https://github.com/owner/repo\u0000",
+      "https://github.com/owner/repo\u001b[2J",
+    ]) {
+      expectRejected(validBrief({ repoUrl: raw }), {
+        field: "repoUrl",
+        code: "invalid_string",
+        message: /control characters/,
+      });
+      expectRejected(validBrief({ issueUrl: raw }), {
+        field: "issueUrl",
+        code: "invalid_string",
+        message: /control characters/,
+      });
+    }
+  });
+
   test("repoUrl cross-check does NOT constrain the host — self-hosted forges are legitimate", () => {
     // The tie is on the PATH only. A host allow-list here would refuse every
     // GitLab/Gitea/Forgejo install, which is a worse failure than the one the
@@ -439,6 +632,92 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     const atCap = "u".repeat(128);
     expect(BriefSchema.parse(validBrief({ requestId: atCap })).requestId).toBe(atCap);
     expectRejected(validBrief({ requestId: "u".repeat(129) }), { field: "requestId", code: "too_big" });
+  });
+
+  test("the control-char guard is the Unicode CATEGORY, not an ASCII range — C1 and DEL too", () => {
+    // The case above uses C0 and NUL only, all of which an `/[\x00-\x1f]/`
+    // rewrite still catches. These four do not: DEL is 0x7f and C1 runs
+    // 0x80–0x9f, where U+0085 (NEL) is a line terminator in several log
+    // consumers and U+009B (CSI) is the single-byte form of the escape
+    // sequence the C0 case is about. `\p{Cc}` is what covers them.
+    for (const bad of ["abc\u0085x", "abc\u009bx", "abc\u009fx", "abc\u007fx"]) {
+      expectRejected(validBrief({ requestId: bad }), {
+        field: "requestId",
+        code: "invalid_string",
+        message: /control characters/,
+      });
+    }
+  });
+
+  test("the control-char guard reaches the JS line terminators and the bidi overrides too", () => {
+    // `\p{Cc}` alone is C0, DEL and C1, which leaves the three classes that
+    // forge the very line this guard protects: U+2028/U+2029 are JS LINE
+    // TERMINATORS, so a consumer splitting the operator stream with a JS regex
+    // — or re-parsing it as a JS string literal — sees a forged record without
+    // a `\n` ever appearing; U+202E (RTL override) reorders what a terminal
+    // RENDERS without changing a byte, so `runId=fake` can be made to display
+    // as something else entirely. The guard is `\p{Cc}\p{Zl}\p{Zp}\p{Cf}`.
+    //
+    // Narrow it back to `\p{Cc}` — or to an ASCII range — and this goes red.
+    for (const risky of ["abc\u2028FLEET dispatch ok runId=fake", "abc\u2029x", "abc\u202ex"]) {
+      expectRejected(validBrief({ requestId: risky }), {
+        field: "requestId",
+        code: "invalid_string",
+        message: /control characters/,
+      });
+    }
+  });
+
+  test("requestId '' is refused — neither absent nor usable", () => {
+    // `""` is the value that does the most damage, because it is FALSY: a
+    // downstream `requestId || mint()` treats it as absent while
+    // `Object.hasOwn`/`!== undefined` treat it as present. That split is how the
+    // ack, the run record, the ledger key and every log correlation line end up
+    // disagreeing about one run, and how concurrent runs carrying it collapse
+    // onto a single empty key. Omitting the key is the supported way to say
+    // "mint me one" (AC1/AC2); the empty string is not a second spelling of it.
+    expectRejected(validBrief({ requestId: "" }), {
+      field: "requestId",
+      code: "too_small",
+      message: /may not be empty/,
+    });
+  });
+
+  test("every cap counts UTF-16 CODE UNITS — an at-cap value is up to 3× its length in bytes", () => {
+    // `.max()` is a `.length` check, and `.length` is UTF-16 units: not bytes,
+    // not code points. Every cap case in this file uses ASCII, where all three
+    // coincide, so the ceiling the caps actually impose has never been visible.
+    // It is a documented ceiling, not a defect — `manifestPath` goes to `fs`,
+    // which takes bytes — so it is pinned rather than argued: at the 1024 cap a
+    // manifestPath can be 3072 bytes, and 512 astral code points.
+    const bmp3 = "漢".repeat(1024); // 3 bytes each, ONE UTF-16 unit each
+    expect(bmp3.length).toBe(1024);
+    expect(Buffer.byteLength(bmp3)).toBe(3072);
+    expect(BriefSchema.parse(validBrief({ manifestPath: bmp3 })).manifestPath).toBe(bmp3);
+
+    const astral = "\u{1F600}".repeat(512); // 4 bytes each, TWO UTF-16 units each
+    expect(astral.length).toBe(1024);
+    expect([...astral]).toHaveLength(512);
+    expect(BriefSchema.parse(validBrief({ manifestPath: astral })).manifestPath).toBe(astral);
+
+    // One more code point is TWO more units, so the cap binds at 1026 — the
+    // boundary is on units, and a rewrite to code points would move it.
+    expectRejected(validBrief({ manifestPath: `${astral}\u{1F600}` }), {
+      field: "manifestPath",
+      code: "too_big",
+    });
+    expect(BriefSchema.parse(validBrief({ requestId: "\u{1F600}".repeat(64) })).requestId).toHaveLength(128);
+  });
+
+  test("repoSlug charset is ASCII — a multi-byte slug is refused, not silently canonicalised", () => {
+    // The one field where the UTF-16 ceiling above does NOT apply, and it must
+    // not: the slug is the ledger key, and `canonicalRepoSlug` folds ASCII only
+    // (to match SQLite's `lower()`), so a non-ASCII slug that got through would
+    // be a value JS and SQL disagree about the identity of.
+    expectRejected(validBrief({ repoSlug: "own\u{1F600}er/repo" }), {
+      field: "repoSlug",
+      code: "invalid_string",
+    });
   });
 
   test("repoSlug invalid pattern rejected (no slash)", () => {
@@ -692,12 +971,21 @@ describe("repoUrl/repoSlug cross-check", () => {
     expect(BriefSchema.parse(brief).repoUrl).toBe("https://github.com/Owner/Repo");
   });
 
-  test("a slug in one casing and a URL in another still name one repository", () => {
-    expect(() =>
-      BriefSchema.parse(
-        validBrief({ repoSlug: "BiosparkHealth/QDS-Factory", repoUrl: "https://github.com/biosparkhealth/qds-factory" }),
-      ),
-    ).not.toThrow();
+  test("a slug in one casing and a URL in another name one repository — and NEITHER is rewritten", () => {
+    // `not.toThrow()` could not see a TRANSFORM, and the comparison being
+    // canonical is exactly what invites one: a schema that canonicalised the
+    // fields it compares would hand back a lower-cased `repoSlug`, and the
+    // ledger key, the per-issue cap override lookup and `run-context.json`
+    // would then carry a slug the operator never wrote — while every casing
+    // case in this file still passed. The parsed value is the invariant.
+    const brief = validBrief({
+      repoSlug: "BiosparkHealth/QDS-Factory",
+      repoUrl: "https://github.com/biosparkhealth/qds-factory",
+    });
+    const parsed = BriefSchema.parse(brief);
+    expect(parsed.repoSlug).toBe("BiosparkHealth/QDS-Factory");
+    expect(parsed.repoUrl).toBe("https://github.com/biosparkhealth/qds-factory");
+    expect(parsed).toEqual(brief as Brief);
   });
 
   test("a DIFFERENT repository is still refused, whatever the casing", () => {

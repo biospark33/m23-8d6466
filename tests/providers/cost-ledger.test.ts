@@ -14,7 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -31,6 +31,7 @@ import {
   loadCostConfig,
   type RunCostRecord,
 } from "../../src/providers/cost-ledger.ts";
+import { setLogSink } from "../../src/swarmclaw/log.ts";
 
 // ─── fixtures ────────────────────────────────────────────────────────────────
 
@@ -1005,18 +1006,26 @@ describe("DF2.8 safe-integer guards (P2, P3, P5)", () => {
     hugeRate.close();
   });
 
-  test("costUsd that exceeds MAX_SAFE_INTEGER on µ$ conversion (P3) → cost-convert-invalid", () => {
+  test("costUsd that exceeds MAX_SAFE_INTEGER on µ$ conversion (P3) persists unpriced, never loses the event", () => {
     seedRecord("run-a1");
     const hugeCost = { costUsd: 1e15 }; // finite, non-negative, but × 1e6 overflows
-    let code = "";
-    try {
-      ledger.ingestCostEvent(mkEvent(hugeCost), mkCtx());
-    } catch (e) {
-      code = (e as CostLedgerError).code;
-    }
-    expect(code).toBe("cost-convert-invalid");
+    // AC4: an unconvertible figure is a malformed event, in the same class as a
+    // negative or non-finite one — not a reason to drop the turn. The throw
+    // escaped ingest and lost the row, so the issue read as having spent
+    // NOTHING on it, and `unpricedTurns > 0` never fired either. Now the turn
+    // is on the ledger at 0 µ$ / unpriced=1, which is what makes the gate see
+    // an issue it cannot price.
+    const res = ledger.ingestCostEvent(mkEvent(hugeCost), mkCtx());
+    expect(res.inserted).toBe(true);
+    expect(res.unpriced).toBe(true);
     const db = rawDb();
-    expect(rowCount(db, "cost_events")).toBe(0);
+    expect(rowCount(db, "cost_events")).toBe(1);
+    const row = db.prepare("SELECT cost_micro_usd, unpriced FROM cost_events").get() as {
+      cost_micro_usd: number;
+      unpriced: number;
+    };
+    expect(row.cost_micro_usd).toBe(0);
+    expect(row.unpriced).toBe(1);
     db.close();
   });
 
@@ -1032,17 +1041,17 @@ describe("DF2.8 safe-integer guards (P2, P3, P5)", () => {
     expect(code).toBe("cost-config-invalid");
   });
 
-  test("costUsd at MAX_SAFE/1e6 boundary converts or throws", () => {
+  test("costUsd at MAX_SAFE/1e6 boundary persists unpriced; just under it prices normally", () => {
     seedRecord("run-a1");
-    // MAX_SAFE_INTEGER / 1e6 ≈ 9007199.254740992 USD, which when × 1e6 exceeds MAX_SAFE_INTEGER
+    // MAX_SAFE_INTEGER / 1e6 ≈ 9,007,199,254.740992 USD, which × 1e6 lands
+    // exactly ON MAX_SAFE_INTEGER's float neighbourhood and does not round to a
+    // safe integer — so usdToMicros still refuses it.
     const boundaryCost = Number.MAX_SAFE_INTEGER / 1_000_000;
-    // Boundary itself should throw due to usdToMicros safe-integer check
-    try {
-      ledger.ingestCostEvent(mkEvent({ costUsd: boundaryCost }), mkCtx());
-      throw new Error("expected cost-convert-invalid");
-    } catch (e) {
-      expect((e as CostLedgerError).code).toBe("cost-convert-invalid");
-    }
+    // Refusing to CONVERT it no longer means refusing to RECORD it: the row
+    // lands unpriced rather than the event being lost (see the P3 test above).
+    const boundary = ledger.ingestCostEvent(mkEvent({ costUsd: boundaryCost }), mkCtx());
+    expect(boundary.inserted).toBe(true);
+    expect(boundary.unpriced).toBe(true);
     // Slightly under boundary should succeed
     const res = ledger.ingestCostEvent(mkEvent({ costUsd: boundaryCost - 0.001 }), mkCtx({ requestId: "r2" }));
     expect(res.unpriced).toBe(false);
@@ -1262,5 +1271,280 @@ describe("canonical repo identity (cap bypass)", () => {
       DEFAULT_COST_CONFIG.defaultCapMicroUsd,
     );
     expect(capForIssue(config, "other/repo", "42")).toBe(DEFAULT_COST_CONFIG.defaultCapMicroUsd);
+  });
+});
+
+// ─── canonical issue identity ────────────────────────────────────────────────
+
+/**
+ * The OTHER half of the (repoSlug, issueId) budget key, and the same cap-bypass
+ * class the slug half closed above. `issue_id` is a byte-exact SQL predicate
+ * everywhere, so `42`, `#42`, `042` and `42 ` were four budget identities for
+ * one issue — each holding a full untouched cap — and an override an operator
+ * wrote as `owner/repo#042` matched the `"42"` a dispatch supplies in nothing,
+ * so the cap silently reverted to the default. Both directions cost money.
+ */
+describe("canonical issue identity (cap bypass)", () => {
+  /** Every spelling a human, a hand-edited record or a brief actually produces. */
+  const SPELLINGS = ["42", "#42", "042", "42 "];
+
+  test("every spelling of one issue reads ONE balance, not four empty ones", () => {
+    seedRecord("run-i1");
+    // Billed under the most-decorated spelling; read under all of them.
+    ledger.ingestCostEvent(mkEvent({ costUsd: 1.0 }), mkCtx({ runId: "run-i1", issueId: "#042" }));
+    for (const issueId of SPELLINGS) {
+      expect(ledger.readIssueCost("qds/demo", issueId).totalMicroUsd).toBe(1_000_000);
+    }
+    // Still scoped: a genuinely different issue is not folded in with it.
+    expect(ledger.readIssueCost("qds/demo", "43").hasEvents).toBe(false);
+    // …and the row itself carries the canonical spelling, so the per-run
+    // breakdown and the gate key on the same string the events were written on.
+    expect(ledger.readIssueRuns("qds/demo", "0042").map((r) => r.runId)).toEqual(["run-i1"]);
+  });
+
+  test("four spellings of one issue share ONE cap — each does not get its own", () => {
+    // THE bypass, end to end. cap 5 µ$, keyCap 2 µ$: folded, the four
+    // admissions draw 2 + 2 + 1 from a single 5 and the fourth is refused.
+    // Unfolded, each spelling opened a fresh identity holding the whole cap and
+    // all four were admitted at 2 — 8 µ$ authorized against a 5 µ$ budget.
+    const cap = 5;
+    const seen: { reserved: number; ceiling: number | null }[] = [];
+    for (const [i, issueId] of SPELLINGS.entries()) {
+      const runId = `run-fold-${i}`;
+      seedRecord(runId);
+      const d = ledger.admitIssue({ repoSlug: "qds/demo", issueId, runId, requestId: `req-fold-${i}` }, cap, 2);
+      seen.push({
+        reserved: d.reservedMicroUsd,
+        ceiling: d.admitted ? d.admittedCeilingMicroUsd : null,
+      });
+    }
+    expect(seen).toEqual([
+      { reserved: 0, ceiling: 2 },
+      { reserved: 2, ceiling: 2 },
+      { reserved: 4, ceiling: 1 }, // clamped by the headroom, not by the key cap
+      { reserved: 5, ceiling: null }, // committed >= cap ⇒ refused
+    ]);
+  });
+
+  test("capForIssue matches an override written with a `#`-decorated or zero-padded id", () => {
+    const config = { ...DEFAULT_COST_CONFIG, perIssueOverrides: { "qds/demo#042": 9_000_000 } };
+    // The operator padded the key; the brief supplies the bare id (and vice versa).
+    for (const issueId of SPELLINGS) expect(capForIssue(config, "qds/demo", issueId)).toBe(9_000_000);
+    expect(capForIssue({ ...DEFAULT_COST_CONFIG, perIssueOverrides: { "qds/demo#42": 9_000_000 } }, "qds/demo", "042")).toBe(9_000_000);
+    // Not a numeric-prefix match: 420 is a different issue, and `Number` folding
+    // would also have to be watched for ids past 2^53.
+    expect(capForIssue(config, "qds/demo", "420")).toBe(DEFAULT_COST_CONFIG.defaultCapMicroUsd);
+  });
+
+  test("two override keys naming ONE issue are REFUSED at load, never silently resolved", () => {
+    // `capForIssue` returns the first match, so this quietly served 20 USD and
+    // ignored the very line the operator added to lower the cap. Picking the
+    // lower one would be just as wrong — it would ignore a line added to RAISE
+    // it. In a money table the honest answer is to refuse and let them say.
+    const file = join(dir, "dup-override.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        defaultCapMicroUsd: 5_000_000,
+        perIssueOverrides: { "QDS/Demo#42": 20_000_000, "qds/demo#042": 1_000_000 },
+      }),
+    );
+    let err: CostConfigError | undefined;
+    try {
+      loadCostConfig(file);
+    } catch (e) {
+      err = e as CostConfigError;
+    }
+    expect(err?.code).toBe("cost-config-invalid");
+    // BOTH keys named, or the operator cannot tell which two lines collided.
+    expect(err?.message).toContain("QDS/Demo#42");
+    expect(err?.message).toContain("qds/demo#042");
+    // Two keys naming two DIFFERENT issues remain perfectly legal.
+    const ok = join(dir, "two-overrides.json");
+    writeFileSync(ok, JSON.stringify({ perIssueOverrides: { "qds/demo#42": 1, "qds/demo#43": 2 } }));
+    expect(loadCostConfig(ok).config.perIssueOverrides).toEqual({ "qds/demo#42": 1, "qds/demo#43": 2 });
+  });
+});
+
+// ─── admission input / SQL binds ─────────────────────────────────────────────
+
+describe("admitIssue correlation binds (NULL safety)", () => {
+  const cap = 5_000_000;
+
+  test("a missing or non-string correlation key is refused before any query runs", () => {
+    seedRecord("run-a1");
+    const base = { repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" };
+    for (const field of ["repoSlug", "issueId", "runId", "requestId"] as const) {
+      // Each of the three shapes that binds as NULL or as nothing at all.
+      for (const bad of [null, undefined, ""]) {
+        const input = { ...base, [field]: bad } as unknown as Parameters<typeof ledger.admitIssue>[0];
+        let err: CostLedgerError | undefined;
+        try {
+          ledger.admitIssue(input, cap, 50_000_000);
+        } catch (e) {
+          err = e as CostLedgerError;
+        }
+        expect(err?.code).toBe("admission-input-invalid");
+        expect(err?.message).toContain(field);
+      }
+    }
+    // Nothing was written on the way to any of those refusals.
+    const db = rawDb();
+    expect(rowCount(db, "gate_admissions")).toBe(0);
+    db.close();
+  });
+
+  test("the reservation predicate is NULL-safe in the SQL itself, not only via the guard above", () => {
+    // Why this is a source assertion rather than a call: `request_id`/`run_id`
+    // are `TEXT NOT NULL`, so the NULL can only ever arrive from the BIND side —
+    // and the guard above refuses exactly that, so there is no runtime path left
+    // to reach the predicate with one. What is still reachable is a FUTURE
+    // caller added after the guard is moved or relaxed, and with plain `=`
+    // SQLite's three-valued logic makes `NOT (a.request_id = NULL AND …)`
+    // evaluate to NULL for every row: the WHERE drops all of them, every
+    // outstanding reservation vanishes, and the admission is handed the whole
+    // remaining cap on top of every live one. `IS` is what makes the query safe
+    // on its own, so `IS` is what is pinned.
+    const source = readFileSync(new URL("../../src/providers/cost-ledger.ts", import.meta.url), "utf8");
+    const predicate = /NOT \(a\.request_id (\S+) \? AND a\.run_id (\S+) \?\)/.exec(source);
+    expect(predicate).not.toBeNull();
+    expect([predicate?.[1], predicate?.[2]]).toEqual(["IS", "IS"]);
+  });
+});
+
+// ─── replay clamp ────────────────────────────────────────────────────────────
+
+describe("admitIssue replay clamp", () => {
+  test("a replay is clamped to the headroom recomputed NOW, upholding ceiling <= remaining", () => {
+    // The exact scenario: cap 100 µ$, keyCap 10 µ$.
+    const cap = 100;
+    const keyCap = 10;
+    seedRecord("run-a");
+    seedRecord("run-b");
+    const a = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a", requestId: "req-a" }, cap, keyCap);
+    if (!a.admitted) throw new Error(`expected A admitted, got ${a.reason}`);
+    expect(a.admittedCeilingMicroUsd).toBe(10);
+
+    const b = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-b", requestId: "req-b" }, cap, keyCap);
+    expect(b.admitted).toBe(true);
+    // B then reports 95 µ$ of PRICED spend — which also retires B's own
+    // reservation, so the headroom A's replay recomputes is 100 - 95 = 5.
+    ledger.ingestCostEvent(mkEvent({ costUsd: 0.000095 }), mkCtx({ runId: "run-b", requestId: "req-b" }));
+
+    const replay = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a", requestId: "req-a" }, cap, keyCap);
+    if (!replay.admitted) throw new Error(`expected the replay admitted, got ${replay.reason}`);
+    expect(replay.remainingMicroUsd).toBe(5);
+    // 5, not the 10 on the row: handing back the recorded figure raw broke the
+    // `admittedCeilingMicroUsd <= remainingMicroUsd` invariant and gave the mint
+    // a ceiling twice the headroom left. A replay may only ever be authorized
+    // for LESS than its original.
+    expect(replay.admittedCeilingMicroUsd).toBe(5);
+    expect(replay.admittedCeilingMicroUsd).toBeLessThanOrEqual(replay.remainingMicroUsd);
+
+    // The ROW is untouched (INV-COST-1): the cap is still holding the original
+    // 10, so the clamp narrows what is minted, never what is reserved.
+    const db = rawDb();
+    const row = db
+      .prepare("SELECT ceiling_micro_usd AS c FROM gate_admissions WHERE request_id = 'req-a' AND run_id = 'run-a'")
+      .get() as { c: number };
+    expect(row.c).toBe(10);
+    expect(rowCount(db, "gate_admissions")).toBe(2); // no second reservation for A
+    db.close();
+  });
+});
+
+// ─── orphan guard: an UNREADABLE record ──────────────────────────────────────
+
+describe("admitIssue orphan guard (unreadable record)", () => {
+  const cap = 5_000_000;
+  const expiryMs = ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS;
+
+  /** A ledger whose record reader throws for exactly one run id. */
+  function ledgerThatThrowsFor(runId: string): CostLedger {
+    return new CostLedger({
+      path: ledgerPath,
+      readRunRecord: (id) => {
+        if (id === runId) throw new Error("record is 0 bytes");
+        return RECORDS.get(id);
+      },
+      config: { defaultCapMicroUsd: 5_000_000, boxHourRateMicroUsd: 3_600_000 },
+    });
+  }
+
+  test("PAST the grace window an unreadable record EXPIRES the reservation, naming it on the log line", () => {
+    // `undefined` and "cannot be read at all" are the same fact — this run will
+    // never report spend — but only the second one used to wedge the issue
+    // FOREVER: an ungrammatical run_id in gate_admissions, a corrupt record or a
+    // 0-byte one caught mid-create made readRunRecord throw, that throw refused
+    // every future dispatch for the issue, and `gate_admissions_no_delete`
+    // blocked the manual remedy. A permanent refusal is not fail-safe; it is a
+    // wedge with no exit.
+    const throwing = ledgerThatThrowsFor("run-corrupt");
+    try {
+      admitAged("run-corrupt", "rc", 4_000_000, expiryMs * 2, "201");
+      const lines: Record<string, unknown>[] = [];
+      const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+      let d: ReturnType<CostLedger["admitIssue"]>;
+      try {
+        d = throwing.admitIssue({ repoSlug: "qds/demo", issueId: "201", runId: "run-next", requestId: "rn" }, cap, 500_000);
+      } finally {
+        restore();
+      }
+      if (!d.admitted) throw new Error(`expected the wedge to clear, got ${d.reason}`);
+      expect(d.reservedMicroUsd).toBe(0); // expired, not counted
+      // Never silent — an operator has to be able to tell an expiry from a
+      // reservation that simply retired, and needs the run id to go look.
+      const line = lines.find((l) => l.code === "reservation-unresolvable-expired");
+      expect(line).toBeDefined();
+      expect(line?.orphanRunId).toBe("run-corrupt");
+      expect(line?.orphanCeilingMicroUsd).toBe(4_000_000);
+    } finally {
+      throwing.close();
+    }
+  });
+
+  test("a YOUNG unreadable record still refuses the dispatch — fail-closed, unchanged", () => {
+    // Below the cutoff the throw propagates: a young unreadable record is far
+    // more likely a real in-flight dispatch than an orphan, and refusing once is
+    // recoverable where over-granting the cap is not.
+    const throwing = ledgerThatThrowsFor("run-fresh");
+    try {
+      admitAged("run-fresh", "rf", 4_000_000, expiryMs / 2, "202");
+      expect(() =>
+        throwing.admitIssue({ repoSlug: "qds/demo", issueId: "202", runId: "run-next2", requestId: "rn2" }, cap, 500_000),
+      ).toThrow(/record is 0 bytes/);
+      // And nothing was reserved on the way out.
+      const db = rawDb();
+      expect(rowCount(db, "gate_admissions")).toBe(1);
+      db.close();
+    } finally {
+      throwing.close();
+    }
+  });
+});
+
+// ─── key cap validation ──────────────────────────────────────────────────────
+
+describe("admitIssue keyCapMicroUsd validation", () => {
+  test("a non-positive, non-integer or NaN key cap is refused, like the issue cap", () => {
+    // It is the OTHER operand of the `Math.min` that becomes the minted ceiling
+    // and it lands in a STRICT INTEGER column: `-1` returned `admitted: true`
+    // with a NEGATIVE ceiling handed to the mint, and a float or NaN failed at
+    // the INSERT with a bare SQLITE_CONSTRAINT naming nothing.
+    seedRecord("run-a1");
+    for (const keyCap of [-1, Number.NaN, 1.5, 0]) {
+      let err: CostConfigError | undefined;
+      try {
+        ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, 5_000_000, keyCap);
+      } catch (e) {
+        err = e as CostConfigError;
+      }
+      expect(err?.code).toBe("cost-config-invalid");
+      expect(err?.message).toContain("keyCapMicroUsd");
+    }
+    // Refused BEFORE the reservation is written, every time.
+    const db = rawDb();
+    expect(rowCount(db, "gate_admissions")).toBe(0);
+    db.close();
   });
 });

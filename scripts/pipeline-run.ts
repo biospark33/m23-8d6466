@@ -47,6 +47,7 @@ import {
   FileJournal,
   Run,
   loadManifest,
+  readArtifactBeneathRoot,
   sanitizeForMessage,
   walkPhases,
   type PhaseBody,
@@ -206,19 +207,30 @@ function runCommand(
  * `_runTeamManifest`, and DF1.6 raises the harness cap from it. Nothing read it:
  * the context was built from three fields, so the field was `undefined` on every
  * real run and every run spawned at the $0.50 harness default no matter what the
- * dispatcher admitted. Dispatch's `run-context.json` has no consumer at all.
+ * dispatcher admitted. Dispatch's `run-context.json` was read by nothing at all.
  *
- * The MANIFEST is the source, because AC9a already makes it the cap's only
- * in-box carrier: dispatch stamps `limitMicroUsd` with the same
+ * The MANIFEST is the CARRIER, because AC9a already makes it the cap's only
+ * in-box one: dispatch stamps `limitMicroUsd` with the same
  * `effectiveCeilingMicros` it writes to `run-context.json`, `loadManifest` has
  * already validated it as a positive safe integer, and the setup gate refuses
- * the box if it is absent or unspendable. Parsing the JSON file instead would be
- * a second copy of one number, with its own parse, its own failure mode and its
- * own way to disagree with the manifest the gate checked.
+ * the box if it is absent or unspendable. It is not the cap's AUTHORITY, which
+ * is why `run-context.json` is read here rather than ignored — see the
+ * reconciliation note below. Two copies of one number that must agree is the
+ * point: they disagree exactly when one of them was authored.
  *
  * Conditional spread, not `?? undefined`: an unstamped manifest must leave the
  * field ABSENT rather than present-and-undefined — the engine never defaults it
  * to a number, and `"effectiveCeilingMicros" in ctx` is the shape that says so.
+ *
+ * A declared cap is RECONCILED, never trusted on the manifest's word.
+ * `stampManifestLimit`'s stamp and a hand-authored `limitMicroUsd` are
+ * byte-identical in the file, so `loadManifest` cannot tell them apart (and
+ * `manifest.ts` says so). This is the read that promotes the field into a
+ * spend ceiling, so it is the read that must ask for a witness: dispatch writes
+ * `run-context.json` beside `pipeline.yaml` carrying the SAME admitted
+ * `effectiveCeilingMicros`, and the two must agree. No witness, an unreadable
+ * one, or a disagreement is a refusal — an authored manifest cannot raise
+ * DF1.6's harness cap by naming a number.
  *
  * Exported for its test: the field appears in no journal row and no terminal
  * marker, so a spawned end-to-end run has nothing to assert on.
@@ -227,15 +239,45 @@ export function runContextFrom(
   runId: string,
   requestId: string,
   manifest: { pipelineId: string; limitMicroUsd?: number },
+  witness: { manifestPath: string; runRoot: string },
 ): RunContext {
-  return {
-    runId,
-    pipelineId: manifest.pipelineId,
-    requestId,
-    ...(manifest.limitMicroUsd === undefined
-      ? {}
-      : { effectiveCeilingMicros: manifest.limitMicroUsd }),
-  };
+  const ctx: RunContext = { runId, pipelineId: manifest.pipelineId, requestId };
+  if (manifest.limitMicroUsd === undefined) return ctx;
+  const admitted = admittedCeilingBeside(witness.manifestPath, witness.runRoot);
+  if (admitted !== manifest.limitMicroUsd) {
+    throw new Error(
+      `manifest declares limitMicroUsd ${manifest.limitMicroUsd} but dispatch admitted ${admitted}`,
+    );
+  }
+  return { ...ctx, effectiveCeilingMicros: manifest.limitMicroUsd };
+}
+
+/**
+ * The admitted ceiling dispatch recorded beside the manifest it stamped.
+ *
+ * Read through `readArtifactBeneathRoot` — the same hardened four-step walk the
+ * manifest itself came through (realpath → beneath-root re-assert → `O_NOFOLLOW`
+ * open + fd-path verification → read through the descriptor), with the same size
+ * ceiling. A second, weaker reader for the file that vouches for the cap would
+ * be the one worth attacking.
+ */
+function admittedCeilingBeside(manifestPath: string, runRoot: string): number {
+  const witnessPath = path.join(path.dirname(manifestPath), "run-context.json");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readArtifactBeneathRoot(witnessPath, runRoot).bytes.toString("utf8"));
+  } catch (err) {
+    throw new Error(
+      `manifest declares limitMicroUsd but its dispatch witness ${witnessPath} is unreadable: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const admitted = (parsed as { effectiveCeilingMicros?: unknown } | null)?.effectiveCeilingMicros;
+  if (!Number.isSafeInteger(admitted) || (admitted as number) <= 0) {
+    throw new Error(
+      `manifest declares limitMicroUsd but ${witnessPath} carries no positive integer effectiveCeilingMicros`,
+    );
+  }
+  return admitted as number;
 }
 
 /**
@@ -450,7 +492,7 @@ async function main(argv: readonly string[]): Promise<number> {
   if (budgetMs === undefined) throw new Error("--budget-ms is required");
   if (!journalPath) throw new Error("--journal is required");
 
-  const { manifest, manifestLoadMs } = loadManifest(manifestPath, budgetMs, runRoot);
+  const { manifest, manifestLoadMs, resolvedPath } = loadManifest(manifestPath, budgetMs, runRoot);
 
   // DF1.8: the marker root is derived before anything can refuse — a
   // correlation failure can precede the trace claim entirely, and its dispatch
@@ -636,7 +678,14 @@ async function main(argv: readonly string[]): Promise<number> {
 
   // DF1.4: Wrap FileJournal with TracingJournal
   const innerJournal = new FileJournal(journalPath, runId);
-  const ctx: RunContext = runContextFrom(runId, requestId, manifest);
+  // The witness is looked for beside the manifest we actually READ — the
+  // verified realpath, not the argv string, so a symlinked `--manifest` cannot
+  // point the cap check at a different directory's run-context.json.
+  // (`loadManifest` always returns it; the `??` is for the optional type.)
+  const ctx: RunContext = runContextFrom(runId, requestId, manifest, {
+    manifestPath: resolvedPath ?? manifestPath,
+    runRoot,
+  });
   const journal = new TracingJournal(innerJournal, tracer, ctx);
 
   const run = new Run({

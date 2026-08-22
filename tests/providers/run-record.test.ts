@@ -394,11 +394,13 @@ describe("list (AC3, INV-4)", () => {
     expect(() => store.list()).toThrow(/malformed run record run-bad-ts\.json.*createdAt/);
   });
 
-  test("a .json whose name is not a valid run id is REPORTED, not fatal to the whole listing", () => {
-    // Not a name this store could ever have written, and no verb can act on it.
-    // Throwing for it took `list()` — `fleet status`, the DF2.6 reaper's record
-    // sweep — down for the entire directory, which is a bigger INV-4 violation
-    // than the one file. It is named on the log line instead of vanishing.
+  test("a .json whose name is not a valid run id makes list() REFUSE, and is named on the log line", () => {
+    // `list()` returns a bare `RunRecord[]` with no channel for "and there was
+    // also this". Returning the short list was fail-OPEN, and `reapRuns` builds
+    // its claim set from exactly this call: a skipped `.json` holding an open
+    // record with a `vmName` drops that box out of `claimed` and the reaper
+    // destroys a LIVE box. So the incomplete listing is refused outright, and a
+    // caller that can handle the gap asks `listWithAnomalies()` for it instead.
     store.create("run-good");
     writeFileSync(join(dir, "Bad Name.json"), JSON.stringify({ runId: "x", createdAt: "y" }), { mode: 0o600 });
     const lines: Record<string, unknown>[] = [];
@@ -406,7 +408,7 @@ describe("list (AC3, INV-4)", () => {
       lines.push(e as unknown as Record<string, unknown>);
     });
     try {
-      expect(store.list().map((r) => r.runId)).toEqual(["run-good"]);
+      expect(() => store.list()).toThrow(/Bad Name\.json/);
     } finally {
       restore();
     }

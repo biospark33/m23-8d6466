@@ -20,7 +20,7 @@ import { assertValidRunId } from "./run-record.ts";
 import { checkHeadroom, HeadroomRefusedError, loadQuotaLimits } from "./quota.ts";
 import { CostLedger } from "./cost-ledger.ts";
 import { assertWithinBudget } from "./budget-gate.ts";
-import { withTimeout } from "./timeout.ts";
+import { TimeoutError, withTimeout } from "./timeout.ts";
 
 /**
  * Create-time provenance marker (DF2.6 D1): every factory-provisioned VM is
@@ -84,6 +84,24 @@ export interface ExecResult {
 }
 
 /**
+ * What a provider listing reported, and what it refused to name — the
+ * driver-side twin of `RunRecordListing` (run-record.ts), and for the same
+ * reason: a skipped box is not an absent box, and a caller that cannot tell
+ * the two apart fails OPEN.
+ *
+ * `reapRuns` destroys every box no OPEN record claims. A box the driver
+ * dropped from `list()` — FakeDriver drops a directory whose name is outside
+ * the box grammar, and logs it — is indistinguishable there from a box that
+ * does not exist, so it is spend nobody can see and nobody can reap. A log
+ * line cannot prevent that; a value in the return can.
+ */
+export interface ProviderVmListing {
+  vms: ProviderVm[];
+  /** Box identifiers the driver refused to report, in listing order. */
+  skipped: string[];
+}
+
+/**
  * The eight provider primitives. Everything above this interface is
  * substrate-independent by construction.
  *
@@ -112,6 +130,16 @@ export interface ProviderDriver {
   readonly name: string;
   create(name: string, tag?: string): Promise<ProviderVm>;
   list(name?: string): Promise<ProviderVm[]>;
+  /**
+   * `list()`, plus what it refused to name (see `ProviderVmListing`).
+   *
+   * OPTIONAL, because it is additive to a shipped seam and a driver that
+   * skips nothing has nothing to report. Read it through `driverListing`
+   * below, never directly — a driver without it answers "no anomalies", which
+   * is honest only for a `list()` that cannot skip. A driver whose `list()`
+   * DOES drop entries must implement this, or its drops stay invisible.
+   */
+  listWithAnomalies?(name?: string): Promise<ProviderVmListing>;
   /** Idempotent (teardown and reap both retry; a missing box is the goal
    * state). Kills the box's processes — FakeDriver kills each exec's whole
    * process group, settling its in-flight execs; whether OTHER drivers'
@@ -186,6 +214,55 @@ export interface ProvisionAdmittedRunOptions {
    * wait out the production value.
    */
   actionTimeoutMs?: number;
+}
+
+/**
+ * The driver listing plus its anomalies, for callers that must prove the box
+ * population complete before acting on it. A driver that predates the channel
+ * reports none — see `ProviderDriver.listWithAnomalies` for why that is a
+ * claim only some drivers may make.
+ */
+export async function driverListing(driver: ProviderDriver, name?: string): Promise<ProviderVmListing> {
+  if (driver.listWithAnomalies !== undefined) return driver.listWithAnomalies(name);
+  return { vms: await driver.list(name), skipped: [] };
+}
+
+/**
+ * One bounded provider call in the provisioning sequence, with the TIMEOUT
+ * classified.
+ *
+ * `withTimeout` refuses with a `TimeoutError`, which carries no `code` and no
+ * `remediation` — the exact unclassified shape `ProvisionRefusedError` exists
+ * to prevent. The fleet CLI's failure payload reads `code` and `remediation`
+ * off the thrown value (`providerCodePayload`/`errorRemediation` in
+ * `src/fleet/dispatch.ts`), so a bare one reaches an operator as exit-1
+ * "provisioning failed" naming no cause — while a box may be live, the record
+ * is OPEN and the issue's reservation is still counting against its cap. That
+ * is precisely the state an operator needs told, by name.
+ *
+ * The driver's OWN refusals pass through untouched: they already carry both
+ * fields (`ExeDevDriverError`), and rewrapping them would replace the
+ * substrate's diagnosis with ours.
+ */
+async function provisionStep<T>(
+  p: Promise<T>,
+  ms: number,
+  what: string,
+  code: string,
+  remediation: string,
+): Promise<T> {
+  try {
+    return await withTimeout(p, ms, what);
+  } catch (e) {
+    if (e instanceof TimeoutError) {
+      throw new ProvisionRefusedError(
+        code,
+        `${e.message} — the call was ABANDONED, not cancelled: the provider may still have acted on it`,
+        remediation,
+      );
+    }
+    throw e;
+  }
 }
 
 /**
@@ -315,10 +392,12 @@ export async function provisionAdmittedRun(
   // to it — `teardownRun` falls back to the run id, which is what the box is
   // named after.
   const actionTimeoutMs = opts.actionTimeoutMs ?? PROVISION_ACTION_TIMEOUT_MS;
-  const vm: ProviderVm = await withTimeout(
+  const vm: ProviderVm = await provisionStep(
     driver.create(opts.runId, SBX_OWNERSHIP_TAG),
     actionTimeoutMs,
     `driver.create(${opts.runId})`,
+    "provider-timeout-create",
+    `check the provider for a box named ${opts.runId} before assuming nothing was created, then tear the run down: bun scripts/fleet.ts teardown ${opts.runId}`,
   );
   // vmName BEFORE expose/setPublic. Both can throw against a box that is
   // already live and already billing; until the name is on the record the
@@ -338,26 +417,45 @@ export async function provisionAdmittedRun(
     // `result.httpsUrl` and a URL off `result.record.httpsUrl`. Both keep the
     // create-time value instead: "clear both" is not available, so they agree
     // on the only value either of them can hold.
-    const exposed: string | undefined = await withTimeout(
+    const exposed: string | undefined = await provisionStep(
       driver.expose(vm.name, opts.port),
       actionTimeoutMs,
       `driver.expose(${vm.name}:${opts.port})`,
+      "provider-timeout-expose",
+      `the box ${vm.name} is live and billing — tear the run down: bun scripts/fleet.ts teardown ${opts.runId}`,
     );
     httpsUrl = exposed ?? httpsUrl;
+    // Fail-safe before the box is made PUBLIC: with no URL from either call,
+    // nothing records how to reach it. The conditional spread below would
+    // write nothing, `setLocked` skips an undefined value and has no way to
+    // unset one later, so the record would carry a port and no address — and
+    // `setPublic` would still run, leaving a publicly-reachable box only the
+    // provider knows the address of. Refusing here leaves the box exposed but
+    // NOT public, with an open record naming it, which teardown can reach.
+    if (httpsUrl === undefined) {
+      throw new ProvisionRefusedError(
+        "expose-no-url",
+        `driver ${driver.name} exposed ${vm.name}:${opts.port} without reporting a URL and create reported none either — refusing to make the box public with no address recorded`,
+        `tear the run down: bun scripts/fleet.ts teardown ${opts.runId} (the box is exposed but was NOT made public)`,
+      );
+    }
     // Persisted BEFORE setPublic, by the same reasoning as vmName above:
     // setPublic can throw against a box that is already exposed and already
     // billing, and until the URL and port are on the record nothing but the
     // provider knows what the box is reachable on.
     //
-    // Conditional spread, matching the first `store.set` above. `setLocked`
-    // does skip an explicitly-undefined value rather than validating it, so
-    // this is belt-and-braces — but the shape must not diverge between the two
-    // writes, or the next reader has to go and check which one is load-bearing.
-    record = store.set(opts.runId, {
-      ports: [opts.port],
-      ...(httpsUrl === undefined ? {} : { httpsUrl }),
-    });
-    await withTimeout(driver.setPublic(vm.name), actionTimeoutMs, `driver.setPublic(${vm.name})`);
+    // Unconditional, unlike the first `store.set` above: the refusal directly
+    // overhead has already proven `httpsUrl` is a string here, and that proof
+    // is the whole point — the port and the address land together or the box
+    // never becomes public.
+    record = store.set(opts.runId, { ports: [opts.port], httpsUrl });
+    await provisionStep(
+      driver.setPublic(vm.name),
+      actionTimeoutMs,
+      `driver.setPublic(${vm.name})`,
+      "provider-timeout-set-public",
+      `the box ${vm.name} is live and may or may not have been made public — tear the run down: bun scripts/fleet.ts teardown ${opts.runId}`,
+    );
   }
   return { record, vm, ...(httpsUrl === undefined ? {} : { httpsUrl }) };
 }
@@ -666,13 +764,32 @@ export async function reapRuns(driver: ProviderDriver, store: RunRecordStore): P
   // fail-safe here; the skip is fail-OPEN, so the completeness has to be proven
   // on this side.
   //
-  // `listWithAnomalies`, not `list`: the skipped filenames are the whole point
-  // here, and they are what the refusal names for the operator.
-  const vms = await driver.list();
+  // `listWithAnomalies`, not `list`, on BOTH sides: the skipped names are the
+  // whole point here, and they are what the refusals name for the operator.
+  //
+  // The driver side needs the same proof for the same reason. `driver.list()`
+  // has no anomaly channel of its own, so a box the driver refused to name was
+  // indistinguishable from a box that does not exist — and this function
+  // destroys every box it cannot match to an open record. It never destroyed
+  // the skipped box (it never saw it), but it also never reported it: that is
+  // a live box no verb can reach, spending against nobody's cap, which is the
+  // unowned-spend case INV-4 exists to prevent. A population that cannot be
+  // proven complete is never reaped from.
+  const vmListing = await driverListing(driver);
+  if (vmListing.skipped.length > 0) {
+    throw new ProvisionRefusedError(
+      "reap-vms-unverified",
+      `refusing to reap: driver ${driver.name} skipped ${vmListing.skipped.length} box(es) in its listing (${vmListing.skipped.join(", ")}), so the box population cannot be proven complete`,
+      "rename or destroy the boxes named above by hand, then re-run — a skipped box is a live box no verb can reach",
+    );
+  }
+  const vms = vmListing.vms;
   const listing = store.listWithAnomalies();
   if (listing.skipped.length > 0) {
-    throw new Error(
-      `refusing to reap: ${listing.skipped.length} run record file(s) in ${store.dir} were skipped by the record listing (${listing.skipped.join(", ")}), so no box can be proven unclaimed — rename or move them, then re-run`,
+    throw new ProvisionRefusedError(
+      "reap-records-unverified",
+      `refusing to reap: ${listing.skipped.length} run record file(s) in ${store.dir} were skipped by the record listing (${listing.skipped.join(", ")}), so no box can be proven unclaimed`,
+      `rename or move the record files named above out of ${store.dir}, then re-run`,
     );
   }
   const claimed = new Set<string>();

@@ -235,6 +235,18 @@ export const LOCK_TIMEOUT_MS = 5_000;
  */
 const LOCK_IMMEDIATE_RETRIES = 8;
 
+/**
+ * Lock paths this JS thread is currently inside.
+ *
+ * Module state, so it is per-THREAD by construction — a `node:worker_threads` /
+ * `Bun.Worker` sibling gets its own module instance and its own set. That is
+ * exactly the granularity `stealIfOwnerGone` cannot get from the pid: both a
+ * sibling thread and a re-entrant `set()` from the `beforeRename` seam present
+ * as "our pid, not our body", and only one of them is the caller deadlocking
+ * against itself. Diagnostic only — the wait stays fail-closed either way.
+ */
+const heldLocks = new Set<string>();
+
 export function assertValidRunId(id: unknown): asserts id is string {
   if (typeof id !== "string" || id.length === 0 || id.length > RUN_ID_MAX || !RUN_ID_RE.test(id)) {
     throw new Error(
@@ -272,7 +284,7 @@ export function newId(slug: string, now: Date = new Date()): string {
  * refuses — a second copy is a list that drifts, and the half that drifts is
  * the half that leaks.
  */
-export const SECRET_PREFIXES = [
+export const SECRET_PREFIXES: readonly string[] = Object.freeze([
   "sk-",
   "sk_live_",
   "sk_test_",
@@ -284,7 +296,10 @@ export const SECRET_PREFIXES = [
   "AKIA",
   "ASIA",
   "-----BEGIN",
-];
+  // Frozen, not just `readonly`: this is INV-2's guard list, and `readonly` is
+  // a compile-time claim an importer erases with one `as string[]`. A `splice()`
+  // here empties the prefix scan for the rest of the process.
+]);
 
 /**
  * Field paths the LENGTH+mixed-class heuristic below does not apply to, because
@@ -312,9 +327,21 @@ const SHAPE_EXEMPT_PATHS: ReadonlySet<string> = new Set([
   "keyHash",
   // Both are validated against their own grammar by BriefSchema before they
   // ever reach the record, and both are written AFTER the box exists.
-  "extensions.budget.repoSlug",
-  "extensions.budget.issueId",
+  extPath("budget", "repoSlug"),
+  extPath("budget", "issueId"),
 ]);
+
+/**
+ * The ONE spelling of an extension field's path. `validateExtensions` builds
+ * `assertNoSecret`'s key with it and `SHAPE_EXEMPT_PATHS` is keyed with it, so
+ * the exempt set cannot drift out of the format the caller actually produces —
+ * a set written as literal `extensions.budget.repoSlug` while the caller passed
+ * `budget.repoSlug` looks correct and exempts nothing, which is the production
+ * incident above still live.
+ */
+function extPath(ns: string, field: string): string {
+  return `extensions.${ns}.${field}`;
+}
 
 /**
  * ponytail: prefix list + a mixed-class long-token heuristic, not an entropy
@@ -434,9 +461,9 @@ function validateExtensions(
         continue;
       }
       const kind = Object.hasOwn(spec.fields, field) ? spec.fields[field] : undefined;
-      if (!kind) throw new Error(`unknown key: extensions.${ns}.${field}`);
-      assertKind(`extensions.${ns}.${field}`, kind, value);
-      assertNoSecret(`extensions.${ns}.${field}`, value);
+      if (!kind) throw new Error(`unknown key: ${extPath(ns, field)}`);
+      assertKind(extPath(ns, field), kind, value);
+      assertNoSecret(extPath(ns, field), value);
       entry[field] = value as string | number;
     }
     merged[ns] = entry;
@@ -516,7 +543,7 @@ export const DEFAULT_RUNS_DIR = ".sandbox/runs";
 /** What a directory sweep read, and what it refused to read (see `listWithAnomalies`). */
 export interface RunRecordListing {
   records: RunRecord[];
-  /** Filenames skipped because the stem is not a run id, in directory order. */
+  /** Filenames skipped because the stem is not a run id, sorted (`readdir` is sorted first). */
   skipped: string[];
 }
 
@@ -605,8 +632,9 @@ export class RunRecordStore {
    * constructed per CLI invocation, so an unconditional sweep would delete a
    * concurrent `set`'s in-flight temp and lose that mutation — the owner pid is
    * encoded in the temp name precisely so this stays safe under concurrency.
-   * ponytail: pid reuse could spare a stale temp; it is swept by the next
-   * construction that sees the pid gone, and a stray temp is inert either way.
+   * ponytail: pid reuse — and our own pid — can spare a stale temp; it is swept
+   * by the next construction whose pid differs and sees the owner gone, and a
+   * stray temp is inert either way.
    */
   private cleanStaleTemps(): void {
     for (const name of readdirSync(this.dir)) {
@@ -622,7 +650,16 @@ export class RunRecordStore {
       // `owner > 0`, not just `Number.isInteger`: `process.kill(0, 0)` signals the
       // caller's own process group and succeeds, so an owner that parsed as `0`
       // would read as permanently alive and the temp would never be swept.
-      if (Number.isInteger(owner) && owner > 0 && owner !== process.pid && isAlive(owner)) continue;
+      //
+      // OUR OWN pid is spared, not swept. Two JS threads
+      // (`node:worker_threads` / `Bun.Worker`) share `process.pid` — the exact
+      // configuration `stealIfOwnerGone`'s docstring reasons about — so a
+      // same-pid temp can be a sibling thread's in-flight `set()` temp, or a
+      // lock body it is holding aside mid-steal. Deleting either destroys a
+      // live claim: the temp loses that mutation, the held-aside body destroys
+      // a lock a live holder is still inside, which is the lost update
+      // `putBack` promises never to cause.
+      if (Number.isInteger(owner) && owner > 0 && (owner === process.pid || isAlive(owner))) continue;
       rmSync(join(this.dir, name), { force: true });
     }
   }
@@ -671,6 +708,10 @@ export class RunRecordStore {
       // writeFileSync loops until the whole buffer lands; a bare writeSync can
       // short-write and leave a truncated record reported as a success.
       writeFileSync(fd, serialize(rec));
+      // INV-1's whole point is that this record reaches disk BEFORE any
+      // billable infrastructure exists. Unsynced, a power loss here loses the
+      // handle while the provider-side box survives — an orphan nobody reaps.
+      fsyncSync(fd);
     } catch (e) {
       closeSync(fd);
       rmSync(p, { force: true });
@@ -746,16 +787,27 @@ export class RunRecordStore {
    * unreadable record throws naming the file — it is never skipped, because a
    * record quietly dropped is a key that quietly keeps spending.
    *
-   * The one exception is a filename outside even the LEGACY id grammar: that is
-   * not a record this store could ever have written, no verb can act on it, and
-   * throwing for it took the whole directory down — `fleet status` and the DF2.6
-   * reaper's record sweep return nothing at all, which is a bigger INV-4
-   * violation than the one file. It is reported on the log line AND in
-   * `listWithAnomalies().skipped` — see there for why the log line alone is not
-   * enough.
+   * A filename outside even the LEGACY id grammar is the one file this store
+   * can neither read nor act on. It is not thrown from the SWEEP — that took
+   * the whole directory down over one file — but it is thrown from HERE, at the
+   * accessor that returns records with no channel to report the anomaly on. A
+   * caller holding a bare `RunRecord[]` cannot tell "no such box" from "a box
+   * behind a file I refused to read", and `reapRuns` destroys every box not in
+   * that set. So the plain array is only ever handed back when it is COMPLETE.
+   *
+   * A caller that can act on the anomaly calls `listWithAnomalies()` and gets
+   * both halves; a caller that cannot gets an error naming the files. Neither
+   * one silently drops a live box. The skip is also on the log line, but a log
+   * line cannot make a caller fail safe.
    */
   list(): RunRecord[] {
-    return this.listWithAnomalies().records;
+    const { records, skipped } = this.listWithAnomalies();
+    if (skipped.length > 0) {
+      throw new Error(
+        `refusing to return a partial run record listing from ${this.dir}: ${skipped.length} file(s) could not be read as a record (${skipped.join(", ")}) — use listWithAnomalies() to handle them, or repair/remove the files named`,
+      );
+    }
+    return records;
   }
 
   /**
@@ -771,8 +823,11 @@ export class RunRecordStore {
    * direction: "3 runs" and "3 runs and one record I refused to read" must not
    * render identically.
    *
-   * `list()` keeps returning the bare array for the callers that genuinely only
-   * want records — the anomaly is opt-in to read, not opt-in to produce.
+   * This is the only accessor that hands back a partial listing, and it hands
+   * back the reason it is partial in the same value. `list()` throws instead —
+   * safety is the DEFAULT, and reading the anomaly is what a caller opts INTO.
+   * The other way round, every caller written before this pair existed keeps
+   * its old `RunRecord[]` call site and silently inherits fail-open.
    */
   listWithAnomalies(): RunRecordListing {
     return this.traced(null, "list", () => this.listUnlogged());
@@ -843,9 +898,11 @@ export class RunRecordStore {
         sleepMs(5);
       }
     }
+    heldLocks.add(lock);
     try {
       return fn();
     } finally {
+      heldLocks.delete(lock);
       this.releaseLock(lock, body);
     }
   }
@@ -890,11 +947,17 @@ export class RunRecordStore {
     } catch (e) {
       // Guarded, not try/catch'd: fd numbers are recycled (see atomicReplace).
       if (fdOpen) closeSync(fd);
-      rmSync(tmp, { force: true });
+      rmQuiet(tmp);
       if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
       throw e;
     }
-    rmSync(tmp, { force: true });
+    // The lock is CLAIMED by the time we get here, so nothing this cleanup does
+    // may escape: a throw from the `rm` (EACCES/EPERM/EBUSY on the temp) leaves
+    // before `withLock` enters the `try/finally` that releases the lock, so the
+    // lock stays on disk with this process alive and every contender waits the
+    // full LOCK_TIMEOUT_MS. The temp is pid-stamped, so leaving it costs a
+    // sweep at the next construction — nothing more.
+    rmQuiet(tmp);
     return true;
   }
 
@@ -954,7 +1017,18 @@ export class RunRecordStore {
     // See cleanStaleTemps: an owner that parsed as `0` must not read as alive.
     // Unparseable, empty or non-positive ⇒ held, wait — never stolen.
     if (!Number.isInteger(owner) || owner <= 0) return "lock body names no pid";
-    if (owner === process.pid ? raw !== body : isAlive(owner)) return "held by a live owner";
+    if (owner === process.pid ? raw !== body : isAlive(owner)) {
+      // Our pid, not our body, and THIS thread already holds the path: the
+      // caller is waiting on itself — a re-entrant `set()` from the
+      // `beforeRename` seam. Fail-closed is still right (there is no safe way
+      // to hand a live holder its own lock), but reporting it as a sibling
+      // writer sent an operator looking for a second process that never
+      // existed. A sibling thread sharing our pid is NOT in this set.
+      if (owner === process.pid && heldLocks.has(lock)) {
+        return "re-entrant record write: this thread already holds this lock";
+      }
+      return "held by a live owner";
+    }
     this.beforeStealTake?.(lock);
     // `.tmp`-suffixed and pid-stamped so a death between the take and the
     // unlink cannot strand the generation: cleanStaleTemps sweeps it at the
@@ -962,8 +1036,16 @@ export class RunRecordStore {
     const claimed = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     try {
       renameSync(lock, claimed);
-    } catch {
-      return null; // gone: the path is free, so retry the claim immediately
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      // ENOENT alone proves the path is free — the corpse was cleared between
+      // the judgement and the take, so the claim can be retried immediately.
+      // EACCES/EROFS/EIO prove nothing of the sort: reporting "free" made
+      // `withLock` retry with NO sleep and never update `heldReason`, so the
+      // eventual timeout said `(contended)` and sent the operator hunting a
+      // phantom writer. Same hardening as the `readFileSync` arm above.
+      if (code === "ENOENT") return null;
+      return `lock untakeable: ${code ?? (e as Error).message}`;
     }
     this.afterLockTake?.(claimed);
     let onDisk: string | undefined;
@@ -1037,8 +1119,17 @@ export class RunRecordStore {
       // Not ours (stolen, cleared by hand, already replaced) — or unreadable,
       // which is not a body we can prove anything about. Either way: hands off.
       if (readFileSync(lock, "utf8") !== body) return;
-    } catch {
-      return; // already gone
+    } catch (e) {
+      // ENOENT alone is "already gone". Treating EVERY read failure as gone
+      // left a lock on disk naming THIS process's live pid, which
+      // `stealIfOwnerGone` scores `owner === process.pid && raw !== body` ⇒
+      // "held by a live owner" — unstealable by us, unstealable by anyone, for
+      // the rest of the process lifetime. The record is then unwritable and
+      // unclosable while the box bills. Any other errno proves nothing about
+      // the body, so fall through to the take-then-compare below, which puts
+      // back whatever it cannot prove is ours. Same hardening as
+      // `stealIfOwnerGone`'s `readFileSync` arm.
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
     }
     const claimed = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     try {
@@ -1088,12 +1179,23 @@ export class RunRecordStore {
     let fdOpen = true;
     try {
       writeFileSync(fd, serialize(rec));
+      // The RECORD is the durable artifact — it is the one file carrying
+      // `keyHash` and `vmName`, and a truncated one makes `readRecord` throw
+      // for that run forever, which is a key nobody can revoke. The ephemeral
+      // lock was fsynced (`claimLock`) and this was not: exactly inverted.
+      fsyncSync(fd);
       // Cleared BEFORE the call — see claimLock: a throwing close still
       // consumes the descriptor, so the catch must not close it again.
       fdOpen = false;
       closeSync(fd);
       this.beforeRename?.(tmp);
       renameSync(tmp, p);
+      // ponytail: the FILE is fsynced, the directory entry is not. A power loss
+      // in this window loses the rename, not the bytes — the record reverts to
+      // its prior complete contents, never a truncated one, which is the
+      // failure INV-3 actually cares about. An `opendir`+`fsync` here costs a
+      // second synchronous flush on every `set()`/`close()`; add it if a crash
+      // is ever observed losing a mutation that was reported committed.
     } catch (e) {
       // Guarded, not try/catch'd: fd numbers are recycled, and `beforeRename`
       // may have opened something else by the time we land here.
@@ -1172,6 +1274,19 @@ function putBack(claimed: string, lock: string): boolean {
     return true;
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === "EEXIST";
+  }
+}
+
+/**
+ * `rm -f` that cannot throw. Used where the removal is pure hygiene and the
+ * caller is past the point where failing is safe — a leftover is pid-stamped,
+ * so `cleanStaleTemps` really does sweep it once this process is gone.
+ */
+function rmQuiet(p: string): void {
+  try {
+    rmSync(p, { force: true });
+  } catch {
+    // Nothing to do and nothing at risk: the file is inert and pid-stamped.
   }
 }
 

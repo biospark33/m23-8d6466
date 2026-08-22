@@ -11,10 +11,14 @@
  *
  * Lock body: `<pid> <host> <createdAt-ISO> <nonce>`. The host field is what
  * makes the pid meaningful: `kill(pid, 0)` answers about THIS host's process
- * table, and a shared runs directory (an NFS mount, a bind-mounted volume, a CI
- * runner and a laptop) makes that answer about a stranger. Bodies written
- * before the field existed are `<pid> <ISO> <nonce>` and still parse — the
- * field that looks like an ISO timestamp tells the two layouts apart.
+ * table (and about this PID NAMESPACE's — see `lockHost`), and a shared runs
+ * directory (an NFS mount, a bind-mounted volume, a CI runner and a laptop)
+ * makes that answer about a stranger. Bodies written before the field existed
+ * are `<pid> <ISO> <nonce>` and still parse — the field that looks like an ISO
+ * timestamp tells the two layouts apart — but they parse to an UNKNOWN host,
+ * which is treated as foreign: their pid is never probed and they are never
+ * marked stale. Back-compat that opted old bodies out of the guard would
+ * re-open the very bug the guard was added for.
  */
 
 import { randomBytes } from "node:crypto";
@@ -25,13 +29,14 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   renameSync,
   rmSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { assertValidRunId } from "../../src/providers/run-record.ts";
 
@@ -79,9 +84,41 @@ export class RunLockReentrantError extends Error {
  */
 const held = new Map<string, string>();
 
-/** This host's name, with whitespace folded — the body is whitespace-delimited. */
+/**
+ * The identity `kill(pid, 0)` is actually scoped to, with whitespace folded —
+ * the body is whitespace-delimited.
+ *
+ * A HOSTNAME IS NOT A PROCESS-TABLE IDENTITY. Two containers with the same
+ * pinned `--hostname` sharing a bind-mounted runs directory each probe their
+ * OWN pid namespace for the other's pid, read a live holder as dead, and print
+ * `rm <lock>` for it — the double teardown, via the guard that exists to
+ * prevent it. The pid namespace's inode is what the probe is really about, so
+ * it goes in the token wherever the kernel exposes it.
+ *
+ * Locks written by an older build carry the bare hostname and therefore no
+ * longer match — which is the fail-closed answer: `refuse` classifies a host it
+ * cannot match as "liveness unknown from here" and never marks it stale.
+ */
 function lockHost(): string {
-  return hostname().replace(/\s+/g, "_") || "unknown-host";
+  const host = hostname().replace(/\s+/g, "_") || "unknown-host";
+  try {
+    // "pid:[4026531836]" → "4026531836". Linux only; on macOS/BSD there is no
+    // pid-namespace ambiguity for it to disambiguate.
+    const ns = readlinkSync("/proc/self/ns/pid").replace(/\D/g, "");
+    return ns === "" ? host : `${host}/${ns}`;
+  } catch {
+    return host;
+  }
+}
+
+/**
+ * `lockHost()` folded to a filename-safe token. Temp files carry it because
+ * their pid is otherwise unqualified: `reapStaleTemps` probes THIS host's
+ * process table, and on a shared runs directory that made it delete a remote
+ * invocation's in-flight temp between its `fsync` and its `linkSync`.
+ */
+function hostTag(): string {
+  return lockHost().replace(/[^A-Za-z0-9_-]/g, "_");
 }
 
 /**
@@ -90,13 +127,21 @@ function lockHost(): string {
  * Duplicated rather than imported because that copy is module-private.
  *
  * Host-local by construction — only ever called for a body this host wrote.
+ *
+ * FAILS CLOSED: a pid this cannot PROVE dead is alive. `process.kill(1e11, 0)`
+ * throws `ERR_OUT_OF_RANGE` — not an errno at all — and pid 0 signals the whole
+ * process group, so both used to answer "not running" and send the operator to
+ * `rm` a live holder's lock. ESRCH is the only proof of death there is; every
+ * other outcome (EPERM, a range error, an errno this runtime invents) is a
+ * failure to answer, and the rest of this module fails closed on exactly that.
  */
 function isAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0 || pid > 0x7fff_ffff) return true;
   try {
     process.kill(pid, 0);
     return true;
   } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM";
+    return (e as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 
@@ -115,15 +160,30 @@ function fsyncDir(dir: string): void {
 }
 
 let signalsInstalled = false;
+let unwinding = false;
 
 /**
  * One Ctrl-C during teardown used to leave the lock on disk forever: every
  * later harvest/teardown of that run refused while the box and the API key
- * stayed live and billing. Release on the way out, then re-raise the signal so
- * the process still dies of what killed it (exit status 128+n, not 0).
+ * stayed live and billing. Release on the way out — EXCEPT past
+ * `markRunLockDestructive`, see `releaseHeldRunLocks` — then exit with the
+ * status the signal earned (128+n, not 0).
  *
- * `process.once` makes this idempotent — the handler is gone before the
- * re-raise, so the second delivery takes the default action.
+ * `removeAllListeners`, not `process.once`'s implicit removal. `once` removed
+ * only OUR handler and then re-raised, which relies on the default TERMINATE
+ * disposition applying — and it does not while ANY other listener for that
+ * signal is still registered (a test runner, an embedder, a wrapper). The
+ * signal was swallowed there, with the lock already unlinked and the teardown
+ * still in flight. Clearing every listener restores the default disposition, so
+ * the re-raise really does kill the process — `process.exit(128+n)` would look
+ * the same to a shell but reports a clean exit rather than a death by signal,
+ * and `signalCode` is what the callers of a killed CLI actually read.
+ *
+ * `process.on` plus the `unwinding` latch, not `once`: the handler stays
+ * registered until a signal actually arrives, so a SECOND acquire after an
+ * earlier signal is still covered (`signalsInstalled` latches, so `once` left
+ * that lock with no handler at all), and the latch keeps a second delivery
+ * mid-release from re-entering.
  *
  * SIGHUP and SIGQUIT are in the list for the same reason SIGINT is: their
  * default disposition TERMINATES, and a dropped ssh session or a closed
@@ -138,8 +198,11 @@ function installSignalRelease(): void {
   if (signalsInstalled) return;
   signalsInstalled = true;
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
-    process.once(sig, () => {
+    process.on(sig, () => {
+      if (unwinding) return;
+      unwinding = true;
       releaseHeldRunLocks();
+      process.removeAllListeners(sig);
       process.kill(process.pid, sig);
     });
   }
@@ -147,6 +210,25 @@ function installSignalRelease(): void {
   // release here would never run. Releasing an empty `held` is a no-op, so this
   // costs nothing on the normal path where the caller's finally already released.
   process.on("exit", releaseHeldRunLocks);
+}
+
+/**
+ * Locks whose critical section is past the point of no return — the box is
+ * being destroyed, the key revoked, the record closed.
+ *
+ * The automatic release above is for the interval where NOTHING has been
+ * mutated yet; past this mark it is the opposite of safe. A Ctrl-C after
+ * `driver.destroy()` but before the record closes would hand the run straight
+ * to the next teardown, which re-runs against a half-torn-down run — and
+ * `ledger.close()`, where the reservation is flushed, was skipped on the way
+ * out too. This module's own promise is that "a stale lock means an uncertain
+ * teardown state, which is exactly the moment an operator — not a heuristic —
+ * should decide", so leave it for the operator and say so on stderr.
+ */
+const destructive = new Set<string>();
+
+export function markRunLockDestructive(lock: string): void {
+  destructive.add(lock);
 }
 
 /**
@@ -180,6 +262,12 @@ function writeStderr(s: string): void {
 /** Release every lock this process still holds, reporting failures to stderr. */
 export function releaseHeldRunLocks(): void {
   for (const lock of [...held.keys()]) {
+    if (destructive.has(lock)) {
+      writeStderr(
+        `!! lock-held: ${lock} was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm ${lock} only once you know the teardown state\n`,
+      );
+      continue;
+    }
     try {
       releaseRunLock(lock);
     } catch (e) {
@@ -218,11 +306,33 @@ const IMPLAUSIBLE_HOLD_S = 6 * 60 * 60;
  */
 function refuse(lock: string, holder: string): RunLockedError | undefined {
   let body = "";
+  // An unreadable lock leaves `body` empty too, and "empty" is a REAPABLE
+  // classification below. The two must not collapse: a lock we merely cannot
+  // read (EACCES, EIO) is the one whose holder is most unknown, and telling an
+  // operator to rm it is the fail-open answer this module never gives.
+  let readable = false;
   try {
     body = readFileSync(lock, "utf8").trim();
+    readable = true;
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     // present but unreadable — fail closed below with what we do know
+  }
+  // An EMPTY body is not an unparseable one. Nothing ever writes a lock without
+  // a body, so the only way to observe one is `writeLockDirect`'s window — a
+  // creator SIGKILLed/OOM-killed between the exclusive create and the write
+  // (every throw in there removes the lock itself). Rendered as "holder
+  // unknown" it became a lock to WAIT on, nothing in this module steals or
+  // expires, and `reapStaleTemps` matches only `.tmp`: the run refused forever
+  // while the box and the key kept billing. Name it and give the exact `rm`.
+  if (readable && body === "") {
+    return new RunLockedError(
+      lock,
+      "the lock is empty: its creator died between creating it and writing its body",
+      holder,
+      true,
+      " — if a harvest or teardown of this run started in the last few seconds, wait and re-check first: an empty lock is otherwise only visible for the instant between its creation and its body being written",
+    );
   }
   const { pid, host, at } = parseLockBody(body);
   if (!/^\d+$/.test(pid ?? "") || Number.isNaN(at)) {
@@ -234,8 +344,18 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
   // — and the remediation then tells the operator to rm a LIVE holder's lock,
   // re-opening the double teardown — or a false "alive" via pid reuse. Say
   // "unknown" instead, and never mark a foreign lock stale.
-  if (host !== undefined && host !== lockHost()) {
-    return new RunLockedError(lock, `pid ${pid} on host ${host}, liveness unknown from here, held ${age}s`, holder);
+  //
+  // A host we cannot MATCH counts as foreign, including the `undefined` a
+  // pre-host body parses to. Back-compat that quietly opts old locks out of the
+  // guard is back-compat that re-opens the bug the guard was added for.
+  if (host !== lockHost()) {
+    return new RunLockedError(
+      lock,
+      host === undefined
+        ? `pid ${pid} from a lock written before the host field existed, liveness unknown from here, held ${age}s`
+        : `pid ${pid} on host ${host}, liveness unknown from here, held ${age}s`,
+      holder,
+    );
   }
   // PID liveness, not just the number: without it the printed remediation
   // ("only if that pid is gone") is unfollowable, and pid reuse makes it wrong.
@@ -271,6 +391,13 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
  */
 function reapStaleTemps(runsDir: string, runId: string): void {
   const prefix = `${runId}.lock.`;
+  // A pid is only meaningful on the host that minted it — the same reason
+  // `refuse` refuses to probe a foreign lock, and this sweep had NO host check
+  // at all. On a shared runs directory an unqualified probe read a remote
+  // invocation's live pid as dead and `rmSync`'d its in-flight temp between the
+  // `fsync` and the `linkSync`. Temps now carry the host tag; one that does not
+  // (an older build's, or another host's) is never ours to reap.
+  const mine = `${hostTag()}.`;
   let names: string[];
   try {
     names = readdirSync(runsDir);
@@ -279,7 +406,9 @@ function reapStaleTemps(runsDir: string, runId: string): void {
   }
   for (const name of names) {
     if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
-    const pid = Number(name.slice(prefix.length).split(".")[0]);
+    const rest = name.slice(prefix.length);
+    if (!rest.startsWith(mine)) continue;
+    const pid = Number(rest.slice(mine.length).split(".")[0]);
     if (!Number.isInteger(pid) || pid <= 0 || isAlive(pid)) continue;
     try {
       rmSync(join(runsDir, name), { force: true });
@@ -287,6 +416,37 @@ function reapStaleTemps(runsDir: string, runId: string): void {
       // Best effort: a temp we cannot remove is litter, never a correctness bug.
     }
   }
+}
+
+/**
+ * Did the EEXIST we just got come from OUR OWN link landing?
+ *
+ * `link(2)` can report EEXIST for a link that SUCCEEDED: NFS retransmits the
+ * request when the reply is lost, and the server answers the retry with EEXIST
+ * because the entry — the one it created for us — is already there. Returning
+ * false there sent `refuse` to read the lock, find OUR pid, `isAlive` say yes,
+ * and throw "another fleet invocation holds it … wait for that invocation to
+ * finish" — about ourselves, forever.
+ *
+ * The body carries a per-attempt nonce, so "the lock holds exactly the bytes we
+ * just wrote" is proof the link landed. A body with our pid and our host but a
+ * different nonce is this process's own earlier claim that outlived its
+ * registration, which is what `RunLockReentrantError` says instead of sending
+ * an operator to wait on themselves. Anything else is genuine contention.
+ */
+function claimedByUs(lock: string, body: string): boolean {
+  let onDisk = "";
+  try {
+    onDisk = readFileSync(lock, "utf8");
+  } catch {
+    // Unreadable or already gone — no proof it is ours, so treat it as a
+    // stranger's and let the caller refuse (which re-reads and reports).
+    return false;
+  }
+  if (onDisk === body) return true;
+  const { pid, host } = parseLockBody(onDisk);
+  if (pid === String(process.pid) && host === lockHost()) throw new RunLockReentrantError(lock);
+  return false;
 }
 
 /**
@@ -310,7 +470,9 @@ function reapStaleTemps(runsDir: string, runId: string): void {
  * that leave no other option.
  */
 function claim(lock: string, body: string): boolean {
-  const tmp = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  // Host tag BEFORE the pid: the pid in this name is what `reapStaleTemps`
+  // probes, and a pid without the host that minted it is not a pid.
+  const tmp = `${lock}.${hostTag()}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   let fd: number | undefined;
   try {
     // Inside the try (not before it): a missing runs directory, EACCES, or a
@@ -329,8 +491,15 @@ function claim(lock: string, body: string): boolean {
       linkSync(tmp, lock);
       return true;
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
-      return writeLockDirect(lock, body);
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") return claimedByUs(lock, body);
+      // ONLY the errnos the paragraph above enumerates fall back. Every other
+      // errno — ENOSPC, EIO, EACCES, EDQUOT — is a link that failed for a
+      // reason `openSync(lock, "wx")` will hit too, and if the link had in fact
+      // landed the fallback's own EEXIST reported "already claimed" against the
+      // lock we just created: the same permanent wedge from the other side.
+      if (code === "EPERM" || code === "ENOSYS" || code === "EOPNOTSUPP") return writeLockDirect(lock, body);
+      throw e;
     }
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -418,7 +587,13 @@ export function acquireRunLock(runsDir: string, runId: string, holder = "invocat
   // of that run refused forever while the box and the key stayed live and
   // billing. Releasing an empty `held` is a no-op, so installing early is free.
   installSignalRelease();
-  const lock = join(runsDir, `${runId}.lock`);
+  // `resolve`, not `join`: `held` is keyed on this string, and a relative
+  // `runsDir` made `/srv/runs` and a `runs` typed from `/srv` two keys for ONE
+  // file — the second acquire then refused with "wait for that invocation to
+  // finish", naming us, which is the message `RunLockReentrantError` was added
+  // to eliminate. An absolute path is also the one an operator can paste into
+  // the `rm` the refusal prints.
+  const lock = resolve(runsDir, `${runId}.lock`);
   if (held.has(lock)) throw new RunLockReentrantError(lock);
   reapStaleTemps(runsDir, runId);
   // Two attempts, not a loop: the second covers a holder that finished between
@@ -446,19 +621,48 @@ export function acquireRunLock(runsDir: string, runId: string, holder = "invocat
  * whether it landed. `link`, never `rename` — rename would overwrite a lock a
  * third invocation claimed at the path while this one was held aside.
  *
- * The taken copy is removed ONLY when the restore succeeded. An unproven body
- * is never deleted: it may be a live holder's claim, and nothing else in the
- * system would put it back.
+ * The taken copy is removed ONLY when the restore succeeded, or when the path
+ * is provably occupied by someone else. An unproven body is never deleted: it
+ * may be a live holder's claim, and nothing else in the system would put it back.
+ *
+ * Two errno classes are NOT "could not be put back":
+ *
+ *  - EEXIST means a third invocation already holds the path. Its lock is LIVE,
+ *    and the generic remediation told the operator to `mv` this copy over it —
+ *    the double teardown, printed as advice. The copy is worthless: discard it.
+ *  - EPERM/ENOSYS/EOPNOTSUPP is the no-hard-link filesystem `claim` exists to
+ *    support (exFAT, SMB, FUSE, some Docker bind mounts), where `linkSync`
+ *    fails EVERY time. Without the same O_EXCL fallback `claim` has, the lock
+ *    was gone — free for a concurrent invocation — while the holder's claim sat
+ *    in a `.rescue` file `reapStaleTemps` deliberately does not sweep. That is
+ *    the double teardown this module exists to prevent.
  */
 function restore(claimed: string, lock: string): string {
+  const discarded = `another invocation holds ${lock}, so the copy at ${claimed} was discarded rather than put back over a live lock`;
+  const stranded = (why: string): string =>
+    `it could not be put back (${why}) and is now at ${claimed} — mv it back to ${lock} once no other invocation holds it`;
   try {
     linkSync(claimed, lock);
+    rmSync(claimed, { force: true });
+    return "it was put back";
   } catch (e) {
-    const why = (e as NodeJS.ErrnoException).code ?? (e as Error).message;
-    return `it could not be put back (${why}) and is now at ${claimed} — mv it back to ${lock} once no other invocation holds it`;
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") {
+      rmSync(claimed, { force: true });
+      return discarded;
+    }
+    if (code !== "EPERM" && code !== "ENOSYS" && code !== "EOPNOTSUPP") return stranded(code ?? (e as Error).message);
   }
-  rmSync(claimed, { force: true });
-  return "it was put back";
+  try {
+    if (!writeLockDirect(lock, readFileSync(claimed, "utf8"))) {
+      rmSync(claimed, { force: true });
+      return discarded;
+    }
+    rmSync(claimed, { force: true });
+    return "it was put back";
+  } catch (e) {
+    return stranded((e as NodeJS.ErrnoException).code ?? (e as Error).message);
+  }
 }
 
 /**
@@ -495,6 +699,9 @@ export function releaseRunLock(lock: string): void {
   if (body === undefined) return;
   // Dropped first: a failed release must not be retried by the signal handler.
   held.delete(lock);
+  // The destructive phase is over the moment its caller releases deliberately —
+  // that is the whole difference between this and the signal path.
+  destructive.delete(lock);
 
   let before: string;
   try {

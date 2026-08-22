@@ -806,11 +806,32 @@ describe("pipeline-run DF3.1 AC9b: the admitted ceiling reaches the run context"
   // bytes of `run-context.json`, a file with no consumer anywhere in the repo,
   // so nothing failed. Asserted on the CONTEXT, which is the thing consumed.
 
+  /**
+   * The pair dispatch leaves on disk: the stamped `pipeline.yaml` and the
+   * `run-context.json` it wrote beside it carrying the SAME admitted ceiling.
+   * `runContextFrom` only takes the manifest's dirname, so the manifest file
+   * itself is never read here — it is written anyway so the fixture is the
+   * shape dispatch actually produces. Omit `witnessBody` for a directory with
+   * no witness at all.
+   */
+  function admitted(witnessBody?: string): { manifestPath: string; runRoot: string } {
+    const runRoot = path.join(tmpRoot, `ac9b-${seq++}`);
+    fs.mkdirSync(runRoot, { recursive: true });
+    const manifestPath = path.join(runRoot, "pipeline.yaml");
+    fs.writeFileSync(manifestPath, "{}\n");
+    if (witnessBody !== undefined) {
+      fs.writeFileSync(path.join(runRoot, "run-context.json"), witnessBody);
+    }
+    return { manifestPath, runRoot };
+  }
+
   test("a stamped manifest puts its limitMicroUsd on the context as effectiveCeilingMicros", () => {
-    const ctx = runContextFrom("run-1", "req-1", {
-      pipelineId: "capped",
-      limitMicroUsd: 250_000,
-    });
+    const ctx = runContextFrom(
+      "run-1",
+      "req-1",
+      { pipelineId: "capped", limitMicroUsd: 250_000 },
+      admitted(JSON.stringify({ effectiveCeilingMicros: 250_000 })),
+    );
     expect(ctx.effectiveCeilingMicros).toBe(250_000);
   });
 
@@ -818,7 +839,102 @@ describe("pipeline-run DF3.1 AC9b: the admitted ceiling reaches the run context"
     // `"x" in ctx`, not `ctx.x === undefined`: present-and-undefined is a
     // different shape from absent, and the engine's own contract
     // (tests/phase-engine/phase-lifecycle.test.ts) is written against absence.
-    const ctx = runContextFrom("run-2", "req-2", { pipelineId: "uncapped" });
+    // Handed a witness-less directory on purpose: no declared cap means nothing
+    // to reconcile, so the no-limit path must return before it looks.
+    const ctx = runContextFrom("run-2", "req-2", { pipelineId: "uncapped" }, admitted());
     expect("effectiveCeilingMicros" in ctx).toBe(false);
+  });
+
+  // A DECLARED cap is reconciled against dispatch's own record, never taken on
+  // the manifest's word. `stampManifestLimit`'s stamp and a hand-authored
+  // `limitMicroUsd` are byte-identical in the file — `loadManifest` cannot tell
+  // them apart — so `run-context.json` is the only thing that distinguishes a
+  // ceiling dispatch admitted from one somebody typed into the yaml to raise
+  // DF1.6's harness cap. Every way of failing to produce that witness refuses.
+
+  test("a declared cap with NO dispatch witness beside the manifest is refused", () => {
+    expect(() =>
+      runContextFrom(
+        "run-3",
+        "req-3",
+        { pipelineId: "authored", limitMicroUsd: 250_000 },
+        admitted(),
+      ),
+    ).toThrow(/run-context\.json is unreadable/);
+  });
+
+  test("a witness that admitted a DIFFERENT ceiling is refused", () => {
+    // The whole attack in one case: the yaml names $50, dispatch admitted $0.25.
+    expect(() =>
+      runContextFrom(
+        "run-4",
+        "req-4",
+        { pipelineId: "authored", limitMicroUsd: 50_000_000 },
+        admitted(JSON.stringify({ effectiveCeilingMicros: 250_000 })),
+      ),
+    ).toThrow("manifest declares limitMicroUsd 50000000 but dispatch admitted 250000");
+  });
+
+  test("a witness carrying no positive-integer effectiveCeilingMicros is refused", () => {
+    // Each of these is a witness that exists and parses but vouches for
+    // nothing spendable. None may fall through to trusting the manifest.
+    const bodies: Record<string, string> = {
+      absent: "{}",
+      zero: JSON.stringify({ effectiveCeilingMicros: 0 }),
+      float: JSON.stringify({ effectiveCeilingMicros: 250_000.5 }),
+      negative: JSON.stringify({ effectiveCeilingMicros: -250_000 }),
+      stringy: JSON.stringify({ effectiveCeilingMicros: "250000" }),
+      unsafe: JSON.stringify({ effectiveCeilingMicros: 2 ** 53 }),
+      null: "null",
+    };
+    for (const [name, body] of Object.entries(bodies)) {
+      expect(() =>
+        runContextFrom(
+          "run-5",
+          "req-5",
+          { pipelineId: name, limitMicroUsd: 250_000 },
+          admitted(body),
+        ),
+      ).toThrow(/carries no positive integer effectiveCeilingMicros/);
+    }
+  });
+
+  test("a witness that is not JSON is refused, never read as an absent cap", () => {
+    expect(() =>
+      runContextFrom(
+        "run-6",
+        "req-6",
+        { pipelineId: "authored", limitMicroUsd: 250_000 },
+        admitted("{ truncated"),
+      ),
+    ).toThrow(/run-context\.json is unreadable/);
+  });
+
+  test("a symlinked manifest path cannot aim the check at another directory's witness", () => {
+    // The call site hands the VERIFIED resolvedPath from `loadManifest`, but
+    // the witness read re-asserts beneath-root on its own: reached through a
+    // symlink, the sibling `run-context.json` realpaths outside the pinned run
+    // root and `readArtifactBeneathRoot` refuses it. Without that step this
+    // witness would have agreed with the manifest and admitted $50.
+    const runRoot = path.join(tmpRoot, `ac9b-${seq++}`);
+    fs.mkdirSync(runRoot, { recursive: true });
+    const elsewhere = path.join(tmpRoot, `ac9b-elsewhere-${seq++}`);
+    fs.mkdirSync(elsewhere, { recursive: true });
+    fs.writeFileSync(
+      path.join(elsewhere, "run-context.json"),
+      JSON.stringify({ effectiveCeilingMicros: 50_000_000 }),
+    );
+    fs.symlinkSync(elsewhere, path.join(runRoot, "link"));
+
+    expect(() =>
+      runContextFrom(
+        "run-7",
+        "req-7",
+        { pipelineId: "aimed-elsewhere", limitMicroUsd: 50_000_000 },
+        { manifestPath: path.join(runRoot, "link", "pipeline.yaml"), runRoot },
+      ),
+      // The REASON, not just the refusal: matching "unreadable" alone would
+      // pass just as well if the witness were simply missing.
+    ).toThrow(/resolves outside the run root/);
   });
 });

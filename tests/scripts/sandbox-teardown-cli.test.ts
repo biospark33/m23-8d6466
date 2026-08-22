@@ -11,7 +11,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { RunRecordStore, RUN_ID_MAX, RUN_ID_RE } from "../../src/providers/run-record.ts";
@@ -39,11 +39,28 @@ const DEAD_PID = 999_999_999;
 const LIVE_FOREIGN_PID = 1;
 
 /**
- * This host's name as the lock body spells it (run-lock.ts's `lockHost`). A body
- * naming any other host takes the "liveness unknown from here" branch and never
- * reaches the pid probe, so a fixture that wants the LOCAL path must say so.
+ * This host as the lock body spells it (run-lock.ts's `lockHost`), OBSERVED from
+ * a real lock the module writes rather than recomputed here. `lockHost` folds the
+ * `/proc/self/ns/pid` inode into the token wherever the kernel exposes it and
+ * nothing where it does not, so a fixture re-deriving it from `hostname()` alone
+ * matches on macOS and silently stops matching on Linux — where it would take the
+ * "liveness unknown from here" branch, which is the exact branch every test below
+ * exists to tell apart from the local one. Neither `lockHost` nor `hostTag` is
+ * exported; a body naming any other host never reaches the pid probe at all.
  */
-const THIS_HOST = hostname().replace(/\s+/g, "_") || "unknown-host";
+function lockHostOf(runsDir: string): string {
+  const lock = acquireRunLock(runsDir, "host-probe");
+  try {
+    return readFileSync(lock, "utf8").trim().split(/\s+/)[1] ?? "";
+  } finally {
+    releaseRunLock(lock);
+  }
+}
+
+/** The same token folded to the filename-safe form lock temps carry (`hostTag`). */
+function hostTagOf(runsDir: string): string {
+  return lockHostOf(runsDir).replace(/[^A-Za-z0-9_-]/g, "_");
+}
 
 /** Drain `stream` until `needle` appears, or fail with the child's stderr. */
 async function readUntil(proc: Bun.Subprocess<"pipe", "pipe", "pipe">, needle: string): Promise<void> {
@@ -151,12 +168,29 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     }
   });
 
-  test("a lock body written before the host field still parses (backwards compatibility)", () => {
-    // `<pid> <ISO> <nonce>` is what the previous implementation wrote. A lock
-    // left on disk by it must still name its holder rather than degrade to
-    // "holder unknown" — that wording tells the operator the file is garbage.
+  test("a lock body written before the host field still parses, and is FOREIGN rather than stale", () => {
+    // `<pid> <ISO> <nonce>` is what the previous implementation wrote. Two
+    // properties, and the second is the one that bites: the lock must still name
+    // its holder rather than degrade to "holder unknown" (that wording tells the
+    // operator the file is garbage), AND it must never be called stale. An old
+    // body carries no host, so `kill(pid, 0)` here answers about whatever process
+    // happens to hold that number on THIS box — back-compat that probed it anyway
+    // quietly opted every pre-host lock out of the host guard and printed `rm` for
+    // a live remote holder, which is the double teardown the guard was added for.
     foreignLock("legacy-body");
-    expect(() => acquireRunLock(runs, "legacy-body")).toThrow(/pid 1, held \d+s/);
+    try {
+      acquireRunLock(runs, "legacy-body");
+      expect.unreachable("a held lock must still refuse");
+    } catch (e) {
+      expect(e).toBeInstanceOf(RunLockedError);
+      expect((e as Error).message).toMatch(
+        /pid 1 from a lock written before the host field existed, liveness unknown from here, held \d+s/,
+      );
+      // The remediation is the half an operator acts on, and "unknown liveness"
+      // and "provably dead" produce refusals that read almost identically.
+      expect((e as RunLockedError).remediation).not.toContain("stale lock");
+      expect((e as RunLockedError).remediation).toContain("wait for that invocation to finish");
+    }
   });
 
   test("a lock held on ANOTHER host is never called stale (its pid is not ours to probe)", () => {
@@ -187,22 +221,35 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     expect(() => acquireRunLock(runs, "holder-teardown", "sandbox-teardown")).toThrow(/another sandbox-teardown holds/);
   });
 
-  test("a stale `<runId>.lock.<pid>.<hex>.tmp` is reaped on acquire; a live pid's temp is left alone", () => {
+  test("a stale `<runId>.lock.<hostTag>.<pid>.<hex>.tmp` is reaped on acquire; a live pid's temp is left alone", () => {
     // Nothing else removes these: a process SIGKILLed between the temp's
     // creation and its unlink leaves one forever, in the same directory the
     // record and bundle listings glob over.
-    const stale = join(runs, `reap-run.lock.${DEAD_PID}.deadbeef.tmp`);
-    const live = join(runs, `reap-run.lock.${process.pid}.c0ffee.tmp`);
-    const otherRun = join(runs, `other-run.lock.${DEAD_PID}.abc123.tmp`);
-    for (const p of [stale, live, otherRun]) writeFileSync(p, "x\n");
+    const tag = hostTagOf(runs);
+    const stale = join(runs, `reap-run.lock.${tag}.${DEAD_PID}.deadbeef.tmp`);
+    const live = join(runs, `reap-run.lock.${tag}.${process.pid}.c0ffee.tmp`);
+    const otherRun = join(runs, `other-run.lock.${tag}.${DEAD_PID}.abc123.tmp`);
+    // A dead pid on a DIFFERENT host. The pid is only meaningful on the box that
+    // minted it, so probing our own process table for it reads a live remote
+    // invocation as dead — and this sweep would then delete its in-flight temp
+    // between the `fsync` and the `linkSync`, freeing the run for a second
+    // holder. The host tag in the name is the whole defence; a sweep that
+    // ignored it passes every other assertion here.
+    const otherHost = join(runs, `reap-run.lock.some-other-box.${DEAD_PID}.abc123.tmp`);
+    // The pre-host-tag filename shape. Deliberately NOT this module's to reap —
+    // it carries no host, so it is exactly as unprobeable as the line above.
+    // `RunRecordStore.cleanStaleTemps` still sweeps it on the next CLI start.
+    const legacyShape = join(runs, `reap-run.lock.${DEAD_PID}.deadbeef.tmp`);
+    for (const p of [stale, live, otherRun, otherHost, legacyShape]) writeFileSync(p, "x\n");
 
     releaseRunLock(acquireRunLock(runs, "reap-run"));
 
     expect(existsSync(stale)).toBeFalse();
     expect(existsSync(live)).toBeTrue(); // mid-acquire, not litter
     expect(existsSync(otherRun)).toBeTrue(); // a different run's temp is not ours to reap
-    rmSync(live);
-    rmSync(otherRun);
+    expect(existsSync(otherHost)).toBeTrue(); // a different host's pid is not ours to probe
+    expect(existsSync(legacyShape)).toBeTrue(); // unqualified pid — left for the store's sweep
+    for (const p of [live, otherRun, otherHost, legacyShape]) rmSync(p);
   });
 
   test("a `.rescue` body left by a failed restore is NEVER reaped, however dead its pid", () => {
@@ -427,7 +474,13 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     // silently become the stale-lock case it has its own test for.
     const other = LIVE_FOREIGN_PID;
     const lock = join(runs, "held-run.lock");
-    writeFileSync(lock, `${other} ${new Date(Date.now() - 5_000).toISOString()}\n`, { flag: "wx" });
+    // `<pid> <host> <ISO> <nonce>` — the modern four-field body `claim` actually
+    // writes, naming THIS host. A pre-host fixture parses fine but classifies
+    // FOREIGN, so it never reaches the pid probe and this case would stop being
+    // about a live holder at all.
+    writeFileSync(lock, `${other} ${lockHostOf(runs)} ${new Date(Date.now() - 5_000).toISOString()} feedface\n`, {
+      flag: "wx",
+    });
 
     const code = await run(["held-run", "--dir", runs], sink);
 
@@ -437,6 +490,10 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     // Delimited, not `toContain("pid 1")`: that substring is inside `pid 12345`
     // too, so a refusal printing some pid other than the HOLDER's reads as correct.
     expect(text).toMatch(new RegExp(`pid ${other}, held \\d+s`));
+    // The live branch's remediation, never the stale one: a liveness probe that
+    // answered "dead" here prints `rm` for a lock a running teardown holds.
+    expect(text).toContain("wait for that invocation to finish");
+    expect(text).not.toContain("stale lock");
     expect(text).toContain("next: ");
     expect(text).toContain(`rm ${lock}`);
     // P10: the refused invocation neither tore down nor released the holder's lock
@@ -561,7 +618,13 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
     expect(text).toContain("holder unknown");
   });
 
-  test("empty lock body reports holder unknown", async () => {
+  test("empty lock body names the creator that died mid-create and gives the rm, not 'holder unknown'", async () => {
+    // "holder unknown" is now reserved for a body that PARSED as garbage and for
+    // a lock we could not read at all. An empty body has exactly one cause —
+    // `writeLockDirect`'s creator SIGKILLed between the exclusive create and the
+    // write — and reporting it as an unknown holder made it a lock to WAIT on:
+    // nothing steals, nothing expires, and `reapStaleTemps` matches only `.tmp`,
+    // so the run refused forever while the box and the key kept billing.
     store.create("empty-lock");
     const lock = join(runs, "empty-lock.lock");
     writeFileSync(lock, "");
@@ -571,13 +634,26 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
     expect(code).toBe(1);
     const text = lines.join("");
     expect(text).toContain("!! run-locked:");
-    expect(text).toContain("holder unknown");
+    expect(text).toContain("the lock is empty: its creator died between creating it and writing its body");
+    expect(text).not.toContain("holder unknown");
+    // Stale, so the operator gets a way out — plus the caveat that stops them
+    // racing a harvest that started a moment ago.
+    expect(text).toContain(`rm ${lock} to clear the stale lock`);
+    expect(text).toContain("wait and re-check first");
+    // Reported, never stolen.
+    expect(existsSync(lock)).toBeTrue();
+    expect(store.get("empty-lock").closedAt).toBeUndefined();
   });
 
   test("a lock whose pid is dead is reported STALE, naming the pid and the rm that clears it", async () => {
     store.create("stale-lock");
     const lock = join(runs, "stale-lock.lock");
-    writeFileSync(lock, `${DEAD_PID} ${new Date(Date.now() - 9_000).toISOString()} c0ffee\n`, { flag: "wx" });
+    // Same-host body: a lock naming any other host (or none, as a pre-host body
+    // does) is foreign and is correctly never marked stale, so a fixture without
+    // the host token tests the opposite branch from the one this title claims.
+    writeFileSync(lock, `${DEAD_PID} ${lockHostOf(runs)} ${new Date(Date.now() - 9_000).toISOString()} c0ffee\n`, {
+      flag: "wx",
+    });
 
     const code = await run(["stale-lock", "--dir", runs], sink);
 
@@ -596,7 +672,12 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
     // an operator follows ("rm the stale lock") must not appear for it.
     store.create("live-lock");
     const lock = join(runs, "live-lock.lock");
-    writeFileSync(lock, `${LIVE_FOREIGN_PID} ${new Date(Date.now() - 3_000).toISOString()} facade\n`, { flag: "wx" });
+    // Same-host body, for the same reason as the stale case above — inverted: a
+    // foreign lock is never stale no matter what the pid is doing, so without the
+    // host token the "never reported stale" assertions below hold vacuously.
+    writeFileSync(lock, `${LIVE_FOREIGN_PID} ${lockHostOf(runs)} ${new Date(Date.now() - 3_000).toISOString()} facade\n`, {
+      flag: "wx",
+    });
 
     const code = await run(["live-lock", "--dir", runs], sink);
 
@@ -622,7 +703,7 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
     // improve, using the createdAt the body already carries.
     const createdAt = new Date(Date.now() - 72 * 3600 * 1000).toISOString();
     const lock = join(runs, "ancient-lock.lock");
-    writeFileSync(lock, `${LIVE_FOREIGN_PID} ${THIS_HOST} ${createdAt} c0ffee\n`, { flag: "wx" });
+    writeFileSync(lock, `${LIVE_FOREIGN_PID} ${lockHostOf(runs)} ${createdAt} c0ffee\n`, { flag: "wx" });
     try {
       acquireRunLock(runs, "ancient-lock");
       expect.unreachable("a held lock must still refuse");
@@ -645,7 +726,7 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
     // their holder might be a recycled pid would train them to ignore the line
     // that matters — and to `rm` a live invocation's lock.
     const lock = join(runs, "fresh-lock.lock");
-    writeFileSync(lock, `${LIVE_FOREIGN_PID} ${THIS_HOST} ${new Date().toISOString()} c0ffee\n`, { flag: "wx" });
+    writeFileSync(lock, `${LIVE_FOREIGN_PID} ${lockHostOf(runs)} ${new Date().toISOString()} c0ffee\n`, { flag: "wx" });
     try {
       acquireRunLock(runs, "fresh-lock");
       expect.unreachable("a held lock must still refuse");
@@ -653,6 +734,36 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
       expect((e as RunLockedError).remediation).not.toContain("recycled");
     }
     rmSync(lock);
+  });
+
+  test("dead vs live on the SAME host differ in the remediation, not just the message", () => {
+    // The two branches share `another … holds <lock> (pid N…)` and diverge only
+    // in what the operator is told to DO — one prints the `rm`, the other says
+    // wait. A liveness probe stubbed to a constant still produces a plausible
+    // refusal either way, so a test that only greps the message passes with the
+    // probe gutted in either direction. Both fixtures use the four-field
+    // `<pid> <host> <ISO> <nonce>` body `claim` writes, on THIS host, so the pid
+    // probe is actually reached.
+    const host = lockHostOf(runs);
+    const at = new Date(Date.now() - 4_000).toISOString();
+    const refusalFor = (runId: string, pid: number): RunLockedError => {
+      writeFileSync(join(runs, `${runId}.lock`), `${pid} ${host} ${at} c0ffee\n`, { flag: "wx" });
+      try {
+        acquireRunLock(runs, runId);
+        return expect.unreachable("a held lock must refuse");
+      } catch (e) {
+        expect(e).toBeInstanceOf(RunLockedError);
+        return e as RunLockedError;
+      }
+    };
+
+    const dead = refusalFor("branch-dead", DEAD_PID);
+    const live = refusalFor("branch-live", LIVE_FOREIGN_PID);
+
+    expect(dead.remediation).toContain(`rm ${join(runs, "branch-dead.lock")} to clear the stale lock`);
+    expect(dead.remediation).not.toContain("wait for that invocation to finish");
+    expect(live.remediation).toContain("wait for that invocation to finish");
+    expect(live.remediation).not.toContain("stale lock");
   });
 
   test("missing runs dir propagates ENOENT from acquireRunLock", async () => {

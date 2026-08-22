@@ -34,7 +34,15 @@ function recordingLedger(defaultCapMicroUsd: number, decide: () => AdmissionDeci
   const ledger: RecordingLedger = {
     config: { defaultCapMicroUsd, perIssueOverrides: {} },
     admitIssue(input, capMicroUsd, keyCapMicroUsd) {
-      admitCalls.push({ input, capMicroUsd, keyCapMicroUsd });
+      // SNAPSHOT, not the live reference. `input` belongs to the dispatcher,
+      // which is free to mutate or reuse the object after the call — and then
+      // every recorded entry describes the FINAL state rather than what the gate
+      // was asked, so a dispatcher booking the wrong issue and correcting the
+      // object afterwards records as correct. `AdmitCall`'s own docblock says
+      // "exactly as the budget gate handed it over"; only a clone makes that
+      // true. (`AdmissionInput` is four strings, so this is structured-cloneable
+      // by construction.)
+      admitCalls.push({ input: structuredClone(input), capMicroUsd, keyCapMicroUsd });
       return decide();
     },
     close() {
