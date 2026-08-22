@@ -837,24 +837,50 @@ export async function dispatch(
   // below, where the reservation is retained deliberately and for as long as the
   // box lives.
   const tCreate = now();
-  const { vm } = await within(
-    "create",
-    provisionAdmittedRun(deps.driver, deps.store, {
-      runId,
-      // `port` is deliberately withheld: provisionAdmittedRun exposes and makes
-      // the box PUBLIC immediately after create, i.e. before the setup gate has
-      // proved anything — and INV-5 then forbids tearing that box down. The
-      // expose/setPublic pair runs here instead, after gate.ready (step 10).
-      budget: {
-        repoSlug: valid.repoSlug,
-        issueId: String(valid.issueId),
-        capMicroUsd: decision.capMicroUsd,
-        spentMicroUsd: decision.spentMicroUsd,
-        reservedMicroUsd: decision.reservedMicroUsd,
-        admittedCeilingMicroUsd: decision.admittedCeilingMicroUsd,
-      },
-    }),
-  );
+  // Wrapped, because this step STRADDLES the record: `provisionAdmittedRun`
+  // writes the run record first (INV-1) and only then creates the box, so a
+  // throw from the budget-extension write or from `driver.create` leaves a real
+  // record on disk. An untyped throw escaping here carries no `runId`, and the
+  // CLI's failure line would then report `runId: null` for a run an operator can
+  // see in `fleet status` — the one case where they most need the id. `refuse`
+  // stamps it (plus the debug/teardown commands) onto the payload, and files the
+  // dispatch-log entry that AC4 evidence is read out of.
+  let provisioned: Awaited<ReturnType<typeof provisionAdmittedRun>>;
+  try {
+    provisioned = await within(
+      "create",
+      provisionAdmittedRun(deps.driver, deps.store, {
+        runId,
+        // `port` is deliberately withheld: provisionAdmittedRun exposes and makes
+        // the box PUBLIC immediately after create, i.e. before the setup gate has
+        // proved anything — and INV-5 then forbids tearing that box down. The
+        // expose/setPublic pair runs here instead, after gate.ready (step 10).
+        budget: {
+          repoSlug: valid.repoSlug,
+          issueId: String(valid.issueId),
+          capMicroUsd: decision.capMicroUsd,
+          spentMicroUsd: decision.spentMicroUsd,
+          reservedMicroUsd: decision.reservedMicroUsd,
+          admittedCeilingMicroUsd: decision.admittedCeilingMicroUsd,
+        },
+      }),
+    );
+  } catch (e) {
+    // `timedOut` already produced one (and already refused) — do not double-log.
+    if (e instanceof FleetError) throw e;
+    throw refuse(
+      1,
+      errorCode(e, "provision-failed"),
+      `provisioning failed for run ${runId}: ${(e as Error).message}`,
+      errorRemediation(
+        e,
+        // Deliberately not "the box is alive": whether it exists depends on which
+        // half of record→box failed. Teardown is idempotent over both.
+        `inspect the run, then tear it down: bun scripts/fleet.ts teardown ${runId}`,
+      ),
+    );
+  }
+  const { vm } = provisioned;
   phase("create_ms", now() - tCreate);
   ctxVmName = vm.name;
 

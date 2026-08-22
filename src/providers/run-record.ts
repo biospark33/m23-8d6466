@@ -23,7 +23,6 @@ import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
-  fstatSync,
   fsyncSync,
   linkSync,
   mkdirSync,
@@ -415,6 +414,13 @@ export interface RunRecordStoreOptions {
    * `rename`. Throwing here must leave the prior record byte-identical (AC2).
    */
   beforeRename?: (tmpPath: string) => void;
+  /**
+   * Fault-injection seam: called once a lock has been JUDGED stale and before
+   * `stealIfOwnerGone` takes the path. The window this opens — corpse cleared,
+   * new writer claims the free path — is the one the take-then-compare protocol
+   * exists to survive, and it is not otherwise reachable from a test.
+   */
+  beforeStealTake?: (lockPath: string) => void;
 }
 
 export const DEFAULT_RUNS_DIR = ".sandbox/runs";
@@ -423,12 +429,14 @@ export class RunRecordStore {
   readonly dir: string;
   private readonly requestId: string;
   private readonly beforeRename?: (tmpPath: string) => void;
+  private readonly beforeStealTake?: (lockPath: string) => void;
 
   constructor(opts: RunRecordStoreOptions | string = {}) {
     const o: RunRecordStoreOptions = typeof opts === "string" ? { dir: opts } : opts;
     this.dir = o.dir ?? process.env.QDS_RUNS_DIR ?? DEFAULT_RUNS_DIR;
     this.requestId = o.requestId ?? newRequestId();
     this.beforeRename = o.beforeRename;
+    this.beforeStealTake = o.beforeStealTake;
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     // mkdir's mode is ignored when the directory already exists, and masked by
     // umask when it does not — set it explicitly, then verify (INV-5).
@@ -484,9 +492,9 @@ export class RunRecordStore {
     for (const name of readdirSync(this.dir)) {
       // `<runId>.json[.lock].<pid>.<hex>.tmp` and `.probe-<pid>-<hex>` — the
       // shapes an unclean death leaves behind, each carrying its owner's pid.
-      // A steal witness (`<runId>.json.lock.<ino>.tmp`) rides the same sweep:
-      // its pid field parses as NaN, so it is swept unconditionally, which is
-      // what keeps a death mid-steal from stranding a lock generation.
+      // A lock taken aside mid-steal or mid-release rides the same sweep — it
+      // is pid-stamped like the rest — which is what keeps a death between the
+      // `rename` and the `rm` from stranding a lock generation.
       const isTemp = name.endsWith(".tmp");
       const isProbe = name.startsWith(".probe-");
       if (!isTemp && !isProbe) continue;
@@ -695,53 +703,70 @@ export class RunRecordStore {
    * stealing on an unreadable body is how a live holder's lock gets taken out
    * from under it, and a dropped `keyHash` is worse than a 5s timeout.
    *
-   * The steal itself is compare-and-swap, not a bare `rm`: two contenders that
-   * both find the same corpse would otherwise both unlink and both claim, the
-   * second one's `rm` deleting the first one's LIVE lock. So the inode that was
-   * judged — read from one fd, so the body and the inode are the same
-   * generation — is hard-linked to a witness path derived from it. `link` is
-   * exclusive, so exactly one contender per generation is authorised to unlink,
-   * and the lock cannot change generation underneath it: changing it means
-   * unlinking it, which means winning the witness this process holds.
+   * TAKE, THEN COMPARE — `releaseLock`'s protocol exactly, and for the same
+   * reason. Judging the body and unlinking the path as two calls is a TOCTOU:
+   * between them the corpse can be cleared (by an operator, by another store's
+   * `cleanStaleTemps`, by the owner's pid coming back) and a NEW writer can
+   * legitimately claim the free path — and the `rm` would then delete that live
+   * writer's lock, letting two `setLocked` read-modify-writes overlap and drop
+   * a field. That is the lost update this lock exists to prevent, entered
+   * through the steal door instead of the release door.
+   *
+   * So the corpse is `rename`d aside in one step and only removed once the
+   * bytes held aside are provably the bytes that were judged dead. `rename`
+   * also makes the steal single-winner without a separate witness link: two
+   * contenders that both find the same corpse cannot both take it, because the
+   * loser's rename either finds nothing or takes a body it must put back.
+   *
+   * Comparing the BODY, not the inode: an unlinked corpse's inode number is
+   * free for the kernel to hand straight back to the new writer's lock file, so
+   * inode equality does not prove generation. The body carries a random nonce
+   * (see `withLock`), which does.
    */
   private stealIfOwnerGone(lock: string): boolean {
-    let fd: number;
-    try {
-      fd = openSync(lock, "r");
-    } catch {
-      return true; // the holder released it between our claim and this read
-    }
-    let ino: number;
     let raw: string;
     try {
-      ino = fstatSync(fd).ino;
-      raw = readFileSync(fd, "utf8");
-    } finally {
-      closeSync(fd);
+      raw = readFileSync(lock, "utf8");
+    } catch {
+      return true; // the holder released it between our claim and this read
     }
     const owner = Number(raw.trim().split(/\s+/)[0]);
     // See cleanStaleTemps: an owner that parsed as `0` must not read as alive.
     // Unparseable, empty or non-positive ⇒ held, wait — never stolen.
     if (!Number.isInteger(owner) || owner <= 0) return false;
     if (owner !== process.pid && isAlive(owner)) return false;
-    // `.tmp`-suffixed so a death between the link and the unlink below cannot
-    // strand the generation forever: cleanStaleTemps sweeps it (its pid field
-    // parses as NaN, i.e. no live owner) at the next store construction.
-    const witness = `${lock}.${ino}.tmp`;
+    this.beforeStealTake?.(lock);
+    // `.tmp`-suffixed and pid-stamped so a death between the take and the
+    // unlink cannot strand the generation: cleanStaleTemps sweeps it at the
+    // next store construction once this pid is gone.
+    const claimed = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     try {
-      linkSync(lock, witness);
+      renameSync(lock, claimed);
     } catch {
-      return false; // another contender owns this generation's steal, or it is gone
+      return true; // gone: the path is free, so retry the claim immediately
     }
+    let onDisk: string;
     try {
-      // The witness is a link to whatever `lock` pointed at when we linked it;
-      // a different inode means the lock moved on and is not ours to take.
-      if (statSync(witness).ino !== ino) return false;
-      rmSync(lock, { force: true });
-      return true;
-    } finally {
-      rmSync(witness, { force: true });
+      onDisk = readFileSync(claimed, "utf8");
+    } catch {
+      rmSync(claimed, { force: true });
+      return true; // took it and it is unreadable — it is off the path either way
     }
+    if (onDisk === raw) {
+      rmSync(claimed, { force: true });
+      return true; // provably the corpse that was judged
+    }
+    // A different body: the corpse was cleared and a NEW writer claimed the
+    // path between the judgement and the take. Put it back — `link`, never
+    // `rename`, so a claim made at the path while this one was held aside is
+    // not overwritten (EEXIST ⇒ that newer claim supersedes this body anyway).
+    try {
+      linkSync(claimed, lock);
+    } catch {
+      // any other errno is swept by cleanStaleTemps
+    }
+    rmSync(claimed, { force: true });
+    return false; // a live lock is HELD — wait, never steal
   }
 
   /**

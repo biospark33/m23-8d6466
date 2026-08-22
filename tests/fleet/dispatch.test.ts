@@ -629,6 +629,33 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expectInOrder(callOrder, "store.create", "driver.create", "mint", "sh-exec", "gate");
   });
 
+  test("a raw failure inside the provisioning step is typed and still names the runId", async () => {
+    // The create step STRADDLES the record: `provisionAdmittedRun` writes the
+    // run record first (INV-1), then the box. An untyped throw escaping from
+    // the second half carries no runId, so the CLI's failure line reported
+    // `runId: null` for a run an operator can see in `fleet status` — exactly
+    // when they need the id to tear it down.
+    driver.create = mock(() => Promise.reject(new Error("substrate refused the box")));
+    const brief = validBrief();
+    let err: FleetError | undefined;
+    try {
+      await dispatch(brief, deps());
+    } catch (e) {
+      err = e as FleetError;
+    }
+    expect(err).toBeInstanceOf(FleetError);
+    const e = err as FleetError;
+    expect(e.exitCode).toBe(1);
+    expect(e.message).toContain("substrate refused the box");
+    const runId = e.payload?.runId;
+    expect(typeof runId).toBe("string");
+    // Not merely non-null — the id must name the record that is really on disk.
+    expect(readdirSync(store.dir)).toContain(`${runId as string}.json`);
+    expect(e.payload?.teardownCommand).toBe(`bun scripts/fleet.ts teardown ${runId as string}`);
+    // `refuse` also files the refusal log line the dispatch-log evidence needs.
+    expect(refusalLines()).toHaveLength(1);
+  });
+
   // ─── Cap hand-off (AC9) ─────────────────────────────────────────────────────────
 
   test("AC9: mintRunKey receives cap === admittedCeilingMicroUsd", async () => {

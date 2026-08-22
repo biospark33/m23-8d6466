@@ -803,7 +803,11 @@ describe("concurrent set", () => {
     // including the lock a second writer legitimately holds after ours was
     // cleared by hand. That reopens the lost update from the other side.
     const id = "release-proof-run";
-    const lock = join(dir, `${id}.lock`);
+    // `${path(id)}.lock`, NOT `join(dir, id + ".lock")` — `path()` appends
+    // `.json`, so the shorter spelling names a file the lock code never touches
+    // and the assertion below only reads back what this test itself wrote.
+    const s0 = new RunRecordStore({ dir });
+    const lock = `${s0.path(id)}.lock`;
     const foreign = `${process.pid + 1} deadbeefcafe\n`;
     const s = new RunRecordStore({
       dir,
@@ -817,4 +821,37 @@ describe("concurrent set", () => {
     expect(readFileSync(lock, "utf8")).toBe(foreign);
     rmSync(lock, { force: true });
   });
+
+  test("a steal never unlinks a lock claimed after the corpse was cleared", () => {
+    // The steal-side twin of the test above, and the same lost update through
+    // the other door. `stealIfOwnerGone` judges a corpse, then removes it —
+    // and in between, the corpse can be cleared (an operator, another store's
+    // stale-temp sweep, the dead pid's number coming back) and a NEW writer can
+    // legitimately claim the now-free path. A bare `rm` there deletes that live
+    // writer's lock and lets two read-modify-writes overlap.
+    const id = "steal-proof-run";
+    const lock = `${store.path(id)}.lock`;
+    // `process.ppid` is a pid that is genuinely alive and is not ours, so every
+    // steal attempt AFTER the swap must judge this lock held and wait it out.
+    const live = `${process.ppid} deadbeefcafe\n`;
+    let swapped = false;
+    const s = new RunRecordStore({
+      dir,
+      beforeStealTake: () => {
+        if (swapped) return; // the claim loop retries; the window opens once
+        swapped = true;
+        rmSync(lock, { force: true });
+        writeFileSync(lock, live, { mode: 0o600 });
+      },
+    });
+    s.create(id);
+    writeFileSync(lock, "999999999\n", { mode: 0o600 }); // the corpse
+
+    // Fail-closed: the live lock is never stolen, so the write times out.
+    expect(() => s.set(id, { vmName: "box-5" })).toThrow(/timed out waiting for the run record lock/);
+    expect(swapped).toBe(true); // the window really opened
+    expect(readFileSync(lock, "utf8")).toBe(live); // the new writer's lock survived
+    expect(s.get(id).vmName).toBeUndefined(); // and its record was not overwritten
+    rmSync(lock, { force: true });
+  }, 15_000);
 });
