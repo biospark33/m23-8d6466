@@ -1849,6 +1849,76 @@ describe("status.ts (list timeout)", () => {
       );
     }
   });
+
+  // ─── the ONE deadline across the named lookup and its unfiltered retry ──────
+  //
+  // These two are a PAIR and only mean anything together: the first proves the
+  // retry still happens, the second proves it stops happening once the budget is
+  // gone. Either alone is satisfied by a broken implementation — delete the
+  // retry entirely and the second still passes; hand each attempt its own full
+  // `timeoutMs` and the first still passes.
+  //
+  // Both assert on the CALLS rather than on wall-clock elapsed. The call log
+  // distinguishes the two implementations exactly and never flakes, where a
+  // timing threshold tight enough to separate one wait from two would.
+  //
+  // `toStrictEqual`, NOT `toEqual`, and that is load-bearing: the fallback is
+  // invoked as `list(undefined)`, and `toEqual` treats `[runId, undefined]` as
+  // equal to `[runId]`. Written with `toEqual` the second test below passes
+  // against the very implementation it exists to reject — verified against the
+  // pre-fix code, which really does call twice (measured: 91 ms against a 50 ms
+  // bound) and really did go green.
+
+  test("a named lookup that ERRORS FAST still gets its unfiltered retry", async () => {
+    const runId = "retry-after-fast-error";
+    await provisionAdmittedRun(driver, store, { runId });
+
+    const calls: (string | undefined)[] = [];
+    const list = (name?: string): Promise<ProviderVm[]> => {
+      calls.push(name);
+      // The shape the retry was written for: `ls <name>` exiting non-zero for a
+      // box that is not there, which the driver surfaces as a THROW and which
+      // `listOwnedBoxesOnce` cannot tell from a real list failure. It costs
+      // almost none of the budget, so the second look is both affordable and the
+      // whole difference between "nothing matched" and "could not be asked".
+      if (name !== undefined) return Promise.reject(new Error("ls: no such box"));
+      return driver.list();
+    };
+
+    const row = await statusRun({ driver: { list }, store, listTimeoutMs: 1_000 }, runId);
+
+    expect(calls).toStrictEqual([runId, undefined]);
+    // And the retry is what ANSWERS — a fallback that fired but whose result was
+    // dropped would still satisfy the call log above.
+    expect(row.state).toBe("live");
+  });
+
+  test("a named lookup that EXHAUSTS the budget does not start the fallback", async () => {
+    const runId = "no-retry-after-timeout";
+    await provisionAdmittedRun(driver, store, { runId });
+
+    const calls: (string | undefined)[] = [];
+    const list = (name?: string): Promise<ProviderVm[]> => {
+      calls.push(name);
+      // Never settles, so the named lookup can only end at the deadline — and
+      // the deadline is then already spent.
+      return new Promise<ProviderVm[]>(() => {});
+    };
+
+    const row = await statusRun({ driver: { list }, store, listTimeoutMs: 50 }, runId);
+
+    // ONE call. A fallback started with a remaining budget of 0 would NOT have
+    // rejected immediately: `listWithTimeout` races the driver against
+    // `setTimeout(…, 0)`, and a zero-delay timer fires in a LATER timers phase,
+    // so a driver resolving before that callback wins the race and pushes the
+    // total past `timeoutMs` — the bound this deadline exists to hold.
+    //
+    // Nothing is lost by not trying. The named lookup timing out means the
+    // substrate is wedged, and the fallback is the same call WITHOUT the filter:
+    // strictly more work, against the same wedge.
+    expect(calls).toStrictEqual([runId]);
+    expect(row.state).toBe("boxUnknown");
+  });
 });
 
 describe("status.ts (statusRun)", () => {

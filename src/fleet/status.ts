@@ -227,18 +227,35 @@ async function listOwnedBoxes(
   name?: string,
 ): Promise<Map<string, ProviderVm> | null> {
   // ONE deadline across BOTH attempts. `timeoutMs` is the caller's bound on this
-  // function, and handing it to each call in turn silently doubled it: the named
-  // lookup timing out is the commonest way to reach the retry, so the path the
-  // retry exists to serve is exactly the one that spent 2 × the budget. A
-  // wedged substrate then held `fleet status` for twice as long as it asked for.
+  // function, and handing it to each call in turn silently doubled it: a wedged
+  // substrate held `fleet status` for twice as long as it asked for.
   const deadline = Date.now() + timeoutMs;
   const boxes = await listOwnedBoxesOnce(deps, timeoutMs, name);
   if (boxes !== null || name === undefined) return boxes;
-  // Exhausted budget still ATTEMPTS rather than short-circuiting to `null`:
-  // `listWithTimeout` races the driver against the timer, so a driver already
-  // holding the answer can still win at 0 ms — and a `null` returned without
-  // asking would claim "the substrate could not be asked" when it never was.
-  return listOwnedBoxesOnce(deps, Math.max(0, deadline - Date.now()));
+
+  const remaining = deadline - Date.now();
+  // NOTHING LEFT ⇒ do not start the fallback, and `null` is the honest answer.
+  //
+  // Two reasons, and the second is the load-bearing one:
+  //
+  //  - A remaining budget of 0 is not a 0ms timeout. `listWithTimeout` races
+  //    `driver.list()` against `setTimeout(…, 0)`, and a zero-delay timer does
+  //    not reject immediately — it rejects in a later timers phase. A driver
+  //    resolving before that callback runs WINS the race, so the fallback adds
+  //    elapsed time past the deadline and `timeoutMs` stops being a bound at all.
+  //  - The retry would be futile anyway. Reaching here with the budget gone
+  //    means the NAMED lookup timed out, and the fallback is the same call
+  //    without the filter — strictly more work against the same wedged
+  //    substrate. The case the retry was written for is the one documented
+  //    above: a named lookup that ERRORS FAST for a box that is not there
+  //    (`ls <name>` exiting non-zero), which leaves nearly the whole budget
+  //    intact and still gets its unfiltered second look.
+  //
+  // So this costs the retry nothing it could have delivered, and buys back the
+  // strict bound. `null` is also exactly right here: a lookup that timed out IS
+  // "the substrate could not be asked".
+  if (remaining <= 0) return null;
+  return listOwnedBoxesOnce(deps, remaining);
 }
 
 async function listOwnedBoxesOnce(
