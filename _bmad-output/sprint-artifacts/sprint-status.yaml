@@ -6,7 +6,10 @@
 # backlog is below (epics df1-df6); derivation decisions live in
 # docs/superpowers/specs/2026-08-11-v5-story-derivation-decisions.md.
 # 2026-08-18: v5-S1 COMPLETE — all 12 S1-tagged stories / 48 pts merged (last two: DF2.5 PR #115,
-# DF1.6 PR #116). DF backlog done-to-date: 13/31 stories, 53/123 pts.
+# DF1.6 PR #116). DF backlog done-to-date at that point: 13/31 stories, 53/123 pts.
+# 2026-08-22: DF4.1 (PR #124) and DF4.2 (PR #126) merged -> 18/31 stories, 72/123 pts.
+# NOTE: DF2.8 still reads ready-for-dev below while PR #121 is merged and its story file says
+# review — a known-stale line, deliberately left for a separate correction; it is NOT counted above.
 
 meta:
   prd: planning-artifacts/prd-qds-factory-v4.md
@@ -137,8 +140,8 @@ epics:
     points: 10
     stories_dir: sprint-artifacts/dark-factory-v5/stories
     stories:
-      DF4.1: { title: "Visualizer Port + Tunneled Auth Gate",                      points: 6, status: review, deps: [DF1.4, DF2.9] }  # v5-S3 — consumer of DF2.9's NOTICE sweep, which the vendored tree must keep green
-      DF4.2: { title: "Visualizer Test Suite from Zero, Bun-API Inventory, Per-Box Deploy", points: 4, status: review, deps: [DF4.1, DF2.2, DF1.4, DF1.6, DF2.3, DF2.5] }  # v5-S3
+      DF4.1: { title: "Visualizer Port + Tunneled Auth Gate",                      points: 6, status: done, deps: [DF1.4, DF2.9] }  # v5-S3 — consumer of DF2.9's NOTICE sweep, which the vendored tree must keep green. done 2026-08-21: PR #124 merged (65bc73b) after 7 review rounds
+      DF4.2: { title: "Visualizer Test Suite from Zero, Bun-API Inventory, Per-Box Deploy", points: 4, status: done, deps: [DF4.1, DF2.2, DF1.4, DF1.6, DF2.3, DF2.5] }  # v5-S3 — done 2026-08-22: PR #126 squash-merged (864ec19). One pre-PR review round (7 defects, incl. an inert coverage gate) + 3 post-PR bot rounds (19 findings across 95c5846/4dd3e57/7218975; 1 rejected — isNoSuchBox is already null-safe via its instanceof guard). Root fixes: stopVisualizer dropped the pidfile before confirming death, then still dropped it after SIGTERM survival (now SIGKILL-escalates and keeps the pidfile on an ALIVE outcome); deploy.ts hardcoded /tmp/qds-viz.pid against the exported constant; both deploy.ts catch blocks threw TypeError on a null rejection and swallowed the real failure; check-lcov.ts accepted NaN counters, then empty/whitespace counters coercing to 0 past the coverage floor. Provider-seam dependency inversion moved to src/providers/viz-guard.ts. MANDATORY real-box E2E remains UNPROVEN (exe.dev registration is interactive); root `bun run lint` red with 5 pre-existing errors; `bun run notice:sweep` exits 2 by contract. CodeRabbit hit its Fair Usage limit twice and gave verdicts as comment replies, so the PR carried no reviewDecision — merge was a human call on the evidence
   df5:
     name: Lights-on PR (§8 step 5)
     status: ready-for-dev

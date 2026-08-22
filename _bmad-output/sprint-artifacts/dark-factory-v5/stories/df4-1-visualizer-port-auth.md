@@ -4,7 +4,7 @@ baseline_commit: 31c4a0d20e015eee5ff2da3c7b5ccf0d06ca676f
 
 # DF4.1: Visualizer Port + Tunneled Auth Gate
 
-**Status:** review
+**Status:** done — merged 2026-08-21 via PR #124 (`65bc73b`)
 **Story Points:** 6
 **Sprint:** v5-S3
 
