@@ -23,14 +23,27 @@
  * recomputes a box-naming formula the factory does not use.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { listVerbs, renderHelp, type VerbEntry, type VerbFlag } from "../../src/fleet/verbs.ts";
-import { FleetError, statusAll, statusRun, type StatusDeps, type StatusRow } from "../../src/fleet/status.ts";
+import {
+  FLEET_ROW_ID,
+  FleetError,
+  statusAll,
+  statusRun,
+  type StatusDeps,
+  type StatusRow,
+} from "../../src/fleet/status.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { provisionAdmittedRun, SBX_OWNERSHIP_TAG, type ProviderVm } from "../../src/providers/driver.ts";
-import { RUN_ID_MAX, RunRecordStore, type RunRecord, type RunRecordPatch } from "../../src/providers/run-record.ts";
+import {
+  RUN_ID_MAX,
+  RUN_ID_RE,
+  RunRecordStore,
+  type RunRecord,
+  type RunRecordPatch,
+} from "../../src/providers/run-record.ts";
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
 
 /** Await a refusal and hand back the typed error — never a bare "something threw". */
@@ -96,6 +109,40 @@ function retagged(driver: FakeDriver, tag: string | null): StatusDeps["driver"] 
  * that verb has no path to. Membership in the documented set is the claim.
  */
 const DOCUMENTED_EXIT_CODES = [0, 1, 2, 3, 4, 5, 6];
+
+/**
+ * The flag lines rendered for ONE verb: everything between its summary line and
+ * its `Exit codes:` line. Scoped per verb deliberately — a flag name may legally
+ * be required on one verb and optional on another, so a whole-string search for
+ * `--dir` cannot say which entry it just read (and `--dir` is a prefix of
+ * `--driver`, which a substring search cannot tell apart at all).
+ */
+function flagLinesFor(help: string, verb: string): string[] {
+  const lines = help.split("\n");
+  const start = lines.findIndex((l) => l.startsWith(`  ${verb} `));
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = lines.findIndex((l, i) => i > start && l.includes("Exit codes:"));
+  expect(end).toBeGreaterThan(start);
+  return lines.slice(start + 1, end).map((l) => l.trim());
+}
+
+/**
+ * Every flag on its OWN line, paired with its OWN valueType and its OWN
+ * required/optional word.
+ *
+ * `toContain("required")` was satisfied by the ternary INVERTED (the one
+ * synthetic flag was required, so the word appeared either way) and by a
+ * renderer that emitted `--brief (string, required)` / `--driver (path,
+ * optional)` — the tokens landed in the string, just not on the right lines.
+ * The pairing is the claim: `required` is what DF3.5 turns into a generated
+ * skill's call signature, and an optional `--driver` generates a skill whose
+ * every call exits 2.
+ */
+function expectFlagLines(help: string, entry: VerbEntry): void {
+  expect(flagLinesFor(help, entry.verb)).toEqual(
+    entry.flags.map((f) => `${f.name} (${f.valueType}, ${f.required ? "required" : "optional"})`),
+  );
+}
 
 describe("verbs.ts (registry)", () => {
   test("listVerbs returns exactly 4 entries", () => {
@@ -191,8 +238,14 @@ describe("verbs.ts (registry)", () => {
     // `transient`, but the work here already landed and a retry only re-hits the
     // wedged lock. `status` cannot reach it — it takes neither lock nor ledger.
     // Demonstrated, not merely declared: see the exit-6 probes below.
-    harvest: [0, 1, 2, 4, 6],
-    teardown: [0, 1, 2, 4, 6],
+    //
+    // 5 = the run lock refused, so the verb never ran. Also deliberately not 1,
+    // and for the mirror-image reason: `transient` tells automation to retry, and
+    // for a STALE lock nothing will ever clear it. 5 is "refused before
+    // provisioning", which is exactly what an acquire refusal is — the throw sits
+    // between the record probe and any mutation. Demonstrated by the lock probes.
+    harvest: [0, 1, 2, 4, 5, 6],
+    teardown: [0, 1, 2, 4, 5, 6],
   };
 
   for (const verb of ["dispatch", "status", "harvest", "teardown"]) {
@@ -218,17 +271,21 @@ describe("verbs.ts (registry)", () => {
       {
         verb: "syntheticverb",
         summary: "a verb that exists only in this test",
-        flags: [{ name: "--synthetic", required: true, valueType: "path" }],
+        // BOTH polarities, because one required flag makes `required ? … : …`
+        // pass with the ternary INVERTED — and `required` is what DF3.5 generates
+        // a skill's call signature from.
+        flags: [
+          { name: "--synthetic", required: true, valueType: "path" },
+          { name: "--optional", required: false, valueType: "string" },
+        ],
         exitCodes: [7],
       },
     ];
     const help = renderHelp(synthetic);
     expect(help).toContain("syntheticverb");
     expect(help).toContain("a verb that exists only in this test");
-    expect(help).toContain("--synthetic");
-    expect(help).toContain("path");
-    expect(help).toContain("required");
     expect(help).toContain("7");
+    expectFlagLines(help, synthetic[0]!);
 
     // ONE rendered entry, because one was handed over — a body that ignores
     // `registry` renders four. This is the primary signal and it cannot be
@@ -257,8 +314,14 @@ describe("verbs.ts (registry)", () => {
     for (const entry of registry) {
       expect(help).toContain(entry.verb);
       expect(help).toContain(entry.summary);
-      for (const flag of entry.flags) expect(help).toContain(flag.name);
+      // Name AND valueType AND polarity, on the same line, for every flag —
+      // the old `toContain(flag.name)` said nothing about the other two columns.
+      expectFlagLines(help, entry);
       expect(help).toContain(entry.exitCodes.join(", "));
+      // Both polarities really are exercised on every verb, so the pairing above
+      // cannot be satisfied by an inverted ternary.
+      expect(entry.flags.some((f) => f.required)).toBe(true);
+      expect(entry.flags.some((f) => !f.required)).toBe(true);
     }
     // Anchored to the FIRST line. `/Usage:|usage:|FLAGS/i` was satisfied by the
     // word "usage" appearing anywhere — including inside a summary — so losing
@@ -353,6 +416,24 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     });
   };
 
+  /**
+   * A foreign, LIVE holder's claim at `<store.dir>/<runId>.lock`, in the body
+   * layout `acquireRunLock` writes (`<pid> <host> <ISO> <nonce>`) — our own pid
+   * and this host, so `refuse()` reads the holder as alive rather than stale.
+   * That is the acquire refusal, and the CLI owes exit 5 for it: the throw sits
+   * between the record probe and any mutation, so nothing was touched, and exit
+   * 1 would stamp it `transient` and tell automation to retry a lock that (in
+   * the stale case) nothing will ever clear.
+   *
+   * Written by hand rather than by calling `acquireRunLock`: this process would
+   * then hold it, and the release inside the verb's `finally` would be a real
+   * release of a lock the test still owns.
+   */
+  const holdRunLock = (runId: string): void => {
+    const host = hostname().replace(/\s+/g, "_") || "unknown-host";
+    writeFileSync(join(store.dir, `${runId}.lock`), `${process.pid} ${host} ${new Date().toISOString()} beefcafe\n`);
+  };
+
   interface Probe {
     argv: string[];
     /**
@@ -369,6 +450,8 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     stdout?: string;
     /** A run to provision first, so the probe has something real to act on. */
     provision?: string;
+    /** Filesystem set-up run after the provisioning and before the invocation. */
+    before?: () => void;
   }
 
   /** Invocations whose refusal (or success) each verb can really produce. */
@@ -395,6 +478,16 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         deps: () => ({ driver, store: unlistableStore() }),
         stderr: "record-store-unreadable",
       },
+      // The SINGLE-run path's exit 1, which `unlistableStore` cannot reach (it
+      // fails `list()`, i.e. statusAll). Without it, widening statusRun's ENOENT
+      // check would make `fleet status <id>` answer "No run record" / exit 4 for
+      // a run whose record is merely unreadable, while its box is alive and spending.
+      {
+        argv: ["status", "some-run"],
+        code: 1,
+        deps: () => ({ driver, store: unreadableStore() }),
+        stderr: "record-read-failed",
+      },
     ],
     harvest: [
       { argv: ["harvest"], code: 2, stderr: "requires <run-id>" },
@@ -419,6 +512,13 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         stdout: "harvested: ",
         stderr: "lock-release-failed",
       },
+      {
+        argv: ["harvest", "harvest-locked"],
+        code: 5,
+        provision: "harvest-locked",
+        before: () => holdRunLock("harvest-locked"),
+        stderr: "run-locked",
+      },
     ],
     teardown: [
       { argv: ["teardown"], code: 2, stderr: "requires <run-id>" },
@@ -441,6 +541,13 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         stdout: "torn down: ",
         stderr: "lock-release-failed",
       },
+      {
+        argv: ["teardown", "teardown-locked"],
+        code: 5,
+        provision: "teardown-locked",
+        before: () => holdRunLock("teardown-locked"),
+        stderr: "run-locked",
+      },
     ],
   };
 
@@ -449,20 +556,69 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
    * The ⊇ direction is scoped around exactly these and nothing else: a precise
    * partial check beats a total one that a verb declaring [0,1,2,3,4,5] passes.
    */
-  const ONLY_REACHABLE_ELSEWHERE: Record<string, { code: number; why: string }[]> = {
+  const ONLY_REACHABLE_ELSEWHERE: Record<string, { code: number; why: string; coveredBy: string }[]> = {
     dispatch: [
       // Every one of these needs the full dispatch wiring — keyApi, ledgerFactory,
       // setupGate, a valid brief — which is tests/fleet/cli.test.ts's subject, not
-      // this file's. They are covered there (exit 0, 1, 3 and 5 respectively).
-      { code: 0, why: "needs a keyApi + ledgerFactory + valid brief — cli.test.ts" },
-      { code: 1, why: "needs a provider failure mid-dispatch — cli.test.ts" },
-      { code: 3, why: "needs a failing setup gate — cli.test.ts" },
-      { code: 5, why: "needs a budget refusal before provisioning — cli.test.ts" },
+      // this file's. `coveredBy` names the test that owes the code; the check below
+      // asserts each title still exists there, so the excuse cannot outlive its test.
+      {
+        code: 0,
+        why: "needs a keyApi + ledgerFactory + valid brief — cli.test.ts",
+        coveredBy: "e2e: dispatch → status → teardown against the fake driver",
+      },
+      {
+        code: 1,
+        why: "needs a provider failure mid-dispatch — cli.test.ts",
+        coveredBy: "a throw that is not an Error still reports exit 1 with a message",
+      },
+      {
+        code: 3,
+        why: "needs a failing setup gate — cli.test.ts",
+        coveredBy: "setup-gate failure → exit 3 with the assertion code, box ALIVE and record OPEN (INV-5)",
+      },
+      {
+        code: 5,
+        why: "needs a budget refusal before provisioning — cli.test.ts",
+        coveredBy: "an over-budget issue → exit 5 refused BEFORE provisioning (AC7)",
+      },
     ],
     status: [],
     harvest: [],
     teardown: [],
   };
+
+  /**
+   * The allowlist above excuses 4 of dispatch's 5 declared codes, which reduces
+   * the ⊇ direction to `{2}` for that verb — honest only while the tests it
+   * defers to exist. Nothing BOUND the excuse to them: deleting a cli.test.ts
+   * case left this file green with `dispatch` advertising an unreachable code to
+   * DF3.5's generated skill.
+   *
+   * The binding this file can make from the outside is the test TITLE: read the
+   * sibling suite and require the named case to still be in it. Not a run of that
+   * test (bun owns that) and not proof it asserts the code — but a deletion or a
+   * rename now turns this red, which is the failure mode that shipped.
+   */
+  test("every excused exit code names a cli.test.ts case that still exists", () => {
+    const cli = readFileSync(join(import.meta.dir, "cli.test.ts"), "utf8");
+    const missing: string[] = [];
+    for (const [verb, excuses] of Object.entries(ONLY_REACHABLE_ELSEWHERE)) {
+      for (const { code, coveredBy } of excuses) {
+        // The title as `test(...)` writes it, not a loose substring: a comment
+        // mentioning the name must not stand in for the case itself.
+        if (!cli.includes(`test(${JSON.stringify(coveredBy)}`)) {
+          missing.push(`${verb} exit ${code}: no test named ${JSON.stringify(coveredBy)} in cli.test.ts`);
+        }
+      }
+    }
+    expect(missing).toEqual([]);
+    // …and every excuse names one: an entry with an empty `coveredBy` would pass
+    // a substring check against any file.
+    for (const excuses of Object.values(ONLY_REACHABLE_ELSEWHERE)) {
+      for (const e of excuses) expect(e.coveredBy.length).toBeGreaterThan(0);
+    }
+  });
 
   test("the declared exitCodes and the codes the CLI really returns are the SAME set", async () => {
     for (const entry of listVerbs()) {
@@ -472,6 +628,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         if (probe.provision !== undefined) {
           await provisionAdmittedRun(driver, store, { runId: probe.provision });
         }
+        probe.before?.();
         const deps = probe.deps?.() ?? { driver, store, readBrief: async () => "{not json" };
         const res = await invoke(probe.argv, deps);
         observed.push(res.code);
@@ -551,7 +708,15 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
     // it would swallow the run id and teardown would refuse as "requires
     // <run-id>" (exit 2); reaching run-not-found (4) proves the id survived.
     expect(await run(["teardown", "--no-harvest", "no-such-run"], sink, deps, sink)).toBe(4);
-    expect(await run(["status", "--help", "no-such-run"], sink, deps, sink)).toBe(0);
+
+    // The OUTPUT, not the code: both hypotheses exit 0 here. A value-taking
+    // `--help` would swallow "no-such-run", leaving `status` with no positionals
+    // over an empty store — which prints nothing and exits 0, exactly like the
+    // help path. Only the usage text tells them apart.
+    const out: string[] = [];
+    expect(await run(["status", "--help", "no-such-run"], (s) => void out.push(s), deps, sink)).toBe(0);
+    expect(out.join("")).toContain("Usage: fleet ");
+    expect(out.join("")).toContain("status");
   });
 
   test("a flag the registry does not give a verb is refused, per verb", async () => {
@@ -621,7 +786,10 @@ describe("status.ts (statusAll join logic)", () => {
     expect(listSpy).toHaveBeenCalled();
   });
 
-  test("closed + destroyed box → 'closed' with no boxAlive", async () => {
+  test("closed + destroyed box → 'closed' with boxAlive FALSE (confirmed gone, not unknown)", async () => {
+    // `false`, not absent: the driver answered. Absence is reserved for "the
+    // substrate could not be reached", which the boxUnknown case below pins —
+    // conflating the two reported every list failure as confirmed-destroyed.
     const runId = "test-closed-gone";
     const rec = await provision(runId);
     await driver.destroy(rec.vmName!);
@@ -630,7 +798,32 @@ describe("status.ts (statusAll join logic)", () => {
     const rows = await statusAll({ driver, store, listTimeoutMs: 1000 });
     expect(rows).toHaveLength(1);
     expect(rows[0]!.state).toBe("closed");
-    expect(rows[0]!).not.toHaveProperty("boxAlive");
+    expect(rows[0]!.boxAlive).toBe(false);
+  });
+
+  test("closed + list FAILS → 'closed' with boxAlive ABSENT (the box may still be billing)", async () => {
+    const runId = "test-closed-unknown";
+    const rec = await provision(runId);
+    await driver.destroy(rec.vmName!);
+    store.close(runId);
+
+    const rows = await statusAll({
+      driver: {
+        list: async (): Promise<ProviderVm[]> => {
+          throw new Error("list down");
+        },
+      },
+      store,
+      listTimeoutMs: 1000,
+    });
+    const closed = rows.find((r) => r.runId === runId)!;
+    expect(closed.state).toBe("closed");
+    expect(closed).not.toHaveProperty("boxAlive");
+    // The other zero-`boxUnknown` fleet: every record CLOSED. No open record
+    // means no boxUnknown row, so without the fleet-level row the outage is
+    // invisible again — a clean-looking exit 0 over an unlistable substrate.
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.runId === FLEET_ROW_ID)!.state).toBe("listUnavailable");
   });
 
   test("open + vmName unset + no box → boxMissing", async () => {
@@ -674,9 +867,10 @@ describe("status.ts (statusAll join logic)", () => {
     const hangingDriver = { list: () => new Promise<ProviderVm[]>(() => {}) };
     const rows = await statusAll({ driver: hangingDriver, store, listTimeoutMs: 5 });
 
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.state).toBe("boxUnknown");
-    expect(rows[0]!.runId).toBe(runId);
+    // The record row PLUS the unconditional listUnavailable row (see below).
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.runId === runId)!.state).toBe("boxUnknown");
+    expect(rows.find((r) => r.runId === FLEET_ROW_ID)!.state).toBe("listUnavailable");
   });
 
   test("open + list throws → boxUnknown", async () => {
@@ -690,9 +884,9 @@ describe("status.ts (statusAll join logic)", () => {
     };
     const rows = await statusAll({ driver: throwingDriver, store, listTimeoutMs: 1000 });
 
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.state).toBe("boxUnknown");
-    expect(rows[0]!.runId).toBe(runId);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.runId === runId)!.state).toBe("boxUnknown");
+    expect(rows.find((r) => r.runId === FLEET_ROW_ID)!.state).toBe("listUnavailable");
   });
 
   test("non-array driver reply degrades to boxUnknown, never a TypeError", async () => {
@@ -702,8 +896,40 @@ describe("status.ts (statusAll join logic)", () => {
     const nonArrayDriver = { list: async (): Promise<ProviderVm[]> => ({}) as unknown as ProviderVm[] };
     const rows = await statusAll({ driver: nonArrayDriver, store, listTimeoutMs: 1000 });
 
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.state).toBe("boxUnknown");
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.runId === runId)!.state).toBe("boxUnknown");
+    expect(rows.find((r) => r.runId === FLEET_ROW_ID)!.state).toBe("listUnavailable");
+  });
+
+  test("a list failure is VISIBLE with zero records — an empty fleet and an unreachable one differ", async () => {
+    // The whole reason the row exists. `boxUnknown` only ever attaches to an
+    // OPEN record, so with nothing on disk (or with every record closed) a total
+    // listing failure produced `[]` — byte-identical to a healthy empty fleet,
+    // and an exit 0 telling the operator the fleet is clean while every box in
+    // it kept billing.
+    const downDriver = {
+      list: async (): Promise<ProviderVm[]> => {
+        throw new Error("substrate unreachable");
+      },
+    };
+    expect(await statusAll({ driver, store, listTimeoutMs: 1000 })).toEqual([]);
+
+    const rows = await statusAll({ driver: downDriver, store, listTimeoutMs: 1000 });
+    expect(rows).toEqual([{ runId: FLEET_ROW_ID, state: "listUnavailable" }]);
+  });
+
+  test("the listUnavailable row's id can never collide with a real run id", async () => {
+    // It is the row's identity in a stream keyed by runId, so a collision would
+    // let a run masquerade as the fleet-level failure (and vice versa).
+    expect(RUN_ID_RE.test(FLEET_ROW_ID)).toBe(false);
+  });
+
+  test("a healthy list emits NO listUnavailable row", async () => {
+    // Without this the row could be unconditional and every case above still
+    // passes by name lookup.
+    await provision("test-no-false-alarm");
+    const rows = await statusAll({ driver, store, listTimeoutMs: 1000 });
+    expect(rows.some((r) => r.state === "listUnavailable")).toBe(false);
   });
 
   test("store.list() failure surfaces as a typed FleetError, not a bare throw", async () => {
@@ -796,8 +1022,9 @@ describe("status.ts (statusAll join logic)", () => {
       store,
       listTimeoutMs: 1000,
     });
-    expect(unknownRows).toHaveLength(3);
-    for (const row of unknownRows) {
+    // 3 record rows + the fleet-level listUnavailable row.
+    expect(unknownRows).toHaveLength(4);
+    for (const row of unknownRows.filter((r) => r.runId !== FLEET_ROW_ID)) {
       expect(row.state).toBe(row.runId === "cost-closed" ? "closed" : "boxUnknown");
       expect(row.spendMicroUsd).toBe(123456);
       expect(row.limitMicroUsd).toBe(500000);
@@ -892,6 +1119,42 @@ describe("status.ts (statusAll join logic)", () => {
     expect(rows[0]!.state).toBe("live");
   });
 
+  test("a box named differently from its run: claimed by vmName, live, never ALSO an orphan", async () => {
+    // Nothing else in this file produces `vmName !== runId` — provisioning names
+    // the box after the run — so three branches in status.ts were dead in test:
+    // the two-name join, the `claimed.add(rec.vmName)` sweep, and (in statusRun)
+    // the list filter. A renamed box is exactly the one that keeps billing while
+    // every row claims boxMissing.
+    const runId = "renamed-box-run";
+    const rec = await provision(runId);
+    await driver.destroy(rec.vmName!); // nothing answers to the run id any more
+    await driver.create("box-under-another-name", SBX_OWNERSHIP_TAG);
+    store.set(runId, { vmName: "box-under-another-name" });
+
+    const rows = await statusAll({ driver, store, listTimeoutMs: 1000 });
+    // ONE row. Dropping `rec.vmName` from the join names reports boxMissing for a
+    // box that is alive; dropping `claimed.add(rec.vmName)` reports that same box
+    // a second time as an orphan, so the fleet appears to hold two of them.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.state).toBe("live");
+    expect(rows[0]!.vmName).toBe("box-under-another-name");
+    expect(rows.filter((r) => r.state === "orphan")).toHaveLength(0);
+  });
+
+  test("vmName names a box that is gone while one lives under the run id → live", async () => {
+    // The other half of the `[vmName, runId]` join: dropping `runId` from it is
+    // invisible while every fixture has the two equal.
+    const runId = "vmname-elsewhere";
+    await provision(runId); // the box IS named after the run
+    store.set(runId, { vmName: "a-box-that-was-renamed-away" });
+
+    const rows = await statusAll({ driver, store, listTimeoutMs: 1000 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.state).toBe("live");
+    // The record's own name still identifies the box — it is what the record says.
+    expect(rows[0]!.vmName).toBe("a-box-that-was-renamed-away");
+  });
+
   test("crash window: open record with no vmName but a live box under the run id → live", async () => {
     // INV-1's window: `driver.create` returned, the `set({vmName})` never landed.
     const runId = "crash-window-run";
@@ -956,9 +1219,12 @@ describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", 
     expect(rec.vmName).toBeUndefined();
   });
 
-  test("a failed budget-extension write leaves the record OPEN and no box behind", async () => {
-    // Same reasoning one step earlier. Nothing billable exists yet, so the only
-    // thing at stake is whether the record survives to be swept.
+  test("a failed budget-extension write REMOVES the record so the reservation can expire", async () => {
+    // The OPPOSITE call from the sibling above, and for the same money reason.
+    // `store.create`'s O_EXCL has only won the id: `driver.create` has not run,
+    // so nothing billable exists and there is no box to keep the record as a
+    // handle for. What the record WOULD do is resolve with no `extensions.budget`
+    // — and that pins the issue's cap forever (see below).
     const runId = "budget-write-fails";
     const failing = Object.assign(Object.create(driver) as FakeDriver, {
       create: async (): Promise<ProviderVm> => {
@@ -984,9 +1250,10 @@ describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", 
     }
     expect(err.message).toContain("record write failed");
 
-    const rec = store.get(runId);
-    expect(rec.closedAt).toBeUndefined();
-    expect(rec.vmName).toBeUndefined();
+    // REMOVED, not left open: a record that resolves with no extensions.budget
+    // pins the issue's cap forever (the orphan guard expires only an admission
+    // whose record does not resolve; only a priced cost_event retires one).
+    expect(() => store.get(runId)).toThrow(/ENOENT/);
     expect(await driver.list(runId)).toEqual([]);
   });
 });
@@ -1268,6 +1535,25 @@ describe("status.ts (statusRun)", () => {
     expect(row.state).toBe("boxUnknown");
   });
 
+  test("a record whose box carries another name is listed UNFILTERED, and reads live", async () => {
+    // The filter branch: `list(runId)` cannot see a box that is not named after
+    // the run, so hardcoding `rec.runId` there reports boxMissing while the box
+    // bills on — and no test constructed the join, because provisioning always
+    // names the box after the run.
+    const runId = "single-renamed-box";
+    const rec = await provision(runId);
+    await driver.destroy(rec.vmName!);
+    await driver.create("some-other-box-name", SBX_OWNERSHIP_TAG);
+    store.set(runId, { vmName: "some-other-box-name" });
+
+    const listSpy = mock((name?: string) => driver.list(name));
+    const row = await statusRun({ driver: { list: listSpy }, store, listTimeoutMs: 1000 }, runId);
+
+    expect(listSpy).toHaveBeenCalledWith(undefined); // the whole fleet, not one name
+    expect(row.state).toBe("live");
+    expect(row.vmName).toBe("some-other-box-name");
+  });
+
   test("crash window: no vmName but a live box under the run id → live", async () => {
     const runId = "single-crash-window";
     store.create(runId);
@@ -1291,10 +1577,13 @@ describe("status.ts (statusRun)", () => {
     expect(row.state).toBe("closed");
     expect(row.runId).toBe(runId);
     expect(row.boxAlive).toBe(true);
-    expect(listSpy).toHaveBeenCalled();
+    // WITH the run id: when the two candidate names agree, the driver's own name
+    // filter is used rather than paging the whole fleet. `toHaveBeenCalled()`
+    // alone could not tell that apart from an unfiltered list.
+    expect(listSpy).toHaveBeenCalledWith(runId);
   });
 
-  test("closed record whose box is gone → closed with boxAlive absent", async () => {
+  test("closed record whose box is gone → closed with boxAlive FALSE (the driver answered)", async () => {
     const runId = "test-closed-destroyed";
     const rec = await provision(runId);
     await driver.destroy(rec.vmName!);
@@ -1302,6 +1591,57 @@ describe("status.ts (statusRun)", () => {
 
     const row = await statusRun({ driver, store, listTimeoutMs: 1000 }, runId);
     expect(row.state).toBe("closed");
+    expect(row.boxAlive).toBe(false);
+  });
+
+  test("closed record + list failure → closed with boxAlive ABSENT (nothing is known)", async () => {
+    const runId = "test-closed-listdown";
+    const rec = await provision(runId);
+    await driver.destroy(rec.vmName!);
+    store.close(runId);
+
+    const row = await statusRun(
+      {
+        driver: {
+          list: async (): Promise<ProviderVm[]> => {
+            throw new Error("list down");
+          },
+        },
+        store,
+        listTimeoutMs: 1000,
+      },
+      runId,
+    );
+    expect(row.state).toBe("closed");
     expect(row).not.toHaveProperty("boxAlive");
+  });
+
+  test("a CORRUPT record refuses as a typed exit-1, never a raw rethrow", async () => {
+    // `readRecord` throws a bare `Error("malformed run record …")` with no
+    // `code`, so the old `throw e` escaped untyped and `report()` printed a
+    // stack dump. Every sibling path types this: statusAll's
+    // record-store-unreadable, harvest/teardown's record-read-failed.
+    const runId = "test-corrupt-record";
+    store.create(runId); // record only — no box, so the driver has nothing to add
+    writeFileSync(join(dir, "runs", `${runId}.json`), "{ not json");
+
+    const err = await refusal(statusRun({ driver, store, listTimeoutMs: 1000 }, runId), 1, "record-read-failed");
+    expect(err.message).toContain(runId);
+    // NOT `orphan`: a record exists, so the box is claimed and an orphan row
+    // would report exit 0 while denying the corruption the operator must fix.
+    expect(err.remediation).not.toMatch(/STILL LIVE/);
+  });
+
+  test("a corrupt record over a LIVE box says so — the box is billing and undiscoverable otherwise", async () => {
+    // The second loss the raw rethrow caused: the driver was never consulted, so
+    // the box that record owns stayed invisible on the one query an operator
+    // types when they already know the run id.
+    const runId = "test-corrupt-live";
+    await provision(runId); // a REAL box, named after the run id
+    writeFileSync(join(dir, "runs", `${runId}.json`), "{ not json");
+
+    const err = await refusal(statusRun({ driver, store, listTimeoutMs: 1000 }, runId), 1, "record-read-failed");
+    expect(err.remediation).toContain(runId);
+    expect(err.remediation).toMatch(/STILL LIVE/);
   });
 });

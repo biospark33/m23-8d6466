@@ -19,7 +19,7 @@ export interface StatusRow {
    * precisely what the documented union exists to surface (it has no record,
    * hence no createdAt: the field is ABSENT and the row sorts first).
    */
-  state: "live" | "boxMissing" | "boxUnknown" | "closed" | "orphan";
+  state: "live" | "boxMissing" | "boxUnknown" | "closed" | "orphan" | "listUnavailable";
   /**
    * INV-4-bis's cross-layer join key, straight off the record — the id that ties
    * this run's dispatch ack, driver lines and record writes together in the log
@@ -31,9 +31,15 @@ export interface StatusRow {
   vmName?: string;
   httpsUrl?: string;
   /**
-   * Set only on a `closed` row whose box the substrate still reports. Teardown
-   * destroys before it closes, so a closed record over a live box means the
-   * destroy never landed and the box is still billing.
+   * Tri-state on a `closed` row, and set only there:
+   *  - `true`  — the substrate still reports the box. Teardown destroys before
+   *    it closes, so a closed record over a live box means the destroy never
+   *    landed and the box is still billing.
+   *  - `false` — the substrate answered and the box is gone (the normal case).
+   *  - ABSENT  — the substrate could not be reached, so nothing is known.
+   *
+   * `false` and absent were one value until round 4, which meant every list
+   * failure silently reported the still-billing case as confirmed-destroyed.
    */
   boxAlive?: boolean;
   /**
@@ -187,7 +193,11 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
       ...base,
       state: "closed",
       closedAt: rec.closedAt,
-      ...(box === undefined ? {} : { boxAlive: true }),
+      // The same `boxes === null ⇒ no evidence` rule the open rows get below.
+      // Omitted (not `false`) on a list failure: a closed record whose destroy
+      // never landed must not read as confirmed-destroyed just because the
+      // substrate was unreachable.
+      ...(boxes === null ? {} : { boxAlive: box !== undefined }),
     };
   }
 
@@ -212,6 +222,30 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
  */
 function orphanRow(vm: ProviderVm): StatusRow {
   return { runId: vm.name, state: "orphan", vmName: vm.name, httpsUrl: vm.httpsUrl };
+}
+
+/**
+ * Identity of the one non-run row `statusAll` can emit. Parenthesised so it can
+ * never collide with a real run id: `RUN_ID_RE` admits only `[a-z0-9-]`.
+ */
+export const FLEET_ROW_ID = "(fleet)";
+
+/**
+ * The substrate could not be listed — emitted by `statusAll` whenever
+ * `driver.list()` failed or timed out, no matter how many records exist.
+ *
+ * `boxUnknown` alone could not carry this: it only ever attaches to an OPEN
+ * record, so with no records on disk (or with every record closed) a total
+ * listing failure produced an empty row set — byte-identical to a healthy empty
+ * fleet, and an exit 0 telling the operator the fleet is clean while every box
+ * in it kept billing. This row exists so the failure is in the output on every
+ * one of those paths.
+ *
+ * No `createdAt`, so it sorts first for the same reason `orphan` does: it is the
+ * row that invalidates every other row's box column.
+ */
+function listUnavailableRow(): StatusRow {
+  return { runId: FLEET_ROW_ID, state: "listUnavailable" };
 }
 
 /** Newest-first by createdAt, `runId` breaking ties so the order is total. */
@@ -261,7 +295,12 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
 
   const rows: StatusRow[] = records.map((rec) => rowForRecord(rec, boxes));
 
-  if (boxes !== null) {
+  if (boxes === null) {
+    // Unconditional, and NOT folded into the per-record rows: the orphan sweep
+    // below is the half of the union that never runs on a list failure, and with
+    // no open record there is no `boxUnknown` row either. See listUnavailableRow.
+    rows.push(listUnavailableRow());
+  } else {
     // Claim by both names, same as reapRuns — including CLOSED records, whose
     // live box is already reported on its own row as closed + boxAlive.
     const claimed = new Set<string>();
@@ -281,8 +320,9 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
 }
 
 /**
- * Single-run status. Validates runId (path safety), throws typed error only
- * when NEITHER a record nor a box exists for the id.
+ * Single-run status. Validates runId (path safety); refuses with a typed error
+ * when the record is ABSENT and no box answers to the id (4), or when the record
+ * is present but unreadable (1) — never untyped, on either path.
  *
  * Mutates NOTHING when not found — the driver is read, never written. It is
  * read because the record and the box are separately losable: the box outlives
@@ -308,14 +348,21 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
     // Optional chain, not a bare cast: a `throw null` must not become a
     // TypeError in the handler that is supposed to classify it.
     const code = (e as NodeJS.ErrnoException | null)?.code;
+
+    // Either way the record is unusable, and either way the box it owns may be
+    // live and BILLING — so the driver is consulted before anything is said
+    // about the run. `readRecord` throws a bare `Error("malformed run record
+    // X.json: …")` with NO `code` on the JSON.parse/assertWellFormed paths, so
+    // the old `throw e` sent a corrupt record out untyped: an exit-1 stack dump
+    // from `report()`, with the driver never asked.
+    const boxes = await listOwnedBoxes(deps, timeoutMs, runId);
+    const box = boxes?.get(runId);
+
     if (code === "ENOENT") {
-      // No record is not the same as no box. Ask the substrate under the run id
-      // — the name `createRun` gives the box — before denying it exists. A hit
-      // is the `orphan` state, i.e. the unattributed spend this verb exists to
-      // surface; a list failure is NOT a hit, so it still refuses as 4 rather
-      // than inventing a box out of a timeout.
-      const boxes = await listOwnedBoxes(deps, timeoutMs, runId);
-      const box = boxes?.get(runId);
+      // No record is not the same as no box. The box is named after the run id
+      // by `createRun`, so a hit is the `orphan` state — the unattributed spend
+      // this verb exists to surface. A list failure is NOT a hit, so it still
+      // refuses as 4 rather than inventing a box out of a timeout.
       if (box !== undefined) return orphanRow(box);
       throw new FleetError(
         4,
@@ -324,7 +371,20 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
         "Check the run ID or create the run first",
       );
     }
-    throw e;
+
+    // Present-but-unreadable is NOT `orphan`: a record exists, so the box is
+    // claimed and the row would deny the corruption the operator has to fix.
+    // Typed like every sibling — `statusAll`'s record-store-unreadable and
+    // harvest/teardown's record-read-failed — and the box verdict rides in the
+    // remediation, since exit 1 is the only way the operator hears it.
+    throw new FleetError(
+      1,
+      "record-read-failed",
+      `Run record for ${runId} could not be read: ${(e as Error | null)?.message ?? String(e)}`,
+      box !== undefined
+        ? `The box ${box.name} is STILL LIVE and billing behind that record — repair the record in place, then \`fleet teardown ${runId}\`; do not re-create the run`
+        : "Repair or move the record file named in the message, then re-run `fleet status`; a box may still sit behind it, so inspect before re-creating the run",
+    );
   }
 
   // One run, one box: use the driver's own name filter rather than paging the

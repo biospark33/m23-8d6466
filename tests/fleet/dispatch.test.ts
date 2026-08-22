@@ -28,10 +28,11 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import * as YAML from "yaml";
 
 import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
@@ -67,6 +68,26 @@ const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
 
 /** The dispatch wall-clock ceiling `DispatchDeps.timeoutMs` defaults to. */
 const DEFAULT_TIMEOUT_MS = 600_000;
+
+/**
+ * The manifest path every brief here carries, RELATIVE to the containment root
+ * (`deps().repoRoot`, the case's tmpdir).
+ *
+ * The schema refuses an ABSOLUTE `manifestPath` outright, because
+ * `resolve(repoRoot, "/etc/shadow")` discards the root — absoluteness, not a
+ * `..` segment, was the containment hole, and relative-with-no-`..` is
+ * contained beneath any root at all. Dispatch resolves this against
+ * `deps.repoRoot`, which is what makes it land on the file `validBrief` wrote.
+ */
+const MANIFEST_REL = join("manifests", "pipeline.json");
+
+/**
+ * The escaping fixture's path, also relative — a SYMLINK beneath the root whose
+ * target resolves outside it. Relative and `..`-free, so the schema admits it;
+ * only `loadManifest`'s realpath + beneath-root re-assertion can refuse it,
+ * which is precisely the dispatch-side INV-2 gate under test.
+ */
+const ESCAPE_REL = join("manifests", "escape.json");
 
 /**
  * Fixtures stay in `os.tmpdir()` and the containment root is INJECTED
@@ -138,9 +159,8 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
   // ─── helpers ─────────────────────────────────────────────────────────────────
 
   function validBrief(overrides: Partial<{ requestId: string; manifestPath: string }> = {}) {
-    const manifestDir = join(dir, "manifests");
-    mkdirSync(manifestDir, { recursive: true });
-    const manifestPath = join(manifestDir, "pipeline.json");
+    const manifestPath = join(dir, MANIFEST_REL);
+    mkdirSync(dirname(manifestPath), { recursive: true });
     const manifest = {
       version: "1.0.0",
       pipelineId: "test-pipeline",
@@ -156,7 +176,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       repoSlug: "owner/repo",
       issueId: 42,
       commitSha: "a".repeat(40),
-      manifestPath,
+      manifestPath: MANIFEST_REL,
       repoUrl: "https://github.com/owner/repo",
       ...overrides,
     };
@@ -377,22 +397,104 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect((refusal.error as { code: string }).code).toBe("invalid-brief");
   });
 
+  test("AC4: the host-side dispatch log records each refusal's code and issue identity", async () => {
+    // The only OTHER read of this file asserts what it does NOT contain, and
+    // `appendDispatchFailure` is called inside a try/catch that swallows to
+    // stderr — so it could write the wrong `code`, drop `repoSlug`/`issueId`/
+    // `requestId`, or fail on every single refusal, and the whole suite stayed
+    // green (`refusalLines()` reads a different, in-process sink). This is the
+    // AC4 evidence itself.
+    const requestId = "6b1f2a90-3d55-4f21-9c0e-7a8b1d2e3f40";
+
+    // A refusal from BEFORE the brief parsed, then one from after it: the two
+    // together pin the documented "null, never '' and never a fabricated value"
+    // shape as well as the populated one.
+    try {
+      await dispatch({ ...validBrief(), unknownField: "x" }, deps());
+      expect.unreachable();
+    } catch (e) {
+      expect((e as FleetError).code).toBe("invalid-brief");
+    }
+    try {
+      await dispatch(validBrief({ requestId }), deps({ ledgerFactory: overBudgetLedger }));
+      expect.unreachable();
+    } catch (e) {
+      expect((e as FleetError).code).toBe("budget-exceeded");
+    }
+
+    // Beside the run records, so `--dir` moves the evidence with them.
+    const lines = readFileSync(join(dir, "dispatch-log.jsonl"), "utf8").trim().split("\n");
+    expect(lines).toHaveLength(2);
+    const [early, admitted] = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
+
+    expect(early?.code).toBe("invalid-brief");
+    expect(early?.repoSlug).toBeNull();
+    expect(early?.issueId).toBeNull();
+    expect(early?.requestId).toBeNull();
+
+    expect(admitted?.code).toBe("budget-exceeded");
+    expect(admitted?.repoSlug).toBe("owner/repo");
+    // The NUMBER, not the ledger's stringified form — this file keys on it.
+    expect(admitted?.issueId).toBe(42);
+    expect(admitted?.requestId).toBe(requestId);
+    expect(String(admitted?.message)).toContain("cap");
+    expect(Number.isNaN(Date.parse(String(admitted?.timestamp)))).toBeFalse();
+  });
+
   // ─── Refusals that fire before an admission is spent (INV-2) ────────────────────────
 
   /**
-   * A manifest at `escapePath` — beneath `tmpRoot`, so outside both the test's
-   * own `repoRoot` (`dir`) and `process.cwd()`. Byte-identical to the valid
-   * fixture: the refusal must be the containment check, never a schema
-   * complaint that would pass for the wrong reason.
+   * A brief whose `manifestPath` is INSIDE the root and resolves OUTSIDE it: a
+   * symlink at `<root>/manifests/escape.json` pointing at a byte-identical copy
+   * of the valid fixture under `outsideDir` (a sibling of `dir`, so outside both
+   * the injected `repoRoot` and `process.cwd()`).
+   *
+   * The escape has to be a symlink now, not an absolute path. An absolute
+   * `manifestPath` is refused by the SCHEMA (see the sibling test below), which
+   * is a strictly earlier gate — routing this brief through it would prove the
+   * schema again and leave dispatch's own containment gate, the subject of these
+   * two tests, with no coverage at all. Relative and `..`-free passes the
+   * schema, so only `loadManifest`'s realpath + beneath-root re-assertion can
+   * refuse it.
+   *
+   * Byte-identical on purpose: the refusal must be the containment check, never
+   * a parse complaint that would pass for the wrong reason.
    */
   function briefWithManifestOutsideRoot() {
     const brief = validBrief();
-    const escapePath = join(outsideDir, "pipeline.json");
-    copyFileSync(brief.manifestPath, escapePath);
-    return { ...brief, manifestPath: escapePath };
+    const escapeTarget = join(outsideDir, "pipeline.json");
+    copyFileSync(join(dir, MANIFEST_REL), escapeTarget);
+    symlinkSync(escapeTarget, join(dir, ESCAPE_REL));
+    return { ...brief, manifestPath: ESCAPE_REL };
   }
 
-  test("INV-2: a manifest outside the supplied repoRoot → exit 2 manifest-rejected, zero provisioning", async () => {
+  test("INV-2: an absolute manifestPath is refused by the schema, naming the field", async () => {
+    // The FIRST of the two containment gates, and the reason the second one is
+    // exercised through a symlink below. `resolve(repoRoot, "/etc/shadow")`
+    // discards the root entirely, so absoluteness — not a `..` segment — was
+    // the hole; a schema with no repo root cannot do resolve-then-contain, and
+    // relative-with-no-`..` IS the containment property expressed at that layer.
+    const brief = { ...validBrief(), manifestPath: join(dir, MANIFEST_REL) };
+    const ledgerFactory = mock(() => goodLedger());
+
+    try {
+      await dispatch(brief, deps({ ledgerFactory }));
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(FleetError);
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(2);
+      expect(err.code).toBe("invalid-brief");
+      // Named, not merely refused — the operator has to know which field.
+      expect(err.payload?.field).toBe("manifestPath");
+      expect(JSON.stringify(err.payload?.issues)).toContain("must be relative to the repo root");
+    }
+    expect(ledgerFactory).not.toHaveBeenCalled();
+    expect(readdirSync(store.dir)).toHaveLength(0);
+    expect(await driver.list()).toHaveLength(0);
+  });
+
+  test("INV-2: a manifest symlinked out of the supplied repoRoot → exit 2 manifest-rejected, zero provisioning", async () => {
     // The root is the injected one, not the manifest's own directory: a root
     // derived from the candidate path makes every path its own root and the
     // beneath-root assertion vacuous. The seam must not have widened the guard.
@@ -407,6 +509,11 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       const err = e as FleetError;
       expect(err.exitCode).toBe(2);
       expect(err.code).toBe("manifest-rejected");
+      // CONTAINMENT specifically, not "the manifest could not be read": the
+      // link's own name IS beneath the root and its target is a perfectly valid
+      // manifest, so a guard that stopped at `lstat` — or one that only checked
+      // existence — would load it. Only the realpath re-assertion says this.
+      expect(err.message).toContain("resolves outside the run root");
       // The refusal names the root it enforced — the injected one, not cwd.
       expect(err.remediation).toContain(dir);
       expect(err.remediation).not.toContain(process.cwd());
@@ -416,11 +523,17 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(await driver.list()).toHaveLength(0);
   });
 
-  test("INV-2: with no repoRoot supplied the default root still refuses an outside manifest", async () => {
+  test("INV-2: with no repoRoot supplied the containment root is process.cwd()", async () => {
     // The fallback is `process.cwd()`. Covered here so the default cannot rot
     // behind the injected root every other test uses — and asserted WITHOUT
     // mutating the process's cwd, which is shared by every other test file.
-    const brief = briefWithManifestOutsideRoot();
+    //
+    // This arm proves WHICH root the default is, not the beneath-root check
+    // itself: `manifestPath` is now relative, so an escaping fixture would have
+    // to be a symlink planted inside the real repo working tree, and no test
+    // here writes there. The symlink escape is exercised against the injected
+    // root above; the two roots run through the same `loadManifest` call.
+    const brief = validBrief();
 
     try {
       await dispatch(brief, deps({ repoRoot: undefined }));
@@ -429,6 +542,10 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect((e as FleetError).exitCode).toBe(2);
       expect((e as FleetError).code).toBe("manifest-rejected");
       expect((e as FleetError).remediation).toContain(process.cwd());
+      // And NOT the injected root — the fixture exists beneath `dir`, so a
+      // dispatch that ignored `repoRoot: undefined` and kept the injected value
+      // would have loaded it and never reached this refusal at all.
+      expect((e as FleetError).remediation).not.toContain(dir);
     }
     expect(readdirSync(store.dir)).toHaveLength(0);
     expect(await driver.list()).toHaveLength(0);
@@ -475,6 +592,139 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     }
     expect(ledgerFactory).not.toHaveBeenCalled();
     expect(readdirSync(store.dir)).toHaveLength(1);
+  });
+
+  test("the LOSER of a same-runId race still refuses exit 2 run-id-in-use (store.create is the arbiter)", async () => {
+    // The step-4 check the sibling above covers is a FAST PATH, not the
+    // guarantee: two concurrent dispatches sharing an explicit `opts.runId`
+    // (DF3.2's fan-out shape) both find no record, both pass it, and both commit
+    // a reservation. `store.create`'s O_EXCL is what actually arbitrates, and
+    // its EEXIST has to map back to the SAME exit-2 refusal — otherwise the
+    // loser gets exit 1 `provision-failed`, which names the wrong cause and
+    // tells the operator to go looking for a substrate fault that is not there.
+    //
+    // Nothing else injects an EEXIST from `store.create`: delete that arm of the
+    // provisioning catch and every other test in this file still passes.
+    const preMinted = mintRunId();
+    const eexist = Object.assign(new Error("EEXIST: file already exists, open 'runs/…'"), {
+      code: "EEXIST",
+    });
+    store.create = () => {
+      throw eexist;
+    };
+    const ledgerFactory = mock(() => goodLedger());
+
+    try {
+      await dispatch(validBrief(), deps({ ledgerFactory }), { runId: preMinted });
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(FleetError);
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(2);
+      expect(err.code).toBe("run-id-in-use");
+      expect(err.payload?.runId).toBe(preMinted);
+      // The provider's errno stays diagnosis, never classification: an operator
+      // greps the fleet code, so `EEXIST` must not have become it.
+      expect(err.payload?.providerCode).toBeUndefined();
+    }
+    // This is the CONCURRENT branch, not the step-4 one: the admission was
+    // already spent by the time the create refused. Asserting it is what tells
+    // the two run-id-in-use sites apart — the sibling above asserts the
+    // opposite, and without this pair either test could be satisfied by the
+    // other's code path.
+    expect(ledgerFactory).toHaveBeenCalled();
+    // No box was ever created: `store.create` is the first half of the step.
+    expect(await driver.list()).toHaveLength(0);
+  });
+
+  test("a SELF-MINTED id that collides is re-minted, and the run lands on the free one", async () => {
+    // Nobody chose a minted id, so a collision is re-minted rather than refused
+    // — and the loop that does it was untested: a `break` on the first collision
+    // would dispatch under an id whose record belongs to another run, which is
+    // the orphaned-reservation-then-EEXIST state the guard exists to prevent.
+    const taken = new Set<string>();
+    let probes = 0;
+    let thirdProbe = "";
+    const realGet = store.get.bind(store);
+    store.get = (runId: string) => {
+      probes += 1;
+      // The first two minted ids are "already taken". Later reads — `store.set`
+      // does its own read-modify-write through `get` — go to the real store.
+      if (probes <= 2) {
+        taken.add(runId);
+        return { runId, createdAt: new Date().toISOString() } as ReturnType<typeof realGet>;
+      }
+      if (probes === 3) thirdProbe = runId;
+      return realGet(runId);
+    };
+
+    const result = await dispatch(validBrief(), deps());
+
+    expect(taken.size).toBe(2); // two DISTINCT ids, i.e. a fresh mint each time
+    expect(taken.has(result.runId)).toBeFalse();
+    expect(result.runId).toBe(thirdProbe);
+    expect(readdirSync(store.dir)).toEqual([`${result.runId}.json`]);
+  });
+
+  test("run ids that ALL collide → exit 1 run-id-unmintable, blaming no other run", async () => {
+    // The other end of the same loop: bounded, so a saturated run directory
+    // refuses instead of spinning — and the refusal must not report the last
+    // COLLIDING id as this dispatch's own, because that id belongs to someone
+    // else's live run and the payload would be telling a tier-1 agent to tear
+    // THAT down.
+    const realGet = store.get.bind(store);
+    let probes = 0;
+    store.get = (runId: string) => {
+      probes += 1;
+      return { runId, createdAt: new Date().toISOString() } as ReturnType<typeof realGet>;
+    };
+
+    try {
+      await dispatch(validBrief(), deps());
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(FleetError);
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(1);
+      expect(err.code).toBe("run-id-unmintable");
+      expect(err.payload?.runId).toBeNull();
+      expect(err.payload).not.toHaveProperty("teardownCommand");
+      expect((refusalLines()[0] as LogEntry).runId).toBeNull();
+    }
+    // MINT_RETRIES (4) re-mints plus the first attempt. Pinned exactly: 1 is an
+    // early `break` and anything unbounded is the spin the bound exists to stop.
+    expect(probes).toBe(5);
+    expect(readdirSync(store.dir)).toHaveLength(0);
+    expect(await driver.list()).toHaveLength(0);
+  });
+
+  test("a run-record directory that cannot be READ refuses (exit 1) rather than reusing the id", async () => {
+    // Absence is ENOENT and nothing else. An EACCES/EIO read the same way as
+    // "free to reuse" hands the id to `store.create` on a store that cannot be
+    // read at all — and an untyped escape costs the operator the dispatch-log
+    // entry and the structured line every other exit owes them.
+    const eacces = Object.assign(new Error("EACCES: permission denied, open 'runs/x.json'"), {
+      code: "EACCES",
+    });
+    store.get = () => {
+      throw eacces;
+    };
+    const ledgerFactory = mock(() => goodLedger());
+
+    try {
+      await dispatch(validBrief(), deps({ ledgerFactory }));
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(FleetError);
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(1);
+      expect(err.code).toBe("record-read-failed");
+      expect(err.payload?.providerCode).toBe("EACCES");
+      // Pre-provision: nothing to tear down.
+      expect(err.payload).not.toHaveProperty("teardownCommand");
+    }
+    expect(ledgerFactory).not.toHaveBeenCalled();
+    expect(await driver.list()).toHaveLength(0);
   });
 
   // ─── Admission: budget gate (AC7) ───────────────────────────────────────────────────
@@ -544,6 +794,47 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(call.capMicroUsd).toBe(cap);
     // DF2.3's backstop, not a re-derived one: the clamp is min(keyCap, remaining).
     expect(call.keyCapMicroUsd).toBe(defaultKeyCapMicroUsd);
+    expect(ledger.closeCalls).toBe(1);
+  });
+
+  test("AC7: an admitted ceiling of ZERO → exit 5 no-ceiling, and nothing is provisioned", async () => {
+    // Every other ledger fixture here admits with a positive ceiling, so this
+    // guard — the only thing between an admitted run and an unspendable one —
+    // had no test at all. Remove it and the dispatcher mints a $0 key, stamps
+    // `limitMicroUsd: 0` into the manifest and fails at gate item D, i.e. exit 3
+    // with a LIVE billable box that INV-5 then forbids tearing down, instead of
+    // refusing before anything exists.
+    //
+    // A POSITIVE cap with a zero ceiling, which is the shape production
+    // produces: the ceiling is min(keyCap, remaining), so an issue with cap left
+    // on paper and nothing remaining admits at exactly this.
+    const ledger = goodLedger(0, defaultKeyCapMicroUsd);
+    const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
+    driver.create = createSpy;
+    const mintSpy = mock((_name: string, limit: number) =>
+      Promise.resolve({ key: "sk-test", hash: "abc", limitUsd: limit, usageUsd: 0 }),
+    );
+    keyApi.createKey = mintSpy;
+
+    try {
+      await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(FleetError);
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(5);
+      expect(err.code).toBe("no-ceiling");
+      expect(err.payload?.admittedCeilingMicroUsd).toBe(0);
+      expect(err.payload?.capMicroUsd).toBe(defaultKeyCapMicroUsd);
+      // Pre-provision, so no teardown advice for a run that does not exist.
+      expect(err.payload).not.toHaveProperty("teardownCommand");
+    }
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(mintSpy).not.toHaveBeenCalled();
+    expect(readdirSync(store.dir)).toHaveLength(0);
+    // The admission WAS spent — this refusal cannot precede it, because the
+    // ceiling under test is the decision's own output. The handle still closes.
+    expect(ledger.admitCalls).toHaveLength(1);
     expect(ledger.closeCalls).toBe(1);
   });
 
@@ -909,6 +1200,60 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(store.get(result.runId).ports).toEqual([8080]);
   });
 
+  test("INV-5: a post-box failure with no code of its own → exit 1 dispatch-failed, box ALIVE, record OPEN", async () => {
+    // The catch-all arm of the post-provision try/catch. Every other failure
+    // after the box exists has its own code — `setup-gate-failed`,
+    // `key-delivery-failed`, `expose-no-url`, `dispatch-timeout` — so nothing
+    // reached `dispatch-failed` at all: delete it and the suite stays green
+    // while the throw escapes untyped, which is a bare CLI exit 1 with no
+    // dispatch-log entry, no runId and no teardown command for a LIVE box.
+    //
+    // `expose` is the sharpest carrier for it: dispatch claims `ports: [port]`
+    // on the record BEFORE calling it, so this failure leaves a record
+    // advertising a port nothing is listening on — which is the correct,
+    // deliberate posture (an abandoned expose can still land), and is exactly
+    // what the operator's teardown has to be pointed at.
+    driver.expose = async () => {
+      throw Object.assign(new Error("substrate refused the tunnel"), { code: "ECONNRESET" });
+    };
+    let setPublicCalls = 0;
+    driver.setPublic = async () => {
+      setPublicCalls += 1;
+    };
+
+    try {
+      await dispatch(validBrief(), deps({ port: 8080 }));
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(FleetError);
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(1);
+      expect(err.code).toBe("dispatch-failed");
+      expect(err.message).toContain("substrate refused the tunnel");
+      expect(err.payload?.providerCode).toBe("ECONNRESET");
+      const runId = err.payload?.runId as string;
+
+      // INV-5's claims, all three: the operator's commands are on the payload…
+      expect(err.payload?.teardownCommand).toBe(`bun scripts/fleet.ts teardown ${runId}`);
+      expect(err.payload?.debugCommands).toEqual([`bun scripts/fleet.ts status ${runId}`]);
+      expect(err.remediation).toContain("the box is ALIVE");
+
+      // …the record is OPEN and carries the pre-claimed port with no URL…
+      const record = store.get(runId);
+      expect(record.closedAt).toBeUndefined();
+      expect(record.ports).toEqual([8080]);
+      expect(record.httpsUrl).toBeUndefined();
+      expect(err.payload?.vmName).toBe(record.vmName);
+
+      // …and THIS run's box is still there. A count alone passes when the run's
+      // own VM is gone and an unrelated box exists.
+      const boxes = await driver.list();
+      expect(boxes.some((b) => b.name === record.vmName)).toBeTrue();
+    }
+    // Nothing was published: the failure fired before setPublic.
+    expect(setPublicCalls).toBe(0);
+  });
+
   // ─── Ack shape (AC2) ─────────────────────────────────────────────────────────────
 
   test("Ack shape {runId, requestId, state: 'ready', vmName, httpsUrl?}", async () => {
@@ -1022,8 +1367,11 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       // The untyped throw carries no `code`/`remediation`, so both fall back.
       expect(err.code).toBe("provision-failed");
       expect(err.remediation).toBeTruthy();
-      // The value itself is surfaced rather than swallowed.
-      expect(err.message).toContain("null");
+      // The thrown VALUE is what got stringified, in the position the caught
+      // error's message occupies. `toContain("null")` was satisfied by text this
+      // module writes anyway (refusals elsewhere carry `runId: null`), so it
+      // held even for a message that had dropped the throw entirely.
+      expect(err.message).toBe(`provisioning failed for run ${err.payload?.runId as string}: null`);
     }
     // The error path is the one most likely to skip the close (see the
     // provisioning-failure test above).
@@ -1110,24 +1458,58 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
   // ─── INV-4: no key material in logs, records or the ack ──────────────────────────────
 
+  /**
+   * The POSITIVE CONTROL every absence proof below needs: the exec invocation
+   * that actually carries the plaintext key into the box.
+   *
+   * `deliverRunKey` keeps the key out of argv and puts it on STDIN
+   * (src/providers/credentials.ts — `deliverScript(envFile)` takes only the
+   * env-file path), so this echoes the WHOLE invocation, which is what a real
+   * exec wrapper reports on a failure and the only shape that puts the key in
+   * reach of a sink. Without it, "no sink contains the key" is satisfied by a
+   * dispatch where the key never came near one — it would stay green with every
+   * redaction deleted, and it would stay green if `deliverRunKey` stopped being
+   * called at all. The failure-path siblings further down already do this; the
+   * success-path ones did not.
+   */
+  function captureKeyDelivery(): () => string {
+    let echoed = "";
+    const realExec = driver.exec.bind(driver);
+    driver.exec = async (vm: string, argv: string[], stdin?: string) => {
+      // The FIRST stdin-carrying exec only. `fillRun` writes `pipeline.yaml` and
+      // `run-context.json` over stdin too and runs after the key delivery, so
+      // last-one-wins captured a manifest write and the control failed on a
+      // dispatch that had delivered the key perfectly well. Step order is
+      // mint → deliver → fill (INV-1, asserted by the ordering test above).
+      if (stdin !== undefined && echoed === "") echoed = `exec: ${argv.join(" ")} <<<${stdin}`;
+      return realExec(vm, argv, stdin);
+    };
+    return () => echoed;
+  }
+
   test("INV-4: no key material in log lines", async () => {
     const brief = validBrief();
     // The REAL `(name, limit)` signature, even where the values are unused: a
     // zero-arg stand-in lets the dispatcher pass nothing, pass the arguments in
     // the wrong order, or hand µ$ where USD belongs, and nothing here would
     // notice — leaving the µ$→USD conversion pinned by the AC9 test alone.
+    const knownKey = "sk-or-known-key-material-12345";
     keyApi.createKey = async (_name: string, limit: number) => ({
-      key: "sk-or-known-key-material-12345",
+      key: knownKey,
       hash: "abc123",
       limitUsd: limit,
       usageUsd: 0,
     });
+    const delivered = captureKeyDelivery();
 
     await dispatch(brief, deps());
 
-    // Positive control: `some(...)` on an EMPTY array is false, so the absence
-    // proof below means nothing unless lines were actually captured.
+    // Positive controls, BOTH required: `some(...)` on an EMPTY array is false,
+    // so the absence proof means nothing unless lines were captured — and an
+    // absence proof over a run where the plaintext never reached a sink's reach
+    // is vacuous too (see `captureKeyDelivery`).
     expect(logs.length).toBeGreaterThan(0);
+    expect(delivered()).toContain(knownKey);
     expect(logs.some((l) => l.includes("sk-or-known-key-material"))).toBeFalse();
   });
 
@@ -1140,10 +1522,13 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       limitUsd: limit,
       usageUsd: 0,
     });
+    const delivered = captureKeyDelivery();
 
     const result = await dispatch(brief, deps());
     const record = store.get(result.runId);
 
+    // Control: the plaintext really was in flight during this dispatch.
+    expect(delivered()).toContain(knownKey);
     // keyHash present, plaintext absent
     expect(record.keyHash).toBe("deadbeef");
     expect(JSON.stringify(record)).not.toContain(knownKey);
@@ -1158,9 +1543,12 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       limitUsd: limit,
       usageUsd: 0,
     });
+    const delivered = captureKeyDelivery();
 
     const result = await dispatch(brief, deps());
 
+    // Control: the plaintext really was in flight during this dispatch.
+    expect(delivered()).toContain(knownKey);
     // The ack is printed to stdout by the CLI. `toMatchObject` above ignores
     // extra keys, so a regression that hangs the plaintext off the ack would
     // leak it there undetected.
@@ -1198,7 +1586,19 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       // `admission-failed` remains greppable across every substrate failure.
       expect(err.code).toBe("admission-failed");
       expect(err.payload?.providerCode).toBe("SQLITE_BUSY");
-      expect(err.payload?.runId).toBe(err.payload?.runId as string);
+      // The run id this dispatch settled on in step 4, in full — `toBe(itself)`
+      // was satisfied by `undefined === undefined`, so the payload carrying NO
+      // id at all (the very thing this line exists to pin, since the structured
+      // line joins on it) passed. The refusal fires from step 5, after the id is
+      // chosen and before anything is provisioned.
+      expect(err.payload?.runId).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
+      // Pre-provision, so no commands: nothing exists for the operator to tear
+      // down, and `refuse` gates those on `ctxProvisionAttempted`, not on "an id
+      // was chosen".
+      expect(err.payload).not.toHaveProperty("teardownCommand");
+      expect(err.payload).not.toHaveProperty("debugCommands");
+      // The structured line joins on the same id.
+      expect((refusalLines()[0] as LogEntry).runId).toBe(err.payload?.runId as string);
       expect(refusalLines()).toHaveLength(1);
     }
     // INV-2: the refusal fired before any provisioning.
@@ -1399,11 +1799,10 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // gate is supposed to name. Stripped at dispatch's host-side read, not in
     // `loadManifest` — the runner reads the already-stamped manifest back
     // through that same loader and must keep the stamp.
-    const manifestDir = join(dir, "manifests");
-    mkdirSync(manifestDir, { recursive: true });
-    const manifestPath = join(manifestDir, "authored-limit.json");
+    const manifestRel = join("manifests", "authored-limit.json");
+    mkdirSync(join(dir, "manifests"), { recursive: true });
     writeFileSync(
-      manifestPath,
+      join(dir, manifestRel),
       JSON.stringify({
         version: "1.0.0",
         pipelineId: "test-pipeline",
@@ -1418,11 +1817,167 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     const admittedCeiling = 250_000;
     const result = await dispatch(
-      { ...validBrief(), manifestPath },
+      { ...validBrief(), manifestPath: manifestRel },
       deps({ ledgerFactory: () => goodLedger(admittedCeiling) }),
     );
 
     const delivered = await driver.exec(result.vmName, ["sh", "-c", "cat pipeline.yaml"]);
     expect(JSON.parse(delivered.stdout).limitMicroUsd).toBe(admittedCeiling);
+  });
+
+  test("INV-4: an ABANDONED deliver that echoes the key never lands it on the abandoned-step line", async () => {
+    // The sibling test above covers the RACE-WON path, where `deliverRunKey`'s
+    // rejection reaches dispatch and the fixed-message catch swallows the text.
+    // This is the other half: when the wall clock wins, the race has already
+    // rejected with the timeout, so that catch never sees the provider error at
+    // all — `within`'s abandoned handler does, and it logged the raw message
+    // through `redactUrls`, which only matches `https?://…`. A bare token went
+    // straight into the structured log.
+    const knownKey = "sk-or-v1-abandonedleakykey31337";
+    keyApi.createKey = async (_name: string, limit: number) => ({
+      key: knownKey,
+      hash: "beefbeef",
+      limitUsd: limit,
+      usageUsd: 0,
+    });
+
+    // Which STEP expires is pinned by the injected clock rather than by racing
+    // real timers: the budget is spent inside `createKey`, i.e. during `mint`,
+    // whose own timer was already armed with the full ceiling. `deliver` is then
+    // the first step to compute a near-zero remainder — deterministically, and
+    // without every earlier step running against a hair-trigger deadline.
+    const { clock, advance } = stepClock();
+    const mintKey = keyApi.createKey.bind(keyApi);
+    keyApi.createKey = async (name: string, limit: number) => {
+      advance(DEFAULT_TIMEOUT_MS - 30);
+      return mintKey(name, limit);
+    };
+
+    // `deliverRunKey` is the ONLY exec that carries stdin (credentials.ts:371),
+    // and the key rides on stdin rather than argv — so this echoes the whole
+    // invocation, which is what a real exec wrapper reports on a failure and the
+    // only shape that puts the key within reach of a sink.
+    let echoed = "";
+    const realExec = driver.exec.bind(driver);
+    driver.exec = async (vm: string, argv: string[], stdin?: string) => {
+      if (stdin === undefined) return realExec(vm, argv, stdin);
+      echoed = `exec failed: ${argv.join(" ")} <<<${stdin}`;
+      // Outlives the 30 ms remainder above, so the race is ABANDONED first and
+      // this rejection lands on the abandoned handler with no other subscriber.
+      await new Promise((r) => setTimeout(r, 250));
+      throw new Error(echoed);
+    };
+
+    try {
+      await dispatch(validBrief(), deps({ clock }));
+      expect.unreachable();
+    } catch (e) {
+      const err = e as FleetError;
+      expect(err.code).toBe("dispatch-timeout");
+      expect(err.payload?.step).toBe("deliver");
+    }
+    // The handler fires on the abandoned promise, after dispatch has returned.
+    await new Promise((r) => setTimeout(r, 400));
+
+    // POSITIVE CONTROLS, both required: an absence proof over a line that was
+    // never emitted, or over a message that never carried the key, is vacuous —
+    // it stays green with the redaction deleted.
+    expect(echoed).toContain(knownKey);
+    const abandoned = entries.filter((e) => e.phase === "abandoned");
+    expect(abandoned).toHaveLength(1);
+    expect(abandoned[0]?.step).toBe("deliver");
+
+    const text = JSON.stringify(abandoned);
+    expect(text).not.toContain(knownKey);
+    expect(text).not.toContain("sk-or-v1-");
+    // And no other sink either — the handler is not the only line in flight.
+    expect(entries.filter((e) => JSON.stringify(e).includes(knownKey)).map((e) => e.operation)).toEqual([]);
+  });
+
+  test("INV-6: a long host label is redacted without mangling the URL, and userinfo never survives", async () => {
+    // The host arm sliced the string: `/[^/]{16,}/` matched the `//host` run
+    // itself, so `https://abcdefghijklmnopq` came out as `https:/«redacted»` —
+    // a malformed single-slash URL, losing the stated guarantee that the scheme
+    // and host survive so an operator can tell WHICH box the line is about.
+    // Conversely `tok@x.io` is one short segment, so userinfo passed the 16-char
+    // floor untouched — and length is not a property of a credential.
+    driver.create = async () => {
+      throw new Error(
+        "create failed: https://abcdefghijklmnopq/vm and https://tok@short.io/vm",
+      );
+    };
+
+    try {
+      await dispatch(validBrief(), deps());
+      expect.unreachable();
+    } catch (e) {
+      const err = e as FleetError;
+      expect(err.code).toBe("provision-failed");
+      expect(err.message).not.toContain("abcdefghijklmnopq");
+      expect(err.message).not.toContain("tok@");
+      // Not mangled into `https:/…`: the scheme keeps both its slashes.
+      expect(err.message).not.toContain("https:/«");
+      expect(err.message).toContain("https://«redacted»");
+      // The host an operator can act on survives; the path does not.
+      expect(err.message).toContain("https://short.io");
+      expect(err.message).not.toContain("short.io/vm");
+    }
+  });
+
+  test("a pre-provision refusal names NO teardown command — nothing was provisioned", async () => {
+    // The remediation was gated on `ctxRunId !== null`, which is set inside the
+    // mint-collision loop — before the admission gates and before store.create.
+    // Every refusal from step 4 on therefore handed a tier-1 agent
+    // `fleet teardown <id>` for an id with no record.
+    try {
+      await dispatch(validBrief(), deps({ ledgerFactory: () => overBudgetLedger() }));
+      expect.unreachable();
+    } catch (e) {
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(5);
+      expect(err.code).toBe("budget-exceeded");
+      // The id is still reported — it is this dispatch's own, and the log line
+      // joins on it. The COMMANDS are what must not be there.
+      expect(err.payload?.runId).toBeString();
+      expect(err.payload).not.toHaveProperty("teardownCommand");
+      expect(err.payload).not.toHaveProperty("debugCommands");
+    }
+    expect(readdirSync(store.dir)).toHaveLength(0);
+    expect(await driver.list()).toHaveLength(0);
+  });
+
+  test("a box is never made public when expose established no URL", async () => {
+    // The URL was written to the record AFTER setPublic, and setPublic ran
+    // whatever expose returned: a driver that resolved no URL still got its box
+    // published, leaving it publicly reachable with nothing on the record saying
+    // where. The `ports` claim two lines above already pre-claims for exactly
+    // this reason; the URL write was the one state claim still made after the
+    // call it describes.
+    let setPublicCalls = 0;
+    driver.expose = async () => undefined as unknown as string;
+    driver.setPublic = async () => {
+      setPublicCalls += 1;
+    };
+
+    try {
+      await dispatch(validBrief(), deps({ port: 8080 }));
+      expect.unreachable();
+    } catch (e) {
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(1);
+      expect(err.code).toBe("expose-no-url");
+      expect(err.payload?.port).toBe(8080);
+      // INV-5: the box is alive and the record open, so the refusal carries the
+      // operator's commands.
+      expect(err.payload?.teardownCommand).toBeString();
+    }
+    expect(setPublicCalls).toBe(0);
+    // The port claim landed before the provider calls and stays on the record;
+    // the URL never does, because none was ever established.
+    const files = readdirSync(store.dir);
+    expect(files).toHaveLength(1);
+    const record = store.get((files[0] as string).replace(/\.json$/, ""));
+    expect(record.ports).toEqual([8080]);
+    expect(record.httpsUrl).toBeUndefined();
   });
 });

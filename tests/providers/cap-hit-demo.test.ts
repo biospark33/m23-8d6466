@@ -737,6 +737,39 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(artifactText).not.toContain(key);
   });
 
+  test("leak scan: an exec wrapper echoing the delivery argv keeps its key out of the deliver line (AC5/INV-4)", async () => {
+    // The known plaintext sink: `deliverRunKey` puts the minted key in the argv
+    // it feeds the box, `timedLoggedStep` re-throws that error RAW by design,
+    // and this demo's catch logged `e.message` verbatim. An exec wrapper that
+    // reports the command it ran — the ordinary way to report a failure — is
+    // all it takes.
+    let thrownText = "";
+    const echoingDriver: ProviderDriver = Object.create(recording);
+    echoingDriver.exec = async (vm: string, argv: string[], stdin?: string) => {
+      if (stdin?.includes("OPENROUTER_API_KEY")) {
+        thrownText = `exec failed on ${vm}: ${argv.join(" ")} <<< ${stdin.trim()}`;
+        throw new Error(thrownText);
+      }
+      return recording.exec(vm, argv, stdin);
+    };
+
+    const result = await runCapHitDemo(deps({ driver: echoingDriver }), defaultOpts());
+    expect(result.reason).toBe("deliver-failed");
+
+    const key = api.plaintexts.get(store.get(result.runId).keyHash ?? "");
+    expect(key).toBeString();
+    // Positive control: the thrown error DID carry the key, so a green
+    // assertion below cannot be green vacuously.
+    expect(thrownText).toContain(key as string);
+
+    const line = logs.find((l) => l.operation === "demo.deliver" && l.status === "error");
+    expect(line).toBeDefined();
+    expect(line?.error?.code).toBe("deliver-failed");
+    expect(leakScan(key as string, JSON.stringify(line))).toBeNull();
+    // Redacted, not dropped — the operator still learns the step failed and why.
+    expect(line?.error?.message).toContain("exec failed");
+  });
+
   test("AC5 hygiene: key-management URL stripped from rejectionStatus, hash stays in keyHash", async () => {
     api = new FakeKeyApi({ usageOnCreateUsd: 0.06 });
     // Live-measured 403 body shape: the message embeds the key-management URL

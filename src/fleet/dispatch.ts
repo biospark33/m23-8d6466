@@ -32,7 +32,12 @@ import type { ExitStatus } from "../../cli-anything/src/types.ts";
 import { appendDispatchFailure } from "../phase-engine/issue-correlation.ts";
 import { isValidUuidV4, resolveRunCorrelation } from "../phase-engine/issue-correlation.ts";
 import { CorrelationError } from "../phase-engine/issue-correlation.ts";
-import { loadManifest, serializeManifest, stampManifestLimit } from "../phase-engine/manifest.ts";
+import {
+  loadManifest,
+  serializeManifest,
+  stampManifestLimit,
+  stripAuthoredLimit,
+} from "../phase-engine/manifest.ts";
 import { fillRun, provisionAdmittedRun, type ProviderDriver } from "../providers/driver.ts";
 import { mintRunKey, deliverRunKey, type KeyApi } from "../providers/credentials.ts";
 import { assertWithinBudget, OverBudgetError } from "../providers/budget-gate.ts";
@@ -40,6 +45,7 @@ import { checkHeadroom, type LoadedQuotaLimits } from "../providers/quota.ts";
 import { CostLedgerError } from "../providers/cost-ledger.ts";
 import type { AdmissionDecision, CostLedger } from "../providers/cost-ledger.ts";
 import { newId, assertValidRunId, type RunRecordStore } from "../providers/run-record.ts";
+import { redactSecrets } from "../providers/step-log.ts";
 import { setupGate as realSetupGate, type SetupGateResult } from "../providers/exedev/setup-gate.ts";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -222,29 +228,82 @@ export function resolveBriefRequestId(parsedBrief: unknown): string | undefined 
   return typeof supplied === "string" && isValidUuidV4(supplied) ? supplied : undefined;
 }
 
+/** Every URL-shaped run in a piece of free text — the unit both redactors work on. */
+const URL_IN_TEXT_RE = /\bhttps?:\/\/[^\s"'<>]+/gi;
+
+/**
+ * Scheme + host, with the two parts of an origin that are never a locator
+ * removed: userinfo ALWAYS (a credential by construction), and any host LABEL
+ * of 16+ characters (a long label is itself a deep link on the substrates the
+ * factory uses). The rest of the host survives because an operator has to
+ * recognise WHICH box the line is about.
+ *
+ * Parsed, not sliced. The previous rule tested the whole `//host` run against
+ * the same 16-char floor, so `https://abcdefghijklmnopq` came out as
+ * `https:/«redacted»` — a malformed single-slash URL that loses the very
+ * scheme-and-host guarantee the rule exists to keep — while
+ * `https://tok@x.io/` kept `tok@x.io` verbatim, because userinfo and host are
+ * one segment and length was the only test applied. Length is not a property
+ * of a secret; that is the argument the path rule below already makes.
+ */
+function safeOrigin(url: URL): string {
+  const host = url.hostname
+    .split(".")
+    .map((label) => (label.length >= 16 ? "«redacted»" : label))
+    .join(".");
+  return `${url.protocol}//${host}${url.port === "" ? "" : `:${url.port}`}`;
+}
+
 /**
  * INV-6: management/deep-link URL parameters are redacted before logging.
  *
- * Redaction is scoped to URLs and applied WHOLE-SEGMENT: the query string and
- * fragment go entirely, EVERY path segment after the host goes with them, and a
- * host segment of 16+ characters goes too (a long host label is itself a deep
- * link on the substrates the factory uses). Length is not a property of a
- * secret: the previous rule redacted only 16+ character segments, so
- * `https://exe.xyz/vm/abc123token` reached the dispatch log intact. The scheme
- * and host survive because an operator has to recognise WHICH box the line is
- * about; prose around a URL is left alone — an unreadable refusal message is
- * not a security property.
+ * Applied WHOLE-SEGMENT: the query string and fragment go entirely and EVERY
+ * path segment after the host goes with them (see `safeOrigin` for what survives
+ * of the origin, and why). Prose around a URL is left alone — an unreadable
+ * refusal message is not a security property, and the operator-facing paths this
+ * module composes (`repoRoot`, `manifestPath`, the dispatch log) are exactly the
+ * text a refusal exists to hand over.
+ *
+ * INV-4 (key material) is NOT enforced here, deliberately: this runs over
+ * locally composed strings too, and `redactSecrets`'s long-mixed-token arm eats
+ * an ordinary absolute path. Key material arrives only as third-party free text,
+ * so it is redacted at that boundary instead — see `errorMessage`.
  */
-function redactUrls(text: string): string {
-  return text.replace(/\bhttps?:\/\/[^\s"'<>]+/gi, (url) => {
-    const cut = url.search(/[?#]/);
-    const base = cut === -1 ? url : url.slice(0, cut);
-    const pathAt = base.indexOf("/", base.indexOf("://") + 3);
-    const host = pathAt === -1 ? base : base.slice(0, pathAt);
-    const path = pathAt === -1 ? "" : base.slice(pathAt);
-    const out = host.replace(/\/[^/]{16,}/g, "/«redacted»") + path.replace(/\/[^/]+/g, "/«redacted»");
-    return cut === -1 ? out : `${out}«redacted»`;
+function redact(text: string): string {
+  return text.replace(URL_IN_TEXT_RE, (raw) => {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      // Scheme matched but the rest did not parse: redact whole rather than
+      // guess at its structure — fail closed, like every other unverifiable
+      // read in this module.
+      return "«redacted»";
+    }
+    const path = url.pathname === "/" ? "" : url.pathname.replace(/\/[^/]+/g, "/«redacted»");
+    const stripped = url.search === "" && url.hash === "" ? "" : "«redacted»";
+    return `${safeOrigin(url)}${path}${stripped}`;
   });
+}
+
+/**
+ * A brief-supplied URL as a LOGGABLE link (INV-6, `issueUrl`).
+ *
+ * `redact` is the wrong tool here: it eats the path, and an issue link with no
+ * path is not a link. The schema constrains `issueUrl`'s SCHEME only, so
+ * `https://github.example/o/r/issues/1?installation_token=…` reached both
+ * structured lines verbatim — on the same line where the box URL was redacted,
+ * and INV-6's own docstring names the query string as the first thing to strip.
+ * Userinfo, query and fragment always go; the path stays clickable.
+ */
+function linkSafe(url: string | null): string | null {
+  if (url === null) return null;
+  try {
+    const parsed = new URL(url);
+    return `${safeOrigin(parsed)}${parsed.pathname === "/" ? "" : parsed.pathname}`;
+  } catch {
+    return "«redacted»";
+  }
 }
 
 /**
@@ -252,7 +311,7 @@ function redactUrls(text: string): string {
  * plain objects.
  *
  * Redaction used to be a per-call-site convention — `refuse` redacted only
- * `message`, and each caller was expected to remember `redactUrls` on the
+ * `message`, and each caller was expected to remember `redact` on the
  * strings it put in the payload and on the remediation. A convention a caller
  * has to remember is one a caller eventually forgets, and the ones that forgot
  * (`errorRemediation` on a provider throw, the gate's `debug: … teardown …`
@@ -264,7 +323,7 @@ function redactUrls(text: string): string {
  * cycle to come from. Add one if a payload ever carries a caller's object.
  */
 function redactDeep(value: unknown): unknown {
-  if (typeof value === "string") return redactUrls(value);
+  if (typeof value === "string") return redact(value);
   if (Array.isArray(value)) return value.map(redactDeep);
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactDeep(v)]));
@@ -490,10 +549,26 @@ function recordExists(store: RunRecordStore, runId: string): boolean {
  * legal. A bare `(e as Error).message` read on those throws a TypeError from
  * inside the catch block, which replaces the real refusal — the diagnosis the
  * operator needs — with an unrelated crash out of the error path itself.
+ *
+ * INV-4 lives HERE, at that boundary, because this is the only place third-party
+ * free text becomes operator-facing text in this module — and key material can
+ * only arrive that way. `deliverRunKey` hands the plaintext key to
+ * `driver.exec`, and an exec wrapper that reports a failure by echoing its
+ * invocation puts the key in the thrown message; `redact` is no help (it matches
+ * `https?://…`, and a bare `sk-…` has no scheme). The step-7 catch guards only
+ * the path where the RACE is won — when the wall clock wins instead, that catch
+ * never sees the provider error at all, and `within`'s abandoned-step handler
+ * logs it. Same rule and same helper (`redactSecrets`) as
+ * `src/providers/step-log.ts` applies to every step line, so a message cannot be
+ * safe in one layer and unsafe in the other.
+ *
+ * Not folded into `redact`: that one also runs over strings this module composes
+ * itself, and `redactSecrets`'s long-mixed-token arm eats an ordinary absolute
+ * path — which is the operator-facing text a refusal exists to hand over.
  */
 function errorMessage(e: unknown): string {
   const message = (e as { message?: unknown } | null | undefined)?.message;
-  return typeof message === "string" ? message : String(e);
+  return redactSecrets(typeof message === "string" ? message : String(e));
 }
 
 /**
@@ -518,9 +593,14 @@ function providerCodePayload(e: unknown): { providerCode?: string } {
   return typeof code === "string" ? { providerCode: code } : {};
 }
 
+/**
+ * The provider's own remediation when it has one. Third-party free text, so it
+ * gets the same INV-4 treatment as `errorMessage`; the FALLBACK is composed here
+ * and does not (see `redact` on why a path must survive).
+ */
 function errorRemediation(e: unknown, fallback: string): string {
   const remediation = (e as { remediation?: unknown } | null | undefined)?.remediation;
-  return typeof remediation === "string" ? remediation : fallback;
+  return typeof remediation === "string" ? redactSecrets(remediation) : fallback;
 }
 
 /**
@@ -572,6 +652,23 @@ export async function dispatch(
    * existed with no way to learn its address.
    */
   let ctxHttpsUrl: string | undefined;
+  /**
+   * Has provisioning been ATTEMPTED for `ctxRunId` — i.e. may a record exist?
+   *
+   * The remediation commands `refuse` composes used to be gated on `ctxRunId !==
+   * null`, which is set INSIDE the mint-collision loop, before the admission
+   * gates and before `store.create`. Every pre-provision refusal after step 4
+   * therefore advertised `fleet teardown <id>` for an id with no record — and on
+   * the `run-id-unmintable` path the id was the last COLLIDING one, which by
+   * definition belongs to someone else's live run, so the payload told a tier-1
+   * agent to tear THAT down.
+   *
+   * Set immediately before `provisionAdmittedRun`, not after it: the step
+   * straddles the record (record first, then box), so a throw from either half
+   * can leave a real record — teardown is the right advice for both, and it is
+   * idempotent over "no record" anyway.
+   */
+  let ctxProvisionAttempted = false;
 
   /**
    * The one exit path every refusal takes: host-side dispatch log (AC4), one
@@ -592,8 +689,8 @@ export async function dispatch(
     rawRemediation: string,
     payload: Record<string, unknown> = {},
   ): FleetError => {
-    const message = redactUrls(rawMessage);
-    const remediation = redactUrls(rawRemediation);
+    const message = redact(rawMessage);
+    const remediation = redact(rawRemediation);
     const redactedPayload = redactDeep(payload) as Record<string, unknown>;
     try {
       appendDispatchFailure(dispatchLog, {
@@ -607,7 +704,20 @@ export async function dispatch(
       // The log must never mask the refusal it records — but swallowing it is
       // how AC4 evidence goes missing, so it is named on stderr (the fallback
       // appendDispatchFailure's own contract documents).
-      process.stderr.write(`dispatch-log append to ${dispatchLog} failed (${code}): ${errorMessage(e)}\n`);
+      //
+      // GUARDED, for the same reason the `log` call below is: `refuse` runs
+      // inside the deadline `setTimeout` callback, and a piped CLI whose reader
+      // has exited makes this write throw EPIPE. Thrown from a timer callback
+      // that is an uncaughtException — the process dies instead of the race
+      // rejecting — and on the gate path it downgrades an exit-3 refusal to a
+      // bare exit-1. Redacted like every other free-text sink here.
+      try {
+        process.stderr.write(
+          `dispatch-log append to ${dispatchLog} failed (${code}): ${redact(errorMessage(e))}\n`,
+        );
+      } catch {
+        // nothing left to report it on
+      }
     }
     const durationMs = now() - wallStart;
     try {
@@ -642,7 +752,11 @@ export async function dispatch(
       runId: ctxRunId,
       ...(ctxVmName === undefined ? {} : { vmName: ctxVmName }),
       ...(ctxHttpsUrl === undefined ? {} : { httpsUrl: ctxHttpsUrl }),
-      ...(ctxRunId === null
+      // Gated on "a record may exist for this id", NOT on "an id was chosen" —
+      // see `ctxProvisionAttempted`. A pre-provision refusal has nothing to tear
+      // down, and naming a teardown for an id this dispatch never provisioned is
+      // at best noise and at worst an instruction to destroy another run.
+      ...(ctxRunId === null || !ctxProvisionAttempted
         ? {}
         : {
             debugCommands: ctxGate?.debugCommands ?? [`bun scripts/fleet.ts status ${ctxRunId}`],
@@ -664,19 +778,41 @@ export async function dispatch(
    * can abort a healthy dispatch. `performance.now()` is the monotonic fix, but
    * it does not compose with the `deps.clock` seam the tests drive; the upgrade
    * is a monotonic seam, not a second clock read.
+   *
+   * FLOORED, because the consumers require an integer and one of them refuses
+   * without it: `loadManifestWithSeams` demands `Number.isSafeInteger` of its
+   * `callerBudgetMs`, and dispatch turns that refusal into
+   * `refuse(2, "manifest-rejected")` — misdiagnosing a slow substrate as a bad
+   * manifest, the exact misdiagnosis the `manifestBudgetMs <= 0` pre-check
+   * exists to avoid. `Date.now()` cannot produce a fraction; an injected clock
+   * seam can, which is the whole point of a seam. Flooring is the fail-closed
+   * direction (a sub-millisecond shave off the budget, never an extension).
    */
   const remaining = (): number => {
     const left = timeoutMs - (now() - wallStart);
-    return Number.isFinite(left) ? left : 0;
+    return Number.isFinite(left) ? Math.floor(left) : 0;
   };
   const timedOut = (step: string, extra: Record<string, unknown> = {}): FleetError =>
     refuse(
       1,
       "dispatch-timeout",
       `dispatch exceeded ${timeoutMs} ms at ${step}`,
-      ctxRunId === null
-        ? "raise timeoutMs, or retry when the substrate is responsive"
-        : `tear the run down: bun scripts/fleet.ts teardown ${ctxRunId}`,
+      // G3/DF3.2: `within` ABANDONS rather than cancels — the provider seam
+      // exposes no AbortSignal — so a create that had already STARTED is a call
+      // still in flight, not a call that was stopped. It can materialise a
+      // billable box seconds after this refusal, i.e. after the operator has
+      // concluded nothing was provisioned and moved on. Until the driver takes a
+      // signal (DF3.2), the only honest remediation is to say so.
+      //
+      // `ctxProvisionAttempted` is what tells the two apart: `within`'s
+      // `left <= 0` pre-check throws BEFORE the thunk runs, and that create
+      // genuinely never started — telling that operator to go looking for a box
+      // would be the opposite error.
+      step === "create" && ctxProvisionAttempted
+        ? `the create call was ABANDONED, not cancelled: a box may still appear for this run. Re-check \`bun scripts/fleet.ts status\` before assuming nothing was created${ctxRunId === null ? "" : `, then tear it down: bun scripts/fleet.ts teardown ${ctxRunId}`}`
+        : ctxRunId === null || !ctxProvisionAttempted
+          ? "raise timeoutMs, or retry when the substrate is responsive"
+          : `tear the run down: bun scripts/fleet.ts teardown ${ctxRunId}`,
       { step, ...extra },
     );
 
@@ -727,7 +863,7 @@ export async function dispatch(
           // Secondary to the timeout that was already thrown: the abandoned
           // provider call failed too, which is what an operator needs to see
           // when the timeout alone does not explain the run.
-          error: { code: "abandoned-step-failed", message: redactUrls(errorMessage(e)) },
+          error: { code: "abandoned-step-failed", message: redact(errorMessage(e)) },
           runId: ctxRunId,
           verb: "dispatch",
           phase: "abandoned",
@@ -793,7 +929,7 @@ export async function dispatch(
       {
         field,
         issues: parsed.error.issues.map((i) =>
-          redactUrls(`${i.path.join(".") || "(root)"}: ${i.message}`),
+          redact(`${i.path.join(".") || "(root)"}: ${i.message}`),
         ),
       },
     );
@@ -861,20 +997,31 @@ export async function dispatch(
   ctxRepoSlug = repoSlug;
   ctxIssueId = correlation.issueId;
   const resolvedMs = now() - wallStart;
-  log({
-    requestId,
-    operation: "fleet.dispatch",
-    agentId: null,
-    timestamp: new Date().toISOString(),
-    duration: resolvedMs,
-    durationMs: resolvedMs,
-    status: "ok",
-    runId: null,
-    issueUrl: correlation.issueUrl,
-    verb: "dispatch",
-    phase: "resolved",
-    exitStatus: "success" as ExitStatus,
-  });
+  // GUARDED, like every other `log` in this module. A throwing sink must not
+  // break the run: unguarded, this one turned a healthy dispatch into a raw
+  // non-`FleetError` escaping before the try/catch below exists — no
+  // dispatch-log entry (AC4), no `runId` on the payload, bare CLI exit 1.
+  try {
+    log({
+      requestId,
+      operation: "fleet.dispatch",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: resolvedMs,
+      durationMs: resolvedMs,
+      status: "ok",
+      runId: null,
+      // Query string and userinfo stripped, path kept clickable: the brief
+      // constrains `issueUrl`'s scheme only, so `?installation_token=…` would
+      // otherwise reach this line verbatim (INV-6 names the query string first).
+      issueUrl: linkSafe(correlation.issueUrl),
+      verb: "dispatch",
+      phase: "resolved",
+      exitStatus: "success" as ExitStatus,
+    });
+  } catch {
+    // see `refuse` — a sink failure is never the run's failure
+  }
 
   // ── 3. manifest + roster (INV-2: pure validation, so it belongs HERE) ──────
   // Loading the manifest at fill time meant a manifest defect was discovered
@@ -936,8 +1083,13 @@ export async function dispatch(
   // ponytail: belt and braces. `stampManifestLimit` below spreads its own value
   // over whatever was there, so the authored one cannot reach the box today;
   // this makes the rule independent of that overwrite staying last.
-  const { limitMicroUsd: _authoredLimit, ...unstamped } = loaded.manifest;
-  loaded = { ...loaded, manifest: unstamped };
+  //
+  // `stripAuthoredLimit`, not a hand-rolled destructure. The two copies had
+  // already diverged (the export freezes its result, this did not), and the
+  // export had ZERO non-test callers — so deleting these lines would have taken
+  // the AC9a money guard with them while manifest.ts's own test stayed green.
+  // One rule, one implementation.
+  loaded = stripAuthoredLimit(loaded);
   // The exedev gate reads the ACTIVE roster beside the manifest. Its absence is
   // a defect in the brief, not a gate outcome, so it refuses before a box
   // exists rather than as a failed assertion on a live box (INV-5 would then
@@ -1025,6 +1177,11 @@ export async function dispatch(
       );
     }
     if (attempt >= MINT_RETRIES) {
+      // The id in `ctxRunId` is the last COLLIDING one — it belongs to another
+      // run's record, not to this dispatch, which never settled on an id at all.
+      // Reporting it as this dispatch's `runId` (on the payload and on the
+      // structured line) attributes this refusal to someone else's live run.
+      ctxRunId = null;
       throw refuse(
         1,
         "run-id-unmintable",
@@ -1112,8 +1269,40 @@ export async function dispatch(
   } finally {
     try {
       ledger?.close();
-    } catch {
-      // a close failure must not mask the gate's own outcome
+    } catch (e) {
+      // A close failure must not MASK the gate's own outcome — rethrowing here
+      // would replace an OverBudgetError refusal with an IO error, and would
+      // turn a successful admission into a failure after the reservation was
+      // already committed. But silence is worse than either: `close()` is where
+      // the reservation write is flushed, so a throw here (SQLITE_BUSY, IO)
+      // means the ledger may hold NO record of the admission just granted — and
+      // the next dispatch for this issue then reads a stale `reservedMicroUsd`
+      // and overcommits the cap. Named on the structured log so the overcommit
+      // is diagnosable after the fact.
+      //
+      // Deliberately NOT a refusal: dispatch cannot tell a failed flush from a
+      // failed release of an already-durable write, and refusing on the second
+      // would burn the issue's cap on a reservation the orphan guard then has
+      // to age out. Report, proceed, let the ledger's own guard arbitrate.
+      const durationMs = now() - wallStart;
+      try {
+        log({
+          requestId,
+          operation: "fleet.dispatch",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: durationMs,
+          durationMs,
+          status: "error",
+          error: { code: "ledger-close-failed", message: redact(errorMessage(e)) },
+          runId,
+          verb: "dispatch",
+          phase: "admitted",
+          exitStatus: "transient" as ExitStatus,
+        });
+      } catch {
+        // a throwing sink must not become the failure this handler reports
+      }
     }
   }
   // AC9b: the ONE ceiling — DF2.8 computed min(keyCap, remaining); propagate.
@@ -1180,8 +1369,13 @@ export async function dispatch(
   // dispatch-log entry that AC4 evidence is read out of.
   let provisioned: Awaited<ReturnType<typeof provisionAdmittedRun>>;
   try {
-    provisioned = await within("create", () =>
-      provisionAdmittedRun(deps.driver, deps.store, {
+    provisioned = await within("create", () => {
+      // INSIDE the thunk, so it means "provisioning STARTED", not "provisioning
+      // was about to start": `within`'s `left <= 0` pre-check throws before the
+      // thunk runs, and that create never touched the store or the driver.
+      // `refuse` gates its teardown remediation on this (see the declaration).
+      ctxProvisionAttempted = true;
+      return provisionAdmittedRun(deps.driver, deps.store, {
         runId,
         // `port` is deliberately withheld: provisionAdmittedRun exposes and makes
         // the box PUBLIC immediately after create, i.e. before the setup gate has
@@ -1195,8 +1389,8 @@ export async function dispatch(
           reservedMicroUsd: decision.reservedMicroUsd,
           admittedCeilingMicroUsd: decision.admittedCeilingMicroUsd,
         },
-      }),
-    );
+      });
+    });
   } catch (e) {
     // `timedOut` already produced one (and already refused) — do not double-log.
     if (e instanceof FleetError) throw e;
@@ -1274,10 +1468,12 @@ export async function dispatch(
     // puts that key in the thrown message. The generic catch below interpolates
     // a caught message into `dispatch failed after the box was created: …`,
     // which is written to the dispatch log AND the structured line AND the
-    // returned FleetError; `redactUrls` only matches `https?://…`, so a bare
-    // token survives all three. INV-4 says plaintext exists in the mint return
-    // and nowhere else, so the provider's free text never reaches a sink here —
-    // only its `code`, in the payload.
+    // returned FleetError. `redact` now carries `redactSecrets`, so a bare token
+    // no longer survives those three — but this catch stays: defence in depth
+    // for an issuer whose prefix is not on the list and whose token is too short
+    // for the long-token arm. INV-4 says plaintext exists in the mint return and
+    // nowhere else, so the provider's free text never reaches a sink here — only
+    // its `code`, in the payload.
     try {
       const { key } = await within("mint", () =>
         mintRunKey(
@@ -1368,11 +1564,17 @@ export async function dispatch(
           // No `as never`, no `as Parameters<…>`: `hasExedevSetup` narrows the
           // driver and `SetupGateOptions` accepts this literal on its own. The
           // casts switched off checking on BOTH arguments of the one call that
-          // most needs it. `o.requestId` is still not forwarded — the gate's
-          // options carry no correlation field, so INV-4-bis on its log lines
-          // needs a change in `src/providers/exedev/setup-gate.ts`.
+          // most needs it.
+          //
+          // `requestId` IS forwarded (INV-4-bis). `SetupGateOptions.requestId`
+          // exists for exactly this, and the gate falls back to the DRIVER's own
+          // id when it is absent — a different id from the ack whenever the
+          // driver was not built by this dispatch, which is precisely the run
+          // (one that died at the gate) whose lines an operator most needs to
+          // join. Every gate log line carries it.
           return realSetupGate(drv, box, {
             runId: o.runId,
+            requestId: o.requestId,
             rosterPath,
             commitSha: o.commitSha,
           });
@@ -1406,7 +1608,15 @@ export async function dispatch(
           },
         });
       } catch (e) {
-        process.stderr.write(`gate outcome not recorded on run ${runId}: ${errorMessage(e)}\n`);
+        // Guarded and redacted for the same reasons as `refuse`'s own stderr
+        // fallback: an EPIPE here (a piped CLI whose reader exited) would
+        // otherwise downgrade this exit-3 gate refusal to a bare exit-1
+        // `dispatch-failed`, which names the wrong cause entirely.
+        try {
+          process.stderr.write(`gate outcome not recorded on run ${runId}: ${redact(errorMessage(e))}\n`);
+        } catch {
+          // nothing left to report it on
+        }
       }
       throw refuse(
         3,
@@ -1443,8 +1653,28 @@ export async function dispatch(
       // entirely. The record claims the port before anything can open it.
       deps.store.set(runId, { ports: [port] });
       ctxHttpsUrl = await within("expose", () => deps.driver.expose(vm.name, port));
+      // The URL was the one state claim still made AFTER the call it describes.
+      // Two ways that lost it: a failed — or, by the same abandon-not-cancel
+      // reasoning as the `ports` claim above, an ABANDONED — `setPublic` left
+      // the record with a port and no URL for a box `expose` had already given
+      // one; and a driver that resolved no URL still went on to be made PUBLIC,
+      // i.e. publicly reachable with nothing on the record saying where.
+      //
+      // `expose` is DECLARED `Promise<string>`, so the undefined arm is a
+      // driver-boundary guard, not a modelled outcome — and the right answer at
+      // that boundary is to refuse before the box is public (INV-5 keeps it
+      // alive and diagnosable) rather than to publish a box nobody can name.
+      if (ctxHttpsUrl === undefined) {
+        throw refuse(
+          1,
+          "expose-no-url",
+          `expose returned no URL for run ${runId} on port ${port}`,
+          "the run record is OPEN and the box is ALIVE but NOT public (INV-5) — inspect it, then tear it down",
+          { port },
+        );
+      }
+      deps.store.set(runId, { httpsUrl: ctxHttpsUrl });
       await within("setPublic", () => deps.driver.setPublic(vm.name));
-      if (ctxHttpsUrl !== undefined) deps.store.set(runId, { httpsUrl: ctxHttpsUrl });
     }
   } catch (e) {
     if (e instanceof FleetError) throw e;
@@ -1466,24 +1696,35 @@ export async function dispatch(
   // admits no other literal, so there is no "succeeded" for it to be confused
   // with — the AC is met, the wording just differs from the literal.
   const durationMs = now() - wallStart;
-  log({
-    requestId,
-    operation: "fleet.dispatch",
-    agentId: null,
-    timestamp: new Date().toISOString(),
-    duration: durationMs,
-    durationMs,
-    status: "ok",
-    runId,
-    issueUrl: correlation.issueUrl,
-    verb: "dispatch",
-    phase: "ready",
-    exitStatus: "success" as ExitStatus,
-    httpsUrl: ctxHttpsUrl === undefined ? undefined : redactUrls(ctxHttpsUrl),
-    // Nested, not spread — see `refuse` for why a `Record<string, number>`
-    // spread last can silently overwrite `status`/`runId`/`exitStatus`.
-    timings: { ...timings },
-  });
+  // GUARDED. This is the LAST thing a fully successful dispatch does: the box is
+  // alive, the key is delivered at the full admitted ceiling, the gate passed
+  // and the record is written — and it runs AFTER the try/catch above has ended,
+  // so a throwing sink escaped as a raw non-`FleetError` with no dispatch-log
+  // entry and no `runId` on it. The operator's natural response to that bare
+  // failure (tear down, retry) re-spends the issue's cap on a run that had
+  // already SUCCEEDED. A sink failure is never the run's failure.
+  try {
+    log({
+      requestId,
+      operation: "fleet.dispatch",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: durationMs,
+      durationMs,
+      status: "ok",
+      runId,
+      issueUrl: linkSafe(correlation.issueUrl),
+      verb: "dispatch",
+      phase: "ready",
+      exitStatus: "success" as ExitStatus,
+      httpsUrl: ctxHttpsUrl === undefined ? undefined : redact(ctxHttpsUrl),
+      // Nested, not spread — see `refuse` for why a `Record<string, number>`
+      // spread last can silently overwrite `status`/`runId`/`exitStatus`.
+      timings: { ...timings },
+    });
+  } catch {
+    // see `refuse`
+  }
   return {
     runId,
     requestId,

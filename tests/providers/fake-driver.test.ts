@@ -18,7 +18,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fillRun, reapRuns } from "../../src/providers/driver.ts";
+import {
+  createRun,
+  fillRun,
+  type ProviderVm,
+  ProvisionRefusedError,
+  provisionAdmittedRun,
+  reapRuns,
+} from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { resolveDriver } from "../../src/providers/index.ts";
@@ -394,6 +401,176 @@ describe("FakeDriver accountability and boundaries", () => {
       rmSync(sync, { recursive: true, force: true });
     }
   }, 15_000);
+});
+
+/**
+ * DF3.1 review round 4 — the provisioning sequence's refusals and the reaper's
+ * fail-safe. Driver-agnostic in intent, but they live here rather than in the
+ * shared contract suite: each one drives a failure the seam cannot produce on a
+ * real substrate on demand (a hung create, a store write that throws), so the
+ * suite DF2.2 and the OCI story import stays substrate-honest.
+ */
+describe("provisioning refusals and fail-safe reap", () => {
+  /** The rejection itself, so a test can assert on its type and code. */
+  async function rejection(p: Promise<unknown>): Promise<Error> {
+    try {
+      await p;
+    } catch (e) {
+      return e as Error;
+    }
+    throw new Error("expected a rejection, got a resolution");
+  }
+
+  function tmp(): { boxes: string; runs: string; driver: FakeDriver; store: RunRecordStore } {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-df31-boxes-"));
+    const runs = mkdtempSync(join(tmpdir(), "qds-df31-runs-"));
+    return { boxes, runs, driver: new FakeDriver(boxes), store: new RunRecordStore({ dir: runs }) };
+  }
+
+  function clean(t: { boxes: string; runs: string }): void {
+    rmSync(t.boxes, { recursive: true, force: true });
+    rmSync(t.runs, { recursive: true, force: true });
+  }
+
+  test("createRun refuses opts.issue: admission has exactly one production caller (AC7)", async () => {
+    const t = tmp();
+    try {
+      // Dormant double admission made loud. A caller that had already admitted
+      // (as the dispatcher does) and then passed `issue` here would book the
+      // same issue against the same cap twice, silently.
+      const err = await rejection(
+        createRun(t.driver, t.store, {
+          runId: "admit-elsewhere-run",
+          issue: { repoSlug: "qds/demo", issueId: "42" },
+        }),
+      );
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      expect((err as ProvisionRefusedError).code).toBe("admission-not-here");
+      expect((err as ProvisionRefusedError).remediation).toContain("provisionAdmittedRun");
+      // Refused before the headroom read, the record and the box.
+      expect(await t.driver.list()).toEqual([]);
+      expect(existsSync(join(t.runs, "admit-elsewhere-run.json"))).toBe(false);
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("an invalid port refuses with a typed code, before the record exists", async () => {
+    const t = tmp();
+    try {
+      const err = await rejection(provisionAdmittedRun(t.driver, t.store, { runId: "bad-port-run", port: 0 }));
+      // Typed, not a bare Error: the fleet CLI classifies on `code` and prints
+      // `remediation`, and `port: 0` used to be accepted (persisted as ports:[0]).
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      expect((err as ProvisionRefusedError).code).toBe("invalid-port");
+      expect(existsSync(join(t.runs, "bad-port-run.json"))).toBe(false);
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("a failed budget write REMOVES the record, so the admission's reservation can expire", async () => {
+    const t = tmp();
+    try {
+      const runId = "budget-write-fails-run";
+      const failing = Object.assign(Object.create(t.driver) as FakeDriver, {
+        create: async (): Promise<ProviderVm> => {
+          throw new Error("driver.create must never be reached");
+        },
+      });
+      const realSet = t.store.set.bind(t.store);
+      t.store.set = (() => {
+        throw new Error("record write failed");
+      }) as typeof t.store.set;
+
+      let err: Error;
+      try {
+        err = await rejection(
+          provisionAdmittedRun(failing, t.store, {
+            runId,
+            budget: {
+              repoSlug: "qds/demo",
+              issueId: "42",
+              capMicroUsd: 5_000_000,
+              spentMicroUsd: 0,
+              reservedMicroUsd: 0,
+              admittedCeilingMicroUsd: 5_000_000,
+            },
+          }),
+        );
+      } finally {
+        t.store.set = realSet;
+      }
+      // The write failure is what the caller sees — never masked by the cleanup.
+      expect(err.message).toContain("record write failed");
+      // A record that RESOLVES with no `extensions.budget` is the one shape
+      // nothing retires: the ledger's orphan guard expires only an admission
+      // whose record does not resolve, and only a priced cost_event (written by
+      // teardown FROM that extension) retires a reservation. Leaving it — open
+      // or closed — erodes the issue's cap permanently.
+      expect(existsSync(join(t.runs, `${runId}.json`))).toBe(false);
+      expect(await failing.list(runId)).toEqual([]);
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("expose resolving no URL leaves the returned and the persisted httpsUrl agreeing", async () => {
+    const t = tmp();
+    try {
+      const created = "https://created.example";
+      const quiet = Object.assign(Object.create(t.driver) as FakeDriver, {
+        create: async (name: string): Promise<ProviderVm> => ({ name, httpsUrl: created }),
+        expose: async (): Promise<string> => undefined as unknown as string,
+        setPublic: async (): Promise<void> => {},
+      });
+      const out = await provisionAdmittedRun(quiet, t.store, { runId: "quiet-expose-run", port: 8080 });
+      // The store cannot unset a field, so "clear both" is unavailable — both
+      // keep the create-time URL rather than the return dropping one the record
+      // still carries.
+      expect(out.httpsUrl).toBe(created);
+      expect(out.record.httpsUrl).toBe(created);
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("a hung provider call is bounded, and the record survives as the handle", async () => {
+    const t = tmp();
+    try {
+      const hung = Object.assign(Object.create(t.driver) as FakeDriver, {
+        create: (): Promise<ProviderVm> => new Promise<ProviderVm>(() => {}),
+      });
+      const err = await rejection(
+        provisionAdmittedRun(hung, t.store, { runId: "hung-create-run", actionTimeoutMs: 5 }),
+      );
+      expect(err.message).toContain("driver.create(hung-create-run) timed out after 5ms");
+      // OPEN, because a timed-out create may still have stood a box up and the
+      // run id is what the box is named after (teardown's fallback handle).
+      expect(t.store.get("hung-create-run").closedAt).toBeUndefined();
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("reap refuses outright when a run record file was skipped by the listing", async () => {
+    const t = tmp();
+    try {
+      await provisionAdmittedRun(t.driver, t.store, { runId: "claimed-run" });
+      await t.driver.create("orphan-box");
+      // The record listing skips a `.json` whose stem fails the id grammar
+      // (INV-4's one exception). A skipped file can hold an OPEN record naming a
+      // live box, so the claim set is no longer provably complete — and every
+      // name missing from it is a box this function would destroy.
+      writeFileSync(join(t.runs, "Not_A_Run_Id.json"), "{}\n");
+      // The filename is in the refusal: it is what an operator has to go rename.
+      await expect(reapRuns(t.driver, t.store)).rejects.toThrow(/refusing to reap.*Not_A_Run_Id\.json/);
+      // Fail-safe: the orphan lives, rather than the claimed box dying.
+      expect((await t.driver.list()).map((v) => v.name).sort()).toEqual(["claimed-run", "orphan-box"]);
+    } finally {
+      clean(t);
+    }
+  });
 });
 
 runDriverContract({ driverName: "fake", makeDriver: () => resolveDriver("fake") });

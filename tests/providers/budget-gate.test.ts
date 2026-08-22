@@ -20,7 +20,8 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { createRun } from "../../src/providers/driver.ts";
+import { createRun, provisionAdmittedRun } from "../../src/providers/driver.ts";
+import type { RunRecord } from "../../src/providers/run-record.ts";
 import { assertWithinBudget, mintCapMicroUsd, OverBudgetError } from "../../src/providers/budget-gate.ts";
 import { CostLedger, CostLedgerError, capForIssue } from "../../src/providers/cost-ledger.ts";
 
@@ -58,6 +59,66 @@ afterEach(() => {
   process.chdir(prevCwd);
   rmSync(dir, { recursive: true, force: true });
 });
+
+/**
+ * Admit once, then provision — the composition `createRun` performed when it
+ * was handed `opts.issue`, and the one `src/fleet/dispatch.ts` performs in
+ * production.
+ *
+ * DF3.1 review L3 moved it out of `createRun`: AC7 states DF2.8's gate has
+ * exactly ONE production caller, and `createRun`'s own gate call was a second
+ * live admission site that would have booked the same issue against the same
+ * cap twice the moment any caller passed an issue. `createRun` now refuses
+ * `opts.issue` outright (`ProvisionRefusedError`, code `admission-not-here`),
+ * so these tests compose the two halves themselves rather than asserting on a
+ * path production no longer has. What they assert — the gate's refusals, the
+ * clamped ceiling, zero creates on a refusal — is unchanged.
+ */
+async function admitAndProvision(
+  driver: FakeDriver,
+  store: RunRecordStore,
+  opts: { runId: string; issue: { repoSlug: string; issueId: string; requestId?: string } },
+): Promise<RunRecord> {
+  const ledger = new CostLedger({
+    // ENOENT → undefined so the gate's orphan-admission expiry can see a run
+    // whose store.create failed; every other read failure propagates.
+    readRunRecord: (id) => {
+      try {
+        return store.get(id);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw e;
+      }
+    },
+  });
+  let decision: ReturnType<typeof assertWithinBudget>;
+  try {
+    decision = assertWithinBudget(ledger, {
+      repoSlug: opts.issue.repoSlug,
+      issueId: opts.issue.issueId,
+      runId: opts.runId,
+      requestId: opts.issue.requestId ?? `gate-${opts.runId}`,
+    });
+  } finally {
+    try {
+      ledger.close();
+    } catch {
+      // A close failure must not mask the gate's own error.
+    }
+  }
+  const { record } = await provisionAdmittedRun(driver, store, {
+    runId: opts.runId,
+    budget: {
+      repoSlug: opts.issue.repoSlug,
+      issueId: opts.issue.issueId,
+      capMicroUsd: decision.capMicroUsd,
+      spentMicroUsd: decision.spentMicroUsd,
+      reservedMicroUsd: decision.reservedMicroUsd,
+      admittedCeilingMicroUsd: decision.admittedCeilingMicroUsd,
+    },
+  });
+  return record;
+}
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -419,7 +480,7 @@ describe("INV-COST-6: unopenable ledger refuses", () => {
 
     let err: CostLedgerError | undefined;
     try {
-      await createRun(driver, store, {
+      await admitAndProvision(driver, store, {
         runId: "badledger-20260820-000001",
         issue: { repoSlug: "qds/demo", issueId: "42", requestId: "req-bad" },
       });
@@ -476,7 +537,7 @@ describe("E2E demo: lead+2-worker run → second dispatch over cap refused", () 
 
     // Dispatch 1 — admitted, remaining 100k, key minted at the clamped ceiling.
     const run1 = "e2e-run-1";
-    const rec1 = await createRun(driver, store, {
+    const rec1 = await admitAndProvision(driver, store, {
       runId: run1,
       issue: { repoSlug: "qds/demo", issueId: "42", requestId: "req-e2e-1" },
     });
@@ -508,7 +569,7 @@ describe("E2E demo: lead+2-worker run → second dispatch over cap refused", () 
     const keysBefore = keyApi.keys.length;
     let refusal: OverBudgetError | undefined;
     try {
-      await createRun(driver, store, {
+      await admitAndProvision(driver, store, {
         runId: "e2e-run-2",
         issue: { repoSlug: "qds/demo", issueId: "42", requestId: "req-e2e-2" },
       });

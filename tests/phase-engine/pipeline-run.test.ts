@@ -13,6 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { readJournal } from "./journal-test-util.ts";
+import { runContextFrom } from "../../scripts/pipeline-run.ts";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
 const RUNNER = path.join(REPO_ROOT, "scripts", "pipeline-run.ts");
@@ -794,4 +795,30 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     }
     expect(fs.existsSync(dispatchFailureLog(ws.markerRoot))).toBe(false);
   }, 60_000);
+});
+
+describe("pipeline-run DF3.1 AC9b: the admitted ceiling reaches the run context", () => {
+  // The chain is dispatch → stamped `pipeline.yaml` → this entrypoint's
+  // RunContext → `dispatch-task.ts` → `_runTeamManifest` → DF1.6's spawn cap.
+  // It was broken at this link: the context was built from three fields, so
+  // `effectiveCeilingMicros` was `undefined` on every real run and every run
+  // spawned at the $0.50 harness default. Dispatch's own coverage stopped at the
+  // bytes of `run-context.json`, a file with no consumer anywhere in the repo,
+  // so nothing failed. Asserted on the CONTEXT, which is the thing consumed.
+
+  test("a stamped manifest puts its limitMicroUsd on the context as effectiveCeilingMicros", () => {
+    const ctx = runContextFrom("run-1", "req-1", {
+      pipelineId: "capped",
+      limitMicroUsd: 250_000,
+    });
+    expect(ctx.effectiveCeilingMicros).toBe(250_000);
+  });
+
+  test("an unstamped manifest leaves the field ABSENT, never defaulted to a number", () => {
+    // `"x" in ctx`, not `ctx.x === undefined`: present-and-undefined is a
+    // different shape from absent, and the engine's own contract
+    // (tests/phase-engine/phase-lifecycle.test.ts) is written against absence.
+    const ctx = runContextFrom("run-2", "req-2", { pipelineId: "uncapped" });
+    expect("effectiveCeilingMicros" in ctx).toBe(false);
+  });
 });

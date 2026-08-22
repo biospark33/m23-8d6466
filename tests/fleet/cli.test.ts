@@ -17,11 +17,24 @@
  * envelope printed onto it.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { Database } from "bun:sqlite";
+
 import { run } from "../../scripts/fleet.ts";
+import { run as sandboxTeardownRun } from "../../scripts/sandbox-teardown.ts";
 import { listVerbs, renderHelp } from "../../src/fleet/verbs.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
@@ -57,6 +70,16 @@ const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
   teardown: 2, // missing <run-id>
 };
 
+/**
+ * The manifest path every brief here carries, RELATIVE to the containment root
+ * (`deps().repoRoot`, the case's tmpdir). The schema now refuses an absolute
+ * `manifestPath` outright — `resolve(repoRoot, "/etc/shadow")` discards the
+ * root, so absoluteness was the containment hole — and dispatch resolves the
+ * relative form against `repoRoot`, which is what makes it land on the file
+ * `validBriefJson` just wrote.
+ */
+const MANIFEST_REL = join("manifests", "pipeline.json");
+
 function validBriefJson(dir: string): string {
   const manifestDir = join(dir, "manifests");
   mkdirSync(manifestDir, { recursive: true });
@@ -77,7 +100,7 @@ function validBriefJson(dir: string): string {
     repoSlug: "owner/repo",
     issueId: 42,
     commitSha: "b".repeat(40),
-    manifestPath,
+    manifestPath: MANIFEST_REL,
     repoUrl: "https://github.com/owner/repo",
   });
 }
@@ -92,7 +115,15 @@ function validBriefJson(dir: string): string {
  * `expect(existsSync(<tmp>/.sandbox/runs)).toBeFalse()` a claim about the path
  * the CLI would actually build.
  */
-const CLI_ENV_KEYS = ["QDS_RUNS_DIR", "QDS_FAKE_BOXES_DIR", "QDS_COST_LEDGER_FILE", "QDS_COST_CONFIG_FILE"] as const;
+const CLI_ENV_KEYS = [
+  "QDS_RUNS_DIR",
+  "QDS_FAKE_BOXES_DIR",
+  "QDS_COST_LEDGER_FILE",
+  "QDS_COST_CONFIG_FILE",
+  // Not redirected, only snapshotted: the cases that care unset it (a host
+  // that exports one would otherwise hide the refusal they assert on).
+  "OPENROUTER_PROVISIONING_KEY",
+] as const;
 
 /**
  * A keyApi that refuses to be touched at all — D8's credential-free claim for
@@ -239,17 +270,19 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
 
   test("with no repoRoot injected the containment root defaults to the process cwd", async () => {
     // Every other case injects `repoRoot`, so without this one a default that
-    // regressed to "no containment at all" would keep the whole file green
-    // while shipping the traversal INV-1 exists to stop. The manifest here sits
-    // in the case's tmpdir — outside the repo the CLI is actually run from — so
-    // the default MUST refuse it.
+    // regressed to "the brief's own directory" would keep the whole file green
+    // while shipping the traversal INV-1 exists to stop. The manifest this
+    // brief names exists ONLY under the case's tmpdir, so resolved against the
+    // repo the CLI is actually run from it must not be found — and the refusal
+    // names that root, which is what pins WHICH root the default is.
     const { repoRoot: _omitted, ...noRoot } = deps(validBriefJson(dir));
     const code = await runCli(["dispatch", "--driver", "fake"], noRoot);
     expect(code).toBe(2);
     expect(text()).toContain("manifest-rejected");
-    // Named so the refusal is provably the containment check and not a schema
-    // complaint about the same brief.
-    expect(text()).toContain("outside the run root");
+    // The remediation names the containment root the manifest was resolved
+    // against: the process cwd, never the tmpdir the brief was written in.
+    expect(text()).toContain(process.cwd());
+    expect(text()).not.toContain(dir);
     expect(readdirSync(runsDir)).toHaveLength(0);
     // `boxesDir` itself is created by FakeDriver's constructor, so its
     // existence proves nothing — its emptiness is the assertion that matters.
@@ -296,15 +329,39 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     }
   });
 
-  test("no verb is wired into the dispatch switch without a registry entry", async () => {
+  test("every dispatched arm has a registry entry, fall-through arms included", async () => {
     // The other direction of AC6 parity, and the only way to see it: the
     // registry check runs BEFORE the switch, so an unregistered arm is
     // unreachable at runtime and no black-box probe can find it. Read the arms.
+    //
+    // The scan used to be `verb === "([a-z-]+)"` alone, which promised a
+    // guarantee the regex could not give: `teardown` is dispatched as the `else`
+    // fall-through and never appeared in the match set at all, so the assertion
+    // ran over 3 of the 4 shipped arms — and a new verb written as a second
+    // fall-through or as a `switch`/`case` was invisible to it. Both explicit
+    // forms are matched now, the fall-through set is NAMED rather than assumed,
+    // and the arm COUNT is pinned, so an arm this scan cannot see fails loudly
+    // here instead of going unread.
     const source = readFileSync(join(import.meta.dir, "../../scripts/fleet.ts"), "utf8");
-    const wired = [...source.matchAll(/verb === "([a-z-]+)"/g)].map((m) => m[1] as string);
-    expect(wired.length).toBeGreaterThan(0);
+    const armed = [...source.matchAll(/verb === "([a-z-]+)"|case "([a-z-]+)"/g)].map((m) => (m[1] ?? m[2]) as string);
+    expect(armed.length).toBeGreaterThan(0);
     const registry = listVerbs().map((v) => v.verb);
-    for (const verb of wired) expect(registry).toContain(verb);
+    for (const verb of armed) expect(registry).toContain(verb);
+
+    // Everything the registry declares that the scan did NOT see is dispatched
+    // by fall-through. Naming the set is what makes a SECOND one fail.
+    const fallThrough = registry.filter((v) => !armed.includes(v));
+    expect(fallThrough).toEqual(["teardown"]);
+    // …and "dispatched by fall-through" is only true if it reaches a verb body:
+    // each must answer with its own grammar, never the unknown-verb refusal.
+    for (const verb of fallThrough) {
+      reset();
+      expect({ verb, code: await runCli([verb, "--driver", "fake"], deps("")) }).toEqual({ verb, code: 2 });
+      expect(text()).toContain(`${verb} requires <run-id>`);
+      expect(text()).not.toContain("unknown-verb");
+    }
+    // Every arm accounted for exactly once: explicit + fall-through = registry.
+    expect(new Set(armed).size + fallThrough.length).toBe(registry.length);
   });
 
   test("the registry owns the per-verb flag grammar: `status --brief x` is refused, not ignored", async () => {
@@ -332,13 +389,28 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(readdirSync(runsDir)).toHaveLength(0);
   });
 
-  test("--flag=value is the same flag as --flag <value>", async () => {
+  test("--flag=value is the same flag as --flag <value>, and its VALUE is consumed", async () => {
     // Fully supported, and therefore routed through the duplicate check below
     // and the per-verb allowed-flag check above; untested, `--driver=fake` could
     // regress to "unknown flag" and every operator who types it is stuck.
-    const code = await runCli(["status", "--driver=fake"], deps(""));
+    //
+    // Paired with a flag whose value actually changes the outcome. On its own
+    // `status --driver=fake` proved only "not rejected as an unknown flag":
+    // `--driver` is inert wherever `deps.driver` is injected and `status` on an
+    // empty store prints nothing, so a splitter yielding `"=fake"` or `"fak"`
+    // passed identically. `--port` is the one flag whose parsed value reaches
+    // the ack, so a mis-split value cannot survive it.
+    const shared = deps(validBriefJson(dir));
+    const code = await runCli(["dispatch", "--driver=fake", "--port=8080"], shared);
     expect(code).toBe(0);
     expect(text()).not.toContain("unknown flag");
+    const ack = JSON.parse(outOnly.find((l) => l.includes("runId")) as string) as {
+      runId: string;
+      vmName: string;
+      httpsUrl?: string;
+    };
+    expect(ack.httpsUrl).toBe(`https://${ack.vmName}-8080.fake.local`);
+    expect((shared.store as RunRecordStore).get(ack.runId).ports).toEqual([8080]);
   });
 
   test("a repeated flag is refused, never last-win", async () => {
@@ -726,12 +798,27 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(row).toMatchObject({ runId, state: "orphan", vmName });
   });
 
-  test("teardown <unknown-runId> → exit 4 run-not-found", async () => {
-    const code = await runCli(["teardown", "qds-19990101-000000"], deps(validBriefJson(dir)));
+  test("teardown <unknown-runId> → exit 4 run-not-found, refused BEFORE the lock", async () => {
+    // The records directory is removed after the store is built, which makes
+    // the ORDERING visible instead of merely plausible. A post-hoc "no .lock
+    // file remains" scan cannot tell the two orders apart: it is satisfied by
+    // the probe-then-lock order the source comment mandates AND by the
+    // lock-discover-release order it exists to forbid — the one that strands a
+    // phantom `<runId>.lock` for a run that never existed when a crash lands in
+    // between. With the directory gone, `store.get` is still ENOENT → exit 4,
+    // but `acquireRunLock` cannot create its temp there: a lock-first order
+    // throws ENOENT out of `claim` and reports a retryable exit 1.
+    const gone = join(dir, "vanished-runs");
+    const shared: Partial<FleetDeps> = { ...deps(validBriefJson(dir)), store: new RunRecordStore(gone) };
+    rmSync(gone, { recursive: true, force: true });
+
+    const code = await runCli(["teardown", "--driver", "fake", "qds-19990101-000000"], shared);
     expect(code).toBe(4);
-    expect(text()).toContain("run-not-found");
-    // Nothing was left behind for the next invocation to trip over.
-    expect(readdirSync(runsDir).filter((f) => f.endsWith(".lock"))).toHaveLength(0);
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string };
+    expect(envelope.code).toBe("run-not-found");
+    // Nothing was created for a run that does not exist: not the directory, not
+    // a lock, not a temp.
+    expect(existsSync(gone)).toBeFalse();
   });
 
   // ─── harvest: the fourth verb, and the only credential-free one (D8) ───────
@@ -796,7 +883,12 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     reset();
     const code = await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared);
 
-    expect(code).toBe(1);
+    // 5 ("refused before provisioning"), NOT 1. Exit 1 is `exitStatus:
+    // "transient"` — "retry me" — and the STALE case below proves why that is
+    // wrong: nothing will ever clear a dead holder's lock, so automation
+    // retries forever. The refusal is thrown between the record probe and any
+    // mutation, which is exactly what 5 means.
+    expect(code).toBe(5);
     expect(text()).toContain("run-locked");
     // fleet's holder wording: `acquireRunLock`'s default is the bare
     // "invocation", and the CLI passes "fleet invocation" so the refusal names
@@ -807,6 +899,127 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(readFileSync(lock, "utf8")).toContain("feedface");
     expect(store.get(runId).closedAt).toBeUndefined();
     expect((await driver.list()).map((vm) => vm.name)).toContain(vmName);
+    rmSync(lock);
+  });
+
+  test("a STALE lock refuses with the same non-retryable code as a live holder", async () => {
+    // The case that makes exit 1 indefensible for a lock refusal: the holder is
+    // gone, so NOTHING will ever release this lock — `refuse()` knows it (the
+    // remediation prints the `rm` that clears it). Exit 1 is stamped
+    // `transient`, so automation reading `exitStatus` retried a lock that can
+    // only ever answer `run-locked`, forever.
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+
+    // A pid above every platform's pid_max, so `kill(pid, 0)` is ESRCH and the
+    // lock reads stale rather than merely foreign. Pre-host body layout (the
+    // one run-lock.ts still parses), because a foreign HOST is deliberately
+    // never marked stale.
+    const lock = join(runsDir, `${runId}.lock`);
+    writeFileSync(lock, `9999999 ${new Date(Date.now() - 90_000).toISOString()} deadbeef\n`, { flag: "wx" });
+
+    reset();
+    const code = await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared);
+
+    expect(code).toBe(5);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("run-locked")) as string) as {
+      code: string;
+      remediation: string;
+    };
+    expect(envelope.code).toBe("run-locked");
+    // The operator's only way out, and the reason a retry is futile.
+    expect(envelope.remediation).toContain("stale lock");
+    expect(envelope.remediation).toContain(`rm ${lock}`);
+    // Refused before any mutation: the holder's file is intact and the run is
+    // untouched.
+    expect(readFileSync(lock, "utf8")).toContain("deadbeef");
+    expect((shared.store as RunRecordStore).get(runId).closedAt).toBeUndefined();
+    rmSync(lock);
+  });
+
+  test("harvest takes the SAME lock: a held lock refuses it, and nothing is harvested", async () => {
+    // The e2e above asserts only that no lock file remains AFTER a harvest —
+    // which a harvest that never acquired one satisfies identically, and the
+    // only `run-locked` case in this file was teardown's. `acquireRunLock` sits
+    // ABOVE the `if (verb === "harvest")` split while every other
+    // teardown-only dependency (keyApi, CostLedger) already lives in the `else`
+    // arm, so "harvest is read-only, why lock it" is a one-line refactor that
+    // ships green — and then `fleet harvest` runs concurrently with a teardown
+    // destroying the box mid-bundle. This is the case that fails when it does.
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+
+    const lock = join(runsDir, `${runId}.lock`);
+    const holder = process.pid + 1;
+    writeFileSync(lock, `${holder} ${new Date(Date.now() - 4_000).toISOString()} feedface\n`, { flag: "wx" });
+
+    reset();
+    const code = await runCli(["harvest", "--driver", "fake", "--dir", runsDir, runId], {
+      ...shared,
+      // D8 still holds on the refusal path: a harvest refused at the lock must
+      // not have reached for credentials on its way there either.
+      keyApi: keyApiTripwire(),
+    });
+
+    // 5, the same non-retryable refusal teardown gives — not a 0 with
+    // "harvested: none", which is what a lockless harvest of this box prints.
+    expect(code).toBe(5);
+    expect(text()).toContain("run-locked");
+    expect(text()).toContain("another fleet invocation holds");
+    expect(text()).toContain(`pid ${holder}`);
+    // Nothing on stdout at all: a refusal is a diagnostic, and `harvested:`
+    // would be a claim about a bundle this invocation never fetched.
+    expect(outOnly).toHaveLength(0);
+    // The holder's claim is intact — a refused invocation never steals it.
+    expect(readFileSync(lock, "utf8")).toContain("feedface");
+    expect((shared.store as RunRecordStore).get(runId).closedAt).toBeUndefined();
+    rmSync(lock);
+  });
+
+  test("a lock that vanishes between the claim and the read refuses terminally, and does not spin", async () => {
+    // `acquireRunLock`'s two-attempt loop had no coverage anywhere in the repo:
+    // every held lock in this file is a plain file this process wrote, so
+    // `refuse()` always answers on attempt 0 and the retry path is never
+    // entered. A DANGLING SYMLINK at the lock path is that window made
+    // deterministic — `link(2)`/`O_EXCL` see the entry and answer EEXIST (so
+    // `claim` returns false), while `readFileSync` follows it and answers
+    // ENOENT (so `refuse` returns undefined: "the holder finished, try again").
+    //
+    // Two mutations die here. Making the loop `while (true)` hangs the CLI, so
+    // this test never returns. Dropping `refuse`'s ENOENT → undefined branch
+    // turns a benign hand-off into `holder unknown, lock body ""` plus a
+    // remediation telling the operator to rm a path with nothing behind it.
+    //
+    // ponytail: it cannot distinguish two attempts from one — both exhaust the
+    // loop against a lock that never becomes claimable. The attempt that
+    // SUCCEEDS after a refusal needs the entry to disappear between two
+    // synchronous fs calls in one process, which no fs primitive affords.
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+
+    const lock = join(runsDir, `${runId}.lock`);
+    symlinkSync(join(dir, "no-such-lock-target"), lock);
+
+    reset();
+    const code = await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared);
+
+    expect(code).toBe(5);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("run-locked")) as string) as {
+      code: string;
+      message: string;
+    };
+    expect(envelope.code).toBe("run-locked");
+    expect(envelope.message).toContain("the lock is being taken and released repeatedly");
+    // NOT the fail-closed wording: an empty body is what a reader sees mid-write,
+    // and this lock was never written by anyone.
+    expect(envelope.message).not.toContain("holder unknown");
+    // Refused before any mutation, and the entry at the lock path is untouched:
+    // the CLI released nothing it never held.
+    expect(lstatSync(lock).isSymbolicLink()).toBeTrue();
+    expect((shared.store as RunRecordStore).get(runId).closedAt).toBeUndefined();
     rmSync(lock);
   });
 
@@ -899,19 +1112,19 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     // no rate — and the teardown's box-hours ingest would refuse rather than
     // price at 0. The exit 0 below is what proves the config followed --dir too.
     writeFileSync(join(sandbox, "cost-config.json"), '{"boxHourRateMicroUsd": 3600000}');
-    // A committed, valid manifest INSIDE the repo: dispatch's containment root
-    // is the cwd, and this case must not move the cwd to satisfy it.
-    const brief = JSON.stringify({
-      repoSlug: "owner/repo",
-      issueId: 4242,
-      commitSha: "c".repeat(40),
-      manifestPath: join(import.meta.dir, "../phase-engine/fixtures/pipeline.qds-factory.json"),
-      repoUrl: "https://github.com/owner/repo",
-    });
+    // The manifest lives in the case's own tmpdir, resolved against an INJECTED
+    // containment root. It used to be a committed repo path with `repoRoot`
+    // deliberately omitted, which made this the one case whose INV-1 resolution
+    // ran against `process.cwd()`: any test in the run that chdir'd turned it
+    // into `manifest-rejected` exit 2, and the only guard was a bare toBe(0).
+    // `repoRoot` is not the subject here — the money is — so the dependency is
+    // removed rather than documented.
+    const brief = validBriefJson(dir);
     const shared: Partial<FleetDeps> = {
       driver: new FakeDriver(boxesDir),
       keyApi: new FakeKeyApi(),
       readBrief: async () => brief,
+      repoRoot: dir,
       // store and ledgerFactory are deliberately NOT injected: --dir has to
       // build both, and injecting either would hide the thing under test.
     };
@@ -944,6 +1157,131 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     ]);
   });
 
+  test("sandbox-teardown settles into the SAME ledger fleet dispatch reserved from", async () => {
+    // The two CLIs share a run: `fleet dispatch --dir X` reserves budget and
+    // `sandbox-teardown --dir X` settles the box hours. sandbox-teardown built
+    // its CostLedger with NO path at all, so it fell back to the cwd-relative
+    // `.sandbox/cost-ledger.db` while the reservation sat beside X — and that
+    // reservation then stays open forever, counting against the budget cap, in
+    // a file nothing settles. Both now resolve through
+    // scripts/lib/cost-ledger-opts.ts.
+    const sandbox = join(dir, "shared-money");
+    const runs = join(sandbox, "runs");
+    mkdirSync(sandbox, { recursive: true });
+    // Box hours are only priced when the CONFIG resolves beside the records
+    // too, so this file is also the proof the second half of the pair followed.
+    writeFileSync(join(sandbox, "cost-config.json"), '{"boxHourRateMicroUsd": 3600000}');
+    // Manifest in the case's tmpdir against an injected `repoRoot` (see the
+    // --dir case above): a committed repo path here resolved INV-1 against
+    // `process.cwd()`, so any chdir elsewhere in the run turned this money
+    // regression test into a `manifest-rejected` exit 2 behind a bare toBe(0).
+    const brief = validBriefJson(dir);
+    // NEITHER driver nor store nor ledger injected: both CLIs must resolve the
+    // fake boxes (via $QDS_FAKE_BOXES_DIR) and the money from --dir themselves,
+    // which is the whole subject.
+    const ambientLedger = join(dir, ".sandbox", "cost-ledger.db");
+    const sentinel = "not-a-sqlite-file — neither CLI may settle into this one\n";
+    writeFileSync(ambientLedger, sentinel);
+
+    expect(
+      await runCli(["dispatch", "--driver", "fake", "--dir", runs], {
+        keyApi: new FakeKeyApi(),
+        readBrief: async () => brief,
+        repoRoot: dir,
+      }),
+    ).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    const ledgerPath = join(sandbox, "cost-ledger.db");
+    expect(existsSync(ledgerPath)).toBeTrue();
+
+    // Make the run KEYLESS before the second CLI touches it. `sandboxTeardownRun`
+    // takes no deps seam, so a record carrying a `keyHash` makes it build a real
+    // `openRouterKeyApi()` — which reads $OPENROUTER_PROVISIONING_KEY and, when
+    // one is present, revokes over the network. That is a second silent ambient
+    // dependency behind this case's bare `toBe(0)`: with the repo's own `.env`
+    // loaded it passed, and from any other cwd the same money assertions failed
+    // as `provisioning-key-missing`. The credential path is not what this case
+    // is about — where the box hours LAND is — so it is removed rather than
+    // depended on. Written through the file because `set()` skips `undefined`
+    // and there is no other way to drop the field.
+    const recordPath = join(runs, `${runId}.json`);
+    const { keyHash: _dropped, ...keyless } = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, unknown>;
+    expect(_dropped).toBeString(); // the field really was there to drop
+    writeFileSync(recordPath, JSON.stringify(keyless), { mode: 0o600 });
+
+    reset();
+    // DF2.5's own CLI, not fleet's teardown verb — the one that was settling
+    // somewhere else.
+    expect(await sandboxTeardownRun([runId, "--dir", runs, "--driver", "fake"], out)).toBe(0);
+    expect(outOnly.join("")).toContain(`torn down: ${runId}`);
+
+    // The box hours are IN the --dir ledger, under this run…
+    const db = new Database(ledgerPath, { readonly: true });
+    try {
+      const rows = db.query("SELECT kind FROM cost_events WHERE run_id = ?").all(runId) as { kind: string }[];
+      expect(rows.map((r) => r.kind)).toContain("box_hours");
+    } finally {
+      db.close();
+    }
+    // …and the cwd-relative default was never opened: byte-identical, with no
+    // -wal/-shm beside it, which a SQLite handle on it would have left.
+    expect(readFileSync(ambientLedger, "utf8")).toBe(sentinel);
+    expect(readdirSync(join(dir, ".sandbox")).filter((f) => f.startsWith("cost-ledger.db"))).toEqual([
+      "cost-ledger.db",
+    ]);
+  });
+
+  test("a second teardown of the same run exits 0 and bills its box hours exactly once", async () => {
+    // `teardownSandbox` short-circuits a CLOSED record (first-close-wins) and
+    // re-runs the box-hours ingest, so `fleet teardown <id>` on an
+    // already-torn-down run skips every step, prints `torn down: <id>` and
+    // exits 0 — telling an operator it just destroyed a box that has been gone
+    // for hours. No case invoked teardown twice on one id, so nothing pinned
+    // either half of that: not the exit code, and not the claim that makes it
+    // defensible. The ingest re-run is DF2.8's crash-window fix (close landed,
+    // the process died before the row did), and it is idempotent by event id —
+    // without that idempotence a re-run bills the same hours again, against the
+    // budget cap, and only a REAL ledger can show it. So no `ledgerFactory` and
+    // no `store` here: both are the CLI's own, beside the records.
+    const sandbox = join(dir, "twice");
+    const runs = join(sandbox, "runs");
+    mkdirSync(sandbox, { recursive: true });
+    writeFileSync(join(sandbox, "cost-config.json"), '{"boxHourRateMicroUsd": 3600000}');
+    const brief = validBriefJson(dir);
+    const shared: Partial<FleetDeps> = {
+      driver: new FakeDriver(boxesDir),
+      keyApi: new FakeKeyApi(),
+      readBrief: async () => brief,
+      repoRoot: dir,
+    };
+
+    expect(await runCli(["dispatch", "--driver", "fake", "--dir", runs], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+
+    reset();
+    expect(await runCli(["teardown", "--driver", "fake", "--dir", runs, runId], shared)).toBe(0);
+    const store = new RunRecordStore(runs);
+    const closedAt = store.get(runId).closedAt as string;
+    expect(closedAt).toBeDefined();
+
+    reset();
+    expect(await runCli(["teardown", "--driver", "fake", "--dir", runs, runId], shared)).toBe(0);
+    expect(outOnly.join("")).toContain(`torn down: ${runId}`);
+    // first-close-wins: the record still reports the FIRST teardown's instant,
+    // so the second pass re-closed nothing.
+    expect(store.get(runId).closedAt).toBe(closedAt);
+    // …and the money was settled once, not twice.
+    const db = new Database(join(sandbox, "cost-ledger.db"), { readonly: true });
+    try {
+      const rows = db.query("SELECT event_id FROM cost_events WHERE run_id = ? AND kind = 'box_hours'").all(runId);
+      expect(rows).toHaveLength(1);
+    } finally {
+      db.close();
+    }
+    // The second invocation took the lock like any other and gave it back.
+    expect(existsSync(join(runs, `${runId}.lock`))).toBeFalse();
+  });
+
   test("--dir reaches the status verb too, not just dispatch and teardown", async () => {
     // Every other status case injects `deps.store`, so the CLI never resolved
     // --dir for this verb: `fleet status --dir /elsewhere` could regress to
@@ -965,6 +1303,202 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     reset();
     expect(await runCli(["status", "--driver", "fake", "--dir", join(dir, "other-runs")], noStore)).toBe(0);
     expect(JSON.parse(outOnly[0] as string)).toMatchObject({ runId, state: "orphan" });
+  });
+
+  test("a completed teardown still exits 0 when stdout is a closed pipe", async () => {
+    // `fleet teardown <id> | head -1` closes the pipe as soon as head has its
+    // line, and the success message then throws EPIPE. That throw landed in the
+    // verb's catch as exit 1 = `transient`, so automation RETRIED a destructive
+    // verb that had already destroyed the box and closed the record.
+    const base = new FakeDriver(boxesDir);
+    const shared: Partial<FleetDeps> = { ...deps(validBriefJson(dir)), driver: base };
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId, vmName } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as {
+      runId: string;
+      vmName: string;
+    };
+
+    reset();
+    const closedPipe = (): never => {
+      const e = new Error("write EPIPE") as NodeJS.ErrnoException;
+      e.code = "EPIPE";
+      throw e;
+    };
+    const code = await run(["teardown", "--driver", "fake", "--dir", runsDir, runId], closedPipe, shared, errOut);
+
+    expect(code).toBe(0);
+    // The work really happened — that is why reporting a failure was so wrong.
+    expect((await base.list()).map((vm) => vm.name)).not.toContain(vmName);
+    expect((shared.store as RunRecordStore).get(runId).closedAt).toBeDefined();
+    // And the lock still came off: the finally runs on this path too.
+    expect(existsSync(join(runsDir, `${runId}.lock`))).toBeFalse();
+  });
+
+  test("status still exits 0 when stdout is a closed pipe", async () => {
+    // The other verb an operator pipes: `fleet status | head -1` closes the pipe
+    // after the first row, and every later row's write throws EPIPE. Reported as
+    // the verb's outcome it makes a read-only query indistinguishable from a
+    // substrate failure — the exit code `status` reserves for "the provider
+    // could not be listed", which is the one thing that did NOT happen here.
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+
+    reset();
+    const closedPipe = (): never => {
+      const e = new Error("write EPIPE") as NodeJS.ErrnoException;
+      e.code = "EPIPE";
+      throw e;
+    };
+    expect(await run(["status", "--driver", "fake"], closedPipe, shared, errOut)).toBe(0);
+    // A broken pipe is not a listing failure, so nothing is claimed on the
+    // diagnostics sink either.
+    expect(errCaptured).toHaveLength(0);
+  });
+
+  test("a write failure that is NOT a broken pipe is still a failure", async () => {
+    // The other half of the EPIPE tolerance: ENOSPC means the output was lost
+    // to a full disk with a reader still there, and swallowing that would make
+    // every unwritten ack a silent success.
+    const shared = deps(validBriefJson(dir));
+    const enospc = (): never => {
+      const e = new Error("write ENOSPC") as NodeJS.ErrnoException;
+      e.code = "ENOSPC";
+      throw e;
+    };
+    const code = await run(["dispatch", "--driver", "fake"], enospc, shared, errOut);
+    expect(code).toBe(1);
+    expect(errCaptured.join("")).toContain("ENOSPC");
+  });
+
+  test("a repeated boolean flag is refused, exactly as a repeated value flag is", async () => {
+    // `bools` is a Set, so `--no-harvest --no-harvest` silently collapsed —
+    // and --no-harvest is the flag that WAIVES artifact capture, so a doubled
+    // one is precisely the invocation an operator must be sure they typed.
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+
+    reset();
+    const code = await runCli(
+      ["teardown", "--driver", "fake", "--dir", runsDir, "--no-harvest", "--no-harvest", runId],
+      shared,
+    );
+    expect(code).toBe(2);
+    expect(text()).toContain("--no-harvest given more than once");
+    // Refused as a usage error: nothing was torn down.
+    expect((shared.store as RunRecordStore).get(runId).closedAt).toBeUndefined();
+  });
+
+  test("a --dir that cannot BE a records dir exits 2, not a retryable 1", async () => {
+    // `new RunRecordStore` throws bare Errors (ENOTDIR here) with no `code`, so
+    // it fell through `report`'s generic branch as exit 1 = `transient`:
+    // automation retried a `--dir` pointing at a regular file forever.
+    const notADir = join(dir, "definitely-a-file");
+    writeFileSync(notADir, "not a directory\n");
+    const code = await runCli(["status", "--driver", "fake", "--dir", notADir], {
+      driver: new FakeDriver(boxesDir),
+    });
+    expect(code).toBe(2);
+    // The store's own message survives the reclassification.
+    expect(errCaptured.join("")).toContain(notADir);
+  });
+
+  test("a --dir the store cannot even create exits 2 as well, whatever the errno", async () => {
+    // The ENOTDIR case above is one of THREE bare-Error shapes `new
+    // RunRecordStore` throws, and they share one classification (`asUsage`) —
+    // so this pins the second reachable one, from a different call site: the
+    // `mkdirSync` rather than the mode check. `--dir` at a self-referential
+    // symlink is ELOOP, deterministic and permission-free.
+    //
+    // The mode branch (`… is mode 0755, not 0700`) is NOT reachable from a
+    // test: the constructor chmods the directory to 0700 itself and only then
+    // verifies, so a loose directory is repaired rather than refused, and the
+    // throw needs a filesystem or an owner where that chmod cannot stick.
+    const loop = join(dir, "self-link");
+    symlinkSync(loop, loop);
+    const code = await runCli(["status", "--driver", "fake", "--dir", loop], {
+      driver: new FakeDriver(boxesDir),
+    });
+    expect(code).toBe(2);
+    // The store's own message survives the reclassification here too.
+    expect(errCaptured.join("")).toContain(loop);
+  });
+
+  test("an invalid brief names the FIELD even on a host with no provisioning key", async () => {
+    // AC1. `openRouterKeyApi()` reads $OPENROUTER_PROVISIONING_KEY at
+    // construction, and building it before dispatch validated meant a
+    // malformed brief exited 2 with `provisioning-key-missing` and no field —
+    // the operator set the env var and re-hit the very same brief.
+    // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+    delete process.env.OPENROUTER_PROVISIONING_KEY;
+    const code = await runCli(["dispatch", "--driver", "fake"], {
+      driver: new FakeDriver(boxesDir),
+      store: new RunRecordStore(runsDir),
+      ledgerFactory: () => goodLedger(),
+      readBrief: async () => '{"repoSlug":"nope"}',
+      repoRoot: dir,
+    });
+    expect(code).toBe(2);
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; field?: string };
+    expect(envelope.code).toBe("invalid-brief");
+    expect(envelope.field).toBeString();
+    expect(errCaptured.join("")).not.toContain("provisioning-key-missing");
+    // INV-2 either way: an invalid brief provisions nothing.
+    expect(readdirSync(runsDir)).toHaveLength(0);
+  });
+
+  test("status exits non-zero and says so when the provider cannot be listed", async () => {
+    // With zero open records a total listing failure used to be an exit 0 and
+    // a clean stdout — byte-identical to a healthy empty fleet, while every box
+    // in it kept billing. `statusAll` now emits a `listUnavailable` row; the
+    // CLI must not print it and call the invocation a success.
+    const base = new FakeDriver(boxesDir);
+    const code = await runCli(["status", "--driver", "fake"], {
+      ...deps(validBriefJson(dir)),
+      driver: driverWith(base, {
+        list: async () => {
+          throw new Error("substrate unreachable");
+        },
+      }),
+    });
+    expect(code).toBe(1); // the substrate failed — retrying IS the right move
+    expect(JSON.parse(outOnly[0] as string)).toMatchObject({ state: "listUnavailable" });
+    // …and the reason is on the diagnostics sink, where `fleet status | jq`
+    // does not have to parse around it.
+    expect(errCaptured.join("")).toContain("list-unavailable");
+  });
+
+  test("…and it exits 1 on a listing failure when every record is CLOSED too", async () => {
+    // The zero-records case above is one half of the hole. This is the other:
+    // `boxUnknown` only ever attaches to an OPEN record, so with every record
+    // closed a total listing failure produced rows that all read as settled and
+    // an exit 0 — and a closed record whose destroy never landed is precisely
+    // the box that is still billing behind it.
+    const base = new FakeDriver(boxesDir);
+    const shared: Partial<FleetDeps> = { ...deps(validBriefJson(dir)), driver: base };
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(0);
+
+    reset();
+    const code = await runCli(["status", "--driver", "fake"], {
+      ...shared,
+      driver: driverWith(base, {
+        list: async () => {
+          throw new Error("substrate unreachable");
+        },
+      }),
+    });
+
+    expect(code).toBe(1);
+    const rows = outOnly.map((l) => JSON.parse(l) as { runId: string; state: string; boxAlive?: boolean });
+    expect(rows.map((r) => r.state)).toContain("listUnavailable");
+    const closed = rows.find((r) => r.runId === runId) as { state: string; boxAlive?: boolean };
+    expect(closed.state).toBe("closed");
+    // ABSENT, not `false`: the substrate never answered, so "the box is gone" is
+    // not a thing this row is entitled to claim.
+    expect(closed.boxAlive).toBeUndefined();
+    expect(errCaptured.join("")).toContain("list-unavailable");
   });
 
   test("a throw that is not an Error still reports exit 1 with a message", async () => {
@@ -1082,7 +1616,10 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(afterCode).toBe(0);
     const closedRow = JSON.parse(captured[0] as string) as { state: string; boxAlive?: boolean };
     expect(closedRow.state).toBe("closed");
-    expect(closedRow.boxAlive).toBeUndefined(); // the box really is gone
+    // `false`, not absent: a successful list is EVIDENCE the box is gone, and
+    // the closed row now carries it either way (absent means the substrate
+    // could not be listed, i.e. no evidence — see statusAll's boxes === null).
+    expect(closedRow.boxAlive).toBe(false);
   });
 
   test("e2e: --no-harvest prints the waiver only after the teardown succeeds", async () => {
@@ -1179,6 +1716,21 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       expect(line.exitStatus).toBe("logic");
       expect(line.runId).toBeNull();
       expect(typeof line.requestId).toBe("string");
+    });
+
+    test("a parse failure logs the attempted VERB, never a flag's value", async () => {
+      // The line exists to be counted, and dashboards key on `verb`. Scanning
+      // raw argv for the first token without a leading dash returned
+      // `/srv/runs` here — the value `--dir` consumed — so a filesystem path
+      // landed in the verb field and the failures this line counts went
+      // missing from every per-verb rollup.
+      const code = await runCli(["--dir", runsDir, "status", "--brief", "x"], deps(""));
+      expect(code).toBe(2);
+
+      const line = verbLines()[0] as unknown as Record<string, unknown>;
+      expect(line.verb).toBe("status");
+      expect(line.operation).toBe("fleet.status");
+      expect(line.exitStatus).toBe("logic");
     });
 
     test("exit 1 is transient (retryable substrate), 2-6 are logic", async () => {

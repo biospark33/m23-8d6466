@@ -24,10 +24,15 @@ export interface RecordingLedger extends LedgerLike {
   closeCalls: number;
 }
 
-function recordingLedger(ceilingMicroUsd: number, decide: () => AdmissionDecision): RecordingLedger {
+/**
+ * `defaultCapMicroUsd` is named for the field it BECOMES. It was called
+ * `ceilingMicroUsd` while every caller passed a cap into it — in the one helper
+ * whose job is keeping the ceiling and the cap distinguishable.
+ */
+function recordingLedger(defaultCapMicroUsd: number, decide: () => AdmissionDecision): RecordingLedger {
   const admitCalls: AdmitCall[] = [];
   const ledger: RecordingLedger = {
-    config: { defaultCapMicroUsd: ceilingMicroUsd, perIssueOverrides: {} },
+    config: { defaultCapMicroUsd, perIssueOverrides: {} },
     admitIssue(input, capMicroUsd, keyCapMicroUsd) {
       admitCalls.push({ input, capMicroUsd, keyCapMicroUsd });
       return decide();
@@ -77,4 +82,39 @@ export function overBudgetLedger(): RecordingLedger {
     reservedMicroUsd: 0,
     unpricedRows: 0,
   }));
+}
+
+/** The messages the two failing fakes below throw, for callers that assert on them. */
+export const ADMIT_THROW_MESSAGE = "ledger admitIssue failed";
+export const CLOSE_THROW_MESSAGE = "ledger close failed";
+
+/**
+ * A ledger whose `admitIssue` THROWS — the real one owns a SQLite handle and
+ * every statement it runs can fail.
+ *
+ * The call is still RECORDED before the throw, so a test can tell "the gate was
+ * reached and blew up" from "the gate was never reached". This is the path where
+ * the handle leak lives: only the dispatcher can close a ledger that threw
+ * inside the gate, and nothing else in this file exercises a throw.
+ */
+export function admitThrowsLedger(): RecordingLedger {
+  return recordingLedger(defaultKeyCapMicroUsd, () => {
+    throw new Error(ADMIT_THROW_MESSAGE);
+  });
+}
+
+/**
+ * A ledger whose `close()` THROWS. `closeCalls` still counts the attempt, so a
+ * dispatch that swallows the failure stays distinguishable from one that never
+ * closed at all — and a failing close must not turn a successful run into a
+ * crash.
+ */
+export function closeThrowsLedger(): RecordingLedger {
+  const ledger = goodLedger();
+  const countClose = ledger.close.bind(ledger);
+  ledger.close = () => {
+    countClose();
+    throw new Error(CLOSE_THROW_MESSAGE);
+  };
+  return ledger;
 }

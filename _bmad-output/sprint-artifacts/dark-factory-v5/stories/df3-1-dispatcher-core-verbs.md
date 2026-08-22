@@ -656,3 +656,218 @@ lives at the dispatch-side read, where `stampManifestLimit` follows immediately.
   `fleet`; no fallout in `hindsight/`, `swarmclaw/` or `cli-anything/`.
 - Pre-existing nit left alone: a duplicated `DD-9` doc comment at `cost-ledger.ts:61-62` is present
   in `main` and is not part of this PR's diff.
+
+## Review round 4 — BMAD adversarial code review, 2026-08-22
+
+**13 review layers** against the PR #123 diff, chunked by file cluster (≤1547 diff lines each) so no
+reviewer read the 12,095-line whole: 5 Blind Hunters (diff only, zero repo access), 4 Edge Case
+Hunters (diff + targeted repo reads), 3 test-quality reviewers (vacuity + coverage hunting), 1
+Acceptance Auditor (story + integration spec, grepped not read whole).
+**~96 raw findings → 58 unique** after cross-layer dedupe → **46 patched, 5 false-positives,
+7 deferred**. Fixes applied in two waves — eight source clusters in parallel, then four
+test-hardening agents once source behaviour had settled, so every test-expectation update saw final
+behaviour. Suite went 1579 → **1660 pass / 0 fail** (81 net new tests).
+
+### The defects that mattered
+
+- [x] **A legitimate repo slug permanently burned the issue's budget cap.** `assertNoSecret`'s
+  key-shape heuristic (`length >= 40 && mixedClass && /^[A-Za-z0-9+\/=_.:-]+$/`) fires on any repo
+  slug ≥40 chars with mixed case and a digit — every character a slug may legally contain is inside
+  that charset. Reproduced with `BiosparkHealth/QDS-Factory-Pipeline-Engine2` (43 chars). It threw
+  on the `extensions.budget` write, which happens *after* `store.create`, so the record existed and
+  **resolved** — and a resolving record is never expired by the ledger's orphan guard, while only a
+  priced `cost_event` retires a reservation. Every retry burned another reservation until the cap
+  was exhausted with no box ever created. Fixed with a path-keyed exemption
+  (`extensions.budget.repoSlug`, `.issueId`, `keyHash`); the heuristic stays fully active elsewhere.
+  [src/providers/run-record.ts:275]
+- [x] **A dispatch retry was refused by its own reservation.** `admitIssue`'s reserved-rows query
+  summed *every* `gate_admissions` row for the issue including the caller's own, so on a retry the
+  over-budget check fired before the `ON CONFLICT DO NOTHING` replay branch could run. With the
+  default config (cap 5M < keyCap 50M) the first admission always reserves the whole cap, making the
+  idempotency branch **dead code**; when it was reachable it returned
+  `admittedCeilingMicroUsd > remainingMicroUsd`. Now excludes the caller's own `(request_id, run_id)`
+  — exactly the PRIMARY KEY, so a different correlation id still sees the reservation.
+  [src/providers/cost-ledger.ts:854]
+- [x] **`sandbox-teardown` settled money into a different ledger file than `dispatch` reserved it
+  from.** It constructed `new CostLedger({readRunRecord})` with no path, falling back to the
+  cwd-relative `.sandbox/cost-ledger.db`, while `fleet.ts` resolves `dirname(store.dir)/cost-ledger.db`.
+  For any non-default `--dir`, box-hours landed in one ledger while the reservation stayed open
+  forever in the other. Both CLIs now share one `costLedgerOpts` helper.
+  [scripts/lib/cost-ledger-opts.ts, scripts/sandbox-teardown.ts:200]
+- [x] **A failed lock write wedged the run permanently.** `writeLockDirect`'s O_EXCL create succeeds,
+  then an ENOSPC/EIO on `writeFileSync`/`fsyncSync` left a 0-byte lock nothing removes. `refuse()`
+  parses `""` as "holder unknown", which is never marked stale, so every later harvest/teardown
+  refused forever while the box and key kept billing — a straight regression from the cleanup this
+  PR deleted from `sandbox-teardown.ts`. Cleanup restored, original errno preserved.
+  [scripts/lib/run-lock.ts:330]
+- [x] **Lock refusals told automation to retry forever.** `RunLockedError` is not a `FleetError`, so
+  `report()` returned 1 — which `logVerb` stamps `transient`. Both the live-holder and the *stale*
+  case (dead holder, nothing will ever clear it) said "retry me". Now exit 5, declared on `harvest`
+  and `teardown`. [scripts/fleet.ts:723, src/fleet/verbs.ts:83]
+- [x] **`fleet status` reported a clean fleet during a substrate outage.** `listOwnedBoxes` swallows
+  every throw to `null`, and the `boxUnknown` signal only ever attached to *open* records — so with
+  zero records, or only closed ones, a failed `driver.list()` produced exit 0 with clean stdout,
+  byte-identical to a healthy empty fleet. Now emits a `{runId:"(fleet)", state:"listUnavailable"}`
+  row and exits 1. [src/fleet/status.ts:247]
+- [x] **`manifestPath` accepted absolute paths.** Only `..` was refused, but
+  `resolve(repoRoot, "/etc/shadow")` discards the root entirely — an absolute path escapes with no
+  `..` segment at all, and the test suite actively *pinned* the acceptance. A schema with no repo
+  root cannot do resolve-then-contain, so relative-only **is** the containment check. NUL bytes and
+  backslash-parent segments now refused too. INV-2's dispatch-side realpath gate keeps its coverage
+  via a symlink escape (relative + no-`..` passes the schema; `readBeneathRoot` still refuses it).
+  [src/fleet/brief-schema.ts:50]
+- [x] **`repoSlug` and `repoUrl` were attacker-separable.** `repoSlug` keys the ledger, the per-issue
+  cap, the dispatch log and `run-context.json`; `repoUrl` is what gets cloned and executed. Nothing
+  required them to describe the same repository. Now cross-checked (URL path, `.git` stripped, must
+  equal the slug) with **no host allow-list** — self-hosted forges stay legitimate. *This is the one
+  change in the round that can reject a brief which previously validated.*
+  [src/fleet/brief-schema.ts:238]
+- [x] **Plaintext key could reach the log via the abandoned-step handler.** When `within("deliver")`
+  exceeds the wall-clock budget, the race has already rejected with the timeout, so the fixed-message
+  catch never sees the provider error — the abandoned handler does, and `redactUrls` only matches
+  `https?://`, so a bare token passed through. Now runs through `redactSecrets`.
+  [src/fleet/dispatch.ts:730]
+- [x] **Redaction erased the one identifier an operator needs to revoke a live key.** `LONG_TOKEN_RE`
+  swallowed the whole `…/keys/<44-char keyHash>` URL in `revoke-failed`'s message *and* its
+  `curl -X DELETE` remediation, leaving only an 8-char prefix — while the key was still live and
+  billing. A key hash is not key material; it now survives via a `keep` parameter.
+  [src/providers/credentials.ts:460, src/providers/step-log.ts:65]
+- [x] **The logger threw from inside its own catch.** `redactSecrets(err.message ?? String(e))`
+  assumed a string; a rejection carrying a structured `message` produced
+  `TypeError: text.replace is not a function`, which escaped the catch — so the log line was never
+  written and the original failure was *replaced*. Coerced at the redactor, fixing all four sinks at
+  once. [src/providers/step-log.ts:56]
+- [x] **AC9b was implemented write-side only.** Dispatch wrote `effectiveCeilingMicros` into
+  `run-context.json`, which has **zero consumers** repo-wide — the in-box entrypoint built its
+  context from three literals — so `dispatch-task.ts` forwarded `undefined` and every real run
+  spawned at the $0.50 harness default. Closed by reading the ceiling from `manifest.limitMicroUsd`
+  (already validated, already gate-checked) rather than adding a second parse of the same number.
+  [scripts/pipeline-run.ts]
+- [x] **`reapRuns` went fail-open.** `list()` degrading from throw to log-and-skip dropped a
+  bad-filename record out of the reaper's `claimed` set, so a live box belonging to an open record
+  could be destroyed. `list()` now exposes `listWithAnomalies()`; the reaper refuses to treat an
+  incomplete listing as authoritative. [src/providers/run-record.ts:508, src/providers/driver.ts:656]
+- [x] **Permanent cap erosion on a failed budget write** (`store.create` succeeds, `store.set` throws):
+  the record now resolves with no `extensions.budget`, so nothing ever retires the reservation. The
+  just-created record is now removed so the orphan guard can expire it — safe, since `driver.create`
+  has not run and nothing billable exists. [src/providers/driver.ts]
+- [x] Provider calls had **no timeouts** — a hung `create`/`expose`/`setPublic` meant dispatch never
+  returned and the reservation counted against the cap indefinitely. Bounded with the existing
+  `withTimeout` helper. [src/providers/driver.ts:305]
+- [x] **Refusals advertised `teardown` for runs that were never provisioned** — and on the
+  mint-collision path, for a *different live run's* id. Gated on actual provisioning.
+  [src/fleet/dispatch.ts:648]
+- [x] `ADMISSION_GRACE_MS` compared a **foreign wall clock** to the local one; a reader >60s ahead
+  classified live reservations as orphans and granted the headroom twice. Clamped with a skew margin,
+  fail-closed. [src/providers/cost-ledger.ts:83]
+- [x] Locks were stranded on **SIGHUP/SIGQUIT/uncaught throw/`process.exit()`** (only SIGINT and
+  SIGTERM were handled), and the release rescue temp shared the `.tmp` shape **two** independent
+  reapers sweep — including `RunRecordStore`'s constructor, which runs *before* the lock is taken.
+  [scripts/lib/run-lock.ts:137, :499]
+- [x] `putBack` could not deliver the protection its comment claimed: whenever the lock path was
+  vacated and `putBack` failed for any non-EEXIST errno, mutual exclusion was already lost — silently,
+  from inside a `finally`. Release now reads-and-returns without vacating; the steal path is loud.
+  [src/providers/run-record.ts:990]
+- [x] A successful `teardown` piped to `head -1` reported **failure** (EPIPE → exit 1 → `transient`),
+  so automation retried a destructive verb that had already succeeded. [scripts/fleet.ts:428]
+- [x] `stripAuthoredLimit` was a **dead export** with dispatch keeping a hand-rolled copy that had
+  already diverged (the export `deepFreeze`s, dispatch's did not). Deleting dispatch's two lines
+  would have removed the AC9a money guard while the manifest test stayed green. One rule, one
+  implementation now. [src/fleet/dispatch.ts]
+- [x] `SetupGateOptions.requestId` **exists** and is emitted on every gate log line, but dispatch did
+  not forward it — on the stated grounds that the field did not exist. INV-4-bis was failing on gate
+  lines. One-line fix. [src/fleet/dispatch.ts:1374]
+- [x] Also patched: swallowed `ledger.close()` failure (money, now surfaced); unguarded success-path
+  and `refuse`-catch writes that could kill the process from inside a timer callback; `redactUrls`
+  mangling the host it claims to preserve while short userinfo survived; `httpsUrl` written after
+  `setPublic` (and a box made public with no URL); `createRun`'s second live admission call site;
+  untyped port refusal; `httpsUrl` return/record divergence; `withLock` busy-spin; per-entry
+  `newRequestId` churn in `fake-driver.list()`; unbounded string fields and control characters at
+  the trust boundary (log injection via `requestId`); case-sensitive `https://` over-rejecting valid
+  input; `statusRun` rethrowing corrupt-record errors raw while its siblings typed them; closed rows
+  conflating "confirmed destroyed" with "could not ask"; `RunRecordStore` construction not wrapped in
+  `asUsage`; the key client built before brief validation (AC1 named the wrong field); empty-string
+  and duplicate boolean flags; the CC-9 log line recording a flag *value* as the verb.
+
+### Test-quality repairs
+
+The three test-quality reviewers found the suite was green in places it should not have been:
+
+- [x] A **tautological assertion** — `expect(err.payload?.runId).toBe(err.payload?.runId)` — passed
+  on `undefined === undefined`, i.e. it held even with no `runId` at all, which is the bug its own
+  comment said it pinned. [tests/fleet/dispatch.test.ts]
+- [x] The **idempotency test could not fail for the bug it named**: the fixture made the recomputed
+  ceiling equal the recorded one, and `reservedMicroUsd` is read *before* the INSERT, so neither a
+  missing replay nor a double-insert was detectable. [tests/providers/cost-ledger.test.ts]
+- [x] The `store.create` **EEXIST arbiter** (the authoritative `run-id-in-use` path) had no test —
+  deleting it left the suite green while a fan-out loser got exit 1 after committing a reservation.
+- [x] **`vmName ≠ runId` was never constructed**, leaving three real `status.ts` branches dead in
+  test; the fleet-list filter, the name join, and the orphan-claim guard were all freely mutable.
+- [x] **Harvest's lock acquisition was never proven**, only its absence afterwards — the obvious
+  "harvest is read-only, why lock it" refactor would have shipped green.
+- [x] **Repeat teardown** was never exercised, so the CLI telling an operator it destroyed a box that
+  was gone hours ago was unpinned; likewise zero-ceiling admission, post-box failure paths, the
+  dispatch log's *contents* (only its non-contents were asserted), and four refusal codes.
+- [x] The registry-parity scan's regex could not see `teardown` at all (it is the `else` arm), so it
+  ran over 3 of 4 shipped verbs while promising to cover all of them.
+- [x] `renderHelp`'s required/optional rendering passed with the ternary **inverted** (the only
+  fixture flag was `required: true`), and `--help`-eats-the-next-token was satisfied by both
+  hypotheses.
+- Every added or repaired test was **mutation-checked**: the targeted source behaviour was reverted
+  in an isolated copy and the test confirmed RED, then restored (verified byte-identical).
+
+### False positives — pushed back, no change made
+
+- [x] **`SETTABLE_FIELDS` / `requestId`** — alleged to be a hand-listed set missing the new field.
+  It is derived: `Object.keys(CORE_FIELDS).filter(f => !IMMUTABLE_FIELDS.has(f) && f !== "closedAt")`,
+  and an existing test already loops every entry through `store.set`. The flagged hunk was
+  comment-only.
+- [x] **`AKIA…`-style keys pass redaction verbatim** — wrong. The `SECRET_PREFIX_RE` arm is
+  unconditional and class-independent; executed:
+  `redactSecrets("creds AKIAIOSFODNN7EXAMPLE here") → "creds «redacted» here"`. Only the *unprefixed
+  all-lowercase-hex* case is real, and it is now documented with its escape hatch rather than fixed
+  by loosening the predicate (which would redact every git SHA in the logs).
+- [x] **Empty-string and `--`-prefixed flag values slip through** — both refused by `tokenizeArgs`
+  before the named check is reached: `--dir ""`, `--dir=` and `--driver --no-harvest` all throw
+  `requires a non-empty value`.
+- [x] **AC9b needs a `phase-lifecycle.test.ts` change** — that test's ctx comes from a local object
+  literal, never from `pipeline-run.ts`; it asserts the *engine* never defaults the field, which
+  stays true.
+- [x] **Unpriced spend should count against the cap** — deliberate, rationale recorded in-file and in
+  commit `e0fbdf4` ("Sift's refuse-on-unpricedRows suggestion rejected: AC4 pins surfacing, not
+  blocking"). Left as-is.
+
+### Deferred — real, out of scope for this round
+
+- [x] **Mid-flight expiry at the `create` step can still materialise a billable box after the
+  operator has torn the run down.** `within` abandons rather than cancels; a proper fix needs an
+  AbortSignal at the driver seam (DF3.2 scope). This round only fixed the remediation wording, and
+  gated it on `ctxProvisionAttempted` so it is not shown for the pre-check arm where nothing ran.
+- [x] Roster-existence TOCTOU between step 3 and step 9 — needs gate-side handling.
+- [x] `restore()` has no O_EXCL fallback, and the `onDisk !== body` branch has no coverage: it needs
+  the lock re-claimed between two adjacent synchronous `fs` calls in one tick. Documented honestly in
+  the test rather than shipping a flaky or clever one.
+- [x] The `is mode 0755, not 0700` store branch is unreachable from a test — the constructor
+  `chmodSync`es *before* it verifies, so a loose directory is repaired, not refused. The ELOOP and
+  ENOTDIR shapes share the same classifier and pin it.
+- [x] `acquireRunLock`'s retry-that-*succeeds* branch — needs a real microsecond race; the dangling
+  symlink fixture covers the ENOENT hand-off and the terminal refusal, but cannot distinguish one
+  attempt from two.
+- [x] No dry-run/confirmation on `teardown`, and `fleet not-a-verb --help` exiting 0 — both
+  deliberate design points.
+- [x] Two `run-record` tests burn the 5s lock timeout in real wall clock (~10s of suite time). Flake
+  surface, not a defect.
+
+### Gates
+
+- `bun test tests/fleet tests/providers tests/phase-engine tests/scripts` → **1660 pass, 2 skip,
+  2 todo, 0 fail** across 49 files (baseline before this round: 1579 pass).
+- `bunx tsc --noEmit` → clean, exit 0, repo-wide.
+- `bunx biome check` → clean across 161 files, no fixes applied.
+- `gitnexus detect_changes` → 67 changed symbols / 49 affected processes. Every affected process is
+  in `providers`/`fleet`/`phase-engine`/`scripts` — `CreateRun`, `TeardownRun`, `ReapRuns`,
+  `RunCredentialLifecycle`, `HarvestRun`, the CLI `Run`, pipeline `Main`. No fallout in `hindsight/`,
+  `swarmclaw/` or `cli-anything/`. **Note:** the index is stale for this branch — it returns
+  `Target not found` for every DF3.1 symbol and surfaces story-file headings as `driver.ts` symbols,
+  so the `critical` risk label reflects breadth, not a verified regression. Reindex with
+  `bash scripts/install-gitnexus-plus.sh` before the next round's `impact` calls are meaningful.

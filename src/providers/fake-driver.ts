@@ -111,6 +111,11 @@ export class FakeDriver implements ProviderDriver {
 
   async list(name?: string): Promise<ProviderVm[]> {
     const out: ProviderVm[] = [];
+    // ONE correlation id for the whole call: a per-anomaly id made the N stray
+    // directories of a single `list()` look like N unrelated events, so nothing
+    // could group them — and `list()` runs on every status poll, so that is the
+    // line an operator sees most often.
+    const requestId = newRequestId();
     for (const entry of readdirSync(this.root).sort()) {
       if (name !== undefined && entry !== name) continue;
       if (!statSync(join(this.root, entry)).isDirectory()) continue;
@@ -129,7 +134,7 @@ export class FakeDriver implements ProviderDriver {
       // record, and an operator needs the name to clean it up by hand.
       if (!LEGACY_RUN_ID_RE.test(entry) || entry.length > RUN_ID_MAX) {
         log({
-          requestId: newRequestId(),
+          requestId,
           operation: "fake-driver.list.skipped",
           agentId: null,
           timestamp: new Date().toISOString(),

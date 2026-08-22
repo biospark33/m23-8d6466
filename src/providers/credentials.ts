@@ -164,7 +164,9 @@ async function timed<T>(ctx: StepContext, step: string, fn: () => Promise<T>): P
     return result;
   } catch (e) {
     const durationMs = Date.now() - started;
-    const err = e as CredentialLifecycleError;
+    // `(e ?? {})`: a step may reject with null/undefined, and reading `.code`
+    // off it would make the logger the failure it was reporting.
+    const err = (e ?? {}) as CredentialLifecycleError;
     log({
       requestId: ctx.requestId,
       operation: `credential.${step}`,
@@ -172,11 +174,16 @@ async function timed<T>(ctx: StepContext, step: string, fn: () => Promise<T>): P
       timestamp: new Date().toISOString(),
       duration: durationMs,
       status: "error",
-      error: { code: err.code ?? "credential_error", message: redactSecrets(err.message ?? String(e)) },
+      // `ctx.keyHash` is kept through redaction: it is the provider-side
+      // IDENTIFIER, not key material (DF2.1 persists it in the plaintext
+      // record), and revoke-failed's "the key may still be live" message and
+      // its DELETE remediation are unactionable without it — `keyHashPrefix`
+      // carries 8 chars, which names no key you can revoke by hand.
+      error: { code: err.code ?? "credential_error", message: redactSecrets(err.message ?? e, ctx.keyHash) },
       // env-var names only, never expanded — and redacted, because a provider's
       // own text can reach here through a wrapped transport failure. `typeof`,
-      // not `??`: a null remediation must not reach the redactor.
-      remediation: typeof err.remediation === "string" ? redactSecrets(err.remediation) : null,
+      // not `??`: a null remediation must log null, not the string "null".
+      remediation: typeof err.remediation === "string" ? redactSecrets(err.remediation, ctx.keyHash) : null,
       runId: ctx.runId,
       step,
       keyHashPrefix: keyHashPrefix(ctx.keyHash),
@@ -243,7 +250,7 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
               // Best-effort — the original transport error stays the reported
               // failure — but a failed orphan revoke must be observable, not
               // silent: the key is live and known only to this log line.
-              const revErrCred = revErr as CredentialLifecycleError;
+              const revErrCred = (revErr ?? {}) as CredentialLifecycleError;
               log({
                 requestId: compCtx.requestId,
                 operation: "credential.mint_compensation",
@@ -253,7 +260,7 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
                 status: "error",
                 error: {
                   code: revErrCred.code ?? "compensation_failed",
-                  message: redactSecrets(revErrCred.message ?? String(revErr)),
+                  message: redactSecrets(revErrCred.message ?? revErr, orphan.hash),
                 },
                 runId,
                 step: "mint_compensation",
@@ -526,7 +533,7 @@ export async function runCredentialLifecycle(deps: CredentialDeps, runId: string
     } catch (compErr) {
       // Log the failed compensation so it's observable; the record still
       // carries keyHash, so DF2.6's orphan sweep or a manual re-run reaches it.
-      const compErrCred = compErr as CredentialLifecycleError;
+      const compErrCred = (compErr ?? {}) as CredentialLifecycleError;
       const compCtx: StepContext = {
         requestId: deps.requestId ?? newRequestId(),
         runId,
@@ -542,7 +549,7 @@ export async function runCredentialLifecycle(deps: CredentialDeps, runId: string
         status: "error",
         error: {
           code: compErrCred.code ?? "compensation_failed",
-          message: redactSecrets(compErrCred.message ?? String(compErr)),
+          message: redactSecrets(compErrCred.message ?? compErr, minted.hash),
         },
         runId,
         step: "delivery_compensation",

@@ -14,7 +14,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { BriefSchema, extractZodErrorField, type Brief } from "../../src/fleet/brief-schema.ts";
+import {
+  BriefSchema,
+  extractZodErrorField,
+  ROOT_FIELD_LABEL,
+  type Brief,
+} from "../../src/fleet/brief-schema.ts";
 import {
   loadManifest,
   ManifestError,
@@ -32,7 +37,9 @@ function validBrief(over: Record<string, unknown> = {}): Record<string, unknown>
     repoSlug: "owner/repo",
     issueId: 123,
     commitSha: "a".repeat(40),
-    manifestPath: "/path/to/pipeline.json",
+    // RELATIVE: the dispatcher resolves this against the repo root, and an
+    // absolute path discards that root outright (round 4, H1).
+    manifestPath: "path/to/pipeline.json",
     repoUrl: "https://github.com/owner/repo",
     ...over,
   };
@@ -100,6 +107,33 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     }
     expect(thrown).toBeInstanceOf(ZodError);
     expect(extractZodErrorField(thrown as ZodError)).toBe("unknownField");
+  });
+
+  test("a non-object brief is refused and NAMED — the root label, not an empty field", () => {
+    // The case the extractor's docblock was written for: a root rejection
+    // carries an EMPTY path, and AC1's "exits 2 naming the offending field"
+    // becomes `field ` — nothing an operator can act on.
+    for (const notAnObject of ["not an object", null, 42, ["repoSlug"]]) {
+      const result = BriefSchema.safeParse(notAnObject);
+      expect(result.success).toBe(false);
+      const error = (result as { error: ZodError }).error;
+      expect(error.issues[0]?.code).toBe("invalid_type");
+      expect(error.issues[0]?.path).toEqual([]);
+      expect(extractZodErrorField(error)).toBe(ROOT_FIELD_LABEL);
+      expect(ROOT_FIELD_LABEL.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("extractZodErrorField never returns an empty label, even for a degenerate ZodError", () => {
+    // The two fallbacks no real parse reaches: zod is free to hand back an error
+    // with no issues, or an unrecognized_keys issue with no keys, and both then
+    // returned "" through a `??`/`||` that only exists to stop that.
+    expect(extractZodErrorField(new ZodError([]))).toBe(ROOT_FIELD_LABEL);
+    expect(
+      extractZodErrorField(
+        new ZodError([{ code: "unrecognized_keys", keys: [], path: [], message: "Unrecognized key(s)" }]),
+      ),
+    ).toBe(ROOT_FIELD_LABEL);
   });
 
   test("the fixture supplies exactly the required keys and nothing optional", () => {
@@ -183,6 +217,23 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     });
   });
 
+  test("issueUrl scheme is allow-listed to https — http, file and javascript rejected", () => {
+    // `not-a-url` above fails on `.url()` alone, so it passes with the scheme
+    // check DELETED: `new URL()` accepts every one of these three. The value
+    // lands in run-context.json and in log lines an operator clicks.
+    for (const bad of [
+      "http://github.com/owner/repo/issues/1",
+      "file:///etc/passwd",
+      "javascript:alert(document.domain)",
+    ]) {
+      expectRejected(validBrief({ issueUrl: bad }), {
+        field: "issueUrl",
+        code: "invalid_string",
+        message: /must be an https:\/\/ URL/,
+      });
+    }
+  });
+
   test("issueUrl valid URL accepted (optional)", () => {
     const brief = validBrief({ issueUrl: "https://github.com/owner/repo/issues/123" });
     const result = BriefSchema.parse(brief);
@@ -240,11 +291,57 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     }
   });
 
+  test("manifestPath backslash parent segment rejected (the guard is about traversal, not POSIX)", () => {
+    // `p.split("/")` never saw these: on a Windows host they walk out of the
+    // repo root, and the guard's own docblock claims to refuse traversal.
+    for (const bad of ["..\\..\\etc\\hosts", "cfg\\..\\..\\escape.json"]) {
+      expectRejected(validBrief({ manifestPath: bad }), {
+        field: "manifestPath",
+        code: "custom",
+        message: /may not be '\.\.'/,
+      });
+    }
+  });
+
+  test("manifestPath ABSOLUTE rejected — no '..' is needed to escape the repo root", () => {
+    // `path.resolve(repoRoot, "/etc/shadow")` returns "/etc/shadow": the root is
+    // discarded outright. The parent-segment guard alone was never containment,
+    // and INV-2 puts the trust boundary here, not on dispatch's second gate.
+    for (const bad of ["/etc/shadow", "/abs/path/pipeline.json", "\\\\host\\share\\p.json", "C:\\p.json"]) {
+      expectRejected(validBrief({ manifestPath: bad }), {
+        field: "manifestPath",
+        code: "custom",
+        message: /must be relative/,
+      });
+    }
+  });
+
+  test("manifestPath NUL byte rejected as exit-2, not as an untyped fs error", () => {
+    // A NUL reaches Node `fs` as ERR_INVALID_ARG_VALUE — past the boundary the
+    // schema is supposed to be.
+    expectRejected(validBrief({ manifestPath: "cfg/pipe\u0000.json" }), {
+      field: "manifestPath",
+      code: "invalid_string",
+      message: /control characters/,
+    });
+  });
+
+  test("manifestPath at the 1024 cap accepted, one over rejected", () => {
+    const atCap = `${"a".repeat(1023)}b`;
+    expect(atCap.length).toBe(1024);
+    expect(BriefSchema.parse(validBrief({ manifestPath: atCap })).manifestPath).toBe(atCap);
+    expectRejected(validBrief({ manifestPath: "a".repeat(1025) }), {
+      field: "manifestPath",
+      code: "too_big",
+    });
+  });
+
   test("manifestPath '.' segments stay legal — './pipeline.json' is an ordinary path", () => {
     // Unlike repoSlug, where '.' is an entire owner/repo name and never valid,
     // a '.' path segment resolves nowhere new. Over-rejecting here would refuse
-    // briefs that are correct.
-    for (const ok of ["./pipeline.json", "cfg/./pipeline.json", "/abs/path/pipeline.json"]) {
+    // briefs that are correct. (An ABSOLUTE path is no longer in this list — see
+    // the rejection case above.)
+    for (const ok of ["./pipeline.json", "cfg/./pipeline.json"]) {
       expect(BriefSchema.parse(validBrief({ manifestPath: ok })).manifestPath).toBe(ok);
     }
   });
@@ -265,6 +362,85 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     });
   });
 
+  test("repoUrl HTTPS:// ACCEPTED — URL schemes are case-insensitive", () => {
+    // `.url()` accepts it (verified: `new URL("HTTPS://…").protocol === "https:"`),
+    // so a case-SENSITIVE prefix check refused a URL that IS https, telling the
+    // operator to use the scheme they already used.
+    const url = "HTTPS://github.com/owner/repo";
+    expect(BriefSchema.parse(validBrief({ repoUrl: url })).repoUrl).toBe(url);
+  });
+
+  test("repoUrl at the 2048 cap accepted, one over rejected", () => {
+    // The rejecting side alone lets the cap be tightened to anything — 32 would
+    // refuse every real clone URL and still pass. The query string keeps the
+    // PATHNAME equal to repoSlug, so this exercises the cap, not the cross-check.
+    const prefix = "https://github.com/owner/repo?x=";
+    const atCap = prefix + "a".repeat(2048 - prefix.length);
+    expect(atCap.length).toBe(2048);
+    expect(BriefSchema.parse(validBrief({ repoUrl: atCap })).repoUrl).toBe(atCap);
+    expectRejected(validBrief({ repoUrl: `${atCap}a` }), { field: "repoUrl", code: "too_big" });
+  });
+
+  test("repoUrl must name the SAME repository as repoSlug (spend identity vs. executed code)", () => {
+    // repoSlug is the ledger key, the per-issue cap and the host-side log path;
+    // repoUrl is what gets cloned and RUN. Validated independently they were
+    // attacker-separable: a trusted slug's budget funding someone else's code.
+    expectRejected(validBrief({ repoUrl: "https://attacker.example/owner/evil" }), {
+      field: "repoUrl",
+      code: "custom",
+      message: /same repository as repoSlug/,
+    });
+  });
+
+  test("repoUrl cross-check accepts a .git suffix and a trailing slash", () => {
+    for (const ok of ["https://github.com/owner/repo.git", "https://github.com/owner/repo/"]) {
+      expect(BriefSchema.parse(validBrief({ repoUrl: ok })).repoUrl).toBe(ok);
+    }
+  });
+
+  test("repoUrl cross-check does NOT constrain the host — self-hosted forges are legitimate", () => {
+    // The tie is on the PATH only. A host allow-list here would refuse every
+    // GitLab/Gitea/Forgejo install, which is a worse failure than the one the
+    // cross-check closes.
+    const url = "https://git.internal.example.com/owner/repo";
+    expect(BriefSchema.parse(validBrief({ repoUrl: url })).repoUrl).toBe(url);
+  });
+
+  test("issueUrl HTTPS:// accepted and the 2048 cap binds at the boundary", () => {
+    const url = "HTTPS://github.com/owner/repo/issues/1";
+    expect(BriefSchema.parse(validBrief({ issueUrl: url })).issueUrl).toBe(url);
+
+    const prefix = "https://github.com/";
+    const atCap = prefix + "a".repeat(2048 - prefix.length);
+    expect(atCap.length).toBe(2048);
+    expect(BriefSchema.parse(validBrief({ issueUrl: atCap })).issueUrl).toBe(atCap);
+    expectRejected(validBrief({ issueUrl: `${atCap}a` }), {
+      field: "issueUrl",
+      code: "too_big",
+    });
+  });
+
+  test("requestId control characters rejected (log injection into the operator stream)", () => {
+    // C3 keeps the FORMAT loose — this is not a UUID check. But the raw value is
+    // interpolated into log lines before `resolveRunCorrelation` ever sees it,
+    // and a newline forges a whole line there.
+    for (const bad of ["abc\nFLEET dispatch ok runId=fake", "abc\rx", "abc\u0000x", "abc\u001bx"]) {
+      expectRejected(validBrief({ requestId: bad }), {
+        field: "requestId",
+        code: "invalid_string",
+        message: /control characters/,
+      });
+    }
+  });
+
+  test("requestId at the 128 cap accepted, one over rejected", () => {
+    // It rides the brief into the run record, the ledger keys and every log
+    // correlation line, all of which are persisted.
+    const atCap = "u".repeat(128);
+    expect(BriefSchema.parse(validBrief({ requestId: atCap })).requestId).toBe(atCap);
+    expectRejected(validBrief({ requestId: "u".repeat(129) }), { field: "requestId", code: "too_big" });
+  });
+
   test("repoSlug invalid pattern rejected (no slash)", () => {
     expectRejected(validBrief({ repoSlug: "justowner" }), { field: "repoSlug", code: "invalid_string" });
   });
@@ -282,8 +458,42 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     });
   });
 
+  test("repoSlug segments at the 100 cap accepted, 101 rejected (both sides)", () => {
+    // Without both directions the `{1,100}` bound is free: `{1,10}` refuses
+    // real repositories and `{1,10000}` lets an unbounded slug reach the ledger
+    // key and the host-side log path, and every other case in this file passes
+    // either way.
+    const atCap = "a".repeat(100);
+    const atCap2 = "b".repeat(100);
+    const slug = `${atCap}/${atCap2}`;
+    expect(BriefSchema.parse(validBrief({ repoSlug: slug, repoUrl: `https://github.com/${slug}` })).repoSlug).toBe(
+      slug,
+    );
+
+    for (const over of [`${"a".repeat(101)}/repo`, `owner/${"b".repeat(101)}`]) {
+      expectRejected(validBrief({ repoSlug: over, repoUrl: `https://github.com/${over}` }), {
+        field: "repoSlug",
+        code: "invalid_string",
+      });
+    }
+  });
+
+  test("repoSlug accepts a realistic long mixed-case slug", () => {
+    // 43 chars, mixed case, digits and hyphens: this shape was rejected DEEP in
+    // the stack by assertNoSecret's key-shape heuristic, AFTER store.create had
+    // already eroded the issue's budget cap. Pinned here so the schema layer
+    // cannot start refusing it either.
+    const slug = "BiosparkHealth/QDS-Factory-Pipeline-Engine2";
+    const result = BriefSchema.parse(validBrief({ repoSlug: slug, repoUrl: `https://github.com/${slug}` }));
+    expect(result.repoSlug).toBe(slug);
+  });
+
   test("repoSlug valid pattern accepted", () => {
-    const brief = validBrief({ repoSlug: "owner-name/repo.name" });
+    // repoUrl moves with it: the two now have to name one repository.
+    const brief = validBrief({
+      repoSlug: "owner-name/repo.name",
+      repoUrl: "https://github.com/owner-name/repo.name",
+    });
     const result = BriefSchema.parse(brief);
     expect(result.repoSlug).toBe("owner-name/repo.name");
   });

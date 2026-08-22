@@ -221,6 +221,20 @@ export const LEGACY_RUN_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
  */
 export const LOCK_TIMEOUT_MS = 5_000;
 
+/**
+ * How many times `withLock` retries a claim with NO sleep before it starts
+ * sleeping anyway.
+ *
+ * The sleepless retry exists for the fast hand-off: `stealIfOwnerGone`
+ * returning `null` means the path is free RIGHT NOW, and a 5ms sleep there
+ * throws the hand-off away. But "free right now" is also what a contender sees
+ * when `claimLock` loses the race and the winner then releases before the
+ * steal probe reads — a state two writers can hand back and forth for the whole
+ * LOCK_TIMEOUT_MS, spinning a core flat out on a `sleepMs` that blocks the
+ * event loop anyway. Past this many, the contention is plainly not a hand-off.
+ */
+const LOCK_IMMEDIATE_RETRIES = 8;
+
 export function assertValidRunId(id: unknown): asserts id is string {
   if (typeof id !== "string" || id.length === 0 || id.length > RUN_ID_MAX || !RUN_ID_RE.test(id)) {
     throw new Error(
@@ -273,21 +287,47 @@ export const SECRET_PREFIXES = [
 ];
 
 /**
+ * Field paths the LENGTH+mixed-class heuristic below does not apply to, because
+ * what they hold is structurally known and structurally not key material.
+ *
+ * Keyed on the PATH, never on the value — that is the whole point. The
+ * heuristic cannot tell a long mixed-class token from a long mixed-class
+ * identifier, so for the fields whose grammar is already pinned down elsewhere
+ * the answer is to stop asking it. `extensions.budget.repoSlug` is the case
+ * that bit: `BiosparkHealth/QDS-Factory-Pipeline-Engine2` is 43 chars, mixed
+ * class, and every character a repo slug may legally carry
+ * (`[A-Za-z0-9._-]+/[A-Za-z0-9._-]+`, src/fleet/brief-schema.ts) is inside the
+ * heuristic's charset. It was refused as "key material" AFTER `store.create`
+ * had already made the record — so the run resolved without an
+ * `extensions.budget` for teardown to price, the ledger's orphan guard never
+ * expired the reservation, and every retry burned another one until the
+ * issue's cap was gone.
+ *
+ * The PREFIX scan still runs on every path including these, so the one field an
+ * operator can fat-finger a raw key into is not the field that accepts it: no
+ * repo slug, issue id or sha256 digest starts with `sk-` or `-----BEGIN`.
+ */
+const SHAPE_EXEMPT_PATHS: ReadonlySet<string> = new Set([
+  // A base64 sha256 is a 44-char mixed-class token by construction.
+  "keyHash",
+  // Both are validated against their own grammar by BriefSchema before they
+  // ever reach the record, and both are written AFTER the box exists.
+  "extensions.budget.repoSlug",
+  "extensions.budget.issueId",
+]);
+
+/**
  * ponytail: prefix list + a mixed-class long-token heuristic, not an entropy
  * model. It catches the credential shapes this factory actually mints; upgrade
  * to a real detector only if a leak gets past it.
  *
- * `shape: false` (used only for `keyHash`) skips the LENGTH heuristic, because a
- * base64 sha256 is a 44-char mixed-class token. The prefix scan still runs: no
- * digest starts with `sk-` or `-----BEGIN`, so the one field an operator can
- * fat-finger a raw key into is not the one field that accepts it.
- *
  * The mixed-class requirement is load-bearing, not decoration. A 40-char git SHA
  * is all-lowercase hex and a run id is all-lowercase hostname text, so a
  * length-only rule would reject `commitSha` and `vmName` — the very fields this
- * record exists to hold — and it would do it AFTER the box was created.
+ * record exists to hold — and it would do it AFTER the box was created. Mixed
+ * class is not enough on its own, though: see `SHAPE_EXEMPT_PATHS`.
  */
-function assertNoSecret(key: string, value: unknown, opts: { shape?: boolean } = {}): void {
+function assertNoSecret(key: string, value: unknown): void {
   if (typeof value !== "string") return;
   const v = value.trim();
   // Matched at a token boundary, not just at position 0: a credential can ride
@@ -298,7 +338,7 @@ function assertNoSecret(key: string, value: unknown, opts: { shape?: boolean } =
       throw new Error(`refusing to write key material into the run record: ${key}`);
     }
   }
-  if (opts.shape === false) return;
+  if (SHAPE_EXEMPT_PATHS.has(key)) return;
   // A URL is a long punctuated token by nature and `httpsUrl`/`prUrl` are
   // first-class fields here, so the shape test does not apply to one.
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) return;
@@ -464,6 +504,13 @@ export interface RunRecordStoreOptions {
 }
 
 export const DEFAULT_RUNS_DIR = ".sandbox/runs";
+
+/** What a directory sweep read, and what it refused to read (see `listWithAnomalies`). */
+export interface RunRecordListing {
+  records: RunRecord[];
+  /** Filenames skipped because the stem is not a run id, in directory order. */
+  skipped: string[];
+}
 
 export class RunRecordStore {
   readonly dir: string;
@@ -663,7 +710,7 @@ export class RunRecordStore {
       if (!kind) throw new Error(`unknown key: ${key}`);
       if (closed) throw new Error(`record ${runId} is closed; core key not writable: ${key}`);
       assertKind(key, kind, value);
-      assertNoSecret(key, value, { shape: key !== "keyHash" });
+      assertNoSecret(key, value);
       (next as unknown as Record<string, unknown>)[key] = value;
     }
 
@@ -693,30 +740,53 @@ export class RunRecordStore {
    * not a record this store could ever have written, no verb can act on it, and
    * throwing for it took the whole directory down — `fleet status` and the DF2.6
    * reaper's record sweep return nothing at all, which is a bigger INV-4
-   * violation than the one file. It is reported on the log line instead of being
-   * dropped silently.
+   * violation than the one file. It is reported on the log line AND in
+   * `listWithAnomalies().skipped` — see there for why the log line alone is not
+   * enough.
    */
   list(): RunRecord[] {
+    return this.listWithAnomalies().records;
+  }
+
+  /**
+   * `list()`, plus what it refused to read.
+   *
+   * A skipped file is not an absence, and a caller that cannot tell the two
+   * apart fails OPEN. `reapRuns` builds its claim set from the records this
+   * returns and destroys every box not in it — so a `.json` skipped for a bad
+   * filename, whose contents are a perfectly valid OPEN record with a `vmName`,
+   * silently drops that box out of the claim set and the reaper destroys a live
+   * box belonging to an open run. A log line cannot prevent that; a value in
+   * the return can. `fleet status` has the same problem in the reporting
+   * direction: "3 runs" and "3 runs and one record I refused to read" must not
+   * render identically.
+   *
+   * `list()` keeps returning the bare array for the callers that genuinely only
+   * want records — the anomaly is opt-in to read, not opt-in to produce.
+   */
+  listWithAnomalies(): RunRecordListing {
     return this.traced(null, "list", () => this.listUnlogged());
   }
 
-  private listUnlogged(): RunRecord[] {
-    const out: RunRecord[] = [];
+  private listUnlogged(): RunRecordListing {
+    const records: RunRecord[] = [];
+    const skipped: string[] = [];
     for (const name of readdirSync(this.dir).sort()) {
       if (!name.endsWith(".json")) continue;
       const id = name.slice(0, -".json".length);
       try {
         assertExistingRunId(id);
       } catch {
+        skipped.push(name);
         this.emit(null, "list.anomaly", Date.now(), "error", {
           code: "malformed_record_name",
           message: `malformed run record ${name}: filename is not a valid run id`,
         });
         continue;
       }
-      out.push(readRecord(join(this.dir, name), id));
+      records.push(readRecord(join(this.dir, name), id));
     }
-    return out;
+    return { records, skipped };
   }
 
   /**
@@ -744,6 +814,9 @@ export class RunRecordStore {
     // EACCES/EIO lock (a permissions or mount problem) is not reported as
     // contention, which is what sent an operator looking for a phantom writer.
     let heldReason = "contended";
+    // Monotonic, never reset: a handful of immediate retries keeps the fast
+    // hand-off, and after that every retry sleeps for the rest of this wait.
+    let sleepless = 0;
     for (;;) {
       if (this.claimLock(lock, body)) break;
       // Checked on every failed claim, including the ones a steal follows, so
@@ -755,6 +828,8 @@ export class RunRecordStore {
       const why = this.stealIfOwnerGone(lock, body);
       if (why !== null) {
         heldReason = why;
+        sleepMs(5);
+      } else if (++sleepless > LOCK_IMMEDIATE_RETRIES) {
         sleepMs(5);
       }
     }
@@ -895,8 +970,23 @@ export class RunRecordStore {
     // path between the judgement and the take. Put it back — `link`, never
     // `rename`, so a claim made at the path while this one was held aside is
     // not overwritten (EEXIST ⇒ that newer claim supersedes this body anyway).
-    if (putBack(claimed, lock)) rmSync(claimed, { force: true });
-    return "held by a live owner"; // a live lock is HELD — wait, never steal
+    if (putBack(claimed, lock)) {
+      rmSync(claimed, { force: true });
+      return "held by a live owner"; // a live lock is HELD — wait, never steal
+    }
+    // Put-back FAILED (ENOSPC, EMLINK, EDQUOT, EIO — never EEXIST, which
+    // `putBack` reports as success). The lock path is now EMPTY while a live
+    // holder is still inside its `fn()`, and the next contender's `claimLock`
+    // will succeed: two `setLocked` read-modify-writes overlap and drop a
+    // field. Nothing here can restore it, so it must not be silent. Reporting
+    // HELD keeps THIS writer fail-closed — it waits out the timeout with the
+    // reason attached rather than joining the overlap — and the log line is
+    // what tells an operator the lock needs putting back by hand.
+    this.emit(null, "lock.not-restored", Date.now(), "error", {
+      code: "lock_not_restored",
+      message: `run record lock left vacated after a steal attempt: ${lock} (body held aside at ${claimed})`,
+    });
+    return "lock could not be restored after a steal attempt";
   }
 
   /**
@@ -908,15 +998,28 @@ export class RunRecordStore {
    * foreign body is left alone rather than thrown on: this runs in a `finally`,
    * where a throw would replace the caller's real error with this one.
    *
-   * TAKE, THEN COMPARE. Reading the body and unlinking the path as two calls is
-   * a TOCTOU — `stealIfOwnerGone` can retire this lock and a new writer claim
-   * the path between them, and the `rm` would then delete that live writer's
-   * lock, letting two `setLocked` read-modify-writes overlap and drop a field.
-   * `rename` takes the path in one step, so the bytes compared below are
-   * provably the bytes removed. Same reasoning, and the same runtime limits, as
-   * `releaseRunLock` in scripts/lib/run-lock.ts.
+   * LOOK BEFORE TAKING, then take-then-compare. The `rename` is what makes the
+   * bytes compared provably the bytes removed — reading and unlinking as two
+   * calls is a TOCTOU, since `stealIfOwnerGone` can retire this lock and a new
+   * writer claim the path in between, and the `rm` would then delete that live
+   * writer's lock. But the rename must not be the FIRST thing this does. It
+   * vacates the path for as long as the compare and the put-back take, and if
+   * `putBack` cannot restore it (ENOSPC, EMLINK, EDQUOT, EIO) it stays vacated:
+   * the next contender claims a lock a live holder is still inside, which is
+   * the lost update this whole protocol exists to prevent — arrived at through
+   * a `finally` that swallows everything. A foreign body is not ours to move at
+   * all, so the cheap read below means the common case never vacates anything.
+   * Same reasoning, and the same runtime limits, as `releaseRunLock` in
+   * scripts/lib/run-lock.ts, which also reads first.
    */
   private releaseLock(lock: string, body: string): void {
+    try {
+      // Not ours (stolen, cleared by hand, already replaced) — or unreadable,
+      // which is not a body we can prove anything about. Either way: hands off.
+      if (readFileSync(lock, "utf8") !== body) return;
+    } catch {
+      return; // already gone
+    }
     const claimed = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     try {
       renameSync(lock, claimed);
@@ -934,10 +1037,22 @@ export class RunRecordStore {
       rmSync(claimed, { force: true });
       return;
     }
-    // Foreign body: put it back. `link`, never `rename` — rename would
-    // overwrite a lock claimed at the path while this one was held aside. A
-    // failure here stays silent for the reason above: this runs in a `finally`.
-    if (putBack(claimed, lock)) rmSync(claimed, { force: true });
+    // Foreign body: the lock was replaced between the read above and the
+    // rename. Put it back — `link`, never `rename`, which would overwrite a
+    // lock claimed at the path while this one was held aside.
+    if (putBack(claimed, lock)) {
+      rmSync(claimed, { force: true });
+      return;
+    }
+    // Put-back failed, so the path is EMPTY and a live holder is inside its
+    // `fn()`. Throwing is not available here — this runs in a `finally`, where
+    // it would replace the caller's real error — but silence is what let the
+    // next contender claim a lock somebody else still holds. Log it: only an
+    // operator can restore the path from `claimed`.
+    this.emit(null, "lock.not-restored", Date.now(), "error", {
+      code: "lock_not_restored",
+      message: `run record lock left vacated on release: ${lock} (body held aside at ${claimed})`,
+    });
   }
 
   /** Write-temp-then-rename. There is no in-place partial-write path (INV-3). */

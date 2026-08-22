@@ -48,11 +48,12 @@ import { assertValidRunId } from "../../src/providers/run-record.ts";
 export class RunLockedError extends Error {
   readonly code = "run-locked";
   readonly remediation: string;
-  constructor(lockPath: string, who: string, holder = "invocation", stale = false) {
+  constructor(lockPath: string, who: string, holder = "invocation", stale = false, note = "") {
     super(`another ${holder} holds ${lockPath} (${who})`);
-    this.remediation = stale
-      ? `no live process holds it (${who}) — rm ${lockPath} to clear the stale lock, then re-run`
-      : `wait for that invocation to finish — or, only if ${who} is gone: rm ${lockPath}`;
+    this.remediation =
+      (stale
+        ? `no live process holds it (${who}) — rm ${lockPath} to clear the stale lock, then re-run`
+        : `wait for that invocation to finish — or, only if ${who} is gone: rm ${lockPath}`) + note;
   }
 }
 
@@ -123,16 +124,29 @@ let signalsInstalled = false;
  *
  * `process.once` makes this idempotent — the handler is gone before the
  * re-raise, so the second delivery takes the default action.
+ *
+ * SIGHUP and SIGQUIT are in the list for the same reason SIGINT is: their
+ * default disposition TERMINATES, and a dropped ssh session or a closed
+ * terminal is the most ordinary way an operator's teardown dies. `exit` covers
+ * everything that is not a signal at all — a plain `process.exit()` reached
+ * while the lock is held, an uncaught throw, an unhandled rejection. Since this
+ * module never steals and neither an empty body nor a live pid is ever marked
+ * stale, each of those paths used to strand the run against every later verb
+ * with no automated way back.
  */
 function installSignalRelease(): void {
   if (signalsInstalled) return;
   signalsInstalled = true;
-  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
     process.once(sig, () => {
       releaseHeldRunLocks();
       process.kill(process.pid, sig);
     });
   }
+  // Sync by construction (`releaseHeldRunLocks` is all *Sync calls) — an async
+  // release here would never run. Releasing an empty `held` is a no-op, so this
+  // costs nothing on the normal path where the caller's finally already released.
+  process.on("exit", releaseHeldRunLocks);
 }
 
 /**
@@ -174,6 +188,13 @@ function parseLockBody(body: string): { pid?: string; host?: string; at: number 
 }
 
 /**
+ * Past this, a live pid holding the lock is more likely a recycled pid than a
+ * running invocation: harvest and teardown are minutes of work, not hours.
+ * Only ever widens the refusal's wording — never a steal, never a TTL.
+ */
+const IMPLAUSIBLE_HOLD_S = 6 * 60 * 60;
+
+/**
  * Describe the invocation currently holding `lock` for the refusal message, or
  * `undefined` when the lock VANISHED between the caller's EEXIST and this read
  * — a free run, not an unreadable one, so the caller retries rather than
@@ -204,7 +225,20 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
   // ("only if that pid is gone") is unfollowable, and pid reuse makes it wrong.
   const alive = isAlive(Number(pid));
   const who = `pid ${pid}${alive ? "" : " is not running"}, held ${age}s`;
-  return new RunLockedError(lock, who, holder, !alive);
+  // Pid reuse cuts BOTH ways, and this is the direction the comment above does
+  // not cover: after a SIGKILL the OS can recycle the holder's pid onto an
+  // unrelated process, `isAlive` reads that stranger as the holder, and the
+  // remediation then tells the operator to wait on a process that will never
+  // release. No steal and no TTL — this module's no-steal property is
+  // load-bearing, and a timeout would resurrect the double teardown it exists
+  // to prevent. Make the DIAGNOSIS honest instead: the body already carries
+  // `createdAt`, so an implausible hold is detectable, and a process start time
+  // later than the lock's proves the pid is not the holder.
+  const note =
+    alive && age > IMPLAUSIBLE_HOLD_S
+      ? ` — note: held ${age}s, far longer than any invocation runs. If its holder was SIGKILLed the OS may have recycled pid ${pid} onto an unrelated process: check \`ps -p ${pid} -o lstart=,args=\`, and if that process started after ${new Date(at).toISOString()} it is NOT the holder and the lock is safe to rm`
+      : "";
+  return new RunLockedError(lock, who, holder, !alive, note);
 }
 
 /**
@@ -213,6 +247,11 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
  * removes them and they accumulate in the same directory the record/bundle
  * listings glob over. Only temps whose recorded pid is gone are removed — a
  * live pid's temp is mid-acquire.
+ *
+ * `.tmp` ONLY, deliberately: a `claim` temp is a copy of our own body and is
+ * pure litter once we are gone, whereas `releaseRunLock`'s `.rescue` file is
+ * the last copy of somebody else's live claim and an operator is told to `mv`
+ * it back. The two must not share a filename shape.
  */
 function reapStaleTemps(runsDir: string, runId: string): void {
   const prefix = `${runId}.lock.`;
@@ -288,9 +327,20 @@ function claim(lock: string, body: string): boolean {
   }
 }
 
-/** The no-hard-links fallback: O_EXCL create, then write. */
+/**
+ * The no-hard-links fallback: O_EXCL create, then write.
+ *
+ * Unlike `claim`'s link path, the create here IS the lock — so every failure
+ * after it has to undo it. An ENOSPC/EIO/EDQUOT on the write or the fsync
+ * otherwise leaves `<runId>.lock` on disk EMPTY, with nothing registered to
+ * release it: the throw escapes past `held.set`, `refuse` renders `""` as
+ * "holder unknown", and "holder unknown" is never marked stale. Nothing in this
+ * module steals and `reapStaleTemps` only sweeps temps, so every later
+ * harvest/teardown of that run refuses FOREVER while the box and the key keep
+ * billing. Removing it on the way out is the whole of the fix.
+ */
 function writeLockDirect(lock: string, body: string): boolean {
-  let fd: number;
+  let fd: number | undefined;
   try {
     fd = openSync(lock, "wx", 0o600);
   } catch (e) {
@@ -300,10 +350,32 @@ function writeLockDirect(lock: string, body: string): boolean {
   try {
     writeFileSync(fd, body);
     fsyncSync(fd);
-  } finally {
-    closeSync(fd);
+    // Cleared BEFORE the call, as in `claim`: `close(2)` consumes the descriptor
+    // whether it returns or fails (POSIX), so a throwing close still leaves the
+    // number free for reuse — closing it again could land on a stranger's handle.
+    const open = fd;
+    fd = undefined;
+    closeSync(open);
+    return true;
+  } catch (e) {
+    // Both cleanups swallow their own failure. They run while `e` is in flight,
+    // and the caller needs the errno that actually broke the write — a `finally
+    // { closeSync(fd) }` that threw EIO on the same failing device would REPLACE
+    // it, which is the mirror image of the hazard `claim` avoids above.
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // The descriptor is consumed either way; the errno below is the useful one.
+      }
+    }
+    try {
+      rmSync(lock, { force: true });
+    } catch {
+      // Wedged lock we cannot clear — no worse than before, and `e` still names why.
+    }
+    throw e;
   }
-  return true;
 }
 
 /**
@@ -424,7 +496,14 @@ export function releaseRunLock(lock: string): void {
     );
   }
 
-  const claimed = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  // `.rescue`, NOT the `.tmp` shape `reapStaleTemps` (and `RunRecordStore`'s own
+  // `cleanStaleTemps`, which runs in this same directory on every CLI start)
+  // sweep by dead pid. If `restore` below fails, this file is the ONLY copy of a
+  // live holder's claim and the remediation tells the operator to `mv` it back —
+  // but our pid is dead by then, so both reapers would garbage-collect it and a
+  // new invocation would acquire freely: the double teardown, via the cleanup.
+  // It only ever survives the failed-restore path; every other exit rms it.
+  const claimed = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.rescue`;
   try {
     renameSync(lock, claimed);
   } catch (e) {

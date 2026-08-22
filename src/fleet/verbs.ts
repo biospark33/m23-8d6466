@@ -73,10 +73,14 @@ export function listVerbs(): VerbEntry[] {
         { name: "--dir", required: false, valueType: "path" },
         { name: "--help", required: false, valueType: "boolean" },
       ],
+      // 5 = the run lock refused, so the verb never ran — "refused before
+      // provisioning", and nothing was mutated. Not 1: `logVerb` stamps 1
+      // `transient` ("retry me"), and for a STALE lock nothing will ever clear
+      // it, so automation retried forever. See scripts/fleet.ts `acquireRunLock`.
       // 6 = cleanup failed on an otherwise-successful path (ledger close or run-lock
       // release). Distinct from 1 because it is NOT retryable: the work succeeded and
       // a retry only re-hits the wedged lock. See scripts/fleet.ts `cleanupFailed()`.
-      exitCodes: [0, 1, 2, 4, 6],
+      exitCodes: [0, 1, 2, 4, 5, 6],
     },
     {
       verb: "teardown",
@@ -87,8 +91,9 @@ export function listVerbs(): VerbEntry[] {
         { name: "--no-harvest", required: false, valueType: "boolean" },
         { name: "--help", required: false, valueType: "boolean" },
       ],
-      // 6 = cleanup failed on an otherwise-successful path — see `harvest` above.
-      exitCodes: [0, 1, 2, 4, 6],
+      // 5 = the run lock refused; 6 = cleanup failed on an otherwise-successful
+      // path — see `harvest` above for both.
+      exitCodes: [0, 1, 2, 4, 5, 6],
     },
   ];
 }

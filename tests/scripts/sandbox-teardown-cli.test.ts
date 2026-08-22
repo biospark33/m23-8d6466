@@ -11,7 +11,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { RunRecordStore, RUN_ID_MAX, RUN_ID_RE } from "../../src/providers/run-record.ts";
@@ -37,6 +37,13 @@ const DEAD_PID = 999_999_999;
  * liveness probe reads (correctly) as alive.
  */
 const LIVE_FOREIGN_PID = 1;
+
+/**
+ * This host's name as the lock body spells it (run-lock.ts's `lockHost`). A body
+ * naming any other host takes the "liveness unknown from here" branch and never
+ * reaches the pid probe, so a fixture that wants the LOCAL path must say so.
+ */
+const THIS_HOST = hostname().replace(/\s+/g, "_") || "unknown-host";
 
 /** Drain `stream` until `needle` appears, or fail with the child's stderr. */
 async function readUntil(proc: Bun.Subprocess<"pipe", "pipe", "pipe">, needle: string): Promise<void> {
@@ -198,6 +205,29 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     rmSync(otherRun);
   });
 
+  test("a `.rescue` body left by a failed restore is NEVER reaped, however dead its pid", () => {
+    // `releaseRunLock` parks a body it took but does not own at
+    // `<runId>.lock.<pid>.<hex>.rescue` and tells the operator to `mv` it back.
+    // While that file used the `.tmp` shape, it was the only copy of a LIVE
+    // holder's claim sitting in a directory two reapers sweep by dead pid — this
+    // acquire's own `reapStaleTemps`, and `RunRecordStore`'s `cleanStaleTemps`,
+    // which runs before the lock is even taken. Our pid is dead by the time an
+    // operator reads the remediation, so both would have collected it and the
+    // next invocation would acquire a run its real holder still owns.
+    const rescue = join(runs, `rescue-run.lock.${DEAD_PID}.deadbeef.rescue`);
+    const litter = join(runs, `rescue-run.lock.${DEAD_PID}.deadbeef.tmp`);
+    for (const p of [rescue, litter]) writeFileSync(p, "someone else's claim\n");
+
+    // A second store construction is what a later CLI invocation does first.
+    new RunRecordStore(runs);
+    releaseRunLock(acquireRunLock(runs, "rescue-run"));
+
+    expect(existsSync(rescue)).toBeTrue();
+    expect(existsSync(litter)).toBeFalse(); // our own abandoned copy is still litter
+    expect(readFileSync(rescue, "utf8")).toContain("someone else's claim");
+    rmSync(rescue);
+  });
+
   test("the lock is released when the guarded operation throws, and the run is lockable again", () => {
     // A teardown that throws mid-flight leaving `<runId>.lock` on disk makes
     // that run permanently un-teardownable — the release belongs in a finally,
@@ -228,10 +258,12 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     expect(() => releaseRunLock(lock)).toThrow(/refusing to release/);
     expect(existsSync(lock)).toBeTrue();
     expect(readFileSync(lock, "utf8")).toContain("deadbeef");
-    // The release TAKES the path (rename) before it compares, so the foreign
-    // claim is put back rather than merely left alone. Restoring it as an empty
-    // or missing file would hand the run to the next contender while its real
-    // holder still believes it owns it — assert the claim is still enforced.
+    // The release READS first and throws on the mismatch (run-lock.ts's
+    // `before !== body` guard) — it never reaches the `rename`, so the foreign
+    // claim is left exactly where it is rather than taken and put back. That
+    // distinction is the fix: a take-then-compare release emptied the path for
+    // a third contender while the restore raced it. Assert the claim is still
+    // enforced, which is what an empty or missing file here would break.
     expect(() => acquireRunLock(runs, "foreign-lock")).toThrow(RunLockedError);
     rmSync(lock);
   });
@@ -244,10 +276,14 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     // that release unlinks by path, the live holder loses its lock mid-teardown
     // and a third invocation walks straight into the same run.
     //
-    // The release is atomic against this by construction — `renameSync` takes
-    // the path and the bytes in one step, so the body compared IS the body
-    // removed. A test cannot open the compare/unlink window itself: there is no
-    // seam between them to interleave on, which is the point of the fix.
+    // This case stops at the READ: `releaseRunLock` compares the on-disk body
+    // before it touches the path, sees the child's claim, and throws without
+    // renaming. The second comparison (rename, re-read, `restore`) guards a
+    // strictly narrower window — the lock being re-claimed between our own read
+    // and our own rename — and no test can open it: the two calls are
+    // synchronous and adjacent, with no seam to interleave on. That branch is
+    // reachable only under fault injection, which is why nothing here asserts
+    // on it.
     const runId = "handoff-run";
     const lock = join(runs, `${runId}.lock`);
     const ours = acquireRunLock(runs, runId);
@@ -328,6 +364,59 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
       proc.kill("SIGKILL"); // no orphan, whatever happened above
       await proc.exited;
     }
+  });
+
+  test("SIGTERM releases the lock too, and still dies of the signal", async () => {
+    // SIGINT has its own test above; SIGTERM is the one `kill`, a supervisor and
+    // a CI cancellation actually send, and it strands the lock in exactly the
+    // same way — the handler list, not just its first entry, is the contract.
+    const child = join(dir, "sigterm-child.ts");
+    writeFileSync(
+      child,
+      [
+        `import { acquireRunLock } from ${JSON.stringify(RUN_LOCK_MODULE)};`,
+        "const [runsDir, runId] = process.argv.slice(2);",
+        "acquireRunLock(runsDir, runId);",
+        'process.stdout.write("locked\\n");',
+        "process.stdin.resume();",
+      ].join("\n"),
+    );
+    const lock = join(runs, "sigterm-run.lock");
+    const proc = Bun.spawn(["bun", child, runs, "sigterm-run"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    try {
+      await readUntil(proc, "locked");
+      expect(existsSync(lock)).toBeTrue();
+      proc.kill("SIGTERM");
+      await proc.exited;
+      expect(proc.signalCode).toBe("SIGTERM");
+      expect(proc.exitCode === null || proc.exitCode === 143).toBeTrue(); // never a swallowed 0
+      expect(existsSync(lock)).toBeFalse();
+    } finally {
+      proc.kill("SIGKILL");
+      await proc.exited;
+    }
+  });
+
+  test("a plain process.exit() while the lock is held still releases it", async () => {
+    // The signal handlers only cover signals. An `exit(N)` reached with the lock
+    // held — a guard clause, an uncaught throw, an unhandled rejection — took
+    // none of them, and since this module never steals and a live-pid body is
+    // never stale, that run was refused against every later verb with no
+    // automated way back. The exit code must survive the release unchanged.
+    const child = join(dir, "exit-child.ts");
+    writeFileSync(
+      child,
+      [
+        `import { acquireRunLock } from ${JSON.stringify(RUN_LOCK_MODULE)};`,
+        "const [runsDir, runId] = process.argv.slice(2);",
+        "acquireRunLock(runsDir, runId);",
+        "process.exit(7); // no release in sight — the handler is the only thing standing between this and a wedged run",
+      ].join("\n"),
+    );
+    const proc = Bun.spawn(["bun", child, runs, "exit-run"], { stdout: "pipe", stderr: "pipe" });
+    await proc.exited;
+    expect(proc.exitCode).toBe(7);
+    expect(existsSync(join(runs, "exit-run.lock"))).toBeFalse();
   });
 
   test("a held lock fails run-locked naming pid/age and the literal rm, and mutates nothing", async () => {
@@ -522,6 +611,48 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
     expect(text).not.toContain("stale lock");
     expect(text).toContain("wait for that invocation to finish");
     expect(existsSync(lock)).toBeTrue();
+  });
+
+  test("a LIVE pid holding the lock for days is diagnosed as possible pid reuse, not silently trusted", () => {
+    // After a SIGKILL the OS can recycle the holder's pid onto an unrelated
+    // process. `kill(pid, 0)` then reads that stranger as the holder, `stale`
+    // stays false, and the remediation ("wait for that invocation to finish")
+    // points at a process the operator waits on forever. No steal and no TTL —
+    // the no-steal property is load-bearing — so the DIAGNOSIS is what has to
+    // improve, using the createdAt the body already carries.
+    const createdAt = new Date(Date.now() - 72 * 3600 * 1000).toISOString();
+    const lock = join(runs, "ancient-lock.lock");
+    writeFileSync(lock, `${LIVE_FOREIGN_PID} ${THIS_HOST} ${createdAt} c0ffee\n`, { flag: "wx" });
+    try {
+      acquireRunLock(runs, "ancient-lock");
+      expect.unreachable("a held lock must still refuse");
+    } catch (e) {
+      expect(e).toBeInstanceOf(RunLockedError);
+      // Still a refusal, still not stale: the fix is honesty, never a steal.
+      expect((e as RunLockedError).remediation).not.toContain("stale lock");
+      expect((e as RunLockedError).remediation).toContain("wait for that invocation to finish");
+      // ...plus the part an operator can act on: the implausible hold, the pid
+      // to check, and the timestamp that settles whether it is the holder.
+      expect((e as RunLockedError).remediation).toContain("recycled");
+      expect((e as RunLockedError).remediation).toContain(`ps -p ${LIVE_FOREIGN_PID}`);
+      expect((e as RunLockedError).remediation).toContain(createdAt);
+    }
+    rmSync(lock);
+  });
+
+  test("a live pid holding the lock for seconds gets NO pid-reuse advice (the note is not boilerplate)", () => {
+    // The ordinary contention case is the common one. Telling every operator
+    // their holder might be a recycled pid would train them to ignore the line
+    // that matters — and to `rm` a live invocation's lock.
+    const lock = join(runs, "fresh-lock.lock");
+    writeFileSync(lock, `${LIVE_FOREIGN_PID} ${THIS_HOST} ${new Date().toISOString()} c0ffee\n`, { flag: "wx" });
+    try {
+      acquireRunLock(runs, "fresh-lock");
+      expect.unreachable("a held lock must still refuse");
+    } catch (e) {
+      expect((e as RunLockedError).remediation).not.toContain("recycled");
+    }
+    rmSync(lock);
   });
 
   test("missing runs dir propagates ENOENT from acquireRunLock", async () => {

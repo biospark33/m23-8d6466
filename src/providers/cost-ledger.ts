@@ -58,6 +58,30 @@ const MS_PER_HOUR = 3_600_000;
  */
 export const ADMISSION_GRACE_MS = 60_000;
 
+/**
+ * Clock-skew slack added to the grace window before an admission can expire.
+ *
+ * `decided_at` is a FOREIGN wall clock — whichever host dispatched wrote it —
+ * compared against the reader's own. A reader running ahead of the writer (NTP
+ * step, VM resume, container drift) sees a live in-flight reservation as aged,
+ * skips it as an orphan, and hands the same headroom out a second time: the
+ * exact double allocation the grace window exists to prevent, and the one
+ * direction of skew that fails OPEN. The expiry therefore fires only once a row
+ * is older than the grace window by more skew than a clock plausibly carries.
+ * Skew the other way is already safe: a future-dated row is younger than any
+ * cutoff, so it counts. The schema carries no local-origin timestamp to compare
+ * against instead (gate_admissions is append-only, so it cannot acquire one for
+ * rows already written), which is why this is a clamp and not a better clock.
+ *
+ * The price is only how long a genuinely orphaned reservation (store.create
+ * failed, so no run can ever report spend) wedges its issue: ~6 minutes rather
+ * than ~1. The price of the other mistake is spending the cap twice, so the
+ * slack buys in the fail-safe direction (INV-COST-6).
+ *
+ * Exported for tests ONLY, on the same reasoning as ADMISSION_GRACE_MS.
+ */
+export const ADMISSION_SKEW_MARGIN_MS = 300_000;
+
 /** DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up. */
 /** DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up. */
 function usdToMicros(usd: number): number {
@@ -781,9 +805,14 @@ export class CostLedger {
    * is therefore bounded by the same fleet hygiene that bounds an open record
    * with a live box — that is the retirement path for a failed dispatch too.
    *
-   * The one expiry: an admission older than `ADMISSION_GRACE_MS` whose run
-   * record does not resolve through readRunRecord (createRun's store.create
-   * failed, so no run can ever exist) stops counting — see the orphan guard.
+   * The one expiry: an admission older than `ADMISSION_GRACE_MS +
+   * ADMISSION_SKEW_MARGIN_MS` whose run record does not resolve through
+   * readRunRecord (createRun's store.create failed, so no run can ever exist)
+   * stops counting — see the orphan guard.
+   *
+   * A retry reusing the same `(requestId, runId)` is idempotent: it is judged
+   * against the headroom its original saw (its own reservation is excluded from
+   * the sum) and hands back the ceiling already ON the row, never a second one.
    */
   admitIssue(input: AdmissionInput, capMicroUsd: number, keyCapMicroUsd: number): AdmissionDecision {
     const started = Date.now();
@@ -801,18 +830,39 @@ export class CostLedger {
           "SELECT COALESCE(SUM(cost_micro_usd), 0) AS total, COUNT(*) AS n FROM cost_events WHERE repo_slug = ? AND issue_id = ? AND unpriced = 0",
         )
         .get(input.repoSlug, input.issueId) as { total: number; n: number };
+      // The caller's OWN row is excluded from the reservations below: this
+      // admission is either fresh (no such row exists, so the exclusion matches
+      // nothing) or a retry of the same (request_id, run_id), which must be
+      // judged against the headroom its original saw — not against its own
+      // reservation. Counting itself charged the cap twice for one run: with the
+      // default cap below the key cap the first admission reserves the WHOLE
+      // cap, so `committed >= cap` refused every retry with `spend-cap-exceeded`
+      // and the replay branch below never ran. It also left `remainingMicroUsd`
+      // net of a reservation the returned `admittedCeilingMicroUsd` (the
+      // recorded one) is not net of, breaking the `admittedCeilingMicroUsd <=
+      // remainingMicroUsd` invariant consumers rely on. Not a hole: the
+      // exclusion is the PRIMARY KEY, so it can only ever drop the caller's own
+      // row, and a DIFFERENT correlation id still sees the reservation. Every
+      // admitted ceiling is <= the headroom left after the reservations
+      // outstanding at ITS admission, so the recorded ceiling a replay hands
+      // back still fits the headroom recomputed here.
       const reservedRows = this.db
         .prepare(
           `SELECT a.ceiling_micro_usd AS ceiling, a.run_id AS runId, a.decided_at AS decidedAt
            FROM gate_admissions a
            WHERE a.repo_slug = ? AND a.issue_id = ?
+             AND NOT (a.request_id = ? AND a.run_id = ?)
              AND NOT EXISTS (
                SELECT 1 FROM cost_events ce
                WHERE ce.run_id = a.run_id AND ce.unpriced = 0
              )`,
         )
-        .all(input.repoSlug, input.issueId) as { ceiling: number; runId: string; decidedAt: string }[];
-      const graceCutoff = Date.now() - ADMISSION_GRACE_MS;
+        .all(input.repoSlug, input.issueId, input.requestId, input.runId) as {
+        ceiling: number;
+        runId: string;
+        decidedAt: string;
+      }[];
+      const graceCutoff = Date.now() - ADMISSION_GRACE_MS - ADMISSION_SKEW_MARGIN_MS;
       let reservedMicroUsd = 0;
       for (const row of reservedRows) {
         // Orphan guard: a reservation counts while its run record resolves —
@@ -832,6 +882,10 @@ export class CostLedger {
         const decidedAt = Date.parse(row.decidedAt);
         // An unparseable decided_at counts as young for the same fail-safe
         // reason the whole guard is conservative: over-reserve, never expire.
+        // So does a future-dated one, and one within ADMISSION_SKEW_MARGIN_MS
+        // of the window on either host's reading of the clock — `graceCutoff`
+        // carries that margin, because `decided_at` is the WRITER's clock and
+        // ours may run ahead of it (see ADMISSION_SKEW_MARGIN_MS).
         const young = !Number.isFinite(decidedAt) || decidedAt > graceCutoff;
         // Read UNCONDITIONALLY, then let `young` decide how to read the answer.
         // Short-circuiting on `young` meant a corrupt record was never touched

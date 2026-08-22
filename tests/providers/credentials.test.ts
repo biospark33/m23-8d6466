@@ -24,9 +24,11 @@ import {
   mintRunKey,
   openRouterKeyApi,
   revokeAndVerify,
+  revokeRunKey,
   runCredentialLifecycle,
   verifyRevoked,
   type CredentialDeps,
+  type KeyApi,
 } from "../../src/providers/credentials.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RecordingDriver } from "./fixtures/recording-driver.ts";
@@ -196,6 +198,94 @@ describe("DF2.3 credential lifecycle", () => {
     expect(store.get(runId).closedAt).toBeUndefined();
     // spend was still captured before the failed revoke
     expect(store.get(runId).spendMicroUsd).toBe(0);
+  });
+
+  // A base64-ish provider hash: 40+ chars of mixed case and digits, i.e. exactly
+  // the shape the long-token redactor exists to catch. It is an IDENTIFIER, not
+  // key material (DF2.1 persists it in the plaintext record).
+  const MIXED_CASE_HASH = "RGvhoNKDIZzsKKEoJm2Y7CDsY2m1S91GtNb3jvbXbfg";
+
+  test("AC3: the revoke-failed line keeps the FULL keyHash — the operator's only handle on a still-live key", async () => {
+    // keyHashPrefix carries 8 chars, which names no key you can revoke by hand,
+    // and this is the one line whose whole content is "the key may still be
+    // live". A redacted hash here leaves a billing key nobody can find.
+    api = new FakeKeyApi({ returnedHash: MIXED_CASE_HASH, deleteStatus: 500 });
+    const runId = "df23-revoke-failed-hash";
+    await makeRun(runId);
+    await expect(runCredentialLifecycle(deps(), runId)).rejects.toThrow();
+
+    const line = logs.find((l) => l.operation === "credential.revoke" && l.status === "error");
+    expect(line).toBeDefined();
+    expect(line?.error?.code).toBe("revoke-failed");
+    expect(line?.error?.message).toContain(MIXED_CASE_HASH);
+    expect(line?.remediation).toContain(MIXED_CASE_HASH);
+  });
+
+  test("AC3 control: the same line still redacts real key material standing beside the kept hash", async () => {
+    // Proves the exemption is the hash alone and not a hole in the redactor:
+    // a transport wrapper reporting the request it made embeds the
+    // Authorization header, so the DELETE's own error text can carry the key.
+    api = new FakeKeyApi({ returnedHash: MIXED_CASE_HASH });
+    const runId = "df23-revoke-failed-control";
+    await makeRun(runId);
+    const minted = await mintRunKey(deps(), runId);
+    const leaky: KeyApi = {
+      createKey: (n, l) => api.createKey(n, l),
+      listAllKeys: (m) => api.listAllKeys(m),
+      getKeyEntry: (h, m) => api.getKeyEntry(h, m),
+      deleteKey: async () => {
+        throw new CredentialLifecycleError(
+          "transport",
+          `DELETE ${MIXED_CASE_HASH} -H 'Authorization: Bearer ${minted.key}' failed`,
+          `retry with $OPENROUTER_PROVISIONING_KEY against ${MIXED_CASE_HASH}`,
+        );
+      },
+    };
+    await expect(revokeRunKey(deps({ keyApi: leaky }), runId)).rejects.toThrow();
+
+    const line = logs.find((l) => l.operation === "credential.revoke" && l.status === "error");
+    expect(line?.error?.message).toContain(MIXED_CASE_HASH); // identifier kept...
+    expect(leakScan(minted.key, JSON.stringify(line))).toBeNull(); // ...key gone
+  });
+
+  test("a step rejecting with null or a non-string message still logs a line and rethrows the original value", async () => {
+    // `e as CredentialLifecycleError` promised nothing: `err.code` on null, and
+    // `redactSecrets` on a structured message, both threw from INSIDE the
+    // error-logging path — replacing the real failure with a TypeError and
+    // writing no line at all.
+    const rejectWith = (value: unknown): KeyApi => ({
+      createKey: async () => {
+        throw value;
+      },
+      listAllKeys: (m) => api.listAllKeys(m),
+      getKeyEntry: (h, m) => api.getKeyEntry(h, m),
+      deleteKey: (h) => api.deleteKey(h),
+    });
+
+    let caught: unknown = "not-thrown";
+    await makeRun("df23-null-rejection");
+    try {
+      await mintRunKey(deps({ keyApi: rejectWith(null) }), "df23-null-rejection");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBe(null);
+    let line = logs.find((l) => l.operation === "credential.mint" && l.status === "error");
+    expect(line?.error?.code).toBe("credential_error");
+    expect(line?.error?.message).toBe("null");
+
+    logs.length = 0;
+    const structured = { code: "transport-detail", message: { detail: "socket hang up" } };
+    await makeRun("df23-nonstring-rejection");
+    try {
+      await mintRunKey(deps({ keyApi: rejectWith(structured) }), "df23-nonstring-rejection");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBe(structured);
+    line = logs.find((l) => l.operation === "credential.mint" && l.status === "error");
+    expect(line?.error?.code).toBe("transport-detail");
+    expect(line?.error?.message).toBe("[object Object]");
   });
 
   test("AC4: empty key list verifies; a truncated page fails closed as list-unverified", async () => {

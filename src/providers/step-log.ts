@@ -25,12 +25,21 @@ import { SECRET_PREFIXES } from "./run-record.ts";
  * `https?://…`, a bare `sk-…` has no scheme, and `src/providers/` does not
  * import from `src/fleet/`.
  *
- * Two arms, both lifted from `assertNoSecret`'s reasoning:
+ * Two arms, in this order, both lifted from `assertNoSecret`'s reasoning:
  *  - the known prefixes, matched at a token boundary so `task-runner` does not
- *    trip on `sk-`;
- *  - a long mixed-class token, for an issuer whose prefix is not on the list.
- *    The mixed-class requirement is what keeps a 40-char all-hex git SHA and an
+ *    trip on `sk-`. This arm is UNCONDITIONAL: a known issuer prefix is the
+ *    strong signal, so `AKIA…`/`ghp_…` are redacted whatever their character
+ *    classes are. Character-class mixing is never the sole test for a token an
+ *    issuer has already labelled;
+ *  - a long mixed-class token, the fallback for UNPREFIXED tokens only. The
+ *    mixed-class requirement is what keeps a 40-char all-hex git SHA and an
  *    all-lowercase run id — the fields these lines exist to carry — readable.
+ *
+ * Residual gap, accepted: an unprefixed all-lowercase-hex (or all-uppercase)
+ * secret from an issuer not on the list is indistinguishable from a git SHA by
+ * shape alone, and passes through. Loosening arm 2 to catch it would redact
+ * every SHA and run id in these lines — the wrong trade for a log whose job is
+ * to carry them. Close it by adding the issuer's prefix to `SECRET_PREFIXES`.
  */
 const SECRET_PREFIX_RE = new RegExp(
   `(^|[^A-Za-z0-9])(?:${SECRET_PREFIXES.map((p) => p.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("|")})[A-Za-z0-9+/=_.:-]*`,
@@ -38,12 +47,46 @@ const SECRET_PREFIX_RE = new RegExp(
 );
 const LONG_TOKEN_RE = /[A-Za-z0-9+/=_.:-]{40,}/g;
 
-export function redactSecrets(text: string): string {
-  return text
+/**
+ * Anything → a string, without ever throwing: a rejection may carry a
+ * non-string `message` (`{message: 42}`, `{message: {detail}}`), and `String`
+ * itself throws on a null-prototype or hostile-`toString` value. A logger that
+ * throws while reporting a failure REPLACES the failure it was reporting.
+ */
+function asText(v: unknown): string {
+  if (typeof v === "string") return v;
+  try {
+    return String(v);
+  } catch {
+    return "[unprintable]";
+  }
+}
+
+/**
+ * `keep` is a caller-known NON-secret identifier (in practice a provider
+ * keyHash) that arm 2 would otherwise swallow — see `credentials.ts`'s
+ * revoke-failed line, whose "the key may still be live" remediation is useless
+ * without the hash naming which key. It is parked behind a redaction-inert
+ * mark and restored afterwards; nothing else is exempted, and the ≥8 floor is
+ * what stops a short `keep` from splitting a real secret into unmatchable
+ * pieces (same boundary as `redactWithKey`'s).
+ *
+ * The mark reuses the guillemets of the placeholder itself: neither character
+ * is in either token charset, so the mark cannot merge with a neighbouring
+ * token — and text that forges one only gets a non-secret hash spliced back in.
+ */
+const KEEP_MARK = "«keep»";
+const MIN_KEEP_LEN = 8;
+
+export function redactSecrets(text: unknown, keep?: string): string {
+  const parked = keep && keep.length >= MIN_KEEP_LEN;
+  const source = parked ? asText(text).split(keep).join(KEEP_MARK) : asText(text);
+  const redacted = source
     .replace(SECRET_PREFIX_RE, (_m, lead: string) => `${lead}«redacted»`)
     .replace(LONG_TOKEN_RE, (t) =>
       /[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t) ? "«redacted»" : t,
     );
+  return parked ? redacted.split(KEEP_MARK).join(keep) : redacted;
 }
 
 /** Per-step log context — propagated ids plus the driver name. */
@@ -110,9 +153,13 @@ export async function timedLoggedStep<T>(
       // Redacted, not dropped: the free text is how an operator diagnoses a
       // failed step, and every step here can carry provider text. The code is
       // ours and never carries a value.
-      error: { code: err.code ?? labels.errorCode, message: redactSecrets(err.message ?? String(e)) },
-      // `typeof`, not `??`: `fn` may reject with a non-Error carrying a null
-      // remediation, and that must not reach the redactor.
+      // `?? e`, not `?? String(e)`: `redactSecrets` coerces (and `String` is
+      // itself throwable on a null-prototype value), so the whole message path
+      // — a non-string `message`, a missing one, a hostile one — is normalized
+      // in exactly one place instead of at each of the four sinks.
+      error: { code: err.code ?? labels.errorCode, message: redactSecrets(err.message ?? e) },
+      // `typeof`, not `??`: a non-Error carrying a null remediation must log a
+      // null remediation, not the string "null".
       remediation: typeof err.remediation === "string" ? redactSecrets(err.remediation) : null,
       outcome: labels.error,
       [`${step}_ms`]: durationMs,

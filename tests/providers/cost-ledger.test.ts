@@ -22,6 +22,7 @@ import { Database } from "bun:sqlite";
 import type { CostEvent } from "../../cli-anything/src/types.ts";
 import {
   ADMISSION_GRACE_MS,
+  ADMISSION_SKEW_MARGIN_MS,
   CostConfigError,
   CostLedger,
   CostLedgerError,
@@ -540,6 +541,8 @@ describe("DF2.8 box hours (AC6)", () => {
 
 describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
   const cap = 5_000_000;
+  /** What the orphan guard actually expires on: the window PLUS the skew clamp. */
+  const expiryMs = ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS;
 
   test("under cap: admits, reserves min(keyCap, remaining), returns the decision", () => {
     seedRecord("run-a1");
@@ -574,18 +577,67 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
   });
 
   test("a repeated (requestId, runId) returns the RECORDED ceiling, never a second uncounted one", () => {
+    seedRecord("run-a0");
     seedRecord("run-a1");
-    const first = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 1_000_000);
+    // The fixture is built so the RECORDED ceiling and the one a retry would
+    // recompute DIFFER — otherwise dropping `ceiling = prior.ceiling` keeps the
+    // test green and it proves nothing. run-a0 reserves 2M, so run-a1's
+    // admission is clamped to the 3M remainder; run-a0 then spends only 500k,
+    // which retires its reservation and leaves 4.5M of headroom, so a
+    // recomputed ceiling would be min(keyCap 4M, 4.5M) = 4M, not 3M.
+    const other = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a0", requestId: "req-0" }, cap, 2_000_000);
+    if (!other.admitted) throw new Error("expected the first dispatch to be admitted");
+    const first = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 4_000_000);
     if (!first.admitted) throw new Error("expected first admission");
+    expect(first.admittedCeilingMicroUsd).toBe(3_000_000); // cap − run-a0's 2M reservation
+    ledger.ingestCostEvent(mkEvent({ agentId: "lead-0", costUsd: 0.5 }), mkCtx({ runId: "run-a0", requestId: "req-0" }));
+
     // A retried dispatch reusing its correlation id: `ON CONFLICT DO NOTHING`
     // writes no row, so a freshly-computed ceiling here would be handed to the
     // mint while holding NO reservation — and the next dispatch would grant the
     // same headroom all over again.
-    const retry = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 1_000_000);
+    const retry = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 4_000_000);
     if (!retry.admitted) throw new Error("expected the retry to be admitted");
-    expect(retry.admittedCeilingMicroUsd).toBe(first.admittedCeilingMicroUsd);
-    // Exactly one reservation on the books, not two.
-    expect(retry.reservedMicroUsd).toBe(first.admittedCeilingMicroUsd);
+    expect(retry.admittedCeilingMicroUsd).toBe(3_000_000); // the recorded one, not the 4M recompute
+    expect(retry.spentMicroUsd).toBe(500_000);
+    // Its own reservation is not counted against it — the retry is judged
+    // against the headroom its original saw — and the ceiling it hands back
+    // still fits inside that headroom.
+    expect(retry.reservedMicroUsd).toBe(0);
+    expect(retry.remainingMicroUsd).toBe(4_500_000);
+    expect(retry.admittedCeilingMicroUsd).toBeLessThanOrEqual(retry.remainingMicroUsd);
+    // Exactly one reservation on the books per correlation id, not two: the
+    // decision's own `reservedMicroUsd` is read BEFORE the INSERT, so only the
+    // row count can see a double-insert.
+    const db = rawDb();
+    expect(rowCount(db, "gate_admissions")).toBe(2);
+    db.close();
+  });
+
+  test("a retry whose own reservation is the whole cap is still admitted, not refused as over-budget", () => {
+    seedRecord("run-a1");
+    // The default configuration: keyCap (50M) above the cap (5M), so the first
+    // admission reserves the ENTIRE cap. Counting that reservation against its
+    // own retry makes `committed >= cap` and refuses every retry before the
+    // replay branch can run — the idempotent path was unreachable in the only
+    // configuration that ships.
+    const first = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 50_000_000);
+    if (!first.admitted) throw new Error("expected first admission");
+    expect(first.admittedCeilingMicroUsd).toBe(cap);
+
+    const retry = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 50_000_000);
+    if (!retry.admitted) throw new Error("expected the saturated retry to be admitted idempotently");
+    expect(retry.admittedCeilingMicroUsd).toBe(cap);
+    expect(retry.remainingMicroUsd).toBe(cap);
+
+    // …and the exclusion is strictly the caller's own row: a DIFFERENT
+    // correlation id still sees the reservation and is still refused.
+    const other = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a2", requestId: "req-2" }, cap, 50_000_000);
+    expect(other.admitted).toBe(false);
+    expect(other.reservedMicroUsd).toBe(cap);
+    const db = rawDb();
+    expect(rowCount(db, "gate_admissions")).toBe(1); // the retry inserted nothing
+    db.close();
   });
 
   test("the reservation retires once the run's first priced ledger row lands", () => {
@@ -674,7 +726,7 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     // (EEXIST / invalid id) — no run record, so no run can ever report spend.
     // Aged past the grace window by INSERTing it directly: gate_admissions is
     // append-only, so an old admission can only be created, never back-dated.
-    admitAged("run-orphan", "r1", cap, ADMISSION_GRACE_MS * 2);
+    admitAged("run-orphan", "r1", cap, expiryMs * 2);
     // A later dispatch for a real run is not refused by the orphan's reservation.
     const after = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-real", requestId: "r2" }, cap, 50_000_000);
     if (!after.admitted) throw new Error("expected admission past the expired orphan reservation");
@@ -720,7 +772,7 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     if (!withYoung.admitted) throw new Error("expected admission alongside the young reservation");
     expect(withYoung.reservedMicroUsd).toBe(1_000_000);
 
-    admitAged("run-old", "ro", 1_000_000, ADMISSION_GRACE_MS * 2); // no record, past the window — orphaned
+    admitAged("run-old", "ro", 1_000_000, expiryMs * 2); // no record, past the window — orphaned
     const withOld = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-y", requestId: "ryy" }, cap, 500_000);
     if (!withOld.admitted) throw new Error("expected admission past the expired reservation");
     // run-young (still young) + run-x's own 500k reservation. run-old is not
@@ -742,15 +794,37 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     //    an issue for minutes), so retuning it should be a deliberate two-file
     //    change a reviewer sees, not a silent one.
     expect(ADMISSION_GRACE_MS).toBe(60_000);
-    admitAged("run-just-young", "rjy", 1_000_000, ADMISSION_GRACE_MS - 1_000, "101");
+    expect(ADMISSION_SKEW_MARGIN_MS).toBe(300_000);
+    admitAged("run-just-young", "rjy", 1_000_000, expiryMs - 1_000, "101");
     const young = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "101", runId: "run-jy", requestId: "rjy2" }, cap, 500_000);
     if (!young.admitted) throw new Error("expected admission alongside the just-young reservation");
     expect(young.reservedMicroUsd).toBe(1_000_000);
 
-    admitAged("run-just-old", "rjo", 1_000_000, ADMISSION_GRACE_MS + 1_000, "102");
+    admitAged("run-just-old", "rjo", 1_000_000, expiryMs + 1_000, "102");
     const old = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "102", runId: "run-jo", requestId: "rjo2" }, cap, 500_000);
     if (!old.admitted) throw new Error("expected admission past the just-old reservation");
     expect(old.reservedMicroUsd).toBe(0);
+  });
+
+  test("a reservation written by a host whose clock lags ours is not expired as an orphan", () => {
+    // `decided_at` is the WRITER's wall clock. A reader whose clock sits a few
+    // minutes ahead (NTP step, VM resume, container drift) reads a reservation
+    // committed SECONDS ago as minutes old. Without the skew clamp it expires,
+    // and the full remaining headroom is handed out a second time against the
+    // same cap — the double allocation the grace window exists to prevent.
+    // Skew is indistinguishable from age in the row itself, so the age below is
+    // exactly what a 4-minute-fast reader sees of a brand-new reservation.
+    admitAged("run-skewed", "rs", 1_000_000, ADMISSION_GRACE_MS + 180_000, "103");
+    const after = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "103", runId: "run-sk", requestId: "rs2" }, cap, 500_000);
+    if (!after.admitted) throw new Error("expected admission alongside the skewed reservation");
+    expect(after.reservedMicroUsd).toBe(1_000_000); // still counted, not skipped
+
+    // The other direction of skew — a writer running ahead of us — is younger
+    // than any cutoff and was never at risk.
+    admitAged("run-future", "rf1", 2_000_000, -ADMISSION_GRACE_MS, "104");
+    const withFuture = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "104", runId: "run-fu", requestId: "rf2" }, cap, 500_000);
+    if (!withFuture.admitted) throw new Error("expected admission alongside the future-dated reservation");
+    expect(withFuture.reservedMicroUsd).toBe(2_000_000);
   });
 
   test("the reader's age predicate is applied to the format the WRITER actually writes", () => {

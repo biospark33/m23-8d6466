@@ -40,6 +40,7 @@ import {
 import { CostLedger } from "../src/providers/cost-ledger.ts";
 import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
+import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 import { acquireRunLock, releaseRunLock } from "./lib/run-lock.ts";
 
 // The lock moved to scripts/lib/run-lock.ts (shared with scripts/fleet.ts);
@@ -174,9 +175,17 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
   // committed the exit code before the cleanup could say so.
   let outcome: number;
   try {
-    // The lock comes BEFORE the record read: reading first is a check-then-act
-    // across the lock boundary — a concurrent teardown closes the run and
-    // revokes its key while this invocation still holds a record that names
+    // A run that does not exist must refuse having touched NOTHING, so probe
+    // for the record first: the lock is a real file — created, fsynced, and
+    // (on a crash before the finally) left behind for a phantom run, while a
+    // concurrent invocation then sees that phantom as busy. `sandbox-teardown
+    // typo-run-id` used to create `<runsDir>/typo-run-id.lock` before finding
+    // out there was no such run. Same order as scripts/fleet.ts.
+    getRecord({ store }, parsed.runId);
+    // Then the lock, and only THEN the read the teardown actually uses: the
+    // probe above is deliberately not trusted across the lock boundary, because
+    // reading first is a check-then-act — a concurrent teardown closes the run
+    // and revokes its key while this invocation still holds a record that names
     // the keyHash, and the revoke runs twice.
     lock = acquireRunLock(store.dir, parsed.runId, "sandbox-teardown");
     // Shared classifier (harvest.ts getRecord — the same one harvestRun and
@@ -197,7 +206,17 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
       // remediation before anything is mutated.
       if (rec.keyHash !== undefined) deps.keyApi = openRouterKeyApi();
       // DF2.8: wire the cost ledger by default — it prices box hours at close.
+      // The ledger file and the cost config are resolved from the RECORDS
+      // directory (scripts/lib/cost-ledger-opts.ts), the same helper
+      // scripts/fleet.ts reserves budget through. Constructed with neither, as
+      // it was, this CLI fell back to CostLedger's own cwd-relative
+      // `.sandbox/cost-ledger.db`: `fleet dispatch --dir /srv/runs` reserved in
+      // /srv/cost-ledger.db and `sandbox-teardown --dir /srv/runs <id>` settled
+      // the box hours into ./.sandbox/cost-ledger.db, leaving the reservation
+      // open forever against the budget cap — and priced them off
+      // DEFAULT_COST_CONFIG rather than the operator's cost-config.json.
       ledger = new CostLedger({
+        ...costLedgerOpts(store.dir),
         readRunRecord: (id) => {
           try {
             const r = getRecord({ store }, id);

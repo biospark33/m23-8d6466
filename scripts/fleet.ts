@@ -32,7 +32,13 @@
  *    store's `assertValidRunId` (both CLIs now refuse the same set of ids; the
  *    grammar was tightened once already in this story, and a local copy of the
  *    pattern is exactly how the two drift);
- *  - the teardown sequence itself is `teardownSandbox`, one implementation.
+ *  - the teardown sequence itself is `teardownSandbox`, one implementation;
+ *  - where a run's MONEY lives — ledger file and cost config, resolved from the
+ *    records directory — is `scripts/lib/cost-ledger-opts.ts`. The two CLIs had
+ *    already drifted here: this one resolved the ledger beside `--dir` while
+ *    sandbox-teardown settled box hours into the cwd-relative default, so a run
+ *    dispatched with `--dir /srv/runs` left its reservation open forever in one
+ *    file and its spend in another.
  *
  * What is NOT shared is each CLI's own surface: argv grammar, exit-code table
  * (this one is 0-5; sandbox-teardown's is 0/1), error rendering (JSON envelopes
@@ -42,13 +48,9 @@
  * remains is the part that is supposed to differ.
  */
 import { readFileSync, statSync, writeSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
 
 import {
   CostLedger,
-  DEFAULT_COST_CONFIG_FILE,
-  DEFAULT_COST_LEDGER_FILE,
-  loadCostConfig,
   getRecord,
   harvestRun,
   openRouterKeyApi,
@@ -61,7 +63,9 @@ import {
 } from "../src/providers/index.ts";
 import { RunRecordStore } from "../src/providers/index.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
-import { acquireRunLock, releaseRunLock } from "./lib/run-lock.ts";
+import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
+import { acquireRunLock, releaseRunLock, RunLockedError } from "./lib/run-lock.ts";
+import { BriefSchema } from "../src/fleet/brief-schema.ts";
 import { log, setLogSink, newRequestId } from "../src/swarmclaw/log.ts";
 import {
   assertFleetRunId,
@@ -134,35 +138,6 @@ function usageError(message: string, remediation: string): FleetError {
 }
 
 /**
- * The ledger and the cost config are SIBLINGS of the records directory, so a
- * run whose records moved must take its money with it: otherwise the dispatch
- * reserves budget against one ledger file and the teardown settles box hours
- * against another. Both call sites resolve through here so the two halves of a
- * run's money can never land in different files.
- *
- * Keyed on `store.dir` — the directory actually in use — NOT on whether `--dir`
- * was typed. `QDS_RUNS_DIR=/srv/runs` and an embedder injecting `deps.store`
- * move the records exactly as `--dir` does, and branching on the flag left both
- * of those falling back to the cwd-relative default while the records sat
- * elsewhere.
- *
- * $QDS_COST_LEDGER_FILE / $QDS_COST_CONFIG_FILE still win, restated here rather
- * than left to CostLedger's own tier because the DEFAULT below is no longer the
- * one CostLedger would pick. An explicit env override is one file for both
- * halves, so it cannot split a run's money either.
- */
-function costLedgerOpts(storeDir: string) {
-  const sandboxDir = dirname(storeDir);
-  return {
-    path: process.env.QDS_COST_LEDGER_FILE ?? join(sandboxDir, basename(DEFAULT_COST_LEDGER_FILE)),
-    // An absent cost-config.json falls back to DEFAULT_COST_CONFIG
-    // (loadCostConfig maps ENOENT to defaults); an unreadable one still throws.
-    config: loadCostConfig(process.env.QDS_COST_CONFIG_FILE ?? join(sandboxDir, basename(DEFAULT_COST_CONFIG_FILE)))
-      .config,
-  };
-}
-
-/**
  * NO verb defaults to a driver. `fleet teardown <id>` with no --driver used to
  * "destroy" a FAKE box, print `torn down`, exit 0 and close the record while
  * the real box kept billing; `fleet dispatch` minted a fake run a CI script
@@ -175,6 +150,21 @@ function assertDriverChosen(verb: string, driverName: string | undefined, inject
     `${verb} requires --driver <name>`,
     "pass --driver fake for a local dry run, or the provider driver to act on the real fleet",
   );
+}
+
+/**
+ * Stands in for the key client on a brief `dispatch` is about to refuse at its
+ * schema — see the `briefCanMint` comment. It is never touched (validation
+ * precedes every credential step), and it throws rather than answering so a
+ * reordering that DID reach it fails loudly instead of dispatching with a
+ * silently inert credential client.
+ */
+function unusedKeyApi(): KeyApi {
+  return new Proxy({} as KeyApi, {
+    get: (_target, prop) => {
+      throw new Error(`keyApi.${String(prop)} on a brief that failed validation — the key client was never built`);
+    },
+  });
 }
 
 /**
@@ -197,13 +187,15 @@ function printError(
 /**
  * Construct a provider-layer dependency, mapping its refusal to exit 2.
  *
- * `resolveDriver` throws a bare Error for an unknown driver name and
- * `openRouterKeyApi` a CredentialLifecycleError for an unset provisioning key.
- * Neither is a FleetError, so both fell through to the generic branch of
- * `report` as exit 1 — which `logVerb` stamps `transient`, i.e. "retry me". A
- * typo'd driver and an unset env var are permanent operator errors: automation
- * reading `exitStatus` retried them forever. Message and remediation are
- * preserved verbatim; only the classification changes.
+ * `resolveDriver` throws a bare Error for an unknown driver name,
+ * `openRouterKeyApi` a CredentialLifecycleError for an unset provisioning key,
+ * and `new RunRecordStore` a bare Error for a records dir that is a regular
+ * file (ENOTDIR), unwritable (EPERM) or not mode 0700. None is a FleetError, so
+ * all fell through to the generic branch of `report` as exit 1 — which
+ * `logVerb` stamps `transient`, i.e. "retry me". A typo'd driver, an unset env
+ * var and a `--dir` pointing at the wrong thing are permanent operator errors:
+ * automation reading `exitStatus` retried them forever. Message and remediation
+ * are preserved verbatim; only the classification changes.
  */
 function asUsage<T>(build: () => T): T {
   try {
@@ -271,6 +263,19 @@ function parseArgv(argv: readonly string[]): ParseResult {
     throw usageError((e as Error).message, HELP);
   }
   const { positionals, flagTokens, bools } = tokens;
+  // The other half of the duplicate-flag guard below. `bools` is a Set, so
+  // `--no-harvest --no-harvest` collapsed into one silently — and --no-harvest
+  // is the flag that WAIVES artifact capture, so a repeated one is exactly the
+  // invocation an operator must be sure they typed. Scanned over raw argv
+  // because the Set has already lost the count; a bool token can never be a
+  // positional (run ids never start with `-`) nor a value (the space form
+  // refuses a `--`-prefixed value, cli-args.ts).
+  const seenBool = new Set<string>();
+  for (const a of argv) {
+    if (!BOOL_FLAGS.includes(a)) continue;
+    if (seenBool.has(a)) throw usageError(`${a} given more than once`, HELP);
+    seenBool.add(a);
+  }
   if (bools.delete(HELP_ALIAS)) bools.add("--help");
 
   const flags = new Map<string, string>();
@@ -428,11 +433,30 @@ export async function run(
   err: (s: string) => void = out,
 ): Promise<number> {
   const startedAt = Date.now();
+  /**
+   * Output writes, EPIPE-tolerant.
+   *
+   * `fleet teardown <id> | head -1` closes the pipe the moment head has its
+   * line, so `out()` — `writeAll(1, …)` under `import.meta.main` — throws
+   * EPIPE. Inside the verb's `try` that throw became `code = report(err, e)` =
+   * 1, which `logVerb` stamps `transient`: automation RETRIED a destructive
+   * verb that had already succeeded. Every write here describes work that is
+   * already done, and a reader who hung up cannot be told anything either way,
+   * so a broken pipe is not the verb's outcome. EPIPE only — ENOSPC or a bad
+   * fd is a real write failure and still throws.
+   */
+  const emit = (s: string): void => {
+    try {
+      out(s);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException | null)?.code !== "EPIPE") throw e;
+    }
+  };
   // The ONE pre-tokenization reading of argv: `fleet help` names no verb to
   // tokenize against. Anchored to argv[0], so it cannot fire from a stray token
   // inside a destructive invocation the way `argv.includes("--help")` did.
   if (argv[0] === "help") {
-    out(`${HELP}\n`);
+    emit(`${HELP}\n`);
     return 0;
   }
 
@@ -445,11 +469,21 @@ export async function run(
     // under-counted exactly the failures an operator most needs to see. The
     // verb is the first positional when there is one — that is what the
     // operator meant even when the flags around it were refused.
-    const attempted = argv.find((a) => !a.startsWith("-")) ?? "(none)";
+    //
+    // From the TOKENIZER's positionals, not a raw-argv scan: the scan returned
+    // the first token without a leading dash, which for `fleet --dir /srv/runs
+    // status --verbose` is `/srv/runs` — the value `--dir` consumed. The line
+    // then logged `verb: "/srv/runs"`, a filesystem path in the field the
+    // dashboards counting these failures are keyed on. Re-tokenized WITHOUT
+    // rejectStraySingleDash so this split cannot itself throw (that is the one
+    // thing tokenizeArgs refuses on), leaving `(none)` only when argv really
+    // names no verb.
+    const attempted =
+      tokenizeArgs(argv, { valueFlags: VALUE_FLAGS, boolFlags: BOOL_FLAGS }).positionals[0] ?? "(none)";
     return logVerb(newRequestId(), attempted, undefined, startedAt, report(err, e));
   }
   if (parsed.help === true) {
-    out(`${HELP}\n`);
+    emit(`${HELP}\n`);
     return 0;
   }
   const { entry, positionals, flags, bools } = parsed;
@@ -534,7 +568,7 @@ export async function run(
       const requestId = resolveBriefRequestId(briefJson) ?? newRequestId();
       dispatchRequestId = requestId;
       const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId }));
-      const store = deps?.store ?? new RunRecordStore({ ...storeOpts, requestId });
+      const store = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, requestId }));
       const ledgerFactory =
         deps?.ledgerFactory ??
         ((): LedgerLike => {
@@ -555,6 +589,20 @@ export async function run(
           });
           return ledger as unknown as LedgerLike;
         });
+      // AC1: an invalid brief must exit 2 NAMING THE OFFENDING FIELD, and
+      // `openRouterKeyApi()` reads $OPENROUTER_PROVISIONING_KEY at
+      // construction. Built unconditionally it fired first, so on a host
+      // without that key a malformed brief exited 2 with
+      // `provisioning-key-missing` and no field — the operator set the env var
+      // and re-hit the very same brief.
+      //
+      // It cannot simply be deferred to the mint that uses it: the mint runs
+      // AFTER provisioning, and INV-5 forbids destroying that box, so a missing
+      // env var would leave a billable box alive. So the same schema dispatch
+      // is about to apply decides the order — the client is built only for a
+      // brief that can reach a mint at all. dispatch() re-validates and owns
+      // the refusal envelope either way; this parse only sequences the two.
+      const briefCanMint = BriefSchema.safeParse(briefJson).success;
       // `readBrief` is the CLI's own seam; everything left is a DispatchDeps
       // seam forwarded verbatim, so one added there is never silently dropped.
       // The explicit keys below win over the spread.
@@ -562,7 +610,7 @@ export async function run(
       const dispatchDeps: DispatchDeps = {
         ...seams,
         driver,
-        keyApi: deps?.keyApi ?? asUsage(() => openRouterKeyApi()),
+        keyApi: deps?.keyApi ?? (briefCanMint ? asUsage(() => openRouterKeyApi()) : unusedKeyApi()),
         store,
         ledgerFactory,
         requestId,
@@ -570,12 +618,13 @@ export async function run(
       };
 
       const ack = await dispatch(briefJson, dispatchDeps);
-      out(`${JSON.stringify(ack)}\n`);
+      emit(`${JSON.stringify(ack)}\n`);
       return logVerb(requestId, verb, ack.runId, startedAt, 0);
     } catch (e) {
-      // resolveDriver, RunRecordStore and openRouterKeyApi throw typed errors
-      // with their own remediation; constructing them inside the try is what
-      // keeps that fidelity in the envelope instead of a bare exit 1.
+      // resolveDriver, RunRecordStore and openRouterKeyApi are each built
+      // inside the try and inside `asUsage`: that is what keeps their own
+      // message and remediation in the envelope, classified as the permanent
+      // operator errors they are instead of a retryable exit 1.
       //
       // CC-9: dispatch is a verb like any other, so it logs its one line on
       // BOTH exits. `dispatch()` emits its own resolved/ready/refused lines —
@@ -609,11 +658,29 @@ export async function run(
       if (runIdArg !== undefined) assertFleetRunId(runIdArg);
       assertDriverChosen("status", driverName, deps?.driver);
       const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId }));
-      const store = deps?.store ?? new RunRecordStore({ ...storeOpts, requestId });
+      const store = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, requestId }));
       const statusDeps = { driver, store };
       const rows = runIdArg === undefined ? await statusAll(statusDeps) : [await statusRun(statusDeps, runIdArg)];
-      for (const row of rows) out(`${JSON.stringify(row)}\n`);
-      return logVerb(requestId, verb, runIdArg, startedAt, 0); // no runs is a state, not an error (AC4)
+      for (const row of rows) emit(`${JSON.stringify(row)}\n`);
+      // `statusAll` emits a `listUnavailable` row whenever driver.list() failed
+      // or timed out (src/fleet/status.ts). The rows it did produce are still
+      // worth printing — they are the records — but every box column in them is
+      // a guess, and during a substrate outage with no open records the whole
+      // output is that one row. Exit 0 there told the operator the fleet was
+      // clean while every box in it kept billing, and a `| jq 'select(...)'`
+      // consumer never saw the row at all. 1 is the declared code for "the
+      // substrate failed, retry", and it is exactly what happened.
+      const listFailed = rows.some((r) => r.state === "listUnavailable");
+      if (listFailed) {
+        printError(
+          err,
+          "list-unavailable",
+          "the provider could not be listed: box state is unknown for every row above",
+          "re-run `fleet status` once the provider answers; treat no output as UNKNOWN, not as an empty fleet",
+        );
+      }
+      // …otherwise no runs is a state, not an error (AC4).
+      return logVerb(requestId, verb, runIdArg, startedAt, listFailed ? 1 : 0);
     } catch (e) {
       return logVerb(requestId, verb, runIdArg, startedAt, report(err, e));
     }
@@ -640,7 +707,7 @@ export async function run(
     assertDriverChosen(verb, driverName, deps?.driver);
 
     const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId, runId: runIdArg }));
-    const store = deps?.store ?? new RunRecordStore({ ...storeOpts, requestId });
+    const store = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, requestId }));
 
     /** exit 4 for a genuine absence; every other read failure propagates. */
     const notFound = (e: unknown): never => {
@@ -673,7 +740,23 @@ export async function run(
     // probe above is deliberately not trusted across the lock boundary, because
     // reading first is a check-then-act — a concurrent teardown closes the run
     // and revokes its key while we hold a record that still names the keyHash.
-    lock = acquireRunLock(store.dir, runIdArg, "fleet invocation");
+    try {
+      lock = acquireRunLock(store.dir, runIdArg, "fleet invocation");
+    } catch (e) {
+      // A lock refusal is 5, not the generic 1. `logVerb` stamps 1
+      // `transient` = "retry me", and for the STALE case (`refuse()` already
+      // knows the holder's pid is dead and prints the `rm` that clears it)
+      // nothing will ever clear the lock on its own — automation retried
+      // forever and hit `run-locked` every time. The `finally` below reasons
+      // exactly this way for the RELEASE failure and mints 6 for it; this is
+      // the acquire side, and 5 is the code for "refused before provisioning"
+      // — the throw happens between the record probe and any mutation, so
+      // nothing was touched. The live-holder case rides along: a caller that
+      // wants to wait for the holder switches on `run-locked` in the payload,
+      // which is the fact, where `transient` is a guess.
+      if (e instanceof RunLockedError) throw new FleetError(5, e.code, e.message, e.remediation);
+      throw e;
+    }
 
     let rec: RunRecord;
     try {
@@ -695,7 +778,7 @@ export async function run(
     if (verb === "harvest") {
       // D8: harvest is credential-free — no keyApi is built.
       const res = await harvestRun(tdeps, runIdArg);
-      out(res.outcome === "harvested" ? `harvested: ${res.count}\n` : "harvested: none\n");
+      emit(res.outcome === "harvested" ? `harvested: ${res.count}\n` : "harvested: none\n");
       code = 0;
     } else {
       if (rec.keyHash !== undefined) tdeps.keyApi = deps?.keyApi ?? asUsage(() => openRouterKeyApi());
@@ -716,8 +799,8 @@ export async function run(
       await teardownSandbox(tdeps, runIdArg, { noHarvest });
       // Reported AFTER the teardown ran: printed first, it claims a waiver for
       // a teardown that may never have happened.
-      if (noHarvest) out(`teardown.harvest_waived ${runIdArg}\n`);
-      out(`torn down: ${runIdArg}\n`);
+      if (noHarvest) emit(`teardown.harvest_waived ${runIdArg}\n`);
+      emit(`torn down: ${runIdArg}\n`);
       code = 0;
     }
   } catch (e) {

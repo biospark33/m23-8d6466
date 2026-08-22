@@ -199,6 +199,46 @@ function runCommand(
 }
 
 /**
+ * The run context the phase engine is handed, built from the loaded manifest.
+ *
+ * DF3.1 AC9b: the run's money ceiling reaches the spawn harness through this
+ * context — `dispatch-task.ts` forwards `ctx.effectiveCeilingMicros` to
+ * `_runTeamManifest`, and DF1.6 raises the harness cap from it. Nothing read it:
+ * the context was built from three fields, so the field was `undefined` on every
+ * real run and every run spawned at the $0.50 harness default no matter what the
+ * dispatcher admitted. Dispatch's `run-context.json` has no consumer at all.
+ *
+ * The MANIFEST is the source, because AC9a already makes it the cap's only
+ * in-box carrier: dispatch stamps `limitMicroUsd` with the same
+ * `effectiveCeilingMicros` it writes to `run-context.json`, `loadManifest` has
+ * already validated it as a positive safe integer, and the setup gate refuses
+ * the box if it is absent or unspendable. Parsing the JSON file instead would be
+ * a second copy of one number, with its own parse, its own failure mode and its
+ * own way to disagree with the manifest the gate checked.
+ *
+ * Conditional spread, not `?? undefined`: an unstamped manifest must leave the
+ * field ABSENT rather than present-and-undefined — the engine never defaults it
+ * to a number, and `"effectiveCeilingMicros" in ctx` is the shape that says so.
+ *
+ * Exported for its test: the field appears in no journal row and no terminal
+ * marker, so a spawned end-to-end run has nothing to assert on.
+ */
+export function runContextFrom(
+  runId: string,
+  requestId: string,
+  manifest: { pipelineId: string; limitMicroUsd?: number },
+): RunContext {
+  return {
+    runId,
+    pipelineId: manifest.pipelineId,
+    requestId,
+    ...(manifest.limitMicroUsd === undefined
+      ? {}
+      : { effectiveCeilingMicros: manifest.limitMicroUsd }),
+  };
+}
+
+/**
  * DF1.8: the correlated dispatch-failure sink (AC4). Appends the refusal to
  * the host-side dispatch log, writes the structured stderr line, and returns
  * the exit code — the caller never continues, and no runId is ever fabricated
@@ -596,7 +636,7 @@ async function main(argv: readonly string[]): Promise<number> {
 
   // DF1.4: Wrap FileJournal with TracingJournal
   const innerJournal = new FileJournal(journalPath, runId);
-  const ctx: RunContext = { runId, pipelineId: manifest.pipelineId, requestId };
+  const ctx: RunContext = runContextFrom(runId, requestId, manifest);
   const journal = new TracingJournal(innerJournal, tracer, ctx);
 
   const run = new Run({

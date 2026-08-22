@@ -235,6 +235,32 @@ describe("set (AC2)", () => {
     expect(rec.vmName).toBe(longId);
   });
 
+  test("INV-2 does NOT fire on a legal repoSlug — and still fires on a key-shaped value elsewhere", () => {
+    // The one that burned budget: `store.create` had already made the record,
+    // so refusing the budget write here left an OPEN record with no
+    // `extensions.budget` for teardown to price — the ledger's orphan guard
+    // never expired the reservation, and every retry burned another one until
+    // the issue's cap was gone. 43 chars, mixed case, a digit, and every
+    // character inside the heuristic's charset: a repo slug is
+    // indistinguishable from a token BY SHAPE, which is why the exemption is
+    // keyed on the field path instead.
+    const slug = "BiosparkHealth/QDS-Factory-Pipeline-Engine2";
+    expect(slug.length).toBe(43);
+    expect(slug).toMatch(/^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/); // BriefSchema's grammar
+    const rec = store.set("run-c", {
+      extensions: { budget: { repoSlug: slug, issueId: "1234567", admittedCeilingMicroUsd: 500_000 } },
+    });
+    expect(rec.extensions?.budget?.repoSlug).toBe(slug);
+
+    // The control: the exemption is one path, not a hole. The same value on a
+    // non-exempt path is still refused, and so is a real key on the exempt one.
+    expect(() => store.set("run-c", { sessionId: slug })).toThrow(/key material/);
+    expect(() => store.set("run-c", { extensions: { fanout: { fanoutId: slug } } })).toThrow(/key material/);
+    expect(() => store.set("run-c", { extensions: { budget: { repoSlug: "ghp_abcdefghijklmnop" } } })).toThrow(
+      /key material/,
+    );
+  });
+
   test("closedAt is close()'s to write, never set()'s", () => {
     const before = snapshot("run-c");
     // `as never`: the patch type refuses closedAt at compile time too — this
@@ -385,6 +411,23 @@ describe("list (AC3, INV-4)", () => {
       restore();
     }
     expect(lines.some((l) => JSON.stringify(l).includes("Bad Name.json"))).toBe(true);
+  });
+
+  test("a skipped file is visible in the RETURN value, not only on the log line", () => {
+    // A log line cannot make a caller fail safe. `reapRuns` builds its claim
+    // set from these records and destroys every box not in it, so a skipped
+    // `.json` holding a valid OPEN record with a `vmName` drops that box out of
+    // the claim set and the reaper destroys a live box. The skip has to be
+    // readable where the records are read.
+    store.create("run-good");
+    writeFileSync(join(dir, "Bad Name.json"), JSON.stringify({ runId: "x", createdAt: "y" }), { mode: 0o600 });
+    const listing = store.listWithAnomalies();
+    expect(listing.records.map((r) => r.runId)).toEqual(["run-good"]);
+    expect(listing.skipped).toEqual(["Bad Name.json"]);
+    // A clean directory reports an empty array, never `undefined` — a caller
+    // guarding on `.length` must not need a null check to be correct.
+    rmSync(join(dir, "Bad Name.json"));
+    expect(store.listWithAnomalies().skipped).toEqual([]);
   });
 
   test("an unreadable record is a hard error too, not a skipped entry", () => {

@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { timedLoggedStep, type StepCtx, type StepLogLabels } from "../../src/providers/step-log.ts";
+import { redactSecrets, timedLoggedStep, type StepCtx, type StepLogLabels } from "../../src/providers/step-log.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 
 let logs: LogEntry[];
@@ -19,6 +19,32 @@ beforeEach(() => {
 
 afterEach(() => {
   restoreLog?.();
+});
+
+describe("redactSecrets", () => {
+  const key = "sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd";
+
+  test("an issuer prefix is redacted whatever its character classes are", () => {
+    // The class heuristic is arm 2's fallback only — an all-uppercase+digits
+    // `AKIA…` and an all-lowercase `ghp_…` both carry a known prefix.
+    expect(redactSecrets("creds AKIAIOSFODNN7EXAMPLE here")).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(redactSecrets(`ghp_${"abcdefghij".repeat(4)}`)).not.toContain("abcdefghij");
+  });
+
+  test("`keep` restores the named non-secret token and nothing else", () => {
+    const hash = "RGvhoNKDIZzsKKEoJm2Y7CDsY2m1S91GtNb3jvbXbfg";
+    const text = `DELETE /keys/${hash} failed; retried with ${key}`;
+    expect(redactSecrets(text)).not.toContain(hash); // ...without `keep`, gone
+    const kept = redactSecrets(text, hash);
+    expect(kept).toContain(hash);
+    expect(kept).not.toContain(key);
+  });
+
+  test("a `keep` shorter than the 8-char floor cannot split a secret out of redaction", () => {
+    // "sk-" as `keep` would park a fragment of every key and hand back the
+    // pieces unredacted — the floor is what refuses that.
+    expect(redactSecrets(`token ${key}`, "sk-")).not.toContain(key.slice(9, 25));
+  });
 });
 
 describe("timedLoggedStep", () => {
@@ -139,8 +165,50 @@ describe("timedLoggedStep", () => {
     expect(line?.remediation).toContain("re-run");
   });
 
+  test("non-string message: log line is still written and the original value rethrown", async () => {
+    // `??` guards only null/undefined, so a rejection carrying a structured
+    // `message` used to reach `.replace` and make the LOGGER the failure —
+    // replacing the real one with a TypeError and writing no line at all.
+    const step = "nonstring-message-test";
+    const thrown = { code: "transport", message: { detail: "socket hang up" } };
+    let caught: unknown;
+    try {
+      await timedLoggedStep(ctx, prefix, step, labels, async () => {
+        throw thrown;
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBe(thrown); // the original failure, not a TypeError
+
+    const errorLine = logs.find((l) => l.operation === `${prefix}.${step}` && l.status === "error");
+    expect(errorLine).toBeDefined();
+    expect(errorLine?.error?.code).toBe("transport");
+    expect(errorLine?.error?.message).toBe("[object Object]");
+  });
+
+  test("a message whose own toString throws is still logged, not rethrown as the logger's failure", async () => {
+    const step = "hostile-message-test";
+    const thrown = { message: Object.create(null) as unknown as string };
+    let caught: unknown;
+    try {
+      await timedLoggedStep(ctx, prefix, step, labels, async () => {
+        throw thrown;
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBe(thrown);
+
+    const errorLine = logs.find((l) => l.operation === `${prefix}.${step}` && l.status === "error");
+    expect(errorLine?.error?.message).toBe("[unprintable]");
+  });
+
   test("redaction leaves the fields these lines exist to carry readable", async () => {
-    const sha = "a".repeat(40); // all-lowercase hex: not mixed-class, not a secret
+    // A REAL git SHA shape: lowercase hex WITH digits. `"a".repeat(40)` would
+    // fail the mixed-class test on two counts and so prove nothing about the
+    // fields this line exists to carry.
+    const sha = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4";
     const step = "harvest";
     await expect(
       timedLoggedStep(ctx, prefix, step, labels, async () => {
