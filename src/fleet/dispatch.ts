@@ -1321,7 +1321,10 @@ export async function dispatch(
   // admission, and cannot be moved before it — the ceiling under test IS the
   // decision's own output. The reservation is retired by the ledger's orphan
   // guard: `store.create` never runs on this path, so no record ever resolves
-  // for this id and the admission stops counting after `ADMISSION_GRACE_MS`.
+  // for this id and the admission stops counting once it ages past the ledger's
+  // orphan window (`ADMISSION_GRACE_MS` + `ADMISSION_SKEW_MARGIN_MS`, the margin
+  // added in review round 4 so a reader whose clock runs ahead of the writer's
+  // cannot expire a live reservation and grant its headroom twice).
   // Retiring it sooner needs a ledger-side release, which `admitIssue`'s
   // contract deliberately does not offer and this layer holds no handle for.
   if (!Number.isSafeInteger(effectiveCeilingMicros) || effectiveCeilingMicros <= 0) {
@@ -1345,8 +1348,9 @@ export async function dispatch(
   //
   // The gap between the admission above and this call — admitIssue's COMMIT to
   // store.create's rename, two processes with no shared lock — is CLOSED, on
-  // the ledger side, by `ADMISSION_GRACE_MS` (cost-ledger.ts): its orphan guard
-  // counts an admission younger than the grace window toward `reservedMicroUsd`
+  // the ledger side, by the orphan window (cost-ledger.ts, `ADMISSION_GRACE_MS`
+  // plus `ADMISSION_SKEW_MARGIN_MS`): its orphan guard
+  // counts an admission younger than that window toward `reservedMicroUsd`
   // whether or not the run record resolves yet, so a concurrent dispatch for the
   // same issue sees this reservation from the instant it commits. Two dispatches
   // can no longer both be granted the full remaining headroom. Do not "fix" this
