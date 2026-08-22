@@ -154,11 +154,27 @@ function installSignalRelease(): void {
  * diagnostics. `console.error` bypassed that sink: its line could interleave
  * with a partially written JSON log line, and a short write silently truncated
  * the remediation an operator has to follow.
+ *
+ * BEST-EFFORT, because of where it runs: `releaseHeldRunLocks` is a
+ * `process.on("exit")` handler, so anything that hangs or throws here replaces
+ * an orderly exit with a wedge or an unhandled error — and the release it is
+ * reporting on has already happened either way. An fd 2 the caller left
+ * non-blocking (a CI runner, a wrapper) is the case: `writeSync` raises EAGAIN
+ * there, and a zero-length return would spin this loop forever. Both give up on
+ * the rest of the line instead.
  */
 function writeStderr(s: string): void {
   const buf = Buffer.from(s, "utf8");
   let off = 0;
-  while (off < buf.length) off += writeSync(2, buf, off, buf.length - off);
+  try {
+    while (off < buf.length) {
+      const n = writeSync(2, buf, off, buf.length - off);
+      if (n <= 0) return;
+      off += n;
+    }
+  } catch {
+    // Diagnostics are not worth an unhandled throw out of an exit handler.
+  }
 }
 
 /** Release every lock this process still holds, reporting failures to stderr. */

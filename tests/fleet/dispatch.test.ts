@@ -1392,7 +1392,11 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     const noManifest = await fakeGate(driver, missing.name, opts);
     const bMissing = noManifest.assertions.find((a) => a.item === "B");
     expect(bMissing?.ok).toBeFalse();
-    expect(bMissing?.note).toContain("pipeline.yaml missing or empty");
+    // `cat`'s stderr is discarded, so absent and present-but-unreadable both
+    // arrive as an empty body; the nonzero exit is what separates them from a
+    // manifest that is genuinely present and empty, and it rides the note.
+    expect(bMissing?.note).toContain("pipeline.yaml missing or unreadable");
+    expect(bMissing?.note).toMatch(/cat exit [1-9]/);
     expect(bMissing?.note).not.toContain("limitMicroUsd absent");
 
     const unstamped = await driver.create("box-probe-unstamped");
@@ -1401,7 +1405,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     const bUnstamped = noStamp.assertions.find((a) => a.item === "B");
     expect(bUnstamped?.ok).toBeFalse();
     expect(bUnstamped?.note).toContain("limitMicroUsd absent");
-    expect(bUnstamped?.note).not.toContain("missing or empty");
+    expect(bUnstamped?.note).not.toContain("pipeline.yaml missing");
 
     // And the stamped manifest still passes B — without this the assertions
     // above are satisfied by a probe that fails unconditionally.
@@ -1413,6 +1417,35 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     ]);
     const ok = await fakeGate(driver, stamped.name, opts);
     expect(ok.assertions.find((a) => a.item === "B")?.ok).toBeTrue();
+
+    // A manifest that landed and is EMPTY is the fill step half-done, not the
+    // fill step skipped — the only arm `cat` can prove, since it is the only one
+    // that exits 0.
+    const empty = await driver.create("box-probe-empty");
+    await driver.exec(empty.name, ["sh", "-c", ": > pipeline.yaml"]);
+    const bEmpty = (await fakeGate(driver, empty.name, opts)).assertions.find((a) => a.item === "B");
+    expect(bEmpty?.ok).toBeFalse();
+    expect(bEmpty?.note).toContain("present but empty");
+    expect(bEmpty?.note).not.toContain("missing");
+
+    // The operational-error path: the manifest EXISTS and cannot be read. It
+    // used to be reported as missing, sending the operator back to a fill step
+    // that had already succeeded. Root reads a mode-000 file, so there is no
+    // fault to inject there.
+    if (process.getuid?.() !== 0) {
+      const unreadable = await driver.create("box-probe-unreadable");
+      await driver.exec(unreadable.name, [
+        "sh",
+        "-c",
+        "printf '%s\\n' '{\"limitMicroUsd\":1,\"phases\":[]}' > pipeline.yaml && chmod 000 pipeline.yaml",
+      ]);
+      const bUnreadable = (await fakeGate(driver, unreadable.name, opts)).assertions.find(
+        (a) => a.item === "B",
+      );
+      expect(bUnreadable?.ok).toBeFalse();
+      expect(bUnreadable?.note).toContain("unreadable");
+      expect(bUnreadable?.note).toMatch(/cat exit [1-9]/);
+    }
   });
 
   test("gate items D and E inspect the manifest's CONTENT, not just its keys", async () => {

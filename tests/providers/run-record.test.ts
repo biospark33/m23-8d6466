@@ -986,4 +986,69 @@ describe("concurrent set", () => {
     expect(s.get(id).vmName).toBeUndefined(); // and its record was not overwritten
     rmSync(lock, { force: true });
   }, 15_000);
+
+  // Root reads a mode-000 file, so the fault below cannot be injected there.
+  const asRoot = process.getuid?.() === 0;
+
+  test.skipIf(asRoot)("a steal whose taken body cannot be READ puts it back instead of removing it", () => {
+    // The read after the take is what proves the taken generation is the corpse
+    // that was judged. When it FAILS — EIO on a failing mount, EACCES on a body
+    // another user wrote — nothing is proved, and the take races exactly the
+    // window the test above covers: the corpse cleared, a live writer's claim
+    // landing at the free path, this rename taking THAT. Removing it there
+    // unlocks a holder still inside its `fn()`.
+    const id = "steal-unreadable-run";
+    const lock = store.lockPath(id);
+    let injected = false;
+    const s = new RunRecordStore({
+      dir,
+      afterLockTake: (claimed) => {
+        if (injected) return; // the claim loop retries; the fault fires once
+        injected = true;
+        chmodSync(claimed, 0o000);
+      },
+    });
+    s.create(id);
+    writeFileSync(lock, `${DEAD_PID}\n`, { mode: 0o600 }); // judged stale, then taken
+
+    // Fail-closed: an unprovable take is HELD, so the write waits it out.
+    expect(() => s.set(id, { vmName: "box-6" })).toThrow(/timed out waiting for the run record lock/);
+    expect(injected).toBe(true); // the fault really fired
+    // The generation is back at the lock path — not deleted, and not stranded
+    // under a `.tmp` name only `cleanStaleTemps` would ever find.
+    expect(existsSync(lock)).toBe(true);
+    chmodSync(lock, 0o600);
+    expect(readFileSync(lock, "utf8")).toBe(`${DEAD_PID}\n`);
+    expect(s.get(id).vmName).toBeUndefined();
+    rmSync(lock, { force: true });
+  }, 15_000);
+
+  test.skipIf(asRoot)("a release whose taken body cannot be READ puts it back instead of removing it", () => {
+    // `releaseLock`'s take-then-compare has the same hole: between its read and
+    // its rename, `stealIfOwnerGone` can retire this lock and a new writer claim
+    // the path. A read failure after the take cannot tell that apart from our
+    // own body, and removing it deletes the new writer's lock. Leaving the
+    // generation on the path strands THIS run's lock — recoverable, and named by
+    // every later refusal — which is the fail-closed half of the trade.
+    const id = "release-unreadable-run";
+    const lock = store.lockPath(id);
+    let injected = false;
+    const s = new RunRecordStore({
+      dir,
+      afterLockTake: (claimed) => {
+        if (injected) return;
+        injected = true;
+        chmodSync(claimed, 0o000);
+      },
+    });
+    s.create(id);
+    // The write itself completes — the fault is on the release, after the
+    // record has already been replaced.
+    expect(s.set(id, { vmName: "box-7" }).vmName).toBe("box-7");
+    expect(injected).toBe(true);
+    expect(existsSync(lock)).toBe(true); // put back, never unlinked
+    chmodSync(lock, 0o600);
+    expect(readFileSync(lock, "utf8")).toMatch(new RegExp(`^${process.pid}\\s`));
+    rmSync(lock, { force: true });
+  }, 15_000);
 });

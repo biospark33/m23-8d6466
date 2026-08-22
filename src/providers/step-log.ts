@@ -20,10 +20,13 @@ import { SECRET_PREFIXES } from "./run-record.ts";
  * OpenRouter key into the box through `driver.exec`, and an exec wrapper that
  * echoes the failed argv — the ordinary way one reports a failure — puts the
  * key plaintext into `err.message`, which this module then writes out. INV-4
- * says the plaintext exists in the mint return and nowhere else. Dispatch's
- * `redactUrls` is no help here and could not be reused anyway: it only matches
- * `https?://…`, a bare `sk-…` has no scheme, and `src/providers/` does not
- * import from `src/fleet/`.
+ * says the plaintext exists in the mint return and nowhere else. Dispatch's own
+ * `redact` is no help here and could not be reused anyway: it enforces INV-6
+ * (deep-link URL parameters) and only matches `https?://…`, a bare `sk-…` has no
+ * scheme, and `src/providers/` does not import from `src/fleet/`. The two are
+ * COMPOSED, not duplicated — dispatch imports this function for the third-party
+ * free text its own rule deliberately does not cover (see `errorMessage` there),
+ * and there is exactly one implementation of each rule.
  *
  * Two arms, in this order, both lifted from `assertNoSecret`'s reasoning:
  *  - the known prefixes, matched at a token boundary so `task-runner` does not

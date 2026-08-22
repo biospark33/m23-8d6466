@@ -640,6 +640,92 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     db.close();
   });
 
+  test("a replayed correlation id under a DIFFERENT repository is refused, not admitted on the old ceiling", () => {
+    seedRecord("run-a1");
+    const first = ledger.admitIssue(
+      { repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" },
+      cap,
+      50_000_000,
+    );
+    if (!first.admitted) throw new Error("expected first admission");
+
+    // The PRIMARY KEY is (request_id, run_id) alone, so this INSERT conflicts
+    // with a row the reservation query — scoped to (repo_slug, issue_id) —
+    // never saw. Returning its ceiling would authorize spend against a budget
+    // holding NOTHING for it: the reservation lives on qds/demo#42's cap.
+    expect(() =>
+      ledger.admitIssue(
+        { repoSlug: "other/repo", issueId: "42", runId: "run-a1", requestId: "req-1" },
+        cap,
+        50_000_000,
+      ),
+    ).toThrow(CostLedgerError);
+    try {
+      ledger.admitIssue(
+        { repoSlug: "other/repo", issueId: "42", runId: "run-a1", requestId: "req-1" },
+        cap,
+        50_000_000,
+      );
+      throw new Error("expected the cross-repo replay to refuse");
+    } catch (e) {
+      expect((e as CostLedgerError).code).toBe("ledger-admission-mismatch");
+      // The refusal names both identities — an operator has to see WHICH budget
+      // holds the reservation to know the replay is a caller bug.
+      expect((e as Error).message).toContain("qds/demo#42");
+      expect((e as Error).message).toContain("other/repo#42");
+    }
+
+    // Append-only, and nothing was minted: the ledger still holds exactly the
+    // one reservation the first admission made.
+    const db = rawDb();
+    expect(rowCount(db, "gate_admissions")).toBe(1);
+    db.close();
+
+    // Case differences are NOT a mismatch: repo identity is canonical, and rows
+    // written before it was hold the brief's original casing.
+    const cased = ledger.admitIssue(
+      { repoSlug: "QDS/Demo", issueId: "42", runId: "run-a1", requestId: "req-1" },
+      cap,
+      50_000_000,
+    );
+    if (!cased.admitted) throw new Error("expected the canonical-casing retry to replay idempotently");
+    expect(cased.admittedCeilingMicroUsd).toBe(first.admittedCeilingMicroUsd);
+  });
+
+  test("a replayed correlation id under a DIFFERENT issue is refused, not admitted on the old ceiling", () => {
+    seedRecord("run-a1");
+    const first = ledger.admitIssue(
+      { repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" },
+      cap,
+      50_000_000,
+    );
+    if (!first.admitted) throw new Error("expected first admission");
+
+    try {
+      ledger.admitIssue(
+        { repoSlug: "qds/demo", issueId: "7", runId: "run-a1", requestId: "req-1" },
+        cap,
+        50_000_000,
+      );
+      throw new Error("expected the cross-issue replay to refuse");
+    } catch (e) {
+      expect((e as CostLedgerError).code).toBe("ledger-admission-mismatch");
+      expect((e as Error).message).toContain("qds/demo#42");
+      expect((e as Error).message).toContain("qds/demo#7");
+    }
+
+    // Issue #7's own cap is untouched by the refusal: a FRESH correlation id
+    // still admits against it, so the guard refuses the collision, not the run.
+    seedRecord("run-b1");
+    const fresh = ledger.admitIssue(
+      { repoSlug: "qds/demo", issueId: "7", runId: "run-b1", requestId: "req-2" },
+      cap,
+      50_000_000,
+    );
+    if (!fresh.admitted) throw new Error("expected a fresh correlation id to admit under issue 7");
+    expect(fresh.reservedMicroUsd).toBe(0); // #42's reservation is not #7's
+  });
+
   test("the reservation retires once the run's first priced ledger row lands", () => {
     seedRecord("run-a1");
     ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 50_000_000);

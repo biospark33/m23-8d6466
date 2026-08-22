@@ -501,6 +501,14 @@ export interface RunRecordStoreOptions {
    * exists to survive, and it is not otherwise reachable from a test.
    */
   beforeStealTake?: (lockPath: string) => void;
+  /**
+   * Fault-injection seam: called with the held-aside path once a lock has been
+   * TAKEN (by `stealIfOwnerGone` or by `releaseLock`) and before its body is
+   * read back. A read that fails there — EIO, EACCES — is what makes the taken
+   * generation unprovable, and no other test control makes `readFileSync` fail
+   * on a file this module has just renamed itself.
+   */
+  afterLockTake?: (claimedPath: string) => void;
 }
 
 export const DEFAULT_RUNS_DIR = ".sandbox/runs";
@@ -517,6 +525,7 @@ export class RunRecordStore {
   private readonly requestId: string;
   private readonly beforeRename?: (tmpPath: string) => void;
   private readonly beforeStealTake?: (lockPath: string) => void;
+  private readonly afterLockTake?: (claimedPath: string) => void;
 
   constructor(opts: RunRecordStoreOptions | string = {}) {
     const o: RunRecordStoreOptions = typeof opts === "string" ? { dir: opts } : opts;
@@ -524,6 +533,7 @@ export class RunRecordStore {
     this.requestId = o.requestId ?? newRequestId();
     this.beforeRename = o.beforeRename;
     this.beforeStealTake = o.beforeStealTake;
+    this.afterLockTake = o.afterLockTake;
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     // mkdir's mode is ignored when the directory already exists, and masked by
     // umask when it does not — set it explicitly, then verify (INV-5).
@@ -955,21 +965,31 @@ export class RunRecordStore {
     } catch {
       return null; // gone: the path is free, so retry the claim immediately
     }
-    let onDisk: string;
+    this.afterLockTake?.(claimed);
+    let onDisk: string | undefined;
     try {
       onDisk = readFileSync(claimed, "utf8");
     } catch {
-      rmSync(claimed, { force: true });
-      return null; // took it and it is unreadable — it is off the path either way
+      // UNREADABLE is not "gone", and it was removed here as if it were. A read
+      // that fails (EIO on a failing mount, EACCES on a body written by another
+      // user) proves nothing about WHICH generation was taken — and the take
+      // races exactly the same window the foreign-body arm below exists for:
+      // the corpse cleared, a live writer's claim landing at the free path,
+      // this rename taking THAT. Deleting it there unlocks a holder still
+      // inside its `fn()`, which is the lost update the protocol exists to
+      // prevent. Fall through to the put-back instead: `undefined` matches no
+      // body, so the unprovable take is restored and reported HELD.
+      onDisk = undefined;
     }
     if (onDisk === raw) {
       rmSync(claimed, { force: true });
       return null; // provably the corpse that was judged
     }
-    // A different body: the corpse was cleared and a NEW writer claimed the
-    // path between the judgement and the take. Put it back — `link`, never
-    // `rename`, so a claim made at the path while this one was held aside is
-    // not overwritten (EEXIST ⇒ that newer claim supersedes this body anyway).
+    // A different — or unreadable — body: the corpse was cleared and a NEW
+    // writer claimed the path between the judgement and the take. Put it back —
+    // `link`, never `rename`, so a claim made at the path while this one was
+    // held aside is not overwritten (EEXIST ⇒ that newer claim supersedes this
+    // body anyway).
     if (putBack(claimed, lock)) {
       rmSync(claimed, { force: true });
       return "held by a live owner"; // a live lock is HELD — wait, never steal
@@ -1026,20 +1046,25 @@ export class RunRecordStore {
     } catch {
       return; // already gone
     }
-    let onDisk: string;
+    this.afterLockTake?.(claimed);
+    let onDisk: string | undefined;
     try {
       onDisk = readFileSync(claimed, "utf8");
     } catch {
-      rmSync(claimed, { force: true });
-      return;
+      // Unreadable ≠ ours. Same reasoning as `stealIfOwnerGone`'s take: a failed
+      // read cannot prove the generation taken is the one this invocation
+      // claimed, and `stealIfOwnerGone` can retire our lock and a new writer
+      // claim the path between the read above and the rename. `undefined`
+      // matches no body, so the take falls through to the put-back below.
+      onDisk = undefined;
     }
     if (onDisk === body) {
       rmSync(claimed, { force: true });
       return;
     }
-    // Foreign body: the lock was replaced between the read above and the
-    // rename. Put it back — `link`, never `rename`, which would overwrite a
-    // lock claimed at the path while this one was held aside.
+    // Foreign — or unreadable — body: the lock was replaced between the read
+    // above and the rename. Put it back — `link`, never `rename`, which would
+    // overwrite a lock claimed at the path while this one was held aside.
     if (putBack(claimed, lock)) {
       rmSync(claimed, { force: true });
       return;

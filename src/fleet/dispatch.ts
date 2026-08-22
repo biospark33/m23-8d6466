@@ -409,7 +409,21 @@ export async function fakeGate(
         // failures: a manifest that never landed and a manifest that landed
         // unstamped are opposite diagnoses — one sends the operator to the fill
         // step, the other to the stamping step.
-        if (body.length === 0) return { ok: false, detail: "pipeline.yaml missing or empty" };
+        //
+        // A third one rides the exit code. `cat`'s stderr is discarded (a
+        // permission message is not this probe's output), so a manifest that
+        // EXISTS and cannot be read — mode 000, EIO, a directory in its place —
+        // arrives here as an empty body and used to be reported as "missing",
+        // sending the operator to re-run the fill step that already succeeded.
+        if (body.length === 0) {
+          return {
+            ok: false,
+            detail:
+              r.exitCode === 0
+                ? "pipeline.yaml is present but empty"
+                : `pipeline.yaml missing or unreadable (cat exit ${r.exitCode})`,
+          };
+        }
         let parsed: unknown;
         try {
           parsed = JSON.parse(body);

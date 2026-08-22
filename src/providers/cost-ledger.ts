@@ -853,6 +853,8 @@ export class CostLedger {
    * A retry reusing the same `(requestId, runId)` is idempotent: it is judged
    * against the headroom its original saw (its own reservation is excluded from
    * the sum) and hands back the ceiling already ON the row, never a second one.
+   * Idempotent for the SAME `(repoSlug, issueId)` only — the replay branch
+   * refuses a correlation id that resolves to another issue's reservation.
    */
   admitIssue(input: AdmissionInput, capMicroUsd: number, keyCapMicroUsd: number): AdmissionDecision {
     const started = Date.now();
@@ -1004,13 +1006,36 @@ export class CostLedger {
         // admission actually reserved. gate_admissions is append-only
         // (INV-COST-1), so re-reading is the whole remedy.
         const prior = this.db
-          .prepare("SELECT ceiling_micro_usd AS ceiling FROM gate_admissions WHERE request_id = ? AND run_id = ?")
-          .get(input.requestId, input.runId) as { ceiling: number } | undefined;
+          .prepare(
+            "SELECT repo_slug AS repoSlug, issue_id AS issueId, ceiling_micro_usd AS ceiling FROM gate_admissions WHERE request_id = ? AND run_id = ?",
+          )
+          .get(input.requestId, input.runId) as
+          | { repoSlug: string; issueId: string; ceiling: number }
+          | undefined;
         if (prior === undefined) {
           throw new CostLedgerError(
             "ledger-admission-lost",
             `the admission for request ${input.requestId} / run ${input.runId} neither inserted nor resolved — refusing to mint an unreserved ceiling`,
             "inspect gate_admissions for that (request_id, run_id) and re-run the dispatch with a fresh request id",
+          );
+        }
+        // The PRIMARY KEY is (request_id, run_id) ALONE, so the row this replay
+        // resolved is not necessarily a reservation against THIS budget. Replay
+        // the same correlation id under a different repo or issue and the
+        // reservation query above — scoped to (repo_slug, issue_id) — never saw
+        // the row, the INSERT conflicted on the key, and this branch handed back
+        // a ceiling reserved out of a DIFFERENT issue's cap: spend authorized
+        // against a budget holding nothing for it. Idempotency is only
+        // idempotency for the SAME identity; a collision under another one is a
+        // caller bug, and the fail-closed answer is to mint nothing.
+        // `canonicalRepoSlug` on the stored side too: rows written before repo
+        // identity was canonicalized hold the brief's original casing, and a
+        // legitimate retry against one of those is not a mismatch.
+        if (canonicalRepoSlug(prior.repoSlug) !== repoSlug || prior.issueId !== input.issueId) {
+          throw new CostLedgerError(
+            "ledger-admission-mismatch",
+            `request ${input.requestId} / run ${input.runId} already holds an admission for ${prior.repoSlug}#${prior.issueId}, not ${repoSlug}#${input.issueId} — refusing to mint against a reservation another issue's cap is holding`,
+            "re-run the dispatch with a fresh request id: a (requestId, runId) pair belongs to exactly one (repoSlug, issueId)",
           );
         }
         ceiling = prior.ceiling;
