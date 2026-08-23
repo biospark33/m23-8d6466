@@ -5,7 +5,7 @@
  * by default; forged Host headers need a raw socket (Host is the one header
  * fetch will not reliably carry).
  */
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { connect } from "node:net";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -709,17 +709,18 @@ describe("CSRF origin parser edges (AC1)", () => {
 });
 
 /**
+/**
  * DIST_DIR is a module constant (`resolve(server/.., "dist")`), so the static
  * branch can only be exercised by putting a real directory there. Under
  * `bun test` it does not exist, which is why every static assertion above this
  * point silently hits the "no ./dist build" early return instead of the
- * file-serving body. These two describes cover both modes, in declaration
- * order: the no-dist branch first, then the fixture that creates dist.
+ * file-serving body.
+ *
+ * The WITH-a-dist half of this coverage lives in auth-static.test.ts: its
+ * fixture creates a real `dist/`, and inside one file Bun's hook scheduling
+ * made that creation order-dependent against the no-dist assertions below.
  */
 const DIST_DIR = path.resolve(import.meta.dir, "..", "dist");
-const INDEX_BODY = '<!doctype html><title>viz-dist-fixture</title><div id="app"></div>';
-const ASSET_BODY = "console.log('viz-fixture-asset');";
-const ENCODED_ASSET_BODY = "encoded-name-asset";
 
 describe("static branch with NO ./dist build", () => {
   // Skipped when a developer has actually run `bun run build`.
@@ -734,138 +735,4 @@ describe("static branch with NO ./dist build", () => {
       expect(await res.text()).toContain("No ./dist build found");
     },
   );
-});
-
-describe("static branch WITH a ./dist build (INV-3 confinement)", () => {
-  const written: string[] = [];
-  let createdDist = false;
-  let indexBody = INDEX_BODY;
-
-  const write = (rel: string, body: string): void => {
-    const full = path.join(DIST_DIR, rel);
-    fs.mkdirSync(path.dirname(full), { recursive: true });
-    if (fs.existsSync(full)) throw new Error(`refusing to clobber ${full}`);
-    fs.writeFileSync(full, body);
-    written.push(full);
-  };
-
-  beforeAll(() => {
-    createdDist = !fs.existsSync(DIST_DIR);
-    fs.mkdirSync(DIST_DIR, { recursive: true });
-    const index = path.join(DIST_DIR, "index.html");
-    // A real build's index.html is left alone and used as the expectation.
-    if (fs.existsSync(index)) indexBody = fs.readFileSync(index, "utf8");
-    else write("index.html", INDEX_BODY);
-    write("assets/viz-fixture.js", ASSET_BODY);
-    write("assets/viz fixture.txt", ENCODED_ASSET_BODY);
-  });
-
-  afterAll(() => {
-    if (createdDist) {
-      fs.rmSync(DIST_DIR, { recursive: true, force: true });
-      return;
-    }
-    for (const full of written) fs.rmSync(full, { force: true });
-  });
-
-  test("a real asset is served with the static headers", async () => {
-    const res = await fetch(`${base()}/assets/viz-fixture.js`, { headers: bearer() });
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe(ASSET_BODY);
-    expect(res.headers.get("cache-control")).toBe("no-store");
-    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
-    expectNoAca(res.headers);
-  });
-
-  test("an asset whose name needs percent-encoding is reachable", async () => {
-    const res = await fetch(`${base()}/assets/viz%20fixture.txt`, { headers: bearer() });
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe(ENCODED_ASSET_BODY);
-  });
-
-  test("the static branch is still gated — no credential → 401, no bytes", async () => {
-    const res = await fetch(`${base()}/assets/viz-fixture.js`);
-    expect(res.status).toBe(401);
-    expect(await res.text()).toBe("");
-  });
-
-  test("SPA fallback: an extensionless route serves index.html as html", async () => {
-    const res = await fetch(`${base()}/session/${FIXTURE_REQUEST_ID}`, {
-      headers: bearer(),
-    });
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
-    expect(res.headers.get("cache-control")).toBe("no-store");
-    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
-    expect(await res.text()).toBe(indexBody);
-  });
-
-  test("a missing dotted asset is a JSON 404, never the SPA shell", async () => {
-    const res = await fetch(`${base()}/assets/gone.js`, { headers: bearer() });
-    expect(res.status).toBe(404);
-    expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
-    expect(await res.json()).toEqual({ error: "not found" });
-  });
-
-  test("percent-encoded traversal /..%2fpackage.json → JSON 404, never the file", async () => {
-    const res = await rawHttp(port, [
-      "GET /..%2fpackage.json HTTP/1.1",
-      `Host: 127.0.0.1:${port}`,
-      `Authorization: Bearer ${TOKEN}`,
-    ]);
-    expect(res.body.includes("sssf-visualizer")).toBe(false);
-    expect(res.status).toBe(404);
-    expect(res.body).toBe(JSON.stringify({ error: "not found" }));
-  });
-
-  test("plain-dot traversal never serves /etc/passwd", async () => {
-    // Bun normalises dot segments out of the request target before the
-    // handler sees it (this arrives as "/etc/passwd", joined back under
-    // dist), so this pins the normalisation + the absence of a leak; the
-    // percent-encoded variants below are what actually reach the
-    // confinement check.
-    const up = "/..".repeat(8);
-    const res = await rawHttp(port, [
-      `GET ${up}/etc/passwd HTTP/1.1`,
-      `Host: 127.0.0.1:${port}`,
-      `Authorization: Bearer ${TOKEN}`,
-    ]);
-    // The last segment has no dot, so the shell answers — the point is that
-    // the bytes of /etc/passwd never do.
-    expect(res.body.includes("root:")).toBe(false);
-    expect(res.status).toBe(200);
-    expect(res.body).toBe(indexBody);
-  });
-
-  test("percent-encoded traversal to /etc/hosts → JSON 404, never the file", async () => {
-    const up = "/..%2f".repeat(8);
-    const res = await rawHttp(port, [
-      `GET ${up}etc%2fhosts HTTP/1.1`,
-      `Host: 127.0.0.1:${port}`,
-      `Authorization: Bearer ${TOKEN}`,
-    ]);
-    expect(res.body.includes("localhost")).toBe(false);
-    expect(res.status).toBe(404);
-    expect(res.body).toBe(JSON.stringify({ error: "not found" }));
-  });
-
-  test("a stat failure between existsSync and statSync (TOCTOU) is a 404, not a 500", async () => {
-    // The comment on serveStatic calls this out by name: "bun run build"
-    // empties dist wholesale, so the file can vanish between the check and
-    // the stat. That race is not reliably reproducible by timing alone, so
-    // the fault is injected directly at the one call this branch makes —
-    // this is exactly the failure the surrounding try/catch exists to
-    // convert into a 404 instead of an unhandled throw.
-    const spy = spyOn(fs, "statSync").mockImplementation(() => {
-      throw new Error("ENOENT: injected TOCTOU race");
-    });
-    try {
-      const res = await fetch(`${base()}/assets/viz-fixture.js`, { headers: bearer() });
-      expect(res.status).toBe(404);
-      expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
-      expect(await res.json()).toEqual({ error: "not found" });
-    } finally {
-      spy.mockRestore();
-    }
-  });
 });
