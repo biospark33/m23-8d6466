@@ -13,13 +13,13 @@
  * these tests are the blocking evidence, not inherited behaviour.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { createRun, neverPublicDriver, startVisualizer, stopVisualizer, VIZ_PIDFILE } from "../../src/providers/driver.ts";
-import type { ExecResult } from "../../src/providers/driver.ts";
+import type { ExecResult, ProviderDriver } from "../../src/providers/driver.ts";
 import { HarvestError } from "../../src/providers/harvest.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
@@ -49,7 +49,7 @@ beforeEach(() => {
   store = new RunRecordStore(join(dir, "runs"));
   api = new FakeKeyApi({ usageOnCreateUsd: 0.0081 });
   driver = new FakeDriver(join(dir, "boxes"));
-  recording = new RecordingDriver(driver);
+  recording = new RecordingDriver(guardVizPidfile(driver));
   logs = [];
   restoreLog = setLogSink((entry) => logs.push(entry));
 });
@@ -69,6 +69,37 @@ function deps(overrides: Partial<TeardownDeps> = {}): TeardownDeps {
 
 function boxDir(vm: string): string {
   return join(dir, "boxes", vm);
+}
+
+/**
+ * Guards the shared HOST pidfile before FakeDriver ever spawns a real
+ * process for it. FakeDriver.exec (src/providers/fake-driver.ts) runs argv
+ * as a REAL child process on this machine, and driver.ts's stopVisualizer
+ * script hard-codes the absolute path VIZ_PIDFILE ("/tmp/qds-viz.pid"),
+ * killing whatever pid is recorded there with NO identity check (unlike
+ * visualizer/test/deploy.test.ts's isVizProcess, which verifies the pid's
+ * command line before signalling — that file's tests deliberately spawn and
+ * stop a real visualizer; nothing here does). Every teardownSandbox call in
+ * this file that reaches a real box runs the prepended stopVisualizer step
+ * unconditionally, so without this guard ANY of them — not just the two
+ * DF4.2 ordering tests — would run the real kill script against a
+ * developer's actual /tmp/qds-viz.pid if one happened to exist. Intercepting
+ * here, between RecordingDriver and FakeDriver, keeps `recording.execCalls`
+ * populated (existing leak-scan/argv assertions are unaffected) while
+ * substituting the script's own routine "no pidfile" outcome instead of
+ * ever letting FakeDriver spawn it for real. Tests that need a specific
+ * stopVisualizer outcome still get one via orderDepsWithViz's
+ * execArgvOverride seam, which is checked before this guard ever runs.
+ */
+function guardVizPidfile(inner: ProviderDriver): ProviderDriver {
+  const guarded = Object.create(inner) as ProviderDriver;
+  guarded.exec = (vm: string, argv: string[], stdin?: string): Promise<ExecResult> => {
+    if (argv.some((a) => a.includes(VIZ_PIDFILE))) {
+      return Promise.resolve({ stdout: "NONE\n", stderr: "", exitCode: 0 });
+    }
+    return inner.exec(vm, argv, stdin);
+  };
+  return guarded;
 }
 
 /** Any >=8-char substring of the secret found in any corpus, else null. */
@@ -1482,5 +1513,23 @@ describe("neverPublicDriver setPublic guard", () => {
   test("the raw driver's own setPublic is untouched — still callable directly", async () => {
     const vm = await driver.create("viz-raw-public");
     await expect(driver.setPublic(vm.name)).resolves.toBeUndefined();
+  });
+
+  // ─── expose branch (gated on the port operand, unlike setPublic) ──────────
+
+  test("the guarded driver's expose refuses exactly the viz port", async () => {
+    const vm = await driver.create("viz-expose-viz-port");
+    const guarded = neverPublicDriver(recording, 4173);
+    expect(() => guarded.expose(vm.name, 4173)).toThrow();
+  });
+
+  test("the guarded driver's expose delegates to the raw driver for any other port", async () => {
+    const vm = await driver.create("viz-expose-other-port");
+    const guarded = neverPublicDriver(recording, 4173);
+    const exposeSpy = spyOn(recording, "expose");
+    const result = await guarded.expose(vm.name, 8080);
+    expect(exposeSpy).toHaveBeenCalledTimes(1);
+    expect(exposeSpy).toHaveBeenCalledWith(vm.name, 8080);
+    await expect(exposeSpy.mock.results[0]!.value).resolves.toBe(result);
   });
 });

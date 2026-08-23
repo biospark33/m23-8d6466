@@ -901,8 +901,17 @@ describe("bind failure after a successful db open (A-EADDRINUSE)", () => {
   test("a second bind on the same port throws and closes the db handle it just opened", () => {
     // Reuse the already-bound port from a live server — Bun.serve's second
     // bind on it fails after startVisualizer has already opened db readonly,
-    // exercising the close-then-rethrow branch (never a leaked handle).
-    expect(() => startVisualizer({ dbPath: seeded.dbPath, token: TOKEN, port })).toThrow();
+    // exercising the close-then-rethrow branch (never a leaked handle). The
+    // throw alone doesn't pin that branch — Bun.serve's own bind failure
+    // throws too, with no db involved — so spy on TraceDb.prototype.close
+    // to prove the catch block's `db.close()` actually ran before rethrow.
+    const closeSpy = spyOn(TraceDb.prototype, "close");
+    try {
+      expect(() => startVisualizer({ dbPath: seeded.dbPath, token: TOKEN, port })).toThrow();
+      expect(closeSpy).toHaveBeenCalled();
+    } finally {
+      closeSpy.mockRestore();
+    }
   });
 });
 
@@ -937,6 +946,10 @@ describe("dispatch-level failure never reaches Bun's default handler (F11)", () 
     });
     try {
       const res = await fetch(`${base()}/api/health`, { headers: bearer });
+      // /api/health returns 200 with no requestIP fault too — that alone
+      // doesn't prove the fallback path ran, so pin that the injection was
+      // actually exercised before trusting the response.
+      expect(spy).toHaveBeenCalled();
       expect(res.status).toBe(200);
     } finally {
       spy.mockRestore();
