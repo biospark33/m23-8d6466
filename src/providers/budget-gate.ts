@@ -34,8 +34,7 @@ export class OverBudgetError extends Error {
     unpricedRows: number;
   }) {
     super(
-      `issue over budget: spent ${refused.spentMicroUsd} / ${refused.capMicroUsd} µ$ (${refused.unpricedRows} unpriced rows)` +
-        " — raise the cap via .sandbox/cost-config.json perIssueOverrides or pick another issue",
+      `issue over budget: spent ${refused.spentMicroUsd} / ${refused.capMicroUsd} µ$ (${refused.unpricedRows} unpriced rows) — raise the cap via .sandbox/cost-config.json perIssueOverrides or pick another issue`,
     );
     this.name = "OverBudgetError";
     this.capMicroUsd = refused.capMicroUsd;
@@ -47,6 +46,17 @@ export class OverBudgetError extends Error {
       `raise the cap via .sandbox/cost-config.json perIssueOverrides (e.g. {"owner/repo#N": <integer µ$>}), or pick another issue`;
   }
 }
+
+/**
+ * The slice of `CostLedger` this gate actually uses.
+ *
+ * Structural, not the class: a caller holding a narrowed handle (dispatch's
+ * `LedgerLike`, a DI fake) had to write `assertWithinBudget(ledger as CostLedger, …)`,
+ * and that cast restores exactly the drift the narrowing exists to prevent —
+ * a fake missing a member compiles and then throws at runtime. Derived from
+ * `CostLedger` with `Pick`, so it cannot drift from the real signatures either.
+ */
+export type BudgetLedger = Pick<CostLedger, "config" | "admitIssue">;
 
 export interface BudgetGateInput {
   repoSlug: string;
@@ -67,7 +77,7 @@ export interface BudgetGateInput {
  * @throws OverBudgetError - When the issue is at or over its cap.
  */
 export function assertWithinBudget(
-  ledger: CostLedger,
+  ledger: BudgetLedger,
   input: BudgetGateInput,
   keyCapMicroUsd: number = defaultKeyCapMicroUsd,
 ): Extract<AdmissionDecision, { admitted: true }> {

@@ -42,6 +42,9 @@ import {
   type ExecResult,
 } from "../src/providers/index.ts";
 import { newId, RunRecordStore, type RunRecord } from "../src/providers/run-record.ts";
+// The same redactor the credentials/step-log sinks use — a second copy of the
+// rule is how a sink drifts out of sync with it.
+import { redactSecrets } from "../src/providers/step-log.ts";
 import { shQuote } from "../src/providers/exedev/transport.ts";
 import { log, newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import {
@@ -370,6 +373,29 @@ export async function runCapHitDemo(
   let keyHash = "";
   let key = "";
   let mintMs = 0;
+  // Every sink below logs a CAUGHT error's free text, and the step wrappers
+  // (`timedLoggedStep`, `timed`) re-throw the RAW error by design — so
+  // redaction is the SINK's job. `deliverRunKey` puts the minted key in the argv, and
+  // an exec wrapper that echoes the argv it ran is the ordinary way to report a
+  // failure: without this the key lands in the deliver line in plaintext.
+  // Reads `key` at call time (a `let` closed over), so it also covers the sinks
+  // that can fire before the mint, where it is still "" and a no-op — not by
+  // assumption but by `redactWithKey`'s own contract: it returns `text`
+  // verbatim for a secret shorter than MIN_REDACTABLE_LEN
+  // (src/providers/cap-rejection.ts:147), and the mirror-sync test in
+  // tests/providers/cap-rejection.test.ts pins that boundary.
+  //
+  // Redaction failure must never abort the run: `redactWithKey` throws
+  // (fail-closed) on a pathological body, and an escaping throw — here or from
+  // a catch re-redacting an error message — would bypass teardown with a live
+  // key. Fail to a marker; never emit raw text.
+  const safeRedact = (text: unknown): string => {
+    try {
+      return redactKeyManagementUrls(redactWithKey(redactSecrets(text), key));
+    } catch {
+      return "[redaction-error]";
+    }
+  };
   {
     const started = Date.now();
     try {
@@ -407,8 +433,8 @@ export async function runCapHitDemo(
         duration: mintMs,
         durationMs: mintMs,
         status: "error",
-        error: { code: err.code ?? "mint_error", message: err.message ?? String(e) },
-        remediation: err.remediation ?? null,
+        error: { code: err.code ?? "mint_error", message: safeRedact(err.message ?? e) },
+        remediation: typeof err.remediation === "string" ? safeRedact(err.remediation) : null,
         outcome: "error",
         mint_ms: mintMs,
       });
@@ -444,7 +470,7 @@ export async function runCapHitDemo(
         duration: Date.now() - started,
         durationMs: Date.now() - started,
         status: "error",
-        error: { code: "deliver-failed", message: (e as Error).message },
+        error: { code: "deliver-failed", message: safeRedact((e as { message?: unknown })?.message ?? e) },
         outcome: "error",
       });
       return finishEarly("deliver-failed");
@@ -582,7 +608,7 @@ export async function runCapHitDemo(
         duration: setupMs,
         durationMs: setupMs,
         status: "error",
-        error: { code: "setup-error", message: (e as Error).message },
+        error: { code: "setup-error", message: safeRedact((e as { message?: unknown })?.message ?? e) },
         outcome: "error",
         setup_ms: setupMs,
       });
@@ -856,17 +882,6 @@ export async function runCapHitDemo(
     });
   } else {
     const started = Date.now();
-    // Redaction failure must never abort the run: redactWithKey throws
-    // (fail-closed) on a pathological body, and an escaping throw — here or
-    // from the catch below re-redacting an error message — would bypass
-    // teardown with a live key. Fail to a marker; never emit raw text.
-    const safeRedact = (text: string): string => {
-      try {
-        return redactKeyManagementUrls(redactWithKey(text, key));
-      } catch {
-        return "[redaction-error]";
-      }
-    };
     const fakeChat = (deps.keyApi as KeyApi & { chatComplete?: (key: string) => Promise<{ status: number; body: string }> }).chatComplete;
     const probeFn = deps.probe ?? (fakeChat ? (k: string) => fakeChat.call(deps.keyApi, k) : openRouterChatProbe);
     try {
@@ -895,7 +910,7 @@ export async function runCapHitDemo(
       // no-rejection answer. Message redacted with the run key AND the
       // key-management URL strip (AC5): a thrown error can embed the request
       // URL, whose /keys/<id> segment is a management deep-link.
-      rejectionStatus = `probe-error: ${safeRedact(String((e as Error).message ?? e))}`;
+      rejectionStatus = `probe-error: ${safeRedact((e as { message?: unknown })?.message ?? e)}`;
     }
     log({
       requestId,
@@ -952,7 +967,7 @@ export async function runCapHitDemo(
       // Fail-closed: spend stays 0 and the verdict cannot be demonstrated on
       // it — but the failure is RETAINED so a zero read is never mistaken for
       // a successful zero-spend answer (reflected in the log and `reason`).
-      spendCaptureError = (e as Error).message ?? String(e);
+      spendCaptureError = safeRedact((e as { message?: unknown })?.message ?? e);
     }
     log({
       requestId,

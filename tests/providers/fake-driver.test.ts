@@ -18,18 +18,43 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fillRun, reapRuns } from "../../src/providers/driver.ts";
+import {
+  createRun,
+  fillRun,
+  type ProviderVm,
+  ProvisionRefusedError,
+  provisionAdmittedRun,
+  reapRuns,
+  SBX_OWNERSHIP_TAG,
+} from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { resolveDriver } from "../../src/providers/index.ts";
-import { setLogSink } from "../../src/swarmclaw/mcp/stdio-transport.ts";
+import { setLogSink } from "../../src/swarmclaw/log.ts";
 import { runDriverContract } from "./driver-contract.test.ts";
+// The block below drives FLEET-layer entry points (`provisionAdmittedRun`,
+// `reapRuns`) against this driver, so it shares the fleet suite's fixtures.
+import { rejection } from "../helpers.ts";
 
 const boxesDir = mkdtempSync(join(tmpdir(), "qds-fake-boxes-"));
+/**
+ * Saved and RESTORED, not just overwritten. `resolveDriver("fake")` reads this
+ * at construction, so an unrestored value follows the bun process into every
+ * later suite in the same run: they build FakeDrivers pointed at THIS file's
+ * box directory (deleted below, so nonexistent), and the failure surfaces as an
+ * unrelated test in an unrelated file, order-dependently.
+ */
+const prevBoxesDir = process.env.QDS_FAKE_BOXES_DIR;
 process.env.QDS_FAKE_BOXES_DIR = boxesDir;
 
 afterAll(() => {
   rmSync(boxesDir, { recursive: true, force: true });
+  if (prevBoxesDir === undefined) {
+    // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+    delete process.env.QDS_FAKE_BOXES_DIR;
+  } else {
+    process.env.QDS_FAKE_BOXES_DIR = prevBoxesDir;
+  }
 });
 
 describe("registry", () => {
@@ -73,6 +98,29 @@ describe("observability contract (driver side)", () => {
     expect((entries[1] as { error: { message: string } }).error.message).toContain("no such box");
   });
 
+  test("listWithAnomalies is an observed primitive, not a pass-through", async () => {
+    // It is what the reaper enumerates through — `list()` is only its wrapper —
+    // so leaving it out of PRIMITIVES made the ONE listing that gates a
+    // destructive fleet-wide sweep the only unobserved driver call. Functionally
+    // it still worked (Reflect.get forwards it), which is exactly why nothing
+    // would have noticed.
+    const entries: Record<string, unknown>[] = [];
+    const restore = setLogSink((e) => entries.push(e as unknown as Record<string, unknown>));
+    try {
+      const d = resolveDriver("fake", { requestId: "req-anom" });
+      await d.listWithAnomalies?.();
+    } finally {
+      restore();
+    }
+    expect(entries.map((e) => e.verb)).toEqual(["listWithAnomalies"]);
+    expect(entries[0]).toMatchObject({
+      requestId: "req-anom",
+      operation: "provider.listWithAnomalies",
+      driver: "fake",
+      outcome: "ok",
+    });
+  });
+
   test("exec stdin never reaches the log stream — it is DF2.3's key channel", async () => {
     const entries: unknown[] = [];
     const restore = setLogSink((e) => {
@@ -99,35 +147,117 @@ describe("observability contract (driver side)", () => {
 });
 
 describe("FakeDriver accountability and boundaries", () => {
-  test("a box with no metadata is still listed, and reap can destroy it", async () => {
+  test("a box with no metadata is still listed, but reap REFUSES rather than silently sparing it", async () => {
     const boxes = mkdtempSync(join(tmpdir(), "qds-fake-orphan-"));
     const runs = mkdtempSync(join(tmpdir(), "qds-fake-orphan-runs-"));
     try {
       const d = new FakeDriver(boxes);
       mkdirSync(join(boxes, "half-built-box")); // crash between mkdir and writeMeta
+      // LISTED is the accountability guarantee: `fleet status` names it, so an
+      // operator can destroy it by hand. REAPING it is a different claim, and
+      // this box cannot support it — no metadata means no ownership tag, and
+      // reap destroys only what proves it is ours. Sparing stays mandatory
+      // (destroying on a guess is unrecoverable), but the spare used to be
+      // SILENT — the caller saw an empty destroyed list and unreaped spend was
+      // invisible at exactly the moment a reaper ran. The sweep now refuses,
+      // naming every unproven candidate.
       expect((await d.list()).map((v) => v.name)).toEqual(["half-built-box"]);
-      expect(await reapRuns(d, new RunRecordStore({ dir: runs }))).toEqual(["half-built-box"]);
-      expect(await d.list()).toEqual([]);
+      const err = await rejection(reapRuns(d, new RunRecordStore({ dir: runs })));
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      // Typed, so the CLI can route the operator to the box-side remediation.
+      expect((err as ProvisionRefusedError).code).toBe("reap-vms-unowned");
+      expect((err as Error).message).toContain("half-built-box");
+      expect((err as Error).message).toContain("spared, not destroyed");
+      // …and nothing was destroyed either way.
+      expect((await d.list()).map((v) => v.name)).toEqual(["half-built-box"]);
     } finally {
       rmSync(boxes, { recursive: true, force: true });
       rmSync(runs, { recursive: true, force: true });
     }
   });
 
-  test("a directory that cannot be a box is skipped, so one stray dir cannot stop reap", async () => {
+  test("a directory that cannot be a box is skipped by list(), and reap REFUSES on it", async () => {
     const boxes = mkdtempSync(join(tmpdir(), "qds-fake-junk-"));
     const runs = mkdtempSync(join(tmpdir(), "qds-fake-junk-runs-"));
     try {
       const d = new FakeDriver(boxes);
       mkdirSync(join(boxes, "Junk_Dir")); // fails the hostname grammar
       await d.create("good-box");
+      // `list()` still filters it: `destroy()` re-validates the name, so
+      // REPORTING the junk dir as a box would throw mid-reap.
       expect((await d.list()).map((v) => v.name)).toEqual(["good-box"]);
-      // destroy() re-validates the name, so reporting the junk dir would throw
-      // here and the reaper would reap nothing at all.
-      expect(await reapRuns(d, new RunRecordStore({ dir: runs }))).toEqual(["good-box"]);
+      // But a directory this driver cannot name can still be a LIVE box, and
+      // reap destroys every box it cannot match to an open record. A population
+      // that cannot be proven complete is never reaped from — otherwise the
+      // stray dir is a box no verb can reach, spending against nobody's cap,
+      // and the operator is never told at the moment it matters.
+      const err = await reapRuns(d, new RunRecordStore({ dir: runs })).then(
+        (v) => new Error(`expected a refusal, got ${JSON.stringify(v)}`),
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      expect((err as ProvisionRefusedError).code).toBe("reap-vms-unverified");
+      expect((err as Error).message).toContain("Junk_Dir");
+      // and it reaped nothing: the good box is untouched.
+      expect((await d.list()).map((v) => v.name)).toEqual(["good-box"]);
     } finally {
       rmSync(boxes, { recursive: true, force: true });
       rmSync(runs, { recursive: true, force: true });
+    }
+  });
+
+  test("an unstat-able entry does not take the whole listing down: ENOENT drops, other errno rides out as an anomaly", async () => {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-stat-"));
+    try {
+      const d = new FakeDriver(boxes);
+      await d.create("good-box");
+      // A dangling symlink: `statSync` FOLLOWS links, so this is the ENOENT an
+      // entry unlinked between `readdir` and `stat` produces. Nothing is there
+      // to reach, so it is not a box and not an anomaly — but an unguarded
+      // `statSync` threw it out of the whole call, and one stray link then hid
+      // every box in the fleet from `status` and from `reapRuns` alike.
+      symlinkSync(join(boxes, "nowhere"), join(boxes, "dangling"));
+      // A self-referential symlink: ELOOP, not ENOENT. Nothing proves this is
+      // NOT a live box, so it must ride out as an anomaly for `reapRuns` to
+      // refuse on rather than being silently dropped.
+      symlinkSync(join(boxes, "loop"), join(boxes, "loop"));
+
+      const listing = await d.listWithAnomalies();
+      expect(listing.vms.map((v) => v.name)).toEqual(["good-box"]);
+      expect(listing.skipped).toEqual(["loop"]);
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
+  test("a skipped entry's name is SANITIZED: control characters ride escaped, not raw (S19)", async () => {
+    // A directory name from `readdirSync` rides log lines and skipped entries
+    // verbatim, and a name carrying a control character (a stray tab, newline
+    // or escape — all legal on APFS/ext4) would inject them into those sinks.
+    // Escaped to visible `\uXXXX` form; ordinary names pass through untouched.
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-ctrl-"));
+    try {
+      const d = new FakeDriver(boxes);
+      mkdirSync(join(boxes, "bad\tname")); // fails the hostname grammar → skipped
+
+      const lines: Record<string, unknown>[] = [];
+      const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+      let listing: Awaited<ReturnType<FakeDriver["listWithAnomalies"]>>;
+      try {
+        listing = await d.listWithAnomalies();
+      } finally {
+        restore();
+      }
+      // The escaped form in the return value — the raw tab survives nowhere.
+      expect(listing.skipped).toEqual(["bad\\u0009name"]);
+      // The log line is sanitized by the same helper, not a second spelling.
+      const messages = lines.flatMap((l) => {
+        const e = l.error as { message?: string } | undefined;
+        return typeof e?.message === "string" ? [e.message] : [];
+      });
+      expect(messages.some((m) => m.includes("bad\\u0009name"))).toBe(true);
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
     }
   });
 
@@ -394,6 +524,314 @@ describe("FakeDriver accountability and boundaries", () => {
       rmSync(sync, { recursive: true, force: true });
     }
   }, 15_000);
+});
+
+/**
+ * DF3.1 review round 4 — the provisioning sequence's refusals and the reaper's
+ * fail-safe. Driver-agnostic in intent, but they live here rather than in the
+ * shared contract suite: each one drives a failure the seam cannot produce on a
+ * real substrate on demand (a hung create, a store write that throws), so the
+ * suite DF2.2 and the OCI story import stays substrate-honest.
+ */
+describe("provisioning refusals and fail-safe reap", () => {
+  function tmp(): { boxes: string; runs: string; driver: FakeDriver; store: RunRecordStore } {
+    const boxes = mkdtempSync(join(tmpdir(), "qds-df31-boxes-"));
+    const runs = mkdtempSync(join(tmpdir(), "qds-df31-runs-"));
+    return { boxes, runs, driver: new FakeDriver(boxes), store: new RunRecordStore({ dir: runs }) };
+  }
+
+  function clean(t: { boxes: string; runs: string }): void {
+    rmSync(t.boxes, { recursive: true, force: true });
+    rmSync(t.runs, { recursive: true, force: true });
+  }
+
+  test("createRun refuses opts.issue: admission has exactly one production caller (AC7)", async () => {
+    const t = tmp();
+    try {
+      // Dormant double admission made loud. A caller that had already admitted
+      // (as the dispatcher does) and then passed `issue` here would book the
+      // same issue against the same cap twice, silently.
+      const err = await rejection(
+        createRun(t.driver, t.store, {
+          runId: "admit-elsewhere-run",
+          issue: { repoSlug: "qds/demo", issueId: "42" },
+        }),
+      );
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      expect((err as ProvisionRefusedError).code).toBe("admission-not-here");
+      expect((err as ProvisionRefusedError).remediation).toContain("provisionAdmittedRun");
+      // Refused before the headroom read, the record and the box.
+      expect(await t.driver.list()).toEqual([]);
+      expect(existsSync(join(t.runs, "admit-elsewhere-run.json"))).toBe(false);
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("an invalid port refuses with a typed code, before the record exists", async () => {
+    const t = tmp();
+    try {
+      const err = await rejection(provisionAdmittedRun(t.driver, t.store, { runId: "bad-port-run", port: 0 }));
+      // Typed, not a bare Error: the fleet CLI classifies on `code` and prints
+      // `remediation`, and `port: 0` used to be accepted (persisted as ports:[0]).
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      expect((err as ProvisionRefusedError).code).toBe("invalid-port");
+      expect(existsSync(join(t.runs, "bad-port-run.json"))).toBe(false);
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("a failed budget write REMOVES the record, so the admission's reservation can expire", async () => {
+    const t = tmp();
+    try {
+      const runId = "budget-write-fails-run";
+      const failing = Object.assign(Object.create(t.driver) as FakeDriver, {
+        create: async (): Promise<ProviderVm> => {
+          throw new Error("driver.create must never be reached");
+        },
+      });
+      const realSet = t.store.set.bind(t.store);
+      t.store.set = (() => {
+        throw new Error("record write failed");
+      }) as typeof t.store.set;
+
+      let err: Error;
+      try {
+        err = await rejection(
+          provisionAdmittedRun(failing, t.store, {
+            runId,
+            budget: {
+              repoSlug: "qds/demo",
+              issueId: "42",
+              capMicroUsd: 5_000_000,
+              spentMicroUsd: 0,
+              reservedMicroUsd: 0,
+              admittedCeilingMicroUsd: 5_000_000,
+            },
+          }),
+        );
+      } finally {
+        t.store.set = realSet;
+      }
+      // The write failure is what the caller sees — never masked by the cleanup.
+      expect(err.message).toContain("record write failed");
+      // A record that RESOLVES with no `extensions.budget` is the one shape
+      // nothing retires: the ledger's orphan guard expires only an admission
+      // whose record does not resolve, and only a priced cost_event (written by
+      // teardown FROM that extension) retires a reservation. Leaving it — open
+      // or closed — erodes the issue's cap permanently.
+      expect(existsSync(join(t.runs, `${runId}.json`))).toBe(false);
+      expect(await failing.list(runId)).toEqual([]);
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("expose resolving no URL leaves the returned and the persisted httpsUrl agreeing", async () => {
+    const t = tmp();
+    try {
+      const created = "https://created.example";
+      const quiet = Object.assign(Object.create(t.driver) as FakeDriver, {
+        create: async (name: string): Promise<ProviderVm> => ({ name, httpsUrl: created }),
+        expose: async (): Promise<string> => undefined as unknown as string,
+        setPublic: async (): Promise<void> => {},
+      });
+      const out = await provisionAdmittedRun(quiet, t.store, { runId: "quiet-expose-run", port: 8080 });
+      // The store cannot unset a field, so "clear both" is unavailable — both
+      // keep the create-time URL rather than the return dropping one the record
+      // still carries.
+      expect(out.httpsUrl).toBe(created);
+      expect(out.record.httpsUrl).toBe(created);
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("a hung provider call is bounded, and the record survives as the handle", async () => {
+    const t = tmp();
+    try {
+      const hung = Object.assign(Object.create(t.driver) as FakeDriver, {
+        create: (): Promise<ProviderVm> => new Promise<ProviderVm>(() => {}),
+      });
+      const err = await rejection(
+        provisionAdmittedRun(hung, t.store, { runId: "hung-create-run", actionTimeoutMs: 5 }),
+      );
+      expect(err.message).toContain("driver.create(hung-create-run) timed out after 5ms");
+      // OPEN, because a timed-out create may still have stood a box up and the
+      // run id is what the box is named after (teardown's fallback handle).
+      expect(t.store.get("hung-create-run").closedAt).toBeUndefined();
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("each hung step of the provisioning sequence refuses with its OWN typed code", async () => {
+    // A bare `Error` from withTimeout is the exact unclassified shape
+    // ProvisionRefusedError exists to prevent: the fleet CLI reads `code` and
+    // `remediation` off the thrown value, so a timeout reached an operator as
+    // exit-1 "provisioning failed" naming no cause — while a box may be LIVE,
+    // the record is open and the issue's reservation is still burning cap. One
+    // code per step, because the remediation differs: after `create` you do not
+    // yet know a box exists, after `expose` you know it does.
+    const hang = <T>(): Promise<T> => new Promise<T>(() => {});
+    const steps: [string, Partial<FakeDriver>, string][] = [
+      ["create", { create: hang<ProviderVm> }, "provider-timeout-create"],
+      ["expose", { expose: hang<string> }, "provider-timeout-expose"],
+      ["setPublic", { setPublic: hang<void> }, "provider-timeout-set-public"],
+    ];
+    for (const [step, override, code] of steps) {
+      const t = tmp();
+      try {
+        const hung = Object.assign(Object.create(t.driver) as FakeDriver, override);
+        const runId = `hung-${step.toLowerCase()}-run`;
+        const err = await rejection(
+          provisionAdmittedRun(hung, t.store, { runId, port: 8080, actionTimeoutMs: 5 }),
+        );
+        expect(err).toBeInstanceOf(ProvisionRefusedError);
+        expect((err as ProvisionRefusedError).code).toBe(code);
+        // ABANDONED, not cancelled — the provider may still have acted on it,
+        // which is the whole reason the remediation is a teardown and not a retry.
+        expect(err.message).toContain("ABANDONED");
+        expect((err as ProvisionRefusedError).remediation).toContain(`teardown ${runId}`);
+        // The record is the only handle left to whatever the provider did.
+        expect(t.store.get(runId).closedAt).toBeUndefined();
+      } finally {
+        clean(t);
+      }
+    }
+  });
+
+  test.each([
+    ["undefined", undefined as unknown as string],
+    ["the empty string", ""],
+    ["whitespace only", "   "],
+  ])(
+    "expose reporting %s — and create reporting none either — refuses BEFORE setPublic",
+    async (_shape, exposed) => {
+      const t = tmp();
+      try {
+        let madePublic = false;
+        const noUrl = Object.assign(Object.create(t.driver) as FakeDriver, {
+          // Neither call establishes an address. The record would then carry a
+          // port and NO address (the store skips an undefined value and has no
+          // way to unset one later), while setPublic still ran — leaving a
+          // publicly reachable box whose address only the provider knows.
+          //
+          // Parameterised over all three shapes because only the FIRST is
+          // caught by a `=== undefined` guard. `""` and `"   "` are what a real
+          // driver returns when its provider answers with an empty field, and
+          // both sailed straight past that guard into `setPublic` — the exact
+          // outcome this refusal exists to prevent, reached by a shape the one
+          // fixture never produced. `address()` normalising on `trim()` is what
+          // the three of them pin together.
+          create: async (name: string): Promise<ProviderVm> => ({ name, status: "running" }),
+          expose: async (): Promise<string> => exposed,
+          setPublic: async (): Promise<void> => {
+            madePublic = true;
+          },
+        });
+        const err = await rejection(
+          provisionAdmittedRun(noUrl, t.store, { runId: "no-url-run", port: 8080 }),
+        );
+        expect(err).toBeInstanceOf(ProvisionRefusedError);
+        expect((err as ProvisionRefusedError).code).toBe("expose-no-url");
+        expect(madePublic).toBe(false);
+        // Exposed but NOT public, with an OPEN record naming the box — the state
+        // teardown can actually reach.
+        const rec = t.store.get("no-url-run");
+        expect(rec.closedAt).toBeUndefined();
+        expect(rec.vmName).toBe("no-url-run");
+        expect(rec.httpsUrl).toBeUndefined();
+      } finally {
+        clean(t);
+      }
+    },
+  );
+
+  test("reap destroys only what proves BOTH name grammar and ownership tag", async () => {
+    // The arm the shared contract suite cannot reach on this driver. Step 7
+    // there asserts the RULE across both drivers, but each one only ever
+    // exercises ONE branch of it: FakeDriver reports its tag so the if-branch
+    // always wins, and exedev's `ls --json` carries no tag field so the else
+    // always does. The untagged-but-grammatical box — created before the tag
+    // existed, or a fake box that crashed between `mkdir` and its metadata
+    // write — is reachable only here.
+    const t = tmp();
+    try {
+      // RUN_ID_SHAPE, not just a legal box name: the reaper's name half is
+      // `<slug>-<YYYYMMDD>-<6 hex>`, so a plainly-named box fails it and the
+      // tag half would never be reached.
+      const tagged = "reap-20260822-a1b2c3";
+      const untagged = "reap-20260822-d4e5f6";
+      await t.driver.create(tagged, SBX_OWNERSHIP_TAG);
+      await t.driver.create(untagged); // grammatical name, no tag
+
+      // The untagged box cannot PROVE it is ours. Sparing stays mandatory (a
+      // stranger can name a box anything), but sparing silently hid unreaped
+      // spend from the caller — the sweep now partitions BEFORE destroying
+      // anything and refuses naming every unproven candidate.
+      const err = await rejection(reapRuns(t.driver, t.store));
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      expect((err as ProvisionRefusedError).code).toBe("reap-vms-unowned");
+      expect((err as Error).message).toContain(untagged);
+      // Refusal-first means even the PROVEN box survives this round untouched.
+      expect((await t.driver.list()).map((v) => v.name).sort()).toEqual([tagged, untagged]);
+
+      // The remediation is operator action; once the unproven box is gone, the
+      // sweep destroys exactly what proved both halves of ownership.
+      await t.driver.destroy(untagged);
+      expect(await reapRuns(t.driver, t.store)).toEqual([tagged]);
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("the boxes root is created by create(), not by the constructor (AC1)", async () => {
+    // "Validation completes before the first side effect": `resolveDriver`
+    // runs during dispatch setup, BEFORE the brief is validated, so a mkdir in
+    // the constructor left a directory behind on every brief that was about to
+    // exit 2. The first side effect belongs to the first box.
+    const root = join(mkdtempSync(join(tmpdir(), "qds-lazy-root-")), "boxes");
+    try {
+      const driver = new FakeDriver(root);
+      expect(existsSync(root)).toBe(false);
+      // …and reading is not a side effect either: no root ⇒ no box was ever
+      // created ⇒ an empty population, not an error and not a mkdir.
+      expect(await driver.list()).toEqual([]);
+      expect(existsSync(root)).toBe(false);
+
+      await driver.create("lazy-box");
+      expect(existsSync(root)).toBe(true);
+      expect((await driver.list()).map((v) => v.name)).toEqual(["lazy-box"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("reap refuses outright when a run record file was skipped by the listing", async () => {
+    const t = tmp();
+    try {
+      await provisionAdmittedRun(t.driver, t.store, { runId: "claimed-run" });
+      await t.driver.create("orphan-box");
+      // The record listing skips a `.json` whose stem fails the id grammar
+      // (INV-4's one exception). A skipped file can hold an OPEN record naming a
+      // live box, so the claim set is no longer provably complete — and every
+      // name missing from it is a box this function would destroy.
+      writeFileSync(join(t.runs, "Not_A_Run_Id.json"), "{}\n");
+      // The filename is in the refusal: it is what an operator has to go rename.
+      const err = await rejection(reapRuns(t.driver, t.store));
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      // Typed, and distinct from the box-side twin (`reap-vms-unverified`): the
+      // fleet CLI classifies on `code`, and the two need different remediations.
+      expect((err as ProvisionRefusedError).code).toBe("reap-records-unverified");
+      expect(err.message).toMatch(/refusing to reap.*Not_A_Run_Id\.json/);
+      // Fail-safe: the orphan lives, rather than the claimed box dying.
+      expect((await t.driver.list()).map((v) => v.name).sort()).toEqual(["claimed-run", "orphan-box"]);
+    } finally {
+      clean(t);
+    }
+  });
 });
 
 runDriverContract({ driverName: "fake", makeDriver: () => resolveDriver("fake") });

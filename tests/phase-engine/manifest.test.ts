@@ -21,7 +21,7 @@ import {
 } from "../../src/phase-engine/index.ts";
 // Imported from the module, not the barrel: the seams can weaken INV-1, so they
 // are deliberately absent from the package's public surface.
-import { loadManifestWithSeams } from "../../src/phase-engine/manifest.ts";
+import { loadManifestWithSeams, stripAuthoredLimit } from "../../src/phase-engine/manifest.ts";
 import { sanitizeForMessage } from "../../src/phase-engine/types.ts";
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df1-1-manifest-")));
@@ -582,6 +582,44 @@ describe("loadManifest — beneath-root walk (INV-1, INV-5)", () => {
     const root = freshRoot();
     const p = writeManifest(root, manifestObject());
     expect(loadManifest(p, 10_000_000, root).resolvedPath).toBe(fs.realpathSync(p));
+  });
+
+  test("loadManifest KEEPS a file's limitMicroUsd; stripAuthoredLimit is what drops it", () => {
+    // The loader reads both sides of the box boundary — the runner reads the
+    // stamped pipeline.yaml back through it — so it must not strip. The
+    // dispatch-side read strips, because only it knows the value is the
+    // author's rather than the dispatcher's.
+    const root = freshRoot();
+    const p = writeManifest(root, { ...manifestObject(), limitMicroUsd: 999_000_000 });
+    const loaded = loadManifest(p, 10_000_000, root);
+    expect(loaded.manifest.limitMicroUsd).toBe(999_000_000);
+
+    const stripped = stripAuthoredLimit(loaded);
+    expect(stripped.manifest.limitMicroUsd).toBeUndefined();
+    expect("limitMicroUsd" in stripped.manifest).toBe(false);
+    expect(stripped.manifest.pipelineId).toBe(loaded.manifest.pipelineId);
+    expect(stripped.manifest.phases).toHaveLength(loaded.manifest.phases.length);
+    // RE-READ the input, AFTER the strip. Asserting `loaded.manifest
+    // .limitMicroUsd` only above proved nothing about aliasing: a
+    // `stripAuthoredLimit` that did `delete input.manifest.limitMicroUsd` and
+    // returned the same object passes every line here, while the runner-side
+    // caller — which holds `loaded`, not `stripped`, and reads the limit back
+    // out of it — silently loses its cap and falls to DF1.6's default. A
+    // "returns a new value" contract has to be checked on the OLD value.
+    expect(loaded.manifest.limitMicroUsd).toBe(999_000_000);
+    expect(stripped.manifest).not.toBe(loaded.manifest);
+    expect(stripped).not.toBe(loaded);
+    // ponytail: the copy is SHALLOW — `phases` is the same array in both — and
+    // that is fine as it stands, because nothing on either side mutates a phase
+    // list. Not asserted either way: pinning a property the source does not
+    // claim would be a test of the implementation rather than the contract. The
+    // contract is that the LIMIT survives on the input, which is the line above.
+    // Dropped for the same reason `stampManifestLimit` drops it: once a field
+    // has been removed the bytes match no file on disk, so carrying the
+    // unstripped file's path forward would claim provenance this content has
+    // lost. Mirrors tests/fleet/brief-schema.test.ts's stamping sibling.
+    expect(loaded.resolvedPath).toBe(fs.realpathSync(p));
+    expect(stripped.resolvedPath).toBeUndefined();
   });
 
   test("a final-component swap surfaces as a ManifestError, not a raw ELOOP", () => {

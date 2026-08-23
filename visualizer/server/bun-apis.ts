@@ -54,13 +54,13 @@ export const BUN_APIS: BunApiEntry[] = [
   },
   {
     api: "import.meta.dir",
-    locations: ["visualizer/server/index.ts:33", "visualizer/scripts/check-lcov.ts:139"],
+    locations: ["visualizer/server/index.ts:33", "visualizer/scripts/check-lcov.ts:161"],
     minBunVersion: "unpinned (repo floor: @types/bun ^1.1.14; see file header)",
     portableFallback: true,
   },
   {
     api: "import.meta.main",
-    locations: ["visualizer/server/index.ts:562", "visualizer/scripts/check-lcov.ts:138"],
+    locations: ["visualizer/server/index.ts:562", "visualizer/scripts/check-lcov.ts:160"],
     minBunVersion: "unpinned (repo floor: @types/bun ^1.1.14; see file header)",
     portableFallback: true,
   },

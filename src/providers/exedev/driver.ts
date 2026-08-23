@@ -27,8 +27,9 @@
 
 import { readFileSync } from "node:fs";
 import { log, newRequestId } from "../../swarmclaw/log.ts";
-import { assertValidRunId } from "../run-record.ts";
-import type { ExecResult, ProviderDriver, ProviderVm } from "../driver.ts";
+import { assertExistingRunId, assertValidRunId } from "../run-record.ts";
+import { redactSecrets } from "../step-log.ts";
+import type { ExecResult, ProviderDriver, ProviderVm, ProviderVmListing } from "../driver.ts";
 import {
   DEFAULT_EXEC_TIMEOUT_MS,
   ExeDevDriverError,
@@ -55,9 +56,16 @@ export {
 
 // ─── response shapes ────────────────────────────────────────────────────────
 
-/** The one MEASURED shape: `ls --json` → `{"vms":[{vm_name, https_url, …}]}`. */
+/**
+ * The one MEASURED shape: `ls --json` → `{"vms":[{vm_name, https_url, …}]}`.
+ *
+ * The rows are `unknown`, not a field shape: only the ENVELOPE is measured, and
+ * a row that is not an object at all (a bare string, a null) made
+ * `typeof v.vm_name` throw a TypeError that surfaced as an opaque crash instead
+ * of a named anomaly. Row shape is checked where the row is read.
+ */
 interface LsShape {
-  vms?: Array<{ vm_name?: unknown; https_url?: unknown; ssh_dest?: unknown }>;
+  vms?: unknown[];
 }
 
 /** How `create` learned the VM's URL — logged per call (Observability Contract). */
@@ -196,7 +204,42 @@ export class ExeDevDriver implements ProviderDriver {
     );
   }
 
-  async list(name?: string): Promise<ProviderVm[]> { /* dp:ok a rejection IS the error contract: non-zero exits are content-checked below, spawn errors propagate through the registry proxy's error log */
+  async list(name?: string): Promise<ProviderVm[]> {
+    return (await this.listWithAnomalies(name)).vms;
+  }
+
+  /**
+   * `list()`, plus the box identifiers this driver refused to name.
+   *
+   * Two unusable rows, two DIFFERENT dispositions, and the split is the whole
+   * design:
+   *
+   *  - `vm_name` UNREADABLE (not a string, absent). Nothing says what this row
+   *    is, so it may be OURS — a live box `reapRuns` cannot see and cannot
+   *    reap, spend nobody is accountable for. It rides out as an ANOMALY and
+   *    the fleet refuses to reap until it is resolved.
+   *  - `vm_name` READABLE but outside every factory grammar. Provably NOT
+   *    ours: no build of this factory ever named a box outside the LEGACY id
+   *    grammar. It is EXCLUDED from the population and logged — see the call
+   *    site for why refusing here would be the unsafe choice, not the safe
+   *    one. A name inside the LEGACY grammar but outside the STRICT one (a
+   *    `trailing-` box from an earlier build) is POSSIBLY ours and is LISTED.
+   *
+   * An anomaly has to be FOLLOWABLE, which the bare `vms[3]` placeholder was
+   * not: no box is named `vms[3]`, and this is an ACCOUNT-WIDE listing (no name
+   * filter), so the index is not even stable between calls. Every other
+   * identifying field the row carries — `ssh_dest`, `https_url`, an id, a tag —
+   * rides the anomaly instead of being discarded, because those are what an
+   * operator matches the row back to a real box with.
+   *
+   * `FakeDriver.listWithAnomalies` reports a bad NAME as an anomaly, and that
+   * is not divergence from this — it is the same rule ("anything that might be
+   * ours and is unaccounted-for stops the sweep") over a population of
+   * different provenance. `.sandbox/fake-boxes` is OUR directory, so a stray
+   * entry in it is suspicious by definition; this account is shared with
+   * strangers, so a stranger's box is expected and must not stop anything.
+   */
+  async listWithAnomalies(name?: string): Promise<ProviderVmListing> { /* dp:ok a rejection IS the error contract: non-zero exits are content-checked below, spawn errors propagate through the registry proxy's error log */
     const res = await this.control(["ls", ...(name === undefined ? [] : [name]), "--json"]);
     if (res.exitCode !== 0) {
       throw new ExeDevDriverError(
@@ -213,16 +256,68 @@ export class ExeDevDriver implements ProviderDriver {
         "re-run `ssh exe.dev ls --json` by hand and compare the shape",
       );
     }
-    return shape.vms.flatMap((v) => {
-      const vmName = typeof v.vm_name === "string" ? v.vm_name : null;
-      if (vmName === null) return [];
+    const skipped: string[] = [];
+    const vms = shape.vms.flatMap((v, i): ProviderVm[] => {
+      if (typeof v !== "object" || v === null || Array.isArray(v)) {
+        // Redacted before it leaves the driver: the raw JSON body can carry
+        // `ssh_dest`/`https_url` values that embed credentials (`ghs_…` in a
+        // clone URL), and these strings reach error messages and log lines.
+        skipped.push(redactSecrets(`vms[${i}] (row is not an object: ${truncate(JSON.stringify(v) ?? String(v))})`));
+        return [];
+      }
+      const row = v as Record<string, unknown>;
+      const vmName = typeof row.vm_name === "string" ? row.vm_name : null;
+      if (vmName === null) {
+        skipped.push(redactSecrets(`vms[${i}] (vm_name is not a string; ${rowIdentity(row)})`));
+        return [];
+      }
+      // Ownership classification for a READABLE name, against the documented
+      // run-id grammars (run-record.ts):
+      //
+      //  - Passes the LEGACY grammar (`assertExistingRunId` — the rule every
+      //    existing-box path accepts): POSSIBLY ours. An earlier build created
+      //    box names under exactly this rule (`trailing-` ids exist on disk by
+      //    construction), so dropping the row here hid a live factory box from
+      //    every listing forever — billed, unreapable, unreported. It rides in
+      //    `vms` instead; whether it may be DESTROYED stays with
+      //    `isFactoryOwnedVm`, which this listing can never satisfy anyway
+      //    (no tag channel), so the fail-safe direction is unchanged.
+      //  - Fails even the LEGACY grammar: provably NOT ours — no build of this
+      //    factory ever named a box outside it, so this is a stranger's box in
+      //    the same account. EXCLUDED — not in `vms`, not in `skipped` — and
+      //    logged.
+      //
+      // Passing a stranger's box through is worse than excluding it: `reapRuns`
+      // destroys every box no open record claims, so it gets destroyed (and
+      // `destroy` would throw on the name anyway, mid-sweep). Reporting it as
+      // an anomaly is worse still: this listing is ACCOUNT-WIDE, so one
+      // stranger's box stalls the sweep for the whole account and OUR boxes
+      // bill forever — trading a bounded risk for an unbounded one. Exclusion
+      // avoids both, and the co-tenant protection holds: nothing excluded here
+      // is ever claimed or destroyed downstream.
+      let mine = true;
+      try {
+        assertExistingRunId(vmName);
+      } catch {
+        mine = false;
+      }
+      if (!mine) {
+        this.emit("list_excluded_foreign_name", {
+          vm: truncate(vmName),
+          verb: "list",
+          outcome: "excluded",
+          reason: "vm_name is outside every factory box-name grammar — not a box this driver created (nor any earlier build)",
+        });
+        return [];
+      }
       return [
         {
           name: vmName,
-          ...(typeof v.https_url === "string" && v.https_url.length > 0 ? { httpsUrl: v.https_url } : {}),
+          ...(typeof row.https_url === "string" && row.https_url.length > 0 ? { httpsUrl: row.https_url } : {}),
         },
       ];
     });
+    return { vms, skipped };
   }
 
   /** Idempotent by contract (teardownRun/reapRuns both retry): a `rm` failure is
@@ -380,6 +475,33 @@ export class ExeDevDriver implements ProviderDriver {
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────
+
+/** Anomaly strings land in an error message and a log line — bound their size. */
+const ANOMALY_VALUE_MAX = 120;
+function truncate(s: string): string {
+  return s.length <= ANOMALY_VALUE_MAX ? s : `${s.slice(0, ANOMALY_VALUE_MAX)}…`;
+}
+
+/**
+ * Whatever identifying fields a row this driver refused to name DOES carry.
+ *
+ * The refusal `reapRuns` raises on a skipped entry tells an operator to go find
+ * it — so the entry has to be findable. `vms[3]` is not: no box is named that,
+ * and the account-wide listing's row order is not stable between calls. The
+ * row's remaining string fields (`ssh_dest`, `https_url`, an id, a tag) are the
+ * only handles the substrate gave us, so they are surfaced rather than dropped.
+ * Capped at four fields and truncated per value — this is a diagnostic, not a
+ * dump of a provider payload.
+ */
+function rowIdentity(row: Record<string, unknown>): string {
+  const fields: string[] = [];
+  for (const [k, v] of Object.entries(row)) {
+    if (k === "vm_name" || typeof v !== "string" || v.length === 0) continue;
+    fields.push(`${truncate(k)}=${truncate(JSON.stringify(v))}`);
+    if (fields.length === 4) break;
+  }
+  return fields.length === 0 ? "the row carries no other identifying field" : `row fields: ${fields.join(" ")}`;
+}
 
 /** Parse or fail with the command named — never pass a guess upstream. */
 function parseJson(text: string, what: string): Record<string, unknown> | null {

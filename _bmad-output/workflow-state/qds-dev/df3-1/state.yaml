@@ -1,0 +1,23 @@
+story: df3-1
+title: Fleet Dispatcher Core Verbs (dispatch, status, harvest, teardown)
+phase: 5-complete  # PR #123 open; stale research-phase marker corrected 2026-08-22
+branch: feature/df3-1-fleet-dispatcher-core-verbs
+base: main
+target: main
+mode: standard
+started: 2026-08-21
+deps: [DF1.8, DF2.1, DF2.2, DF2.5, DF2.6, DF2.8]
+dep_status: all-merged
+guardrail_log: []
+checkpoints:
+  - phase0-validation: done 2026-08-21
+  - phase1-branch: done 2026-08-21 (cut from main; pre-existing dirty files unrelated, excluded from PR)
+  - phase2-research: done 2026-08-21 confidence 0.95 auto-approved; reports in research/
+  - phase3-gate: auto-approved
+  - phase4-wave0: architect locking integration-spec.md (D1-D10)
+  - phase4-wave0: integration-spec.md locked + orchestrator corrections C1-C10 (createRun bypass verified against source)
+  - phase4-wave1: agents A/B/C parallel TDD (brief-schema+manifest / dispatch / verbs+status)
+  - phase4-wave1-result: A green (brief-schema+manifest 51 tests w/ C); C green (verbs+status); B died post-tests (defective dispatch.test.ts); D relaunched for dispatch.ts+CLI+e2e
+  - phase5-done: 2026-08-21 commit ec4b5f7 pushed, PR #123 opened (CodeRabbit auto-review pending)
+  - status: review
+  - phase5-review-r8: done 2026-08-22 (BMAD round 8: 25-agent wave, 24 source + test-hardening patches, false-positive pushbacks, conservative decisions documented; gates green)

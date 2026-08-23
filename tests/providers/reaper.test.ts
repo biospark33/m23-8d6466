@@ -358,6 +358,13 @@ describe("DF2.6 sweep", () => {
     const fleet = await seedFleet(dir, e2eState(), NOW);
     const brokenList = Object.create(fleet.driver) as FakeDriver;
     brokenList.list = () => Promise.reject(new Error("ssh: connection reset by peer"));
+    // BOTH entry points, or the injection does not reach the sweep: `sweep()`
+    // enumerates through `listWithAnomalies` now, and `Object.create` overrides
+    // only the property it is given — the prototype's working `listWithAnomalies`
+    // would keep serving the sweep and this test would pass on a driver that is
+    // not actually broken. The dual-entry hazard is inherent to the
+    // `list()`/`listWithAnomalies()` split; a transport failure hits both.
+    brokenList.listWithAnomalies = () => Promise.reject(new Error("ssh: connection reset by peer"));
     let err2: unknown;
     try {
       await sweep(deps(fleet, { driver: brokenList }), { yes: true });

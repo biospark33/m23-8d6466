@@ -15,6 +15,7 @@ import { runDriverContract } from "../driver-contract.test.ts";
 import { registeredDrivers, resolveDriver } from "../../../src/providers/index.ts";
 import { assertValidRunId } from "../../../src/providers/run-record.ts";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
+import { setLogSink } from "../../../src/swarmclaw/log.ts";
 import {
   fakeExeDev,
   writePostureAttestation,
@@ -369,6 +370,159 @@ describe("ExeDevDriver — control-plane parsing", () => {
     const one = await driver.list("list-2");
     expect(one.map((v) => v.name)).toEqual(["list-2"]);
     expect(one[0]?.httpsUrl).toBe("https://list-2.exe.xyz");
+  });
+
+  test("an `ls --json` entry whose vm_name is not a string is REPORTED as skipped, not silently dropped", async () => {
+    // The driver-side twin of a skipped run-record file. `reapRuns` destroys
+    // every box no open record claims and refuses outright on a listing it
+    // cannot prove complete — so a VM dropped from `list()` used to be a live
+    // box no verb could reach, spending against nobody's cap, with nothing in
+    // the return value to say so. The DROP still happens (there is no usable
+    // name to hand back); what changed is that it is now reported.
+    //
+    // A hand-written `run` seam, not the fake substrate: this shape is exactly
+    // what the substrate never produces, so it has to be injected here.
+    const stub = async (argv: string[]) => {
+      expect(argv.slice(0, 3)).toEqual(["ssh", "exe.dev", "ls"]);
+      return {
+        stdout: JSON.stringify({ vms: [{ vm_name: "good-box" }, { vm_name: 42 }, { vm_name: null }] }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+    const driver = new ExeDevDriver({ run: stub });
+    const listing = await driver.listWithAnomalies();
+    expect(listing.vms.map((v) => v.name)).toEqual(["good-box"]);
+    // The index anchors the entry, and whatever the row DOES identify itself by
+    // rides along — the refusal built on this tells an operator to go find the
+    // box, and "vms[1]" alone names nothing findable. These rows carry no other
+    // field, so the anomaly says exactly that rather than implying a handle.
+    expect(listing.skipped).toEqual([
+      "vms[1] (vm_name is not a string; the row carries no other identifying field)",
+      "vms[2] (vm_name is not a string; the row carries no other identifying field)",
+    ]);
+    // A row that DOES carry identifying fields surfaces them: that is the whole
+    // difference between a followable remediation and an unfollowable one.
+    const withFields = new ExeDevDriver({
+      run: async () => ({
+        stdout: JSON.stringify({ vms: [{ vm_name: 42, ssh_dest: "root@abc.exe.xyz", tag: "qds-sbx" }] }),
+        stderr: "",
+        exitCode: 0,
+      }),
+    });
+    expect((await withFields.listWithAnomalies()).skipped).toEqual([
+      'vms[0] (vm_name is not a string; row fields: ssh_dest="root@abc.exe.xyz" tag="qds-sbx")',
+    ]);
+    // A READABLE name outside the factory grammar is a STRANGER's box in the
+    // same account (`create` only ever names boxes from an assertValidRunId
+    // id), and this listing is account-wide. It is EXCLUDED — reporting it
+    // would stall the fleet sweep over a box we can never make go away, and
+    // passing it through would have `reapOrphans` destroy someone else's box.
+    const foreign = new ExeDevDriver({
+      run: async () => ({
+        stdout: JSON.stringify({ vms: [{ vm_name: "good-box" }, { vm_name: "Someones_Dev_Box" }] }),
+        stderr: "",
+        exitCode: 0,
+      }),
+    });
+    const foreignListing = await foreign.listWithAnomalies();
+    expect(foreignListing.vms.map((v) => v.name)).toEqual(["good-box"]);
+    expect(foreignListing.skipped).toEqual([]);
+    // `list()` is the thin wrapper over it, so the two can never disagree about
+    // which VMs were reported — the dual-entry hazard the split otherwise has.
+    expect(await driver.list()).toEqual(listing.vms);
+    // A clean page reports an empty array, never `undefined`: a caller checking
+    // `.length` must not read "no anomaly channel" as "no anomalies".
+    const clean = new ExeDevDriver({
+      run: async () => ({ stdout: JSON.stringify({ vms: [{ vm_name: "good-box" }] }), stderr: "", exitCode: 0 }),
+    });
+    expect((await clean.listWithAnomalies()).skipped).toEqual([]);
+  });
+
+  test("a foreign box is excluded SILENTLY from the return value but LOUDLY on the log", async () => {
+    // Exclusion is the only option that is not a live hazard — but "not in
+    // `vms` and not in `skipped`" is indistinguishable from a box that simply
+    // was not there, and an operator staring at `fleet status` deserves to know
+    // the account holds boxes this factory does not manage. The log line is the
+    // whole of that channel, so it is worth pinning: the box NAME (to go look)
+    // and the REASON (so it is not read as a bug in the listing).
+    //
+    // Contrast with `FakeDriver`, which reports a stray entry as an ANOMALY:
+    // `.sandbox/fake-boxes` is our OWN directory, so a name we did not write is
+    // suspicious. exe.dev's listing is account-wide, where a stranger's box is
+    // ordinary — and reporting it would stall the fleet sweep over a box we can
+    // never make go away, while OUR boxes keep billing.
+    const foreign = new ExeDevDriver({
+      run: async () => ({
+        stdout: JSON.stringify({
+          vms: [{ vm_name: "good-box" }, { vm_name: "Someones_Dev_Box" }, { vm_name: "another_stranger" }],
+        }),
+        stderr: "",
+        exitCode: 0,
+      }),
+    });
+    const lines: Record<string, unknown>[] = [];
+    const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+    let listing: Awaited<ReturnType<ExeDevDriver["listWithAnomalies"]>>;
+    try {
+      listing = await foreign.listWithAnomalies();
+    } finally {
+      restore();
+    }
+    expect(listing.vms.map((v) => v.name)).toEqual(["good-box"]);
+    expect(listing.skipped).toEqual([]);
+
+    // ONE line per excluded box — not one per listing, and not one per row.
+    const excluded = lines.filter((l) => l.operation === "exedev.list_excluded_foreign_name");
+    expect(excluded.map((l) => l.vm)).toEqual(["Someones_Dev_Box", "another_stranger"]);
+    expect(excluded[0]?.outcome).toBe("excluded");
+    expect(excluded[0]?.reason).toContain("not a box this driver created");
+    // The box we DID recognise produces no exclusion line at all.
+    expect(lines.filter((l) => l.vm === "good-box" && l.outcome === "excluded")).toEqual([]);
+  });
+
+  test("a LEGACY-grammar name is POSSIBLY ours and is LISTED, not excluded (S14)", async () => {
+    // `trailing-` ids exist ON DISK by construction from every build before the
+    // grammar tightened (run-record.ts's read/write split), so a box named from
+    // one may be OURS — an earlier build created it. Excluding it on the strict
+    // grammar hid a billed, unreapable box from `fleet status` and the record
+    // sweep forever. Ownership stays with `isFactoryOwnedVm` downstream; the
+    // listing only refuses to drop what might be ours.
+    const legacy = new ExeDevDriver({
+      run: async () => ({
+        stdout: JSON.stringify({ vms: [{ vm_name: "trailing-" }, { vm_name: "good-box" }] }),
+        stderr: "",
+        exitCode: 0,
+      }),
+    });
+    const listing = await legacy.listWithAnomalies();
+    expect(listing.vms.map((v) => v.name)).toEqual(["trailing-", "good-box"]);
+    // Listed operator-visibly is not "skipped": nothing here blocks a reap.
+    expect(listing.skipped).toEqual([]);
+  });
+
+  test("skipped entries are REDACTED before they leave the driver (S20)", async () => {
+    // A malformed row's identifying fields ride the anomaly string verbatim, and
+    // that string reaches error messages and log lines. Provider rows carry
+    // `https_url`/`ssh_dest` values that can embed credentials (`ghs_…` in a
+    // clone URL), so the free text goes through the shared redactor first.
+    const leaky = new ExeDevDriver({
+      run: async () => ({
+        stdout: JSON.stringify({
+          vms: [{ vm_name: 42, ssh_dest: "https://x-access-token:ghs_15b9c7e0deadbeef@github.com/o/r" }],
+        }),
+        stderr: "",
+        exitCode: 0,
+      }),
+    });
+    const listing = await leaky.listWithAnomalies();
+    expect(listing.vms).toEqual([]);
+    expect(listing.skipped).toHaveLength(1);
+    expect(listing.skipped[0]).toContain("«redacted»");
+    expect(JSON.stringify(listing.skipped)).not.toContain("ghs_");
+    // The identifying SHAPE survives the redaction — still followable.
+    expect(listing.skipped[0]).toContain("ssh_dest=");
+    expect(listing.skipped[0]).toContain("@github.com/o/r");
   });
 
   test("destroy re-reads ls when rm reports not-found — idempotent by content", async () => {

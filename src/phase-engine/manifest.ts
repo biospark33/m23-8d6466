@@ -124,6 +124,30 @@ export const PipelineManifestSchema = z
     version: z.literal(MANIFEST_VERSION),
     pipelineId: z.string().regex(PIPELINE_ID_PATTERN, "pipelineId must match ^[a-z][a-z0-9-]{1,63}$"),
     runBudgetMs: z.number().int().positive(),
+    // DF3.1 AC9a: stamped by dispatch for box fill. `.max` because
+    // `z.number().int()` accepts 1e300 (Number.isInteger is true for it) — a
+    // hand-authored manifest could otherwise declare a cap the engine can
+    // neither compare against an admitted ceiling nor round-trip as an integer.
+    // NOT authoritative to the host, and `loadManifest` deliberately does not
+    // strip it: the read path IS the delivery path — the dispatcher stamps,
+    // serializes and `fill`s this file into the box, and the in-box engine
+    // reads it back through the same loader (round trip pinned by
+    // tests/fleet/brief-schema.test.ts). Dropping it on read would make AC9a's
+    // delivery a no-op.
+    //
+    // The enforced ceiling is the DF2.3 key cap recorded as the run record's
+    // `limitMicroUsd`; this field is the box's copy of it, never its source.
+    // Two readers promote it, and neither takes it on the file's word:
+    // `scripts/fleet.ts`'s dispatch calls `stripAuthoredLimit` on the
+    // pre-stamp read, and `runContextFrom` in `scripts/pipeline-run.ts` — which
+    // turns it into `effectiveCeilingMicros` and so into DF1.6's harness cap —
+    // reconciles it against the `effectiveCeilingMicros` dispatch wrote to
+    // `run-context.json` beside the manifest, refusing on absence or
+    // disagreement. Any future reader owes the same: a stamped cap and an
+    // authored one are byte-identical here, so the loader cannot tell them
+    // apart and a consumer that skips the reconciliation lets a hand-authored
+    // `pipeline.yaml` name its own ceiling.
+    limitMicroUsd: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
     phases: z.array(PhaseSpecSchema).min(MIN_PHASES, `phaseCount < ${MIN_PHASES}`),
   })
   .strict();
@@ -462,8 +486,13 @@ export interface LoadedManifest {
   manifest: Readonly<PipelineManifest>;
   /** `manifest_load_ms` for the observability contract. */
   manifestLoadMs: number;
-  /** The verified absolute path the manifest was read from. */
-  resolvedPath: string;
+  /**
+   * The verified absolute path the manifest was read from — provenance for
+   * the exact bytes in `manifest`. Absent when the content was derived in
+   * memory rather than read (`stampManifestLimit`), because those bytes match
+   * no file on disk.
+   */
+  resolvedPath?: string;
 }
 
 /** Bytes read through a verified descriptor anchored beneath `runRoot`. */
@@ -675,4 +704,98 @@ export function loadManifestWithSeams(
     manifestLoadMs: performance.now() - started,
     resolvedPath,
   };
+}
+
+/**
+ * DF3.1 AC9a: drop an author-supplied `limitMicroUsd` before stamping.
+ *
+ * For the DISPATCH-side read only. `loadManifest` is deliberately neutral —
+ * it is the reader on BOTH sides of the box boundary, and the runner
+ * (`scripts/pipeline-run.ts`) reads the already-stamped `pipeline.yaml` back
+ * through it, so stripping there would delete the dispatcher's own ceiling and
+ * run the engine uncapped. A stamped cap and an authored cap are byte-identical
+ * in the file; the loader cannot tell them apart and must not try.
+ *
+ * The dispatcher can, because it knows which read is which: it calls this on
+ * the pre-stamp host read, then `stampManifestLimit` supplies the admitted
+ * ceiling. Harmless even without the strip — `stampManifestLimit` spreads
+ * `limitMicroUsd` last, so the stamp already wins — but this closes the path
+ * where dispatch does NOT stamp and an authored cap would reach the box.
+ *
+ * Drops `resolvedPath` for the same reason `stampManifestLimit` does: once a
+ * field has been removed the bytes match no file on disk, and carrying the
+ * unstripped file's path forward claims provenance the content no longer has.
+ */
+export function stripAuthoredLimit(loaded: LoadedManifest): LoadedManifest {
+  const { limitMicroUsd: _authored, ...rest } = loaded.manifest;
+  return {
+    manifest: deepFreeze(rest as PipelineManifest),
+    manifestLoadMs: loaded.manifestLoadMs,
+  };
+}
+
+/**
+ * DF3.1 AC9a: Stamp limitMicroUsd into a manifest for fill.
+ * Returns a frozen copy that validates against the extended schema.
+ *
+ * The result carries no `resolvedPath`: its bytes exist at no path, and
+ * inheriting the unstamped file's would claim provenance the content no
+ * longer has.
+ *
+ * @param manifest — the loaded manifest to stamp
+ * @param limitMicroUsd — positive safe integer ceiling (rejects 0, negative,
+ *   float, and anything past `Number.MAX_SAFE_INTEGER`)
+ * @throws {ManifestError} if the ceiling is not a positive safe integer, if the
+ *   stamped manifest fails schema validation, or if the stamp did not land —
+ *   every failure of this function, so callers catch one type
+ */
+export function stampManifestLimit(manifest: LoadedManifest, limitMicroUsd: number): LoadedManifest {
+  // `z.number().int()` accepts 1e300 — `Number.isInteger` is true for it — and
+  // the value then round-trips through the delivered manifest as `1e+300`,
+  // i.e. an in-box cap that is not the ceiling admission actually granted.
+  // Bound it here, where the ceiling is still comparable to the admitted one.
+  if (!Number.isSafeInteger(limitMicroUsd) || limitMicroUsd <= 0) {
+    throw new ManifestError(
+      `limitMicroUsd must be a positive integer <= ${Number.MAX_SAFE_INTEGER}; got ${limitMicroUsd}`,
+    );
+  }
+  const stamped = { ...manifest.manifest, limitMicroUsd };
+  // safeParse, so a schema failure leaves through this module's OWN error type.
+  // `parse` threw a raw ZodError, which every caller of this module (dispatch's
+  // `manifest-rejected` arm included) handles as an unrecognised throw.
+  const result = PipelineManifestSchema.safeParse(stamped);
+  if (!result.success) {
+    const detail = result.error.issues
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("; ");
+    throw new ManifestError(`stamped manifest failed validation: ${detail}`);
+  }
+  const validated = result.data as PipelineManifest;
+  // `limitMicroUsd` is optional on the schema — existing uncapped manifests
+  // must still load — so validation alone does not prove the stamp landed.
+  // Assert it here rather than let a dispatch deliver an uncapped manifest.
+  // (Engine-side mandatory enforcement is DF3.x; this closes the producer.)
+  if (validated.limitMicroUsd === undefined) {
+    throw new ManifestError("stamp did not land: the manifest carries no limitMicroUsd");
+  }
+  return { manifest: deepFreeze(validated), manifestLoadMs: manifest.manifestLoadMs };
+}
+
+/**
+ * DF3.1 AC9a: Serialize a manifest for `fill` delivery into the box.
+ *
+ * Emits **JSON**, despite the `.yaml` filename the dispatcher delivers it
+ * under. `loadManifest` above is the authoritative reader of this file and it
+ * `JSON.parse`s; JSON is a subset of YAML, so a YAML reader accepts this too,
+ * while the reverse does not hold — `YAML.stringify` emits unquoted keys that
+ * no JSON parser will take, which made the delivered manifest unreadable by
+ * this repo's own loader. Emitting JSON is therefore the only output both
+ * accept. It also moots YAML's default `lineWidth: 80` scalar folding, which
+ * re-parsed a long phase command as a subtly different string.
+ *
+ * @param manifest — the loaded manifest (may be stamped)
+ * @returns a string suitable for BoxFile delivery, readable by `loadManifest`
+ */
+export function serializeManifest(manifest: LoadedManifest): string {
+  return JSON.stringify(manifest.manifest, null, 2);
 }

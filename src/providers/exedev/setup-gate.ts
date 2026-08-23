@@ -42,10 +42,10 @@
  * store consumer including the reaper.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../../swarmclaw/log.ts";
-import { parseRoster } from "../../phase-engine/roster/schema.ts";
+import { parseRoster, ROSTER_MAX_BYTES, RosterError } from "../../phase-engine/roster/schema.ts";
 import { assertValidRunId } from "../run-record.ts";
 import { KEY_ENV_FILE } from "../credentials.ts";
 import { DEFAULT_FILL_WORKDIR } from "./fill.ts";
@@ -89,6 +89,14 @@ export interface SetupGateResult {
 
 export interface SetupGateOptions {
   runId: string;
+  /**
+   * INV-4-bis: the DISPATCH's correlation id, so the gate's log lines join to
+   * the dispatch ack. Falls back to `requestId` — the driver instance's
+   * own id, which is a different id from the ack's whenever the driver was not
+   * constructed by this dispatch, and a run that dies at the gate then cannot
+   * be joined to the dispatch that started it.
+   */
+  requestId?: string;
   /** The ACTIVE roster — an argument, never an environment variable. */
   rosterPath: string;
   /** The recorded commit SHA the clone must be pinned to (assertion A). */
@@ -139,6 +147,17 @@ function assertPathSafe(kind: string, p: string): void {
 /** Parse the roster host-side (DF1.5's closed-schema parser) and derive the
  *  bare model ids the in-box C pings. Single source: the rosterPath ARGUMENT. */
 function rosterModels(rosterPath: string): string[] {
+  // Same ceiling loadRoster enforces: this read is synchronous on the event
+  // loop, so an oversized roster would wedge the gate outside every deadline
+  // (the dispatch pre-check caps its own read; this is the second copy of the
+  // same hazard — brief-steered path, repo-root containment only).
+  const size = statSync(rosterPath).size;
+  if (size > ROSTER_MAX_BYTES) {
+    throw new RosterError(
+      [`roster is ${size} bytes, over the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling`],
+      rosterPath,
+    );
+  }
   const text = readFileSync(rosterPath, "utf8");
   const roster = parseRoster(text, rosterPath);
   const slugs = [...new Set(roster.roles.map((r) => r.slug))];
@@ -191,6 +210,18 @@ export async function setupGate(
 ): Promise<SetupGateResult> {
   assertValidRunId(opts.runId);
   assertValidRunId(vm);
+  // Empty is ABSENT: `??` admits `""` (an unset env var, a trimmed field
+  // threaded through by a caller), and an empty `requestId` on every
+  // `emitGate`/`log` line for the run is precisely the un-joinable output this
+  // parameter was added to prevent — worse than the driver's own id, which at
+  // least correlates the gate's own lines to each other.
+  //
+  // `!= null`, not `!== undefined`: the type says `string | undefined`, but this
+  // is a driver-boundary option bag that callers build from JSON and env, where
+  // `null` is what an absent field deserialises to. `!== undefined` let it
+  // through to `.trim()` and turned a missing id into a TypeError out of the
+  // gate — a crash where the fallback was the whole point.
+  const requestId = opts.requestId != null && opts.requestId.trim().length > 0 ? opts.requestId : driver.requestId;
   if (!SHA_RE.test(opts.commitSha)) {
     throw new ExeDevDriverError(
       "commit-sha-invalid",
@@ -277,7 +308,7 @@ export async function setupGate(
   const headSha = head.stdout.trim();
   const dirty = porcelain.stdout.trim();
   const aOk = head.exitCode === 0 && porcelain.exitCode === 0 && headSha.startsWith(wantSha) && dirty.length === 0;
-  emitGate(driver.requestId, g, vm, "gate_a", Date.now() - t, aOk ? "ok" : "error");
+  emitGate(requestId, g, vm, "gate_a", Date.now() - t, aOk ? "ok" : "error");
   if (head.exitCode !== 0) {
     assertions.push({ item: "A", ok: false, note: `A: git rev-parse HEAD failed (exit ${head.exitCode}): ${head.stderr.trim()}` });
   } else if (porcelain.exitCode !== 0) {
@@ -306,7 +337,7 @@ export async function setupGate(
     t = Date.now();
     if (Date.now() >= deadline) {
       assertions.push({ item: "B", ok: false, note: `B: gate budget exhausted before B ran (earlier phases consumed gateTimeoutMs=${gateTimeoutMs}ms)` });
-      emitGate(driver.requestId, g, vm, "gate_b", Date.now() - t, "error");
+      emitGate(requestId, g, vm, "gate_b", Date.now() - t, "error");
     } else {
       const piPath = await driver.execTimed(vm, ["sh", "-c", "command -v pi"], budgetFree());
       if (piPath.exitCode !== 0 || piPath.stdout.trim().length === 0) {
@@ -322,7 +353,7 @@ export async function setupGate(
           assertions.push({ item: "B", ok: true, note: "B: pi registry loaded — list-models content present" });
         }
       }
-      emitGate(driver.requestId, g, vm, "gate_b", Date.now() - t, assertions.at(-1)?.ok ? "ok" : "error");
+      emitGate(requestId, g, vm, "gate_b", Date.now() - t, assertions.at(-1)?.ok ? "ok" : "error");
     }
   }
 
@@ -342,7 +373,7 @@ export async function setupGate(
         { item: "D", ok: false, note },
         { item: "E", ok: false, note },
       );
-      emitGate(driver.requestId, g, vm, "gate_cde", Date.now() - t, "error");
+      emitGate(requestId, g, vm, "gate_cde", Date.now() - t, "error");
     } else {
       const res = await driver.execTimed(
         vm,
@@ -435,7 +466,7 @@ export async function setupGate(
       // PARTIAL or DUPLICATED evidence is equally unproven — the same
       // complete-evidence predicate that admits the results decides the label.
       const cdeOk = res.exitCode === 0 && cdeComplete && results.every((r) => r.ok);
-      emitGate(driver.requestId, g, vm, "gate_cde", Date.now() - t, cdeOk ? "ok" : "error");
+      emitGate(requestId, g, vm, "gate_cde", Date.now() - t, cdeOk ? "ok" : "error");
       }
   }
 
@@ -458,7 +489,7 @@ export async function setupGate(
 
   const gateMs = Date.now() - gateStart;
   log({
-    requestId: driver.requestId,
+    requestId: requestId,
     operation: "exedev.gate",
     agentId: null,
     timestamp: new Date().toISOString(),
@@ -485,7 +516,7 @@ export async function setupGate(
     // Retaining the artifact must never turn a red gate green or crash the
     // caller — the evidence lives in the return value; log the write failure.
     log({
-      requestId: driver.requestId,
+      requestId: requestId,
       operation: "exedev.gate",
       agentId: null,
       timestamp: new Date().toISOString(),

@@ -50,6 +50,7 @@ export function resolveDriver(name: string, ctx: ResolveContext = {}): ProviderD
 const PRIMITIVES: ReadonlySet<string> = new Set([
   "create",
   "list",
+  "listWithAnomalies",
   "destroy",
   "expose",
   "setPublic",
@@ -63,9 +64,11 @@ function instrument(driver: ProviderDriver, ctx: ResolveContext): ProviderDriver
   return new Proxy(driver, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
-      // Only the seam's eight primitives are driver calls. Wrapping every
-      // callable turned `toString()` and a driver's own private helpers into
-      // fake observability lines.
+      // Only the seam's primitives are driver calls. Wrapping every callable
+      // turned `toString()` and a driver's own private helpers into fake
+      // observability lines. `listWithAnomalies` is in the set because the
+      // reaper enumerates through it, not `list` — leaving it out made the one
+      // listing that gates a destructive sweep the only unobserved driver call.
       if (typeof value !== "function" || !PRIMITIVES.has(String(prop))) return value;
       const verb = String(prop);
       return (...args: unknown[]) => {
@@ -141,6 +144,14 @@ export * from "./teardown.ts";
 // async bounds (withTimeout, LIST_TIMEOUT_MS) ride along from their own leaf.
 export * from "./quota.ts";
 export * from "./reaper.ts";
+// `RUN_ID_SHAPE` arrives through BOTH star exports — it is declared in
+// driver.ts (beside `isFactoryOwnedVm`, which needs it) and re-exported by
+// reaper.ts so that module's existing importers are unchanged. Two star
+// exports offering one name is TS2308 regardless of them resolving to the same
+// declaration, so the barrel names the owner explicitly. Do NOT resolve this by
+// giving reaper.ts its own copy of the regex: the two reapers share one
+// ownership test precisely so they cannot drift apart on what is ours.
+export { RUN_ID_SHAPE } from "./driver.ts";
 export * from "./timeout.ts";
 // DF2.8: the micro-dollar cost ledger (append-only, host-side) and the
 // pre-spawn budget gate join the exported surface — the dispatcher (DF3.1)
