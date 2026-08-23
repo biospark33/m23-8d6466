@@ -311,7 +311,113 @@ assumed. Driver registration cites `src/providers/index.ts`'s `resolveDriver(nam
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Wave 2, agent D — CLI wiring + verb registration + e2e demo (2026-08-23)
+
+**Landed (this wave):**
+
+| File | Change |
+|---|---|
+| `src/fleet/verbs.ts` | Two additive registry entries (`fanout` [0,1,2,5,6], `rank` [0,1,2,4] with `--steps-json` per ruling C2); `:39` docstring "Exactly 4" → six verbs; the "`--driver` required on every verb" header paragraph now names its one exception. No DF3.1-owned entry edited. |
+| `src/fleet/index.ts` | Three export lines: `./fanout.ts`, `./fanout-primitive.ts`, `./rank.ts`. `fleet-lock.ts` deliberately stays off the barrel (consumers import it directly). |
+| `scripts/fleet.ts` | `fanout` and `rank` verb blocks per D12. Shared helpers extracted when fanout became the second caller: `ingestBriefJson` (brief seam/cap/parse), `makeLedgerFactory` (budget-gate handle), `readFanoutForRank` (ENOENT→null mapping). `FleetDeps` gains `fanoutsDir?`/`lockPath?` seams (tests/embedders point them at a tmpdir). Dispatch block rewired onto the two shared helpers — behavior-identical, one implementation of each discipline. |
+| `tests/fleet/verbs.test.ts` | Pinned sites updated additively: EXPECTED_FLAGS/EXPECTED_EXIT_CODES + verb loop (:314), synthetic-render no-leak list (:366), probe-order pin (:875), plus three sites K4's register under-counted ("exactly 4 entries", renderHelp polarity, "--driver required on EVERY verb") — each updated with rank's documented exemption. NEW probes: fanout 7 (codes 2×5, 5, 1, 0), rank 5 (2×2, 4, 1, 0) — every declared code probed for both verbs except fanout 6, excused to its cli.test.ts case via the existing binding check. Env redirects QDS_RUNS_DIR/QDS_FANOUTS_DIR added to the exit-codes describe. |
+| `tests/fleet/cli.test.ts` | EXPECTED_VERBS → six (+BARE_VERB_EXIT entries). New tests: best-of-n e2e (acks + auto-rank line + extension joins + lock released), many-stories wrapper e2e, six validation refusals (exit 2, nothing provisioned), no-headroom exit 5, **exit-6 EAGAIN test** (the allowlist's binding target), rank scored via `--steps-json` (asserts score to 6 dp, exactly-two-key breakdown, rankedAt stamped), rank unscored exit 0, rank unknown-id exit 4. |
+| `tests/fleet/patterns.test.ts` | ONE new block (AC8): two full `fanout()` invocations race with a seam barrier parked in the winner's admission await — loser refuses exit 5 having written zero records/mints/boxes; totals prove it under the shared driver/store. |
+
+**Gate evidence:** scoped files 175 pass / 0 fail; full suite **3308 pass / 8 skip / 1 fail** —
+the one fail is `tests/gitnexus/graph-queries.test.ts` ("gitnexus_impact — 'registerSwarmClawAgent'
+…"), proven pre-existing by `git stash push -- <six owned files>` + rerun on the clean tree: same
+1 fail / 15 pass. It reads the GitNexus index, not our code. B's other candidates (setup-gate ×6,
+readRunsByIssue, usage.test.ts, cli-anything watchdog) all passed this run. `bunx tsc --noEmit`
+clean; `biome check` clean on all six files; GitNexus impact run before editing (`listVerbs`,
+`run` — both LOW); detect_changes before commit.
+
+### MANDATORY e2e demo (DOD) — captured verbatim
+
+Driven through the real CLI front door (`scripts/fleet.ts run()` — the exact function
+`import.meta.main` binds to argv) in a temp cwd, fake driver + FakeKeyApi injected via the CLI's
+own DI seams. Chain: `fanout` → `teardown` ×3 (DF2.5 harvest-before-destroy closes each arm's
+record) → `rank --steps-json` keyed by the ACTUAL minted run ids.
+
+```
+===== COMMAND: bun scripts/fleet.ts fanout --driver fake --pattern best-of-n --n 3 \
+           --pin fff…fe2e(40 hex) --roster alpha,beta,gamma --brief brief.json   (stdout verbatim)
+{"fanoutId":"fan-20260823-09bd5a","arm":0,"runId":"qds-20260823-b4d8fe","outcome":"ready","vmName":"qds-20260823-b4d8fe"}
+{"fanoutId":"fan-20260823-09bd5a","arm":1,"runId":"qds-20260823-679d1c","outcome":"ready","vmName":"qds-20260823-679d1c"}
+{"fanoutId":"fan-20260823-09bd5a","arm":2,"runId":"qds-20260823-b9b4a7","outcome":"ready","vmName":"qds-20260823-b9b4a7"}
+{"fanoutId":"fan-20260823-09bd5a","scores":[{"arm":0,"runId":"qds-20260823-b4d8fe","score":null,…},{"arm":1,…},{"arm":2,…}],"tie":false,
+ "rationale":"no step-output source provided — every arm listed unscored; supply --steps-json to rank","timings":{"rankMs":0.98}}
+
+===== COMMAND: bun scripts/fleet.ts teardown qds-20260823-b4d8fe --driver fake --dir .sandbox/runs
+torn down: qds-20260823-b4d8fe
+===== COMMAND: bun scripts/fleet.ts teardown qds-20260823-679d1c --driver fake --dir .sandbox/runs
+torn down: qds-20260823-679d1c
+===== COMMAND: bun scripts/fleet.ts teardown qds-20260823-b9b4a7 --driver fake --dir .sandbox/runs
+torn down: qds-20260823-b9b4a7
+
+===== COMMAND: bun scripts/fleet.ts rank fan-20260823-09bd5a --dir .sandbox/fanouts --steps-json steps.json   (stdout verbatim)
+{"fanoutId":"fan-20260823-09bd5a","scores":[
+  {"arm":1,"runId":"qds-20260823-679d1c","score":0.9, "breakdown":{"testPassRate":1,  "uniqueFileCoverage":0.75}},
+  {"arm":0,"runId":"qds-20260823-b4d8fe","score":0.74,"breakdown":{"testPassRate":0.9, "uniqueFileCoverage":0.5}},
+  {"arm":2,"runId":"qds-20260823-b9b4a7","score":0.4, "breakdown":{"testPassRate":0.5, "uniqueFileCoverage":0.25}}],
+ "tie":false,"rationale":"top arm 1 (run qds-20260823-679d1c, score 0.9) leads by more than 0.1","timings":{"rankMs":0.94}}
+
+===== .sandbox/runs — three CLOSED records with three DISTINCT keyHash values =====
+qds-20260823-679d1c  state=closed  keyHash=09fd612b7812…  box=qds-20260823-679d1c   (roster beta)
+qds-20260823-b4d8fe  state=closed  keyHash=1dd0a409d75a…  box=qds-20260823-b4d8fe   (roster alpha)
+qds-20260823-b9b4a7  state=closed  keyHash=41d1e83e200f…  box=qds-20260823-b9b4a7   (roster gamma)
+distinct keyHash count: 3
+
+===== .sandbox/fanouts/fan-20260823-09bd5a.json (the AC9 record; rankedAt stamped by rank) =====
+{ "fanoutId": "fan-20260823-09bd5a", "pattern": "best-of-n", "n": 3,
+  "pin": "fffffffffffffffffffffffffffffffffffffe2e",
+  "arms": [
+    {"arm":0,"runId":"qds-20260823-b4d8fe","rosterId":"alpha","briefHash":"7a3faf39…"},
+    {"arm":1,"runId":"qds-20260823-679d1c","rosterId":"beta", "briefHash":"7a3faf39…"},
+    {"arm":2,"runId":"qds-20260823-b9b4a7","rosterId":"gamma","briefHash":"7a3faf39…"}],
+  "winner": null, "rankedAt": "2026-08-23T19:27:57.073Z", "closedAt": "2026-08-23T19:27:56.232Z" }
+```
+
+Score arithmetic check against AC7: cross-arm union = {dispatcher.ts, verbs.ts, rank.ts, rank.test.ts}
+(4 files). Arm 1: passRate 20/20 = 1.0, coverage 3/4 = 0.75 ⇒ 0.9. Arm 0: 18/20 = 0.9, 2/4 = 0.5
+⇒ 0.74. Arm 2: 10/20 = 0.5, 1/4 = 0.25 ⇒ 0.4. Top-two delta 0.16 > 0.1 ⇒ tie false. ✓
+
+**Honest deltas (not fabricated):**
+1. **Bundles:** the fake driver's boxes carry no git history or artifacts, so DF2.5's harvest step
+   reports `"harvested":"none"` and no bundle directories appear under `.sandbox/runs/<run-id>/`.
+   The three record FILES are what `.sandbox/runs/` holds. Real exe.dev arms would produce real
+   bundles at the same lifecycle point.
+2. **Invocation route:** pure-shell `bun scripts/fleet.ts …` would need a live OpenRouter
+   provisioning key for the per-arm key mints (no env escape for the key client exists), so the
+   demo drives the CLI's exported `run()` with FakeKeyApi/FakeDriver/goodLedger injected — the same
+   seams cli.test.ts's mandatory e2e uses. Argv, flag parsing, output shaping and exit codes are
+   the production paths.
+3. **Ranking is two-phase:** run ids do not exist before `fanout` runs, so `--steps-json` cannot be
+   supplied to the in-fanout auto-rank; it lists arms unscored with the rationale above (by design),
+   and the scored table comes from `fleet rank <id> --steps-json …`.
+
+### Deviations / corrections proposed (SOURCE WINS)
+
+- **K12 (proposed): in-process lock-refusal code is `fleet-lock-reentrant`, not `fleet-busy`.**
+  The AC8 patterns test races two FULL `fanout()` invocations inside one process (seam barrier at
+  the admission await, per D14). fleet-lock.ts hoists the own-pid re-entrancy guard ABOVE every
+  contention branch (r8 HIGH), so the same-process loser gets exit 5 `fleet-lock-reentrant`; the
+  cross-process refusal AC8's prose describes (`fleet-busy`) is proven separately by
+  fanout.test.ts's subprocess race. Both codes are exit 5 and both write nothing. The spec sketch
+  said "fleet-busy" for this test; source wins, test pins reality.
+- **Exit-code refinement for `race`:** the shorthand "exit 1 from any non-ready arm outcome"
+  would make every SUCCESSFUL race exit 1 (losers are the expected disposition). Implemented rule:
+  exit 1 iff any arm is setupFailed/armFailed/armUnknown; `lostRace` alone does not fail the
+  invocation. Identical behavior for best-of-n/many-stories.
+- **rank's `--dir` means the FAN-OUT records directory** (`.sandbox/fanouts`), not the runs dir —
+  rank reads no run record (K11 dropped that dep). Documented on the registry entry; discovered
+  operationally during this demo (passing `.sandbox/runs` yields a correct exit-4 refusal).
+  Proposed follow-up: teach rank.ts's `fanout-not-found` remediation to mention `--dir` explicitly.
+- **No interrupt handlers on the fanout verb** (dispatch installs them because IT can orphan a box
+  mid-flight with no record): fanout's fleet-lock module already releases its lock on SIGINT/SIGTERM;
+  orphaned-arm recovery rides the story's own admission/record evidence. Residual noted, not
+  silently dropped.
+
 
 ---
 

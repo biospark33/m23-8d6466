@@ -23,7 +23,7 @@
  * recomputes a box-naming formula the factory does not use.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listVerbs, renderHelp, type VerbEntry, type VerbFlag } from "../../src/fleet/verbs.ts";
@@ -51,6 +51,12 @@ import {
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
 import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
 import { liveForeignPid, rejection } from "../helpers.ts";
+// DF3.2 probe wiring: the full fanout path needs a key client, a ledger, and
+// the fan-out record store the auto-rank reads.
+import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
+import { goodLedger } from "./helpers.ts";
+import { FanoutRecordStore } from "../../src/fleet/fanout.ts";
+import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
 
 /**
  * Await a refusal and hand back the TYPED error — never a bare "something threw".
@@ -202,14 +208,18 @@ describe("verbs.ts (registry)", () => {
     ]);
   });
 
-  test("listVerbs returns exactly 4 entries", () => {
+  test("listVerbs returns exactly 6 entries", () => {
     const verbs: VerbEntry[] = listVerbs();
-    expect(verbs).toHaveLength(4);
+    expect(verbs).toHaveLength(6);
     const verbNames = verbs.map((v) => v.verb);
     expect(verbNames).toContain("dispatch");
     expect(verbNames).toContain("status");
     expect(verbNames).toContain("harvest");
     expect(verbNames).toContain("teardown");
+    // DF3.2's additive pair — appended after the DF3.1 four, none of which was
+    // edited to make room.
+    expect(verbNames).toContain("fanout");
+    expect(verbNames).toContain("rank");
   });
 
   test("each verb has exact shape with no extra keys", () => {
@@ -281,6 +291,26 @@ describe("verbs.ts (registry)", () => {
       { name: "--help", required: false, valueType: "boolean" },
       { name: "--no-harvest", required: false, valueType: "boolean" },
     ],
+    // DF3.2's additive entries (integration spec D12 + ruling C2's
+    // --steps-json). --n/--cap-micro-usd are "string": the CLI range-checks
+    // them as integers rather than trusting Number()'s coercions.
+    fanout: [
+      { name: "--brief", required: false, valueType: "path" },
+      { name: "--cap-micro-usd", required: false, valueType: "string" },
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--driver", required: true, valueType: "string" },
+      { name: "--help", required: false, valueType: "boolean" },
+      { name: "--n", required: true, valueType: "string" },
+      { name: "--pattern", required: true, valueType: "string" },
+      { name: "--pin", required: false, valueType: "string" },
+      { name: "--roster", required: false, valueType: "string" },
+    ],
+    // NO --driver BY DESIGN: rank touches fan-out records and step output only.
+    rank: [
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--help", required: false, valueType: "boolean" },
+      { name: "--steps-json", required: false, valueType: "path" },
+    ],
   };
 
   const EXPECTED_EXIT_CODES: Record<string, number[]> = {
@@ -309,9 +339,17 @@ describe("verbs.ts (registry)", () => {
     // between the record probe and any mutation. Demonstrated by the lock probes.
     harvest: [0, 1, 2, 4, 5, 6],
     teardown: [0, 1, 2, 4, 5, 6],
+    // DF3.2. fanout: 1 = any collected arm failure (setupFailed/armFailed/
+    // armUnknown) after a result returned; 5 = refused before anything was
+    // provisioned (fleet-busy, no-headroom); 6 = the arms LANDED and a
+    // completion line would not print. rank: 4 = unknown/unparseable fan-out
+    // id, 1 = record read/write failure, and — deliberately absent — no 5/6:
+    // rank takes no lock, provisions nothing and destroys nothing.
+    fanout: [0, 1, 2, 5, 6],
+    rank: [0, 1, 2, 4],
   };
 
-  for (const verb of ["dispatch", "status", "harvest", "teardown"]) {
+  for (const verb of ["dispatch", "status", "harvest", "teardown", "fanout", "rank"]) {
     test(`${verb} verb declares its exact flag table and exit codes`, () => {
       const entry = listVerbs().find((v) => v.verb === verb);
       expect(entry).toBeDefined();
@@ -363,7 +401,7 @@ describe("verbs.ts (registry)", () => {
       .filter((l) => l.startsWith("  "))
       .join("\n");
     expect(entries).toContain("syntheticverb");
-    for (const real of ["dispatch", "status", "harvest", "teardown"]) {
+    for (const real of ["dispatch", "status", "harvest", "teardown", "fanout", "rank"]) {
       expect(entries).not.toContain(real);
     }
   });
@@ -382,8 +420,14 @@ describe("verbs.ts (registry)", () => {
       expectFlagLines(help, entry);
       expect(help).toContain(entry.exitCodes.join(", "));
       // Both polarities really are exercised on every verb, so the pairing above
-      // cannot be satisfied by an inverted ternary.
-      expect(entry.flags.some((f) => f.required)).toBe(true);
+      // cannot be satisfied by an inverted ternary. rank is the ONE exemption:
+      // it declares no --driver (nothing it does consumes a driver), and its
+      // remaining flags are all genuinely optional, so `required` never appears
+      // — the DF3.2 ruling, pinned here so a re-added required flag must argue
+      // its way past this sentence.
+      if (entry.verb !== "rank") {
+        expect(entry.flags.some((f) => f.required)).toBe(true);
+      }
       expect(entry.flags.some((f) => !f.required)).toBe(true);
     }
     // Anchored to the FIRST line. `/Usage:|usage:|FLAGS/i` was satisfied by the
@@ -406,14 +450,28 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
   let dir: string;
   let store: RunRecordStore;
   let driver: FakeDriver;
+  // DF3.2 probes reach the fanout/rank wiring, whose stores resolve
+  // cwd-relative defaults — redirected into the case tmpdir like cli.test.ts
+  // does for QDS_RUNS_DIR, so a probe can never litter the repo's .sandbox.
+  let savedDirs: Record<string, string | undefined>;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "qds-verb-exit-"));
     driver = new FakeDriver(join(dir, "boxes"));
     store = new RunRecordStore({ dir: join(dir, "runs") });
+    savedDirs = {
+      QDS_RUNS_DIR: process.env.QDS_RUNS_DIR,
+      QDS_FANOUTS_DIR: process.env.QDS_FANOUTS_DIR,
+    };
+    process.env.QDS_RUNS_DIR = join(dir, "sandbox-runs");
+    process.env.QDS_FANOUTS_DIR = join(dir, "fanouts");
   });
 
   afterEach(() => {
+    for (const [k, v] of Object.entries(savedDirs)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -568,6 +626,49 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     /** Filesystem set-up run after the provisioning and before the invocation. Awaited, so async set-up lands before the invocation. */
     before?: () => void | Promise<void>;
   }
+
+  /**
+   * Full fanout wiring under the case tmpdir (DF3.2): manifest + brief written
+   * lazily, every store/lock path redirected, so a probe that reaches the
+   * primitive never touches the repo's .sandbox. The env redirects in
+   * beforeEach cover the stores' own defaults; these seams cover the rest.
+   */
+  const fanBrief = (): string => {
+    mkdirSync(join(dir, "manifests"), { recursive: true });
+    writeFileSync(
+      join(dir, "manifests", "pipeline.json"),
+      JSON.stringify({
+        version: "1.0.0",
+        pipelineId: "probe-pipeline",
+        runBudgetMs: 200_000,
+        phases: [
+          { name: "plan", kind: "engineer", description: "Draft the approach", maxDurationMs: 10_000, retries: 0 },
+          { name: "build", kind: "code", description: "Run the suite", command: ["bun", "test"], maxDurationMs: 40_000, retries: 0 },
+        ],
+      }),
+    );
+    return JSON.stringify({
+      repoSlug: "owner/repo",
+      issueId: 7,
+      commitSha: "c".repeat(40),
+      manifestPath: join("manifests", "pipeline.json"),
+      repoUrl: "https://github.com/owner/repo",
+    });
+  };
+  const fanDeps = (): Partial<FleetDeps> => ({
+    driver,
+    store,
+    keyApi: new FakeKeyApi(),
+    ledgerFactory: () => goodLedger(),
+    readBrief: async () => fanBrief(),
+    repoRoot: dir,
+    fanoutsDir: join(dir, "fanouts"),
+    lockPath: join(dir, "fleet.lock"),
+  });
+  const lowCeiling = (maxVms: number): LoadedQuotaLimits => ({
+    limits: { ...DEFAULT_QUOTA_LIMITS, maxVms },
+    source: "default",
+  });
 
   /** Invocations whose refusal (or success) each verb can really produce. */
   const PROBES: Record<string, Probe[]> = {
@@ -763,6 +864,91 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         stderr: ["run-locked", "no live process holds it"],
       },
     ],
+    // DF3.2's pair. fanout's exit-1 here is the SUBSTRATE shape (an untyped
+    // throw out of the primitive surfaces through report() as 1 with a named
+    // envelope); the collected-arm-failure shape is cli.test.ts's, which owns
+    // the full per-arm wiring. Exit 6 needs a stdout sink that refuses
+    // mid-stream — excused below to its cli.test.ts case.
+    fanout: [
+      // No injected driver → the same refusal dispatch owes.
+      { argv: ["fanout"], code: 2, deps: () => ({ store }), stderr: "fanout requires --driver" },
+      { argv: ["fanout", "stray"], code: 2, stderr: "takes no positional arguments" },
+      { argv: ["fanout", "--driver", "fake", "--n", "9"], code: 2, stderr: "--n" },
+      {
+        argv: ["fanout", "--driver", "fake", "--n", "2", "--cap-micro-usd", "0x10"],
+        code: 2,
+        stderr: "--cap-micro-usd",
+      },
+      // A brief that is not JSON — refused before any store is constructed.
+      { argv: ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2"], code: 2, stderr: "not valid JSON" },
+      // Refused BEFORE anything provisioned: one headroom check for all N,
+      // zero records, zero boxes. The envelope names no-headroom.
+      {
+        argv: ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "3", "--roster", "a,b,c"],
+        code: 5,
+        deps: () => ({ ...fanDeps(), quotaLimits: lowCeiling(2) }),
+        stderr: "no-headroom",
+      },
+      // The substrate arm of exit 1: fanoutsDir points at a regular FILE, so
+      // the record store's mkdir throws EEXIST mid-fan-out and report() names
+      // it. Nothing reaches stdout.
+      {
+        argv: ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "r0,r1"],
+        code: 1,
+        before: () => void writeFileSync(join(dir, "fanouts-blocked"), "not a directory"),
+        deps: () => ({ ...fanDeps(), fanoutsDir: join(dir, "fanouts-blocked") }),
+        stderr: "EEXIST",
+      },
+      // The happy path: two arms ready, one ack line each, then best-of-n's
+      // auto-rank summary (unscored — this verb has no step-output source).
+      {
+        argv: ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "r0,r1"],
+        code: 0,
+        deps: () => fanDeps(),
+        stdout: ['"outcome":"ready"', '"scores"'],
+      },
+    ],
+    rank: [
+      { argv: ["rank"], code: 2, stderr: "exactly one" },
+      { argv: ["rank", "bogus-id"], code: 2, stderr: "not a fan-out id" },
+      // Well-formed but absent: rank maps the ENOENT to its own exit 4.
+      { argv: ["rank", "fan-20260101-000000"], code: 4, stderr: "no fan-out record found" },
+      // A record that exists but cannot be parsed: substrate, not absence.
+      {
+        argv: ["rank", "fan-20260101-aaaaaa"],
+        code: 1,
+        before: () => {
+          mkdirSync(process.env.QDS_FANOUTS_DIR!, { recursive: true });
+          writeFileSync(join(process.env.QDS_FANOUTS_DIR!, "fan-20260101-aaaaaa.json"), "{ not json");
+        },
+        stderr: "malformed fan-out record",
+      },
+      // A real completed record ranks cleanly even with NO --steps-json:
+      // every arm listed score:null, tie:false, rationale on stdout, exit 0.
+      {
+        argv: ["rank", "fan-20260101-bbbbbb"],
+        code: 0,
+        before: () => {
+          const fstore = new FanoutRecordStore({ dir: process.env.QDS_FANOUTS_DIR });
+          fstore.create({
+            fanoutId: "fan-20260101-bbbbbb",
+            requestId: "01234567-89ab-cdef-0123-456789abcdef",
+            pattern: "best-of-n",
+            n: 2,
+            pin: "c".repeat(40),
+            createdAt: new Date().toISOString(),
+            arms: [
+              { arm: 0, runId: "qds-20260101-000001", briefHash: "a".repeat(64) },
+              { arm: 1, runId: "qds-20260101-000002", briefHash: "a".repeat(64) },
+            ],
+            winner: null,
+            rankedAt: null,
+            closedAt: new Date().toISOString(),
+          });
+        },
+        stdout: ['"scores"', '"tie":false'],
+      },
+    ],
   };
 
   /**
@@ -805,6 +991,17 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     status: [],
     harvest: [],
     teardown: [],
+    // fanout's probes above cover {0, 1, 2, 5}; 6 needs a stdout sink that
+    // refuses with EAGAIN mid-stream (the outputIncomplete fold), which the
+    // shared invoke() sinks here cannot do — cli.test.ts owns a sink that can.
+    fanout: [
+      {
+        code: 6,
+        why: "needs SUCCESSFUL arms and a stdout sink that throws EAGAIN — cli.test.ts",
+        coveredBy: "a fanout whose completion lines cannot print exits 6 with the work landed",
+      },
+    ],
+    rank: [], // [0, 1, 2, 4] are all probed above.
   };
 
   /**
@@ -872,7 +1069,14 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     // over an empty fleet only because dispatch's probes happen to precede it.
     // Pin the order so a registry reshuffle fails HERE rather than silently
     // changing what half the table is asserting about.
-    expect(listVerbs().map((v) => v.verb)).toEqual(["dispatch", "status", "harvest", "teardown"]);
+    expect(listVerbs().map((v) => v.verb)).toEqual([
+      "dispatch",
+      "status",
+      "harvest",
+      "teardown",
+      "fanout",
+      "rank",
+    ]);
     for (const entry of listVerbs()) {
       const probes = PROBES[entry.verb]!;
       const observed: number[] = [];
@@ -986,13 +1190,24 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  test("--driver is required:true on EVERY verb — omitting it is refused as usage", async () => {
+  test("--driver is required:true on EVERY verb that takes one — omitting it is refused as usage", async () => {
     // No injected driver, so nothing stands in for the flag. Every verb declares
     // `{name: "--driver", required: true}`; declaring it optional is how DF3.5
     // would generate a skill whose every call exits 2.
+    //
+    // DF3.2's rank is the ONE verb without the flag (it reads fan-out records
+    // and step output — no box to choose a driver FOR), so it is pinned by its
+    // own negative: no --driver declared, and it never reaches the refusal.
     for (const entry of listVerbs()) {
+      if (entry.verb === "rank") {
+        expect(entry.flags.find((f) => f.name === "--driver")).toBeUndefined();
+        continue;
+      }
       expect(entry.flags.find((f) => f.name === "--driver")?.required).toBe(true);
-      const argv = entry.verb === "dispatch" || entry.verb === "status" ? [entry.verb] : [entry.verb, "some-run"];
+      const argv =
+        entry.verb === "dispatch" || entry.verb === "status" || entry.verb === "fanout"
+          ? [entry.verb]
+          : [entry.verb, "some-run"];
       const err: string[] = [];
       expect(await run(argv, sink, { store }, (s) => void err.push(s))).toBe(2);
       expect(err.join("")).toContain(`${entry.verb} requires --driver <name>`);

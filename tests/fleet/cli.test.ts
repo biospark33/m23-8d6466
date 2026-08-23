@@ -44,6 +44,8 @@ import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { leakScan, MIN_REDACTABLE_LEN } from "../providers/fixtures/leak-scan.ts";
 import { RUN_ID_RE, RunRecordStore } from "../../src/providers/run-record.ts";
+import { FanoutRecordStore, mintFanoutId } from "../../src/fleet/fanout.ts";
+import { DEFAULT_QUOTA_LIMITS } from "../../src/providers/quota.ts";
 import type { FleetDeps, } from "../../scripts/fleet.ts";
 import type { KeyApi } from "../../src/providers/credentials.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
@@ -314,7 +316,7 @@ const MAX_BRIEF_BYTES = 64 * 1024;
  * below shrink with the registry: delete `harvest` and a registry-derived loop
  * still passes.
  */
-const EXPECTED_VERBS = ["dispatch", "status", "harvest", "teardown"] as const;
+const EXPECTED_VERBS = ["dispatch", "status", "harvest", "teardown", "fanout", "rank"] as const;
 
 /** Exit code for `fleet <verb>` with no positional and an injected driver. */
 const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
@@ -322,6 +324,8 @@ const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
   status: 0, // no runs is a state, not an error (AC4)
   harvest: 2, // missing <run-id>
   teardown: 2, // missing <run-id>
+  fanout: 2, // no --n given (DF3.2; the brief would be refused next anyway)
+  rank: 2, // missing <fanout-id>
 };
 
 /**
@@ -3591,6 +3595,244 @@ process.on = ((sig, listener) => {
     expect(text()).not.toContain("teardown.harvest_waived");
     expect(text()).not.toContain("torn down:");
 
+  });
+
+  // ─── fanout + rank (DF3.2): the two new verbs at the front door ────────────
+
+  /** Full fanout wiring over the case tmpdir — the deps() seams plus DF3.2's. */
+  function fanoutDeps(): Partial<FleetDeps> {
+    return {
+      ...deps(validBriefJson(dir)),
+      fanoutsDir: join(dir, ".sandbox", "fanouts"),
+      lockPath: join(dir, ".sandbox", "fleet.lock"),
+    };
+  }
+
+  test("e2e: fanout best-of-n admits its arms and prints one ack per arm plus the ranking line", async () => {
+    const d = fanoutDeps();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+      d,
+    );
+    expect(code).toBe(0);
+    interface ArmAck {
+      fanoutId: string;
+      arm: number;
+      runId: string;
+      outcome: string;
+      vmName?: string;
+    }
+    interface RankedLine {
+      scores: { arm: number; runId: string; score: number | null }[];
+      tie: boolean;
+      rationale: string;
+    }
+    const lines = outOnly.map((l) => JSON.parse(l) as unknown);
+    // One ack line PER ARM, then best-of-n's auto-rank summary.
+    expect(lines).toHaveLength(3);
+    const [armA, armB, ranked] = lines as [ArmAck, ArmAck, RankedLine];
+    for (const [i, arm] of [
+      [0, armA],
+      [1, armB],
+    ] as const) {
+      expect(arm?.outcome).toBe("ready");
+      expect(arm?.arm).toBe(i);
+      expect(arm?.runId).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
+      expect(typeof arm?.vmName).toBe("string");
+    }
+    expect(armA?.fanoutId).toBe(armB?.fanoutId);
+    // This verb has no step-output source (`--steps-json` is rank's flag), so
+    // every arm is LISTED unscored with a rationale saying how to score them.
+    expect(ranked?.scores.every((s) => s.score === null)).toBeTrue();
+    expect(ranked?.tie).toBeFalse();
+    expect(ranked?.rationale).toContain("--steps-json");
+    // The run records are joined to the fan-out through the extension
+    // namespace, and the fleet lock did not survive the verb.
+    const store = d.store as RunRecordStore;
+    for (const arm of [armA, armB]) {
+      const rec = store.get(arm?.runId as string);
+      expect(rec.extensions?.fanout).toEqual({
+        schemaVersion: 1,
+        fanoutId: arm?.fanoutId,
+        arm: String(arm?.arm),
+      });
+    }
+    expect(existsSync(join(dir, ".sandbox", "fleet.lock"))).toBeFalse();
+  });
+
+  test("e2e: many-stories takes the briefs wrapper and skips the ranking step", async () => {
+    const brief = JSON.parse(validBriefJson(dir)) as Record<string, unknown>;
+    const d: Partial<FleetDeps> = {
+      ...fanoutDeps(),
+      readBrief: async () => JSON.stringify({ briefs: [brief] }),
+    };
+    const code = await runCli(["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1"], d);
+    expect(code).toBe(0);
+    const lines = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>);
+    // The degenerate case is the same code path: one ack, NO ranking line.
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.outcome).toBe("ready");
+    expect(outOnly.join("")).not.toContain('"scores"');
+  });
+
+  test("fanout validation refusals exit 2 naming the guard, having provisioned nothing", async () => {
+    const manyWrapped = (): Partial<FleetDeps> => ({
+      ...fanoutDeps(),
+      readBrief: async () => JSON.stringify({ briefs: [JSON.parse(validBriefJson(dir)) as Record<string, unknown>] }),
+    });
+    const cases: [string[], string, Partial<FleetDeps>?][] = [
+      [["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "1", "--roster", "a"], "invalid-n"],
+      [
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b,c"],
+        "roster-count-mismatch",
+      ],
+      [
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b", "--pin", "d".repeat(40)],
+        "pin-mismatch",
+      ],
+      // A bare brief where the wrapper is required is refused first...
+      [["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1", "--roster", "a"], "briefs"],
+      // ...and WITH the wrapper, --roster itself is the refusal.
+      [["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1", "--roster", "a"], "roster-forbidden", manyWrapped()],
+      [["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1"], "briefs"],
+    ];
+    for (const [argv, needle, over] of cases) {
+      reset();
+      const code = await runCli(argv, over ?? fanoutDeps());
+      expect({ argv, code }).toEqual({ argv, code: 2 });
+      expect(text()).toContain(needle);
+      expectNoBoxes();
+    }
+  });
+
+  test("fanout refuses no-headroom with exit 5 before provisioning anything", async () => {
+    const d: Partial<FleetDeps> = {
+      ...fanoutDeps(),
+      quotaLimits: { limits: { ...DEFAULT_QUOTA_LIMITS, maxVms: 1 }, source: "default" },
+    };
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
+      d,
+    );
+    expect(code).toBe(5);
+    expect(text()).toContain("no-headroom");
+    expectNoBoxes();
+  });
+
+  test("a fanout whose completion lines cannot print exits 6 with the work landed", async () => {
+    const d = fanoutDeps();
+    let refused = 0;
+    const nonBlocking = (): never => {
+      refused++;
+      const e = new Error("fd 1 accepted 0 bytes") as NodeJS.ErrnoException;
+      e.code = "EAGAIN";
+      throw e;
+    };
+    const code = await run(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+      nonBlocking,
+      d,
+      errOut,
+    );
+    // 6, not 0 and not 1: both arms LANDED (boxes provisioned, records written)
+    // and only the printing failed — retrying would provision a second fan-out.
+    expect(code).toBe(6);
+    expect(refused).toBeGreaterThan(1);
+    expect(errCaptured.filter((l) => l.includes("stdout-truncated"))).toHaveLength(1);
+    // The work is real even though its acks never printed: exactly one fan-out
+    // record exists for it.
+    expect(readdirSync(join(dir, ".sandbox", "fanouts"))).toHaveLength(1);
+  });
+
+  test("rank scores a completed fan-out from --steps-json and stamps rankedAt", async () => {
+    const fanoutsPath = join(dir, ".sandbox", "fanouts");
+    const fstore = new FanoutRecordStore({ dir: fanoutsPath });
+    const id = mintFanoutId();
+    fstore.create({
+      fanoutId: id,
+      requestId: "01234567-89ab-cdef-0123-456789abcdef",
+      pattern: "best-of-n",
+      n: 2,
+      pin: "c".repeat(40),
+      createdAt: new Date().toISOString(),
+      arms: [
+        { arm: 0, runId: "qds-20260101-00000a", briefHash: "a".repeat(64) },
+        { arm: 1, runId: "qds-20260101-00000b", briefHash: "a".repeat(64) },
+      ],
+      winner: null,
+      rankedAt: null,
+      closedAt: new Date().toISOString(),
+    });
+    // Union = {a.ts, b.ts, c.ts} (3 files); each arm touches 2 ⇒ coverage 2/3.
+    // Arm 1 passes everything (rate 1.0), arm 0 passes 8/10 — a 0.12 gap, past
+    // the tie window.
+    const stepsPath = join(dir, "steps.json");
+    writeFileSync(
+      stepsPath,
+      JSON.stringify({
+        "qds-20260101-00000a": { testsExecuted: true, testResults: { passed: 8, failed: 2 }, changedFiles: ["src/a.ts", "src/b.ts"] },
+        "qds-20260101-00000b": { testsExecuted: true, testResults: { passed: 10, failed: 0 }, changedFiles: ["src/a.ts", "src/c.ts"] },
+      }),
+    );
+    reset();
+    const code = await runCli(["rank", id, "--dir", fanoutsPath, "--steps-json", stepsPath], deps(""));
+    expect(code).toBe(0);
+    const result = JSON.parse(outOnly[0] as string) as {
+      fanoutId: string;
+      scores: { arm: number; runId: string; score: number; breakdown: Record<string, number> }[];
+      tie: boolean;
+      rationale: string;
+    };
+    expect(result.fanoutId).toBe(id);
+    expect(result.scores[0]?.runId).toBe("qds-20260101-00000b"); // 1.0 pass rate wins
+    expect(result.scores[0]?.score).toBeCloseTo(1 * 0.6 + (2 / 3) * 0.4, 6);
+    expect(result.scores[1]?.score).toBeCloseTo(0.8 * 0.6 + (2 / 3) * 0.4, 6);
+    // AC7's breakdown carries EXACTLY the two keys.
+    expect(Object.keys(result.scores[0]?.breakdown ?? {}).sort()).toEqual([
+      "testPassRate",
+      "uniqueFileCoverage",
+    ]);
+    expect(result.tie).toBe(false);
+    expect(fstore.get(id).rankedAt).not.toBeNull();
+  });
+
+  test("rank without --steps-json lists every arm unscored and still exits 0", async () => {
+    const fanoutsPath = join(dir, ".sandbox", "fanouts");
+    const fstore = new FanoutRecordStore({ dir: fanoutsPath });
+    const id = mintFanoutId();
+    fstore.create({
+      fanoutId: id,
+      requestId: "01234567-89ab-cdef-0123-456789abcdef",
+      pattern: "best-of-n",
+      n: 1,
+      pin: "c".repeat(40),
+      createdAt: new Date().toISOString(),
+      arms: [{ arm: 0, runId: "qds-20260101-00000c", briefHash: "a".repeat(64) }],
+      winner: null,
+      rankedAt: null,
+      closedAt: new Date().toISOString(),
+    });
+    reset();
+    const code = await runCli(["rank", id, "--dir", fanoutsPath], deps(""));
+    expect(code).toBe(0);
+    const result = JSON.parse(outOnly[0] as string) as {
+      scores: { score: number | null }[];
+      tie: boolean;
+      rationale: string;
+    };
+    expect(result.scores).toHaveLength(1);
+    expect(result.scores[0]?.score).toBeNull(); // listed, never dropped
+    expect(result.tie).toBe(false);
+    expect(result.rationale).toContain("no step-output source provided");
+  });
+
+  test("rank refuses an unknown fan-out id with exit 4, naming it", async () => {
+    reset();
+    const code = await runCli(["rank", "fan-19700101-ffffff"], deps(""));
+    expect(code).toBe(4);
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+    expect(envelope.code).toBe("fanout-not-found");
+    expect(envelope.message).toContain("fan-19700101-ffffff");
   });
 
   // ─── CC-9: one structured line per verb, dispatch included ─────────────────

@@ -58,7 +58,7 @@
  * have to re-introduce them as branches on a caller flag — the duplication that
  * remains is the part that is supposed to differ.
  */
-import { closeSync, fstatSync, openSync, readSync, statSync, writeSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync, writeSync } from "node:fs";
 
 import {
   CostLedger,
@@ -105,6 +105,18 @@ import {
 } from "../src/fleet/dispatch.ts";
 import { listVerbs, renderHelp, type VerbEntry } from "../src/fleet/verbs.ts";
 import { statusAll, statusRun } from "../src/fleet/status.ts";
+// DF3.2: the fanout/rank front doors. fanout-primitive (not fanout.ts) holds
+// the primitive — the store module must never import it back.
+import { FANOUT_ID_RE, FanoutRecordStore, resolveFanoutsDir, type FanoutRecord } from "../src/fleet/fanout.ts";
+import {
+  assertFanoutPin,
+  fanout,
+  FANOUT_MAX_N,
+  type FanoutDeps,
+  type FanoutPattern,
+} from "../src/fleet/fanout-primitive.ts";
+import { rank, type ArmStepOutput } from "../src/fleet/rank.ts";
+import type { Brief } from "../src/fleet/brief-schema.ts";
 import type { KeyApi } from "../src/providers/credentials.ts";
 import type { ExitStatus } from "../cli-anything/src/types.ts";
 
@@ -158,6 +170,14 @@ export interface FleetDeps
   store: RunRecordStore;
   ledgerFactory: () => LedgerLike;
   readBrief: () => Promise<string>;
+  /**
+   * DF3.2 fanout/rank seams, forwarded into FanoutDeps verbatim. There is no
+   * operator flag for either — `.sandbox/fanouts` and `.sandbox/fleet.lock`
+   * follow their env/default resolution — but tests and embedders point them
+   * at a tmpdir the same way they point `--dir`.
+   */
+  fanoutsDir?: string;
+  lockPath?: string;
 }
 
 /** Every refusal is a FleetError so ONE renderer owns the envelope + exit code. */
@@ -646,6 +666,108 @@ function assertOneBriefSource(briefPath: string): void {
 }
 
 /**
+ * Brief ingress shared by every brief-eating verb — `dispatch` and DF3.2's
+ * `fanout`. The readBrief seam else the --brief/stdin discrimination, the
+ * byte cap enforced AS READ (skipped for a lossy decode), and JSON.parse.
+ * Extracted when fanout became the second caller: two copies of the cap/TTY/
+ * source discipline is exactly how they drift. The pieces themselves stay put:
+ * `readCappedStdin` streams its cap, `readBriefFile` proves the open
+ * descriptor, `assertOneBriefSource` allow-lists fd 0.
+ *
+ * Every refusal is a FleetError exit 2, so both callers' catch blocks render
+ * it unchanged. Nothing here touches disk beyond reading the brief itself.
+ */
+async function ingestBriefJson(briefPath: string | undefined, deps?: Partial<FleetDeps>): Promise<unknown> {
+  const readBrief: () => Promise<string> =
+    deps?.readBrief ??
+    (async () => {
+      if (briefPath !== undefined) {
+        assertOneBriefSource(briefPath);
+        return readBriefFile(briefPath);
+      }
+      // No prompt, no timeout: a TTY here means the operator typed a verb and
+      // would wait forever for a pipe that never arrives.
+      if (process.stdin.isTTY) {
+        throw usageError("no brief on stdin", "pipe the brief JSON in, or pass --brief <path>");
+      }
+      return readCappedStdin();
+    });
+
+  const rawBrief = await readBrief();
+  // The cap is on BYTES whichever source produced the text — `.length` counts
+  // UTF-16 code units, which under-measures every non-ASCII brief. Skipped when
+  // the decode was LOSSY: TextDecoder maps each invalid UTF-8 byte to U+FFFD,
+  // which re-encodes as THREE bytes, so a corrupt brief measured here could
+  // exceed a cap its RAW bytes had already passed — and both real readers cap
+  // raw bytes as they read. Replacement chars are proof this count no longer
+  // describes what arrived; without one the decode round-trips exactly and the
+  // measurement binds (which is what still bounds an injected reader that
+  // bypasses both real caps).
+  if (!rawBrief.includes("\u{FFFD}")) {
+    const briefBytes = Buffer.byteLength(rawBrief, "utf8");
+    if (briefBytes > MAX_BRIEF_BYTES) {
+      throw new FleetError(
+        2,
+        "brief-too-large",
+        `brief is ${briefBytes} bytes; the cap is ${MAX_BRIEF_BYTES}`,
+        "trim the brief or split payload out of it",
+      );
+    }
+  }
+  try {
+    return JSON.parse(rawBrief);
+  } catch (e) {
+    throw new FleetError(
+      2,
+      "invalid-brief",
+      `brief is not valid JSON: ${(e as Error).message}`,
+      "fix the JSON on stdin or in --brief <path>",
+    );
+  }
+}
+
+/**
+ * The budget gate's ONLY storage handle, wired beside the records dir. One
+ * implementation for dispatch and fanout — only a genuine missing record reads
+ * as undefined; every other read failure refuses the dispatch. NOT wrapped in
+ * `asUsage`: the factory runs inside each verb's admission try, which already
+ * maps an unopenable or busy ledger to its own exit-5 refusal. Wrapping here
+ * would only relabel the message on the way there.
+ */
+function makeLedgerFactory(store: RunRecordStore): () => LedgerLike {
+  return (): LedgerLike => {
+    const ledger = new CostLedger({
+      ...costLedgerOpts(store.dir),
+      readRunRecord: (id: string) => {
+        try {
+          return store.get(id);
+        } catch (e) {
+          // Optional-chained: a `throw null` must not become a TypeError in the
+          // handler that is supposed to classify it.
+          if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
+          throw e;
+        }
+      },
+    });
+    return ledger as unknown as LedgerLike;
+  };
+}
+
+/**
+ * rank's record half: ENOENT reads as "no such fan-out" (rank maps null to its
+ * exit-4 fanout-not-found), every OTHER read failure propagates — a malformed
+ * or unreadable record is exit 1 substrate, never a quiet misscored arm.
+ */
+function readFanoutForRank(store: FanoutRecordStore, fanoutId: string): FanoutRecord | null {
+  try {
+    return store.get(fanoutId);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return null;
+    throw e;
+  }
+}
+
+/**
  * Every verb logs one structured line (CC-9 observability contract):
  * {requestId, runId, verb, phase, timestamp, durationMs, exitStatus}.
  *
@@ -969,54 +1091,9 @@ export async function run(
       // INV-2: the brief is read and parsed — both side-effect free — before
       // anything is constructed. `new RunRecordStore` mkdirs and chmods the
       // records directory, which is a side effect an invalid brief must not
-      // cause.
-      const readBrief: () => Promise<string> =
-        deps?.readBrief ??
-        (async () => {
-          if (briefPath !== undefined) {
-            assertOneBriefSource(briefPath);
-            return readBriefFile(briefPath);
-          }
-          // No prompt, no timeout: a TTY here means the operator typed `fleet
-          // dispatch` and would wait forever for a pipe that never arrives.
-          if (process.stdin.isTTY) {
-            throw usageError("no brief on stdin", "pipe the brief JSON in, or pass --brief <path>");
-          }
-          return readCappedStdin();
-        });
-
-      let briefJson: unknown;
-      const rawBrief = await readBrief();
-      // The cap is on BYTES whichever source produced the text — `.length`
-      // counts UTF-16 code units, which under-measures every non-ASCII brief.
-      // Skipped when the decode was LOSSY: TextDecoder maps each invalid UTF-8
-      // byte to U+FFFD, which re-encodes as THREE bytes, so a corrupt brief
-      // measured here could exceed a cap its RAW bytes had already passed —
-      // and both real readers cap raw bytes as they read. Replacement chars
-      // are proof this count no longer describes what arrived; without one the
-      // decode round-trips exactly and the measurement binds (which is what
-      // still bounds an injected reader that bypasses both real caps).
-      if (!rawBrief.includes("\u{FFFD}")) {
-        const briefBytes = Buffer.byteLength(rawBrief, "utf8");
-        if (briefBytes > MAX_BRIEF_BYTES) {
-          throw new FleetError(
-            2,
-            "brief-too-large",
-            `brief is ${briefBytes} bytes; the cap is ${MAX_BRIEF_BYTES}`,
-            "trim the brief or split payload out of it",
-          );
-        }
-      }
-      try {
-        briefJson = JSON.parse(rawBrief);
-      } catch (e) {
-        throw new FleetError(
-          2,
-          "invalid-brief",
-          `brief is not valid JSON: ${(e as Error).message}`,
-          "fix the JSON on stdin or in --brief <path>",
-        );
-      }
+      // cause. (The seam/cap/parse machinery lives in `ingestBriefJson` since
+      // `fanout` became the second brief-eating verb.)
+      const briefJson = await ingestBriefJson(briefPath, deps);
 
       // INV-4-bis: the brief owns the correlation id. Minting one here and
       // letting dispatch() resolve a different one from the brief breaks the
@@ -1055,36 +1132,17 @@ export async function run(
             // owns the refusal envelope, so it still needs a `store` to hold —
             // it just must not be one whose construction touched the disk.
             unusedStore(resolveRunsDir(dir)));
-      const ledgerFactory =
-        deps?.ledgerFactory ??
-        ((): LedgerLike => {
-          // Mirrors createRun's wiring: only a genuine missing record reads as
-          // undefined; every other read failure refuses the dispatch.
-          //
-          // NOT wrapped in `asUsage`, unlike the teardown path's construction:
-          // this factory is called from inside `dispatch()`'s admission try,
-          // which already maps an unopenable or busy ledger to its exit-5
-          // `admission-failed` refusal. Wrapping here would only relabel the
-          // message on its way there.
-          const ledger = new CostLedger({
-            ...costLedgerOpts(store.dir),
-            readRunRecord: (id: string) => {
-              try {
-                return store.get(id);
-              } catch (e) {
-                // Optional-chained: a `throw null` must not become a TypeError
-                // in the handler that is supposed to classify it.
-                if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
-                throw e;
-              }
-            },
-          });
-          return ledger as unknown as LedgerLike;
-        });
-      // `readBrief` is the CLI's own seam; everything left is a DispatchDeps
-      // seam forwarded verbatim, so one added there is never silently dropped.
-      // The explicit keys below win over the spread.
-      const { readBrief: _readBrief, ...seams } = deps ?? {};
+      const ledgerFactory = deps?.ledgerFactory ?? makeLedgerFactory(store);
+      // `readBrief` is the CLI's own seam and fanoutsDir/lockPath are DF3.2's;
+      // everything else is a DispatchDeps seam forwarded verbatim, so one added
+      // there is never silently dropped. The explicit keys below win over the
+      // spread.
+      const {
+        readBrief: _readBrief,
+        fanoutsDir: _fanoutsDir,
+        lockPath: _lockPath,
+        ...seams
+      } = deps ?? {};
       const dispatchDeps: DispatchDeps = {
         ...seams,
         driver,
@@ -1151,6 +1209,263 @@ export async function run(
     // resolved has no correlation id to report, so one is minted for the
     // invocation rather than a run's id forged for it.
     return finish(dispatchRequestId ?? newRequestId(), verb, dispatchRunId, dispatchCode);
+  }
+
+  // ── fanout (DF3.2 D12) ──────────────────────────────────────────────────────
+  if (verb === "fanout") {
+    // Hoisted like dispatch's id: a refusal before the brief resolves has no
+    // correlation id yet, and the CC-9 line must still be emitted.
+    let fanRequestId: string | undefined;
+    let fanoutId: string | undefined;
+    let fanoutCode: number;
+    try {
+      if (positionals.length > 1) {
+        throw usageError(
+          "fanout takes no positional arguments",
+          "pass flags only — the brief rides stdin or --brief <path>",
+        );
+      }
+      const driverName = flags.get("--driver");
+      assertDriverChosen("fanout", driverName, deps?.driver);
+      // The pattern decides how the brief payload is SHAPED (many-stories wraps
+      // its briefs), so it is read first. Its VALIDITY stays with fanout()'s own
+      // validation — this only routes the parse; a typo'd pattern flows through
+      // the single-object path and is refused exit-2 there.
+      const pattern = flags.get("--pattern");
+      const nRaw = flags.get("--n");
+      // Mirrors --port: plain decimal ONLY, then range — Number() alone accepts
+      // hex (`0x3` → 3), exponents and zero padding that are not what was typed.
+      const n = typeof nRaw === "string" && /^[1-9]\d{0,1}$/.test(nRaw) ? Number(nRaw) : Number.NaN;
+      if (!Number.isInteger(n) || n < 1 || n > FANOUT_MAX_N) {
+        throw usageError(
+          `--n ${JSON.stringify(nRaw)} is not a fan-out width`,
+          `--n takes an integer 1-${FANOUT_MAX_N} (best-of-n/race need two arms to compare)`,
+        );
+      }
+      const rosterIds = flags
+        .get("--roster")
+        ?.split(",")
+        .map((s) => s.trim())
+        .filter((s) => s !== "");
+      // Positive safe integer, mirroring the --port numeric-flag idiom (D10).
+      const capRaw = flags.get("--cap-micro-usd");
+      let capMicroUsd: number | undefined;
+      if (capRaw !== undefined) {
+        capMicroUsd = /^[1-9]\d*$/.test(capRaw) ? Number(capRaw) : Number.NaN;
+        if (!Number.isSafeInteger(capMicroUsd) || capMicroUsd < 1) {
+          throw usageError(
+            `--cap-micro-usd ${JSON.stringify(capRaw)} is not a micro-dollar amount`,
+            "--cap-micro-usd takes a positive integer of micro-dollars ($1 is 1000000)",
+          );
+        }
+      }
+
+      // Brief ingestion reuses the dispatch front door verbatim — same seam,
+      // same 64 KiB cap enforced AS READ, same TTY refusal (`ingestBriefJson`).
+      const briefJson = await ingestBriefJson(briefPath, deps);
+      // many-stories carries its N briefs as { "briefs": [ … ] }; every other
+      // pattern takes exactly ONE object (fanout() refuses an array for them).
+      let briefs: unknown;
+      let requestIdSource: unknown;
+      if (pattern === "many-stories") {
+        const wrapped = (briefJson as { briefs?: unknown } | null)?.briefs;
+        if (!Array.isArray(wrapped)) {
+          throw new FleetError(
+            2,
+            "invalid-brief",
+            'many-stories needs { "briefs": [ … ] }',
+            "wrap the n brief objects in a briefs array",
+          );
+        }
+        briefs = wrapped;
+        requestIdSource = undefined;
+      } else {
+        briefs = briefJson;
+        requestIdSource = briefJson;
+      }
+      // INV-4-bis: the brief owns the correlation id where one exists (the
+      // single-brief patterns); many-stories' distinct briefs share none, so the
+      // invocation mints the ONE id CC-9 joins all arms and the record under.
+      fanRequestId = resolveBriefRequestId(requestIdSource) ?? newRequestId();
+
+      // The pin is the control variable — checked BEFORE anything is
+      // constructed, so a mismatch exits 2 having mutated nothing.
+      const schemaList: unknown[] = Array.isArray(briefs) ? briefs : [briefs];
+      assertFanoutPin(pattern as FanoutPattern, schemaList, flags.get("--pin"));
+
+      // Validation-before-construction, dispatch's exact posture: these
+      // constructors mkdir/chmod, so an invalid brief must refuse without them.
+      const briefsOk = schemaList.every((b) => BriefSchema.safeParse(b).success);
+      const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId: fanRequestId }));
+      const keyApi = deps?.keyApi ?? (briefsOk ? asUsage(() => openRouterKeyApi()) : unusedKeyApi());
+      const store =
+        deps?.store ??
+        (briefsOk
+          ? asUsage(() => new RunRecordStore({ ...storeOpts, requestId: fanRequestId }))
+          : unusedStore(resolveRunsDir(dir)));
+
+      // `readBrief` is the CLI's own seam and fanoutsDir/lockPath are re-homed
+      // below; everything else forwards verbatim into FanoutDeps.
+      const {
+        readBrief: _readBrief,
+        fanoutsDir: injectedFanoutsDir,
+        lockPath: injectedLockPath,
+        ...seams
+      } = deps ?? {};
+      const result = await fanout(pattern as FanoutPattern, n, briefs as Brief | Brief[], {
+        ...seams,
+        driver,
+        keyApi,
+        store,
+        ledgerFactory: deps?.ledgerFactory ?? makeLedgerFactory(store),
+        requestId: fanRequestId,
+        ...(injectedFanoutsDir === undefined ? {} : { fanoutsDir: injectedFanoutsDir }),
+        ...(injectedLockPath === undefined ? {} : { lockPath: injectedLockPath }),
+        ...(rosterIds === undefined ? {} : { rosterIds }),
+        ...(capMicroUsd === undefined ? {} : { capMicroUsd }),
+      });
+      fanoutId = result.fanoutId;
+
+      // One JSON line PER ARM — the status-row idiom: stdout is what a caller
+      // parses, diagnostics ride stderr.
+      for (const arm of result.arms) {
+        emit(
+          `${JSON.stringify({
+            fanoutId: result.fanoutId,
+            arm: arm.arm,
+            runId: arm.runId,
+            outcome: arm.outcome,
+            ...(arm.vmName === undefined ? {} : { vmName: arm.vmName }),
+          })}\n`,
+        );
+      }
+      // Auto-rank (AC7/D12): best-of-n's whole point, emitted when EVERY arm is
+      // ready. Advisory — it authorizes nothing and never changes the exit code.
+      // This verb has no step-output source (`--steps-json` is rank's flag), so
+      // arms list unscored with an explanatory rationale;
+      // `fleet rank <id> --steps-json …` scores them afterwards.
+      if (pattern === "best-of-n" && result.arms.every((a) => a.outcome === "ready")) {
+        const fstore = new FanoutRecordStore({ dir: resolveFanoutsDir(injectedFanoutsDir), requestId: fanRequestId });
+        const ranked = await rank(result.fanoutId, {
+          recordReader: (id) => readFanoutForRank(fstore, id),
+          recordWriter: (id, mutator) => fstore.mutate(id, (rec) => mutator(rec) as FanoutRecord),
+          stepOutputFor: () => null,
+        });
+        emit(`${JSON.stringify(ranked)}\n`);
+      }
+      // Exit 1 collects any arm that did not succeed-or-legitimately-lose:
+      // setupFailed/armFailed/armUnknown are collected failures. lostRace alone
+      // is NOT one — it is race's EXPECTED loser disposition, and a race that
+      // produced its winner worked; reporting 1 there would make automation
+      // alert on every successful race.
+      fanoutCode = result.arms.some(
+        (a) => a.outcome === "setupFailed" || a.outcome === "armFailed" || a.outcome === "armUnknown",
+      )
+        ? 1
+        : 0;
+    } catch (e) {
+      fanoutCode = report(note, e);
+    }
+    return finish(fanRequestId ?? newRequestId(), verb, fanoutId, fanoutCode);
+  }
+
+  // ── rank (DF3.2 D12/C2) ─────────────────────────────────────────────────────
+  if (verb === "rank") {
+    const requestId = newRequestId();
+    try {
+      if (positionals.length !== 2) {
+        throw usageError("rank requires exactly one <fanout-id>", "fleet rank <fanout-id> [--steps-json <path>]");
+      }
+      const fanoutId = positionals[1] as string;
+      // Grammar BEFORE any store construction: a malformed id must not mkdir the
+      // very directory it is about to be refused for.
+      if (!FANOUT_ID_RE.test(fanoutId)) {
+        throw usageError(
+          `${JSON.stringify(fanoutId.slice(0, MAX_ECHO))} is not a fan-out id`,
+          "fan-out ids look like fan-YYYYMMDD-<6hex>; `fleet fanout` prints them",
+        );
+      }
+      // NO assertDriverChosen here BY DESIGN (the registry gives rank no
+      // --driver): rank reads fan-out records and step output, never a box, so
+      // the B8 fake-driver hazard cannot arise.
+      //
+      // A WRITABLE store — rank stamps rankedAt. Shared residual: pointing
+      // --dir at an existing directory re-chmods it 0700 before the lookup can
+      // refuse; the default dir bootstrapping on first use is intended.
+      const fstore = new FanoutRecordStore({ ...(dir === undefined ? {} : { dir }), requestId });
+      // Step outputs (ruling C2): --steps-json maps runId → step output; absent
+      // ⇒ the accessor nulls EVERY arm, which rank lists score:null — advisory
+      // rank stays structurally useful rather than erroring.
+      const byRun = new Map<string, ArmStepOutput>();
+      const stepsPath = flags.get("--steps-json");
+      if (stepsPath !== undefined) {
+        let rawSteps: string;
+        try {
+          rawSteps = readFileSync(stepsPath, "utf8");
+        } catch (e) {
+          throw usageError(
+            `cannot read --steps-json ${stepsPath}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`,
+            "point --steps-json at a readable JSON file mapping run ids to step outputs",
+          );
+        }
+        let parsedSteps: unknown;
+        try {
+          parsedSteps = JSON.parse(rawSteps);
+        } catch (e) {
+          throw usageError(
+            `--steps-json is not valid JSON: ${(e as Error).message}`,
+            "fix the file, then rerun",
+          );
+        }
+        if (typeof parsedSteps !== "object" || parsedSteps === null || Array.isArray(parsedSteps)) {
+          throw usageError(
+            "--steps-json must be a JSON object keyed by run id",
+            'e.g. {"qds-…": {"testsExecuted": true, "testResults": {"passed": 3, "failed": 1}, "changedFiles": ["a.ts"]}}',
+          );
+        }
+        // Shape-check at the trust boundary: garbage entries would otherwise
+        // surface as NaN scores in the ranking table instead of a named refusal.
+        for (const [runId, out] of Object.entries(parsedSteps as Record<string, unknown>)) {
+          const bad = (why: string): FleetError =>
+            usageError(
+              `--steps-json entry ${JSON.stringify(runId)} ${why}`,
+              "each entry carries testsExecuted?, testResults{passed,failed}? and changedFiles[]?",
+            );
+          if (typeof out !== "object" || out === null || Array.isArray(out)) throw bad("must be an object");
+          const o = out as Record<string, unknown>;
+          if (o.testsExecuted !== undefined && typeof o.testsExecuted !== "boolean") {
+            throw bad("has a non-boolean testsExecuted (it is a guard flag, never a divisor)");
+          }
+          if (o.testResults !== undefined) {
+            const tr = o.testResults as Record<string, unknown> | null;
+            if (
+              typeof tr !== "object" ||
+              tr === null ||
+              !Number.isInteger(tr.passed) ||
+              !Number.isInteger(tr.failed)
+            ) {
+              throw bad("needs testResults with integer passed/failed counts");
+            }
+          }
+          if (
+            o.changedFiles !== undefined &&
+            (!Array.isArray(o.changedFiles) || o.changedFiles.some((f) => typeof f !== "string"))
+          ) {
+            throw bad("has changedFiles that is not an array of path strings");
+          }
+          byRun.set(runId, o as unknown as ArmStepOutput);
+        }
+      }
+      const result = await rank(fanoutId, {
+        recordReader: (id) => readFanoutForRank(fstore, id),
+        recordWriter: (id, mutator) => fstore.mutate(id, (rec) => mutator(rec) as FanoutRecord),
+        stepOutputFor: (runId) => byRun.get(runId) ?? null,
+      });
+      emit(`${JSON.stringify(result)}\n`);
+      return finish(requestId, verb, fanoutId, 0);
+    } catch (e) {
+      return finish(requestId, verb, undefined, report(note, e));
+    }
   }
 
   // status / harvest / teardown all take an optional-or-required runId.

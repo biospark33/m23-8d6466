@@ -784,4 +784,58 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(setArgs).toHaveLength(0);
     });
   });
+
+  // ─── AC8: two FULL invocations race the fleet lock ─────────────────────────────
+
+  describe("single-operator enforcement across full invocations (AC8)", () => {
+    test("a second fanout while the first sits between admission and mint refuses exit 5 having written nothing", async () => {
+      manifest();
+      // Barrier IN THE WINNER'S ADMISSION AWAIT: checkHeadroom's provider list
+      // parks until the loser has tried and failed to take the lock — forced
+      // interleaving through a seam, never natural timing (D14 / r9 lesson).
+      let releaseAdmission: (() => void) | undefined;
+      const admitted = new Promise<void>((resolve) => {
+        releaseAdmission = resolve;
+      });
+      const parkedDriver = boundProxy(driver, {
+        get(prop) {
+          return prop === "list" ? () => admitted.then(() => []) : undefined;
+        },
+      });
+
+      const roster = { rosterIds: ["r0", "r1"] };
+      const winner = fanout("best-of-n", 2, brief(), deps({ ...roster, driver: parkedDriver }));
+      // Merely CALLING fanout ran its whole synchronous prefix — validation,
+      // FleetLock.acquire() — and left it parked INSIDE the admission await
+      // with the lock held. Everything below therefore races a HELD lock.
+      const loserErr = await refuseOf(fanout("best-of-n", 2, brief(), deps(roster)));
+      expect(loserErr.exitCode).toBe(5);
+      // SOURCE WINS over the spec sketch's "fleet-busy" here: within ONE
+      // process the own-pid re-entrancy guard is hoisted ABOVE every
+      // contention branch (fleet-lock.ts, r8 HIGH), so a second invocation
+      // from THIS process is refused as fleet-lock-reentrant. The cross-
+      // PROCESS refusal — the shape AC8's prose actually describes — is
+      // fleet-busy, proven by fanout.test.ts's subprocess race. Both codes are
+      // exit 5 and neither provisions anything.
+      expect(loserErr.code).toBe("fleet-lock-reentrant");
+      // The loser wrote ZERO fan-out records, minted ZERO run ids and created
+      // ZERO boxes: its refusal fired before admission even returned.
+      expect(fanoutRecordFiles()).toHaveLength(0);
+      expect(boxCount(driver)).toBe(0);
+      expect(readdirSafe(join(dir, "runs"))).toHaveLength(0);
+
+      releaseAdmission?.();
+      const res = await winner;
+      expect(res.arms.map((a) => a.outcome)).toEqual(["ready", "ready"]);
+      // Exactly ONE record, TWO run records and TWO boxes exist IN TOTAL —
+      // decisive under the shared driver/store, where per-invocation
+      // attribution is not directly observable: any loser-side write would
+      // break one of these counts.
+      expect(fanoutRecordFiles()).toEqual([`${res.fanoutId}.json`]);
+      expect(boxCount(driver)).toBe(2);
+      expect(readdirSafe(join(dir, "runs")).filter((f) => f.endsWith(".json"))).toHaveLength(2);
+      // The critical section closed cleanly behind the winner.
+      expect(existsSync(lockPath)).toBe(false);
+    });
+  });
 });
