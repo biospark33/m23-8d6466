@@ -37,14 +37,14 @@ import { basename, dirname, join } from "node:path";
 
 import { isAlive } from "../../scripts/lib/run-lock.ts";
 import type { FleetError } from "../../src/fleet/dispatch.ts";
+// The fleet lock lives in its own module (D1 escape clause, orchestrator-approved
+// split); the record store stays here in fanout.test.ts's sibling fanout.ts.
+import { FLEET_LOCK_STALE_MS, FleetLock, readOwnPidStartTime } from "../../src/fleet/fleet-lock.ts";
 import {
   DEFAULT_FANOUTS_DIR,
   FANOUT_ID_RE,
-  FLEET_LOCK_STALE_MS,
-  FleetLock,
   FanoutRecordStore,
   mintFanoutId,
-  readOwnPidStartTime,
   resolveFanoutsDir,
   type FanoutRecord,
 } from "../../src/fleet/fanout.ts";
@@ -636,7 +636,7 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
 
     test("SIGINT mid-hold releases the lock — real child through the signal-install seam", async () => {
       const scriptPath = join(tmpRoot, `holder-${Date.now()}-${Math.random().toString(36).slice(2)}.ts`);
-      writeFileSync(scriptPath, CHILD_SCRIPT_SRC(realpathSync(new URL("../../src/fleet/fanout.ts", import.meta.url).pathname)));
+      writeFileSync(scriptPath, CHILD_SCRIPT_SRC(realpathSync(new URL("../../src/fleet/fleet-lock.ts", import.meta.url).pathname)));
 
       const child = Bun.spawn(["bun", scriptPath, lockPath, "req-sigint-child"]);
       children.push(child);
@@ -655,7 +655,7 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
 
     test("barrier-forced concurrent race: exactly one contender admits, the loser exits 5 fleet-busy having written nothing", async () => {
       const scriptPath = join(tmpRoot, `contender-${Date.now()}-${Math.random().toString(36).slice(2)}.ts`);
-      writeFileSync(scriptPath, CHILD_SCRIPT_SRC(realpathSync(new URL("../../src/fleet/fanout.ts", import.meta.url).pathname)));
+      writeFileSync(scriptPath, CHILD_SCRIPT_SRC(realpathSync(new URL("../../src/fleet/fleet-lock.ts", import.meta.url).pathname)));
 
       // Contender A acquires and HOLDS (idle timer) — the HELD line is the seam
       // barrier proving the critical section is occupied before B starts.
