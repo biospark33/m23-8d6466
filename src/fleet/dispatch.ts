@@ -48,7 +48,7 @@ import { newId, assertValidRunId, type RunRecordStore } from "../providers/run-r
 import { redactSecrets } from "../providers/step-log.ts";
 import { setupGate as realSetupGate, type SetupGateResult } from "../providers/exedev/setup-gate.ts";
 import { fakeGate, isSubstrateFailure } from "../providers/fake-gate.ts";
-import { parseRoster } from "../phase-engine/roster/schema.ts";
+import { parseRoster, ROSTER_MAX_BYTES } from "../phase-engine/roster/schema.ts";
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { log } from "../swarmclaw/log.ts";
@@ -156,18 +156,12 @@ export function assertFleetRunId(runId: unknown): asserts runId is string {
   try {
     assertValidRunId(runId);
   } catch (e) {
-    // `redact`, not bare `errorMessage`. This is the ONE refusal in the module
-    // that builds its `FleetError` directly instead of through `refuse`, so
-    // `refuse`'s INV-6 pass never ran over it — and the store's message echoes
-    // the raw argument, which on this path is argv. A management URL pasted
-    // into the run-id position therefore reached stderr with its query string
-    // and path intact; `redactSecrets` alone does not carry the whole-segment
-    // URL rule (that is `redact`'s half, see its docstring). Composed, so this
-    // path gets the same treatment as every other operator-facing sink here.
+    // The store's message, echo bounded, redaction composed: see
+    // `storeRunIdRefusal` for why neither half alone is enough.
     throw new FleetError(
       2,
       "invalid-run-id",
-      `${redact(errorMessage(e))}${runIdSupplied(runId)}`,
+      storeRunIdRefusal(e, runId),
       "run ids come from `fleet dispatch`; list them with `fleet status`",
     );
   }
@@ -220,6 +214,41 @@ function runIdSupplied(value: unknown): string {
   return typeof value === "string" && value.length > RUN_ID_ECHO_CHARS
     ? ` — supplied: ${runIdEcho(value)}`
     : "";
+}
+
+/**
+ * The record store's invalid-run-id message with its embedded echo made safe at
+ * BOTH ends of the redactor's reach — both call sites that surface it
+ * (`assertFleetRunId`, and the step-4 backstop in `dispatch`).
+ *
+ * The store interpolates `JSON.stringify(id)` verbatim, and one sink pass
+ * cannot bound it from either side:
+ *
+ *  - AT OR OVER the 40-char floor (`redactSecrets`' long-token arm) the sink
+ *    pass (`redact`) eats the echo whole and `runIdSupplied` carries the bounded
+ *    copy — the pinned shape;
+ *  - UNDER it the echo survives every sink verbatim: a 13–39-char pasted key
+ *    came back intact on stderr, in the dispatch log and on the payload, with
+ *    the suffix repeating it in bounded form right next to the leak. So under
+ *    the floor the bounded form is SPLICED over the raw echo instead, leaving
+ *    no full-length copy anywhere and needing no suffix.
+ *
+ * The grammar sentence stays the store's single copy either way (see
+ * `assertFleetRunId` for why it is never restated here), and `redact` still runs
+ * over the whole result so a management URL pasted into the run-id position
+ * keeps losing its path and query string.
+ */
+function storeRunIdRefusal(e: unknown, value: unknown): string {
+  const raw = errorMessage(e);
+  if (typeof value !== "string" || value.length >= 40 /* redactSecrets' LONG_TOKEN_RE floor */) {
+    return `${redact(raw)}${runIdSupplied(value)}`;
+  }
+  // A function replacement: `JSON.stringify` output can contain `$`, which a
+  // string replacement pattern would expand.
+  const storeEcho = JSON.stringify(value);
+  return raw.includes(storeEcho)
+    ? redact(raw.replace(storeEcho, () => runIdEcho(value)))
+    : `${redact(raw)}${runIdSupplied(value)}`;
 }
 
 /**
@@ -1366,7 +1395,21 @@ export async function dispatch(
       // `existsSync` reports as present) fails the same `isFile()`.
       const fd = openSync(rosterPath, constants.O_RDONLY | constants.O_NONBLOCK);
       try {
-        if (!fstatSync(fd).isFile()) throw new Error(`${rosterPath} is not a regular file`);
+        const st = fstatSync(fd);
+        if (!st.isFile()) throw new Error(`${rosterPath} is not a regular file`);
+        // SIZE, before the slurp. readFileSync + parseRoster are synchronous
+        // and run OUTSIDE every within() deadline — nothing can interrupt them
+        // — so an uncapped read let a planted multi-gigabyte roster.yaml hang
+        // the dispatch before any admission is spent: the same pre-admission
+        // wedge the FIFO guard above exists for, by volume instead of by
+        // blocking. The schema's own load path enforces this ceiling (it stats
+        // before reading too); this pre-check reads a handle directly, so the
+        // check moves with it. Same message shape, so one vocabulary.
+        if (st.size > ROSTER_MAX_BYTES) {
+          throw new Error(
+            `roster is ${st.size} bytes, over the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling`,
+          );
+        }
         rosterSlugs = parseRoster(readFileSync(fd, "utf8"), rosterPath).roles.map((r) => r.slug);
       } finally {
         closeSync(fd);
@@ -1417,10 +1460,10 @@ export async function dispatch(
       throw refuse(
         2,
         "invalid-run-id",
-        // Same suffix as `assertFleetRunId`'s: the store's echo is redacted out
-        // from under this message too, and this is the CLI's other entry point
-        // for a caller-supplied id.
-        `${errorMessage(e)}${runIdSupplied(opts.runId)}`,
+        // Same helper as `assertFleetRunId`'s: the store's embedded echo reaches
+        // this message too, and this is the CLI's other entry point for a
+        // caller-supplied id.
+        storeRunIdRefusal(e, opts.runId),
         "omit runId and let dispatch mint one, or pass a value from mintRunId()",
       );
     }
@@ -1508,12 +1551,20 @@ export async function dispatch(
       );
     }
     if (!headroom.allowed) {
+      // `list-unverified` is the SUBSTRATE failing to answer (quota.ts
+      // fail-closes on any list error or contract violation), not the brief or
+      // the budget being wrong — but exit 5 maps to do-not-retry `logic` by
+      // default. The override is what tells wave 2's retry logic this one is
+      // transient; `vm-ceiling` and `pooled-disk` stay `logic`, since waiting
+      // is exactly what their remediations prescribe.
+      const listUnverified = headroom.reason === "list-unverified";
       throw refuse(
         5,
         "no-headroom",
         `refusing dispatch: ${headroom.reason ?? "headroom"} — live ${headroom.liveVms}/${headroom.ceiling}, headroom ${headroom.headroom}`,
         "wait for a slot (fleet status), tear a run down, or raise the ceiling in the quota limits",
         { reason: headroom.reason, liveVms: headroom.liveVms, ceiling: headroom.ceiling, headroom: headroom.headroom },
+        listUnverified ? ("transient" as ExitStatus) : undefined,
       );
     }
   }
@@ -1704,7 +1755,7 @@ export async function dispatch(
   let provisioned: Awaited<ReturnType<typeof provisionAdmittedRun>>;
   /**
    * INV-4-bis's join key onto the record, best-effort, from every path that can
-   * leave a record behind.
+   * leave THIS dispatch's own record behind.
    *
    * `store.create` takes only an id, so the correlation can only be WRITTEN once
    * a record exists — but the value has been known since step 2, and the write
@@ -1715,6 +1766,11 @@ export async function dispatch(
    * step's own failure path, and again from the abandoned-success handler, which
    * is the moment a record created by a call this dispatch had already given up
    * on is known to exist.
+   *
+   * NOT from the `run-id-in-use` arm: there the EEXIST names a record this
+   * dispatch did not create — the winner's, on the shared-runId race — and
+   * stamping would merge this dispatch's `requestId` onto it, inverting the
+   * join key. See the provisioning catch.
    *
    * Best-effort by construction: the record may not exist yet (ENOENT, on the
    * pre-check timeout), and a failure to stamp a correlation must never replace
@@ -1767,11 +1823,24 @@ export async function dispatch(
       },
     );
   } catch (e) {
-    // Whatever went wrong, a record may exist for this id (INV-1 writes it
-    // first) — and a record with no correlation joins to nothing.
-    stampCorrelation();
+    // Whatever went wrong, a record may exist FOR THIS ID — but whether it is
+    // THIS dispatch's own decides whether the correlation may be stamped onto
+    // it. INV-1 writes the record before anything billable, so most paths here
+    // own whatever record they leave; the exception is the loser of a
+    // shared-runId race, whose EEXIST names the WINNER's record file. Stamping
+    // unconditionally merged THIS dispatch's requestId onto that record (the
+    // store merges patches), inverting INV-4-bis's join key: the winner's log
+    // lines then join to the loser's dispatch and vice versa. So — stamp on the
+    // timeout arm first (its record, when one exists, was written by this call:
+    // `store.create` succeeded before `driver.create` could be in flight), skip
+    // it on the run-id-in-use arm below (the record is someone else's), and
+    // stamp again past both arms, where the record can only be ours.
+    //
     // `timedOut` already produced one (and already refused) — do not double-log.
-    if (e instanceof FleetError) throw e;
+    if (e instanceof FleetError) {
+      stampCorrelation();
+      throw e;
+    }
     // `store.create`'s O_EXCL is the AUTHORITATIVE arbiter of run-id identity;
     // the step-4 check is a fast path. Two concurrent dispatches sharing an
     // explicit `opts.runId` (DF3.2's fan-out shape) both pass that check and
@@ -1816,6 +1885,9 @@ export async function dispatch(
       errno?.code === "EEXIST" &&
       (errno.path === undefined || errno.path === null || errno.path === deps.store.path(runId))
     ) {
+      // No stampCorrelation here, deliberately: the EEXIST names a record this
+      // dispatch did not create — the winner's, in the race case. See the catch
+      // header.
       throw refuse(
         2,
         "run-id-in-use",
@@ -1823,6 +1895,11 @@ export async function dispatch(
         `omit runId for a fresh one, or tear the existing run down: bun scripts/fleet.ts teardown ${runId}`,
       );
     }
+    // Past both arms above, any record under this id was created by THIS call
+    // (INV-1) and the correlation belongs on it — best-effort exactly as the
+    // helper promises: the refusal below must not be replaced by a stamp
+    // failure.
+    stampCorrelation();
     throw refuse(
       1,
       "provision-failed",
@@ -2077,12 +2154,18 @@ export async function dispatch(
       // Gated on the SAME predicate as the gate below (see `isExedevDriver`):
       // keyed on `.fill` alone, a driver with `fill` and no `setup` got its repo
       // cloned and was then handed the dir-box gate, which probes for none of it.
-      await within("clone", () =>
-        exedevDriver.fill(vm.name, {
-          runId,
-          repoUrl: valid.repoUrl,
-          commitSha: valid.commitSha,
-        }),
+      await within(
+        "clone",
+        () =>
+          exedevDriver.fill(vm.name, {
+            runId,
+            repoUrl: valid.repoUrl,
+            commitSha: valid.commitSha,
+          }),
+        // Resolves `void`; what a late one means is that the repo landed in the
+        // box AFTER the operator was told the dispatch failed. The box is the
+        // fact.
+        () => ({ vmName: vm.name, clonedLate: true }),
       );
     }
     await within("fill", () => fillRun(deps.driver, vm.name, files));
@@ -2193,14 +2276,18 @@ export async function dispatch(
       // `setup gate failed at item ?: ` — a refusal that keeps a billable box
       // alive to explain itself and then explains nothing. Name the absence.
       //
-      // `escapeText` over the gate's own strings. An exedev assertion `note` is
-      // whatever the BOX printed, and it lands in three operator-facing sinks
-      // (stderr via the dispatch log, the CLI-printed payload, the structured
-      // line). `refuse` redacts them — but redaction is about secrets, and a
-      // note of `"\x1b[2J"` or `"\nFLEET dispatch ok runId=fake"` is not a
-      // secret, it is a terminal escape and a forged log line. The
-      // `invalid-brief` path has escaped its third-party text since it was
-      // written; these two are the module's other two sources of it.
+      // `escapeText` over every gate-supplied string. An exedev assertion
+      // `note` is whatever the BOX printed, and it lands in three operator-
+      // facing sinks (stderr via the dispatch log, the CLI-printed payload, the
+      // structured line). `refuse` redacts them — but redaction is about
+      // secrets, and a note of `"\x1b[2J"` or `"\nFLEET dispatch ok
+      // runId=fake"` is not a secret, it is a terminal escape and a forged log
+      // line. The same holds for everything else here the gate chose — the
+      // debug/teardown COMMAND strings and the assertion ITEM LABELS come off
+      // the same result object the note does — so they get the treatment too;
+      // only the locally composed `bun scripts/fleet.ts …` fallbacks are this
+      // module's own text. The `invalid-brief` path has escaped its third-party
+      // text since it was written; these are the module's other sources of it.
       const failedNote = gateAssertions.find((a) => !a.ok)?.note;
       throw refuse(
         3,
@@ -2210,17 +2297,17 @@ export async function dispatch(
             ? "the gate reported no failing assertion — inspect the box directly"
             : escapeText(failedNote)
         }`,
-        `debug: ${debugCommands.join("; ")} — teardown when done: ${teardownCommand}`,
+        `debug: ${debugCommands.map(escapeText).join("; ")} — teardown when done: ${escapeText(teardownCommand)}`,
         {
           assertionCode: gate.assertionCode,
           failedItem: gate.failedItem,
           // `refuse` redacts every string leaf of the payload at the choke
           // point, so nothing here (or at any other call site) repeats THAT.
           // The escaping is a different guarantee and is not at a choke point:
-          // it applies to the text the box chose, not to the item labels this
-          // line composes around it.
+          // item labels come off the gate's result object just like the notes,
+          // so they get it too.
           assertions: gateAssertions.map(
-            (a) => `${a.item}:${a.ok ? "ok" : escapeText(a.note)}`,
+            (a) => `${escapeText(a.item)}:${a.ok ? "ok" : escapeText(a.note)}`,
           ),
         },
         // A gate that failed because the PROBE NEVER RAN is a broken box, not a
@@ -2303,7 +2390,14 @@ export async function dispatch(
         // driver-boundary guard, not a modelled outcome — and the right answer at
         // that boundary is to refuse before the box is public (INV-5 keeps it
         // alive and diagnosable) rather than to publish a box nobody can name.
-        if (ctxHttpsUrl === undefined) {
+        // Blank is the same outcome by another road: driver.ts normalizes
+        // whitespace-only URLs to undefined at ITS boundary (`address`), but
+        // `""` is a string and is not an address either, so a driver that skips
+        // that helper hands one straight through — same refusal, same family.
+        // The port claim below is RETAINED: `expose` RESOLVED, so the port is
+        // real even where the address is not usable (the retraction's own
+        // second case).
+        if (ctxHttpsUrl === undefined || ctxHttpsUrl.trim().length === 0) {
           throw refuse(
             1,
             "expose-no-url",

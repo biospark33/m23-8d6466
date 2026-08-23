@@ -1337,7 +1337,12 @@ export class RunRecordStore {
       onDisk = undefined;
     }
     if (onDisk === raw) {
-      rmSync(claimed, { force: true });
+      // rmQuiet, not a bare rmSync: the corpse is proven and judged, but this
+      // still runs under `withLock`, and an EIO/EACCES escaping here aborts the
+      // claim attempt AFTER the take succeeded. Nothing this cleanup does may
+      // escape (see claimLock); a leftover is pid-stamped, so cleanStaleTemps
+      // sweeps it once this process is gone.
+      rmQuiet(claimed);
       return null; // provably the corpse that was judged
     }
     // A different — or unreadable — body: the corpse was cleared and a NEW
@@ -1357,9 +1362,16 @@ export class RunRecordStore {
     // HELD keeps THIS writer fail-closed — it waits out the timeout with the
     // reason attached rather than joining the overlap — and the log line is
     // what tells an operator the lock needs putting back by hand.
+    //
+    // The evidence is parked under a name `cleanStaleTemps` does not match:
+    // these bytes are exactly what that log line tells an operator to restore,
+    // and a `.tmp` name would let the next sweep destroy them within one cycle
+    // of this pid dying or its grace elapsing. `parkAside` reports wherever the
+    // bytes actually are — the move can fail too — so the line names the truth.
+    const heldAside = parkAside(claimed);
     this.emit(null, "lock.not-restored", Date.now(), "error", {
       code: "lock_not_restored",
-      message: `run record lock left vacated after a steal attempt: ${lock} (body held aside at ${claimed})`,
+      message: `run record lock left vacated after a steal attempt: ${lock} (body held aside at ${heldAside})`,
     });
     return "lock could not be restored after a steal attempt";
   }
@@ -1423,7 +1435,14 @@ export class RunRecordStore {
       onDisk = undefined;
     }
     if (onDisk === body) {
-      rmSync(claimed, { force: true });
+      // rmQuiet, not a bare rmSync: the record write has ALREADY COMMITTED by
+      // the time this finally runs, and a throwing rm (EIO/EACCES/EPERM —
+      // `force` suppresses only ENOENT) would replace the caller's success with
+      // an error, sending a retry back through a read of the pre-commit record
+      // — a doubled spend delta on the money path. Nothing this cleanup does
+      // may escape (see claimLock); a leftover is pid-stamped, so
+      // cleanStaleTemps sweeps it once this process is gone.
+      rmQuiet(claimed);
       return;
     }
     // Foreign — or unreadable — body: the lock was replaced between the read
@@ -1438,10 +1457,13 @@ export class RunRecordStore {
     // `fn()`. Throwing is not available here — this runs in a `finally`, where
     // it would replace the caller's real error — but silence is what let the
     // next contender claim a lock somebody else still holds. Log it: only an
-    // operator can restore the path from `claimed`.
+    // operator can restore the path from where `parkAside` reports the body —
+    // parked under a name `cleanStaleTemps` does not sweep, so the evidence
+    // outlives this process instead of being destroyed within one sweep cycle.
+    const held = parkAside(claimed);
     this.emit(null, "lock.not-restored", Date.now(), "error", {
       code: "lock_not_restored",
-      message: `run record lock left vacated on release: ${lock} (body held aside at ${claimed})`,
+      message: `run record lock left vacated on release: ${lock} (body held aside at ${held})`,
     });
   }
 
@@ -1474,7 +1496,10 @@ export class RunRecordStore {
       // Guarded, not try/catch'd: fd numbers are recycled, and `beforeRename`
       // may have opened something else by the time we land here.
       if (fdOpen) closeSync(fd);
-      rmSync(tmp, { force: true });
+      // Quiet, same doctrine as the lock cleanups: this temp is inert litter
+      // if it survives, and a throwing rm here would replace the REAL error
+      // `e` the caller needs.
+      rmQuiet(tmp);
       throw e;
     }
   }
@@ -1499,7 +1524,17 @@ export class RunRecordStore {
     }
   }
 
-  /** Observability contract: one line per record mutation, never the keyHash value. */
+  /**
+   * Observability contract: one line per record mutation, never the keyHash value.
+   *
+   * Guarded like cost-ledger's emit, for the same reason: every caller is PAST
+   * its outcome by the time it emits — `traced`'s error arm included, where a
+   * raising sink would REPLACE the real error — so a throwing custom sink must
+   * not turn a durable result into a thrown one. Swallow with a stderr note
+   * naming the verb; never echo the payload, which is not redacted on stderr.
+   * The stderr write itself is best-effort too: a diagnostic that throws is
+   * worse than silence.
+   */
   private emit(
     runId: string | null,
     verb: string,
@@ -1508,21 +1543,27 @@ export class RunRecordStore {
     error?: { code: string; message: string },
   ): void {
     const durationMs = Date.now() - started;
-    log({
-      requestId: this.requestId,
-      operation: `run-record.${verb}`,
-      agentId: null,
-      timestamp: new Date().toISOString(),
-      duration: durationMs,
-      status: outcome,
-      ...(error ? { error } : {}),
-      runId,
-      driver: null,
-      verb,
-      durationMs,
-      outcome,
-      record_write_ms: durationMs,
-    });
+    try {
+      log({
+        requestId: this.requestId,
+        operation: `run-record.${verb}`,
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: durationMs,
+        status: outcome,
+        ...(error ? { error } : {}),
+        runId,
+        driver: null,
+        verb,
+        durationMs,
+        outcome,
+        record_write_ms: durationMs,
+      });
+    } catch (e) {
+      noteOnStderr(
+        `run-record: log sink threw for run-record.${verb} (${(e as Error).message}) — the record outcome stands\n`,
+      );
+    }
   }
 }
 
@@ -1530,9 +1571,10 @@ export class RunRecordStore {
  * Re-link a lock body held aside at `claimed` back to `lock`. True when the
  * lock path ends up correctly served AND `claimed` has been disposed of here —
  * callers must not unlink it afterwards. False means the put-back did NOT
- * happen and `claimed` is the ONLY remaining link to the body; leave it
- * exactly where it is (pid-stamped, so `cleanStaleTemps` sweeps it once this
- * process is gone).
+ * happen and `claimed` is the ONLY remaining link to the body; the callers park
+ * it aside (`parkAside`) under a name `cleanStaleTemps` does not sweep — it is
+ * evidence an operator has been told to restore by hand, not litter for the
+ * next construction to destroy.
  *
  * The return value is the whole point. `link` succeeding puts the body back,
  * and the second link at `claimed` is then redundant, so it is unlinked here —
@@ -1552,8 +1594,8 @@ export class RunRecordStore {
  * support, EIO) means the put-back did NOT happen, and `claimed` is then the
  * ONLY remaining link to that body: unlinking it destroys a lock a live holder
  * is still inside, letting two `setLocked` read-modify-writes overlap and drop
- * a field. Leave it on disk instead — it is pid-stamped, so `cleanStaleTemps`
- * really does sweep it once this process is gone.
+ * a field. Leave it on disk instead — parked under an unswept sibling name by
+ * the caller, which is what keeps manual restoration possible.
  *
  * Same shape as `scripts/lib/run-lock.ts`'s release, for the same reason.
  */
@@ -1574,18 +1616,38 @@ function putBack(claimed: string, lock: string): boolean {
 /**
  * Move a held-aside body that must not be deleted — an unrestorable lock
  * generation, a tombstone window's non-tombstone — to a unique sibling orphan
- * name, and say so on stderr. Failing to move leaves the body where it is:
- * either name is inert and pid-stamped, swept by `cleanStaleTemps` once this
- * process is gone.
+ * name, say so on stderr, and report WHERE THE BYTES ARE: the orphan name on
+ * success, `p` itself when the move failed, so every caller names the truth.
+ *
+ * The orphan carries NO `.tmp` suffix ON PURPOSE. These bytes are evidence an
+ * operator has been told to restore by hand (`lock.not-restored`), and a `.tmp`
+ * name sits inside `cleanStaleTemps`' reach — swept within one cycle of this
+ * pid dying or OWN_TEMP_GRACE_MS elapsing, exactly when nobody has restored
+ * them yet. Inert either way: no shape the store reads as record, lock or
+ * probe. A failed move leaves the body at its original `.tmp` name — degraded
+ * back to sweepable, but the stderr note already said where it was.
  */
-function parkAside(claimed: string): void {
-  const orphan = `${claimed}.orphan.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+function parkAside(p: string): string {
+  const orphan = `${p}.orphan.${process.pid}.${randomBytes(4).toString("hex")}`;
   try {
-    renameSync(claimed, orphan);
+    renameSync(p, orphan);
   } catch {
-    return;
+    return p;
   }
-  process.stderr.write(`run-record: parked an unrestorable held-aside lock body at ${orphan}\n`);
+  noteOnStderr(`run-record: parked an unrestorable held-aside lock body at ${orphan}\n`);
+  return orphan;
+}
+
+/**
+ * Best-effort diagnostic write: never throws, never delays the caller. A
+ * failing stderr is itself unreportable, so the second layer is silence.
+ */
+function noteOnStderr(line: string): void {
+  try {
+    process.stderr.write(line);
+  } catch {
+    // best-effort diagnostic only
+  }
 }
 
 /**

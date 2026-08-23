@@ -411,6 +411,29 @@ export interface LoadedCostConfig {
   file?: string;
 }
 
+/**
+ * A throwing log sink must not turn an outcome the ledger has ALREADY COMMITTED
+ * (or a legitimate layout it is only reporting) into a thrown error. Swallow
+ * with a stderr note naming the operation; never echo the payload itself —
+ * stderr is a second channel and these lines are not redacted. The default sink
+ * already drops on EPIPE, so only a raising custom sink reaches the catch — and
+ * the stderr note is best-effort too: a diagnostic that throws is worse than
+ * silence.
+ */
+function emitGuarded(line: Parameters<typeof log>[0]): void {
+  try {
+    log(line);
+  } catch (e) {
+    try {
+      process.stderr.write(
+        `cost-ledger: log sink threw for ${line.operation} (${(e as Error).message}) — the ledger outcome stands\n`,
+      );
+    } catch {
+      // best-effort diagnostic only
+    }
+  }
+}
+
 /** Mirrors quota.ts's loader: absent file ⇒ defaults; a config that cannot be trusted never falls back silently. */
 export function loadCostConfig(
   file: string = process.env.QDS_COST_CONFIG_FILE ?? DEFAULT_COST_CONFIG_FILE,
@@ -426,8 +449,10 @@ export function loadCostConfig(
       // so relocating the records (`--dir`, $QDS_RUNS_DIR) silently swaps the
       // operator's caps for the built-ins — the same spend priced against a
       // different ceiling, with nothing on stdout or stderr saying so. Name the
-      // path we looked at; the fallback itself stays non-fatal.
-      log({
+      // path we looked at; the fallback itself stays non-fatal. Guarded like
+      // every other emission here: a raising sink must not convert a legitimate
+      // layout into a thrown error.
+      emitGuarded({
         requestId: newRequestId(),
         operation: "cost-ledger.config",
         agentId: null,
@@ -1190,7 +1215,13 @@ export class CostLedger {
     // and the transaction are still read live inside it — a race that can only
     // add the odd record, never the whole list. Correctness is untouched: the
     // SUM→INSERT serialization the gate depends on is all still inside.
-    const prefetched = new Map<string, { record?: RunCostRecord; error?: unknown }>();
+    // Only SUCCESSFUL reads are cached. An ABSENCE or a THROW is a fact about
+    // the prefetch instant, not about the decision: freezing either across the
+    // gap to the write lock retired reservations whose record had appeared
+    // meanwhile (`{record: undefined}` → expired-orphan for a row whose
+    // dispatch had just created its record) or expired them off an error that
+    // had already cleared. Both are re-read LIVE inside the transaction below.
+    const prefetched = new Map<string, RunCostRecord>();
     // Moving this read OUT of the transaction moved it out of the busy mapping
     // too: `decide.immediate()` below translates SQLITE_BUSY into the typed
     // `ledger-busy` refusal, and for as long as the read lived inside it, so did
@@ -1212,12 +1243,12 @@ export class CostLedger {
     }
     for (const row of admittedRuns) {
       try {
-        prefetched.set(row.runId, { record: this.readRunRecord(row.runId) });
-      } catch (error) {
-        // A throw is classified inside the loop below (young ⇒ refuse, aged ⇒
-        // expire), so it is CARRIED there rather than thrown here — reading a
-        // record early must not change which dispatch the failure lands on.
-        prefetched.set(row.runId, { error });
+        const record = this.readRunRecord(row.runId);
+        if (record !== undefined) prefetched.set(row.runId, record);
+      } catch {
+        // Not cached — see the map comment above: the transaction re-reads
+        // live, so a fault here costs one extra read inside the lock instead of
+        // freezing a transient failure into an expiry.
       }
     }
     // Log lines the reservation loop wants to emit, flushed after the write
@@ -1328,14 +1359,15 @@ export class CostLedger {
         // refusing once is recoverable where over-granting the cap is not.
         let record: RunCostRecord | undefined;
         try {
-          // Prefetched outside the write lock; read live only for a row that
-          // appeared since (see the hoist above). Either way the classification
-          // below is identical — the map carries a throw rather than swallowing
-          // it, so the failure still lands on this dispatch.
+          // Prefetched outside the write lock — but only a successful read is
+          // trusted across that gap. A cache miss (row appeared since, or the
+          // prefetch read failed) re-reads LIVE here: one extra syscall inside
+          // the lock, against silently expiring a reservation whose record is
+          // already on disk or whose prefetch fault was transient. The
+          // classification below is unchanged — a throw still lands on THIS
+          // dispatch, young ⇒ refuse, aged ⇒ expire.
           const cached = prefetched.get(row.runId);
-          if (cached === undefined) record = this.readRunRecord(row.runId);
-          else if (cached.error !== undefined) throw cached.error;
-          else record = cached.record;
+          record = cached ?? this.readRunRecord(row.runId);
         } catch (e) {
           if (young) throw e;
           // Never silent: the expired row is named, so an operator can tell an
@@ -1516,22 +1548,6 @@ export class CostLedger {
         admittedCeilingMicroUsd: ceiling,
       };
     });
-    // A throwing log sink (a custom setLogSink that raises) must not turn an
-    // outcome the ledger has ALREADY COMMITTED into a thrown error: past this
-    // point every mutation is durable and the caller needs the decision, not
-    // a retry. Swallow with a stderr note naming the operation; never echo the
-    // payload itself — stderr is a second channel and these lines are not
-    // redacted. The default sink already drops on EPIPE, so only a raising
-    // custom sink can reach the catch.
-    const emit = (line: Parameters<typeof log>[0]): void => {
-      try {
-        log(line);
-      } catch (e) {
-        process.stderr.write(
-          `cost-ledger: log sink threw for ${line.operation} (${(e as Error).message}) — the ledger outcome stands\n`,
-        );
-      }
-    };
     let decision: AdmissionDecision;
     try {
       decision = decide.immediate();
@@ -1539,11 +1555,12 @@ export class CostLedger {
       throw ledgerBusyError(e) ?? e;
     } finally {
       // finally, not the success path: a transaction that threw after expiring a
-      // reservation still owes the operator that line.
-      for (const line of pendingLogs) emit(line);
+      // reservation still owes the operator that line. `emitGuarded` because a
+      // committed outcome must survive a raising sink — see its docstring.
+      for (const line of pendingLogs) emitGuarded(line);
     }
     const durationMs = Date.now() - started;
-    emit({
+    emitGuarded({
       requestId: input.requestId,
       operation: "cost-ledger.gate",
       agentId: null,

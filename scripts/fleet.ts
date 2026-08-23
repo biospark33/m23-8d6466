@@ -793,6 +793,33 @@ export async function run(
    */
   const finish = (rid: string, v: string, runId: string | undefined, code: number): number =>
     logVerb(rid, v, runId, startedAt, code === 0 && outputIncomplete ? 6 : code);
+  /**
+   * The dispatch ack's posture over the COMPLETION lines — teardown's
+   * `torn down:` and harvest's `harvested:`. Those lines describe work that has
+   * already happened: a destroyed box, a closed record, a captured tree. A bare
+   * `emit` tolerates EPIPE silently and EAGAIN as `stdout-truncated`, but a
+   * non-EPIPE/EAGAIN throw (ENOSPC, EBADF) escaped the verb's try into
+   * `report`, which stamps it exit 1 = `transient` = "retry me" — automation
+   * re-running a destructive verb that had already landed. So the write failure
+   * is caught here, named ONCE on stderr, and reported as false: the caller
+   * exits 6, "the work landed but its line did not print", outside the retry
+   * range like every other landed-but-unreportable code in this file.
+   */
+  const reportCompletion = (...lines: string[]): boolean => {
+    try {
+      for (const line of lines) emit(line);
+      return true;
+    } catch (e) {
+      const x = (e ?? {}) as { message?: string };
+      printError(
+        note,
+        "completion-unwritable",
+        `the command completed but its result line could not be written to stdout: ${redactSecrets(x.message ?? e)}`,
+        "the work the missing line describes DID happen — confirm with `fleet status`; do not treat the short output as a failure to retry",
+      );
+      return false;
+    }
+  };
   // The ONE pre-tokenization reading of argv: `fleet help` names no verb to
   // tokenize against. Anchored to argv[0], so it cannot fire from a stray token
   // inside a destructive invocation the way `argv.includes("--help")` did.
@@ -1098,7 +1125,7 @@ export async function run(
         printError(
           note,
           "ack-unwritable",
-          `the box for ${ack.runId} is live but its ack could not be written to stdout: ${(e as Error).message}`,
+          `the box for ${ack.runId} is live but its ack could not be written to stdout: ${redactSecrets((e as Error).message)}`,
           `record run id ${ack.runId} now — \`fleet teardown ${ack.runId}\` is the only thing that stops it billing`,
           { runId: ack.runId },
         );
@@ -1326,8 +1353,13 @@ export async function run(
     if (verb === "harvest") {
       // D8: harvest is credential-free — no keyApi is built.
       const res = await harvestRun(tdeps, runIdArg);
-      emit(res.outcome === "harvested" ? `harvested: ${res.count}\n` : "harvested: none\n");
-      code = 0;
+      // Through `reportCompletion`, not a bare `emit` (see it): the harvest
+      // has already run, so a lost result line is 6, never a retryable 1.
+      code = reportCompletion(
+        res.outcome === "harvested" ? `harvested: ${res.count}\n` : "harvested: none\n",
+      )
+        ? 0
+        : 6;
     } else {
       // Set by the branch below, read after the teardown: a possibly-live key
       // this teardown provably cannot revoke is not a success, and it cannot be
@@ -1392,11 +1424,32 @@ export async function run(
       // "the caller reached its finally" looks the same whether
       // `teardownSandbox` returned or threw.
       destructiveInFlight = false;
-      clearRunLockDestructive(lock);
+      // Guarded like the `finally` cleanups below, and for the same reason: the
+      // teardown has LANDED, so a failure clearing the destructive mark is
+      // bookkeeping left undone, not a verb to retry. Letting it escape to the
+      // generic catch stamped landed destructive work exit 1 `transient`. 6 is
+      // what the finally gives the sibling leftovers: "already done, still
+      // needs an operator" — the mark stays set, so every later harvest or
+      // teardown of this run refuses until an operator removes it.
+      let markCleared = true;
+      try {
+        clearRunLockDestructive(lock);
+      } catch (e) {
+        markCleared = false;
+        const x = (e ?? {}) as { message?: string };
+        printError(
+          note,
+          "lock-clear-failed",
+          `could not clear the destructive mark on ${lock}: ${redactSecrets(x.message ?? e)}`,
+          `rm ${lock} by hand once no other invocation holds it — until then every later harvest or teardown of this run refuses`,
+        );
+      }
       // Reported AFTER the teardown ran: printed first, it claims a waiver for
       // a teardown that may never have happened.
-      if (noHarvest) emit(`teardown.harvest_waived ${runIdArg}\n`);
-      emit(`torn down: ${runIdArg}\n`);
+      const reportedLanding = reportCompletion(
+        ...(noHarvest ? [`teardown.harvest_waived ${runIdArg}\n`] : []),
+        `torn down: ${runIdArg}\n`,
+      );
       // NOT 0. The box is gone and the record is closed, so the verb's own work
       // landed — but a key that may still be minting spend was not revoked and
       // this CLI cannot find it. `torn down:` + exit 0 is what `fleet teardown
@@ -1412,8 +1465,10 @@ export async function run(
       // leftover is a live credential no retry of this verb can reach. 6 is
       // "already done, still needs an operator", which is exactly the manual
       // key revocation the stderr line just asked for. It is in teardown's
-      // declared set (src/fleet/verbs.ts) already.
-      code = keyUnattributable ? 6 : 0;
+      // declared set (src/fleet/verbs.ts) already. The un-clearable mark and
+      // the unwritable result line above are the same classification — landed
+      // work with a leftover only an operator can resolve.
+      code = keyUnattributable || !markCleared || !reportedLanding ? 6 : 0;
     }
   } catch (e) {
     code = report(note, e);
@@ -1441,7 +1496,7 @@ export async function run(
         printError(
           note,
           "ledger-close-failed",
-          `could not close the cost ledger: ${(e as Error).message}`,
+          `could not close the cost ledger: ${redactSecrets((e as Error).message)}`,
           "the handle dies with the process; re-run to confirm it still reads",
         );
         cleanupFailed();
@@ -1485,7 +1540,7 @@ export async function run(
         printError(
           note,
           "lock-release-failed",
-          `could not release ${lock}: ${(e as Error).message}`,
+          `could not release ${lock}: ${redactSecrets((e as Error).message)}`,
           `rm ${lock} by hand once no other invocation holds it — until then every later harvest or teardown of this run refuses`,
         );
         cleanupFailed();

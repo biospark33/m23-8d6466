@@ -96,8 +96,54 @@ const NO_CONTROL_CHARS = new RegExp(`^[^${CONTROL_CHAR_CLASS}]*$`, "u");
 const CONTROL_CHARS_G = new RegExp(`[${CONTROL_CHAR_CLASS}]`, "gu");
 
 /**
+ * The one ill-formedness the category classes above cannot see: a LONE
+ * surrogate. `\uD800` unpaired is an unassigned code point, not Cc/Zl/Zp/Cf,
+ * so `cfg/pi\u{D800}pe.json` passes NO_CONTROL_CHARS and reaches Node `fs`,
+ * which answers it with the same untyped `ERR_INVALID_ARG_VALUE` the NUL arm
+ * exists to prevent — a lone surrogate has no UTF-8 encoding, and every fs
+ * call that takes a string refuses mid-surrogate instead of producing the
+ * exit 2 this schema owns.
+ *
+ * `isWellFormed` (ES2024) is exactly that predicate, and it rides WITH the
+ * control-char rule wherever the rule applies — as this rejecter on each field
+ * that carries NO_CONTROL_CHARS, and as the matcher half inside
+ * `sanitizeLabel` — so the two arms keep agreeing by construction.
+ *
+ * Implemented as a scan rather than `String.prototype.isWellFormed` because the
+ * project's lib target predates ES2024; the semantics are copied verbatim: a
+ * high surrogate must be followed by a low one, a low one must follow a high.
+ */
+function isWellFormed(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      if (!(s.charCodeAt(i + 1) >= 0xdc00 && s.charCodeAt(i + 1) <= 0xdfff)) return false;
+      i++; // the pair was consumed as one unit
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return false; // low surrogate with no high before it
+    }
+  }
+  return true;
+}
+
+/**
+ * The matcher arm of the same rule, shared with `sanitizeLabel`: code points
+ * iterated whole, so a PAIRED surrogate survives as one unit while a lone one
+ * becomes U+FFFD. Run AFTER any slicing so a cap cut through a pair cannot
+ * leave half of one behind either.
+ */
+function repairLoneSurrogates(s: string): string {
+  let out = "";
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) as number;
+    out += cp >= 0xd800 && cp <= 0xdfff ? "\u{FFFD}" : ch;
+  }
+  return out;
+}
+
+/**
  * Attacker-authored text on its way into an operator-facing label: control
- * characters removed, length capped.
+ * characters removed, lone surrogates replaced with U+FFFD, length capped.
  *
  * Every guard above is on a brief VALUE, and that leaves the REJECTION path
  * uncovered — a key NAME is attacker-chosen, is never matched against any
@@ -125,8 +171,13 @@ const CONTROL_CHARS_G = new RegExp(`[${CONTROL_CHAR_CLASS}]`, "gu");
  * refused before it can spend, an orphan row describes a box already billing.
  */
 export function sanitizeLabel(text: string, max: number): string {
-  const stripped = text.replace(CONTROL_CHARS_G, "");
-  return stripped.length > max ? `${stripped.slice(0, max)}…` : stripped;
+  // `repairLoneSurrogates` is the matcher arm of the lone-surrogate rule: a
+  // stripped string can still carry one — including one born from the length
+  // cap slicing through a pair — and the label's whole claim is that nothing in
+  // it can surprise a consumer — an fs path among them.
+  const capped = text.replace(CONTROL_CHARS_G, "");
+  const sliced = capped.length > max ? `${capped.slice(0, max)}…` : capped;
+  return repairLoneSurrogates(sliced);
 }
 
 /**
@@ -272,6 +323,7 @@ export const BriefSchema = z.strictObject({
     .regex(NO_CONTROL_CHARS, "issueUrl may not contain control characters")
     .url()
     .regex(/^https:\/\//i, "issueUrl must be an https:// URL")
+    .refine(isWellFormed, "issueUrl may not contain unpaired surrogates")
     .refine(hasNoUserinfo, "issueUrl may not carry userinfo (user:pass@host)")
     .optional(),
   // DF3.1 D2: 40-hex regex (setup-gate, fill)
@@ -291,6 +343,7 @@ export const BriefSchema = z.strictObject({
     .min(1, "requestId may not be empty — omit the key instead")
     .max(MAX_REQUEST_ID)
     .regex(NO_CONTROL_CHARS, "requestId may not contain control characters")
+    .refine(isWellFormed, "requestId may not contain unpaired surrogates")
     .refine(isNotBlank, "requestId may not be blank — omit the key instead")
     .optional(),
   // DF3.1 D2: repo-relative path to the pipeline manifest (non-empty, capped,
@@ -300,6 +353,7 @@ export const BriefSchema = z.strictObject({
     .min(1)
     .max(MAX_MANIFEST_PATH)
     .regex(NO_CONTROL_CHARS, "manifestPath may not contain control characters")
+    .refine(isWellFormed, "manifestPath may not contain unpaired surrogates")
     .refine(isNotBlank, "manifestPath may not be blank")
     .refine(hasNoParentSegment, "manifestPath segments may not be '..'")
     .refine(isRelativePath, "manifestPath must be relative to the repo root, not absolute"),
@@ -314,6 +368,7 @@ export const BriefSchema = z.strictObject({
     .regex(NO_CONTROL_CHARS, "repoUrl may not contain control characters")
     .url()
     .regex(/^https:\/\//i, "repoUrl must be an https:// URL")
+    .refine(isWellFormed, "repoUrl may not contain unpaired surrogates")
     .refine(hasNoUserinfo, "repoUrl may not carry userinfo (user:pass@host)"),
 })
   /**

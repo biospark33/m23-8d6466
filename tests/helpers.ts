@@ -73,11 +73,13 @@ export async function rejection(work: Promise<unknown>): Promise<Error> {
 export function liveForeignPid(): { pid: number; stop: () => void } {
   const child = Bun.spawn(["sleep", "600"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   child.unref();
+  const stop = () => child.kill("SIGKILL");
   // Cheap, but it is the ONE assumption the caller cannot check for itself, and
   // a fixture that silently returned our own pid is precisely the bug this
   // helper replaces.
   if (child.pid === process.pid) {
+    stop();
     throw new Error(`live-pid fixture spawned a child reporting our own pid ${child.pid}`);
   }
-  return { pid: child.pid, stop: () => child.kill("SIGKILL") };
+  return { pid: child.pid, stop };
 }

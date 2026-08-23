@@ -1063,6 +1063,39 @@ describe("observability", () => {
     }
     expect(JSON.stringify(entries)).not.toContain("deadbeefcafe");
   });
+
+  test("a THROWING log sink cannot break the listing sweep", () => {
+    // listUnlogged emits an anomaly line per skipped file; a raising custom
+    // sink turned that emission into a thrown error out of the sweep — the
+    // same committed-outcome masking cost-ledger's emit guards against. The
+    // listing plus its skips must come back regardless; the stderr note names
+    // the operation, never the payload.
+    store.create("run-sink-ok");
+    writeFileSync(join(dir, "Bad Name.json"), JSON.stringify({ runId: "x", createdAt: "y" }), { mode: 0o600 });
+    let threw = false; // flipped by the sink itself, so a silent skip cannot pass
+    const restore = setLogSink(() => {
+      threw = true;
+      throw new Error("sink exploded");
+    });
+    const notes: string[] = [];
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let listing: ReturnType<RunRecordStore["listWithAnomalies"]>;
+    try {
+      listing = store.listWithAnomalies();
+    } finally {
+      restore();
+      process.stderr.write = origWrite;
+    }
+    expect(threw).toBe(true); // the sink really ran and really raised
+    expect(listing.records.map((r) => r.runId)).toEqual(["run-sink-ok"]);
+    expect(listing.skipped).toEqual(["Bad Name.json"]);
+    expect(listing.skippedReasons[0]).toContain("not a valid run id");
+    expect(notes.join("")).toContain("log sink threw for run-record.list.anomaly");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1283,6 +1316,80 @@ describe("concurrent set", () => {
     expect(readFileSync(lock, "utf8")).toMatch(new RegExp(`^${process.pid}\\s`));
     rmSync(lock, { force: true });
   }, 15_000);
+
+  test("an rm failure while releasing cannot mask an ALREADY-COMMITTED record write", () => {
+    // releaseLock runs in withLock's finally, AFTER setUnlogged has replaced
+    // the record. A bare `rmSync(claimed, { force: true })` suppresses only
+    // ENOENT: an EACCES/EIO/EPERM escaped that finally, replaced the caller's
+    // success with an error, and a retry recomputed from its PRE-COMMIT read —
+    // a doubled spend delta on the money path. The cleanup must be as quiet as
+    // claimLock's ("nothing this cleanup does may escape").
+    const id = "release-rm-eacces-run";
+    store.create(id);
+    const realRm = nodeFs.rmSync;
+    let injected = false;
+    let matching = 0;
+    const spy = spyOn(nodeFs, "rmSync").mockImplementation(((p: unknown, opts: unknown) => {
+      if (typeof p === "string" && p.startsWith(`${store.lockPath(id)}.`)) {
+        // Claim-path rms only: claimLock's temp first, the release's held-aside
+        // claim second. The fault must land on the SECOND — the release side,
+        // which runs after the write has committed.
+        matching++;
+        if (matching === 2 && !injected) {
+          injected = true;
+          spy.mockRestore(); // restore FIRST — the assertions below need real fs
+          const e = new Error(`EACCES: permission denied, unlink '${p}'`) as NodeJS.ErrnoException;
+          e.code = "EACCES";
+          throw e;
+        }
+      }
+      return realRm(p as string, opts as Parameters<typeof nodeFs.rmSync>[1]);
+    }) as typeof nodeFs.rmSync);
+    try {
+      expect(store.set(id, { vmName: "box-rm9" }).vmName).toBe("box-rm9"); // outcome returned
+    } finally {
+      spy.mockRestore();
+    }
+    expect(injected).toBe(true); // the fault really fired on the release cleanup
+    expect(store.get(id).vmName).toBe("box-rm9"); // …and the write stands behind it
+  });
+
+  test("an rm failure while retiring a PROVEN corpse does not abort the claim", () => {
+    // stealIfOwnerGone's take-then-compare proved the taken bytes are the corpse
+    // it judged; removing them is pure hygiene. A throwing rm there used to
+    // escape out of the claim attempt itself and abort a write whose only fault
+    // was a failing unlink of bytes already proven disposable.
+    const id = "steal-rm-eacces-run";
+    store.create(id);
+    const lock = store.lockPath(id);
+    writeFileSync(lock, `${DEAD_PID} bbbb2222\n`, { mode: 0o600 }); // the corpse
+    const realRm = nodeFs.rmSync;
+    let injected = false;
+    let matching = 0;
+    const spy = spyOn(nodeFs, "rmSync").mockImplementation(((p: unknown, opts: unknown) => {
+      if (typeof p === "string" && p.startsWith(`${lock}.`)) {
+        // First match is claimLock's failed-attempt temp; second is the steal's
+        // proven-corpse claim.
+        matching++;
+        if (matching === 2 && !injected) {
+          injected = true;
+          spy.mockRestore();
+          const e = new Error(`EACCES: permission denied, unlink '${p}'`) as NodeJS.ErrnoException;
+          e.code = "EACCES";
+          throw e;
+        }
+      }
+      return realRm(p as string, opts as Parameters<typeof nodeFs.rmSync>[1]);
+    }) as typeof nodeFs.rmSync);
+    try {
+      expect(store.set(id, { vmName: "box-rm10" }).vmName).toBe("box-rm10");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(injected).toBe(true); // the fault really fired on the steal cleanup
+    // The corpse did not wedge the id: the mutation landed through the steal.
+    expect(store.get(id).vmName).toBe("box-rm10");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1427,16 +1534,26 @@ describe("own-pid lock generations", () => {
     expect(err?.message).toMatch(/timed out waiting for the run record lock/);
     expect(err?.message).toContain("held by a live owner");
     // The taken-aside generation was NOT deleted: it sits under a unique
-    // `.orphan.` sibling carrying its original bytes.
-    const orphans = readdirSync(dir).filter((f) => f.includes(".orphan.") && f.endsWith(".tmp"));
+    // `.orphan.` sibling carrying its original bytes — with NO `.tmp` suffix,
+    // so `cleanStaleTemps` can never destroy evidence an operator was told to
+    // restore by hand.
+    const orphans = readdirSync(dir).filter((f) => f.includes(".orphan."));
     expect(orphans).toHaveLength(1);
     const orphan = orphans[0]!;
+    expect(orphan.endsWith(".tmp")).toBe(false);
     expect(readFileSync(join(dir, orphan), "utf8")).toBe(takenAside);
     // …and the path serves the COMPETITOR's claim, not the parked one.
     expect(readFileSync(lock, "utf8")).toBe(competitor);
     // The park is operator-visible: silent stranding was the other failure mode.
     expect(notes.join("")).toContain("parked an unrestorable held-aside lock body at");
     expect(notes.join("")).toContain(orphan);
+    // The park must SURVIVE the next sweep. Aged past the own-pid grace, a
+    // `.tmp`-named body would be destroyed by the very next store construction
+    // — while `lock.not-restored` is still telling an operator to restore it.
+    const aged = new Date(Date.now() - 120_000); // 2× OWN_LOCK_GRACE_MS
+    utimesSync(join(dir, orphan), aged, aged);
+    new RunRecordStore({ dir }); // construction runs cleanStaleTemps
+    expect(existsSync(join(dir, orphan))).toBe(true);
     rmSync(lock, { force: true });
     rmSync(join(dir, orphan), { force: true });
   }, 15_000);

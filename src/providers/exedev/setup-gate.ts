@@ -42,10 +42,10 @@
  * store consumer including the reaper.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../../swarmclaw/log.ts";
-import { parseRoster } from "../../phase-engine/roster/schema.ts";
+import { parseRoster, ROSTER_MAX_BYTES, RosterError } from "../../phase-engine/roster/schema.ts";
 import { assertValidRunId } from "../run-record.ts";
 import { KEY_ENV_FILE } from "../credentials.ts";
 import { DEFAULT_FILL_WORKDIR } from "./fill.ts";
@@ -147,6 +147,17 @@ function assertPathSafe(kind: string, p: string): void {
 /** Parse the roster host-side (DF1.5's closed-schema parser) and derive the
  *  bare model ids the in-box C pings. Single source: the rosterPath ARGUMENT. */
 function rosterModels(rosterPath: string): string[] {
+  // Same ceiling loadRoster enforces: this read is synchronous on the event
+  // loop, so an oversized roster would wedge the gate outside every deadline
+  // (the dispatch pre-check caps its own read; this is the second copy of the
+  // same hazard — brief-steered path, repo-root containment only).
+  const size = statSync(rosterPath).size;
+  if (size > ROSTER_MAX_BYTES) {
+    throw new RosterError(
+      [`roster is ${size} bytes, over the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling`],
+      rosterPath,
+    );
+  }
   const text = readFileSync(rosterPath, "utf8");
   const roster = parseRoster(text, rosterPath);
   const slugs = [...new Set(roster.roles.map((r) => r.slug))];

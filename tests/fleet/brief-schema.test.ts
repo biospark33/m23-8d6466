@@ -18,6 +18,7 @@ import {
   BriefSchema,
   extractZodErrorField,
   ROOT_FIELD_LABEL,
+  sanitizeLabel,
   type Brief,
 } from "../../src/fleet/brief-schema.ts";
 import {
@@ -553,6 +554,55 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
       code: "invalid_string",
       message: /control characters/,
     });
+  });
+
+  test("a LONE SURROGATE is rejected — the one ill-formedness the control categories cannot see", () => {
+    // \uD800 unpaired is an unassigned code point, not Cc/Zl/Zp/Cf, so
+    // NO_CONTROL_CHARS admits it and Node `fs` answers the path with an
+    // untyped ERR_INVALID_ARG_VALUE — the NUL arm's failure mode, one code
+    // point over. Each fixture fails on WELL-FORMEDNESS alone (charset,
+    // length, traversal and absoluteness all pass), so a guard that grew or
+    // shrank the wrong rule cannot satisfy this by accident.
+    for (const [field, value] of [
+      ["manifestPath", "cfg/pi\uD800pe.json"],
+      ["requestId", "req-\uD800"],
+      ["repoUrl", "https://github.com/o\uDFFFwner/repo"],
+      ["issueUrl", "https://github.com/o\uDFFFwner/repo/issues/1"],
+    ] as const) {
+      expectRejected(validBrief({ [field]: value }), {
+        field,
+        code: "custom",
+        message: /unpaired surrogates/,
+      });
+    }
+  });
+
+  test("the lone-surrogate rule is load-bearing on the URL fields — `.url()` parses one", () => {
+    // WHATWG `URL` accepts a lone surrogate in its input and serializes it
+    // percent-encoded, so every URL-side guard downstream sees a CLEAN string:
+    // the scheme check passes and the repoSlug cross-check compares against
+    // the encoded form. The refusal has to run on the RAW string, exactly like
+    // the control-char case above it.
+    const url = "https://github.com/o\uD800wner/repo";
+    expect(new URL(url).href).not.toContain("\uD800"); // .url() alone would pass it
+    expectRejected(validBrief({ repoUrl: url }), {
+      field: "repoUrl",
+      code: "custom",
+      message: /unpaired surrogates/,
+    });
+  });
+
+  test("a PAIRED surrogate stays legal — the rule rejects ill-formedness, not non-ASCII", () => {
+    const p = "cfg/\u{1F4E8}.json";
+    expect(BriefSchema.parse(validBrief({ manifestPath: p })).manifestPath).toBe(p);
+  });
+
+  test("sanitizeLabel replaces a lone surrogate instead of passing it through", () => {
+    // The matcher arm of the same rule: stripping control characters cannot
+    // remove ill-formedness, and a label that still carries one surprises any
+    // consumer that re-encodes it — an fs path among them. Control characters
+    // are still STRIPPED; only surrogates have no printable form to keep.
+    expect(sanitizeLabel("box-\uD800name\nline", 64)).toBe("box-�nameline");
   });
 
   test("manifestPath at the 1024 cap accepted, one over rejected", () => {

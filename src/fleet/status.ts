@@ -65,9 +65,11 @@ export interface StatusRow {
   spendMicroUsd?: number;
   limitMicroUsd?: number;
   /**
-   * Record filenames the listing refused to read (`listWithAnomalies().skipped`).
-   * Present on the `recordsSkipped` row, and on a `statusRun` row whose verdict
-   * those files could contradict — never anywhere else, and never empty.
+   * Record filenames the listing refused to read (`listWithAnomalies().skipped`),
+   * sanitized like every other store-supplied string (a POSIX filename may hold
+   * newlines and worse). Present on the `recordsSkipped` row, and on a
+   * `statusRun` row whose verdict those files could contradict — never anywhere
+   * else, and never empty.
    */
   skippedRecords?: string[];
 }
@@ -109,6 +111,15 @@ function isOwnedVm(vm: ProviderVm): boolean {
  * a foreign box on a tag-blind provider is whatever the account named it.
  */
 const MAX_VM_NAME = 128;
+
+/**
+ * Cap on a record-supplied timestamp in a row. `assertWellFormed` proves only
+ * that the store's value is a string `Date.parse` accepts — parseability is not
+ * printability, and a hostile store is one structural interface away (see
+ * `safeName`), so the field gets the same two rules as every other
+ * record-supplied string before it reaches an operator.
+ */
+const MAX_TIMESTAMP = 64;
 
 /**
  * A substrate-supplied name on its way into a row, under the same two rules
@@ -308,7 +319,12 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
     // originates at the provider on both paths.
     vmName: sanitizeOptionalName(rec.vmName ?? box?.name),
     httpsUrl: safeUrl(rec.httpsUrl),
-    createdAt: rec.createdAt,
+    // `runId` stays RAW deliberately — it is the join key (`claimed` in
+    // statusAll matches box names against it), and the store has already
+    // grammar-checked it against the filename it was read from
+    // (`assertWellFormed`). `createdAt` is only proven parseable, so it is
+    // sanitized like its siblings.
+    createdAt: sanitizeLabel(rec.createdAt, MAX_TIMESTAMP),
     spendMicroUsd: rec.spendMicroUsd,
     limitMicroUsd: rec.limitMicroUsd,
   };
@@ -409,7 +425,11 @@ function listUnavailableRow(): StatusRow {
  * it is a row about the completeness of every other row.
  */
 function recordsSkippedRow(skipped: string[]): StatusRow {
-  return { runId: FLEET_ROW_ID, state: "recordsSkipped", skippedRecords: skipped };
+  // Sanitized at the PRODUCER, not left to each consumer: these are filesystem
+  // names from `readdirSync`, so a newline in one forges the very log line this
+  // row is rendered into — and the CLI's records-skipped envelope reads them
+  // back out of this row.
+  return { runId: FLEET_ROW_ID, state: "recordsSkipped", skippedRecords: skipped.map(safeName) };
 }
 
 /**
@@ -475,12 +495,20 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
     // The SHAPE read is inside the guard, not just the call. `RunRecordStore` is
     // a structural interface exactly like `StatusDeps.driver`, and the same
     // argument applies: any injected or test store satisfies the type while
-    // answering `{records: […]}` with no `skipped`, or with a non-array
-    // `records`. Read outside, `listing.records.map(…)` and
-    // `listing.skipped.length` threw a TypeError out of `statusAll` untyped —
-    // the precise failure `record-store-unreadable` was added to prevent. The
-    // throw here lands in the catch below and comes out as that error.
-    if (!Array.isArray(listing?.records) || !Array.isArray(listing.skipped)) {
+    // answering `{records: […]}` with no `skipped`, with a non-array
+    // `records`, or — the same trust level one step deeper — with ELEMENTS
+    // that are not records (`null` dereferenced in `rowForRecord` as
+    // `rec.vmName`). Read outside, all three threw a TypeError out of
+    // `statusAll` untyped — the precise failure `record-store-unreadable` was
+    // added to prevent. The throw here lands in the catch below and comes out
+    // as that error. Elements are refused rather than dropped (the driver-side
+    // filter's shape): a silently missing record is exactly the truncated
+    // fleet the `recordsSkipped` row exists to keep honest.
+    if (
+      !Array.isArray(listing?.records) ||
+      !Array.isArray(listing.skipped) ||
+      listing.records.some((rec) => rec === null || typeof rec !== "object")
+    ) {
       throw new Error("listWithAnomalies() did not return {records: [], skipped: []}");
     }
   } catch (e) {
@@ -586,7 +614,9 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
       if (box !== undefined) {
         return {
           ...orphanRow(box),
-          ...(skipped !== null && skipped.length > 0 ? { skippedRecords: skipped } : {}),
+          // Same sanitization the fleet-level row applies — these names reach
+          // the same output stream.
+          ...(skipped !== null && skipped.length > 0 ? { skippedRecords: skipped.map(safeName) } : {}),
         };
       }
       throw new FleetError(
@@ -607,7 +637,7 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
             ? "Check the run ID — the record listing could not be read, so a record for this run under a mangled name cannot be ruled out. Run `fleet status` (which refuses with record-store-unreadable and names the file) and repair it before creating the run; a box may still be billing behind it"
             : skipped.length === 0
               ? "Check the run ID or create the run first"
-              : `Check the run ID or create the run first — the listing skipped ${skipped.length} file(s) whose names are not run ids (${skipped.join(", ")}), and one of them may be this run's record under a mangled name`,
+              : `Check the run ID or create the run first — the listing skipped ${skipped.length} file(s) whose names are not run ids (${skipped.map(safeName).join(", ")}), and one of them may be this run's record under a mangled name`,
       );
     }
 

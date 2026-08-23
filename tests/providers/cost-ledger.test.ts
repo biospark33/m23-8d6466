@@ -1216,6 +1216,65 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     // those tests fabricate are the ages production actually produces.
     expect(decidedAt).toBe(new Date(parsed).toISOString());
   });
+
+  test("a record created between the prefetch and the transaction is COUNTED, not expired", () => {
+    // The prefetch used to cache `{record: undefined}` for an absent record;
+    // inside the transaction that frozen absence read as expired-orphan for a
+    // row whose dispatch had JUST created its record — retiring a live
+    // reservation and handing its ceiling out twice. Only successful reads are
+    // cached now; an absence re-reads LIVE under the lock.
+    admitAged("run-lateborn", "rl", 1_000_000, expiryMs * 2); // aged row, record absent yet
+    let reads = 0;
+    const lateBorn = new CostLedger({
+      path: ledgerPath,
+      readRunRecord: (id) => {
+        if (id === "run-lateborn") {
+          reads++;
+          if (reads === 1) return undefined; // absent at prefetch …
+          seedRecord("run-lateborn"); // …created before the write lock was taken
+        }
+        return RECORDS.get(id);
+      },
+      config: { defaultCapMicroUsd: cap, boxHourRateMicroUsd: 3_600_000 },
+    });
+    try {
+      const d = lateBorn.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-new", requestId: "rn" }, cap, 500_000);
+      expect(reads).toBe(2); // prefetch AND the live re-read inside the transaction
+      if (!d.admitted) throw new Error(`expected admission, got ${d.reason}`);
+      expect(d.reservedMicroUsd).toBe(1_000_000); // counted, not expired-orphaned
+    } finally {
+      lateBorn.close();
+    }
+  });
+
+  test("a transient read failure at prefetch is retried inside the transaction, not frozen", () => {
+    // Same shape for the error half of the old cache: a throw at prefetch was
+    // carried into the decision, where an AGED row took it as "this run will
+    // never report spend" and expired the reservation — even though the record
+    // reads fine a moment later. One live retry inside the lock is enough.
+    seedRecord("run-flaky");
+    admitAged("run-flaky", "rfl", 1_000_000, expiryMs * 2);
+    let calls = 0;
+    const flaky = new CostLedger({
+      path: ledgerPath,
+      readRunRecord: (id) => {
+        if (id === "run-flaky") {
+          calls++;
+          if (calls === 1) throw new Error("EIO mid-sweep"); // transient, at prefetch only
+        }
+        return RECORDS.get(id);
+      },
+      config: { defaultCapMicroUsd: cap, boxHourRateMicroUsd: 3_600_000 },
+    });
+    try {
+      const d = flaky.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-next", requestId: "rn3" }, cap, 500_000);
+      expect(calls).toBe(2); // the retry really happened under the lock
+      if (!d.admitted) throw new Error(`expected admission, got ${d.reason}`);
+      expect(d.reservedMicroUsd).toBe(1_000_000); // counted — no frozen-error expiry
+    } finally {
+      flaky.close();
+    }
+  });
 });
 
 // ─── config ──────────────────────────────────────────────────────────────────
@@ -1226,6 +1285,27 @@ describe("DF2.8 cost config", () => {
     expect(loaded.config.defaultCapMicroUsd).toBe(5_000_000);
     expect(loaded.source).toBe("default");
     expect(DEFAULT_COST_CONFIG.defaultCapMicroUsd).toBe(5_000_000);
+  });
+
+  test("a THROWING log sink does not turn an absent-config layout into an error", () => {
+    // The absent-file notice used to log through the raw sink; a raising custom
+    // sink converted a legitimate layout into a thrown error out of a loader
+    // whose contract is "absent ⇒ defaults". Routed through the same guarded
+    // emission every other committed outcome here uses.
+    let threw = false; // flipped by the sink itself, so a silent skip cannot pass
+    const restore = setLogSink(() => {
+      threw = true;
+      throw new Error("sink exploded");
+    });
+    let loaded: ReturnType<typeof loadCostConfig>;
+    try {
+      loaded = loadCostConfig(join(dir, "none.json"));
+    } finally {
+      restore();
+    }
+    expect(threw).toBe(true); // the sink really ran and really raised
+    expect(loaded.source).toBe("default"); // …and the layout still resolves
+    expect(loaded.config).toEqual({ ...DEFAULT_COST_CONFIG });
   });
 
   test("per-issue overrides keyed owner/repo#N apply; unknown issues keep the default", () => {

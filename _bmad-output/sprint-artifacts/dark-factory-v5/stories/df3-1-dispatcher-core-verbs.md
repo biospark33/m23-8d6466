@@ -1553,3 +1553,102 @@ GitNexus impact before editing symbols; every claim verified against real source
 - GitNexus `detect_changes` (unstaged): 64 changed symbols / 28 files, blast radius confined to
   the PR's own modules and processes (Dispatch, StatusRun, ReapRuns, WithLock,
   ProvisionAdmittedRun, TeardownRun, DriverListing, Sweep, Run CLI) — zero out-of-scope symbols.
+
+## Review round 9 — BMAD adversarial code review, 2026-08-23
+
+16 review agents over a 20-chunk split of the 30,361-line diff (chunks ≤1256 lines, run in waves of
+4–5 after the round-8 context-limit lesson): 13 blind (chunk-only), 2 edge with repo verification,
+1 cross-layer test-vs-source auditor, 1 spec auditor. ~48 raw findings + 4 bot roll-ins (Sift ×2,
+CodeRabbit ×1, inline comment) → triage ledger: **40 patched including every LOW**, 3 spec items
+closed as documentation amendments, 2 dismissed with source evidence, 2 deferred/pushed back.
+Fix waves: 4 parallel source fixers on disjoint clusters (dispatch / fleet-src+scripts / money /
+helpers), then 2 test-hardening fixers after source settled; lead applied two residuals found at
+gate. Chunking infra bug from round 8 (split script deleting its own `-p1` outputs) fixed this run.
+
+### Money path and locks
+
+- **Stale admission prefetch retired live reservations** (cost-ledger): the prefetch loop cached
+  `{record:undefined}` for absent records and `{error}` for transient read failures; inside the
+  transaction an aged row took the cached verdict, so a record created minutes later was expired as
+  an orphan while holding a live key — headroom handed out twice, cap fail-open. Prefetch now caches
+  successful reads only; cache miss or cached error re-reads live under the lock.
+- **Unguarded `rmSync(claimed)` in releaseLock/stealIfOwnerGone success arms**: EACCES/EIO out of a
+  `finally` replaced an already-committed record write; a caller retrying recomputed from a pre-commit
+  read — the seed for a doubled spend delta. Both sites now `rmQuiet`, per claimLock's own doctrine.
+  `atomicReplace`'s catch got the same treatment (its rm could mask the real error it rethrows).
+- **Sink hardening, three sites one invariant** (a raising custom log sink can no longer turn a
+  committed outcome into a thrown error): run-record's shared `emit` guarded (covers traced()'s error
+  arm too), loadCostConfig's ENOENT fallback routed through the guarded emitter, and emit's own
+  `process.stderr.write` fallback wrapped.
+- **`lock.not-restored` evidence self-destructed**: putBack failure parked the live holder's lock
+  body as a `.tmp`, which cleanStaleTemps sweeps within one cycle while the log says "restore by
+  hand". Orphans now park `.orphan.`-suffixed (never swept); parkAside returns where the bytes are.
+
+### Dispatch
+
+- **Race loser stamped its requestId onto the winner's record** (HIGH): two concurrent dispatches
+  sharing an explicit runId both reach provisioning; the loser's catch ran stampCorrelation before
+  the EEXIST classification, overwriting the winner's join key via the store's patch merge. Stamp now
+  skipped on the EEXIST/run-id-in-use arm; regression test plants a winner and asserts its requestId
+  survives the loser's refusal verbatim.
+- **13–39-char secrets echoed whole** through assertValidRunId/store refusals (under redactSecrets'
+  40-char floor, no URL to trigger the token arm): new `storeRunIdRefusal` splices runIdEcho's bounded
+  head+length form over the store's embedded echo for sub-floor values; ≥40-char shape unchanged.
+- **Gate-seam strings bypassed escapeText**: debugCommands elements, teardownCommand and assertion
+  item labels are box-chosen text reaching operator sinks raw; all three now escaped like their
+  failedItem/note siblings.
+- **Roster pre-check had no size ceiling**: dispatch's own `readFileSync` bypassed loadRoster's
+  ROSTER_MAX_BYTES, so a large roster.yaml wedged the dispatcher in synchronous fs+YAML work no timer
+  can break. Capped at both copies of the hazard (dispatch pre-check and setup-gate's rosterModels).
+- Blank exposure URL (`""`/whitespace) published a public box with no usable locator — guard extended
+  past `=== undefined` to the trim-empty shape driver.ts uses; port claim retained (expose resolved).
+- clone's `within()` gained the late-state handler every other effectful call already had;
+  list-unverified headroom refusals classified `transient` instead of do-not-retry.
+
+### Fleet status/brief-schema/scripts front door
+
+- Skipped-record filenames (filesystem-controlled, newline-capable) reached operator output raw —
+  log forgery via the store directory; sanitized alongside rowForRecord's raw createdAt. Non-object
+  `listing.records` elements now route through record-store-unreadable instead of escaping untyped.
+- Lone surrogates passed NO_CONTROL_CHARS (not Cc/Zl/Zp/Cf) and died as untyped fs errors; local
+  well-formedness scan + repair (no ES2024 lib bump) applied across the four URL/id fields.
+- Landed teardown/harvest reported exit 1 "retry me" when the post-completion stdout write or the
+  lock clear failed — both now take the ack's exit-6 posture ("completion-unwritable" /
+  "lock-clear-failed"); pre-completion failures still exit 1. Three printError sites interpolated
+  foreign errno text unredacted; redactSecrets applied.
+
+### Test wave (~29 items, incl. cross-layer + spec auditor)
+
+Signal-delivery coverage for scripts/fleet.ts's SIGINT/SIGTERM handlers was zero (deletable-green);
+delivery tests now drive real children through the preload-patched install seam (130/143, CC-9 line
+ordered before exit). The lost-race concurrency test depended on natural scheduler interleaving — a
+headroom-seam barrier now forces overlap deterministically (the ledgerFactory seam is synchronous, so
+the barrier moved to the only await between step-4 and O_EXCL). Deadline-timer lifecycle pinned via a
+setTimeout/clearTimeout spy on success AND refusal paths. The ack-EPIPE fixture never set `e.code`,
+so it tested the wrong arm of the tolerance branch. Plus: per-stream sink reads for envelope/row
+assertions (stdout-purity contract enforced on six more paths), zero-provisioning assertions on the
+{admitted:true} budget arm, run-record audited as a redaction sink on all three failure paths,
+toStrictEqual on ports tuples, shapeSeed reuse, refusalLines helper shared across seven refusal
+tests, bounded-form pin for the new run-id echo contract, lease bumps on live-holder lock fixtures,
+within() around the /dev/zero case, LOCK_HOST field-count validation, race-child ENOENT-as-violation,
+harvest count-bearing arm, gate-E note depth, httpsUrl regex pin, env restore verified already-covered
+(false positive).
+
+### Dismissed (verified against source) / deferred
+
+- step-log `timedLoggedStep` null-rejection deref: already fixed — `(e ?? {})` binding present.
+- Slug `lower()` ASCII-fold mismatch: canonicalRepoSlug folds `[A-Z]` only (issue-correlation.ts:71),
+  byte-identical to SQLite's scalar lower() — invariant already holds.
+- Sift's `withRunRecordTxn` consolidation across six consumers: architectural migration deferred
+  post-merge (regression risk > benefit at round 9); contract fixes carry test pins meanwhile.
+- Spec drift (dispatch exit 6, additive status states, C9 failures-only wording): aligned by amending
+  integration-spec.md's C4/C6/C9 with AMENDED notes matching the story's standing round-8 decisions —
+  ends the recurring bot flag without touching runtime semantics.
+
+### Gates
+
+- Full suite: **2834 pass / 0 fail / 17 skip / 2 todo** across 81 files (round 8: 2808; +26 net new).
+- biome check clean (src tests scripts, 190 files); `tsc --noEmit -p tsconfig.json` exit 0 repo-wide.
+- GitNexus `detect_changes` (unstaged): 63 changed symbols / 20 files — every entry inside the PR's
+  own modules (fleet, providers, exedev setup-gate, scripts/fleet, their tests); zero out-of-scope
+  symbols. Focal reruns during the wave: fleet 369→370+, providers 183 green, cli 93/93 stable.

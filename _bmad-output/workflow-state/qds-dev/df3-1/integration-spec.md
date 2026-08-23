@@ -644,6 +644,14 @@ The sketch's `vmSet.size === 0 → boxUnknown` is WRONG (violates inkwell doctri
 >    exists, refusing 4 only when NEITHER a record nor an owned box is found. A
 >    list failure/timeout is not a hit (still 4). "Mutating nothing" holds — the
 >    driver is read, never written.
+>
+> **AMENDED (round-9 review)** — two ADDITIVE diagnostics row states beyond the
+> enumeration above, both shipped and normative: **`listUnavailable`** (the
+> listing itself failed where C4's doctrine would have rendered `boxUnknown`
+> per-row; the fleet-wide shape names the cause once instead) and
+> **`recordsSkipped`** (record-store files outside the id grammar, surfaced so a
+> corrupt store is visible rather than silently absent; filenames are sanitized
+> before output). `listUnavailable` maps to exit 1 on the single-run path.
 
 ## C5. index.ts — NO harvest.ts/teardown.ts modules (not in FTM).
 Harvest/teardown verbs are thin front doors implemented INSIDE scripts/fleet.ts directly over providers' harvestRun/teardownSandbox (delegate unmodified, guards intact, no second retry loop). index.ts exports only: brief-schema, dispatch, status, verbs.
@@ -669,6 +677,15 @@ flags list = dashed flags only (positionals like runId are per-verb CLI grammar,
 > against each verb's OWN declared set, read from the registry — the three do not
 > share one.
 >
+> **AMENDED (round-9 review)** — dispatch's declared set is `[0,1,2,3,5,6]`: it
+> also carries **6**, meaning "landed but unreportable" — provisioning fully
+> succeeded and the box is live, but the ack write to stdout failed (non-EPIPE /
+> non-EAGAIN). This mirrors harvest/teardown's 6 ("cleanup failure on an
+> otherwise-successful path") in posture: nothing will ever clear it by retrying,
+> so it is kept out of the retryable range. The round-5 note reserving 6 for
+> harvest/teardown predates the ack-unwritable mapping; this amendment supersedes
+> that reservation. DF3.5's contract test reads each verb's OWN declared set.
+>
 > **AMENDED (review B2)** — `--driver` is `required: true` on all four entries
 > (it was declared `required: false`). `assertDriverChosen` in `scripts/fleet.ts`
 > refuses every verb with exit 2 when the flag is absent and no driver is
@@ -688,7 +705,7 @@ if driver has `.fill` method (ExeDevDriver extra) → fillExeDev(driver, vm, {ru
 - Sub-timings on dispatch: validate_ms, mint_ms, create_ms, fill_ms, setup_gate_ms in the log payload.
 - 600_000ms wall clock around mint→gate; expiry → FleetError exit 1 {code:"dispatch-timeout"} — box left alive, record open (same posture as gate failure; remediation prints teardown command).
 - INV-6 redaction: /(https?:\/\/[^\s]*[0-9a-zA-Z%-]{16,})/ applied to any URL-bearing string before logging; also never log key material (INV-4 — keyHash only).
-- DF1.8 dispatch log: call the appendDispatchLog-style helper from issue-correlation.ts (read its exact export name) once per dispatch outcome.
+- DF1.8 dispatch log: call the appendDispatchLog-style helper from issue-correlation.ts (read its exact export name) once per dispatch **failure** outcome — success keeps its structured line only; the durable file is DISPATCH_FAILURE_LOG and per-dispatch success entries would be noise (round-9 clarification; the story's Decisions section records the same reading).
 - D9 confirmed: dispatch does NOT open the trace store / initiateSession (engine-side owns it).
 
 ## C10. Wave plan (locks who writes what — FTM-bound).
