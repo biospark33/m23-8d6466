@@ -117,7 +117,8 @@ function lockHost(): string {
  * process table, and on a shared runs directory that made it delete a remote
  * invocation's in-flight temp between its `fsync` and its `linkSync`.
  */
-function hostTag(): string {
+/** Exported for DF3.2's fleet lock (src/fleet/fanout.ts) — additive only, no behavior change. */
+export function hostTag(): string {
   return lockHost().replace(/[^A-Za-z0-9_-]/g, "_");
 }
 
@@ -135,7 +136,8 @@ function hostTag(): string {
  * other outcome (EPERM, a range error, an errno this runtime invents) is a
  * failure to answer, and the rest of this module fails closed on exactly that.
  */
-function isAlive(pid: number): boolean {
+/** Exported for DF3.2's fleet lock (src/fleet/fanout.ts) — additive only, no behavior change. */
+export function isAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0 || pid > 0x7fff_ffff) return true;
   try {
     process.kill(pid, 0);
@@ -547,7 +549,8 @@ function claimedByUs(lock: string, body: string): boolean {
  * "holder unknown". Correct, just less informative — and only on filesystems
  * that leave no other option.
  */
-function claim(lock: string, body: string): boolean {
+/** Exported for DF3.2's fleet lock (src/fleet/fanout.ts) — additive only, no behavior change. */
+export function claim(lock: string, body: string): boolean {
   // Host tag BEFORE the pid: the pid in this name is what `reapStaleTemps`
   // probes, and a pid without the host that minted it is not a pid.
   const tmp = `${lock}.${hostTag()}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
@@ -615,7 +618,8 @@ function claim(lock: string, body: string): boolean {
  * harvest/teardown of that run refuses FOREVER while the box and the key keep
  * billing. Removing it on the way out is the whole of the fix.
  */
-function writeLockDirect(lock: string, body: string): boolean {
+/** Exported for DF3.2's fleet lock (src/fleet/fanout.ts) — additive only, no behavior change. */
+export function writeLockDirect(lock: string, body: string): boolean {
   let fd: number | undefined;
   try {
     fd = openSync(lock, "wx", 0o600);
