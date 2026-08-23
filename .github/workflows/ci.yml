@@ -28,8 +28,20 @@ jobs:
       # its deps hoist from the root lockfile) — see #54.
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
+      # The visualizer is a separate TS project (its own tsconfig + vue-tsc);
+      # the root typecheck/lint do not reach it. DF4.1.
+      - run: bun run typecheck:visualizer
       - run: bun run lint
+      - run: bun run lint:visualizer
       - run: bun test
+      # DF4.2 coverage gate. Two steps so the coverage run's own exit status
+      # (bunfig's aggregate line threshold) gates first, then check-lcov.ts
+      # enforces per-file line+function floors and fails loudly on any
+      # server/**/src/lib/**/deploy.ts file bun never loaded at all — the
+      # blind spot the aggregate threshold can't see.
+      - run: bun run test:visualizer
+      - run: bun run check:lcov
+      - run: bun run --cwd visualizer build:check
 
   # DF2.9: the enterprise image contract. The license sweep is the gate — a
   # denied package, a broken pin, or a package the build cannot attribute exits

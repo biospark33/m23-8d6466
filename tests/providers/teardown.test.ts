@@ -13,12 +13,14 @@
  * these tests are the blocking evidence, not inherited behaviour.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { createRun } from "../../src/providers/driver.ts";
+import { createRun, neverPublicDriver, startVisualizer, stopVisualizer, VIZ_PIDFILE } from "../../src/providers/driver.ts";
+import type { ExecResult, ProviderDriver } from "../../src/providers/driver.ts";
+import { HarvestError } from "../../src/providers/harvest.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
@@ -47,7 +49,7 @@ beforeEach(() => {
   store = new RunRecordStore(join(dir, "runs"));
   api = new FakeKeyApi({ usageOnCreateUsd: 0.0081 });
   driver = new FakeDriver(join(dir, "boxes"));
-  recording = new RecordingDriver(driver);
+  recording = new RecordingDriver(guardVizPidfile(driver));
   logs = [];
   restoreLog = setLogSink((entry) => logs.push(entry));
 });
@@ -67,6 +69,37 @@ function deps(overrides: Partial<TeardownDeps> = {}): TeardownDeps {
 
 function boxDir(vm: string): string {
   return join(dir, "boxes", vm);
+}
+
+/**
+ * Guards the shared HOST pidfile before FakeDriver ever spawns a real
+ * process for it. FakeDriver.exec (src/providers/fake-driver.ts) runs argv
+ * as a REAL child process on this machine, and driver.ts's stopVisualizer
+ * script hard-codes the absolute path VIZ_PIDFILE ("/tmp/qds-viz.pid"),
+ * killing whatever pid is recorded there with NO identity check (unlike
+ * visualizer/test/deploy.test.ts's isVizProcess, which verifies the pid's
+ * command line before signalling — that file's tests deliberately spawn and
+ * stop a real visualizer; nothing here does). Every teardownSandbox call in
+ * this file that reaches a real box runs the prepended stopVisualizer step
+ * unconditionally, so without this guard ANY of them — not just the two
+ * DF4.2 ordering tests — would run the real kill script against a
+ * developer's actual /tmp/qds-viz.pid if one happened to exist. Intercepting
+ * here, between RecordingDriver and FakeDriver, keeps `recording.execCalls`
+ * populated (existing leak-scan/argv assertions are unaffected) while
+ * substituting the script's own routine "no pidfile" outcome instead of
+ * ever letting FakeDriver spawn it for real. Tests that need a specific
+ * stopVisualizer outcome still get one via orderDepsWithViz's
+ * execArgvOverride seam, which is checked before this guard ever runs.
+ */
+function guardVizPidfile(inner: ProviderDriver): ProviderDriver {
+  const guarded = Object.create(inner) as ProviderDriver;
+  guarded.exec = (vm: string, argv: string[], stdin?: string): Promise<ExecResult> => {
+    if (argv.some((a) => a.includes(VIZ_PIDFILE))) {
+      return Promise.resolve({ stdout: "NONE\n", stderr: "", exitCode: 0 });
+    }
+    return inner.exec(vm, argv, stdin);
+  };
+  return guarded;
 }
 
 /** Any >=8-char substring of the secret found in any corpus, else null. */
@@ -168,6 +201,39 @@ function orderDeps(base: Partial<TeardownDeps> = {}): { calls: string[]; deps: T
     return store.close(runId, now);
   };
   return { calls, deps: { driver: driverW, store: storeW, keyApi: keyW, runsDir: store.dir, workdir: "app", ...base } };
+}
+
+/**
+ * DF4.2: `orderDeps` above wraps only the four claimants it already knows
+ * about (spend/revoke/destroy/close) — it cannot see the prepended
+ * `stopVisualizer` step because that step never touches keyApi/destroy/close,
+ * it goes through `driver.exec` alone. This variant additionally wraps `exec`
+ * to recognize DF4.2's fixed pidfile path (`VIZ_PIDFILE`, imported from
+ * src/providers/driver.ts rather than duplicated here, so a future path
+ * change can't silently desync this wrapper) and push
+ * "stopVisualizer" onto the SAME `calls` array before delegating — giving one
+ * combined, correctly-ordered timeline instead of two separate ones that
+ * would need cross-referencing by timestamp. `execArgvOverride`, when given,
+ * runs first and can substitute a rejection for the real exec (AC6's failure
+ * demonstration) — the label is still pushed either way, matching the fact
+ * that teardown calls the step regardless of its outcome.
+ */
+function orderDepsWithViz(
+  base: Partial<TeardownDeps> = {},
+  execArgvOverride?: (vm: string, argv: string[], stdin: string | undefined) => Promise<ExecResult> | undefined,
+): { calls: string[]; deps: TeardownDeps } {
+  const { calls, deps: d } = orderDeps(base);
+  const inner = d.driver as RecordingDriver;
+  const driverW = Object.create(inner) as RecordingDriver;
+  driverW.exec = (vm: string, argv: string[], stdin?: string) => {
+    if (argv.some((a) => a.includes(VIZ_PIDFILE))) {
+      calls.push("stopVisualizer");
+      const overridden = execArgvOverride?.(vm, argv, stdin);
+      if (overridden !== undefined) return overridden;
+    }
+    return inner.exec(vm, argv, stdin);
+  };
+  return { calls, deps: { ...d, driver: driverW } };
 }
 
 /**
@@ -1242,3 +1308,228 @@ async function runE2eDemo(): Promise<TeardownDemoEvidence> {
     leak: leakScan(secret, readFileSync(store.path(runId), "utf8"), JSON.stringify(logs), argvCorpus),
   };
 }
+
+// ─── DF4.2: stopVisualizer prepend (AC6) ──────────────────────────────────────
+
+describe("DF4.2 stopVisualizer prepend (AC6)", () => {
+  test("(a) stopVisualizer runs FIRST, ahead of spend", async () => {
+    const runId = "df42-viz-first";
+    const host = await makeHostRepo();
+    await makeRun(runId);
+    await mintFor(runId);
+    const { calls, deps: d } = orderDepsWithViz({ gitCwd: host });
+    await teardownSandbox(d, runId);
+    expect(calls[0]).toBe("stopVisualizer");
+    expect(calls.indexOf("stopVisualizer")).toBe(0);
+    expect(calls.indexOf("stopVisualizer")).toBeLessThan(calls.indexOf("spend"));
+  });
+
+  test("(b) the prepend keeps DF2.5's six-step relative order intact (subsequence, not equality)", async () => {
+    const runId = "df42-viz-subseq";
+    const host = await makeHostRepo();
+    await makeRun(runId);
+    await mintFor(runId);
+    const { calls, deps: d } = orderDepsWithViz({ gitCwd: host });
+    await teardownSandbox(d, runId);
+    // assertTeardownOrder only reasons about spend/revoke/destroy/close — it
+    // is unmodified from DF2.5 and still passes with "stopVisualizer" as an
+    // extra label ahead of everything it checks, proving the prepend is
+    // additive rather than a reorder of the existing six.
+    assertTeardownOrder(calls);
+    // orderDeps only wraps the claimants it already tracks (spend/revoke/
+    // verify/destroy/close) — artifacts/harvest run too but aren't pushed here
+    // (asserted separately via logs, as the pre-existing tests already do).
+    // "stopVisualizer" leads every one of them.
+    expect(calls[0]).toBe("stopVisualizer");
+    for (const label of ["spend", "revoke", "verify", "destroy", "close"]) {
+      expect(calls.indexOf(label)).toBeGreaterThan(0);
+    }
+  });
+
+  test("(c) a count-only check is blind to a reordering that the subsequence check catches", () => {
+    const good = ["stopVisualizer", "spend", "revoke", "destroy", "close"];
+    // Same five labels, same count, but revoke/destroy swapped ahead of spend.
+    const reordered = ["revoke", "destroy", "spend", "stopVisualizer", "close"];
+
+    const countOnly = (calls: string[]) => calls.length === 5;
+    // The gate this test exists to demonstrate: a bare count assertion passes
+    // on BOTH the correctly-ordered and the reordered call list — it is not a
+    // gate against reordering at all, only against steps going missing.
+    expect(countOnly(good)).toBe(true);
+    expect(countOnly(reordered)).toBe(true);
+
+    // The subsequence check this file actually uses is not blind the same
+    // way: it throws on the reordered list and passes on the correct one.
+    expect(() => assertTeardownOrder(good)).not.toThrow();
+    expect(() => assertTeardownOrder(reordered)).toThrow();
+    expect(reordered.indexOf("stopVisualizer")).toBeGreaterThan(reordered.indexOf("spend")); // the reorder this catches
+  });
+
+  test("(d) a failing stopVisualizer is logged with its cause and does NOT abort teardown", async () => {
+    const runId = "df42-viz-fail";
+    const host = await makeHostRepo();
+    await makeRun(runId);
+    await mintFor(runId);
+    const { deps: d } = orderDepsWithViz({ gitCwd: host }, () => Promise.reject(new Error("box unreachable")));
+    // Must not throw — AC6's whole point is that this completes normally.
+    await teardownSandbox(d, runId);
+    const rec = store.get(runId);
+    expect(rec.closedAt).toBeString();
+    expect(existsSync(boxDir(runId))).toBeFalse();
+    const vizLog = logs.find(
+      (l) => l.operation === "teardown.stopVisualizer" && l.status === "error",
+    ) as (LogEntry & { error?: { code: string; message: string } }) | undefined;
+    expect(vizLog).toBeDefined();
+    expect(vizLog?.error?.message).toContain("box unreachable");
+  });
+
+  test("no box ever created: stopVisualizer is skipped, not run", async () => {
+    const runId = "df42-viz-no-box";
+    store.create(runId); // a record that never got a VM
+    await teardownSandbox(deps({ keyApi: undefined }), runId);
+    const skip = logs.find((l) => l.operation === "teardown.stopVisualizer");
+    expect(skip?.outcome).toBe("skipped");
+  });
+
+  test("a driver rejecting with null still lets teardown complete and bring the box down", async () => {
+    // Regression: `err.code` on a null/undefined rejection throws TypeError,
+    // which escapes runVizStopStep and aborts the whole teardown sequence —
+    // box left alive, record left open — exactly what AC6 exists to prevent.
+    const runId = "df42-viz-null-reject";
+    const host = await makeHostRepo();
+    await makeRun(runId);
+    await mintFor(runId);
+    const { deps: d } = orderDepsWithViz({ gitCwd: host }, () => Promise.reject(null));
+    await teardownSandbox(d, runId); // must not throw
+    const rec = store.get(runId);
+    expect(rec.closedAt).toBeString();
+    expect(existsSync(boxDir(runId))).toBeFalse();
+  });
+
+  test("an already-destroyed box logs a skip, not status:\"error\", on the stopVisualizer step", async () => {
+    // Every other pre-destroy step that execs the box routes "box is gone"
+    // through isNoSuchBox and records a skip (see teardown.ts:125-133);
+    // runVizStopStep must do the same instead of alerting on a routine
+    // crash-between-destroy-and-close / reaper-race condition.
+    const runId = "df42-viz-no-such-box";
+    const host = await makeHostRepo();
+    await makeRun(runId);
+    await mintFor(runId);
+    const noSuchBox = new HarvestError("exec-failed", "no such box", "n/a", { noSuchBox: true });
+    const { deps: d } = orderDepsWithViz({ gitCwd: host }, () => Promise.reject(noSuchBox));
+    await teardownSandbox(d, runId);
+    const vizLog = logs.find((l) => l.operation === "teardown.stopVisualizer");
+    expect(vizLog?.status).toBe("ok");
+    expect(vizLog?.outcome).toBe("skipped");
+  });
+
+  test("a process that survives SIGTERM and SIGKILL is reported ALIVE, pidfile kept, stopped:false", async () => {
+    // Stub the exec transport directly rather than spawning a real
+    // unkillable process — asserts driver.ts's stopVisualizer maps the
+    // script's own "ALIVE <pid>" line (emitted when the wait loop finds the
+    // pid still alive after both signals) to stopped:false with a reason
+    // naming it, instead of falling through to the default stopped:true.
+    const stub = {
+      exec: (_vm: string, _argv: string[], _stdin?: string): Promise<ExecResult> =>
+        Promise.resolve({ stdout: "ALIVE 4242\n", stderr: "", exitCode: 0 }),
+    } as unknown as Parameters<typeof stopVisualizer>[0];
+    const result = await stopVisualizer(stub, "df42-viz-alive");
+    expect(result.stopped).toBeFalse();
+    expect(result.reason).toContain("ALIVE 4242");
+    expect(result.reason).toContain("SIGKILL");
+  });
+});
+
+// ─── startVisualizer: shell-injection guard (driver.ts) ───────────────────────
+
+describe("startVisualizer shell-injection guard", () => {
+  const baseOpts = { port: 4173, dbPath: "/tmp/viz.db" };
+
+  test("a dbPath carrying a shell metacharacter is refused before any exec is issued", async () => {
+    const vm = await driver.create("viz-inject-dbpath");
+    const before = recording.execCalls.length;
+    await expect(
+      startVisualizer(recording, vm.name, { ...baseOpts, dbPath: "/tmp/x'; touch /tmp/PWNED #" }),
+    ).rejects.toThrow(/not a plain path/);
+    expect(recording.execCalls.length).toBe(before); // zero exec calls emitted
+  });
+
+  test("a cwd carrying a shell metacharacter is refused before any exec is issued", async () => {
+    const vm = await driver.create("viz-inject-cwd");
+    const before = recording.execCalls.length;
+    await expect(
+      startVisualizer(recording, vm.name, { ...baseOpts, cwd: "visualizer'; touch /tmp/PWNED #" }),
+    ).rejects.toThrow(/not a plain path/);
+    expect(recording.execCalls.length).toBe(before);
+  });
+
+  test("an envFile carrying a shell metacharacter is refused before any exec is issued", async () => {
+    const vm = await driver.create("viz-inject-envfile");
+    const before = recording.execCalls.length;
+    await expect(
+      startVisualizer(recording, vm.name, { ...baseOpts, envFile: "/tmp/x'; touch /tmp/PWNED #" }),
+    ).rejects.toThrow(/not a plain path/);
+    expect(recording.execCalls.length).toBe(before);
+  });
+
+  test("an envFile with a '..' segment is refused before any exec is issued", async () => {
+    const vm = await driver.create("viz-inject-traversal");
+    const before = recording.execCalls.length;
+    await expect(
+      startVisualizer(recording, vm.name, { ...baseOpts, envFile: "/tmp/../etc/passwd" }),
+    ).rejects.toThrow(/not a plain path/);
+    expect(recording.execCalls.length).toBe(before);
+  });
+
+  test("a non-integer port is refused before any exec is issued", async () => {
+    const vm = await driver.create("viz-inject-port-float");
+    const before = recording.execCalls.length;
+    await expect(startVisualizer(recording, vm.name, { ...baseOpts, port: 1.5 })).rejects.toThrow(
+      /integer in 1\.\.65535/,
+    );
+    expect(recording.execCalls.length).toBe(before);
+  });
+
+  test("a port outside 1..65535 is refused before any exec is issued", async () => {
+    const vm = await driver.create("viz-inject-port-range");
+    const before = recording.execCalls.length;
+    await expect(startVisualizer(recording, vm.name, { ...baseOpts, port: 70000 })).rejects.toThrow(
+      /integer in 1\.\.65535/,
+    );
+    expect(recording.execCalls.length).toBe(before);
+  });
+});
+
+// ─── neverPublicDriver: setPublic guard (driver.ts, INV-2) ────────────────────
+
+describe("neverPublicDriver setPublic guard", () => {
+  test("the guarded driver's setPublic refuses unconditionally", async () => {
+    const vm = await driver.create("viz-never-public");
+    const guarded = neverPublicDriver(recording, 4173);
+    // assertNeverPublic throws synchronously (it is typed `never`, not async).
+    expect(() => guarded.setPublic(vm.name)).toThrow();
+  });
+
+  test("the raw driver's own setPublic is untouched — still callable directly", async () => {
+    const vm = await driver.create("viz-raw-public");
+    await expect(driver.setPublic(vm.name)).resolves.toBeUndefined();
+  });
+
+  // ─── expose branch (gated on the port operand, unlike setPublic) ──────────
+
+  test("the guarded driver's expose refuses exactly the viz port", async () => {
+    const vm = await driver.create("viz-expose-viz-port");
+    const guarded = neverPublicDriver(recording, 4173);
+    expect(() => guarded.expose(vm.name, 4173)).toThrow();
+  });
+
+  test("the guarded driver's expose delegates to the raw driver for any other port", async () => {
+    const vm = await driver.create("viz-expose-other-port");
+    const guarded = neverPublicDriver(recording, 4173);
+    const exposeSpy = spyOn(recording, "expose");
+    const result = await guarded.expose(vm.name, 8080);
+    expect(exposeSpy).toHaveBeenCalledTimes(1);
+    expect(exposeSpy).toHaveBeenCalledWith(vm.name, 8080);
+    await expect(exposeSpy.mock.results[0]!.value).resolves.toBe(result);
+  });
+});

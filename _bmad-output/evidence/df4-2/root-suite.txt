@@ -1,0 +1,309 @@
+bun test v1.3.13 (bf2e2cec)
+
+cli-anything/test/index.test.ts:
+usage: cli-anything run [--manifest <path.yaml>] [--timeout-ms <n>] [-- <args>]
+  --manifest <path> | --manifest=<path>    manifest YAML path; values beginning
+                                           with "-" require the "=" form; repeated
+                                           flags: first wins (space or = form)
+  --timeout-ms <n> | --timeout-ms=<n>      wall-clock timeout in ms: a decimal
+                                           integer in 1..2147483647 (default 10 min)
+  --                                       end of options; first token after --
+                                           is used as the manifest path if none
+                                           was given before it
+  unknown flags and stray positional args are rejected (exit 64)
+usage: cli-anything run [--manifest <path.yaml>] [--timeout-ms <n>] [-- <args>]
+  --manifest <path> | --manifest=<path>    manifest YAML path; values beginning
+                                           with "-" require the "=" form; repeated
+                                           flags: first wins (space or = form)
+  --timeout-ms <n> | --timeout-ms=<n>      wall-clock timeout in ms: a decimal
+                                           integer in 1..2147483647 (default 10 min)
+  --                                       end of options; first token after --
+                                           is used as the manifest path if none
+                                           was given before it
+  unknown flags and stray positional args are rejected (exit 64)
+usage: cli-anything run [--manifest <path.yaml>] [--timeout-ms <n>] [-- <args>]
+  --manifest <path> | --manifest=<path>    manifest YAML path; values beginning
+                                           with "-" require the "=" form; repeated
+                                           flags: first wins (space or = form)
+  --timeout-ms <n> | --timeout-ms=<n>      wall-clock timeout in ms: a decimal
+                                           integer in 1..2147483647 (default 10 min)
+  --                                       end of options; first token after --
+                                           is used as the manifest path if none
+                                           was given before it
+  unknown flags and stray positional args are rejected (exit 64)
+usage: cli-anything run [--manifest <path.yaml>] [--timeout-ms <n>] [-- <args>]
+  --manifest <path> | --manifest=<path>    manifest YAML path; values beginning
+                                           with "-" require the "=" form; repeated
+                                           flags: first wins (space or = form)
+  --timeout-ms <n> | --timeout-ms=<n>      wall-clock timeout in ms: a decimal
+                                           integer in 1..2147483647 (default 10 min)
+  --                                       end of options; first token after --
+                                           is used as the manifest path if none
+                                           was given before it
+  unknown flags and stray positional args are rejected (exit 64)
+{"exit_class":"ok","stdout_excerpt":"QDS_PROBE=x7\nPATH=<omitted>\n","env_probe_result":"x7","spawn_error_code":null,"exit_code":0,"signal":null,"truncated":false}
+{"exit_class":"ok","stdout_excerpt":"ok\n","env_probe_result":null,"spawn_error_code":null,"exit_code":0,"signal":null,"truncated":false}
+{"exit_class":"ok","stdout_excerpt":"QDS_PROBE=x7\nPATH=<omitted>\n","env_probe_result":"x7","spawn_error_code":null,"exit_code":0,"signal":null,"truncated":false}
+{"exit_class":"timeout","stdout_excerpt":"","env_probe_result":null,"spawn_error_code":null,"exit_code":null,"signal":"SIGKILL","truncated":false}
+{"exit_class":"timeout","stdout_excerpt":"","env_probe_result":null,"spawn_error_code":null,"exit_code":null,"signal":"SIGKILL","truncated":false}
+{"exit_class":"ok","stdout_excerpt":"QDS_PROBE=x7\nPATH=<omitted>\n","env_probe_result":"x7","spawn_error_code":null,"exit_code":0,"signal":null,"truncated":false}
+{"exit_class":"nonzero","stdout_excerpt":"","env_probe_result":null,"spawn_error_code":null,"exit_code":3,"signal":null,"truncated":false}
+{"exit_class":"spawn_error","stdout_excerpt":"","env_probe_result":null,"spawn_error_code":"ENOENT","exit_code":null,"signal":null,"truncated":false}
+
+cli-anything/test/runner-integration.test.ts:
+cli-anything: RSS watchdog CPU stats (advisory): 7 samples, avg 2.33%
+cli-anything: RSS watchdog CPU stats (advisory): 1 samples, avg 7.50%
+cli-anything: cost event reports unpriced turns; cumulative total is partial (INV-COST-5)
+cli-anything: RSS watchdog CPU stats (advisory): 1 samples, avg 11.40%
+cli-anything: RSS watchdog CPU stats (advisory): 1 samples, avg 8.80%
+cli-anything: RSS watchdog CPU stats (advisory): 1 samples, avg 7.00%
+cli-anything: RSS watchdog CPU stats (advisory): 1 samples, avg 10.90%
+cli-anything: RSS watchdog CPU stats (advisory): 1 samples, avg 12.00%
+cli-anything: RSS watchdog CPU stats (advisory): 1 samples, avg 8.90%
+cli-anything: RSS watchdog CPU stats (advisory): 1 samples, avg 6.90%
+cli-anything: RSS watchdog CPU stats (advisory): 1 samples, avg 5.80%
+cli-anything: RSS watchdog CPU stats (advisory): 1 samples, avg 7.80%
+cli-anything: RSS watchdog escalation at 5368709120 bytes (5.00 GB, threshold 4.00 GB)
+cli-anything: RSS watchdog CPU stats (advisory): 1 samples, avg 10.80%
+
+cli-anything/test/watchdog.test.ts:
+cli-anything: RSS watchdog log callback threw 307 |       thresholdBytes: 1,
+308 |       pollMs: 20,
+309 |       graceMs: 60_000,
+310 |       onEscalate: () => { throw new Error("callback boom"); },
+311 |       onUnwatchable: () => {},
+312 |       log: () => { throw new Error("log boom"); },
+                                   ^
+error: log boom
+      at log (<WORKSPACE>/cli-anything/test/watchdog.test.ts:312:30)
+      at <anonymous> (<WORKSPACE>/cli-anything/src/watchdog.ts:306:9)
+
+cli-anything: RSS watchdog onEscalate callback threw 305 |       child,
+306 |       pgidOrGroup: child.pid!, // escalation signals THIS group
+307 |       thresholdBytes: 1,
+308 |       pollMs: 20,
+309 |       graceMs: 60_000,
+310 |       onEscalate: () => { throw new Error("callback boom"); },
+                                          ^
+error: callback boom
+      at onEscalate (<WORKSPACE>/cli-anything/test/watchdog.test.ts:310:37)
+      at <anonymous> (<WORKSPACE>/cli-anything/src/watchdog.ts:314:9)
+
+
+visualizer/test/auth.test.ts:
+{"event":"viz_request","requestId":"req-f82c0c82aa3a","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":1,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-38f4d8f432fb","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-f19573bb13a8","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-74496db9293c","route":"/api/sessions","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-68f3cdee95bc","route":"/api/sessions","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-d3ea921c78b7","route":"/api/sessions","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/envelopes","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/envelopes","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/envelopes","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/gates","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/gates","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/gates","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/prompts","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/prompts","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/prompts","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-58f5a7b38a00","route":"/","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-227b839f70bc","route":"/","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-8b23b2d064ac","route":"/","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-09dd0b3fb3b7","route":"/","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-82c0ed642423","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/gates","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-98f2b2da383f","route":"/api/health","authOutcome":"ok","status":200,"durationMs":1,"auth_ms":0,"query_ms":1,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-85b312054ee3","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-25b9052b84a3","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-5f5de8583710","route":"/api/health","authOutcome":"ok","status":404,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-938810d2c32c","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-ac68ae3c3560","route":"/api/health","authOutcome":"host_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-9745c58251c1","route":"/api/health","authOutcome":"host_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-e7a41bbd75f5","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-01ca1fa8f907","route":"/","authOutcome":"host_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"csrf_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"csrf_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":200,"durationMs":2,"auth_ms":0,"query_ms":2,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"csrf_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"csrf_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-b6747ee2ccd6","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-4a73c3815de2","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-17141338e519","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-d9fd7c95dbe3","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-52c26c60753d","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-3dffef149ede","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-0dd92057f732","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-35c6489e693f","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-f3fbcad07034","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-55504ec2b851","route":"/api/health","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-134264ddb84a","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-6693ac707f21","route":"/api/nope","authOutcome":"ok","status":404,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":400,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-25a5da413a5c","route":"/api","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-9c3cb45389d7","route":"/x","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-e1a25d1cb40b","route":"/apifoo","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-a42bfc7a2e33","route":"-","authOutcome":"host_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0}
+{"event":"viz_request","requestId":"req-c561ce1ae556","route":"/api/health","authOutcome":"host_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-b65c78455351","route":"/api/health","authOutcome":"host_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-c87f3723a4e4","route":"/api/health","authOutcome":"host_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-fd094e5d997e","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-9f2c19730446","route":"/api/health","authOutcome":"host_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-c37a27e7d20c","route":"-","authOutcome":"host_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"csrf_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"csrf_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"csrf_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"csrf_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/archive","authOutcome":"csrf_rejected","status":403,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-b6c008dd8d92","route":"/","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-193fc7948c4d","route":"/assets/viz-fixture.js","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-3b0368c93efe","route":"/assets/viz%20fixture.txt","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-082f5a918dff","route":"/assets/viz-fixture.js","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-68eb1aa060b5","route":"/session/req-df41-fixture","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-07aea11f7b92","route":"/assets/gone.js","authOutcome":"ok","status":404,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-66f2510212c8","route":"/..%2fpackage.json","authOutcome":"ok","status":404,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-eacc849d4021","route":"/etc/passwd","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-105e4461bf8c","route":"/..%2f/..%2f/..%2f/..%2f/..%2f/..%2f/..%2f/..%2fetc%2fhosts","authOutcome":"ok","status":404,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-bac641e272b0","route":"/assets/viz-fixture.js","authOutcome":"ok","status":404,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+
+visualizer/test/routes.test.ts:
+{"event":"viz_request","requestId":"req-cc54aa0c346e","route":"/api/sessions","authOutcome":"ok","status":200,"durationMs":1,"auth_ms":0,"query_ms":1,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-3d3c88805449","route":"/api/sessions","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId","authOutcome":"ok","status":200,"durationMs":1,"auth_ms":0,"query_ms":1,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-nope","route":"/api/sessions/:requestId","authOutcome":"ok","status":404,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"..%2Fetc","route":"/api/sessions/:requestId","authOutcome":"ok","status":400,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/gates","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/envelopes","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/prompts","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/prompts","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/prompts","authOutcome":"ok","status":400,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/prompts","authOutcome":"ok","status":400,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/prompts","authOutcome":"ok","status":400,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-d980ece2d9ae","route":"/api/sessions/req-df41-fixture/agents/builder/prompts","authOutcome":"ok","status":404,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-many","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":4,"auth_ms":0,"query_ms":4,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-many","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":400,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":400,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":400,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":400,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-unknown","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"%E0%A4%A","route":"/api/sessions/:requestId/events","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"%E0%A4%A","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":400,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":200,"durationMs":1,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-nope","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":404,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":413,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId/archive","authOutcome":"rejected","status":401,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":400,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-b91a1738eeae","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-cf89927646d8","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-fbe0f3531e48","route":"/api/sessions","authOutcome":"ok","status":200,"durationMs":1,"auth_ms":0,"query_ms":1,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-dc67a7762a02","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-82017128ed23","route":"/api/sessions","authOutcome":"ok","status":200,"durationMs":1,"auth_ms":0,"query_ms":1,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-cfff3c58b76e","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-956598829532","route":"/api/sessions","authOutcome":"ok","status":500,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-1977b5404e7c","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-9fddb8b84236","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-b4954be844bb","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-ba1557633f48","route":"/api/sessions","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-07114bd3482c","route":"/api/sessions","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-e643bd4ca3c2","route":"/api/sessions","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-3273fcf8b6b6","route":"/api/sessions","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/prompts","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/prompts","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/prompts","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-many","route":"/api/sessions/:requestId/prompts","authOutcome":"ok","status":200,"durationMs":2,"auth_ms":0,"query_ms":2,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-many","route":"/api/sessions/:requestId/prompts","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-many","route":"/api/sessions/:requestId/prompts","authOutcome":"ok","status":200,"durationMs":2,"auth_ms":0,"query_ms":2,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-many","route":"/api/sessions/:requestId/prompts","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":400,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":400,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-fixture","route":"/api/sessions/:requestId/events","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-8a6c3024ae97","route":"/api/zzz-reflect-me","authOutcome":"ok","status":404,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-nope","route":"/api/sessions/:requestId","authOutcome":"ok","status":404,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":413,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":500,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-3d15e6c7dfd2","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId","authOutcome":"ok","status":200,"durationMs":1,"auth_ms":0,"query_ms":1,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-e75bf53f6f3e","route":"/api/health","authOutcome":"ok","status":500,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-f72bfdeadf12","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0}
+{"event":"viz_request","requestId":"req-940c5598fb49","route":"/api/sessions","authOutcome":"ok","status":200,"durationMs":1,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-1e2b193ffeb3","route":"/api/health","authOutcome":"ok","status":200,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+{"event":"viz_request","requestId":"req-df41-empty","route":"/api/sessions/:requestId/archive","authOutcome":"ok","status":413,"durationMs":0,"auth_ms":0,"query_ms":0,"source":"127.0.0.1"}
+[viz] visualizer api  http://127.0.0.1:4601
+[viz] db              /fake/trace.db  [journal_mode=wal]
+[viz] no ./dist — use "bun run dev" for the Vite dev server
+[viz] journal_mode is "delete", expected "wal" — live reads during pipeline writes may block
+
+tests/providers/teardown.test.ts:
+DF2.5 teardown e2e demo evidence:
+{
+  "runId": "df25-demo",
+  "baseSha": "9fe1bd104e5b779c0725a2837b36b9d5d4b9cfc4",
+  "originCommits": 3,
+  "boxCommits": 3,
+  "revListRangedCount": 3,
+  "revListTotalCount": 6,
+  "porcelainEmpty": true,
+  "branchListUnchanged": true,
+  "sandboxRef": "7b72ac434226eaacd9628762391e451162ea93b1",
+  "spendMicroUsd": 8100,
+  "keyRevoked": true,
+  "boxDirGone": true,
+  "bundlePresent": true,
+  "artifactsDir": "/var/folders/b1/3xqsp60176l3n0f7rxfv6q2h0000gn/T/qds-df25-td-gu8e01/runs/df25-demo-artifacts",
+  "artifactEntries": [
+    "app_docs",
+    "run.log",
+    "specs"
+  ],
+  "closedAt": "2026-08-22T17:53:39.148Z",
+  "leak": null
+}
+FAIL bad_args: --roster <path> is required
+FAIL bad_args: unknown flag: --nope
+FAIL roster path is outside the repo root: /private/tmp/roster-out-6zaEHC/x.roster.yaml
+{"requestId":"3cffa6c8-d88e-4424-9374-5cd2d3ee16bb","error":{"code":"roster_invalid","message":"roster /private/tmp/roster-out-6zaEHC/x.roster.yaml is invalid:\\x0a  - roster path is outside the repo root: /private/tmp/roster-out-6zaEHC/x.roster.yaml"}}
+FAIL cannot read roster: ENOENT: no such file or directory, lstat '<WORKSPACE>/config/rosters/no-such-file.roster.yaml'
+{"requestId":"c18b87d5-387a-405b-a793-1a100bd4cfe6","error":{"code":"roster_unreadable","message":"roster <WORKSPACE>/config/rosters/no-such-file.roster.yaml could not be read:\\x0a  - cannot read roster: ENOENT: no such file or directory, lstat '<WORKSPACE>/config/rosters/no-such-file.roster.yaml'"}}
+FAIL roles[a\x9bb\u202ec]: writes is required — declare [] for no repo writes or null for unrestricted (set it here or in defaults)
+FAIL roles[0]: Unrecognized key(s) in object: 'bogus'
+{"requestId":"b5df4cd3-6e63-41ff-a258-40a747a2c790","error":{"code":"roster_invalid","message":"roster <WORKSPACE>/config/rosters/.test-WiyiKj/bad.roster.yaml is invalid:\\x0a  - roles[0]: Unrecognized key(s) in object: 'bogus'"}}
+
+tests/phase-engine/dispatch-task.test.ts:
+[dispatch-task] artifact dropped: evil (linked-dir/evil.txt) — validation or read failed
+
+tests/phase-engine/trace/reader.test.ts:
+[reader] journal_mode is "delete", expected "wal" — live reads during writes may block
+[reader] journal_mode is "delete", expected "wal" — live reads during writes may block
+
+ 2666 pass
+ 7 skip
+ 2 todo
+ 0 fail
+ 8737 expect() calls
+Ran 2675 tests across 91 files. [321.35s]

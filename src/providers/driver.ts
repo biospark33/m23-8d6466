@@ -20,6 +20,7 @@ import { assertExistingRunId, assertValidRunId } from "./run-record.ts";
 import { redactSecrets } from "./step-log.ts";
 import { checkHeadroom, HeadroomRefusedError, loadQuotaLimits } from "./quota.ts";
 import { TimeoutError, withTimeout } from "./timeout.ts";
+import { assertNeverPublic } from "./viz-guard.ts";
 
 /**
  * Create-time provenance marker (DF2.6 D1): every factory-provisioned VM is
@@ -325,7 +326,7 @@ export function unownedVmReapRefusal(driverName: string, spared: readonly string
   const n = spared.length;
   return new ProvisionRefusedError(
     "reap-vms-unowned",
-    `refusing to reap: ${n} unclaimed box${n === 1 ? "" : "es"} cannot prove factory ownership (${spared.join(", ")}) — spared, not destroyed, but leaving them unsurfaced hid unreaped spend`,
+    `refusing to reap: ${n} unclaimed box${n === 1 ? "" : "es"} on driver ${driverName} cannot prove factory ownership (${spared.join(", ")}) — spared, not destroyed, but leaving them unsurfaced hid unreaped spend`,
     "inspect each box above (fleet status / provider ls), tear down or tag the ones that are ours, then re-run — a box without the ownership tag is never destroyed automatically",
   );
 }
@@ -863,6 +864,224 @@ export function observeRun(
   localPath: string,
 ): Promise<void> {
   return driver.copyFile(vm, remotePath, localPath);
+}
+
+/**
+ * DF4.2's in-box convention for the visualizer's spawned process: the token
+ * env file (delivered via DF2.3's stdin `deliverScript` shape — the box-side
+ * half of INV-3; visualizer/deploy.ts owns the host-side half), the pidfile
+ * `startVisualizer`/`stopVisualizer` agree on, and its log. Exported so
+ * visualizer/deploy.ts delivers to the exact path this file spawns against —
+ * one convention, not two independently-guessed ones.
+ */
+export const VIZ_ENVFILE = "/tmp/qds-viz.env";
+/** Exported for the same reason as VIZ_ENVFILE: tests that need to recognize
+ * the stopVisualizer step by its exec argv reference this constant instead
+ * of duplicating the literal path. */
+export const VIZ_PIDFILE = "/tmp/qds-viz.pid";
+/** Exported for the same reason as VIZ_PIDFILE: deploy.ts's health check tails
+ * this file on CRASHED, and must read the same path this module writes to. */
+export const VIZ_LOGFILE = "/tmp/qds-viz.log";
+
+export interface StartVisualizerOptions {
+  /** In-box directory containing the visualizer package (server/index.ts). Default "visualizer". */
+  cwd?: string;
+  /** Forwarded as QDS_VIZ_PORT. */
+  port: number;
+  /** Forwarded as QDS_VIZ_DB. */
+  dbPath: string;
+  /** In-box path of the delivered token env file (DF2.3 shape). Default VIZ_ENVFILE. */
+  envFile?: string;
+}
+
+export interface StartVisualizerResult {
+  pid: number;
+  /** An existing healthy process was left running rather than a second one started (AC3). */
+  reused: boolean;
+}
+
+/**
+ * INV-2 (enforced by visualizer/test/auth.test.ts's static scanner): any file
+ * under src/providers that configures QDS_VIZ_PORT must prove, in the same
+ * file, that the port is never routed to `expose`/`setPublic` — the two
+ * public-share primitives. This wrapper is that proof: it is a real
+ * interception, not a call for the scanner's sake alone. `startVisualizer`
+ * below never calls `expose`/`setPublic` on any path, so in normal operation
+ * this guard is inert; it exists to hard-fail a future edit that tries.
+ *
+ * `setPublic(vm)` takes no port, so it cannot be gated on `vizPort` the way
+ * `expose` is — yet it is exactly the call that makes the whole box, viz port
+ * included, publicly reachable. The guarded driver's `setPublic` therefore
+ * refuses unconditionally; the raw `driver.setPublic` this wrapper closes
+ * over is untouched and still used legitimately by other callers (DF2.2).
+ *
+ * Exported for the INV-2 test suite only (tests/providers/teardown.test.ts);
+ * `startVisualizer` is the only production caller.
+ */
+export function neverPublicDriver(driver: ProviderDriver, vizPort: number): ProviderDriver {
+  // Bound explicitly, not `{...driver}`: a class instance's methods live on
+  // its prototype, so an object spread would drop every one of them.
+  return {
+    name: driver.name,
+    create: driver.create.bind(driver),
+    list: driver.list.bind(driver),
+    destroy: driver.destroy.bind(driver),
+    expose: (vm: string, port: number) => (port === vizPort ? assertNeverPublic(port) : driver.expose(vm, port)),
+    setPublic: () => assertNeverPublic(vizPort),
+    whoami: driver.whoami.bind(driver),
+    exec: driver.exec.bind(driver),
+    copyFile: driver.copyFile.bind(driver),
+  };
+}
+
+/**
+ * Injection guard for `startVisualizer`'s script (charset allow-list, no
+ * ".." segments) — the same grammar credentials.ts's `assertEnvFileSafe`
+ * enforces on `envFile` before it lands in a single-quoted `sh -c` literal.
+ * Applied here to `cwd` and `dbPath` too: both are interpolated the same way.
+ */
+function assertShellSafePath(label: string, value: string): void {
+  const wellFormed = /^[A-Za-z0-9._/-]+$/.test(value) && value.length > 0;
+  const noTraversal = value.split("/").every((segment) => segment !== "..");
+  if (!wellFormed || !noTraversal) {
+    throw new Error(
+      `startVisualizer ${label} ${JSON.stringify(value)} is not a plain path (charset [A-Za-z0-9._/-], no ".." segments) — refusing to build a shell script from it`,
+    );
+  }
+}
+
+/** `opts.port` is typed `number` but nothing enforces it at runtime before it reaches the script. */
+function assertVizPort(port: number): void {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`startVisualizer port ${JSON.stringify(port)} is not an integer in 1..65535`);
+  }
+}
+
+/**
+ * Lifecycle verb `startVisualizer` — spawn the DF4.2 visualizer server inside
+ * the box, sourced from the token env file DF2.3's stdin-delivery shape wrote
+ * at `opts.envFile` (INV-3's box-side half; visualizer/deploy.ts mints and
+ * delivers it before calling this). Backgrounded with `nohup` so it survives
+ * this exec returning (SIGHUP is what would otherwise kill it); its pid
+ * lands at VIZ_PIDFILE. No `disown`: the script runs under `sh -c`, and on
+ * Debian/Ubuntu `/bin/sh` is dash, where `disown` is not a builtin — it
+ * would print `sh: disown: not found` to the same stderr the error path
+ * surfaces, with no added effect over `nohup` alone.
+ *
+ * Idempotent (AC3): a pidfile naming a still-live process is left running —
+ * reused, never a second listener. This function does no health probing —
+ * "spawned" and "answering /api/health" are different facts, and only
+ * visualizer/deploy.ts (which polls after calling this) needs the second one.
+ */
+export async function startVisualizer(
+  driver: ProviderDriver,
+  vm: string,
+  opts: StartVisualizerOptions,
+): Promise<StartVisualizerResult> {
+  const guarded = neverPublicDriver(driver, opts.port);
+  const cwd = opts.cwd ?? "visualizer";
+  const envFile = opts.envFile ?? VIZ_ENVFILE;
+  // Injection guard (mirrors credentials.ts's assertEnvFileSafe): every one
+  // of these becomes single-quoted `sh -c` script text below, and quoting
+  // alone is the SECONDARY defense — a value carrying a `'` escapes it (e.g.
+  // dbPath = "/tmp/x'; touch /tmp/PWNED #"). Validate the charset BEFORE
+  // interpolation, primary defense, so a caller-controlled path can never
+  // reach the box as a second command.
+  assertShellSafePath("cwd", cwd);
+  assertShellSafePath("dbPath", opts.dbPath);
+  assertShellSafePath("envFile", envFile);
+  assertVizPort(opts.port);
+  const script = `
+if [ -f '${VIZ_PIDFILE}' ] && kill -0 "$(cat '${VIZ_PIDFILE}')" 2>/dev/null; then
+  echo "REUSED $(cat '${VIZ_PIDFILE}')"
+  exit 0
+fi
+[ -f '${envFile}' ] || { echo "viz token env file missing at ${envFile}" >&2; exit 3; }
+cd '${cwd}' || { echo "viz cwd missing: ${cwd}" >&2; exit 4; }
+set -a
+. '${envFile}'
+set +a
+QDS_VIZ_DB='${opts.dbPath}' QDS_VIZ_PORT='${opts.port}' nohup bun run server/index.ts >'${VIZ_LOGFILE}' 2>&1 &
+echo $! > '${VIZ_PIDFILE}'
+echo "STARTED $(cat '${VIZ_PIDFILE}')"
+`.trim();
+  const res = await guarded.exec(vm, ["sh", "-c", script]);
+  const match = /^(REUSED|STARTED) (\d+)$/.exec(res.stdout.trim());
+  if (res.exitCode !== 0 || !match) {
+    throw new Error(
+      `startVisualizer spawn failed (exit ${res.exitCode}): ${res.stderr.trim() || res.stdout.trim()}`,
+    );
+  }
+  return { pid: Number(match[2]), reused: match[1] === "REUSED" };
+}
+
+export interface StopVisualizerResult {
+  stopped: boolean;
+  reason: string;
+}
+
+/**
+ * Lifecycle verb `stopVisualizer` — kill the pid at VIZ_PIDFILE if it is
+ * still alive, then remove the pidfile. Never throws on "nothing to stop" or
+ * "already dead" — those are reported outcomes, not failures. AC6 requires
+ * teardown to CONTINUE past a stop failure regardless; a transport-level
+ * throw (the box unreachable) still propagates here and is the caller's
+ * (teardown.ts) job to catch and log rather than abort on.
+ */
+export async function stopVisualizer(driver: ProviderDriver, vm: string): Promise<StopVisualizerResult> {
+  const script = `
+if [ ! -f '${VIZ_PIDFILE}' ]; then
+  echo "NONE"
+  exit 0
+fi
+pid="$(cat '${VIZ_PIDFILE}')"
+if kill -0 "$pid" 2>/dev/null; then
+  kill "$pid" 2>/dev/null
+  # Wait for the process to actually die before dropping the pidfile — a
+  # bare kill+rm races an uninterruptible-sleep or slow-shutdown process:
+  # the pidfile vanishes while the process (and its port) are still live,
+  # so a later stopVisualizer call reports NONE and the process orphans.
+  # ~1s budget (5 x 0.2s); teardown continues either way past this loop.
+  for i in 1 2 3 4 5; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  # SIGTERM alone didn't land within budget — escalate to SIGKILL and give
+  # it the same wait budget before giving up.
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null
+    for i in 1 2 3 4 5; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.2
+    done
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    # Still alive after SIGTERM+SIGKILL — keep the pidfile so a later call
+    # doesn't report NONE and orphan the process/port.
+    echo "ALIVE $pid"
+    exit 0
+  fi
+  rm -f '${VIZ_PIDFILE}'
+  echo "STOPPED $pid"
+else
+  rm -f '${VIZ_PIDFILE}'
+  echo "STALE $pid"
+fi
+`.trim();
+  const res = await driver.exec(vm, ["sh", "-c", script]);
+  const line = res.stdout.trim();
+  if (res.exitCode !== 0) {
+    return { stopped: false, reason: `stop script exited ${res.exitCode}: ${res.stderr.trim() || line}` };
+  }
+  if (line === "NONE") return { stopped: false, reason: "no visualizer pidfile — nothing to stop" };
+  if (line.startsWith("STALE")) return { stopped: false, reason: `pidfile named a dead process (${line})` };
+  if (line.startsWith("ALIVE")) {
+    return {
+      stopped: false,
+      reason: `process survived SIGTERM and SIGKILL; pidfile kept (${line})`,
+    };
+  }
+  return { stopped: true, reason: line };
 }
 
 /**

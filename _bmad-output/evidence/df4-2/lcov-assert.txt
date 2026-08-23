@@ -1,0 +1,3 @@
+$ bun run --cwd visualizer scripts/check-lcov.ts
+check-lcov: all 13 expected files clear the floor
+EXIT=0
