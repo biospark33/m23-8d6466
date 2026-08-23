@@ -7,8 +7,11 @@
  * `./fleet-lock.ts` (split out under D1's sanctioned escape clause,
  * orchestrator-approved).
  *
- * Section 3 — the primitive, the three patterns and the race poller — lands at
- * the END of this module (Wave-1b agent B appends there; see the marker below).
+ * Section 3 — the primitive, the three patterns and the race poller — lives in
+ * `./fanout-primitive.ts` (split under D1's sanctioned escape clause once
+ * sections 1+3 together crossed the line ceiling; orchestrator-approved for
+ * wave-1b agent B). This module stays the store only; the split is acyclic
+ * (primitive → store/lock, never back).
  */
 
 import { randomBytes } from "node:crypto";
@@ -344,9 +347,9 @@ function readFanoutRecord(p: string, expectedId: string): FanoutRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Section 3 — the primitive, the three patterns and the race poller (AC1-AC6).
-// Wave-1b agent B APPENDS HERE. Do not reorder above this line: section 1's
-// store is section 3's dependency, and the file reads store → primitive.
+// Section 3 (the primitive, patterns, race poller) lives in
+// ./fanout-primitive.ts — D1 escape-clause split, see this file's header.
+// Only its shared fs helpers remain below.
 // ---------------------------------------------------------------------------
 
 /** Best-effort durability for the directory entry the link created. */
