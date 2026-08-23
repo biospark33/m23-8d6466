@@ -299,6 +299,14 @@ export interface DispatchDeps {
   dispatchLogPath?: string;
   /** Setup-gate seam (test/injection). Default: exedev `.setup`, else fakeGate. */
   setupGate?: (driver: ProviderDriver, vm: string, opts: GateOpts) => Promise<SetupGateResult>;
+  /**
+   * Per-run key cap in integer micro-dollars (DF3.2/DD-9). Flows to the budget
+   * gate's `keyCapMicroUsd` — the ceiling it clamps into
+   * `admittedCeilingMicroUsd`, which becomes the minted key's provider-side
+   * hard USD limit at mintRunKey. Absent/undefined ⇒ the single-run default
+   * (`defaultKeyCapMicroUsd`) — behavior identical to pre-DF3.2.
+   */
+  capMicroUsd?: number;
 }
 
 export interface GateOpts {
@@ -1581,7 +1589,13 @@ export async function dispatch(
     // cast restores exactly the drift the Pick<> was introduced to prevent.
     // Widening the gate's parameter to a structural slice is the real fix and
     // lives in `src/providers/budget-gate.ts`, outside this module.
-    decision = assertWithinBudget(ledger as CostLedger, { repoSlug, issueId, runId, requestId });
+    // Third arg (DF3.2/DD-9): the caller's per-run key cap. Undefined ⇒ the
+    // gate's own default — byte-for-byte the pre-DF3.2 behavior.
+    decision = assertWithinBudget(
+      ledger as CostLedger,
+      { repoSlug, issueId, runId, requestId },
+      deps.capMicroUsd,
+    );
   } catch (e) {
     if (e instanceof OverBudgetError) {
       throw refuse(5, "budget-exceeded", e.message, e.remediation, {
