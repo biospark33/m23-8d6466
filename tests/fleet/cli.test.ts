@@ -1170,7 +1170,10 @@ process.stdout.write(t);
         await proc.exited;
       }
     }
-  }, 60_000);
+    // 4 cases × (probe + dispatch), each bounded at 30s: the outer budget has to
+    // clear the SUM, or the runner's timeout fires first and masks the NAMED
+    // hang this test's `within`s exist to produce.
+  }, 300_000);
 
   test("invalid JSON brief → exit 2", async () => {
     const code = await runCli(["dispatch", "--driver", "fake"], deps("{not json"));
@@ -1213,7 +1216,9 @@ process.stdout.write(t);
       proc.kill("SIGKILL");
       await proc.exited;
     }
-  });
+    // Above the 30s `within` bound: the runner's timeout must never be what
+    // ends this test, or the named "did not finish within" never surfaces.
+  }, 60_000);
 
   test("the STDIN reader enforces the cap on both sides of the boundary, out of process", async () => {
     // `yes |` above is the gross case: an infinite producer, refused as it
@@ -1227,6 +1232,17 @@ process.stdout.write(t);
     const atCap = brief + " ".repeat(MAX_BRIEF_BYTES - Buffer.byteLength(brief, "utf8"));
     expect(Buffer.byteLength(atCap, "utf8")).toBe(MAX_BRIEF_BYTES);
     const fleetPath = join(import.meta.dir, "../../scripts/fleet.ts");
+    // Credential-stripped env, deliberately NOT inherited wholesale. The accept
+    // row drives a REAL scripts/fleet.ts with a VALID brief, so on a host that
+    // exports $OPENROUTER_PROVISIONING_KEY — a normal .env state — it would
+    // otherwise complete a full dispatch and mint a LIVE credentialed key while
+    // the row passed silently; on hosts without the variable the same row
+    // passed by a different route (provisioning-key-missing). Stripping it makes
+    // both rows deterministic everywhere: `openRouterKeyApi()` refuses at
+    // construction, before any side effect, and the accept row's claim is still
+    // exercised — a brief AT the cap got through the reader without being named
+    // brief-too-large.
+    const { OPENROUTER_PROVISIONING_KEY: _provKey, ...childEnv } = process.env;
 
     for (const [label, payload, refused] of [
       ["exactly the cap", atCap, false],
@@ -1234,24 +1250,43 @@ process.stdout.write(t);
     ] as const) {
       const proc = Bun.spawn(["bun", fleetPath, "dispatch", "--driver", "fake"], {
         cwd: dir,
+        env: childEnv,
         stdin: Buffer.from(payload, "utf8"),
         stdout: "pipe",
         stderr: "pipe",
       });
       try {
-        const [, , stderr] = await within(
+        const [code, stdout, stderr] = await within(
           `fleet dispatch with a brief of ${label}`,
           30_000,
           Promise.all([proc.exited, readCapped(proc.stdout), readCapped(proc.stderr)]),
         );
+        // BOTH rows exit 2 — the cap refusal and the key refusal share the
+        // envelope shape — and stdout stays empty in both. Asserting them on the
+        // accept side too is what stops a crash-shaped 1, or a wedged success,
+        // from passing as "the cap was not hit".
+        expect({ label, code }).toEqual({ label, code: 2 });
+        expect({ label, stdout }).toEqual({ label, stdout: "" });
         expect({ label, refused: stderr.includes("brief-too-large") }).toEqual({ label, refused });
-        if (refused) expect(stderr).toContain(String(MAX_BRIEF_BYTES));
+        if (refused) {
+          expect(stderr).toContain(String(MAX_BRIEF_BYTES));
+        } else {
+          // Accepted THROUGH the reader, then stopped cold before the mint: the
+          // refusal names the missing provisioning key and nothing else was
+          // provisioned — the store's dir exists but holds no record (it is
+          // built before the client, per fleet.ts's INV ordering), and no box
+          // root was ever created.
+          expect(stderr).toContain("OPENROUTER_PROVISIONING_KEY is not set");
+          expect(readdirSync(join(dir, ".sandbox", "runs"))).toHaveLength(0);
+          expect(existsSync(join(dir, ".sandbox", "fake-boxes"))).toBeFalse();
+        }
       } finally {
         proc.kill("SIGKILL");
         await proc.exited;
       }
     }
-  }, 60_000);
+    // Two rows × 30s each: the outer budget clears the SUM of the inner bounds.
+  }, 90_000);
 
   // ─── --port grammar and the ack's httpsUrl ─────────────────────────────────
 
@@ -1405,7 +1440,16 @@ process.stdout.write(t);
           remediation: string;
         };
         expect(envelope.code).toBe("invalid-run-id");
-        if (runId === LONG_ID) {
+        if (runId === "") {
+          // EXACT, not `toContain(JSON.stringify(""))`: `'""'` matches any
+          // message containing two adjacent quotes, which is all of them. This
+          // is also the only row short enough that `runIdSupplied` adds no
+          // "— supplied" suffix, so pinning it verbatim proves the message is
+          // built from the raw argument rather than from a placeholder.
+          expect(envelope.message).toBe(
+            'invalid run id: "" (must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ and be <= 63 chars)',
+          );
+        } else if (runId === LONG_ID) {
           // VERBATIM, not `toContain` of the pieces: every part of this string
           // is load-bearing and each was independently wrong at some point —
           // the head length, the escaping, the redaction of the store's echo,
@@ -1757,7 +1801,8 @@ process.stdout.write(t);
     expect(lstatSync(lock).isSymbolicLink()).toBeTrue();
     expect((shared.store as RunRecordStore).get(runId).closedAt).toBeUndefined();
     rmSync(lock);
-  });
+    // Above the 20s `within` bound, so a hang reports its own name.
+  }, 40_000);
 
   test("teardown HOLDS the run lock when the teardown itself fails, and says so", async () => {
     const base = new FakeDriver(boxesDir);
@@ -1807,6 +1852,16 @@ process.stdout.write(t);
     // `held` map — which is a programming-error branch, not the contention an
     // operator hits. `--driver fake` is resolved for real here (no injected
     // deps), which is why the boxes dir has to be handed over in the env.
+    //
+    // Keyless first, like every other child this file hands a record to: if the
+    // lock guard above ever regresses, this child reaches the revocation step,
+    // builds a REAL `openRouterKeyApi()` against $OPENROUTER_PROVISIONING_KEY
+    // and talks to the live network before the assertion below gets to fail.
+    // Stripping `keyHash` turns that regression into a deterministic exit-2
+    // provisioning-key refusal that touches nothing.
+    const recordPath = join(runsDir, `${runId}.json`);
+    const { keyHash: _dropped, ...keyless } = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(recordPath, JSON.stringify(keyless), { mode: 0o600 });
     const next = Bun.spawn(
       ["bun", join(import.meta.dir, "../../scripts/fleet.ts"), "teardown", "--driver", "fake", "--dir", runsDir, runId],
       { cwd: dir, stdout: "pipe", stderr: "pipe", env: { ...process.env, QDS_FAKE_BOXES_DIR: boxesDir } },
@@ -1829,7 +1884,9 @@ process.stdout.write(t);
     }
     // The refusal neither stole nor cleared it: only an operator can.
     expect(existsSync(join(runsDir, `${runId}.lock`))).toBeTrue();
-  }, 30_000);
+    // Above the child's own 30s bound, so a hung child names its await instead
+    // of being cut off here.
+  }, 60_000);
 
   test("teardown of a run with a box, an OPEN record and no keyHash exits 6, not 0", async () => {
     // The record `dispatch` leaves if it dies between `driver.create()`
@@ -1986,8 +2043,10 @@ process.stdout.write(t);
       await Promise.all(racers.map((p) => p.exited));
       rmSync(join(runsDir, `${runId}.lock`), { force: true });
     }
-    // Four `bun` cold starts plus 240 contended rounds: past bun's 5s default.
-  }, 60_000);
+    // Four `bun` cold starts plus 240 contended rounds: past bun's 5s default,
+    // and above the race's own 60s bound so a hung racer reports ITS name
+    // rather than being cut off by this timeout.
+  }, 90_000);
 
   test("on a filesystem with no hard links the O_EXCL fallback is still exclusive", async () => {
     // `claim`'s `writeLockDirect` fallback has no coverage at all, and on FUSE
@@ -2048,7 +2107,9 @@ process.stdout.write(t);
     // The sibling EPERM case above already pins its exact string.
     expect(said).toBe("lost EIO");
     expect(existsSync(lock)).toBeFalse();
-  }, 30_000);
+    // Three `within`s of 20s each: the outer budget clears the SUM, so the
+    // first hung acquire names itself instead of dying to this timeout.
+  }, 90_000);
 
   test("a signal releases a lock taken before the destructive phase, and the process dies by signal", async () => {
     // `installSignalRelease` is entirely uncovered: the only signal anywhere in
@@ -2097,7 +2158,10 @@ process.stdout.write(t);
     expect(stderr).toContain("check the run's box, key and record");
     expect(destructive.signalCode).toBe("SIGINT");
     rmSync(lock, { force: true });
-  }, 30_000);
+    // Six `within`s of 20s each (two per signal × two signals, then the
+    // destructive pair): the outer budget clears that SUM so a hung holder
+    // reports which await wedged instead of being cut off here.
+  }, 150_000);
 
   test("fleet and sandbox-teardown exclude each other through the SAME per-run lock", async () => {
     // The file header claims both CLIs take one shared lock, and nothing showed
@@ -2503,10 +2567,18 @@ process.stdout.write(t);
     // The envelope is the operator's ONLY copy of the run id now — the ack that
     // carried it is the write that failed — so it must name the id and the
     // exact command that reclaims the box, both keyed to the run that is
-    // actually billing (the record proves the box exists under that id).
+    // actually billing.
     expect(envelope.runId).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
     expect(envelope.remediation).toContain(`fleet teardown ${envelope.runId}`);
-    expect((shared.store as RunRecordStore).get(envelope.runId).vmName).toBe(envelope.runId);
+    // Box identity pinned to vmName — the driver's own name for the billing box
+    // — like every sibling case, not to the id. `vmName === runId` is a
+    // FakeDriver naming convention, not the envelope's promise; asserting it
+    // made a driver-side rename fail this test while leaving the actual claim
+    // (a live box exists for the named run) untested.
+    const record = (shared.store as RunRecordStore).get(envelope.runId);
+    // A dispatched run's record always names its box; `?? ""` only keeps the
+    // optional field honest — an unnamed record cannot match any real VM.
+    expect((await (shared.driver as FakeDriver).list()).map((vm) => vm.name)).toContain(record.vmName ?? "");
     expect(errCaptured.join("")).toContain("ENOSPC");
   });
 
@@ -3109,27 +3181,45 @@ process.stdout.write(t);
       }
     });
 
-    test("the log's runId bound is the CLI's own, not the refusal envelope's", async () => {
-      // Two streams, two owners, deliberately NOT collapsed. `assertFleetRunId`
-      // owns the operator-facing echo and cuts it to a 12-char redacted head
-      // plus the true length; `bounded` owns the LOG field and cuts it to 96.
-      // Folding them was tried and was wrong: capping first handed the store a
-      // 108-char string to describe, so the envelope carried two lengths that
-      // contradicted each other. What must hold of both is that neither ever
-      // carries the whole thing.
+    test("the log's runId is redacted first, then capped at the CLI's own bound", async () => {
+      // Two streams, two owners, deliberately NOT collapsed — and now the SAME
+      // order inside each. `assertFleetRunId` owns the operator-facing echo
+      // (redact, then a 12-char head plus the true length); `bounded` owns the
+      // LOG field and REDACTS FIRST, THEN cuts to its own 96. Capping before
+      // redacting sliced a pasted credential across the 96-char boundary into
+      // halves neither redaction rule matched, and nothing downstream of that
+      // sink redacts at all — so the head rode out verbatim. What must hold of
+      // both streams is that neither ever carries a matchable piece of the id.
       const long = "Q".repeat(300);
       expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, long], deps(""))).toBe(2);
       const line = verbLines()[0] as unknown as Record<string, unknown>;
       expect(line.verb).toBe("teardown");
-      expect(line.runId).toBe(`${"Q".repeat(96)}…(300 chars)`);
+      // Secret-shaped argv: redaction eats it WHOLE, so no 96-char head of a
+      // pasted credential ever reaches the log stream.
+      expect(line.runId).toBe("«redacted»");
       expect(line.exitCode).toBe(2);
-      // The envelope's echo is the SHORTER, redacted form — the two bounds are
-      // visibly different, which is the thing this pins.
+      // The envelope's echo stays the SHORTER, bounded form naming the true
+      // length — visibly different from the log's placeholder, which is the
+      // two-owners property this pins.
       const envelope = JSON.parse(errCaptured[0] as string) as { message: string };
       expect(envelope.message).toContain('supplied: "QQQQQQQQQQQQ…" (300 chars)');
       expect(envelope.message).not.toContain("Q".repeat(96));
-      // …and 200 KB of argv reaches neither stream.
+
+      // The CLI's own cap is still there and observable on text redaction
+      // LEAVES ALONE (hex-with-letters passes the opaque-token arm): 96 chars,
+      // ellipsis, true length.
+      const hexy = "b".repeat(300);
+      entries.length = 0;
+      reset();
+      expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, hexy], deps(""))).toBe(2);
+      const capped = (verbLines()[0] as unknown as Record<string, unknown>).runId;
+      expect(capped).toBe(`${"b".repeat(96)}…(300 chars)`);
+      // …and 200 KB of argv reaches neither stream when it is secret-shaped.
       expect(`${JSON.stringify(entries)} ${errCaptured.join("")}`).not.toContain(long);
+      // A BENIGN id is different by design: redact() leaves hex alone, so the
+      // operator-facing envelope may echo it whole — but the LOG field still
+      // never does; its cap applies regardless of shape.
+      expect(JSON.stringify(entries)).not.toContain(hexy);
     });
 
     test("a parse failure logs the attempted VERB, never a flag's value", async () => {

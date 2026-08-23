@@ -37,6 +37,18 @@ interface BoxMeta {
 
 const META = ".box.json";
 
+/**
+ * A directory name from `readdirSync` rides log lines and skipped entries
+ * verbatim, and a name carrying control characters (a stray tab, newline or
+ * escape) would inject them into those sinks. Control characters are escaped
+ * to visible `\uXXXX` form; ordinary names pass through byte-for-byte, so
+ * every existing consumer of these strings still matches them unchanged.
+ */
+function displayName(entry: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters IS the purpose
+  return entry.replace(/[\u0000-\u001f\u007f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 export class FakeDriver implements ProviderDriver {
   readonly name = "fake";
   readonly root: string;
@@ -169,7 +181,7 @@ export class FakeDriver implements ProviderDriver {
         isDir = statSync(join(this.root, entry)).isDirectory();
       } catch (e) {
         const code = (e as NodeJS.ErrnoException).code;
-        if (code !== "ENOENT") skipped.push(entry);
+        if (code !== "ENOENT") skipped.push(displayName(entry));
         log({
           requestId,
           operation: "fake-driver.list.unstatable",
@@ -179,7 +191,7 @@ export class FakeDriver implements ProviderDriver {
           status: "error",
           error: {
             code: "unstatable_box_entry",
-            message: `box directory could not be stat'ed: ${entry} (${code ?? (e as Error).message})`,
+            message: `box directory could not be stat'ed: ${displayName(entry)} (${code ?? (e as Error).message})`,
           },
           driver: this.name,
           verb: "list",
@@ -219,7 +231,7 @@ export class FakeDriver implements ProviderDriver {
         nameOk = false;
       }
       if (!nameOk) {
-        skipped.push(entry);
+        skipped.push(displayName(entry));
         log({
           requestId,
           operation: "fake-driver.list.skipped",
@@ -227,7 +239,7 @@ export class FakeDriver implements ProviderDriver {
           timestamp: new Date().toISOString(),
           duration: 0,
           status: "error",
-          error: { code: "unlistable_box_name", message: `box directory is not a valid box name: ${entry}` },
+          error: { code: "unlistable_box_name", message: `box directory is not a valid box name: ${displayName(entry)}` },
           driver: this.name,
           verb: "list",
           outcome: "skipped",

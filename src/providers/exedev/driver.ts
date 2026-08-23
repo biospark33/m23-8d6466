@@ -27,7 +27,8 @@
 
 import { readFileSync } from "node:fs";
 import { log, newRequestId } from "../../swarmclaw/log.ts";
-import { assertValidRunId } from "../run-record.ts";
+import { assertExistingRunId, assertValidRunId } from "../run-record.ts";
+import { redactSecrets } from "../step-log.ts";
 import type { ExecResult, ProviderDriver, ProviderVm, ProviderVmListing } from "../driver.ts";
 import {
   DEFAULT_EXEC_TIMEOUT_MS,
@@ -217,10 +218,12 @@ export class ExeDevDriver implements ProviderDriver {
    *    is, so it may be OURS — a live box `reapRuns` cannot see and cannot
    *    reap, spend nobody is accountable for. It rides out as an ANOMALY and
    *    the fleet refuses to reap until it is resolved.
-   *  - `vm_name` READABLE but outside the factory grammar. Provably NOT ours:
-   *    every box this driver creates is named from an `assertValidRunId` id.
-   *    It is EXCLUDED from the population and logged — see the call site for
-   *    why refusing here would be the unsafe choice, not the safe one.
+   *  - `vm_name` READABLE but outside every factory grammar. Provably NOT
+   *    ours: no build of this factory ever named a box outside the LEGACY id
+   *    grammar. It is EXCLUDED from the population and logged — see the call
+   *    site for why refusing here would be the unsafe choice, not the safe
+   *    one. A name inside the LEGACY grammar but outside the STRICT one (a
+   *    `trailing-` box from an earlier build) is POSSIBLY ours and is LISTED.
    *
    * An anomaly has to be FOLLOWABLE, which the bare `vms[3]` placeholder was
    * not: no box is named `vms[3]`, and this is an ACCOUNT-WIDE listing (no name
@@ -256,30 +259,45 @@ export class ExeDevDriver implements ProviderDriver {
     const skipped: string[] = [];
     const vms = shape.vms.flatMap((v, i): ProviderVm[] => {
       if (typeof v !== "object" || v === null || Array.isArray(v)) {
-        skipped.push(`vms[${i}] (row is not an object: ${truncate(JSON.stringify(v) ?? String(v))})`);
+        // Redacted before it leaves the driver: the raw JSON body can carry
+        // `ssh_dest`/`https_url` values that embed credentials (`ghs_…` in a
+        // clone URL), and these strings reach error messages and log lines.
+        skipped.push(redactSecrets(`vms[${i}] (row is not an object: ${truncate(JSON.stringify(v) ?? String(v))})`));
         return [];
       }
       const row = v as Record<string, unknown>;
       const vmName = typeof row.vm_name === "string" ? row.vm_name : null;
       if (vmName === null) {
-        skipped.push(`vms[${i}] (vm_name is not a string; ${rowIdentity(row)})`);
+        skipped.push(redactSecrets(`vms[${i}] (vm_name is not a string; ${rowIdentity(row)})`));
         return [];
       }
-      // A READABLE name outside the strict id grammar is provably not ours:
-      // every box this driver creates is named from a `assertValidRunId` id
-      // (`create` asserts it, and so does `provisionAdmittedRun` before it), so
-      // a name that fails it is a stranger's box in the same account. It is
-      // EXCLUDED — not in `vms`, not in `skipped` — and logged.
+      // Ownership classification for a READABLE name, against the documented
+      // run-id grammars (run-record.ts):
       //
-      // Passing it through is worse: `reapRuns` destroys every box no open
-      // record claims, so a stranger's box gets destroyed (and `destroy` would
-      // throw on the name anyway, mid-sweep). Reporting it as an anomaly is
-      // worse still: this listing is ACCOUNT-WIDE, so one stranger's box stalls
-      // the sweep for the whole account and OUR boxes bill forever — trading a
-      // bounded risk for an unbounded one. Exclusion avoids both.
+      //  - Passes the LEGACY grammar (`assertExistingRunId` — the rule every
+      //    existing-box path accepts): POSSIBLY ours. An earlier build created
+      //    box names under exactly this rule (`trailing-` ids exist on disk by
+      //    construction), so dropping the row here hid a live factory box from
+      //    every listing forever — billed, unreapable, unreported. It rides in
+      //    `vms` instead; whether it may be DESTROYED stays with
+      //    `isFactoryOwnedVm`, which this listing can never satisfy anyway
+      //    (no tag channel), so the fail-safe direction is unchanged.
+      //  - Fails even the LEGACY grammar: provably NOT ours — no build of this
+      //    factory ever named a box outside it, so this is a stranger's box in
+      //    the same account. EXCLUDED — not in `vms`, not in `skipped` — and
+      //    logged.
+      //
+      // Passing a stranger's box through is worse than excluding it: `reapRuns`
+      // destroys every box no open record claims, so it gets destroyed (and
+      // `destroy` would throw on the name anyway, mid-sweep). Reporting it as
+      // an anomaly is worse still: this listing is ACCOUNT-WIDE, so one
+      // stranger's box stalls the sweep for the whole account and OUR boxes
+      // bill forever — trading a bounded risk for an unbounded one. Exclusion
+      // avoids both, and the co-tenant protection holds: nothing excluded here
+      // is ever claimed or destroyed downstream.
       let mine = true;
       try {
-        assertValidRunId(vmName);
+        assertExistingRunId(vmName);
       } catch {
         mine = false;
       }
@@ -288,7 +306,7 @@ export class ExeDevDriver implements ProviderDriver {
           vm: truncate(vmName),
           verb: "list",
           outcome: "excluded",
-          reason: "vm_name is outside the factory box-name grammar — not a box this driver created",
+          reason: "vm_name is outside every factory box-name grammar — not a box this driver created (nor any earlier build)",
         });
         return [];
       }

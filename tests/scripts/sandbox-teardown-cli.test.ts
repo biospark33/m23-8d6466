@@ -134,8 +134,14 @@ afterEach(() => {
 });
 
 describe("sandbox-teardown run() — the per-run operator lock", () => {
-  /** A foreign holder's body at `lock` — contention, without a second process. */
-  function foreignLock(runId: string, pid = 1): string {
+  /**
+   * A foreign holder's body at `lock` — contention, without a second process.
+   * The pid defaults to LIVE_FOREIGN_PID, not `1`: inside a CI container the
+   * runner IS pid 1, so a literal `1` wrote OUR pid into the body and every
+   * case here exercised the wrong refusal. Same reasoning as LIVE_FOREIGN_PID's
+   * own docstring above.
+   */
+  function foreignLock(runId: string, pid: number = LIVE_FOREIGN_PID): string {
     const lock = join(runs, `${runId}.lock`);
     writeFileSync(lock, `${pid} ${new Date().toISOString()} feedface\n`, { flag: "wx" });
     return lock;
@@ -202,7 +208,9 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     } catch (e) {
       expect(e).toBeInstanceOf(RunLockedError);
       expect((e as Error).message).toMatch(
-        /pid 1 from a lock written before the host field existed, liveness unknown from here, held \d+s/,
+        new RegExp(
+          `pid ${LIVE_FOREIGN_PID} from a lock written before the host field existed, liveness unknown from here, held \\d+s`,
+        ),
       );
       // The remediation is the half an operator acts on, and "unknown liveness"
       // and "provably dead" produce refusals that read almost identically.
@@ -810,8 +818,9 @@ describe("sandbox-teardown run() — lock edge cases (P5)", () => {
   });
 
   test("a lock held by a LIVE unrelated pid is never reported stale (pid reuse is not a licence to rm)", async () => {
-    // pid 1 is alive and is certainly not a teardown of this run — the wording
-    // an operator follows ("rm the stale lock") must not appear for it.
+    // LIVE_FOREIGN_PID is alive (a child this file owns) and is certainly not a
+    // teardown of this run — the wording an operator follows ("rm the stale
+    // lock") must not appear for it.
     store.create("live-lock");
     const lock = join(runs, "live-lock.lock");
     // Same-host body, for the same reason as the stale case above — inverted: a

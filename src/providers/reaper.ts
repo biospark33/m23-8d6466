@@ -444,7 +444,7 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
   }
 
   for (const rec of records) {
-    if (rec.closedAt !== undefined) continue; // closed ⇒ nothing to claim
+    if (rec.closedAt !== undefined) continue; // closed ⇒ no live box for the reaper; ledger-side, a fresh close still holds its ceiling until the retirement grace cutoff passes (cost-ledger.ts admitIssue)
     const stale = aged(rec.createdAt);
     rows.push({
       kind: "record",

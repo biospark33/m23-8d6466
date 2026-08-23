@@ -693,10 +693,14 @@ export async function dispatch(
    * operator output verbatim, on the same object where every other string leaf
    * was redacted. So:
    *
-   *  - ids, `httpsUrl` and the LOCALLY COMPOSED `bun scripts/fleet.ts …`
-   *    fallbacks stay verbatim — a redacted teardown command is one the operator
-   *    cannot use, and redaction is a no-op on them anyway (no URL, no ≥40-char
-   *    token);
+   *  - ids and the LOCALLY COMPOSED `bun scripts/fleet.ts …` fallbacks stay
+   *    verbatim — a redacted teardown command is one the operator cannot use,
+   *    and redaction is a no-op on them anyway (no URL, no ≥40-char token);
+   *  - `httpsUrl` goes through `redact`, as the ack log line's copy already
+   *    did: it is PROVIDER-supplied (`vm.httpsUrl`, `expose`), so the "no URL
+   *    in it" assumption behind keeping it verbatim was false for exactly the
+   *    values that matter. The run RECORD keeps its full-fidelity copy on
+   *    purpose — see the expose-path store write;
    *  - anything the GATE supplied is substrate-controlled text and gets the same
    *    treatment as every other string leaf.
    *
@@ -783,7 +787,10 @@ export async function dispatch(
       ...redactedPayload,
       runId: ctxRunId,
       ...(ctxVmName === undefined ? {} : { vmName: ctxVmName }),
-      ...(ctxHttpsUrl === undefined ? {} : { httpsUrl: ctxHttpsUrl }),
+      // Redacted like the ack LOG LINE's copy (:redact there too): this payload
+      // is operator-facing output, not persistence — the record keeps the only
+      // full-fidelity URL on purpose (see the expose-path store write).
+      ...(ctxHttpsUrl === undefined ? {} : { httpsUrl: redact(ctxHttpsUrl) }),
       // Gated on "a record may exist for this id", NOT on "an id was chosen" —
       // see `ctxProvisionAttempted`. A pre-provision refusal has nothing to tear
       // down, and naming a teardown for an id this dispatch never provisioned is
@@ -1129,6 +1136,11 @@ export async function dispatch(
   // overriding is the documented contract of the parameter.
   if (briefRequestId !== undefined && deps.requestId !== undefined && briefRequestId !== deps.requestId) {
     try {
+      // `status: "ok"` / `exitStatus: "success"` made a WARNED run count as a
+      // clean one for any consumer tallying successes. The schema admits no
+      // "warn", so the non-success state is `"error"` (the anomaly is real and
+      // the line already carries its `error` detail) under a dedicated
+      // `phase`, and the false `exitStatus: "success"` is simply gone.
       log({
         requestId: deps.requestId,
         operation: "fleet.dispatch",
@@ -1136,15 +1148,14 @@ export async function dispatch(
         timestamp: new Date().toISOString(),
         duration: now() - wallStart,
         durationMs: now() - wallStart,
-        status: "ok",
+        status: "error",
         error: {
           code: "request-id-overridden",
           message: `the brief's requestId ${JSON.stringify(briefRequestId)} was overridden by deps.requestId`,
         },
         runId: null,
         verb: "dispatch",
-        phase: "resolved",
-        exitStatus: "success" as ExitStatus,
+        phase: "request-id-overridden",
       });
     } catch {
       // see `refuse` — a sink failure is never the run's failure
@@ -1798,9 +1809,12 @@ export async function dispatch(
     // reports "a box with this name already exists" as a pathless EEXIST is
     // still misclassified; it needs a typed provider error, not an errno.
     const errno = e as (NodeJS.ErrnoException & { path?: unknown }) | null | undefined;
+    // `null` is "no path" the same as `undefined` — a store that reports EEXIST
+    // with an explicit `path: null` is the run-id race by elimination, not a
+    // provision failure.
     if (
       errno?.code === "EEXIST" &&
-      (errno.path === undefined || errno.path === deps.store.path(runId))
+      (errno.path === undefined || errno.path === null || errno.path === deps.store.path(runId))
     ) {
       throw refuse(
         2,
@@ -2164,7 +2178,16 @@ export async function dispatch(
       // assertion evidence this refusal exists to carry. `refuse` already
       // guards the same two reads (`ctxGate?.debugCommands ?? […]`); this call
       // site did not, and it is the one that names them to the operator.
-      const debugCommands = gate.debugCommands ?? [`bun scripts/fleet.ts status ${runId}`];
+      //
+      // Absence is not the only shape a seam can lie about: a TRUTHY non-array
+      // (`{ready:false, debugCommands:"x"}` or `assertions:"x"`) sailed past
+      // every `??` here and threw out of `.join`/`.map`/`.find`/`.some`
+      // instead — the same downgrade, one call later. Array-ness is checked,
+      // once, where the fields are read.
+      const gateAssertions = Array.isArray(gate.assertions) ? gate.assertions : [];
+      const debugCommands = Array.isArray(gate.debugCommands)
+        ? gate.debugCommands
+        : [`bun scripts/fleet.ts status ${runId}`];
       const teardownCommand = gate.teardownCommand ?? `bun scripts/fleet.ts teardown ${runId}`;
       // An empty (or all-passing) `assertions` on a `ready:false` gate yielded
       // `setup gate failed at item ?: ` — a refusal that keeps a billable box
@@ -2178,11 +2201,11 @@ export async function dispatch(
       // secret, it is a terminal escape and a forged log line. The
       // `invalid-brief` path has escaped its third-party text since it was
       // written; these two are the module's other two sources of it.
-      const failedNote = gate.assertions?.find((a) => !a.ok)?.note;
+      const failedNote = gateAssertions.find((a) => !a.ok)?.note;
       throw refuse(
         3,
         "setup-gate-failed",
-        `setup gate failed at item ${gate.failedItem ?? "?"}: ${
+        `setup gate failed at item ${escapeText(gate.failedItem ?? "?")}: ${
           failedNote === undefined
             ? "the gate reported no failing assertion — inspect the box directly"
             : escapeText(failedNote)
@@ -2196,15 +2219,19 @@ export async function dispatch(
           // The escaping is a different guarantee and is not at a choke point:
           // it applies to the text the box chose, not to the item labels this
           // line composes around it.
-          assertions: (gate.assertions ?? []).map(
+          assertions: gateAssertions.map(
             (a) => `${a.item}:${a.ok ? "ok" : escapeText(a.note)}`,
           ),
         },
         // A gate that failed because the PROBE NEVER RAN is a broken box, not a
         // bad brief: retryable. The default exit-code mapping calls every non-1
         // exit `logic` (do-not-retry), which discards the one classification
-        // `substrateFailure` is computed to produce.
-        isSubstrateFailure(gate) ? ("transient" as ExitStatus) : undefined,
+        // `substrateFailure` is computed to produce. The sanitized gate keeps a
+        // truthy non-array `assertions` from throwing out of the helper's own
+        // `.some` — same seam, same guard.
+        isSubstrateFailure({ ...gate, assertions: gateAssertions })
+          ? ("transient" as ExitStatus)
+          : undefined,
       );
     }
     // ── 10. expose (INV-5 ordering: PUBLIC only once the gate has proved it) ─
@@ -2233,13 +2260,6 @@ export async function dispatch(
       // so on the payload.
       if (remaining() <= 0) throw timedOut("post-gate", { gateReady: true });
 
-      // Intent marker BEFORE the provider calls. `within` ABANDONS rather than
-      // cancels (no AbortSignal at the seam), so an expose/setPublic abandoned
-      // at the deadline can still complete seconds later: the box is then
-      // publicly reachable while the record carries no `ports`, so `fleet
-      // status` under-reports a live public box and port-keyed reapers miss it
-      // entirely. The record claims the port before anything can open it.
-      deps.store.set(runId, { ports: [port] });
       // `expose` RESOLVING is the moment the port stops being speculative — the
       // retraction below turns on this and nothing else. It cannot be inferred
       // from `ctxHttpsUrl`, which is already set from `vm.httpsUrl` at create
@@ -2248,7 +2268,25 @@ export async function dispatch(
       try {
         ctxHttpsUrl = await within(
           "expose",
-          () => deps.driver.expose(vm.name, port),
+          () => {
+            // Intent marker BEFORE the provider call, but INSIDE the step:
+            // `within` pre-checks the budget before invoking its thunk, so a
+            // deadline that expires between the post-gate sample above and that
+            // pre-check throws before any claim exists. The claim used to sit
+            // outside, and a `dispatch-timeout` from a NEVER-STARTED expose was
+            // then exempted from the retraction below like an abandoned one —
+            // leaving `ports: [port]` on the record for a port nothing opened,
+            // visible to `fleet status` and port-keyed reapers until teardown.
+            //
+            // Written before the driver call either way: `within` ABANDONS
+            // rather than cancels (no AbortSignal at the seam), so an expose
+            // abandoned at the deadline can still complete seconds later — the
+            // box is then publicly reachable while the record must already
+            // claim its port, or `fleet status` under-reports a live public box
+            // and port-keyed reapers miss it entirely.
+            deps.store.set(runId, { ports: [port] });
+            return deps.driver.expose(vm.name, port);
+          },
           // A late expose opens the port after the refusal; the URL is what the
           // record could not be told.
           (url) => ({ httpsUrl: typeof url === "string" ? redact(url) : undefined, port }),
@@ -2274,6 +2312,13 @@ export async function dispatch(
             { port },
           );
         }
+        // Verbatim DELIBERATELY, unlike every log-line copy of this field: the
+        // record is the persistent locator for a public box (the ack return and
+        // this write are its only copies), so a lossy form here — `redact`
+        // eats long host labels outright — leaves a live box whose address is
+        // recorded nowhere. The operator-facing halves sanitize at their own
+        // boundaries instead: the structured lines redact, and `fleet status`'s
+        // `safeUrl` drops userinfo-bearing URLs entirely.
         deps.store.set(runId, { httpsUrl: ctxHttpsUrl });
         await within(
           "setPublic",
@@ -2294,7 +2339,10 @@ export async function dispatch(
         //
         //  - An ABANDONED call, which is what the claim was written for: a
         //    `dispatch-timeout` is precisely the case where the expose may still
-        //    land after the refusal.
+        //    land after the refusal. A `dispatch-timeout` can now also mean the
+        //    step NEVER started (budget gone before `within` invoked its thunk)
+        //    — but then no claim was written either, so exempting it here
+        //    retracts nothing and leaves no phantom port behind.
         //  - Anything that failed AFTER `expose` resolved — `expose-no-url` and
         //    every `setPublic` failure. The port is OPEN on those; retracting
         //    left the record denying a port the box is listening on, and

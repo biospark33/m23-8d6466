@@ -35,6 +35,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+// Named import, not the global: the wait budget below must be MONOTONIC, and
+// spelling the source makes that impossible to satisfy accidentally.
+import { performance } from "node:perf_hooks";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 
 // ---------------------------------------------------------------------------
@@ -241,6 +244,26 @@ const LOCK_IMMEDIATE_RETRIES = 8;
  * in-flight write. See the sweep for why our pid cannot simply be spared.
  */
 const OWN_TEMP_GRACE_MS = 60_000;
+
+/**
+ * How long a lock stamped with OUR OWN pid but carrying a foreign body must sit
+ * untouched before `stealIfOwnerGone` treats it as a dead sibling's leftover
+ * instead of a sibling thread's live claim.
+ *
+ * The pid alone cannot make this call: two JS threads share `process.pid`, so a
+ * same-pid body is either a live sibling holder — stealing it lets two
+ * `setLocked` read-modify-writes overlap — or a sibling thread that DIED
+ * holding its claim, which used to wedge the id for the rest of the process
+ * lifetime (`isAlive(pid)` stays true forever, and no sweep touches locks). No
+ * portable API separates the two: a module-init nonce differs per thread by
+ * construction (which would make LIVE siblings stealable), and process start
+ * time is not exposed without shelling out. Age is the separator, mirroring
+ * OWN_TEMP_GRACE_MS. The bound is looser than a temp's — the claim spans a
+ * whole read-modify-write, not one write-and-rename — but an operation still
+ * inside its lock after a full minute is wedged by some other means anyway,
+ * and waiting for it was the outage.
+ */
+const OWN_LOCK_GRACE_MS = 60_000;
 
 /**
  * How long a zero-byte `<runId>.json` must sit untouched before `create()`
@@ -1098,7 +1121,11 @@ export class RunRecordStore {
     // the lock file itself is a write into the unproven directory.
     this.assertWritable();
     const lock = this.lockPath(runId);
-    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    // Monotonic on purpose: this budget bounds WAITING, and a wall-clock step
+    // (NTP correction, VM pause/resume) would silently shorten or extend it.
+    // The persisted-mtime comparisons (`olderThan`) keep wall time
+    // deliberately — mtimes are wall-clock stamps, so the comparison must be.
+    const deadline = performance.now() + LOCK_TIMEOUT_MS;
     // `<pid> <nonce>`: the pid is what a contender probes for liveness, the
     // nonce is what release compares back before it unlinks anything.
     const body = `${process.pid} ${randomBytes(4).toString("hex")}\n`;
@@ -1113,7 +1140,7 @@ export class RunRecordStore {
       if (this.claimLock(lock, body)) break;
       // Checked on every failed claim, including the ones a steal follows, so
       // the loop is bounded by LOCK_TIMEOUT_MS however the contention resolves.
-      if (Date.now() >= deadline) {
+      if (performance.now() >= deadline) {
         throw new Error(`timed out waiting for the run record lock: ${lock} (${heldReason})`);
       }
       // A successful steal means the path is free now — retry without sleeping.
@@ -1212,9 +1239,17 @@ export class RunRecordStore {
    * A lock owned by THIS pid is not automatically a corpse either. Two JS
    * threads (`node:worker_threads` / `Bun.Worker`) share `process.pid`, and the
    * `beforeRename` seam runs INSIDE the lock and can re-enter `set()`. Only our
-   * OWN body is stealable under our own pid; any other body belongs to a live
-   * sibling holder, and taking it lets two `setLocked` read-modify-writes
-   * overlap and drop a field — INV-4's named failure mode.
+   * OWN body is stealable under our own pid outright; any other same-pid body
+   * is either a live sibling holder or a sibling thread that DIED holding its
+   * claim, and the pid cannot tell them apart (see `OWN_LOCK_GRACE_MS` for why
+   * no portable identity token can). Inside the grace it is HELD — taking a
+   * live sibling's lets two `setLocked` read-modify-writes overlap and drop a
+   * field, INV-4's named failure mode; past the grace it is a wedge, and
+   * waiting on it forever was the outage this bound closes.
+   *
+   * Same-thread re-entrancy outranks that grace: `heldLocks` is per-thread
+   * module state, so when it names this path the caller is provably waiting on
+   * its own enclosing operation, whatever the mtime says.
    *
    * TAKE, THEN COMPARE — `releaseLock`'s protocol exactly, and for the same
    * reason. Judging the body and unlinking the path as two calls is a TOCTOU:
@@ -1251,18 +1286,22 @@ export class RunRecordStore {
     // See cleanStaleTemps: an owner that parsed as `0` must not read as alive.
     // Unparseable, empty or non-positive ⇒ held, wait — never stolen.
     if (!Number.isInteger(owner) || owner <= 0) return "lock body names no pid";
-    if (owner === process.pid ? raw !== body : isAlive(owner)) {
-      // Our pid, not our body, and THIS thread already holds the path: the
-      // caller is waiting on itself — a re-entrant `set()` from the
-      // `beforeRename` seam. Fail-closed is still right (there is no safe way
-      // to hand a live holder its own lock), but reporting it as a sibling
-      // writer sent an operator looking for a second process that never
-      // existed. A sibling thread sharing our pid is NOT in this set.
-      if (owner === process.pid && heldLocks.has(lock)) {
-        return "re-entrant record write: this thread already holds this lock";
-      }
-      return "held by a live owner";
+    // Our pid, not our body, and THIS thread already holds the path: the
+    // caller is waiting on itself — a re-entrant `set()` from the
+    // `beforeRename` seam. Fail-closed is still right (there is no safe way
+    // to hand a live holder its own lock), but reporting it as a sibling
+    // writer sent an operator looking for a second process that never
+    // existed. Checked BEFORE the age bound below so a long-running enclosing
+    // write cannot age past the grace and let the re-entrant call steal its
+    // own outer claim. A sibling thread sharing our pid is NOT in this set.
+    if (owner === process.pid && heldLocks.has(lock)) {
+      return "re-entrant record write: this thread already holds this lock";
     }
+    const held =
+      owner === process.pid
+        ? raw !== body && !olderThan(lock, OWN_LOCK_GRACE_MS)
+        : isAlive(owner);
+    if (held) return "held by a live owner";
     this.beforeStealTake?.(lock);
     // `.tmp`-suffixed and pid-stamped so a death between the take and the
     // unlink cannot strand the generation: cleanStaleTemps sweeps it at the
@@ -1304,10 +1343,10 @@ export class RunRecordStore {
     // A different — or unreadable — body: the corpse was cleared and a NEW
     // writer claimed the path between the judgement and the take. Put it back —
     // `link`, never `rename`, so a claim made at the path while this one was
-    // held aside is not overwritten (EEXIST ⇒ that newer claim supersedes this
-    // body anyway).
+    // held aside is not overwritten. `putBack` disposes of `claimed` on every
+    // true return (unlink on restore, park-orphan on EEXIST), so nothing here
+    // deletes bytes it has not proven disposable.
     if (putBack(claimed, lock)) {
-      rmSync(claimed, { force: true });
       return "held by a live owner"; // a live lock is HELD — wait, never steal
     }
     // Put-back FAILED (ENOSPC, EMLINK, EDQUOT, EIO — never EEXIST, which
@@ -1390,8 +1429,9 @@ export class RunRecordStore {
     // Foreign — or unreadable — body: the lock was replaced between the read
     // above and the rename. Put it back — `link`, never `rename`, which would
     // overwrite a lock claimed at the path while this one was held aside.
+    // `putBack` disposes of `claimed` on every true return (see the steal-side
+    // call), so nothing here deletes bytes it has not proven disposable.
     if (putBack(claimed, lock)) {
-      rmSync(claimed, { force: true });
       return;
     }
     // Put-back failed, so the path is EMPTY and a live holder is inside its
@@ -1488,11 +1528,26 @@ export class RunRecordStore {
 
 /**
  * Re-link a lock body held aside at `claimed` back to `lock`. True when the
- * caller may unlink `claimed`.
+ * lock path ends up correctly served AND `claimed` has been disposed of here —
+ * callers must not unlink it afterwards. False means the put-back did NOT
+ * happen and `claimed` is the ONLY remaining link to the body; leave it
+ * exactly where it is (pid-stamped, so `cleanStaleTemps` sweeps it once this
+ * process is gone).
  *
- * The return value is the whole point. `link` succeeding puts the body back;
- * EEXIST means the path already carries a NEWER claim, which supersedes this
- * body anyway — both leave the live lock reachable, so `claimed` is redundant.
+ * The return value is the whole point. `link` succeeding puts the body back,
+ * and the second link at `claimed` is then redundant, so it is unlinked here —
+ * quietly, because the lock is served and a leftover `.tmp` is pure hygiene.
+ *
+ * EEXIST used to read as "a newer claim supersedes this body" with the CALLER
+ * unlinking `claimed` — but EEXIST proves only that the PATH carries a newer
+ * link, nothing about whose bytes sit at `claimed`. The take races exactly the
+ * corpse-cleared window, so those bytes can be a LIVE holder's generation, and
+ * unlinking them left that holder unlocked under a contender's exclusive lock:
+ * two read-modify-writes overlapping, INV-4's named failure mode. They are
+ * parked under a sibling orphan name instead (`parkAside`) — never deleted,
+ * because a body we could not prove disposable is evidence, not litter — and
+ * named on stderr, since a silent park would strand an operator's diagnosis.
+ *
  * Any OTHER errno (ENOSPC, EMLINK, EDQUOT, EPERM on a mount without hardlink
  * support, EIO) means the put-back did NOT happen, and `claimed` is then the
  * ONLY remaining link to that body: unlinking it destroys a lock a live holder
@@ -1505,10 +1560,32 @@ export class RunRecordStore {
 function putBack(claimed: string, lock: string): boolean {
   try {
     linkSync(claimed, lock);
-    return true;
   } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EEXIST";
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") return false;
+    // A newer claim supersedes whatever we hold aside — supersede, not delete:
+    // whose bytes these may turn out to be is exactly what EEXIST cannot say.
+    parkAside(claimed);
+    return true;
   }
+  rmQuiet(claimed);
+  return true;
+}
+
+/**
+ * Move a held-aside body that must not be deleted — an unrestorable lock
+ * generation, a tombstone window's non-tombstone — to a unique sibling orphan
+ * name, and say so on stderr. Failing to move leaves the body where it is:
+ * either name is inert and pid-stamped, swept by `cleanStaleTemps` once this
+ * process is gone.
+ */
+function parkAside(claimed: string): void {
+  const orphan = `${claimed}.orphan.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  try {
+    renameSync(claimed, orphan);
+  } catch {
+    return;
+  }
+  process.stderr.write(`run-record: parked an unrestorable held-aside lock body at ${orphan}\n`);
 }
 
 /**
@@ -1549,6 +1626,18 @@ function sleepMs(ms: number): void {
  * deleting THAT would let two creates both believe they own the id.
  * CREATE_TOMBSTONE_GRACE_MS is the separator: an empty file untouched for
  * seconds is a corpse, an empty file written to this instant is a live writer.
+ *
+ * And JUDGING THEN REMOVING is not enough either — stat→rm is a TOCTOU. Two
+ * creators can pass the aged-zero-byte check on the same tombstone; B then rms
+ * it and completes its exclusive create; A's unconditional `rm` lands on B's
+ * LIVE record and deletes it — two dispatchers now own one id, each minting
+ * keys against a box the other believes is theirs. So the removal takes the
+ * tombstone ASIDE first (`rename` to a unique name) and only the taken-aside
+ * bytes are verified and unlinked. The `rename` makes the decision
+ * single-winner — the loser's rename finds nothing — and a creator racing for
+ * the path sees either the tombstone (EEXIST) or a free path, never a record
+ * being deleted underneath it.
+ *
  * ponytail: an mtime grace, not a lock — `create()` runs before any lock
  * exists, and the window it has to separate is microseconds wide.
  */
@@ -1561,14 +1650,46 @@ function clearCreateTombstone(p: string): boolean {
     return false;
   }
   if (size !== 0 || !olderThan(p, CREATE_TOMBSTONE_GRACE_MS)) return false;
+  // `.tmp`-suffixed and pid-stamped like every other held-aside name: a death
+  // between this take and the unlink leaves an inert file the next store
+  // construction sweeps (the pid parses from the third-from-last segment).
+  const claimed = `${p}.tomb.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   try {
-    // `force`, so a corpse another sweeper cleared first still counts as done.
-    rmSync(p, { force: true });
+    renameSync(p, claimed);
+  } catch (e) {
+    // ENOENT alone means another sweeper won the race and the path is free —
+    // done, exactly as the old force-rm counted a competitor's cleanup. Any
+    // other errno proves nothing about what sits at `p`; report failure so the
+    // caller surfaces the original EEXIST rather than a stranger's errno.
+    return (e as NodeJS.ErrnoException).code === "ENOENT";
+  }
+  // The bytes taken aside must still be the zero-byte corpse that was judged.
+  // Nothing in-tree replaces a tombstone in place (every write at the path
+  // needs the path free first), but nothing here deletes on faith either:
+  // an unreadable or non-empty take is restored or parked, never removed.
+  let taken = -1;
+  try {
+    taken = statSync(claimed).size;
   } catch {
-    // EACCES/EPERM/EBUSY: the tombstone stays. Report the original EEXIST
-    // rather than a second, less recognisable errno.
+    // Unprovable ⇒ restore-or-park below, never unlink.
+  }
+  if (taken !== 0) {
+    try {
+      linkSync(claimed, p);
+      // Restored: the second link is hygiene now, not the body itself.
+      rmQuiet(claimed);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+        // A create won the freed path while we held this aside — so what we
+        // hold may be somebody's live record. Park it under an orphan name;
+        // never delete bytes we cannot prove are ours to delete.
+        parkAside(claimed);
+      }
+      // Other errnos: `claimed` stays where it is, inert and pid-stamped.
+    }
     return false;
   }
+  rmQuiet(claimed);
   return true;
 }
 

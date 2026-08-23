@@ -200,13 +200,36 @@ export async function fakeGate(
         // to python3, so any box without an interpreter failed item C for a
         // reason that has nothing to do with the key's mode. `stat` is in
         // coreutils/BSD base on every substrate the factory targets.
+        //
+        // No `|| echo none` fallback: that made every stat failure exit 0 with
+        // empty output, so an EIO box was reported as a delivery-contract miss
+        // (do-not-retry) instead of the transient substrate failure it is, and
+        // `substrateFailure` below could never fire. The probe now answers on
+        // stdout — "absent", the mode digits, or "unreadable" — and says which.
         const r = await driver.exec(
           vm,
-          ["sh", "-c", "stat -c '%a' .env 2>/dev/null || stat -f '%Lp' .env 2>/dev/null || echo none"],
+          [
+            "sh",
+            "-c",
+            "if [ ! -e .env ]; then echo absent; exit 0; fi; m=$(stat -c '%a' .env 2>/dev/null); [ -n \"$m\" ] && { echo \"$m\"; exit 0; }; m=$(stat -f '%Lp' .env 2>/dev/null); [ -n \"$m\" ] && { echo \"$m\"; exit 0; }; echo unreadable",
+          ],
         );
         const substrate = substrateFailure(r.exitCode);
         if (substrate !== undefined) return { ok: false, detail: substrate };
         const mode = (r.stdout ?? "").trim();
+        // ".env absent" is the DELIVERY CONTRACT failing (fill never landed the
+        // key) — retrying cannot help. Present-but-unreadable is the BOX failing
+        // (EIO, a missing stat binary), which is transient, so it carries
+        // SUBSTRATE_MARK like the signal arms above. (.env vanishing between
+        // `-e` and `stat` lands here too — rare, and "retry" is the safe answer
+        // for a race.)
+        if (mode === "unreadable") {
+          return {
+            ok: false,
+            detail: `${SUBSTRATE_MARK}.env exists but neither stat(1) could read its mode — a substrate failure, not a delivery-contract one`,
+          };
+        }
+        if (mode === "absent") return { ok: false, detail: "mode absent (.env was not delivered)" };
         return { ok: mode === "600", detail: `mode ${mode || "unknown"}` };
       },
     },

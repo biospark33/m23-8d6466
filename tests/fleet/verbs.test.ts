@@ -182,15 +182,23 @@ describe("verbs.ts (registry)", () => {
     // becomes a status: it clamps to a literal range that IS the table's extent
     // (anything outside is documented there as a bug in the thrower).
     const cli = readFileSync(join(import.meta.dir, "..", "..", "scripts", "fleet.ts"), "utf8");
-    const clamp = /e\.exitCode >= (\d+) && e\.exitCode <= (\d+)/.exec(cli);
+    // Whitespace-insensitive, and BOTH spellings of the range — `>= F && <= C`
+    // and its De Morgan twin `< F || > C` — so a reformat or an inverted
+    // conditional does not red a table that is still correct.
+    const clamp =
+      /e\.exitCode\s*(?:>=\s*(\d+)\s*&&\s*e\.exitCode\s*<=\s*(\d+)|<\s*(\d+)\s*\|\|\s*e\.exitCode\s*>\s*(\d+))/.exec(
+        cli,
+      );
     expect(clamp).not.toBeNull();
-    const [, floor, ceiling] = clamp as RegExpExecArray;
+    const [, geFloor, leCeiling, ltFloor, gtCeiling] = clamp as RegExpExecArray;
+    const floor = Number(geFloor ?? ltFloor);
+    const ceiling = Number(leCeiling ?? gtCeiling);
     // The clamp's floor is 1, not 0: `report` is only ever reached from a catch,
     // so 0 is the one value it must refuse rather than the bottom of the table.
-    expect(Number(floor)).toBe(1);
+    expect(floor).toBe(1);
     expect(DOCUMENTED_EXIT_CODES).toEqual([
       0,
-      ...Array.from({ length: Number(ceiling) }, (_, i) => i + 1),
+      ...Array.from({ length: ceiling }, (_, i) => i + 1),
     ]);
   });
 
@@ -557,8 +565,8 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     stdout?: string | string[];
     /** A run to provision first, so the probe has something real to act on. */
     provision?: string;
-    /** Filesystem set-up run after the provisioning and before the invocation. */
-    before?: () => void;
+    /** Filesystem set-up run after the provisioning and before the invocation. Awaited, so async set-up lands before the invocation. */
+    before?: () => void | Promise<void>;
   }
 
   /** Invocations whose refusal (or success) each verb can really produce. */
@@ -709,7 +717,9 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         argv: ["teardown", "teardown-boxless"],
         code: 6,
         provision: "teardown-boxless",
-        before: () => void driver.destroy("teardown-boxless"),
+        // Awaited by the runner below — fire-and-forget here let the teardown
+        // probe race the still-running destroy and see the box as present.
+        before: () => driver.destroy("teardown-boxless"),
         stdout: "torn down: ",
         stderr: "key-unattributable",
       },
@@ -828,10 +838,17 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         }
         // The body, bounded by the next top-level `test(` in that file (they are
         // all indented two spaces inside one describe). Scanning the whole file
-        // instead would let ANY case's `toBe(0)` excuse every other one.
+        // instead would let ANY case's `toBe(0)` excuse every other one — so a
+        // missed boundary must fail loudly, never degrade to scanning `rest`.
         const rest = cli.slice(at + head.length);
         const end = rest.indexOf('\n  test("');
-        const body = end < 0 ? rest : rest.slice(0, end);
+        if (end < 0) {
+          missing.push(
+            `${verb} exit ${code}: no next-test boundary after ${JSON.stringify(coveredBy)} in cli.test.ts`,
+          );
+          continue;
+        }
+        const body = rest.slice(0, end);
         // The exit code, asserted. `toBe(<code>)` is how every exit assertion in
         // that file is spelled; `code: <code>` is the object form the loops use.
         if (!new RegExp(`toBe\\(${code}\\)|\\bcode: ${code}\\b`).test(body)) {
@@ -863,7 +880,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         if (probe.provision !== undefined) {
           await provisionAdmittedRun(driver, store, { runId: probe.provision });
         }
-        probe.before?.();
+        await probe.before?.();
         const deps = probe.deps?.() ?? { driver, store, readBrief: async () => "{not json" };
         const res = await invoke(probe.argv, deps);
         observed.push(res.code);
@@ -897,7 +914,10 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       // now reaches must be struck from it, not left as a standing exemption.
       expect([...excused].filter((c) => seen.has(c))).toEqual([]);
     }
-  });
+    // ~40 probes, each provisioning a run and several spawning lock-holder
+    // processes: the cost is fixture-bound and routinely passes bun's 5s default,
+    // and a mid-test kill leaves the dangling holder to poison the next test.
+  }, 60_000);
 
   test("exit 6's OTHER documented route: the verb succeeded and the LEDGER would not close", async () => {
     // teardown/harvest declare 6 for two failures — "the cost ledger would not
@@ -1135,7 +1155,10 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
     // runtime enumeration of "strings the CLI answers before the registry" —
     // the same binding the excused-exit-code test makes against cli.test.ts.
     const cli = readFileSync(join(import.meta.dir, "..", "..", "scripts", "fleet.ts"), "utf8");
-    expect([...cli.matchAll(/argv\[0\]\s*===\s*"([^"]*)"/g)].map((m) => m[1])).toEqual(["help"]);
+    // `argv.at(0)` and bracket spacing are the same reading spelled differently.
+    expect(
+      [...cli.matchAll(/\bargv(?:\.at\(\s*0\s*\)|\[\s*0\s*\])\s*===\s*"([^"]*)"/g)].map((m) => m[1]),
+    ).toEqual(["help"]);
   });
 
   test("a flag the registry does not give a verb is refused, per verb", async () => {
@@ -1588,7 +1611,11 @@ describe("status.ts (statusAll join logic)", () => {
         ] as unknown as ProviderVm[],
     };
     const rows = await statusAll({ driver: junkDriver, store, listTimeoutMs: 1000 });
-    expect(rows.map((r) => r.runId)).toEqual(["(orphan real-orphan)"]);
+    // toStrictEqual, NOT toEqual: an undefined element compares equal to a
+    // missing one under toEqual, and a trailing nameless row is exactly the
+    // regression this test exists to reject.
+    expect(rows).toHaveLength(1);
+    expect(rows.map((r) => r.runId)).toStrictEqual(["(orphan real-orphan)"]);
     expect(rows[0]!.state).toBe("orphan");
     expect(rows[0]!.vmName).toBe("real-orphan");
   });
@@ -1805,7 +1832,9 @@ describe("status.ts (list timeout)", () => {
       // driver that yields nothing of its own, the status timer is armed before
       // this call expression returns. That synchronous window is the whole point:
       // nothing else can arm a timer inside it, so the timer under test is
-      // identified by WHEN it was armed rather than by its delay.
+      // identified by WHEN it was armed rather than by its delay. Deliberate
+      // tradeoff: that couples the test to the arm staying synchronous — an
+      // implementation that defers it past its first await must re-pin here.
       //
       // Filtering the whole await on `ms === 30_000` was the alternative, and it
       // reds a correct implementation the moment anything else — the runtime, a
@@ -2061,7 +2090,14 @@ describe("status.ts (statusRun)", () => {
       { list: async (): Promise<ProviderVm[]> => { throw new Error("list down"); } },
       { list: (): Promise<ProviderVm[]> => new Promise<ProviderVm[]>(() => {}) },
     ]) {
-      await refusal(statusRun({ driver: failing, store, listTimeoutMs: 5 }, "gone-run"), 4, "run-not-found");
+      const err = await refusal(
+        statusRun({ driver: failing, store, listTimeoutMs: 5 }, "gone-run"),
+        4,
+        "run-not-found",
+      );
+      // The unaskable-substrate arm: whether a live box answers to this id
+      // cannot be ruled out, so the remediation may never say "create the run".
+      expect(err.remediation).toContain("could not be listed");
     }
   });
 

@@ -1396,3 +1396,160 @@ now FAILS on a non-Error rejection instead of wrapping one, which had made
 - **`fleet help` is dispatchable but absent from `listVerbs()`** — knowingly deferred.
 - Read-mode for harvest/teardown: costs a second construction to save a chmod on a
   directory the run legitimately owns.
+
+## Review round 8 — BMAD adversarial code review, 2026-08-22
+
+Method: 25-agent parallel wave over hunked diff chunks (≤1,940 lines each): 21 blind hunters
+(diff-only), 3 edge hunters (diff + repo verification), 1 acceptance auditor (spec grep).
+62 raw findings → triage ledger (`/tmp/pr-123-review/triage.md`) → 24 source patches across 7
+disjoint clusters, then test hardening across 6 clusters after source settled. Every fixer ran
+GitNexus impact before editing symbols; every claim verified against real source before patching.
+
+### Money and locks
+
+- **Same-pid foreign lock body wedged the run record forever** (HIGH) — a dead worker thread
+  sharing our pid held `<runId>.json.lock`; `isAlive` stayed true so `stealIfOwnerGone` refused
+  to take it for the process lifetime, burning LOCK_TIMEOUT_MS on every later write while the
+  box billed. Locks now get the same age-based recovery temps always had: own-pid foreign bodies
+  older than `OWN_LOCK_GRACE_MS` (60 s) are stolen, with the re-entrant check hoisted ABOVE the
+  grace so a long enclosing write can never steal its own outer claim.
+- **Tombstone stat→rm race let two creates own one runId** — creator A passed the stat, B rm'd
+  the tombstone and wrote a live record, A's unconditional rmSync deleted it and minted its own.
+  Removal is now rename-claim take-then-compare: single winner by rename, mismatches restored or
+  parked, never deleted blind.
+- **putBack-on-EEXIST destroyed a live holder's lock body** — stealer renames aside, operator
+  clears, writer W claims, third writer X claims before put-back → the held-aside body W was
+  inside got rm'd. EEXIST now parks `.orphan.<pid>.<hex>.tmp` + stderr note instead of deleting;
+  callers dropped their unconditional rmSync.
+- **Closed-record retirement front-ran box-hours pricing** — teardown closes the record before
+  the box_hours row lands; a concurrent admitIssue saw `closedAt`, retired the reservation, and
+  granted headroom the imminent charge consumed past cap. Retirement now requires the close to
+  be absent, unparseable, or older than the existing admission-grace cutoff (zero new constants);
+  freshly-closed records keep consuming their ceiling until the priced row must have landed.
+  Crash residual narrowed from unbounded to one grace window.
+- **Throwing log sink surfaced a COMMITTED admission as failure** — pendingLogs flushed outside
+  any guard post-COMMIT. Both post-commit emission points now swallow sink throws to stderr; the
+  ledger outcome stands.
+- **Lock wait budgets moved to monotonic `performance.now()`** — NTP jumps could extend a
+  fail-closed wait indefinitely or time out a healthy contention spuriously.
+
+### Provisioning, reaping, ownership evidence
+
+- **Legacy-named factory boxes were invisible to every listing** (HIGH) — exedev's strict grammar
+  classified them "provably not ours", dropping them from vms AND skipped: spend no verb could
+  reach. Readable names are now classified against the legacy grammar too and ride in `vms`;
+  only names failing EVERY factory grammar stay excluded (co-tenant protection preserved).
+- **Destroy decisions rested on rows carrying no ownership evidence** (HIGH) — exedev's ls has
+  no tag field, so the gate reduced to name-shape: destroy-on-guess for a co-tenant within the
+  grammar, or silent stop. Fail-safe direction taken: `reapRuns` partitions unclaimed boxes
+  BEFORE destroying anything and refuses wholesale via new `unownedVmReapRefusal`
+  (`reap-vms-unowned`, naming each spared box) rather than guessing either way. Three pins that
+  encoded silent-spare were re-pinned to assert the refusal.
+- **Provider row payloads reached operator output unredacted** — skipped entries and the
+  refusal message now pass through `redactSecrets` like every other sink this PR adds.
+- **fake-gate's substrate probe could never fail** (`|| echo none` forced exit 0), classifying
+  an EIO-broken box do-not-retry; explicit absent/mode/unreadable arms replace it, unreadable
+  carrying the substrate mark (retryable).
+- Control characters in directory names are escaped (`\uXXXX`) at all four fake-driver
+  free-text sinks; stale `closed ⇒ nothing to claim` rationale comments rewritten to the current
+  invariant (driver.ts ×3, reaper.ts).
+
+### Dispatch, status, CLI front door
+
+- Injected-gate array fields (`assertions`, `debugCommands`) guarded for type, not just absence
+  — a hostile/stub gate can no longer downgrade the exit-3 refusal to exit-1 via TypeError.
+- Never-started expose no longer leaves a phantom `ports:[port]` on a live billable box: the
+  claim is written INSIDE the expose thunk, so a pre-start timeout writes nothing while the
+  abandoned-but-started path keeps round 7's behavior.
+- Refusal payload `httpsUrl` now runs through `redact()`; pathless-EEXIST arm accepts
+  `path:null`; `failedItem` escaped like its sibling gate text; the split-correlation warning no
+  longer logs success markers (`status:"error"`, dedicated phase, no false exitStatus).
+- Single-run status gained the arm statusAll already had: when the substrate could not be asked,
+  remediation names the outage and withholds create-the-run advice (exit code unchanged).
+- **CC-9 secret-splitting closed at the choke point** — `bounded()` redacts BEFORE slicing, and
+  strictly stronger than the finding assumed: nothing downstream of `logVerb` redacted at all,
+  so the old code leaked the head of any credential-shaped argv verbatim, not merely split it.
+- Lossy-decode stdin briefs no longer double-refuse: the raw-byte streaming cap governs (U+FFFD
+  expansion skips the redundant byteLength recheck); exact decodes still bind.
+- **Stale or author-planted dispatch witness no longer sets the spend ceiling** — witness
+  freshness binding (±30 min, symmetric against future mtimes): stale witness-only → ceiling
+  left absent + structured warn; declared-limit path refuses even a number-agreeing stale pair.
+  Temporal binding chosen over runId match: the dispatcher writes two distinct ids into
+  run-context.json and the runner carries one, so id-match would break the real handoff.
+
+### Test wave
+
+- Live-mint hazard removed: out-of-process CLI tests strip `$OPENROUTER_PROVISIONING_KEY` from
+  child env and assert the deterministic provisioning-key refusal; the teardown spawn strips
+  `keyHash` like its siblings. A regression can no longer spend real network quota from `bun test`.
+- All 8 `within()`-vs-outer timeout ties re-budgeted (outer > cumulative inner) with a scripted
+  re-scan proving zero remaining violations; abandoned-line helper settles ≤50 ms before
+  counting; three abandonment tests' real-clock margins widened −200/−250 → −1000 (residual
+  >1 s inter-step stall documented); vacuous undefined===undefined vmName pairs pinned with
+  `/^qds-/` shape checks both sides; INV-4 sink tests now read the echoed `limitUsd` (arg-swap
+  detectable); UTC-midnight mint window accepts either bound; all 48 try/catch sites convert to
+  an `UnexpectedSuccessError` sentinel that survives the catch under test; collision stub seeded
+  from a real record instead of a two-field cast; mkfifo tests skipIf binary absent; failedAt
+  discriminator strict `>` with justification.
+- Regression coverage added for every wave-1 behavior change: lock-grace steal (young/aged/
+  re-entrant), orphan parking, tombstone single-winner, retirement grace retention + expiry,
+  throwing-sink success, legacy-listing, redacted skipped entries, control-char sanitization,
+  witness staleness arms (stale/future/refusal/fresh-honoured), S26 redact-then-cap pin.
+- driver-contract INV-1 arm tolerates both S15 outcomes (clean sweep excludes the live box;
+  account-wide refusal accepted if it doesn't name the claimed box) — kills cascade-red when a
+  sibling test leaks a box mid-suite.
+- Pre-existing per-test-timeout red on the ~40-probe sweep (fixture-bound 8.7 s vs bun's 5 s)
+  given an explicit 60 s budget; verified pre-existing on the checked-out pre-edit file first.
+- Reprioritized, not churned: cost-ledger's SQL-literal regex brittleness and ±1 s expiry-margin
+  notes were superseded by behavioral grace-window tests pinning the same invariant without the
+  fragility.
+
+### False positives — pushed back with executed evidence
+
+- **Record `httpsUrl` written verbatim on the sync path** (reviewer: contradicts the redacted
+  abandoned path). Reverted after sink analysis: the record IS the persistence layer — the pinned
+  AC keeps a live PUBLIC box's address findable, `redact()` is lossy on exactly this shape (host
+  labels ≥16 chars; every minted id produces one), and `fleet status` re-sanitizes at its own
+  display boundary. Redacting the write would trade a cosmetic inconsistency for losing the only
+  full-fidelity copy. Site documents why verbatim is correct.
+- **FakeDriver half-built boxes bypassing the anomaly channel** — already listed on HEAD (catch
+  pushes `{name, status:"unknown"}` into vms, pinned); the residual silent-spare concern is
+  closed by the new reap refusal surfacing.
+- **Slug canonicalization orphaning historical ledger rows** (HIGH) — dismissed on evidence:
+  canonicalization is introduced BY this PR (no hits in main), the ledger is per-checkout
+  `.sandbox/` storage, and `issueScopeSql` keeps the legacy-safe disjunct plus replay identity
+  canonicalizes BOTH sides — mixed-case rows still count toward caps.
+- **foreignLock pid=1 CI failure mechanism** — the claimed RunLockReentrantError path is not
+  reachable (legacy-body refuse branch precedes any pid probe); the magic-number fix stands on
+  hygiene grounds, but the finding's failure mode is not credited.
+- **qds-cost env deletion leak** — outer afterEach already restored the variable; explicit
+  save/restore added anyway.
+
+### Decisions taken (conservative / fail-safe, per standing authorization)
+
+- **Dispatch declares exit 6 in its registry though the round-5 amendment reserves 6 for
+  harvest/teardown** (auditor MED). Changing an exit-code contract at review round 8 risks every
+  consumer for a mapping (`ack-unwritable`) no other declared value fits. Decision: keep runtime
+  behavior, register the deviation here as the round-8 amendment to C6/B8 — dispatch's 6 means
+  "output-write failure after provisioning (ack-unwritable)". DF3.5's generator consumes the
+  registry as-is, so generated skills stay truthful. Flagged for the next spec touch.
+- **Status emits `listUnavailable`/`recordsSkipped` beyond C4's five states** — already carried
+  above as a spec-amendment-needed item; round 8 confirms additive-diagnostics intent and adopts
+  it into this story's standing amendment rather than deleting diagnostics.
+- **Success-path dispatch emits no durable dispatch-log entry** vs C9's "once per outcome"
+  wording — interpreted as failures-only (the constant is DISPATCH_FAILURE_LOG); success keeps
+  its structured line. Recorded so C9's wording gets aligned at the next spec touch instead of
+  adding per-dispatch noise now.
+- **Fleet-ceiling TOCTOU stays deferred** — checkHeadroom remains a bare read; the in-code
+  comments own it as DF2.6 quota-layer work. Unchanged this round.
+- **fake-gate substrate-probe coverage** wanted for setup-gate.test.ts (unreadable→retryable
+  arm) — source fix shipped and manually probed; the test addition is filed as follow-up rather
+  than rushed at round 8.
+
+### Gates
+
+- Full suite: **2808 pass / 0 fail / 17 skip / 2 todo** across 81 files (post-final-edit rerun).
+- biome check clean on all 22 touched files; `tsc --noEmit -p tsconfig.json` exit 0 repo-wide.
+- GitNexus `detect_changes` (unstaged): 64 changed symbols / 28 files, blast radius confined to
+  the PR's own modules and processes (Dispatch, StatusRun, ReapRuns, WithLock,
+  ProvisionAdmittedRun, TeardownRun, DriverListing, Sweep, Run CLI) — zero out-of-scope symbols.

@@ -593,16 +593,21 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
         4,
         "run-not-found",
         `No run record for ${runId}`,
-        // Three arms, because there are three states and the middle one used to
-        // render as the first: the listing was read and was clean; the listing
-        // could not be read, so nothing rules out this run's record sitting
-        // under a mangled name; or it was read and named the files in question.
-        // Only the first may tell the operator to create the run.
-        skipped === null
-          ? "Check the run ID — the record listing could not be read, so a record for this run under a mangled name cannot be ruled out. Run `fleet status` (which refuses with record-store-unreadable and names the file) and repair it before creating the run; a box may still be billing behind it"
-          : skipped.length === 0
-            ? "Check the run ID or create the run first"
-            : `Check the run ID or create the run first — the listing skipped ${skipped.length} file(s) whose names are not run ids (${skipped.join(", ")}), and one of them may be this run's record under a mangled name`,
+        // Four arms, because there are four states and two of them used to
+        // render as "create the run": the BOX listing could not be asked, so
+        // nothing rules out a live box behind this id (`statusAll` renders the
+        // same outage as its listUnavailable row — an unaskable substrate never
+        // renders clean); the RECORD listing could not be read, so nothing
+        // rules out this run's record sitting under a mangled name; or it was
+        // read — cleanly, or naming the files in question. Only a substrate
+        // that ANSWERED may tell the operator to create the run.
+        boxes === null
+          ? "Check the run ID — the driver could not be listed (timed out or errored), so whether a live box answers to this id cannot be ruled out and one may still be billing. Run `fleet status` (which reports the same outage as its listUnavailable row) and resolve it before creating the run"
+          : skipped === null
+            ? "Check the run ID — the record listing could not be read, so a record for this run under a mangled name cannot be ruled out. Run `fleet status` (which refuses with record-store-unreadable and names the file) and repair it before creating the run; a box may still be billing behind it"
+            : skipped.length === 0
+              ? "Check the run ID or create the run first"
+              : `Check the run ID or create the run first — the listing skipped ${skipped.length} file(s) whose names are not run ids (${skipped.join(", ")}), and one of them may be this run's record under a mangled name`,
       );
     }
 

@@ -147,7 +147,7 @@ describe("observability contract (driver side)", () => {
 });
 
 describe("FakeDriver accountability and boundaries", () => {
-  test("a box with no metadata is still listed, but reap will NOT destroy it", async () => {
+  test("a box with no metadata is still listed, but reap REFUSES rather than silently sparing it", async () => {
     const boxes = mkdtempSync(join(tmpdir(), "qds-fake-orphan-"));
     const runs = mkdtempSync(join(tmpdir(), "qds-fake-orphan-runs-"));
     try {
@@ -156,11 +156,19 @@ describe("FakeDriver accountability and boundaries", () => {
       // LISTED is the accountability guarantee: `fleet status` names it, so an
       // operator can destroy it by hand. REAPING it is a different claim, and
       // this box cannot support it — no metadata means no ownership tag, and
-      // reap destroys only what proves it is ours. Fail-safe by design: a
-      // stalled reap on a box we can still name is recoverable; destroying a
-      // stranger's box (the same shape, on an account-wide listing) is not.
+      // reap destroys only what proves it is ours. Sparing stays mandatory
+      // (destroying on a guess is unrecoverable), but the spare used to be
+      // SILENT — the caller saw an empty destroyed list and unreaped spend was
+      // invisible at exactly the moment a reaper ran. The sweep now refuses,
+      // naming every unproven candidate.
       expect((await d.list()).map((v) => v.name)).toEqual(["half-built-box"]);
-      expect(await reapRuns(d, new RunRecordStore({ dir: runs }))).toEqual([]);
+      const err = await rejection(reapRuns(d, new RunRecordStore({ dir: runs })));
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      // Typed, so the CLI can route the operator to the box-side remediation.
+      expect((err as ProvisionRefusedError).code).toBe("reap-vms-unowned");
+      expect((err as Error).message).toContain("half-built-box");
+      expect((err as Error).message).toContain("spared, not destroyed");
+      // …and nothing was destroyed either way.
       expect((await d.list()).map((v) => v.name)).toEqual(["half-built-box"]);
     } finally {
       rmSync(boxes, { recursive: true, force: true });
@@ -217,6 +225,37 @@ describe("FakeDriver accountability and boundaries", () => {
       const listing = await d.listWithAnomalies();
       expect(listing.vms.map((v) => v.name)).toEqual(["good-box"]);
       expect(listing.skipped).toEqual(["loop"]);
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
+  test("a skipped entry's name is SANITIZED: control characters ride escaped, not raw (S19)", async () => {
+    // A directory name from `readdirSync` rides log lines and skipped entries
+    // verbatim, and a name carrying a control character (a stray tab, newline
+    // or escape — all legal on APFS/ext4) would inject them into those sinks.
+    // Escaped to visible `\uXXXX` form; ordinary names pass through untouched.
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-ctrl-"));
+    try {
+      const d = new FakeDriver(boxes);
+      mkdirSync(join(boxes, "bad\tname")); // fails the hostname grammar → skipped
+
+      const lines: Record<string, unknown>[] = [];
+      const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+      let listing: Awaited<ReturnType<FakeDriver["listWithAnomalies"]>>;
+      try {
+        listing = await d.listWithAnomalies();
+      } finally {
+        restore();
+      }
+      // The escaped form in the return value — the raw tab survives nowhere.
+      expect(listing.skipped).toEqual(["bad\\u0009name"]);
+      // The log line is sanitized by the same helper, not a second spelling.
+      const messages = lines.flatMap((l) => {
+        const e = l.error as { message?: string } | undefined;
+        return typeof e?.message === "string" ? [e.message] : [];
+      });
+      expect(messages.some((m) => m.includes("bad\\u0009name"))).toBe(true);
     } finally {
       rmSync(boxes, { recursive: true, force: true });
     }
@@ -728,14 +767,21 @@ describe("provisioning refusals and fail-safe reap", () => {
       await t.driver.create(tagged, SBX_OWNERSHIP_TAG);
       await t.driver.create(untagged); // grammatical name, no tag
 
-      const destroyed = await reapRuns(t.driver, t.store);
-      expect(destroyed).toEqual([tagged]);
-      // Left LISTED, not silently spared: a stalled reap on a box we can still
-      // name is recoverable by an operator (`fleet status` shows it, teardown
-      // reaches it); a destroyed stranger's box is not. Auto-reaping on the
-      // name alone is the unrecoverable direction — a stranger can name a box
-      // anything.
-      expect((await t.driver.list()).map((v) => v.name)).toEqual([untagged]);
+      // The untagged box cannot PROVE it is ours. Sparing stays mandatory (a
+      // stranger can name a box anything), but sparing silently hid unreaped
+      // spend from the caller — the sweep now partitions BEFORE destroying
+      // anything and refuses naming every unproven candidate.
+      const err = await rejection(reapRuns(t.driver, t.store));
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      expect((err as ProvisionRefusedError).code).toBe("reap-vms-unowned");
+      expect((err as Error).message).toContain(untagged);
+      // Refusal-first means even the PROVEN box survives this round untouched.
+      expect((await t.driver.list()).map((v) => v.name).sort()).toEqual([tagged, untagged]);
+
+      // The remediation is operator action; once the unproven box is gone, the
+      // sweep destroys exactly what proved both halves of ownership.
+      await t.driver.destroy(untagged);
+      expect(await reapRuns(t.driver, t.store)).toEqual([tagged]);
     } finally {
       clean(t);
     }

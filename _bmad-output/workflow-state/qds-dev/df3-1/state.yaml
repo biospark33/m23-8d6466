@@ -20,3 +20,4 @@ checkpoints:
   - phase4-wave1-result: A green (brief-schema+manifest 51 tests w/ C); C green (verbs+status); B died post-tests (defective dispatch.test.ts); D relaunched for dispatch.ts+CLI+e2e
   - phase5-done: 2026-08-21 commit ec4b5f7 pushed, PR #123 opened (CodeRabbit auto-review pending)
   - status: review
+  - phase5-review-r8: done 2026-08-22 (BMAD round 8: 25-agent wave, 24 source + test-hardening patches, false-positive pushbacks, conservative decisions documented; gates green)

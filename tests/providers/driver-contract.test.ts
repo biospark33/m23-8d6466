@@ -20,6 +20,7 @@ import {
   executeRun,
   fillRun,
   observeRun,
+  ProvisionRefusedError,
   reapRuns,
   SBX_OWNERSHIP_TAG,
   setupRun,
@@ -164,7 +165,21 @@ export function runDriverContract(opts: DriverContractOptions): void {
       await driver.create(id);
       expect(store.get(id).vmName).toBeUndefined();
 
-      expect(await reapRuns(driver, store)).not.toContain(id);
+      // S15: the open record claims this box by runId, so a clean sweep spares
+      // it — but if any OTHER unproven box is visible account-wide (a sibling
+      // test that crashed mid-lifecycle, on a real substrate a stranger's), the
+      // sweep now refuses wholesale instead of destroying anything. Both
+      // outcomes keep the live box alive; that is the invariant pinned here.
+      let refused: ProvisionRefusedError | undefined;
+      try {
+        const destroyed = await reapRuns(driver, store);
+        expect(destroyed).not.toContain(id);
+      } catch (err) {
+        if (!(err instanceof ProvisionRefusedError) || err.code !== "reap-vms-unowned") throw err;
+        refused = err;
+      }
+      // Claimed-by-runId keeps the box off the refusal's spared list too.
+      if (refused !== undefined) expect(refused.message).not.toContain(id);
       expect((await driver.list(id)).map((v) => v.name)).toEqual([id]);
       await teardownRun(driver, store, id);
       await driver.destroy(id);
@@ -222,14 +237,31 @@ export function runDriverContract(opts: DriverContractOptions): void {
       // the rule, not one driver's outcome — an unclaimed box is destroyed only
       // when it proves it is ours, and is otherwise left listed and reachable.
       const listedOrphan = (await driver.list(orphan))[0];
-      const destroyed = await reapRuns(driver, store);
-      expect(destroyed).not.toContain(keeper);
-      if (listedOrphan?.tag === SBX_OWNERSHIP_TAG) {
+      let destroyed: string[] | undefined;
+      let refused: unknown;
+      try {
+        destroyed = await reapRuns(driver, store);
+      } catch (e) {
+        refused = e;
+      }
+      if (refused !== undefined) {
+        // S15 fail-safe: a driver that cannot prove ownership of the unclaimed
+        // box refuses the whole sweep instead of destroying on a guess or
+        // silently sparing. Only reachable when the listing carries no tag.
+        expect(listedOrphan?.tag === SBX_OWNERSHIP_TAG).toBe(false);
+        expect(refused).toBeInstanceOf(ProvisionRefusedError);
+        expect((refused as ProvisionRefusedError).code).toBe("reap-vms-unowned");
+        expect((refused as Error).message).toContain(orphan);
+      } else if (listedOrphan?.tag === SBX_OWNERSHIP_TAG) {
         expect(destroyed).toContain(orphan);
       } else {
         expect(destroyed).not.toContain(orphan);
+        expect(destroyed).not.toContain(keeper);
         expect((await driver.list(orphan)).map((v) => v.name)).toEqual([orphan]);
         await driver.destroy(orphan); // what an operator does with a reported box
+      }
+      if (destroyed !== undefined) {
+        expect(destroyed).not.toContain(keeper);
       }
       expect((await driver.list(keeper)).map((v) => v.name)).toEqual([keeper]);
       await teardownRun(driver, store, keeper);

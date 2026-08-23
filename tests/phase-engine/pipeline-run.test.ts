@@ -1009,10 +1009,16 @@ describe("pipeline-run DF3.1 AC9b: the admitted ceiling reaches the run context"
     // `--manifest` pointed into, which is the redirect the symlink case above
     // refuses. A throw is what keeps the re-enable from being silent.
     const source = fs.readFileSync(path.join(REPO_ROOT, "scripts", "pipeline-run.ts"), "utf8");
+    // The identifier must still exist at all: without this probe, a rename of
+    // `resolvedPath` turns BOTH matches below into vacuous passes instead of a
+    // loud failure at the moment the guarantee loses its subject.
+    expect(source).toContain("resolvedPath");
     // No `?? manifestPath` anywhere near the witness anchor…
     expect(source).not.toMatch(/resolvedPath\s*\?\?\s*manifestPath/);
-    // …and the undefined case is a throw, not a default.
-    expect(source).toMatch(/if \(resolvedPath === undefined\) \{\s*\n\s*throw new Error\(/);
+    // …and the undefined case is a throw, not a default. Whitespace-tolerant,
+    // because the only thing being pinned is control flow, not layout: a
+    // reformatted `if(` or re-indented body must not false-fail a correct file.
+    expect(source).toMatch(/if\s*\(\s*resolvedPath\s*===\s*undefined\s*\)\s*\{[\s\S]{0,80}?throw new Error\(/);
   });
 
   test("the cap refusal closes the tracer — the session it opened does not wedge the requestId", async () => {
@@ -1090,4 +1096,96 @@ describe("pipeline-run DF3.1 AC9b: the admitted ceiling reaches the run context"
     expect(afterErr).not.toContain("RequestIdRepoMismatch");
     expect(afterCode).toBe(0);
   }, 60_000);
+});
+
+describe("pipeline-run DF3.1 S28: the witness is fresh-bound to THIS run (±30 min)", () => {
+  // `runContextFrom`'s temporal binding: a witness only vouches for a ceiling
+  // while its mtime sits inside ±WITNESS_FRESH_WINDOW_MS of now. The two ways a
+  // wrong ceiling got in — a leftover run-context.json from an earlier, larger
+  // dispatch sharing the directory, and one committed beside the manifest — are
+  // both OLD; dispatch's own handoff writes the witness moments before the box
+  // reads it and stays inside the window. Every arm here backdates (or
+  // future-dates) the mtime past the window via utimesSync and holds the
+  // witness BYTES identical to a case that is honoured elsewhere in this file,
+  // so staleness is the only variable that can move the verdict.
+
+  /** AC9b's fixture pair, plus the witness path itself — freshness is judged on the file's own lstat mtime. */
+  function witnessed(witnessBody: string): { manifestPath: string; runRoot: string; witnessPath: string } {
+    const runRoot = path.join(tmpRoot, `s28-${seq++}`);
+    fs.mkdirSync(runRoot, { recursive: true });
+    const manifestPath = path.join(runRoot, "pipeline.yaml");
+    fs.writeFileSync(manifestPath, "{}\n");
+    const witnessPath = path.join(runRoot, "run-context.json");
+    fs.writeFileSync(witnessPath, witnessBody);
+    return { manifestPath, runRoot, witnessPath };
+  }
+
+  const HOUR_AGO = new Date(Date.now() - 60 * 60_000); // 2× the window
+  const HOUR_AHEAD = new Date(Date.now() + 60 * 60_000);
+
+  test("a STALE witness on an unstamped manifest leaves the ceiling ABSENT", () => {
+    // Same bytes as the honoured fresh case above ("a witness WITHOUT a stamped
+    // manifest still puts the admitted ceiling on the context"); only the mtime
+    // differs. Falling back to an absent field is the conservative money
+    // direction — the harness default is never above what was reserved.
+    const f = witnessed(JSON.stringify({ effectiveCeilingMicros: 250_000 }));
+    fs.utimesSync(f.witnessPath, HOUR_AGO, HOUR_AGO);
+
+    const ctx = runContextFrom("run-s28-1", "req-s28-1", { pipelineId: "stale-witness" }, f);
+    expect("effectiveCeilingMicros" in ctx).toBe(false);
+  });
+
+  test("a FUTURE-dated witness is stale too — Math.abs is the whole point of the window", () => {
+    // A clock-skewed or forged mtime an hour ahead is exactly as untrustworthy
+    // as one an hour old; a signed age check would honour it.
+    const f = witnessed(JSON.stringify({ effectiveCeilingMicros: 250_000 }));
+    fs.utimesSync(f.witnessPath, HOUR_AHEAD, HOUR_AHEAD);
+
+    const ctx = runContextFrom("run-s28-2", "req-s28-2", { pipelineId: "future-witness" }, f);
+    expect("effectiveCeilingMicros" in ctx).toBe(false);
+  });
+
+  test("a DECLARED cap reconciles only against a CURRENT witness — a stale agreeing pair REFUSES", () => {
+    // The committed pipeline.yaml + run-context.json pair that agreed before
+    // S28 reconciled cleanly and raised the harness cap by naming a number
+    // twice. Agreement is not enough when it is old. There is nothing to fall
+    // back to on this path — the manifest asserts a ceiling nothing current
+    // vouches for — so this refuses instead of downgrading.
+    const f = witnessed(JSON.stringify({ effectiveCeilingMicros: 250_000 }));
+    fs.utimesSync(f.witnessPath, HOUR_AGO, HOUR_AGO);
+
+    expect(() =>
+      runContextFrom(
+        "run-s28-3",
+        "req-s28-3",
+        { pipelineId: "stale-agreeing-pair", limitMicroUsd: 250_000 },
+        f,
+      ),
+    ).toThrow(/is stale/);
+  });
+
+  test("the stale downgrade is not silent: the runner warns witness_stale and still runs at the default", async () => {
+    // The warn line is written straight to fd 2 (`fs.writeSync(2, …)`), so it
+    // is observable only through the spawned runner — a direct call would print
+    // it into the test process's own stderr.
+    const ws = workspace();
+    // No declared limit → the witness-only path, which DOWNGRADES rather than
+    // refusing: the run proceeds at the DF1.6 default.
+    const manifest = writeCodeManifest(ws.dir);
+    const witness = path.join(ws.dir, "run-context.json");
+    fs.writeFileSync(witness, JSON.stringify({ effectiveCeilingMicros: 250_000 }));
+    fs.utimesSync(witness, HOUR_AGO, HOUR_AGO);
+
+    const proc = spawnRunner(
+      ["--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal, "--run-root", ws.dir],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(0);
+
+    const warn = jsonLines(stderr).find((l) => l.event === "witness_stale");
+    expect(warn).toBeDefined();
+    expect(String(warn?.detail)).toContain("freshness window");
+    expect(String(warn?.effect)).toContain("left unset");
+  });
 });

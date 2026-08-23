@@ -481,6 +481,50 @@ describe("ExeDevDriver — control-plane parsing", () => {
     expect(lines.filter((l) => l.vm === "good-box" && l.outcome === "excluded")).toEqual([]);
   });
 
+  test("a LEGACY-grammar name is POSSIBLY ours and is LISTED, not excluded (S14)", async () => {
+    // `trailing-` ids exist ON DISK by construction from every build before the
+    // grammar tightened (run-record.ts's read/write split), so a box named from
+    // one may be OURS — an earlier build created it. Excluding it on the strict
+    // grammar hid a billed, unreapable box from `fleet status` and the record
+    // sweep forever. Ownership stays with `isFactoryOwnedVm` downstream; the
+    // listing only refuses to drop what might be ours.
+    const legacy = new ExeDevDriver({
+      run: async () => ({
+        stdout: JSON.stringify({ vms: [{ vm_name: "trailing-" }, { vm_name: "good-box" }] }),
+        stderr: "",
+        exitCode: 0,
+      }),
+    });
+    const listing = await legacy.listWithAnomalies();
+    expect(listing.vms.map((v) => v.name)).toEqual(["trailing-", "good-box"]);
+    // Listed operator-visibly is not "skipped": nothing here blocks a reap.
+    expect(listing.skipped).toEqual([]);
+  });
+
+  test("skipped entries are REDACTED before they leave the driver (S20)", async () => {
+    // A malformed row's identifying fields ride the anomaly string verbatim, and
+    // that string reaches error messages and log lines. Provider rows carry
+    // `https_url`/`ssh_dest` values that can embed credentials (`ghs_…` in a
+    // clone URL), so the free text goes through the shared redactor first.
+    const leaky = new ExeDevDriver({
+      run: async () => ({
+        stdout: JSON.stringify({
+          vms: [{ vm_name: 42, ssh_dest: "https://x-access-token:ghs_15b9c7e0deadbeef@github.com/o/r" }],
+        }),
+        stderr: "",
+        exitCode: 0,
+      }),
+    });
+    const listing = await leaky.listWithAnomalies();
+    expect(listing.vms).toEqual([]);
+    expect(listing.skipped).toHaveLength(1);
+    expect(listing.skipped[0]).toContain("«redacted»");
+    expect(JSON.stringify(listing.skipped)).not.toContain("ghs_");
+    // The identifying SHAPE survives the redaction — still followable.
+    expect(listing.skipped[0]).toContain("ssh_dest=");
+    expect(listing.skipped[0]).toContain("@github.com/o/r");
+  });
+
   test("destroy re-reads ls when rm reports not-found — idempotent by content", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
     await driver.create("destroy-1");

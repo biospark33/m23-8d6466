@@ -255,6 +255,17 @@ function runCommand(
  * reach) — or to sign it. Until then the guarantee is "an authored manifest
  * alone cannot raise the cap", not "an authored REPO cannot".
  *
+ * S28 narrows that residual with a TEMPORAL binding, since a cryptographic one
+ * does not exist yet: a witness is only trusted while it is FRESH relative to
+ * this invocation (`witnessStaleBecause`, ±30 min around now). The two ways a
+ * wrong ceiling got in were a leftover `run-context.json` from an earlier,
+ * larger dispatch sharing the directory, and one committed next to the manifest
+ * in the repo — the first is always old, and the second is old unless the run
+ * starts inside the checkout window. Dispatch's own handoff is unaffected: it
+ * writes the witness moments before the box runs, well inside the window.
+ * Fully closing the second vector still needs a dispatch-owned location or a
+ * signature; a fresh planted file still reconciles.
+ *
  * Exported for its test: the field appears in no journal row and no terminal
  * marker, so a spawned end-to-end run has nothing to assert on.
  */
@@ -277,6 +288,31 @@ export function runContextFrom(
     // `stripAuthoredLimit` is applied on the runner side, this is the door the
     // admitted ceiling walks out of.
     if (!witnessPresent(witness.manifestPath)) return ctx;
+    // S28: a STALE witness is a previous run's statement, not this one's — it
+    // no longer sets the ceiling. Falling back to the absent field is the
+    // conservative money direction (the DF1.6 harness default is never higher
+    // than what was reserved), and the stderr line keeps the downgrade from
+    // being silent: an operator whose runs now die early at $0.50 gets a reason.
+    const stale = witnessStaleBecause(witness.manifestPath);
+    if (stale !== null) {
+      try {
+        fs.writeSync(
+          2,
+          `${JSON.stringify({
+            level: "warn",
+            event: "witness_stale",
+            runId,
+            requestId,
+            witnessPath: witnessPathBeside(witness.manifestPath),
+            detail: stale,
+            effect: "effectiveCeilingMicros left unset; the run spawns at the harness default",
+          })}\n`,
+        );
+      } catch {
+        /* observability only; the fallback itself must not fail */
+      }
+      return ctx;
+    }
     return {
       ...ctx,
       effectiveCeilingMicros: admittedCeilingBeside(witness.manifestPath, witness.runRoot, false),
@@ -329,6 +365,38 @@ function witnessPresent(manifestPath: string): boolean {
 }
 
 /**
+ * S28: the freshness half of binding the witness to THIS run. `null` when the
+ * witness is fresh enough to trust, else a reason naming the violation.
+ *
+ * The window is SYMMETRIC around now, and `Math.abs` is the whole point: a
+ * future-dated mtime (clock skew between fill host and box, or a forged one)
+ * is exactly as untrustworthy as an old one. 30 min is three DF1.6 default
+ * step timeouts (600_000 ms) — room for box boot and the setup gate between
+ * dispatch's fill and the runner's first read, without letting last week's
+ * dispatch speak for this run. A checked-in witness only passes if the run
+ * starts within the checkout window; killing that residual needs the
+ * dispatch-owned location or signature noted in `runContextFrom`.
+ *
+ * `lstatSync`, matching `witnessPresent`: the link itself is what was seen
+ * there, so the link's mtime is what is judged. A throw here (the entry
+ * vanished since the presence check) reads as stale — fail closed.
+ */
+const WITNESS_FRESH_WINDOW_MS = 30 * 60_000;
+
+function witnessStaleBecause(manifestPath: string): string | null {
+  let mtimeMs: number;
+  try {
+    mtimeMs = fs.lstatSync(witnessPathBeside(manifestPath)).mtimeMs;
+  } catch {
+    return "it vanished between the presence check and this read";
+  }
+  const ageMs = Date.now() - mtimeMs;
+  if (Math.abs(ageMs) <= WITNESS_FRESH_WINDOW_MS) return null;
+  const skew = ageMs < 0;
+  return `its mtime is ${Math.round(Math.abs(ageMs) / 1000)}s ${skew ? "in the future" : "old"}, outside the ±${Math.round(WITNESS_FRESH_WINDOW_MS / 60_000)}min freshness window this run binds it to`;
+}
+
+/**
  * `declared` is the CALLER'S state, not a behaviour switch: both refusals read
  * identically either way, and only the lead-in changes. The witness-only path
  * reaches this function precisely BECAUSE the manifest declared nothing, so the
@@ -355,6 +423,16 @@ function admittedCeilingBeside(manifestPath: string, runRoot: string, declared: 
   const admitted = (parsed as { effectiveCeilingMicros?: unknown } | null)?.effectiveCeilingMicros;
   if (!Number.isSafeInteger(admitted) || (admitted as number) <= 0) {
     throw new Error(`${because} ${witnessPath} carries no positive integer effectiveCeilingMicros`);
+  }
+  // S28: freshness binds the witness to this run on the DECLARED path too. The
+  // numbers agreeing is not enough when the agreement is old — an authored
+  // manifest and a leftover witness that once matched (a previous dispatch into
+  // the same directory, or a committed pair) would otherwise reconcile cleanly.
+  // Unlike the witness-only path there is nothing to fall back to — the
+  // manifest asserts a ceiling nothing current vouches for — so this refuses.
+  const stale = witnessStaleBecause(manifestPath);
+  if (stale !== null) {
+    throw new Error(`${because} ${witnessPath} is stale: ${stale}`);
   }
   return admitted as number;
 }

@@ -77,6 +77,25 @@ import {
  */
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+/**
+ * `expect.unreachable()` throws a plain Error, so a `catch` under test swallows
+ * it and re-reports an unexpected SUCCESS as whatever its own failed
+ * expectations produce — naming the wrong failure. Every try/catch here whose
+ * try ends in the unreachable-success arm throws THIS instead, and its catch
+ * rethrows on sight, so unexpected success fails loudly under its own name.
+ */
+class UnexpectedSuccessError extends Error {
+  constructor() {
+    super("dispatch unexpectedly succeeded");
+    this.name = "UnexpectedSuccessError";
+  }
+}
+
+/** The unreachable-success arm of a try whose catch rethrows {@link UnexpectedSuccessError}. */
+function failUnreachable(): never {
+  throw new UnexpectedSuccessError();
+}
+
 /** The dispatch wall-clock ceiling `DispatchDeps.timeoutMs` defaults to. */
 const DEFAULT_TIMEOUT_MS = 600_000;
 
@@ -265,6 +284,22 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
   /** An abandoned-step line for `step`, once `within`'s handler has filed it. */
   async function abandonedLine(step: string): Promise<LogEntry> {
     await awaitEntry((e) => e.phase === "abandoned" && e.step === step);
+    // Settle BEFORE counting: the FIRST matching line resolves `awaitEntry`, but
+    // a sibling step can file its own abandoned line a tick later — counting
+    // immediately lets that second line slip past this helper, and the
+    // assertions below then run against whichever entry happened to come first.
+    // Bounded poll (≤50 ms total): yield on a short timer until the
+    // abandoned-line count has held steady across two consecutive hops.
+    const abandonedCount = (): number => entries.filter((e) => e.phase === "abandoned").length;
+    const settleBy = Date.now() + 50;
+    let seen = abandonedCount();
+    let quietHops = 0;
+    while (quietHops < 2 && Date.now() < settleBy) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const next = abandonedCount();
+      quietHops = next === seen ? quietHops + 1 : 0;
+      seen = next;
+    }
     const lines = entries.filter((e) => e.phase === "abandoned");
     // Exactly one: a second abandoned step means a different step also expired,
     // and the assertions below would then be about whichever came first.
@@ -301,8 +336,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       // @ts-expect-error AC2: a caller-invented id is not a MintedRunId — the brand
       // refuses it at compile time; this asserts the runtime guard still refuses a cast.
       await dispatch(brief, deps(), { runId: "invented-by-caller" });
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       // Not just "a FleetError": every later refusal is one too, and this test
@@ -347,8 +383,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
           // this asserts the runtime guard still refuses a cast.
           runId: forged,
         });
-        expect.unreachable();
+        failUnreachable();
       } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
         expect(e).toBeInstanceOf(FleetError);
         const err = e as FleetError;
         expect(err.code).toBe("run-id-not-minted");
@@ -368,11 +405,17 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
   });
 
   test("mintRunId() re-exports newId('qds') — dated, and RANDOM, not a counter", () => {
+    // The UTC day is captured on BOTH sides of every mint below: an id carries
+    // the date AT ITS OWN MINT, and a UTC-midnight flip mid-test is legitimate —
+    // pinning to whichever bound was read last would flake once a day at
+    // 00:00:00 UTC instead of testing anything.
+    const utcDay = (): string => new Date().toISOString().slice(0, 10).replaceAll("-", "");
+    const dayBefore = utcDay();
     const id = mintRunId();
     expect(id).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
     // The DAY, not just eight digits: `newId` composes it from `toISOString()`,
     // and a shape assertion alone is satisfied by a constant.
-    expect(id.slice(4, 12)).toBe(new Date().toISOString().slice(0, 10).replaceAll("-", ""));
+    expect([dayBefore, utcDay()]).toContain(id.slice(4, 12));
 
     // INDEPENDENCE, which the collision-retry loop above assumes: a counter, a
     // pid-derived value or a second-resolution timestamp all satisfy the shape
@@ -393,9 +436,13 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     const tails = minted.map((v) => Number.parseInt(v.slice(13), 16));
     expect(tails.every((t, i) => i === 0 || t > (tails[i - 1] as number))).toBeFalse();
     // And the randomness is in the TAIL, not smuggled into the date: every one
-    // of those ids carries today's date, so the set above is 256 distinct
-    // six-hex suffixes rather than 256 distinct prefixes.
-    expect(new Set([...ids].map((v) => v.slice(0, 12))).size).toBe(1);
+    // of those ids carries a day THIS TEST WINDOW covers (one, or both if the
+    // UTC day flipped mid-test), so the set above is still 256 mostly-distinct
+    // six-hex suffixes rather than 256 distinct date groups.
+    const daysInWindow = new Set([dayBefore, utcDay()]);
+    const days = [...ids].map((v) => v.slice(4, 12));
+    expect(days.every((d) => daysInWindow.has(d))).toBeTrue();
+    expect(new Set(days).size).toBeLessThanOrEqual(daysInWindow.size);
   });
 
   test("INV-4-bis: requestId is persisted on the record and surfaces on the status row", async () => {
@@ -424,8 +471,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(brief, deps());
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(2);
@@ -458,8 +506,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     ] as const) {
       try {
         await dispatch(validBrief({ [hostile]: "x" }), deps());
-        expect.unreachable();
+        failUnreachable();
       } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
         const err = e as FleetError;
         expect(err.code).toBe("invalid-brief");
         // The raw name never appears in ANY operator-facing string.
@@ -501,8 +550,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(brief, deps());
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(2);
@@ -527,8 +577,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(brief, deps());
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(2);
@@ -553,8 +604,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(brief, deps({ ledgerFactory }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       expect((e as FleetError).exitCode).toBe(2);
     }
@@ -571,8 +623,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // and the assertion reads as awaited without being it.
     try {
       await dispatch(brief, deps());
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
     }
 
@@ -601,14 +654,16 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // shape as well as the populated one.
     try {
       await dispatch({ ...validBrief(), unknownField: "x" }, deps());
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect((e as FleetError).code).toBe("invalid-brief");
     }
     try {
       await dispatch(validBrief({ requestId }), deps({ ledgerFactory: overBudgetLedger }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect((e as FleetError).code).toBe("budget-exceeded");
     }
 
@@ -679,8 +734,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(brief, deps({ ledgerFactory }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(2);
@@ -703,8 +759,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(brief, deps({ ledgerFactory }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(2);
@@ -737,8 +794,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(brief, deps({ repoRoot: undefined }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect((e as FleetError).exitCode).toBe(2);
       expect((e as FleetError).code).toBe("manifest-rejected");
       expect((e as FleetError).remediation).toContain(process.cwd());
@@ -857,7 +915,12 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(err.message).toContain("no roster beside the manifest");
   });
 
-  test("INV-2: a roster.yaml that is a FIFO → exit 2 roster-rejected, and the dispatch does not HANG", async () => {
+  /** `mkfifo` is absent on some minimal CI images; without it no FIFO fixture can exist. */
+  const mkfifoMissing = Bun.which("mkfifo") === null;
+
+  test.skipIf(mkfifoMissing)(
+    "INV-2: a roster.yaml that is a FIFO → exit 2 roster-rejected, and the dispatch does not HANG",
+    async () => {
     // The roster block runs OUTSIDE `within` — it is synchronous host-side work
     // — so no timer can rescue it. Under the old `statSync(path)` then
     // `readFileSync(path)` pair a FIFO planted at this brief-steered path
@@ -963,8 +1026,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(brief, deps({ ledgerFactory }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       const err = e as FleetError;
       expect(err.code).toBe("provision-failed");
       expect(err.message).toContain("past the roster pre-check");
@@ -1010,8 +1074,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       const ledgerFactory = mock(() => goodLedger());
       try {
         await dispatch(validBrief(), deps({ timeoutMs, ledgerFactory }));
-        expect.unreachable();
+        failUnreachable();
       } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
         expect((e as FleetError).exitCode).toBe(2);
         expect((e as FleetError).code).toBe("timeout-invalid");
       }
@@ -1063,8 +1128,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       const ledgerFactory = mock(() => goodLedger());
       try {
         await dispatch(validBrief(), deps({ port, ledgerFactory }));
-        expect.unreachable();
+        failUnreachable();
       } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
         expect((e as FleetError).exitCode).toBe(2);
         expect((e as FleetError).code).toBe("port-invalid");
       }
@@ -1094,8 +1160,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     const ledgerFactory = mock(() => goodLedger());
     try {
       await dispatch(validBrief(), deps({ ledgerFactory }), { runId: preMinted });
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect((e as FleetError).exitCode).toBe(2);
       expect((e as FleetError).code).toBe("run-id-in-use");
     }
@@ -1125,8 +1192,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps({ ledgerFactory }), { runId: preMinted });
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(2);
@@ -1218,13 +1286,18 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     let probes = 0;
     let thirdProbe = "";
     const realGet = store.get.bind(store);
+    // The "taken" stand-ins carry a FULL record shape, seeded from a real record
+    // in a throwaway store: `{ runId, createdAt } as RunRecord` left every other
+    // field undefined, so a future existence probe branching on another field
+    // silently exercised a state no real record ever has.
+    const shapeSeed = new RunRecordStore(join(dir, "shape-seed")).create(mintRunId());
     store.get = (runId: string) => {
       probes += 1;
       // The first two minted ids are "already taken". Later reads — `store.set`
       // does its own read-modify-write through `get` — go to the real store.
       if (probes <= 2) {
         taken.add(runId);
-        return { runId, createdAt: new Date().toISOString() } as ReturnType<typeof realGet>;
+        return { ...shapeSeed, runId };
       }
       if (probes === 3) thirdProbe = runId;
       return realGet(runId);
@@ -1253,8 +1326,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps());
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(1);
@@ -1285,8 +1359,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps({ ledgerFactory }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(1);
@@ -1313,8 +1388,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(brief, deps({ ledgerFactory: () => ledger }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(5);
@@ -1353,8 +1429,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         deps({ ledgerFactory: () => ledger, quotaLimits: limitsWith({ maxVms: 0 }) }),
         { admitted: true },
       );
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(5);
@@ -1471,8 +1548,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(5);
@@ -1504,8 +1582,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(5);
@@ -1550,8 +1629,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(5);
@@ -1630,8 +1710,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(brief, deps({ quotaLimits: loaded }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(5);
@@ -1660,8 +1741,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(brief, deps());
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(5);
@@ -1985,19 +2067,27 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         brief,
         deps({
           ledgerFactory: () => ledger,
-          setupGate: async () => ({
-            ready: false,
-            failedItem: "A" as const,
-            assertionCode: 1 as const,
-            assertions: [{ item: "A" as const, ok: false, note: "HEAD mismatch" }],
-            debugCommands: ["ssh box.exe.xyz cat /tmp/provision"],
-            teardownCommand: "bun scripts/fleet.ts teardown the-run",
-            vm: "test-box",
-          }),
+          setupGate: async () => {
+            // ≥2 real ms of wall clock between `createdAt` and the failure stamp:
+            // the strict `>` below has to distinguish a FRESH stamp from a copied
+            // one even on a machine where this whole fake provision fits inside a
+            // single clock tick.
+            await Bun.sleep(2);
+            return {
+              ready: false,
+              failedItem: "A" as const,
+              assertionCode: 1 as const,
+              assertions: [{ item: "A" as const, ok: false, note: "HEAD mismatch" }],
+              debugCommands: ["ssh box.exe.xyz cat /tmp/provision"],
+              teardownCommand: "bun scripts/fleet.ts teardown the-run",
+              vm: "test-box",
+            };
+          },
         }),
       );
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(3);
@@ -2022,8 +2112,11 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(failedAt).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
       expect(Date.parse(failedAt)).toBeGreaterThanOrEqual(before);
       expect(Date.parse(failedAt)).toBeLessThanOrEqual(Date.now());
-      // …and it is not just `createdAt` under another name.
-      expect(Date.parse(failedAt)).toBeGreaterThanOrEqual(Date.parse(record.createdAt));
+      // …and it is not just `createdAt` under another name. STRICTLY greater —
+      // an equality-satisfying `>=` also passed with `failedAt` copied verbatim
+      // from `createdAt`, which is exactly the frozen-stamp regression this pair
+      // pins. The gate stub's sleep guarantees the gap exists here.
+      expect(Date.parse(failedAt)).toBeGreaterThan(Date.parse(record.createdAt));
 
       // A minted key is spendable the moment it exists. If the dispatcher dies
       // at the gate without persisting `keyHash`, the credential is live and
@@ -2064,8 +2157,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
             setupGate: (async () => returned) as unknown as DispatchDeps["setupGate"],
           }),
         );
-        expect.unreachable();
+        failUnreachable();
       } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
         expect(e).toBeInstanceOf(FleetError);
         const err = e as FleetError;
         expect(err.exitCode).toBe(3);
@@ -2117,8 +2211,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
           }),
         }),
       );
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(3);
@@ -2167,8 +2262,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
           },
         }),
       );
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect((e as FleetError).code).toBe("setup-gate-failed");
     }
     // A box made public before the gate proves it is reachable while unproven —
@@ -2247,8 +2343,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps({ port: 8080 }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(1);
@@ -2333,8 +2430,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
           },
         }),
       );
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(1);
@@ -2392,8 +2490,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(1);
@@ -2695,8 +2794,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
           },
         }),
       );
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(5);
@@ -2737,8 +2837,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         validBrief(),
         deps({ quotaLimits: {} as unknown as LoadedQuotaLimits }),
       );
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(5);
@@ -2782,8 +2883,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps());
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(1);
@@ -2851,8 +2953,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
           },
         }),
       );
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(1);
@@ -2873,8 +2976,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // split INV-4-bis exists to prevent, with no error anywhere.
     try {
       await dispatch(validBrief(), deps({ requestId: "not-a-uuid" }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(2);
@@ -2912,8 +3016,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps());
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       const err = e as FleetError;
       expect(err.code).toBe("provision-failed");
       expect(err.payload?.providerCode).toBe("ECONNRESET");
@@ -3004,12 +3109,16 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // through `redactUrls`, which only matches `https?://…`. A bare token went
     // straight into the structured log.
     const knownKey = "sk-or-v1-abandonedleakykey31337";
-    keyApi.createKey = async (_name: string, limit: number) => ({
-      key: knownKey,
-      hash: "beefbeef",
-      limitUsd: limit,
-      usageUsd: 0,
-    });
+    let echoedLimitUsd: number | undefined;
+    keyApi.createKey = async (_name: string, limit: number) => {
+      echoedLimitUsd = limit;
+      return {
+        key: knownKey,
+        hash: "beefbeef",
+        limitUsd: limit,
+        usageUsd: 0,
+      };
+    };
 
     // Which STEP expires is pinned by the injected clock rather than by racing
     // real timers: the budget is spent inside `createKey`, i.e. during `mint`,
@@ -3049,8 +3158,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps({ clock }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       const err = e as FleetError;
       expect(err.code).toBe("dispatch-timeout");
       expect(err.payload?.step).toBe("deliver");
@@ -3066,6 +3176,10 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // never emitted, or over a message that never carried the key, is vacuous —
     // it stays green with the redaction deleted.
     expect(echoed).toContain(knownKey);
+    // The stand-in ECHOES the limit dispatch asked the provider to mint; read it
+    // back, or an argument swap in createKey's (name, limitUsd) call — or a µ$/m$
+    // unit slip — sails through undetected. Default ledger ⇒ defaultKeyCap ceiling.
+    expect(echoedLimitUsd).toBe(defaultKeyCapMicroUsd / 1_000_000);
     // The FAILURE arm of the handler, named: the abandoned call rejected, which
     // is a different line (and a different code) from an abandoned call that
     // completed — and it is the one that carries the provider's free text.
@@ -3097,7 +3211,13 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     const realCreate = driver.create.bind(driver);
     driver.create = async (name: string, tag?: string) => {
       const vm = await realCreate(name, tag);
-      advance(DEFAULT_TIMEOUT_MS - 200);
+      // Spends all but 1 s inside `create`, whose own timer was armed with the
+      // full ceiling before it ran — so `mint` is the step holding the short
+      // timer, by construction. The margin covers load: the steps between this
+      // advance and `mint` arm a REAL timer of this same remainder, and a loop
+      // stall longer than it would fire one of those first, flipping which step
+      // expires. Residual risk accepted: >1 s between adjacent steps.
+      advance(DEFAULT_TIMEOUT_MS - 1_000);
       return vm;
     };
     const knownKey = "sk-or-v1-abandonedmintkey31337";
@@ -3105,7 +3225,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     const minting = new Promise<void>((r) => {
       releaseMint = r;
     });
+    let echoedLimitUsd: number | undefined;
     keyApi.createKey = async (_name: string, limitUsd: number) => {
+      echoedLimitUsd = limitUsd;
       // GATED, not slept: the mint completes only once the test releases it,
       // which it does after `dispatch` has already refused — so the call is
       // ABANDONED first by construction and the handler is its only subscriber.
@@ -3115,8 +3237,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps({ clock, ledgerFactory: () => goodLedger(admittedCeiling) }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       const err = e as FleetError;
       expect(err.code).toBe("dispatch-timeout");
       expect(err.payload?.step).toBe("mint");
@@ -3131,6 +3254,11 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // What IDENTIFIES the key: the provider-side handle, and what it may spend.
     expect(line.keyHash).toBe("d00dfeed");
     expect(line.capMicroUsd).toBe(admittedCeiling);
+    // The stand-in ECHOES what dispatch ASKED the provider to mint — read it
+    // back, or an argument swap in createKey's (name, limitUsd) call, or a µ$/m$
+    // unit slip, sails through: `capMicroUsd` above is stamped from the ledger
+    // decision, not from this echo. 12_000_000 µ$ ⇒ 12 USD requested.
+    expect(echoedLimitUsd).toBe(admittedCeiling / 1_000_000);
     // INV-4: the hash, never the plaintext — this is a log sink.
     expect(JSON.stringify(line)).not.toContain(knownKey);
     expect(JSON.stringify(line)).not.toContain("sk-or-v1-");
@@ -3159,10 +3287,15 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
           port: 8080,
           setupGate: async (drv, vm, o) => {
             const gate = await fakeGate(drv, vm, o);
-            // Leaves 250 ms for everything after the gate: the post-gate
-            // re-sample passes, `expose` (a local call) resolves, and
-            // `setPublic` is the step the deadline lands on.
-            advance(DEFAULT_TIMEOUT_MS - 250);
+            // Spends all but 1 s AFTER the gate: `expose` (a local call)
+            // resolves inside that margin, and `setPublic` is then the step
+            // holding the short timer. The margin is deliberately generous —
+            // every step from here to `setPublic` arms a REAL timer of this
+            // same remainder, and under load a stalled loop could fire one of
+            // THOSE first, flipping which step the refusal names. 1 s keeps
+            // that window un-raceable in practice; residual risk accepted: a
+            // machine stalling >1 s between two adjacent steps still flips it.
+            advance(DEFAULT_TIMEOUT_MS - 1_000);
             return gate;
           },
         }),
@@ -3184,6 +3317,12 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     releasePublic();
     const line = await abandonedLine("setPublic");
     expect((line.error as { code?: string }).code).toBe("abandoned-step-succeeded");
+    // Shape-pinned BEFORE the equality: `undefined === undefined` satisfies
+    // `toBe`, so an unnamed box on BOTH sides — a describeLate that dropped
+    // vmName AND a record write that never landed — would pass vacuously.
+    expect(line.vmName).toBeString();
+    expect(line.vmName).toMatch(/^qds-/);
+    expect(store.get(runId).vmName).toBeString();
     expect(line.vmName).toBe(store.get(runId).vmName);
     expect(line.publiclyReachable).toBeTrue();
   });
@@ -3213,11 +3352,15 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         validBrief({ requestId }),
         deps({
           clock,
-          // The last seam before the create step: 200 ms is the whole of that
-          // step's budget, and `store.create` (INV-1's first half) has already
-          // written the record by the time it expires.
+          // The last seam before the create step — everything from here to
+          // `within("create")` arms a REAL timer of this same remainder (the
+          // injected clock does not move on its own), so 1 s of margin keeps a
+          // loaded loop from firing an intermediate step's timer first and
+          // flipping which step the refusal names. `store.create` (INV-1's
+          // first half) has already written the record by the time the create
+          // timer expires.
           ledgerFactory: () => {
-            advance(DEFAULT_TIMEOUT_MS - 200);
+            advance(DEFAULT_TIMEOUT_MS - 1_000);
             return goodLedger();
           },
         }),
@@ -3242,6 +3385,12 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // test — and the late box gets named on the record and on the line.
     releaseCreate();
     const line = await abandonedLine("create");
+    // Both sides named — and pinned independently of the equality, which
+    // `undefined === undefined` satisfies: a regression that names NEITHER the
+    // abandoned line NOR the record passes vacuously without these shape pins.
+    expect(line.vmName).toBeString();
+    expect(line.vmName).toMatch(/^qds-/);
+    expect(store.get(runId).vmName).toBeString();
     expect(line.vmName).toBe(store.get(runId).vmName);
     expect(store.get(runId).requestId).toBe(requestId);
   });
@@ -3261,8 +3410,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps());
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       const err = e as FleetError;
       expect(err.code).toBe("provision-failed");
       expect(err.message).not.toContain("abcdefghijklmnopq");
@@ -3295,8 +3445,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     const supplied = "Q".repeat(96);
     try {
       assertFleetRunId(supplied);
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       expect(e).toBeInstanceOf(FleetError);
       const err = e as FleetError;
       expect(err.exitCode).toBe(2);
@@ -3325,8 +3476,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     const url = `https://mgmt.example.com/keys/${"a".repeat(32)}`;
     try {
       assertFleetRunId(url);
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       const err = e as FleetError;
       expect(err.code).toBe("invalid-run-id");
       // Scheme and host survive — an operator has to know which substrate they
@@ -3344,8 +3496,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // `fleet teardown <id>` for an id with no record.
     try {
       await dispatch(validBrief(), deps({ ledgerFactory: () => overBudgetLedger() }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       const err = e as FleetError;
       expect(err.exitCode).toBe(5);
       expect(err.code).toBe("budget-exceeded");
@@ -3380,8 +3533,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps({ port: 8080 }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       const err = e as FleetError;
       expect(err.exitCode).toBe(1);
       expect(err.code).toBe("expose-no-url");
@@ -3431,8 +3585,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     try {
       await dispatch(validBrief(), deps({ port: 8080 }));
-      expect.unreachable();
+      failUnreachable();
     } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
       const err = e as FleetError;
       expect(err.code).toBe("dispatch-failed");
       expect(err.payload?.providerCode).toBe("EACCES");

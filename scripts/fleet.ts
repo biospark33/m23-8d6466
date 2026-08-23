@@ -694,11 +694,19 @@ function runIdFromError(e: unknown): string | undefined {
  * $(head -c 200000 /dev/urandom)` is refused, but the id it was refused for
  * still landed unbounded in the CC-9 line's `runId` — one refused invocation
  * writing 200 KB into the operator's log stream.
+ *
+ * REDACT first, THEN cap — the order `assertFleetRunId` fixed for the refusal
+ * echo. Capping first sliced a pasted credential across the 96-char boundary
+ * into halves neither redaction rule matches, and nothing downstream of this
+ * sink redacts at all, so the head went out verbatim. Minted ids
+ * (`qds-YYYYMMDD-hex`, well under `redactSecrets`' 40-char floor) pass through
+ * untouched, so ordinary runs log exactly as before.
  */
 const MAX_ECHO = 96;
 function bounded(s: string | undefined): string {
   if (s === undefined) return "(none)";
-  return s.length <= MAX_ECHO ? s : `${s.slice(0, MAX_ECHO)}…(${s.length} chars)`;
+  const safe = redactSecrets(s);
+  return safe.length <= MAX_ECHO ? safe : `${safe.slice(0, MAX_ECHO)}…(${safe.length} chars)`;
 }
 
 export async function run(
@@ -954,14 +962,23 @@ export async function run(
       const rawBrief = await readBrief();
       // The cap is on BYTES whichever source produced the text — `.length`
       // counts UTF-16 code units, which under-measures every non-ASCII brief.
-      const briefBytes = Buffer.byteLength(rawBrief, "utf8");
-      if (briefBytes > MAX_BRIEF_BYTES) {
-        throw new FleetError(
-          2,
-          "brief-too-large",
-          `brief is ${briefBytes} bytes; the cap is ${MAX_BRIEF_BYTES}`,
-          "trim the brief or split payload out of it",
-        );
+      // Skipped when the decode was LOSSY: TextDecoder maps each invalid UTF-8
+      // byte to U+FFFD, which re-encodes as THREE bytes, so a corrupt brief
+      // measured here could exceed a cap its RAW bytes had already passed —
+      // and both real readers cap raw bytes as they read. Replacement chars
+      // are proof this count no longer describes what arrived; without one the
+      // decode round-trips exactly and the measurement binds (which is what
+      // still bounds an injected reader that bypasses both real caps).
+      if (!rawBrief.includes("\u{FFFD}")) {
+        const briefBytes = Buffer.byteLength(rawBrief, "utf8");
+        if (briefBytes > MAX_BRIEF_BYTES) {
+          throw new FleetError(
+            2,
+            "brief-too-large",
+            `brief is ${briefBytes} bytes; the cap is ${MAX_BRIEF_BYTES}`,
+            "trim the brief or split payload out of it",
+          );
+        }
       }
       try {
         briefJson = JSON.parse(rawBrief);

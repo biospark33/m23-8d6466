@@ -1151,6 +1151,10 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
     //
     // If a branded stamped type ever lands, this stops compiling — which is the
     // signal, not a regression. Read it as "the hole is closed", and delete it.
+    //
+    // KNOWN DEFECT: untyped serializeManifest (no StampedManifest brand to
+    // demand). A green run here certifies the unstamped-serialize hole is open
+    // — it does not bless shipping without a stamp as supported.
     const loaded = loadManifest(manifestPath, 120_000, manifestDir);
     const unstamped = JSON.parse(serializeManifest(loaded)) as Record<string, unknown>;
     expect(unstamped.limitMicroUsd).toBeUndefined();
@@ -1170,6 +1174,10 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
     // lands, this line goes red BY DESIGN and gets deleted — rather than the
     // raise slipping in unobserved. What is asserted is the hazard, not that
     // raising is correct: it is not.
+    //
+    // KNOWN DEFECT: unguarded last-wins re-stamp (no monotonic ceiling check).
+    // A green run here certifies the ceiling raise is still possible — it does
+    // not bless double-stamping as supported.
     const loaded = loadManifest(manifestPath, 120_000, manifestDir);
     const once = stampManifestLimit(loaded, 500_000);
     const twice = stampManifestLimit(once, 9_000_000);
@@ -1261,10 +1269,9 @@ describe("repoUrl/repoSlug cross-check", () => {
     });
   });
 
-  test("the host is deliberately unconstrained — self-hosted forges stay legitimate", () => {
-    const url = "https://git.internal.example.com/owner/repo";
-    expect(BriefSchema.parse(validBrief({ repoUrl: url })).repoUrl).toBe(url);
-  });
+  // Host-unconstrained is asserted once, above the cross-check cases
+  // ("repoUrl cross-check does NOT constrain the host…") — a second identical
+  // case here was byte-for-byte the same assertion under another name.
 
   test("KNOWN DEFECT: a repository literally NAMED `repo.git` is falsely refused", () => {
     // SOURCE BUG, pinned rather than accommodated. `repoSlugOfUrl` strips

@@ -6,7 +6,7 @@
  * `set`. Each is called out where it bites.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
@@ -19,6 +19,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import * as nodeFs from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { run as cliRun } from "../../scripts/run-record.ts";
@@ -639,6 +640,44 @@ describe("create tombstone", () => {
     expect(snapshot(id)).toEqual(before);
     expect(store.get(id).createdAt).toBe(first.createdAt);
   });
+
+  test("a competitor that clears the tombstone first leaves create free to win the retry (ENOENT take)", () => {
+    // Two creators can pass the aged-zero-byte check on the SAME tombstone; the
+    // removal is therefore a rename-claim (`<p>.tomb.<pid>.<hex>.tmp`) so it has
+    // exactly one winner. The loser's rename then finds NOTHING — the winner
+    // already took the corpse aside — and that ENOENT means the path is free:
+    // surfacing it as a stranger's errno wedged the id behind an error naming
+    // nothing, where the single-winner contract says this creator may now run
+    // its exclusive create. The injection below vanishes the tombstone between
+    // the aged check and the rename — precisely the window the competitor wins.
+    const id = "run-tomb-race";
+    const p = join(dir, `${id}.json`);
+    writeFileSync(p, "", { mode: 0o600 });
+    const past = new Date(Date.now() - WELL_PAST_GRACE_MS);
+    utimesSync(p, past, past);
+
+    const realRename = nodeFs.renameSync;
+    let fired = false;
+    const spy = spyOn(nodeFs, "renameSync").mockImplementation(((from: unknown, to: unknown) => {
+      if (from === p && String(to).includes(".tomb.")) {
+        fired = true;
+        spy.mockRestore(); // restore FIRST — the retried create below needs the real fs
+        rmSync(p, { force: true }); // the competitor won the take; the corpse is gone
+        return realRename(from as string, to as string); // → ENOENT
+      }
+      return realRename(from as string, to as string);
+    }) as typeof nodeFs.renameSync);
+    try {
+      const rec = store.create(id);
+      expect(rec.runId).toBe(id);
+      expect(fired).toBe(true); // the ENOENT arm really ran, not a vacuous pass
+      // A REAL record sits at the path — no empty file, no stranded .tmp.
+      expect(statSync(p).size).toBeGreaterThan(0);
+      expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1243,5 +1282,162 @@ describe("concurrent set", () => {
     chmodSync(lock, 0o600);
     expect(readFileSync(lock, "utf8")).toMatch(new RegExp(`^${process.pid}\\s`));
     rmSync(lock, { force: true });
+  }, 15_000);
+});
+
+// ---------------------------------------------------------------------------
+// Same-pid lock bodies — two JS threads share process.pid, so the pid alone
+// cannot tell a live sibling holder from a sibling that DIED holding its claim
+// ---------------------------------------------------------------------------
+
+describe("own-pid lock generations", () => {
+  /**
+   * The documented grace is OWN_LOCK_GRACE_MS (60s, not exported). Twice it, so
+   * a modest retune does not turn this into a false failure.
+   */
+  const WELL_PAST_LOCK_GRACE_MS = 120_000;
+
+  test("an own-pid body left by a dead sibling thread is stolen once it ages past the grace", () => {
+    // Our pid is alive forever, so `isAlive` can never prove this lock dead and
+    // no sweep touches locks — before the age bound, a sibling thread that died
+    // holding its claim wedged the id for the rest of the PROCESS lifetime: the
+    // record was unwritable and unclosable while its box billed. Age is the
+    // separator; past the grace, the steal must be as fast as the foreign-pid
+    // one above, not waited out.
+    const id = "ownpid-aged-run";
+    store.create(id);
+    const lock = store.lockPath(id);
+    writeFileSync(lock, `${process.pid} cafebabe\n`, { mode: 0o600 }); // our pid, a FOREIGN nonce
+    const past = new Date(Date.now() - WELL_PAST_LOCK_GRACE_MS);
+    utimesSync(lock, past, past);
+
+    const started = Date.now();
+    expect(store.set(id, { vmName: "box-8" }).vmName).toBe("box-8");
+    // Fast hand-off, expressed against the constant like the dead-pid case.
+    expect(Date.now() - started).toBeLessThan(LOCK_TIMEOUT_MS / 2);
+    // Released cleanly after the mutation — nothing held aside is stranded.
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  test("a YOUNG own-pid foreign body is still HELD — it times out the full window, never stolen", () => {
+    // Inside the grace the same shape is a live sibling's claim, and stealing
+    // one of those lets two setLocked read-modify-writes overlap and drop a
+    // field — INV-4's named failure mode. Fail-closed means the FULL window,
+    // not "a while": the same bound the unreadable-body case pins below-sibling.
+    const id = "ownpid-young-run";
+    store.create(id);
+    const lock = store.lockPath(id);
+    const foreignNonce = `${process.pid} deadbabe\n`;
+    writeFileSync(lock, foreignNonce, { mode: 0o600 }); // fresh mtime ⇒ inside the grace
+
+    const started = Date.now();
+    expect(() => store.set(id, { vmName: "box-9" })).toThrow(/timed out waiting for the run record lock/);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(LOCK_TIMEOUT_MS);
+    // Never taken aside: the sibling's generation is byte-for-byte where it was.
+    expect(readFileSync(lock, "utf8")).toBe(foreignNonce);
+    expect(store.get(id).vmName).toBeUndefined();
+    rmSync(lock, { force: true });
+  }, 15_000);
+
+  test("re-entrancy outranks the grace: an AGED outer claim is still reported re-entrant, not stolen", () => {
+    // A long enclosing write CAN age past OWN_LOCK_GRACE_MS while an inner,
+    // seam-driven set() on the same record waits behind it. Ordering matters:
+    // judged by age alone, the inner call would take the outer claim aside
+    // mid-write; the per-thread heldLocks check fires FIRST, so the timeout
+    // names the real deadlock instead of reporting contention with a phantom
+    // sibling writer.
+    const id = "reentrant-aged-run";
+    const lock = new RunRecordStore({ dir }).lockPath(id);
+    let innerErr: Error | undefined;
+    const outer = new RunRecordStore({
+      dir,
+      beforeRename: () => {
+        // Backdate the OUTER claim past the grace — without the ordering, the
+        // aged body below reads exactly like a dead sibling's leftover.
+        const past = new Date(Date.now() - WELL_PAST_LOCK_GRACE_MS);
+        utimesSync(lock, past, past);
+        try {
+          store.set(id, { vmName: "inner" });
+        } catch (e) {
+          innerErr = e as Error;
+        }
+        throw new Error("injected"); // abort the enclosing write, byte-identical
+      },
+    });
+    outer.create(id);
+    expect(() => outer.set(id, { vmName: "outer" })).toThrow("injected");
+    expect(innerErr).toBeDefined();
+    expect(innerErr?.message).toMatch(/timed out waiting for the run record lock/);
+    expect(innerErr?.message).toContain("re-entrant record write");
+    // The enclosing write released its own claim in the finally — no wedge.
+    expect(existsSync(lock)).toBe(false);
+  }, 20_000);
+
+  test("putBack losing to a competitor parks the taken body as a .orphan. sibling and says so", () => {
+    // The EEXIST half of put-back used to DELETE the held-aside bytes — but
+    // EEXIST proves only that the PATH carries a newer link, nothing about whose
+    // bytes sit at `claimed`. Those bytes can be a live holder's generation, and
+    // unlinking them unlocks a holder still inside its fn(): the lost update,
+    // entered through the park door. Now they are parked under a unique orphan
+    // name and named on stderr instead.
+    const id = "orphan-park-run";
+    store.create(id);
+    const lock = store.lockPath(id);
+    const corpse = `${DEAD_PID} aaaa1111\n`; // what the stealer JUDGES stale...
+    const takenAside = `${process.ppid} cafebabe\n`; // ...and what it actually TAKES
+    const competitor = `${process.ppid} deadbabe\n`; // ...and what reclaims the path
+    let swapped = false;
+    let injected = false;
+    const s = new RunRecordStore({
+      dir,
+      beforeStealTake: () => {
+        if (swapped) return;
+        swapped = true;
+        // The corpse's bytes change between the judgement read and the take —
+        // the take then holds aside a generation that matches NO judgement.
+        writeFileSync(lock, takenAside, { mode: 0o600 });
+      },
+      afterLockTake: () => {
+        if (injected || !swapped) return;
+        injected = true;
+        // A competing writer claims the now-empty path while the take is held:
+        // exactly the window put-back races.
+        writeFileSync(lock, competitor, { mode: 0o600 });
+      },
+    });
+
+    const notes: string[] = [];
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let err: Error | undefined;
+    try {
+      writeFileSync(lock, corpse, { mode: 0o600 });
+      try {
+        s.set(id, { vmName: "box-orphan" });
+      } catch (e) {
+        err = e as Error;
+      }
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    // Fail-closed: the reclaiming claim is live, so the write waits it out.
+    expect(err?.message).toMatch(/timed out waiting for the run record lock/);
+    expect(err?.message).toContain("held by a live owner");
+    // The taken-aside generation was NOT deleted: it sits under a unique
+    // `.orphan.` sibling carrying its original bytes.
+    const orphans = readdirSync(dir).filter((f) => f.includes(".orphan.") && f.endsWith(".tmp"));
+    expect(orphans).toHaveLength(1);
+    const orphan = orphans[0]!;
+    expect(readFileSync(join(dir, orphan), "utf8")).toBe(takenAside);
+    // …and the path serves the COMPETITOR's claim, not the parked one.
+    expect(readFileSync(lock, "utf8")).toBe(competitor);
+    // The park is operator-visible: silent stranding was the other failure mode.
+    expect(notes.join("")).toContain("parked an unrestorable held-aside lock body at");
+    expect(notes.join("")).toContain(orphan);
+    rmSync(lock, { force: true });
+    rmSync(join(dir, orphan), { force: true });
   }, 15_000);
 });

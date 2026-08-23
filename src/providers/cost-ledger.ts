@@ -1089,15 +1089,27 @@ export class CostLedger {
    * a live box — that is the retirement path for a failed dispatch too.
    *
    * The second retirement, and the reason "actual spend" is not a wedge: a run
-   * whose record is CLOSED retires too. Every row still in the loop is by
-   * construction a run that has reported no positive spend, and a closed record
-   * means the box is gone and the key revoked — the exposure the reservation
-   * represents is over, and nothing else will ever come to retire it (a
-   * zero-length lifetime prices box-hours at 0 µ$, which is another priced
-   * zero). Without this, a run that genuinely cost nothing would hold its
-   * ceiling against the issue forever, and `gate_admissions_no_delete` leaves no
-   * manual exit. This is strictly more conservative than retiring on any priced
-   * row: it fires later, and only for runs that spent nothing.
+   * whose record is CLOSED retires too — once the close is older than the
+   * grace cutoff. Every row still in the loop is by construction a run that
+   * has reported no positive spend, and a closed record means the box is gone
+   * and the key revoked — the exposure the reservation represents is over, and
+   * nothing else will ever come to retire it (a zero-length lifetime prices
+   * box-hours at 0 µ$, which is another priced zero). Without this, a run that
+   * genuinely cost nothing would hold its ceiling against the issue forever,
+   * and `gate_admissions_no_delete` leaves no manual exit. This is strictly
+   * more conservative than retiring on any priced row: it fires later, and
+   * only for runs that spent nothing.
+   *
+   * The "older than the grace cutoff" qualifier is the close→price race guard:
+   * teardown closes the record FIRST and writes the priced `box_hours` row
+   * moments later (same step, or later through the crash-recovery re-run).
+   * Retiring on the bare close freed headroom that the imminent charge then
+   * consumed past cap — box hours being the one term no key bounds. So a
+   * FRESHLY-closed record keeps counting until its close passes the same
+   * cutoff the orphan expiry uses, by which point either the row landed or
+   * teardown's retry path has surfaced the failure loudly. An unparseable
+   * closed_at retires as before: holding it would be a wedge with no exit,
+   * because the record resolves cleanly and the orphan expiry never fires.
    *
    * The one expiry: an admission older than `ADMISSION_GRACE_MS +
    * ADMISSION_SKEW_MARGIN_MS` whose run record does not resolve through
@@ -1349,12 +1361,27 @@ export class CostLedger {
           continue;
         }
         if (!young && record === undefined) continue;
-        // Closed record ⇒ retired. Every row here is a run that has reported no
-        // positive spend, so without this a run that genuinely cost nothing
-        // holds its ceiling against the issue forever and INV-COST-1 leaves no
-        // manual exit. A closed record means the box is destroyed and the key
-        // revoked: there is no unspent exposure left to reserve against.
-        if (record?.closedAt !== undefined) continue;
+        // Closed record ⇒ retired — once the close is older than `graceCutoff`.
+        // Every row here is a run that has reported no positive spend, so
+        // without this a run that genuinely cost nothing holds its ceiling
+        // against the issue forever and INV-COST-1 leaves no manual exit. A
+        // closed record means the box is destroyed and the key revoked: there
+        // is no unspent exposure left to reserve against.
+        //
+        // The cutoff qualifier is the close→price race guard: teardown closes
+        // the record first and lands the priced box_hours row moments later
+        // (same step, or via the crash-recovery re-run), and retiring inside
+        // that window freed headroom the imminent charge then consumed past
+        // cap. A young close keeps counting; an unparseable closed_at retires
+        // as before, because holding it would wedge with no expiry (the record
+        // resolves, so the orphan guard never fires).
+        const closedAtMs = record?.closedAt === undefined ? Number.NaN : Date.parse(record.closedAt);
+        if (
+          record?.closedAt !== undefined &&
+          (!Number.isFinite(closedAtMs) || closedAtMs <= graceCutoff)
+        ) {
+          continue;
+        }
         reservedMicroUsd += row.ceiling;
         // Overflow guard: sum of reservation ceilings can exceed MAX_SAFE_INTEGER
         if (reservedMicroUsd > Number.MAX_SAFE_INTEGER) {
@@ -1489,6 +1516,22 @@ export class CostLedger {
         admittedCeilingMicroUsd: ceiling,
       };
     });
+    // A throwing log sink (a custom setLogSink that raises) must not turn an
+    // outcome the ledger has ALREADY COMMITTED into a thrown error: past this
+    // point every mutation is durable and the caller needs the decision, not
+    // a retry. Swallow with a stderr note naming the operation; never echo the
+    // payload itself — stderr is a second channel and these lines are not
+    // redacted. The default sink already drops on EPIPE, so only a raising
+    // custom sink can reach the catch.
+    const emit = (line: Parameters<typeof log>[0]): void => {
+      try {
+        log(line);
+      } catch (e) {
+        process.stderr.write(
+          `cost-ledger: log sink threw for ${line.operation} (${(e as Error).message}) — the ledger outcome stands\n`,
+        );
+      }
+    };
     let decision: AdmissionDecision;
     try {
       decision = decide.immediate();
@@ -1497,10 +1540,10 @@ export class CostLedger {
     } finally {
       // finally, not the success path: a transaction that threw after expiring a
       // reservation still owes the operator that line.
-      for (const line of pendingLogs) log(line);
+      for (const line of pendingLogs) emit(line);
     }
     const durationMs = Date.now() - started;
-    log({
+    emit({
       requestId: input.requestId,
       operation: "cost-ledger.gate",
       agentId: null,

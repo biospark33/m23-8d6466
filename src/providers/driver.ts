@@ -17,6 +17,7 @@
 import { rmSync } from "node:fs";
 import type { RunRecord, RunRecordStore } from "./run-record.ts";
 import { assertExistingRunId, assertValidRunId } from "./run-record.ts";
+import { redactSecrets } from "./step-log.ts";
 import { checkHeadroom, HeadroomRefusedError, loadQuotaLimits } from "./quota.ts";
 import { TimeoutError, withTimeout } from "./timeout.ts";
 
@@ -300,8 +301,32 @@ export function unverifiedVmListingRefusal(
 ): ProvisionRefusedError {
   return new ProvisionRefusedError(
     "reap-vms-unverified",
-    `refusing to reap: driver ${driverName} could not account for ${skipped.length} listing entr${skipped.length === 1 ? "y" : "ies"} (${skipped.join("; ")}), so the box population cannot be proven complete`,
+    // Redacted at the sink: `skipped` entries are provider-derived free text
+    // (exedev rides raw row fields like `https_url`, which can embed a
+    // `ghs_…` token), and this message reaches the CLI and the log lines.
+    `refusing to reap: driver ${driverName} could not account for ${skipped.length} listing entr${skipped.length === 1 ? "y" : "ies"} (${redactSecrets(skipped.join("; "))}), so the box population cannot be proven complete`,
     "find each entry above from the identifying details it carries (for exedev: `ssh exe.dev ls --json`, match the row), then destroy or repair it by hand and re-run — an entry the driver cannot name is a live box no verb can reach",
+  );
+}
+
+/**
+ * The refusal for unclaimed boxes that cannot PROVE they are ours.
+ *
+ * `reapRuns` used to `continue` past these silently: a grammar-valid box with
+ * no ownership tag was spared, and the caller saw only the (possibly empty)
+ * destroyed list — so unreaped spend was invisible at the exact moment a
+ * reaper ran. Sparing stays mandatory (never destroy on a guess), but it is no
+ * longer silent: the sweep refuses, naming every spared candidate, which is
+ * the same fail-closed shape as `unverifiedVmListingRefusal` above. The names
+ * are grammar-checked by construction (`isFactoryOwnedVm`'s name half is the
+ * strictest of them), so no redaction is needed here.
+ */
+export function unownedVmReapRefusal(driverName: string, spared: readonly string[]): ProvisionRefusedError {
+  const n = spared.length;
+  return new ProvisionRefusedError(
+    "reap-vms-unowned",
+    `refusing to reap: ${n} unclaimed box${n === 1 ? "" : "es"} cannot prove factory ownership (${spared.join(", ")}) — spared, not destroyed, but leaving them unsurfaced hid unreaped spend`,
+    "inspect each box above (fleet status / provider ls), tear down or tag the ones that are ours, then re-run — a box without the ownership tag is never destroyed automatically",
   );
 }
 
@@ -352,9 +377,13 @@ async function provisionStep<T>(
  * may still write. Every other failure (EIO, ENOSPC, a schema rejection) is
  * raised from inside the lock, where this process is the only writer.
  *
- * The lock timeout is a bare `Error` with no `code`, so the message is the only
+ * The lock timeout is a bare `Error` with no `code` (verified at the throw
+ * site: `withLock` raises plain `new Error(...)`, so `code` is undefined and
+ * `name` is the default `"Error"`), which leaves the message as the only
  * discriminator reachable from here — run-record.ts's own tests already pin
- * that string, which is what makes it usable at all.
+ * that string, which is what makes it usable at all. If upstream rewords the
+ * message this predicate silently stops matching and the rollback below takes
+ * the destructive arm; keep the two in sync until then.
  * ponytail: message match; replace with `e.code === "lock-timeout"` the day
  * run-record.ts types that refusal.
  */
@@ -435,14 +464,16 @@ export async function provisionAdmittedRun(
     //    guard never expires the admission (it expires only an admission whose
     //    run record does not resolve at all);
     //  - it carries no `extensions.budget`, so teardown's
-    //    `ingestBoxHoursIfAttributed` writes no priced row — and a priced
-    //    `cost_event` is the ONLY thing that retires a reservation.
+    //    `ingestBoxHoursIfAttributed` writes no priced row — so nothing prices
+    //    this run. (The ledger's closedAt arm retires a CLOSED record's stale
+    //    reservation too, but only once the close outlives its grace cutoff —
+    //    see cost-ledger.ts.)
     //
-    // The issue's cap was therefore permanently reduced with no automated route
-    // back. So the record is REMOVED here, restoring exactly the state the
-    // orphan guard does handle (store.create failed ⇒ no record ⇒ the
-    // reservation stops counting after ADMISSION_GRACE_MS). Closing it instead
-    // does not work — a closed record resolves just as well as an open one.
+    // So the record is REMOVED here rather than closed. Removal restores
+    // exactly the state the orphan guard already handles (store.create failed
+    // ⇒ no record ⇒ the reservation stops counting after ADMISSION_GRACE_MS),
+    // it takes effect immediately instead of after the cutoff, and it frees
+    // the id — this run never happened.
     //
     // Removal is safe only when the write failed with the lock in OUR hands:
     // nothing billable exists yet (`driver.create` is below) and no other
@@ -502,14 +533,15 @@ export async function provisionAdmittedRun(
   // This used to close it, on the reasoning that an open record "claims" a box
   // the reaper would otherwise reclaim. Two things make that the wrong trade:
   //
-  //  - A closed record does not retire the admission. The ledger's orphan guard
-  //    expires a reservation only when the record does not RESOLVE (readRunRecord
-  //    → undefined, i.e. store.create itself failed); a closed record resolves
-  //    fine, so the reservation kept counting against the issue's cap forever.
-  //    Retirement needs a priced `cost_event`, which only teardown writes, from
-  //    the `extensions.budget` written above — and the reaper routes an aged
-  //    OPEN record through `teardownSandbox`, while a closed record with no box
-  //    it skips entirely (`closed ⇒ nothing to claim`).
+  //  - The reservation behind this admission retires on a priced `cost_event`
+  //    — which only teardown writes, from the `extensions.budget` above — or,
+  //    since the ledger's closedAt arm, on a CLOSED record whose close outlives
+  //    the grace cutoff. Closing would therefore free the cap EVENTUALLY, but
+  //    it is still the wrong shape for a FAILED create: a freshly-closed,
+  //    budgetless record keeps counting until the cutoff passes, and the reaper
+  //    routes an aged OPEN record through `teardownSandbox` (which harvests,
+  //    destroys AND prices), while a closed record's live box falls to the bare
+  //    leaked-vm destroy with no box-hours row.
   //  - If create DID stand a box up before throwing, an open record keeps that
   //    box reachable by run id: the aged-record sweep tears it down through the
   //    same path, which harvests, destroys and prices it. Closing sent it down
@@ -876,13 +908,14 @@ export async function reapRuns(driver: ProviderDriver, store: RunRecordStore): P
   // either already claimed or has had a full record-write cycle to become
   // claimed by the time we check it.
   //
-  // The claim set is only usable if it is COMPLETE. `store.list()` logs-and-skips
-  // a `.json` whose stem fails the id grammar (INV-4's one exception, so that one
-  // bad filename cannot take `fleet status` and the record sweep down with it) —
-  // but a skipped file can hold an OPEN record naming a live box, and a box
-  // missing from `claimed` is a box this function destroys. The old throw was
-  // fail-safe here; the skip is fail-OPEN, so the completeness has to be proven
-  // on this side.
+  // The claim set is only usable if it is COMPLETE. The record store REFUSES a
+  // partial listing: plain `store.list()` throws naming any `.json` it could
+  // not read as a record (run-record.ts), and this function reads
+  // `listWithAnomalies()` directly so it can raise the same refusal itself
+  // (`reap-records-unverified` below) before anything is destroyed. A skipped
+  // file can hold an OPEN record naming a live box, and a box missing from
+  // `claimed` is a box this function would otherwise treat as unowned spend —
+  // so a partial record listing stops the sweep; it never narrows the claim set.
   //
   // `listWithAnomalies`, not `list`, on BOTH sides: the skipped names are the
   // whole point here, and they are what the refusals name for the operator.
@@ -914,16 +947,28 @@ export async function reapRuns(driver: ProviderDriver, store: RunRecordStore): P
     claimed.add(rec.runId);
     if (rec.vmName !== undefined) claimed.add(rec.vmName);
   }
+  // Unclaimed is not the same as OURS, and this listing is account-wide on
+  // exedev (`driverListing(driver)` passes no name filter), so a stranger's
+  // box in the same account arrives here unclaimed by construction —
+  // destroying it is the worst outcome anywhere in this subsystem, and
+  // unrecoverable. The ownership test is the gate, and it is the SAME
+  // predicate the DF2.6 sweep classifies on: a box that cannot prove it is
+  // ours is `foreign` there and is not an orphan here.
+  //
+  // But sparing silently was its own failure: a grammar-valid box with no tag
+  // (created before the tag existed, or a fake box that crashed between mkdir
+  // and its metadata write) was skipped without a trace in the return value,
+  // so unreaped spend was invisible at the moment the reaper ran — the same
+  // fail-open shape this function already refuses on for driver-side and
+  // record-side anomalies. Partition BEFORE destroying anything, and refuse
+  // naming every unproven candidate; only provably-owned boxes are destroyed.
+  const unproven = vms.filter((vm) => !claimed.has(vm.name) && !isFactoryOwnedVm(vm));
+  if (unproven.length > 0) throw unownedVmReapRefusal(driver.name, unproven.map((vm) => vm.name));
   const destroyed: string[] = [];
   for (const vm of vms) {
     if (claimed.has(vm.name)) continue;
-    // Unclaimed is not the same as OURS, and this listing is account-wide on
-    // exedev (`driverListing(driver)` passes no name filter), so a stranger's
-    // box in the same account arrives here unclaimed by construction —
-    // destroying it is the worst outcome anywhere in this subsystem, and
-    // unrecoverable. The ownership test is the gate, and it is the SAME
-    // predicate the DF2.6 sweep classifies on: a box that cannot prove it is
-    // ours is `foreign` there and is not an orphan here.
+    // Everything unproven was refused above, so anything still standing here
+    // proves ownership by the shared predicate.
     if (!isFactoryOwnedVm(vm)) continue;
     await driver.destroy(vm.name);
     destroyed.push(vm.name);

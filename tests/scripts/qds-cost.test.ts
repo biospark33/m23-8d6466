@@ -493,11 +493,20 @@ describe("qds-cost CLI", () => {
   // report read another, and the two disagreements are opposite and both
   // silent — "no cost ledger at …" for money that exists, or a confident zero.
   describe("ledger resolution through costLedgerOpts", () => {
+    let prevLedgerFile: string | undefined;
     beforeEach(() => {
       // These cases are ABOUT the derived path, so the env tier that would
-      // short-circuit it has to be out of the way.
+      // short-circuit it has to be out of the way. Saved and RESTORED, not just
+      // deleted: an unrestored value follows this process into every later
+      // suite in the same run.
+      prevLedgerFile = process.env.QDS_COST_LEDGER_FILE;
       // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
       delete process.env.QDS_COST_LEDGER_FILE;
+    });
+    afterEach(() => {
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      if (prevLedgerFile === undefined) delete process.env.QDS_COST_LEDGER_FILE;
+      else process.env.QDS_COST_LEDGER_FILE = prevLedgerFile;
     });
 
     /** Spend on qds/demo#42, written straight into `ledgerPath`. */

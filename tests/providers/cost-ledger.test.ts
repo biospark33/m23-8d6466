@@ -848,6 +848,83 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     expect(afterClose.admittedCeilingMicroUsd).toBe(cap);
   });
 
+  test("a FRESHLY-closed record keeps counting until its close passes the grace cutoff", () => {
+    // The close→price race guard, in the over-reserve direction. Teardown closes
+    // the record FIRST and writes the priced box_hours row moments later;
+    // retiring on the bare close freed headroom inside exactly that window and
+    // the imminent charge then landed past cap — box hours being the one term no
+    // key bounds. So a young close must keep the ceiling counted (the opposite
+    // trade of the fixed-past-timestamp test above, which is what makes this one
+    // runnable without a faked clock).
+    seedRecord("run-a1");
+    const first = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 50_000_000);
+    if (!first.admitted) throw new Error("expected the first dispatch to be admitted");
+    // A priced ZERO row is present too — neither retirement arm may fire.
+    ledger.ingestCostEvent(mkEvent({ costUsd: 0 }), mkCtx());
+    seedRecord("run-a1", { closedAt: new Date().toISOString() }); // teardown just closed it
+    const next = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a2", requestId: "req-2" }, cap, 50_000_000);
+    if (next.admitted) throw new Error("expected the freshly-closed reservation to still count");
+    expect(next.reservedMicroUsd).toBe(cap);
+    expect(next.spentMicroUsd).toBe(0);
+  });
+
+  test("close-retirement fires once the close is past the cutoff, not merely 'a while' after it", () => {
+    // The boundary arm of the test above, on a LIVE timestamp rather than a
+    // fixed past date: the cutoff is ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS
+    // before now, and a close just past it retires even though its admission row
+    // is brand new — the cutoff qualifier rides closedAt alone, not decided_at.
+    seedRecord("run-a1");
+    const first = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 50_000_000);
+    if (!first.admitted) throw new Error("expected the first dispatch to be admitted");
+    ledger.ingestCostEvent(mkEvent({ costUsd: 0 }), mkCtx());
+    const cutoff = expiryMs + 1_000; // just past the grace window + skew margin
+    seedRecord("run-a1", { closedAt: new Date(Date.now() - cutoff).toISOString() });
+    const next = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a2", requestId: "req-2" }, cap, 50_000_000);
+    if (!next.admitted) throw new Error("expected the aged close's reservation to have retired");
+    expect(next.reservedMicroUsd).toBe(0);
+  });
+
+  test("a THROWING log sink does not turn an already-committed admission into an error (S13)", () => {
+    // The decision is durable the moment `decide.immediate()` returns; a custom
+    // setLogSink that raises used to surface out of admitIssue AFTER that commit,
+    // so the gate retried a dispatch the ledger had already reserved for. Swallow
+    // with a stderr note naming the operation instead — never the payload, which
+    // is not redacted on stderr.
+    seedRecord("run-a1");
+    let threw = false; // flipped by the first sink call, so a silent skip cannot pass
+    let notes = "";
+    const restore = setLogSink(() => {
+      threw = true;
+      throw new Error("sink exploded");
+    });
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      notes += String(chunk);
+      return true;
+    }) as typeof process.stderr.write;
+    let decision: ReturnType<CostLedger["admitIssue"]>;
+    try {
+      decision = ledger.admitIssue(
+        { repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" },
+        cap,
+        50_000_000,
+      );
+    } finally {
+      restore();
+      process.stderr.write = origWrite;
+    }
+    expect(threw).toBe(true); // the sink really ran and really raised
+    if (!decision.admitted) throw new Error("expected the committed admission to be returned");
+    expect(decision.admittedCeilingMicroUsd).toBe(cap);
+    // And it really committed: the reservation row exists behind the returned
+    // ceiling, not just in the value the caller happens to hold.
+    const db = rawDb();
+    expect(rowCount(db, "gate_admissions")).toBe(1);
+    db.close();
+    expect(notes).toContain("log sink threw for cost-ledger.gate");
+    expect(notes).toContain("the ledger outcome stands");
+  });
+
   test("two admission rows for ONE run reserve its ceiling ONCE, not twice", () => {
     // gate_admissions' PRIMARY KEY is (request_id, run_id), so a dispatch
     // retried under a FRESH request id for the same run inserts a SECOND row.
