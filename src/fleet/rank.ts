@@ -1,0 +1,205 @@
+/**
+ * DF3.2 rank (AC7) — score a completed best-of-N fan-out. ADVISORY: ranking
+ * authorizes NOTHING; the diff is the artifact and a human closes the loop
+ * (fan_out_n.md:136-140). Reads/writes ONLY the fan-out record (via injected
+ * seams) plus the injected step-output source.
+ *
+ * score = testPassRate*0.6 + uniqueFileCoverage*0.4 (weights sum to 1.0 — a
+ * deliberate round choice, NOT renormalization of P1.4's 0.5/0.3).
+ *
+ * The fan-out record is reached through `recordReader`/`recordWriter`, NOT
+ * through FanoutRecordStore directly: the store lands in fanout.ts under wave
+ * sequencing C3, and rank must compile standalone. The CLI wires the store's
+ * get/mutate into these seams; until then tests inject fakes.
+ */
+import { FleetError } from "./dispatch.ts";
+import { redactSecrets } from "../providers/step-log.ts";
+
+/** Weight of `testPassRate` in the composite score. */
+export const TEST_PASS_WEIGHT = 0.6;
+/** Weight of `uniqueFileCoverage` in the composite score. */
+export const FILE_COVERAGE_WEIGHT = 0.4;
+/** Top-two delta at or below which `tie` is true — INCLUSIVE boundary. */
+export const TIE_DELTA = 0.1;
+
+/**
+ * DF1.6 producer contract: counts are `passed`/`failed` (no `testsPassed`
+ * exists anywhere), and `testsExecuted` is a boolean GUARD, never a divisor.
+ */
+export interface ArmStepOutput {
+  testsExecuted?: boolean;
+  testResults?: { passed: number; failed: number };
+  changedFiles?: string[];
+}
+
+export interface RankedArm {
+  arm: number;
+  runId: string;
+  /** null ⇒ no step output for this run; the arm stays LISTED, never dropped. */
+  score: number | null;
+  /** EXACTLY these two keys — P1.4's summaryQuality was dropped (AC7). */
+  breakdown: { testPassRate: number; uniqueFileCoverage: number };
+}
+
+export interface RankResult {
+  fanoutId: string;
+  scores: RankedArm[];
+  tie: boolean;
+  rationale: string;
+  /** Sub-timing for the observability line's nested `timings` object (D13). */
+  timings: { rankMs: number };
+}
+
+/**
+ * Structural view of the fields rank touches on a FanoutRecord — the minimal
+ * shape that keeps this module decoupled from fanout.ts (ruling C3).
+ */
+export interface FanoutRecordView {
+  winner?: number | null;
+  rankedAt?: string | null;
+  closedAt?: string | null;
+  arms: readonly { arm: number; runId: string }[];
+}
+
+/** Mutate-and-persist under the store's per-record lock; returns the next state. */
+export type FanoutRecordMutator = (rec: FanoutRecordView) => FanoutRecordView;
+
+export interface RankDeps {
+  /** Read the fan-out record; null ⇒ unknown id → FleetError exitCode 4. */
+  recordReader: (fanoutId: string) => FanoutRecordView | null;
+  /** Persist a mutation — rank uses it ONLY to stamp `rankedAt`. */
+  recordWriter: (
+    fanoutId: string,
+    mutator: FanoutRecordMutator,
+  ) => FanoutRecordView;
+  /**
+   * Step-output source, REQUIRED injection (OPEN-QUESTION-2 / ruling C2):
+   * returning null lists that arm with score:null. An accessor that nulls
+   * every run (e.g. `--steps-json` absent) leaves every arm unscored — not an
+   * error; rank stays structurally useful.
+   */
+  stepOutputFor: (runId: string) => ArmStepOutput | null;
+  /** performance.now seam (test); defaults to the host monotonic clock. */
+  monotonic?: () => number;
+}
+
+/**
+ * `(testsExecuted === true && testResults && passed+failed > 0)
+ *   ? passed/(passed+failed) : 0` — absent testResults and passed+failed===0
+ * both yield 0; the flag gates, it never divides.
+ */
+function testPassRate(out: ArmStepOutput): number {
+  if (out.testsExecuted !== true || !out.testResults) return 0;
+  const total = out.testResults.passed + out.testResults.failed;
+  return total > 0 ? out.testResults.passed / total : 0;
+}
+
+/** Normalized top-two delta ≤ TIE_DELTA (K6: toFixed(10) tames IEEE-754 drift). */
+function isTie(scores: RankedArm[]): boolean {
+  const [top, second] = scores;
+  if (!top || top.score === null) return false;
+  if (!second || second.score === null) return false;
+  return Number((top.score - second.score).toFixed(10)) <= TIE_DELTA;
+}
+
+function buildRationale(scores: RankedArm[], tie: boolean): string {
+  const top = scores[0];
+  const unscored = scores.filter((s) => s.score === null);
+  let rationale: string;
+  if (!top || top.score === null) {
+    rationale =
+      "no step-output source provided — every arm listed unscored; " +
+      "supply --steps-json to rank";
+  } else if (tie && scores[1]) {
+    const second = scores[1];
+    rationale =
+      `top arms ${top.arm} (run ${top.runId}) and ${second.arm} (run ${second.runId}) are within ${TIE_DELTA} of each other — tie flagged, NO automatic tie-break; human review resolves`;
+  } else {
+    rationale =
+      `top arm ${top.arm} (run ${top.runId}, score ${top.score}) leads by more than ${TIE_DELTA}`;
+  }
+  // Name the empty runs: a --steps-json key typo nulls an arm silently, and the
+  // operator needs to see WHICH runId came up empty.
+  if (unscored.length > 0 && unscored.length < scores.length) {
+    rationale += `; no step output for ${unscored.map((s) => `arm ${s.arm} (run ${s.runId})`).join(", ")}`;
+  }
+  return rationale;
+}
+
+/**
+ * Score one completed best-of-N fan-out: per-arm composite over the CROSS-ARM
+ * union denominator, FP-normalized inclusive tie window, rankedAt stamped
+ * through the injected writer. Emits `{scores[{arm,runId,score,breakdown}],
+ * tie, rationale}` — advisory only.
+ */
+export async function rank(fanoutId: string, deps: RankDeps): Promise<RankResult> {
+  const start = deps.monotonic?.() ?? performance.now();
+
+  const record = deps.recordReader(fanoutId);
+  if (!record) {
+    throw new FleetError(
+      4,
+      "fanout-not-found",
+      `no fan-out record found for ${redactSecrets(fanoutId)}`,
+      "Check the fanout-id (`fleet fanout` prints it; ids look like fan-YYYYMMDD-<6hex>) or list .sandbox/fanouts/.",
+    );
+  }
+
+  // Cross-arm union FIRST: every arm's changedFiles contributes to everyone's
+  // denominator, Set-deduped on both sides (AC7).
+  const outputs = record.arms.map((a) => ({
+    arm: a.arm,
+    runId: a.runId,
+    out: deps.stepOutputFor(a.runId),
+  }));
+  const union = new Set<string>();
+  for (const o of outputs) {
+    for (const f of o.out?.changedFiles ?? []) union.add(f);
+  }
+
+  let scores: RankedArm[] = [];
+  let tie = false;
+  let rationale: string;
+
+  if (record.arms.length === 0) {
+    rationale =
+      `fan-out ${fanoutId} has no ranked arms: every arm failed before minting a run id — nothing to rank`;
+  } else {
+    scores = outputs
+      .map(({ arm, runId, out }): RankedArm => {
+        if (!out) {
+          return {
+            arm,
+            runId,
+            score: null,
+            breakdown: { testPassRate: 0, uniqueFileCoverage: 0 },
+          };
+        }
+        const passRate = testPassRate(out);
+        const coverage =
+          union.size === 0 ? 0 : new Set(out.changedFiles ?? []).size / union.size;
+        return {
+          arm,
+          runId,
+          score: passRate * TEST_PASS_WEIGHT + coverage * FILE_COVERAGE_WEIGHT,
+          breakdown: { testPassRate: passRate, uniqueFileCoverage: coverage },
+        };
+      })
+      // Descending score, nulls last, stable by arm within equals.
+      .sort((a, b) =>
+        (b.score ?? -1) !== (a.score ?? -1)
+          ? (b.score ?? -1) - (a.score ?? -1)
+          : a.arm - b.arm,
+      );
+    tie = isTie(scores);
+    rationale = buildRationale(scores, tie);
+  }
+
+  deps.recordWriter(fanoutId, (rec) => ({
+    ...rec,
+    rankedAt: new Date().toISOString(),
+  }));
+
+  const rankMs = (deps.monotonic?.() ?? performance.now()) - start;
+  return { fanoutId, scores, tie, rationale: redactSecrets(rationale), timings: { rankMs } };
+}

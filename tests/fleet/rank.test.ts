@@ -1,0 +1,379 @@
+/**
+ * Rank tests (Story DF3.2 AC7): TDD — written before src/fleet/rank.ts existed.
+ *
+ * Coverage per spec D11/D14 + Correction K6:
+ * - score === testPassRate*0.6 + uniqueFileCoverage*0.4 to six decimals (three-arm fixture)
+ * - uniqueFileCoverage denominates over the CROSS-ARM union of changedFiles
+ * - breakdown carries EXACTLY {testPassRate, uniqueFileCoverage}; summaryQuality cannot
+ *   compile (type-level pin) and never appears at runtime
+ * - tie deltas: 0.05 → true, 0.2 → false, 0.1 boundary → true INCLUSIVE via the
+ *   FP-normalized comparator (K6: fixtures chosen so the RAW delta straddles 0.1 both ways)
+ * - guarded divisors: testsExecuted:false / absent testResults / passed+failed===0 → 0
+ * - empty union → coverage 0; arm without step output LISTED score:null, never dropped;
+ *   all-null source → every arm unscored + "no step-output source provided" rationale (C2);
+ *   record with no arms → empty scores + failure rationale
+ * - unknown fanout-id → FleetError exitCode 4
+ * - rankedAt stamped through the injected writer exactly once
+ * - rationale passes the single redactSecrets chokepoint before returning
+ * - timings.rankMs reported from the injected monotonic clock
+ */
+import { describe, expect, test } from "bun:test";
+
+import { FleetError } from "../../src/fleet/dispatch.ts";
+import {
+  type ArmStepOutput,
+  type FanoutRecordView,
+  type RankedArm,
+  type RankDeps,
+  rank,
+} from "../../src/fleet/rank.ts";
+
+/** Step-output fixture row: everything `stepOutputFor` may hand back. */
+interface StepFixture extends ArmStepOutput {}
+
+interface HarnessOpts {
+  arms?: { arm: number; runId: string }[];
+  /** runId → step output; runIds absent from the map yield null (no step output). */
+  steps?: Record<string, StepFixture>;
+}
+
+/**
+ * Local fake fan-out record plumbing (C3: wave-1 fakes stay local to this file).
+ * The CLI wires FanoutRecordStore.get/mutate into these seams after merge.
+ */
+function harness(opts: HarnessOpts = {}) {
+  const record: FanoutRecordView = {
+    winner: null,
+    rankedAt: null,
+    closedAt: null,
+    arms: opts.arms ?? [],
+  };
+  const writes: { fanoutId: string; next: FanoutRecordView }[] = [];
+  let readCalls = 0;
+  const deps: RankDeps = {
+    recordReader: () => {
+      readCalls += 1;
+      return record;
+    },
+    recordWriter: (fanoutId, mutator) => {
+      const next = mutator(record);
+      writes.push({ fanoutId, next });
+      return next;
+    },
+    stepOutputFor: (runId) => opts.steps?.[runId] ?? null,
+  };
+  return { deps, record, writes, reads: () => readCalls };
+}
+
+const FANOUT_ID = "fan-20260823-abc123";
+
+describe("rank (DF3.2 AC7)", () => {
+  test("scores three arms as testPassRate*0.6 + uniqueFileCoverage*0.4 to six decimals", async () => {
+    const h = harness({
+      arms: [
+        { arm: 0, runId: "r0" },
+        { arm: 1, runId: "r1" },
+        { arm: 2, runId: "r2" },
+      ],
+      steps: {
+        // tpr 0.7, coverage 3/4 → 0.42 + 0.30 = 0.72
+        r0: { testsExecuted: true, testResults: { passed: 7, failed: 3 }, changedFiles: ["a.ts", "b.ts", "c.ts"] },
+        // tpr 0.5, coverage 3/4 → 0.30 + 0.30 = 0.60
+        r1: { testsExecuted: true, testResults: { passed: 1, failed: 1 }, changedFiles: ["b.ts", "c.ts", "d.ts"] },
+        // tpr 0.25, coverage 0/4 → 0.15 + 0 = 0.15
+        r2: { testsExecuted: true, testResults: { passed: 2, failed: 6 }, changedFiles: [] },
+      },
+    });
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    expect(res.fanoutId).toBe(FANOUT_ID);
+    // Descending by score, stable by arm.
+    expect(res.scores.map((s) => s.arm)).toEqual([0, 1, 2]);
+    expect(res.scores[0]?.score).toBeCloseTo(0.72, 6);
+    expect(res.scores[1]?.score).toBeCloseTo(0.6, 6);
+    expect(res.scores[2]?.score).toBeCloseTo(0.15, 6);
+    expect(res.scores[0]?.breakdown).toEqual({ testPassRate: 0.7, uniqueFileCoverage: 0.75 });
+    // 0.72 − 0.60 clears the 0.1 window — no accidental tie in the happy path.
+    expect(res.tie).toBe(false);
+  });
+
+  test("denominates uniqueFileCoverage over the cross-arm union of changedFiles", async () => {
+    const h = harness({
+      arms: [
+        { arm: 0, runId: "sub" },
+        { arm: 1, runId: "sup" },
+      ],
+      steps: {
+        sub: { testsExecuted: true, testResults: { passed: 1, failed: 0 }, changedFiles: ["f1.ts"] },
+        sup: {
+          testsExecuted: true,
+          testResults: { passed: 1, failed: 0 },
+          changedFiles: ["f1.ts", "f2.ts", "f3.ts"],
+        },
+      },
+    });
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    const byArm = new Map(res.scores.map((s) => [s.arm, s]));
+    // Union = {f1,f2,f3} (size 3): the subset arm covers 1/3 of the SURFACE any arm touched —
+    // a per-arm denominator would have scored it a full 1.
+    expect(byArm.get(0)?.breakdown.uniqueFileCoverage).toBeCloseTo(1 / 3, 10);
+    expect(byArm.get(0)?.breakdown.uniqueFileCoverage).not.toBe(1);
+    expect(byArm.get(1)?.breakdown.uniqueFileCoverage).toBe(1);
+    // Duplicate entries within one arm's list count once (Set-dedup both sides).
+    const dedup = harness({
+      arms: [{ arm: 0, runId: "d" }],
+      steps: {
+        d: {
+          testsExecuted: true,
+          testResults: { passed: 1, failed: 0 },
+          changedFiles: ["f1.ts", "f1.ts"],
+        },
+      },
+    });
+    const dedupRes = await rank(FANOUT_ID, dedup.deps);
+    expect(dedupRes.scores[0]?.breakdown.uniqueFileCoverage).toBe(1);
+  });
+
+  test("carries exactly two breakdown keys — summaryQuality cannot compile and never appears", async () => {
+    // Type-level pin: excess-property checking must reject P1.4's dropped third term.
+    // Enforcement lives in `bunx tsc --noEmit`; the literal below fails compilation
+    // if the breakdown type ever widens to admit summaryQuality again.
+    const _mustNotCompile: RankedArm["breakdown"] = {
+      testPassRate: 0,
+      uniqueFileCoverage: 0,
+      // @ts-expect-error summaryQuality was dropped from AC7 — re-adding it MUST fail typecheck
+      summaryQuality: 0,
+    };
+    void _mustNotCompile;
+
+    const h = harness({
+      arms: [{ arm: 0, runId: "r0" }],
+      steps: {
+        r0: { testsExecuted: true, testResults: { passed: 1, failed: 0 }, changedFiles: ["f.ts"] },
+      },
+    });
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    expect(Object.keys(res.scores[0]?.breakdown ?? {}).sort()).toEqual([
+      "testPassRate",
+      "uniqueFileCoverage",
+    ]);
+  });
+
+  test("tie: delta 0.05 flags a tie", async () => {
+    // All arms share one file ⇒ ufc = 1 everywhere ⇒ deltas ride testPassRate alone.
+    const h = harness({
+      arms: [
+        { arm: 0, runId: "top" },
+        { arm: 1, runId: "near" },
+      ],
+      steps: {
+        top: { testsExecuted: true, testResults: { passed: 12, failed: 0 }, changedFiles: ["shared.ts"] },
+        near: { testsExecuted: true, testResults: { passed: 11, failed: 1 }, changedFiles: ["shared.ts"] },
+      },
+    });
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    expect((res.scores[0]?.score ?? 0) - (res.scores[1]?.score ?? 0)).toBeCloseTo(0.05, 6);
+    expect(res.tie).toBe(true);
+  });
+
+  test("tie: delta 0.2 does not flag a tie", async () => {
+    const h = harness({
+      arms: [
+        { arm: 0, runId: "top" },
+        { arm: 1, runId: "far" },
+      ],
+      steps: {
+        top: { testsExecuted: true, testResults: { passed: 12, failed: 0 }, changedFiles: ["shared.ts"] },
+        far: { testsExecuted: true, testResults: { passed: 8, failed: 4 }, changedFiles: ["shared.ts"] },
+      },
+    });
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    expect((res.scores[0]?.score ?? 0) - (res.scores[1]?.score ?? 0)).toBeCloseTo(0.2, 6);
+    expect(res.tie).toBe(false);
+  });
+
+  test("tie: 0.1 boundary is INCLUSIVE — normalization rescues a raw delta ABOVE 0.1 (K6)", async () => {
+    // passed 2/3 vs passed 1/2: nominal score delta is exactly 0.1, but IEEE-754 renders
+    // the raw subtraction as 0.10000000000000009 — strictly GREATER than 0.1. An
+    // unnormalized `<= 0.1` comparator flips the DOD's boundary case to tie:false; the
+    // normalized Number(delta.toFixed(10)) lands on exactly 0.1 and must report tie:true.
+    const h = harness({
+      arms: [
+        { arm: 0, runId: "a23" },
+        { arm: 1, runId: "b12" },
+      ],
+      steps: {
+        a23: { testsExecuted: true, testResults: { passed: 2, failed: 1 }, changedFiles: ["shared.ts"] },
+        b12: { testsExecuted: true, testResults: { passed: 1, failed: 1 }, changedFiles: ["shared.ts"] },
+      },
+    });
+
+    const rawDelta =
+      ((await rank(FANOUT_ID, h.deps)).scores[0]?.score ?? 0) -
+      ((await rank(FANOUT_ID, h.deps)).scores[1]?.score ?? 0);
+    expect(rawDelta).toBeGreaterThan(0.1); // the trap exists — this assertion IS the K6 proof
+
+    const res = await rank(FANOUT_ID, h.deps);
+    expect(Number(rawDelta.toFixed(10))).toBe(0.1);
+    expect(res.tie).toBe(true); // inclusive boundary survives the float rendering
+
+    // Canonical K6 example, pinned as documentation: 0.7 − 0.6 renders BELOW 0.1 raw,
+    // so neither direction of the boundary can be judged unnormalized.
+    expect(Number((0.7 - 0.6).toFixed(10))).toBe(0.1);
+  });
+
+  test("guards the pass-rate divisor: testsExecuted:false, absent testResults, zero total → 0", async () => {
+    const h = harness({
+      arms: [
+        { arm: 0, runId: "notexec" },
+        { arm: 1, runId: "noresults" },
+        { arm: 2, runId: "zerototal" },
+      ],
+      steps: {
+        // Flag false with nonzero counts present — the flag is a GUARD, never a divisor.
+        notexec: { testsExecuted: false, testResults: { passed: 9, failed: 1 }, changedFiles: [] },
+        noresults: { testsExecuted: true, changedFiles: [] },
+        zerototal: { testsExecuted: true, testResults: { passed: 0, failed: 0 }, changedFiles: [] },
+      },
+    });
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    // Empty changedFiles across ALL arms also pins the empty-union rule: coverage 0.
+    for (const s of res.scores) {
+      expect(s.score).toBe(0);
+      expect(s.breakdown.testPassRate).toBe(0);
+      expect(s.breakdown.uniqueFileCoverage).toBe(0);
+    }
+    // Literal spec: all scores are exactly 0, so the top-two normalized delta is
+    // 0 ≤ 0.1 — a tie. No all-zero carve-out exists in AC7 and none is invented;
+    // the human reviewer sees three zeros and concludes nothing worked.
+    expect(res.tie).toBe(true);
+  });
+
+  test("lists an arm with no step output as score:null and never drops it", async () => {
+    const h = harness({
+      arms: [
+        { arm: 0, runId: "scored" },
+        { arm: 1, runId: "silent" },
+      ],
+      steps: {
+        scored: { testsExecuted: true, testResults: { passed: 1, failed: 0 }, changedFiles: ["f.ts"] },
+        // "silent" deliberately absent from the map → stepOutputFor returns null.
+      },
+    });
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    expect(res.scores).toHaveLength(2);
+    expect(res.scores.map((s) => s.arm)).toEqual([0, 1]); // scored first, null-scored listed after
+    expect(res.scores[0]?.score).not.toBeNull();
+    expect(res.scores[1]?.score).toBeNull();
+    expect(res.scores[1]?.runId).toBe("silent");
+    expect(res.rationale).toContain("silent");
+  });
+
+  test("returns every arm unscored with a no-source rationale when no step output exists at all", async () => {
+    const h = harness({
+      arms: [
+        { arm: 0, runId: "r0" },
+        { arm: 1, runId: "r1" },
+      ],
+      steps: {}, // ruling C2: --steps-json absent ⇒ accessor nulls every arm
+    });
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    expect(res.scores).toHaveLength(2);
+    expect(res.scores.every((s) => s.score === null)).toBe(true);
+    expect(res.tie).toBe(false);
+    expect(res.rationale).toContain("no step-output source provided");
+  });
+
+  test("yields empty scores and a failure rationale when the record has no arms", async () => {
+    const h = harness({ arms: [] }); // every arm refused before minting a run id
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    expect(res.scores).toEqual([]);
+    expect(res.tie).toBe(false);
+    expect(res.rationale.toLowerCase()).toContain("fail");
+  });
+
+  test("throws FleetError exit 4 when the fan-out record is unknown", async () => {
+    const h = harness();
+    const missing: RankDeps = { ...h.deps, recordReader: () => null };
+
+    try {
+      await rank("fan-20260823-deadbe", missing);
+      throw new Error("expected rank to refuse an unknown fanout-id");
+    } catch (e) {
+      expect(e).toBeInstanceOf(FleetError);
+      const fe = e as FleetError;
+      expect(fe.exitCode).toBe(4);
+      expect(fe.code).toBe("fanout-not-found");
+    }
+  });
+
+  test("stamps rankedAt on the fan-out record through the injected writer, exactly once", async () => {
+    const h = harness({
+      arms: [{ arm: 0, runId: "r0" }],
+      steps: {
+        r0: { testsExecuted: true, testResults: { passed: 1, failed: 0 }, changedFiles: ["f.ts"] },
+      },
+    });
+
+    await rank(FANOUT_ID, h.deps);
+
+    expect(h.writes).toHaveLength(1);
+    expect(h.writes[0]?.fanoutId).toBe(FANOUT_ID);
+    const stamped = h.writes[0]?.next.rankedAt ?? "";
+    expect(Number.isNaN(Date.parse(stamped))).toBe(false);
+    expect(h.reads()).toBe(1);
+  });
+
+  test("passes the rationale through the single redactSecrets chokepoint", async () => {
+    const leakyRunId = "qds-x https://openrouter.ai/api/v1/keys/s3cr3tvalue99";
+    const h = harness({
+      arms: [{ arm: 0, runId: leakyRunId }],
+      steps: {
+        [leakyRunId]: {
+          testsExecuted: true,
+          testResults: { passed: 1, failed: 0 },
+          changedFiles: ["f.ts"],
+        },
+      },
+    });
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    // The rationale names the winning run — after redaction the key-management URL's
+    // token must not survive anywhere in the returned string.
+    expect(res.rationale).not.toContain("s3cr3tvalue99");
+  });
+
+  test("reports rank_ms from the injected monotonic clock", async () => {
+    const h = harness({ arms: [] });
+    let now = 100;
+    const deps: RankDeps = {
+      ...h.deps,
+      monotonic: () => {
+        now += 7;
+        return now;
+      },
+    };
+
+    const res = await rank(FANOUT_ID, deps);
+
+    expect(res.timings.rankMs).toBe(7);
+  });
+});
