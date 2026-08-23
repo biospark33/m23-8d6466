@@ -1,6 +1,6 @@
 # DF4.2: Visualizer Test Suite from Zero, Bun-API Inventory, Per-Box Deploy
 
-**Status:** Done — merged as PR #126 (squash) — every gate green except: the mandatory real-box E2E, which is BLOCKED; the root `bun run lint` gate, which is red with 5 pre-existing errors on `main`; and `bun run notice:sweep`, which exits 2 by contract (requires `--tree <dir>`) (see Dev Agent Record)
+**Status:** Done — merged as PR #126 (squash), with test-quality follow-up PR #127 (`878b66c`, 2026-08-23) — every gate green except: the mandatory real-box E2E, which is BLOCKED; the root `bun run lint` gate, which is red with 5 pre-existing errors on `main`; and `bun run notice:sweep`, which exits 2 by contract (requires `--tree <dir>`) (see Dev Agent Record)
 **Story Points:** 4
 **Sprint:** v5-S3
 
@@ -569,3 +569,31 @@ whitespace counter fixtures in `visualizer/test/check-lcov.test.ts`.
 an 18-minute window) and delivered its verdicts as comment replies rather than formal reviews, so
 the PR's `reviewDecision` stayed empty throughout. The merge was a human decision on the evidence
 above, not a bot approval.
+
+### Follow-up review-body findings (PR #127)
+
+PR #126's merge closed every inline and issue-comment finding, but CodeRabbit had also posted
+findings in its **review bodies** — a third GitHub comment namespace (`GET /pulls/{n}/reviews`,
+`.body`) that carries "outside diff range" and file-level observations appearing in neither
+`pulls/{n}/comments` nor `issues/{n}/comments`. The PR monitor polled only the latter two, so six
+review-body findings were never dispositioned. Four were still valid against the merged code and are
+fixed here; PR #127 squash-merged as `878b66c`.
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | **Host-safety hazard.** `FakeDriver.exec` spawns a real child process, and `driver.ts`'s `stopVisualizer` script kills whatever pid sits at the shared host path `VIZ_PIDFILE` (`/tmp/qds-viz.pid`) with no identity check. Every `teardownSandbox` call reaching a real box runs that step unconditionally, so the exposure was **file-wide**, not the two ordering tests CodeRabbit named. | Added `guardVizPidfile()`, wired into the shared `recording` driver in `beforeEach`. One guard at the shared seam rather than an `execArgvOverride` stub per call site. No test in the file can now run the real kill script against a developer's actual pidfile. |
+| 2 | **False-green fault injection.** `routes.test.ts`'s requestIP-failure test asserted only the response, which is reachable without the injected fault ever firing. | Verified empirically (fault removed → test still passed), then added `expect(spy).toHaveBeenCalled()` before the response assertion. Audited all 7 `spyOn` fault injections across `auth.test.ts` and `routes.test.ts` by reverting each and confirming failure — the other 6 already prove interception. The claimed `auth.test.ts` TOCTOU false-green did **not** hold up (removing its injection yields 200 instead of 404); left unchanged. |
+| 3 | **Unverified branch.** `routes.test.ts`'s EADDRINUSE test asserted only that `startVisualizer` throws, not that the close-then-rethrow branch in `server/index.ts` ran. | Spy on `TraceDb.close` asserting it was called; verified the assertion fails when that call is removed from the branch. |
+| 4 | **Missing coverage.** `neverPublicDriver`'s `expose` branch (gated on the port operand, unlike `setPublic`) had no test on either side. | Added both cases: `expose` on the viz port throws, `expose` on any other port delegates to the raw driver. Verified the throw case fails against the ungated branch. |
+| 5 | **Bot round 1 on PR #127** (`3d48bca`, inline `3837275496`). The delegation test added in #4 compared two separately-invoked `expose()` results — a wrapper could return a matching value without ever calling `recording.expose`. | Spy on `recording.expose`, call the guarded wrapper once, assert the spy fired exactly once with the same `(vm, port)` arguments and that its resolved sentinel is what the guarded call returned. |
+
+Gates: `bun test tests/providers/teardown.test.ts` 51 pass / 0 fail (up from 49), full modified-file
+suite 206/206, `bunx tsc --noEmit` clean, Biome clean. CodeRabbit's re-review on `3d48bca` returned
+**no new issues**, explicitly confirming the delegation check "resolves the prior false-positive
+condition".
+
+**Process fix.** The gap was in the monitor, not the review: `qds-pr-monitor` was polling two of the
+three comment namespaces. It now polls review bodies as a first-class source (v2.6.0 — Phase 1
+Step 3b fetch, Phase 3 Step 0b finding split, and a `last_processed_review_id` high-water mark kept
+in its own id space, since review ids are orders of magnitude larger than comment ids and a shared
+max would permanently mask every inline comment).
