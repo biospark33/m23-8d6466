@@ -15,8 +15,9 @@
  *
  * (b) FULL VERB PROOF — the whole chain runs REAL with the DEFAULT workdir
  * (`workdir: "src"` is now literally the default, kept explicit at the call
- * site as a seam marker): https clone inside the box at the pinned SHA on the
- * `sbx/<run-id>` branch, a real in-box commit, then the `fleet harvest` VERB
+ * site as a seam marker): the default bundle-push fill fetches HOST-side,
+ * pushes the bundle in, and the box clones LOCALLY at the pinned SHA on the
+ * `sbx/<run-id>` branch; then a real in-box commit, then the `fleet harvest` VERB
  * as a real subprocess — its DEFAULT_WORKDIRS probe list includes relative
  * `"src"`, so the verb finds the repo with no overrides.
  * Bundle comes out over scp, `git bundle verify` and the quarantine fetch run

@@ -272,6 +272,122 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
     const porcelain = await driver.exec("fill-1", ["git", "-C", "work", "status", "--porcelain"]);
     expect(porcelain.stdout.trim()).toBe("");
   });
+
+  test("F4 (2026-08-24): the DEFAULT fill mode is bundle-push — host clone → base64 bundle in → box clones from the LOCAL bundle", async () => {
+    // Private repos are the operator requirement: a box has no GitHub creds
+    // (INV-CRED-1 — no second secret in a box), so an in-box https clone of a
+    // private repo is impossible BY DESIGN. Bundle-push fills from the HOST's
+    // own credentials: host fetches the pinned SHA, bundles it, pushes the
+    // bundle over exec stdin (base64 — the wire is textual), and the box
+    // clones from the LOCAL bundle file. Credentials never cross the wire.
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create("fill-bundle");
+    await driver.fill("fill-bundle", {
+      runId: "fill-bundle",
+      repoUrl: `file://${originDir}`,
+      commitSha: shaB,
+      workdir: "work",
+    });
+    // Same end-state as the remote clone: pinned SHA on sbx/<run-id>.
+    const head = await driver.exec("fill-bundle", ["git", "-C", "work", "rev-parse", "HEAD"]);
+    expect(head.stdout.trim()).toBe(shaB);
+    const branch = await driver.exec("fill-bundle", ["git", "-C", "work", "rev-parse", "--abbrev-ref", "HEAD"]);
+    expect(branch.stdout.trim()).toBe("sbx/fill-bundle");
+    // And it went THROUGH the bundle, not an in-box origin clone: the box saw
+    // a base64 decode landing the bundle, and its clone named the bundle file.
+    // (argv words are shQuoted, so match per-token, not across spaces.)
+    const sawDecode = fake.calls.some((argv) => argv.join(" ").includes("base64 -d"));
+    expect(sawDecode).toBe(true);
+    const sawBundleClone = fake.calls.some((argv) => argv.join(" ").includes("clone") && argv.join(" ").includes("work.bundle"));
+    expect(sawBundleClone).toBe(true);
+    // The in-box clone NEVER named the origin URL — that is the whole point:
+    // the box needs zero network credentials for this fill.
+    const cloneCalls = fake.calls.filter((argv) => argv.join(" ").includes("clone"));
+    expect(cloneCalls.length).toBeGreaterThan(0);
+    expect(cloneCalls.every((argv) => !argv.join(" ").includes(originDir))).toBe(true);
+    // No bundle litter left in the box.
+    const litter = await driver.exec("fill-bundle", ["sh", "-c", "ls work.bundle 2>/dev/null; true"]);
+    expect(litter.stdout.trim()).toBe("");
+  }, 30_000);
+
+  test("F4: mode 'remote-clone' keeps the legacy in-box https/file clone", async () => {
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create("fill-remote");
+    await driver.fill("fill-remote", {
+      runId: "fill-remote",
+      repoUrl: `file://${originDir}`,
+      commitSha: shaB,
+      workdir: "work",
+      mode: "remote-clone",
+    });
+    const branch = await driver.exec("fill-remote", ["git", "-C", "work", "rev-parse", "--abbrev-ref", "HEAD"]);
+    expect(branch.stdout.trim()).toBe("sbx/fill-remote");
+    const cloneCalls = fake.calls.filter((argv) => argv.join(" ").includes("clone"));
+    expect(cloneCalls.some((argv) => argv.join(" ").includes(originDir))).toBe(true);
+  }, 30_000);
+
+  test("F4: a re-fill in bundle-push mode fetches from a fresh bundle and preserves the sandbox branch", async () => {
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create("fill-bundle2");
+    await driver.fill("fill-bundle2", {
+      runId: "fill-bundle2",
+      repoUrl: `file://${originDir}`,
+      commitSha: shaB,
+      workdir: "work",
+    });
+    await driver.exec("fill-bundle2", [
+      "git",
+      "-C",
+      "work",
+      "-c",
+      "user.email=test@qds",
+      "-c",
+      "user.name=test",
+      "commit",
+      "-q",
+      "--allow-empty",
+      "-m",
+      "in-box work",
+    ]);
+    const before = await driver.exec("fill-bundle2", ["git", "-C", "work", "rev-parse", "sbx/fill-bundle2"]);
+    await driver.fill("fill-bundle2", {
+      runId: "fill-bundle2",
+      repoUrl: `file://${originDir}`,
+      commitSha: shaA,
+      workdir: "work",
+    });
+    const after = await driver.exec("fill-bundle2", ["git", "-C", "work", "rev-parse", "sbx/fill-bundle2"]);
+    expect(after.stdout.trim()).toBe(before.stdout.trim()); // never reset
+    const head = await driver.exec("fill-bundle2", ["git", "-C", "work", "rev-parse", "HEAD"]);
+    expect(head.stdout.trim()).toBe(after.stdout.trim()); // still ON the branch
+    // The refill fetched from the BUNDLE, not an origin remote.
+    const fetchCalls = fake.calls.filter((argv) => argv.join(" ").includes("fetch"));
+    expect(fetchCalls.some((argv) => argv.join(" ").includes("work.bundle"))).toBe(true);
+  }, 30_000);
+
+  test("F4: an oversized bundle refuses with a named error before any box mutation", async () => {
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create("fill-toobig");
+    let err: unknown;
+    try {
+      await driver.fill("fill-toobig", {
+        runId: "fill-toobig",
+        repoUrl: `file://${originDir}`,
+        commitSha: shaB,
+        workdir: "work",
+        bundleMaxBytes: 1, // any real bundle exceeds 1 byte
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    expect((err as ExeDevDriverError).code).toBe("fill-failed");
+    expect(String((err as Error).message)).toContain("bundle-too-large");
+    // Nothing landed in the box.
+    const probe = await driver.exec("fill-toobig", ["sh", "-c", "ls work 2>/dev/null; ls work.bundle 2>/dev/null; true"]);
+    expect(probe.stdout.trim()).toBe("");
+  }, 30_000);
+
   test("fill with NO workdir clones into the HOME-relative default 'src' (F3, 2026-08-24)", async () => {
     // The real exe.dev image: ssh user exedev, HOME=/home/exedev, /home
     // root-owned. A default of /home/agent/src made every default fill fail
@@ -319,8 +435,6 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
     expect(readFileSync(envPath, "utf8")).toBe("OPENROUTER_API_KEY=sk-or-test-not-a-real-key\n");
   });
 
-
-
   test("a re-fill switches to the existing branch and never re-creates it", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
     await driver.create("fill-2");
@@ -347,7 +461,8 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
     const driver = new ExeDevDriver({ run: fake.run });
     await driver.create("fill-https");
     // A path-carrying https URL must pass the GRAMMAR: the failure below is
-    // the clone itself, named "fill clone", NOT "repo-url-invalid" — that
+    // the fetch itself, named "fill host-bundle" (bundle-push is the default
+    // mode — the HOST does the fetching), NOT "repo-url-invalid" — that
     // distinction is the regression. The origin is loopback port 9 (discard):
     // connection refused instantly, no DNS, no egress — hermetic in CI.
     await expect(
@@ -357,7 +472,7 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
         commitSha: "0123456789abcdef0123456789abcdef01234567",
         workdir: "work",
       }),
-    ).rejects.toThrow(/fill clone exited|fill-failed/);
+    ).rejects.toThrow(/fill host-bundle|fill clone exited/);
   });
 
   test("fill refuses a repo URL that is not a plain public clone source", async () => {
@@ -582,6 +697,7 @@ describe("ExeDevDriver — control-plane parsing", () => {
     await driver.destroy("destroy-1");
     expect((await driver.list("destroy-1"))).toEqual([]);
   });
+
   test("destroy VERIFIES absence after a successful rm — exit 0 alone is not 'destroyed' (F7, 2026-08-24)", async () => {
     // The live flake shape (e2e-run-report F7): `rm` exited 0, the box stayed
     // listed, teardown walked away "confirmed". rm's exit status is a claim;
@@ -638,8 +754,6 @@ describe("ExeDevDriver — control-plane parsing", () => {
     await new ExeDevDriver({ run: lagging }).destroy("f7-lag");
     expect(rmCalls).toBe(2);
   });
-
-
 
   test("expose validates the port and returns the https URL", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
