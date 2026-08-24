@@ -831,9 +831,9 @@ describe("DF2.5 teardownSandbox", () => {
       const secondRow = rawDb.query("SELECT event_id FROM cost_events WHERE kind = 'box_hours' AND run_id = ?").get(runId) as { event_id: string };
       expect(secondRow.event_id).toBe(firstEventId);
 
-      // Verify cost = ceil(30min) × rate = 1h × 1M µ$/h, attributed to the run's issue
+      // Verify cost = 30min × 1M µ$/h = 500,000 µ$ fractional (F8), attributed to the run's issue
       const row = rawDb.query("SELECT cost_micro_usd, repo_slug, issue_id FROM cost_events WHERE kind = 'box_hours' AND run_id = ?").get(runId) as { cost_micro_usd: number; repo_slug: string; issue_id: string };
-      expect(row.cost_micro_usd).toBe(1_000_000);
+      expect(row.cost_micro_usd).toBe(500_000);
       expect(row.repo_slug).toBe("qds/demo");
       expect(row.issue_id).toBe("42");
       rawDb.close();

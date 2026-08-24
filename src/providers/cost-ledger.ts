@@ -866,11 +866,19 @@ export class CostLedger {
   }
 
   /**
-   * The box-hours row: ceil(VM lifetime) × boxHourRateMicroUsd, from the DF2.1
-   * record's own timestamps, written at teardown's close step — the one point
-   * at which the destroy is confirmed and the lifetime is final. Never from
+   * The box-hours row: fractional VM lifetime × boxHourRateMicroUsd, in
+   * INTEGER µ$ (rounded up to the next whole µ$), from the DF2.1 record's own
+   * timestamps, written at teardown's close step — the one point at which the
+   * destroy is confirmed and the lifetime is final. Never from
    * `captureSpend`: that reads the same token money DF2.7 already priced, and
    * ingesting it would double-count inside the SUM the gate reads.
+   *
+   * F8 (2026-08-24): the DF2.8 story originally specified ceil(lifetime in
+   * whole hours) × rate — a 1-hour MINIMUM per box. Live evidence (a ~20s box
+   * billed a full hour, 230,000 µ$) overstates short-lived runs by up to 1h
+   * each, which compounds at fleet scale. Pricing now runs on wall-clock ms
+   * with the µ$ result rounded up (never down — sub-µ$ runtime is not free);
+   * the story's Technical Notes carry the amendment.
    */
   ingestBoxHours(ctx: BoxHoursCtx): IngestResult {
     const started = Date.now();
@@ -925,12 +933,24 @@ export class CostLedger {
         `write {"boxHourRateMicroUsd": <integer µ$/h>} to .sandbox/cost-config.json (exe.dev figures are vendor-single-origin [VERIFY] — R5 §6 fact 11), then re-run teardown`,
       );
     }
-    const hours = Math.ceil((closed - created) / MS_PER_HOUR);
-    const costMicroUsd = hours * rate;
+    // F8: integer µ$ from wall-clock ms — rate·ms over ms-per-hour, rounded UP
+    // so a sub-µ$ lifetime still prices at 1 µ$, never 0. The product
+    // rate·lifetimeMs is checked for exact-integrality BEFORE the division:
+    // a float drift there would silently misprice by more than the rounding.
+    const lifetimeMs = closed - created;
+    const numerator = rate * lifetimeMs;
+    if (!Number.isSafeInteger(numerator)) {
+      throw new CostLedgerError(
+        "box-hours-cost-invalid",
+        `run ${ctx.runId} box-hours product is not a safe integer (lifetime ${lifetimeMs}ms × rate ${rate} µ$/h = ${numerator}) — refusing to store a silently wrong figure`,
+        "repair the run record's createdAt/closedAt or lower boxHourRateMicroUsd in .sandbox/cost-config.json, then re-run teardown",
+      );
+    }
+    const costMicroUsd = Math.ceil(numerator / MS_PER_HOUR);
     if (!Number.isSafeInteger(costMicroUsd)) {
       throw new CostLedgerError(
         "box-hours-cost-invalid",
-        `run ${ctx.runId} box-hours cost is not a safe integer (lifetime ${hours}h × rate ${rate} µ$/h = ${costMicroUsd}) — refusing to store a silently wrong figure`,
+        `run ${ctx.runId} box-hours cost is not a safe integer (lifetime ${lifetimeMs}ms × rate ${rate} µ$/h = ${costMicroUsd} µ$) — refusing to store a silently wrong figure`,
         "repair the run record's createdAt/closedAt or lower boxHourRateMicroUsd in .sandbox/cost-config.json, then re-run teardown",
       );
     }
