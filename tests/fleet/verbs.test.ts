@@ -1133,6 +1133,73 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     // and a mid-test kill leaves the dangling holder to poison the next test.
   }, 60_000);
 
+  test("F5 (2026-08-24): close-step box-hour failure AFTER destroy+revoke releases the run lock — exit 6, nothing wedged", async () => {
+    // Live shape (e2e-run-report F5): attributed run + no cost-config.json
+    // beside the records dir. The teardown destroys the box, revokes nothing
+    // (keyless), CLOSES the record — and the close step's ingest refuses the
+    // unpriced row (box-hour-rate-unconfigured, fail-loud by design). The old
+    // finally then held the run lock over a run with nothing billable left:
+    // the operator had to rm the lock by hand for an already-dead run.
+    const runId = "teardown-f5-unpriced";
+    await provisionAdmittedRun(driver, store, { runId });
+    store.set(runId, {
+      extensions: {
+        budget: {
+          repoSlug: "owner/repo",
+          issueId: "5",
+          capMicroUsd: 1_000_000,
+          spentMicroUsd: 0,
+          reservedMicroUsd: 0,
+          admittedCeilingMicroUsd: 1_000_000,
+        },
+      },
+    });
+
+    const res = await invoke(["teardown", runId], { driver, store });
+    // The unpriced row still surfaces loudly — 6, "done, needs an operator".
+    expect(res.code).toBe(6);
+    expect(res.err).toContain("box-hour-rate-unconfigured");
+    // THE pin: no lock-held note — the record is closed, so destroy+revoke
+    // landed and the lock guards nothing billable. The landed fact rides the
+    // lock-released note on stderr ("torn down:" is only printed on the
+    // no-throw path, which this is not by construction).
+    expect(res.err).not.toContain("lock-held");
+    expect(res.err).toContain("lock-released-work-landed");
+
+    // And the lock is REALLY gone, not just unreported: the next teardown is
+    // the idempotent closed-record path (still fail-loud on the unpriced row —
+    // that is the design until cost-config.json exists), never run-locked.
+    const again = await invoke(["teardown", runId], { driver, store });
+    expect(again.code).not.toBe(5);
+    expect(again.err).not.toContain("run-locked");
+    expect(again.err).not.toContain("lock-held");
+  }, 60_000);
+
+  test("F5 arm 2: a throw BEFORE close (record still open) still holds the lock", async () => {
+    // The lock's real job: guarding a HALF-torn-down run. A destroy failure
+    // leaves the record open and the box possibly alive — the lock must stay.
+    const runId = "teardown-f5-halfdead";
+    await provisionAdmittedRun(driver, store, { runId });
+    const exploding = Object.create(driver) as FakeDriver;
+    exploding.destroy = () => Promise.reject(new Error("rm exploded"));
+
+    const res = await invoke(["teardown", runId], { driver: exploding, store });
+    expect(res.code).toBe(6);
+    expect(res.err).toContain("lock-held");
+    // The lock is PHYSICALLY still there and refuses the next invocation. The
+    // second invoke runs in THIS process, so the acquire refuses as
+    // re-entrant (1) rather than run-locked (5) — either way, the refusal
+    // proves the lock survived a failed teardown.
+    expect(existsSync(join(store.dir, `${runId}.lock`))).toBe(true);
+    const again = await invoke(["teardown", runId], { driver: exploding, store });
+    expect(again.code).toBe(1);
+    expect(again.err).toContain("run-lock-reentrant");
+    // Release for the shared fixtures — this run's lock is deliberately
+    // wedged (destructive mark still set), so plain releaseRunLock refuses;
+    // rm the file directly, exactly what the remediation tells the operator.
+    rmSync(join(store.dir, `${runId}.lock`), { force: true });
+  }, 60_000);
+
   test("exit 6's OTHER documented route: the verb succeeded and the LEDGER would not close", async () => {
     // teardown/harvest declare 6 for two failures — "the cost ledger would not
     // close, or the run lock would not release" — and every probe above reaches

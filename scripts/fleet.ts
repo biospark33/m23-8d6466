@@ -1833,6 +1833,12 @@ export async function run(
    * invocation REPORTS.
    */
   let destructiveInFlight = false;
+  // The teardown verb's store, hoisted for the finally: the landed-check below
+  // reads the run record AFTER `teardownSandbox` threw, and the block-scoped
+  // `store` is out of reach there. Assigned only on the teardown/harvest/status
+  // paths that can ever hold a destructive lock — undefined means "cannot
+  // check", and the finally then holds the lock (fail-closed).
+  let verbStore: RunRecordStore | undefined;
   // Assigned on every path, then possibly downgraded by the finally: a release
   // failure leaves the run locked against every later harvest/teardown while
   // the box and the key stay live, and `return 0` inside the try would have
@@ -1865,6 +1871,7 @@ export async function run(
     // asked to look in. See `assertRecordsDirUsable`.
     assertRecordsDirUsable(dir, deps?.store);
     const store = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, requestId }));
+    verbStore = store;
 
     /** exit 4 for a genuine absence; every other read failure propagates. */
     const notFound = (e: unknown): never => {
@@ -2088,34 +2095,84 @@ export async function run(
     // this invocation's claim, so a refused invocation — or one whose lock was
     // cleared and re-taken — never unlinks a live holder's file.
     if (lock !== undefined && destructiveInFlight) {
-      // …but "still ours" is not the question on THIS path. `teardownSandbox`
-      // threw partway through destroying the run, so the box may be gone with
-      // the key un-revoked, or the record may still be open against a box that
-      // no longer exists — the state the comment above `markRunLockDestructive`
-      // says only an operator can judge. Releasing hands it to the next
-      // invocation, which re-runs against a half-torn-down run.
-      //
-      // Not even attempted, rather than attempted and refused: `releaseRunLock`
-      // would throw for exactly this reason (the destructive mark is still set,
-      // because only the success path above clears it), and reporting that as
-      // `lock-release-failed` would read as a cleanup that went wrong on top of
-      // the verb's failure. It did not go wrong; it was declined on purpose.
-      printError(
-        note,
-        "lock-held",
-        `${lock} was NOT released: this teardown of ${runIdArg} failed partway through destroying the run`,
-        `check the run's box, key and record before anything else touches it, then rm ${lock} — until then every later harvest or teardown of this run refuses`,
-        { runId: runIdArg },
-      );
-      // Over the failure the verb already reported, which is the one place this
-      // file's "cleanup never overwrites the verb's own code" rule has to bend:
-      // the code being overwritten is `report`'s 1, `transient`, "retry me" —
-      // and the retry it invites cannot do anything but hit `run-locked` (5)
-      // forever, because this invocation just decided nothing will clear the
-      // lock but a human. 6 is the honest classification of what was left
-      // behind: partly done, not retryable, needs an operator.
-      code = 6;
-    } else if (lock !== undefined) {
+      // F5 (2026-08-24): before deciding the lock must stay, ask the RECORD
+      // what actually landed. teardownSandbox's fixed order is
+      // spend→…→revoke→verify→destroy→close, and close is LAST — so a record
+      // whose closedAt is set proves destroy AND revoke already ran, and the
+      // throw came from the close step's post-close work (the box-hour ingest
+      // refusing an unpriced row, an unopenable ledger). There is no
+      // half-torn-down run left for the lock to guard: the box is destroyed,
+      // the key revoked, the record closed. Holding the lock forced the
+      // operator to rm it by hand for a run with nothing billable left
+      // (e2e-run-report F5). Release it; the failure still exits 6 below —
+      // "done, needs an operator (e.g. write cost-config.json, re-run)" —
+      // and a re-run is the idempotent closed-record path, which retries the
+      // ingest on its own.
+      let landed = false;
+      try {
+        landed = verbStore !== undefined && runIdArg !== undefined && verbStore.get(runIdArg).closedAt !== undefined;
+      } catch {
+        landed = false; // unreadable record — hold the lock, let an operator see it
+      }
+      if (landed) {
+        let markCleared = true;
+        try {
+          clearRunLockDestructive(lock);
+        } catch (e) {
+          markCleared = false;
+          const x = (e ?? {}) as { message?: string };
+          printError(
+            note,
+            "lock-clear-failed",
+            `could not clear the destructive mark on ${lock}: ${redactSecrets(x.message ?? e)}`,
+            `rm ${lock} by hand once no other invocation holds it — until then every later harvest or teardown of this run refuses`,
+          );
+        }
+        if (markCleared) {
+          printError(
+            note,
+            "lock-released-work-landed",
+            `${runIdArg} was torn down (box destroyed, key revoked, record closed) and its lock was released — the failure above is the close step's leftover, not a half-destroyed run`,
+            `resolve the reported leftover (e.g. write cost-config.json beside the records dir), then re-run: fleet teardown ${runIdArg} retries it idempotently`,
+            { runId: runIdArg },
+          );
+          destructiveInFlight = false; // nothing left to guard — plain release below
+        }
+        // 6 either way: the work is DONE and the leftover (unpriced row, or an
+        // unclearable mark) needs an operator — never 1, whose "retry me"
+        // sends automation back to a run that no longer exists.
+        code = 6;
+      } else {
+        // …but "still ours" is not the question on THIS path. `teardownSandbox`
+        // threw partway through destroying the run, so the box may be gone with
+        // the key un-revoked, or the record may still be open against a box that
+        // no longer exists — the state the comment above `markRunLockDestructive`
+        // says only an operator can judge. Releasing hands it to the next
+        // invocation, which re-runs against a half-torn-down run.
+        //
+        // Not even attempted, rather than attempted and refused: `releaseRunLock`
+        // would throw for exactly this reason (the destructive mark is still set,
+        // because only the success path above clears it), and reporting that as
+        // `lock-release-failed` would read as a cleanup that went wrong on top of
+        // the verb's failure. It did not go wrong; it was declined on purpose.
+        printError(
+          note,
+          "lock-held",
+          `${lock} was NOT released: this teardown of ${runIdArg} failed partway through destroying the run`,
+          `check the run's box, key and record before anything else touches it, then rm ${lock} — until then every later harvest or teardown of this run refuses`,
+          { runId: runIdArg },
+        );
+        // Over the failure the verb already reported, which is the one place this
+        // file's "cleanup never overwrites the verb's own code" rule has to bend:
+        // the code being overwritten is `report`'s 1, `transient`, "retry me" —
+        // and the retry it invites cannot do anything but hit `run-locked` (5)
+        // forever, because this invocation just decided nothing will clear the
+        // lock but a human. 6 is the honest classification of what was left
+        // behind: partly done, not retryable, needs an operator.
+        code = 6;
+      }
+    }
+    if (lock !== undefined && !destructiveInFlight) {
       try {
         releaseRunLock(lock);
       } catch (e) {
