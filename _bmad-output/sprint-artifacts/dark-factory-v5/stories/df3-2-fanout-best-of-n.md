@@ -643,7 +643,7 @@ armUnknown boxes never auto-destroyed (INV-5 verbatim) · store.set is patch/mer
 only by race poller by design) · empty-briefs zero-arm record impossible (pre-lock validation) ·
 best-of-n --n 1 enforced downstream with the advertised message · unmatched steps keys named in
 rationale · hostTag/writeLockDirect exports + src→scripts/lib inversion documented deliberate ·
-loser-ledger SQLite file created pre-admission REAL but closing it needs a factory seam — DEFERRED ·
+loser-ledger SQLite file created pre-admission REAL but closing it needs a factory seam — DEFERRED to #129 ·
 CWD-relative library defaults = CLI-owned resolution discipline (prior rounds' disposition).
 
 Gates at close: fleet focal suites 498 tests green modulo the documented K8/AC5 load flakes (pass
