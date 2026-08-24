@@ -205,3 +205,10 @@ adopt-persisted-winner already covers the stale-winner claim). Full ledger:
 `_bmad-output/workflow-state/code-review/pr128-r5/triage.md`. Gates: 506/506 fleet focal, tsc clean,
 biome clean ×7, detect_changes LOW (1 symbol, 0 processes). One intra-round regression caught and
 fixed: P3 retitle broke verbs.test.ts coveredBy title binding — updated to the new title.
+
+## Round 5b addendum (2026-08-24 — CodeRabbit + Sift warnings after round 5)
+
+2 confirmed + fixed (loser-ledger post-close reopen in the lazy hook; marker-corruption
+consecutive counting via probeArm "absent" verdict), 1 dismissed (Sift's unhandled-
+rejection warning — withTimeout's pre-attached no-op catch is the exact suggested fix,
+in place since round 4). Both fixes mutation-verified RED pre-fix. 508/508 focal.

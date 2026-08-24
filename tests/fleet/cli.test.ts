@@ -4222,6 +4222,111 @@ process.on = ((sig, listener) => {
     expect(existsSync(join(dir, ".sandbox", "fleet.lock"))).toBeFalse();
   });
 
+  test("a timed-out loser's late teardown still prices its box hours after the verb closed the ledger", async () => {
+    // CodeRabbit round-5 warning: disposeLosers abandons a hung teardown at
+    // its deadline, the verb's finally closes the loser ledger — and the
+    // abandoned teardown's close step then ingested against the CLOSED
+    // handle, losing the box-hours row and under-counting the ledger the cap
+    // admits against. The hook now drops its reference on close, so the late
+    // ingest re-opens; the event-id conflict rule keeps the row exactly-once.
+    const base = new FakeDriver(boxesDir);
+    const markerPath = runMarkerPath();
+    const boxMarker = (vm: string): string => join(boxesDir, vm, "journal", "final.json");
+    let plantedVm: string | undefined;
+    let releaseDestroy: (() => void) | undefined;
+    let barrierFor: string | undefined;
+    const d = {
+      ...fanoutDeps(),
+      driver: driverWith(base, {
+        exec: async (vm: string, argv: string[], stdin?: string) => {
+          if (
+            argv.length >= 3 &&
+            argv[0] === "sh" &&
+            argv[1] === "-c" &&
+            typeof argv[2] === "string" &&
+            argv[2].includes(markerPath)
+          ) {
+            if (plantedVm === undefined) {
+              plantedVm = vm;
+              mkdirSync(dirname(boxMarker(vm)), { recursive: true });
+              writeFileSync(boxMarker(vm), `${JSON.stringify({ ok: true })}\n`);
+            }
+            return base.exec(vm, ["sh", "-c", `test -f '${boxMarker(vm)}'`], stdin);
+          }
+          return base.exec(vm, argv, stdin);
+        },
+        copyFile: async (vm: string, remotePath: string, localPath: string) =>
+          remotePath === markerPath
+            ? base.copyFile(vm, boxMarker(vm), localPath)
+            : base.copyFile(vm, remotePath, localPath),
+        // The FIRST loser disposed parks at destroy until the verb has fully
+        // returned — the abandoned-teardown window this test exists for. The
+        // second loser tears down cleanly and prices pre-close, so the verb's
+        // ledger close closes a LIVE handle — the exact fixture the warning
+        // described.
+        destroy: (vm: string): Promise<void> => {
+          if (barrierFor === undefined && vm !== plantedVm) {
+            barrierFor = vm;
+            return new Promise<void>((resolve) => {
+              releaseDestroy = resolve;
+            });
+          }
+          return base.destroy(vm);
+        },
+      }),
+      pollIntervalMs: 10,
+      ceilingMs: 10_000,
+      // Must clear the real git bundle-verify probe teardown runs first (same
+      // constraint as patterns.test.ts's deadline pin — under host load that
+      // probe alone can run 2s+, and a harvest-side abandon never reaches the
+      // parked destroy), while still bounding the wait. Flake profile: same
+      // documented family as the K8/AC5 load flakes — this test is
+      // deterministic on an idle host and may abandon at harvest under
+      // saturation (observed at LA 150+); re-run solo.
+      loserTeardownTimeoutMs: 4_000,
+    } as Partial<FleetDeps>;
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "race", "--n", "3", "--roster", "a,b,c"],
+      d,
+    );
+    // Winner + one cleanly-disposed loser + one deadline-abandoned loser: the
+    // race itself worked, and losing is not failing (:417).
+    expect(code).toBe(0);
+    const rows = armRows();
+    expect(rows.map((r) => r.outcome)).toEqual(["ready", "lostRace", "lostRace"]);
+    expect(barrierFor).toBeDefined();
+
+    // THE WINDOW: runCli has resolved, so the finally already closed the
+    // loser ledger. Release the barrier — the abandoned teardown's close step
+    // ingests NOW, against a hook whose reference was dropped at close.
+    (releaseDestroy as () => void)();
+    const store = d.store as RunRecordStore;
+    const hungRun = rows.find((r) => r.vmName === barrierFor)?.runId as string;
+    const settleBy = Date.now() + 5_000;
+    while (store.get(hungRun).closedAt === undefined && Date.now() < settleBy) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(store.get(hungRun).closedAt).not.toBeNull();
+
+    // deps() injects runsDir = <case>/runs, a non-default layout, so the
+    // ledger sits INSIDE the records directory (costLedgerOpts' rule), not in
+    // the .sandbox sibling the default layout uses.
+    const db = new Database(join(runsDir, "cost-ledger.db"), { readonly: true });
+    try {
+      const priced = db
+        .query("SELECT run_id FROM cost_events WHERE kind = 'box_hours'")
+        .all() as { run_id: string }[];
+      // BOTH losers priced: the clean sibling pre-close, the abandoned one
+      // through the post-close re-open — one row each, exactly once.
+      expect(priced.map((r) => r.run_id).sort()).toEqual(
+        rows.slice(1).map((r) => r.runId as string).sort(),
+      );
+    } finally {
+      db.close();
+    }
+  }, 30_000); // 4s loser deadline + the sibling's REAL teardown + the post-release settle window — past bun's 5s default
+
   test("fanout stdout is a keyed contract: exact key sets per emitted line kind", async () => {
     // Story :499 documents what a caller parses off these lines. Pinning the
     // EXACT key sets (not just their presence) is what makes a silently added

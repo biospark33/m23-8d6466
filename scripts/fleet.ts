@@ -1456,6 +1456,14 @@ export async function run(
           },
           close(): void {
             realLoserLedger?.close();
+            // An ABANDONED loser teardown (its deadline hit inside disposeLosers)
+            // can still reach its close step after this verb's finally ran — on
+            // the held handle that ingest threw and the loser's box-hours row
+            // was lost, under-counting the ledger the cap admits against. Drop
+            // the reference: a late ingest re-opens the ledger, and the
+            // event-id conflict rule keeps it idempotent against rows already
+            // landed.
+            realLoserLedger = undefined;
           },
         };
       }

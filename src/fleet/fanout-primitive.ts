@@ -550,6 +550,14 @@ async function runRace(
         }
         continue;
       }
+      if (verdict === "absent") {
+        // The probe RAN and read the box clean — the marker is just not there
+        // yet. Corruption counting is CONSECUTIVE (the contract above), so a
+        // usable read clears the arm's streak. Transport skips return null: a
+        // probe that never ran is no evidence either way and must not reset.
+        unusableTicks.delete(arm);
+        continue;
+      }
       if (verdict !== null) return verdict; // includes "another process won"
     }
     if (undecided().length > 0 && performanceNow(deps) - baseline < ceilingMs) {
@@ -565,8 +573,10 @@ async function runRace(
 
 /**
  * One arm's one tick. A winner index when the race is decided (ours or another
- * process's), "unusable" when the marker exists but cannot be judged, and null
- * for every ordinary not-yet/failed-marker outcome.
+ * process's), "unusable" when the marker exists but cannot be judged, "absent"
+ * when the probe ran clean and the marker is simply not there yet (the usable
+ * read that resets the arm's corruption streak), and null for transport skips
+ * and settled-failed markers.
  */
 async function probeArm(
   deps: FanoutDeps,
@@ -576,7 +586,7 @@ async function probeArm(
   arm: number,
   markerPath: string,
   deadlineMs: number,
-): Promise<number | null | "unusable"> {
+): Promise<number | null | "unusable" | "absent"> {
   const outcome = outcomes[arm] as ArmOutcome; // racing arms are settled and ready
   const vm = outcome.vmName as string;
   let tmp: string | undefined;
@@ -590,7 +600,7 @@ async function probeArm(
       deadlineMs,
       "race-probe",
     );
-    if (probe.exitCode !== 0) return null; // no marker yet — next tick
+    if (probe.exitCode !== 0) return "absent"; // no marker yet — a clean read, resets the streak
 
     tmp = join(tmpdir(), `qds-fanout-${fanoutId}-${arm}-${randomBytes(4).toString("hex")}.json`);
     await withTimeout(deps.driver.copyFile(vm, markerPath, tmp), deadlineMs, "race-read");

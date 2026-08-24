@@ -926,6 +926,52 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(existsSync(lockPath)).toBe(false);
     }, 20_000); // the injected deadline alone is 2s, plus a REAL git bundle-verify probe in the sibling's teardown — past bun's 5s default
 
+    test("corruption counting is CONSECUTIVE: unusable → absent → unusable ×2 leaves the arm pollable and it still wins", async () => {
+      // CodeRabbit round-5 warning: unusableTicks accumulated across usable
+      // reads, so corrupt/absent/corrupt/corrupt hit the 3-tick limit on tick
+      // four — not the "consecutive unusable reads" the runRace contract
+      // promises. A clean absent read now resets the streak; transport skips
+      // (null) do not.
+      manifest();
+      let arm0: string | undefined;
+      let arm0Probes = 0;
+      driver.onProbe = (vm) => {
+        if (arm0 === undefined) {
+          // Index-order polling: the first probed vm IS arm 0.
+          arm0 = vm;
+        }
+        if (vm !== arm0) return;
+        arm0Probes += 1;
+        const marker = join(driver.root, vm, "journal", "final.json");
+        if (arm0Probes === 1) {
+          plantMarker(driver, vm, "{corrupt"); // unusable (streak 1)
+        } else if (arm0Probes === 2) {
+          rmSync(marker); // absent — a clean read resets the streak
+        } else if (arm0Probes === 3) {
+          plantMarker(driver, vm, "{corrupt"); // unusable (streak 1 — was 3 cumulative before the fix)
+        } else if (arm0Probes === 4) {
+          return; // file persists — unusable (streak 2)
+        } else if (arm0Probes === 5) {
+          plantMarker(driver, vm, { ok: true }); // usable and decisive
+        }
+      };
+      const res = await fanout(
+        "race",
+        2,
+        brief(),
+        raceDeps({ rosterIds: ["r0", "r1"], pollIntervalMs: 10, ceilingMs: 10_000 }),
+      );
+      // Under the cumulative bug arm 0 went armUnknown at probe 4, could never
+      // claim, and the race ended null at the ceiling. Consecutive counting
+      // keeps it polling through the dance — and it WINS on probe 5.
+      expect(arm0Probes).toBeGreaterThanOrEqual(5);
+      const won = res.arms.findIndex((a) => a.vmName === arm0);
+      expect(won).toBe(0);
+      expect(res.winner).toBe(won);
+      expect(res.arms[won]?.outcome).toBe("ready");
+      expect(res.arms[1 - won]?.outcome).toBe("lostRace");
+    }, 20_000); // the loser's REAL teardown (git bundle-verify) rides the 2s deadline path
+
     test("a ready:false gate excludes the arm from the race entirely: setupFailed, left alive, siblings decide the winner (AC4 × AC5)", async () => {
       manifest();
       let gateCalls = 0;

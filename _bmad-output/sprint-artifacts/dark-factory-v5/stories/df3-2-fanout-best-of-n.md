@@ -722,3 +722,34 @@ re-run and at close — the documented load-flake set) · verbs↔cli exit-code 
 from the P3 retitle caught by the suite and fixed in the same round · bunx tsc --noEmit clean ·
 biome clean on all 7 touched files · detect_changes: 1 symbol touched (runRace), 0 affected
 processes, LOW risk — blast radius confined to this PR's modules.
+
+### Round 5b — post-round-5 bot warnings (2026-08-24, CodeRabbit + Sift)
+
+- [x] **CodeRabbit: timed-out loser could lose its box-hours charge after the CLI closed
+  the ledger** — CONFIRMED and fixed. Chain: disposeLosers abandons a hung teardown at
+  its deadline → the verb's finally closes loserLedger → the abandoned teardown's close
+  step reaches `ingestBoxHours` on the held (now closed) CostLedger handle → the SQLite
+  call throws into withTimeout's pre-attached no-op catch → box destroyed, record closed,
+  NO box-hours row — the ledger under-counts and later assertWithinBudget over-admits.
+  Fix: the lazy hook drops its `realLoserLedger` reference in close(), so a late ingest
+  re-opens the ledger; the event-id `ON CONFLICT DO NOTHING` rule keeps the row
+  exactly-once. Pin: cli.test.ts "a timed-out loser's late teardown still prices its box
+  hours after the verb closed the ledger" (n=3 race — clean loser prices pre-close,
+  barriered loser released only after runCli resolves; mutation-verified RED pre-fix).
+- [x] **CodeRabbit: marker corruption counted cumulatively, not consecutively** —
+  CONFIRMED and fixed (the round-3 story claim "reset on any usable read" was never in
+  the code — the counter had also shipped with zero direct tests, which is how the gap
+  survived five rounds). probeArm now returns "absent" for a clean no-marker read and
+  runRace resets the arm's streak on it; transport skips stay null (no evidence either
+  way, no reset). Pin: patterns.test.ts "corruption counting is CONSECUTIVE" (corrupt →
+  absent → corrupt ×2 → decisive marker WINS — under cumulative counting tick 4 hit the
+  3-tick limit and the arm went armUnknown; mutation-verified RED pre-fix).
+- [x] **Sift: "abandoned loser teardown can reject unhandled later"** — dismissed with
+  evidence: withTimeout pins `void p.catch(() => {})` on the losing promise BEFORE the
+  race (timeout.ts), exactly the suggested fix, documented in disposeLosers's own
+  docstring since round 4.
+
+Gates: fleet focal 508/508 (both new tests pass in-suite; the cli pin carries the K8/AC5
+load-flake caveat — deterministic idle, observed abandoning at harvest under LA 150+),
+biome clean, tsc clean, detect_changes 2 symbols / 4 Run→* processes, all inside this
+PR's modules.
