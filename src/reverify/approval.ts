@@ -101,6 +101,18 @@ async function withApprovalLock<T>(dir: string, runId: string, body: () => T | P
       // alone: a live holder can be suspended past LOCK_STALE_MS with its
       // mtime unchanged, and age-only reclamation would let a second process
       // barge into the critical section underneath it.
+      //
+      // `claimed` tracks whether `renameSync` below has already moved a file
+      // onto this process's private `claimPath`. Before that point a failure
+      // (the lock vanishing between the stat and the read, e.g.) is benign —
+      // nothing has moved, so falling through to retry is safe. Once this
+      // process owns a file at `claimPath` it is holding either the dead
+      // holder's lock or a live replacement's; ANY failure past that point
+      // (a read, a restore write, an unlink) must fail closed instead of
+      // being swallowed — swallowing it would free `lockPath` for the next
+      // loop iteration while the claimed content sits stranded off-path,
+      // letting two processes both believe they hold the lock.
+      let claimed = false;
       try {
         if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
           const raw = readFileSync(lockPath, "utf8");
@@ -119,8 +131,9 @@ async function withApprovalLock<T>(dir: string, runId: string, body: () => T | P
               if ((renameErr as NodeJS.ErrnoException).code === "ENOENT") continue; // another racer claimed it first
               throw renameErr;
             }
-            const claimed = readFileSync(claimPath, "utf8");
-            if (claimed === raw) {
+            claimed = true;
+            const content = readFileSync(claimPath, "utf8");
+            if (content === raw) {
               // Genuinely the dead holder's lock: reclaim it.
               rmSync(claimPath, { force: true });
               continue;
@@ -129,15 +142,20 @@ async function withApprovalLock<T>(dir: string, runId: string, body: () => T | P
             // created between the read above and the rename). Put it back
             // unless a new holder has since re-taken the path.
             try {
-              writeFileSync(lockPath, claimed, { flag: "wx", mode: 0o600 });
+              writeFileSync(lockPath, content, { flag: "wx", mode: 0o600 });
             } catch (restoreErr) {
-              if ((restoreErr as NodeJS.ErrnoException).code !== "EEXIST") throw restoreErr;
+              if ((restoreErr as NodeJS.ErrnoException).code !== "EEXIST") {
+                throw new Error(
+                  `approval lock reclaim: failed to restore replacement lock from ${claimPath} back to ${lockPath}; remove or restore it by hand: ${(restoreErr as Error).message}`,
+                );
+              }
               // Someone else already holds lockPath now — nothing to restore.
             }
             rmSync(claimPath, { force: true });
           }
         }
-      } catch {
+      } catch (err) {
+        if (claimed) throw err; // own a claimed lock file — fail closed, never retry past it
         // vanished between the open and the stat/read — just retry
       }
       if (Date.now() >= deadline) {

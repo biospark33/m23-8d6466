@@ -229,6 +229,97 @@ describe("approval lock", () => {
     }
   }, 15_000);
 
+  test("a restore failure after a successful claim fails closed, not open", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      const lock = path.join(s.dir, "run-1.approval.lock");
+      const dead = spawnSync(process.execPath, ["--version"]);
+      const deadContent = `${dead.pid}:stale-nonce`;
+      fs.writeFileSync(lock, deadContent);
+      const old = new Date(Date.now() - 60_000);
+      fs.utimesSync(lock, old, old);
+
+      // Same replacement race as above, but this time the restore write that
+      // puts the replacement lock back fails with something other than
+      // EEXIST (e.g. a transient I/O error) — after this process has already
+      // renamed lockPath onto its own claimPath. That failure must propagate
+      // (fail closed) instead of being swallowed and retried: swallowing it
+      // would free lockPath for a subsequent acquisition while the
+      // replacement holder's content is stranded at claimPath, letting two
+      // callers both believe they hold the lock.
+      const liveContent = `${process.pid}:replacement-nonce`;
+      const realReadFileSync = fs.readFileSync;
+      let injected = false;
+      const readSpy = spyOn(fs, "readFileSync").mockImplementation(((
+        ...args: Parameters<typeof fs.readFileSync>
+      ) => {
+        const result = realReadFileSync(...args);
+        if (!injected && args[0] === lock && result === deadContent) {
+          injected = true;
+          fs.writeFileSync(lock, liveContent, { mode: 0o600 });
+        }
+        return result;
+      }) as typeof fs.readFileSync);
+
+      // Only the RESTORE write (after this process has renamed lockPath onto
+      // its own claimPath) must fail — the initial "wx" claim attempt at the
+      // top of the loop, and the injected replacement write above, must go
+      // through untouched, or the test would never reach the reclaim path at
+      // all. `pastRename` gates that.
+      let pastRename = false;
+      const realRenameSync = fs.renameSync;
+      const renameSpy = spyOn(fs, "renameSync").mockImplementation(((
+        ...args: Parameters<typeof fs.renameSync>
+      ) => {
+        const result = realRenameSync(...args);
+        pastRename = true;
+        return result;
+      }) as typeof fs.renameSync);
+
+      const realWriteFileSync = fs.writeFileSync;
+      const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(((
+        ...args: Parameters<typeof fs.writeFileSync>
+      ) => {
+        if (pastRename && args[0] === lock) {
+          const err = new Error("simulated transient I/O error") as NodeJS.ErrnoException;
+          err.code = "EIO";
+          throw err;
+        }
+        return realWriteFileSync(...args);
+      }) as typeof fs.writeFileSync);
+
+      try {
+        await expect(recordApprovalPort(s.store).requestApproval("run-1", req("rv-1"))).rejects.toThrow(
+          /approval lock reclaim: failed to restore/,
+        );
+      } finally {
+        writeSpy.mockRestore();
+        renameSpy.mockRestore();
+        readSpy.mockRestore();
+      }
+
+      // Fail closed, not open: `body()` (the read-decide-write against the
+      // run record) must never have run. Before the fix, the swallowed
+      // restore error let this SAME call's loop fall through, re-acquire the
+      // now-empty lockPath on its next iteration, and enter the critical
+      // section anyway — despite the replacement holder's lock content being
+      // stranded at claimPath. The rejection above is the fix; this confirms
+      // no approval record was written as a side effect of that wrongly
+      // continued loop.
+      expect(s.store.get("run-1").extensions?.approval).toBeUndefined();
+
+      // The replacement holder's content is preserved (at claimPath, not
+      // discarded) so an operator can recover it by hand, per the error
+      // message above naming claimPath.
+      const claimLeftovers = fs.readdirSync(s.dir).filter((f) => f.includes(".claim."));
+      expect(claimLeftovers.length).toBe(1);
+      expect(fs.readFileSync(path.join(s.dir, claimLeftovers[0]!), "utf8")).toBe(liveContent);
+    } finally {
+      s.cleanup();
+    }
+  }, 15_000);
+
   test("a FRESH lock is waited on, then times out rather than being stolen", async () => {
     const s = store();
     try {
