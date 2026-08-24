@@ -605,8 +605,10 @@ test-hardening agents after sources settled.
 - [x] **Bounded loser teardown** — disposeLosers wraps each teardownSandbox in a deadline
   (LOSER_TEARDOWN_TIMEOUT_MS, default 5 min): one hung exec can no longer park between
   markDestructive/clearDestructive and wedge every future fleet operation behind the lock.
-- [x] Marker-unusable counter reset on any usable read (doc always said "consecutive"; code now
-  matches) · consecutive transport-skip bound (MARKER_TRANSPORT_SKIP_LIMIT=60) so persistent
+- [x] Marker-unusable counter reset on any usable read — CORRECTED RETROSPECTIVELY: round 3
+  recorded "code now matches", but round 5b proved the reset never landed in the round-3 code (the
+  counter stayed cumulative until round 5b's probeArm "absent"-verdict fix; see Round 5b below) ·
+  consecutive transport-skip bound (MARKER_TRANSPORT_SKIP_LIMIT=60) so persistent
   EACCES/timeouts can't poll the full ceiling under the lock · marker size cap (1 MiB ⇒ unusable,
   no unbounded JSON.parse of a runaway final.json) · race tmp staging via mkdtemp 0700 dir (kills the
   predictable-/tmp symlink class) · roster entries refused when empty/duplicated ·

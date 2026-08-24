@@ -1541,10 +1541,11 @@ export async function run(
           });
           emit(`${JSON.stringify(ranked)}\n`);
         } catch (e) {
+          const x = (e ?? {}) as { message?: string };
           printError(
             note,
             "auto-rank-failed",
-            `the advisory ranking failed (${redactSecrets((e as Error).message)}) — the fan-out itself succeeded`,
+            `the advisory ranking failed (${redactSecrets(x.message ?? e)}) — the fan-out itself succeeded`,
             `\`fleet rank ${result.fanoutId} [--steps-json <path>]\` ranks it after the fact`,
             { fanoutId: result.fanoutId },
           );
@@ -1576,10 +1577,11 @@ export async function run(
         try {
           loserLedger.close();
         } catch (e) {
+          const x = (e ?? {}) as { message?: string };
           printError(
             note,
             "ledger-close-failed",
-            `could not close the loser cost ledger: ${redactSecrets((e as Error).message)}`,
+            `could not close the loser cost ledger: ${redactSecrets(x.message ?? e)}`,
             "the handle dies with the process; re-run to confirm it still reads",
           );
           if (fanoutCode === 0) fanoutCode = 6;

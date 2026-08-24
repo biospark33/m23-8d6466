@@ -182,8 +182,11 @@ reconciliation note at the top of this file explains the header/remainder accoun
   wraps each teardownSandbox in `loserTeardownTimeoutMs` (LOSER_TEARDOWN_TIMEOUT_MS, default 5 min);
   a hung disposal is abandoned with its own `loser-teardown-timeout` arm line and the fleet lock is
   provably released. Pinned by patterns.test.ts "a hung loser teardown hits its deadline".
-  DF2.5 has no cancellation seam, so "known to have stopped" is unobservable; the deadline abandons,
-  safe because an abandoned teardown can only touch its own idempotent run state.
+  DF2.5 has no cancellation seam, so "known to have stopped" is unobservable; the deadline abandons.
+  NARROWED in round 5b: that safety holds for BOX LIFECYCLE actions only — an abandoned teardown's
+  close step still updates SHARED cost-ledger state (ingestBoxHours on the loser ledger), which is
+  why the lazy hook must re-open the ledger past a close; "only its own idempotent run state" was
+  too broad.
 - --steps-json gained readBriefFile's regular-file proof (directory ⇒ named refusal instead of EISDIR;
   FIFO can no longer block the read); pinned by a cli.test.ts directory probe.
 - tests/fleet: deadPid/liveChild consolidated into helpers.ts (were duplicated across fanout.test.ts

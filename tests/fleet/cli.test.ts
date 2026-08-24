@@ -4307,7 +4307,10 @@ process.on = ((sig, listener) => {
     while (store.get(hungRun).closedAt === undefined && Date.now() < settleBy) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    expect(store.get(hungRun).closedAt).not.toBeNull();
+    // toBeDefined, not toBeNull: the loop exits on TIMEOUT with closedAt
+    // undefined, and `undefined` is not null — a null-only check would
+    // false-pass exactly when the late teardown failed to settle.
+    expect(store.get(hungRun).closedAt).toBeDefined();
 
     // deps() injects runsDir = <case>/runs, a non-default layout, so the
     // ledger sits INSIDE the records directory (costLedgerOpts' rule), not in
