@@ -400,6 +400,11 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       );
       const ro = new FanoutRecordStore({ dir: fanoutsDir, create: false });
       expect(ro.get("fan-20260823-cafe00").n).toBe(3);
+      // list() works in read-only mode
+      expect(() => ro.list()).not.toThrow();
+      const listed = ro.list();
+      expect(listed).toHaveLength(1);
+      expect(listed[0]?.fanoutId).toBe("fan-20260823-cafe00");
       expect(() => ro.create(makeRecord())).toThrow(/create: false/);
       expect(() => ro.mutate("fan-20260823-cafe00", (r) => r)).toThrow(/create: false/);
     });
@@ -412,7 +417,8 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       const a = readOwnPidStartTime();
       const b = readOwnPidStartTime();
       expect(a).toBe(b);
-      expect(a).toBeGreaterThan(Date.now() - 86_400_000);
+      // Clock-skew-tolerant sanity window: 10 years. Source guarantees only stability, not exact now.
+      expect(a).toBeGreaterThan(Date.now() - 315_360_000_000);
       expect(a).toBeLessThanOrEqual(Date.now());
     });
 
@@ -421,7 +427,8 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       children.push(child);
       const observed = readOwnPidStartTime(child.pid);
       expect(observed).toBeLessThanOrEqual(Date.now());
-      expect(observed).toBeGreaterThan(Date.now() - 3_600_000_000);
+      // Clock-skew-tolerant sanity window: 10 years. Source guarantees only stability, not exact now.
+      expect(observed).toBeGreaterThan(Date.now() - 315_360_000_000);
       expect(readOwnPidStartTime(child.pid)).toBe(observed);
     });
 
@@ -789,6 +796,42 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       // as "dead": the named diagnosis is what keeps it distinct.
       expect(err?.message).toContain("unusable pid");
       expect(onDisk().requestId).toBe("req-huge-pid");
+    });
+
+    test("pid boundary values: 0 and 0x8000_0000 are refused", () => {
+      // pid 0 → refused
+      plantLock(lockPath, {
+        pid: 0,
+        pidStartTime: 1,
+        createdAt: agedIso(),
+        requestId: "req-pid-zero",
+      });
+      let errZero: FleetError | undefined;
+      try {
+        lock().acquire();
+      } catch (e) {
+        errZero = e as FleetError;
+      }
+      expect(errZero?.exitCode).toBe(5);
+      expect(errZero?.message).toContain("unusable pid");
+      expect(onDisk().requestId).toBe("req-pid-zero");
+
+      // pid 0x8000_0000 (one past max) → refused
+      plantLock(lockPath, {
+        pid: 0x8000_0000,
+        pidStartTime: 1,
+        createdAt: agedIso(),
+        requestId: "req-pid-over-max",
+      });
+      let errOverMax: FleetError | undefined;
+      try {
+        lock().acquire();
+      } catch (e) {
+        errOverMax = e as FleetError;
+      }
+      expect(errOverMax?.exitCode).toBe(5);
+      expect(errOverMax?.message).toContain("unusable pid");
+      expect(onDisk().requestId).toBe("req-pid-over-max");
     });
 
     test("the fleet-busy remediation names the holding requestId and the exact rm path", async () => {

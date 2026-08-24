@@ -562,7 +562,8 @@ export class FleetLock {
         // Even a SUCCESSFUL steal respects the budget: a mutex that keeps
         // vanishing under us could otherwise spin past the deadline forever.
         if (Date.now() >= deadline) return false;
-        continue; // provably freeable — retry the claim at once
+        sleepSync(REAP_MUTEX_TICK_MS);
+        continue; // provably freeable — retry after one tick
       }
       if (Date.now() >= deadline) return false;
       sleepSync(REAP_MUTEX_TICK_MS);

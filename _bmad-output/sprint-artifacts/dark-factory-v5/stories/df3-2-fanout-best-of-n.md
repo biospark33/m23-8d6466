@@ -656,3 +656,69 @@ Round 4 (+3 pins ⇒ 501): hung-loser-teardown deadline pin (patterns), --steps-
 refusal probe and fleet-busy-no-money-file pin (cli) — all pass solo; full-file runs during a host
 load spike (LA 200-300 from unrelated VM/Chrome/tsserver processes) reproduce ONLY the documented
 5s-timeout flakes with a mutating failure set, including at HEAD via stash A/B.
+
+## Review round 5 — bmad-code-review on full branch diff (2026-08-24, HEAD `07deeef`)
+
+Nine reviewers over a 6-chunk split of the 8,212-line diff (3 blind source, 3 edge test-suite with
+repo cross-check, 1 acceptance auditor; two agents died on context and were respawned as half-chunk
+tests-patterns-A/B + a slim auditor retry — chunk budget held ≤1,623 lines). 24 raw findings →
+12 patch (2 source, 10 test), 1 decision-needed resolved conservatively, 11 dismissed with source
+evidence (full ledger: `_bmad-output/workflow-state/code-review/pr128-r5/triage.md`).
+
+### Patched (source — wave 1)
+
+- [x] **Reap-mutex steal-success path sleeps before retrying the claim** (fleet-lock.ts
+  acquireReapMutex) — steal→failed-claim→steal cycles previously retried with zero tick sleep,
+  burning CPU until the deadline; the retry now pays one REAP_MUTEX_TICK_MS, tightening the bound the
+  round-3 budget check established. Impact: LOW, 1 caller, behavior-preserving.
+- [x] **runRace hoists `undecided()` to one call per poll iteration** (fanout-primitive.ts) — was
+  computed twice (while-condition + for-loop). Impact: LOW, behavior-preserving.
+
+### Patched (tests — wave 2)
+
+- [x] cli.test.ts: retitled the misleading "scored table" case (it has no --steps-json — all scores
+  null); verbs.test.ts coveredBy binding updated to match; new `--n 0` explicit boundary refusal;
+  new empty `{}` --steps-json happy-path case (exit 0, all scores null, tie:false); 1 MiB cap comment
+  arithmetic corrected (JSON wrapper is 9 bytes, not ~12).
+- [x] fanout.test.ts: readOwnPidStartTime sanity windows loosened to 10-year clock-skew tolerance
+  (stability across calls is the source's real guarantee); new pid boundary refusals (0 and
+  0x8000_0000 — one past pidmax); create:false store now proves list() reads work.
+- [x] rank.test.ts: null-scored arm's breakdown pinned ({testPassRate: 0, uniqueFileCoverage: 0});
+  new identical-scores tie case (different runIds) pins tie:true, exactly-equal scores, stable
+  arm-0-first ordering, "tie flagged" rationale, and the no-automatic-tie-break contract.
+- [x] patterns.test.ts: validation section gains the many-stories n=1 POSITIVE case (min-N asymmetry
+  previously asserted only via rejections).
+
+### Decision-needed → resolved conservatively
+
+- [x] **AC9 schemaVersion explicit-vs-implicit** (auditor, LOW): spec quotes
+  `extensions.fanout = { schemaVersion: 1, … }`; the stamp site writes `{ fanoutId, arm }` and the
+  store layer auto-injects schemaVersion for EVERY extension namespace (run-record.ts
+  validateExtensions). On-disk shape matches the spec exactly. Resolved: no code change — making one
+  call site literal would diverge from the cross-namespace injection contract every other extension
+  write follows. Auditor's own assessment: "No action required unless explicit literal compliance is
+  demanded."
+
+### False positives / dismissals this round (each verified against source before dropping)
+
+Two HIGH "signal-handler race" findings are impossible as described: `onSignal` is fully synchronous
+and Node delivers signals serialized through the single-threaded event loop, so the fleetUnwinding
+check-then-set cannot interleave; `process.listeners(sig)` returns same-signal listeners only, so the
+borrow-strip-reraise loop cannot remove another signal's handler · cross-process stale-winner HIGH
+re-describes the exact failure mode round 3's adopt-persisted-winner mutate already fixes (per-record
+run-lock; loser learns HERE and tears down) · disposeLosers "stale entrants" MED concedes its own
+filter reads current outcomes — correct exclusion, single-threaded · semaphore "active drifts above
+width" MED misreads the handoff: the woken waiter resumes after `await` without re-calling acquire,
+and only the fast path increments (gated `active < width`) · lstartUtcMs "dead code" is deliberate
+round-3 forensic evidence ("RECORDED ONLY", TZ-unsafe to compare — removing it deletes the
+cross-TZ-identity debugging trail) · CLK_TCK hardcode carries its ponytail ceiling annotation ·
+rmQuiet leak is the function's named best-effort contract · cross-process lock-coverage gap MED:
+real Bun.spawn two-process lock races already exist (fanout.test.ts req-race-a/b) · onProbe timing
+and first-writer-atomicity LOWs: reviewer-self-assessed acceptable/covered · auditor AC table:
+17/18 PASS, 1 PARTIAL (the AC9 note above).
+
+Gates at close: full fleet focal suite 506/506 green (K8 flaked once under host load 13.5, passed on
+re-run and at close — the documented load-flake set) · verbs↔cli exit-code title binding regression
+from the P3 retitle caught by the suite and fixed in the same round · bunx tsc --noEmit clean ·
+biome clean on all 7 touched files · detect_changes: 1 symbol touched (runRace), 0 affected
+processes, LOW risk — blast radius confined to this PR's modules.

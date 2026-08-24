@@ -192,3 +192,16 @@ reconciliation note at the top of this file explains the header/remainder accoun
   generic corpse helpers are shared like the ledger fixtures.
 - cli.test.ts unknown-pattern case: the "constructed nothing" assertion now points the invocation at
   a fresh path via --dir (the old freshFanouts path was never consumed by the CLI — vacuous).
+
+## Round 5 addendum (2026-08-24, HEAD 07deeef — bmad-code-review, 9 reviewers / 6 chunks)
+
+24 raw → 12 patch (2 source: reap-mutex steal-path tick sleep, runRace undecided() hoist; 10 test:
+cli retitle + --n 0 + {} steps-json + comment arithmetic, fanout clock-skew bounds + pid boundaries
++ list() read-only, rank breakdown pin + tie contract pin, patterns many-stories n=1 positive),
+1 decision-needed resolved conservative (AC9 schemaVersion: store-layer injection is the cross-namespace
+contract; on-disk shape correct; no change), 11 dismissed with source evidence (incl. two impossible
+signal-handler HIGHs — sync handler + serialized event loop; per-signal listener lists; round-3
+adopt-persisted-winner already covers the stale-winner claim). Full ledger:
+`_bmad-output/workflow-state/code-review/pr128-r5/triage.md`. Gates: 506/506 fleet focal, tsc clean,
+biome clean ×7, detect_changes LOW (1 symbol, 0 processes). One intra-round regression caught and
+fixed: P3 retitle broke verbs.test.ts coveredBy title binding — updated to the new title.

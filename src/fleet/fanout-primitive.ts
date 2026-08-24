@@ -531,7 +531,8 @@ async function runRace(
 
   const baseline = performanceNow(deps);
   while (undecided().length > 0 && performanceNow(deps) - baseline < ceilingMs) {
-    for (const arm of undecided()) {
+    const current = undecided();
+    for (const arm of current) {
       const verdict = await probeArm(deps, store, fanoutId, outcomes, arm, markerPath, deadlineMs);
       if (verdict === "unusable") {
         const ticks = (unusableTicks.get(arm) ?? 0) + 1;

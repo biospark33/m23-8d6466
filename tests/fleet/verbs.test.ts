@@ -1009,7 +1009,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       {
         code: 6,
         why: "needs a successful ranking and a stdout sink that throws EAGAIN — cli.test.ts",
-        coveredBy: "a rank whose scored table cannot print exits 6 with rankedAt stamped",
+        coveredBy: "a rank with no --steps-json whose result line cannot print exits 6 with rankedAt stamped",
       },
     ],
   };

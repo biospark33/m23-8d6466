@@ -233,6 +233,30 @@ describe("rank (DF3.2 AC7)", () => {
     expect(Number((0.7 - 0.6).toFixed(10))).toBe(0.1);
   });
 
+  test("tie: different runIds with identical step outputs produce identical scores and tie", async () => {
+    const h = harness({
+      arms: [
+        { arm: 0, runId: "first" },
+        { arm: 1, runId: "second" },
+      ],
+      steps: {
+        first: { testsExecuted: true, testResults: { passed: 3, failed: 1 }, changedFiles: ["a.ts", "b.ts"] },
+        second: { testsExecuted: true, testResults: { passed: 3, failed: 1 }, changedFiles: ["a.ts", "b.ts"] },
+      },
+    });
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    expect(res.scores.map((s) => s.arm)).toEqual([0, 1]); // stable by arm on equals
+    expect(res.scores[0]?.runId).toBe("first");
+    expect(res.scores[1]?.runId).toBe("second");
+    expect(res.scores[0]?.score).toBe(res.scores[1]?.score); // EXACTLY equal
+    expect(res.tie).toBe(true);
+    expect(res.rationale).toContain("tie flagged");
+    // Deterministic winner on tie: lower arm index wins (stable by arm sort)
+    expect(res.scores[0]?.arm).toBe(0);
+  });
+
   test("tie: normalization rescues a raw delta BELOW 0.1 the other way (K6 straddle)", async () => {
     // Mirror of the fixture above: passed 1/2 vs passed 1/3 has a nominal score
     // delta of exactly 0.1, but this time IEEE-754 renders the score subtraction
@@ -330,6 +354,7 @@ describe("rank (DF3.2 AC7)", () => {
     expect(res.scores[0]?.score).not.toBeNull();
     expect(res.scores[1]?.score).toBeNull();
     expect(res.scores[1]?.runId).toBe("silent");
+    expect(res.scores[1]?.breakdown).toEqual({ testPassRate: 0, uniqueFileCoverage: 0 });
     expect(res.rationale).toContain("silent");
   });
 

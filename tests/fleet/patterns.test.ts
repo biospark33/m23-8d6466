@@ -353,6 +353,13 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       );
     });
 
+    test("many-stories accepts n=1", async () => {
+      manifest();
+      const res = await fanout("many-stories", 1, [brief()], deps());
+      expect(res.arms).toHaveLength(1);
+      expect(res.arms[0]?.outcome).toBe("ready");
+    });
+
     test("best-of-n requires a roster whose count equals n", async () => {
       manifest();
       expect((await refuseOf(fanout("best-of-n", 2, brief(), deps()))).code).toBe("roster-required");

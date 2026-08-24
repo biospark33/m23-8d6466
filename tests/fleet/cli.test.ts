@@ -3707,6 +3707,19 @@ process.on = ((sig, listener) => {
     }
   });
 
+  test("fanout refuses --n 0 with exit 2 naming the 1-8 range", async () => {
+    // Source rejects n < 1 with "takes an integer 1-8" (fleet.ts ~1291).
+    // This test pins the --n 0 boundary case explicitly.
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "0", "--roster", "a"],
+      fanoutDeps(),
+    );
+    expect(code).toBe(2);
+    expect(text()).toContain("--n takes an integer 1-8");
+    expectNoBoxes();
+  });
+
   test("fanout refuses no-headroom with exit 5 before provisioning anything", async () => {
     const d: Partial<FleetDeps> = {
       ...fanoutDeps(),
@@ -3798,7 +3811,7 @@ process.on = ((sig, listener) => {
     expect(readdirSync(join(dir, ".sandbox", "fanouts"))).toHaveLength(1);
   });
 
-  test("a rank whose scored table cannot print exits 6 with rankedAt stamped", async () => {
+  test("a rank with no --steps-json whose result line cannot print exits 6 with rankedAt stamped", async () => {
     const fanoutsPath = join(dir, ".sandbox", "fanouts");
     const fstore = new FanoutRecordStore({ dir: fanoutsPath });
     const id = mintFanoutId();
@@ -4245,7 +4258,7 @@ process.on = ((sig, listener) => {
   test("--steps-json over the 1 MiB cap refuses by name before any read or store build", async () => {
     // Mirrored literal, same discipline as MAX_BRIEF_BYTES above: importing the
     // constant would let an implementation that quietly lowered the cap pass
-    // both sides of this boundary. The pad makes the file 1 MiB + ~12 bytes.
+    // both sides of this boundary. The pad makes the file 1 MiB + 9 bytes.
     const stepsPath = join(dir, "steps-big.json");
     writeFileSync(stepsPath, JSON.stringify({ pad: "x".repeat(1024 * 1024) }));
     const freshDir = join(dir, "never-created-steps");
@@ -4277,6 +4290,43 @@ process.on = ((sig, listener) => {
     expect(envelope.message).toContain("is not a regular file");
     expect(existsSync(freshDir)).toBeFalse();
     expectNoBoxes();
+  });
+
+  test("rank accepts empty {} --steps-json with all scores null and exits 0", async () => {
+    // Source accepts {} as valid steps-json (all arms unscored). This proves the
+    // happy path: an empty object produces a ranking line with every score null.
+    const fanoutsPath = join(dir, ".sandbox", "fanouts");
+    const fstore = new FanoutRecordStore({ dir: fanoutsPath });
+    const id = mintFanoutId();
+    fstore.create({
+      fanoutId: id,
+      requestId: "01234567-89ab-cdef-0123-456789abcdef",
+      pattern: "best-of-n",
+      n: 2,
+      pin: "c".repeat(40),
+      createdAt: new Date().toISOString(),
+      arms: [
+        { arm: 0, runId: "qds-20260101-00000a", briefHash: "a".repeat(64) },
+        { arm: 1, runId: "qds-20260101-00000b", briefHash: "a".repeat(64) },
+      ],
+      winner: null,
+      rankedAt: null,
+      closedAt: new Date().toISOString(),
+    });
+    const stepsPath = join(dir, "steps.json");
+    writeFileSync(stepsPath, "{}");
+    reset();
+    const code = await runCli(["rank", id, "--dir", fanoutsPath, "--steps-json", stepsPath], deps(""));
+    expect(code).toBe(0);
+    const result = JSON.parse(outOnly[0] as string) as { /* dp:ok test-authored output: rank result line this run just emitted to outOnly */
+      scores: { score: number | null }[];
+      tie: boolean;
+      rationale: string;
+    };
+    expect(result.scores).toHaveLength(2);
+    expect(result.scores[0]?.score).toBeNull();
+    expect(result.scores[1]?.score).toBeNull();
+    expect(result.tie).toBe(false);
   });
 
   test("a fleet-busy race refusal creates NO loser cost ledger (INV-2: the money file follows admission)", async () => {
