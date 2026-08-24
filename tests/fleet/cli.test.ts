@@ -39,7 +39,7 @@ import { deadPid } from "./helpers.ts";
 
 import { Database } from "bun:sqlite";
 
-import { run } from "../../scripts/fleet.ts";
+import { makeLoserLedgerHook, run } from "../../scripts/fleet.ts";
 import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
 import { run as sandboxTeardownRun } from "../../scripts/sandbox-teardown.ts";
 import { listVerbs, renderHelp } from "../../src/fleet/verbs.ts";
@@ -4326,6 +4326,57 @@ process.on = ((sig, listener) => {
       db.close();
     }
   }, 30_000); // 4s loser deadline + the sibling's REAL teardown + the post-release settle window — past bun's 5s default
+
+  test("loser-ledger hook: a close() that throws still drops the handle — the late ingest re-opens", () => {
+    // Round 6 (CodeRabbit): the hook's close used to drop its reference AFTER
+    // realLoserLedger?.close(), so a close that THREW left the reference on
+    // the dead handle — and the abandoned-loser window (the test above) would
+    // ingest on it, where bun:sqlite answers "Database has closed" and the
+    // late box-hours row is lost. The drop now rides a finally; the throw
+    // still propagates so the verb's finally keeps its exit-6 reporting.
+    // Unit-level because a REAL CostLedger close cannot be made to throw
+    // deterministically (bun's close is idempotent — a double close is a
+    // no-op, verified against bun:sqlite directly).
+    const ctx = {
+      runId: "qds-20260101-00000a",
+      repoSlug: "o/r",
+      issueId: "7",
+      requestId: "01234567-89ab-cdef-0123-456789abcdef",
+    };
+    const ingestCalls: number[] = [];
+    let opened = 0;
+    const hook = makeLoserLedgerHook(() => {
+      opened += 1;
+      const id = opened;
+      return {
+        ingestBoxHours: () => {
+          ingestCalls.push(id);
+          return { eventId: `evt-${id}`, inserted: true, unpriced: false };
+        },
+        // Handle #1's close fails — the exact failure mode the warning named.
+        close:
+          id === 1
+            ? () => {
+                throw new Error("simulated sqlite close failure");
+              }
+            : () => {},
+      };
+    });
+    // First loser prices pre-close: handle #1 opens.
+    expect(hook.ingestBoxHours(ctx)).toEqual({ eventId: "evt-1", inserted: true, unpriced: false });
+    // The verb's finally closes it and the close FAILS — the failure must
+    // reach the caller while STILL dropping the reference.
+    expect(() => hook.close()).toThrow("simulated sqlite close failure");
+    // THE WINDOW: the abandoned teardown's late ingest lands on a NEW handle,
+    // not the one whose close failed.
+    expect(hook.ingestBoxHours(ctx)).toEqual({ eventId: "evt-2", inserted: true, unpriced: false });
+    expect(ingestCalls).toEqual([1, 2]);
+    expect(opened).toBe(2);
+    // The re-opened handle closes cleanly — no residual throw, no third open.
+    hook.close();
+    expect(opened).toBe(2);
+    expect(ingestCalls).toEqual([1, 2]);
+  });
 
   test("fanout stdout is a keyed contract: exact key sets per emitted line kind", async () => {
     // Story :499 documents what a caller parses off these lines. Pinning the

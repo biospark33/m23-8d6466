@@ -85,6 +85,7 @@ import { resolveRunsDir, RunRecordStore } from "../src/providers/index.ts";
  * not the provider layer, was where redaction stopped.
  */
 import { redactSecrets } from "../src/providers/step-log.ts";
+import type { BoxHoursCtx, IngestResult } from "../src/providers/cost-ledger.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 import {
@@ -763,6 +764,48 @@ function makeLedgerFactory(store: RunRecordStore): () => LedgerLike {
 }
 
 /**
+ * Structural minimum the loser-ledger hook needs from a handle: the real
+ * CostLedger satisfies it, and tests substitute a controllable fake.
+ */
+interface LoserLedgerHandle {
+  ingestBoxHours(ctx: BoxHoursCtx): IngestResult;
+  close(): void;
+}
+
+/**
+ * The lazy loser-ledger hook (see the fanout block's comment): opened on the
+ * FIRST ingestBoxHours, closed by the fanout verb's finally — teardown's close
+ * step only ever ingests. The reference drop is unconditional (try/finally):
+ * a close() that THROWS must still drop the handle, because an abandoned
+ * loser teardown can reach its ingest after the verb's finally ran, and on a
+ * handle whose close failed bun:sqlite answers "Database has closed" — the
+ * late box-hours row lost, under-counting the ledger the cap admits against.
+ * Dropped, the late ingest re-opens a fresh ledger, and the event-id conflict
+ * rule keeps it idempotent against rows already landed. The throw still
+ * propagates: the verb's finally is what reports it (exit 6). The opener seam
+ * exists so that contract is testable without manufacturing a SQLite close
+ * failure (bun's close is idempotent — a double close does not throw).
+ */
+export function makeLoserLedgerHook(
+  openLedger: () => LoserLedgerHandle,
+): CostLedgerHook & { close(): void } {
+  let handle: LoserLedgerHandle | undefined;
+  return {
+    ingestBoxHours: (ctx) => {
+      if (handle === undefined) handle = openLedger();
+      return handle.ingestBoxHours(ctx);
+    },
+    close(): void {
+      try {
+        handle?.close();
+      } finally {
+        handle = undefined;
+      }
+    },
+  };
+}
+
+/**
  * rank's record half: ENOENT reads as "no such fan-out" (rank maps null to its
  * exit-4 fanout-not-found), every OTHER read failure propagates — a malformed
  * or unreadable record is exit 1 substrate, never a quiet misscored arm.
@@ -1433,39 +1476,22 @@ export async function run(
       // any use is a no-op. Race-only wiring: no other pattern disposes arms
       // through teardownSandbox; an injected seam (tests/embedders) wins.
       if (pattern === "race" && injectedCostLedger === undefined) {
-        let realLoserLedger: CostLedger | undefined;
-        loserLedger = {
-          ingestBoxHours: (ctx) => {
-            if (realLoserLedger === undefined) {
-              realLoserLedger = asUsage(
-                () =>
-                  new CostLedger({
-                    ...costLedgerOpts(store.dir),
-                    readRunRecord: (id: string) => {
-                      try {
-                        return store.get(id);
-                      } catch (e) {
-                        if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
-                        throw e;
-                      }
-                    },
-                  }),
-              );
-            }
-            return realLoserLedger.ingestBoxHours(ctx);
-          },
-          close(): void {
-            realLoserLedger?.close();
-            // An ABANDONED loser teardown (its deadline hit inside disposeLosers)
-            // can still reach its close step after this verb's finally ran — on
-            // the held handle that ingest threw and the loser's box-hours row
-            // was lost, under-counting the ledger the cap admits against. Drop
-            // the reference: a late ingest re-opens the ledger, and the
-            // event-id conflict rule keeps it idempotent against rows already
-            // landed.
-            realLoserLedger = undefined;
-          },
-        };
+        loserLedger = makeLoserLedgerHook(() =>
+          asUsage(
+            () =>
+              new CostLedger({
+                ...costLedgerOpts(store.dir),
+                readRunRecord: (id: string) => {
+                  try {
+                    return store.get(id);
+                  } catch (e) {
+                    if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
+                    throw e;
+                  }
+                },
+              }),
+          ),
+        );
       }
       const result = await fanout(pattern as FanoutPattern, n, briefs as Brief | Brief[], {
         ...seams,
