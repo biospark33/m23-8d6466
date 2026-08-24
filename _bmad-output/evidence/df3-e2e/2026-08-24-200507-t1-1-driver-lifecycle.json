@@ -6,7 +6,8 @@
     {
       "phase": "whoami",
       "ok": true,
-      "account": "Email Address: steve@quantumsolutions.tech\nRegion: lax (Los Angeles, USA)\nSSH Keys:\n  Public Key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBrajmPmfznH2xnd2WWBpyqe/TVmf9oyBW5zWlGpZvpV (key-1) ← current"
+      "answered": true,
+      "length": 196
     },
     {
       "phase": "create",

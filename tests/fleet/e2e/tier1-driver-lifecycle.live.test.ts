@@ -36,7 +36,11 @@ test.todoIf(liveTodoOff())(
     let outcome = "pass";
     try {
       expect(ctx.whoami.length).toBeGreaterThan(0);
-      evidence.push({ phase: "whoami", ok: true, account: ctx.whoami });
+      // The whoami answer is operator IDENTITY (email, ssh public key,
+      // region) — proof goes into evidence as the FACT it answered, never the
+      // blob itself; evidence files are quoted in reports and PR comments.
+      // Security review 2026-08-24: SENSITIVE-TO-OBSERVABILITY.
+      evidence.push({ phase: "whoami", ok: true, answered: true, length: ctx.whoami.length });
 
       // ── create → present in list() ────────────────────────────────────────
       vm = runIdFor("t11");
