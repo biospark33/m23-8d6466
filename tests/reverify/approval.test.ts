@@ -6,6 +6,7 @@
  * contract that must hold whichever adapter is plugged in.
  */
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -139,12 +140,15 @@ describe("recordApprovalPort", () => {
 });
 
 describe("approval lock", () => {
-  test("a lock left behind by a dead holder is stolen once it is stale", async () => {
+  test("a lock left behind by a DEAD holder is stolen once it is stale", async () => {
     const s = store();
     try {
       s.store.create("run-1");
       const lock = path.join(s.dir, "run-1.approval.lock");
-      fs.writeFileSync(lock, "");
+      // spawnSync blocks until the child exits, so its pid is guaranteed dead
+      // by the time we write it into the lock — proof of death, not guesswork.
+      const dead = spawnSync(process.execPath, ["--version"]);
+      fs.writeFileSync(lock, `${dead.pid}:stale-nonce`);
       // Backdate past the timeout: the holder is gone, not slow.
       const old = new Date(Date.now() - 60_000);
       fs.utimesSync(lock, old, old);
@@ -156,6 +160,27 @@ describe("approval lock", () => {
       s.cleanup();
     }
   });
+
+  test("a lock held by a LIVE process is NOT reclaimed by age alone", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      const lock = path.join(s.dir, "run-1.approval.lock");
+      // Own pid is verifiably alive (it's this test process), yet the file is
+      // backdated well past LOCK_STALE_MS: a suspended-but-live holder must
+      // still block a second requester from entering the critical section.
+      fs.writeFileSync(lock, `${process.pid}:still-alive`);
+      const old = new Date(Date.now() - 60_000);
+      fs.utimesSync(lock, old, old);
+
+      await expect(recordApprovalPort(s.store).requestApproval("run-1", req("rv-1"))).rejects.toThrow(
+        /approval lock .* held for over/,
+      );
+      expect(fs.existsSync(lock)).toBe(true);
+    } finally {
+      s.cleanup();
+    }
+  }, 15_000);
 
   test("a FRESH lock is waited on, then times out rather than being stolen", async () => {
     const s = store();

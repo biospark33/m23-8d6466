@@ -12,7 +12,8 @@
  * teardown). When DF3.4 lands its own implementation it replaces the ADAPTER,
  * not the caller: the state machine below is caller-side contract.
  */
-import { closeSync, openSync, rmSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { RunRecordStore } from "../providers/run-record.ts";
@@ -63,26 +64,60 @@ const LOCK_POLL_MS = 10;
  */
 const LOCK_STALE_MS = 2 * LOCK_TIMEOUT_MS;
 
+/**
+ * Best-effort check that `pid` no longer refers to a live process. Signal 0
+ * sends nothing but still validates the pid: ESRCH means the process is gone,
+ * anything else (e.g. EPERM — the pid is alive but owned by another user)
+ * means we cannot prove death and must NOT reclaim the lock.
+ */
+function isLockHolderDead(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+function lockHolderPid(raw: string): number | undefined {
+  const pid = Number(raw.split(":", 1)[0]);
+  return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+}
+
 async function withApprovalLock<T>(dir: string, runId: string, body: () => T | Promise<T>): Promise<T> {
   const lockPath = join(dir, `${runId}.approval.lock`);
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   for (;;) {
     try {
-      closeSync(openSync(lockPath, "wx", 0o600));
+      // Content proves ownership: pid lets a later waiter check the holder is
+      // actually dead (not just slow), and the nonce makes the content unique
+      // per acquisition so a compare-and-delete can't be fooled by a
+      // replacement lock that happens to reuse the same pid.
+      writeFileSync(lockPath, `${process.pid}:${randomUUID()}`, { flag: "wx", mode: 0o600 });
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      // Steal a lock whose holder died: this file carries no owner pid, so age
-      // is the only evidence there is. Without this, one crashed reverify
-      // bricks every later approval for the run until an operator removes the
-      // file by hand.
+      // Steal a lock only when its holder is provably dead, never on age
+      // alone: a live holder can be suspended past LOCK_STALE_MS with its
+      // mtime unchanged, and age-only reclamation would let a second process
+      // barge into the critical section underneath it.
       try {
         if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
-          rmSync(lockPath, { force: true });
-          continue;
+          const raw = readFileSync(lockPath, "utf8");
+          const pid = lockHolderPid(raw);
+          if (pid !== undefined && isLockHolderDead(pid)) {
+            // Compare-and-delete: re-read immediately before unlinking so a
+            // replacement lock created between the staleness check above and
+            // this removal (e.g. a new holder that raced in after the dead
+            // owner's lock aged out) is never mistaken for the dead one.
+            if (readFileSync(lockPath, "utf8") === raw) {
+              rmSync(lockPath, { force: true });
+              continue;
+            }
+          }
         }
       } catch {
-        // vanished between the open and the stat — just retry
+        // vanished between the open and the stat/read — just retry
       }
       if (Date.now() >= deadline) {
         throw new Error(
