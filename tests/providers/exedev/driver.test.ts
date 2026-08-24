@@ -16,6 +16,7 @@ import { registeredDrivers, resolveDriver } from "../../../src/providers/index.t
 import { assertValidRunId, RunRecordStore } from "../../../src/providers/run-record.ts";
 import { deliverRunKey, type KeyApi } from "../../../src/providers/credentials.ts";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
+import { ExeDevDriverError } from "../../../src/providers/exedev/transport.ts";
 import { setLogSink } from "../../../src/swarmclaw/log.ts";
 import {
   fakeExeDev,
@@ -581,6 +582,64 @@ describe("ExeDevDriver — control-plane parsing", () => {
     await driver.destroy("destroy-1");
     expect((await driver.list("destroy-1"))).toEqual([]);
   });
+  test("destroy VERIFIES absence after a successful rm — exit 0 alone is not 'destroyed' (F7, 2026-08-24)", async () => {
+    // The live flake shape (e2e-run-report F7): `rm` exited 0, the box stayed
+    // listed, teardown walked away "confirmed". rm's exit status is a claim;
+    // the listing is the state. One retry, then fail closed.
+    let rmCalls = 0;
+    const lying = async (argv: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+      const sub = argv.slice(2).join(" ");
+      if (/^rm /.test(sub)) {
+        rmCalls++;
+        return { stdout: "removed\n", stderr: "", exitCode: 0 };
+      }
+      if (/^ls( \S+)? --json$/.test(sub)) {
+        return {
+          stdout: `${JSON.stringify({ vms: [{ vm_name: "f7-lying", ssh_dest: "f7-lying.exe.xyz" }] })}\n`,
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      if (sub === "whoami") return { stdout: "op\n", stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: `unsupported: ${sub}\n`, exitCode: 64 };
+    };
+    const driver = new ExeDevDriver({ run: lying });
+    let err: unknown;
+    try {
+      await driver.destroy("f7-lying");
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    const code = (err as ExeDevDriverError).code;
+    expect(code).toBe("rm-failed");
+    expect(String((err as Error).message)).toContain("still listed");
+    expect(rmCalls).toBe(2); // exactly one retry before failing closed
+  });
+
+  test("destroy recovers when the retry clears a stale listing (F7)", async () => {
+    // rm exit 0 + still listed once, then the second listing is clean:
+    // transient listing lag must not wedge the destroy.
+    let rmCalls = 0;
+    const lagging = async (argv: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+      const sub = argv.slice(2).join(" ");
+      if (/^rm /.test(sub)) {
+        rmCalls++;
+        return { stdout: "removed\n", stderr: "", exitCode: 0 };
+      }
+      if (/^ls( \S+)? --json$/.test(sub)) {
+        const stillListed = rmCalls < 2; // first listing lags, second is clean
+        const vms = stillListed ? [{ vm_name: "f7-lag", ssh_dest: "f7-lag.exe.xyz" }] : [];
+        return { stdout: `${JSON.stringify({ vms })}\n`, stderr: "", exitCode: 0 };
+      }
+      if (sub === "whoami") return { stdout: "op\n", stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: `unsupported: ${sub}\n`, exitCode: 64 };
+    };
+    await new ExeDevDriver({ run: lagging }).destroy("f7-lag");
+    expect(rmCalls).toBe(2);
+  });
+
+
 
   test("expose validates the port and returns the https URL", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
