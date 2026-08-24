@@ -147,7 +147,7 @@ Reviewers: blind-cli, blind-engine, blind-lockrank, edge-src, edge-tests-a, edge
 - Skips: F11 pin, exitCode rename
 
 ### fix-cli-rank — DONE (all FIXED; F7 verified pre-fixed)
-- F5 auto-rank try/catch ⇒ stderr `auto-rank-failed` envelope, arm-derived exit preserved +pin · F6 ledger gated briefsOk +pin (dir half already correct) · F7 NO LIVE BUG — b916396 fixed it (constructor resolves internally); explicit resolveFanoutsDir both sides for visible symmetry · F8 assertStepOutputShape guard + clamp +pin · F16 single-arm rationale +pin · F18a roster normalize +pin · F18b close guarded dp:ok (no seam for pin) · F18c costLedger stripped · F18d steps-json parsed before store/mkdir +pin · F18e boundary non-negative check +pin
+- F5 auto-rank try/catch ⇒ stderr `auto-rank-failed` envelope, arm-derived exit preserved +pin · F6 ledger gated briefsOk +pin (dir half already correct) — **REOPENED round 4**: briefsOk gating still constructed the SQLite db pre-lock, so a fleet-busy / no-headroom race refusal left cost-ledger.db behind (INV-2). Re-fixed LAZILY — see the round-4 addendum below · F7 NO LIVE BUG — b916396 fixed it (constructor resolves internally); explicit resolveFanoutsDir both sides for visible symmetry · F8 assertStepOutputShape guard + clamp +pin · F16 single-arm rationale +pin · F18a roster normalize +pin · F18b close guarded dp:ok (no seam for pin) · F18c costLedger stripped · F18d steps-json parsed before store/mkdir +pin · F18e boundary non-negative check +pin
 - focal 199 pass / 0 fail ×2 runs · biome clean · tsc clean repo-wide
 - 7 intentional changes logged
 
@@ -167,3 +167,28 @@ auditor (spec) + Sift inline batch. ~100 raw → **21 patch items / rest dismiss
 Working ledger: `/tmp/pr128-r3/triage.md`. Patched items and dispositions recorded in the story's
 "Review round 3" section. Round-1 chunk counts above are left as written (historical record); the
 reconciliation note at the top of this file explains the header/remainder accounting.
+
+## Round 4 addendum (2026-08-24 — Sift inline batch + CodeRabbit outside-diff comments)
+
+- **F6 reopened and re-fixed.** The round-3 "built only past admission" claim was wrong: the loser
+  CostLedger was still constructed eagerly in scripts/fleet.ts before fanout() took the lock, so a
+  fleet-busy or no-headroom race refusal created cost-ledger.db (INV-2 "a refused fan-out mutates
+  nothing"). Fix: the CLI now builds a lazy CostLedgerHook — the hook does no I/O and the real
+  ledger opens only on the first ingestBoxHours, reachable exclusively from a LOSER'S teardown
+  close step, strictly past admission; close-before-use touches no disk. Pinned by cli.test.ts
+  "a fleet-busy race refusal creates NO loser cost ledger". The story's "#129 deferral (needs a
+  factory seam)" rationale is void: no primitive-side seam was required.
+- **Bounded loser teardown landed for real** (the story's round-3 entry pre-checked it): disposeLosers
+  wraps each teardownSandbox in `loserTeardownTimeoutMs` (LOSER_TEARDOWN_TIMEOUT_MS, default 5 min);
+  a hung disposal is abandoned with its own `loser-teardown-timeout` arm line and the fleet lock is
+  provably released. Pinned by patterns.test.ts "a hung loser teardown hits its deadline".
+  DF2.5 has no cancellation seam, so "known to have stopped" is unobservable; the deadline abandons,
+  safe because an abandoned teardown can only touch its own idempotent run state.
+- --steps-json gained readBriefFile's regular-file proof (directory ⇒ named refusal instead of EISDIR;
+  FIFO can no longer block the read); pinned by a cli.test.ts directory probe.
+- tests/fleet: deadPid/liveChild consolidated into helpers.ts (were duplicated across fanout.test.ts
+  and fleet-lock.test.ts under a C3 reading the directory itself did not follow — patterns.test.ts
+  already imports shared fixtures). Ruling-C3 comments rescoped: LOCAL covers choreography fakes;
+  generic corpse helpers are shared like the ledger fixtures.
+- cli.test.ts unknown-pattern case: the "constructed nothing" assertion now points the invocation at
+  a fresh path via --dir (the old freshFanouts path was never consumed by the CLI — vacuous).

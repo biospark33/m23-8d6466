@@ -35,6 +35,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { runMarkerPath } from "../../src/phase-engine/journal.ts";
+import { deadPid } from "./helpers.ts";
 
 import { Database } from "bun:sqlite";
 
@@ -4260,6 +4261,53 @@ process.on = ((sig, listener) => {
     expectNoBoxes();
   });
 
+  test("--steps-json pointing at a DIRECTORY is refused by name before any read or store build", async () => {
+    // readBriefFile's posture: only a regular file has a size worth trusting.
+    // A directory reports a small st.size that sails past the cap, and without
+    // this proof the read would surface as a bare EISDIR instead of a named
+    // refusal (a FIFO would block the read outright).
+    const stepsPath = join(dir, "steps-dir");
+    mkdirSync(stepsPath);
+    const freshDir = join(dir, "never-created-steps-dir");
+    reset();
+    const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+    expect(code).toBe(2);
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: usage envelope this run just emitted to errCaptured */
+    expect(envelope.code).toBe("usage");
+    expect(envelope.message).toContain("is not a regular file");
+    expect(existsSync(freshDir)).toBeFalse();
+    expectNoBoxes();
+  });
+
+  test("a fleet-busy race refusal creates NO loser cost ledger (INV-2: the money file follows admission)", async () => {
+    // The loser ledger is LAZY end to end: the hook object itself does no I/O,
+    // and the real CostLedger opens its SQLite file only on the first
+    // ingestBoxHours — reachable exclusively from a LOSER'S teardown close
+    // step, strictly past admission. A race refused at the lock therefore
+    // leaves no money file behind (the pre-lazy build created one here).
+    const heldLock = join(dir, ".sandbox", "fleet.lock");
+    mkdirSync(dirname(heldLock), { recursive: true });
+    const corpsePid = await deadPid();
+    writeFileSync(
+      heldLock,
+      `${JSON.stringify({
+        pid: corpsePid,
+        pidStartTime: 1,
+        createdAt: new Date().toISOString(), // YOUNG: refused, never stolen
+        requestId: "busy-holder",
+      })}\n`,
+      { mode: 0o600 },
+    );
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
+      deps(validBriefJson(dir)),
+    );
+    expect(code).toBe(5);
+    expect(existsSync(join(dir, ".sandbox", "cost-ledger.db"))).toBeFalse();
+    expect(existsSync(join(dir, "runs", "cost-ledger.db"))).toBeFalse();
+  });
+
   test("an unknown --pattern refuses exit 2 before any construction side effect", async () => {
     // F-C1/F-C2: the pattern guard is hoisted ABOVE the constructors and above
     // every pattern-scoped check, so a typo'd pattern is a usage error that has
@@ -4267,10 +4315,10 @@ process.on = ((sig, listener) => {
     const freshFanouts = join(dir, "fresh-fanouts");
     reset();
     const code = await runCli(
-      ["fanout", "--driver", "fake", "--pattern", "racee", "--n", "2", "--roster", "a,b"],
-      // fanoutsDir deliberately NOT injected — the flag is the subject, and the
-      // strongest form of "constructed nothing" is that the fresh path the flag
-      // names still does not exist.
+      // --dir points the (would-be) fan-outs store at a fresh path: the
+      // strongest form of "constructed nothing" is that the very directory the
+      // invocation was aimed at still does not exist afterwards.
+      ["fanout", "--driver", "fake", "--pattern", "racee", "--n", "2", "--roster", "a,b", "--dir", freshFanouts],
       { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
     );
     expect(code).toBe(2);

@@ -643,9 +643,16 @@ armUnknown boxes never auto-destroyed (INV-5 verbatim) · store.set is patch/mer
 only by race poller by design) · empty-briefs zero-arm record impossible (pre-lock validation) ·
 best-of-n --n 1 enforced downstream with the advertised message · unmatched steps keys named in
 rationale · hostTag/writeLockDirect exports + src→scripts/lib inversion documented deliberate ·
-loser-ledger SQLite file created pre-admission REAL but closing it needs a factory seam — DEFERRED to #129 ·
+loser-ledger SQLite file created pre-admission — REAL; initially deferred to #129, then FIXED in
+round 4 via lazy first-use construction in the CLI (no factory seam was required — see the triage
+ledger's round-4 addendum) ·
 CWD-relative library defaults = CLI-owned resolution discipline (prior rounds' disposition).
 
-Gates at close: fleet focal suites 498 tests green modulo the documented K8/AC5 load flakes (pass
+Gates at close: fleet focal suites 501 tests green modulo the documented K8/AC5 load flakes (pass
 solo) · bunx tsc --noEmit clean · biome clean on all touched files · detect_changes blast radius
 confined to this PR's modules (run + fanout flows only).
+
+Round 4 (+3 pins ⇒ 501): hung-loser-teardown deadline pin (patterns), --steps-json directory
+refusal probe and fleet-busy-no-money-file pin (cli) — all pass solo; full-file runs during a host
+load spike (LA 200-300 from unrelated VM/Chrome/tsserver processes) reproduce ONLY the documented
+5s-timeout flakes with a mutating failure set, including at HEAD via stash A/B.

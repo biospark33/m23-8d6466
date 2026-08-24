@@ -1,8 +1,10 @@
 /**
  * DF3.2 Wave-1a agent A — fan-out record store (AC9) + fleet lock (AC8).
  *
- * Fakes stay LOCAL to this file (orchestrator ruling C3): nobody touches
- * tests/fleet/helpers.ts in wave 1.
+ * Fakes stay LOCAL to this file (orchestrator ruling C3): the choreography
+ * each suite forces is planted here, not in a shared module. The generic
+ * process-corpse helpers are the exception — shared via ./helpers.ts like the
+ * ledger fixtures, so a fix to how death is proven cannot fork per file.
  *
  * Coverage per integration-spec D14 mandatory inventory, agent-A scope:
  * - AC9 store: O_EXCL create (EEXIST propagates, body byte-identical — the
@@ -39,6 +41,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 import { isAlive } from "../../scripts/lib/run-lock.ts";
+import { deadPid, liveChild } from "./helpers.ts";
 import type { FleetError } from "../../src/fleet/dispatch.ts";
 // The fleet lock lives in its own module (D1 escape clause, orchestrator-approved
 // split); the record store stays here in fanout.test.ts's sibling fanout.ts.
@@ -101,18 +104,6 @@ function plantLock(
 /** An ISO createdAt aged past FLEET_LOCK_STALE_MS by `extraMs`. */
 function agedIso(extraMs = 60_000): string {
   return new Date(Date.now() - FLEET_LOCK_STALE_MS - extraMs).toISOString();
-}
-
-/** Spawn a short-lived child and resolve once its pid is provably dead. */
-async function deadPid(): Promise<number> { /* dp:ok proc.exited resolves with the exit code, never rejects */
-  const proc = Bun.spawn(["true"]);
-  await proc.exited;
-  return proc.pid;
-}
-
-/** A live child the test kills on teardown — for identity-match rows. */
-function liveChild(): Bun.Subprocess {
-  return Bun.spawn(["sleep", "30"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 }
 
 /** First line of a subprocess stream, bounded — the inter-process barrier. */

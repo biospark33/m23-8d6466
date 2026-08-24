@@ -69,6 +69,17 @@ export const DEFAULT_FANOUT_CEILING_MS = 3_600_000;
  */
 export const MARKER_UNUSABLE_TICKS_LIMIT = 3;
 
+/**
+ * Whole-pipeline deadline for ONE loser's teardownSandbox (all eight DF2.5
+ * steps, network execs included). The fleet lock is HELD for every loser
+ * disposal between markDestructive/clearDestructive, so one hung step — a
+ * wedged exec, a stalled provider destroy — would otherwise park the lock
+ * indefinitely and wedge every future fleet operation behind it. Generous by
+ * design: this bounds a hang, it does not hurry a slow-but-alive teardown
+ * (per-step pacing is teardown's own business).
+ */
+export const LOSER_TEARDOWN_TIMEOUT_MS = 300_000;
+
 export type FanoutPattern = "best-of-n" | "many-stories" | "race";
 
 export interface FanoutDeps extends Omit<DispatchDeps, "requestId"> {
@@ -86,6 +97,11 @@ export interface FanoutDeps extends Omit<DispatchDeps, "requestId"> {
   pollIntervalMs?: number;
   perCallDeadlineMs?: number;
   ceilingMs?: number;
+  /**
+   * Whole-pipeline deadline for ONE loser's teardownSandbox during disposal
+   * (default LOSER_TEARDOWN_TIMEOUT_MS). Tests inject small values.
+   */
+  loserTeardownTimeoutMs?: number;
   /** Monotonic seam for same-process budgets (tick math, ceilings). */
   monotonic?: () => number;
   /**
@@ -636,6 +652,19 @@ function shellQuote(s: string): string {
  * did not win goes through DF2.5's teardownSandbox UNMODIFIED — its fixed step
  * array harvests before it destroys (teardown.ts:99-111). Per-arm guards: one
  * failed disposal never aborts a sibling's.
+ *
+ * Each disposal is DEADLINED (`loserTeardownTimeoutMs`, default
+ * LOSER_TEARDOWN_TIMEOUT_MS): this whole loop sits between markDestructive and
+ * clearDestructive with the fleet lock held, so one unbounded teardown — a
+ * wedged exec, a stalled provider destroy — would park the lock indefinitely
+ * and wedge every future fleet operation behind it. DF2.5 has no cancellation
+ * seam (no AbortSignal crosses driver.exec, git or destroy), so "known to have
+ * stopped" is not observable; the deadline therefore ABANDONS the attempt.
+ * That is safe because a late-settling abandoned teardown can only touch its
+ * OWN run state: the record close is first-close-wins, the box-hour ledger row
+ * is idempotent by event id, and withTimeout pins a no-op catch on the
+ * abandoned promise so its eventual fate never surfaces as an unhandled
+ * rejection after release.
  */
 async function disposeLosers(
   deps: FanoutDeps,
@@ -667,20 +696,24 @@ async function disposeLosers(
     if (o.outcome === "ready") outcomes[o.arm] = { ...o, outcome: "lostRace" };
   }
   // The destructive phase began — the fleet lock refuses release until the
-  // phase completes. Cleared once EVERY loser has been attempted: individual
+  // phase completes. Cleared once EVERY loser has been ATTEMPTED: individual
   // failures were logged with their own remediation above. The mark sits
   // INSIDE the try so any throw after the flag is set still reaches the clear.
+  const teardownDeadlineMs = deps.loserTeardownTimeoutMs ?? LOSER_TEARDOWN_TIMEOUT_MS;
   try {
     lock.markDestructive();
     for (const o of entered) {
       try {
-        await teardownSandbox(teardownDeps, o.runId as string);
+        await withTimeout(teardownSandbox(teardownDeps, o.runId as string), teardownDeadlineMs, "loser-teardown");
       } catch (e) {
         armLine(deps.requestId, fanoutId, {
           arm: o.arm,
           runId: o.runId,
           outcome: "lostRace",
-          error: { code: "loser-teardown-failed", message: errText(e) },
+          error: {
+            code: e instanceof TimeoutError ? "loser-teardown-timeout" : "loser-teardown-failed",
+            message: errText(e),
+          },
         });
       }
     }

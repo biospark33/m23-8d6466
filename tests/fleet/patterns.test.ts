@@ -848,6 +848,77 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(existsSync(lockPath)).toBe(false);
     });
 
+    test("a hung loser teardown hits its deadline: disposal completes, the timeout is named, the lock survives", async () => {
+      manifest();
+      let plantedVm: string | undefined;
+      driver.onProbe = (vm, probeNumber) => {
+        if (probeNumber === 2 && plantedVm === undefined) {
+          plantedVm = vm;
+          plantMarker(driver, vm, { ok: true });
+        }
+      };
+      // Only the FIRST non-winner destroy hangs — a provider that accepted the
+      // call and never answers. Pre-deadline this parked the whole loop between
+      // markDestructive/clearDestructive forever, wedging every later fleet
+      // operation behind the held lock.
+      let hungFor: string | undefined;
+      const hangingDestroyDriver = boundProxy(driver, {
+        get(prop) {
+          return prop === "destroy"
+            ? (vm: string): Promise<void> => {
+                if (hungFor === undefined && vm !== plantedVm) {
+                  hungFor = vm;
+                  return new Promise<never>(() => {});
+                }
+                return driver.destroy(vm);
+              }
+            : undefined;
+        },
+      });
+      // The deadline must clear the REAL git bundle-verify probe teardown runs
+      // first (it is genuine host git, not a fake), while still bounding the
+      // hang to something a test can wait out.
+      const res = await fanout(
+        "race",
+        3,
+        brief(),
+        raceDeps({ rosterIds: ["r0", "r1", "r2"], driver: hangingDestroyDriver, loserTeardownTimeoutMs: 2_000 }),
+      );
+
+      const won = res.arms.findIndex((a) => a.vmName === plantedVm);
+      expect(res.winner).toBe(won);
+      expect(res.arms[won]?.outcome).toBe("ready"); // winner intact, untouched
+      expect(boxExists(driver, res.arms[won]?.vmName)).toBe(true);
+
+      // The hung loser: classified lostRace like any attempted disposal, and
+      // named by its OWN code — distinguishable from an ordinary failure.
+      expect(hungFor).toBeDefined();
+      const hungArm = res.arms.find((a) => a.vmName === hungFor);
+      expect(hungArm?.outcome).toBe("lostRace");
+      const timeouts = entries.filter(
+        (e) =>
+          e.operation === "fleet.fanout.arm" &&
+          (e.error as { code?: string } | undefined)?.code === "loser-teardown-timeout",
+      );
+      expect(timeouts).toHaveLength(1);
+      expect(timeouts[0]?.runId).toBe(hungArm?.runId);
+
+      // Disposal CONTINUED past the abandoned attempt: the sibling went through
+      // DF2.5 in full — harvested before destroyed, closed, box gone.
+      const sibling = res.arms.find((a) => a !== hungArm && a !== res.arms[won]);
+      const steps = teardownStepsFor(entries, sibling?.runId);
+      expect(steps.indexOf("harvest")).toBeLessThan(steps.indexOf("destroy"));
+      expect(steps).toContain("close");
+      expect(boxExists(driver, sibling?.vmName)).toBe(false);
+
+      // No wedge: the record closed and the fleet lock was RELEASED — the file
+      // this fan-out held is gone, so nothing is pinned destructive behind it.
+      const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
+      expect(rec.winner).toBe(won);
+      expect(rec.closedAt).not.toBeNull();
+      expect(existsSync(lockPath)).toBe(false);
+    }, 20_000); // the injected deadline alone is 2s, plus a REAL git bundle-verify probe in the sibling's teardown — past bun's 5s default
+
     test("a ready:false gate excludes the arm from the race entirely: setupFailed, left alive, siblings decide the winner (AC4 × AC5)", async () => {
       manifest();
       let gateCalls = 0;

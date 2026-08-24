@@ -6,8 +6,10 @@
  *
  * Moved out of fanout.test.ts (PR 128 review round 3): that file keeps the
  * fleet-lock behavior tests that go through FleetLock.acquire()/subprocesses;
- * this one owns the mutex-judgment matrix. Helpers stay LOCAL to their file
- * (orchestrator ruling C3) — no shared test module.
+ * this one owns the mutex-judgment matrix. The choreography fakes stay local
+ * (ruling C3); the generic process-corpse helpers are shared via ./helpers.ts,
+ * like the ledger fixtures, so a fix to how death is proven lands everywhere
+ * at once.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
@@ -23,19 +25,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { deadPid, liveChild } from "./helpers.ts";
 import { readOwnPidStartTime, stealJudgedReapMutex } from "../../src/fleet/fleet-lock.ts";
-
-/** Spawn a short-lived child and resolve once its pid is provably dead. */
-async function deadPid(): Promise<number> { /* dp:ok proc.exited resolves with the exit code, never rejects */
-  const proc = Bun.spawn(["true"]);
-  await proc.exited;
-  return proc.pid;
-}
-
-/** A live child the test kills on teardown — for identity-match rows. */
-function liveChild(): Bun.Subprocess {
-  return Bun.spawn(["sleep", "30"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-}
 
 const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "df3-2-fleet-lock-")));
 

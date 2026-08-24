@@ -1257,9 +1257,13 @@ export async function run(
     // catch, honored on the completion line below (logVerb derives from exit
     // code alone, and 5 alone would read as do-not-retry "logic").
     let transientRefusal = false;
-    // Race losers' teardown prices box hours through THIS ledger (DF2.8);
-    // built beside the records dir like teardown's own, closed in the finally.
-    let loserLedger: CostLedger | undefined;
+    // Race losers' teardown prices box hours through THIS handle (DF2.8);
+    // closed in the finally like teardown's own ledger. Built LAZILY below —
+    // just before fanout(), once the records store exists — because the real
+    // CostLedger creates its SQLite db file in its constructor, and an eager
+    // build left a money file behind on every pre-admission refusal
+    // (fleet-busy, no-headroom): INV-2's "a refused fan-out mutates nothing".
+    let loserLedger: (CostLedgerHook & { close(): void }) | undefined;
     try {
       if (positionals.length > 1) {
         throw usageError(
@@ -1422,29 +1426,38 @@ export async function run(
         ...seams
       } = deps ?? {};
       const fanoutsFlagDir = injectedFanoutsDir ?? dir;
-      // Race losers' teardown prices their box hours into the ledger — wired
-      // beside the records dir exactly like the teardown verb's, so a loser's
-      // close step cannot silently under-count spend against the cap. Race
-      // only: no other pattern disposes arms through teardownSandbox here, and
-      // an unused SQLite handle would still create its db file. briefsOk keeps
-      // that true past validation too (INV-2: a refused fan-out mutates
-      // nothing — its money file included); fanout() re-refuses the briefs
-      // anyway, and a refused race never reaches a loser to price.
-      if (pattern === "race" && briefsOk && injectedCostLedger === undefined) {
-        loserLedger = asUsage(
-          () =>
-            new CostLedger({
-              ...costLedgerOpts(store.dir),
-              readRunRecord: (id: string) => {
-                try {
-                  return store.get(id);
-                } catch (e) {
-                  if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
-                  throw e;
-                }
-              },
-            }),
-        );
+      // The hook defers FURTHER than its own construction: the real CostLedger
+      // opens on the FIRST ingestBoxHours, and only a LOSER'S teardown close
+      // step can call that — strictly past admission — so even a headroom-
+      // refused race that got this far touches no money file. close() before
+      // any use is a no-op. Race-only wiring: no other pattern disposes arms
+      // through teardownSandbox; an injected seam (tests/embedders) wins.
+      if (pattern === "race" && injectedCostLedger === undefined) {
+        let realLoserLedger: CostLedger | undefined;
+        loserLedger = {
+          ingestBoxHours: (ctx) => {
+            if (realLoserLedger === undefined) {
+              realLoserLedger = asUsage(
+                () =>
+                  new CostLedger({
+                    ...costLedgerOpts(store.dir),
+                    readRunRecord: (id: string) => {
+                      try {
+                        return store.get(id);
+                      } catch (e) {
+                        if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
+                        throw e;
+                      }
+                    },
+                  }),
+              );
+            }
+            return realLoserLedger.ingestBoxHours(ctx);
+          },
+          close(): void {
+            realLoserLedger?.close();
+          },
+        };
       }
       const result = await fanout(pattern as FanoutPattern, n, briefs as Brief | Brief[], {
         ...seams,
@@ -1578,17 +1591,27 @@ export async function run(
       const stepsPath = flags.get("--steps-json");
       if (stepsPath !== undefined) {
         let rawSteps: string;
-        // Size cap BEFORE the read (MAX_BRIEF_BYTES parity): an oversized file
-        // is refused by name instead of being slurped. A statSync failure
-        // (ENOENT, EACCES) leaves the size unknown and falls through to the
-        // read's own catch below, keeping the missing-file message shape.
-        const stepsSize = (() => {
+        // Regular-file proof BEFORE the cap and the read (readBriefFile's
+        // posture): a directory reports a small st.size that sails past the
+        // cap into an EISDIR read, and a FIFO would BLOCK the read forever
+        // waiting for a writer — only a regular file has a size worth trusting
+        // and can be refused before it is opened. A statSync failure (ENOENT,
+        // EACCES) leaves the stat unknown and falls through to the read's own
+        // catch below, keeping the missing-file message shape.
+        const stepsStat = (() => {
           try {
-            return statSync(stepsPath).size;
+            return statSync(stepsPath);
           } catch {
-            return -1;
+            return undefined;
           }
         })();
+        if (stepsStat !== undefined && !stepsStat.isFile()) {
+          throw usageError(
+            `--steps-json ${stepsPath} is not a regular file`,
+            "point --steps-json at a readable JSON file mapping run ids to step outputs",
+          );
+        }
+        const stepsSize = stepsStat?.size ?? -1;
         if (stepsSize > MAX_STEPS_BYTES) {
           throw usageError(
             "--steps-json exceeds the 1 MiB cap",

@@ -131,3 +131,23 @@ export function closeThrowsLedger(): RecordingLedger {
 // `tests/providers/fake-driver.test.ts` as well as this suite, and a shared
 // combinator does not belong inside the higher layer's fixtures — see that
 // file's header for the load-cost half of the reason.
+
+// ─── process-corpse helpers (shared by the lock-choreography suites) ──────────
+
+/**
+ * Spawn a short-lived child and resolve once its pid is provably dead.
+ *
+ * Shared here rather than re-declared per file: a fix to HOW death is proven
+ * (e.g. `Bun.spawn(["true"])` flaking on a loaded host) must land everywhere
+ * at once or two suites silently disagree about what "dead" means.
+ */
+export async function deadPid(): Promise<number> { /* dp:ok proc.exited resolves with the exit code, never rejects */
+  const proc = Bun.spawn(["true"]);
+  await proc.exited;
+  return proc.pid;
+}
+
+/** A live child the test kills on teardown — for identity-match rows. */
+export function liveChild(): Bun.Subprocess {
+  return Bun.spawn(["sleep", "30"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+}
