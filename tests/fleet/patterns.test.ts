@@ -33,7 +33,7 @@ import { VIZ_PIDFILE, type ExecResult, type ProviderDriver } from "../../src/pro
 import type { SetupGateResult } from "../../src/providers/exedev/setup-gate.ts";
 import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
-import { goodLedger } from "./helpers.ts";
+import { goodLedger, type RecordingLedger } from "./helpers.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 import { runMarkerPath } from "../../src/phase-engine/journal.ts";
 import { FleetError, type GateOpts } from "../../src/fleet/dispatch.ts";
@@ -581,6 +581,47 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
     });
   });
 
+  // ─── DD-9/INV-3: the per-arm cap reaches dispatch ADMISSION ──────────────────
+
+  describe("per-arm cap enforcement path (DD-9/INV-3)", () => {
+    test("deps.capMicroUsd reaches every arm's budget admission as the key cap — not just the admitted log line", async () => {
+      manifest();
+      const ledgers: RecordingLedger[] = [];
+      const res = await fanout(
+        "best-of-n",
+        2,
+        brief(),
+        deps({
+          rosterIds: ["r0", "r1"],
+          capMicroUsd: 12_345,
+          // A config default DISTINCT from the passed cap: the recording
+          // ledger keeps `capMicroUsd` (config-derived) apart from
+          // `keyCapMicroUsd` (the gate's third argument) precisely so a
+          // dispatcher propagating one while claiming the other fails here.
+          ledgerFactory: () => {
+            const l = goodLedger(7_000_000);
+            ledgers.push(l);
+            return l;
+          },
+        }),
+      );
+      expect(res.arms.map((a) => a.outcome)).toEqual(["ready", "ready"]);
+      expect(ledgers).toHaveLength(2);
+      for (const l of ledgers) {
+        expect(l.admitCalls).toHaveLength(1);
+        // assertWithinBudget was handed deps.capMicroUsd as its key-cap…
+        expect(l.admitCalls[0]?.keyCapMicroUsd).toBe(12_345);
+        // …while the ledger-config-derived cap stayed the ledger's own.
+        expect(l.admitCalls[0]?.capMicroUsd).toBe(7_000_000);
+      }
+      // And each admission booked ITS OWN arm's runId — per-arm dispatch, not
+      // one shared admission.
+      expect(ledgers.map((l) => l.admitCalls[0]?.input.runId).sort()).toEqual(
+        res.arms.map((a) => a.runId as string).sort(),
+      );
+    });
+  });
+
   // ─── AC4: setup-gate failure isolation ─────────────────────────────────────────
 
   describe("arm failure isolation (AC4)", () => {
@@ -611,6 +652,42 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
       expect(rec.closedAt).not.toBeNull();
       expect(rec.winner).toBeNull();
+    });
+
+    test("two of three arms failing post-provision — a ready:false gate and a THROWING gate side by side: both classified, survivor unaffected, record closes", async () => {
+      manifest();
+      let gateCalls = 0;
+      const res = await fanout(
+        "best-of-n",
+        3,
+        brief(),
+        deps({
+          rosterIds: ["r0", "r1", "r2"],
+          setupGate: async (_d: ProviderDriver, vm: string) => {
+            gateCalls += 1;
+            if (gateCalls === 2) return gateFail(vm); // exit-3 refusal
+            if (gateCalls === 3) throw new Error("gate exploded mid-batch");
+            return gateReady(vm);
+          },
+        }),
+      );
+      const byOutcome = (o: string) => res.arms.filter((a) => a.outcome === o);
+      // The survivor completed untouched by its batch-mates' failures.
+      expect(byOutcome("ready")).toHaveLength(1);
+      expect(byOutcome("setupFailed")).toHaveLength(1);
+      expect(byOutcome("setupFailed")[0]?.exitCode).toBe(3);
+      // A thrown gate error escapes dispatch's outer catch as exit-1
+      // dispatch-failed: an arm failure, never a setup classification and
+      // never an unclassified crash.
+      expect(byOutcome("armFailed")).toHaveLength(1);
+      expect(byOutcome("armFailed")[0]?.exitCode).toBe(1);
+      // INV-5: every provisioned box stays alive WITH its evidence, and no
+      // teardown ran at all (best-of-n never disposes).
+      for (const arm of res.arms) expect(boxExists(driver, arm.vmName)).toBe(true);
+      expect(entries.some((e) => e.operation.startsWith("teardown."))).toBe(false);
+      const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
+      expect(rec.winner).toBeNull();
+      expect(rec.closedAt).not.toBeNull();
     });
   });
 
@@ -771,6 +848,195 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(existsSync(lockPath)).toBe(false);
     });
 
+    test("a ready:false gate excludes the arm from the race entirely: setupFailed, left alive, siblings decide the winner (AC4 × AC5)", async () => {
+      manifest();
+      let gateCalls = 0;
+      let plantedVm: string | undefined;
+      driver.onProbe = (vm, probeNumber) => {
+        if (probeNumber === 2 && plantedVm === undefined) {
+          plantedVm = vm;
+          plantMarker(driver, vm, { ok: true });
+        }
+      };
+      const res = await fanout(
+        "race",
+        3,
+        brief(),
+        raceDeps({
+          rosterIds: ["r0", "r1", "r2"],
+          setupGate: async (_d: ProviderDriver, vm: string) => {
+            gateCalls += 1;
+            return gateCalls === 1 ? gateFail(vm) : gateReady(vm);
+          },
+        }),
+      );
+      const failed = res.arms.find((a) => a.outcome === "setupFailed");
+      expect(failed?.exitCode).toBe(3);
+      const failedIndex = res.arms.indexOf(failed as (typeof res.arms)[number]);
+      // Excluded from ENTRANTS: never polled, never disposed — INV-5 alive.
+      expect(boxExists(driver, failed?.vmName)).toBe(true);
+      expect(teardownStepsFor(entries, failed?.runId)).toEqual([]);
+      // The two siblings raced normally: one won and stays up, one lost and
+      // went through DF2.5 in full.
+      const won = res.winner ?? -1;
+      expect(won).toBeGreaterThanOrEqual(0);
+      expect(won).not.toBe(failedIndex);
+      expect(res.arms[won]?.outcome).toBe("ready");
+      expect(res.arms[won]?.vmName).toBe(plantedVm);
+      expect(boxExists(driver, res.arms[won]?.vmName)).toBe(true);
+      const loser = res.arms.find((a) => a !== failed && a !== res.arms[won]);
+      expect(loser?.outcome).toBe("lostRace");
+      expect(teardownStepsFor(entries, loser?.runId)).toContain("close");
+      expect(boxExists(driver, loser?.vmName)).toBe(false);
+      const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
+      expect(rec.winner).toBe(won);
+      expect(rec.closedAt).not.toBeNull();
+    });
+
+    test("a THROWN gate error is an arm failure, not a race loss: classified armFailed, excluded from entrants, left alive", async () => {
+      manifest();
+      let plantedVm: string | undefined;
+      driver.onProbe = (vm, probeNumber) => {
+        if (probeNumber === 2 && plantedVm === undefined) {
+          plantedVm = vm;
+          plantMarker(driver, vm, { ok: true });
+        }
+      };
+      let gateCalls = 0;
+      const res = await fanout(
+        "race",
+        3,
+        brief(),
+        raceDeps({
+          rosterIds: ["r0", "r1", "r2"],
+          setupGate: async (_d: ProviderDriver, vm: string) => {
+            gateCalls += 1;
+            if (gateCalls === 1) throw new Error("gate blew up before asserting");
+            return gateReady(vm);
+          },
+        }),
+      );
+      const failed = res.arms.find((a) => a.outcome === "armFailed");
+      // dispatch's outer catch wraps the raw throw as exit-1 dispatch-failed:
+      // an ARM failure — never misfiled as setupFailed, never treated as a
+      // race entrant that then loses.
+      expect(failed).toBeDefined();
+      expect(failed?.exitCode).toBe(1);
+      expect(res.arms.some((a) => a.outcome === "setupFailed")).toBe(false);
+      // Excluded from ENTRANTS: alive with its evidence, no lifecycle ran.
+      expect(boxExists(driver, failed?.vmName)).toBe(true);
+      expect(teardownStepsFor(entries, failed?.runId)).toEqual([]);
+      const won = res.winner ?? -1;
+      expect(won).toBeGreaterThanOrEqual(0);
+      expect(won).not.toBe(res.arms.indexOf(failed as (typeof res.arms)[number]));
+      expect(res.arms[won]?.outcome).toBe("ready");
+      expect(boxExists(driver, res.arms[won]?.vmName)).toBe(true);
+      const loser = res.arms.find((a) => a !== failed && a !== res.arms[won]);
+      expect(loser?.outcome).toBe("lostRace");
+      expect(teardownStepsFor(entries, loser?.runId)).toContain("close");
+      const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
+      expect(rec.closedAt).not.toBeNull();
+    });
+
+    test("harvest failing during loser disposal logs loser-teardown-failed, leaves THAT box alive, and still disposes the sibling", async () => {
+      manifest();
+      const sha = "a".repeat(40);
+      const dispatched = new Map<string, string>(); // vm → runId, via the gate seam
+      let plantedVm: string | undefined;
+      driver.onProbe = (vm, probeNumber) => {
+        if (probeNumber === 2 && plantedVm === undefined) {
+          plantedVm = vm;
+          plantMarker(driver, vm, { ok: true });
+          // Dispatch never stamps commitSha onto the record, so harvest would
+          // short-circuit to outcome "none" without ever exec'ing its bundle
+          // step. Stamping here (post-dispatch, pre-disposal) walks harvest
+          // into its REAL in-box exec so the failure below lands ON harvest.
+          for (const [ , runId ] of dispatched) store.set(runId, { commitSha: sha });
+        }
+      };
+      // Same spy shape as the destroy-failure test above, aimed at HARVEST's
+      // in-box exec (`bash -s -- <base> <branch>`; artifacts' shape is plain
+      // `bash -s`, so argv[2]==="--" separates the two). The FIRST loser to
+      // reach harvest gets a hard exit-128; the sibling gets a clean NOREPO
+      // protocol line, keeping its path deterministic (and git-less).
+      let failedFor: string | undefined;
+      const failingHarvestDriver = boundProxy(driver, {
+        get(prop) {
+          if (prop !== "exec") return undefined;
+          return (vm: string, argv: string[], stdin?: string): Promise<ExecResult> => {
+            if (
+              argv.length === 5 &&
+              argv[0] === "bash" &&
+              argv[1] === "-s" &&
+              argv[2] === "--" &&
+              vm !== plantedVm
+            ) {
+              if (failedFor === undefined) {
+                failedFor = vm;
+                return Promise.resolve({ stdout: "", stderr: "fatal: bad object abc123", exitCode: 128 });
+              }
+              return Promise.resolve({ stdout: "NOREPO\n", stderr: "", exitCode: 0 });
+            }
+            return driver.exec(vm, argv, stdin);
+          };
+        },
+      });
+      const res = await fanout(
+        "race",
+        3,
+        brief(),
+        raceDeps({
+          rosterIds: ["r0", "r1", "r2"],
+          driver: failingHarvestDriver,
+          setupGate: async (_d: ProviderDriver, vmName: string, o: GateOpts) => {
+            dispatched.set(vmName, o.runId);
+            return gateReady(vmName);
+          },
+        }),
+      );
+      expect(dispatched.size).toBe(3);
+      const won = res.arms.findIndex((a) => a.vmName === plantedVm);
+      expect(won).toBeGreaterThanOrEqual(0);
+      expect(res.winner).toBe(won);
+      expect(res.arms[won]?.outcome).toBe("ready"); // winner intact
+
+      expect(failedFor).toBeDefined();
+      const failedArm = res.arms.find((a) => a.vmName === failedFor);
+      expect(failedArm?.outcome).toBe("lostRace");
+      // The taxonomy event fired once, naming the right run, carrying
+      // HARVEST's own diagnosis (exit code + stderr), not a generic failure.
+      const failures = entries.filter(
+        (e) =>
+          e.operation === "fleet.fanout.arm" &&
+          (e.error as { code?: string } | undefined)?.code === "loser-teardown-failed",
+      );
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.runId).toBe(failedArm?.runId);
+      expect((failures[0]?.error as { message?: string } | undefined)?.message).toContain("exited 128");
+      // Aborted AT harvest: it is the last teardown step attempted for this
+      // loser — revoke/destroy/close never ran, the box is alive WITH its
+      // evidence, and its record is still open.
+      const failedSteps = teardownStepsFor(entries, failedArm?.runId);
+      expect(failedSteps[failedSteps.length - 1]).toBe("harvest");
+      expect(boxExists(driver, failedFor)).toBe(true);
+      expect(store.get(failedArm?.runId as string).closedAt).toBeUndefined();
+
+      // Per-arm guards: the sibling loser was STILL attempted and completed
+      // DF2.5 in full — harvest before destroy, closed, box gone.
+      const sibling = res.arms.find((a) => a !== failedArm && a !== res.arms[won]);
+      expect(sibling?.outcome).toBe("lostRace");
+      const steps = teardownStepsFor(entries, sibling?.runId);
+      expect(steps.indexOf("harvest")).toBeLessThan(steps.indexOf("destroy"));
+      expect(steps).toContain("close");
+      expect(boxExists(driver, sibling?.vmName)).toBe(false);
+
+      // No wedge: the destructive mark cleared (release succeeded) and the
+      // fan-out's own record closed despite the failed loser.
+      const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
+      expect(rec.closedAt).not.toBeNull();
+      expect(existsSync(lockPath)).toBe(false);
+    }, 30_000); // harvest's preflight spawns a REAL host git — needs headroom under load
+
     test("another process's persisted claim is adopted immediately: winner returned, losers disposed", async () => {
       manifest();
       // The "other process" lands between admission and OUR first probe: its
@@ -916,6 +1182,26 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(DEFAULT_POLL_INTERVAL_MS).toBe(5_000);
       expect(DEFAULT_PER_CALL_DEADLINE_MS).toBe(10_000);
       expect(DEFAULT_FANOUT_CEILING_MS).toBe(3_600_000);
+    });
+
+    test("many-stories at the FANOUT_MAX_N edge admits and runs every arm (off-by-one guard on the accepting side)", async () => {
+      manifest();
+      const n = FANOUT_MAX_N;
+      const res = await fanout(
+        "many-stories",
+        n,
+        Array.from({ length: n }, () => brief()),
+        // Headroom must cover the whole edge: the default limits are not
+        // guaranteed to admit 8, and this row is about the n bound.
+        deps({ quotaLimits: limitsWith(n) }),
+      );
+      expect(res.arms).toHaveLength(n);
+      expect(res.arms.every((a) => a.outcome === "ready")).toBe(true);
+      expect(new Set(res.arms.map((a) => a.vmName)).size).toBe(n);
+      const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
+      expect(rec.n).toBe(n);
+      expect(rec.arms).toHaveLength(n);
+      expect(rec.closedAt).not.toBeNull();
     });
 
     test("the pin is the control variable: mismatch exits 2 pin-mismatch", () => {

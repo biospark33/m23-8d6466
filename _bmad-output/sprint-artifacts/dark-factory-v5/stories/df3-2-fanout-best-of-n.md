@@ -570,3 +570,82 @@ touched files; `detect_changes` blast radius confined to this PR's modules.
 Fleet focal suites (fanout/patterns/rank/verbs/cli): all green post-change · `bunx tsc --noEmit` clean ·
 biome clean on all touched files · detect_changes run before commit. Full-suite numbers recorded in the
 addendum below.
+
+## Review round 3 — bmad-code-review on full branch diff (2026-08-24, HEAD `6af62af`)
+
+Seven parallel reviewers (5 blind chunk reviewers incl. two test-chunk specialists, edge-src with repo
+access, spec auditor) over a 5-chunk split of the 6,958-line diff, plus the Sift bot's post-round-2
+inline batch folded into triage. ~100 raw findings → 21 patch items, rest dismissed against source
+(full ledger: `_bmad-output/evidence/df3-2/pr128-triage.md`, round-3 addendum; working notes
+`/tmp/pr128-r3/triage.md`). Fix waves: 2 source-cluster fixers + 1 cli/rank fixer, then 2 standalone
+test-hardening agents after sources settled.
+
+### Patched (source — fleet-lock.ts)
+
+- [x] **Cross-TZ identity compare could steal a LIVE holder's lock** — round-2's r10 "TZ-stable UTC
+  arithmetic" premise was inverted: `ps` renders digits in the READING shell's TZ, so
+  `Date.UTC(reader-local-digits)` ≠ writer value for the same instant. Identity comparison now uses
+  the observer-self-consistent `localMs === pidStartTime` unconditionally; `lstartRaw`/`lstartUtcMs`
+  remain recorded as operator evidence only. Regression pin: live holder with off-by-half-day
+  `lstartUtcMs` must refuse, never reclaim.
+- [x] **Reap-mutex litter sweep no longer age-judges judgeable-ish bodies** — object-with-pid bytes
+  (missing pidStartTime / out-of-range pid) wait out the budget instead of being swept after 1 s;
+  sweep strictly for unparseable/no-pid bytes.
+- [x] **acquireReapMutex loop bounded** — deadline re-checked after a successful steal; steal treats
+  only ENOENT as vanish evidence (EACCES/EIO ⇒ wait, not spin).
+- [x] **release() non-ENOENT read failure keeps the lock releasable** — registration (and destructive
+  mark) restored before rethrow so signal/exit handlers retry instead of stranding until death+1h.
+- [x] **Zombie holders reclaimed** — `pidIsZombie()` probe (linux `/proc` state Z, darwin `ps -o stat=`);
+  a SIGKILLed fan-out whose CI parent never reaps no longer wedges the fleet forever.
+- [x] Dir-mode failure typed as FleetError(5,"fleet-lock-dir-mode") · fleet-busy remediation mentions
+  mid-reclaim hand-off · steal-mutex race tests moved to new dedicated tests/fleet/fleet-lock.test.ts.
+
+### Patched (source — fanout-primitive.ts)
+
+- [x] **Bounded loser teardown** — disposeLosers wraps each teardownSandbox in a deadline
+  (LOSER_TEARDOWN_TIMEOUT_MS, default 5 min): one hung exec can no longer park between
+  markDestructive/clearDestructive and wedge every future fleet operation behind the lock.
+- [x] Marker-unusable counter reset on any usable read (doc always said "consecutive"; code now
+  matches) · consecutive transport-skip bound (MARKER_TRANSPORT_SKIP_LIMIT=60) so persistent
+  EACCES/timeouts can't poll the full ceiling under the lock · marker size cap (1 MiB ⇒ unusable,
+  no unbounded JSON.parse of a runaway final.json) · race tmp staging via mkdtemp 0700 dir (kills the
+  predictable-/tmp symlink class) · roster entries refused when empty/duplicated ·
+  pollIntervalMs/perCallDeadlineMs/ceilingMs validated ≥1 at the public seam.
+
+### Patched (source — scripts/fleet.ts + rank.ts)
+
+- [x] **Structural refusals hoisted pre-construction (INV-2)** — unknown pattern, pattern min-N,
+  roster-forbidden/required/count refuse before keyApi/store/loserLedger constructors run. Precedence
+  preserved exactly (pinned by verbs.test.ts's declared-exit-codes probes): flag-syntax gates
+  (`--n`, `--cap-micro-usd`) first, then brief parse errors, then roster-forbidden, then
+  pattern/min-N/roster shape. Pin check runs after the known-pattern guard.
+- [x] --steps-json capped at 1 MiB (named refusal; MAX_BRIEF_BYTES parity) · --n regex ceiling
+  decoupled from FANOUT_MAX_N · rank's assertStepOutputShape refuses non-object outputs and counts
+  past Number.MAX_SAFE_INTEGER under the same invalid-step-output code.
+
+### Patched (tests — wave 2)
+
+- [x] **Fanout arm-failure exit rule e2e (was entirely untested)** — setupFailed⇒1, armUnknown-at-
+  ceiling⇒1, lostRace-only⇒0 through the CLI front door.
+- [x] Race gateFail precedence (ready:false AND thrown variants) · per-arm capMicroUsd enforcement
+  path (RecordingLedger pins what assertWithinBudget receives) · harvest-stage loser-teardown failure
+  (commitSha-stamped fixture so harvest really execs) · 2-of-3 mass-failure batch · FANOUT_MAX_N
+  accepted edge · exact STALE_MS boundary pin (`>` semantics) · dead-pid re-verified at plant sites ·
+  refusal-matrix err.code/message assertions · stdout JSON-lines keyed contract pinned · oversize
+  steps-json + unknown-pattern CLI refusals · rank non-object/MAX_SAFE_INTEGER/duplicate-runId
+  characterization.
+
+### False positives / dismissals this round (verified against source)
+
+best-of-n leaves arms alive + closedAt stamped (INV-5 + advisory human-closes-loop design) · failed/
+armUnknown boxes never auto-destroyed (INV-5 verbatim) · store.set is patch/merge semantics
+(RunRecordPatch) · auto-rank null stamp does not brick re-rank (rank has no rankedAt guard; winner set
+only by race poller by design) · empty-briefs zero-arm record impossible (pre-lock validation) ·
+best-of-n --n 1 enforced downstream with the advertised message · unmatched steps keys named in
+rationale · hostTag/writeLockDirect exports + src→scripts/lib inversion documented deliberate ·
+loser-ledger SQLite file created pre-admission REAL but closing it needs a factory seam — DEFERRED ·
+CWD-relative library defaults = CLI-owned resolution discipline (prior rounds' disposition).
+
+Gates at close: fleet focal suites 498 tests green modulo the documented K8/AC5 load flakes (pass
+solo) · bunx tsc --noEmit clean · biome clean on all touched files · detect_changes blast radius
+confined to this PR's modules (run + fanout flows only).

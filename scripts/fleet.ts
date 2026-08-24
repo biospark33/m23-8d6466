@@ -113,7 +113,6 @@ import {
   assertFanoutPin,
   fanout,
   FANOUT_MAX_N,
-  type FanoutDeps,
   type FanoutPattern,
 } from "../src/fleet/fanout-primitive.ts";
 import { rank, type ArmStepOutput } from "../src/fleet/rank.ts";
@@ -125,6 +124,9 @@ const HELP = renderHelp(listVerbs());
 
 /** Brief ingress cap (story Guards): 64 KiB from stdin or --brief <path>. */
 const MAX_BRIEF_BYTES = 64 * 1024;
+// Same posture as MAX_BRIEF_BYTES, one tier up in size: --steps-json is
+// capped AS STAT'D so readFileSync never pulls unbounded bytes into memory.
+const MAX_STEPS_BYTES = 1024 * 1024;
 
 /**
  * The tokenizer's flag grammar, derived from the SAME registry `parseArgv`
@@ -1269,28 +1271,25 @@ export async function run(
       assertDriverChosen("fanout", driverName, deps?.driver);
       // The pattern decides how the brief payload is SHAPED (many-stories wraps
       // its briefs), so it is read first. Its VALIDITY stays with fanout()'s own
-      // validation — this only routes the parse; a typo'd pattern flows through
-      // the single-object path and is refused exit-2 there.
+      // validation — this only routes the parse; a typo'd or absent pattern
+      // flows through the single-object path and is refused exit-2 there.
       const pattern = flags.get("--pattern");
+      // Flag-level width gate FIRST, pattern-blind exactly as it has always
+      // been: a malformed/out-of-range --n must refuse with ITS message even
+      // when --pattern is missing or garbled (the declared-exit-codes probe in
+      // verbs.test.ts pins this precedence). Pattern-scoped structure follows.
       const nRaw = flags.get("--n");
       // Mirrors --port: plain decimal ONLY, then range — Number() alone accepts
-      // hex (`0x3` → 3), exponents and zero padding that are not what was typed.
-      const n = typeof nRaw === "string" && /^[1-9]\d{0,1}$/.test(nRaw) ? Number(nRaw) : Number.NaN;
+      // hex (`0x3` → 3), exponents and zero padding that are not what was
+      // typed. Digits are unbounded on purpose: the ceiling lives solely in
+      // the range check against FANOUT_MAX_N below.
+      const n = typeof nRaw === "string" && /^[1-9][0-9]*$/.test(nRaw) ? Number(nRaw) : Number.NaN;
       if (!Number.isInteger(n) || n < 1 || n > FANOUT_MAX_N) {
         throw usageError(
           `--n ${JSON.stringify(nRaw)} is not a fan-out width`,
           `--n takes an integer 1-${FANOUT_MAX_N} (best-of-n/race need two arms to compare)`,
         );
       }
-      let rosterIds = flags
-        .get("--roster")
-        ?.split(",")
-        .map((s) => s.trim())
-        .filter((s) => s !== "");
-      // `--roster ""` / "," splits to an EMPTY list — separators alone name no
-      // arms, so that is flag-ABSENT semantics (the primitive's own
-      // roster-required refusal), not a supplied roster of zero entries.
-      if (rosterIds !== undefined && rosterIds.length === 0) rosterIds = undefined;
       // Positive safe integer, mirroring the --port numeric-flag idiom (D10).
       const capRaw = flags.get("--cap-micro-usd");
       let capMicroUsd: number | undefined;
@@ -1304,9 +1303,67 @@ export async function run(
         }
       }
 
-      // Brief ingestion reuses the dispatch front door verbatim — same seam,
-      // same 64 KiB cap enforced AS READ, same TTY refusal (`ingestBriefJson`).
+      // INV-2 / validation-before-construction: fanout()'s cheap structural
+      // Brief ingestion comes next: reading + JSON-parsing the brief has always
+      // preceded the pattern/roster semantics (the declared-exit-codes probe
+      // feeds "{not json" and expects THAT refusal), and it mutates nothing —
+      // so it stays ahead of the structural hoist below without touching INV-2.
       const briefJson = await ingestBriefJson(briefPath, deps);
+      // Structural refusals are mirrored HERE, before the keyApi / store /
+      // loser-ledger constructors, so structurally-invalid input never builds
+      // a handle (let alone touches disk). The primitive keeps its own checks
+      // untouched — this is the library boundary staying put while the CLI
+      // refuses earlier. An absent/garbled PATTERN is refused here too — same
+      // message fanout() would give, just before any constructor runs.
+      let rosterIds = flags
+        .get("--roster")
+        ?.split(",")
+        .map((s) => s.trim())
+        .filter((s) => s !== "");
+      // `--roster ""` / "," splits to an EMPTY list — separators alone name no
+      // arms, so that is flag-ABSENT semantics (the primitive's own
+      // roster-required refusal), not a supplied roster of zero entries.
+      if (rosterIds !== undefined && rosterIds.length === 0) rosterIds = undefined;
+      // Pattern-scoped structure, still pre-construction: a KNOWN pattern gets
+      // its min-N refusals here; anything else takes the unknown-pattern
+      // refusal — the same message fanout() would print, just earlier. The
+      // many-stories roster FORBIDDEN check deliberately precedes this guard:
+      // `many-stories --roster …` must refuse on the roster even when the brief
+      // is not yet wrapper-valid (cli.test.ts pins both orderings).
+      if (pattern === "many-stories" && rosterIds !== undefined) {
+        throw usageError(
+          "--roster is not valid for many-stories",
+          "drop --roster; per-arm variation comes from the distinct briefs",
+        );
+      }
+      if (pattern === "best-of-n" || pattern === "many-stories" || pattern === "race") {
+        const minN = pattern === "many-stories" ? 1 : 2;
+        if (n < minN) {
+          throw usageError(
+            `--n ${JSON.stringify(nRaw)} is not a fan-out width`,
+            `--n takes an integer ${minN}-${FANOUT_MAX_N}${minN === 2 ? " (best-of-n/race need two arms to compare)" : ""}`,
+          );
+        }
+      } else {
+        throw usageError(
+          `unknown pattern: ${String(pattern)}`,
+          "pattern is one of best-of-n, many-stories, race",
+        );
+      }
+      // Roster shape, same hoisting: required and exactly --n wide for
+      // best-of-n/race (many-stories' forbidden case already refused above).
+      if (pattern !== "many-stories") {
+        if (rosterIds === undefined) {
+          throw usageError(
+            `${pattern} requires a roster list (one entry per arm)`,
+            "pass the roster entries and rerun",
+          );
+        }
+        if (rosterIds.length !== n) {
+          throw usageError(`${pattern} got ${rosterIds.length} roster entries for n=${n}`, "the roster count must equal --n");
+        }
+      }
+
       // many-stories carries its N briefs as { "briefs": [ … ] }; every other
       // pattern takes exactly ONE object (fanout() refuses an array for them).
       let briefs: unknown;
@@ -1333,7 +1390,9 @@ export async function run(
       fanRequestId = resolveBriefRequestId(requestIdSource) ?? newRequestId();
 
       // The pin is the control variable — checked BEFORE anything is
-      // constructed, so a mismatch exits 2 having mutated nothing.
+      // constructed, so a mismatch exits 2 having mutated nothing. It runs
+      // after the known-pattern guard above: a garbage --pattern is an
+      // unknown-pattern refusal, never a pin verdict over a typo'd value.
       const schemaList: unknown[] = Array.isArray(briefs) ? briefs : [briefs];
       assertFanoutPin(pattern as FanoutPattern, schemaList, flags.get("--pin"));
 
@@ -1519,6 +1578,23 @@ export async function run(
       const stepsPath = flags.get("--steps-json");
       if (stepsPath !== undefined) {
         let rawSteps: string;
+        // Size cap BEFORE the read (MAX_BRIEF_BYTES parity): an oversized file
+        // is refused by name instead of being slurped. A statSync failure
+        // (ENOENT, EACCES) leaves the size unknown and falls through to the
+        // read's own catch below, keeping the missing-file message shape.
+        const stepsSize = (() => {
+          try {
+            return statSync(stepsPath).size;
+          } catch {
+            return -1;
+          }
+        })();
+        if (stepsSize > MAX_STEPS_BYTES) {
+          throw usageError(
+            "--steps-json exceeds the 1 MiB cap",
+            "point --steps-json at a smaller JSON file mapping run ids to step outputs",
+          );
+        }
         try {
           rawSteps = readFileSync(stepsPath, "utf8");
         } catch (e) {

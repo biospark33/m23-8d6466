@@ -32,7 +32,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+
+import { runMarkerPath } from "../../src/phase-engine/journal.ts";
 
 import { Database } from "bun:sqlite";
 
@@ -3676,34 +3678,28 @@ process.on = ((sig, listener) => {
   });
 
   test("fanout validation refusals exit 2 naming the guard, having provisioned nothing", async () => {
-    const manyWrapped = (): Partial<FleetDeps> => ({
-      ...fanoutDeps(),
-      readBrief: async () => JSON.stringify({ briefs: [JSON.parse(validBriefJson(dir)) as Record<string, unknown>] }), /* dp:ok test-authored output: re-parses the brief this file builds in-process */
-    });
-    const cases: [string[], string, Partial<FleetDeps>?][] = [
-      [["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "1", "--roster", "a"], "invalid-n"],
+    const cases: [string[], string][] = [
+      // Round 3 (F-C1): the pattern-scoped structural refusals are hoisted to
+      // the CLI's pre-construction block, so these rows hit usageErrors whose
+      // prose mirrors fanout()'s taxonomy — pinned by message, not code.
+      [["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "1", "--roster", "a"], "--n takes an integer 2-8"],
       [
         ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b,c"],
-        "roster-count-mismatch",
+        "the roster count must equal --n",
       ],
       [
         ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b", "--pin", "d".repeat(40)],
         "pin-mismatch",
       ],
-      // A bare brief where the wrapper is required is refused first...
-      // The CLI's own wrapper guard's remediation (scripts/fleet.ts) alone —
-      // the generic "briefs" matched every brief-shaped refusal equally.
-      [
-        ["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1", "--roster", "a"],
-        "wrap the n brief objects",
-      ],
-      // ...and WITH the wrapper, --roster itself is the refusal.
-      [["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1", "--roster", "a"], "roster-forbidden", manyWrapped()],
+      // --roster is structurally forbidden for many-stories BEFORE the brief is
+      // even ingested, so this refuses the same way with or without the
+      // briefs wrapper (the wrapper guard still owns the no-roster case below).
+      [["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1", "--roster", "a"], "--roster is not valid for many-stories"],
       [["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1"], "wrap the n brief objects"],
     ];
-    for (const [argv, needle, over] of cases) {
+    for (const [argv, needle] of cases) {
       reset();
-      const code = await runCli(argv, over ?? fanoutDeps());
+      const code = await runCli(argv, fanoutDeps());
       expect({ argv, code }).toEqual({ argv, code: 2 });
       expect(text()).toContain(needle);
       expectNoBoxes();
@@ -3991,7 +3987,9 @@ process.on = ((sig, listener) => {
   test("--roster of separators only is flag-absent: roster-required, not count-mismatch", async () => {
     // `--roster ","` splits to an empty list, which used to be treated as a
     // SUPPLIED roster of zero entries. It names no arms at all, so the operator
-    // gets the same refusal as omitting the flag entirely.
+    // gets the same refusal as omitting the flag entirely. Round 3 hoists that
+    // refusal to the CLI's pre-construction block, so it surfaces as a usage
+    // error whose prose still says a roster is required.
     reset();
     const d = fanoutDeps();
     const code = await runCli(
@@ -3999,8 +3997,9 @@ process.on = ((sig, listener) => {
       d,
     );
     expect(code).toBe(2);
-    const envelope = JSON.parse(errCaptured[0] as string) as { code: string }; /* dp:ok test-authored output: error envelope this run just emitted to errCaptured */
-    expect(envelope.code).toBe("roster-required");
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: error envelope this run just emitted to errCaptured */
+    expect(envelope.code).toBe("usage");
+    expect(envelope.message).toContain("requires a roster list");
   });
 
   test("a refused race constructs no cost ledger — no db file appears anywhere", async () => {
@@ -4054,6 +4053,240 @@ process.on = ((sig, listener) => {
     expect(envelope.message).toContain("the fan-out itself succeeded");
     // The acks printed; the ranking line did not.
     expect(outOnly).toHaveLength(2);
+  });
+
+  // ─── fanout exit rule + stdout row contract (round-3 T-W1/T-W6) ────────────
+
+  /**
+   * Redirects `runMarkerPath()` (read at call time from `$QDS_RUN_ROOT`) into
+   * the case tmpdir and returns a restore fn. Without it the race poller probes
+   * `/run/journal/final.json` — a path this host may or may not answer — so
+   * "no marker" and "marker present" both become properties of THIS case's
+   * directory instead of the machine's.
+   */
+  function redirectRunRoot(subdir: string): { root: string; restore: () => void } {
+    const prev = process.env.QDS_RUN_ROOT;
+    const root = join(dir, subdir);
+    mkdirSync(root, { recursive: true });
+    process.env.QDS_RUN_ROOT = root;
+    return {
+      root,
+      // Reflect.deleteProperty, not `= undefined`: Bun coerces an undefined
+      // assignment into the STRING "undefined" (the QDS_FANOUTS_DIR note).
+      restore: () => {
+        if (prev === undefined) Reflect.deleteProperty(process.env, "QDS_RUN_ROOT");
+        else process.env.QDS_RUN_ROOT = prev;
+      },
+    };
+  }
+
+  /** The arm-status rows a fanout run printed to stdout, parsed. */
+  const armRows = (): { fanoutId: string; arm: number; runId: string; outcome: string; vmName?: string }[] =>
+    outOnly.map((l) => JSON.parse(l) as { fanoutId: string; arm: number; runId: string; outcome: string; vmName?: string }); /* dp:ok test-authored output: arm rows this test's own CLI run just emitted */
+
+  /**
+   * The AC5 timing seams are FanoutDeps-only — FleetDeps forwards every key it
+   * does not consume verbatim (`...seams`), so tests inject small values even
+   * though the operator surface has no flag for them. The cast is the seam's
+   * own shape, not a hole: production defaults are the AC numbers.
+   */
+  const raceTimingDeps = (): Partial<FleetDeps> =>
+    ({ ...fanoutDeps(), pollIntervalMs: 10, perCallDeadlineMs: 5_000 }) as Partial<FleetDeps>;
+
+  test("e2e: an arm classified setupFailed exits 1 — the failure half of the story:417 exit rule", async () => {
+    const base = new FakeDriver(boxesDir);
+    const d: Partial<FleetDeps> = {
+      ...fanoutDeps(),
+      // Item A of the fake gate is `exec true`; failing it fails EVERY arm at
+      // its gate — dispatch refuses exit 3 per arm, which classifyArmFailure
+      // turns into setupFailed (never armFailed, never lostRace).
+      driver: driverWith(base, {
+        exec: async (vm: string, argv: string[], stdin?: string) =>
+          argv[0] === "true"
+            ? { exitCode: 1, stdout: "", stderr: "box unreachable" }
+            : base.exec(vm, argv, stdin),
+      }),
+    };
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+      d,
+    );
+    // 1, not 0 and not 2: the arms PROVISIONED then failed their gates — a
+    // substrate outcome automation must alert on, not an argv mistake.
+    expect(code).toBe(1);
+    const rows = armRows();
+    expect(rows.map((r) => r.outcome)).toEqual(["setupFailed", "setupFailed"]);
+    // The gate runs AFTER provisioning, so each refusal names its box and the
+    // optional vmName key rides along — see the row-contract pin below.
+    for (const row of rows) expect(Object.keys(row).sort()).toEqual(["arm", "fanoutId", "outcome", "runId", "vmName"]);
+    // No auto-rank: only an all-ready best-of-n ranks.
+    expect(outOnly.join("")).not.toContain('"scores"');
+  });
+
+  test("e2e: arms still undecided at the race ceiling report armUnknown and exit 1", async () => {
+    const rr = redirectRunRoot("empty-run-root"); // no completion marker anywhere under it
+    try {
+      reset();
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
+        // The tiny ceiling keeps the fleet lock held for milliseconds instead
+        // of the production hour; the verdict either way is armUnknown.
+        { ...raceTimingDeps(), ceilingMs: 120 } as Partial<FleetDeps>,
+      );
+      expect(code).toBe(1);
+      const rows = armRows();
+      expect(rows.map((r) => r.outcome)).toEqual(["armUnknown", "armUnknown"]);
+      // INV-6's other half: unknown-state arms are never assumed losers —
+      // neither box was torn down on a guess.
+      for (const row of rows) expect(existsSync(join(boxesDir, row.vmName ?? ""))).toBeTrue();
+    } finally {
+      rr.restore();
+    }
+  });
+
+  test("e2e: a race whose every non-winner is lostRace exits 0 — losing is not failing", async () => {
+    // FakeDriver's copyFile refuses any remote path outside the box, so — like
+    // patterns.test.ts's RaceFakeDriver — the in-box completion marker maps
+    // onto <box>/journal/final.json and planting it is writing that file. The
+    // FIRST marker probe belongs to arm 0 (index-order polling), so planting
+    // at first probe makes the winner deterministic.
+    const base = new FakeDriver(boxesDir);
+    const markerPath = runMarkerPath();
+    const boxMarker = (vm: string): string => join(boxesDir, vm, "journal", "final.json");
+    let planted = false;
+    const d = {
+      ...fanoutDeps(),
+      driver: driverWith(base, {
+        exec: async (vm: string, argv: string[], stdin?: string) => {
+          if (
+            argv.length >= 3 &&
+            argv[0] === "sh" &&
+            argv[1] === "-c" &&
+            typeof argv[2] === "string" &&
+            argv[2].includes(markerPath)
+          ) {
+            if (!planted) {
+              planted = true;
+              mkdirSync(dirname(boxMarker(vm)), { recursive: true });
+              writeFileSync(boxMarker(vm), `${JSON.stringify({ ok: true })}\n`);
+            }
+            return base.exec(vm, ["sh", "-c", `test -f '${boxMarker(vm)}'`], stdin);
+          }
+          return base.exec(vm, argv, stdin);
+        },
+        copyFile: async (vm: string, remotePath: string, localPath: string) =>
+          remotePath === markerPath
+            ? base.copyFile(vm, boxMarker(vm), localPath)
+            : base.copyFile(vm, remotePath, localPath),
+      }),
+      // The generous ceiling is the safety net: a fixture regression must fail
+      // fast, not hold the fleet lock for the production hour.
+      pollIntervalMs: 10,
+      ceilingMs: 10_000,
+    } as Partial<FleetDeps>;
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
+      d,
+    );
+    // The load-bearing half of the story:417 rule — lostRace alone does NOT
+    // fail. A race that produced its winner worked; reporting 1 here would
+    // make automation alert on every successful race.
+    expect(code).toBe(0);
+    const rows = armRows();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.outcome).toBe("ready");
+    expect(rows[1]?.outcome).toBe("lostRace");
+    // Winner stays up; the loser went through DF2.5 teardownSandbox
+    // (harvested-then-destroyed), pricing its box hours into the loser ledger
+    // the verb built.
+    expect(existsSync(join(boxesDir, rows[0]?.vmName ?? ""))).toBeTrue();
+    expect(existsSync(join(boxesDir, rows[1]?.vmName ?? ""))).toBeFalse();
+    // Loser disposal marked the fleet lock destructive and CLEARED it —
+    // release succeeded, so nothing survives the verb.
+    expect(existsSync(join(dir, ".sandbox", "fleet.lock"))).toBeFalse();
+  });
+
+  test("fanout stdout is a keyed contract: exact key sets per emitted line kind", async () => {
+    // Story :499 documents what a caller parses off these lines. Pinning the
+    // EXACT key sets (not just their presence) is what makes a silently added
+    // column — the thing that breaks every downstream jq filter — a test
+    // failure instead of a release note.
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+      fanoutDeps(),
+    );
+    expect(code).toBe(0);
+    const lines = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>); /* dp:ok test-authored output: lines this test's own CLI run just emitted */
+    expect(lines).toHaveLength(3);
+    const [rowA, rowB, rankedLine] = lines;
+    // Arm rows: the four fixed keys plus the optional vmName — ready arms carry it.
+    const ARM_ROW_KEYS = ["arm", "fanoutId", "outcome", "runId", "vmName"];
+    expect(Object.keys(rowA ?? {}).sort()).toEqual(ARM_ROW_KEYS);
+    expect(Object.keys(rowB ?? {}).sort()).toEqual(ARM_ROW_KEYS);
+    interface RankedRow {
+      fanoutId: string;
+      scores: { arm: number; runId: string; score: number | null; breakdown: Record<string, unknown> }[];
+      tie: boolean;
+      rationale: string;
+      timings: Record<string, unknown>;
+    }
+    const ranked = rankedLine as unknown as RankedRow;
+    expect(Object.keys(ranked).sort()).toEqual(["fanoutId", "rationale", "scores", "tie", "timings"]);
+    expect(ranked.timings && Object.keys(ranked.timings)).toEqual(["rankMs"]);
+    for (const s of ranked.scores) {
+      expect(Object.keys(s).sort()).toEqual(["arm", "breakdown", "runId", "score"]);
+      expect(Object.keys(s.breakdown).sort()).toEqual(["testPassRate", "uniqueFileCoverage"]);
+    }
+  });
+
+  test("--steps-json over the 1 MiB cap refuses by name before any read or store build", async () => {
+    // Mirrored literal, same discipline as MAX_BRIEF_BYTES above: importing the
+    // constant would let an implementation that quietly lowered the cap pass
+    // both sides of this boundary. The pad makes the file 1 MiB + ~12 bytes.
+    const stepsPath = join(dir, "steps-big.json");
+    writeFileSync(stepsPath, JSON.stringify({ pad: "x".repeat(1024 * 1024) }));
+    const freshDir = join(dir, "never-created-steps");
+    reset();
+    const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+    expect(code).toBe(2);
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: usage envelope this run just emitted to errCaptured */
+    expect(envelope.code).toBe("usage");
+    expect(envelope.message).toContain("--steps-json exceeds the 1 MiB cap");
+    // Size-checked BEFORE the read and BEFORE the store constructor — the id
+    // grammar's principle holding two flags further down the verb.
+    expect(existsSync(freshDir)).toBeFalse();
+    expectNoBoxes();
+  });
+
+  test("an unknown --pattern refuses exit 2 before any construction side effect", async () => {
+    // F-C1/F-C2: the pattern guard is hoisted ABOVE the constructors and above
+    // every pattern-scoped check, so a typo'd pattern is a usage error that has
+    // touched no disk — not a pin verdict, not a half-built fan-out record.
+    const freshFanouts = join(dir, "fresh-fanouts");
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "racee", "--n", "2", "--roster", "a,b"],
+      // fanoutsDir deliberately NOT injected — the flag is the subject, and the
+      // strongest form of "constructed nothing" is that the fresh path the flag
+      // names still does not exist.
+      { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+    );
+    expect(code).toBe(2);
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: usage envelope this run just emitted to errCaptured */
+    expect(envelope.code).toBe("usage");
+    // The echo passes redactSecrets, which strips the JSON quoting — pinned as
+    // it actually renders.
+    expect(envelope.message).toContain("unknown pattern: racee");
+    expect(text()).toContain("pattern is one of best-of-n, many-stories, race");
+    // No fan-outs store, no fleet lock, no boxes, no loser-ledger db: the verb
+    // refused before anything that mkdirs was ever built.
+    expect(existsSync(freshFanouts)).toBeFalse();
+    expect(existsSync(join(dir, ".sandbox", "fleet.lock"))).toBeFalse();
+    expectNoBoxes();
+    expect(existsSync(join(dir, ".sandbox", "cost-ledger.db"))).toBeFalse();
+    expect(existsSync(join(dir, "runs", "cost-ledger.db"))).toBeFalse();
   });
 
   // ─── CC-9: one structured line per verb, dispatch included ─────────────────

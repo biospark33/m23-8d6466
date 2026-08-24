@@ -18,9 +18,12 @@
  *   mid-hold releases through a REAL child driven through the signal-install
  *   seam; barrier-forced concurrent race admits exactly one contender.
  *
+ * The stealJudgedReapMutex mutex-judgment matrix lives in its own module now
+ * (round 3): tests/fleet/fleet-lock.test.ts.
+ *
  * Constants are IMPORTED from source (FLEET_LOCK_STALE_MS), never mirrored.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
   existsSync,
   mkdirSync,
@@ -30,7 +33,6 @@ import {
   realpathSync,
   rmSync,
   statSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,7 +46,6 @@ import {
   FLEET_LOCK_STALE_MS,
   FleetLock,
   readOwnPidStartTime,
-  stealJudgedReapMutex,
 } from "../../src/fleet/fleet-lock.ts";
 import {
   DEFAULT_FANOUTS_DIR,
@@ -83,7 +84,15 @@ function makeRecord(overrides: Partial<FanoutRecord> = {}): FanoutRecord {
  */
 function plantLock(
   path: string,
-  body: { pid: number; pidStartTime: number; createdAt: string; requestId: string },
+  body: {
+    pid: number;
+    pidStartTime: number;
+    createdAt: string;
+    requestId: string;
+    /** Optional darwin-writer evidence keys — recorded by the lock, never compared. */
+    lstartRaw?: string;
+    lstartUtcMs?: number;
+  },
 ): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(body)}\n`, { mode: 0o600 });
@@ -537,8 +546,60 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       expect(err?.code).toBe("fleet-busy");
     });
 
+    test("a dead holder one tick UNDER the stale boundary is still refused (age alone never reclaims)", async () => {
+      const pid = await deadPid();
+      expect(isAlive(pid)).toBe(false); // T-W7c: the corpse premise holds at use
+      // 59 minutes old at plant; the few ms of test jitter cannot close a
+      // 60-second margin, so this row deterministically sits below the bound.
+      plantLock(lockPath, {
+        pid,
+        pidStartTime: 12345,
+        createdAt: new Date(Date.now() - FLEET_LOCK_STALE_MS + 60_000).toISOString(),
+        requestId: "req-under-boundary",
+      });
+      let err: FleetError | undefined;
+      try {
+        lock().acquire();
+      } catch (e) {
+        err = e as FleetError;
+      }
+      expect(err?.exitCode).toBe(5);
+      expect(err?.code).toBe("fleet-busy");
+      expect(onDisk().requestId).toBe("req-under-boundary");
+    });
+
+    test("a dead holder aged EXACTLY FLEET_LOCK_STALE_MS is refused — reclaim needs strictly MORE than stale (`>` semantics)", async () => {
+      const pid = await deadPid();
+      expect(isAlive(pid)).toBe(false);
+      const t0 = Date.now();
+      plantLock(lockPath, {
+        pid,
+        pidStartTime: 12345,
+        createdAt: new Date(t0 - FLEET_LOCK_STALE_MS).toISOString(),
+        requestId: "req-exact-stale",
+      });
+      // Freeze Date.now at t0 for the judgment so age === STALE_MS exactly
+      // (bun's spyOn restores cleanly here; setSystemTime would stay frozen
+      // for the rest of the file). At ==, `Date.now() - at > STALE_MS` is
+      // false: judged YOUNG despite the provably-dead pid. A `>=` flip reclaims
+      // and fails this.
+      const frozen = spyOn(Date, "now").mockReturnValue(t0);
+      let err: FleetError | undefined;
+      try {
+        lock().acquire();
+      } catch (e) {
+        err = e as FleetError;
+      } finally {
+        frozen.mockRestore();
+      }
+      expect(err?.exitCode).toBe(5);
+      expect(err?.code).toBe("fleet-busy");
+      expect(onDisk().requestId).toBe("req-exact-stale");
+    });
+
     test("aged+dead owner → reclaimed: acquire succeeds and the body becomes ours", async () => {
       const pid = await deadPid();
+      expect(isAlive(pid)).toBe(false); // T-W7c: re-verify at use (pid recycling)
       plantLock(lockPath, {
         pid,
         pidStartTime: 12345,
@@ -557,6 +618,7 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
 
     test("a foreign LIVE reclaimer holding the reap mutex blocks the unlink (verify+rm serialized)", async () => {
       const pid = await deadPid();
+      expect(isAlive(pid)).toBe(false); // T-W7c: re-verify at use (pid recycling)
       plantLock(lockPath, {
         pid,
         pidStartTime: 12345,
@@ -595,6 +657,7 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
 
     test("an ABANDONED reap mutex (dead holder) is stolen, never waited on forever", async () => {
       const pid = await deadPid();
+      expect(isAlive(pid)).toBe(false); // T-W7c: re-verify at use (pid recycling)
       plantLock(lockPath, {
         pid,
         pidStartTime: 12345,
@@ -604,6 +667,7 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       // A reclaimer SIGKILLed between claiming the mutex and finishing its
       // rm: dead pid ⇒ provably stealable without waiting out the budget.
       const corpsePid = await deadPid();
+      expect(isAlive(corpsePid)).toBe(false); // T-W7c: re-verify at use (pid recycling)
       writeFileSync(
         `${lockPath}.reap`,
         `${JSON.stringify({
@@ -617,84 +681,6 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       lock().acquire();
       expect(onDisk().requestId).toBe("req-under-test"); // the reclaim went through
       expect(existsSync(`${lockPath}.reap`)).toBe(false); // …and took the stolen mutex with it
-    });
-
-    test("a STALE observation never removes a mutex that was REPLACED after it (two-reclaimer race)", async () => {
-      // The reported interleaving, pinned deterministically: reclaimer B reads
-      // a dead holder's mutex body and pauses; reclaimer A clears the path and
-      // contender C claims fresh bytes; B resumes holding a pending unlink.
-      // The conditional removal must refuse — only the EXACT judged bytes are
-      // ever deleted, so C's live mutex (and its verify+rm serialization)
-      // survives B's stale judgment.
-      mkdirSync(dirname(lockPath), { recursive: true });
-      const reap = `${lockPath}.reap`;
-      const corpsePid = await deadPid();
-      const judgedBytes = `${JSON.stringify({
-        pid: corpsePid,
-        pidStartTime: 1,
-        createdAt: new Date().toISOString(),
-        requestId: "corpse-reclaimer",
-      })}\n`;
-      writeFileSync(reap, judgedBytes, { mode: 0o600 });
-      // While our observation is in flight: another reclaimer cleared the
-      // corpse and a third contender claimed fresh LIVE bytes at the path.
-      const fresh = liveChild();
-      children.push(fresh);
-      const freshBytes = `${JSON.stringify({
-        pid: fresh.pid,
-        pidStartTime: readOwnPidStartTime(fresh.pid),
-        createdAt: new Date().toISOString(),
-        requestId: "fresh-reclaimer",
-      })}\n`;
-      writeFileSync(reap, freshBytes, { mode: 0o600 });
-      expect(stealJudgedReapMutex(reap, judgedBytes)).toBe(false); // stale ⇒ refuse
-      expect(readFileSync(reap, "utf8")).toBe(freshBytes); // the live mutex survived
-      // Control: when the path still holds the judged bytes, the steal lands.
-      writeFileSync(reap, judgedBytes, { mode: 0o600 });
-      expect(stealJudgedReapMutex(reap, judgedBytes)).toBe(true); // unchanged ⇒ removed
-      expect(existsSync(reap)).toBe(false);
-    });
-
-    test("a genuinely LIVE reap-mutex holder is NEVER stolen on mtime alone (identity match)", async () => {
-      // A SIGSTOPped or descheduled holder can sit inside its microsecond
-      // section far longer than any mtime bound. Age must not judge a body
-      // whose holder identity still matches — only death or recycling may.
-      mkdirSync(dirname(lockPath), { recursive: true });
-      const reap = `${lockPath}.reap`;
-      const holder = liveChild();
-      children.push(holder);
-      const bytes = `${JSON.stringify({
-        pid: holder.pid,
-        pidStartTime: readOwnPidStartTime(holder.pid),
-        createdAt: new Date().toISOString(),
-        requestId: "foreign-reclaimer",
-      })}\n`;
-      writeFileSync(reap, bytes, { mode: 0o600 });
-      // Backdate the mtime past REAP_MUTEX_ABANDON_MS: the pre-identity code
-      // would have robbed this holder outright.
-      utimesSync(reap, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
-      expect(stealJudgedReapMutex(reap, bytes)).toBe(false);
-      expect(readFileSync(reap, "utf8")).toBe(bytes);
-    });
-
-    test("a recycled-pid reap-mutex holder is stolen AT ONCE (identity mismatch beats any age)", async () => {
-      // Alive pid, but wearing a stranger's start time: the RECORDED owner is
-      // provably a corpse. The recycle proof clears it without waiting out any
-      // mtime bound — fresh mtime on purpose, so only the identity path can
-      // have removed it.
-      mkdirSync(dirname(lockPath), { recursive: true });
-      const reap = `${lockPath}.reap`;
-      const impostor = liveChild();
-      children.push(impostor);
-      const bytes = `${JSON.stringify({
-        pid: impostor.pid,
-        pidStartTime: readOwnPidStartTime(impostor.pid) + 98_765, // the recycled half
-        createdAt: new Date().toISOString(),
-        requestId: "corpse-reclaimer",
-      })}\n`;
-      writeFileSync(reap, bytes, { mode: 0o600 });
-      expect(stealJudgedReapMutex(reap, bytes)).toBe(true);
-      expect(existsSync(reap)).toBe(false);
     });
 
     test("aged+alive identity match → refuse fleet-busy (a first fan-out inside teardown is never preempted)", async () => {
@@ -730,6 +716,36 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       expect(onDisk().requestId).toBe("req-under-test");
     });
 
+    test("lstart evidence written under a DIFFERENT TZ never drives identity: aged live holder refused, never reclaimed (localMs-only compare)", async () => {
+      const child = liveChild();
+      children.push(child);
+      const trueStart = readOwnPidStartTime(child.pid);
+      plantLock(lockPath, {
+        pid: child.pid,
+        // Matches what THIS shell observes — the only identity input.
+        pidStartTime: trueStart,
+        createdAt: agedIso(3_600_000), // far past stale
+        requestId: "req-cross-tz-writer",
+        // Evidence keys shaped as a darwin writer running under another zone
+        // would have left them: lstartUtcMs off by a full half-day — outside
+        // every real zone reconstruction this shell could produce — plus a
+        // plausible raw line. Identity must ride pidStartTime ONLY: comparing
+        // the lstart evidence reclaimed this LIVE holder (the round-3 HIGH).
+        lstartRaw: "Wed Aug 19 10:00:00 2026",
+        lstartUtcMs: trueStart - 14 * 3_600_000,
+      });
+      let err: FleetError | undefined;
+      try {
+        lock().acquire();
+      } catch (e) {
+        err = e as FleetError;
+      }
+      expect(err?.exitCode).toBe(5);
+      expect(err?.code).toBe("fleet-busy");
+      expect(err?.message).toContain("same process"); // judged alive-and-identical, not recycled
+      expect(onDisk().requestId).toBe("req-cross-tz-writer"); // never stolen
+    });
+
     test("unreadable/unparseable body → refuse exit 5, never steal what cannot be judged", () => {
       mkdirSync(dirname(lockPath), { recursive: true });
       writeFileSync(lockPath, "{not json at all");
@@ -740,6 +756,11 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
         err = e as FleetError;
       }
       expect(err?.exitCode).toBe(5);
+      // The refusal matrix distinguishes these rows by MESSAGE within the
+      // shared fleet-busy code — pin both halves so a future collapse onto a
+      // generic fleet-busy (or worse, a reclaim) trips here.
+      expect(err?.code).toBe("fleet-busy");
+      expect(err?.message).toContain("cannot judge");
       expect(readFileSync(lockPath, "utf8")).toBe("{not json at all");
     });
 
@@ -753,6 +774,9 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
         err = e as FleetError;
       }
       expect(err?.exitCode).toBe(5);
+      expect(err?.code).toBe("fleet-busy");
+      expect(err?.message).toContain("cannot judge");
+      expect(readFileSync(lockPath, "utf8")).toBe(""); // never stolen either
     });
 
     test("out-of-range recorded pid → refuse (out-of-range is NOT dead)", () => {
@@ -769,6 +793,10 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
         err = e as FleetError;
       }
       expect(err?.exitCode).toBe(5);
+      expect(err?.code).toBe("fleet-busy");
+      // Aged + out-of-range is the row a careless refactor most wants to read
+      // as "dead": the named diagnosis is what keeps it distinct.
+      expect(err?.message).toContain("unusable pid");
       expect(onDisk().requestId).toBe("req-huge-pid");
     });
 

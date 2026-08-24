@@ -1,7 +1,7 @@
 # PR 128 Review Triage Ledger
 
 Round: 1 · Date: 2026-08-23 · Diff: origin/main...HEAD (15 files, +4892/−104, 5371 diff lines)
-Chunks: cli 821 · engine 1065 · lockrank 661 · tests-a 1607 · tests-b 1098
+Chunks (raw `wc -l` of each pathspec-split `git diff -- <paths>` file; per-file diff headers INCLUDED, files outside the five clusters — story md, evidence md — NOT chunked): cli 821 · engine 1065 · lockrank 661 · tests-a 1607 · tests-b 1098. The chunk sum (5252) vs the full-diff line count (5371) reconciles to the unchunked remainder plus header accounting; the historical HEAD SHA was not recorded in this ledger, so the round-1 numbers are not byte-reproducible after the fact — see the round-3 addendum at the bottom of this file for a fully reproducible value set (recorded SHA + same-command outputs).
 Reviewers: blind-cli, blind-engine, blind-lockrank, edge-src, edge-tests-a, edge-tests-b, auditor
 
 ## Pre-seeded: Sift bot findings (verified against source by orchestrator)
@@ -27,6 +27,7 @@ Reviewers: blind-cli, blind-engine, blind-lockrank, edge-src, edge-tests-a, edge
 - S4 ≡ edge-tests-a HIGH regex
 
 ### Source patches — WAVE 1
+
 | ID | Fix | File(s) | Assignee |
 |----|-----|---------|----------|
 | F1 | Capture rec.winner in mutate refuse branch | fanout-primitive.ts:537-541 | fix-primitive |
@@ -50,6 +51,7 @@ Reviewers: blind-cli, blind-engine, blind-lockrank, edge-src, edge-tests-a, edge
 | F18 | CLI batch: roster ""→undefined; loserLedger.close guarded; costLedger added to dispatch strip list; steps-json validated BEFORE store mkdir/chmod | scripts/fleet.ts:1195,1278,1435,1478,1518 | fix-cli-rank |
 
 ### Test patches — WAVE 2 (after source settles)
+
 | ID | Fix | File | Assignee |
 |----|-----|------|----------|
 | T1 | Tighten /malformed\|n/i → /malformed/i; sweep siblings for same pattern | tests/fleet/*.test.ts | fix-tests-a |
@@ -152,3 +154,16 @@ Reviewers: blind-cli, blind-engine, blind-lockrank, edge-src, edge-tests-a, edge
 ### fix-tests-a (wave 2) — DONE, no skips
 - :430 mandated-keys: 4 present + extras ⊆ {lstartRaw,lstartUtcMs} exact — future key still fails · T1: /malformed|n/i→/malformed/i; sweep clean (:327/:653 alternatives are full discriminating words) · T4 new pin "one loser's destroy failing never wedges disposal" (teardown-failed line, sibling disposed harvest-before-destroy, winner intact, record closed, destructive mark cleared) · T5 winner derived from planted-marker arm; decorative not.toBe(3) dropped; constants comment reworded; bare toThrow→/could not/ (darwin+linux share fragment)
 - focal 64 pass / 0 fail (355 expects) · biome+tsc clean
+
+---
+
+## Round 3 addendum (2026-08-24, reviewed HEAD `6af62af` — reproducible value set)
+
+Diff: `git -C <root> diff origin/main...HEAD` at HEAD `6af62af` = 16 files, +6465/−105, **6,958 lines**.
+Chunks (raw `wc -l`, pathspec-split, headers included): cli 739 · lockrank 1139 · fanout 1279 ·
+tests-a 1400 · tests-b 1445 (sum 6002; remainder = story md + this ledger, unchunked).
+Reviewers: blind-cli, blind-lockrank, blind-fanout, blind-tests-a, blind-tests-b, edge-src (repo),
+auditor (spec) + Sift inline batch. ~100 raw → **21 patch items / rest dismissed-vs-source**.
+Working ledger: `/tmp/pr128-r3/triage.md`. Patched items and dispositions recorded in the story's
+"Review round 3" section. Round-1 chunk counts above are left as written (historical record); the
+reconciliation note at the top of this file explains the header/remainder accounting.

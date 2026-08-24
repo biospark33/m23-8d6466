@@ -63,20 +63,27 @@ export interface FleetLockBody {
   createdAt: string;
   requestId: string;
   /**
-   * Additive (r10 darwin TZ fix): the raw `ps -o lstart=` line exactly as this
-   * host printed it — TZ/locale evidence an operator can diff against a live
-   * `ps -p <pid> -o lstart=`. Never COMPARED across processes directly: each
-   * `ps` renders the same instant in the READING shell's TZ.
+   * Additive operator evidence: the raw `ps -o lstart=` line exactly as this
+   * host printed it — an operator can diff it against a live
+   * `ps -p <pid> -o lstart=`. Never COMPARED across processes: each `ps`
+   * renders the same instant in the READING shell's TZ.
    */
   lstartRaw?: string;
-  /** Those same components converted by UTC arithmetic alone — the TZ-stable identity half `classifyHolder` compares. */
+  /**
+   * Those same components re-assembled by UTC arithmetic alone. RECORDED ONLY,
+   * never an identity input: `ps` renders the DIGITS in the reading shell's
+   * TZ, so Date.UTC(those digits) shifts with the observer and two shells in
+   * different zones disagree about one instant. Identity is always
+   * `pidStartTime`, whose digits are rendered and parsed by the SAME shell.
+   */
   lstartUtcMs?: number;
 }
 
 /**
- * What one platform observation of a pid's start time yields. `localMs` is the
- * legacy epoch-ms half (`pidStartTime`); the darwin observer additionally
- * records the raw line and the TZ-free conversion.
+ * What one platform observation of a pid's start time yields. `localMs` is THE
+ * identity half (compared as `pidStartTime`); the darwin observer additionally
+ * records the raw line and a UTC re-assembly of it — evidence only, never
+ * compared (see FleetLockBody.lstartUtcMs).
  */
 interface PidIdentity {
   localMs: number;
@@ -153,17 +160,41 @@ function psLstartIdentity(pid: number): PidIdentity {
       `could not parse \`ps -o lstart=\` month ${JSON.stringify(m[1])} for pid ${pid}: locale not in the manual map`,
     );
   }
-  // LOCAL time, no TZ designator: the legacy `pidStartTime` value is still
-  // constructed in local time, never Date.UTC. The SAME components are also
-  // converted by UTC arithmetic alone into `lstartUtcMs` — a local-time Date
-  // bakes in the OBSERVING shell's TZ, so a lock written under TZ=UTC (cron)
-  // was judged by a TZ=X reader into reclaiming its LIVE owner (r10). Pure
-  // component arithmetic has no TZ in it and compares equal from any shell.
+  // LOCAL time, no TZ designator: constructed with the local-time constructor,
+  // never Date.UTC. That is observer-self-consistent BY CONSTRUCTION — the
+  // digits were rendered under THIS shell's TZ and parsed back under it, so
+  // two observations of one process compare equal from any zone. The UTC
+  // re-assembly recorded below looks TZ-free but is NOT: `ps` prints digits
+  // in the READING shell's TZ, so Date.UTC(those digits) shifts with the
+  // observer and would read a LIVE cross-TZ holder as recycled if compared.
+  // Recorded as evidence; never compared (see FleetLockBody.lstartUtcMs).
   return {
     localMs: new Date(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])).getTime(),
     lstartRaw: out.trim(),
     lstartUtcMs: Date.UTC(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])),
   };
+}
+
+/**
+ * Is `pid` a zombie — exited but not yet reaped by its parent? `kill(pid, 0)`
+ * still succeeds on one, so a liveness probe alone cannot tell an immortal
+ * holder from a corpse awaiting collection. A zombie can never run again, so
+ * every judge here treats it as DEAD. Any probe failure ⇒ false: an
+ * unobservable state is not evidence of zombiedom.
+ */
+function pidIsZombie(pid: number): boolean {
+  try {
+    if (process.platform === "linux") {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      // After the LAST ')': the first token is field 3, the single-letter
+      // process state (proc_pid_stat(5)); "Z" is zombie.
+      return stat.slice(stat.lastIndexOf(")") + 1).trim().startsWith("Z");
+    }
+    const stat = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).trim();
+    return stat.startsWith("Z"); // darwin STAT column leads with Z for zombies
+  } catch {
+    return false; /* dp:ok a failed probe proves nothing — fail toward "not a zombie" */
+  }
 }
 
 /** Locks THIS process created and has not released yet: resolved path → body. */
@@ -369,7 +400,12 @@ export class FleetLock {
     chmodSync(dir, 0o700);
     const dirMode = statSync(dir).mode & 0o777;
     if (dirMode !== 0o700) {
-      throw new Error(`fleet-lock dir ${dir} is mode 0${dirMode.toString(8)}, not 0700`);
+      throw new FleetError(
+        5,
+        "fleet-lock-dir-mode",
+        `fleet-lock dir ${dir} is mode 0${dirMode.toString(8)}, not 0700`,
+        `chmod 700 ${dir} — the fleet lock refuses to sit anywhere group/world-readable`,
+      );
     }
     for (let attempt = 0; attempt < 2; attempt++) {
       const body = JSON.stringify(ownFleetLockBody(this.requestId));
@@ -421,8 +457,8 @@ export class FleetLock {
     throw new FleetError(
       5,
       "fleet-busy",
-      `another fan-out holds ${this.path} (taken and released repeatedly while we waited)`,
-      `wait for the other fan-out to finish — or, only if you have confirmed none is running: rm ${this.path}`,
+      `another fan-out holds ${this.path} (taken and released repeatedly, or mid-stale-reclaim, while we waited)`,
+      `wait for any other fan-out to finish — the path can also change hands briefly while a contender verifies and removes a stale lock; rm ${this.path} only once you have confirmed none is running or mid-reclaim`,
     );
   }
 
@@ -475,6 +511,7 @@ export class FleetLock {
       );
     }
     // Dropped first: a failed release must not be retried by the signal handler.
+    const wasDestructive = fleetDestructive.has(this.path);
     fleetHeld.delete(this.path);
     fleetDestructive.delete(this.path);
 
@@ -482,7 +519,13 @@ export class FleetLock {
     try {
       before = readFileSync(this.path, "utf8");
     } catch (e) {
+      /* dp:ok ENOENT means nothing is left to hold; any OTHER failure restores
+         both marks BEFORE rethrowing — the registration is already gone by
+         then, and without it the exit/signal handlers would never retry this
+         release, wedging the lock until this process dies */
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // gone — done
+      fleetHeld.set(this.path, body);
+      if (wasDestructive) fleetDestructive.add(this.path);
       throw e;
     }
     if (before === body) {
@@ -515,7 +558,12 @@ export class FleetLock {
         fleetHeld.set(this.reapPath, body);
         return true;
       }
-      if (this.stealAbandonedReapMutex()) continue; // provably freeable — retry the claim at once
+      if (this.stealAbandonedReapMutex()) {
+        // Even a SUCCESSFUL steal respects the budget: a mutex that keeps
+        // vanishing under us could otherwise spin past the deadline forever.
+        if (Date.now() >= deadline) return false;
+        continue; // provably freeable — retry the claim at once
+      }
       if (Date.now() >= deadline) return false;
       sleepSync(REAP_MUTEX_TICK_MS);
     }
@@ -531,8 +579,10 @@ export class FleetLock {
     let raw: string;
     try {
       raw = readFileSync(this.reapPath, "utf8");
-    } catch {
-      return true; /* dp:ok ENOENT — vanished between our EEXIST and this read; the next claim takes the free path */
+    } catch (e) {
+      /* dp:ok ENOENT — vanished between our EEXIST and this read; the next claim takes the free path */
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return true;
+      return false; /* dp:ok an unreadable mutex (EACCES/EIO) is not PROVEN gone — wait out the budget */
     }
     return stealJudgedReapMutex(this.reapPath, raw);
   }
@@ -686,7 +736,9 @@ function classifyHolder(path: string): HolderVerdict {
       ),
     };
   }
-  if (!isAlive(body.pid)) return { verdict: "reclaim", body: raw }; // aged AND dead: both parts satisfied
+  if (!isAlive(body.pid) || pidIsZombie(body.pid)) {
+    return { verdict: "reclaim", body: raw }; // aged AND dead (or zombied): both parts satisfied
+  }
   let observed: PidIdentity;
   try {
     observed = observePidStart(body.pid);
@@ -702,14 +754,14 @@ function classifyHolder(path: string): HolderVerdict {
       ),
     };
   }
-  // Identity, TZ-proof when both sides recorded it (r10): the UTC-converted
-  // components are compared instead of the legacy local-time epochs, whose
-  // values shift with each observer's TZ. Bodies without the additive keys
-  // (older builds, planted fixtures) keep the numeric comparison.
-  const sameProcess =
-    body.lstartUtcMs !== undefined && observed.lstartUtcMs !== undefined
-      ? observed.lstartUtcMs === body.lstartUtcMs
-      : observed.localMs === body.pidStartTime;
+  // Identity: ALWAYS the epoch-ms comparison (`localMs` vs the recorded
+  // `pidStartTime`). Each side's digits were rendered AND parsed under that
+  // side's own shell TZ, so the pair is self-consistent even across different
+  // zones. The recorded lstartUtcMs looks TZ-free but is NOT: `ps` prints its
+  // digits in the READING shell's TZ, so Date.UTC(those digits) shifts with
+  // the observer — comparing it read a LIVE cross-TZ holder as recycled (the
+  // r10 bug family). Evidence only; see FleetLockBody.lstartUtcMs.
+  const sameProcess = observed.localMs === body.pidStartTime;
   if (!sameProcess) return { verdict: "reclaim", body: raw }; // aged AND recycled pid: the recorded owner is provably gone
   // Aged + alive + identity match: a first fan-out inside teardown is never
   // preempted, however old the lock looks.
@@ -744,17 +796,21 @@ function fsyncDir(dir: string): void {
  * still holds those same bytes. Returns whether the caller may retry its
  * claim at once.
  *
- * Three proofs, in strictness order; the first two are identity proofs, the
- * third sweeps only bodies too broken to judge at all:
+ * Three judgments, in strictness order; the first two are identity proofs,
+ * the third sweeps only bytes with NO judgeable holder at all:
  *
- * 1. a well-typed pid that `isAlive` can prove dead;
+ * 1. a well-typed in-range pid that `isAlive` proves dead — or proves ZOMBIE
+ *    (`pidIsZombie`: exited but unreaped; kill(pid,0) still succeeds, yet it
+ *    can never run again);
  * 2. a well-typed pid that IS ALIVE but whose observed start time ≠ the
  *    recorded one — a recycled pid, so the RECORDED owner (the only owner
  *    that matters) is provably gone even though something living wears its
- *    number now (classifyHolder's identical discipline, including the TZ-
- *    stable lstartUtcMs comparison when both sides recorded it);
- * 3. unjudgeable bytes ONLY (unparseable JSON, malformed/missing pid): an
- *    mtime older than REAP_MUTEX_ABANDON_MS — see that constant.
+ *    number now (classifyHolder's identical discipline);
+ * 3. unjudgeable bytes ONLY (unparseable JSON, or an object with no numeric
+ *    pid field): an mtime older than REAP_MUTEX_ABANDON_MS — see that
+ *    constant. A parseable body carrying a numeric pid is NEVER judged by
+ *    the clock whatever else is wrong with it: a missing start time or an
+ *    out-of-range pid means UNKNOWN, and UNKNOWN waits out the budget.
  *
  * An alive pid that identity-MATCHES is a genuinely live holder and is never
  * stolen on any evidence short of its own exit — a SIGSTOPped or descheduled
@@ -797,39 +853,36 @@ export function stealJudgedReapMutex(reapPath: string, raw: string): boolean {
   } catch {
     parsed = null; /* dp:ok unparseable body falls through to the mtime litter sweep */
   }
-  if (
-    parsed !== null &&
-    typeof parsed.pid === "number" &&
-    Number.isInteger(parsed.pid) &&
-    parsed.pid > 0 &&
-    parsed.pid <= 0x7fff_ffff
-  ) {
-    if (!isAlive(parsed.pid)) return removeIfUnchanged(); // proof 1: dead holder
-    if (typeof parsed.pidStartTime === "number") {
-      // Proof 2: recycle check BEFORE any age conclusion — the same order and
-      // identity comparison classifyHolder uses. An alive pid wearing a
-      // recorded stranger's identity means the recorded owner is a corpse.
-      let observed: PidIdentity;
-      try {
-        observed = observePidStart(parsed.pid);
-      } catch {
-        return false; /* dp:ok identity unobservable — the one holder that must not be judged */
+  if (parsed === null || typeof parsed !== "object" || typeof parsed.pid !== "number") {
+    // Unjudgeable bytes only (no parseable object / no numeric pid field):
+    // the mtime litter sweep.
+    try {
+      if (Date.now() - statSync(reapPath).mtimeMs > REAP_MUTEX_ABANDON_MS) {
+        return removeIfUnchanged();
       }
-      const sameProcess =
-        parsed.lstartUtcMs !== undefined && observed.lstartUtcMs !== undefined
-          ? observed.lstartUtcMs === parsed.lstartUtcMs
-          : observed.localMs === parsed.pidStartTime;
-      if (!sameProcess) return removeIfUnchanged(); // proof 2: recycled pid — recorded owner provably gone
-      return false; // alive AND identity match: a genuinely live holder — never stolen on a guess
+    } catch {
+      return true; /* dp:ok stat failed/ENOENT — the next claim attempt resolves it one way or the other */
     }
+    return false;
   }
-  // Unjudgeable bytes only: the mtime litter sweep.
+  // A numeric pid makes the body JUDGEABLE — from here on identity proofs
+  // only, never the clock. Out-of-range/non-integer is UNKNOWN, never dead
+  // (classifyHolder's range guard): wait out the budget.
+  if (!Number.isInteger(parsed.pid) || parsed.pid <= 0 || parsed.pid > 0x7fff_ffff) return false;
+  if (!isAlive(parsed.pid) || pidIsZombie(parsed.pid)) return removeIfUnchanged(); // proof 1: dead (or zombied) holder
+  if (typeof parsed.pidStartTime !== "number") {
+    return false; // no comparable identity — a possibly-live holder is never swept on a guess
+  }
+  // Proof 2: recycle check BEFORE any age conclusion — the same order and
+  // identity comparison classifyHolder uses. An alive pid wearing a recorded
+  // stranger's identity means the recorded owner is a corpse.
+  let observed: PidIdentity;
   try {
-    if (Date.now() - statSync(reapPath).mtimeMs > REAP_MUTEX_ABANDON_MS) {
-      return removeIfUnchanged();
-    }
+    observed = observePidStart(parsed.pid);
   } catch {
-    return true; /* dp:ok stat failed/ENOENT — the next claim attempt resolves it one way or the other */
+    return false; /* dp:ok identity unobservable — the one holder that must not be judged */
   }
-  return false;
+  const sameProcess = observed.localMs === parsed.pidStartTime;
+  if (!sameProcess) return removeIfUnchanged(); // proof 2: recycled pid — recorded owner provably gone
+  return false; // alive AND identity match: a genuinely live holder — never stolen on a guess
 }

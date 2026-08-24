@@ -103,6 +103,17 @@ function testPassRate(out: ArmStepOutput): number {
  */
 function assertStepOutputShape(runId: string, out: ArmStepOutput): void {
   const hint = "each entry carries testsExecuted?, testResults{passed,failed}? and changedFiles[]?";
+  // First statement, before any field access: a non-object (truthy junk — a
+  // string, number, or an Array) refuses HERE as the named refusal instead of
+  // dying as a TypeError on the accesses below.
+  if (typeof out !== "object" || out === null || Array.isArray(out)) {
+    throw new FleetError(
+      2,
+      "invalid-step-output",
+      `step output for run ${redactSecrets(runId)} must be an object`,
+      hint,
+    );
+  }
   if (out.testsExecuted !== undefined && typeof out.testsExecuted !== "boolean") {
     throw new FleetError(
       2,
@@ -124,7 +135,12 @@ function assertStepOutputShape(runId: string, out: ArmStepOutput): void {
       !Number.isInteger(tr.passed) ||
       !Number.isInteger(tr.failed) ||
       tr.passed < 0 ||
-      tr.failed < 0)
+      tr.failed < 0 ||
+      // Astronomic counts are refused under the SAME message: past
+      // MAX_SAFE_INTEGER the score arithmetic loses integrity before any
+      // comparison could catch it.
+      tr.passed > Number.MAX_SAFE_INTEGER ||
+      tr.failed > Number.MAX_SAFE_INTEGER)
   ) {
     throw new FleetError(
       2,

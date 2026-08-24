@@ -501,4 +501,90 @@ describe("rank (DF3.2 AC7)", () => {
     const soloRes = await rank(FANOUT_ID, solo.deps);
     expect(soloRes.rationale).toContain("no comparison possible");
   });
+
+  test("refuses non-object step output instead of silently scoring it zero", async () => {
+    // An embedder seam handing back truthy junk must hit the guard's FIRST
+    // statement — the named invalid-step-output refusal that names the run —
+    // not a TypeError on the field accesses below it (or worse, a quiet zero
+    // score ranked against healthy arms).
+    const cases: [string, unknown][] = [
+      ["numjunk", 42],
+      ["strjunk", "x"],
+      // Arrays pass `typeof === "object"` — they are refused explicitly too.
+      ["arrjunk", ["f.ts"]],
+    ];
+    for (const [runId, junk] of cases) {
+      const h = harness({
+        arms: [{ arm: 0, runId }],
+        steps: { [runId]: junk as unknown as StepFixture },
+      });
+      try {
+        await rank(FANOUT_ID, h.deps);
+        throw new Error(`expected rank to refuse a ${typeof junk} step output`);
+      } catch (e) {
+        expect(e).toBeInstanceOf(FleetError);
+        const fe = e as FleetError;
+        expect({ junkKind: typeof junk, exitCode: fe.exitCode, code: fe.code }).toEqual({
+          junkKind: typeof junk,
+          exitCode: 2,
+          code: "invalid-step-output",
+        });
+        expect(fe.message).toContain(runId); // names the run before any arithmetic
+        expect(fe.message).toContain("must be an object");
+      }
+    }
+  });
+
+  test("refuses counts past Number.MAX_SAFE_INTEGER under the same invalid-step-output code", async () => {
+    // Past MAX_SAFE_INTEGER the composite arithmetic loses integrity before any
+    // tie comparison could catch it — refused outright, not clamped.
+    const h = harness({
+      arms: [{ arm: 0, runId: "huge" }],
+      steps: {
+        huge: { testsExecuted: true, testResults: { passed: Number.MAX_SAFE_INTEGER + 1, failed: 0 } },
+      },
+    });
+    try {
+      await rank(FANOUT_ID, h.deps);
+      throw new Error("expected rank to refuse an astronomic count");
+    } catch (e) {
+      expect(e).toBeInstanceOf(FleetError);
+      const fe = e as FleetError;
+      expect(fe.exitCode).toBe(2);
+      expect(fe.code).toBe("invalid-step-output");
+      expect(fe.message).toContain("non-negative integer passed/failed");
+    }
+  });
+
+  test("characterization: two arms sharing one runId score identically over the deduped union", async () => {
+    // CURRENT behavior, pinned: stepOutputFor is keyed by runId, so both arms
+    // read the SAME output; the union Set-dedupes the repeated contribution;
+    // and identical scores put the top-two delta at exactly 0 — inside the
+    // inclusive tie window.
+    const h = harness({
+      arms: [
+        { arm: 0, runId: "dup" },
+        { arm: 1, runId: "dup" },
+      ],
+      steps: {
+        dup: { testsExecuted: true, testResults: { passed: 3, failed: 1 }, changedFiles: ["a.ts", "b.ts"] },
+      },
+    });
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    expect(res.scores.map((s) => s.arm)).toEqual([0, 1]); // equals → stable by arm
+    // The union counted the shared run's files ONCE ({a,b}, size 2), so each
+    // arm covers ALL of it — a denominator that concatenated the repeated
+    // contributions would read 2/4 here.
+    for (const s of res.scores) {
+      expect(s.runId).toBe("dup");
+      expect(s.breakdown.testPassRate).toBeCloseTo(0.75, 10);
+      expect(s.breakdown.uniqueFileCoverage).toBe(1);
+      expect(s.score).toBeCloseTo(0.75 * 0.6 + 0.4, 6);
+    }
+    expect(res.scores[0]?.score).toBe(res.scores[1]?.score); // EXACTLY equal, not close
+    expect(res.tie).toBe(true);
+    expect(res.rationale).toContain("tie flagged"); // no automatic tie-break
+  });
 });
