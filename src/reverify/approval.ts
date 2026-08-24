@@ -13,7 +13,7 @@
  * not the caller: the state machine below is caller-side contract.
  */
 import { randomUUID } from "node:crypto";
-import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { RunRecordStore } from "../providers/run-record.ts";
@@ -91,8 +91,8 @@ async function withApprovalLock<T>(dir: string, runId: string, body: () => T | P
     try {
       // Content proves ownership: pid lets a later waiter check the holder is
       // actually dead (not just slow), and the nonce makes the content unique
-      // per acquisition so a compare-and-delete can't be fooled by a
-      // replacement lock that happens to reuse the same pid.
+      // per acquisition so reclamation can't be fooled by a replacement lock
+      // that happens to reuse the same pid.
       writeFileSync(lockPath, `${process.pid}:${randomUUID()}`, { flag: "wx", mode: 0o600 });
       break;
     } catch (e) {
@@ -106,14 +106,35 @@ async function withApprovalLock<T>(dir: string, runId: string, body: () => T | P
           const raw = readFileSync(lockPath, "utf8");
           const pid = lockHolderPid(raw);
           if (pid !== undefined && isLockHolderDead(pid)) {
-            // Compare-and-delete: re-read immediately before unlinking so a
-            // replacement lock created between the staleness check above and
-            // this removal (e.g. a new holder that raced in after the dead
-            // owner's lock aged out) is never mistaken for the dead one.
-            if (readFileSync(lockPath, "utf8") === raw) {
-              rmSync(lockPath, { force: true });
+            // Atomic reclaim: `rename` is atomic on the same filesystem, so
+            // at most one racer can move `lockPath` onto its own private
+            // claim path — a second racer's rename fails ENOENT instead of
+            // destroying whatever this racer captured. The removal IS the
+            // atomic step, so there is no read-then-delete gap for a
+            // replacement lock to fall into.
+            const claimPath = `${lockPath}.claim.${process.pid}.${randomUUID()}`;
+            try {
+              renameSync(lockPath, claimPath);
+            } catch (renameErr) {
+              if ((renameErr as NodeJS.ErrnoException).code === "ENOENT") continue; // another racer claimed it first
+              throw renameErr;
+            }
+            const claimed = readFileSync(claimPath, "utf8");
+            if (claimed === raw) {
+              // Genuinely the dead holder's lock: reclaim it.
+              rmSync(claimPath, { force: true });
               continue;
             }
+            // We captured a live replacement's lock by accident (it was
+            // created between the read above and the rename). Put it back
+            // unless a new holder has since re-taken the path.
+            try {
+              writeFileSync(lockPath, claimed, { flag: "wx", mode: 0o600 });
+            } catch (restoreErr) {
+              if ((restoreErr as NodeJS.ErrnoException).code !== "EEXIST") throw restoreErr;
+              // Someone else already holds lockPath now — nothing to restore.
+            }
+            rmSync(claimPath, { force: true });
           }
         }
       } catch {

@@ -5,7 +5,7 @@
  * seam DF3.4 lands behind; the state machine asserted here is the caller-side
  * contract that must hold whichever adapter is plugged in.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -177,6 +177,53 @@ describe("approval lock", () => {
         /approval lock .* held for over/,
       );
       expect(fs.existsSync(lock)).toBe(true);
+    } finally {
+      s.cleanup();
+    }
+  }, 15_000);
+
+  test("a replacement lock racing in between the ownership check and removal is NOT destroyed", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      const lock = path.join(s.dir, "run-1.approval.lock");
+      // spawnSync blocks until the child exits, so its pid is guaranteed dead
+      // by the time we write it into the lock — proof of death, not guesswork.
+      const dead = spawnSync(process.execPath, ["--version"]);
+      const deadContent = `${dead.pid}:stale-nonce`;
+      fs.writeFileSync(lock, deadContent);
+      const old = new Date(Date.now() - 60_000);
+      fs.utimesSync(lock, old, old);
+
+      // Simulate a second racer: right after this process reads the dead
+      // holder's content (proving death) but before it can act on it, a
+      // fresh, live holder replaces the lock file in place. The rename-based
+      // reclaim must detect the content mismatch and put the replacement
+      // back rather than deleting it.
+      const liveContent = `${process.pid}:replacement-nonce`;
+      const realReadFileSync = fs.readFileSync;
+      let injected = false;
+      const spy = spyOn(fs, "readFileSync").mockImplementation(((...args: Parameters<typeof fs.readFileSync>) => {
+        const result = realReadFileSync(...args);
+        if (!injected && args[0] === lock && result === deadContent) {
+          injected = true;
+          fs.writeFileSync(lock, liveContent, { mode: 0o600 });
+        }
+        return result;
+      }) as typeof fs.readFileSync);
+
+      try {
+        await expect(recordApprovalPort(s.store).requestApproval("run-1", req("rv-1"))).rejects.toThrow(
+          /approval lock .* held for over/,
+        );
+      } finally {
+        spy.mockRestore();
+      }
+
+      // The replacement lock must survive untouched — it was never the dead
+      // holder's lock, so it must never have been unlinked.
+      expect(fs.existsSync(lock)).toBe(true);
+      expect(fs.readFileSync(lock, "utf8")).toBe(liveContent);
     } finally {
       s.cleanup();
     }
