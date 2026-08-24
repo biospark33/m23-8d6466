@@ -366,7 +366,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
 
     test("many-stories takes exactly n brief objects and forbids a roster", async () => {
       manifest();
-      expect((await refuseOf(fanout("many-stories", 3, brief() as unknown as Brief[], deps()))).code).toBe(
+      expect((await refuseOf(fanout("many-stories", 3, brief() as unknown as Brief[], deps()))).code).toBe( /* dp:ok deliberately malformed fixture: this row asserts the invalid-brief refusal */
         "invalid-brief",
       );
       expect(
@@ -379,7 +379,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
 
     test("a malformed brief refuses as invalid-brief", async () => {
       manifest();
-      const bad = { ...brief(), commitSha: "not-a-sha" } as unknown as Brief;
+      const bad = { ...brief(), commitSha: "not-a-sha" } as unknown as Brief; /* dp:ok deliberately malformed fixture: asserts the invalid-brief refusal below */
       const err = await refuseOf(fanout("best-of-n", 2, bad, deps({ rosterIds: ["a", "b"] })));
       expect(err.code).toBe("invalid-brief");
     });
@@ -424,7 +424,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(err.code).toBe("no-headroom");
       expect(err.message).toContain("headroom");
       expect(err.payload).toMatchObject({ reason: "vm-ceiling", liveVms: 0, ceiling: 2, headroom: 2 });
-      expect((err as unknown as { exitStatus?: string }).exitStatus).toBeUndefined();
+      expect((err as unknown as { exitStatus?: string }).exitStatus).toBeUndefined(); /* dp:ok probing an undeclared field off the thrown FleetError */
       // Zero records, zero boxes, zero keys (nothing provisioned ⇒ no budget
       // admission either), zero mints — and the lock was released.
       expect(fanoutRecordFiles()).toHaveLength(0);
@@ -447,7 +447,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(err.exitCode).toBe(5);
       expect(err.code).toBe("no-headroom");
       expect(err.payload).toMatchObject({ reason: "list-unverified", headroom: 0 });
-      expect((err as unknown as { exitStatus?: string }).exitStatus).toBe("transient");
+      expect((err as unknown as { exitStatus?: string }).exitStatus).toBe("transient"); /* dp:ok probing an undeclared field off the thrown FleetError */
       expect(fanoutRecordFiles()).toHaveLength(0);
       expect(boxCount(driver)).toBe(0);
     });
@@ -764,7 +764,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
           return prop === "set"
             ? (...args: unknown[]) => {
                 setArgs.push(args);
-                return (store as unknown as { set: (...a: unknown[]) => unknown }).set(...args);
+                return (store as unknown as { set: (...a: unknown[]) => unknown }).set(...args); /* dp:ok re-reaching the real store.set through the bound proxy spy */
               }
             : undefined;
         },

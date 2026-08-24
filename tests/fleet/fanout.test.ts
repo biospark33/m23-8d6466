@@ -89,7 +89,7 @@ function agedIso(extraMs = 60_000): string {
 }
 
 /** Spawn a short-lived child and resolve once its pid is provably dead. */
-async function deadPid(): Promise<number> {
+async function deadPid(): Promise<number> { /* dp:ok proc.exited resolves with the exit code, never rejects */
   const proc = Bun.spawn(["true"]);
   await proc.exited;
   return proc.pid;
@@ -399,7 +399,7 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
     }
 
     function onDisk(): { pid: number; pidStartTime: number; createdAt: string; requestId: string } {
-      return JSON.parse(readFileSync(lockPath, "utf8"));
+      return JSON.parse(readFileSync(lockPath, "utf8")); /* dp:ok test-authored output: parses the lock body acquire() just wrote */
     }
 
     test("acquire publishes the mandated JSON body at 0600 carrying our identity", () => {
@@ -621,7 +621,7 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       expect(parked.length).toBe(1);
       // K1: a .tmp-suffixed park would be garbage-collected by the next sweep.
       expect(parked[0]?.endsWith(".tmp")).toBe(false);
-      expect(readFileSync(join(dirname(lockPath), parked[0] ?? ""), "utf8")).toBe(stranger);
+      expect(readFileSync(join(dirname(lockPath), parked[0] ?? ""), "utf8")).toBe(stranger); /* dp:ok length asserted above; the "" path would EISDIR and fail the test */
     });
 
     test("release refuses while marked destructive unless forced", () => {

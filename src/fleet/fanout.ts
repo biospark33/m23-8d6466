@@ -321,7 +321,7 @@ function validateFanoutRecord(source: string, expectedId: string, raw: unknown):
       throw malformed(`${key} must be a parseable timestamp or null`);
     }
   }
-  return r as unknown as FanoutRecord;
+  return r as unknown as FanoutRecord; /* dp:ok validate-then-cast: every field of FanoutRecord is checked above */
 }
 
 function readFanoutRecord(p: string, expectedId: string): FanoutRecord {

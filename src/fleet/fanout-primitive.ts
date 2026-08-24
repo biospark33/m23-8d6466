@@ -33,7 +33,7 @@ import { TimeoutError, withTimeout } from "../providers/timeout.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
 import { defaultKeyCapMicroUsd, type KeyApi } from "../providers/credentials.ts";
 import type { ProviderDriver } from "../providers/driver.ts";
-import type { RunRecordStore } from "../providers/run-record.ts";
+import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { runMarkerPath } from "../phase-engine/journal.ts";
 import { log } from "../swarmclaw/log.ts";
@@ -338,7 +338,7 @@ async function runArms(
   fanoutId: string,
   outcomes: OutcomeSlot[],
   width: number,
-): Promise<void> {
+): Promise<void> { /* dp:ok body awaits allSettled (never rejects) and a non-rejecting semaphore; every per-arm await carries its own guard */
   const sem = semaphore(width);
   await Promise.allSettled(
     ids.map(async (runId, i) => {
@@ -436,7 +436,7 @@ async function runRace(
   store: FanoutRecordStore,
   fanoutId: string,
   outcomes: OutcomeSlot[],
-): Promise<number | null> {
+): Promise<number | null> { /* dp:ok probeArm self-guards every await (try/catch/finally); the sleep promise never rejects */
   const pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const deadlineMs = deps.perCallDeadlineMs ?? DEFAULT_PER_CALL_DEADLINE_MS;
   const ceilingMs = deps.ceilingMs ?? DEFAULT_FANOUT_CEILING_MS;
@@ -634,9 +634,9 @@ function errText(e: unknown): string {
  * cannot be verified is the caller's to log, never a silent skip.
  */
 export function stampFanoutExtension(store: RunRecordStore, runId: string, fanoutId: string, arm: number): void {
-  let current: { extensions?: Record<string, unknown> };
+  let current: RunRecord;
   try {
-    current = store.get(runId) as unknown as { extensions?: Record<string, unknown> };
+    current = store.get(runId);
   } catch (e) {
     if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return;
     throw e;

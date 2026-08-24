@@ -336,7 +336,7 @@ describe("rank (DF3.2 AC7)", () => {
 
     expect(h.writes).toHaveLength(1);
     expect(h.writes[0]?.fanoutId).toBe(FANOUT_ID);
-    const stamped = h.writes[0]?.next.rankedAt ?? "";
+    const stamped = h.writes[0]?.next.rankedAt ?? ""; /* dp:ok fallback only feeds the assertion below, which fails on an unparsable stamp */
     expect(Number.isNaN(Date.parse(stamped))).toBe(false);
     expect(h.reads()).toBe(1);
   });

@@ -715,7 +715,7 @@ async function ingestBriefJson(briefPath: string | undefined, deps?: Partial<Fle
     }
   }
   try {
-    return JSON.parse(rawBrief);
+    return JSON.parse(rawBrief); /* dp:ok guarded below: catch maps parse failure to FleetError(2, invalid-brief) */
   } catch (e) {
     throw new FleetError(
       2,
@@ -749,7 +749,7 @@ function makeLedgerFactory(store: RunRecordStore): () => LedgerLike {
         }
       },
     });
-    return ledger as unknown as LedgerLike;
+    return ledger;
   };
 }
 
@@ -1453,7 +1453,7 @@ export async function run(
           ) {
             throw bad("has changedFiles that is not an array of path strings");
           }
-          byRun.set(runId, o as unknown as ArmStepOutput);
+          byRun.set(runId, o as unknown as ArmStepOutput); /* dp:ok shape-checked field-by-field above against ArmStepOutput's three optional keys */
         }
       }
       const result = await rank(fanoutId, {

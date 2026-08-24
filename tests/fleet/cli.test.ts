@@ -3627,7 +3627,7 @@ process.on = ((sig, listener) => {
       tie: boolean;
       rationale: string;
     }
-    const lines = outOnly.map((l) => JSON.parse(l) as unknown);
+    const lines = outOnly.map((l) => JSON.parse(l) as unknown); /* dp:ok test-authored output: stdout this test's own CLI run just emitted */
     // One ack line PER ARM, then best-of-n's auto-rank summary.
     expect(lines).toHaveLength(3);
     const [armA, armB, ranked] = lines as [ArmAck, ArmAck, RankedLine];
@@ -3661,14 +3661,14 @@ process.on = ((sig, listener) => {
   });
 
   test("e2e: many-stories takes the briefs wrapper and skips the ranking step", async () => {
-    const brief = JSON.parse(validBriefJson(dir)) as Record<string, unknown>;
+    const brief = JSON.parse(validBriefJson(dir)) as Record<string, unknown>; /* dp:ok test-authored output: parses the string validBriefJson() built above */
     const d: Partial<FleetDeps> = {
       ...fanoutDeps(),
       readBrief: async () => JSON.stringify({ briefs: [brief] }),
     };
     const code = await runCli(["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1"], d);
     expect(code).toBe(0);
-    const lines = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>);
+    const lines = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>); /* dp:ok test-authored output: stdout this test's own CLI run just emitted */
     // The degenerate case is the same code path: one ack, NO ranking line.
     expect(lines).toHaveLength(1);
     expect(lines[0]?.outcome).toBe("ready");
@@ -3678,7 +3678,7 @@ process.on = ((sig, listener) => {
   test("fanout validation refusals exit 2 naming the guard, having provisioned nothing", async () => {
     const manyWrapped = (): Partial<FleetDeps> => ({
       ...fanoutDeps(),
-      readBrief: async () => JSON.stringify({ briefs: [JSON.parse(validBriefJson(dir)) as Record<string, unknown>] }),
+      readBrief: async () => JSON.stringify({ briefs: [JSON.parse(validBriefJson(dir)) as Record<string, unknown>] }), /* dp:ok test-authored output: re-parses the brief this file builds in-process */
     });
     const cases: [string[], string, Partial<FleetDeps>?][] = [
       [["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "1", "--roster", "a"], "invalid-n"],
@@ -3777,7 +3777,7 @@ process.on = ((sig, listener) => {
     reset();
     const code = await runCli(["rank", id, "--dir", fanoutsPath, "--steps-json", stepsPath], deps(""));
     expect(code).toBe(0);
-    const result = JSON.parse(outOnly[0] as string) as {
+    const result = JSON.parse(outOnly[0] as string) as { /* dp:ok test-authored output: rank result line this run just emitted to outOnly */
       fanoutId: string;
       scores: { arm: number; runId: string; score: number; breakdown: Record<string, number> }[];
       tie: boolean;
@@ -3815,7 +3815,7 @@ process.on = ((sig, listener) => {
     reset();
     const code = await runCli(["rank", id, "--dir", fanoutsPath], deps(""));
     expect(code).toBe(0);
-    const result = JSON.parse(outOnly[0] as string) as {
+    const result = JSON.parse(outOnly[0] as string) as { /* dp:ok test-authored output: rank result line this run just emitted to outOnly */
       scores: { score: number | null }[];
       tie: boolean;
       rationale: string;
@@ -3830,7 +3830,7 @@ process.on = ((sig, listener) => {
     reset();
     const code = await runCli(["rank", "fan-19700101-ffffff"], deps(""));
     expect(code).toBe(4);
-    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: error envelope this run just emitted to errCaptured */
     expect(envelope.code).toBe("fanout-not-found");
     expect(envelope.message).toContain("fan-19700101-ffffff");
   });
