@@ -30,6 +30,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,7 +40,12 @@ import { isAlive } from "../../scripts/lib/run-lock.ts";
 import type { FleetError } from "../../src/fleet/dispatch.ts";
 // The fleet lock lives in its own module (D1 escape clause, orchestrator-approved
 // split); the record store stays here in fanout.test.ts's sibling fanout.ts.
-import { FLEET_LOCK_STALE_MS, FleetLock, readOwnPidStartTime } from "../../src/fleet/fleet-lock.ts";
+import {
+  FLEET_LOCK_STALE_MS,
+  FleetLock,
+  readOwnPidStartTime,
+  stealJudgedReapMutex,
+} from "../../src/fleet/fleet-lock.ts";
 import {
   DEFAULT_FANOUTS_DIR,
   FANOUT_ID_RE,
@@ -611,6 +617,84 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       lock().acquire();
       expect(onDisk().requestId).toBe("req-under-test"); // the reclaim went through
       expect(existsSync(`${lockPath}.reap`)).toBe(false); // …and took the stolen mutex with it
+    });
+
+    test("a STALE observation never removes a mutex that was REPLACED after it (two-reclaimer race)", async () => {
+      // The reported interleaving, pinned deterministically: reclaimer B reads
+      // a dead holder's mutex body and pauses; reclaimer A clears the path and
+      // contender C claims fresh bytes; B resumes holding a pending unlink.
+      // The conditional removal must refuse — only the EXACT judged bytes are
+      // ever deleted, so C's live mutex (and its verify+rm serialization)
+      // survives B's stale judgment.
+      mkdirSync(dirname(lockPath), { recursive: true });
+      const reap = `${lockPath}.reap`;
+      const corpsePid = await deadPid();
+      const judgedBytes = `${JSON.stringify({
+        pid: corpsePid,
+        pidStartTime: 1,
+        createdAt: new Date().toISOString(),
+        requestId: "corpse-reclaimer",
+      })}\n`;
+      writeFileSync(reap, judgedBytes, { mode: 0o600 });
+      // While our observation is in flight: another reclaimer cleared the
+      // corpse and a third contender claimed fresh LIVE bytes at the path.
+      const fresh = liveChild();
+      children.push(fresh);
+      const freshBytes = `${JSON.stringify({
+        pid: fresh.pid,
+        pidStartTime: readOwnPidStartTime(fresh.pid),
+        createdAt: new Date().toISOString(),
+        requestId: "fresh-reclaimer",
+      })}\n`;
+      writeFileSync(reap, freshBytes, { mode: 0o600 });
+      expect(stealJudgedReapMutex(reap, judgedBytes)).toBe(false); // stale ⇒ refuse
+      expect(readFileSync(reap, "utf8")).toBe(freshBytes); // the live mutex survived
+      // Control: when the path still holds the judged bytes, the steal lands.
+      writeFileSync(reap, judgedBytes, { mode: 0o600 });
+      expect(stealJudgedReapMutex(reap, judgedBytes)).toBe(true); // unchanged ⇒ removed
+      expect(existsSync(reap)).toBe(false);
+    });
+
+    test("a genuinely LIVE reap-mutex holder is NEVER stolen on mtime alone (identity match)", async () => {
+      // A SIGSTOPped or descheduled holder can sit inside its microsecond
+      // section far longer than any mtime bound. Age must not judge a body
+      // whose holder identity still matches — only death or recycling may.
+      mkdirSync(dirname(lockPath), { recursive: true });
+      const reap = `${lockPath}.reap`;
+      const holder = liveChild();
+      children.push(holder);
+      const bytes = `${JSON.stringify({
+        pid: holder.pid,
+        pidStartTime: readOwnPidStartTime(holder.pid),
+        createdAt: new Date().toISOString(),
+        requestId: "foreign-reclaimer",
+      })}\n`;
+      writeFileSync(reap, bytes, { mode: 0o600 });
+      // Backdate the mtime past REAP_MUTEX_ABANDON_MS: the pre-identity code
+      // would have robbed this holder outright.
+      utimesSync(reap, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+      expect(stealJudgedReapMutex(reap, bytes)).toBe(false);
+      expect(readFileSync(reap, "utf8")).toBe(bytes);
+    });
+
+    test("a recycled-pid reap-mutex holder is stolen AT ONCE (identity mismatch beats any age)", async () => {
+      // Alive pid, but wearing a stranger's start time: the RECORDED owner is
+      // provably a corpse. The recycle proof clears it without waiting out any
+      // mtime bound — fresh mtime on purpose, so only the identity path can
+      // have removed it.
+      mkdirSync(dirname(lockPath), { recursive: true });
+      const reap = `${lockPath}.reap`;
+      const impostor = liveChild();
+      children.push(impostor);
+      const bytes = `${JSON.stringify({
+        pid: impostor.pid,
+        pidStartTime: readOwnPidStartTime(impostor.pid) + 98_765, // the recycled half
+        createdAt: new Date().toISOString(),
+        requestId: "corpse-reclaimer",
+      })}\n`;
+      writeFileSync(reap, bytes, { mode: 0o600 });
+      expect(stealJudgedReapMutex(reap, bytes)).toBe(true);
+      expect(existsSync(reap)).toBe(false);
     });
 
     test("aged+alive identity match → refuse fleet-busy (a first fan-out inside teardown is never preempted)", async () => {

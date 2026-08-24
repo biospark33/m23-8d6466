@@ -46,11 +46,13 @@ const REAP_MUTEX_WAIT_MS = 250;
 const REAP_MUTEX_TICK_MS = 10;
 
 /**
- * Past this mtime age a reclaim mutex is abandoned litter. Its critical
- * section is readFileSync + compare + rmSync — microseconds — so a mutex this
- * old belongs to a holder that died mid-section with its pid since recycled
- * onto someone unprobeable. Stealing it cannot race a live holder: no live
- * holder stays inside the section anywhere near this long.
+ * Past this mtime age, UNJUDGEABLE reclaim-mutex bytes (unparseable JSON,
+ * malformed/missing pid) are abandoned litter. Its critical section is
+ * readFileSync + compare + rmSync — microseconds — so such bytes this old were
+ * not left by any holder claim() could have published (claim links complete,
+ * fsynced files: garbage is never a live holder mid-write). Well-typed bodies
+ * are NEVER judged by age — their holders are proved gone by pid death or
+ * identity recycling, never by a clock.
  */
 const REAP_MUTEX_ABANDON_MS = 1_000;
 
@@ -494,9 +496,10 @@ export class FleetLock {
    * Take `<path>.reap` for the length of one verify-and-remove. Bounded: a
    * live reclaimer's critical section is microseconds, so REAP_MUTEX_WAIT_MS
    * of patience covers every honest collision; past it we skip THIS attempt
-   * rather than rm blind. A holder that is PROVABLY gone (dead pid) or whose
-   * mutex is mtime-abandoned is stolen at once — a corpse must not block
-   * reclaims behind it forever.
+   * rather than rm blind. A holder that is PROVABLY gone (dead pid or
+   * recycled-pid identity) is stolen at once — a corpse must not block
+   * reclaims behind it forever — while a genuinely live holder is only ever
+   * waited out, never robbed.
    */
   private acquireReapMutex(): boolean {
     const body = JSON.stringify(ownFleetLockBody(this.requestId));
@@ -520,13 +523,9 @@ export class FleetLock {
 
   /**
    * Is the mutex holder PROVABLY gone, and if so was the mutex removed?
-   * Two proofs, either suffices: a well-typed pid that `isAlive` can prove
-   * dead (the same fail-closed probe classifyHolder defers to), or an mtime
-   * older than REAP_MUTEX_ABANDON_MS — no live holder stays inside a three-
-   * sync-call section anywhere near that long, and a SIGKILLed one leaves its
-   * pid recyclable beyond proof. Anything unprovable returns false and the
-   * caller keeps waiting out its bounded budget; nothing is ever stolen on a
-   * guess.
+   * Delegates to `stealJudgedReapMutex` — identity proofs first (dead pid,
+   * recycled pid), the mtime sweep only for unjudgeable bytes — which also
+   * carries the full safety argument.
    */
   private stealAbandonedReapMutex(): boolean {
     let raw: string;
@@ -535,42 +534,15 @@ export class FleetLock {
     } catch {
       return true; /* dp:ok ENOENT — vanished between our EEXIST and this read; the next claim takes the free path */
     }
-    try {
-      const parsed = JSON.parse(raw) as Partial<FleetLockBody> | null;
-      const pid = parsed?.pid;
-      if (
-        typeof pid === "number" &&
-        Number.isInteger(pid) &&
-        pid > 0 &&
-        pid <= 0x7fff_ffff &&
-        !isAlive(pid)
-      ) {
-        try {
-          rmSync(this.reapPath, { force: true });
-          return true;
-        } catch {
-          return false; /* dp:ok unremovable mutex (EACCES/EIO) is not stealable — wait out the budget */
-        }
-      }
-    } catch {
-      /* dp:ok unparseable mutex body falls through to the mtime judgment */
-    }
-    try {
-      if (Date.now() - statSync(this.reapPath).mtimeMs > REAP_MUTEX_ABANDON_MS) {
-        rmSync(this.reapPath, { force: true });
-        return true;
-      }
-    } catch {
-      return true; /* dp:ok stat failed/ENOENT — the next claim attempt resolves it one way or the other */
-    }
-    return false;
+    return stealJudgedReapMutex(this.reapPath, raw);
   }
 
   /**
    * Drop the reclaim mutex. Our body → rmSync; anything else left standing —
    * a foreign body parked there while we were interrupted, litter from a dead
-   * predecessor — is NEVER deleted here: the next contender's dead-pid/mtime
-   * proof in `stealAbandonedReapMutex` is the only thing that clears those.
+   * predecessor — is NEVER deleted here: the next contender's proof of a
+   * provably-gone holder in `stealJudgedReapMutex` is the only thing that
+   * clears those.
    */
   private releaseReapMutex(): void {
     const body = fleetHeld.get(this.reapPath);
@@ -764,4 +736,100 @@ function fsyncDir(dir: string): void {
   } finally {
     if (dfd !== undefined) closeSync(dfd);
   }
+}
+
+/**
+ * Remove the reclaim mutex at `reapPath` IF its holder is provably gone —
+ * judged against the exact bytes `raw` observed there earlier — and the path
+ * still holds those same bytes. Returns whether the caller may retry its
+ * claim at once.
+ *
+ * Three proofs, in strictness order; the first two are identity proofs, the
+ * third sweeps only bodies too broken to judge at all:
+ *
+ * 1. a well-typed pid that `isAlive` can prove dead;
+ * 2. a well-typed pid that IS ALIVE but whose observed start time ≠ the
+ *    recorded one — a recycled pid, so the RECORDED owner (the only owner
+ *    that matters) is provably gone even though something living wears its
+ *    number now (classifyHolder's identical discipline, including the TZ-
+ *    stable lstartUtcMs comparison when both sides recorded it);
+ * 3. unjudgeable bytes ONLY (unparseable JSON, malformed/missing pid): an
+ *    mtime older than REAP_MUTEX_ABANDON_MS — see that constant.
+ *
+ * An alive pid that identity-MATCHES is a genuinely live holder and is never
+ * stolen on any evidence short of its own exit — a SIGSTOPped or descheduled
+ * holder would otherwise lose its mutex mid-section. Identity that cannot be
+ * observed fails closed the same way. Either way the caller's bounded budget
+ * expires instead; nothing is ever stolen on a guess.
+ *
+ * The removal itself is CONDITIONAL: the path is re-read immediately before
+ * the unlink and only bytes equal to `raw` are removed. Two reclaimers can
+ * observe the same corpse; without the re-read, the slower one's pending
+ * unlink destroys whatever a third party claimed after the faster one cleared
+ * the path — including the fresh mutex whose taker would then enter the
+ * verify-and-remove section concurrently with ours, defeating exactly the
+ * serialization this mutex exists to provide. The residual compare-to-unlink
+ * window is the same one acquire()'s main-lock reclaim already accepts — no
+ * CAS primitive exists for directory entries on POSIX.
+ *
+ * Exported for the concurrency tests: the stale-observation-vs-replacement
+ * interleaving is pinned by calling this directly with pre-planted bytes, not
+ * by choreographing real processes.
+ */
+export function stealJudgedReapMutex(reapPath: string, raw: string): boolean {
+  // The removal guard: delete what we judged, never what replaced it.
+  const removeIfUnchanged = (): boolean => {
+    try {
+      if (readFileSync(reapPath, "utf8") !== raw) return false; // replaced under us — not ours to rm
+    } catch {
+      return true; /* dp:ok vanished between judgment and rm — nothing left to protect; the next claim takes the free path */
+    }
+    try {
+      rmSync(reapPath, { force: true });
+      return true;
+    } catch {
+      return false; /* dp:ok unremovable mutex (EACCES/EIO) is not stealable — wait out the budget */
+    }
+  };
+  let parsed: Partial<FleetLockBody> | null;
+  try {
+    parsed = JSON.parse(raw) as Partial<FleetLockBody> | null;
+  } catch {
+    parsed = null; /* dp:ok unparseable body falls through to the mtime litter sweep */
+  }
+  if (
+    parsed !== null &&
+    typeof parsed.pid === "number" &&
+    Number.isInteger(parsed.pid) &&
+    parsed.pid > 0 &&
+    parsed.pid <= 0x7fff_ffff
+  ) {
+    if (!isAlive(parsed.pid)) return removeIfUnchanged(); // proof 1: dead holder
+    if (typeof parsed.pidStartTime === "number") {
+      // Proof 2: recycle check BEFORE any age conclusion — the same order and
+      // identity comparison classifyHolder uses. An alive pid wearing a
+      // recorded stranger's identity means the recorded owner is a corpse.
+      let observed: PidIdentity;
+      try {
+        observed = observePidStart(parsed.pid);
+      } catch {
+        return false; /* dp:ok identity unobservable — the one holder that must not be judged */
+      }
+      const sameProcess =
+        parsed.lstartUtcMs !== undefined && observed.lstartUtcMs !== undefined
+          ? observed.lstartUtcMs === parsed.lstartUtcMs
+          : observed.localMs === parsed.pidStartTime;
+      if (!sameProcess) return removeIfUnchanged(); // proof 2: recycled pid — recorded owner provably gone
+      return false; // alive AND identity match: a genuinely live holder — never stolen on a guess
+    }
+  }
+  // Unjudgeable bytes only: the mtime litter sweep.
+  try {
+    if (Date.now() - statSync(reapPath).mtimeMs > REAP_MUTEX_ABANDON_MS) {
+      return removeIfUnchanged();
+    }
+  } catch {
+    return true; /* dp:ok stat failed/ENOENT — the next claim attempt resolves it one way or the other */
+  }
+  return false;
 }
