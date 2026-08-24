@@ -78,6 +78,12 @@ export interface FanoutDeps extends Omit<DispatchDeps, "requestId"> {
   ceilingMs?: number;
   /** Monotonic seam for same-process budgets (tick math, ceilings). */
   monotonic?: () => number;
+  /**
+   * DF2.8: when present, race losers' teardown prices their box hours into
+   * the ledger at its close step (teardown.ts gates on exactly this hook).
+   * Wired beside the records dir by the CLI, like teardown's own.
+   */
+  costLedger?: TeardownDeps["costLedger"];
 }
 
 export interface ArmOutcome {
@@ -219,7 +225,27 @@ export async function fanout(
   try {
     // AC1: EXACTLY ONE checkHeadroom(N), inside the lock, before anything minted.
     const tAdmit = mono();
-    const headroom = await checkHeadroom(deps.driver, n, deps.quotaLimits);
+    let headroom: HeadroomResult;
+    try {
+      headroom = await checkHeadroom(deps.driver, n, deps.quotaLimits);
+    } catch (e) {
+      if (e instanceof FleetError) throw e;
+      // Copied from dispatch.ts's admission gate: checkHeadroom's default
+      // parameter is loadQuotaLimits(), which throws QuotaLimitsError for a
+      // malformed or unreadable quota-limits file — an admission refusal like
+      // any other, never a bare exit 1. The provider's own code rides the
+      // payload as diagnosis; it does not become this layer's FleetError code.
+      const q = e as { code?: unknown; remediation?: unknown };
+      throw invalid(
+        5,
+        "headroom-failed",
+        `headroom could not be determined: ${errText(e)}`,
+        typeof q.remediation === "string"
+          ? q.remediation
+          : "fix .sandbox/quota-limits.json, then retry — nothing was provisioned",
+        typeof q.code === "string" ? { providerCode: q.code } : undefined,
+      );
+    }
     if (!headroom.allowed) {
       // Copied from dispatch.ts:1552-1576: list-unverified is the SUBSTRATE
       // failing to answer, not the request being wrong — classify transient.
@@ -568,6 +594,10 @@ async function disposeLosers(
     store: deps.store as RunRecordStore,
     keyApi: deps.keyApi as KeyApi,
     requestId: deps.requestId,
+    // DF2.8: a loser's close step must price its box hours like any teardown,
+    // or the ledger under-counts spend and a later assertWithinBudget
+    // over-admits against the cap.
+    ...(deps.costLedger === undefined ? {} : { costLedger: deps.costLedger }),
   };
   // Undecided losers become lostRace; a marker-decided armFailed KEEPS its
   // classification (a completed run that reported failure — not a race loss).

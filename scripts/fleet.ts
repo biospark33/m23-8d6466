@@ -67,6 +67,7 @@ import {
   openRouterKeyApi,
   resolveDriver,
   teardownSandbox,
+  type CostLedgerHook,
   type HarvestError,
   type ProviderDriver,
   type RunRecord,
@@ -178,6 +179,12 @@ export interface FleetDeps
    */
   fanoutsDir?: string;
   lockPath?: string;
+  /**
+   * DF2.8: when present, race losers' teardown prices their box hours into
+   * THIS ledger instead of the one the verb builds beside the records dir.
+   * Absent and pattern=race ⇒ the verb constructs it (see the fanout block).
+   */
+  costLedger?: CostLedgerHook;
 }
 
 /** Every refusal is a FleetError so ONE renderer owns the envelope + exit code. */
@@ -777,8 +784,21 @@ function readFanoutForRank(store: FanoutRecordStore, fanoutId: string): FanoutRe
  * (dispatch's own refusal path already classifies its exit 1 the same way).
  * 2-5 are the operator's brief, flags, id or budget, and 6 is a wedged cleanup
  * that no amount of retrying can clear: retrying any of them is futile.
+ *
+ * `exitStatusOverride` carries the one exception the table cannot see: an
+ * error that KNOWS its own classification despite landing on a do-not-retry
+ * code (fanout's list-unverified refusal rides exit 5 but is the substrate
+ * failing to answer — fanout-primitive's invalid() attaches it to the
+ * FleetError). Undefined ⇒ the code-derived default, unchanged.
  */
-function logVerb(requestId: string, verb: string, runId: string | undefined, startedAt: number, code: number): number {
+function logVerb(
+  requestId: string,
+  verb: string,
+  runId: string | undefined,
+  startedAt: number,
+  code: number,
+  exitStatusOverride?: ExitStatus,
+): number {
   const durationMs = Date.now() - startedAt;
   log({
     requestId,
@@ -795,7 +815,8 @@ function logVerb(requestId: string, verb: string, runId: string | undefined, sta
     verb: bounded(verb),
     phase: "complete",
     exitCode: code,
-    exitStatus: (code === 0 ? "success" : code === 1 ? "transient" : "logic") as ExitStatus,
+    exitStatus: (exitStatusOverride ??
+      (code === 0 ? "success" : code === 1 ? "transient" : "logic")) as ExitStatus,
   });
   return code;
 }
@@ -913,8 +934,13 @@ export async function run(
    * news than a short write, and this is the same rule the cleanup `finally`
    * below states for the ledger and the lock.
    */
-  const finish = (rid: string, v: string, runId: string | undefined, code: number): number =>
-    logVerb(rid, v, runId, startedAt, code === 0 && outputIncomplete ? 6 : code);
+  const finish = (
+    rid: string,
+    v: string,
+    runId: string | undefined,
+    code: number,
+    exitStatusOverride?: ExitStatus,
+  ): number => logVerb(rid, v, runId, startedAt, code === 0 && outputIncomplete ? 6 : code, exitStatusOverride);
   /**
    * The dispatch ack's posture over the COMPLETION lines — teardown's
    * `torn down:` and harvest's `harvested:`. Those lines describe work that has
@@ -1218,6 +1244,13 @@ export async function run(
     let fanRequestId: string | undefined;
     let fanoutId: string | undefined;
     let fanoutCode: number;
+    // The error's own retry classification, when it carries one — read in the
+    // catch, honored on the completion line below (logVerb derives from exit
+    // code alone, and 5 alone would read as do-not-retry "logic").
+    let transientRefusal = false;
+    // Race losers' teardown prices box hours through THIS ledger (DF2.8);
+    // built beside the records dir like teardown's own, closed in the finally.
+    let loserLedger: CostLedger | undefined;
     try {
       if (positionals.length > 1) {
         throw usageError(
@@ -1295,14 +1328,19 @@ export async function run(
 
       // Validation-before-construction, dispatch's exact posture: these
       // constructors mkdir/chmod, so an invalid brief must refuse without them.
+      // --dir is NOT this store's dir: for both producer and consumer it names
+      // the FAN-OUTS directory (rank's semantics — one flag, one meaning), and
+      // a fan-*.json inside a runs dir would make every later sweep of that
+      // dir report malformed_record_name anomalies. The run records follow
+      // their own default/env chain.
       const briefsOk = schemaList.every((b) => BriefSchema.safeParse(b).success);
       const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId: fanRequestId }));
       const keyApi = deps?.keyApi ?? (briefsOk ? asUsage(() => openRouterKeyApi()) : unusedKeyApi());
       const store =
         deps?.store ??
         (briefsOk
-          ? asUsage(() => new RunRecordStore({ ...storeOpts, requestId: fanRequestId }))
-          : unusedStore(resolveRunsDir(dir)));
+          ? asUsage(() => new RunRecordStore({ requestId: fanRequestId }))
+          : unusedStore(resolveRunsDir()));
 
       // `readBrief` is the CLI's own seam and fanoutsDir/lockPath are re-homed
       // below; everything else forwards verbatim into FanoutDeps.
@@ -1310,8 +1348,31 @@ export async function run(
         readBrief: _readBrief,
         fanoutsDir: injectedFanoutsDir,
         lockPath: injectedLockPath,
+        costLedger: injectedCostLedger,
         ...seams
       } = deps ?? {};
+      const fanoutsFlagDir = injectedFanoutsDir ?? dir;
+      // Race losers' teardown prices their box hours into the ledger — wired
+      // beside the records dir exactly like the teardown verb's, so a loser's
+      // close step cannot silently under-count spend against the cap. Race
+      // only: no other pattern disposes arms through teardownSandbox here, and
+      // an unused SQLite handle would still create its db file.
+      if (pattern === "race" && injectedCostLedger === undefined) {
+        loserLedger = asUsage(
+          () =>
+            new CostLedger({
+              ...costLedgerOpts(store.dir),
+              readRunRecord: (id: string) => {
+                try {
+                  return store.get(id);
+                } catch (e) {
+                  if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
+                  throw e;
+                }
+              },
+            }),
+        );
+      }
       const result = await fanout(pattern as FanoutPattern, n, briefs as Brief | Brief[], {
         ...seams,
         driver,
@@ -1319,7 +1380,9 @@ export async function run(
         store,
         ledgerFactory: deps?.ledgerFactory ?? makeLedgerFactory(store),
         requestId: fanRequestId,
-        ...(injectedFanoutsDir === undefined ? {} : { fanoutsDir: injectedFanoutsDir }),
+        ...(injectedCostLedger === undefined ? {} : { costLedger: injectedCostLedger }),
+        ...(loserLedger === undefined ? {} : { costLedger: loserLedger }),
+        ...(fanoutsFlagDir === undefined ? {} : { fanoutsDir: fanoutsFlagDir }),
         ...(injectedLockPath === undefined ? {} : { lockPath: injectedLockPath }),
         ...(rosterIds === undefined ? {} : { rosterIds }),
         ...(capMicroUsd === undefined ? {} : { capMicroUsd }),
@@ -1345,7 +1408,7 @@ export async function run(
       // arms list unscored with an explanatory rationale;
       // `fleet rank <id> --steps-json …` scores them afterwards.
       if (pattern === "best-of-n" && result.arms.every((a) => a.outcome === "ready")) {
-        const fstore = new FanoutRecordStore({ dir: resolveFanoutsDir(injectedFanoutsDir), requestId: fanRequestId });
+        const fstore = new FanoutRecordStore({ dir: resolveFanoutsDir(fanoutsFlagDir), requestId: fanRequestId });
         const ranked = await rank(result.fanoutId, {
           recordReader: (id) => readFanoutForRank(fstore, id),
           recordWriter: (id, mutator) => fstore.mutate(id, (rec) => mutator(rec) as FanoutRecord),
@@ -1365,8 +1428,19 @@ export async function run(
         : 0;
     } catch (e) {
       fanoutCode = report(note, e);
+      transientRefusal = e instanceof FleetError && (e as { exitStatus?: unknown }).exitStatus === "transient";
+    } finally {
+      // The ledger owns a SQLite handle; the arms' budget admissions closed
+      // THEIR ledgers, and this one closes with the verb like teardown's does.
+      loserLedger?.close();
     }
-    return finish(fanRequestId ?? newRequestId(), verb, fanoutId, fanoutCode);
+    return finish(
+      fanRequestId ?? newRequestId(),
+      verb,
+      fanoutId,
+      fanoutCode,
+      transientRefusal ? ("transient" as ExitStatus) : undefined,
+    );
   }
 
   // ── rank (DF3.2 D12/C2) ─────────────────────────────────────────────────────

@@ -451,6 +451,39 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(fanoutRecordFiles()).toHaveLength(0);
       expect(boxCount(driver)).toBe(0);
     });
+
+    test("a malformed quota-limits file refuses exit 5 headroom-failed, zero side effects", async () => {
+      manifest();
+      // checkHeadroom's default parameter is loadQuotaLimits(), which throws
+      // QuotaLimitsError for an unreadable/unparseable file. Dispatch maps the
+      // identical condition to refuse(5, "headroom-failed") — the primitive
+      // must not let it escape as a bare exit-1.
+      const bad = join(dir, "quota-limits.json");
+      writeFileSync(bad, "{ not json");
+      const prev = process.env.QDS_QUOTA_LIMITS_FILE;
+      process.env.QDS_QUOTA_LIMITS_FILE = bad;
+      try {
+        const err = await refuseOf(
+          fanout("best-of-n", 2, brief(), deps({ rosterIds: ["r0", "r1"], quotaLimits: undefined })),
+        );
+        expect(err.exitCode).toBe(5);
+        expect(err.code).toBe("headroom-failed");
+        expect(err.message).toContain("headroom could not be determined");
+        expect(err.payload).toMatchObject({ providerCode: "quota-limits-unreadable" });
+        // Zero side effects: nothing provisioned, no record, lock released.
+        expect(fanoutRecordFiles()).toHaveLength(0);
+        expect(boxCount(driver)).toBe(0);
+        expect(ledgerCalls).toBe(0);
+        expect(readdirSafe(join(dir, "runs"))).toHaveLength(0);
+        expect(existsSync(lockPath)).toBe(false);
+      } finally {
+        // Reflect.deleteProperty, not `= undefined`: Bun coerces an undefined
+        // assignment into the STRING "undefined", poisoning every later
+        // loadQuotaLimits() in the same process.
+        if (prev === undefined) Reflect.deleteProperty(process.env, "QDS_QUOTA_LIMITS_FILE");
+        else process.env.QDS_QUOTA_LIMITS_FILE = prev;
+      }
+    });
   });
 
   // ─── AC2/AC3: isolation and mint ordering ──────────────────────────────────────
@@ -564,6 +597,44 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
       expect(rec.winner).toBe(1);
       expect(rec.closedAt).not.toBeNull();
+    });
+
+    test("loser teardown prices box hours into the injected cost ledger (DF2.8)", async () => {
+      manifest();
+      // Same spy shape teardown.test.ts uses for the close step: the hook is
+      // what TeardownDeps.costLedger declares, so no real SQLite is involved.
+      const ingestCalls: { runId: string; repoSlug: string; issueId: string; requestId: string }[] = [];
+      const costLedger = {
+        ingestBoxHours(ctx: { runId: string; repoSlug: string; issueId: string; requestId: string }): {
+          eventId: string;
+          inserted: boolean;
+          unpriced: boolean;
+        } {
+          ingestCalls.push({ ...ctx });
+          return { eventId: `event-${ctx.runId}`, inserted: true, unpriced: false };
+        },
+      };
+      driver.onProbe = (_vm, probeNumber) => {
+        if (probeNumber === 2) plantMarker(driver, _vm, { ok: true });
+      };
+      const res = await fanout(
+        "race",
+        2,
+        brief(),
+        raceDeps({ rosterIds: ["r0", "r1"], costLedger }),
+      );
+      expect(res.winner).toBe(1);
+      // The LOSER'S close step priced its box hours — dispatch's own budget
+      // admission wrote extensions.budget off the brief, so teardown's
+      // attribution gate passes and the row lands exactly once per loser.
+      expect(res.arms[0]?.outcome).toBe("lostRace");
+      expect(ingestCalls).toHaveLength(1);
+      expect(ingestCalls[0]).toMatchObject({
+        runId: res.arms[0]?.runId,
+        repoSlug: "owner/repo",
+        issueId: "42",
+        requestId,
+      });
     });
 
     test("an ok:false marker is armFailed — the race continues past it", async () => {

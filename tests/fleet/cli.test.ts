@@ -3719,6 +3719,58 @@ process.on = ((sig, listener) => {
     expectNoBoxes();
   });
 
+  test("--dir is the fan-outs directory for BOTH verbs: fanout → rank round-trip", async () => {
+    // One flag, one meaning (rank's): the producer drops its record under
+    // --dir so `rank <id> --dir <same>` finds it. Run records stay on their
+    // own default/env chain — a fan-*.json inside a runs dir would make every
+    // later sweep of that dir report malformed_record_name anomalies.
+    const fanouts = join(dir, "operator-fanouts");
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta", "--dir", fanouts],
+      // fanoutsDir deliberately NOT injected — the flag is the subject. The
+      // lock still must not land in the repo cwd.
+      { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+    );
+    expect(code).toBe(0);
+    const files = readdirSync(fanouts).filter((f) => f.endsWith(".json"));
+    expect(files).toHaveLength(1);
+    const fanoutId = (
+      JSON.parse(readFileSync(join(fanouts, files[0] as string), "utf8")) as { fanoutId: string } /* dp:ok test-authored output: parses the record this test's own fanout run just wrote */
+    ).fanoutId;
+    expect(fanoutId).toMatch(/^fan-\d{8}-[a-f0-9]{6}$/);
+    // The consumer finds it through the SAME flag value.
+    reset();
+    expect(await runCli(["rank", fanoutId, "--dir", fanouts], deps(""))).toBe(0);
+  });
+
+  test("without --dir both verbs resolve the shared default fan-outs chain", async () => {
+    // `$QDS_FANOUTS_DIR` is the middle tier of the SAME resolver both verbs
+    // call with no explicit dir — redirected here only to keep the default
+    // hermetic (the repo cwd has no .sandbox of its own under test).
+    const prev = process.env.QDS_FANOUTS_DIR;
+    process.env.QDS_FANOUTS_DIR = join(dir, "env-fanouts");
+    try {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+        { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+      );
+      expect(code).toBe(0);
+      const files = readdirSync(join(dir, "env-fanouts")).filter((f) => f.endsWith(".json"));
+      expect(files).toHaveLength(1);
+      const fanoutId = (
+        JSON.parse(readFileSync(join(dir, "env-fanouts", files[0] as string), "utf8")) as { fanoutId: string } /* dp:ok test-authored output: parses the record this test's own fanout run just wrote */
+      ).fanoutId;
+      reset();
+      expect(await runCli(["rank", fanoutId], deps(""))).toBe(0);
+    } finally {
+      // Reflect.deleteProperty, not `= undefined`: Bun coerces an undefined
+      // assignment into the STRING "undefined", poisoning later resolvers in
+      // the same process.
+      if (prev === undefined) Reflect.deleteProperty(process.env, "QDS_FANOUTS_DIR");
+      else process.env.QDS_FANOUTS_DIR = prev;
+    }
+  });
+
   test("a fanout whose completion lines cannot print exits 6 with the work landed", async () => {
     const d = fanoutDeps();
     let refused = 0;
@@ -4051,6 +4103,34 @@ process.on = ((sig, listener) => {
       const line = verbLines()[0] as unknown as Record<string, unknown>;
       expect(line.exitCode).toBe(6);
       expect(line.exitStatus).toBe("logic");
+    });
+
+    test("a fanout list-unverified refusal stamps its completion line transient", async () => {
+      // The primitive attaches exitStatus "transient" to the ERROR itself
+      // (fanout-primitive's invalid()): list-unverified is the SUBSTRATE
+      // failing to answer, not the brief being wrong. logVerb derives from
+      // exit code alone, and 5 reads as do-not-retry "logic" — so the
+      // completion line must honor the error-carried override or automation
+      // drops exactly the one retryable fan-out refusal.
+      const base = new FakeDriver(boxesDir);
+      const d: Partial<FleetDeps> = {
+        ...fanoutDeps(),
+        driver: driverWith(base, {
+          list: async () => {
+            throw new Error("provider unreachable");
+          },
+        }),
+      };
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
+        d,
+      );
+      expect(code).toBe(5);
+      expect(text()).toContain("list-unverified");
+      const line = verbLines()[0] as unknown as Record<string, unknown>; /* dp:ok same read-back cast every sibling CC-9 case uses on the sink's LogEntry */
+      expect(line.verb).toBe("fanout");
+      expect(line.exitCode).toBe(5);
+      expect(line.exitStatus).toBe("transient");
     });
   });
 });
