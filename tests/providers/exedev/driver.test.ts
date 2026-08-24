@@ -365,6 +365,21 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
     expect(fetchCalls.some((argv) => argv.join(" ").includes("work.bundle"))).toBe(true);
   }, 30_000);
 
+  test("F4: a workdir carrying shell metacharacters or .. is refused before any command runs", async () => {
+    // The workdir (and the <workdir>.bundle sibling) reaches sh -c scripts —
+    // the validator is the PRIMARY defense, shQuote the belt (credentials.ts
+    // assertEnvFileSafe posture). Refused at the boundary, zero seam calls.
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create("fill-badpath");
+    const before = fake.calls.length;
+    for (const bad of ["a; rm -rf /", "../escape", "a/../b", "a//b", "trailing/", ""]) {
+      await expect(
+        driver.fill("fill-badpath", { runId: "fill-badpath", repoUrl: `file://${originDir}`, commitSha: shaB, workdir: bad }),
+      ).rejects.toThrow(/workdir/);
+    }
+    expect(fake.calls.length).toBe(before);
+  }, 30_000);
+
   test("F4: an oversized bundle refuses with a named error before any box mutation", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
     await driver.create("fill-toobig");

@@ -87,6 +87,30 @@ export const DEFAULT_FILL_WORKDIR = "src";
 /** 7–64 hex chars: accepts both short and full SHAs, rejects everything else. */
 const SHA_RE = /^[0-9a-f]{7,64}$/i;
 
+/**
+ * The workdir (and the `<workdir>.bundle` sibling derived from it) reaches
+ * `sh -c` scripts and git argv — validated against a strict path grammar
+ * BEFORE any interpolation, the same primary-defense posture as
+ * credentials.ts's assertEnvFileSafe (shQuote is the secondary belt, not the
+ * validator). Absolute paths are fine (embedder overrides); "..", empty
+ * segments, and every shell metacharacter are not.
+ */
+function assertWorkdirSafe(work: string): void {
+  const segments = work.split("/");
+  if (
+    work.length === 0 ||
+    !/^[A-Za-z0-9._/-]+$/.test(work) ||
+    segments.includes("..") ||
+    segments.slice(1).includes("")
+  ) {
+    throw new ExeDevDriverError(
+      "workdir-invalid",
+      `workdir ${JSON.stringify(work)} is not a plain path (charset [A-Za-z0-9._/-], no ".." segments, no empty segments)`,
+      "pass a plain in-box path — relative resolves against the ssh HOME",
+    );
+  }
+}
+
 function assertRepoUrl(repoUrl: string): void {
   // No userinfo anywhere: `user:pass@host` inside an https URL is a credential
   // this driver refuses to carry (INV-CRED-1: no second secret in a box). The
@@ -240,6 +264,7 @@ export async function fillExeDev(driver: ExeDevDriver, vm: string, opts: FillOpt
   assertRepoUrl(opts.repoUrl);
   assertCommitSha(opts.commitSha);
   const work = opts.workdir ?? DEFAULT_FILL_WORKDIR;
+  assertWorkdirSafe(work);
   const branch = `sbx/${opts.runId}`;
   const started = Date.now();
 
