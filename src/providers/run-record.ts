@@ -168,6 +168,31 @@ export const EXTENSION_NAMESPACES: Readonly<
     },
   },
   /**
+   * DF3.4's pre-PR approval gate, registered here so DF5.1 — the single owner
+   * of the `requestApproval` CALLER — can bind a green host verdict to a
+   * decision. `reportId` is a `ReverifyReport.reverifyId` and `headSha` is that
+   * same report's head: the approval binds to one report, not to a run in
+   * general, and `supersededReportId` records the report a rebind displaced.
+   *
+   * States: `pausing` (created before teardown, not yet promoted),
+   * `awaiting-approval`, then terminal `approved` / `rejected` / `timed-out`.
+   * DF3.4 owns the decide side and may extend these fields.
+   */
+  approval: {
+    schemaVersion: 1,
+    fields: {
+      state: "string",
+      proposal: "string",
+      reportId: "string",
+      headSha: "string",
+      requestedAt: "string",
+      supersededReportId: "string",
+      approverId: "string",
+      decidedAt: "string",
+      reason: "string",
+    },
+  },
+  /**
    * DF3.1 AC3: the setup gate's refusal, written by the fleet dispatcher when
    * the gate fails. The record stays OPEN and the box ALIVE (INV-5) — this is
    * the record-side half of the evidence the host-side dispatch log carries.
