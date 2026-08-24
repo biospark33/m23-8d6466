@@ -3801,6 +3801,46 @@ process.on = ((sig, listener) => {
     expect(readdirSync(join(dir, ".sandbox", "fanouts"))).toHaveLength(1);
   });
 
+  test("a rank whose scored table cannot print exits 6 with rankedAt stamped", async () => {
+    const fanoutsPath = join(dir, ".sandbox", "fanouts");
+    const fstore = new FanoutRecordStore({ dir: fanoutsPath });
+    const id = mintFanoutId();
+    fstore.create({
+      fanoutId: id,
+      requestId: "01234567-89ab-cdef-0123-456789abcdef",
+      pattern: "best-of-n",
+      n: 2,
+      pin: "c".repeat(40),
+      createdAt: new Date().toISOString(),
+      arms: [
+        { arm: 0, runId: "qds-20260101-00000c", briefHash: "a".repeat(64) },
+        { arm: 1, runId: "qds-20260101-00000d", briefHash: "a".repeat(64) },
+      ],
+      winner: null,
+      rankedAt: null,
+      closedAt: new Date().toISOString(),
+    });
+    let refused = 0;
+    const nonBlocking = (): never => {
+      refused++;
+      const e = new Error("fd 1 accepted 0 bytes") as NodeJS.ErrnoException;
+      e.code = "EAGAIN";
+      throw e;
+    };
+    reset();
+    // No --steps-json: the ranking still LANDS (every arm listed unscored, the
+    // C2 advisory posture) and its one result line is what cannot print.
+    const code = await run(["rank", id, "--dir", fanoutsPath], nonBlocking, deps(""), errOut);
+    // 6, not 0: the record was read, scores computed and rankedAt STAMPED —
+    // re-running would refuse nothing (rank is idempotent) but a caller that
+    // parsed the truncated stdout got no table at all.
+    expect(code).toBe(6);
+    expect(refused).toBeGreaterThanOrEqual(1);
+    expect(errCaptured.filter((l) => l.includes("stdout-truncated"))).toHaveLength(1);
+    // The work landed even though its line never printed.
+    expect(fstore.get(id).rankedAt).not.toBeNull();
+  });
+
   test("rank scores a completed fan-out from --steps-json and stamps rankedAt", async () => {
     const fanoutsPath = join(dir, ".sandbox", "fanouts");
     const fstore = new FanoutRecordStore({ dir: fanoutsPath });

@@ -114,7 +114,13 @@ function assertStepOutputShape(runId: string, out: ArmStepOutput): void {
   const tr = out.testResults;
   if (
     tr !== undefined &&
-    (typeof tr !== "object" ||
+    // JSON carries `null` where the CLI's --steps-json gate refuses it
+    // (scripts/fleet.ts's testResults branch) — `null !== undefined` alone let
+    // it past this guard and die as `Cannot read properties of null` on the
+    // `.passed` access below instead of the named refusal embedders get for
+    // every other malformed shape.
+    (tr === null ||
+      typeof tr !== "object" ||
       !Number.isInteger(tr.passed) ||
       !Number.isInteger(tr.failed) ||
       tr.passed < 0 ||

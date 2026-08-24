@@ -307,7 +307,12 @@ assumed. Driver registration cites `src/providers/index.ts`'s `resolveDriver(nam
       down through DF2.5's six steps (harvest before destroy), and an arm whose marker never appears is reported `armUnknown`
 - [ ] **Test (e2e demo — MANDATORY):** best-of-N `N=3` against the `fake` driver produces three closed
       records with three distinct `keyHash` values, three bundles under `.sandbox/runs/`, and one
-      ranking table with rationale — captured in the Dev Agent Record
+      ranking table with rationale — captured in the Dev Agent Record.
+      **PARTIAL as demonstrated:** the records, distinct keyHashes and ranking table are all shown;
+      the three bundles are NOT (the fake driver's boxes carry no git history or artifacts, so
+      DF2.5's harvest step reports `"harvested":"none"` — see Honest deltas #1). Bundle production
+      itself is DF2.5's mechanism and is exercised there; a real exe.dev arm rerun is what would
+      close this criterion fully.
 
 ## Dev Agent Record
 
@@ -324,7 +329,9 @@ assumed. Driver registration cites `src/providers/index.ts`'s `resolveDriver(nam
 | `tests/fleet/cli.test.ts` | EXPECTED_VERBS → six (+BARE_VERB_EXIT entries). New tests: best-of-n e2e (acks + auto-rank line + extension joins + lock released), many-stories wrapper e2e, six validation refusals (exit 2, nothing provisioned), no-headroom exit 5, **exit-6 EAGAIN test** (the allowlist's binding target), rank scored via `--steps-json` (asserts score to 6 dp, exactly-two-key breakdown, rankedAt stamped), rank unscored exit 0, rank unknown-id exit 4. |
 | `tests/fleet/patterns.test.ts` | ONE new block (AC8): two full `fanout()` invocations race with a seam barrier parked in the winner's admission await — loser refuses exit 5 having written zero records/mints/boxes; totals prove it under the shared driver/store. |
 
-**Gate evidence:** scoped files 175 pass / 0 fail; full suite **3308 pass / 8 skip / 1 fail** —
+**Gate evidence:** scoped files 175 pass / 0 fail; full suite **3308 pass / 8 skip / 1 fail** (= 3317
+collected; this is agent B's wave snapshot, NOT the same run as the close-gate line at the bottom of this
+record — see "Story-evidence reconciliation" for the one-run addendum) —
 the one fail is `tests/gitnexus/graph-queries.test.ts` ("gitnexus_impact — 'registerSwarmClawAgent'
 …"), proven pre-existing by `git stash push -- <six owned files>` + rerun on the clean tree: same
 1 fail / 15 pass. It reads the GitNexus index, not our code. B's other candidates (setup-gate ×6,
@@ -440,7 +447,7 @@ Score arithmetic check against AC7: cross-arm union = {dispatcher.ts, verbs.ts, 
 
 Seven parallel reviewers (3 blind chunk reviewers, 3 edge hunters with repo access, 1 spec auditor) over a
 5-chunk split of the full branch diff, plus the Sift bot's 7 inline findings folded into triage.
-Full ledger: `/tmp/pr128-review/triage.md`.
+Full ledger: `_bmad-output/evidence/df3-2/pr128-triage.md` (committed; formerly `/tmp/pr128-review/triage.md`).
 
 ### Patched (source)
 
@@ -489,11 +496,77 @@ Full ledger: `/tmp/pr128-review/triage.md`.
 
 ### Deferred / documented
 
-Orphan temp sweeper (two accumulation paths, inert to list()) · fleetUnwinding permanent latch · corrupt
-final.json spins poller to ceiling holding lock (design gap) · polymorphic stdout rows undocumented · metric
-names durationMs/rankMs vs spec arm_dispatch_ms/rank_ms · AC7 letter (empty scores) unreachable for real
-all-failed records under K11 · record pin stamps requested SHA (verification delegated to DF3.1 fill gate).
+Orphan temp sweeper (two accumulation paths, inert to list()) · fleetUnwinding permanent latch ·
+polymorphic stdout rows undocumented · metric names durationMs/rankMs vs spec arm_dispatch_ms/rank_ms ·
+AC7 letter (empty scores) unreachable for real all-failed records under K11 · record pin stamps requested
+SHA (verification delegated to DF3.1 fill gate).
 
 Gates at close: fleet focal suites 472 pass / 0 fail (7 files) · full suite 3338 tests, 1 fail = documented
 pre-existing gitnexus AC-1 index-reader · tsc --noEmit clean · biome clean · detect_changes blast radius
 confined to this PR's modules.
+
+## Review round 2 — Sift/Gemini/CodeRabbit comments on PR #128 (2026-08-24)
+
+Triage of the post-round-1 review batch against HEAD `6a54683`. Several findings were STALE — posted
+against pre-`6a54683` revisions and already fixed by that commit; each is listed with its disposition.
+
+### Patched (source)
+
+- [x] **Reclaim verify+rm serialized** (`fleet-lock.ts`) — the r10 byte-compare narrowed but did not close
+  the reclaim TOCTOU: between compare and `rmSync`, a SECOND reclaimer can remove the judged stale body and
+  a contender claim fresh bytes, which our pending unlink then destroys → two holders. Contenders cannot
+  interleave there (claim's link refuses while any body occupies the path); only fellow reclaimers can.
+  Verify-and-rm now runs under a dedicated `<path>.reap` mutex: bounded wait (250 ms), dead-pid/mtime steal
+  proofs for an abandoned holder, signal-release registered. Deterministic tests: foreign LIVE mutex blocks
+  the unlink (stale body survives both attempts → fleet-busy); ABANDONED mutex (dead pid) stolen without
+  waiting out the budget.
+- [x] **Corrupt final.json no longer spins to the ceiling** (`fanout-primitive.ts`) — journal.ts publishes
+  the marker by temp+rename, so persistent parse failure is corruption, not latency. After 3 consecutive
+  unusable reads (`MARKER_UNUSABLE_TICKS_LIMIT`) an arm is reclassified armUnknown and dropped from polling;
+  record still closes and the lock releases through the existing finally. Was listed as a deferred design gap.
+- [x] **Null arms element refused through the malformed taxonomy** (`fanout.ts`) — `(null as Record<…>).arm`
+  escaped validateFanoutRecord as a bare TypeError instead of naming record + field.
+- [x] **rank refuses testResults:null** (`rank.ts`) — same named invalid-step-output refusal the CLI's
+  --steps-json gate gives; previously died as "Cannot read properties of null" at the library boundary.
+- [x] **rank declares exit 6** (`verbs.ts`) — the shared `finish` folds EAGAIN-refused stdout into 6 for
+  every verb that emits one; rank's omission was a registry-contract gap. Pinned by a new cli.test.ts e2e
+  ("a rank whose scored table cannot print exits 6 with rankedAt stamped") + allowlist entry in verbs.test.ts.
+- [x] **loserLedger.close() follows the ONE cleanup policy** (`scripts/fleet.ts`) — was guarded-but-silent;
+  now prints `ledger-close-failed` and downgrades an otherwise-clean fanout to exit 6, matching teardown's/
+  harvest's stated policy verbatim.
+- [x] **rmQuiet deduplicated** — exported from `fanout.ts` and imported by `fanout-primitive.ts` (already
+  downstream of it). `fsyncDir` stays module-private per file DELIBERATELY: sharing it would couple
+  fleet-lock.ts to the store module it must sit beneath.
+
+### Dispositions of stale/wrong findings (no change)
+
+- "Race poller continues after other process wins" — already fixed in round 1 (mutate callback adopts the
+  persisted winner); reviewer saw a pre-`6a54683` revision.
+- "`/malformed|n/i` overly broad" — already tightened to `/malformed/i` in round 1's test patches.
+- "Auto-rank must be isolated" — already isolated in round 1 (own catch → stderr warn).
+- "`lock.acquire()` not awaited" — acquire is synchronous by signature and body; awaiting sync void is a no-op.
+- "`isAlive()` may throw" — fails closed internally (try/catch around kill, non-ESRCH ⇒ alive) and the pid
+  is range-guarded before the call; the suggested `catch { return "reclaim" }` would convert unobservable
+  holders into steals, violating the module's doctrine.
+- shellQuote mirrored into patterns.test.ts — intentional isolation (a loosened production quoter must not
+  loosen the test's own probe rewriting).
+
+### Story-evidence reconciliation
+
+- Gate evidence above mixes two runs (wave-1b snapshot vs close gate). Both retained as historical record;
+  see the dated addendum below for one internally consistent run.
+- DoD e2e-demo criterion labeled PARTIAL (bundles) — see the annotation on the DoD item.
+- Review ledger committed to `_bmad-output/evidence/df3-2/pr128-triage.md`; `/tmp` reference replaced.
+
+**One-run addendum (2026-08-24, post-round-2 patches, HEAD = round-2 commit):** full suite in ONE run —
+3332 pass + 8 skip + 2 todo + 1 fail = **3343 collected** across 99 files; the 1 fail is
+`tests/gitnexus/graph-queries.test.ts` ("gitnexus_impact — 'registerSwarmClawAgent'…"), re-verified
+pre-existing by direct rerun (same AC-1 index-reader failure round 1 documented). Fleet focal suites green:
+fanout+rank 56 · verbs 74 · cli 110 · patterns 30 — 0 fail. `bunx tsc --noEmit` clean; biome clean on all
+touched files; `detect_changes` blast radius confined to this PR's modules.
+
+### Round-2 gates
+
+Fleet focal suites (fanout/patterns/rank/verbs/cli): all green post-change · `bunx tsc --noEmit` clean ·
+biome clean on all touched files · detect_changes run before commit. Full-suite numbers recorded in the
+addendum below.

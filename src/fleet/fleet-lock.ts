@@ -34,6 +34,26 @@ export const FLEET_LOCK_PATH = ".sandbox/fleet.lock";
 /** Past this age, staleness is CANDIDATE — identity still decides (see classify). */
 export const FLEET_LOCK_STALE_MS = 3_600_000;
 
+/**
+ * Bounded wait for the reclaim mutex before giving up THIS attempt (the outer
+ * loop's retry re-classifies whatever sits at the path by then). Two reclaims
+ * colliding is already the rare path; half a second of patience costs nothing
+ * next to a stale lock that has sat for an hour.
+ */
+const REAP_MUTEX_WAIT_MS = 250;
+
+/** Spacing between reclaim-mutex claim attempts while waiting. */
+const REAP_MUTEX_TICK_MS = 10;
+
+/**
+ * Past this mtime age a reclaim mutex is abandoned litter. Its critical
+ * section is readFileSync + compare + rmSync — microseconds — so a mutex this
+ * old belongs to a holder that died mid-section with its pid since recycled
+ * onto someone unprobeable. Stealing it cannot race a live holder: no live
+ * holder stays inside the section anywhere near this long.
+ */
+const REAP_MUTEX_ABANDON_MS = 1_000;
+
 /** Story-mandated body — JSON, mode 0600. Distinct from run-lock's whitespace body. */
 export interface FleetLockBody {
   pid: number;
@@ -148,6 +168,20 @@ function psLstartIdentity(pid: number): PidIdentity {
 const fleetHeld = new Map<string, string>();
 /** Paths past the point of no return — release refuses unless forced. */
 const fleetDestructive = new Set<string>();
+
+/**
+ * Block the thread for `ms`. The reclaim path is synchronous end to end (it
+ * sits between an EEXIST and an unlink inside a sync loop), so there is no
+ * await to reach for; Atomics.wait is the one runtime-blessed way to sleep
+ * without spinning the CPU.
+ *
+ * ponytail: one shared zeroed cell for every sleep in the process — the value
+ * never changes, only the timeout matters.
+ */
+const SLEEP_CELL = new Int32Array(new SharedArrayBuffer(4));
+function sleepSync(ms: number): void {
+  Atomics.wait(SLEEP_CELL, 0, 0, ms);
+}
 
 let fleetSignalsInstalled = false;
 let fleetUnwinding = false;
@@ -283,10 +317,16 @@ function ownFleetLockBody(requestId: string): FleetLockBody {
 export class FleetLock {
   /** Resolved — `held` keys on one spelling of the path, always. */
   readonly path: string;
+  /**
+   * The reclaim mutex beside the lock (`<path>.reap`): serializes the
+   * verify-and-remove half of a stale reclaim across processes.
+   */
+  private readonly reapPath: string;
   private readonly requestId: string;
 
   constructor(opts: { path?: string; requestId: string }) {
     this.path = resolve(opts.path ?? FLEET_LOCK_PATH);
+    this.reapPath = `${this.path}.reap`;
     this.requestId = opts.requestId;
   }
 
@@ -340,18 +380,37 @@ export class FleetLock {
       }
       const verdict = classifyHolder(this.path);
       if (verdict.verdict === "reclaim") {
-        // Re-read immediately before the unlink and delete only the EXACT bytes
-        // we judged (r10 HIGH): two contenders judging the same stale lock used
-        // to both blind-rm — B's unlink deleted A's freshly claimed LIVE lock
-        // and both walked away holding it. A mismatch means the path changed
-        // under us; the next iteration re-classifies whatever is there now.
-        let now: string;
-        try {
-          now = readFileSync(this.path, "utf8");
-        } catch {
-          continue; /* dp:ok vanished between judgment and unlink — the retry re-claims or re-classifies */
+        // Verify-and-remove, SERIALIZED against fellow reclaimers. The r10 HIGH
+        // fix re-reads immediately before the unlink and deletes only the EXACT
+        // bytes it judged — but read-compare-then-rmSync is still not atomic:
+        // between the compare and the rm, a SECOND reclaimer can remove the
+        // judged stale body and a contender can claim fresh bytes at the path,
+        // and our pending unlink then destroys that LIVE claim. Both processes
+        // walk away holding. Contenders alone cannot cause this — claim's link
+        // refuses while ANY body occupies the path, so nobody can interleave
+        // there until a reclaimer removes it — but another reclaimer can.
+        // Serializing verify+rm under `<path>.reap` closes the window exactly,
+        // because the only actors who can act inside it now queue behind the
+        // mutex. A mismatch still means the path changed under us; the next
+        // iteration re-classifies whatever is there now.
+        if (!this.acquireReapMutex()) {
+          // The whole wait budget passed with a live reclaimer inside its own
+          // verify+rm. Do NOT rm blind: skip this attempt and re-classify on
+          // the retry (or report fleet-busy when the attempts run out) — the
+          // honest answer to "someone else is mid-reclaim right now".
+          continue;
         }
-        if (now === verdict.body) rmSync(this.path, { force: true });
+        try {
+          let now: string;
+          try {
+            now = readFileSync(this.path, "utf8");
+          } catch {
+            continue; /* dp:ok vanished between judgment and unlink — the retry re-claims or re-classifies */
+          }
+          if (now === verdict.body) rmSync(this.path, { force: true });
+        } finally {
+          this.releaseReapMutex();
+        }
         continue;
       }
       if (verdict.verdict === "vanished") continue; // holder finished between EEXIST and our read
@@ -429,6 +488,107 @@ export class FleetLock {
       return;
     }
     parkOrphan(this.path);
+  }
+
+  /**
+   * Take `<path>.reap` for the length of one verify-and-remove. Bounded: a
+   * live reclaimer's critical section is microseconds, so REAP_MUTEX_WAIT_MS
+   * of patience covers every honest collision; past it we skip THIS attempt
+   * rather than rm blind. A holder that is PROVABLY gone (dead pid) or whose
+   * mutex is mtime-abandoned is stolen at once — a corpse must not block
+   * reclaims behind it forever.
+   */
+  private acquireReapMutex(): boolean {
+    const body = JSON.stringify(ownFleetLockBody(this.requestId));
+    const deadline = Date.now() + REAP_MUTEX_WAIT_MS;
+    for (;;) {
+      // claim() over the mutex too: link(2)'s exclusivity with no check-then-
+      // write window, identical discipline to the main lock.
+      if (claim(this.reapPath, body)) {
+        // Registered like the main lock: an interrupt landing inside the
+        // verify+rm section releases the mutex on the way out instead of
+        // wedging every later reclaim behind a corpse. (The destructive mark
+        // does not apply — the mutex guards no torn-down state of its own.)
+        fleetHeld.set(this.reapPath, body);
+        return true;
+      }
+      if (this.stealAbandonedReapMutex()) continue; // provably freeable — retry the claim at once
+      if (Date.now() >= deadline) return false;
+      sleepSync(REAP_MUTEX_TICK_MS);
+    }
+  }
+
+  /**
+   * Is the mutex holder PROVABLY gone, and if so was the mutex removed?
+   * Two proofs, either suffices: a well-typed pid that `isAlive` can prove
+   * dead (the same fail-closed probe classifyHolder defers to), or an mtime
+   * older than REAP_MUTEX_ABANDON_MS — no live holder stays inside a three-
+   * sync-call section anywhere near that long, and a SIGKILLed one leaves its
+   * pid recyclable beyond proof. Anything unprovable returns false and the
+   * caller keeps waiting out its bounded budget; nothing is ever stolen on a
+   * guess.
+   */
+  private stealAbandonedReapMutex(): boolean {
+    let raw: string;
+    try {
+      raw = readFileSync(this.reapPath, "utf8");
+    } catch {
+      return true; /* dp:ok ENOENT — vanished between our EEXIST and this read; the next claim takes the free path */
+    }
+    try {
+      const parsed = JSON.parse(raw) as Partial<FleetLockBody> | null;
+      const pid = parsed?.pid;
+      if (
+        typeof pid === "number" &&
+        Number.isInteger(pid) &&
+        pid > 0 &&
+        pid <= 0x7fff_ffff &&
+        !isAlive(pid)
+      ) {
+        try {
+          rmSync(this.reapPath, { force: true });
+          return true;
+        } catch {
+          return false; /* dp:ok unremovable mutex (EACCES/EIO) is not stealable — wait out the budget */
+        }
+      }
+    } catch {
+      /* dp:ok unparseable mutex body falls through to the mtime judgment */
+    }
+    try {
+      if (Date.now() - statSync(this.reapPath).mtimeMs > REAP_MUTEX_ABANDON_MS) {
+        rmSync(this.reapPath, { force: true });
+        return true;
+      }
+    } catch {
+      return true; /* dp:ok stat failed/ENOENT — the next claim attempt resolves it one way or the other */
+    }
+    return false;
+  }
+
+  /**
+   * Drop the reclaim mutex. Our body → rmSync; anything else left standing —
+   * a foreign body parked there while we were interrupted, litter from a dead
+   * predecessor — is NEVER deleted here: the next contender's dead-pid/mtime
+   * proof in `stealAbandonedReapMutex` is the only thing that clears those.
+   */
+  private releaseReapMutex(): void {
+    const body = fleetHeld.get(this.reapPath);
+    if (body === undefined) return;
+    fleetHeld.delete(this.reapPath);
+    let now: string;
+    try {
+      now = readFileSync(this.reapPath, "utf8");
+    } catch {
+      return; /* dp:ok already gone — done */
+    }
+    if (now === body) {
+      try {
+        rmSync(this.reapPath, { force: true });
+      } catch {
+        /* dp:ok best-effort cleanup — an unremovable mutex is litter the next steal proof clears */
+      }
+    }
   }
 }
 

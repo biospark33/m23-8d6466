@@ -217,12 +217,14 @@ describe("rank (DF3.2 AC7)", () => {
       },
     });
 
-    const rawDelta =
-      ((await rank(FANOUT_ID, h.deps)).scores[0]?.score ?? 0) -
-      ((await rank(FANOUT_ID, h.deps)).scores[1]?.score ?? 0);
+    const res = await rank(FANOUT_ID, h.deps);
+    expect(res.scores[0]).toBeDefined();
+    expect(res.scores[1]).toBeDefined();
+    // The RAW subtraction on one invocation's scores is the K6 proof: two
+    // separate rank() calls would let a non-idempotent writer mask the trap.
+    const rawDelta = (res.scores[0]!.score ?? 0) - (res.scores[1]!.score ?? 0);
     expect(rawDelta).toBeGreaterThan(0.1); // the trap exists — this assertion IS the K6 proof
 
-    const res = await rank(FANOUT_ID, h.deps);
     expect(Number(rawDelta.toFixed(10))).toBe(0.1);
     expect(res.tie).toBe(true); // inclusive boundary survives the float rendering
 
@@ -248,12 +250,12 @@ describe("rank (DF3.2 AC7)", () => {
       },
     });
 
-    const rawDelta =
-      ((await rank(FANOUT_ID, h.deps)).scores[0]?.score ?? 0) -
-      ((await rank(FANOUT_ID, h.deps)).scores[1]?.score ?? 0);
+    const res = await rank(FANOUT_ID, h.deps);
+    expect(res.scores[0]).toBeDefined();
+    expect(res.scores[1]).toBeDefined();
+    const rawDelta = (res.scores[0]!.score ?? 0) - (res.scores[1]!.score ?? 0);
     expect(rawDelta).toBeLessThan(0.1); // the straddle's other direction is real
 
-    const res = await rank(FANOUT_ID, h.deps);
     expect(Number(rawDelta.toFixed(10))).toBe(0.1); // normalized UP onto the boundary
     expect(res.tie).toBe(true);
   });
@@ -287,6 +289,27 @@ describe("rank (DF3.2 AC7)", () => {
     expect(res.tie).toBe(true);
   });
 
+  test("testResults:null is refused through invalid-step-output, never a TypeError", async () => {
+    // JSON carries `null` where absence means `undefined`; the CLI's
+    // --steps-json gate refuses it, so embedders calling rank() directly must
+    // get the SAME named refusal — not "Cannot read properties of null".
+    const h = harness({
+      arms: [{ arm: 0, runId: "nulltr" }],
+      steps: {
+        nulltr: { testsExecuted: true, testResults: null } as unknown as StepFixture,
+      },
+    });
+    let err: FleetError | undefined;
+    try {
+      await rank(FANOUT_ID, h.deps);
+    } catch (e) {
+      err = e as FleetError;
+    }
+    expect(err?.exitCode).toBe(2);
+    expect(err?.code).toBe("invalid-step-output");
+    expect(err?.message).toContain("nulltr"); // names the run before any arithmetic
+  });
+
   test("lists an arm with no step output as score:null and never drops it", async () => {
     const h = harness({
       arms: [
@@ -303,6 +326,7 @@ describe("rank (DF3.2 AC7)", () => {
 
     expect(res.scores).toHaveLength(2);
     expect(res.scores.map((s) => s.arm)).toEqual([0, 1]); // scored first, null-scored listed after
+    expect(res.scores[0]).toBeDefined();
     expect(res.scores[0]?.score).not.toBeNull();
     expect(res.scores[1]?.score).toBeNull();
     expect(res.scores[1]?.runId).toBe("silent");
@@ -463,6 +487,7 @@ describe("rank (DF3.2 AC7)", () => {
 
     const res = await rank(FANOUT_ID, h.deps);
 
+    expect(res.scores[0]).toBeDefined();
     expect(res.scores[0]?.score).not.toBeNull();
     expect(res.tie).toBe(false);
     expect(res.rationale).toContain("no comparison possible");

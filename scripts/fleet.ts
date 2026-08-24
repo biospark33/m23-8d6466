@@ -1246,7 +1246,11 @@ export async function run(
     // correlation id yet, and the CC-9 line must still be emitted.
     let fanRequestId: string | undefined;
     let fanoutId: string | undefined;
-    let fanoutCode: number;
+    // Initialized to the failure side so the cleanup `finally` below may read
+    // it: both the try and the catch assign before returning, so the default
+    // is unreachable unless `report` itself throws — and then 1 ("substrate
+    // failed") is the honest thing to die with.
+    let fanoutCode = 1;
     // The error's own retry classification, when it carries one — read in the
     // catch, honored on the completion line below (logVerb derives from exit
     // code alone, and 5 alone would read as do-not-retry "logic").
@@ -1456,14 +1460,23 @@ export async function run(
     } finally {
       // The ledger owns a SQLite handle; the arms' budget admissions closed
       // THEIR ledgers, and this one closes with the verb like teardown's does.
-      // Guarded: a close is module cleanup, not part of the verdict — a throw
-      // here must neither discard the computed fanoutCode nor escape as an
-      // unhandled rejection after the return below.
+      // ONE cleanup-failure policy with that finally (and harvest's): guarded,
+      // reported on stderr — and on an otherwise-successful path the failure IS
+      // the error, downgraded to 6 ("landed, but not cleanly closable") without
+      // ever overwriting an arm failure already collected. A throw here must
+      // neither escape as an unhandled rejection after the return below nor
+      // turn N priced losers into a silent clean exit.
       if (loserLedger !== undefined) {
         try {
           loserLedger.close();
-        } catch {
-          /* dp:ok cleanup-best-effort: the verdict (fanoutCode) is already decided */
+        } catch (e) {
+          printError(
+            note,
+            "ledger-close-failed",
+            `could not close the loser cost ledger: ${redactSecrets((e as Error).message)}`,
+            "the handle dies with the process; re-run to confirm it still reads",
+          );
+          if (fanoutCode === 0) fanoutCode = 6;
         }
       }
     }

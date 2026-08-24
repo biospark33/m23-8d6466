@@ -164,7 +164,13 @@ export function listVerbs(): VerbEntry[] {
       // flag nothing consumes trains operators to paste magic values.
       // assertDriverChosen is skipped for rank (no driver to default — the B8
       // hazard cannot arise).
-      exitCodes: [0, 1, 2, 4],
+      //
+      // 6 = the ranking LANDED (record read, scores computed, rankedAt stamped)
+      // and the result line would not print — the shared `finish` folds an
+      // EAGAIN-refused stdout into 6 exactly as it does for dispatch/fanout.
+      // Still no 5: rank refuses nothing before provisioning, because it never
+      // provisions.
+      exitCodes: [0, 1, 2, 4, 6],
     },
   ];
 }

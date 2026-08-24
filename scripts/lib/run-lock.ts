@@ -136,7 +136,7 @@ export function hostTag(): string {
  * other outcome (EPERM, a range error, an errno this runtime invents) is a
  * failure to answer, and the rest of this module fails closed on exactly that.
  */
-/** Exported for DF3.2's fleet lock (src/fleet/fanout.ts) — additive only, no behavior change. */
+/** Exported for DF3.2's fleet lock (src/fleet/fleet-lock.ts) — additive only, no behavior change. */
 export function isAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0 || pid > 0x7fff_ffff) return true;
   try {

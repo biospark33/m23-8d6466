@@ -312,6 +312,13 @@ function validateFanoutRecord(source: string, expectedId: string, raw: unknown):
   }
   if (!Array.isArray(r.arms)) throw malformed("arms is not an array");
   for (const arm of r.arms) {
+    // The cast below lies about null: `(null as Record<…>).arm` throws a bare
+    // TypeError that escapes the descriptive malformed taxonomy this gate
+    // exists to provide (get() would surface "Cannot read properties of null"
+    // instead of naming the record and field).
+    if (typeof arm !== "object" || arm === null) {
+      throw malformed(`an arms element is ${JSON.stringify(arm)}, not an object`);
+    }
     const a = arm as Record<string, unknown>;
     if (!Number.isInteger(a.arm) || (a.arm as number) < 0) throw malformed(`arm index ${JSON.stringify(a.arm)}`);
     if (typeof a.runId !== "string" || a.runId === "") throw malformed("an arm is missing its runId");
@@ -379,8 +386,16 @@ function fsyncDir(dir: string): void {
   }
 }
 
-/** `rm -f` that cannot throw — pure-hygiene cleanups only. */
-function rmQuiet(p: string): void {
+/**
+ * `rm -f` that cannot throw — pure-hygiene cleanups only.
+ *
+ * Exported for ./fanout-primitive.ts, which already sits downstream of this
+ * module (store → primitive, never back): one copy in the slice beats two
+ * that can drift. `fsyncDir` stays module-private per file on purpose —
+ * sharing it with fleet-lock.ts would couple the lock module to the store
+ * module it must sit beneath.
+ */
+export function rmQuiet(p: string): void {
   try {
     rmSync(p, { force: true });
   } catch {

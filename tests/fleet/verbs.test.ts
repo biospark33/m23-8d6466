@@ -343,10 +343,12 @@ describe("verbs.ts (registry)", () => {
     // armUnknown) after a result returned; 5 = refused before anything was
     // provisioned (fleet-busy, no-headroom); 6 = the arms LANDED and a
     // completion line would not print. rank: 4 = unknown/unparseable fan-out
-    // id, 1 = record read/write failure, and — deliberately absent — no 5/6:
-    // rank takes no lock, provisions nothing and destroys nothing.
+    // id, 1 = record read/write failure, 6 = the ranking LANDED and its result
+    // line would not print (the shared finish folds an EAGAIN-refused stdout
+    // into 6 for every verb that emits one). Still no 5: rank refuses nothing
+    // before provisioning, because it never provisions.
     fanout: [0, 1, 2, 5, 6],
-    rank: [0, 1, 2, 4],
+    rank: [0, 1, 2, 4, 6],
   };
 
   for (const verb of ["dispatch", "status", "harvest", "teardown", "fanout", "rank"]) {
@@ -1001,7 +1003,15 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         coveredBy: "a fanout whose completion lines cannot print exits 6 with the work landed",
       },
     ],
-    rank: [], // [0, 1, 2, 4] are all probed above.
+    // [0, 1, 2, 4] are all probed above; 6 needs the same refusing sink fanout's
+    // excuse needs — cli.test.ts owns it.
+    rank: [
+      {
+        code: 6,
+        why: "needs a successful ranking and a stdout sink that throws EAGAIN — cli.test.ts",
+        coveredBy: "a rank whose scored table cannot print exits 6 with rankedAt stamped",
+      },
+    ],
   };
 
   /**

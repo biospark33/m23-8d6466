@@ -21,7 +21,7 @@
  *   close record (closedAt) → FleetLock.release() in FINALLY.
  */
 import { randomBytes, createHash } from "node:crypto";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -39,7 +39,7 @@ import { runMarkerPath } from "../phase-engine/journal.ts";
 import { log } from "../swarmclaw/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
 import { dispatch, FleetError, mintRunId, type DispatchDeps, type MintedRunId } from "./dispatch.ts";
-import { mintFanoutId, FanoutRecordStore } from "./fanout.ts";
+import { mintFanoutId, FanoutRecordStore, rmQuiet } from "./fanout.ts";
 import { FLEET_LOCK_PATH, FleetLock } from "./fleet-lock.ts";
 
 // ─── INV-6 finite caps (imported constants — never mirrored literals) ─────────
@@ -58,6 +58,16 @@ export const DEFAULT_PER_CALL_DEADLINE_MS = 10_000;
 
 /** AC5/INV-6 fan-out ceiling — undecided arms report armUnknown past it. */
 export const DEFAULT_FANOUT_CEILING_MS = 3_600_000;
+
+/**
+ * Consecutive unreadable/unusable reads of one arm's completion marker after
+ * which that arm is abandoned as armUnknown instead of polled to the ceiling.
+ * DF1.1 publishes final.json by temp+rename (journal.ts), so its bytes never
+ * exist half-written on disk — persistent parse failure is CORRUPTION, not
+ * latency, and polling it to the 1h ceiling held the fleet lock while every
+ * racing box billed for nothing.
+ */
+export const MARKER_UNUSABLE_TICKS_LIMIT = 3;
 
 export type FanoutPattern = "best-of-n" | "many-stories" | "race";
 
@@ -479,7 +489,15 @@ function classifyArmFailure(i: number, runId: string, e: unknown): ArmOutcome {
  * execs can outlive a destroy (driver.ts:153-168), so a hung remote call
  * SKIPS its tick — logged, non-fatal — instead of wedging the loop.
  *
- * Returns the winning arm index, or null (all armFailed, or ceiling reached).
+ * A marker that EXISTS but cannot be read as `{ok: boolean}` is different:
+ * journal.ts publishes it by temp+rename, so persistence of the failure means
+ * corruption, not latency. After MARKER_UNUSABLE_TICKS_LIMIT consecutive
+ * unusable reads an arm is reclassified armUnknown and dropped from polling
+ * (never touched by loser disposal — its run state is genuinely unknown),
+ * bounding what used to spin to the full ceiling with the fleet lock held.
+ *
+ * Returns the winning arm index, or null (all armFailed/armUnknown-given-up,
+ * or ceiling reached).
  */
 async function runRace(
   _input: ValidatedInput,
@@ -493,11 +511,28 @@ async function runRace(
   const ceilingMs = deps.ceilingMs ?? DEFAULT_FANOUT_CEILING_MS;
   const markerPath = runMarkerPath(); // DIRECT import — the barrel withholds it (K7)
   const undecided = (): number[] => outcomes.filter((o) => o.outcome === "ready").map((o) => o.arm);
+  const unusableTicks = new Map<number, number>();
 
   const baseline = performanceNow(deps);
   while (undecided().length > 0 && performanceNow(deps) - baseline < ceilingMs) {
     for (const arm of undecided()) {
       const verdict = await probeArm(deps, store, fanoutId, outcomes, arm, markerPath, deadlineMs);
+      if (verdict === "unusable") {
+        const ticks = (unusableTicks.get(arm) ?? 0) + 1;
+        unusableTicks.set(arm, ticks);
+        if (ticks >= MARKER_UNUSABLE_TICKS_LIMIT) {
+          outcomes[arm] = { ...(outcomes[arm] as ArmOutcome), outcome: "armUnknown" };
+          // Dropping from `ready` removes the arm from `undecided()` and from
+          // disposeLosers' entrants in one move: an unknown-state box is never
+          // torn down on a guess, and no longer polls.
+          raceEvent(deps.requestId, fanoutId, {
+            arm,
+            event: "marker-unusable",
+            detail: `marker present but unreadable ${String(ticks)} ticks in a row — arm left UNKNOWN, polling abandoned`,
+          });
+        }
+        continue;
+      }
       if (verdict !== null) return verdict; // includes "another process won"
     }
     if (undecided().length > 0 && performanceNow(deps) - baseline < ceilingMs) {
@@ -511,7 +546,11 @@ async function runRace(
   return null;
 }
 
-/** One arm's one tick. Returns a winner index when the race is decided. */
+/**
+ * One arm's one tick. A winner index when the race is decided (ours or another
+ * process's), "unusable" when the marker exists but cannot be judged, and null
+ * for every ordinary not-yet/failed-marker outcome.
+ */
 async function probeArm(
   deps: FanoutDeps,
   store: FanoutRecordStore,
@@ -520,7 +559,7 @@ async function probeArm(
   arm: number,
   markerPath: string,
   deadlineMs: number,
-): Promise<number | null> {
+): Promise<number | null | "unusable"> {
   const outcome = outcomes[arm] as ArmOutcome; // racing arms are settled and ready
   const vm = outcome.vmName as string;
   let tmp: string | undefined;
@@ -542,8 +581,8 @@ async function probeArm(
     try {
       marker = JSON.parse(readFileSync(tmp, "utf8")) as { ok?: unknown };
     } catch (e) {
-      skipTick("marker-unreadable", e); // malformed ⇒ no-marker-this-tick (G6)
-      return null;
+      skipTick("marker-unreadable", e);
+      return "unusable"; // present-but-corrupt is counted by runRace, never polled forever
     }
     if (marker.ok === false) {
       // A settled-but-failed run: armFailed and the race CONTINUES (G6:
@@ -554,7 +593,7 @@ async function probeArm(
     }
     if (marker.ok !== true) {
       skipTick("marker-unreadable", new Error(`final.json carries ok=${JSON.stringify(marker.ok)}`));
-      return null;
+      return "unusable"; // same corruption counting as the parse failure above
     }
     // Atomic first-writer transition, under the record's own lock: the mutate
     // fn ADOPTS the persisted winner when another writer claimed first — the
@@ -590,14 +629,6 @@ async function probeArm(
 
 function shellQuote(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
-}
-
-function rmQuiet(p: string): void {
-  try {
-    rmSync(p, { force: true });
-  } catch {
-    // Inert litter in the OS temp dir; nothing to do.
-  }
 }
 
 /**

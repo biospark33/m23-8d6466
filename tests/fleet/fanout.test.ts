@@ -316,6 +316,23 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       expect(() => store.mutate(rec.fanoutId, () => ({ ...rec, n: 0 } as FanoutRecord))).toThrow(/malformed/i);
     });
 
+    test("a null arms element is refused through the malformed taxonomy, never a TypeError", () => {
+      const store = new FanoutRecordStore({ dir: join(dir, "fanouts") });
+      const rec = makeRecord();
+      store.create(rec);
+      // `(null as Record<…>).arm` used to escape this gate as
+      // "Cannot read properties of null" — get()/list() must name the record
+      // and field instead.
+      let err: Error | undefined;
+      try {
+        store.mutate(rec.fanoutId, () => ({ ...rec, arms: [null] }) as unknown as FanoutRecord);
+      } catch (e) {
+        err = e as Error;
+      }
+      expect(err?.message).toMatch(/^malformed fan-out record /);
+      expect(err?.message).toContain("arms");
+    });
+
     test("a winner index outside arms is refused on write and on read (rank/close never see one)", () => {
       const fanoutsDir = join(dir, "fanouts");
       const store = new FanoutRecordStore({ dir: fanoutsDir });
@@ -526,6 +543,74 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       const body = onDisk();
       expect(body.pid).toBe(process.pid);
       expect(body.requestId).toBe("req-under-test");
+      // The reclaim mutex is transient by construction — a successful verify+
+      // rm leaves no `<path>.reap` litter behind for the next contender to
+      // judge.
+      expect(existsSync(`${lockPath}.reap`)).toBe(false);
+    });
+
+    test("a foreign LIVE reclaimer holding the reap mutex blocks the unlink (verify+rm serialized)", async () => {
+      const pid = await deadPid();
+      plantLock(lockPath, {
+        pid,
+        pidStartTime: 12345,
+        createdAt: agedIso(),
+        requestId: "req-corpse",
+      });
+      // Another reclaimer mid-cycle: its mutex holder is alive, so it cannot
+      // be stolen, only waited out. This is the exact interleaving that used
+      // to double-rm: our verify+rm must NOT proceed while another party is
+      // inside theirs.
+      const holder = liveChild();
+      children.push(holder);
+      writeFileSync(
+        `${lockPath}.reap`,
+        `${JSON.stringify({
+          pid: holder.pid,
+          pidStartTime: readOwnPidStartTime(holder.pid),
+          createdAt: new Date().toISOString(),
+          requestId: "foreign-reclaimer",
+        })}\n`,
+        { mode: 0o600 },
+      );
+      let err: FleetError | undefined;
+      try {
+        lock().acquire(); // burns both attempts waiting out REAP_MUTEX_WAIT_MS
+      } catch (e) {
+        err = e as FleetError;
+      }
+      expect(err?.exitCode).toBe(5);
+      expect(err?.code).toBe("fleet-busy");
+      // The stale body SURVIVED both blocked attempts — nothing was unlinked
+      // blind under a foreign mutex. A retry once the foreign reclaimer exits
+      // would reclaim normally (the aged+dead case above).
+      expect(onDisk().requestId).toBe("req-corpse");
+    });
+
+    test("an ABANDONED reap mutex (dead holder) is stolen, never waited on forever", async () => {
+      const pid = await deadPid();
+      plantLock(lockPath, {
+        pid,
+        pidStartTime: 12345,
+        createdAt: agedIso(),
+        requestId: "req-corpse",
+      });
+      // A reclaimer SIGKILLed between claiming the mutex and finishing its
+      // rm: dead pid ⇒ provably stealable without waiting out the budget.
+      const corpsePid = await deadPid();
+      writeFileSync(
+        `${lockPath}.reap`,
+        `${JSON.stringify({
+          pid: corpsePid,
+          pidStartTime: 1,
+          createdAt: new Date().toISOString(),
+          requestId: "corpse-reclaimer",
+        })}\n`,
+        { mode: 0o600 },
+      );
+      lock().acquire();
+      expect(onDisk().requestId).toBe("req-under-test"); // the reclaim went through
+      expect(existsSync(`${lockPath}.reap`)).toBe(false); // …and took the stolen mutex with it
     });
 
     test("aged+alive identity match → refuse fleet-busy (a first fan-out inside teardown is never preempted)", async () => {
