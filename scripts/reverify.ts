@@ -39,4 +39,12 @@ async function main(): Promise<number> {
   return EXIT_BY_VERDICT[report.verdict];
 }
 
-process.exit(await main());
+// A throw is exit 2 (`error`), never exit 1 (`red`): a host that could not
+// complete the check has not judged the tree, and the two must not be confused
+// by whatever reads this exit code (AC4, INV-RV-5).
+process.exit(
+  await main().catch((e: unknown) => {
+    process.stderr.write(`reverify failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`);
+    return 2;
+  }),
+);

@@ -16,7 +16,7 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 
-import { redactSecrets } from "../../cli-anything/src/redact.ts";
+import { MIN_REDACTABLE_VALUE_LEN, SECRET_KEY_RE, redactSecrets } from "../../cli-anything/src/redact.ts";
 import type { GateCheck } from "../phase-engine/gates/report.ts";
 import { EXIT_STATUSES } from "../../cli-anything/src/types.ts";
 
@@ -24,6 +24,8 @@ import { EXIT_STATUSES } from "../../cli-anything/src/types.ts";
 export const NOTE_MAX_CHARS = 1_000;
 /** Hard cap on examined items carried in one report. */
 export const CHECKS_MAX = 500;
+/** Hard cap on box-claimed paths carried in one report (they are untrusted). */
+export const CLAIMED_FILES_MAX = 500;
 
 export type ReverifyVerdict = "green" | "red" | "error";
 
@@ -148,8 +150,11 @@ export interface ReverifyReport {
 /** `redactSecrets` ignores keys its heuristic does not recognise — refuse those loudly. */
 function assertRedactable(map: RedactionMap): void {
   for (const [key, value] of Object.entries(map)) {
-    if (value.length < 8) continue; // below redactSecrets' floor; nothing to promise
-    if (!/SECRET|TOKEN|PASS|CRED|API[_-]?KEY|PRIVATE|CERT|DSN|DATABASE_URL|SSH|SIGNING|AUTH|[_-]KEY|[_-]URL|[_-]URI/i.test(key)) {
+    // Below redactSecrets' own floor; nothing to promise. Both the floor and
+    // the key pattern are IMPORTED, never re-spelled: a local copy silently
+    // stops matching the moment redact.ts widens either one.
+    if (value.length < MIN_REDACTABLE_VALUE_LEN) continue;
+    if (!SECRET_KEY_RE.test(key)) {
       throw new Error(
         `redaction map key ${key} is invisible to redactSecrets; name it so it matches SECRET_KEY_RE (e.g. QDS_PROVIDER_KEY)`,
       );
@@ -209,6 +214,28 @@ export function sealReport(evidence: ReverifyEvidence, redaction: RedactionMap):
     .slice(0, CHECKS_MAX)
     .map((c) => Object.freeze({ item: c.item, ok: c.ok, note: scrub(c.note, redaction) }));
 
+  // The box wrote `claimed`. Every string in it is agent-controlled and DF5.2
+  // renders it into a PR body, so it is scrubbed and capped exactly like a
+  // check note (INV-RV-4) — the counts and the enum'd exitStatus cannot carry a
+  // secret, `changedFiles` can.
+  const claimed =
+    parsed.claimed === null
+      ? null
+      : Object.freeze({
+          exitStatus: parsed.claimed.exitStatus,
+          testResults: { ...parsed.claimed.testResults },
+          changedFiles: parsed.claimed.changedFiles
+            .slice(0, CLAIMED_FILES_MAX)
+            .map((f) => scrub(f, redaction)),
+        });
+  if (
+    parsed.claimed !== null &&
+    parsed.claimed.changedFiles.length > CLAIMED_FILES_MAX &&
+    !flags.includes("claimed-files-truncated")
+  ) {
+    flags.push("claimed-files-truncated");
+  }
+
   const { verdict, reason } = deriveVerdict(parsed);
 
   // The exitStatus comparison lives HERE because it is the one discrepancy that
@@ -237,7 +264,7 @@ export function sealReport(evidence: ReverifyEvidence, redaction: RedactionMap):
     testResults: Object.freeze({ ...parsed.testResults }),
     flags: Object.freeze(flags.map((f) => scrub(f, redaction))),
     discrepancies: Object.freeze(discrepancies.map((d) => scrub(d, redaction))),
-    claimed: parsed.claimed === null ? null : Object.freeze(structuredClone(parsed.claimed)),
+    claimed,
     toolchain: Object.freeze({ ...parsed.toolchain }),
     timings: Object.freeze({ ...parsed.timings }),
     ...(parsed.failure
@@ -274,8 +301,18 @@ export function readReports(dir: string, runId: string): ReverifyReport[] {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw e;
   }
-  return text
-    .split("\n")
-    .filter((l) => l.trim().length > 0)
-    .map((l) => JSON.parse(l) as ReverifyReport);
+  // A line that will not parse is SKIPPED, never thrown: `reverify` reads this
+  // outside its own try/catch to decide nondeterminism, and one torn line (a
+  // killed append) must not turn a completed re-verify into an uncaught throw
+  // with no report on disk at all.
+  const out: ReverifyReport[] = [];
+  for (const line of text.split("\n")) {
+    if (line.trim().length === 0) continue;
+    try {
+      out.push(JSON.parse(line) as ReverifyReport);
+    } catch {
+      // torn or truncated line — ignore it
+    }
+  }
+  return out;
 }

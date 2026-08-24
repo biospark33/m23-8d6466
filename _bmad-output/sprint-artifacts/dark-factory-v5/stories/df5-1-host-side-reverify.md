@@ -326,3 +326,29 @@ red:   one seeded failing test at the same shape →
 - **DF5.2** reads the LAST line of `.sandbox/reverify/<run-id>.jsonl` and re-checks `reverifyId` +
   `headSha` against `extensions.approval` before pushing.
 - AC6 prose amendment per Deviation 2.
+
+### Post-implementation adversarial review
+
+Three review passes over the implementation (verdict integrity / secret exposure, resource and
+cleanup correctness, contract and failure paths). Nine findings, all fixed on this branch with a
+test each where the logic is non-trivial:
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | `claimed.changedFiles` — agent-controlled strings from the box's own artifacts — were copied into the report unredacted and uncapped, and DF5.2 renders the report into a PR body (INV-RV-4 leak). | Scrubbed through `scrub()` and capped at `CLAIMED_FILES_MAX` (500), with a `claimed-files-truncated` flag. |
+| 2 | `readReports` threw on a torn jsonl line, and `reverify` calls it OUTSIDE its own try/catch — one half-written append turned a completed re-verify into an uncaught throw. | Unparseable lines are skipped. |
+| 3 | `timings.cleanup_ms` was computed as `elapsed − gates_ms`, i.e. everything that was not gates. | Stamped at the worktree body's return; now measures the prune. |
+| 4 | The guards' SIGKILL sweep re-read the process table 5 s AFTER firing and killed every current descendant of the host process — in a long-lived dispatcher, that is the next, unrelated subprocess. | The doomed pid set is snapshotted at fire time. |
+| 5 | `scripts/reverify.ts` had no catch: a throw exited 1, which is the `red` code, not the `error` code. | Wrapped; a throw is exit 2. |
+| 6 | `assertRedactable` re-spelled `SECRET_KEY_RE` and the length floor as literals, so a widened pattern in `redact.ts` would silently stop being enforced here. | Both imported from `redact.ts`. |
+| 7 | An `error` verdict compared against a prior green branded the run `nondeterministic` — a flaky host probe read as flaky code. | Only two non-error verdicts at one sha can disagree. |
+| 8 | `withQuarantineWorktree` is exported and `rmSync`s `resolve(root, runId)` recursively without validating `runId`. | `assertExistingRunId` before any path is derived. |
+| 9 | A `noTestSuite` entry whose manifest had no non-test phase command produced a green resting on the `install` check alone; and a crashed holder's approval lock bricked every later approval for the run. | `resolveHostPlan` refuses that entry; the lock is stolen once older than `LOCK_STALE_MS` (2× the wait timeout, so a live holder is never robbed). |
+
+Also: the approval request is now caught — a failing DF3.4 intake leaves a green report flagged
+`approval-request-failed` and `approval: null` rather than throwing past `reverify`'s typed outcome.
+
+Known ceilings left in place (documented, not fixed here): the verify process inherits `HOME`, so
+`~/.npmrc` / `~/.gitconfig` credentials remain reachable during install, and RSS is sampled from
+`ps` rather than enforced by a cgroup. Both are the disposable host-side verify box the story
+already names as the follow-up.

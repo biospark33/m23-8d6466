@@ -118,3 +118,11 @@ describe("probeToolchain", () => {
     expect((err as ReverifyError).code).toBe("toolchain-missing");
   });
 });
+
+describe("withQuarantineWorktree refuses an unusable run id", () => {
+  test("a traversing run id is rejected before any path is removed", async () => {
+    await expect(
+      withQuarantineWorktree({ gitCwd: process.cwd(), runId: "../../etc" }, async () => undefined),
+    ).rejects.toThrow(/invalid run id/);
+  });
+});

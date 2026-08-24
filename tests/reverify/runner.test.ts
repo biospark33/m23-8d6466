@@ -401,6 +401,26 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
     }
   }, 120_000);
 
+  test("an approval intake that throws leaves a flagged report, never an uncaught throw", async () => {
+    const h = await harness();
+    try {
+      const throwing: ApprovalPort = {
+        async requestApproval() {
+          throw new Error("DF3.4 intake unavailable");
+        },
+      };
+      const { report, approval } = await reverify(h.repo.runId, deps(h, { approval: throwing }));
+      // The tree DID verify green — the host says so — but no approval was
+      // requested, so DF5.2 has nothing to push behind.
+      expect(report.verdict).toBe("green");
+      expect(report.flags).toContain("approval-request-failed");
+      expect(approval).toBeNull();
+      expect(readReports(h.reverifyDir, h.repo.runId).at(-1)!.flags).toContain("approval-request-failed");
+    } finally {
+      h.cleanup();
+    }
+  }, 120_000);
+
   test("a terminal record: no request, and the report carries approval-already-decided", async () => {
     const h = await harness();
     try {

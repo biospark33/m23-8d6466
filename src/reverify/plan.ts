@@ -119,6 +119,14 @@ export function resolveHostPlan(opts: HostPlanOptions): HostPlan {
     .filter((p): p is typeof p & { command: string[] } => p.command !== undefined)
     .map((p) => ({ name: p.name, argv: [...p.command] }));
 
+  // A `noTestSuite` repo's green rests entirely on the non-test phases, so a
+  // manifest that has none would let `install`-alone stand in for verification.
+  if (entry.noTestSuite && gateCommands.length === 0) {
+    throw noHostPlan(
+      `host manifest ${manifestPath} sets noTestSuite but declares no non-test phase command — a green would rest on nothing`,
+    );
+  }
+
   if (!entry.noTestSuite && testPhase === undefined) {
     throw noHostPlan(
       `host manifest ${manifestPath} declares no testCommand and the entry does not set noTestSuite — reverify has nothing to execute tests with`,

@@ -13,6 +13,7 @@ import * as path from "node:path";
 import {
   NOTE_MAX_CHARS,
   CHECKS_MAX,
+  CLAIMED_FILES_MAX,
   appendReport,
   readReports,
   sealReport,
@@ -226,6 +227,44 @@ describe("append-only persistence", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rv-report-"));
     try {
       expect(readReports(dir, "no-such-run")).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("box-claimed evidence is untrusted text (INV-RV-4)", () => {
+  const claimed = (changedFiles: string[]) => ({
+    exitStatus: "success",
+    testResults: { passed: 1, failed: 0 },
+    changedFiles,
+  });
+
+  test("claimed changedFiles are redacted, not copied through verbatim", () => {
+    const r = sealReport(
+      evidence({ claimed: claimed(["src/a.ts", "leaked sk-live-abcdefghijklmnop here"]) }),
+      { QDS_PROVIDER_KEY: "sk-live-abcdefghijklmnop" },
+    );
+    expect(r.claimed?.changedFiles.join("\n")).not.toContain("sk-live-abcdefghijklmnop");
+  });
+
+  test("claimed changedFiles are capped and the truncation is flagged", () => {
+    const many = Array.from({ length: CLAIMED_FILES_MAX + 10 }, (_, i) => `src/f${i}.ts`);
+    const r = sealReport(evidence({ claimed: claimed(many) }), {});
+    expect(r.claimed?.changedFiles.length).toBe(CLAIMED_FILES_MAX);
+    expect(r.flags).toContain("claimed-files-truncated");
+  });
+});
+
+describe("readReports tolerates a torn line", () => {
+  test("a half-written last line is skipped, not thrown", () => {
+    const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "rv-torn-"));
+    try {
+      appendReport(dir, sealReport(evidence(), {}));
+      fs.appendFileSync(path.join(dir, "run-1.jsonl"), '{"runId":"run-1","verd');
+      const reports = readReports(dir, "run-1");
+      expect(reports.length).toBe(1);
+      expect(reports[0]!.verdict).toBe("green");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

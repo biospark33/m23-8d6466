@@ -137,3 +137,36 @@ describe("recordApprovalPort", () => {
     }
   });
 });
+
+describe("approval lock", () => {
+  test("a lock left behind by a dead holder is stolen once it is stale", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      const lock = path.join(s.dir, "run-1.approval.lock");
+      fs.writeFileSync(lock, "");
+      // Backdate past the timeout: the holder is gone, not slow.
+      const old = new Date(Date.now() - 60_000);
+      fs.utimesSync(lock, old, old);
+
+      const out = await recordApprovalPort(s.store).requestApproval("run-1", req("rv-1"));
+      expect(out.outcome).toBe("requested");
+      expect(fs.existsSync(lock)).toBe(false);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("a FRESH lock is waited on, then times out rather than being stolen", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      fs.writeFileSync(path.join(s.dir, "run-1.approval.lock"), "");
+      await expect(recordApprovalPort(s.store).requestApproval("run-1", req("rv-1"))).rejects.toThrow(
+        /approval lock .* held for over/,
+      );
+    } finally {
+      s.cleanup();
+    }
+  }, 15_000);
+});

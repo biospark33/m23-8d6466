@@ -12,7 +12,7 @@
  * teardown). When DF3.4 lands its own implementation it replaces the ADAPTER,
  * not the caller: the state machine below is caller-side contract.
  */
-import { closeSync, openSync, rmSync } from "node:fs";
+import { closeSync, openSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import type { RunRecordStore } from "../providers/run-record.ts";
@@ -55,6 +55,13 @@ export interface ApprovalPort {
  */
 const LOCK_TIMEOUT_MS = 5_000;
 const LOCK_POLL_MS = 10;
+/**
+ * Age at which a lock is assumed abandoned. DELIBERATELY past the wait timeout:
+ * at exactly `LOCK_TIMEOUT_MS` a waiter would steal every lock the instant it
+ * gave up waiting, which is not a stale-lock recovery, it is no lock at all.
+ * The guarded body is one read-decide-write, so a live holder never reaches 10 s.
+ */
+const LOCK_STALE_MS = 2 * LOCK_TIMEOUT_MS;
 
 async function withApprovalLock<T>(dir: string, runId: string, body: () => T | Promise<T>): Promise<T> {
   const lockPath = join(dir, `${runId}.approval.lock`);
@@ -65,6 +72,18 @@ async function withApprovalLock<T>(dir: string, runId: string, body: () => T | P
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      // Steal a lock whose holder died: this file carries no owner pid, so age
+      // is the only evidence there is. Without this, one crashed reverify
+      // bricks every later approval for the run until an operator removes the
+      // file by hand.
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
+          rmSync(lockPath, { force: true });
+          continue;
+        }
+      } catch {
+        // vanished between the open and the stat — just retry
+      }
       if (Date.now() >= deadline) {
         throw new Error(
           `approval lock ${lockPath} held for over ${LOCK_TIMEOUT_MS}ms; remove it by hand if no reverify is running`,

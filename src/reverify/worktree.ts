@@ -10,6 +10,8 @@
 import { rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+import { assertExistingRunId } from "../providers/run-record.ts";
+
 /** A named, remediable failure. Every one of these maps to an `error` verdict. */
 export class ReverifyError extends Error {
   constructor(
@@ -117,6 +119,11 @@ export async function withQuarantineWorktree<T>(
   opts: QuarantineOptions,
   body: (q: Quarantine) => Promise<T>,
 ): Promise<T> {
+  // The worktree path is `resolve(root, runId)` and the cleanup below is an
+  // unconditional recursive `rmSync` of it. Validate the id BEFORE either: a
+  // caller reaching this export without going through the run record store
+  // must not be able to aim that remove with `../..`.
+  assertExistingRunId(opts.runId);
   const ref = sandboxRef(opts.runId);
   const headSha = await refSha(opts.gitCwd, ref);
   if (headSha === null) {
@@ -233,25 +240,36 @@ export function withGuards(opts: { wallClockMs?: number; rssBytes?: number } = {
   const rssBytes = opts.rssBytes ?? DEFAULT_RSS_BYTES;
   const controller = new AbortController();
   let trip: { code: string; message: string } | null = null;
+  let disposed = false;
 
   const fire = (code: string, message: string): void => {
     if (trip !== null) return;
     trip = { code, message };
     // Abort first: that is the SIGTERM every spawned gate sees.
     controller.abort(new Error(message));
-    // Then sweep whatever ignored it, after the grace window.
-    const sweep = setTimeout(() => {
-      void processTable().then((table) => {
-        for (const pid of descendants(table, process.pid)) {
+    // Then sweep whatever ignored it, after the grace window — but only the
+    // pids that are descendants AT FIRE TIME. Re-reading the process table
+    // inside the timer would SIGKILL whatever a long-lived host process
+    // happens to have spawned by then, which is nothing to do with this
+    // re-verify.
+    //
+    // ponytail: a pid recycled inside the 5 s grace is killed wrongly; the
+    // upgrade path is the process group / disposable verify box the story
+    // already names.
+    void processTable().then((table) => {
+      const doomed = descendants(table, process.pid);
+      if (disposed) return; // re-verify finished before the snapshot came back
+      const sweep = setTimeout(() => {
+        for (const pid of doomed) {
           try {
             process.kill(pid, "SIGKILL");
           } catch {
             // already gone — the SIGTERM did its job
           }
         }
-      });
-    }, KILL_GRACE_MS);
-    sweep.unref?.();
+      }, KILL_GRACE_MS);
+      sweep.unref?.();
+    });
   };
 
   const wallTimer = setTimeout(
@@ -261,6 +279,7 @@ export function withGuards(opts: { wallClockMs?: number; rssBytes?: number } = {
   wallTimer.unref?.();
 
   const rssTimer = setInterval(() => {
+    if (trip !== null) return; // already fired; the snapshot is taken
     void processTable().then((table) => {
       const total = descendants(table, process.pid).reduce((sum, pid) => sum + (table.get(pid)?.rss ?? 0), 0);
       if (total > rssBytes) {
@@ -274,8 +293,11 @@ export function withGuards(opts: { wallClockMs?: number; rssBytes?: number } = {
     signal: controller.signal,
     tripped: () => trip,
     dispose: () => {
+      disposed = true;
       clearTimeout(wallTimer);
       clearInterval(rssTimer);
+      // The pending SIGKILL is NOT cancelled: its pid set was snapshotted at
+      // fire time and every one of those is this re-verify's own straggler.
     },
   };
 }

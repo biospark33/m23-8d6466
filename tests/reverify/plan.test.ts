@@ -110,6 +110,40 @@ describe("resolveHostPlan", () => {
     }
   });
 
+  test("noTestSuite with no non-test phase is refused — a green would rest on nothing", async () => {
+    const repo = await makeHarvestedRepo();
+    try {
+      writeHostPlan(repo.dir, { manifest: ".factory/manifests/acme-widget.json", noTestSuite: true });
+      // Replace the gate phase with a non-`code` one (the manifest schema
+      // requires two phases, and forbids `command` outside kind "code"), so the
+      // plan resolves with tests declared absent AND nothing else to judge with.
+      const manifestPath = path.join(repo.dir, ".factory", "manifests", "acme-widget.json");
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { phases: Record<string, unknown>[] };
+      manifest.phases[1] = {
+        name: "plan",
+        kind: "agent",
+        description: "no host-runnable command",
+        maxDurationMs: 150_000,
+        retries: 0,
+      };
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+
+      const err = (() => {
+        try {
+          resolveHostPlan({ hostRoot: repo.dir, repoSlug: "acme/widget", baseSha: repo.baseSha });
+          return null;
+        } catch (e) {
+          return e as ReverifyError;
+        }
+      })();
+      expect(err).toBeInstanceOf(ReverifyError);
+      expect(err!.code).toBe("no-host-plan");
+      expect(err!.message).toContain("no non-test phase command");
+    } finally {
+      repo.cleanup();
+    }
+  });
+
   test("a manifest path escaping the operator's .factory root is refused", async () => {
     const repo = await makeHarvestedRepo();
     try {

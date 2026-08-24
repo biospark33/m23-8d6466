@@ -34,6 +34,7 @@ import {
   DEFAULT_WALL_CLOCK_MS,
   ReverifyError,
   exec,
+  probeToolchain,
   sandboxRef,
   withGuards,
   withQuarantineWorktree,
@@ -222,6 +223,9 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
   const redaction = deps.redaction ?? {};
 
   const timings: Timings = { worktree_ms: 0, install_ms: 0, tests_ms: 0, gates_ms: 0, cleanup_ms: 0 };
+  // Stamped when the worktree body returns, so `cleanup_ms` measures the prune
+  // that follows it and not "everything that was not gates".
+  let bodyEndedMs = 0;
   const checks: GateCheck[] = [];
   const flags: string[] = [];
   const discrepancies: string[] = [];
@@ -354,6 +358,7 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
         }
         timings.gates_ms = Date.now() - gateStart;
         step("gates", timings.gates_ms, { gates: plan.gateCommands.length });
+        bodyEndedMs = Date.now();
       },
     );
 
@@ -376,13 +381,17 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
     step("error", Date.now() - startedMs, { code: err.code });
   } finally {
     guards.dispose();
-    timings.cleanup_ms = Date.now() - startedMs - timings.gates_ms;
+    timings.cleanup_ms = bodyEndedMs === 0 ? 0 : Math.max(0, Date.now() - bodyEndedMs);
   }
 
   // Two runs at the same sha that disagree are RED, never retried into green.
   const priorAtSha = readReports(reverifyDir, runId).filter((r) => r.headSha === headSha && r.verdict !== "error");
   const provisional = seal();
-  const nondeterministic = priorAtSha.some((r) => r.verdict !== provisional.verdict);
+  // An `error` is a host failure, not a verdict about the tree: comparing it
+  // against a prior green would brand a flaky toolchain probe as the CODE being
+  // nondeterministic. Only two real verdicts at one sha can disagree.
+  const nondeterministic =
+    provisional.verdict !== "error" && priorAtSha.some((r) => r.verdict !== provisional.verdict);
   const report = nondeterministic ? seal(true) : provisional;
 
   appendReport(reverifyDir, report);
@@ -390,12 +399,31 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
 
   if (report.verdict !== "green") return { report, approval: null };
 
-  const port = deps.approval ?? recordApprovalPort(deps.store ?? new RunRecordStore({ dir: runsDir }));
-  const approval = await port.requestApproval(runId, {
-    proposal: `open a PR for run ${runId} at ${report.headSha}`,
-    reportId: report.reverifyId,
-    headSha: report.headSha,
-  });
+  // A writable store: `store` above may be the read-only (`create: false`) one,
+  // and the approval write needs a store that can create.
+  const port =
+    deps.approval ?? recordApprovalPort(deps.store ?? new RunRecordStore({ dir: runsDir }));
+  // The approval request is the LAST thing and it is caught: the green report
+  // is already on disk, and a failed request must leave a report that SAYS so
+  // rather than throwing past `reverify`'s typed outcome (AC4). DF5.2 gates on
+  // the approval state, so no approval means no PR either way.
+  let approval: ReverifyOutcome["approval"];
+  try {
+    approval = await port.requestApproval(runId, {
+      proposal: `open a PR for run ${runId} at ${report.headSha}`,
+      reportId: report.reverifyId,
+      headSha: report.headSha,
+    });
+  } catch (e) {
+    flags.push("approval-request-failed");
+    const flagged = seal(nondeterministic);
+    appendReport(reverifyDir, flagged);
+    step("approval", Date.now() - startedMs, {
+      outcome: "failed",
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return { report: flagged, approval: null };
+  }
   if (approval.outcome === "pause-in-progress" || approval.outcome === "already-decided") {
     // The flag belongs on the report, so re-seal and append the corrected one.
     const flag = approval.outcome === "pause-in-progress" ? "approval-pause-in-progress" : "approval-already-decided";
@@ -436,7 +464,6 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
   }
 
   async function probeRequired(): Promise<Record<string, string>> {
-    const { probeToolchain } = await import("./worktree.ts");
     const tools = deps.tools ?? REQUIRED_TOOLS;
     return probeToolchain(tools.map((t) => ({ name: t.name, argv: [...t.argv] })));
   }
