@@ -1254,10 +1254,14 @@ export async function run(
       try {
         out(`${JSON.stringify(ack)}\n`);
       } catch (e) {
+        // `(e ?? {})`: a sink may reject with null/undefined (a bare `throw;`,
+        // a violated library contract), and reading `.message` off it would
+        // make the failure REPORTER the failure — over a live, billing box.
+        const x = (e ?? {}) as { message?: string };
         printError(
           note,
           "ack-unwritable",
-          `the box for ${ack.runId} is live but its ack could not be written to stdout: ${redactSecrets((e as Error).message)}`,
+          `the box for ${ack.runId} is live but its ack could not be written to stdout: ${redactSecrets(x.message ?? e)}`,
           `record run id ${ack.runId} now — \`fleet teardown ${ack.runId}\` is the only thing that stops it billing`,
           { runId: ack.runId },
         );
@@ -2082,10 +2086,14 @@ export async function run(
       try {
         ledger.close();
       } catch (e) {
+        // Same normalization as the ack arm: a null/undefined rejection here
+        // would throw a TypeError from INSIDE this catch, escaping the cleanup
+        // policy and hiding the original close failure under a crash.
+        const x = (e ?? {}) as { message?: string };
         printError(
           note,
           "ledger-close-failed",
-          `could not close the cost ledger: ${redactSecrets((e as Error).message)}`,
+          `could not close the cost ledger: ${redactSecrets(x.message ?? e)}`,
           "the handle dies with the process; re-run to confirm it still reads",
         );
         cleanupFailed();
@@ -2176,10 +2184,14 @@ export async function run(
       try {
         releaseRunLock(lock);
       } catch (e) {
+        // releaseRunLock itself throws Errors today, but this file's policy is
+        // uniform: a reporting catch must survive ANY rejection shape — the
+        // two sibling arms above already normalize for the same reason.
+        const x = (e ?? {}) as { message?: string };
         printError(
           note,
           "lock-release-failed",
-          `could not release ${lock}: ${redactSecrets((e as Error).message)}`,
+          `could not release ${lock}: ${redactSecrets(x.message ?? e)}`,
           `rm ${lock} by hand once no other invocation holds it — until then every later harvest or teardown of this run refuses`,
         );
         cleanupFailed();

@@ -2869,6 +2869,25 @@ process.on = ((sig, listener) => {
     expect(envelope.remediation).toContain("do not parse what was printed");
   });
 
+  test("a NON-ERROR write failure (throw null) still reports ack-unwritable, not a TypeError (CodeRabbit round 8)", async () => {
+    // A sink may reject with null/undefined (a bare `throw;`, a violated
+    // library contract). The catch that reports it must not become its own
+    // failure: `(e as Error).message` on null throws a TypeError inside the
+    // handler, escaping as a retryable-looking exit 1 over a box that is
+    // live and billing. Same shape as the ENOSPC sibling, minus the Error.
+    const shared = deps(validBriefJson(dir));
+    const nullSink = (): never => {
+      throw null;
+    };
+    const code = await run(["dispatch", "--driver", "fake"], nullSink, shared, errOut);
+    expect(code).toBe(6);
+    const line = errCaptured.find((l) => l.includes("ack-unwritable"));
+    expect(line).toBeDefined();
+    const envelope = JSON.parse(line as string) as { code: string; runId: string };
+    expect(envelope.code).toBe("ack-unwritable");
+    expect(envelope.runId).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
+  });
+
   test("a write failure that is NOT a broken pipe is still a failure", async () => {
     // The other half of the EPIPE tolerance: ENOSPC means the output was lost
     // to a full disk with a reader still there, and swallowing that would make

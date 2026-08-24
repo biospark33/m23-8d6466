@@ -1244,6 +1244,33 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     expect(existsSync(join(store.dir, `${runId}.lock`))).toBe(false);
     expect(listVerbs().find((v) => v.verb === "teardown")?.exitCodes).toContain(6);
   });
+
+  test("a NON-ERROR ledger close failure (throw null) still reports ledger-close-failed at exit 6 (CodeRabbit round 8)", async () => {
+    // SQLite-adjacent code may reject with null/undefined. The reporting catch
+    // must survive it: `(e as Error).message` on null throws a TypeError from
+    // INSIDE the finally's catch, escaping the cleanup policy entirely and
+    // hiding the original failure under a crash. Same route as the sibling
+    // above, minus the Error.
+    const runId = "ledger-wedged-null";
+    await provisionAdmittedRun(driver, store, { runId });
+    store.close(runId);
+    const realClose = CostLedger.prototype.close;
+    CostLedger.prototype.close = function wedgedNull(this: CostLedger): void {
+      realClose.call(this);
+      throw null;
+    };
+    let res: { code: number; out: string; err: string };
+    try {
+      res = await invoke(["teardown", runId], { driver, store });
+    } finally {
+      CostLedger.prototype.close = realClose;
+    }
+    expect(res.code).toBe(6);
+    expect(res.out).toContain(`torn down: ${runId}`);
+    expect(res.err).toContain("ledger-close-failed");
+    expect(res.err).not.toContain("lock-release-failed");
+    expect(existsSync(join(store.dir, `${runId}.lock`))).toBe(false);
+  });
 });
 
 /**
