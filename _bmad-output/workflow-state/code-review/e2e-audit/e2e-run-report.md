@@ -12,6 +12,37 @@ found and pinned verbatim (both invisible to the 508 FakeDriver tests — the
 audit's thesis confirmed). TIER-2 (dispatch/fanout verbs with real gate C/D
 model spend) NOT run: requires per-run spend approval.
 
+## FIX SESSION (2026-08-24, later) — all six actionable findings FIXED, retested LIVE
+
+Fix session on the same branch (commits f3abb96..624c98b, pushed to PR #128).
+Every fix: gitnexus impact() before edit (teardownSandbox and deliverRunKey
+returned CRITICAL — blast radius stated before proceeding, and it WAS the leak
+surface), mutation-verified RED test first, root-cause fix at the shared
+function, focal suites green. One commit per fix.
+
+| Finding | Verdict | Fix | Live proof |
+|---|---|---|---|
+| F3 (HIGH) default fill/key paths unwritable | **FIXED** | `DEFAULT_FILL_WORKDIR="src"`, `KEY_ENV_FILE="app/.env"` — HOME-relative (ssh exec lands in $HOME, the only writable root; image-agnostic, absolute overrides still work); all consumers swept (gate, harvest, dispatch, cap-hit-demo, tests) | T1.3a rewritten from BUG PIN to FIXED PIN: default fill + default env file SUCCEED on a real box (`2026-08-24-220128-t1-3a-fill-default-fixed.json`) |
+| F6 (HIGH) teardown leaks box at exit 0 | **FIXED** | destroyTarget = `rec.vmName ?? runId` (the fallback `teardownRun` driver.ts:1099 always promised); idempotent no-op when no box; failure fails closed | unit port of live repro e2e-repro6d (box GONE + record closed); every teardown this session destroyed its box — final ls empty after each test |
+| F7 (flake) destroy trusts rm exit 0 | **FIXED** | destroy verifies absence via `list()` after rm exit-0, one retry, then throws (assert-by-real-state) | scripted-seam unit pair (lying rm / stale listing); 10+ live destroys this session, zero survivors |
+| F5 (sharp edge) run lock held after destroy+revoke | **FIXED** | finally reads the record: closedAt set ⇒ destroy+revoke+close landed ⇒ lock released with `lock-released-work-landed` note, exit stays 6; record still open ⇒ old lock-held behavior | both arms unit-pinned (RED reproduced the live remediation verbatim); re-invoke reaches the idempotent closed path |
+| F8 box-hours 1-hour minimum | **FIXED** | fractional µ$ from wall-clock ms: `ceil(rate × lifetimeMs / 3_600_000)`, integer-safe product check, sub-µ$ rounds UP; DF2.8 story amended in the same commit (whole-hour rows never rewritten) | live T1.4 ledger row `cost_micro_usd: 931` for a ~15s box (was 230,000 = full hour) |
+| F4 private repos impossible (INV-CRED-1) | **FIXED (feature)** | bundle-push is the DEFAULT fill mode: HOST fetches the pinned SHA with host creds → `git bundle` → base64 over exec stdin → box clones from the LOCAL bundle; creds never cross the wire; rejected deploy-token/forwarding designs on secret-surface grounds; workdir path grammar validated before script interpolation (security-review hardening 624c98b) | **T1.3a+b PASS against PRIVATE biospark33/QDS-Factory at pushed SHA 624c98b** — default fill, sbx branch, in-box commit, harvest verb exit 0, host bundle verify 0, quarantine fetch 0 (`2026-08-24-220341/220432`) |
+| F1 no node in box image | environment fact, no action | documented | — |
+| F2 keyHash-less teardown exits 6 | designed, unchanged | — | T1.2/T1.3/T1.6 finallys still 0-or-6 as expected |
+| F9 host-load flake family | documented, unchanged | reaper "E2E --yes" + signal-handler + fill-refill tests flake under load-average 250+; ALL pass solo | this session: full suite green at load ≤30 |
+
+Post-fix TIER-1 rerun (each SOLO, real exe.dev, zero model spend, `ssh exe.dev
+ls --json` empty after EVERY test): **7/7 PROVEN** — T1.1 (220018), T1.2
+(220048), T1.3a+b public (220128/220201), T1.4 (220231), T1.5 (220246), T1.6
+(220300), plus the private-repo pair (220341/220432). Full gates:
+`bun test tests/fleet/ tests/providers/` **1199 pass / 0 fail / 9 todo**;
+biome clean; tsc --noEmit clean; detect_changes 42 symbols / 25 files, every
+entry inside the six fix surfaces + tests + the DF2.8 story.
+
+**TIER-2 is unblocked**: the F3+F4 blockers are gone — dispatch can now fill
+and deliver keys on a real box, from a private repo, with no workdir seam.
+
 ## Per-test verdicts
 
 | # | Test | Verdict | What was proven on real substrate | Evidence (latest) |

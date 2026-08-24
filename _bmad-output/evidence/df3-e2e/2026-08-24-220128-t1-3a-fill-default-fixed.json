@@ -1,0 +1,30 @@
+{
+  "writtenAt": "2026-08-24T22:01:28.599Z",
+  "test": "T1.3a",
+  "outcome": "pass",
+  "runId": "e2e-t13a-mt7s5r06ne",
+  "phases": [
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t13a-mt7s5r06ne"
+    },
+    {
+      "phase": "fill-default-workdir",
+      "ok": true,
+      "ms": 14496
+    },
+    {
+      "phase": "default-fill-branch",
+      "branch": "sbx/e2e-t13a-mt7s5r06ne"
+    },
+    {
+      "phase": "default-env-file-writable",
+      "mode": "600"
+    },
+    {
+      "phase": "finally-teardown-verb",
+      "exitCode": 6
+    }
+  ]
+}

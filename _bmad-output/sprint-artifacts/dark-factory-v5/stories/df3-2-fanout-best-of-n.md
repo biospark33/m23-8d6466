@@ -767,3 +767,19 @@ are dispatches and inherit DF3.1's blockers (gate C/D spend + fill/key-path
 bugs F3/F6 in the run report), so pattern-arm live proof moves to TIER-2 with
 per-run spend approval. Report:
 `_bmad-output/workflow-state/code-review/e2e-audit/e2e-run-report.md`.
+
+
+### 2026-08-24 (later) — e2e fix session lands under the fanout PR's branch — commits f3abb96..624c98b
+
+The TIER-1 findings (e2e-run-report.md) were fixed on this PR's branch, so
+fanout's arms inherit everything: teardown no longer leaks a vmName-less
+record's runId-named box (F6 — disposeLosers/teardownSandbox's shared
+destroy step), destroy verifies by listing (F7), a post-close ingest failure
+releases the run lock instead of wedging the run (F5), and box-hours price
+fractionally (F8 — loser box-hours rows no longer round up to a full hour
+each). The new default fill mode bundle-push (F4) removes the public-repo
+requirement for every arm; proven live against the private
+biospark33/QDS-Factory at pushed SHA 624c98b (evidence
+`2026-08-24-220341/220432`). Fanout's own live-slice (lock refusal) re-proven
+post-fix (evidence 220246). Full suite 1199 pass / 0 fail; TIER-2 arms now
+need spend approval only.

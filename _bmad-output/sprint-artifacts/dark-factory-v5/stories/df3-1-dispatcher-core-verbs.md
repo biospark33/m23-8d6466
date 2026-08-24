@@ -1688,3 +1688,38 @@ in-box anonymous clone is impossible by design (INV-CRED-1) — live fills must
 use a public repo until a private-repo design lands (operator requirement on
 record: proprietary repos must work; candidate: host-side clone + bundle push
 into the box, creds never cross the wire).
+
+
+### 2026-08-24 (later) — e2e fix session: F3/F6/F7/F5/F8 fixed + private-repo fill (F4) — commits f3abb96..624c98b
+
+The TIER-1 run's findings were root-caused and fixed on this branch (one
+commit per fix, impact() before every edit, mutation-verified RED tests,
+1199/0/9 full-suite green, all retested LIVE solo):
+
+- **F3** `DEFAULT_FILL_WORKDIR` → `"src"`, `KEY_ENV_FILE` → `"app/.env"`
+  (HOME-relative — ssh exec lands in the only writable root; every consumer
+  swept). Live: default fill + default key file SUCCEED on a real box
+  (T1.3a FIXED PIN, evidence 220128).
+- **F6** teardown now destroys `rec.vmName ?? runId` (the fallback
+  teardownRun always promised) — a vmName-less open record can no longer
+  leak its runId-named box at exit 0 (unit port of live repro e2e-repro6d).
+- **F7** ExeDevDriver.destroy verifies absence via ls after rm exit-0 (one
+  retry, then throws) — rm's ack is no longer read as the box's state.
+- **F5** the teardown verb's finally reads the record: closed ⇒ the lock
+  guards nothing billable and is released (exit stays 6 for the unpriced
+  row); open ⇒ lock-held unchanged.
+- **F8** box-hours price fractionally from wall-clock ms into integer µ$
+  (live row: 931 µ$ for a ~15s box, was 230,000); DF2.8 story amended in the
+  same commit.
+- **F4** NEW default fill mode `bundle-push`: host fetches the pinned SHA
+  with the HOST's own git credentials, bundles it, pushes it into the box
+  over exec stdin (base64), box clones from the LOCAL bundle — credentials
+  never cross the wire (INV-CRED-1 pure), and PRIVATE repos work. Proven
+  live against private biospark33/QDS-Factory at pushed SHA 624c98b through
+  the full harvest verb (evidence 220341/220432).
+
+**dispatch is no longer structurally blocked**: fill + key delivery land on
+default paths, private repos included. Remaining gate to live dispatch is
+TIER-2 spend approval only. Full report:
+`_bmad-output/workflow-state/code-review/e2e-audit/e2e-run-report.md` (fix
+session section).
