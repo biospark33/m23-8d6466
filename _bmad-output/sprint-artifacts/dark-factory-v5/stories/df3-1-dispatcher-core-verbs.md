@@ -1652,3 +1652,39 @@ harvest count-bearing arm, gate-E note depth, httpsUrl regex pin, env restore ve
 - GitNexus `detect_changes` (unstaged): 63 changed symbols / 20 files — every entry inside the PR's
   own modules (fleet, providers, exedev setup-gate, scripts/fleet, their tests); zero out-of-scope
   symbols. Focal reruns during the wave: fleet 369→370+, providers 183 green, cli 93/93 stable.
+
+### 2026-08-24 — TIER-1 live e2e (real exe.dev, zero model spend) — commit 0349b13
+
+First-ever real-substrate proof of the verb layer: 7 live tests in `tests/fleet/e2e/`
+(todoIf-gated on QDS_E2E_LIVE, refuse-half-configured), all PROVEN — driver
+primitives (whoami/create/list/exec/copyFile/destroy + scp round-trip), `status`
+verb against the real provider listing, `harvest` verb end-to-end (real in-box
+clone at pinned SHA on `sbx/<runId>`, in-box commit, bundle out over scp, host
+`git bundle verify` + quarantine fetch), `teardown` verb full chain (real key
+mint at 5000 µ$ cap — $0 model spend — revoke verified against the provider's
+key list, real `cost_events` box_hours ledger write, idempotent second
+teardown), and the run-lock under real concurrent subprocesses. Evidence:
+`_bmad-output/evidence/df3-e2e/` (26 redacted JSONs); full report with the bug
+list at `_bmad-output/workflow-state/code-review/e2e-audit/e2e-run-report.md`.
+
+The `dispatch` verb itself remains 0% real — exedev dispatch ALWAYS runs the
+five-assertion gate, whose C/D are real chat calls (model spend), and it is
+blocked anyway by two HIGH bugs the live run pinned (fix session input, not
+hacked around here):
+
+- **F3** `DEFAULT_FILL_WORKDIR=/home/agent/src` (fill.ts:40) and
+  `KEY_ENV_FILE=/home/agent/app/.env` (credentials.ts:51) are unwritable on
+  the real image (ssh user `exedev`, HOME=/home/exedev, /home root-owned) —
+  fill AND key delivery fail on every real box; no dispatch has ever run live.
+- **F6** `fleet teardown` on an open record with no vmName skips destroy and
+  exits 0 "torn down" (teardown.ts:446) while the runId-named box keeps
+  billing — the runId fallback provisionAdmittedRun's comments promise does
+  not exist on this path. 3 boxes leaked during early iterations (all
+  recovered; final `ssh exe.dev ls` empty).
+
+Also verified live: box image has NO node (python3/curl/git/pi only); box-hours
+price at a 1-hour minimum (~20s box → full hour); QDS-Factory is PRIVATE so
+in-box anonymous clone is impossible by design (INV-CRED-1) — live fills must
+use a public repo until a private-repo design lands (operator requirement on
+record: proprietary repos must work; candidate: host-side clone + bundle push
+into the box, creds never cross the wire).

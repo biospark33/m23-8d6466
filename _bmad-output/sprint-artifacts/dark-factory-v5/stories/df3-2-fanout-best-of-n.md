@@ -753,3 +753,15 @@ Gates: fleet focal 508/508 (both new tests pass in-suite; the cli pin carries th
 load-flake caveat — deterministic idle, observed abandoning at harvest under LA 150+),
 biome clean, tsc clean, detect_changes 2 symbols / 4 Run→* processes, all inside this
 PR's modules.
+
+### 2026-08-24 — TIER-1 live slice: fleet lock on real substrate — commit 0349b13
+
+`tier1-fanout-refusal.live.test.ts`: with the real FleetLock held at the
+cwd-relative path the verb resolves, a fully valid `fleet fanout --driver
+exedev` (schema-valid brief, matching --pin, roster ids) refuses exit 5 and
+mutates NOTHING — provider listing byte-identical, no fan-*.json, no run
+records (INV-2 pinned against the live provider). The fanout arms themselves
+are dispatches and inherit DF3.1's blockers (gate C/D spend + fill/key-path
+bugs F3/F6 in the run report), so pattern-arm live proof moves to TIER-2 with
+per-run spend approval. Report:
+`_bmad-output/workflow-state/code-review/e2e-audit/e2e-run-report.md`.
