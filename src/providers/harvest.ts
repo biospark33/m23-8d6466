@@ -64,15 +64,17 @@ export const TAR_METADATA_MAX_BYTES = 64 * 1024;
 
 /**
  * In-box repo workdir candidates, in probe order: box-relative names first
- * (`app` is the layout the fake substrate and its tests use), then the
- * absolute production spellings (DF2.2's KEY_ENV_FILE contract clones to
- * /home/agent/app; /home/agent/src is design.md's). An explicit
- * `deps.workdir` replaces the whole list.
+ * (the canonical HOME-relative layout since F3 — fill clones to `src`, the
+ * key lands `app/.env`), then the legacy absolute spellings as fallbacks for
+ * boxes provisioned by earlier builds. An explicit `deps.workdir` replaces
+ * the whole list.
  */
 // ponytail: relative-first, but the absolute fallbacks can still probe HOST
 // dirs when the fake substrate executes scripts on the host and the repo lives
 // elsewhere — a substrate-aware probe is the real fix if that ever bites.
 const DEFAULT_WORKDIRS = ["app", "src", "/home/agent/app", "/home/agent/src"];
+// F3 (2026-08-24): the relative entries are canonical now (HOME-relative
+// defaults); the absolute spellings stay as legacy-box fallbacks.
 
 export class HarvestError extends Error {
   /** Machine-readable failure class; also the `code` in every log line. */

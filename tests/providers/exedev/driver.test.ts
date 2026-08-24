@@ -8,12 +8,13 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDriverContract } from "../driver-contract.test.ts";
 import { registeredDrivers, resolveDriver } from "../../../src/providers/index.ts";
-import { assertValidRunId } from "../../../src/providers/run-record.ts";
+import { assertValidRunId, RunRecordStore } from "../../../src/providers/run-record.ts";
+import { deliverRunKey, type KeyApi } from "../../../src/providers/credentials.ts";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
 import { setLogSink } from "../../../src/swarmclaw/log.ts";
 import {
@@ -270,6 +271,54 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
     const porcelain = await driver.exec("fill-1", ["git", "-C", "work", "status", "--porcelain"]);
     expect(porcelain.stdout.trim()).toBe("");
   });
+  test("fill with NO workdir clones into the HOME-relative default 'src' (F3, 2026-08-24)", async () => {
+    // The real exe.dev image: ssh user exedev, HOME=/home/exedev, /home
+    // root-owned. A default of /home/agent/src made every default fill fail
+    // with "Permission denied" (e2e-run-report F3). The default is now
+    // RELATIVE — ssh exec lands in $HOME, so "src" resolves image-agnostically
+    // and the fake substrate (cwd = box dir) models the same contract.
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create("fill-default");
+    await driver.fill("fill-default", {
+      runId: "fill-default",
+      repoUrl: `file://${originDir}`,
+      commitSha: shaB,
+    });
+    const branch = await driver.exec("fill-default", ["git", "-C", "src", "rev-parse", "--abbrev-ref", "HEAD"]);
+    expect(branch.exitCode).toBe(0);
+    expect(branch.stdout.trim()).toBe("sbx/fill-default");
+  });
+
+  test("key delivery with NO envFile lands in the HOME-relative default app/.env, mode 600 (F3)", async () => {
+    // KEY_ENV_FILE shares the fill wall: /home/agent/app/.env is unwritable on
+    // the real image. Relative "app/.env" resolves against the ssh HOME (the
+    // fake substrate's box dir models it) and stays a SIBLING of the "src"
+    // clone dir — the fill.ts separation contract holds.
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create("deliver-default");
+    const unusedKeyApi: KeyApi = {
+      createKey: async () => {
+        throw new Error("not used by deliverRunKey");
+      },
+      getKeyEntry: async () => {
+        throw new Error("not used by deliverRunKey");
+      },
+      listAllKeys: async () => {
+        throw new Error("not used by deliverRunKey");
+      },
+      deleteKey: async () => {
+        throw new Error("not used by deliverRunKey");
+      },
+    };
+    const store = new RunRecordStore({ dir: join(tempDir, "deliver-runs") });
+    await deliverRunKey({ keyApi: unusedKeyApi, driver, store }, "deliver-default", "sk-or-test-not-a-real-key");
+    const envPath = join(fake.boxDir("deliver-default"), "app", ".env");
+    const st = statSync(envPath);
+    expect((st.mode & 0o777).toString(8)).toBe("600");
+    expect(readFileSync(envPath, "utf8")).toBe("OPENROUTER_API_KEY=sk-or-test-not-a-real-key\n");
+  });
+
+
 
   test("a re-fill switches to the existing branch and never re-creates it", async () => {
     const driver = new ExeDevDriver({ run: fake.run });

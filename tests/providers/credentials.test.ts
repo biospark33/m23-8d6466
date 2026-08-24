@@ -21,6 +21,7 @@ import {
   captureSpend,
   defaultKeyCapMicroUsd,
   deliverRunKey,
+  KEY_ENV_FILE,
   mintRunKey,
   openRouterKeyApi,
   revokeAndVerify,
@@ -80,6 +81,16 @@ async function makeRun(runId: string): Promise<string> {
 describe("DF2.3 credential lifecycle", () => {
   test("defaultKeyCapMicroUsd is the documented 50_000_000 µ$ backstop", () => {
     expect(defaultKeyCapMicroUsd).toBe(50_000_000);
+  });
+
+  test("KEY_ENV_FILE is HOME-relative (F3, 2026-08-24): the real image's ssh HOME is the only writable root", () => {
+    // /home/agent/app/.env pinned the inkwell-era layout; the real exe.dev
+    // image ships no /home/agent and /home is root-owned, so every default
+    // delivery failed at mkdir. Relative "app/.env" resolves against the ssh
+    // HOME (where every driver exec lands) and stays a SIBLING of the fill
+    // clone dir "src" — the separation contract in fill.ts holds.
+    expect(KEY_ENV_FILE).toBe("app/.env");
+    expect(KEY_ENV_FILE.startsWith("/")).toBe(false);
   });
 
   test("e2e (MANDATORY): full lifecycle leaves an OPEN record, populated fields, absent key, zero plaintext leakage", async () => {

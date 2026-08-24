@@ -87,7 +87,9 @@ describe("setup gate — defaults are the story's constants", () => {
     expect(mod.DEFAULT_GATE_TIMEOUT_MS).toBe(300_000);
     expect(mod.DEFAULT_SENTINEL_PATH).toBe("/tmp/PROVISION_READY");
     // The env-file contract is DF2.3's constant, imported — not re-typed.
-    expect(mod.DEFAULT_ENV_FILE).toBe("/home/agent/app/.env");
+    // F3 (2026-08-24): HOME-relative — the real image's ssh HOME is the only
+    // writable root, and /home/agent does not exist on it.
+    expect(mod.DEFAULT_ENV_FILE).toBe("app/.env");
   });
 });
 

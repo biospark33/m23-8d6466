@@ -8,10 +8,13 @@
  * A re-fill SWITCHES to the existing branch and never re-creates it; the
  * branch's commits are the run's output, harvested by DF2.5.
  *
- * The clone is public and unauthenticated by construction: the URL grammar
- * admits `https://` (production) and `file://` (offline tests) with NO
- * userinfo — a credential-carrying URL is refused before any command runs,
- * because a push/pull secret in a box is exactly what INV-CRED-1 forbids.
+ * No credential ever rides the URL: the grammar admits `https://` (production)
+ * and `file://` (offline tests) with NO userinfo — a credential-carrying URL
+ * is refused before any command runs, because a push/pull secret in a box is
+ * exactly what INV-CRED-1 forbids.
+ *
+ * F3 (2026-08-24): the default workdir is HOME-RELATIVE — every driver exec
+ * lands in the box's ssh HOME, the only writable root on the real image.
  */
 
 import { log } from "../../swarmclaw/log.ts";
@@ -26,18 +29,26 @@ export interface FillOptions {
   repoUrl: string;
   /** The commit SHA from the run record, pinned verbatim. */
   commitSha: string;
-  /** Clone target inside the box. Defaults to the app directory. */
+  /** Clone target inside the box. HOME-relative by default (see DEFAULT_FILL_WORKDIR). */
   workdir?: string;
 }
 
 /**
- * Deliberately NOT `/home/agent/app` (DF2.3's KEY_ENV_FILE directory): the
- * env file and the clone must not share a directory. Key-delivered-before-fill
- * breaks `git clone` into a non-empty dir; fill-before-key makes `.env` an
- * untracked file that assertion A's porcelain check false-fails on for any
- * repo that does not .gitignore it. A sibling directory sidesteps both.
+ * HOME-RELATIVE (F3, 2026-08-24): every driver exec lands in the box's ssh
+ * HOME — the only writable root on the real exe.dev image (ssh user `exedev`,
+ * `/home` root-owned; the inkwell-era `/home/agent` does not exist there). A
+ * relative default is image-agnostic: it resolves wherever HOME points. An
+ * absolute workdir override keeps working for embedders with a different
+ * layout.
+ *
+ * Deliberately NOT the KEY_ENV_FILE directory (`app`): the env file and the
+ * clone must not share a directory. Key-delivered-before-fill breaks
+ * `git clone` into a non-empty dir; fill-before-key makes `.env` an untracked
+ * file that assertion A's porcelain check false-fails on for any repo that
+ * does not .gitignore it. Sibling directories (`src` beside `app`) sidestep
+ * both.
  */
-export const DEFAULT_FILL_WORKDIR = "/home/agent/src";
+export const DEFAULT_FILL_WORKDIR = "src";
 
 /** 7–64 hex chars: accepts both short and full SHAs, rejects everything else. */
 const SHA_RE = /^[0-9a-f]{7,64}$/i;

@@ -63,7 +63,7 @@ afterEach(() => {
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 function deps(overrides: Partial<TeardownDeps> = {}): TeardownDeps {
-  // workdir "app": the fake box's clone target (impl default is DF2.2's /home/agent/src)
+  // workdir "app": the fake box's clone target (impl default is the HOME-relative "src")
   return { driver: recording, store, keyApi: api, runsDir: store.dir, workdir: "app", ...overrides };
 }
 

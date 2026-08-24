@@ -3722,7 +3722,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     makeDriverExedevCapable();
     const brief = validBrief(); // also creates the manifests dir the roster sits in
     // An EXEDEV-shaped driver delivers the key to the DEFAULT in-box path
-    // (`envFileFor` → undefined → /home/agent/app/.env), which the fake box
+    // (`envFileFor` → undefined → app/.env, HOME-relative), which the fake box
     // cannot materialize on the host — every other exedev-shaped fixture here
     // refuses before provisioning, so this is the first test that has to get
     // PAST delivery. Report the mode the script checks for.

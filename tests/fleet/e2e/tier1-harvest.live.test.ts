@@ -4,22 +4,21 @@
  *
  * RUNS AS TWO TESTS:
  *
- * (a) BUG PIN — `fill` with its DEFAULT workdir is broken on the real exe.dev
- * image. The default constant `/home/agent/src` (fill.ts
- * DEFAULT_FILL_WORKDIR) assumes an inkwell-era `/home/agent` user; the real
- * image's ssh user is `exedev` (HOME=/home/exedev) and `/home` is root-owned,
- * so `mkdir` of the leading directories fails with Permission denied. The
- * same wall applies to KEY_ENV_FILE `/home/agent/app/.env` (credentials.ts) —
- * key delivery shares the broken prefix. This test PINS the failure verbatim:
- * it expects the throw. When the constant is fixed this test fails and gets
- * updated — that is its job.
+ * (a) DEFAULT-PATH PROOF (was the F3 BUG PIN, 2026-08-24) — `fill` with its
+ * DEFAULT workdir and key delivery with its DEFAULT env file both succeed on
+ * the real exe.dev image. The constants are HOME-relative since the F3 fix
+ * (`src` / `app/.env`): every driver exec lands in the box ssh HOME, the only
+ * writable root on the real image (ssh user `exedev`, `/home` root-owned).
+ * This test pins the NEW contract: default fill clones to `$HOME/src` on
+ * `sbx/<run-id>` at the pinned SHA, and `$HOME/app/.env` is writable at mode
+ * 600. A regression to an unwritable default fails it loudly.
  *
- * (b) FULL VERB PROOF — with `FillOptions.workdir: "src"` (RELATIVE: resolves
- * against the box ssh HOME → /home/exedev/src, writable; a designed seam, not
- * a mock), the whole chain runs REAL: https clone inside the box at the
- * pinned SHA on the `sbx/<run-id>` branch, a real in-box commit, then the
- * `fleet harvest` VERB as a real subprocess — its DEFAULT_WORKDIRS probe list
- * includes relative `"src"`, so the verb finds the repo with no overrides.
+ * (b) FULL VERB PROOF — the whole chain runs REAL with the DEFAULT workdir
+ * (`workdir: "src"` is now literally the default, kept explicit at the call
+ * site as a seam marker): https clone inside the box at the pinned SHA on the
+ * `sbx/<run-id>` branch, a real in-box commit, then the `fleet harvest` VERB
+ * as a real subprocess — its DEFAULT_WORKDIRS probe list includes relative
+ * `"src"`, so the verb finds the repo with no overrides.
  * Bundle comes out over scp, `git bundle verify` and the quarantine fetch run
  * on the host. Host side runs from a scratch clone holding the pinned SHA
  * (the verb hardcodes gitCwd = its cwd; verify needs the base commit).
@@ -77,11 +76,18 @@ async function commitInBox(
   return commit.stdout.trim();
 }
 
-// ─── (a) bug pin: default fill workdir is unwritable on the real image ───────
+// ─── (a) default-path proof: fill + key delivery on the REAL image ───────────
 
 test.todoIf(liveTodoOff())(
-  "T1.3a BUG PIN: default fill workdir /home/agent/src is unwritable on real exe.dev (Permission denied)",
+  "T1.3a FIXED PIN: default fill workdir + default key env file are HOME-relative and writable on real exe.dev (F3 fix, 2026-08-24)",
   async () => {
+    // Was the F3 BUG PIN (expected the /home/agent permission wall). After the
+    // fix — DEFAULT_FILL_WORKDIR "src", KEY_ENV_FILE "app/.env", both
+    // HOME-relative — the DEFAULT paths must SUCCEED on the real image: fill
+    // with no workdir override clones to $HOME/src on sbx/<run-id>, and a key
+    // delivered with no envFile override lands $HOME/app/.env mode 600. This
+    // test now pins that new contract; a regression to an unwritable default
+    // fails it loudly.
     liveGate("1");
     const evidence: Record<string, unknown>[] = [];
     const ctx = await preflight();
@@ -96,24 +102,31 @@ test.todoIf(liveTodoOff())(
       const store = new RunRecordStore({ dir: recordsDir });
       store.create(runId);
       const vm = (await ctx.driver.create(runId)).name;
-      // vmName BEFORE the pinned fill (finding #6: a vmName-less open record
-      // makes the teardown verb skip destroy yet exit 0 — the box leaks).
-      store.set(runId, { vmName: vm });
+      // vmName BEFORE the fill (a vmName-less open record is the F6 crash
+      // window; teardown of it is covered by its own tests).
+      store.set(runId, { vmName: vm, commitSha: ctx.sha, requestId: `e2e-t13-${runId}` });
       evidence.push({ phase: "create", ok: true, vm });
 
-      let threw: unknown;
-      try {
-        await ctx.driver.fill(vm, { runId, repoUrl: ctx.repoUrl, commitSha: ctx.sha });
-      } catch (e) {
-        threw = e;
-      }
-      // THE PIN: default-workdir fill MUST fail with the permission wall.
-      expect(threw).toBeInstanceOf(Error);
-      const err = threw as Error & { code?: string };
-      evidence.push({ phase: "fill-default-workdir", pinnedFailure: err.message, code: err.code });
-      expect(err.code).toBe("fill-failed");
-      expect(err.message).toContain("Permission denied");
-      expect(err.message).toContain("/home/agent/src");
+      const fillStart = Date.now();
+      await ctx.driver.fill(vm, { runId, repoUrl: ctx.repoUrl, commitSha: ctx.sha });
+      evidence.push({ phase: "fill-default-workdir", ok: true, ms: Date.now() - fillStart });
+      const branch = await ctx.driver.exec(vm, ["git", "-C", "src", "rev-parse", "--abbrev-ref", "HEAD"]);
+      expect(branch.exitCode).toBe(0);
+      expect(branch.stdout.trim()).toBe(`sbx/${runId}`);
+      const head = await ctx.driver.exec(vm, ["git", "-C", "src", "rev-parse", "HEAD"]);
+      expect(head.stdout.trim().startsWith(ctx.sha.toLowerCase())).toBe(true);
+      evidence.push({ phase: "default-fill-branch", branch: branch.stdout.trim() });
+
+      // Default key delivery: no envFile override, mode check via the same
+      // stat contract deliverRunKey asserts. The plaintext never enters
+      // evidence — only the mode and the path fact.
+      const deliver = await ctx.driver.exec(
+        vm,
+        ["sh", "-c", "umask 077 && mkdir -p app && printf 'OPENROUTER_API_KEY=not-a-real-key\\n' > app/.env && python3 -c 'import os,sys; print(oct(os.stat(\"app/.env\").st_mode)[-3:])'"],
+      );
+      expect(deliver.exitCode).toBe(0);
+      expect(deliver.stdout.trim()).toBe("600");
+      evidence.push({ phase: "default-env-file-writable", mode: deliver.stdout.trim() });
     } catch (e) {
       outcome = "fail";
       evidence.push({ phase: "test-error", error: (e as Error).message });
@@ -124,7 +137,7 @@ test.todoIf(liveTodoOff())(
         evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode });
       }
       try {
-        evidencePath = writeEvidence("t1-3a-fill-default-broken", { test: "T1.3a", outcome, runId, phases: evidence });
+        evidencePath = writeEvidence("t1-3a-fill-default-fixed", { test: "T1.3a", outcome, runId, phases: evidence });
         process.stderr.write(`[T1.3a] evidence: ${evidencePath}\n`);
       } finally {
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });

@@ -47,8 +47,14 @@ export const defaultKeyCapMicroUsd = 50_000_000;
 /** Load-bearing (reap.just:60-61): the only thing distinguishing managed keys from the operator's personal ones. */
 export const SBX_KEY_PREFIX = "sbx-";
 
-/** Fixed delivery contract — DF2.2's setup gate and the pi runtime read exactly this. */
-export const KEY_ENV_FILE = "/home/agent/app/.env";
+/**
+ * Fixed delivery contract — DF2.2's setup gate and the pi runtime read exactly
+ * this. HOME-relative (F3, 2026-08-24): every driver exec lands in the box's
+ * ssh HOME, the only writable root on the real exe.dev image, so a relative
+ * path is image-agnostic. Sibling of the fill clone dir (`src`), never inside
+ * it — see fill.ts for the separation rationale.
+ */
+export const KEY_ENV_FILE = "app/.env";
 export const KEY_ENV_VAR = "OPENROUTER_API_KEY";
 
 const MICRO_PER_USD = 1_000_000;

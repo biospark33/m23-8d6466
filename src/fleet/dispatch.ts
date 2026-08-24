@@ -535,7 +535,7 @@ function isExedevDriver(driver: ProviderDriver): driver is ExedevCapable {
   return typeof d.setup === "function" && typeof d.fill === "function";
 }
 
-/** Dir boxes are plain host dirs — the key lands box-relative, not /home/agent. */
+/** Dir boxes are plain host dirs — the key lands box-relative beside the box dir root. */
 function envFileFor(driver: ProviderDriver): string | undefined {
   return isExedevDriver(driver) ? undefined : ".env";
 }
