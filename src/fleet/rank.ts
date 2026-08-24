@@ -94,6 +94,52 @@ function testPassRate(out: ArmStepOutput): number {
   return total > 0 ? out.testResults.passed / total : 0;
 }
 
+/**
+ * Structural guard at the library boundary — the same shape refusal the CLI's
+ * --steps-json parser makes, so embedders calling rank() directly get the
+ * named refusal instead of NaN scores. Counts must be NON-negative integers:
+ * a negative count made passRate exceed 1 and ranked a broken arm above a
+ * healthy one.
+ */
+function assertStepOutputShape(runId: string, out: ArmStepOutput): void {
+  const hint = "each entry carries testsExecuted?, testResults{passed,failed}? and changedFiles[]?";
+  if (out.testsExecuted !== undefined && typeof out.testsExecuted !== "boolean") {
+    throw new FleetError(
+      2,
+      "invalid-step-output",
+      `step output for run ${redactSecrets(runId)} has a non-boolean testsExecuted (it is a guard flag, never a divisor)`,
+      hint,
+    );
+  }
+  const tr = out.testResults;
+  if (
+    tr !== undefined &&
+    (typeof tr !== "object" ||
+      !Number.isInteger(tr.passed) ||
+      !Number.isInteger(tr.failed) ||
+      tr.passed < 0 ||
+      tr.failed < 0)
+  ) {
+    throw new FleetError(
+      2,
+      "invalid-step-output",
+      `step output for run ${redactSecrets(runId)} needs testResults with non-negative integer passed/failed counts`,
+      hint,
+    );
+  }
+  if (
+    out.changedFiles !== undefined &&
+    (!Array.isArray(out.changedFiles) || out.changedFiles.some((f) => typeof f !== "string"))
+  ) {
+    throw new FleetError(
+      2,
+      "invalid-step-output",
+      `step output for run ${redactSecrets(runId)} has changedFiles that is not an array of path strings`,
+      hint,
+    );
+  }
+}
+
 /** Normalized top-two delta ≤ TIE_DELTA (K6: toFixed(10) tames IEEE-754 drift). */
 function isTie(scores: RankedArm[]): boolean {
   const [top, second] = scores;
@@ -114,6 +160,10 @@ function buildRationale(scores: RankedArm[], tie: boolean): string {
     const second = scores[1];
     rationale =
       `top arms ${top.arm} (run ${top.runId}) and ${second.arm} (run ${second.runId}) are within ${TIE_DELTA} of each other — tie flagged, NO automatic tie-break; human review resolves`;
+  } else if (unscored.length === scores.length - 1) {
+    // Exactly one scored arm: there is nothing for it to lead over, so the
+    // "leads by more than" claim would be a comparison over no data.
+    rationale = `only arm ${top.arm} (run ${top.runId}) has step output — no comparison possible; supply step output for every arm to rank`;
   } else {
     rationale =
       `top arm ${top.arm} (run ${top.runId}, score ${top.score}) leads by more than ${TIE_DELTA}`;
@@ -154,6 +204,10 @@ export async function rank(fanoutId: string, deps: RankDeps): Promise<RankResult
   }));
   const union = new Set<string>();
   for (const o of outputs) {
+    // Malformed entries refuse NAMING the run before any arithmetic: a negative
+    // count or a non-array changedFiles would otherwise flow into the score as
+    // an above-1 pass rate or NaN.
+    if (o.out !== null) assertStepOutputShape(o.runId, o.out);
     for (const f of o.out?.changedFiles ?? []) union.add(f);
   }
 
@@ -181,7 +235,10 @@ export async function rank(fanoutId: string, deps: RankDeps): Promise<RankResult
         return {
           arm,
           runId,
-          score: passRate * TEST_PASS_WEIGHT + coverage * FILE_COVERAGE_WEIGHT,
+          // Clamped to [0,1]: both terms are bounded once the shape guard holds,
+          // so this only keeps a future weight change from emitting an
+          // unnormalizable composite.
+          score: Math.min(1, Math.max(0, passRate * TEST_PASS_WEIGHT + coverage * FILE_COVERAGE_WEIGHT)),
           breakdown: { testPassRate: passRate, uniqueFileCoverage: coverage },
         };
       })

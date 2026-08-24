@@ -231,6 +231,33 @@ describe("rank (DF3.2 AC7)", () => {
     expect(Number((0.7 - 0.6).toFixed(10))).toBe(0.1);
   });
 
+  test("tie: normalization rescues a raw delta BELOW 0.1 the other way (K6 straddle)", async () => {
+    // Mirror of the fixture above: passed 1/2 vs passed 1/3 has a nominal score
+    // delta of exactly 0.1, but this time IEEE-754 renders the score subtraction
+    // as 0.09999999999999998 — strictly BELOW 0.1. Normalization rounds back UP
+    // onto exactly 0.1, so the inclusive comparator still reports tie:true: the
+    // boundary verdict may not depend on which way the rendering fell.
+    const h = harness({
+      arms: [
+        { arm: 0, runId: "a12" },
+        { arm: 1, runId: "b13" },
+      ],
+      steps: {
+        a12: { testsExecuted: true, testResults: { passed: 1, failed: 1 }, changedFiles: ["shared.ts"] },
+        b13: { testsExecuted: true, testResults: { passed: 1, failed: 2 }, changedFiles: ["shared.ts"] },
+      },
+    });
+
+    const rawDelta =
+      ((await rank(FANOUT_ID, h.deps)).scores[0]?.score ?? 0) -
+      ((await rank(FANOUT_ID, h.deps)).scores[1]?.score ?? 0);
+    expect(rawDelta).toBeLessThan(0.1); // the straddle's other direction is real
+
+    const res = await rank(FANOUT_ID, h.deps);
+    expect(Number(rawDelta.toFixed(10))).toBe(0.1); // normalized UP onto the boundary
+    expect(res.tie).toBe(true);
+  });
+
   test("guards the pass-rate divisor: testsExecuted:false, absent testResults, zero total → 0", async () => {
     const h = harness({
       arms: [
@@ -375,5 +402,78 @@ describe("rank (DF3.2 AC7)", () => {
     const res = await rank(FANOUT_ID, deps);
 
     expect(res.timings.rankMs).toBe(7);
+  });
+
+  test("refuses a negative test count instead of scoring nonsense from it", async () => {
+    // passed:-3 makes passRate exceed 1 — a broken arm ranked ABOVE healthy
+    // ones. The library guard mirrors the CLI's --steps-json refusal.
+    const h = harness({
+      arms: [{ arm: 0, runId: "neg" }],
+      steps: { neg: { testsExecuted: true, testResults: { passed: -3, failed: 1 } } },
+    });
+
+    try {
+      await rank(FANOUT_ID, h.deps);
+      throw new Error("expected rank to refuse a negative count");
+    } catch (e) {
+      expect(e).toBeInstanceOf(FleetError);
+      const fe = e as FleetError;
+      expect(fe.exitCode).toBe(2);
+      expect(fe.code).toBe("invalid-step-output");
+      expect(fe.message).toContain("neg");
+    }
+  });
+
+  test("treats a non-array changedFiles as malformed, not as a character union", async () => {
+    // A bare string would iterate per CHARACTER into the cross-arm union and
+    // poison everyone's coverage denominator.
+    const h = harness({
+      arms: [{ arm: 0, runId: "strfiles" }],
+      steps: {
+        strfiles: {
+          testsExecuted: true,
+          testResults: { passed: 1, failed: 0 },
+          changedFiles: "f.ts" as unknown as string[],
+        },
+      },
+    });
+
+    try {
+      await rank(FANOUT_ID, h.deps);
+      throw new Error("expected rank to refuse a non-array changedFiles");
+    } catch (e) {
+      expect(e).toBeInstanceOf(FleetError);
+      const fe = e as FleetError;
+      expect(fe.exitCode).toBe(2);
+      expect(fe.code).toBe("invalid-step-output");
+      expect(fe.message).toContain("changedFiles");
+    }
+  });
+
+  test("states no comparison was possible when exactly ONE arm scored", async () => {
+    // One scored arm among two: the old rationale claimed it "leads by more
+    // than 0.1" over nothing at all.
+    const h = harness({
+      arms: [
+        { arm: 0, runId: "only" },
+        { arm: 1, runId: "dark" },
+      ],
+      steps: { only: { testsExecuted: true, testResults: { passed: 1, failed: 0 }, changedFiles: ["f.ts"] } },
+    });
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    expect(res.scores[0]?.score).not.toBeNull();
+    expect(res.tie).toBe(false);
+    expect(res.rationale).toContain("no comparison possible");
+    expect(res.rationale).not.toContain("leads by more than");
+
+    // A single-arm record is the same branch by construction.
+    const solo = harness({
+      arms: [{ arm: 0, runId: "solo" }],
+      steps: { solo: { testsExecuted: true, testResults: { passed: 1, failed: 0 }, changedFiles: ["f.ts"] } },
+    });
+    const soloRes = await rank(FANOUT_ID, solo.deps);
+    expect(soloRes.rationale).toContain("no comparison possible");
   });
 });

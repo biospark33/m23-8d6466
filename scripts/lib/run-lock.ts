@@ -117,7 +117,7 @@ function lockHost(): string {
  * process table, and on a shared runs directory that made it delete a remote
  * invocation's in-flight temp between its `fsync` and its `linkSync`.
  */
-/** Exported for DF3.2's fleet lock (src/fleet/fanout.ts) — additive only, no behavior change. */
+/** Exported alongside the other primitives; DF3.2's fleet lock imports only `claim`/`isAlive`. */
 export function hostTag(): string {
   return lockHost().replace(/[^A-Za-z0-9_-]/g, "_");
 }
@@ -549,7 +549,7 @@ function claimedByUs(lock: string, body: string): boolean {
  * "holder unknown". Correct, just less informative — and only on filesystems
  * that leave no other option.
  */
-/** Exported for DF3.2's fleet lock (src/fleet/fanout.ts) — additive only, no behavior change. */
+/** Exported for DF3.2's fleet lock (src/fleet/fleet-lock.ts) — additive only, no behavior change. */
 export function claim(lock: string, body: string): boolean {
   // Host tag BEFORE the pid: the pid in this name is what `reapStaleTemps`
   // probes, and a pid without the host that minted it is not a pid.
@@ -618,7 +618,7 @@ export function claim(lock: string, body: string): boolean {
  * harvest/teardown of that run refuses FOREVER while the box and the key keep
  * billing. Removing it on the way out is the whole of the fix.
  */
-/** Exported for DF3.2's fleet lock (src/fleet/fanout.ts) — additive only, no behavior change. */
+/** Exported alongside the other primitives; DF3.2's fleet lock imports only `claim`/`isAlive`. */
 export function writeLockDirect(lock: string, body: string): boolean {
   let fd: number | undefined;
   try {

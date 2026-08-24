@@ -3691,10 +3691,15 @@ process.on = ((sig, listener) => {
         "pin-mismatch",
       ],
       // A bare brief where the wrapper is required is refused first...
-      [["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1", "--roster", "a"], "briefs"],
+      // The CLI's own wrapper guard's remediation (scripts/fleet.ts) alone —
+      // the generic "briefs" matched every brief-shaped refusal equally.
+      [
+        ["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1", "--roster", "a"],
+        "wrap the n brief objects",
+      ],
       // ...and WITH the wrapper, --roster itself is the refusal.
       [["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1", "--roster", "a"], "roster-forbidden", manyWrapped()],
-      [["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1"], "briefs"],
+      [["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1"], "wrap the n brief objects"],
     ];
     for (const [argv, needle, over] of cases) {
       reset();
@@ -3879,12 +3884,136 @@ process.on = ((sig, listener) => {
   });
 
   test("rank refuses an unknown fan-out id with exit 4, naming it", async () => {
+    // --dir keeps this hermetic: with none, the store constructor mkdirs the
+    // cwd-relative default (.sandbox/fanouts) INTO THE REPO TREE before the
+    // lookup can refuse.
     reset();
-    const code = await runCli(["rank", "fan-19700101-ffffff"], deps(""));
+    const code = await runCli(
+      ["rank", "fan-19700101-ffffff", "--dir", join(dir, ".sandbox", "fanouts")],
+      deps(""),
+    );
     expect(code).toBe(4);
     const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: error envelope this run just emitted to errCaptured */
     expect(envelope.code).toBe("fanout-not-found");
     expect(envelope.message).toContain("fan-19700101-ffffff");
+  });
+
+  test("a malformed --steps-json refuses before the fan-outs store is constructed", async () => {
+    // Negative counts are the boundary case rank() itself also refuses; here
+    // the FLAG parser must name it first — and the refusal must not mkdir/chmod
+    // the --dir it was about to be refused over (the id grammar's principle,
+    // one step further down the verb).
+    const stepsPath = join(dir, "steps.json");
+    writeFileSync(
+      stepsPath,
+      JSON.stringify({ r0: { testsExecuted: true, testResults: { passed: -3, failed: 1 } } }),
+    );
+    const freshDir = join(dir, "never-created-fanouts");
+    reset();
+    const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+    expect(code).toBe(2);
+    const envelope = JSON.parse(errCaptured[0] as string) as { message: string }; /* dp:ok test-authored output: error envelope this run just emitted to errCaptured */
+    expect(envelope.message).toContain("non-negative integer");
+    expect(existsSync(freshDir)).toBeFalse();
+  });
+
+  test("each remaining --steps-json shape refusal exits 2 naming its own branch", async () => {
+    // The negative-count branch above is pinned separately (rank() refuses it
+    // too); these are the flag parser's OWN refusals. Each asserts its
+    // distinguishing message — exit 2 alone would pass for any usage error.
+    const stepsPath = join(dir, "steps.json");
+    const freshDir = join(dir, "never-created-either");
+    const cases: [string | null, string][] = [
+      [null, "cannot read"], // never written: the read itself fails
+      ['{"r0":', "not valid JSON"],
+      ["[]", "keyed by run id"],
+      // The envelope JSON-escapes the quoted run id, so the needle spells the escapes too.
+      ['{"r0": 7}', 'entry \\"r0\\" must be an object'],
+      ['{"r0": {"testsExecuted": "yes"}}', "non-boolean testsExecuted"],
+      ['{"r0": {"changedFiles": "src/a.ts"}}', "not an array of path strings"],
+    ];
+    for (const [content, needle] of cases) {
+      if (content === null) rmSync(stepsPath, { force: true });
+      else writeFileSync(stepsPath, content);
+      reset();
+      const code = await runCli(
+        ["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath],
+        deps(""),
+      );
+      expect({ content, code }).toEqual({ content, code: 2 });
+      expect(text()).toContain(needle);
+      expectNoBoxes();
+    }
+    // Every branch refused at the flag parser, so none ever built the store.
+    expect(existsSync(freshDir)).toBeFalse();
+  });
+
+  test("--roster of separators only is flag-absent: roster-required, not count-mismatch", async () => {
+    // `--roster ","` splits to an empty list, which used to be treated as a
+    // SUPPLIED roster of zero entries. It names no arms at all, so the operator
+    // gets the same refusal as omitting the flag entirely.
+    reset();
+    const d = fanoutDeps();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", ","],
+      d,
+    );
+    expect(code).toBe(2);
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string }; /* dp:ok test-authored output: error envelope this run just emitted to errCaptured */
+    expect(envelope.code).toBe("roster-required");
+  });
+
+  test("a refused race constructs no cost ledger — no db file appears anywhere", async () => {
+    // INV-2: a refused fan-out mutates nothing. The loser ledger used to be
+    // built BEFORE the briefs were validated, and its constructor creates its
+    // db file even though race never reaches a loser to price.
+    const d: Partial<FleetDeps> = {
+      ...fanoutDeps(),
+      readBrief: async () => '{"repoSlug":"nope"}', // parses fine; fails BriefSchema
+    };
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
+      d,
+    );
+    expect(code).toBe(2);
+    // Both resolution shapes: default-layout sibling of .sandbox/runs, and
+    // beside an explicitly-injected records dir.
+    expect(existsSync(join(dir, ".sandbox", "cost-ledger.db"))).toBeFalse();
+    expect(existsSync(join(dir, "runs", "cost-ledger.db"))).toBeFalse();
+  });
+
+  test("a failing advisory auto-rank warns on stderr and keeps the ARM-derived exit code", async () => {
+    const d = fanoutDeps();
+    const fanouts = join(dir, ".sandbox", "fanouts");
+    let sabotaged = false;
+    // The ack lines print BETWEEN fanout() returning and the advisory rank —
+    // the one hook that makes ONLY the advisory step fail (delete the record
+    // it is about to read) while both arms really did land ready.
+    const saboteur = (s: string): void => {
+      out(s);
+      if (!sabotaged) {
+        sabotaged = true;
+        for (const f of readdirSync(fanouts)) rmSync(join(fanouts, f));
+      }
+    };
+    reset();
+    const code = await run(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+      saboteur,
+      d,
+      errOut,
+    );
+    // Two ready arms ⇒ success. The advisory failure used to flip this to a
+    // reported refusal through the shared catch, turning N provisioned boxes
+    // into an incident.
+    expect(code).toBe(0);
+    const envelope = JSON.parse(
+      errCaptured.find((l) => l.includes("auto-rank-failed")) as string,
+    ) as { code: string; message: string }; /* dp:ok test-authored output: warning envelope this run just emitted to errCaptured */
+    expect(envelope.message).toContain("the fan-out itself succeeded");
+    // The acks printed; the ranking line did not.
+    expect(outOnly).toHaveLength(2);
   });
 
   // ─── CC-9: one structured line per verb, dispatch included ─────────────────

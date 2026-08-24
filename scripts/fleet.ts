@@ -1159,14 +1159,17 @@ export async function run(
             // it just must not be one whose construction touched the disk.
             unusedStore(resolveRunsDir(dir)));
       const ledgerFactory = deps?.ledgerFactory ?? makeLedgerFactory(store);
-      // `readBrief` is the CLI's own seam and fanoutsDir/lockPath are DF3.2's;
-      // everything else is a DispatchDeps seam forwarded verbatim, so one added
-      // there is never silently dropped. The explicit keys below win over the
-      // spread.
+      // `readBrief` is the CLI's own seam, fanoutsDir/lockPath are DF3.2's and
+      // costLedger is DF2.8's race-loser ledger — dispatch prices its own run
+      // through ledgerFactory alone, so a caller-injected hook must not leak
+      // through the spread into DispatchDeps. Everything else forwards
+      // verbatim, so one seam added there is never silently dropped. The
+      // explicit keys below win over the spread.
       const {
         readBrief: _readBrief,
         fanoutsDir: _fanoutsDir,
         lockPath: _lockPath,
+        costLedger: _costLedger,
         ...seams
       } = deps ?? {};
       const dispatchDeps: DispatchDeps = {
@@ -1275,11 +1278,15 @@ export async function run(
           `--n takes an integer 1-${FANOUT_MAX_N} (best-of-n/race need two arms to compare)`,
         );
       }
-      const rosterIds = flags
+      let rosterIds = flags
         .get("--roster")
         ?.split(",")
         .map((s) => s.trim())
         .filter((s) => s !== "");
+      // `--roster ""` / "," splits to an EMPTY list — separators alone name no
+      // arms, so that is flag-ABSENT semantics (the primitive's own
+      // roster-required refusal), not a supplied roster of zero entries.
+      if (rosterIds !== undefined && rosterIds.length === 0) rosterIds = undefined;
       // Positive safe integer, mirroring the --port numeric-flag idiom (D10).
       const capRaw = flags.get("--cap-micro-usd");
       let capMicroUsd: number | undefined;
@@ -1356,8 +1363,11 @@ export async function run(
       // beside the records dir exactly like the teardown verb's, so a loser's
       // close step cannot silently under-count spend against the cap. Race
       // only: no other pattern disposes arms through teardownSandbox here, and
-      // an unused SQLite handle would still create its db file.
-      if (pattern === "race" && injectedCostLedger === undefined) {
+      // an unused SQLite handle would still create its db file. briefsOk keeps
+      // that true past validation too (INV-2: a refused fan-out mutates
+      // nothing — its money file included); fanout() re-refuses the briefs
+      // anyway, and a refused race never reaches a loser to price.
+      if (pattern === "race" && briefsOk && injectedCostLedger === undefined) {
         loserLedger = asUsage(
           () =>
             new CostLedger({
@@ -1403,18 +1413,32 @@ export async function run(
         );
       }
       // Auto-rank (AC7/D12): best-of-n's whole point, emitted when EVERY arm is
-      // ready. Advisory — it authorizes nothing and never changes the exit code.
+      // ready. Advisory — it authorizes nothing, so it carries its OWN catch:
+      // a failure here (record unreadable, store construction refused) must
+      // never reach this verb's shared catch, which would flip N provisioned,
+      // ready boxes into a reported refusal. It degrades to a stderr warning
+      // and leaves fanoutCode derived from the ARM outcomes below alone.
       // This verb has no step-output source (`--steps-json` is rank's flag), so
       // arms list unscored with an explanatory rationale;
       // `fleet rank <id> --steps-json …` scores them afterwards.
       if (pattern === "best-of-n" && result.arms.every((a) => a.outcome === "ready")) {
-        const fstore = new FanoutRecordStore({ dir: resolveFanoutsDir(fanoutsFlagDir), requestId: fanRequestId });
-        const ranked = await rank(result.fanoutId, {
-          recordReader: (id) => readFanoutForRank(fstore, id),
-          recordWriter: (id, mutator) => fstore.mutate(id, (rec) => mutator(rec) as FanoutRecord),
-          stepOutputFor: () => null,
-        });
-        emit(`${JSON.stringify(ranked)}\n`);
+        try {
+          const fstore = new FanoutRecordStore({ dir: resolveFanoutsDir(fanoutsFlagDir), requestId: fanRequestId });
+          const ranked = await rank(result.fanoutId, {
+            recordReader: (id) => readFanoutForRank(fstore, id),
+            recordWriter: (id, mutator) => fstore.mutate(id, (rec) => mutator(rec) as FanoutRecord),
+            stepOutputFor: () => null,
+          });
+          emit(`${JSON.stringify(ranked)}\n`);
+        } catch (e) {
+          printError(
+            note,
+            "auto-rank-failed",
+            `the advisory ranking failed (${redactSecrets((e as Error).message)}) — the fan-out itself succeeded`,
+            `\`fleet rank ${result.fanoutId} [--steps-json <path>]\` ranks it after the fact`,
+            { fanoutId: result.fanoutId },
+          );
+        }
       }
       // Exit 1 collects any arm that did not succeed-or-legitimately-lose:
       // setupFailed/armFailed/armUnknown are collected failures. lostRace alone
@@ -1432,7 +1456,16 @@ export async function run(
     } finally {
       // The ledger owns a SQLite handle; the arms' budget admissions closed
       // THEIR ledgers, and this one closes with the verb like teardown's does.
-      loserLedger?.close();
+      // Guarded: a close is module cleanup, not part of the verdict — a throw
+      // here must neither discard the computed fanoutCode nor escape as an
+      // unhandled rejection after the return below.
+      if (loserLedger !== undefined) {
+        try {
+          loserLedger.close();
+        } catch {
+          /* dp:ok cleanup-best-effort: the verdict (fanoutCode) is already decided */
+        }
+      }
     }
     return finish(
       fanRequestId ?? newRequestId(),
@@ -1463,13 +1496,12 @@ export async function run(
       // --driver): rank reads fan-out records and step output, never a box, so
       // the B8 fake-driver hazard cannot arise.
       //
-      // A WRITABLE store — rank stamps rankedAt. Shared residual: pointing
-      // --dir at an existing directory re-chmods it 0700 before the lookup can
-      // refuse; the default dir bootstrapping on first use is intended.
-      const fstore = new FanoutRecordStore({ ...(dir === undefined ? {} : { dir }), requestId });
       // Step outputs (ruling C2): --steps-json maps runId → step output; absent
       // ⇒ the accessor nulls EVERY arm, which rank lists score:null — advisory
-      // rank stays structurally useful rather than erroring.
+      // rank stays structurally useful rather than erroring. Parsed BEFORE any
+      // store is constructed — the id grammar's principle, one flag further: a
+      // malformed --steps-json must refuse without mkdir/chmod'ing the very
+      // directory it is being refused over.
       const byRun = new Map<string, ArmStepOutput>();
       const stepsPath = flags.get("--steps-json");
       if (stepsPath !== undefined) {
@@ -1516,9 +1548,15 @@ export async function run(
               typeof tr !== "object" ||
               tr === null ||
               !Number.isInteger(tr.passed) ||
-              !Number.isInteger(tr.failed)
+              !Number.isInteger(tr.failed) ||
+              (tr.passed as number) < 0 ||
+              (tr.failed as number) < 0
             ) {
-              throw bad("needs testResults with integer passed/failed counts");
+              // Non-negative, not just integral: a negative count would rank a
+              // broken arm above healthy ones (passRate > 1). rank()'s own
+              // shape guard refuses it too — this is the boundary naming the
+              // flag that carried it.
+              throw bad("needs testResults with non-negative integer passed/failed counts");
             }
           }
           if (
@@ -1530,6 +1568,13 @@ export async function run(
           byRun.set(runId, o as unknown as ArmStepOutput); /* dp:ok shape-checked field-by-field above against ArmStepOutput's three optional keys */
         }
       }
+      // A WRITABLE store — rank stamps rankedAt. Shared residual: pointing
+      // --dir at an existing directory re-chmods it 0700 before the lookup can
+      // refuse; the default dir bootstrapping on first use is intended.
+      // Resolved through resolveFanoutsDir HERE TOO: fanout's producer side
+      // resolves this same flag through it, and one flag keeps one meaning and
+      // one chain (flag → env → default) at both ends of the round-trip.
+      const fstore = new FanoutRecordStore({ dir: resolveFanoutsDir(dir), requestId });
       const result = await rank(fanoutId, {
         recordReader: (id) => readFanoutForRank(fstore, id),
         recordWriter: (id, mutator) => fstore.mutate(id, (rec) => mutator(rec) as FanoutRecord),

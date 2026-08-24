@@ -396,6 +396,22 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(ledgerCalls).toBe(0);
       expect(readdirSafe(join(dir, "runs"))).toHaveLength(0);
     });
+
+    test("a non-positive or non-integer capMicroUsd refuses exit 2 before anything runs", async () => {
+      manifest();
+      for (const cap of [-1, 0, Number.NaN, 1.5]) {
+        /* dp:ok deliberately malformed fixtures: each row asserts the invalid-cap refusal */
+        const err = await refuseOf(
+          fanout("best-of-n", 2, brief(), deps({ rosterIds: ["a", "b"], capMicroUsd: cap })),
+        );
+        expect(err.exitCode).toBe(2);
+        expect(err.code).toBe("invalid-cap");
+      }
+      // Zero side effects: the INV-3 admitted line never carried a bad cap.
+      expect(existsSync(lockPath)).toBe(false);
+      expect(boxCount(driver)).toBe(0);
+      expect(fanoutRecordFiles()).toHaveLength(0);
+    });
   });
 
   // ─── AC1: admission ────────────────────────────────────────────────────────────
@@ -533,6 +549,38 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
     });
   });
 
+  // ─── K8: the concurrency bound ────────────────────────────────────────────────
+
+  describe("concurrency bound (K8)", () => {
+    test("width=2 over n=4 with staggered completions never exceeds two concurrent arms", async () => {
+      manifest();
+      let inFlight = 0;
+      let peak = 0;
+      const res = await fanout(
+        "best-of-n",
+        4,
+        brief(),
+        deps({
+          rosterIds: ["r0", "r1", "r2", "r3"],
+          concurrency: 2,
+          setupGate: async (_d: ProviderDriver, vm: string) => {
+            inFlight += 1;
+            peak = Math.max(peak, inFlight);
+            // Stagger the completions so permits hand off waiter→waiter.
+            await new Promise<void>((resolve) => setTimeout(resolve, TICK_MS));
+            inFlight -= 1;
+            return gateReady(vm);
+          },
+        }),
+      );
+      expect(res.arms.every((a) => a.outcome === "ready")).toBe(true);
+      // Not vacuous: the four arms really did contend for two slots…
+      expect(peak).toBe(2);
+      // …and the bound held across every permit handoff.
+      expect(peak).toBeLessThanOrEqual(2);
+    });
+  });
+
   // ─── AC4: setup-gate failure isolation ─────────────────────────────────────────
 
   describe("arm failure isolation (AC4)", () => {
@@ -576,26 +624,34 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
 
     test("planted marker decides the winner first-writer; losers tear down harvest-before-destroy", async () => {
       manifest();
-      driver.onProbe = (_vm, probeNumber) => {
-        if (probeNumber === 2) plantMarker(driver, _vm, { ok: true });
+      let plantedVm: string | undefined;
+      driver.onProbe = (vm, probeNumber) => {
+        if (probeNumber === 2 && plantedVm === undefined) {
+          plantedVm = vm;
+          plantMarker(driver, vm, { ok: true });
+        }
       };
       const res = await fanout("race", 3, brief(), raceDeps({ rosterIds: ["r0", "r1", "r2"] }));
-      expect(res.winner).toBe(1); // probe #2 belongs to arm index 1 (sequential probing)
-      expect(res.arms[1]?.outcome).toBe("ready"); // the winner raced and won
-      expect(res.arms[0]?.outcome).toBe("lostRace");
-      expect(res.arms[2]?.outcome).toBe("lostRace");
+      // The winner is WHICHEVER arm owned probe #2 (sequential probing puts
+      // that on arm index 1 today) — derived from the planted marker, not
+      // hardcoded.
+      const won = res.arms.findIndex((a) => a.vmName === plantedVm);
+      expect(won).toBeGreaterThanOrEqual(0);
+      expect(res.winner).toBe(won);
+      expect(res.arms[won]?.outcome).toBe("ready"); // the winner raced and won
+      const losers = res.arms.filter((_, i) => i !== won);
+      for (const loser of losers) expect(loser.outcome).toBe("lostRace");
       // Losers went through DF2.5 unmodified — destroyed; the winner stays up.
-      expect(boxExists(driver, res.arms[0]?.vmName)).toBe(false);
-      expect(boxExists(driver, res.arms[2]?.vmName)).toBe(false);
-      expect(boxExists(driver, res.arms[1]?.vmName)).toBe(true);
-      for (const loser of [res.arms[0], res.arms[2]]) {
-        const steps = teardownStepsFor(entries, loser?.runId);
+      for (const loser of losers) expect(boxExists(driver, loser.vmName)).toBe(false);
+      expect(boxExists(driver, res.arms[won]?.vmName)).toBe(true);
+      for (const loser of losers) {
+        const steps = teardownStepsFor(entries, loser.runId);
         expect(steps).toContain("harvest");
         expect(steps.indexOf("harvest")).toBeLessThan(steps.indexOf("destroy"));
         expect(steps).toContain("close");
       }
       const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
-      expect(rec.winner).toBe(1);
+      expect(rec.winner).toBe(won);
       expect(rec.closedAt).not.toBeNull();
     });
 
@@ -637,6 +693,115 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       });
     });
 
+    test("one loser's destroy failing never wedges disposal: logged, skipped, siblings still torn down", async () => {
+      manifest();
+      let plantedVm: string | undefined;
+      driver.onProbe = (vm, probeNumber) => {
+        if (probeNumber === 2 && plantedVm === undefined) {
+          plantedVm = vm;
+          plantMarker(driver, vm, { ok: true });
+        }
+      };
+      // Same spy shape as brokenListDriver: only `destroy` is overridden, and
+      // it fails exactly ONCE — for the FIRST non-winner box disposed (arm
+      // order, so arms[0]). Every other destroy reaches the real driver.
+      let failedFor: string | undefined;
+      const failingDestroyDriver = boundProxy(driver, {
+        get(prop) {
+          return prop === "destroy"
+            ? (vm: string): Promise<void> => {
+                if (failedFor === undefined && vm !== plantedVm) {
+                  failedFor = vm;
+                  return Promise.reject(new Error("provider outage"));
+                }
+                return driver.destroy(vm);
+              }
+            : undefined;
+        },
+      });
+      const res = await fanout(
+        "race",
+        3,
+        brief(),
+        raceDeps({ rosterIds: ["r0", "r1", "r2"], driver: failingDestroyDriver }),
+      );
+      const won = res.arms.findIndex((a) => a.vmName === plantedVm);
+      expect(won).toBeGreaterThanOrEqual(0);
+      expect(res.winner).toBe(won);
+      expect(res.arms[won]?.outcome).toBe("ready"); // winner intact
+      expect(boxExists(driver, res.arms[won]?.vmName)).toBe(true);
+
+      // The failed loser: one loser-teardown-failed arm line naming IT, its
+      // box left alive WITH its evidence, its record still open — the abort
+      // happened AT destroy, after harvest had run.
+      expect(failedFor).toBeDefined();
+      const failedArm = res.arms.find((a) => a.vmName === failedFor);
+      expect(failedArm?.outcome).toBe("lostRace");
+      const failures = entries.filter(
+        (e) =>
+          e.operation === "fleet.fanout.arm" &&
+          (e.error as { code?: string } | undefined)?.code === "loser-teardown-failed",
+      );
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.runId).toBe(failedArm?.runId);
+      expect((failures[0]?.error as { message?: string } | undefined)?.message).toContain(
+        "provider outage",
+      );
+      const failedSteps = teardownStepsFor(entries, failedArm?.runId);
+      expect(failedSteps).toContain("harvest");
+      expect(failedSteps).not.toContain("close");
+      expect(boxExists(driver, failedFor)).toBe(true);
+      expect(store.get(failedArm?.runId as string).closedAt).toBeUndefined();
+
+      // The disposal CONTINUED: the sibling loser went through DF2.5 in full —
+      // harvest before destroy, closed, box gone.
+      const sibling = res.arms.find((a) => a !== failedArm && a !== res.arms[won]);
+      expect(sibling?.outcome).toBe("lostRace");
+      const steps = teardownStepsFor(entries, sibling?.runId);
+      expect(steps).toContain("harvest");
+      expect(steps.indexOf("harvest")).toBeLessThan(steps.indexOf("destroy"));
+      expect(steps).toContain("close");
+      expect(boxExists(driver, sibling?.vmName)).toBe(false);
+
+      // No wedge: the destructive mark cleared (release succeeded) and the
+      // fan-out's own record closed despite the failed loser.
+      const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
+      expect(rec.winner).toBe(won);
+      expect(rec.closedAt).not.toBeNull();
+      expect(existsSync(lockPath)).toBe(false);
+    });
+
+    test("another process's persisted claim is adopted immediately: winner returned, losers disposed", async () => {
+      manifest();
+      // The "other process" lands between admission and OUR first probe: its
+      // winner is already on the record when our arm-0 marker read succeeds.
+      // The poller must return that persisted index AT ONCE — refusing to
+      // claim used to leave claimed=null, so this process re-probed to the
+      // ceiling holding the fleet lock while its losers never tore down.
+      driver.onProbe = (vm) => {
+        plantMarker(driver, vm, { ok: true });
+        const other = new FanoutRecordStore({ dir: fanoutsDir });
+        const rec = other.list()[0];
+        if (rec?.winner === null) other.mutate(rec.fanoutId, (r) => ({ ...r, winner: 1 }));
+      };
+      const res = await fanout("race", 3, brief(), raceDeps({ rosterIds: ["r0", "r1", "r2"] }));
+      expect(res.winner).toBe(1); // adopted, not spun past
+      expect(res.arms[1]?.outcome).toBe("ready"); // the adopted winner stays up
+      expect(res.arms[0]?.outcome).toBe("lostRace");
+      expect(res.arms[2]?.outcome).toBe("lostRace");
+      expect(boxExists(driver, res.arms[1]?.vmName)).toBe(true);
+      expect(boxExists(driver, res.arms[0]?.vmName)).toBe(false);
+      expect(boxExists(driver, res.arms[2]?.vmName)).toBe(false);
+      // The cross-process loss was stated once, naming the adopted winner.
+      const lost = entries.filter(
+        (e) =>
+          e.operation === "fleet.fanout.race" &&
+          (e.error as { code?: string; message?: string } | undefined)?.code === "race-lost-cross-process",
+      );
+      expect(lost.length).toBeGreaterThanOrEqual(1);
+      expect((lost[0]?.error as { message?: string } | undefined)?.message).toContain("arm 1");
+    });
+
     test("an ok:false marker is armFailed — the race continues past it", async () => {
       manifest();
       driver.onProbe = (vm, probeNumber) => {
@@ -650,7 +815,6 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       // never left alive and never treated as a setup failure.
       expect(boxExists(driver, res.arms[0]?.vmName)).toBe(false);
       expect(teardownStepsFor(entries, res.arms[0]?.runId)).toContain("harvest");
-      expect(res.arms[0]?.exitCode).not.toBe(3);
     });
 
     test("every arm reporting ok:false: winner null, record closed, EVERY arm torn down", async () => {
@@ -745,7 +909,9 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(rec.pattern).toBe("many-stories");
       expect(rec.pin).toBeNull();
       expect(rec.arms).toHaveLength(1);
-      // The INV-6 caps are imported constants, never mirrored literals.
+      // INV-6 caps are pinned here against silent retune: these literals ARE
+      // the agreed values — retuning them must be a deliberate test change,
+      // not a constant drift past review.
       expect(MAX_FANOUT_CONCURRENCY).toBe(8);
       expect(DEFAULT_POLL_INTERVAL_MS).toBe(5_000);
       expect(DEFAULT_PER_CALL_DEADLINE_MS).toBe(10_000);

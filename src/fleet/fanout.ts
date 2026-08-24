@@ -249,6 +249,10 @@ export class FanoutRecordStore {
       fdOpen = false;
       closeSync(fd);
       renameSync(tmp, p);
+      // Mirror create()'s durability: without it a crash can resurrect the
+      // pre-mutate record, and the race decision is this store's least
+      // durable state.
+      fsyncDir(this.dir);
     } catch (e) {
       if (fdOpen) closeSync(fd);
       rmQuiet(tmp);
@@ -314,7 +318,16 @@ function validateFanoutRecord(source: string, expectedId: string, raw: unknown):
     if (typeof a.briefHash !== "string" || a.briefHash === "") throw malformed("an arm is missing its briefHash");
     if (a.rosterId !== undefined && typeof a.rosterId !== "string") throw malformed("rosterId must be a string");
   }
-  if (r.winner !== null && !Number.isInteger(r.winner)) throw malformed("winner must be an integer or null");
+  // winner indexes arms — an out-of-range value validates into rank/close and
+  // mis-drives their teardown decisions. (arms:[] is LEGITIMATE here: create()
+  // writes it before the fill-mutate attaches the minted ids, so emptiness is
+  // never refused.)
+  if (
+    r.winner !== null &&
+    (!Number.isInteger(r.winner) || (r.winner as number) < 0 || (r.winner as number) >= r.arms.length)
+  ) {
+    throw malformed(`winner ${JSON.stringify(r.winner)} does not index arms (length ${r.arms.length})`);
+  }
   for (const key of ["rankedAt", "closedAt"] as const) {
     const v = r[key];
     if (v !== null && v !== undefined && (typeof v !== "string" || Number.isNaN(Date.parse(v)))) {

@@ -184,6 +184,19 @@ function validatePatternInput(pattern: FanoutPattern, n: number, briefs: unknown
   if (deps.concurrency !== undefined && (!Number.isInteger(deps.concurrency) || deps.concurrency < 1)) {
     throw invalid(2, "invalid-concurrency", `concurrency must be a positive integer, got ${JSON.stringify(deps.concurrency)}`, "drop concurrency for the default min(n, headroom, 8)");
   }
+  if (
+    deps.capMicroUsd !== undefined &&
+    (!Number.isInteger(deps.capMicroUsd) || deps.capMicroUsd <= 0)
+  ) {
+    // Same shape as credentials.ts:231's mint-time check, but HERE — before the
+    // lock — so an invalid cap never reaches the INV-3 admitted line or a box.
+    throw invalid(
+      2,
+      "invalid-cap",
+      `capMicroUsd must be a positive integer of micro-dollars, got ${JSON.stringify(deps.capMicroUsd)}`,
+      "pass a positive-integer micro-dollar cap, or drop capMicroUsd to use the key default",
+    );
+  }
   return { pattern, n, briefList, rosterIds, concurrency: deps.concurrency };
 }
 
@@ -311,7 +324,12 @@ export async function fanout(
     // Pre-race slots carry no outcome yet; every slot has one once the
     // allSettled section returns.
     const outcomes: OutcomeSlot[] = ids.map((runId, arm) => ({ arm, runId }));
-    const width = input.concurrency ?? Math.min(n, headroom.headroom, MAX_FANOUT_CONCURRENCY);
+    // K8's bound holds for BOTH paths: an explicit concurrency is clamped to
+    // MAX_FANOUT_CONCURRENCY like the default (the constant's doc contract),
+    // and the Math.max(1, …) keeps a degenerate headroom answer from building
+    // a semaphore(0) that would park allSettled forever with the lock held.
+    const requested = input.concurrency ?? Math.min(n, headroom.headroom, MAX_FANOUT_CONCURRENCY);
+    const width = Math.max(1, Math.min(requested, MAX_FANOUT_CONCURRENCY));
     await runArms(input, ids, deps, fanoutId, outcomes, width);
 
     let winner: number | null = null;
@@ -321,7 +339,7 @@ export async function fanout(
       // poller later classified them.
       const entrants = outcomes.filter((o) => o.outcome === "ready").map((o) => o.arm);
       winner = await runRace(input, deps, store, fanoutId, outcomes);
-      await disposeLosers(deps, lock, outcomes, entrants, winner);
+      await disposeLosers(deps, lock, outcomes, entrants, winner, fanoutId);
     }
 
     store.mutate(fanoutId, (rec) => ({ ...rec, closedAt: now().toISOString() }));
@@ -351,8 +369,15 @@ function semaphore(width: number): { acquire(): Promise<void>; release(): void }
       return new Promise<void>((resolve) => waiters.push(resolve));
     },
     release(): void {
+      // A permit hands off WHOLE to the next waiter. Decrementing AND waking
+      // made the woken waiter run on a permit nobody holds, drifting `active`
+      // below zero until later acquires fast-pathed past the width bound.
+      const wake = waiters.shift();
+      if (wake !== undefined) {
+        wake();
+        return;
+      }
       active -= 1;
-      waiters.shift()?.();
     },
   };
 }
@@ -402,14 +427,14 @@ async function runArms(
         try {
           stampFanoutExtension(deps.store, runId, fanoutId, i);
         } catch (e) {
-          armLine(deps.requestId, {
+          armLine(deps.requestId, fanoutId, {
             arm: i,
             runId,
             outcome: outcomes[i]?.outcome,
             error: { code: "fanout-extension-failed", message: errText(e) },
           });
         }
-        armLine(deps.requestId, {
+        armLine(deps.requestId, fanoutId, {
           arm: i,
           runId,
           outcome: outcomes[i]?.outcome,
@@ -532,10 +557,15 @@ async function probeArm(
       return null;
     }
     // Atomic first-writer transition, under the record's own lock: the mutate
-    // fn refuses when winner !== null.
+    // fn ADOPTS the persisted winner when another writer claimed first — the
+    // caller has to learn who won HERE, or this process re-probes to the
+    // ceiling holding the fleet lock while its losers never tear down.
     let claimed: number | null = null;
     store.mutate(fanoutId, (rec) => {
-      if (rec.winner !== null) return rec;
+      if (rec.winner !== null) {
+        claimed = rec.winner;
+        return rec;
+      }
       claimed = arm;
       return { ...rec, winner: arm };
     });
@@ -582,6 +612,7 @@ async function disposeLosers(
   outcomes: OutcomeSlot[],
   entrants: number[],
   winner: number | null,
+  fanoutId: string,
 ): Promise<void> {
   // Every entrant that did not win is a loser — including arms the poller
   // marked armFailed (ok:false). armUnknown entrants are NEVER touched.
@@ -606,14 +637,15 @@ async function disposeLosers(
   }
   // The destructive phase began — the fleet lock refuses release until the
   // phase completes. Cleared once EVERY loser has been attempted: individual
-  // failures were logged with their own remediation above.
-  lock.markDestructive();
+  // failures were logged with their own remediation above. The mark sits
+  // INSIDE the try so any throw after the flag is set still reaches the clear.
   try {
+    lock.markDestructive();
     for (const o of entered) {
       try {
         await teardownSandbox(teardownDeps, o.runId as string);
       } catch (e) {
-        armLine(deps.requestId, {
+        armLine(deps.requestId, fanoutId, {
           arm: o.arm,
           runId: o.runId,
           outcome: "lostRace",
@@ -628,8 +660,9 @@ async function disposeLosers(
 
 // ─── observability (D13) ───────────────────────────────────────────────────────
 
-function armLine(requestId: string, fields: Record<string, unknown>): void {
-  emitLine({ requestId, operation: "fleet.fanout.arm", ...fields });
+/** Every arm line carries the fan-out's correlation id alongside the request's. */
+function armLine(requestId: string, fanoutId: string, fields: Record<string, unknown>): void {
+  emitLine({ requestId, operation: "fleet.fanout.arm", fanoutId, ...fields });
 }
 
 function raceEvent(requestId: string, fanoutId: string, fields: Record<string, unknown>): void {

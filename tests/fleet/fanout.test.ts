@@ -224,8 +224,8 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
     test("create + get round-trip the full frozen schema", () => {
       const store = new FanoutRecordStore({ dir: join(dir, "fanouts") });
       const rec = makeRecord({
-        arms: [{ arm: 2, runId: "qds-20260823-bbb001", rosterId: "roster-a", briefHash: "h" }],
-        winner: 2,
+        arms: [{ arm: 0, runId: "qds-20260823-bbb001", rosterId: "roster-a", briefHash: "h" }],
+        winner: 0,
         rankedAt: "2026-08-23T01:00:00.000Z",
         closedAt: "2026-08-23T02:00:00.000Z",
       });
@@ -313,7 +313,29 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       const store = new FanoutRecordStore({ dir: join(dir, "fanouts") });
       const rec = makeRecord();
       store.create(rec);
-      expect(() => store.mutate(rec.fanoutId, () => ({ ...rec, n: 0 } as FanoutRecord))).toThrow(/malformed|n/i);
+      expect(() => store.mutate(rec.fanoutId, () => ({ ...rec, n: 0 } as FanoutRecord))).toThrow(/malformed/i);
+    });
+
+    test("a winner index outside arms is refused on write and on read (rank/close never see one)", () => {
+      const fanoutsDir = join(dir, "fanouts");
+      const store = new FanoutRecordStore({ dir: fanoutsDir });
+      const rec = makeRecord();
+      store.create(rec);
+      const p = join(fanoutsDir, `${rec.fanoutId}.json`);
+      const before = readFileSync(p, "utf8");
+
+      expect(() => store.mutate(rec.fanoutId, (r) => ({ ...r, winner: 99 }))).toThrow(/malformed|winner/i);
+      expect(readFileSync(p, "utf8")).toBe(before); // refused writes leave no trace
+
+      // And a record planted past the gate cannot sneak back in through get().
+      writeFileSync(p, JSON.stringify(makeRecord({ winner: 5 })));
+      let message = "";
+      try {
+        store.get(rec.fanoutId);
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toContain("winner");
     });
 
     test("list() is fail-closed: an unreadable sibling .json throws naming the file", () => {
@@ -383,7 +405,9 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
     test("dead pid throws (identity cannot be observed — callers must fail closed)", async () => {
       const pid = await deadPid();
       expect(isAlive(pid)).toBe(false);
-      expect(() => readOwnPidStartTime(pid)).toThrow();
+      // The fail-closed refusal text ("could not …" — observe on darwin, read
+      // from /proc on linux), not some incidental error.
+      expect(() => readOwnPidStartTime(pid)).toThrow(/could not/);
     });
   });
 
@@ -405,7 +429,15 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
     test("acquire publishes the mandated JSON body at 0600 carrying our identity", () => {
       lock().acquire();
       const body = onDisk();
-      expect(Object.keys(body).sort()).toEqual(["createdAt", "pid", "pidStartTime", "requestId"]);
+      // The four MANDATED keys must all be published; the ONLY tolerated
+      // extras are the darwin-only lstart* diagnostics fleet-lock.ts may add.
+      // Any other key — announced or not — fails right here.
+      const mandated = ["createdAt", "pid", "pidStartTime", "requestId"];
+      const extras = Object.keys(body).filter(
+        (k) => !mandated.includes(k) && k !== "lstartRaw" && k !== "lstartUtcMs",
+      );
+      expect(extras).toEqual([]);
+      for (const k of mandated) expect(Object.keys(body)).toContain(k);
       expect(body.pid).toBe(process.pid);
       expect(body.pidStartTime).toBe(readOwnPidStartTime());
       expect(Number.isNaN(Date.parse(body.createdAt))).toBe(false);

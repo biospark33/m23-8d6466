@@ -14,6 +14,7 @@
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   closeSync,
   fsyncSync,
   mkdirSync,
@@ -21,6 +22,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 
@@ -38,6 +40,26 @@ export interface FleetLockBody {
   pidStartTime: number;
   createdAt: string;
   requestId: string;
+  /**
+   * Additive (r10 darwin TZ fix): the raw `ps -o lstart=` line exactly as this
+   * host printed it — TZ/locale evidence an operator can diff against a live
+   * `ps -p <pid> -o lstart=`. Never COMPARED across processes directly: each
+   * `ps` renders the same instant in the READING shell's TZ.
+   */
+  lstartRaw?: string;
+  /** Those same components converted by UTC arithmetic alone — the TZ-stable identity half `classifyHolder` compares. */
+  lstartUtcMs?: number;
+}
+
+/**
+ * What one platform observation of a pid's start time yields. `localMs` is the
+ * legacy epoch-ms half (`pidStartTime`); the darwin observer additionally
+ * records the raw line and the TZ-free conversion.
+ */
+interface PidIdentity {
+  localMs: number;
+  lstartRaw?: string;
+  lstartUtcMs?: number;
 }
 
 /**
@@ -70,10 +92,14 @@ const MONTH_INDEX: Readonly<Record<string, number>> = {
  * unobservable owner is exactly the one that must not be judged.
  */
 export function readOwnPidStartTime(pid: number = process.pid): number {
-  return process.platform === "linux" ? procStatStartTime(pid) : psLstartStartTime(pid);
+  return observePidStart(pid).localMs;
 }
 
-function procStatStartTime(pid: number): number {
+function observePidStart(pid: number = process.pid): PidIdentity {
+  return process.platform === "linux" ? procStatIdentity(pid) : psLstartIdentity(pid);
+}
+
+function procStatIdentity(pid: number): PidIdentity {
   const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
   // After the LAST ')': state is field 3, so starttime (field 22) sits at
   // remainder index 19 (proc_pid_stat(5)).
@@ -83,10 +109,10 @@ function procStatStartTime(pid: number): number {
   if (!Number.isFinite(ticks) || btime === undefined) {
     throw new Error(`could not read start time of pid ${pid} from /proc`);
   }
-  return Number(btime) * 1000 + Math.floor((ticks / CLK_TCK) * 1000);
+  return { localMs: Number(btime) * 1000 + Math.floor((ticks / CLK_TCK) * 1000) };
 }
 
-function psLstartStartTime(pid: number): number {
+function psLstartIdentity(pid: number): PidIdentity {
   let out: string;
   try {
     out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
@@ -105,8 +131,17 @@ function psLstartStartTime(pid: number): number {
       `could not parse \`ps -o lstart=\` month ${JSON.stringify(m[1])} for pid ${pid}: locale not in the manual map`,
     );
   }
-  // LOCAL time, no TZ designator: construct in local time, never Date.UTC.
-  return new Date(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])).getTime();
+  // LOCAL time, no TZ designator: the legacy `pidStartTime` value is still
+  // constructed in local time, never Date.UTC. The SAME components are also
+  // converted by UTC arithmetic alone into `lstartUtcMs` — a local-time Date
+  // bakes in the OBSERVING shell's TZ, so a lock written under TZ=UTC (cron)
+  // was judged by a TZ=X reader into reclaiming its LIVE owner (r10). Pure
+  // component arithmetic has no TZ in it and compares equal from any shell.
+  return {
+    localMs: new Date(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])).getTime(),
+    lstartRaw: out.trim(),
+    lstartUtcMs: Date.UTC(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])),
+  };
 }
 
 /** Locks THIS process created and has not released yet: resolved path → body. */
@@ -207,6 +242,35 @@ function parkOrphan(path: string): void {
 }
 
 /**
+ * This process's story-mandated lock body. Observing our own start time can
+ * fail (missing/broken `ps`, exotic locale); that failure used to escape
+ * `acquire` as a raw Error outside the module's typed taxonomy, so it is a
+ * FleetError here — a fleet lock whose identity cannot be WRITTEN must not be
+ * claimed at all.
+ */
+function ownFleetLockBody(requestId: string): FleetLockBody {
+  let identity: PidIdentity;
+  try {
+    identity = observePidStart();
+  } catch (e) {
+    throw new FleetError(
+      5,
+      "fleet-identity-unobservable",
+      `cannot record this process's start time for the fleet lock: ${(e as Error).message}`,
+      "run where the platform identity probe works (a working ps/procfs and a common locale) — the fleet lock refuses to claim without provable identity",
+    );
+  }
+  return {
+    pid: process.pid,
+    pidStartTime: identity.localMs,
+    createdAt: new Date().toISOString(),
+    requestId,
+    ...(identity.lstartRaw === undefined ? {} : { lstartRaw: identity.lstartRaw }),
+    ...(identity.lstartUtcMs === undefined ? {} : { lstartUtcMs: identity.lstartUtcMs }),
+  };
+}
+
+/**
  * The single-operator advisory lock across admission + all N mints (AC8).
  *
  * Composition over scripts/lib/run-lock.ts's primitives: `claim()` publishes
@@ -255,28 +319,43 @@ export class FleetLock {
         "release the lock before acquiring again — the fleet lock is not reentrant",
       );
     }
-    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+    const dir = dirname(this.path);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // mkdir's mode is ignored when the directory already exists, and masked by
+    // umask when it does not — set it explicitly, then verify (the same
+    // discipline as FanoutRecordStore's constructor).
+    chmodSync(dir, 0o700);
+    const dirMode = statSync(dir).mode & 0o777;
+    if (dirMode !== 0o700) {
+      throw new Error(`fleet-lock dir ${dir} is mode 0${dirMode.toString(8)}, not 0700`);
+    }
     for (let attempt = 0; attempt < 2; attempt++) {
-      const body = JSON.stringify({
-        pid: process.pid,
-        pidStartTime: readOwnPidStartTime(),
-        createdAt: new Date().toISOString(),
-        requestId: this.requestId,
-      } satisfies FleetLockBody);
+      const body = JSON.stringify(ownFleetLockBody(this.requestId));
       if (claim(this.path, body)) {
         // Registered the instant the lock is ours — everything after this can
         // throw or be interrupted, and an unregistered lock is one nothing releases.
         fleetHeld.set(this.path, body);
-        fsyncDir(dirname(this.path));
+        fsyncDir(dir);
         return;
       }
       const verdict = classifyHolder(this.path);
-      if (verdict === "reclaim") {
-        rmSync(this.path, { force: true });
-        continue; // retry claim once — a third contender taking it here is real contention
+      if (verdict.verdict === "reclaim") {
+        // Re-read immediately before the unlink and delete only the EXACT bytes
+        // we judged (r10 HIGH): two contenders judging the same stale lock used
+        // to both blind-rm — B's unlink deleted A's freshly claimed LIVE lock
+        // and both walked away holding it. A mismatch means the path changed
+        // under us; the next iteration re-classifies whatever is there now.
+        let now: string;
+        try {
+          now = readFileSync(this.path, "utf8");
+        } catch {
+          continue; /* dp:ok vanished between judgment and unlink — the retry re-claims or re-classifies */
+        }
+        if (now === verdict.body) rmSync(this.path, { force: true });
+        continue;
       }
-      if (verdict === "vanished") continue; // holder finished between EEXIST and our read
-      throw verdict;
+      if (verdict.verdict === "vanished") continue; // holder finished between EEXIST and our read
+      throw verdict.error;
     }
     throw new FleetError(
       5,
@@ -290,10 +369,45 @@ export class FleetLock {
    * Finally-guaranteed release. Our body → rmSync; gone already → no-op; ANY
    * other content → NEVER deleted, parked aside under a NON-.tmp orphan (K1).
    * Refuses while marked destructive unless `{force:true}`.
+   *
+   * `{force:true}` also covers the r10 signal-path shape: `releaseHeldFleetLocks`
+   * deletes the registration but KEEPS the destructive mark, and an explicit
+   * release then found no body to compare and silently no-op'd — stranding the
+   * file undiagnosed forever. Forced cleanup without the registration falls
+   * back to field-matching what is on disk: bytes that still name THIS
+   * process/request are removed; anything else is parked, never deleted.
    */
   release(opts: { force?: boolean } = {}): void {
     const body = fleetHeld.get(this.path);
-    if (body === undefined) return; // never held (or already released): no-op
+    if (body === undefined) {
+      // Never held, already released, or unmarked: a plain no-op either way.
+      // Only the signal-path combination (marker set, registration gone) with
+      // an explicit force gets the best-effort cleanup below.
+      if (!fleetDestructive.has(this.path) || opts.force !== true) return;
+      fleetDestructive.delete(this.path);
+      try {
+        const onDisk = JSON.parse(readFileSync(this.path, "utf8")) as Partial<FleetLockBody> | null;
+        let sameIdentity = false;
+        try {
+          sameIdentity =
+            onDisk?.pid === process.pid &&
+            onDisk.requestId === this.requestId &&
+            onDisk.pidStartTime === observePidStart().localMs; /* dp:ok identity probe failure lands in the outer catch and parks, never rms */
+        } catch {
+          sameIdentity = false; /* dp:ok unobservable own identity cannot prove ownership — park below */
+        }
+        if (sameIdentity) {
+          rmSync(this.path, { force: true });
+        } else {
+          parkOrphan(this.path);
+        }
+      } catch (e) {
+        /* dp:ok ENOENT means nothing was stranded; any other read/parse failure parks via parkOrphan's own guards */
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // already gone — done
+        parkOrphan(this.path); // present but unreadable/unparseable: evidence, not ours to rm
+      }
+      return;
+    }
     if (fleetDestructive.has(this.path) && opts.force !== true) {
       throw new Error(
         `refusing to release ${this.path}: the destructive phase began (arms being torn down) and their state is uncertain — clear it only once you know what happened, or pass {force:true} to accept that judgment yourself`,
@@ -319,8 +433,20 @@ export class FleetLock {
 }
 
 /**
+ * What `classifyHolder` decided about the holder behind an EEXIST. A
+ * `"reclaim"` verdict carries the EXACT bytes it judged: `acquire` re-reads the
+ * path immediately before unlinking and removes nothing else, so a contender
+ * that claimed the path in between can never be deleted out from under (r10).
+ */
+type HolderVerdict =
+  | { verdict: "reclaim"; body: string }
+  | { verdict: "vanished" }
+  | { verdict: "refuse"; error: FleetError };
+
+/**
  * Classify the holder behind an EEXIST. Returns `"reclaim"` (unlink + retry),
- * `"vanished"` (the lock disappeared — retry), or the FleetError to throw.
+ * `"vanished"` (the lock disappeared — retry), or `"refuse"` with the
+ * FleetError to throw.
  *
  * Order matters: the body must be JUDGED before anything else (never steal
  * what cannot be judged), then own-pid refusal is hoisted ABOVE every
@@ -328,20 +454,23 @@ export class FleetLock {
  * not reclaim), then the pid range guard (out-of-range is NOT dead), and only
  * then the two-part reclaim.
  */
-function classifyHolder(path: string): "reclaim" | "vanished" | FleetError {
+function classifyHolder(path: string): HolderVerdict {
   const waitRemediation = (who: string): string =>
     `wait for that fan-out to finish — or, only if you have confirmed ${who} is gone: rm ${path}`;
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return "vanished";
-    return new FleetError(
-      5,
-      "fleet-busy",
-      `cannot judge the holder of ${path} (unreadable: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`,
-      `inspect the file by hand first — nothing is stolen unreadable; rm ${path} only once you know no fan-out is running`,
-    );
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { verdict: "vanished" };
+    return {
+      verdict: "refuse",
+      error: new FleetError(
+        5,
+        "fleet-busy",
+        `cannot judge the holder of ${path} (unreadable: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`,
+        `inspect the file by hand first — nothing is stolen unreadable; rm ${path} only once you know no fan-out is running`,
+      ),
+    };
   }
   let body: FleetLockBody | undefined;
   try {
@@ -354,41 +483,60 @@ function classifyHolder(path: string): "reclaim" | "vanished" | FleetError {
       typeof parsed.createdAt === "string" &&
       typeof parsed.requestId === "string"
     ) {
-      body = parsed as FleetLockBody;
+      // The additive keys are copied ONLY when well-typed: a wrong-shaped value
+      // must not reach the identity comparison as junk that always mismatches
+      // and reads a live owner as recycled (r10).
+      body = {
+        pid: parsed.pid,
+        pidStartTime: parsed.pidStartTime,
+        createdAt: parsed.createdAt,
+        requestId: parsed.requestId,
+        ...(typeof parsed.lstartRaw === "string" ? { lstartRaw: parsed.lstartRaw } : {}),
+        ...(typeof parsed.lstartUtcMs === "number" ? { lstartUtcMs: parsed.lstartUtcMs } : {}),
+      };
     }
   } catch {
-    body = undefined;
+    body = undefined; /* dp:ok unparseable JSON is classified below as fleet-busy, never stolen */
   }
   if (body === undefined) {
-    return new FleetError(
-      5,
-      "fleet-busy",
-      `cannot judge the holder of ${path} (body ${JSON.stringify(raw.trim().slice(0, 120))})`,
-      `inspect the file by hand first — nothing is stolen unreadable; rm ${path} only once you know no fan-out is running`,
-    );
+    return {
+      verdict: "refuse",
+      error: new FleetError(
+        5,
+        "fleet-busy",
+        `cannot judge the holder of ${path} (body ${JSON.stringify(raw.trim().slice(0, 120))})`,
+        `inspect the file by hand first — nothing is stolen unreadable; rm ${path} only once you know no fan-out is running`,
+      ),
+    };
   }
   // Own-pid FIRST — above every grace/reclaim branch (r8 HIGH). A body with
   // our pid but not our registration is a recycled predecessor or a wedged
   // earlier claim; the fleet lock refuses (fail-closed) rather than judging
   // itself stale, unlike the run lock which can PROVE such a corpse.
   if (body.pid === process.pid) {
-    return new FleetError(
-      5,
-      "fleet-lock-reentrant",
-      `${path} records pid ${body.pid} (this process) for request ${body.requestId}, but this process holds no such lock`,
-      `a previous fan-out of this process died holding the lock — confirm no arm is still running anywhere, then rm ${path}`,
-    );
+    return {
+      verdict: "refuse",
+      error: new FleetError(
+        5,
+        "fleet-lock-reentrant",
+        `${path} records pid ${body.pid} (this process) for request ${body.requestId}, but this process holds no such lock`,
+        `a previous fan-out of this process died holding the lock — confirm no arm is still running anywhere, then rm ${path}`,
+      ),
+    };
   }
   // Range guard BEFORE any liveness conclusion: kill(1e11, 0) throws
   // ERR_OUT_OF_RANGE — not an errno — and kill(0, 0) signals the whole process
   // group. An out-of-range pid is UNKNOWN, never dead.
   if (!Number.isInteger(body.pid) || body.pid <= 0 || body.pid > 0x7fff_ffff) {
-    return new FleetError(
-      5,
-      "fleet-busy",
-      `${path} records an unusable pid ${body.pid} (request ${body.requestId})`,
-      `check whether request ${body.requestId} is running anywhere that shares this directory; rm ${path} only once you are sure it is not`,
-    );
+    return {
+      verdict: "refuse",
+      error: new FleetError(
+        5,
+        "fleet-busy",
+        `${path} records an unusable pid ${body.pid} (request ${body.requestId})`,
+        `check whether request ${body.requestId} is running anywhere that shares this directory; rm ${path} only once you are sure it is not`,
+      ),
+    };
   }
   // Wall clock (Date.now/Date.parse) for CROSS-PROCESS age — monotonic
   // performance.now() cannot span processes. An unparseable createdAt reads as
@@ -396,37 +544,52 @@ function classifyHolder(path: string): "reclaim" | "vanished" | FleetError {
   const at = Date.parse(body.createdAt);
   const aged = Number.isFinite(at) && Date.now() - at > FLEET_LOCK_STALE_MS;
   if (!aged) {
-    return new FleetError(
-      5,
-      "fleet-busy",
-      `another fan-out holds ${path} (request ${body.requestId}, pid ${body.pid}, created ${body.createdAt})`,
-      waitRemediation(`that fan-out (pid ${body.pid})`),
-    );
+    return {
+      verdict: "refuse",
+      error: new FleetError(
+        5,
+        "fleet-busy",
+        `another fan-out holds ${path} (request ${body.requestId}, pid ${body.pid}, created ${body.createdAt})`,
+        waitRemediation(`that fan-out (pid ${body.pid})`),
+      ),
+    };
   }
-  if (!isAlive(body.pid)) return "reclaim"; // aged AND dead: both parts satisfied
-  let observed: number;
+  if (!isAlive(body.pid)) return { verdict: "reclaim", body: raw }; // aged AND dead: both parts satisfied
+  let observed: PidIdentity;
   try {
-    observed = readOwnPidStartTime(body.pid);
+    observed = observePidStart(body.pid);
   } catch (e) {
     // Identity unobservable — the one holder that must not be judged.
-    return new FleetError(
-      5,
-      "fleet-busy",
-      `another fan-out holds ${path} (request ${body.requestId}, pid ${body.pid}) and its identity could not be verified: ${(e as Error).message}`,
-      waitRemediation(`pid ${body.pid}`),
-    );
+    return {
+      verdict: "refuse",
+      error: new FleetError(
+        5,
+        "fleet-busy",
+        `another fan-out holds ${path} (request ${body.requestId}, pid ${body.pid}) and its identity could not be verified: ${(e as Error).message}`,
+        waitRemediation(`pid ${body.pid}`),
+      ),
+    };
   }
-  if (observed === body.pidStartTime) {
-    // Aged + alive + identity match: a first fan-out inside teardown is never
-    // preempted, however old the lock looks.
-    return new FleetError(
+  // Identity, TZ-proof when both sides recorded it (r10): the UTC-converted
+  // components are compared instead of the legacy local-time epochs, whose
+  // values shift with each observer's TZ. Bodies without the additive keys
+  // (older builds, planted fixtures) keep the numeric comparison.
+  const sameProcess =
+    body.lstartUtcMs !== undefined && observed.lstartUtcMs !== undefined
+      ? observed.lstartUtcMs === body.lstartUtcMs
+      : observed.localMs === body.pidStartTime;
+  if (!sameProcess) return { verdict: "reclaim", body: raw }; // aged AND recycled pid: the recorded owner is provably gone
+  // Aged + alive + identity match: a first fan-out inside teardown is never
+  // preempted, however old the lock looks.
+  return {
+    verdict: "refuse",
+    error: new FleetError(
       5,
       "fleet-busy",
       `another fan-out holds ${path} (request ${body.requestId}, pid ${body.pid}, alive and still the same process despite age ${Math.round((Date.now() - at) / 1000)}s)`,
       waitRemediation(`that fan-out (pid ${body.pid})`),
-    );
-  }
-  return "reclaim"; // aged AND recycled pid: the recorded owner is provably gone
+    ),
+  };
 }
 
 /** Best-effort durability for the directory entry the link created. */

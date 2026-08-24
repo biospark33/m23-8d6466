@@ -433,3 +433,67 @@ Score arithmetic check against AC7: cross-arm union = {dispatcher.ts, verbs.ts, 
 - **DOD trimmed:** Reduced from 20 to 10 checkboxes by merging redundant test items and removing duplicate integration/security entries.
 - **Files to Modify:** Kept at ≤10 unique paths (no change needed — was already compliant).
 - **Campaign fixes 2026-08-20:** DF3.2-M1, DF3.2-L1.
+
+---
+
+## Review Findings — BMAD adversarial review, 2026-08-23 (PR #128)
+
+Seven parallel reviewers (3 blind chunk reviewers, 3 edge hunters with repo access, 1 spec auditor) over a
+5-chunk split of the full branch diff, plus the Sift bot's 7 inline findings folded into triage.
+Full ledger: `/tmp/pr128-review/triage.md`.
+
+### Patched (source)
+
+- [x] **Race poller adopted persisted winner** (`fanout-primitive.ts`) — mutate refuse branch left `claimed`
+  null, so a cross-process loser re-probed to the 1h ceiling holding the fleet lock; at ceiling healthy arms
+  flipped `armUnknown` and escaped loser teardown entirely (N−1 paid VMs leaked). Losers now adopt and return
+  the persisted winner immediately.
+- [x] **Reclaim TOCTOU** (`fleet-lock.ts`) — classify→`rmSync` was blind; two contenders judging the same
+  stale lock could each delete the other's fresh claim (two holders, AC8 void). Reclaim now re-reads and
+  byte-compares the judged body before unlink; mismatch re-classifies.
+- [x] **Darwin start-time TZ bug** (`fleet-lock.ts`) — `ps lstart` wall-clock parsed in reader-local time;
+  writer under TZ=UTC vs operator shell could see a live owner as "recycled pid" and reclaim it. Lock body
+  gains optional `lstartRaw`/`lstartUtcMs` (TZ-free compare via `Date.UTC`, legacy numeric fallback).
+- [x] **Semaphore permit handoff** (`fanout-primitive.ts`) — release decremented AND woke a waiter that never
+  re-incremented; drift would defeat the width cap for any future multi-phase acquire caller. Transfer semantics.
+- [x] **Advisory auto-rank exit flip** (`scripts/fleet.ts`) — rank/store failure after all-ready arms reported
+  N provisioned boxes as refused. Rank block isolated: stderr warn, arm-derived exit preserved.
+- [x] **CostLedger built before admission** (`scripts/fleet.ts`) — race pattern with schema-failing brief still
+  created its SQLite db off the default dir. Gated on brief validity, wired to resolved dir.
+- [x] **Rank input guards** (`rank.ts`) — non-negative integer counts, changedFiles array-of-strings,
+  composite clamped to [0,1], single-arm rationale no longer claims a margin over nothing.
+- [x] **Record validation** (`fanout.ts`) — winner must be null or in `[0, arms.length)`, enforced write+read;
+  atomicReplace fsyncs the dir (crash can't resurrect pre-mutate records).
+- [x] **Smalls**: markDestructive inside try · width floor 1 · capMicroUsd validated exit 2 pre-lock ·
+  explicit concurrency clamped to MAX · lock-dir chmod verified 0700 · ps failure wrapped FleetError ·
+  force-release effective after signal-interrupted destructive phase · roster ""→absent · ledger.close guarded ·
+  costLedger stripped from DispatchDeps · steps-json parsed before mkdir/chmod · arm lines gain fanoutId.
+
+### Patched (tests)
+
+- [x] `/malformed|n/i` regex tightened (matched nearly every message); sibling weak-shape sweep clean.
+- [x] All six `--steps-json` refusal branches probed through the CLI front door (block was deletable while green).
+- [x] Unknown-id rank test made hermetic (was mkdir-ing `.sandbox/fanouts` into the repo tree).
+- [x] New pin: one loser's failing destroy never wedges disposal (harvest-before-destroy preserved, destructive
+  mark cleared); mandated-lock-body assertion updated for optional identity keys.
+
+### False positives / dismissals (verified against source)
+
+- Sift "lock.acquire() not awaited" — `acquire()` is synchronous.
+- Sift "isAlive may throw" — fails closed internally (try/catch, non-ESRCH ⇒ alive).
+- Sift shellQuote test mirror — intentional isolation (prod loosening must not loosen the probe).
+- fsyncDir/rmQuiet duplication — established module-private idiom; bodies byte-identical (verified).
+- rmQuiet "already exported" premise — it isn't exported; no fleet.ts import exists.
+- `--dir` producer/consumer split-brain — b916396 already fixed the live path (constructor resolves);
+  symmetry made explicit.
+
+### Deferred / documented
+
+Orphan temp sweeper (two accumulation paths, inert to list()) · fleetUnwinding permanent latch · corrupt
+final.json spins poller to ceiling holding lock (design gap) · polymorphic stdout rows undocumented · metric
+names durationMs/rankMs vs spec arm_dispatch_ms/rank_ms · AC7 letter (empty scores) unreachable for real
+all-failed records under K11 · record pin stamps requested SHA (verification delegated to DF3.1 fill gate).
+
+Gates at close: fleet focal suites 472 pass / 0 fail (7 files) · full suite 3338 tests, 1 fail = documented
+pre-existing gitnexus AC-1 index-reader · tsc --noEmit clean · biome clean · detect_changes blast radius
+confined to this PR's modules.
