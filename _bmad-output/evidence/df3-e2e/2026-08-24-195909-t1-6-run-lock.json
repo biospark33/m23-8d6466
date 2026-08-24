@@ -1,0 +1,30 @@
+{
+  "writtenAt": "2026-08-24T19:59:09.937Z",
+  "test": "T1.6",
+  "outcome": "fail",
+  "runId": "e2e-t16-mt7nsx0a779",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t16-mt7nsx0a779"
+    },
+    {
+      "phase": "concurrent-teardowns",
+      "a": {
+        "exitCode": 6,
+        "stdout": "teardown.harvest_waived e2e-t16-mt7nsx0a779\ntorn down: e2e-t16-mt7nsx0a779",
+        "stderrHasRunLocked": false
+      },
+      "b": {
+        "exitCode": 5,
+        "stdout": "",
+        "stderrHasRunLocked": true
+      }
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBeTrue()\n\nReceived: false\n"
+    }
+  ]
+}

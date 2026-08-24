@@ -1,0 +1,25 @@
+{
+  "writtenAt": "2026-08-24T19:40:48.422Z",
+  "test": "T1.3b",
+  "outcome": "fail",
+  "runId": "e2e-t13b-mt7n5aox2s8",
+  "phases": [
+    {
+      "phase": "host-scratch-clone",
+      "ok": true
+    },
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t13b-mt7n5aox2s8"
+    },
+    {
+      "phase": "test-error",
+      "error": "fill clone exited 128: fatal: could not read Username for 'https://github.com': No such device or address"
+    },
+    {
+      "phase": "finally-teardown-verb",
+      "exitCode": 0
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "writtenAt": "2026-08-24T19:31:12.576Z",
+  "test": "T1.1",
+  "outcome": "pass",
+  "vm": "e2e-t11-mt7mszt149l",
+  "phases": [
+    {
+      "phase": "whoami",
+      "ok": true,
+      "account": "Email Address: steve@quantumsolutions.tech\nRegion: lax (Los Angeles, USA)\nSSH Keys:\n  Public Key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBrajmPmfznH2xnd2WWBpyqe/TVmf9oyBW5zWlGpZvpV (key-1) ← current"
+    },
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t11-mt7mszt149l",
+      "providerName": "e2e-t11-mt7mszt149l"
+    },
+    {
+      "phase": "list-after-create",
+      "vm": "e2e-t11-mt7mszt149l",
+      "count": 1
+    },
+    {
+      "phase": "exec-node-version",
+      "exitCode": 127,
+      "stdout": ""
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t11-mt7mszt149l",
+      "ok": true
+    }
+  ]
+}

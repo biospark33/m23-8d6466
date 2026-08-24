@@ -1,0 +1,26 @@
+{
+  "writtenAt": "2026-08-24T19:36:09.127Z",
+  "test": "T1.3",
+  "outcome": "fail",
+  "runId": "e2e-t13-mt7mz7ps3jq",
+  "phases": [
+    {
+      "phase": "host-scratch-clone",
+      "ok": true,
+      "dir": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t13-Ujtvrb/host-clone"
+    },
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t13-mt7mz7ps3jq"
+    },
+    {
+      "phase": "test-error",
+      "error": "fill clone exited 128: fatal: could not create leading directories of '/home/agent/src': Permission denied"
+    },
+    {
+      "phase": "finally-teardown-verb",
+      "exitCode": 6
+    }
+  ]
+}

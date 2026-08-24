@@ -1,0 +1,34 @@
+{
+  "writtenAt": "2026-08-24T19:33:21.255Z",
+  "test": "T1.2",
+  "outcome": "fail",
+  "runId": "e2e-t12-mt7mvn1l4tx",
+  "phases": [
+    {
+      "phase": "createRun",
+      "ok": true,
+      "runId": "e2e-t12-mt7mvn1l4tx",
+      "vmName": "e2e-t12-mt7mvn1l4tx"
+    },
+    {
+      "phase": "box-in-list",
+      "count": 1
+    },
+    {
+      "phase": "status-single",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t12-mt7mvn1l4tx\",\"vmName\":\"e2e-t12-mt7mvn1l4tx\",\"httpsUrl\":\"https://e2e-t12-mt7mvn1l4tx.exe.xyz\",\"createdAt\":\"2026-08-24T19:33:10.185Z\",\"state\":\"live\"}",
+      "stderr": "{\"requestId\":\"30e81008-1acc-4911-834c-b7a2e362ea3d\",\"operation\":\"provider.list\",\"agentId\":null,\"timestamp\":\"2026-08-24T19:33:15.672Z\",\"duration\":1605,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"list\",\"durationMs\":1605,\"outcome\":\"ok\",\"driver_call_ms\":1605}\n{\"requestId\":\"30e81008-1acc-4911-834c-b7a2e362ea3d\",\"operation\":\"fleet.status\",\"agentId\":null,\"timestamp\":\"2026-08-24T19:33:15.677Z\",\"duration\":1613,\"durationMs\":1613,\"status\":\"ok\",\"runId\":\"e2e-t12-mt7mvn1l4tx\",\"verb\":\"status\",\"phase\":"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBeTrue()\n\nReceived: undefined\n"
+    },
+    {
+      "phase": "finally-teardown-verb",
+      "exitCode": 6,
+      "stdout": "teardown.harvest_waived e2e-t12-mt7mvn1l4tx\ntorn down: e2e-t12-mt7mvn1l4tx",
+      "stderr": "{\"runId\":\"e2e-t12-mt7mvn1l4tx\",\"code\":\"key-unattributable\",\"message\":\"e2e-t12-mt7mvn1l4tx has a box but no keyHash: if a key was minted for it, this teardown cannot revoke it\",\"remediation\":\"check the provider's key list for a key created around this run's createdAt and revoke it by hand\"}\n{\"request"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "writtenAt": "2026-08-24T20:05:14.131Z",
+  "test": "T1.3a",
+  "outcome": "pass",
+  "runId": "e2e-t13a-mt7o0sln1jq",
+  "phases": [
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t13a-mt7o0sln1jq"
+    },
+    {
+      "phase": "fill-default-workdir",
+      "pinnedFailure": "fill clone exited 128: fatal: could not create leading directories of '/home/agent/src': Permission denied",
+      "code": "fill-failed"
+    },
+    {
+      "phase": "finally-teardown-verb",
+      "exitCode": 0
+    }
+  ]
+}
