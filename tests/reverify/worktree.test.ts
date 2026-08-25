@@ -159,12 +159,37 @@ describe("withGuards", () => {
       }) as typeof process.kill;
 
       const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+
+      // fire() assigns `sweepTimer` asynchronously, inside the continuation
+      // of processTable().then(...) -- well after guards.tripped() is set
+      // synchronously in fire() itself. Waiting on a fixed sleep before
+      // calling dispose() only makes it LIKELY the sweep is armed by then;
+      // it is not a guarantee. Spy on the global setTimeout so the test
+      // waits for the actual KILL_GRACE_MS scheduling call -- the real
+      // "sweep is armed" signal -- before calling dispose(). This proves
+      // dispose() cancels the pending sweep rather than just winning a race
+      // against it never having been armed.
+      const originalSetTimeout = globalThis.setTimeout;
+      let armed: () => void = () => {};
+      const armedPromise = new Promise<void>((resolve) => {
+        armed = resolve;
+      });
+      globalThis.setTimeout = ((fn: (...args: unknown[]) => void, delay?: number, ...rest: unknown[]) => {
+        const handle = originalSetTimeout(fn, delay, ...rest);
+        if (delay === KILL_GRACE_MS) armed();
+        return handle;
+      }) as typeof setTimeout;
+
       const guards = withGuards({ rssBytes: -1 }); // always "over budget" -> trips on the first RSS poll
       try {
         // Wait for the RSS poll to trip the guard, then for fire()'s async
         // process-table snapshot to resolve and arm the sweep timer against
-        // this real child.
-        await new Promise((r) => setTimeout(r, 3_000));
+        // this real child -- proven by the setTimeout(..., KILL_GRACE_MS)
+        // spy above resolving, not by a fixed sleep.
+        await Promise.race([
+          armedPromise,
+          new Promise((_, reject) => originalSetTimeout(() => reject(new Error("sweep timer never armed")), 10_000)),
+        ]);
         expect(guards.tripped()).not.toBeNull();
 
         guards.dispose();
@@ -172,9 +197,10 @@ describe("withGuards", () => {
         // If dispose() failed to cancel the sweep, the sibling test above
         // proves this exact setup would have put `child.pid` in `killed`
         // by now.
-        await new Promise((r) => setTimeout(r, KILL_GRACE_MS + 1_000));
+        await new Promise((r) => originalSetTimeout(r, KILL_GRACE_MS + 1_000));
         expect(killed).not.toContain(child.pid);
       } finally {
+        globalThis.setTimeout = originalSetTimeout;
         process.kill = originalKill;
         guards.dispose();
         child.kill();
