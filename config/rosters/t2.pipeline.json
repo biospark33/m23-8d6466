@@ -1,0 +1,23 @@
+{
+  "version": "1.0.0",
+  "pipelineId": "t2-e2e-dispatch-engine",
+  "runBudgetMs": 60000,
+  "phases": [
+    {
+      "name": "t2-engine-probe",
+      "kind": "code",
+      "description": "Tier-2 live e2e probe phase that echoes a marker from the dispatched manifest workload.",
+      "command": ["echo", "t2-e2e-engine-ran"],
+      "maxDurationMs": 1000,
+      "retries": 0
+    },
+    {
+      "name": "t2-engine-verify",
+      "kind": "code",
+      "description": "Tier-2 live e2e closing phase that exits cleanly after the probe.",
+      "command": ["true"],
+      "maxDurationMs": 1000,
+      "retries": 0
+    }
+  ]
+}

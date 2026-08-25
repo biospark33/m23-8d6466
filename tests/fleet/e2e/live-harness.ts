@@ -88,8 +88,8 @@ export interface LiveCtx {
  * remediation. `whoami` is content-checked by the driver itself (exit 0 with
  * empty output is a refusal, not an identity).
  */
-export async function preflight(): Promise<LiveCtx> {
-  liveGate("1");
+export async function preflight(tier: "1" | "2" = "1"): Promise<LiveCtx> {
+  liveGate(tier);
   let whoami: string;
   try {
     whoami = await new ExeDevDriver().whoami();
