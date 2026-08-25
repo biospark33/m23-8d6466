@@ -341,21 +341,26 @@ two dispatches entering admission within one `driver.list()` round trip while
 `liveVms === ceiling - 1` BOTH pass and both create. The ledger's orphan window closes the
 MONEY half of this race; the BOX half is what stays open.
 
-**Why it becomes yours:** a single `dispatch` races only other invocations. Fan-out arms N
-admissions CONCURRENTLY inside one process — the interleaving goes from theoretical to
-routine, and overshoot scales with N. Round 10 pinned today's behavior deliberately:
-`tests/fleet/dispatch.test.ts`, the two-DISTINCT-id concurrency test (barrier parked inside
-checkHeadroom's driver.list against maxVms=1 ⇒ both admitted). That pin is your acceptance
-signal — flip it red-to-green when the reservation lands; do not delete it.
+**Why it becomes yours:** a single `dispatch` races only other invocations — and the FAN-OUT
+half of that race is closed by AC8 as built: the `.sandbox/fleet.lock` spans admission plus
+all N mints, a second concurrent fan-out is refused `fleet-busy`, arms enter through
+`{ admitted: true }`, and there is exactly ONE `checkHeadroom(N)` inside the lock. What
+stays OPEN is plain `dispatch()`: it holds no fleet lock, so two concurrent single
+dispatches — or a single dispatch racing a fan-out's admission window — can still both
+sample `liveVms === ceiling - 1` and both create. Round 10 pinned today's behavior
+deliberately: `tests/fleet/dispatch.test.ts`, the two-DISTINCT-id concurrency test (barrier
+parked inside checkHeadroom's driver.list against maxVms=1 ⇒ both admitted). That pin now
+DOCUMENTS the residual seam: keep it red-by-design until the quota layer closes the
+cross-invocation half — do not delete it, and do not promise to flip it. The acceptance
+signal for the shipped half is AC8's own: a second concurrent fan-out refused
+`fleet-busy` with nothing created.
 
-**Recommended shape (cheapest first):**
-1. Single-flight INSIDE one fanout invocation: serialize the admission critical section
-   (driver.list → decision → create) across arms behind an in-process mutex. Kills the
-   N-arm amplification without new persistence; cross-invocation race stays documented.
-2. If cross-invocation closure is wanted: quota-layer intent record mirroring
-   cost-ledger's `admitIssue` — BEGIN IMMEDIATE write-ahead row (reserve slot → create →
-   settle/release on failure), reusing that transaction's conventions rather than inventing
-   new ones.
+**Remaining direction (only if cross-invocation closure for SINGLE dispatches is wanted):**
+a quota-layer intent record mirroring cost-ledger's `admitIssue` — BEGIN IMMEDIATE
+write-ahead row (reserve slot → create → settle/release on failure), reusing that
+transaction's conventions rather than inventing new ones. THAT is what flips the pinned
+two-distinct-dispatch test red-to-green. Routing every single dispatch through the fleet
+lock is the wrong tool — it would serialize unrelated issues behind one operator-wide lock.
 
 **Adjacent graces to keep in mind at N>1** (deferred FP8/FP10, deliberate): run-record's
 own-pid lock steal and temp sweep fire after 60 s stalls. Concurrent arms sharing one pid

@@ -275,13 +275,25 @@ THIS story's allowlist design.
 
 **Recommendation for the allowlist:**
 1. Host allowlist as an extension of the SAME zod refine (keep the one-gate doctrine — do not
-   add a second check downstream). Deny-by-default; allowed hosts come from operator config
-   (a sibling key in `cost-config.json` keeps the config surface at one file).
+   add a second check downstream). Deny-by-default, with ONE authoritative configuration key:
+   `allowedRepoHosts` in `cost-config.json` — declared on `CostConfig` (`src/providers/cost-ledger.ts`,
+   alongside `defaultCapMicroUsd` in the `CONFIG_KEYS` list), accepted and validated by
+   `loadCostConfig` there, resolved for CLIs through the existing `costLedgerOpts` helper
+   (`scripts/lib/cost-ledger-opts.ts`), and forwarded into the gate at `dispatch()`'s
+   `BriefSchema.safeParse` call (`src/fleet/dispatch.ts`) so the object refine checks PATH
+   equality AND host membership in ONE validation. Division of authority stays fixed:
+   `.factory/repos.json` remains the REPOSITORY authority (INV-PR-3 — remote, base branch,
+   `authorLogin` derive from it) and the config key governs HOSTS only; a repos.json entry
+   never widens the allowlist and the allowlist never names a repository.
 2. On mismatch: exit 2 `invalid-brief` naming BOTH hosts, before any provisioning side effect
    (AC1 posture — validation completes before the first mutation).
 3. Consider requiring a pinned commit SHA in the brief as defense-in-depth: DF3-1's F4
-   `bundle-push` fill fetches the pinned SHA with HOST credentials, so a pinned SHA makes code
-   identity = reviewed SHA even when a host allowlist entry is broad.
+   `bundle-push` fill fetches the pinned SHA with HOST credentials, so the pin makes the
+   build REPRODUCIBLE even when a host allowlist entry is broad. Reproducible is not
+   REVIEWED: BriefSchema validates the SHA's format, never that its bytes are the reviewed
+   ones — "the pinned commit is the reviewed code" may be claimed only after an independent
+   trusted check (host-side fetch plus a review-record/provenance comparison), never from
+   schema validation alone.
 4. Migration note: default-deny breaks self-hosted Git hosts until configured — ship the
    refusal message with the exact config key to set, same pattern cost-ledger-opts uses for
    `$QDS_COST_CONFIG_FILE`.

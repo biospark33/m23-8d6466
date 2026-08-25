@@ -301,6 +301,16 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
   try {
     ledger = new CostLedger({ config, path: ledgerPath });
   } catch (e) {
+    // The probe handle is still HELD here — identity was never adjudicated, so
+    // releasing it is this failure path's job too. run() is importable, and a
+    // caller that retries against a broken ledger would otherwise leak one
+    // descriptor per attempt. A close failure never outranks the refusal
+    // below; like the replacement path, the fds die with the process anyway.
+    try {
+      if (probeFd !== null) closeSync(probeFd);
+    } catch {
+      /* the refusal below is the outcome */
+    }
     const err = e as { code?: string; message?: string; remediation?: string };
     reportFailure(out, err.code ?? "ledger-unopenable", err.message ?? String(e), err.remediation);
     return 1;
@@ -314,7 +324,14 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
   try {
     if (statSync(ledgerPath).ino !== probedIno) throw new Error("replaced");
   } catch {
-    if (probeFd !== null) closeSync(probeFd);
+    // Guarded like the construction-failure arm above: this catch exists to
+    // CLASSIFY the inode mismatch, and an unguarded close throwing out of it
+    // would replace the ledger-replaced refusal with a raw crash.
+    try {
+      if (probeFd !== null) closeSync(probeFd);
+    } catch {
+      /* the refusal below is the outcome; the fds die with the process */
+    }
     try {
       ledger.close();
     } catch {

@@ -108,17 +108,19 @@ recorded deferral. Both are decided here rather than left orphaned.
 
 ## Appendix (2026-08-25): deferred-seam register from the df3-1 review (round 10)
 
-Findings deferred by df3-1 review round 10 that have NO owning story yet. Each entry: the
-open hazard, where the seam lives, and the recommended direction when someone picks it up.
+Register of findings deferred by df3-1 review round 10. The entries BELOW have no owning
+story; each carries the open hazard, where the seam lives, and the recommended direction
+when someone picks it up. Two further deferred findings were handed straight to stories and
+are therefore NOT listed here: FF2 → DF5.2, DF13 → DF3.2 (annotated in those story files).
 Full evidence in `_bmad-output/workflow-state/code-review/pr123/{triage.md,reports/}`.
-(FF2 → handed to DF5.2; DF13 → handed to DF3.2 — annotated in those story files.)
 
 - **FB10 — exedev setup-gate never inspects `limitMicroUsd`** (fake gate does, per AC9a).
   Seam: `src/providers/exedev/setup-gate.ts`. Engine is safe today — `scripts/pipeline-run.ts`
   reconciles stamped manifest vs run-context witness inside the box and refuses on
-  absence/disagreement. When substrate-parity work happens: add a sixth/fifth probe reading
-  the delivered manifest's stamp via exec, emitting the same per-item assertion shape as
-  fake-gate items B/D so exit-3 classification needs no new code.
+  absence/disagreement. When substrate-parity work happens: add one more probe that reads
+  the delivered manifest's `limitMicroUsd` stamp via exec and asserts root-level
+  presence/agreement, emitting the same per-item assertion shape as fake-gate items B/D so
+  exit-3 classification needs no new code.
 - **FP3 — close→price race is a fixed ~6-min wall-clock bet.** Teardown closes a record,
   then crashes before the priced box-hours row lands; recovery slower than the grace cutoff
   lets a new dispatch spend the freed headroom before the late row arrives → cap overshoot.
