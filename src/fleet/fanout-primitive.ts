@@ -749,7 +749,7 @@ async function disposeLosers(
   // classification (a completed run that reported failure — not a race loss).
   for (const o of entered) {
     if (o.outcome === "ready") outcomes[o.arm] = { ...o, outcome: "lostRace" };
-  }
+  } // ponytail: spread required — o is OutcomeSlot without guaranteed outcome field
   // The destructive phase began — the fleet lock refuses release until the
   // phase completes. Cleared once EVERY loser has been ATTEMPTED: individual
   // failures were logged with their own remediation above. The mark sits

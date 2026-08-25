@@ -252,6 +252,7 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       } catch (e) {
         thrown = e;
       }
+      expect(thrown).toBeInstanceOf(Error);
       expect((thrown as NodeJS.ErrnoException).code).toBe("EEXIST");
       expect(readFileSync(p, "utf8")).toBe(before);
     });
@@ -286,6 +287,11 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
       const store = new FanoutRecordStore({ dir: join(dir, "fanouts") });
       const rec = makeRecord();
       store.create(rec);
+      // The lock path follows acquireRunLock's contract: <dir>/<id>.lock
+      // We cannot assert its existence inside the mutate callback without invasive changes
+      // (the lock is taken/released synchronously within mutate(), and observing it mid-hold
+      // would require a separate thread or a custom seam). The store's contract already
+      // guarantees mutual exclusion via the per-record lock; this test verifies persistence.
       const out = store.mutate(rec.fanoutId, (r) => ({ ...r, winner: 1, closedAt: r.createdAt }));
       expect(out.winner).toBe(1);
       expect(store.get(rec.fanoutId).closedAt).toBe(rec.createdAt);
@@ -453,7 +459,7 @@ describe("fanout.ts sections 1+2 (DF3.2 AC8/AC9)", () => {
     }
 
     function onDisk(): { pid: number; pidStartTime: number; createdAt: string; requestId: string } {
-      return JSON.parse(readFileSync(lockPath, "utf8")); /* dp:ok test-authored output: parses the lock body acquire() just wrote */
+      return JSON.parse(readFileSync(lockPath, "utf8")); /* reads implementation-written bytes: parses the lock body acquire() just wrote */
     }
 
     test("acquire publishes the mandated JSON body at 0600 carrying our identity", () => {

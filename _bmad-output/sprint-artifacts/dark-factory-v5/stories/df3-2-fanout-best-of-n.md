@@ -854,3 +854,65 @@ real record (null-score contract, rankedAt stamped, winner null), BOTH bundles
 verify, teardown ×2 exit 0, aggregate spend **146 µ$ ≤ 100,000 µ$**, final-ls
 []. Evidence:
 `_bmad-output/evidence/df3-e2e/2026-08-25-155131-t2-2-fanout-bestofn.json`.
+
+## Review round 6 — bmad-code-review on full branch diff (2026-08-25, HEAD `8d27d7d`)
+
+14-layer parallel review (6 blind + 7 edge + acceptance auditor; 13 chunks, 12,798 diff lines).
+Auditor: 9/9 ACs PASS, rank formula exact match. Triage ledger:
+`_bmad-output/workflow-state/code-review/pr128-r6/triage.md`.
+
+### Patch (source — wave 1)
+- [x] [Review][Patch] A1 pidStartTime NaN/Infinity passes typeof gate in classifyHolder + stealJudgedReapMutex — add Number.isFinite, unjudgeable ⇒ refuse [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] A2 lstartUtcMs copied without isFinite [src/fleet/fleet-lock.ts:678]
+- [x] [Review][Patch] A3 empty-string requestId passes shape gate — treat as unjudgeable [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] A4 verify reap-mutex file mode 0600 explicit [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] A5 redundant spread of already-ArmOutcome [src/fleet/fanout-primitive.ts:757]
+- [x] [Review][Patch] A6 doc comment: use FleetLock not bare claim [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] B1 validate capMicroUsd positive safe integer at dispatch boundary [src/fleet/dispatch.ts]
+- [x] [Review][Patch] C1 --cap-micro-usd domain upper bound (1e12 µ$) [scripts/fleet.ts]
+- [x] [Review][Patch] C2 --roster ""/"," ≡ absent — refuse explicit-empty [scripts/fleet.ts]
+- [x] [Review][Patch] C3 steps-json testResults-with-testsExecuted:false inconsistency refused [scripts/fleet.ts]
+- [x] [Review][Patch] C4 robust error-message extraction in catch paths (ack/ledger close) [scripts/fleet.ts]
+- [x] [Review][Patch] C5 loser-ledger close failure always logged [scripts/fleet.ts:1776-1784]
+- [x] [Review][Patch] C6 help text --dir = fanouts dir [scripts/fleet.ts]
+
+### Patch (tests — wave 2)
+- [x] [Review][Patch] T1a remove redundant toBeLessThanOrEqual after toBe(2) [tests/fleet/patterns.test.ts]
+- [x] [Review][Patch] T1b n=FANOUT_MAX_N accept-side boundary test [tests/fleet/patterns.test.ts]
+- [x] [Review][Patch] T1c unknown-pattern message toContain(pattern) [tests/fleet/patterns.test.ts]
+- [x] [Review][Patch] T1d verify/fix determinism of race + AC8 concurrent tests [tests/fleet/patterns.test.ts]
+- [x] [Review][Patch] T2a fix misleading dp:ok comment on onDisk() [tests/fleet/fanout.test.ts]
+- [x] [Review][Patch] T2b instanceof Error guard before .code check [tests/fleet/fanout.test.ts]
+- [x] [Review][Patch] T2c explicit union-of-empty coverage test [tests/fleet/rank.test.ts]
+- [x] [Review][Patch] T2d assert lock file held during store mutation callback [tests/fleet/fanout.test.ts]
+- [x] [Review][Patch] T3a deadPid() verify-not-alive hardening [tests/fleet/helpers.ts]
+- [x] [Review][Patch] T3b armRows() parse guard [tests/fleet/cli.test.ts]
+- [x] [Review][Patch] T3c wedged-lock cleanup to guaranteed finally [tests/fleet/cli.test.ts]
+- [x] [Review][Patch] T3d length assert before tuple destructure [tests/fleet/cli.test.ts]
+- [x] [Review][Patch] T3e liveChild orphan guard [tests/fleet/helpers.ts]
+- [x] [Review][Patch] T4a tier1-lock concurrent teardown start barrier [tests/fleet/e2e/tier1-lock.live.test.ts]
+- [x] [Review][Patch] T4b tier1-teardown finally key-revoke fallback [tests/fleet/e2e/tier1-teardown.live.test.ts]
+
+### Dismissed (26, each verified against source — see triage.md §DISMISS)
+Headline: reap-mutex TOCTOU claims (serialized under .reap mutex; residual window
+documented as POSIX no-CAS limit), --steps-json "traversal" (no privilege
+boundary), fakeGate commitSha omission (full opts forwarded), winner >= arms.length
+(correct as written), tier2 recovery regex (matches verified newId("qds") format),
+rank rationale overlap (branches disjoint), 1e20 cap (unsafe integer already refused).
+
+### Deferred: none. decision_needed: none (C1 bound 1e12 µ$ chosen conservatively).
+
+### Round 6 gate (2026-08-25)
+
+All 28 patch items applied and checked off above (13 source — fleet-lock fail-closed
+body validation, dispatch capMicroUsd boundary guard, CLI cap/roster/steps-json
+refusals, errText diagnostics, unconditional loser-ledger close log; 15 test —
+boundary/determinism/comment hardening, deadPid reap-proof, wedged-lock finally,
+tier1-lock contention barrier, tier1-teardown finally revoke). 26 dismissals each
+verified against source (ledger: pr128-r6/triage.md). Bonus gate fix: tests/scripts/
+qds-cost.test.ts was stale vs F8 fractional box-hours (expected ceil-to-2h
+7,350,000; shipped arithmetic is 1.5h×3.6M=5,400,000) — proved pre-existing via
+stash, re-pinned to F8 math (23/23). Gates: full suite 3526 pass / 8 skip /
+11 todo / 1 fail = documented pre-existing gitnexus graph-queries index-reader;
+tsc --noEmit clean; biome clean on all 15 touched files; gitnexus detect_changes
+scope = PR's own fleet/CLI/test modules, no out-of-scope symbols.

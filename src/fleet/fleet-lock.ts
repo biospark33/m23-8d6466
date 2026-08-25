@@ -26,6 +26,7 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 
+// Internal primitives — use FleetLock; bare claim() carries no signal-handler contract.
 import { claim, isAlive } from "../../scripts/lib/run-lock.ts";
 import { FleetError } from "./dispatch.ts";
 
@@ -663,8 +664,10 @@ function classifyHolder(path: string): HolderVerdict {
       parsed !== null &&
       typeof parsed.pid === "number" &&
       typeof parsed.pidStartTime === "number" &&
+      Number.isFinite(parsed.pidStartTime) &&
       typeof parsed.createdAt === "string" &&
-      typeof parsed.requestId === "string"
+      typeof parsed.requestId === "string" &&
+      parsed.requestId !== ""
     ) {
       // The additive keys are copied ONLY when well-typed: a wrong-shaped value
       // must not reach the identity comparison as junk that always mismatches
@@ -675,7 +678,7 @@ function classifyHolder(path: string): HolderVerdict {
         createdAt: parsed.createdAt,
         requestId: parsed.requestId,
         ...(typeof parsed.lstartRaw === "string" ? { lstartRaw: parsed.lstartRaw } : {}),
-        ...(typeof parsed.lstartUtcMs === "number" ? { lstartUtcMs: parsed.lstartUtcMs } : {}),
+        ...(Number.isFinite(parsed.lstartUtcMs) ? { lstartUtcMs: parsed.lstartUtcMs } : {}),
       };
     }
   } catch {
@@ -871,7 +874,7 @@ export function stealJudgedReapMutex(reapPath: string, raw: string): boolean {
   // (classifyHolder's range guard): wait out the budget.
   if (!Number.isInteger(parsed.pid) || parsed.pid <= 0 || parsed.pid > 0x7fff_ffff) return false;
   if (!isAlive(parsed.pid) || pidIsZombie(parsed.pid)) return removeIfUnchanged(); // proof 1: dead (or zombied) holder
-  if (typeof parsed.pidStartTime !== "number") {
+  if (!Number.isFinite(parsed.pidStartTime)) {
     return false; // no comparable identity — a possibly-live holder is never swept on a guess
   }
   // Proof 2: recycle check BEFORE any age conclusion — the same order and

@@ -26,6 +26,7 @@ import {
   liveTodoOff,
   mintCappedKey,
   preflight,
+  revokeQuietly,
   runFleet,
   runIdFor,
   tmpWorkspace,
@@ -43,6 +44,10 @@ test.todoIf(liveTodoOff())(
     let workspace = "";
     let evidencePath = "";
     let outcome = "pass";
+    let keyWasMinted = false;
+    let teardownSucceeded = false;
+    // Hoisted so the finally's belt-and-braces revoke can reach it on every path.
+    let store: InstanceType<typeof RunRecordStore> | undefined;
     try {
       workspace = tmpWorkspace("t14");
       const recordsDir = join(workspace, "runs");
@@ -54,7 +59,7 @@ test.todoIf(liveTodoOff())(
       writeFileSync(join(workspace, "cost-config.json"), JSON.stringify({ boxHourRateMicroUsd: 230_000 }));
 
       // ── record → box (INV-1), budget attribution so teardown prices hours ─
-      const store = new RunRecordStore({ dir: recordsDir });
+      store = new RunRecordStore({ dir: recordsDir });
       store.create(runId);
       const vm = (await ctx.driver.create(runId)).name;
       store.set(runId, {
@@ -74,11 +79,13 @@ test.todoIf(liveTodoOff())(
 
       // ── REAL mint at a tiny cap; plaintext never leaves mintRunKey's return ─
       const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
+      keyWasMinted = true;
       evidence.push({ phase: "mint", ok: true, keyHash: hash });
       expect(await listedKeyHashes().then((s) => s.has(hash))).toBeTrue();
 
       // ── the teardown verb, real subprocess, FULL chain (harvest included) ─
       const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir], { timeoutMs: 420_000 });
+      teardownSucceeded = td.exitCode === 0;
       evidence.push({
         phase: "teardown-verb",
         exitCode: td.exitCode,
@@ -122,8 +129,9 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "test-error", error: (e as Error).message });
       throw e;
     } finally {
-      // If anything above failed mid-chain the key may still be live: revoke
-      // path via the verb is unsafe to re-run blindly; belt-and-braces destroy.
+      // If anything above failed mid-chain the key may still be live: belt-and-braces
+      // cleanup. Box destroy runs regardless; revoke runs ONLY when teardown failed
+      // AND a key was minted (the finally-revoke helper checks keyHash presence).
       try {
         const still = await ctx.driver.list(runId);
         if (still.some((b) => b.name === runId)) {
@@ -132,6 +140,9 @@ test.todoIf(liveTodoOff())(
         }
       } catch {
         // list failure must not mask the test's own result
+      }
+      if (!teardownSucceeded && keyWasMinted) {
+        if (store !== undefined) await revokeQuietly(ctx.driver, store, runId, evidence);
       }
       try {
         evidencePath = writeEvidence("t1-4-teardown-verb", { test: "T1.4", outcome, runId, phases: evidence });

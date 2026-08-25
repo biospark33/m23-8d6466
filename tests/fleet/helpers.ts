@@ -154,17 +154,35 @@ export function closeThrowsLedger(): RecordingLedger {
 
 // ─── process-corpse helpers (shared by the lock-choreography suites) ──────────
 
+import { isAlive } from "../../scripts/lib/run-lock.ts";
+
 /**
  * Spawn a short-lived child and resolve once its pid is provably dead.
  *
  * Shared here rather than re-declared per file: a fix to HOW death is proven
  * (e.g. `Bun.spawn(["true"])` flaking on a loaded host) must land everywhere
  * at once or two suites silently disagree about what "dead" means.
+ *
+ * After `proc.exited` resolves, poll `isAlive` up to 100ms (10×10ms) to ensure
+ * the pid is truly no longer alive. This guards against TOCTOU on loaded hosts
+ * where `proc.exited` may resolve before the process table entry is fully reaped.
  */
-export async function deadPid(): Promise<number> { /* dp:ok proc.exited resolves with the exit code, never rejects */
+export async function deadPid(): Promise<number> {
   const proc = Bun.spawn(["true"]);
-  await proc.exited;
-  return proc.pid;
+  await proc.exited; /* dp:ok resolves with exit code, never rejects */
+  const pid = proc.pid;
+
+  // Ponytail: poll isAlive up to 100ms. On a loaded host, the pid may still briefly
+  // report alive after exited resolves. 10 iterations of 10ms = 100ms budget.
+  // If the process is truly dead, isAlive returns false within the first few polls.
+  // If it never dies within budget, throw - this is a test infrastructure bug.
+  for (let i = 0; i < 10; i++) {
+    if (!isAlive(pid)) {
+      return pid;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`deadPid: pid ${pid} still reports as alive after 100ms - test infrastructure bug`);
 }
 
 /** A live child the test kills on teardown — for identity-match rows. */

@@ -13,7 +13,7 @@
  * touched it. ZERO model spend.
  */
 import { expect, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
@@ -40,21 +40,34 @@ test.todoIf(liveTodoOff())(
       store.set(runId, { vmName: vm });
       evidence.push({ phase: "provision", ok: true, vm });
 
+      // ponytail: deterministic barrier ensures the second teardown contends while
+      // the first still holds the lock. Without this, if the first completes before
+      // the second even attempts acquisition, both may win and the test flakes.
+      // The lock file <recordsDir>/<runId>.json.lock appears the instant acquireRunLock
+      // succeeds, so we poll for it before launching the contender.
+      const lockPath = join(recordsDir, `${runId}.json.lock`);
       const teardownArgv = ["teardown", runId, "--driver", "exedev", "--dir", recordsDir, "--no-harvest"] as const;
-      const [a, b] = await Promise.all([
-        runFleet(teardownArgv, { timeoutMs: 240_000 }),
-        runFleet(teardownArgv, { timeoutMs: 240_000 }),
-      ]);
+      const a = runFleet(teardownArgv, { timeoutMs: 240_000 });
+      // Barrier: wait for lock file evidence (max 5s, 50ms ticks) before launching b.
+      const barrierDeadline = Date.now() + 5_000;
+      while (!existsSync(lockPath) && Date.now() < barrierDeadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (!existsSync(lockPath)) {
+        throw new Error("barrier: first teardown did not create lock file within 5s — cannot test contention");
+      }
+      const b = runFleet(teardownArgv, { timeoutMs: 240_000 });
+      const [aResult, bResult] = await Promise.all([a, b]);
       evidence.push({
         phase: "concurrent-teardowns",
-        a: { exitCode: a.exitCode, stdout: a.stdout.trim().slice(0, 120), stderrHasRunLocked: a.stderr.includes("run-locked") },
-        b: { exitCode: b.exitCode, stdout: b.stdout.trim().slice(0, 120), stderrHasRunLocked: b.stderr.includes("run-locked") },
+        a: { exitCode: aResult.exitCode, stdout: aResult.stdout.trim().slice(0, 120), stderrHasRunLocked: aResult.stderr.includes("run-locked") },
+        b: { exitCode: bResult.exitCode, stdout: bResult.stdout.trim().slice(0, 120), stderrHasRunLocked: bResult.stderr.includes("run-locked") },
       });
 
       // Winner: 0, or the designed 6 key-unattributable note, with "torn down".
       // Loser: 5 with the run-locked diagnostic. Exactly one of each.
-      const winner = (a.exitCode ?? -1) === 5 ? b : a;
-      const loser = winner === a ? b : a;
+      const winner = (aResult.exitCode ?? -1) === 5 ? bResult : aResult;
+      const loser = winner === aResult ? bResult : aResult;
       expect([0, 6]).toContain(winner.exitCode ?? -1);
       expect(winner.stdout).toContain("torn down");
       expect(loser.exitCode).toBe(5);

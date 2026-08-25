@@ -305,11 +305,13 @@ export interface DispatchDeps {
   /** Setup-gate seam (test/injection). Default: exedev `.setup`, else fakeGate. */
   setupGate?: (driver: ProviderDriver, vm: string, opts: GateOpts) => Promise<SetupGateResult>;
   /**
-   * Per-run key cap in integer micro-dollars (DF3.2/DD-9). Flows to the budget
-   * gate's `keyCapMicroUsd` — the ceiling it clamps into
-   * `admittedCeilingMicroUsd`, which becomes the minted key's provider-side
-   * hard USD limit at mintRunKey. Absent/undefined ⇒ the single-run default
-   * (`defaultKeyCapMicroUsd`) — behavior identical to pre-DF3.2.
+   * Per-run key cap in integer micro-dollars (DF3.2/DD-9). Validated at dispatch
+   * before reaching the budget gate: if provided, must be a positive integer no
+   * greater than `Number.MAX_SAFE_INTEGER`. Flows to the budget gate's
+   * `keyCapMicroUsd` — the ceiling it clamps into `admittedCeilingMicroUsd`,
+   * which becomes the minted key's provider-side hard USD limit at mintRunKey.
+   * Absent/undefined ⇒ the single-run default (`defaultKeyCapMicroUsd`) —
+   * behavior identical to pre-DF3.2.
    */
   capMicroUsd?: number;
 }
@@ -1721,6 +1723,25 @@ export async function dispatch(
     // ledger is constructed INSIDE the try: an unopenable or busy ledger is an
     // admission refusal (exit 5), not an untyped exit 1 (INV-COST-6 — a ledger
     // that cannot be read is never read as zero spend).
+    //
+    // B1 (DEFENSE-IN-DEPTH): validate `capMicroUsd` at the dispatch boundary,
+    // before it reaches the budget gate. The gate also validates; this is the
+    // early guard that catches bad input before admission work begins.
+    // undefined ⇒ default cap path (byte-for-byte pre-DF3.2 behavior).
+    if (
+      deps.capMicroUsd !== undefined &&
+      (!Number.isInteger(deps.capMicroUsd) ||
+        deps.capMicroUsd <= 0 ||
+        deps.capMicroUsd > Number.MAX_SAFE_INTEGER)
+    ) {
+      throw refuse(
+        2,
+        "invalid-cap",
+        `capMicroUsd must be a positive integer no greater than ${Number.MAX_SAFE_INTEGER}, got ${deps.capMicroUsd}`,
+        "pass a positive integer micro-dollar cap, or omit for the default",
+        { capMicroUsd: deps.capMicroUsd },
+      );
+    }
     let ledger: LedgerLike | undefined;
     let decision: Extract<AdmissionDecision, { admitted: true }>;
     try {

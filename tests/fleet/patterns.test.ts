@@ -339,6 +339,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       manifest();
       const err = await refuseOf(fanout("best-of-nn" as never, 2, brief(), deps()));
       expect(err.exitCode).toBe(2);
+      expect(err.message).toContain("best-of-nn");
     });
 
     test("best-of-n and race reject n=1; every pattern rejects n beyond the bound", async () => {
@@ -617,8 +618,6 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(res.arms.every((a) => a.outcome === "ready")).toBe(true);
       // Not vacuous: the four arms really did contend for two slots…
       expect(peak).toBe(2);
-      // …and the bound held across every permit handoff.
-      expect(peak).toBeLessThanOrEqual(2);
     });
   });
 
@@ -754,9 +753,9 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
         }
       };
       const res = await fanout("race", 3, brief(), raceDeps({ rosterIds: ["r0", "r1", "r2"] }));
-      // The winner is WHICHEVER arm owned probe #2 (sequential probing puts
-      // that on arm index 1 today) — derived from the planted marker, not
-      // hardcoded.
+      // Deterministic winner: sequential probing guarantees arm index 1 runs
+      // probe #2, and we derive the winner from the planted marker rather than
+      // hardcoding an index. The winner is WHICHEVER arm owned probe #2.
       const won = res.arms.findIndex((a) => a.vmName === plantedVm);
       expect(won).toBeGreaterThanOrEqual(0);
       expect(res.winner).toBe(won);
@@ -1366,6 +1365,27 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(rec.closedAt).not.toBeNull();
     });
 
+    test("best-of-n at the FANOUT_MAX_N edge admits and runs every arm (accept-side boundary coverage)", async () => {
+      manifest();
+      const n = FANOUT_MAX_N;
+      const res = await fanout(
+        "best-of-n",
+        n,
+        brief(),
+        deps({
+          rosterIds: Array.from({ length: n }, (_, i) => `r${i}`),
+          quotaLimits: limitsWith(n),
+        }),
+      );
+      expect(res.arms).toHaveLength(n);
+      expect(res.arms.every((a) => a.outcome === "ready")).toBe(true);
+      expect(new Set(res.arms.map((a) => a.vmName)).size).toBe(n);
+      const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
+      expect(rec.n).toBe(n);
+      expect(rec.arms).toHaveLength(n);
+      expect(rec.closedAt).not.toBeNull();
+    });
+
     test("the pin is the control variable: mismatch exits 2 pin-mismatch", () => {
       const sha = "c".repeat(40);
       expect(syncRefuseOf(() => assertFanoutPin("best-of-n", [brief(sha)], "d".repeat(40))).code).toBe(
@@ -1475,9 +1495,12 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
   describe("single-operator enforcement across full invocations (AC8)", () => {
     test("a second fanout while the first sits between admission and mint refuses exit 5 having written nothing", async () => {
       manifest();
-      // Barrier IN THE WINNER'S ADMISSION AWAIT: checkHeadroom's provider list
-      // parks until the loser has tried and failed to take the lock — forced
-      // interleaving through a seam, never natural timing (D14 / r9 lesson).
+      // Deterministic barrier: the Promise.then synchronization guarantees
+      // the loser attempts lock acquisition while the winner holds it — no
+      // wall-clock races. Barrier IN THE WINNER'S ADMISSION AWAIT:
+      // checkHeadroom's provider list parks until the loser has tried and
+      // failed to take the lock — forced interleaving through a seam, never
+      // natural timing (D14 / r9 lesson).
       let releaseAdmission: (() => void) | undefined;
       const admitted = new Promise<void>((resolve) => {
         releaseAdmission = resolve;

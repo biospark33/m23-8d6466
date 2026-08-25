@@ -4298,6 +4298,7 @@ process.on = ((sig, listener) => {
     // gets the same refusal as omitting the flag entirely. Round 3 hoists that
     // refusal to the CLI's pre-construction block, so it surfaces as a usage
     // error whose prose still says a roster is required.
+    // After round 6: explicit empty refusal (C2) now fires instead.
     reset();
     const d = fanoutDeps();
     const code = await runCli(
@@ -4307,7 +4308,7 @@ process.on = ((sig, listener) => {
     expect(code).toBe(2);
     const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: error envelope this run just emitted to errCaptured */
     expect(envelope.code).toBe("usage");
-    expect(envelope.message).toContain("requires a roster list");
+    expect(envelope.message).toBe("--roster provided but empty");
   });
 
   test("a refused race constructs no cost ledger — no db file appears anywhere", async () => {
@@ -4390,7 +4391,15 @@ process.on = ((sig, listener) => {
 
   /** The arm-status rows a fanout run printed to stdout, parsed. */
   const armRows = (): { fanoutId: string; arm: number; runId: string; outcome: string; vmName?: string }[] =>
-    outOnly.map((l) => JSON.parse(l) as { fanoutId: string; arm: number; runId: string; outcome: string; vmName?: string }); /* dp:ok test-authored output: arm rows this test's own CLI run just emitted */
+    outOnly.map((l) => {
+      const row = JSON.parse(l) as Record<string, unknown>;
+      // Ponytail: validate shape after parse - malformed lines fail with useful message
+      expect(row).toHaveProperty("fanoutId");
+      expect(row).toHaveProperty("arm");
+      expect(row).toHaveProperty("runId");
+      expect(row).toHaveProperty("outcome");
+      return row as { fanoutId: string; arm: number; runId: string; outcome: string; vmName?: string };
+    }); /* dp:ok test-authored output: arm rows this test's own CLI run just emitted */
 
   /**
    * The AC5 timing seams are FanoutDeps-only — FleetDeps forwards every key it
@@ -5063,20 +5072,27 @@ process.on = ((sig, listener) => {
       const wedged = (JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string }).runId;
       const lock = join(runsDir, `${wedged}.lock`);
       entries.length = 0;
-      expect(
-        await runCli(["teardown", "--driver", "fake", "--dir", runsDir, "--no-harvest", wedged], {
-          ...shared,
-          driver: driverWith(base, {
-            destroy: async (vm: string) => {
-              await base.destroy(vm);
-              writeFileSync(lock, "99999 someone-else 2026-01-01T00:00:00.000Z deadbeef\n");
-            },
+      try {
+        expect(
+          await runCli(["teardown", "--driver", "fake", "--dir", runsDir, "--no-harvest", wedged], {
+            ...shared,
+            driver: driverWith(base, {
+              destroy: async (vm: string) => {
+                await base.destroy(vm);
+                writeFileSync(lock, "99999 someone-else 2026-01-01T00:00:00.000Z deadbeef\n");
+              },
+            }),
           }),
-        }),
-      ).toBe(6);
-      const line = verbLines()[0] as unknown as Record<string, unknown>;
-      expect(line.exitCode).toBe(6);
-      expect(line.exitStatus).toBe("logic");
+        ).toBe(6);
+        const line = verbLines()[0] as unknown as Record<string, unknown>;
+        expect(line.exitCode).toBe(6);
+        expect(line.exitStatus).toBe("logic");
+      } finally {
+        // Ponytail: clean up the wedged lock so it doesn't leak into later tests
+        if (existsSync(lock)) {
+          rmSync(lock);
+        }
+      }
     });
 
     test("a fanout list-unverified refusal stamps its completion line transient", async () => {
@@ -5105,6 +5121,83 @@ process.on = ((sig, listener) => {
       expect(line.verb).toBe("fanout");
       expect(line.exitCode).toBe(5);
       expect(line.exitStatus).toBe("transient");
+    });
+  });
+
+  // round-6 review: explicit-empty refusals (C1/C2/C3)
+  describe("round-6 review refusals", () => {
+    test("C1: --cap-micro-usd above $1M (1e12 µ$) is refused with domain bound", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b", "--cap-micro-usd", "1000000000001"],
+        fanoutDeps(),
+      );
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("--cap-micro-usd");
+      expect(envelope.remediation).toContain("1000000000000");
+    });
+
+    test("C1: --cap-micro-usd accepts exactly $1M (1e12 µ$)", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b", "--cap-micro-usd", "1000000000000"],
+        fanoutDeps(),
+      );
+      expect(code).toBe(0);
+    });
+
+    test("C2: --roster with empty string (\"\") is refused as explicit empty", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", ""],
+        fanoutDeps(),
+      );
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
+      // Empty value is caught by parseValueFlags before our split/filter logic
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("--roster");
+      expect(envelope.message).toContain("non-empty");
+    });
+
+    test("C2: --roster with only commas (\",,,\") is refused as explicit empty", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", ",,,"],
+        fanoutDeps(),
+      );
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toBe("--roster provided but empty");
+    });
+
+    test("C3: --steps-json entry with testResults but testsExecuted=false is refused", async () => {
+      const freshDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+      const stepsPath = join(freshDir, "steps.json");
+      writeFileSync(stepsPath, JSON.stringify({ "qds-123": { testsExecuted: false, testResults: { passed: 1, failed: 0 } } }));
+      const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("testResults but testsExecuted is false");
+    });
+
+    test("C3: --steps-json entry with testResults and testsExecuted=true is accepted", async () => {
+      const freshDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+      const stepsPath = join(freshDir, "steps.json");
+      writeFileSync(stepsPath, JSON.stringify({ "qds-123": { testsExecuted: true, testResults: { passed: 1, failed: 0 } } }));
+      const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+      // Exits 4 because fanout doesn't exist, but shape validation passed
+      expect(code).toBe(4);
+      expect(text()).not.toContain("testResults");
+    });
+
+    test("C3: --steps-json entry with testsExecuted=true and no testResults is legal (passRate 0)", async () => {
+      const freshDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+      const stepsPath = join(freshDir, "steps.json");
+      writeFileSync(stepsPath, JSON.stringify({ "qds-123": { testsExecuted: true } }));
+      const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+      // Exits 4 because fanout doesn't exist, but shape validation passed
+      expect(code).toBe(4);
     });
   });
 });

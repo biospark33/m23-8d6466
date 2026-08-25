@@ -138,6 +138,8 @@ export function listVerbs(): VerbEntry[] {
         // like --n. Absent ⇒ the single-run default cap.
         { name: "--cap-micro-usd", required: false, valueType: "string" },
         { name: "--brief", required: false, valueType: "path" },
+        // The FAN-OUT records directory (.sandbox/fanouts), NOT the runs dir:
+        // fanout writes fan-*.json records; rank reads them.
         { name: "--dir", required: false, valueType: "path" },
         { name: "--help", required: false, valueType: "boolean" },
       ],

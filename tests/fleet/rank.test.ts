@@ -313,6 +313,39 @@ describe("rank (DF3.2 AC7)", () => {
     expect(res.tie).toBe(true);
   });
 
+  test("all arms with empty changedFiles → every arm scores 0, breakdown 0, tie (union denominator 0)", async () => {
+    // Pins the cross-arm union rule: when NO arm touches any file, the union is empty
+    // (size 0), every arm's uniqueFileCoverage is 0/0 → 0, and all scores are 0.
+    const h = harness({
+      arms: [
+        { arm: 0, runId: "empty-a" },
+        { arm: 1, runId: "empty-b" },
+        { arm: 2, runId: "empty-c" },
+      ],
+      steps: {
+        "empty-a": { testsExecuted: true, testResults: { passed: 5, failed: 0 }, changedFiles: [] },
+        "empty-b": { testsExecuted: true, testResults: { passed: 3, failed: 2 }, changedFiles: [] },
+        "empty-c": { testsExecuted: true, testResults: { passed: 1, failed: 4 }, changedFiles: [] },
+      },
+    });
+
+    const res = await rank(FANOUT_ID, h.deps);
+
+    // Every arm's breakdown is {testPassRate: <their TPR>, uniqueFileCoverage: 0}
+    // because the cross-arm union is empty (denominator 0 → coverage 0).
+    const byArm = new Map(res.scores.map((s) => [s.arm, s]));
+    expect(byArm.get(0)?.breakdown.uniqueFileCoverage).toBe(0);
+    expect(byArm.get(1)?.breakdown.uniqueFileCoverage).toBe(0);
+    expect(byArm.get(2)?.breakdown.uniqueFileCoverage).toBe(0);
+
+    // Scores are testPassRate * 0.6 only (coverage term vanishes): arm0=1.0*0.6=0.6, arm1=0.6*0.6=0.36, arm2=0.2*0.6=0.12
+    expect(res.scores.map((s) => s.score)).toEqual([0.6, 0.36, 0.12]);
+
+    // Top-two delta: 0.6 - 0.36 = 0.24 > 0.1 → no tie despite all coverage being 0.
+    expect(res.tie).toBe(false);
+    expect(res.rationale).toContain("leads by more than");
+  });
+
   test("testResults:null is refused through invalid-step-output, never a TypeError", async () => {
     // JSON carries `null` where absence means `undefined`; the CLI's
     // --steps-json gate refuses it, so embedders calling rank() directly must

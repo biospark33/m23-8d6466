@@ -28,7 +28,7 @@ import { join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 
 import { costLedgerOpts } from "../../../scripts/lib/cost-ledger-opts.ts";
-import { mintRunKey, openRouterKeyApi } from "../../../src/providers/credentials.ts";
+import { mintRunKey, openRouterKeyApi, revokeRunKey } from "../../../src/providers/credentials.ts";
 import type { KeyApi } from "../../../src/providers/credentials.ts";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
 import type { RunRecordStore } from "../../../src/providers/run-record.ts";
@@ -296,6 +296,36 @@ export async function destroyQuietly(driver: ExeDevDriver, vm: string, evidence:
     evidence.push({ phase: "finally-destroy", vm, ok: true });
   } catch (e) {
     evidence.push({ phase: "finally-destroy", vm, ok: false, error: (e as Error).message });
+  }
+}
+
+/**
+ * Best-effort key revoke for `finally` blocks — runs ONLY when the teardown verb
+ * failed AND the key was minted. A failure here must not mask the test's own
+ * result; logs to stderr and appends to evidence, never throws.
+ *
+ * ponytail: uses the same revoke primitive as the teardown verb itself
+ * (revokeRunKey), gated by the keyHash presence in the record — no new API,
+ * just the belt-and-braces fallback the teardown verb already provides.
+ */
+export async function revokeQuietly(
+  driver: ExeDevDriver,
+  store: RunRecordStore,
+  runId: string,
+  evidence: Record<string, unknown>[],
+): Promise<void> {
+  const rec = store.get(runId);
+  if (!rec.keyHash) {
+    return; // no key was ever minted — nothing to revoke
+  }
+  try {
+    const keyApi: KeyApi = openRouterKeyApi();
+    const result = await revokeRunKey({ keyApi, driver, store }, runId);
+    evidence.push({ phase: "finally-revoke", runId, result, ok: result !== "none" });
+  } catch (e) {
+    // Log to stderr so it's visible even if evidence write fails; never throw.
+    process.stderr.write(`[finally-revoke] failed for ${runId}: ${(e as Error).message}\n`);
+    evidence.push({ phase: "finally-revoke", runId, ok: false, error: (e as Error).message });
   }
 }
 

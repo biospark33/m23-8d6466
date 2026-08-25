@@ -123,6 +123,16 @@ import type { ExitStatus } from "../cli-anything/src/types.ts";
 
 const HELP = renderHelp(listVerbs());
 
+/**
+ * Extract a readable error description from any thrown value.
+ * Returns the message when Error, else String(e), else "unknown".
+ */
+function errText(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (e === null || e === undefined) return "unknown";
+  return String(e);
+}
+
 /** Brief ingress cap (story Guards): 64 KiB from stdin or --brief <path>. */
 const MAX_BRIEF_BYTES = 64 * 1024;
 // Same posture as MAX_BRIEF_BYTES, one tier up in size: --steps-json is
@@ -1453,11 +1463,10 @@ export async function run(
         // `(e ?? {})`: a sink may reject with null/undefined (a bare `throw;`,
         // a violated library contract), and reading `.message` off it would
         // make the failure REPORTER the failure — over a live, billing box.
-        const x = (e ?? {}) as { message?: string };
         printError(
           note,
           "ack-unwritable",
-          `the box for ${ack.runId} is live but its ack could not be written to stdout: ${redactSecrets(x.message ?? e)}`,
+          `the box for ${ack.runId} is live but its ack could not be written to stdout: ${redactSecrets(errText(e))}`,
           `record run id ${ack.runId} now — \`fleet teardown ${ack.runId}\` is the only thing that stops it billing`,
           { runId: ack.runId },
         );
@@ -1542,10 +1551,12 @@ export async function run(
       let capMicroUsd: number | undefined;
       if (capRaw !== undefined) {
         capMicroUsd = /^[1-9]\d*$/.test(capRaw) ? Number(capRaw) : Number.NaN;
-        if (!Number.isSafeInteger(capMicroUsd) || capMicroUsd < 1) {
+        // C1: Upper bound of $1M (1e12 µ$) — domain ceiling for per-arm caps.
+        const CAP_MAX_MICRO_USD = 1_000_000_000_000;
+        if (!Number.isSafeInteger(capMicroUsd) || capMicroUsd < 1 || capMicroUsd > CAP_MAX_MICRO_USD) {
           throw usageError(
             `--cap-micro-usd ${JSON.stringify(capRaw)} is not a micro-dollar amount`,
-            "--cap-micro-usd takes a positive integer of micro-dollars ($1 is 1000000)",
+            `--cap-micro-usd takes a positive integer of micro-dollars (1-${CAP_MAX_MICRO_USD}, where $1 is 1000000)`,
           );
         }
       }
@@ -1562,15 +1573,20 @@ export async function run(
       // untouched — this is the library boundary staying put while the CLI
       // refuses earlier. An absent/garbled PATTERN is refused here too — same
       // message fanout() would give, just before any constructor runs.
-      let rosterIds = flags
+      const rosterIds = flags
         .get("--roster")
         ?.split(",")
         .map((s) => s.trim())
         .filter((s) => s !== "");
-      // `--roster ""` / "," splits to an EMPTY list — separators alone name no
-      // arms, so that is flag-ABSENT semantics (the primitive's own
-      // roster-required refusal), not a supplied roster of zero entries.
-      if (rosterIds !== undefined && rosterIds.length === 0) rosterIds = undefined;
+      // C2: Fail-closed for explicit empty roster. `--roster ""` or `--roster ","`
+      // produces an empty list; flag PRESENT but resulting list EMPTY ⇒ refusal.
+      // Flag absent ⇒ rosterIds stays undefined (no roster provided).
+      if (rosterIds !== undefined && rosterIds.length === 0) {
+        throw usageError(
+          "--roster provided but empty",
+          "pass at least one roster entry, or omit --roster entirely",
+        );
+      }
       // Pattern-scoped structure, still pre-construction: a KNOWN pattern gets
       // its min-N refusals here; anything else takes the unknown-pattern
       // refusal — the same message fanout() would print, just earlier. The
@@ -1777,13 +1793,13 @@ export async function run(
         try {
           loserLedger.close();
         } catch (e) {
-          const x = (e ?? {}) as { message?: string };
           printError(
             note,
             "ledger-close-failed",
-            `could not close the loser cost ledger: ${redactSecrets(x.message ?? e)}`,
+            `could not close the loser cost ledger: ${redactSecrets(errText(e))}`,
             "the handle dies with the process; re-run to confirm it still reads",
           );
+          // C5: Exit code escalation only when fanoutCode === 0 (the log is always emitted).
           if (fanoutCode === 0) fanoutCode = 6;
         }
       }
@@ -1906,6 +1922,12 @@ export async function run(
               // flag that carried it.
               throw bad("needs testResults with non-negative integer passed/failed counts");
             }
+          }
+          // C3: Refuse inconsistent testResults/testsExecuted combo.
+          // testResults present while testsExecuted === false is logically inconsistent.
+          // (Inverse is legal: testsExecuted true with no testResults = passRate 0).
+          if (o.testResults !== undefined && o.testsExecuted === false) {
+            throw bad("has testResults but testsExecuted is false — tests must have been executed to have results");
           }
           if (
             o.changedFiles !== undefined &&
@@ -2312,11 +2334,10 @@ export async function run(
         // Same normalization as the ack arm: a null/undefined rejection here
         // would throw a TypeError from INSIDE this catch, escaping the cleanup
         // policy and hiding the original close failure under a crash.
-        const x = (e ?? {}) as { message?: string };
         printError(
           note,
           "ledger-close-failed",
-          `could not close the cost ledger: ${redactSecrets(x.message ?? e)}`,
+          `could not close the cost ledger: ${redactSecrets(errText(e))}`,
           "the handle dies with the process; re-run to confirm it still reads",
         );
         cleanupFailed();
