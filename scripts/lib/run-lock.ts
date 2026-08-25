@@ -30,6 +30,7 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -221,6 +222,19 @@ function installSignalRelease(): void {
       for (const listener of others) process.removeListener(sig, listener as () => void);
       try {
         process.kill(process.pid, sig);
+      } catch {
+        // The re-raise itself failed (a seccomp filter or an LSM refusing
+        // kill(2), say): the signal was NOT delivered, so the default
+        // disposition never applied and the process is still running with its
+        // lock already released. Leaving `unwinding` set — and this handler
+        // off — would dead-letter every later Ctrl-C: an unstoppable CLI, mid-
+        // destruction if it got there. Reset the latch and put OUR listener
+        // back alongside the borrowed ones so the next signal retries release
+        // (a no-op on an empty `held`) and the raise; the operator's second
+        // Ctrl-C is the retry.
+        unwinding = false;
+        process.on(sig, onSignal);
+        return;
       } finally {
         for (const listener of others) process.on(sig, listener as () => void);
       }
@@ -343,6 +357,14 @@ function parseLockBody(body: string): { pid?: string; host?: string; at: number 
 const IMPLAUSIBLE_HOLD_S = 6 * 60 * 60;
 
 /**
+ * Generous NTP slop. A `createdAt` further in the FUTURE than this is not a
+ * clock the holder host can reasonably disagree by — it is a holder whose
+ * clock leads this one, and "held 0s" would be a lie for as long as the skew
+ * runs.
+ */
+const CLOCK_SKEW_S = 5 * 60;
+
+/**
  * Describe the invocation currently holding `lock` for the refusal message, or
  * `undefined` when the lock VANISHED between the caller's EEXIST and this read
  * — a free run, not an unreadable one, so the caller retries rather than
@@ -380,19 +402,38 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
   // the "rm it, then re-run" remediation, which is the double teardown printed
   // as advice. Say what is known in the prose and leave the flag alone.
   if (readable && body === "") {
-    return new RunLockedError(
-      lock,
-      "an empty lock, holder unknown",
-      holder,
-      false,
-      " — an empty lock means either a creator that died between creating it and writing its body, or one still inside that window (on a filesystem without hard links the write and its fsync are not instant). Wait and re-check first; rm it only once you have confirmed no harvest or teardown of this run is running anywhere that shares this directory",
-    );
+    // Dedicated wording, not the base template plus a note: the template's
+    // "wait for that invocation to finish — or, only if <holder unknown> is
+    // gone: rm" fought the appended "rm it only once you have confirmed …",
+    // telling the operator to rm and never-rm in the same breath. The stale
+    // flag stays false (an empty body PROVES NOTHING — see above), so the
+    // machine-readable classification is untouched; only the prose stops
+    // contradicting itself.
+    const err = new RunLockedError(lock, "an empty lock, holder unknown", holder);
+    // `remediation` is readonly to its consumers; this module OWNS the class,
+    // so the dedicated wording is assigned through a writable view rather than
+    // widening the public property.
+    (err as { remediation: string }).remediation =
+      `Wait and re-check first — an empty lock means either a creator that died between creating it and writing its body, or one still inside that window (on a filesystem without hard links the write and its fsync are not instant). rm ${lock} only once you have confirmed no harvest or teardown of this run is running anywhere that shares this directory`;
+    return err;
   }
   const { pid, host, at } = parseLockBody(body);
   if (!/^\d+$/.test(pid ?? "") || Number.isNaN(at)) {
     return new RunLockedError(lock, `holder unknown, lock body ${JSON.stringify(body)}`, holder);
   }
-  const age = Math.max(0, Math.round((Date.now() - at) / 1000));
+  const rawAgeS = Math.round((Date.now() - at) / 1000);
+  const age = Math.max(0, rawAgeS);
+  // A holder host whose clock LEADS this one writes creation times in the
+  // future; `Math.max(0, …)` clamped those to "held 0s" for as long as the
+  // skew ran — hours or days printed as an instant — and the implausible-hold
+  // hint below could not fire because 0 is never past any threshold. Past the
+  // skew bound, name the skew instead of the fake age and let the hint fire;
+  // the lock is still NEVER marked stale on this evidence alone (fail-closed).
+  const futureS = rawAgeS < -CLOCK_SKEW_S ? -rawAgeS : 0;
+  const ageText =
+    futureS > 0
+      ? `held ${age}s (its createdAt is ${futureS}s in the future — the holder host's clock leads this one)`
+      : `held ${age}s`;
   // A pid is only meaningful on the host that minted it. Probing our own
   // process table for a foreign host's pid returns either a false "not running"
   // — and the remediation then tells the operator to rm a LIVE holder's lock,
@@ -406,9 +447,19 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
     return new RunLockedError(
       lock,
       host === undefined
-        ? `pid ${pid} from a lock written before the host field existed, liveness unknown from here, held ${age}s`
-        : `pid ${pid} on host ${host}, liveness unknown from here, held ${age}s`,
+        ? `pid ${pid} from a lock written before the host field existed, liveness unknown from here, ${ageText}`
+        : `pid ${pid} on host ${host}, liveness unknown from here, ${ageText}`,
       holder,
+      false,
+      // Same honesty this branch demands of the same-host one: a hostname can
+      // CHANGE (a recreated container, a dhcp renewal), so "another host" does
+      // not always mean another machine — but this module will not probe or
+      // clear a lock whose host it cannot match, so long silence plus a ps on
+      // the box is the operator's evidence, stated as guidance rather than
+      // acted on. Behavior unchanged: still refused, still not stale.
+      host === undefined
+        ? ""
+        : ` — held ${age}s already. Hostnames change (a recreated container or a dhcp renewal can leave THIS box matching nothing): if ${host} looks like this machine under an older name and no harvest or teardown of this run is running anywhere sharing this directory, that long silence is the evidence — check \`ps -p ${pid}\` on the box; this module will not probe or clear a lock whose host it cannot match`,
     );
   }
   // OUR OWN pid, on our own host, in a body we did not write (`claimedByUs`
@@ -428,9 +479,45 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
   // so it cannot also name a live holder. `isAlive` would say "yes" (it is us)
   // and send the operator to wait on themselves forever.
   if (pid === String(process.pid)) {
+    // A matching pid alone does not PROVE the holder is dead: the same runs
+    // directory reachable under two spellings (a symlinked path, a case-
+    // insensitive mount) gives one live lock two resolved paths, so the
+    // `held.has(lock)` guard in `acquireRunLock` missed and this "claim" is
+    // our OWN live lock seen through an alias — marking it stale advises an
+    // `rm` of a lock we hold mid-destruction. Before calling it provably
+    // stale, require realpath identity with an entry this process actually
+    // holds; anything unprovable (the lock or a held entry unreadable to
+    // realpath) reads as a LIVE holder. Fail-closed kept: only the proven-
+    // unheld case is ever marked stale.
+    let provenUnheld = false;
+    try {
+      const real = realpathSync(lock);
+      provenUnheld = true;
+      for (const h of held.keys()) {
+        try {
+          if (realpathSync(h) === real) {
+            provenUnheld = false;
+            break;
+          }
+        } catch {
+          // A vanished or unreadable held entry proves nothing either way.
+        }
+      }
+    } catch {
+      // The lock itself cannot be resolved to a real path — no proof of death.
+    }
+    if (!provenUnheld) {
+      return new RunLockedError(
+        lock,
+        `pid ${pid} is this invocation's own pid and the lock is live under another spelling of the same directory, ${ageText}`,
+        holder,
+        false,
+        " — the run lock is not re-entrant and this process HOLDS it (reached through a different path spelling): release that claim instead of removing this file",
+      );
+    }
     return new RunLockedError(
       lock,
-      `pid ${pid} is this invocation's own pid but the claim is not one it registered, held ${age}s`,
+      `pid ${pid} is this invocation's own pid but the claim is not one it registered, ${ageText}`,
       holder,
       true,
       ` — either a dead predecessor's pid was recycled onto this process, or an earlier claim of this process outlived a failed release. No live invocation can hold it: this pid is ours. rm ${lock}, then re-run`,
@@ -439,7 +526,7 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
   // PID liveness, not just the number: without it the printed remediation
   // ("only if that pid is gone") is unfollowable, and pid reuse makes it wrong.
   const alive = isAlive(Number(pid));
-  const who = `pid ${pid}${alive ? "" : " is not running"}, held ${age}s`;
+  const who = `pid ${pid}${alive ? "" : " is not running"}, ${ageText}`;
   // Pid reuse cuts BOTH ways, and this is the direction the comment above does
   // not cover: after a SIGKILL the OS can recycle the holder's pid onto an
   // unrelated process, `isAlive` reads that stranger as the holder, and the
@@ -449,10 +536,16 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
   // to prevent. Make the DIAGNOSIS honest instead: the body already carries
   // `createdAt`, so an implausible hold is detectable, and a process start time
   // later than the lock's proves the pid is not the holder.
+  //
+  // A future-dated body gets the same hint from the other side (FR10): with
+  // createdAt ahead of this host's clock the age is unknowable here, so "wait"
+  // is advice about an unmeasurable interval — point at `ps` against NOW.
   const note =
-    alive && age > IMPLAUSIBLE_HOLD_S
-      ? ` — note: held ${age}s, far longer than any invocation runs. If its holder was SIGKILLed the OS may have recycled pid ${pid} onto an unrelated process: check \`ps -p ${pid} -o lstart=,args=\`, and if that process started after ${new Date(at).toISOString()} it is NOT the holder and the lock is safe to rm`
-      : "";
+    alive && futureS > 0
+      ? ` — note: the lock claims creation ${futureS}s ahead of this host's clock, so its hold length cannot be judged from here. Check \`ps -p ${pid} -o lstart=,args=\`: if that process started after ${new Date(Date.now()).toISOString()} it is likely a recycled pid, not the holder`
+      : alive && age > IMPLAUSIBLE_HOLD_S
+        ? ` — note: held ${age}s, far longer than any invocation runs. If its holder was SIGKILLed the OS may have recycled pid ${pid} onto an unrelated process: check \`ps -p ${pid} -o lstart=,args=\`, and if that process started after ${new Date(at).toISOString()} it is NOT the holder and the lock is safe to rm`
+        : "";
   return new RunLockedError(lock, who, holder, !alive, note);
 }
 
@@ -865,7 +958,21 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
     throw new Error(`could not read ${lock} while releasing it (${(e as Error).message}) — ${restore(claimed, lock)}`);
   }
   if (onDisk === body) {
-    rmSync(claimed, { force: true });
+    // The rename+verify above PROVED the taken bytes are ours — the release
+    // has already succeeded, and this rm is tidy-up of our own private
+    // `.rescue` copy. An unguarded rm here converted a SUCCESSFUL release into
+    // a thrown "lock-release-failed" on EACCES/EIO: callers exited 1 over a
+    // teardown that did land (after printing `torn down:`), the rescue copy
+    // was left as litter anyway, and the remediation named an rm for a lock
+    // that no longer existed. Best-effort, matching every other guarded
+    // cleanup in this module; `force: true` already absorbs ENOENT.
+    try {
+      rmSync(claimed, { force: true });
+    } catch (e) {
+      writeStderr(
+        `warning: released ${lock}, but could not remove the rescue copy ${claimed}: ${(e as Error).message}\n`,
+      );
+    }
     return;
   }
   // Re-claimed inside the rename window — vanishingly narrow, but the body is

@@ -96,7 +96,7 @@ import {
   RunLockedError,
 } from "./lib/run-lock.ts";
 import { BriefSchema } from "../src/fleet/brief-schema.ts";
-import { log, setLogSink, newRequestId } from "../src/swarmclaw/log.ts";
+import { log, logSink, setLogSink, newRequestId } from "../src/swarmclaw/log.ts";
 import {
   assertFleetRunId,
   dispatch,
@@ -151,6 +151,61 @@ const VALUE_FLAGS = flagNames(false);
  */
 const HELP_ALIAS = "-h";
 const BOOL_FLAGS = [...flagNames(true), HELP_ALIAS];
+
+/**
+ * Startup grammar validation (round 10): the tokenizer's two lists are UNIONS
+ * over every verb's flags, so nothing in the derivation itself stops the same
+ * flag name from being a boolean for one verb and a value flag for another —
+ * it would then land in BOTH `BOOL_FLAGS` and `VALUE_FLAGS`, and `tokenizeArgs`
+ * would split one verb's argv by the other verb's grammar (`--pin x` consumed
+ * as a value for the boolean verb, left dangling for the valued one). The
+ * registry is the contract, so an incoherent one must refuse to start rather
+ * than mis-parse at runtime. Exported so tests can pin the helper directly;
+ * empty ⇒ clean.
+ */
+export function flagTypeConflicts(entries: readonly VerbEntry[]): string[] {
+  const typesByName = new Map<string, Set<string>>();
+  for (const v of entries) {
+    for (const f of v.flags) {
+      const types = typesByName.get(f.name) ?? new Set<string>();
+      types.add(f.valueType);
+      typesByName.set(f.name, types);
+    }
+  }
+  const conflicts: string[] = [];
+  // Code-unit sort: deterministic across locales (localeCompare is not).
+  for (const name of [...typesByName.keys()].sort()) {
+    const types = typesByName.get(name) as Set<string>;
+    if (types.size > 1) conflicts.push(`${name} is ${[...types].sort().join(" on some verbs, ")}`);
+  }
+  return conflicts;
+}
+// Fail fast at startup, before any verb can run against the broken grammar.
+const FLAG_TYPE_CONFLICTS = flagTypeConflicts(listVerbs());
+if (FLAG_TYPE_CONFLICTS.length > 0) {
+  throw new Error(`fleet registry flag-type conflicts: ${FLAG_TYPE_CONFLICTS.join("; ")}`);
+}
+// The help tokens MUST ride the boolean table. `parseValueFlags`'s own help
+// clause answers its match with writeSync + `process.exit(0)` — fatal to an
+// embedder and to the test runner, and mid-verb an exit 0 is a phantom success.
+// They are unreachable there only because every registry entry declares
+// `--help` boolean and `-h` is aliased into BOOL_FLAGS below; this invariant
+// turns a registry edit that silently breaks that premise into a startup
+// refusal instead of a live exit-on-match path.
+for (const helpToken of ["--help", HELP_ALIAS]) {
+  if (!BOOL_FLAGS.includes(helpToken)) {
+    throw new Error(`fleet grammar: ${helpToken} must be a derived boolean flag, never a parseValueFlags help match`);
+  }
+}
+
+/**
+ * The log sink as it stood when THIS module loaded. `run()` wires the
+ * best-effort stderr sink only when the installed sink is still this default —
+ * so embedders get hardened diagnostics without losing stdout purity, while a
+ * caller that deliberately installed its own collector (tests) keeps it. Live
+ * import binding: reflects any setLogSink that ran before this line.
+ */
+const BOOT_LOG_SINK = logSink;
 
 /**
  * Injectable seams (repo DI idiom; tests override without module mocks).
@@ -268,12 +323,16 @@ function assertRecordsDirUsable(dir: string | undefined, injected: RunRecordStor
   try {
     st = statSync(dir);
   } catch (e) {
+    // `bounded`: `--dir $(head -c 200000 /dev/urandom)` is refused, but the
+    // refusal must not echo all of what the operator typed (round 10 — every
+    // argv-derived echo in an envelope goes through the same cap as a log
+    // field; redact-first is bounded's own order).
     throw usageError(
-      `--dir ${dir} does not exist: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`,
+      `--dir ${bounded(dir)} does not exist: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`,
       "point --dir at the records directory the run was dispatched with — this verb never creates one",
     );
   }
-  if (!st.isDirectory()) throw usageError(`--dir ${dir} is not a directory`, "point --dir at the records directory");
+  if (!st.isDirectory()) throw usageError(`--dir ${bounded(dir)} is not a directory`, "point --dir at the records directory");
 }
 
 /**
@@ -304,8 +363,9 @@ function unusedStore(dir: string): RunRecordStore {
  * payload (assertionCode, DF2.8 fields, reason…) can never overwrite the
  * `code`/`message` the caller switches on.
  *
- * Redaction happens at the two places FOREIGN text enters this file (`asUsage`
- * and `report`'s untyped branch), not here. Doing it here instead covers one
+ * Redaction happens at the places FOREIGN text enters this file (`asUsage`,
+ * `report`'s untyped branch, and `ingestBriefJson`'s invalid-brief embed of a
+ * JSON.parse message), not here. Doing it here instead covers one
  * more path and breaks a real one: `redactSecrets` blanks any ≥40-char opaque
  * token, and the messages this file composes itself deliberately ECHO argv —
  * `fleet teardown $(200KB)` is answered with the first 96 characters of what
@@ -338,9 +398,10 @@ function printError(
  * automation reading `exitStatus` retried them forever. Only the classification
  * changes — and the redaction below, which is not a change of meaning.
  *
- * This is one of the two places text this file did not compose becomes text it
- * PRINTS, so it is one of the two places `redactSecrets` belongs (the other is
- * `report`'s untyped branch). A driver constructor or `openRouterKeyApi()` that
+ * This is one of the places text this file did not compose becomes text it
+ * PRINTS, so it is one of the places `redactSecrets` belongs (the others are
+ * `report`'s untyped branch and the invalid-brief embed in
+ * `ingestBriefJson`). A driver constructor or `openRouterKeyApi()` that
  * throws with the request URL or a key prefix in `.message` used to have it
  * copied verbatim into the exit-2 envelope — the provider layer's INV-4/INV-6
  * redaction stopped dead at this module boundary, while every `src/` sink runs
@@ -463,7 +524,10 @@ function parseArgv(argv: readonly string[]): ParseResult {
       rejectStraySingleDash: true,
     });
   } catch (e) {
-    throw usageError((e as Error).message, HELP);
+    // `bounded`: the tokenizer's messages embed the raw token (`unknown flag:
+    // -<200KB>`), so the envelope must cap what argv put in it — same bound as
+    // every other argv-derived echo in this file.
+    throw usageError(bounded((e as Error).message), HELP);
   }
   const { positionals, flagTokens, bools } = tokens;
   // The other half of the duplicate-flag guard below. `bools` is a Set, so
@@ -473,11 +537,17 @@ function parseArgv(argv: readonly string[]): ParseResult {
   // because the Set has already lost the count; a bool token can never be a
   // positional (run ids never start with `-`) nor a value (the space form
   // refuses a `--`-prefixed value, cli-args.ts).
+  //
+  // Aliases are canonicalized BEFORE the count: `-h --help` names one flag
+  // twice, but the raw-string scan saw two distinct tokens and waved it
+  // through to the Set, which collapsed it — the guard existed for exactly
+  // this invocation and missed it (round 10).
   const seenBool = new Set<string>();
   for (const a of argv) {
-    if (!BOOL_FLAGS.includes(a)) continue;
-    if (seenBool.has(a)) throw usageError(`${a} given more than once`, HELP);
-    seenBool.add(a);
+    const name = a === HELP_ALIAS ? "--help" : a;
+    if (!BOOL_FLAGS.includes(name)) continue;
+    if (seenBool.has(name)) throw usageError(`${name} given more than once`, HELP);
+    seenBool.add(name);
   }
   if (bools.delete(HELP_ALIAS)) bools.add("--help");
 
@@ -503,10 +573,22 @@ function parseArgv(argv: readonly string[]): ParseResult {
         if (flags.has(flag)) throw new Error(`${flag} given more than once`);
         flags.set(flag, value);
       },
+      /**
+       * NOT a token list — despite the sibling options' shapes, this is the
+       * help TEXT `parseValueFlags` writes before `process.exit(0)` when a bare
+       * `--help`/`-h` reaches it. It must stay unreachable: both tokens are
+       * intercepted into `bools` by `tokenizeArgs` (every registry entry
+       * declares `--help` boolean; `-h` rides BOOL_FLAGS), and the module-level
+       * invariant above refuses to start if that premise breaks. This CLI must
+       * NEVER take the exit-on-match path — mid-verb it would print usage and
+       * report success, and to an embedder it kills the process.
+       */
       help: [HELP],
     });
   } catch (e) {
-    throw usageError((e as Error).message, HELP);
+    // `bounded`, for the same reason as the tokenize catch above: the parser's
+    // messages embed raw argv (`unknown flag: --<200KB>`).
+    throw usageError(bounded((e as Error).message), HELP);
   }
 
   // Resolved from the PARSED flags, and only AFTER the value grammar has run.
@@ -526,7 +608,10 @@ function parseArgv(argv: readonly string[]): ParseResult {
 
   const entry = listVerbs().find((v) => v.verb === verb);
   if (entry === undefined) {
-    throw new FleetError(2, "unknown-verb", `unknown verb ${JSON.stringify(verb)}`, HELP);
+    // Both echoes `bounded`: argv-derived, so a refusal must not repeat an
+    // unbounded slice of what was typed (round 10 — same cap as the log
+    // fields, redact-first).
+    throw new FleetError(2, "unknown-verb", `unknown verb ${JSON.stringify(bounded(verb))}`, HELP);
   }
   // AC6 parity in BOTH directions: the registry says which flags a verb takes,
   // so `fleet status --brief x` is refused rather than silently accepted.
@@ -534,7 +619,10 @@ function parseArgv(argv: readonly string[]): ParseResult {
   for (const flag of [...flags.keys(), ...bools]) {
     if (!allowed.has(flag)) {
       const list = [...allowed].join(" ");
-      throw usageError(`${verb} does not take ${flag}`, `flags for ${verb}: ${list === "" ? "(none)" : list}`);
+      throw usageError(
+        `${bounded(verb)} does not take ${bounded(flag)}`,
+        `flags for ${bounded(verb)}: ${list === "" ? "(none)" : list}`,
+      );
     }
   }
   return { entry, positionals, flags, bools };
@@ -565,15 +653,33 @@ function readBriefFile(briefPath: string): string {
     new FleetError(
       2,
       "brief-unreadable",
-      `cannot read --brief ${briefPath}: ${why}`,
+      `cannot read --brief ${bounded(briefPath)}: ${why}`,
       "point --brief at a readable regular JSON file",
     );
+  /**
+   * Classify by whether a RETRY could clear it — the same doctrine `asUsage`
+   * applies to its constructors, now applied here too. EMFILE/ENFILE/EAGAIN
+   * are the substrate running out of fds or a non-blocking fd refusing, not a
+   * typo'd path: wrapping them into the permanent exit-2 envelope told
+   * automation "never retry" while the condition was gone milliseconds later
+   * (round 10). They rethrow raw so `report` renders them as exit 1
+   * `transient`; everything else stays the usage refusal.
+   */
+  // Explicit variable annotation, not just the arrow's return type: TypeScript
+  // narrows control flow across a never-returning call only when the callee is
+  // so annotated at the DECLARATION.
+  const unreadableOrTransient: (e: unknown) => never = (e) => {
+    const errno = (e as NodeJS.ErrnoException | null)?.code;
+    if (errno !== undefined && RETRYABLE_ERRNOS.has(errno)) throw e;
+    throw unreadable(errno ?? (e as Error).message);
+  };
   let st: ReturnType<typeof statSync>;
   try {
     st = statSync(briefPath);
   } catch (e) {
     // ENOENT / EACCES / ELOOP are not "invalid JSON" — the file was never read.
-    throw unreadable((e as NodeJS.ErrnoException).code ?? (e as Error).message);
+    // (Transient errnos exit 1 instead — see `unreadableOrTransient`.)
+    unreadableOrTransient(e);
   }
   // A directory, /dev/zero or a FIFO all report size 0: the cap would be
   // vacuous and the read unbounded. Only a regular file has a size worth
@@ -600,7 +706,7 @@ function readBriefFile(briefPath: string): string {
   try {
     fd = openSync(briefPath, "r");
   } catch (e) {
-    throw unreadable((e as NodeJS.ErrnoException).code ?? (e as Error).message);
+    unreadableOrTransient(e);
   }
   try {
     if (!fstatSync(fd).isFile()) throw unreadable("not a regular file");
@@ -611,7 +717,7 @@ function readBriefFile(briefPath: string): string {
       try {
         r = readSync(fd, buf, n, buf.length - n, null);
       } catch (e) {
-        throw unreadable((e as NodeJS.ErrnoException).code ?? (e as Error).message);
+        unreadableOrTransient(e);
       }
       if (r <= 0 || n + r >= buf.length) {
         n += Math.max(0, r);
@@ -670,7 +776,7 @@ function assertOneBriefSource(briefPath: string): void {
   }
   if (st.isCharacterDevice()) return;
   throw usageError(
-    `--brief ${briefPath} was given AND a brief was redirected onto stdin`,
+    `--brief ${bounded(briefPath)} was given AND a brief was redirected onto stdin`,
     "pass the brief exactly one way: `--brief <path>`, or on stdin with no --brief",
   );
 }
@@ -748,6 +854,11 @@ function makeLedgerFactory(store: RunRecordStore): () => LedgerLike {
   return (): LedgerLike => {
     const ledger = new CostLedger({
       ...costLedgerOpts(store.dir),
+      // Orphan-guard seam wiring (round 10): without it, recordStructurallyAbsent
+      // stats `$QDS_RUNS_DIR ?? .sandbox/runs` — a directory THIS store never
+      // wrote — so an aged read-fault cross-check reads absence from the wrong
+      // tree.
+      runsDir: store.dir,
       readRunRecord: (id: string) => {
         try {
           return store.get(id);
@@ -843,6 +954,16 @@ function logVerb(
   startedAt: number,
   code: number,
   exitStatusOverride?: ExitStatus,
+  /**
+   * The one field that keeps a help request from being counted as a successful
+   * verb execution (round 10): `fleet teardown <id> --driver real --help` used
+   * to land a line indistinguishable from `fleet teardown <id>` — same
+   * `status:"ok"`, same `exitStatus:"success"` — and dashboards counting
+   * completions by this line counted a phantom teardown. It stays exit 0 (a
+   * help request IS a successful invocation of the help path); it just no
+   * longer CLAIMS to be a completed verb.
+   */
+  phase: "complete" | "help" = "complete",
 ): number {
   const durationMs = Date.now() - startedAt;
   log({
@@ -858,10 +979,14 @@ function logVerb(
     // call site (one that forgot is how the unbounded `runId` shipped).
     runId: runId === undefined ? null : bounded(runId),
     verb: bounded(verb),
-    phase: "complete",
+    phase,
     exitCode: code,
-    exitStatus: (exitStatusOverride ??
-      (code === 0 ? "success" : code === 1 ? "transient" : "logic")) as ExitStatus,
+    // A caller with knowledge the exit table lacks (the only statuses it can
+    // name are success/transient/logic) passes its own classification; the
+    // table below is the fallback for every call site that has nothing
+    // finer-grained to add.
+    exitStatus:
+      exitStatusOverride ?? ((code === 0 ? "success" : code === 1 ? "transient" : "logic") as ExitStatus),
   });
   return code;
 }
@@ -895,6 +1020,34 @@ function bounded(s: string | undefined): string {
   if (s === undefined) return "(none)";
   const safe = redactSecrets(s);
   return safe.length <= MAX_ECHO ? safe : `${safe.slice(0, MAX_ECHO)}…(${safe.length} chars)`;
+}
+
+/**
+ * Observe the run-id MINT through the one object both sides of a dispatch
+ * already share — the record store. `dispatch()` persists the record via
+ * `store.create(runId)` long before its promise resolves, but the CLI only
+ * learned the id from the RESOLVED ack, so a SIGINT landing between the two
+ * logged the interrupt line with `runId: null` for a run that demonstrably
+ * existed on disk. Wrapping the store turns the persist itself into the
+ * notification; the first created id wins, and every other member forwards
+ * untouched (RunRecordStore's privates are compile-time only, so property
+ * access through the proxy is transparent).
+ *
+ * Additive by design: no seam was added to src/fleet/dispatch.ts, and an
+ * injected store is wrapped exactly like a constructed one. Exported so tests
+ * can pin the forwarding + capture contract directly.
+ */
+export function observingMint(store: RunRecordStore, onMinted: (runId: string) => void): RunRecordStore {
+  return new Proxy(store, {
+    get(target, prop) {
+      if (prop !== "create") return Reflect.get(target, prop);
+      const create = target.create.bind(target);
+      return (runId: string, now?: Date) => {
+        onMinted(runId);
+        return create(runId, now);
+      };
+    },
+  });
 }
 
 export async function run(
@@ -951,12 +1104,27 @@ export async function run(
    * NOT used for the dispatch ack — see the write there.
    */
   let outputIncomplete = false;
-  const emit = (s: string): void => {
+  /**
+   * `failOnEpipe` splits the two kinds of stdout this file writes. Plain
+   * listings (`fleet status | head -1`) keep the silent tolerance — a hung-up
+   * reader is reading nothing more either way, and a read-only query must not
+   * look like a substrate failure. COMPLETION lines routed through
+   * `reportCompletion` do not: there the line IS the only report of work that
+   * already happened, so a lost line is exactly the landed-but-unreportable
+   * case that verb's exit 6 posture exists for — the same treatment ENOSPC and
+   * EBADF already got. Before round 10 an EPIPE on `torn down:` vanished
+   * silently with exit 0 while its siblings reported 6 through the same
+   * envelope.
+   */
+  const emit = (s: string, failOnEpipe = false): void => {
     try {
       out(s);
     } catch (e) {
       const errno = (e as NodeJS.ErrnoException | null)?.code ?? "";
-      if (errno === "EPIPE") return;
+      if (errno === "EPIPE") {
+        if (!failOnEpipe) return;
+        throw e;
+      }
       if (errno !== "EAGAIN" && errno !== "EWOULDBLOCK") throw e;
       // One line per invocation, not per refused write: a full pipe refuses
       // every row after the first, and the diagnostic must not itself be what
@@ -985,22 +1153,28 @@ export async function run(
     runId: string | undefined,
     code: number,
     exitStatusOverride?: ExitStatus,
-  ): number => logVerb(rid, v, runId, startedAt, code === 0 && outputIncomplete ? 6 : code, exitStatusOverride);
+    phase?: "complete" | "help",
+  ): number =>
+    logVerb(rid, v, runId, startedAt, code === 0 && outputIncomplete ? 6 : code, exitStatusOverride, phase);
   /**
    * The dispatch ack's posture over the COMPLETION lines — teardown's
    * `torn down:` and harvest's `harvested:`. Those lines describe work that has
    * already happened: a destroyed box, a closed record, a captured tree. A bare
-   * `emit` tolerates EPIPE silently and EAGAIN as `stdout-truncated`, but a
-   * non-EPIPE/EAGAIN throw (ENOSPC, EBADF) escaped the verb's try into
+   * `emit` tolerates EPIPE silently and EAGAIN as `stdout-truncated`, but any
+   * other write failure (ENOSPC, EBADF) escaped the verb's try into
    * `report`, which stamps it exit 1 = `transient` = "retry me" — automation
    * re-running a destructive verb that had already landed. So the write failure
    * is caught here, named ONCE on stderr, and reported as false: the caller
    * exits 6, "the work landed but its line did not print", outside the retry
    * range like every other landed-but-unreportable code in this file.
+   *
+   * EPIPE rides the same path since round 10 (`failOnEpipe`): a completion line
+   * lost to a closed pipe is as lost as one lost to ENOSPC — `| head -1` must
+   * not turn "the box is destroyed" into a silent success the caller never saw.
    */
   const reportCompletion = (...lines: string[]): boolean => {
     try {
-      for (const line of lines) emit(line);
+      for (const line of lines) emit(line, true);
       return true;
     } catch (e) {
       const x = (e ?? {}) as { message?: string };
@@ -1021,9 +1195,20 @@ export async function run(
   // line"). Help used to be the exception, which made `fleet teardown <id>
   // --driver real --help` — an operator who meant to destroy a box and did not
   // — the one invocation a dashboard could not see at all.
+  // Wire the hardened diagnostics sink for EMBEDDED callers (round 10): the
+  // import.meta.main binding below only ever ran for the CLI itself, so a
+  // library caller of run() got the module-default sink — plain stdout writes,
+  // no best-effort guard. Idempotent and non-invasive: wired only when the
+  // installed sink is STILL this module's boot default (a caller that set its
+  // own collector keeps it), and skipped under bun test's muting policy so a
+  // sink-less suite stays quiet (log.ts's NODE_ENV rule, replicated because it
+  // is not exported).
+  if (logSink === BOOT_LOG_SINK && !(process.env.NODE_ENV === "test" && !process.env.QDS_LOG_VERBOSE)) {
+    setLogSink((entry) => writeBestEffort(2, `${JSON.stringify(entry)}\n`));
+  }
   if (argv[0] === "help") {
     emit(`${HELP}\n`);
-    return finish(newRequestId(), "help", undefined, 0);
+    return finish(newRequestId(), "help", undefined, 0, undefined, "help");
   }
 
   let parsed: ParseResult;
@@ -1063,8 +1248,10 @@ export async function run(
     emit(`${HELP}\n`);
     // `bounded`, and defaulting to the verb the operator effectively invoked:
     // `fleet --help` names none, and an unbounded `fleet $(200KB) --help` would
-    // otherwise put all of it in the field the dashboards key on.
-    return finish(newRequestId(), bounded(parsed.verb ?? "help"), undefined, 0);
+    // otherwise put all of it in the field the dashboards key on. `phase:
+    // "help"` — see logVerb: a help line must not be countable as a completed
+    // verb execution.
+    return finish(newRequestId(), bounded(parsed.verb ?? "help"), undefined, 0, undefined, "help");
   }
   const { entry, positionals, flags, bools } = parsed;
   const verb = entry.verb;
@@ -1155,7 +1342,11 @@ export async function run(
         // still owns 0 and 65536+.
         port = /^[1-9]\d{0,4}$/.test(portRaw) ? Number(portRaw) : Number.NaN;
         if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-          throw usageError(`--port ${JSON.stringify(portRaw)} is not a TCP port`, "--port takes an integer 1-65535");
+          // `bounded`: a rejected value is echoed, and argv is unbounded.
+          throw usageError(
+            `--port ${JSON.stringify(bounded(portRaw))} is not a TCP port`,
+            "--port takes an integer 1-65535",
+          );
         }
       }
 
@@ -1221,7 +1412,14 @@ export async function run(
         ...seams,
         driver,
         keyApi: deps?.keyApi ?? (briefCanMint ? asUsage(() => openRouterKeyApi()) : unusedKeyApi()),
-        store,
+        // The interrupt handlers below log `dispatchRunId`, which the resolved
+        // ack used to set too late: a SIGINT after `store.create` persisted the
+        // record but before dispatch() returned reported `runId: null` for a
+        // run that exists. The store is where the mint becomes visible, so it
+        // is observed here (round 10).
+        store: observingMint(store, (minted) => {
+          if (dispatchRunId === undefined) dispatchRunId = minted;
+        }),
         ledgerFactory,
         requestId,
         ...(port === undefined ? {} : { port }),
@@ -1984,6 +2182,9 @@ export async function run(
         () =>
           new CostLedger({
             ...costLedgerOpts(store.dir),
+            // FP1 (round 10): orphan-expiry stat probes target THIS store's
+            // runs dir (see makeLedgerFactory twin).
+            runsDir: store.dir,
             readRunRecord: (id: string) => {
               try {
                 const r = getRecord({ store }, id);
@@ -2002,12 +2203,36 @@ export async function run(
       );
       tdeps.costLedger = ledger;
       const noHarvest = bools.has("--no-harvest");
-      // Past this point an interrupt must NOT drop the lock: `teardownSandbox`
-      // destroys the box, revokes the key and closes the record, and a Ctrl-C
-      // partway through leaves a state only an operator can judge. Automatic
-      // release would hand it straight to the next teardown, which would re-run
-      // against a half-torn-down run.
-      markRunLockDestructive(lock);
+      /**
+       * Guarded like its sibling `clearRunLockDestructive` below (round 10): a
+       * PARTIAL mark write leaves the lock file's ownership body unreadable, so
+       * every later release attempt refuses — the same "wedged, needs an
+       * operator" shape that finally gives exit 6, and never the exit-1
+       * "retry me" an unguarded throw produced. Fail CLOSED as well: the mark
+       * is what makes the destructive window safe to interrupt into, so a
+       * failed mark aborts BEFORE `teardownSandbox`. Nothing has been
+       * destroyed; `destructiveInFlight` stays false, so the finally releases
+       * the still-clean lock (or reports it un-releasable if the partial write
+       * corrupted it — either way the operator is told).
+       */
+      let marked = true;
+      try {
+        markRunLockDestructive(lock);
+      } catch (e) {
+        marked = false;
+        const x = (e ?? {}) as { message?: string };
+        printError(
+          note,
+          "lock-mark-failed",
+          `could not mark ${lock} destructive: ${redactSecrets(x.message ?? e)} — refusing to tear down ${runIdArg}`,
+          `nothing was destroyed; inspect and rm ${lock} by hand once no other invocation holds it, then re-run`,
+        );
+        // Nothing was destroyed and the lock is still clean: returning now lets
+        // the finally run its normal release path (`destructiveInFlight` stayed
+        // false), and 6 — not the unguarded throw's retryable 1 — reports the
+        // wedged mark.
+        return finish(requestId, verb, runIdArg, 6);
+      }
       destructiveInFlight = true;
       await teardownSandbox(tdeps, runIdArg, { noHarvest });
       // The destructive sequence completed: box destroyed, key revoked (or

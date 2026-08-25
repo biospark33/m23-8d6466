@@ -162,13 +162,44 @@ describe("redactSecrets", () => {
     // The bounded arm is ordered terminated-first and its SECOND branch cannot
     // fail, which is what keeps the scan linear. A bounded arm that CAN fail is
     // retried at every `-----BEGIN` in the text and pays the full 8 KB cap each
-    // time — measured at 3.7 s on this input against ~1 ms here. The bound is
-    // deliberately loose (3 orders of magnitude above the real figure): it is
-    // there to catch the superlinear shape, not to benchmark the machine.
-    const noisy = "-----BEGIN mention in provider output. ".repeat(25_000); // ~1 MB
-    const started = Date.now();
-    redactSecrets(noisy);
-    expect(Date.now() - started).toBeLessThan(2_000);
+    // time — measured at 3.7 s on a 1 MB input against ~1 ms here.
+    //
+    // SCALING, not wall-clock: both measurements push the SAME number of bytes
+    // through the redactor, so linear cost bills them about equally while the
+    // quadratic arm's per-byte rate grows with the INPUT size — its ratio tracks
+    // the 20× size step between the two inputs. An absolute ceiling flakes on a
+    // loaded CI runner; this ratio does not.
+    const unit = "-----BEGIN mention in provider output. ";
+    const scanMs = (repeats: number, passes: number): number => {
+      const input = unit.repeat(repeats);
+      const started = Date.now();
+      for (let i = 0; i < passes; i++) redactSecrets(input);
+      return Math.max(Date.now() - started, 1);
+    };
+    const smallMs = scanMs(10_000, 200); // 200 × ~400 KB
+    const bigMs = scanMs(200_000, 10); //   10 × ~8 MB — same total bytes
+    expect(bigMs / smallMs).toBeLessThan(8);
+  });
+
+  test("a JSON-ESCAPED PEM body on one line is swallowed whole by the same arm", () => {
+    // How the block actually reaches the redactor from structured sinks: a log
+    // entry stringified to JSON turns every newline into the two literal
+    // characters `\` + `n`, so the block arrives as ONE line with no `\n` byte
+    // anywhere in it. The PEM arm's body matcher is `[\s\S]{0,N}?`, i.e. ANY
+    // character including those two, so escaping must not reopen the hole the
+    // arm closed — most importantly for the short tail line the long-token arm
+    // would otherwise pass.
+    const pem = [
+      "-----BEGIN OPENSSH PRIVATE KEY-----",
+      "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAA",
+      "AbCd", // the short tail line the token arm would have passed
+      "-----END OPENSSH PRIVATE KEY-----",
+    ].join("\\n"); // literal backslash-n between segments, JSON-style
+    const wrapped = JSON.stringify({ stderr: pem });
+    const out = redactSecrets(wrapped);
+    expect(out).not.toContain("b3BlbnNzaC1rZXktdjE");
+    expect(leakScan(pem, out)).toBeNull();
+    expect(out).toContain("«redacted»");
   });
 
   test("the `keep` splice-back is budgeted: forged marks in provider text stay literal", () => {

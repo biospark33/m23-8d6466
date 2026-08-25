@@ -19,13 +19,17 @@
  */
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import { Database } from "bun:sqlite";
 
 import type { CostEvent } from "../../cli-anything/src/types.ts";
 import { canonicalRepoSlug } from "../phase-engine/issue-correlation.ts";
 import { log, newRequestId } from "../swarmclaw/log.ts";
+// The orphan guard's stat cross-check resolves the record filename the same way
+// the DF2.1 store does, and admits its READ-path id grammar — both live there,
+// and a second copy of either is a grammar that drifts.
+import { LEGACY_RUN_ID_RE, resolveRunsDir } from "./run-record.ts";
 
 // ─── units ───────────────────────────────────────────────────────────────────
 
@@ -107,9 +111,20 @@ function sqlCanonicalIssueId(col: string): string {
  * `cost_events_issue_canonical`; the mirrored expression is the recovery path
  * for legacy rows only, and over-inclusive in the safe direction — it can add
  * spend the cap had lost sight of, never subtract any.
+ *
+ * The SLUG half folds on the column side too, mirroring `canonicalRepoSlug`'s
+ * trim as well as its case fold. Folding only `lower()` left a row stored with
+ * a padded raw slug (`" qds/demo "`, written by a pre-canonicalisation build)
+ * permanently unmatchable: its priced spend vanished from every SUM the cap
+ * reads — an UNDER-count, which is the cap-bypass direction. The trim set is
+ * the same ASCII set `sqlCanonicalIssueId` uses, with the same documented
+ * divergence from JS `.trim()`'s Unicode set; over-inclusion only ever ADDS
+ * spend to a scope, never subtracts.
  */
 function issueScopeSql(slugCol = "repo_slug", issueCol = "issue_id"): string {
-  return `lower(${slugCol}) = ? AND (${issueCol} = ? OR ${sqlCanonicalIssueId(issueCol)} = ?)`;
+  // Space, tab, LF, VT, FF, CR — JS `.trim()`'s ASCII set (same list as sqlCanonicalIssueId).
+  const trimmedSlug = `trim(${slugCol}, char(32,9,10,11,12,13))`;
+  return `lower(${trimmedSlug}) = ? AND (${issueCol} = ? OR ${sqlCanonicalIssueId(issueCol)} = ?)`;
 }
 
 /** The three binds `issueScopeSql` expects, canonicalised once. */
@@ -270,11 +285,16 @@ CREATE TABLE IF NOT EXISTS cost_events (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS cost_events_issue ON cost_events (repo_slug, issue_id, unpriced);
 -- Identity is the CANONICAL slug (see canonicalRepoSlug): every issue-scoped
--- predicate below filters on lower(repo_slug), so the index has to be on the
--- same expression or SQLite falls back to a scan. The raw-column index above is
--- kept: cost_events_run and per-row lookups still use the stored value.
+-- predicate filters on lower(trim(repo_slug, …)), so the index has to be on the
+-- SAME expression or SQLite falls back to a scan — inside BEGIN IMMEDIATE on
+-- the admission path. The older lower()-only expression below is kept for
+-- existing databases (IF NOT EXISTS never rewrites one) and any external
+-- reader; the raw-column index above is kept: cost_events_run and per-row
+-- lookups still use the stored value.
 CREATE INDEX IF NOT EXISTS cost_events_issue_canonical
   ON cost_events (lower(repo_slug), issue_id, unpriced);
+CREATE INDEX IF NOT EXISTS cost_events_issue_canonical_trimmed
+  ON cost_events (lower(trim(repo_slug, char(32,9,10,11,12,13))), issue_id, unpriced);
 CREATE INDEX IF NOT EXISTS cost_events_run ON cost_events (run_id);
 CREATE TRIGGER IF NOT EXISTS cost_events_no_update
 BEFORE UPDATE ON cost_events
@@ -295,6 +315,8 @@ CREATE TABLE IF NOT EXISTS gate_admissions (
 CREATE INDEX IF NOT EXISTS gate_admissions_issue ON gate_admissions (repo_slug, issue_id);
 CREATE INDEX IF NOT EXISTS gate_admissions_issue_canonical
   ON gate_admissions (lower(repo_slug), issue_id);
+CREATE INDEX IF NOT EXISTS gate_admissions_issue_canonical_trimmed
+  ON gate_admissions (lower(trim(repo_slug, char(32,9,10,11,12,13))), issue_id);
 CREATE TRIGGER IF NOT EXISTS gate_admissions_no_update
 BEFORE UPDATE ON gate_admissions
 BEGIN SELECT RAISE(ABORT, 'gate_admissions is append-only (INV-COST-1)'); END;
@@ -616,6 +638,15 @@ export interface CostLedgerDeps {
   path?: string;
   /** Resolves run_id → the DF2.1 record's credential/lifetime fields. */
   readRunRecord?: (runId: string) => RunCostRecord | undefined;
+  /**
+   * The DF2.1 records directory the admission gate's orphan guard stats when a
+   * run-record read THROWS for an aged reservation — the cross-check that tells
+   * "the file is gone" (safe to expire) from "the file is there but unreadable"
+   * (a live run whose ceiling must stay counted). Defaults through
+   * `resolveRunsDir()`, i.e. `$QDS_RUNS_DIR ?? .sandbox/runs`; pass
+   * `store.dir` explicitly when the records were relocated by flag.
+   */
+  runsDir?: string;
   /** Explicit config; otherwise `loadCostConfig()` (env tier → `.sandbox/cost-config.json` → defaults). */
   config?: CostConfig;
 }
@@ -670,11 +701,13 @@ export type AdmissionDecision =
 export class CostLedger {
   private readonly db: Database;
   private readonly readRunRecord: (runId: string) => RunCostRecord | undefined;
+  private readonly runsDir: string;
   readonly config: CostConfig;
   readonly path: string;
 
   constructor(deps: CostLedgerDeps = {}) {
     this.path = deps.path ?? process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE;
+    this.runsDir = resolveRunsDir(deps.runsDir);
     // Fail-safe default (INV-COST-6): an unwired seam must not expire
     // reservations — a truthy stub keeps every outstanding admission counted
     // (over-reserving, never under-counting). The ingest paths stay fail-closed
@@ -1157,9 +1190,11 @@ export class CostLedger {
    * because the record resolves cleanly and the orphan expiry never fires.
    *
    * The one expiry: an admission older than `ADMISSION_GRACE_MS +
-   * ADMISSION_SKEW_MARGIN_MS` whose run record does not resolve through
-   * readRunRecord (createRun's store.create failed, so no run can ever exist)
-   * stops counting — see the orphan guard.
+   * ADMISSION_SKEW_MARGIN_MS` whose run record is STRUCTURALLY ABSENT — it does
+   * not resolve through readRunRecord AND the record path stats as ENOENT (or a
+   * confirmed zero-byte tombstone), so createRun's store.create failed and no
+   * run can ever exist — stops counting; a throw over a record still on disk
+   * keeps its ceiling counted (see the orphan guard).
    *
    * A retry reusing the same `(requestId, runId)` is idempotent: it is judged
    * against the headroom its original saw (its own reservation is excluded from
@@ -1335,6 +1370,20 @@ export class CostLedger {
       }[];
       const graceCutoff = Date.now() - ADMISSION_GRACE_MS - ADMISSION_SKEW_MARGIN_MS;
       let reservedMicroUsd = 0;
+      // The ONE add site for every path that counts a ceiling — the loop body
+      // below and the kept-reservation arm of the catch above it — so the
+      // safe-integer guard cannot drift out of either.
+      const reserve = (ceiling: number): void => {
+        reservedMicroUsd += ceiling;
+        // Overflow guard: sum of reservation ceilings can exceed MAX_SAFE_INTEGER
+        if (reservedMicroUsd > Number.MAX_SAFE_INTEGER) {
+          throw new CostLedgerError(
+            "ledger-overflow",
+            `sum of reservation ceilings (${reservedMicroUsd} µ$) exceeds safe integer range`,
+            "wait for existing reservations to retire, or raise the issue cap",
+          );
+        }
+      };
       for (const row of reservedRows) {
         // Orphan guard: a reservation counts while its run record resolves —
         // and, for the first ADMISSION_GRACE_MS, whether it resolves or not.
@@ -1365,18 +1414,19 @@ export class CostLedger {
         // the comment above promises did not happen — the corruption surfaced
         // 60s later, on somebody else's dispatch.
         //
-        // A THROW past the cutoff expires the reservation too. `undefined` and
-        // "the record cannot be read at all" are the same fact — this run will
-        // never report spend — and only the second one used to wedge the issue
-        // FOREVER: an ungrammatical run_id that landed in gate_admissions before
-        // assertValidRunId ever saw it, a corrupt record, or a 0-byte record
-        // caught mid-`createUnlogged` all make readRunRecord throw, and that
-        // throw refused every future dispatch for the issue while
-        // `gate_admissions_no_delete` blocked the manual remedy. A permanent
-        // refusal is not the fail-safe direction — it is a wedge with no exit.
-        // Below the cutoff the throw still propagates: a young unreadable record
-        // is far more likely a real in-flight dispatch than an orphan, and
-        // refusing once is recoverable where over-granting the cap is not.
+        // A THROW past the cutoff expires the reservation ONLY when the record's
+        // absence is STRUCTURAL (see the catch below): an ungrammatical run_id
+        // that landed in gate_admissions before assertValidRunId ever saw it,
+        // a proven-ENOENT path, or a 0-byte tombstone caught mid-`createUnlogged`.
+        // Those made readRunRecord throw and used to refuse every future
+        // dispatch for the issue while `gate_admissions_no_delete` blocked the
+        // manual remedy — a wedge with no exit, which is what expiry cures. A
+        // throw over a record that is demonstrably STILL ON DISK is the other
+        // fact: a live box whose ceiling must keep counting.
+        // Below the cutoff the throw still propagates either way: a young
+        // unreadable record is far more likely a real in-flight dispatch than
+        // an orphan, and refusing once is recoverable where over-granting the
+        // cap is not.
         let record: RunCostRecord | undefined;
         try {
           // Prefetched outside the write lock — but only a successful read is
@@ -1390,6 +1440,38 @@ export class CostLedger {
           record = cached ?? this.readRunRecord(row.runId);
         } catch (e) {
           if (young) throw e;
+          // An aged THROW is not automatically an absence. The record may be
+          // sitting on disk behind a transient fault — EIO on a flaky mount, an
+          // EACCES after a sibling's chown, a torn read — and the box it
+          // describes may be LIVE and billing right now. Dropping its ceiling
+          // from `reservedMicroUsd` handed the next dispatch the full remaining
+          // headroom ON TOP of that live exposure: overspend by design gap,
+          // with only the young-guard standing between them. So expiry is
+          // reserved for STRUCTURAL absence — proven ENOENT or a confirmed
+          // zero-byte tombstone (see `recordStructurallyAbsent`); anything else
+          // keeps the ceiling counted, under-admitting rather than
+          // over-admitting (INV-COST-6's direction).
+          if (!this.recordStructurallyAbsent(row.runId)) {
+            pendingLogs.push({
+              requestId: input.requestId,
+              operation: "cost-ledger.gate",
+              agentId: null,
+              timestamp: new Date().toISOString(),
+              duration: Date.now() - started,
+              status: "ok",
+              runId: input.runId,
+              repoSlug,
+              issueId,
+              code: "reservation-unresolvable-held",
+              orphanRunId: row.runId,
+              orphanDecidedAt: row.decidedAt,
+              orphanCeilingMicroUsd: row.ceiling,
+              message: `reservation for run ${row.runId} is past the grace window and its record could not be read (${(e as Error).message}) — the record file is present on disk (or its absence is unprovable), so its ceiling stays counted against the cap`,
+              outcome: "reservation-held",
+            });
+            reserve(row.ceiling);
+            continue;
+          }
           // Never silent: the expired row is named, so an operator can tell an
           // expiry from a reservation that simply retired. Queued, not logged —
           // the sink runs after the write lock is released.
@@ -1434,15 +1516,7 @@ export class CostLedger {
         ) {
           continue;
         }
-        reservedMicroUsd += row.ceiling;
-        // Overflow guard: sum of reservation ceilings can exceed MAX_SAFE_INTEGER
-        if (reservedMicroUsd > Number.MAX_SAFE_INTEGER) {
-          throw new CostLedgerError(
-            "ledger-overflow",
-            `sum of reservation ceilings (${reservedMicroUsd} µ$) exceeds safe integer range`,
-            "wait for existing reservations to retire, or raise the issue cap",
-          );
-        }
+        reserve(row.ceiling);
       }
       const unpricedRow = this.db
         .prepare(
@@ -1603,6 +1677,45 @@ export class CostLedger {
       sum_query_ms: durationMs,
     });
     return decision;
+  }
+
+  /**
+   * Can this reservation's run record be proven STRUCTURALLY ABSENT — gone in
+   * a way no retry will cure? Only YES may expire an aged admission.
+   *
+   * The gate's orphan expiry used to treat "readRunRecord threw" as the same
+   * fact as "no record", so a transient read fault past the grace window
+   * (EIO on a failing mount, EACCES from a sibling's chown) expired a LIVE
+   * run's reservation and re-granted its ceiling to the next dispatch while
+   * the box kept billing. The stat cross-check separates the two facts:
+   *
+   *  - the path stats ENOENT ⇒ absent: expire (createRun failed before
+   *    INV-1's record landed; nothing will ever report spend);
+   *  - the file exists at ZERO bytes ⇒ absent: expire — that is the
+   *    interrupted-create tombstone `clearCreateTombstone` documents, which
+   *    carries no keyHash and no box;
+   *  - anything else — a non-empty file, or a stat that fails with any other
+   *    errno — is UNPROVABLE, and unprovable counts as present: keep the
+   *    ceiling reserved. Over-reserving wedges one issue until the fault
+   *    clears or an operator looks; under-reserving spends money twice. Only
+   *    the first is recoverable.
+   *
+   * A run id outside even the LEGACY read grammar can never have named a
+   * record file (`path()` refuses it) nor provisioned a box, so it is absent
+   * by construction — that case keeps expiring without touching the
+   * filesystem, exactly as before.
+   */
+  private recordStructurallyAbsent(runId: string): boolean {
+    if (!LEGACY_RUN_ID_RE.test(runId)) return true;
+    try {
+      // Built by hand rather than through RunRecordStore.path(): the store's
+      // validator would THROW on the legacy-tolerant ids this check exists to
+      // judge, and the ledger holds no store handle — only this directory.
+      return statSync(join(this.runsDir, `${runId}.json`)).size === 0;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return true;
+      return false; // EACCES/EIO/…: absence unproven ⇒ still-reserved
+    }
   }
 }
 

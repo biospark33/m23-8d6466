@@ -60,6 +60,14 @@ export function substrateFailure(exitCode: unknown): string | undefined {
   if (exitCode === null || exitCode === undefined) {
     return `${SUBSTRATE_MARK}the box did not run the probe (killed by a signal) — a substrate failure, not a manifest one`;
   }
+  // A NEGATIVE value is Bun/Node's spawn convention for "killed by signal n"
+  // (-15 = SIGTERM). It used to fall through every arm below and reach dispatch
+  // as a MANIFEST verdict with no SUBSTRATE_MARK — do-not-retry for what is
+  // definitionally the box failing. Same band logic as the 128+n arm: no probe
+  // here answers with its own negative status.
+  if (typeof exitCode === "number" && exitCode < 0) {
+    return `${SUBSTRATE_MARK}exit ${exitCode}: the probe was killed by signal ${-exitCode} — a substrate failure, not a manifest one`;
+  }
   if (exitCode === 126) {
     return `${SUBSTRATE_MARK}exit 126: the probe command is present but not executable — the probe never ran`;
   }
@@ -85,9 +93,17 @@ export function substrateFailure(exitCode: unknown): string | undefined {
  * fail-closed direction here is "do not advertise a retry".
  */
 export function isSubstrateFailure(gate: SetupGateResult): boolean {
-  return (gate.assertions ?? []).some(
-    (a) => !a.ok && typeof a.note === "string" && a.note.includes(SUBSTRATE_MARK),
-  );
+  // `?? []` only caught nullish: a non-array truthy `assertions` (`{}`,
+  // `"boom"` — the injected gate's shape is a caller's promise, not a checked
+  // one) sailed past it and `.some` threw a TypeError OUT of this fail-closed
+  // classifier, replacing "do not advertise a retry" with a crash. Array
+  // guard keeps the same answer for junk as for missing: false.
+  const assertions: unknown = (gate as { assertions?: unknown }).assertions;
+  if (!Array.isArray(assertions)) return false;
+  return assertions.some((raw) => {
+    const a = raw as { ok?: unknown; note?: unknown } | null | undefined;
+    return a != null && !a.ok && typeof a.note === "string" && a.note.includes(SUBSTRATE_MARK);
+  });
 }
 
 /**
@@ -205,24 +221,30 @@ export async function fakeGate(
         // empty output, so an EIO box was reported as a delivery-contract miss
         // (do-not-retry) instead of the transient substrate failure it is, and
         // `substrateFailure` below could never fire. The probe now answers on
-        // stdout — "absent", the mode digits, or "unreadable" — and says which.
+        // stdout — "absent", "not-a-file", the mode digits, or "unreadable" —
+        // and says which. The type probe keeps a DIRECTORY named `.env` from
+        // reporting as a mode mismatch ("mode 755"): that sent the operator to
+        // `chmod` a thing chmod cannot fix, when the fix is re-delivering the
+        // key file the fill step failed to land.
         const r = await driver.exec(
           vm,
           [
             "sh",
             "-c",
-            "if [ ! -e .env ]; then echo absent; exit 0; fi; m=$(stat -c '%a' .env 2>/dev/null); [ -n \"$m\" ] && { echo \"$m\"; exit 0; }; m=$(stat -f '%Lp' .env 2>/dev/null); [ -n \"$m\" ] && { echo \"$m\"; exit 0; }; echo unreadable",
+            "if [ ! -e .env ]; then echo absent; exit 0; fi; if [ ! -f .env ]; then echo not-a-file; exit 0; fi; m=$(stat -c '%a' .env 2>/dev/null); [ -n \"$m\" ] && { echo \"$m\"; exit 0; }; m=$(stat -f '%Lp' .env 2>/dev/null); [ -n \"$m\" ] && { echo \"$m\"; exit 0; }; echo unreadable",
           ],
         );
         const substrate = substrateFailure(r.exitCode);
         if (substrate !== undefined) return { ok: false, detail: substrate };
         const mode = (r.stdout ?? "").trim();
         // ".env absent" is the DELIVERY CONTRACT failing (fill never landed the
-        // key) — retrying cannot help. Present-but-unreadable is the BOX failing
-        // (EIO, a missing stat binary), which is transient, so it carries
-        // SUBSTRATE_MARK like the signal arms above. (.env vanishing between
-        // `-e` and `stat` lands here too — rare, and "retry" is the safe answer
-        // for a race.)
+        // key) — retrying cannot help. Wrong TYPE is the same contract failing
+        // by a different road (something else wrote a directory/symlink-dir in
+        // `.env`'s place): re-deliver, never chmod. Present-but-unreadable is
+        // the BOX failing (EIO, a missing stat binary), which is transient, so
+        // it carries SUBSTRATE_MARK like the signal arms above. (.env vanishing
+        // between `-e` and `stat` lands here too — rare, and "retry" is the
+        // safe answer for a race.)
         if (mode === "unreadable") {
           return {
             ok: false,
@@ -230,6 +252,9 @@ export async function fakeGate(
           };
         }
         if (mode === "absent") return { ok: false, detail: "mode absent (.env was not delivered)" };
+        if (mode === "not-a-file") {
+          return { ok: false, detail: ".env exists but is not a regular file — re-run the key delivery step; do not chmod" };
+        }
         return { ok: mode === "600", detail: `mode ${mode || "unknown"}` };
       },
     },

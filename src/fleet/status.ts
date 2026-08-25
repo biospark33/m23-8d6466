@@ -12,7 +12,7 @@
 import { SBX_OWNERSHIP_TAG, type ProviderVm } from "../providers/driver.ts";
 import type { RunRecord, RunRecordListing, RunRecordStore } from "../providers/run-record.ts";
 
-import { MAX_URL, sanitizeLabel } from "./brief-schema.ts";
+import { MAX_REQUEST_ID, MAX_URL, sanitizeLabel } from "./brief-schema.ts";
 // NOT re-exported. `FleetError` has ONE owner, `dispatch.ts`, and the barrel
 // star-exports both modules — so a re-export here is the same binding reached
 // twice through `index.ts`. It resolves today only because the two resolve to
@@ -67,9 +67,12 @@ export interface StatusRow {
   /**
    * Record filenames the listing refused to read (`listWithAnomalies().skipped`),
    * sanitized like every other store-supplied string (a POSIX filename may hold
-   * newlines and worse). Present on the `recordsSkipped` row, and on a
-   * `statusRun` row whose verdict those files could contradict — never anywhere
-   * else, and never empty.
+   * newlines and worse). Present on the `recordsSkipped` row, and on the one
+   * `statusRun` row whose verdict those files could contradict — the `orphan`
+   * row returned when this run's record is missing while a live box answers to
+   * its id. Never anywhere else, and never empty. On every other `statusRun`
+   * exit there IS no row to carry it, so the same caveat travels in the
+   * run-not-found remediation instead (which names the files when it has them).
    */
   skippedRecords?: string[];
 }
@@ -122,6 +125,35 @@ const MAX_VM_NAME = 128;
 const MAX_TIMESTAMP = 64;
 
 /**
+ * Cap on store exception text interpolated into a typed message
+ * (`record-store-unreadable`, `record-read-failed`). The producer-side rule
+ * `sanitizeLabel`'s docstring states — repair at the producer, never per
+ * consumer — applies here too: an exception's `.message` is store-authored
+ * text (`malformed run record <name>.json: …`, where `<name>` came from
+ * `readdirSync`), and it lands verbatim in the operator-facing envelope. Sized
+ * like a diagnostic, not a label: long enough to keep the filename and the
+ * failure reason together, short enough that a hostile record body cannot ride
+ * the refusal out unbounded.
+ */
+const MAX_DIAGNOSTIC = 512;
+
+/** The message half of a store exception, under the same two rules as names. */
+function safeDiagnostic(e: unknown): string {
+  // Optional chain, not a bare cast: a `throw null` must still classify (the
+  // same argument statusRun's handler makes) rather than TypeError here.
+  // The EXTRACTION itself is guarded too: a `.message` getter or a
+  // `toString`/`Symbol.toPrimitive` that throws would otherwise escape this
+  // helper mid-catch and replace the typed refusal (record-store-unreadable,
+  // record-read-failed) with a secondary crash — defeating the one job the
+  // helper has. Fixed fallback, no interpolation of the unprintable value.
+  try {
+    return sanitizeLabel((e as Error | null)?.message ?? String(e), MAX_DIAGNOSTIC);
+  } catch {
+    return "[unprintable diagnostic]";
+  }
+}
+
+/**
  * A substrate-supplied name on its way into a row, under the same two rules
  * `brief-schema.ts` applies to a brief.
  *
@@ -136,14 +168,14 @@ function safeName(name: string): string {
   return sanitizeLabel(name, MAX_VM_NAME);
 }
 
-/** `safeName` over an optional field, preserving the absence. */
-function sanitizeOptionalName(name: string | undefined): string | undefined {
-  return name === undefined ? undefined : safeName(name);
+/** `sanitizeLabel` over an optional field, preserving the absence. */
+function sanitizeOptional(text: string | undefined, max: number): string | undefined {
+  return text === undefined ? undefined : sanitizeLabel(text, max);
 }
 
 /**
  * A substrate- or record-supplied URL as a row field, or ABSENT when it carries
- * a credential.
+ * a credential or a non-https scheme.
  *
  * INV-CRED-1's rule, applied on the way OUT as well as on the way in: the brief
  * schema refuses `https://token@host/…` because userinfo is "a credential by
@@ -153,11 +185,20 @@ function sanitizeOptionalName(name: string | undefined): string | undefined {
  * link is a smaller loss than a token in whatever an operator pastes the status
  * output into. An unparseable URL is dropped for the same reason `hasNoUserinfo`
  * gives: it cannot be shown to be free of one.
+ *
+ * The scheme is https-only for the same reason `BriefSchema.repoUrl`/`issueUrl`
+ * are (`^https:\/\/` there): these rows render as CLICKABLE links in operator
+ * output, and `.url()`-style parsing alone admits `javascript:` (script in the
+ * operator's page context) and `file:` (local path disclosure) — the outbound
+ * arm of the same INV-CRED-1 boundary. `URL.protocol` is normalized lowercase,
+ * so `HTTPS://` passes exactly as the brief schema's case-insensitive regex
+ * intends.
  */
 function safeUrl(url: string | undefined): string | undefined {
   if (url === undefined) return undefined;
   try {
     const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return undefined;
     if (parsed.username !== "" || parsed.password !== "") return undefined;
   } catch {
     return undefined;
@@ -186,9 +227,19 @@ async function listWithTimeout(
   name?: string,
 ): Promise<ProviderVm[]> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const listing = driver.list(name);
+  // The race abandons its loser, and an abandoned promise that later REJECTS
+  // surfaces as an unhandled rejection — which kills the process AFTER the
+  // caller has already classified the timeout as boxUnknown/null. A wedged
+  // substrate answering with an error seconds late must not take `fleet status`
+  // down on its way out; this no-op handler pins the loser on BOTH outcomes and
+  // is ignored when `listing` wins. (The timer half needs no such pin:
+  // `Promise.race` subscribes to every entrant, so its rejection is always
+  // observed.)
+  void listing.catch(() => {});
   try {
     return await Promise.race([
-      driver.list(name),
+      listing,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error("list timeout")), timeoutMs);
       }),
@@ -309,7 +360,10 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
   // populated on five of six paths is how the last round of this bug started.
   const base = {
     runId: rec.runId,
-    requestId: rec.requestId,
+    // Record-supplied strings are sanitized like their siblings: parseability
+    // (or grammar-checking) is not printability, and `assertWellFormed` proves
+    // nothing about control characters in these two.
+    requestId: sanitizeOptional(rec.requestId, MAX_REQUEST_ID),
     // In the crash window the record has no handle but the box does; the box
     // name is what teardown would target (`rec.vmName ?? runId`).
     //
@@ -317,7 +371,7 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
     // structural interface is why the record half needs it too — the same
     // argument `listOwnedBoxes` makes about `StatusDeps.driver`. `httpsUrl`
     // originates at the provider on both paths.
-    vmName: sanitizeOptionalName(rec.vmName ?? box?.name),
+    vmName: sanitizeOptional(rec.vmName ?? box?.name, MAX_VM_NAME),
     httpsUrl: safeUrl(rec.httpsUrl),
     // `runId` stays RAW deliberately — it is the join key (`claimed` in
     // statusAll matches box names against it), and the store has already
@@ -335,7 +389,9 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
     return {
       ...base,
       state: "closed",
-      closedAt: rec.closedAt,
+      // Same treatment as createdAt: bounded, control-char-free — a timestamp's
+      // parseability says nothing about what else is in the string.
+      closedAt: sanitizeLabel(rec.closedAt, MAX_TIMESTAMP),
       // The same `boxes === null ⇒ no evidence` rule the open rows get below.
       // Omitted (not `false`) on a list failure: a closed record whose destroy
       // never landed must not read as confirmed-destroyed just because the
@@ -349,6 +405,22 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
   if (boxes === null) return { ...base, state: "boxUnknown" };
 
   return { ...base, state: box === undefined ? "boxMissing" : "live" };
+}
+
+/**
+ * The sort instant per row, taken from the record BEFORE `sanitizeLabel` bounds
+ * it. Truncating an over-long-but-valid ISO string with an ellipsis makes it
+ * unparseable, and feeding that truncation artifact to `byCreatedAtDesc`
+ * dropped exactly the row the newest-first order exists to surface among the
+ * failure rows (+Infinity). Keyed weakly so rows stay plain JSON-serializable
+ * objects; rows with no entry (orphans, fleet-level rows) fall back to the
+ * comparator's own parse of `createdAt`, which is `undefined` there anyway.
+ */
+const sortInstants = new WeakMap<object, number>();
+
+function pinSortInstant(row: StatusRow, rawCreatedAt: string): void {
+  const t = Date.parse(rawCreatedAt);
+  if (!Number.isNaN(t)) sortInstants.set(row, t);
 }
 
 /**
@@ -463,19 +535,36 @@ function skippedRecordNames(store: RunRecordStore): string[] | null {
 function byCreatedAtDesc(a: StatusRow, b: StatusRow): number {
   // Numeric, never localeCompare: createdAt is an instant, and ICU collation on
   // mixed ISO shapes ("…Z" vs "…+00:00") orders them by text, not by time.
+  // A row whose instant was pinned before sanitization (see `sortInstants`)
+  // sorts by the RAW value, so a truncation artifact never feeds this
+  // comparator; everything else parses its (bounded) display string.
   // Absent or unparseable (orphan rows carry none) sorts first — unowned spend
   // is the row an operator most needs to see.
   const ts = (r: StatusRow): number => {
+    const pinned = sortInstants.get(r);
+    if (pinned !== undefined) return pinned;
     const t = r.createdAt === undefined ? Number.NaN : Date.parse(r.createdAt);
     return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
   };
   // Two rows that both sort first give `Infinity - Infinity` = NaN, which is
   // falsy and falls through to the tie-break — so the tie-break runs on the
   // rows least likely to have a well-formed runId, and must not throw there.
+  // Code-unit `<`/`>`, for the reason the instant arm already gives — ICU
+  // collation reorders and can disagree between hosts; ids sort by their bytes.
   // `?? ""` over a declared-string field on purpose: rows are built from a
   // structural driver/store interface, not from a validated type.
-  return ts(b) - ts(a) || (a.runId ?? "").localeCompare(b.runId ?? "");
+  const aId = a.runId ?? "";
+  const bId = b.runId ?? "";
+  return ts(b) - ts(a) || (aId < bId ? -1 : aId > bId ? 1 : 0);
 }
+
+/**
+ * The optional TEXT fields `rowForRecord` reads off a record. Each must be
+ * absent or a string: `sanitizeOptional`/`safeUrl` trust their inputs are
+ * strings, and the store being a structural interface means a test double can
+ * hand back a record whose `vmName` is a number.
+ */
+const RECORD_TEXT_FIELDS = ["vmName", "httpsUrl", "requestId", "closedAt"] as const;
 
 /**
  * Status: store.listWithAnomalies() ∪ driver.list() with 30s timeout.
@@ -503,13 +592,30 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
     // added to prevent. The throw here lands in the catch below and comes out
     // as that error. Elements are refused rather than dropped (the driver-side
     // filter's shape): a silently missing record is exactly the truncated
-    // fleet the `recordsSkipped` row exists to keep honest.
+    // fleet the `recordsSkipped` row exists to keep honest. Arrays are refused
+    // with them: `typeof [] === "object"`, so an array element passed the old
+    // guard and dereferenced as a record full of undefined fields.
     if (
       !Array.isArray(listing?.records) ||
       !Array.isArray(listing.skipped) ||
-      listing.records.some((rec) => rec === null || typeof rec !== "object")
+      listing.records.some((rec) => {
+        if (rec === null || typeof rec !== "object" || Array.isArray(rec)) return true;
+        // One step deeper still: the FIELDS rowForRecord dereferences. A
+        // non-string runId breaks the box join and the sort key; a numeric
+        // vmName rides into sanitizeOptional, which trusts its input is a
+        // string. Same refusal vocabulary as above: elements are refused,
+        // never dropped.
+        const r = rec as Partial<RunRecord>;
+        return (
+          typeof r.runId !== "string" ||
+          typeof r.createdAt !== "string" ||
+          RECORD_TEXT_FIELDS.some((f) => r[f] !== undefined && typeof r[f] !== "string")
+        );
+      })
     ) {
-      throw new Error("listWithAnomalies() did not return {records: [], skipped: []}");
+      throw new Error(
+        "listWithAnomalies() did not return {records: [], skipped: []} of records with string runId/createdAt and absent-or-string optional fields",
+      );
     }
   } catch (e) {
     // INV-4 makes list() throw on the FIRST unreadable record — untyped, so one
@@ -517,7 +623,7 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
     throw new FleetError(
       1,
       "record-store-unreadable",
-      `Cannot read the run record store: ${(e as Error | null)?.message ?? String(e)}`,
+      `Cannot read the run record store: ${safeDiagnostic(e)}`,
       "Fix or move the record file named in the message, then re-run `fleet status`",
     );
   }
@@ -527,7 +633,12 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
   const boxes = await listOwnedBoxes(deps, timeoutMs);
 
   const records = listing.records;
-  const rows: StatusRow[] = records.map((rec) => rowForRecord(rec, boxes));
+  const rows: StatusRow[] = records.map((rec) => {
+    const row = rowForRecord(rec, boxes);
+    // From the RAW value, before sanitization bounded it — see sortInstants.
+    pinSortInstant(row, rec.createdAt);
+    return row;
+  });
 
   // Independent of the driver: a truncated record listing invalidates the row
   // COUNT, and (below) makes any orphan verdict unprovable — a skipped file may
@@ -649,9 +760,13 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
     throw new FleetError(
       1,
       "record-read-failed",
-      `Run record for ${runId} could not be read: ${(e as Error | null)?.message ?? String(e)}`,
+      // Both interpolations are sanitized like every sibling producer: the
+      // exception text is store-authored (see safeDiagnostic) and the box name
+      // is substrate-supplied (see safeName) — the same sentence a raw newline
+      // in either would forge.
+      `Run record for ${runId} could not be read: ${safeDiagnostic(e)}`,
       box !== undefined
-        ? `The box ${box.name} is STILL LIVE and billing behind that record — repair the record in place, then \`fleet teardown ${runId}\`; do not re-create the run`
+        ? `The box ${safeName(box.name)} is STILL LIVE and billing behind that record — repair the record in place, then \`fleet teardown ${runId}\`; do not re-create the run`
         : "Repair or move the record file named in the message, then re-run `fleet status`; a box may still sit behind it, so inspect before re-creating the run",
     );
   }

@@ -28,3 +28,6 @@ oci/.build/
 # under _bmad-output/evidence/df4-2/.
 visualizer/coverage/
 visualizer/dist/
+
+# qds-pr-monitor transient state
+.claude/state/

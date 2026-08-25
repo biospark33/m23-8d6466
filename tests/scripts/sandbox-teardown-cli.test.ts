@@ -10,7 +10,7 @@
  * themselves are covered by tests/providers/teardown.test.ts.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1012,6 +1012,104 @@ describe("sandbox-teardown run() — lock release failure never masks the primar
     } finally {
       process.env.PATH = savedPath;
       chmodSync(runs, 0o755); // afterEach sweeps dir — restore write permission first
+    }
+  });
+});
+
+describe("sandbox-teardown run() — F5 ported from fleet: a LANDED teardown releases its lock", () => {
+  test("closedAt set + a post-close ingest refusal → lock released, work-landed diagnostic, exit 1 kept", async () => {
+    // The record is already closed, so teardownSandbox takes the idempotent
+    // path (teardown.ts: "record already closed (first-close-wins)") and the
+    // ONLY thing that runs is the box-hours hook — which refuses here: no
+    // cost-config.json beside the records dir, so boxHourRateMicroUsd is
+    // unconfigured. That throw used to wedge the lock with `run-locked` for a
+    // run with NOTHING billable left (destroy/revoke/close all proved by
+    // closedAt), where fleet exits 6 idempotent for identical state.
+    store.create("f5-landed");
+    store.set("f5-landed", { extensions: { budget: { repoSlug: "qds/demo", issueId: "42" } } });
+    store.close("f5-landed");
+
+    const code = await run(["f5-landed", "--dir", runs], sink);
+
+    // The failure itself is still reported and still exit 1 …
+    expect(code).toBe(1);
+    const text = lines.join("");
+    expect(text).toContain("box-hour-rate-unconfigured");
+    expect(text).not.toContain("!! lock-held:");
+    // … but the lock is RELEASED, with its own diagnostic naming the leftover
+    // and the idempotent re-run that retries it.
+    expect(text).toContain("!! lock-released-work-landed:");
+    expect(text).toContain("retries it idempotently");
+    expect(existsSync(join(runs, "f5-landed.lock"))).toBeFalse();
+  });
+});
+
+describe("sandbox-teardown — self-pid staleness requires realpath identity (FR3)", () => {
+  test("the same live lock reached through a symlinked runs dir is LIVE, not provably stale", () => {
+    // One directory, two spellings: `held` is keyed on the RESOLVED argv path,
+    // so an alias defeats the re-entrant guard and refuse() sees our own pid
+    // on a claim it never registered. Marking that stale advises `rm` of OUR
+    // OWN live lock mid-destruction; requiring realpath identity against the
+    // held entries keeps the alias case on the live-holder side.
+    const ours = acquireRunLock(runs, "aliased-lock");
+    try {
+      const alias = join(dir, "runs-alias");
+      symlinkSync(runs, alias, "dir");
+      let err: Error | undefined;
+      try {
+        acquireRunLock(alias, "aliased-lock");
+        expect.unreachable("a held lock must still refuse through an alias");
+      } catch (e) {
+        err = e as Error;
+      }
+      expect(err).toBeInstanceOf(RunLockedError);
+      expect(err).not.toBeInstanceOf(RunLockReentrantError);
+      expect(err?.message).toContain("live under another spelling of the same directory");
+      // The stale giveaway must not appear: this lock has a live holder — us.
+      expect((err as RunLockedError).remediation).not.toContain("no live process holds it");
+    } finally {
+      releaseRunLock(ours);
+    }
+  });
+
+  test("a self-pid claim with NO held entry behind it stays provably stale", () => {
+    // The recycled-predecessor case FR3 must not regress: nothing held, so
+    // realpath identity matches nothing, and the ONE provable-stale branch
+    // still fires with its rm.
+    const host = lockHostOf(runs);
+    const lock = join(runs, "own-pid-unheld.lock");
+    writeFileSync(lock, `${process.pid} ${host} ${new Date(Date.now() - 3_000).toISOString()} feedface\n`, {
+      flag: "wx",
+    });
+    let err: Error | undefined;
+    try {
+      acquireRunLock(runs, "own-pid-unheld");
+    } catch (e) {
+      err = e as Error;
+    }
+    expect((err as RunLockedError).remediation).toContain(`rm ${lock} to clear the stale lock`);
+  });
+});
+
+describe("sandbox-teardown — future-dated lock bodies (FR10)", () => {
+  test("a createdAt hours ahead names the skew instead of claiming held 0s forever", () => {
+    // A holder host whose clock leads this one wrote its createdAt in the
+    // future; Math.max(0, age) printed "held 0s" for as long as the skew ran
+    // and the implausible-hold hint could never fire. Past the skew bound the
+    // refusal now says so — and STILL never marks the lock stale.
+    const futureIso = new Date(Date.now() + 6 * 3600 * 1000).toISOString();
+    const lock = join(runs, "future-lock.lock");
+    writeFileSync(lock, `${LIVE_FOREIGN_PID} ${lockHostOf(runs)} ${futureIso} c0ffee\n`, { flag: "wx" });
+    try {
+      acquireRunLock(runs, "future-lock");
+      expect.unreachable("a held lock must still refuse");
+    } catch (e) {
+      expect(e).toBeInstanceOf(RunLockedError);
+      expect((e as Error).message).toMatch(/held \d+s \(its createdAt is \d+s in the future/);
+      expect((e as RunLockedError).remediation).not.toContain("stale lock");
+      expect((e as RunLockedError).remediation).toContain("recycled pid");
+    } finally {
+      rmSync(lock);
     }
   });
 });

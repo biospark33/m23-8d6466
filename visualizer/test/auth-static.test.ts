@@ -126,7 +126,16 @@ describe("static branch WITH a ./dist build (INV-3 confinement)", () => {
       fs.rmSync(DIST_DIR, { recursive: true, force: true });
       return;
     }
-    for (const full of written) fs.rmSync(full, { force: true });
+    // Guard the tracked-list removal: every path we rm must sit inside dist/.
+    // A future edit to `write()` that escapes the tree would otherwise delete
+    // an operator file at teardown — the one direction this fixture must never
+    // fail in.
+    for (const full of written) {
+      if (!path.resolve(full).startsWith(`${DIST_DIR}${path.sep}`)) {
+        throw new Error(`fixture wrote outside dist/: ${full}`);
+      }
+      fs.rmSync(full, { force: true });
+    }
   });
 
   test("a real asset is served with the static headers", async () => {
@@ -206,6 +215,32 @@ describe("static branch WITH a ./dist build (INV-3 confinement)", () => {
       `Authorization: Bearer ${TOKEN}`,
     ]);
     expect(res.body.includes("localhost")).toBe(false);
+    expect(res.status).toBe(404);
+    expect(res.body).toBe(JSON.stringify({ error: "not found" }));
+  });
+
+  test.each([
+    ["double-encoded", "/..%252f".repeat(8), "%252fetc%252fhosts", "localhost"],
+    ["backslash separators", "/..%5c".repeat(8), "etc%5chosts", "localhost"],
+    // Uppercase on the SLASH escape: the segment must decode to a GENUINE
+    // `../` (the former `/..%2E%2F` decoded to a literal `.../` directory — no
+    // traversal at all), and hex case must not decide whether `%2F` becomes a
+    // separator.
+    ["uppercase hex digits", "/..%2F".repeat(8), "etc%2Fhosts", "localhost"],
+  ])("%s traversal spelling → JSON 404, never the file", async (_label, up, tail, marker) => {
+    // The three spellings a naive decoder chain is known to miss: one decode
+    // pass leaves %252f as literal "%2f" (so it must not be decoded TWICE into
+    // a separator); a backslash is a plain filename character on POSIX and
+    // must never be treated as one; and case in the hex digits must not decide
+    // whether an escape decodes. All of them end the same way either way —
+    // inside dist (no such file) or refused at the confinement check — and
+    // none may hand back bytes from outside it.
+    const res = await rawHttp(port, [
+      `GET ${up}${tail} HTTP/1.1`,
+      `Host: 127.0.0.1:${port}`,
+      `Authorization: Bearer ${TOKEN}`,
+    ]);
+    expect(res.body.includes(marker)).toBe(false);
     expect(res.status).toBe(404);
     expect(res.body).toBe(JSON.stringify({ error: "not found" }));
   });

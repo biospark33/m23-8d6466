@@ -88,9 +88,16 @@ import { DEFAULT_RUNS_DIR } from "../../src/providers/run-record.ts";
  * "$UNSET"`) is a path that resolves to the cwd, and `??` passed it straight
  * through — for the config that ENOENTs into DEFAULT_COST_CONFIG, so the caps
  * silently revert to defaults while the operator believes the override took.
+ *
+ * The returned value is TRIMMED, not just tested: a padded value
+ * (`export QDS_COST_LEDGER_FILE=" /srv/ledger.db "` — a trailing space from an
+ * editor, a shell snippet, or `read` without `-r`) used to pass the emptiness
+ * check verbatim and open a literal-space filename. Whitespace at either end
+ * of an env-var path is never intentional.
  */
 function envPath(value: string | undefined): string | undefined {
-  return value === undefined || value.trim() === "" ? undefined : value;
+  const trimmed = value?.trim();
+  return trimmed === "" ? undefined : trimmed;
 }
 
 /**
@@ -116,9 +123,24 @@ export function costLedgerOpts(storeDir: string): Required<Pick<CostLedgerDeps, 
   return {
     path: envPath(process.env.QDS_COST_LEDGER_FILE) ?? join(ledgerDir, basename(DEFAULT_COST_LEDGER_FILE)),
     // An absent cost-config.json falls back to DEFAULT_COST_CONFIG
-    // (loadCostConfig maps ENOENT to defaults); an unreadable one still throws.
-    config: loadCostConfig(
-      envPath(process.env.QDS_COST_CONFIG_FILE) ?? join(dirname(dir), basename(DEFAULT_COST_CONFIG_FILE)),
-    ).config,
+    // (loadCostConfig maps ENOENT to defaults); an unreadable one still throws
+    // — fail-closed preserved. But that throw used to reach a BLOCKED TEARDOWN
+    // of a billing box with a remediation that never mentioned the one knob
+    // that unblocks it, so the override name is appended here (still throwing;
+    // the caller decides what to do). loadCostConfig's own remediations are
+    // untouched — this is the shared-resolution layer speaking about ITS env.
+    config: (() => {
+      try {
+        return loadCostConfig(
+          envPath(process.env.QDS_COST_CONFIG_FILE) ?? join(dirname(dir), basename(DEFAULT_COST_CONFIG_FILE)),
+        ).config;
+      } catch (e) {
+        const err = e as { code?: string; remediation?: string };
+        if (err.code === "cost-config-unreadable" || err.code === "cost-config-invalid") {
+          err.remediation = `${err.remediation ?? "fix or remove that file"} — or point $QDS_COST_CONFIG_FILE at a readable config to proceed`;
+        }
+        throw e;
+      }
+    })(),
   };
 }

@@ -917,6 +917,18 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
     });
   });
 
+  test("repoSlug multi-segment (a GitLab subgroup path) rejected", () => {
+    // The pattern is deliberately TWO segments (`owner/name`): a forge path with
+    // more has never been expressible as a repoSlug, independently of any
+    // cross-check. Pinned so a widening of REPO_SLUG_PATTERN — imported from
+    // DF1.8, so it could move over there alone — is argued here, not absorbed.
+    expectRejected(validBrief({ repoSlug: "group/sub/repo" }), {
+      field: "repoSlug",
+      code: "invalid_string",
+      alsoNames: ["repoUrl"],
+    });
+  });
+
   test("repoSlug dot segment rejected (it reaches join() on the ledger key)", () => {
     for (const slug of ["../repo", "./repo"]) {
       expectRejected(validBrief({ repoSlug: slug }), {
@@ -1211,31 +1223,18 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
     expect(unstamped.phases).toHaveLength(2);
   });
 
-  test("re-stamping is LAST-WINS and unguarded — a second stamp can RAISE the ceiling", () => {
-    // TRIPWIRE, NOT A SPECIFICATION. `stampManifestLimit` accepts an already
-    // stamped manifest and overwrites the ceiling with no comparison against
-    // what is already there, so a retry path that stamps twice — a re-dispatch
-    // reusing a loaded manifest, a caller that stamps defensively "just in
-    // case" — delivers whichever ceiling was applied LAST, including a higher
-    // one than the ledger admitted. Today nothing calls it twice; nothing stops
-    // it either, and no other case here would notice if something started.
-    //
-    // Pinned as behaviour so the day a monotonic guard (or a stamped type)
-    // lands, this line goes red BY DESIGN and gets deleted — rather than the
-    // raise slipping in unobserved. What is asserted is the hazard, not that
-    // raising is correct: it is not.
-    //
-    // KNOWN DEFECT: unguarded last-wins re-stamp (no monotonic ceiling check).
-    // A green run here certifies the ceiling raise is still possible — it does
-    // not bless double-stamping as supported.
+  test("re-stamping is monotonic — a second stamp cannot RAISE the ceiling", () => {
+    // The monotonic guard (equal/lower stay legal) is pinned exhaustively in
+    // `tests/phase-engine/manifest.test.ts`; here only the raise refusal, since
+    // a fleet-side double stamp was the path that could have delivered a higher
+    // ceiling than the ledger admitted.
     const loaded = loadManifest(manifestPath, 120_000, manifestDir);
     const once = stampManifestLimit(loaded, 500_000);
-    const twice = stampManifestLimit(once, 9_000_000);
+    expect(() => stampManifestLimit(once, 9_000_000)).toThrow(
+      /refusing to raise limitMicroUsd from 500000 to 9000000/,
+    );
+    // The refused attempt left the admitted ceiling intact.
     expect(once.manifest.limitMicroUsd).toBe(500_000);
-    expect(twice.manifest.limitMicroUsd).toBe(9_000_000); // RAISED, and unremarked
-    // The first stamp is not mutated, so the two ceilings are distinguishable at
-    // all — a stamp that wrote in place would make even this invisible.
-    expect(Object.isFrozen(once.manifest)).toBe(true);
   });
 
   test("stampManifestLimit preserves manifestLoadMs and DROPS resolvedPath", () => {

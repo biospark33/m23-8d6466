@@ -225,4 +225,131 @@ story only *requests* the approval on a green verdict (AC6).
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Branch:** `feature/df5-1-host-side-reverify` (from `main`)<br />
+**Status:** implemented, all DOD items covered by tests
+
+### Shipped
+
+| File | Role |
+|------|------|
+| `src/reverify/report.ts` | `ReverifyReport` contract. `sealReport` is the ONLY place a verdict exists — derived, frozen, no setter (INV-RV-5). Append-only `.jsonl` persistence, zod `.strict()` undeclared-field rejection, `redactSecrets` at the boundary. |
+| `src/reverify/worktree.ts` | `ReverifyError`, detached quarantine worktree with prune-on-every-exit-path (INV-RV-2), `probeToolchain`, and `withGuards` (wall-clock + RSS, SIGTERM then 5 s then SIGKILL sweep). |
+| `src/reverify/plan.ts` | Host-pinned gate plan from the operator's `.factory/pipeline.json` keyed by `repoSlug` + the DF1.1 manifest it names (AC2), plus `divergenceFlags`. |
+| `src/reverify/approval.ts` | The `ApprovalPort` seam and its RunRecord-backed adapter over `extensions.approval`. |
+| `src/reverify/runner.ts` | `reverify(runId)` orchestration. |
+| `src/reverify/index.ts` | Public surface. |
+| `scripts/reverify.ts` | CLI. Exit 0 green / 1 red / 2 error. |
+| `src/providers/run-record.ts` | **One addition**: registered the `approval` extension namespace (see Deviation 1). |
+| `tests/reverify/{report,worktree,plan,approval,runner}.test.ts` + `fixtures/harvested-repo.ts` | 44 tests. The runner suite drives a REAL throwaway git repo, a real `refs/sandbox/<run-id>` and real `bun test` subprocesses. |
+
+### Deviations and assumptions
+
+1. **DF3.4 is not implemented.** No `requestApproval` / `ApprovalRecord` existed in `src/` when this
+   story ran. Per operator decision, DF5.1 ships the **caller** (which it owns per AC6) behind an
+   `ApprovalPort` interface, plus a RunRecord-backed adapter so AC6 is exercised end to end. DF3.4
+   replaces the **adapter**, not the caller. Registering the `approval` namespace in
+   `EXTENSION_NAMESPACES` was required for that adapter; gitnexus impact on that symbol: **LOW, 0
+   upstream dependents** (additive entry). DF3.4 may extend the field set.
+2. **AC6 wording vs DF3.4's hardened design.** AC6 describes a separate `ApprovalRecord` created
+   `O_EXCL`; DF3.4's 2026-08-20 hardening moved approval state into `runRecord.extensions.approval`
+   (namespace registration, PID lock, writable-after-close). Built against the **predecessor's**
+   shape per operator decision. AC6's prose should be amended to match; the state machine it
+   specifies (`pausing` untouched, `awaiting-approval` rebound atomically with the superseded id
+   recorded, terminal left alone) is implemented verbatim.
+3. **`noTestSuite` is host-declared.** The story's "a repository with no suite declares that in the
+   host manifest" is implemented as a `noTestSuite: true` flag on the **`.factory/pipeline.json`
+   entry**, not inside the DF1.1 manifest — `PipelineManifestSchema` is `.strict()` and this is
+   operator config, never tree-supplied. It is the only thing that suppresses `no-tests-executed`,
+   and it still cannot make an empty check set green.
+4. **Read-then-write atomicity.** `RunRecordStore.set` is atomic but its lock is private, so the AC6
+   read-decide-write is serialized by a separate `O_EXCL` lock at
+   `<runsDir>/<run-id>.approval.lock` (5 s ceiling, 10 ms poll). Taking the store's own lock would
+   deadlock inside `set`. Covered by a concurrency test.
+5. **RSS enforcement ceiling** (`ponytail:` comment in `worktree.ts`): sampled every 2 s from `ps`
+   over this process's descendant tree, not cgroups. Catches a runaway allocator, not a sub-2 s
+   spike. Upgrade path is the disposable host-side verify box the story already names.
+6. **`reverifyId` grammar.** Lowercase and hyphenated because it is written into the run record as
+   `extensions.approval.reportId` and DF2.1's `assertNoSecret` refuses long mixed-case alphanumerics
+   there as suspected key material.
+7. **`claimed` is matched by SHAPE, not filename** — any `*.json` under
+   `.sandbox/runs/<run-id>-artifacts/` carrying DF1.6's `{exitStatus, changedFiles, testResults}`.
+   Absent, unreadable or unrecognisable all yield `claimed: null`, which never blocks a verdict.
+8. **No `.factory/` shipped.** The host plan index is per-operator config naming per-repo manifests;
+   creating one in this repo would point reverify at this repo's own pipeline. Operators author it.
+
+### Operator setup
+
+`.factory/pipeline.json`:
+
+```json
+{ "version": 1, "repos": { "acme/widget": { "manifest": ".factory/manifests/acme-widget.json" } } }
+```
+
+The named manifest is a normal DF1.1 pipeline manifest (`version: "1.0.0"`, **≥2 phases**). The first
+phase declaring a `testCommand` is the host test run and its counts are the evidence; every other
+phase carrying a `command` becomes a `commandGate`. The test phase's own `command` is not re-run.
+
+### E2E demo artifacts (`tests/reverify/runner.test.ts`, "the e2e slice")
+
+Three harvested commits against a real throwaway repo:
+
+```text
+green: verdict "green", headSha=<3rd commit>, testResults {passed:1, failed:0},
+       discrepancies [], approval {outcome:"requested"}, worktree pruned
+red:   one seeded failing test at the same shape →
+       verdict "red", testResults {passed:0, failed:1},
+       discrepancies ["testResults.failed: claimed 0, host 1",
+                      "exitStatus: claimed \"success\", host verdict red"],
+       approval null
+```
+
+### DOD coverage
+
+| DOD item | Test |
+|---|---|
+| Impl: worktree, scripts-free install, host plan, tests + gates, report, prune | `runner.test.ts` e2e slice |
+| Impl: `claimed` both directions, absence changes no verdict | `runner.test.ts` INV-RV-1 block |
+| Contract: append-only jsonl, undeclared field rejected | `report.test.ts` persistence + boundary |
+| Integration: DF1.2 `commandGate`, argv from DF1.1 manifest | `runner.test.ts` AC2 block |
+| Security: no credential, `--ignore-scripts`, sentinel in **gate output** not `process.env` | `runner.test.ts` INV-RV-3/4 block |
+| Test (authority, negative control) | `runner.test.ts` "deleting every harvested artifact…" |
+| Test (manifest divergence) | `runner.test.ts` "in-tree manifest replacing the test command with `true`" |
+| Test (error is not green) | `runner.test.ts` "removing the test runner from the resolved toolchain" |
+| Test (approval request, single owner) | `runner.test.ts` AC6 block (green once / red zero / error zero) |
+| Test (rebind on re-verify) | `runner.test.ts` "the default adapter rebinds…" + `approval.test.ts` full state machine |
+| Test (empty harvest boundary) | `runner.test.ts` AC5 block |
+| Test (e2e demo — MANDATORY) | `runner.test.ts` "the e2e slice" |
+
+### Follow-ups
+
+- **DF3.4** replaces `recordApprovalPort` with its own adapter and owns the decide side. The caller
+  contract in `approval.ts` is what it must satisfy.
+- **DF5.2** reads the LAST line of `.sandbox/reverify/<run-id>.jsonl` and re-checks `reverifyId` +
+  `headSha` against `extensions.approval` before pushing.
+- AC6 prose amendment per Deviation 2.
+
+### Post-implementation adversarial review
+
+Three review passes over the implementation (verdict integrity / secret exposure, resource and
+cleanup correctness, contract and failure paths). Nine findings, all fixed on this branch with a
+test each where the logic is non-trivial:
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | `claimed.changedFiles` — agent-controlled strings from the box's own artifacts — were copied into the report unredacted and uncapped, and DF5.2 renders the report into a PR body (INV-RV-4 leak). | Scrubbed through `scrub()` and capped at `CLAIMED_FILES_MAX` (500), with a `claimed-files-truncated` flag. |
+| 2 | `readReports` threw on a torn jsonl line, and `reverify` calls it OUTSIDE its own try/catch — one half-written append turned a completed re-verify into an uncaught throw. | Unparseable lines are skipped. |
+| 3 | `timings.cleanup_ms` was computed as `elapsed − gates_ms`, i.e. everything that was not gates. | Stamped at the worktree body's return; now measures the prune. |
+| 4 | The guards' SIGKILL sweep re-read the process table 5 s AFTER firing and killed every current descendant of the host process — in a long-lived dispatcher, that is the next, unrelated subprocess. | The doomed pid set is snapshotted at fire time. |
+| 5 | `scripts/reverify.ts` had no catch: a throw exited 1, which is the `red` code, not the `error` code. | Wrapped; a throw is exit 2. |
+| 6 | `assertRedactable` re-spelled `SECRET_KEY_RE` and the length floor as literals, so a widened pattern in `redact.ts` would silently stop being enforced here. | Both imported from `redact.ts`. |
+| 7 | An `error` verdict compared against a prior green branded the run `nondeterministic` — a flaky host probe read as flaky code. | Only two non-error verdicts at one sha can disagree. |
+| 8 | `withQuarantineWorktree` is exported and `rmSync`s `resolve(root, runId)` recursively without validating `runId`. | `assertExistingRunId` before any path is derived. |
+| 9 | A `noTestSuite` entry whose manifest had no non-test phase command produced a green resting on the `install` check alone; and a crashed holder's approval lock bricked every later approval for the run. | `resolveHostPlan` refuses that entry; the lock is stolen once older than `LOCK_STALE_MS` (2× the wait timeout, so a live holder is never robbed). |
+
+Also: the approval request is now caught — a failing DF3.4 intake leaves a green report flagged
+`approval-request-failed` and `approval: null` rather than throwing past `reverify`'s typed outcome.
+
+Known ceilings left in place (documented, not fixed here): the verify process inherits `HOME`, so
+`~/.npmrc` / `~/.gitconfig` credentials remain reachable during install, and RSS is sampled from
+`ps` rather than enforced by a cgroup. Both are the disposable host-side verify box the story
+already names as the follow-up.

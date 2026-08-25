@@ -1145,6 +1145,23 @@ describe("pipeline-run DF3.1 S28: the witness is fresh-bound to THIS run (±30 m
     expect("effectiveCeilingMicros" in ctx).toBe(false);
   });
 
+  test("a witness at the INNER edge of the window is still honoured", () => {
+    // The boundary arm: `Math.abs(ageMs) <= WITNESS_FRESH_WINDOW_MS` (30 min,
+    // module-private in scripts/pipeline-run.ts) is INCLUSIVE, so a witness
+    // seconds inside the window vouches for its ceiling. The exact-equality
+    // instant is not pinnable here — `Date.now()` inside the reader has already
+    // advanced past this fixture's by the time lstat runs — so this backdates
+    // by just under the window (2 s of slack against that drift) and pins that
+    // the window's width really is ±30 min: any accidental tightening to a
+    // smaller constant flips this to absent.
+    const f = witnessed(JSON.stringify({ effectiveCeilingMicros: 250_000 }));
+    const innerEdge = new Date(Date.now() - 30 * 60_000 + 2_000);
+    fs.utimesSync(f.witnessPath, innerEdge, innerEdge);
+
+    const ctx = runContextFrom("run-s28-2b", "req-s28-2b", { pipelineId: "inner-edge-witness" }, f);
+    expect(ctx.effectiveCeilingMicros).toBe(250_000);
+  });
+
   test("a DECLARED cap reconciles only against a CURRENT witness — a stale agreeing pair REFUSES", () => {
     // The committed pipeline.yaml + run-context.json pair that agreed before
     // S28 reconciled cleanly and raised the harness cap by naming a number

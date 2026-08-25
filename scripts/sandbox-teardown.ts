@@ -139,6 +139,21 @@ function fail(out: (s: string) => void, code: string, message: string, remediati
   if (remediation !== undefined) out(`next: ${remediation}\n`);
 }
 
+/**
+ * A FAILURE report is best-effort — the same posture run-lock.ts's writeStderr
+ * takes. `out` is writeSync(1, …) here, so an EPIPE from a closed pipe escaped
+ * the reporting catch, REPLACED the classified error with it, and skipped the
+ * mapped exit path; the exit code is what carries the classification when
+ * stdout is gone, so the write failing must not matter.
+ */
+function reportFailure(out: (s: string) => void, code: string, message: string, remediation?: string): void {
+  try {
+    fail(out, code, message, remediation);
+  } catch {
+    // stdout is gone; the exit code still says what happened.
+  }
+}
+
 export async function run(argv: readonly string[], out: (s: string) => void): Promise<number> {
   let parsed: ParsedArgs;
   try {
@@ -189,12 +204,19 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
   // downgraded the cleanup diagnostic to a no-op.
   let outcome = 1;
   try {
-    // A run that does not exist must refuse having touched NOTHING, so probe
-    // for the record first: the lock is a real file — created, fsynced, and
-    // (on a crash before the finally) left behind for a phantom run, while a
+    // A run that does not exist must refuse having touched anything OF THE RUN,
+    // so probe for the record first: the lock is a real file — created, fsynced,
+    // and (on a crash before the finally) left behind for a phantom run, while a
     // concurrent invocation then sees that phantom as busy. `sandbox-teardown
     // typo-run-id` used to create `<runsDir>/typo-run-id.lock` before finding
     // out there was no such run. Same order as scripts/fleet.ts.
+    //
+    // "Nothing of the run", not "nothing at all": by this line the store's
+    // constructor has already created and chmodded 0700 the records directory
+    // and swept its stale temps, and reapStaleTemps runs again on acquire —
+    // surroundings, not the run's own state. What this order buys is that no
+    // LOCK file exists for a run id that never was: no phantom for a concurrent
+    // invocation to refuse behind, and nothing an operator must rm.
     getRecord({ store }, parsed.runId);
     // Then the lock, and only THEN the read the teardown actually uses: the
     // probe above is deliberately not trusted across the lock boundary, because
@@ -231,6 +253,9 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
       // DEFAULT_COST_CONFIG rather than the operator's cost-config.json.
       ledger = new CostLedger({
         ...costLedgerOpts(store.dir),
+        // FP1 (round 10): orphan-expiry stat probes must target THIS store's
+        // runs dir, not the default-resolved one (see makeLedgerFactory twin).
+        runsDir: store.dir,
         readRunRecord: (id) => {
           try {
             const r = getRecord({ store }, id);
@@ -275,7 +300,7 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     // Non-Error rejections normalize to {} so the printer cannot itself throw
     // while reporting one.
     const err = (e ?? {}) as { code?: string; remediation?: string; message?: string };
-    fail(out, err.code ?? "error", err.message ?? String(e), err.remediation);
+    reportFailure(out, err.code ?? "error", err.message ?? String(e), err.remediation);
     outcome = 1;
   } finally {
     /**
@@ -298,7 +323,7 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
       try {
         ledger.close();
       } catch (e) {
-        fail(out, "ledger-close-failed", `could not close the cost ledger: ${(e as Error).message}`, "the ledger is WAL-mode and the handle dies with the process; re-run to confirm it still reads");
+        reportFailure(out, "ledger-close-failed", `could not close the cost ledger: ${(e as Error).message}`, "the ledger is WAL-mode and the handle dies with the process; re-run to confirm it still reads");
         cleanupFailed();
       }
     }
@@ -308,6 +333,47 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     // live holder's file. A release failure keeps the run locked for every
     // later teardown, so it must show up in the exit code, not only in the
     // diagnostic.
+    // F5 (ported from scripts/fleet.ts's finally, 2026-08-24): before deciding
+    // the lock must stay, ask the RECORD what actually landed. teardownSandbox's
+    // fixed order is spend→…→revoke→verify→destroy→close, and close is LAST —
+    // so a record whose closedAt is set proves destroy AND revoke already ran,
+    // and the throw came from the close step's post-close work (the box-hour
+    // ingest refusing an unpriced row, an unopenable ledger). There is no half-
+    // torn-down run left for the lock to guard: holding it forced an operator to
+    // rm by hand for a run with nothing billable left. Release it; the failure
+    // keeps exit 1 and the re-run is the idempotent closed-record path, which
+    // retries the leftover on its own.
+    if (lock !== undefined && destructivePhase) {
+      let landed = false;
+      try {
+        landed = getRecord({ store }, parsed.runId).closedAt !== undefined;
+      } catch {
+        landed = false; // unreadable record — hold the lock, let an operator see it
+      }
+      if (landed) {
+        let markCleared = true;
+        try {
+          clearRunLockDestructive(lock);
+        } catch (e) {
+          markCleared = false;
+          reportFailure(
+            out,
+            "lock-clear-failed",
+            `could not clear the destructive mark on ${lock}: ${(e as Error).message}`,
+            `rm ${lock} by hand once no other invocation holds it — until then every later harvest or teardown of this run refuses`,
+          );
+        }
+        if (markCleared) {
+          reportFailure(
+            out,
+            "lock-released-work-landed",
+            `${parsed.runId} was torn down (box destroyed, key revoked, record closed) and its lock was released — the error above was the close step's leftover, not a half-destroyed run`,
+            `resolve the reported leftover (e.g. write cost-config.json beside the records dir), then re-run: sandbox-teardown ${parsed.runId} retries it idempotently`,
+          );
+          destructivePhase = false; // nothing left to guard — plain release below
+        }
+      }
+    }
     if (lock !== undefined) {
       try {
         releaseRunLock(lock);
@@ -317,7 +383,7 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
         // be revoked and the record may still be open, and "rm it once no other
         // invocation holds it" would invite exactly the retry against a
         // half-torn-down run the mark exists to prevent.
-        fail(
+        reportFailure(
           out,
           destructivePhase ? "lock-held" : "lock-release-failed",
           destructivePhase

@@ -43,10 +43,18 @@ const META = ".box.json";
  * escape) would inject them into those sinks. Control characters are escaped
  * to visible `\uXXXX` form; ordinary names pass through byte-for-byte, so
  * every existing consumer of these strings still matches them unchanged.
+ *
+ * Beyond C0 and DEL the set covers the Unicode format/bidi/line-separator
+ * categories (Cf, Zl, Zp): U+202E (RTL override) reorders everything printed
+ * after it and U+200B (ZWSP) is invisible entirely, so an unescaped one rides
+ * into a log line or refusal as invisible direction tampering — the same
+ * shapes brief-schema's NO_CONTROL_CHARS doctrine bars at the record boundary.
  */
 function displayName(entry: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters IS the purpose
-  return entry.replace(/[\u0000-\u001f\u007f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  const controlChars =
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters IS the purpose
+    /[\u0000-\u001f\u007f\u00ad\u0600-\u0605\u061c\u06dd\u070f\u08e2\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/g;
+  return entry.replace(controlChars, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
 export class FakeDriver implements ProviderDriver {

@@ -99,7 +99,10 @@ describe("qds-cost CLI", () => {
       const issueId = "42";
       const requestId = "req-001";
 
-      // Stub run record with 90min lifetime (2h box hours = 7,200,000 µ$)
+      // Stub run record: 90min lifetime. Box-hours bill by CEILED whole hours:
+      // ceil(1.5h) = 2h × 3,600,000 µ$/h = 7,200,000 µ$. (The fractional
+      // per-minute formula this comment once described lives on another
+      // branch; here the whole-hour minimum is the shipped arithmetic.)
       const stubRecord = {
         keyHash: "hash-abc123",
         limitMicroUsd: 50_000_000,
@@ -157,7 +160,7 @@ describe("qds-cost CLI", () => {
         invocationSeq: 0,
       });
 
-      // Box hours row: 90min = 2h = 7,200,000 µ$
+      // Box hours row: 90 minutes ceils to 2 whole hours = 7,200,000 µ$
       ledger.ingestBoxHours({ runId, repoSlug, issueId, requestId });
       ledger.close();
 
@@ -168,7 +171,7 @@ describe("qds-cost CLI", () => {
       // Header with issue ref
       expect(out).toContain(`${repoSlug}#${issueId}`);
 
-      // Total: tokens (150,000 µ$) + box-hours (7,200,000 µ$) = 7,350,000 µ$
+      // Total: tokens (150,000 µ$) + box-hours (2h × 3,600,000 = 7,200,000 µ$)
       expect(out).toContain("7,350,000");
       expect(out).toContain("$7.35");
 
@@ -339,6 +342,44 @@ describe("qds-cost CLI", () => {
       const out = res.stdout.toString();
       expect(out).toContain("ledger-unopenable");
       expect(out).toContain("next:");
+    });
+
+    test("unopenable ledger stays cleanly repeatable across in-process invocations", () => {
+      // The construction-failure arm must release the held-open probe fd and
+      // report WITHOUT throwing: run() is importable, so a caller retrying
+      // against a broken ledger hits this arm once per attempt. The OS-level
+      // absence of the descriptor is deliberately NOT asserted — Bun finalizes
+      // fs.openSync descriptors on collection, which masks fd counts from any
+      // in-process measurement, and node:fs bindings cannot be intercepted
+      // from a preload (the ESM namespace is frozen). What IS pinned here is
+      // the observable contract: N repeated constructions all classify as
+      // ledger-unopenable/exit-1, which fails if either close guard ever
+      // throws out of the catch instead of being swallowed.
+      const badPath = join(dir, "leaky-ledger");
+      process.env.QDS_COST_LEDGER_FILE = badPath;
+      mkdirSync(badPath);
+
+      const looper = join(dir, "unopenable-looper.ts");
+      writeFileSync(
+        looper,
+        `import { run } from ${JSON.stringify(CLI)};
+let buf = "";
+const out = (s: string): void => { buf += s; };
+for (let i = 0; i < 25; i++) {
+  buf = "";
+  const code = run(["qds/demo#42"], out);
+  if (code !== 1 || !buf.includes("ledger-unopenable")) {
+    console.log(\`DIVERGENCE at \${i}: code=\${code} out=\${buf.slice(0, 160)}\`);
+    process.exit(7);
+  }
+}
+console.log("ALL_OK");
+`,
+      );
+
+      const res = spawnSync(process.execPath, [looper], { env: process.env });
+      expect(res.stdout.toString()).toContain("ALL_OK");
+      expect(res.status).toBe(0);
     });
 
     test("absent ledger file → exit 1, ledger-missing + next: remediation (never zero spend)", () => {

@@ -796,3 +796,41 @@ dispatch whose setup gate dies at assertion C (DF3.1's F11, after F10's fix);
 spending ~$0.15 to re-hit a proven wall was declined. Rank remains unproven
 live for the same reason. The race pattern and reapRuns are still the two
 never-proven-live surfaces after this session.
+## Handoff from df3-1 review round 10 — the fleet-ceiling TOCTOU goes LIVE the moment fan-out ships (DF13)
+
+**Source:** df3-1 BMAD review round 10, finding DF13 (MED, deferred to the providers/quota
+layer). Ledger: `_bmad-output/workflow-state/code-review/pr123/triage.md` · evidence:
+`…/code-review/pr123/reports/edge-dispatch-src.md`.
+
+**The seam:** `src/providers/quota.ts` — `checkHeadroom` is a READ, not a lock (its own
+docstring says so), and `src/fleet/dispatch.ts` step-5 admission samples it locklessly. The
+design note in dispatch.ts (~lines 1728-1753) declares the FLEET-CEILING half "NOT closed":
+two dispatches entering admission within one `driver.list()` round trip while
+`liveVms === ceiling - 1` BOTH pass and both create. The ledger's orphan window closes the
+MONEY half of this race; the BOX half is what stays open.
+
+**Why it becomes yours:** a single `dispatch` races only other invocations — and the FAN-OUT
+half of that race is closed by AC8 as built: the `.sandbox/fleet.lock` spans admission plus
+all N mints, a second concurrent fan-out is refused `fleet-busy`, arms enter through
+`{ admitted: true }`, and there is exactly ONE `checkHeadroom(N)` inside the lock. What
+stays OPEN is plain `dispatch()`: it holds no fleet lock, so two concurrent single
+dispatches — or a single dispatch racing a fan-out's admission window — can still both
+sample `liveVms === ceiling - 1` and both create. Round 10 pinned today's behavior
+deliberately: `tests/fleet/dispatch.test.ts`, the two-DISTINCT-id concurrency test (barrier
+parked inside checkHeadroom's driver.list against maxVms=1 ⇒ both admitted). That pin now
+DOCUMENTS the residual seam: keep it red-by-design until the quota layer closes the
+cross-invocation half — do not delete it, and do not promise to flip it. The acceptance
+signal for the shipped half is AC8's own: a second concurrent fan-out refused
+`fleet-busy` with nothing created.
+
+**Remaining direction (only if cross-invocation closure for SINGLE dispatches is wanted):**
+a quota-layer intent record mirroring cost-ledger's `admitIssue` — BEGIN IMMEDIATE
+write-ahead row (reserve slot → create → settle/release on failure), reusing that
+transaction's conventions rather than inventing new ones. THAT is what flips the pinned
+two-distinct-dispatch test red-to-green. Routing every single dispatch through the fleet
+lock is the wrong tool — it would serialize unrelated issues behind one operator-wide lock.
+
+**Adjacent graces to keep in mind at N>1** (deferred FP8/FP10, deliberate): run-record's
+own-pid lock steal and temp sweep fire after 60 s stalls. Concurrent arms sharing one pid
+that pause >60 s mid-critical-section (debugger, SIGSTOP) can have locks stolen / temps
+swept by a sibling arm. Fine at current scale; worth a comment where fanout parks arms.

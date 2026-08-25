@@ -46,10 +46,14 @@ import { CostLedgerError } from "../providers/cost-ledger.ts";
 import type { AdmissionDecision, CostLedger } from "../providers/cost-ledger.ts";
 import { newId, assertValidRunId, type RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
-import { setupGate as realSetupGate, type SetupGateResult } from "../providers/exedev/setup-gate.ts";
+import {
+  setupGate as realSetupGate,
+  type AssertionResult,
+  type SetupGateResult,
+} from "../providers/exedev/setup-gate.ts";
 import { fakeGate, isSubstrateFailure } from "../providers/fake-gate.ts";
 import { parseRoster, ROSTER_MAX_BYTES } from "../phase-engine/roster/schema.ts";
-import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { log } from "../swarmclaw/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
@@ -221,34 +225,35 @@ function runIdSupplied(value: unknown): string {
  * BOTH ends of the redactor's reach — both call sites that surface it
  * (`assertFleetRunId`, and the step-4 backstop in `dispatch`).
  *
- * The store interpolates `JSON.stringify(id)` verbatim, and one sink pass
- * cannot bound it from either side:
+ * The store interpolates `JSON.stringify(id)` verbatim. The bounded form is
+ * spliced over that echo UNCONDITIONALLY — there is no length branch left. The
+ * old ≥40-char arm assumed `redactSecrets`' long-token floor ate every long
+ * echo at the sinks, but the arm EXEMPTS hex digests, so a pasted ≥40-char hex
+ * argument survived `redact` verbatim on stderr, in the dispatch log and on the
+ * payload while the suffix repeated it in bounded form right next to the leak.
+ * Keyed instead on whether the store's echo SURVIVED REDACTION:
  *
- *  - AT OR OVER the 40-char floor (`redactSecrets`' long-token arm) the sink
- *    pass (`redact`) eats the echo whole and `runIdSupplied` carries the bounded
- *    copy — the pinned shape;
- *  - UNDER it the echo survives every sink verbatim: a 13–39-char pasted key
- *    came back intact on stderr, in the dispatch log and on the payload, with
- *    the suffix repeating it in bounded form right next to the leak. So under
- *    the floor the bounded form is SPLICED over the raw echo instead, leaving
- *    no full-length copy anywhere and needing no suffix.
+ *  - echo still present after `redact` (short ids, hex-digest-exempt ones) ⇒
+ *    splice the bounded copy over it — no full-length survivor anywhere;
+ *  - echo already gone (the long-token or URL arms ate it) ⇒ keep the redacted
+ *    text and let `runIdSupplied` carry the bounded copy — splicing there would
+ *    REPLACE information the redactor deliberately kept (a management URL's
+ *    scheme and host, which tells the operator which substrate they pasted)
+ *    with a twelve-character head.
  *
  * The grammar sentence stays the store's single copy either way (see
- * `assertFleetRunId` for why it is never restated here), and `redact` still runs
- * over the whole result so a management URL pasted into the run-id position
- * keeps losing its path and query string.
+ * `assertFleetRunId` for why it is never restated here).
  */
 function storeRunIdRefusal(e: unknown, value: unknown): string {
   const raw = errorMessage(e);
-  if (typeof value !== "string" || value.length >= 40 /* redactSecrets' LONG_TOKEN_RE floor */) {
-    return `${redact(raw)}${runIdSupplied(value)}`;
-  }
+  if (typeof value !== "string") return `${redact(raw)}${runIdSupplied(value)}`;
   // A function replacement: `JSON.stringify` output can contain `$`, which a
   // string replacement pattern would expand.
   const storeEcho = JSON.stringify(value);
-  return raw.includes(storeEcho)
-    ? redact(raw.replace(storeEcho, () => runIdEcho(value)))
-    : `${redact(raw)}${runIdSupplied(value)}`;
+  const redacted = redact(raw);
+  return redacted.includes(storeEcho)
+    ? redacted.replace(storeEcho, () => runIdEcho(value))
+    : `${redacted}${runIdSupplied(value)}`;
 }
 
 /**
@@ -546,14 +551,17 @@ function envFileFor(driver: ProviderDriver): string | undefined {
  * problem that must not be read as "free to reuse".
  *
  * The RETURN VALUE is read, not just the absence of a throw. `get` is declared
- * `RunRecord`, so `undefined` is a driver-boundary guard rather than a modelled
- * outcome — but a store that ever signals absence by returning it would have
- * made every mint report "taken", and dispatch bricks with `run-id-unmintable`
- * for a run directory that is in fact empty.
+ * `RunRecord`, so an absence sentinel at the driver boundary is not a modelled
+ * outcome — but a store that signalled absence by returning `undefined` OR
+ * `null` (the shape a JSON-backed store hands back for "no such file") would
+ * have made every mint report "taken", and dispatch bricks with
+ * `run-id-unmintable` for a run directory that is in fact empty. Both count as
+ * absent.
  */
 function recordExists(store: RunRecordStore, runId: string): boolean {
   try {
-    return store.get(runId) !== undefined;
+    const record = store.get(runId);
+    return record !== undefined && record !== null;
   } catch (e) {
     if ((e as NodeJS.ErrnoException | null | undefined)?.code === "ENOENT") return false;
     throw e;
@@ -661,9 +669,15 @@ export async function dispatch(
   // that is the fallback. `dirname(p) === p` is the root test.
   const storeDir = resolve(deps.store.dir);
   const logDir = dirname(storeDir);
-  const dispatchLog =
+  // `resolve` over the caller's value too: the computed default is absolute, and
+  // a RELATIVE `deps.dispatchLogPath` used to stay raw — every append resolved it
+  // against the process cwd implicitly anyway (so behavior was cwd-dependent
+  // either way), but the stderr fallback and any diagnostic printed the
+  // UNRESOLVED form. Same rule as `store.dir` above.
+  const dispatchLog = resolve(
     deps.dispatchLogPath ??
-    join(dirname(logDir) === logDir ? storeDir : logDir, basename(DISPATCH_FAILURE_LOG));
+      join(dirname(logDir) === logDir ? storeDir : logDir, basename(DISPATCH_FAILURE_LOG)),
+  );
   const timings: Record<string, number> = {};
   const phase = (name: string, ms: number): void => {
     timings[name] = ms;
@@ -832,17 +846,27 @@ export async function dispatch(
       // see `ctxProvisionAttempted`. A pre-provision refusal has nothing to tear
       // down, and naming a teardown for an id this dispatch never provisioned is
       // at best noise and at worst an instruction to destroy another run.
+      // SHA-GUARDED, mirroring the gate-failure call site's own guards: the gate
+      // is an injection seam, so `teardownCommand` can be ANY truthy non-string
+      // and `debugCommands` any truthy non-array. The old reads crashed or
+      // mistyped right here INSIDE refuse — a non-string teardownCommand threw
+      // out of `redact`'s `.replace`, and that crash escaped the gate refusal,
+      // re-crashed in the outer catch's fallback refuse, and left a bare exit 1
+      // with every piece of AC4 evidence gone. Non-string ⇒ the locally composed
+      // fallback (`errorRemediation`'s rule), array elements ESCAPED
+      // (`escapeText`) as well as redacted — the same treatment the remediation
+      // string gets, so a newline-bearing command cannot forge a log line here
+      // either.
       ...(ctxRunId === null || !ctxProvisionAttempted
         ? {}
         : {
-            debugCommands:
-              ctxGate?.debugCommands === undefined
-                ? [`bun scripts/fleet.ts status ${ctxRunId}`]
-                : (redactDeep(ctxGate.debugCommands) as unknown[]),
+            debugCommands: Array.isArray(ctxGate?.debugCommands)
+              ? ctxGate.debugCommands.map((cmd) => redact(escapeText(cmd)))
+              : [`bun scripts/fleet.ts status ${ctxRunId}`],
             teardownCommand:
-              ctxGate?.teardownCommand === undefined
-                ? `bun scripts/fleet.ts teardown ${ctxRunId}`
-                : redact(ctxGate.teardownCommand),
+              typeof ctxGate?.teardownCommand === "string"
+                ? redact(escapeText(ctxGate.teardownCommand))
+                : `bun scripts/fleet.ts teardown ${ctxRunId}`,
           }),
     });
   };
@@ -914,6 +938,16 @@ export async function dispatch(
         return `the expose call was ABANDONED, not cancelled: a port may still be opened on this box after this refusal. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\`, then tear the run down: ${teardown}`;
       case "setPublic":
         return `the setPublic call was ABANDONED, not cancelled: this box may become PUBLICLY REACHABLE after this refusal. Do not assume it stayed private — tear the run down: ${teardown}`;
+      // The remaining billable-box steps got the generic fallback (or nothing)
+      // even though each can land material in a box that is still billing.
+      case "clone":
+        return `the clone call was ABANDONED, not cancelled: the repository may still be cloned into the billable box at the pinned SHA after this refusal. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\`, then tear the run down: ${teardown}`;
+      case "fill":
+        return `the fill call was ABANDONED, not cancelled: the manifest and run context may still be written into the billable box after this refusal. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\`, then tear the run down: ${teardown}`;
+      case "deliver":
+        return `the deliver call was ABANDONED, not cancelled: the provider key may still be written into the billable box after this refusal. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\`, then tear the run down: ${teardown}`;
+      case "gate":
+        return `the gate call was ABANDONED, not cancelled: the probe may still finish on the billable box after this refusal, and its outcome reaches no record this dispatch writes — inspect the box directly, then tear the run down: ${teardown}`;
       default:
         return undefined;
     }
@@ -933,7 +967,14 @@ export async function dispatch(
         : undefined) ??
         (ctxRunId === null || !ctxProvisionAttempted
           ? "raise timeoutMs, or retry when the substrate is responsive"
-          : `tear the run down: bun scripts/fleet.ts teardown ${ctxRunId}`),
+          : // The POST-GATE sample fires on a run the gate already PROVED: box up,
+            // key live at the admitted ceiling, record written. The generic
+            // "tear the run down" sent the operator after a healthy run — and
+            // tearing it down before acking re-spends the issue's cap on a
+            // re-dispatch of work that had SUCCEEDED. Inspect and ack first.
+            (step === "post-gate"
+              ? `the setup gate PASSED — this run is fully provisioned and proven; inspect it (\`bun scripts/fleet.ts status ${ctxRunId}\`) and ack manually BEFORE destroying anything, then tear it down only if confirmed dead: bun scripts/fleet.ts teardown ${ctxRunId}`
+              : `tear the run down: bun scripts/fleet.ts teardown ${ctxRunId}`)),
       { step, ...extra },
     );
 
@@ -1010,6 +1051,14 @@ export async function dispatch(
      * store; a throw from it costs the extra fields, never the line.
      */
     describeLate?: (value: T) => Record<string, unknown>,
+    /**
+     * Runs when an ABANDONED call of this step REJECTS — the moment a claim
+     * written speculatively before the call (expose's `ports`) is known to be
+     * phantom and can be retracted. Guarded like `logAbandoned` by the caller
+     * below; a throw from it must not become the unhandled rejection this
+     * handler exists to prevent.
+     */
+    onAbandonedFailure?: (e: unknown) => void,
   ): Promise<T> => {
     const left = remaining();
     if (left <= 0) throw timedOut(step);
@@ -1057,7 +1106,17 @@ export async function dispatch(
         // Secondary to the timeout that was already thrown: the abandoned
         // provider call failed too, which is what an operator needs to see when
         // the timeout alone does not explain the run.
-        if (abandoned) logAbandoned("abandoned-step-failed", () => redact(errorMessage(e)));
+        if (!abandoned) return;
+        logAbandoned("abandoned-step-failed", () => redact(errorMessage(e)));
+        // The rejection SETTLES the question the speculative claim hedged on:
+        // whatever this call was going to produce will never land, so a claim
+        // written before it can now be retracted (the expose call site's port).
+        try {
+          onAbandonedFailure?.(e);
+        } catch {
+          // the refusal has gone out — a failed retraction must not become the
+          // unhandled rejection this handler exists to prevent
+        }
       },
     );
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1153,7 +1212,11 @@ export async function dispatch(
     throw refuse(
       2,
       "invalid-request-id",
-      `deps.requestId ${JSON.stringify(deps.requestId)} is not a strict UUID v4`,
+      // `escapeText`, not bare `JSON.stringify`: this is caller-supplied
+      // third-party-shaped text reaching three operator sinks, and it is the one
+      // such interpolation that skipped the escaper — a newline-bearing value
+      // forged a line in the dispatch log.
+      `deps.requestId "${escapeText(deps.requestId)}" is not a strict UUID v4`,
       "pass the value resolveBriefRequestId() returned for this brief, or omit it and let dispatch resolve the brief's own",
     );
   }
@@ -1405,8 +1468,8 @@ export async function dispatch(
       try {
         const st = fstatSync(fd);
         if (!st.isFile()) throw new Error(`${rosterPath} is not a regular file`);
-        // SIZE, before the slurp. readFileSync + parseRoster are synchronous
-        // and run OUTSIDE every within() deadline — nothing can interrupt them
+        // SIZE, before the read. The read + parseRoster pair is synchronous
+        // and runs OUTSIDE every within() deadline — nothing can interrupt it
         // — so an uncapped read let a planted multi-gigabyte roster.yaml hang
         // the dispatch before any admission is spent: the same pre-admission
         // wedge the FIFO guard above exists for, by volume instead of by
@@ -1418,7 +1481,32 @@ export async function dispatch(
             `roster is ${st.size} bytes, over the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling`,
           );
         }
-        rosterSlugs = parseRoster(readFileSync(fd, "utf8"), rosterPath).roles.map((r) => r.slug);
+        // CAPPED READ, not a slurp. A readFileSync here would swallow whatever
+        // landed between the size verdict above and the read — synchronously,
+        // outside every within() deadline, the same pre-admission wedge the
+        // FIFO guard exists for, by volume instead of by blocking. At most
+        // ROSTER_MAX_BYTES + 1 bytes ever enter memory, and parseRoster never
+        // sees a byte over the ceiling: over-cap refuses HERE, on what was
+        // actually read, before any parsing runs.
+        const capped = Buffer.alloc(ROSTER_MAX_BYTES + 1);
+        let total = 0;
+        while (total < capped.length) {
+          const n = readSync(fd, capped, total, capped.length - total, null);
+          if (n === 0) break;
+          total += n;
+        }
+        // RE-FSTAT AFTER the read. The size verdict above described the file as
+        // it stood THEN; a writer still appending shows up ON DISK even when
+        // the capped read has already bounded what entered memory. Both figures
+        // are checked: what was READ bounds the parse, what is ON DISK catches
+        // an append still landing.
+        const after = fstatSync(fd);
+        if (total > ROSTER_MAX_BYTES || after.size > ROSTER_MAX_BYTES) {
+          throw new Error(
+            `roster grew past the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling while it was read (${total} bytes read, ${after.size} on disk)`,
+          );
+        }
+        rosterSlugs = parseRoster(capped.toString("utf8", 0, total), rosterPath).roles.map((r) => r.slug);
       } finally {
         closeSync(fd);
       }
@@ -1892,12 +1980,23 @@ export async function dispatch(
     // reports "a box with this name already exists" as a pathless EEXIST is
     // still misclassified; it needs a typed provider error, not an errno.
     const errno = e as (NodeJS.ErrnoException & { path?: unknown }) | null | undefined;
+    // Compare RESOLVED forms, not raw strings. `store.path(runId)` is absolute;
+    // an error's `path` can be the relative form (`runs/<id>.json`) or traverse
+    // a symlinked directory, and exact string equality misread both as
+    // provision-failed — exit 1, retryable substrate advice, for what is really
+    // the run-id race. Basenames as the fallback: the record file's name is
+    // `<runId>.json`, which no box-side mkdir collides with by accident.
+    const reportedPath = typeof errno?.path === "string" ? errno.path : undefined;
+    const recordPath = deps.store.path(runId);
+    const pathsMatch =
+      reportedPath !== undefined &&
+      (resolve(reportedPath) === resolve(recordPath) || basename(reportedPath) === basename(recordPath));
     // `null` is "no path" the same as `undefined` — a store that reports EEXIST
     // with an explicit `path: null` is the run-id race by elimination, not a
     // provision failure.
     if (
       errno?.code === "EEXIST" &&
-      (errno.path === undefined || errno.path === null || errno.path === deps.store.path(runId))
+      (errno.path === undefined || errno.path === null || pathsMatch)
     ) {
       // No stampCorrelation here, deliberately: the EEXIST names a record this
       // dispatch did not create — the winner's, in the race case. See the catch
@@ -2235,6 +2334,20 @@ export async function dispatch(
     }
     const gate = gateResult as SetupGateResult;
     ctxGate = gate;
+    // STRICT BOOLEAN. A truthy non-boolean ready (`"no"`, `1`) sailed past this
+    // check and dispatched on a gate that never passed — every sibling field of
+    // the same seam is defended, and `!gate.ready` was the one read still
+    // trusting it. Non-boolean ⇒ invalid gate result, same refusal path as the
+    // non-object shape above.
+    if (typeof gate.ready !== "boolean") {
+      throw refuse(
+        3,
+        "setup-gate-invalid",
+        `the setup gate returned ${typeof gate.ready} for ready instead of a boolean`,
+        "the box is ALIVE and the record is OPEN (INV-5) — inspect it, then fix the gate passed via deps.setupGate",
+        { returned: typeof gate.ready },
+      );
+    }
     if (!gate.ready) {
       // AC3: the refusal is recorded on the RUN RECORD as well as host-side —
       // an operator reading `fleet status` must see why the run is open. The
@@ -2279,9 +2392,13 @@ export async function dispatch(
       // Absence is not the only shape a seam can lie about: a TRUTHY non-array
       // (`{ready:false, debugCommands:"x"}` or `assertions:"x"`) sailed past
       // every `??` here and threw out of `.join`/`.map`/`.find`/`.some`
-      // instead — the same downgrade, one call later. Array-ness is checked,
-      // once, where the fields are read.
-      const gateAssertions = Array.isArray(gate.assertions) ? gate.assertions : [];
+      // instead — the same downgrade, one call later. Array-ness AND ELEMENT
+      // shape are checked here, once: `{assertions:[null]}` passed the
+      // array-ness guard and still threw out of the `.find` below, downgrading
+      // this exit-3 refusal to exit-1 two lines after its own defence ran.
+      const gateAssertions = (
+        Array.isArray(gate.assertions) ? (gate.assertions as unknown[]) : []
+      ).filter((a): a is AssertionResult => a !== null && typeof a === "object");
       const debugCommands = Array.isArray(gate.debugCommands)
         ? gate.debugCommands
         : [`bun scripts/fleet.ts status ${runId}`];
@@ -2366,6 +2483,9 @@ export async function dispatch(
       // from `ctxHttpsUrl`, which is already set from `vm.httpsUrl` at create
       // time and so is non-undefined on plenty of runs where `expose` never ran.
       let portOpened = false;
+      // Whether the locator write landed — the one state claim still made AFTER
+      // a call, so its failure mode needs its own repair path below.
+      let httpsUrlPersisted = false;
       try {
         ctxHttpsUrl = await within(
           "expose",
@@ -2391,6 +2511,19 @@ export async function dispatch(
           // A late expose opens the port after the refusal; the URL is what the
           // record could not be told.
           (url) => ({ httpsUrl: typeof url === "string" ? redact(url) : undefined, port }),
+          // An abandoned expose that then FAILS settles it: the port will never
+          // open, so the claim written inside the thunk is now phantom — the
+          // same state the synchronous retraction below fixes for an ordinary
+          // failure, reachable only here because a `dispatch-timeout` is exempt
+          // there (at throw time the call may still land). Retract at the
+          // rejection, best-effort exactly like the catch's own.
+          () => {
+            try {
+              deps.store.set(runId, { ports: [] });
+            } catch {
+              // best-effort: the refusal stands either way
+            }
+          },
         );
         portOpened = true;
         // The URL was the one state claim still made AFTER the call it describes.
@@ -2428,6 +2561,7 @@ export async function dispatch(
         // boundaries instead: the structured lines redact, and `fleet status`'s
         // `safeUrl` drops userinfo-bearing URLs entirely.
         deps.store.set(runId, { httpsUrl: ctxHttpsUrl });
+        httpsUrlPersisted = true;
         await within(
           "setPublic",
           () => deps.driver.setPublic(vm.name),
@@ -2437,6 +2571,26 @@ export async function dispatch(
           () => ({ vmName: vm.name, publiclyReachable: true }),
         );
       } catch (e) {
+        // The URL write failing after `expose` resolved left a record holding a
+        // port with NO locator, permanently — the store merges patches and has
+        // no way to remove one. One best-effort repair before the refusal: this
+        // is the only moment the URL is known and the write is cheap to repeat.
+        // Guarded on the URL actually being usable, so an `expose-no-url`
+        // failure does not write garbage over the absence it is refusing for.
+        if (
+          portOpened &&
+          !httpsUrlPersisted &&
+          typeof ctxHttpsUrl === "string" &&
+          ctxHttpsUrl.trim().length > 0
+        ) {
+          try {
+            deps.store.set(runId, { httpsUrl: ctxHttpsUrl });
+          } catch {
+            // still unrecorded — vmName and port ride the refusal payload and
+            // the box stays alive (INV-5), so the operator can read the
+            // address off it directly
+          }
+        }
         // RETRACT the speculative `ports` claim, but ONLY while it is still
         // speculative. Left standing on a failed `expose`, the record
         // permanently advertised a port on a box where nothing was opened:
