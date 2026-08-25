@@ -176,6 +176,15 @@ else:
 d_scan="$(python3 -c '
 import json, os, sys
 p = os.path.expanduser("~/.pi/agent/models.json")
+# F14 (2026-08-25, gate qds-20260825-0250b0): the box image drifted — pi 0.84.2
+# never writes models.json (its registry lives in pi'"'"'s own store; models-store.json
+# ships `{}`), and production readCustomRegistry treats a MISSING file as an
+# EMPTY custom registry priced by the bundled catalog (validate.ts AC5). So
+# absence is production-legal: D then rests on the provider usage.cost proof
+# above and says so. A file that DOES exist keeps the full scan below.
+if not os.path.exists(p):
+    print("custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost")
+    sys.exit(0)
 try:
     data = json.load(open(p)).get("models", {})
 except Exception as e:
@@ -198,10 +207,15 @@ if bad:
     print("; ".join(bad)); sys.exit(1)
 print(f"{len(data)}/{len(data)} models priced")
 ')"
-if ! printf '%s' "$d_scan" | grep -q " models priced$"; then
-  emit D 0 "cost table not loadable: $d_scan"
-  exit 3
-fi
+# Two passing shapes (F14): the full-pricing scan result, or the AC5 absence
+# note. Anything ELSE is a real cost-table failure.
+case "$d_scan" in
+  *"custom registry absent"*|*" models priced") : ;;
+  *)
+    emit D 0 "cost table not loadable: $d_scan"
+    exit 3
+    ;;
+esac
 if ! printf '%s' "$d_total" | python3 -c '
 import sys, math
 v = float(sys.stdin.read().strip() or 0)
