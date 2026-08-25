@@ -23,8 +23,17 @@
 
 set -u
 # round 7: hermetic parsing — a polluted IFS or non-C locale inherited from the
-# ssh environment must not perturb word splitting or string matching below
-IFS=' \t\n'
+# ssh environment must not perturb word splitting or string matching below.
+#
+# F11 (2026-08-25): that hardening shipped as `IFS=' \t\n'` — SINGLE quotes,
+# so IFS became the LITERAL characters {space, backslash, t, n} and C's
+# `for m in $Models` shredded every slug containing n/t ("anthropic/…" →
+# a, "", hropic/…; measured live three gates failed while n/t-less deepseek
+# passed). Build the REAL three characters instead: printf emits space+tab+
+# newline+x, command substitution keeps them (nothing trailing to strip), and
+# the sentinel-x is removed so IFS is exactly {space, tab, newline}.
+IFS="$(printf ' \t\nx')"
+IFS="${IFS%x}"
 export LC_ALL=C
 
 Roster="${1:?usage: assertions-in-box.sh <rosterPath> <envFile> <model>...}"

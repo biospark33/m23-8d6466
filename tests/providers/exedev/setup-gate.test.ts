@@ -783,6 +783,128 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     expect(stdout).not.toMatch(/^\{/m); // no evidence lines — the gate did not run
   }, 60_000);
 
+  test("F11 regression: C pings each roster slug WHOLE — IFS must not shred slugs containing n/t", async () => {
+    // The round-7 hermetic-parsing line `IFS=' \t\n'` is SINGLE-quoted, so IFS
+    // became the literal characters {space, backslash, t, n} — and the C loop's
+    // `for m in $Models` then word-split every slug ON THOSE CHARACTERS:
+    // "anthropic/claude-haiku-4.5" shattered into the fields a, "", hropic/…,
+    // each pinged as its own model id (measured live 2026-08-25, three gates
+    // failed C with "from: a  hropic/…" while deepseek — no n/t — passed).
+    // The instrument here mirrors that failure exactly: a shim PATH whose curl
+    // RECORDS every model id it was asked to ping. The contract: one ping per
+    // roster model, each body carrying the FULL slug.
+    const script = join(import.meta.dir, "../../../src/providers/exedev/assertions-in-box.sh");
+    const binDir = join(rosterDir, "f11-shim-bin");
+    mkdirSync(binDir, { recursive: true });
+    const curlLog = join(rosterDir, "f11-curl.log");
+    // Shim curl: log every -d BODY (contains "model":" …), answer
+    // chat/completions like OpenRouter and /api/v1/key like a capped key.
+    // Handles -o <file> and -w <fmt> like real curl (payload to the file, HTTP
+    // code appended) because assertion D reads status and body SEPARATELY.
+    writeFileSync(
+      join(binDir, "curl"),
+      [
+        "#!/bin/sh",
+        // log bodies FIRST — the -o/-w parse below shifts $@ away
+        `for a in "$@"; do`,
+        `  printf '%s' "$a" | grep -q '"model":"' && printf '%s\\n' "$a" >> "${curlLog}"`,
+        "done",
+        "out=''; fmt=''",
+        // snapshot argv BEFORE the shift-loop eats it — the URL case needs it
+        "all=\"$*\"",
+        "while [ \"$#\" -gt 0 ]; do",
+        '  case "$1" in',
+        "    -o) out=\"$2\"; shift 2;;",
+        "    -w) fmt=\"$2\"; shift 2;;",
+        "    *) shift;;",
+        "  esac",
+        "done",
+        "emit() {",
+        // real curl: payload to -o FILE if given, but -w's code ALWAYS to stdout
+        `  if [ -n \"$out\" ]; then printf '%s' \"$1\" > \"$out\"; else printf '%s' \"$1\"; fi`,
+        `  [ -n \"$fmt\" ] && printf '200'`,
+        "}",
+        "payload=''",
+        `case " $all " in`,
+        `  *chat/completions*) payload='{"choices":[{"message":{"content":"ready"}}],"usage":{"cost":{"total":0.00003}}}';;`,
+        `  *) payload='{"data":{"limit":50000,"usage":10}}';;`,
+        "esac",
+        "emit \"$payload\"",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    // pi stub: B-equivalent content is irrelevant here (the script only needs
+    // `command -v pi` to succeed); python3 symlinked from the host so the
+    // emit/json machinery runs for real.
+    writeFileSync(join(binDir, "pi"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    symlinkSync("/usr/bin/python3", join(binDir, "python3"));
+    const envFile = join(rosterDir, "f11-env");
+    writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-f110000000000000000000\n", { mode: 0o600 });
+    // D reads ~/.pi/agent/models.json and demands every model carry ALL FOUR
+    // cost keys with input > 0 (INV: the factory must never report $0 spend).
+    const piAgentDir = join(rosterDir, ".pi", "agent");
+    mkdirSync(piAgentDir, { recursive: true });
+    writeFileSync(
+      join(piAgentDir, "models.json"),
+      JSON.stringify({
+        models: {
+          "anthropic/claude-haiku-4.5": {
+            cost: { input: 1e-6, output: 5e-6, cacheRead: 1e-7, cacheWrite: 1.25e-6 },
+          },
+          "deepseek/deepseek-v3.2": {
+            cost: { input: 2.8e-7, output: 4.2e-6, cacheRead: 2.8e-8, cacheWrite: 3.5e-7 },
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const rosterFile = join(rosterDir, "f11-roster.yaml");
+    // Both slugs real TIER-2 shapes: haiku carries n AND t (the shredding
+    // trigger), deepseek carries neither (the control that kept passing live).
+    writeFileSync(
+      rosterFile,
+      "defaults:\n  writes: []\nroles:\n  - name: lead\n    model: anthropic/claude-haiku-4.5\n    writes: []\n  - name: fixer\n    model: deepseek/deepseek-v3.2\n    writes: []\n",
+      { mode: 0o600 },
+    );
+    try {
+      rmSync(curlLog, { force: true });
+      const proc = Bun.spawn({
+        cmd: ["/bin/sh", script, rosterFile, envFile, "anthropic/claude-haiku-4.5", "deepseek/deepseek-v3.2"],
+        // binDir PREPENDS to the host PATH: the three shims shadow the real
+        // binaries while /bin/sh's own utilities (grep, awk, rm) stay reachable.
+        env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, HOME: rosterDir },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, , exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      const lines = stdout.trim().split("\n").filter((l) => l.startsWith("{"));
+      const parsed = lines.map((l) => JSON.parse(l) as { item: string; ok: boolean; note: string });
+      const c = parsed.find((r) => r.item === "C");
+      expect(c?.ok).toBe(true);
+      expect(c?.note).toMatch(/2\/2 roster models answered/);
+      // THE instrument: every model id anything in the script pinged. C's loop
+      // contributes the first two, IN ROSTER ORDER; D re-pings the first slug
+      // for the cost table. No fragment ("a", "", "hropic/…") may appear.
+      const bodies = (await Bun.file(curlLog).text()).trim().split("\n");
+      const models = bodies.map((b) => b.replace(/^.*"model":"([^"]*)".*$/, "$1"));
+      expect(models.slice(0, 2)).toEqual(["anthropic/claude-haiku-4.5", "deepseek/deepseek-v3.2"]);
+      for (const m of models) {
+        expect(["anthropic/claude-haiku-4.5", "deepseek/deepseek-v3.2"]).toContain(m);
+      }
+      expect(exitCode).toBe(0);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(curlLog, { force: true });
+      rmSync(envFile, { force: true });
+    }
+  }, 60_000);
+
   test("round 7: env file mode 0644 fails C with 0600/DF2.3 violation note", async () => {
     const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
     const box = await makeBox(fake, driver, "gate-env-mode", originDir, rosterDir);
