@@ -84,9 +84,21 @@ test.todoIf(liveTodoOff())(
       mkdirSync(recordsDir, { recursive: true });
       // Records follow the env chain in the SUBPROCESS (QDS_RUNS_DIR); the
       // cost config sits beside that records dir (costLedgerOpts).
+      //
+      // BOTH arms share the brief's ONE issueId, and admitIssue budgets per
+      // (repoSlug, issueId) — measured live twice (gates ff6d64/b37e88): with
+      // only defaultCap=50,000, arm 0's reservation consumed the whole issue
+      // ceiling and arm 1 was refused `budget-exceeded` before provisioning.
+      // The issue override is therefore n × per-arm: --cap-micro-usd stays the
+      // PER-ARM key cap, the override declares the AGGREGATE the operator is
+      // willing to spend on this issue's best-of-n.
       writeFileSync(
         join(workspace, "cost-config.json"),
-        JSON.stringify({ defaultCapMicroUsd: T2_CAP_MICRO_USD, boxHourRateMicroUsd: T2_BOX_HOUR_RATE_MICRO_USD }),
+        JSON.stringify({
+          defaultCapMicroUsd: T2_CAP_MICRO_USD,
+          boxHourRateMicroUsd: T2_BOX_HOUR_RATE_MICRO_USD,
+          perIssueOverrides: { "biospark33/QDS-Factory#46": 2 * T2_CAP_MICRO_USD },
+        }),
       );
       const briefPath = join(workspace, "brief.json");
       writeFileSync(
