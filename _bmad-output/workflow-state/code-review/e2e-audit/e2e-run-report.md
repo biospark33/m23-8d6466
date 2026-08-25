@@ -139,102 +139,114 @@ DF3.1 zero-spend surface: majority now real-proven. DF3.2: lock slice only.
 
 `bun test tests/fleet/ tests/providers/` → 1183 pass / 9 todo / 1 fail (F9 flake; solo 30/30). `bunx biome check tests/fleet/e2e/` clean. `bunx tsc --noEmit` clean. gitnexus `detect_changes` → 0 changed symbols, risk low (new files only). Commit `0349b13` pushed.
 
-## TIER-2 (2026-08-24/25) — T2.1 BROKEN at setup-gate C (F10 fixed, F11 open); T2.2 SKIPPED-BLOCKED
+## TIER-2 FINAL (2026-08-25, sessions 2–3) — T2.1 **PROVEN GREEN**, T2.2 **PROVEN GREEN** at HEAD `4804765`
 
-Executor: fresh-context session per handoff. Branch tip `89a44f4` → `1f2830d`
-(pushed). Operator approved 280,000 µ$ worst case for T2.1 and 380,000 µ$ for
-T2.2. Tests committed: `tier2-dispatch-engine.live.test.ts`,
-`tier2-fanout-bestofn.live.test.ts`, harness `preflight(tier)`, manifest
-`config/rosters/t2.pipeline.json` + active roster `config/rosters/roster.yaml`
-(gate reads it beside the manifest per dispatch.ts roster-beside rule).
+Executor: fresh-context session per handoff, then operator-directed finish.
+Fresh spend approval granted in-session (GO for both tests). Branch tip
+progression this arc: `1f2830d` → merge origin/main (PR #131 + DF5.1) at
+`eaee8bb` → F11 fix `409137d` → F14 fix `ea6dd64` → record-stamp `536c23b`
+→ harness commit-fix `94de84a` → T2.2 fixture `ca158fd` → **F15 product fix
+`4804765`** (final green SHA for both tests). Tests unchanged in shape;
+`config/rosters/t2.pipeline.json` + beside-roster `roster.yaml` as committed.
 
 ### Verdicts
 
-| # | Test | Verdict | What happened on real substrate |
+| # | Test | Verdict | Final-run evidence (real substrate) |
 |---|---|---|---|
-| T2.1 | dispatch→engine→harvest→teardown | **BROKEN** (3 attempts) | dispatch verb real subprocess: validate→admit(50,000 µ$ config)→record→box→mint→**private-repo fill**→gate A✓ B✓ **C✗ exit 3**, deterministically (3/3). Everything upstream of gate C is now real-proven; the engine/harvest/spend legs never ran |
-| T2.2 | fanout best-of-n N=2 + rank | **SKIPPED-BLOCKED** | every arm is a dispatch through the same gate C; running would spend ~$0.15 to re-hit a proven wall. Rank's null-score contract pinned in the committed test, unproven live |
+| T2.1 | dispatch→engine(seeded-fix)→harvest→teardown | **PROVEN — 37/37 asserts** | evidence `2026-08-25-153706-t2-1-dispatch-engine.json`: dispatch exit 0, ack `{runId qds-20260825-*, vmName, httpsUrl, state:"ready"}`, box LIVE on exe.dev, record carries keyHash + limitMicroUsd=50000 + **commitSha (newly stamped)**, gate **A✓B✓C✓D✓E✓**, delivered manifest stamped limitMicroUsd==effectiveCeilingMicros==50000, seed fails (exit 1) → pi/deepseek-v3.2 fixes add() on the run key (real model spend, attempt-1 warm, no stall retry needed) → seeded test exits 0 → harness commits the verified fix → harvest bundle verifies, tip matches, fix-in-bundle TRUE → teardown exit 0, box gone, keyHash absent post-revoke, ledger box_hours row priced (7,798 µ$), tokens rows = 0 (pre-registered gap), **spend 7,825 ≤ 50,000 µ$ cap** |
+| T2.2 | fanout best-of-n N=2 + advisory rank + harvest×2 + teardown×2 | **PROVEN — 52/52 asserts** | evidence `2026-08-25-155131-t2-2-fanout-bestofn.json`: fanout verb exit 0, **both arms outcome "ready"** through full gates on two real boxes, fan-*.json carries both runIds + rosterIds [lead,fixer] + pin==SHA, advisory null-score contract held in-verb AND via `rank` verb exit 0 over the real record (rankedAt stamped, winner stays null), per-arm work products committed distinct on-box, BOTH bundles verify, teardown×2 exit 0, aggregate **spend 146 µ$ ≤ 100,000 µ$ (2×cap)**, final-ls [] |
 
-### F10 — HIGH, product, FIXED (commit 1f2830d): gate C ping omitted max_tokens ⇒ guaranteed 402 on capped keys
+### Defects found and fixed this arc (all root-caused, RED→GREEN)
 
-- File: `src/providers/exedev/assertions-in-box.sh:94` (C block).
-- Symptom (verbatim, attempt 1): gate C failed `anthropic/claude-haiku-4.5`;
-  host-side repro with a minted 50,000 µ$ key returned
-  `402 {"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 50000..."}}`.
-- Root cause: no `max_tokens` in C's chat/completions body ⇒ OpenRouter prices
-  the request at the model's DEFAULT max output (haiku-4.5 = 64k tokens) ⇒ any
-  capped run key whose cap < one theoretical max-output request refuses the
-  PING — the gate rejects healthy models on healthy keys. D already sent
-  `max_tokens:8`; cap-hit-demo's probe sends `max_tokens:1`; C alone defaulted.
-- Fix: `"max_tokens":8` in C's body (D's own figure). impact(setupGate)=LOW,
-  focal setup-gate.test.ts 39/39 green.
-- Post-fix attempts 2–3 STILL fail C — see F11.
+- **F11 — CRITICAL, product, FIXED (`409137d`): gate C shredded every slug containing n/t.**
+  The round-7 hermetic-parsing line was `IFS=' \t\n'` in SINGLE quotes ⇒ IFS =
+  literal {space, backslash, t, n}; C's `for m in $Models` word-split model ids
+  ON 'n' AND 't'. Byte-exact local repro (shim curl logging each ping):
+  `anthropic/claude-haiku-4.5` pinged as `a`, `""`, `hropic/claude-haiku-4.5`;
+  n/t-less `deepseek/deepseek-v3.2` passed intact — exactly why c_fail showed
+  only haiku and why the note rendered the two-space mangle
+  `from: a  hropic/…` (the empty middle field appends a bare space).
+  Explains all three prior gate failures deterministically; the "intermittent
+  whitespace-200 egress" hypothesis is DEAD for these failures. Fix builds the
+  real three characters POSIX-portably (`IFS="$(printf ' \t\nx')";
+  IFS="${IFS%x}"`). First live gate after fix: **C passed 2/2**.
+- **F14 — HIGH, product, FIXED (`ea6dd64`): gate D false-fails when pi's models.json is absent.**
+  D had NEVER executed live (always behind C). Image drifted to pi 0.84.2,
+  which never writes `~/.pi/agent/models.json` (its store ships `{}`). D's
+  full-pricing scan hit "unreadable" on a healthy box mid-green-gate
+  (qds-20260825-0250b0: A✓B✓C✓ **D✗**). Production `readCustomRegistry`
+  treats absence as an EMPTY registry priced by the bundled catalog
+  (validate.ts AC5) — the gate was stricter than the code it guards. D now:
+  absent ⇒ pass naming AC5, resting on the provider usage.cost proof; PRESENT
+  ⇒ unchanged four-key scan. Live result: **D✓E✓** next run.
+- **Money-identity gap — MED, product, FIXED (`536c23b`): dispatch never stamped
+  record.commitSha.** Gate-passed runs carried vmName but no pinned SHA — no
+  audit answer to "which commit is this billable box running?" Stamp lands
+  only AFTER the gate passes, best-effort like sibling writes; unit-pinned.
+- **F15 — HIGH, product, FIXED (`4804765`): best-of-n arms strangled by the per-issue budget.**
+  Both arms share ONE issueId; admitIssue budgets PER ISSUE; with the ceiling
+  below n×cap arm 0 admitted (billable box) while arms 1..n-1 were refused
+  `budget-exceeded` — measured live ×2 (`fan-20260825-{ff6d64,b37e88}`), then
+  reproduced byte-for-byte out-of-test. Per operator direction ("the budget
+  goes to whatever the asked work needs"), the PRODUCT now reconciles its
+  DECLARED aggregate against the ledger BEFORE minting anything:
+  `CostLedger.issueBudgetSnapshot()` exposes the read-only
+  {ceiling, spent, reserved} triple admission acts on; fanout requires headroom
+  for n×cap pre-mint and refuses exit-5 `issue-ceiling-insufficient` naming the
+  exact `perIssueOverrides` line to declare the aggregate. No silent raises —
+  the config stays the one place budgets are declared; the failure moved from
+  after-arm-0's-meter to before-anything-exists. RED→GREEN pinned
+  (patterns.test: refusal-before-provisioning, zero records, zero boxes).
+- **Test-side (fixed in-place, same lessons as F12/F13):** T2.1/T2.2 arms must
+  COMMIT their verified work products before harvest — harvest counts COMMITS
+  on sbx/<runId> and probe manifests commit nothing ("harvested: none", bundle
+  never written); the MODEL makes and proves the fix, the HARNESS commits it.
+  T2.2 fixture declares the n×per-arm aggregate via perIssueOverrides (now
+  also enforced pre-flight by F15).
 
-### F11 — HIGH, OPEN: gate C fails through-gate only; slug arrives mangled / empty-200 from box egress
+### Known-residual / not-proven (honest ledger)
 
-- Signature (verbatim, all 3 attempts):
-  `C False | no live answer (content or reasoning) from: a  hropic/claude-haiku-4.5 — roster …roster.yaml; check the box egress and the runtime key`
-  — note the model id renders as `a␣␣hropic/…`, i.e. the in-box loop saw the
-  slug split into words (`a`, `hropic/claude-haiku-4.5`) OR the note lost
-  characters; this mangle appears ONLY inside gate execution.
-- Contradicting evidence (all live, same night, same image, same key shape):
-  - manual `driver.execTimed(vm, ["sh","-c", <exact fixed C request>])` on a
-    fresh box → HTTP 200, full JSON, answer "ready" (830 bytes);
-    qwen3-30b-a3b and deepseek-v3.2 also 200 "ready".
-  - one earlier probe of haiku through a box returned **HTTP 200 with a
-    whitespace-only body** (empty choices) — intermittent empty-200s from
-    OpenRouter over box egress are REAL and would legitimately trip C.
-  - host-side identical request → 200 routed via "Amazon Bedrock" (route
-    differs by ingress region/pool).
-- Suspects (unresolved): (a) models argv delivery into assertions-in-box.sh
-  under the gate's exact exec composition (`["sh","-c",script,"sh",roster,env,…models]`)
-  mangling despite transport probes passing; (b) provider-side intermittent
-  whitespace-only 200s over box egress hitting the FIRST ping while manual
-  retries succeed. Gate evidence files:
-  `.sandbox/setup-gate/qds-20260825-{ce6e89,b7b338,97451e}.json`.
-- Next session: reproduce with the gate's own script file executed verbatim
-  in-box with argv tracing (`printf "[%s]" "$@"`), and add a bounded retry +
-  response-body echo to C's failure note so the next failure self-documents.
-
-### F12/F13 — test-side defects found by the leaks (both FIXED in the committed tests)
-
-- F12: T2.1/T2.2 finallys parsed runId/vmName only from a SUCCESSFUL ack — a
-  gate-refused dispatch (which PROVISIONS, INV-5 keeps box+key alive)
-  stranded box + capped key outside the finally. All three attempt boxes
-  (`qds-20260825-{ce6e89,b7b338,97451e}`) leaked and their three
-  `sbx-qds-*` 50k-cap keys stayed live until operator-session remediation:
-  boxes destroyed via `ssh exe.dev rm`, keys revoked via revokeAndVerify and
-  confirmed absent from listAllKeys. Tests now recover ids from stdout AND
-  stderr refusal payloads before teardown.
-- F13: leak check filtered `e2e-*` only; dispatch mints `qds-*` names, so
-  final-ls reported false-clean `[]` while boxes billed. Fixed to match both
-  prefixes.
+- One historical whitespace-only HTTP 200 from OpenRouter over box egress was
+  observed once (prior session). C remains single-shot by design; if it ever
+  recurs the failure note now self-documents (model list verbatim). Not
+  defensive-coded against — no evidence it fires on healthy slugs.
+- `tokensRows == 0` asserted and holds (pre-registered gap:
+  `CostLedger.ingestCostEvent` has no production caller — documented, not faked).
+- Race pattern + reapRuns remain never-proven-live (unchanged from prior
+  report) → T3 candidates alongside: cold-box first-call B flake (fresh-box
+  `pi --list-models` fetch timeout measured once on the probe box; B has
+  passed 6/6 live gate executions).
 
 ### Spend (actual vs approved caps)
 
 | Run | Approved worst case | Actual |
 |---|---|---|
-| T2.1 attempt 1 (pre-F10) | 280,000 µ$ | ~3,500 µ$: gate A/B only + 2 C pings (~200 µ$) + ~47 s box (~3,000 µ$ fractional) |
-| T2.1 attempts 2–3 | included above | ~2×~45 s boxes + handful of pings ≈ ~6,500 µ$ total |
-| Diagnostics (4 minted keys, all revoked+verified) | — | ≤ ~1,000 µ$ total (each ping 30–40 µ$, deepseek control ~0) |
-| T2.2 | 380,000 µ$ | **0 — not run (blocked)** |
-| **Total TIER-2** | **660,000 µ$ ($0.66)** | **≈ 11,000 µ$ ($0.011)** + leaked-box remediation (3 boxes ~2 min total lifetime, billed fractionally post-F8) |
+| T2.1 attempts 1–4 this arc (incl. killed wrong-SHA launch, engine-leg run) | 280,000 µ$ | ≈ 25,000 µ$ (gate pings + fractional boxes + deepseek fixer 1,752 µ$) |
+| **T2.1 FINAL green** (`153706`) | included | **7,825 µ$** |
+| T2.2 attempts 1–3 (two budget-refused, one harvest-none) + diagnostics | 380,000 µ$ | ≈ 12,000 µ$ (boxes fractionally billed; arms idle at gate pings) |
+| **T2.2 FINAL green** (`155131`) | included | **146 µ$** (arms [73, 73]) |
+| Diagnostic probe boxes (pi-registry path, argv repro) | — | ≈ 6,000 µ$ |
+| Leak remediation (killed-launch box + stale-key sweep: 51 orphaned `sbx-qds-*` keys revoked, verified absent; 0 boxes left) | — | negligible (keys were unspent) |
+| **Total TIER-2 arc** | **660,000 µ$ ($0.66)** | **≈ 45–50,000 µ$ (~$0.05)** |
 
-kind='tokens' ledger rows: pre-registered assertion expects ZERO (documented
-gap — CostLedger.ingestCostEvent has no production caller), never reached
-live because the engine leg is behind gate C.
+### Coverage matrix delta (after TIER-2 FINAL)
 
-### Coverage matrix delta (after TIER-2 attempts)
-
-| Surface | Before T2 | After T2 |
+| Surface | Before T2 | After T2 FINAL |
 |---|---|---|
-| dispatch verb steps 1–8 (validate→admit→record→box→mint→fill private repo→gate entry) | 0% | **real-proven** incl. budget admission at an operator cost-config and bundle-push fill inside the verb |
-| setup gate A/B on a dispatch-provisioned box | 0% | **PROVEN** |
-| setup gate C/D/E | 0% | **BROKEN — F10 fixed, F11 open** |
-| expose/ack, delivered stamped manifest read-back, engine spend, harvest-of-dispatch-run, teardown-with-spend | 0% | 0% (behind gate C) |
-| fanout best-of-N arms / rank live | 0% | 0% (blocked by same gate) |
+| dispatch verb steps 1–8 (validate→admit→record→box→mint→fill private repo→gate entry) | 0% | **real-proven** incl. budget admission at an operator cost-config, bundle-push fill, and post-gate commitSha stamping |
+| setup gate A/B on a dispatch-provisioned box | 0% | **PROVEN** (6/6 live executions) |
+| setup gate C/D/E | 0% | **PROVEN — C 2/2 roster pings whole, D provider-cost + AC5-absence semantics, E computed credit** |
+| expose/ack, delivered stamped manifest read-back | 0% | **PROVEN** (stampedLimit == effectiveCeiling == 50,000 µ$) |
+| engine spend on the run key (seeded-fix loop) | 0% | **PROVEN** (deepseek-v3.2 real spend fixes the seeded bug; test exits 0) |
+| harvest-of-dispatch-run | 0% | **PROVEN** (bundle verify, tip match, fix-in-bundle) |
+| teardown-with-spend | 0% | **PROVEN** (exit 0, box-hours row priced 7,798 µ$, key revoked+verified) |
+| fanout best-of-N arms live | lock slice | **PROVEN — both arms ready through full gates on two real boxes** |
+| advisory rank over a real fan-out record | 0% | **PROVEN** (null-score steps contract, rankedAt stamped, in-verb + verb paths) |
+| race pattern / reapRuns / many-stories | 0% | 0% — T3 candidates |
 
-Fleet demo-readiness verdict: NOT yet — the money path is provably admitted,
-filled and gated up to assertion C on real substrate; one open defect (F11)
-blocks every costing surface end-to-end.
+Fleet demo-readiness verdict: **YES for the money path** — dispatch → gate →
+engine → harvest → teardown proven end-to-end on real substrate at capped
+cost, and N-arm fan-out + advisory ranking proven above it. Remaining gaps are
+adjacent patterns (race, reapRuns, many-stories), not the demonstrated chain.
+
 

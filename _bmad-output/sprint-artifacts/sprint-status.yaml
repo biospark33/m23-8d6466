@@ -12,6 +12,13 @@
 # 2026-08-23: DF4.2 follow-up PR #127 (878b66c) merged — test-quality only, no scope or points
 # change. It closes four CodeRabbit REVIEW-BODY findings from PR #126 that the PR monitor never
 # dispositioned (it polled only inline + issue comments). Tally unchanged: 19/31 stories, 76/123 pts.
+# 2026-08-25: DF3 TIER-2 live e2e CLOSED GREEN on PR #128's branch at 4804765 (merge of main +
+# F11 IFS root-cause + F14 gate-D image drift + commitSha stamping + F15 fan-out budget
+# pre-flight). Dispatch→gate(A-E)→engine(seeded-fix, real model spend)→harvest→teardown proven
+# end-to-end; both best-of-n arms ready through full gates; advisory rank proven over a real
+# record. Session spend ≈ $0.05 against $0.66 worst-case approval. Fleet money path is
+# demo-ready; race/reapRuns/many-stories remain unproven-live (T3). Report:
+# _bmad-output/workflow-state/code-review/e2e-audit/e2e-run-report.md §TIER-2 FINAL.
 
 meta:
   prd: planning-artifacts/prd-qds-factory-v4.md

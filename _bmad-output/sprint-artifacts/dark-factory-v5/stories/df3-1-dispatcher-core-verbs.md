@@ -1846,3 +1846,22 @@ stamped-manifest read-back, engine spend and harvest-of-dispatch-run remain
 unproven behind gate C. Two test-side leak lessons fixed in the same commit:
 finallys now recover runId/vmName from refusal payloads (F12), and the leak
 check matches dispatch's real `qds-*` box names (F13).
+
+### 2026-08-25 (session 3) — TIER-2 CLOSED GREEN: gate C/D/E + engine + harvest + teardown all real-proven — commits 409137d..4804765
+
+F11 ROOT-CAUSED and FIXED (`409137d`): the round-7 hermetic-parsing line was
+`IFS=' \t\n'` in single quotes — IFS became the literal characters
+{space, backslash, t, n} and the in-box C loop word-split model ids on 'n' AND
+'t': `anthropic/claude-haiku-4.5` pinged as a, "", hropic/… (the empty middle
+field IS the two-space mangle in the old evidence notes) while n/t-less
+deepseek passed intact. Byte-exact local repro with a shim curl; RED test
+drives the verbatim script. The whitespace-200 egress theory is dead for these
+failures. F14 (`ea6dd64`): first-ever live D execution failed on image drift —
+pi 0.84.2 never writes models.json; D now treats absence as production-legal
+(validate.ts AC5), keeps the four-key scan when present; E proven same run.
+Dispatch now stamps record.commitSha after a passing gate (`536c23b`) — the
+audit answer to "which commit is this billable box running?". FINAL live run
+at HEAD: gate A✓B✓C✓D✓E✓, seeded-fix engine loop on deepseek-v3.2 (real spend),
+harvest bundle verified (fix-in-bundle true), teardown exit 0, box-hours priced
+7,798 µ$, spend 7,825 ≤ 50,000 µ$ cap. Evidence:
+`_bmad-output/evidence/df3-e2e/2026-08-25-153706-t2-1-dispatch-engine.json`.

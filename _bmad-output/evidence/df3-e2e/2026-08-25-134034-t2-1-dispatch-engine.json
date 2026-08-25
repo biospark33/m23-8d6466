@@ -1,0 +1,62 @@
+{
+  "writtenAt": "2026-08-25T13:40:34.663Z",
+  "test": "T2.1",
+  "outcome": "fail",
+  "runId": "qds-20260825-e8121b",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t21probe-mt8pou8659c"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260825-e8121b\",\"requestId\":\"7df79c5a-3dd1-4129-97e3-fe35d10577bb\",\"state\":\"ready\",\"vmName\":\"qds-20260825-e8121b\",\"httpsUrl\":\"https://qds-20260825-e8121b.exe.xyz\"}",
+      "stderrTail": "8-25T13:40:19.969Z\",\"duration\":42059,\"durationMs\":42059,\"status\":\"ok\",\"runId\":\"qds-20260825-e8121b\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":2202,\"mint_ms\":2058,\"fill_ms\":20058,\"setup_gate_ms\":16274}}\n{\"requestId\":\"7df79c5a-3dd1-4129-97e3-fe35d10577bb\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-25T13:40:19.970Z\",\"duration\":42067,\"durationMs\":42067,\"status\":\"ok\",\"runId\":\"qds-20260825-e8121b\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260825-e8121b",
+      "vmName": "qds-20260825-e8121b",
+      "httpsUrl": "https://qds-20260825-e8121b.exe.xyz"
+    },
+    {
+      "phase": "box-live",
+      "ok": true,
+      "vmName": "qds-20260825-e8121b"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: \"ea6dd64fe426c4e2ff80b01f375f9b098abfa06d\"\nReceived: undefined\n"
+    },
+    {
+      "phase": "finally-teardown-verb",
+      "exitCode": 0,
+      "stderrTail": "tId\":null,\"timestamp\":\"2026-08-25T13:40:30.734Z\",\"duration\":9257,\"durationMs\":9257,\"status\":\"ok\",\"runId\":\"qds-20260825-e8121b\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260825-e8121b",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [
+        "qds-20260825-9e347f"
+      ]
+    },
+    {
+      "phase": "final-ls-error",
+      "error": "expect(received).toEqual(expected)\n\n- []\n+ [\n+   \"qds-20260825-9e347f\",\n+ ]\n\n- Expected  - 1\n+ Received  + 3\n"
+    }
+  ]
+}

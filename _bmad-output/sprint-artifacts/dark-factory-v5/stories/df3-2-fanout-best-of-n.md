@@ -834,3 +834,23 @@ lock is the wrong tool — it would serialize unrelated issues behind one operat
 own-pid lock steal and temp sweep fire after 60 s stalls. Concurrent arms sharing one pid
 that pause >60 s mid-critical-section (debugger, SIGSTOP) can have locks stolen / temps
 swept by a sibling arm. Fine at current scale; worth a comment where fanout parks arms.
+
+### 2026-08-25 (session 3) — TIER-2 fanout GREEN live: both arms ready through full gates, advisory rank proven, F15 budget reconciliation landed — commit 4804765
+
+Three findings closed. (1) Arms share ONE issueId and admitIssue budgets per
+issue: with the ceiling below n×cap arm 0 provisioned a billable box while arm
+1 was refused budget-exceeded — measured live ×2 then reproduced byte-for-byte.
+Per operator direction the PRODUCT now reconciles before minting:
+`CostLedger.issueBudgetSnapshot()` (read-only ceiling/spent/reserved triple)
++ fanout pre-flight refusing exit-5 `issue-ceiling-insufficient` with the exact
+perIssueOverrides line to declare the aggregate — no silent raises, no
+post-meter refusal. RED→GREEN pinned in patterns.test (zero records, zero boxes
+on refusal). (2) Harness lesson from T2.1 applies per-arm: arms commit distinct
+work products pre-harvest (harvest counts COMMITS; probe manifests commit
+nothing). (3) Fixture declares n×per-arm via cost-config override — now also
+enforced early by the pre-flight itself. FINAL live run at HEAD: both arms
+outcome "ready" through full gates on two real boxes, rank verb exit 0 over the
+real record (null-score contract, rankedAt stamped, winner null), BOTH bundles
+verify, teardown ×2 exit 0, aggregate spend **146 µ$ ≤ 100,000 µ$**, final-ls
+[]. Evidence:
+`_bmad-output/evidence/df3-e2e/2026-08-25-155131-t2-2-fanout-bestofn.json`.
