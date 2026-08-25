@@ -84,6 +84,14 @@ fi
 # route, accepting `content` OR `reasoning` — reasoning models answer with
 # content=null and the text under .reasoning; accepting only .content here
 # produces false failures.
+#
+# max_tokens is EXPLICIT (8, D's own figure) because the provider DEFAULT is
+# the model's max output — for high-ceiling slugs that worst case exceeds a
+# capped run key's whole limit and OpenRouter refuses the ping outright:
+# MEASURED live 2026-08-25, anthropic/claude-haiku-4.5 against a 50,000 µ$ key
+# → 402 "You requested up to 64000 tokens, but can only afford 50000" — the
+# gate then fails C on a healthy model + healthy key. Bounding the request
+# keeps the ping inside any cap the fleet can mint (F10).
 c_fail=""
 c_count=0
 for m in $Models; do
@@ -91,7 +99,7 @@ for m in $Models; do
   resp="$(printf 'header = "Authorization: Bearer %s"\n' "$OPENROUTER_API_KEY" \
     | curl -s --max-time 30 -K - https://openrouter.ai/api/v1/chat/completions \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"reply with the single word: ready\"}],\"provider\":{\"zdr\":true,\"data_collection\":\"deny\"}}")"
+    -d "{\"model\":\"$m\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"reply with the single word: ready\"}],\"provider\":{\"zdr\":true,\"data_collection\":\"deny\"}}")"
   if ! printf '%s' "$resp" | python3 -c '
 import json, sys
 try:
