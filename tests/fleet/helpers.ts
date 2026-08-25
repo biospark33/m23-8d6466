@@ -24,6 +24,16 @@ export interface RecordingLedger extends LedgerLike {
   closeCalls: number;
 }
 
+/** What {@link recordingLedger}'s `issueBudgetSnapshot` reports. Ceiling defaults
+ *  to MAX_SAFE_INTEGER — infinite headroom — because the fan-out pre-flight only
+ *  acts when the numbers DON'T fit, and every pre-existing caller means "never
+ *  refuse". A test pinning the refusal names a tight ceiling explicitly. */
+export interface BudgetSnapshot {
+  ceilingMicroUsd: number;
+  spentMicroUsd: number;
+  reservedMicroUsd: number;
+}
+
 /**
  * `defaultCapMicroUsd` is named for the field it BECOMES. It was called
  * `ceilingMicroUsd` while every caller passed a cap into it — in the one helper
@@ -33,6 +43,11 @@ function recordingLedger(defaultCapMicroUsd: number, decide: () => AdmissionDeci
   const admitCalls: AdmitCall[] = [];
   const ledger: RecordingLedger = {
     config: { defaultCapMicroUsd, perIssueOverrides: {} },
+    issueBudgetSnapshot: () => ({
+      ceilingMicroUsd: Number.MAX_SAFE_INTEGER,
+      spentMicroUsd: 0,
+      reservedMicroUsd: 0,
+    }),
     admitIssue(input, capMicroUsd, keyCapMicroUsd) {
       // SNAPSHOT, not the live reference. `input` belongs to the dispatcher,
       // which is free to mutate or reuse the object after the call — and then
@@ -66,8 +81,9 @@ function recordingLedger(defaultCapMicroUsd: number, decide: () => AdmissionDeci
 export function goodLedger(
   ceilingMicroUsd: number = defaultKeyCapMicroUsd,
   capMicroUsd: number = ceilingMicroUsd,
+  budgetSnapshot?: BudgetSnapshot,
 ): RecordingLedger {
-  return recordingLedger(capMicroUsd, () => ({
+  const ledger = recordingLedger(capMicroUsd, () => ({
     admitted: true as const,
     status: "within-budget" as const,
     admittedCeilingMicroUsd: ceilingMicroUsd,
@@ -77,6 +93,10 @@ export function goodLedger(
     remainingMicroUsd: ceilingMicroUsd,
     unpricedRows: 0,
   }));
+  if (budgetSnapshot !== undefined) {
+    ledger.issueBudgetSnapshot = () => budgetSnapshot;
+  }
+  return ledger;
 }
 
 /** A ledger whose issue is over cap (the DF2.8 refused decision shape). */

@@ -299,6 +299,50 @@ export async function fanout(
       );
     }
 
+    // ── F15 budget reconciliation: the DECLARED aggregate must fit the issue ──
+    // Every arm of best-of-n/race runs ONE brief, so every arm shares ONE
+    // issueId — and admitIssue budgets PER ISSUE. Measured live ×2 (fan-
+    // 20260825-{ff6d64,b37e88}): with the issue ceiling below n×cap, arm 0
+    // admitted and provisioned a billable box while every later arm was
+    // refused budget-exceeded — a deterministic partial fan-out that spent
+    // money on a fan-out the ledger was always going to strangle. Reconcile
+    // BEFORE anything is minted: read the same three numbers admission acts on
+    // and require headroom for the whole declared aggregate, n × per-arm cap.
+    // The remedy names the exact config line — the operator's cost-config
+    // stays the one place budgets are declared; the verb just refuses early,
+    // cheaply, and legibly instead of after arm 0's box is on the meter.
+    const cap = deps.capMicroUsd ?? defaultKeyCapMicroUsd;
+    const brief0 = input.briefList[0] as Brief | undefined;
+    if (brief0 !== undefined) {
+      const issueKey = `${brief0.repoSlug}#${brief0.issueId}`;
+      const ledger = deps.ledgerFactory();
+      let available = 0;
+      let snapshotMicroUsd = { ceilingMicroUsd: 0, spentMicroUsd: 0, reservedMicroUsd: 0 };
+      try {
+        snapshotMicroUsd = ledger.issueBudgetSnapshot(brief0.repoSlug, String(brief0.issueId));
+        available =
+          snapshotMicroUsd.ceilingMicroUsd -
+          snapshotMicroUsd.spentMicroUsd -
+          snapshotMicroUsd.reservedMicroUsd;
+      } finally {
+        try {
+          ledger.close();
+        } catch {
+          // a read-only probe's close failure must not mask the refusal below
+        }
+      }
+      const need = n * cap;
+      if (available < need) {
+        throw invalid(
+          5,
+          "issue-ceiling-insufficient",
+          `fan-out of ${n} arms at ${cap} µ$ each needs ${need} µ$ of issue headroom for ${issueKey}, but the ledger has ${available} (ceiling ${snapshotMicroUsd.ceilingMicroUsd} − spent ${snapshotMicroUsd.spentMicroUsd} − reserved ${snapshotMicroUsd.reservedMicroUsd})`,
+          `declare the aggregate for this fan-out in .sandbox/cost-config.json: {"perIssueOverrides": {"${issueKey}": ${need}}}`,
+          { issueKey, needMicroUsd: need, availableMicroUsd: available, ...snapshotMicroUsd },
+        );
+      }
+    }
+
     // AC9: the record exists before the FIRST mint. Arms are attached right
     // after the mints (the schema wants real runIds, so create-then-fill).
     const store = new FanoutRecordStore({ dir: deps.fanoutsDir, requestId: deps.requestId });
@@ -332,8 +376,8 @@ export async function fanout(
     }));
     const mintAllMs = mono() - tMint;
 
-    // INV-3: aggregate exposure stated BEFORE the first dispatch.
-    const cap = deps.capMicroUsd ?? defaultKeyCapMicroUsd;
+    // INV-3: aggregate exposure stated BEFORE the first dispatch. `cap` is the
+    // per-arm figure resolved in the F15 reconciliation above.
     emitLine({
       requestId: deps.requestId,
       operation: "fleet.fanout",

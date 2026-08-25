@@ -512,6 +512,40 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
   // ─── AC2/AC3: isolation and mint ordering ──────────────────────────────────────
 
   describe("isolation and mint ordering (AC2/AC3)", () => {
+    test("F15: issue headroom below n×cap refuses BEFORE any arm is provisioned", async () => {
+      // MEASURED live ×2 (fan-20260825-{ff6d64,b37e88}): both arms share ONE
+      // issueId, admitIssue budgets PER ISSUE, and with the ceiling below
+      // n×cap arm 0 admitted (billable box) while arms 1..n-1 were refused
+      // budget-exceeded — a deterministic partial fan-out that spent money on
+      // work the operator's own config had declared unaffordable. The
+      // primitive must reconcile its DECLARED aggregate against the ledger
+      // snapshot BEFORE the fanout record exists or anything is minted.
+      const cap = 50_000;
+      manifest();
+      const err = await refuseOf(
+        fanout(
+          "best-of-n",
+          2,
+          brief(),
+          deps({
+            capMicroUsd: cap,
+            rosterIds: ["r0", "r1"],
+            ledgerFactory: () =>
+              goodLedger(cap, cap, { ceilingMicroUsd: cap, spentMicroUsd: 0, reservedMicroUsd: 0 }),
+          }),
+        ),
+      );
+      expect(err.exitCode).toBe(5);
+      expect(err.code).toBe("issue-ceiling-insufficient");
+      expect(err.message).toContain("owner/repo#42");
+      expect(err.message).toContain("100000"); // n × cap, the exact number to authorize
+      expect(err.remediation).toContain("perIssueOverrides");
+      // Pre-mint: no fanout record, no run records, nothing on a provider.
+      expect(fanoutRecordFiles()).toEqual([]);
+      expect(readdirSafe(store.dir)).toEqual([]);
+      expect(boxCount(driver)).toBe(0);
+    });
+
     test("N arms hold distinct boxes, keys and records (negative control)", async () => {
       manifest();
       const res = await fanout("best-of-n", 2, brief(), deps({ rosterIds: ["r0", "r1"] }));
@@ -613,8 +647,12 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
         }),
       );
       expect(res.arms.map((a) => a.outcome)).toEqual(["ready", "ready"]);
-      expect(ledgers).toHaveLength(2);
-      for (const l of ledgers) {
+      // The F15 pre-flight opens its OWN ledger instance for the read-only
+      // budget snapshot (zero admitCalls, closed immediately); only the arms'
+      // two instances ever reach admitIssue.
+      const admitting = ledgers.filter((l) => l.admitCalls.length > 0);
+      expect(admitting).toHaveLength(2);
+      for (const l of admitting) {
         expect(l.admitCalls).toHaveLength(1);
         // assertWithinBudget was handed deps.capMicroUsd as its key-cap…
         expect(l.admitCalls[0]?.keyCapMicroUsd).toBe(12_345);

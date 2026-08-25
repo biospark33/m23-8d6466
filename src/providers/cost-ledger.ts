@@ -1204,6 +1204,63 @@ export class CostLedger {
    * `(repoSlug, issueId)` only — the replay branch refuses a correlation id
    * that resolves to another issue's reservation.
    */
+  /**
+   * Read-only budget snapshot for ONE canonical (repoSlug, issueId): the
+   * ceiling `admitIssue` would enforce, the priced spend booked so far, and the
+   * live reservations (one per run — a run with any priced>0 event has settled
+   * and stops counting, exactly as in admitIssue's own reservation sum).
+   *
+   * F15 (2026-08-25, live fan-20260825-{ff6d64,b37e88}): fan-out arms share the
+   * brief's single issueId, and admitIssue budgets PER ISSUE — so an n-arm
+   * fan-out whose issue ceiling sat below n×cap admitted arm 0 and
+   * deterministically refused every later arm AFTER arm 0 had provisioned a
+   * billable box. The pre-flight that prevents this needs to SEE the same three
+   * numbers admission will act on, from the same ledger instance, without
+   * taking the write lock or writing a row.
+   */
+  issueBudgetSnapshot(repoSlug: string, issueId: string): {
+    ceilingMicroUsd: number;
+    spentMicroUsd: number;
+    reservedMicroUsd: number;
+  } {
+    assertCanonicalIdentity(
+      "admission-input-invalid",
+      repoSlug,
+      issueId,
+      "supply the dispatch-resolved {repoSlug, issueId} pair",
+    );
+    const slug = canonicalRepoSlug(repoSlug);
+    const issue = canonicalIssueId(issueId);
+    const scopeKeys = issueScopeKeys(repoSlug, issueId);
+    this.assertQueryable();
+    const spentRow = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(cost_micro_usd), 0) AS total FROM cost_events WHERE ${issueScopeSql()} AND unpriced = 0`,
+      )
+      .get(...scopeKeys) as { total: number };
+    // Same per-run MAX and settled-run exclusion as admitIssue's reservation
+    // sum: ONE live ceiling per run, retired once the run reports real spend.
+    const reservedRow = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(ceiling), 0) AS total FROM (
+           SELECT MAX(a.ceiling_micro_usd) AS ceiling
+           FROM gate_admissions a
+           WHERE ${issueScopeSql("a.repo_slug", "a.issue_id")}
+             AND NOT EXISTS (
+               SELECT 1 FROM cost_events ce
+               WHERE ce.run_id = a.run_id AND ce.unpriced = 0 AND ce.cost_micro_usd > 0
+             )
+           GROUP BY a.run_id
+         )`,
+      )
+      .get(...scopeKeys) as { total: number };
+    return {
+      ceilingMicroUsd: capForIssue(this.config, slug, issue),
+      spentMicroUsd: spentRow.total,
+      reservedMicroUsd: reservedRow.total,
+    };
+  }
+
   admitIssue(input: AdmissionInput, capMicroUsd: number, keyCapMicroUsd: number): AdmissionDecision {
     const started = Date.now();
     // All four are load-bearing SQL BINDS, not optional decoration. A non-string

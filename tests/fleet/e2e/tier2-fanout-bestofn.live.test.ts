@@ -203,6 +203,22 @@ test.todoIf(liveTodoOff())(
       const rec1 = JSON.parse(readFileSync(join(fanoutsDir, `${fanoutId}.json`), "utf8")) as { rankedAt?: string | null };
       expect(rec1.rankedAt ?? "").not.toBe(""); // rank stamped it
 
+      // ── 5.5 per-arm committed work — harvest counts COMMITS on sbx/<runId> ──
+      // First live T2.2 (fan-20260825-df0ab4) proved both arms + the rank
+      // contract but harvest reported "harvested: none": the arms' manifest is
+      // a probe (echo/true), so no arm ever committed anything, and a bundle
+      // never existed to verify. Same lesson as T2.1's commit-fix: the HARNESS
+      // gives each arm its verified work product — one distinct file per arm,
+      // committed on-box with distinct content so the two bundles differ.
+      for (let i = 0; i < armVms.length; i++) {
+        const c = await ctx.driver.exec(armVms[i] as string, [
+          "sh", "-c",
+          `cd "$HOME/src" && printf 'arm %s of fanout %s\\n' "${i}" "${fanoutId}" > t2_arm_${i}_note.txt && git add t2_arm_${i}_note.txt && git -c user.name=t2-e2e -c user.email=t2-e2e@local commit -q -m "t2.2 arm ${i} work product" && git rev-parse --short HEAD`,
+        ]);
+        evidence.push({ phase: "arm-work", arm: i, exitCode: c.exitCode, sha: c.stdout.trim() });
+        expect(c.exitCode).toBe(0);
+      }
+
       // ── 6. harvest BOTH arms (both diffs are the artifact), teardown BOTH ─
       const hostRepo = await scratchClone(ctx.repoUrl, ctx.sha, workspace);
       for (let i = 0; i < armRunIds.length; i++) {

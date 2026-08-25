@@ -261,7 +261,7 @@ function storeRunIdRefusal(e: unknown, value: unknown): string {
  * and derived from `CostLedger` itself so a fake cannot drift from the real
  * signatures the gate is compiled against (`as never` erased exactly that).
  */
-export type LedgerLike = Pick<CostLedger, "config" | "admitIssue" | "close">;
+export type LedgerLike = Pick<CostLedger, "config" | "issueBudgetSnapshot" | "admitIssue" | "close">;
 
 export interface DispatchDeps {
   driver: ProviderDriver;

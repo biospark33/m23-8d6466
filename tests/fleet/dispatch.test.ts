@@ -1715,6 +1715,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     let closeCalls = 0;
     const ledger: LedgerLike = {
       config: { defaultCapMicroUsd: cap, perIssueOverrides: {} },
+      issueBudgetSnapshot: () => ({ ceilingMicroUsd: cap, spentMicroUsd: cap, reservedMicroUsd: 0 }),
       admitIssue() {
         return {
           admitted: false as const,
@@ -1853,6 +1854,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
           "owner/repo#43": 1_000,
         },
       },
+      issueBudgetSnapshot: () => ({ ceilingMicroUsd: 99_000_000, spentMicroUsd: 0, reservedMicroUsd: 0 }),
       admitIssue(input, capMicroUsd) {
         admitCalls.push({ input, capMicroUsd });
         return {
