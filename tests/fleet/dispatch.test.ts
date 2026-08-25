@@ -1185,6 +1185,19 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(result.state).toBe("ready");
   });
 
+  test("a gate-passed run's record carries the commitSha it was filled and gated against", async () => {
+    // T2.1 live finding (2026-08-25): the ack carried vmName but the record
+    // never stamped the pinned SHA — `fleet status`/audit could not answer
+    // "which commit is this billable box running?". The stamp lands only AFTER
+    // the gate passed: a refused run must not claim a provenance it never
+    // reached, and the SHA written is the BRIEF's (the one fill pinned and the
+    // gate prefix-checked), re-read from the record like any other consumer.
+    const brief = validBrief();
+    const result = await dispatch(brief, deps());
+    expect(result.state).toBe("ready");
+    expect(store.get(result.runId).commitSha).toBe(brief.commitSha);
+  });
+
   /**
    * The `setTimeout` clamp is the upper bound's whole reason for existing: a
    * delay past 2^31-1 wraps to 1 ms, so a request to LENGTHEN the budget

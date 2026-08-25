@@ -2452,6 +2452,20 @@ export async function dispatch(
           : undefined,
       );
     }
+    // The gate PROVED this box — stamp the money identity on the record: the
+    // exact SHA the box was filled to and gated against (T2.1 live 2026-08-25:
+    // the ack carried vmName but `fleet status`/audit could not answer "which
+    // commit is this billable box running?"). Best-effort like its sibling
+    // record writes: a failed stamp must not kill a healthy dispatch.
+    try {
+      deps.store.set(runId, { commitSha: valid.commitSha });
+    } catch (e) {
+      try {
+        process.stderr.write(`commitSha not recorded on run ${runId}: ${redact(errorMessage(e))}\n`);
+      } catch {
+        // nothing left to report it on
+      }
+    }
     // ── 10. expose (INV-5 ordering: PUBLIC only once the gate has proved it) ─
     const port = deps.port;
     if (port !== undefined) {
