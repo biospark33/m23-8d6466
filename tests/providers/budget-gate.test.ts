@@ -77,9 +77,22 @@ afterEach(() => {
 async function admitAndProvision(
   driver: FakeDriver,
   store: RunRecordStore,
-  opts: { runId: string; issue: { repoSlug: string; issueId: string; requestId?: string } },
+  opts: { runId: string; issue: { repoSlug: string; issueId: string; requestId?: string }; ledgerPath?: string },
 ): Promise<RunRecord> {
+  // Every construction names its path EXPLICITLY. The default tier resolves
+  // `.sandbox/cost-ledger.db` off the cwd, which beforeEach relocates into the
+  // per-test mkdtemp — but relying on chdir means one construction outside a
+  // chdir'd window silently opens the repo's REAL sandbox ledger: money rows
+  // land in shared state, and a refusal passes for a leftover-spend reason
+  // instead of the one under test. Same for `runsDir`, the wave-1 orphan-guard
+  // seam: without it the aged read-fault cross-check stats a directory this
+  // suite never wrote.
+  const ledgerPathUsed = opts.ledgerPath ?? join(dir, "cost-ledger.db");
   const ledger = new CostLedger({
+    path: ledgerPathUsed,
+    // store.dir, not a sibling guess: the aged read-fault cross-check must stat
+    // the directory THIS suite's records actually live in.
+    runsDir: store.dir,
     // ENOENT → undefined so the gate's orphan-admission expiry can see a run
     // whose store.create failed; every other read failure propagates.
     readRunRecord: (id) => {
@@ -126,6 +139,12 @@ async function admitAndProvision(
 function freshLedger(path?: string, store?: RunRecordStore): CostLedger {
   return new CostLedger({
     path: path ?? join(dir, "cost-ledger.db"),
+    // The wave-1 orphan-guard seam: the aged read-fault cross-check stats
+    // `$QDS_RUNS_DIR ?? .sandbox/runs`, so without this it would look in a
+    // directory this suite never wrote. Tied to the store's own dir rather
+    // than reconstructed beside it — correct even when a caller hands us a
+    // store from somewhere else.
+    runsDir: store?.dir,
     readRunRecord: store ? ((runId: string) => {
       try {
         const rec = store.get(runId);
@@ -473,16 +492,19 @@ describe("INV-COST-6: unopenable ledger refuses", () => {
     const driver = new FakeDriver(join(dir, "boxes"));
     const store = new RunRecordStore(join(dir, "runs"));
 
-    // Point ledger at a directory instead of a file
+    // Point ledger at a directory instead of a file — passed EXPLICITLY now
+    // that admitAndProvision takes a path, so this exercises the same
+    // construction shape every other test uses rather than a private env-tier
+    // route to it.
     const badPath = join(dir, "not-a-ledger");
     mkdirSync(badPath, { recursive: true });
-    process.env.QDS_COST_LEDGER_FILE = badPath;
 
     let err: CostLedgerError | undefined;
     try {
       await admitAndProvision(driver, store, {
         runId: "badledger-20260820-000001",
         issue: { repoSlug: "qds/demo", issueId: "42", requestId: "req-bad" },
+        ledgerPath: badPath,
       });
     } catch (e) {
       err = e as CostLedgerError;

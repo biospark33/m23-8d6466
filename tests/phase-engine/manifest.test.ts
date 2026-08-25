@@ -21,7 +21,11 @@ import {
 } from "../../src/phase-engine/index.ts";
 // Imported from the module, not the barrel: the seams can weaken INV-1, so they
 // are deliberately absent from the package's public surface.
-import { loadManifestWithSeams, stripAuthoredLimit } from "../../src/phase-engine/manifest.ts";
+import {
+  loadManifestWithSeams,
+  stampManifestLimit,
+  stripAuthoredLimit,
+} from "../../src/phase-engine/manifest.ts";
 import { sanitizeForMessage } from "../../src/phase-engine/types.ts";
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df1-1-manifest-")));
@@ -648,5 +652,45 @@ describe("loadManifest — beneath-root walk (INV-1, INV-5)", () => {
     const dir = path.join(root, "dir");
     fs.mkdirSync(dir);
     expect(() => loadManifest(dir, 10_000_000, root)).toThrow(ManifestError);
+  });
+});
+
+describe("stampManifestLimit — monotonic ceiling guard", () => {
+  /** A loaded, unstamped fixture: the ordinary first-stamp input. */
+  function loadUnstamped(): ReturnType<typeof loadManifest> {
+    const root = freshRoot();
+    return loadManifest(writeManifest(root, manifestObject()), 10_000_000, root);
+  }
+
+  test("a first stamp onto an absent limit lands whatever admission granted", () => {
+    expect(stampManifestLimit(loadUnstamped(), 500_000).manifest.limitMicroUsd).toBe(500_000);
+  });
+
+  test("re-stamping HIGHER than an existing ceiling is refused, naming both values", () => {
+    const once = stampManifestLimit(loadUnstamped(), 500_000);
+    // Both figures in one message: the operator sees the admitted ceiling and
+    // the attempted one without re-running anything.
+    expect(() => stampManifestLimit(once, 9_000_000)).toThrow(
+      /refusing to raise limitMicroUsd from 500000 to 9000000/,
+    );
+    // The refusal leaves the granted ceiling intact on the input.
+    expect(once.manifest.limitMicroUsd).toBe(500_000);
+  });
+
+  test("re-stamping EQUAL passes", () => {
+    const once = stampManifestLimit(loadUnstamped(), 500_000);
+    expect(stampManifestLimit(once, 500_000).manifest.limitMicroUsd).toBe(500_000);
+  });
+
+  test("re-stamping LOWER passes — the ceiling is downward-only", () => {
+    // Tightening preserves doctrine: every downstream consumer clamps down, so
+    // a lower re-stamp only ever shrinks spend.
+    const once = stampManifestLimit(loadUnstamped(), 9_000_000);
+    expect(stampManifestLimit(once, 250_000).manifest.limitMicroUsd).toBe(250_000);
+  });
+
+  test("the positive-safe-integer validation runs before the guard", () => {
+    const once = stampManifestLimit(loadUnstamped(), 500_000);
+    expect(() => stampManifestLimit(once, 1.5)).toThrow(/must be a positive integer/);
   });
 });

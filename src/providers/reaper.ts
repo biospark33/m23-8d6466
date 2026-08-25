@@ -33,9 +33,9 @@ import {
 } from "./credentials.ts";
 import {
   driverListing,
-  isFactoryOwnedVm,
   ProvisionRefusedError,
   RUN_ID_SHAPE,
+  SBX_OWNERSHIP_TAG,
   unverifiedVmListingRefusal,
   type ProviderDriver,
   type ProviderVm,
@@ -47,7 +47,10 @@ import {
   type QuotaLimits,
   type QuotaLimitsSource,
 } from "./quota.ts";
-import type { RunRecord, RunRecordStore } from "./run-record.ts";
+// LEGACY_RUN_ID_RE is the read/write grammar every record path already honours;
+// the sweep's name test below admits it too so a legacy-id box cannot be
+// stranded foreign here while its own record reads fine everywhere else.
+import { LEGACY_RUN_ID_RE, type RunRecord, type RunRecordStore } from "./run-record.ts";
 import { teardownSandbox, type TeardownDeps } from "./teardown.ts";
 import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
 
@@ -57,6 +60,31 @@ import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
  * existing importer of `reaper.ts` is unchanged.
  */
 export { RUN_ID_SHAPE };
+
+/**
+ * The sweep's ownership test — driver.ts's `isFactoryOwnedVm` widened on the
+ * NAME half to the grammar a record already on disk may carry.
+ *
+ * `isFactoryOwnedVm` demands the STRICT generated shape (`RUN_ID_SHAPE`), but
+ * the factory's own read/write paths honour `LEGACY_RUN_ID_RE` — records from
+ * before the id tightening exist by construction and stay readable, closable
+ * and teardown-able everywhere else (run-record.ts). A TAGGED box named by such
+ * an id classified `foreign` here: reported for manual remediation, never
+ * reaped — the exact keeps-billing outcome the legacy accommodation exists to
+ * prevent, entered through the ownership-predicate door.
+ *
+ * The widening is deliberately LOCAL to this sweep and the tag half is NOT
+ * relaxed: a box is still destroyable only when it carries `SBX_OWNERSHIP_TAG`,
+ * which nothing but `create` stamps on factory boxes. An untagged box of ANY
+ * name shape is foreign, exactly as before; only the shape half of the proof
+ * accepts what the rest of the codebase has always accepted. (`reapRuns`'s raw
+ * destroy path in driver.ts keeps the strict predicate until that file takes
+ * the same widening — its refusal is fail-safe, only noisier.)
+ */
+function isReaperOwnedVm(vm: ProviderVm): boolean {
+  if (vm.tag !== SBX_OWNERSHIP_TAG) return false;
+  return RUN_ID_SHAPE.test(vm.name) || LEGACY_RUN_ID_RE.test(vm.name);
+}
 
 export type RowClass =
   | "paired" | "leaked-vm" | "leaked-key" | "stale-record"
@@ -375,12 +403,13 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
   const rows: SweepRow[] = [];
 
   for (const vm of vms) {
-    // Foreign by grammar, or shape-matching without the ownership tag: reported
-    // for manual remediation, NEVER destroyed (INV-1 fail-safe — exedev's ls
-    // reports no tag, so its boxes all land here). `isFactoryOwnedVm` is the
-    // shared predicate — `reapRuns` gates its destroy on the same one, so the
-    // two reapers cannot drift into disagreeing about what is ours.
-    if (!isFactoryOwnedVm(vm)) {
+    // Foreign by grammar, or tagged-or-not without a name this factory could
+    // have generated: reported for manual remediation, NEVER destroyed
+    // (INV-1 fail-safe — exedev's ls reports no tag, so its boxes all land
+    // here). `isReaperOwnedVm` is `isFactoryOwnedVm` with the name half widened
+    // to the legacy record grammar (see its docstring); the tag half — the
+    // part INV-1 actually leans on — is unchanged.
+    if (!isReaperOwnedVm(vm)) {
       rows.push({ kind: "vm", id: vm.name, class: "foreign", action: "report" });
       continue;
     }
@@ -631,7 +660,7 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
               recordError = (e as Error).message ?? String(e);
             }
           }
-          if (current === undefined || !isFactoryOwnedVm(current)) {
+          if (current === undefined || !isReaperOwnedVm(current)) {
             failures.push({
               vm: unit.id,
               code: "ownership-recheck-refused",

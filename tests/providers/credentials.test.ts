@@ -678,6 +678,47 @@ describe("DF2.3 credential lifecycle", () => {
     expect((err as CredentialLifecycleError).message).toContain("timed out");
   });
 
+  test("a hostile non-string rejection survives every error log without replacing the real failure", async () => {
+    // Pins the redaction contract the error paths lean on: redactSecrets
+    // coerces ANY rejection value without throwing (asText) and fails to a
+    // marker rather than raising (its own try/catch), so a logger can never
+    // become the failure it is reporting — and no raw hostile value leaks.
+    const runId = "df23-hostile-reject";
+    await makeRun(runId);
+    // A null-prototype object: String(it) THROWS, so any unguarded coercion in
+    // an error path would replace the real error with its own.
+    const hostile: object = Object.assign(Object.create(null), { evil: true });
+    const d = deps({
+      driver: { exec: () => Promise.reject({ code: "boom", message: hostile }) } as unknown as CredentialDeps["driver"],
+      keyApi: {
+        createKey: (name: string, limitUsd: number) => api.createKey(name, limitUsd),
+        listAllKeys: (maxPages: number) => api.listAllKeys(maxPages),
+        deleteKey: (hash: string) => api.deleteKey(hash),
+        getKeyEntry: () => Promise.reject(Object.assign(Object.create(null), { noMessageHere: true })),
+      } as unknown as KeyApi,
+    });
+
+    let err: unknown;
+    try {
+      await runCredentialLifecycle(d, runId);
+    } catch (e) {
+      err = e;
+    }
+    // The ORIGINAL delivery rejection propagated, untouched by both log arms.
+    expect(err).toMatchObject({ code: "boom" });
+    // The mint had already succeeded and been recorded — revocable later.
+    expect(store.get(runId).keyHash).toBeString();
+    // Both cited sites logged STRING messages: the hostile values coerced to
+    // the redactor's unprintable marker, never echoed raw.
+    const deliver = logs.find((l) => l.operation === "credential.deliver" && l.status === "error");
+    expect(JSON.stringify(deliver?.error)).toContain("[unprintable]");
+    expect(JSON.stringify(deliver?.error)).not.toContain("evil");
+    const comp = logs.find((l) => l.operation === "credential.delivery_compensation");
+    expect(comp?.status).toBe("error");
+    expect(JSON.stringify(comp?.error)).toContain("[unprintable]");
+    expect(JSON.stringify(comp?.error)).not.toContain("noMessageHere");
+  });
+
   test("maxPages validation: openRouterKeyApi().listAllKeys throws for non-positive maxPages", async () => {
     const realEnv = process.env.OPENROUTER_PROVISIONING_KEY;
     process.env.OPENROUTER_PROVISIONING_KEY = "test-key";

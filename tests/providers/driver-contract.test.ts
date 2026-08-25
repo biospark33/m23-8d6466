@@ -266,6 +266,36 @@ export function runDriverContract(opts: DriverContractOptions): void {
       expect((await driver.list(keeper)).map((v) => v.name)).toEqual([keeper]);
       await teardownRun(driver, store, keeper);
     }, 60_000);
+
+    test("step 7 twin: a CLEAN listing completes the sweep — no fleet-wide refusal", async () => {
+      // The S15 refusal fires only when there is an UNPROVEN box to judge. A
+      // tagless-listing driver (exedev's `ls --json` carries no tag field)
+      // whose account shows nothing unclaimed must still get a completed sweep:
+      // refusing wholesale on shape alone would wedge every teardown behind
+      // one stranger's box forever, with nothing to spare and nothing to
+      // destroy. One keeper run claims its box; the sweep has to finish,
+      // destroy nothing, and leave it running.
+      const id = track(nextId());
+      await createRun(driver, store, { runId: id });
+      let destroyed: string[] | undefined;
+      let refused: unknown;
+      try {
+        destroyed = await reapRuns(driver, store);
+      } catch (e) {
+        // On a REAL substrate the account is shared, so strangers can appear
+        // mid-suite; S15 refusing while naming THEM is correct behavior and is
+        // not what this pin guards. What must never happen is OUR box being
+        // named as the reason.
+        refused = e;
+      }
+      if (refused !== undefined) {
+        expect((refused as Error).message).not.toContain(id);
+      } else {
+        expect(destroyed).toEqual([]);
+      }
+      expect((await driver.list(id)).map((v) => v.name)).toEqual([id]);
+      await teardownRun(driver, store, id);
+    }, 60_000);
   });
 }
 

@@ -412,9 +412,30 @@ function admittedCeilingBeside(manifestPath: string, runRoot: string, declared: 
   const because = declared
     ? "manifest declares limitMicroUsd but its dispatch witness"
     : "manifest declares no limitMicroUsd and the dispatch witness beside it";
+  // ABSENCE is its own diagnosis and keeps its historical refusal: an ENOENT
+  // from the read below says there is nothing there at all, not that a
+  // statement has gone stale. Only a PRESENT witness reaches the checks.
+  let bytes: Buffer;
+  try {
+    ({ bytes } = readArtifactBeneathRoot(witnessPath, runRoot));
+  } catch (err) {
+    throw new Error(
+      `${because} ${witnessPath} is unreadable: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  // S28: FRESHNESS before CONTENT, on BOTH paths. This used to parse and
+  // validate the body first, so a stale witness was diagnosed by whatever its
+  // content happened to be — "carries no positive integer effectiveCeiling-
+  // Micros" or a ceiling mismatch — when the truth is that it is a PREVIOUS
+  // run's statement and speaks for nothing. The witness-only path
+  // (runContextFrom) already ordered it this way.
+  const stale = witnessStaleBecause(manifestPath);
+  if (stale !== null) {
+    throw new Error(`${because} ${witnessPath} is stale: ${stale}`);
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readArtifactBeneathRoot(witnessPath, runRoot).bytes.toString("utf8"));
+    parsed = JSON.parse(bytes.toString("utf8"));
   } catch (err) {
     throw new Error(
       `${because} ${witnessPath} is unreadable: ${err instanceof Error ? err.message : String(err)}`,
@@ -424,16 +445,9 @@ function admittedCeilingBeside(manifestPath: string, runRoot: string, declared: 
   if (!Number.isSafeInteger(admitted) || (admitted as number) <= 0) {
     throw new Error(`${because} ${witnessPath} carries no positive integer effectiveCeilingMicros`);
   }
-  // S28: freshness binds the witness to this run on the DECLARED path too. The
-  // numbers agreeing is not enough when the agreement is old — an authored
-  // manifest and a leftover witness that once matched (a previous dispatch into
-  // the same directory, or a committed pair) would otherwise reconcile cleanly.
-  // Unlike the witness-only path there is nothing to fall back to — the
-  // manifest asserts a ceiling nothing current vouches for — so this refuses.
-  const stale = witnessStaleBecause(manifestPath);
-  if (stale !== null) {
-    throw new Error(`${because} ${witnessPath} is stale: ${stale}`);
-  }
+  // Unlike the witness-only path there is nothing to fall back to when stale:
+  // the manifest asserts a ceiling nothing current vouches for, so a stale
+  // witness refuses outright instead of downgrading anything.
   return admitted as number;
 }
 

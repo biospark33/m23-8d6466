@@ -105,3 +105,48 @@ recorded deferral. Both are decided here rather than left orphaned.
   3–5), DOD ≤10 high-signal, Files-to-Modify mandatory, Security Invariants when triggered.
 - exe.dev claims carry [VERIFY] vendor-single-origin flags; no AC assumes a compliance
   artifact (SOC 2/DPA/SLA) exists.
+
+## Appendix (2026-08-25): deferred-seam register from the df3-1 review (round 10)
+
+Register of findings deferred by df3-1 review round 10. The entries BELOW have no owning
+story; each carries the open hazard, where the seam lives, and the recommended direction
+when someone picks it up. Two further deferred findings were handed straight to stories and
+are therefore NOT listed here: FF2 → DF5.2, DF13 → DF3.2 (annotated in those story files).
+Full evidence in `_bmad-output/workflow-state/code-review/pr123/{triage.md,reports/}`.
+
+- **FB10 — exedev setup-gate never inspects `limitMicroUsd`** (fake gate does, per AC9a).
+  Seam: `src/providers/exedev/setup-gate.ts`. Engine is safe today — `scripts/pipeline-run.ts`
+  reconciles stamped manifest vs run-context witness inside the box and refuses on
+  absence/disagreement. When substrate-parity work happens: add one more probe that reads
+  the delivered manifest's `limitMicroUsd` stamp via exec and asserts root-level
+  presence/agreement, emitting the same per-item assertion shape as fake-gate items B/D so
+  exit-3 classification needs no new code.
+- **FP3 — close→price race is a fixed ~6-min wall-clock bet.** Teardown closes a record,
+  then crashes before the priced box-hours row lands; recovery slower than the grace cutoff
+  lets a new dispatch spend the freed headroom before the late row arrives → cap overshoot.
+  Seam: `cost-ledger.ts` admitIssue's closed-record retirement arm (~:1416). Direction: retire
+  on close-age ONLY when the record's teardown outcome is observable (terminal marker), or
+  scale the cutoff off record state — do NOT simply widen the window; that trades this hole
+  for admission wedging on records whose teardown never reports.
+- **FP9 — failed lock put-back vacates mutual exclusion for everyone.** A steal parks a live
+  writer's lock body aside; if `linkSync` then fails (ENOSPC/EMLINK), the lock path stays
+  empty while the writer is mid-`fn()`. Seam: `run-record.ts stealIfOwnerGone` tail /
+  `putBack`. Direction: a refuse-all sentinel file at the lock path (contenders see it ⇒
+  HELD-with-reason) until an operator restores the parked bytes; flock is the heavier
+  alternative and mixes locking disciplines.
+- **FF13 — exit code 6 carries two meanings** (fleet verbs: "cleanup after success failed";
+  dispatch ack-unwritable: "neither"). The registry NOTE documents the split; DF3.5's skill
+  contract test inherits it. Direction when unified: split into distinct codes OR scope 6 to
+  "work landed, reporting failed" everywhere and give ack-unwritable its own number — pick
+  BEFORE DF3.5 generates skills, after that the taxonomy is frozen into generated artifacts.
+- **FR9 — same-condition diagnostics land on different streams/formats per CLI** (lock-held
+  prose to stderr from run-lock's finally vs JSON warn events vs fleet printError).
+  Direction: one structured diagnostic emitter in scripts/lib consumed by all four CLIs;
+  do it alongside any future observability story, not piecemeal.
+
+Not work items — documented permanent tradeoffs (do not "fix" without reopening the original
+argument): FP8/FP10 own-pid 60 s graces (wedge-breakers), FB7 redaction segment floor
+(over-redaction = safe direction), FB8 fail-closed reap stall, FC12 records-skipped taxonomy,
+FR5 layout heuristic, FR14 witness advisory TOCTOU, DF8/DF14 shared-runId races (latent —
+nothing passes opts.runId until DF3.2 wires pre-minted ids; revisit THEN), DF19 monotonic
+clock seam, FF14 duplicate box-name last-wins.
