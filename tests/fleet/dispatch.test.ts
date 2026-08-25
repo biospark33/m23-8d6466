@@ -2719,6 +2719,119 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expectSingleRefusalLine("setup-gate-failed");
   });
 
+  test("AC3 via the real probe path: a NEVER-delivered key fails item C with the absent verdict", async () => {
+    // The other delivery-contract failure the type probe names: fill never
+    // landed `.env` at all. The verdict is ABSENCE — no mode digits, because a
+    // mode for a missing file is exactly the misleading detail this probe was
+    // rewritten to stop reporting.
+    const realExec = driver.exec.bind(driver);
+    driver.exec = async (vm: string, argv: string[], stdin?: string) => {
+      const r = await realExec(vm, argv, stdin);
+      if ((argv[2] ?? "").startsWith("umask 077")) {
+        rmSync(join(driver.root, vm, ".env"));
+      }
+      return r;
+    };
+
+    try {
+      await dispatch(validBrief(), deps());
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(3);
+      expect(err.code).toBe("setup-gate-failed");
+      // A and B passed; C is where the executed set stops.
+      expect(err.payload?.failedItem).toBe("C");
+      expect(err.payload?.assertionCode).toBe(2);
+      expect(err.payload?.assertions).toEqual([
+        "A:ok",
+        "B:ok",
+        "C:delivered key env file is mode 600 (DF2.3 delivery contract) — mode absent (.env was not delivered)",
+      ]);
+      const record = store.get(err.payload?.runId as string);
+      expect(record.closedAt).toBeUndefined();
+    }
+    expectSingleRefusalLine("setup-gate-failed");
+  });
+
+  test("AC3 via the real probe path: a DIRECTORY named .env fails item C as not-a-file, never as a mode", async () => {
+    // Wrong TYPE is the delivery contract failing by another road: something
+    // else wrote a directory in `.env`'s place. The verdict must send the
+    // operator to RE-DELIVER, and it must not carry mode digits — "mode 755"
+    // for a directory is what sent operators to chmod a thing chmod cannot fix.
+    const realExec = driver.exec.bind(driver);
+    driver.exec = async (vm: string, argv: string[], stdin?: string) => {
+      const r = await realExec(vm, argv, stdin);
+      if ((argv[2] ?? "").startsWith("umask 077")) {
+        const envPath = join(driver.root, vm, ".env");
+        rmSync(envPath);
+        mkdirSync(envPath);
+      }
+      return r;
+    };
+
+    try {
+      await dispatch(validBrief(), deps());
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(3);
+      expect(err.code).toBe("setup-gate-failed");
+      expect(err.payload?.failedItem).toBe("C");
+      expect(err.payload?.assertionCode).toBe(2);
+      expect(err.payload?.assertions).toEqual([
+        "A:ok",
+        "B:ok",
+        "C:delivered key env file is mode 600 (DF2.3 delivery contract) — .env exists but is not a regular file — re-run the key delivery step; do not chmod",
+      ]);
+      const record = store.get(err.payload?.runId as string);
+      expect(record.closedAt).toBeUndefined();
+    }
+    expectSingleRefusalLine("setup-gate-failed");
+  });
+
+  test.each([
+    ["an object", {} as unknown],
+    ["a string", "x" as unknown],
+  ])(
+    "a gate whose assertions value is %s fails closed at exit 3 instead of throwing",
+    async (_label, bogusAssertions) => {
+      // DF3's seam: every collection read off the gate result (.find/.map here,
+      // .some inside isSubstrateFailure) runs over the SANITIZED array, so a
+      // truthy non-array takes the empty-array path — the ordinary failure
+      // refusal with the explicit absence note — never a TypeError that
+      // downgrades exit 3 to exit-1 dispatch-failed.
+      try {
+        await dispatch(
+          validBrief(),
+          deps({
+            ledgerFactory: () => goodLedger(),
+            setupGate: async () => ({
+              ready: false,
+              failedItem: "A" as const,
+              assertionCode: 1 as const,
+              assertions: bogusAssertions as never,
+              debugCommands: ["bun scripts/fleet.ts status the-run"],
+              teardownCommand: "bun scripts/fleet.ts teardown the-run",
+              vm: "test-box",
+            }),
+          }),
+        );
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        const err = e as FleetError;
+        expect(err.exitCode).toBe(3);
+        expect(err.code).toBe("setup-gate-failed");
+        expect(err.message).toContain("the gate reported no failing assertion");
+        expect(err.payload?.assertions).toEqual([]);
+      }
+      expectSingleRefusalLine("setup-gate-failed");
+    },
+  );
+
   test("INV-6: gate COMMAND strings and assertion ITEM LABELS are escaped like notes are", async () => {
     // The note got `escapeText` first; the debug commands, the teardown command
     // and the item labels rode through raw on the theory that only the

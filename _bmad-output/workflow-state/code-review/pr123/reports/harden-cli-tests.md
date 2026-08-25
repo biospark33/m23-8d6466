@@ -52,7 +52,7 @@ Files owned and touched: `tests/fleet/brief-schema.test.ts`, `tests/fleet/cli.te
 
 ## Gates
 
-- `bunx biome check` on all four touched files: clean.
+- `bunx biome check` on all three touched files: clean.
 - `bunx tsc --noEmit`: exit 0.
 - `bun test tests/fleet/`: **528 pass, 9 todo, 0 fail**, 4650 expect() calls, 537 tests across 16 files (45.78s).
 - INV-2 flake rerun solo: pass. `cli.test.ts` solo rerun: 127 pass / 0 fail.

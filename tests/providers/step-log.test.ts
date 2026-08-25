@@ -162,14 +162,23 @@ describe("redactSecrets", () => {
     // The bounded arm is ordered terminated-first and its SECOND branch cannot
     // fail, which is what keeps the scan linear. A bounded arm that CAN fail is
     // retried at every `-----BEGIN` in the text and pays the full 8 KB cap each
-    // time — measured at 3.7 s on a 1 MB input against ~1 ms here. The input
-    // below is 4× that size, so the quadratic shape costs ~15 s against the
-    // unchanged 2 s ceiling: slow CI drifts the LINEAR figure (still hundreds
-    // of ms) without ever letting the QUADRATIC one under the bar.
-    const noisy = "-----BEGIN mention in provider output. ".repeat(100_000); // ~4 MB
-    const started = Date.now();
-    redactSecrets(noisy);
-    expect(Date.now() - started).toBeLessThan(2_000);
+    // time — measured at 3.7 s on a 1 MB input against ~1 ms here.
+    //
+    // SCALING, not wall-clock: both measurements push the SAME number of bytes
+    // through the redactor, so linear cost bills them about equally while the
+    // quadratic arm's per-byte rate grows with the INPUT size — its ratio tracks
+    // the 20× size step between the two inputs. An absolute ceiling flakes on a
+    // loaded CI runner; this ratio does not.
+    const unit = "-----BEGIN mention in provider output. ";
+    const scanMs = (repeats: number, passes: number): number => {
+      const input = unit.repeat(repeats);
+      const started = Date.now();
+      for (let i = 0; i < passes; i++) redactSecrets(input);
+      return Math.max(Date.now() - started, 1);
+    };
+    const smallMs = scanMs(10_000, 200); // 200 × ~400 KB
+    const bigMs = scanMs(200_000, 10); //   10 × ~8 MB — same total bytes
+    expect(bigMs / smallMs).toBeLessThan(8);
   });
 
   test("a JSON-ESCAPED PEM body on one line is swallowed whole by the same arm", () => {

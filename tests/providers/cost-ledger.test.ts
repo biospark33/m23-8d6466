@@ -1299,6 +1299,28 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     }
   });
 
+  test("reservation ceilings summing past MAX_SAFE_INTEGER throw ledger-overflow instead of wrapping", () => {
+    // Companion to the spend-SUM overflow above: admitIssue's OTHER additive
+    // site is the reservation-sum guard. Two live reservations whose ceilings
+    // are each individually valid but jointly past 2^53 must surface the named
+    // CostLedgerError — not a wrapped negative, an admitted decision carrying a
+    // nonsense reserved figure, or some generic Error.
+    admitAged("run-big-a", "req-big-a", Number.MAX_SAFE_INTEGER - 1000, 0);
+    admitAged("run-big-b", "req-big-b", Number.MAX_SAFE_INTEGER - 1000, 0);
+    let thrown: unknown;
+    try {
+      ledger.admitIssue(
+        { repoSlug: "qds/demo", issueId: "42", runId: "run-after-big", requestId: "req-after-big" },
+        Number.MAX_SAFE_INTEGER,
+        Number.MAX_SAFE_INTEGER,
+      );
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(CostLedgerError);
+    expect((thrown as CostLedgerError).code).toBe("ledger-overflow");
+  });
+
   test("a record created between the prefetch and the transaction is COUNTED, not expired", () => {
     // The prefetch used to cache `{record: undefined}` for an absent record;
     // inside the transaction that frozen absence read as expired-orphan for a

@@ -550,6 +550,14 @@ function byCreatedAtDesc(a: StatusRow, b: StatusRow): number {
 }
 
 /**
+ * The optional TEXT fields `rowForRecord` reads off a record. Each must be
+ * absent or a string: `sanitizeOptional`/`safeUrl` trust their inputs are
+ * strings, and the store being a structural interface means a test double can
+ * hand back a record whose `vmName` is a number.
+ */
+const RECORD_TEXT_FIELDS = ["vmName", "httpsUrl", "requestId", "closedAt"] as const;
+
+/**
  * Status: store.listWithAnomalies() ∪ driver.list() with 30s timeout.
  *
  * Per C4: boxUnknown only on list failure/timeout; empty list is boxMissing.
@@ -581,9 +589,24 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
     if (
       !Array.isArray(listing?.records) ||
       !Array.isArray(listing.skipped) ||
-      listing.records.some((rec) => rec === null || typeof rec !== "object" || Array.isArray(rec))
+      listing.records.some((rec) => {
+        if (rec === null || typeof rec !== "object" || Array.isArray(rec)) return true;
+        // One step deeper still: the FIELDS rowForRecord dereferences. A
+        // non-string runId breaks the box join and the sort key; a numeric
+        // vmName rides into sanitizeOptional, which trusts its input is a
+        // string. Same refusal vocabulary as above: elements are refused,
+        // never dropped.
+        const r = rec as Partial<RunRecord>;
+        return (
+          typeof r.runId !== "string" ||
+          typeof r.createdAt !== "string" ||
+          RECORD_TEXT_FIELDS.some((f) => r[f] !== undefined && typeof r[f] !== "string")
+        );
+      })
     ) {
-      throw new Error("listWithAnomalies() did not return {records: [], skipped: []}");
+      throw new Error(
+        "listWithAnomalies() did not return {records: [], skipped: []} of records with string runId/createdAt and absent-or-string optional fields",
+      );
     }
   } catch (e) {
     // INV-4 makes list() throw on the FIRST unreadable record — untyped, so one

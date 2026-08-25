@@ -796,7 +796,12 @@ function logVerb(
     verb: bounded(verb),
     phase,
     exitCode: code,
-    exitStatus: (code === 0 ? "success" : code === 1 ? "transient" : "logic") as ExitStatus,
+    // A caller with knowledge the exit table lacks (the only statuses it can
+    // name are success/transient/logic) passes its own classification; the
+    // table below is the fallback for every call site that has nothing
+    // finer-grained to add.
+    exitStatus:
+      exitStatusOverride ?? ((code === 0 ? "success" : code === 1 ? "transient" : "logic") as ExitStatus),
   });
   return code;
 }
@@ -1261,6 +1266,11 @@ export async function run(
           // message on its way there.
           const ledger = new CostLedger({
             ...costLedgerOpts(store.dir),
+            // Same orphan-guard seam wiring as teardown's construction below:
+            // without it, recordStructurallyAbsent stats `$QDS_RUNS_DIR ??
+            // .sandbox/runs` — a directory THIS store never wrote — so an aged
+            // read-fault cross-check reads absence from the wrong tree.
+            runsDir: store.dir,
             readRunRecord: (id: string) => {
               try {
                 return store.get(id);

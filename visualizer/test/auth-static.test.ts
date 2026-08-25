@@ -222,7 +222,11 @@ describe("static branch WITH a ./dist build (INV-3 confinement)", () => {
   test.each([
     ["double-encoded", "/..%252f".repeat(8), "%252fetc%252fhosts", "localhost"],
     ["backslash separators", "/..%5c".repeat(8), "etc%5chosts", "localhost"],
-    ["uppercase hex digits", "/..%2E%2F".repeat(4), "etc%2Fhosts", "localhost"],
+    // Uppercase on the SLASH escape: the segment must decode to a GENUINE
+    // `../` (the former `/..%2E%2F` decoded to a literal `.../` directory — no
+    // traversal at all), and hex case must not decide whether `%2F` becomes a
+    // separator.
+    ["uppercase hex digits", "/..%2F".repeat(8), "etc%2Fhosts", "localhost"],
   ])("%s traversal spelling → JSON 404, never the file", async (_label, up, tail, marker) => {
     // The three spellings a naive decoder chain is known to miss: one decode
     // pass leaves %252f as literal "%2f" (so it must not be decoded TWICE into

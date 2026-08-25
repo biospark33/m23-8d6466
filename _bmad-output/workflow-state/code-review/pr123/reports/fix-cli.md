@@ -40,4 +40,28 @@ bun test tests/fleet/verbs.test.ts                           # 77 pass, 0 fail �
 bun test tests/fleet/                                        # 515 pass, 9 todo, 1 fail (foreign manifest.ts/brief-schema.test pair above)
 ```
 
-GitNexus impact before edits: `impact({target:"run", file_path:"scripts/fleet.ts", direction:"upstream"})` → 1 impacted symbol (the script itself), risk LOW, epistemic exact. No HIGH/CRITICAL warnings.
+**Snapshot note (round-10 wrap-up):** the figures above are the INTERMEDIATE
+per-cluster gate taken mid-wave, while other fixers' files were still in flight
+in the shared tree; they are preserved verbatim on purpose. The AUTHORITATIVE
+final validation gate for the round is the closing run recorded in
+[harden-cli-tests.md §Gates](./harden-cli-tests.md): `bunx tsc --noEmit` clean ·
+`bunx biome check` clean · `bun test tests/fleet/` → **528 pass, 0 fail**
+(4650 expect() calls).
+
+GitNexus impact before edits: `impact({target:"run", file_path:"scripts/fleet.ts",
+direction:"upstream"})` → 1 impacted symbol (the script entrypoint itself), risk
+LOW, epistemic exact. No HIGH/CRITICAL warnings for this cluster. Completed at
+wrap-up (tree settled), per symbol:
+
+| Symbol | Impact (upstream) | Direct callers | Affected processes | Risk |
+|---|---|---|---|---|
+| `run` (scripts/fleet.ts) | 1 impacted | — (CLI entrypoint) | — | LOW |
+| `logVerb` | 4 impacted | `finish`, verb handlers | `run`, `handler` | LOW |
+
+Final `detect_changes({scope:"compare", base_ref:"main"})` for the whole round:
+**125 changed symbols across 83 files, 37 affected processes** — the aggregate
+reads CRITICAL only because it spans every cluster of the 55-finding round plus
+docs/tests; the changed-symbol set stays inside this story's modules (fleet CLI,
+fleet core, providers, scripts) with no unexpected scope. This report's fixes
+were COMMITTED as part of cf56c26 on `fix/df3-1-review-round-10`; the earlier
+"no commits made" stance was a mid-wave working-note, not final evidence.

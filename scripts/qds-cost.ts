@@ -260,13 +260,24 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
   // came back as a brand-new empty database and read as a confident ZERO
   // SPEND, exit 0.
   let probedIno: number;
+  // The probe fd is HELD OPEN until the post-construction identity verdict
+  // below, not closed here. While this process holds the inode it cannot be
+  // freed, so the number cannot be recycled: a ledgerPath that fstats to the
+  // SAME inode after construction IS the file we probed. With the fd closed
+  // early, a replace-and-restore across the CostLedger open window could forge
+  // that equality — the restored copy is a new inode wearing the old number,
+  // and the constructed ledger would be reading bytes nobody wrote behind a
+  // passing check.
+  let probeFd: number | null = null;
   try {
     const fd = openSync(ledgerPath, "r");
     try {
       probedIno = fstatSync(fd).ino;
-    } finally {
+    } catch (e) {
       closeSync(fd);
+      throw e;
     }
+    probeFd = fd;
   } catch (e) {
     const errno = (e as NodeJS.ErrnoException).code;
     if (errno === "ENOENT") {
@@ -303,10 +314,11 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
   try {
     if (statSync(ledgerPath).ino !== probedIno) throw new Error("replaced");
   } catch {
+    if (probeFd !== null) closeSync(probeFd);
     try {
       ledger.close();
     } catch {
-      /* the refusal below is the outcome; the fd dies with the process */
+      /* the refusal below is the outcome; the fds die with the process */
     }
     reportFailure(
       out,
@@ -316,6 +328,8 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
     );
     return 1;
   }
+  // Identity proven: release the probe handle before reading.
+  if (probeFd !== null) closeSync(probeFd);
 
   // Assigned on every path, then possibly downgraded by the finally — the same
   // shape scripts/fleet.ts and scripts/sandbox-teardown.ts use. `return 1`

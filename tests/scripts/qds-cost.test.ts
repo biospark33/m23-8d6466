@@ -99,10 +99,10 @@ describe("qds-cost CLI", () => {
       const issueId = "42";
       const requestId = "req-001";
 
-      // Stub run record: 90min lifetime. F8 prices box-hours fractionally
-      // from wall-clock ms — 1.5h × 3,600,000 µ$/h = 5,400,000 µ$ (the old
-      // ceil-to-whole-hours formula billed 2h = 7,200,000 µ$, a 1-hour
-      // minimum this fixture's expectation was written against).
+      // Stub run record: 90min lifetime. Box-hours bill by CEILED whole hours:
+      // ceil(1.5h) = 2h × 3,600,000 µ$/h = 7,200,000 µ$. (The fractional
+      // per-minute formula this comment once described lives on another
+      // branch; here the whole-hour minimum is the shipped arithmetic.)
       const stubRecord = {
         keyHash: "hash-abc123",
         limitMicroUsd: 50_000_000,
@@ -160,7 +160,7 @@ describe("qds-cost CLI", () => {
         invocationSeq: 0,
       });
 
-      // Box hours row: 90min = 1.5h = 5,400,000 µ$ (F8 fractional pricing)
+      // Box hours row: 90 minutes ceils to 2 whole hours = 7,200,000 µ$
       ledger.ingestBoxHours({ runId, repoSlug, issueId, requestId });
       ledger.close();
 
@@ -171,7 +171,7 @@ describe("qds-cost CLI", () => {
       // Header with issue ref
       expect(out).toContain(`${repoSlug}#${issueId}`);
 
-      // Total: tokens (150,000 µ$) + box-hours (5,400,000 µ$) = 5,550,000 µ$
+      // Total: tokens (150,000 µ$) + box-hours (2h × 3,600,000 = 7,200,000 µ$)
       expect(out).toContain("7,350,000");
       expect(out).toContain("$7.35");
 

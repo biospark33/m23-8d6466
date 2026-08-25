@@ -7,9 +7,31 @@ all 113 tests pass on the source-only diff; the file is untouched.
 GitNexus impact before edits: `impact({target:"dispatch", target_uid:
 "Function:src/fleet/dispatch.ts:dispatch", direction:"upstream"})` → risk LOW,
 4 impacted (direct callers: `fanout-primitive.ts:fanout`, `scripts/fleet.ts:run`).
-No HIGH/CRITICAL warning. `detect_changes()` skipped: no commit occurs, and the
-shared worktree carries parallel teammates' unstaged edits that would pollute
-attribution.
+No HIGH/CRITICAL warning. `detect_changes()` skipped at fix time: no commit
+occurred then, and the shared worktree carried parallel teammates' unstaged edits
+that would have polluted attribution.
+
+Completed per-symbol evidence (wrap-up, tree settled):
+
+| Symbol | Impact (upstream) | Direct callers | Affected processes | Risk |
+|---|---|---|---|---|
+| `dispatch` | 4 impacted | `fanout`, fleet `run` | `fanout` (6 hits), fleet `run` (4) | LOW |
+| `refuse` | 7 impacted | `dispatch`, `timedOut` | within/fanout/run/dispatch chains | **HIGH** |
+| `within` | 5 impacted | `dispatch` | fanout/run/dispatch | **HIGH** |
+
+The two HIGH ratings are this module's choke-point topology (`refuse` and
+`within` sit on every refusal/timeout path), expected for a dispatcher-core fix
+round — every change is internal to the refusal envelope composition, and all
+113 dispatch tests plus the round-closing gate stayed green.
+
+Final `detect_changes({scope:"compare", base_ref:"main"})` for the whole round:
+**125 changed symbols across 83 files, 37 affected processes**; this file's
+changed symbols there are `storeRunIdRefusal`, `recordExists`, `dispatch`,
+`phase`, `refuse`, `timedOut`, `within`. The CRITICAL aggregate spans the full
+55-finding round plus docs/tests and stays inside this story's modules — it is
+the round-wide figure, not a single-cluster blast radius. These fixes were
+COMMITTED as part of cf56c26 on `fix/df3-1-review-round-10`; the no-commit note
+above was a mid-wave working constraint, not final evidence.
 
 ## Dispositions
 
@@ -64,4 +86,7 @@ Deferred untouched per instructions: DF8, DF13, DF14, DF19. DF17 dismissed.
 | `bun test tests/fleet/dispatch.test.ts` | **113 pass, 0 fail** (816 expect calls) |
 | `bun test tests/fleet/{fanout,verbs,rank,patterns}.test.ts` (bonus) | first run 3 fails (documented parallel-load flake territory), solo rerun **180 pass, 0 fail** |
 
-No commits, no pushes.
+No commits, no pushes at fix time. Landed in commit cf56c26 ("fix(df3-1): review
+round 10 — 55 findings patched across dispatcher, CLI, money paths") on
+`fix/df3-1-review-round-10`; see the completed evidence block above for the final
+impact/detect_changes record.

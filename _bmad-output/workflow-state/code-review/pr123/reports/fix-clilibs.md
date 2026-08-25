@@ -52,6 +52,13 @@ F8 fixed). Fixed the fixture's expected figures + comments in tests/scripts/qds-
 
 ## Gates
 
+**Snapshot note (round-10 wrap-up):** the figures below are the INTERMEDIATE
+per-cluster gate taken mid-wave, while other fixers' files were still in flight
+in the shared tree; they are preserved verbatim on purpose. The AUTHORITATIVE
+final validation gate for the round is the closing run recorded in
+[harden-cli-tests.md §Gates](./harden-cli-tests.md): `bunx tsc --noEmit` clean ·
+`bunx biome check` clean · `bun test tests/fleet/` → **528 pass, 0 fail**.
+
 - `bunx biome check` on all 7 touched files → clean.
 - `bunx tsc --noEmit` → exit 0.
 - `bun test tests/scripts/ tests/phase-engine/pipeline-run.test.ts` → **317 pass, 0 fail**,
@@ -61,11 +68,28 @@ F8 fixed). Fixed the fixture's expected figures + comments in tests/scripts/qds-
   tests/fleet/cli.test.ts (invalid-run-id message shape + brief U+FFFD byte cap),
   BOTH files currently modified in-tree by the fleet agent; neither path touches
   run-lock/cost-ledger-opts. Out of my scope.
-- `detect_changes(unstaged)`: my cluster's symbols only (refuse, onSignal, installSignalRelease,
-  envPath, admittedCeilingBeside, run ×2, assertValidMicroTotal); the CRITICAL aggregate is the
-  tree-wide concurrent agents' churn (fleet.ts, src/fleet/*, src/providers/cost-ledger.ts …).
-- GitNexus impact run before edits: releaseRunLock/acquireRunLock/costLedgerOpts HIGH (expected
-  shared seams — signatures preserved, internal-only changes), runContextFrom LOW.
+
+GitNexus evidence (completed at wrap-up, tree settled — per symbol):
+
+| Symbol | Impact (upstream) | Direct callers | Affected processes | Risk |
+|---|---|---|---|---|
+| `releaseRunLock` | 11 impacted (d=4 direct) | fleet teardown/harvest paths, sandbox-teardown | `fanout`, fleet `run`, teardown `run`, `recordWriter` | **HIGH** |
+| `acquireRunLock` | 9 impacted (d=3 direct) | fleet verbs, sandbox-teardown | same four as above | **HIGH** |
+| `costLedgerOpts` | 7 impacted (d=4 direct) | fleet.ts, qds-cost.ts, sandbox-teardown.ts | fleet/teardown/qds-cost `run`s | **HIGH** |
+
+The three HIGH ratings are EXPECTED shared-seam topology, not regressions: every
+consumer routes through these functions, signatures were preserved, and the
+changes are internal-only (release best-effort rescue rm; refusal classifier;
+remediation text). No consumer edits were required.
+
+Final `detect_changes({scope:"compare", base_ref:"main"})` for the whole round:
+**125 changed symbols across 83 files, 37 affected processes**; this cluster's
+own symbols appear there (refuse, onSignal, installSignalRelease, envPath,
+admittedCeilingBeside, run ×2, assertValidMicroTotal). The CRITICAL aggregate is
+the full 55-finding round's diff plus docs/tests, confined to this story's
+modules — not a single-cluster blast radius. These fixes were COMMITTED as part
+of cf56c26 on `fix/df3-1-review-round-10`; the earlier no-commit stance was a
+mid-wave working note, not final evidence.
 
 New tests added (tests/scripts/sandbox-teardown-cli.test.ts): F5 released-lock case;
 symlink-alias self-pid LIVE case; unheld self-pid stays stale (FR3 regression guard);

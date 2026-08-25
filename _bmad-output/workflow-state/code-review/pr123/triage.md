@@ -146,4 +146,4 @@ PATCH = fix this round · DEFER = real, not actionable now (rationale given) · 
 | FB9 | LOW | edge | W2c | (listed above — executed by W1f; W2c must not clobber) |
 
 ## Dismissal count: 8 (DF17, DF20, FF7, FF11, FF15, FC6, FB11, plus FC13 folded into PATCH-verify)
-## Deferred count: 17 (DF8, DF13, DF14, DF19, FF2, FF13, FF14, FC12, FR5, FR9, FR14, FP3, FP8, FP9, FP10, FP12, FB7, FB8, FB10 — 19 entries; see tables)
+## Deferred count: 19 (DF8, DF13, DF14, DF19, FF2, FF13, FF14, FC12, FR5, FR9, FR14, FP3, FP8, FP9, FP10, FP12, FB7, FB8, FB10 — see tables)

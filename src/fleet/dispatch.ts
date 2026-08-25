@@ -53,7 +53,7 @@ import {
 } from "../providers/exedev/setup-gate.ts";
 import { fakeGate, isSubstrateFailure } from "../providers/fake-gate.ts";
 import { parseRoster, ROSTER_MAX_BYTES } from "../phase-engine/roster/schema.ts";
-import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { log } from "../swarmclaw/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
@@ -1460,8 +1460,8 @@ export async function dispatch(
       try {
         const st = fstatSync(fd);
         if (!st.isFile()) throw new Error(`${rosterPath} is not a regular file`);
-        // SIZE, before the slurp. readFileSync + parseRoster are synchronous
-        // and run OUTSIDE every within() deadline — nothing can interrupt them
+        // SIZE, before the read. The read + parseRoster pair is synchronous
+        // and runs OUTSIDE every within() deadline — nothing can interrupt it
         // — so an uncapped read let a planted multi-gigabyte roster.yaml hang
         // the dispatch before any admission is spent: the same pre-admission
         // wedge the FIFO guard above exists for, by volume instead of by
@@ -1473,21 +1473,32 @@ export async function dispatch(
             `roster is ${st.size} bytes, over the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling`,
           );
         }
-        const content = readFileSync(fd, "utf8");
-        // RE-FSTAT + length check AFTER the slurp. The size verdict above
-        // described the file as it stood THEN; a writer appending between that
-        // fstat and the read makes readFileSync swallow past the ceiling —
-        // synchronously, outside every within() deadline, which is the same
-        // pre-admission wedge the FIFO guard exists for, by volume instead of by
-        // blocking. Both figures are checked: what was READ bounds the parse,
-        // what is ON DISK catches an append still landing.
+        // CAPPED READ, not a slurp. A readFileSync here would swallow whatever
+        // landed between the size verdict above and the read — synchronously,
+        // outside every within() deadline, the same pre-admission wedge the
+        // FIFO guard exists for, by volume instead of by blocking. At most
+        // ROSTER_MAX_BYTES + 1 bytes ever enter memory, and parseRoster never
+        // sees a byte over the ceiling: over-cap refuses HERE, on what was
+        // actually read, before any parsing runs.
+        const capped = Buffer.alloc(ROSTER_MAX_BYTES + 1);
+        let total = 0;
+        while (total < capped.length) {
+          const n = readSync(fd, capped, total, capped.length - total, null);
+          if (n === 0) break;
+          total += n;
+        }
+        // RE-FSTAT AFTER the read. The size verdict above described the file as
+        // it stood THEN; a writer still appending shows up ON DISK even when
+        // the capped read has already bounded what entered memory. Both figures
+        // are checked: what was READ bounds the parse, what is ON DISK catches
+        // an append still landing.
         const after = fstatSync(fd);
-        if (after.size > ROSTER_MAX_BYTES || content.length > ROSTER_MAX_BYTES) {
+        if (total > ROSTER_MAX_BYTES || after.size > ROSTER_MAX_BYTES) {
           throw new Error(
-            `roster grew past the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling while it was read (${content.length} bytes read, ${after.size} on disk)`,
+            `roster grew past the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling while it was read (${total} bytes read, ${after.size} on disk)`,
           );
         }
-        rosterSlugs = parseRoster(content, rosterPath).roles.map((r) => r.slug);
+        rosterSlugs = parseRoster(capped.toString("utf8", 0, total), rosterPath).roles.map((r) => r.slug);
       } finally {
         closeSync(fd);
       }

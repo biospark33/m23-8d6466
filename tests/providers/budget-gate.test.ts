@@ -90,7 +90,9 @@ async function admitAndProvision(
   const ledgerPathUsed = opts.ledgerPath ?? join(dir, "cost-ledger.db");
   const ledger = new CostLedger({
     path: ledgerPathUsed,
-    runsDir: join(dir, "runs"),
+    // store.dir, not a sibling guess: the aged read-fault cross-check must stat
+    // the directory THIS suite's records actually live in.
+    runsDir: store.dir,
     // ENOENT → undefined so the gate's orphan-admission expiry can see a run
     // whose store.create failed; every other read failure propagates.
     readRunRecord: (id) => {
@@ -139,8 +141,10 @@ function freshLedger(path?: string, store?: RunRecordStore): CostLedger {
     path: path ?? join(dir, "cost-ledger.db"),
     // The wave-1 orphan-guard seam: the aged read-fault cross-check stats
     // `$QDS_RUNS_DIR ?? .sandbox/runs`, so without this it would look in a
-    // directory this suite never wrote.
-    runsDir: store ? join(dir, "runs") : undefined,
+    // directory this suite never wrote. Tied to the store's own dir rather
+    // than reconstructed beside it — correct even when a caller hands us a
+    // store from somewhere else.
+    runsDir: store?.dir,
     readRunRecord: store ? ((runId: string) => {
       try {
         const rec = store.get(runId);

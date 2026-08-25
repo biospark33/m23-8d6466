@@ -631,10 +631,16 @@ export async function provisionAdmittedRun(
       `check the provider for a box named ${opts.runId} before assuming nothing was created, then tear the run down: bun scripts/fleet.ts teardown ${opts.runId}`,
     );
   }
-  // vmName AND the intended port BEFORE expose/setPublic. Every call below can
-  // throw against a box that is already live and already billing; until the
-  // name is on the record the only handle to it is `teardownRun`'s runId
-  // fallback, which holds only while the box happens to be named after the run.
+  // vmName AND the intended port BEFORE anything else that can refuse —
+  // including `address`'s own validation of the create-time URL. Every call
+  // below can throw against a box that is already live and already billing;
+  // until the name is on the record the only handle to it is `teardownRun`'s
+  // runId fallback, which holds only while the box happens to be named after
+  // the run. Validating the URL BEFORE persisting the name left exactly that
+  // hole: a driver returning `null` (or any non-string) for `httpsUrl` refused
+  // out of `address` while the record named nothing at all. Now the worst case
+  // of ANY refusal in this sequence is a record that NAMES the box — which
+  // teardown and the reaper act on directly.
   //
   // The port rides along INTENDED, not confirmed, and that is the honest
   // record: `withTimeout` ABANDONS the expose call rather than cancelling it,
@@ -642,7 +648,7 @@ export async function provisionAdmittedRun(
   // after the call, the record described a box with a name and no port — i.e.
   // not the box that exists. Written before, the worst case is a port recorded
   // for a box the provider never exposed, which teardown destroys either way.
-  const createUrl = address(vm.httpsUrl, `driver.create(${opts.runId})`, opts.runId);
+  //
   // Both mid-sequence record writes are classified, like every other failure
   // in this sequence: a raw store error (EIO, ENOSPC, a lock timeout from a
   // concurrent writer) used to escape as a bare `Error` past a LIVE, BILLING
@@ -657,9 +663,14 @@ export async function provisionAdmittedRun(
     try {
       return store.set(opts.runId, patch);
     } catch (e) {
+      // Non-Error rejections (`throw null`, a string from a proxying store)
+      // used to render `(undefined)` here — a refusal whose one diagnostic
+      // slot said nothing at all. Errors keep their message verbatim; every
+      // other rejection kind goes through `String`.
+      const detail = e instanceof Error ? e.message : String(e);
       throw new ProvisionRefusedError(
         "record-write-failed",
-        `the ${what} for run ${opts.runId} could not be written (${(e as Error).message}) — box ${vm.name} is live and billing and the record is left OPEN`,
+        `the ${what} for run ${opts.runId} could not be written (${detail}) — box ${vm.name} is live and billing and the record is left OPEN`,
         `tear the run down: bun scripts/fleet.ts teardown ${opts.runId}`,
       );
     }
@@ -668,10 +679,19 @@ export async function provisionAdmittedRun(
     {
       vmName: vm.name,
       ...(opts.port === undefined ? {} : { ports: [opts.port] }),
-      ...(createUrl === undefined ? {} : { httpsUrl: createUrl }),
     },
-    "box handle (vmName/ports/httpsUrl)",
+    "box handle (vmName/ports)",
   );
+  // Only NOW is the create-time URL validated. `address` still rejects a null
+  // (any non-string, non-undefined) httpsUrl — that seam lie is what it exists
+  // for — but the refusal now lands on a record that already names the box and
+  // carries the intended port, so the remediation's teardown acts on `vmName`
+  // instead of falling back to the runId. Absence (undefined) stays the
+  // legitimate no-create-URL case and persists nothing extra.
+  const createUrl = address(vm.httpsUrl, `driver.create(${opts.runId})`, opts.runId);
+  if (createUrl !== undefined) {
+    record = setRecord({ httpsUrl: createUrl }, "create-time address (httpsUrl)");
+  }
   let httpsUrl = createUrl;
   if (opts.port !== undefined) {
     // A driver that resolves nothing — or an empty string — has established no
