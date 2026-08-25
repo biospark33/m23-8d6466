@@ -13,9 +13,11 @@ import * as path from "node:path";
 
 import { rejection } from "../helpers.ts";
 import {
+  KILL_GRACE_MS,
   ReverifyError,
   probeToolchain,
   sandboxRef,
+  withGuards,
   withQuarantineWorktree,
 } from "../../src/reverify/worktree.ts";
 import { makeHarvestedRepo } from "./fixtures/harvested-repo.ts";
@@ -102,6 +104,37 @@ describe("withQuarantineWorktree", () => {
       repo.cleanup();
     }
   });
+});
+
+describe("withGuards", () => {
+  test(
+    "dispose() cancels the pending SIGKILL sweep after a guard trip",
+    async () => {
+      const originalKill = process.kill.bind(process);
+      const killed: number[] = [];
+      process.kill = ((pid: number, _signal?: string | number) => {
+        killed.push(pid);
+        return true;
+      }) as typeof process.kill;
+      const guards = withGuards({ rssBytes: -1 }); // always "over budget" -> trips on the first RSS poll
+      try {
+        // Wait for the RSS poll to trip the guard, then for fire()'s async
+        // process-table snapshot to resolve and arm the sweep timer.
+        await new Promise((r) => setTimeout(r, 3_000));
+        expect(guards.tripped()).not.toBeNull();
+
+        guards.dispose();
+
+        // If dispose() failed to cancel the sweep, it would fire by now.
+        await new Promise((r) => setTimeout(r, KILL_GRACE_MS + 1_000));
+        expect(killed).toEqual([]);
+      } finally {
+        process.kill = originalKill;
+        guards.dispose();
+      }
+    },
+    { timeout: 15_000 },
+  );
 });
 
 describe("probeToolchain", () => {

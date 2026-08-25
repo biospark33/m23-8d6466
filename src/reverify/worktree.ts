@@ -241,6 +241,7 @@ export function withGuards(opts: { wallClockMs?: number; rssBytes?: number } = {
   const controller = new AbortController();
   let trip: { code: string; message: string } | null = null;
   let disposed = false;
+  let sweepTimer: ReturnType<typeof setTimeout> | null = null;
 
   const fire = (code: string, message: string): void => {
     if (trip !== null) return;
@@ -259,7 +260,8 @@ export function withGuards(opts: { wallClockMs?: number; rssBytes?: number } = {
     void processTable().then((table) => {
       const doomed = descendants(table, process.pid);
       if (disposed) return; // re-verify finished before the snapshot came back
-      const sweep = setTimeout(() => {
+      sweepTimer = setTimeout(() => {
+        sweepTimer = null;
         for (const pid of doomed) {
           try {
             process.kill(pid, "SIGKILL");
@@ -268,7 +270,7 @@ export function withGuards(opts: { wallClockMs?: number; rssBytes?: number } = {
           }
         }
       }, KILL_GRACE_MS);
-      sweep.unref?.();
+      sweepTimer.unref?.();
     });
   };
 
@@ -296,8 +298,13 @@ export function withGuards(opts: { wallClockMs?: number; rssBytes?: number } = {
       disposed = true;
       clearTimeout(wallTimer);
       clearInterval(rssTimer);
-      // The pending SIGKILL is NOT cancelled: its pid set was snapshotted at
-      // fire time and every one of those is this re-verify's own straggler.
+      // Cancel a pending SIGKILL sweep too: without this, a guard trip that
+      // races the disposal (fire()'s processTable() resolves and arms the
+      // timer after dispose() already ran) leaves an unref'd timeout alive
+      // in a long-lived host process. It would fire minutes later and SIGKILL
+      // whatever pid the sweep's snapshot named — even a since-recycled pid
+      // now used by an unrelated descendant the host spawned afterward.
+      if (sweepTimer !== null) clearTimeout(sweepTimer);
     },
   };
 }
