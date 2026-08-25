@@ -282,12 +282,10 @@ describe("AC4 / INV-RV-5 — error is never green", () => {
     }
   }, 120_000);
 
-  test("an absent quarantine ref is an error verdict, not a crash and not a pass", async () => {
+  test("a deleted quarantine ref resolves to an empty harvest, not a crash", async () => {
     const h = await harness();
     try {
       h.repo.git(["git", "update-ref", "-d", `refs/sandbox/${h.repo.runId}`]);
-      // Point the run at a base that is NOT the ref tip so the empty-harvest
-      // short circuit does not swallow this case.
       const { report } = await reverify(h.repo.runId, deps(h));
       expect(report.verdict).toBe("red");
       expect(report.reason).toBe("nothing-to-verify");

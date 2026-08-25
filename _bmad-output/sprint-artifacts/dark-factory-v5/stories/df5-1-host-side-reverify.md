@@ -279,8 +279,9 @@ story only *requests* the approval on a green verdict (AC6).
 
 ### Operator setup
 
+`.factory/pipeline.json`:
+
 ```json
-// .factory/pipeline.json
 { "version": 1, "repos": { "acme/widget": { "manifest": ".factory/manifests/acme-widget.json" } } }
 ```
 
@@ -292,7 +293,7 @@ phase carrying a `command` becomes a `commandGate`. The test phase's own `comman
 
 Three harvested commits against a real throwaway repo:
 
-```
+```text
 green: verdict "green", headSha=<3rd commit>, testResults {passed:1, failed:0},
        discrepancies [], approval {outcome:"requested"}, worktree pruned
 red:   one seeded failing test at the same shape →

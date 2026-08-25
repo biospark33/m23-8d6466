@@ -215,6 +215,12 @@ export function recordApprovalPort(store: RunRecordStore): ApprovalPort {
               reportId: req.reportId,
               headSha: req.headSha,
               requestedAt,
+              // `set()` deep-merges the namespace field-by-field, so an omitted
+              // key retains whatever a prior cycle left there. This is a fresh
+              // request, not a rebind — explicitly clear supersededReportId
+              // rather than leave a stale value from an earlier rebind visible
+              // under this new reportId.
+              supersededReportId: "",
             },
           },
         });

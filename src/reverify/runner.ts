@@ -298,10 +298,11 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
     claimed = readClaimed(join(runsDir, `${runId}-artifacts`));
 
     const env = verifyEnv();
+    const worktreeStart = Date.now();
     await withQuarantineWorktree(
       { gitCwd: hostRoot, runId, signal: guards.signal, ...(deps.worktreeRoot !== undefined ? { root: deps.worktreeRoot } : {}) },
       async (wt) => {
-        timings.worktree_ms = Date.now() - startedMs;
+        timings.worktree_ms = Date.now() - worktreeStart;
         step("worktree", timings.worktree_ms, { dir: wt.dir, headSha: wt.headSha });
 
         // INV-RV-3: no lifecycle scripts, no lockfile drift.
