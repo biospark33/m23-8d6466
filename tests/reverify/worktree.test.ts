@@ -107,6 +107,47 @@ describe("withQuarantineWorktree", () => {
 });
 
 describe("withGuards", () => {
+  // A guard trip only sweeps real OS descendants of THIS process (see
+  // descendants() in src/reverify/worktree.ts, rooted at process.pid).
+  // Without a live child process, `doomed` is always empty and
+  // process.kill is never called whether or not dispose() cancels the
+  // timer -- so both cases below spawn a real, long-lived child first.
+  //
+  // The two guards run sequentially (not concurrently): descendants() is
+  // rooted at the shared test process, so two live children present at once
+  // would both land in every guard's sweep set, defeating the "this guard's
+  // dispose stopped its own sweep" proof.
+  test(
+    "an undisposed guard's sweep reaches a real descendant (sweep is genuinely armed)",
+    async () => {
+      const originalKill = process.kill.bind(process);
+      const killed: number[] = [];
+      process.kill = ((pid: number, _signal?: string | number) => {
+        killed.push(pid);
+        return true;
+      }) as typeof process.kill;
+
+      const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+      const guards = withGuards({ rssBytes: -1 }); // always "over budget" -> trips on the first RSS poll
+      try {
+        await new Promise((r) => setTimeout(r, 3_000));
+        expect(guards.tripped()).not.toBeNull();
+
+        // Never disposed: let the sweep run its natural course. This proves
+        // descendants() actually finds the child and fire()'s sweep really
+        // arms a SIGKILL against it -- the baseline this test's sibling
+        // ("dispose() cancels...") depends on to be non-vacuous.
+        await new Promise((r) => setTimeout(r, KILL_GRACE_MS + 1_000));
+        expect(killed).toContain(child.pid);
+      } finally {
+        process.kill = originalKill;
+        guards.dispose();
+        child.kill();
+      }
+    },
+    { timeout: 15_000 },
+  );
+
   test(
     "dispose() cancels the pending SIGKILL sweep after a guard trip",
     async () => {
@@ -116,21 +157,27 @@ describe("withGuards", () => {
         killed.push(pid);
         return true;
       }) as typeof process.kill;
+
+      const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
       const guards = withGuards({ rssBytes: -1 }); // always "over budget" -> trips on the first RSS poll
       try {
         // Wait for the RSS poll to trip the guard, then for fire()'s async
-        // process-table snapshot to resolve and arm the sweep timer.
+        // process-table snapshot to resolve and arm the sweep timer against
+        // this real child.
         await new Promise((r) => setTimeout(r, 3_000));
         expect(guards.tripped()).not.toBeNull();
 
         guards.dispose();
 
-        // If dispose() failed to cancel the sweep, it would fire by now.
+        // If dispose() failed to cancel the sweep, the sibling test above
+        // proves this exact setup would have put `child.pid` in `killed`
+        // by now.
         await new Promise((r) => setTimeout(r, KILL_GRACE_MS + 1_000));
-        expect(killed).toEqual([]);
+        expect(killed).not.toContain(child.pid);
       } finally {
         process.kill = originalKill;
         guards.dispose();
+        child.kill();
       }
     },
     { timeout: 15_000 },
