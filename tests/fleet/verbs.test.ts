@@ -173,6 +173,19 @@ function expectFlagLines(help: string, entry: VerbEntry): void {
   );
 }
 
+/**
+ * `needle` appears in `haystack` in order, gaps allowed. The open-world form of
+ * an order pin: a registry that INSERTS a verb keeps every known pair correctly
+ * ordered, while one that RESHUFFLES known verbs goes red.
+ */
+const inOrder = (needle: readonly string[], haystack: readonly string[]): boolean => {
+  let i = 0;
+  for (const h of haystack) {
+    if (h === needle[i]) i += 1;
+  }
+  return i === needle.length;
+};
+
 describe("verbs.ts (registry)", () => {
   test("DOCUMENTED_EXIT_CODES is the CLI's table, not a copy of it that can drift", () => {
     // Everything below asserts `DOCUMENTED_EXIT_CODES` CONTAINS each declared
@@ -184,13 +197,18 @@ describe("verbs.ts (registry)", () => {
     const cli = readFileSync(join(import.meta.dir, "..", "..", "scripts", "fleet.ts"), "utf8");
     // Whitespace-insensitive, and BOTH spellings of the range — `>= F && <= C`
     // and its De Morgan twin `< F || > C` — so a reformat or an inverted
-    // conditional does not red a table that is still correct.
-    const clamp =
-      /e\.exitCode\s*(?:>=\s*(\d+)\s*&&\s*e\.exitCode\s*<=\s*(\d+)|<\s*(\d+)\s*\|\|\s*e\.exitCode\s*>\s*(\d+))/.exec(
-        cli,
-      );
-    expect(clamp).not.toBeNull();
-    const [, geFloor, leCeiling, ltFloor, gtCeiling] = clamp as RegExpExecArray;
+    // conditional does not red a table that is still correct. matchAll + count,
+    // not first-match: `report()` is the ONE throw→status boundary, and a
+    // second clamp appearing anywhere else in the file must turn this red
+    // rather than let the regex silently re-bind the table to whichever site
+    // it happened to meet first.
+    const clamps = [
+      ...cli.matchAll(
+        /e\.exitCode\s*(?:>=\s*(\d+)\s*&&\s*e\.exitCode\s*<=\s*(\d+)|<\s*(\d+)\s*\|\|\s*e\.exitCode\s*>\s*(\d+))/g,
+      ),
+    ];
+    expect(clamps).toHaveLength(1);
+    const [, geFloor, leCeiling, ltFloor, gtCeiling] = clamps[0] as RegExpMatchArray;
     const floor = Number(geFloor ?? ltFloor);
     const ceiling = Number(leCeiling ?? gtCeiling);
     // The clamp's floor is 1, not 0: `report` is only ever reached from a catch,
@@ -202,14 +220,18 @@ describe("verbs.ts (registry)", () => {
     ]);
   });
 
-  test("listVerbs returns exactly 4 entries", () => {
-    const verbs: VerbEntry[] = listVerbs();
-    expect(verbs).toHaveLength(4);
-    const verbNames = verbs.map((v) => v.verb);
-    expect(verbNames).toContain("dispatch");
-    expect(verbNames).toContain("status");
-    expect(verbNames).toContain("harvest");
-    expect(verbNames).toContain("teardown");
+  test("listVerbs keeps every known verb", () => {
+    // OPEN-WORLD on purpose: an eighth verb must not have to edit this file to
+    // exist — the registry may grow additively and every per-verb pin below is
+    // keyed by name. What IS pinned here is that no KNOWN verb silently
+    // disappears, which a length pin (`toHaveLength(N)`) could never express:
+    // it breaks on the legal growth and stays green on the illegal deletion.
+    const verbNames = listVerbs().map((v) => v.verb);
+    for (const known of ["dispatch", "status", "harvest", "teardown"]) {
+      expect(verbNames).toContain(known);
+    }
+    // Relative order of the known verbs is pinned as a SUBSEQUENCE by the
+    // same-set test at the bottom of this describe; uniqueness has its own case.
   });
 
   test("each verb has exact shape with no extra keys", () => {
@@ -563,6 +585,13 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     stderr?: string | string[];
     /** Must appear on stdout (the verb's own output). */
     stdout?: string | string[];
+    /**
+     * stdout must be EXACTLY empty. Not expressible via `stdout` — every value
+     * there is matched with stringContaining, which `""` satisfies vacuously —
+     * and emptiness is its own claim: an empty fleet whose status prints
+     * nothing-by-crash (a skipped emitter) must not pass as quiet-by-design.
+     */
+    stdoutEmpty?: boolean;
     /** A run to provision first, so the probe has something real to act on. */
     provision?: string;
     /** Filesystem set-up run after the provisioning and before the invocation. Awaited, so async set-up lands before the invocation. */
@@ -585,8 +614,15 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       // ASSERTED rather than assumed. Every probe in this file shares ONE store
       // and they run in `listVerbs()` order, so "no runs yet" is a fact about
       // what happens to run before this line (dispatch's probes, all refusals)
-      // and nothing pinned it. `before` makes the dependency fail loudly.
-      { argv: ["status"], code: 0, before: () => void expect(store.list()).toEqual([]) },
+      // and nothing pinned it. `before` makes the dependency fail loudly;
+      // `stdoutEmpty` makes the quietness a claim — exit 0 over an empty store
+      // is also what a status whose emitter never ran would print.
+      {
+        argv: ["status"],
+        code: 0,
+        stdoutEmpty: true,
+        before: () => void expect(store.list()).toEqual([]),
+      },
       // …and a status that PRINTS. `{code: 0}` over an EMPTY fleet is satisfied
       // by a status whose rows never reach the emitter at all — the row shape,
       // the join and the JSON line could all be gone and the code is still 0.
@@ -829,26 +865,31 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     for (const [verb, excuses] of Object.entries(ONLY_REACHABLE_ELSEWHERE)) {
       for (const { code, coveredBy } of excuses) {
         // The title as `test(...)` writes it, not a loose substring: a comment
-        // mentioning the name must not stand in for the case itself.
-        const head = `test(${JSON.stringify(coveredBy)}`;
-        const at = cli.indexOf(head);
+        // mentioning the name must not stand in for the case itself. All three
+        // delimiters a title could legally use — a title containing `"` cannot
+        // be double-quoted, so pinning one spelling would strand the excuse.
+        let at = -1;
+        let headLen = 0;
+        for (const q of ['"', "`", "'"]) {
+          const head = `test(${q}${coveredBy}${q}`;
+          const i = cli.indexOf(head);
+          if (i >= 0 && (at < 0 || i < at)) {
+            at = i;
+            headLen = head.length;
+          }
+        }
         if (at < 0) {
           missing.push(`${verb} exit ${code}: no test named ${JSON.stringify(coveredBy)} in cli.test.ts`);
           continue;
         }
-        // The body, bounded by the next top-level `test(` in that file (they are
-        // all indented two spaces inside one describe). Scanning the whole file
-        // instead would let ANY case's `toBe(0)` excuse every other one — so a
-        // missed boundary must fail loudly, never degrade to scanning `rest`.
-        const rest = cli.slice(at + head.length);
-        const end = rest.indexOf('\n  test("');
-        if (end < 0) {
-          missing.push(
-            `${verb} exit ${code}: no next-test boundary after ${JSON.stringify(coveredBy)} in cli.test.ts`,
-          );
-          continue;
-        }
-        const body = rest.slice(0, end);
+        // The body, bounded by the next top-level `test(`/`it(` in that file
+        // (they are all indented two spaces inside one describe) — or, when the
+        // excused case is the FILE'S LAST, by the end of the file. Scanning past
+        // a real boundary would let ANY case's `toBe(0)` excuse every other one,
+        // so only the genuine no-next-test case falls through to EOF.
+        const rest = cli.slice(at + headLen);
+        const end = rest.search(/\n {2}(?:test|it)\(/);
+        const body = end < 0 ? rest : rest.slice(0, end);
         // The exit code, asserted. `toBe(<code>)` is how every exit assertion in
         // that file is spelled; `code: <code>` is the object form the loops use.
         if (!new RegExp(`toBe\\(${code}\\)|\\bcode: ${code}\\b`).test(body)) {
@@ -870,9 +911,11 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     // down the run its exit-6 sibling closed), but it means what each probe sees
     // depends on the registry's iteration order — and the empty-fleet probe was
     // over an empty fleet only because dispatch's probes happen to precede it.
-    // Pin the order so a registry reshuffle fails HERE rather than silently
-    // changing what half the table is asserting about.
-    expect(listVerbs().map((v) => v.verb)).toEqual(["dispatch", "status", "harvest", "teardown"]);
+    // Pin the RELATIVE order of the known verbs — as a SUBSEQUENCE, not an
+    // exact list, so an additive verb may slot in anywhere without editing this
+    // file while a reshuffle of known ones still fails HERE rather than
+    // silently changing what half the table asserts about.
+    expect(inOrder(["dispatch", "status", "harvest", "teardown"], listVerbs().map((v) => v.verb))).toBe(true);
     for (const entry of listVerbs()) {
       const probes = PROBES[entry.verb]!;
       const observed: number[] = [];
@@ -892,6 +935,9 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         }
         for (const want of [probe.stdout ?? []].flat()) {
           expect({ argv: probe.argv, want, out: res.out }).toMatchObject({ out: expect.stringContaining(want) });
+        }
+        if (probe.stdoutEmpty === true) {
+          expect({ argv: probe.argv, out: res.out }).toEqual({ argv: probe.argv, out: "" });
         }
         // Every non-zero exit says something. Silence is the failure mode an
         // exit-code-only assertion cannot see.
@@ -986,17 +1032,37 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  test("--driver is required:true on EVERY verb — omitting it is refused as usage", async () => {
-    // No injected driver, so nothing stands in for the flag. Every verb declares
-    // `{name: "--driver", required: true}`; declaring it optional is how DF3.5
-    // would generate a skill whose every call exits 2.
+  test("--driver is required:true on EVERY verb that takes one — omitting it is refused as usage", async () => {
+    // No injected driver, so nothing stands in for the flag. Declaring it
+    // optional is how DF3.5 would generate a skill whose every call exits 2.
+    //
+    // Driven from the REGISTRY's own flag metadata, not from a verb list: the
+    // sweep covers every verb that DECLARES --driver, whatever the registry
+    // grows to, and skips those that don't (rank reads fan-out records and step
+    // output — no box to choose a driver FOR — so it has no --driver to make
+    // required; its negative is pinned right below).
     for (const entry of listVerbs()) {
-      expect(entry.flags.find((f) => f.name === "--driver")?.required).toBe(true);
-      const argv = entry.verb === "dispatch" || entry.verb === "status" ? [entry.verb] : [entry.verb, "some-run"];
+      const declared = entry.flags.find((f) => f.name === "--driver");
+      if (declared === undefined) continue;
+      expect(declared.required).toBe(true);
+      const argv =
+        entry.verb === "dispatch" || entry.verb === "status" || entry.verb === "fanout"
+          ? [entry.verb]
+          : [entry.verb, "some-run"];
       const err: string[] = [];
       expect(await run(argv, sink, { store }, (s) => void err.push(s))).toBe(2);
       expect(err.join("")).toContain(`${entry.verb} requires --driver <name>`);
     }
+    // …and the one deliberate exemption stays an EXEMPTION: a verb that stops
+    // taking --driver must argue it here, not slip out of the sweep silently.
+    expect(
+      listVerbs()
+        .filter((v) => !v.flags.some((f) => f.name === "--driver"))
+        .map((v) => v.verb),
+    ).toEqual([]); // round 10: registry-adaptive sweep; main has no driver-less verb yet
+    // The seam the requirement lives behind: an INJECTED deps.driver stands in
+    // for the flag entirely — `required` is about ARGV, not about embedders.
+    expect(await run(["status"], sink, { store, driver }, sink)).toBe(0);
   });
 
   test("a value-taking flag with no value is refused; a boolean flag never eats the next token", async () => {

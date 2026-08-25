@@ -765,7 +765,15 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     const line = logs.find((l) => l.operation === "demo.deliver" && l.status === "error");
     expect(line).toBeDefined();
     expect(line?.error?.code).toBe("deliver-failed");
-    expect(leakScan(key as string, JSON.stringify(line))).toBeNull();
+    // Scan the WHOLE stream, not just the one error line: a key that leaked
+    // into ANY other entry this run emitted (a sibling step's payload, an ok
+    // line echoing argv, whatever a future call site adds) is the same leak,
+    // and a find()-one-line scan can never see it. The sink captures every
+    // entry the demo emits in-process — there is no separate stdout transcript
+    // to sweep on this path.
+    expect(leakScan(key as string, JSON.stringify(logs))).toBeNull();
+    // …and the artifact file the failed run still wrote.
+    expect(leakScan(key as string, readFileSync(result.artifactPath, "utf8"))).toBeNull();
     // Redacted, not dropped — the operator still learns the step failed and why.
     expect(line?.error?.message).toContain("exec failed");
   });

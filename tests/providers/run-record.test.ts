@@ -23,8 +23,9 @@ import * as nodeFs from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { run as cliRun } from "../../scripts/run-record.ts";
+import { liveForeignPid } from "../helpers.ts";
 import { setLogSink } from "../../src/swarmclaw/mcp/stdio-transport.ts";
-import { teardownRun } from "../../src/providers/driver.ts";
+import { isRecordLockTimeout, teardownRun } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import {
   CORE_FIELDS,
@@ -526,6 +527,16 @@ describe("list (AC3, INV-4)", () => {
       JSON.stringify({ runId: "run-bad-ts", createdAt: "not-a-timestamp" }),
       /createdAt/,
     ],
+    [
+      // A TRUNCATED body: valid JSON up to the cut, then nothing — the torn
+      // write a crash mid-`writeFileSync` leaves. JSON.parse throws a
+      // SyntaxError on it, which is the same quarantine routing as any other
+      // unparseable body: skipped with its reason, never fleet-wide.
+      "a truncated JSON body",
+      "run-trunc",
+      `{"runId":"run-trunc","createdAt":"${new Date().toISOString()}","keyHash":"sha256:abc`,
+      /[Jj][Ss][Oo][Nn]|Expected|Unexpected|EOF/i,
+    ],
   ])("a body rejected for %s is ONE skipped entry, and list() names the reason", (_label, id, body, reasonRe) => {
     // Quarantined per FILE, not per sweep. The hard-error tests above pin that
     // `list()` still refuses — safety is the default — but they cannot tell a
@@ -629,6 +640,36 @@ describe("create tombstone", () => {
     expect(statSync(p).size).toBe(0);
   });
 
+  test("the mtime grace boundary is the documented 5s, straddled tightly from both sides", () => {
+    // The suite's other arms sit at ~0s (fresh) and 50s (WELL_PAST_GRACE_MS),
+    // which passes for any window between them. These two sit ±200ms either
+    // side of CREATE_TOMBSTONE_GRACE_MS (5s, module-private in run-record.ts,
+    // so named here rather than imported): an in-grace file is still held and
+    // one just past it clears. `olderThan` compares `Date.now() - mtimeMs >=
+    // ms`, so the exact-equality instant again drifts past while the call
+    // runs — what this pins is the window's WIDTH, not its open/closed end.
+    const id = "run-tomb-boundary";
+    const p = join(dir, `${id}.json`);
+
+    const inside = new Date(Date.now() - 4_800);
+    writeFileSync(p, "", { mode: 0o600 });
+    utimesSync(p, inside, inside);
+    let err: NodeJS.ErrnoException | undefined;
+    try {
+      store.create(id);
+    } catch (e) {
+      err = e as NodeJS.ErrnoException;
+    }
+    expect(err?.code).toBe("EEXIST"); // still inside the grace ⇒ a live writer
+    rmSync(p, { force: true });
+
+    const outside = new Date(Date.now() - 5_200);
+    writeFileSync(p, "", { mode: 0o600 });
+    utimesSync(p, outside, outside);
+    store.create(id); // just past it ⇒ a corpse; create must succeed
+    expect(statSync(p).size).toBeGreaterThan(0);
+  });
+
   test("only ONE retry: a real record at the path is never overwritten", () => {
     // The retry exists for the tombstone and nothing else. A second EEXIST
     // means a real record (or another writer's fresh create) is there, and
@@ -636,7 +677,16 @@ describe("create tombstone", () => {
     const id = "run-real";
     const first = store.create(id);
     const before = snapshot(id);
-    expect(() => store.create(id)).toThrow();
+    // The errno is the contract, not just "it threw": the retry loop and every
+    // caller classify on EEXIST. A different failure here (EACCES, ENOSPC)
+    // would also throw but means something no retry may survive.
+    let err: NodeJS.ErrnoException | undefined;
+    try {
+      store.create(id);
+    } catch (e) {
+      err = e as NodeJS.ErrnoException;
+    }
+    expect(err?.code).toBe("EEXIST");
     expect(snapshot(id)).toEqual(before);
     expect(store.get(id).createdAt).toBe(first.createdAt);
   });
@@ -1179,6 +1229,12 @@ describe("concurrent set", () => {
     // shortening the wait shortens the window in which a contender proves an
     // owner dead, and raises the odds two writers overlap.
     expect(Date.now() - started).toBeGreaterThanOrEqual(LOCK_TIMEOUT_MS);
+    // Upper bound too: the wait must END near the window, not run past it. The
+    // loop is bounded by LOCK_TIMEOUT_MS by construction; this catches a
+    // regression that waits MULTIPLE windows before giving up. LOCK_TIMEOUT_MS
+    // is a module constant with no per-store override, so "shorten via config"
+    // is not available — the bound below is derived from it.
+    expect(Date.now() - started).toBeLessThan(2 * LOCK_TIMEOUT_MS);
     expect(LOCK_TIMEOUT_MS).toBe(5_000);
     expect(existsSync(lock)).toBe(true); // still held by whoever wrote it
     expect(store.get(id).vmName).toBeUndefined();
@@ -1196,27 +1252,33 @@ describe("concurrent set", () => {
     // would only read back what this test itself wrote.
     const s0 = new RunRecordStore({ dir });
     const lock = s0.lockPath(id);
-    // `process.ppid`: a pid that is genuinely alive and genuinely not ours.
-    // `process.pid + 1` is frequently a live process too, but only by accident —
-    // and it can equally be free, which makes the fixture's premise a coin flip.
-    const foreign = `${process.ppid} deadbeefcafe\n`;
+    // A pid that is genuinely alive and genuinely not ours — owned by the suite
+    // via the shared helper, not guessed: `process.ppid` goes STALE the moment
+    // the runner's parent exits mid-suite, which turns this contention fixture
+    // into the steal case wearing its clothes.
+    const foreign = liveForeignPid();
+    const foreignBody = `${foreign.pid} deadbeefcafe\n`;
     let fired = false;
     const s = new RunRecordStore({
       dir,
       beforeRename: () => {
         fired = true;
         rmSync(lock, { force: true });
-        writeFileSync(lock, foreign, { mode: 0o600 });
+        writeFileSync(lock, foreignBody, { mode: 0o600 });
       },
     });
-    s.create(id);
-    expect(s.set(id, { vmName: "box-4" }).vmName).toBe("box-4");
-    // The seam really ran. Without this a refactor that moves the rename out of
-    // `beforeRename`'s reach stops opening the window at all, and the assertion
-    // below degrades into an ENOENT instead of naming what broke.
-    expect(fired).toBe(true);
-    expect(readFileSync(lock, "utf8")).toBe(foreign);
-    rmSync(lock, { force: true });
+    try {
+      s.create(id);
+      expect(s.set(id, { vmName: "box-4" }).vmName).toBe("box-4");
+      // The seam really ran. Without this a refactor that moves the rename out of
+      // `beforeRename`'s reach stops opening the window at all, and the assertion
+      // below degrades into an ENOENT instead of naming what broke.
+      expect(fired).toBe(true);
+      expect(readFileSync(lock, "utf8")).toBe(foreignBody);
+    } finally {
+      foreign.stop();
+      rmSync(lock, { force: true });
+    }
   });
 
   test("a steal never unlinks a lock claimed after the corpse was cleared", () => {
@@ -1228,9 +1290,11 @@ describe("concurrent set", () => {
     // writer's lock and lets two read-modify-writes overlap.
     const id = "steal-proof-run";
     const lock = store.lockPath(id);
-    // `process.ppid` is a pid that is genuinely alive and is not ours, so every
-    // steal attempt AFTER the swap must judge this lock held and wait it out.
-    const live = `${process.ppid} deadbeefcafe\n`;
+    // A pid that is alive by construction (the shared helper), so every steal
+    // attempt AFTER the swap must judge this lock held and wait it out — the
+    // same no-guess rule as the release-side twin above.
+    const foreign = liveForeignPid();
+    const live = `${foreign.pid} deadbeefcafe\n`;
     let swapped = false;
     const s = new RunRecordStore({
       dir,
@@ -1241,15 +1305,19 @@ describe("concurrent set", () => {
         writeFileSync(lock, live, { mode: 0o600 });
       },
     });
-    s.create(id);
-    writeFileSync(lock, `${DEAD_PID}\n`, { mode: 0o600 }); // the corpse
+    try {
+      s.create(id);
+      writeFileSync(lock, `${DEAD_PID}\n`, { mode: 0o600 }); // the corpse
 
-    // Fail-closed: the live lock is never stolen, so the write times out.
-    expect(() => s.set(id, { vmName: "box-5" })).toThrow(/timed out waiting for the run record lock/);
-    expect(swapped).toBe(true); // the window really opened
-    expect(readFileSync(lock, "utf8")).toBe(live); // the new writer's lock survived
-    expect(s.get(id).vmName).toBeUndefined(); // and its record was not overwritten
-    rmSync(lock, { force: true });
+      // Fail-closed: the live lock is never stolen, so the write times out.
+      expect(() => s.set(id, { vmName: "box-5" })).toThrow(/timed out waiting for the run record lock/);
+      expect(swapped).toBe(true); // the window really opened
+      expect(readFileSync(lock, "utf8")).toBe(live); // the new writer's lock survived
+      expect(s.get(id).vmName).toBeUndefined(); // and its record was not overwritten
+    } finally {
+      foreign.stop();
+      rmSync(lock, { force: true });
+    }
   }, 15_000);
 
   // Root reads a mode-000 file, so the fault below cannot be injected there.
@@ -1440,6 +1508,9 @@ describe("own-pid lock generations", () => {
     const started = Date.now();
     expect(() => store.set(id, { vmName: "box-9" })).toThrow(/timed out waiting for the run record lock/);
     expect(Date.now() - started).toBeGreaterThanOrEqual(LOCK_TIMEOUT_MS);
+    // …and it ends near the window, not past it (same upper bound as the
+    // unreadable-body case above).
+    expect(Date.now() - started).toBeLessThan(2 * LOCK_TIMEOUT_MS);
     // Never taken aside: the sibling's generation is byte-for-byte where it was.
     expect(readFileSync(lock, "utf8")).toBe(foreignNonce);
     expect(store.get(id).vmName).toBeUndefined();
@@ -1491,8 +1562,12 @@ describe("own-pid lock generations", () => {
     store.create(id);
     const lock = store.lockPath(id);
     const corpse = `${DEAD_PID} aaaa1111\n`; // what the stealer JUDGES stale...
-    const takenAside = `${process.ppid} cafebabe\n`; // ...and what it actually TAKES
-    const competitor = `${process.ppid} deadbabe\n`; // ...and what reclaims the path
+    // Both live bodies use the shared helper's pid: alive by construction, so
+    // the reclaiming claim is genuinely held and the fail-closed timeout below
+    // is the contention case, not an accidental stale-pid steal.
+    const foreign = liveForeignPid();
+    const takenAside = `${foreign.pid} cafebabe\n`; // ...and what it actually TAKES
+    const competitor = `${foreign.pid} deadbabe\n`; // ...and what reclaims the path
     let swapped = false;
     let injected = false;
     const s = new RunRecordStore({
@@ -1550,11 +1625,49 @@ describe("own-pid lock generations", () => {
     // The park must SURVIVE the next sweep. Aged past the own-pid grace, a
     // `.tmp`-named body would be destroyed by the very next store construction
     // — while `lock.not-restored` is still telling an operator to restore it.
-    const aged = new Date(Date.now() - 120_000); // 2× OWN_LOCK_GRACE_MS
+    const aged = new Date(Date.now() - WELL_PAST_LOCK_GRACE_MS); // 2× OWN_LOCK_GRACE_MS
     utimesSync(join(dir, orphan), aged, aged);
     new RunRecordStore({ dir }); // construction runs cleanStaleTemps
     expect(existsSync(join(dir, orphan))).toBe(true);
+    foreign.stop();
     rmSync(lock, { force: true });
     rmSync(join(dir, orphan), { force: true });
   }, 15_000);
 });
+
+test("FB9 two-sided pin: driver.ts's lock-timeout predicate matches ONLY what this module throws", () => {
+  // The predicate (driver.ts isRecordLockTimeout) keys on the MESSAGE TEXT of
+  // the lock timeout thrown below, and routes on it: a match refuses loudly, a
+  // non-match takes the DESTRUCTIVE rollback arm (rmSync of the record). That
+  // makes the string load-bearing in both directions, so BOTH halves are
+  // pinned here: if either side rewords, this test fails instead of a
+  // concurrent-writer budget-write failure being silently destroyed.
+  //
+  // Side B — the REAL throw path. An unreadable lock body is held, never
+  // stolen, so `set` waits out LOCK_TIMEOUT_MS and throws the exact message
+  // shape the predicate matches on.
+  const id = "lock-timeout-pin-run";
+  store.create(id);
+  const lock = store.lockPath(id);
+  writeFileSync(lock, "", { mode: 0o600 });
+  let thrown: unknown;
+  try {
+    store.set(id, { vmName: "pin-box" });
+  } catch (e) {
+    thrown = e;
+  } finally {
+    rmSync(lock, { force: true });
+  }
+  expect(thrown).toBeInstanceOf(Error);
+  expect((thrown as Error).message.startsWith("timed out waiting for the run record lock:")).toBe(true);
+  // Side A — the predicate accepts exactly that message…
+  expect(isRecordLockTimeout(thrown)).toBe(true);
+  // …and rejects the rewordings and near-misses that would silently flip the
+  // routing (a reworded THROW SITE stops matching ⇒ destructive arm; a reworded
+  // PREDICATE would match refusals it was never meant to).
+  expect(isRecordLockTimeout(new Error("timed out waiting for the record lock: /x (contended)"))).toBe(false);
+  expect(isRecordLockTimeout(new Error("run record lock timed out: /x (contended)"))).toBe(false);
+  expect(isRecordLockTimeout(new Error("lock acquisition failed"))).toBe(false);
+  // Non-Error values never match, message text notwithstanding (instanceof gate).
+  expect(isRecordLockTimeout({ message: "timed out waiting for the run record lock: /x (held)" })).toBe(false);
+}, 15_000);

@@ -16,7 +16,7 @@
 
 import { rmSync } from "node:fs";
 import type { RunRecord, RunRecordStore } from "./run-record.ts";
-import { assertExistingRunId, assertValidRunId } from "./run-record.ts";
+import { assertExistingRunId, assertValidRunId, LEGACY_RUN_ID_RE } from "./run-record.ts";
 import { redactSecrets } from "./step-log.ts";
 import { checkHeadroom, HeadroomRefusedError, loadQuotaLimits } from "./quota.ts";
 import { TimeoutError, withTimeout } from "./timeout.ts";
@@ -49,12 +49,16 @@ export const RUN_ID_SHAPE = /^[a-z0-9][a-z0-9-]*-\d{8}-[0-9a-f]{6}$/;
  * either, so a box is destroyable only when it carries the marker `create`
  * stamps on every factory box AND a name only `newId` produces.
  *
- * The consequence is deliberate and asymmetric: a box that IS ours but does not
- * prove it (created before the tag existed, or a fake box that crashed between
+ * The consequence is deliberate and asymmetric: a box that IS ours but carries
+ * no tag (created before the tag existed, or a fake box that crashed between
  * `mkdir` and its metadata write) is never destroyed here. It stays listed, so
  * `fleet status` still names it and an operator can tear it down by hand — a
  * stalled reap on a box we can still name is recoverable, and a destroyed
- * stranger's box is not.
+ * stranger's box is not. The NAME half accepts both the current `newId`
+ * grammar and the legacy pre-tightening grammar (round 10, FP2): a tagged box
+ * whose name predates the shape tightening was stranded billable forever under
+ * the strict-only test, while the record read paths already honor the same
+ * legacy grammar — the tag remains the load-bearing ownership proof either way.
  *
  * KNOWN BLOCKER — exedev cannot be auto-reaped. Its `ls --json` reports no tag
  * field at all (`ProviderVm.tag`, 3-origin verified), so nothing it lists can
@@ -68,7 +72,7 @@ export const RUN_ID_SHAPE = /^[a-z0-9][a-z0-9-]*-\d{8}-[0-9a-f]{6}$/;
  * left listed is recoverable, a destroyed stranger's box is not.
  */
 export function isFactoryOwnedVm(vm: ProviderVm): boolean {
-  return RUN_ID_SHAPE.test(vm.name) && vm.tag === SBX_OWNERSHIP_TAG;
+  return (RUN_ID_SHAPE.test(vm.name) || LEGACY_RUN_ID_RE.test(vm.name)) && vm.tag === SBX_OWNERSHIP_TAG;
 }
 
 /**
@@ -276,8 +280,23 @@ export async function driverListing(driver: ProviderDriver, name?: string): Prom
   // rides out as the anomaly it is, and the destructive callers refuse on it.
   return {
     vms: await driver.list(name),
-    skipped: [`driver ${driver.name} has no listWithAnomalies(): its box listing cannot be proven complete`],
+    skipped: [noAnomalyChannelSkip(driver.name)],
   };
+}
+
+/**
+ * The structured skip entry for a driver with no anomaly channel — one
+ * `key=value`-shaped line, not a prose sentence.
+ *
+ * `skipped` entries are COUNTED (`unverifiedVmListingRefusal` reports
+ * `${n} listing entr…`) and matched against boxes by the guidance below, so a
+ * full sentence in the array turned one MISSING CAPABILITY into "1 listing
+ * entry" and sent an operator hunting for a box the text never named.
+ * Greppable by the `unproven-listing` tag; single-sourced here because this
+ * producer and that guidance must name the same shape.
+ */
+export function noAnomalyChannelSkip(driverName: string): string {
+  return `unproven-listing driver=${driverName} reason=no-anomaly-channel (no listWithAnomalies)`;
 }
 
 /**
@@ -306,7 +325,7 @@ export function unverifiedVmListingRefusal(
     // (exedev rides raw row fields like `https_url`, which can embed a
     // `ghs_…` token), and this message reaches the CLI and the log lines.
     `refusing to reap: driver ${driverName} could not account for ${skipped.length} listing entr${skipped.length === 1 ? "y" : "ies"} (${redactSecrets(skipped.join("; "))}), so the box population cannot be proven complete`,
-    "find each entry above from the identifying details it carries (for exedev: `ssh exe.dev ls --json`, match the row), then destroy or repair it by hand and re-run — an entry the driver cannot name is a live box no verb can reach",
+    "find each entry above from the identifying details it carries (for exedev: `ssh exe.dev ls --json`, match the row), then destroy or repair it by hand and re-run — an entry the driver cannot name is a live box no verb can reach. An `unproven-listing` entry is NOT a box: the driver it names implements no listWithAnomalies(), so nothing it lists can be proven complete — implement the anomaly channel or switch drivers before sweeping",
   );
 }
 
@@ -386,9 +405,11 @@ async function provisionStep<T>(
  * message this predicate silently stops matching and the rollback below takes
  * the destructive arm; keep the two in sync until then.
  * ponytail: message match; replace with `e.code === "lock-timeout"` the day
- * run-record.ts types that refusal.
+ * run-record.ts types that refusal. Exported so the two-sided pin test in
+ * tests/providers/run-record.test.ts can hold BOTH halves — this predicate
+ * and the real throw site — against drift.
  */
-function isRecordLockTimeout(e: unknown): boolean {
+export function isRecordLockTimeout(e: unknown): boolean {
   return e instanceof Error && e.message.startsWith("timed out waiting for the run record lock:");
 }
 
@@ -404,9 +425,28 @@ function isRecordLockTimeout(e: unknown): boolean {
  * this sequence — the record, the refusal and the return value then agree on
  * one meaning. Whitespace-only is empty for the same reason: it is not an
  * address either.
+ *
+ * `null` and any other non-string are NOT absence: they are a driver crossing
+ * the seam with a broken return value (`expose` is typed `Promise<string>`,
+ * `ProviderVm.httpsUrl` is `string | undefined`), so they refuse in this
+ * module's taxonomy instead of throwing a raw `TypeError` out of `.trim()` —
+ * which, on the create path, escaped BEFORE `vmName` was recorded and reached
+ * dispatch as an unclassified "provisioning failed". The value that IS an
+ * address comes back TRIMMED: whitespace padding was tested away but returned
+ * verbatim, so the record carried `" https://… "` while every consumer
+ * comparing prefixes saw something else. Padding is not part of an address.
  */
-function address(url: string | undefined): string | undefined {
-  return url !== undefined && url.trim().length > 0 ? url : undefined;
+function address(url: unknown, source: string, runId: string): string | undefined {
+  if (url === undefined) return undefined;
+  if (typeof url !== "string") {
+    throw new ProvisionRefusedError(
+      "driver-address-invalid",
+      `${source} resolved a ${typeof url} where a URL string was required — refusing to record an unusable address for run ${runId}`,
+      `check the driver implementation, then tear the run down: bun scripts/fleet.ts teardown ${runId}`,
+    );
+  }
+  const trimmed = url.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 /**
@@ -602,12 +642,36 @@ export async function provisionAdmittedRun(
   // after the call, the record described a box with a name and no port — i.e.
   // not the box that exists. Written before, the worst case is a port recorded
   // for a box the provider never exposed, which teardown destroys either way.
-  const createUrl = address(vm.httpsUrl);
-  let record = store.set(opts.runId, {
-    vmName: vm.name,
-    ...(opts.port === undefined ? {} : { ports: [opts.port] }),
-    ...(createUrl === undefined ? {} : { httpsUrl: createUrl }),
-  });
+  const createUrl = address(vm.httpsUrl, `driver.create(${opts.runId})`, opts.runId);
+  // Both mid-sequence record writes are classified, like every other failure
+  // in this sequence: a raw store error (EIO, ENOSPC, a lock timeout from a
+  // concurrent writer) used to escape as a bare `Error` past a LIVE, BILLING
+  // box — reaching dispatch's classifier with no `code` and no `remediation`,
+  // i.e. exactly the unclassified shape `ProvisionRefusedError` exists to
+  // prevent. The refusal deliberately does NOT roll anything back: the box
+  // already exists (unlike the budget-write rollback above, where nothing
+  // billable did), so removal here would orphan spend the reaper cannot see.
+  // The open record naming the box IS the cleanup handle; the remediation
+  // points at it.
+  const setRecord = (patch: Parameters<RunRecordStore["set"]>[1], what: string): RunRecord => {
+    try {
+      return store.set(opts.runId, patch);
+    } catch (e) {
+      throw new ProvisionRefusedError(
+        "record-write-failed",
+        `the ${what} for run ${opts.runId} could not be written (${(e as Error).message}) — box ${vm.name} is live and billing and the record is left OPEN`,
+        `tear the run down: bun scripts/fleet.ts teardown ${opts.runId}`,
+      );
+    }
+  };
+  let record = setRecord(
+    {
+      vmName: vm.name,
+      ...(opts.port === undefined ? {} : { ports: [opts.port] }),
+      ...(createUrl === undefined ? {} : { httpsUrl: createUrl }),
+    },
+    "box handle (vmName/ports/httpsUrl)",
+  );
   let httpsUrl = createUrl;
   if (opts.port !== undefined) {
     // A driver that resolves nothing — or an empty string — has established no
@@ -622,6 +686,8 @@ export async function provisionAdmittedRun(
         "provider-timeout-expose",
         `tear the run down: bun scripts/fleet.ts teardown ${opts.runId} — the box ${vm.name} is live and billing, and the expose call was ABANDONED, not cancelled: port ${opts.port} may be opened after this refusal, which is why the record carries it as INTENDED, not confirmed`,
       ),
+      `driver.expose(${vm.name}:${opts.port})`,
+      opts.runId,
     );
     httpsUrl = exposed ?? httpsUrl;
     // Fail-safe before the box is made PUBLIC: with no address from either
@@ -646,7 +712,7 @@ export async function provisionAdmittedRun(
     // overhead has already proven `httpsUrl` is a NON-EMPTY string here, and
     // that proof is the whole point — an address lands or the box never
     // becomes public.
-    record = store.set(opts.runId, { httpsUrl });
+    record = setRecord({ httpsUrl }, "confirmed address (httpsUrl)");
     await provisionStep(
       driver.setPublic(vm.name),
       actionTimeoutMs,

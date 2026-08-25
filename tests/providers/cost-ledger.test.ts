@@ -383,6 +383,25 @@ describe("DF2.8 malformed events (AC4)", () => {
     ]);
     expect(ledger.readIssueCost("qds/demo", "42").unpricedRows).toBe(1);
   });
+
+  test("the half-micro straddle: exactly 0.5 µ$ rounds UP to a priced 1, a hair under stays unpriced", () => {
+    // The conversion is `Math.round(usd × 1e6)`, half-up — so 0.0000005 USD is
+    // the last figure that is money (1 µ$, priced) and 0.0000004999 USD the
+    // first that is not (0 µ$, flagged sub-micro like its 0.4 sibling above).
+    // Both arms verified against JS floats: `0.0000005 * 1e6` is exactly 0.5,
+    // `0.0000004999 * 1e6` ≈ 0.4999, so neither case silently flips with an
+    // engine change to rounding.
+    seedRecord("run-half");
+    seedRecord("run-under");
+    const half = ledger.ingestCostEvent(mkEvent({ agentId: "half", costUsd: 0.0000005 }), mkCtx({ runId: "run-half", requestId: "req-half" }));
+    const under = ledger.ingestCostEvent(mkEvent({ agentId: "under", costUsd: 0.0000004999 }), mkCtx({ runId: "run-under", requestId: "req-under" }));
+    expect(half.unpriced).toBe(false);
+    expect(under.unpriced).toBe(true);
+
+    const view = ledger.readIssueCost("qds/demo", "42");
+    expect(view.totalMicroUsd).toBe(1); // the rounded half-micro, counted
+    expect(view.unpricedRows).toBe(1); // …and the sub-floor one, surfaced
+  });
 });
 
 // ─── AC5 + views ─────────────────────────────────────────────────────────────
@@ -884,6 +903,37 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     expect(next.reservedMicroUsd).toBe(0);
   });
 
+  test("the close-retirement cutoff is the same grace window, pinned from BOTH sides", () => {
+    // The boundary arms of the test above, tightened to the window itself:
+    // just INSIDE keeps counting (the close→price race is still open), just
+    // OUTSIDE retires. Derived from the import so a window retune moves these
+    // with it instead of turning them into false failures. The exact-equality
+    // instant is not discriminable here: `graceCutoff` is recomputed inside
+    // admitIssue from ITS Date.now(), which has already advanced by the time
+    // this test hands a timestamp over, so an == fixture would drift to the
+    // outside arm under either comparison operator. What these two DO pin is
+    // that the qualifier rides the window constant and closedAt alone — a
+    // change of window width, or of the column it reads, fails one arm.
+    seedRecord("run-a1");
+    const first = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, cap, 50_000_000);
+    if (!first.admitted) throw new Error("expected the first dispatch to be admitted");
+    ledger.ingestCostEvent(mkEvent({ costUsd: 0 }), mkCtx());
+
+    const JUST_INSIDE_MS = 2_000; // >> clock drift between utimes and the read
+    seedRecord("run-a1", { closedAt: new Date(Date.now() - expiryMs + JUST_INSIDE_MS).toISOString() });
+    // "Keeps counting" reads as a refusal here — the held ceiling alone meets
+    // the cap, exactly like the freshly-closed case above — so the assertion
+    // is the refusal's reserved figure, not an admission.
+    const stillCounted = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-inside", requestId: "req-inside" }, cap, 50_000_000);
+    if (stillCounted.admitted) throw new Error("expected the just-inside close to still hold its ceiling");
+    expect(stillCounted.reservedMicroUsd).toBe(cap);
+
+    seedRecord("run-a1", { closedAt: new Date(Date.now() - expiryMs - JUST_INSIDE_MS).toISOString() });
+    const retired = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-outside", requestId: "req-outside" }, cap, 50_000_000);
+    if (!retired.admitted) throw new Error("expected the just-outside close's reservation to have retired");
+    expect(retired.reservedMicroUsd).toBe(0);
+  });
+
   test("a THROWING log sink does not turn an already-committed admission into an error (S13)", () => {
     // The decision is durable the moment `decide.immediate()` returns; a custom
     // setLogSink that raises used to surface out of admitIssue AFTER that commit,
@@ -1100,11 +1150,15 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     expect(after.reservedMicroUsd).toBe(0);
   });
 
-  test("two dispatches racing one issue cannot both win the full remaining headroom", () => {
-    // The real interleaving: A's admission COMMITs, and A has NOT yet reached
+  test("two SEQUENTIAL admissions simulate the race: the second cannot win the full remaining headroom", () => {
+    // Title says sequential because it is: these are two synchronous calls on
+    // one ledger, not concurrent dispatches. What they simulate is the real
+    // interleaving: A's admission COMMITs, and A has NOT yet reached
     // store.create — so A's run record does not resolve when B walks the
     // reservations. Without the grace window B reads A's reservation as an
-    // orphan, skips it, and both are granted the whole 5M cap.
+    // orphan, skips it, and both are granted the whole 5M cap. (The actual
+    // concurrency serialization is pinned by the BEGIN IMMEDIATE tests in the
+    // serialized-admission describe above.)
     const a = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-race-a", requestId: "ra" }, cap, 50_000_000);
     if (!a.admitted) throw new Error("expected the first dispatch to be admitted");
     expect(a.admittedCeilingMicroUsd).toBe(cap);
@@ -1215,6 +1269,34 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     // …and it is byte-for-byte the encoding admitAged imitates, so the ages
     // those tests fabricate are the ages production actually produces.
     expect(decidedAt).toBe(new Date(parsed).toISOString());
+  });
+
+  test("an issue whose spend SUM crosses the safe-integer range still refuses fail-closed", () => {
+    // Neighborhood of the overflow: every ROW is individually valid (usdToMicros
+    // enforces safe integers per event), but their SQLite-side SUM lands past
+    // 2^53, where JS numbers lose unit precision. Nothing may wrap to negative,
+    // NaN, or a figure below the cap: the only acceptable shape is the ordinary
+    // over-budget refusal naming a finite spent figure far above it.
+    // Residual, accepted and noted: past 2^53 the reported µ$ total can drift by
+    // more than 1 from the exact arithmetic sum, so a cap sitting within that
+    // drift of the true committed spend could flip either way — the guard for
+    // THAT would be a ledger-level overflow check, not a test.
+    seedRecord("run-ovf");
+    const bigRowUsd = 450_000_000; // $450M/row → 4.5e14 µ$; 40 rows ≈ 1.8e16 µ$ > 2^53
+    for (let seq = 0; seq < 40; seq++) {
+      const res = ledger.ingestCostEvent(
+        mkEvent({ agentId: `ovf-${seq}`, costUsd: bigRowUsd }),
+        mkCtx({ runId: "run-ovf", requestId: "req-ovf", invocationSeq: seq }),
+      );
+      expect(res.unpriced).toBe(false);
+    }
+    const d = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-after-ovf", requestId: "req-after" }, cap, 50_000_000);
+    expect(d.admitted).toBe(false);
+    if (!d.admitted) {
+      expect(d.reason).toBe("spend-cap-exceeded");
+      expect(Number.isFinite(d.spentMicroUsd)).toBe(true);
+      expect(d.spentMicroUsd).toBeGreaterThan(cap);
+    }
   });
 
   test("a record created between the prefetch and the transaction is COUNTED, not expired", () => {
@@ -1533,6 +1615,33 @@ describe("canonical repo identity (cap bypass)", () => {
       50_000_000,
     );
     expect(d.spentMicroUsd).toBe(2_500_000);
+  });
+
+  test("a raw slug padded with whitespace still counts — column-side trim mirrors the bind-side fold", () => {
+    // lower() alone never matched `" qds/Demo "`: the padded row's spend sat
+    // OUTSIDE every SUM the cap reads — an under-count, which is the
+    // cap-bypass direction. The column side now trims exactly the ASCII set
+    // canonicalRepoSlug trims, so a padded historical row lands in scope.
+    const raw = rawDb();
+    raw.prepare(
+      `INSERT INTO cost_events (event_id, run_id, repo_slug, issue_id, request_id, role,
+                                agent_id, kind, invocation_seq, cost_micro_usd, unpriced, created_at)
+       VALUES ('legacy-padded', 'run-padded', ' qds/Demo ', '42', 'req-padded', 'lead',
+               'lead-1', 'tokens', 0, 2500000, 0, '2026-08-20T12:00:00.000Z')`,
+    ).run();
+    raw.close();
+
+    expect(ledger.readIssueCost("qds/demo", "42").totalMicroUsd).toBe(2_500_000);
+
+    // The gate reads that same SUM: 2.5M µ$ committed against a 2M µ$ cap refuses.
+    seedRecord("run-pad-next");
+    const d = ledger.admitIssue(
+      { repoSlug: "qds/demo", issueId: "42", runId: "run-pad-next", requestId: "req-pad-next" },
+      2_000_000,
+      50_000_000,
+    );
+    expect(d.spentMicroUsd).toBe(2_500_000);
+    expect(d.admitted).toBeFalse();
   });
 
   test("admitIssue writes its reservation under the canonical slug, so a later admission in any casing sees it", () => {
@@ -1903,9 +2012,21 @@ describe("admitIssue correlation binds (NULL safety)", () => {
     // remaining cap on top of every live one. `IS` is what makes the query safe
     // on its own, so `IS` is what is pinned.
     const source = readFileSync(new URL("../../src/providers/cost-ledger.ts", import.meta.url), "utf8");
-    const predicate = /NOT \(a\.request_id (\S+) \? AND a\.run_id (\S+) \?\)/.exec(source);
-    expect(predicate).not.toBeNull();
-    expect([predicate?.[1], predicate?.[2]]).toEqual(["IS", "IS"]);
+    // matchAll, not exec: exec sees only the FIRST match, so a second
+    // reservation-reading query added later with plain `=` inside it would sail
+    // through this pin green. Every occurrence must carry IS — today there is
+    // exactly ONE SQL site (the in-transaction reservation read; the prefetch
+    // read outside the lock scopes on issue columns alone), and the count pin
+    // below makes adding a second site a conscious decision to re-count.
+    const hits = [...source.matchAll(/NOT \(a\.request_id (\S+) \? AND a\.run_id (\S+) \?\)/g)];
+    expect(hits.length).toBe(1);
+    for (const hit of hits) {
+      expect([hit[1], hit[2]]).toEqual(["IS", "IS"]);
+    }
+    // And the unsafe spelling exists NOWHERE, not merely "not first": SQLite's
+    // three-valued logic makes `NOT (x = NULL AND …)` NULL for every row, so one
+    // copy of the `=` shape is one vanishing-reservation bug waiting to ship.
+    expect(source).not.toMatch(/NOT \(a\.request_id = \? AND a\.run_id = \?\)/);
   });
 });
 
@@ -2014,6 +2135,175 @@ describe("admitIssue orphan guard (unreadable record)", () => {
       const db = rawDb();
       expect(rowCount(db, "gate_admissions")).toBe(1);
       db.close();
+    } finally {
+      throwing.close();
+    }
+  });
+
+  // ── aged read faults vs proven absence (the stat cross-check) ───────────────
+
+  /**
+   * A ledger whose record reader throws an errno-coded fault for the named run
+   * ids, pointed at a records directory pre-seeded with files of the given
+   * byte sizes (`<id>.json`). This is the fixture an EIO-shaped transient
+   * needs: a reader that merely RETURNS undefined exercises the absence path,
+   * not the throw arm the cross-check guards.
+   */
+  function faultLedger(throwFor: string[], files: Record<string, number> = {}): CostLedger {
+    const runsDir = join(dir, "runs-fp1");
+    mkdirSync(runsDir, { recursive: true });
+    for (const [id, size] of Object.entries(files)) {
+      writeFileSync(join(runsDir, `${id}.json`), "x".repeat(size));
+    }
+    return new CostLedger({
+      path: ledgerPath,
+      runsDir,
+      readRunRecord: (id) => {
+        if (throwFor.includes(id)) {
+          const e: Error & { code?: string } = new Error(`unreadable run record ${id}.json: EIO`);
+          e.code = "EIO";
+          throw e;
+        }
+        return RECORDS.get(id);
+      },
+      config: { defaultCapMicroUsd: 5_000_000, boxHourRateMicroUsd: 3_600_000 },
+    });
+  }
+
+  test("an AGED read fault over a record STILL ON DISK keeps its ceiling counted, not re-granted", () => {
+    // Transient EIO past the grace window used to expire a LIVE run's
+    // reservation: the next dispatch was granted the full remaining headroom
+    // ATOP that live exposure — overspend by design gap, guarded only while
+    // the run was young. Present-and-non-empty counts as still-reserved
+    // instead: under-admit, never over-admit.
+    const throwing = faultLedger(["run-eio"], { "run-eio": 64 });
+    try {
+      admitAged("run-eio", "re", 4_000_000, expiryMs * 2, "211");
+      const lines: Record<string, unknown>[] = [];
+      const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+      let d: ReturnType<CostLedger["admitIssue"]>;
+      try {
+        d = throwing.admitIssue({ repoSlug: "qds/demo", issueId: "211", runId: "run-next", requestId: "rn" }, cap, 500_000);
+      } finally {
+        restore();
+      }
+      if (!d.admitted) throw new Error(`expected admission atop the held reservation, got ${d.reason}`);
+      expect(d.reservedMicroUsd).toBe(4_000_000); // KEPT, not expired
+      expect(d.remainingMicroUsd).toBe(1_000_000);
+      // And the granted ceiling fits the headroom left AFTER the held ceiling.
+      expect(d.admittedCeilingMicroUsd).toBe(500_000);
+      // Never silent either way — the hold names the run and its exposure.
+      const held = lines.find((l) => l.code === "reservation-unresolvable-held");
+      expect(held?.orphanRunId).toBe("run-eio");
+      expect(held?.orphanCeilingMicroUsd).toBe(4_000_000);
+      expect(lines.find((l) => l.code === "reservation-unresolvable-expired")).toBeUndefined();
+    } finally {
+      throwing.close();
+    }
+  });
+
+  test("a HELD unresolvable reservation refuses when it alone exceeds the cap", () => {
+    // The hold is a real reservation, not a shrug: 6M µ$ held against a 5M µ$
+    // cap must refuse, exactly as a readable reservation would.
+    const throwing = faultLedger(["run-eio-big"], { "run-eio-big": 64 });
+    try {
+      admitAged("run-eio-big", "reb", 6_000_000, expiryMs * 2, "212");
+      const lines: Record<string, unknown>[] = [];
+      const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+      let d: ReturnType<CostLedger["admitIssue"]>;
+      try {
+        d = throwing.admitIssue(
+          { repoSlug: "qds/demo", issueId: "212", runId: "run-next2", requestId: "rn2" },
+          cap,
+          500_000,
+        );
+      } finally {
+        restore();
+      }
+      expect(d.admitted).toBeFalse();
+      if (d.admitted) throw new Error("unreachable");
+      expect(d.reason).toBe("spend-cap-exceeded");
+      expect(d.reservedMicroUsd).toBe(6_000_000);
+      expect(lines.find((l) => l.code === "reservation-unresolvable-held")).toBeDefined();
+    } finally {
+      throwing.close();
+    }
+  });
+
+  test("a PROVEN-ABSENT record still expires — the path stats ENOENT", () => {
+    const throwing = faultLedger(["run-gone"]);
+    try {
+      admitAged("run-gone", "rg", 4_000_000, expiryMs * 2, "213");
+      const lines: Record<string, unknown>[] = [];
+      const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+      let d: ReturnType<CostLedger["admitIssue"]>;
+      try {
+        d = throwing.admitIssue(
+          { repoSlug: "qds/demo", issueId: "213", runId: "run-next3", requestId: "rn3" },
+          cap,
+          500_000,
+        );
+      } finally {
+        restore();
+      }
+      if (!d.admitted) throw new Error(`expected the wedge to clear, got ${d.reason}`);
+      expect(d.reservedMicroUsd).toBe(0);
+      const line = lines.find((l) => l.code === "reservation-unresolvable-expired");
+      expect(line?.orphanRunId).toBe("run-gone");
+      expect(lines.find((l) => l.code === "reservation-unresolvable-held")).toBeUndefined();
+    } finally {
+      throwing.close();
+    }
+  });
+
+  test("a confirmed ZERO-BYTE tombstone still expires — structural absence by size", () => {
+    // The interrupted-create tombstone clearCreateTombstone documents: no
+    // keyHash, no box, nothing that will ever report spend.
+    const throwing = faultLedger(["run-tomb"], { "run-tomb": 0 });
+    try {
+      admitAged("run-tomb", "rt", 4_000_000, expiryMs * 2, "214");
+      const lines: Record<string, unknown>[] = [];
+      const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+      let d: ReturnType<CostLedger["admitIssue"]>;
+      try {
+        d = throwing.admitIssue(
+          { repoSlug: "qds/demo", issueId: "214", runId: "run-next4", requestId: "rn4" },
+          cap,
+          500_000,
+        );
+      } finally {
+        restore();
+      }
+      if (!d.admitted) throw new Error(`expected the tombstone to expire, got ${d.reason}`);
+      expect(d.reservedMicroUsd).toBe(0);
+      expect(lines.find((l) => l.code === "reservation-unresolvable-expired")).toBeDefined();
+    } finally {
+      throwing.close();
+    }
+  });
+
+  test("a run id outside even the LEGACY grammar expires WITHOUT consulting the filesystem", () => {
+    // An id that could never have named a record file nor a box can never
+    // report spend — the original wedge-cure keeps working, and the hand-built
+    // filename can never escape the records directory.
+    const throwing = faultLedger(["../../escape"]);
+    try {
+      admitAged("../../escape", "rx", 4_000_000, expiryMs * 2, "215");
+      const lines: Record<string, unknown>[] = [];
+      const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+      let d: ReturnType<CostLedger["admitIssue"]>;
+      try {
+        d = throwing.admitIssue(
+          { repoSlug: "qds/demo", issueId: "215", runId: "run-next5", requestId: "rn5" },
+          cap,
+          500_000,
+        );
+      } finally {
+        restore();
+      }
+      if (!d.admitted) throw new Error(`expected the ungrammatical id to expire, got ${d.reason}`);
+      expect(d.reservedMicroUsd).toBe(0);
+      expect(lines.find((l) => l.code === "reservation-unresolvable-expired")?.orphanRunId).toBe("../../escape");
     } finally {
       throwing.close();
     }

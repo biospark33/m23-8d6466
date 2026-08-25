@@ -38,10 +38,10 @@
  * dir-mode/file-mode) exit 1 with code + remediation.
  */
 
-import { existsSync, writeSync } from "node:fs";
+import { closeSync, fstatSync, openSync, statSync, writeSync } from "node:fs";
 
 import { CostLedger, type CostConfig, type CostView } from "../src/providers/cost-ledger.ts";
-import { DEFAULT_RUNS_DIR } from "../src/providers/run-record.ts";
+import { resolveRunsDir } from "../src/providers/run-record.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 
@@ -64,6 +64,20 @@ const HELP = [
 function fail(out: (s: string) => void, code: string, message: string, remediation?: string): void {
   out(`!! ${code}: ${message}\n`);
   if (remediation !== undefined) out(`next: ${remediation}\n`);
+}
+
+/**
+ * A FAILURE report is best-effort (the same posture run-lock.ts's writeStderr
+ * and sandbox-teardown.ts's reportFailure take): `out` is writeSync(1, …), so
+ * an EPIPE from a closed pipe must not replace the classified error or skip
+ * the mapped exit code.
+ */
+function reportFailure(out: (s: string) => void, code: string, message: string, remediation?: string): void {
+  try {
+    fail(out, code, message, remediation);
+  } catch {
+    // stdout is gone; the exit code still says what happened.
+  }
 }
 
 /**
@@ -201,17 +215,27 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
         `unexpected argument: ${positionals[positionals.length - 1]}\n${HELP.join("\n")}`,
       );
     }
+    // The shared grammar refuses an EMPTY `--dir`/`--dir=` value, but a
+    // WHITESPACE-ONLY one passed straight through and resolved the ledger
+    // against a literal-space path (`./ /cost-ledger.db`) — a confident
+    // ledger-miss for a typo'd space. Same refusal as a missing value.
+    if (dir !== undefined && dir.trim() === "") {
+      throw new Error(`--dir requires a non-empty value\n${HELP.join("\n")}`);
+    }
     issueRef = parseIssueRef(positionals[0]);
   } catch (e) {
     out((e as Error).message);
     return 2;
   }
 
-  // The store's own three-tier chain, restated rather than taken from a
-  // `RunRecordStore`: that constructor mkdirs the records directory and chmods
-  // it 0700, and a REPORTING CLI that materializes the directory it is asked
-  // about is the same fail-open INV-COST-6 forbids one level up.
-  const storeDir = dir ?? process.env.QDS_RUNS_DIR ?? DEFAULT_RUNS_DIR;
+  // The store's own resolution chain, through the EXPORTED helper rather than a
+  // restatement of it: the restated chain here was the split-brain its own
+  // comment warned about — resolveRunsDir moving (or gaining a tier) left this
+  // CLI resolving a different records directory than the stores that write
+  // into it. The helper is a pure string resolution, not the constructor: no
+  // mkdir, no chmod, so the REPORTING CLI still never materializes the
+  // directory it is asked about (the fail-open INV-COST-6 forbids).
+  const storeDir = resolveRunsDir(dir);
 
   let config: CostConfig;
   let ledgerPath: string;
@@ -221,21 +245,44 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
     ({ config, path: ledgerPath } = costLedgerOpts(storeDir));
   } catch (e) {
     const err = e as { code?: string; message?: string; remediation?: string };
-    fail(out, err.code ?? "cost-config-error", err.message ?? String(e), err.remediation);
+    reportFailure(out, err.code ?? "cost-config-error", err.message ?? String(e), err.remediation);
     return 1;
   }
 
   // INV-COST-6 for the reporting side: an absent ledger refuses instead of
   // materializing an empty one — a typo'd $QDS_COST_LEDGER_FILE or a wrong
-  // --dir must not read as "nothing spent". C5 notes: existsSync()-then-open
-  // race exists; CostLedger creates missing files, so we must pre-check for the
-  // "refuse absent" behavior.
-  if (!existsSync(ledgerPath)) {
-    fail(
+  // --dir must not read as "nothing spent".
+  //
+  // The pre-check is a NO-CREATE open, not existsSync(): both answer "is it
+  // there", but the open also yields the inode that answer was about — which
+  // is what closes the C5 race. CostLedger CREATES a missing db (and migrates
+  // its schema), so a ledger removed between an existence check and the open
+  // came back as a brand-new empty database and read as a confident ZERO
+  // SPEND, exit 0.
+  let probedIno: number;
+  try {
+    const fd = openSync(ledgerPath, "r");
+    try {
+      probedIno = fstatSync(fd).ino;
+    } finally {
+      closeSync(fd);
+    }
+  } catch (e) {
+    const errno = (e as NodeJS.ErrnoException).code;
+    if (errno === "ENOENT") {
+      reportFailure(
+        out,
+        "ledger-missing",
+        `no cost ledger at ${ledgerPath} — refusing to report zero spend from a file that does not exist`,
+        "dispatch a run first (the budget gate creates the ledger), or point --dir / QDS_RUNS_DIR at the records directory whose runs you are asking about",
+      );
+      return 1;
+    }
+    reportFailure(
       out,
-      "ledger-missing",
-      `no cost ledger at ${ledgerPath} — refusing to report zero spend from a file that does not exist`,
-      "dispatch a run first (the budget gate creates the ledger), or point --dir / QDS_RUNS_DIR at the records directory whose runs you are asking about",
+      "ledger-unreadable",
+      `cannot read the cost ledger at ${ledgerPath} (${(e as Error).message})`,
+      "fix the permissions on the ledger file and its directory, then re-run",
     );
     return 1;
   }
@@ -244,7 +291,29 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
     ledger = new CostLedger({ config, path: ledgerPath });
   } catch (e) {
     const err = e as { code?: string; message?: string; remediation?: string };
-    fail(out, err.code ?? "ledger-unopenable", err.message ?? String(e), err.remediation);
+    reportFailure(out, err.code ?? "ledger-unopenable", err.message ?? String(e), err.remediation);
+    return 1;
+  }
+  // The other half of the C5 race: whatever now sits at ledgerPath must still
+  // BE the file we probed. An inode change (or a vanished path) means the
+  // ledger was removed inside the open window and CostLedger fabricated a
+  // fresh one in its place — reading it would report zero spend from bytes
+  // nobody wrote. Close the handle and refuse; this is not the AC5 zero-row
+  // case, which is about a REAL ledger with no rows.
+  try {
+    if (statSync(ledgerPath).ino !== probedIno) throw new Error("replaced");
+  } catch {
+    try {
+      ledger.close();
+    } catch {
+      /* the refusal below is the outcome; the fd dies with the process */
+    }
+    reportFailure(
+      out,
+      "ledger-replaced",
+      `the cost ledger at ${ledgerPath} was removed or replaced while this invocation opened it — refusing to report spend from a file that was not there when the read began`,
+      "re-run once any concurrent dispatch or teardown has finished writing this ledger",
+    );
     return 1;
   }
 
@@ -264,7 +333,7 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
     code = 0;
   } catch (e) {
     const err = e as { code?: string; message?: string; remediation?: string };
-    fail(out, err.code ?? "ledger-error", err.message ?? String(e), err.remediation);
+    reportFailure(out, err.code ?? "ledger-error", err.message ?? String(e), err.remediation);
     code = 1;
   } finally {
     try {
@@ -279,7 +348,7 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
         process.stderr.write(`warning: ledger close failed after error: ${(closeErr as Error).message}\n`);
       } else {
         const cerr = closeErr as { code?: string; message?: string; remediation?: string };
-        fail(out, cerr.code ?? "ledger-close-failed", cerr.message ?? String(closeErr), cerr.remediation);
+        reportFailure(out, cerr.code ?? "ledger-close-failed", cerr.message ?? String(closeErr), cerr.remediation);
         code = 1;
       }
     }

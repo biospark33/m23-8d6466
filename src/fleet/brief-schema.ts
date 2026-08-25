@@ -171,12 +171,20 @@ function repairLoneSurrogates(s: string): string {
  * refused before it can spend, an orphan row describes a box already billing.
  */
 export function sanitizeLabel(text: string, max: number): string {
+  // `max < 1` cannot hold a label; returning "" keeps the length invariant
+  // below total rather than letting `slice(0, max - 1)` read as `slice(0, -1)`
+  // (everything but the last unit) at that bound.
+  if (max < 1) return "";
   // `repairLoneSurrogates` is the matcher arm of the lone-surrogate rule: a
   // stripped string can still carry one — including one born from the length
   // cap slicing through a pair — and the label's whole claim is that nothing in
   // it can surprise a consumer — an fs path among them.
   const capped = text.replace(CONTROL_CHARS_G, "");
-  const sliced = capped.length > max ? `${capped.slice(0, max)}…` : capped;
+  // `max - 1` before the ellipsis, not `max`: appending to a full `max`-unit
+  // slice produced `max + 1` UTF-16 units, so "capped at `max`" was false by
+  // exactly one character on every input long enough to be capped at all.
+  // The result is now never longer than `max` units.
+  const sliced = capped.length > max ? `${capped.slice(0, max - 1)}…` : capped;
   return repairLoneSurrogates(sliced);
 }
 
@@ -252,7 +260,8 @@ function hasNoUserinfo(url: string): boolean {
 const MAX_MANIFEST_PATH = 1024;
 /** Exported for `status.ts`, which caps substrate-supplied URLs to the same bound. */
 export const MAX_URL = 2048;
-const MAX_REQUEST_ID = 128;
+/** Exported for `status.ts`, which caps record-supplied request ids to the same bound. */
+export const MAX_REQUEST_ID = 128;
 
 /**
  * Cap on the field NAME `extractZodErrorField` hands back. Sized like

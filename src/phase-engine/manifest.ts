@@ -746,8 +746,9 @@ export function stripAuthoredLimit(loaded: LoadedManifest): LoadedManifest {
  * @param limitMicroUsd — positive safe integer ceiling (rejects 0, negative,
  *   float, and anything past `Number.MAX_SAFE_INTEGER`)
  * @throws {ManifestError} if the ceiling is not a positive safe integer, if the
- *   stamped manifest fails schema validation, or if the stamp did not land —
- *   every failure of this function, so callers catch one type
+ *   requested ceiling would RAISE one already present, if the stamped manifest
+ *   fails schema validation, or if the stamp did not land — every failure of
+ *   this function, so callers catch one type
  */
 export function stampManifestLimit(manifest: LoadedManifest, limitMicroUsd: number): LoadedManifest {
   // `z.number().int()` accepts 1e300 — `Number.isInteger` is true for it — and
@@ -757,6 +758,17 @@ export function stampManifestLimit(manifest: LoadedManifest, limitMicroUsd: numb
   if (!Number.isSafeInteger(limitMicroUsd) || limitMicroUsd <= 0) {
     throw new ManifestError(
       `limitMicroUsd must be a positive integer <= ${Number.MAX_SAFE_INTEGER}; got ${limitMicroUsd}`,
+    );
+  }
+  // Monotonic guard, fail-closed: a ceiling already present is what admission
+  // GRANTED, so the last-wins spread below must never let a second stamp
+  // overwrite it upward past the ledger (unreserved headroom). Equal and lower
+  // stay legal — downstream clamps are downward-only, so tightening preserves
+  // doctrine. An absent field is the ordinary first stamp and is untouched.
+  const existing = manifest.manifest.limitMicroUsd;
+  if (existing !== undefined && limitMicroUsd > existing) {
+    throw new ManifestError(
+      `refusing to raise limitMicroUsd from ${existing} to ${limitMicroUsd} above the admitted ceiling`,
     );
   }
   const stamped = { ...manifest.manifest, limitMicroUsd };

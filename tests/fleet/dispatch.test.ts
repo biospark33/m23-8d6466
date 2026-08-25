@@ -21,6 +21,7 @@
  */
 import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -267,9 +268,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
   /**
    * Every typed refusal owes exactly ONE structured line, classified `error`,
    * carrying the fleet code — the join key and diagnosis AC4's evidence rides
-   * on. Several siblings asserted this piecemeal and six did not assert it at
-   * all, so a `refuse` that stopped filing its line failed none of them by
-   * name; this is the shared minimum they all now make.
+   * on. This is the shared minimum, and every refusal family in this file now
+   * asserts it — directly here, through {@link expectRosterRefusal}, or inline
+   * in the few families that predate the helper.
    *
    * Deliberately NOT pinned here: `exitStatus` (per-path classification) and
    * `runId`/`requestId` joins (depend on how far the refusal got) — callers add
@@ -310,10 +311,14 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // a sibling step can file its own abandoned line a tick later — counting
     // immediately lets that second line slip past this helper, and the
     // assertions below then run against whichever entry happened to come first.
-    // Bounded poll (≤50 ms total): yield on a short timer until the
-    // abandoned-line count has held steady across two consecutive hops.
+    // Bounded poll: yield on a short timer until the abandoned-line count has
+    // held steady across two consecutive hops. The cap is 250 ms, not 50 — a
+    // sibling step's line arriving MORE than 50 ms after the first used to slip
+    // past this window and defeat the exactly-one assertion below. The early
+    // exit keeps the common case at ~10 ms; the larger ceiling is only paid
+    // when lines are genuinely still arriving.
     const abandonedCount = (): number => entries.filter((e) => e.phase === "abandoned").length;
-    const settleBy = Date.now() + 50;
+    const settleBy = Date.now() + 250;
     let seen = abandonedCount();
     let quietHops = 0;
     while (quietHops < 2 && Date.now() < settleBy) {
@@ -413,6 +418,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         expect(err.code).toBe("run-id-not-minted");
         expect(err.exitCode).toBe(2);
       }
+      expectSingleRefusalLine("run-id-not-minted");
       expect(ledgerFactory).not.toHaveBeenCalled();
       expect(readdirSync(store.dir)).toHaveLength(0);
       expect(await driver.list()).toHaveLength(0);
@@ -480,6 +486,24 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(row.state).toBe("live");
   });
 
+  test("AC2: a supplied requestId is REUSED across two sequential runs, not minted per run", async () => {
+    // "Honoured" in the sibling above is one dispatch deep: a resolver that
+    // honoured the FIRST call and re-minted on every later one would pass it.
+    // The id is the operator's correlation handle — two runs the caller sent
+    // under one requestId must stay joinable under it.
+    const requestId = "5d4e3f2a-1b0c-4d9e-8f7a-6b5c4d3e2f10";
+    const first = await dispatch(validBrief({ requestId }), deps());
+    const second = await dispatch(validBrief({ requestId }), deps());
+
+    expect(first.requestId).toBe(requestId);
+    expect(second.requestId).toBe(requestId);
+    // On the records too — the ack is not the only carrier (INV-4-bis).
+    expect(store.get(first.runId).requestId).toBe(requestId);
+    expect(store.get(second.runId).requestId).toBe(requestId);
+    // Two DISTINCT runs share it; nothing here mints a third value.
+    expect(new Set([first.runId, second.runId]).size).toBe(2);
+  });
+
   // ─── INV-2: validate before any side effect ───────────────────────────────────────────
 
   test("INV-2: unknown field → FleetError exit 2, zero provisioning", async () => {
@@ -533,6 +557,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         if (e instanceof UnexpectedSuccessError) throw e;
         const err = e as FleetError;
         expect(err.code).toBe("invalid-brief");
+        expect(err.exitCode).toBe(2);
         // The raw name never appears in ANY operator-facing string.
         const operatorFacing = [
           err.message,
@@ -767,6 +792,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(err.payload?.field).toBe("manifestPath");
       expect(JSON.stringify(err.payload?.issues)).toContain("must be relative to the repo root");
     }
+    expectSingleRefusalLine("invalid-brief");
     expect(ledgerFactory).not.toHaveBeenCalled();
     expect(readdirSync(store.dir)).toHaveLength(0);
     expect(await driver.list()).toHaveLength(0);
@@ -797,6 +823,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(err.remediation).toContain(dir);
       expect(err.remediation).not.toContain(process.cwd());
     }
+    expectSingleRefusalLine("manifest-rejected");
     expect(ledgerFactory).not.toHaveBeenCalled();
     expect(readdirSync(store.dir)).toHaveLength(0);
     expect(await driver.list()).toHaveLength(0);
@@ -807,12 +834,15 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // behind the injected root every other test uses — and asserted WITHOUT
     // mutating the process's cwd, which is shared by every other test file.
     //
-    // This arm proves WHICH root the default is, not the beneath-root check
-    // itself: `manifestPath` is now relative, so an escaping fixture would have
-    // to be a symlink planted inside the real repo working tree, and no test
-    // here writes there. The symlink escape is exercised against the injected
-    // root above; the two roots run through the same `loadManifest` call.
-    const brief = validBrief();
+    // ISOLATED from the real repo tree's contents. The manifest lives at a
+    // NONCE path written ONLY beneath `dir`: the cwd resolution of that path
+    // cannot exist regardless of what the working tree holds (the old
+    // `manifests/pipeline.json` spelling would have started loading the real
+    // repo's manifest the day one landed there), and the injected root WOULD
+    // load it — so the refusal below still proves WHICH root the default is,
+    // not merely that some file was missing somewhere.
+    const brief = { ...validBrief(), manifestPath: manifestAt(join("manifests", "cwd-fallback-probe.json")) };
+    expect(existsSync(join(process.cwd(), "manifests", "cwd-fallback-probe.json"))).toBeFalse();
 
     try {
       await dispatch(brief, deps({ repoRoot: undefined }));
@@ -827,6 +857,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       // would have loaded it and never reached this refusal at all.
       expect((e as FleetError).remediation).not.toContain(dir);
     }
+    expectSingleRefusalLine("manifest-rejected");
     expect(readdirSync(store.dir)).toHaveLength(0);
     expect(await driver.list()).toHaveLength(0);
   });
@@ -862,7 +893,16 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     return counts;
   }
 
-  /** The `tests/phase-engine/fixtures/dispatch-roster.yaml` shape, inline. */
+  /**
+   * The `tests/phase-engine/fixtures/dispatch-roster.yaml` shape, inline.
+   *
+   * COUPLING, named because no constant is exported to derive it from: the
+   * `model:` value is a plain schema-valid model id (`provider: anthropic` in
+   * defaults is what keeps it from needing a provider prefix — see
+   * `resolveSlug` in roster/schema.ts). If the roster schema ever renames or
+   * re-constrains models, THIS string must be updated by hand; nothing in the
+   * import graph will flag the drift.
+   */
   const VALID_ROSTER = [
     "defaults:",
     "  provider: anthropic",
@@ -907,6 +947,10 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     } catch (e) {
       err = e as FleetError;
     }
+    // Same idiom as the `failUnreachable` arms (see the class doc): an
+    // unexpected SUCCESS fails under its own name, not as "expected
+    // FleetError, got undefined" out of the assertion below.
+    if (err === undefined) throw new UnexpectedSuccessError();
     expect(err).toBeInstanceOf(FleetError);
     const fleetError = err as FleetError;
     expect(fleetError.exitCode).toBe(2);
@@ -918,6 +962,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(ledgerFactory).not.toHaveBeenCalled();
     expect(createSpy).not.toHaveBeenCalled();
     expect(readdirSync(store.dir)).toHaveLength(0);
+    // The shared minimum, so a `refuse` that stopped filing its line fails
+    // every roster refusal by name rather than only where a sibling remembers.
+    expectSingleRefusalLine(code);
     return fleetError;
   }
 
@@ -939,6 +986,18 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
   /** `mkfifo` is absent on some minimal CI images; without it no FIFO fixture can exist. */
   const mkfifoMissing = Bun.which("mkfifo") === null;
+
+  // Skip visibility: `test.skipIf` shows a skipped entry with no reason, so on
+  // a host without `mkfifo` nothing in the output says WHY the anti-hang case
+  // above never ran. This always-on line names the state either way.
+  test(
+    mkfifoMissing
+      ? "FIFO anti-hang coverage is SKIPPED on this host: mkfifo is absent, so no FIFO fixture can exist"
+      : "FIFO anti-hang coverage is ACTIVE on this host: mkfifo is present",
+    () => {
+      expect(typeof mkfifoMissing).toBe("boolean");
+    },
+  );
 
   test.skipIf(mkfifoMissing)(
     "INV-2: a roster.yaml that is a FIFO → exit 2 roster-rejected, and the dispatch does not HANG",
@@ -991,6 +1050,42 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     const err = await expectRosterRefusal(brief, "roster-rejected", rosterPath);
     // Same vocabulary as the schema's load path, so operators see one rule.
     expect(err.message).toContain(`over the ${ROSTER_MAX_BYTES}-byte`);
+  });
+
+  test("INV-2: a roster at EXACTLY the byte ceiling is ACCEPTED — the boundary is `>`", async () => {
+    // The boundary control for the oversize sibling: both size checks are
+    // strict (`st.size > ROSTER_MAX_BYTES`, then the re-fstat/read-length pair),
+    // so a ceiling that had drifted to `>=` would refuse a legitimate
+    // full-size roster and every rejection case above would stay green. The
+    // fixture pads the VALID roster with a YAML comment to exactly the ceiling.
+    makeDriverExedevCapable();
+    const brief = validBrief();
+    const rosterPath = join(dir, "manifests", "roster.yaml");
+    const padding = ROSTER_MAX_BYTES - VALID_ROSTER.length;
+    expect(padding).toBeGreaterThanOrEqual(4);
+    const exact = `${VALID_ROSTER}# ${"x".repeat(padding - 3)}\n`;
+    expect(exact.length).toBe(ROSTER_MAX_BYTES); // all-ASCII: chars == bytes
+    writeFileSync(rosterPath, exact);
+
+    // ACCEPTED means the dispatch gets PAST the roster block: `driver.create`
+    // fails with a marker at the next step, which is unambiguously after it —
+    // the same shape the VALID-roster positive control uses.
+    driver.create = async () => {
+      throw new Error("past the exact-ceiling roster pre-check");
+    };
+    const ledgerFactory = mock(() => goodLedger());
+
+    try {
+      await dispatch(brief, deps({ ledgerFactory }));
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      const err = e as FleetError;
+      expect(err.code).toBe("provision-failed");
+      expect(err.message).toContain("past the exact-ceiling roster pre-check");
+    }
+    // And the admission WAS spent — this run got all the way into provisioning.
+    expect(ledgerFactory).toHaveBeenCalled();
   });
 
   test("INV-2: a roster path outside the gate's plain-path charset → exit 2 roster-path-unsafe", async () => {
@@ -1122,6 +1217,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         expect((e as FleetError).exitCode).toBe(2);
         expect((e as FleetError).code).toBe("timeout-invalid");
       }
+      expectSingleRefusalLine("timeout-invalid");
       expect(ledgerFactory).not.toHaveBeenCalled();
       expect(readdirSync(store.dir)).toHaveLength(0);
       expect(await driver.list()).toHaveLength(0);
@@ -1178,6 +1274,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         expect((e as FleetError).exitCode).toBe(2);
         expect((e as FleetError).code).toBe("port-invalid");
       }
+      expectSingleRefusalLine("port-invalid");
       expect(ledgerFactory).not.toHaveBeenCalled();
       expect(readdirSync(store.dir)).toHaveLength(0);
       expect(await driver.list()).toHaveLength(0);
@@ -1210,6 +1307,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect((e as FleetError).exitCode).toBe(2);
       expect((e as FleetError).code).toBe("run-id-in-use");
     }
+    expectSingleRefusalLine("run-id-in-use");
     expect(ledgerFactory).not.toHaveBeenCalled();
     expect(readdirSync(store.dir)).toHaveLength(1);
   });
@@ -1248,6 +1346,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       // greps the fleet code, so `EEXIST` must not have become it.
       expect(err.payload?.providerCode).toBeUndefined();
     }
+    expectSingleRefusalLine("run-id-in-use");
     // This is the CONCURRENT branch, not the step-4 one: the admission was
     // already spent by the time the create refused. Asserting it is what tells
     // the two run-id-in-use sites apart — the sibling above asserts the
@@ -1387,6 +1486,55 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(ledger.closeCalls).toBe(2);
   });
 
+  test("N concurrent dispatches on DISTINCT ids racing headroom both pass — the documented fleet-ceiling gap, pinned", async () => {
+    // The same-id race above has an arbiter (`store.create`'s O_EXCL). The
+    // DISTINCT-id race against the FLEET ceiling has none: step 5's
+    // `checkHeadroom` is a bare READ of `driver.list()` with no reservation at
+    // the quota layer (see the long comment over step 6 in src/fleet/dispatch.ts:
+    // "The FLEET-CEILING half is NOT closed"). Two arms parked INSIDE that read,
+    // both released into a fleet with zero live boxes and a ceiling of one, are
+    // both told `allowed: true` and both provision.
+    //
+    // This pins the DOCUMENTED current behavior so the gap cannot silently
+    // widen (or quietly get fixed without the comment moving): overshoot is
+    // bounded by how many dispatches fit inside one list round trip, and the
+    // DF2.6 reaper still sees every box. Closing it needs a providers-layer
+    // intent record — deliberately not this module's change to make.
+    let parked = 0;
+    let releaseBarrier: () => void = () => {};
+    const bothParked = new Promise<void>((r) => {
+      releaseBarrier = r;
+    });
+    const realList = driver.list.bind(driver);
+    driver.list = async () => {
+      parked += 1;
+      if (parked === 2) releaseBarrier();
+      else await bothParked;
+      return realList();
+    };
+
+    const settled = await Promise.allSettled([
+      dispatch(validBrief(), deps({ quotaLimits: limitsWith({ maxVms: 1 }) })),
+      dispatch(validBrief(), deps({ quotaLimits: limitsWith({ maxVms: 1 }) })),
+    ]);
+
+    // BOTH succeeded: neither saw the other's box, because neither existed yet.
+    const winners = settled.filter((s) => s.status === "fulfilled");
+    const losers = settled.filter((s) => s.status === "rejected");
+    expect(winners).toHaveLength(2);
+    expect(losers).toHaveLength(0);
+
+    // The ceiling was 1; two live boxes exist after the race.
+    const runIds = settled.map(
+      (s) => (s as PromiseFulfilledResult<{ runId: string }>).value?.runId,
+    );
+    expect(new Set(runIds).size).toBe(2);
+    expect(readdirSync(store.dir)).toHaveLength(2);
+    const live = await driver.list();
+    expect(live.length).toBe(2);
+    expect(live.length).toBeGreaterThan(1); // the gap, stated plainly: maxVms=1 exceeded
+  });
+
   test("a SELF-MINTED id that collides is re-minted, and the run lands on the free one", async () => {
     // Nobody chose a minted id, so a collision is re-minted rather than refused
     // — and the loop that does it was untested: a `break` on the first collision
@@ -1451,9 +1599,15 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(err.payload).not.toHaveProperty("teardownCommand");
       expect((refusalLines()[0] as LogEntry).runId).toBeNull();
     }
-    // MINT_RETRIES (4) re-mints plus the first attempt. Pinned exactly: 1 is an
+    // MINT_RETRIES re-mints plus the first attempt. Pinned exactly: 1 is an
     // early `break` and anything unbounded is the spin the bound exists to stop.
-    expect(probes).toBe(5);
+    // The constant mirrors dispatch.ts's unexported `MINT_RETRIES` — if that
+    // changes, THIS literal is the one to move, and the failure message below
+    // says so.
+    const DISPATCH_MINT_RETRIES = 4;
+    expect(probes, `${probes} existence probes ≠ 1 + ${DISPATCH_MINT_RETRIES} re-mints — update DISPATCH_MINT_RETRIES if src/fleet/dispatch.ts's MINT_RETRIES changed`).toBe(
+      DISPATCH_MINT_RETRIES + 1,
+    );
     expect(readdirSync(store.dir)).toHaveLength(0);
     expect(await driver.list()).toHaveLength(0);
   });
@@ -1534,6 +1688,52 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // The refusal path closes the handle too — a leaked SQLite handle per
     // refused dispatch is invisible until the fleet runs out of them.
     expect(ledger.closeCalls).toBe(1);
+  });
+
+  test("AC7: spent EXACTLY AT the cap refuses — the decision shape's own boundary", async () => {
+    // The sibling above refuses at spent 12_000_000 / cap 10_000_000. Equality
+    // is the boundary the DECISION shape owns (`assertWithinBudget` forwards
+    // whatever `admitIssue` decided; the gate throws on the refused variant,
+    // whose contract is "at or over cap"). A dispatch-side rewrite that compared
+    // `spent > cap` — or dropped the refused arm to admit anything with a
+    // status string — passes the strictly-over sibling and mints a key for an
+    // issue with zero headroom.
+    const cap = 10_000_000;
+    let closeCalls = 0;
+    const ledger: LedgerLike = {
+      config: { defaultCapMicroUsd: cap, perIssueOverrides: {} },
+      admitIssue() {
+        return {
+          admitted: false as const,
+          status: "over-budget" as const,
+          reason: "spend-cap-exceeded" as const,
+          capMicroUsd: cap,
+          spentMicroUsd: cap, // EXACTLY equal, not over
+          reservedMicroUsd: 0,
+          unpricedRows: 0,
+        };
+      },
+      close() {
+        closeCalls += 1;
+      },
+    };
+
+    try {
+      await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(5);
+      expect(err.code).toBe("budget-exceeded");
+      // Both figures ride the payload, EQUAL — the shape the operator reads.
+      expect(err.payload?.capMicroUsd).toBe(cap);
+      expect(err.payload?.spentMicroUsd).toBe(cap);
+    }
+    expectSingleRefusalLine("budget-exceeded");
+    expect(closeCalls).toBe(1);
+    expect(readdirSync(store.dir)).toHaveLength(0);
+    expect(await driver.list()).toHaveLength(0);
   });
 
   test("AC7: {admitted:true} still checks budget (only headroom suppressed)", async () => {
@@ -2055,6 +2255,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(typeof runId).toBe("string");
     // Not merely non-null — the id must name the record that is really on disk.
     expect(readdirSync(store.dir)).toContain(`${runId as string}.json`);
+    // …and that record is OPEN (INV-5's other half): teardown is advice, never
+    // something dispatch did on the operator's behalf.
+    expect(store.get(runId as string).closedAt).toBeUndefined();
     expect(e.payload?.teardownCommand).toBe(`bun scripts/fleet.ts teardown ${runId as string}`);
     // `refuse` also files the refusal log line the dispatch-log evidence needs.
     expect(refusalLines()).toHaveLength(1);
@@ -2233,6 +2436,39 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect((differs[0] as LogEntry).exitStatus).toBe("success");
   });
 
+  test("AC9: a provider that mints EXACTLY the request is SILENT — no mint-cap line at all", async () => {
+    // The third arm of the family, and the one whose failure mode is pure
+    // noise: a `mintedCeilingMicros !== effectiveCeilingMicros` comparison
+    // written as `>=`/`<=` — or the guard dropped to `if (true)` "for safety" —
+    // logs an incident line on every healthy dispatch, paging nobody for real
+    // over-mints because the channel cried wolf forever. Equality must produce
+    // NO line in either direction.
+    const admittedCeiling = 25_000_000;
+    const requestedUsd: number[] = [];
+    keyApi.createKey = async (_name: string, limitUsd: number) => {
+      requestedUsd.push(limitUsd);
+      // The provider echoes the request back EXACTLY.
+      return { key: "sk-exactmint", hash: "f00dface", limitUsd, usageUsd: 0 };
+    };
+
+    const result = await dispatch(validBrief(), deps({ ledgerFactory: () => goodLedger(admittedCeiling) }));
+
+    expect(result.state).toBe("ready");
+    expect(requestedUsd).toEqual([admittedCeiling / 1_000_000]);
+    // Both carriers carry the agreed figure…
+    const delivered = await driver.exec(result.vmName, ["sh", "-c", "cat pipeline.yaml"]);
+    expect((JSON.parse(delivered.stdout) as { limitMicroUsd: number }).limitMicroUsd).toBe(admittedCeiling);
+    const ctx = await driver.exec(result.vmName, ["sh", "-c", "cat run-context.json"]);
+    expect((JSON.parse(ctx.stdout) as { effectiveCeilingMicros: number }).effectiveCeilingMicros).toBe(
+      admittedCeiling,
+    );
+    // …and NEITHER diagnostic code fired — not even the informational one.
+    // `phase: "minted"` is used by the mint-cap block and nothing else, so an
+    // empty filter is the whole silence claim.
+    expect(entries.filter((e) => e.phase === "minted")).toEqual([]);
+    expect(refusalLines()).toHaveLength(0);
+  });
+
   // ─── Gate failure (AC3, INV-5) ─────────────────────────────────────────────────────
 
   test("AC3: gate ready=false → FleetError exit 3, record OPEN, box alive, gate outcome recorded", async () => {
@@ -2359,6 +2595,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         const boxes = await driver.list();
         expect(boxes.some((b) => b.name === record.vmName)).toBeTrue();
       }
+      expectSingleRefusalLine("setup-gate-invalid");
       expect(ledger.closeCalls).toBe(1);
     });
   }
@@ -2408,6 +2645,78 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(err.payload?.failedItem).toBe("A");
       expect(err.payload?.assertions).toEqual(["A:«unprintable»"]);
     }
+  });
+
+  // ─── items A and C through the REAL probe path ─────────────────────────────
+  // The hand-built `ready:false` fixtures above pin dispatch's REFUSAL side.
+  // These two run the default gate — no `deps.setupGate`, so `fakeGate` itself
+  // probes the box — and fail the box's STATE so a specific ITEM fires, which
+  // is coverage the injected-result shape cannot give: a probe order change, or
+  // an item that stopped reading what it claims to read, passes every fixture
+  // that never runs the probes.
+
+  test("AC3 via the real probe path: an unreachable box fails at item A", async () => {
+    // Item A is `exec ["true"]`; its nonzero exit is the box refusing to run
+    // anything. Probing stops at the first failure, so B..E must not appear.
+    const realExec = driver.exec.bind(driver);
+    driver.exec = async (vm: string, argv: string[], stdin?: string) =>
+      argv[0] === "true" ? { exitCode: 1, stdout: "", stderr: "" } : realExec(vm, argv, stdin);
+
+    try {
+      await dispatch(validBrief(), deps());
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(3);
+      expect(err.code).toBe("setup-gate-failed");
+      expect(err.payload?.failedItem).toBe("A");
+      expect(err.payload?.assertionCode).toBe(1);
+      // The executed SET stops at A — later items are absent, not merely passing.
+      expect(err.payload?.assertions).toEqual(["A:box reachable (exec true) — exit 1"]);
+    }
+    expectSingleRefusalLine("setup-gate-failed");
+  });
+
+  test("AC3 via the real probe path: a mis-moded delivered key fails item C", async () => {
+    // The delivery contract's own failure, produced on the REAL file: delivery
+    // lands `.env` at mode 600 inside the fake box (a host directory), and the
+    // test demotes it to 0644 before the gate reads it — so item C's stat probe
+    // reports the wrong mode for exactly the reason production would see one.
+    const realExec = driver.exec.bind(driver);
+    driver.exec = async (vm: string, argv: string[], stdin?: string) => {
+      const r = await realExec(vm, argv, stdin);
+      // The key-delivery script opens with `umask 077` (credentials.ts).
+      if ((argv[2] ?? "").startsWith("umask 077")) {
+        chmodSync(join(driver.root, vm, ".env"), 0o644);
+      }
+      return r;
+    };
+
+    try {
+      await dispatch(validBrief(), deps());
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(3);
+      expect(err.code).toBe("setup-gate-failed");
+      // A and B passed (the box ran; the manifest landed stamped); C is the
+      // failing item of the full EXECUTED set the payload carries.
+      expect(err.payload?.failedItem).toBe("C");
+      expect(err.payload?.assertionCode).toBe(2);
+      expect(err.payload?.assertions).toEqual([
+        "A:ok",
+        "B:ok",
+        "C:delivered key env file is mode 600 (DF2.3 delivery contract) — mode 644",
+      ]);
+      // INV-5 posture, same as every other gate failure.
+      const record = store.get(err.payload?.runId as string);
+      expect(record.closedAt).toBeUndefined();
+      const boxes = await driver.list();
+      expect(boxes.some((b) => b.name === record.vmName)).toBeTrue();
+    }
+    expectSingleRefusalLine("setup-gate-failed");
   });
 
   test("INV-6: gate COMMAND strings and assertion ITEM LABELS are escaped like notes are", async () => {
@@ -2710,6 +3019,40 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(result.state).toBe("ready");
   });
 
+  test("600s wall clock: expiry AT exactly the ceiling (elapsed === timeoutMs) refuses", async () => {
+    // The exact boundary between the two siblings: `remaining()` floors to 0
+    // when elapsed EQUALS the ceiling, and both consumers refuse on `<= 0`. An
+    // off-by-one to `<` would ack a run that spent its entire budget and had
+    // nothing left — invisible from a strictly-past case and a just-under case
+    // alone.
+    const { clock, advance } = stepClock();
+
+    try {
+      await dispatch(
+        validBrief(),
+        deps({
+          clock,
+          // `port` keeps post-gate work in scope, same as the expiry sibling.
+          port: 8080,
+          setupGate: async (drv, vm, o) => {
+            const result = await fakeGate(drv, vm, o);
+            advance(DEFAULT_TIMEOUT_MS); // EXACTLY — not one ms more
+            return result;
+          },
+        }),
+      );
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(1);
+      expect(err.code).toBe("dispatch-timeout");
+      expect(err.payload?.step).toBe("post-gate");
+      expect(err.payload?.gateReady).toBeTrue();
+    }
+    expectSingleRefusalLine("dispatch-timeout");
+  });
+
   test("the armed wall-clock deadline timer is CLEARED when dispatch settles — success and refusal alike", async () => {
     // `within` arms one REAL `setTimeout` per step and clears it in a finally.
     // A settle path that skips the clear leaves a live 600 s timer that fires
@@ -2860,6 +3203,25 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(bEmpty?.ok).toBeFalse();
     expect(bEmpty?.note).toContain("present but empty");
     expect(bEmpty?.note).not.toContain("missing");
+
+    // The fourth arm: PRESENT, NON-EMPTY, and not JSON at all. It exits `cat`
+    // with 0 and has length, so the missing/empty/unreadable trio above all
+    // pass it through — only the parse refusal names it, and without this case
+    // a B that reported any of those three instead would stay green.
+    const garbage = await driver.create("box-probe-garbage");
+    await driver.exec(garbage.name, [
+      "sh",
+      "-c",
+      "printf '%s\\n' 'this is not json at all' > pipeline.yaml",
+    ]);
+    const bGarbage = (await fakeGate(driver, garbage.name, opts)).assertions.find(
+      (a) => a.item === "B",
+    );
+    expect(bGarbage?.ok).toBeFalse();
+    expect(bGarbage?.note).toContain("not parseable");
+    expect(bGarbage?.note).not.toContain("present but empty");
+    expect(bGarbage?.note).not.toContain("missing or unreadable");
+    expect(bGarbage?.note).not.toContain("limitMicroUsd absent");
 
   });
 
@@ -3149,6 +3511,56 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     }
     expect(readdirSync(store.dir)).toHaveLength(0);
     expect(await driver.list()).toHaveLength(0);
+  });
+
+  test("a mint that THROWS mid-provision refuses exit 1 key-delivery-failed with a FIXED message", async () => {
+    // The sibling below covers the DELIVERY half (the exec echo). This is the
+    // MINT half: `createKey` rejects after the box exists. The step-7 catch
+    // exists so the provider's free text never reaches any sink — the message is
+    // FIXED, the code rides the payload only when the throw carried one — and
+    // that posture is what gets pinned here, alongside the INV-5 shape the
+    // provisioning-failure sibling pins for its own step.
+    const vaultError = new Error("vault unavailable: 503 from upstream");
+    keyApi.createKey = async () => {
+      throw vaultError;
+    };
+    const ledger = goodLedger();
+
+    try {
+      await dispatch(validBrief(), deps({ ledgerFactory: () => ledger }));
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(1);
+      expect(err.code).toBe("key-delivery-failed");
+      // FIXED message: the provider's free text appears nowhere in it…
+      expect(err.message).toContain("key mint or delivery failed");
+      expect(err.message).not.toContain("vault unavailable");
+      // …and a plain Error carries no `code`, which is named by omission.
+      expect(err.payload?.providerCode).toBeUndefined();
+      // INV-5 posture: record OPEN, box ALIVE, operator commands name THIS run.
+      const runId = err.payload?.runId as string;
+      expect(store.get(runId).closedAt).toBeUndefined();
+      expect(err.payload?.teardownCommand).toBe(`bun scripts/fleet.ts teardown ${runId}`);
+      expect(err.payload?.debugCommands).toEqual([`bun scripts/fleet.ts status ${runId}`]);
+      const boxes = await driver.list();
+      expect(boxes.some((b) => b.name === store.get(runId).vmName)).toBeTrue();
+    }
+    // The FLEET-side sinks carry no provider free text — dispatch's own
+    // structured lines and the persisted dispatch log (AC4 evidence). The
+    // providers layer logs its own step line for the failed mint; that copy is
+    // `redactSecrets`' jurisdiction (see the delivery sibling's two-half split),
+    // not this catch's.
+    const own = entries.filter((line) => line.operation === "fleet.dispatch");
+    expect(own.length).toBeGreaterThan(0);
+    expect(own.some((line) => JSON.stringify(line).includes("vault unavailable"))).toBeFalse();
+    expect(readFileSync(join(dir, "dispatch-log.jsonl"), "utf8")).not.toContain(
+      "vault unavailable",
+    );
+    expectSingleRefusalLine("key-delivery-failed");
+    // The handle closes on this path too.
+    expect(ledger.closeCalls).toBe(1);
   });
 
   test("INV-4: a driver that echoes the delivered key in its error never lands it in a sink", async () => {
@@ -3521,17 +3933,29 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // whose own timer was armed with the full ceiling before it ran. Nothing
     // races a real clock: 200 ms is the whole of the mint step's budget, by
     // construction and at any load.
+    // TWO-STAGE clock spend, so no CI stall can flip WHICH step expires:
+    //   - inside `create` (after the real box exists) spend all but 30 s — every
+    //     timer any OTHER step arms from here holds ~30 s of REAL time, which no
+    //     plausible loop stall outlives before the runner's own timeout;
+    //   - at the LAST synchronous seam before `within("mint")` arms its timer
+    //     (the correlation stamp — nothing is awaited between it and the arming)
+    //     spend down to 900 ms, so `mint` is the ONLY step holding a short timer.
+    // The old single 1 s advance left every adjacent step the same 1 s, so a
+    // stalled loop could fire an earlier step's timer first.
+    const EARLY_LEFT_MS = 30_000;
+    const TARGET_LEFT_MS = 900;
     const realCreate = driver.create.bind(driver);
     driver.create = async (name: string, tag?: string) => {
       const vm = await realCreate(name, tag);
-      // Spends all but 1 s inside `create`, whose own timer was armed with the
-      // full ceiling before it ran — so `mint` is the step holding the short
-      // timer, by construction. The margin covers load: the steps between this
-      // advance and `mint` arm a REAL timer of this same remainder, and a loop
-      // stall longer than it would fire one of those first, flipping which step
-      // expires. Residual risk accepted: >1 s between adjacent steps.
-      advance(DEFAULT_TIMEOUT_MS - 1_000);
+      advance(DEFAULT_TIMEOUT_MS - EARLY_LEFT_MS);
       return vm;
+    };
+    const realSet = store.set.bind(store);
+    store.set = (id: string, patch: Parameters<RunRecordStore["set"]>[1]) => {
+      if (Object.keys(patch).length === 1 && "requestId" in patch) {
+        advance(EARLY_LEFT_MS - TARGET_LEFT_MS);
+      }
+      return realSet(id, patch);
     };
     const knownKey = "sk-or-v1-abandonedmintkey31337";
     let releaseMint: () => void = () => {};
@@ -3591,6 +4015,24 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       await publishing;
     };
 
+    // TWO-STAGE clock spend, same scheme as the abandoned-mint sibling: after
+    // the gate, leave 30 s so `expose`'s timer is far too long for any loop
+    // stall to outlive; at the LAST synchronous seam before `within("setPublic")`
+    // arms its timer — the `httpsUrl` record write, with nothing awaited between
+    // it and the arming — spend down to 900 ms, so `setPublic` alone holds the
+    // short timer. The old single 1 s advance gave `expose` the SAME 1 s, and a
+    // stalled loop during expose could fire ITS timer first, flipping which step
+    // the refusal names.
+    const EARLY_LEFT_MS = 30_000;
+    const TARGET_LEFT_MS = 900;
+    const realSet = store.set.bind(store);
+    store.set = (id: string, patch: Parameters<RunRecordStore["set"]>[1]) => {
+      if (Object.keys(patch).length === 1 && "httpsUrl" in patch) {
+        advance(EARLY_LEFT_MS - TARGET_LEFT_MS);
+      }
+      return realSet(id, patch);
+    };
+
     let err: FleetError | undefined;
     try {
       await dispatch(
@@ -3600,15 +4042,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
           port: 8080,
           setupGate: async (drv, vm, o) => {
             const gate = await fakeGate(drv, vm, o);
-            // Spends all but 1 s AFTER the gate: `expose` (a local call)
-            // resolves inside that margin, and `setPublic` is then the step
-            // holding the short timer. The margin is deliberately generous —
-            // every step from here to `setPublic` arms a REAL timer of this
-            // same remainder, and under load a stalled loop could fire one of
-            // THOSE first, flipping which step the refusal names. 1 s keeps
-            // that window un-raceable in practice; residual risk accepted: a
-            // machine stalling >1 s between two adjacent steps still flips it.
-            advance(DEFAULT_TIMEOUT_MS - 1_000);
+            advance(DEFAULT_TIMEOUT_MS - EARLY_LEFT_MS);
             return gate;
           },
         }),
@@ -3665,15 +4099,17 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         validBrief({ requestId }),
         deps({
           clock,
-          // The last seam before the create step — everything from here to
-          // `within("create")` arms a REAL timer of this same remainder (the
-          // injected clock does not move on its own), so 1 s of margin keeps a
-          // loaded loop from firing an intermediate step's timer first and
-          // flipping which step the refusal names. `store.create` (INV-1's
-          // first half) has already written the record by the time the create
-          // timer expires.
+          // The last seam before the create step. NO other timer can win here:
+          // the stretch between this advance and `within("create")` arming its
+          // timer is fully synchronous, and every EARLIER timer (headroom) was
+          // armed with the full ceiling and cleared before the advance ran — so
+          // a CI stall can delay the refusal but never flip WHICH step it
+          // names. The 2 s margin is insurance against a future refactor
+          // inserting an awaited step between admission and provisioning.
+          // `store.create` (INV-1's first half) has already written the record
+          // by the time the create timer expires.
           ledgerFactory: () => {
-            advance(DEFAULT_TIMEOUT_MS - 1_000);
+            advance(DEFAULT_TIMEOUT_MS - 2_000);
             return goodLedger();
           },
         }),
@@ -3735,6 +4171,23 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         await cloning;
       },
     });
+    // TWO-STAGE clock spend, same scheme as the abandoned-mint sibling:
+    // `ledgerFactory` (below) leaves 30 s so every timer create/mint/deliver
+    // arm is far too long for a CI stall to outlive; THIS stub — key delivery,
+    // the LAST awaited step before `within("clone")` arms its timer — spends
+    // down to 900 ms on its first call. Deliver resolves instantly after it,
+    // clearing its own 30 s timer, so `clone` alone holds the short one. The
+    // old single 1 s advance gave create/mint/deliver the SAME 1 s, and a stall
+    // during any of them flipped which step the refusal named.
+    const EARLY_LEFT_MS = 30_000;
+    const TARGET_LEFT_MS = 900;
+    let execCalls = 0;
+    Object.assign(driver, {
+      exec: async () => {
+        if (execCalls++ === 0) advance(EARLY_LEFT_MS - TARGET_LEFT_MS);
+        return { exitCode: 0, stdout: "600\n", stderr: "" };
+      },
+    });
     writeFileSync(join(dir, "manifests", "roster.yaml"), VALID_ROSTER);
 
     let err: FleetError | undefined;
@@ -3743,12 +4196,11 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         brief,
         deps({
           clock,
-          // Same trick as the create-timeout sibling: spend all but 1 s at the
-          // last seam before the step under test, so every earlier within()
-          // resolves instantly inside its REAL 1 s timer and "clone" is the
-          // step holding the short one.
+          // Stage one of the two-stage spend (see the exec stub above): leave
+          // 30 s here, so the steps between admission and clone hold long real
+          // timers; the exec stub spends down to the clone timer's remainder.
           ledgerFactory: () => {
-            advance(DEFAULT_TIMEOUT_MS - 1_000);
+            advance(DEFAULT_TIMEOUT_MS - EARLY_LEFT_MS);
             return goodLedger();
           },
         }),
@@ -3911,6 +4363,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     } catch (e) {
       if (e instanceof UnexpectedSuccessError) throw e;
       const err = e as FleetError;
+      expect(err.exitCode).toBe(2);
       expect(err.code).toBe("invalid-run-id");
       // Scheme and host survive — an operator has to know which substrate they
       // pasted — and EVERY path segment goes, not just the long one.
@@ -3993,6 +4446,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     //
     // It contradicts nothing the refusal says: EXPOSED is not PUBLIC, and
     // `setPublicCalls === 0` above is what makes "ALIVE but NOT public" true.
+    expectSingleRefusalLine("expose-no-url");
     const files = readdirSync(store.dir);
     expect(files).toHaveLength(1);
     const record = store.get((files[0] as string).replace(/\.json$/, ""));
@@ -4030,6 +4484,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         expect(err.payload?.port).toBe(8080);
         expect(err.remediation).toContain("NOT public");
       }
+      expectSingleRefusalLine("expose-no-url");
       // setPublic never ran: INV-5 keeps the box private until an address exists.
       expect(setPublicCalls).toBe(0);
       // The port claim is RETAINED, exactly as for the undefined arm: `expose`
@@ -4072,5 +4527,6 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(record.ports).toEqual([8080]);
       expect(record.httpsUrl).toMatch(/^https:\/\//);
     }
+    expectSingleRefusalLine("dispatch-failed");
   });
 });

@@ -31,6 +31,7 @@ import {
 } from "../../src/providers/reaper.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import type { FakeDriver } from "../../src/providers/fake-driver.ts";
+import { SBX_OWNERSHIP_TAG } from "../../src/providers/driver.ts";
 import type { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { seedFleet, type FleetState, type SeededFleet } from "./fixtures/fleet-state.ts";
 import { runLocal } from "./fixtures/git-fixture.ts";
@@ -229,7 +230,12 @@ describe("DF2.6 sweep", () => {
 
   test("foreign controls: permissive-grammar VM and shape-match-no-tag VM survive --yes", async () => {
     const fleet = await seedFleet(dir, {
-      vms: [{ name: OPERATOR_VM }, { name: OPERATOR_VM_SHAPED, tag: null }, { name: VM_ORPHAN }],
+      // Both are UNTAGGED: the sweep's ownership proof is our tag plus a name
+      // the factory could have generated. A permissive name WITHOUT the tag is
+      // an operator's box; the seeder's default tag would make it
+      // indistinguishable from a factory box, which is precisely the claim the
+      // widened legacy-shape arm no longer pretends to doubt.
+      vms: [{ name: OPERATOR_VM, tag: null }, { name: OPERATOR_VM_SHAPED, tag: null }, { name: VM_ORPHAN }],
     }, NOW);
     // the ownership grammar itself: shaped matches, permissive-only does not
     expect(RUN_ID_SHAPE.test(OPERATOR_VM_SHAPED)).toBeTrue();
@@ -243,6 +249,61 @@ describe("DF2.6 sweep", () => {
     // the ONE destroy is the tagged record-less VM; both operator VMs survive
     expect(report.executed.destroy).toEqual([VM_ORPHAN]);
     expect((await fleet.driver.list()).map((v) => v.name).sort()).toEqual([OPERATOR_VM, OPERATOR_VM_SHAPED].sort());
+  });
+
+  // ─── 3b'. legacy-id ownership: the tag is INV-1's proof, not the strict shape ──
+
+  const LEGACY_VM = "legacy-trailing-"; // matches LEGACY_RUN_ID_RE only (trailing hyphen)
+
+  /**
+   * Hand-seed the box a PRE-TIGHTENING build would have left behind:
+   * FakeDriver.create is strict today, but its listing and destroy still honour
+   * the legacy grammar (as every record path does), and the metadata file is
+   * exactly what an earlier build's create wrote.
+   */
+  async function seedLegacyBox(fleet: SeededFleet, tag: string | null): Promise<void> {
+    mkdirSync(join(fleet.boxesDir, LEGACY_VM), { recursive: true });
+    writeFileSync(
+      join(fleet.boxesDir, LEGACY_VM, ".box.json"),
+      `${JSON.stringify(
+        { name: LEGACY_VM, ...(tag === null ? {} : { tag }), public: false, ports: [], createdAt: new Date().toISOString() },
+        null,
+        2,
+      )}\n`,
+      { mode: 0o600 },
+    );
+  }
+
+  test("a TAGGED box with a legacy-shape id is owned: record-less ⇒ destroyed, not stranded foreign", async () => {
+    // Pre-tightening builds generated ids like this, and every record path
+    // still honours them — but the strict shape half classified their TAGGED
+    // boxes foreign here: reported, never reaped, billing forever. The tag,
+    // not the shape, is what proves ownership.
+    expect(RUN_ID_SHAPE.test(LEGACY_VM)).toBeFalse();
+
+    const fleet = await seedFleet(dir, {}, NOW);
+    await seedLegacyBox(fleet, SBX_OWNERSHIP_TAG);
+    expect((await fleet.driver.list()).map((v) => v.tag)).toEqual([SBX_OWNERSHIP_TAG]);
+
+    // dry-run predicts it; --yes destroys it through the widened re-check.
+    const dry = await sweep(deps(fleet));
+    expect(dry.rows.map(rowSig)).toContain(`vm:${LEGACY_VM}:leaked-vm:destroy`);
+    expect(dry.executed.destroy).toEqual([LEGACY_VM]);
+
+    const report = await sweep(deps(fleet), { yes: true });
+    expect(report.failures).toHaveLength(0);
+    expect(report.executed.destroy).toEqual([LEGACY_VM]);
+    expect(await fleet.driver.list()).toHaveLength(0);
+  });
+
+  test("an UNTAGGED legacy-shape box stays foreign — widening never relaxes the tag", async () => {
+    const fleet = await seedFleet(dir, {}, NOW);
+    await seedLegacyBox(fleet, null);
+
+    const report = await sweep(deps(fleet), { yes: true });
+    expect(report.rows.filter((r) => r.class === "foreign").map((r) => r.id)).toEqual([LEGACY_VM]);
+    expect(report.executed.destroy).toHaveLength(0);
+    expect((await fleet.driver.list()).map((v) => v.name)).toEqual([LEGACY_VM]);
   });
 
   // ─── 3b. fixture contract: prefix-aware key→record join ────────────────────

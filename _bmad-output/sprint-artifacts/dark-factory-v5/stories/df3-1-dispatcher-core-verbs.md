@@ -1652,3 +1652,106 @@ harvest count-bearing arm, gate-E note depth, httpsUrl regex pin, env restore ve
 - GitNexus `detect_changes` (unstaged): 63 changed symbols / 20 files — every entry inside the PR's
   own modules (fleet, providers, exedev setup-gate, scripts/fleet, their tests); zero out-of-scope
   symbols. Focal reruns during the wave: fleet 369→370+, providers 183 green, cli 93/93 stable.
+
+## Review round 10 — BMAD adversarial code review, 2026-08-24
+
+12 parallel reviewers over the merged PR 123 diff (chunked ≤4k lines/file-cluster;
+7 blind/edge source, 4 test reviewers, 1 acceptance auditor) → ~95 raw findings →
+triage ledger `_bmad-output/workflow-state/code-review/pr123/triage.md`:
+**~55 PATCHED · 19 DEFERRED · 8 DISMISSED**. Fix waves: 7 disjoint source clusters in
+parallel + lead-applied cross-cluster items, then 3 test-hardening agents. All work
+reports under `…/code-review/pr123/reports/`.
+
+### Patched (all verified; behavior changes flagged)
+
+- **HIGH ×3**: `refuse()` TypeError on non-string `teardownCommand` poisoned every
+  refusal after `ctxGate` was set (DF1); status `Promise.race` loser could crash the
+  process with an unhandled rejection AFTER classification (FF1); cost-ledger
+  `admitIssue` expired a LIVE run's reservation on a transient record-read fault past
+  the grace window → concurrent dispatch granted the full headroom atop live exposure
+  (FP1). FP1 now expires only on stat-proven ENOENT / zero-byte tombstone / illegal id;
+  everything unprovable keeps its ceiling counted (`reservation-unresolvable-held`),
+  and every script-side ledger construction passes `runsDir: store.dir`.
+- **Money/cap**: `stampManifestLimit` refuses to RAISE an existing ceiling (FM1,
+  flips the certified-green KNOWN-DEFECT tripwire in brief-schema.test.ts);
+  reaper + `driver.isFactoryOwnedVm` accept TAGGED legacy-grammar boxes (FP2 — tag
+  stays the load-bearing proof); spend-predicate slug fold now trims column-side (FP5).
+- **Dispatch**: gate `ready` strict-boolean (truthy garbage no longer dispatches
+  unproven), assertion-element guards, payload `debugCommands`/`teardownCommand`
+  escapeText+array-typed at the choke point, recordExists null-sentinel, phantom-port
+  retraction on abandoned-failed expose, EEXIST resolve()-comparison, best-effort
+  httpsUrl retry, post-gate timeout remediation ("gate PASSED — ack manually before
+  destroying"), roster post-read byte cap, unconditional runId echo bounding,
+  step-aware abandoned remediation for clone/fill/deliver/gate, resolved
+  dispatchLogPath.
+- **status/brief-schema**: https-only safeUrl scheme arm, requestId/closedAt row
+  sanitization, code-unit tie-break, safeName on box.name remediation,
+  sanitizeLabel off-by-one, array-as-record guard, createdAt parse-before-truncate,
+  sanitized store-exception text, skippedRecords docstring aligned.
+- **CLI/scripts**: completion-line EPIPE ⇒ exit 6 `completion-unwritable` (was silent
+  exit 0), help CC-9 lines carry `phase:"help"`, all argv envelope echoes bounded,
+  guarded destructive-mark (exit 6), transient errnos → exit 1, redacted invalid-brief
+  message, U+FFFD byte-cap bypass closed, `-h/--help` dup guard, SIGINT reports minted
+  runId (`observingMint` seam), embedder sink wiring, startup registry-conflict +
+  help-invariant validations.
+- **run-lock/teardown/pipeline-run/qds-cost**: release-succeeded-no-longer-fails,
+  F5 closedAt auto-release ported to sandbox-teardown, realpath-guarded self-pid
+  staleness, cost-config remediation names `$QDS_COST_CONFIG_FILE`, env trim, honest
+  "touched nothing" comment, EPIPE-safe failure reporters, future-clock skew hint,
+  signal-re-raise unlatch, foreign-host aging guidance, witness staleness-first
+  ordering, empty-body refusal wording, `resolveRunsDir` reuse, no-create+inode-recheck
+  ledger open (`ledger-replaced`), whitespace-only `--dir` refused.
+- **Substrate**: mid-provision record-write failures classified
+  (`record-write-failed`), `address()` typed refusal for null/non-string URL + trimmed
+  return, `isSubstrateFailure` junk-proof, negative exit codes substrate-marked,
+  structured no-anomaly-channel skip entry, displayName escapes bidi/format controls,
+  fake-gate item C distinguishes wrong-type `.env`.
+- **Tests** (+~30 cases): refusal-line assertions across ~12 families that contradicted
+  the helper's "shared minimum" claim, help-table↔registry binding (codes 3/5),
+  open-world verbs registry rewrite, budget-gate ledger isolation off the repo's real
+  sandbox db, exact-boundary pins (mint==cap, tombstone grace, close-retirement,
+  expiry==ceiling, spent==cap, MAX_BYTES roster), real-path gate A/C drive-throughs,
+  createKey-throw mid-provision posture, cross-runId concurrency pin of the DOCUMENTED
+  maxVms TOCTOU, traversal encodings (%252e/%5c/uppercase), truncated-JSON quarantine,
+  whole-stream leak scans, SUM-overflow neighborhood, S28 inner-edge case.
+
+### False positives (pushback with evidence)
+
+- **credentials redaction "unguarded"** (FP4): `redactSecrets` wraps its entire body in
+  try/catch→REDACTED by construction and coerces via `asText`; the `safeRedact` pattern
+  exists because cap-hit-demo calls narrower redactors directly. Regression test added
+  anyway.
+- **`help:[HELP]` "prose in token list"** (FC13): premise inverted — `ValueFlagSpec.help`
+  IS the display text; branch unreachable today. Hardened with a startup invariant
+  instead of deletion.
+- **`--dir=` empty accepted** (FP11): bare empty already refused by shared grammar;
+  real residue was whitespace-padded values — now refused.
+- **repoSlug unbounded** (FF7): `REPO_SLUG_PATTERN` bounds both segments `{1,100}`.
+- **status missing-record exit-4 gap** (FC6): handled — `statusRun` raises
+  `run-not-found` (exit 4) as AC4 requires.
+
+### Deferred (documented tradeoffs/design-residuals, not silently dropped)
+
+DF5.2 repoUrl-host allowlist (FF2); maxVms intent-reservation TOCTOU (DF13, providers-
+layer, DF2.6 scope); shared-runId reservation/stamp race-on-races (DF8/DF14); monotonic
+clock seam (DF19); exit-6 semantic split (FF13); duplicate box-name last-wins (FF14);
+records-skipped exit taxonomy (FC12); layout-heuristic + diagnostics-stream divergence
+(FR5/FR9); witness double-lstat TOCTOU (FR14); close→price 6-min wall bet (FP3);
+same-pid steal/temp graces + put-back vacate + tombstone retry blip (FP8-FP12 family);
+PATH_TOKEN_RE segment floor + one-bad-entry reap stall + exedev limitMicroUsd gate
+parity (FB7/FB8/FB10). Full rationales in triage.md.
+
+### Pre-existing baseline fixed en route
+
+`qds-cost CLI > full view … complete run` was failing on the untouched tree:
+commit bf076a7 (F8 fractional box-hour pricing) changed the arithmetic without updating
+this fixture (90 min @ 3.6M µ$/h = 1.5h = 5,400,000 µ$, not 2h). Fixture corrected.
+
+### Gates (round 10 final)
+
+`bunx tsc --noEmit` clean · `bunx biome check` clean (246 files) · focal suites
+**2470 pass / 0 fail** (baseline before round 10: 2077 pass / 2 fail) · GitNexus
+`detect_changes`: 96 symbols / 39 files, blast radius confined to this story's modules.
+AC2 runtime provenance remains shape-only — amended this round as a DECLARED deviation
+(brand = compile-time half; mint-registry rejected as out-of-scope subsystem; collision
+guards make exposure = squatting a free id).

@@ -15,15 +15,24 @@
  * run() is called through `runCli` so its two sinks stay apart: `err` defaults
  * to `out`, and a merged capture cannot tell an ack on stdout from a refusal
  * envelope printed onto it.
+ *
+ * POSIX precondition: the lock choreography leans on hard links (`linkSync` as
+ * the atomic claim, with one case forcing its failure via `--preload`), mode
+ * bits (0o600/0o700 records dirs) and SIGKILL-able children. On a filesystem or
+ * host without those — FUSE, some SMB mounts, Windows — the failures are
+ * environmental, not regressions; run the suite on a supported host before
+ * reading anything into a red here.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -36,7 +45,7 @@ import { join } from "node:path";
 
 import { Database } from "bun:sqlite";
 
-import { run } from "../../scripts/fleet.ts";
+import { observingMint, run } from "../../scripts/fleet.ts";
 import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
 import { run as sandboxTeardownRun } from "../../scripts/sandbox-teardown.ts";
 import { listVerbs, renderHelp } from "../../src/fleet/verbs.ts";
@@ -51,6 +60,30 @@ import { goodLedger, overBudgetLedger, type RecordingLedger } from "./helpers.ts
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "df3-1-cli-"));
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
+
+/**
+ * Losers of `within`'s race. `run()` is in-process and cannot be killed —
+ * losing the race leaves it executing — and a straggler still mutating a
+ * records dir or holding a lock-map entry is exactly the cross-test poisoning
+ * that surfaces as a flake in a LATER case. Each loser is kept observable here
+ * (its eventual rejection names itself instead of killing the runner as an
+ * unhandled rejection) and joined, bounded, before the next test starts.
+ */
+const abandonedRuns: Promise<unknown>[] = [];
+
+afterEach(async () => {
+  if (abandonedRuns.length === 0) return;
+  const losers = abandonedRuns.splice(0);
+  // Bounded join: a straggler whose hang is PERMANENT (the unbounded retry loop
+  // one case exists to catch) gets one window to drain — not a stall on every
+  // remaining test — and then the failure names the poisoner instead of leaving
+  // later cases to fail mysteriously.
+  const drained = await Promise.race([
+    Promise.allSettled(losers).then(() => true),
+    Bun.sleep(5_000).then(() => false),
+  ]);
+  expect({ drained, losers: losers.length }).toEqual({ drained: true, losers: losers.length });
+});
 
 /**
  * The host token `run-lock.ts` writes into a lock body, READ OFF A REAL LOCK
@@ -225,15 +258,24 @@ fs.linkSync = (a: string, b: string): void => {
 /** Resolve, or fail with attribution rather than dying on the runner's timeout. */
 async function within<T>(what: string, ms: number, p: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let lost = false;
   try {
     return await Promise.race([
       p,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${what} did not finish within ${ms}ms`)), ms);
+        timer = setTimeout(() => {
+          lost = true;
+          reject(new Error(`${what} did not finish within ${ms}ms`));
+        }, ms);
       }),
     ]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    // Either arm: the loser keeps running after this function returns, so its
+    // eventual rejection must be observed here — and it is remembered so the
+    // file-level afterEach above can join it before the next test starts.
+    void p.catch(() => {});
+    if (lost) abandonedRuns.push(p);
   }
 }
 
@@ -610,6 +652,21 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     const help = outOnly.join("");
     const undeclared = observed.filter(([verb, code]) => !helpExitCodesFor(help, verb).includes(code));
     expect(undeclared.map(([verb, code]) => `fleet ${verb} → exit ${code} is not on its help table`)).toEqual([]);
+    // …and the other direction, against the REGISTRY rather than the probes:
+    // every code a verb DECLARES must sit on that verb's own line of the
+    // printed text, read back through an independent parser. The byte-equality
+    // pin above cannot see this — both sides of it come from `renderHelp`, so a
+    // renderer that filtered or hard-coded a subset still matched itself — and
+    // observed-set coverage alone never would: dispatch's 3 (setup gate) and 5
+    // (refused before provisioning) are deliberately not probed here because
+    // their full cases live in the gate/budget sections below, so they were
+    // declared and printed without anything pairing print to declaration.
+    for (const entry of listVerbs()) {
+      expect({
+        verb: entry.verb,
+        table: helpExitCodesFor(help, entry.verb),
+      }).toEqual({ verb: entry.verb, table: [...entry.exitCodes] });
+    }
     // …and the probes really did exercise more than "everything exits 2": a
     // vacuous set would satisfy the check above for any table at all.
     expect(new Set(observed.map(([, code]) => code))).toEqual(new Set([0, 2, 4, 6]));
@@ -1125,6 +1182,42 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
     expect(text()).not.toContain("invalid-brief");
   });
 
+  test("a TRANSIENT errno while reading --brief is exit 1, never permanent exit 2 (round 10)", async () => {
+    // FC5: readBriefFile wrapped every stat/open/read failure into the
+    // permanent `brief-unreadable` exit-2 envelope. EMFILE/ENFILE/EAGAIN are
+    // the SUBSTRATE running out of fds, classified retryable everywhere else
+    // in this CLI (RETRYABLE_ERRNOS / asUsage) — so they must surface as exit
+    // 1 `transient`, not tell automation to never retry a condition that is
+    // gone as soon as one fd closes.
+    const briefPath = join(dir, "transient-brief.json");
+    writeFileSync(briefPath, validBriefJson(dir), { mode: 0o600 });
+    const hoard: number[] = [];
+    try {
+      // Exhaust the fd table until the OS refuses. The soft limit here is
+      // six figures, so the bound is a DEADLINE (a platform that never
+      // refuses fails THIS test loudly) rather than an fd count.
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        if (Date.now() > deadline) throw new Error("could not provoke EMFILE within 30s of hoarding");
+        try {
+          hoard.push(openSync("/dev/null", "r"));
+        } catch (e) {
+          expect((e as NodeJS.ErrnoException).code).toBe("EMFILE");
+          break;
+        }
+      }
+      // The path itself stats fine (path-based syscall, no fd); it is the OPEN
+      // that hits the exhausted table and must now rethrow raw.
+      const code = await runCli(["dispatch", "--driver", "fake", "--brief", briefPath], {});
+      expect(code).toBe(1);
+      const envelope = JSON.parse(errCaptured.find((l) => l.includes("EMFILE")) as string) as { code: string };
+      expect(envelope.code).toBe("EMFILE");
+      expect(errCaptured.join("")).not.toContain("brief-unreadable");
+    } finally {
+      for (const fd of hoard) closeSync(fd);
+    }
+  });
+
   test("--brief AND a brief redirected onto stdin is refused; /dev/null stdin is not", async () => {
     // `fleet dispatch --brief old.json < new.json` provisioned from old.json and
     // said nothing — the same "acting on something other than what the operator
@@ -1265,6 +1358,40 @@ process.stdout.write(t);
     const code = await runCli(["dispatch", "--driver", "fake"], deps("{not json"));
     expect(code).toBe(2);
     expect(text()).toContain("invalid-brief");
+  });
+
+  test("the decoded-brief byte cap binds even when the brief legitimately contains U+FFFD (round 10)", async () => {
+    // FC8: the old re-measure was skipped whenever the decoded text CONTAINED
+    // U+FFFD — which cannot tell a corrupt byte from a legitimate one, so a
+    // brief whose content includes a real replacement character bypassed the
+    // cap's second enforcement site entirely. Measured unconditionally now:
+    // a legit U+FFFD round-trips (3 bytes in, 3 out), so at-cap is accepted
+    // and over-cap refused, exactly as for any other content. The char rides
+    // INSIDE a string value and the padding is trailing whitespace, so both
+    // rows are valid JSON — the refusal can only be the cap's.
+    const base = validBriefJson(dir);
+    // requestId is the schema's deliberately-LOOSE string (no format rule), so
+    // a legit U+FFFD there survives BriefSchema and the accept row proves the
+    // MEASURE released the brief — not that a schema refusal coincidentally
+    // shares exit 2.
+    const withFffd = base.replace(',"manifestPath":', ',"requestId":"corr-\u{FFFD}id","manifestPath":');
+    expect(withFffd).not.toBe(base); // the injection really happened
+    // \u{FFFD} encodes as exactly 3 UTF-8 bytes.
+    const atCap = `${withFffd}${" ".repeat(MAX_BRIEF_BYTES - Buffer.byteLength(withFffd, "utf8"))}`;
+    expect(Buffer.byteLength(atCap, "utf8")).toBe(MAX_BRIEF_BYTES);
+    const over = `${atCap} `;
+    expect(Buffer.byteLength(over, "utf8")).toBe(MAX_BRIEF_BYTES + 1);
+
+    reset();
+    expect(
+      await runCli(["dispatch", "--driver", "fake"], { ...deps(atCap) }),
+    ).toBe(0);
+
+    reset();
+    expect(
+      await runCli(["dispatch", "--driver", "fake"], { ...deps(over) }),
+    ).toBe(2);
+    expect(text()).toContain("brief-too-large");
   });
 
   test("`yes | fleet dispatch` hits brief-too-large immediately instead of buffering to OOM", async () => {
@@ -1549,16 +1676,14 @@ process.stdout.write(t);
           expect(envelope.remediation).toBe("run ids come from `fleet dispatch`; list them with `fleet status`");
           // Whatever else changes, the id itself never rides out whole.
           expect(errCaptured.join("")).not.toContain(runId);
-        } else if (runId.length > 12 && runId.length < 40 /* RUN_ID_ECHO_CHARS .. redactSecrets' floor */) {
-          // The 13–39-char band, bounded at BOTH ends now: under
-          // `redactSecrets`' 40-char floor the store's verbatim echo used to
-          // survive every sink whole — the leak class this row pins. The
-          // refusal splices the bounded form over it instead, so the full id
-          // appears NOWHERE in the message and the operator still gets the
-          // true length back. At-or-over the floor the sink eats the echo
-          // itself (the LONG_ID row above pins that shape); short enough for
-          // `runIdEcho` not to truncate, the last branch keeps the verbatim
-          // echo those rows always had.
+        } else if (runId.length > 12 /* RUN_ID_ECHO_CHARS */) {
+          // Cross-cluster update (round 10): dispatch.ts's `runIdEcho` now
+          // truncates EVERY over-12-char rejection — head plus TRUE length,
+          // spliced over the store's own verbatim echo — where it used to
+          // bound only the band under redactSecrets' 40-char floor. So no
+          // long id rides out whole anywhere (`a`×64, which fails only the
+          // cap, lands here too), and only ids of twelve characters or fewer
+          // keep the verbatim echo in the final branch.
           expect(envelope.message).not.toContain(runId);
           expect(envelope.message).toBe(
             `invalid run id: "${runId.slice(0, 12)}…" (${runId.length} chars) (must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ and be <= 63 chars)`,
@@ -1576,6 +1701,43 @@ process.stdout.write(t);
     reset();
     expect(await runCli(["status", "--driver", "fake", "--dir", runsDir, "a".repeat(63)], deps(""))).toBe(4);
     expect(errCaptured.join("")).not.toContain("invalid-run-id");
+  });
+
+  test("a LEGAL id inside redaction's ≥40-char band rides run-not-found VERBATIM, whatever its shape", async () => {
+    // The band the grammar test above only sees from the REJECTED side: an id of
+    // 40–63 chars passes RUN_ID_RE, so it never meets `runIdEcho`'s bounded,
+    // redaction-composed echo — it reaches the store and comes back through the
+    // TYPED FleetError branch of `report`, whose messages are composed redacted
+    // at their source and are printed as-is (`printError` deliberately does not
+    // re-redact). Pinned as INTENT on both shapes the sink could meet:
+    //
+    //  - digest-shaped (hex with a-f letters): verbatim BY DESIGN. Legal ids are
+    //    dispatch-minted operator data, and `redactSecrets`' long-token arm
+    //    exempts hex digests precisely so SHAs stay readable everywhere else —
+    //    a run id named after one must not be eaten where those survive.
+    //  - opaque-shaped: STILL verbatim here, and that is the honest pin, not an
+    //    oversight to hide: the eaten-whole treatment is a property of the
+    //    GRAMMAR GATE for rejected arguments (the LONG_ID row above), and this
+    //    path has no second gate to hide behind. If that ever stops being the
+    //    accepted residual, this line goes red and the fix belongs in the
+    //    envelope's composer — not in a test-side redaction that would leave
+    //    every other typed message unguarded.
+    const shaShaped = "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff0"; // 63 hex chars
+    const opaque = "q9r8s7t6u4v3w5x2y1z0a9b8c7d6e5f4g3h2j1k9l8m7n6p5q4r3s2t1u0v9w"; // 61 chars, non-hex
+    expect(shaShaped).toMatch(/^[0-9a-f]{63}$/);
+    expect(opaque.length).toBeGreaterThanOrEqual(40);
+    expect(opaque).toMatch(/^[a-z0-9-]+$/);
+    for (const runId of [shaShaped, opaque]) {
+      reset();
+      expect(await runCli(["status", "--driver", "fake", "--dir", runsDir, runId], deps(""))).toBe(4);
+      const envelope = JSON.parse(errCaptured.find((l) => l.includes("run-not-found")) as string) as {
+        code: string;
+        message: string;
+      };
+      expect(envelope.code).toBe("run-not-found");
+      // WHOLE, in the sentence — the operator asked about THIS id by name.
+      expect(envelope.message).toContain(`No run record for ${runId}`);
+    }
   });
 
   // ─── status unknown run → exit 4, mutates nothing (AC4) ────────────────────
@@ -1707,8 +1869,24 @@ process.stdout.write(t);
     // for the duration instead of fetching refs/sandbox/<id> into whatever
     // checkout launched the suite. Restored in finally; the repo is deleted.
     const hostRepo = mkdtempSync(join(tmpRoot, "harvest-host-"));
+    // POSIX-precondition isolation for hosts whose global git config signs or
+    // hooks commits: `-c commit.gpgsign=false` keeps a gpg-signing checkout from
+    // failing (or PASSPHRASE-PROMPTING, which reads as a hang) on the one commit
+    // this case makes, and the ident env spares hosts with no global
+    // user.name/email. Nothing here depends on signing or hooks.
     const git = (args: string[]): void => {
-      const r = Bun.spawnSync(["git", ...args], { cwd: hostRepo, stdout: "pipe", stderr: "pipe" });
+      const r = Bun.spawnSync(["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", ...args], {
+        cwd: hostRepo,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "fleet test",
+          GIT_AUTHOR_EMAIL: "fleet-test@example.invalid",
+          GIT_COMMITTER_NAME: "fleet test",
+          GIT_COMMITTER_EMAIL: "fleet-test@example.invalid",
+        },
+      });
       if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr.toString().trim()}`);
     };
     git(["init", "-q"]);
@@ -1784,7 +1962,14 @@ process.stdout.write(t);
         Bun.spawnSync(["git", "rev-parse", "--verify", `refs/sandbox/${runId}`], { cwd: hostRepo }).exitCode,
       ).toBe(0);
     } finally {
-      process.chdir(originalCwd);
+      // PARALLEL-FILE RISK, contained: `bun test` may run this file's cases
+      // interleaved with other suites in the same PROCESS, and process.cwd() is
+      // process-global — a case left behind here would resolve every later
+      // cwd-relative default (the containment-root refusal pins one) against a
+      // deleted throwaway repo. The restore is therefore guarded: it fires even
+      // on assertion failures mid-case (this `finally`), and only moves back
+      // when something actually moved away.
+      if (process.cwd() !== originalCwd) process.chdir(originalCwd);
       rmSync(hostRepo, { recursive: true, force: true });
     }
   });
@@ -1820,9 +2005,17 @@ process.stdout.write(t);
     writeFileSync(lock, lockBody(holder, 90_000, "feedface"), { flag: "wx" });
 
     reset();
-    const code = await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared);
-    alive.kill("SIGKILL");
-    await alive.exited;
+    // The refusing invocation is wrapped so the OWNED holder dies even when the
+    // invocation throws: a leaked `sleep 30` keeps the fixture's lock live past
+    // this case and reads as a mystery holder to anything that inspects the
+    // tmpdir afterwards.
+    let code: number;
+    try {
+      code = await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared);
+    } finally {
+      alive.kill("SIGKILL");
+      await alive.exited;
+    }
 
     // 5 ("refused before provisioning"), NOT 1. Exit 1 is `exitStatus:
     // "transient"` — "retry me" — and the STALE case below proves why that is
@@ -1931,14 +2124,20 @@ process.stdout.write(t);
     writeFileSync(lock, lockBody(holder, 90_000, "feedface"), { flag: "wx" });
 
     reset();
-    const code = await runCli(["harvest", "--driver", "fake", "--dir", runsDir, runId], {
-      ...shared,
-      // D8 still holds on the refusal path: a harvest refused at the lock must
-      // not have reached for credentials on its way there either.
-      keyApi: keyApiTripwire(),
-    });
-    alive.kill("SIGKILL");
-    await alive.exited;
+    // Same owned-holder containment as the teardown case: the kill survives a
+    // throwing invocation.
+    let code: number;
+    try {
+      code = await runCli(["harvest", "--driver", "fake", "--dir", runsDir, runId], {
+        ...shared,
+        // D8 still holds on the refusal path: a harvest refused at the lock must
+        // not have reached for credentials on its way there either.
+        keyApi: keyApiTripwire(),
+      });
+    } finally {
+      alive.kill("SIGKILL");
+      await alive.exited;
+    }
 
     // 5, the same non-retryable refusal teardown gives — not a 0 with
     // "harvested: none", which is what a lockless harvest of this box prints.
@@ -2761,20 +2960,26 @@ process.on = ((sig, listener) => {
     // no record to claim it" looks like.
     mkdirSync(join(dir, "other-runs"), { recursive: true, mode: 0o700 });
     expect(await runCli(["status", "--driver", "fake", "--dir", join(dir, "other-runs")], noStore)).toBe(0);
-    // `(orphan <vmName>)` — see the orphan case above; `vmName` still names the
-    // box, and it is the box that proves --dir was honoured.
-    expect(JSON.parse(outOnly[0] as string)).toMatchObject({
-      runId: `(orphan ${runId})`,
-      state: "orphan",
-      vmName: runId,
-    });
+    const orphan = JSON.parse(outOnly[0] as string) as { runId: string; state: string; vmName: string };
+    // FakeDriver names the box after the run, so vmName and runId coincide here —
+    // but the label is asserted off the row's OWN vmName, the discipline the
+    // orphan case above pins (`(orphan <vmName>)`: there is no record, so the
+    // BOX is the only true name for it), rather than off the id they happen to
+    // share on this driver.
+    expect(orphan.vmName).toBe(runId);
+    expect(orphan).toMatchObject({ runId: `(orphan ${orphan.vmName})`, state: "orphan" });
   });
 
-  test("a completed teardown still exits 0 when stdout is a closed pipe", async () => {
-    // `fleet teardown <id> | head -1` closes the pipe as soon as head has its
-    // line, and the success message then throws EPIPE. That throw landed in the
-    // verb's catch as exit 1 = `transient`, so automation RETRIED a destructive
-    // verb that had already destroyed the box and closed the record.
+  test("a completed teardown whose result line hits a CLOSED PIPE exits 6 via completion-unwritable (round 10)", async () => {
+    // BEHAVIOR CHANGE (review round 10, FC1): this used to expect exit 0. `fleet
+    // teardown <id> | head -1` closes the pipe around the time `torn down:`
+    // prints, and the EPIPE was swallowed silently by plain `emit` — while the
+    // SAME line lost to ENOSPC or a bad fd reported 6 through
+    // `completion-unwritable`, and the dispatch ack lost to EPIPE reported 6
+    // through `ack-unwritable`. Three write failures, three postures; now one:
+    // a completion line describes work that already happened, so however its
+    // write failed, the caller hears "landed but unreportable" (6), never a
+    // silent success.
     const base = new FakeDriver(boxesDir);
     const shared: Partial<FleetDeps> = { ...deps(validBriefJson(dir)), driver: base };
     expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
@@ -2791,8 +2996,14 @@ process.on = ((sig, listener) => {
     };
     const code = await run(["teardown", "--driver", "fake", "--dir", runsDir, runId], closedPipe, shared, errOut);
 
-    expect(code).toBe(0);
-    // The work really happened — that is why reporting a failure was so wrong.
+    expect(code).toBe(6);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("completion-unwritable")) as string) as {
+      code: string;
+      message: string;
+    };
+    expect(envelope.code).toBe("completion-unwritable");
+    // The work really happened behind the lost line — which is why 6 ("done,
+    // needs an operator") and not 1 ("retry me") is the honest report.
     expect((await base.list()).map((vm) => vm.name)).not.toContain(vmName);
     expect((shared.store as RunRecordStore).get(runId).closedAt).toBeDefined();
     // And the lock still came off: the finally runs on this path too.
@@ -3014,6 +3225,16 @@ process.on = ((sig, listener) => {
     expect(text()).toContain("--no-harvest given more than once");
     // Refused as a usage error: nothing was torn down.
     expect((shared.store as RunRecordStore).get(runId).closedAt).toBeUndefined();
+
+    // Aliases count as the same flag (round 10): `-h --help` names one flag
+    // twice, but the raw-string dup scan saw two distinct tokens and waved the
+    // pair through to `bools`, whose Set collapsed it — the guard existed for
+    // exactly this invocation and missed it. Canonicalized BEFORE the count,
+    // so the refusal names the canonical flag.
+    reset();
+    const aliasCode = await runCli(["status", "-h", "--help"], deps(""));
+    expect(aliasCode).toBe(2);
+    expect(text()).toContain("--help given more than once");
   });
 
   test("a --dir that does not exist is exit 2 on every READ verb, and is not created", async () => {
@@ -3389,6 +3610,28 @@ process.on = ((sig, listener) => {
     expect(counts()).toEqual(before);
   });
 
+  test("observingMint reports the minted id at create() time and forwards everything else (round 10)", async () => {
+    // FC10's seam, pinned directly. dispatch() persists via store.create long
+    // before its promise resolves, but the CLI used to learn the run id only
+    // from the RESOLVED ack — so a SIGINT in between logged the interrupt line
+    // with `runId: null` for a record already on disk. Wrapping the store makes
+    // the persist itself the notification; no seam was added to dispatch.ts.
+    const minted: string[] = [];
+    const base = new RunRecordStore(runsDir);
+    const observed = observingMint(base, (id) => minted.push(id));
+    const rec = observed.create("qds-20260101-abcdef");
+    expect(minted).toEqual(["qds-20260101-abcdef"]);
+    // Forwarded intact: the record really landed through the wrapper…
+    expect(rec.runId).toBe("qds-20260101-abcdef");
+    expect(base.get("qds-20260101-abcdef").createdAt).toBeDefined();
+    // …and every non-create member still answers through it.
+    expect(observed.get("qds-20260101-abcdef").runId).toBe("qds-20260101-abcdef");
+    observed.set("qds-20260101-abcdef", { vmName: "vm-through-proxy" });
+    expect(observed.get("qds-20260101-abcdef").vmName).toBe("vm-through-proxy");
+    expect(observed.dir).toBe(runsDir);
+    rmSync(join(runsDir, "qds-20260101-abcdef.json"), { force: true });
+  });
+
   test("a throw that is not an Error still reports exit 1 with a message", async () => {
     // report()'s `x.code ?? "error"` / `x.message ?? String(e)` normalisation.
     // A rejected string has no `.message`, and a printer that assumed one turned
@@ -3614,6 +3857,15 @@ process.on = ((sig, listener) => {
     const verbLines = (): LogEntry[] =>
       entries.filter((e) => (e as unknown as { phase?: string }).phase === "complete");
 
+    /**
+     * Help requests carry the DISCRIMINATING `phase: "help"` (round 10, FC2):
+     * before it, a help line was byte-for-byte a successful verb execution —
+     * same status:"ok", same exitStatus:"success" — and dashboards counting
+     * completions counted phantom teardowns.
+     */
+    const helpLines = (): LogEntry[] =>
+      entries.filter((e) => (e as unknown as { phase?: string }).phase === "help");
+
     test("dispatch logs its verb line on success, carrying the ack's runId", async () => {
       const code = await runCli(["dispatch", "--driver", "fake"], deps(validBriefJson(dir)));
       expect(code).toBe(0);
@@ -3627,6 +3879,7 @@ process.on = ((sig, listener) => {
       const line = lines[0] as unknown as Record<string, unknown>;
       expect(line.verb).toBe("dispatch");
       expect(line.operation).toBe("fleet.dispatch");
+      expect(line.phase).toBe("complete");
       expect(line.exitCode).toBe(0);
       expect(line.exitStatus).toBe("success");
       // The brief owns the correlation id (INV-4-bis), so the CLI's line joins
@@ -3651,13 +3904,20 @@ process.on = ((sig, listener) => {
       expect(typeof line.requestId).toBe("string");
     });
 
-    test("a help request logs its line too, naming the verb it was asked ABOUT", async () => {
+    test("a help request logs its line too, phase:\"help\" — never a phantom completed verb (round 10)", async () => {
       // CC-9 says every verb logs one structured line, and help used to be the
       // exception — which made `fleet teardown <id> --driver real --help` (an
       // operator who meant to destroy a box and did not) the one invocation a
       // dashboard could not see at all. The verb is the one they typed, not
       // "help": a line reporting `help` cannot be told apart from a genuine
       // `fleet --help` in a per-verb rollup.
+      //
+      // Round 10 (FC2): logging it was only half the fix — the line was then
+      // INDISTINGUISHABLE from a successful execution of that verb (`status:
+      // "ok"`, `exitStatus: "success"`, `phase: "complete"`), so completion-
+      // counting dashboards recorded a phantom teardown. The line now carries
+      // `phase: "help"` — still exit 0, still success-classified, but no longer
+      // countable as a completed verb.
       for (const [argv, verb] of [
         [["teardown", "qds-20260101-abcdef", "--driver", "fake", "--help"], "teardown"],
         [["dispatch", "--help"], "dispatch"],
@@ -3668,17 +3928,21 @@ process.on = ((sig, listener) => {
         entries.length = 0;
         reset();
         expect({ argv, code: await runCli([...argv], deps("")) }).toEqual({ argv, code: 0 });
-        const lines = verbLines();
+        const lines = helpLines();
         expect({ argv, lines: lines.length }).toEqual({ argv, lines: 1 });
         const line = lines[0] as unknown as Record<string, unknown>;
         expect({ argv, verb: line.verb }).toEqual({ argv, verb });
         expect({ argv, operation: line.operation }).toEqual({ argv, operation: `fleet.${verb}` });
+        expect(line.phase).toBe("help");
         expect(line.exitCode).toBe(0);
         expect(line.exitStatus).toBe("success");
         // No run was acted on, so there is none to report — `null`, never a
         // fabricated or argv-scraped id.
         expect(line.runId).toBeNull();
         expect(typeof line.requestId).toBe("string");
+        // THE discriminating property: the completed-verb filter must NOT see
+        // this line, or the fix is cosmetic.
+        expect(verbLines()).toHaveLength(0);
       }
     });
 
