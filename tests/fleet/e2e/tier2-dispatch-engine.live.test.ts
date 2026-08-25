@@ -230,6 +230,19 @@ test.todoIf(liveTodoOff())(
       expect(/FIX_TEST_EXIT=0/.test(verify.stdout)).toBe(true); // the seeded test now PASSES
       expect(verify.stdout).toContain("t2_seed_calc.py"); // and git sees the fixer's edit
 
+      // Commit the VERIFIED fix on the box: harvest counts commits on
+      // sbx/<runId> (NOCOMMITS ⇒ outcome "none"), and the fixer's edit was
+      // left as an untracked working-tree change. The MODEL made and proved
+      // the fix above; this is the harness plumbing that hands verified work
+      // to the harvest verb — first live T2.1 run died exactly here
+      // ("harvested: none", bundle never written).
+      const commitFix = await ctx.driver.exec(vmName, [
+        "sh", "-c",
+        'cd "$HOME/src" && git add t2_seed_calc.py && git -c user.name=t2-e2e -c user.email=t2-e2e@local commit -q -m "t2: fixer\'s verified fix — add returns a + b" && git rev-parse --short HEAD',
+      ]);
+      evidence.push({ phase: "commit-fix", exitCode: commitFix.exitCode, sha: commitFix.stdout.trim() });
+      expect(commitFix.exitCode).toBe(0);
+
       // ── 7. harvest the fixed tree out (bundle → host verify → quarantine) ─
       const hostRepo = await scratchClone(ctx.repoUrl, ctx.sha, workspace);
       const harvest = await runFleet(["harvest", runId, "--driver", "exedev", "--dir", recordsDir], {
