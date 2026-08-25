@@ -252,3 +252,40 @@ DF5.1's host-side re-verify, not an LSP gate. Both remain KEEP and are repointed
 ## Dev Agent Record
 
 <!-- Empty placeholder — filled during development. -->
+
+## Handoff from df3-1 review round 10 — repoUrl host binding is OPEN above this story
+
+**Source:** df3-1 BMAD review round 10, finding FF2 (HIGH, deferred to here by design).
+Ledger: `_bmad-output/workflow-state/code-review/pr123/triage.md` · reviewer evidence:
+`…/code-review/pr123/reports/blind-fleet-rest.md` (§ Brief can attribute attacker-controlled code).
+
+**The seam you inherit:** `src/fleet/brief-schema.ts`, the object-level refine
+(`repoSlugOfUrl`, ~line 395-423). It ties `repoUrl`'s PATH to `repoSlug` and nothing else.
+Everything downstream trusts the slug after this gate: ledger identity (`canonicalRepoSlug`,
+`issueScopeSql`), the run-context cap witness, dispatch-log attribution. The clone consumes
+raw `repoUrl`. df3-1's doctrine is "validate once at the brief, trust the identity everywhere
+after" — which means this refine is the ONLY thing standing between a brief and the code that
+runs under an identity's budget.
+
+**Foreseen problem:** `{repoSlug: "trusted/repo", repoUrl: "https://evil.example/trusted/repo"}`
+validates today — path ties exactly, host untied. The box clones evil.example's code while cap,
+run-context and every log row record `trusted/repo`: miss-attributed spend plus arbitrary code
+execution under a trusted identity. The docstring on the refine says all of this; it defers to
+THIS story's allowlist design.
+
+**Recommendation for the allowlist:**
+1. Host allowlist as an extension of the SAME zod refine (keep the one-gate doctrine — do not
+   add a second check downstream). Deny-by-default; allowed hosts come from operator config
+   (a sibling key in `cost-config.json` keeps the config surface at one file).
+2. On mismatch: exit 2 `invalid-brief` naming BOTH hosts, before any provisioning side effect
+   (AC1 posture — validation completes before the first mutation).
+3. Consider requiring a pinned commit SHA in the brief as defense-in-depth: DF3-1's F4
+   `bundle-push` fill fetches the pinned SHA with HOST credentials, so a pinned SHA makes code
+   identity = reviewed SHA even when a host allowlist entry is broad.
+4. Migration note: default-deny breaks self-hosted Git hosts until configured — ship the
+   refusal message with the exact config key to set, same pattern cost-ledger-opts uses for
+   `$QDS_COST_CONFIG_FILE`.
+
+**Test guidance:** mutation-test the refine itself — an `evil.example` variant must refuse at
+exit 2 pre-provisioning (assert NOTHING was created: no store dir, no ledger row), not merely
+fail later. A test that only checks exit 2 passes even if the gate fires after `store.create`.

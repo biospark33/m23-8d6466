@@ -327,3 +327,37 @@ assumed. Driver registration cites `src/providers/index.ts`'s `resolveDriver(nam
 - **DOD trimmed:** Reduced from 20 to 10 checkboxes by merging redundant test items and removing duplicate integration/security entries.
 - **Files to Modify:** Kept at ≤10 unique paths (no change needed — was already compliant).
 - **Campaign fixes 2026-08-20:** DF3.2-M1, DF3.2-L1.
+
+## Handoff from df3-1 review round 10 — the fleet-ceiling TOCTOU goes LIVE the moment fan-out ships (DF13)
+
+**Source:** df3-1 BMAD review round 10, finding DF13 (MED, deferred to the providers/quota
+layer). Ledger: `_bmad-output/workflow-state/code-review/pr123/triage.md` · evidence:
+`…/code-review/pr123/reports/edge-dispatch-src.md`.
+
+**The seam:** `src/providers/quota.ts` — `checkHeadroom` is a READ, not a lock (its own
+docstring says so), and `src/fleet/dispatch.ts` step-5 admission samples it locklessly. The
+design note in dispatch.ts (~lines 1728-1753) declares the FLEET-CEILING half "NOT closed":
+two dispatches entering admission within one `driver.list()` round trip while
+`liveVms === ceiling - 1` BOTH pass and both create. The ledger's orphan window closes the
+MONEY half of this race; the BOX half is what stays open.
+
+**Why it becomes yours:** a single `dispatch` races only other invocations. Fan-out arms N
+admissions CONCURRENTLY inside one process — the interleaving goes from theoretical to
+routine, and overshoot scales with N. Round 10 pinned today's behavior deliberately:
+`tests/fleet/dispatch.test.ts`, the two-DISTINCT-id concurrency test (barrier parked inside
+checkHeadroom's driver.list against maxVms=1 ⇒ both admitted). That pin is your acceptance
+signal — flip it red-to-green when the reservation lands; do not delete it.
+
+**Recommended shape (cheapest first):**
+1. Single-flight INSIDE one fanout invocation: serialize the admission critical section
+   (driver.list → decision → create) across arms behind an in-process mutex. Kills the
+   N-arm amplification without new persistence; cross-invocation race stays documented.
+2. If cross-invocation closure is wanted: quota-layer intent record mirroring
+   cost-ledger's `admitIssue` — BEGIN IMMEDIATE write-ahead row (reserve slot → create →
+   settle/release on failure), reusing that transaction's conventions rather than inventing
+   new ones.
+
+**Adjacent graces to keep in mind at N>1** (deferred FP8/FP10, deliberate): run-record's
+own-pid lock steal and temp sweep fire after 60 s stalls. Concurrent arms sharing one pid
+that pause >60 s mid-critical-section (debugger, SIGSTOP) can have locks stolen / temps
+swept by a sibling arm. Fine at current scale; worth a comment where fanout parks arms.
