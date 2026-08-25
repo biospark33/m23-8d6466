@@ -139,12 +139,102 @@ DF3.1 zero-spend surface: majority now real-proven. DF3.2: lock slice only.
 
 `bun test tests/fleet/ tests/providers/` → 1183 pass / 9 todo / 1 fail (F9 flake; solo 30/30). `bunx biome check tests/fleet/e2e/` clean. `bunx tsc --noEmit` clean. gitnexus `detect_changes` → 0 changed symbols, risk low (new files only). Commit `0349b13` pushed.
 
-## TIER-2 preamble (awaiting per-run approval)
+## TIER-2 (2026-08-24/25) — T2.1 BROKEN at setup-gate C (F10 fixed, F11 open); T2.2 SKIPPED-BLOCKED
 
-Estimate per e2e-plan defaults (`capMicroUsd=50000`/key, ≤1h/box): T2.1
-dispatch-engine = 1 key × 50,000 µ$ + gate C/D pings (~2 chat calls on
-haiku/deepseek ≈ tens of µ$) + 1 box ≤1h ⇒ worst case ≈ 50,000 µ$ model +
-$0.23 box. T2.2 fanout N=2 = 2 × 50,000 µ$ + 2 boxes ⇒ worst case ≈ 100,000
-µ$ ($0.10) + $0.46. Both BLOCKED on F3 (fill workdir) being fixed or the
-workdir seam being acceptable for the live run — a dispatch cannot pass its
-gate until the fill/key paths land somewhere writable.
+Executor: fresh-context session per handoff. Branch tip `89a44f4` → `1f2830d`
+(pushed). Operator approved 280,000 µ$ worst case for T2.1 and 380,000 µ$ for
+T2.2. Tests committed: `tier2-dispatch-engine.live.test.ts`,
+`tier2-fanout-bestofn.live.test.ts`, harness `preflight(tier)`, manifest
+`config/rosters/t2.pipeline.json` + active roster `config/rosters/roster.yaml`
+(gate reads it beside the manifest per dispatch.ts roster-beside rule).
+
+### Verdicts
+
+| # | Test | Verdict | What happened on real substrate |
+|---|---|---|---|
+| T2.1 | dispatch→engine→harvest→teardown | **BROKEN** (3 attempts) | dispatch verb real subprocess: validate→admit(50,000 µ$ config)→record→box→mint→**private-repo fill**→gate A✓ B✓ **C✗ exit 3**, deterministically (3/3). Everything upstream of gate C is now real-proven; the engine/harvest/spend legs never ran |
+| T2.2 | fanout best-of-n N=2 + rank | **SKIPPED-BLOCKED** | every arm is a dispatch through the same gate C; running would spend ~$0.15 to re-hit a proven wall. Rank's null-score contract pinned in the committed test, unproven live |
+
+### F10 — HIGH, product, FIXED (commit 1f2830d): gate C ping omitted max_tokens ⇒ guaranteed 402 on capped keys
+
+- File: `src/providers/exedev/assertions-in-box.sh:94` (C block).
+- Symptom (verbatim, attempt 1): gate C failed `anthropic/claude-haiku-4.5`;
+  host-side repro with a minted 50,000 µ$ key returned
+  `402 {"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 50000..."}}`.
+- Root cause: no `max_tokens` in C's chat/completions body ⇒ OpenRouter prices
+  the request at the model's DEFAULT max output (haiku-4.5 = 64k tokens) ⇒ any
+  capped run key whose cap < one theoretical max-output request refuses the
+  PING — the gate rejects healthy models on healthy keys. D already sent
+  `max_tokens:8`; cap-hit-demo's probe sends `max_tokens:1`; C alone defaulted.
+- Fix: `"max_tokens":8` in C's body (D's own figure). impact(setupGate)=LOW,
+  focal setup-gate.test.ts 39/39 green.
+- Post-fix attempts 2–3 STILL fail C — see F11.
+
+### F11 — HIGH, OPEN: gate C fails through-gate only; slug arrives mangled / empty-200 from box egress
+
+- Signature (verbatim, all 3 attempts):
+  `C False | no live answer (content or reasoning) from: a  hropic/claude-haiku-4.5 — roster …roster.yaml; check the box egress and the runtime key`
+  — note the model id renders as `a␣␣hropic/…`, i.e. the in-box loop saw the
+  slug split into words (`a`, `hropic/claude-haiku-4.5`) OR the note lost
+  characters; this mangle appears ONLY inside gate execution.
+- Contradicting evidence (all live, same night, same image, same key shape):
+  - manual `driver.execTimed(vm, ["sh","-c", <exact fixed C request>])` on a
+    fresh box → HTTP 200, full JSON, answer "ready" (830 bytes);
+    qwen3-30b-a3b and deepseek-v3.2 also 200 "ready".
+  - one earlier probe of haiku through a box returned **HTTP 200 with a
+    whitespace-only body** (empty choices) — intermittent empty-200s from
+    OpenRouter over box egress are REAL and would legitimately trip C.
+  - host-side identical request → 200 routed via "Amazon Bedrock" (route
+    differs by ingress region/pool).
+- Suspects (unresolved): (a) models argv delivery into assertions-in-box.sh
+  under the gate's exact exec composition (`["sh","-c",script,"sh",roster,env,…models]`)
+  mangling despite transport probes passing; (b) provider-side intermittent
+  whitespace-only 200s over box egress hitting the FIRST ping while manual
+  retries succeed. Gate evidence files:
+  `.sandbox/setup-gate/qds-20260825-{ce6e89,b7b338,97451e}.json`.
+- Next session: reproduce with the gate's own script file executed verbatim
+  in-box with argv tracing (`printf "[%s]" "$@"`), and add a bounded retry +
+  response-body echo to C's failure note so the next failure self-documents.
+
+### F12/F13 — test-side defects found by the leaks (both FIXED in the committed tests)
+
+- F12: T2.1/T2.2 finallys parsed runId/vmName only from a SUCCESSFUL ack — a
+  gate-refused dispatch (which PROVISIONS, INV-5 keeps box+key alive)
+  stranded box + capped key outside the finally. All three attempt boxes
+  (`qds-20260825-{ce6e89,b7b338,97451e}`) leaked and their three
+  `sbx-qds-*` 50k-cap keys stayed live until operator-session remediation:
+  boxes destroyed via `ssh exe.dev rm`, keys revoked via revokeAndVerify and
+  confirmed absent from listAllKeys. Tests now recover ids from stdout AND
+  stderr refusal payloads before teardown.
+- F13: leak check filtered `e2e-*` only; dispatch mints `qds-*` names, so
+  final-ls reported false-clean `[]` while boxes billed. Fixed to match both
+  prefixes.
+
+### Spend (actual vs approved caps)
+
+| Run | Approved worst case | Actual |
+|---|---|---|
+| T2.1 attempt 1 (pre-F10) | 280,000 µ$ | ~3,500 µ$: gate A/B only + 2 C pings (~200 µ$) + ~47 s box (~3,000 µ$ fractional) |
+| T2.1 attempts 2–3 | included above | ~2×~45 s boxes + handful of pings ≈ ~6,500 µ$ total |
+| Diagnostics (4 minted keys, all revoked+verified) | — | ≤ ~1,000 µ$ total (each ping 30–40 µ$, deepseek control ~0) |
+| T2.2 | 380,000 µ$ | **0 — not run (blocked)** |
+| **Total TIER-2** | **660,000 µ$ ($0.66)** | **≈ 11,000 µ$ ($0.011)** + leaked-box remediation (3 boxes ~2 min total lifetime, billed fractionally post-F8) |
+
+kind='tokens' ledger rows: pre-registered assertion expects ZERO (documented
+gap — CostLedger.ingestCostEvent has no production caller), never reached
+live because the engine leg is behind gate C.
+
+### Coverage matrix delta (after TIER-2 attempts)
+
+| Surface | Before T2 | After T2 |
+|---|---|---|
+| dispatch verb steps 1–8 (validate→admit→record→box→mint→fill private repo→gate entry) | 0% | **real-proven** incl. budget admission at an operator cost-config and bundle-push fill inside the verb |
+| setup gate A/B on a dispatch-provisioned box | 0% | **PROVEN** |
+| setup gate C/D/E | 0% | **BROKEN — F10 fixed, F11 open** |
+| expose/ack, delivered stamped manifest read-back, engine spend, harvest-of-dispatch-run, teardown-with-spend | 0% | 0% (behind gate C) |
+| fanout best-of-N arms / rank live | 0% | 0% (blocked by same gate) |
+
+Fleet demo-readiness verdict: NOT yet — the money path is provably admitted,
+filled and gated up to assertion C on real substrate; one open defect (F11)
+blocks every costing surface end-to-end.
+

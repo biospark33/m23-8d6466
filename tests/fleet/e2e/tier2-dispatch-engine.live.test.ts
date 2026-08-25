@@ -94,6 +94,8 @@ test.todoIf(liveTodoOff())(
     let workspace = "";
     let runId = "";
     let vmName = "";
+    let dispatchOut = "";
+    let dispatchErr = "";
     let evidencePath = "";
     let outcome = "pass";
     try {
@@ -132,6 +134,8 @@ test.todoIf(liveTodoOff())(
         ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", recordsDir],
         { cwd: REPO_ROOT, timeoutMs: 1_200_000 },
       );
+      dispatchOut = dispatch.stdout;
+      dispatchErr = dispatch.stderr;
       evidence.push({
         phase: "dispatch-verb",
         exitCode: dispatch.exitCode,
@@ -287,14 +291,27 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "test-error", error: (e as Error).message });
       throw e;
     } finally {
+      // F12 lesson (2026-08-25 live leak of qds-20260825-ce6e89/b7b338/97451e):
+      // a gate-refused dispatch PROVISIONED (INV-5 keeps the box alive) but
+      // emitted a REFUSAL payload, not an ack — so `runId` above stayed ""
+      // and this finally skipped every verb. Recover ids from BOTH streams:
+      // the refusal envelope's debug/teardown commands name the box.
+      if (runId === "" || vmName === "") {
+        const combined = `${dispatchOut}\n${dispatchErr}`;
+        if (runId === "") runId = /qds-[0-9]{8}-[a-z0-9]{6}/.exec(combined)?.[0] ?? "";
+        if (vmName === "") vmName = /ssh ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})\.exe\.xyz/.exec(combined)?.[1] ?? /(?:teardown|rm) ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})/.exec(combined)?.[1] ?? "";
+        evidence.push({ phase: "finally-id-recovery", runId, vmName });
+      }
       if (runId !== "") {
         const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
-        evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode });
+        evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-200) });
       }
       if (vmName !== "") await destroyQuietly(ctx.driver, vmName, evidence);
       try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-"));
-        evidence.push({ phase: "final-ls", e2eBoxes: final });
+        // F13 lesson: dispatch mints `qds-…` box names — filtering only
+        // `e2e-…` reported a false-clean [] while three boxes billed.
+        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+        evidence.push({ phase: "final-ls", fleetBoxes: final });
         expect(final).toEqual([]); // a leak is a failure even when the test already failed
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });

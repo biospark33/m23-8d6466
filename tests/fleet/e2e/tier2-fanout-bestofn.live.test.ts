@@ -71,6 +71,8 @@ test.todoIf(liveTodoOff())(
     let workspace = "";
     let armRunIds: string[] = [];
     let armVms: string[] = [];
+    let fanOut = "";
+    let fanErr = "";
     let fanoutId = "";
     let evidencePath = "";
     let outcome = "pass";
@@ -112,6 +114,8 @@ test.todoIf(liveTodoOff())(
         ],
         { cwd: REPO_ROOT, env: { QDS_RUNS_DIR: recordsDir }, timeoutMs: 1_800_000 },
       );
+      fanOut = fan.stdout;
+      fanErr = fan.stderr;
       evidence.push({
         phase: "fanout-verb",
         exitCode: fan.exitCode,
@@ -236,6 +240,16 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "test-error", error: (e as Error).message });
       throw e;
     } finally {
+      // Same lessons as T2.1's finally (F12/F13): recover arm ids from BOTH
+      // streams when the verb refused mid-flight, and filter the leak check
+      // over dispatch's real `qds-…` names, not just `e2e-…`.
+      if (armRunIds.length === 0 || armVms.length === 0) {
+        const combined = `${fanOut}\n${fanErr}`;
+        const ids = [...combined.matchAll(/(?:qds|e2e)-[0-9]{8}-[a-z0-9]{6}/g)].map((m) => m[0]);
+        armRunIds = [...new Set(ids)];
+        armVms = [...armRunIds];
+        evidence.push({ phase: "finally-id-recovery", runIds: armRunIds });
+      }
       for (let i = 0; i < armRunIds.length; i++) {
         const id = armRunIds[i] as string;
         if (workspace !== "") {
@@ -245,8 +259,8 @@ test.todoIf(liveTodoOff())(
       }
       for (const vm of armVms) if (vm !== "") await destroyQuietly(ctx.driver, vm, evidence);
       try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-"));
-        evidence.push({ phase: "final-ls", e2eBoxes: final });
+        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+        evidence.push({ phase: "final-ls", fleetBoxes: final });
         expect(final).toEqual([]);
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });

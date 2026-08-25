@@ -783,3 +783,16 @@ biospark33/QDS-Factory at pushed SHA 624c98b (evidence
 `2026-08-24-220341/220432`). Fanout's own live-slice (lock refusal) re-proven
 post-fix (evidence 220246). Full suite 1199 pass / 0 fail; TIER-2 arms now
 need spend approval only.
+
+### 2026-08-25 — TIER-2 fanout test built; arms blocked at setup-gate C (F11) — SKIPPED-BLOCKED
+
+T2.2 (`tests/fleet/e2e/tier2-fanout-bestofn.live.test.ts`, commit 89a44f4)
+pins the full best-of-N N=2 live contract: one JSON line per ready arm,
+fan-*.json carrying both runIds + rosterIds + pin, per-arm capped records via
+QDS_RUNS_DIR, harvest both + teardown both, aggregate spend ≤ 2×cap, then
+`fleet rank` exit 0 over the real record with the null-score steps contract
+(no step-output producer exists for gate-only arms). NOT RUN: every arm is a
+dispatch whose setup gate dies at assertion C (DF3.1's F11, after F10's fix);
+spending ~$0.15 to re-hit a proven wall was declined. Rank remains unproven
+live for the same reason. The race pattern and reapRuns are still the two
+never-proven-live surfaces after this session.
