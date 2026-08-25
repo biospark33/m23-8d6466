@@ -345,8 +345,23 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
     );
     return 1;
   }
-  // Identity proven: release the probe handle before reading.
-  if (probeFd !== null) closeSync(probeFd);
+  // Identity proven: release the probe handle before reading. Guarded like
+  // every other close in this function — a bare throw would escape run()
+  // unclassified, so it becomes the ledger-close-failed refusal (the
+  // finally's own doctrine: past a completed classification, a close failure
+  // IS the outcome), with the ledger released best-effort first.
+  try {
+    if (probeFd !== null) closeSync(probeFd);
+  } catch (e) {
+    try {
+      ledger.close();
+    } catch {
+      /* the refusal below outranks the close failure */
+    }
+    const cerr = e as { code?: string; message?: string; remediation?: string };
+    reportFailure(out, cerr.code ?? "ledger-close-failed", cerr.message ?? String(e), cerr.remediation);
+    return 1;
+  }
 
   // Assigned on every path, then possibly downgraded by the finally — the same
   // shape scripts/fleet.ts and scripts/sandbox-teardown.ts use. `return 1`

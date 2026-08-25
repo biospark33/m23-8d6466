@@ -3534,6 +3534,38 @@ process.on = ((sig, listener) => {
     expect(outOnly).toHaveLength(0);
   });
 
+  test("a store error whose DIAGNOSTIC ITSELF throws still refuses record-store-unreadable", async () => {
+    // safeDiagnostic's contract is that ANY thrown value classifies. A value
+    // whose `.message` getter throws used to escape the helper mid-catch and
+    // replace the typed refusal with a secondary crash — the one failure mode
+    // the helper exists to make impossible.
+    const shared = deps(validBriefJson(dir));
+    const hostileDiagnosticStore = {
+      dir: runsDir,
+      listWithAnomalies: (): { records: unknown[]; skipped: unknown[] } => {
+        throw Object.create(null, {
+          message: {
+            get(): string {
+              throw new Error("message getter boom");
+            },
+          },
+        });
+      },
+    } as unknown as RunRecordStore;
+
+    reset();
+    const code = await runCli(["status", "--driver", "fake"], { ...shared, store: hostileDiagnosticStore });
+
+    expect(code).toBe(1);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("record-store-unreadable")) as string) as {
+      code: string;
+      message: string;
+    };
+    expect(envelope.code).toBe("record-store-unreadable");
+    expect(envelope.message).toContain("[unprintable diagnostic]");
+    expect(outOnly).toHaveLength(0);
+  });
+
   test("no minted key material reaches stdout, stderr or the CC-9 log line", async () => {
     // INV-2 is enforced on the RECORD, and commit 78c9bd7 took a key out of the
     // CLI's own log fields — with nothing left behind to keep it out. The three

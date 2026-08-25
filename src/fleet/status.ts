@@ -141,7 +141,16 @@ const MAX_DIAGNOSTIC = 512;
 function safeDiagnostic(e: unknown): string {
   // Optional chain, not a bare cast: a `throw null` must still classify (the
   // same argument statusRun's handler makes) rather than TypeError here.
-  return sanitizeLabel((e as Error | null)?.message ?? String(e), MAX_DIAGNOSTIC);
+  // The EXTRACTION itself is guarded too: a `.message` getter or a
+  // `toString`/`Symbol.toPrimitive` that throws would otherwise escape this
+  // helper mid-catch and replace the typed refusal (record-store-unreadable,
+  // record-read-failed) with a secondary crash — defeating the one job the
+  // helper has. Fixed fallback, no interpolation of the unprintable value.
+  try {
+    return sanitizeLabel((e as Error | null)?.message ?? String(e), MAX_DIAGNOSTIC);
+  } catch {
+    return "[unprintable diagnostic]";
+  }
 }
 
 /**
