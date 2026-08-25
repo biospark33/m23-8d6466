@@ -811,15 +811,13 @@ async function ingestBriefJson(briefPath: string | undefined, deps?: Partial<Fle
 
   const rawBrief = await readBrief();
   // The cap is on BYTES whichever source produced the text — `.length` counts
-  // UTF-16 code units, which under-measures every non-ASCII brief. Skipped when
-  // the decode was LOSSY: TextDecoder maps each invalid UTF-8 byte to U+FFFD,
-  // which re-encodes as THREE bytes, so a corrupt brief measured here could
-  // exceed a cap its RAW bytes had already passed — and both real readers cap
-  // raw bytes as they read. Replacement chars are proof this count no longer
-  // describes what arrived; without one the decode round-trips exactly and the
-  // measurement binds (which is what still bounds an injected reader that
-  // bypasses both real caps).
-  if (!rawBrief.includes("\u{FFFD}")) {
+  // UTF-16 code units, which under-measures every non-ASCII brief. The
+  // re-measure is UNCONDITIONAL (round 10): a presence test for U+FFFD cannot
+  // tell a lossy decode from a brief that legitimately contains the character,
+  // so a legit-FFFD carrier could slip a >cap payload past this second
+  // enforcement site. Over-refusing a corrupt sub-cap corrupt brief is the
+  // accepted trade; the real readers still cap raw bytes as they read.
+  {
     const briefBytes = Buffer.byteLength(rawBrief, "utf8");
     if (briefBytes > MAX_BRIEF_BYTES) {
       throw new FleetError(
