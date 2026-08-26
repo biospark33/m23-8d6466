@@ -1755,3 +1755,25 @@ this fixture (90 min @ 3.6M µ$/h = 1.5h = 5,400,000 µ$, not 2h). Fixture corre
 AC2 runtime provenance remains shape-only — amended this round as a DECLARED deviation
 (brand = compile-time half; mint-registry rejected as out-of-scope subsystem; collision
 guards make exposure = squatting a free id).
+
+---
+
+## Status
+
+**done — PR [#123](https://github.com/biospark33/QDS-Factory/pull/123) merged 2026-08-23 (`f1aa4db`), after nine BMAD adversarial review rounds.**
+
+Review round 10 (55 findings across the dispatcher, the CLI and the money paths) was run against
+the already-merged diff and landed separately as PR
+[#131](https://github.com/biospark33/QDS-Factory/pull/131), merged 2026-08-25 (`6caffdb`), with two
+follow-up commits on the same branch: `9cc03b8` (guard the last unguarded probe close, harden
+`safeDiagnostic`) and `724c663` (probe fd release + spec/story alignment). The "Review round 10"
+section above is authoritative for that round's disposition.
+
+This story file carried no Status section at all until the 2026-08-26 artifact audit, and
+`sprint-status.yaml` had it pinned at `review` through both merges — which is why the 20/31 and
+21/31 tallies recorded in that file's header were computed without DF3.1's 5 points. Corrected
+tally: 22/31 stories, 89/123 pts.
+
+Declared deviation still standing: AC2 runtime provenance is shape-only (brand = the compile-time
+half; a mint registry was rejected as an out-of-scope subsystem, and the collision guards reduce
+the exposure to squatting a free id).

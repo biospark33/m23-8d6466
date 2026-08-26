@@ -226,7 +226,7 @@ story only *requests* the approval on a green verdict (AC6).
 ## Dev Agent Record
 
 **Branch:** `feature/df5-1-host-side-reverify` (from `main`)<br />
-**Status:** implemented, all DOD items covered by tests
+**Status:** done — PR #130 merged 2026-08-25 (`486a40a`), all DOD items covered by tests, after seven CodeRabbit rounds / nine fixes (approval-lock pid reclamation via liveness check, atomic claim via `renameSync`, fail-closed restore on a failed post-claim write, five first-pass findings, SIGKILL-sweep timer cancellation in `withGuards` dispose(), and two rounds hardening the disposal regression test). Known ceilings left standing: the verify process inherits `HOME`, and RSS is `ps`-sampled rather than cgroup-enforced. This line read "implemented" after the merge; corrected in the 2026-08-26 artifact audit.
 
 ### Shipped
 

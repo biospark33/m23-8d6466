@@ -307,4 +307,16 @@ called directly for record-less orphan keys, not only transitively through DF2.5
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+Implemented and merged before this record was written; the PR diff and its five post-merge review
+rounds are the authoritative account of what was built. See PR
+[#120](https://github.com/biospark33/QDS-Factory/pull/120) and the DF2.6 note in
+`_bmad-output/sprint-artifacts/sprint-status.yaml`.
+
+---
+
+## Status
+
+**done — PR [#120](https://github.com/biospark33/QDS-Factory/pull/120) merged 2026-08-20 (`9c93c56`),
+after five post-PR review rounds.** Status section added in the 2026-08-26 artifact audit —
+`sprint-status.yaml` already carried `done`, this file had only the empty Dev Agent Record
+placeholder.

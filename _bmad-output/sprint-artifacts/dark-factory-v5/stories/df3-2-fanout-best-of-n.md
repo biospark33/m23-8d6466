@@ -366,3 +366,14 @@ lock is the wrong tool — it would serialize unrelated issues behind one operat
 own-pid lock steal and temp sweep fire after 60 s stalls. Concurrent arms sharing one pid
 that pause >60 s mid-critical-section (debugger, SIGSTOP) can have locks stolen / temps
 swept by a sibling arm. Fine at current scale; worth a comment where fanout parks arms.
+
+---
+
+## Status
+
+**in progress — PR [#128](https://github.com/biospark33/QDS-Factory/pull/128) open since 2026-08-24
+(branch `feature/df3-2-fanout-best-of-n`, 56 commits), under review.**
+
+`sprint-status.yaml` had this story at `ready-for-dev` for the whole life of the PR; corrected to
+`in-progress` in the 2026-08-26 artifact audit. The Dev Agent Record above is still the empty
+placeholder — it gets filled when the PR merges. Not counted in the done tally.

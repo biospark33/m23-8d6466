@@ -237,7 +237,7 @@ post-edit `lsp_diagnostics` gate.
 
 ## Dev Agent Record
 
-**Status:** implemented 2026-08-15; local gates green (bun test 1383 pass / 0 fail incl. 42 new DF1.2 tests, tsc clean, biome clean).
+**Status:** done — PR #110 merged 2026-08-15 (`c8c5b26`); local gates green at merge (bun test 1383 pass / 0 fail incl. 42 new DF1.2 tests, tsc clean, biome clean). The PR reference was added in the 2026-08-26 artifact audit.
 
 **Implementation Plan → what shipped:**
 
