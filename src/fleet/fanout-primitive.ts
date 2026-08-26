@@ -20,10 +20,7 @@
  *   per-arm classification → race pattern: poller + winner + loser teardown →
  *   close record (closedAt) → FleetLock.release() in FINALLY.
  */
-import { randomBytes, createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 import {
   checkHeadroom,
@@ -39,7 +36,7 @@ import { runMarkerPath } from "../phase-engine/journal.ts";
 import { log } from "../swarmclaw/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
 import { dispatch, FleetError, mintRunId, type DispatchDeps, type MintedRunId } from "./dispatch.ts";
-import { mintFanoutId, FanoutRecordStore, rmQuiet } from "./fanout.ts";
+import { mintFanoutId, FanoutRecordStore } from "./fanout.ts";
 import { FLEET_LOCK_PATH, FleetLock } from "./fleet-lock.ts";
 
 // ─── INV-6 finite caps (imported constants — never mirrored literals) ─────────
@@ -677,7 +674,6 @@ async function probeArm(
 ): Promise<number | null | "unusable" | "absent"> {
   const outcome = outcomes[arm] as ArmOutcome; // racing arms are settled and ready
   const vm = outcome.vmName as string;
-  let tmp: string | undefined;
   const skipTick = (code: string, e: unknown): void => {
     raceEvent(deps.requestId, fanoutId, { arm, error: { code, message: errText(e) } });
   };
@@ -690,11 +686,27 @@ async function probeArm(
     );
     if (probe.exitCode !== 0) return "absent"; // no marker yet — a clean read, resets the streak
 
-    tmp = join(tmpdir(), `qds-fanout-${fanoutId}-${arm}-${randomBytes(4).toString("hex")}.json`);
-    await withTimeout(deps.driver.copyFile(vm, markerPath, tmp), deadlineMs, "race-read");
+    // MEASURED live 2026-08-26 (fan-20260826-f04c3c): read the marker through
+    // the SAME exec channel the presence probe uses. copyFile is box-RELATIVE
+    // by driver contract (ExeDevDriver's assertBoxPathSafe) while
+    // runMarkerPath() is ABSOLUTE (/run/journal/final.json) — a copyFile read
+    // died "remote-path-invalid" on every tick and the race spun to its
+    // ceiling with the marker present and the winner never claimed. cat is
+    // subject to the same shellQuote; no driver path-safety surface changes.
+    const read = await withTimeout(
+      deps.driver.exec(vm, ["sh", "-c", `cat ${shellQuote(markerPath)}`]),
+      deadlineMs,
+      "race-read",
+    );
+    if (read.exitCode !== 0) {
+      // Present at test, unreadable at cat — a vanished/vanishing marker is a
+      // skipped tick, not corruption: the next tick re-tests presence first.
+      skipTick("race-read-failed", new Error(`cat exited ${read.exitCode}: ${read.stderr.trim().slice(0, 200)}`));
+      return null;
+    }
     let marker: { ok?: unknown };
     try {
-      marker = JSON.parse(readFileSync(tmp, "utf8")) as { ok?: unknown };
+      marker = JSON.parse(read.stdout) as { ok?: unknown };
     } catch (e) {
       skipTick("marker-unreadable", e);
       return "unusable"; // present-but-corrupt is counted by runRace, never polled forever
@@ -737,8 +749,6 @@ async function probeArm(
     // the loop retries on the next tick, bounded by the overall ceiling.
     skipTick(e instanceof TimeoutError ? "race-probe-timeout" : "race-probe-failed", e);
     return null;
-  } finally {
-    if (tmp !== undefined) rmQuiet(tmp);
   }
 }
 

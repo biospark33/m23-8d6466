@@ -86,6 +86,7 @@ test.todoIf(liveTodoOff())(
     let armVms: string[] = [];
     let fanoutId = "";
     let outcome = "pass";
+    let lastRecSnap: Record<string, unknown> = {};
     try {
       workspace = tmpWorkspace("t31");
       const fanoutsDir = join(workspace, "fanouts");
@@ -160,7 +161,17 @@ test.todoIf(liveTodoOff())(
       // FAST ARM := ARM 0 (index-order probing). Bounded retries: a marker
       // that never lands parks the poller at the 1h CEILING holding the fleet
       // lock with both boxes billing — abort loudly instead.
-      const markerCmd = `mkdir -p /run/journal && printf '{"ok":true}\\n' > /run/journal/final.json`;
+      //
+      // /run is root:root 755 on the real image and the ssh user is uid 1000
+      // (MEASURED 2026-08-26: plain mkdir → "Permission denied"; sudo -n
+      // works, exedev is in the sudo group) — so the marker write goes through
+      // `sudo -n`. The written file is world-readable, which is all the
+      // poller's probe (`test -f`) and copyFile need. This is itself a
+      // FINDING: the poller's marker path is unwritable by the box's default
+      // user, so until the proposed in-box executor ships (running privileged
+      // or with its own marker root), only a sudo-capable writer can ever
+      // decide a race on real substrate.
+      const markerCmd = `sudo -n sh -c 'mkdir -p /run/journal && printf "{\\"ok\\":true}\\n" > /run/journal/final.json'`;
       await pollUntil(
         "winner marker written",
         async () => {
@@ -173,14 +184,51 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "marker-planted", vm: armVms[0], marker: "/run/journal/final.json" });
 
       // ── 4. the REAL poller claims: local record winner flips to 0 ────────
-      const winner = await pollUntil(
-        "record winner",
-        async () => {
-          const rec = JSON.parse(readFileSync(join(fanoutsDir, `${fanoutId}.json`), "utf8")) as { winner: number | null };
-          return rec.winner === null ? null : rec.winner;
-        },
-        300_000,
-      );
+      // Bound is generous (10 min): the poller only starts once BOTH arms'
+      // gates settle, and fresh-box gate B's first `pi --list-models` fetch
+      // can burn minutes before that. While polling, capture DIAGNOSTICS every
+      // ~30 s — a test-side marker probe (is the marker still there, readable
+      // exactly as probeArm reads it?) and the arms' run records (vmName set ⇒
+      // that arm's dispatch acked; closedAt ⇒ closed) — so a timeout names
+      // WHERE the verb was. On timeout, KILL the verb and capture its stderr:
+      // the poller logs race-probe-failed/race-probe-timeout per skipped tick,
+      // which distinguishes "poller probing and failing" from "poller never
+      // started (arms still gating)".
+      let winner: number | null = null;
+      {
+        const t0 = Date.now();
+        let tick = 0;
+        for (;;) {
+          const rec = JSON.parse(readFileSync(join(fanoutsDir, `${fanoutId}.json`), "utf8")) as { winner: number | null; closedAt?: string | null };
+          lastRecSnap = { winner: rec.winner, closedAt: rec.closedAt ?? null, t: Math.round((Date.now() - t0) / 1000) };
+          if (rec.winner !== null) {
+            winner = rec.winner;
+            break;
+          }
+          if (Date.now() - t0 > 600_000) break;
+          if (tick % 15 === 0) {
+            const probe = await ctx.driver.exec(armVms[0] as string, ["sh", "-c", "test -f /run/journal/final.json && cat /run/journal/final.json"]);
+            const armRecs = armRunIds.map((id) => {
+              try {
+                const r = new RunRecordStore({ dir: join(workspace, "runs") }).get(id);
+                return { vmName: r.vmName ?? null, closedAt: r.closedAt ?? null };
+              } catch {
+                return { absent: true };
+              }
+            });
+            evidence.push({ phase: "winner-poll-diag", t: Math.round((Date.now() - t0) / 1000), markerProbe: probe.exitCode === 0 ? probe.stdout.trim() : `absent(exit ${probe.exitCode}, ${probe.stderr.trim().slice(0, 120)})`, arms: armRecs });
+          }
+          tick += 1;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
+      evidence.push({ phase: "record-snapshot-at-claim-or-timeout", record: lastRecSnap });
+      if (winner === null) {
+        verb.kill();
+        const diag = await verb.output;
+        evidence.push({ phase: "verb-stderr-on-timeout", tail: diag.stderr.trim().slice(-2500) });
+        throw new Error(`race poller never claimed a winner in 600 s — record ${JSON.stringify(lastRecSnap)}`);
+      }
       evidence.push({ phase: "winner-claimed", winner });
       expect(winner).toBe(0);
 
@@ -283,7 +331,7 @@ test.todoIf(liveTodoOff())(
       expect(recRanked.winner).toBe(0); // rank NEVER sets winner
     } catch (e) {
       outcome = "fail";
-      evidence.push({ phase: "test-error", error: (e as Error).message });
+      evidence.push({ phase: "test-error", error: (e as Error).message, record: lastRecSnap });
       throw e;
     } finally {
       // The primitive disposed the loser; the WINNER is ours. Kill an

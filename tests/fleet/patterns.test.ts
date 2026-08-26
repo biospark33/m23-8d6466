@@ -16,6 +16,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
   existsSync,
+  readFileSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -125,7 +126,7 @@ function shellQuote(s: string): string {
  * guard teardown.test.ts installs).
  */
 class RaceFakeDriver extends FakeDriver {
-  /** Called before each marker probe runs; `probeNumber` counts ALL probes. */
+  /** Called before each presence probe runs; `probeNumber` counts one per poll tick (the in-memory cat read does not count). */
   onProbe?: (vm: string, probeNumber: number) => void;
   #probes = 0;
 
@@ -134,6 +135,23 @@ class RaceFakeDriver extends FakeDriver {
       return { stdout: "NONE\n", stderr: "", exitCode: 0 };
     }
     if (this.isMarkerProbe(argv)) {
+      // Since PF-3 the poller reads the marker by cat-ing the ABSOLUTE
+      // runMarkerPath() through the same exec channel it tested presence
+      // with (ExeDevDriver.copyFile is box-relative by contract and rejects
+      // it). The read is answered in-memory — a spawn per 10 ms poll tick
+      // made the suite crawl, and the bytes are the same file the test
+      // planted. ONLY the presence probe counts and fires onProbe: tests key
+      // plants to TICK numbers, and counting the cat read too shifted every
+      // dance by one and let a probeNumber-keyed plant overwrite the marker
+      // between the presence test and the read of the SAME tick.
+      const cmd = String(argv[2]);
+      if (cmd.includes("cat ")) {
+        try {
+          return { stdout: readFileSync(this.boxMarker(vm), "utf8"), stderr: "", exitCode: 0 };
+        } catch {
+          return { stdout: "", stderr: "cat: marker vanished between test and read", exitCode: 1 };
+        }
+      }
       this.#probes += 1;
       this.onProbe?.(vm, this.#probes);
       return super.exec(vm, ["sh", "-c", `test -f ${shellQuote(this.boxMarker(vm))}`], stdin);
@@ -732,7 +750,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(res.arms.every((a) => a.outcome === "ready")).toBe(true);
       // Not vacuous: the four arms really did contend for two slots…
       expect(peak).toBe(2);
-    });
+    }, 20_000);
   });
 
   // ─── DD-9/INV-3: the per-arm cap reaches dispatch ADMISSION ──────────────────
@@ -888,7 +906,45 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
       expect(rec.winner).toBe(won);
       expect(rec.closedAt).not.toBeNull();
-    });
+    }, 20_000);
+
+    test("PF-3: race decides even when copyFile refuses ABSOLUTE paths — the measured ExeDevDriver contract", async () => {
+      // MEASURED live 2026-08-26 (fan-20260826-f04c3c, three attempts): the
+      // poller's marker path runMarkerPath() is ABSOLUTE (/run/journal/
+      // final.json) while ExeDevDriver.copyFile's assertBoxPathSafe demands
+      // box-RELATIVE remote paths — every read tick died
+      // "remote-path-invalid" and the race spun to its ceiling with the
+      // marker present, readable, and the winner never claimed. This fake
+      // pins the REAL driver's contract (absolute remote path ⇒ rejection)
+      // so the regression can never hide behind FakeDriver's permissive
+      // copyFile again.
+      manifest();
+      const strictCopyDriver: ProviderDriver = boundProxy(driver, {
+        get(prop) {
+          if (prop !== "copyFile") return undefined;
+          return (vm: string, remotePath: string, localPath: string): Promise<void> => {
+            if (remotePath.startsWith("/")) {
+              return Promise.reject(
+                new Error(`remote path "${remotePath}" is not a plain box-relative path (charset [A-Za-z0-9._/-], no leading /)`),
+              );
+            }
+            return driver.copyFile(vm, remotePath, localPath);
+          };
+        },
+      });
+      driver.onProbe = (vm, probeNumber) => {
+        if (probeNumber === 2) plantMarker(driver, vm, { ok: true });
+      };
+      const res = await fanout(
+        "race",
+        2,
+        brief(),
+        raceDeps({ rosterIds: ["r0", "r1"], driver: strictCopyDriver }),
+      );
+      expect(res.winner).toBe(1); // probe #2 is arm 1 — sequential index order
+      expect(res.arms[0]?.outcome).toBe("lostRace");
+      expect(res.arms[1]?.outcome).toBe("ready");
+    }, 20_000); // the loser's REAL teardown (git bundle-verify) rides the 2s deadline path — past bun's 5s default under load
 
     test("loser teardown prices box hours into the injected cost ledger (DF2.8)", async () => {
       manifest();
@@ -1004,7 +1060,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(rec.winner).toBe(won);
       expect(rec.closedAt).not.toBeNull();
       expect(existsSync(lockPath)).toBe(false);
-    });
+    }, 20_000);
 
     test("a hung loser teardown hits its deadline: disposal completes, the timeout is named, the lock survives", async () => {
       manifest();
@@ -1348,7 +1404,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       // timing of when the persisted winner is first observed is non-deterministic.
       expect(lost.length).toBeGreaterThanOrEqual(1);
       expect((lost[0]?.error as { message?: string } | undefined)?.message).toContain("arm 1");
-    });
+    }, 20_000); // TWO losers' REAL teardowns (git bundle-verify) ride the 2s deadline path — past bun's 5s default under load
 
     test("an ok:false marker is armFailed — the race continues past it", async () => {
       manifest();
@@ -1363,7 +1419,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       // never left alive and never treated as a setup failure.
       expect(boxExists(driver, res.arms[0]?.vmName)).toBe(false);
       expect(teardownStepsFor(entries, res.arms[0]?.runId)).toContain("harvest");
-    });
+    }, 20_000); // ceiling alone is 10s — past bun's 5s default; the failed arm's REAL teardown rides the 2s deadline path
 
     test("every arm reporting ok:false: winner null, record closed, EVERY arm torn down", async () => {
       manifest();
@@ -1384,7 +1440,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       const rec = new FanoutRecordStore({ dir: fanoutsDir }).get(res.fanoutId);
       expect(rec.winner).toBeNull();
       expect(rec.closedAt).not.toBeNull();
-    });
+    }, 20_000); // ceiling alone is 10s — past bun's 5s default; THREE real harvest teardowns follow
 
     test("no marker at the ceiling: armUnknown, never assumed a loser, never auto-destroyed", async () => {
       manifest();
