@@ -8,11 +8,15 @@
  * WHAT IS REAL HERE: the race verb as a spawn-without-await subprocess
  * (spawnFleet) — two full dispatch arms (fill + setup gates, real chat spend,
  * one capped key each), then the REAL poller deciding the race off a REAL
- * marker: the test execs `{"ok":true}` onto arm 0's box
- * (/run/journal/final.json), and the primitive's probe→copyFile→parse→
- * first-writer-claim chain runs unmodified (5s ticks, 1h ceiling — no CLI
- * knobs exist, by design). The FAST ARM is ARM 0: the poller probes in index
- * order, so even a mistimed double-marker agrees on arm 0.
+ * marker: the test reads each arm's gate evidence
+ * (.sandbox/setup-gate/<runId>.json) and execs `{"ok":true}` onto the
+ * LOWEST-INDEX GATE-READY arm's box (/run/journal/final.json), and the
+ * primitive's probe→exec-cat→parse→first-writer-claim chain runs unmodified
+ * (5s ticks, 1h ceiling — no CLI knobs exist, by design). Gate B can flake
+ * on a fresh box (pi registry still initializing — MEASURED att6): a
+ * single-entrant race is then asserted in full (sole entrant claims, its box
+ * alive, the gate-failed arm setupFailed with box+key ALIVE, INV-5); the
+ * loser-teardown/ledger surface is asserted only on a full field.
  *
  * The verb holds .sandbox/fleet.lock across its ENTIRE run including the
  * race poll window — this test needs an exclusive execution window (no other
@@ -158,15 +162,50 @@ test.todoIf(liveTodoOff())(
       armVms = [...armRunIds];
       evidence.push({ phase: "boxes-listed", vms: armVms });
 
-      // FAST ARM := ARM 0 (index-order probing). Bounded retries: a marker
-      // that never lands parks the poller at the 1h CEILING holding the fleet
-      // lock with both boxes billing — abort loudly instead.
+      // ── 3.5 WHO may enter the race: read the REAL gate outcomes ─────────
+      // MEASURED att6 (fan-20260826-cee620): a fresh box's pi registry can
+      // still be initializing when gate B runs — "No models available. Use
+      // /login" — while its sibling box, created 2 s apart, passes A–E. The
+      // gate is fail-closed by design (DF2.2): that arm becomes setupFailed
+      // (exit 3), its box stays ALIVE (INV-5), and it is NEVER an entrant.
+      // att6 planted the marker on arm 0 blindly and raced a poller against
+      // the one arm that could not win. The gate writes host-side evidence at
+      // .sandbox/setup-gate/<runId>.json — read REALITY, plant on the
+      // lowest-index READY arm, and expect THAT winner.
+      const gateStates = await pollUntil(
+        "gate evidence for both arms",
+        async () => {
+          const states = armVms.map((vm) => {
+            try {
+              const g = JSON.parse(readFileSync(join(REPO_ROOT, ".sandbox", "setup-gate", `${vm}.json`), "utf8")) as { ready?: unknown };
+              return typeof g.ready === "boolean" ? g.ready : null;
+            } catch {
+              return null;
+            }
+          });
+          return states.every((s) => s !== null) ? states : null;
+        },
+        360_000, // the gate's own budget is 300 s per arm (arms gate in parallel) + slop
+      );
+      const readyArms = gateStates.flatMap((ready, i) => (ready ? [i] : []));
+      const fullField = readyArms.length === 2;
+      if (readyArms.length === 0) {
+        throw new Error(`substrate flake: BOTH gates failed, no entrants possible — gate evidence ${JSON.stringify(gateStates)}`);
+      }
+      const plantArm = readyArms[0] as number; // index-order probing: lowest READY arm wins any tie
+      const winnerExpect = plantArm;
+      const otherArm = 1 - plantArm;
+      evidence.push({ phase: "gates", ready: gateStates, readyArms, fullField, plantArm });
+
+      // Marker write. Bounded retries: a marker that never lands parks the
+      // poller at the 1h CEILING holding the fleet lock with both boxes
+      // billing — abort loudly instead.
       //
       // /run is root:root 755 on the real image and the ssh user is uid 1000
       // (MEASURED 2026-08-26: plain mkdir → "Permission denied"; sudo -n
-      // works, exedev is in the sudo group) — so the marker write goes through
+      // works, exedev is in the sudo group) — so the write goes through
       // `sudo -n`. The written file is world-readable, which is all the
-      // poller's probe (`test -f`) and copyFile need. This is itself a
+      // poller's probe (`test -f`) and exec-cat read need. This is itself a
       // FINDING: the poller's marker path is unwritable by the box's default
       // user, so until the proposed in-box executor ships (running privileged
       // or with its own marker root), only a sudo-capable writer can ever
@@ -175,13 +214,13 @@ test.todoIf(liveTodoOff())(
       await pollUntil(
         "winner marker written",
         async () => {
-          const r = await ctx.driver.exec(armVms[0] as string, ["sh", "-c", markerCmd]);
+          const r = await ctx.driver.exec(armVms[plantArm] as string, ["sh", "-c", markerCmd]);
           return r.exitCode === 0 ? r.stdout.trim() : null;
         },
         180_000,
         5000,
       );
-      evidence.push({ phase: "marker-planted", vm: armVms[0], marker: "/run/journal/final.json" });
+      evidence.push({ phase: "marker-planted", vm: armVms[plantArm], marker: "/run/journal/final.json" });
 
       // ── 4. the REAL poller claims: local record winner flips to 0 ────────
       // Bound is generous (10 min): the poller only starts once BOTH arms'
@@ -230,35 +269,38 @@ test.todoIf(liveTodoOff())(
         throw new Error(`race poller never claimed a winner in 600 s — record ${JSON.stringify(lastRecSnap)}`);
       }
       evidence.push({ phase: "winner-claimed", winner });
-      expect(winner).toBe(0);
+      expect(winner).toBe(winnerExpect);
 
-      // Best-effort late marker on arm 1 — harmless; the lostRace flip is
-      // unconditional for non-winner ready entrants.
+      // Best-effort late marker on the OTHER arm — harmless; the lostRace
+      // flip is unconditional for non-winner ready entrants (and a no-op on a
+      // setupFailed arm the poller never probes).
       try {
-        await ctx.driver.exec(armVms[1] as string, ["sh", "-c", markerCmd]);
-        evidence.push({ phase: "late-marker-arm1", ok: true });
+        await ctx.driver.exec(armVms[otherArm] as string, ["sh", "-c", markerCmd]);
+        evidence.push({ phase: "late-marker-other-arm", arm: otherArm, ok: true });
       } catch (e) {
-        evidence.push({ phase: "late-marker-arm1", ok: false, error: (e as Error).message });
+        evidence.push({ phase: "late-marker-other-arm", arm: otherArm, ok: false, error: (e as Error).message });
       }
 
-      // ── 5. verb exit 0 (winner-ready + lostRace losers is SUCCESS) ────────
+      // ── 5. verb exit: 0 on a full field; 1 when a gate-failed arm is collected
       const exitCode = await verb.exited;
       const { stdout, stderr } = await verb.output;
-      evidence.push({ phase: "verb-exit", exitCode, stdout: stdout.trim().slice(0, 1200), stderrBytes: stderr.length });
-      expect(exitCode).toBe(0);
+      evidence.push({ phase: "verb-exit", exitCode, fullField, stdout: stdout.trim().slice(0, 1200), stderrBytes: stderr.length });
+      expect(exitCode).toBe(fullField ? 0 : 1);
 
-      // Exactly one ready line (the winner), N−1 lostRace, ZERO setupFailed /
-      // armFailed / armUnknown — any of those fails loudly, named.
+      // The winner is ready; the other arm lost the race (full field) or
+      // never entered it (gate flake — setupFailed is EXPECTED then).
       const lines = stdout.trim().split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as ArmLine);
       const armLines = lines.filter((l) => typeof l.arm === "number").sort((a, b) => a.arm - b.arm);
       expect(armLines.length).toBe(2);
       const byArm = new Map(armLines.map((l) => [l.arm, l]));
-      expect(byArm.get(0)?.outcome).toBe("ready");
-      expect(byArm.get(1)?.outcome).toBe("lostRace");
-      expect(armLines.filter((l) => ["setupFailed", "armFailed", "armUnknown"].includes(l.outcome))).toEqual([]);
+      expect(byArm.get(plantArm)?.outcome).toBe("ready");
+      expect(byArm.get(otherArm)?.outcome).toBe(fullField ? "lostRace" : "setupFailed");
+      if (fullField) {
+        expect(armLines.filter((l) => ["setupFailed", "armFailed", "armUnknown"].includes(l.outcome))).toEqual([]);
+      }
       evidence.push({ phase: "arm-lines", armLines });
 
-      // Record: race contract — winner 0, closedAt set, rankedAt NULL (race
+      // Record: race contract — winner set, closedAt set, rankedAt NULL (race
       // gets no auto-rank; the rank add-on below stamps it).
       const recFinal = JSON.parse(readFileSync(join(fanoutsDir, `${fanoutId}.json`), "utf8")) as {
         pattern: string;
@@ -268,7 +310,7 @@ test.todoIf(liveTodoOff())(
         arms: Array<{ arm: number; runId: string; rosterId?: string }>;
       };
       expect(recFinal.pattern).toBe("race");
-      expect(recFinal.winner).toBe(0);
+      expect(recFinal.winner).toBe(winnerExpect);
       expect(recFinal.closedAt ?? "").not.toBe("");
       expect(recFinal.rankedAt ?? null).toBe(null);
       expect(recFinal.arms.map((a) => a.rosterId)).toEqual(["lead", "fixer"]);
@@ -280,46 +322,67 @@ test.todoIf(liveTodoOff())(
       expect(wonEvents).toBe(1);
       expect(crossEvents).toBe(0);
 
-      // ── 7. boxes: winner ALIVE, loser DESTROYED BY THE PRIMITIVE ─────────
-      const winnerVm = armVms[0] as string;
-      const loserVm = armVms[1] as string;
-      const loserId = armRunIds[1] as string;
-      await pollUntil(
-        "loser destroyed",
-        async () => {
-          const names = (await ctx.driver.list()).map((b) => b.name);
-          return names.includes(loserVm) ? null : names;
-        },
-        300_000,
-      ).then((names) => evidence.push({ phase: "loser-destroyed", ok: true, listedCount: names.length }));
-      const afterLoss = (await ctx.driver.list()).map((b) => b.name);
-      expect(afterLoss).toContain(winnerVm);
-      expect(afterLoss).not.toContain(loserVm);
-
-      // ── 8. loser record closed + key revoked ──────────────────────────────
+      // ── 7. boxes: winner ALIVE; loser destroyed (full field) or gate-failed
+      // arm STILL ALIVE (INV-5 LIVE — the race never touches it) ────────────
+      const winnerVm = armVms[plantArm] as string;
+      const otherVm = armVms[otherArm] as string;
       const store = new RunRecordStore({ dir: recordsDir });
-      const loserRec = store.get(loserId);
-      expect(loserRec.closedAt ?? "").not.toBe("");
-      expect(loserRec.spendMicroUsd ?? 0).toBeGreaterThan(0);
-      expect(loserRec.spendMicroUsd ?? 1).toBeLessThanOrEqual(T3_CAP_MICRO_USD);
-      expect(await listedKeyHashes()).not.toContain(loserRec.keyHash);
+      if (fullField) {
+        await pollUntil(
+          "loser destroyed",
+          async () => {
+            const names = (await ctx.driver.list()).map((b) => b.name);
+            return names.includes(otherVm) ? null : names;
+          },
+          300_000,
+        ).then((names) => evidence.push({ phase: "loser-destroyed", ok: true, listedCount: names.length }));
+        const afterLoss = (await ctx.driver.list()).map((b) => b.name);
+        expect(afterLoss).toContain(winnerVm);
+        expect(afterLoss).not.toContain(otherVm);
+      } else {
+        const after = (await ctx.driver.list()).map((b) => b.name);
+        expect(after).toContain(winnerVm);
+        expect(after).toContain(otherVm); // INV-5: a gate-failed arm's box is never destroyed by the race
+        evidence.push({ phase: "failed-arm-alive-inv5", vm: otherVm, listed: true });
+      }
 
-      // ── 9. THE DF2.8 PROOF: loser box_hours rows via the REAL lazy hook ──
-      const loserRows = ledgerRows(
-        recordsDir,
-        "SELECT run_id, cost_micro_usd, unpriced FROM cost_events WHERE kind = 'box_hours' AND run_id = ?",
-        loserId,
-      );
-      evidence.push({ phase: "loser-ledger", rows: loserRows });
-      expect(loserRows.length).toBeGreaterThanOrEqual(1);
-      expect(loserRows.every((r) => r.unpriced === 0)).toBe(true);
-      expect(loserRows.every((r) => Number(r.cost_micro_usd) > 0)).toBe(true);
+      if (fullField) {
+        // ── 8. loser record closed + key revoked ────────────────────────────
+        const loserId = armRunIds[otherArm] as string;
+        const loserRec = store.get(loserId);
+        expect(loserRec.closedAt ?? "").not.toBe("");
+        expect(loserRec.spendMicroUsd ?? 0).toBeGreaterThan(0);
+        expect(loserRec.spendMicroUsd ?? 1).toBeLessThanOrEqual(T3_CAP_MICRO_USD);
+        expect(await listedKeyHashes()).not.toContain(loserRec.keyHash);
+
+        // ── 9. THE DF2.8 PROOF: loser box_hours rows via the REAL lazy hook ─
+        const loserRows = ledgerRows(
+          recordsDir,
+          "SELECT run_id, cost_micro_usd, unpriced FROM cost_events WHERE kind = 'box_hours' AND run_id = ?",
+          loserId,
+        );
+        evidence.push({ phase: "loser-ledger", rows: loserRows });
+        expect(loserRows.length).toBeGreaterThanOrEqual(1);
+        expect(loserRows.every((r) => r.unpriced === 0)).toBe(true);
+        expect(loserRows.every((r) => Number(r.cost_micro_usd) > 0)).toBe(true);
+      } else {
+        // Degraded field: the gate-failed arm's record stays OPEN with its
+        // key STILL LIVE — teardown owns both, and the race must not preempt.
+        const failedId = armRunIds[otherArm] as string;
+        const failedRec = store.get(failedId);
+        expect(failedRec.closedAt ?? "").toBe("");
+        expect(failedRec.spendMicroUsd ?? 1).toBeLessThanOrEqual(T3_CAP_MICRO_USD);
+        expect(failedRec.keyHash).toBeDefined();
+        expect(await listedKeyHashes()).toContain(failedRec.keyHash as string);
+        evidence.push({ phase: "failed-arm-record-open-inv5", runId: failedId, spendMicroUsd: failedRec.spendMicroUsd ?? null });
+      }
 
       // Aggregate token spend ≤ 2×cap across BOTH arms' records.
-      const winnerId = armRunIds[0] as string;
+      const winnerId = armRunIds[plantArm] as string;
       const winnerSpend = store.get(winnerId).spendMicroUsd ?? 0;
-      const totalSpend = winnerSpend + (loserRec.spendMicroUsd ?? 0);
-      evidence.push({ phase: "spend", capPerArm: T3_CAP_MICRO_USD, aggregateCap: 2 * T3_CAP_MICRO_USD, winnerSpend, loserSpend: loserRec.spendMicroUsd, totalSpend });
+      const otherSpend = store.get(armRunIds[otherArm] as string).spendMicroUsd ?? 0;
+      const totalSpend = winnerSpend + otherSpend;
+      evidence.push({ phase: "spend", capPerArm: T3_CAP_MICRO_USD, aggregateCap: 2 * T3_CAP_MICRO_USD, winnerSpend, otherSpend, totalSpend });
       expect(totalSpend).toBeLessThanOrEqual(2 * T3_CAP_MICRO_USD);
 
       // ── 10. rank add-on: stamps rankedAt, winner stays 0 ─────────────────
@@ -328,7 +391,7 @@ test.todoIf(liveTodoOff())(
       expect(rank.exitCode).toBe(0);
       const recRanked = JSON.parse(readFileSync(join(fanoutsDir, `${fanoutId}.json`), "utf8")) as { rankedAt?: string | null; winner: number | null };
       expect(recRanked.rankedAt ?? "").not.toBe("");
-      expect(recRanked.winner).toBe(0); // rank NEVER sets winner
+      expect(recRanked.winner).toBe(winnerExpect); // rank NEVER sets winner
     } catch (e) {
       outcome = "fail";
       evidence.push({ phase: "test-error", error: (e as Error).message, record: lastRecSnap });
