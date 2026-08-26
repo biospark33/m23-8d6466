@@ -214,6 +214,38 @@ export async function runFleet(
   }
 }
 
+/**
+ * Spawn `bun scripts/fleet.ts …` WITHOUT awaiting — for tests that must act
+ * DURING the verb's run (the race pattern: plant the winner's marker while the
+ * poller is live). Same env/cwd semantics as runFleet. `output` resolves once
+ * BOTH pipes close; read it only after `exited` settles.
+ */
+export interface SpawnedFleet {
+  exited: Promise<number | null>;
+  output: Promise<{ stdout: string; stderr: string }>;
+  kill: () => void;
+}
+
+export function spawnFleet(
+  argv: readonly string[],
+  opts: { cwd?: string; env?: Record<string, string> } = {},
+): SpawnedFleet {
+  const proc = Bun.spawn({
+    cmd: ["bun", join(REPO_ROOT, "scripts/fleet.ts"), ...argv],
+    cwd: opts.cwd ?? REPO_ROOT,
+    env: { ...process.env as Record<string, string>, ...(opts.env ?? {}) },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return {
+    exited: proc.exited,
+    output: Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]).then(
+      ([stdout, stderr]) => ({ stdout, stderr }),
+    ),
+    kill: () => proc.kill(),
+  };
+}
+
 // ─── host-side git scratch clone (harvest prerequisite) ──────────────────────
 
 /**

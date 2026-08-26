@@ -194,7 +194,12 @@ test.todoIf(liveTodoOff())(
       // Two briefs on the SAME issue, made DISTINCT via issueUrl — an opaque
       // human-facing link (schema: "a link, not a lookup") that changes each
       // brief's JSON and therefore its briefHash without touching spend
-      // identity, pins or manifests.
+      // identity, pins or manifests. brief46b is written in the SCHEMA's key
+      // order (repoSlug, issueId, issueUrl, commitSha, requestId,
+      // manifestPath, repoUrl): the primitive hashes the Zod-PARSED brief,
+      // and Zod emits keys in schema order — a literal in any other order
+      // hashes differently and the recompute assertion below would fail on
+      // KEY ORDER, not content.
       const brief46 = {
         repoSlug: "biospark33/QDS-Factory",
         issueId: 46,
@@ -202,7 +207,14 @@ test.todoIf(liveTodoOff())(
         manifestPath: "config/rosters/t2.pipeline.json",
         repoUrl: ctx.repoUrl,
       };
-      const brief46b = { ...brief46, issueUrl: "https://github.com/biospark33/QDS-Factory/issues/46" };
+      const brief46b = {
+        repoSlug: "biospark33/QDS-Factory",
+        issueId: 46,
+        issueUrl: "https://github.com/biospark33/QDS-Factory/issues/46",
+        commitSha: ctx.sha,
+        manifestPath: "config/rosters/t2.pipeline.json",
+        repoUrl: ctx.repoUrl,
+      };
       const briefs = [brief46, brief46b];
       const briefsPath = join(workspace, "briefs.json");
       writeFileSync(briefsPath, JSON.stringify({ briefs }));

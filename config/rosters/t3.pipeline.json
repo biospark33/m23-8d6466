@@ -1,0 +1,35 @@
+{
+  "version": "1.0.0",
+  "pipelineId": "t3-e2e-remote-phases",
+  "runBudgetMs": 60000,
+  "phases": [
+    {
+      "name": "t3-probe",
+      "kind": "code",
+      "description": "T3.5 remote-runner probe: echoes a marker whose stdout tail must ride the journal value (PF-2).",
+      "command": ["echo", "t3-remote-engine-ran"],
+      "maxDurationMs": 5000,
+      "retries": 0
+    },
+    {
+      "name": "t3-verify",
+      "kind": "code",
+      "description": "T3.5 closing sanity phase that exits cleanly.",
+      "command": ["true"],
+      "maxDurationMs": 5000,
+      "retries": 0
+    },
+    {
+      "name": "t3-marker",
+      "kind": "code",
+      "description": "T3.5 tracked work product: writes and COMMITS a marker file in the cloned checkout so the harvest bundle carries proof the phase executed on the box.",
+      "command": [
+        "sh",
+        "-c",
+        "printf 't3 phase marker\\n' > t3_phase_marker.txt && git add t3_phase_marker.txt && git -c user.name=t3-e2e -c user.email=t3-e2e@local commit -q -m t3-phase-marker"
+      ],
+      "maxDurationMs": 30000,
+      "retries": 0
+    }
+  ]
+}
