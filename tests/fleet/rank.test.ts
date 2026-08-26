@@ -617,9 +617,9 @@ describe("rank (DF3.2 AC7)", () => {
     // so embedders calling rank() directly get the named refusal instead of a
     // silent zero score.
     const h = harness({
-      arms: [{ arm: 0, runId: "inconsistent" }],
+      arms: [{ arm: 0, runId: "notexec" }],
       steps: {
-        inconsistent: { testsExecuted: false, testResults: { passed: 5, failed: 0 } },
+        notexec: { testsExecuted: false, testResults: { passed: 5, failed: 0 } },
       },
     });
     try {
@@ -630,7 +630,10 @@ describe("rank (DF3.2 AC7)", () => {
       const fe = e as FleetError;
       expect(fe.exitCode).toBe(2);
       expect(fe.code).toBe("invalid-step-output");
-      expect(fe.message).toContain("inconsistent");
+      // The refusal names the offending run AND the actual diagnostic — the
+      // runId deliberately does NOT collide with any word in the message, so
+      // each toContain pins a distinct fragment (CodeRabbit r7 follow-up).
+      expect(fe.message).toContain("notexec");
       expect(fe.message).toContain("testResults but testsExecuted is false");
     }
   });
