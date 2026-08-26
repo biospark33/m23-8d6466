@@ -59,6 +59,11 @@ import {
 
 const CAP = 50_000;
 const BOX_HOUR_RATE = 230_000;
+// 12 kill attempts' too-late residue is priced against the issue FOREVER; the
+// young-control refusal below needs (ceiling − orphan CAP − residue) < ask =
+// ceiling − 5k, i.e. residue < 45k across all attempts. 5×CAP leaves that
+// much room where 3×CAP starved at attempt 3-6 (run4).
+const CEILING = 5 * CAP;
 
 interface Spawned {
   exited: Promise<number | null>;
@@ -129,16 +134,16 @@ test.todoIf(liveTodoOff())(
       // every production verb uses.
       const ledgerPath = join(runsDir, "cost-ledger.db");
       mkdirSync(runsDir, { recursive: true });
-      // A FRESH issue (#48) with SLACK: 3× the per-arm cap. Retirement prices
-      // each too-late attempt's REAL box lifetime against the issue FOREVER
-      // (MEASURED fake-driver: run 1 priced 231 µ$ and run 2's admission
-      // ceiling came back 49769) — a ceiling of exactly one cap left zero
-      // room for that residue and run4's attempts 3-6 all refused exit 5
+      // A FRESH issue (#48) with SLACK: CEILING (5× the per-arm cap). Retirement
+      // prices each too-late attempt's REAL box lifetime against the issue
+      // FOREVER (MEASURED fake-driver: run 1 priced 231 µ$ and run 2's
+      // admission ceiling came back 49769) — a ceiling of exactly one cap left
+      // zero room for that residue and run4's attempts 3-6 all refused exit 5
       // before the kill window could be retried. The orphan-still-reserves
       // control below asks for MORE than the slack can ever allow instead.
       writeFileSync(
         join(workspace, "cost-config.json"),
-        JSON.stringify({ defaultCapMicroUsd: CAP, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "biospark33/QDS-Factory#48": 3 * CAP } }),
+        JSON.stringify({ defaultCapMicroUsd: CAP, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "biospark33/QDS-Factory#48": CEILING } }),
       );
       // Config as the records dir's SIBLING is the real resolution; the env
       // carries only the runs dir. (Run2's cascade: the repo root has no
@@ -164,39 +169,83 @@ test.todoIf(liveTodoOff())(
       };
 
       // ── kill-loop: land between admission-commit and store.create ────────
+      // MEASURED (runs 1-6): the window is ~1-3 ms — the admission row commits
+      // ~1 ms before store.create fires. The old poller (fresh readonly open
+      // per try + 5 ms race + 5 ms sleep ≈ 10 ms/cycle) caught it once in 13
+      // attempts. Tightened: ONE persistent readonly WAL connection (reopened
+      // only when the file resets underneath us), a hot spin of back-to-back
+      // SELECTs between event-loop turns (the turn lets proc.exited resolve),
+      // proc.kill() on first row sight, 12 attempts, 5×CAP ceiling.
       let orphan: { runId: string; decidedAt: string } | null = null;
-      for (let attempt = 1; attempt <= 6 && orphan === null; attempt++) {
-        const brief = briefFor();
-        const proc = spawnScript("scripts/fleet.ts", ["dispatch", "--driver", "exedev", "--brief", brief.path], env);
-        const t0 = Date.now();
-        let landed = false;
-        while (Date.now() - t0 < 180_000) {
-          const row = ledgerTry(
-            (db) =>
-              (db.query("SELECT run_id AS id, decided_at AS at FROM gate_admissions WHERE request_id = ?").get(brief.requestId) as { id: string; at: string } | null | undefined) ??
-              null,
-            ledgerPath,
-          );
-          if (row !== null) {
-            proc.kill(); // SIGKILL — the row is committed, nothing else may land
-            const msFromRow = Date.now() - t0;
-            if (!existsSync(join(runsDir, `${row.id}.json`))) {
-              orphan = { runId: row.id, decidedAt: row.at };
-              landed = true;
-              evidence.push({ phase: "kill-landed", attempt, msFromRow, runId: row.id, decidedAt: row.at });
-            } else {
-              evidence.push({ phase: "kill-too-late", attempt, runId: row.id, note: "record existed — tearing down, retrying" });
-            }
-            break;
+      const ATTEMPTS = 12;
+      let db: Database | null = null;
+      const getRow = (requestId: string): { id: string; at: string } | null => {
+        if (db === null) {
+          if (!existsSync(ledgerPath)) return null;
+          try {
+            const d = new Database(ledgerPath, { readonly: true });
+            d.query("SELECT 1 FROM gate_admissions LIMIT 1").get(); // schema-init window guard
+            db = d;
+          } catch {
+            return null; // no table yet / WAL mid-checkpoint (SQLITE_CANTOPEN)
           }
-          const code = await Promise.race([proc.exited, new Promise<null>((r) => setTimeout(() => r(null), 5))]);
-          if (code !== null) {
-            evidence.push({ phase: "attempt-exited-early", attempt, exitCode: code });
-            break;
-          }
-          await new Promise((r) => setTimeout(r, 5));
         }
-        if (!landed && orphan === null) proc.kill();
+        try {
+          return (db.query("SELECT run_id AS id, decided_at AS at FROM gate_admissions WHERE request_id = ?").get(requestId) as { id: string; at: string } | undefined) ?? null;
+        } catch {
+          try {
+            db.close();
+          } catch {
+            /* already closed */
+          }
+          db = null; // WAL reset underneath us — the next call reopens
+          return null;
+        }
+      };
+      for (let attempt = 1; attempt <= ATTEMPTS && orphan === null; attempt++) {
+        const brief = briefFor();
+        getRow("warmup"); // open the reader pre-spawn so the spin starts hot
+        const proc = spawnScript("scripts/fleet.ts", ["dispatch", "--driver", "exedev", "--brief", brief.path], env);
+        let exited: number | null = null;
+        void proc.exited.then(
+          (c) => {
+            exited = c;
+          },
+          () => {
+            exited = -1;
+          },
+        );
+        const t0 = Date.now();
+        let row: { id: string; at: string } | null = null;
+        while (row === null && exited === null && Date.now() - t0 < 180_000) {
+          for (let i = 0; i < 256 && row === null && exited === null; i += 1) {
+            row = getRow(brief.requestId);
+          }
+          if (row !== null || exited !== null) break;
+          // db not open yet (child boot / schema init) → idle cadence; hot
+          // spin only once the reader is live. Event-loop turn either way so
+          // the exited flag can resolve.
+          await new Promise((r) => setTimeout(r, db === null ? 5 : 0));
+        }
+        const msFromRow = row !== null ? Date.now() - t0 : null;
+        if (row !== null) {
+          proc.kill(); // SIGKILL — the row is committed, nothing else may land
+          if (!existsSync(join(runsDir, `${row.id}.json`))) {
+            orphan = { runId: row.id, decidedAt: row.at };
+            evidence.push({ phase: "kill-landed", attempt, msFromRow, runId: row.id, decidedAt: row.at });
+          } else {
+            evidence.push({ phase: "kill-too-late", attempt, msFromRow, runId: row.id, note: "record existed — tearing down, retrying" });
+          }
+        } else {
+          proc.kill();
+          evidence.push({ phase: exited === null ? "attempt-timeout" : "attempt-exited-early", attempt, exitCode: exited });
+          if (exited === 5) {
+            // Headroom refusal mid-loop: residue already ate the ceiling —
+            // further attempts are identical refusals. Fail with forensics.
+            evidence.push({ phase: "headroom-refused", attempt, note: "ceiling exhausted by too-late residue" });
+            break;
+          }
+        }
         await proc.exited.catch(() => null);
         const { stderr } = await proc.output;
         evidence.push({ phase: "attempt", attempt, stderrTail: stderr.trim().slice(-600) });
@@ -226,7 +275,7 @@ test.todoIf(liveTodoOff())(
       // orphan 50k − residue) + 5k can NEVER fit while the orphan reserves.
       writeFileSync(
         join(workspace, "cost-config.json"),
-        JSON.stringify({ defaultCapMicroUsd: 3 * CAP - 5_000, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "biospark33/QDS-Factory#48": 3 * CAP } }),
+        JSON.stringify({ defaultCapMicroUsd: CEILING - 5_000, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "biospark33/QDS-Factory#48": CEILING } }),
       );
       const control = await runFleet(
         ["dispatch", "--driver", "exedev", "--brief", briefFor().path],
@@ -234,7 +283,7 @@ test.todoIf(liveTodoOff())(
       );
       writeFileSync(
         join(workspace, "cost-config.json"),
-        JSON.stringify({ defaultCapMicroUsd: CAP, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "biospark33/QDS-Factory#48": 3 * CAP } }),
+        JSON.stringify({ defaultCapMicroUsd: CAP, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "biospark33/QDS-Factory#48": CEILING } }),
       );
       evidence.push({ phase: "young-control", exitCode: control.exitCode, stderrTail: control.stderr.trim().slice(-500) });
       expect(control.exitCode).toBe(5);
