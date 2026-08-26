@@ -26,7 +26,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { deadPid, liveChild } from "./helpers.ts";
-import { readOwnPidStartTime, stealJudgedReapMutex } from "../../src/fleet/fleet-lock.ts";
+import { FleetLock, readOwnPidStartTime, stealJudgedReapMutex } from "../../src/fleet/fleet-lock.ts";
 
 const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "df3-2-fleet-lock-")));
 
@@ -130,5 +130,31 @@ describe("stealJudgedReapMutex (reclaim-mutex steal judgments)", () => {
     writeFileSync(reap, bytes, { mode: 0o600 });
     expect(stealJudgedReapMutex(reap, bytes)).toBe(true);
     expect(existsSync(reap)).toBe(false);
+  });
+});
+
+describe("FleetLock construction refuses an unattributable body (round-6 follow-up)", () => {
+  test("empty requestId throws a typed refusal and mints nothing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "df32-lock-emptyreq-"));
+    const path = join(dir, "fleet.lock");
+    expect(() => new FleetLock({ path, requestId: "" })).toThrow(
+      /requestId must be a non-empty string/,
+    );
+    // No directory side effects either: validation happens before any fs op.
+    expect(existsSync(path)).toBe(false);
+    expect(existsSync(dir)).toBe(true); // constructor never even mkdirs
+    try {
+      const thrown = (() => {
+        try {
+          new FleetLock({ path, requestId: "" });
+        } catch (e) {
+          return e;
+        }
+      })();
+      expect((thrown as { code?: string }).code).toBe("fleet-lock-invalid-request");
+      expect((thrown as { exitCode?: number }).exitCode).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

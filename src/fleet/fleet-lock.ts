@@ -359,6 +359,19 @@ export class FleetLock {
   private readonly requestId: string;
 
   constructor(opts: { path?: string; requestId: string }) {
+    // Empty requestId refuses HERE, before any fs op can commit a body: a lock
+    // minted with `""` is one `classifyHolder` can never judge (the round-6
+    // empty-requestId gate), so aged contenders would wedge on fleet-busy until
+    // an operator removed the file by hand. Validation-before-construction,
+    // the same discipline as FanoutRecordStore.
+    if (typeof opts.requestId !== "string" || opts.requestId === "") {
+      throw new FleetError(
+        2,
+        "fleet-lock-invalid-request",
+        `requestId must be a non-empty string, got ${JSON.stringify(opts.requestId)}`,
+        "pass the originating request's id — an unattributable fleet lock can never be reclaimed safely",
+      );
+    }
     this.path = resolve(opts.path ?? FLEET_LOCK_PATH);
     this.reapPath = `${this.path}.reap`;
     this.requestId = opts.requestId;
