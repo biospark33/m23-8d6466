@@ -98,7 +98,11 @@ test.todoIf(liveTodoOff())(
       // All four negative probes refuse BEFORE the lock: exit 2, JSON
       // envelope on stderr, zero boxes minted. They are run in ONE workspace
       // so the final fanoutsDir listing asserts no fan-*.json side effect.
-      const neg = async (name: string, extra: string[], wantCode: string, n = "2") => {
+      // `want` is a stderr SUBSTRING, not always the code: the CLI's own
+      // mirror guard (fleet.ts:1577-1585) refuses --roster before the
+      // primitive sees it, as code "usage" — the message is the stable
+      // surface on that one.
+      const neg = async (name: string, extra: string[], want: string, n = "2") => {
         const r = await runFleet(
           [
             "fanout", "--pattern", "many-stories", "--n", n,
@@ -109,9 +113,9 @@ test.todoIf(liveTodoOff())(
         );
         evidence.push({ phase: name, exitCode: r.exitCode, stderrTail: r.stderr.trim().slice(-500) });
         expect(r.exitCode).toBe(2);
-        expect(r.stderr).toContain(wantCode);
+        expect(r.stderr).toContain(want);
       };
-      await neg("neg-roster", ["--roster", "lead,fixer"], "roster-forbidden");
+      await neg("neg-roster", ["--roster", "lead,fixer"], "--roster is not valid for many-stories");
       await neg("neg-pin", ["--pin", ctx.sha], "pin-mismatch");
       await neg("neg-count", [], "brief-count-mismatch", "3");
       // n=1 is LEGAL for many-stories (minN=1): two briefs against n=1 must
