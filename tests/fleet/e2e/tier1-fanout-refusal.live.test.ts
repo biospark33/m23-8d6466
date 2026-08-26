@@ -15,7 +15,7 @@
  * nothing", proven against the live provider listing.
  */
 import { expect, test } from "bun:test";
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { FleetLock } from "../../../src/fleet/fleet-lock.ts";
@@ -52,6 +52,8 @@ test.todoIf(liveTodoOff())(
       mkdirSync(join(workspace, ".sandbox"), { recursive: true });
       lock = new FleetLock({ path: join(workspace, ".sandbox/fleet.lock"), requestId: `e2e-t15-${probe}` });
       lock.acquire();
+      // Prove the lock is on disk (acquire could succeed in-memory while the file write failed silently).
+      expect(existsSync(lock.path), `fleet lock file exists at ${lock.path}`).toBe(true);
       evidence.push({ phase: "fleet-lock-held", ok: true, path: lock.path });
 
       const before = (await ctx.driver.list()).map((b) => b.name);

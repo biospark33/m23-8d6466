@@ -27,6 +27,8 @@ import { dirname, join } from "node:path";
 
 import { deadPid, liveChild } from "./helpers.ts";
 import { FleetLock, readOwnPidStartTime, stealJudgedReapMutex } from "../../src/fleet/fleet-lock.ts";
+import { isAlive } from "../../scripts/lib/run-lock.ts";
+import type { FleetError } from "../../src/fleet/dispatch.ts";
 
 const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "df3-2-fleet-lock-")));
 
@@ -156,5 +158,114 @@ describe("FleetLock construction refuses an unattributable body (round-6 follow-
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("round-7 S1 timestamp validation", () => {
+  let lockPath: string;
+  let children: Bun.Subprocess[];
+
+  beforeEach(() => {
+    lockPath = join(realpathSync(mkdtempSync(join(tmpdir(), "case-"))), "sandbox", "fleet.lock");
+    children = [];
+  });
+
+  afterEach(() => {
+    for (const c of children) {
+      try {
+        c.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+    children = [];
+    rmSync(dirname(lockPath), { recursive: true, force: true });
+  });
+
+  test("r7-S1a: negative createdAt is unjudgeable — refuse, never reclaim", async () => {
+    const pid = await deadPid();
+    expect(isAlive(pid)).toBe(false);
+    mkdirSync(dirname(lockPath), { recursive: true });
+    const negativeTs = "1969-12-31T23:59:59.999Z"; // Date.parse returns -1 ms
+    expect(Date.parse(negativeTs)).toBe(-1);
+    writeFileSync(
+      lockPath,
+      `${JSON.stringify({
+        pid,
+        pidStartTime: 1,
+        createdAt: negativeTs,
+        requestId: "req-negative-created",
+      })}\n`,
+      { mode: 0o600 },
+    );
+    let err: unknown;
+    try {
+      new FleetLock({ path: lockPath, requestId: "contender" }).acquire();
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    const fe = err as FleetError;
+    expect(fe.exitCode).toBe(5);
+    expect(fe.code).toBe("fleet-busy");
+    expect(fe.message).toContain("malformed createdAt");
+    expect(readFileSync(lockPath, "utf8")).toContain(negativeTs); // never stolen
+  });
+
+  test("r7-S1c: far-future createdAt is unjudgeable — refuse, never reclaim", async () => {
+    const pid = await deadPid();
+    expect(isAlive(pid)).toBe(false);
+    mkdirSync(dirname(lockPath), { recursive: true });
+    const futureTime = new Date(Date.now() + 3_600_000).toISOString(); // 1 hour ahead
+    writeFileSync(
+      lockPath,
+      `${JSON.stringify({
+        pid,
+        pidStartTime: 1,
+        createdAt: futureTime,
+        requestId: "req-future-created",
+      })}\n`,
+      { mode: 0o600 },
+    );
+    let err: unknown;
+    try {
+      new FleetLock({ path: lockPath, requestId: "contender" }).acquire();
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    const fe = err as FleetError;
+    expect(fe.exitCode).toBe(5);
+    expect(fe.code).toBe("fleet-busy");
+    expect(fe.message).toContain("malformed createdAt");
+    expect(readFileSync(lockPath, "utf8")).toContain(futureTime); // never stolen
+  });
+
+  test("r7-S1b: negative pidStartTime is unjudgeable — refuse, never reclaim", async () => {
+    const pid = await deadPid();
+    expect(isAlive(pid)).toBe(false);
+    mkdirSync(dirname(lockPath), { recursive: true });
+    writeFileSync(
+      lockPath,
+      `${JSON.stringify({
+        pid,
+        pidStartTime: -1, // negative start-time
+        createdAt: new Date(Date.now() - 4_000_000).toISOString(),
+        requestId: "req-negative-start",
+      })}\n`,
+      { mode: 0o600 },
+    );
+    let err: unknown;
+    try {
+      new FleetLock({ path: lockPath, requestId: "contender" }).acquire();
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    const fe = err as FleetError;
+    expect(fe.exitCode).toBe(5);
+    expect(fe.code).toBe("fleet-busy");
+    expect(fe.message).toContain("cannot judge");
+    expect(readFileSync(lockPath, "utf8")).toContain("pidStartTime\":-1"); // never stolen
   });
 });

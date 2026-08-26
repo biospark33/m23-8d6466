@@ -137,7 +137,9 @@ function errText(e: unknown): string {
 const MAX_BRIEF_BYTES = 64 * 1024;
 // Same posture as MAX_BRIEF_BYTES, one tier up in size: --steps-json is
 // capped AS STAT'D so readFileSync never pulls unbounded bytes into memory.
-const MAX_STEPS_BYTES = 1024 * 1024;
+// r7-T-b2: exported so the CLI tests pin the --steps-json boundary against
+// the production constant instead of a drifting 1024*1024 literal.
+export const MAX_STEPS_BYTES = 1024 * 1024;
 
 /**
  * The tokenizer's flag grammar, derived from the SAME registry `parseArgv`
@@ -1573,19 +1575,41 @@ export async function run(
       // untouched — this is the library boundary staying put while the CLI
       // refuses earlier. An absent/garbled PATTERN is refused here too — same
       // message fanout() would give, just before any constructor runs.
-      const rosterIds = flags
-        .get("--roster")
+      const rawRosterValue = flags.get("--roster");
+      const rosterIds = rawRosterValue
         ?.split(",")
-        .map((s) => s.trim())
-        .filter((s) => s !== "");
+        .map((s) => s.trim());
+      // r7-S3a: Fail-closed for empty roster segments BEFORE filtering.
+      // `--roster "a,,b"` has empty segments; flag PRESENT with ANY empty
+      // entry ⇒ refusal. Filter happens AFTER this guard.
+      if (rosterIds?.some((s) => s === "")) {
+        throw usageError(
+          "--roster contains an empty entry",
+          "every comma-separated entry must be non-empty",
+        );
+      }
+      // Apply the filter AFTER the empty-segment guard.
+      const filteredRosterIds = rosterIds?.filter((s) => s !== "");
       // C2: Fail-closed for explicit empty roster. `--roster ""` or `--roster ","`
       // produces an empty list; flag PRESENT but resulting list EMPTY ⇒ refusal.
-      // Flag absent ⇒ rosterIds stays undefined (no roster provided).
-      if (rosterIds !== undefined && rosterIds.length === 0) {
+      // Flag absent ⇒ filteredRosterIds stays undefined (no roster provided).
+      if (filteredRosterIds !== undefined && filteredRosterIds.length === 0) {
         throw usageError(
           "--roster provided but empty",
           "pass at least one roster entry, or omit --roster entirely",
         );
+      }
+      // r7-S3b: Fail-closed for duplicate roster ids. Duplicates silently
+      // degrade the experiment by provisioning identical-model arms.
+      const seen = new Set<string>();
+      for (const id of filteredRosterIds ?? []) {
+        if (seen.has(id)) {
+          throw usageError(
+            `--roster contains duplicate entry ${JSON.stringify(id)}`,
+            "each roster entry must be unique",
+          );
+        }
+        seen.add(id);
       }
       // Pattern-scoped structure, still pre-construction: a KNOWN pattern gets
       // its min-N refusals here; anything else takes the unknown-pattern
@@ -1593,7 +1617,7 @@ export async function run(
       // many-stories roster FORBIDDEN check deliberately precedes this guard:
       // `many-stories --roster …` must refuse on the roster even when the brief
       // is not yet wrapper-valid (cli.test.ts pins both orderings).
-      if (pattern === "many-stories" && rosterIds !== undefined) {
+      if (pattern === "many-stories" && filteredRosterIds !== undefined) {
         throw usageError(
           "--roster is not valid for many-stories",
           "drop --roster; per-arm variation comes from the distinct briefs",
@@ -1616,14 +1640,14 @@ export async function run(
       // Roster shape, same hoisting: required and exactly --n wide for
       // best-of-n/race (many-stories' forbidden case already refused above).
       if (pattern !== "many-stories") {
-        if (rosterIds === undefined) {
+        if (filteredRosterIds === undefined) {
           throw usageError(
             `${pattern} requires a roster list (one entry per arm)`,
             "pass the roster entries and rerun",
           );
         }
-        if (rosterIds.length !== n) {
-          throw usageError(`${pattern} got ${rosterIds.length} roster entries for n=${n}`, "the roster count must equal --n");
+        if (filteredRosterIds.length !== n) {
+          throw usageError(`${pattern} got ${filteredRosterIds.length} roster entries for n=${n}`, "the roster count must equal --n");
         }
       }
 
@@ -1720,7 +1744,7 @@ export async function run(
         ...(loserLedger === undefined ? {} : { costLedger: loserLedger }),
         ...(fanoutsFlagDir === undefined ? {} : { fanoutsDir: fanoutsFlagDir }),
         ...(injectedLockPath === undefined ? {} : { lockPath: injectedLockPath }),
-        ...(rosterIds === undefined ? {} : { rosterIds }),
+        ...(filteredRosterIds === undefined ? {} : { rosterIds: filteredRosterIds }),
         ...(capMicroUsd === undefined ? {} : { capMicroUsd }),
       });
       fanoutId = result.fanoutId;

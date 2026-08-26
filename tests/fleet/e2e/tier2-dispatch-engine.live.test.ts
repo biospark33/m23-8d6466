@@ -323,8 +323,20 @@ test.todoIf(liveTodoOff())(
       try {
         // F13 lesson: dispatch mints `qds-…` box names — filtering only
         // `e2e-…` reported a false-clean [] while three boxes billed.
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls", fleetBoxes: final });
+        // r7-T-h1: measured live substrate lag: destroy rm exit 0 while box stays
+        // listed 25+ seconds → poll with bounded retry before reporting leak.
+        const maxAttempts = 5;
+        const retryDelayMs = 8000;
+        let final: string[] = [];
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+          if (final.length === 0) break;
+          if (attempt < maxAttempts) {
+            evidence.push({ phase: "final-ls-retry", attempt, remaining: final, note: "boxes still listed, retrying" });
+            await new Promise((r) => setTimeout(r, retryDelayMs));
+          }
+        }
+        evidence.push({ phase: "final-ls", fleetBoxes: final, attempts: maxAttempts });
         expect(final).toEqual([]); // a leak is a failure even when the test already failed
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });

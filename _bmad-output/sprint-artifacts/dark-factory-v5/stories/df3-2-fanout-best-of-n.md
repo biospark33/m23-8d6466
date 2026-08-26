@@ -916,3 +916,44 @@ stash, re-pinned to F8 math (23/23). Gates: full suite 3526 pass / 8 skip /
 11 todo / 1 fail = documented pre-existing gitnexus graph-queries index-reader;
 tsc --noEmit clean; biome clean on all 15 touched files; gitnexus detect_changes
 scope = PR's own fleet/CLI/test modules, no out-of-scope symbols.
+
+### Round 7 gate (2026-08-25)
+
+17 reviewers (11 blind, 4 edge, 2 split auditors — the first auditor died on the
+full-diff context limit and was respawned as two sequential-reading halves) over an
+11-chunk bijection-verified split. Auditors: 0 AC FAILs (PARTIALs were split-scope
+artifacts, cross-covered). Ledger: `workflow-state/code-review/pr128-r7/triage.md`.
+
+Patched (13 source + 12 test items, all including LOWs):
+- [x] [Review][Patch] S1a/S1c fleet-lock refuses negative + far-future createdAt (unjudgeable, never reclaim) [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] S1b fleet-lock refuses negative pidStartTime in classifyHolder + stealJudgedReapMutex [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] S1d per-listener try/catch in signal restoration loop [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] S2a rank refuses testResults-without-testsExecuted:true at library boundary (CLI C3 parity) [src/fleet/rank.ts]
+- [x] [Review][Patch] S3a `--roster "a,,b"` empty-segment refusal [scripts/fleet.ts]
+- [x] [Review][Patch] S3b `--roster "x,x"` duplicate refusal [scripts/fleet.ts]
+- [x] [Review][Patch] S3c rank refuses orphaned zero-arms fanout record (crash-window detect-only, never deletes) [src/fleet/rank.ts]
+- [x] [Review][Patch] S4a race lowest-index tie-break documented [src/fleet/fanout-primitive.ts]
+- [x] [Review][Patch] S5a evidence scrub catch-all `sk-…{20,}` pass [tests/fleet/e2e/live-harness.ts]
+- [x] [Review][Patch] S5b runIdFor suffix space 1e4→1e6; S5c scratchClone unfetchable-SHA diagnostic [tests/fleet/e2e/live-harness.ts]
+- [x] [Review][Patch] T-g fanout-refusal test asserts lock file on disk [tests/fleet/e2e/tier1-fanout-refusal.live.test.ts]
+- [x] [Review][Patch] T-a1 patterns.test exact-count tightening (1 pinned; 4 sites documented non-pinnable — poll-cycle timing) + peak-measured-before-release bug fix [tests/fleet/patterns.test.ts]
+- [x] [Review][Patch] T-b1/T-b2/T-b3 negative-cap test, MAX_STEPS_BYTES export+import, scratch-dir afterEach sweep [tests/fleet/cli.test.ts, scripts/fleet.ts]
+- [x] [Review][Patch] T-c1 deadPid budget 100ms→2s [tests/fleet/helpers.ts]
+- [x] [Review][Patch] T-e1 tier1-harvest finally asserts teardown exit 0 when body succeeded (VM-leak visibility) [tests/fleet/e2e/tier1-harvest.live.test.ts]
+- [x] [Review][Patch] T-f1 tier1-lock barrier no longer false-throws when first teardown out-runs the poller [tests/fleet/e2e/tier1-lock.live.test.ts]
+- [x] [Review][Patch] T-h1 tier2 leak-check retry 5×8s (measured 25s+ listing lag) [tests/fleet/e2e/tier2-*.live.test.ts]
+
+Dismissed (28, each verified against source — see triage.md §DISMISS). Headline:
+steps-json "unbounded read" BLOCKER (no privilege boundary; FIFO/dir refused pre-read;
+stat-fail fall-through deliberate), cost-ledger float BLOCKER (numerator integrality
+checked before division), settle-loop toBeDefined "false pass" (reviewer error — it
+fails), runFleet "backpressure deadlock" (Promise.all drains both pipes concurrently),
+fill absolute-workdir `../bundle` break (join consistent both sides), liveChild BLOCKER
+(self-expiring 30s, call-site contract). T-i1 qds-cost ceil comment was already fixed
+in round 6 (reviewer read a stale hunk).
+
+Gates: focal suites 484 pass / 0 fail across 8 files (cli suite run 3× — one 5s-default
+timeout flake hardened to 20s with rationale); biome clean on all 17 touched files;
+tsc --noEmit exit 0; gitnexus detect_changes scope = PR's own fleet/CLI/test modules,
+no out-of-scope symbols. decision_needed: none — S3c resolved detect+refuse (fail-safe),
+S1c resolved refuse-reclamation (fail-closed).

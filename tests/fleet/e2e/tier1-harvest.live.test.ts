@@ -96,6 +96,7 @@ test.todoIf(liveTodoOff())(
     let workspace = "";
     let evidencePath = "";
     let outcome = "pass";
+    let bodySucceeded = false; // r7-T-e1: track try-body success for finally assertion
     try {
       workspace = tmpWorkspace("t13a");
       const recordsDir = join(workspace, "runs");
@@ -128,6 +129,7 @@ test.todoIf(liveTodoOff())(
       expect(deliver.exitCode).toBe(0);
       expect(deliver.stdout.trim()).toBe("600");
       evidence.push({ phase: "default-env-file-writable", mode: deliver.stdout.trim() });
+      bodySucceeded = true; // r7-T-e1: all body assertions passed
     } catch (e) {
       outcome = "fail";
       evidence.push({ phase: "test-error", error: (e as Error).message });
@@ -136,6 +138,11 @@ test.todoIf(liveTodoOff())(
       if (workspace !== "") {
         const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
         evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode });
+        // r7-T-e1: if body succeeded, assert teardown exitCode 0 to catch VM leaks.
+        // if body already failed, evidence-only teardown avoids masking the original failure.
+        if (bodySucceeded) {
+          expect(td.exitCode).toBe(0); // leak prevention: a failed teardown here is a real-money breach
+        }
       }
       try {
         evidencePath = writeEvidence("t1-3a-fill-default-fixed", { test: "T1.3a", outcome, runId, phases: evidence });
@@ -160,6 +167,7 @@ test.todoIf(liveTodoOff())(
     let workspace = "";
     let evidencePath = "";
     let outcome = "pass";
+    let bodySucceeded = false; // r7-T-e1: track try-body success for finally assertion
     try {
       workspace = tmpWorkspace("t13b");
       const recordsDir = join(workspace, "runs");
@@ -206,6 +214,7 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "quarantine-ref", exitCode: ref.exitCode, tip: ref.stdout.toString().trim() });
       expect(ref.exitCode).toBe(0);
       expect(ref.stdout.toString().trim()).toBe(tip);
+      bodySucceeded = true; // r7-T-e1: all body assertions passed
     } catch (e) {
       outcome = "fail";
       evidence.push({ phase: "test-error", error: (e as Error).message });
@@ -214,6 +223,11 @@ test.todoIf(liveTodoOff())(
       if (workspace !== "") {
         const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
         evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode });
+        // r7-T-e1: if body succeeded, assert teardown exitCode 0 to catch VM leaks.
+        // if body already failed, evidence-only teardown avoids masking the original failure.
+        if (bodySucceeded) {
+          expect(td.exitCode).toBe(0); // leak prevention: a failed teardown here is a real-money breach
+        }
       }
       try {
         evidencePath = writeEvidence("t1-3b-harvest-verb", { test: "T1.3b", outcome, runId, phases: evidence });

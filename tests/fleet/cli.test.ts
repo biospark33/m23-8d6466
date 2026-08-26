@@ -48,7 +48,7 @@ import { deadPid } from "./helpers.ts";
 
 import { Database } from "bun:sqlite";
 
-import { makeLoserLedgerHook, observingMint, run } from "../../scripts/fleet.ts";
+import { makeLoserLedgerHook, MAX_STEPS_BYTES, observingMint, run } from "../../scripts/fleet.ts";
 import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
 import { run as sandboxTeardownRun } from "../../scripts/sandbox-teardown.ts";
 import { listVerbs, renderHelp } from "../../src/fleet/verbs.ts";
@@ -65,6 +65,13 @@ import { goodLedger, overBudgetLedger, type RecordingLedger } from "./helpers.ts
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "df3-1-cli-"));
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
+
+// r7-T-b3: per-test scratch dirs (fleet-test-*) are swept after each test so
+// a failure mid-test cannot accumulate litter across the suite.
+const freshScratchDirs: string[] = [];
+afterEach(() => {
+  for (const d of freshScratchDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
 
 /**
  * Losers of `within`'s race. `run()` is in-process and cannot be killed —
@@ -3666,7 +3673,11 @@ process.on = ((sig, listener) => {
     }
 
     expect(counts()).toEqual(before);
-  });
+    // r7: eight sequential in-process CLI round-trips routinely exceed bun's
+    // 5s default under load; the timeout must never be what fails a listener
+    // arithmetic test (a timeout here also wedges the lock for the NEXT test,
+    // turning one flake into two).
+  }, 20_000);
 
   test("observingMint reports the minted id at create() time and forwards everything else (round 10)", async () => {
     // FC10's seam, pinned directly. dispatch() persists via store.create long
@@ -4293,12 +4304,8 @@ process.on = ((sig, listener) => {
   });
 
   test("--roster of separators only is flag-absent: roster-required, not count-mismatch", async () => {
-    // `--roster ","` splits to an empty list, which used to be treated as a
-    // SUPPLIED roster of zero entries. It names no arms at all, so the operator
-    // gets the same refusal as omitting the flag entirely. Round 3 hoists that
-    // refusal to the CLI's pre-construction block, so it surfaces as a usage
-    // error whose prose still says a roster is required.
-    // After round 6: explicit empty refusal (C2) now fires instead.
+    // `--roster ","` splits to ["",""], which round 7 S3a now refuses as empty segments
+    // (previously: split→filter→empty list, caught by C2 empty-list refusal).
     reset();
     const d = fanoutDeps();
     const code = await runCli(
@@ -4308,7 +4315,7 @@ process.on = ((sig, listener) => {
     expect(code).toBe(2);
     const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: error envelope this run just emitted to errCaptured */
     expect(envelope.code).toBe("usage");
-    expect(envelope.message).toBe("--roster provided but empty");
+    expect(envelope.message).toBe("--roster contains an empty entry");
   });
 
   test("a refused race constructs no cost ledger — no db file appears anywhere", async () => {
@@ -4722,7 +4729,7 @@ process.on = ((sig, listener) => {
     // constant would let an implementation that quietly lowered the cap pass
     // both sides of this boundary. The pad makes the file 1 MiB + 9 bytes.
     const stepsPath = join(dir, "steps-big.json");
-    writeFileSync(stepsPath, JSON.stringify({ pad: "x".repeat(1024 * 1024) }));
+    writeFileSync(stepsPath, JSON.stringify({ pad: "x".repeat(MAX_STEPS_BYTES) }));
     const freshDir = join(dir, "never-created-steps");
     reset();
     const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
@@ -5146,6 +5153,17 @@ process.on = ((sig, listener) => {
       expect(code).toBe(0);
     });
 
+    test("C1: --cap-micro-usd negative (-1) is refused (r7-T-b1)", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b", "--cap-micro-usd", "-1"],
+        fanoutDeps(),
+      );
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("--cap-micro-usd");
+    });
+
     test("C2: --roster with empty string (\"\") is refused as explicit empty", async () => {
       const code = await runCli(
         ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", ""],
@@ -5159,19 +5177,21 @@ process.on = ((sig, listener) => {
       expect(envelope.message).toContain("non-empty");
     });
 
-    test("C2: --roster with only commas (\",,,\") is refused as explicit empty", async () => {
+    test("C2: --roster with only commas (\",,,\") is refused as explicit empty (r7-S3a guard catches empty segments)", async () => {
       const code = await runCli(
         ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", ",,,"],
         fanoutDeps(),
       );
       expect(code).toBe(2);
-      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
       expect(envelope.code).toBe("usage");
-      expect(envelope.message).toBe("--roster provided but empty");
+      expect(envelope.message).toBe("--roster contains an empty entry");
+      expect(envelope.remediation).toContain("non-empty");
     });
 
     test("C3: --steps-json entry with testResults but testsExecuted=false is refused", async () => {
       const freshDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+      freshScratchDirs.push(freshDir);
       const stepsPath = join(freshDir, "steps.json");
       writeFileSync(stepsPath, JSON.stringify({ "qds-123": { testsExecuted: false, testResults: { passed: 1, failed: 0 } } }));
       const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
@@ -5183,6 +5203,7 @@ process.on = ((sig, listener) => {
 
     test("C3: --steps-json entry with testResults and testsExecuted=true is accepted", async () => {
       const freshDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+      freshScratchDirs.push(freshDir);
       const stepsPath = join(freshDir, "steps.json");
       writeFileSync(stepsPath, JSON.stringify({ "qds-123": { testsExecuted: true, testResults: { passed: 1, failed: 0 } } }));
       const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
@@ -5193,11 +5214,80 @@ process.on = ((sig, listener) => {
 
     test("C3: --steps-json entry with testsExecuted=true and no testResults is legal (passRate 0)", async () => {
       const freshDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+      freshScratchDirs.push(freshDir);
       const stepsPath = join(freshDir, "steps.json");
       writeFileSync(stepsPath, JSON.stringify({ "qds-123": { testsExecuted: true } }));
       const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
       // Exits 4 because fanout doesn't exist, but shape validation passed
       expect(code).toBe(4);
+    });
+
+    // round-7 review S3 findings
+    test("S3a: --roster with empty segment (\"a,,b\") is refused with named error", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "3", "--roster", "a,,b"],
+        fanoutDeps(),
+      );
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toBe("--roster contains an empty entry");
+      expect(envelope.remediation).toContain("non-empty");
+    });
+
+    test("S3b: --roster with duplicate entries (\"x,x\") is refused naming the duplicate", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "x,x"],
+        fanoutDeps(),
+      );
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("duplicate entry");
+      expect(envelope.message).toContain("x");
+      expect(envelope.remediation).toContain("unique");
+    });
+
+    test("S3c: rank refuses orphaned fanout record (n>0, arms:[]) with named error", async () => {
+      // Create a custom fanouts directory and use it directly via --dir
+      const customFanoutsDir = join(dir, "custom-fanouts");
+      mkdirSync(customFanoutsDir, { recursive: true });
+      const fstore = new FanoutRecordStore({ dir: customFanoutsDir });
+      // Plant an orphaned record: n=2 but arms=[] (crash between create and mutate)
+      const orphanedId = "fan-20260101-a1b2c3"; // Valid format: fan-YYYYMMDD-6hex
+      fstore.create({
+        fanoutId: orphanedId,
+        requestId: "01234567-89ab-cdef-0123-456789abcdef",
+        pattern: "best-of-n",
+        n: 2,
+        pin: "a".repeat(40),
+        createdAt: new Date().toISOString(),
+        arms: [], // Empty arms with n>0 = orphaned
+        winner: null,
+        rankedAt: null,
+        closedAt: null,
+      });
+      // Use --dir to point directly at the fanouts directory (resolveFanoutsDir returns dir as-is)
+      const code = await runCli(["rank", orphanedId, "--dir", customFanoutsDir], deps(""));
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
+      expect(envelope.code).toBe("invalid-fanout-record");
+      expect(envelope.message).toContain("has n=2 but zero arms");
+      expect(envelope.message).toContain("orphaned");
+      expect(envelope.remediation).toContain(".sandbox/fanouts/");
+    });
+
+    test("S3 control: --roster with valid distinct entries (\"a,b\") still works", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b"],
+        fanoutDeps(),
+      );
+      // Same fixture shape as the C1 accepts-exactly-$1M control: the verb runs
+      // to completion (0) — roster parsing neither refuses nor derails it.
+      expect(code).toBe(0);
+      const errText = errCaptured.join("");
+      expect(errText).not.toContain("--roster");
+      expect(errText).not.toContain("usage");
     });
   });
 });

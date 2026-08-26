@@ -576,6 +576,7 @@ async function runRace(
   const baseline = performanceNow(deps);
   while (undecided().length > 0 && performanceNow(deps) - baseline < ceilingMs) {
     const current = undecided();
+    // Tie-break: when multiple arms complete in the same poll iteration, the lowest arm index wins (r7-S4a).
     for (const arm of current) {
       const verdict = await probeArm(deps, store, fanoutId, outcomes, arm, markerPath, deadlineMs);
       if (verdict === "unusable") {

@@ -43,6 +43,7 @@ interface HarnessOpts {
  */
 function harness(opts: HarnessOpts = {}) {
   const record: FanoutRecordView = {
+    n: opts.arms?.length ?? 0,
     winner: null,
     rankedAt: null,
     closedAt: null,
@@ -287,13 +288,10 @@ describe("rank (DF3.2 AC7)", () => {
   test("guards the pass-rate divisor: testsExecuted:false, absent testResults, zero total → 0", async () => {
     const h = harness({
       arms: [
-        { arm: 0, runId: "notexec" },
-        { arm: 1, runId: "noresults" },
-        { arm: 2, runId: "zerototal" },
+        { arm: 0, runId: "noresults" },
+        { arm: 1, runId: "zerototal" },
       ],
       steps: {
-        // Flag false with nonzero counts present — the flag is a GUARD, never a divisor.
-        notexec: { testsExecuted: false, testResults: { passed: 9, failed: 1 }, changedFiles: [] },
         noresults: { testsExecuted: true, changedFiles: [] },
         zerototal: { testsExecuted: true, testResults: { passed: 0, failed: 0 }, changedFiles: [] },
       },
@@ -309,7 +307,7 @@ describe("rank (DF3.2 AC7)", () => {
     }
     // Literal spec: all scores are exactly 0, so the top-two normalized delta is
     // 0 ≤ 0.1 — a tie. No all-zero carve-out exists in AC7 and none is invented;
-    // the human reviewer sees three zeros and concludes nothing worked.
+    // the human reviewer sees two zeros and concludes nothing worked.
     expect(res.tie).toBe(true);
   });
 
@@ -612,6 +610,67 @@ describe("rank (DF3.2 AC7)", () => {
       expect(fe.code).toBe("invalid-step-output");
       expect(fe.message).toContain("non-negative integer passed/failed");
     }
+  });
+
+  test("r7-S2a: refuses testResults with testsExecuted=false as inconsistent", async () => {
+    // The CLI already refuses this combo (round-6 C3); rank must refuse too,
+    // so embedders calling rank() directly get the named refusal instead of a
+    // silent zero score.
+    const h = harness({
+      arms: [{ arm: 0, runId: "inconsistent" }],
+      steps: {
+        inconsistent: { testsExecuted: false, testResults: { passed: 5, failed: 0 } },
+      },
+    });
+    try {
+      await rank(FANOUT_ID, h.deps);
+      throw new Error("expected rank to refuse testResults with testsExecuted=false");
+    } catch (e) {
+      expect(e).toBeInstanceOf(FleetError);
+      const fe = e as FleetError;
+      expect(fe.exitCode).toBe(2);
+      expect(fe.code).toBe("invalid-step-output");
+      expect(fe.message).toContain("inconsistent");
+      expect(fe.message).toContain("testResults but testsExecuted is false");
+    }
+  });
+
+  test("r7-S2a: refuses testResults with testsExecuted absent as inconsistent", async () => {
+    // testsExecuted missing (undefined) while testResults present is the same
+    // semantic inconsistency — results exist but the guard doesn't say tests ran.
+    const h = harness({
+      arms: [{ arm: 0, runId: "absentflag" }],
+      steps: {
+        absentflag: { testResults: { passed: 5, failed: 0 } },
+      },
+    });
+    try {
+      await rank(FANOUT_ID, h.deps);
+      throw new Error("expected rank to refuse testResults with testsExecuted absent");
+    } catch (e) {
+      expect(e).toBeInstanceOf(FleetError);
+      const fe = e as FleetError;
+      expect(fe.exitCode).toBe(2);
+      expect(fe.code).toBe("invalid-step-output");
+      expect(fe.message).toContain("absentflag");
+      expect(fe.message).toContain("testResults but testsExecuted is false");
+    }
+  });
+
+  test("r7-S2a: accepts testResults with testsExecuted=true and scores normally", async () => {
+    // Control case: the consistent combo still scores, not refused.
+    const h = harness({
+      arms: [{ arm: 0, runId: "consistent" }],
+      steps: {
+        consistent: { testsExecuted: true, testResults: { passed: 5, failed: 1 }, changedFiles: ["f.ts"] },
+      },
+    });
+    const res = await rank(FANOUT_ID, h.deps);
+    // testPassRate = 5/6 ≈ 0.833, coverage = 1 (single file, union of 1)
+    // score = 0.833*0.6 + 1*0.4 ≈ 0.5 + 0.4 = 0.9
+    expect(res.scores[0]?.score).toBeCloseTo(0.9, 1);
+    expect(res.scores[0]?.breakdown.testPassRate).toBeCloseTo(5 / 6, 6);
+    expect(res.scores[0]?.breakdown.uniqueFileCoverage).toBe(1);
   });
 
   test("characterization: two arms sharing one runId score identically over the deduped union", async () => {

@@ -274,7 +274,14 @@ function installFleetSignalRelease(): void {
       try {
         process.kill(process.pid, sig);
       } finally {
-        for (const listener of others) process.on(sig, listener as () => void);
+        // r7-S1d: restore each listener independently so one failure cannot strand the rest
+        for (const listener of others) {
+          try {
+            process.on(sig, listener as () => void);
+          } catch {
+            // best-effort restoration only
+          }
+        }
       }
     };
     process.on(sig, onSignal);
@@ -678,6 +685,8 @@ function classifyHolder(path: string): HolderVerdict {
       typeof parsed.pid === "number" &&
       typeof parsed.pidStartTime === "number" &&
       Number.isFinite(parsed.pidStartTime) &&
+      // r7-S1b: negative start-time is physically impossible — treat as unjudgeable
+      parsed.pidStartTime >= 0 &&
       typeof parsed.createdAt === "string" &&
       typeof parsed.requestId === "string" &&
       parsed.requestId !== ""
@@ -741,7 +750,21 @@ function classifyHolder(path: string): HolderVerdict {
   // performance.now() cannot span processes. An unparseable createdAt reads as
   // young: fail closed toward refusal, never toward a steal.
   const at = Date.parse(body.createdAt);
-  const aged = Number.isFinite(at) && Date.now() - at > FLEET_LOCK_STALE_MS;
+  // r7-S1a/S1c: negative or far-future createdAt is unjudgeable — refuse, never reclaim
+  // Negative timestamps compute huge ages; far-future timestamps never age.
+  // A 5-minute slew covers realistic clock drift while catching malformed data.
+  if (!Number.isFinite(at) || at < 0 || at > Date.now() + 300_000) {
+    return {
+      verdict: "refuse",
+      error: new FleetError(
+        5,
+        "fleet-busy",
+        `cannot judge the holder of ${path} (malformed createdAt: ${body.createdAt})`,
+        `inspect the file by hand first — a lock with an invalid timestamp is never stolen; rm ${path} only once you are sure it is not live`,
+      ),
+    };
+  }
+  const aged = Date.now() - at > FLEET_LOCK_STALE_MS;
   if (!aged) {
     return {
       verdict: "refuse",
@@ -887,7 +910,12 @@ export function stealJudgedReapMutex(reapPath: string, raw: string): boolean {
   // (classifyHolder's range guard): wait out the budget.
   if (!Number.isInteger(parsed.pid) || parsed.pid <= 0 || parsed.pid > 0x7fff_ffff) return false;
   if (!isAlive(parsed.pid) || pidIsZombie(parsed.pid)) return removeIfUnchanged(); // proof 1: dead (or zombied) holder
-  if (!Number.isFinite(parsed.pidStartTime)) {
+  // r7-S1b: negative start-time is physically impossible — treat as unjudgeable
+  if (
+    typeof parsed.pidStartTime !== "number" ||
+    !Number.isFinite(parsed.pidStartTime) ||
+    parsed.pidStartTime < 0
+  ) {
     return false; // no comparable identity — a possibly-live holder is never swept on a guess
   }
   // Proof 2: recycle check BEFORE any age conclusion — the same order and

@@ -111,7 +111,7 @@ export async function preflight(tier: "1" | "2" = "1"): Promise<LiveCtx> {
 
 /** A fresh, grammar-valid, collision-unlikely run/box id: `e2e-<label>-<stamp>`. */
 export function runIdFor(label: string): string {
-  const stamp = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
+  const stamp = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
   const id = `e2e-${label}-${stamp}`;
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(id) || id.length > 63) {
     throw new Error(`generated run id ${id} is not grammar-valid`);
@@ -128,7 +128,9 @@ const SECRET_VALUES: readonly string[] = [
 ].filter((v) => v.length > 0);
 
 function scrubText(s: string): string {
+  // Specific pattern first, then generic catch-all (brackets in charset prevent double-scrub).
   let out = s.replace(/sk-or-[A-Za-z0-9_-]+/g, "[REDACTED-KEY]");
+  out = out.replace(/sk-[A-Za-z0-9_-]{20,}/g, "[REDACTED-KEY]");
   for (const secret of SECRET_VALUES) {
     out = out.split(secret).join("[REDACTED-ENV]");
   }
@@ -237,7 +239,11 @@ export async function scratchClone(repoUrl: string, sha: string, parentDir: stri
   for (const step of steps) {
     const r = git(step);
     if (r.exitCode !== 0) {
-      throw new Error(`scratchClone: git ${step.join(" ")} exited ${r.exitCode}: ${r.stderr.trim()}`);
+      // Specialize fetch failures: name the SHA and explain the likely cause.
+      const msg = step[2] === "fetch" && step[3] === "--depth=1" && step[4] === "origin"
+        ? `scratchClone: pinned base SHA ${sha} not fetchable from origin — is the commit pushed? (git ${step.join(" ")} exited ${r.exitCode}: ${r.stderr.trim()})`
+        : `scratchClone: git ${step.join(" ")} exited ${r.exitCode}: ${r.stderr.trim()}`;
+      throw new Error(msg);
     }
   }
   return dir;

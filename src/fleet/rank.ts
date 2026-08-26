@@ -55,6 +55,7 @@ export interface RankResult {
  * shape that keeps this module decoupled from fanout.ts (ruling C3).
  */
 export interface FanoutRecordView {
+  n: number;
   winner?: number | null;
   rankedAt?: string | null;
   closedAt?: string | null;
@@ -149,6 +150,18 @@ function assertStepOutputShape(runId: string, out: ArmStepOutput): void {
       hint,
     );
   }
+  // r7-S2a: Refuse semantic inconsistency — testResults present while
+  // testsExecuted !== true. Matches CLI refusal (scripts/fleet.ts C3) so
+  // embedders calling rank() directly get the named refusal, not silent
+  // zero scores from testPassRate's gate on testsExecuted === true.
+  if (tr !== undefined && out.testsExecuted !== true) {
+    throw new FleetError(
+      2,
+      "invalid-step-output",
+      `step output for run ${redactSecrets(runId)} has testResults but testsExecuted is false — tests must have been executed to have results`,
+      hint,
+    );
+  }
   if (
     out.changedFiles !== undefined &&
     (!Array.isArray(out.changedFiles) || out.changedFiles.some((f) => typeof f !== "string"))
@@ -214,6 +227,19 @@ export async function rank(fanoutId: string, deps: RankDeps): Promise<RankResult
       "fanout-not-found",
       `no fan-out record found for ${redactSecrets(fanoutId)}`,
       "Check the fanout-id (`fleet fanout` prints it; ids look like fan-YYYYMMDD-<6hex>) or list .sandbox/fanouts/.",
+    );
+  }
+
+  // r7-S3c: Detect orphaned fanout record — crash window between store.create
+  // (with arms:[]) and store.mutate (fills arms). A record with n>0 but
+  // arms.length===0 is indistinguishable from a real empty outcome; fail-safe
+  // refusal with named error.
+  if (record.n > 0 && record.arms.length === 0) {
+    throw new FleetError(
+      2,
+      "invalid-fanout-record",
+      `fanout record ${redactSecrets(fanoutId)} has n=${record.n} but zero arms — orphaned by a crash between create and arm fill`,
+      `inspect .sandbox/fanouts/${redactSecrets(fanoutId)}.json and re-run fleet fanout to complete the record`,
     );
   }
 

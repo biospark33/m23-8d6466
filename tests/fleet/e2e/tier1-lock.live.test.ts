@@ -50,11 +50,25 @@ test.todoIf(liveTodoOff())(
       const a = runFleet(teardownArgv, { timeoutMs: 240_000 });
       // Barrier: wait for lock file evidence (max 5s, 50ms ticks) before launching b.
       const barrierDeadline = Date.now() + 5_000;
-      while (!existsSync(lockPath) && Date.now() < barrierDeadline) {
-        await new Promise((r) => setTimeout(r, 50));
+      let lockSighted = false;
+      while (!lockSighted && Date.now() < barrierDeadline) {
+        if (existsSync(lockPath)) {
+          lockSighted = true;
+        } else {
+          await new Promise((r) => setTimeout(r, 50));
+        }
       }
-      if (!existsSync(lockPath)) {
-        throw new Error("barrier: first teardown did not create lock file within 5s — cannot test contention");
+      // r7-T-f1: only throw if the first teardown is still running without lock sighted.
+      // If the first already exited (fast path), let the final assertions decide.
+      if (!lockSighted) {
+        const aExited = await Promise.race([
+          a.then(() => "exited"),
+          new Promise<string>((resolve) => setTimeout(() => resolve("running"), 0)),
+        ]);
+        if (aExited === "running") {
+          throw new Error("barrier: first teardown still running without lock sighted after 5s — cannot test contention");
+        }
+        evidence.push({ phase: "barrier-lock-not-sighted", note: "first teardown completed before poll observed lock file; proceeding to final assertions" });
       }
       const b = runFleet(teardownArgv, { timeoutMs: 240_000 });
       const [aResult, bResult] = await Promise.all([a, b]);
