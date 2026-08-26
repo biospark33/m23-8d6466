@@ -257,7 +257,10 @@ DF5.1's host-side re-verify, not an LSP gate. Both remain KEEP and are repointed
 
 ## Dev Agent Record
 
-**Status:** complete — all DOD items met, including the mandatory e2e demo.
+**Branch:** `feature/df5-2-host-side-pr-creation` (from `main`)<br />
+**Status:** DONE — merged 2026-08-26 as PR #132, squash commit `bf89d34`, after 18 review
+rounds. All DOD items met, including the mandatory e2e demo. CI `check` was red at merge on the
+pre-existing stale-GitNexus-index job that reproduces on `main`; CodeRabbit was green.
 
 ### The step-5 artifact (MANDATORY e2e demo)
 
