@@ -1,0 +1,55 @@
+{
+  "writtenAt": "2026-08-26T19:10:33.865Z",
+  "test": "T3.4b",
+  "outcome": "fail",
+  "runId": "qds-20260826-eb14c5",
+  "phases": [
+    {
+      "phase": "dispatch",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260826-eb14c5\",\"requestId\":\"bc054171-b9a1-47bf-b023-ad9370b1a449\",\"state\":\"ready\",\"vmName\":\"qds-20260826-eb14c5\",\"httpsUrl\":\"https://qds-20260826-eb14c5.exe.xyz\"}"
+    },
+    {
+      "phase": "stale-wait",
+      "staleAfterMs": 60000
+    },
+    {
+      "phase": "reap",
+      "exitCode": 0,
+      "stdout": "apply: teardown 1, destroy 0, revoke 0\nfleet: 2 VMs, 8 keys, 1 records (file limits)\nreport: .sandbox/reap/2026-08-26T19-10-26.566Z.json",
+      "stderrTail": ",\"duration\":0,\"durationMs\":0,\"status\":\"ok\",\"class\":\"foreign\",\"action\":\"report\",\"keyHashPrefix\":\"56536fc911d6\"}\n{\"requestId\":\"807d1531-349d-4d68-933c-7abbda9895dc\",\"operation\":\"reap.row\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:10:26.566Z\",\"duration\":0,\"durationMs\":0,\"status\":\"ok\",\"class\":\"foreign\",\"action\":\"report\",\"keyHashPrefix\":\"9fd739bed515\"}\n{\"requestId\":\"807d1531-349d-4d68-933c-7abbda9895dc\",\"operation\":\"reap.row\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:10:26.566Z\",\"duration\":9626,\"durationMs\":9626,\"status\":\"ok\",\"class\":\"stale-record\",\"action\":\"teardown\",\"runId\":\"qds-20260826-eb14c5\"}"
+    },
+    {
+      "phase": "post-reap",
+      "closedAt": "2026-08-26T19:10:26.563Z",
+      "spendMicroUsd": 73
+    },
+    {
+      "phase": "ledger",
+      "boxHours": []
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBeGreaterThanOrEqual(expected)\n\nExpected: >= 1\nReceived: 0\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-eb14c5",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [
+        "qds-20260826-27c13b"
+      ]
+    },
+    {
+      "phase": "final-ls-error",
+      "error": "expect(received).toEqual(expected)\n\n- []\n+ [\n+   \"qds-20260826-27c13b\",\n+ ]\n\n- Expected  - 1\n+ Received  + 3\n"
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "writtenAt": "2026-08-26T16:01:58.843Z",
+  "test": "T3.5",
+  "outcome": "fail",
+  "runId": "qds-20260826-ad83ec",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260826-ad83ec\",\"requestId\":\"6272f965-81b7-414a-b12c-9cd078e52f17\",\"state\":\"ready\",\"vmName\":\"qds-20260826-ad83ec\",\"httpsUrl\":\"https://qds-20260826-ad83ec.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":2414,\"mint_ms\":6605,\"fill_ms\":21294,\"setup_gate_ms\":15276}}\n{\"requestId\":\"6272f965-81b7-414a-b12c-9cd078e52f17\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T16:01:45.220Z\",\"duration\":46891,\"durationMs\":46891,\"status\":\"ok\",\"runId\":\"qds-20260826-ad83ec\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260826-ad83ec",
+        "requestId": "6272f965-81b7-414a-b12c-9cd078e52f17",
+        "state": "ready",
+        "vmName": "qds-20260826-ad83ec",
+        "httpsUrl": "https://qds-20260826-ad83ec.exe.xyz"
+      }
+    },
+    {
+      "phase": "shim",
+      "exitCode": 2,
+      "stdout": "",
+      "stderrTail": "pipeline-run-remote: box read of $HOME/pipeline.yaml failed (exit 1): cat: '$HOME/pipeline.yaml': No such file or directory"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 2\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-ad83ec",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

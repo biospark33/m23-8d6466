@@ -957,3 +957,53 @@ timeout flake hardened to 20s with rationale); biome clean on all 17 touched fil
 tsc --noEmit exit 0; gitnexus detect_changes scope = PR's own fleet/CLI/test modules,
 no out-of-scope symbols. decision_needed: none — S3c resolved detect+refuse (fail-safe),
 S1c resolved refuse-reclamation (fail-closed).
+
+### 2026-08-26 — TIER-3 live-proof audit GREEN: 6/6 shipped patterns proven on real substrate — commits `b8da988`..`f8cb500`
+
+Full §T3 verdict matrix + per-attempt spend table + findings ledger:
+`_bmad-output/workflow-state/code-review/e2e-audit/e2e-run-report.md` §TIER-3
+FINAL. Per-test evidence: `_bmad-output/evidence/df3-e2e/2026-08-26-*` (44
+JSONs, committed).
+
+- **T3.2 many-stories PROVEN** (`131544`): both arms ready, distinct
+  briefHashes, pin null, no auto-rank, harvest+teardown ×2, spend 146 µ$ ≤
+  100k; $0 probe suite incl. P1 — the live discharge of the **PF-1 F15b
+  grouped-arithmetic fix** (`b8da988`: pre-flight groups briefs by
+  (repoSlug, issueId), Σ(count×cap) headroom per group, refusal names every
+  group's override line).
+- **T3.1 race PROVEN** att7 (`154346`): both gates ready, marker planted via
+  the **PF-3 exec-cat fix** (`fc21f8b` — copyFile was box-relative and
+  refused /run, making the race structurally undecidable on real substrate),
+  winner 0 claimed live, loser destroyed by the primitive with a REAL lazy
+  ledger row (3716 µ$ unpriced=0 — the DF2.8 proof unit tests only faked).
+- **T3.5 on-box phases PROVEN** run9 (`182443`): 3 manifest phases exec'd
+  on-box through `scripts/pipeline-run-remote.ts` (host-orchestrated shim;
+  in-box executor stays the filed story proposal), **PF-2 stdout tails**
+  ride journal values (`e586da2`), money identity 50k×3, marker in the
+  harvest bundle. Shim fixes on the way: `$HOME` resolution, per-element
+  shellQuote (reproduced dash `printf: usage` live), manifest runBudgetMs
+  60000→150000 per requiredBudgetMs arithmetic (`889e4c1`).
+- **T3.3 expose/port PROVEN** run5 (`185732`): posture-gate refusal (exit 1,
+  box alive) + anonymous world-reach serving an unguessable marker + the
+  teardown-redirect retraction proof. Assert discipline: served-BODY
+  content, never curl exit codes (exe.dev redirects ECHO the path).
+- **T3.4b reaper PROVEN** run4 (`193343`) + **product fix**: sandbox-reap's
+  SweepDeps.costLedger was missing — teardown ran but never priced box_hours
+  and never retired the reservation. Wired (`2b94456`), then proven live:
+  stale OPEN record → reap --yes → 8170 µ$ priced row → box destroyed, key
+  revoked, dry-run clean.
+- **T3.4a orphan lazy-expiry PROVEN** run7 (`204954`): after measuring the
+  admission-commit→record-create window at ~1–3 ms (5ms poll: 1-in-13), the
+  test's kill poller became a hot spin over ONE persistent readonly WAL
+  connection (`f8cb500`) — kill landed attempt 1-of-12, young-control
+  refused exit 5 (reservation still held), 368.6s later a fresh dispatch on
+  the same issue ADMITTED with reserved:0 — the lazy sweep expired the
+  orphan exactly. Zero boxes ever created; run cost ≈ $0.
+
+Arc spend ≈ 410–500k µ$ (~$0.50) against a ≈$1.22 approved envelope; no test
+approached its cap. Substrate clean at close: 0 boxes, 0 orphan keys
+(swept + verified after every test). Four PR-visible product changes above
+(PF-1, PF-2, PF-3, reaper costLedger); the rest is committed live-test +
+shim infrastructure. 9 findings ledgered in the run report (headline:
+gate-B fresh-box pi-registry init race ~25%/attempt on 2-arm runs —
+substrate-level, planning decision whether to add a bounded B-only retry).

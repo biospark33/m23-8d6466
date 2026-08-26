@@ -1,0 +1,111 @@
+{
+  "writtenAt": "2026-08-26T19:17:56.979Z",
+  "test": "T3.4a",
+  "outcome": "fail",
+  "phases": [
+    {
+      "phase": "kill-too-late",
+      "attempt": 1,
+      "runId": "qds-20260826-7cf098",
+      "note": "record existed — tearing down, retrying"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 1,
+      "stderrTail": "62-4856-9a8b-09d38dd46e62\",\"operation\":\"run-record.create\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:17:44.809Z\",\"duration\":1,\"status\":\"ok\",\"runId\":\"qds-20260826-7cf098\",\"driver\":null,\"verb\":\"create\",\"durationMs\":1,\"outcome\":\"ok\",\"record_write_ms\":1}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-7cf098",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 2,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 2,
+      "stderrTail": "-d44511394479\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:17:48.814Z\",\"duration\":1341,\"durationMs\":1341,\"status\":\"error\",\"runId\":\"qds-20260826-ebd8b9\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-7cf098",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 3,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 3,
+      "stderrTail": "-f23403338fdb\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:17:50.122Z\",\"duration\":1214,\"durationMs\":1214,\"status\":\"error\",\"runId\":\"qds-20260826-6d0f41\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-7cf098",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 4,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 4,
+      "stderrTail": "-2a4a6475a265\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:17:51.519Z\",\"duration\":1311,\"durationMs\":1311,\"status\":\"error\",\"runId\":\"qds-20260826-012386\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-7cf098",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 5,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 5,
+      "stderrTail": "-0622113e624f\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:17:52.932Z\",\"duration\":1328,\"durationMs\":1328,\"status\":\"error\",\"runId\":\"qds-20260826-953b76\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-7cf098",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 6,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 6,
+      "stderrTail": "-6e58c222a173\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:17:54.355Z\",\"duration\":1330,\"durationMs\":1330,\"status\":\"error\",\"runId\":\"qds-20260826-e156de\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-7cf098",
+      "teardownExit": 0
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).not.toBeNull()\n\nReceived: null\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "id": "qds-20260826-7cf098",
+      "exitCode": 0
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

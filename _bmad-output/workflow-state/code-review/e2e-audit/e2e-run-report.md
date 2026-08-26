@@ -250,3 +250,127 @@ cost, and N-arm fan-out + advisory ranking proven above it. Remaining gaps are
 adjacent patterns (race, reapRuns, many-stories), not the demonstrated chain.
 
 
+
+## TIER-3 FINAL (2026-08-26, sessions 4–5) — **6/6 PROVEN** at HEAD `f8cb500`
+
+Executor: fresh-context sessions per t3-test-plan.md (handoffs
+t3-handoff-session3/4.md). Every live run individually GO-approved after
+printing keys×cap + boxes×est-hours + worst µ$ and $. Branch tip progression
+this arc: `b8da988` (PF-1 F15b grouped arithmetic) → `e586da2` (T3 kit: PF-2
+stdout tails + remote phase runner + race/remote live tests) → `cde3f81`/
+`86be739` (T3.2 test + probe-fix) → `fc21f8b` (PF-3 exec-cat marker read) →
+`6c1064a` (T3.1 gate-outcome read) → `889e4c1` (T3.5 shim: HOME resolution,
+argv re-quote, manifest budget 150000) → `7e47279` (T3.3 served-marker
+assert) → `2b94456` (reaper costLedger wiring — PRODUCT FIX) → `f8cb500`
+(T3.4a hot-spin kill poller). Substrate at session end: **0 boxes, 0 orphan
+qds-\*/sbx-qds-\* keys** (swept + verified after every test and at close).
+
+### Verdict matrix
+
+| # | Test | Verdict | What was proven on real substrate | Final-run evidence |
+|---|---|---|---|---|
+| T3.2 | many-stories + F15 $0 probes | **PROVEN** | fanout `--pattern many-stories --n 2` exit 0; BOTH arms `ready` through full gates; record `pin:null`, arms carry DISTINCT briefHashes recomputed in-test, NO rosterId; per-arm work committed (eeea36d / 1284047); harvest "harvested: 1" ×2, teardown ×2 exit 0; NO auto-rank line; spend **146 µ$ ≤ 100,000** (arms 73+73); box_hours priced 6381+7898 unpriced=0; final-ls []. $0 probes: `--roster` refused, `--pin` refused, brief-count≠n refused, n=1 legal, and **P1 grouped-arithmetic proof** (two briefs, two issues, override only on A → exit 5 naming repo#A needing 100,000 with available 50,000) — the live discharge of PF-1 | `2026-08-26-131544-t3-2-manystories.json` + `114225-t3-2-manystories-probes.json` |
+| T3.1 | race pattern | **PROVEN** (att7) | both arms gate-READY (full-field branch); marker planted on lowest-index ready arm via PF-3 exec-cat channel; **winner 0 claimed on real substrate**; exactly one "ready" + one `lostRace` line; loser **destroyed BY THE PRIMITIVE**; loser ledger row through the REAL lazy hook: box_hours **3716 µ$ unpriced=0**; wonEvents=1, crossEvents=0; `rank` verb exit 0 (null-score contract, rankedAt stamped, winner stays 0-not-null semantics per record `winner:0`); teardown winner exit 0; final-ls [] | `2026-08-26-154346-t3-1-fanout-race.json` |
+| T3.5 | manifest phases ON the box | **PROVEN** (run9) | dispatch exit 0 → shim runs 3 manifest phases (`t3-probe`/`t3-verify`/`t3-marker`) via `driver.exec` on-box, all exit 0, **PF-2 stdout tail in journal value** ("t3-remote-engine-ran"); money identity delivered==witness==record==50,000 µ$; marker file lands in the **harvest bundle** via `git show refs/sandbox/<runId>` = "t3 phase marker"; teardown exit 0, box gone; final-ls []. Honest label: host-orchestrated shim (`scripts/pipeline-run-remote.ts`) — the in-box executor remains the filed story proposal | `2026-08-26-182443-t3-5-remote-phases.json` |
+| T3.3 | expose/port + posture gate | **PROVEN** (run5) | NEGATIVE: posture file absent → dispatch exit 1 `posture-attestation-missing`, port claim RETAINED in record, box ALIVE, anonymous URL = exe.dev login redirect **ECHOING the requested path** (asserted as served-BODY marker absence, never curl exit code). POSITIVE: posture present → unguessable runId-named box serves the unguessable marker ANONYMOUSLY at the derived https URL; teardown → same URL answers the 307 auth redirect (the only retraction proof that exists); both boxes destroyed; final-ls [] | `2026-08-26-185732-t3-3-expose-port.json` |
+| T3.4b | active reaper (sandbox-reap) | **PROVEN** (run4) — **product fix proven** | full dispatch to `ready` = abandoned OPEN record + box + key; `staleAfterMs:60000` via the REAL `QDS_QUOTA_LIMITS_FILE` knob; `sandbox-reap --yes` → `stale-record → teardown` action, **box_hours row PRICED 8170 µ$ unpriced=0** (pre-fix: teardown ran but ZERO cost_events rows — the SweepDeps.costLedger wiring gap), record closed, box destroyed, key revoked, exit 0; follow-up dry-run: "nothing to reap" | `2026-08-26-193343-t3-4b-sandbox-reap.json` |
+| T3.4a | orphan reservation lazy expiry | **PROVEN** (run7) | hot-spin poller (ONE persistent readonly WAL conn, back-to-back SELECTs, SIGKILL on first row sight) landed the kill **attempt 1 of 12** — admission `qds-20260826-15ff61` committed 20:43:34.014Z, record never created, 0 boxes ever provisioned; young-control dispatch on the same issue REFUSED exit 5 (the orphan's 50k reservation ate the headroom); after the 368.6s window (grace 60s + skew 300s) a fresh dispatch **ADMITTED with reserved:0 remaining:250000** — the lazy sweep inside admitIssue expired the orphan exactly; clean-ENOENT expiry silent by design, numbers are the pass; final-ls [] | `2026-08-26-204954-t3-4a-orphan-expiry.json` |
+
+### Product changes shipped this arc (PR-visible)
+
+1. **PF-1 (`b8da988`)** — F15 pre-flight grouped briefs by (repoSlug, issueId):
+   Σ(count×cap) headroom required PER GROUP; refusal names every group's
+   override line. Killed the over-refusal AND the under-protection half of the
+   F15 bug for multi-issue many-stories briefs. Live proof: T3.2 P1 probe.
+2. **PF-2 (`e586da2`)** — code-phase stdout now rides the journal value as a
+   bounded tail (was stderr-only, dropped). Live proof: T3.5 steps query.
+3. **PF-3 (`fc21f8b`)** — race probeArm reads the marker via exec `cat` on the
+   same channel as the presence probe (ExeDevDriver.copyFile is box-relative
+   and refused the absolute /run path — the race was UNDECIDABLE pre-fix on
+   real substrate). Live proof: T3.1 att7.
+4. **Reaper costLedger (`2b94456`)** — SweepDeps.costLedger was missing from
+   sandbox-reap's teardown wiring, so reaped runs never priced box_hours and
+   their reservations never retired. Live proof: T3.4b 8170 µ$ row.
+
+Test-infra (not product): T3.5 remote shim manifest budget 60000→150000
+(requiredBudgetMs = Σ(retries+1)×(PARSE_FIX_ATTEMPTS+1)×maxDuration +
+phases×ROUTING_MARGIN), shim `$HOME` resolution + per-element shellQuote
+(reproduced live: dash `printf: usage` exit 2, empty marker), T3.3
+served-body assert discipline, T3.4a hot-spin poller + 5×CAP ceiling +
+fail-fast headroom refusal (`f8cb500`).
+
+### Spend (actual vs approved, EVERY attempt)
+
+| Test | Attempts | Approved worst | Actual |
+|---|---|---|---|
+| T3.2 | 7 (2 probe-assert bugs $0-5k, 3 design/flake, final green + probes) | 330,000 µ$ | ≈ 25–35,000 µ$ arc; final green run itself **146 µ$** vs 100,000 cap |
+| T3.1 | 7 (att1-5 driver/PF-3 debugging ≈150–200k; att6 gate-B flake ≈80–90k, 2 boxes 10.5 min; att7 green) | 560,000 µ$ | att7 ≈ 15,000 µ$ (73 µ$ tokens + 3716 µ$ loser box + fractional winner) |
+| T3.5 | 9 (r1 $0 usage-refusal, r2-r7 ≈5k each, debug box ≈12k, r9 green) | 110,000 µ$ | ≈ 42,000 µ$ arc; green run ≈ 5,000 µ$ vs 50,000 cap |
+| T3.3 | 5 (r1-r4 incl. gate-B flake + leak-cleaned run; r5 green, 2 dispatches) | 110,000 µ$ | ≈ 40,000 µ$ arc; green run ≈ 12,000 µ$ vs 100,000 (2×cap) |
+| T3.4 | 6 (r1-r3 full dispatch legs ≈25k; r4 4b-green+4a ≈12k; r5 $0 usage refusals; r6 6 kill-too-late ≈8k) | ≈ cents claimed, ≈60k realistic | ≈ 45,000 µ$ arc |
+| T3.4a final | 1 (run7 hot-spin) | 150,000 µ$ | **≈ 0 µ$** — kill landed pre-provision, 0 boxes ever created, 0 tokens |
+| **TIER-3 total** | | **≈ $1.22 envelope** | **≈ 410–500,000 µ$ (~$0.50)**; no test approached its cap aggregate |
+
+### Coverage delta (after TIER-3 FINAL)
+
+| Surface | Before T3 | After T3 FINAL |
+|---|---|---|
+| race pattern (marker → first-writer claim → primitive-disposes losers) | 0% | **PROVEN** (incl. loser lazy-ledger pricing, the DF2.8 proof unit tests only faked) |
+| many-stories wrapper (multi-brief, per-brief manifest/roster) | 0% | **PROVEN** |
+| F15 grouped multi-issue budget arithmetic | unit-only | **PROVEN live ($0 probe)** |
+| expose/port + posture attestation + anonymous retraction semantics | 0% | **PROVEN** (negative + positive) |
+| ledger lazy orphan expiry (grace+skew sweep inside admitIssue) | 0% | **PROVEN** (kill-in-window, young refusal, post-expiry admission) |
+| active reaper (sandbox-reap --yes, staleAfterMs knob, priced teardown) | 0% | **PROVEN** (+ product fix it forced) |
+| manifest phases executing on-box | 0% | **PROVEN via host-orchestrated shim** — in-box executor = filed story proposal |
+
+Fleet demo-readiness verdict: **YES for every shipped pattern** — dispatch →
+gate → engine → harvest → teardown (T2), best-of-n + rank (T2), race,
+many-stories, expose/port, orphan expiry, active reaper, on-box phases (T3)
+all proven against real exe.dev + real OpenRouter at bounded cost. Remaining
+gaps are filed stories (in-box executor, reapRuns delete-or-wire,
+ingestCostEvent wiring), not unproven shipped code.
+
+### Findings ledger (T3 arc)
+
+1. **PF-3 — copyFile-vs-marker-path mismatch** (race probe read marker via
+   box-relative copyFile; /run absolute refused): FIXED `fc21f8b`, proven live
+   att7. Pre-fix the race pattern was structurally undecidable on real
+   substrate — the 508 FakeDriver tests could not see it (audit thesis
+   confirmed a third time).
+2. **/run marker write needs a sudo-capable writer** (root:root 0755, box
+   user uid 1000) — in-box executor story input.
+3. **Gate-B fresh-box pi-registry init race** (substrate): fresh-box
+   `pi --list-models` can still be initializing at gate time ("No models
+   available. Use /login") while a sibling box created 2s apart passes A–E.
+   Fail-closed by design (DF2.2) → setupFailed exit 3, box ALIVE (INV-5).
+   Occurrences this arc: T3.2 12:41 ×2, T3.1 att6 arm 0, T3.3 run3 —
+   ~4/16 ≈ 25% per-attempt on 2-arm runs. Possible product hardening
+   (PLANNING decision, not audit scope): bounded B-only wait/retry (B itself
+   spends nothing).
+4. **Reaper teardown never priced box_hours** — SweepDeps.costLedger missing:
+   FIXED `2b94456`, proven live (8170 µ$ row, reservation retired).
+5. **`reapRuns` dead code** (driver.ts:1201-1282, zero production callers,
+   docstring contradicts itself; the ACTIVE reaper is scripts/sandbox-reap.ts)
+   — delete-or-wire is a planning decision.
+6. **briefHash contract**: sha256 of the Zod-PARSED brief in SCHEMA key
+   order (not raw file bytes) — documented for future consumers.
+7. **exe.dev proxy semantics**: a private VM answers anonymous requests with
+   a login redirect that ECHOES the requested path; a destroyed VM's hostname
+   still 307s. Tests must assert served-BODY content, never curl exit codes.
+8. **Ledger retirement semantics**: priced spend consumes issue headroom
+   FOREVER (the reservation retires; the money does not come back) — T3.4a's
+   ceiling sizing and the young-control design both rest on this.
+9. **Orphan-window width ~1–3 ms measured** (admission commit → record
+   create; runs 1-6: a 5ms-poll caught it 1-in-13). NOT reclassified: the
+   hot-spin poller (`f8cb500`) landed it attempt 1-of-12 live. Width stands
+   as the measured fact for anyone sizing this window on production-speed
+   hosts.
+
+### Not run / honest residuals
+
+- P2 optional probe (overrides {A:100k, B:10k} partial-fanout refusal) —
+  declined: P1 already proves the grouped arithmetic live; P2 would spend
+  boxes to re-prove the same code path.
+- In-box executor (T3.5 story proposal B), reapRuns delete-or-wire,
+  ingestCostEvent tokens wiring — planning queue, unchanged.
+- Gate-B flake unmitigated in product (finding 3) — planning decision.

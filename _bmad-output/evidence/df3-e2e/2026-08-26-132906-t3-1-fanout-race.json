@@ -1,0 +1,73 @@
+{
+  "writtenAt": "2026-08-26T13:29:06.791Z",
+  "test": "T3.1 race",
+  "outcome": "fail",
+  "fanoutId": "fan-20260826-3d3be6",
+  "runIds": [
+    "qds-20260826-518b48",
+    "qds-20260826-ae9b9e"
+  ],
+  "capMicroUsdPerArm": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "aggregateCapMicroUsd": 100000
+    },
+    {
+      "phase": "fan-record-early",
+      "fanoutId": "fan-20260826-3d3be6",
+      "arms": [
+        {
+          "arm": 0,
+          "runId": "qds-20260826-518b48",
+          "rosterId": "lead",
+          "briefHash": "ab18fe086ea5c7821d231fa44a09c563c06fdd06d02da2c9ba94c10fa8397b9f"
+        },
+        {
+          "arm": 1,
+          "runId": "qds-20260826-ae9b9e",
+          "rosterId": "fixer",
+          "briefHash": "ab18fe086ea5c7821d231fa44a09c563c06fdd06d02da2c9ba94c10fa8397b9f"
+        }
+      ]
+    },
+    {
+      "phase": "boxes-listed",
+      "vms": [
+        "qds-20260826-518b48",
+        "qds-20260826-ae9b9e"
+      ]
+    },
+    {
+      "phase": "test-error",
+      "error": "pollUntil(winner marker written) exceeded 180000 ms bound"
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 0,
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 1,
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-518b48",
+      "ok": true
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-ae9b9e",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [],
+      "attempts": 5
+    }
+  ]
+}

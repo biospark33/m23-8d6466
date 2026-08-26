@@ -1,0 +1,395 @@
+{
+  "writtenAt": "2026-08-26T14:28:51.452Z",
+  "test": "T3.1 race",
+  "outcome": "fail",
+  "fanoutId": "fan-20260826-f04c3c",
+  "runIds": [
+    "qds-20260826-bd5a27",
+    "qds-20260826-7ee3db"
+  ],
+  "capMicroUsdPerArm": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "aggregateCapMicroUsd": 100000
+    },
+    {
+      "phase": "fan-record-early",
+      "fanoutId": "fan-20260826-f04c3c",
+      "arms": [
+        {
+          "arm": 0,
+          "runId": "qds-20260826-bd5a27",
+          "rosterId": "lead",
+          "briefHash": "ab18fe086ea5c7821d231fa44a09c563c06fdd06d02da2c9ba94c10fa8397b9f"
+        },
+        {
+          "arm": 1,
+          "runId": "qds-20260826-7ee3db",
+          "rosterId": "fixer",
+          "briefHash": "ab18fe086ea5c7821d231fa44a09c563c06fdd06d02da2c9ba94c10fa8397b9f"
+        }
+      ]
+    },
+    {
+      "phase": "boxes-listed",
+      "vms": [
+        "qds-20260826-bd5a27",
+        "qds-20260826-7ee3db"
+      ]
+    },
+    {
+      "phase": "marker-planted",
+      "vm": "qds-20260826-bd5a27",
+      "marker": "/run/journal/final.json"
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 1,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 32,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 63,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 96,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 127,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 159,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 190,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 221,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 253,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 284,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 315,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 346,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 378,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 409,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 440,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 472,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 503,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 534,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 565,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 596,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-bd5a27",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-7ee3db",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "record-snapshot-at-claim-or-timeout",
+      "record": {
+        "winner": null,
+        "closedAt": null,
+        "t": 602
+      }
+    },
+    {
+      "phase": "verb-stderr-on-timeout",
+      "tail": "all_ms\":1228}\n{\"requestId\":\"bc6c34a9-5ee4-4f4c-939b-786bd12bfc46\",\"operation\":\"provider.copyFile\",\"agentId\":null,\"timestamp\":\"2026-08-26T14:28:18.705Z\",\"duration\":0,\"status\":\"error\",\"error\":{\"code\":\"remote-path-invalid\",\"message\":\"remote path \\\"/run/journal/final.json\\\" is not a plain box-relative path (charset [A-Za-z0-9._/-], no leading /, no \\\"..\\\" segments)\"},\"runId\":null,\"driver\":\"exedev\",\"verb\":\"copyFile\",\"durationMs\":0,\"outcome\":\"error\",\"driver_call_ms\":0}\n{\"agentId\":null,\"timestamp\":\"2026-08-26T14:28:18.705Z\",\"duration\":0,\"status\":\"error\",\"requestId\":\"bc6c34a9-5ee4-4f4c-939b-786bd12bfc46\",\"operation\":\"fleet.fanout.race\",\"fanoutId\":\"fan-20260826-f04c3c\",\"arm\":0,\"error\":{\"code\":\"race-probe-failed\",\"message\":\"remote path \\\"/run/journal/final.json\\\" is not a plain box-relative path (charset [A-Za-z0-9._/-], no leading /, no \\\"..\\\" segments)\"}}\n{\"requestId\":\"bc6c34a9-5ee4-4f4c-939b-786bd12bfc46\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-08-26T14:28:19.809Z\",\"duration\":1102,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":1102,\"outcome\":\"ok\",\"driver_call_ms\":1102}\n{\"requestId\":\"bc6c34a9-5ee4-4f4c-939b-786bd12bfc46\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-08-26T14:28:25.887Z\",\"duration\":1077,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":1077,\"outcome\":\"ok\",\"driver_call_ms\":1077}\n{\"requestId\":\"bc6c34a9-5ee4-4f4c-939b-786bd12bfc46\",\"operation\":\"provider.copyFile\",\"agentId\":null,\"timestamp\":\"2026-08-26T14:28:25.887Z\",\"duration\":0,\"status\":\"error\",\"error\":{\"code\":\"remote-path-invalid\",\"message\":\"remote path \\\"/run/journal/final.json\\\" is not a plain box-relative path (charset [A-Za-z0-9._/-], no leading /, no \\\"..\\\" segments)\"},\"runId\":null,\"driver\":\"exedev\",\"verb\":\"copyFile\",\"durationMs\":0,\"outcome\":\"error\",\"driver_call_ms\":0}\n{\"agentId\":null,\"timestamp\":\"2026-08-26T14:28:25.887Z\",\"duration\":0,\"status\":\"error\",\"requestId\":\"bc6c34a9-5ee4-4f4c-939b-786bd12bfc46\",\"operation\":\"fleet.fanout.race\",\"fanoutId\":\"fan-20260826-f04c3c\",\"arm\":0,\"error\":{\"code\":\"race-probe-failed\",\"message\":\"remote path \\\"/run/journal/final.json\\\" is not a plain box-relative path (charset [A-Za-z0-9._/-], no leading /, no \\\"..\\\" segments)\"}}\n{\"requestId\":\"bc6c34a9-5ee4-4f4c-939b-786bd12bfc46\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-08-26T14:28:27.035Z\",\"duration\":1147,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":1147,\"outcome\":\"ok\",\"driver_call_ms\":1147}"
+    },
+    {
+      "phase": "test-error",
+      "error": "race poller never claimed a winner in 600 s — record {\"winner\":null,\"closedAt\":null,\"t\":602}",
+      "record": {
+        "winner": null,
+        "closedAt": null,
+        "t": 602
+      }
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 0,
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 1,
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-bd5a27",
+      "ok": true
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-7ee3db",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [],
+      "attempts": 5
+    }
+  ]
+}

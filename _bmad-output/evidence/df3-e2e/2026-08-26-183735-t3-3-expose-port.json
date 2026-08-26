@@ -1,0 +1,48 @@
+{
+  "writtenAt": "2026-08-26T18:37:35.194Z",
+  "test": "T3.3",
+  "outcome": "fail",
+  "negRunId": "qds-20260826-ad7617",
+  "posRunId": "",
+  "port": 8123,
+  "phases": [
+    {
+      "phase": "neg-dispatch",
+      "exitCode": 1,
+      "stderrTail": "station at .sandbox/exedev-posture.json (ENOENT: no such file or directory, open '.sandbox/exedev-posture.json') — setPublic refuses: team sharing defaults open and a public box breaks one-run-per-box isolation\",\"remediation\":\"flip 'vm-sharing admins-only' in the exe.dev team settings, record it once: {\\\"vmSharing\\\":\\\"admins-only\\\",\\\"attestedAt\\\":\\\"<iso>\\\"} at .sandbox/exedev-posture.json, then re-run\"}\n{\"requestId\":\"bad0e973-d607-4653-bb45-01c78e8ecd0d\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T18:37:18.969Z\",\"duration\":49330,\"durationMs\":49330,\"status\":\"error\",\"runId\":\"qds-20260826-ad7617\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "neg-record",
+      "runId": "qds-20260826-ad7617",
+      "vmName": "qds-20260826-ad7617",
+      "ports": [
+        8123
+      ],
+      "httpsUrl": "https://qds-20260826-ad7617.exe.xyz"
+    },
+    {
+      "phase": "neg-curl",
+      "exitCode": 0,
+      "bodyHead": "<a href=\"https://qds-20260826-ad7617.exe.xyz/__exe.dev/login?exedev_host=qds-20260826-ad7617.exe.xyz&amp;redirect=%2Ft3-977294d631ab3cad150676f7.txt\">Temporary Redirect</a>.",
+      "stderrTail": ""
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).not.toContain(expected)\n\nExpected to not contain: \"977294d631ab3cad150676f7\"\nReceived: \"<a href=\\\"https://qds-20260826-ad7617.exe.xyz/__exe.dev/login?exedev_host=qds-20260826-ad7617.exe.xyz&amp;redirect=%2Ft3-977294d631ab3cad150676f7.txt\\\">Temporary Redirect</a>.\\n\\n\"\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "runId": "qds-20260826-ad7617",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-ad7617",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

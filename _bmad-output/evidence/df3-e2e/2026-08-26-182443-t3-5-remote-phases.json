@@ -1,0 +1,95 @@
+{
+  "writtenAt": "2026-08-26T18:24:43.880Z",
+  "test": "T3.5",
+  "outcome": "pass",
+  "runId": "qds-20260826-1aac79",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260826-1aac79\",\"requestId\":\"28d73dd3-ba52-400c-82aa-5c9ba9f3eacd\",\"state\":\"ready\",\"vmName\":\"qds-20260826-1aac79\",\"httpsUrl\":\"https://qds-20260826-1aac79.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":2378,\"mint_ms\":2345,\"fill_ms\":20800,\"setup_gate_ms\":15427}}\n{\"requestId\":\"28d73dd3-ba52-400c-82aa-5c9ba9f3eacd\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T18:24:11.378Z\",\"duration\":42171,\"durationMs\":42171,\"status\":\"ok\",\"runId\":\"qds-20260826-1aac79\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260826-1aac79",
+        "requestId": "28d73dd3-ba52-400c-82aa-5c9ba9f3eacd",
+        "state": "ready",
+        "vmName": "qds-20260826-1aac79",
+        "httpsUrl": "https://qds-20260826-1aac79.exe.xyz"
+      }
+    },
+    {
+      "phase": "shim",
+      "exitCode": 0,
+      "stdout": "RUN qds-20260826-1aac79 pipeline=t3-e2e-remote-phases ok=true accepted=true phases=3 completedAt=2026-08-26T18:24:18.338Z",
+      "stderrTail": "atus\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":1080,\"journal_write_ms\":2}}\n{\"requestId\":\"qds-20260826-1aac79\",\"pipelineId\":\"t3-e2e-remote-phases\",\"phase\":\"t3-marker\",\"kind\":\"code\",\"timestamp\":\"2026-08-26T18:24:18.337Z\",\"durationMs\":1148,\"status\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":1148,\"journal_write_ms\":1}}"
+    },
+    {
+      "phase": "journal",
+      "ok": true,
+      "rows": 3
+    },
+    {
+      "phase": "steps",
+      "steps": [
+        {
+          "phase": "t3-probe",
+          "exitCode": 0,
+          "stdoutTail": "t3-remote-engine-ran\n"
+        },
+        {
+          "phase": "t3-verify",
+          "exitCode": 0,
+          "stdoutTail": ""
+        },
+        {
+          "phase": "t3-marker",
+          "exitCode": 0,
+          "stdoutTail": ""
+        }
+      ]
+    },
+    {
+      "phase": "money-identity",
+      "deliveredLimit": 50000,
+      "witnessCeiling": 50000,
+      "recordLimit": 50000
+    },
+    {
+      "phase": "harvest",
+      "exitCode": 0,
+      "stdout": "harvested: 1"
+    },
+    {
+      "phase": "marker-in-bundle",
+      "exitCode": 0,
+      "body": "t3 phase marker"
+    },
+    {
+      "phase": "teardown",
+      "exitCode": 0,
+      "stderrTail": "lose_ms\":5}\n{\"requestId\":\"4242ac67-fa08-48bf-86e2-d19805e8fd35\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-08-26T18:24:38.508Z\",\"duration\":12091,\"durationMs\":12091,\"status\":\"ok\",\"runId\":\"qds-20260826-1aac79\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-1aac79",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

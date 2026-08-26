@@ -1,0 +1,53 @@
+{
+  "writtenAt": "2026-08-26T16:08:28.293Z",
+  "test": "T3.5",
+  "outcome": "fail",
+  "runId": "qds-20260826-fd3e65",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260826-fd3e65\",\"requestId\":\"46bf5466-6c51-4418-8cf7-dbcad9ebcd02\",\"state\":\"ready\",\"vmName\":\"qds-20260826-fd3e65\",\"httpsUrl\":\"https://qds-20260826-fd3e65.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":2392,\"mint_ms\":2154,\"fill_ms\":17296,\"setup_gate_ms\":15379}}\n{\"requestId\":\"46bf5466-6c51-4418-8cf7-dbcad9ebcd02\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T16:08:10.036Z\",\"duration\":38394,\"durationMs\":38394,\"status\":\"ok\",\"runId\":\"qds-20260826-fd3e65\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260826-fd3e65",
+        "requestId": "46bf5466-6c51-4418-8cf7-dbcad9ebcd02",
+        "state": "ready",
+        "vmName": "qds-20260826-fd3e65",
+        "httpsUrl": "https://qds-20260826-fd3e65.exe.xyz"
+      }
+    },
+    {
+      "phase": "shim",
+      "exitCode": 0,
+      "stdout": "RUN qds-20260826-fd3e65 pipeline=t3-e2e-remote-phases ok=true accepted=true phases=3 completedAt=2026-08-26T16:08:16.272Z",
+      "stderrTail": "status\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":1020,\"journal_write_ms\":2}}\n{\"requestId\":\"qds-20260826-fd3e65\",\"pipelineId\":\"t3-e2e-remote-phases\",\"phase\":\"t3-marker\",\"kind\":\"code\",\"timestamp\":\"2026-08-26T16:08:16.271Z\",\"durationMs\":974,\"status\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":974,\"journal_write_ms\":1}}"
+    },
+    {
+      "phase": "test-error",
+      "error": "JSON Parse error: Expected '}'"
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-fd3e65",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

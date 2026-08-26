@@ -1,0 +1,28 @@
+{
+  "writtenAt": "2026-08-26T15:49:25.174Z",
+  "test": "T3.5",
+  "outcome": "fail",
+  "runId": "",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 2,
+      "stdout": "",
+      "stderrTail": "dget but declares runBudgetMs 60000\",\"remediation\":\"fix the manifest, or point manifestPath at one beneath /Users/steve/QDS-Factory\"}\n{\"requestId\":\"bf7e3136-9d85-4e8d-9ba3-975340706198\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T15:49:23.885Z\",\"duration\":14,\"durationMs\":14,\"status\":\"error\",\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 2\n"
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}
