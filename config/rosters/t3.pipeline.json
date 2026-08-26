@@ -1,13 +1,16 @@
 {
   "version": "1.0.0",
   "pipelineId": "t3-e2e-remote-phases",
-  "runBudgetMs": 60000,
+  "runBudgetMs": 150000,
   "phases": [
     {
       "name": "t3-probe",
       "kind": "code",
       "description": "T3.5 remote-runner probe: echoes a marker whose stdout tail must ride the journal value (PF-2).",
-      "command": ["echo", "t3-remote-engine-ran"],
+      "command": [
+        "echo",
+        "t3-remote-engine-ran"
+      ],
       "maxDurationMs": 5000,
       "retries": 0
     },
@@ -15,7 +18,9 @@
       "name": "t3-verify",
       "kind": "code",
       "description": "T3.5 closing sanity phase that exits cleanly.",
-      "command": ["true"],
+      "command": [
+        "true"
+      ],
       "maxDurationMs": 5000,
       "retries": 0
     },

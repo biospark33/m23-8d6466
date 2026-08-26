@@ -102,24 +102,39 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "dispatch-ack", ack });
 
       // ── 2. the shim: production engine, phases exec ON THE BOX ───────────
-      const shim = await runFleet(
-        ["scripts/pipeline-run-remote.ts", "--vm", vm, "--run-id", runId, "--records-dir", recordsDir, "--budget-ms", "60000"],
-        { cwd: REPO_ROOT, timeoutMs: 300_000 },
-      );
-      evidence.push({ phase: "shim", exitCode: shim.exitCode, stdout: shim.stdout.trim().slice(0, 400), stderrTail: shim.stderr.trim().slice(-400) });
-      expect(shim.exitCode).toBe(0);
+      // Direct spawn — the shim is a script, not a fleet verb: runFleet routes
+      // argv[0] through scripts/fleet.ts, which refuses it as an unknown verb
+      // and prints the FLEET usage (run2's 3 ms exit 2). --budget-ms must be
+      // ≥ the manifest's declared runBudgetMs (150000) or loadManifest
+      // refuses "runBudgetMs exceeds callerBudgetMs".
+      const shimProc = Bun.spawn({
+        cmd: ["bun", join(REPO_ROOT, "scripts/pipeline-run-remote.ts"), "--vm", vm, "--run-id", runId, "--records-dir", recordsDir, "--budget-ms", "180000"],
+        cwd: REPO_ROOT,
+        env: { ...(process.env as Record<string, string>) },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [shimExit, shimStdout, shimStderr] = await Promise.all([
+        shimProc.exited,
+        new Response(shimProc.stdout).text(),
+        new Response(shimProc.stderr).text(),
+      ]);
+      evidence.push({ phase: "shim", exitCode: shimExit, stdout: shimStdout.trim().slice(0, 400), stderrTail: shimStderr.trim().slice(-400) });
+      expect(shimExit).toBe(0);
 
       // ── 3. journal rows ordered+settled; steps.json carries PF-2 tails ───
+      // FileJournal persists ONE JournalFile object (pretty-printed JSON — the
+      // ".jsonl" name is the engine's own filename convention, not a line
+      // format; see FileJournal.flush), so parse the whole body, not per line.
       const journalPath = join(recordsDir, runId, "journal.jsonl");
       expect(existsSync(journalPath)).toBeTrue();
-      const rows = readFileSync(journalPath, "utf8").trim().split("\n").map((l) => JSON.parse(l) as {
-        phase?: string;
-        name?: string;
-        status?: string;
-        value?: { exitCode?: number; stdoutTail?: string };
-      });
-      evidence.push({ phase: "journal", rows: rows.length });
-      const phaseRows = rows.filter((r) => typeof r.name === "string");
+      const journalBody = JSON.parse(readFileSync(journalPath, "utf8")) as {
+        ok?: boolean;
+        phases?: Array<{ name?: string; status?: string }>;
+      };
+      const phaseRows = journalBody.phases ?? [];
+      evidence.push({ phase: "journal", ok: journalBody.ok, rows: phaseRows.length });
+      expect(journalBody.ok).toBe(true);
       expect(phaseRows.map((r) => r.name)).toEqual(["t3-probe", "t3-verify", "t3-marker"]);
       expect(phaseRows.every((r) => r.status === "success")).toBe(true);
       // PF-2: the echoed marker survives as the phase value's bounded stdout
@@ -130,6 +145,7 @@ test.todoIf(liveTodoOff())(
         exitCode: number | null;
         stdoutTail: string | null;
       }>;
+      evidence.push({ phase: "steps", steps });
       expect(steps.map((s) => s.phase)).toEqual(["t3-probe", "t3-verify", "t3-marker"]);
       expect(steps.every((s) => s.exitCode === 0)).toBe(true);
       expect(steps[0]?.stdoutTail ?? "").toContain("t3-remote-engine-ran");
@@ -190,7 +206,10 @@ test.todoIf(liveTodoOff())(
         const evidencePath = writeEvidence("t3-5-remote-phases", { test: "T3.5", outcome, runId, capMicroUsd: T3_CAP_MICRO_USD, phases: evidence });
         process.stderr.write(`[T3.5] evidence: ${evidencePath}\n`);
       } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+        // Keep the workspace on failure — journal/steps/marker forensics beat
+        // re-spending a box to reproduce. Cleaned up on the next green run.
+        if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
+        else if (workspace !== "") process.stderr.write(`[T3.5] workspace kept for forensics: ${workspace}\n`);
       }
     }
   },

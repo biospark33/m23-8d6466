@@ -61,6 +61,23 @@ async function fetchBoxFile(vm: string, boxPath: string): Promise<string> {
   return r.stdout;
 }
 
+/**
+ * The box's $HOME, resolved ON THE BOX. shellQuote'd paths are injected into
+ * the remote `sh -c` VERBATIM — `cat '$HOME/pipeline.yaml'` single-quotes the
+ * dollar and cats a literal "$HOME" directory that does not exist (run3's
+ * refusal). Resolving once here and substituting a real absolute path keeps
+ * every later shellQuote injection-safe AND expansible-free.
+ */
+async function boxHome(vm: string): Promise<string> {
+  const driver = new ExeDevDriver();
+  const r = await driver.exec(vm, ["sh", "-c", 'printf %s "$HOME"']);
+  const home = r.stdout.trim();
+  if (r.exitCode !== 0 || !/^[A-Za-z0-9._/-]+$/.test(home) || !home.startsWith("/")) {
+    throw new Error(`could not resolve $HOME on ${vm} (exit ${r.exitCode}): ${home.slice(0, 120) || r.stderr.trim().slice(0, 120)}`);
+  }
+  return home;
+}
+
 interface RemoteOpts {
   vm: string;
   runId: string;
@@ -87,10 +104,16 @@ function makeRemoteBodyFactory(opts: RemoteOpts): (spec: PhaseSpec) => PhaseBody
       }
       return async () => {
         const driver = new ExeDevDriver();
+        // Re-quote EVERY argv element: pipeline-run.ts spawns `cmd` as a real
+        // argv (no shell), but this shim rides `sh -c`, and a bare
+        // `cmd.join(" ")` flattens `["sh","-c","printf 'x y' > f && …"]` into
+        // `sh -c printf 'x y' > f && …` — the script stops being ONE argument,
+        // the inner printf runs arg-less (dash "usage" exit 2), and the file
+        // lands empty. shellQuote per element keeps the shape argv-identical.
         const r = await driver.exec(opts.vm, [
           "sh",
           "-c",
-          `cd ${shellQuote(opts.boxSrc)} && ${cmd.join(" ")}`,
+          `cd ${shellQuote(opts.boxSrc)} && ${cmd.map(shellQuote).join(" ")}`,
         ]);
         return { exitCode: r.exitCode, stdoutTail: r.stdout.slice(-STDOUT_TAIL_CHARS) };
       };
@@ -146,20 +169,23 @@ async function main(argv: readonly string[]): Promise<number> {
   if (!recordsDir) throw new Error("--records-dir is required");
   if (budgetMs === undefined) throw new Error("--budget-ms is required");
 
+  // 1. Fetch the DELIVERED stamped manifest + dispatch's witness off the box.
+  //    The bytes are the box's own — the fetch proves delivery; the host-side
+  //    scratch dir exists only because loadManifest reads through a path.
+  //    Paths are HOME-RESOLVED (see boxHome): a literal "$HOME" survives
+  //    shellQuote unexpanded and reads nothing. A custom --box-src is used
+  //    VERBATIM; only the default is resolved against the box's real HOME.
+  const home = await boxHome(vm);
   const opts: RemoteOpts = {
     vm,
     runId,
     requestId: requestId ?? runId,
     recordsDir,
     budgetMs,
-    boxSrc: boxSrc ?? "$HOME/src",
+    boxSrc: boxSrc ?? `${home}/src`,
   };
-
-  // 1. Fetch the DELIVERED stamped manifest + dispatch's witness off the box.
-  //    The bytes are the box's own — the fetch proves delivery; the host-side
-  //    scratch dir exists only because loadManifest reads through a path.
-  const manifestBytes = await fetchBoxFile(vm, "$HOME/pipeline.yaml");
-  const witnessBytes = await fetchBoxFile(vm, "$HOME/run-context.json");
+  const manifestBytes = await fetchBoxFile(vm, `${home}/pipeline.yaml`);
+  const witnessBytes = await fetchBoxFile(vm, `${home}/run-context.json`);
   const markerRoot = path.join(recordsDir, runId);
   const srcDir = path.join(markerRoot, "delivered");
   fs.mkdirSync(srcDir, { recursive: true });
