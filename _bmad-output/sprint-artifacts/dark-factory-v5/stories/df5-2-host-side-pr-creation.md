@@ -162,7 +162,13 @@ DF5.1's host-side re-verify, not an LSP gate. Both remain KEEP and are repointed
   **host** clock immediately before the `POST /pulls` call — never GitHub's `created_at`, whose server
   clock is not comparable with the host clocks that stamp `ReverifyReport.completedAt` and
   `ApprovalRecord.decidedAt`. It exists so DF5.4-C6 can prove re-verify-precedes-PR ordering by
-  comparing host clocks only. This story is the owner of the `pr` sub-key's shape, and that shape is
+  comparing host clocks only. **On the two paths that adopt an existing PR instead of posting** — a
+  lost `POST /pulls` response recovered by the reuse probe, and a 422 "already exists" from a
+  concurrent caller — no host stamp for the true creation is recoverable, so `createdAt` is the
+  host's first-observation time: later than the true creation, therefore conservative for C6's
+  ordering, and not a claim about when GitHub made the PR. Round 16 of the review made that
+  contract explicit rather than adding a fourth field, which would have rippled through DF5.3 and
+  DF5.4 for a value neither of them orders differently. This story is the owner of the `pr` sub-key's shape, and that shape is
   exactly `{ prUrl, prNumber, createdAt }` at `schemaVersion: 1`; DF2.1's registry line naming the
   namespace is **illustrative of the allow-list entry**, not a competing field list.
 - **Refusals are durable, host-side and separate from the run record:** AC3's refusal appends one
@@ -251,7 +257,289 @@ DF5.1's host-side re-verify, not an LSP gate. Both remain KEEP and are repointed
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Status:** complete — all DOD items met, including the mandatory e2e demo.
+
+### The step-5 artifact (MANDATORY e2e demo)
+
+A real PR, produced host-side from a harvested run against a disposable
+repository, with a credential that was never inside a sandbox:
+
+**https://github.com/biospark33/qds-df52-e2e/pull/2**
+
+- Branch: `qds/run-df52-e2e`, author `biospark33` (the allowlist entry's `authorLogin`)
+- Body: `Run: run-df52-e2e` / `Issue: Closes #1` / `Cost: $0.014912 (3 events, 0 unpriced)` /
+  `Re-verify: green — 7/7 checks` / `Approved by: steve at …` / `Flags: test-files-modified`
+- `extensions.pr` on the run record: `{ schemaVersion: 1, prUrl, prNumber: 2, createdAt: "2026-08-25T12:04:39.417Z" }`
+- Sub-timings logged: `preflight_ms: 284`, `push_ms: 1561`, `pr_open_ms: 1230`, `record_write_ms: 5`
+- Second invocation returned the same PR with `reused: true`; the repo still shows exactly one open PR.
+
+The refusal path was demonstrated live on the same repository: a run whose report
+is `red` produced **no remote branch and no PR**, exit 1, one durable line in
+`.sandbox/pr/run-df52-red.refusals.jsonl` naming `reverify-red` and the failing
+check, and one comment on issue #1 carrying the same content.
+
+The token was piped over stdin (`gh auth token | bun scripts/open-pr.ts <run-id>`) —
+never argv, never an environment variable of this process.
+
+### What was built
+
+| File | Role |
+|------|------|
+| `src/pr/repos.ts` | `.factory/repos.json` allowlist: 0600 mode gate before the read, https-github.com remotes only, `authorLogin` required. `PrRefusalError` lives here. |
+| `src/pr/push.ts` | The preflight (ref → re-verify → approval → allowlist → token identity) and `pushVerifiedSha`. Durable refusal records. |
+| `src/pr/body.ts` | Pure body renderer: labelled lines, caps, `redactSecrets` once at the boundary. |
+| `src/pr/github.ts` | The four GitHub calls, 30 s timeout, one retry on 5xx/429, plus the keychain-or-stdin token reader. |
+| `src/pr/open-pr.ts` | `openPullRequest`, issue resolution through P1.3's mirror index, cost lookup, record write, best-effort issue comment. |
+| `scripts/open-pr.ts` | Operator CLI. Exit 0 opened/already-open, 1 refused, 2 usage/unexpected. |
+
+### Deviations and decisions
+
+- **The `ApprovalRecord` is read from the run record's `extensions.approval`
+  namespace, not from `.sandbox/approvals/<run-id>.json`.** DF3.4 has not landed;
+  DF5.1's `recordApprovalPort` — the single owner of the `requestApproval`
+  caller — writes the decision to the DF2.1 registered namespace, and every field
+  AC1/AC3 compares (`state`, `approverId`, `decidedAt`, `reportId`, `headSha`) is
+  registered there. When DF3.4 lands its own store, only this read moves.
+- **The token reaches git through a credential helper reading a variable set on
+  that child only**, not through an authenticated remote URL or
+  `-c http.extraheader=` — both of those put the token in argv where `ps` reads it
+  (INV-PR-2). The helper first RESETS the inherited chain, so an operator's global
+  helper cannot answer first and authenticate as a different account.
+- **The changed-file list is the host's own `git diff --name-only base..head`**, not
+  the box's `claimed.changedFiles` — the claim is agent-authored (INV-PR-4).
+- **A refusal that IS about the credential or the allowlist never falls back to
+  reading a token to post its issue comment.** An unregistered repo must not cause a
+  credential to be read; that is what refusing it means. Gate refusals (red verdict,
+  unapproved run) do resolve an entry and token best-effort in order to notify.
+- **`CostView.eventCount` was added to DF2.8's view** (the count was already computed
+  for `hasEvents`) so the body can render `(N events, M unpriced)`.
+- **`extensions.pr` gained `createdAt`** — this story owns that sub-key's shape, and
+  it is exactly `{ prUrl, prNumber, createdAt }` at `schemaVersion: 1`.
+
+### Verification
+
+- `bun test tests/pr` — 85 tests, all passing. The push tests run against a real
+  git repo and a real bare remote, so the non-force and fast-forward refusals are
+  assertions about git's behaviour rather than a mock's; only the GitHub HTTP
+  surface is faked.
+- `bunx tsc --noEmit` clean; `bunx @biomejs/biome check` clean on the new files.
+- Full suite: 3358 pass, 1 fail — `tests/gitnexus/graph-queries.test.ts`, which
+  fails identically on `main` with this branch stashed (stale gitnexus index,
+  unrelated to this story).
+
+### Review round 11 — CodeRabbit on PR #132, plus two rounds of our own
+
+Three exhaustive passes. Round 1 verified and fixed CodeRabbit's six actionable
+findings and its one nitpick; round 2 mutation-tested every new guard (all nine
+mutants killed) and found two residual defects; round 3 re-read the fixed surface
+and found an ordering defect in round 1's own fix.
+
+| # | Finding | Fix |
+|---|---------|-----|
+| 1 | `runId` reached `refusalPath` and `refs/sandbox/${runId}` with only a `startsWith("-")` check — `../../etc/x` escapes `.sandbox/pr/` | `assertExistingRunId` at the entry of `openPullRequest` and `pushVerifiedSha`, BEFORE `prDir` is named. Reuses the read-path admission rule the rest of the factory already honours; a malformed id throws (exit 2) rather than refusing, because a refusal it cannot record durably is not a refusal |
+| 2 | `pushVerifiedSha` accepted any `targetRef` — an ancestor-validated push straight onto `refs/heads/main`, or a new tag | `PUBLISH_REF_PREFIX` + `assertPublishableRef`, an ALLOW-list on each `/`-separated segment (`/^[A-Za-z0-9][A-Za-z0-9._-]*$/`, no `.lock` tail). Asserted in `pushWithPreflight` — the choke point every push routes through — AND before `preflight` in `pushVerifiedSha`, so the ordering matches the module's own rule that a ref the factory would never publish to must not cause a credential to be read |
+| 3 | `request` retried a 5xx on EVERY method: GitHub can land `POST /pulls` and fail the response, and the retry opens a second PR | `SAFE_METHODS` — GET/HEAD retry once, writes are attempted exactly once. A lost response is resolved by the next invocation's `findOpenPr` probe (AC4), which is the path that already existed |
+| 4 | `Bun.spawn` THROWS `ENOENT` when `security` is absent; it does not exit non-zero, so `readHostToken` rejected on every non-macOS host and never reached the piped-stdin fallback | The spawn is wrapped; the error is swallowed rather than surfaced (it carries the argv it was called with) |
+| 5 | `changedFiles` returned `[]` on a failed `git diff`, publishing `## Changed files (0)` and a `0 files, re-verified green` title for a run that passed re-verification | `diff-unavailable` refusal. The push has already happened and is idempotent, so the next invocation resumes at this step |
+| 6 | The idempotency `store.get` ran outside every `try` — an absent record rejected the promise with no refusal written and no log line | Routed through `refuse`, like every other precondition. The record's `requestId` is now carried into the `already-open` log line, which was the one event missing it |
+| 7 | The fake `findOpenPr` ignored its arguments and returned `openPrs[0]`, so the AC4 reuse tests could not detect a wrong-branch query | The fake records the head branch on create and filters on it |
+| 8 | *(ours)* `renderBody`/`renderRefusalComment` passed `redaction` straight to `redactSecrets`, which silently ignores keys outside `SECRET_KEY_RE`. Only `sealReport` validated | `assertRedactable` exported from `report.ts` and called at BOTH PR render boundaries, and once more at `openPullRequest`'s entry — the body renders after the push, so validating only at render time would publish a branch for a call whose body can never render |
+| 9 | *(ours)* the borrowed `RunRecord["extensions"] extends …` conditional type | `ExtensionEntry`, the type the store actually returns |
+
+Every fix carries a regression test that FAILS when the guard is reverted —
+verified by mutation, one mutant per fix. `bun test tests/pr` is 68 tests
+(was 51); `bunx tsc --noEmit` and `bunx @biomejs/biome check` clean.
+
+### Review round 12 — the ref grammar was an approximation of git's, not git's
+
+CodeRabbit's one finding on round 11: `REF_SEGMENT_RE`'s `[A-Za-z0-9._-]*` tail
+accepts `a.` and `a..b`, both of which `git check-ref-format` rejects (`..` is
+its range operator). Verified against real git before fixing — the guard was
+LOOSER than git for those two names, so the refusal arrived from `git push`
+after the token had already been handed to a git child, which is the ordering
+round 11 added the guard to prevent.
+
+The tail is now `[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*` — a dot only between two
+non-dot runs.
+
+The regression test is the PROPERTY, not the two names: for a table of 26 ref
+components it runs `git check-ref-format` and asserts the guard never ACCEPTS
+what git rejects. One-directional on purpose — stricter than git is fine (the
+guard also rejects a bare `@` component, which git allows), looser is the bug.
+A second test drives both invalid names through `pushVerifiedSha` with an
+instrumented token reader and asserts zero reads. Both mutants — the loose
+regex, and dropping the `.lock` predicate — are killed.
+
+### Review round 13 — the argv boundary, and the one thread that stayed open
+
+CodeRabbit auto-resolved six of round 11's seven threads once it had verified
+the fixes. The seventh — `scripts/open-pr.ts:28` — stayed open, correctly: the
+guard had been placed at `openPullRequest`'s entry so every library caller is
+covered, but the anchor file itself was never touched, so the argv surface
+reported a malformed id as an unhandled throw rather than as a usage error.
+
+`scripts/open-pr.ts` now calls `assertExistingRunId` before dispatching. The
+grammar is IMPORTED, not a second regex spelled out at the CLI: one admission
+rule, two call sites, no drift. A malformed id is exit 2 with the usage line; a
+well-formed one with no record is still exit 1, a refusal on its merits.
+
+`tests/pr/open-pr-cli.test.ts` spawns the real CLI, because exit codes are the
+contract and only a process has one. It runs in a throwaway cwd — `hostRoot`
+defaults to `process.cwd()`, so an unisolated case appends to the operator's own
+`.sandbox/pr/`, which the first version of the test did before this was caught.
+
+Sift's one open finding (`scripts/sandbox-teardown.ts:149`, a duplicated
+`reportFailure`) is not actionable here: that file is not in this PR's diff — the
+comment predates the `origin/main` merge that removed it from the range. Sift's
+run against round 11 reports no issues.
+
+### Review round 14 — GitNexus evidence (procedural finding, CLAUDE.md)
+
+Round 13's only finding was procedural and correct: this repo's `CLAUDE.md`
+requires an `impact` run before editing a symbol and a `detect_changes` before
+committing, and round 13 edited `main` in `scripts/open-pr.ts` without either.
+
+The index was badly stale — 4,469 nodes, built at `f8feebe`, and neither `main`
+nor `openPullRequest` resolved in it at all. Rebuilt with the canonical
+`bash scripts/install-gitnexus-plus.sh` (never a bare `gitnexus analyze`, #46/#47):
+9,946 nodes, 21,883 edges, indexed at `12376ac`.
+
+**`impact` — upstream**
+
+| Target | Impacted | Direct | Processes | Risk |
+|--------|----------|--------|-----------|------|
+| `main` (`scripts/open-pr.ts`) | 1 | 1 | 0 | LOW |
+| `openPullRequest` (`src/pr/open-pr.ts`) | 3 | 2 | 0 | LOW |
+| `runCli` (`tests/pr/open-pr-cli.test.ts`) | 1 | 1 | 0 | LOW |
+| `assertExistingRunId` (`src/providers/run-record.ts`) | 102 | 10 | 18 | **CRITICAL** |
+
+`main`'s only dependent is its own file; `openPullRequest`'s are the CLI's
+`main` and `tests/pr/open-pr.test.ts`, one module (`Pr`).
+
+**The CRITICAL result needs stating precisely.** `assertExistingRunId` carries
+102 upstream dependents across 18 processes and 7 modules — but this story does
+not MODIFY it. Rounds 11 and 13 added two CALL sites. The blast radius of
+changing that function is critical; the blast radius of calling it is bounded by
+the two callers above, both LOW. Reusing the factory's existing admission rule
+is what keeps it that way — a second regex spelled out locally would have added
+a fourth grammar to a symbol 18 processes already depend on.
+
+**`detect_changes({scope: "compare", base_ref: "main"})`**
+
+Run twice, because the first result was wrong in a way worth recording. The
+local `main` ref was 6 commits stale (`486a40a`, behind `origin/main` at
+`6caffdb`), which produced **408 changed symbols / 77 files / risk CRITICAL** —
+and is almost certainly the source of the review's "404 files" figure. After
+fast-forwarding local `main` (verified as an ancestor first, so a
+fast-forward and not a reset):
+
+| | Stale `main` | Corrected `main` |
+|---|---|---|
+| Changed symbols | 408 | **170** |
+| Changed files | 77 | **20** |
+| Risk | critical | **medium** |
+
+Affected processes, all five: `PushVerifiedSha → PrRefusalError`,
+`→ ResolveRunsDir`, `→ RunRecordStore`, `→ HttpGitHubApi`, and
+`Run → CostLedgerError` (via `CostLedger.view`, one step). Four of the five are
+the push path this story owns and re-gated; the fifth is the cost line the body
+renders. No process outside DF5.2's own surface is touched — which is what the
+review asked to see substantiated rather than asserted.
+
+### Review rounds 15-18 — the fixes whose own first draft was wrong
+
+**Round 15** — five findings, four mechanical: `gitEnv` now sets
+`GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null` (the credential chain
+was already reset in argv; the config that can REWRITE the remote was not), the
+non-default-`targetRef` refusal emits its step log line, the verification count
+was stale, and the owed deletion of the demo repo moved to issue #133.
+
+The fifth is the one worth recording. `writeReport(…, { claimedSuccess: false })`
+emitted a *successful* claim; the fix set `exitStatus: "failure"`, which is not
+a member of `EXIT_STATUSES`, so `sealReport`'s strict parse would have thrown on
+the first call — and silently, because nothing called it. Two local reviews
+caught it before the push. It is `"logic"`, and a new INV-PR-4 test (a box
+claiming failure against a green host verdict still opens the PR) exercises the
+branch. A dead option is not a harmless one.
+
+**Round 16** — four findings, all on code this round did not touch. Two fixed:
+
+- A `store.set` failing AFTER `createPr` succeeded reached the outer catch as
+  `unexpected-error`, so both the durable refusal line and the issue comment
+  described a run that had published nothing while GitHub held an open PR. It
+  is now `record-write-after-publication` and names the PR. It stays a refusal —
+  an unwritten `extensions.pr` is the correlation key DF5.3 walks — but it no
+  longer lies. Tested with a `Proxy` store failing the first `set`: the second
+  invocation pushes nothing, opens nothing, and writes the record.
+- The `ledgerPath` docstring claimed an ABSENT path renders `Cost: unavailable`.
+  It does not; absent falls through to `CostLedger`'s default, which is the host
+  ledger the CLI depends on. The comment was wrong, not the code.
+
+**Round 17** — the two round-16 push-backs, both rejected on review, both
+correctly:
+
+- *Concurrency.* "The CLI is one process" does not bind other callers of an
+  exported library API. The answer is not a lock — a lock file surviving a crash
+  blocks the resume AC4 requires — but GitHub's own serialization: one open PR
+  per head branch, and a second `POST /pulls` answered 422. `createOrAdopt`
+  catches a 422, re-probes `findOpenPr`, and ADOPTS the racer's PR; a 422 the
+  probe cannot explain still refuses. The head branch embeds the run id, so
+  adoption cannot attach a run to another run's PR. Both branches are
+  mutation-tested.
+- *`createdAt` on the adopt paths.* Conceded as a contract defect, not a value
+  defect. No `POST /pulls` happens on those paths, so the stamp is a
+  first-observation time; it is documented as such in `EXTENSION_NAMESPACES.pr`,
+  at the write site, and above. A fourth field would have rippled through DF5.3
+  and DF5.4 for a value neither of them orders differently.
+
+**Round 18** — the round-17 fix had a gap of its own, and the review found it:
+`findOpenPr` filtered on the head branch alone, so an open PR on `qds/<run-id>`
+targeting some OTHER base could be reused by the probe or adopted after a 422 —
+correlating the run to a PR that never targets the allowlisted base. The filter
+now carries `baseBranch` through the interface, the HTTP query (`base=`), both
+call sites, and the fake. Two tests: a wrong-base PR is neither reused nor
+adopted (the run opens its own against the allowlisted base), and the real
+client sends both filters.
+
+`bun test tests/pr` is 85 tests. Every fix in these four rounds carries a
+regression test that fails when the guard is reverted, verified by mutation.
+
+### Negative controls, as required
+
+- **INV-PR-1:** a test scans every file under `src/pr/` for an import edge to a
+  provider driver. The source story's in-box push (DD-10) fails it.
+- **INV-PR-4:** a run whose harvested output claims `exitStatus: "success"` with green
+  in-box gates and whose host verdict is `red` opens no PR. An implementation gating
+  on the in-box claim fails it.
+- **INV-PR-7:** the sentinel is planted in a re-verify note — a body INPUT — and kept
+  out of `process.env`. An implementation redacting against `process.env` fails it.
+- **AC3:** a run with no issue reference and a red report still refuses with the
+  durable line written. An implementation whose only refusal sink is the issue
+  comment fails it.
+- **AC4:** the second `openPullRequest` asserts the remote refs are byte-identical
+  and that exactly one PR was created. A re-push-and-reopen implementation fails it.
+
+### Cleanup owed
+
+`biospark33/qds-df52-e2e` is a private disposable repo created for the demo. Delete it
+with `gh repo delete biospark33/qds-df52-e2e --yes` once the PR URL above has been
+reviewed. The story is complete while that deletion is not, so it is tracked outside
+the story: **biospark33/QDS-Factory#133**.
+
+
+### The df3-1 round-10 handoff is NOT closed by this story
+
+The section below landed on `main` (PR #131) after this story's implementation began. It is
+**open**, and this PR does not close it: `allowedRepoHosts` appears nowhere in the codebase and
+`BriefSchema`'s object refine (`src/fleet/brief-schema.ts`) still ties `repoUrl`'s PATH to
+`repoSlug` with the HOST left unbound.
+
+What this story DID settle is the division of authority the handoff depends on:
+`.factory/repos.json` is the REPOSITORY authority — remote, base branch and `authorLogin` resolve
+from it and from nothing else (INV-PR-3) — so a host allowlist can be added as a `cost-config.json`
+key governing HOSTS only, without either surface widening the other. Implementing that refine
+change, its config plumbing and the pre-provisioning mutation test the handoff specifies is
+follow-up work, not part of DF5.2's ACs or DOD.
 
 ## Handoff from df3-1 review round 10 — repoUrl host binding is OPEN above this story
 

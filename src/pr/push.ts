@@ -1,0 +1,488 @@
+/**
+ * The host-side push, and the preflight that guards it (Story DF5.2).
+ *
+ * `pushVerifiedSha` is a SEPARATE export from `openPullRequest` because DF6.1's
+ * fix loop enters here — it appends to an existing PR branch and never opens a
+ * second PR. Both entry points run the SAME preflight (INV-PR-5): there is no
+ * push path that skips the gate, so a fix run's append needs its own green
+ * report and its own matching approval exactly as a first PR does.
+ *
+ * DD-10: P1.15 had the agent push from inside the box. D8 reverses that. The
+ * credential is host-only, the push happens after DF5.1's out-of-box re-verify,
+ * and nothing in this file is reachable from a provider driver (INV-PR-1).
+ */
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+
+import { RunRecordStore, assertExistingRunId, resolveRunsDir, type RunRecord } from "../providers/run-record.ts";
+import { DEFAULT_REVERIFY_DIR, readReports, reportPath, type ReverifyReport } from "../reverify/report.ts";
+import { exec as defaultExec, type ExecResult } from "../reverify/worktree.ts";
+import { httpGitHubApi, readHostToken, type GitHubApi } from "./github.ts";
+import { PrRefusalError, resolveRepoEntry, type RepoEntry } from "./repos.ts";
+
+export { PrRefusalError };
+
+/** Where refusals are recorded — host-side, append-only, mode 0600. */
+export const DEFAULT_PR_DIR = ".sandbox/pr";
+
+/**
+ * The namespace EVERY publishable ref lives under.
+ *
+ * The factory publishes to `qds/…` and to nothing else. Without this,
+ * `pushVerifiedSha`'s `targetRef` is caller-controlled: an ancestor-validated
+ * push straight onto `refs/heads/main`, or the creation of a tag, is a
+ * one-argument change away — and the ancestry check is not a permission, it
+ * only proves the update is an append (INV-PR-6).
+ */
+export const PUBLISH_REF_PREFIX = "refs/heads/qds/";
+
+/** The branch a first PR is opened from. `openPullRequest` uses this and only this. */
+export function defaultTargetRef(runId: string): string {
+  return `refs/heads/qds/${runId}`;
+}
+
+/**
+ * Refuse any ref outside the publish namespace, and any name git would reject
+ * or a path join would resolve out of it.
+ *
+ * `..` is the traversal that makes `refs/heads/qds/../../heads/main` a push to
+ * `main`; the rest is `git check-ref-format`'s grammar, applied here rather
+ * than discovered as a push failure after the credential has been handed to a
+ * child.
+ */
+/**
+ * Each `/`-separated segment of a publishable ref, in full — git's own
+ * component grammar, not an approximation of it.
+ *
+ * A dot may only appear BETWEEN two non-dot runs. That is what rejects `a.`
+ * and `a..b`, which `git check-ref-format` rejects too (`..` is its range
+ * operator). A looser `[A-Za-z0-9._-]*` tail accepts both, and the refusal
+ * then arrives as a failed `git push` — after the token has already been
+ * handed to a git child, which is the ordering this guard exists to prevent.
+ */
+const REF_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/;
+
+export function assertPublishableRef(targetRef: string): void {
+  const rest = targetRef.startsWith(PUBLISH_REF_PREFIX) ? targetRef.slice(PUBLISH_REF_PREFIX.length) : null;
+  const segments = rest === null ? [] : rest.split("/");
+  // An ALLOW-list, not a deny-list: a leading `.`, a `..`, an empty segment, a
+  // space, a control character and every one of git's own `~^:?*[\@{`
+  // metacharacters all fail to match, and none of them has to be enumerated.
+  const ok =
+    rest !== null &&
+    segments.length > 0 &&
+    segments.every((seg) => REF_SEGMENT_RE.test(seg) && !seg.endsWith(".lock"));
+  if (!ok) {
+    throw new PrRefusalError(
+      "target-ref-outside-namespace",
+      `${JSON.stringify(targetRef)} is not a publishable ref; the factory pushes only to ${PUBLISH_REF_PREFIX}<name>`,
+      { securityEvent: true },
+    );
+  }
+}
+
+export interface PrDeps {
+  /** The operator's checkout — the host git repo AND where `.factory/` lives. */
+  hostRoot?: string;
+  runsDir?: string;
+  store?: RunRecordStore;
+  reverifyDir?: string;
+  /** Where `<run-id>.refusals.jsonl` is appended. Defaults to `<hostRoot>/.sandbox/pr`. */
+  prDir?: string;
+  reposFile?: string;
+  /** Reads the host token. Defaults to keychain-then-stdin; never env, never argv. */
+  token?: () => Promise<string | null>;
+  github?: GitHubApi;
+  exec?: (argv: readonly string[], opts?: { cwd?: string; env?: Record<string, string> }) => Promise<ExecResult>;
+  now?: () => Date;
+  log?: (event: Record<string, unknown>) => void;
+}
+
+/** Everything the gate proved, handed forward so no caller re-reads it. */
+export interface Preflight {
+  runId: string;
+  requestId: string;
+  record: RunRecord;
+  report: ReverifyReport;
+  approval: { approverId: string; decidedAt: string; reportId: string; headSha: string };
+  entry: RepoEntry;
+  headSha: string;
+  token: string;
+  login: string;
+  hostRoot: string;
+  reverifyDir: string;
+  store: RunRecordStore;
+  github: GitHubApi;
+  exec: NonNullable<PrDeps["exec"]>;
+  durationMs: number;
+}
+
+export type PushOutcome =
+  | { ok: true; sha: string; targetRef: string; pushed: boolean }
+  | { ok: false; refusal: RefusalRecord };
+
+export interface RefusalRecord {
+  runId: string;
+  attemptedAt: string;
+  failedPrecondition: string;
+  failingChecks: string[];
+  reportPath: string;
+  message: string;
+}
+
+export function stderrLog(event: Record<string, unknown>): void {
+  process.stderr.write(`${JSON.stringify(event)}\n`);
+}
+
+export function refusalPath(dir: string, runId: string): string {
+  return join(dir, `${runId}.refusals.jsonl`);
+}
+
+/**
+ * The DURABLE half of AC3, and the only half that is not best-effort.
+ *
+ * The issue comment is a notification on top of this line, not instead of it: a
+ * run dispatched without an issue reference, or one whose comment API call
+ * fails, still refuses with this record written — a fail-closed path whose only
+ * sink is an optional surface is not fail-closed.
+ */
+export function recordRefusal(dir: string, record: RefusalRecord): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  appendFileSync(refusalPath(dir, record.runId), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+}
+
+export function toRefusal(runId: string, at: string, e: unknown): RefusalRecord {
+  const err = e instanceof PrRefusalError ? e : null;
+  return {
+    runId,
+    attemptedAt: at,
+    failedPrecondition: err?.precondition ?? "unexpected-error",
+    failingChecks: err?.failingChecks ?? [],
+    reportPath: err?.reportPath ?? "",
+    message: e instanceof Error ? e.message : String(e),
+  };
+}
+
+/**
+ * Git with the host token, supplied through a credential helper reading a
+ * variable set on THAT CHILD ONLY.
+ *
+ * Not an authenticated remote URL and not a `-c http.extraheader=` — both put
+ * the token in argv, where `ps` reads it (INV-PR-2). The helper body in argv is
+ * a shell function; the secret it echoes lives in the child's environment and
+ * nowhere else, and the process it is handed to is `git`, never a provider
+ * driver (INV-PR-1).
+ */
+function gitEnv(token: string): Record<string, string> {
+  return {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: process.env.HOME ?? "/tmp",
+    // The credential chain is reset in argv (see `authedGit`); the config that
+    // can REWRITE the remote — an operator's `url.<base>.insteadOf` or `http.*`
+    // rule — is reset here. Repo-local config still loads, which is the only
+    // config this module relies on.
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    // No prompt, ever: an unattended refusal beats a hung push waiting on a tty.
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "",
+    QDS_PR_TOKEN: token,
+  };
+}
+
+const CREDENTIAL_HELPER =
+  '!f() { test "$1" = get && printf "username=x-access-token\\npassword=%s\\n" "$QDS_PR_TOKEN"; }; f';
+
+function authedGit(argv: readonly string[]): string[] {
+  // The empty helper first RESETS the inherited chain: without it the
+  // operator's global helper (osxkeychain, gh, a manager) answers before ours
+  // and the push authenticates as whoever that holds — the exact identity
+  // mismatch AC5's `authorLogin` check exists to prevent.
+  return ["git", "-c", "credential.helper=", "-c", `credential.helper=${CREDENTIAL_HELPER}`, ...argv];
+}
+
+/**
+ * The gate, in the fixed order: ref → re-verify → approval → allowlist → token
+ * identity. Every step refuses before the next one runs, and the token is read
+ * LAST — an unregistered repo or a red verdict must never cause a credential to
+ * be touched at all.
+ */
+export async function preflight(runId: string, deps: PrDeps = {}): Promise<Preflight> {
+  const startedMs = Date.now();
+  const hostRoot = deps.hostRoot ?? process.cwd();
+  const runsDir = resolveRunsDir(deps.runsDir);
+  const store = deps.store ?? new RunRecordStore({ dir: runsDir, create: false });
+  const reverifyDir = deps.reverifyDir ?? join(hostRoot, DEFAULT_REVERIFY_DIR);
+  const exec = deps.exec ?? defaultExec;
+  const github = deps.github ?? httpGitHubApi();
+
+  const record = store.get(runId);
+  const requestId = record.requestId ?? "unknown";
+
+  // ── 1. the quarantine ref, and the sha it resolves to RIGHT NOW ──
+  const ref = `refs/sandbox/${runId}`;
+  const probe = await exec(["git", "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: hostRoot });
+  const headSha = probe.exitCode === 0 ? probe.stdout.trim() : "";
+  if (headSha === "") {
+    throw new PrRefusalError("quarantine-ref", `${ref} does not resolve to a commit in ${hostRoot}`, {
+      reportPath: reportPath(reverifyDir, runId),
+    });
+  }
+
+  // ── 2. DF5.1's report: the LAST record is authoritative ──
+  const reports = readReports(reverifyDir, runId);
+  const report = reports.at(-1);
+  const rp = reportPath(reverifyDir, runId);
+  if (report === undefined) {
+    throw new PrRefusalError("reverify-missing", `no ReverifyReport for run ${runId} at ${rp}`, { reportPath: rp });
+  }
+  const failingChecks = report.checks.filter((c) => !c.ok).map((c) => c.item);
+  if (report.verdict !== "green") {
+    throw new PrRefusalError(
+      `reverify-${report.verdict}`,
+      `re-verify verdict for ${runId} is ${report.verdict}${report.reason ? ` (${report.reason})` : ""}`,
+      { failingChecks, reportPath: rp },
+    );
+  }
+  // The verdict is about a SHA, not about a run. A green at some earlier sha
+  // never authorizes publishing a later re-harvest.
+  if (report.headSha !== headSha) {
+    throw new PrRefusalError(
+      "reverify-sha-mismatch",
+      `re-verify for ${runId} is green at ${report.headSha} but ${ref} now resolves to ${headSha}`,
+      { failingChecks, reportPath: rp },
+    );
+  }
+
+  // ── 3. DF3.4's approval, bound to THAT report ──
+  const approval = record.extensions?.approval;
+  if (approval === undefined) {
+    throw new PrRefusalError("approval-missing", `run ${runId} carries no approval record`, { reportPath: rp });
+  }
+  if (approval.state !== "approved") {
+    throw new PrRefusalError("approval-not-approved", `approval for ${runId} is ${String(approval.state)}, not approved`, {
+      reportPath: rp,
+    });
+  }
+  const approverId = String(approval.approverId ?? "");
+  const decidedAt = String(approval.decidedAt ?? "");
+  if (approverId === "" || decidedAt === "") {
+    throw new PrRefusalError("approval-incomplete", `approval for ${runId} carries no approverId/decidedAt`, {
+      reportPath: rp,
+    });
+  }
+  if (String(approval.reportId ?? "") !== report.reverifyId) {
+    throw new PrRefusalError(
+      "approval-report-mismatch",
+      `approval for ${runId} is bound to report ${String(approval.reportId)}, not ${report.reverifyId}`,
+      { reportPath: rp },
+    );
+  }
+  if (String(approval.headSha ?? "") !== headSha) {
+    throw new PrRefusalError(
+      "approval-sha-mismatch",
+      `approval for ${runId} is bound to sha ${String(approval.headSha)}, not ${headSha}`,
+      { reportPath: rp },
+    );
+  }
+  // An approval of an EARLIER verdict never authorizes a later re-harvest, so
+  // the decision must post-date the report it claims to authorize. Both stamps
+  // are host clocks (DF5.1 and DF3.4 both write host-side), so they compare.
+  const decided = Date.parse(decidedAt);
+  const completed = Date.parse(report.completedAt);
+  if (!Number.isFinite(decided) || !Number.isFinite(completed) || decided < completed) {
+    throw new PrRefusalError(
+      "approval-precedes-report",
+      `approval for ${runId} was decided at ${decidedAt}, before report ${report.reverifyId} completed at ${report.completedAt}`,
+      { reportPath: rp },
+    );
+  }
+
+  // ── 4. the allowlist — remote and base branch, never the harvested config ──
+  const repoSlug = record.extensions?.budget?.repoSlug;
+  if (typeof repoSlug !== "string" || repoSlug.length === 0) {
+    throw new PrRefusalError("no-repo-slug", `run ${runId} carries no extensions.budget.repoSlug to resolve a repo by`, {
+      reportPath: rp,
+      securityEvent: true,
+    });
+  }
+  const entry = resolveRepoEntry(hostRoot, repoSlug, deps.reposFile);
+
+  // ── 5. the token, read LAST, and the identity it authenticates as ──
+  const token = await (deps.token ?? readHostToken)();
+  if (token === null || token.length === 0) {
+    throw new PrRefusalError("no-token", "no host GitHub token is available (keychain empty and stdin not piped)", {
+      reportPath: rp,
+      securityEvent: true,
+    });
+  }
+  let login: string;
+  try {
+    login = await github.authenticatedLogin(token);
+  } catch (e) {
+    throw new PrRefusalError("token-unusable", `the host token could not be identified: ${(e as Error).message}`, {
+      reportPath: rp,
+      securityEvent: true,
+    });
+  }
+  if (login !== entry.authorLogin) {
+    throw new PrRefusalError(
+      "author-identity-mismatch",
+      `host token authenticates as ${login} but ${entry.repoSlug} requires ${entry.authorLogin}; a PR from the wrong identity gets no bot review`,
+      { reportPath: rp, securityEvent: true },
+    );
+  }
+
+  return {
+    runId,
+    requestId,
+    record,
+    report,
+    approval: { approverId, decidedAt, reportId: report.reverifyId, headSha },
+    entry,
+    headSha,
+    token,
+    login,
+    hostRoot,
+    reverifyDir,
+    store,
+    github,
+    exec,
+    durationMs: Date.now() - startedMs,
+  };
+}
+
+/** The remote's current sha for `ref`, or null when the ref does not exist there. */
+async function remoteTip(pre: Preflight, ref: string): Promise<string | null> {
+  const res = await pre.exec(authedGit(["ls-remote", pre.entry.remote, ref]), {
+    cwd: pre.hostRoot,
+    env: gitEnv(pre.token),
+  });
+  if (res.exitCode !== 0) {
+    throw new PrRefusalError("remote-unreachable", `git ls-remote ${ref} failed (exit ${res.exitCode}): ${res.stderr.trim()}`);
+  }
+  const line = res.stdout.split("\n").find((l) => l.trim().length > 0);
+  return line ? (line.split(/\s+/)[0] ?? null) : null;
+}
+
+/**
+ * Push the sha DF5.1 was green at, non-force, to `targetRef`.
+ *
+ * The SHA is pushed, never the ref name: `refs/sandbox/<run-id>` could move
+ * between preflight and push, and `git push <remote> <ref>:<target>` would then
+ * publish something no host ever verified (AC1).
+ *
+ * A non-default `targetRef` is DF6.1's PR branch. It is additionally required to
+ * be a fast-forward — an append is the only accepted update and a rewrite is a
+ * refusal (INV-PR-6).
+ */
+export async function pushVerifiedSha(
+  runId: string,
+  opts: { targetRef?: string } & PrDeps = {},
+): Promise<PushOutcome> {
+  // BEFORE `prDir`, and before anything else can be named after `runId`:
+  // `recordRefusal` writes `<prDir>/<runId>.refusals.jsonl`, so a traversing id
+  // would escape the refusal directory on the very path that is supposed to
+  // contain the refusal. A malformed id is a caller bug, not a refusal the
+  // factory can record — it throws.
+  assertExistingRunId(runId);
+  const now = opts.now ?? (() => new Date());
+  const prDir = opts.prDir ?? join(opts.hostRoot ?? process.cwd(), DEFAULT_PR_DIR);
+  try {
+    // BEFORE the preflight, for the same reason the preflight reads the token
+    // LAST: a ref the factory would never publish to must not cause a
+    // credential to be touched at all. `pushWithPreflight` asserts it again —
+    // that is the choke point every push routes through, this is the ordering.
+    const targetRef = opts.targetRef ?? defaultTargetRef(runId);
+    assertPublishableRef(targetRef);
+    const pre = await preflight(runId, opts);
+    const pushed = await pushWithPreflight(pre, targetRef, opts.log ?? stderrLog);
+    return { ok: true, sha: pre.headSha, targetRef, pushed };
+  } catch (e) {
+    const refusal = toRefusal(runId, now().toISOString(), e);
+    recordRefusal(prDir, refusal);
+    (opts.log ?? stderrLog)({
+      runId,
+      step: "push",
+      timestamp: refusal.attemptedAt,
+      durationMs: 0,
+      outcome: "refused",
+      failedPrecondition: refusal.failedPrecondition,
+      ...(e instanceof PrRefusalError && e.securityEvent ? { securityEvent: true } : {}),
+    });
+    return { ok: false, refusal };
+  }
+}
+
+/**
+ * The push itself, on an already-satisfied preflight. Returns whether a ref
+ * update actually happened — a remote already at this sha is a RESUME, not a
+ * second push (AC4).
+ */
+export async function pushWithPreflight(
+  pre: Preflight,
+  targetRef: string,
+  log: (e: Record<string, unknown>) => void,
+): Promise<boolean> {
+  const startedMs = Date.now();
+  // Every push in this file routes through here — one guard covers both entry
+  // points, and it runs before the token is handed to any git child.
+  assertPublishableRef(targetRef);
+  const isDefault = targetRef === defaultTargetRef(pre.runId);
+  const tip = await remoteTip(pre, targetRef);
+
+  if (tip === pre.headSha) {
+    log({ requestId: pre.requestId, runId: pre.runId, step: "push", repoSlug: pre.entry.repoSlug, timestamp: new Date().toISOString(), durationMs: Date.now() - startedMs, outcome: "already-present" });
+    return false;
+  }
+
+  if (tip !== null) {
+    if (isDefault) {
+      // A divergent `qds/<run-id>` is a refusal, not an overwrite (INV-PR-6).
+      throw new PrRefusalError(
+        "remote-ref-diverged",
+        `${targetRef} already exists on ${pre.entry.repoSlug} at ${tip}, not ${pre.headSha}; the factory never force-updates a published ref`,
+      );
+    }
+    // DF6.1's append: the new sha must be a DESCENDANT of the remote tip. The
+    // tip is fetched first because `merge-base` needs the object locally, and a
+    // remote whose tip we cannot fetch is a refusal rather than an assumption.
+    const fetched = await pre.exec(authedGit(["fetch", "--no-tags", pre.entry.remote, `${tip}`]), {
+      cwd: pre.hostRoot,
+      env: gitEnv(pre.token),
+    });
+    if (fetched.exitCode !== 0) {
+      throw new PrRefusalError(
+        "remote-tip-unfetchable",
+        `could not fetch ${targetRef}'s tip ${tip} to prove the push is an append: ${fetched.stderr.trim()}`,
+      );
+    }
+    const ancestor = await pre.exec(["git", "merge-base", "--is-ancestor", tip, pre.headSha], { cwd: pre.hostRoot });
+    if (ancestor.exitCode !== 0) {
+      throw new PrRefusalError(
+        "not-fast-forward",
+        `${pre.headSha} is not a descendant of ${targetRef}'s tip ${tip}; an append is the only accepted update`,
+      );
+    }
+  }
+
+  const res = await pre.exec(authedGit(["push", pre.entry.remote, `${pre.headSha}:${targetRef}`]), {
+    cwd: pre.hostRoot,
+    env: gitEnv(pre.token),
+  });
+  if (res.exitCode !== 0) {
+    throw new PrRefusalError("push-failed", `git push to ${targetRef} failed (exit ${res.exitCode}): ${res.stderr.trim()}`);
+  }
+  log({
+    requestId: pre.requestId,
+    runId: pre.runId,
+    step: "push",
+    repoSlug: pre.entry.repoSlug,
+    timestamp: new Date().toISOString(),
+    durationMs: Date.now() - startedMs,
+    outcome: "pushed",
+    targetRef,
+    sha: pre.headSha,
+  });
+  return true;
+}

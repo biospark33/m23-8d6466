@@ -659,6 +659,8 @@ export interface CostView {
   tokenTotals: { inputTokens: number; outputTokens: number };
   cacheTotals: { cacheReadTokens: number; cacheWriteTokens: number };
   unpricedRows: number;
+  /** Every row in scope, priced or not — DF5.2's PR body reports it beside the total. */
+  eventCount: number;
   /** `false` distinguishes a run/issue with no ledger rows from one that spent nothing. */
   hasEvents: boolean;
 }
@@ -1066,6 +1068,7 @@ export class CostLedger {
       tokenTotals: { inputTokens: tokenRow.inputTokens, outputTokens: tokenRow.outputTokens },
       cacheTotals: { cacheReadTokens: tokenRow.cacheReadTokens, cacheWriteTokens: tokenRow.cacheWriteTokens },
       unpricedRows: unpricedRow.n,
+      eventCount: anyRow.n,
       hasEvents: anyRow.n > 0,
     };
   }
