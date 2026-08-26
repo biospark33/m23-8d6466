@@ -33,7 +33,7 @@ import { VIZ_PIDFILE, type ExecResult, type ProviderDriver } from "../../src/pro
 import type { SetupGateResult } from "../../src/providers/exedev/setup-gate.ts";
 import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
-import { goodLedger, type RecordingLedger } from "./helpers.ts";
+import { goodLedger, type BudgetSnapshot, type RecordingLedger } from "./helpers.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 import { runMarkerPath } from "../../src/phase-engine/journal.ts";
 import { FleetError, type GateOpts } from "../../src/fleet/dispatch.ts";
@@ -588,6 +588,118 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(armsAtFirstAdmission).toBe(3);
       expect(seenRunIds.size).toBe(3);
       for (const id of seenRunIds) expect(id).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
+    });
+  });
+
+  // ─── F15b: per-issue grouped headroom (multi-issue many-stories) ─────────────
+
+  describe("F15b: per-issue grouped headroom (multi-issue many-stories)", () => {
+    /**
+     * goodLedger whose snapshot answers PER canonical issue key. Issues not in
+     * the map report infinite headroom — same "never refuse by default" stance
+     * as the helper's own default snapshot; a test pinning a refusal names the
+     * tight issue explicitly.
+     */
+    function perIssueLedger(byIssue: Record<string, BudgetSnapshot>): RecordingLedger {
+      const ledger = goodLedger();
+      ledger.issueBudgetSnapshot = (repoSlug: string, issueId: string): BudgetSnapshot =>
+        byIssue[`${repoSlug}#${issueId}`] ?? {
+          ceilingMicroUsd: Number.MAX_SAFE_INTEGER,
+          spentMicroUsd: 0,
+          reservedMicroUsd: 0,
+        };
+      return ledger;
+    }
+
+    test("two briefs on two DIFFERENT issues, each fitting alone, fan out — briefList[0]-only arithmetic would over-refuse", async () => {
+      // many-stories arms may target distinct issues; admitIssue budgets PER
+      // (repoSlug, issueId). Each issue carries exactly ONE arm at cap here, so
+      // 50k available per issue is enough for both groups. The pre-F15b block
+      // read only briefList[0] and demanded n×cap = 100k on issue #42 — a
+      // legitimate fan-out refused exit 5 before anything existed.
+      const cap = 50_000;
+      manifest();
+      const res = await fanout(
+        "many-stories",
+        2,
+        [brief(), { ...brief(), issueId: 43 }],
+        deps({
+          capMicroUsd: cap,
+          ledgerFactory: () =>
+            perIssueLedger({
+              "owner/repo#42": { ceilingMicroUsd: cap, spentMicroUsd: 0, reservedMicroUsd: 0 },
+              "owner/repo#43": { ceilingMicroUsd: cap, spentMicroUsd: 0, reservedMicroUsd: 0 },
+            }),
+        }),
+      );
+      expect(res.arms.map((a) => a.outcome)).toEqual(["ready", "ready"]);
+      expect(boxCount(driver)).toBe(2);
+    });
+
+    test("a LATER brief's exhausted issue refuses pre-mint — arms 1..n-1 are no longer unchecked", async () => {
+      // #42 fits; #43 has 20k free < cap. Pre-F15b only #42 was read → both
+      // arms dispatched and arm 1's real admitIssue refused budget-exceeded
+      // MID-flight, after arm 0 provisioned a billable box — the exact hazard
+      // the F15 block was built to kill. The refusal must land on #43 BEFORE
+      // anything is minted.
+      const cap = 50_000;
+      manifest();
+      const err = await refuseOf(
+        fanout(
+          "many-stories",
+          2,
+          [brief(), { ...brief(), issueId: 43 }],
+          deps({
+            capMicroUsd: cap,
+            ledgerFactory: () =>
+              perIssueLedger({
+                "owner/repo#42": { ceilingMicroUsd: 1_000_000, spentMicroUsd: 0, reservedMicroUsd: 0 },
+                "owner/repo#43": { ceilingMicroUsd: 50_000, spentMicroUsd: 30_000, reservedMicroUsd: 0 },
+              }),
+          }),
+        ),
+      );
+      expect(err.exitCode).toBe(5);
+      expect(err.code).toBe("issue-ceiling-insufficient");
+      expect(err.message).toContain("owner/repo#43");
+      expect(err.message).not.toContain("owner/repo#42"); // #42 fits — only the exhausted group is named
+      expect(fanoutRecordFiles()).toEqual([]);
+      expect(boxCount(driver)).toBe(0);
+    });
+
+    test("grouped refusal names EVERY insufficient issue's own need and override line", async () => {
+      // Briefs [#42, #43, #42]: group #42 carries TWO arms (needs 2×cap),
+      // group #43 one. Both groups are short — the message and the
+      // remediation's perIssueOverrides map must name BOTH, each with its OWN
+      // group-count arithmetic (100000 and 50000), never n×cap flattened onto
+      // brief 0's issue.
+      const cap = 50_000;
+      manifest();
+      const err = await refuseOf(
+        fanout(
+          "many-stories",
+          3,
+          [brief(), { ...brief(), issueId: 43 }, brief()],
+          deps({
+            capMicroUsd: cap,
+            ledgerFactory: () =>
+              perIssueLedger({
+                "owner/repo#42": { ceilingMicroUsd: 60_000, spentMicroUsd: 0, reservedMicroUsd: 0 },
+                "owner/repo#43": { ceilingMicroUsd: 10_000, spentMicroUsd: 0, reservedMicroUsd: 0 },
+              }),
+          }),
+        ),
+      );
+      expect(err.exitCode).toBe(5);
+      expect(err.code).toBe("issue-ceiling-insufficient");
+      expect(err.message).toContain("owner/repo#42");
+      expect(err.message).toContain("100000"); // 2 arms × cap on #42 — not 3×cap
+      expect(err.message).toContain("owner/repo#43");
+      expect(err.message).toContain("50000");
+      expect(err.remediation).toContain('"owner/repo#42": 100000');
+      expect(err.remediation).toContain('"owner/repo#43": 50000');
+      expect(fanoutRecordFiles()).toEqual([]);
+      expect(boxCount(driver)).toBe(0);
     });
   });
 

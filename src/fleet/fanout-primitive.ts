@@ -307,23 +307,36 @@ export async function fanout(
     // refused budget-exceeded — a deterministic partial fan-out that spent
     // money on a fan-out the ledger was always going to strangle. Reconcile
     // BEFORE anything is minted: read the same three numbers admission acts on
-    // and require headroom for the whole declared aggregate, n × per-arm cap.
-    // The remedy names the exact config line — the operator's cost-config
-    // stays the one place budgets are declared; the verb just refuses early,
-    // cheaply, and legibly instead of after arm 0's box is on the meter.
+    // and require headroom for the whole declared aggregate.
+    //
+    // F15b: many-stories arms may target DIFFERENT issues, and the briefs
+    // carry no cross-issue rule — so the aggregate is per GROUP of briefs
+    // sharing a canonical (repoSlug, issueId), not n×cap flattened onto
+    // briefList[0]'s issue. Reading only arm 0 was wrong twice: it OVER-REFUSED
+    // (demanding n×cap on an issue arm 0 alone bills cap against) and it
+    // UNDER-PROTECTED (arms 1..n-1's issues were never checked, so their
+    // budget-exceeded refusals landed mid-flight, after arm 0 provisioned).
+    // The remedy names every short group's own config line — the operator's
+    // cost-config stays the one place budgets are declared.
     const cap = deps.capMicroUsd ?? defaultKeyCapMicroUsd;
-    const brief0 = input.briefList[0] as Brief | undefined;
-    if (brief0 !== undefined) {
-      const issueKey = `${brief0.repoSlug}#${brief0.issueId}`;
+    const groups = new Map<string, { repoSlug: string; issueId: string; count: number }>();
+    for (const b of input.briefList) {
+      const issueId = String(b.issueId);
+      const g = groups.get(`${b.repoSlug}#${issueId}`);
+      if (g === undefined) groups.set(`${b.repoSlug}#${issueId}`, { repoSlug: b.repoSlug, issueId, count: 1 });
+      else g.count += 1;
+    }
+    const shortGroups: Array<{
+      issueKey: string;
+      need: number;
+      available: number;
+      snapshot: { ceilingMicroUsd: number; spentMicroUsd: number; reservedMicroUsd: number };
+    }> = [];
+    for (const g of groups.values()) {
       const ledger = deps.ledgerFactory();
-      let available = 0;
       let snapshotMicroUsd = { ceilingMicroUsd: 0, spentMicroUsd: 0, reservedMicroUsd: 0 };
       try {
-        snapshotMicroUsd = ledger.issueBudgetSnapshot(brief0.repoSlug, String(brief0.issueId));
-        available =
-          snapshotMicroUsd.ceilingMicroUsd -
-          snapshotMicroUsd.spentMicroUsd -
-          snapshotMicroUsd.reservedMicroUsd;
+        snapshotMicroUsd = ledger.issueBudgetSnapshot(g.repoSlug, g.issueId);
       } finally {
         try {
           ledger.close();
@@ -331,16 +344,46 @@ export async function fanout(
           // a read-only probe's close failure must not mask the refusal below
         }
       }
-      const need = n * cap;
+      const available =
+        snapshotMicroUsd.ceilingMicroUsd -
+        snapshotMicroUsd.spentMicroUsd -
+        snapshotMicroUsd.reservedMicroUsd;
+      const need = g.count * cap;
       if (available < need) {
-        throw invalid(
-          5,
-          "issue-ceiling-insufficient",
-          `fan-out of ${n} arms at ${cap} µ$ each needs ${need} µ$ of issue headroom for ${issueKey}, but the ledger has ${available} (ceiling ${snapshotMicroUsd.ceilingMicroUsd} − spent ${snapshotMicroUsd.spentMicroUsd} − reserved ${snapshotMicroUsd.reservedMicroUsd})`,
-          `declare the aggregate for this fan-out in .sandbox/cost-config.json: {"perIssueOverrides": {"${issueKey}": ${need}}}`,
-          { issueKey, needMicroUsd: need, availableMicroUsd: available, ...snapshotMicroUsd },
-        );
+        shortGroups.push({
+          issueKey: `${g.repoSlug}#${g.issueId}`,
+          need,
+          available,
+          snapshot: snapshotMicroUsd,
+        });
       }
+    }
+    if (shortGroups.length > 0) {
+      const first = shortGroups[0] as (typeof shortGroups)[number];
+      const message =
+        shortGroups.length === 1
+          ? `fan-out of ${n} arms at ${cap} µ$ each needs ${first.need} µ$ of issue headroom for ${first.issueKey}, but the ledger has ${first.available} (ceiling ${first.snapshot.ceilingMicroUsd} − spent ${first.snapshot.spentMicroUsd} − reserved ${first.snapshot.reservedMicroUsd})`
+          : `fan-out of ${n} arms at ${cap} µ$ each across ${groups.size} issues lacks per-issue headroom: ${shortGroups
+              .map(
+                (s) =>
+                  `${s.issueKey} needs ${s.need} µ$ (ledger has ${s.available}: ceiling ${s.snapshot.ceilingMicroUsd} − spent ${s.snapshot.spentMicroUsd} − reserved ${s.snapshot.reservedMicroUsd})`,
+              )
+              .join("; ")}`;
+      const overrides = shortGroups.map((s) => `"${s.issueKey}": ${s.need}`).join(", ");
+      throw invalid(
+        5,
+        "issue-ceiling-insufficient",
+        message,
+        `declare the aggregate${shortGroups.length === 1 ? "" : "s"} for this fan-out in .sandbox/cost-config.json: {"perIssueOverrides": {${overrides}}}`,
+        {
+          issues: shortGroups.map((s) => ({
+            issueKey: s.issueKey,
+            needMicroUsd: s.need,
+            availableMicroUsd: s.available,
+            ...s.snapshot,
+          })),
+        },
+      );
     }
 
     // AC9: the record exists before the FIRST mint. Arms are attached right
