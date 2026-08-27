@@ -27,6 +27,27 @@ import { assertExistingRunId, assertValidRunId } from "./run-record.ts";
 
 export const DEFAULT_FAKE_BOXES_DIR = ".sandbox/fake-boxes";
 
+/**
+ * The error shape the driver CONTRACT means: machine `code` + literal next
+ * command, matching `ExeDevDriverError`. Raw fs errors out of this driver
+ * reached dispatch's classifier unclassified (`providerCodePayload` got
+ * nothing, `errorRemediation` fell to its generic fallback) on every fake-path
+ * failure — the exact shape `ProvisionRefusedError`/`ExeDevDriverError` exist
+ * to prevent. Defined here rather than imported from the exedev layer: the
+ * fake must not depend on a specific substrate's module.
+ */
+class FakeDriverError extends Error {
+  readonly code: string;
+  readonly remediation: string;
+
+  constructor(code: string, message: string, remediation: string) {
+    super(message);
+    this.name = "FakeDriverError";
+    this.code = code;
+    this.remediation = remediation;
+  }
+}
+
 interface BoxMeta {
   name: string;
   tag?: string;
@@ -116,7 +137,16 @@ export class FakeDriver implements ProviderDriver {
       if (meta.name !== vm) throw new Error("box metadata name mismatch");
       return meta;
     } catch (e) {
-      throw new Error(`no such box: ${vm} (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`);
+      // Contract-shaped (code + remediation), not a bare Error: dispatch's
+      // classifier reads those two fields off every driver rejection. The
+      // MESSAGE keeps the historical `no such box: <vm>` prefix — harvest's
+      // `isNoSuchBox` and teardown's box-gone skip both classify on that text,
+      // so the marker must survive the reshape.
+      throw new FakeDriverError(
+        "no-such-box",
+        `no such box: ${vm} (${(e as NodeJS.ErrnoException).code ?? (e instanceof Error ? e.message : String(e))})`,
+        "the box is gone or its .box.json is unreadable — re-check the boxes root, or create the box again",
+      );
     }
   }
 
@@ -132,8 +162,20 @@ export class FakeDriver implements ProviderDriver {
     // effect belongs to the first box. Recursive, so it is idempotent.
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
     // Non-recursive mkdir: a second create of the same box fails with EEXIST
-    // rather than silently adopting someone else's box.
-    mkdirSync(dir, { mode: 0o700 });
+    // rather than silently adopting someone else's box — and the failure is
+    // contract-shaped, not a raw errno (same classifier reasoning as readMeta).
+    try {
+      mkdirSync(dir, { mode: 0o700 });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new FakeDriverError(
+          "box-exists",
+          `box ${name} already exists`,
+          "a box by this name is already provisioned — destroy it first or use a different run id",
+        );
+      }
+      throw e;
+    }
     const meta: BoxMeta = { name, tag, public: false, ports: [], createdAt: new Date().toISOString() };
     this.writeMeta(meta);
     return { name, status: "running" };

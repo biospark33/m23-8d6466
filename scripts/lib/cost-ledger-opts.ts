@@ -73,6 +73,7 @@
  * one CostLedger would pick. An explicit env override is one file for both
  * halves, so it cannot split a run's money either.
  */
+import { copyFileSync, existsSync, mkdirSync, statSync, writeSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
 import {
@@ -116,12 +117,81 @@ function envPath(value: string | undefined): string | undefined {
  */
 const DEFAULT_RUNS_SUFFIX = sep + DEFAULT_RUNS_DIR.split("/").join(sep);
 
+/** One-line best-effort stderr note (fd-2 style), never thrown from. */
+function noteStderr(line: string): void {
+  try {
+    writeSync(2, `${line}\n`);
+  } catch {
+    // Diagnostics only; resolution must not fail over a note.
+  }
+}
+
+/**
+ * L5 MIGRATION — one-time, additive. When the RESOLVED ledger path does not
+ * exist yet but the LEGACY sibling `<parent>/cost-ledger.db` beside the records
+ * directory does, copy it to the new location. Non-default store dirs had their
+ * money orphaned by the relocation: dispatch reserved against a brand-new
+ * empty ledger while every reservation and settled box hour sat unread in the
+ * old sibling — `capForIssue` saw zero spend and re-admitted spend that was
+ * already blocked, which is the under-counting direction that SPENDS.
+ *
+ * Fail-safe on every axis:
+ *  - the legacy file is NEVER deleted or moved — it stays as the operator's
+ *    backup and as the fallback below forever;
+ *  - an env override wins outright (`$QDS_COST_LEDGER_FILE`) and skips both the
+ *    migration and the check — an explicit path is deliberate, no second-
+ *    guessing it;
+ *  - any failure at any point falls back to READING THE LEGACY PATH rather than
+ *    proceeding against an empty new ledger — degraded-but-correct beats
+ *    silently-wrong.
+ */
+function migrateOrFallback(ledgerPath: string, legacyPath: string): string {
+  if (!existsSync(ledgerPath) && existsSync(legacyPath)) {
+    try {
+      let sizeOk = true;
+      try {
+        sizeOk = statSync(legacyPath).isFile();
+      } catch {
+        sizeOk = false;
+      }
+      if (sizeOk) {
+        mkdirSync(dirname(ledgerPath), { recursive: true });
+        // Copy, never rename: the legacy file must stay intact as the backup.
+        copyFileSync(legacyPath, ledgerPath);
+        noteStderr(
+          `note: migrated cost ledger ${legacyPath} -> ${ledgerPath} (legacy file kept in place; remove it once you have verified the new location)`,
+        );
+        return ledgerPath;
+      }
+    } catch {
+      // fall through to reading the legacy path below
+    }
+    noteStderr(
+      `warning: could not migrate cost ledger ${legacyPath} to ${ledgerPath} — reading the LEGACY location so existing accounting is not silently dropped`,
+    );
+    return legacyPath;
+  }
+  return ledgerPath;
+}
+
 export function costLedgerOpts(storeDir: string): Required<Pick<CostLedgerDeps, "path" | "config">> {
   const dir = resolve(storeDir);
   // The default layout is the one place the ledger stays a sibling.
-  const ledgerDir = dir.endsWith(DEFAULT_RUNS_SUFFIX) ? dirname(dir) : dir;
+  const defaultLayout = dir.endsWith(DEFAULT_RUNS_SUFFIX);
+  const ledgerDir = defaultLayout ? dirname(dir) : dir;
+  const override = envPath(process.env.QDS_COST_LEDGER_FILE);
+  const derivedPath = join(ledgerDir, basename(DEFAULT_COST_LEDGER_FILE));
   return {
-    path: envPath(process.env.QDS_COST_LEDGER_FILE) ?? join(ledgerDir, basename(DEFAULT_COST_LEDGER_FILE)),
+    // L5: for a NON-default layout the relocation above is the one that
+    // orphaned existing accounting, so when the new spot is empty and the old
+    // sibling still holds the money, migrate (or read the old side). The
+    // DEFAULT layout special case needs no migration — it has always settled
+    // into its sibling.
+    path:
+      override ??
+      (defaultLayout
+        ? derivedPath
+        : migrateOrFallback(derivedPath, join(dirname(dir), basename(DEFAULT_COST_LEDGER_FILE)))),
     // An absent cost-config.json falls back to DEFAULT_COST_CONFIG
     // (loadCostConfig maps ENOENT to defaults); an unreadable one still throws
     // — fail-closed preserved. But that throw used to reach a BLOCKED TEARDOWN

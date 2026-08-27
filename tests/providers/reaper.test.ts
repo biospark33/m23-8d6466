@@ -274,18 +274,48 @@ describe("DF2.6 sweep", () => {
     );
   }
 
-  test("a TAGGED box with a legacy-shape id is owned: record-less ⇒ destroyed, not stranded foreign", async () => {
-    // Pre-tightening builds generated ids like this, and every record path
-    // still honours them — but the strict shape half classified their TAGGED
-    // boxes foreign here: reported, never reaped, billing forever. The tag,
-    // not the shape, is what proves ownership.
+  test("a TAGGED box with a legacy-shape id and NO record stays report-only (K4: tag alone cannot corroborate a non-generated name)", async () => {
+    // K4 narrowing of the round-10 widening: `LEGACY_RUN_ID_RE` matches any
+    // lowercase co-tenant name and the ownership tag is a shared constant, so
+    // tag + legacy-name alone is ONE factor — a sibling deployment's manually
+    // tagged box would classify owned and be DESTROYED unrecoverably. The
+    // legacy arm now demands a record reference in THIS deployment's store
+    // before it votes destroy; without one the box reports for manual
+    // remediation (the pre-widening verdict for non-generated names).
     expect(RUN_ID_SHAPE.test(LEGACY_VM)).toBeFalse();
 
     const fleet = await seedFleet(dir, {}, NOW);
     await seedLegacyBox(fleet, SBX_OWNERSHIP_TAG);
-    expect((await fleet.driver.list()).map((v) => v.tag)).toEqual([SBX_OWNERSHIP_TAG]);
 
-    // dry-run predicts it; --yes destroys it through the widened re-check.
+    const dry = await sweep(deps(fleet));
+    expect(dry.rows.map(rowSig)).toContain(`vm:${LEGACY_VM}:foreign:report`);
+    expect(dry.executed.destroy).toEqual([]);
+
+    const report = await sweep(deps(fleet), { yes: true });
+    expect(report.failures).toHaveLength(0);
+    expect(report.executed.destroy).toHaveLength(0);
+    expect((await fleet.driver.list()).map((v) => v.name)).toEqual([LEGACY_VM]);
+  });
+
+  test("a TAGGED box with a legacy-shape id AND a matching record IS owned: corroboration completes the widened arm", async () => {
+    // The anti-stranding intent the widening existed for still holds when the
+    // evidence is two-factor: record (this store) + tag. A pre-tightening
+    // build wrote the record before the box (INV-1), so every genuine factory
+    // box named under the legacy grammar has one here — the corroboration arm
+    // costs it nothing while refusing everything no local record vouches for.
+    const fleet = await seedFleet(dir, {}, NOW);
+    await seedLegacyBox(fleet, SBX_OWNERSHIP_TAG);
+    // The record must CLAIM the box but not keep it alive through another arm:
+    // a CLOSED record is exactly the leaked-box state INV-4 defines. Seeded by
+    // hand — `store.create` applies the STRICT grammar and refuses the
+    // trailing-hyphen name (that strictness is why pre-tightening records had
+    // to keep being readable under the legacy rule).
+    writeFileSync(
+      join(fleet.runsDir, `${LEGACY_VM}.json`),
+      `${JSON.stringify({ runId: LEGACY_VM, createdAt: new Date().toISOString(), closedAt: NOW.toISOString() })}\n`,
+      { mode: 0o600 },
+    );
+
     const dry = await sweep(deps(fleet));
     expect(dry.rows.map(rowSig)).toContain(`vm:${LEGACY_VM}:leaked-vm:destroy`);
     expect(dry.executed.destroy).toEqual([LEGACY_VM]);

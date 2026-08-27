@@ -158,6 +158,20 @@ function invalidFile(file: string, detail: string): QuotaLimitsError {
  */
 export interface HeadroomInput {
   list(name?: string): Promise<{ name: string }[]>;
+  /**
+   * The listing plus what it refused to name, structurally typed (D4 — the
+   * value shape mirrors `ProviderVmListing` without importing it). OPTIONAL,
+   * additive like the seam's own: when present, the population count comes
+   * from HERE, because a row the driver dropped is a possible live box —
+   * counting only what `list()` reports undercounts the population and admits
+   * creates against spend nobody enumerated (fail-open). Any non-empty
+   * `skipped` refuses outright (`list-unverified`, transient — never
+   * full-headroom-from-an-undercount).
+   */
+  listWithAnomalies?(name?: string): Promise<{
+    vms: { name: string }[];
+    skipped: readonly string[];
+  }>;
 }
 
 export interface HeadroomResult {
@@ -208,7 +222,23 @@ export async function checkHeadroom(
   };
   let vms: { name: string }[];
   try {
-    vms = await withTimeout(driver.list(), listTimeoutMs, "driver.list()");
+    // The anomaly channel when the driver has one, `list()` otherwise (same
+    // fallback contract as the seam's `driverListing` — a driver without the
+    // channel has claimed nothing about completeness either way). A non-empty
+    // `skipped` is rows this driver COULD NOT name — possible live boxes — so
+    // it refuses exactly like an enumeration failure: `list-unverified` is
+    // transient at every consumer (dispatch and fanout both classify it
+    // retryable), which is precisely the right posture for "the count is not
+    // proven": refuse once, admit on the next clean answer.
+    if (driver.listWithAnomalies !== undefined) {
+      const listing = await withTimeout(driver.listWithAnomalies(), listTimeoutMs, "driver.list()");
+      if (!Array.isArray(listing?.vms) || listing.skipped.length > 0) {
+        return { ...base, allowed: false, liveVms: 0, headroom: 0, usedDiskGiB: 0, verified: false, reason: "list-unverified" };
+      }
+      vms = listing.vms;
+    } else {
+      vms = await withTimeout(driver.list(), listTimeoutMs, "driver.list()");
+    }
   } catch {
     return {
       ...base,

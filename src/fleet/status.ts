@@ -137,6 +137,15 @@ const MAX_TIMESTAMP = 64;
  */
 const MAX_DIAGNOSTIC = 512;
 
+/**
+ * Cap on how many skipped filenames the run-not-found remediation interpolates
+ * into ONE operator-facing line. The list scales with the runs directory, so an
+ * unbounded join put megabytes of stderr (and payload) behind one `statusRun`
+ * on a directory holding thousands of non-run-id `.json` files. The COUNT stays
+ * exact — a truncated list is visibly partial, never silently short.
+ */
+const MAX_SKIPPED_ECHO = 16;
+
 /** The message half of a store exception, under the same two rules as names. */
 function safeDiagnostic(e: unknown): string {
   // Optional chain, not a bare cast: a `throw null` must still classify (the
@@ -206,6 +215,16 @@ function safeUrl(url: string | undefined): string | undefined {
   return sanitizeLabel(url, MAX_URL);
 }
 
+/**
+ * `setTimeout` clamps a delay past the 32-bit signed max to 1 ms — the same
+ * inversion dispatch.ts's `MAX_TIMEOUT_MS` guards, and status did not: a
+ * caller asking for a LONGER budget got the SHORTEST possible one, every box
+ * reported `boxUnknown` and `statusAll` emitted `listUnavailable`. Clamped
+ * rather than refused so an over-eager configured ceiling degrades to the
+ * largest real one instead of breaking every verb.
+ */
+const MAX_LIST_TIMEOUT_MS = 2_147_483_647;
+
 /** Story: 30s default. A non-positive value would fire the timer immediately. */
 function resolveTimeoutMs(deps: StatusDeps): number {
   const ms = deps.listTimeoutMs ?? 30_000;
@@ -217,7 +236,7 @@ function resolveTimeoutMs(deps: StatusDeps): number {
       "Omit listTimeoutMs for the 30s default, or pass a positive millisecond value",
     );
   }
-  return ms;
+  return Math.min(ms, MAX_LIST_TIMEOUT_MS);
 }
 
 /** driver.list() under a cleared-on-completion timeout (story: 30s → boxUnknown). */
@@ -748,7 +767,9 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
             ? "Check the run ID — the record listing could not be read, so a record for this run under a mangled name cannot be ruled out. Run `fleet status` (which refuses with record-store-unreadable and names the file) and repair it before creating the run; a box may still be billing behind it"
             : skipped.length === 0
               ? "Check the run ID or create the run first"
-              : `Check the run ID or create the run first — the listing skipped ${skipped.length} file(s) whose names are not run ids (${skipped.map(safeName).join(", ")}), and one of them may be this run's record under a mangled name`,
+              : `Check the run ID or create the run first — the listing skipped ${skipped.length} file(s) whose names are not run ids (${
+                  skipped.slice(0, MAX_SKIPPED_ECHO).map(safeName).join(", ")
+                }${skipped.length > MAX_SKIPPED_ECHO ? `, and ${skipped.length - MAX_SKIPPED_ECHO} more` : ""}), and one of them may be this run's record under a mangled name`,
       );
     }
 

@@ -262,7 +262,7 @@ export class ExeDevDriver implements ProviderDriver {
         // Redacted before it leaves the driver: the raw JSON body can carry
         // `ssh_dest`/`https_url` values that embed credentials (`ghs_…` in a
         // clone URL), and these strings reach error messages and log lines.
-        skipped.push(redactSecrets(`vms[${i}] (row is not an object: ${truncate(JSON.stringify(v) ?? String(v))})`));
+        skipped.push(redactSecrets(`vms[${i}] (row is not an object: ${truncate(boundedJson(v) ?? String(v))})`));
         return [];
       }
       const row = v as Record<string, unknown>;
@@ -302,8 +302,12 @@ export class ExeDevDriver implements ProviderDriver {
         mine = false;
       }
       if (!mine) {
+        // Redacted like every sibling anomaly string: a name failing the
+        // grammar is provider free text, and it can embed credential-shaped
+        // material (`ghs_…` in a URL fragment) — truncation alone does not
+        // scrub it. `emit`'s fields land verbatim in the JSONL log stream.
         this.emit("list_excluded_foreign_name", {
-          vm: truncate(vmName),
+          vm: redactSecrets(truncate(vmName)),
           verb: "list",
           outcome: "excluded",
           reason: "vm_name is outside every factory box-name grammar — not a box this driver created (nor any earlier build)",
@@ -500,6 +504,22 @@ function truncate(s: string): string {
 }
 
 /**
+ * Bounded stringify: `JSON.stringify` runs to completion before `truncate`
+ * gets its cap, so one multi-megabyte provider row block the event loop for
+ * the whole serialization regardless of the 120-char output ceiling (the same
+ * hazard the roster read's byte bound exists for). Slicing the VALUE first
+ * bounds the stringify input; the flag makes truncated containers render as
+ * `"…"`, never the unbalanced remainder of a cut JSON text.
+ */
+function boundedJson(v: unknown): string | undefined {
+  try {
+    return JSON.stringify(v, (_, inner) => (typeof inner === "string" && inner.length > ANOMALY_VALUE_MAX ? `${inner.slice(0, ANOMALY_VALUE_MAX)}…` : inner));
+  } catch {
+    return undefined; // circular provider payload — fall through to String(v)
+  }
+}
+
+/**
  * Whatever identifying fields a row this driver refused to name DOES carry.
  *
  * The refusal `reapRuns` raises on a skipped entry tells an operator to go find
@@ -514,7 +534,7 @@ function rowIdentity(row: Record<string, unknown>): string {
   const fields: string[] = [];
   for (const [k, v] of Object.entries(row)) {
     if (k === "vm_name" || typeof v !== "string" || v.length === 0) continue;
-    fields.push(`${truncate(k)}=${truncate(JSON.stringify(v))}`);
+    fields.push(`${truncate(k)}=${truncate(boundedJson(v) ?? String(v))}`);
     if (fields.length === 4) break;
   }
   return fields.length === 0 ? "the row carries no other identifying field" : `row fields: ${fields.join(" ")}`;

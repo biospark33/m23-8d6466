@@ -474,6 +474,40 @@ function writeCodeManifest(dir: string): string {
   return manifest;
 }
 
+/** `writeCodeManifest` at an EXACT path — the resolved-path witness test needs
+ * a stable name to symlink against. Same body, no seq suffix. */
+function writeCodeManifestIn(dir: string): string {
+  const manifest = path.join(dir, "pipeline-linked.json");
+  fs.writeFileSync(
+    manifest,
+    JSON.stringify({
+      version: "1.0.0",
+      pipelineId: "resolved-anchor-demo",
+      runBudgetMs: 100_000,
+      limitMicroUsd: 250_000,
+      phases: [
+        {
+          name: "plan",
+          kind: "code",
+          description: "Emit the plan artifact for the requested change",
+          maxDurationMs: 15_000,
+          retries: 0,
+          command: ["echo", "planned"],
+        },
+        {
+          name: "build",
+          kind: "code",
+          description: "Apply the reviewed change to the worktree",
+          maxDurationMs: 15_000,
+          retries: 0,
+          command: ["echo", "built"],
+        },
+      ],
+    }),
+  );
+  return manifest;
+}
+
 function traceDb(markerRoot: string): string {
   return path.join(markerRoot, "trace", "trace.db");
 }
@@ -996,18 +1030,62 @@ describe("pipeline-run DF3.1 AC9b: the admitted ceiling reaches the run context"
     ).toThrow(/resolves outside the run root/);
   });
 
-  test("an unresolved manifest path THROWS rather than falling back to the argv string", () => {
-    // Why a source assertion and not a call: `resolvedPath` is optional on
-    // `LoadedManifest` — `stampManifestLimit` and `stripAuthoredLimit` both drop
-    // it deliberately, because their bytes match no file on disk — but
-    // `loadManifest`, the only thing `main` routes through today, always sets
-    // it. So there is no runtime path left that reaches the branch. What is
-    // still reachable is the FUTURE caller who routes `main` through one of the
-    // deriving helpers, and the old `?? manifestPath` fallback silently
-    // substituted the argv string for the verified realpath at exactly that
-    // moment — aiming the cap witness at whatever directory a symlinked
-    // `--manifest` pointed into, which is the redirect the symlink case above
-    // refuses. A throw is what keeps the re-enable from being silent.
+  test("the runner anchors the cap witness on the VERIFIED path, never the argv string", async () => {
+    // The runtime half of the guard at main's witness anchor. `resolvedPath` is
+    // optional on `LoadedManifest` (the deriving helpers drop it because their
+    // bytes match no file), so a `?? manifestPath` fallback was live type
+    // surface there: it aimed the witness check at whatever directory the argv
+    // path sits in instead of the directory the manifest BYTES were read from.
+    //
+    // No caller today can hand main an unresolved derived manifest, but the two
+    // directories ARE constructibly distinct through a symlink: loadManifest
+    // reads the REALPATH's sibling and refuses an out-of-root witness, while a
+    // restored fallback would consult the SYMLINK's sibling — so planting a
+    // fresh agreeing pair in each proves which one the run anchored on. The
+    // symlink arm above ("cannot aim the check at another directory") already
+    // refuses this shape via readArtifactBeneathRoot; the discriminating case
+    // here is DECLARED-LIMIT + no witness beside the link target: under the
+    // guard the ceiling matches against the realpath's fresh witness and exits
+    // 0; under a `?? argv` regression the reconciliation looks beside the LINK,
+    // finds nothing, and the ceiling-mismatch refusal fires instead.
+    const ws = workspace();
+    const realDir = path.join(ws.dir, "real");
+    fs.mkdirSync(realDir, { recursive: true });
+    const manifest = writeCodeManifestIn(realDir);
+    fs.writeFileSync(
+      path.join(realDir, "run-context.json"),
+      JSON.stringify({ effectiveCeilingMicros: 250_000 }),
+    );
+    const linkDir = path.join(ws.dir, "linkdir");
+    fs.mkdirSync(linkDir, { recursive: true });
+    fs.symlinkSync(manifest, path.join(linkDir, "pipeline-linked.json"));
+
+    const correlation = ["--repo-slug", "qds/demo", "--issue", "42", "--request-id", crypto.randomUUID()];
+    const proc = spawnRunner(
+      [
+        "--manifest", path.join(linkDir, "pipeline-linked.json"),
+        "--budget-ms", "120000",
+        "--journal", ws.journal,
+        "--run-root", ws.dir,
+        ...correlation,
+      ],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(0);
+    // And it really did agree with the FRESH witness beside the resolved bytes
+    // (not exit-0-by-luck): naming a different admitted ceiling must refuse.
+    expect(stderr).not.toContain("declares limitMicroUsd");
+    expect(stderr).not.toContain("is stale");
+  }, 60_000);
+
+  test("layout change-detector: no argv-string fallback at the witness anchor", () => {
+    // SECONDARY pin, kept only as an early tripwire for the anchor's SHAPE — a
+    // rename of `resolvedPath` or a reformatted guard fails here before any
+    // behaviour test does. It cannot prove the guard runs (see the runtime test
+    // above for that), and the two `expect(source)` probes below are what keep
+    // ITS OWN matches honest: without them a rename makes both regexes vacuously
+    // pass, which is exactly the false-pass the runtime arm exists to close.
     const source = fs.readFileSync(path.join(REPO_ROOT, "scripts", "pipeline-run.ts"), "utf8");
     // The identifier must still exist at all: without this probe, a rename of
     // `resolvedPath` turns BOTH matches below into vacuous passes instead of a
@@ -1123,26 +1201,34 @@ describe("pipeline-run DF3.1 S28: the witness is fresh-bound to THIS run (±30 m
   const HOUR_AGO = new Date(Date.now() - 60 * 60_000); // 2× the window
   const HOUR_AHEAD = new Date(Date.now() + 60 * 60_000);
 
-  test("a STALE witness on an unstamped manifest leaves the ceiling ABSENT", () => {
+  test("a STALE witness on an unstamped manifest REFUSES — round 11 removed the downgrade", () => {
     // Same bytes as the honoured fresh case above ("a witness WITHOUT a stamped
     // manifest still puts the admitted ceiling on the context"); only the mtime
-    // differs. Falling back to an absent field is the conservative money
-    // direction — the harness default is never above what was reserved.
+    // differs. This used to warn and downgrade to DF1.6's $0.50 harness
+    // default on the theory that the default is "never higher than what was
+    // reserved" — false for any admission BELOW $0.50, so a witnessed 250_000
+    // µ$ ran at TWICE its ceiling (the exact spawn the reconciliation was built
+    // to stop). An undeclared limit has nothing of its own to fall back to, so
+    // the undeclared path now takes the same refusing staleness verdict the
+    // declared path always did.
     const f = witnessed(JSON.stringify({ effectiveCeilingMicros: 250_000 }));
     fs.utimesSync(f.witnessPath, HOUR_AGO, HOUR_AGO);
 
-    const ctx = runContextFrom("run-s28-1", "req-s28-1", { pipelineId: "stale-witness" }, f);
-    expect("effectiveCeilingMicros" in ctx).toBe(false);
+    expect(() =>
+      runContextFrom("run-s28-1", "req-s28-1", { pipelineId: "stale-witness" }, f),
+    ).toThrow(/is stale/);
   });
 
-  test("a FUTURE-dated witness is stale too — Math.abs is the whole point of the window", () => {
+  test("a FUTURE-dated witness refuses too — Math.abs is the whole point of the window", () => {
     // A clock-skewed or forged mtime an hour ahead is exactly as untrustworthy
-    // as one an hour old; a signed age check would honour it.
+    // as one an hour old; a signed age check would honour it. Refusal, not the
+    // old downgrade: see the stale-witness arm above.
     const f = witnessed(JSON.stringify({ effectiveCeilingMicros: 250_000 }));
     fs.utimesSync(f.witnessPath, HOUR_AHEAD, HOUR_AHEAD);
 
-    const ctx = runContextFrom("run-s28-2", "req-s28-2", { pipelineId: "future-witness" }, f);
-    expect("effectiveCeilingMicros" in ctx).toBe(false);
+    expect(() =>
+      runContextFrom("run-s28-2", "req-s28-2", { pipelineId: "future-witness" }, f),
+    ).toThrow(/is stale/);
   });
 
   test("a witness at the INNER edge of the window is still honoured", () => {
@@ -1160,6 +1246,23 @@ describe("pipeline-run DF3.1 S28: the witness is fresh-bound to THIS run (±30 m
 
     const ctx = runContextFrom("run-s28-2b", "req-s28-2b", { pipelineId: "inner-edge-witness" }, f);
     expect(ctx.effectiveCeilingMicros).toBe(250_000);
+  });
+
+  test("a witness ONE MINUTE past the outer edge REFUSES — the window is ±30 min, not 'recent enough'", () => {
+    // The outer half of the boundary pair with the honoured inner-edge arm
+    // above: window + 60 s is outside by construction even against lstat/now
+    // drift far larger than the pair's 2 s slack. Together the two arms pin the
+    // WIDTH of WITNESS_FRESH_WINDOW_MS (not merely "(0, 60 min)" as both ends
+    // at ±1 h did) — shrinking the constant toward CI-flake territory or
+    // growing it toward "last week's committed pair accepted" now fails one of
+    // them.
+    const f = witnessed(JSON.stringify({ effectiveCeilingMicros: 250_000 }));
+    const outerEdge = new Date(Date.now() - 31 * 60_000);
+    fs.utimesSync(f.witnessPath, outerEdge, outerEdge);
+
+    expect(() =>
+      runContextFrom("run-s28-2c", "req-s28-2c", { pipelineId: "outer-edge-witness" }, f),
+    ).toThrow(/is stale/);
   });
 
   test("a DECLARED cap reconciles only against a CURRENT witness — a stale agreeing pair REFUSES", () => {
@@ -1181,13 +1284,14 @@ describe("pipeline-run DF3.1 S28: the witness is fresh-bound to THIS run (±30 m
     ).toThrow(/is stale/);
   });
 
-  test("the stale downgrade is not silent: the runner warns witness_stale and still runs at the default", async () => {
-    // The warn line is written straight to fd 2 (`fs.writeSync(2, …)`), so it
-    // is observable only through the spawned runner — a direct call would print
-    // it into the test process's own stderr.
+  test("a stale witness on an unstamped manifest refuses the RUN (exit 2), not just the cap", async () => {
+    // Round 11: the undeclared path's stale downgrade became a refusal. Driven
+    // through the spawned runner because that is where the EXIT CODE lives —
+    // the direct `runContextFrom` arms above prove the throw; this proves the
+    // runner turns it into "the run could not be settled at all" rather than a
+    // silently-uncapped spawn. The message must name the constant, so an
+    // operator staring at a CI log can find the window without reading source.
     const ws = workspace();
-    // No declared limit → the witness-only path, which DOWNGRADES rather than
-    // refusing: the run proceeds at the DF1.6 default.
     const manifest = writeCodeManifest(ws.dir);
     const witness = path.join(ws.dir, "run-context.json");
     fs.writeFileSync(witness, JSON.stringify({ effectiveCeilingMicros: 250_000 }));
@@ -1198,11 +1302,42 @@ describe("pipeline-run DF3.1 S28: the witness is fresh-bound to THIS run (±30 m
       ws.markerRoot,
     );
     const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
-    expect(exitCode).toBe(0);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("is stale");
+    expect(stderr).toContain("WITNESS_FRESH_WINDOW_MS");
+  });
 
-    const warn = jsonLines(stderr).find((l) => l.event === "witness_stale");
-    expect(warn).toBeDefined();
-    expect(String(warn?.detail)).toContain("freshness window");
-    expect(String(warn?.effect)).toContain("left unset");
+  test("an UNREADABLE witness directory refuses on the unstamped path — never 'uncapped' or mislabelled", () => {
+    // Round 11 / E2: an EACCES'd manifest directory used to flow presence
+    // (true, fails closed) into a staleness check whose bare catch labelled
+    // EVERY errno "it vanished between the presence check and this read" — a
+    // factually wrong diagnosis, and after the old downgrade a permissions
+    // fault read as an uncapped-at-default run. Now the hardened reader's
+    // refusal lands first and the message says unreadable, not vanished.
+    // Driven end to end (presence → read → verdict); mode bits are skipped
+    // under root, where the read simply succeeds and there is nothing to pin.
+    if (process.getuid?.() === 0) return;
+    const runRoot = path.join(tmpRoot, `s28-eacces-${seq++}`);
+    const manifestDir = path.join(runRoot, "locked");
+    fs.mkdirSync(manifestDir, { recursive: true });
+    const manifestPath = path.join(manifestDir, "pipeline.yaml");
+    fs.writeFileSync(manifestPath, "{}\n");
+    fs.writeFileSync(
+      path.join(manifestDir, "run-context.json"),
+      JSON.stringify({ effectiveCeilingMicros: 250_000 }),
+    );
+    fs.chmodSync(manifestDir, 0o000);
+    let threw: unknown;
+    try {
+      runContextFrom("run-s28-4", "req-s28-4", { pipelineId: "unreadable-witness" }, { manifestPath, runRoot });
+    } catch (e) {
+      threw = e;
+    }
+    fs.chmodSync(manifestDir, 0o755);
+    expect(threw).toBeDefined();
+    const message = String((threw as Error).message);
+    expect(message).toContain("run-context.json");
+    expect(message).not.toContain("vanished");
+    expect(message).not.toContain("left unset");
   });
 });

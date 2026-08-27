@@ -252,6 +252,15 @@ function runCommand(
  * must agree; witness alone → the witness IS the ceiling; declared limit alone
  * → refusal; neither → the field stays ABSENT, never defaulted to a number.
  *
+ * Round 11 removed the last fallback on the witness-alone path: a STALE
+ * witness on an unstamped manifest used to warn and downgrade to the harness
+ * default, on the theory that the default is "never higher than what was
+ * reserved" — false for any admission below DF1.6's $0.50 (a witnessed
+ * 250_000 µ$ ran at TWICE its ceiling, the very spawn the reconciliation was
+ * built to stop). An undeclared limit has nothing of its own to fall back to,
+ * so the witness-only path now goes through the same refusing reader the
+ * declared path uses: whatever verdict the reader reaches is the verdict.
+ *
  * KNOWN ASSUMPTION, and the whole reconciliation rests on it: THE WITNESS IS
  * NOT AUTHOR-WRITABLE. It is looked for beside the manifest
  * (`admittedCeilingBeside` joins `run-context.json` onto the manifest's own
@@ -301,31 +310,15 @@ export function runContextFrom(
     // `stripAuthoredLimit` is applied on the runner side, this is the door the
     // admitted ceiling walks out of.
     if (!witnessPresent(witness.manifestPath)) return ctx;
-    // S28: a STALE witness is a previous run's statement, not this one's — it
-    // no longer sets the ceiling. Falling back to the absent field is the
-    // conservative money direction (the DF1.6 harness default is never higher
-    // than what was reserved), and the stderr line keeps the downgrade from
-    // being silent: an operator whose runs now die early at $0.50 gets a reason.
-    const stale = witnessStaleBecause(witness.manifestPath);
-    if (stale !== null) {
-      try {
-        fs.writeSync(
-          2,
-          `${JSON.stringify({
-            level: "warn",
-            event: "witness_stale",
-            runId,
-            requestId,
-            witnessPath: witnessPathBeside(witness.manifestPath),
-            detail: stale,
-            effect: "effectiveCeilingMicros left unset; the run spawns at the harness default",
-          })}\n`,
-        );
-      } catch {
-        /* observability only; the fallback itself must not fail */
-      }
-      return ctx;
-    }
+    // No undeclared-limit fallback remains. The stale downgrade below used to
+    // be a warn + harness-default on the theory that "the DF1.6 harness
+    // default is never higher than what was reserved" — false for any
+    // admission BELOW $0.50 (a witnessed 250_000 µ$ ran at twice its ceiling),
+    // so it has been deleted: a present witness now goes through the same
+    // refusing reader the declared path uses (`admittedCeilingBeside`, whose
+    // staleness check throws). An unreadable lstat also refuses there instead
+    // of masquerading as "vanished → stale → uncapped". ABSENCE is still the
+    // only thing that leaves the field unset.
     return {
       ...ctx,
       effectiveCeilingMicros: admittedCeilingBeside(witness.manifestPath, witness.runRoot, false),
@@ -391,22 +384,41 @@ function witnessPresent(manifestPath: string): boolean {
  * dispatch-owned location or signature noted in `runContextFrom`.
  *
  * `lstatSync`, matching `witnessPresent`: the link itself is what was seen
- * there, so the link's mtime is what is judged. A throw here (the entry
- * vanished since the presence check) reads as stale — fail closed.
+ * there, so the link's mtime is what is judged.
+ *
+ * Only ENOENT reads as "vanished" here (round 11): every other errno is an
+ * UNREADABLE witness, and mapping it onto staleness — which the callers then
+ * treat as a downgrade to the harness default — turned a permissions fault
+ * into an uncapped run. That was fail-open where `witnessPresent`'s own
+ * contract promises fail-closed ("an unreadable witness must REFUSE, not read
+ * as 'no cap'"). `witnessStaleBecause` now rethrows any non-ENOENT errno; the
+ * calling paths refuse with it verbatim. Nothing can interleave a removal
+ * AND swap in a different file under this name between the presence check and
+ * the read without touching the directory itself, so a true ENOENT remains the
+ * only disappearance worth labelling.
  */
 const WITNESS_FRESH_WINDOW_MS = 30 * 60_000;
+
+/** The reason an out-of-window witness stops speaking for this run. */
+const WITNESS_STALE_MESSAGE = (ageMs: number): string => {
+  const skew = ageMs < 0;
+  return `its mtime is ${Math.round(Math.abs(ageMs) / 1000)}s ${skew ? "in the future" : "old"}, outside the ±${Math.round(WITNESS_FRESH_WINDOW_MS / 60_000)}min freshness window this run binds it to`;
+};
 
 function witnessStaleBecause(manifestPath: string): string | null {
   let mtimeMs: number;
   try {
     mtimeMs = fs.lstatSync(witnessPathBeside(manifestPath)).mtimeMs;
-  } catch {
-    return "it vanished between the presence check and this read";
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return "it vanished between the presence check and this read";
+    }
+    throw err;
   }
   const ageMs = Date.now() - mtimeMs;
   if (Math.abs(ageMs) <= WITNESS_FRESH_WINDOW_MS) return null;
-  const skew = ageMs < 0;
-  return `its mtime is ${Math.round(Math.abs(ageMs) / 1000)}s ${skew ? "in the future" : "old"}, outside the ±${Math.round(WITNESS_FRESH_WINDOW_MS / 60_000)}min freshness window this run binds it to`;
+  return WITNESS_STALE_MESSAGE(ageMs);
 }
 
 /**
@@ -440,11 +452,19 @@ function admittedCeilingBeside(manifestPath: string, runRoot: string, declared: 
   // validate the body first, so a stale witness was diagnosed by whatever its
   // content happened to be — "carries no positive integer effectiveCeiling-
   // Micros" or a ceiling mismatch — when the truth is that it is a PREVIOUS
-  // run's statement and speaks for nothing. The witness-only path
-  // (runContextFrom) already ordered it this way.
+  // run's statement and speaks for nothing. Both paths reach here ordered
+  // this way now (round 11 removed the witness-only fallback).
   const stale = witnessStaleBecause(manifestPath);
   if (stale !== null) {
-    throw new Error(`${because} ${witnessPath} is stale: ${stale}`);
+    // The refusal stands (money-safe), but the operator needs the two facts
+    // that make it actionable instead of a dead end: what the window IS, and
+    // that the remedy is free — re-dispatching re-reserves and re-stamps the
+    // witness moments before the box runs. The existing reservation is not
+    // orphaned by this refusal: `sandbox-teardown` closes the run record, and
+    // the ledger retires a closed run's reservation regardless of spend.
+    throw new Error(
+      `${because} ${witnessPath} is stale: ${stale}. This refuses rather than trust a previous run's ceiling statement (window: WITNESS_FRESH_WINDOW_MS = ±${Math.round(WITNESS_FRESH_WINDOW_MS / 60_000)}min in scripts/pipeline-run.ts). Re-dispatch to re-reserve and re-stamp the witness; the current reservation stays open only until teardown closes this run's record`,
+    );
   }
   let parsed: unknown;
   try {
@@ -458,9 +478,10 @@ function admittedCeilingBeside(manifestPath: string, runRoot: string, declared: 
   if (!Number.isSafeInteger(admitted) || (admitted as number) <= 0) {
     throw new Error(`${because} ${witnessPath} carries no positive integer effectiveCeilingMicros`);
   }
-  // Unlike the witness-only path there is nothing to fall back to when stale:
-  // the manifest asserts a ceiling nothing current vouches for, so a stale
-  // witness refuses outright instead of downgrading anything.
+  // A stale witness refuses on BOTH paths since round 11: there is nothing to
+  // fall back to on the declared path (the manifest asserts a ceiling nothing
+  // current vouches for), and the undeclared path's old harness-default
+  // fallback admitted over reserved ceilings — see `runContextFrom`.
   return admitted as number;
 }
 
@@ -895,6 +916,15 @@ async function main(argv: readonly string[]): Promise<number> {
     } catch {
       /* the cap-reconciliation refusal outranks a close failure */
     }
+    // `innerJournal` deliberately gets NO symmetric close here: FileJournal
+    // holds no descriptor between calls — every flush opens, fsyncs, renames,
+    // closes — so there is no handle to leak on this exit (the tracer's WAL
+    // handle above is the one that needs releasing). Its constructor's header
+    // flush stays on disk showing ok:false and no phases, which is the true
+    // state: a run that never started. Unlinking it from this catch cannot
+    // prove the file still belongs to THIS invocation (a concurrent writer on
+    // the same --journal path may have already replaced it), so the honest
+    // residue is the header itself.
     throw err;
   }
   const journal = new TracingJournal(innerJournal, tracer, ctx);

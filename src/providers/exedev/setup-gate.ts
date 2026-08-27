@@ -151,14 +151,43 @@ function rosterModels(rosterPath: string): string[] {
   // loop, so an oversized roster would wedge the gate outside every deadline
   // (the dispatch pre-check caps its own read; this is the second copy of the
   // same hazard — brief-steered path, repo-root containment only).
-  const size = statSync(rosterPath).size;
-  if (size > ROSTER_MAX_BYTES) {
+  //
+  // Every fs failure below is TYPED (RosterError), never a bare Node error:
+  // the gate's contract is refusals an operator can act on, and a bare
+  // ENOENT/EACCES/EISDIR escaping here classified as an unhandled crash.
+  // stat → read → re-stat closes the check-then-act gap the single stat left:
+  // a roster grown (or swapped) past the ceiling between statSync and
+  // readFileSync still lands, so the event-loop wedge window stays shut.
+  let stat: import("node:fs").Stats;
+  try {
+    stat = statSync(rosterPath);
+  } catch (e) {
+    throw unreadableRoster(rosterPath, e);
+  }
+  if (!stat.isFile()) {
     throw new RosterError(
-      [`roster is ${size} bytes, over the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling`],
+      [`roster path is not a regular file (${stat.isDirectory() ? "a directory" : "other"}) — cannot parse it as a roster`],
       rosterPath,
+      "roster_unreadable",
     );
   }
-  const text = readFileSync(rosterPath, "utf8");
+  if (stat.size > ROSTER_MAX_BYTES) {
+    throw overCeilingRoster(rosterPath, stat.size);
+  }
+  let text: string;
+  try {
+    text = readFileSync(rosterPath, "utf8");
+  } catch (e) {
+    throw unreadableRoster(rosterPath, e);
+  }
+  try {
+    const after = statSync(rosterPath);
+    if (after.size > ROSTER_MAX_BYTES) throw overCeilingRoster(rosterPath, after.size);
+  } catch (e) {
+    if (e instanceof RosterError) throw e;
+    // The re-stat itself failed — the roster vanished mid-gate. The bytes we
+    // did read stay usable (parse decides), so this is not fatal; swallow.
+  }
   const roster = parseRoster(text, rosterPath);
   const slugs = [...new Set(roster.roles.map((r) => r.slug))];
   return slugs.map((slug) => {
@@ -174,7 +203,26 @@ function rosterModels(rosterPath: string): string[] {
   });
 }
 
-// ─── timing ─────────────────────────────────────────────────────────────────
+// ─── timing ────────────────────────────────────────────────────────────────
+
+/** A roster read that failed before parsing could see it — typed, with the errno named. */
+function unreadableRoster(rosterPath: string, e: unknown): RosterError {
+  const err = e as NodeJS.ErrnoException;
+  return new RosterError(
+    [`roster could not be read (${err.code ?? (e instanceof Error ? e.message : String(e))}) — the gate parses it host-side before any spend`],
+    rosterPath,
+    "roster_unreadable",
+  );
+}
+
+/** The post-read re-stat found growth past the ceiling. */
+function overCeilingRoster(rosterPath: string, size: number): RosterError {
+  return new RosterError(
+    [`roster is ${size} bytes, over the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling`],
+    rosterPath,
+    "roster_unreadable",
+  );
+}
 
 function emitGate(
   requestId: string,
@@ -220,8 +268,12 @@ export async function setupGate(
   // is a driver-boundary option bag that callers build from JSON and env, where
   // `null` is what an absent field deserialises to. `!== undefined` let it
   // through to `.trim()` and turned a missing id into a TypeError out of the
-  // gate — a crash where the fallback was the whole point.
-  const requestId = opts.requestId != null && opts.requestId.trim().length > 0 ? opts.requestId : driver.requestId;
+  // gate — a crash where the fallback was the whole point. The typeof guard is
+  // the same posture one step further: a JSON-built bag can carry a NUMBER or
+  // BOOLEAN id ({"requestId": 42}), which `.trim()` also TypeErrored on — any
+  // non-string falls back to the driver's own id, never crashes the gate.
+  const requestId =
+    typeof opts.requestId === "string" && opts.requestId.trim().length > 0 ? opts.requestId : driver.requestId;
   if (!SHA_RE.test(opts.commitSha)) {
     throw new ExeDevDriverError(
       "commit-sha-invalid",

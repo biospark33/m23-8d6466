@@ -8,7 +8,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { redactSecrets, timedLoggedStep, type StepCtx, type StepLogLabels } from "../../src/providers/step-log.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
-import { leakScan } from "./fixtures/leak-scan.ts";
+import { findKeyManagementUrl, leakScan } from "./fixtures/leak-scan.ts";
+import { SECRET_PREFIXES } from "../../src/providers/run-record.ts";
 
 let logs: LogEntry[];
 let restoreLog: (() => void) | undefined;
@@ -39,6 +40,34 @@ describe("redactSecrets", () => {
     const kept = redactSecrets(text, hash);
     expect(kept).toContain(hash);
     expect(kept).not.toContain(key);
+  });
+
+  test("`keep` composed with a key-management URL: the hash comes back, but NEVER inside a live link", () => {
+    // T2-2 (round 11): the two arms above are only ever tested in isolation, but
+    // their ORDER is load-bearing (step-log.ts's comment documents it): parking
+    // `keep` before the deep-link arm leaves `…/keys/«keep»…`, which no longer
+    // matches KEY_MANAGEMENT_URL_RE (the mark's guillemets sit outside its tail
+    // charset) — and the splice-back then hands the keyHash back INSIDE a live
+    // URL. Reordering the arms (or hoisting the park ahead of redactKeyManagementUrls)
+    // leaks a provider keyHash into a log while every isolated test here stays green,
+    // so the composition IS the coverage.
+    const hash = "RGvhoNKDIZzsKKEoJm2Y7CDsY2m1S91GtNb3jvbXbfg";
+    const pctHash = "RGvhoNKDIZzs%2BKKEoJm2Y7CDsY2m1S91GtNb3%2FjvbXbfg%3D"; // encodeURIComponent(hash)
+    const url = `https://openrouter.ai/api/v1/keys/${pctHash}`;
+    const text = `revoke failed for DELETE ${url}; the hash was ${hash}`;
+
+    // The composed call: keep = the very hash the URL carries. The CONTRACT is
+    // asymmetric on purpose — the FREE-TEXT mention is a caller-known non-secret
+    // identifier and comes back (that is what keep is for); the URL does not.
+    const kept = redactSecrets(text, hash);
+    expect(findKeyManagementUrl(kept)).toBeNull(); // no live deep link survives
+    expect(kept).not.toContain("https://openrouter.ai");
+    expect(kept).toContain("[REDACTED]"); // the deep-link arm's own placeholder
+    // Exactly ONE restoration — the parked free-text occurrence. A second
+    // appearance would mean the URL body itself survived as fragments.
+    expect(kept.split(hash).length - 1).toBe(1);
+    // Baseline without keep: BOTH occurrences go, leakScan-clean.
+    expect(leakScan(hash, redactSecrets(text))).toBeNull();
   });
 
   test("a `keep` shorter than the 8-char floor cannot split a secret out of redaction", () => {
@@ -265,30 +294,36 @@ describe("redactSecrets", () => {
   // floor, so the shape heuristic would have redacted them with the prefix entry
   // deleted — the row passed without proving the thing it names. Under the floor
   // (asserted below) the prefix arm is the ONLY arm that can reach them.
-  test.each([
-    ["xapp-", "xapp-EXAMPLE-NOT-A-REAL-TOKEN"],
-    ["xoxa-", "xoxa-EXAMPLE-NOT-A-REAL-TOKEN"],
-    ["xoxr-", "xoxr-EXAMPLE-NOT-A-REAL-TOKEN"],
-    ["rk_live_", "rk_live_EXAMPLE_NOT_A_REAL_KEY"],
-    ["rk_test_", "rk_test_EXAMPLE_NOT_A_REAL_KEY"],
-    ["ghs_", "ghs_EXAMPLE_NOT_A_REAL_TOKEN"],
-    ["ghu_", "ghu_EXAMPLE_NOT_A_REAL_TOKEN"],
-    ["ghr_", "ghr_EXAMPLE_NOT_A_REAL_TOKEN"],
-  ])("the %s issuer prefix is redacted on sight", (_prefix, token) => {
-    // The prefix arm is UNCONDITIONAL on character classes: a known issuer
-    // prefix is the strong signal, so the shape heuristic is never the sole
-    // test for a token the issuer has already labelled. `ghs_` is the one a
-    // real clone URL carries (`https://x-access-token:ghs_…@github.com/…`),
-    // and the shape heuristic cannot reach it at all — anything matching
-    // `scheme://` returns early.
-    // Under LONG_TOKEN_RE's 40-char floor BY CONSTRUCTION, so the assertions
-    // below can only be satisfied by the prefix arm. Without this, re-lengthening
-    // a body would quietly hand the row back to the shape heuristic.
-    expect(token.length).toBeLessThan(40);
-    const out = redactSecrets(`auth failed for ${token}`);
-    expect(leakScan(token, out)).toBeNull();
-    expect(out).toContain("«redacted»");
-  });
+  //
+  // T2-9 (round 11): derived FROM SECRET_PREFIXES rather than hand-listed, so all
+  // fifteen entries get a sub-40-char row — adding an entry to the list without a
+  // way to exercise it used to be invisible (`sk-`, `sk_live_`, `sk_test_`, `gho_`,
+  // `github_pat_`, `xoxb-`, `xoxp-`, `ASIA` had no rows at all). `-----BEGIN` rides
+  // the same table but is structurally a BLOCK marker, exercised by its own tests
+  // above, not by this per-token shape; one grep-visible exclusion names it.
+  const SCANNED_PREFIXES = SECRET_PREFIXES.filter((p) => p !== "-----BEGIN");
+  test.each(SCANNED_PREFIXES.map((p) => [p, `${p}EXAMPLE-NOT-A-REAL-TOKEN`] as const))(
+    "the %s issuer prefix is redacted on sight",
+    (_prefix, token) => {
+      // The prefix arm is UNCONDITIONAL on character classes: a known issuer
+      // prefix is the strong signal, so the shape heuristic is never the sole
+      // test for a token the issuer has already labelled. `ghs_` is the one a
+      // real clone URL carries (`https://x-access-token:ghs_…@github.com/…`),
+      // and the shape heuristic cannot reach it at all — anything matching
+      // `scheme://` returns early.
+      // Under LONG_TOKEN_RE's 40-char floor BY CONSTRUCTION, so the assertions
+      // below can only be satisfied by the prefix arm. Without this, re-lengthening
+      // a body would quietly hand the row back to the shape heuristic.
+      expect(token.length).toBeLessThan(40);
+      const out = redactSecrets(`auth failed for ${token}`);
+      expect(leakScan(token, out)).toBeNull();
+      expect(out).toContain("«redacted»");
+    },
+  );
+  // The exclusion above must itself be pinned: if SECRET_PREFIXES ever loses or
+  // renames the PEM marker, the filter's argument stops matching silently — so
+  // assert the filtered set is exactly "all but that one".
+  expect(SCANNED_PREFIXES).toHaveLength(SECRET_PREFIXES.length - 1);
 
   test.each([
     ["bare, space-delimited", (k: string) => `key ${k} used`],

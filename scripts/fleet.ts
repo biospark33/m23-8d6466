@@ -105,6 +105,8 @@ import {
   type DispatchDeps,
   type LedgerLike,
 } from "../src/fleet/dispatch.ts";
+/** The records-skipped envelope echoes `readdirSync` names through it (round 11). */
+import { sanitizeLabel } from "../src/fleet/brief-schema.ts";
 import { listVerbs, renderHelp, type VerbEntry } from "../src/fleet/verbs.ts";
 import { statusAll, statusRun } from "../src/fleet/status.ts";
 // DF3.2: the fanout/rank front doors. fanout-primitive (not fanout.ts) holds
@@ -444,6 +446,17 @@ function asUsage<T>(build: () => T): T {
 
 /** Errnos a later attempt could clear — a full or failing device, not a typo. */
 const RETRYABLE_ERRNOS = new Set(["ENOSPC", "EDQUOT", "EIO", "EBUSY", "EMFILE", "ENFILE", "EAGAIN", "ETIMEDOUT"]);
+/**
+ * The inverse, for errors that arrive with the ERRNO AS their `code` — no
+ * layer classified them, the OS did. Permission, type and lookup failures are
+ * there on every retry identically: exit 1 stamps them `transient`
+ * ("retry me") and automation retries a permanent permission error forever —
+ * the same drift `asUsage` fixes for CONSTRUCTOR-time errors, extended to the
+ * RUNTIME ones `report` receives raw. Everything not listed stays exit 1: an
+ * unlisted or missing errno is the substrate failing, and retry is the honest
+ * read of what nobody has classified.
+ */
+const PERMANENT_ERRNOS = new Set(["EACCES", "EPERM", "ENOTDIR", "EISDIR", "ENOENT", "EROFS", "ELOOP", "EBADF"]);
 
 /** Render any throw as the envelope + this CLI's exit code. */
 function report(err: (s: string) => void, e: unknown): number {
@@ -501,8 +514,29 @@ function report(err: (s: string) => void, e: unknown): number {
   // advice" where the missing key reads as "this failure has no remediation
   // designed for it". Only the present one is redacted.
   const remediation = x.remediation === undefined ? undefined : redactSecrets(x.remediation);
-  printError(err, x.code ?? "error", redactSecrets(x.message ?? e), remediation, debris);
-  return 1;
+  // An OS-classified permanent errno keeps the raw envelope (its `code` field
+  // already names it) but must not inherit exit 1's "retry me" — the same
+  // split `asUsage` draws for constructor-time errnos, extended here where
+  // RUNTIME ones land. EPIPE/EAGAIN stay 1: the sink layer owns their
+  // classification (emit tolerates them, reportCompletion exits 6) and a
+  // completed verb whose REPORTING hit a closed pipe must not be relabeled
+  // "permanently wrong".
+  const permanentErrno =
+    typeof x.code === "string" &&
+    x.code !== "EPIPE" &&
+    x.code !== "EAGAIN" &&
+    PERMANENT_ERRNOS.has(x.code);
+  printError(
+    err,
+    x.code ?? "error",
+    redactSecrets(x.message ?? e),
+    remediation ??
+      (permanentErrno
+        ? "this failure is identical on every retry — fix what the errno names (permissions, path type, absence) instead of re-running"
+        : undefined),
+    debris,
+  );
+  return permanentErrno ? 2 : 1;
 }
 
 interface Parsed {
@@ -640,11 +674,32 @@ function parseArgv(argv: readonly string[]): ParseResult {
   return { entry, positionals, flags, bools };
 }
 
+/**
+ * A parent that pipes its default stdin to us and never closes the write end
+ * parks `readCappedStdin` forever, before any provisioning started — a CI job
+ * hangs until ITS timeout with no envelope. The wait is bounded at a generous
+ * two minutes (a slow producer streaming a full-cap brief takes seconds), so
+ * the refusal names the missing EOF rather than the process sitting silent.
+ */
+const STDIN_BRIEF_TIMEOUT_MS = 120_000;
+
 /** Read stdin, refusing AS IT STREAMS — buffering first turns `yes |` into an OOM. */
 async function readCappedStdin(): Promise<string> {
   const chunks: Uint8Array[] = [];
   let bytes = 0;
+  // Per-CHUNK deadline, not a whole-read one: a slow-but-flowing producer is
+  // exactly the case worth waiting for; only a PIPE that stops moving forever
+  // is the hang this bounds.
+  const deadline = Date.now() + STDIN_BRIEF_TIMEOUT_MS;
   for await (const chunk of Bun.stdin.stream()) {
+    if (Date.now() > deadline) {
+      throw new FleetError(
+        2,
+        "brief-stdin-timeout",
+        `no brief arrived on stdin within ${STDIN_BRIEF_TIMEOUT_MS / 1000}s`,
+        "the writer holding this pipe's write end never closed it — close it, or pass --brief <path> instead",
+      );
+    }
     bytes += chunk.byteLength;
     if (bytes > MAX_BRIEF_BYTES) {
       throw new FleetError(
@@ -655,6 +710,9 @@ async function readCappedStdin(): Promise<string> {
       );
     }
     chunks.push(chunk);
+    // Reading resets nothing: the deadline is from FIRST chunk (which
+    // renegotiation would show as a second read), and any total slower than
+    // the window from open is refused by design — see the constant.
   }
   return new TextDecoder().decode(Buffer.concat(chunks));
 }
@@ -765,19 +823,24 @@ function readBriefFile(briefPath: string): string {
  * break every non-interactive `--brief` invocation there is.
  *
  * ALLOW-LIST, not a deny-list, and that is the whole lesson of the bug this
- * shape replaces. The first version refused fifo-or-regular-file and allowed
- * everything else, which quietly allowed a SOCKET — and a socket is what fd 0
- * is under any Node/Bun parent spawning with `stdio: "pipe"`, i.e. the most
- * common programmatic caller there is. Enumerating the dangerous types means
- * the next stdio type someone invents is allowed by default; enumerating the
- * benign ones means it is refused by default, which is the direction a guard
- * on a billable path should fail.
+ * shape replaces. An early version allowed everything but fifo-or-regular-file,
+ * which quietly allowed the WRONG socket case; round 11 tightened the split to
+ * what the type can actually prove (see the list below). Enumerated reasons,
+ * closed set: the next stdio type someone invents is REFUSED by default, which
+ * is the direction a guard on a billable path should fail.
  *
  * Benign, and the complete list: a character device — `/dev/null` (cron,
  * systemd, containers) and a tty (an operator who typed the command and
- * redirected nothing) are both one — and a closed fd 0, where `fstat` throws
- * EBADF. Everything else (fifo, regular file, socket) is a brief someone
- * deliberately attached to this process.
+ * redirected nothing) are both one; a closed fd 0, where `fstat` throws EBADF;
+ * and a SOCKET (round 11). A socket is what fd 0 is under any Node/Bun parent
+ * spawning with `stdio: "pipe"` — the most common programmatic caller there
+ * is — and no brief was attached to it: the socket IS the parent's unattended
+ * default, not a second source. The first cut of this list refused sockets,
+ * which turned every such `--brief` invocation into the exact "two sources"
+ * refusal the guard exists to prevent, minus the two sources. Everything else
+ * (fifo, regular file, and any type nobody has thought of yet) is refused:
+ * a fifo is fed by a pipeline the caller wrote, a regular file by a `<`
+ * redirect the caller wrote — deliberate attachments both.
  */
 function assertOneBriefSource(briefPath: string): void {
   let st: ReturnType<typeof fstatSync>;
@@ -786,7 +849,7 @@ function assertOneBriefSource(briefPath: string): void {
   } catch {
     return; // no fd 0 at all — nothing was attached
   }
-  if (st.isCharacterDevice()) return;
+  if (st.isCharacterDevice() || st.isSocket()) return;
   throw usageError(
     `--brief ${bounded(briefPath)} was given AND a brief was redirected onto stdin`,
     "pass the brief exactly one way: `--brief <path>`, or on stdin with no --brief",
@@ -813,8 +876,9 @@ async function ingestBriefJson(briefPath: string | undefined, deps?: Partial<Fle
         assertOneBriefSource(briefPath);
         return readBriefFile(briefPath);
       }
-      // No prompt, no timeout: a TTY here means the operator typed a verb and
-      // would wait forever for a pipe that never arrives.
+      // No prompt: a TTY here means the operator typed a verb and would wait
+      // forever for bytes that are never coming. A non-TTY (pipe) read IS
+      // bounded — STDIN_BRIEF_TIMEOUT_MS, see readCappedStdin.
       if (process.stdin.isTTY) {
         throw usageError("no brief on stdin", "pipe the brief JSON in, or pass --brief <path>");
       }
@@ -957,13 +1021,23 @@ function readFanoutForRank(store: FanoutRecordStore, fanoutId: string): FanoutRe
  * failing to answer — fanout-primitive's invalid() attaches it to the
  * FleetError). Undefined ⇒ the code-derived default, unchanged.
  */
+/**
+ * What a verb line may claim about its outcome. `ExitStatus` is the table's
+ * vocabulary; `"signalled"` (round 11) covers 128+n exits, which sit outside
+ * the classification table by design (see the header) and previously fell
+ * through to `logic` — reading a Ctrl-C as a non-retryable logic failure.
+ * `LogEntry`'s index signature carries the extra word without widening
+ * cli-anything's enum for every other consumer.
+ */
+type VerbExitStatus = ExitStatus | "signalled";
+
 function logVerb(
   requestId: string,
   verb: string,
   runId: string | undefined,
   startedAt: number,
   code: number,
-  exitStatusOverride?: ExitStatus,
+  exitStatusOverride?: VerbExitStatus,
   /**
    * The one field that keeps a help request from being counted as a successful
    * verb execution (round 10): `fleet teardown <id> --driver real --help` used
@@ -1162,7 +1236,7 @@ export async function run(
     v: string,
     runId: string | undefined,
     code: number,
-    exitStatusOverride?: ExitStatus,
+    exitStatusOverride?: VerbExitStatus,
     phase?: "complete" | "help",
   ): number =>
     logVerb(rid, v, runId, startedAt, code === 0 && outputIncomplete ? 6 : code, exitStatusOverride, phase);
@@ -1217,7 +1291,48 @@ export async function run(
     setLogSink((entry) => writeBestEffort(2, `${JSON.stringify(entry)}\n`));
   }
   if (argv[0] === "help") {
-    emit(`${HELP}\n`);
+    // Round 11: this short-circuit was the ONE pre-tokenization path with no
+    // grammar check — `fleet help --bogus xyz junk` printed usage and exited 0,
+    // reading to a script as a valid invocation, while the sibling spellings
+    // (`fleet --help --bogus`) refused. Bare `help` stays the same exit-0 help;
+    // anything AFTER it is validated like any other verb's argv: no unknown
+    // flags (tokens the tokenizer would refuse anywhere else), and exactly one
+    // optional verb positional naming a verb the registry knows.
+    //
+    // Wrapped so a refusal keeps BOTH halves of every other refusal — the
+    // exit-2 envelope AND its own CC-9 line (`verb: "help"`): these throws sit
+    // outside the parseArgv try below, and an unwrapped one would have escaped
+    // run() entirely as a bare stack, which is exactly the shape this block
+    // replaced.
+    try {
+      const extra = argv.slice(1);
+      const badFlag = extra.find((t) => t.startsWith("-"));
+      if (badFlag !== undefined) {
+        throw usageError(`unknown flag after \`help\`: ${bounded(badFlag)}`, "`fleet help [<verb>]` takes no flags");
+      }
+      if (extra.length > 1) {
+        throw usageError("`help` takes at most one <verb>", "`fleet help [<verb>]`");
+      }
+      if (extra[0] !== undefined && !listVerbs().some((v) => v.verb === extra[0])) {
+        throw new FleetError(2, "unknown-verb", `no such verb: ${JSON.stringify(extra[0])}`, HELP);
+      }
+    } catch (e) {
+      return finish(newRequestId(), "help", undefined, report(note, e));
+    }
+    // Same write-failure contract as the `--help` path above: a throw out of
+    // this emit used to escape run() raw — the envelope discipline held
+    // everywhere else in the file but here.
+    try {
+      emit(`${HELP}\n`, true);
+    } catch (e) {
+      printError(
+        note,
+        "help-unwritable",
+        `the usage text could not be written to stdout: ${redactSecrets(errText(e))}`,
+        "stdout refused the bytes (disk full, bad fd) — fix the destination and re-run",
+      );
+      return finish(newRequestId(), "help", undefined, 6);
+    }
     return finish(newRequestId(), "help", undefined, 0, undefined, "help");
   }
 
@@ -1255,7 +1370,23 @@ export async function run(
     return finish(newRequestId(), attempted, undefined, report(note, e));
   }
   if (parsed.help === true) {
-    emit(`${HELP}\n`);
+    // Through `emit`'s failure contract — never bare. An ENOSPC/EBADF out of a
+    // write here used to escape `run()` (the help paths sit outside every try)
+    // as a raw stack with exit 1: the envelope discipline every other path in
+    // this file keeps. A help request whose output could not be delivered is
+    // still only a help request: envelope on stderr, exit 6 ("could not finish
+    // reporting"), CC-9 line either way.
+    try {
+      emit(`${HELP}\n`, true);
+    } catch (e) {
+      printError(
+        note,
+        "help-unwritable",
+        `the usage text could not be written to stdout: ${redactSecrets(errText(e))}`,
+        "stdout refused the bytes (disk full, bad fd) — fix the destination and re-run",
+      );
+      return finish(newRequestId(), bounded(parsed.verb ?? "help"), undefined, 6);
+    }
     // `bounded`, and defaulting to the verb the operator effectively invoked:
     // `fleet --help` names none, and an unbounded `fleet $(200KB) --help` would
     // otherwise put all of it in the field the dashboards key on. `phase:
@@ -1298,9 +1429,28 @@ export async function run(
      * demonstrably does not exist is how a real warning stops being read.
      */
     let mayHaveProvisioned = false;
+    /**
+     * The per-run lock taken the moment the mint becomes visible (round 11):
+     * held from `store.create` through the key persist and the ack, so a
+     * concurrent harvest/teardown cannot acquire it inside the
+     * record-persisted/key-unpersisted window and destroy the box mid-mint.
+     * Released here, in the verb's finally, and on the signal paths below.
+     */
+    let dispatchLock: string | undefined;
+    const releaseDispatchLock = (): void => {
+      if (dispatchLock === undefined) return;
+      try {
+        releaseRunLock(dispatchLock);
+      } catch {
+        // A lock we could not drop is reported like any wedged cleanup; inside
+        // a signal handler the CC-9 line below still goes out either way.
+      }
+      dispatchLock = undefined;
+    };
     const interruptHandlers = ([
       ["SIGINT", 130],
       ["SIGTERM", 143],
+      ["SIGHUP", 129],
     ] as const).map(([sig, status]) => {
       const handler = (): void => {
         if (mayHaveProvisioned) {
@@ -1326,8 +1476,12 @@ export async function run(
         // of a signal handler.
         //
         // The status is 128+signo, deliberately outside the 0-6 table — see the
-        // exit-code note at the top of this file.
-        logVerb(dispatchRequestId ?? newRequestId(), verb, dispatchRunId, startedAt, status);
+        // exit-code note at the top of this file. Its log classification rides
+        // `exitStatusOverride` ("signalled") rather than the table's fallback:
+        // 129/130/143 are neither success nor retryable nor a verdict about the
+        // verb at all — see the header's own 130/143 note.
+        releaseDispatchLock();
+        logVerb(dispatchRequestId ?? newRequestId(), verb, dispatchRunId, startedAt, status, "signalled");
         process.exit(status);
       };
       process.on(sig, handler);
@@ -1426,9 +1580,25 @@ export async function run(
         // ack used to set too late: a SIGINT after `store.create` persisted the
         // record but before dispatch() returned reported `runId: null` for a
         // run that exists. The store is where the mint becomes visible, so it
-        // is observed here (round 10).
+        // is observed here (round 10) — and since round 11 it is also where the
+        // per-run lock is TAKEN, closing the harvest/teardown race against the
+        // key mint: before this, a concurrent `teardown <id>` could acquire
+        // between record-persisted and keyHash-persisted, warn
+        // key-unattributable, and destroy the box mid-mint. A refusal here
+        // must NOT abort the mint — the create has already landed; losing the
+        // race is reported and the dispatch carries on.
         store: observingMint(store, (minted) => {
           if (dispatchRunId === undefined) dispatchRunId = minted;
+          try {
+            if (dispatchLock === undefined) dispatchLock = acquireRunLock(store.dir, minted, "fleet dispatch key-mint");
+          } catch (e) {
+            printError(
+              note,
+              "key-mint-lock-unavailable",
+              `the run lock for ${minted} could not be taken while the key was being minted: ${redactSecrets(errText(e))}`,
+              "a concurrent harvest or teardown may be acting on this run id — check `fleet status` before touching either",
+            );
+          }
         }),
         ledgerFactory,
         requestId,
@@ -1482,6 +1652,11 @@ export async function run(
       dispatchRunId = runIdFromError(e);
       dispatchCode = report(note, e);
     } finally {
+      // The per-run lock taken at the mint (round 11) rides the same finally:
+      // released here on every non-signal path, after the ack write above has
+      // had its say — a later teardown is safe exactly when this invocation's
+      // record/key work is over. Signal paths release through the handler.
+      releaseDispatchLock();
       // The ledger this factory builds is NOT closed here: `dispatch()` owns it
       // and closes it in its own `finally`, logging (deliberately not refusing
       // on) a failed flush. A second close would be an unconditional throw.
@@ -1833,7 +2008,7 @@ export async function run(
       verb,
       fanoutId,
       fanoutCode,
-      transientRefusal ? ("transient" as ExitStatus) : undefined,
+      transientRefusal ? "transient" : undefined,
     );
   }
 
@@ -2042,12 +2217,24 @@ export async function run(
       // covers both.
       const skipped = rows.flatMap((r) => r.skippedRecords ?? []);
       if (skipped.length > 0) {
+        // The names come from `readdirSync` — filesystem-controlled text — and
+        // land in a stderr envelope: same two rules as every other non-argv
+        // echo in this file (sanitize first, then a count cap). Unbounded, a
+        // hostile or merely littered records dir printed megabytes; capped,
+        // the refusal still names enough to act on and says how many it did
+        // not. 512 is status.ts's MAX_DIAGNOSTIC, the sink the producer side
+        // already sizes these for.
+        const MAX_SKIPPED_ECHO = 50;
+        const echoed = skipped.slice(0, MAX_SKIPPED_ECHO).map((n) => sanitizeLabel(n, 512));
         printError(
           note,
           "records-skipped",
           `${skipped.length} record file(s) could not be read: the rows above are not the whole fleet`,
           "repair or remove the files named in skippedRecords, then re-run `fleet status` — nothing clears this on its own",
-          { skippedRecords: skipped },
+          {
+            skippedRecords: echoed,
+            ...(skipped.length > MAX_SKIPPED_ECHO ? { skippedRecordsOmitted: skipped.length - MAX_SKIPPED_ECHO } : {}),
+          },
         );
       }
       // 2, not 1. Exit 1 is `transient` = "retry me", and a malformed record
@@ -2085,6 +2272,13 @@ export async function run(
   // paths that can ever hold a destructive lock — undefined means "cannot
   // check", and the finally then holds the lock (fail-closed).
   let verbStore: RunRecordStore | undefined;
+  /**
+   * The verb's own CC-9 interrupt listeners (round 11), hoisted so the finally
+   * below can remove them: empty until the lock is acquired, registered only
+   * for the window where an interrupt would otherwise skip this block entirely
+   * (run-lock's re-raise terminates the process before its finallys run).
+   */
+  let signalListeners: ReadonlyArray<readonly [NodeJS.Signals, () => void]> = [];
   // Assigned on every path, then possibly downgraded by the finally: a release
   // failure leaves the run locked against every later harvest/teardown while
   // the box and the key stay live, and `return 0` inside the try would have
@@ -2116,7 +2310,27 @@ export async function run(
     // below is before the lock: this verb must not create the directory it was
     // asked to look in. See `assertRecordsDirUsable`.
     assertRecordsDirUsable(dir, deps?.store);
-    const store = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, requestId }));
+    // Round 11 (auditor F3 residual): the constructor used to be built WRITABLE
+    // unconditionally, so `fleet teardown <typo> --dir /shared/existing` chmod'd
+    // that operator-named directory to 0700 (and swept its stale temps) before
+    // the exit-4 probe could refuse — mutating the thing a refused invocation
+    // promised it had not touched. For a NAMED --dir the probe therefore reads
+    // through a `create: false` view (status's exact treatment): it asserts the
+    // directory is there without creating or re-permissioning anything. The
+    // writable store is built AFTER the record is confirmed, when the directory
+    // is one the run legitimately owns. The DEFAULT directory keeps the
+    // writable bootstrap store — creating `.sandbox/runs` on first use is the
+    // intended posture, and refusing it breaks every fresh checkout.
+    let store: RunRecordStore =
+      deps?.store ??
+      asUsage(
+        () =>
+          new RunRecordStore({
+            ...storeOpts,
+            ...(dir === undefined ? {} : { create: false }),
+            requestId,
+          }),
+      );
     verbStore = store;
 
     /** exit 4 for a genuine absence; every other read failure propagates. */
@@ -2132,6 +2346,16 @@ export async function run(
           "check the id (fleet status) — nothing was mutated",
         );
       }
+      // The shared classifier (harvest.ts getRecord) wraps every OTHER read
+      // failure as a typed `record-read-failed`; it arrived here EXITING AS 1,
+      // whose logVerb stamp is `transient` ("retry me") — and no retry heals a
+      // corrupt record file. status.ts reaches the identical refusal through
+      // FleetError (non-retryable), so this verb does too: 5 = "refused before
+      // provisioning, payload names the guard" and nothing was mutated.
+      if ((e as HarvestError | null)?.code === "record-read-failed") {
+        const h = e as HarvestError;
+        throw new FleetError(5, h.code, h.message, h.remediation);
+      }
       throw e;
     };
 
@@ -2139,11 +2363,21 @@ export async function run(
     // lock is a real file — created, fsynced, and (on a crash before the
     // finally) left behind for a phantom run, while a concurrent invocation
     // sees the run as busy. So probe first, cheaply, and refuse before the
-    // filesystem is touched.
+    // filesystem is touched — through the `create: false` view above for a
+    // NAMED --dir, so the refusal also mutates nothing.
     try {
       getRecord({ store }, runIdArg);
     } catch (e) {
       throw notFound(e);
+    }
+
+    // The probe passed, so the run exists: NOW build the writable store this
+    // verb acts through (round 11). Building it FIRST chmod'd an existing
+    // operator-named directory to 0700 before the probe could refuse.
+    if (dir !== undefined && deps?.store === undefined) {
+      const writable = asUsage(() => new RunRecordStore({ ...storeOpts, requestId }));
+      verbStore = writable;
+      store = writable;
     }
 
     // Then the lock, and only THEN the read that the verb actually uses: the
@@ -2167,6 +2401,25 @@ export async function run(
       if (e instanceof RunLockedError) throw new FleetError(5, e.code, e.message, e.remediation);
       throw e;
     }
+
+    /**
+     * CC-9 for the interrupted verb (round 11): run-lock's signal path
+     * releases (or declines) and then RE-RAISES the default disposition,
+     * which skips this verb's `finally` — so a Ctrl-C'd harvest or teardown
+     * was the one invocation that produced no structured line. This handler
+     * emits it first; ordering with run-lock's own listener is harmless either
+     * way (the line describes the interruption, not the lock's disposition),
+     * and `log`'s sink is best-effort so nothing here throws out of a signal
+     * context. Scoped and removed in the verb's finally like dispatch's pair.
+     */
+    const verbInterruptHandler = (sig: NodeJS.Signals): void => {
+      logVerb(requestId, verb, runIdArg, startedAt, sig === "SIGINT" ? 130 : 143, "signalled");
+    };
+    // Direct references, so the finally below can remove exactly these.
+    signalListeners = (["SIGINT", "SIGTERM"] as const).map(
+      (sig) => [sig, () => verbInterruptHandler(sig)] as const,
+    );
+    for (const [sig, listener] of signalListeners) process.on(sig, listener);
 
     let rec: RunRecord;
     try {
@@ -2465,6 +2718,10 @@ export async function run(
         cleanupFailed();
       }
     }
+    // The verb scoped its CC-9 interrupt listeners at acquire; whether the verb
+    // finished, threw, or exits through THIS finally on a normal path, they have
+    // nothing left to guard and must not accumulate per call in an embedder.
+    for (const [sig, listener] of signalListeners) process.removeListener(sig, listener);
   }
   return finish(requestId, verb, runIdArg, code);
 }

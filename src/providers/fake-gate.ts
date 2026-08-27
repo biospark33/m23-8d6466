@@ -33,17 +33,57 @@ export interface FakeGateOpts {
 }
 
 /**
- * A substrate failure's detail is PREFIXED with this so a consumer can tell
+ * A substrate failure's detail is PREFIXED with this so an OPERATOR can tell
  * "the box is broken" (retryable) from "the manifest is wrong" (the brief's own
  * fault) WITHOUT re-deriving the diagnosis. `SetupGateResult` is DF2.2's shape
- * and carries no field for the distinction, so the marker rides the note the
- * gate already returns; `isSubstrateFailure` below is the only reader.
+ * and carries no field for the distinction.
  *
- * Without it the classification was computed here and thrown away one layer up:
- * dispatch mapped every exit-3 gate refusal to `logic` (do-not-retry), which is
- * the one answer this helper exists to contradict.
+ * The mark is PRESENTATION only as of this change: machine classification no
+ * longer scans note text for it. Every failing note here embeds box/provider
+ * echo somewhere (`detailOf(e)`, probe stderr), so free-text scanning let any
+ * detail quoting `"substrate: "` reclassify a manifest failure retryable —
+ * one doomed retry bought by whoever controls the string. `fakeGate` now
+ * records its OWN verdicts on a side channel (`markSubstrate`, keyed off the
+ * result object), and `isSubstrateFailure` reads THAT channel alone. The mark
+ * still rides the notes so human readers keep the diagnosis inline.
  */
 export const SUBSTRATE_MARK = "substrate: ";
+
+/**
+ * The structured channel behind `isSubstrateFailure`: the substrate verdicts
+ * THIS module's probes produced, keyed per result object. A WeakMap because
+ * `SetupGateResult` has no spare field and growing DF2.2's contract for one
+ * caller's flag would reach every driver's gate; keyed OFF THE OBJECT rather
+ * than a single boolean slot because dispatch can run gates concurrently
+ * (fan-out arms) and injection tests build many results per process.
+ *
+ * An INJECTED gate (`deps.setupGate`) never touches this map, so its results
+ * classify as non-substrate regardless of what its notes quote — which is the
+ * fail-closed direction: do not advertise a retry off a claim you cannot trace
+ * to your own probe.
+ */
+const substrateResults = new WeakMap<object, boolean>();
+
+/** Record this result's substrate classification on the side channel. */
+function markSubstrate(result: SetupGateResult, substrate: boolean): void {
+  try {
+    substrateResults.set(result, substrate);
+  } catch {
+    // A hostile/frozen result object must not crash the gate emitting it.
+  }
+}
+
+/**
+ * Read back what markSubstrate recorded. Anything this module did not produce
+ * ⇒ false, never derived from message text.
+ */
+function markedSubstrate(result: SetupGateResult): boolean {
+  try {
+    return substrateResults.get(result) === true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * "The command never ran at all", told apart from "the command ran and failed".
@@ -86,24 +126,20 @@ export function substrateFailure(exitCode: unknown): string | undefined {
 /**
  * Did this gate fail because the BOX is broken, rather than its contents?
  *
- * Defended, because it is also called on an INJECTED gate's result
- * (`deps.setupGate` in dispatch): `assertions` is a declared field of a shape
- * a caller supplies, so a missing array or a non-string note is a boundary
- * question, not a modelled one. Unknown ⇒ not a substrate failure — the
+ * Reads ONLY the side channel this module's own probes write (`markSubstrate`)
+ * — never the assertion notes. Scanning free text let any failing probe whose
+ * detail quotes `"substrate: "` (a JSON-parse error echoing file content, a
+ * driver message echoing box output) reclassify itself retryable; and an
+ * injected gate could claim substrate with one string. Unmarked ⇒ false: the
  * fail-closed direction here is "do not advertise a retry".
+ *
+ * The Array guard stays (this is still called on injected results whose shape
+ * is a caller's promise), but it now answers only "did the GATE crash", never
+ * "was the box broken".
  */
 export function isSubstrateFailure(gate: SetupGateResult): boolean {
-  // `?? []` only caught nullish: a non-array truthy `assertions` (`{}`,
-  // `"boom"` — the injected gate's shape is a caller's promise, not a checked
-  // one) sailed past it and `.some` threw a TypeError OUT of this fail-closed
-  // classifier, replacing "do not advertise a retry" with a crash. Array
-  // guard keeps the same answer for junk as for missing: false.
-  const assertions: unknown = (gate as { assertions?: unknown }).assertions;
-  if (!Array.isArray(assertions)) return false;
-  return assertions.some((raw) => {
-    const a = raw as { ok?: unknown; note?: unknown } | null | undefined;
-    return a != null && !a.ok && typeof a.note === "string" && a.note.includes(SUBSTRATE_MARK);
-  });
+  if (typeof gate !== "object" || gate === null) return false;
+  return markedSubstrate(gate);
 }
 
 /**
@@ -162,7 +198,7 @@ export async function fakeGate(
       run: async () => {
         const r = await driver.exec(vm, ["true"]);
         const substrate = substrateFailure(r.exitCode);
-        if (substrate !== undefined) return { ok: false, detail: substrate };
+        if (substrate !== undefined) return { ok: false, detail: substrate, substrate: true };
         return { ok: r.exitCode === 0, detail: `exit ${r.exitCode}` };
       },
     },
@@ -170,27 +206,36 @@ export async function fakeGate(
       item: "B",
       note: "frozen manifest carries a root-level limitMicroUsd (AC9a refuse-if-absent)",
       run: async () => {
-        const r = await driver.exec(vm, ["sh", "-c", "cat pipeline.yaml 2>/dev/null"]);
+        // An existence pre-test before the read, mirroring item C's shape:
+        // `cat`'s stderr is discarded, so EXISTS-BUT-UNREADABLE (mode 000, EIO)
+        // and NEVER LANDED both arrived as an empty body + nonzero exit and
+        // shared one diagnosis. They are opposite diagnoses — the fill step
+        // can be re-run for the second and is wasted work for the first — and
+        // only the second is the brief's own fault. Present-but-unreadable is
+        // the BOX failing, so it carries SUBSTRATE_MARK like every signal arm;
+        // a genuinely missing manifest stays unmarked (do-not-retry).
+        const r = await driver.exec(
+          vm,
+          ["sh", "-c", 'if [ ! -e pipeline.yaml ]; then echo absent; exit 0; fi; cat pipeline.yaml 2>/dev/null'],
+        );
         const substrate = substrateFailure(r.exitCode);
-        if (substrate !== undefined) return { ok: false, detail: substrate };
-        const body = (r.stdout ?? "").trim();
-        // This probe runs before item D, so it has to name BOTH of its own
-        // failures: a manifest that never landed and a manifest that landed
-        // unstamped are opposite diagnoses — one sends the operator to the fill
-        // step, the other to the stamping step.
-        //
-        // A third one rides the exit code. `cat`'s stderr is discarded (a
-        // permission message is not this probe's output), so a manifest that
-        // EXISTS and cannot be read — mode 000, EIO, a directory in its place —
-        // arrives here as an empty body and used to be reported as "missing",
-        // sending the operator to re-run the fill step that already succeeded.
+        if (substrate !== undefined) return { ok: false, detail: substrate, substrate: true };
+        const rawBody = (r.stdout ?? "").trim();
+        if (rawBody === "absent") {
+          return { ok: false, detail: "pipeline.yaml is absent — the fill step never delivered it (re-run the fill step)" };
+        }
+        const body = rawBody;
         if (body.length === 0) {
+          // Existed at -e, produced nothing, exited nonzero ⇒ unreadable, not
+          // missing. (.env vanishing between the two lands here too — rare, and
+          // "retry" is the safe answer for a race.)
           return {
             ok: false,
             detail:
               r.exitCode === 0
                 ? "pipeline.yaml is present but empty"
-                : `pipeline.yaml missing or unreadable (cat exit ${r.exitCode})`,
+                : `${SUBSTRATE_MARK}pipeline.yaml exists but could not be read (exit ${r.exitCode}) — a substrate failure, not a manifest one; re-running the fill step will not help`,
+            ...(r.exitCode === 0 ? {} : { substrate: true }),
           };
         }
         let parsed: unknown;
@@ -235,19 +280,21 @@ export async function fakeGate(
           ],
         );
         const substrate = substrateFailure(r.exitCode);
-        if (substrate !== undefined) return { ok: false, detail: substrate };
+        if (substrate !== undefined) return { ok: false, detail: substrate, substrate: true };
         const mode = (r.stdout ?? "").trim();
         // ".env absent" is the DELIVERY CONTRACT failing (fill never landed the
         // key) — retrying cannot help. Wrong TYPE is the same contract failing
         // by a different road (something else wrote a directory/symlink-dir in
         // `.env`'s place): re-deliver, never chmod. Present-but-unreadable is
         // the BOX failing (EIO, a missing stat binary), which is transient, so
-        // it carries SUBSTRATE_MARK like the signal arms above. (.env vanishing
-        // between `-e` and `stat` lands here too — rare, and "retry" is the
-        // safe answer for a race.)
+        // it carries SUBSTRATE_MARK like the signal arms above — and flags the
+        // side channel to match, which is what classification now reads.
+        // (.env vanishing between `-e` and `stat` lands here too — rare, and
+        // "retry" is the safe answer for a race.)
         if (mode === "unreadable") {
           return {
             ok: false,
+            substrate: true,
             detail: `${SUBSTRATE_MARK}.env exists but neither stat(1) could read its mode — a substrate failure, not a delivery-contract one`,
           };
         }
@@ -288,8 +335,9 @@ export async function fakeGate(
     },
   ];
   const assertions: SetupGateResult["assertions"] = [];
+  let substrateFailed = false;
   for (const probe of probes) {
-    let outcome: { ok: boolean; detail: string };
+    let outcome: { ok: boolean; detail: string; substrate?: boolean };
     try {
       outcome = await probe.run();
     } catch (e) {
@@ -298,21 +346,33 @@ export async function fakeGate(
       // exit-1 "dispatch failed after the box was created", costing the
       // operator the per-item evidence the exit-3 envelope carries. It is the
       // box that failed, not the manifest, so it is marked as such.
-      outcome = { ok: false, detail: `${SUBSTRATE_MARK}${detailOf(e)}` };
+      outcome = { ok: false, detail: `${SUBSTRATE_MARK}${detailOf(e)}`, substrate: true };
     }
-    const { ok, detail } = outcome;
+    const { ok, detail, substrate } = outcome;
+    if (!ok && substrate === true) substrateFailed = true;
     assertions.push({ item: probe.item, ok, note: ok ? probe.note : `${probe.note} — ${detail}` });
     if (!ok) break;
   }
   const firstFail = assertions.find((a) => !a.ok);
-  return {
+  // The substrate verdict rides a STRUCTURED side channel (see the WeakMap at
+  // SUBSTRATE_MARK), not note text an echoed detail could forge.
+  const shellSafeRunId = /^[\w.-]{1,128}$/.test(opts.runId)
+    ? opts.runId
+    : // Not this gate's to fix: the id came from outside the generated grammar.
+      // Substituting keeps the command copy-pasteable without injecting whatever
+      // the real value carries into the operator's shell; the refusal payload
+      // still carries the unmodified runId for correlation.
+      "<run-id>";
+  const result: SetupGateResult = {
     ready: firstFail === undefined,
     ...(firstFail !== undefined
       ? { failedItem: firstFail.item, assertionCode: FAKE_ASSERTION_CODE[firstFail.item] }
       : {}),
     assertions,
-    debugCommands: [`bun scripts/fleet.ts status ${opts.runId}`],
-    teardownCommand: `bun scripts/fleet.ts teardown ${opts.runId}`,
+    debugCommands: [`bun scripts/fleet.ts status ${shellSafeRunId}`],
+    teardownCommand: `bun scripts/fleet.ts teardown ${shellSafeRunId}`,
     vm,
   };
+  markSubstrate(result, substrateFailed);
+  return result;
 }

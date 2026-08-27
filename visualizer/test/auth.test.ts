@@ -709,7 +709,6 @@ describe("CSRF origin parser edges (AC1)", () => {
 });
 
 /**
-/**
  * DIST_DIR is a module constant (`resolve(server/.., "dist")`), so the static
  * branch can only be exercised by putting a real directory there. Under
  * `bun test` it does not exist, which is why every static assertion above this

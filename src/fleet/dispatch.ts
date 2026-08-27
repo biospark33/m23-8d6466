@@ -78,6 +78,76 @@ export const DISPATCH_FAILURE_LOG = ".sandbox/dispatch-log.jsonl";
 const MINTED_RUN_ID_RE = /^qds-\d{8}-[a-f0-9]{6}$/;
 
 /**
+ * The ids `mintRunId()` has handed out IN THIS PROCESS — the runtime half of
+ * AC2's provenance. The brand covers compile time and `MINTED_RUN_ID_RE` covers
+ * shape; neither proves the id came from HERE, so a shape-valid string cast in
+ * by a misbehaving in-process caller was accepted. Now it is checked against
+ * this registry.
+ *
+ * Memory only, never persisted: a restart forgets every id, and that is correct
+ * — a stale id from a dead process has no record this process minted, and the
+ * ordinary `run-id-in-use` arbiter (`recordExists` → `store.create` O_EXCL)
+ * governs whatever actually exists on disk.
+ *
+ * ponytail: FIFO-evicted past 4096 mints (DF3.2 fans out tens, so the cap is
+ * orders of magnitude above every real batch). Raise it before any caller mints
+ * four thousand ids before consuming the first; that caller does not exist.
+ */
+const MINTED_RUN_IDS_MAX = 4096;
+const mintedRunIds = new Set<string>();
+
+function rememberMintedRunId(id: string): void {
+  mintedRunIds.add(id);
+  if (mintedRunIds.size > MINTED_RUN_IDS_MAX) {
+    // Set iteration is insertion order, so the OLDEST mint goes first.
+    const oldest = mintedRunIds.values().next().value;
+    if (oldest !== undefined) mintedRunIds.delete(oldest);
+  }
+}
+
+/**
+ * Was this FleetError produced by THIS dispatch's own `refuse` — i.e. did the
+ * dispatch-log entry, the structured line and the payload already go out with
+ * it? Every catch that rethrows an incoming FleetError on the assumption it was
+ * refusal-logged rechecks this instead of assuming (see the rethrow arms).
+ */
+const refusedOnce = new WeakSet<FleetError>();
+
+function alreadyRefused(e: unknown): boolean {
+  return e instanceof FleetError && refusedOnce.has(e);
+}
+
+/** Prose punctuation a sentence hangs on a link, never part of the host. */
+const URL_TRAILING_PUNCT_RE = /[)\]},;.!?'.,]+$/;
+
+/**
+ * Upper bound on the `invalid-brief` payload's echoed zod issues. The array
+ * scales with the attacker-controlled UNRECOGNIZED-KEY count, so an unbounded
+ * echo flooded stderr, the FleetError payload and every consumer of both with
+ * one crafted brief. `RUN_ID_ECHO_CHARS` bounds the id the same way.
+ */
+const MAX_ISSUES_ECHO = 32;
+
+/** A byte ceiling as operator-facing KiB text, derived so it cannot drift. */
+function kibLabel(bytes: number): string {
+  return `${Math.round((bytes / 1024) * 100) / 100} KiB`;
+}
+
+/**
+ * The bounded `issues` echo for an `invalid-brief` payload: the first
+ * `MAX_ISSUES_ECHO` entries, or a truncation marker as the last element when
+ * the caller's array ran longer. A partial list must be visibly partial — the
+ * dropped count rides beside it on the payload (`issueCount`).
+ */
+function cappedIssues(total: number, issues: string[]): string[] {
+  if (total <= MAX_ISSUES_ECHO) return issues;
+  return [
+    ...issues.slice(0, MAX_ISSUES_ECHO),
+    `… and ${total - MAX_ISSUES_ECHO} more issue(s) omitted`,
+  ];
+}
+
+/**
  * The exedev gate's plain-path charset (`assertPathSafe`, `rosterModels`),
  * mirrored so the roster can be refused BEFORE a box is billed rather than as a
  * failed assertion on a live one INV-5 forbids destroying. Deliberately a
@@ -160,6 +230,26 @@ export function assertFleetRunId(runId: unknown): asserts runId is string {
   try {
     assertValidRunId(runId);
   } catch (e) {
+    // The store's refusal IS the validation verdict — it throws only on a
+    // failed shape check (its body admits no other throw), so anything that
+    // escapes with the matching message family is an operator error (exit 2).
+    // A THROW OUT OF THE CHECK ITSELF — a bug in a future edit, or a store
+    // whose assert misbehaves — is NOT that: classifying it as invalid-run-id
+    // blamed the operator's id for a programmer error. Discriminate on the
+    // message the function composes: same failure family as before, and every
+    // other error takes the honest exit-1 route.
+    const isValidationVerdict =
+      e instanceof Error &&
+      typeof e.message === "string" &&
+      e.message.startsWith("invalid run id:");
+    if (!isValidationVerdict) {
+      throw new FleetError(
+        1,
+        "run-id-check-failed",
+        `the run-id grammar check itself failed: ${errorMessage(e)}`,
+        "retry once, then report this — nothing was provisioned",
+      );
+    }
     // The store's message, echo bounded, redaction composed: see
     // `storeRunIdRefusal` for why neither half alone is enough.
     throw new FleetError(
@@ -196,7 +286,15 @@ const RUN_ID_ECHO_CHARS = 12;
  * secret without repeating any of it.
  */
 function runIdEcho(value: unknown): string {
-  if (typeof value !== "string") return escapeText(value);
+  if (typeof value !== "string") {
+    // Same bounded treatment as the string arms: a non-string's coercion can be
+    // an unbounded join, so it gets the LENGTH-bound head plus the count rather
+    // than the whole thing. Both callers type-guard today; this arm is the
+    // boundary's own defence for the day one stops.
+    const text = escapeText(value);
+    if (text.length <= RUN_ID_ECHO_CHARS) return `"${redact(text)}"`;
+    return `"${redact(text.slice(0, RUN_ID_ECHO_CHARS))}…" (${text.length} chars)`;
+  }
   if (value.length <= RUN_ID_ECHO_CHARS) return `"${redact(escapeText(value))}"`;
   return `"${redact(escapeText(value.slice(0, RUN_ID_ECHO_CHARS)))}…" (${value.length} chars)`;
 }
@@ -332,7 +430,9 @@ export interface DispatchResult {
 
 /** The dispatcher mints the runId — callers never invent one (AC2, §5.3). */
 export function mintRunId(): MintedRunId {
-  return newId("qds") as MintedRunId;
+  const id = newId("qds") as MintedRunId;
+  rememberMintedRunId(id);
+  return id;
 }
 
 /**
@@ -410,9 +510,18 @@ function safeOrigin(url: URL): string {
 function redact(text: string): string {
   return redactSecrets(
     text.replace(URL_IN_TEXT_RE, (raw) => {
+      // Prose punctuation trailing the match is NOT part of the URL: the
+      // charset above stops only at whitespace/quotes/angle brackets, so a
+      // sentence-final or parenthesized link (`…host/path).`) handed the
+      // trailing punctuation to `new URL`, which threw on it — and the catch
+      // below then redacted the ENTIRE match including the scheme and host
+      // that tell the operator which box the line is about. Trim it first;
+      // what remains is either a parseable URL (kept) or genuinely
+      // unparseable (redacted whole — still fail-closed).
+      const trimmed = raw.replace(URL_TRAILING_PUNCT_RE, "");
       let url: URL;
       try {
-        url = new URL(raw);
+        url = new URL(trimmed);
       } catch {
         // Scheme matched but the rest did not parse: redact whole rather than
         // guess at its structure — fail closed, like every other unverifiable
@@ -853,7 +962,17 @@ export async function dispatch(
         // nothing left to report it on
       }
     }
-    const durationMs = now() - wallStart;
+    let durationMs = 0;
+    try {
+      // GUARDED: `refuse` runs inside the deadline `setTimeout` callback, so a
+      // throwing `deps.clock` here is an uncaughtException that kills the
+      // process instead of throwing the exit-code refusal every comment on this
+      // function promises is guarded. Zero is a diagnosed absence, same rule as
+      // `remaining`'s non-finite arm.
+      durationMs = now() - wallStart;
+    } catch {
+      durationMs = 0;
+    }
     try {
       log({
         requestId: ctxRequestId ?? UNRESOLVED_REQUEST_ID,
@@ -882,7 +1001,7 @@ export async function dispatch(
       // instead of rejecting the race — the same reason `within`'s abandoned
       // handler guards its own log call.
     }
-    return new FleetError(exitCode, code, message, remediation, {
+    const refused = new FleetError(exitCode, code, message, remediation, {
       ...redactedPayload,
       runId: ctxRunId,
       ...(ctxVmName === undefined ? {} : { vmName: ctxVmName }),
@@ -908,15 +1027,22 @@ export async function dispatch(
       ...(ctxRunId === null || !ctxProvisionAttempted
         ? {}
         : {
-            debugCommands: Array.isArray(ctxGate?.debugCommands)
-              ? ctxGate.debugCommands.map((cmd) => redact(escapeText(cmd)))
-              : [`bun scripts/fleet.ts status ${ctxRunId}`],
+            debugCommands:
+              Array.isArray(ctxGate?.debugCommands) && ctxGate.debugCommands.length > 0
+                ? ctxGate.debugCommands.map((cmd) => redact(escapeText(cmd)))
+                : [`bun scripts/fleet.ts status ${ctxRunId}`],
             teardownCommand:
               typeof ctxGate?.teardownCommand === "string"
                 ? redact(escapeText(ctxGate.teardownCommand))
                 : `bun scripts/fleet.ts teardown ${ctxRunId}`,
           }),
     });
+    // Marked HERE, at the choke point every refusal exits through: the
+    // FleetError now carries the dispatch-log entry, the structured line and
+    // the payload. The rethrow arms downstream check this instead of assuming
+    // (see the `alreadyRefused` arms).
+    refusedOnce.add(refused);
+    return refused;
   };
 
   /**
@@ -1117,7 +1243,15 @@ export async function dispatch(
       message: () => string,
       extra: () => Record<string, unknown> = () => ({}),
     ): void => {
-      const durationMs = now() - wallStart;
+      // Guarded, for the same reason the log call below is: a throwing
+      // `deps.clock` in this handler would re-create the unhandled rejection it
+      // exists to prevent. Zero is a diagnosed absence.
+      let durationMs = 0;
+      try {
+        durationMs = now() - wallStart;
+      } catch {
+        durationMs = 0;
+      }
       try {
         log({
           requestId: ctxRequestId ?? UNRESOLVED_REQUEST_ID,
@@ -1227,14 +1361,24 @@ export async function dispatch(
       `fix or remove ${JSON.stringify(field)} in the brief JSON`,
       {
         field,
+        // The untruncated count, so a capped `issues` list is visibly partial.
+        issueCount: parsed.error.issues.length,
         // zod builds "Unrecognized key(s) in object: '<raw>'" from the same
         // attacker-chosen name, so the issue strings need the same escaping —
         // but NOT the surrounding quotes JSON.stringify adds, because these are
         // already list ELEMENTS. That is `escapeText`, which is now the one
         // implementation the other third-party-text sinks share.
-        issues: parsed.error.issues.map((i) =>
-          redact(escapeText(`${i.path.join(".") || "(root)"}: ${i.message}`)),
-        ),
+        //
+        // CAPPED: the array scales with the attacker-controlled unrecognized-
+        // key count, and an unbounded echo flooded stderr, the payload and the
+        // dispatch log with one crafted brief. The first issues are the ones
+        // `extractZodErrorField` names; the count of the rest is named by
+        // omission via the total (below), never silently dropped.
+        issues: cappedIssues(parsed.error.issues.length, [
+          ...parsed.error.issues.map((i) =>
+            redact(escapeText(`${i.path.join(".") || "(root)"}: ${i.message}`)),
+          ),
+        ]),
       },
     );
   }
@@ -1526,7 +1670,7 @@ export async function dispatch(
         // check moves with it. Same message shape, so one vocabulary.
         if (st.size > ROSTER_MAX_BYTES) {
           throw new Error(
-            `roster is ${st.size} bytes, over the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling`,
+            `roster is ${st.size} bytes, over the ${ROSTER_MAX_BYTES}-byte (${kibLabel(ROSTER_MAX_BYTES)}) ceiling`,
           );
         }
         // CAPPED READ, not a slurp. A readFileSync here would swallow whatever
@@ -1551,7 +1695,7 @@ export async function dispatch(
         const after = fstatSync(fd);
         if (total > ROSTER_MAX_BYTES || after.size > ROSTER_MAX_BYTES) {
           throw new Error(
-            `roster grew past the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling while it was read (${total} bytes read, ${after.size} on disk)`,
+            `roster grew past the ${ROSTER_MAX_BYTES}-byte (${kibLabel(ROSTER_MAX_BYTES)}) ceiling while it was read (${total} bytes read, ${after.size} on disk)`,
           );
         }
         rosterSlugs = parseRoster(capped.toString("utf8", 0, total), rosterPath).roles.map((r) => r.slug);
@@ -1592,6 +1736,22 @@ export async function dispatch(
         // `runIdEcho`, not `JSON.stringify`: same raw argv, same three hazards
         // (unbounded, possibly a pasted key, possibly control characters).
         `opts.runId ${runIdEcho(opts.runId)} is not a dispatcher-minted id`,
+        "omit runId and let dispatch mint one, or pass a value from mintRunId()",
+      );
+    }
+    // PROVENANCE, the runtime half AC2 asks for: the brand proves compile-time
+    // literals and the regex above proves shape, but neither proves the id came
+    // out of THIS module. A shape-perfect string cast in by a misbehaving
+    // in-process caller used to sail through here and claim whatever admission
+    // and budget a real run carries. Minted ids ride the process-local
+    // registry (`mintRunId` records every hand-out), so a legitimate
+    // re-supply — DF3.2's fan-out passing back the very ids it minted, the
+    // collision loop's own re-mints — is accepted, and everything else refuses.
+    if (!mintedRunIds.has(opts.runId)) {
+      throw refuse(
+        2,
+        "run-id-not-minted",
+        `opts.runId ${runIdEcho(opts.runId)} matches the minted shape but was never returned by mintRunId() in this process`,
         "omit runId and let dispatch mint one, or pass a value from mintRunId()",
       );
     }
@@ -1684,8 +1844,10 @@ export async function dispatch(
       try {
         headroom = await within("headroom", () => checkHeadroom(deps.driver, 1, deps.quotaLimits));
       } catch (e) {
-        // `within`'s own deadline already refused — do not double-log it.
-        if (e instanceof FleetError) throw e;
+        // `within`'s own deadline already refused this one (checked, not
+        // assumed: a FleetError that never passed `refuse` gets the typed
+        // arm below instead of a bare escape).
+        if (alreadyRefused(e)) throw e;
         // `checkHeadroom`'s default parameter is `limits = loadQuotaLimits()`,
         // which throws QuotaLimitsError for malformed JSON, an unknown key, a
         // non-positive value or EACCES (only ENOENT falls back to the defaults) —
@@ -2014,8 +2176,11 @@ export async function dispatch(
       // it on the run-id-in-use arm below (the record is someone else's), and
       // stamp again past both arms, where the record can only be ours.
       //
-      // `timedOut` already produced one (and already refused) — do not double-log.
-      if (e instanceof FleetError) {
+      // `timedOut` already produced one (and already refused) — do not
+      // double-log it. Checked against the marker, not the class: a FleetError
+      // a seam threw WITHOUT refusing takes the typed arms below instead of
+      // escaping bare.
+      if (alreadyRefused(e)) {
         stampCorrelation();
         throw e;
       }
@@ -2048,13 +2213,19 @@ export async function dispatch(
       // `path` is what separates them, and Node sets it on every fs error:
       // `store.create` opens `store.path(runId)` with `wx`, so a genuine run-id
       // collision names that exact file and a box-side `mkdir` names the box.
-      // An EEXIST carrying NO path still takes this arm — a store whose backend
-      // reports one without a path is the run-id race by elimination, and the
-      // sibling failure (a genuine loser of the race reported as exit-1
-      // `provision-failed`, sending the operator after a substrate fault that is
-      // not there) is the worse of the two. Residual, accepted: a PROVIDER that
-      // reports "a box with this name already exists" as a pathless EEXIST is
-      // still misclassified; it needs a typed provider error, not an errno.
+      // A PATHLESS EEXIST no longer takes this arm by elimination: it could be
+      // the run-id race, but it could equally be a PROVIDER reporting "box
+      // already exists" as a bare errno — and refusing THAT as exit-2
+      // do-not-retry "omit runId" sent operators away from a retryable
+      // substrate condition while THIS dispatch's record stayed open with its
+      // reservation outstanding against the issue cap. The residual is now
+      // pointed the cheaper way: a pathless EEXIST gets exit 1 (retryable) via
+      // the typed provider-error surface below; only an EEXIST whose PATH
+      // matches the record file stays the exit-2 arbiter verdict. Cost: a
+      // store whose backend genuinely races without ever setting `path` is
+      // reported as provision-failed instead of run-id-in-use — the record is
+      // still OPEN either way and nothing was double-booked beyond what the
+      // race itself books, so this misclassification is diagnosis-only.
       const errno = e as (NodeJS.ErrnoException & { path?: unknown }) | null | undefined;
       // Compare RESOLVED forms, not raw strings. `store.path(runId)` is absolute;
       // an error's `path` can be the relative form (`runs/<id>.json`) or traverse
@@ -2066,14 +2237,9 @@ export async function dispatch(
       const recordPath = deps.store.path(runId);
       const pathsMatch =
         reportedPath !== undefined &&
-        (resolve(reportedPath) === resolve(recordPath) || basename(reportedPath) === basename(recordPath));
-      // `null` is "no path" the same as `undefined` — a store that reports EEXIST
-      // with an explicit `path: null` is the run-id race by elimination, not a
-      // provision failure.
-      if (
-        errno?.code === "EEXIST" &&
-        (errno.path === undefined || errno.path === null || pathsMatch)
-      ) {
+        (resolve(reportedPath) === resolve(recordPath) ||
+          basename(reportedPath) === basename(recordPath));
+      if (errno?.code === "EEXIST" && pathsMatch) {
         // No stampCorrelation here, deliberately: the EEXIST names a record this
         // dispatch did not create — the winner's, in the race case. See the catch
         // header.
@@ -2212,13 +2378,24 @@ export async function dispatch(
         () => ({ vmName: vm.name, keyDelivered: true }),
       );
     } catch (e) {
-      if (e instanceof FleetError) throw e;
+      // Rethrow only when `refuse` already logged this one — a FleetError that
+      // did NOT pass through `refuse` (a seam throwing one directly) would
+      // otherwise escape with no dispatch-log entry, no structured line and no
+      // payload: exactly the bare-exit-1 treatment this catch exists to deny.
+      if (alreadyRefused(e)) throw e;
       throw refuse(
         1,
-        "key-delivery-failed",
-        `key mint or delivery failed for run ${runId}`,
-        "the run record is OPEN and the box is ALIVE (INV-5) — inspect it, then tear it down",
-        providerCodePayload(e),
+        e instanceof FleetError ? "key-delivery-refused" : "key-delivery-failed",
+        e instanceof FleetError
+          ? `${e.message} — during key mint or delivery for run ${runId}`
+          : `key mint or delivery failed for run ${runId}`,
+        e instanceof FleetError && typeof e.remediation === "string"
+          ? e.remediation
+          : "the run record is OPEN and the box is ALIVE (INV-5) — inspect it, then tear it down",
+        {
+          ...(e instanceof FleetError && e.code !== undefined ? { code: e.code } : {}),
+          ...providerCodePayload(e),
+        },
       );
     }
     phase("mint_ms", now() - tMint);
@@ -2477,9 +2654,13 @@ export async function dispatch(
       const gateAssertions = (
         Array.isArray(gate.assertions) ? (gate.assertions as unknown[]) : []
       ).filter((a): a is AssertionResult => a !== null && typeof a === "object");
-      const debugCommands = Array.isArray(gate.debugCommands)
-        ? gate.debugCommands
-        : [`bun scripts/fleet.ts status ${runId}`];
+      // An EMPTY array counts as absent here exactly as it does in `refuse`'s
+      // payload arm: a live box left with zero debug commands is the outcome
+      // this fallback exists to prevent, whatever shape the absence took.
+      const debugCommands =
+        Array.isArray(gate.debugCommands) && gate.debugCommands.length > 0
+          ? gate.debugCommands
+          : [`bun scripts/fleet.ts status ${runId}`];
       const teardownCommand = gate.teardownCommand ?? `bun scripts/fleet.ts teardown ${runId}`;
       // An empty (or all-passing) `assertions` on a `ready:false` gate yielded
       // `setup gate failed at item ?: ` — a refusal that keeps a billable box
@@ -2522,12 +2703,13 @@ export async function dispatch(
         // A gate that failed because the PROBE NEVER RAN is a broken box, not a
         // bad brief: retryable. The default exit-code mapping calls every non-1
         // exit `logic` (do-not-retry), which discards the one classification
-        // `substrateFailure` is computed to produce. The sanitized gate keeps a
-        // truthy non-array `assertions` from throwing out of the helper's own
-        // `.some` — same seam, same guard.
-        isSubstrateFailure({ ...gate, assertions: gateAssertions })
-          ? ("transient" as ExitStatus)
-          : undefined,
+        // `substrateFailure` is computed to produce.
+        //
+        // The GATE OBJECT ITSELF is passed — not `{...gate}`. Classification
+        // reads a side channel keyed by object identity (the structured
+        // replacement for scanning note text), and a spread copy keys as a new
+        // object: an unmarked gate, misclassified non-substrate.
+        isSubstrateFailure(gate) ? ("transient" as ExitStatus) : undefined,
       );
     }
     // The gate PROVED this box — stamp the money identity on the record: the
@@ -2636,7 +2818,19 @@ export async function dispatch(
         // The port claim below is RETAINED: `expose` RESOLVED, so the port is
         // real even where the address is not usable (the retraction's own
         // second case).
-        if (ctxHttpsUrl === undefined || ctxHttpsUrl.trim().length === 0) {
+        // The MAIN path's read of `expose`'s resolution — the one read with no
+        // `typeof` guard (the late-success handler checks, this did not).
+        // `expose` is DECLARED `Promise<string>`, but `deps.driver` is an
+        // injection seam and a truthy non-string here threw out of `.trim()`,
+        // escaping to the outer catch as exit-1 `dispatch-failed` instead of
+        // the purpose-built refusal below. The port claim stays real either
+        // way (`expose` resolved), and the box is left PRIVATE (INV-5) rather
+        // than published with an unusable locator.
+        if (
+          typeof ctxHttpsUrl !== "string" ||
+          ctxHttpsUrl === undefined ||
+          ctxHttpsUrl.trim().length === 0
+        ) {
           throw refuse(
             1,
             "expose-no-url",
@@ -2719,16 +2913,25 @@ export async function dispatch(
       }
     }
   } catch (e) {
-    if (e instanceof FleetError) throw e;
+    // Same rule as the key-delivery arm: rethrow only a refusal that ALREADY
+    // went out. A FleetError thrown straight past `refuse` (a seam's own
+    // construction, not this module's) used to escape bare — no dispatch-log
+    // entry, no structured line, no payload on it for the CLI to print.
+    if (alreadyRefused(e)) throw e;
     throw refuse(
       1,
-      "dispatch-failed",
-      `dispatch failed after the box was created: ${errorMessage(e)}`,
+      e instanceof FleetError ? "dispatch-refused" : "dispatch-failed",
+      e instanceof FleetError
+        ? `${e.message} — dispatch failed after the box was created`
+        : `dispatch failed after the box was created: ${errorMessage(e)}`,
       errorRemediation(
         e,
         "the run record is OPEN and the box is ALIVE (INV-5) — inspect it, then tear it down",
       ),
-      providerCodePayload(e),
+      {
+        ...(e instanceof FleetError && e.code !== undefined ? { code: e.code } : {}),
+        ...providerCodePayload(e),
+      },
     );
   }
 

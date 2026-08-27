@@ -746,9 +746,9 @@ export function stripAuthoredLimit(loaded: LoadedManifest): LoadedManifest {
  * @param limitMicroUsd — positive safe integer ceiling (rejects 0, negative,
  *   float, and anything past `Number.MAX_SAFE_INTEGER`)
  * @throws {ManifestError} if the ceiling is not a positive safe integer, if the
- *   requested ceiling would RAISE one already present, if the stamped manifest
- *   fails schema validation, or if the stamp did not land — every failure of
- *   this function, so callers catch one type
+ *   requested ceiling would RAISE one already present, or if the stamped
+ *   manifest fails schema validation — every failure of this function, so
+ *   callers catch one type
  */
 export function stampManifestLimit(manifest: LoadedManifest, limitMicroUsd: number): LoadedManifest {
   // `z.number().int()` accepts 1e300 — `Number.isInteger` is true for it — and
@@ -783,13 +783,14 @@ export function stampManifestLimit(manifest: LoadedManifest, limitMicroUsd: numb
     throw new ManifestError(`stamped manifest failed validation: ${detail}`);
   }
   const validated = result.data as PipelineManifest;
-  // `limitMicroUsd` is optional on the schema — existing uncapped manifests
-  // must still load — so validation alone does not prove the stamp landed.
-  // Assert it here rather than let a dispatch deliver an uncapped manifest.
-  // (Engine-side mandatory enforcement is DF3.x; this closes the producer.)
-  if (validated.limitMicroUsd === undefined) {
-    throw new ManifestError("stamp did not land: the manifest carries no limitMicroUsd");
-  }
+  // `stampManifestLimit` spread `limitMicroUsd` last and safeParse cannot drop
+  // a present field (the schema declares it `.optional()` with no default or
+  // transform — nothing in zod removes an existing key), so
+  // `validated.limitMicroUsd === limitMicroUsd` holds by construction. An old
+  // "stamp did not land" check here defended against a schema behaviour that
+  // does not exist, while teaching readers that optional fields can silently
+  // vanish through validation. The REAL guarantee is the parse above: a stamp
+  // that fails validation throws ManifestError there.
   return { manifest: deepFreeze(validated), manifestLoadMs: manifest.manifestLoadMs };
 }
 

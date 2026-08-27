@@ -42,9 +42,16 @@ describe("ExeDevDriver — DF2.1 contract suite (unmodified)", () => {
   // The suite calls setPublic, which requires the vm-sharing attestation, so
   // makeDriver hands the driver an attested posture file. The refusal-without-
   // attestation case is tested explicitly below.
+  //
+  // listingProvesTag: exedev's `ls --json` reports no tag field at all (a
+  // documented KNOWN BLOCKER in driver.ts), so nothing its listing carries can
+  // pass isFactoryOwnedVm — the contract's reap step takes the `reap-vms-unowned`
+  // refusal arm here and must KEEP taking it (T2-5: declared per driver; a flip
+  // to destroying would be a substrate change arriving unannounced).
   runDriverContract({
     driverName: "exedev",
     makeDriver: () => new ExeDevDriver({ run: fake.run, postureFile }),
+    listingProvesTag: false,
   });
 });
 

@@ -41,6 +41,19 @@ interface DriverContractOptions {
   makeDriver: () => ProviderDriver;
   /** Optional per-test run id factory; defaults to `newId("box")`. */
   newRunId?: () => string;
+  /**
+   * Does THIS driver's listing carry the ownership tag channel?
+   *
+   * T2-5 (round 11): the shared reap assertions used to pick their outcome from
+   * whatever the driver DID on one run — FakeDriver reported its tag so the
+   * destroy arm won, exedev's `ls --json` reports no tag field so the refusal
+   * arm always did — and either driver could flip branches silently with the
+   * suite green. The expectation is now DECLARED per driver: `true` pins the
+   * destroy arm outright, anything else pins the `reap-vms-unowned` refusal.
+   * Exedev documents its missing tag channel as a KNOWN BLOCKER (driver.ts),
+   * so `false` is the honest declaration there, not a deficiency marker.
+   */
+  listingProvesTag?: boolean;
 }
 
 export function runDriverContract(opts: DriverContractOptions): void {
@@ -173,14 +186,17 @@ export function runDriverContract(opts: DriverContractOptions): void {
       let refused: ProvisionRefusedError | undefined;
       try {
         const destroyed = await reapRuns(driver, store);
-        expect(destroyed).not.toContain(id);
+        // T2-7 (round 11): used to sit INSIDE the try, so a refusal-armed run
+        // skipped the very pin this test exists for. Hoisted: a refusal destroys
+        // nothing, so the claim holds under both outcomes — asserted once below.
       } catch (err) {
         if (!(err instanceof ProvisionRefusedError) || err.code !== "reap-vms-unowned") throw err;
         refused = err;
       }
+      // Under both arms the claimed box is never destroyed and still listed.
+      expect((await driver.list(id)).map((v) => v.name)).toEqual([id]);
       // Claimed-by-runId keeps the box off the refusal's spared list too.
       if (refused !== undefined) expect(refused.message).not.toContain(id);
-      expect((await driver.list(id)).map((v) => v.name)).toEqual([id]);
       await teardownRun(driver, store, id);
       await driver.destroy(id);
     });
@@ -227,41 +243,63 @@ export function runDriverContract(opts: DriverContractOptions): void {
       // reap now destroys only boxes that PROVE they are ours (name grammar +
       // ownership tag): the listing is account-wide on a real substrate, so an
       // unclaimed untagged box may be a stranger's.
+      //
+      // T2-5 (round 11): WHICH arm this step proves is DECLARED per driver via
+      // `listingProvesTag`, no longer inferred from what one run happened to do.
+      // The old three-way pick ran the destroy arm only ever on FakeDriver and
+      // the refusal arm only ever on exedev — a driver that stopped reporting
+      // tags (or started reporting them everywhere) flipped branches and stayed
+      // green. FakeDriver declares `true`; exedev declares `false` (its `ls
+      // --json` carries no tag field at all — a documented KNOWN BLOCKER in
+      // driver.ts, not a gap this suite is asked to tolerate silently).
+      expect(opts.listingProvesTag).toBeDefined();
       const orphan = track(nextId());
       await driver.create(orphan, SBX_OWNERSHIP_TAG);
       const keeper = track(nextId());
       await createRun(driver, store, { runId: keeper });
-      // What reap guarantees is now conditional on what the DRIVER can prove,
-      // and the two shipped drivers differ: FakeDriver reports the tag it was
-      // created with, exedev's `ls --json` carries no tag field at all. Assert
-      // the rule, not one driver's outcome — an unclaimed box is destroyed only
-      // when it proves it is ours, and is otherwise left listed and reachable.
       const listedOrphan = (await driver.list(orphan))[0];
-      let destroyed: string[] | undefined;
-      let refused: unknown;
-      try {
-        destroyed = await reapRuns(driver, store);
-      } catch (e) {
-        refused = e;
-      }
-      if (refused !== undefined) {
-        // S15 fail-safe: a driver that cannot prove ownership of the unclaimed
-        // box refuses the whole sweep instead of destroying on a guess or
-        // silently sparing. Only reachable when the listing carries no tag.
-        expect(listedOrphan?.tag === SBX_OWNERSHIP_TAG).toBe(false);
+      // The declaration must match the substrate: a driver declaring "my listing
+      // proves tags" has to actually carry the tag it was created with, and one
+      // declaring otherwise must NOT report it. Without this, a stale declaration
+      // picks the arm before reality is consulted — the old failure mode, moved
+      // rather than removed.
+      expect(listedOrphan?.tag === SBX_OWNERSHIP_TAG).toBe(Boolean(opts.listingProvesTag));
+
+      if (opts.listingProvesTag === true) {
+        // DESTROY ARM: tag-proven boxes unclaimed by any open record are reaped.
+        const destroyed = await reapRuns(driver, store);
+        expect(destroyed).toContain(orphan);
+        expect(destroyed).not.toContain(keeper);
+      } else {
+        // REFUSAL ARM (S15 fail-safe): a listing that cannot prove ownership of
+        // the unclaimed box refuses the whole sweep naming it — never destroying
+        // on a guess, never sparing silently. Kept here as an EXPECTED outcome
+        // for drivers that declare it, asserted exactly.
+        let refused: unknown;
+        try {
+          await reapRuns(driver, store);
+          throw new Error(
+            `${opts.driverName} declared listingProvesTag:false but reapRuns did not refuse`,
+          );
+        } catch (e) {
+          refused = e;
+        }
         expect(refused).toBeInstanceOf(ProvisionRefusedError);
         expect((refused as ProvisionRefusedError).code).toBe("reap-vms-unowned");
         expect((refused as Error).message).toContain(orphan);
-      } else if (listedOrphan?.tag === SBX_OWNERSHIP_TAG) {
-        expect(destroyed).toContain(orphan);
-      } else {
-        expect(destroyed).not.toContain(orphan);
-        expect(destroyed).not.toContain(keeper);
-        expect((await driver.list(orphan)).map((v) => v.name)).toEqual([orphan]);
-        await driver.destroy(orphan); // what an operator does with a reported box
       }
-      if (destroyed !== undefined) {
-        expect(destroyed).not.toContain(keeper);
+      // T2-7: hoisted OUT of any conditional. This assertion previously sat inside
+      // the success-path only, so every refusal-armed run skipped it — on the real
+      // substrate that could permanently reduce this pin to "the box still exists",
+      // never "the sweep's destroy path spares claimed boxes". It holds under BOTH
+      // arms: a sweep that refuses destroys nothing at all, and one that proceeds
+      // must not touch a claimed box either way.
+      const listedAfter = (await driver.list()).map((v) => v.name);
+      expect(listedAfter).toContain(keeper);
+      if (opts.listingProvesTag !== true) {
+        // The refusal spares everything; the destroy arm already consumed orphan.
+        expect(listedAfter).toContain(orphan);
+        await driver.destroy(orphan); // what an operator does with a reported box
       }
       expect((await driver.list(keeper)).map((v) => v.name)).toEqual([keeper]);
       await teardownRun(driver, store, keeper);

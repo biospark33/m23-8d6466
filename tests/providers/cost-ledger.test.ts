@@ -157,6 +157,13 @@ describe("DF2.8 cost ledger ingest (AC1)", () => {
   });
 
   test("re-ingesting the identical event set adds zero rows and mutates none", () => {
+    // T2-14 (round 11), documented gap: append-side PARALLEL writers (an agent
+    // retry racing teardown's box-hours ingest on one event_id) are only ever
+    // exercised SEQUENTIALLY here. Real interleave coverage would need two
+    // connections racing ON CONFLICT — SQLite serialises writes anyway, so a
+    // regression the sequential form cannot see is bounded to classification
+    // (K8's ledger-busy taxonomy, pinned via admitIssue's probe) rather than
+    // lost money. Disproportionate fixture; noted rather than silently absent.
     seedRecord("run-a1");
     const events: CostEvent[] = [
       mkEvent({ agentId: "lead-1", costUsd: 0.01 }),
@@ -631,6 +638,95 @@ describe("DF2.8 box hours (AC6)", () => {
     seedRecord("run-a1", { closedAt: "2026-08-20T13:00:00.000Z" });
     expect(() => unConfigured.ingestBoxHours(boxCtx)).toThrow(CostConfigError);
     unConfigured.close();
+  });
+
+  // K9 (round 11): the dedup key is (runId, closedAt). A redelivery digesting
+  // identically but PRICED differently — rate edited, record re-priced after the
+  // fact — used to silently dedupe; now it emits a structured ingest-digest-collision
+  // line naming both figures. The SUM counts the STORED row either way, which is
+  // what this pin makes explicit.
+  test("a same-key redelivery priced DIFFERENTLY never silently dedupes — collision line names both figures", () => {
+    seedRecord("run-a1", { createdAt: "2026-08-20T12:00:00.000Z", closedAt: "2026-08-20T13:30:00.000Z" });
+    const first = ledger.ingestBoxHours(boxCtx);
+    expect(first.inserted).toBe(true);
+
+    const lines: Record<string, unknown>[] = [];
+    const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+    let second: ReturnType<CostLedger["ingestBoxHours"]>;
+    try {
+      // The record's lifetime changed under the stored row (re-priced after close):
+      // same (runId, closedAt) digest, different computed figure.
+      RECORDS.set("run-a1", { ...RECORDS.get("run-a1")!, closedAt: "2026-08-20T15:30:00.000Z" });
+      seedRecord("run-a1", { closedAt: "2026-08-20T13:30:00.000Z", createdAt: "2026-08-20T11:00:00.000Z" });
+      second = ledger.ingestBoxHours(boxCtx);
+    } finally {
+      restore();
+    }
+    expect(second.inserted).toBe(false); // ON CONFLICT DO NOTHING held
+    expect(second.eventId).toBe(first.eventId);
+
+    const line = lines.find((l) => l.code === "ingest-digest-collision");
+    expect(line).toBeDefined();
+    expect(line?.outcome).toBe("digest-collision");
+    expect(line?.storedCostMicroUsd).toBe(5_400_000); // 1.5h × 3.6M µ$/h
+    expect(line?.computedCostMicroUsd).toBe(9_000_000); // 11:00→13:30 = 2.5h × 3.6M µ$/h
+    expect(String(line?.message)).toContain("the SUM counts the STORED figure");
+
+    // And the sum indeed counts the STORED one, exactly once.
+    const db = rawDb();
+    expect(rowCount(db, "cost_events")).toBe(1);
+    db.close();
+    expect(ledger.readIssueCost("qds/demo", "42").totalMicroUsd).toBe(5_400_000);
+  });
+
+  // K1 residual: admitIssue retires a closed run's reservation once closedAt passes
+  // ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS (~6 min), re-granting that headroom.
+  // Teardown's crash-recovery re-run can land its box-hours row AFTER that cutoff —
+  // spend against a cap whose reservation is gone, so admissions granted since may
+  // have spent into this charge. Nothing can un-retire an append-only admission, so
+  // the fail-safe response is to NAME the exposure, loudly and structuredly.
+  test("box hours landing PAST the reservation-retirement cutoff emit a loud late-ingest warning", () => {
+    const graceCutoffMs = ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS;
+    const closedLongAgo = new Date(Date.now() - graceCutoffMs - 60_000);
+    const createdTenMinEarlier = new Date(closedLongAgo.getTime() - 10 * 60_000);
+    seedRecord("run-late", {
+      createdAt: createdTenMinEarlier.toISOString(),
+      closedAt: closedLongAgo.toISOString(),
+    });
+
+    const lines: Record<string, unknown>[] = [];
+    const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+    let res: ReturnType<CostLedger["ingestBoxHours"]>;
+    try {
+      res = ledger.ingestBoxHours({ runId: "run-late", repoSlug: "qds/demo", issueId: "42", requestId: "req-late" });
+    } finally {
+      restore();
+    }
+    expect(res.inserted).toBe(true); // the money row DID land — this is a report, not a refusal
+
+    const line = lines.find((l) => l.code === "box-hours-late-past-reservation-cutoff");
+    expect(line).toBeDefined();
+    expect(line?.outcome).toBe("late-ingest-over-cap-risk");
+    expect(line?.closedAt).toBe(closedLongAgo.toISOString());
+    expect(line?.costMicroUsd).toBe(600_000); // 10 min × 3.6M µ$/h — positive spend only
+    expect(String(line?.message)).toContain("reservation-retirement cutoff");
+
+    // Control in the other direction: the idempotent re-run of the SAME landed row
+    // does not fire again (it no longer inserts), and a row landing inside the window
+    // stays silent — the warning means "past the cutoff", not "late relative to today".
+    const linesAfter: Record<string, unknown>[] = [];
+    const restore2 = setLogSink((e) => linesAfter.push(e as unknown as Record<string, unknown>));
+    try {
+      ledger.ingestBoxHours({ runId: "run-late", repoSlug: "qds/demo", issueId: "42", requestId: "req-late" });
+      seedRecord("run-fresh-close", {
+        createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+        closedAt: new Date(Date.now() - 30_000).toISOString(), // inside the ~6 min window
+      });
+      ledger.ingestBoxHours({ runId: "run-fresh-close", repoSlug: "qds/demo", issueId: "42", requestId: "req-rfc" });
+    } finally {
+      restore2();
+    }
+    expect(linesAfter.find((l) => l.code === "box-hours-late-past-reservation-cutoff")).toBeUndefined();
   });
 });
 
@@ -1131,6 +1227,13 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     // dispatched run never has rows yet). Reservation accounting must make the
     // second refuse: 4.9M spent + 100k reserved = at cap. A bare read-and-compare
     // reads 4.9M twice and admits both — the TOCTOU R2 §6 exists to close.
+    //
+    // T2-13 (round 11), scope honestly stated: these two admitIssue calls are
+    // SEQUENTIAL, so this test alone also passes with decide.immediate() deleted
+    // and would not notice real interleaving. Actual concurrency coverage is carried
+    // by exactly ONE probe in this file — "the SELECT and the INSERT run inside ONE
+    // write transaction" below-neighborhood (the BEGIN IMMEDIATE lock-out seam) —
+    // which is why that single test is the one that must not rot or be skipped.
     const a = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "r1" }, cap, 50_000_000);
     const b = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a2", requestId: "r2" }, cap, 50_000_000);
     if (a.admitted !== true) throw new Error("expected first admission");
@@ -1242,14 +1345,22 @@ describe("DF2.8 serialized admission (R2 §6, INV-COST-3)", () => {
     //    short double-allocates the cap under the dispatch race, too long wedges
     //    an issue for minutes), so retuning it should be a deliberate two-file
     //    change a reviewer sees, not a silent one.
+    // ±10s, not ±1s (T2-1): these ages are computed from THIS test's Date.now(),
+    // but admitIssue's predicate re-reads it INSIDE the call. A >1s stall
+    // between the insert and that read aged the −1s arm past expiry and red-teamed
+    // a correct implementation on loaded CI runners — money-path noise that
+    // trains people to re-run and ignore. 10s keeps both arms far inside/outside
+    // the boundary under any plausible stall while the straddle still pins the
+    // window's width to seconds, not minutes.
     expect(ADMISSION_GRACE_MS).toBe(60_000);
     expect(ADMISSION_SKEW_MARGIN_MS).toBe(300_000);
-    admitAged("run-just-young", "rjy", 1_000_000, expiryMs - 1_000, "101");
+    const BOUNDARY_MARGIN_MS = 10_000;
+    admitAged("run-just-young", "rjy", 1_000_000, expiryMs - BOUNDARY_MARGIN_MS, "101");
     const young = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "101", runId: "run-jy", requestId: "rjy2" }, cap, 500_000);
     if (!young.admitted) throw new Error("expected admission alongside the just-young reservation");
     expect(young.reservedMicroUsd).toBe(1_000_000);
 
-    admitAged("run-just-old", "rjo", 1_000_000, expiryMs + 1_000, "102");
+    admitAged("run-just-old", "rjo", 1_000_000, expiryMs + BOUNDARY_MARGIN_MS, "102");
     const old = ledger.admitIssue({ repoSlug: "qds/demo", issueId: "102", runId: "run-jo", requestId: "rjo2" }, cap, 500_000);
     if (!old.admitted) throw new Error("expected admission past the just-old reservation");
     expect(old.reservedMicroUsd).toBe(0);
@@ -1943,7 +2054,9 @@ describe("canonical issue identity (cap bypass)", () => {
           err = e as CostLedgerError;
         }
         expect(err).toBeInstanceOf(CostLedgerError);
-        expect(err?.message).toContain("canonicalises to an empty identity");
+        // The refusal names the grammar the identity fails, empty or not —
+        // every value here canonicalises to "" and no override key can name it.
+        expect(err?.message).toContain("not a budget key a perIssueOverrides entry");
       }
       // Nothing on either table on the way out: a refusal that still wrote the
       // row would leave the shared bucket in place regardless.
@@ -2020,6 +2133,96 @@ describe("canonical issue identity (cap bypass)", () => {
     };
     expect(capForIssue(mixed, "owner/repo", "42")).toBe(20_000_000);
   });
+
+  // K5 (review round 11): `"# 42"` — trim, THEN strip `#` WITH its following
+  // whitespace — used to fold to `" 42"`, a fifth spelling no override matched.
+  test("a space after the '#' folds with it: '# 42' is the same budget identity as '42'", () => {
+    seedRecord("run-hashspace");
+    // Billed under "# 42"; read under every spelling, including the raw shape
+    // only this pair of folds accepts.
+    ledger.ingestCostEvent(mkEvent(), mkCtx({ runId: "run-hashspace", requestId: "req-hs", issueId: "# 42" }));
+    for (const issueId of ["# 42", "42", "#42", "042"]) {
+      expect(ledger.readIssueCost("qds/demo", issueId).totalMicroUsd).toBe(12_345); // mkEvent's default
+    }
+    // Override keys name it too — the whole point of the fold.
+    const config = { ...DEFAULT_COST_CONFIG, perIssueOverrides: { "qds/demo#42": 7_000_000 } };
+    expect(capForIssue(config, "qds/demo", "# 42")).toBe(7_000_000);
+
+    // The SQL-side mirror (fix-K's second half): a legacy row stored with the
+    // padded spelling still counts, which is what pins sqlCanonicalIssueId to
+    // the same single-pass fold instead of drifting on the `##` shapes.
+    const raw = rawDb();
+    try {
+      raw.prepare(
+        `INSERT INTO cost_events (event_id, run_id, repo_slug, issue_id, request_id, role,
+                                  agent_id, kind, invocation_seq, cost_micro_usd, unpriced, created_at)
+         VALUES ('legacy-hash-space', 'run-legacy-hs', 'qds/demo', '# 42', 'req-legacy', 'lead',
+                 'lead-1', 'tokens', 0, 2000000, 0, '2026-08-20T12:00:00.000Z')`,
+      ).run();
+    } finally {
+      raw.close();
+    }
+    expect(ledger.readIssueCost("qds/demo", "42").totalMicroUsd).toBe(2_012_345); // 12,345 fresh + 2M legacy
+    // Distinct identities stay distinct: `"##42"` strips one decorator and stops,
+    // exactly like the anchored JS regex — it does not become "42".
+    expect(ledger.readIssueCost("qds/demo", "##42").hasEvents).toBe(false);
+  });
+
+  // K6: canonicalIssueId is TOTAL by design (reads of pre-existing rows must not
+  // throw), so a non-digit remainder folded to itself and opened a budget identity
+  // no ISSUE_KEY_RE override can spell — one default cap covering an unbounded set
+  // of malformed dispatches. assertCanonicalIdentity refuses those now; these are
+  // the typed arms for the two shapes the empty-refusal tests above cannot reach.
+  test.each(["42x", "-1"])(
+    "issueId %p is REFUSED — it canonicalises to a non-numeric identity no override can name",
+    (issueId) => {
+      seedRecord("run-malformed");
+      const calls: Array<() => void> = [
+        () => ledger.admitIssue({ repoSlug: "qds/demo", issueId, runId: "run-malformed", requestId: "req-malformed" }, 5_000_000, 50_000_000),
+        () => ledger.ingestCostEvent(mkEvent(), mkCtx({ issueId })),
+        () => ledger.ingestBoxHours({ runId: "run-malformed", repoSlug: "qds/demo", issueId, requestId: "req-malformed" }),
+      ];
+      for (const call of calls) {
+        let err: CostLedgerError | undefined;
+        try {
+          call();
+        } catch (e) {
+          err = e as CostLedgerError;
+        }
+        expect(err).toBeInstanceOf(CostLedgerError);
+        // Typed, and naming the actual problem — not the empty-identity wording.
+        expect(err?.message).toContain("not a budget key a perIssueOverrides entry");
+      }
+      // A refused identity booked nothing, so no shared bucket exists either.
+      const db = rawDb();
+      expect(rowCount(db, "gate_admissions")).toBe(0);
+      expect(rowCount(db, "cost_events")).toBe(0);
+      db.close();
+    },
+  );
+
+  // K10 regression pin: the type forbids null, but a CostConfig assembled in code
+  // or parsed without the validator reaches capForIssue anyway — and the in-code
+  // arm regressed once to Object.entries(null) throwing OUT OF THE GATE where the
+  // old `?.` lookup returned the default cap. Absent overrides mean default, in
+  // either spelling of absent.
+  test("capForIssue treats a NULL overrides map as absent (default cap, never a throw)", () => {
+    const asNull = { ...DEFAULT_COST_CONFIG, perIssueOverrides: null } as unknown as Parameters<typeof capForIssue>[0];
+    expect(capForIssue(asNull, "qds/demo", "42")).toBe(DEFAULT_COST_CONFIG.defaultCapMicroUsd);
+    // Through the gate too — admitIssue reads caps via capForIssue.
+    seedRecord("run-null-overrides");
+    const gated = new CostLedger({
+      path: join(dir, "null-ovr.db"),
+      config: { ...DEFAULT_COST_CONFIG, perIssueOverrides: null } as unknown as Parameters<typeof capForIssue>[0],
+    });
+    try {
+      const d = gated.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-null-overrides", requestId: "rnv" }, DEFAULT_COST_CONFIG.defaultCapMicroUsd, 50_000_000);
+      if (!d.admitted) throw new Error(`expected admission under a null overrides map, got ${d.reason}`);
+      expect(d.capMicroUsd).toBe(DEFAULT_COST_CONFIG.defaultCapMicroUsd);
+    } finally {
+      gated.close();
+    }
+  });
 });
 
 // ─── admission input / SQL binds ─────────────────────────────────────────────
@@ -2051,6 +2254,10 @@ describe("admitIssue correlation binds (NULL safety)", () => {
   });
 
   test("the reservation predicate is NULL-safe in the SQL itself, not only via the guard above", () => {
+    // DELIBERATE CHANGE-DETECTOR (T2-12): this pins source TEXT, not behavior —
+    // a behavior-preserving reformat (line wrap, alias rename) red-tests it while
+    // nothing can falsely pass. Accepted because the thing protected against has
+    // no runtime probe (see below); its failure mode is CI noise, never silence.
     // Why this is a source assertion rather than a call: `request_id`/`run_id`
     // are `TEXT NOT NULL`, so the NULL can only ever arrive from the BIND side —
     // and the guard above refuses exactly that, so there is no runtime path left

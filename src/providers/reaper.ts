@@ -63,27 +63,29 @@ export { RUN_ID_SHAPE };
 
 /**
  * The sweep's ownership test — driver.ts's `isFactoryOwnedVm` widened on the
- * NAME half to the grammar a record already on disk may carry.
+ * NAME half to the grammar a record already on disk may carry, WITHOUT letting
+ * the legacy grammar swallow co-tenants.
  *
- * `isFactoryOwnedVm` demands the STRICT generated shape (`RUN_ID_SHAPE`), but
- * the factory's own read/write paths honour `LEGACY_RUN_ID_RE` — records from
- * before the id tightening exist by construction and stay readable, closable
- * and teardown-able everywhere else (run-record.ts). A TAGGED box named by such
- * an id classified `foreign` here: reported for manual remediation, never
- * reaped — the exact keeps-billing outcome the legacy accommodation exists to
- * prevent, entered through the ownership-predicate door.
+ * Generated shape (`RUN_ID_SHAPE`) + tag ⇒ owned outright: only `newId`
+ * produces those names, so the pair is a two-factor proof and a record-less
+ * such box is a leak — and record-less ⇒ destroyed exactly as before (the
+ * generated shape IS the corroboration; no record reference is needed).
  *
- * The widening is deliberately LOCAL to this sweep and the tag half is NOT
- * relaxed: a box is still destroyable only when it carries `SBX_OWNERSHIP_TAG`,
- * which nothing but `create` stamps on factory boxes. An untagged box of ANY
- * name shape is foreign, exactly as before; only the shape half of the proof
- * accepts what the rest of the codebase has always accepted. (`reapRuns`'s raw
- * destroy path in driver.ts keeps the strict predicate until that file takes
- * the same widening — its refusal is fail-safe, only noisier.)
+ * Legacy-only shape (fits `LEGACY_RUN_ID_RE` but not the generated grammar) +
+ * tag is NOT sufficient on its own: `[a-z0-9][a-z0-9-]*` matches any lowercase
+ * co-tenant name (`ci-runner-2`), and `SBX_OWNERSHIP_TAG` is a fixed constant
+ * shared by every deployment of this code — a sibling deployment, a manually
+ * tagged box or a relocated runs dir all present as tagged legacy names this
+ * factory never minted. Destroying one of those is unrecoverable, so the
+ * legacy arm demands corroboration THIS deployment can see: a run record in
+ * its own store resolving under the box's name (`hasRecordClaim`). A record
+ * whose box this store knows by that exact id is evidence no third party can
+ * plant from outside; absent it, tagged-legacy is report-only, which is the
+ * pre-widening verdict for every non-generated name.
  */
-function isReaperOwnedVm(vm: ProviderVm): boolean {
+function isReaperOwnedVm(vm: ProviderVm, hasRecordClaim: boolean): boolean {
   if (vm.tag !== SBX_OWNERSHIP_TAG) return false;
-  return RUN_ID_SHAPE.test(vm.name) || LEGACY_RUN_ID_RE.test(vm.name);
+  return RUN_ID_SHAPE.test(vm.name) || hasRecordClaim;
 }
 
 export type RowClass =
@@ -418,8 +420,9 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
     // (INV-1 fail-safe — exedev's ls reports no tag, so its boxes all land
     // here). `isReaperOwnedVm` is `isFactoryOwnedVm` with the name half widened
     // to the legacy record grammar (see its docstring); the tag half — the
-    // part INV-1 actually leans on — is unchanged.
-    if (!isReaperOwnedVm(vm)) {
+    // part INV-1 actually leans on — is unchanged, and the legacy arm demands
+    // a record reference as corroboration before it ever votes destroy.
+    if (!isReaperOwnedVm(vm, recordsByRun.has(vm.name))) {
       rows.push({ kind: "vm", id: vm.name, class: "foreign", action: "report" });
       continue;
     }
@@ -672,7 +675,12 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
               recordError = (e as Error).message ?? String(e);
             }
           }
-          if (current === undefined || !isReaperOwnedVm(current)) {
+          // The re-check mirrors the classification-time predicate including
+          // its record-corroboration arm: `claimed` here is THIS deployment's
+          // re-read of the store, so a legacy-named tagged box destroyed under
+          // the widened arm at classification is corroborated (or newly claimed,
+          // caught two arms down) by the same evidence at the delete boundary.
+          if (current === undefined || !isReaperOwnedVm(current, claimed !== undefined)) {
             failures.push({
               vm: unit.id,
               code: "ownership-recheck-refused",

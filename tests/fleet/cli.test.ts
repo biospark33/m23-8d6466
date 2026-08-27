@@ -175,8 +175,23 @@ if (mode === "race") {
   const marker = join(runsDir as string, "inside-the-critical-section");
   let acquired = 0;
   let violations = 0;
-  const t = Number(startAt);
-  while (Date.now() < t) { /* spin to the barrier */ }
+  // Pair-barrier (round-11, T1-1) instead of spinning to a wall-clock start
+  // time: every racer waits until ALL N racers have arrived before any of them
+  // touches the lock. The old \`Date.now() < t\` spin proved only that a racer's
+  // clock passed t — under load a late cold-start just skipped the barrier and
+  // contended with nobody. Here each racer writes its pid to the barrier file,
+  // then polls until the file holds all N pids, so mutual exclusion is
+  // exercised from a proven-simultaneous position by construction.
+  const RACERS = Number(startAt); // repurposed arg: racer count, not a timestamp
+  const barrier = join(runsDir as string, ".race-arrivals");
+  {
+    writeFileSync(barrier, \`\${me}\\n\`, { flag: "a" });
+    for (;;) {
+      const arrived = new Set(readFileSync(barrier, "utf8").split("\\n").filter(Boolean));
+      if (arrived.size >= RACERS) break;
+      await Bun.sleep(2);
+    }
+  }
   // Bounded by ROUNDS WON, not by attempts: a loser returns instantly, so an
   // attempt budget is spent entirely by whoever is not holding the lock and
   // that process never enters the critical section at all.
@@ -286,6 +301,11 @@ async function within<T>(what: string, ms: number, p: Promise<T>): Promise<T> {
     // Either arm: the loser keeps running after this function returns, so its
     // eventual rejection must be observed here — and it is remembered so the
     // file-level afterEach above can join it before the next test starts.
+    // T1-16 (round 11): the `void p.catch(() => {})` IS the named-loss-of-the-
+    // raced-rejection handling — same shape as readUntilMarker's. The promise is
+    // tracked too, so a post-timeout rejection can never surface as an
+    // unhandled rejection between this return and the afterEach drain; the
+    // "did not finish within" attribution lives in the timer's own reject.
     void p.catch(() => {});
     if (lost) abandonedRuns.push(p);
   }
@@ -1294,7 +1314,14 @@ process.stdout.write(t);
         });
 
     const cases: [string, string, Spawn, boolean][] = [
-      ["a socket on stdin", "socket", viaSocket, true],
+      // Round 11: a SOCKET is ALLOWED now — it is what fd 0 is under any
+      // Node/Bun parent spawning with `stdio: "pipe"` (this row's own spawn is
+      // the proof), i.e. no brief attached at all, only the parent's unattended
+      // default. Refusing it made every such `--brief` invocation exit 2 with
+      // "two sources" when there was exactly one. The fifo and regular-file
+      // rows still refuse: a pipeline or a `<` redirect IS an attachment the
+      // caller wrote.
+      ["a socket on stdin", "socket", viaSocket, false],
       ["a pipe on stdin", "fifo", viaShell((c) => `cat ${q(briefPath)} | ${c}`), true],
       ["a redirected regular file", "file", viaShell((c) => `${c} < ${q(briefPath)}`), true],
       // LOAD-BEARING, do not "simplify" to an isTTY check: cron, systemd and
@@ -2377,7 +2404,10 @@ process.stdout.write(t);
     const base = new FakeDriver(boxesDir);
     const shared: Partial<FleetDeps> = { ...deps(validBriefJson(dir)), driver: base };
     expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
-    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    const {
+      runId,
+      vmName,
+    } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string; vmName: string };
     const lock = join(runsDir, `${runId}.lock`);
 
     reset();
@@ -2400,7 +2430,10 @@ process.stdout.write(t);
     // it is not 1: exit 1 is `exitStatus: "transient"`, and retrying a wedged
     // lock only re-hits `run-locked` forever.
     expect(outOnly.join("")).toContain(`torn down: ${runId}`);
-    expect((await base.list()).map((vm) => vm.name)).not.toContain(runId);
+    // T1-10 (round 11): the destroy claim rides the RECORD's vmName, not the
+    // FakeDriver naming convention (`vmName === runId`). A driver-side rename
+    // decouples the two, and this assertion must still verify the box is gone.
+    expect((await base.list()).map((vm) => vm.name)).not.toContain(vmName);
     const envelope = JSON.parse(errCaptured.find((l) => l.includes("lock-release-failed")) as string) as {
       code: string;
       remediation: string;
@@ -2433,9 +2466,11 @@ process.stdout.write(t);
     const child = lockChild(dir);
     const runId = "qds-20260101-abcdef";
     mkdirSync(runsDir, { recursive: true });
-    const startAt = Date.now() + 800; // enough for four `bun` cold starts
+    // The fourth argument is the RACER COUNT for the child's pair-barrier — no
+    // wall-clock start time anywhere (T1-1): a racer cannot pass the barrier
+    // until every racer has provably arrived and written its pid.
     const racers = Array.from({ length: 4 }, () =>
-      Bun.spawn(["bun", child, runsDir, runId, "race", String(startAt)], { stdout: "pipe", stderr: "pipe" }),
+      Bun.spawn(["bun", child, runsDir, runId, "race", "4"], { stdout: "pipe", stderr: "pipe" }),
     );
     try {
       const results = await within(
@@ -2466,6 +2501,11 @@ process.stdout.write(t);
       for (const p of racers) p.kill("SIGKILL");
       await Promise.all(racers.map((p) => p.exited));
       rmSync(join(runsDir, `${runId}.lock`), { force: true });
+      // The pair-barrier file: without this sweep a leaked barrier pre-fills
+      // the NEXT run of this test with stale arrivals and the new racers skip
+      // the wait entirely — reintroducing exactly the unproven start T1-1 removed.
+      rmSync(join(runsDir, ".race-arrivals"), { force: true });
+      rmSync(join(runsDir, "inside-the-critical-section"), { force: true });
     }
     // Four `bun` cold starts plus 240 contended rounds: past bun's 5s default,
     // and above the race's own 60s bound so a hung racer reports ITS name
@@ -2587,7 +2627,7 @@ process.stdout.write(t);
     // reports which await wedged instead of being cut off here.
   }, 150_000);
 
-  test("dispatch's SIGINT/SIGTERM handlers are DELIVERED: envelope, CC-9 line, exit 130/143", async () => {
+  test("dispatch's SIGINT/SIGTERM/SIGHUP handlers are DELIVERED: envelope, CC-9 line, exit 130/143/129", async () => {
     // The listener-count test further down cannot tell "installed and removed"
     // from "never installed" — deleting scripts/fleet.ts's interruptHandlers
     // block leaves it green. Delivery needs a REAL process holding the
@@ -2631,6 +2671,11 @@ process.on = ((sig, listener) => {
     for (const [sig, status] of [
       ["SIGINT", 130],
       ["SIGTERM", 143],
+      // C6 (round 11): an ssh drop HUPS the process. Without a handler the
+      // default disposition killed a mid-provision dispatch instantly — no
+      // envelope, no CC-9 line, no lock release, 128+1 by disposition instead
+      // of exit. Same delivery contract as its two siblings.
+      ["SIGHUP", 129],
     ] as const) {
       const proc = Bun.spawn(["bun", "--preload", preload, fleetPath, "dispatch", "--driver", "fake"], {
         cwd: dir,
@@ -2682,9 +2727,11 @@ process.on = ((sig, listener) => {
         const line = lines[done] as Record<string, unknown>;
         expect(line.operation).toBe("fleet.dispatch");
         expect(line.exitCode).toBe(status);
-        // 130/143 are neither 0 nor 1: classified with the operator errors,
-        // never with the retryable substrate.
-        expect(line.exitStatus).toBe("logic");
+        // Round 11: 130/143 sit OUTSIDE this CLI's classification table (see
+        // the header), so they are no longer stamped `logic` — a non-retryable
+        // verdict about the verb they interrupted — but their own "the shell
+        // signalled this process" status, matching the header's claim.
+        expect(line.exitStatus).toBe("signalled");
         // …and truly nothing was created: no runs dir under the redirected
         // default ($QDS_RUNS_DIR points into this case's tmpdir).
         expect(existsSync(join(dir, ".sandbox", "runs"))).toBeFalse();
@@ -2693,9 +2740,9 @@ process.on = ((sig, listener) => {
         await proc.exited;
       }
     }
-    // Two children × (readiness + exit), each bounded at 30s: the outer budget
+    // Three children × (readiness + exit), each bounded at 30s: the outer budget
     // clears that SUM so the first hung child names its await.
-  }, 120_000);
+  }, 150_000);
 
   test("fleet and sandbox-teardown exclude each other through the SAME per-run lock", async () => {
     // The file header claims both CLIs take one shared lock, and nothing showed
@@ -3210,6 +3257,19 @@ process.on = ((sig, listener) => {
       message: string;
     };
     expect(envelope.code).toBe("completion-unwritable");
+    // T1-9 (round 11): the harvest itself ran to its verdict — 6 means "done,
+    // unreportable", so a harvest that silently no-ops and then fails the
+    // write must not pass. This fixture's box has no repo (NOREPO) and no
+    // artifacts, so the landed surface is the RECORD of a completed pull:
+    // pullArtifacts created and cleared its staging tgz and left neither it nor
+    // an artifacts dir behind. The affirmative landing shape (bundle /
+    // artifacts dir) is pinned in the OK-protocol sibling above; here we pin
+    // that the verb got PAST its preflight to that verdict — reached by an
+    // exec on the box — rather than failing at the record probe with 6.
+    const landed = readdirSync(runsDir).filter((f) => f.startsWith(runId));
+    expect(landed).toContain(`${runId}.json`);
+    expect(landed.some((f) => f.endsWith(".lock"))).toBeFalse();
+    expect(landed.some((f) => f.endsWith(".bundle") || f.endsWith("-artifacts.tgz"))).toBeFalse();
     // Harvest is credential-free and read-side: the lock came off and nothing
     // was left half-done for a retry to trip over.
     expect(existsSync(join(runsDir, `${runId}.lock`))).toBeFalse();
@@ -3232,8 +3292,13 @@ process.on = ((sig, listener) => {
     reset();
     const code = await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared);
 
-    expect(code).toBe(1);
+    // Round 11: the typed `record-read-failed` envelope arrives as exit 5
+    // ("refused before provisioning; do not retry"), not 1 — whose logVerb
+    // stamp was `transient` and sent automation back to retry a file no retry
+    // can heal.
+    expect(code).toBe(5);
     expect(text()).toContain("malformed run record");
+    expect(text()).toContain("record-read-failed");
     // Nothing landed: the box is still live and the corrupt body is still on
     // disk, unread (re-reading it here would throw on the very corruption the
     // fixture planted — the raw bytes are the evidence instead).
@@ -3679,6 +3744,66 @@ process.on = ((sig, listener) => {
     // turning one flake into two).
   }, 20_000);
 
+  test("run()'s handler-removal is observable: a fresh child still installs handlers (T1-11)", async () => {
+    // T1-11 (round 11). The count-equality sibling above can only detect
+    // LEAKS — "installed and removed" is indistinguishable from "never
+    // installed" there. This is the cheap positive control: one REAL `fleet
+    // dispatch` child, gated on the signals-ready marker (which fires only when
+    // a real SIGINT/SIGTERM listener lands) and then SIGINT'd, proves the
+    // INSTALL path exists in current source. Delete `installSignalRelease` or
+    // dispatch's scoped handler block and THIS test never sees its marker;
+    // delete only the REMOVAL and the sibling fails on listener arithmetic.
+    // Together they bound both directions without new seams. Delivery itself is
+    // the signal-delivery sibling's subject (130 + envelope); here the exit code
+    // only proves the handler ran, so the assertion stays coarse.
+    const fleetPath = join(import.meta.dir, "../../scripts/fleet.ts");
+    const preload = join(dir, "signals-ready-preload.ts");
+    writeFileSync(
+      preload,
+      `const realOn = process.on.bind(process);
+let announced = false;
+process.on = ((sig, listener) => {
+  const ret = realOn(sig, listener);
+  if (!announced && (sig === "SIGINT" || sig === "SIGTERM")) {
+    announced = true;
+    process.stdout.write("signals-ready\\n");
+  }
+  return ret;
+});
+`,
+    );
+    const { OPENROUTER_PROVISIONING_KEY: _provKey, ...signalChildEnv } = process.env;
+    const proc = Bun.spawn(["bun", "--preload", preload, fleetPath, "dispatch", "--driver", "fake"], {
+      cwd: dir,
+      env: signalChildEnv,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    try {
+      await within(
+        "the handler-install probe child's readiness",
+        30_000,
+        readUntilMarker(proc.stdout, "signals-ready"),
+      );
+      // stdin is a pipe that never closes, so the verb blocks in its brief
+      // read after installing handlers — that is exactly where the SIGINT
+      // delivery tests meet it. For THIS probe the refusal comes from the
+      // same kill: nothing above 128+n would prove removal anyway; the marker
+      // IS the install proof.
+      proc.kill("SIGINT");
+      const [code] = await within(
+        "the probe child's interrupted exit",
+        30_000,
+        Promise.all([proc.exited, readCapped(proc.stdout)]),
+      );
+      expect(code).toBe(130);
+    } finally {
+      proc.kill("SIGKILL");
+      await proc.exited;
+    }
+  }, 60_000);
+
   test("observingMint reports the minted id at create() time and forwards everything else (round 10)", async () => {
     // FC10's seam, pinned directly. dispatch() persists via store.create long
     // before its promise resolves, but the CLI used to learn the run id only
@@ -3841,7 +3966,11 @@ process.on = ((sig, listener) => {
     reset();
     const teardownCode = await runCli(["teardown", "--driver", "fake", "--dir", runsDir, ack.runId], shared);
     expect(teardownCode).toBe(0);
-    expect(text()).toContain(`torn down: ${ack.runId}`);
+    // T1-15 (round 11): read from STDOUT only, not the merged sink. This file
+    // separates the two streams precisely so a regression moving the ack onto
+    // stderr (where `fleet teardown | jq` and piped callers cannot see it)
+    // fails HERE; `text()` was blind to exactly that.
+    expect(outOnly.join("")).toContain(`torn down: ${ack.runId}`);
     const record = store.get(ack.runId);
     expect(record.closedAt).toBeDefined();
     // The key's $0.25 of usage, captured BEFORE the revoke (INV-4) — `typeof
@@ -5141,8 +5270,14 @@ process.on = ((sig, listener) => {
       const base = new FakeDriver(boxesDir);
       const d: Partial<FleetDeps> = {
         ...fanoutDeps(),
+        // quota.checkHeadroom reads listWithAnomalies when the driver has one
+        // (wave-1 D3), so BOTH channels must be unreachable — the inherited
+        // base.listWithAnomalies would answer cleanly and admit the fan-out.
         driver: driverWith(base, {
           list: async () => {
+            throw new Error("provider unreachable");
+          },
+          listWithAnomalies: async () => {
             throw new Error("provider unreachable");
           },
         }),
