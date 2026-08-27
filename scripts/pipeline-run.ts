@@ -589,15 +589,29 @@ const RESIDENT_CREDENTIAL_VALUE = [
 
 function assertNoResidentCredentials(brief: Record<string, unknown>, where = "brief"): void {
   for (const [k, v] of Object.entries(brief)) {
+    // Field-name checks stay scoped to meaningful object field names — an
+    // array INDEX ("0", "1") is never a credential-shaped name.
     if (RESIDENT_CREDENTIAL_FIELD.test(k)) {
       throw new Error(`resident brief refused: credential-named field '${sanitizeForMessage(k)}' in ${where}`);
     }
-    if (typeof v === "string" && RESIDENT_CREDENTIAL_VALUE.some((re) => re.test(v))) {
-      throw new Error(`resident brief refused: credential-shaped value at ${where}.${sanitizeForMessage(k)}`);
-    }
-    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
-      assertNoResidentCredentials(v as Record<string, unknown>, `${where}.${sanitizeForMessage(k)}`);
-    }
+    assertNoResidentCredentialValue(v, `${where}.${sanitizeForMessage(k)}`);
+  }
+}
+
+/** The value half of the scan, shared by object properties and array elements:
+ *  a credential-shaped string refuses anywhere it appears, and objects nest.
+ *  Arrays are traversed element-wise — `[\"sk-…\"]` must not slip past a
+ *  properties-only walk. */
+function assertNoResidentCredentialValue(v: unknown, where: string): void {
+  if (typeof v === "string" && RESIDENT_CREDENTIAL_VALUE.some((re) => re.test(v))) {
+    throw new Error(`resident brief refused: credential-shaped value at ${where}`);
+  }
+  if (Array.isArray(v)) {
+    v.forEach((el, i) => assertNoResidentCredentialValue(el, `${where}[${i}]`));
+    return;
+  }
+  if (v !== null && typeof v === "object") {
+    assertNoResidentCredentials(v as Record<string, unknown>, where);
   }
 }
 
@@ -1308,10 +1322,14 @@ async function main(argv: readonly string[]): Promise<number> {
     tracer.startSession({ requestId, request: manifest.pipelineId });
   }
 
+  // Declared BEFORE the signal handlers so they can stop it: the resident is
+  // an owned subprocess, and neither signal exit may orphan an in-flight pi
+  // call past this process's own death.
+  let residentSpawn: ResidentSpawn | undefined;
   // A signal becomes a terminating exception so the run closes and its rows
   // settle, rather than leaving the journal claiming work that is already dead.
   let terminated = false;
-  const onSignal = (sig: string) => {
+  const onSignal = async (sig: string): Promise<void> => {
     if (terminated) {
       // The handlers removed the default disposition, so a second Ctrl-C must
       // not be swallowed while a body sits out its cancellation grace.
@@ -1327,13 +1345,20 @@ async function main(argv: readonly string[]): Promise<number> {
       } catch {
         /* ignore */
       }
+      // The owned resident dies with the run: stop() SIGKILLs the in-flight
+      // call (if any) and awaits its exit, so no pi child outlives process.exit.
+      try {
+        await residentSpawn?.stop();
+      } catch {
+        /* the exit outranks teardown noise */
+      }
       process.exit(2);
     }
     terminated = true;
     run.terminate(sig);
   };
-  process.on("SIGTERM", () => onSignal("SIGTERM"));
-  process.on("SIGINT", () => onSignal("SIGINT"));
+  process.on("SIGTERM", (sig) => void onSignal(sig));
+  process.on("SIGINT", (sig) => void onSignal(sig));
 
   // DF3.3: the resident orchestrator. Source = the run-context.json witness
   // beside the resolved manifest (dispatch's in-box brief carrier): a NON-EMPTY
@@ -1370,15 +1395,26 @@ async function main(argv: readonly string[]): Promise<number> {
   // resident_solicit observability line carries it as `model` — D4's
   // month-1 spend-per-model eval keys on it.
   const residentModel = DEFAULT_RESIDENT_SLUG;
-  let residentSpawn: ResidentSpawn | undefined;
   let steering: SteeringController | undefined;
   if (residentArmed && residentBrief !== undefined) {
     // DOD-Security / INV-RES-3: a brief whose values or field names match a
     // credential shape refuses the run BEFORE any spawn — a manifest is
     // already scanned for exactly this (manifest.ts's INV-4 walk), and the
     // brief reaches a THIRD party's prompt, which is worse. The refusal names
-    // the field, never the value.
-    assertNoResidentCredentials(residentBrief);
+    // the field, never the value. Guarded like the cap-reconciliation refusal:
+    // the tracer's session is already open, so throwing without the close
+    // leaks the WAL handle and leaves an unfinished session row that breaks a
+    // later initiateSession for this requestId.
+    try {
+      assertNoResidentCredentials(residentBrief);
+    } catch (err) {
+      try {
+        tracer.close();
+      } catch {
+        /* the arming refusal outranks a close failure */
+      }
+      throw err;
+    }
     let spawned: ReturnType<typeof startResident> | undefined;
     try {
       spawned = startResident({
@@ -1563,6 +1599,14 @@ async function main(argv: readonly string[]): Promise<number> {
       residentBlock.exitStatus = await residentSpawn.exitStatus();
     } catch {
       /* keep null — the run is settled; the process's word is telemetry */
+    }
+    // Ownership: the runner spawned the resident, so the runner stops it —
+    // stop() arms its guard and SIGKILLs anything still in flight before the
+    // process.exit below. Guarded like the telemetry read: the run is settled.
+    try {
+      await residentSpawn.stop();
+    } catch {
+      /* the settled marker is the commitment, not the resident's teardown */
     }
   }
   try {

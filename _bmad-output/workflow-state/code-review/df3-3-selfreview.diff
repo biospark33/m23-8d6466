@@ -1,3 +1,4 @@
+# Provenance: round-1 pre-fix source snapshot of the df3-3 branch (self-review input). Superseded by the round-2 fixes in commit history; kept as historical review evidence, NOT a build input.
 diff --git a/scripts/pipeline-run.ts b/scripts/pipeline-run.ts
 index ed26d89..7d7b3e1 100644
 --- a/scripts/pipeline-run.ts

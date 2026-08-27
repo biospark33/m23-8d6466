@@ -100,6 +100,15 @@ function solicitTimeoutMs(env: NodeJS.ProcessEnv): number {
 }
 
 /**
+ * Test seam for the timeout's resolution table (the `_injectRateSources`
+ * convention): lets the clamp tests assert the resolved value directly
+ * instead of burning the 60 s default on a real hang.
+ */
+export function _resolvedSolicitTimeoutMs(env: NodeJS.ProcessEnv): number {
+  return solicitTimeoutMs(env);
+}
+
+/**
  * AC4: absent/empty brief means the resident is NEVER spawned — an explicit
  * non-error path checked before rate resolution, so a rate-less config can
  * never turn "no brief" into a refusal.

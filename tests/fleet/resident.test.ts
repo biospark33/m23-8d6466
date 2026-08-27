@@ -23,6 +23,7 @@ import { join } from "node:path";
 
 import {
   _injectRateSources,
+  _resolvedSolicitTimeoutMs,
   DEFAULT_RESIDENT_SLUG,
   startResident,
   type ResidentSpawn,
@@ -507,28 +508,21 @@ describe("persistence + redaction (§5.2 pre-execution, INV-RES-3)", () => {
     expect(await spawn.exitStatus()).toBe("transient");
   });
 
-  test("B4: an out-of-range timeout override falls back to the default (clamped to 600 000)", async () => {
-    const dir = caseDir("clamp");
-    // 600_001 is one over the clamp; the effective timeout must NOT be 24 days,
-    // so a hang call is killed by the 60 s default long before this test's
-    // own budget — asserted by the rejection arriving at all.
-    const spawn = enabled(
-      startResident({
-        brief: brief(),
-        runId: "run-clamp",
-        sessionDir: dir,
-        bin: fakePi,
-        env: piEnv({
-          QDS_FAKE_PI_MODE: "hang",
-          QDS_RESIDENT_TIMEOUT_MS: "600001",
-        }),
-      }),
-    );
-    await expect(spawn.caller.call(PROMPT)).rejects.toThrow(/killed by signal/);
-    expect(await spawn.exitStatus()).toBe("transient");
-    // The fallback hangs for the full 60 s default, so this leg is the suite's
-    // one long test; the budget is wide so parallel CI load cannot flake it.
-  }, 150_000);
+  test("B4: an out-of-range timeout override falls back to the default (clamped to 600 000)", () => {
+    // Resolution table, asserted directly through the `_resolvedSolicitTimeoutMs`
+    // seam (the `_injectRateSources` convention): out-of-range, non-integer,
+    // and non-numeric overrides all resolve to the 60 s default instead of
+    // Bun.spawn's ~0 ms NaN timeout or a 2^31-1 ms (~24.8 day) hang. The
+    // spawn-path wiring of the resolved value is covered by the fast 500 ms
+    // in-range leg above — no 60 s hang needed here.
+    expect(_resolvedSolicitTimeoutMs({ QDS_RESIDENT_TIMEOUT_MS: "600001" })).toBe(60_000);
+    expect(_resolvedSolicitTimeoutMs({ QDS_RESIDENT_TIMEOUT_MS: "600000" })).toBe(600_000);
+    expect(_resolvedSolicitTimeoutMs({ QDS_RESIDENT_TIMEOUT_MS: "0" })).toBe(60_000);
+    expect(_resolvedSolicitTimeoutMs({ QDS_RESIDENT_TIMEOUT_MS: "-5" })).toBe(60_000);
+    expect(_resolvedSolicitTimeoutMs({ QDS_RESIDENT_TIMEOUT_MS: "1.5" })).toBe(60_000);
+    expect(_resolvedSolicitTimeoutMs({ QDS_RESIDENT_TIMEOUT_MS: "not-a-number" })).toBe(60_000);
+    expect(_resolvedSolicitTimeoutMs({})).toBe(60_000);
+  });
 
   test("B8: reply persist failure is best-effort — usage still returns", async () => {
     const dir = caseDir("replyfail");

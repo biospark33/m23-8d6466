@@ -292,11 +292,14 @@ existing manifest changes behavior); resident telemetry lands as `JournalFile.re
 
 **E2E demo (DOD, artifact `_bmad-output/evidence/df3-3/demo/out.json`):** steered run
 exit 0 — phases `[plan, build]` success in control order; gate events `gate_fail@1` →
-`resident_directive retry("the assertion compares bytes, not strings")@2` → `gate_pass@2`;
-`resident {status:"active", directives:3, steeringIterations:{build:1}, spendMicros:1104,
-directivesRejected:0, exitStatus:"success", tripwires:[]}`; three `resident_solicit`
-observability lines carrying runId/requestId/phase/point/directiveAction/accepted/spendMicros/
-durationMs (stderr.log). spendMicros 1104 = 3 × (336+32) — exact integer µ$ arithmetic.
+`gate_pass@2` (the accepted directive rides a type:"log" trace row, not a gate event —
+round-2 C2); `resident {status:"active", directives:3, steeringIterations:{build:1},
+spendMicros:276, directivesRejected:0, exitStatus:"success", tripwires:[]}`; three
+`resident_solicit` observability lines carrying runId/requestId/phase/point/directiveAction/
+model/accepted/spendMicros/durationMs (stderr.log). spendMicros 276 = 3 × 92 (1000 in /
+64 out at 80 000/180 000 µ$/MTok) — exact integer µ$ arithmetic. Artifact regenerated
+after the round-2 journal-schema change (review round 3); the original run's 1104 µ$
+(3 × 368) used a stale pre-round-2 fixture configuration.
 
 **Tests:** `tests/phase-engine/steering.test.ts` (25: union rejections ×4 + unknown field →
 tripwire w/ action name + single attempt + default; unreachable/timeout/malformed×2 → degraded,
@@ -386,69 +389,69 @@ test hardening second).
 
 ### Patched (all fixed, checked off)
 
-- [x] [Review][Patch] select_roster fail-open when `ctx.rosterIds` undefined — missing set now treated as empty, out-of-set rejected [src/phase-engine/steering.ts]
-- [x] [Review][Patch] meter() lacked finite guard — NaN/Infinity/negative usage poisoned spendMicros for the run [src/phase-engine/steering.ts]
-- [x] [Review][Patch] throwing onTripwire observer broke solicit's never-throws contract [src/phase-engine/steering.ts]
-- [x] [Review][Patch] parse-step callee throw escaped solicit — now treated as malformed [src/phase-engine/steering.ts]
-- [x] [Review][Patch] degradation cause discarded — sanitized reason now exposed via controller getter (journal block stays closed-set) [src/phase-engine/steering.ts]
-- [x] [Review][Patch] malformed correction prompt now restates the directive union for stateless callers [src/phase-engine/steering.ts]
-- [x] [Review][Patch] context truncation dropped the NEWEST lines first — accepted guidance now survives the cut [src/phase-engine/steering.ts]
-- [x] [Review][Patch] KNOWN_ACTIONS/schema literal duplication — single const source [src/phase-engine/steering.ts]
-- [x] [Review][Patch] stderr tail truncated before redaction — redact full then cut [src/fleet/resident.ts]
-- [x] [Review][Patch] runId unvalidated into file paths — grammar-validated at startResident [src/fleet/resident.ts]
-- [x] [Review][Patch] redaction bound only 2 key names — expanded credential env set + pattern keys [src/fleet/resident.ts]
-- [x] [Review][Patch] QDS_RESIDENT_TIMEOUT_MS ignored opts.env seam + 24.8-day upper bound — reads child env, capped 600s [src/fleet/resident.ts]
-- [x] [Review][Patch] dead Math.max armor removed [src/fleet/resident.ts]
-- [x] [Review][Patch] ENOENT now exitStatus "logic" (was "transient") — misconfig is permanent [src/fleet/resident.ts]
-- [x] [Review][Patch] exitStatus() null for never-solicited resident (was "transient") [src/fleet/resident.ts]
-- [x] [Review][Patch] reply-persist failure no longer degrades the call or drops metered spend — best-effort persist; prompt persist stays fail-closed [src/fleet/resident.ts]
-- [x] [Review][Patch] stop() race window — stopped flag checked at call top [src/fleet/resident.ts]
-- [x] [Review][Patch] garbage slug refused after prefix normalization [src/fleet/resident.ts]
-- [x] [Review][Patch] gated retry loop ignored aborted signal — post-settlement zombie loop (re-spawn + journal mutation after terminal marker) now exits on abort [scripts/pipeline-run.ts]
-- [x] [Review][Patch] resident_directive wrote fabricated gate_results row (passed=0) + event outside closed union — now a type:"log" trace row [scripts/pipeline-run.ts]
-- [x] [Review][Patch] abort at post_gate_failure left no record — directive+reason now traced [scripts/pipeline-run.ts]
-- [x] [Review][Patch] pipelineId/runId/phase-names entered prompt raw (newline injection) — sanitized [scripts/pipeline-run.ts]
-- [x] [Review][Patch] RateError refused the whole run — now lands status:"disabled" + stderr line, run proceeds deterministic (INV-RES-5) [scripts/pipeline-run.ts]
-- [x] [Review][Patch] credential-shaped brief values now refuse the run naming the field (INV-RES-3) [scripts/pipeline-run.ts]
-- [x] [Review][Patch] resident_solicit line now carries `model` (Observability Contract) [scripts/pipeline-run.ts]
-- [x] [Review][Patch] telemetry snapshot deep-copies tripwires/steeringIterations [scripts/pipeline-run.ts]
-- [x] [Review][Patch] writeSync partial-write loop for all fd writes [scripts/pipeline-run.ts]
-- [x] [Review][Patch] closedRosterIds silent empty-set — stderr note on roster load failure [scripts/pipeline-run.ts]
-- [x] [Review][Patch] testCommand on non-code phase now schema-refused (superRefine) [src/phase-engine/manifest.ts]
-- [x] [Review][Patch] unreadable brief witness distinguished from absent (stderr warning) [scripts/pipeline-run.ts]
-- [x] [Review][Patch] e2e host-coupling: QDS_PI_MODELS_JSON pinned (host ~/.pi no longer read); TMPDIR per-leg single-source; runner killed in finally + stdout drained; budget below test timeout [tests/phase-engine/resident-e2e.test.ts]
-- [x] [Review][Patch] shared global counter file moved under per-leg dir with cleanup [tests/phase-engine/resident-e2e.test.ts]
-- [x] [Review][Patch] arming negative control (identity-free witness + requestId → disabled) [tests/phase-engine/resident-e2e.test.ts]
-- [x] [Review][Patch] usage.test steering exemption now pinned: exactly 2 sanctioned divisions [tests/phase-engine/usage.test.ts]
-- [x] [Review][Patch] telemetry test asserts exitCode 0; spendMicros exact (276 µ$ = 3×92); directive partition (directives + rejected === 3); degraded-path leg (FAKE_RESIDENT_EXIT=3 → "logic", deterministic completion) [tests/phase-engine/resident-e2e.test.ts]
-- [x] [Review][Patch] redaction proven: fake OPENROUTER_API_KEY absent from all 6 artifacts [tests/phase-engine/resident-e2e.test.ts]
-- [x] [Review][Patch] timing-key strip now pattern-based; retry-authorization refusal semantics pinned; jsonLines filters on event before find; /exit 1\b/; toBe(3); walkKeys canary; mode & 0o077 === 0; toEqual/stable dedup; resident stripped top-level only [tests/phase-engine/resident-e2e.test.ts]
-- [x] [Review][Patch] fake-resident: missing -p keeps exit 2; invocation marker precedes hang check [tests/phase-engine/fixtures/fake-resident.ts]
-- [x] [Review][Patch] pi-catalog cacheWrite aligned with TEST_SOURCES (0.018) [tests/phase-engine/fixtures/pi-catalog/openrouter.json]
-- [x] [Review][Patch] fleet tests: delete-based env cleanup; stop() discrimination (elapsed « timeout); string-brief branches; behavioral session continuity (fixture now appends to --session); fixture NaN refusal; fixture-knob scrubbing; honest DEFAULT_RESIDENT_SLUG pin [tests/fleet/resident.test.ts, tests/fleet/fixtures/fake-pi-resident.ts]
-- [x] [Review][Patch] steering tests: tie rounding, select_roster single-attempt, malformed-counter reset across solicits, steeringIterations increment-vs-overwrite, missing-field schema rejections, correction metering [tests/phase-engine/steering.test.ts]
-- [x] [Review][Patch] dispatch-task testCommand expectation flipped to the new schema refusal [tests/phase-engine/dispatch-task.test.ts]
+- [x] Review/Patch: select_roster fail-open when `ctx.rosterIds` undefined — missing set now treated as empty, out-of-set rejected [src/phase-engine/steering.ts]
+- [x] Review/Patch: meter() lacked finite guard — NaN/Infinity/negative usage poisoned spendMicros for the run [src/phase-engine/steering.ts]
+- [x] Review/Patch: throwing onTripwire observer broke solicit's never-throws contract [src/phase-engine/steering.ts]
+- [x] Review/Patch: parse-step callee throw escaped solicit — now treated as malformed [src/phase-engine/steering.ts]
+- [x] Review/Patch: degradation cause discarded — sanitized reason now exposed via controller getter (journal block stays closed-set) [src/phase-engine/steering.ts]
+- [x] Review/Patch: malformed correction prompt now restates the directive union for stateless callers [src/phase-engine/steering.ts]
+- [x] Review/Patch: context truncation dropped the NEWEST lines first — accepted guidance now survives the cut [src/phase-engine/steering.ts]
+- [x] Review/Patch: KNOWN_ACTIONS/schema literal duplication — single const source [src/phase-engine/steering.ts]
+- [x] Review/Patch: stderr tail truncated before redaction — redact full then cut [src/fleet/resident.ts]
+- [x] Review/Patch: runId unvalidated into file paths — grammar-validated at startResident [src/fleet/resident.ts]
+- [x] Review/Patch: redaction bound only 2 key names — expanded credential env set + pattern keys [src/fleet/resident.ts]
+- [x] Review/Patch: QDS_RESIDENT_TIMEOUT_MS ignored opts.env seam + 24.8-day upper bound — reads child env, capped 600s [src/fleet/resident.ts]
+- [x] Review/Patch: dead Math.max armor removed [src/fleet/resident.ts]
+- [x] Review/Patch: ENOENT now exitStatus "logic" (was "transient") — misconfig is permanent [src/fleet/resident.ts]
+- [x] Review/Patch: exitStatus() null for never-solicited resident (was "transient") [src/fleet/resident.ts]
+- [x] Review/Patch: reply-persist failure no longer degrades the call or drops metered spend — best-effort persist; prompt persist stays fail-closed [src/fleet/resident.ts]
+- [x] Review/Patch: stop() race window — stopped flag checked at call top [src/fleet/resident.ts]
+- [x] Review/Patch: garbage slug refused after prefix normalization [src/fleet/resident.ts]
+- [x] Review/Patch: gated retry loop ignored aborted signal — post-settlement zombie loop (re-spawn + journal mutation after terminal marker) now exits on abort [scripts/pipeline-run.ts]
+- [x] Review/Patch: resident_directive wrote fabricated gate_results row (passed=0) + event outside closed union — now a type:"log" trace row [scripts/pipeline-run.ts]
+- [x] Review/Patch: abort at post_gate_failure left no record — directive+reason now traced [scripts/pipeline-run.ts]
+- [x] Review/Patch: pipelineId/runId/phase-names entered prompt raw (newline injection) — sanitized [scripts/pipeline-run.ts]
+- [x] Review/Patch: RateError refused the whole run — now lands status:"disabled" + stderr line, run proceeds deterministic (INV-RES-5) [scripts/pipeline-run.ts]
+- [x] Review/Patch: credential-shaped brief values now refuse the run naming the field (INV-RES-3) [scripts/pipeline-run.ts]
+- [x] Review/Patch: resident_solicit line now carries `model` (Observability Contract) [scripts/pipeline-run.ts]
+- [x] Review/Patch: telemetry snapshot deep-copies tripwires/steeringIterations [scripts/pipeline-run.ts]
+- [x] Review/Patch: writeSync partial-write loop for all fd writes [scripts/pipeline-run.ts]
+- [x] Review/Patch: closedRosterIds silent empty-set — stderr note on roster load failure [scripts/pipeline-run.ts]
+- [x] Review/Patch: testCommand on non-code phase now schema-refused (superRefine) [src/phase-engine/manifest.ts]
+- [x] Review/Patch: unreadable brief witness distinguished from absent (stderr warning) [scripts/pipeline-run.ts]
+- [x] Review/Patch: e2e host-coupling: QDS_PI_MODELS_JSON pinned (host ~/.pi no longer read); TMPDIR per-leg single-source; runner killed in finally + stdout drained; budget below test timeout [tests/phase-engine/resident-e2e.test.ts]
+- [x] Review/Patch: shared global counter file moved under per-leg dir with cleanup [tests/phase-engine/resident-e2e.test.ts]
+- [x] Review/Patch: arming negative control (identity-free witness + requestId → disabled) [tests/phase-engine/resident-e2e.test.ts]
+- [x] Review/Patch: usage.test steering exemption now pinned: exactly 2 sanctioned divisions [tests/phase-engine/usage.test.ts]
+- [x] Review/Patch: telemetry test asserts exitCode 0; spendMicros exact (276 µ$ = 3×92); directive partition (directives + rejected === 3); degraded-path leg (FAKE_RESIDENT_EXIT=3 → "logic", deterministic completion) [tests/phase-engine/resident-e2e.test.ts]
+- [x] Review/Patch: redaction proven: fake OPENROUTER_API_KEY absent from all 6 artifacts [tests/phase-engine/resident-e2e.test.ts]
+- [x] Review/Patch: timing-key strip now pattern-based; retry-authorization refusal semantics pinned; jsonLines filters on event before find; /exit 1\b/; toBe(3); walkKeys canary; mode & 0o077 === 0; toEqual/stable dedup; resident stripped top-level only [tests/phase-engine/resident-e2e.test.ts]
+- [x] Review/Patch: fake-resident: missing -p keeps exit 2; invocation marker precedes hang check [tests/phase-engine/fixtures/fake-resident.ts]
+- [x] Review/Patch: pi-catalog cacheWrite aligned with TEST_SOURCES (0.018) [tests/phase-engine/fixtures/pi-catalog/openrouter.json]
+- [x] Review/Patch: fleet tests: delete-based env cleanup; stop() discrimination (elapsed « timeout); string-brief branches; behavioral session continuity (fixture now appends to --session); fixture NaN refusal; fixture-knob scrubbing; honest DEFAULT_RESIDENT_SLUG pin [tests/fleet/resident.test.ts, tests/fleet/fixtures/fake-pi-resident.ts]
+- [x] Review/Patch: steering tests: tie rounding, select_roster single-attempt, malformed-counter reset across solicits, steeringIterations increment-vs-overwrite, missing-field schema rejections, correction metering [tests/phase-engine/steering.test.ts]
+- [x] Review/Patch: dispatch-task testCommand expectation flipped to the new schema refusal [tests/phase-engine/dispatch-task.test.ts]
 
 ### Deferred (real, not this round — pre-existing or owned elsewhere)
 
-- [x] [Review][Defer] Steering wall-clock absent from requiredBudgetMs admission math — DF3.6's projection owns it
-- [x] [Review][Defer] post_gate_failure solicitation not wired for agent/engineer phases (point 2 is code-phase-only) — engine retry-loop seam, follow-up story; deviation now recorded here
-- [x] [Review][Defer] select_roster pick recorded but not applied to dispatch_task spawn (deviation ledger #3 — DF1.6 owns the surface)
-- [x] [Review][Defer] retry guidance reaches the resident's next prompt only, never an executor (F6) — story amendment
-- [x] [Review][Defer] sub-timings (prompt_render_ms/agent_call_ms/directive_parse_ms) unimplemented — escape hatch documented, durationMs authoritative
-- [x] [Review][Defer] pi session file is an unredacted duplicate of the conversation — pi-owned format
-- [x] [Review][Defer] full prompt on argv visible in ps — pi CLI contract
-- [x] [Review][Defer] journal version stays 1.0.0 despite additive resident block — 4+ test pins; belongs to a journal-schema change
-- [x] [Review][Defer] artifact accumulation unbounded in journal dir — retention policy
-- [x] [Review][Defer] same-runId re-dispatch resumes prior session/overwrites artifacts
-- [x] [Review][Defer] gate-note redaction bound to secret-free childEnv — pre-existing PF-2 pattern
-- [x] [Review][Defer] roster closed-set is global union, not per-phase
-- [x] [Review][Defer] gate_bypass_attempt cause covers roster rejections — spec's closed 3-cause union
-- [x] [Review][Defer] accepted-but-inapplicable directives counted — AC5 telemetry semantics as specced
-- [x] [Review][Defer] abort skips run_end solicitation — spec amendment note (F8)
-- [x] [Review][Defer] valid-roster-selection application untested e2e
-- [x] [Review][Defer] testCommand composition switches on silently for future code-phase manifests — noted (F12)
-- [x] [Review][Defer] witness TOCTOU double-read (informational)
+- [x] Review/Defer: Steering wall-clock absent from requiredBudgetMs admission math — DF3.6's projection owns it
+- [x] Review/Defer: post_gate_failure solicitation not wired for agent/engineer phases (point 2 is code-phase-only) — engine retry-loop seam, follow-up story; deviation now recorded here
+- [x] Review/Defer: select_roster pick recorded but not applied to dispatch_task spawn (deviation ledger #3 — DF1.6 owns the surface)
+- [x] Review/Defer: retry guidance reaches the resident's next prompt only, never an executor (F6) — story amendment
+- [x] Review/Defer: sub-timings (prompt_render_ms/agent_call_ms/directive_parse_ms) unimplemented — escape hatch documented, durationMs authoritative
+- [x] Review/Defer: pi session file is an unredacted duplicate of the conversation — pi-owned format
+- [x] Review/Defer: full prompt on argv visible in ps — pi CLI contract
+- [x] Review/Defer: journal version stays 1.0.0 despite additive resident block — 4+ test pins; belongs to a journal-schema change
+- [x] Review/Defer: artifact accumulation unbounded in journal dir — retention policy
+- [x] Review/Defer: same-runId re-dispatch resumes prior session/overwrites artifacts
+- [x] Review/Defer: gate-note redaction bound to secret-free childEnv — pre-existing PF-2 pattern
+- [x] Review/Defer: roster closed-set is global union, not per-phase
+- [x] Review/Defer: gate_bypass_attempt cause covers roster rejections — spec's closed 3-cause union
+- [x] Review/Defer: accepted-but-inapplicable directives counted — AC5 telemetry semantics as specced
+- [x] Review/Defer: abort skips run_end solicitation — spec amendment note (F8)
+- [x] Review/Defer: valid-roster-selection application untested e2e
+- [x] Review/Defer: testCommand composition switches on silently for future code-phase manifests — noted (F12)
+- [x] Review/Defer: witness TOCTOU double-read (informational)
 
 ### Dismissed as noise / false positives (13, with evidence in triage.md)
 

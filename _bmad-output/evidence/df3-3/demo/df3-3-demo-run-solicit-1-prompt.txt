@@ -1,8 +1,8 @@
 Steering point: run_start.
 pipeline resident-e2e run df3-3-demo-run
 requestId: demo-req-0001
-repoSlug: biospark33/QDS-Factory
-issueId: 999
+repoSlug: qds/demo
+issueId: 42
 effectiveCeilingMicros: 250000
 phases: plan(code), build(code,1r)
 You are the resident orchestrator for this run. Reply with ONE JSON object and nothing else.

@@ -1425,6 +1425,11 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     expect(stderr).toContain("credential-shaped value at brief.note");
     // The value itself is never echoed.
     expect(stderr).not.toContain(secret);
+    // The arming refusal closes the trace store before the throw (the
+    // cap-reconciliation pattern): a checkpointed WAL (absent or truncated to
+    // zero) is the on-disk proof — an unclosed tracer leaves its frames behind.
+    const wal = `${traceDb(ws.markerRoot)}-wal`;
+    expect(fs.existsSync(wal) ? fs.statSync(wal).size : 0).toBe(0);
   }, 60_000);
 
   test("C6: a credential-NAMED brief field refuses the run, naming the field", async () => {
@@ -1445,6 +1450,50 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
     expect(exitCode).toBe(2);
     expect(stderr).toContain("credential-named field 'github_token'");
+  }, 60_000);
+
+  test("C6: a credential-shaped value inside an ARRAY refuses the run, naming the element path", async () => {
+    const ws = workspace();
+    const manifest = writeCodeManifest(ws.dir);
+    const secret = "sk-abcdef1234567890abcdef";
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({
+        requestId: crypto.randomUUID(),
+        // The scan walks array elements — a credential-shaped string must not
+        // slip past a properties-only walk on the array's parent object.
+        notes: ["clean note", secret],
+        effectiveCeilingMicros: 250_000,
+      }),
+    );
+    const proc = spawnRunner(
+      ["--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal, "--run-root", ws.dir],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("credential-shaped value at brief.notes[1]");
+    expect(stderr).not.toContain(secret);
+  }, 60_000);
+
+  test("C6: a credential-named field on an OBJECT inside an array refuses the run", async () => {
+    const ws = workspace();
+    const manifest = writeCodeManifest(ws.dir);
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({
+        requestId: crypto.randomUUID(),
+        targets: [{ name: "ok" }, { api_key: "x".repeat(10) }],
+        effectiveCeilingMicros: 250_000,
+      }),
+    );
+    const proc = spawnRunner(
+      ["--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal, "--run-root", ws.dir],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("credential-named field 'api_key' in brief.targets[1]");
   }, 60_000);
 
   test("C12: a brief source that never existed stays QUIET (AC4), and the unreadable branch warns", async () => {

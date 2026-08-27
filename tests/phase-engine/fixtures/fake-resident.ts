@@ -98,6 +98,10 @@ const index = invocationIndex(typeof session === "string" ? session : undefined)
 
 if (process.env.FAKE_RESIDENT_HANG === "1") {
   // Never reply — the caller's timeout (SIGKILL) is the behavior under test.
+  // The timer pins the event loop the same way fake-pi-resident.ts's hang mode
+  // does: a live handle guarantees the child stays hung even on a runtime that
+  // would otherwise let an unsettled top-level await end the process.
+  setInterval(() => {}, 1 << 30);
   await new Promise<never>(() => {});
 }
 

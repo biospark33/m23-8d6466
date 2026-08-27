@@ -2,7 +2,7 @@
   "version": "1.0.0",
   "runId": "df3-3-demo-run",
   "ok": true,
-  "completedAt": "2026-08-27T15:30:28.911Z",
+  "completedAt": "2026-08-27T23:34:48.064Z",
   "resident": {
     "status": "active",
     "directives": 3,
@@ -10,7 +10,7 @@
     "steeringIterations": {
       "build": 1
     },
-    "spendMicros": 1104,
+    "spendMicros": 276,
     "exitStatus": "success",
     "tripwires": []
   },
@@ -23,12 +23,12 @@
       "name": "plan",
       "kind": "code",
       "status": "success",
-      "startedAt": "2026-08-27T15:30:28.871Z",
-      "updatedAt": "2026-08-27T15:30:28.875Z",
-      "durationMs": 3,
+      "startedAt": "2026-08-27T23:34:48.029Z",
+      "updatedAt": "2026-08-27T23:34:48.034Z",
+      "durationMs": 4,
       "subTimings": {
         "manifest_load_ms": 2,
-        "phase_body_ms": 3,
+        "phase_body_ms": 4,
         "journal_write_ms": 1
       },
       "exitStatus": "success"
@@ -41,12 +41,12 @@
       "name": "build",
       "kind": "code",
       "status": "success",
-      "startedAt": "2026-08-27T15:30:28.876Z",
-      "updatedAt": "2026-08-27T15:30:28.910Z",
-      "durationMs": 34,
+      "startedAt": "2026-08-27T23:34:48.034Z",
+      "updatedAt": "2026-08-27T23:34:48.063Z",
+      "durationMs": 28,
       "subTimings": {
         "manifest_load_ms": 0,
-        "phase_body_ms": 34,
+        "phase_body_ms": 28,
         "journal_write_ms": 0
       },
       "exitStatus": "success"
@@ -61,7 +61,7 @@
       "requestId": "demo-req-0001",
       "phase": "build",
       "attempt": 1,
-      "gate_exec_ms": 9,
+      "gate_exec_ms": 5,
       "gate_report_ms": 0,
       "violations": [
         "testCommand:build: exit 1\ntest attempt 1\n"
@@ -77,23 +77,12 @@
     {
       "runId": "df3-3-demo-run",
       "phaseId": "df3-3-demo-run:1:build",
-      "type": "resident_directive",
-      "name": "resident",
-      "requestId": "demo-req-0001",
-      "phase": "build",
-      "action": "retry",
-      "guidance": "the assertion compares bytes, not strings",
-      "attempt": 2
-    },
-    {
-      "runId": "df3-3-demo-run",
-      "phaseId": "df3-3-demo-run:1:build",
       "type": "gate_pass",
       "name": "commandGate(testCommand:build)",
       "requestId": "demo-req-0001",
       "phase": "build",
       "attempt": 2,
-      "gate_exec_ms": 7,
+      "gate_exec_ms": 5,
       "gate_report_ms": 0,
       "violations": [],
       "checks": [
