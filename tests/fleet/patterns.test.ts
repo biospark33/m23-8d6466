@@ -728,6 +728,14 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       manifest();
       let inFlight = 0;
       let peak = 0;
+      // Pair-barrier instead of wall-clock pacing: a solitary arm PARKS inside
+      // the gate (holding its permit) until a second arm arrives, so peak===2
+      // is forced by construction rather than by hoping a 10ms sleep overlaps
+      // two arms — under suite load the old pacing lost the overlap (peak 1)
+      // on a saturated host. Round-9 precedent: same seam-barrier de-flake the
+      // lost-race test got. A width-1 regression parks arm 0 forever and fails
+      // by timeout; a width-3 regression records peak 3 and fails the assert.
+      let openGate: (() => void) | undefined;
       const res = await fanout(
         "best-of-n",
         4,
@@ -737,11 +745,17 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
           concurrency: 2,
           setupGate: async (_d: ProviderDriver, vm: string) => {
             inFlight += 1;
-            // Measure peak BEFORE sleep: arms holding semaphore permits are concurrently in-flight.
+            // Measure peak BEFORE the barrier: arms holding semaphore permits are concurrently in-flight.
             peak = Math.max(peak, inFlight);
-            // Paces gate completion: keeps arms in the semaphore longer so permits
-            // actually contend. Wall-clock dependency is intentional for pacing.
-            await new Promise<void>((resolve) => setTimeout(resolve, TICK_MS));
+            if (inFlight >= 2) {
+              const release = openGate;
+              openGate = undefined;
+              release?.();
+            } else {
+              await new Promise<void>((resolve) => {
+                openGate = resolve;
+              });
+            }
             inFlight -= 1;
             return gateReady(vm);
           },
