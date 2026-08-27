@@ -4490,6 +4490,20 @@ process.on = ((sig, listener) => {
             typeof argv[2] === "string" &&
             argv[2].includes(markerPath)
           ) {
+            // Since PF-3 (fc21f8b) the poller reads the marker by cat-ing
+            // runMarkerPath() through this same exec channel (copyFile is
+            // box-relative by driver contract). Answer the cat in-memory from
+            // the planted box file, exactly as patterns.test.ts's
+            // RaceFakeDriver does: letting it fall through to the `test -f`
+            // probe returned exit 0 with EMPTY stdout, JSON.parse("") threw,
+            // and every arm polled as "unusable" — no winner, race to ceiling.
+            if (String(argv[2]).includes("cat ")) {
+              try {
+                return { stdout: readFileSync(boxMarker(vm), "utf8"), stderr: "", exitCode: 0 };
+              } catch {
+                return { stdout: "", stderr: "cat: marker vanished between test and read", exitCode: 1 };
+              }
+            }
             if (!planted) {
               planted = true;
               mkdirSync(dirname(boxMarker(vm)), { recursive: true });
@@ -4530,7 +4544,9 @@ process.on = ((sig, listener) => {
     // Loser disposal marked the fleet lock destructive and CLEARED it —
     // release succeeded, so nothing survives the verb.
     expect(existsSync(join(dir, ".sandbox", "fleet.lock"))).toBeFalse();
-  });
+    // 20s parity with fc21f8b's four patterns.test.ts race bumps: the
+    // loser's REAL git teardown can outrun bun's 5s default under load.
+  }, 20_000);
 
   test("a timed-out loser's late teardown still prices its box hours after the verb closed the ledger", async () => {
     // CodeRabbit round-5 warning: disposeLosers abandons a hung teardown at
@@ -4556,6 +4572,17 @@ process.on = ((sig, listener) => {
             typeof argv[2] === "string" &&
             argv[2].includes(markerPath)
           ) {
+            // PF-3 (fc21f8b) moved the marker read onto this exec channel as
+            // `cat` — answer it in-memory from the planted box file (same
+            // RaceFakeDriver contract as patterns.test.ts), or every arm
+            // polls "unusable" and the race spins to its ceiling.
+            if (String(argv[2]).includes("cat ")) {
+              try {
+                return { stdout: readFileSync(boxMarker(vm), "utf8"), stderr: "", exitCode: 0 };
+              } catch {
+                return { stdout: "", stderr: "cat: marker vanished between test and read", exitCode: 1 };
+              }
+            }
             if (plantedVm === undefined) {
               plantedVm = vm;
               mkdirSync(dirname(boxMarker(vm)), { recursive: true });
@@ -4825,7 +4852,9 @@ process.on = ((sig, listener) => {
     expect(code).toBe(5);
     expect(existsSync(join(dir, ".sandbox", "cost-ledger.db"))).toBeFalse();
     expect(existsSync(join(dir, "runs", "cost-ledger.db"))).toBeFalse();
-  });
+    // 20s: deadPid() spawns+reaps a real child and the refusal path fsyncs
+    // the lock — can outrun bun's 5s default under parallel-suite load.
+  }, 20_000);
 
   test("an unknown --pattern refuses exit 2 before any construction side effect", async () => {
     // F-C1/F-C2: the pattern guard is hoisted ABOVE the constructors and above
