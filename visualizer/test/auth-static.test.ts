@@ -21,6 +21,7 @@ import { seedTrace, FIXTURE_REQUEST_ID } from "./fixtures/trace-fixture.ts";
 import { startVisualizer } from "../server/index.ts";
 
 const TOKEN = "0123456789abcdef0123456789abcdef"; // 32 bytes
+const WRONG_SAME_LENGTH = "ffffffffffffffffffffffffffffffff"; // 32 bytes, wrong
 
 let seeded: ReturnType<typeof seedTrace>;
 let handle: ReturnType<typeof startVisualizer>;
@@ -99,16 +100,66 @@ const ENCODED_ASSET_BODY = "encoded-name-asset";
 
 describe("static branch WITH a ./dist build (INV-3 confinement)", () => {
   const written: string[] = [];
+  // Directories THIS suite created (deepest-first, from `write`'s walk) —
+  // removed after the files, empty-only, so a real build's populated dirs and
+  // a pre-existing dist/ itself are never touched.
+  const createdDirs: string[] = [];
   let createdDist = false;
   let indexBody = INDEX_BODY;
 
   const write = (rel: string, body: string): void => {
     const full = path.join(DIST_DIR, rel);
+    // Record every not-yet-existing ancestor strictly under DIST_DIR BEFORE
+    // mkdirSync creates them: the walk runs deepest-first, so createdDirs is
+    // naturally in reverse-depth order for cleanup.
+    for (
+      let dir = path.dirname(full);
+      !fs.existsSync(dir) && path.resolve(dir).startsWith(`${DIST_DIR}${path.sep}`);
+      dir = path.dirname(dir)
+    ) {
+      createdDirs.push(dir);
+    }
     fs.mkdirSync(path.dirname(full), { recursive: true });
     if (fs.existsSync(full)) throw new Error(`refusing to clobber ${full}`);
     fs.writeFileSync(full, body);
     written.push(full);
   };
+
+  /**
+   * Teardown shared by afterAll and process exit. `afterAll` alone leaks the
+   * fixture into the working tree on a hard kill (CI timeout): dist/ sits in
+   * the repo and an `assets/` dir survives even on clean runs when a real
+   * build pre-existed. The exit hook cannot know whether it created dist/, so
+   * it removes only files this suite actually wrote — the tracked list is the
+   * safety property afterAll's escape guard already enforces — and then only
+   * the directories this suite created, only when they are EMPTY and only in
+   * reverse-depth order (deepest first), so a concurrent build dropping files
+   * in mid-teardown is left alone rather than rmdir'd under. Unregistered
+   * after a normal teardown so a late exit event doesn't rm someone's fresh
+   * build output.
+   */
+  const cleanupWritten = (): void => {
+    for (const full of written) {
+      if (!path.resolve(full).startsWith(`${DIST_DIR}${path.sep}`)) continue;
+      try {
+        fs.rmSync(full, { force: true });
+      } catch {
+        /* best effort at exit time */
+      }
+    }
+    for (const dir of createdDirs) {
+      if (!path.resolve(dir).startsWith(`${DIST_DIR}${path.sep}`)) continue;
+      try {
+        // rmdirSync refuses a non-empty directory (ENOTEMPTY), which is the
+        // only-when-empty guard: anything that appeared inside stays put.
+        fs.rmdirSync(dir);
+      } catch {
+        /* best effort at exit time */
+      }
+    }
+  };
+  const onExit = (): void => cleanupWritten();
+  process.on("exit", onExit);
 
   beforeAll(() => {
     createdDist = !fs.existsSync(DIST_DIR);
@@ -122,20 +173,9 @@ describe("static branch WITH a ./dist build (INV-3 confinement)", () => {
   });
 
   afterAll(() => {
-    if (createdDist) {
-      fs.rmSync(DIST_DIR, { recursive: true, force: true });
-      return;
-    }
-    // Guard the tracked-list removal: every path we rm must sit inside dist/.
-    // A future edit to `write()` that escapes the tree would otherwise delete
-    // an operator file at teardown — the one direction this fixture must never
-    // fail in.
-    for (const full of written) {
-      if (!path.resolve(full).startsWith(`${DIST_DIR}${path.sep}`)) {
-        throw new Error(`fixture wrote outside dist/: ${full}`);
-      }
-      fs.rmSync(full, { force: true });
-    }
+    process.removeListener("exit", onExit);
+    cleanupWritten();
+    if (createdDist) fs.rmSync(DIST_DIR, { recursive: true, force: true });
   });
 
   test("a real asset is served with the static headers", async () => {
@@ -155,6 +195,28 @@ describe("static branch WITH a ./dist build (INV-3 confinement)", () => {
 
   test("the static branch is still gated — no credential → 401, no bytes", async () => {
     const res = await fetch(`${base()}/assets/viz-fixture.js`);
+    expect(res.status).toBe(401);
+    expect(await res.text()).toBe("");
+  });
+
+  test("asset request with a WRONG token of the right length → 401, no bytes", async () => {
+    // The gate sits BEFORE routing, so a dist asset takes the same credential
+    // check as `/` — but that is exactly the assumption worth pinning: a
+    // future cache/Range fast-path added inside the branch could plausibly
+    // skip it "for assets only". Same-length matters here (timing/comparison
+    // shortcuts return early on length), mirrored from auth.test.ts's route
+    // sweep.
+    const res = await fetch(`${base()}/assets/viz-fixture.js`, {
+      headers: bearer(WRONG_SAME_LENGTH),
+    });
+    expect(res.status).toBe(401);
+    expect(await res.text()).toBe("");
+  });
+
+  test("asset request with a MALFORMED bearer value → 401, no bytes", async () => {
+    const res = await fetch(`${base()}/assets/viz-fixture.js`, {
+      headers: { authorization: "Bearer ???not-a-token" },
+    });
     expect(res.status).toBe(401);
     expect(await res.text()).toBe("");
   });

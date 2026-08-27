@@ -203,24 +203,38 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
     // `fleet` and `sandbox-teardown` — including `--dir=<path>` and the missing-
     // value refusal. The issue ref stays the sole positional.
     const { positionals, flagTokens } = tokenizeArgs(argv, { valueFlags: VALUE_FLAGS });
+    // A repeated `--dir` used to silently last-win: the second value overrode
+    // the first, and against a typo'd or wrong directory the CLI then reported
+    // from (or refused ledger-missing for) a records dir the operator never
+    // believed they typed. Every other typo class here refuses loudly; this
+    // one now does too, with the same "given more than once" wording
+    // scripts/fleet.ts refuses duplicate flags by. A Set is enough — both
+    // occurrences carry the same name.
+    const seenValueFlags = new Set<string>();
     parseValueFlags(flagTokens, {
       flags: VALUE_FLAGS,
-      onValue: (_flag, value) => {
+      onValue: (flag, value) => {
+        if (seenValueFlags.has(flag)) {
+          // The `!!`-envelope the rest of this CLI refuses with (see
+          // `reportFailure`): the bare usage message kept the exit code but
+          // dropped the code prefix and the remediation line automation keys
+          // on. Tests pin the message SUBSTRING, which the envelope preserves.
+          throw new Error(`!! cost-usage-invalid: ${flag} given more than once\nnext: pass a single --dir value\n${HELP.join("\n")}`);
+        }
+        seenValueFlags.add(flag);
         dir = value;
       },
       help: HELP,
     });
     if (positionals.length > 1) {
-      throw new Error(
-        `unexpected argument: ${positionals[positionals.length - 1]}\n${HELP.join("\n")}`,
-      );
+      throw new Error(`!! cost-usage-invalid: unexpected argument: ${positionals[positionals.length - 1]}\nnext: pass one issue reference (owner/repo#N) — flags only, no extra positionals\n${HELP.join("\n")}`);
     }
     // The shared grammar refuses an EMPTY `--dir`/`--dir=` value, but a
     // WHITESPACE-ONLY one passed straight through and resolved the ledger
     // against a literal-space path (`./ /cost-ledger.db`) — a confident
     // ledger-miss for a typo'd space. Same refusal as a missing value.
     if (dir !== undefined && dir.trim() === "") {
-      throw new Error(`--dir requires a non-empty value\n${HELP.join("\n")}`);
+      throw new Error(`!! cost-usage-invalid: --dir requires a non-empty value\nnext: pass a --dir path that is not only whitespace\n${HELP.join("\n")}`);
     }
     issueRef = parseIssueRef(positionals[0]);
   } catch (e) {
@@ -391,7 +405,11 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
       // (the close failure is a stderr warning); if close fails on the success
       // path, the close failure IS the error.
       if (code !== 0) {
-        process.stderr.write(`warning: ledger close failed after error: ${(closeErr as Error).message}\n`);
+        // writeSync, not process.stderr.write — run() returns straight into
+        // process.exit below, and a piped/redirected stderr tears down before
+        // an async write lands. This warning is the only record that the
+        // ledger handle failed to release, so it must not be the line lost.
+        writeSync(2, `warning: ledger close failed after error: ${(closeErr as Error).message}\n`);
       } else {
         const cerr = closeErr as { code?: string; message?: string; remediation?: string };
         reportFailure(out, cerr.code ?? "ledger-close-failed", cerr.message ?? String(closeErr), cerr.remediation);

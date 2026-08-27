@@ -58,6 +58,23 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+/**
+ * T2-11 (round 11): several tests monkeypatch `process.stderr.write` and restore
+ * it in a `finally`. A `finally` never runs if THIS file's test is killed by its
+ * own timeout mid-call, and the stub then eats bun's reporter output for every
+ * later test in the process — order-dependent failures that mislocalize. The
+ * original is captured ONCE at patch time (the in-test fixtures already do that)
+ * and this guard re-checks after every test, so a leaked stub is repaired even on
+ * the kill path. Module-level because the patch leaks across the whole file.
+ */
+const REAL_STDERR_WRITE = process.stderr.write;
+afterEach(() => {
+  if (process.stderr.write !== REAL_STDERR_WRITE) {
+    console.warn("run-record.test: a stderr monkeypatch survived its test — restored by the file-level guard");
+    process.stderr.write = REAL_STDERR_WRITE;
+  }
+});
+
 interface CliResult {
   stdout: string;
   stderr: string;
@@ -102,9 +119,15 @@ describe("create (AC1, INV-3)", () => {
       err = e as NodeJS.ErrnoException;
     }
     // A check-then-write implementation throws its own Error and has no
-    // syscall/errno — this assertion is what makes it fail.
+    // syscall/errno — this assertion is what makes it fail. The errno now comes
+    /// from `link(2)` rather than `open(O_EXCL)`: creation is temp-write-then-
+    // link-publish, so the kernel arbitrates ownership at the moment the final
+    // path first appears — which also closes the torn-write and stalled-creator
+    // windows an in-place O_EXCL write left open (see createUnlogged's
+    // docstring). Same guarantee, one primitive later; `link` failing EEXIST on
+    // a non-empty destination is exactly what makes overwrite impossible.
     expect(err?.code).toBe("EEXIST");
-    expect(err?.syscall).toBe("open");
+    expect(err?.syscall).toBe("link");
     expect(snapshot("run-a")).toEqual(before);
   });
 
@@ -519,6 +542,44 @@ describe("list (AC3, INV-4)", () => {
     expect(listing.skippedReasons[0]).toContain("run-empty.json");
   });
 
+  test("TWO skipped files: every reason aligns with its file by index", () => {
+    // T2-3 (round 11): with exactly one skipped element, index alignment is
+    // unfalsifiable — any scramble of a one-element array against a one-element
+    // array is invisible. `list()`'s operator-facing detail is built as
+    // `skipped.map((name, i) => … skippedReasons[i])`, so a regression that
+    // truncates, reorders or misaligns the reasons array renders the WRONG
+    // diagnosis next to each filename — or undefined. Two DISTINCT failure
+    // classes make a swap detectable: each reason must name only its own file.
+    store.create("run-good");
+    writeFileSync(join(dir, "run-empty-one.json"), "", { mode: 0o600 });
+    writeFileSync(
+      join(dir, "run-bad-key-two.json"),
+      JSON.stringify({ runId: "run-bad-key-two", createdAt: new Date().toISOString(), nope: 1 }),
+      { mode: 0o600 },
+    );
+
+    const listing = store.listWithAnomalies();
+    // Same length is the floor; the per-index pairing is the point.
+    expect(listing.skipped).toHaveLength(2);
+    expect(listing.skippedReasons).toHaveLength(2);
+    for (const [i, name] of listing.skipped.entries()) {
+      expect(listing.skippedReasons[i]).toBeDefined();
+      expect(String(listing.skippedReasons[i])).toContain(name);
+    }
+    // And the reasons really do differ (empty-body vs unknown-key), so an
+    // alignment bug cannot hide behind two identical strings.
+    expect(listing.skippedReasons[0]).not.toBe(listing.skippedReasons[1]);
+    // list()'s aggregate refusal renders reasons by the same index mapping.
+    let err: Error | undefined;
+    try {
+      store.list();
+    } catch (e) {
+      err = e as Error;
+    }
+    expect(err?.message).toContain("run-empty-one.json");
+    expect(err?.message).toContain("run-bad-key-two.json");
+  });
+
   test.each([
     ["an unknown key", "run-odd", JSON.stringify({ runId: "run-odd", createdAt: "x", nope: 1 }), /nope/],
     [
@@ -564,8 +625,11 @@ describe("list (AC3, INV-4)", () => {
     expect(err?.message).toMatch(reasonRe);
   });
 
-  test("an unreadable record is ONE skipped entry too, carrying its errno", () => {
-    if (process.getuid?.() === 0) return; // root reads mode-0000 files; nothing to prove
+  // Root reads a mode-0000 file, so the fault below cannot be injected there —
+  // but a silent `return` reported PASS with zero assertions, indistinguishable
+  // from verification (T2-10). Visible skip, like the lock tests' `skipIf`.
+  const asRoot = process.getuid?.() === 0;
+  test.skipIf(asRoot)("an unreadable record is ONE skipped entry too, carrying its errno", () => {
     store.create("run-good");
     store.create("run-locked");
     chmodSync(join(dir, "run-locked.json"), 0o000);
@@ -1422,6 +1486,60 @@ describe("concurrent set", () => {
     expect(store.get(id).vmName).toBe("box-rm9"); // …and the write stands behind it
   });
 
+  // R2 (round 11): `releaseLock`'s FIRST read used to treat EVERY errno as
+  // "already gone" and return silently — leaving a lock on disk naming THIS
+  // process's live pid, which later judges score "held by a live owner":
+  // unstealable, unwritable and unclosable for the rest of the process lifetime.
+  // Now only ENOENT is gone; any other errno falls through to take-then-compare,
+  // whose rename retry then fails → the loud stderr note + registration KEPT so
+  // a retry actually retries. This pins the loud-note arm via a rename EACCES on
+  // exactly that fall-through path.
+  test("a non-ENOENT failure while releasing is LOUD: stderr note, not a silent no-op", () => {
+    const id = "release-eio-loud-run";
+    store.create(id);
+    const lockPathStr = store.lockPath(id);
+    const realRename = nodeFs.renameSync;
+    const notes: string[] = [];
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    // Declared BEFORE the spy: the mock callback closes over it, and a first
+    // invocation ahead of the declaration would be a TDZ throw instead of a
+    // counted fault.
+    let attempts = 0;
+    const spy = spyOn(nodeFs, "renameSync").mockImplementation(((from: unknown, to: unknown) => {
+      if (from === lockPathStr && attempts < 2) {
+        // Only THIS lock's take-aside — every other rename passes untouched.
+        // BOTH release attempts must fail (releaseLock retries once before it
+        // reports), and the counter is what keeps every later lifecycle clean.
+        attempts += 1;
+        if (attempts === 2) spy.mockRestore(); // nothing after the report needs the fault
+        const e = new Error(`EIO: i/o error, rename '${String(from)}'`) as NodeJS.ErrnoException;
+        e.code = "EIO";
+        throw e;
+      }
+      return realRename(from as string, to as string);
+    }) as typeof nodeFs.renameSync);
+    try {
+      expect(store.set(id, { vmName: "box-loud" }).vmName).toBe("box-loud"); // committed regardless
+    } catch (e) {
+      // withLock may surface a loud failure from an unrecoverable release rather
+      // than swallow it — either way the commit semantics are pinned below.
+      expect((e as Error).message).toMatch(/EIO|lock/);
+    } finally {
+      // T2-11's file-level guard is the backstop; land the local one too so a
+      // note assertion reads a clean buffer regardless of where set() threw.
+      process.stderr.write = origWrite;
+    }
+    expect(attempts).toBe(2); // the retry really ran before the report
+    // The wedge must be VISIBLE, not silent: the operator is told THIS process
+    // still holds the lock and later writes will time out until it is released.
+    expect(notes.join("")).toContain("could not release");
+    expect(notes.join("")).toContain("THIS process still holds it");
+  });
+
   test("an rm failure while retiring a PROVEN corpse does not abort the claim", () => {
     // stealIfOwnerGone's take-then-compare proved the taken bytes are the corpse
     // it judged; removing them is pure hygiene. A throwing rm there used to
@@ -1550,6 +1668,72 @@ describe("own-pid lock generations", () => {
     // The enclosing write released its own claim in the finally — no wedge.
     expect(existsSync(lock)).toBe(false);
   }, 20_000);
+
+  // R7 (round 11): an OWNERLESS body — empty, whitespace, or a non-numeric pid
+  // field, the artifact of an O_EXCL-era crash caught mid-write — names no pid,
+  // so `isAlive` has nothing to probe and NO sweep matches `.lock`. The young
+  // arm below pins the fail-closed side: an unprovable body inside the grace
+  // holds the full window, never stolen.
+  //
+  // R7's residual CLOSED (round-11 re-review): the aged ownerless corpse now
+  // falls through to the same take-then-compare reclamation a dead-pid corpse
+  // gets, instead of reporting "free" while the file still sat at the path —
+  // which spun every retry's claim into EEXIST and the wait into its own
+  // timeout, the very wedge the age bound was added to close.
+  test("an OWNERLESS lock body: YOUNG one fails closed; an AGED one is reclaimed fast", () => {
+    store.create("ownerless-run");
+    const lock = store.lockPath("ownerless-run");
+
+    // Young ownerless body ⇒ HELD: fails closed like any unprovable read, for
+    // the FULL window — not some shorter guess that invites the lost update.
+    writeFileSync(lock, "", { mode: 0o600 });
+    const startedYoung = Date.now();
+    expect(() => store.set("ownerless-run", { vmName: "box-young" })).toThrow(
+      /timed out waiting for the run record lock/,
+    );
+    expect(Date.now() - startedYoung).toBeGreaterThanOrEqual(LOCK_TIMEOUT_MS);
+    rmSync(lock, { force: true });
+
+    // Aged ownerless corpse (non-numeric pid field — same "names no pid" shape):
+    // acquired well inside the wait budget, with the stale lock file REMOVED —
+    // the steal consumed it rather than abandoning it for the operator.
+    store.create("ownerless-aged-run");
+    const lock2 = store.lockPath("ownerless-aged-run");
+    writeFileSync(lock2, "junk cafebabe\n", { mode: 0o600 });
+    utimesSync(lock2, new Date(Date.now() - WELL_PAST_LOCK_GRACE_MS), new Date(Date.now() - WELL_PAST_LOCK_GRACE_MS));
+    const startedAged = Date.now();
+    expect(store.set("ownerless-aged-run", { vmName: "box-aged" }).vmName).toBe("box-aged");
+    expect(Date.now() - startedAged).toBeLessThan(LOCK_TIMEOUT_MS / 2);
+    expect(existsSync(lock2)).toBe(false);
+    rmSync(lock2, { force: true });
+  }, 30_000);
+
+  // R4 (round 11): mtime is stamped from the wall clock, so an NTP step FORWARD
+  // makes a live sibling's fresh temp read as older-than-the-grace and gets it
+  // swept by cleanStaleTemps — the lost mutation the pid+age scheme exists to
+  // prevent. Only a MATERIAL future offset counts: sub-ms jitter between the
+  // write's clock domains is noise every fresh temp carries.
+  test("cleanStaleTemps NEVER sweeps a FUTURE-dated temp — clock steps do not reap in-flight writes", () => {
+    store.create("run-future-sweep");
+    const livePidTemp = join(dir, `run-future-sweep.json.${process.pid}.cafe1111.tmp`);
+    writeFileSync(livePidTemp, "{}", { mode: 0o600 });
+    // Two minutes into the future: far past OWN_TEMP_GRACE_MS, far past any
+    // jitter, inside what an NTP step actually does.
+    const future = new Date(Date.now() + 120_000);
+    utimesSync(livePidTemp, future, future);
+
+    new RunRecordStore({ dir }); // construction runs the sweep
+
+    expect(existsSync(livePidTemp)).toBe(true);
+    // Control: the SAME shape dated normally is swept once our own grace passes…
+    const agedTemp = join(dir, `run-future-sweep.json.${process.pid}.dead2222.tmp`);
+    writeFileSync(agedTemp, "{}", { mode: 0o600 });
+    const past = new Date(Date.now() - 130_000); // > OWN_TEMP_GRACE_MS (60s)
+    utimesSync(agedTemp, past, past);
+    new RunRecordStore({ dir });
+    expect(existsSync(agedTemp)).toBe(false);
+    rmSync(livePidTemp, { force: true });
+  });
 
   test("putBack losing to a competitor parks the taken body as a .orphan. sibling and says so", () => {
     // The EEXIST half of put-back used to DELETE the held-aside bytes — but

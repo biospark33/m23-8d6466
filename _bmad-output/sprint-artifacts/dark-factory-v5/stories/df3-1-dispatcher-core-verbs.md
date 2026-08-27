@@ -524,7 +524,7 @@ none would have been caught by patching the original findings.
 | Engine-side mandatory `limitMicroUsd` | Needs an engine change outside this story's FTM; the in-scope guard (assert the stamp landed) is applied |
 | `driver.list()` `AbortSignal` | Requires a DF2.x driver-interface change |
 | Cross-process dispatch serialization | Would defeat DF3.2's fan-out; `ADMISSION_GRACE_MS` closes the actual race |
-| AC2 run-id provenance | Now enforced at **compile** time via a branded `MintedRunId`; a runtime mint registry remains out of scope |
+| AC2 run-id provenance | Compile-time half landed here (`MintedRunId` brand); the runtime half was later closed by round 11's F17 — a process-local minted-id registry now refuses runtime-supplied shape-valid-but-unminted ids (see "Review round 11") |
 
 ### Verification
 
@@ -1868,9 +1868,109 @@ harvest bundle verified (fix-in-bundle true), teardown exit 0, box-hours priced
 
 ---
 
+## Review round 11 — BMAD adversarial code review, 2026-08-27
+
+Post-merge re-audit of PR #123's full diff **as it sits on current main** — after DF3.2
+(fan-out/best-of-n), DF4, DF5.1/5.2 landed on top, and after the TIER-2 live-fire e2e
+rounds. Goal: confirm the cornerstone still holds with every later layer stacked on it.
+
+**Method.** The merged PR's diff (32,543 lines, 63 files, reconstructed from merge commit
+`f1aa4db^1..f1aa4db^2`) was chunked 25 ways (≤2,056 diff lines per agent — the ceiling
+that survived round 5's context-burn). 31 review agents in three waves — 9 blind cynical
+reviewers (chunk only), 9 edge-case hunters (chunk + repo), 12 test-quality reviewers,
+plus an acceptance auditor working story-first — returned **130 findings across 10
+clusters**. Fixes were applied in two waves of parallel fixer agents on disjoint file
+clusters (source first, tests after), each with focal-tests-only validation, then one
+full-suite gate. Every finding was re-verified against current main before patching:
+**~15 were already fixed by post-merge work** (df3-2 single-flight admission, round-10
+status sanitization wave, orphan-guard `recordStructurallyAbsent`, slug column trim,
+fake-gate shape guards, run-lock realpath/clock-skew/dead-letter fixes) — dismissed with
+evidence, not patched blind.
+
+**Auditor verdict.** Every AC and DoD item present with evidence; no CRITICAL/HIGH
+spec-level gaps; the implementation is consistently stricter than the story text
+(fail-closed direction). Two soft spots closed this round: F17 runId provenance
+(runtime shape-valid but unminted ids now refused via a process-local minted-id
+registry; DF3.2's legitimate re-supply unaffected) and the F3 "mutates nothing"
+bootstrap residual (harvest/teardown now build a `create:false` probe store for the
+exit-4 lookup).
+
+**Headline source fixes** (branch `fix/df3-1-review-round-11`):
+
+- **Money paths fail-closed.** `pipeline-run.ts` deleted the stale-witness
+  warn-and-downgrade branch entirely — an undeclared manifest + stale witness now
+  REFUSES instead of spawning at the $0.50 harness default above the reserved ceiling;
+  unreadable (non-ENOENT) witness errors propagate as typed refusals instead of
+  "vanished". `cost-ledger.ts`: late box-hours ingest past the retirement cutoff emits
+  `box-hours-late-past-reservation-collision`; malformed issue ids are refused instead
+  of minting unnammable full-cap identities; ingest INSERTs carry the `ledger-busy`
+  taxonomy; digest conflicts with differing payloads warn visibly.
+- **Persistence torn-state closed structurally.** `run-record.ts` `create` now
+  publishes via temp-write → fsync → `link(2)` — a partially-written record at the
+  final path is impossible; the publish-link EEXIST carries the FINAL path so the race
+  loser classifies `run-id-in-use` (exit 2) not `provision-failed`; ownerless aged
+  lock corpses are reclaimed; failed releases retry instead of silently no-op'ing;
+  the temp sweep admit-lists only this module's grammar (run-lock claim temps on
+  shared directories are no longer reaped); future-dated mtimes never sweep.
+- **Destroy-path corroboration.** `reaper.ts`/`isReaperOwnedVm` requires tag AND
+  generated-name grammar (or a record in this store) before destroy — a co-tenant's
+  `qds-sbx`-tagged `ci-runner-2` is report-only now. `quota.ts` `checkHeadroom` reads
+  `listWithAnomalies` — skipped rows refuse headroom (`list-unverified`, transient)
+  instead of undercounting the population.
+- **CLI correctness.** `--brief` no longer false-refuses when stdin is a pipe/socket
+  (every programmatic caller); SIGHUP gets the full envelope treatment (exit 129);
+  interrupted harvest/teardown emit their CC-9 line before the re-raise; corrupt
+  records in harvest/teardown exit 5 `record-read-failed` (non-retryable) instead of
+  exit 1 "transient" forever-retry; permanent fs errnos classify exit 2; `fleet help
+  <garbage>` validates argv; stdin briefs time out at 120s instead of hanging.
+- **Locks.** Survived-signal rollback restores claims instead of leaving a lock-less
+  process mid-teardown; failed releases stay dirty and retryable; hostTag is
+  bijective (no folding collisions); dual module loads share one registry; the ledger
+  relocation migrates (never deletes) a legacy sibling ledger for non-default store
+  dirs instead of silently starting empty.
+
+**Cross-cluster regression caught by the test wave and fixed:** the link-publish
+redesign initially misclassified the genuine race loser (fs `path` pointed at the
+staging temp); `publishCreate` now retargets the EEXIST's `path` to the final record
+name — pinned by the real-store concurrent-dispatch test.
+
+**Test wave** (~40 strengthenings + ~25 new tests): pair-barrier seam replaces the
+wall-clock race pacing; the cross-verb flag sweep derives from `listVerbs()` (91
+probes); the excused-code tripwire requires a real exit assertion; registry-derived
+admitted-unreachability pin; abandoned-GATE test (the longest await finally covered);
+`within()`-loser and timer-audit arms fail loudly on unexpected success; driver-contract
+reap expectations are per-driver; 15/15 SECRET_PREFIXES rows; multi-file
+`skippedReasons` alignment; `keep`+URL redaction composition; runtime
+witness-anchor arm with a falsifiability probe; wrong-type brief field rows; boundary
+margins widened to kill the 360s±1s flake.
+
+**Deferred (named follow-ups, surfaced):** cross-process fleet-ceiling TOCTOU (needs
+quota-layer intent records — in-process half closed by DF3.2's single-flight);
+same-runId loser reservation retirement (ledger-side rule, callers forbidden from
+releasing); over-mint key above the admitted ceiling (evidence already derivable on
+disk from `limitMicroUsd` vs `extensions.budget`; refusing would break rounding
+providers); per-store-dir cap split (detection unreliable without issue identity);
+`reapRuns` fail-closed throw (story-pinned contract; zero production callers — the
+active reaper is `sandbox-reap.ts`'s `sweep()`); `list()` throw-on-skipped (the
+reaper's fail-closed population gate).
+
+**Gates:** full suite 3,686 pass / 3 fail after the final fix — the three were: two
+real regressions from this round's own checkHeadroom channel change (patterns.test.ts
+spied `list` while the gate now reads `listWithAnomalies`; both fixed — spy moved to
+the anomaly channel, `brokenListDriver` rejects both channels, 45/45 green) and one
+pre-existing environmental failure (`tests/gitnexus/graph-queries.test.ts`, a ZodError
+inside the gitnexus MCP client resolving `registerSwarmClawAgent` against the external
+swarmclaw index — no PR-123 file touches it). One additional intermittent load-flake
+timeout appeared in the first run and passed on re-run (the documented 20s-timeout
+class). biome clean repo-wide, `tsc --noEmit` clean, `detect_changes` blast radius
+confined to PR-123 modules (fleet, providers, run-lock, cost-ledger, pipeline-run,
+qds-cost).
+
+---
+
 ## Status
 
-**done — PR [#123](https://github.com/biospark33/QDS-Factory/pull/123) merged 2026-08-23 (`f1aa4db`), after nine BMAD adversarial review rounds.**
+**done — PR [#123](https://github.com/biospark33/QDS-Factory/pull/123) merged 2026-08-23 (`f1aa4db`), after nine BMAD adversarial review rounds; review round 11 (post-merge re-audit vs current main, 130 findings) landed on `fix/df3-1-review-round-11`.**
 
 Review round 10 (55 findings across the dispatcher, the CLI and the money paths) was run against
 the already-merged diff and landed separately as PR
@@ -1884,6 +1984,9 @@ This story file carried no Status section at all until the 2026-08-26 artifact a
 21/31 tallies recorded in that file's header were computed without DF3.1's 5 points. Corrected
 tally: 22/31 stories, 89/123 pts.
 
-Declared deviation still standing: AC2 runtime provenance is shape-only (brand = the compile-time
-half; a mint registry was rejected as an out-of-scope subsystem, and the collision guards reduce
-the exposure to squatting a free id).
+Formerly-declared deviation CLOSED by round 11 (F17): AC2 runtime provenance is no longer
+shape-only. The compile-time `MintedRunId` brand is unchanged, and a process-local minted-id
+registry (`dispatch.ts`'s `mintedRunIds`, fed by `mintRunId`) now refuses runtime-supplied ids
+that are shape-valid but unminted — DF3.2's legitimate re-supply path (a previously minted id
+re-accepted within the registry's window) is unaffected. The round-10 "Gates" note above records
+the pre-F17 state and is superseded by this.

@@ -17,6 +17,7 @@
 import { rmSync } from "node:fs";
 import type { RunRecord, RunRecordStore } from "./run-record.ts";
 import { assertExistingRunId, assertValidRunId, LEGACY_RUN_ID_RE } from "./run-record.ts";
+import { log, newRequestId } from "../swarmclaw/log.ts";
 import { redactSecrets } from "./step-log.ts";
 import { checkHeadroom, HeadroomRefusedError, loadQuotaLimits } from "./quota.ts";
 import { TimeoutError, withTimeout } from "./timeout.ts";
@@ -409,8 +410,22 @@ async function provisionStep<T>(
  * tests/providers/run-record.test.ts can hold BOTH halves — this predicate
  * and the real throw site — against drift.
  */
+/**
+ * The exact message prefix `withLock` (run-record.ts) throws on a lock timeout.
+ *
+ * Single-shared-const rather than a copy hardcoded inside the predicate below:
+ * the string is load-bearing in both directions (matching it authorizes the
+ * DESTRUCTIVE budget-write rollback; a reworded throw site silently reroutes a
+ * concurrent-writer failure onto `rmSync`), and a const gives run-record.ts's
+ * owner one symbol to import the day that module types the refusal (until then
+ * the reverse edge stays cut — run-record.ts is the lower module and must not
+ * import driver.ts). Drift is also pinned in BOTH directions by the FB9
+ * two-sided test in tests/providers/run-record.test.ts.
+ */
+export const RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX = "timed out waiting for the run record lock:";
+
 export function isRecordLockTimeout(e: unknown): boolean {
-  return e instanceof Error && e.message.startsWith("timed out waiting for the run record lock:");
+  return e instanceof Error && e.message.startsWith(RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX);
 }
 
 /**
@@ -556,13 +571,42 @@ export async function provisionAdmittedRun(
       }
       try {
         rmSync(store.path(opts.runId), { force: true });
-      } catch {
+      } catch (rmError) {
         // `force` swallows ENOENT only; an EACCES/EIO removal failure must not
-        // REPLACE the write failure the caller has to see and act on. The
-        // record then survives budgetless — the state this catch exists to
-        // avoid — but naming the wrong cause helps nobody diagnose it.
+        // REPLACE the write failure the caller has to see and act on — but a
+        // zero-signal catch left the record surviving OPEN and BUDGETLESS (the
+        // exact unrecoverable state this rollback exists to prevent) with no
+        // line anywhere saying so. Log it structured, then classify the
+        // rethrow: the caller keeps the ORIGINAL cause (it is what the operator
+        // must fix first), and the payload tells them the removal did not land.
+        const detail =
+          rmError instanceof Error ? rmError.message : String(rmError);
+        log({
+          requestId: newRequestId(),
+          operation: "providers.budget-write-rollback-failed",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: 0,
+          status: "error",
+          runId: opts.runId,
+          driver: driver.name,
+          error: { code: "budget-rollback-failed", message: detail },
+        });
+        throw new ProvisionRefusedError(
+          "budget-write-failed",
+          `the budget attribution for run ${opts.runId} could not be written (${e instanceof Error ? e.message : String(e)}) and the compensating record removal ALSO failed (${detail}) — the record is OPEN and BUDGETLESS and will be resolved by every reader`,
+          `remove the record by hand once no writer holds its lock (its lock file names the pid), so ${opts.budget.repoSlug}#${opts.budget.issueId}'s reservation stops counting against its cap: rm ${store.path(opts.runId)} — then retry the dispatch`,
+        );
       }
-      throw e;
+      // Rollback LANDED: the record is gone, the id remintable. Classify the
+      // rethrow like every other refusal in this sequence — a bare fs Error
+      // here reached dispatch as unclassified exit-1 "provisioning failed".
+      const detail = e instanceof Error ? e.message : String(e);
+      throw new ProvisionRefusedError(
+        "budget-write-failed",
+        `the budget attribution for run ${opts.runId} could not be written (${detail}) — the record was removed (this run never happened); nothing is billing`,
+        "retry the dispatch once the cause above is fixed",
+      );
     }
   }
   // D1: every factory-provisioned VM carries the canonical ownership tag —
@@ -599,6 +643,18 @@ export async function provisionAdmittedRun(
   // to it — `teardownRun` falls back to the run id, which is what the box is
   // named after.
   const actionTimeoutMs = opts.actionTimeoutMs ?? PROVISION_ACTION_TIMEOUT_MS;
+  // Same trust boundary as the exedev constructor's `execTimeoutMs` and the
+  // gate's assert/gate timeouts: `0`, a negative or a NaN budget make
+  // `withTimeout` fire ~immediately, so EVERY provider call below "times out"
+  // at 0 ms wearing the full misleading provider-timeout remediation — an
+  // operator sent hunting for a substrate outage that is a caller bug.
+  if (!Number.isFinite(actionTimeoutMs) || actionTimeoutMs < 1) {
+    throw new ProvisionRefusedError(
+      "action-timeout-invalid",
+      `actionTimeoutMs ${JSON.stringify(actionTimeoutMs)} is not a finite number >= 1 ms`,
+      "pass a positive millisecond ceiling, or omit actionTimeoutMs for the default",
+    );
+  }
   const vm: ProviderVm = await provisionStep(
     driver.create(opts.runId, SBX_OWNERSHIP_TAG),
     actionTimeoutMs,
@@ -1011,6 +1067,13 @@ export function neverPublicDriver(driver: ProviderDriver, vizPort: number): Prov
     name: driver.name,
     create: driver.create.bind(driver),
     list: driver.list.bind(driver),
+    // Forwarded bound-method-style like its siblings (prototype methods do not
+    // survive a spread): an omitted channel makes every `driverListing` call on
+    // a wrapped driver take the no-anomaly fallback arm, refusing sweeps that
+    // the underlying driver could have proven complete.
+    ...(driver.listWithAnomalies === undefined
+      ? {}
+      : { listWithAnomalies: driver.listWithAnomalies.bind(driver) }),
     destroy: driver.destroy.bind(driver),
     expose: (vm: string, port: number) => (port === vizPort ? assertNeverPublic(port) : driver.expose(vm, port)),
     setPublic: () => assertNeverPublic(vizPort),
@@ -1191,14 +1254,30 @@ export async function teardownRun(
 }
 
 /**
+ * Per-destroy budget — generous over the 60s provisioning budget: exedev's own
+ * destroy retries rm once. Module-level and injectable through `reapRuns`'s
+ * third parameter so a test can observe the ABANDON path without waiting out
+ * the production ceiling.
+ */
+const REAP_DESTROY_TIMEOUT_MS = 120_000;
+
+/**
  * Lifecycle verb `reap` — destroy every box the substrate reports that no OPEN
  * record claims. A box belonging to a closed record is an orphan by definition:
  * teardown destroys before it closes, so a closed record plus a live box means
  * the destroy never landed.
  *
- * Returns the names destroyed.
+ * Returns the names destroyed. On a mid-sweep failure the error carries
+ * `destroyed` (everything torn down before the throw) and `remaining`
+ * (unclaimed provably-owned boxes NOT confirmed destroyed — the failed one,
+ * if any, plus everything listed after it) as properties: losing either half
+ * understates what the sweep did and leaves retry targets unnamed.
  */
-export async function reapRuns(driver: ProviderDriver, store: RunRecordStore): Promise<string[]> {
+export async function reapRuns(
+  driver: ProviderDriver,
+  store: RunRecordStore,
+  destroyTimeoutMs: number = REAP_DESTROY_TIMEOUT_MS,
+): Promise<string[]> {
   // Claim by BOTH runId and vmName. `createRun` names the box after the run id,
   // so between `driver.create()` and the `set({vmName})` that follows it there is
   // a window where an open record has a live box and no vmName — claiming by
@@ -1270,13 +1349,48 @@ export async function reapRuns(driver: ProviderDriver, store: RunRecordStore): P
   const unproven = vms.filter((vm) => !claimed.has(vm.name) && !isFactoryOwnedVm(vm));
   if (unproven.length > 0) throw unownedVmReapRefusal(driver.name, unproven.map((vm) => vm.name));
   const destroyed: string[] = [];
-  for (const vm of vms) {
-    if (claimed.has(vm.name)) continue;
-    // Everything unproven was refused above, so anything still standing here
-    // proves ownership by the shared predicate.
-    if (!isFactoryOwnedVm(vm)) continue;
-    await driver.destroy(vm.name);
-    destroyed.push(vm.name);
+  // The eligible set is snapshotted BEFORE the first destroy so a mid-sweep
+  // failure can name every retry target exactly as the contract above
+  // promises: the failed box plus every eligible box still unprocessed after
+  // it. The per-iteration claimed/ownership re-checks the loop used to carry
+  // watched this same static array, so the filter is the identical predicate —
+  // everything unproven was already refused above, and claimed boxes are
+  // excluded here.
+  const eligible = vms.filter((vm) => !claimed.has(vm.name) && isFactoryOwnedVm(vm)).map((vm) => vm.name);
+  for (let i = 0; i < eligible.length; i++) {
+    const name = eligible[i] as string;
+    try {
+      // Same bare-await hazard provisionStep bounds on every create-path call:
+      // a driver whose destroy never settles hangs the sweep past every
+      // deadline. Typed refusal with the partial report attached (below), like
+      // any other mid-sweep failure.
+      await withTimeout(driver.destroy(name), destroyTimeoutMs, `driver.destroy(${name})`);
+    } catch (e) {
+      // A COPY of the tail, not a live view: the TimeoutError path attaches
+      // the array directly, and `eligible` is reused by later iterations of a
+      // caller that retries — the enriched path copies, so this one does too.
+      const remaining = [...eligible.slice(i)];
+      if (e instanceof TimeoutError) {
+        const fail = new ProvisionRefusedError(
+          "reap-destroy-timeout",
+          `destroying ${name} did not settle within ${destroyTimeoutMs}ms — the call was ABANDONED, not cancelled: the provider may still have acted on it`,
+          `check the provider for ${name} by hand, then re-run the sweep (destroy is idempotent)`,
+        );
+        throw Object.assign(fail, { destroyed: [...destroyed], remaining });
+      }
+      throw e instanceof Error ? enriched(e, destroyed, remaining) : enriched(new Error(String(e)), destroyed, remaining);
+    }
+    destroyed.push(name);
   }
   return destroyed;
+}
+
+/**
+ * Attach the partial sweep report to a mid-sweep error without reshaping it:
+ * drivers' OWN typed refusals (`ExeDevDriverError`) pass through carrying their
+ * `code`/`remediation` intact, plus `destroyed`/`remaining` as properties for
+ * callers that want to report what the sweep got through before failing.
+ */
+function enriched(e: Error, destroyed: readonly string[], remaining: readonly string[]): Error {
+  return Object.assign(e, { destroyed: [...destroyed], remaining: [...remaining] });
 }

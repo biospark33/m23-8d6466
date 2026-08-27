@@ -242,8 +242,10 @@ export const RUN_ID_MAX = 63;
  * The grammar a run id ALREADY ON DISK may carry — the pre-tightening rule,
  * which anchored only the leading character.
  *
- * `create()` takes a caller-supplied id, so `trailing-` records exist by
- * construction from any earlier build. Applying the strict grammar on the READ
+ * `create()` accepts a caller-supplied id (the store API does not force
+ * `newId`; `scripts/run-record.ts create <id>` passes argv straight through),
+ * so `trailing-` records exist by construction from any earlier build. Applying
+ * the strict grammar on the READ
  * paths made those records unreadable, unclosable and un-teardown-able: the box
  * keeps billing with no route to reclaim it, and `list()` — `fleet status`, the
  * DF2.6 reaper's record sweep — threw for the whole directory over one
@@ -288,6 +290,16 @@ const LOCK_IMMEDIATE_RETRIES = 8;
 const OWN_TEMP_GRACE_MS = 60_000;
 
 /**
+ * How far into the FUTURE a temp's mtime may sit before the sweep calls it
+ * clock disagreement rather than write-time jitter. `mtimeMs` is sub-millisecond,
+ * `Date.now()` is not, so a just-written file legitimately reads ~−1ms; an NTP
+ * step forward — the case this bound exists for — moves a clock by whole
+ * seconds. Anything whose age reads below minus-tolerance is unprovable from
+ * here and never swept.
+ */
+const FUTURE_MTIME_TOLERANCE_MS = 2_000;
+
+/**
  * How long a lock stamped with OUR OWN pid but carrying a foreign body must sit
  * untouched before `stealIfOwnerGone` treats it as a dead sibling's leftover
  * instead of a sibling thread's live claim.
@@ -315,6 +327,40 @@ const OWN_LOCK_GRACE_MS = 60_000;
 const CREATE_TOMBSTONE_GRACE_MS = 5_000;
 
 /**
+ * How long a `.orphan.` file (a held-aside lock body or restored tombstone
+ * window that `parkAside` moved out of the sweep's reach as EVIDENCE) must sit
+ * before the sweep reaps it.
+ *
+ * These bytes exist because some window could not be proven disposable, and
+ * `lock.not-restored` told an operator where they are. Unbounded accumulation
+ * is the alternative — repeated `putBack` failures in an ENOSPC loop park one
+ * per failure — so they age out on a LONG grace instead of living forever:
+ * 24h of wall time is ample for an operator to inspect and restore, and past
+ * it the evidence is worth less than the disk. ponytail: wall-clock age only;
+ * lease renewal if orphan volume ever matters.
+ */
+const ORPHAN_GRACE_MS = 86_400_000;
+
+/**
+ * The STRICT grammar of a temp file this module itself creates. See
+ * `cleanStaleTemps` for why the sweep admit-lists this shape instead of
+ * sweeping every `.tmp` it finds.
+ *
+ * Three spellings, sharing one tail — `<id>.json[.lock|.tomb].<pid>.<8hex>.tmp`:
+ * the record temp (`atomicReplace`), the lock claim/steal temp
+ * (`claimLock`/`stealIfOwnerGone`/`releaseLock`), and the tombstone-removal
+ * temp (`clearCreateTombstone`). The `.json` segment is the discriminator: the
+ * run-lock module (`scripts/lib/run-lock.ts`) writes ITS claim temps into this
+ * same directory as `<id>.lock.<hostTag>.<pid>.<hex>.tmp` — no `.json` — and
+ * its host tag folds arbitrarily characters in, so parsing a pid out of an
+ * arbitrary `.tmp` name lands on ANOTHER CONTRACT'S in-flight claim. That was
+ * a deletion of a remote invocation's live claim temp (its `linkSync` then
+ * died on ENOENT, classified nowhere). Host-blind deletions require an exact
+ * home-grammar match; anything else is never ours to reap.
+ */
+const RUN_RECORD_TEMP_RE = /^[a-z0-9][a-z0-9-]*\.json(?:\.(?:lock|tomb))?\.[0-9]+\.[0-9a-f]{8}\.tmp$/;
+
+/**
  * Lock paths this JS thread is currently inside.
  *
  * Module state, so it is per-THREAD by construction — a `node:worker_threads` /
@@ -326,9 +372,25 @@ const CREATE_TOMBSTONE_GRACE_MS = 5_000;
  */
 const heldLocks = new Set<string>();
 
+/**
+ * The typed verdict both run-id asserts throw. A dedicated subclass, not a
+ * message prefix: `assertFleetRunId` (src/fleet/dispatch.ts) has to separate
+ * "the operator's id failed the shape check" (exit 2) from a bug inside the
+ * check itself (exit 1), and matching `"invalid run id:"` text breaks the
+ * moment the message is reworded — or misclassifies any other error that
+ * happens to start with those bytes. `instanceof Error` still holds, so every
+ * consumer that only cares that it IS an error is unchanged.
+ */
+export class InvalidRunIdError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidRunIdError";
+  }
+}
+
 export function assertValidRunId(id: unknown): asserts id is string {
   if (typeof id !== "string" || id.length === 0 || id.length > RUN_ID_MAX || !RUN_ID_RE.test(id)) {
-    throw new Error(
+    throw new InvalidRunIdError(
       `invalid run id: ${JSON.stringify(id)} (must match ${RUN_ID_RE.source} and be <= ${RUN_ID_MAX} chars)`,
     );
   }
@@ -337,7 +399,7 @@ export function assertValidRunId(id: unknown): asserts id is string {
 /** The read/write-path admission rule: `assertValidRunId` plus the legacy tail. */
 export function assertExistingRunId(id: unknown): asserts id is string {
   if (typeof id !== "string" || id.length === 0 || id.length > RUN_ID_MAX || !LEGACY_RUN_ID_RE.test(id)) {
-    throw new Error(
+    throw new InvalidRunIdError(
       `invalid run id: ${JSON.stringify(id)} (must match ${LEGACY_RUN_ID_RE.source} and be <= ${RUN_ID_MAX} chars)`,
     );
   }
@@ -474,7 +536,20 @@ function assertNoSecret(key: string, value: unknown): void {
       throw new Error(`refusing to write key material into the run record: ${key}`);
     }
   }
-  if (SHAPE_EXEMPT_PATHS.has(key)) return;
+  if (SHAPE_EXEMPT_PATHS.has(key)) {
+    // The exemption stops the HEURISTIC, not validation: these paths are
+    // exempt precisely because their grammar is pinned elsewhere
+    // (`REPO_SLUG_PATTERN`'s two `[A-Za-z0-9._-]{1,100}` segments,
+    // issue-correlation's MAX_ISSUE_ID), and an exemption with no ceiling is a
+    // persist-forever door — a >40-char mixed-class blob pasted into `repoSlug`
+    // passes the slug grammar and skips the one test that could catch it. The
+    // length half of that grammar is mirrored here as the write-time backstop;
+    // the upstream schema remains the authority, and if it ever tightens the
+    // mirror is deliberately the LOOSER bound, so this never rejects a value
+    // the owning schema accepts.
+    if (v.length > 201) throw new Error(`value exceeds the field's grammar bound: ${key}`);
+    return;
+  }
   // A URL is a long punctuated token by nature and `httpsUrl`/`prUrl` are
   // first-class fields here, so the shape test does not apply to one.
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) return;
@@ -672,6 +747,16 @@ export const DEFAULT_RUNS_DIR = ".sandbox/runs";
  * The records directory a store WOULD use, as a plain string. The constructor
  * resolves through this, so there is one copy of the chain.
  *
+ * An EMPTY `QDS_RUNS_DIR` is treated as unset, not as a path: `""` is not
+ * nullish, so it used to beat DEFAULT_RUNS_DIR and resolve records (and,
+ * through costLedgerOpts, both money files) to cwd and cwd's PARENT — an
+ * exported-unset variable (`export QDS_RUNS_DIR=$UNSET`) silently moved the
+ * ledger out of `.sandbox/`. Same doctrine scripts/lib/cost-ledger-opts.ts's
+ * `envPath` applies to the two override vars; folding happens here, at the ONE
+ * place every caller routes through, rather than per call site. (Whitespace is
+ * left alone here — unlike an env override path, this value also carries
+ * explicit CLI roots whose spaces are legal.)
+ *
  * Exported because the CLI needs the resolved path for a directory that may not
  * exist yet — that is the whole case it needs it for, since the read verbs
  * refuse a nonexistent `--dir` rather than creating it. A `create: false` store
@@ -681,7 +766,10 @@ export const DEFAULT_RUNS_DIR = ".sandbox/runs";
  * set — the two stores then disagree about which runs exist.
  */
 export function resolveRunsDir(dir?: string): string {
-  return dir ?? process.env.QDS_RUNS_DIR ?? DEFAULT_RUNS_DIR;
+  if (dir !== undefined) return dir;
+  const env = process.env.QDS_RUNS_DIR?.trim();
+  if (env !== undefined && env !== "") return env;
+  return DEFAULT_RUNS_DIR;
 }
 
 /** What a directory sweep read, and what it refused to read (see `listWithAnomalies`). */
@@ -802,8 +890,9 @@ export class RunRecordStore {
     // concurrently-constructing store's probe file.
     const probe = join(this.dir, `.probe-${process.pid}-${randomBytes(4).toString("hex")}`);
     const probeLink = `${probe}-link`;
+    let probeFd = -1;
     try {
-      closeSync(openSync(probe, "wx", 0o600));
+      probeFd = openSync(probe, "wx", 0o600);
       const mode = statSync(probe).mode & 0o777;
       if (mode !== 0o600) {
         throw new Error(`file mode 0600 not honoured (got 0${mode.toString(8)})`);
@@ -822,9 +911,38 @@ export class RunRecordStore {
           `hard links are not supported here (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); the record lock needs link(2)`,
         );
       }
+      // fsync is probed for the same reason link is: `create` fsyncs the record
+      // before publishing it (INV-1's durable-handle guarantee), and on a
+      // filesystem that refuses fsync on a regular file (some FUSE/network
+      // mounts return EINVAL) the store used to construct cleanly and then die
+      // mid-lifecycle — after the box existed — with a bare errno. Same
+      // fail-closed doctrine: refuse at startup, name the primitive, never
+      // degrade. If such a platform ever needs support, the answer is an
+      // explicit opt-out, not a silent skip.
+      //
+      // Probed through the SAME exclusive-writable fd the record write path
+      // holds (`openSync(p, "wx", 0o600)` then fsync): the fd is held from
+      // creation above rather than re-opened read-only, so what is proven is
+      // the fsync the writer actually performs — not a weaker variant that
+      // happens to succeed on mounts the write path would still refuse.
+      try {
+        fsyncSync(probeFd);
+      } catch (e) {
+        throw new Error(
+          `fsync is not supported here (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); the record write needs fsync(2)`,
+        );
+      }
     } catch (e) {
       throw new Error(`run record store cannot start in ${this.dir}: ${(e as Error).message}`);
     } finally {
+      // Guarded — this function's own contract is to leave no surprises.
+      if (probeFd !== -1) {
+        try {
+          closeSync(probeFd);
+        } catch {
+          // best effort; the rm below is what matters
+        }
+      }
       rmSync(probe, { force: true });
       rmSync(probeLink, { force: true });
     }
@@ -847,16 +965,45 @@ export class RunRecordStore {
    */
   private cleanStaleTemps(): void {
     for (const name of readdirSync(this.dir)) {
-      // `<runId>.json[.lock].<pid>.<hex>.tmp` and `.probe-<pid>-<hex>` — the
-      // shapes an unclean death leaves behind, each carrying its owner's pid.
-      // A lock taken aside mid-steal or mid-release rides the same sweep — it
-      // is pid-stamped like the rest — which is what keeps a death between the
-      // `rename` and the `rm` from stranding a lock generation.
-      const isTemp = name.endsWith(".tmp");
-      const isProbe = name.startsWith(".probe-");
-      if (!isTemp && !isProbe) continue;
+      // `.probe-<pid>-<hex>` — this module's probe file, always ours to judge.
+      if (name.startsWith(".probe-")) {
+        const full = join(this.dir, name);
+        const owner = Number(name.split("-")[1]);
+        // Same `owner > 0` rule as below: an unparsable probe carries no proof,
+        // and kill(0,0)-style owners would read as permanently alive.
+        if (Number.isInteger(owner) && owner > 0 && (owner === process.pid || isAlive(owner))) continue;
+        rmQuiet(full);
+        continue;
+      }
+      if (!name.endsWith(".tmp") && !name.includes(".orphan.")) continue;
       const full = join(this.dir, name);
-      const owner = Number(isTemp ? name.split(".").at(-3) : name.split("-")[1]);
+      // `.orphan.` files are EVIDENCE (`parkAside`), moved out of every other
+      // sweep's reach precisely so an operator could restore them. Unbounded is
+      // not an option either, so they age out on ORPHAN_GRACE_MS — judged BEFORE
+      // the home-grammar test below, since an orphan name carries no `.tmp`
+      // tail by design. Being operator-addressable evidence rather than
+      // in-flight state, their age is not clamped against clock steps either
+      // (a stepped-forward clock merely reaps them sooner than 24h).
+      if (name.includes(".orphan.")) {
+        if (!olderThan(full, ORPHAN_GRACE_MS)) continue;
+        rmQuiet(full);
+        noteOnStderr(`run-record: reaped a long-unrestored held-aside body ${name}\n`);
+        continue;
+      }
+      // ADMIT-LIST, not deny-list. A `.tmp` in THIS directory may belong to another
+      // contract entirely: scripts/lib/run-lock.ts writes ITS invocation-lock claim
+      // temps here as `<runId>.lock.<hostTag>.<pid>.<hex>.tmp` (and `.rescue`
+      // files on release), with a host tag folding arbitrary characters in. This
+      // module has no host identity, so a host-blind parse of such a name lands on
+      // ANOTHER CONTRACT'S in-flight claim — deleting it made the remote writer's
+      // next linkSync die on ENOENT, an errno nothing classified. So deletion is
+      // reserved for names matching run-record's OWN grammar exactly; anything else
+      // stays on disk (its own module reaps it — run-lock's reapStaleTemps matches
+      // its shape WITH a host check).
+      if (!RUN_RECORD_TEMP_RE.test(name)) continue;
+      // Third-from-last segment for BOTH grammar tails above: `…json.<pid>.<hex>.tmp`
+      // and `…json.lock.<pid>.<hex>.tmp` — `.tmp` is last, hex second-to-last.
+      const owner = Number(name.split(".").at(-3));
       // `owner > 0`, not just `Number.isInteger`: `process.kill(0, 0)` signals the
       // caller's own process group and succeeds, so an owner that parsed as `0`
       // would read as permanently alive and the temp would never be swept.
@@ -879,11 +1026,28 @@ export class RunRecordStore {
       // lifetime. OWN_TEMP_GRACE_MS is the bound: both live windows above are
       // a write-and-rename wide (microseconds), so a same-pid temp untouched
       // for a full minute is leftover, not in flight.
+      //
+      // The FUTURE-mtime guard is the wall-clock half of that judgement: mtime
+      // is stamped from the wall clock, so an NTP step FORWARD makes a live
+      // sibling's fresh temp read as older-than-the-grace and gets it swept —
+      // the lost mutation the pid+age scheme exists to prevent. Only a MATERIAL
+      // negative age counts: `mtimeMs` carries sub-millisecond precision while
+      // `Date.now()` is whole milliseconds, so a temp written this instant reads
+      // ≈ −1ms — jitter, not skew. FUTURE_MTIME_TOLERANCE_MS bounds what is
+      /// treated as clock disagreement; anything inside it ages normally.
       if (Number.isInteger(owner) && owner > 0) {
-        const live = owner === process.pid ? !olderThan(full, OWN_TEMP_GRACE_MS) : isAlive(owner);
+        let st: { mtimeMs: number };
+        try {
+          st = statSync(full);
+        } catch {
+          continue;
+        }
+        const ageMs = Date.now() - st.mtimeMs;
+        if (ageMs < -FUTURE_MTIME_TOLERANCE_MS) continue; // future-dated ⇒ skew ⇒ never sweep
+        const live = owner === process.pid ? ageMs < OWN_TEMP_GRACE_MS : isAlive(owner);
         if (live) continue;
       }
-      rmSync(full, { force: true });
+      rmQuiet(full);
     }
   }
 
@@ -927,33 +1091,18 @@ export class RunRecordStore {
     assertValidRunId(runId);
     const p = this.path(runId);
     const rec: RunRecord = { runId, createdAt: now.toISOString() };
-    let fd: number;
     try {
-      fd = openSync(p, "wx", 0o600);
+      this.publishCreate(p, rec);
     } catch (e) {
       // A tombstone is not a record, and it must not make the id permanently
       // uncreatable — see `clearCreateTombstone`. One retry only: a second
-      // EEXIST means a real record (or another writer's fresh create) is at the
-      // path, and INV-3's no-overwrite is absolute for those.
+      // EEXIST means a real record (or another writer's freshly published
+      // create) is at the path, and INV-3's no-overwrite is absolute for those.
       if ((e as NodeJS.ErrnoException).code !== "EEXIST" || !clearCreateTombstone(p)) throw e;
-      fd = openSync(p, "wx", 0o600);
+      this.publishCreate(p, rec);
     }
-    try {
-      // writeFileSync loops until the whole buffer lands; a bare writeSync can
-      // short-write and leave a truncated record reported as a success.
-      writeFileSync(fd, serialize(rec));
-      // INV-1's whole point is that this record reaches disk BEFORE any
-      // billable infrastructure exists. Unsynced, a power loss here loses the
-      // handle while the provider-side box survives — an orphan nobody reaps.
-      fsyncSync(fd);
-    } catch (e) {
-      closeSync(fd);
-      rmSync(p, { force: true });
-      throw e;
-    }
-    closeSync(fd);
-    // …and the DIRECTORY ENTRY, which the fsync above does not persist. This is
-    // the one place the record has no prior version to fall back to: unlike
+    // …and the DIRECTORY ENTRY, which makes the new link durable. This is the
+    // one place the record has no prior version to fall back to: unlike
     // `atomicReplace`, where a lost rename reverts to the previous complete
     // record, a lost create leaves NO handle at all while the provider-side box
     // survives — precisely the orphan the comment above claims to prevent. Best
@@ -961,6 +1110,92 @@ export class RunRecordStore {
     // directory must not fail the create.
     fsyncDir(this.dir);
     return rec;
+  }
+
+  /**
+   * One exclusive-create attempt: write the record to a pid-stamped temp,
+   * fsync it, and PUBLISH it at the final path with `link(2)`.
+   *
+   * The old shape wrote straight into the final path through an O_EXCL fd, and
+   * that had two failure modes no amount of caller discipline could close:
+   *
+   *  - A kill or power loss MID-WRITE left a torn, non-zero `<runId>.json` —
+   *    permanently unparseable (bricking `list()` for the directory) and
+   *    permanently EEXIST (an id nothing could ever reclaim).
+   *  - Two creators raced the open-then-write window itself: a creator stalled
+   *    between its O_EXCL open and its write watched another dispatcher's
+   *    tombstone recovery take its zero-byte file aside and win, then resumed
+   *    writing through its still-open fd into what was now a foreign record —
+   *    two dispatchers each believing they owned the id, one minting keys
+   *    against a box the record could no longer name.
+   *
+   * Publishing with `link` closes both at once, the same way `claimLock`
+   * claims a lock: the path appears COMPLETE or not at all — kernel-arbitrated,
+   * single-winner, no in-between byte state observable at the final name. The
+   * stalled creator above now loses the LINK instead of corrupting the record:
+   * its EEXIST is definitive (the winner's bytes are whole at the path), so
+   * ownership is granted exactly once by construction rather than reconstructed
+   * afterwards with read-backs. Any torn state lives at the temp, which is
+   * swept at the next construction; the final path only ever holds a record
+   * whose bytes were fully written AND fsynced before they got their name.
+   */
+  private publishCreate(p: string, rec: RunRecord): void {
+    const tmp = `${p}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+    // An EEXIST at this open is a TEMP-name collision — a 4-byte nonce landing
+    // on a temp left by a crashed process that had our pid (the same reasoning
+    // `claimLock` applies). Letting it propagate is the contention signal: the
+    // create arm treats any throw as "this attempt failed"; the publish link
+    // never ran, so the final path was not touched either way.
+    const fd = openSync(tmp, "wx", 0o600);
+    let fdOpen = true;
+    // Set only once the fd is closed and the publish link is the next syscall:
+    // distinguishes "the final name is taken" (link EEXIST, path retargeted
+    // below) from "our private temp collided" (open EEXIST, path left alone).
+    let reachedLink = false;
+    try {
+      // writeFileSync loops until the whole buffer lands; a bare writeSync can
+      // short-write and leave a truncated record reported as a success.
+      writeFileSync(fd, serialize(rec));
+      // Sync BEFORE the link: whatever lands at the final path must already be
+      // durable bytes, or the durability guarantee INV-1 sells is written in
+      // the wrong order.
+      fsyncSync(fd);
+      // Cleared BEFORE the call — see claimLock: a throwing close still
+      // consumes the descriptor, so the catch must not close it again.
+      fdOpen = false;
+      closeSync(fd);
+      // Deliberately NOT the `beforeRename` seam: that hook is the set()-path's
+      // fault injector ("must leave the PRIOR record byte-identical", AC2) — a
+      // create has no prior record, and consumers keyed their fixtures to its
+      // firing mid-update only. Firing it here would run their callbacks while
+      // no lock yet exists, with different filesystem facts than they modelled.
+      reachedLink = true;
+      linkSync(tmp, p);
+    } catch (e) {
+      // Guarded, not try/catch'd: fd numbers are recycled, and the fault-injection
+      // seam may have opened something else by the time we land here.
+      if (fdOpen) closeSync(fd);
+      // Quiet, same doctrine as every lock cleanup: this temp is inert litter
+      // (grammar-matched and pid-stamped, so the construction sweep takes it),
+      // and a throwing rm here would replace the REAL error — the EEXIST that
+      // says another creator won, or the link errno that names the platform.
+      rmQuiet(tmp);
+      // An EEXIST from the PUBLISH LINK means the final name is taken — the
+      // race loser's signal. The fs error carries the staging temp in `path`
+      // (link(2) reporting the source), but every downstream classifier
+      // (dispatch's run-id-in-use arm) compares against the RECORD file.
+      // Retarget `path` to the final name so the loser is classified
+      // run-id-in-use, not provision-failed. An EEXIST from the temp `open`
+      // above (nonce collision) keeps its own path: that arm treats any throw
+      // as "attempt failed" with no path semantics.
+      if (reachedLink && (e as NodeJS.ErrnoException).code === "EEXIST") {
+        (e as NodeJS.ErrnoException).path = p;
+      }
+      throw e;
+    }
+    // The link is the commit point. The second link is hygiene now, not the
+    // body — unlinking it cannot lose bytes.
+    rmQuiet(tmp);
   }
 
   get(runId: string): RunRecord {
@@ -1326,24 +1561,42 @@ export class RunRecordStore {
     }
     const owner = Number(raw.trim().split(/\s+/)[0]);
     // See cleanStaleTemps: an owner that parsed as `0` must not read as alive.
-    // Unparseable, empty or non-positive ⇒ held, wait — never stolen.
-    if (!Number.isInteger(owner) || owner <= 0) return "lock body names no pid";
-    // Our pid, not our body, and THIS thread already holds the path: the
-    // caller is waiting on itself — a re-entrant `set()` from the
-    // `beforeRename` seam. Fail-closed is still right (there is no safe way
-    // to hand a live holder its own lock), but reporting it as a sibling
-    // writer sent an operator looking for a second process that never
-    // existed. Checked BEFORE the age bound below so a long-running enclosing
-    // write cannot age past the grace and let the re-entrant call steal its
-    // own outer claim. A sibling thread sharing our pid is NOT in this set.
-    if (owner === process.pid && heldLocks.has(lock)) {
-      return "re-entrant record write: this thread already holds this lock";
+    // Unparseable, empty or non-positive names NO owner, and inside the grace
+    // that means WAIT — an O_EXCL-era lock body caught mid-write, or a body a
+    // build we cannot model wrote; stealing on an unprovable read is how a live
+    // holder's claim gets taken (INV-4's lost update). But an ownerless body is
+    // also the exact artifact of a pre-link-format crash: nothing in the file
+    // can EVER come back to prove liveness, `stealIfOwnerGone`'s dead-pid proof
+    // has nothing to probe, no sweep matches `.lock`, and release only handles
+    // bodies this process wrote itself — so it wedged the id for the process
+    // lifetime. Age is the bound, as for own-pid bodies: an ownerless body past
+    // OWN_LOCK_GRACE_MS is a corpse with no possible mourner and falls through
+    // to the same take-then-compare protocol below, bypassing the pid liveness
+    // checks by construction (there is no pid to probe; the compare against
+    // `raw` still protects any writer that claimed between judgement and take).
+    // Returning `null` here — "path free" — was the round-11 residual: the
+    // corpse still sits at the path, so every retry's claim EEXISTs and the
+    // wait spins to its own timeout, the very wedge the age bound closes.
+    if (!Number.isInteger(owner) || owner <= 0) {
+      if (!olderThan(lock, OWN_LOCK_GRACE_MS)) return "lock body names no pid";
+    } else {
+      // Our pid, not our body, and THIS thread already holds the path: the
+      // caller is waiting on itself — a re-entrant `set()` from the
+      // `beforeRename` seam. Fail-closed is still right (there is no safe way
+      // to hand a live holder its own lock), but reporting it as a sibling
+      // writer sent an operator looking for a second process that never
+      // existed. Checked BEFORE the age bound below so a long-running enclosing
+      // write cannot age past the grace and let the re-entrant call steal its
+      // own outer claim. A sibling thread sharing our pid is NOT in this set.
+      if (owner === process.pid && heldLocks.has(lock)) {
+        return "re-entrant record write: this thread already holds this lock";
+      }
+      const held =
+        owner === process.pid
+          ? raw !== body && !olderThan(lock, OWN_LOCK_GRACE_MS)
+          : isAlive(owner);
+      if (held) return "held by a live owner";
     }
-    const held =
-      owner === process.pid
-        ? raw !== body && !olderThan(lock, OWN_LOCK_GRACE_MS)
-        : isAlive(owner);
-    if (held) return "held by a live owner";
     this.beforeStealTake?.(lock);
     // `.tmp`-suffixed and pid-stamped so a death between the take and the
     // unlink cannot strand the generation: cleanStaleTemps sweeps it at the
@@ -1460,9 +1713,32 @@ export class RunRecordStore {
     }
     const claimed = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     try {
-      renameSync(lock, claimed);
-    } catch {
-      return; // already gone
+      try {
+        renameSync(lock, claimed);
+      } catch (e) {
+        // ENOENT alone means another writer stole/released it between our read
+        // and the take — genuinely gone, and the put-back contract below no
+        // longer applies because there is nothing of ours to restore. EVERY
+        // other errno used to be swallowed the same way, which stranded OUR
+        // live-pid body at the path: unstealable ("held by a live owner"),
+        // unwritable and unclosable for the rest of the process lifetime while
+        // the box billed. Retry once (a transient EIO/EACCES settles), then
+        // report — loudly, since throwing from this `finally` would replace
+        // the caller's committed result with an fs error.
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+        sleepMs(5);
+        renameSync(lock, claimed);
+      }
+    } catch (e) {
+      const detail = (e as NodeJS.ErrnoException).code ?? (e as Error).message;
+      noteOnStderr(
+        `run-record: could not release ${lock} (${detail}) — THIS process still holds it; later writes to this run will time out until it is released\n`,
+      );
+      this.emit(null, "lock.release-failed", Date.now(), "error", {
+        code: "lock_release_failed",
+        message: `run record lock release failed: ${lock} (${detail})`,
+      });
+      return;
     }
     this.afterLockTake?.(claimed);
     let onDisk: string | undefined;
@@ -1783,13 +2059,14 @@ function clearCreateTombstone(p: string): boolean {
       // Restored: the second link is hygiene now, not the body itself.
       rmQuiet(claimed);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "EEXIST") {
-        // A create won the freed path while we held this aside — so what we
-        // hold may be somebody's live record. Park it under an orphan name;
-        // never delete bytes we cannot prove are ours to delete.
-        parkAside(claimed);
-      }
-      // Other errnos: `claimed` stays where it is, inert and pid-stamped.
+      // ANY failed restore here — EEXIST because a create won the freed path,
+      // EACCES/EIO on the link — leaves bytes this branch just conceded may be
+      // a LIVE record sitting at a `.tomb.…tmp` name: home-grammar-matched and
+      // pid-stamped, so the construction sweep destroys them once the pid dies
+      // or the grace elapses. That is exactly what the park doctrine forbids:
+      // move every unproven take to an unswept `.orphan.` name and say where
+      // the bytes are.
+      parkAside(claimed);
     }
     return false;
   }
@@ -1833,7 +2110,17 @@ function fsyncDir(dir: string): void {
   } catch {
     // EINVAL/EPERM/ENOTSUP on a filesystem that does not sync directories.
   } finally {
-    closeSync(fd);
+    // Guarded like every other close: an EINTR-class close failure here used
+    // to escape AFTER the record was durably written and synced, reporting the
+    // create failed when it landed — and a caller-supplied-id retry then hit
+    // EEXIST at a path holding a complete record. "Guarded end to end" has to
+    // include this call or it is not.
+    try {
+      closeSync(fd);
+    } catch {
+      // close(2) consumes the descriptor whether it reports success or not;
+      // nothing to do and nothing at risk.
+    }
   }
 }
 

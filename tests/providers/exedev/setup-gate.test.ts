@@ -14,6 +14,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
 import { ASSERTION_CODE } from "../../../src/providers/exedev/setup-gate.ts";
+import { setupGate } from "../../../src/providers/exedev/setup-gate.ts";
+import { RosterError } from "../../../src/phase-engine/roster/schema.ts";
+import { provisionAdmittedRun, ProvisionRefusedError } from "../../../src/providers/driver.ts";
+import { RunRecordStore } from "../../../src/providers/run-record.ts";
+import { setLogSink } from "../../../src/swarmclaw/log.ts";
 import {
   fakeExeDev,
   writePostureAttestation,
@@ -1068,4 +1073,131 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       edgeFake.cleanup();
     }
   }, 60_000);
+});
+
+// ─── D9/D10/D14 (review round 11): typed roster refusals, requestId fallback,
+// actionTimeoutMs validation — the gate's own input contract, driven directly ──
+
+describe("setup gate — input contract (D9/D10/D14)", () => {
+  const fake = fakeExeDev();
+  afterAll(() => fake.cleanup());
+
+  function minimalOpts(patch: Partial<Parameters<typeof setupGate>[2]> = {}): Parameters<typeof setupGate>[2] {
+    // A roster-bearing option bag; the fs errors below fire BEFORE any probe
+    // runs, so no box is ever created and nothing here touches the substrate.
+    return {
+      runId: "gate-input-run",
+      rosterPath: join(mkdtempSync(join(tmpdir(), "qds-sg-input-")), "roster.yaml"),
+      commitSha: "a".repeat(40),
+      ...patch,
+    } as Parameters<typeof setupGate>[2];
+  }
+
+  // D9: every fs failure below parse is TYPED `RosterError` with the errno named
+  // — a bare ENOENT/EACCES out of statSync/readFileSync used to escape as an
+  // unclassified crash on a brief-steered path. Three distinct arms, each
+  // falsifying one hypothesis about how the read fails.
+  test("D9: an ENOENT roster path refuses as a typed RosterError naming the errno", async () => {
+    let err: unknown;
+    try {
+      await setupGate(new ExeDevDriver({ run: fake.run }), "gate-input-vm", minimalOpts());
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(RosterError);
+    expect(String((err as Error).message)).toContain("ENOENT");
+  });
+
+  test("D9: a roster DIRECTORY refuses as 'not a regular file', not a read error", async () => {
+    const dirRoster = mkdtempSync(join(tmpdir(), "qds-sg-dirroster-"));
+    let err: unknown;
+    try {
+      await setupGate(new ExeDevDriver({ run: fake.run }), "gate-input-vm", minimalOpts({ rosterPath: dirRoster }));
+    } catch (e) {
+      err = e;
+    } finally {
+      rmSync(dirRoster, { recursive: true, force: true });
+    }
+    expect(err).toBeInstanceOf(RosterError);
+    expect(String((err as Error).message)).toContain("not a regular file");
+    expect(String((err as Error).message)).toContain("a directory");
+  });
+
+  test("D10: a non-string requestId falls back to the driver's id instead of crashing the gate", async () => {
+    // The documented fallback ({"requestId": 42} from a JSON-built bag), pinned
+    // at the sink: `.trim()` used to TypeError on it, turning a missing id into
+    // an untyped gate crash BEFORE any assertion ran. The box must EXIST (the
+    // fallback sits before the first probe; on a missing box the sentinel clear
+    // throws first) and the roster must PARSE, so execution reaches gate_A and
+    // its structured emission — which must carry the DRIVER's id, not a crash,
+    // not "42", not undefined.
+    const watched = new ExeDevDriver({ run: fake.run, requestId: "driver-side-id" });
+    await watched.create("d10-vm-20260827-a1b2c3");
+    // A PARSEABLE roster: the gate parses it host-side after resolving requestId
+    // and before the first probe, so the valid fixture proves execution reached
+    // gate_A through the fallback (the parseable-roster precondition is the
+    // whole difference between "fallback held" and "roster refused first").
+    const d10Roster = join(mkdtempSync(join(tmpdir(), "qds-sg-d10-")), "roster.yaml");
+    writeFileSync(d10Roster, ROSTER, { mode: 0o600 });
+    const seen: string[] = [];
+    const restore = setLogSink((e) => {
+      if (String((e as { operation?: string }).operation ?? "").startsWith("exedev.gate")) {
+        seen.push(String((e as { requestId?: string }).requestId));
+      }
+    });
+    try {
+      await setupGate(watched, "d10-vm-20260827-a1b2c3", minimalOpts({ requestId: 42 as unknown as string, rosterPath: d10Roster }));
+      // ready:false is fine — item A/C verdicts are not what this test measures;
+      // reaching ANY result proves the gate ran past the id resolution.
+    } catch {
+      // …and so does any probe-level failure AFTER the first emission.
+    } finally {
+      restore();
+      rmSync(d10Roster, { force: true });
+    }
+    expect(seen.length).toBeGreaterThan(0); // the gate really emitted
+    expect(seen.every((id) => id === "driver-side-id")).toBe(true);
+  });
+
+  test("D14: actionTimeoutMs of 0 / negative / NaN refuses with action-timeout-invalid", async () => {
+    // The store lives in a FRESH tmpdir per call: provisionAdmittedRun writes the
+    // record (INV-1) before it would touch the driver, and the timeout guard runs
+    // BEFORE that — so an EEXIST here would mean the guard moved or was lost.
+    const storeRoot = mkdtempSync(join(tmpdir(), "qds-sg-timeout-"));
+    try {
+      for (const bad of [0, -5, Number.NaN]) {
+        let err: unknown;
+        try {
+          await provisionAdmittedRun(
+            new ExeDevDriver({ run: fake.run }),
+            new RunRecordStore(join(storeRoot, `runs-${String(bad).replace(".", "")}`)),
+            {
+              runId: "timeout-invalid-run",
+              budget: {
+                repoSlug: "qds/demo",
+                issueId: "42",
+                capMicroUsd: 1,
+                spentMicroUsd: 0,
+                reservedMicroUsd: 0,
+                admittedCeilingMicroUsd: 1,
+              },
+              actionTimeoutMs: bad,
+            },
+          );
+        } catch (e) {
+          err = e;
+        }
+        expect(err).toBeInstanceOf(ProvisionRefusedError);
+        expect((err as ProvisionRefusedError).code).toBe("action-timeout-invalid");
+        // The remediation must not send an operator hunting a provider outage
+        // that was a caller bug.
+        expect((err as ProvisionRefusedError).remediation).toContain("omit actionTimeoutMs");
+        // EACCES-on-box-hours-remediation aside, nothing else happened: no box
+        // (the fake's boxes dir never materializes without create), and this
+        // refusal precedes even the INV-1 record write.
+      }
+    } finally {
+      rmSync(storeRoot, { recursive: true, force: true });
+    }
+  });
 });

@@ -125,7 +125,10 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
   test("unknown top-level key rejected (exit-path: parse throws with the key named)", () => {
     const brief = { ...validBrief(), unknownField: "should-reject" };
     expectRejected(brief, { field: "unknownField", code: "unrecognized_keys", message: /unknownField/ });
-    expect(() => BriefSchema.parse(brief)).toThrow();
+    // The throw itself must name the key — the exit-2 path formats its payload
+    // from the ZodError's own issue text, so a rejection whose MESSAGE dropped
+    // the key would exit 2 with a refusal the operator cannot act on.
+    expect(() => BriefSchema.parse(brief)).toThrow(/unknownField/);
   });
 
   test("ZodError helper extracts offending field name", () => {
@@ -210,10 +213,13 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
       // never carried the key at all.
       expect(Object.hasOwn(brief, key)).toBe(true);
       expect(Object.keys(brief)).toContain(key);
+      // The refusal IS the anti-pollution guarantee — pollution can only
+      // happen if the key SURVIVES validation into `parsed.data` and is later
+      // merged/spread, so strictObject rejecting it here is the whole claim.
+      // (A former `expect(({}).polluted).toBeUndefined()` here asserted a
+      // property of a fresh object literal nothing under test touched.)
       expectRejected(brief, { field: key, code: "unrecognized_keys" });
     }
-    // …and nothing was polluted on the way through.
-    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
   test("a non-object brief is refused and NAMED — the root label, not an empty field", () => {
@@ -312,6 +318,26 @@ describe("brief-schema.ts (DF3.1 AC1, AC2, INV-2, C3)", () => {
         message: /received null/,
       });
     }
+  });
+
+  test.each([
+    ["repoSlug", 42],
+    ["repoSlug", false],
+    ["commitSha", true],
+    ["commitSha", ["a".repeat(40)]], // an ARRAY is what a "list of shas" guess actually sends
+    ["manifestPath", 3.5],
+    ["repoUrl", { evil: true }],
+  ])("wrong-TYPE %s (%p) refused as invalid_type naming the field", (key, bad) => {
+    // absent/undefined/null are pinned per field above; type-rejection itself
+    // was exercised only via issueId/requestId, so a z.string() that drifted
+    // to z.any() on one of THESE four fields would have shipped green. A
+    // templating layer rendering a number or a boolean into a string field is
+    // the realistic carrier.
+    expectRejected(validBrief({ [key]: bad }), {
+      field: key,
+      code: "invalid_type",
+      message: /Expected string/,
+    });
   });
 
   test("commitSha not-40-hex rejected: 39 chars", () => {

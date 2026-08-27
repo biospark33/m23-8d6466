@@ -78,12 +78,46 @@ export class RunLockReentrantError extends Error {
 }
 
 /**
- * Locks THIS process created and has not released yet: path → the exact body
- * written into it. Release compares the body back before unlinking, so a lock
- * re-created by a different invocation (ours crashed, theirs claimed the path)
- * is never deleted out from under its live holder.
+ * Module state — `held`, `destructive`, and the two unwind latches — parked on
+ * `globalThis` under a registered symbol instead of in module scope.
+ *
+ * CJS+ESM DUAL-LOAD. One process can load this file twice (an ESM caller and a
+ * CJS dependency of the same embedder resolve it as two instances), and every
+ * piece of state above USED to be per-instance — so the safety proofs that
+ * read `held` were proofs about HALF the process's locks:
+ *
+ *  - the `held.has(lock)` reentrancy guard missed a claim the twin instance
+ *    holds;
+ *  - worse, `refuse`'s own-pid branch asks "is this REALLY one of mine?" by
+ *    scanning `held` — the twin's LIVE lock answered "proven unheld" and was
+ *    marked `stale=true`, printing `rm <lock>` advice for a lock this very
+ *    process actively holds. The uniqueness argument ("this pid is ours, so
+ *    no live invocation can hold it") is simply false across instances.
+ *
+ * Sharing one registry through `Symbol.for` — which both module systems land
+ * on in the same process — makes both proofs whole again with no API change.
+ * `worker_threads`/`Bun.Worker` deliberately get their own copy: threads are
+ * separate holders by construction everywhere else in this module (record
+ * store locks reason about sibling threads the same way).
  */
-const held = new Map<string, string>();
+interface RunLockModuleState {
+  held: Map<string, string>;
+  destructive: Set<string>;
+  signalsInstalled: boolean;
+  unwinding: boolean;
+}
+
+/* eslint-disable @typescript-eslint/no-unnecessary-condition */
+function moduleState(): RunLockModuleState {
+  const key = Symbol.for("qds.run-lock.state");
+  let state = (globalThis as Record<symbol, unknown>)[key] as RunLockModuleState | undefined;
+  if (state === undefined || state.held === undefined || state.destructive === undefined) {
+    state = { held: new Map(), destructive: new Set(), signalsInstalled: false, unwinding: false };
+    (globalThis as Record<symbol, unknown>)[key] = state;
+  }
+  return state;
+}
+/* eslint-enable @typescript-eslint/no-unnecessary-condition */
 
 /**
  * The identity `kill(pid, 0)` is actually scoped to, with whitespace folded —
@@ -113,14 +147,22 @@ function lockHost(): string {
 }
 
 /**
- * `lockHost()` folded to a filename-safe token. Temp files carry it because
- * their pid is otherwise unqualified: `reapStaleTemps` probes THIS host's
- * process table, and on a shared runs directory that made it delete a remote
- * invocation's in-flight temp between its `fsync` and its `linkSync`.
+ * `lockHost()` folded to a filename-safe token — BIJECTIVELY. A literal
+ * underscore becomes `--`, and every byte outside `[A-Za-z0-9_]` — a literal
+ * hyphen included — is escaped as `-XX` (its two-digit hex), so the fold is
+ * reversible and two distinct hosts can never collide (`a/b` → `a-2f`,
+ * `a-b` → `a-2d`, `a_b` → `a--`; the old charset fold sent both `/`, `.`,
+ * and any other stranger to `_`).
+ *
+ * The COLLISION mattered because temp files carry this tag: their pid is
+ * otherwise unqualified, `reapStaleTemps` probes THIS host's process table,
+ * and on a shared runs directory it used to delete a remote invocation's
+ * in-flight temp between its `fsync` and its `linkSync`. A tag that folds
+ * distinct identities together re-enables exactly that accident.
  */
 /** Exported alongside the other primitives; DF3.2's fleet lock imports only `claim`/`isAlive`. */
 export function hostTag(): string {
-  return lockHost().replace(/[^A-Za-z0-9_-]/g, "_");
+  return lockHost().replace(/[^A-Za-z0-9_]|_/g, (ch) => (ch === "_" ? "--" : `-${ch.charCodeAt(0).toString(16).padStart(2, "0")}`));
 }
 
 /**
@@ -158,12 +200,19 @@ function fsyncDir(dir: string): void {
     // Not every platform/filesystem permits fsync on a directory handle; the
     // link itself is the mutual-exclusion boundary, the fsync only its durability.
   } finally {
-    if (dfd !== undefined) closeSync(dfd);
+    if (dfd !== undefined) {
+      try {
+        closeSync(dfd);
+      } catch {
+        // The descriptor is consumed either way (POSIX). This runs AFTER
+        // `held.set` in acquire, so a throwing close used to fail an
+        // already-claimed acquire with a raw errno — the caller classified the
+        // invocation as failed while holding the lock. Same guard as claim's /
+        // writeLockDirect's closes; fsync here is best-effort by design.
+      }
+    }
   }
 }
-
-let signalsInstalled = false;
-let unwinding = false;
 
 /**
  * One Ctrl-C during teardown used to leave the lock on disk forever: every
@@ -189,8 +238,12 @@ let unwinding = false;
  * (graceful shutdown, coverage flush, `bun test` cleanup) for the rest of the
  * process. The removal is only needed for the length of the re-raise. On the
  * path that matters the restore never runs, because the process is already
- * dead; if the signal was blocked or ignored and we survive it, the host's
- * disposition is exactly what it was before we touched it.
+ * dead; if the signal was blocked or ignored and we SURVIVE it, the releases
+ * are undone (`rollbackReleasedClaims`) — a live invocation must not keep
+ * running mid-teardown with its locks unlinked, which is the double-teardown
+ * window that opening them before the raise used to leave behind. Fail-safe
+ * direction: a failed rollback strands a lock an operator judges, never hands
+ * the run free to the next verb.
  *
  * `process.on` plus the `unwinding` latch, not `once`: the handler stays
  * registered until a signal actually arrives, so a SECOND acquire after an
@@ -208,36 +261,65 @@ let unwinding = false;
  * with no automated way back.
  */
 function installSignalRelease(): void {
-  if (signalsInstalled) return;
-  signalsInstalled = true;
+  if (moduleState().signalsInstalled) return;
+  moduleState().signalsInstalled = true;
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
     const onSignal = (): void => {
-      if (unwinding) return;
-      unwinding = true;
-      releaseHeldRunLocks();
+      if (moduleState().unwinding) return;
+      moduleState().unwinding = true;
+      // Snapshot BEFORE releasing: the rollback below must know every claim
+      // this unwind dropped, including the successful ones (`releaseHeld...`
+      // deletes entries as they succeed, so reading `held` afterwards sees
+      // only the dirtily-failed leftovers).
+      const preReleaseSnapshot = [...moduleState().held.entries()];
       // Ours goes for good (the `unwinding` latch already made it a no-op);
       // everyone else's is borrowed for the duration of the re-raise.
       process.removeListener(sig, onSignal);
       const others = process.listeners(sig);
       for (const listener of others) process.removeListener(sig, listener as () => void);
+      releaseHeldRunLocks();
       try {
         process.kill(process.pid, sig);
-      } catch {
+      } catch (raiseErr) {
         // The re-raise itself failed (a seccomp filter or an LSM refusing
-        // kill(2), say): the signal was NOT delivered, so the default
-        // disposition never applied and the process is still running with its
-        // lock already released. Leaving `unwinding` set — and this handler
-        // off — would dead-letter every later Ctrl-C: an unstoppable CLI, mid-
-        // destruction if it got there. Reset the latch and put OUR listener
-        // back alongside the borrowed ones so the next signal retries release
-        // (a no-op on an empty `held`) and the raise; the operator's second
-        // Ctrl-C is the retry.
-        unwinding = false;
+        // kill(2), say): the signal was NOT delivered, so nothing terminated.
+        // Leaving `unwinding` set — and this handler off — would dead-letter
+        // every later Ctrl-C; reset the latch, put EVERY listener back — ours
+        // and each one borrowed for the re-raise, so the embedder/supervisor
+        // handlers this module must not eat survive the failed raise too —
+        // put the claims we just released BACK on disk, and surface the
+        // failure — L1's rule is that locks come off only when termination is
+        // proven.
+        moduleState().unwinding = false;
         process.on(sig, onSignal);
-        return;
-      } finally {
         for (const listener of others) process.on(sig, listener as () => void);
+        rollbackReleasedClaims(preReleaseSnapshot);
+        writeStderr(
+          `warning: could not re-raise ${sig} (${(raiseErr as Error).message}) — the releases above were rolled back and this invocation is STILL RUNNING with its locks restored\n`,
+        );
+        return;
       }
+      // The raise landed with NO listeners registered for `sig`, so the
+      // kernel's default TERMINATE disposition ends this process right here —
+      // everything below runs only when it did NOT end anything, i.e. the
+      // host's disposition blocked/ignored/caught the signal (an embedder, a
+      // supervisor wrapper, a debugger). A survivor mid-teardown with its locks
+      // already unlinked is exactly the double-teardown window L1 names, so the
+      // releases are ROLLED BACK: each claim goes back under its own path, and
+      // every later verb refuses on a live lock again — the module's standing
+      // fail-safe posture (an operator judges a stranded lock) rather than the
+      // fail-open alternative (the path left free). The borrowed listeners go
+      // back on this path too: a supervisor that blocked the signal still
+      // expects its own handler to fire on the NEXT delivery, and a permanent
+      // strip here would have eaten it for the rest of the process.
+      rollbackReleasedClaims(preReleaseSnapshot);
+      moduleState().unwinding = false;
+      process.on(sig, onSignal);
+      for (const listener of others) process.on(sig, listener as () => void);
+      writeStderr(
+        `warning: ${sig} arrived while this process's disposition is blocked or ignored (an embedder or supervisor wrapper) and did NOT terminate it\n` +
+          `next: the run locks released above were PUT BACK — stop the embedder or SIGKILL this process instead of relying on ${sig}\n`,
+      );
     };
     process.on(sig, onSignal);
   }
@@ -272,7 +354,7 @@ function installSignalRelease(): void {
 const destructive = new Set<string>();
 
 export function markRunLockDestructive(lock: string): void {
-  destructive.add(lock);
+  moduleState().destructive.add(lock);
 }
 
 /**
@@ -286,7 +368,7 @@ export function markRunLockDestructive(lock: string): void {
  * that is the entire distinction the mark exists to draw.
  */
 export function clearRunLockDestructive(lock: string): void {
-  destructive.delete(lock);
+  moduleState().destructive.delete(lock);
 }
 
 /**
@@ -317,10 +399,42 @@ function writeStderr(s: string): void {
   }
 }
 
+/**
+ * Put claims `releaseHeldRunLocks` just dropped back on disk (L1's
+ * survived-signal path: the re-raise did not terminate the process, so the
+ * releases it caused are no longer safe to have happened). Only entries still
+ * in `held` are restored, which is exactly the ones whose release FAILED
+ * dirty — a successful release already removed its own entry.
+ *
+ * `claim` is exclusive, so a contender that took the path between our release
+ * and our rollback simply wins: our re-claim returns false, we keep the entry,
+ * and our next release/exit finds the mismatch branch and drops it.
+ */
+function rollbackReleasedClaims(snapshot: [string, string][]): void {
+  const state = moduleState();
+  for (const [lock, body] of snapshot) {
+    // Past the point of no return — `releaseHeldRunLocks` never dropped these,
+    // so putting their (possibly released-by-us?) bodies back is not ours to
+    // decide here either; they keep the operator-judgment posture.
+    if (state.destructive.has(lock)) continue;
+    try {
+      claim(lock, body);
+      // Re-registered ONLY if this process does not still hold it (a dirty
+      // failed release leaves the entry in place — claimedByUs made the claim
+      // succeed against our own surviving file, so refresh it).
+      state.held.set(lock, body);
+    } catch {
+      // Best-effort by construction: runs inside a signal handler. An entry
+      // that could not be reclaimed but IS absent from `held` gets re-added so
+      // the exit handler keeps owning its fate rather than dropping it.
+      if (!state.held.has(lock)) state.held.set(lock, body);
+    }
+  }
+}
+
 /** Release every lock this process still holds, reporting failures to stderr. */
-export function releaseHeldRunLocks(): void {
-  for (const lock of [...held.keys()]) {
-    if (destructive.has(lock)) {
+export function releaseHeldRunLocks(): void {  for (const lock of [...moduleState().held.keys()]) {
+    if (moduleState().destructive.has(lock)) {
       writeStderr(
         `!! lock-held: ${lock} was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm ${lock} only once you know the teardown state\n`,
       );
@@ -377,12 +491,29 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
   // read (EACCES, EIO) is the one whose holder is most unknown, and telling an
   // operator to rm it is the fail-open answer this module never gives.
   let readable = false;
+  let readErrno: string | undefined;
   try {
     body = readFileSync(lock, "utf8").trim();
     readable = true;
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return undefined;
+    readErrno = code ?? (e as Error).message;
     // present but unreadable — fail closed below with what we do know
+  }
+  // PRESENT but UNREADABLE (EACCES, EIO): the holder is maximally unknown, so
+  // the rendering must not fake a body ("holder unknown, lock body \"\"" was
+  // asserting bytes that were never seen) and must not print the template's
+  // rm-for-a-proven-gone-holder advice — there is no proof anybody is gone.
+  if (!readable) {
+    const err = new RunLockedError(
+      lock,
+      `unreadable from this invocation (${readErrno}), holder maximally unknown`,
+      holder,
+    );
+    (err as { remediation: string }).remediation =
+      `do NOT remove it on this evidence alone — fix the read failure first (${readErrno}): check permissions/ownership of ${lock} and every directory on its path, or run this verb as a user that can read it; once it reads, re-run and judge by what the body says`;
+    return err;
   }
   // An EMPTY body is not an unparseable one. Nothing ever writes a lock without
   // a body, so the ways to observe one are `writeLockDirect`'s create-to-write
@@ -493,7 +624,7 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
     try {
       const real = realpathSync(lock);
       provenUnheld = true;
-      for (const h of held.keys()) {
+      for (const h of moduleState().held.keys()) {
         try {
           if (realpathSync(h) === real) {
             provenUnheld = false;
@@ -550,16 +681,42 @@ function refuse(lock: string, holder: string): RunLockedError | undefined {
 }
 
 /**
- * Reap `<runId>.lock.<pid>.<hex>.tmp` left by a process that died between the
- * temp's creation and its unlink (SIGKILL, ENOSPC, power loss). Nothing else
- * removes them and they accumulate in the same directory the record/bundle
- * listings glob over. Only temps whose recorded pid is gone are removed — a
- * live pid's temp is mid-acquire.
+ * The claim-temp suffix. Deliberately NOT `.tmp`: `RunRecordStore`'s own
+ * constructor sweep (`cleanStaleTemps`) runs in THIS directory on every CLI
+ * start and treats every `*.tmp` whose pid does not parse as immediately
+ * removable — a run-lock claim temp carries `<hostTag>.<pid>` so its second-to-
+ * last dot-separated field is the tag, not the pid, which parses to NaN there
+ * and got the in-flight temp rmSync'd by a store built on another HOST while
+ * the claim was mid-link. A distinct suffix takes these temps out of that
+ * sweep's reach entirely, which no host qualification inside the name could
+ * achieve without editing the foreign module.
  *
- * `.tmp` ONLY, deliberately: a `claim` temp is a copy of our own body and is
- * pure litter once we are gone, whereas `releaseRunLock`'s `.rescue` file is
- * the last copy of somebody else's live claim and an operator is told to `mv`
- * it back. The two must not share a filename shape.
+ * `reapStaleTemps` here matches only this shape; `.rescue` keeps its separate,
+ * unswept shape as before.
+ */
+const CLAIM_TEMP_SUFFIX = ".lktmp";
+
+/**
+ * Cap on directory entries scanned per temp sweep. The scan exists to clear
+ * THIS run's dead claims' litter — bounded per-run work on a shared store, not
+ * an O(n) walk of thousands of unrelated records on every acquire. Sweeps are
+ * advisory hygiene: anything past the cap stays until a later acquire whose
+ * entries sort earlier, and correctness was never carried by completeness
+ * (`live` temps are skipped by design).
+ */
+const REAP_SCAN_CAP = 512;
+
+/** Temps swept at most once per process-epoch-minute, not once per acquire. */
+const REAP_SWEEP_TTL_MS = 60_000;
+
+const reapTtlCache = new Map<string, number>();
+
+/**
+ * Reap `<runId>.lock.<hostTag>.<pid>.<hex>.lktmp` left by a process that died
+ * between the temp's creation and its unlink (SIGKILL, ENOSPC, power loss).
+ * Nothing else removes them and they accumulate in the same directory the
+ * record/bundle listings glob over. Only temps whose recorded pid is gone are
+ * removed — a live pid's temp is mid-acquire.
  */
 function reapStaleTemps(runsDir: string, runId: string): void {
   const prefix = `${runId}.lock.`;
@@ -567,17 +724,21 @@ function reapStaleTemps(runsDir: string, runId: string): void {
   // `refuse` refuses to probe a foreign lock, and this sweep had NO host check
   // at all. On a shared runs directory an unqualified probe read a remote
   // invocation's live pid as dead and `rmSync`'d its in-flight temp between the
-  // `fsync` and the `linkSync`. Temps now carry the host tag; one that does not
-  // (an older build's, or another host's) is never ours to reap.
+  // `fsync` and the `linkSync`. Temps carry the host tag; one that does not
+  // match OURS (another host's, or an older build's) is never ours to reap.
   const mine = `${hostTag()}.`;
+  const lastSweep = reapTtlCache.get(`${runsDir} ${runId}`);
+  if (lastSweep !== undefined && Date.now() - lastSweep < REAP_SWEEP_TTL_MS) return;
+  reapTtlCache.set(`${runsDir} ${runId}`, Date.now());
   let names: string[];
   try {
     names = readdirSync(runsDir);
+    if (names.length > REAP_SCAN_CAP) names = names.slice(0, REAP_SCAN_CAP);
   } catch {
     return; // the acquire below reports a missing/unreadable directory properly
   }
   for (const name of names) {
-    if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
+    if (!name.startsWith(prefix) || !name.endsWith(CLAIM_TEMP_SUFFIX)) continue;
     const rest = name.slice(prefix.length);
     if (!rest.startsWith(mine)) continue;
     const pid = Number(rest.slice(mine.length).split(".")[0]);
@@ -646,7 +807,7 @@ function claimedByUs(lock: string, body: string): boolean {
 export function claim(lock: string, body: string): boolean {
   // Host tag BEFORE the pid: the pid in this name is what `reapStaleTemps`
   // probes, and a pid without the host that minted it is not a pid.
-  const tmp = `${lock}.${hostTag()}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  const tmp = `${lock}.${hostTag()}.${process.pid}.${randomBytes(4).toString("hex")}${CLAIM_TEMP_SUFFIX}`;
   let fd: number | undefined;
   try {
     // Inside the try (not before it): a missing runs directory, EACCES, or a
@@ -782,7 +943,7 @@ export function acquireRunLock(runsDir: string, runId: string, holder = "invocat
   // to eliminate. An absolute path is also the one an operator can paste into
   // the `rm` the refusal prints.
   const lock = resolve(runsDir, `${runId}.lock`);
-  if (held.has(lock)) throw new RunLockReentrantError(lock);
+  if (moduleState().held.has(lock)) throw new RunLockReentrantError(lock);
   reapStaleTemps(runsDir, runId);
   // Two attempts, not a loop: the second covers a holder that finished between
   // our EEXIST and refuse()'s read (the lock is genuinely free again). A third
@@ -794,7 +955,7 @@ export function acquireRunLock(runsDir: string, runId: string, holder = "invocat
       // Registered the instant the lock is ours, BEFORE the fsync: everything
       // after this point can throw or be interrupted, and an unregistered lock
       // is one nothing will ever release.
-      held.set(lock, body);
+      moduleState().held.set(lock, body);
       fsyncDir(runsDir);
       return lock;
     }
@@ -902,7 +1063,7 @@ function restore(claimed: string, lock: string): string {
  * one), that is the upgrade path — it would make the restore branch dead code.
  */
 export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): void {
-  const body = held.get(lock);
+  const body = moduleState().held.get(lock);
   if (body === undefined) return;
   // The destructive mark is NOT cleared by the act of releasing. "The caller
   // reached its `finally`" is what a deliberate release used to be inferred
@@ -912,14 +1073,22 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
   // state this module says only an operator can judge. The caller clears the
   // mark on its SUCCESS path (`clearRunLockDestructive`); `force` exists for a
   // caller that has judged the state itself and wants the lock gone anyway.
-  if (destructive.has(lock) && opts.force !== true) {
+  if (moduleState().destructive.has(lock) && opts.force !== true) {
     throw new Error(
       `refusing to release ${lock}: this invocation was interrupted or failed after it began destroying the run, so the lock is deliberately left in place — check the run's box, key and record before anything else touches it, then rm ${lock} once you know the teardown state`,
     );
   }
-  // Dropped first: a failed release must not be retried by the signal handler.
-  held.delete(lock);
-  destructive.delete(lock);
+  // The registration stays until a release SUCCEEDS (`held.delete` used to run
+  // HERE, before any I/O — so the first EACCES/EIO/ESTALE left the lock on disk
+  // with this process's body while every later release for it returned as a
+  // silent no-op success and the exit handler skipped it too; an embedder whose
+  // caller caught the throw and retried got a clean return with the run still
+  // locked). Keeping it means a retry actually retries, `releaseHeldRunLocks`
+  // still covers the path on the way out, and a proven-not-ours mismatch below
+  // drops it — that lock is no longer ours to retry.
+  // ENOENT deserves one exception: the lock is provably GONE, so "retrying"
+  // could never do anything but report the same success. Drop the entry there,
+  // exactly as before.
 
   let before: string;
   try {
@@ -928,10 +1097,16 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
     // ENOENT: already gone (reaped, or cleared by hand and not yet re-taken) —
     // a no-op release. Any other errno means the body is UNKNOWN, and an
     // unknown body is precisely the one that must not be deleted.
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+      moduleState().held.delete(lock);
+      return;
+    }
     throw e;
   }
   if (before !== body) {
+    // Proven not ours — this process can never release it, so retrying on the
+    // exit path is meaningless; drop the entry rather than leave a phantom.
+    moduleState().held.delete(lock);
     throw new Error(
       `refusing to release ${lock}: it holds ${JSON.stringify(before.trim())}, not this invocation's claim — left untouched`,
     );
@@ -948,8 +1123,11 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
   try {
     renameSync(lock, claimed);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw e;
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+      moduleState().held.delete(lock); // gone mid-release — the retry could never do more
+      return;
+    }
+    throw e; // registration kept — dirty, retried by the caller or the exit handler
   }
   let onDisk: string;
   try {
@@ -958,6 +1136,8 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
     throw new Error(`could not read ${lock} while releasing it (${(e as Error).message}) — ${restore(claimed, lock)}`);
   }
   if (onDisk === body) {
+    // SUCCESS — drop the registration only now (see the comment at the top).
+    moduleState().held.delete(lock);
     // The rename+verify above PROVED the taken bytes are ours — the release
     // has already succeeded, and this rm is tidy-up of our own private
     // `.rescue` copy. An unguarded rm here converted a SUCCESSFUL release into
@@ -976,7 +1156,10 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
     return;
   }
   // Re-claimed inside the rename window — vanishingly narrow, but the body is
-  // someone else's and must go back rather than be deleted.
+  // someone else's and must go back rather than be deleted. Proven not ours
+  // either way, so the entry is dropped (same reasoning as the pre-rename
+  // mismatch); `restore` already put somebody else's claim back where it was.
+  moduleState().held.delete(lock);
   throw new Error(
     `refusing to release ${lock}: it now holds ${JSON.stringify(onDisk.trim())}, not this invocation's claim — ${restore(claimed, lock)}`,
   );

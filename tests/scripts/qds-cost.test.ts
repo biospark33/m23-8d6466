@@ -90,6 +90,73 @@ describe("qds-cost CLI", () => {
       expect(out).toContain("0 µ$"); // the TOTAL line's µ$ figure is exactly zero
       expect(out).toContain("no ledger rows for this issue");
     });
+
+    test("a repeated `--dir` refuses instead of silently last-winning", () => {
+      // Both values name real directories with ledgers, so a last-win
+      // implementation would EXIT 0 against whichever came second — the refusals
+      // below are what prove the duplicate itself is rejected, not just that
+      // some dir resolved.
+      const first = join(dir, "runs-a");
+      const second = join(dir, "runs-b");
+      for (const d of [first, second]) mkdirSync(d, { recursive: true, mode: 0o700 });
+      writeFileSync(join(first, "cost-ledger.db"), "");
+      writeFileSync(join(second, "cost-ledger.db"), "");
+
+      const spaced = spawnSync(CLI, ["qds/demo#42", "--dir", first, "--dir", second], { env: process.env });
+      expect(spaced.status).toBe(2);
+      expect(spaced.stdout.toString()).toContain("--dir given more than once");
+      // help-suffix shape, matching fleet.ts's duplicate-flag refusal
+      expect(spaced.stdout.toString()).toContain("Usage: qds-cost");
+
+      const inline = spawnSync(CLI, ["qds/demo#42", `--dir=${first}`, "--dir", second], { env: process.env });
+      expect(inline.status).toBe(2);
+      expect(inline.stdout.toString()).toContain("--dir given more than once");
+    });
+
+    test("an EMPTY $QDS_RUNS_DIR resolves to the default records dir, not the cwd", () => {
+      // Round 11 / E6: `""` is not nullish, so it used to beat DEFAULT_RUNS_DIR
+      // and locate both money files at the caller's cwd — an exported-unset
+      // variable (`export QDS_RUNS_DIR=$UNSET`) silently moved the ledger out
+      // of `.sandbox/`. Discriminator: the DEFAULT layout's money sits in
+      // `<home>/.sandbox/cost-ledger.db`; the pre-fix resolution for "" read
+      // `<cwd>/cost-ledger.db`, so that file holds an EMPTY decoy here — the
+      // run must report the real spend, never the decoy's zero rows.
+      const home = mkdtempSync(join(tmpdir(), "qds-cost-emptyenv-"));
+      try {
+        const runs = join(home, ".sandbox", "runs");
+        mkdirSync(runs, { recursive: true, mode: 0o700 });
+        const ledger = new CostLedger({
+          path: join(home, ".sandbox", "cost-ledger.db"),
+          config: { defaultCapMicroUsd: 5_000_000 },
+          readRunRecord: () => ({ keyHash: "h", limitMicroUsd: 50_000_000, createdAt: "2026-08-20T10:00:00Z" }),
+        });
+        ledger.ingestCostEvent(
+          { agentId: "lead-agent", model: "cheap/model", durationMs: 0, inputTokens: 1, outputTokens: 2, turnCount: 1, costUsd: 0.25, timestamp: "2026-08-20T10:05:00Z" } as CostEvent,
+          { runId: "emptyenv-run", repoSlug: "qds/demo", issueId: "42", requestId: "req-e", role: "lead", invocationSeq: 0 },
+        );
+        ledger.close();
+
+        // Exactly the file the ""-as-set resolution used to open: <cwd-of-child>/cost-ledger.db.
+        new CostLedger({ path: join(home, "cost-ledger.db"), config: { defaultCapMicroUsd: 5_000_000 } }).close();
+
+        // This suite's beforeEach pins $QDS_COST_LEDGER_FILE — an explicit env
+        // override wins OUTRIGHT over every derived tier, so for this one run
+        // it must be absent or it would decide the path instead of the
+        // resolution chain under test. (Destructure-and-omit, not `delete`: this
+        // is a fresh child-env object, never the live process.env.)
+        const { QDS_COST_LEDGER_FILE: _drop, ...rest } = process.env;
+        const env = { ...rest, QDS_RUNS_DIR: "" };
+
+        const res = spawnSync(CLI, ["qds/demo#42"], { env, cwd: home });
+        expect(res.status).toBe(0);
+        const out = res.stdout.toString();
+        expect(out).toContain("TOTAL: 250,000 µ$");
+        expect(out).not.toContain("no ledger rows");
+        expect(out).not.toContain("no cost ledger");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("full view with lead+worker+box-hours", () => {

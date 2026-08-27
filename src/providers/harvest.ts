@@ -45,7 +45,7 @@ import { createGunzip } from "node:zlib";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import type { ExecResult, ProviderDriver } from "./driver.ts";
-import { DEFAULT_RUNS_DIR, type RunRecord, type RunRecordStore } from "./run-record.ts";
+import { resolveRunsDir as resolveExportedRunsDir, type RunRecord, type RunRecordStore } from "./run-record.ts";
 import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 
 /** Bundle received-bytes cap (INV-3-style bomb defense, host-side). */
@@ -257,7 +257,10 @@ function logPreflightError(ctx: StepCtx, err: HarvestError): void {
 // ─── paths + script assembly ─────────────────────────────────────────────────
 
 function resolveRunsDir(deps: HarvestDeps): string {
-  const dir = deps.runsDir ?? process.env.QDS_RUNS_DIR ?? DEFAULT_RUNS_DIR;
+  // The store's exported chain, not a restated `?? env ?? default`: the local
+  // copy predated the empty-`QDS_RUNS_DIR` fold in resolveRunsDir and would
+  // have kept resolving an exported-unset variable to cwd.
+  const dir = deps.runsDir ?? resolveExportedRunsDir();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
 }

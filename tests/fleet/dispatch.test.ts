@@ -37,7 +37,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as YAML from "yaml";
 
-import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
+import {
+  DEFAULT_QUOTA_LIMITS,
+  loadQuotaLimits,
+  QuotaLimitsError,
+  type LoadedQuotaLimits,
+} from "../../src/providers/quota.ts";
 import { ROSTER_MAX_BYTES } from "../../src/phase-engine/roster/schema.ts";
 
 /** Fresh limits — NEVER mutate DEFAULT_QUOTA_LIMITS (shared, unfrozen reference). */
@@ -54,6 +59,7 @@ import { type AdmissionInput, CostLedgerError } from "../../src/providers/cost-l
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 import { statusRun } from "../../src/fleet/status.ts";
+import { isSubstrateFailure } from "../../src/providers/fake-gate.ts";
 import {
   FleetError,
   assertFleetRunId,
@@ -432,6 +438,54 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(result.runId).toBe(preMinted);
   });
 
+  test("F17: a SHAPE-PERFECT runId this process never minted is refused run-id-not-minted (runtime provenance)", async () => {
+    // fix-F17's runtime half: `MINTED_RUN_ID_RE` proves shape only, and a
+    // misbehaving in-process caller can cast a shape-perfect string in. The
+    // registry (`mintRunIds` Set fed by every real hand-out) refuses it — the
+    // message must name the registry, not the shape, so an operator reading
+    // "matches the minted shape but was never returned" is not sent hunting a
+    // typo that does not exist.
+    const forged = "qds-20260101-abcdef";
+    // Premise: the forged id PASSES the shape gate (dispatch's private
+    // MINTED_RUN_ID_RE is `/^qds-\d{8}-[a-f0-9]{6}$/`), so only provenance can
+    // refuse it — pinning the shape here keeps that premise honest if the
+    // grammar ever loosens.
+    expect(forged).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
+    const ledgerFactory = mock(() => goodLedger());
+    try {
+      await dispatch(validBrief(), deps({ ledgerFactory }), {
+        // @ts-expect-error the brand refuses the literal at compile time; the
+        // RUNTIME guard is what this test exists to pin.
+        runId: forged,
+      });
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(2);
+      expect(err.code).toBe("run-id-not-minted");
+      // The PROVENANCE arm's own words — deleting the registry check leaves
+      // every shape-arm test above green, so this one line is its whole pin.
+      expect(err.message).toContain("was never returned by mintRunId()");
+    }
+    const refused = expectSingleRefusalLine("run-id-not-minted");
+    void refused;
+    // Refused BEFORE admission spent anything.
+    expect(ledgerFactory).not.toHaveBeenCalled();
+    expect(readdirSync(store.dir)).toHaveLength(0);
+  });
+
+  test("F17 composition: a LEGITIMATE re-supply still passes — mint output re-dispatched is accepted", async () => {
+    // The false-positive control for the sibling: fan-out's actual pattern is
+    // mint → hand to arms → re-supply via opts.runId. Breaking the accept half
+    // of the registry check would refuse exactly that.
+    const first = await dispatch(validBrief(), deps()); // populates nothing shared; proves wiring alone
+    const preMinted = mintRunId(); // the genuine hand-out
+    const second = await dispatch(validBrief(), deps(), { runId: preMinted });
+    expect(second.runId).toBe(preMinted);
+    expect(first.runId).not.toBe(preMinted);
+  });
+
   test("mintRunId() re-exports newId('qds') — dated, and RANDOM, not a counter", () => {
     // The UTC day is captured on BOTH sides of every mint below: an id carries
     // the date AT ITS OWN MINT, and a UTC-midnight flip mid-test is legitimate —
@@ -729,7 +783,11 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // The NUMBER, not the ledger's stringified form — this file keys on it.
     expect(admitted?.issueId).toBe(42);
     expect(admitted?.requestId).toBe(requestId);
-    expect(String(admitted?.message)).toContain("cap");
+    // The over-budget DIAGNOSIS, not a bare substring: `toContain("cap")` was
+    // satisfied by "capacity"/"capabilities"/any incidental text. The message
+    // is OverBudgetError's own fixed composition (budget-gate.ts) — pin its
+    // discriminating head so the on-disk AC4 evidence names the real condition.
+    expect(String(admitted?.message)).toMatch(/^issue over budget: spent \d+ \/ \d+ µ\$/);
     // WHEN, not merely "parseable". `Date.parse("2001")` is a number, so a
     // frozen constant, a copied timestamp or a zero epoch all satisfied the old
     // assertion — and this line is the AC4 evidence an operator sorts by. Both
@@ -1175,10 +1233,17 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(ledgerFactory).toHaveBeenCalled();
   });
 
-  test("a NON-exedev driver never looks for a roster at all", async () => {
+  test("a NON-exedev driver dispatches with no roster file present (no roster REFUSAL)", async () => {
     // The predicate's other half. `FakeDriver` has neither `setup` nor `fill`,
     // so a dir-box dispatch must succeed with no roster anywhere — otherwise
     // every other test in this file is running against a gate it never reaches.
+    //
+    // T1-13 (round 11) — the old title overclaimed "never looks for a roster
+    // at all". Black-box, this test can only prove the SUCCESS path ignores a
+    // MISSING roster (an implementation that existsSync'd and ignored the
+    // result still passes); what it DOES refuse to let pass silently is the
+    // refusal direction: a probe that errors on a missing roster. The name now
+    // says exactly that much and no more.
     const brief = validBrief();
     expect(existsSync(join(dir, "manifests", "roster.yaml"))).toBeFalse();
     const result = await dispatch(brief, deps());
@@ -1237,7 +1302,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     });
   }
 
-  test("INV-2: timeoutMs AT the setTimeout clamp is accepted — and is the ceiling that gets ARMED", async () => {
+  test("INV-2: timeoutMs AT the setTimeout clamp is accepted — armed ceiling observed via post-gate work", async () => {
     // The boundary control. Without it the guard could be `>=` — refusing the
     // largest ceiling `setTimeout` can actually honour — and every case above
     // would still pass.
@@ -1247,9 +1312,13 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // accepted this value and then clamped the ceiling back to the 600_000
     // default would pass a bare `state: "ready"` — so the clock is advanced to
     // just under the SUPPLIED ceiling, which is nearly four hours past the
-    // default. `port` is what makes that observable: the post-gate re-sample
-    // exists only where there is work left, and it is the line that would
-    // refuse against a clamped ceiling.
+    // default. T1-14 (round 11): that observation rides on the POST-GATE
+    // re-sample existing — if the re-sample were refactored away, the advance
+    // past the default would go unrefused only because nothing samples there,
+    // silently degrading this to acceptance-only. The renAMed title says what
+    // is actually load-bearing; the mechanism itself stays, since a direct
+    // arming probe would need a new seam in dispatch (disproportionate for a
+    // LOW).
     const { clock, advance } = stepClock();
     const result = await dispatch(
       validBrief(),
@@ -1336,10 +1405,18 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     //
     // Nothing else injects an EEXIST from `store.create`: delete that arm of the
     // provisioning catch and every other test in this file still passes.
+    //
+    // F12 (round 11): a PATHLESS EEXIST is no longer classified as run-id-in-use
+    // — it can equally be a provider's bare errno, and refusing that as exit-2
+    // do-not-retry sent operators away from a retryable substrate condition.
+    // Only an EEXIST whose `path` names THIS run's record file is the arbiter's
+    // verdict, so the fixture carries the real store's own path shape (Node/Bun
+    // set `.path` on every wx-open EEXIST — verified against RunRecordStore).
     const preMinted = mintRunId();
-    const eexist = Object.assign(new Error("EEXIST: file already exists, open 'runs/…'"), {
-      code: "EEXIST",
-    });
+    const eexist = Object.assign(
+      new Error(`EEXIST: file already exists, open '${store.path(preMinted)}'`),
+      { code: "EEXIST", path: store.path(preMinted) },
+    );
     store.create = () => {
       throw eexist;
     };
@@ -1387,9 +1464,13 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     const winnerRequestId = "9f1754e8-1c32-4bc7-8e0d-34f39bc8e5a2";
     store.create(preMinted);
     store.set(preMinted, { requestId: winnerRequestId });
-    const eexist = Object.assign(new Error("EEXIST: file already exists, open 'runs/…'"), {
-      code: "EEXIST",
-    });
+    // F12 (round 11): the arbiter arm requires the EEXIST's `path` to name this
+    // run's record file (see the sibling above for why the pathless shape is no
+    // longer classified as run-id-in-use).
+    const eexist = Object.assign(
+      new Error(`EEXIST: file already exists, open '${store.path(preMinted)}'`),
+      { code: "EEXIST", path: store.path(preMinted) },
+    );
     const realGet = store.get.bind(store);
     let probes = 0;
     store.get = (runId: string) => {
@@ -1467,8 +1548,11 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       }
     };
     let lists = 0;
-    const realList = driver.list.bind(driver);
-    driver.list = async () => {
+    // Same D3 path as the AC8 tests: the headroom read goes through the
+    // anomaly channel on a driver that has one, so this is where both racers
+    // must block for the window to be real.
+    const realList = driver.listWithAnomalies.bind(driver);
+    driver.listWithAnomalies = async () => {
       lists += 1;
       await bothProbed;
       return realList();
@@ -1877,6 +1961,62 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(ledger.closeCalls).toBe(1);
   });
 
+  test("AC7 (T2-8): an ADMISSION throw means driver.create is never called — production gate-before-provision ordering", async () => {
+    // What budget-gate.test.ts's "zero creates" assertions can NOT prove: there,
+    // `admitAndProvision` is the TEST'S OWN helper calling assertWithinBudget
+    // before provisionAdmittedRun, so a refusal makes reaching driver.create
+    // structurally impossible — the assertions verify the helper's sequencing.
+    // Production ordering lives HERE, in dispatch's admission critical section:
+    // assertWithinBudget and provisionAdmittedRun are two separate calls whose
+    // order the dispatcher owns. A refactor that provisions before admitting (the
+    // double-admission bug INV-COST-3/DF13 closed) flips them, this box gets
+    // created against a ledger that never admitted it, and only THIS pin notices.
+    //
+    // The fault is an admitIssue that THROWS (worse than refusing — nothing in
+    // the provisioning path can have run if even the gate did not return), and
+    // `admitCalls` carries the one probe that shows the gate itself was reached.
+    const brief = validBrief();
+    const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
+    driver.create = createSpy;
+    const mintSpy = mock(() => Promise.resolve({ key: "sk-test", hash: "abc", limitUsd: 50, usageUsd: 0 }));
+    keyApi.createKey = mintSpy;
+
+    let closeCalls = 0;
+    let asked = false;
+    const ledger: LedgerLike = {
+      config: { defaultCapMicroUsd: 10_000_000, perIssueOverrides: {} },
+      issueBudgetSnapshot: () => ({ ceilingMicroUsd: Number.MAX_SAFE_INTEGER, spentMicroUsd: 0, reservedMicroUsd: 0 }),
+      admitIssue() {
+        asked = true; // the gate WAS reached…
+        throw new Error("admission exploded"); // …and blew up instead of admitting
+      },
+      close() {
+        closeCalls += 1;
+      },
+    };
+
+    try {
+      await dispatch(brief, deps({ ledgerFactory: () => ledger }));
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      // Classified as an admission failure (exit 5), not an untyped crash —
+      // this also keeps the pin honest about WHERE the ordering broke.
+      const err = e as FleetError;
+      expect(err.exitCode).toBe(5);
+      expect(err.code).toBe("admission-failed");
+      expect(err.message).toContain("admission exploded");
+    }
+    expect(asked).toBeTrue(); // the gate really ran, so the refusal is real
+    // THE ORDERING PIN: no box, no key, no record. Any call ordering other than
+    // admit-then-provision fails at least one of these three.
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(mintSpy).not.toHaveBeenCalled();
+    expect(readdirSync(store.dir)).toHaveLength(0);
+    // The refused dispatch still closed its ledger handle.
+    expect(closeCalls).toBe(1);
+  });
+
   test("AC7: a perIssueOverride is what reaches admitIssue — and it is matched CANONICALLY", async () => {
     // Every fixture in this file leaves `perIssueOverrides` empty, so
     // `capForIssue`'s override branch never ran at this seam and the sibling
@@ -2106,14 +2246,20 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
   test("AC8: checkHeadroom allowed:false → FleetError exit 5, zero provisioning", async () => {
     const brief = validBrief();
+    // checkHeadroom reads the ANOMALY channel on a driver that has one (D3:
+    // a skipped row is a possible live box and must never be undercounted) —
+    // so the fleet is seeded through `listWithAnomalies`, not `list`.
     const listSpy = mock(() =>
-      Promise.resolve([
-        { name: "box1", status: "running" },
-        { name: "box2", status: "running" },
-        { name: "box3", status: "running" },
-      ] as ProviderVm[]),
+      Promise.resolve({
+        vms: [
+          { name: "box1", status: "running" },
+          { name: "box2", status: "running" },
+          { name: "box3", status: "running" },
+        ],
+        skipped: [],
+      } as never),
     );
-    driver.list = listSpy;
+    driver.listWithAnomalies = listSpy;
 
     const loaded = limitsWith({ maxVms: 3 }); // 3 live == ceiling → headroom 0
     const requestId = "7d2c1b0a-9f8e-4d7c-b6a5-4e3d2c1b0a9f";
@@ -2158,8 +2304,10 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
   test("AC8: checkHeadroom list-unverified → FleetError exit 5", async () => {
     const brief = validBrief();
     const requestId = "2b3c4d5e-6f70-4a1b-8c9d-0e1f2a3b4c5d";
-    // driver.list throws → checkHeadroom reports list-unverified (fail-closed)
-    driver.list = mock(() => Promise.reject(new Error("list timeout")));
+    // Same D3 path as the sibling: the enumeration refusal has to fire through
+    // the anomaly channel the gate actually reads. A throwing channel — or a
+    // non-empty `skipped`, pinned in quota.test.ts — is list-unverified.
+    driver.listWithAnomalies = mock(() => Promise.reject(new Error("list timeout")));
     const createSpy = mock(() => Promise.resolve({ name: "test", status: "running" } as ProviderVm));
     driver.create = createSpy;
     const mintSpy = mock((_name: string, limit: number) =>
@@ -3206,11 +3354,13 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // alone.
     const { clock, advance } = stepClock();
 
+    const ledger = goodLedger();
     try {
       await dispatch(
         validBrief(),
         deps({
           clock,
+          ledgerFactory: () => ledger,
           // `port` keeps post-gate work in scope, same as the expiry sibling.
           port: 8080,
           setupGate: async (drv, vm, o) => {
@@ -3228,8 +3378,14 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(err.code).toBe("dispatch-timeout");
       expect(err.payload?.step).toBe("post-gate");
       expect(err.payload?.gateReady).toBeTrue();
+      expect(err.payload?.runId).toBeString();
     }
-    expectSingleRefusalLine("dispatch-timeout");
+    // T1-8 (round 11): a post-gate timeout is "a refusal like any other" —
+    // pinned through the family helper (the old bare call asserted nothing: no
+    // code, no status) and the ledger handle is closed like every refusal's.
+    const refused = expectSingleRefusalLine("dispatch-timeout");
+    expect(refused.status).toBe("error");
+    expect(ledger.closeCalls).toBe(1);
   });
 
   test("the armed wall-clock deadline timer is CLEARED when dispatch settles — success and refusal alike", async () => {
@@ -3279,13 +3435,21 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     await auditSettledTimers(() => dispatch(validBrief(), deps()));
     // REFUSAL: the budget gate refuses after headroom already armed a
     // full-ceiling timer — the arm that most tempts a refactor to drop the
-    // finally on the way out. The refusal's CONTENT is its own tests' business;
-    // this pass only audits what the timers did on the way out.
+    // finally on the way out. T1-5 (round 11): the catch PINS the refusal
+    // instead of swallowing everything — if a regression stopped the budget
+    // gate from refusing, dispatch would resolve and this pass would silently
+    // degrade to a second success-path audit, leaving the test's stated
+    // subject (the refusal-path timer clear) untested while green.
     await auditSettledTimers(async () => {
       try {
         await dispatch(validBrief(), deps({ ledgerFactory: () => overBudgetLedger() }));
-      } catch {
-        // expected: budget-exceeded
+        failUnreachable();
+      } catch (e) {
+        if (e instanceof UnexpectedSuccessError) throw e;
+        expect(e).toBeInstanceOf(FleetError);
+        expect((e as FleetError).code).toBe("budget-exceeded");
+        // exit 1 vs 2 not pinned here deliberately — the budget-arm's OWN test
+        // owns that; this pass only needs "it refused" to be true.
       }
     });
   });
@@ -3347,11 +3511,11 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     const noManifest = await fakeGate(driver, missing.name, opts);
     const bMissing = noManifest.assertions.find((a) => a.item === "B");
     expect(bMissing?.ok).toBeFalse();
-    // `cat`'s stderr is discarded, so absent and present-but-unreadable both
-    // arrive as an empty body; the nonzero exit is what separates them from a
-    // manifest that is genuinely present and empty, and it rides the note.
-    expect(bMissing?.note).toContain("pipeline.yaml missing or unreadable");
-    expect(bMissing?.note).toMatch(/cat exit [1-9]/);
+    // The probe answers on stdout (`-e` pre-test, like item C): a manifest that
+    // never landed says so by name. Absent stays UNMARKED — the fill step can
+    // fix it, so it is the brief's own fault (do-not-retry), not the box's.
+    expect(bMissing?.note).toContain("pipeline.yaml is absent");
+    expect(bMissing?.note).not.toContain("substrate: ");
     expect(bMissing?.note).not.toContain("limitMicroUsd absent");
 
     const unstamped = await driver.create("box-probe-unstamped");
@@ -3399,17 +3563,20 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(bGarbage?.ok).toBeFalse();
     expect(bGarbage?.note).toContain("not parseable");
     expect(bGarbage?.note).not.toContain("present but empty");
-    expect(bGarbage?.note).not.toContain("missing or unreadable");
+    expect(bGarbage?.note).not.toContain("pipeline.yaml is absent");
+    expect(bGarbage?.note).not.toContain("could not be read");
     expect(bGarbage?.note).not.toContain("limitMicroUsd absent");
 
   });
 
   // The operational-error path: the manifest EXISTS and cannot be read (mode
-  // 000, EIO, an ACL). `cat`'s stderr is discarded by the probe, so this arrives
-  // as an empty body exactly like a manifest that never landed — and it used to
-  // be reported as "missing", sending the operator back to a fill step that had
-  // already succeeded. The NONZERO EXIT is the only thing that separates the two
-  // from "present but empty", and it is what has to ride the note.
+  // 000, EIO, an ACL). The probe's `-e` pre-test now PROVES presence before the
+  // read, so present-but-unreadable no longer shares an answer with "missing":
+  // existed + empty body + nonzero exit ⇒ SUBSTRATE_MARK (the box failed; the
+  // fill step cannot fix it), where genuinely-missing stays unmarked
+  // do-not-retry. That separation IS K3's fix — the .env side already worked
+  // this way, and an operator re-running a fill step that succeeded burned a
+  // retry budget on a transient box fault classified as the brief's own fault.
   //
   // Unreadability is injected at the DRIVER, not with `chmod 000`. Root reads a
   // mode-000 file, so the chmod fixture had to carry
@@ -3417,8 +3584,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
   // (root in Docker), so this arm could collapse back into "missing" and ship
   // green with only a skip marker to say it had never been attempted. A stubbed
   // `exec` reproduces what an EACCES actually delivers to the probe (empty
-  // stdout, nonzero exit) on every host and every uid.
-  test("gate item B reports an existing-but-unreadable manifest by its EXIT CODE, not as empty", async () => {
+  // stdout, nonzero exit from the cat half of the compound) on every host and
+  // every uid — the `-e` halves still hit the real box, so existence is proven.
+  test("gate item B reports an existing-but-unreadable manifest as SUBSTRATE, not missing", async () => {
     const box = await driver.create("box-probe-unreadable");
     // The manifest is REAL and well-formed — the file exists and would pass B
     // outright. Without this the case proves nothing about "existing but
@@ -3429,11 +3597,20 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       "printf '%s\\n' '{\"limitMicroUsd\":1,\"phases\":[{\"name\":\"plan\"}]}' > pipeline.yaml",
     ]);
     const realExec = driver.exec.bind(driver);
+    // Existence is proven FIRST, against the REAL box, BEFORE the stub goes
+    // in: the stub below replaces the whole compound probe — the `-e`
+    // pre-test AND the `cat` live in ONE `sh -c` string — so from install
+    // time on, nothing the gate probes touches the real filesystem. Without
+    // this dedicated pre-check the fixture would silently stop proving
+    // "genuinely present" and could collapse back into the missing case.
+    expect((await driver.exec(box.name, ["sh", "-c", "test -e pipeline.yaml"])).exitCode).toBe(0);
     driver.exec = async (vm: string, argv: string[], stdin?: string) => {
-      // Only the manifest read: every other probe still runs against the real
-      // box, so a gate that failed earlier (item A) would be visible as a
-      // different `failedItem` rather than silently satisfying these assertions.
-      if (argv[0] === "sh" && (argv[2] ?? "").startsWith("cat pipeline.yaml")) {
+      // Only the manifest-READ response is faked (empty stdout, nonzero exit
+      // from the compound's cat half — what an EACCES delivers); every other
+      // probe passes through untouched, so a gate that failed at item A shows
+      // up as a different `failedItem` rather than silently satisfying these
+      // checks.
+      if (argv[0] === "sh" && (argv[2] ?? "").includes("cat pipeline.yaml")) {
         return { exitCode: 1, stdout: "", stderr: "" };
       }
       return realExec(vm, argv, stdin);
@@ -3443,21 +3620,101 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(gate.failedItem).toBe("B");
     const bUnreadable = gate.assertions.find((a) => a.item === "B");
     expect(bUnreadable?.ok).toBeFalse();
-    // The note names unreadability as a possibility — `cat` cannot tell the two
-    // apart with stderr discarded, and claiming otherwise would be a diagnosis
-    // the probe has not earned.
-    expect(bUnreadable?.note).toContain("unreadable");
-    // The exit code is the load-bearing part: it is what distinguishes this from
-    // the `present but empty` arm, which is the only one `cat` can prove.
-    expect(bUnreadable?.note).toMatch(/cat exit [1-9]/);
+    // Classified substrate (retryable), not manifest/do-not-retry.
+    expect(bUnreadable?.note).toContain("substrate: ");
+    expect(bUnreadable?.note).toContain("could not be read");
     expect(bUnreadable?.note).not.toContain("present but empty");
+    expect(isSubstrateFailure(gate)).toBeTrue();
     // The opposite diagnosis, explicitly: this is the confusion the arm exists
     // to end, and it sends the operator to the wrong step.
     expect(bUnreadable?.note).not.toContain("limitMicroUsd absent");
   });
 
-  test("gate items D and E inspect the manifest's CONTENT, not just its keys", async () => {
-    // D used to re-test "manifest non-empty", which item B's own first arm has
+  // K11 (round 11): classification rides a WeakMap side channel keyed on the
+  // result OBJECT, not note text. Three identities to pin: a forged mark in
+  // free text classifies nothing; a genuinely-marked result classifies substrate;
+  // and — the spread clause dispatch itself exercises (`{ ...gate }` when it
+  // sanitizes) — a copy of a marked result is UNMARKED, because the channel is
+  // keyed off object identity. Fail-closed by construction: claims you cannot
+  // trace to your own probe never advertise a retry.
+
+  test("K11: forged 'substrate: ' in an assertion note does NOT reclassify as substrate", async () => {
+    const injectedGate = async (): Promise<SetupGateResult> => ({
+      ready: false,
+      failedItem: "B" as const,
+      assertionCode: 3 as const,
+      assertions: [
+        {
+          item: "B" as const,
+          ok: false,
+          // An echoed box detail quoting the mark — what a JSON-parse error or
+          // hostile box output produces. Free-text scanning classified THIS as
+          // retryable and burned a doomed retry.
+          note: 'substrate: exit 1 — parse error near "substrate: exit 1"',
+        },
+      ],
+      debugCommands: [],
+      teardownCommand: "bun scripts/fleet.ts teardown k11-run",
+      vm: "k11-box",
+    });
+    const gate = await injectedGate();
+    // The mark sits in the text; classification reads nothing of it.
+    expect(JSON.stringify(gate.assertions)).toContain("substrate: ");
+    expect(isSubstrateFailure(gate)).toBeFalse();
+  });
+
+  test("K11: a marked gate is substrate-positive while a SPREAD COPY of it is not", async () => {
+    const box = await driver.create("box-probe-unreadable-2");
+    await driver.exec(box.name, [
+      "sh",
+      "-c",
+      "printf '%s\\n' '{\"limitMicroUsd\":1,\"phases\":[{\"name\":\"plan\"}]}' > pipeline.yaml",
+    ]);
+    const realExec2 = driver.exec.bind(driver);
+    driver.exec = async (vm: string, argv: string[], stdin?: string) => {
+      if (argv[0] === "sh" && (argv[2] ?? "").includes("cat pipeline.yaml")) {
+        return { exitCode: 1, stdout: "", stderr: "" };
+      }
+      return realExec2(vm, argv, stdin);
+    };
+    try {
+      const gate = await fakeGate(driver, box.name, gateOpts);
+      expect(isSubstrateFailure(gate)).toBeTrue(); // the original carries its verdict…
+      // …but a STRUCTURAL copy loses it — identity-keyed, fail-closed. A caller
+      // that clones/spreads a gate (dispatch's sanitizer shape) gets "unknown
+      // provenance ⇒ do not advertise retry", never the inherited claim.
+      const copy = { ...gate };
+      expect(copy).toEqual(gate); // same CONTENT…
+      expect(isSubstrateFailure(copy)).toBeFalse(); // …different VERDICT
+    } finally {
+      driver.exec = realExec2;
+    }
+  });
+
+  // K12 (round 11): the operator-run debug/teardown commands interpolate runId.
+  // A value outside the shell-safe charset used to reach the string raw — an
+  // injection-shaped hole in copy-pasteable advice. Now a non-conforming id is
+  // substituted with a placeholder (the refusal payload still carries the real
+  // id for correlation), and this pins BOTH arms through the exported gate.
+  test("K12: fakeGate commands quote a conforming runId but SUBSTITUTE a non-conforming one", async () => {
+    const box = await driver.create("box-probe-k12");
+    const conforming = await fakeGate(driver, box.name, { ...gateOpts, runId: "k12-20260827-a1b2c3" });
+    expect(conforming.debugCommands[0]).toBe("bun scripts/fleet.ts status k12-20260827-a1b2c3");
+    expect(conforming.teardownCommand).toBe("bun scripts/fleet.ts teardown k12-20260827-a1b2c3");
+
+    // A hostile id: metacharacters that would break out of the command string.
+    const hostile = 'x; rm -rf / #';
+    const substituted = await fakeGate(driver, box.name, { ...gateOpts, runId: hostile });
+    expect(substituted.debugCommands[0]).toContain("<run-id>");
+    expect(substituted.teardownCommand).toContain("<run-id>");
+    // No fragment of the hostile value survives into either command.
+    for (const cmd of [substituted.debugCommands[0], substituted.teardownCommand]) {
+      expect(cmd).not.toContain("rm -rf");
+      expect(cmd).not.toContain(hostile);
+    }
+  });
+
+  test("gate items D and E inspect the manifest's CONTENT, not just its keys", async () => {    // D used to re-test "manifest non-empty", which item B's own first arm has
     // already proved by the time D runs — it could not fail, so the
     // five-assertion gate was effectively four. It now checks that the stamped
     // ceiling is spendable, and E that the phases list has phases in it.
@@ -3674,6 +3931,33 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // ($QDS_QUOTA_LIMITS_FILE), so the same throw is provoked through the
     // injectable half: a malformed LoadedQuotaLimits. Either way the call sat
     // in no try/catch at all.
+    //
+    // T1-18 (round 11): the injectable half cannot see a dispatch-side
+    // mishandling of QuotaLimitsError SPECIFICALLY (vs any untyped throw from
+    // the seam). The production trigger itself is pinned one layer down, at
+    // `loadQuotaLimits`'s own boundary, where the typed class and its code are
+    // cheap to observe through the same env var the CLI inherits — without
+    // redirecting that global mid-suite or growing a second dispatch seam:
+    await (async () => {
+      const bad = join(outsideDir, "quota-limits-bad.json");
+      writeFileSync(bad, "{not json");
+      const saved = process.env.QDS_QUOTA_LIMITS_FILE;
+      process.env.QDS_QUOTA_LIMITS_FILE = bad;
+      try {
+        let caught: unknown;
+        try {
+          loadQuotaLimits();
+        } catch (e) {
+          caught = e;
+        }
+        expect(caught).toBeInstanceOf(QuotaLimitsError);
+        expect((caught as QuotaLimitsError).code).toBe("quota-limits-unreadable");
+      } finally {
+        // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+        if (saved === undefined) delete process.env.QDS_QUOTA_LIMITS_FILE;
+        else process.env.QDS_QUOTA_LIMITS_FILE = saved;
+      }
+    })();
     try {
       await dispatch(
         validBrief(),
@@ -3686,7 +3970,11 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       const err = e as FleetError;
       expect(err.exitCode).toBe(5);
       expect(err.code).toBe("headroom-failed");
-      expect(refusalLines()).toHaveLength(1);
+      // T1-7 (round 11): the line is pinned through the family helper, not a
+      // bare count — the old toHaveLength(1) passed a line filed with the wrong
+      // code or status≠error, which every sibling refusal family refuses.
+      const refused = expectSingleRefusalLine("headroom-failed");
+      expect(refused.runId).toBe(err.payload?.runId as string);
     }
     expect(readdirSync(store.dir)).toHaveLength(0);
     expect(await driver.list()).toHaveLength(0);
@@ -4402,6 +4690,96 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(line.clonedLate).toBeTrue();
   });
 
+  test("an ABANDONED GATE keeps the box's posture honest and names the gate-specific remediation", async () => {
+    // T1-6 (round 11): the gate is "the longest await in a dispatch" and was
+    // the ONE step with no hanging test — every sibling step's timeout path is
+    // pinned, so `within("gate")`'s abandoned-arm (step:"gate" in the payload,
+    // the gate-specific late-effect remediation naming "inspect the box
+    // directly": a gate outcome reaches NO record this dispatch writes) could
+    // regress untested while every sibling stayed green.
+    const { clock, advance } = stepClock();
+    let releaseGate: () => void = () => {};
+    const gating = new Promise<void>((r) => {
+      releaseGate = r;
+    });
+    makeDriverExedevCapable();
+    const brief = validBrief(); // also creates the manifests dir the roster sits in
+    Object.assign(driver, {
+      exec: async () => ({ exitCode: 0, stdout: "600\n", stderr: "" }),
+    });
+    // The HANG rides the DEPS seam (`deps.setupGate`), not a driver method:
+    // with only a driver method assigned, dispatch's default gateFn sees an
+    // exedev-shaped driver and calls realSetupGate, whose `driver.boxHost` the
+    // FakeDriver lacks — a TypeError, not the timeout this test exists to pin.
+    const gatingGate: DispatchDeps["setupGate"] = async () => {
+      await gating;
+      // Shape-complete for the type; only `ready` is ever read — dispatch has
+      // already refused by the time this resolves.
+      return {
+        ready: true,
+        assertions: [],
+        debugCommands: [],
+        teardownCommand: "bun scripts/fleet.ts teardown never-reached",
+        vm: "",
+      };
+    };
+    // TWO-STAGE clock spend, same scheme as the clone sibling: deliver's exec
+    // stub spends down to 900 ms on its FIRST call, and everything earlier
+    // holds a 30 s timer no CI stall can outlive — so only `gate` holds the
+    // short one when its `within` arms.
+    const EARLY_LEFT_MS = 30_000;
+    const TARGET_LEFT_MS = 900;
+    let execCalls = 0;
+    Object.assign(driver, {
+      exec: async () => {
+        if (execCalls++ === 0) advance(EARLY_LEFT_MS - TARGET_LEFT_MS);
+        return { exitCode: 0, stdout: "600\n", stderr: "" };
+      },
+    });
+    writeFileSync(join(dir, "manifests", "roster.yaml"), VALID_ROSTER);
+
+    let err: FleetError | undefined;
+    try {
+      await dispatch(
+        brief,
+        deps({
+          clock,
+          setupGate: gatingGate,
+          ledgerFactory: () => {
+            advance(DEFAULT_TIMEOUT_MS - EARLY_LEFT_MS);
+            return goodLedger();
+          },
+        }),
+      );
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      err = e as FleetError;
+    }
+    expect(err).toBeInstanceOf(FleetError);
+    expect(err?.code).toBe("dispatch-timeout");
+    expect(err?.payload?.step).toBe("gate");
+    const runId = err?.payload?.runId as string;
+    expect(runId).toBeString();
+
+    // The abandoned call resolving LATE must still file the abandoned line —
+    // `within("gate")` passes no describeLate (a gate result reaches no record),
+    // so the line carries no vmName; the pin is that it EMERGES at all, with
+    // the success marker, after dispatch has already rejected.
+    releaseGate();
+    const line = await abandonedLine("gate");
+    expect((line.error as { code?: string }).code).toBe("abandoned-step-succeeded");
+    // The record keeps the box named even though the late line does not.
+    expect(store.get(runId)?.vmName).toBeString();
+    // AC4: the refusal filed exactly one joinable error line, and it names the
+    // dispatch's correlation id — recovered from the record the create step
+    // persisted, since `requestId` here is dispatch-generated (none injected).
+    const refused = expectSingleRefusalLine("dispatch-timeout");
+    // The correlation was stamped on the record during the create step; the
+    // assertion fails loudly if either side lost it.
+    expect(refused.requestId).toBe(store.get(runId).requestId as string);
+  });
+
   test("INV-6: a long host label is redacted without mangling the URL, and userinfo never survives", async () => {
     // The host arm sliced the string: `/[^/]{16,}/` matched the `//host` run
     // itself, so `https://abcdefghijklmnopq` came out as `https:/«redacted»` —
@@ -4499,11 +4877,13 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // repeating it in safe form right next to the leak. So under the floor the
     // bounded form is spliced over the raw echo instead.
     //
-    // Scope note: these assertFleetRunId units call the function DIRECTLY, so
-    // they can only ever observe the envelope. The stderr line and the
-    // dispatch-log entry the CLI derives from that envelope are two hops
-    // downstream of the composition under test here, and no unit-level call
-    // exercises them — they are not claimed as covered.
+    // Scope note (T1-17, round 11): these units observe the ENVELOPE only. The
+    // derived sinks ARE covered downstream now, not unclaimed: cli.test.ts's
+    // "a run id that fails the grammar…" pins the stderr envelope verbatim for
+    // every band, and its CC-9 test ("the log's runId is redacted first, then
+    // capped…") pins the log field's redact-then-cap on the same input class.
+    // A sink-side regression that re-echosed unredacted payload fails THERE;
+    // this file's comment previously said no such coverage existed.
     const supplied = "s3cr3t-Token-abc"; // 16 chars; uppercase fails the run-id grammar
     expect(supplied.length).toBeLessThan(40);
     try {

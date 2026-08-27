@@ -40,7 +40,12 @@ import {
 } from "../../src/fleet/status.ts";
 import { CostLedger } from "../../src/providers/index.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
-import { provisionAdmittedRun, SBX_OWNERSHIP_TAG, type ProviderVm } from "../../src/providers/driver.ts";
+import {
+  provisionAdmittedRun,
+  RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX,
+  SBX_OWNERSHIP_TAG,
+  type ProviderVm,
+} from "../../src/providers/driver.ts";
 import {
   RUN_ID_MAX,
   RUN_ID_RE,
@@ -226,6 +231,35 @@ describe("verbs.ts (registry)", () => {
     ]);
   });
 
+  test("F6 composition: no verb exposes an admission-skip flag, and the CLI refuses one", () => {
+    // Auditor F6 (round 11). The dangerous capability is `dispatch`'s programmatic
+    // `{ admitted: true }` seam (DF3.2's fan-out route, dispatch.ts:809): if it
+    // ever leaked into the PUBLIC CLI surface as a flag — `--admitted`,
+    // `--skip-admission`, `--no-headroom`, anything semantics-adjacent — every
+    // headroom/budget gate would be bypassable from a shell with no code change
+    // in the gates themselves. Two registry-derived pins close the class rather
+    // than any one spelling:
+    //   1. NO declared flag on ANY verb carries admission-skipping meaning;
+    //   2. the CLI refuses EVERY undeclared flag on EVERY verb (the sweep test
+    //      below is that half at runtime; this names the same property for the
+    //      skip vocabulary specifically).
+    const skipVocabulary = /admit|headroom|budget|ceiling|skip|force|bypass/i;
+    for (const entry of listVerbs()) {
+      for (const flag of entry.flags) {
+        expect({ verb: entry.verb, flag: flag.name, matchesSkip: skipVocabulary.test(flag.name) }).toEqual({
+          verb: entry.verb,
+          flag: flag.name,
+          matchesSkip: false,
+        });
+      }
+    }
+    // And the invariant travels with NEW flags: the sweep derives its list from
+    // this same registry, so a future admission-shaped flag is refused against
+    // every verb by construction before it can act.
+    const allFlags = listVerbs().flatMap((v) => v.flags.map((f) => f.name));
+    for (const name of allFlags) expect(skipVocabulary.test(name)).toBe(false);
+  });
+
   test("listVerbs keeps every known verb", () => {
     // OPEN-WORLD on purpose: an eighth verb must not have to edit this file to
     // exist — the registry may grow additively and every per-verb pin below is
@@ -409,7 +443,12 @@ describe("verbs.ts (registry)", () => {
     const help = renderHelp(synthetic);
     expect(help).toContain("syntheticverb");
     expect(help).toContain("a verb that exists only in this test");
-    expect(help).toContain("7");
+    // T1-12 (round 11): the exitCodes COLUMN form, not a bare substring —
+    // `toContain("7")` was satisfied by "17"/"70"/any stray 7 anywhere in the
+    // text. The real-registry test pins `join(", ")`; this pins it on a
+    // synthetic registry too, so a renderer corrupting just this line fails
+    // here and not only on main's data.
+    expect(help).toMatch(/^ *Exit codes: 7$/m);
     expectFlagLines(help, synthetic[0]!);
 
     // ONE rendered entry, because one was handed over — a body that ignores
@@ -764,8 +803,10 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       { argv: ["harvest", "--no-harvest", "some-run"], code: 2, stderr: "does not take --no-harvest" },
       { argv: ["harvest", "some-run"], code: 2, deps: () => ({ store }), stderr: "harvest requires --driver" },
       {
+        // Wave-1 C4 contract update: a corrupt record is 5 (do-not-retry — no
+        // retry heals a corrupt record file), not 1 transient.
         argv: ["harvest", "some-run"],
-        code: 1,
+        code: 5,
         deps: () => ({ driver, store: unreadableStore() }),
         stderr: "record-read-failed",
       },
@@ -822,8 +863,9 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       { argv: ["teardown", "one", "two"], code: 2, stderr: "exactly one" },
       { argv: ["teardown", "some-run"], code: 2, deps: () => ({ store }), stderr: "teardown requires --driver" },
       {
+        // Wave-1 C4 contract update: same as the harvest sibling above.
         argv: ["teardown", "some-run"],
-        code: 1,
+        code: 5,
         deps: () => ({ driver, store: unreadableStore() }),
         stderr: "record-read-failed",
       },
@@ -1027,8 +1069,26 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       },
     ],
     status: [],
-    harvest: [],
-    teardown: [],
+    // Wave-1 C4 contract update: the corrupt-record probes above now return 5
+    // (do-not-retry — no retry heals a corrupt record file), not 1 transient.
+    // 1 = a mid-capture HarvestError typed code (bundle-create-failed &c., a
+    // provider-side substrate fault past the record probe) — it needs a full
+    // in-box bundle protocol (git runner + seeded box + host checkout), which
+    // cli.test.ts owns through its seeded-run fixtures, not this shared store.
+    harvest: [
+      {
+        code: 1,
+        why: "needs a mid-capture failure past the record probe — cli.test.ts",
+        coveredBy: "a throw that is not an Error still reports exit 1 with a message",
+      },
+    ],
+    teardown: [
+      {
+        code: 1,
+        why: "needs a mid-capture failure past the record probe — cli.test.ts (same harvest-step shape as harvest's excuse)",
+        coveredBy: "a throw that is not an Error still reports exit 1 with a message",
+      },
+    ],
     // fanout's probes above cover {0, 1, 2, 5}; 6 needs a stdout sink that
     // refuses with EAGAIN mid-stream (the outputIncomplete fold), which the
     // shared invoke() sinks here cannot do — cli.test.ts owns a sink that can.
@@ -1097,9 +1157,15 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         const rest = cli.slice(at + headLen);
         const end = rest.search(/\n {2}(?:test|it)\(/);
         const body = end < 0 ? rest : rest.slice(0, end);
-        // The exit code, asserted. `toBe(<code>)` is how every exit assertion in
-        // that file is spelled; `code: <code>` is the object form the loops use.
-        if (!new RegExp(`toBe\\(${code}\\)|\\bcode: ${code}\\b`).test(body)) {
+        // T1-2 (round 11): an actual EXIT-CODE assertion shape, not any
+        // `toBe(<code>)` token — `expect(capMicroUsd).toBe(5)` in a sibling
+        // line satisfied the old regex while the exit stayed unasserted.
+        // `(code|exitCode))?.toBe(N)` covers `expect(code).toBe(6)` and the
+        // optional-chained variants; `\bcode: N\b` covers the object-literal
+        // form the probe loops use. Verified empirically per excused code: each
+        // still has ≥1 satisfier (dispatch 0's three satisfies come from its
+        // dispatchCode/statusCode/teardownCode assertions).
+        if (!new RegExp(`\\b(?:exitCode|[A-Za-z]*[Cc]ode)\\s*\\)?\\.toBe\\(\\s*${code}\\s*\\)`).test(body)) {
           missing.push(`${verb} exit ${code}: ${JSON.stringify(coveredBy)} no longer asserts exit ${code}`);
         }
       }
@@ -1533,14 +1599,26 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
 
   test("a flag the registry does not give a verb is refused, per verb", async () => {
     const deps: Partial<FleetDeps> = { driver, store, readBrief: async () => "{not json" };
+    // T1-3 (round 11): the sweep list is DERIVED from the registry, not a
+    // hand-maintained three-flag literal — post-merge verbs added --pattern,
+    // --n, --pin, --roster, --cap-micro-usd and --steps-json, none of which the
+    // old list ever tried against a foreign verb. A verb whose parser stops
+    // refusing another verb's flag now turns red HERE.
+    const allFlags = [...new Set(listVerbs().flatMap((v) => v.flags.map((f) => f.name)))];
+    expect(allFlags.length).toBeGreaterThan(3); // anti-vacuity: the derivation really widened
     for (const entry of listVerbs()) {
       const declared = new Set(entry.flags.map((f) => f.name));
-      // Every flag ANY verb declares, tried against a verb that does not declare
-      // it: `--brief`/`--port` (dispatch only) and `--no-harvest` (teardown only).
-      for (const flag of ["--brief", "--port", "--no-harvest"]) {
+      for (const flag of allFlags) {
         if (declared.has(flag)) continue;
         const err: string[] = [];
-        const argv = flag === "--no-harvest" ? [entry.verb, flag] : [entry.verb, flag, "x"];
+        // The value TYPE is resolved from the verb that OWNS the flag, not from
+        // this entry — `entry.flags.find(... === flag)` is always undefined
+        // here (the sweep only visits flags this verb does NOT declare), so it
+        // typed every foreign flag as valued and appended "x" even to boolean
+        // ones. The owning verb's declaration is the authority.
+        const owner = listVerbs().find((v) => v.flags.some((f) => f.name === flag));
+        const value = owner?.flags.find((f) => f.name === flag)?.valueType !== "boolean";
+        const argv = value ? [entry.verb, flag, "x"] : [entry.verb, flag];
         expect(await run(argv, sink, deps, (s) => void err.push(s))).toBe(2);
         expect(err.join("")).toContain(`${entry.verb} does not take ${flag}`);
       }
@@ -1819,6 +1897,83 @@ describe("status.ts (statusAll join logic)", () => {
     rmSync(join(store.dir, "NOT_A_RUN_ID.json"));
     const clean = await statusAll({ driver, store, listTimeoutMs: 1000 });
     expect(clean.some((r) => r.state === "recordsSkipped")).toBe(false);
+  });
+
+  test("T1 (r3b-verbs-b): recordsSkipped and listUnavailable rows COEXIST — neither folds into the other", async () => {
+    // Two independent truncations of two independent listings: the DRIVER
+    // refused to name boxes (listUnavailable) and the RECORD store skipped a
+    // file (recordsSkipped). Both share runId "(fleet)", so a refactor that
+    // lets one row overwrite the other in a map keyed by id stays green while
+    // one of the two outages vanishes from the output. Order rides stable-sort
+    // insertion (records first, driver row pushed after) — pinned as such.
+    await provision("coexist-run");
+    writeFileSync(join(store.dir, "NOT_A_RUN_ID.json"), '{"runId":"NOT_A_RUN_ID"}\n');
+    const rows = await statusAll({
+      driver: {
+        list: async (): Promise<ProviderVm[]> => {
+          throw new Error("list down");
+        },
+      },
+      store,
+      listTimeoutMs: 1000,
+    });
+    const fleetRows = rows.filter((r) => r.runId === FLEET_ROW_ID);
+    // BOTH, as separate rows.
+    expect(fleetRows.map((r) => r.state)).toContain("recordsSkipped");
+    expect(fleetRows.map((r) => r.state)).toContain("listUnavailable");
+    expect(fleetRows).toHaveLength(2);
+    // The skipped NAMES survive on their own row even with the driver down.
+    expect(fleetRows.find((r) => r.state === "recordsSkipped")?.skippedRecords).toEqual(["NOT_A_RUN_ID.json"]);
+  });
+
+  test("T1 (r3b-verbs-b): safeUrl refuses userinfo-bearing and non-https httpsUrl on STATUS ROWS", async () => {
+    // dispatch's INV-6 pins the same sanitizer on refusal MESSAGES; the status
+    // row is a second sink (`rowForRecord` / `orphanRow`) and could ride the
+    // raw value out with this suite green. https-only and no-userinfo are both
+    // mandatory; `sanitizeLabel`'s cap is inherited, not re-pinned here.
+    const rec = await provision("url-sanitized-run", { httpsUrl: "https://user:pw@host.example/vm" });
+    const row = await statusRun({ driver, store, listTimeoutMs: 1000 }, rec.runId);
+    expect(row.state).toBe("live");
+    expect(row.httpsUrl).toBeUndefined();
+
+    // Non-https scheme: dropped for the same reason.
+    store.set(rec.runId, { httpsUrl: "http://host.example/vm" });
+    const httpRow = await statusRun({ driver, store, listTimeoutMs: 1000 }, rec.runId);
+    expect(httpRow.httpsUrl).toBeUndefined();
+
+    // A clean URL SURVIVES verbatim-shaped (bounded): the absence proofs above
+    // are vacuous if `safeUrl` just deleted everything.
+    store.set(rec.runId, { httpsUrl: "https://clean-host.example/vm" });
+    const okRow = await statusRun({ driver, store, listTimeoutMs: 1000 }, rec.runId);
+    expect(okRow.httpsUrl).toBe("https://clean-host.example/vm");
+  });
+
+  test("T1 (r3b-verbs-b): a >64-char createdAt is TRUNCATED in the row but still sorts by its true instant", async () => {
+    // `pinSortInstant` reads the RAW record value BEFORE `sanitizeLabel` bounds
+    // it to MAX_TIMESTAMP=64 — deleting pinSortInstant passes every short-date
+    // fixture and silently demotes over-long stamps to "unparseable sorts
+    // first", inverting newest-first for exactly the malformed-createdAt runs an
+    // operator most needs on top.
+    // MAX_TIMESTAMP is module-private (status.ts:125); this test pins the
+    // CONTRACT "row.createdAt is bounded, sort uses the raw instant", not the
+    // constant itself — a widening of the bound must not break the sort pin.
+    // A >64-char createdAt that still PARSES: a long fractional-second stamp.
+    // JS Date.parse accepts arbitrary fraction digits (truncating to ms), so
+    // 40 of them clears the 64-unit bound while remaining a valid instant.
+    const longCreatedAt = `2026-01-02T03:04:05.${"1".repeat(40)}+00:00`;
+    expect(longCreatedAt.length).toBeGreaterThan(64);
+    expect(Number.isNaN(Date.parse(longCreatedAt))).toBe(false);
+    const rows2: RunRecord[] = [
+      { runId: "x-long", createdAt: longCreatedAt },
+      { runId: "y-short-newer", createdAt: "2026-01-02T09:00:00Z" },
+    ];
+    const stubStore = {
+      listWithAnomalies: () => ({ records: rows2, skipped: [] }),
+    } as unknown as RunRecordStore;
+    const rows = await statusAll({ driver, store: stubStore, listTimeoutMs: 1000 });
+    // y-short-newer is genuinely later → first. If the raw pin were gone,
+    // x-long's bounded string would parse as NaN/Infinity-first and WIN.
+    expect(rows.map((r) => r.runId)).toEqual(["y-short-newer", "x-long"]);
   });
 
   test("newest-first by createdAt, numeric across mixed ISO shapes, runId breaking ties", async () => {
@@ -2145,6 +2300,50 @@ describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", 
     expect(() => store.get(runId)).toThrow(/ENOENT/);
     expect(await driver.list(runId)).toEqual([]);
   });
+
+  test("a budget write timing out on the record LOCK refuses `budget-write-lock-timeout` and does NOT remove the record (T1/r3b)", async () => {
+    // The third arm of provisionAdmittedRun's budget-write catch, added in
+    // round 6 with no test anywhere: a lock TIMEOUT means someone else HOLDS
+    // the lock — removing the record there would delete bytes a live writer is
+    // about to rename back (record returns OPEN and BUDGETLESS anyway, id
+    // re-mintable). The arm is chosen by `isRecordLockTimeout`, i.e. by the
+    // message prefix `RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX`; every other cause
+    // still takes the destructive rollback. Inverting the guard — routing THIS
+    // cause onto rmSync, or that one onto this refusal — must fail here.
+    const runId = "budget-write-lock-timeout";
+    const failing = Object.assign(Object.create(driver) as FakeDriver, {
+      create: async (): Promise<ProviderVm> => {
+        throw new Error("driver.create must never be reached");
+      },
+    });
+    const realSet = store.set.bind(store);
+    let calls = 0;
+    store.set = ((id: string) => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error(`${RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX} held by pid 424242`);
+      }
+      return realSet(id, {} as Parameters<typeof realSet>[1]);
+    }) as typeof store.set;
+
+    let err: Error | undefined;
+    try {
+      err = await rejection(provisionAdmittedRun(failing, store, { runId, budget }));
+    } finally {
+      store.set = realSet;
+    }
+    // The LOCK-TIMEOUT refusal, typed and named — not the generic provision
+    // failure the sibling above produces for an untyped write failure.
+    expect(err.message).toContain(RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX);
+    expect(err.message).toContain("deliberately NOT removed");
+
+    // The record SURVIVES: this is the whole point of the arm. Reading it back
+    // must NOT throw ENOENT — inverting the guard turns this into the sibling's
+    // expectation, which is how a live writer's bytes get deleted.
+    const rec = store.get(runId);
+    expect(rec.closedAt).toBeUndefined();
+    expect(rec.extensions?.budget).toBeUndefined();
+  });
 });
 
 describe("status.ts (list timeout)", () => {
@@ -2160,6 +2359,53 @@ describe("status.ts (list timeout)", () => {
 
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("F15: a listTimeoutMs above the 32-bit signed max is CLAMPED to it, never inverted to ~1ms", async () => {
+    // fix-F15: `setTimeout` clamps a delay past 2^31-1 to 1 ms — an over-eager
+    // configured ceiling used to become the SHORTEST possible budget, every box
+    // reported boxUnknown and statusAll emitted listUnavailable. Clamping (not
+    // refusing) is the contract: the largest real budget replaces an impossible
+    // one. Pinned through the same timer-observation seam the default case
+    // uses, because resolveTimeoutMs is module-private.
+    await provisionAdmittedRun(driver, store, { runId: "clamp-run" });
+    const boxes = await driver.list();
+    let release!: (vms: ProviderVm[]) => void;
+    const gate = new Promise<ProviderVm[]>((resolve) => {
+      release = resolve;
+    });
+    const gated = { list: (): Promise<ProviderVm[]> => gate };
+
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    const armed: { ms: unknown; handle: unknown }[] = [];
+    globalThis.setTimeout = ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      const handle = (realSetTimeout as (...a: unknown[]) => unknown)(fn, ms, ...rest);
+      armed.push({ ms, handle });
+      return handle;
+    }) as unknown as typeof globalThis.setTimeout;
+    globalThis.clearTimeout = ((handle: unknown) => {
+      (realClearTimeout as (...a: unknown[]) => void)(handle);
+    }) as unknown as typeof globalThis.clearTimeout;
+
+    try {
+      const pending = statusAll({
+        driver: gated,
+        store,
+        // Exactly past the boundary: a value `setTimeout` would invert.
+        listTimeoutMs: 2_147_483_648,
+      });
+      const armedByTheRace = armed.splice(0);
+      expect(armedByTheRace).toHaveLength(1);
+      // THE pin: the armed delay is the clamp ceiling, not 1 ms.
+      expect(armedByTheRace[0]!.ms).toBe(2_147_483_647);
+      release(boxes); // the listing answers; no timeout ever fires
+      const rows = await pending;
+      expect(rows.find((r) => r.state === "live")).toBeDefined();
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+    }
   });
 
   test("omitted listTimeoutMs arms the 30s default and the timer is always cleared", async () => {
@@ -2451,6 +2697,38 @@ describe("status.ts (statusRun)", () => {
     // And the same id through the fleet-wide verb agrees — one shared row shape.
     const rows = await statusAll({ driver, store, listTimeoutMs: 1000 });
     expect(rows).toEqual([row]);
+  });
+
+  test("T1-4: an ENOENT orphan row carries skippedRecords when the listing skipped files", async () => {
+    // status.ts's orphan arm spreads `skippedRecords` onto the row — a mangled
+    // `.json` stem may be THIS run's renamed record, and an orphan verdict that
+    // hides a possible record for the same id contradicts itself. Deleting that
+    // spread passed every other orphan case (they plant no skipped files), so
+    // it is pinned here: same shape as the fleet-level recordsSkipped row, on
+    // THE row whose existence the caveat is about.
+    const runId = "orphan-with-skipped";
+    await driver.create(runId, SBX_OWNERSHIP_TAG);
+    // A real store: the skipping happens inside `listWithAnomalies`, so the
+    // fixture must plant a genuinely grammar-violating stem.
+    writeFileSync(join(store.dir, "NOT_A_RUN_ID.json"), '{"runId":"NOT_A_RUN_ID"}\n');
+
+    const row = await statusRun({ driver, store, listTimeoutMs: 1000 }, runId);
+    expect(row.state).toBe("orphan");
+    expect(row.skippedRecords).toEqual(["NOT_A_RUN_ID.json"]);
+
+    // …and the caveat rides out sanitized, like the fleet-level row's copy:
+    // `safeName` strips control characters from substrate-supplied text before
+    // it reaches the operator stream.
+    expect(row.skippedRecords?.join("")).not.toMatch(/[\r\n\t]/);
+
+    // No skipped files → no key at all (an orphan over a clean listing must not
+    // grow an empty-array `skippedRecords` that renderers would print as "0").
+    rmSync(join(store.dir, "NOT_A_RUN_ID.json"));
+    await driver.destroy(runId);
+    await driver.create(runId, SBX_OWNERSHIP_TAG);
+    const cleanRow = await statusRun({ driver, store, listTimeoutMs: 1000 }, runId);
+    expect(cleanRow.state).toBe("orphan");
+    expect(cleanRow).not.toHaveProperty("skippedRecords");
   });
 
   test("a list failure on the ENOENT path still refuses as 4, never invents a box", async () => {

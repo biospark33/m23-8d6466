@@ -488,7 +488,10 @@ describe("per-issue override honored end-to-end", () => {
 // ─── INV-COST-6: unopenable ledger ─────────────────────────────────────────────
 
 describe("INV-COST-6: unopenable ledger refuses", () => {
-  test("INV-COST-6: createRun with opts.issue on an unopenable ledger path (directory) refuses, zero creates", async () => {
+  // T2-15 (round 11): the title used to name `createRun` with `opts.issue` — a
+  // path DF3.1 review L3 REMOVED (createRun now refuses opts.issue outright with
+  // admission-not-here). The body calls admitAndProvision; the title now says so.
+  test("INV-COST-6: an unopenable ledger path (directory) refuses BEFORE provisioning — zero creates", async () => {
     const driver = new FakeDriver(join(dir, "boxes"));
     const store = new RunRecordStore(join(dir, "runs"));
 

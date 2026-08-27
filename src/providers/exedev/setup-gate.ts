@@ -42,7 +42,7 @@
  * store consumer including the reaper.
  */
 
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../../swarmclaw/log.ts";
 import { parseRoster, ROSTER_MAX_BYTES, RosterError } from "../../phase-engine/roster/schema.ts";
@@ -151,14 +151,66 @@ function rosterModels(rosterPath: string): string[] {
   // loop, so an oversized roster would wedge the gate outside every deadline
   // (the dispatch pre-check caps its own read; this is the second copy of the
   // same hazard — brief-steered path, repo-root containment only).
-  const size = statSync(rosterPath).size;
-  if (size > ROSTER_MAX_BYTES) {
-    throw new RosterError(
-      [`roster is ${size} bytes, over the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling`],
-      rosterPath,
-    );
+  //
+  // Every fs failure below is TYPED (RosterError), never a bare Node error:
+  // the gate's contract is refusals an operator can act on, and a bare
+  // ENOENT/EACCES/EISDIR escaping here classified as an unhandled crash.
+  //
+  // ONE verified file descriptor end to end: the path is opened once, proven
+  // a regular file under the ceiling BY THE DESCRIPTOR (fstat, not a
+  // path-based stat that can name a different inode than the one read), and
+  // read through that same descriptor under a hard byte cap. The old
+  // stat-path → read-path → re-stat-path sequence verified and consumed three
+  // potentially different files; here growth past the ceiling between fstat
+  // and read cannot wedge the loop, because the read itself is capped at
+  // ceiling+1 bytes and anything longer is the same typed over-ceiling
+  // refusal the re-stat used to produce.
+  let fd: number | undefined;
+  try {
+    try {
+      fd = openSync(rosterPath, "r");
+    } catch (e) {
+      throw unreadableRoster(rosterPath, e);
+    }
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) {
+      throw new RosterError(
+        [`roster path is not a regular file (${stat.isDirectory() ? "a directory" : "other"}) — cannot parse it as a roster`],
+        rosterPath,
+        "roster_unreadable",
+      );
+    }
+    if (stat.size > ROSTER_MAX_BYTES) {
+      throw overCeilingRoster(rosterPath, stat.size);
+    }
+    // +1 byte of slack: a file grown past the ceiling since the fstat shows up
+    // as an overlong read here, not as an unbounded buffer.
+    const buf = Buffer.alloc(stat.size + 1);
+    let read = 0;
+    while (read < buf.length) {
+      const n = readSync(fd, buf, read, buf.length - read, read);
+      if (n === 0) break; // EOF — a file shrunk since the fstat reads short
+      read += n;
+    }
+    if (read > ROSTER_MAX_BYTES) {
+      throw overCeilingRoster(rosterPath, read);
+    }
+    const text = buf.subarray(0, read).toString("utf8");
+    return parseRosterSlugs(text, rosterPath);
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // The typed verdict above is already decided; a failing close on a
+        // read-only fd must not replace it.
+      }
+    }
   }
-  const text = readFileSync(rosterPath, "utf8");
+}
+
+/** Shared tail of `rosterModels`: parse, then validate the derived slugs. */
+function parseRosterSlugs(text: string, rosterPath: string): string[] {
   const roster = parseRoster(text, rosterPath);
   const slugs = [...new Set(roster.roles.map((r) => r.slug))];
   return slugs.map((slug) => {
@@ -174,7 +226,26 @@ function rosterModels(rosterPath: string): string[] {
   });
 }
 
-// ─── timing ─────────────────────────────────────────────────────────────────
+// ─── timing ────────────────────────────────────────────────────────────────
+
+/** A roster read that failed before parsing could see it — typed, with the errno named. */
+function unreadableRoster(rosterPath: string, e: unknown): RosterError {
+  const err = e as NodeJS.ErrnoException;
+  return new RosterError(
+    [`roster could not be read (${err.code ?? (e instanceof Error ? e.message : String(e))}) — the gate parses it host-side before any spend`],
+    rosterPath,
+    "roster_unreadable",
+  );
+}
+
+/** The roster exceeded the byte ceiling — at the fstat, or as an overlong capped read. */
+function overCeilingRoster(rosterPath: string, size: number): RosterError {
+  return new RosterError(
+    [`roster is ${size} bytes, over the ${ROSTER_MAX_BYTES}-byte (256 KiB) ceiling`],
+    rosterPath,
+    "roster_unreadable",
+  );
+}
 
 function emitGate(
   requestId: string,
@@ -220,8 +291,12 @@ export async function setupGate(
   // is a driver-boundary option bag that callers build from JSON and env, where
   // `null` is what an absent field deserialises to. `!== undefined` let it
   // through to `.trim()` and turned a missing id into a TypeError out of the
-  // gate — a crash where the fallback was the whole point.
-  const requestId = opts.requestId != null && opts.requestId.trim().length > 0 ? opts.requestId : driver.requestId;
+  // gate — a crash where the fallback was the whole point. The typeof guard is
+  // the same posture one step further: a JSON-built bag can carry a NUMBER or
+  // BOOLEAN id ({"requestId": 42}), which `.trim()` also TypeErrored on — any
+  // non-string falls back to the driver's own id, never crashes the gate.
+  const requestId =
+    typeof opts.requestId === "string" && opts.requestId.trim().length > 0 ? opts.requestId : driver.requestId;
   if (!SHA_RE.test(opts.commitSha)) {
     throw new ExeDevDriverError(
       "commit-sha-invalid",

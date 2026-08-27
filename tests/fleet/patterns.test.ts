@@ -81,7 +81,13 @@ function boundProxy<T extends object>(target: T, extra: { get(prop: string | sym
 function brokenListDriver(inner: ProviderDriver): ProviderDriver {
   return boundProxy(inner, {
     get(prop) {
-      return prop === "list" ? () => Promise.reject(new Error("provider unreachable")) : undefined;
+      // Both listing channels reject: checkHeadroom prefers listWithAnomalies
+      // when the driver has one (the anomaly seam), so a stub that only breaks
+      // `list` lets the population read succeed through the other channel and
+      // never reaches the list-unverified refusal.
+      return prop === "list" || prop === "listWithAnomalies"
+        ? () => Promise.reject(new Error("provider unreachable"))
+        : undefined;
     },
   });
 }
@@ -445,7 +451,9 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
   describe("admission (AC1)", () => {
     test("checkHeadroom is consulted EXACTLY once for n=3 — never once per arm", async () => {
       manifest();
-      const listSpy = spyOn(driver, "list");
+      // checkHeadroom reads the anomaly channel when the driver has one
+      // (FakeDriver does), so that is the spy that counts consultations.
+      const listSpy = spyOn(driver, "listWithAnomalies");
       const res = await fanout("best-of-n", 3, brief(), deps({ rosterIds: ["r0", "r1", "r2"] }));
       expect(res.arms).toHaveLength(3);
       expect(listSpy.mock.calls.length).toBe(1);

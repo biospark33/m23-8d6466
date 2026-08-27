@@ -9,8 +9,9 @@
  * no git repo is touched and no box is destroyed — the harvest/teardown flows
  * themselves are covered by tests/providers/teardown.test.ts.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import * as nodeFs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -77,7 +78,10 @@ function lockHostOf(runsDir: string): string {
 
 /** The same token folded to the filename-safe form lock temps carry (`hostTag`). */
 function hostTagOf(runsDir: string): string {
-  return lockHostOf(runsDir).replace(/[^A-Za-z0-9_-]/g, "_");
+  return lockHostOf(runsDir).replace(
+    /[^A-Za-z0-9_]|_/g,
+    (ch) => (ch === "_" ? "--" : `-${ch.charCodeAt(0).toString(16).padStart(2, "0")}`),
+  );
 }
 
 /** Drain `stream` until `needle` appears, or fail with the child's stderr. */
@@ -365,23 +369,24 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
     releaseRunLock(acquireRunLock(runs, "destructive-unit"));
   });
 
-  test("a stale `<runId>.lock.<hostTag>.<pid>.<hex>.tmp` is reaped on acquire; a live pid's temp is left alone", () => {
+  test("a stale `<runId>.lock.<hostTag>.<pid>.<hex>.lktmp` is reaped on acquire; a live pid's temp is left alone", () => {
     // Nothing else removes these: a process SIGKILLed between the temp's
     // creation and its unlink leaves one forever, in the same directory the
     // record and bundle listings glob over.
     const tag = hostTagOf(runs);
-    const stale = join(runs, `reap-run.lock.${tag}.${DEAD_PID}.deadbeef.tmp`);
-    const live = join(runs, `reap-run.lock.${tag}.${process.pid}.c0ffee.tmp`);
-    const otherRun = join(runs, `other-run.lock.${tag}.${DEAD_PID}.abc123.tmp`);
+    const stale = join(runs, `reap-run.lock.${tag}.${DEAD_PID}.deadbeef.lktmp`);
+    const live = join(runs, `reap-run.lock.${tag}.${process.pid}.c0ffee.lktmp`);
+    const otherRun = join(runs, `other-run.lock.${tag}.${DEAD_PID}.abc123.lktmp`);
     // A dead pid on a DIFFERENT host. The pid is only meaningful on the box that
     // minted it, so probing our own process table for it reads a live remote
     // invocation as dead — and this sweep would then delete its in-flight temp
     // between the `fsync` and the `linkSync`, freeing the run for a second
     // holder. The host tag in the name is the whole defence; a sweep that
     // ignored it passes every other assertion here.
-    const otherHost = join(runs, `reap-run.lock.some-other-box.${DEAD_PID}.abc123.tmp`);
-    // The pre-host-tag filename shape. Deliberately NOT this module's to reap —
-    // it carries no host, so it is exactly as unprobeable as the line above.
+    const otherHost = join(runs, `reap-run.lock.some-other-box.${DEAD_PID}.abc123.lktmp`);
+    // The pre-host-tag filename shape (and today's `.tmp` suffix). Deliberately
+    // NOT this module's to reap — it carries no host, so it is exactly as
+    // unprobeable as the line above.
     // `RunRecordStore.cleanStaleTemps` still sweeps it on the next CLI start.
     const legacyShape = join(runs, `reap-run.lock.${DEAD_PID}.deadbeef.tmp`);
     for (const p of [stale, live, otherRun, otherHost, legacyShape]) writeFileSync(p, "x\n");
@@ -399,22 +404,31 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
   test("a `.rescue` body left by a failed restore is NEVER reaped, however dead its pid", () => {
     // `releaseRunLock` parks a body it took but does not own at
     // `<runId>.lock.<pid>.<hex>.rescue` and tells the operator to `mv` it back.
-    // While that file used the `.tmp` shape, it was the only copy of a LIVE
-    // holder's claim sitting in a directory two reapers sweep by dead pid — this
-    // acquire's own `reapStaleTemps`, and `RunRecordStore`'s `cleanStaleTemps`,
-    // which runs before the lock is even taken. Our pid is dead by the time an
-    // operator reads the remediation, so both would have collected it and the
-    // next invocation would acquire a run its real holder still owns.
+    // While rescue files used the bare-`.tmp` shape, they were the only copy of
+    // a LIVE holder's claim sitting in a directory two reapers sweep by dead
+    // pid — this acquire's own `reapStaleTemps`, and `RunRecordStore`'s
+    // `cleanStaleTemps`, which runs before the lock is even taken. Our pid is
+    // dead by the time an operator reads the remediation, so both would have
+    // collected it and the next invocation would acquire a run its real holder
+    // still owns.
+    //
+    // Broken-expectation repair (wave-2): `cleanStaleTemps`' L3-crossing
+    // admit-list narrowed it to run-record's OWN `<id>.json[…].<pid>.<hex>.tmp`
+    // grammar, so an untagged `.lock.<pid>.<hex>.tmp` name is now swept by
+    // nobody. The "abandoned claim-temp does get collected" control therefore
+    // rides THIS module's current claim shape (host-tagged `.lktmp`, dead pid)
+    // instead of the retired legacy spelling.
     const rescue = join(runs, `rescue-run.lock.${DEAD_PID}.deadbeef.rescue`);
-    const litter = join(runs, `rescue-run.lock.${DEAD_PID}.deadbeef.tmp`);
+    const litter = join(runs, `rescue-run.lock.${hostTagOf(runs)}.${DEAD_PID}.deadbeef.lktmp`);
     for (const p of [rescue, litter]) writeFileSync(p, "someone else's claim\n");
 
-    // A second store construction is what a later CLI invocation does first.
+    // A second store construction is what a later CLI invocation does first;
+    // the subsequent acquire is what runs THIS module's own sweep.
     new RunRecordStore(runs);
     releaseRunLock(acquireRunLock(runs, "rescue-run"));
 
     expect(existsSync(rescue)).toBeTrue();
-    expect(existsSync(litter)).toBeFalse(); // our own abandoned copy is still litter
+    expect(existsSync(litter)).toBeFalse(); // the owner-contract temp went home
     expect(readFileSync(rescue, "utf8")).toContain("someone else's claim");
     rmSync(rescue);
   });
@@ -1013,6 +1027,57 @@ describe("sandbox-teardown run() — lock release failure never masks the primar
       process.env.PATH = savedPath;
       chmodSync(runs, 0o755); // afterEach sweeps dir — restore write permission first
     }
+  });
+
+  test("HARVEST mode: a genuine lock-release failure is its own `lock-release-failed` diagnostic at exit 1", async () => {
+    // T2-4 (round 11): the rewrite moved the only release-failure coverage onto
+    // the `lock-held` arm (the destructive mark refuses before any fs call, so a
+    // chmod-555 runs dir is inert there), and this branch's own comment conceded
+    // harvest mode "wants its own test". This is that test. Harvest marks nothing,
+    // so a release that genuinely fails reaches the NON-destructive else-arm:
+    // the diagnostic swap ("could not release" + the rm-by-hand remediation,
+    // NOT the lock-held wording) and cleanupFailed()'s exit downgrade of an
+    // otherwise-SUCCESSFUL harvest. Untested, either could regress silently.
+    //
+    // Fault injection rides the SAME seam the unreadable-body tests use in
+    // run-record.test.ts: `spyOn(nodeFs, "readFileSync")` failing ONLY for the
+    // release read-back of THIS run's lock (an EACCES — what a failing mount or
+    // a foreign-owned body actually delivers). Not chmod-555 anywhere: root reads
+    // mode-000 files, so permission fixtures skip exactly where CI runs.
+    store.create("harvest-release-fail"); // no vmName ⇒ harvest reports "none", then releases
+
+    const injectedPath = join(runs, "harvest-release-fail.lock");
+    let injected = false;
+    const realRead = nodeFs.readFileSync;
+    const spy = spyOn(nodeFs, "readFileSync").mockImplementation(((p: unknown, ...rest: unknown[]) => {
+      if (!injected && p === injectedPath) {
+        // Acquire does NOT read back; only releaseRunLock's verify-read does —
+        // but gating on flag anyway keeps any future extra read immune to the fault.
+        injected = true;
+        const e = new Error(`EACCES: permission denied, open '${injectedPath}'`) as NodeJS.ErrnoException;
+        e.code = "EACCES";
+        throw e;
+      }
+      return (realRead as (...a: unknown[]) => unknown)(p, ...rest);
+    }) as typeof nodeFs.readFileSync);
+
+    let code: number;
+    try {
+      code = await run(["harvest", "harvest-release-fail", "--dir", runs], sink);
+    } finally {
+      spy.mockRestore(); // a leaked stub corrupts every later fs read in the file
+    }
+
+    const text = lines.join("");
+    expect(injected).toBeTrue(); // the fault really fired — never a vacuous pass
+    expect(text).toContain("harvested: none"); // the primary work LANDED first — else-arm's premise
+    expect(text).toContain("!! lock-release-failed:");
+    expect(text).not.toContain("!! lock-held:"); // harvest carried NO destructive mark
+    expect(text).toContain("could not release");
+    expect(text).toContain(`rm ${injectedPath} by hand`);
+    // cleanupFailed downgraded the successful harvest's 0 — a wedged run is an
+    // error at this CLI's table, not a footnote.
+    expect(code).toBe(1);
   });
 });
 

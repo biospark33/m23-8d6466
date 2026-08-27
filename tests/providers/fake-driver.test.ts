@@ -35,6 +35,7 @@ import { runDriverContract } from "./driver-contract.test.ts";
 // The block below drives FLEET-layer entry points (`provisionAdmittedRun`,
 // `reapRuns`) against this driver, so it shares the fleet suite's fixtures.
 import { rejection } from "../helpers.ts";
+import { isNoSuchBox } from "../../src/providers/harvest.ts";
 
 const boxesDir = mkdtempSync(join(tmpdir(), "qds-fake-boxes-"));
 /**
@@ -832,6 +833,132 @@ describe("provisioning refusals and fail-safe reap", () => {
       clean(t);
     }
   });
+
+  // ── D11 (round 11): FakeDriver errors are CONTRACT-shaped ───────────────────
+  // dispatch's classifier reads `code` + `remediation` off every driver
+  // rejection; a raw fs error out of the fake reached it unclassified. And the
+  // MESSAGE keeps `no such box:` — harvest's isNoSuchBox and teardown's box-gone
+  // skip classify on that text, so reshaping the error must not lose the marker.
+
+  test("D11: readMeta failure carries code + remediation AND the 'no such box:' prefix", async () => {
+    const t = tmp();
+    try {
+      // A metadata-name mismatch is the injection-free route into the contract-
+      // shaped error: the directory exists but its .box.json names another box,
+      // exactly what a workload overwriting .box.json produces.
+      await t.driver.create("d11-box-20260827-a1b2c3");
+      const meta = join(t.boxes, "d11-box-20260827-a1b2c3", ".box.json");
+      writeFileSync(meta, `${JSON.stringify({ name: "someone-else", public: false, ports: [], createdAt: new Date().toISOString() }, null, 2)}\n`, {
+        mode: 0o600,
+      });
+      const err = await rejection(t.driver.exec("d11-box-20260827-a1b2c3", ["true"]));
+      expect(err).toBeInstanceOf(Error);
+      expect((err as { code?: string }).code).toBe("no-such-box");
+      expect(typeof (err as { remediation?: string }).remediation).toBe("string");
+      expect((err as { remediation?: string }).remediation).toContain(".box.json");
+      // The harvest-classifier half: this prefix must survive any reshape.
+      expect(isNoSuchBox(err)).toBe(true);
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("D11: create EEXIST refuses as a typed box-exists, not a raw mkdir errno", async () => {
+    const t = tmp();
+    try {
+      await t.driver.create("d11-dup-20260827-b2c3d4");
+      const err = await rejection(t.driver.create("d11-dup-20260827-b2c3d4"));
+      expect(err).toBeInstanceOf(Error);
+      expect((err as { code?: string }).code).toBe("box-exists");
+      expect((err as Error).message).toContain("already exists");
+      // The literal next command an operator (or caller) can run.
+      expect(String((err as { remediation?: string }).remediation)).toContain("destroy");
+    } finally {
+      clean(t);
+    }
+  });
+
+  // ── D7/D8 (round 11): the reap destroy loop fails LOUD and PARTIAL-aware ────
+
+  test("D7/D8: a mid-sweep destroy throw keeps what was destroyed and what remains on the error", async () => {
+    const t = tmp();
+    try {
+      const store = new RunRecordStore({ dir: t.runs });
+      const n0 = "reap-p1-20260827-c1d2e3";
+      const n1 = "reap-p2-20260827-c1d2e4";
+      const n2 = "reap-p3-20260827-c1d2e5";
+      for (const n of [n0, n1, n2]) await t.driver.create(n, SBX_OWNERSHIP_TAG);
+      const d = t.driver;
+      const realDestroy = d.destroy.bind(d);
+      let calls = 0;
+      // Fail on the SECOND destroy: one success precedes it, one target follows.
+      d.destroy = async (name: string) => {
+        calls += 1;
+        if (calls === 2) throw Object.assign(new Error("destroy exploded"), { code: "exec-failed" });
+        return realDestroy(name);
+      };
+      let err: unknown;
+      try {
+        await reapRuns(d, store);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(Error);
+      const e2 = err as Error & { destroyed?: string[]; remaining?: string[] };
+      // D7: everything torn down BEFORE the throw is reported — losing it
+      // understates what the sweep did and hides successful work from callers.
+      expect(e2.destroyed ?? []).toEqual([n0]);
+      // `remaining` carries the documented contract: the FAILED call plus
+      // every eligible box still unprocessed after it — exactly what callers
+      // cannot assume about provider state. (The failed name alone would hide
+      // n2, which no destroy was ever attempted against.)
+      expect(e2.remaining ?? []).toEqual([n1, n2]);
+      // First really gone; failed and not-yet-attempted boxes all still there.
+      expect(await d.list(n0)).toEqual([]);
+      expect((await d.list()).map((v) => v.name)).toContain(n1);
+      expect((await d.list()).map((v) => v.name)).toContain(n2);
+    } finally {
+      clean(t);
+    }
+  });
+
+  test("D7/D8: a HUNG driver.destroy aborts at the sweep budget with reap-destroy-timeout", async () => {
+    const t = tmp();
+    try {
+      const store = new RunRecordStore({ dir: t.runs });
+      const id = "reap-hang-20260827-d4e5f6";
+      await t.driver.create(id, SBX_OWNERSHIP_TAG);
+      const d = t.driver;
+      // NEVER settles — the bare-await hazard D8 names. The budget is
+      // INJECTED through reapRuns' third parameter: the production refusal
+      // (not this harness's outer bound) is what the test observes, without
+      // pinning the 120s constant. withTimeout clears its own timer in a
+      // finally, so the abandoned race leaves nothing scheduled behind.
+      d.destroy = () => new Promise(() => {});
+      let err: unknown;
+      const started = Date.now();
+      try {
+        await reapRuns(d, store, 150);
+      } catch (e) {
+        err = e;
+      }
+      expect(Date.now() - started).toBeLessThan(5_000); // the injected budget fired, not the 120s default
+      // The sweep's OWN typed refusal, with the partial report attached:
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      const refused = err as ProvisionRefusedError & { destroyed?: string[]; remaining?: string[] };
+      expect(refused.code).toBe("reap-destroy-timeout");
+      expect(refused.destroyed ?? []).toEqual([]);
+      // The hung box is the failed head of `remaining` — never-confirmed-gone.
+      expect(refused.remaining ?? []).toEqual([id]);
+      // …and the hung call left the box listed, so no state was lost or faked.
+      expect((await t.driver.list()).map((v) => v.name)).toEqual([id]);
+    } finally {
+      clean(t);
+    }
+  });
 });
 
-runDriverContract({ driverName: "fake", makeDriver: () => resolveDriver("fake") });
+// listingProvesTag: FakeDriver's metadata carries the ownership tag it was
+// created with, so its listing PROVES tags — the contract's reap step takes the
+// destroy arm here (T2-5: declared per driver, not inferred from one run).
+runDriverContract({ driverName: "fake", makeDriver: () => resolveDriver("fake"), listingProvesTag: true });

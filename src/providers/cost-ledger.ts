@@ -53,17 +53,24 @@ const MS_PER_HOUR = 3_600_000;
  *
  * Three foldings, each for a shape a human or a hand-edited record actually
  * produces: surrounding whitespace, the `#` operators write out of habit, and
- * leading zeros. Leading zeros are stripped by regex rather than through
+ * leading zeros. The `#` fold takes the whole `#\s*` prefix — `"# 42"` is the
+ * same habit spelled with a space, and stripping only the `#` left it a fresh
+ * budget identity. Leading zeros are stripped by regex rather than through
  * `Number`, which would round any id past 2^53 into a different issue.
  *
  * TOTAL, like `canonicalRepoSlug`: a non-numeric remainder is passed through
  * trimmed rather than rejected, so this can canonicalise on every path
  * (including reads of rows written before it existed) without becoming a
  * second validation gate. `resolveRunCorrelation` is where an issue id is
- * validated; this is only where it is made a key.
+ * validated; this is only where it is made a key. Budget-key consumers go one
+ * step further — `assertCanonicalIdentity` refuses a non-numeric remainder, so
+ * a malformed id can never become a budget at all.
  */
 export function canonicalIssueId(issueId: string): string {
-  const bare = issueId.trim().replace(/^#/, "");
+  // `trim`, then `#` WITH whatever whitespace follows it. Stripping the bare
+  // `#` left `"# 42"` folded to `" 42"` — a fourth spelling no override key
+  // matches and the dispatch never writes.
+  const bare = issueId.trim().replace(/^#[ \t\n\v\f\r]*/, "");
   // `(?=\d)` keeps "0" as "0" instead of folding it to the empty string.
   return /^\d+$/.test(bare) ? bare.replace(/^0+(?=\d)/, "") : bare;
 }
@@ -80,19 +87,24 @@ export function canonicalIssueId(issueId: string): string {
  * BEFORE UPDATE/DELETE triggers (INV-COST-1), so a canonicalising migration is
  * impossible by construction — the fold has to happen in the predicate.
  *
- * Mirrors the three foldings exactly: trim, one leading `#`, and leading zeros
- * ONLY when the remainder is all digits (so `"0"` stays `"0"` and `"0abc"` is
- * never folded into `"abc"`, which would merge two genuinely distinct issues).
- * The one divergence is the trim set: JS `.trim()` also folds Unicode spaces,
- * SQLite's two-arg `trim()` folds only the characters named. ASCII whitespace
- * is what a hand-edited record or a shell argument actually carries; a row
- * whose id is padded with U+00A0 stays unmatched, which is the same
- * under-count this closes — narrowed, not eliminated.
+ * Mirrors the three foldings exactly: trim, `#` WITH following whitespace (the
+ * same `"# 42"` fold the bind side makes), and leading zeros ONLY when the
+ * remainder is all digits (so `"0"` stays `"0"` and `"0abc"` is never folded
+ * into `"abc"`, which would merge two genuinely distinct issues). The one
+ * divergence is the trim set: JS `.trim()` also folds Unicode spaces, SQLite's
+ * two-arg `trim()` folds only the characters named. ASCII whitespace is what a
+ * hand-edited record or a shell argument actually carries; a row whose id is
+ * padded with U+00A0 stays unmatched, which is the same under-count this
+ * closes — narrowed, not eliminated.
  */
 function sqlCanonicalIssueId(col: string): string {
   // Space, tab, LF, VT, FF, CR — JS `.trim()`'s ASCII set.
   const trimmed = `trim(${col}, char(32,9,10,11,12,13))`;
-  const bare = `(CASE WHEN substr(${trimmed}, 1, 1) = '#' THEN substr(${trimmed}, 2) ELSE ${trimmed} END)`;
+  // One-or-more ASCII spaces after the `#` fold too, matching
+  // canonicalIssueId's `/^#[ \t\n\v\f\r]*/`: strip the `#`, then left-trim
+  // whitespace once (the ltrim runs past further spaces but never past a
+  // second `#`, exactly like the anchored regex). Same char list as the trim.
+  const bare = `(CASE WHEN substr(${trimmed}, 1, 1) = '#' THEN ltrim(substr(${trimmed}, 2), char(32,9,10,11,12,13)) ELSE ${trimmed} END)`;
   // GLOB is the case-sensitive, character-class matcher: leading digit AND no
   // non-digit anywhere ⇒ `/^\d+$/`. `ltrim(…,'0')` empties an all-zero id, so
   // "000" folds to "0" the way the `(?=\d)` lookahead does.
@@ -143,12 +155,29 @@ function issueScopeKeys(repoSlug: string, issueId: string): string[] {
  * requires `#\d+`, no `perIssueOverrides` key can ever name that identity, so
  * the shared bucket always got `defaultCapMicroUsd` — one default cap covering
  * an unbounded set of malformed dispatches.
+ *
+ * The remnant the empty-check alone left open: a NON-empty canonical value no
+ * override can name either. `"42x"` or `"-1"` folded to themselves, passed the
+ * emptiness check, opened their OWN budget identity holding a full untouched
+ * cap, and no ISSUE_KEY_RE key (`#\d+`) ever matched it — an operator could not
+ * lower what they cannot spell. Every legitimate dispatch source reaches here
+ * through `resolveRunCorrelation`, which demands a positive int32; a residue
+ * outside `/^\d+$/` therefore names a programmatic/hand-edited value, and the
+ * fail-closed answer is to refuse the identity outright (a refused budget key
+ * books no rows; a mis-spelled one books spend nobody can cap).
  */
 function assertCanonicalIdentity(code: string, repoSlug: string, issueId: string, remediation: string): void {
-  if (canonicalRepoSlug(repoSlug).length === 0 || canonicalIssueId(issueId).length === 0) {
+  const canonicalIssue = canonicalIssueId(issueId);
+  if (
+    canonicalRepoSlug(repoSlug).length === 0 ||
+    canonicalIssue.length === 0 ||
+    // The only shape every ISSUE_KEY_RE override key can name: digits, after
+    // the fold. Anything else is an identity perIssueOverrides cannot address.
+    !/^\d+$/.test(canonicalIssue)
+  ) {
     throw new CostLedgerError(
       code,
-      `repoSlug ${JSON.stringify(repoSlug)} / issueId ${JSON.stringify(issueId)} canonicalises to an empty identity — a budget key no override can name and every malformed dispatch shares`,
+      `repoSlug ${JSON.stringify(repoSlug)} / issueId ${JSON.stringify(issueId)} canonicalises to ${JSON.stringify(canonicalRepoSlug(repoSlug))}#${JSON.stringify(canonicalIssue)} — not a budget key a perIssueOverrides entry (owner/repo#N) can name`,
       remediation,
     );
   }
@@ -258,6 +287,16 @@ function boxHoursEventId(runId: string, closedAt: string): string {
   h.update(`${runId}|box_hours|box_hours|${closedAt}`);
   return h.digest("hex");
 }
+
+/** The differing-field check in ingestCostEvent reads exactly these columns. */
+type TokenRowCols = {
+  cost_micro_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  unpriced: number;
+};
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS cost_events (
@@ -583,7 +622,12 @@ export function loadCostConfig(
  */
 export function capForIssue(config: CostConfig, repoSlug: string, issueId: string): number {
   const overrides = config.perIssueOverrides;
-  if (overrides === undefined) return config.defaultCapMicroUsd;
+  // `null` alongside `undefined`: the type forbids it, but a CostConfig
+  // assembled in code or read from JSON without the parse validator reaches
+  // here anyway, and `Object.entries(null)` threw out of the GATE where the
+  // pre-canonicalisation code's `config.perIssueOverrides?.[…]` returned the
+  // default cap. Absent overrides mean the default cap in either spelling.
+  if (overrides === undefined || overrides === null) return config.defaultCapMicroUsd;
   const want = canonicalIssueKey(repoSlug, issueId);
   let cap: number | undefined;
   for (const [key, value] of Object.entries(overrides)) {
@@ -838,39 +882,98 @@ export class CostLedger {
       costMicroUsd,
       timestamp: event.timestamp,
     });
-    const { changes } = this.db
-      .prepare(
-        `INSERT INTO cost_events (
+    const insert = () =>
+      this.db
+        .prepare(
+          `INSERT INTO cost_events (
            event_id, run_id, repo_slug, issue_id, request_id, role, agent_id,
            kind, invocation_seq, input_tokens, output_tokens, cache_read_tokens,
            cache_write_tokens, turn_count, cost_micro_usd, unpriced,
            key_hash, key_limit_micro_usd, created_at
          ) VALUES (?,?,?,?,?,?,?, 'tokens', ?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(event_id) DO NOTHING`,
-      )
-      .run(
-        eventId,
-        ctx.runId,
-        // Persist the canonical identity: teardown re-reads this slug back out of
-        // the run record on disk, and a record written before canonicalisation
-        // would otherwise mint a second identity on every later ingest.
-        canonicalRepoSlug(ctx.repoSlug),
-        canonicalIssueId(ctx.issueId),
-        ctx.requestId,
-        ctx.role,
-        event.agentId,
-        ctx.invocationSeq,
-        event.inputTokens ?? 0,
-        event.outputTokens ?? 0,
-        event.cacheReadTokens ?? 0,
-        event.cacheWriteTokens ?? 0,
-        event.turnCount ?? 0,
-        costMicroUsd,
-        unpriced ? 1 : 0,
-        keyHash,
-        keyLimit,
-        new Date().toISOString(),
-      );
+        )
+        .run(
+          eventId,
+          ctx.runId,
+          // Persist the canonical identity: teardown re-reads this slug back out of
+          // the run record on disk, and a record written before canonicalisation
+          // would otherwise mint a second identity on every later ingest.
+          canonicalRepoSlug(ctx.repoSlug),
+          canonicalIssueId(ctx.issueId),
+          ctx.requestId,
+          ctx.role,
+          event.agentId,
+          ctx.invocationSeq,
+          event.inputTokens ?? 0,
+          event.outputTokens ?? 0,
+          event.cacheReadTokens ?? 0,
+          event.cacheWriteTokens ?? 0,
+          event.turnCount ?? 0,
+          costMicroUsd,
+          unpriced ? 1 : 0,
+          keyHash,
+          keyLimit,
+          new Date().toISOString(),
+        );
+    // The ingest INSERT is a ledger-write like admitIssue's own: SQLITE_BUSY
+    // past the busy timeout (a concurrent ingest or gate holding the write
+    // lock) surfaces as the same typed retryable refusal, not a raw driver
+    // error no caller can switch on. Anything else rethrows unchanged.
+    let changes: number;
+    try {
+      ({ changes } = insert());
+    } catch (e) {
+      throw ledgerBusyError(e) ?? e;
+    }
+    if (changes === 0) {
+      // ON CONFLICT fired on THIS event's digest: same run/agent/seq/turn/cost/
+      // timestamp. A redelivery digesting identically is correct dedup; but the
+      // key cannot distinguish two DISTINCT events that collide in one tick
+      // (both turned `turnCount ?? 0`, say). Read what the conflicting row
+      // holds: byte-identical ⇒ a genuine redelivery, dedup silently as before;
+      // any differing field is spend the SUM will count once for TWO events —
+      // money-visible, so it gets its own structured line, never "duplicate".
+      const prior = this.db
+        .prepare(
+          "SELECT cost_micro_usd, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, unpriced FROM cost_events WHERE event_id = ?",
+        )
+        .get(eventId) as TokenRowCols | undefined;
+      // MONEY-VISIBLE fields only. `request_id` is provenance, not spend: two
+      // distinct events whose cost/token/cache/unpriced fields are identical
+      // count the SAME sum either way, so a request-id difference alone is not
+      // a collision the cap cares about — and alarming on it cried
+      // "ingest-digest-collision" (only one will be counted) for rows that
+      // count identically.
+      const differs =
+        prior !== undefined &&
+        !(
+          prior.cost_micro_usd === costMicroUsd &&
+          prior.input_tokens === (event.inputTokens ?? 0) &&
+          prior.output_tokens === (event.outputTokens ?? 0) &&
+          prior.cache_read_tokens === (event.cacheReadTokens ?? 0) &&
+          prior.cache_write_tokens === (event.cacheWriteTokens ?? 0) &&
+          prior.unpriced === (unpriced ? 1 : 0)
+        );
+      if (differs) {
+        emitGuarded({
+          requestId: ctx.requestId,
+          operation: "cost-ledger.ingest",
+          agentId: event.agentId,
+          timestamp: new Date().toISOString(),
+          duration: Date.now() - started,
+          durationMs: Date.now() - started,
+          status: "ok",
+          runId: ctx.runId,
+          repoSlug: canonicalRepoSlug(ctx.repoSlug),
+          issueId: canonicalIssueId(ctx.issueId),
+          code: "ingest-digest-collision",
+          eventId,
+          message: `event ${eventId} digests to an existing row whose fields differ — two distinct events share one identity and only one will be counted toward the cap`,
+          outcome: "digest-collision",
+        });
+      }
+    }
     const durationMs = Date.now() - started;
     const inserted = changes === 1;
     log({
@@ -990,17 +1093,89 @@ export class CostLedger {
       );
     }
     const eventId = boxHoursEventId(ctx.runId, record.closedAt);
-    const { changes } = this.db
-      .prepare(
-        `INSERT INTO cost_events (
+    // Same busy taxonomy as ingestCostEvent: a teardown-ingest racing the gate
+    // surfaces as `ledger-busy`, not a raw driver error (fail-closed either
+    // way — this is classification, not correction).
+    let changes: number;
+    try {
+      ({ changes } = this.db
+        .prepare(
+          `INSERT INTO cost_events (
            event_id, run_id, repo_slug, issue_id, request_id, role, agent_id,
            kind, invocation_seq, cost_micro_usd, unpriced, created_at
          ) VALUES (?,?,?,?,?, NULL, NULL, 'box_hours', 0, ?, 0, ?)
          ON CONFLICT(event_id) DO NOTHING`,
-      )
-      .run(eventId, ctx.runId, canonicalRepoSlug(ctx.repoSlug), canonicalIssueId(ctx.issueId), ctx.requestId, costMicroUsd, new Date().toISOString());
+        )
+        .run(eventId, ctx.runId, canonicalRepoSlug(ctx.repoSlug), canonicalIssueId(ctx.issueId), ctx.requestId, costMicroUsd, new Date().toISOString()));
+    } catch (e) {
+      throw ledgerBusyError(e) ?? e;
+    }
     const durationMs = Date.now() - started;
     const inserted = changes === 1;
+    if (inserted) {
+      // K1 residual, made loud instead of silent: admitIssue retires a closed
+      // run's reservation once `closedAt` passes ADMISSION_GRACE_MS +
+      // ADMISSION_SKEW_MARGIN_MS (~6 min), re-granting the freed headroom to
+      // the next dispatch. Teardown's crash-recovery re-run can land THIS row
+      // after that cutoff — spend on a cap whose reservation is gone. Nothing
+      // here can un-retire (gate_admissions is append-only, INV-COST-1), so
+      // the money-safe response is to name the exposure the moment it lands.
+      const landedLate =
+        costMicroUsd > 0 &&
+        Number.isFinite(closed) &&
+        closed <= Date.now() - ADMISSION_GRACE_MS - ADMISSION_SKEW_MARGIN_MS;
+      if (landedLate) {
+        emitGuarded({
+          requestId: ctx.requestId,
+          operation: "cost-ledger.ingest",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: durationMs,
+          durationMs,
+          status: "ok",
+          runId: ctx.runId,
+          repoSlug: canonicalRepoSlug(ctx.repoSlug),
+          issueId: canonicalIssueId(ctx.issueId),
+          kind: "box_hours",
+          costMicroUsd,
+          closedAt: record.closedAt,
+          code: "box-hours-late-past-reservation-cutoff",
+          message: `box hours for run ${ctx.runId} landed ${Math.round((Date.now() - closed) / 1000)}s after its close — past the ~${(ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS) / 1000}s reservation-retirement cutoff, so admissions granted since may have spent into this charge; the issue total can exceed its cap`,
+          outcome: "late-ingest-over-cap-risk",
+        });
+      }
+    }
+    if (!inserted) {
+      // The digest keys on (runId, closedAt). A redelivered teardown digesting
+      // identically is correct dedup — the idempotent re-run path. But a row on
+      // disk priced DIFFERENTLY than this call computes means the stored figure
+      // no longer matches the record's lifetime × rate: a hand-edited rate or
+      // record re-priced after the fact, and one of the two figures is wrong in
+      // the SUM. Never silent — money-visible.
+      const prior = this.db
+        .prepare("SELECT cost_micro_usd FROM cost_events WHERE event_id = ?")
+        .get(eventId) as { cost_micro_usd: number } | undefined;
+      if (prior !== undefined && prior.cost_micro_usd !== costMicroUsd) {
+        emitGuarded({
+          requestId: ctx.requestId,
+          operation: "cost-ledger.ingest",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: durationMs,
+          durationMs,
+          status: "ok",
+          runId: ctx.runId,
+          repoSlug: canonicalRepoSlug(ctx.repoSlug),
+          issueId: canonicalIssueId(ctx.issueId),
+          code: "ingest-digest-collision",
+          eventId,
+          storedCostMicroUsd: prior.cost_micro_usd,
+          computedCostMicroUsd: costMicroUsd,
+          message: `box-hours event ${eventId} digests to an existing row priced ${prior.cost_micro_usd} µ$ but recomputed at ${costMicroUsd} µ$ — rate or record changed since it landed; the SUM counts the STORED figure`,
+          outcome: "digest-collision",
+        });
+      }
+    }
     log({
       requestId: ctx.requestId,
       operation: "cost-ledger.ingest",
