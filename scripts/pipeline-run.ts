@@ -83,7 +83,8 @@ import {
   type SteeringPoint,
 } from "../src/phase-engine/steering.ts";
 import { loadRoster } from "../src/phase-engine/roster/schema.ts";
-import { startResident, type ResidentSpawn } from "../src/fleet/resident.ts";
+import { DEFAULT_RESIDENT_SLUG, startResident, type ResidentSpawn } from "../src/fleet/resident.ts";
+import { RateError } from "../src/phase-engine/roster/validate.ts";
 import {
   appendDispatchFailure,
   CorrelationError,
@@ -143,6 +144,24 @@ function childEnv(): Record<string, string> {
 /** PF-2: the bounded stdout tail a code phase's journal value carries. */
 const STDOUT_TAIL_CHARS = 4096;
 
+/**
+ * `fs.writeSync` may write PARTIALLY (pipes, EINTR); a short write silently
+ * drops the tail of the log line. Loop until every byte lands. Write errors
+ * (EPIPE on a closed fd, EAGAIN on a full pipe buffer) are swallowed —
+ * observability is a sidecar (AC5), never a reason to fail the run.
+ */
+function writeAll(fd: number, data: string | Buffer): void {
+  const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : data;
+  let written = 0;
+  try {
+    while (written < bytes.length) {
+      written += fs.writeSync(fd, bytes, written, bytes.length - written);
+    }
+  } catch {
+    /* drop the rest of this line rather than fail the run for a log write */
+  }
+}
+
 function runCommand(
   cmd: readonly string[],
   signal: AbortSignal,
@@ -169,9 +188,9 @@ function runCommand(
       stdoutBuf = stdoutBuf.length + b.length > STDOUT_TAIL_CHARS * 4
         ? Buffer.concat([stdoutBuf.subarray(stdoutBuf.length + b.length - STDOUT_TAIL_CHARS * 4), b])
         : Buffer.concat([stdoutBuf, b]);
-      fs.writeSync(2, b);
+      writeAll(2, b);
     });
-    child.stderr?.on("data", (b: Buffer) => fs.writeSync(2, b));
+    child.stderr?.on("data", (b: Buffer) => writeAll(2, b));
 
     // DF1.4: Record process spawn. Tracer methods are non-throwing by
     // contract (AC5); the guard is defense in depth — at this point the child
@@ -536,8 +555,49 @@ function readResidentBriefSource(
     return parsed !== null && typeof parsed === "object"
       ? (parsed as Record<string, unknown>)
       : undefined;
-  } catch {
+  } catch (err) {
+    // ABSENT (ENOENT — dispatch shipped no brief) is AC4's quiet non-error
+    // path. Every OTHER failure is an env fault wearing absent's clothes: say
+    // so, or a permissions problem silently reads as a deliberately disabled
+    // resident. The hardened reader wraps the raw errno in a ManifestError
+    // `cause`, so the absence test walks that chain one level.
+    const code = (e: unknown): string | undefined =>
+      e instanceof Error && "cause" in e ? code(e.cause) : (e as NodeJS.ErrnoException | undefined)?.code;
+    if (code(err) !== "ENOENT") {
+      writeAll(
+        2,
+        `pipeline-run: warning: resident brief source ${witnessPathBeside(manifestPath)} is unreadable (${err instanceof Error ? err.message : String(err)}) — continuing without a resident\n`,
+      );
+    }
     return undefined;
+  }
+}
+
+/**
+ * DOD-Security / INV-RES-3: the brief's own credential refusal, at the
+ * resident boundary. The manifest carries the same scan (manifest.ts INV-4),
+ * but the witness/brief is a different carrier read by a different path, and
+ * its content reaches a third party's prompt. Field names NEVER echo values.
+ */
+const RESIDENT_CREDENTIAL_FIELD = /(^|[-_])(api)?(key|token|secret|password|passwd|credential)s?([-_]|$)/i;
+const RESIDENT_CREDENTIAL_VALUE = [
+  /\bsk-[A-Za-z0-9_-]{8,}/i,
+  /\bghp_[A-Za-z0-9]{8,}/i,
+  /\bbearer\s+\S/i,
+  /-----BEGIN [A-Z ]+/,
+];
+
+function assertNoResidentCredentials(brief: Record<string, unknown>, where = "brief"): void {
+  for (const [k, v] of Object.entries(brief)) {
+    if (RESIDENT_CREDENTIAL_FIELD.test(k)) {
+      throw new Error(`resident brief refused: credential-named field '${sanitizeForMessage(k)}' in ${where}`);
+    }
+    if (typeof v === "string" && RESIDENT_CREDENTIAL_VALUE.some((re) => re.test(v))) {
+      throw new Error(`resident brief refused: credential-shaped value at ${where}.${sanitizeForMessage(k)}`);
+    }
+    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+      assertNoResidentCredentials(v as Record<string, unknown>, `${where}.${sanitizeForMessage(k)}`);
+    }
   }
 }
 
@@ -559,6 +619,9 @@ interface ResidentHooks {
   rosterChoice: { pending?: string };
   /** DF1.5's closed id set — handed to every solicitation (AC2). */
   rosterIds: readonly string[];
+  /** The armed slug — the resident_solicit line's `model` field (Observability
+   *  Contract; D4's spend-per-model eval). */
+  model: string;
 }
 
 /**
@@ -576,8 +639,15 @@ function closedRosterIds(phases: readonly PhaseSpec[], runRoot: string): string[
     if (spec.kind !== "dispatch_task" || spec.roster === undefined) continue;
     try {
       for (const role of loadRoster(spec.roster, { cwd: runRoot }).roles) ids.add(role.name);
-    } catch {
-      /* the phase refuses with the real error; the closed set stays shut */
+    } catch (err) {
+      // A roster that will not load is an OPERATOR fault, but the effect is
+      // "every select_roster rejected as gate_bypass_attempt" — an agent is
+      // then blamed for a shut set they could not have widened. Say so here;
+      // the dispatch_task phase still refuses with the real error later.
+      writeAll(
+        2,
+        `pipeline-run: warning: roster '${sanitizeForMessage(spec.roster)}' for phase '${sanitizeForMessage(spec.name)}' did not load: ${err instanceof Error ? err.message : String(err)} — select_roster will reject everything\n`,
+      );
     }
   }
   return [...ids];
@@ -597,7 +667,9 @@ function residentContextLines(
   manifest: { pipelineId: string; phases: readonly PhaseSpec[] },
   brief: Record<string, unknown>,
 ): string[] {
-  const lines = [`pipeline ${manifest.pipelineId} run ${runId}`];
+  const lines = [
+    `pipeline ${sanitizeForMessage(manifest.pipelineId)} run ${sanitizeForMessage(runId)}`,
+  ];
   for (const key of ["requestId", "repoSlug", "issueId", "issueUrl", "effectiveCeilingMicros"]) {
     const v = brief[key];
     if (v !== undefined && v !== null && `${v}`.length > 0) {
@@ -606,7 +678,10 @@ function residentContextLines(
   }
   lines.push(
     `phases: ${manifest.phases
-      .map((p) => `${p.name}(${p.kind}${p.retries > 0 ? `,${p.retries}r` : ""})`)
+      .map(
+        (p) =>
+          `${sanitizeForMessage(p.name)}(${sanitizeForMessage(p.kind)}${p.retries > 0 ? `,${p.retries}r` : ""})`,
+      )
       .join(", ")}`,
   );
   return lines;
@@ -617,6 +692,7 @@ async function solicitResident(
   steering: SteeringController,
   point: SteeringPoint,
   ctx: SolicitCtx,
+  model: string,
 ): Promise<SteeringDirective> {
   const started = performance.now();
   const directivesBefore = steering.telemetry.directives;
@@ -631,7 +707,7 @@ async function solicitResident(
     return { action: "proceed" };
   }
   try {
-    fs.writeSync(
+    writeAll(
       2,
       `${JSON.stringify({
         level: "info",
@@ -641,6 +717,8 @@ async function solicitResident(
         phase: ctx.phase ?? null,
         point,
         directiveAction: directive.action,
+        // D4's month-1 spend-per-model eval keys on this slug.
+        model,
         // Accepted := the accepted-directive COUNT moved — a schema-rejected
         // reply also changes telemetry, but it was never accepted.
         accepted: steering.telemetry.directives > directivesBefore,
@@ -680,12 +758,12 @@ function dispatchFail(
       message,
     });
   } catch (logErr) {
-    fs.writeSync(
+    writeAll(
       2,
       `pipeline-run: dispatch-failure log unwritable: ${logErr instanceof Error ? logErr.message : String(logErr)}\n`,
     );
   }
-  fs.writeSync(
+  writeAll(
     2,
     `${JSON.stringify({
       level: "error",
@@ -753,6 +831,11 @@ function makeBodyFactory(
               { attempt },
             )(base)(bodyCtx);
           } catch (err) {
+            // An aborted body is a SETTLED run: the terminal marker may already
+            // be on disk (maxDurationMs overflow or run.terminate), so no
+            // post-settlement zombie may re-run the command, re-solicit the
+            // resident, or write journal rows after it.
+            if (bodyCtx.signal.aborted) throw err;
             if (!(err instanceof GateFailureError) || attempt > spec.retries) throw err;
             // DF1.3 authorized attempt N+1 (the retry.ts:284-287 branch,
             // mirrored here for code phases). DF3.3 solicitation point 2 of 3:
@@ -764,27 +847,57 @@ function makeBodyFactory(
               phase: spec.name,
               rosterIds: resident.rosterIds,
               promptContext: resident.promptContext,
-            });
+            }, resident.model);
             if (directive.action === "abort") {
               // The engine's own fail transition: the authorized retry is
               // declined and the caught GateFailureError settles the phase.
+              // The agent's reason is a run fact — a trace row records it
+              // before the rethrow (DF1.4's closed event union is untouched;
+              // residentTripwire's precedent).
+              try {
+                tracer.trace({
+                  type: "log",
+                  name: "resident_directive",
+                  requestId: resident.requestId,
+                  phaseId: bodyCtx.phaseId,
+                  payloadJson: JSON.stringify({
+                    runId: resident.runId,
+                    phase: spec.name,
+                    action: "abort",
+                    reason: directive.reason,
+                    attempt: attempt + 1,
+                  }),
+                });
+              } catch {
+                /* the trace store is a sidecar; the phase verdict owns the run */
+              }
               throw err;
             }
             if (directive.action === "retry") {
               resident.promptContext.push(
-                `resident guidance for ${spec.name} (attempt ${attempt + 1}): ${directive.guidance}`,
+                `resident guidance for ${spec.name} (attempt ${attempt + 1}): ${sanitizeForMessage(directive.guidance)}`,
               );
-              journal.writeGateEvent({
-                runId: resident.runId,
-                phaseId: bodyCtx.phaseId,
-                type: "resident_directive",
-                name: "resident",
-                requestId: resident.requestId,
-                phase: spec.name,
-                action: "retry",
-                guidance: directive.guidance,
-                attempt: attempt + 1,
-              });
+              // Directive rows ride type:"log" + a name, NOT writeGateEvent:
+              // the bridge maps every gate event to a gate_results row, so a
+              // directive there fabricated a passed=0 verdict and an event
+              // type outside DF1.4's closed TraceEventType union.
+              try {
+                tracer.trace({
+                  type: "log",
+                  name: "resident_directive",
+                  requestId: resident.requestId,
+                  phaseId: bodyCtx.phaseId,
+                  payloadJson: JSON.stringify({
+                    runId: resident.runId,
+                    phase: spec.name,
+                    action: "retry",
+                    guidance: directive.guidance,
+                    attempt: attempt + 1,
+                  }),
+                });
+              } catch {
+                /* the trace store is a sidecar; the retry itself is the effect */
+              }
             }
             // proceed (the deterministic default): the engine-authorized
             // retry runs unguided.
@@ -1059,7 +1172,7 @@ async function main(argv: readonly string[]): Promise<number> {
       requestId,
       pipelineName: manifest.pipelineId,
       onTraceError: (err) => {
-        fs.writeSync(
+        writeAll(
           2,
           `${JSON.stringify({
             level: "error",
@@ -1091,7 +1204,7 @@ async function main(argv: readonly string[]): Promise<number> {
       const sessionUpsertMs = Math.round(performance.now() - sessionStart);
       // The dispatcher reads the run back from this line; sub-timings are
       // whole-ms (Observability Contract: absent a breakdown, report 0).
-      fs.writeSync(
+      writeAll(
         2,
         `${JSON.stringify({
           level: "info",
@@ -1202,7 +1315,7 @@ async function main(argv: readonly string[]): Promise<number> {
     if (terminated) {
       // The handlers removed the default disposition, so a second Ctrl-C must
       // not be swallowed while a body sits out its cancellation grace.
-      fs.writeSync(2, `pipeline-run: ${sig} again — exiting immediately\n`);
+      writeAll(2, `pipeline-run: ${sig} again — exiting immediately\n`);
       // 2, not 1: the run never reached `finish`, so no marker was written and
       // the exit code must not claim the run settled.
       // DF1.4: Close tracer before exit. Optional chaining because this
@@ -1253,10 +1366,20 @@ async function main(argv: readonly string[]): Promise<number> {
   // solicitation (AC2 at the wiring level; steering.ts rejects outside it).
   const rosterIds = closedRosterIds(manifest.phases, runRoot);
   const rosterChoice: { pending?: string } = {};
+  // The slug startResident arms with (main passes no override). The
+  // resident_solicit observability line carries it as `model` — D4's
+  // month-1 spend-per-model eval keys on it.
+  const residentModel = DEFAULT_RESIDENT_SLUG;
   let residentSpawn: ResidentSpawn | undefined;
   let steering: SteeringController | undefined;
   if (residentArmed && residentBrief !== undefined) {
-    let spawned: ReturnType<typeof startResident>;
+    // DOD-Security / INV-RES-3: a brief whose values or field names match a
+    // credential shape refuses the run BEFORE any spawn — a manifest is
+    // already scanned for exactly this (manifest.ts's INV-4 walk), and the
+    // brief reaches a THIRD party's prompt, which is worse. The refusal names
+    // the field, never the value.
+    assertNoResidentCredentials(residentBrief);
+    let spawned: ReturnType<typeof startResident> | undefined;
     try {
       spawned = startResident({
         brief: residentBrief,
@@ -1267,14 +1390,35 @@ async function main(argv: readonly string[]): Promise<number> {
         persistDir: path.dirname(path.resolve(journalPath)),
       });
     } catch (err) {
-      try {
-        tracer.close();
-      } catch {
-        /* the arming refusal outranks a close failure */
+      if (!(err instanceof RateError)) {
+        try {
+          tracer.close();
+        } catch {
+          /* the arming refusal outranks a close failure */
+        }
+        throw err;
       }
-      throw err;
+      // Spec (Infra Prerequisites): a slug with no resolvable rate refuses
+      // the RESIDENT, never the run — INV-RES-5 degrades toward
+      // determinism. steering is never constructed, so the journal's
+      // resident block stays the explicit "disabled" shape, and the run
+      // proceeds deterministically with the cause on stderr.
+      // startResident's own throw contract is unchanged; this is the
+      // runner's arming policy.
+      writeAll(
+        2,
+        `${JSON.stringify({
+          level: "warn",
+          event: "resident_disabled",
+          runId,
+          requestId,
+          model: residentModel,
+          reason: "rate_unresolved",
+          detail: err.message,
+        })}\n`,
+      );
     }
-    if (!("disabled" in spawned)) {
+    if (spawned !== undefined && !("disabled" in spawned)) {
       residentSpawn = spawned;
       steering = createSteering({
         caller: spawned.caller,
@@ -1309,7 +1453,7 @@ async function main(argv: readonly string[]): Promise<number> {
       requestId,
       rosterIds,
       promptContext: residentPromptContext,
-    });
+    }, residentModel);
     if (directive.action === "abort") {
       residentAborted = true;
     } else if (directive.action === "select_roster") {
@@ -1335,6 +1479,7 @@ async function main(argv: readonly string[]): Promise<number> {
             promptContext: residentPromptContext,
             rosterChoice,
             rosterIds,
+            model: residentModel,
           },
         ),
       );
@@ -1378,7 +1523,14 @@ async function main(argv: readonly string[]): Promise<number> {
           exitStatus: null,
           tripwires: [],
         }
-      : { ...steering.telemetry };
+      : // Snapshot, not shallow copy: a seeded journal block must not keep
+        // aliasing steering's live tripwires/steeringIterations and mutate
+        // when the run_end solicitation appends after it.
+        {
+          ...steering.telemetry,
+          steeringIterations: { ...steering.telemetry.steeringIterations },
+          tripwires: steering.telemetry.tripwires.map((t) => ({ ...t })),
+        };
 
   // The terminal marker is emitted INSIDE Run.finish, and a poller that reads
   // it must never find a settled journal with no resident block at all: seed
@@ -1398,7 +1550,7 @@ async function main(argv: readonly string[]): Promise<number> {
       phase: outcomes.length > 0 ? outcomes[outcomes.length - 1]?.name : undefined,
       rosterIds,
       promptContext: residentPromptContext,
-    });
+    }, residentModel);
   }
 
   // Final refresh (run_end's directive + the resident process's own exit
@@ -1416,7 +1568,7 @@ async function main(argv: readonly string[]): Promise<number> {
   try {
     innerJournal.writeResident(residentBlock);
   } catch (err) {
-    fs.writeSync(
+    writeAll(
       2,
       `pipeline-run: resident telemetry write failed: ${err instanceof Error ? err.message : String(err)}\n`,
     );
@@ -1436,7 +1588,7 @@ async function main(argv: readonly string[]): Promise<number> {
   // non-fatally: the run is already settled and its marker written, so an EPIPE
   // on stdout must not downgrade a settled run to "never settled".
   try {
-    fs.writeSync(1, `${result.banner}\n`);
+    writeAll(1, `${result.banner}\n`);
   } catch {
     /* the marker is the commitment, not stdout */
   }
@@ -1448,7 +1600,7 @@ if (import.meta.main) {
   try {
     code = await main(Bun.argv.slice(2));
   } catch (err) {
-    fs.writeSync(2, `pipeline-run: ${err instanceof Error ? err.message : String(err)}\n`);
+    writeAll(2, `pipeline-run: ${err instanceof Error ? err.message : String(err)}\n`);
   }
   // Explicit exit: a phase body that ignored its abort may still be alive after
   // the cancellation grace, and nothing it does may outlive the terminal marker.

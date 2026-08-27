@@ -15,8 +15,12 @@
  *   hang    — stay alive until SIGKILLed (timeout/stop path).
  *   fail    — exit 3 (nonzero → exitStatus "logic").
  *   garbage — print non-NDJSON, exit 0 (malformed reply, caller must resolve).
+ *
+ * Session continuity (B14): when the argv carries `--session <path>`, the
+ * fixture appends one line per invocation, so a test can watch the file grow
+ * across calls on one resident.
  */
-import { existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 
 const recordPath = process.env.QDS_FAKE_PI_RECORD;
 if (recordPath) {
@@ -32,6 +36,11 @@ if (recordPath) {
   );
 }
 
+const sessionFlag = Bun.argv.slice(2).indexOf("--session");
+if (sessionFlag !== -1) {
+  appendFileSync(Bun.argv.slice(2)[sessionFlag + 1]!, "called\n");
+}
+
 const mode = process.env.QDS_FAKE_PI_MODE ?? "ok";
 if (mode === "hang") {
   // A bare pending promise does not keep a Bun process alive; a timer does.
@@ -41,8 +50,15 @@ if (mode === "hang") {
 } else if (mode === "garbage") {
   console.log("this is not NDJSON");
 } else {
-  const input = Number(process.env.QDS_FAKE_PI_INPUT ?? 7);
-  const output = Number(process.env.QDS_FAKE_PI_OUTPUT ?? 11);
+  const toCount = (raw: string | undefined, fallback: number, label: string): number => {
+    const n = Number(raw ?? fallback);
+    if (!Number.isInteger(n) || n < 0) {
+      throw new Error(`fake-pi: ${label}=${JSON.stringify(raw)} is not a non-negative integer`);
+    }
+    return n;
+  };
+  const input = toCount(process.env.QDS_FAKE_PI_INPUT, 7, "QDS_FAKE_PI_INPUT");
+  const output = toCount(process.env.QDS_FAKE_PI_OUTPUT, 11, "QDS_FAKE_PI_OUTPUT");
   const text = process.env.QDS_FAKE_PI_TEXT ?? '{"action":"proceed"}';
   // Decoy usage — must never reach the caller's usage totals.
   const decoyUsage = { input: 9999, output: 9999, cacheRead: 0, cacheWrite: 0, cost: { total: 9.99 } };

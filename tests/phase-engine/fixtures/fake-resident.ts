@@ -34,7 +34,11 @@ const sessionIndex = argv.indexOf("--session");
 const session = sessionIndex >= 0 ? argv[sessionIndex + 1] : undefined;
 
 /** Invocation index = markers this script already appended to the session
- *  file — deterministic across one run's synchronous solicitations. */
+ *  file — deterministic across one run's synchronous solicitations. The
+ *  marker append happens on EVERY invocation that reaches this function,
+ *  hang-mode included: a hung attempt consumed an invocation slot, and the
+ *  next (post-timeout) attempt must script the NEXT reply, not the same one
+ *  again (the index would otherwise shift back one reply for every hang). */
 function invocationIndex(sessionPath: string | undefined): number {
   if (sessionPath === undefined) return 0;
   let seen = 0;
@@ -86,14 +90,17 @@ function scriptedUsage(): { input: number; output: number } {
   return { input: 1000, output: 64 };
 }
 
+// Marker BEFORE the hang check (see invocationIndex above): a hung attempt
+// still consumed its invocation slot.
+const replies = scriptedReplies();
+const usage = scriptedUsage();
+const index = invocationIndex(typeof session === "string" ? session : undefined);
+
 if (process.env.FAKE_RESIDENT_HANG === "1") {
   // Never reply — the caller's timeout (SIGKILL) is the behavior under test.
   await new Promise<never>(() => {});
 }
 
-const replies = scriptedReplies();
-const usage = scriptedUsage();
-const index = invocationIndex(typeof session === "string" ? session : undefined);
 const reply = replies[Math.min(index, replies.length - 1)]!;
 
 const message = {
@@ -113,4 +120,8 @@ console.log(JSON.stringify({ type: "message_start", message }));
 console.log(JSON.stringify({ type: "message_end", message }));
 console.log(JSON.stringify({ type: "agent_end", messages: [message] }));
 
-process.exitCode = Number(process.env.FAKE_RESIDENT_EXIT ?? 0) || 0;
+// A usage fault already set exitCode 2 above — FAKE_RESIDENT_EXIT must not
+// clobber it to 0 (the `?? 0 || 0` chain used to overwrite any earlier code).
+if (process.exitCode === undefined || process.exitCode === null) {
+  process.exitCode = Number(process.env.FAKE_RESIDENT_EXIT ?? 0) || 0;
+}

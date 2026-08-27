@@ -12,7 +12,8 @@
  *
  * Coverage: AC1a proceed-only byte-identity vs --no-resident, AC1b steered-run
  * invariants (NO byte-identity assertion, by AC1's own words), the mandatory
- * demo slice, and the telemetry boundary.
+ * demo slice, the telemetry boundary, the arming negative control, the
+ * degraded-resident path, and the non-positive-ceiling witness refusal.
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -31,6 +32,17 @@ const CATALOG_DIR = path.join(FIXTURES, "pi-catalog");
 
 /** The fixture's build testCommand counts invocations in $TMPDIR under this name. */
 const STATE_NAME = "qds-resident-fixture-count";
+
+/**
+ * The counter lives in the LEG DIR — the same value spawnRunner hands the
+ * runner as TMPDIR, which childEnv forwards to the fixture's `sh -c`. One
+ * source of truth: a TMPDIR-unset host (empty `$TMPDIR` → the counter lands
+ * at /) and concurrent suite processes (a fixed name in the global TMPDIR)
+ * both diverge from the test's own reset unless the two sides agree.
+ */
+function stateFile(dir: string): string {
+  return path.join(dir, STATE_NAME);
+}
 
 /**
  * The journal's resident block, as the e2e reads it (structural — the
@@ -64,6 +76,15 @@ type E2eJournal = ReturnType<typeof readJournal> & {
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df3-3-e2e-")));
 afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
 
+/**
+ * DOD-Security redaction probe (D11): a value long enough to clear
+ * cli-anything redact.ts's MIN_REDACTABLE_VALUE_LEN, env-borne under a name
+ * the SECRET_KEY_RE heuristic already matches. The brief carries no
+ * credential-shaped value, so INV-RES-3's run refusal is not triggered — the
+ * only thing this exercises is artifact redaction.
+ */
+const REDACTION_PROBE = "sk-fake-e2e-redaction-probe-000000";
+
 /** C1's fake contract: reply STRINGS in invocation order, last one repeats. */
 const PROCEED_ONLY = [JSON.stringify({ action: "proceed" })];
 const STEERED = [
@@ -72,11 +93,12 @@ const STEERED = [
   JSON.stringify({ action: "proceed", note: "report: steered run complete" }),
 ];
 
-function stateFile(): string {
-  return path.join(process.env.TMPDIR ?? os.tmpdir(), STATE_NAME);
-}
-
-function spawnRunner(args: string[], markerRoot: string, env: Record<string, string>) {
+function spawnRunner(
+  args: string[],
+  markerRoot: string,
+  tmpDir: string,
+  env: Record<string, string>,
+) {
   // `process.execPath`, not "bun": a sibling suite that rewrites PATH must not
   // decide which runtime this spawns (pipeline-run.test.ts:38-41).
   return Bun.spawn({
@@ -87,6 +109,14 @@ function spawnRunner(args: string[], markerRoot: string, env: Record<string, str
       QDS_RUN_ROOT: markerRoot,
       QDS_PI_BIN: FAKE_PI,
       QDS_PI_CATALOG_DIR: CATALOG_DIR,
+      // Per-leg scratch: childEnv forwards it to the manifest command, whose
+      // counter then lives in THIS leg's dir (stateFile's single source), not
+      // in a host-global TMPDIR other suite processes share.
+      TMPDIR: tmpDir,
+      // The custom rate registry is unsteered on a host that has one — an
+      // EACCES there fails every leg, a priced entry silently changes the
+      // fixture's spendMicros. ENOENT is the sanctioned empty registry.
+      QDS_PI_MODELS_JSON: path.join(tmpDir, "no-such-models.json"),
       ...env,
     },
     stdout: "pipe",
@@ -99,8 +129,11 @@ interface LegOpts {
   requestId: string;
   noResident?: boolean;
   replies?: string[];
-  /** Replaces the default run-context.json body (the arm-on-content test drops requestId). */
+  /** Replaces the default run-context.json body (the arming legs shape the
+   *  brief the arming predicate reads). */
   witness?: Record<string, unknown>;
+  /** Extra child env (the redaction probe, the fixture's own knobs). */
+  env?: Record<string, string>;
 }
 
 /** One e2e leg: fresh workspace, manifest + dispatch witness, reset counter, run. */
@@ -128,13 +161,16 @@ async function runLeg(
     ),
   );
   // The counter starts at zero for this leg — attempt 1 fails, attempt 2 passes.
-  fs.rmSync(stateFile(), { force: true });
+  fs.rmSync(stateFile(dir), { force: true });
   const markerRoot = path.join(dir, "marker");
   const journalPath = path.join(dir, "out.json");
+  // Matches the fixture's runBudgetMs and sits below every test timeout: a
+  // hung run fails an assertion inside the test rather than outliving it, so
+  // the finally's kill is the backstop, not the mechanism.
   const proc = spawnRunner(
     [
       "--manifest", manifest,
-      "--budget-ms", "200000",
+      "--budget-ms", "50000",
       "--journal", journalPath,
       "--run-root", dir,
       "--run-id", opts.runId,
@@ -142,25 +178,55 @@ async function runLeg(
       ...(opts.noResident ? ["--no-resident"] : []),
     ],
     markerRoot,
-    opts.replies === undefined ? {} : { FAKE_RESIDENT_REPLIES: JSON.stringify(opts.replies) },
-  );
-  const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
-  return {
     dir,
-    journal: JSON.parse(fs.readFileSync(journalPath, "utf8")) as E2eJournal,
-    exitCode,
-    stderr,
-  };
+    {
+      ...(opts.replies === undefined ? {} : { FAKE_RESIDENT_REPLIES: JSON.stringify(opts.replies) }),
+      ...opts.env,
+    },
+  );
+  try {
+    // stdout AND stderr both drained: piped-but-undrained fds deadlock at the
+    // 64KB pipe buffer (the banner relays a manifest's stderr in full).
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    let journal: E2eJournal;
+    try {
+      journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as E2eJournal;
+    } catch (err) {
+      // A runner that died before the journal file existed (arming refusal,
+      // cap refusal) must not surface as a bare ENOENT — the operator (and
+      // the failure diff) needs the exit code and the stderr tail.
+      throw new Error(
+        `journal ${journalPath} unreadable after exit ${exitCode}: ` +
+          `${(err as Error).message}\nstderr tail: ${stderr.slice(-2000)}`,
+        { cause: err },
+      );
+    }
+    void stdout;
+    return { dir, journal, exitCode, stderr };
+  } finally {
+    // The tree dies with the test even on a timeout: budget overruns and
+    // fixture hangs must not orphan a runner into the next suite.
+    if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+    // Per-leg, not per-suite: legs may share a name across re-runs and the
+    // counter must start at zero for THIS leg only.
+    fs.rmSync(stateFile(dir), { force: true });
+  }
 }
 
-/** Parsed JSON-object stderr lines; relayed child output is skipped. */
+/** Structured stderr lines: an `event` field is the runner's own; relayed
+ *  child JSON (phase log lines start with "{") is skipped. */
 function jsonLines(stderr: string): Record<string, unknown>[] {
   const parsed: Record<string, unknown>[] = [];
   for (const line of stderr.split("\n")) {
     const t = line.trim();
     if (!t.startsWith("{")) continue;
     try {
-      parsed.push(JSON.parse(t) as Record<string, unknown>);
+      const row = JSON.parse(t) as Record<string, unknown>;
+      if (typeof row.event === "string") parsed.push(row);
     } catch {
       /* relayed child noise that merely starts with "{" */
     }
@@ -168,36 +234,28 @@ function jsonLines(stderr: string): Record<string, unknown>[] {
   return parsed;
 }
 
-/** Timing fields deleted at every depth: timestamps, durations, and *_ms sub-timings. */
-const TIMING_KEYS = new Set([
-  "completedAt",
-  "startedAt",
-  "updatedAt",
-  "durationMs",
-  "subTimings",
-  "gate_exec_ms",
-  "gate_report_ms",
-  "gate_ms",
-]);
+/** The runner's resident_solicit observability lines for one point. */
+const solicitsAt = (stderr: string, point: string): Record<string, unknown>[] =>
+  jsonLines(stderr).filter((l) => l.event === "resident_solicit" && l.point === point);
 
-/** AC1a's comparable view: `resident.*` and timing fields deleted, recursively. */
-function stripped(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stripped);
+/** Timing-shaped keys, pattern-based (the old allowlist grew by hand and closed
+ *  on itself): suffix `Ms`/`ms` and `At`/`_at` cover timestamps, durations and
+ *  the sub-timing family; `subTimings` is the one container name. A future
+ *  timing field must not reopen AC1a's diff. */
+const TIMING_KEY_RE = /Ms$|MS$|(^|[^A-Za-z])ms$|(At|_at)$|^at$|^subTimings$/;
+
+/** AC1a's comparable view: the journal's top-level `resident` block and every
+ * timing-shaped key at every depth, deleted. */
+function stripped(value: unknown, top = true): unknown {
+  if (Array.isArray(value)) return value.map((v) => stripped(v, false));
   if (value === null || typeof value !== "object") return value;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    if (k === "resident" || TIMING_KEYS.has(k)) continue;
-    out[k] = stripped(v);
+    if (top && k === "resident") continue;
+    if (TIMING_KEY_RE.test(k)) continue;
+    out[k] = stripped(v, false);
   }
   return out;
-}
-
-/** Deterministic JSON text: object keys sorted at every depth. */
-function stable(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stable(v)}`).join(",")}}`;
 }
 
 describe("DF3.3 resident e2e — pipeline-run wiring", () => {
@@ -209,10 +267,11 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
     expect(proceed.exitCode).toBe(0);
     expect(control.exitCode).toBe(0);
 
-    // Byte-identity once resident.* and timing fields are excluded — asserted
-    // BOTH as deep equality and as stable-stringified text (the DOD's shape).
+    // Byte-identity once resident.* and timing fields are excluded. Deep
+    // equality only: `stable()` re-stated the same comparison as text (and
+    // bun's own diff output is the readable form when it fails), so the second
+    // assertion was redundancy, not extra strength.
     expect(stripped(proceed.journal)).toEqual(stripped(control.journal));
-    expect(stable(stripped(proceed.journal))).toBe(stable(stripped(control.journal)));
 
     // The strips were load-bearing: the raw journals differ exactly by the
     // resident block, and the control leg says WHY it has no resident.
@@ -240,7 +299,7 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
     expect(buildGates).toHaveLength(2);
     expect(buildGates[0]?.type).toBe("gate_fail");
     expect(buildGates[0]?.attempt).toBe(1);
-    expect(JSON.stringify(buildGates[0]?.checks)).toContain("exit 1");
+    expect(JSON.stringify(buildGates[0]?.checks)).toMatch(/exit 1\b/);
     expect(buildGates[1]?.type).toBe("gate_pass");
     expect(buildGates[1]?.attempt).toBe(2);
     expect(JSON.stringify(buildGates[1]?.checks)).toContain("exit 0");
@@ -255,47 +314,82 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
     // Byte-identity is deliberately NOT asserted of a steered run (AC1).
   }, 60_000);
 
-  test("demo: out.json shows gate fail → steered retry with guidance → pass, plus resident telemetry", async () => {
+  test("demo: gate fail → steered retry with guidance → pass, directive on the trace, telemetry in the journal", async () => {
+    const runId = "resident-demo-run";
     const steered = await runLeg("demo", {
-      runId: "resident-demo-run",
+      runId,
       requestId: crypto.randomUUID(),
       replies: STEERED,
+      env: { OPENROUTER_API_KEY: REDACTION_PROBE },
     });
     expect(steered.exitCode).toBe(0);
     const j = steered.journal;
 
-    // The E2E slice, in journal order: gate fails on attempt 1, the accepted
-    // retry directive carries its guidance text, the gate passes on attempt 2.
+    // The E2E slice, in journal order: gate fails on attempt 1, gate passes
+    // on attempt 2. The directive itself is NOT a gate event — accepted
+    // directives are trace rows (wave-1 C2: a gate event would fabricate a
+    // passed:0 verdict in the DF1.4 bridge, and `log` is the closed event
+    // type they ride) — asserted below against the trace mirror.
     const seq = j.gateEvents
       .filter((e) => e.phase === "build")
       .map((e) => ({ type: e.type, attempt: e.attempt }));
     expect(seq).toEqual([
       { type: "gate_fail", attempt: 1 },
-      { type: "resident_directive", attempt: 2 },
       { type: "gate_pass", attempt: 2 },
     ]);
-    const directive = j.gateEvents.find((e) => e.type === "resident_directive");
-    expect(directive?.action).toBe("retry");
-    expect(directive?.guidance).toBe("the assertion compares bytes, not strings");
+
+    // The directive's own record: `<run-root>/trace/events.jsonl` (the
+    // tracer's JSONL mirror of trace.db), payload naming the action and the
+    // guidance the engine-authorized attempt N+1 consumed.
+    const traceRows = fs
+      .readFileSync(path.join(steered.dir, "marker", "trace", "events.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as { type?: string; name?: string; payload_json?: string | null });
+    const directives = traceRows.filter((r) => r.type === "log" && r.name === "resident_directive");
+    expect(directives).toHaveLength(1);
+    const payload = JSON.parse(directives[0]?.payload_json ?? "{}") as {
+      action?: string;
+      guidance?: string;
+      attempt?: number;
+      phase?: string;
+    };
+    expect(payload.action).toBe("retry");
+    expect(payload.guidance).toBe("the assertion compares bytes, not strings");
+    expect(payload.attempt).toBe(2);
+    expect(payload.phase).toBe("build");
 
     const r = j.resident;
     expect(r?.status).toBe("active");
+    // The partition: 3 solicitations, all accepted, none rejected (D8).
     expect(r?.directives).toBe(3);
+    expect(r?.directivesRejected).toBe(0);
     expect(r?.steeringIterations).toEqual({ build: 1 });
-    expect(typeof r?.spendMicros).toBe("number");
-    expect(Number.isInteger(r?.spendMicros)).toBe(true);
+    // Deterministic from the fixture's fixed usage (1000 in / 64 out) and the
+    // catalog's fixed rate ($0.08/$0.18 per MTok → 80_000/180_000 µ$): every
+    // call rounds to 80 + 12 = 92 µ$, three calls = 276 (D7 — the meter is
+    // pinned, not merely typed).
+    expect(r?.spendMicros).toBe(276);
 
     // §5.2 / DOD-Security: every prompt and raw reply persisted PRE-EXECUTION,
     // redacted, beside the journal — 3 solicited points => 3 prompts + 3 replies.
     const artifacts = fs
       .readdirSync(steered.dir)
-      .filter((f) => f.startsWith("resident-demo-run-solicit-"))
+      .filter((f) => f.startsWith(`${runId}-solicit-`))
       .sort();
     expect(artifacts).toHaveLength(6);
-    const promptFile = path.join(steered.dir, "resident-demo-run-solicit-1-prompt.txt");
-    expect(fs.statSync(promptFile).mode & 0o777).toBe(0o600);
+    const promptFile = path.join(steered.dir, `${runId}-solicit-1-prompt.txt`);
+    // 0600, asserted portably: no group/other access bits (a umask-dependent
+    // host that lands the file at 0400 still honours the contract).
+    expect(fs.statSync(promptFile).mode & 0o077).toBe(0);
     // And the brief's content (not just its presence) reached the resident.
     expect(fs.readFileSync(promptFile, "utf8")).toContain("repoSlug");
+
+    // DOD-Security redaction, actually asserted: a credential the child was
+    // handed must not survive into any persisted artifact.
+    for (const f of artifacts) {
+      expect(fs.readFileSync(path.join(steered.dir, f), "utf8")).not.toContain(REDACTION_PROBE);
+    }
   }, 60_000);
 
   test("select_roster outside DF1.5's closed set is rejected at the wiring level, never accepted", async () => {
@@ -311,8 +405,11 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
     // itself is unaffected — gate fail → authorized retry → pass, exit 0.
     expect(leg.exitCode).toBe(0);
     const r = leg.journal.resident;
+    // The partition holds under rejection too: 3 solicitations = 2 accepted
+    // + 1 rejected (D8's sum is the solicitation count, not a second truth).
     expect(r?.directives).toBe(2);
     expect(r?.directivesRejected).toBe(1);
+    expect((r?.directives ?? 0) + (r?.directivesRejected ?? 0)).toBe(3);
     expect(r?.tripwires).toHaveLength(1);
     const tripwire = (r?.tripwires ?? [])[0] as { cause?: string; detail?: string } | undefined;
     expect(tripwire?.cause).toBe("gate_bypass_attempt");
@@ -322,11 +419,10 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
     // reply resolves to the deterministic default (directiveAction "proceed"),
     // and accepted is FALSE — the count did not move; the later accepted
     // proceed is accepted:true.
-    const solicits = jsonLines(leg.stderr).filter((l) => l.event === "resident_solicit");
-    const runStart = solicits.find((l) => l.point === "run_start");
+    const [runStart] = solicitsAt(leg.stderr, "run_start");
     expect(runStart?.directiveAction).toBe("proceed");
     expect(runStart?.accepted).toBe(false);
-    const postGate = solicits.find((l) => l.point === "post_gate_failure");
+    const [postGate] = solicitsAt(leg.stderr, "post_gate_failure");
     expect(postGate?.directiveAction).toBe("proceed");
     expect(postGate?.accepted).toBe(true);
   }, 60_000);
@@ -340,7 +436,35 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
     });
     expect(leg.exitCode).toBe(0);
     expect(leg.journal.resident?.status).toBe("active");
-    expect(leg.journal.resident?.directives).toBeGreaterThanOrEqual(2);
+    // All 3 engine-owned points solicited — an armed resident is never silent.
+    expect(leg.journal.resident?.directives).toBe(3);
+  }, 60_000);
+
+  test("arming negative control: a brief with no identity field leaves the resident disabled", async () => {
+    const leg = await runLeg("arm-negative", {
+      runId: "resident-arm-negative-run",
+      requestId: crypto.randomUUID(),
+      replies: PROCEED_ONLY,
+      // --request-id still rides the argv (runLeg passes it), and the witness
+      // still satisfies the cap reader — but the BRIEF carries none of the
+      // identity fields arming reads, so a resident that armed on "a witness
+      // happened to exist" would be the bug.
+      witness: { effectiveCeilingMicros: 250_000 },
+    });
+    expect(leg.exitCode).toBe(0);
+    // AC4's explicit disabled shape — not an absent block, never a half-armed one.
+    expect(leg.journal.resident).toEqual({
+      status: "disabled",
+      directives: 0,
+      directivesRejected: 0,
+      steeringIterations: {},
+      spendMicros: 0,
+      exitStatus: null,
+      tripwires: [],
+    });
+    // And the run is fully deterministic: no solicitation observability line,
+    // because nothing was solicited.
+    expect(jsonLines(leg.stderr).filter((l) => l.event === "resident_solicit")).toHaveLength(0);
   }, 60_000);
 
   test("telemetry boundary: spec fields present, zero ratio/percentage/share fields, DF2.1 run record untouched", async () => {
@@ -349,6 +473,7 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
       requestId: crypto.randomUUID(),
       replies: STEERED,
     });
+    expect(steered.exitCode).toBe(0);
     const j = steered.journal;
 
     // The resident block carries exactly the spec's field set (AC5) — closed,
@@ -374,6 +499,10 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
         .split(/(?=[A-Z])|[_-]/)
         .map((s) => s.toLowerCase())
         .filter((s) => s.length > 0);
+    // Canary: the splitter must actually see the ratio segment a smuggled key
+    // carries — a broken camelCase/snake_case splitter would silently pass
+    // everything below and the detector would be dead code.
+    expect(segmentsOf("costRatio").some((s) => FORBIDDEN_SEGMENTS.has(s))).toBe(true);
     const ratioKeys: string[] = [];
     const walkKeys = (v: unknown): void => {
       if (Array.isArray(v)) {
@@ -400,4 +529,70 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
       "completedAt", "gateEvents", "ok", "phases", "resident", "runId", "version",
     ]);
   }, 60_000);
+
+  test("degraded resident: a dying resident process degrades to the deterministic default and the run still settles", async () => {
+    const leg = await runLeg("degraded", {
+      runId: "resident-degraded-run",
+      requestId: crypto.randomUUID(),
+      env: { FAKE_RESIDENT_EXIT: "3" },
+    });
+    // The resident process exits non-zero on EVERY call (the fixture prints
+    // its reply, then exits 3), so the very first solicitation at run_start
+    // fails the call — and the RUN is unaffected: AC3's degrade, never a
+    // failed run, never a skipped gate.
+    expect(leg.exitCode).toBe(0);
+    const r = leg.journal.resident;
+    expect(r?.status).toBe("degraded");
+    expect(r?.directives).toBe(0);
+    expect(r?.directivesRejected).toBe(0);
+    expect(r?.spendMicros).toBe(0);
+    // Every later point short-circuits on the degraded status: still exactly
+    // 3 observability lines, each resolving to the deterministic default.
+    const lines = jsonLines(leg.stderr).filter((l) => l.event === "resident_solicit");
+    expect(lines).toHaveLength(3);
+    expect(lines.map((l) => l.directiveAction)).toEqual(["proceed", "proceed", "proceed"]);
+    // The engine-authorized retry runs unguided and passes.
+    expect(j2GateSeq(leg.journal)).toEqual([
+      { type: "gate_fail", attempt: 1 },
+      { type: "gate_pass", attempt: 2 },
+    ]);
+    expect(leg.journal.phases.map((p) => p.status)).toEqual(["success", "success"]);
+    // C3's process-end mapping (wave-1 B6): a non-zero pi exit is "logic",
+    // surfaced in the journal's resident block even though the run succeeded.
+    expect(r?.exitStatus).toBe("logic");
+  }, 60_000);
+
+  test("retry authorization: a non-positive admitted ceiling refuses the run before any journal row", async () => {
+    // The cap witness reader (`admittedCeilingBeside`) demands a positive
+    // integer effectiveCeilingMicros on BOTH the declared and undeclared
+    // paths — a ceiling of 0 is a refusal, not an authorization to spend.
+    // Assert THAT refusal rather than a retry-loop behaviour the wiring never
+    // reaches: the manifest declares no limitMicroUsd, so the witness supplies
+    // the cap, and a zero cap is rejected at reconciliation.
+    const leg = await runLeg("zero-ceiling", {
+      runId: "resident-zero-ceiling-run",
+      requestId: crypto.randomUUID(),
+      replies: PROCEED_ONLY,
+      witness: { effectiveCeilingMicros: 0 },
+    });
+    expect(leg.exitCode).toBe(2);
+    expect(leg.stderr).toContain("carries no positive integer effectiveCeilingMicros");
+    // The refusal lands before any phase: the journal file on disk is the
+    // constructor's header flush only — ok:false, no phases, no gate events,
+    // no resident block — the honest residue of a run that never started.
+    expect(leg.journal).toEqual({
+      version: "1.0.0",
+      runId: "resident-zero-ceiling-run",
+      ok: false,
+      phases: [],
+      gateEvents: [],
+    });
+  }, 60_000);
 });
+
+/** Gate-event sequence for the build phase, the two steered legs' spine. */
+function j2GateSeq(j: E2eJournal): Array<Pick<GateRow, "type" | "attempt">> {
+  return j.gateEvents
+    .filter((e) => e.phase === "build")
+    .map((e) => ({ type: e.type as GateRow["type"], attempt: e.attempt as GateRow["attempt"] }));
+}

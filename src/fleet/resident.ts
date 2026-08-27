@@ -20,7 +20,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { redactSecrets } from "../../cli-anything/src/redact.ts";
+import { redactSecrets, SECRET_KEY_RE } from "../../cli-anything/src/redact.ts";
 import { harvestPiStream } from "../../cli-anything/scripts/team-lead-driver.ts";
 import type { ExitStatus } from "../../cli-anything/src/types.ts";
 import { SOLICIT_TIMEOUT_MS, type ResidentCaller } from "../phase-engine/steering.ts";
@@ -35,12 +35,27 @@ import { resolveRate, type RateSources } from "../phase-engine/roster/validate.t
  */
 export const DEFAULT_RESIDENT_SLUG = "deepseek/deepseek-v4-flash-0731";
 
+/**
+ * The runId lands in file names (`${runId}.resident.jsonl`, artifact names), so
+ * anything that escapes the session/persist dirs (path traversal) is refused
+ * before it can become a path. Same guard idea as dispatch's
+ * `assertValidRunId`, local because the resident's artifact grammar (dots,
+ * underscores) is wider than the store's RFC 1123 label.
+ */
+const RESIDENT_RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** Upper clamp on QDS_RESIDENT_TIMEOUT_MS — 10 min admits no unbounded hang. */
+const MAX_RESIDENT_TIMEOUT_MS = 600_000;
+
 export interface ResidentSpawn {
   /** Implements ResidentCaller over a pi subprocess (one process per call). */
   caller: ResidentCaller;
   rate: { inputPerMTok: number; outputPerMTok: number };
-  /** How the resident process itself ended (CC-1 ExitStatus). */
-  exitStatus(): Promise<ExitStatus>;
+  /**
+   * How the resident process itself ended (CC-1 ExitStatus); null when the
+   * resident never ran a call, because there is no process end to report.
+   */
+  exitStatus(): Promise<ExitStatus | null>;
   /** SIGKILL the in-flight call, if any. DF3.6 decides when; this supplies how. */
   stop(): Promise<void>;
 }
@@ -72,12 +87,16 @@ export function _injectRateSources(sources: RateSources | null): void {
  * Per-call timeout. Default SOLICIT_TIMEOUT_MS (the frozen constant); the
  * QDS_RESIDENT_TIMEOUT_MS override is bounds-checked exactly like
  * PI_COMS_TIMEOUT_MS in team-lead-driver.ts:691-697 — only integers in
- * [1, 2^31-1] count, because `setTimeout(NaN)` fires at ~0 ms and Bun's
- * timeout option would reject a non-positive value outright.
+ * [1, 600_000] count, because `setTimeout(NaN)` fires at ~0 ms, Bun's
+ * timeout option would reject a non-positive value outright, and an unclamped
+ * upper bound would let a typo hang a run for 2^31-1 ms (~24.8 days).
+ * Reads `env` (the spawn seam), falling back to this process's env.
  */
-function solicitTimeoutMs(): number {
-  const raw = Number(process.env.QDS_RESIDENT_TIMEOUT_MS);
-  return Number.isInteger(raw) && raw >= 1 && raw <= 2 ** 31 - 1 ? raw : SOLICIT_TIMEOUT_MS;
+function solicitTimeoutMs(env: NodeJS.ProcessEnv): number {
+  const raw = Number(env.QDS_RESIDENT_TIMEOUT_MS);
+  return Number.isInteger(raw) && raw >= 1 && raw <= MAX_RESIDENT_TIMEOUT_MS
+    ? raw
+    : SOLICIT_TIMEOUT_MS;
 }
 
 /**
@@ -93,15 +112,37 @@ function briefIsEmpty(brief: unknown): boolean {
 }
 
 /**
- * Redaction bind (dispatch-task.ts:120-126 pattern): name-only keys from the
- * env the child actually receives, empty/whitespace values excluded. Every
- * persisted artifact and every error message passes through this one chokepoint.
+ * Credential-shaped env KEY NAMES bound for redaction. Explicit common names
+ * first, then the repo's SECRET_KEY_RE heuristic (cli-anything redact.ts)
+ * catches the rest (anything *TOKEN/*SECRET/*KEY-shaped) from the env the
+ * child actually receives; empty/whitespace values are excluded.
+ */
+const SECRET_ENV_KEYS = [
+  "ANTHROPIC_API_KEY",
+  "OPENROUTER_API_KEY",
+  "PI_API_KEY",
+  "GITHUB_TOKEN",
+  "GH_TOKEN",
+  "GIT_TOKEN",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+] as const;
+
+/**
+ * Redaction bind (dispatch-task.ts:120-126 pattern): the explicit key set
+ * above plus every SECRET_KEY_RE-shaped key from the env the child actually
+ * receives. Every persisted artifact and every error message passes through
+ * this one chokepoint.
  */
 function bindRedact(env: NodeJS.ProcessEnv): (s: string) => string {
   const secretEnv: Record<string, string> = {};
-  for (const key of ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]) {
-    const v = env[key];
+  const add = (key: string, v: string | undefined) => {
     if (v !== undefined && v.trim().length > 0) secretEnv[key] = v;
+  };
+  for (const key of SECRET_ENV_KEYS) add(key, env[key]);
+  for (const [key, v] of Object.entries(env)) {
+    if (typeof v === "string" && SECRET_KEY_RE.test(key)) add(key, v);
   }
   return (s: string) => redactSecrets(s, secretEnv);
 }
@@ -110,7 +151,8 @@ function bindRedact(env: NodeJS.ProcessEnv): (s: string) => string {
  * Persist one redacted artifact (§5.2). Pre-execution for prompts: the caller
  * invokes this BEFORE Bun.spawn. A failed write throws — an unloggable prompt
  * must not execute (fail-closed), which degrades the resident rather than
- * running an unpersisted solicitation.
+ * running an unpersisted solicitation. Replies call this same helper but wrap
+ * it: the spend is already metered, so the artifact must not cost the reply.
  */
 function persistArtifact(dir: string, name: string, body: string): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -126,6 +168,13 @@ function persistArtifact(dir: string, name: string, body: string): void {
 export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabled: true } {
   if (briefIsEmpty(opts.brief)) return { disabled: true };
 
+  if (!RESIDENT_RUN_ID_RE.test(opts.runId)) {
+    throw new Error(
+      `resident refused: runId ${JSON.stringify(opts.runId.slice(0, 32))} is not ` +
+        `${RESIDENT_RUN_ID_RE.source} — it becomes file names under the session and persist dirs`,
+    );
+  }
+
   // SOURCE-vs-spec drift: resolveRate's tables key `${providerId}/${id}`
   // (validate.ts:396) where id is itself vendor/model — e.g.
   // openrouter/deepseek/deepseek-v4-flash-0731 — so the story's short slug can
@@ -133,19 +182,29 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
   // rateKey is always provider-qualified and --model always carries the bare id.
   const slug = opts.slug ?? DEFAULT_RESIDENT_SLUG;
   const qualified = slug.startsWith("openrouter/");
-  const rateKey = qualified ? slug : `openrouter/${slug}`;
   const modelArg = qualified ? slug.slice("openrouter/".length) : slug;
+  // Slug shape (B10): the remainder must be a non-empty vendor/model id —
+  // `openrouter/` alone or a bare "/" is configuration garbage, never a model.
+  if (!modelArg.includes("/") || modelArg.split("/").some((part) => part.length === 0)) {
+    throw new Error(
+      `resident refused: slug ${JSON.stringify(slug.slice(0, 64))} is not a vendor/model id`,
+    );
+  }
+  const rateKey = qualified ? slug : `openrouter/${slug}`;
   const rate = resolveRate(rateKey, _rateSources ?? undefined);
   const bin = opts.bin ?? process.env.QDS_PI_BIN ?? "pi";
   const sessionPath = join(opts.sessionDir, `${opts.runId}.resident.jsonl`);
   mkdirSync(opts.sessionDir, { recursive: true, mode: 0o700 });
   const childEnv = opts.env ?? process.env;
   const redact = bindRedact(childEnv);
+  const timeoutMs = solicitTimeoutMs(childEnv);
   let seq = 0;
   let lastExit: ExitStatus | null = null;
   let current: Bun.Subprocess | null = null;
+  let stopped = false;
 
   const call = async (prompt: string) => {
+    if (stopped) throw new Error("resident stopped: stop() was called before this call");
     seq += 1;
     if (opts.persistDir !== undefined) {
       persistArtifact(opts.persistDir, `${opts.runId}-solicit-${seq}-prompt.txt`, redact(prompt));
@@ -174,13 +233,16 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
           stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",
-          timeout: Math.max(1, solicitTimeoutMs()),
+          timeout: timeoutMs,
           killSignal: "SIGKILL",
           env: childEnv,
         },
       );
     } catch (err) {
-      lastExit = "transient";
+      // Bun.spawn throws synchronously on a missing binary (ENOENT) — that is
+      // a configuration fault (wrong QDS_PI_BIN / pi not installed), which
+      // will not heal on retry: "logic", not "transient".
+      lastExit = "logic";
       throw err;
     }
     current = proc;
@@ -211,12 +273,27 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
     const exitCode = proc.exitCode;
     if (exitCode !== 0) {
       lastExit = "logic";
-      throw new Error(`resident pi exited ${exitCode}: ${redact(stderr.slice(-400))}`);
+      // Redact FULL output, THEN cut (command-gate rule): cutting first can
+      // split a secret at the boundary and leak the surviving fragment.
+      throw new Error(`resident pi exited ${exitCode}: ${redact(stderr).slice(-400)}`);
     }
     lastExit = "success";
     const harvest = harvestPiStream(stdout);
     if (opts.persistDir !== undefined) {
-      persistArtifact(opts.persistDir, `${opts.runId}-solicit-${seq}-reply.txt`, redact(harvest.text));
+      // Reply persistence is BEST-EFFORT: the call already ran and was billed,
+      // so throwing here would degrade the resident AND lose the usage.
+      try {
+        persistArtifact(
+          opts.persistDir,
+          `${opts.runId}-solicit-${seq}-reply.txt`,
+          redact(harvest.text),
+        );
+      } catch (err) {
+        console.error(
+          `[resident] reply artifact not persisted (${opts.runId}-solicit-${seq}): ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
     return {
       raw: harvest.text,
@@ -227,10 +304,11 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
   return {
     caller: { call },
     rate: { inputPerMTok: rate.inputPerMTok, outputPerMTok: rate.outputPerMTok },
-    // ponytail: "transient" before any call — exitStatus() is non-null per the
-    // frozen interface, and a never-solicited resident has no process to report.
-    exitStatus: async () => lastExit ?? "transient",
+    // null before any call: a never-solicited resident has no process end to
+    // report, and "transient" would be a fact about nothing.
+    exitStatus: async () => lastExit,
     stop: async () => {
+      stopped = true;
       const proc = current;
       if (proc === null) return;
       try {

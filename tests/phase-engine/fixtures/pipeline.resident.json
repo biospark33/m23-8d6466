@@ -1,13 +1,13 @@
 {
   "version": "1.0.0",
   "pipelineId": "resident-e2e",
-  "runBudgetMs": 200000,
+  "runBudgetMs": 50000,
   "phases": [
     {
       "name": "plan",
       "kind": "code",
       "description": "Emit the implementation plan for the requested change",
-      "maxDurationMs": 15000,
+      "maxDurationMs": 2000,
       "retries": 0,
       "command": ["echo", "plan complete"]
     },
@@ -15,7 +15,7 @@
       "name": "build",
       "kind": "code",
       "description": "Apply the planned change and prove it with the gated test command",
-      "maxDurationMs": 15000,
+      "maxDurationMs": 5000,
       "retries": 1,
       "command": ["echo", "build ran"],
       "testCommand": [

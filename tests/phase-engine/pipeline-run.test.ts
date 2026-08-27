@@ -33,14 +33,19 @@ function workspace(): { dir: string; journal: string; markerRoot: string } {
   };
 }
 
-function spawnRunner(args: string[], markerRoot: string, cwd = REPO_ROOT) {
+function spawnRunner(
+  args: string[],
+  markerRoot: string,
+  cwd = REPO_ROOT,
+  extraEnv: Record<string, string> = {},
+) {
   return Bun.spawn({
     // `process.execPath`, not "bun": `bun test` runs every file in one process,
     // so a sibling suite that rewrites PATH must not decide which runtime this
     // spawns.
     cmd: [process.execPath, RUNNER, ...args],
     cwd,
-    env: { ...process.env, QDS_RUN_ROOT: markerRoot },
+    env: { ...process.env, QDS_RUN_ROOT: markerRoot, ...extraEnv },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -1340,4 +1345,128 @@ describe("pipeline-run DF3.1 S28: the witness is fresh-bound to THIS run (±30 m
     expect(message).not.toContain("vanished");
     expect(message).not.toContain("left unset");
   });
+});
+
+// ---------------------------------------------------------------------------
+// PR135 round-2 cluster C: the runner's resident arming policy and the
+// gated-retry contract, driven through the spawned runner because the load-
+// bearing surfaces (exit code, stderr line, journal resident block) are all
+// main()'s.
+// ---------------------------------------------------------------------------
+
+/** A green two-code-phase manifest plus a witness brief that ARMS the resident
+ * (identity field present), written into one workspace. */
+function armedWorkspace(): {
+  dir: string;
+  journal: string;
+  markerRoot: string;
+  manifest: string;
+  requestId: string;
+} {
+  const ws = workspace();
+  const manifest = writeCodeManifest(ws.dir);
+  // The brief IS the cap witness (one file, two readers): it must satisfy the
+  // ceiling reconciliation too, or the run refuses before the resident arms.
+  fs.writeFileSync(
+    path.join(ws.dir, "run-context.json"),
+    JSON.stringify({
+      requestId: crypto.randomUUID(),
+      repoSlug: "qds/demo",
+      issueId: 42,
+      effectiveCeilingMicros: 250_000,
+    }),
+  );
+  return { ...ws, manifest, requestId: crypto.randomUUID() };
+}
+
+describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
+  test("C5: an unresolvable resident rate disables the RESIDENT and the run still settles ok (exit 0)", async () => {
+    // Pin the rate registry at a path that does not exist: loadRateSources
+    // throws RateError inside startResident. The old behaviour refused the
+    // whole run (exit 2, nothing settled); the spec's rule is that a slug
+    // with no resolvable rate refuses the RESIDENT, never the deterministic
+    // run (INV-RES-5).
+    const ws = armedWorkspace();
+    const proc = spawnRunner(
+      [
+        "--manifest", ws.manifest, "--budget-ms", "120000", "--journal", ws.journal,
+        "--run-root", ws.dir, "--request-id", ws.requestId,
+      ],
+      ws.markerRoot,
+      REPO_ROOT,
+      // Force the rate seam: an override dir that does not exist makes
+      // loadRateSources throw RateError inside startResident.
+      { QDS_PI_CATALOG_DIR: path.join(ws.dir, "no-such-catalog") },
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(0);
+    expect(stderr).toContain("resident_disabled");
+    expect(stderr).toContain("rate_unresolved");
+    const journal = readJournal(ws.journal);
+    expect(journal.ok).toBe(true);
+    expect(journal.resident?.status).toBe("disabled");
+    expect(journal.resident?.spendMicros).toBe(0);
+  }, 60_000);
+
+  test("C6: a credential-shaped brief value refuses the run, naming the field and never the value", async () => {
+    const ws = workspace();
+    const manifest = writeCodeManifest(ws.dir);
+    const secret = "sk-abcdef1234567890abcdef";
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({ requestId: crypto.randomUUID(), note: secret, effectiveCeilingMicros: 250_000 }),
+    );
+    const proc = spawnRunner(
+      ["--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal, "--run-root", ws.dir],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("credential-shaped value at brief.note");
+    // The value itself is never echoed.
+    expect(stderr).not.toContain(secret);
+  }, 60_000);
+
+  test("C6: a credential-NAMED brief field refuses the run, naming the field", async () => {
+    const ws = workspace();
+    const manifest = writeCodeManifest(ws.dir);
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({
+        requestId: crypto.randomUUID(),
+        github_token: "x".repeat(10),
+        effectiveCeilingMicros: 250_000,
+      }),
+    );
+    const proc = spawnRunner(
+      ["--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal, "--run-root", ws.dir],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("credential-named field 'github_token'");
+  }, 60_000);
+
+  test("C12: a brief source that never existed stays QUIET (AC4), and the unreadable branch warns", async () => {
+    // Reachability note: the brief source IS the cap witness, and
+    // `runContextFrom` refuses a present-but-unreadable witness first — so the
+    // warning branch is only reachable through a between-reads swap (TOCTOU),
+    // which no deterministic e2e can drive. The e2e arm pins AC4's quiet path;
+    // the source arm pins that the catch DISTINGUISHES absent from unreadable
+    // rather than swallowing both (this file's layout-detector precedent).
+    const quiet = workspace();
+    const manifest2 = writeCodeManifest(quiet.dir);
+    const proc2 = spawnRunner(
+      ["--manifest", manifest2, "--budget-ms", "120000", "--journal", quiet.journal, "--run-root", quiet.dir],
+      quiet.markerRoot,
+    );
+    const [silent, code2] = await Promise.all([new Response(proc2.stderr).text(), proc2.exited]);
+    expect(code2).toBe(0);
+    expect(silent).not.toContain("resident brief source");
+    expect(readJournal(quiet.journal).resident?.status).toBe("disabled");
+
+    const source = fs.readFileSync(path.join(REPO_ROOT, "scripts", "pipeline-run.ts"), "utf8");
+    expect(source).toContain("resident brief source");
+    expect(source).toMatch(/code\s*!==\s*"ENOENT"/);
+  }, 60_000);
 });

@@ -87,6 +87,15 @@ export const PhaseSpecSchema = z
     if (spec.kind !== "code" && spec.command !== undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `command is forbidden when kind is '${spec.kind}'` });
     }
+    // A testCommand is schema-legal on any kind (it shares the argv shape),
+    // but only kind === "code" composes a gate over it — elsewhere it is
+    // silently dead. Refuse rather than let an author believe it enforced.
+    if (spec.kind !== "code" && spec.testCommand !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `testCommand is forbidden when kind is '${spec.kind}'`,
+      });
+    }
     // DF1.6: roster and task required when kind === "dispatch_task", forbidden otherwise
     if (spec.kind === "dispatch_task") {
       if (spec.roster === undefined) {

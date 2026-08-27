@@ -83,6 +83,25 @@ describe("SteeringDirectiveSchema — closed union (AC2 contract)", () => {
     expect(SteeringDirectiveSchema.safeParse({ action: "proceed", evil: true }).success).toBe(false);
     expect(SteeringDirectiveSchema.safeParse("not an object").success).toBe(false);
   });
+
+  test("known actions with a missing or wrong-typed required field are REJECTED (AC1 verb contract, A13)", () => {
+    expect(SteeringDirectiveSchema.safeParse({ action: "retry" }).success).toBe(false); // no guidance
+    expect(SteeringDirectiveSchema.safeParse({ action: "select_roster" }).success).toBe(false); // no rosterId
+    expect(SteeringDirectiveSchema.safeParse({ action: "abort" }).success).toBe(false); // no reason
+    expect(SteeringDirectiveSchema.safeParse({ action: "retry", guidance: 42 }).success).toBe(false); // wrong type
+  });
+
+  test("the derived action list and the schema literals cannot drift (A8)", () => {
+    // Mirror the instruction text's four members; any schema change that
+    // drops or renames one must update this list (and DIRECTIVE_INSTRUCTION)
+    // in the same commit.
+    expect(SteeringDirectiveSchema.options.map((m) => m.shape.action.value)).toEqual([
+      "proceed",
+      "retry",
+      "select_roster",
+      "abort",
+    ]);
+  });
 });
 
 describe("solicit — accepted directives", () => {
@@ -180,6 +199,33 @@ describe("AC2 — schema rejections record a gate_bypass_attempt tripwire, defau
     expect(d).toEqual(PROCEED);
     expect(c.telemetry.directivesRejected).toBe(1);
     expect(c.telemetry.tripwires[0]!.detail).toContain("nope");
+    expect(s.calls()).toBe(1); // single attempt — roster rejection never reparses
+  });
+
+  test("select_roster with rosterIds ABSENT is rejected — missing set reads as empty (fail-closed)", async () => {
+    const s = scriptedCaller([{ raw: '{"action":"select_roster","phase":"build","rosterId":"r1"}' }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    const d = await c.solicit("run_start", ctx());
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.status).toBe("active");
+    expect(c.telemetry.directives).toBe(0);
+    expect(c.telemetry.directivesRejected).toBe(1);
+    expect(c.telemetry.tripwires[0]!.detail).toContain("outside closed roster set");
+  });
+
+  test("a throwing onTripwire observer never breaks the never-throws contract", async () => {
+    const s = scriptedCaller([{ raw: '{"action":"skip_gate"}' }]);
+    const c = createSteering({
+      caller: s.caller,
+      rate: RATE,
+      onTripwire: () => {
+        throw new Error("trace store exploded");
+      },
+    });
+    const d = await c.solicit("run_start", ctx({ phase: "build" }));
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.directivesRejected).toBe(1);
+    expect(c.telemetry.tripwires).toHaveLength(1); // the journal row survived
   });
 });
 
@@ -232,6 +278,73 @@ describe("AC3 — fail-closed degradation", () => {
     expect(s.prompts[1]!).toContain("no JSON object was found");
     expect(s.prompts[1]!).not.toContain("I will steer this run now");
   });
+
+  test("correction prompt restates the closed union so a stateless second attempt is not blind (A6)", async () => {
+    const s = scriptedCaller([{ raw: "garbage preamble" }, { raw: '{"action":"proceed"}' }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    await c.solicit("run_start", ctx());
+    expect(s.prompts[1]!).toContain('{"action":"proceed"}');
+    expect(s.prompts[1]!).toContain('{"action":"retry","guidance":string}');
+    expect(s.prompts[1]!).toContain('{"action":"abort","reason":string}');
+  });
+
+  test("a throwing reply parser is a malformed reply, counted toward the limit (never throws)", async () => {
+    // The scripted Step shape cannot express a throwing extractor, so the
+    // caller itself returns a raw that throws on read (A4's callee-throw route).
+    let calls = 0;
+    const throwing = createSteering({
+      caller: {
+        call: async () => {
+          calls += 1;
+          return {
+            get raw(): string {
+              throw new Error("extractor blew up");
+            },
+            usage: { inputTokens: 0, outputTokens: 0 },
+          };
+        },
+      },
+      rate: RATE,
+    });
+    const d = await throwing.solicit("run_start", ctx());
+    expect(d).toEqual(PROCEED);
+    expect(throwing.telemetry.status).toBe("degraded"); // malformed × 2 → limit
+    expect(calls).toBe(MAX_MALFORMED_ATTEMPTS);
+  });
+
+  test("malformed-counter is per-solicit: recover in one, next malformed still gets its correction (A11)", async () => {
+    const s = scriptedCaller([
+      { raw: "garbage preamble" },
+      { raw: '{"action":"proceed"}' }, // solicit 1 recovers on the correction attempt
+      { raw: "garbage again" },
+      { raw: '{"action":"proceed"}' }, // solicit 2 ALSO gets a correction attempt
+    ]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    await c.solicit("run_start", ctx());
+    await c.solicit("run_end", ctx());
+    expect(c.telemetry.status).toBe("active");
+    expect(c.telemetry.directives).toBe(2);
+    expect(s.calls()).toBe(4);
+  });
+
+  test("two consecutive accepted retries in one phase increment, not overwrite (A12)", async () => {
+    const s = scriptedCaller([
+      { raw: '{"action":"retry","guidance":"first"}' },
+      { raw: '{"action":"retry","guidance":"second"}' },
+    ]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    await c.solicit("post_gate_failure", ctx({ phase: "build" }));
+    await c.solicit("post_gate_failure", ctx({ phase: "build" }));
+    expect(c.telemetry.steeringIterations).toEqual({ build: 2 });
+  });
+
+  test("lastDegradationReason is set by degradation paths, sanitized, and never journaled as telemetry", async () => {
+    const failing = createSteering({ caller: scriptedCaller([{ error: new Error("spawn ENOENT\n") }]).caller, rate: RATE });
+    expect(failing.lastDegradationReason).toBeNull();
+    await failing.solicit("run_start", ctx());
+    expect(failing.lastDegradationReason).toBe("spawn ENOENT\\n");
+    expect(failing.telemetry).not.toHaveProperty("lastDegradationReason");
+  });
 });
 
 describe("metering — engine-side integer µ$ (DD-9)", () => {
@@ -270,6 +383,42 @@ describe("metering — engine-side integer µ$ (DD-9)", () => {
     // per reply: round(100·100000/1e6)=10 + round(100·180000/1e6)=18 → 28 × 3
     expect(c.telemetry.spendMicros).toBe(84);
   });
+
+  test("exactly-.5 product rounds half-up (A9): 1115 tokens × 100000 / 1e6 = 111.5 → 112", async () => {
+    const s = scriptedCaller([{
+      raw: '{"action":"proceed"}',
+      usage: { inputTokens: 1_115, outputTokens: 0 },
+    }]);
+    const c = createSteering({ caller: s.caller, rate: { inputPerMTok: 100_000, outputPerMTok: 180_000 } });
+    await c.solicit("run_start", ctx());
+    expect(c.telemetry.spendMicros).toBe(112);
+  });
+
+  test("a malformed correction attempt meters BOTH replies (A14)", async () => {
+    const s = scriptedCaller([
+      { raw: "garbage", usage: { inputTokens: 100, outputTokens: 100 } }, // 28
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 100, outputTokens: 100 } }, // 28
+    ]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    await c.solicit("run_start", ctx());
+    expect(c.telemetry.spendMicros).toBe(56);
+    expect(s.calls()).toBe(2);
+  });
+
+  test("non-finite and negative token counts clamp to 0 — spendMicros stays a finite integer (A2)", async () => {
+    const s = scriptedCaller([
+      { raw: '{"action":"proceed"}', usage: { inputTokens: Number.NaN, outputTokens: 0 } },
+      { raw: '{"action":"proceed"}', usage: { inputTokens: -500, outputTokens: Number.POSITIVE_INFINITY } },
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 1_111, outputTokens: 0 } }, // 111.1 → 111
+    ]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    await c.solicit("run_start", ctx());
+    await c.solicit("run_end", ctx());
+    await c.solicit("post_gate_failure", ctx());
+    expect(Number.isInteger(c.telemetry.spendMicros)).toBe(true);
+    expect(Number.isFinite(c.telemetry.spendMicros)).toBe(true);
+    expect(c.telemetry.spendMicros).toBe(111);
+  });
 });
 
 describe("prompt ceiling — ≤ PROMPT_CHAR_CEILING including truncation suffix", () => {
@@ -285,6 +434,20 @@ describe("prompt ceiling — ≤ PROMPT_CHAR_CEILING including truncation suffix
     // The instruction carrying the closed union survives the cut.
     expect(prompt).toContain("ONE JSON object");
     expect(prompt).toContain(String(MAX_OUTPUT_TOKENS));
+  });
+
+  test("over-ceiling context is cut OLDEST-first — the newest line survives (A7)", async () => {
+    const s = scriptedCaller([{ raw: '{"action":"proceed"}' }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    // Oldest line first; the accepted guidance line is pushed LAST.
+    await c.solicit("run_start", ctx({ promptContext: ["oldest".repeat(4_000), "newest-accepted-guidance"] }));
+    const prompt = s.prompts[0]!;
+    expect(prompt.length).toBeLessThanOrEqual(PROMPT_CHAR_CEILING);
+    expect(prompt).not.toContain("oldest".repeat(4_000)); // head was cut
+    expect(prompt).toContain("newest-accepted-guidance"); // tail survived
+    // The suffix names the whole context (two lines + joiner), not just the
+    // survivor — proof the cut really happened at the head.
+    expect(prompt).toContain(`[truncated, ${`${"oldest".repeat(4_000)}\nnewest-accepted-guidance`.length} chars total]`);
   });
 
   test("short context passes through uncut, lines joined", async () => {

@@ -30,8 +30,6 @@ export const MAX_MALFORMED_ATTEMPTS = 2;
 /** The three engine-owned solicitation points — there is no fourth. */
 export type SteeringPoint = "run_start" | "post_gate_failure" | "run_end";
 
-const KNOWN_ACTIONS = ["proceed", "retry", "select_roster", "abort"] as const;
-
 /**
  * The closed directive union (AC2): guidance text, a roster choice, or an
  * abort — and nothing else. Closed-ness is member-level in zod v3: every
@@ -53,6 +51,9 @@ export const SteeringDirectiveSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("abort"), reason: z.string(), note: z.string().optional() }).strict(),
 ]);
 export type SteeringDirective = z.infer<typeof SteeringDirectiveSchema>;
+
+/** Derived from the schema itself (A8) so the literals cannot drift apart. */
+const KNOWN_ACTIONS = SteeringDirectiveSchema.options.map((m) => m.shape.action.value) as readonly string[];
 
 /** Fleet-supplied agent caller. Engine never imports fleet (INV-RES-1). */
 export interface ResidentCaller {
@@ -99,6 +100,13 @@ export interface ResidentTelemetry {
 
 export interface SteeringController {
   readonly telemetry: ResidentTelemetry;
+  /** In-memory diagnostic for the most recent degradation (call failure or
+   *  malformed-reply limit), sanitized at read. NOT journaled: the journal's
+   *  resident block is a closed key set with no field for a degradation
+   *  cause, and the tripwire cause union stays closed to
+   *  "gate_bypass_attempt" (AC5/AC2) — so this lives on the controller only.
+   */
+  readonly lastDegradationReason: string | null;
   /** Never throws. Degraded/disabled → resolves { action: "proceed" }
    *  (deterministic default, INV-RES-5). */
   solicit(point: SteeringPoint, ctx: SolicitCtx): Promise<SteeringDirective>;
@@ -119,11 +127,13 @@ const DIRECTIVE_INSTRUCTION = [
 ].join("\n");
 
 /**
- * Head-truncation reserving the suffix width BEFORE cutting — copied rule
- * form from cli-anything/src/merger.ts:218-245 (private there; re-exporting
- * it would touch a file outside this story's list). Surrogate-safe.
+ * Tail-truncation reserving the suffix width BEFORE cutting: context lines
+ * arrive oldest-first and accepted guidance is pushed LAST, so the NEWEST
+ * context is what a steering prompt must not lose — drop from the head.
+ * (The head-keep variant came from cli-anything/src/merger.ts:218-245, where
+ * newest-last was not the invariant.) Surrogate-safe.
  */
-function truncateHeadWithSuffix(text: string, maxLength: number): string {
+function truncateTailWithSuffix(text: string, maxLength: number): string {
   if (text.length <= maxLength) return text;
   const suffix = `[truncated, ${text.length} chars total]`;
   const proseBudget = maxLength - suffix.length;
@@ -132,15 +142,15 @@ function truncateHeadWithSuffix(text: string, maxLength: number): string {
     if (maxLength >= 3) return minimalMarker;
     return minimalMarker.slice(0, maxLength);
   }
-  let cutPoint = proseBudget;
+  let cutPoint = text.length - proseBudget;
   while (
-    cutPoint > 0 &&
-    text.charCodeAt(cutPoint - 1) >= 0xd800 &&
-    text.charCodeAt(cutPoint - 1) <= 0xdbff
+    cutPoint < text.length &&
+    text.charCodeAt(cutPoint) >= 0xdc00 &&
+    text.charCodeAt(cutPoint) <= 0xdfff
   ) {
-    cutPoint -= 1;
+    cutPoint += 1;
   }
-  return text.slice(0, cutPoint) + suffix;
+  return suffix + text.slice(cutPoint);
 }
 
 function renderPrompt(point: SteeringPoint, ctx: SolicitCtx): string {
@@ -150,17 +160,20 @@ function renderPrompt(point: SteeringPoint, ctx: SolicitCtx): string {
   // instruction that carries the closed union always survives the cap — the
   // ceiling then holds for the whole prompt, suffix included.
   const budget = PROMPT_CHAR_CEILING - header.length - DIRECTIVE_INSTRUCTION.length - 1;
-  return `${header}${truncateHeadWithSuffix(context, budget)}\n${DIRECTIVE_INSTRUCTION}`;
+  return `${header}${truncateTailWithSuffix(context, budget)}\n${DIRECTIVE_INSTRUCTION}`;
 }
 
 /** The malformed-reply correction, built from harness-authored text ONLY
  *  (INV-2, modelled on envelope-parse.ts's parseCorrectionPrompt): the parse
- *  failure is named, the model's own output is never interpolated. */
+ *  failure is named, the model's own output is never interpolated. The union
+ *  is restated so a stateless caller's correction attempt still sees the
+ *  schema it must answer with. */
 function malformedCorrectionPrompt(reason: string): string {
   return [
     "Your previous response could not be parsed as a steering directive.",
     `Parse failure: ${reason}.`,
     `Reply with ONE JSON object matching the closed union, at most ${MAX_OUTPUT_TOKENS} output tokens, and nothing else.`,
+    DIRECTIVE_INSTRUCTION,
   ].join("\n");
 }
 
@@ -183,7 +196,7 @@ function parseReply(raw: string): ReplyParse {
  *  routes sanitize model-authored text (INV-2 / R7 §2c). */
 function rejectionDetail(parsed: unknown, error: ZodError): string {
   const action = (parsed as { action?: unknown } | null)?.action;
-  if (typeof action === "string" && !(KNOWN_ACTIONS as readonly string[]).includes(action)) {
+  if (typeof action === "string" && !KNOWN_ACTIONS.includes(action)) {
     return `unrecognized action: ${sanitizeForMessage(action)}`;
   }
   const issue = error.issues[0];
@@ -204,12 +217,16 @@ export function createSteering(deps: {
     exitStatus: null,
     tripwires: [],
   };
+  let lastDegradationReason: string | null = null;
 
-  /** Integer µ$ per reply (DD-9): round at each term, sum integers only. */
+  /** Integer µ$ per reply (DD-9): round at each term, sum integers only.
+   *  A non-finite or negative token count clamps to 0 — one poisoned usage
+   *  would otherwise turn spendMicros non-integer (JSON null) for the run. */
   const meter = (usage: { inputTokens: number; outputTokens: number }): void => {
+    const clamp = (n: number): number => (Number.isFinite(n) && n > 0 ? n : 0);
     telemetry.spendMicros +=
-      Math.round((usage.inputTokens * deps.rate.inputPerMTok) / 1_000_000) +
-      Math.round((usage.outputTokens * deps.rate.outputPerMTok) / 1_000_000);
+      Math.round((clamp(usage.inputTokens) * deps.rate.inputPerMTok) / 1_000_000) +
+      Math.round((clamp(usage.outputTokens) * deps.rate.outputPerMTok) / 1_000_000);
   };
 
   /** A rejected directive has exactly one effect: a telemetry row (INV-RES-2). */
@@ -223,7 +240,13 @@ export function createSteering(deps: {
       detail,
     };
     telemetry.tripwires.push(row);
-    deps.onTripwire?.(row);
+    // A throwing observer is a telemetry sidecar fault; it must never
+    // convert a parsed directive into the deterministic default.
+    try {
+      deps.onTripwire?.(row);
+    } catch {
+      /* observability is a sidecar; the journal row above is the record */
+    }
     return PROCEED;
   };
 
@@ -236,17 +259,28 @@ export function createSteering(deps: {
       let reply: Awaited<ReturnType<ResidentCaller["call"]>>;
       try {
         reply = await deps.caller.call(prompt);
-      } catch {
+      } catch (err) {
         // Timeout / unreachable / process death: no retry of the call, no
-        // retry of the underlying phase, no gate skipped (AC3).
+        // retry of the underlying phase, no gate skipped (AC3). The cause is
+        // kept in memory for diagnostics — the journal's resident block is a
+        // closed key set, so it has no field to carry a degradation reason.
         telemetry.status = "degraded";
+        lastDegradationReason = err instanceof Error ? err.message : String(err);
         return PROCEED;
       }
       meter(reply.usage);
-      const parsed = parseReply(reply.raw);
+      let parsed: ReplyParse;
+      try {
+        parsed = parseReply(reply.raw);
+      } catch (err) {
+        // A throwing extractor is a malformed reply like any other (AC3's
+        // never-throws contract) — it counts toward the malformed limit.
+        parsed = { ok: false, reason: `reply extraction failed: ${sanitizeForMessage(String(err))}` };
+      }
       if (!parsed.ok) {
         if (attempt >= MAX_MALFORMED_ATTEMPTS) {
           telemetry.status = "degraded";
+          lastDegradationReason = `malformed reply: ${parsed.reason}`;
           return PROCEED;
         }
         prompt = malformedCorrectionPrompt(parsed.reason);
@@ -258,10 +292,12 @@ export function createSteering(deps: {
         return reject(ctx, rejectionDetail(parsed.parsed, result.error));
       }
       const directive = result.data;
+      // An absent rosterIds is an EMPTY set, not an unvalidated one: with no
+      // closed id set in hand there is nothing a roster pick could legally
+      // name (fail-closed, INV-RES-2).
       if (
         directive.action === "select_roster" &&
-        ctx.rosterIds !== undefined &&
-        !ctx.rosterIds.includes(directive.rosterId)
+        !(ctx.rosterIds ?? []).includes(directive.rosterId)
       ) {
         return reject(ctx, `rosterId outside closed roster set: ${sanitizeForMessage(directive.rosterId)}`);
       }
@@ -273,5 +309,11 @@ export function createSteering(deps: {
     }
   }
 
-  return { telemetry, solicit };
+  return {
+    telemetry,
+    solicit,
+    get lastDegradationReason() {
+      return lastDegradationReason === null ? null : sanitizeForMessage(lastDegradationReason);
+    },
+  };
 }

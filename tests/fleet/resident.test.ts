@@ -17,6 +17,7 @@ import {
   realpathSync,
   rmSync,
 } from "node:fs";
+
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -68,9 +69,16 @@ function caseDir(name: string): string {
   return realpathSync(mkdtempSync(join(tmpRoot, `${name}-`)));
 }
 
-/** Child env for the fake pi: PATH inherited, key env-borne, fake knobs set. */
+/** Child env for the fake pi: PATH inherited, key env-borne, fake knobs set.
+ * Fixture knobs (QDS_FAKE_PI_* and FAKE_RESIDENT_* prefixes) are scrubbed from
+ * THIS process's env before the spread so a developer's shell settings cannot
+ * leak into a child that sets its own via `over`. */
 function piEnv(over: Record<string, string> = {}): NodeJS.ProcessEnv {
-  return { ...process.env, OPENROUTER_API_KEY: SECRET, ...over };
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!/^(QDS_FAKE_PI_|FAKE_RESIDENT_)/.test(key)) env[key] = value;
+  }
+  return { ...env, OPENROUTER_API_KEY: SECRET, ...over };
 }
 
 function readRecord(dir: string): { argv: string[]; env: { OPENROUTER_API_KEY: string | null }; promptPrePersisted: boolean | null } {
@@ -89,8 +97,11 @@ beforeEach(() => {
 });
 afterEach(() => {
   _injectRateSources(null);
-  process.env.QDS_RESIDENT_TIMEOUT_MS = undefined;
-  process.env.QDS_PI_BIN = undefined;
+  // `= undefined` stores the string "undefined" under Bun and stays truthy.
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  delete process.env.QDS_RESIDENT_TIMEOUT_MS;
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  delete process.env.QDS_PI_BIN;
 });
 
 describe("AC4 — empty brief disables the resident before any spawn", () => {
@@ -109,6 +120,68 @@ describe("AC4 — empty brief disables the resident before any spawn", () => {
     expect(res).toEqual({ disabled: true });
     // Zero spawn attempts: the recording fake never ran.
     expect(existsSync(join(dir, "record.json"))).toBe(false);
+  });
+
+  test("whitespace-only string brief disables; a non-empty string spawns", async () => {
+    const dir = caseDir("briefstr");
+    _injectRateSources(EMPTY_SOURCES);
+    expect(
+      startResident({
+        brief: "   ",
+        runId: "run-blank",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
+      }),
+    ).toEqual({ disabled: true });
+
+    _injectRateSources(TEST_SOURCES);
+    const live = enabled(
+      startResident({
+        brief: "steer toward the acceptance criteria",
+        runId: "run-text",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
+      }),
+    );
+    await live.caller.call(PROMPT);
+    expect(existsSync(join(dir, "record.json"))).toBe(true);
+  });
+});
+
+describe("ingress validation (runId + slug become paths and argv)", () => {
+  test("runId with path traversal refuses BEFORE any spawn", () => {
+    const dir = caseDir("runidbad");
+    for (const bad of ["../../escape", "sub/dir", "", ".hidden", "a".repeat(129)]) {
+      expect(() =>
+        startResident({
+          brief: brief(),
+          runId: bad,
+          sessionDir: dir,
+          bin: fakePi,
+          env: piEnv(),
+        }),
+      ).toThrow(/runId/);
+    }
+    // The refusal fires before mkdir: the session dir stays empty.
+    expect(existsSync(join(dir, "..", "..", "escape.resident.jsonl"))).toBe(false);
+    expect(existsSync(join(dir, "sub", "dir.resident.jsonl"))).toBe(false);
+  });
+
+  test("a slug that is not a vendor/model id refuses with a clear error", () => {
+    for (const bad of ["openrouter/", "openrouter//x", "/"]) {
+      expect(() =>
+        startResident({
+          brief: brief(),
+          runId: "run-slugbad",
+          sessionDir: caseDir("slugbad"),
+          slug: bad,
+          bin: fakePi,
+          env: piEnv(),
+        }),
+      ).toThrow(/vendor\/model/);
+    }
   });
 });
 
@@ -129,12 +202,10 @@ describe("rate resolution (DF1.5 rule, consumed not re-derived)", () => {
   });
 
   test("resolved rate is exposed on the spawn, input/output µ$/MTok only", () => {
-    // The fixture catalog is keyed the way a REAL host's tables are
-    // (validate.ts:396 `${providerId}/${id}`): openrouter/deepseek/… — so this
-    // pins that DEFAULT_RESIDENT_SLUG resolves against the canonical key shape.
-    expect([...TEST_SOURCES.bundled.entries.keys()]).toEqual([
-      "openrouter/deepseek/deepseek-v4-flash-0731",
-    ]);
+    // Pin the slug itself: the provenance default is the FULL vendor/model id,
+    // which is what makes it resolvable against the canonical
+    // `openrouter/${vendor}/${model}` table key (validate.ts:396).
+    expect(DEFAULT_RESIDENT_SLUG).toBe("deepseek/deepseek-v4-flash-0731");
     const spawn = enabled(
       startResident({ brief: brief(), runId: "run-rate-ok", sessionDir: caseDir("rateok"), bin: fakePi, env: piEnv() }),
     );
@@ -291,7 +362,7 @@ describe("process-end mapping (exitStatus, CC-1 values)", () => {
     expect(await spawn.exitStatus()).toBe("transient");
   });
 
-  test("missing binary (ENOENT) → call throws, exitStatus 'transient'", async () => {
+  test("missing binary (ENOENT) → call throws, exitStatus 'logic' (a misconfig never heals on retry)", async () => {
     const dir = caseDir("enoent");
     const spawn = enabled(
       startResident({
@@ -303,7 +374,7 @@ describe("process-end mapping (exitStatus, CC-1 values)", () => {
       }),
     );
     await expect(spawn.caller.call(PROMPT)).rejects.toThrow();
-    expect(await spawn.exitStatus()).toBe("transient");
+    expect(await spawn.exitStatus()).toBe("logic");
   });
 
   test("nonzero exit → call throws, exitStatus 'logic'", async () => {
@@ -323,6 +394,10 @@ describe("process-end mapping (exitStatus, CC-1 values)", () => {
 
   test("stop() SIGKILLs the in-flight call (DF3.6 decides when, this supplies how)", async () => {
     const dir = caseDir("stop");
+    // Timeout deliberately far above the hang fixture's kill: a NO-OP stop()
+    // would let the call run to the native timeout, so a rejection arriving
+    // well under the budget is the only discrimination a no-op cannot fake.
+    process.env.QDS_RESIDENT_TIMEOUT_MS = "30000";
     const spawn = enabled(
       startResident({
         brief: brief(),
@@ -332,12 +407,31 @@ describe("process-end mapping (exitStatus, CC-1 values)", () => {
         env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json"), QDS_FAKE_PI_MODE: "hang" }),
       }),
     );
+    const startedAt = performance.now();
     const pending = spawn.caller.call(PROMPT);
     await spawn.stop(); // no sleeping: call() reaches its spawn synchronously
     await expect(pending).rejects.toThrow();
+    expect(performance.now() - startedAt).toBeLessThan(10_000);
     expect(await spawn.exitStatus()).toBe("transient");
     // Idempotent: a second stop with nothing in flight still resolves.
     await spawn.stop();
+  });
+
+  test("stop() BEFORE any call → the call refuses instead of spawning into a dead resident", async () => {
+    const dir = caseDir("stoptop");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-stoptop",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
+      }),
+    );
+    await spawn.stop();
+    await expect(spawn.caller.call(PROMPT)).rejects.toThrow(/stopped/);
+    // Nothing was spawned: the recording fake never ran.
+    expect(existsSync(join(dir, "record.json"))).toBe(false);
   });
 });
 
@@ -389,5 +483,112 @@ describe("persistence + redaction (§5.2 pre-execution, INV-RES-3)", () => {
     );
     await spawn.caller.call(PROMPT);
     expect(await spawn.exitStatus()).toBe("success");
+  });
+
+  test("B4: QDS_RESIDENT_TIMEOUT_MS is read from opts.env, not this process's env", async () => {
+    const dir = caseDir("envtimeout");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-envtimeout",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({
+          QDS_FAKE_PI_RECORD: join(dir, "record.json"),
+          QDS_FAKE_PI_MODE: "hang",
+          QDS_RESIDENT_TIMEOUT_MS: "500",
+        }),
+      }),
+    );
+    const startedAt = performance.now();
+    await expect(spawn.caller.call(PROMPT)).rejects.toThrow(/killed by signal/);
+    // The opts.env override (500 ms) fired, not the 60 s default.
+    expect(performance.now() - startedAt).toBeLessThan(30_000);
+    expect(await spawn.exitStatus()).toBe("transient");
+  });
+
+  test("B4: an out-of-range timeout override falls back to the default (clamped to 600 000)", async () => {
+    const dir = caseDir("clamp");
+    // 600_001 is one over the clamp; the effective timeout must NOT be 24 days,
+    // so a hang call is killed by the 60 s default long before this test's
+    // own budget — asserted by the rejection arriving at all.
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-clamp",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({
+          QDS_FAKE_PI_MODE: "hang",
+          QDS_RESIDENT_TIMEOUT_MS: "600001",
+        }),
+      }),
+    );
+    await expect(spawn.caller.call(PROMPT)).rejects.toThrow(/killed by signal/);
+    expect(await spawn.exitStatus()).toBe("transient");
+    // The fallback hangs for the full 60 s default, so this leg is the suite's
+    // one long test; the budget is wide so parallel CI load cannot flake it.
+  }, 150_000);
+
+  test("B8: reply persist failure is best-effort — usage still returns", async () => {
+    const dir = caseDir("replyfail");
+    const persistDir = join(dir, "trace");
+    mkdirSync(persistDir, { recursive: true });
+    // The REPLY artifact path is a directory, so its write fails (EISDIR) while
+    // the prompt artifact — same dir, pre-execution, fail-closed — succeeds.
+    mkdirSync(join(persistDir, "run-replyfail-solicit-1-reply.txt"), { recursive: true });
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-replyfail",
+        sessionDir: dir,
+        bin: fakePi,
+        persistDir,
+        env: piEnv({
+          QDS_FAKE_PI_RECORD: join(dir, "record.json"),
+          QDS_FAKE_PI_INPUT: "5",
+          QDS_FAKE_PI_OUTPUT: "9",
+        }),
+      }),
+    );
+    const reply = await spawn.caller.call(PROMPT);
+    expect(reply.raw).toBe('{"action":"proceed"}');
+    expect(reply.usage).toEqual({ inputTokens: 5, outputTokens: 9 });
+    expect(await spawn.exitStatus()).toBe("success");
+  });
+});
+
+describe("session continuity (the session FILE is the conversation)", () => {
+  test("two calls on one resident append the SAME session file; a new runId starts a fresh one", async () => {
+    const dir = caseDir("continuity");
+    const sessionDir = join(dir, "sessions");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-cont",
+        sessionDir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
+      }),
+    );
+    await spawn.caller.call(PROMPT);
+    await spawn.caller.call(PROMPT);
+    const sessionPath = join(sessionDir, "run-cont.resident.jsonl");
+    const linesAfterTwo = readFileSync(sessionPath, "utf8").trim().split("\n").length;
+    expect(linesAfterTwo).toBe(2);
+
+    const other = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-other",
+        sessionDir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
+      }),
+    );
+    await other.caller.call(PROMPT);
+    // A different runId never shares the session file.
+    expect(readFileSync(sessionPath, "utf8").trim().split("\n").length).toBe(linesAfterTwo);
+    expect(readFileSync(join(sessionDir, "run-other.resident.jsonl"), "utf8")).toContain("called");
   });
 });

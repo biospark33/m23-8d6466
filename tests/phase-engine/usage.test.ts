@@ -172,6 +172,14 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
     // by 1e6 at the projection") and validate.ts's own docstring define the
     // contract; fleet-side projections (DF3.2) live outside this walk.
     const steeringPath = path.join(engineRoot, "steering.ts");
+    // COMPENSATING PIN for the steering.ts exemption above: the file is
+    // excluded from the no-other-division walk, so a NEW division there would
+    // pass this suite unexamined. The meter is exactly two terms — input
+    // tokens and output tokens, each `/ 1_000_000` (integer µ$ per DD-9,
+    // rounded per term) — and any additional division is a new conversion
+    // site that must be argued, not smuggled in.
+    const steering = codeOnly(steeringPath);
+    expect((steering.match(/\/\s*1_000_000/g) ?? []).length).toBe(2);
     const others: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

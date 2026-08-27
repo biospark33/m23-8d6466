@@ -5,7 +5,7 @@
         "input": 0.08,
         "output": 0.18,
         "cacheRead": 0.016,
-        "cacheWrite": 0
+        "cacheWrite": 0.018
       }
     }
   }
