@@ -185,10 +185,11 @@ export function runDriverContract(opts: DriverContractOptions): void {
       // outcomes keep the live box alive; that is the invariant pinned here.
       let refused: ProvisionRefusedError | undefined;
       try {
-        const destroyed = await reapRuns(driver, store);
-        // T2-7 (round 11): used to sit INSIDE the try, so a refusal-armed run
-        // skipped the very pin this test exists for. Hoisted: a refusal destroys
-        // nothing, so the claim holds under both outcomes — asserted once below.
+        // T2-7 (round 11): the return value used to be bound INSIDE the try, so
+        // a refusal-armed run skipped the very pin this test exists for.
+        // Hoisted — and unbound: a refusal destroys nothing, so the claim holds
+        // under both outcomes and is asserted once below.
+        await reapRuns(driver, store);
       } catch (err) {
         if (!(err instanceof ProvisionRefusedError) || err.code !== "reap-vms-unowned") throw err;
         refused = err;

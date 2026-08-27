@@ -524,7 +524,7 @@ none would have been caught by patching the original findings.
 | Engine-side mandatory `limitMicroUsd` | Needs an engine change outside this story's FTM; the in-scope guard (assert the stamp landed) is applied |
 | `driver.list()` `AbortSignal` | Requires a DF2.x driver-interface change |
 | Cross-process dispatch serialization | Would defeat DF3.2's fan-out; `ADMISSION_GRACE_MS` closes the actual race |
-| AC2 run-id provenance | Now enforced at **compile** time via a branded `MintedRunId`; a runtime mint registry remains out of scope |
+| AC2 run-id provenance | Compile-time half landed here (`MintedRunId` brand); the runtime half was later closed by round 11's F17 — a process-local minted-id registry now refuses runtime-supplied shape-valid-but-unminted ids (see "Review round 11") |
 
 ### Verification
 
@@ -1984,6 +1984,9 @@ This story file carried no Status section at all until the 2026-08-26 artifact a
 21/31 tallies recorded in that file's header were computed without DF3.1's 5 points. Corrected
 tally: 22/31 stories, 89/123 pts.
 
-Declared deviation still standing: AC2 runtime provenance is shape-only (brand = the compile-time
-half; a mint registry was rejected as an out-of-scope subsystem, and the collision guards reduce
-the exposure to squatting a free id).
+Formerly-declared deviation CLOSED by round 11 (F17): AC2 runtime provenance is no longer
+shape-only. The compile-time `MintedRunId` brand is unchanged, and a process-local minted-id
+registry (`dispatch.ts`'s `mintedRunIds`, fed by `mintRunId`) now refuses runtime-supplied ids
+that are shape-valid but unminted — DF3.2's legitimate re-supply path (a previously minted id
+re-accepted within the registry's window) is unaffected. The round-10 "Gates" note above records
+the pre-F17 state and is superseded by this.

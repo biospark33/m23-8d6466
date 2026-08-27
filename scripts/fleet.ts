@@ -687,32 +687,54 @@ const STDIN_BRIEF_TIMEOUT_MS = 120_000;
 async function readCappedStdin(): Promise<string> {
   const chunks: Uint8Array[] = [];
   let bytes = 0;
-  // Per-CHUNK deadline, not a whole-read one: a slow-but-flowing producer is
-  // exactly the case worth waiting for; only a PIPE that stops moving forever
-  // is the hang this bounds.
-  const deadline = Date.now() + STDIN_BRIEF_TIMEOUT_MS;
-  for await (const chunk of Bun.stdin.stream()) {
-    if (Date.now() > deadline) {
-      throw new FleetError(
-        2,
-        "brief-stdin-timeout",
-        `no brief arrived on stdin within ${STDIN_BRIEF_TIMEOUT_MS / 1000}s`,
-        "the writer holding this pipe's write end never closed it — close it, or pass --brief <path> instead",
-      );
+  const reader = Bun.stdin.stream().getReader();
+  try {
+    for (;;) {
+      // Each READ races the window — including the FIRST one (nothing has
+      // arrived yet) and the one waiting for EOF after the last chunk. The
+      // old deadline check lived inside the loop BODY, so it only ran when a
+      // chunk arrived: a parent that piped stdin and never wrote nor closed
+      // hung in the await forever, past every deadline — the exact case the
+      // constant exists to bound. A slow-but-flowing producer keeps winning
+      // its per-read races and is never refused; only a pipe that stops
+      // moving for the whole window is.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const stall = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new FleetError(
+              2,
+              "brief-stdin-timeout",
+              `no brief arrived on stdin within ${STDIN_BRIEF_TIMEOUT_MS / 1000}s`,
+              "the writer holding this pipe's write end never closed it — close it, or pass --brief <path> instead",
+            ),
+          );
+        }, STDIN_BRIEF_TIMEOUT_MS);
+      });
+      let res: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        res = await Promise.race([reader.read(), stall]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      if (res.done) break;
+      const chunk = res.value;
+      bytes += chunk.byteLength;
+      if (bytes > MAX_BRIEF_BYTES) {
+        throw new FleetError(
+          2,
+          "brief-too-large",
+          `brief exceeds the ${MAX_BRIEF_BYTES} byte cap`,
+          "trim the brief or split payload out of it",
+        );
+      }
+      chunks.push(chunk);
     }
-    bytes += chunk.byteLength;
-    if (bytes > MAX_BRIEF_BYTES) {
-      throw new FleetError(
-        2,
-        "brief-too-large",
-        `brief exceeds the ${MAX_BRIEF_BYTES} byte cap`,
-        "trim the brief or split payload out of it",
-      );
-    }
-    chunks.push(chunk);
-    // Reading resets nothing: the deadline is from FIRST chunk (which
-    // renegotiation would show as a second read), and any total slower than
-    // the window from open is refused by design — see the constant.
+  } catch (e) {
+    // Cancel, not just release: the abandoned read must not keep the stream
+    // open behind the refusal.
+    await reader.cancel().catch(() => {});
+    throw e;
   }
   return new TextDecoder().decode(Buffer.concat(chunks));
 }
@@ -1314,7 +1336,10 @@ export async function run(
         throw usageError("`help` takes at most one <verb>", "`fleet help [<verb>]`");
       }
       if (extra[0] !== undefined && !listVerbs().some((v) => v.verb === extra[0])) {
-        throw new FleetError(2, "unknown-verb", `no such verb: ${JSON.stringify(extra[0])}`, HELP);
+        // Same bound as the tokenizer's own unknown-verb refusal (`bounded`
+        // before `JSON.stringify`): an unbounded token echoed here would blow
+        // the envelope's own output ceiling.
+        throw new FleetError(2, "unknown-verb", `no such verb: ${JSON.stringify(bounded(extra[0]))}`, HELP);
       }
     } catch (e) {
       return finish(newRequestId(), "help", undefined, report(note, e));

@@ -295,7 +295,6 @@ type TokenRowCols = {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
-  request_id: string;
   unpriced: number;
 };
 
@@ -937,9 +936,15 @@ export class CostLedger {
       // money-visible, so it gets its own structured line, never "duplicate".
       const prior = this.db
         .prepare(
-          "SELECT cost_micro_usd, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, request_id, unpriced FROM cost_events WHERE event_id = ?",
+          "SELECT cost_micro_usd, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, unpriced FROM cost_events WHERE event_id = ?",
         )
         .get(eventId) as TokenRowCols | undefined;
+      // MONEY-VISIBLE fields only. `request_id` is provenance, not spend: two
+      // distinct events whose cost/token/cache/unpriced fields are identical
+      // count the SAME sum either way, so a request-id difference alone is not
+      // a collision the cap cares about — and alarming on it cried
+      // "ingest-digest-collision" (only one will be counted) for rows that
+      // count identically.
       const differs =
         prior !== undefined &&
         !(
@@ -948,7 +953,6 @@ export class CostLedger {
           prior.output_tokens === (event.outputTokens ?? 0) &&
           prior.cache_read_tokens === (event.cacheReadTokens ?? 0) &&
           prior.cache_write_tokens === (event.cacheWriteTokens ?? 0) &&
-          prior.request_id === ctx.requestId &&
           prior.unpriced === (unpriced ? 1 : 0)
         );
       if (differs) {

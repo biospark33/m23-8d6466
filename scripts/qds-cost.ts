@@ -49,9 +49,6 @@ const ISSUE_REF_RE = /^[\w.-]+\/[\w.-]+#\d+$/;
 
 const VALUE_FLAGS = ["--dir"] as const;
 
-/** Help-suffixed refusal for the shared-grammar typos (every sibling above). */
-const usageError = (message: string): Error => new Error(`${message}\n${HELP.join("\n")}`);
-
 const HELP = [
   "Usage: qds-cost <owner/repo>#<N> [--dir <path>]",
   "",
@@ -217,21 +214,27 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
     parseValueFlags(flagTokens, {
       flags: VALUE_FLAGS,
       onValue: (flag, value) => {
-        if (seenValueFlags.has(flag)) throw usageError(`${flag} given more than once`);
+        if (seenValueFlags.has(flag)) {
+          // The `!!`-envelope the rest of this CLI refuses with (see
+          // `reportFailure`): the bare usage message kept the exit code but
+          // dropped the code prefix and the remediation line automation keys
+          // on. Tests pin the message SUBSTRING, which the envelope preserves.
+          throw new Error(`!! cost-usage-invalid: ${flag} given more than once\nnext: pass a single --dir value\n${HELP.join("\n")}`);
+        }
         seenValueFlags.add(flag);
         dir = value;
       },
       help: HELP,
     });
     if (positionals.length > 1) {
-      throw usageError(`unexpected argument: ${positionals[positionals.length - 1]}`);
+      throw new Error(`!! cost-usage-invalid: unexpected argument: ${positionals[positionals.length - 1]}\nnext: pass one issue reference (owner/repo#N) — flags only, no extra positionals\n${HELP.join("\n")}`);
     }
     // The shared grammar refuses an EMPTY `--dir`/`--dir=` value, but a
     // WHITESPACE-ONLY one passed straight through and resolved the ledger
     // against a literal-space path (`./ /cost-ledger.db`) — a confident
     // ledger-miss for a typo'd space. Same refusal as a missing value.
     if (dir !== undefined && dir.trim() === "") {
-      throw usageError("--dir requires a non-empty value");
+      throw new Error(`!! cost-usage-invalid: --dir requires a non-empty value\nnext: pass a --dir path that is not only whitespace\n${HELP.join("\n")}`);
     }
     issueRef = parseIssueRef(positionals[0]);
   } catch (e) {

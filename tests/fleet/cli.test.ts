@@ -186,9 +186,20 @@ if (mode === "race") {
   const barrier = join(runsDir as string, ".race-arrivals");
   {
     writeFileSync(barrier, \`\${me}\\n\`, { flag: "a" });
+    // Racer-specific deadline: a cold-start straggler (or a dead racer that
+    // never wrote its pid) must fail LOUDLY with the arrival count, not spin
+    // forever inside the barrier — the parent's 60s bound would then report
+    // an empty output with no cause.
+    const barrierDeadline = Date.now() + 30_000;
     for (;;) {
       const arrived = new Set(readFileSync(barrier, "utf8").split("\\n").filter(Boolean));
       if (arrived.size >= RACERS) break;
+      if (Date.now() > barrierDeadline) {
+        process.stderr.write(
+          \`race barrier expired: \${arrived.size}/\${RACERS} racers arrived (pids: \${[...arrived].join(",")})\\n\`,
+        );
+        process.exit(3);
+      }
       await Bun.sleep(2);
     }
   }

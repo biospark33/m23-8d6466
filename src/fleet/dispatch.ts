@@ -44,7 +44,7 @@ import { assertWithinBudget, OverBudgetError } from "../providers/budget-gate.ts
 import { checkHeadroom, type LoadedQuotaLimits } from "../providers/quota.ts";
 import { CostLedgerError } from "../providers/cost-ledger.ts";
 import type { AdmissionDecision, CostLedger } from "../providers/cost-ledger.ts";
-import { newId, assertValidRunId, type RunRecordStore } from "../providers/run-record.ts";
+import { newId, assertValidRunId, InvalidRunIdError, type RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import {
   setupGate as realSetupGate,
@@ -232,17 +232,14 @@ export function assertFleetRunId(runId: unknown): asserts runId is string {
   } catch (e) {
     // The store's refusal IS the validation verdict — it throws only on a
     // failed shape check (its body admits no other throw), so anything that
-    // escapes with the matching message family is an operator error (exit 2).
+    // escapes as the store's TYPED verdict is an operator error (exit 2).
     // A THROW OUT OF THE CHECK ITSELF — a bug in a future edit, or a store
     // whose assert misbehaves — is NOT that: classifying it as invalid-run-id
     // blamed the operator's id for a programmer error. Discriminate on the
-    // message the function composes: same failure family as before, and every
-    // other error takes the honest exit-1 route.
-    const isValidationVerdict =
-      e instanceof Error &&
-      typeof e.message === "string" &&
-      e.message.startsWith("invalid run id:");
-    if (!isValidationVerdict) {
+    // store's dedicated `InvalidRunIdError` class, not the message text: a
+    // stable typed discriminator survives any rewording of the message, and
+    // every other error takes the honest exit-1 route.
+    if (!(e instanceof InvalidRunIdError)) {
       throw new FleetError(
         1,
         "run-id-check-failed",

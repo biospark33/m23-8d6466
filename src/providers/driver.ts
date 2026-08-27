@@ -1254,6 +1254,14 @@ export async function teardownRun(
 }
 
 /**
+ * Per-destroy budget — generous over the 60s provisioning budget: exedev's own
+ * destroy retries rm once. Module-level and injectable through `reapRuns`'s
+ * third parameter so a test can observe the ABANDON path without waiting out
+ * the production ceiling.
+ */
+const REAP_DESTROY_TIMEOUT_MS = 120_000;
+
+/**
  * Lifecycle verb `reap` — destroy every box the substrate reports that no OPEN
  * record claims. A box belonging to a closed record is an orphan by definition:
  * teardown destroys before it closes, so a closed record plus a live box means
@@ -1265,7 +1273,11 @@ export async function teardownRun(
  * if any, plus everything listed after it) as properties: losing either half
  * understates what the sweep did and leaves retry targets unnamed.
  */
-export async function reapRuns(driver: ProviderDriver, store: RunRecordStore): Promise<string[]> {
+export async function reapRuns(
+  driver: ProviderDriver,
+  store: RunRecordStore,
+  destroyTimeoutMs: number = REAP_DESTROY_TIMEOUT_MS,
+): Promise<string[]> {
   // Claim by BOTH runId and vmName. `createRun` names the box after the run id,
   // so between `driver.create()` and the `set({vmName})` that follows it there is
   // a window where an open record has a live box and no vmName — claiming by
@@ -1337,35 +1349,38 @@ export async function reapRuns(driver: ProviderDriver, store: RunRecordStore): P
   const unproven = vms.filter((vm) => !claimed.has(vm.name) && !isFactoryOwnedVm(vm));
   if (unproven.length > 0) throw unownedVmReapRefusal(driver.name, unproven.map((vm) => vm.name));
   const destroyed: string[] = [];
-  const remaining: string[] = [];
-  const REAP_DESTROY_TIMEOUT_MS = 120_000; // generous over the 60s provisioning budget: exedev's own destroy retries rm once
-  for (const vm of vms) {
-    if (claimed.has(vm.name)) continue;
-    // Everything unproven was refused above (and claimed boxes were skipped
-    // just before), so anything still standing here proves ownership by the
-    // shared predicate — but keep the explicit guard fail-safe rather than
-    // dead: a listing mutated between filter and loop must reach a destroy.
-    if (!isFactoryOwnedVm(vm)) continue;
-    remaining.push(vm.name);
+  // The eligible set is snapshotted BEFORE the first destroy so a mid-sweep
+  // failure can name every retry target exactly as the contract above
+  // promises: the failed box plus every eligible box still unprocessed after
+  // it. The per-iteration claimed/ownership re-checks the loop used to carry
+  // watched this same static array, so the filter is the identical predicate —
+  // everything unproven was already refused above, and claimed boxes are
+  // excluded here.
+  const eligible = vms.filter((vm) => !claimed.has(vm.name) && isFactoryOwnedVm(vm)).map((vm) => vm.name);
+  for (let i = 0; i < eligible.length; i++) {
+    const name = eligible[i] as string;
     try {
       // Same bare-await hazard provisionStep bounds on every create-path call:
       // a driver whose destroy never settles hangs the sweep past every
       // deadline. Typed refusal with the partial report attached (below), like
       // any other mid-sweep failure.
-      await withTimeout(driver.destroy(vm.name), REAP_DESTROY_TIMEOUT_MS, `driver.destroy(${vm.name})`);
+      await withTimeout(driver.destroy(name), destroyTimeoutMs, `driver.destroy(${name})`);
     } catch (e) {
+      // A COPY of the tail, not a live view: the TimeoutError path attaches
+      // the array directly, and `eligible` is reused by later iterations of a
+      // caller that retries — the enriched path copies, so this one does too.
+      const remaining = [...eligible.slice(i)];
       if (e instanceof TimeoutError) {
         const fail = new ProvisionRefusedError(
           "reap-destroy-timeout",
-          `destroying ${vm.name} did not settle within ${REAP_DESTROY_TIMEOUT_MS}ms — the call was ABANDONED, not cancelled: the provider may still have acted on it`,
-          `check the provider for ${vm.name} by hand, then re-run the sweep (destroy is idempotent)`,
+          `destroying ${name} did not settle within ${destroyTimeoutMs}ms — the call was ABANDONED, not cancelled: the provider may still have acted on it`,
+          `check the provider for ${name} by hand, then re-run the sweep (destroy is idempotent)`,
         );
         throw Object.assign(fail, { destroyed: [...destroyed], remaining });
       }
       throw e instanceof Error ? enriched(e, destroyed, remaining) : enriched(new Error(String(e)), destroyed, remaining);
     }
-    destroyed.push(vm.name);
-    remaining.pop();
+    destroyed.push(name);
   }
   return destroyed;
 }

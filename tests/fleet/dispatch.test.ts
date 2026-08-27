@@ -3597,11 +3597,19 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       "printf '%s\\n' '{\"limitMicroUsd\":1,\"phases\":[{\"name\":\"plan\"}]}' > pipeline.yaml",
     ]);
     const realExec = driver.exec.bind(driver);
+    // Existence is proven FIRST, against the REAL box, BEFORE the stub goes
+    // in: the stub below replaces the whole compound probe — the `-e`
+    // pre-test AND the `cat` live in ONE `sh -c` string — so from install
+    // time on, nothing the gate probes touches the real filesystem. Without
+    // this dedicated pre-check the fixture would silently stop proving
+    // "genuinely present" and could collapse back into the missing case.
+    expect((await driver.exec(box.name, ["sh", "-c", "test -e pipeline.yaml"])).exitCode).toBe(0);
     driver.exec = async (vm: string, argv: string[], stdin?: string) => {
-      // Only the manifest READ: the `-e` pre-test still runs against the real
-      // box (so the fixture keeps proving genuine existence), and every other
-      // probe is untouched — a gate that failed at item A would show up as a
-      // different `failedItem` rather than silently satisfying these checks.
+      // Only the manifest-READ response is faked (empty stdout, nonzero exit
+      // from the compound's cat half — what an EACCES delivers); every other
+      // probe passes through untouched, so a gate that failed at item A shows
+      // up as a different `failedItem` rather than silently satisfying these
+      // checks.
       if (argv[0] === "sh" && (argv[2] ?? "").includes("cat pipeline.yaml")) {
         return { exitCode: 1, stdout: "", stderr: "" };
       }

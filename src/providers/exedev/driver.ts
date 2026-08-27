@@ -505,17 +505,51 @@ function truncate(s: string): string {
 
 /**
  * Bounded stringify: `JSON.stringify` runs to completion before `truncate`
- * gets its cap, so one multi-megabyte provider row block the event loop for
+ * gets its cap, so one multi-megabyte provider row blocked the event loop for
  * the whole serialization regardless of the 120-char output ceiling (the same
- * hazard the roster read's byte bound exists for). Slicing the VALUE first
- * bounds the stringify input; the flag makes truncated containers render as
- * `"…"`, never the unbalanced remainder of a cut JSON text.
+ * hazard the roster read's byte bound exists for). The replacer form only
+ * capped STRING leaves — it still had to VISIT every node to get there, so a
+ * provider row with a hundred-thousand-element array was fully walked (and
+ * its serialization buffer fully built) before any cap applied.
+ *
+ * So the value is PROJECTED into a bounded tree first, and only the projection
+ * is serialized: traversal depth, object field count and array element count
+ * each hit a hard ceiling, truncated containers render as `[…]`/`{…}`, strings
+ * keep the leaf cap, and a final character budget bounds the serialized text.
+ * `undefined` on serialization failure is preserved for `listWithAnomalies`'
+ * `String(v)` fallback.
  */
+const ANOMALY_DEPTH_MAX = 4;
+const ANOMALY_FIELDS_MAX = 8;
+const ANOMALY_ELEMS_MAX = 8;
+const ANOMALY_JSON_MAX = 512;
 function boundedJson(v: unknown): string | undefined {
+  const project = (node: unknown, depth: number): unknown => {
+    if (typeof node === "string") {
+      return node.length > ANOMALY_VALUE_MAX ? `${node.slice(0, ANOMALY_VALUE_MAX)}…` : node;
+    }
+    if (Array.isArray(node)) {
+      if (depth >= ANOMALY_DEPTH_MAX) return "[…]";
+      return node.slice(0, ANOMALY_ELEMS_MAX).map((el) => project(el, depth + 1));
+    }
+    if (typeof node === "object" && node !== null) {
+      if (depth >= ANOMALY_DEPTH_MAX) return "{…}";
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(node).slice(0, ANOMALY_FIELDS_MAX)) {
+        out[k] = project(val, depth + 1);
+      }
+      return out;
+    }
+    return node;
+  };
   try {
-    return JSON.stringify(v, (_, inner) => (typeof inner === "string" && inner.length > ANOMALY_VALUE_MAX ? `${inner.slice(0, ANOMALY_VALUE_MAX)}…` : inner));
+    // The projection bounds node count and leaf width; the slice bounds the
+    // serialized TEXT. Every consumer passes the result through `truncate`
+    // (120 chars) anyway — the 512-char budget just keeps the intermediate
+    // buffer honest for any future consumer that skips it.
+    return JSON.stringify(project(v, 0))?.slice(0, ANOMALY_JSON_MAX);
   } catch {
-    return undefined; // circular provider payload — fall through to String(v)
+    return undefined; // a getter that threw mid-projection — fall through to String(v)
   }
 }
 

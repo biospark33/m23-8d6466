@@ -1611,7 +1611,13 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
       for (const flag of allFlags) {
         if (declared.has(flag)) continue;
         const err: string[] = [];
-        const value = entry.flags.find((f) => f.name === flag)?.valueType !== "boolean";
+        // The value TYPE is resolved from the verb that OWNS the flag, not from
+        // this entry — `entry.flags.find(... === flag)` is always undefined
+        // here (the sweep only visits flags this verb does NOT declare), so it
+        // typed every foreign flag as valued and appended "x" even to boolean
+        // ones. The owning verb's declaration is the authority.
+        const owner = listVerbs().find((v) => v.flags.some((f) => f.name === flag));
+        const value = owner?.flags.find((f) => f.name === flag)?.valueType !== "boolean";
         const argv = value ? [entry.verb, flag, "x"] : [entry.verb, flag];
         expect(await run(argv, sink, deps, (s) => void err.push(s))).toBe(2);
         expect(err.join("")).toContain(`${entry.verb} does not take ${flag}`);

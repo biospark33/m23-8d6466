@@ -36,7 +36,6 @@ import { runDriverContract } from "./driver-contract.test.ts";
 // `reapRuns`) against this driver, so it shares the fleet suite's fixtures.
 import { rejection } from "../helpers.ts";
 import { isNoSuchBox } from "../../src/providers/harvest.ts";
-import { TimeoutError, withTimeout } from "../../src/providers/timeout.ts";
 
 const boxesDir = mkdtempSync(join(tmpdir(), "qds-fake-boxes-"));
 /**
@@ -909,9 +908,11 @@ describe("provisioning refusals and fail-safe reap", () => {
       // D7: everything torn down BEFORE the throw is reported — losing it
       // understates what the sweep did and hides successful work from callers.
       expect(e2.destroyed ?? []).toEqual([n0]);
-      // The FAILED call is named as never-confirmed-gone: retry targets carry
-      // exactly what callers cannot assume about provider state.
-      expect(e2.remaining ?? []).toEqual([n1]);
+      // `remaining` carries the documented contract: the FAILED call plus
+      // every eligible box still unprocessed after it — exactly what callers
+      // cannot assume about provider state. (The failed name alone would hide
+      // n2, which no destroy was ever attempted against.)
+      expect(e2.remaining ?? []).toEqual([n1, n2]);
       // First really gone; failed and not-yet-attempted boxes all still there.
       expect(await d.list(n0)).toEqual([]);
       expect((await d.list()).map((v) => v.name)).toContain(n1);
@@ -928,22 +929,27 @@ describe("provisioning refusals and fail-safe reap", () => {
       const id = "reap-hang-20260827-d4e5f6";
       await t.driver.create(id, SBX_OWNERSHIP_TAG);
       const d = t.driver;
-      // NEVER settles — the bare-await hazard D8 names. A short ceiling makes the
-      // abort observable without pinning the production constant's size here.
+      // NEVER settles — the bare-await hazard D8 names. The budget is
+      // INJECTED through reapRuns' third parameter: the production refusal
+      // (not this harness's outer bound) is what the test observes, without
+      // pinning the 120s constant. withTimeout clears its own timer in a
+      // finally, so the abandoned race leaves nothing scheduled behind.
       d.destroy = () => new Promise(() => {});
       let err: unknown;
       const started = Date.now();
       try {
-        await withTimeout(reapRuns(d, store), 2_000, "reapRuns(hung-destroy)");
+        await reapRuns(d, store, 150);
       } catch (e) {
         err = e;
       }
-      // The outer timeout fired first in THIS harness (2s < the 120s sweep budget),
-      // which is the point: without SOME bound inside, nothing below the process
-      // level ever interrupts. D8's production bound is REAP_DESTROY_TIMEOUT_MS.
-      expect(Date.now() - started).toBeLessThan(10_000);
-      // The sweep did not complete, no partial value was silently returned…
-      expect(err).toBeDefined();
+      expect(Date.now() - started).toBeLessThan(5_000); // the injected budget fired, not the 120s default
+      // The sweep's OWN typed refusal, with the partial report attached:
+      expect(err).toBeInstanceOf(ProvisionRefusedError);
+      const refused = err as ProvisionRefusedError & { destroyed?: string[]; remaining?: string[] };
+      expect(refused.code).toBe("reap-destroy-timeout");
+      expect(refused.destroyed ?? []).toEqual([]);
+      // The hung box is the failed head of `remaining` — never-confirmed-gone.
+      expect(refused.remaining ?? []).toEqual([id]);
       // …and the hung call left the box listed, so no state was lost or faked.
       expect((await t.driver.list()).map((v) => v.name)).toEqual([id]);
     } finally {

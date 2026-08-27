@@ -232,10 +232,17 @@ export async function checkHeadroom(
     // proven": refuse once, admit on the next clean answer.
     if (driver.listWithAnomalies !== undefined) {
       const listing = await withTimeout(driver.listWithAnomalies(), listTimeoutMs, "driver.list()");
-      if (!Array.isArray(listing?.vms) || listing.skipped.length > 0) {
+      // `skipped` is part of the same verified-listing contract as `vms`: a
+      // listing whose skipped channel is missing or not an array has claimed
+      // nothing about completeness either way, and dereferencing it used to
+      // rely on the surrounding catch to land in the same refusal — refuse it
+      // in the guard itself, matching the vms check beside it.
+      const listed = Array.isArray(listing?.vms) ? listing.vms : undefined;
+      const skipped = listing?.skipped;
+      if (listed === undefined || !Array.isArray(skipped) || skipped.length > 0) {
         return { ...base, allowed: false, liveVms: 0, headroom: 0, usedDiskGiB: 0, verified: false, reason: "list-unverified" };
       }
-      vms = listing.vms;
+      vms = listed;
     } else {
       vms = await withTimeout(driver.list(), listTimeoutMs, "driver.list()");
     }

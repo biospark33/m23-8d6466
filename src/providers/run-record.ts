@@ -372,9 +372,25 @@ const RUN_RECORD_TEMP_RE = /^[a-z0-9][a-z0-9-]*\.json(?:\.(?:lock|tomb))?\.[0-9]
  */
 const heldLocks = new Set<string>();
 
+/**
+ * The typed verdict both run-id asserts throw. A dedicated subclass, not a
+ * message prefix: `assertFleetRunId` (src/fleet/dispatch.ts) has to separate
+ * "the operator's id failed the shape check" (exit 2) from a bug inside the
+ * check itself (exit 1), and matching `"invalid run id:"` text breaks the
+ * moment the message is reworded — or misclassifies any other error that
+ * happens to start with those bytes. `instanceof Error` still holds, so every
+ * consumer that only cares that it IS an error is unchanged.
+ */
+export class InvalidRunIdError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidRunIdError";
+  }
+}
+
 export function assertValidRunId(id: unknown): asserts id is string {
   if (typeof id !== "string" || id.length === 0 || id.length > RUN_ID_MAX || !RUN_ID_RE.test(id)) {
-    throw new Error(
+    throw new InvalidRunIdError(
       `invalid run id: ${JSON.stringify(id)} (must match ${RUN_ID_RE.source} and be <= ${RUN_ID_MAX} chars)`,
     );
   }
@@ -383,7 +399,7 @@ export function assertValidRunId(id: unknown): asserts id is string {
 /** The read/write-path admission rule: `assertValidRunId` plus the legacy tail. */
 export function assertExistingRunId(id: unknown): asserts id is string {
   if (typeof id !== "string" || id.length === 0 || id.length > RUN_ID_MAX || !LEGACY_RUN_ID_RE.test(id)) {
-    throw new Error(
+    throw new InvalidRunIdError(
       `invalid run id: ${JSON.stringify(id)} (must match ${LEGACY_RUN_ID_RE.source} and be <= ${RUN_ID_MAX} chars)`,
     );
   }
@@ -874,8 +890,9 @@ export class RunRecordStore {
     // concurrently-constructing store's probe file.
     const probe = join(this.dir, `.probe-${process.pid}-${randomBytes(4).toString("hex")}`);
     const probeLink = `${probe}-link`;
+    let probeFd = -1;
     try {
-      closeSync(openSync(probe, "wx", 0o600));
+      probeFd = openSync(probe, "wx", 0o600);
       const mode = statSync(probe).mode & 0o777;
       if (mode !== 0o600) {
         throw new Error(`file mode 0600 not honoured (got 0${mode.toString(8)})`);
@@ -902,27 +919,30 @@ export class RunRecordStore {
       // fail-closed doctrine: refuse at startup, name the primitive, never
       // degrade. If such a platform ever needs support, the answer is an
       // explicit opt-out, not a silent skip.
-      let probeFd = -1;
+      //
+      // Probed through the SAME exclusive-writable fd the record write path
+      // holds (`openSync(p, "wx", 0o600)` then fsync): the fd is held from
+      // creation above rather than re-opened read-only, so what is proven is
+      // the fsync the writer actually performs — not a weaker variant that
+      // happens to succeed on mounts the write path would still refuse.
       try {
-        probeFd = openSync(probe, "r");
         fsyncSync(probeFd);
       } catch (e) {
         throw new Error(
           `fsync is not supported here (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); the record write needs fsync(2)`,
         );
-      } finally {
-        // Guarded — this function's own contract is to leave no surprises.
-        if (probeFd !== -1) {
-          try {
-            closeSync(probeFd);
-          } catch {
-            // best effort; the rm below is what matters
-          }
-        }
       }
     } catch (e) {
       throw new Error(`run record store cannot start in ${this.dir}: ${(e as Error).message}`);
     } finally {
+      // Guarded — this function's own contract is to leave no surprises.
+      if (probeFd !== -1) {
+        try {
+          closeSync(probeFd);
+        } catch {
+          // best effort; the rm below is what matters
+        }
+      }
       rmSync(probe, { force: true });
       rmSync(probeLink, { force: true });
     }
@@ -1550,28 +1570,33 @@ export class RunRecordStore {
     // has nothing to probe, no sweep matches `.lock`, and release only handles
     // bodies this process wrote itself — so it wedged the id for the process
     // lifetime. Age is the bound, as for own-pid bodies: an ownerless body past
-    // OWN_LOCK_GRACE_MS is a corpse with no possible mourner and is taken via
-    // the same take-then-compare protocol below (the compare against `raw`
-    // still protects any writer that claimed between judgement and take).
+    // OWN_LOCK_GRACE_MS is a corpse with no possible mourner and falls through
+    // to the same take-then-compare protocol below, bypassing the pid liveness
+    // checks by construction (there is no pid to probe; the compare against
+    // `raw` still protects any writer that claimed between judgement and take).
+    // Returning `null` here — "path free" — was the round-11 residual: the
+    // corpse still sits at the path, so every retry's claim EEXISTs and the
+    // wait spins to its own timeout, the very wedge the age bound closes.
     if (!Number.isInteger(owner) || owner <= 0) {
-      return olderThan(lock, OWN_LOCK_GRACE_MS) ? null : "lock body names no pid";
+      if (!olderThan(lock, OWN_LOCK_GRACE_MS)) return "lock body names no pid";
+    } else {
+      // Our pid, not our body, and THIS thread already holds the path: the
+      // caller is waiting on itself — a re-entrant `set()` from the
+      // `beforeRename` seam. Fail-closed is still right (there is no safe way
+      // to hand a live holder its own lock), but reporting it as a sibling
+      // writer sent an operator looking for a second process that never
+      // existed. Checked BEFORE the age bound below so a long-running enclosing
+      // write cannot age past the grace and let the re-entrant call steal its
+      // own outer claim. A sibling thread sharing our pid is NOT in this set.
+      if (owner === process.pid && heldLocks.has(lock)) {
+        return "re-entrant record write: this thread already holds this lock";
+      }
+      const held =
+        owner === process.pid
+          ? raw !== body && !olderThan(lock, OWN_LOCK_GRACE_MS)
+          : isAlive(owner);
+      if (held) return "held by a live owner";
     }
-    // Our pid, not our body, and THIS thread already holds the path: the
-    // caller is waiting on itself — a re-entrant `set()` from the
-    // `beforeRename` seam. Fail-closed is still right (there is no safe way
-    // to hand a live holder its own lock), but reporting it as a sibling
-    // writer sent an operator looking for a second process that never
-    // existed. Checked BEFORE the age bound below so a long-running enclosing
-    // write cannot age past the grace and let the re-entrant call steal its
-    // own outer claim. A sibling thread sharing our pid is NOT in this set.
-    if (owner === process.pid && heldLocks.has(lock)) {
-      return "re-entrant record write: this thread already holds this lock";
-    }
-    const held =
-      owner === process.pid
-        ? raw !== body && !olderThan(lock, OWN_LOCK_GRACE_MS)
-        : isAlive(owner);
-    if (held) return "held by a live owner";
     this.beforeStealTake?.(lock);
     // `.tmp`-suffixed and pid-stamped so a death between the take and the
     // unlink cannot strand the generation: cleanStaleTemps sweeps it at the

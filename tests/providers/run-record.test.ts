@@ -1499,13 +1499,16 @@ describe("concurrent set", () => {
     store.create(id);
     const lockPathStr = store.lockPath(id);
     const realRename = nodeFs.renameSync;
-    const injected = false;
     const notes: string[] = [];
     const origWrite = process.stderr.write;
     process.stderr.write = ((chunk: unknown) => {
       notes.push(String(chunk));
       return true;
     }) as typeof process.stderr.write;
+    // Declared BEFORE the spy: the mock callback closes over it, and a first
+    // invocation ahead of the declaration would be a TDZ throw instead of a
+    // counted fault.
+    let attempts = 0;
     const spy = spyOn(nodeFs, "renameSync").mockImplementation(((from: unknown, to: unknown) => {
       if (from === lockPathStr && attempts < 2) {
         // Only THIS lock's take-aside — every other rename passes untouched.
@@ -1519,14 +1522,12 @@ describe("concurrent set", () => {
       }
       return realRename(from as string, to as string);
     }) as typeof nodeFs.renameSync);
-    let attempts = 0;
     try {
       expect(store.set(id, { vmName: "box-loud" }).vmName).toBe("box-loud"); // committed regardless
     } catch (e) {
       // withLock may surface a loud failure from an unrecoverable release rather
       // than swallow it — either way the commit semantics are pinned below.
       expect((e as Error).message).toMatch(/EIO|lock/);
-      store.set as never; // no-op to keep shape explicit
     } finally {
       // T2-11's file-level guard is the backstop; land the local one too so a
       // note assertion reads a clean buffer regardless of where set() threw.
@@ -1674,17 +1675,12 @@ describe("own-pid lock generations", () => {
   // arm below pins the fail-closed side: an unprovable body inside the grace
   // holds the full window, never stolen.
   //
-  // KNOWN SOURCE GAP (found BY this probe, reported for cluster R): the aged
-  // ownerless corpse is NOT reclaimed. `stealIfOwnerGone`'s ownerless arm
-  // returns null ("free right now") once `olderThan(lock, OWN_LOCK_GRACE_MS)`
-  // passes — but the corpse still sits at the path, so every retry's claimLink
-  // EEXISTs forever: the very process-lifetime wedge the age bound was added to
-  // close. Returning "free" without REMOVING the judged corpse leaves the claim
-  // loop spinning on a path that will never free itself. Pinned here as a
-  // bounded-timeout observation so the wedge's shape is documented in tests; if
-  // the reclaim lands, flip this expectation to a fast steal (see the own-pid
-  // sibling above) and delete this paragraph.
-  test("an OWNERLESS lock body: YOUNG one fails closed; an AGED one wedges (source gap, R7 residual)", () => {
+  // R7's residual CLOSED (round-11 re-review): the aged ownerless corpse now
+  // falls through to the same take-then-compare reclamation a dead-pid corpse
+  // gets, instead of reporting "free" while the file still sat at the path —
+  // which spun every retry's claim into EEXIST and the wait into its own
+  // timeout, the very wedge the age bound was added to close.
+  test("an OWNERLESS lock body: YOUNG one fails closed; an AGED one is reclaimed fast", () => {
     store.create("ownerless-run");
     const lock = store.lockPath("ownerless-run");
 
@@ -1699,25 +1695,16 @@ describe("own-pid lock generations", () => {
     rmSync(lock, { force: true });
 
     // Aged ownerless corpse (non-numeric pid field — same "names no pid" shape):
-    // currently spins past its whole budget and abandons the corpse at the path.
+    // acquired well inside the wait budget, with the stale lock file REMOVED —
+    // the steal consumed it rather than abandoning it for the operator.
     store.create("ownerless-aged-run");
     const lock2 = store.lockPath("ownerless-aged-run");
     writeFileSync(lock2, "junk cafebabe\n", { mode: 0o600 });
     utimesSync(lock2, new Date(Date.now() - WELL_PAST_LOCK_GRACE_MS), new Date(Date.now() - WELL_PAST_LOCK_GRACE_MS));
-    let threw: Error | undefined;
-    try {
-      store.set("ownerless-aged-run", { vmName: "box-aged" });
-    } catch (e) {
-      threw = e as Error;
-    }
-    // EITHER arm satisfies this pin today; when reclaim lands, tighten to
-    // "succeeds within LOCK_TIMEOUT_MS/2 and unlinks the corpse".
-    if (threw !== undefined) {
-      expect(threw.message).toMatch(/timed out waiting for the run record lock/);
-      // The corpse survives the abandoned wait — evidence for the operator,
-      // and exactly what a future reclaim must consume.
-      expect(existsSync(lock2)).toBe(true);
-    }
+    const startedAged = Date.now();
+    expect(store.set("ownerless-aged-run", { vmName: "box-aged" }).vmName).toBe("box-aged");
+    expect(Date.now() - startedAged).toBeLessThan(LOCK_TIMEOUT_MS / 2);
+    expect(existsSync(lock2)).toBe(false);
     rmSync(lock2, { force: true });
   }, 30_000);
 

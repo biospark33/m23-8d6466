@@ -147,11 +147,12 @@ function lockHost(): string {
 }
 
 /**
- * `lockHost()` folded to a filename-safe token — BIJECTIVELY. Every byte
- * outside `[A-Za-z0-9_-]` is escaped as `-XX` (its two-digit hex) and a
- * literal `-` becomes `--`, so the fold is reversible and two distinct hosts
- * can never collide (`a/b` → `a-2f`, `a-b` → `a--2d`; the old charset fold
- * sent both `/`, `.`, and any other stranger to `_`).
+ * `lockHost()` folded to a filename-safe token — BIJECTIVELY. A literal
+ * underscore becomes `--`, and every byte outside `[A-Za-z0-9_]` — a literal
+ * hyphen included — is escaped as `-XX` (its two-digit hex), so the fold is
+ * reversible and two distinct hosts can never collide (`a/b` → `a-2f`,
+ * `a-b` → `a-2d`, `a_b` → `a--`; the old charset fold sent both `/`, `.`,
+ * and any other stranger to `_`).
  *
  * The COLLISION mattered because temp files carry this tag: their pid is
  * otherwise unqualified, `reapStaleTemps` probes THIS host's process table,
@@ -283,11 +284,15 @@ function installSignalRelease(): void {
         // The re-raise itself failed (a seccomp filter or an LSM refusing
         // kill(2), say): the signal was NOT delivered, so nothing terminated.
         // Leaving `unwinding` set — and this handler off — would dead-letter
-        // every later Ctrl-C; reset the latch, put our listener back, put the
-        // claims we just released BACK on disk, and surface the failure — L1's
-        // rule is that locks come off only when termination is proven.
+        // every later Ctrl-C; reset the latch, put EVERY listener back — ours
+        // and each one borrowed for the re-raise, so the embedder/supervisor
+        // handlers this module must not eat survive the failed raise too —
+        // put the claims we just released BACK on disk, and surface the
+        // failure — L1's rule is that locks come off only when termination is
+        // proven.
         moduleState().unwinding = false;
         process.on(sig, onSignal);
+        for (const listener of others) process.on(sig, listener as () => void);
         rollbackReleasedClaims(preReleaseSnapshot);
         writeStderr(
           `warning: could not re-raise ${sig} (${(raiseErr as Error).message}) — the releases above were rolled back and this invocation is STILL RUNNING with its locks restored\n`,
@@ -303,9 +308,14 @@ function installSignalRelease(): void {
       // releases are ROLLED BACK: each claim goes back under its own path, and
       // every later verb refuses on a live lock again — the module's standing
       // fail-safe posture (an operator judges a stranded lock) rather than the
-      // fail-open alternative (the path left free).
+      // fail-open alternative (the path left free). The borrowed listeners go
+      // back on this path too: a supervisor that blocked the signal still
+      // expects its own handler to fire on the NEXT delivery, and a permanent
+      // strip here would have eaten it for the rest of the process.
       rollbackReleasedClaims(preReleaseSnapshot);
       moduleState().unwinding = false;
+      process.on(sig, onSignal);
+      for (const listener of others) process.on(sig, listener as () => void);
       writeStderr(
         `warning: ${sig} arrived while this process's disposition is blocked or ignored (an embedder or supervisor wrapper) and did NOT terminate it\n` +
           `next: the run locks released above were PUT BACK — stop the embedder or SIGKILL this process instead of relying on ${sig}\n`,

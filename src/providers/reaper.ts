@@ -680,19 +680,26 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           // re-read of the store, so a legacy-named tagged box destroyed under
           // the widened arm at classification is corroborated (or newly claimed,
           // caught two arms down) by the same evidence at the delete boundary.
-          if (current === undefined || !isReaperOwnedVm(current, claimed !== undefined)) {
-            failures.push({
-              vm: unit.id,
-              code: "ownership-recheck-refused",
-              message: `VM ${unit.id} failed the ownership re-check immediately before destroy (present: ${current !== undefined}, tag: ${JSON.stringify(current?.tag)}) — not destroyed`,
-              remediation: `inspect ${unit.id} by hand and destroy it via the driver once its provenance is understood`,
-            });
-          } else if (recordError !== undefined) {
+          //
+          // The READ failure is judged FIRST: a record the sweep cannot re-read
+          // leaves the claim state unknown, and the ownership arm below would
+          // otherwise score an unreadable record as "no record corroborates
+          // this box" — reporting ownership-recheck-refused (inspect the box)
+          // when the actionable verdict is record-recheck-failed (repair the
+          // file; the box itself may be perfectly provably ours).
+          if (recordError !== undefined) {
             failures.push({
               vm: unit.id,
               code: "record-recheck-failed",
               message: `record ${unit.id}.json could not be re-read before destroy (${recordError}) — not destroyed`,
               remediation: `repair or delete ${unit.id}.json by hand, then re-run the sweep — the next sweep also refuses to enumerate a malformed record (record-unreadable), so it cannot be worked around by retrying`,
+            });
+          } else if (current === undefined || !isReaperOwnedVm(current, claimed !== undefined)) {
+            failures.push({
+              vm: unit.id,
+              code: "ownership-recheck-refused",
+              message: `VM ${unit.id} failed the ownership re-check immediately before destroy (present: ${current !== undefined}, tag: ${JSON.stringify(current?.tag)}) — not destroyed`,
+              remediation: `inspect ${unit.id} by hand and destroy it via the driver once its provenance is understood`,
             });
           } else if (claimed !== undefined && claimed.closedAt === undefined) {
             failures.push({
