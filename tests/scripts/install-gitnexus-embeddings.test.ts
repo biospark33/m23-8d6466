@@ -183,5 +183,8 @@ describe("install-gitnexus-plus.sh — EMBEDDINGS_FLAG branch (#74, PR #90)", ()
       expect(args).toContain("--force");
       expect(args).toContain("--skip-agents-md");
     }
-  });
+    // Real git remote round-trips (or script spawns) can outrun bun's 5s
+    // default under parallel-suite load — same load-flake family the fleet
+    // race tests document; deterministic solo.
+  }, 20_000);
 });

@@ -99,7 +99,10 @@ describe("INV-PR-6 — append-only publication", () => {
     // Already there at this sha: a resume, not a second push.
     const second = await pushVerifiedSha(runId, deps(host));
     expect(second).toMatchObject({ ok: true, pushed: false });
-  });
+    // Real git remote round-trips (or script spawns) can outrun bun's 5s
+    // default under parallel-suite load — same load-flake family the fleet
+    // race tests document; deterministic solo.
+  }, 20_000);
 
   test("a non-default targetRef whose sha is NOT a descendant of the remote tip is refused", async () => {
     const runId = "run-push-rewrite";
@@ -117,7 +120,10 @@ describe("INV-PR-6 — append-only publication", () => {
     if (out.ok) return;
     expect(out.refusal.failedPrecondition).toBe("not-fast-forward");
     expect((await remoteRefs(host))["refs/heads/qds/pr-branch"]).toBe(sibling);
-  });
+    // Real git remote round-trips (or script spawns) can outrun bun's 5s
+    // default under parallel-suite load — same load-flake family the fleet
+    // race tests document; deterministic solo.
+  }, 20_000);
 
   test("a descendant sha appends to the same non-default targetRef", async () => {
     const runId = "run-push-append";
@@ -134,7 +140,10 @@ describe("INV-PR-6 — append-only publication", () => {
     const out = await pushVerifiedSha(runId, { ...deps(host), targetRef: "refs/heads/qds/pr-branch" });
     expect(out).toMatchObject({ ok: true, sha: fixSha, pushed: true });
     expect((await remoteRefs(host))["refs/heads/qds/pr-branch"]).toBe(fixSha);
-  });
+    // Real git remote round-trips (or script spawns) can outrun bun's 5s
+    // default under parallel-suite load — same load-flake family the fleet
+    // race tests document; deterministic solo.
+  }, 20_000);
 
   test("the SHA is pushed, not the ref name — a ref that moved after preflight publishes nothing new", async () => {
     const runId = "run-push-sha";

@@ -321,7 +321,10 @@ describe("AC4 — idempotency and resumability", () => {
 
     const out = await openPullRequest(runId, deps(host, github));
     expect(out.ok).toBe(false);
-  });
+    // Real git remote round-trips (or script spawns) can outrun bun's 5s
+    // default under parallel-suite load — same load-flake family the fleet
+    // race tests document; deterministic solo.
+  }, 20_000);
 
   test("a record write that fails AFTER the PR is open refuses NAMING the PR, and the re-run reuses it", async () => {
     const runId = "run-writefail";

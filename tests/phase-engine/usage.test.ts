@@ -158,7 +158,9 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
     };
     walk(engineRoot);
     expect(offenders).toEqual([]);
-  });
+    // 20s: recursive src scan can outrun bun's 5s default under
+    // parallel-suite load on a saturated host — deterministic solo.
+  }, 20_000);
 
   test("exactly one micros→USD DIVISION exists in the engine, in usage.ts", () => {
     const usage = codeOnly(path.join(engineRoot, "usage.ts"));
@@ -177,7 +179,8 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
     };
     walk(engineRoot);
     expect(others).toEqual([]);
-  });
+    // 20s: same load-flake family as the scan above — recursive src read.
+  }, 20_000);
 
   test("exactly one USD→µ$ MULTIPLICATION exists in the engine, in team-event-adapter.ts (DF1.3 boundary)", () => {
     const adapterPath = path.join(engineRoot, "phases", "team-event-adapter.ts");
