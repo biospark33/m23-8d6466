@@ -31,6 +31,9 @@ import {
   type SweepDeps,
   type SweepReport,
 } from "../src/providers/index.ts";
+import { CostLedger } from "../src/providers/cost-ledger.ts";
+import { getRecord } from "../src/providers/harvest.ts";
+import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 import { newRequestId, setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 
@@ -137,13 +140,36 @@ export async function run(
 
   let report: SweepReport;
   try {
+    const store = deps.store ?? new RunRecordStore({ requestId });
     report = await sweep(
       {
         driver,
+        store,
         // openRouterKeyApi throws its own provisioning-key-missing remediation
         // before the sweep enumerates anything.
-        store: deps.store ?? new RunRecordStore({ requestId }),
         keyApi: deps.keyApi ?? openRouterKeyApi(),
+        // DF2.8 (see SweepDeps.costLedger): the sweep's teardown units must
+        // settle box hours into the SAME ledger dispatch reserved against —
+        // costLedgerOpts(store.dir), exactly the sandbox-teardown wiring.
+        // Without it a reaped run closes with zero cost_events rows and its
+        // reservation counts against the issue cap forever (MEASURED live
+        // 2026-08-26, T3.4b).
+        costLedger: new CostLedger({
+          ...costLedgerOpts(store.dir),
+          runsDir: store.dir,
+          readRunRecord: (id) => {
+            try {
+              const r = getRecord({ store }, id);
+              return { createdAt: r.createdAt, closedAt: r.closedAt, keyHash: r.keyHash, limitMicroUsd: r.limitMicroUsd };
+            } catch (e) {
+              // Same classifier semantics as sandbox-teardown: only genuine
+              // absence maps to undefined; a corrupt record propagates — a
+              // live box and key may sit behind it.
+              if ((e as { code?: string }).code === "no-record") return undefined;
+              throw e;
+            }
+          },
+        }),
         ...(deps.reapDir !== undefined ? { reapDir: deps.reapDir } : {}),
         ...(deps.limits !== undefined ? { limits: deps.limits } : {}),
         ...(deps.now !== undefined ? { now: deps.now } : {}),

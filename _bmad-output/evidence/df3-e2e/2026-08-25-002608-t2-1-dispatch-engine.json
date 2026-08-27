@@ -1,0 +1,35 @@
+{
+  "writtenAt": "2026-08-25T00:26:08.155Z",
+  "test": "T2.1",
+  "outcome": "fail",
+  "runId": "",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t21probe-mt7xbgpr5ty"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 3,
+      "stdoutTail": "",
+      "stderrTail": "'git -C src status --porcelain'; ssh qds-20260825-b7b338.exe.xyz 'pi --list-models'; ssh qds-20260825-b7b338.exe.xyz 'python3 -m json.tool ~/.pi/agent/models.json' — teardown when done: ssh exe.dev rm qds-20260825-b7b338  # DF2.5 teardown — the only VM-destroying path; NEVER auto-run on gate failure (INV-5)\"}\n{\"requestId\":\"31d61d82-f87b-49eb-b21e-8152fe47ce54\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-25T00:26:06.626Z\",\"duration\":41632,\"durationMs\":41632,\"status\":\"error\",\"runId\":\"qds-20260825-b7b338\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":3,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 3\n"
+    },
+    {
+      "phase": "final-ls",
+      "e2eBoxes": []
+    }
+  ]
+}

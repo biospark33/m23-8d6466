@@ -1,0 +1,35 @@
+{
+  "writtenAt": "2026-08-24T19:31:12.576Z",
+  "test": "T1.1",
+  "outcome": "pass",
+  "vm": "e2e-t11-mt7mszt149l",
+  "phases": [
+    {
+      "phase": "whoami",
+      "ok": true,
+      "answered": true,
+      "length": 196
+    },
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t11-mt7mszt149l",
+      "providerName": "e2e-t11-mt7mszt149l"
+    },
+    {
+      "phase": "list-after-create",
+      "vm": "e2e-t11-mt7mszt149l",
+      "count": 1
+    },
+    {
+      "phase": "exec-node-version",
+      "exitCode": 127,
+      "stdout": ""
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t11-mt7mszt149l",
+      "ok": true
+    }
+  ]
+}

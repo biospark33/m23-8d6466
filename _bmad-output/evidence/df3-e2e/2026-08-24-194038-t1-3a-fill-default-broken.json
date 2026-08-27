@@ -1,0 +1,25 @@
+{
+  "writtenAt": "2026-08-24T19:40:38.026Z",
+  "test": "T1.3a",
+  "outcome": "fail",
+  "runId": "e2e-t13a-mt7n55jd2b",
+  "phases": [
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t13a-mt7n55jd2b"
+    },
+    {
+      "phase": "fill-default-workdir",
+      "pinnedFailure": "fill clone exited 128: fatal: could not create leading directories of '/home/agent/src': Permission denied"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toContain(expected)\n\nExpected to contain: \"fill-failed\"\nReceived: \"fill clone exited 128: fatal: could not create leading directories of '/home/agent/src': Permission denied\"\n"
+    },
+    {
+      "phase": "finally-teardown-verb",
+      "exitCode": 0
+    }
+  ]
+}

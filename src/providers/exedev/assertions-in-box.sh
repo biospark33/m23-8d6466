@@ -23,8 +23,17 @@
 
 set -u
 # round 7: hermetic parsing — a polluted IFS or non-C locale inherited from the
-# ssh environment must not perturb word splitting or string matching below
-IFS=' \t\n'
+# ssh environment must not perturb word splitting or string matching below.
+#
+# F11 (2026-08-25): that hardening shipped as `IFS=' \t\n'` — SINGLE quotes,
+# so IFS became the LITERAL characters {space, backslash, t, n} and C's
+# `for m in $Models` shredded every slug containing n/t ("anthropic/…" →
+# a, "", hropic/…; measured live three gates failed while n/t-less deepseek
+# passed). Build the REAL three characters instead: printf emits space+tab+
+# newline+x, command substitution keeps them (nothing trailing to strip), and
+# the sentinel-x is removed so IFS is exactly {space, tab, newline}.
+IFS="$(printf ' \t\nx')"
+IFS="${IFS%x}"
 export LC_ALL=C
 
 Roster="${1:?usage: assertions-in-box.sh <rosterPath> <envFile> <model>...}"
@@ -84,6 +93,14 @@ fi
 # route, accepting `content` OR `reasoning` — reasoning models answer with
 # content=null and the text under .reasoning; accepting only .content here
 # produces false failures.
+#
+# max_tokens is EXPLICIT (8, D's own figure) because the provider DEFAULT is
+# the model's max output — for high-ceiling slugs that worst case exceeds a
+# capped run key's whole limit and OpenRouter refuses the ping outright:
+# MEASURED live 2026-08-25, anthropic/claude-haiku-4.5 against a 50,000 µ$ key
+# → 402 "You requested up to 64000 tokens, but can only afford 50000" — the
+# gate then fails C on a healthy model + healthy key. Bounding the request
+# keeps the ping inside any cap the fleet can mint (F10).
 c_fail=""
 c_count=0
 for m in $Models; do
@@ -91,7 +108,7 @@ for m in $Models; do
   resp="$(printf 'header = "Authorization: Bearer %s"\n' "$OPENROUTER_API_KEY" \
     | curl -s --max-time 30 -K - https://openrouter.ai/api/v1/chat/completions \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"reply with the single word: ready\"}],\"provider\":{\"zdr\":true,\"data_collection\":\"deny\"}}")"
+    -d "{\"model\":\"$m\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"reply with the single word: ready\"}],\"provider\":{\"zdr\":true,\"data_collection\":\"deny\"}}")"
   if ! printf '%s' "$resp" | python3 -c '
 import json, sys
 try:
@@ -159,6 +176,15 @@ else:
 d_scan="$(python3 -c '
 import json, os, sys
 p = os.path.expanduser("~/.pi/agent/models.json")
+# F14 (2026-08-25, gate qds-20260825-0250b0): the box image drifted — pi 0.84.2
+# never writes models.json (its registry lives in pi'"'"'s own store; models-store.json
+# ships `{}`), and production readCustomRegistry treats a MISSING file as an
+# EMPTY custom registry priced by the bundled catalog (validate.ts AC5). So
+# absence is production-legal: D then rests on the provider usage.cost proof
+# above and says so. A file that DOES exist keeps the full scan below.
+if not os.path.exists(p):
+    print("custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost")
+    sys.exit(0)
 try:
     data = json.load(open(p)).get("models", {})
 except Exception as e:
@@ -181,10 +207,15 @@ if bad:
     print("; ".join(bad)); sys.exit(1)
 print(f"{len(data)}/{len(data)} models priced")
 ')"
-if ! printf '%s' "$d_scan" | grep -q " models priced$"; then
-  emit D 0 "cost table not loadable: $d_scan"
-  exit 3
-fi
+# Two passing shapes (F14): the full-pricing scan result, or the AC5 absence
+# note. Anything ELSE is a real cost-table failure.
+case "$d_scan" in
+  *"custom registry absent"*|*" models priced") : ;;
+  *)
+    emit D 0 "cost table not loadable: $d_scan"
+    exit 3
+    ;;
+esac
 if ! printf '%s' "$d_total" | python3 -c '
 import sys, math
 v = float(sys.stdin.read().strip() or 0)

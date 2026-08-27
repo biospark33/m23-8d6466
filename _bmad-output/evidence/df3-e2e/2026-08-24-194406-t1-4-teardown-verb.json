@@ -1,0 +1,16 @@
+{
+  "writtenAt": "2026-08-24T19:44:06.091Z",
+  "test": "T1.4",
+  "outcome": "fail",
+  "runId": "e2e-t14-mt7n9m6ykf",
+  "phases": [
+    {
+      "phase": "test-error",
+      "error": "extensions.budget.issueId must be a string"
+    },
+    {
+      "phase": "finally-direct-destroy",
+      "ok": true
+    }
+  ]
+}

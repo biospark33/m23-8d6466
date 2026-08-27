@@ -1653,6 +1653,77 @@ harvest count-bearing arm, gate-E note depth, httpsUrl regex pin, env restore ve
   own modules (fleet, providers, exedev setup-gate, scripts/fleet, their tests); zero out-of-scope
   symbols. Focal reruns during the wave: fleet 369→370+, providers 183 green, cli 93/93 stable.
 
+### 2026-08-24 — TIER-1 live e2e (real exe.dev, zero model spend) — commit 0349b13
+
+First-ever real-substrate proof of the verb layer: 7 live tests in `tests/fleet/e2e/`
+(todoIf-gated on QDS_E2E_LIVE, refuse-half-configured), all PROVEN — driver
+primitives (whoami/create/list/exec/copyFile/destroy + scp round-trip), `status`
+verb against the real provider listing, `harvest` verb end-to-end (real in-box
+clone at pinned SHA on `sbx/<runId>`, in-box commit, bundle out over scp, host
+`git bundle verify` + quarantine fetch), `teardown` verb full chain (real key
+mint at 5000 µ$ cap — $0 model spend — revoke verified against the provider's
+key list, real `cost_events` box_hours ledger write, idempotent second
+teardown), and the run-lock under real concurrent subprocesses. Evidence:
+`_bmad-output/evidence/df3-e2e/` (26 redacted JSONs); full report with the bug
+list at `_bmad-output/workflow-state/code-review/e2e-audit/e2e-run-report.md`.
+
+The `dispatch` verb itself remains 0% real — exedev dispatch ALWAYS runs the
+five-assertion gate, whose C/D are real chat calls (model spend), and it is
+blocked anyway by two HIGH bugs the live run pinned (fix session input, not
+hacked around here):
+
+- **F3** `DEFAULT_FILL_WORKDIR=/home/agent/src` (fill.ts:40) and
+  `KEY_ENV_FILE=/home/agent/app/.env` (credentials.ts:51) are unwritable on
+  the real image (ssh user `exedev`, HOME=/home/exedev, /home root-owned) —
+  fill AND key delivery fail on every real box; no dispatch has ever run live.
+- **F6** `fleet teardown` on an open record with no vmName skips destroy and
+  exits 0 "torn down" (teardown.ts:446) while the runId-named box keeps
+  billing — the runId fallback provisionAdmittedRun's comments promise does
+  not exist on this path. 3 boxes leaked during early iterations (all
+  recovered; final `ssh exe.dev ls` empty).
+
+Also verified live: box image has NO node (python3/curl/git/pi only); box-hours
+price at a 1-hour minimum (~20s box → full hour); QDS-Factory is PRIVATE so
+in-box anonymous clone is impossible by design (INV-CRED-1) — live fills must
+use a public repo until a private-repo design lands (operator requirement on
+record: proprietary repos must work; candidate: host-side clone + bundle push
+into the box, creds never cross the wire).
+
+
+### 2026-08-24 (later) — e2e fix session: F3/F6/F7/F5/F8 fixed + private-repo fill (F4) — commits f3abb96..624c98b
+
+The TIER-1 run's findings were root-caused and fixed on this branch (one
+commit per fix, impact() before every edit, mutation-verified RED tests,
+1199/0/9 full-suite green, all retested LIVE solo):
+
+- **F3** `DEFAULT_FILL_WORKDIR` → `"src"`, `KEY_ENV_FILE` → `"app/.env"`
+  (HOME-relative — ssh exec lands in the only writable root; every consumer
+  swept). Live: default fill + default key file SUCCEED on a real box
+  (T1.3a FIXED PIN, evidence 220128).
+- **F6** teardown now destroys `rec.vmName ?? runId` (the fallback
+  teardownRun always promised) — a vmName-less open record can no longer
+  leak its runId-named box at exit 0 (unit port of live repro e2e-repro6d).
+- **F7** ExeDevDriver.destroy verifies absence via ls after rm exit-0 (one
+  retry, then throws) — rm's ack is no longer read as the box's state.
+- **F5** the teardown verb's finally reads the record: closed ⇒ the lock
+  guards nothing billable and is released (exit stays 6 for the unpriced
+  row); open ⇒ lock-held unchanged.
+- **F8** box-hours price fractionally from wall-clock ms into integer µ$
+  (live row: 931 µ$ for a ~15s box, was 230,000); DF2.8 story amended in the
+  same commit.
+- **F4** NEW default fill mode `bundle-push`: host fetches the pinned SHA
+  with the HOST's own git credentials, bundles it, pushes it into the box
+  over exec stdin (base64), box clones from the LOCAL bundle — credentials
+  never cross the wire (INV-CRED-1 pure), and PRIVATE repos work. Proven
+  live against private biospark33/QDS-Factory at pushed SHA 624c98b through
+  the full harvest verb (evidence 220341/220432).
+
+**dispatch is no longer structurally blocked**: fill + key delivery land on
+default paths, private repos included. Remaining gate to live dispatch is
+TIER-2 spend approval only. Full report:
+`_bmad-output/workflow-state/code-review/e2e-audit/e2e-run-report.md` (fix
+session section).
+
 ## Review round 10 — BMAD adversarial code review, 2026-08-24
 
 12 parallel reviewers over the merged PR 123 diff (chunked ≤4k lines/file-cluster;
@@ -1755,6 +1826,45 @@ this fixture (90 min @ 3.6M µ$/h = 1.5h = 5,400,000 µ$, not 2h). Fixture corre
 AC2 runtime provenance remains shape-only — amended this round as a DECLARED deviation
 (brand = compile-time half; mint-registry rejected as out-of-scope subsystem; collision
 guards make exposure = squatting a free id).
+
+### 2026-08-25 — TIER-2 live e2e: dispatch verb real-proven through gate B; gate C broken (F10 fixed, F11 open)
+
+T2.1 (`tests/fleet/e2e/tier2-dispatch-engine.live.test.ts`, commit 89a44f4)
+drove the REAL `fleet dispatch --driver exedev` subprocess against the private
+biospark33/QDS-Factory at pushed SHAs, operator-approved 50,000 µ$/key cap.
+Newly real-proven live: brief validation → budget admission at an operator
+cost-config (50,000 µ$ cap + box-hour rate beside the records dir) → record→box→mint
+ordering → default bundle-push fill of the PRIVATE repo inside the verb →
+setup-gate A (HEAD+porcelain) and B (pi registry) on a dispatch-provisioned
+box. Gate C fails deterministically (3/3 attempts): F10 — C's ping omitted
+max_tokens so OpenRouter priced it at haiku-4.5's 64k default and refused with
+402 against the capped key — FIXED at source (assertions-in-box.sh, commit
+1f2830d, focal suite green); post-fix failures persist through-gate only
+(F11 OPEN — mangled slug in C's failure note / intermittent whitespace-only
+200s from box egress; full evidence in e2e-run-report.md §TIER-2). Expose/ack,
+stamped-manifest read-back, engine spend and harvest-of-dispatch-run remain
+unproven behind gate C. Two test-side leak lessons fixed in the same commit:
+finallys now recover runId/vmName from refusal payloads (F12), and the leak
+check matches dispatch's real `qds-*` box names (F13).
+
+### 2026-08-25 (session 3) — TIER-2 CLOSED GREEN: gate C/D/E + engine + harvest + teardown all real-proven — commits 409137d..4804765
+
+F11 ROOT-CAUSED and FIXED (`409137d`): the round-7 hermetic-parsing line was
+`IFS=' \t\n'` in single quotes — IFS became the literal characters
+{space, backslash, t, n} and the in-box C loop word-split model ids on 'n' AND
+'t': `anthropic/claude-haiku-4.5` pinged as a, "", hropic/… (the empty middle
+field IS the two-space mangle in the old evidence notes) while n/t-less
+deepseek passed intact. Byte-exact local repro with a shim curl; RED test
+drives the verbatim script. The whitespace-200 egress theory is dead for these
+failures. F14 (`ea6dd64`): first-ever live D execution failed on image drift —
+pi 0.84.2 never writes models.json; D now treats absence as production-legal
+(validate.ts AC5), keeps the four-key scan when present; E proven same run.
+Dispatch now stamps record.commitSha after a passing gate (`536c23b`) — the
+audit answer to "which commit is this billable box running?". FINAL live run
+at HEAD: gate A✓B✓C✓D✓E✓, seeded-fix engine loop on deepseek-v3.2 (real spend),
+harvest bundle verified (fix-in-bundle true), teardown exit 0, box-hours priced
+7,798 µ$, spend 7,825 ≤ 50,000 µ$ cap. Evidence:
+`_bmad-output/evidence/df3-e2e/2026-08-25-153706-t2-1-dispatch-engine.json`.
 
 ---
 

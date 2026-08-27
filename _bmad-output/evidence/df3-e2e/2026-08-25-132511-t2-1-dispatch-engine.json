@@ -1,0 +1,50 @@
+{
+  "writtenAt": "2026-08-25T13:25:11.825Z",
+  "test": "T2.1",
+  "outcome": "fail",
+  "runId": "qds-20260825-0250b0",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t21probe-mt8p4x096wy"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 3,
+      "stdoutTail": "",
+      "stderrTail": "'git -C src status --porcelain'; ssh qds-20260825-0250b0.exe.xyz 'pi --list-models'; ssh qds-20260825-0250b0.exe.xyz 'python3 -m json.tool ~/.pi/agent/models.json' — teardown when done: ssh exe.dev rm qds-20260825-0250b0  # DF2.5 teardown — the only VM-destroying path; NEVER auto-run on gate failure (INV-5)\"}\n{\"requestId\":\"f98b0575-e951-49b6-a13a-80b2a52eb7a2\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-25T13:24:58.990Z\",\"duration\":50723,\"durationMs\":50723,\"status\":\"error\",\"runId\":\"qds-20260825-0250b0\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":3,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 3\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "qds-20260825-0250b0",
+      "vmName": "qds-20260825-0250b0"
+    },
+    {
+      "phase": "finally-teardown-verb",
+      "exitCode": 0,
+      "stderrTail": "tId\":null,\"timestamp\":\"2026-08-25T13:25:08.262Z\",\"duration\":9196,\"durationMs\":9196,\"status\":\"ok\",\"runId\":\"qds-20260825-0250b0\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260825-0250b0",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

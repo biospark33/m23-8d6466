@@ -107,24 +107,37 @@ function childEnv(): NodeJS.ProcessEnv {
  *
  * DF1.4: recordProcess/endProcess calls for tracer.
  */
+/** PF-2: the bounded stdout tail a code phase's journal value carries. */
+const STDOUT_TAIL_CHARS = 4096;
+
 function runCommand(
   cmd: readonly string[],
   signal: AbortSignal,
   cwd: string,
   tracer: Tracer,
   requestId: string,
-): Promise<number> {
+): Promise<{ exitCode: number; stdoutTail: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd[0] as string, cmd.slice(1), {
       cwd,
       env: childEnv(),
       // fd 1 stays engine-owned: the banner and the structured log are run facts,
       // and a manifest-declared command must not be able to forge either. Child
-      // output is relayed to stderr instead.
+      // output is relayed to stderr instead — and, since PF-2, a bounded tail of
+      // it rides the phase value so step outputs become queryable (the journal
+      // used to carry {exitCode} only, which left rank scoring nothing to read).
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });
-    child.stdout?.on("data", (b: Buffer) => fs.writeSync(2, b));
+    // The tail is last-STDOUT_TAIL_CHARS chars, so a bounded buffer + drop-oldest
+    // while streaming; stderr needs no tail and only relays.
+    let stdoutBuf: Buffer = Buffer.alloc(0);
+    child.stdout?.on("data", (b: Buffer) => {
+      stdoutBuf = stdoutBuf.length + b.length > STDOUT_TAIL_CHARS * 4
+        ? Buffer.concat([stdoutBuf.subarray(stdoutBuf.length + b.length - STDOUT_TAIL_CHARS * 4), b])
+        : Buffer.concat([stdoutBuf, b]);
+      fs.writeSync(2, b);
+    });
     child.stderr?.on("data", (b: Buffer) => fs.writeSync(2, b));
 
     // DF1.4: Record process spawn. Tracer methods are non-throwing by
@@ -194,7 +207,7 @@ function runCommand(
     // it until this process reads it.
     child.on("exit", (code, sig) => {
       done();
-      resolve(code ?? (sig ? 128 : 0));
+      resolve({ exitCode: code ?? (sig ? 128 : 0), stdoutTail: stdoutBuf.toString("utf8").slice(-STDOUT_TAIL_CHARS) });
     });
   });
 }
@@ -520,7 +533,10 @@ function makeBodyFactory(
       // phase verdict — so gates are composed by the caller that wants them
       // (gatedBody over this factory's bodies); the tracer then sees their
       // events through the journal port this run already decorates.
-      return async ({ signal }) => ({ exitCode: await runCommand(cmd, signal, cwd, tracer, requestId) });
+      // PF-2: the value is {exitCode, stdoutTail} — the bounded tail makes the
+      // step's output queryable downstream without unseating fd 1's engine
+      // ownership (the full stream still relays to stderr).
+      return ({ signal }) => runCommand(cmd, signal, cwd, tracer, requestId);
     }
     // DF1.6 T7: dispatch_task registration — the factory closes over the
     // run's tracer + requestId so prompt events (pre-spawn) and adapted team

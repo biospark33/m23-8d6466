@@ -1185,6 +1185,19 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(result.state).toBe("ready");
   });
 
+  test("a gate-passed run's record carries the commitSha it was filled and gated against", async () => {
+    // T2.1 live finding (2026-08-25): the ack carried vmName but the record
+    // never stamped the pinned SHA — `fleet status`/audit could not answer
+    // "which commit is this billable box running?". The stamp lands only AFTER
+    // the gate passed: a refused run must not claim a provenance it never
+    // reached, and the SHA written is the BRIEF's (the one fill pinned and the
+    // gate prefix-checked), re-read from the record like any other consumer.
+    const brief = validBrief();
+    const result = await dispatch(brief, deps());
+    expect(result.state).toBe("ready");
+    expect(store.get(result.runId).commitSha).toBe(brief.commitSha);
+  });
+
   /**
    * The `setTimeout` clamp is the upper bound's whole reason for existing: a
    * delay past 2^31-1 wraps to 1 ms, so a request to LENGTHEN the budget
@@ -1410,35 +1423,54 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // The sibling above stubs `store.create` to throw EEXIST, so it proves the
     // MAPPING and nothing about the window. This one runs two dispatches
     // against the real store and FORCES the overlap: the first headroom call
-    // PARKS until the second arrives. The headroom step sits strictly after
-    // the step-4 existence probe and strictly before `store.create`, so once
-    // both arms have parked there, each has provably found no record and is
-    // committed into exactly the window whose arbiter is `store.create`'s
-    // O_EXCL — whichever continuation resumes first wins it, the other provably
-    // loses IN the window rather than at the fast path.
+    // PARKS until the second dispatch has COMMITTED at its step-4 existence
+    // probe. The headroom step sits strictly after that probe and strictly
+    // before `store.create`, so once the gate opens, each arm has provably
+    // found no record and is committed into exactly the window whose arbiter
+    // is `store.create`'s O_EXCL — whichever continuation resumes first wins
+    // it, the other provably loses IN the window rather than at the fast path.
+    //
+    // The release signal is the PROBE, not a second arrival inside headroom:
+    // a barrier that parks the first headroom read until a second one arrives
+    // DEADLOCKS once admission is single-flight (DF3.2's fleet-ceiling fix) —
+    // the queued loser never reaches its read, so the first would hold the
+    // section forever. The probe runs before the section is entered, so the
+    // overlap is still forced on unfixed code and deadlock-free on fixed code.
     //
     // Without the barrier this test bet on natural interleaving: if a scheduler
     // or refactor ever serialized the arms, the loser would take the step-4
     // FAST PATH instead — same refusal code, same exit, every assertion below
-    // still green, and the window silently unexercised. A regression that skips
-    // headroom entirely parks here and times THIS test out, which names the
-    // fixture rather than misreporting as a pass.
+    // still green, and the window silently unexercised. The `lists` count
+    // asserted below is the tripwire that replaced the old park-forever one:
+    // a regression that skips headroom entirely starves it and fails here,
+    // naming the fixture rather than misreporting as a pass.
     const preMinted = mintRunId();
     // ONE ledger for both arms, so `admitCalls` counts across them. The default
     // `ledgerFactory` mints a fresh throwaway per call, which is precisely what
     // makes the double-admission window unobservable.
     const ledger = goodLedger();
-    let parked = 0;
+    let probes = 0;
     let releaseBarrier: () => void = () => {};
-    const bothParked = new Promise<void>((r) => {
+    const bothProbed = new Promise<void>((r) => {
       releaseBarrier = r;
     });
+    const realGet = store.get.bind(store);
+    store.get = (runId: string) => {
+      try {
+        return realGet(runId);
+      } finally {
+        // `finally`, not the return path: `store.get` THROWS ENOENT for a
+        // missing record (it is `recordExists`'s own catch arm that maps that
+        // to "free"), and a probe counted only on return never fires.
+        probes += 1;
+        if (probes === 2) releaseBarrier();
+      }
+    };
+    let lists = 0;
     const realList = driver.list.bind(driver);
     driver.list = async () => {
-      parked += 1;
-      // The SECOND arrival opens the gate; the FIRST holds until it does.
-      if (parked === 2) releaseBarrier();
-      else await bothParked;
+      lists += 1;
+      await bothProbed;
       return realList();
     };
 
@@ -1446,6 +1478,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       dispatch(validBrief(), deps({ ledgerFactory: () => ledger }), { runId: preMinted }),
       dispatch(validBrief(), deps({ ledgerFactory: () => ledger }), { runId: preMinted }),
     ]);
+
+    // Both arms took the headroom read — the window really was exercised.
+    expect(lists).toBe(2);
 
     const winners = settled.filter((s) => s.status === "fulfilled");
     const losers = settled.filter((s) => s.status === "rejected");
@@ -1486,53 +1521,82 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(ledger.closeCalls).toBe(2);
   });
 
-  test("N concurrent dispatches on DISTINCT ids racing headroom both pass — the documented fleet-ceiling gap, pinned", async () => {
-    // The same-id race above has an arbiter (`store.create`'s O_EXCL). The
-    // DISTINCT-id race against the FLEET ceiling has none: step 5's
-    // `checkHeadroom` is a bare READ of `driver.list()` with no reservation at
-    // the quota layer (see the long comment over step 6 in src/fleet/dispatch.ts:
-    // "The FLEET-CEILING half is NOT closed"). Two arms parked INSIDE that read,
-    // both released into a fleet with zero live boxes and a ceiling of one, are
-    // both told `allowed: true` and both provision.
+  test("N concurrent dispatches on DISTINCT ids racing headroom admit exactly ONE — the fleet-ceiling race, closed in-process", async () => {
+    // The round-10 pin (df3-1 review, finding DF13) froze the overshoot: two
+    // dispatches parked inside step 5's `driver.list()` against maxVms=1 were
+    // BOTH told `allowed: true` and both provisioned, because `checkHeadroom`
+    // is a bare READ (see the long comment over step 6 in src/fleet/dispatch.ts).
+    // DF3.2 closes the IN-PROCESS half: the admission critical section —
+    // headroom read → decision → box create — is single-flight, so the second
+    // dispatch re-lists AFTER the first's box exists and takes the ordinary
+    // `vm-ceiling` refusal. This is that pin flipped red-to-green per the
+    // round-10 handoff; the CROSS-PROCESS half (two CLI invocations, or a
+    // fan-out's aggregate list vs a concurrent plain dispatch) stays open and
+    // documented in dispatch.ts.
     //
-    // This pins the DOCUMENTED current behavior so the gap cannot silently
-    // widen (or quietly get fixed without the comment moving): overshoot is
-    // bounded by how many dispatches fit inside one list round trip, and the
-    // DF2.6 reaper still sees every box. Closing it needs a providers-layer
-    // intent record — deliberately not this module's change to make.
-    let parked = 0;
+    // The barrier parks the first list until the second dispatch has COMMITTED
+    // to admission — observed at its `recordExists` store.get probe, which runs
+    // BEFORE the critical section. Parking until a second arrival INSIDE the
+    // list (the old pin's shape) would deadlock a single-flight loser that
+    // never gets to list at all; releasing on the probe keeps the interleaving
+    // real for unfixed code and deadlock-free for fixed code.
+    const probed = new Set<string>();
     let releaseBarrier: () => void = () => {};
-    const bothParked = new Promise<void>((r) => {
+    const bothCommitted = new Promise<void>((r) => {
       releaseBarrier = r;
     });
+    const realGet = store.get.bind(store);
+    // `finally`, not the return path: `store.get` THROWS ENOENT for a missing
+    // record (it is `recordExists`'s own catch arm that maps that to "free"),
+    // and a probe counted only on return never fires for either dispatch.
+    store.get = (runId: string) => {
+      try {
+        return realGet(runId);
+      } finally {
+        if (!probed.has(runId)) {
+          probed.add(runId);
+          if (probed.size === 2) releaseBarrier();
+        }
+      }
+    };
     const realList = driver.list.bind(driver);
-    driver.list = async () => {
-      parked += 1;
-      if (parked === 2) releaseBarrier();
-      else await bothParked;
-      return realList();
+    driver.list = async (name?: string) => {
+      await bothCommitted;
+      return realList(name);
     };
 
     const settled = await Promise.allSettled([
-      dispatch(validBrief(), deps({ quotaLimits: limitsWith({ maxVms: 1 }) })),
-      dispatch(validBrief(), deps({ quotaLimits: limitsWith({ maxVms: 1 }) })),
+      dispatch(validBrief(), deps({ quotaLimits: limitsWith({ maxVms: 1 }) }), { runId: mintRunId() }),
+      dispatch(validBrief(), deps({ quotaLimits: limitsWith({ maxVms: 1 }) }), { runId: mintRunId() }),
     ]);
 
-    // BOTH succeeded: neither saw the other's box, because neither existed yet.
+    // The race really happened: both dispatches were in flight before either
+    // listed — the overshoot precondition the old pin relied on.
+    expect(probed.size).toBe(2);
+
+    // Exactly ONE won. The loser is the ordinary sequential refusal, not a
+    // crash and not a silent overshoot.
     const winners = settled.filter((s) => s.status === "fulfilled");
     const losers = settled.filter((s) => s.status === "rejected");
-    expect(winners).toHaveLength(2);
-    expect(losers).toHaveLength(0);
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(1);
+    const loser = (losers[0] as PromiseRejectedResult).reason as FleetError;
+    expect(loser).toBeInstanceOf(FleetError);
+    expect(loser.exitCode).toBe(5);
+    expect(loser.code).toBe("no-headroom");
+    expect(loser.payload?.reason).toBe("vm-ceiling");
+    // The refusal counted the WINNER's box — the single-flight re-list saw it.
+    expect(loser.payload?.liveVms).toBe(1);
+    expect(loser.payload?.ceiling).toBe(1);
 
-    // The ceiling was 1; two live boxes exist after the race.
-    const runIds = settled.map(
-      (s) => (s as PromiseFulfilledResult<{ runId: string }>).value?.runId,
-    );
-    expect(new Set(runIds).size).toBe(2);
-    expect(readdirSync(store.dir)).toHaveLength(2);
-    const live = await driver.list();
-    expect(live.length).toBe(2);
-    expect(live.length).toBeGreaterThan(1); // the gap, stated plainly: maxVms=1 exceeded
+    // The ceiling held on every surface: one record, one box.
+    expect(readdirSync(store.dir)).toHaveLength(1);
+    const live = await realList();
+    expect(live).toHaveLength(1);
+    // AC4: the loser filed exactly one joinable refusal line, do-not-retry —
+    // a full ceiling is the fleet's steady state, not a fault.
+    const refused = expectSingleRefusalLine("no-headroom");
+    expect(refused.exitStatus).toBe("logic");
   });
 
   test("a SELF-MINTED id that collides is re-minted, and the run lands on the free one", async () => {
@@ -1702,6 +1766,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     let closeCalls = 0;
     const ledger: LedgerLike = {
       config: { defaultCapMicroUsd: cap, perIssueOverrides: {} },
+      issueBudgetSnapshot: () => ({ ceilingMicroUsd: cap, spentMicroUsd: cap, reservedMicroUsd: 0 }),
       admitIssue() {
         return {
           admitted: false as const,
@@ -1840,6 +1905,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
           "owner/repo#43": 1_000,
         },
       },
+      issueBudgetSnapshot: () => ({ ceilingMicroUsd: 99_000_000, spentMicroUsd: 0, reservedMicroUsd: 0 }),
       admitIssue(input, capMicroUsd) {
         admitCalls.push({ input, capMicroUsd });
         return {
@@ -4271,7 +4337,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     makeDriverExedevCapable();
     const brief = validBrief(); // also creates the manifests dir the roster sits in
     // An EXEDEV-shaped driver delivers the key to the DEFAULT in-box path
-    // (`envFileFor` → undefined → /home/agent/app/.env), which the fake box
+    // (`envFileFor` → undefined → app/.env, HOME-relative), which the fake box
     // cannot materialize on the host — every other exedev-shaped fixture here
     // refuses before provisioning, so this is the first test that has to get
     // PAST delivery. Report the mode the script checks for.

@@ -1,0 +1,53 @@
+{
+  "writtenAt": "2026-08-26T15:55:46.289Z",
+  "test": "T3.5",
+  "outcome": "fail",
+  "runId": "qds-20260826-515ef6",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260826-515ef6\",\"requestId\":\"b7676099-2d4b-48e2-960d-a9d167d76081\",\"state\":\"ready\",\"vmName\":\"qds-20260826-515ef6\",\"httpsUrl\":\"https://qds-20260826-515ef6.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":2359,\"mint_ms\":1812,\"fill_ms\":23289,\"setup_gate_ms\":16073}}\n{\"requestId\":\"b7676099-2d4b-48e2-960d-a9d167d76081\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T15:55:33.943Z\",\"duration\":44863,\"durationMs\":44863,\"status\":\"ok\",\"runId\":\"qds-20260826-515ef6\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260826-515ef6",
+        "requestId": "b7676099-2d4b-48e2-960d-a9d167d76081",
+        "state": "ready",
+        "vmName": "qds-20260826-515ef6",
+        "httpsUrl": "https://qds-20260826-515ef6.exe.xyz"
+      }
+    },
+    {
+      "phase": "shim",
+      "exitCode": 2,
+      "stdout": "",
+      "stderrTail": "n (path, optional)\\n        --help (boolean, optional)\\n        Exit codes: 0, 1, 2, 4, 6\"}\n{\"requestId\":\"bd329442-4a60-4fba-b2a5-769d53d14da0\",\"operation\":\"fleet.scripts/pipeline-run-remote.ts\",\"agentId\":null,\"timestamp\":\"2026-08-26T15:55:34.010Z\",\"duration\":3,\"durationMs\":3,\"status\":\"error\",\"runId\":null,\"verb\":\"scripts/pipeline-run-remote.ts\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 2\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-515ef6",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

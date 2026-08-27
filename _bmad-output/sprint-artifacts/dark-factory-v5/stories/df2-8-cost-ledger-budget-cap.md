@@ -169,6 +169,12 @@ DF1.8 uses.)*
 - **Box-hours are computed host-side, never ingested from `captureSpend`.** A `box_hours` row is
   `ceil(VM lifetime) × boxHourRateMicroUsd`, where the lifetime comes from the DF2.1 run record's
   own timestamps, written by `ingestBoxHours` called from DF2.5 teardown's **close** step (AC6) —
+  *(AMENDED 2026-08-24, DF3 fix session: the whole-hour `ceil` is superseded by FRACTIONAL pricing —
+  `ceil(boxHourRateMicroUsd × lifetime_ms / 3_600_000)` in integer µ$. Live TIER-1 evidence priced
+  a ~20s box at a full hour (230,000 µ$); a per-box 1-hour minimum overstates short-lived runs by
+  up to 1h each and compounds at fleet scale. Rows written before the amendment keep their
+  original whole-hour figures — `event_id` is unchanged and idempotent-close de-dup means they are
+  never rewritten.)* —
   the one point at which the destroy is confirmed and the lifetime is final. **`event_id` for a
   `box_hours` row digests `run_id, kind='box_hours', closed_at`** — `closed_at` being the DF2.1
   record's own close timestamp (fixed once the record closes, never the ingest-time clock) — in

@@ -1,0 +1,47 @@
+{
+  "writtenAt": "2026-08-26T18:30:51.287Z",
+  "test": "T3.3",
+  "outcome": "fail",
+  "negRunId": "qds-20260826-552f1c",
+  "posRunId": "",
+  "port": 8123,
+  "phases": [
+    {
+      "phase": "neg-dispatch",
+      "exitCode": 1,
+      "stderrTail": "station at .sandbox/exedev-posture.json (ENOENT: no such file or directory, open '.sandbox/exedev-posture.json') — setPublic refuses: team sharing defaults open and a public box breaks one-run-per-box isolation\",\"remediation\":\"flip 'vm-sharing admins-only' in the exe.dev team settings, record it once: {\\\"vmSharing\\\":\\\"admins-only\\\",\\\"attestedAt\\\":\\\"<iso>\\\"} at .sandbox/exedev-posture.json, then re-run\"}\n{\"requestId\":\"82a748cf-fee3-4ea8-a0cb-53578ecb87e8\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T18:30:37.290Z\",\"duration\":46016,\"durationMs\":46016,\"status\":\"error\",\"runId\":\"qds-20260826-552f1c\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "neg-record",
+      "runId": "qds-20260826-552f1c",
+      "vmName": "qds-20260826-552f1c",
+      "ports": [
+        8123
+      ],
+      "httpsUrl": "https://qds-20260826-552f1c.exe.xyz"
+    },
+    {
+      "phase": "neg-curl",
+      "exitCode": 0,
+      "stderrTail": ""
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).not.toBe(expected)\n\nExpected: not 0\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "runId": "qds-20260826-552f1c",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-552f1c",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

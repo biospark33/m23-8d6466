@@ -41,11 +41,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+
+import { runMarkerPath } from "../../src/phase-engine/journal.ts";
+import { deadPid } from "./helpers.ts";
 
 import { Database } from "bun:sqlite";
 
-import { observingMint, run } from "../../scripts/fleet.ts";
+import { makeLoserLedgerHook, MAX_STEPS_BYTES, observingMint, run } from "../../scripts/fleet.ts";
 import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
 import { run as sandboxTeardownRun } from "../../scripts/sandbox-teardown.ts";
 import { listVerbs, renderHelp } from "../../src/fleet/verbs.ts";
@@ -53,6 +56,8 @@ import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { leakScan, MIN_REDACTABLE_LEN } from "../providers/fixtures/leak-scan.ts";
 import { RUN_ID_RE, RunRecordStore } from "../../src/providers/run-record.ts";
+import { FanoutRecordStore, mintFanoutId } from "../../src/fleet/fanout.ts";
+import { DEFAULT_QUOTA_LIMITS } from "../../src/providers/quota.ts";
 import type { FleetDeps, } from "../../scripts/fleet.ts";
 import type { KeyApi } from "../../src/providers/credentials.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
@@ -60,6 +65,13 @@ import { goodLedger, overBudgetLedger, type RecordingLedger } from "./helpers.ts
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "df3-1-cli-"));
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
+
+// r7-T-b3: per-test scratch dirs (fleet-test-*) are swept after each test so
+// a failure mid-test cannot accumulate litter across the suite.
+const freshScratchDirs: string[] = [];
+afterEach(() => {
+  for (const d of freshScratchDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
 
 /**
  * Losers of `within`'s race. `run()` is in-process and cannot be killed —
@@ -356,7 +368,7 @@ const MAX_BRIEF_BYTES = 64 * 1024;
  * below shrink with the registry: delete `harvest` and a registry-derived loop
  * still passes.
  */
-const EXPECTED_VERBS = ["dispatch", "status", "harvest", "teardown"] as const;
+const EXPECTED_VERBS = ["dispatch", "status", "harvest", "teardown", "fanout", "rank"] as const;
 
 /** Exit code for `fleet <verb>` with no positional and an injected driver. */
 const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
@@ -364,6 +376,8 @@ const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
   status: 0, // no runs is a state, not an error (AC4)
   harvest: 2, // missing <run-id>
   teardown: 2, // missing <run-id>
+  fanout: 2, // no --n given (DF3.2; the brief would be refused next anyway)
+  rank: 2, // missing <fanout-id>
 };
 
 /**
@@ -3073,6 +3087,25 @@ process.on = ((sig, listener) => {
     expect(envelope.remediation).toContain("do not parse what was printed");
   });
 
+  test("a NON-ERROR write failure (throw null) still reports ack-unwritable, not a TypeError (CodeRabbit round 8)", async () => {
+    // A sink may reject with null/undefined (a bare `throw;`, a violated
+    // library contract). The catch that reports it must not become its own
+    // failure: `(e as Error).message` on null throws a TypeError inside the
+    // handler, escaping as a retryable-looking exit 1 over a box that is
+    // live and billing. Same shape as the ENOSPC sibling, minus the Error.
+    const shared = deps(validBriefJson(dir));
+    const nullSink = (): never => {
+      throw null;
+    };
+    const code = await run(["dispatch", "--driver", "fake"], nullSink, shared, errOut);
+    expect(code).toBe(6);
+    const line = errCaptured.find((l) => l.includes("ack-unwritable"));
+    expect(line).toBeDefined();
+    const envelope = JSON.parse(line as string) as { code: string; runId: string };
+    expect(envelope.code).toBe("ack-unwritable");
+    expect(envelope.runId).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
+  });
+
   test("a write failure that is NOT a broken pipe is still a failure", async () => {
     // The other half of the EPIPE tolerance: ENOSPC means the output was lost
     // to a full disk with a reader still there, and swallowing that would make
@@ -3640,7 +3673,11 @@ process.on = ((sig, listener) => {
     }
 
     expect(counts()).toEqual(before);
-  });
+    // r7: eight sequential in-process CLI round-trips routinely exceed bun's
+    // 5s default under load; the timeout must never be what fails a listener
+    // arithmetic test (a timeout here also wedges the lock for the NEXT test,
+    // turning one flake into two).
+  }, 20_000);
 
   test("observingMint reports the minted id at create() time and forwards everything else (round 10)", async () => {
     // FC10's seam, pinned directly. dispatch() persists via store.create long
@@ -3868,6 +3905,986 @@ process.on = ((sig, listener) => {
 
   });
 
+  // ─── fanout + rank (DF3.2): the two new verbs at the front door ────────────
+
+  /** Full fanout wiring over the case tmpdir — the deps() seams plus DF3.2's. */
+  function fanoutDeps(): Partial<FleetDeps> {
+    return {
+      ...deps(validBriefJson(dir)),
+      fanoutsDir: join(dir, ".sandbox", "fanouts"),
+      lockPath: join(dir, ".sandbox", "fleet.lock"),
+    };
+  }
+
+  test("e2e: fanout best-of-n admits its arms and prints one ack per arm plus the ranking line", async () => {
+    const d = fanoutDeps();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+      d,
+    );
+    expect(code).toBe(0);
+    interface ArmAck {
+      fanoutId: string;
+      arm: number;
+      runId: string;
+      outcome: string;
+      vmName?: string;
+    }
+    interface RankedLine {
+      scores: { arm: number; runId: string; score: number | null }[];
+      tie: boolean;
+      rationale: string;
+    }
+    const lines = outOnly.map((l) => JSON.parse(l) as unknown); /* dp:ok test-authored output: stdout this test's own CLI run just emitted */
+    // One ack line PER ARM, then best-of-n's auto-rank summary.
+    expect(lines).toHaveLength(3);
+    const [armA, armB, ranked] = lines as [ArmAck, ArmAck, RankedLine];
+    for (const [i, arm] of [
+      [0, armA],
+      [1, armB],
+    ] as const) {
+      expect(arm?.outcome).toBe("ready");
+      expect(arm?.arm).toBe(i);
+      expect(arm?.runId).toMatch(/^qds-\d{8}-[a-f0-9]{6}$/);
+      expect(typeof arm?.vmName).toBe("string");
+    }
+    expect(armA?.fanoutId).toBe(armB?.fanoutId);
+    // This verb has no step-output source (`--steps-json` is rank's flag), so
+    // every arm is LISTED unscored with a rationale saying how to score them.
+    expect(ranked?.scores.every((s) => s.score === null)).toBeTrue();
+    expect(ranked?.tie).toBeFalse();
+    expect(ranked?.rationale).toContain("--steps-json");
+    // The run records are joined to the fan-out through the extension
+    // namespace, and the fleet lock did not survive the verb.
+    const store = d.store as RunRecordStore;
+    for (const arm of [armA, armB]) {
+      const rec = store.get(arm?.runId as string);
+      expect(rec.extensions?.fanout).toEqual({
+        schemaVersion: 1,
+        fanoutId: arm?.fanoutId,
+        arm: String(arm?.arm),
+      });
+    }
+    expect(existsSync(join(dir, ".sandbox", "fleet.lock"))).toBeFalse();
+  });
+
+  test("e2e: many-stories takes the briefs wrapper and skips the ranking step", async () => {
+    const brief = JSON.parse(validBriefJson(dir)) as Record<string, unknown>; /* dp:ok test-authored output: parses the string validBriefJson() built above */
+    const d: Partial<FleetDeps> = {
+      ...fanoutDeps(),
+      readBrief: async () => JSON.stringify({ briefs: [brief] }),
+    };
+    const code = await runCli(["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1"], d);
+    expect(code).toBe(0);
+    const lines = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>); /* dp:ok test-authored output: stdout this test's own CLI run just emitted */
+    // The degenerate case is the same code path: one ack, NO ranking line.
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.outcome).toBe("ready");
+    expect(outOnly.join("")).not.toContain('"scores"');
+  });
+
+  test("fanout validation refusals exit 2 naming the guard, having provisioned nothing", async () => {
+    const cases: [string[], string][] = [
+      // Round 3 (F-C1): the pattern-scoped structural refusals are hoisted to
+      // the CLI's pre-construction block, so these rows hit usageErrors whose
+      // prose mirrors fanout()'s taxonomy — pinned by message, not code.
+      [["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "1", "--roster", "a"], "--n takes an integer 2-8"],
+      [
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b,c"],
+        "the roster count must equal --n",
+      ],
+      [
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b", "--pin", "d".repeat(40)],
+        "pin-mismatch",
+      ],
+      // --roster is structurally forbidden for many-stories BEFORE the brief is
+      // even ingested, so this refuses the same way with or without the
+      // briefs wrapper (the wrapper guard still owns the no-roster case below).
+      [["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1", "--roster", "a"], "--roster is not valid for many-stories"],
+      [["fanout", "--driver", "fake", "--pattern", "many-stories", "--n", "1"], "wrap the n brief objects"],
+    ];
+    for (const [argv, needle] of cases) {
+      reset();
+      const code = await runCli(argv, fanoutDeps());
+      expect({ argv, code }).toEqual({ argv, code: 2 });
+      expect(text()).toContain(needle);
+      expectNoBoxes();
+    }
+  });
+
+  test("fanout refuses --n 0 with exit 2 naming the 1-8 range", async () => {
+    // Source rejects n < 1 with "takes an integer 1-8" (fleet.ts ~1291).
+    // This test pins the --n 0 boundary case explicitly.
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "0", "--roster", "a"],
+      fanoutDeps(),
+    );
+    expect(code).toBe(2);
+    expect(text()).toContain("--n takes an integer 1-8");
+    expectNoBoxes();
+  });
+
+  test("fanout refuses no-headroom with exit 5 before provisioning anything", async () => {
+    const d: Partial<FleetDeps> = {
+      ...fanoutDeps(),
+      quotaLimits: { limits: { ...DEFAULT_QUOTA_LIMITS, maxVms: 1 }, source: "default" },
+    };
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
+      d,
+    );
+    expect(code).toBe(5);
+    expect(text()).toContain("no-headroom");
+    expectNoBoxes();
+  });
+
+  test("--dir is the fan-outs directory for BOTH verbs: fanout → rank round-trip", async () => {
+    // One flag, one meaning (rank's): the producer drops its record under
+    // --dir so `rank <id> --dir <same>` finds it. Run records stay on their
+    // own default/env chain — a fan-*.json inside a runs dir would make every
+    // later sweep of that dir report malformed_record_name anomalies.
+    const fanouts = join(dir, "operator-fanouts");
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta", "--dir", fanouts],
+      // fanoutsDir deliberately NOT injected — the flag is the subject. The
+      // lock still must not land in the repo cwd.
+      { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+    );
+    expect(code).toBe(0);
+    const files = readdirSync(fanouts).filter((f) => f.endsWith(".json"));
+    expect(files).toHaveLength(1);
+    const fanoutId = (
+      JSON.parse(readFileSync(join(fanouts, files[0] as string), "utf8")) as { fanoutId: string } /* dp:ok test-authored output: parses the record this test's own fanout run just wrote */
+    ).fanoutId;
+    expect(fanoutId).toMatch(/^fan-\d{8}-[a-f0-9]{6}$/);
+    // The consumer finds it through the SAME flag value.
+    reset();
+    expect(await runCli(["rank", fanoutId, "--dir", fanouts], deps(""))).toBe(0);
+  });
+
+  test("without --dir both verbs resolve the shared default fan-outs chain", async () => {
+    // `$QDS_FANOUTS_DIR` is the middle tier of the SAME resolver both verbs
+    // call with no explicit dir — redirected here only to keep the default
+    // hermetic (the repo cwd has no .sandbox of its own under test).
+    const prev = process.env.QDS_FANOUTS_DIR;
+    process.env.QDS_FANOUTS_DIR = join(dir, "env-fanouts");
+    try {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+        { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+      );
+      expect(code).toBe(0);
+      const files = readdirSync(join(dir, "env-fanouts")).filter((f) => f.endsWith(".json"));
+      expect(files).toHaveLength(1);
+      const fanoutId = (
+        JSON.parse(readFileSync(join(dir, "env-fanouts", files[0] as string), "utf8")) as { fanoutId: string } /* dp:ok test-authored output: parses the record this test's own fanout run just wrote */
+      ).fanoutId;
+      reset();
+      expect(await runCli(["rank", fanoutId], deps(""))).toBe(0);
+    } finally {
+      // Reflect.deleteProperty, not `= undefined`: Bun coerces an undefined
+      // assignment into the STRING "undefined", poisoning later resolvers in
+      // the same process.
+      if (prev === undefined) Reflect.deleteProperty(process.env, "QDS_FANOUTS_DIR");
+      else process.env.QDS_FANOUTS_DIR = prev;
+    }
+  });
+
+  test("a fanout whose completion lines cannot print exits 6 with the work landed", async () => {
+    const d = fanoutDeps();
+    let refused = 0;
+    const nonBlocking = (): never => {
+      refused++;
+      const e = new Error("fd 1 accepted 0 bytes") as NodeJS.ErrnoException;
+      e.code = "EAGAIN";
+      throw e;
+    };
+    const code = await run(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+      nonBlocking,
+      d,
+      errOut,
+    );
+    // 6, not 0 and not 1: both arms LANDED (boxes provisioned, records written)
+    // and only the printing failed — retrying would provision a second fan-out.
+    expect(code).toBe(6);
+    expect(refused).toBeGreaterThan(1);
+    expect(errCaptured.filter((l) => l.includes("stdout-truncated"))).toHaveLength(1);
+    // The work is real even though its acks never printed: exactly one fan-out
+    // record exists for it.
+    expect(readdirSync(join(dir, ".sandbox", "fanouts"))).toHaveLength(1);
+  });
+
+  test("a rank with no --steps-json whose result line cannot print exits 6 with rankedAt stamped", async () => {
+    const fanoutsPath = join(dir, ".sandbox", "fanouts");
+    const fstore = new FanoutRecordStore({ dir: fanoutsPath });
+    const id = mintFanoutId();
+    fstore.create({
+      fanoutId: id,
+      requestId: "01234567-89ab-cdef-0123-456789abcdef",
+      pattern: "best-of-n",
+      n: 2,
+      pin: "c".repeat(40),
+      createdAt: new Date().toISOString(),
+      arms: [
+        { arm: 0, runId: "qds-20260101-00000c", briefHash: "a".repeat(64) },
+        { arm: 1, runId: "qds-20260101-00000d", briefHash: "a".repeat(64) },
+      ],
+      winner: null,
+      rankedAt: null,
+      closedAt: new Date().toISOString(),
+    });
+    let refused = 0;
+    const nonBlocking = (): never => {
+      refused++;
+      const e = new Error("fd 1 accepted 0 bytes") as NodeJS.ErrnoException;
+      e.code = "EAGAIN";
+      throw e;
+    };
+    reset();
+    // No --steps-json: the ranking still LANDS (every arm listed unscored, the
+    // C2 advisory posture) and its one result line is what cannot print.
+    const code = await run(["rank", id, "--dir", fanoutsPath], nonBlocking, deps(""), errOut);
+    // 6, not 0: the record was read, scores computed and rankedAt STAMPED —
+    // re-running would refuse nothing (rank is idempotent) but a caller that
+    // parsed the truncated stdout got no table at all.
+    expect(code).toBe(6);
+    expect(refused).toBeGreaterThanOrEqual(1);
+    expect(errCaptured.filter((l) => l.includes("stdout-truncated"))).toHaveLength(1);
+    // The work landed even though its line never printed.
+    expect(fstore.get(id).rankedAt).not.toBeNull();
+  });
+
+  test("rank scores a completed fan-out from --steps-json and stamps rankedAt", async () => {
+    const fanoutsPath = join(dir, ".sandbox", "fanouts");
+    const fstore = new FanoutRecordStore({ dir: fanoutsPath });
+    const id = mintFanoutId();
+    fstore.create({
+      fanoutId: id,
+      requestId: "01234567-89ab-cdef-0123-456789abcdef",
+      pattern: "best-of-n",
+      n: 2,
+      pin: "c".repeat(40),
+      createdAt: new Date().toISOString(),
+      arms: [
+        { arm: 0, runId: "qds-20260101-00000a", briefHash: "a".repeat(64) },
+        { arm: 1, runId: "qds-20260101-00000b", briefHash: "a".repeat(64) },
+      ],
+      winner: null,
+      rankedAt: null,
+      closedAt: new Date().toISOString(),
+    });
+    // Union = {a.ts, b.ts, c.ts} (3 files); each arm touches 2 ⇒ coverage 2/3.
+    // Arm 1 passes everything (rate 1.0), arm 0 passes 8/10 — a 0.12 gap, past
+    // the tie window.
+    const stepsPath = join(dir, "steps.json");
+    writeFileSync(
+      stepsPath,
+      JSON.stringify({
+        "qds-20260101-00000a": { testsExecuted: true, testResults: { passed: 8, failed: 2 }, changedFiles: ["src/a.ts", "src/b.ts"] },
+        "qds-20260101-00000b": { testsExecuted: true, testResults: { passed: 10, failed: 0 }, changedFiles: ["src/a.ts", "src/c.ts"] },
+      }),
+    );
+    reset();
+    const code = await runCli(["rank", id, "--dir", fanoutsPath, "--steps-json", stepsPath], deps(""));
+    expect(code).toBe(0);
+    const result = JSON.parse(outOnly[0] as string) as { /* dp:ok test-authored output: rank result line this run just emitted to outOnly */
+      fanoutId: string;
+      scores: { arm: number; runId: string; score: number; breakdown: Record<string, number> }[];
+      tie: boolean;
+      rationale: string;
+    };
+    expect(result.fanoutId).toBe(id);
+    expect(result.scores[0]?.runId).toBe("qds-20260101-00000b"); // 1.0 pass rate wins
+    expect(result.scores[0]?.score).toBeCloseTo(1 * 0.6 + (2 / 3) * 0.4, 6);
+    expect(result.scores[1]?.score).toBeCloseTo(0.8 * 0.6 + (2 / 3) * 0.4, 6);
+    // AC7's breakdown carries EXACTLY the two keys.
+    expect(Object.keys(result.scores[0]?.breakdown ?? {}).sort()).toEqual([
+      "testPassRate",
+      "uniqueFileCoverage",
+    ]);
+    expect(result.tie).toBe(false);
+    expect(fstore.get(id).rankedAt).not.toBeNull();
+  });
+
+  test("rank without --steps-json lists every arm unscored and still exits 0", async () => {
+    const fanoutsPath = join(dir, ".sandbox", "fanouts");
+    const fstore = new FanoutRecordStore({ dir: fanoutsPath });
+    const id = mintFanoutId();
+    fstore.create({
+      fanoutId: id,
+      requestId: "01234567-89ab-cdef-0123-456789abcdef",
+      pattern: "best-of-n",
+      n: 1,
+      pin: "c".repeat(40),
+      createdAt: new Date().toISOString(),
+      arms: [{ arm: 0, runId: "qds-20260101-00000c", briefHash: "a".repeat(64) }],
+      winner: null,
+      rankedAt: null,
+      closedAt: new Date().toISOString(),
+    });
+    reset();
+    const code = await runCli(["rank", id, "--dir", fanoutsPath], deps(""));
+    expect(code).toBe(0);
+    const result = JSON.parse(outOnly[0] as string) as { /* dp:ok test-authored output: rank result line this run just emitted to outOnly */
+      scores: { score: number | null }[];
+      tie: boolean;
+      rationale: string;
+    };
+    expect(result.scores).toHaveLength(1);
+    expect(result.scores[0]?.score).toBeNull(); // listed, never dropped
+    expect(result.tie).toBe(false);
+    expect(result.rationale).toContain("no step-output source provided");
+  });
+
+  test("rank refuses an unknown fan-out id with exit 4, naming it", async () => {
+    // --dir keeps this hermetic: with none, the store constructor mkdirs the
+    // cwd-relative default (.sandbox/fanouts) INTO THE REPO TREE before the
+    // lookup can refuse.
+    reset();
+    const code = await runCli(
+      ["rank", "fan-19700101-ffffff", "--dir", join(dir, ".sandbox", "fanouts")],
+      deps(""),
+    );
+    expect(code).toBe(4);
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: error envelope this run just emitted to errCaptured */
+    expect(envelope.code).toBe("fanout-not-found");
+    expect(envelope.message).toContain("fan-19700101-ffffff");
+  });
+
+  test("a malformed --steps-json refuses before the fan-outs store is constructed", async () => {
+    // Negative counts are the boundary case rank() itself also refuses; here
+    // the FLAG parser must name it first — and the refusal must not mkdir/chmod
+    // the --dir it was about to be refused over (the id grammar's principle,
+    // one step further down the verb).
+    const stepsPath = join(dir, "steps.json");
+    writeFileSync(
+      stepsPath,
+      JSON.stringify({ r0: { testsExecuted: true, testResults: { passed: -3, failed: 1 } } }),
+    );
+    const freshDir = join(dir, "never-created-fanouts");
+    reset();
+    const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+    expect(code).toBe(2);
+    const envelope = JSON.parse(errCaptured[0] as string) as { message: string }; /* dp:ok test-authored output: error envelope this run just emitted to errCaptured */
+    expect(envelope.message).toContain("non-negative integer");
+    expect(existsSync(freshDir)).toBeFalse();
+  });
+
+  test("each remaining --steps-json shape refusal exits 2 naming its own branch", async () => {
+    // The negative-count branch above is pinned separately (rank() refuses it
+    // too); these are the flag parser's OWN refusals. Each asserts its
+    // distinguishing message — exit 2 alone would pass for any usage error.
+    const stepsPath = join(dir, "steps.json");
+    const freshDir = join(dir, "never-created-either");
+    const cases: [string | null, string][] = [
+      [null, "cannot read"], // never written: the read itself fails
+      ['{"r0":', "not valid JSON"],
+      ["[]", "keyed by run id"],
+      // The envelope JSON-escapes the quoted run id, so the needle spells the escapes too.
+      ['{"r0": 7}', 'entry \\"r0\\" must be an object'],
+      ['{"r0": {"testsExecuted": "yes"}}', "non-boolean testsExecuted"],
+      ['{"r0": {"changedFiles": "src/a.ts"}}', "not an array of path strings"],
+    ];
+    for (const [content, needle] of cases) {
+      if (content === null) rmSync(stepsPath, { force: true });
+      else writeFileSync(stepsPath, content);
+      reset();
+      const code = await runCli(
+        ["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath],
+        deps(""),
+      );
+      expect({ content, code }).toEqual({ content, code: 2 });
+      expect(text()).toContain(needle);
+      expectNoBoxes();
+    }
+    // Every branch refused at the flag parser, so none ever built the store.
+    expect(existsSync(freshDir)).toBeFalse();
+  });
+
+  test("--roster of separators only is flag-absent: roster-required, not count-mismatch", async () => {
+    // `--roster ","` splits to ["",""], which round 7 S3a now refuses as empty segments
+    // (previously: split→filter→empty list, caught by C2 empty-list refusal).
+    reset();
+    const d = fanoutDeps();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", ","],
+      d,
+    );
+    expect(code).toBe(2);
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: error envelope this run just emitted to errCaptured */
+    expect(envelope.code).toBe("usage");
+    expect(envelope.message).toBe("--roster contains an empty entry");
+  });
+
+  test("a refused race constructs no cost ledger — no db file appears anywhere", async () => {
+    // INV-2: a refused fan-out mutates nothing. The loser ledger used to be
+    // built BEFORE the briefs were validated, and its constructor creates its
+    // db file even though race never reaches a loser to price.
+    const d: Partial<FleetDeps> = {
+      ...fanoutDeps(),
+      readBrief: async () => '{"repoSlug":"nope"}', // parses fine; fails BriefSchema
+    };
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
+      d,
+    );
+    expect(code).toBe(2);
+    // Both resolution shapes: default-layout sibling of .sandbox/runs, and
+    // beside an explicitly-injected records dir.
+    expect(existsSync(join(dir, ".sandbox", "cost-ledger.db"))).toBeFalse();
+    expect(existsSync(join(dir, "runs", "cost-ledger.db"))).toBeFalse();
+  });
+
+  test("a failing advisory auto-rank warns on stderr and keeps the ARM-derived exit code", async () => {
+    const d = fanoutDeps();
+    const fanouts = join(dir, ".sandbox", "fanouts");
+    let sabotaged = false;
+    // The ack lines print BETWEEN fanout() returning and the advisory rank —
+    // the one hook that makes ONLY the advisory step fail (delete the record
+    // it is about to read) while both arms really did land ready.
+    const saboteur = (s: string): void => {
+      out(s);
+      if (!sabotaged) {
+        sabotaged = true;
+        for (const f of readdirSync(fanouts)) rmSync(join(fanouts, f));
+      }
+    };
+    reset();
+    const code = await run(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+      saboteur,
+      d,
+      errOut,
+    );
+    // Two ready arms ⇒ success. The advisory failure used to flip this to a
+    // reported refusal through the shared catch, turning N provisioned boxes
+    // into an incident.
+    expect(code).toBe(0);
+    const envelope = JSON.parse(
+      errCaptured.find((l) => l.includes("auto-rank-failed")) as string,
+    ) as { code: string; message: string }; /* dp:ok test-authored output: warning envelope this run just emitted to errCaptured */
+    expect(envelope.message).toContain("the fan-out itself succeeded");
+    // The acks printed; the ranking line did not.
+    expect(outOnly).toHaveLength(2);
+  });
+
+  // ─── fanout exit rule + stdout row contract (round-3 T-W1/T-W6) ────────────
+
+  /**
+   * Redirects `runMarkerPath()` (read at call time from `$QDS_RUN_ROOT`) into
+   * the case tmpdir and returns a restore fn. Without it the race poller probes
+   * `/run/journal/final.json` — a path this host may or may not answer — so
+   * "no marker" and "marker present" both become properties of THIS case's
+   * directory instead of the machine's.
+   */
+  function redirectRunRoot(subdir: string): { root: string; restore: () => void } {
+    const prev = process.env.QDS_RUN_ROOT;
+    const root = join(dir, subdir);
+    mkdirSync(root, { recursive: true });
+    process.env.QDS_RUN_ROOT = root;
+    return {
+      root,
+      // Reflect.deleteProperty, not `= undefined`: Bun coerces an undefined
+      // assignment into the STRING "undefined" (the QDS_FANOUTS_DIR note).
+      restore: () => {
+        if (prev === undefined) Reflect.deleteProperty(process.env, "QDS_RUN_ROOT");
+        else process.env.QDS_RUN_ROOT = prev;
+      },
+    };
+  }
+
+  /** The arm-status rows a fanout run printed to stdout, parsed. */
+  const armRows = (): { fanoutId: string; arm: number; runId: string; outcome: string; vmName?: string }[] =>
+    outOnly.map((l) => {
+      const row = JSON.parse(l) as Record<string, unknown>;
+      // Ponytail: validate shape after parse - malformed lines fail with useful message
+      expect(row).toHaveProperty("fanoutId");
+      expect(row).toHaveProperty("arm");
+      expect(row).toHaveProperty("runId");
+      expect(row).toHaveProperty("outcome");
+      return row as { fanoutId: string; arm: number; runId: string; outcome: string; vmName?: string };
+    }); /* dp:ok test-authored output: arm rows this test's own CLI run just emitted */
+
+  /**
+   * The AC5 timing seams are FanoutDeps-only — FleetDeps forwards every key it
+   * does not consume verbatim (`...seams`), so tests inject small values even
+   * though the operator surface has no flag for them. The cast is the seam's
+   * own shape, not a hole: production defaults are the AC numbers.
+   */
+  const raceTimingDeps = (): Partial<FleetDeps> =>
+    ({ ...fanoutDeps(), pollIntervalMs: 10, perCallDeadlineMs: 5_000 }) as Partial<FleetDeps>;
+
+  test("e2e: an arm classified setupFailed exits 1 — the failure half of the story:417 exit rule", async () => {
+    const base = new FakeDriver(boxesDir);
+    const d: Partial<FleetDeps> = {
+      ...fanoutDeps(),
+      // Item A of the fake gate is `exec true`; failing it fails EVERY arm at
+      // its gate — dispatch refuses exit 3 per arm, which classifyArmFailure
+      // turns into setupFailed (never armFailed, never lostRace).
+      driver: driverWith(base, {
+        exec: async (vm: string, argv: string[], stdin?: string) =>
+          argv[0] === "true"
+            ? { exitCode: 1, stdout: "", stderr: "box unreachable" }
+            : base.exec(vm, argv, stdin),
+      }),
+    };
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+      d,
+    );
+    // 1, not 0 and not 2: the arms PROVISIONED then failed their gates — a
+    // substrate outcome automation must alert on, not an argv mistake.
+    expect(code).toBe(1);
+    const rows = armRows();
+    expect(rows.map((r) => r.outcome)).toEqual(["setupFailed", "setupFailed"]);
+    // The gate runs AFTER provisioning, so each refusal names its box and the
+    // optional vmName key rides along — see the row-contract pin below.
+    for (const row of rows) expect(Object.keys(row).sort()).toEqual(["arm", "fanoutId", "outcome", "runId", "vmName"]);
+    // No auto-rank: only an all-ready best-of-n ranks.
+    expect(outOnly.join("")).not.toContain('"scores"');
+  });
+
+  test("e2e: arms still undecided at the race ceiling report armUnknown and exit 1", async () => {
+    const rr = redirectRunRoot("empty-run-root"); // no completion marker anywhere under it
+    try {
+      reset();
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
+        // The tiny ceiling keeps the fleet lock held for milliseconds instead
+        // of the production hour; the verdict either way is armUnknown.
+        { ...raceTimingDeps(), ceilingMs: 120 } as Partial<FleetDeps>,
+      );
+      expect(code).toBe(1);
+      const rows = armRows();
+      expect(rows.map((r) => r.outcome)).toEqual(["armUnknown", "armUnknown"]);
+      // INV-6's other half: unknown-state arms are never assumed losers —
+      // neither box was torn down on a guess.
+      for (const row of rows) expect(existsSync(join(boxesDir, row.vmName ?? ""))).toBeTrue();
+    } finally {
+      rr.restore();
+    }
+  });
+
+  test("e2e: a race whose every non-winner is lostRace exits 0 — losing is not failing", async () => {
+    // FakeDriver's copyFile refuses any remote path outside the box, so — like
+    // patterns.test.ts's RaceFakeDriver — the in-box completion marker maps
+    // onto <box>/journal/final.json and planting it is writing that file. The
+    // FIRST marker probe belongs to arm 0 (index-order polling), so planting
+    // at first probe makes the winner deterministic.
+    const base = new FakeDriver(boxesDir);
+    const markerPath = runMarkerPath();
+    const boxMarker = (vm: string): string => join(boxesDir, vm, "journal", "final.json");
+    let planted = false;
+    const d = {
+      ...fanoutDeps(),
+      driver: driverWith(base, {
+        exec: async (vm: string, argv: string[], stdin?: string) => {
+          if (
+            argv.length >= 3 &&
+            argv[0] === "sh" &&
+            argv[1] === "-c" &&
+            typeof argv[2] === "string" &&
+            argv[2].includes(markerPath)
+          ) {
+            // Since PF-3 (fc21f8b) the poller reads the marker by cat-ing
+            // runMarkerPath() through this same exec channel (copyFile is
+            // box-relative by driver contract). Answer the cat in-memory from
+            // the planted box file, exactly as patterns.test.ts's
+            // RaceFakeDriver does: letting it fall through to the `test -f`
+            // probe returned exit 0 with EMPTY stdout, JSON.parse("") threw,
+            // and every arm polled as "unusable" — no winner, race to ceiling.
+            if (String(argv[2]).includes("cat ")) {
+              try {
+                return { stdout: readFileSync(boxMarker(vm), "utf8"), stderr: "", exitCode: 0 };
+              } catch {
+                return { stdout: "", stderr: "cat: marker vanished between test and read", exitCode: 1 };
+              }
+            }
+            if (!planted) {
+              planted = true;
+              mkdirSync(dirname(boxMarker(vm)), { recursive: true });
+              writeFileSync(boxMarker(vm), `${JSON.stringify({ ok: true })}\n`);
+            }
+            return base.exec(vm, ["sh", "-c", `test -f '${boxMarker(vm)}'`], stdin);
+          }
+          return base.exec(vm, argv, stdin);
+        },
+        copyFile: async (vm: string, remotePath: string, localPath: string) =>
+          remotePath === markerPath
+            ? base.copyFile(vm, boxMarker(vm), localPath)
+            : base.copyFile(vm, remotePath, localPath),
+      }),
+      // The generous ceiling is the safety net: a fixture regression must fail
+      // fast, not hold the fleet lock for the production hour.
+      pollIntervalMs: 10,
+      ceilingMs: 10_000,
+    } as Partial<FleetDeps>;
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
+      d,
+    );
+    // The load-bearing half of the story:417 rule — lostRace alone does NOT
+    // fail. A race that produced its winner worked; reporting 1 here would
+    // make automation alert on every successful race.
+    expect(code).toBe(0);
+    const rows = armRows();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.outcome).toBe("ready");
+    expect(rows[1]?.outcome).toBe("lostRace");
+    // Winner stays up; the loser went through DF2.5 teardownSandbox
+    // (harvested-then-destroyed), pricing its box hours into the loser ledger
+    // the verb built.
+    expect(existsSync(join(boxesDir, rows[0]?.vmName ?? ""))).toBeTrue();
+    expect(existsSync(join(boxesDir, rows[1]?.vmName ?? ""))).toBeFalse();
+    // Loser disposal marked the fleet lock destructive and CLEARED it —
+    // release succeeded, so nothing survives the verb.
+    expect(existsSync(join(dir, ".sandbox", "fleet.lock"))).toBeFalse();
+    // 20s parity with fc21f8b's four patterns.test.ts race bumps: the
+    // loser's REAL git teardown can outrun bun's 5s default under load.
+  }, 20_000);
+
+  test("a timed-out loser's late teardown still prices its box hours after the verb closed the ledger", async () => {
+    // CodeRabbit round-5 warning: disposeLosers abandons a hung teardown at
+    // its deadline, the verb's finally closes the loser ledger — and the
+    // abandoned teardown's close step then ingested against the CLOSED
+    // handle, losing the box-hours row and under-counting the ledger the cap
+    // admits against. The hook now drops its reference on close, so the late
+    // ingest re-opens; the event-id conflict rule keeps the row exactly-once.
+    const base = new FakeDriver(boxesDir);
+    const markerPath = runMarkerPath();
+    const boxMarker = (vm: string): string => join(boxesDir, vm, "journal", "final.json");
+    let plantedVm: string | undefined;
+    let releaseDestroy: (() => void) | undefined;
+    let barrierFor: string | undefined;
+    const d = {
+      ...fanoutDeps(),
+      driver: driverWith(base, {
+        exec: async (vm: string, argv: string[], stdin?: string) => {
+          if (
+            argv.length >= 3 &&
+            argv[0] === "sh" &&
+            argv[1] === "-c" &&
+            typeof argv[2] === "string" &&
+            argv[2].includes(markerPath)
+          ) {
+            // PF-3 (fc21f8b) moved the marker read onto this exec channel as
+            // `cat` — answer it in-memory from the planted box file (same
+            // RaceFakeDriver contract as patterns.test.ts), or every arm
+            // polls "unusable" and the race spins to its ceiling.
+            if (String(argv[2]).includes("cat ")) {
+              try {
+                return { stdout: readFileSync(boxMarker(vm), "utf8"), stderr: "", exitCode: 0 };
+              } catch {
+                return { stdout: "", stderr: "cat: marker vanished between test and read", exitCode: 1 };
+              }
+            }
+            if (plantedVm === undefined) {
+              plantedVm = vm;
+              mkdirSync(dirname(boxMarker(vm)), { recursive: true });
+              writeFileSync(boxMarker(vm), `${JSON.stringify({ ok: true })}\n`);
+            }
+            return base.exec(vm, ["sh", "-c", `test -f '${boxMarker(vm)}'`], stdin);
+          }
+          return base.exec(vm, argv, stdin);
+        },
+        copyFile: async (vm: string, remotePath: string, localPath: string) =>
+          remotePath === markerPath
+            ? base.copyFile(vm, boxMarker(vm), localPath)
+            : base.copyFile(vm, remotePath, localPath),
+        // The FIRST loser disposed parks at destroy until the verb has fully
+        // returned — the abandoned-teardown window this test exists for. The
+        // second loser tears down cleanly and prices pre-close, so the verb's
+        // ledger close closes a LIVE handle — the exact fixture the warning
+        // described.
+        destroy: (vm: string): Promise<void> => {
+          if (barrierFor === undefined && vm !== plantedVm) {
+            barrierFor = vm;
+            return new Promise<void>((resolve) => {
+              releaseDestroy = resolve;
+            });
+          }
+          return base.destroy(vm);
+        },
+      }),
+      pollIntervalMs: 10,
+      ceilingMs: 10_000,
+      // Must clear the real git bundle-verify probe teardown runs first (same
+      // constraint as patterns.test.ts's deadline pin — under host load that
+      // probe alone can run 2s+, and a harvest-side abandon never reaches the
+      // parked destroy), while still bounding the wait. Flake profile: same
+      // documented family as the K8/AC5 load flakes — this test is
+      // deterministic on an idle host and may abandon at harvest under
+      // saturation (observed at LA 150+); re-run solo.
+      loserTeardownTimeoutMs: 4_000,
+    } as Partial<FleetDeps>;
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "race", "--n", "3", "--roster", "a,b,c"],
+      d,
+    );
+    // Winner + one cleanly-disposed loser + one deadline-abandoned loser: the
+    // race itself worked, and losing is not failing (:417).
+    expect(code).toBe(0);
+    const rows = armRows();
+    expect(rows.map((r) => r.outcome)).toEqual(["ready", "lostRace", "lostRace"]);
+    expect(barrierFor).toBeDefined();
+
+    // THE WINDOW: runCli has resolved, so the finally already closed the
+    // loser ledger. Release the barrier — the abandoned teardown's close step
+    // ingests NOW, against a hook whose reference was dropped at close.
+    (releaseDestroy as () => void)();
+    const store = d.store as RunRecordStore;
+    const hungRun = rows.find((r) => r.vmName === barrierFor)?.runId as string;
+    const settleBy = Date.now() + 5_000;
+    while (store.get(hungRun).closedAt === undefined && Date.now() < settleBy) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    // toBeDefined, not toBeNull: the loop exits on TIMEOUT with closedAt
+    // undefined, and `undefined` is not null — a null-only check would
+    // false-pass exactly when the late teardown failed to settle.
+    expect(store.get(hungRun).closedAt).toBeDefined();
+
+    // deps() injects runsDir = <case>/runs, a non-default layout, so the
+    // ledger sits INSIDE the records directory (costLedgerOpts' rule), not in
+    // the .sandbox sibling the default layout uses.
+    const db = new Database(join(runsDir, "cost-ledger.db"), { readonly: true });
+    try {
+      const priced = db
+        .query("SELECT run_id FROM cost_events WHERE kind = 'box_hours'")
+        .all() as { run_id: string }[];
+      // BOTH losers priced: the clean sibling pre-close, the abandoned one
+      // through the post-close re-open — one row each, exactly once.
+      expect(priced.map((r) => r.run_id).sort()).toEqual(
+        rows.slice(1).map((r) => r.runId as string).sort(),
+      );
+    } finally {
+      db.close();
+    }
+  }, 30_000); // 4s loser deadline + the sibling's REAL teardown + the post-release settle window — past bun's 5s default
+
+  test("loser-ledger hook: a close() that throws still drops the handle — the late ingest re-opens", () => {
+    // Round 6 (CodeRabbit): the hook's close used to drop its reference AFTER
+    // realLoserLedger?.close(), so a close that THREW left the reference on
+    // the dead handle — and the abandoned-loser window (the test above) would
+    // ingest on it, where bun:sqlite answers "Database has closed" and the
+    // late box-hours row is lost. The drop now rides a finally; the throw
+    // still propagates so the verb's finally keeps its exit-6 reporting.
+    // Unit-level because a REAL CostLedger close cannot be made to throw
+    // deterministically (bun's close is idempotent — a double close is a
+    // no-op, verified against bun:sqlite directly).
+    const ctx = {
+      runId: "qds-20260101-00000a",
+      repoSlug: "o/r",
+      issueId: "7",
+      requestId: "01234567-89ab-cdef-0123-456789abcdef",
+    };
+    const ingestCalls: number[] = [];
+    let opened = 0;
+    const hook = makeLoserLedgerHook(() => {
+      opened += 1;
+      const id = opened;
+      return {
+        ingestBoxHours: () => {
+          ingestCalls.push(id);
+          return { eventId: `evt-${id}`, inserted: true, unpriced: false };
+        },
+        // Handle #1's close fails — the exact failure mode the warning named.
+        close:
+          id === 1
+            ? () => {
+                throw new Error("simulated sqlite close failure");
+              }
+            : () => {},
+      };
+    });
+    // First loser prices pre-close: handle #1 opens.
+    expect(hook.ingestBoxHours(ctx)).toEqual({ eventId: "evt-1", inserted: true, unpriced: false });
+    // The verb's finally closes it and the close FAILS — the failure must
+    // reach the caller while STILL dropping the reference.
+    expect(() => hook.close()).toThrow("simulated sqlite close failure");
+    // THE WINDOW: the abandoned teardown's late ingest lands on a NEW handle,
+    // not the one whose close failed.
+    expect(hook.ingestBoxHours(ctx)).toEqual({ eventId: "evt-2", inserted: true, unpriced: false });
+    expect(ingestCalls).toEqual([1, 2]);
+    expect(opened).toBe(2);
+    // The re-opened handle closes cleanly — no residual throw, no third open.
+    hook.close();
+    expect(opened).toBe(2);
+    expect(ingestCalls).toEqual([1, 2]);
+  });
+
+  test("fanout stdout is a keyed contract: exact key sets per emitted line kind", async () => {
+    // Story :499 documents what a caller parses off these lines. Pinning the
+    // EXACT key sets (not just their presence) is what makes a silently added
+    // column — the thing that breaks every downstream jq filter — a test
+    // failure instead of a release note.
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+      fanoutDeps(),
+    );
+    expect(code).toBe(0);
+    const lines = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>); /* dp:ok test-authored output: lines this test's own CLI run just emitted */
+    expect(lines).toHaveLength(3);
+    const [rowA, rowB, rankedLine] = lines;
+    // Arm rows: the four fixed keys plus the optional vmName — ready arms carry it.
+    const ARM_ROW_KEYS = ["arm", "fanoutId", "outcome", "runId", "vmName"];
+    expect(Object.keys(rowA ?? {}).sort()).toEqual(ARM_ROW_KEYS);
+    expect(Object.keys(rowB ?? {}).sort()).toEqual(ARM_ROW_KEYS);
+    interface RankedRow {
+      fanoutId: string;
+      scores: { arm: number; runId: string; score: number | null; breakdown: Record<string, unknown> }[];
+      tie: boolean;
+      rationale: string;
+      timings: Record<string, unknown>;
+    }
+    const ranked = rankedLine as unknown as RankedRow;
+    expect(Object.keys(ranked).sort()).toEqual(["fanoutId", "rationale", "scores", "tie", "timings"]);
+    expect(ranked.timings && Object.keys(ranked.timings)).toEqual(["rankMs"]);
+    for (const s of ranked.scores) {
+      expect(Object.keys(s).sort()).toEqual(["arm", "breakdown", "runId", "score"]);
+      expect(Object.keys(s.breakdown).sort()).toEqual(["testPassRate", "uniqueFileCoverage"]);
+    }
+  });
+
+  test("--steps-json over the 1 MiB cap refuses by name before any read or store build", async () => {
+    // Mirrored literal, same discipline as MAX_BRIEF_BYTES above: importing the
+    // constant would let an implementation that quietly lowered the cap pass
+    // both sides of this boundary. The pad makes the file 1 MiB + 9 bytes.
+    const stepsPath = join(dir, "steps-big.json");
+    writeFileSync(stepsPath, JSON.stringify({ pad: "x".repeat(MAX_STEPS_BYTES) }));
+    const freshDir = join(dir, "never-created-steps");
+    reset();
+    const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+    expect(code).toBe(2);
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: usage envelope this run just emitted to errCaptured */
+    expect(envelope.code).toBe("usage");
+    expect(envelope.message).toContain("--steps-json exceeds the 1 MiB cap");
+    // Size-checked BEFORE the read and BEFORE the store constructor — the id
+    // grammar's principle holding two flags further down the verb.
+    expect(existsSync(freshDir)).toBeFalse();
+    expectNoBoxes();
+  });
+
+  test("--steps-json pointing at a DIRECTORY is refused by name before any read or store build", async () => {
+    // readBriefFile's posture: only a regular file has a size worth trusting.
+    // A directory reports a small st.size that sails past the cap, and without
+    // this proof the read would surface as a bare EISDIR instead of a named
+    // refusal (a FIFO would block the read outright).
+    const stepsPath = join(dir, "steps-dir");
+    mkdirSync(stepsPath);
+    const freshDir = join(dir, "never-created-steps-dir");
+    reset();
+    const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+    expect(code).toBe(2);
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: usage envelope this run just emitted to errCaptured */
+    expect(envelope.code).toBe("usage");
+    expect(envelope.message).toContain("is not a regular file");
+    expect(existsSync(freshDir)).toBeFalse();
+    expectNoBoxes();
+  });
+
+  test("rank accepts empty {} --steps-json with all scores null and exits 0", async () => {
+    // Source accepts {} as valid steps-json (all arms unscored). This proves the
+    // happy path: an empty object produces a ranking line with every score null.
+    const fanoutsPath = join(dir, ".sandbox", "fanouts");
+    const fstore = new FanoutRecordStore({ dir: fanoutsPath });
+    const id = mintFanoutId();
+    fstore.create({
+      fanoutId: id,
+      requestId: "01234567-89ab-cdef-0123-456789abcdef",
+      pattern: "best-of-n",
+      n: 2,
+      pin: "c".repeat(40),
+      createdAt: new Date().toISOString(),
+      arms: [
+        { arm: 0, runId: "qds-20260101-00000a", briefHash: "a".repeat(64) },
+        { arm: 1, runId: "qds-20260101-00000b", briefHash: "a".repeat(64) },
+      ],
+      winner: null,
+      rankedAt: null,
+      closedAt: new Date().toISOString(),
+    });
+    const stepsPath = join(dir, "steps.json");
+    writeFileSync(stepsPath, "{}");
+    reset();
+    const code = await runCli(["rank", id, "--dir", fanoutsPath, "--steps-json", stepsPath], deps(""));
+    expect(code).toBe(0);
+    const result = JSON.parse(outOnly[0] as string) as { /* dp:ok test-authored output: rank result line this run just emitted to outOnly */
+      scores: { score: number | null }[];
+      tie: boolean;
+      rationale: string;
+    };
+    expect(result.scores).toHaveLength(2);
+    expect(result.scores[0]?.score).toBeNull();
+    expect(result.scores[1]?.score).toBeNull();
+    expect(result.tie).toBe(false);
+  });
+
+  test("a fleet-busy race refusal creates NO loser cost ledger (INV-2: the money file follows admission)", async () => {
+    // The loser ledger is LAZY end to end: the hook object itself does no I/O,
+    // and the real CostLedger opens its SQLite file only on the first
+    // ingestBoxHours — reachable exclusively from a LOSER'S teardown close
+    // step, strictly past admission. A race refused at the lock therefore
+    // leaves no money file behind (the pre-lazy build created one here).
+    const heldLock = join(dir, ".sandbox", "fleet.lock");
+    mkdirSync(dirname(heldLock), { recursive: true });
+    const corpsePid = await deadPid();
+    writeFileSync(
+      heldLock,
+      `${JSON.stringify({
+        pid: corpsePid,
+        pidStartTime: 1,
+        createdAt: new Date().toISOString(), // YOUNG: refused, never stolen
+        requestId: "busy-holder",
+      })}\n`,
+      { mode: 0o600 },
+    );
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
+      deps(validBriefJson(dir)),
+    );
+    expect(code).toBe(5);
+    expect(existsSync(join(dir, ".sandbox", "cost-ledger.db"))).toBeFalse();
+    expect(existsSync(join(dir, "runs", "cost-ledger.db"))).toBeFalse();
+    // 20s: deadPid() spawns+reaps a real child and the refusal path fsyncs
+    // the lock — can outrun bun's 5s default under parallel-suite load.
+  }, 20_000);
+
+  test("an unknown --pattern refuses exit 2 before any construction side effect", async () => {
+    // F-C1/F-C2: the pattern guard is hoisted ABOVE the constructors and above
+    // every pattern-scoped check, so a typo'd pattern is a usage error that has
+    // touched no disk — not a pin verdict, not a half-built fan-out record.
+    const freshFanouts = join(dir, "fresh-fanouts");
+    reset();
+    const code = await runCli(
+      // --dir points the (would-be) fan-outs store at a fresh path: the
+      // strongest form of "constructed nothing" is that the very directory the
+      // invocation was aimed at still does not exist afterwards.
+      ["fanout", "--driver", "fake", "--pattern", "racee", "--n", "2", "--roster", "a,b", "--dir", freshFanouts],
+      { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+    );
+    expect(code).toBe(2);
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: usage envelope this run just emitted to errCaptured */
+    expect(envelope.code).toBe("usage");
+    // The echo passes redactSecrets, which strips the JSON quoting — pinned as
+    // it actually renders.
+    expect(envelope.message).toContain("unknown pattern: racee");
+    expect(text()).toContain("pattern is one of best-of-n, many-stories, race");
+    // No fan-outs store, no fleet lock, no boxes, no loser-ledger db: the verb
+    // refused before anything that mkdirs was ever built.
+    expect(existsSync(freshFanouts)).toBeFalse();
+    expect(existsSync(join(dir, ".sandbox", "fleet.lock"))).toBeFalse();
+    expectNoBoxes();
+    expect(existsSync(join(dir, ".sandbox", "cost-ledger.db"))).toBeFalse();
+    expect(existsSync(join(dir, "runs", "cost-ledger.db"))).toBeFalse();
+  });
+
   // ─── CC-9: one structured line per verb, dispatch included ─────────────────
 
   describe("the CC-9 observability line", () => {
@@ -4091,20 +5108,215 @@ process.on = ((sig, listener) => {
       const wedged = (JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string }).runId;
       const lock = join(runsDir, `${wedged}.lock`);
       entries.length = 0;
-      expect(
-        await runCli(["teardown", "--driver", "fake", "--dir", runsDir, "--no-harvest", wedged], {
-          ...shared,
-          driver: driverWith(base, {
-            destroy: async (vm: string) => {
-              await base.destroy(vm);
-              writeFileSync(lock, "99999 someone-else 2026-01-01T00:00:00.000Z deadbeef\n");
-            },
+      try {
+        expect(
+          await runCli(["teardown", "--driver", "fake", "--dir", runsDir, "--no-harvest", wedged], {
+            ...shared,
+            driver: driverWith(base, {
+              destroy: async (vm: string) => {
+                await base.destroy(vm);
+                writeFileSync(lock, "99999 someone-else 2026-01-01T00:00:00.000Z deadbeef\n");
+              },
+            }),
           }),
+        ).toBe(6);
+        const line = verbLines()[0] as unknown as Record<string, unknown>;
+        expect(line.exitCode).toBe(6);
+        expect(line.exitStatus).toBe("logic");
+      } finally {
+        // Ponytail: clean up the wedged lock so it doesn't leak into later tests
+        if (existsSync(lock)) {
+          rmSync(lock);
+        }
+      }
+    });
+
+    test("a fanout list-unverified refusal stamps its completion line transient", async () => {
+      // The primitive attaches exitStatus "transient" to the ERROR itself
+      // (fanout-primitive's invalid()): list-unverified is the SUBSTRATE
+      // failing to answer, not the brief being wrong. logVerb derives from
+      // exit code alone, and 5 reads as do-not-retry "logic" — so the
+      // completion line must honor the error-carried override or automation
+      // drops exactly the one retryable fan-out refusal.
+      const base = new FakeDriver(boxesDir);
+      const d: Partial<FleetDeps> = {
+        ...fanoutDeps(),
+        driver: driverWith(base, {
+          list: async () => {
+            throw new Error("provider unreachable");
+          },
         }),
-      ).toBe(6);
-      const line = verbLines()[0] as unknown as Record<string, unknown>;
-      expect(line.exitCode).toBe(6);
-      expect(line.exitStatus).toBe("logic");
+      };
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
+        d,
+      );
+      expect(code).toBe(5);
+      expect(text()).toContain("list-unverified");
+      const line = verbLines()[0] as unknown as Record<string, unknown>; /* dp:ok same read-back cast every sibling CC-9 case uses on the sink's LogEntry */
+      expect(line.verb).toBe("fanout");
+      expect(line.exitCode).toBe(5);
+      expect(line.exitStatus).toBe("transient");
+    });
+  });
+
+  // round-6 review: explicit-empty refusals (C1/C2/C3)
+  describe("round-6 review refusals", () => {
+    test("C1: --cap-micro-usd above $1M (1e12 µ$) is refused with domain bound", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b", "--cap-micro-usd", "1000000000001"],
+        fanoutDeps(),
+      );
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("--cap-micro-usd");
+      expect(envelope.remediation).toContain("1000000000000");
+    });
+
+    test("C1: --cap-micro-usd accepts exactly $1M (1e12 µ$)", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b", "--cap-micro-usd", "1000000000000"],
+        fanoutDeps(),
+      );
+      expect(code).toBe(0);
+    });
+
+    test("C1: --cap-micro-usd negative (-1) is refused (r7-T-b1)", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b", "--cap-micro-usd", "-1"],
+        fanoutDeps(),
+      );
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("--cap-micro-usd");
+    });
+
+    test("C2: --roster with empty string (\"\") is refused as explicit empty", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", ""],
+        fanoutDeps(),
+      );
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
+      // Empty value is caught by parseValueFlags before our split/filter logic
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("--roster");
+      expect(envelope.message).toContain("non-empty");
+    });
+
+    test("C2: --roster with only commas (\",,,\") is refused as explicit empty (r7-S3a guard catches empty segments)", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", ",,,"],
+        fanoutDeps(),
+      );
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toBe("--roster contains an empty entry");
+      expect(envelope.remediation).toContain("non-empty");
+    });
+
+    test("C3: --steps-json entry with testResults but testsExecuted=false is refused", async () => {
+      const freshDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+      freshScratchDirs.push(freshDir);
+      const stepsPath = join(freshDir, "steps.json");
+      writeFileSync(stepsPath, JSON.stringify({ "qds-123": { testsExecuted: false, testResults: { passed: 1, failed: 0 } } }));
+      const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("testResults but testsExecuted is false");
+    });
+
+    test("C3: --steps-json entry with testResults and testsExecuted=true is accepted", async () => {
+      const freshDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+      freshScratchDirs.push(freshDir);
+      const stepsPath = join(freshDir, "steps.json");
+      writeFileSync(stepsPath, JSON.stringify({ "qds-123": { testsExecuted: true, testResults: { passed: 1, failed: 0 } } }));
+      const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+      // Exits 4 because fanout doesn't exist, but shape validation passed
+      expect(code).toBe(4);
+      expect(text()).not.toContain("testResults");
+    });
+
+    test("C3: --steps-json entry with testsExecuted=true and no testResults is legal (passRate 0)", async () => {
+      const freshDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+      freshScratchDirs.push(freshDir);
+      const stepsPath = join(freshDir, "steps.json");
+      writeFileSync(stepsPath, JSON.stringify({ "qds-123": { testsExecuted: true } }));
+      const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+      // Exits 4 because fanout doesn't exist, but shape validation passed
+      expect(code).toBe(4);
+    });
+
+    // round-7 review S3 findings
+    test("S3a: --roster with empty segment (\"a,,b\") is refused with named error", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "3", "--roster", "a,,b"],
+        fanoutDeps(),
+      );
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toBe("--roster contains an empty entry");
+      expect(envelope.remediation).toContain("non-empty");
+    });
+
+    test("S3b: --roster with duplicate entries (\"x,x\") is refused naming the duplicate", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "x,x"],
+        fanoutDeps(),
+      );
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("duplicate entry");
+      expect(envelope.message).toContain("x");
+      expect(envelope.remediation).toContain("unique");
+    });
+
+    test("S3c: rank refuses orphaned fanout record (n>0, arms:[]) with named error", async () => {
+      // Create a custom fanouts directory and use it directly via --dir
+      const customFanoutsDir = join(dir, "custom-fanouts");
+      mkdirSync(customFanoutsDir, { recursive: true });
+      const fstore = new FanoutRecordStore({ dir: customFanoutsDir });
+      // Plant an orphaned record: n=2 but arms=[] (crash between create and mutate)
+      const orphanedId = "fan-20260101-a1b2c3"; // Valid format: fan-YYYYMMDD-6hex
+      fstore.create({
+        fanoutId: orphanedId,
+        requestId: "01234567-89ab-cdef-0123-456789abcdef",
+        pattern: "best-of-n",
+        n: 2,
+        pin: "a".repeat(40),
+        createdAt: new Date().toISOString(),
+        arms: [], // Empty arms with n>0 = orphaned
+        winner: null,
+        rankedAt: null,
+        closedAt: null,
+      });
+      // Use --dir to point directly at the fanouts directory (resolveFanoutsDir returns dir as-is)
+      const code = await runCli(["rank", orphanedId, "--dir", customFanoutsDir], deps(""));
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
+      expect(envelope.code).toBe("invalid-fanout-record");
+      expect(envelope.message).toContain("has n=2 but zero arms");
+      expect(envelope.message).toContain("orphaned");
+      expect(envelope.remediation).toContain(".sandbox/fanouts/");
+    });
+
+    test("S3 control: --roster with valid distinct entries (\"a,b\") still works", async () => {
+      const code = await runCli(
+        ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b"],
+        fanoutDeps(),
+      );
+      // Same fixture shape as the C1 accepts-exactly-$1M control: the verb runs
+      // to completion (0) — roster parsing neither refuses nor derails it.
+      expect(code).toBe(0);
+      const errText = errCaptured.join("");
+      expect(errText).not.toContain("--roster");
+      expect(errText).not.toContain("usage");
     });
   });
 });

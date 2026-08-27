@@ -63,7 +63,7 @@ afterEach(() => {
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 function deps(overrides: Partial<TeardownDeps> = {}): TeardownDeps {
-  // workdir "app": the fake box's clone target (impl default is DF2.2's /home/agent/src)
+  // workdir "app": the fake box's clone target (impl default is the HOME-relative "src")
   return { driver: recording, store, keyApi: api, runsDir: store.dir, workdir: "app", ...overrides };
 }
 
@@ -559,7 +559,7 @@ describe("DF2.5 teardownSandbox", () => {
 
   // ─── 9a. No-VM guard ───────────────────────────────────────────────────────
 
-  test("no-VM record: teardown completes, destroy skipped with the no-box reason, record closes", async () => {
+  test("no-VM record: teardown completes, destroy attempted via the runId fallback (idempotent no-op), record closes", async () => {
     const runId = "df25-novm";
     store.create(runId); // a record that never got a VM — but it DID get a key
     const hash = await mintFor(runId);
@@ -569,21 +569,23 @@ describe("DF2.5 teardownSandbox", () => {
     expect(store.get(runId).closedAt).toBeString();
     // the key lifecycle still ran end to end on the way past (spend → revoke → verify)
     expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeFalse();
+    // F6: destroy no longer SKIPS on a vmName-less record — it runs against
+    // the runId-named box (idempotent no-op when none exists).
     const destroy = logs.find((l) => l.operation === "teardown.destroy");
-    expect(destroy?.outcome).toBe("skipped");
-    expect(String(destroy?.reason)).toContain("no box was ever created");
+    expect(destroy?.outcome).toBe("ran");
   }, 30_000);
 
-  test("no-VM record call order: destroy absent, close present, key lifecycle runs", async () => {
+  test("no-VM record call order: destroy present (runId fallback), close last, key lifecycle runs", async () => {
     const runId = "df25-novm-order";
-    store.create(runId); // no vmName — destroy skips
+    store.create(runId); // no vmName — destroy falls back to the run id
     const hash = await mintFor(runId);
     const h = orderDeps();
 
     await teardownSandbox(h.deps, runId);
 
-    // destroy NEVER appears — no box was ever created
-    expect(h.calls).not.toContain("destroy");
+    // F6: destroy RUNS (fallback handle), before close
+    expect(h.calls).toContain("destroy");
+    expect(h.calls.indexOf("destroy")).toBeLessThan(h.calls.indexOf("close"));
     // close still runs (last)
     expect(h.calls[h.calls.length - 1]).toBe("close");
     // key lifecycle still ran
@@ -591,6 +593,43 @@ describe("DF2.5 teardownSandbox", () => {
     expect(h.calls).toContain("revoke");
     expect(h.calls).toContain("verify");
     expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeFalse();
+  }, 30_000);
+
+  test("F6 (2026-08-24): vmName-less OPEN record destroys the runId-named live box — the INV-1 crash window cannot leak", async () => {
+    // Port of live repro e2e-repro6d: `store.create` → `driver.create` →
+    // crash before `store.set(vmName)` leaves a live box named after the run
+    // id. The old code skipped destroy on vmName-less records and exited
+    // reporting "torn down" — the box kept billing. teardownRun (driver.ts)
+    // has always fallen back to the run id; teardownSandbox must too.
+    const runId = "df25-f6-fallback";
+    store.create(runId); // record open, vmName never written
+    await driver.create(runId); // the box IS live, named after the run id
+    expect((await driver.list(runId)).length).toBe(1);
+
+    await teardownSandbox(deps(), runId);
+
+    // THE pin: the box is GONE and the record closed — no leak at exit 0.
+    expect((await driver.list(runId)).length).toBe(0);
+    expect(store.get(runId).closedAt).toBeString();
+    const destroy = logs.find((l) => l.operation === "teardown.destroy");
+    expect(destroy?.outcome).toBe("ran");
+  }, 30_000);
+
+  test("F6 arm 2: destroy failure on the runId fallback aborts fail-closed — no close, record stays open", async () => {
+    const runId = "df25-f6-fallback-fail";
+    store.create(runId);
+    await driver.create(runId);
+    const failing = Object.create(recording) as RecordingDriver;
+    failing.destroy = (vm: string) => {
+      if (vm === runId) return Promise.reject(new Error("rm exploded"));
+      return recording.destroy(vm);
+    };
+
+    await expect(teardownSandbox(deps({ driver: failing as unknown as TeardownDeps["driver"] }), runId)).rejects.toThrow(
+      /destroy-unconfirmed|rm exploded/,
+    );
+    expect((await driver.list(runId)).length).toBe(1); // box untouched — fail-closed
+    expect(store.get(runId).closedAt).toBeUndefined();
   }, 30_000);
 
   // ─── DF2.8: box-hours hook at close step ──────────────────────────────────────
@@ -792,9 +831,9 @@ describe("DF2.5 teardownSandbox", () => {
       const secondRow = rawDb.query("SELECT event_id FROM cost_events WHERE kind = 'box_hours' AND run_id = ?").get(runId) as { event_id: string };
       expect(secondRow.event_id).toBe(firstEventId);
 
-      // Verify cost = ceil(30min) × rate = 1h × 1M µ$/h, attributed to the run's issue
+      // Verify cost = 30min × 1M µ$/h = 500,000 µ$ fractional (F8), attributed to the run's issue
       const row = rawDb.query("SELECT cost_micro_usd, repo_slug, issue_id FROM cost_events WHERE kind = 'box_hours' AND run_id = ?").get(runId) as { cost_micro_usd: number; repo_slug: string; issue_id: string };
-      expect(row.cost_micro_usd).toBe(1_000_000);
+      expect(row.cost_micro_usd).toBe(500_000);
       expect(row.repo_slug).toBe("qds/demo");
       expect(row.issue_id).toBe("42");
       rawDb.close();

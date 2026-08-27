@@ -1,0 +1,50 @@
+{
+  "writtenAt": "2026-08-24T20:06:50.541Z",
+  "test": "T1.3b",
+  "outcome": "pass",
+  "runId": "e2e-t13b-mt7o2i8fue",
+  "phases": [
+    {
+      "phase": "host-scratch-clone",
+      "ok": true
+    },
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t13b-mt7o2i8fue"
+    },
+    {
+      "phase": "fill",
+      "ok": true,
+      "ms": 6316
+    },
+    {
+      "phase": "box-branch",
+      "branch": "sbx/e2e-t13b-mt7o2i8fue"
+    },
+    {
+      "phase": "in-box-commit",
+      "tip": "9120c1d280293c042dd8bab598356d08e0877fb7"
+    },
+    {
+      "phase": "harvest-verb",
+      "exitCode": 0,
+      "stdout": "harvested: 1",
+      "stderrTail": "tifacts_ms\":1295}\n{\"requestId\":\"6c905cb6-d2f8-4b29-aead-c71724e80d93\",\"operation\":\"harvest.summary\",\"agentId\":null,\"timestamp\":\"2026-08-24T20:06:45.922Z\",\"duration\":4896,\"status\":\"ok\",\"runId\":\"e2e-t13b-mt7o2i8fue\",\"step\":\"summary\",\"driver\":\"exedev\",\"durationMs\":4896,\"outcome\":\"ok\",\"harvested\":1,\"artifacts\":\"none\"}\n{\"requestId\":\"6c905cb6-d2f8-4b29-aead-c71724e80d93\",\"operation\":\"fleet.harvest\",\"agentId\":null,\"timestamp\":\"2026-08-24T20:06:45.923Z\",\"duration\":4900,\"durationMs\":4900,\"status\":\"ok\",\"runId\":\"e2e-t13b-mt7o2i8fue\",\"verb\":\"harvest\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "host-bundle-verify",
+      "exitCode": 0,
+      "stderr": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t13b-2q7aGL/runs/e2e-t13b-mt7o2i8fue.bundle is okay"
+    },
+    {
+      "phase": "quarantine-ref",
+      "exitCode": 0,
+      "tip": "9120c1d280293c042dd8bab598356d08e0877fb7"
+    },
+    {
+      "phase": "finally-teardown-verb",
+      "exitCode": 6
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "writtenAt": "2026-08-26T19:20:23.035Z",
+  "test": "T3.4b",
+  "outcome": "fail",
+  "runId": "qds-20260826-80c893",
+  "phases": [
+    {
+      "phase": "dispatch",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260826-80c893\",\"requestId\":\"ee41e6bb-3d61-4ba1-9422-e8b157bbdaa0\",\"state\":\"ready\",\"vmName\":\"qds-20260826-80c893\",\"httpsUrl\":\"https://qds-20260826-80c893.exe.xyz\"}"
+    },
+    {
+      "phase": "stale-wait",
+      "staleAfterMs": 60000
+    },
+    {
+      "phase": "reap",
+      "exitCode": 0,
+      "stdout": "apply: teardown 1, destroy 0, revoke 0\nfleet: 1 VMs, 8 keys, 1 records (file limits)\nreport: .sandbox/reap/2026-08-26T19-20-15.047Z.json",
+      "stderrTail": ",\"duration\":0,\"durationMs\":0,\"status\":\"ok\",\"class\":\"foreign\",\"action\":\"report\",\"keyHashPrefix\":\"56536fc911d6\"}\n{\"requestId\":\"40ffc63b-bc0b-4d33-9cd5-c263bd6aafe4\",\"operation\":\"reap.row\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:20:15.047Z\",\"duration\":0,\"durationMs\":0,\"status\":\"ok\",\"class\":\"foreign\",\"action\":\"report\",\"keyHashPrefix\":\"9fd739bed515\"}\n{\"requestId\":\"40ffc63b-bc0b-4d33-9cd5-c263bd6aafe4\",\"operation\":\"reap.row\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:20:15.047Z\",\"duration\":9227,\"durationMs\":9227,\"status\":\"ok\",\"class\":\"stale-record\",\"action\":\"teardown\",\"runId\":\"qds-20260826-80c893\"}"
+    },
+    {
+      "phase": "post-reap",
+      "closedAt": "2026-08-26T19:20:15.046Z",
+      "spendMicroUsd": 72
+    },
+    {
+      "phase": "ledger",
+      "boxHours": []
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBeGreaterThanOrEqual(expected)\n\nExpected: >= 1\nReceived: 0\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-80c893",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

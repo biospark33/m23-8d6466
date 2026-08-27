@@ -1,0 +1,159 @@
+{
+  "writtenAt": "2026-08-25T14:46:26.692Z",
+  "test": "T2.2",
+  "outcome": "fail",
+  "fanoutId": "fan-20260825-df0ab4",
+  "runIds": [
+    "qds-20260825-e1218f",
+    "qds-20260825-11b91f"
+  ],
+  "capMicroUsdPerArm": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "perArm": true,
+      "aggregateCapMicroUsd": 100000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t22probe-mt8s0qu34qq"
+    },
+    {
+      "phase": "fanout-verb",
+      "exitCode": 0,
+      "stdout": "{\"fanoutId\":\"fan-20260825-df0ab4\",\"arm\":0,\"runId\":\"qds-20260825-e1218f\",\"outcome\":\"ready\",\"vmName\":\"qds-20260825-e1218f\"}\n{\"fanoutId\":\"fan-20260825-df0ab4\",\"arm\":1,\"runId\":\"qds-20260825-11b91f\",\"outcome\":\"ready\",\"vmName\":\"qds-20260825-11b91f\"}\n{\"fanoutId\":\"fan-20260825-df0ab4\",\"scores\":[{\"arm\":0,\"runId\":\"qds-20260825-e1218f\",\"score\":null,\"breakdown\":{\"testPassRate\":0,\"uniqueFileCoverage\":0}},{\"arm\":1,\"runId\":\"qds-20260825-11b91f\",\"score\":null,\"breakdown\":{\"testPassRate\":0,\"uniqueFileCoverage\":0}}],\"tie\":false,\"rationale\":\"no step-output source provided — every arm listed unscored; supply --steps-json to rank\",\"timings\":{\"rankMs\":2.032792000005429}}",
+      "stderrTail": "c074e\",\"operation\":\"fleet.fanout.arm\",\"fanoutId\":\"fan-20260825-df0ab4\",\"arm\":0,\"runId\":\"qds-20260825-e1218f\",\"outcome\":\"ready\",\"vmName\":\"qds-20260825-e1218f\",\"durationMs\":60118}\n{\"requestId\":\"08014009-dee0-4e5c-9730-eb9e35ec074e\",\"operation\":\"fanout-record.mutate\",\"agentId\":null,\"timestamp\":\"2026-08-25T14:45:54.441Z\",\"duration\":1,\"status\":\"ok\"}\n{\"requestId\":\"08014009-dee0-4e5c-9730-eb9e35ec074e\",\"operation\":\"fanout-record.mutate\",\"agentId\":null,\"timestamp\":\"2026-08-25T14:45:54.445Z\",\"duration\":2,\"status\":\"ok\"}\n{\"requestId\":\"08014009-dee0-4e5c-9730-eb9e35ec074e\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-08-25T14:45:54.445Z\",\"duration\":61720,\"durationMs\":61720,\"status\":\"ok\",\"runId\":\"fan-20260825-df0ab4\",\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "arms",
+      "fanoutId": "fan-20260825-df0ab4",
+      "armLines": [
+        {
+          "fanoutId": "fan-20260825-df0ab4",
+          "arm": 0,
+          "runId": "qds-20260825-e1218f",
+          "outcome": "ready",
+          "vmName": "qds-20260825-e1218f"
+        },
+        {
+          "fanoutId": "fan-20260825-df0ab4",
+          "arm": 1,
+          "runId": "qds-20260825-11b91f",
+          "outcome": "ready",
+          "vmName": "qds-20260825-11b91f"
+        }
+      ],
+      "autoRankLine": {
+        "fanoutId": "fan-20260825-df0ab4",
+        "scores": [
+          {
+            "arm": 0,
+            "runId": "qds-20260825-e1218f",
+            "score": null,
+            "breakdown": {
+              "testPassRate": 0,
+              "uniqueFileCoverage": 0
+            }
+          },
+          {
+            "arm": 1,
+            "runId": "qds-20260825-11b91f",
+            "score": null,
+            "breakdown": {
+              "testPassRate": 0,
+              "uniqueFileCoverage": 0
+            }
+          }
+        ],
+        "tie": false,
+        "rationale": "no step-output source provided — every arm listed unscored; supply --steps-json to rank",
+        "timings": {
+          "rankMs": 2.032792000005429
+        }
+      }
+    },
+    {
+      "phase": "boxes-live",
+      "ok": true,
+      "vms": [
+        "qds-20260825-e1218f",
+        "qds-20260825-11b91f"
+      ]
+    },
+    {
+      "phase": "fanout-record",
+      "ok": true,
+      "arms": [
+        {
+          "arm": 0,
+          "runId": "qds-20260825-e1218f",
+          "rosterId": "lead",
+          "briefHash": "7df93a8c5a17c3b2405ef7bce7b44a0ee2b0f5cc4bfd2f770448c1b9500d05bb"
+        },
+        {
+          "arm": 1,
+          "runId": "qds-20260825-11b91f",
+          "rosterId": "fixer",
+          "briefHash": "7df93a8c5a17c3b2405ef7bce7b44a0ee2b0f5cc4bfd2f770448c1b9500d05bb"
+        }
+      ]
+    },
+    {
+      "phase": "arm-records",
+      "ok": true,
+      "runIds": [
+        "qds-20260825-e1218f",
+        "qds-20260825-11b91f"
+      ]
+    },
+    {
+      "phase": "rank-verb",
+      "exitCode": 0,
+      "stdout": "{\"fanoutId\":\"fan-20260825-df0ab4\",\"scores\":[{\"arm\":0,\"runId\":\"qds-20260825-e1218f\",\"score\":null,\"breakdown\":{\"testPassRate\":0,\"uniqueFileCoverage\":0}},{\"arm\":1,\"runId\":\"qds-20260825-11b91f\",\"score\":null,\"breakdown\":{\"testPassRate\":0,\"uniqueFileCoverage\":0}}],\"tie\":false,\"rationale\":\"no step-output source provided — every arm listed unscored; supply --steps-json to rank\",\"timings\":{\"rankMs\":2.262874999999994}}",
+      "stderrTail": "9a9ce0aa8\",\"operation\":\"fanout-record.mutate\",\"agentId\":null,\"timestamp\":\"2026-08-25T14:45:55.788Z\",\"duration\":2,\"status\":\"ok\"}\n{\"requestId\":\"2d65c99f-156e-411b-95d2-4809a9ce0aa8\",\"operation\":\"fleet.rank\",\"agentId\":null,\"timestamp\":\"2026-08-25T14:45:55.789Z\",\"duration\":4,\"durationMs\":4,\"status\":\"ok\",\"runId\":\"fan-20260825-df0ab4\",\"verb\":\"rank\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "harvest-arm",
+      "arm": 0,
+      "exitCode": 0,
+      "stdout": "harvested: none"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 0,
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 1,
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260825-e1218f",
+      "ok": true
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260825-11b91f",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [
+        "qds-20260825-329565"
+      ]
+    },
+    {
+      "phase": "final-ls-error",
+      "error": "expect(received).toEqual(expected)\n\n- []\n+ [\n+   \"qds-20260825-329565\",\n+ ]\n\n- Expected  - 1\n+ Received  + 3\n"
+    }
+  ]
+}

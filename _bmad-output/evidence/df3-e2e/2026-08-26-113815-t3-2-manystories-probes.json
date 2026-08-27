@@ -1,0 +1,20 @@
+{
+  "writtenAt": "2026-08-26T11:38:15.535Z",
+  "test": "T3.2 probes",
+  "outcome": "fail",
+  "phases": [
+    {
+      "phase": "ls-before",
+      "boxes": []
+    },
+    {
+      "phase": "neg-roster",
+      "exitCode": 2,
+      "stderrTail": "{\"code\":\"usage\",\"message\":\"--roster is not valid for many-stories\",\"remediation\":\"drop --roster; per-arm variation comes from the distinct briefs\"}\n{\"requestId\":\"d3b08087-a70a-4deb-89a2-165621353328\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-08-26T11:38:15.512Z\",\"duration\":44,\"durationMs\":44,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toContain(expected)\n\nExpected to contain: \"roster-forbidden\"\nReceived: \"{\\\"code\\\":\\\"usage\\\",\\\"message\\\":\\\"--roster is not valid for many-stories\\\",\\\"remediation\\\":\\\"drop --roster; per-arm variation comes from the distinct briefs\\\"}\\n{\\\"requestId\\\":\\\"d3b08087-a70a-4deb-89a2-165621353328\\\",\\\"operation\\\":\\\"fleet.fanout\\\",\\\"agentId\\\":null,\\\"timestamp\\\":\\\"2026-08-26T11:38:15.512Z\\\",\\\"duration\\\":44,\\\"durationMs\\\":44,\\\"status\\\":\\\"error\\\",\\\"runId\\\":null,\\\"verb\\\":\\\"fanout\\\",\\\"phase\\\":\\\"complete\\\",\\\"exitCode\\\":2,\\\"exitStatus\\\":\\\"logic\\\"}\\n\"\n"
+    }
+  ]
+}

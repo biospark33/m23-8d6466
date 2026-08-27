@@ -23,7 +23,7 @@
  * recomputes a box-naming formula the factory does not use.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listVerbs, renderHelp, type VerbEntry, type VerbFlag } from "../../src/fleet/verbs.ts";
@@ -51,6 +51,12 @@ import {
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
 import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
 import { liveForeignPid, rejection } from "../helpers.ts";
+// DF3.2 probe wiring: the full fanout path needs a key client, a ledger, and
+// the fan-out record store the auto-rank reads.
+import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
+import { goodLedger } from "./helpers.ts";
+import { FanoutRecordStore } from "../../src/fleet/fanout.ts";
+import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
 
 /**
  * Await a refusal and hand back the TYPED error — never a bare "something threw".
@@ -230,6 +236,10 @@ describe("verbs.ts (registry)", () => {
     for (const known of ["dispatch", "status", "harvest", "teardown"]) {
       expect(verbNames).toContain(known);
     }
+    // DF3.2's additive pair is pinned by name too — appended after the DF3.1
+    // four, none of which was edited to make room.
+    expect(verbNames).toContain("fanout");
+    expect(verbNames).toContain("rank");
     // Relative order of the known verbs is pinned as a SUBSEQUENCE by the
     // same-set test at the bottom of this describe; uniqueness has its own case.
   });
@@ -303,6 +313,26 @@ describe("verbs.ts (registry)", () => {
       { name: "--help", required: false, valueType: "boolean" },
       { name: "--no-harvest", required: false, valueType: "boolean" },
     ],
+    // DF3.2's additive entries (integration spec D12 + ruling C2's
+    // --steps-json). --n/--cap-micro-usd are "string": the CLI range-checks
+    // them as integers rather than trusting Number()'s coercions.
+    fanout: [
+      { name: "--brief", required: false, valueType: "path" },
+      { name: "--cap-micro-usd", required: false, valueType: "string" },
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--driver", required: true, valueType: "string" },
+      { name: "--help", required: false, valueType: "boolean" },
+      { name: "--n", required: true, valueType: "string" },
+      { name: "--pattern", required: true, valueType: "string" },
+      { name: "--pin", required: false, valueType: "string" },
+      { name: "--roster", required: false, valueType: "string" },
+    ],
+    // NO --driver BY DESIGN: rank touches fan-out records and step output only.
+    rank: [
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--help", required: false, valueType: "boolean" },
+      { name: "--steps-json", required: false, valueType: "path" },
+    ],
   };
 
   const EXPECTED_EXIT_CODES: Record<string, number[]> = {
@@ -331,9 +361,19 @@ describe("verbs.ts (registry)", () => {
     // between the record probe and any mutation. Demonstrated by the lock probes.
     harvest: [0, 1, 2, 4, 5, 6],
     teardown: [0, 1, 2, 4, 5, 6],
+    // DF3.2. fanout: 1 = any collected arm failure (setupFailed/armFailed/
+    // armUnknown) after a result returned; 5 = refused before anything was
+    // provisioned (fleet-busy, no-headroom); 6 = the arms LANDED and a
+    // completion line would not print. rank: 4 = unknown/unparseable fan-out
+    // id, 1 = record read/write failure, 6 = the ranking LANDED and its result
+    // line would not print (the shared finish folds an EAGAIN-refused stdout
+    // into 6 for every verb that emits one). Still no 5: rank refuses nothing
+    // before provisioning, because it never provisions.
+    fanout: [0, 1, 2, 5, 6],
+    rank: [0, 1, 2, 4, 6],
   };
 
-  for (const verb of ["dispatch", "status", "harvest", "teardown"]) {
+  for (const verb of ["dispatch", "status", "harvest", "teardown", "fanout", "rank"]) {
     test(`${verb} verb declares its exact flag table and exit codes`, () => {
       const entry = listVerbs().find((v) => v.verb === verb);
       expect(entry).toBeDefined();
@@ -385,7 +425,7 @@ describe("verbs.ts (registry)", () => {
       .filter((l) => l.startsWith("  "))
       .join("\n");
     expect(entries).toContain("syntheticverb");
-    for (const real of ["dispatch", "status", "harvest", "teardown"]) {
+    for (const real of ["dispatch", "status", "harvest", "teardown", "fanout", "rank"]) {
       expect(entries).not.toContain(real);
     }
   });
@@ -404,8 +444,14 @@ describe("verbs.ts (registry)", () => {
       expectFlagLines(help, entry);
       expect(help).toContain(entry.exitCodes.join(", "));
       // Both polarities really are exercised on every verb, so the pairing above
-      // cannot be satisfied by an inverted ternary.
-      expect(entry.flags.some((f) => f.required)).toBe(true);
+      // cannot be satisfied by an inverted ternary. rank is the ONE exemption:
+      // it declares no --driver (nothing it does consumes a driver), and its
+      // remaining flags are all genuinely optional, so `required` never appears
+      // — the DF3.2 ruling, pinned here so a re-added required flag must argue
+      // its way past this sentence.
+      if (entry.verb !== "rank") {
+        expect(entry.flags.some((f) => f.required)).toBe(true);
+      }
       expect(entry.flags.some((f) => !f.required)).toBe(true);
     }
     // Anchored to the FIRST line. `/Usage:|usage:|FLAGS/i` was satisfied by the
@@ -428,14 +474,28 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
   let dir: string;
   let store: RunRecordStore;
   let driver: FakeDriver;
+  // DF3.2 probes reach the fanout/rank wiring, whose stores resolve
+  // cwd-relative defaults — redirected into the case tmpdir like cli.test.ts
+  // does for QDS_RUNS_DIR, so a probe can never litter the repo's .sandbox.
+  let savedDirs: Record<string, string | undefined>;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "qds-verb-exit-"));
     driver = new FakeDriver(join(dir, "boxes"));
     store = new RunRecordStore({ dir: join(dir, "runs") });
+    savedDirs = {
+      QDS_RUNS_DIR: process.env.QDS_RUNS_DIR,
+      QDS_FANOUTS_DIR: process.env.QDS_FANOUTS_DIR,
+    };
+    process.env.QDS_RUNS_DIR = join(dir, "sandbox-runs");
+    process.env.QDS_FANOUTS_DIR = join(dir, "fanouts");
   });
 
   afterEach(() => {
+    for (const [k, v] of Object.entries(savedDirs)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -597,6 +657,49 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     /** Filesystem set-up run after the provisioning and before the invocation. Awaited, so async set-up lands before the invocation. */
     before?: () => void | Promise<void>;
   }
+
+  /**
+   * Full fanout wiring under the case tmpdir (DF3.2): manifest + brief written
+   * lazily, every store/lock path redirected, so a probe that reaches the
+   * primitive never touches the repo's .sandbox. The env redirects in
+   * beforeEach cover the stores' own defaults; these seams cover the rest.
+   */
+  const fanBrief = (): string => {
+    mkdirSync(join(dir, "manifests"), { recursive: true });
+    writeFileSync(
+      join(dir, "manifests", "pipeline.json"),
+      JSON.stringify({
+        version: "1.0.0",
+        pipelineId: "probe-pipeline",
+        runBudgetMs: 200_000,
+        phases: [
+          { name: "plan", kind: "engineer", description: "Draft the approach", maxDurationMs: 10_000, retries: 0 },
+          { name: "build", kind: "code", description: "Run the suite", command: ["bun", "test"], maxDurationMs: 40_000, retries: 0 },
+        ],
+      }),
+    );
+    return JSON.stringify({
+      repoSlug: "owner/repo",
+      issueId: 7,
+      commitSha: "c".repeat(40),
+      manifestPath: join("manifests", "pipeline.json"),
+      repoUrl: "https://github.com/owner/repo",
+    });
+  };
+  const fanDeps = (): Partial<FleetDeps> => ({
+    driver,
+    store,
+    keyApi: new FakeKeyApi(),
+    ledgerFactory: () => goodLedger(),
+    readBrief: async () => fanBrief(),
+    repoRoot: dir,
+    fanoutsDir: join(dir, "fanouts"),
+    lockPath: join(dir, "fleet.lock"),
+  });
+  const lowCeiling = (maxVms: number): LoadedQuotaLimits => ({
+    limits: { ...DEFAULT_QUOTA_LIMITS, maxVms },
+    source: "default",
+  });
 
   /** Invocations whose refusal (or success) each verb can really produce. */
   const PROBES: Record<string, Probe[]> = {
@@ -799,6 +902,91 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         stderr: ["run-locked", "no live process holds it"],
       },
     ],
+    // DF3.2's pair. fanout's exit-1 here is the SUBSTRATE shape (an untyped
+    // throw out of the primitive surfaces through report() as 1 with a named
+    // envelope); the collected-arm-failure shape is cli.test.ts's, which owns
+    // the full per-arm wiring. Exit 6 needs a stdout sink that refuses
+    // mid-stream — excused below to its cli.test.ts case.
+    fanout: [
+      // No injected driver → the same refusal dispatch owes.
+      { argv: ["fanout"], code: 2, deps: () => ({ store }), stderr: "fanout requires --driver" },
+      { argv: ["fanout", "stray"], code: 2, stderr: "takes no positional arguments" },
+      { argv: ["fanout", "--driver", "fake", "--n", "9"], code: 2, stderr: "--n" },
+      {
+        argv: ["fanout", "--driver", "fake", "--n", "2", "--cap-micro-usd", "0x10"],
+        code: 2,
+        stderr: "--cap-micro-usd",
+      },
+      // A brief that is not JSON — refused before any store is constructed.
+      { argv: ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2"], code: 2, stderr: "not valid JSON" },
+      // Refused BEFORE anything provisioned: one headroom check for all N,
+      // zero records, zero boxes. The envelope names no-headroom.
+      {
+        argv: ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "3", "--roster", "a,b,c"],
+        code: 5,
+        deps: () => ({ ...fanDeps(), quotaLimits: lowCeiling(2) }),
+        stderr: "no-headroom",
+      },
+      // The substrate arm of exit 1: fanoutsDir points at a regular FILE, so
+      // the record store's mkdir throws EEXIST mid-fan-out and report() names
+      // it. Nothing reaches stdout.
+      {
+        argv: ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "r0,r1"],
+        code: 1,
+        before: () => void writeFileSync(join(dir, "fanouts-blocked"), "not a directory"),
+        deps: () => ({ ...fanDeps(), fanoutsDir: join(dir, "fanouts-blocked") }),
+        stderr: "EEXIST",
+      },
+      // The happy path: two arms ready, one ack line each, then best-of-n's
+      // auto-rank summary (unscored — this verb has no step-output source).
+      {
+        argv: ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "r0,r1"],
+        code: 0,
+        deps: () => fanDeps(),
+        stdout: ['"outcome":"ready"', '"scores"'],
+      },
+    ],
+    rank: [
+      { argv: ["rank"], code: 2, stderr: "exactly one" },
+      { argv: ["rank", "bogus-id"], code: 2, stderr: "not a fan-out id" },
+      // Well-formed but absent: rank maps the ENOENT to its own exit 4.
+      { argv: ["rank", "fan-20260101-000000"], code: 4, stderr: "no fan-out record found" },
+      // A record that exists but cannot be parsed: substrate, not absence.
+      {
+        argv: ["rank", "fan-20260101-aaaaaa"],
+        code: 1,
+        before: () => {
+          mkdirSync(process.env.QDS_FANOUTS_DIR!, { recursive: true });
+          writeFileSync(join(process.env.QDS_FANOUTS_DIR!, "fan-20260101-aaaaaa.json"), "{ not json");
+        },
+        stderr: "malformed fan-out record",
+      },
+      // A real completed record ranks cleanly even with NO --steps-json:
+      // every arm listed score:null, tie:false, rationale on stdout, exit 0.
+      {
+        argv: ["rank", "fan-20260101-bbbbbb"],
+        code: 0,
+        before: () => {
+          const fstore = new FanoutRecordStore({ dir: process.env.QDS_FANOUTS_DIR });
+          fstore.create({
+            fanoutId: "fan-20260101-bbbbbb",
+            requestId: "01234567-89ab-cdef-0123-456789abcdef",
+            pattern: "best-of-n",
+            n: 2,
+            pin: "c".repeat(40),
+            createdAt: new Date().toISOString(),
+            arms: [
+              { arm: 0, runId: "qds-20260101-000001", briefHash: "a".repeat(64) },
+              { arm: 1, runId: "qds-20260101-000002", briefHash: "a".repeat(64) },
+            ],
+            winner: null,
+            rankedAt: null,
+            closedAt: new Date().toISOString(),
+          });
+        },
+        stdout: ['"scores"', '"tie":false'],
+      },
+    ],
   };
 
   /**
@@ -841,6 +1029,25 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     status: [],
     harvest: [],
     teardown: [],
+    // fanout's probes above cover {0, 1, 2, 5}; 6 needs a stdout sink that
+    // refuses with EAGAIN mid-stream (the outputIncomplete fold), which the
+    // shared invoke() sinks here cannot do — cli.test.ts owns a sink that can.
+    fanout: [
+      {
+        code: 6,
+        why: "needs SUCCESSFUL arms and a stdout sink that throws EAGAIN — cli.test.ts",
+        coveredBy: "a fanout whose completion lines cannot print exits 6 with the work landed",
+      },
+    ],
+    // [0, 1, 2, 4] are all probed above; 6 needs the same refusing sink fanout's
+    // excuse needs — cli.test.ts owns it.
+    rank: [
+      {
+        code: 6,
+        why: "needs a successful ranking and a stdout sink that throws EAGAIN — cli.test.ts",
+        coveredBy: "a rank with no --steps-json whose result line cannot print exits 6 with rankedAt stamped",
+      },
+    ],
   };
 
   /**
@@ -914,8 +1121,11 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     // Pin the RELATIVE order of the known verbs — as a SUBSEQUENCE, not an
     // exact list, so an additive verb may slot in anywhere without editing this
     // file while a reshuffle of known ones still fails HERE rather than
-    // silently changing what half the table asserts about.
-    expect(inOrder(["dispatch", "status", "harvest", "teardown"], listVerbs().map((v) => v.verb))).toBe(true);
+    // silently changing what half the table asserts about. DF3.2's pair is part
+    // of that pinned subsequence: fanout and rank come after the DF3.1 four.
+    expect(
+      inOrder(["dispatch", "status", "harvest", "teardown", "fanout", "rank"], listVerbs().map((v) => v.verb)),
+    ).toBe(true);
     for (const entry of listVerbs()) {
       const probes = PROBES[entry.verb]!;
       const observed: number[] = [];
@@ -965,6 +1175,73 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     // and a mid-test kill leaves the dangling holder to poison the next test.
   }, 60_000);
 
+  test("F5 (2026-08-24): close-step box-hour failure AFTER destroy+revoke releases the run lock — exit 6, nothing wedged", async () => {
+    // Live shape (e2e-run-report F5): attributed run + no cost-config.json
+    // beside the records dir. The teardown destroys the box, revokes nothing
+    // (keyless), CLOSES the record — and the close step's ingest refuses the
+    // unpriced row (box-hour-rate-unconfigured, fail-loud by design). The old
+    // finally then held the run lock over a run with nothing billable left:
+    // the operator had to rm the lock by hand for an already-dead run.
+    const runId = "teardown-f5-unpriced";
+    await provisionAdmittedRun(driver, store, { runId });
+    store.set(runId, {
+      extensions: {
+        budget: {
+          repoSlug: "owner/repo",
+          issueId: "5",
+          capMicroUsd: 1_000_000,
+          spentMicroUsd: 0,
+          reservedMicroUsd: 0,
+          admittedCeilingMicroUsd: 1_000_000,
+        },
+      },
+    });
+
+    const res = await invoke(["teardown", runId], { driver, store });
+    // The unpriced row still surfaces loudly — 6, "done, needs an operator".
+    expect(res.code).toBe(6);
+    expect(res.err).toContain("box-hour-rate-unconfigured");
+    // THE pin: no lock-held note — the record is closed, so destroy+revoke
+    // landed and the lock guards nothing billable. The landed fact rides the
+    // lock-released note on stderr ("torn down:" is only printed on the
+    // no-throw path, which this is not by construction).
+    expect(res.err).not.toContain("lock-held");
+    expect(res.err).toContain("lock-released-work-landed");
+
+    // And the lock is REALLY gone, not just unreported: the next teardown is
+    // the idempotent closed-record path (still fail-loud on the unpriced row —
+    // that is the design until cost-config.json exists), never run-locked.
+    const again = await invoke(["teardown", runId], { driver, store });
+    expect(again.code).not.toBe(5);
+    expect(again.err).not.toContain("run-locked");
+    expect(again.err).not.toContain("lock-held");
+  }, 60_000);
+
+  test("F5 arm 2: a throw BEFORE close (record still open) still holds the lock", async () => {
+    // The lock's real job: guarding a HALF-torn-down run. A destroy failure
+    // leaves the record open and the box possibly alive — the lock must stay.
+    const runId = "teardown-f5-halfdead";
+    await provisionAdmittedRun(driver, store, { runId });
+    const exploding = Object.create(driver) as FakeDriver;
+    exploding.destroy = () => Promise.reject(new Error("rm exploded"));
+
+    const res = await invoke(["teardown", runId], { driver: exploding, store });
+    expect(res.code).toBe(6);
+    expect(res.err).toContain("lock-held");
+    // The lock is PHYSICALLY still there and refuses the next invocation. The
+    // second invoke runs in THIS process, so the acquire refuses as
+    // re-entrant (1) rather than run-locked (5) — either way, the refusal
+    // proves the lock survived a failed teardown.
+    expect(existsSync(join(store.dir, `${runId}.lock`))).toBe(true);
+    const again = await invoke(["teardown", runId], { driver: exploding, store });
+    expect(again.code).toBe(1);
+    expect(again.err).toContain("run-lock-reentrant");
+    // Release for the shared fixtures — this run's lock is deliberately
+    // wedged (destructive mark still set), so plain releaseRunLock refuses;
+    // rm the file directly, exactly what the remediation tells the operator.
+    rmSync(join(store.dir, `${runId}.lock`), { force: true });
+  }, 60_000);
+
   test("exit 6's OTHER documented route: the verb succeeded and the LEDGER would not close", async () => {
     // teardown/harvest declare 6 for two failures — "the cost ledger would not
     // close, or the run lock would not release" — and every probe above reaches
@@ -1008,6 +1285,33 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     // to strand the lock.
     expect(existsSync(join(store.dir, `${runId}.lock`))).toBe(false);
     expect(listVerbs().find((v) => v.verb === "teardown")?.exitCodes).toContain(6);
+  });
+
+  test("a NON-ERROR ledger close failure (throw null) still reports ledger-close-failed at exit 6 (CodeRabbit round 8)", async () => {
+    // SQLite-adjacent code may reject with null/undefined. The reporting catch
+    // must survive it: `(e as Error).message` on null throws a TypeError from
+    // INSIDE the finally's catch, escaping the cleanup policy entirely and
+    // hiding the original failure under a crash. Same route as the sibling
+    // above, minus the Error.
+    const runId = "ledger-wedged-null";
+    await provisionAdmittedRun(driver, store, { runId });
+    store.close(runId);
+    const realClose = CostLedger.prototype.close;
+    CostLedger.prototype.close = function wedgedNull(this: CostLedger): void {
+      realClose.call(this);
+      throw null;
+    };
+    let res: { code: number; out: string; err: string };
+    try {
+      res = await invoke(["teardown", runId], { driver, store });
+    } finally {
+      CostLedger.prototype.close = realClose;
+    }
+    expect(res.code).toBe(6);
+    expect(res.out).toContain(`torn down: ${runId}`);
+    expect(res.err).toContain("ledger-close-failed");
+    expect(res.err).not.toContain("lock-release-failed");
+    expect(existsSync(join(store.dir, `${runId}.lock`))).toBe(false);
   });
 });
 
@@ -1059,7 +1363,7 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
       listVerbs()
         .filter((v) => !v.flags.some((f) => f.name === "--driver"))
         .map((v) => v.verb),
-    ).toEqual([]); // round 10: registry-adaptive sweep; main has no driver-less verb yet
+    ).toEqual(["rank"]); // DF3.2: rank is the ONE deliberate driver-less verb; a second must argue it here
     // The seam the requirement lives behind: an INJECTED deps.driver stands in
     // for the flag entirely — `required` is about ARGV, not about embedders.
     expect(await run(["status"], sink, { store, driver }, sink)).toBe(0);

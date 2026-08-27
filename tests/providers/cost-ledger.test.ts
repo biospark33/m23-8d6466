@@ -544,7 +544,7 @@ describe("DF2.8 fail-closed open (INV-COST-6)", () => {
 describe("DF2.8 box hours (AC6)", () => {
   const boxCtx = { runId: "run-a1", repoSlug: "qds/demo", issueId: "42", requestId: "req-1" };
 
-  test("a closed run writes exactly one box_hours row = ceil(lifetime) × rate", () => {
+  test("a closed run writes exactly one box_hours row = fractional lifetime × rate, integer µ$ (F8, 2026-08-24)", () => {
     seedRecord("run-a1", { createdAt: "2026-08-20T12:00:00.000Z", closedAt: "2026-08-20T13:30:00.000Z" });
     const res = ledger.ingestBoxHours(boxCtx);
     expect(res.inserted).toBe(true);
@@ -555,11 +555,39 @@ describe("DF2.8 box hours (AC6)", () => {
     ).all() as { kind: string; cost_micro_usd: number; role: string | null; agent_id: string | null; key_hash: string | null; invocation_seq: number }[];
     db.close();
     expect(rows.length).toBe(1);
-    expect(rows[0]!.cost_micro_usd).toBe(2 * 3_600_000); // ceil(1.5h) = 2h × 3.6M µ$/h
+    // F8: 1.5h × 3.6M µ$/h = 5.4M µ$ EXACT — the old ceil-to-whole-hours
+    // contract priced this 7.2M µ$ (a 2h minimum for a 1.5h box).
+    expect(rows[0]!.cost_micro_usd).toBe(5_400_000);
     expect(rows[0]!.role).toBeNull();
     expect(rows[0]!.agent_id).toBeNull();
     expect(rows[0]!.key_hash).toBeNull();
     expect(rows[0]!.invocation_seq).toBe(0);
+  });
+
+
+  test("sub-hour boxes price fractionally — a 20-second box is not a 1-hour bill (F8)", () => {
+    // The live incident (e2e-run-report F8): a ~20s box priced at exactly
+    // 230,000 µ$ (= 1h at the configured rate). Wall-clock ms → integer µ$,
+    // rounded UP to the next whole µ$ when the product divides unevenly.
+    seedRecord("run-subhour", { createdAt: "2026-08-24T12:00:00.000Z", closedAt: "2026-08-24T12:00:20.000Z" });
+    const res = ledger.ingestBoxHours({ ...boxCtx, runId: "run-subhour" });
+    expect(res.inserted).toBe(true);
+    const db = rawDb();
+    const rows = db.prepare("SELECT cost_micro_usd FROM cost_events WHERE kind='box_hours' AND run_id='run-subhour'").all() as { cost_micro_usd: number }[];
+    db.close();
+    // 20s = 20,000 ms; 3.6M µ$/h = 1 µ$/ms exactly → 20,000 µ$. The old
+    // formula wrote 3_600_000 (ceil → 1 whole hour).
+    expect(rows[0]!.cost_micro_usd).toBe(20_000);
+  });
+
+  test("a sub-µ$ lifetime rounds UP to 1 µ$, never 0 (F8)", () => {
+    // 1 ms of box life at 3.6M µ$/h is exactly 1 µ$; 0 would be free runtime.
+    seedRecord("run-tiny", { createdAt: "2026-08-24T12:00:00.000Z", closedAt: "2026-08-24T12:00:00.001Z" });
+    ledger.ingestBoxHours({ ...boxCtx, runId: "run-tiny" });
+    const db = rawDb();
+    const rows = db.prepare("SELECT cost_micro_usd FROM cost_events WHERE kind='box_hours' AND run_id='run-tiny'").all() as { cost_micro_usd: number }[];
+    db.close();
+    expect(rows[0]!.cost_micro_usd).toBe(1);
   });
 
   test("re-calling ingestBoxHours on the same closed record writes no second row (idempotent close)", () => {
@@ -591,11 +619,11 @@ describe("DF2.8 box hours (AC6)", () => {
   test("the issue SUM equals token rows plus exactly one box row — captureSpend money appears nowhere", () => {
     seedRecord("run-a1", { closedAt: "2026-08-20T12:10:00.000Z" });
     ledger.ingestCostEvent(mkEvent({ costUsd: 0.01 }), mkCtx());
-    ledger.ingestBoxHours(boxCtx); // ceil(10min) = 1h × 3.6M
+    ledger.ingestBoxHours(boxCtx); // F8: 10min × 3.6M µ$/h = 600,000 µ$ fractional
     const view = ledger.readIssueCost("qds/demo", "42");
-    expect(view.totalMicroUsd).toBe(10_000 + 3_600_000);
+    expect(view.totalMicroUsd).toBe(10_000 + 600_000);
     // box-hours surface as an explicit unattributed line, never an invented role
-    expect(view.perRole).toEqual({ lead: 10_000, "box-hours": 3_600_000 });
+    expect(view.perRole).toEqual({ lead: 10_000, "box-hours": 600_000 });
   });
 
   test("an unconfigured box-hour rate is a structured config error, not a zero row", () => {

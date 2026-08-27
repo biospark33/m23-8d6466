@@ -1,0 +1,58 @@
+{
+  "writtenAt": "2026-08-26T16:13:30.371Z",
+  "test": "T3.5",
+  "outcome": "fail",
+  "runId": "qds-20260826-156051",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260826-156051\",\"requestId\":\"657c7543-9ab1-45c0-8a1a-2094c93f0e73\",\"state\":\"ready\",\"vmName\":\"qds-20260826-156051\",\"httpsUrl\":\"https://qds-20260826-156051.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":2330,\"mint_ms\":1964,\"fill_ms\":17647,\"setup_gate_ms\":14175}}\n{\"requestId\":\"657c7543-9ab1-45c0-8a1a-2094c93f0e73\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T16:13:11.489Z\",\"duration\":37548,\"durationMs\":37548,\"status\":\"ok\",\"runId\":\"qds-20260826-156051\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260826-156051",
+        "requestId": "657c7543-9ab1-45c0-8a1a-2094c93f0e73",
+        "state": "ready",
+        "vmName": "qds-20260826-156051",
+        "httpsUrl": "https://qds-20260826-156051.exe.xyz"
+      }
+    },
+    {
+      "phase": "shim",
+      "exitCode": 0,
+      "stdout": "RUN qds-20260826-156051 pipeline=t3-e2e-remote-phases ok=true accepted=true phases=3 completedAt=2026-08-26T16:13:17.680Z",
+      "stderrTail": "tatus\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":991,\"journal_write_ms\":2}}\n{\"requestId\":\"qds-20260826-156051\",\"pipelineId\":\"t3-e2e-remote-phases\",\"phase\":\"t3-marker\",\"kind\":\"code\",\"timestamp\":\"2026-08-26T16:13:17.678Z\",\"durationMs\":1065,\"status\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":1065,\"journal_write_ms\":2}}"
+    },
+    {
+      "phase": "journal",
+      "ok": true,
+      "rows": 3
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-156051",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

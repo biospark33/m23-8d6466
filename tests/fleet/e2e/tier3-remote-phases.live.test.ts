@@ -1,0 +1,217 @@
+/**
+ * T3.5 — manifest phases executing ON THE BOX, orchestrated FROM THE HOST
+ * (t3-test-plan.md §T3.5, recon/phase-engine.md §4A).
+ *
+ * GATING: QDS_E2E_LIVE=1 AND QDS_E2E_TIER=2. Operator approves spend OUT of
+ * band first: 1 key × capMicroUsd + 1 box.
+ *
+ * WHAT IS REAL HERE: `fleet dispatch` provisions a real box (fill delivers
+ * the STAMPED manifest + witness, setup gates run on the run key), then
+ * `scripts/pipeline-run-remote.ts` — the honest host-side shim — fetches the
+ * DELIVERED manifest + run-context.json off the box (proving the stamp rode
+ * out), runs the production `loadManifest` + `runContextFrom` witness
+ * reconciliation unchanged, and executes every `code` phase ON THE BOX
+ * (`sh -c` in $HOME/src via driver.exec) through the production
+ * Run/walkPhases/FileJournal. The journal and terminal marker land host-side;
+ * the third phase commits a tracked marker file, and the REAL harvest bundle
+ * must carry it.
+ *
+ * HONEST LABEL (in the plan's words): phases execute ON THE BOX orchestrated
+ * FROM THE HOST — all production code paths, no fake substrate. The IN-BOX
+ * executor remains a proposed story (G1–G3 stay open).
+ *
+ * PF-2 proof rides phase 1: the journal value's bounded stdoutTail must carry
+ * the echoed marker (pre-PF-2 the value was {exitCode} only).
+ *
+ * NO FAKES anywhere in this file.
+ */
+import { expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { RunRecordStore } from "../../../src/providers/run-record.ts";
+import {
+  REPO_ROOT,
+  destroyQuietly,
+  liveGate,
+  liveTodoOff,
+  listedKeyHashes,
+  preflight,
+  runFleet,
+  scratchClone,
+  tmpWorkspace,
+  writeEvidence,
+} from "./live-harness.ts";
+
+const T3_CAP_MICRO_USD = 50_000;
+const T3_BOX_HOUR_RATE_MICRO_USD = 230_000;
+const ISSUE_KEY = "biospark33/QDS-Factory#46";
+
+test.todoIf(liveTodoOff())(
+  "T3.5 remote phases: dispatch → shim drives manifest phases on-box → journal+marker → harvest carries marker → teardown",
+  async () => {
+    liveGate("2");
+    const evidence: Record<string, unknown>[] = [];
+    const ctx = await preflight("2");
+    let workspace = "";
+    let runId = "";
+    let vm = "";
+    let hostRepo = "";
+    let outcome = "pass";
+    try {
+      workspace = tmpWorkspace("t35");
+      const recordsDir = join(workspace, "runs");
+      mkdirSync(recordsDir, { recursive: true });
+      writeFileSync(
+        join(workspace, "cost-config.json"),
+        JSON.stringify({
+          defaultCapMicroUsd: T3_CAP_MICRO_USD,
+          boxHourRateMicroUsd: T3_BOX_HOUR_RATE_MICRO_USD,
+          perIssueOverrides: { [ISSUE_KEY]: T3_CAP_MICRO_USD },
+        }),
+      );
+      const briefPath = join(workspace, "brief.json");
+      writeFileSync(
+        briefPath,
+        JSON.stringify({
+          repoSlug: "biospark33/QDS-Factory",
+          issueId: 46,
+          commitSha: ctx.sha,
+          manifestPath: "config/rosters/t3.pipeline.json",
+          repoUrl: ctx.repoUrl,
+        }),
+      );
+      evidence.push({ phase: "setup", ok: true, capMicroUsd: T3_CAP_MICRO_USD });
+
+      // ── 1. dispatch: box + key + delivered stamped manifest + gates ──────
+      const d = await runFleet(
+        ["dispatch", "--driver", "exedev", "--brief", briefPath],
+        { cwd: REPO_ROOT, env: { QDS_RUNS_DIR: recordsDir }, timeoutMs: 1_800_000 },
+      );
+      evidence.push({ phase: "dispatch-verb", exitCode: d.exitCode, stdout: d.stdout.trim().slice(0, 400), stderrTail: d.stderr.trim().slice(-400) });
+      expect(d.exitCode).toBe(0);
+      const ack = JSON.parse(d.stdout.trim().split("\n").filter((l) => l.startsWith("{")).at(-1) as string) as {
+        runId: string;
+        vmName: string;
+        httpsUrl?: string;
+        state: string;
+      };
+      expect(ack.state).toBe("ready");
+      runId = ack.runId;
+      vm = ack.vmName;
+      evidence.push({ phase: "dispatch-ack", ack });
+
+      // ── 2. the shim: production engine, phases exec ON THE BOX ───────────
+      // Direct spawn — the shim is a script, not a fleet verb: runFleet routes
+      // argv[0] through scripts/fleet.ts, which refuses it as an unknown verb
+      // and prints the FLEET usage (run2's 3 ms exit 2). --budget-ms must be
+      // ≥ the manifest's declared runBudgetMs (150000) or loadManifest
+      // refuses "runBudgetMs exceeds callerBudgetMs".
+      const shimProc = Bun.spawn({
+        cmd: ["bun", join(REPO_ROOT, "scripts/pipeline-run-remote.ts"), "--vm", vm, "--run-id", runId, "--records-dir", recordsDir, "--budget-ms", "180000"],
+        cwd: REPO_ROOT,
+        env: { ...(process.env as Record<string, string>) },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [shimExit, shimStdout, shimStderr] = await Promise.all([
+        shimProc.exited,
+        new Response(shimProc.stdout).text(),
+        new Response(shimProc.stderr).text(),
+      ]);
+      evidence.push({ phase: "shim", exitCode: shimExit, stdout: shimStdout.trim().slice(0, 400), stderrTail: shimStderr.trim().slice(-400) });
+      expect(shimExit).toBe(0);
+
+      // ── 3. journal rows ordered+settled; steps.json carries PF-2 tails ───
+      // FileJournal persists ONE JournalFile object (pretty-printed JSON — the
+      // ".jsonl" name is the engine's own filename convention, not a line
+      // format; see FileJournal.flush), so parse the whole body, not per line.
+      const journalPath = join(recordsDir, runId, "journal.jsonl");
+      expect(existsSync(journalPath)).toBeTrue();
+      const journalBody = JSON.parse(readFileSync(journalPath, "utf8")) as {
+        ok?: boolean;
+        phases?: Array<{ name?: string; status?: string }>;
+      };
+      const phaseRows = journalBody.phases ?? [];
+      evidence.push({ phase: "journal", ok: journalBody.ok, rows: phaseRows.length });
+      expect(journalBody.ok).toBe(true);
+      expect(phaseRows.map((r) => r.name)).toEqual(["t3-probe", "t3-verify", "t3-marker"]);
+      expect(phaseRows.every((r) => r.status === "success")).toBe(true);
+      // PF-2: the echoed marker survives as the phase value's bounded stdout
+      // tail, persisted by the shim to steps.json (the journal's PhaseRecord
+      // is metadata-only — pre-PF-2 the value was {exitCode} and dropped).
+      const steps = JSON.parse(readFileSync(join(recordsDir, runId, "steps.json"), "utf8")) as Array<{
+        phase: string;
+        exitCode: number | null;
+        stdoutTail: string | null;
+      }>;
+      evidence.push({ phase: "steps", steps });
+      expect(steps.map((s) => s.phase)).toEqual(["t3-probe", "t3-verify", "t3-marker"]);
+      expect(steps.every((s) => s.exitCode === 0)).toBe(true);
+      expect(steps[0]?.stdoutTail ?? "").toContain("t3-remote-engine-ran");
+
+      // ── 4. terminal marker host-side under <records>/<runId>/journal/ ────
+      const marker = join(recordsDir, runId, "journal", "final.json");
+      expect(existsSync(marker)).toBeTrue();
+      const markerBody = JSON.parse(readFileSync(marker, "utf8")) as { ok?: boolean };
+      expect(markerBody.ok).toBe(true);
+
+      // ── 5. money identity: delivered manifest stamp == witness == record ─
+      const delivered = readFileSync(join(recordsDir, runId, "delivered", "pipeline.yaml"), "utf8");
+      const deliveredLimit = (JSON.parse(delivered) as { limitMicroUsd?: number }).limitMicroUsd;
+      const witness = JSON.parse(readFileSync(join(recordsDir, runId, "delivered", "run-context.json"), "utf8")) as { effectiveCeilingMicros?: number };
+      const rec = new RunRecordStore({ dir: recordsDir }).get(runId);
+      evidence.push({ phase: "money-identity", deliveredLimit, witnessCeiling: witness.effectiveCeilingMicros, recordLimit: rec.limitMicroUsd });
+      expect(deliveredLimit).toBe(T3_CAP_MICRO_USD); // the stamp rode OUT
+      expect(witness.effectiveCeilingMicros).toBe(deliveredLimit); // reconciliation input agreed
+      expect(rec.limitMicroUsd).toBe(deliveredLimit); // ceiling == limitMicroUsd
+
+      // ── 6. the REAL harvest bundle carries the on-box committed marker ──
+      hostRepo = await scratchClone(ctx.repoUrl, ctx.sha, workspace);
+      const h = await runFleet(["harvest", runId, "--driver", "exedev", "--dir", recordsDir], { cwd: hostRepo, timeoutMs: 300_000 });
+      evidence.push({ phase: "harvest", exitCode: h.exitCode, stdout: h.stdout.trim().slice(0, 200) });
+      expect(h.exitCode).toBe(0);
+      const show = Bun.spawnSync({ cmd: ["git", "show", `refs/sandbox/${runId}:t3_phase_marker.txt`], cwd: hostRepo, stdout: "pipe", stderr: "pipe" });
+      evidence.push({ phase: "marker-in-bundle", exitCode: show.exitCode, body: show.stdout.toString().trim() });
+      expect(show.exitCode).toBe(0);
+      expect(show.stdout.toString()).toContain("t3 phase marker");
+
+      // ── 7. teardown: spend ≤ cap, key revoked, box gone ──────────────────
+      const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir], { cwd: hostRepo, timeoutMs: 300_000 });
+      evidence.push({ phase: "teardown", exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-300) });
+      expect(td.exitCode).toBe(0);
+      const closed = new RunRecordStore({ dir: recordsDir }).get(runId);
+      expect(closed.closedAt ?? "").not.toBe("");
+      expect(closed.spendMicroUsd ?? 0).toBeLessThanOrEqual(T3_CAP_MICRO_USD);
+      expect(await listedKeyHashes()).not.toContain(closed.keyHash);
+      expect((await ctx.driver.list()).map((b) => b.name)).not.toContain(vm);
+    } catch (e) {
+      outcome = "fail";
+      evidence.push({ phase: "test-error", error: (e as Error).message });
+      throw e;
+    } finally {
+      if (runId !== "" && workspace !== "") {
+        const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
+        evidence.push({ phase: "finally-teardown", exitCode: td.exitCode });
+      }
+      if (vm !== "") await destroyQuietly(ctx.driver, vm, evidence);
+      try {
+        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+        evidence.push({ phase: "final-ls", fleetBoxes: final });
+        expect(final).toEqual([]);
+      } catch (e) {
+        evidence.push({ phase: "final-ls-error", error: (e as Error).message });
+      }
+      try {
+        const evidencePath = writeEvidence("t3-5-remote-phases", { test: "T3.5", outcome, runId, capMicroUsd: T3_CAP_MICRO_USD, phases: evidence });
+        process.stderr.write(`[T3.5] evidence: ${evidencePath}\n`);
+      } finally {
+        // Keep the workspace on failure — journal/steps/marker forensics beat
+        // re-spending a box to reproduce. Cleaned up on the next green run.
+        if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
+        else if (workspace !== "") process.stderr.write(`[T3.5] workspace kept for forensics: ${workspace}\n`);
+      }
+    }
+  },
+  1_800_000,
+);

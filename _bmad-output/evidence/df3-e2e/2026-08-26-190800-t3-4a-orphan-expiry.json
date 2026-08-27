@@ -1,0 +1,117 @@
+{
+  "writtenAt": "2026-08-26T19:08:00.291Z",
+  "test": "T3.4a",
+  "outcome": "fail",
+  "phases": [
+    {
+      "phase": "kill-too-late",
+      "attempt": 1,
+      "runId": "qds-20260826-f3ed31",
+      "note": "record existed — tearing down, retrying"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 1,
+      "stderrTail": "880-11e2-461f-81e4-beca176847a6\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:07:46.081Z\",\"duration\":2,\"status\":\"ok\",\"runId\":\"qds-20260826-f3ed31\",\"driver\":null,\"verb\":\"set\",\"durationMs\":2,\"outcome\":\"ok\",\"record_write_ms\":2}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-f3ed31",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 2,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 2,
+      "stderrTail": "-976046460e44\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:07:53.177Z\",\"duration\":1413,\"durationMs\":1413,\"status\":\"error\",\"runId\":\"qds-20260826-a6afc0\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-f3ed31",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 3,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 3,
+      "stderrTail": "-03936e1f9186\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:07:54.532Z\",\"duration\":1263,\"durationMs\":1263,\"status\":\"error\",\"runId\":\"qds-20260826-7534c7\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-f3ed31",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 4,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 4,
+      "stderrTail": "-d888de255a1e\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:07:56.023Z\",\"duration\":1398,\"durationMs\":1398,\"status\":\"error\",\"runId\":\"qds-20260826-0817fc\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-f3ed31",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 5,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 5,
+      "stderrTail": "-da2e4a19cdc6\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:07:57.367Z\",\"duration\":1255,\"durationMs\":1255,\"status\":\"error\",\"runId\":\"qds-20260826-8f1622\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-f3ed31",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 6,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 6,
+      "stderrTail": "-559b86d55af0\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:07:58.977Z\",\"duration\":1472,\"durationMs\":1472,\"status\":\"error\",\"runId\":\"qds-20260826-e2cc60\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-f3ed31",
+      "teardownExit": 0
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).not.toBeNull()\n\nReceived: null\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "id": "qds-20260826-f3ed31",
+      "exitCode": 0
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [
+        "qds-20260826-27c13b"
+      ]
+    },
+    {
+      "phase": "final-ls-error",
+      "error": "expect(received).toEqual(expected)\n\n- []\n+ [\n+   \"qds-20260826-27c13b\",\n+ ]\n\n- Expected  - 1\n+ Received  + 3\n"
+    }
+  ]
+}

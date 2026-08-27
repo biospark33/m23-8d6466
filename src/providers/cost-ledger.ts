@@ -901,11 +901,19 @@ export class CostLedger {
   }
 
   /**
-   * The box-hours row: ceil(VM lifetime) × boxHourRateMicroUsd, from the DF2.1
-   * record's own timestamps, written at teardown's close step — the one point
-   * at which the destroy is confirmed and the lifetime is final. Never from
+   * The box-hours row: fractional VM lifetime × boxHourRateMicroUsd, in
+   * INTEGER µ$ (rounded up to the next whole µ$), from the DF2.1 record's own
+   * timestamps, written at teardown's close step — the one point at which the
+   * destroy is confirmed and the lifetime is final. Never from
    * `captureSpend`: that reads the same token money DF2.7 already priced, and
    * ingesting it would double-count inside the SUM the gate reads.
+   *
+   * F8 (2026-08-24): the DF2.8 story originally specified ceil(lifetime in
+   * whole hours) × rate — a 1-hour MINIMUM per box. Live evidence (a ~20s box
+   * billed a full hour, 230,000 µ$) overstates short-lived runs by up to 1h
+   * each, which compounds at fleet scale. Pricing now runs on wall-clock ms
+   * with the µ$ result rounded up (never down — sub-µ$ runtime is not free);
+   * the story's Technical Notes carry the amendment.
    */
   ingestBoxHours(ctx: BoxHoursCtx): IngestResult {
     const started = Date.now();
@@ -960,12 +968,24 @@ export class CostLedger {
         `write {"boxHourRateMicroUsd": <integer µ$/h>} to .sandbox/cost-config.json (exe.dev figures are vendor-single-origin [VERIFY] — R5 §6 fact 11), then re-run teardown`,
       );
     }
-    const hours = Math.ceil((closed - created) / MS_PER_HOUR);
-    const costMicroUsd = hours * rate;
+    // F8: integer µ$ from wall-clock ms — rate·ms over ms-per-hour, rounded UP
+    // so a sub-µ$ lifetime still prices at 1 µ$, never 0. The product
+    // rate·lifetimeMs is checked for exact-integrality BEFORE the division:
+    // a float drift there would silently misprice by more than the rounding.
+    const lifetimeMs = closed - created;
+    const numerator = rate * lifetimeMs;
+    if (!Number.isSafeInteger(numerator)) {
+      throw new CostLedgerError(
+        "box-hours-cost-invalid",
+        `run ${ctx.runId} box-hours product is not a safe integer (lifetime ${lifetimeMs}ms × rate ${rate} µ$/h = ${numerator}) — refusing to store a silently wrong figure`,
+        "repair the run record's createdAt/closedAt or lower boxHourRateMicroUsd in .sandbox/cost-config.json, then re-run teardown",
+      );
+    }
+    const costMicroUsd = Math.ceil(numerator / MS_PER_HOUR);
     if (!Number.isSafeInteger(costMicroUsd)) {
       throw new CostLedgerError(
         "box-hours-cost-invalid",
-        `run ${ctx.runId} box-hours cost is not a safe integer (lifetime ${hours}h × rate ${rate} µ$/h = ${costMicroUsd}) — refusing to store a silently wrong figure`,
+        `run ${ctx.runId} box-hours cost is not a safe integer (lifetime ${lifetimeMs}ms × rate ${rate} µ$/h = ${costMicroUsd} µ$) — refusing to store a silently wrong figure`,
         "repair the run record's createdAt/closedAt or lower boxHourRateMicroUsd in .sandbox/cost-config.json, then re-run teardown",
       );
     }
@@ -1187,6 +1207,63 @@ export class CostLedger {
    * `(repoSlug, issueId)` only — the replay branch refuses a correlation id
    * that resolves to another issue's reservation.
    */
+  /**
+   * Read-only budget snapshot for ONE canonical (repoSlug, issueId): the
+   * ceiling `admitIssue` would enforce, the priced spend booked so far, and the
+   * live reservations (one per run — a run with any priced>0 event has settled
+   * and stops counting, exactly as in admitIssue's own reservation sum).
+   *
+   * F15 (2026-08-25, live fan-20260825-{ff6d64,b37e88}): fan-out arms share the
+   * brief's single issueId, and admitIssue budgets PER ISSUE — so an n-arm
+   * fan-out whose issue ceiling sat below n×cap admitted arm 0 and
+   * deterministically refused every later arm AFTER arm 0 had provisioned a
+   * billable box. The pre-flight that prevents this needs to SEE the same three
+   * numbers admission will act on, from the same ledger instance, without
+   * taking the write lock or writing a row.
+   */
+  issueBudgetSnapshot(repoSlug: string, issueId: string): {
+    ceilingMicroUsd: number;
+    spentMicroUsd: number;
+    reservedMicroUsd: number;
+  } {
+    assertCanonicalIdentity(
+      "admission-input-invalid",
+      repoSlug,
+      issueId,
+      "supply the dispatch-resolved {repoSlug, issueId} pair",
+    );
+    const slug = canonicalRepoSlug(repoSlug);
+    const issue = canonicalIssueId(issueId);
+    const scopeKeys = issueScopeKeys(repoSlug, issueId);
+    this.assertQueryable();
+    const spentRow = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(cost_micro_usd), 0) AS total FROM cost_events WHERE ${issueScopeSql()} AND unpriced = 0`,
+      )
+      .get(...scopeKeys) as { total: number };
+    // Same per-run MAX and settled-run exclusion as admitIssue's reservation
+    // sum: ONE live ceiling per run, retired once the run reports real spend.
+    const reservedRow = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(ceiling), 0) AS total FROM (
+           SELECT MAX(a.ceiling_micro_usd) AS ceiling
+           FROM gate_admissions a
+           WHERE ${issueScopeSql("a.repo_slug", "a.issue_id")}
+             AND NOT EXISTS (
+               SELECT 1 FROM cost_events ce
+               WHERE ce.run_id = a.run_id AND ce.unpriced = 0 AND ce.cost_micro_usd > 0
+             )
+           GROUP BY a.run_id
+         )`,
+      )
+      .get(...scopeKeys) as { total: number };
+    return {
+      ceilingMicroUsd: capForIssue(this.config, slug, issue),
+      spentMicroUsd: spentRow.total,
+      reservedMicroUsd: reservedRow.total,
+    };
+  }
+
   admitIssue(input: AdmissionInput, capMicroUsd: number, keyCapMicroUsd: number): AdmissionDecision {
     const started = Date.now();
     // All four are load-bearing SQL BINDS, not optional decoration. A non-string

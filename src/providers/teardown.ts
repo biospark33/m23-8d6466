@@ -440,25 +440,28 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   // 6. destroy — the driver confirms internally; a throw is an UNCONFIRMED
   // destroy and aborts with the record open (AC6). No host-side key file
   // exists to shred — the in-box .env dies with the box, so destroy IS the
-  // shred (recorded deviation; DF2.3 owns shred). A record with no vmName
-  // never had a box: skip destroy entirely (never fall back to destroying by
-  // runId) so the run can still close.
-  const vmName = rec.vmName;
-  if (vmName === undefined) {
-    skipStep(ctx, "destroy", "no box was ever created for this run");
-  } else {
-    await runStep(ctx, "destroy", async () => {
-      try {
-        await deps.driver.destroy(vmName);
-      } catch (e) {
-        throw new TeardownError(
-          "destroy-unconfirmed",
-          `driver could not confirm destruction of ${vmName}: ${(e as Error).message} — the box may still be alive`,
-          "destroy the box by hand via the driver, then re-run teardown — the record stays open until destroy is confirmed",
-        );
-      }
-    });
-  }
+  // shred (recorded deviation; DF2.3 owns shred).
+  //
+  // F6 (2026-08-24): a missing vmName is NOT proof no box exists. The INV-1
+  // crash window (`store.create` → `driver.create` → crash before
+  // `store.set(vmName)`) leaves a live, billing box named after the run id
+  // with no recorded handle; the old skip let teardown report "torn down"
+  // over it (e2e-run-report F6, live-confirmed). Fall back to the run id —
+  // `createRun` names the box after it — exactly as `teardownRun`
+  // (driver.ts) always has; `destroy` is contractually idempotent, so a run
+  // that truly never had a box is a no-op and the run still closes.
+  const destroyTarget = rec.vmName ?? runId;
+  await runStep(ctx, "destroy", async () => {
+    try {
+      await deps.driver.destroy(destroyTarget);
+    } catch (e) {
+      throw new TeardownError(
+        "destroy-unconfirmed",
+        `driver could not confirm destruction of ${destroyTarget}: ${(e as Error).message} — the box may still be alive`,
+        "destroy the box by hand via the driver, then re-run teardown — the record stays open until destroy is confirmed",
+      );
+    }
+  });
 
   // 7. close — LAST. (extensions stay writable post-close; we write none.)
   // A cost-ingest throw inside this step (unconfigured box-hour rate, an

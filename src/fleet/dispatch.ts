@@ -261,7 +261,7 @@ function storeRunIdRefusal(e: unknown, value: unknown): string {
  * and derived from `CostLedger` itself so a fake cannot drift from the real
  * signatures the gate is compiled against (`as never` erased exactly that).
  */
-export type LedgerLike = Pick<CostLedger, "config" | "admitIssue" | "close">;
+export type LedgerLike = Pick<CostLedger, "config" | "issueBudgetSnapshot" | "admitIssue" | "close">;
 
 export interface DispatchDeps {
   driver: ProviderDriver;
@@ -304,6 +304,16 @@ export interface DispatchDeps {
   dispatchLogPath?: string;
   /** Setup-gate seam (test/injection). Default: exedev `.setup`, else fakeGate. */
   setupGate?: (driver: ProviderDriver, vm: string, opts: GateOpts) => Promise<SetupGateResult>;
+  /**
+   * Per-run key cap in integer micro-dollars (DF3.2/DD-9). Validated at dispatch
+   * before reaching the budget gate: if provided, must be a positive integer no
+   * greater than `Number.MAX_SAFE_INTEGER`. Flows to the budget gate's
+   * `keyCapMicroUsd` — the ceiling it clamps into `admittedCeilingMicroUsd`,
+   * which becomes the minted key's provider-side hard USD limit at mintRunKey.
+   * Absent/undefined ⇒ the single-run default (`defaultKeyCapMicroUsd`) —
+   * behavior identical to pre-DF3.2.
+   */
+  capMicroUsd?: number;
 }
 
 export interface GateOpts {
@@ -532,7 +542,7 @@ function isExedevDriver(driver: ProviderDriver): driver is ExedevCapable {
   return typeof d.setup === "function" && typeof d.fill === "function";
 }
 
-/** Dir boxes are plain host dirs — the key lands box-relative, not /home/agent. */
+/** Dir boxes are plain host dirs — the key lands box-relative beside the box dir root. */
 function envFileFor(driver: ProviderDriver): string | undefined {
   return isExedevDriver(driver) ? undefined : ".env";
 }
@@ -638,6 +648,52 @@ function errorRemediation(e: unknown, fallback: string): string {
  *     exit 5 admission refusal · exit 1 wall-clock expiry and post-provision
  *     infrastructure failure.
  */
+/**
+ * In-process single-flight over dispatch's admission critical section — DF3.2's
+ * closure of the fleet-ceiling TOCTOU the df3-1 round-10 review deferred as
+ * finding DF13 (ledger: `_bmad-output/workflow-state/code-review/pr123/
+ * triage.md`; handoff: the df3-2 story file).
+ *
+ * `checkHeadroom` is a READ, not a lock (quota.ts's own docstring), so two
+ * in-process dispatches entering step 5 within one `driver.list()` round trip
+ * while `liveVms === ceiling - 1` BOTH pass and BOTH create — and the overshoot
+ * scales with N the moment fan-out runs arm admissions concurrently. Running
+ * headroom-read → decision → box-create through one promise chain closes the
+ * in-process half: the queued dispatch re-lists AFTER the holder's box exists
+ * and takes the ordinary `vm-ceiling` refusal, exactly as the sequential case
+ * always did.
+ *
+ * Scope is deliberately narrow on BOTH ends:
+ * - IN-PROCESS only. Two CLI invocations (separate processes) can still race,
+ *   and so can a fan-out's aggregate `checkHeadroom(N)` against a concurrent
+ *   plain dispatch's own list. Closing those needs a quota-layer intent record
+ *   mirroring cost-ledger's `admitIssue` reserve→create→settle shape, per the
+ *   round-10 handoff's follow-up — not this module's call to make.
+ * - The section ends the moment the BOX exists. Key mint, setup gate and
+ *   expose run OUTSIDE it: a whole-dispatch lock would serialise DF3.2's
+ *   N-arm fan-out (the reason this seam was previously left open) — arms
+ *   serialize only their record→box moment and still gate concurrently.
+ *
+ * Promise-chain mutex: `await held` before the section and `release()` in a
+ * `finally` hand the section to the next waiter on EVERY exit, refusal throws
+ * included. The `finally` is structural, not stylistic — a leaked release
+ * would park every future in-process dispatch forever.
+ */
+let admissionTail: Promise<void> = Promise.resolve();
+async function withAdmissionSingleFlight<T>(section: () => Promise<T>): Promise<T> {
+  const held = admissionTail;
+  let release!: () => void;
+  admissionTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await held;
+  try {
+    return await section();
+  } finally {
+    release();
+  }
+}
+
 export async function dispatch(
   brief: unknown,
   deps: DispatchDeps,
@@ -1614,404 +1670,440 @@ export async function dispatch(
     runId = mintRunId();
   }
 
-  // ── 5. admission (AC7/AC8 — both BEFORE store.create/driver.create) ────────
-  // AC8: skipped only under { admitted: true } (DF3.2's single checkHeadroom(N)).
-  if (opts.admitted !== true) {
-    let headroom: Awaited<ReturnType<typeof checkHeadroom>>;
+  // ── 5–6 single-flight: the admission critical section (DF3.2, finding DF13) ─
+  // Wrapped as one unit — headroom read, budget decision, box create — so that
+  // concurrent in-process dispatches (fan-out arms especially) cannot both
+  // pass a ceiling they sampled before either box existed. See
+  // `withAdmissionSingleFlight`'s doc comment for the scope and the half that
+  // deliberately stays open.
+  const { provisioned, effectiveCeilingMicros, tCreate } = await withAdmissionSingleFlight(async () => {
+    // ── 5. admission (AC7/AC8 — both BEFORE store.create/driver.create) ────────
+    // AC8: skipped only under { admitted: true } (DF3.2's single checkHeadroom(N)).
+    if (opts.admitted !== true) {
+      let headroom: Awaited<ReturnType<typeof checkHeadroom>>;
+      try {
+        headroom = await within("headroom", () => checkHeadroom(deps.driver, 1, deps.quotaLimits));
+      } catch (e) {
+        // `within`'s own deadline already refused — do not double-log it.
+        if (e instanceof FleetError) throw e;
+        // `checkHeadroom`'s default parameter is `limits = loadQuotaLimits()`,
+        // which throws QuotaLimitsError for malformed JSON, an unknown key, a
+        // non-positive value or EACCES (only ENOENT falls back to the defaults) —
+        // and the CLI never passes `deps.quotaLimits`. Untyped, a plain
+        // configuration defect was exit 1 with no dispatch-log entry and no log
+        // line. It is an admission refusal like any other (AC8), and nothing is
+        // provisioned at this point.
+        throw refuse(
+          5,
+          "headroom-failed",
+          `headroom could not be determined: ${errorMessage(e)}`,
+          errorRemediation(e, "fix .sandbox/quota-limits.json, then retry — nothing was provisioned"),
+          providerCodePayload(e),
+        );
+      }
+      if (!headroom.allowed) {
+        // `list-unverified` is the SUBSTRATE failing to answer (quota.ts
+        // fail-closes on any list error or contract violation), not the brief or
+        // the budget being wrong — but exit 5 maps to do-not-retry `logic` by
+        // default. The override is what tells wave 2's retry logic this one is
+        // transient; `vm-ceiling` and `pooled-disk` stay `logic`, since waiting
+        // is exactly what their remediations prescribe.
+        const listUnverified = headroom.reason === "list-unverified";
+        throw refuse(
+          5,
+          "no-headroom",
+          `refusing dispatch: ${headroom.reason ?? "headroom"} — live ${headroom.liveVms}/${headroom.ceiling}, headroom ${headroom.headroom}`,
+          "wait for a slot (fleet status), tear a run down, or raise the ceiling in the quota limits",
+          { reason: headroom.reason, liveVms: headroom.liveVms, ceiling: headroom.ceiling, headroom: headroom.headroom },
+          listUnverified ? ("transient" as ExitStatus) : undefined,
+        );
+      }
+    }
+    // AC7: budget admission always runs (a single dispatch is not exempt). The
+    // ledger is constructed INSIDE the try: an unopenable or busy ledger is an
+    // admission refusal (exit 5), not an untyped exit 1 (INV-COST-6 — a ledger
+    // that cannot be read is never read as zero spend).
+    //
+    // B1 (DEFENSE-IN-DEPTH): validate `capMicroUsd` at the dispatch boundary,
+    // before it reaches the budget gate. The gate also validates; this is the
+    // early guard that catches bad input before admission work begins.
+    // undefined ⇒ default cap path (byte-for-byte pre-DF3.2 behavior).
+    if (
+      deps.capMicroUsd !== undefined &&
+      (!Number.isInteger(deps.capMicroUsd) ||
+        deps.capMicroUsd <= 0 ||
+        deps.capMicroUsd > Number.MAX_SAFE_INTEGER)
+    ) {
+      throw refuse(
+        2,
+        "invalid-cap",
+        `capMicroUsd must be a positive integer no greater than ${Number.MAX_SAFE_INTEGER}, got ${deps.capMicroUsd}`,
+        "pass a positive integer micro-dollar cap, or omit for the default",
+        { capMicroUsd: deps.capMicroUsd },
+      );
+    }
+    let ledger: LedgerLike | undefined;
+    let decision: Extract<AdmissionDecision, { admitted: true }>;
     try {
-      headroom = await within("headroom", () => checkHeadroom(deps.driver, 1, deps.quotaLimits));
+      ledger = deps.ledgerFactory();
+      // `as CostLedger`: `assertWithinBudget` takes the concrete class, and
+      // `LedgerLike` is the Pick<> that lets a fake exist at all — so this single
+      // cast restores exactly the drift the Pick<> was introduced to prevent.
+      // Widening the gate's parameter to a structural slice is the real fix and
+      // lives in `src/providers/budget-gate.ts`, outside this module.
+      // Third arg (DF3.2/DD-9): the caller's per-run key cap. Undefined ⇒ the
+      // gate's own default — byte-for-byte the pre-DF3.2 behavior.
+      decision = assertWithinBudget(
+        ledger as CostLedger,
+        { repoSlug, issueId, runId, requestId },
+        deps.capMicroUsd,
+      );
     } catch (e) {
-      // `within`'s own deadline already refused — do not double-log it.
-      if (e instanceof FleetError) throw e;
-      // `checkHeadroom`'s default parameter is `limits = loadQuotaLimits()`,
-      // which throws QuotaLimitsError for malformed JSON, an unknown key, a
-      // non-positive value or EACCES (only ENOENT falls back to the defaults) —
-      // and the CLI never passes `deps.quotaLimits`. Untyped, a plain
-      // configuration defect was exit 1 with no dispatch-log entry and no log
-      // line. It is an admission refusal like any other (AC8), and nothing is
-      // provisioned at this point.
+      if (e instanceof OverBudgetError) {
+        throw refuse(5, "budget-exceeded", e.message, e.remediation, {
+          code: e.code,
+          capMicroUsd: e.capMicroUsd,
+          spentMicroUsd: e.spentMicroUsd,
+          reservedMicroUsd: e.reservedMicroUsd,
+          unpricedRows: e.unpricedRows,
+        });
+      }
+      if (e instanceof CostLedgerError) {
+        // A FIXED fleet code, with the ledger's own in the payload — the same rule
+        // `providerCodePayload` states and the CorrelationError arm above applies.
+        // `refuse(5, e.code, …)` made this CLI's exit-code table whatever
+        // `cost-ledger.ts` currently emits: an operator greps the dispatch log for
+        // a fleet code, and a rename over there silently changed which rows they
+        // find. That the ledger's table is first-party and closed does not make it
+        // THIS table — it makes it a table two modules would have to be renamed in
+        // step, which is the drift the rule exists to prevent.
+        //
+        // The MESSAGE and the REMEDIATION stay the ledger's: those are diagnosis
+        // and the operator's literal next command, and neither is a classification.
+        throw refuse(5, "ledger-failed", e.message, e.remediation, providerCodePayload(e));
+      }
+      // Everything else — a raw bun:sqlite SQLITE_BUSY, ENOENT/EACCES on the
+      // ledger file, a TypeError out of a misconfigured `deps.ledgerFactory` — is
+      // the SAME refusal the comment above promises for an unopenable or busy
+      // ledger, which was only ever true for the two TYPED errors. A bare rethrow
+      // bypassed `refuse` entirely: no dispatch-log entry, no structured line, no
+      // runId on the payload, bare CLI exit 1.
       throw refuse(
         5,
-        "headroom-failed",
-        `headroom could not be determined: ${errorMessage(e)}`,
-        errorRemediation(e, "fix .sandbox/quota-limits.json, then retry — nothing was provisioned"),
+        "admission-failed",
+        `budget admission failed: ${errorMessage(e)}`,
+        errorRemediation(e, "fix or move the cost ledger, then retry — nothing was provisioned"),
+        providerCodePayload(e),
+      );
+    } finally {
+      try {
+        ledger?.close();
+      } catch (e) {
+        // A close failure must not MASK the gate's own outcome — rethrowing here
+        // would replace an OverBudgetError refusal with an IO error, and would
+        // turn a successful admission into a failure after the reservation was
+        // already committed. But silence is worse than either: `close()` is where
+        // the reservation write is flushed, so a throw here (SQLITE_BUSY, IO)
+        // means the ledger may hold NO record of the admission just granted — and
+        // the next dispatch for this issue then reads a stale `reservedMicroUsd`
+        // and overcommits the cap. Named on the structured log so the overcommit
+        // is diagnosable after the fact.
+        //
+        // Deliberately NOT a refusal: dispatch cannot tell a failed flush from a
+        // failed release of an already-durable write, and refusing on the second
+        // would burn the issue's cap on a reservation the orphan guard then has
+        // to age out. Report, proceed, let the ledger's own guard arbitrate.
+        const durationMs = now() - wallStart;
+        try {
+          log({
+            requestId,
+            operation: "fleet.dispatch",
+            agentId: null,
+            timestamp: new Date().toISOString(),
+            duration: durationMs,
+            durationMs,
+            status: "error",
+            error: { code: "ledger-close-failed", message: redact(errorMessage(e)) },
+            runId,
+            verb: "dispatch",
+            phase: "admitted",
+            exitStatus: "transient" as ExitStatus,
+          });
+        } catch {
+          // a throwing sink must not become the failure this handler reports
+        }
+      }
+    }
+    // AC9b: the ONE ceiling — DF2.8 computed min(keyCap, remaining); propagate.
+    const effectiveCeilingMicros = decision.admittedCeilingMicroUsd;
+    // A zero ceiling is an admission that buys nothing: the mint refuses a
+    // non-positive cap and the manifest stamp rejects 0, so the run would exist,
+    // bill box-hours and be unable to spend a micro-dollar. That is a refusal
+    // (exit 5), not a provisioning step.
+    //
+    // `isSafeInteger`, not `isInteger`: `Number.isInteger(1e300)` is true, so an
+    // unsafe ceiling passed this guard, provisioned a box and a key, and only
+    // then died in `stampManifestLimit` (which does bound it) — INV-2 in reverse.
+    // The same bound is on the manifest schema, so the three agree.
+    //
+    // ponytail: this refusal fires AFTER `assertWithinBudget` committed the
+    // admission, and cannot be moved before it — the ceiling under test IS the
+    // decision's own output.
+    //
+    // It is also, today, UNREACHABLE from this call site, which is why the
+    // reservation it would strand is not worth a compensating release:
+    // `admitIssue` refuses a non-positive `capMicroUsd` before it writes anything,
+    // returns `admitted: false` unless `remainingMicroUsd > 0`, and then computes
+    // `min(keyCapMicroUsd, remaining)` — and dispatch never passes
+    // `keyCapMicroUsd`, so it is `defaultKeyCapMicroUsd`, a positive literal. The
+    // guard stays because it is the one thing standing between a future change to
+    // any of those three and a run that bills box-hours it can never spend.
+    // The reservation is retired by the ledger's orphan
+    // guard: `store.create` never runs on this path, so no record ever resolves
+    // for this id and the admission stops counting once it ages past the ledger's
+    // orphan window (`ADMISSION_GRACE_MS` + `ADMISSION_SKEW_MARGIN_MS`, the margin
+    // added in review round 4 so a reader whose clock runs ahead of the writer's
+    // cannot expire a live reservation and grant its headroom twice).
+    // Retiring it sooner needs a ledger-side release, which `admitIssue`'s
+    // contract deliberately does not offer and this layer holds no handle for.
+    if (!Number.isSafeInteger(effectiveCeilingMicros) || effectiveCeilingMicros <= 0) {
+      throw refuse(
+        5,
+        "no-ceiling",
+        `admitted ceiling is ${effectiveCeilingMicros} µ$ — the run could not spend anything`,
+        `raise the cap via .sandbox/cost-config.json perIssueOverrides for ${repoSlug}#${issueId}, or pick another issue`,
+        {
+          admittedCeilingMicroUsd: effectiveCeilingMicros,
+          capMicroUsd: decision.capMicroUsd,
+          spentMicroUsd: decision.spentMicroUsd,
+          reservedMicroUsd: decision.reservedMicroUsd,
+        },
+      );
+    }
+
+    // ── 6. record → box (INV-3: record → box → key, enforced by construction).
+    // The sequence is provisionAdmittedRun — the same body createRun composes —
+    // so the record-before-VM invariant cannot drift between the two callers.
+    //
+    // The gap between the admission above and this call — admitIssue's COMMIT to
+    // store.create's rename, two processes with no shared lock — is closed on the
+    // LEDGER side, and only there. The orphan window (cost-ledger.ts,
+    // `ADMISSION_GRACE_MS` plus `ADMISSION_SKEW_MARGIN_MS`) makes its orphan guard
+    // count an admission younger than that window toward `reservedMicroUsd`
+    // whether or not the run record resolves yet, so a concurrent dispatch for the
+    // same issue sees this reservation from the instant it commits. Two dispatches
+    // can no longer both be granted the full remaining headroom. Do not "fix" that
+    // half with a ledger/store transaction or a global dispatch lock — the first is
+    // unnecessary now and the second would serialise DF3.2's N-arm fan-out.
+    //
+    // The FLEET-CEILING half is closed IN-PROCESS and only in-process (DF3.2,
+    // finding DF13 from the df3-1 round-10 review): step 5's `checkHeadroom`
+    // read, the budget decision and this create all run inside
+    // `withAdmissionSingleFlight`, so a second in-process dispatch re-lists
+    // after this box exists and refuses on `vm-ceiling` exactly like the
+    // sequential case. The orphan-window argument above never reached this
+    // half — a ledger reservation is money, not a box — which is why the
+    // arbiter here is execution order, not the ledger.
+    //
+    // What deliberately stays OPEN: two CLI invocations in separate processes,
+    // and a fan-out's aggregate `checkHeadroom(N)` racing a concurrent plain
+    // dispatch's own list. Both need a RESERVATION at the quota layer — an
+    // intent record a concurrent `checkHeadroom` counts as live until the box
+    // appears or the intent ages out, the same shape `admitIssue` already has
+    // for spend. That is a providers-layer change (DF2.6 owns the fleet
+    // ceiling; this module owns only the call site) and the round-10 handoff's
+    // documented follow-up. Until it lands, overshoot is bounded by the
+    // processes racing inside one list round trip, and the DF2.6 reaper still
+    // sees and prices every box.
+    //
+    // Still keep this gap short: the grace window is a floor on how long a
+    // genuinely orphaned reservation (store.create failed, so no run can ever
+    // report spend) holds the issue's cap. Distinct from the post-provision case
+    // below, where the reservation is retained deliberately and for as long as the
+    // box lives.
+    const tCreate = now();
+    // Wrapped, because this step STRADDLES the record: `provisionAdmittedRun`
+    // writes the run record first (INV-1) and only then creates the box, so a
+    // throw from the budget-extension write or from `driver.create` leaves a real
+    // record on disk. An untyped throw escaping here carries no `runId`, and the
+    // CLI's failure line would then report `runId: null` for a run an operator can
+    // see in `fleet status` — the one case where they most need the id. `refuse`
+    // stamps it (plus the debug/teardown commands) onto the payload, and files the
+    // dispatch-log entry that AC4 evidence is read out of.
+    let provisioned: Awaited<ReturnType<typeof provisionAdmittedRun>>;
+    /**
+     * INV-4-bis's join key onto the record, best-effort, from every path that can
+     * leave THIS dispatch's own record behind.
+     *
+     * `store.create` takes only an id, so the correlation can only be WRITTEN once
+     * a record exists — but the value has been known since step 2, and the write
+     * used to happen only after `provisionAdmittedRun` RETURNED. On the two paths
+     * where it does not return, the record survived with no `requestId` and (on
+     * the timeout path) no `vmName` either: `fleet status` showed an open run that
+     * joins to no log line anywhere, forever. So it is attempted from the create
+     * step's own failure path, and again from the abandoned-success handler, which
+     * is the moment a record created by a call this dispatch had already given up
+     * on is known to exist.
+     *
+     * NOT from the `run-id-in-use` arm: there the EEXIST names a record this
+     * dispatch did not create — the winner's, on the shared-runId race — and
+     * stamping would merge this dispatch's `requestId` onto it, inverting the
+     * join key. See the provisioning catch.
+     *
+     * Best-effort by construction: the record may not exist yet (ENOENT, on the
+     * pre-check timeout), and a failure to stamp a correlation must never replace
+     * the refusal being reported. The authoritative fix is a `store.create` that
+     * takes the id and the correlation together — a run-record change, not this
+     * layer's.
+     */
+    const stampCorrelation = (): void => {
+      try {
+        deps.store.set(runId, { requestId });
+      } catch {
+        // no record to stamp (or an unwritable one) — the refusal stands either way
+      }
+    };
+    try {
+      provisioned = await within(
+        "create",
+        () => {
+          // INSIDE the thunk, so it means "provisioning STARTED", not "provisioning
+          // was about to start": `within`'s `left <= 0` pre-check throws before the
+          // thunk runs, and that create never touched the store or the driver.
+          // `refuse` gates its teardown remediation on this (see the declaration).
+          ctxProvisionAttempted = true;
+          return provisionAdmittedRun(deps.driver, deps.store, {
+            runId,
+            // `port` is deliberately withheld: provisionAdmittedRun exposes and makes
+            // the box PUBLIC immediately after create, i.e. before the setup gate has
+            // proved anything — and INV-5 then forbids tearing that box down. The
+            // expose/setPublic pair runs here instead, after gate.ready (step 10).
+            budget: {
+              repoSlug,
+              issueId,
+              capMicroUsd: decision.capMicroUsd,
+              spentMicroUsd: decision.spentMicroUsd,
+              reservedMicroUsd: decision.reservedMicroUsd,
+              admittedCeilingMicroUsd: decision.admittedCeilingMicroUsd,
+            },
+          });
+        },
+        (p) => {
+          // The box exists and this dispatch has already refused, so the record is
+          // the only place either fact can still be joined from. `vmName` lands
+          // there via `provisionAdmittedRun` itself; the correlation is this
+          // layer's, and this is the first instant a record is known to exist.
+          stampCorrelation();
+          return {
+            vmName: p.vm.name,
+            ...(p.vm.httpsUrl === undefined ? {} : { httpsUrl: redact(p.vm.httpsUrl) }),
+          };
+        },
+      );
+    } catch (e) {
+      // Whatever went wrong, a record may exist FOR THIS ID — but whether it is
+      // THIS dispatch's own decides whether the correlation may be stamped onto
+      // it. INV-1 writes the record before anything billable, so most paths here
+      // own whatever record they leave; the exception is the loser of a
+      // shared-runId race, whose EEXIST names the WINNER's record file. Stamping
+      // unconditionally merged THIS dispatch's requestId onto that record (the
+      // store merges patches), inverting INV-4-bis's join key: the winner's log
+      // lines then join to the loser's dispatch and vice versa. So — stamp on the
+      // timeout arm first (its record, when one exists, was written by this call:
+      // `store.create` succeeded before `driver.create` could be in flight), skip
+      // it on the run-id-in-use arm below (the record is someone else's), and
+      // stamp again past both arms, where the record can only be ours.
+      //
+      // `timedOut` already produced one (and already refused) — do not double-log.
+      if (e instanceof FleetError) {
+        stampCorrelation();
+        throw e;
+      }
+      // `store.create`'s O_EXCL is the AUTHORITATIVE arbiter of run-id identity;
+      // the step-4 check is a fast path. Two concurrent dispatches sharing an
+      // explicit `opts.runId` (DF3.2's fan-out shape) both pass that check and
+      // both commit a reservation — exactly one wins the create, and the loser
+      // must get the SAME exit-2 `run-id-in-use` refusal the sequential case
+      // gets, not a generic exit-1 "provisioning failed" naming the wrong cause.
+      //
+      // The loser's reservation stays outstanding, and this layer cannot retire
+      // it: the ledger's orphan guard expires an admission only when NO record
+      // resolves for the id, and the winner's record resolves under exactly this
+      // id. `admitIssue`'s contract states no caller may release a reservation,
+      // and the ledger handle is closed by the `finally` above. Retiring it needs
+      // a ledger-side rule for a losing admission — cross-cluster, not here.
+      //
+      // Scoped to the RECORD half. `within("create", …)` wraps the whole of
+      // `provisionAdmittedRun` — `store.create`, the budget `store.set` AND
+      // `driver.create` — and `code === "EEXIST"` alone claimed every one of them
+      // for `run <id> already has a record`. A dir-box driver whose create does
+      // `mkdir` over a leftover box directory (reachable exactly after an
+      // abandoned-create timeout left a box named after the run id) therefore came
+      // out as exit 2 `logic`, do-not-retry, advising "omit runId for a fresh one"
+      // — while the true state was: record created by THIS dispatch, budget
+      // written, no box name recorded, and a retryable substrate condition. The
+      // operator moves on and this dispatch's record stays open with its
+      // reservation outstanding against the issue cap.
+      //
+      // `path` is what separates them, and Node sets it on every fs error:
+      // `store.create` opens `store.path(runId)` with `wx`, so a genuine run-id
+      // collision names that exact file and a box-side `mkdir` names the box.
+      // An EEXIST carrying NO path still takes this arm — a store whose backend
+      // reports one without a path is the run-id race by elimination, and the
+      // sibling failure (a genuine loser of the race reported as exit-1
+      // `provision-failed`, sending the operator after a substrate fault that is
+      // not there) is the worse of the two. Residual, accepted: a PROVIDER that
+      // reports "a box with this name already exists" as a pathless EEXIST is
+      // still misclassified; it needs a typed provider error, not an errno.
+      const errno = e as (NodeJS.ErrnoException & { path?: unknown }) | null | undefined;
+      // Compare RESOLVED forms, not raw strings. `store.path(runId)` is absolute;
+      // an error's `path` can be the relative form (`runs/<id>.json`) or traverse
+      // a symlinked directory, and exact string equality misread both as
+      // provision-failed — exit 1, retryable substrate advice, for what is really
+      // the run-id race. Basenames as the fallback: the record file's name is
+      // `<runId>.json`, which no box-side mkdir collides with by accident.
+      const reportedPath = typeof errno?.path === "string" ? errno.path : undefined;
+      const recordPath = deps.store.path(runId);
+      const pathsMatch =
+        reportedPath !== undefined &&
+        (resolve(reportedPath) === resolve(recordPath) || basename(reportedPath) === basename(recordPath));
+      // `null` is "no path" the same as `undefined` — a store that reports EEXIST
+      // with an explicit `path: null` is the run-id race by elimination, not a
+      // provision failure.
+      if (
+        errno?.code === "EEXIST" &&
+        (errno.path === undefined || errno.path === null || pathsMatch)
+      ) {
+        // No stampCorrelation here, deliberately: the EEXIST names a record this
+        // dispatch did not create — the winner's, in the race case. See the catch
+        // header.
+        throw refuse(
+          2,
+          "run-id-in-use",
+          `run ${runId} already has a record`,
+          `omit runId for a fresh one, or tear the existing run down: bun scripts/fleet.ts teardown ${runId}`,
+        );
+      }
+      // Past both arms above, any record under this id was created by THIS call
+      // (INV-1) and the correlation belongs on it — best-effort exactly as the
+      // helper promises: the refusal below must not be replaced by a stamp
+      // failure.
+      stampCorrelation();
+      throw refuse(
+        1,
+        "provision-failed",
+        `provisioning failed for run ${runId}: ${errorMessage(e)}`,
+        errorRemediation(
+          e,
+          // Deliberately not "the box is alive": whether it exists depends on which
+          // half of record→box failed. Teardown is idempotent over both.
+          `inspect the run, then tear it down: bun scripts/fleet.ts teardown ${runId}`,
+        ),
         providerCodePayload(e),
       );
     }
-    if (!headroom.allowed) {
-      // `list-unverified` is the SUBSTRATE failing to answer (quota.ts
-      // fail-closes on any list error or contract violation), not the brief or
-      // the budget being wrong — but exit 5 maps to do-not-retry `logic` by
-      // default. The override is what tells wave 2's retry logic this one is
-      // transient; `vm-ceiling` and `pooled-disk` stay `logic`, since waiting
-      // is exactly what their remediations prescribe.
-      const listUnverified = headroom.reason === "list-unverified";
-      throw refuse(
-        5,
-        "no-headroom",
-        `refusing dispatch: ${headroom.reason ?? "headroom"} — live ${headroom.liveVms}/${headroom.ceiling}, headroom ${headroom.headroom}`,
-        "wait for a slot (fleet status), tear a run down, or raise the ceiling in the quota limits",
-        { reason: headroom.reason, liveVms: headroom.liveVms, ceiling: headroom.ceiling, headroom: headroom.headroom },
-        listUnverified ? ("transient" as ExitStatus) : undefined,
-      );
-    }
-  }
-  // AC7: budget admission always runs (a single dispatch is not exempt). The
-  // ledger is constructed INSIDE the try: an unopenable or busy ledger is an
-  // admission refusal (exit 5), not an untyped exit 1 (INV-COST-6 — a ledger
-  // that cannot be read is never read as zero spend).
-  let ledger: LedgerLike | undefined;
-  let decision: Extract<AdmissionDecision, { admitted: true }>;
-  try {
-    ledger = deps.ledgerFactory();
-    // `as CostLedger`: `assertWithinBudget` takes the concrete class, and
-    // `LedgerLike` is the Pick<> that lets a fake exist at all — so this single
-    // cast restores exactly the drift the Pick<> was introduced to prevent.
-    // Widening the gate's parameter to a structural slice is the real fix and
-    // lives in `src/providers/budget-gate.ts`, outside this module.
-    decision = assertWithinBudget(ledger as CostLedger, { repoSlug, issueId, runId, requestId });
-  } catch (e) {
-    if (e instanceof OverBudgetError) {
-      throw refuse(5, "budget-exceeded", e.message, e.remediation, {
-        code: e.code,
-        capMicroUsd: e.capMicroUsd,
-        spentMicroUsd: e.spentMicroUsd,
-        reservedMicroUsd: e.reservedMicroUsd,
-        unpricedRows: e.unpricedRows,
-      });
-    }
-    if (e instanceof CostLedgerError) {
-      // A FIXED fleet code, with the ledger's own in the payload — the same rule
-      // `providerCodePayload` states and the CorrelationError arm above applies.
-      // `refuse(5, e.code, …)` made this CLI's exit-code table whatever
-      // `cost-ledger.ts` currently emits: an operator greps the dispatch log for
-      // a fleet code, and a rename over there silently changed which rows they
-      // find. That the ledger's table is first-party and closed does not make it
-      // THIS table — it makes it a table two modules would have to be renamed in
-      // step, which is the drift the rule exists to prevent.
-      //
-      // The MESSAGE and the REMEDIATION stay the ledger's: those are diagnosis
-      // and the operator's literal next command, and neither is a classification.
-      throw refuse(5, "ledger-failed", e.message, e.remediation, providerCodePayload(e));
-    }
-    // Everything else — a raw bun:sqlite SQLITE_BUSY, ENOENT/EACCES on the
-    // ledger file, a TypeError out of a misconfigured `deps.ledgerFactory` — is
-    // the SAME refusal the comment above promises for an unopenable or busy
-    // ledger, which was only ever true for the two TYPED errors. A bare rethrow
-    // bypassed `refuse` entirely: no dispatch-log entry, no structured line, no
-    // runId on the payload, bare CLI exit 1.
-    throw refuse(
-      5,
-      "admission-failed",
-      `budget admission failed: ${errorMessage(e)}`,
-      errorRemediation(e, "fix or move the cost ledger, then retry — nothing was provisioned"),
-      providerCodePayload(e),
-    );
-  } finally {
-    try {
-      ledger?.close();
-    } catch (e) {
-      // A close failure must not MASK the gate's own outcome — rethrowing here
-      // would replace an OverBudgetError refusal with an IO error, and would
-      // turn a successful admission into a failure after the reservation was
-      // already committed. But silence is worse than either: `close()` is where
-      // the reservation write is flushed, so a throw here (SQLITE_BUSY, IO)
-      // means the ledger may hold NO record of the admission just granted — and
-      // the next dispatch for this issue then reads a stale `reservedMicroUsd`
-      // and overcommits the cap. Named on the structured log so the overcommit
-      // is diagnosable after the fact.
-      //
-      // Deliberately NOT a refusal: dispatch cannot tell a failed flush from a
-      // failed release of an already-durable write, and refusing on the second
-      // would burn the issue's cap on a reservation the orphan guard then has
-      // to age out. Report, proceed, let the ledger's own guard arbitrate.
-      const durationMs = now() - wallStart;
-      try {
-        log({
-          requestId,
-          operation: "fleet.dispatch",
-          agentId: null,
-          timestamp: new Date().toISOString(),
-          duration: durationMs,
-          durationMs,
-          status: "error",
-          error: { code: "ledger-close-failed", message: redact(errorMessage(e)) },
-          runId,
-          verb: "dispatch",
-          phase: "admitted",
-          exitStatus: "transient" as ExitStatus,
-        });
-      } catch {
-        // a throwing sink must not become the failure this handler reports
-      }
-    }
-  }
-  // AC9b: the ONE ceiling — DF2.8 computed min(keyCap, remaining); propagate.
-  const effectiveCeilingMicros = decision.admittedCeilingMicroUsd;
-  // A zero ceiling is an admission that buys nothing: the mint refuses a
-  // non-positive cap and the manifest stamp rejects 0, so the run would exist,
-  // bill box-hours and be unable to spend a micro-dollar. That is a refusal
-  // (exit 5), not a provisioning step.
-  //
-  // `isSafeInteger`, not `isInteger`: `Number.isInteger(1e300)` is true, so an
-  // unsafe ceiling passed this guard, provisioned a box and a key, and only
-  // then died in `stampManifestLimit` (which does bound it) — INV-2 in reverse.
-  // The same bound is on the manifest schema, so the three agree.
-  //
-  // ponytail: this refusal fires AFTER `assertWithinBudget` committed the
-  // admission, and cannot be moved before it — the ceiling under test IS the
-  // decision's own output.
-  //
-  // It is also, today, UNREACHABLE from this call site, which is why the
-  // reservation it would strand is not worth a compensating release:
-  // `admitIssue` refuses a non-positive `capMicroUsd` before it writes anything,
-  // returns `admitted: false` unless `remainingMicroUsd > 0`, and then computes
-  // `min(keyCapMicroUsd, remaining)` — and dispatch never passes
-  // `keyCapMicroUsd`, so it is `defaultKeyCapMicroUsd`, a positive literal. The
-  // guard stays because it is the one thing standing between a future change to
-  // any of those three and a run that bills box-hours it can never spend.
-  // The reservation is retired by the ledger's orphan
-  // guard: `store.create` never runs on this path, so no record ever resolves
-  // for this id and the admission stops counting once it ages past the ledger's
-  // orphan window (`ADMISSION_GRACE_MS` + `ADMISSION_SKEW_MARGIN_MS`, the margin
-  // added in review round 4 so a reader whose clock runs ahead of the writer's
-  // cannot expire a live reservation and grant its headroom twice).
-  // Retiring it sooner needs a ledger-side release, which `admitIssue`'s
-  // contract deliberately does not offer and this layer holds no handle for.
-  if (!Number.isSafeInteger(effectiveCeilingMicros) || effectiveCeilingMicros <= 0) {
-    throw refuse(
-      5,
-      "no-ceiling",
-      `admitted ceiling is ${effectiveCeilingMicros} µ$ — the run could not spend anything`,
-      `raise the cap via .sandbox/cost-config.json perIssueOverrides for ${repoSlug}#${issueId}, or pick another issue`,
-      {
-        admittedCeilingMicroUsd: effectiveCeilingMicros,
-        capMicroUsd: decision.capMicroUsd,
-        spentMicroUsd: decision.spentMicroUsd,
-        reservedMicroUsd: decision.reservedMicroUsd,
-      },
-    );
-  }
-
-  // ── 6. record → box (INV-3: record → box → key, enforced by construction).
-  // The sequence is provisionAdmittedRun — the same body createRun composes —
-  // so the record-before-VM invariant cannot drift between the two callers.
-  //
-  // The gap between the admission above and this call — admitIssue's COMMIT to
-  // store.create's rename, two processes with no shared lock — is closed on the
-  // LEDGER side, and only there. The orphan window (cost-ledger.ts,
-  // `ADMISSION_GRACE_MS` plus `ADMISSION_SKEW_MARGIN_MS`) makes its orphan guard
-  // count an admission younger than that window toward `reservedMicroUsd`
-  // whether or not the run record resolves yet, so a concurrent dispatch for the
-  // same issue sees this reservation from the instant it commits. Two dispatches
-  // can no longer both be granted the full remaining headroom. Do not "fix" that
-  // half with a ledger/store transaction or a global dispatch lock — the first is
-  // unnecessary now and the second would serialise DF3.2's N-arm fan-out.
-  //
-  // The FLEET-CEILING half is NOT closed, and this comment used to imply it was.
-  // Step 5's `checkHeadroom(deps.driver, 1, …)` is a bare READ: `quota.ts` lists
-  // the substrate, compares the count to `maxVms` and writes NOTHING (verified
-  // — it holds no lock and records no intent), so nothing represents an
-  // in-flight box to a concurrent caller. Two dispatches entering step 5 within
-  // one `driver.list()` round trip of each other while `liveVms === ceiling - 1`
-  // both see `allowed: true` and both reach `driver.create`, and the fleet
-  // ceiling is exceeded by one. The orphan-window argument above does not reach
-  // this: a ledger reservation is money, not a box.
-  //
-  // Closing it needs a RESERVATION at the quota layer — an intent record a
-  // concurrent `checkHeadroom` counts as live until the box appears or the
-  // intent ages out, i.e. the same shape `admitIssue` already has for spend.
-  // That is a providers-layer change (DF2.6 owns the fleet ceiling; this module
-  // owns only the call site), so the behaviour is deliberately left alone here.
-  // Ceiling: overshoot is bounded by the number of dispatches racing inside one
-  // list round trip, and the DF2.6 reaper still sees and prices every box.
-  //
-  // Still keep this gap short: the grace window is a floor on how long a
-  // genuinely orphaned reservation (store.create failed, so no run can ever
-  // report spend) holds the issue's cap. Distinct from the post-provision case
-  // below, where the reservation is retained deliberately and for as long as the
-  // box lives.
-  const tCreate = now();
-  // Wrapped, because this step STRADDLES the record: `provisionAdmittedRun`
-  // writes the run record first (INV-1) and only then creates the box, so a
-  // throw from the budget-extension write or from `driver.create` leaves a real
-  // record on disk. An untyped throw escaping here carries no `runId`, and the
-  // CLI's failure line would then report `runId: null` for a run an operator can
-  // see in `fleet status` — the one case where they most need the id. `refuse`
-  // stamps it (plus the debug/teardown commands) onto the payload, and files the
-  // dispatch-log entry that AC4 evidence is read out of.
-  let provisioned: Awaited<ReturnType<typeof provisionAdmittedRun>>;
-  /**
-   * INV-4-bis's join key onto the record, best-effort, from every path that can
-   * leave THIS dispatch's own record behind.
-   *
-   * `store.create` takes only an id, so the correlation can only be WRITTEN once
-   * a record exists — but the value has been known since step 2, and the write
-   * used to happen only after `provisionAdmittedRun` RETURNED. On the two paths
-   * where it does not return, the record survived with no `requestId` and (on
-   * the timeout path) no `vmName` either: `fleet status` showed an open run that
-   * joins to no log line anywhere, forever. So it is attempted from the create
-   * step's own failure path, and again from the abandoned-success handler, which
-   * is the moment a record created by a call this dispatch had already given up
-   * on is known to exist.
-   *
-   * NOT from the `run-id-in-use` arm: there the EEXIST names a record this
-   * dispatch did not create — the winner's, on the shared-runId race — and
-   * stamping would merge this dispatch's `requestId` onto it, inverting the
-   * join key. See the provisioning catch.
-   *
-   * Best-effort by construction: the record may not exist yet (ENOENT, on the
-   * pre-check timeout), and a failure to stamp a correlation must never replace
-   * the refusal being reported. The authoritative fix is a `store.create` that
-   * takes the id and the correlation together — a run-record change, not this
-   * layer's.
-   */
-  const stampCorrelation = (): void => {
-    try {
-      deps.store.set(runId, { requestId });
-    } catch {
-      // no record to stamp (or an unwritable one) — the refusal stands either way
-    }
-  };
-  try {
-    provisioned = await within(
-      "create",
-      () => {
-        // INSIDE the thunk, so it means "provisioning STARTED", not "provisioning
-        // was about to start": `within`'s `left <= 0` pre-check throws before the
-        // thunk runs, and that create never touched the store or the driver.
-        // `refuse` gates its teardown remediation on this (see the declaration).
-        ctxProvisionAttempted = true;
-        return provisionAdmittedRun(deps.driver, deps.store, {
-          runId,
-          // `port` is deliberately withheld: provisionAdmittedRun exposes and makes
-          // the box PUBLIC immediately after create, i.e. before the setup gate has
-          // proved anything — and INV-5 then forbids tearing that box down. The
-          // expose/setPublic pair runs here instead, after gate.ready (step 10).
-          budget: {
-            repoSlug,
-            issueId,
-            capMicroUsd: decision.capMicroUsd,
-            spentMicroUsd: decision.spentMicroUsd,
-            reservedMicroUsd: decision.reservedMicroUsd,
-            admittedCeilingMicroUsd: decision.admittedCeilingMicroUsd,
-          },
-        });
-      },
-      (p) => {
-        // The box exists and this dispatch has already refused, so the record is
-        // the only place either fact can still be joined from. `vmName` lands
-        // there via `provisionAdmittedRun` itself; the correlation is this
-        // layer's, and this is the first instant a record is known to exist.
-        stampCorrelation();
-        return {
-          vmName: p.vm.name,
-          ...(p.vm.httpsUrl === undefined ? {} : { httpsUrl: redact(p.vm.httpsUrl) }),
-        };
-      },
-    );
-  } catch (e) {
-    // Whatever went wrong, a record may exist FOR THIS ID — but whether it is
-    // THIS dispatch's own decides whether the correlation may be stamped onto
-    // it. INV-1 writes the record before anything billable, so most paths here
-    // own whatever record they leave; the exception is the loser of a
-    // shared-runId race, whose EEXIST names the WINNER's record file. Stamping
-    // unconditionally merged THIS dispatch's requestId onto that record (the
-    // store merges patches), inverting INV-4-bis's join key: the winner's log
-    // lines then join to the loser's dispatch and vice versa. So — stamp on the
-    // timeout arm first (its record, when one exists, was written by this call:
-    // `store.create` succeeded before `driver.create` could be in flight), skip
-    // it on the run-id-in-use arm below (the record is someone else's), and
-    // stamp again past both arms, where the record can only be ours.
-    //
-    // `timedOut` already produced one (and already refused) — do not double-log.
-    if (e instanceof FleetError) {
-      stampCorrelation();
-      throw e;
-    }
-    // `store.create`'s O_EXCL is the AUTHORITATIVE arbiter of run-id identity;
-    // the step-4 check is a fast path. Two concurrent dispatches sharing an
-    // explicit `opts.runId` (DF3.2's fan-out shape) both pass that check and
-    // both commit a reservation — exactly one wins the create, and the loser
-    // must get the SAME exit-2 `run-id-in-use` refusal the sequential case
-    // gets, not a generic exit-1 "provisioning failed" naming the wrong cause.
-    //
-    // The loser's reservation stays outstanding, and this layer cannot retire
-    // it: the ledger's orphan guard expires an admission only when NO record
-    // resolves for the id, and the winner's record resolves under exactly this
-    // id. `admitIssue`'s contract states no caller may release a reservation,
-    // and the ledger handle is closed by the `finally` above. Retiring it needs
-    // a ledger-side rule for a losing admission — cross-cluster, not here.
-    //
-    // Scoped to the RECORD half. `within("create", …)` wraps the whole of
-    // `provisionAdmittedRun` — `store.create`, the budget `store.set` AND
-    // `driver.create` — and `code === "EEXIST"` alone claimed every one of them
-    // for `run <id> already has a record`. A dir-box driver whose create does
-    // `mkdir` over a leftover box directory (reachable exactly after an
-    // abandoned-create timeout left a box named after the run id) therefore came
-    // out as exit 2 `logic`, do-not-retry, advising "omit runId for a fresh one"
-    // — while the true state was: record created by THIS dispatch, budget
-    // written, no box name recorded, and a retryable substrate condition. The
-    // operator moves on and this dispatch's record stays open with its
-    // reservation outstanding against the issue cap.
-    //
-    // `path` is what separates them, and Node sets it on every fs error:
-    // `store.create` opens `store.path(runId)` with `wx`, so a genuine run-id
-    // collision names that exact file and a box-side `mkdir` names the box.
-    // An EEXIST carrying NO path still takes this arm — a store whose backend
-    // reports one without a path is the run-id race by elimination, and the
-    // sibling failure (a genuine loser of the race reported as exit-1
-    // `provision-failed`, sending the operator after a substrate fault that is
-    // not there) is the worse of the two. Residual, accepted: a PROVIDER that
-    // reports "a box with this name already exists" as a pathless EEXIST is
-    // still misclassified; it needs a typed provider error, not an errno.
-    const errno = e as (NodeJS.ErrnoException & { path?: unknown }) | null | undefined;
-    // Compare RESOLVED forms, not raw strings. `store.path(runId)` is absolute;
-    // an error's `path` can be the relative form (`runs/<id>.json`) or traverse
-    // a symlinked directory, and exact string equality misread both as
-    // provision-failed — exit 1, retryable substrate advice, for what is really
-    // the run-id race. Basenames as the fallback: the record file's name is
-    // `<runId>.json`, which no box-side mkdir collides with by accident.
-    const reportedPath = typeof errno?.path === "string" ? errno.path : undefined;
-    const recordPath = deps.store.path(runId);
-    const pathsMatch =
-      reportedPath !== undefined &&
-      (resolve(reportedPath) === resolve(recordPath) || basename(reportedPath) === basename(recordPath));
-    // `null` is "no path" the same as `undefined` — a store that reports EEXIST
-    // with an explicit `path: null` is the run-id race by elimination, not a
-    // provision failure.
-    if (
-      errno?.code === "EEXIST" &&
-      (errno.path === undefined || errno.path === null || pathsMatch)
-    ) {
-      // No stampCorrelation here, deliberately: the EEXIST names a record this
-      // dispatch did not create — the winner's, in the race case. See the catch
-      // header.
-      throw refuse(
-        2,
-        "run-id-in-use",
-        `run ${runId} already has a record`,
-        `omit runId for a fresh one, or tear the existing run down: bun scripts/fleet.ts teardown ${runId}`,
-      );
-    }
-    // Past both arms above, any record under this id was created by THIS call
-    // (INV-1) and the correlation belongs on it — best-effort exactly as the
-    // helper promises: the refusal below must not be replaced by a stamp
-    // failure.
-    stampCorrelation();
-    throw refuse(
-      1,
-      "provision-failed",
-      `provisioning failed for run ${runId}: ${errorMessage(e)}`,
-      errorRemediation(
-        e,
-        // Deliberately not "the box is alive": whether it exists depends on which
-        // half of record→box failed. Teardown is idempotent over both.
-        `inspect the run, then tear it down: bun scripts/fleet.ts teardown ${runId}`,
-      ),
-      providerCodePayload(e),
-    );
-  }
+    return { provisioned, effectiveCeilingMicros, tCreate };
+  });
   const { vm } = provisioned;
   phase("create_ms", now() - tCreate);
   ctxVmName = vm.name;
@@ -2437,6 +2529,20 @@ export async function dispatch(
           ? ("transient" as ExitStatus)
           : undefined,
       );
+    }
+    // The gate PROVED this box — stamp the money identity on the record: the
+    // exact SHA the box was filled to and gated against (T2.1 live 2026-08-25:
+    // the ack carried vmName but `fleet status`/audit could not answer "which
+    // commit is this billable box running?"). Best-effort like its sibling
+    // record writes: a failed stamp must not kill a healthy dispatch.
+    try {
+      deps.store.set(runId, { commitSha: valid.commitSha });
+    } catch (e) {
+      try {
+        process.stderr.write(`commitSha not recorded on run ${runId}: ${redact(errorMessage(e))}\n`);
+      } catch {
+        // nothing left to report it on
+      }
     }
     // ── 10. expose (INV-5 ordering: PUBLIC only once the gate has proved it) ─
     const port = deps.port;

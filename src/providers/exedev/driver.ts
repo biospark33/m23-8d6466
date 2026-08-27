@@ -320,17 +320,34 @@ export class ExeDevDriver implements ProviderDriver {
     return { vms, skipped };
   }
 
-  /** Idempotent by contract (teardownRun/reapRuns both retry): a `rm` failure is
-   *  confirmed against `ls` content — "not found" is the goal state, not an error. */
+  /**
+   * Idempotent by contract (teardownRun/reapRuns both retry): a `rm` failure is
+   * confirmed against `ls` content — "not found" is the goal state, not an error.
+   *
+   * F7 (2026-08-24): `rm` exit 0 is the substrate's CLAIM, not the state — a
+   * live incident left a box alive behind an rm that had exited 0. Absence is
+   * therefore VERIFIED by `ls` after every successful rm; a box that survives
+   * its own rm-ack gets exactly one retry before destroy fails closed.
+   */
   async destroy(vm: string): Promise<void> { /* dp:ok a rejection IS the error contract: non-zero exits are content-checked below, spawn errors propagate through the registry proxy's error log */
     assertValidRunId(vm);
-    const res = await this.control(["rm", vm]);
-    if (res.exitCode === 0) return;
+    let lastRm: { exitCode: number; stderr: string } | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await this.control(["rm", vm]);
+      if (res.exitCode !== 0) {
+        lastRm = { exitCode: res.exitCode, stderr: res.stderr };
+        break; // fall through to the content check — maybe it died anyway
+      }
+      lastRm = { exitCode: res.exitCode, stderr: res.stderr };
+      const remaining = await this.list(vm);
+      if (remaining.length === 0) return; // CONFIRMED gone by real state
+      // rm claimed success but the box is still listed — retry once.
+    }
     const remaining = await this.list(vm);
     if (remaining.length === 0) return; // already gone — idempotent success
     throw new ExeDevDriverError(
       "rm-failed",
-      `ssh exe.dev rm ${vm} exited ${res.exitCode} and the VM is still listed: ${res.stderr.trim()}`,
+      `ssh exe.dev rm ${vm} exited ${lastRm?.exitCode} and the VM is still listed after one retry: ${lastRm?.stderr.trim()}`,
       `ssh exe.dev rm ${vm}  # then confirm with: ssh exe.dev ls ${vm} --json`,
     );
   }

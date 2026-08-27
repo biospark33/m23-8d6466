@@ -75,7 +75,7 @@ export interface CapHitDemoDeps {
   evidenceDir?: string;
   /** Clock seam for tests — recordedAt and log timestamps (default: real time). */
   now?: () => Date;
-  /** Override envFile path for key delivery (default: /home/agent/app/.env). */
+  /** Override envFile path for key delivery (default: app/.env, HOME-relative). */
   envFile?: string;
   /** Test seam: grace bound for the wall-clock cancel settlement await (default 10s). */
   cancelGraceMs?: number;
@@ -169,8 +169,10 @@ const DEFAULT_FIXTURE_PATH = "tests/providers/fixtures/loopy-workload.yaml";
 
 // Live-substrate layout, measured on the exe.dev image (boldsoftware/exeuntu,
 // 2026-08-19 probe): the user is `exedev`, home /home/exedev — there is NO
-// /home/agent (the inkwell layout DF2.2/DF2.3 defaults assume). Their override
-// knobs carry the corrected paths; no predecessor code changes.
+// /home/agent (the inkwell layout DF2.2/DF2.3 defaults assumed). The src
+// defaults are HOME-relative since the F3 fix (2026-08-24), so these explicit
+// live spellings are now redundant-but-harmless anchors for this standalone
+// demo's own layout.
 const LIVE_HOME = "/home/exedev";
 const LIVE_ENV_FILE = `${LIVE_HOME}/.env`;
 const LIVE_WORKDIR = `${LIVE_HOME}/src`;

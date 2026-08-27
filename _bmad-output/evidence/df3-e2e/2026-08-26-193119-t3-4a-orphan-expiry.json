@@ -1,0 +1,142 @@
+{
+  "writtenAt": "2026-08-26T19:31:19.450Z",
+  "test": "T3.4a",
+  "outcome": "fail",
+  "phases": [
+    {
+      "phase": "kill-too-late",
+      "attempt": 1,
+      "runId": "qds-20260826-e2d805",
+      "note": "record existed — tearing down, retrying"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 1,
+      "stderrTail": "a9c-d670-4056-9ee6-f1799e54fdb2\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:31:04.492Z\",\"duration\":2,\"status\":\"ok\",\"runId\":\"qds-20260826-e2d805\",\"driver\":null,\"verb\":\"set\",\"durationMs\":2,\"outcome\":\"ok\",\"record_write_ms\":2}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-e2d805",
+      "teardownExit": 0
+    },
+    {
+      "phase": "kill-too-late",
+      "attempt": 2,
+      "runId": "qds-20260826-424314",
+      "note": "record existed — tearing down, retrying"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 2,
+      "stderrTail": "71-4e1c-ab20-befb4dcd6310\",\"operation\":\"run-record.create\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:31:08.652Z\",\"duration\":0,\"status\":\"ok\",\"runId\":\"qds-20260826-424314\",\"driver\":null,\"verb\":\"create\",\"durationMs\":0,\"outcome\":\"ok\",\"record_write_ms\":0}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-e2d805",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-424314",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 3,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 3,
+      "stderrTail": "-15292b46eb21\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:31:12.412Z\",\"duration\":1149,\"durationMs\":1149,\"status\":\"error\",\"runId\":\"qds-20260826-508676\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-e2d805",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-424314",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 4,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 4,
+      "stderrTail": "-dbfbfcef13f3\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:31:13.829Z\",\"duration\":1295,\"durationMs\":1295,\"status\":\"error\",\"runId\":\"qds-20260826-22f050\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-e2d805",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-424314",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 5,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 5,
+      "stderrTail": "-1ca73c77dba1\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:31:15.236Z\",\"duration\":1272,\"durationMs\":1272,\"status\":\"error\",\"runId\":\"qds-20260826-d80d06\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-e2d805",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-424314",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 6,
+      "exitCode": 5
+    },
+    {
+      "phase": "attempt",
+      "attempt": 6,
+      "stderrTail": "-f1f01ff29442\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:31:16.696Z\",\"duration\":1328,\"durationMs\":1328,\"status\":\"error\",\"runId\":\"qds-20260826-70511e\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-e2d805",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-424314",
+      "teardownExit": 0
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).not.toBeNull()\n\nReceived: null\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "id": "qds-20260826-e2d805",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-teardown",
+      "id": "qds-20260826-424314",
+      "exitCode": 0
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

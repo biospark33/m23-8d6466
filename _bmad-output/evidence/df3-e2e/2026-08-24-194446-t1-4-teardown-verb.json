@@ -1,0 +1,28 @@
+{
+  "writtenAt": "2026-08-24T19:44:46.945Z",
+  "test": "T1.4",
+  "outcome": "fail",
+  "runId": "e2e-t14-mt7na8036dj",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t14-mt7na8036dj"
+    },
+    {
+      "phase": "mint",
+      "ok": true,
+      "keyHash": "8e7adf2a0df904615dfff4a904718e89871a96d656d895c06792024c2c293a69"
+    },
+    {
+      "phase": "teardown-verb",
+      "exitCode": 6,
+      "stdout": "",
+      "stderrTail": "l5/runs/e2e-t14-mt7na8036dj.lock — until then every later harvest or teardown of this run refuses\"}\n{\"requestId\":\"94ed3d75-bf49-492d-9a7f-49373ca9e692\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-08-24T19:44:45.631Z\",\"duration\":11083,\"durationMs\":11083,\"status\":\"error\",\"runId\":\"e2e-t14-mt7na8036dj\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}\n!! lock-held: /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t14-hNuwl5/runs/e2e-t14-mt7na8036dj.lock was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t14-hNuwl5/runs/e2e-t14-mt7na8036dj.lock only once you know the teardown state"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 6\n"
+    }
+  ]
+}

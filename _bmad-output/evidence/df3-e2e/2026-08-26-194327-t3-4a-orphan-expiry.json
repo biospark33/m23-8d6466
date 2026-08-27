@@ -1,0 +1,75 @@
+{
+  "writtenAt": "2026-08-26T19:43:27.984Z",
+  "test": "T3.4a",
+  "outcome": "fail",
+  "phases": [
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 1,
+      "exitCode": 2
+    },
+    {
+      "phase": "attempt",
+      "attempt": 1,
+      "stderrTail": "{\"code\":\"usage\",\"message\":\"dispatch does not take --cap-micro-usd\",\"remediation\":\"flags for dispatch: --driver --brief --dir --port --help\"}\n{\"requestId\":\"95fd82ce-2698-46fe-b439-54f9d8cb52a2\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:43:25.371Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 2,
+      "exitCode": 2
+    },
+    {
+      "phase": "attempt",
+      "attempt": 2,
+      "stderrTail": "{\"code\":\"usage\",\"message\":\"dispatch does not take --cap-micro-usd\",\"remediation\":\"flags for dispatch: --driver --brief --dir --port --help\"}\n{\"requestId\":\"5770ec4d-cc34-43ba-8b66-834d5a360679\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:43:25.413Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 3,
+      "exitCode": 2
+    },
+    {
+      "phase": "attempt",
+      "attempt": 3,
+      "stderrTail": "{\"code\":\"usage\",\"message\":\"dispatch does not take --cap-micro-usd\",\"remediation\":\"flags for dispatch: --driver --brief --dir --port --help\"}\n{\"requestId\":\"cf551824-f128-4c81-b79c-ef4c35b59086\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:43:25.452Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 4,
+      "exitCode": 2
+    },
+    {
+      "phase": "attempt",
+      "attempt": 4,
+      "stderrTail": "{\"code\":\"usage\",\"message\":\"dispatch does not take --cap-micro-usd\",\"remediation\":\"flags for dispatch: --driver --brief --dir --port --help\"}\n{\"requestId\":\"032d7a40-beb3-4153-b704-05491da01596\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:43:25.492Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 5,
+      "exitCode": 2
+    },
+    {
+      "phase": "attempt",
+      "attempt": 5,
+      "stderrTail": "{\"code\":\"usage\",\"message\":\"dispatch does not take --cap-micro-usd\",\"remediation\":\"flags for dispatch: --driver --brief --dir --port --help\"}\n{\"requestId\":\"363df38b-ab36-45b9-8532-4404e9d81ee6\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:43:25.538Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 6,
+      "exitCode": 2
+    },
+    {
+      "phase": "attempt",
+      "attempt": 6,
+      "stderrTail": "{\"code\":\"usage\",\"message\":\"dispatch does not take --cap-micro-usd\",\"remediation\":\"flags for dispatch: --driver --brief --dir --port --help\"}\n{\"requestId\":\"74240844-efb8-48da-93ae-41396597e2bc\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:43:25.582Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":null,\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).not.toBeNull()\n\nReceived: null\n"
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

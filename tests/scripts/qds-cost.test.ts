@@ -99,10 +99,8 @@ describe("qds-cost CLI", () => {
       const issueId = "42";
       const requestId = "req-001";
 
-      // Stub run record: 90min lifetime. Box-hours bill by CEILED whole hours:
-      // ceil(1.5h) = 2h × 3,600,000 µ$/h = 7,200,000 µ$. (The fractional
-      // per-minute formula this comment once described lives on another
-      // branch; here the whole-hour minimum is the shipped arithmetic.)
+      // Stub run record: 90min lifetime. Box-hours bill FRACTIONALLY (F8):
+      // 1.5h × 3,600,000 µ$/h = 5,400,000 µ$ — no whole-hour ceiling.
       const stubRecord = {
         keyHash: "hash-abc123",
         limitMicroUsd: 50_000_000,
@@ -160,7 +158,7 @@ describe("qds-cost CLI", () => {
         invocationSeq: 0,
       });
 
-      // Box hours row: 90 minutes ceils to 2 whole hours = 7,200,000 µ$
+      // Box hours row: 90 minutes billed fractionally (F8) = 5,400,000 µ$
       ledger.ingestBoxHours({ runId, repoSlug, issueId, requestId });
       ledger.close();
 
@@ -171,9 +169,9 @@ describe("qds-cost CLI", () => {
       // Header with issue ref
       expect(out).toContain(`${repoSlug}#${issueId}`);
 
-      // Total: tokens (150,000 µ$) + box-hours (2h × 3,600,000 = 7,200,000 µ$)
-      expect(out).toContain("7,350,000");
-      expect(out).toContain("$7.35");
+      // Total: tokens (150,000 µ$) + box-hours (1.5h × 3,600,000 = 5,400,000 µ$)
+      expect(out).toContain("5,550,000");
+      expect(out).toContain("$5.55");
 
       // Per-role split
       expect(out).toContain("lead");
@@ -181,11 +179,11 @@ describe("qds-cost CLI", () => {
       expect(out).toContain("worker");
       expect(out).toContain("50,000"); // 0.05 USD
       expect(out).toContain("box-hours");
-      expect(out).toContain("7,200,000");
+      expect(out).toContain("5,400,000");
 
       // Per-run table with the closed run's box hours NOT pending
       expect(out).toContain(runId);
-      expect(out).toContain("7,350,000"); // run total
+      expect(out).toContain("5,550,000"); // run total
       // Box hours should NOT be pending for a closed run
       expect(out).not.toContain("pending");
 

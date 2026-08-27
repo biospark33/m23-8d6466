@@ -1,0 +1,166 @@
+{
+  "writtenAt": "2026-08-26T13:15:44.090Z",
+  "test": "T3.2 happy path",
+  "outcome": "pass",
+  "fanoutId": "fan-20260826-a11e9e",
+  "runIds": [
+    "qds-20260826-b40191",
+    "qds-20260826-9cc40a"
+  ],
+  "capMicroUsdPerArm": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "aggregateCapMicroUsd": 100000
+    },
+    {
+      "phase": "fanout-verb",
+      "exitCode": 0,
+      "stdout": "{\"fanoutId\":\"fan-20260826-a11e9e\",\"arm\":0,\"runId\":\"qds-20260826-b40191\",\"outcome\":\"ready\",\"vmName\":\"qds-20260826-b40191\"}\n{\"fanoutId\":\"fan-20260826-a11e9e\",\"arm\":1,\"runId\":\"qds-20260826-9cc40a\",\"outcome\":\"ready\",\"vmName\":\"qds-20260826-9cc40a\"}",
+      "stderrTail": ":9,\"outcome\":\"ok\",\"record_write_ms\":9}\n{\"agentId\":null,\"timestamp\":\"2026-08-26T13:14:33.726Z\",\"duration\":64482,\"status\":\"ok\",\"requestId\":\"69f9938a-2398-4265-9c73-5fcf9a5e3bd0\",\"operation\":\"fleet.fanout.arm\",\"fanoutId\":\"fan-20260826-a11e9e\",\"arm\":0,\"runId\":\"qds-20260826-b40191\",\"outcome\":\"ready\",\"vmName\":\"qds-20260826-b40191\",\"durationMs\":64482}\n{\"requestId\":\"69f9938a-2398-4265-9c73-5fcf9a5e3bd0\",\"operation\":\"fanout-record.mutate\",\"agentId\":null,\"timestamp\":\"2026-08-26T13:14:33.729Z\",\"duration\":2,\"status\":\"ok\"}\n{\"requestId\":\"69f9938a-2398-4265-9c73-5fcf9a5e3bd0\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-08-26T13:14:33.732Z\",\"duration\":65842,\"durationMs\":65842,\"status\":\"ok\",\"runId\":\"fan-20260826-a11e9e\",\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "arms",
+      "fanoutId": "fan-20260826-a11e9e",
+      "armLines": [
+        {
+          "fanoutId": "fan-20260826-a11e9e",
+          "arm": 0,
+          "runId": "qds-20260826-b40191",
+          "outcome": "ready",
+          "vmName": "qds-20260826-b40191"
+        },
+        {
+          "fanoutId": "fan-20260826-a11e9e",
+          "arm": 1,
+          "runId": "qds-20260826-9cc40a",
+          "outcome": "ready",
+          "vmName": "qds-20260826-9cc40a"
+        }
+      ],
+      "autoRankLine": null
+    },
+    {
+      "phase": "boxes-live",
+      "ok": true,
+      "vms": [
+        "qds-20260826-b40191",
+        "qds-20260826-9cc40a"
+      ]
+    },
+    {
+      "phase": "fanout-record",
+      "ok": true,
+      "arms": [
+        {
+          "arm": 0,
+          "runId": "qds-20260826-b40191",
+          "briefHash": "f51afe30083abcaddf3412076f96431f7996895a49c194907fc6dca209b3aba6"
+        },
+        {
+          "arm": 1,
+          "runId": "qds-20260826-9cc40a",
+          "briefHash": "b9926324ffdad116beeda805a8d0126430454211a626b10571e37c435edd2f17"
+        }
+      ]
+    },
+    {
+      "phase": "arm-records",
+      "ok": true,
+      "runIds": [
+        "qds-20260826-b40191",
+        "qds-20260826-9cc40a"
+      ]
+    },
+    {
+      "phase": "arm-work",
+      "arm": 0,
+      "exitCode": 0,
+      "sha": "eeea36d"
+    },
+    {
+      "phase": "arm-work",
+      "arm": 1,
+      "exitCode": 0,
+      "sha": "1284047"
+    },
+    {
+      "phase": "harvest-arm",
+      "arm": 0,
+      "exitCode": 0,
+      "stdout": "harvested: 1"
+    },
+    {
+      "phase": "teardown-arm",
+      "arm": 0,
+      "exitCode": 0,
+      "stderrTail": "ose_ms\":31}\n{\"requestId\":\"f85758d8-740b-406a-b939-7f3d9069190c\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-08-26T13:15:09.205Z\",\"duration\":16363,\"durationMs\":16363,\"status\":\"ok\",\"runId\":\"qds-20260826-b40191\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "harvest-arm",
+      "arm": 1,
+      "exitCode": 0,
+      "stdout": "harvested: 1"
+    },
+    {
+      "phase": "teardown-arm",
+      "arm": 1,
+      "exitCode": 0,
+      "stderrTail": "ose_ms\":14}\n{\"requestId\":\"e9ff7c56-25c1-422f-9efd-cb07bf03158a\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-08-26T13:15:35.425Z\",\"duration\":15281,\"durationMs\":15281,\"status\":\"ok\",\"runId\":\"qds-20260826-9cc40a\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "spend",
+      "capPerArmMicroUsd": 50000,
+      "aggregateCapMicroUsd": 100000,
+      "spends": [
+        73,
+        73
+      ],
+      "total": 146
+    },
+    {
+      "phase": "ledger",
+      "boxHours": [
+        {
+          "run_id": "qds-20260826-9cc40a",
+          "cost_micro_usd": 7898,
+          "unpriced": 0
+        },
+        {
+          "run_id": "qds-20260826-b40191",
+          "cost_micro_usd": 6381,
+          "unpriced": 0
+        }
+      ],
+      "tokensRows": 0,
+      "tokensRowsGap": "ingestCostEvent has no production caller — see run report"
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 0,
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 1,
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-b40191",
+      "ok": true
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-9cc40a",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [],
+      "attempts": 5
+    }
+  ]
+}

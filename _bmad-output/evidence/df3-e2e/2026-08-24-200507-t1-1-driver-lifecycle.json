@@ -1,0 +1,49 @@
+{
+  "writtenAt": "2026-08-24T20:05:07.787Z",
+  "test": "T1.1",
+  "outcome": "pass",
+  "phases": [
+    {
+      "phase": "whoami",
+      "ok": true,
+      "answered": true,
+      "length": 196
+    },
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t11-mt7o0ha81wo",
+      "providerName": "e2e-t11-mt7o0ha81wo"
+    },
+    {
+      "phase": "list-after-create",
+      "vm": "e2e-t11-mt7o0ha81wo",
+      "count": 1
+    },
+    {
+      "phase": "exec-python3-version",
+      "exitCode": 0,
+      "stdout": "Python 3.12.3"
+    },
+    {
+      "phase": "exec-uname",
+      "exitCode": 0,
+      "stdout": "Linux e2e-t11-mt7o0ha81wo 6.12.93 #1 SMP Wed Jul 22 19:44:49 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux"
+    },
+    {
+      "phase": "exec-git-version",
+      "exitCode": 0,
+      "stdout": "git version 2.43.0"
+    },
+    {
+      "phase": "copyFile-roundtrip",
+      "ok": true,
+      "bytes": 48
+    },
+    {
+      "phase": "list-after-destroy",
+      "vm": "e2e-t11-mt7o0ha81wo",
+      "count": 0
+    }
+  ]
+}

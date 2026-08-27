@@ -1,0 +1,78 @@
+{
+  "writtenAt": "2026-08-26T18:12:23.615Z",
+  "test": "T3.5",
+  "outcome": "fail",
+  "runId": "qds-20260826-e0c5cd",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260826-e0c5cd\",\"requestId\":\"0172f2cd-e645-4d28-b67a-5b9c1452ad60\",\"state\":\"ready\",\"vmName\":\"qds-20260826-e0c5cd\",\"httpsUrl\":\"https://qds-20260826-e0c5cd.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":2482,\"mint_ms\":3251,\"fill_ms\":25045,\"setup_gate_ms\":14462}}\n{\"requestId\":\"0172f2cd-e645-4d28-b67a-5b9c1452ad60\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-26T18:12:04.737Z\",\"duration\":46408,\"durationMs\":46408,\"status\":\"ok\",\"runId\":\"qds-20260826-e0c5cd\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260826-e0c5cd",
+        "requestId": "0172f2cd-e645-4d28-b67a-5b9c1452ad60",
+        "state": "ready",
+        "vmName": "qds-20260826-e0c5cd",
+        "httpsUrl": "https://qds-20260826-e0c5cd.exe.xyz"
+      }
+    },
+    {
+      "phase": "shim",
+      "exitCode": 0,
+      "stdout": "RUN qds-20260826-e0c5cd pipeline=t3-e2e-remote-phases ok=true accepted=true phases=3 completedAt=2026-08-26T18:12:11.600Z",
+      "stderrTail": "atus\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":1083,\"journal_write_ms\":2}}\n{\"requestId\":\"qds-20260826-e0c5cd\",\"pipelineId\":\"t3-e2e-remote-phases\",\"phase\":\"t3-marker\",\"kind\":\"code\",\"timestamp\":\"2026-08-26T18:12:11.598Z\",\"durationMs\":1188,\"status\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":1188,\"journal_write_ms\":2}}"
+    },
+    {
+      "phase": "journal",
+      "ok": true,
+      "rows": 3
+    },
+    {
+      "phase": "steps",
+      "steps": [
+        {
+          "phase": "t3-probe",
+          "exitCode": 0,
+          "stdoutTail": "t3-remote-engine-ran\n"
+        },
+        {
+          "phase": "t3-verify",
+          "exitCode": 0,
+          "stdoutTail": ""
+        },
+        {
+          "phase": "t3-marker",
+          "exitCode": 2,
+          "stdoutTail": ""
+        }
+      ]
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-e0c5cd",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

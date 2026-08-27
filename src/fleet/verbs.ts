@@ -21,6 +21,11 @@
  * optional here is how DF3.5 would generate a skill whose every call exits 2.
  * The one way to satisfy the requirement without the flag is an INJECTED
  * driver (tests, embedders), which is not an argv shape the registry describes.
+ *
+ * DF3.2's ONE exception proves the rule: `rank` takes no `--driver` because no
+ * driver exists to choose — it reads fan-out records and step output only, so
+ * requiring a flag nothing consumes would train operators to paste magic
+ * values. It is also why rank is absent from assertDriverChosen's callers.
  */
 export interface VerbFlag {
   name: string;
@@ -36,7 +41,9 @@ export interface VerbEntry {
 }
 
 /**
- * Return the verb registry. Exactly 4 entries: dispatch, status, harvest, teardown.
+ * Return the verb registry. Exactly 6 entries: dispatch, status, harvest,
+ * teardown, fanout, rank (fanout/rank are DF3.2's additive entries — no
+ * DF3.1-owned entry was edited).
  * Shape is story-normative; exit codes match AC6 table.
  */
 export function listVerbs(): VerbEntry[] {
@@ -110,6 +117,62 @@ export function listVerbs(): VerbEntry[] {
       // 5 = the run lock refused; 6 = cleanup failed on an otherwise-successful
       // path — see `harvest` above for both.
       exitCodes: [0, 1, 2, 4, 5, 6],
+    },
+    {
+      verb: "fanout",
+      summary: "Run N isolated dispatch arms as one pattern (best-of-n, many-stories, race)",
+      flags: [
+        { name: "--driver", required: true, valueType: "string" },
+        { name: "--pattern", required: true, valueType: "string" },
+        // "string", like --port: the CLI range-checks it as a positive integer
+        // (2..8 best-of-n/race, 1..8 many-stories — INV-6) rather than trusting
+        // Number()'s coercions.
+        { name: "--n", required: true, valueType: "string" },
+        // Must equal the brief's commitSha(s) — checked by assertFanoutPin
+        // before anything is constructed.
+        { name: "--pin", required: false, valueType: "string" },
+        // Comma-separated roster ids; best-of-n/race require exactly --n of
+        // them, many-stories refuses the flag outright.
+        { name: "--roster", required: false, valueType: "string" },
+        // Per-arm key cap in integer micro-dollars (DD-9), positive-int-checked
+        // like --n. Absent ⇒ the single-run default cap.
+        { name: "--cap-micro-usd", required: false, valueType: "string" },
+        { name: "--brief", required: false, valueType: "path" },
+        // The FAN-OUT records directory (.sandbox/fanouts), NOT the runs dir:
+        // fanout writes fan-*.json records; rank reads them.
+        { name: "--dir", required: false, valueType: "path" },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // 1 = any collected arm failure after a result returned (setupFailed,
+      // armFailed, armUnknown); 5 = refused before anything provisioned
+      // (fleet-busy, no-headroom); 2 validation; 6 = landed but a completion
+      // line would not print. See scripts/fleet.ts's fanout block.
+      exitCodes: [0, 1, 2, 5, 6],
+    },
+    {
+      verb: "rank",
+      summary: "Score a completed best-of-N fan-out (advisory; emits scores, tie, rationale)",
+      flags: [
+        // The FAN-OUT records directory (not the runs dir): rank touches fanout
+        // records and step output only — it reads no run record (DF3.2 K11).
+        { name: "--dir", required: false, valueType: "path" },
+        // Optional JSON map runId → {testsExecuted?, testResults?, changedFiles?}.
+        // Absent ⇒ every arm is listed score:null with an explanatory
+        // rationale — advisory rank stays structurally useful (ruling C2).
+        { name: "--steps-json", required: false, valueType: "path" },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // NO --driver: rank touches records and step output only; requiring a
+      // flag nothing consumes trains operators to paste magic values.
+      // assertDriverChosen is skipped for rank (no driver to default — the B8
+      // hazard cannot arise).
+      //
+      // 6 = the ranking LANDED (record read, scores computed, rankedAt stamped)
+      // and the result line would not print — the shared `finish` folds an
+      // EAGAIN-refused stdout into 6 exactly as it does for dispatch/fanout.
+      // Still no 5: rank refuses nothing before provisioning, because it never
+      // provisions.
+      exitCodes: [0, 1, 2, 4, 6],
     },
   ];
 }

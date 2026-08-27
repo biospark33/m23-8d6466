@@ -390,3 +390,100 @@ predecessor: its webhook receiver is out of scope for v5.0 — see AC3 and the T
 ## Dev Agent Record
 
 <!-- Empty placeholder — filled during development. -->
+
+### 2026-08-25 — Inherited-seam briefing from DF3 TIER-2 e2e (pre-dev)
+
+Ground truth for everything below:
+`_bmad-output/workflow-state/code-review/e2e-audit/e2e-run-report.md` §TIER-2 FINAL
+(T2.1/T2.2 both PROVEN GREEN at HEAD `4804765`). Read it before dev; this section
+records only what that arc proved, left open, or changed under this story's feet.
+
+**1. The steps-producer seam — rank scoring consumes step output nobody produces.**
+`rank` scores each arm as `testPassRate*0.6 + uniqueFileCoverage*0.4`
+(`src/fleet/rank.ts:7-8`, computed at `rank.ts:263`) over the per-run
+`ArmStepOutput` its REQUIRED injected source hands back
+(`RankDeps.stepOutputFor`, `src/fleet/rank.ts:81`): `{testsExecuted?: boolean,
+testResults?: {passed, failed}, changedFiles?: string[]}` (`src/fleet/rank.ts:29-33`).
+Today the only producers are test fakes and the operator's hand-authored
+`--steps-json` file (`scripts/fleet.ts:1827-1929`); the fanout verb itself wires
+`stepOutputFor: () => null` (`scripts/fleet.ts:1740`) — the null-score contract is
+that unscored arms stay LISTED with `score: null`, never dropped
+(`src/fleet/rank.ts:38-39, 245-253`), and an all-null source yields the
+"no step-output source provided" rationale (`src/fleet/rank.ts:177-181`). TIER-2
+proved exactly that contract live; no real score has ever been produced.
+What does NOT exist anywhere (verified by grep across `src/`): a producer of
+`testResults{passed,failed}` counts — per DF1.6's contract note
+(`src/fleet/rank.ts:26-28`) no `testsPassed` shape exists, and no production code
+emits pass/fail counts at all. `changedFiles` half-exists: the worker reply
+contract carries it (SCHEMA_INSTRUCTION, `cli-anything/scripts/team-lead-driver.ts:365`),
+but in T2.1 that reply landed in `/tmp/t2-pi-out.txt` **in the box** and only the
+harness parsed it — nothing host-side captures it as an artifact. Consequence for
+this story's fix runs: if any consumer wants structured per-run output (attempt
+diagnostics beyond the raw diff, or scoring/verifying a fix attempt), THIS story's
+fix-run path must emit it — a runId-keyed map written host-side from what the box
+produced. Until then every score stays null by design. OPEN QUESTION: whether fix
+attempts are ever scored via `rank` machinery (they are single dispatches, not
+fan-out arms) or only diagnosed via AC4's escalation payload — decide before
+building any producer.
+
+**2. Manifest phase execution on a box has NEVER been proven live.** T2.1 proved
+dispatch → gate → harvest → teardown end-to-end on real substrate, but its engine
+leg drove pi DIRECTLY: the harness exec'd the pi worker argv in-box
+(`pi --provider … --mode json --no-session -p …` sourced from `$HOME/app/.env`,
+`tests/fleet/e2e/tier2-dispatch-engine.live.test.ts:208-231`) — the same argv shape
+the host driver owns (`buildWorkerArgv`, `cli-anything/scripts/team-lead-driver.ts:377`).
+The dispatched manifest WAS delivered and stamped (`$HOME/pipeline.yaml`,
+`$HOME/run-context.json` read back, `tier2-dispatch-engine.live.test.ts:184-191`)
+but NO in-box consumer executed its phases — the test header records the gap
+verbatim ("no in-box consumer of the delivered pipeline.yaml exists today",
+`:28-31`; box image has no node/bun, run-report finding F1). This story MUST NOT
+assume a manifest-phase executor will run the single-fixer team in-box. Two honest
+options: (a) build/prove an in-box manifest executor inside this story's slice, or
+(b) drive pi the way TIER-2 did. **(b) is recommended**: it is the only
+live-proven path, engine spend lands on the twice-capped run key, edits land in
+the box repo where harvest can see them. Either way, two TIER-2 harness facts bind
+the implementation: harvest counts COMMITS on `sbx/<runId>` — work products must be
+committed in-box pre-harvest or the bundle never materializes ("harvested: none";
+the MODEL makes and proves the fix, something must commit it), and the engine's
+JSON reply needs a host-side capture point or it evaporates with the box.
+
+**3. tokensRows = 0 — spend reporting is incomplete by a documented gap.**
+`CostLedger.ingestCostEvent` (`src/providers/cost-ledger.ts:786`; the run report
+cites :753 from an earlier sha) has zero non-test callers, so kind='tokens' rows
+never reach `cost_events`. T2.1 asserts the gap rather than faking around it
+(`tier2-dispatch-engine.live.test.ts:290-301`); the authoritative spend figure is
+the run record's `spendMicroUsd` captured provider-side at teardown
+(`:272-276`). This story's observability contract must not promise token-row-based
+cost accounting for fix runs; budget against `spendMicroUsd`.
+
+**4. F15 budget rule — this story's own dispatches must declare their aggregate.**
+Admission budgets PER ISSUE (`admitIssue`); F15 (fixed at `4804765`) makes fan-out
+reconcile its DECLARED aggregate against the ledger BEFORE minting, refusing exit-5
+`issue-ceiling-insufficient` naming the exact `perIssueOverrides` line when the
+ceiling is below n×cap (`df3-2-fanout-best-of-n.md` session-3 section; run-report
+F15 entry). A fix loop is not a fan-out, but the same arithmetic bites it: max 2
+attempts means up to n=2 billable boxes whose spend+reservation accumulates on ONE
+issueId — attempt 2 can be refused `budget-exceeded` even though each attempt is
+individually under cap. The fix brief must carry an issueId whose ceiling covers
+the whole loop (declare `perIssueOverrides`; no silent raises). OPEN QUESTION:
+which issueId the fix brief pins — the parent PR-producing run's issueId (then
+parent + fixes share one ceiling) or a fresh one? Unspecified in this story today;
+decide at dev time because it decides whether the loop fits the default ceiling.
+
+**5. Other inherited constraints.**
+- **DF13 fleet-ceiling TOCTOU** (handoff appended to `df3-2-fanout-best-of-n.md:799`):
+  plain `dispatch()` holds NO fleet lock — two concurrent dispatches can both sample
+  `liveVms === ceiling - 1` and both create (pinned red-by-design in
+  `tests/fleet/dispatch.test.ts`; do not delete the pin). The fan-out half is closed
+  by AC8's `.sandbox/fleet.lock`. A fix loop that ever fires attempt 2 while anything
+  else dispatches inherits the race; the quota-layer intent-record direction in the
+  handoff is where a closure would land, not here.
+- **Race pattern + reapRuns remain never-proven-live** (run-report §Known-residual) —
+  do not cite them as proven machinery in tests or DOD.
+- **commitSha stamping now happens post-gate** (money-identity fix `536c23b`): a
+  gate-passed run record carries `vmName` AND the pinned SHA. AC2's `attemptSha`
+  bookkeeping still comes from `pushVerifiedSha`'s return, not from the record.
+- Coverage matrix delta (run-report, after TIER-2 FINAL) names what IS proven live:
+  dispatch steps 1–8, gates A–E, expose/ack, seeded-fix engine spend, harvest,
+  teardown-with-spend, N-arm fan-out, advisory rank (null-score). Everything outside
+  that list is unproven until someone proves it.

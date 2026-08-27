@@ -87,7 +87,9 @@ describe("setup gate — defaults are the story's constants", () => {
     expect(mod.DEFAULT_GATE_TIMEOUT_MS).toBe(300_000);
     expect(mod.DEFAULT_SENTINEL_PATH).toBe("/tmp/PROVISION_READY");
     // The env-file contract is DF2.3's constant, imported — not re-typed.
-    expect(mod.DEFAULT_ENV_FILE).toBe("/home/agent/app/.env");
+    // F3 (2026-08-24): HOME-relative — the real image's ssh HOME is the only
+    // writable root, and /home/agent does not exist on it.
+    expect(mod.DEFAULT_ENV_FILE).toBe("app/.env");
   });
 });
 
@@ -779,6 +781,184 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     expect(exitCode).toBe(125);
     expect(stderr).toMatch(/missing dependency: curl python3 pi/);
     expect(stdout).not.toMatch(/^\{/m); // no evidence lines — the gate did not run
+  }, 60_000);
+
+  /** The PATH-shim used by the direct-script tests below: a fake curl that
+   *  answers chat/completions and /api/v1/key like the real endpoints and
+   *  (optionally) logs every -d body carrying "model": so a test can assert
+   *  the EXACT ids the in-box script pinged. Handles -o/-w like real curl
+   *  because assertion D reads status and body separately. */
+  function installCurlShim(binDir: string, opts: { curlLog?: string } = {}): void {
+    mkdirSync(binDir, { recursive: true });
+    const logLines =
+      opts.curlLog === undefined
+        ? []
+        : [
+            `for a in "$@"; do`,
+            `  printf '%s' "$a" | grep -q '"model":"' && printf '%s\\n' "$a" >> "${opts.curlLog}"`,
+            "done",
+          ];
+    writeFileSync(
+      join(binDir, "curl"),
+      [
+        "#!/bin/sh",
+        // log bodies FIRST — the -o/-w parse below shifts $@ away
+        ...logLines,
+        "out=''; fmt=''",
+        // snapshot argv BEFORE the shift-loop eats it — the URL case needs it
+        "all=\"$*\"",
+        "while [ \"$#\" -gt 0 ]; do",
+        '  case "$1" in',
+        "    -o) out=\"$2\"; shift 2;;",
+        "    -w) fmt=\"$2\"; shift 2;;",
+        "    *) shift;;",
+        "  esac",
+        "done",
+        "emit() {",
+        // real curl: payload to -o FILE if given, but -w's code ALWAYS to stdout
+        `  if [ -n \"$out\" ]; then printf '%s' \"$1\" > \"$out\"; else printf '%s' \"$1\"; fi`,
+        `  [ -n \"$fmt\" ] && printf '200'`,
+        "}",
+        "payload=''",
+        `case " $all " in`,
+        `  *chat/completions*) payload='{"choices":[{"message":{"content":"ready"}}],"usage":{"cost":{"total":0.00003}}}';;`,
+        `  *) payload='{"data":{"limit":50000,"usage":10}}';;`,
+        "esac",
+        "emit \"$payload\"",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    // pi stub: the script only needs `command -v pi` to succeed here; python3
+    // symlinked from the host so the emit/json machinery runs for real.
+    writeFileSync(join(binDir, "pi"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    symlinkSync("/usr/bin/python3", join(binDir, "python3"));
+  }
+
+  test("F11 regression: C pings each roster slug WHOLE — IFS must not shred slugs containing n/t", async () => {
+    // The round-7 hermetic-parsing line `IFS=' \t\n'` is SINGLE-quoted, so IFS
+    // became the literal characters {space, backslash, t, n} — and the C loop's
+    // `for m in $Models` then word-split every slug ON THOSE CHARACTERS:
+    // "anthropic/claude-haiku-4.5" shattered into the fields a, "", hropic/…,
+    // each pinged as its own model id (measured live 2026-08-25, three gates
+    // failed C with "from: a  hropic/…" while deepseek — no n/t — passed).
+    // The instrument here mirrors that failure exactly: a shim PATH whose curl
+    // RECORDS every model id it was asked to ping. The contract: one ping per
+    // roster model, each body carrying the FULL slug.
+    const script = join(import.meta.dir, "../../../src/providers/exedev/assertions-in-box.sh");
+    const binDir = join(rosterDir, "f11-shim-bin");
+    const curlLog = join(rosterDir, "f11-curl.log");
+    installCurlShim(binDir, { curlLog });
+    const envFile = join(rosterDir, "f11-env");
+    writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-f110000000000000000000\n", { mode: 0o600 });
+    // D reads ~/.pi/agent/models.json and demands every model carry ALL FOUR
+    // cost keys with input > 0 (INV: the factory must never report $0 spend).
+    const piAgentDir = join(rosterDir, ".pi", "agent");
+    mkdirSync(piAgentDir, { recursive: true });
+    writeFileSync(
+      join(piAgentDir, "models.json"),
+      JSON.stringify({
+        models: {
+          "anthropic/claude-haiku-4.5": {
+            cost: { input: 1e-6, output: 5e-6, cacheRead: 1e-7, cacheWrite: 1.25e-6 },
+          },
+          "deepseek/deepseek-v3.2": {
+            cost: { input: 2.8e-7, output: 4.2e-6, cacheRead: 2.8e-8, cacheWrite: 3.5e-7 },
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const rosterFile = join(rosterDir, "f11-roster.yaml");
+    // Both slugs real TIER-2 shapes: haiku carries n AND t (the shredding
+    // trigger), deepseek carries neither (the control that kept passing live).
+    writeFileSync(
+      rosterFile,
+      "defaults:\n  writes: []\nroles:\n  - name: lead\n    model: anthropic/claude-haiku-4.5\n    writes: []\n  - name: fixer\n    model: deepseek/deepseek-v3.2\n    writes: []\n",
+      { mode: 0o600 },
+    );
+    try {
+      rmSync(curlLog, { force: true });
+      const proc = Bun.spawn({
+        cmd: ["/bin/sh", script, rosterFile, envFile, "anthropic/claude-haiku-4.5", "deepseek/deepseek-v3.2"],
+        // binDir PREPENDS to the host PATH: the three shims shadow the real
+        // binaries while /bin/sh's own utilities (grep, awk, rm) stay reachable.
+        env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, HOME: rosterDir },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, , exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      const lines = stdout.trim().split("\n").filter((l) => l.startsWith("{"));
+      const parsed = lines.map((l) => JSON.parse(l) as { item: string; ok: boolean; note: string });
+      const c = parsed.find((r) => r.item === "C");
+      expect(c?.ok).toBe(true);
+      expect(c?.note).toMatch(/2\/2 roster models answered/);
+      // THE instrument: every model id anything in the script pinged. C's loop
+      // contributes the first two, IN ROSTER ORDER; D re-pings the first slug
+      // for the cost table. No fragment ("a", "", "hropic/…") may appear.
+      const bodies = (await Bun.file(curlLog).text()).trim().split("\n");
+      const models = bodies.map((b) => b.replace(/^.*"model":"([^"]*)".*$/, "$1"));
+      expect(models.slice(0, 2)).toEqual(["anthropic/claude-haiku-4.5", "deepseek/deepseek-v3.2"]);
+      for (const m of models) {
+        expect(["anthropic/claude-haiku-4.5", "deepseek/deepseek-v3.2"]).toContain(m);
+      }
+      expect(exitCode).toBe(0);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(curlLog, { force: true });
+      rmSync(envFile, { force: true });
+    }
+  }, 60_000);
+
+  test("F14 regression: D passes when ~/.pi/agent/models.json is ABSENT — production AC5 says absence is an empty registry", async () => {
+    // MEASURED live 2026-08-25 (gate qds-20260825-0250b0): the box image's pi
+    // (0.84.2) never writes ~/.pi/agent/models.json — the registry lives in
+    // pi's own store/LLM integration and models-store.json is `{}`. Production
+    // readCustomRegistry treats a MISSING file as an EMPTY custom registry
+    // priced by the bundled catalog (validate.ts AC5), so D failing on absence
+    // is STRICTER than the code it guards. The contract now: absent ⇒ D still
+    // passes on the strength of the provider usage.cost proof, naming why; a
+    // PRESENT file keeps the full four-key scan (F11 regression test above).
+    const script = join(import.meta.dir, "../../../src/providers/exedev/assertions-in-box.sh");
+    const binDir = join(rosterDir, "f14-shim-bin");
+    installCurlShim(binDir); // no model log needed — C/D shapes only
+    const envFile = join(rosterDir, "f14-env");
+    writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-f140000000000000000000\n", { mode: 0o600 });
+    const homeDir = join(rosterDir, "f14-home");
+    mkdirSync(homeDir, { recursive: true }); // deliberately NO .pi/agent/models.json
+    try {
+      const proc = Bun.spawn({
+        cmd: ["/bin/sh", script, join(rosterDir, "f11-roster.yaml"), envFile, "deepseek/deepseek-v3.2"],
+        env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, HOME: homeDir },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, , exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      const parsed = stdout
+        .trim()
+        .split("\n")
+        .filter((l) => l.startsWith("{"))
+        .map((l) => JSON.parse(l) as { item: string; ok: boolean; note: string });
+      const d = parsed.find((r) => r.item === "D");
+      expect(d?.ok).toBe(true);
+      expect(d?.note).toMatch(/custom registry absent/);
+      expect(parsed.find((r) => r.item === "E")?.ok).toBe(true);
+      expect(exitCode).toBe(0);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(envFile, { force: true });
+      rmSync(homeDir, { recursive: true, force: true });
+    }
   }, 60_000);
 
   test("round 7: env file mode 0644 fails C with 0600/DF2.3 violation note", async () => {

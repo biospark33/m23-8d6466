@@ -307,11 +307,124 @@ assumed. Driver registration cites `src/providers/index.ts`'s `resolveDriver(nam
       down through DF2.5's six steps (harvest before destroy), and an arm whose marker never appears is reported `armUnknown`
 - [ ] **Test (e2e demo — MANDATORY):** best-of-N `N=3` against the `fake` driver produces three closed
       records with three distinct `keyHash` values, three bundles under `.sandbox/runs/`, and one
-      ranking table with rationale — captured in the Dev Agent Record
+      ranking table with rationale — captured in the Dev Agent Record.
+      **PARTIAL as demonstrated:** the records, distinct keyHashes and ranking table are all shown;
+      the three bundles are NOT (the fake driver's boxes carry no git history or artifacts, so
+      DF2.5's harvest step reports `"harvested":"none"` — see Honest deltas #1). Bundle production
+      itself is DF2.5's mechanism and is exercised there; a real exe.dev arm rerun is what would
+      close this criterion fully.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Wave 2, agent D — CLI wiring + verb registration + e2e demo (2026-08-23)
+
+**Landed (this wave):**
+
+| File | Change |
+|---|---|
+| `src/fleet/verbs.ts` | Two additive registry entries (`fanout` [0,1,2,5,6], `rank` [0,1,2,4] with `--steps-json` per ruling C2); `:39` docstring "Exactly 4" → six verbs; the "`--driver` required on every verb" header paragraph now names its one exception. No DF3.1-owned entry edited. |
+| `src/fleet/index.ts` | Three export lines: `./fanout.ts`, `./fanout-primitive.ts`, `./rank.ts`. `fleet-lock.ts` deliberately stays off the barrel (consumers import it directly). |
+| `scripts/fleet.ts` | `fanout` and `rank` verb blocks per D12. Shared helpers extracted when fanout became the second caller: `ingestBriefJson` (brief seam/cap/parse), `makeLedgerFactory` (budget-gate handle), `readFanoutForRank` (ENOENT→null mapping). `FleetDeps` gains `fanoutsDir?`/`lockPath?` seams (tests/embedders point them at a tmpdir). Dispatch block rewired onto the two shared helpers — behavior-identical, one implementation of each discipline. |
+| `tests/fleet/verbs.test.ts` | Pinned sites updated additively: EXPECTED_FLAGS/EXPECTED_EXIT_CODES + verb loop (:314), synthetic-render no-leak list (:366), probe-order pin (:875), plus three sites K4's register under-counted ("exactly 4 entries", renderHelp polarity, "--driver required on EVERY verb") — each updated with rank's documented exemption. NEW probes: fanout 7 (codes 2×5, 5, 1, 0), rank 5 (2×2, 4, 1, 0) — every declared code probed for both verbs except fanout 6, excused to its cli.test.ts case via the existing binding check. Env redirects QDS_RUNS_DIR/QDS_FANOUTS_DIR added to the exit-codes describe. |
+| `tests/fleet/cli.test.ts` | EXPECTED_VERBS → six (+BARE_VERB_EXIT entries). New tests: best-of-n e2e (acks + auto-rank line + extension joins + lock released), many-stories wrapper e2e, six validation refusals (exit 2, nothing provisioned), no-headroom exit 5, **exit-6 EAGAIN test** (the allowlist's binding target), rank scored via `--steps-json` (asserts score to 6 dp, exactly-two-key breakdown, rankedAt stamped), rank unscored exit 0, rank unknown-id exit 4. |
+| `tests/fleet/patterns.test.ts` | ONE new block (AC8): two full `fanout()` invocations race with a seam barrier parked in the winner's admission await — loser refuses exit 5 having written zero records/mints/boxes; totals prove it under the shared driver/store. |
+
+**Gate evidence:** scoped files 175 pass / 0 fail; full suite **3308 pass / 8 skip / 1 fail** (= 3317
+collected; this is agent B's wave snapshot, NOT the same run as the close-gate line at the bottom of this
+record — see "Story-evidence reconciliation" for the one-run addendum) —
+the one fail is `tests/gitnexus/graph-queries.test.ts` ("gitnexus_impact — 'registerSwarmClawAgent'
+…"), proven pre-existing by `git stash push -- <six owned files>` + rerun on the clean tree: same
+1 fail / 15 pass. It reads the GitNexus index, not our code. B's other candidates (setup-gate ×6,
+readRunsByIssue, usage.test.ts, cli-anything watchdog) all passed this run. `bunx tsc --noEmit`
+clean; `biome check` clean on all six files; GitNexus impact run before editing (`listVerbs`,
+`run` — both LOW); detect_changes before commit.
+
+### MANDATORY e2e demo (DOD) — captured verbatim
+
+Driven through the real CLI front door (`scripts/fleet.ts run()` — the exact function
+`import.meta.main` binds to argv) in a temp cwd, fake driver + FakeKeyApi injected via the CLI's
+own DI seams. Chain: `fanout` → `teardown` ×3 (DF2.5 harvest-before-destroy closes each arm's
+record) → `rank --steps-json` keyed by the ACTUAL minted run ids.
+
+```
+===== COMMAND: bun scripts/fleet.ts fanout --driver fake --pattern best-of-n --n 3 \
+           --pin fff…fe2e(40 hex) --roster alpha,beta,gamma --brief brief.json   (stdout verbatim)
+{"fanoutId":"fan-20260823-09bd5a","arm":0,"runId":"qds-20260823-b4d8fe","outcome":"ready","vmName":"qds-20260823-b4d8fe"}
+{"fanoutId":"fan-20260823-09bd5a","arm":1,"runId":"qds-20260823-679d1c","outcome":"ready","vmName":"qds-20260823-679d1c"}
+{"fanoutId":"fan-20260823-09bd5a","arm":2,"runId":"qds-20260823-b9b4a7","outcome":"ready","vmName":"qds-20260823-b9b4a7"}
+{"fanoutId":"fan-20260823-09bd5a","scores":[{"arm":0,"runId":"qds-20260823-b4d8fe","score":null,…},{"arm":1,…},{"arm":2,…}],"tie":false,
+ "rationale":"no step-output source provided — every arm listed unscored; supply --steps-json to rank","timings":{"rankMs":0.98}}
+
+===== COMMAND: bun scripts/fleet.ts teardown qds-20260823-b4d8fe --driver fake --dir .sandbox/runs
+torn down: qds-20260823-b4d8fe
+===== COMMAND: bun scripts/fleet.ts teardown qds-20260823-679d1c --driver fake --dir .sandbox/runs
+torn down: qds-20260823-679d1c
+===== COMMAND: bun scripts/fleet.ts teardown qds-20260823-b9b4a7 --driver fake --dir .sandbox/runs
+torn down: qds-20260823-b9b4a7
+
+===== COMMAND: bun scripts/fleet.ts rank fan-20260823-09bd5a --dir .sandbox/fanouts --steps-json steps.json   (stdout verbatim)
+{"fanoutId":"fan-20260823-09bd5a","scores":[
+  {"arm":1,"runId":"qds-20260823-679d1c","score":0.9, "breakdown":{"testPassRate":1,  "uniqueFileCoverage":0.75}},
+  {"arm":0,"runId":"qds-20260823-b4d8fe","score":0.74,"breakdown":{"testPassRate":0.9, "uniqueFileCoverage":0.5}},
+  {"arm":2,"runId":"qds-20260823-b9b4a7","score":0.4, "breakdown":{"testPassRate":0.5, "uniqueFileCoverage":0.25}}],
+ "tie":false,"rationale":"top arm 1 (run qds-20260823-679d1c, score 0.9) leads by more than 0.1","timings":{"rankMs":0.94}}
+
+===== .sandbox/runs — three CLOSED records with three DISTINCT keyHash values =====
+qds-20260823-679d1c  state=closed  keyHash=09fd612b7812…  box=qds-20260823-679d1c   (roster beta)
+qds-20260823-b4d8fe  state=closed  keyHash=1dd0a409d75a…  box=qds-20260823-b4d8fe   (roster alpha)
+qds-20260823-b9b4a7  state=closed  keyHash=41d1e83e200f…  box=qds-20260823-b9b4a7   (roster gamma)
+distinct keyHash count: 3
+
+===== .sandbox/fanouts/fan-20260823-09bd5a.json (the AC9 record; rankedAt stamped by rank) =====
+{ "fanoutId": "fan-20260823-09bd5a", "pattern": "best-of-n", "n": 3,
+  "pin": "fffffffffffffffffffffffffffffffffffffe2e",
+  "arms": [
+    {"arm":0,"runId":"qds-20260823-b4d8fe","rosterId":"alpha","briefHash":"7a3faf39…"},
+    {"arm":1,"runId":"qds-20260823-679d1c","rosterId":"beta", "briefHash":"7a3faf39…"},
+    {"arm":2,"runId":"qds-20260823-b9b4a7","rosterId":"gamma","briefHash":"7a3faf39…"}],
+  "winner": null, "rankedAt": "2026-08-23T19:27:57.073Z", "closedAt": "2026-08-23T19:27:56.232Z" }
+```
+
+Score arithmetic check against AC7: cross-arm union = {dispatcher.ts, verbs.ts, rank.ts, rank.test.ts}
+(4 files). Arm 1: passRate 20/20 = 1.0, coverage 3/4 = 0.75 ⇒ 0.9. Arm 0: 18/20 = 0.9, 2/4 = 0.5
+⇒ 0.74. Arm 2: 10/20 = 0.5, 1/4 = 0.25 ⇒ 0.4. Top-two delta 0.16 > 0.1 ⇒ tie false. ✓
+
+**Honest deltas (not fabricated):**
+1. **Bundles:** the fake driver's boxes carry no git history or artifacts, so DF2.5's harvest step
+   reports `"harvested":"none"` and no bundle directories appear under `.sandbox/runs/<run-id>/`.
+   The three record FILES are what `.sandbox/runs/` holds. Real exe.dev arms would produce real
+   bundles at the same lifecycle point.
+2. **Invocation route:** pure-shell `bun scripts/fleet.ts …` would need a live OpenRouter
+   provisioning key for the per-arm key mints (no env escape for the key client exists), so the
+   demo drives the CLI's exported `run()` with FakeKeyApi/FakeDriver/goodLedger injected — the same
+   seams cli.test.ts's mandatory e2e uses. Argv, flag parsing, output shaping and exit codes are
+   the production paths.
+3. **Ranking is two-phase:** run ids do not exist before `fanout` runs, so `--steps-json` cannot be
+   supplied to the in-fanout auto-rank; it lists arms unscored with the rationale above (by design),
+   and the scored table comes from `fleet rank <id> --steps-json …`.
+
+### Deviations / corrections proposed (SOURCE WINS)
+
+- **K12 (proposed): in-process lock-refusal code is `fleet-lock-reentrant`, not `fleet-busy`.**
+  The AC8 patterns test races two FULL `fanout()` invocations inside one process (seam barrier at
+  the admission await, per D14). fleet-lock.ts hoists the own-pid re-entrancy guard ABOVE every
+  contention branch (r8 HIGH), so the same-process loser gets exit 5 `fleet-lock-reentrant`; the
+  cross-process refusal AC8's prose describes (`fleet-busy`) is proven separately by
+  fanout.test.ts's subprocess race. Both codes are exit 5 and both write nothing. The spec sketch
+  said "fleet-busy" for this test; source wins, test pins reality.
+- **Exit-code refinement for `race`:** the shorthand "exit 1 from any non-ready arm outcome"
+  would make every SUCCESSFUL race exit 1 (losers are the expected disposition). Implemented rule:
+  exit 1 iff any arm is setupFailed/armFailed/armUnknown; `lostRace` alone does not fail the
+  invocation. Identical behavior for best-of-n/many-stories.
+- **rank's `--dir` means the FAN-OUT records directory** (`.sandbox/fanouts`), not the runs dir —
+  rank reads no run record (K11 dropped that dep). Documented on the registry entry; discovered
+  operationally during this demo (passing `.sandbox/runs` yields a correct exit-4 refusal).
+  Proposed follow-up: teach rank.ts's `fanout-not-found` remediation to mention `--dir` explicitly.
+- **No interrupt handlers on the fanout verb** (dispatch installs them because IT can orphan a box
+  mid-flight with no record): fanout's fleet-lock module already releases its lock on SIGINT/SIGTERM;
+  orphaned-arm recovery rides the story's own admission/record evidence. Residual noted, not
+  silently dropped.
+
 
 ---
 
@@ -328,6 +441,361 @@ assumed. Driver registration cites `src/providers/index.ts`'s `resolveDriver(nam
 - **Files to Modify:** Kept at ≤10 unique paths (no change needed — was already compliant).
 - **Campaign fixes 2026-08-20:** DF3.2-M1, DF3.2-L1.
 
+---
+
+## Review Findings — BMAD adversarial review, 2026-08-23 (PR #128)
+
+Seven parallel reviewers (3 blind chunk reviewers, 3 edge hunters with repo access, 1 spec auditor) over a
+5-chunk split of the full branch diff, plus the Sift bot's 7 inline findings folded into triage.
+Full ledger: `_bmad-output/evidence/df3-2/pr128-triage.md` (committed; formerly `/tmp/pr128-review/triage.md`).
+
+### Patched (source)
+
+- [x] **Race poller adopted persisted winner** (`fanout-primitive.ts`) — mutate refuse branch left `claimed`
+  null, so a cross-process loser re-probed to the 1h ceiling holding the fleet lock; at ceiling healthy arms
+  flipped `armUnknown` and escaped loser teardown entirely (N−1 paid VMs leaked). Losers now adopt and return
+  the persisted winner immediately.
+- [x] **Reclaim TOCTOU** (`fleet-lock.ts`) — classify→`rmSync` was blind; two contenders judging the same
+  stale lock could each delete the other's fresh claim (two holders, AC8 void). Reclaim now re-reads and
+  byte-compares the judged body before unlink; mismatch re-classifies.
+- [x] **Darwin start-time TZ bug** (`fleet-lock.ts`) — `ps lstart` wall-clock parsed in reader-local time;
+  writer under TZ=UTC vs operator shell could see a live owner as "recycled pid" and reclaim it. Lock body
+  gains optional `lstartRaw`/`lstartUtcMs` (TZ-free compare via `Date.UTC`, legacy numeric fallback).
+- [x] **Semaphore permit handoff** (`fanout-primitive.ts`) — release decremented AND woke a waiter that never
+  re-incremented; drift would defeat the width cap for any future multi-phase acquire caller. Transfer semantics.
+- [x] **Advisory auto-rank exit flip** (`scripts/fleet.ts`) — rank/store failure after all-ready arms reported
+  N provisioned boxes as refused. Rank block isolated: stderr warn, arm-derived exit preserved.
+- [x] **CostLedger built before admission** (`scripts/fleet.ts`) — race pattern with schema-failing brief still
+  created its SQLite db off the default dir. Gated on brief validity, wired to resolved dir.
+- [x] **Rank input guards** (`rank.ts`) — non-negative integer counts, changedFiles array-of-strings,
+  composite clamped to [0,1], single-arm rationale no longer claims a margin over nothing.
+- [x] **Record validation** (`fanout.ts`) — winner must be null or in `[0, arms.length)`, enforced write+read;
+  atomicReplace fsyncs the dir (crash can't resurrect pre-mutate records).
+- [x] **Smalls**: markDestructive inside try · width floor 1 · capMicroUsd validated exit 2 pre-lock ·
+  explicit concurrency clamped to MAX · lock-dir chmod verified 0700 · ps failure wrapped FleetError ·
+  force-release effective after signal-interrupted destructive phase · roster ""→absent · ledger.close guarded ·
+  costLedger stripped from DispatchDeps · steps-json parsed before mkdir/chmod · arm lines gain fanoutId.
+
+### Patched (tests)
+
+- [x] `/malformed|n/i` regex tightened (matched nearly every message); sibling weak-shape sweep clean.
+- [x] All six `--steps-json` refusal branches probed through the CLI front door (block was deletable while green).
+- [x] Unknown-id rank test made hermetic (was mkdir-ing `.sandbox/fanouts` into the repo tree).
+- [x] New pin: one loser's failing destroy never wedges disposal (harvest-before-destroy preserved, destructive
+  mark cleared); mandated-lock-body assertion updated for optional identity keys.
+
+### False positives / dismissals (verified against source)
+
+- Sift "lock.acquire() not awaited" — `acquire()` is synchronous.
+- Sift "isAlive may throw" — fails closed internally (try/catch, non-ESRCH ⇒ alive).
+- Sift shellQuote test mirror — intentional isolation (prod loosening must not loosen the probe).
+- fsyncDir/rmQuiet duplication — established module-private idiom; bodies byte-identical (verified).
+- rmQuiet "already exported" premise — it isn't exported; no fleet.ts import exists.
+- `--dir` producer/consumer split-brain — b916396 already fixed the live path (constructor resolves);
+  symmetry made explicit.
+
+### Deferred / documented
+
+Orphan temp sweeper (two accumulation paths, inert to list()) · fleetUnwinding permanent latch ·
+polymorphic stdout rows undocumented · metric names durationMs/rankMs vs spec arm_dispatch_ms/rank_ms ·
+AC7 letter (empty scores) unreachable for real all-failed records under K11 · record pin stamps requested
+SHA (verification delegated to DF3.1 fill gate).
+
+Gates at close: fleet focal suites 472 pass / 0 fail (7 files) · full suite 3338 tests, 1 fail = documented
+pre-existing gitnexus AC-1 index-reader · tsc --noEmit clean · biome clean · detect_changes blast radius
+confined to this PR's modules.
+
+## Review round 2 — Sift/Gemini/CodeRabbit comments on PR #128 (2026-08-24)
+
+Triage of the post-round-1 review batch against HEAD `6a54683`. Several findings were STALE — posted
+against pre-`6a54683` revisions and already fixed by that commit; each is listed with its disposition.
+
+### Patched (source)
+
+- [x] **Reclaim verify+rm serialized** (`fleet-lock.ts`) — the r10 byte-compare narrowed but did not close
+  the reclaim TOCTOU: between compare and `rmSync`, a SECOND reclaimer can remove the judged stale body and
+  a contender claim fresh bytes, which our pending unlink then destroys → two holders. Contenders cannot
+  interleave there (claim's link refuses while any body occupies the path); only fellow reclaimers can.
+  Verify-and-rm now runs under a dedicated `<path>.reap` mutex: bounded wait (250 ms), dead-pid/mtime steal
+  proofs for an abandoned holder, signal-release registered. Deterministic tests: foreign LIVE mutex blocks
+  the unlink (stale body survives both attempts → fleet-busy); ABANDONED mutex (dead pid) stolen without
+  waiting out the budget.
+- [x] **Corrupt final.json no longer spins to the ceiling** (`fanout-primitive.ts`) — journal.ts publishes
+  the marker by temp+rename, so persistent parse failure is corruption, not latency. After 3 consecutive
+  unusable reads (`MARKER_UNUSABLE_TICKS_LIMIT`) an arm is reclassified armUnknown and dropped from polling;
+  record still closes and the lock releases through the existing finally. Was listed as a deferred design gap.
+- [x] **Null arms element refused through the malformed taxonomy** (`fanout.ts`) — `(null as Record<…>).arm`
+  escaped validateFanoutRecord as a bare TypeError instead of naming record + field.
+- [x] **rank refuses testResults:null** (`rank.ts`) — same named invalid-step-output refusal the CLI's
+  --steps-json gate gives; previously died as "Cannot read properties of null" at the library boundary.
+- [x] **rank declares exit 6** (`verbs.ts`) — the shared `finish` folds EAGAIN-refused stdout into 6 for
+  every verb that emits one; rank's omission was a registry-contract gap. Pinned by a new cli.test.ts e2e
+  ("a rank whose scored table cannot print exits 6 with rankedAt stamped") + allowlist entry in verbs.test.ts.
+- [x] **loserLedger.close() follows the ONE cleanup policy** (`scripts/fleet.ts`) — was guarded-but-silent;
+  now prints `ledger-close-failed` and downgrades an otherwise-clean fanout to exit 6, matching teardown's/
+  harvest's stated policy verbatim.
+- [x] **rmQuiet deduplicated** — exported from `fanout.ts` and imported by `fanout-primitive.ts` (already
+  downstream of it). `fsyncDir` stays module-private per file DELIBERATELY: sharing it would couple
+  fleet-lock.ts to the store module it must sit beneath.
+
+### Dispositions of stale/wrong findings (no change)
+
+- "Race poller continues after other process wins" — already fixed in round 1 (mutate callback adopts the
+  persisted winner); reviewer saw a pre-`6a54683` revision.
+- "`/malformed|n/i` overly broad" — already tightened to `/malformed/i` in round 1's test patches.
+- "Auto-rank must be isolated" — already isolated in round 1 (own catch → stderr warn).
+- "`lock.acquire()` not awaited" — acquire is synchronous by signature and body; awaiting sync void is a no-op.
+- "`isAlive()` may throw" — fails closed internally (try/catch around kill, non-ESRCH ⇒ alive) and the pid
+  is range-guarded before the call; the suggested `catch { return "reclaim" }` would convert unobservable
+  holders into steals, violating the module's doctrine.
+- shellQuote mirrored into patterns.test.ts — intentional isolation (a loosened production quoter must not
+  loosen the test's own probe rewriting).
+
+### Story-evidence reconciliation
+
+- Gate evidence above mixes two runs (wave-1b snapshot vs close gate). Both retained as historical record;
+  see the dated addendum below for one internally consistent run.
+- DoD e2e-demo criterion labeled PARTIAL (bundles) — see the annotation on the DoD item.
+- Review ledger committed to `_bmad-output/evidence/df3-2/pr128-triage.md`; `/tmp` reference replaced.
+
+**One-run addendum (2026-08-24, post-round-2 patches, HEAD = round-2 commit):** full suite in ONE run —
+3332 pass + 8 skip + 2 todo + 1 fail = **3343 collected** across 99 files; the 1 fail is
+`tests/gitnexus/graph-queries.test.ts` ("gitnexus_impact — 'registerSwarmClawAgent'…"), re-verified
+pre-existing by direct rerun (same AC-1 index-reader failure round 1 documented). Fleet focal suites green:
+fanout+rank 56 · verbs 74 · cli 110 · patterns 30 — 0 fail. `bunx tsc --noEmit` clean; biome clean on all
+touched files; `detect_changes` blast radius confined to this PR's modules.
+
+### Round-2 gates
+
+Fleet focal suites (fanout/patterns/rank/verbs/cli): all green post-change · `bunx tsc --noEmit` clean ·
+biome clean on all touched files · detect_changes run before commit. Full-suite numbers recorded in the
+addendum below.
+
+## Review round 3 — bmad-code-review on full branch diff (2026-08-24, HEAD `6af62af`)
+
+Seven parallel reviewers (5 blind chunk reviewers incl. two test-chunk specialists, edge-src with repo
+access, spec auditor) over a 5-chunk split of the 6,958-line diff, plus the Sift bot's post-round-2
+inline batch folded into triage. ~100 raw findings → 21 patch items, rest dismissed against source
+(full ledger: `_bmad-output/evidence/df3-2/pr128-triage.md`, round-3 addendum; working notes
+`/tmp/pr128-r3/triage.md`). Fix waves: 2 source-cluster fixers + 1 cli/rank fixer, then 2 standalone
+test-hardening agents after sources settled.
+
+### Patched (source — fleet-lock.ts)
+
+- [x] **Cross-TZ identity compare could steal a LIVE holder's lock** — round-2's r10 "TZ-stable UTC
+  arithmetic" premise was inverted: `ps` renders digits in the READING shell's TZ, so
+  `Date.UTC(reader-local-digits)` ≠ writer value for the same instant. Identity comparison now uses
+  the observer-self-consistent `localMs === pidStartTime` unconditionally; `lstartRaw`/`lstartUtcMs`
+  remain recorded as operator evidence only. Regression pin: live holder with off-by-half-day
+  `lstartUtcMs` must refuse, never reclaim.
+- [x] **Reap-mutex litter sweep no longer age-judges judgeable-ish bodies** — object-with-pid bytes
+  (missing pidStartTime / out-of-range pid) wait out the budget instead of being swept after 1 s;
+  sweep strictly for unparseable/no-pid bytes.
+- [x] **acquireReapMutex loop bounded** — deadline re-checked after a successful steal; steal treats
+  only ENOENT as vanish evidence (EACCES/EIO ⇒ wait, not spin).
+- [x] **release() non-ENOENT read failure keeps the lock releasable** — registration (and destructive
+  mark) restored before rethrow so signal/exit handlers retry instead of stranding until death+1h.
+- [x] **Zombie holders reclaimed** — `pidIsZombie()` probe (linux `/proc` state Z, darwin `ps -o stat=`);
+  a SIGKILLed fan-out whose CI parent never reaps no longer wedges the fleet forever.
+- [x] Dir-mode failure typed as FleetError(5,"fleet-lock-dir-mode") · fleet-busy remediation mentions
+  mid-reclaim hand-off · steal-mutex race tests moved to new dedicated tests/fleet/fleet-lock.test.ts.
+
+### Patched (source — fanout-primitive.ts)
+
+- [x] **Bounded loser teardown** — disposeLosers wraps each teardownSandbox in a deadline
+  (LOSER_TEARDOWN_TIMEOUT_MS, default 5 min): one hung exec can no longer park between
+  markDestructive/clearDestructive and wedge every future fleet operation behind the lock.
+- [x] Marker-unusable counter reset on any usable read — CORRECTED RETROSPECTIVELY: round 3
+  recorded "code now matches", but round 5b proved the reset never landed in the round-3 code (the
+  counter stayed cumulative until round 5b's probeArm "absent"-verdict fix; see Round 5b below) ·
+  consecutive transport-skip bound (MARKER_TRANSPORT_SKIP_LIMIT=60) so persistent
+  EACCES/timeouts can't poll the full ceiling under the lock · marker size cap (1 MiB ⇒ unusable,
+  no unbounded JSON.parse of a runaway final.json) · race tmp staging via mkdtemp 0700 dir (kills the
+  predictable-/tmp symlink class) · roster entries refused when empty/duplicated ·
+  pollIntervalMs/perCallDeadlineMs/ceilingMs validated ≥1 at the public seam.
+
+### Patched (source — scripts/fleet.ts + rank.ts)
+
+- [x] **Structural refusals hoisted pre-construction (INV-2)** — unknown pattern, pattern min-N,
+  roster-forbidden/required/count refuse before keyApi/store/loserLedger constructors run. Precedence
+  preserved exactly (pinned by verbs.test.ts's declared-exit-codes probes): flag-syntax gates
+  (`--n`, `--cap-micro-usd`) first, then brief parse errors, then roster-forbidden, then
+  pattern/min-N/roster shape. Pin check runs after the known-pattern guard.
+- [x] --steps-json capped at 1 MiB (named refusal; MAX_BRIEF_BYTES parity) · --n regex ceiling
+  decoupled from FANOUT_MAX_N · rank's assertStepOutputShape refuses non-object outputs and counts
+  past Number.MAX_SAFE_INTEGER under the same invalid-step-output code.
+
+### Patched (tests — wave 2)
+
+- [x] **Fanout arm-failure exit rule e2e (was entirely untested)** — setupFailed⇒1, armUnknown-at-
+  ceiling⇒1, lostRace-only⇒0 through the CLI front door.
+- [x] Race gateFail precedence (ready:false AND thrown variants) · per-arm capMicroUsd enforcement
+  path (RecordingLedger pins what assertWithinBudget receives) · harvest-stage loser-teardown failure
+  (commitSha-stamped fixture so harvest really execs) · 2-of-3 mass-failure batch · FANOUT_MAX_N
+  accepted edge · exact STALE_MS boundary pin (`>` semantics) · dead-pid re-verified at plant sites ·
+  refusal-matrix err.code/message assertions · stdout JSON-lines keyed contract pinned · oversize
+  steps-json + unknown-pattern CLI refusals · rank non-object/MAX_SAFE_INTEGER/duplicate-runId
+  characterization.
+
+### False positives / dismissals this round (verified against source)
+
+best-of-n leaves arms alive + closedAt stamped (INV-5 + advisory human-closes-loop design) · failed/
+armUnknown boxes never auto-destroyed (INV-5 verbatim) · store.set is patch/merge semantics
+(RunRecordPatch) · auto-rank null stamp does not brick re-rank (rank has no rankedAt guard; winner set
+only by race poller by design) · empty-briefs zero-arm record impossible (pre-lock validation) ·
+best-of-n --n 1 enforced downstream with the advertised message · unmatched steps keys named in
+rationale · hostTag/writeLockDirect exports + src→scripts/lib inversion documented deliberate ·
+loser-ledger SQLite file created pre-admission — REAL; initially deferred to #129, then FIXED in
+round 4 via lazy first-use construction in the CLI (no factory seam was required — see the triage
+ledger's round-4 addendum) ·
+CWD-relative library defaults = CLI-owned resolution discipline (prior rounds' disposition).
+
+Gates at close: fleet focal suites 501 tests green modulo the documented K8/AC5 load flakes (pass
+solo) · bunx tsc --noEmit clean · biome clean on all touched files · detect_changes blast radius
+confined to this PR's modules (run + fanout flows only).
+
+Round 4 (+3 pins ⇒ 501): hung-loser-teardown deadline pin (patterns), --steps-json directory
+refusal probe and fleet-busy-no-money-file pin (cli) — all pass solo; full-file runs during a host
+load spike (LA 200-300 from unrelated VM/Chrome/tsserver processes) reproduce ONLY the documented
+5s-timeout flakes with a mutating failure set, including at HEAD via stash A/B.
+
+## Review round 5 — bmad-code-review on full branch diff (2026-08-24, HEAD `07deeef`)
+
+Nine reviewers over a 6-chunk split of the 8,212-line diff (3 blind source, 3 edge test-suite with
+repo cross-check, 1 acceptance auditor; two agents died on context and were respawned as half-chunk
+tests-patterns-A/B + a slim auditor retry — chunk budget held ≤1,623 lines). 24 raw findings →
+12 patch (2 source, 10 test), 1 decision-needed resolved conservatively, 11 dismissed with source
+evidence (full ledger: `_bmad-output/workflow-state/code-review/pr128-r5/triage.md`).
+
+### Patched (source — wave 1)
+
+- [x] **Reap-mutex steal-success path sleeps before retrying the claim** (fleet-lock.ts
+  acquireReapMutex) — steal→failed-claim→steal cycles previously retried with zero tick sleep,
+  burning CPU until the deadline; the retry now pays one REAP_MUTEX_TICK_MS, tightening the bound the
+  round-3 budget check established. Impact: LOW, 1 caller, behavior-preserving.
+- [x] **runRace hoists `undecided()` to one call per poll iteration** (fanout-primitive.ts) — was
+  computed twice (while-condition + for-loop). Impact: LOW, behavior-preserving.
+
+### Patched (tests — wave 2)
+
+- [x] cli.test.ts: retitled the misleading "scored table" case (it has no --steps-json — all scores
+  null); verbs.test.ts coveredBy binding updated to match; new `--n 0` explicit boundary refusal;
+  new empty `{}` --steps-json happy-path case (exit 0, all scores null, tie:false); 1 MiB cap comment
+  arithmetic corrected (JSON wrapper is 9 bytes, not ~12).
+- [x] fanout.test.ts: readOwnPidStartTime sanity windows loosened to 10-year clock-skew tolerance
+  (stability across calls is the source's real guarantee); new pid boundary refusals (0 and
+  0x8000_0000 — one past pidmax); create:false store now proves list() reads work.
+- [x] rank.test.ts: null-scored arm's breakdown pinned ({testPassRate: 0, uniqueFileCoverage: 0});
+  new identical-scores tie case (different runIds) pins tie:true, exactly-equal scores, stable
+  arm-0-first ordering, "tie flagged" rationale, and the no-automatic-tie-break contract.
+- [x] patterns.test.ts: validation section gains the many-stories n=1 POSITIVE case (min-N asymmetry
+  previously asserted only via rejections).
+
+### Decision-needed → resolved conservatively
+
+- [x] **AC9 schemaVersion explicit-vs-implicit** (auditor, LOW): spec quotes
+  `extensions.fanout = { schemaVersion: 1, … }`; the stamp site writes `{ fanoutId, arm }` and the
+  store layer auto-injects schemaVersion for EVERY extension namespace (run-record.ts
+  validateExtensions). On-disk shape matches the spec exactly. Resolved: no code change — making one
+  call site literal would diverge from the cross-namespace injection contract every other extension
+  write follows. Auditor's own assessment: "No action required unless explicit literal compliance is
+  demanded."
+
+### False positives / dismissals this round (each verified against source before dropping)
+
+Two HIGH "signal-handler race" findings are impossible as described: `onSignal` is fully synchronous
+and Node delivers signals serialized through the single-threaded event loop, so the fleetUnwinding
+check-then-set cannot interleave; `process.listeners(sig)` returns same-signal listeners only, so the
+borrow-strip-reraise loop cannot remove another signal's handler · cross-process stale-winner HIGH
+re-describes the exact failure mode round 3's adopt-persisted-winner mutate already fixes (per-record
+run-lock; loser learns HERE and tears down) · disposeLosers "stale entrants" MED concedes its own
+filter reads current outcomes — correct exclusion, single-threaded · semaphore "active drifts above
+width" MED misreads the handoff: the woken waiter resumes after `await` without re-calling acquire,
+and only the fast path increments (gated `active < width`) · lstartUtcMs "dead code" is deliberate
+round-3 forensic evidence ("RECORDED ONLY", TZ-unsafe to compare — removing it deletes the
+cross-TZ-identity debugging trail) · CLK_TCK hardcode carries its ponytail ceiling annotation ·
+rmQuiet leak is the function's named best-effort contract · cross-process lock-coverage gap MED:
+real Bun.spawn two-process lock races already exist (fanout.test.ts req-race-a/b) · onProbe timing
+and first-writer-atomicity LOWs: reviewer-self-assessed acceptable/covered · auditor AC table:
+17/18 PASS, 1 PARTIAL (the AC9 note above).
+
+Gates at close: full fleet focal suite 506/506 green (K8 flaked once under host load 13.5, passed on
+re-run and at close — the documented load-flake set) · verbs↔cli exit-code title binding regression
+from the P3 retitle caught by the suite and fixed in the same round · bunx tsc --noEmit clean ·
+biome clean on all 7 touched files · detect_changes: 1 symbol touched (runRace), 0 affected
+processes, LOW risk — blast radius confined to this PR's modules.
+
+### Round 5b — post-round-5 bot warnings (2026-08-24, CodeRabbit + Sift)
+
+- [x] **CodeRabbit: timed-out loser could lose its box-hours charge after the CLI closed
+  the ledger** — CONFIRMED and fixed. Chain: disposeLosers abandons a hung teardown at
+  its deadline → the verb's finally closes loserLedger → the abandoned teardown's close
+  step reaches `ingestBoxHours` on the held (now closed) CostLedger handle → the SQLite
+  call throws into withTimeout's pre-attached no-op catch → box destroyed, record closed,
+  NO box-hours row — the ledger under-counts and later assertWithinBudget over-admits.
+  Fix: the lazy hook drops its `realLoserLedger` reference in close(), so a late ingest
+  re-opens the ledger; the event-id `ON CONFLICT DO NOTHING` rule keeps the row
+  exactly-once. Pin: cli.test.ts "a timed-out loser's late teardown still prices its box
+  hours after the verb closed the ledger" (n=3 race — clean loser prices pre-close,
+  barriered loser released only after runCli resolves; mutation-verified RED pre-fix).
+- [x] **CodeRabbit: marker corruption counted cumulatively, not consecutively** —
+  CONFIRMED and fixed (the round-3 story claim "reset on any usable read" was never in
+  the code — the counter had also shipped with zero direct tests, which is how the gap
+  survived five rounds). probeArm now returns "absent" for a clean no-marker read and
+  runRace resets the arm's streak on it; transport skips stay null (no evidence either
+  way, no reset). Pin: patterns.test.ts "corruption counting is CONSECUTIVE" (corrupt →
+  absent → corrupt ×2 → decisive marker WINS — under cumulative counting tick 4 hit the
+  3-tick limit and the arm went armUnknown; mutation-verified RED pre-fix).
+- [x] **Sift: "abandoned loser teardown can reject unhandled later"** — dismissed with
+  evidence: withTimeout pins `void p.catch(() => {})` on the losing promise BEFORE the
+  race (timeout.ts), exactly the suggested fix, documented in disposeLosers's own
+  docstring since round 4.
+
+Gates: fleet focal 508/508 (both new tests pass in-suite; the cli pin carries the K8/AC5
+load-flake caveat — deterministic idle, observed abandoning at harvest under LA 150+),
+biome clean, tsc clean, detect_changes 2 symbols / 4 Run→* processes, all inside this
+PR's modules.
+
+### 2026-08-24 — TIER-1 live slice: fleet lock on real substrate — commit 0349b13
+
+`tier1-fanout-refusal.live.test.ts`: with the real FleetLock held at the
+cwd-relative path the verb resolves, a fully valid `fleet fanout --driver
+exedev` (schema-valid brief, matching --pin, roster ids) refuses exit 5 and
+mutates NOTHING — provider listing byte-identical, no fan-*.json, no run
+records (INV-2 pinned against the live provider). The fanout arms themselves
+are dispatches and inherit DF3.1's blockers (gate C/D spend + fill/key-path
+bugs F3/F6 in the run report), so pattern-arm live proof moves to TIER-2 with
+per-run spend approval. Report:
+`_bmad-output/workflow-state/code-review/e2e-audit/e2e-run-report.md`.
+
+
+### 2026-08-24 (later) — e2e fix session lands under the fanout PR's branch — commits f3abb96..624c98b
+
+The TIER-1 findings (e2e-run-report.md) were fixed on this PR's branch, so
+fanout's arms inherit everything: teardown no longer leaks a vmName-less
+record's runId-named box (F6 — disposeLosers/teardownSandbox's shared
+destroy step), destroy verifies by listing (F7), a post-close ingest failure
+releases the run lock instead of wedging the run (F5), and box-hours price
+fractionally (F8 — loser box-hours rows no longer round up to a full hour
+each). The new default fill mode bundle-push (F4) removes the public-repo
+requirement for every arm; proven live against the private
+biospark33/QDS-Factory at pushed SHA 624c98b (evidence
+`2026-08-24-220341/220432`). Fanout's own live-slice (lock refusal) re-proven
+post-fix (evidence 220246). Full suite 1199 pass / 0 fail; TIER-2 arms now
+need spend approval only.
+
+### 2026-08-25 — TIER-2 fanout test built; arms blocked at setup-gate C (F11) — SKIPPED-BLOCKED
+
+T2.2 (`tests/fleet/e2e/tier2-fanout-bestofn.live.test.ts`, commit 89a44f4)
+pins the full best-of-N N=2 live contract: one JSON line per ready arm,
+fan-*.json carrying both runIds + rosterIds + pin, per-arm capped records via
+QDS_RUNS_DIR, harvest both + teardown both, aggregate spend ≤ 2×cap, then
+`fleet rank` exit 0 over the real record with the null-score steps contract
+(no step-output producer exists for gate-only arms). NOT RUN: every arm is a
+dispatch whose setup gate dies at assertion C (DF3.1's F11, after F10's fix);
+spending ~$0.15 to re-hit a proven wall was declined. Rank remains unproven
+live for the same reason. The race pattern and reapRuns are still the two
+never-proven-live surfaces after this session.
 ## Handoff from df3-1 review round 10 — the fleet-ceiling TOCTOU goes LIVE the moment fan-out ships (DF13)
 
 **Source:** df3-1 BMAD review round 10, finding DF13 (MED, deferred to the providers/quota
@@ -367,13 +835,190 @@ own-pid lock steal and temp sweep fire after 60 s stalls. Concurrent arms sharin
 that pause >60 s mid-critical-section (debugger, SIGSTOP) can have locks stolen / temps
 swept by a sibling arm. Fine at current scale; worth a comment where fanout parks arms.
 
+### 2026-08-25 (session 3) — TIER-2 fanout GREEN live: both arms ready through full gates, advisory rank proven, F15 budget reconciliation landed — commit 4804765
+
+Three findings closed. (1) Arms share ONE issueId and admitIssue budgets per
+issue: with the ceiling below n×cap arm 0 provisioned a billable box while arm
+1 was refused budget-exceeded — measured live ×2 then reproduced byte-for-byte.
+Per operator direction the PRODUCT now reconciles before minting:
+`CostLedger.issueBudgetSnapshot()` (read-only ceiling/spent/reserved triple)
++ fanout pre-flight refusing exit-5 `issue-ceiling-insufficient` with the exact
+perIssueOverrides line to declare the aggregate — no silent raises, no
+post-meter refusal. RED→GREEN pinned in patterns.test (zero records, zero boxes
+on refusal). (2) Harness lesson from T2.1 applies per-arm: arms commit distinct
+work products pre-harvest (harvest counts COMMITS; probe manifests commit
+nothing). (3) Fixture declares n×per-arm via cost-config override — now also
+enforced early by the pre-flight itself. FINAL live run at HEAD: both arms
+outcome "ready" through full gates on two real boxes, rank verb exit 0 over the
+real record (null-score contract, rankedAt stamped, winner null), BOTH bundles
+verify, teardown ×2 exit 0, aggregate spend **146 µ$ ≤ 100,000 µ$**, final-ls
+[]. Evidence:
+`_bmad-output/evidence/df3-e2e/2026-08-25-155131-t2-2-fanout-bestofn.json`.
+
+## Review round 6 — bmad-code-review on full branch diff (2026-08-25, HEAD `8d27d7d`)
+
+14-layer parallel review (6 blind + 7 edge + acceptance auditor; 13 chunks, 12,798 diff lines).
+Auditor: 9/9 ACs PASS, rank formula exact match. Triage ledger:
+`_bmad-output/workflow-state/code-review/pr128-r6/triage.md`.
+
+### Patch (source — wave 1)
+- [x] [Review][Patch] A1 pidStartTime NaN/Infinity passes typeof gate in classifyHolder + stealJudgedReapMutex — add Number.isFinite, unjudgeable ⇒ refuse [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] A2 lstartUtcMs copied without isFinite [src/fleet/fleet-lock.ts:678]
+- [x] [Review][Patch] A3 empty-string requestId passes shape gate — treat as unjudgeable [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] A4 verify reap-mutex file mode 0600 explicit [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] A5 redundant spread of already-ArmOutcome [src/fleet/fanout-primitive.ts:757]
+- [x] [Review][Patch] A6 doc comment: use FleetLock not bare claim [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] B1 validate capMicroUsd positive safe integer at dispatch boundary [src/fleet/dispatch.ts]
+- [x] [Review][Patch] C1 --cap-micro-usd domain upper bound (1e12 µ$) [scripts/fleet.ts]
+- [x] [Review][Patch] C2 --roster ""/"," ≡ absent — refuse explicit-empty [scripts/fleet.ts]
+- [x] [Review][Patch] C3 steps-json testResults-with-testsExecuted:false inconsistency refused [scripts/fleet.ts]
+- [x] [Review][Patch] C4 robust error-message extraction in catch paths (ack/ledger close) [scripts/fleet.ts]
+- [x] [Review][Patch] C5 loser-ledger close failure always logged [scripts/fleet.ts:1776-1784]
+- [x] [Review][Patch] C6 help text --dir = fanouts dir [scripts/fleet.ts]
+
+### Patch (tests — wave 2)
+- [x] [Review][Patch] T1a remove redundant toBeLessThanOrEqual after toBe(2) [tests/fleet/patterns.test.ts]
+- [x] [Review][Patch] T1b n=FANOUT_MAX_N accept-side boundary test [tests/fleet/patterns.test.ts]
+- [x] [Review][Patch] T1c unknown-pattern message toContain(pattern) [tests/fleet/patterns.test.ts]
+- [x] [Review][Patch] T1d verify/fix determinism of race + AC8 concurrent tests [tests/fleet/patterns.test.ts]
+- [x] [Review][Patch] T2a fix misleading dp:ok comment on onDisk() [tests/fleet/fanout.test.ts]
+- [x] [Review][Patch] T2b instanceof Error guard before .code check [tests/fleet/fanout.test.ts]
+- [x] [Review][Patch] T2c explicit union-of-empty coverage test [tests/fleet/rank.test.ts]
+- [x] [Review][Patch] T2d assert lock file held during store mutation callback [tests/fleet/fanout.test.ts]
+- [x] [Review][Patch] T3a deadPid() verify-not-alive hardening [tests/fleet/helpers.ts]
+- [x] [Review][Patch] T3b armRows() parse guard [tests/fleet/cli.test.ts]
+- [x] [Review][Patch] T3c wedged-lock cleanup to guaranteed finally [tests/fleet/cli.test.ts]
+- [x] [Review][Patch] T3d length assert before tuple destructure [tests/fleet/cli.test.ts]
+- [x] [Review][Patch] T3e liveChild orphan guard [tests/fleet/helpers.ts]
+- [x] [Review][Patch] T4a tier1-lock concurrent teardown start barrier [tests/fleet/e2e/tier1-lock.live.test.ts]
+- [x] [Review][Patch] T4b tier1-teardown finally key-revoke fallback [tests/fleet/e2e/tier1-teardown.live.test.ts]
+
+### Dismissed (26, each verified against source — see triage.md §DISMISS)
+Headline: reap-mutex TOCTOU claims (serialized under .reap mutex; residual window
+documented as POSIX no-CAS limit), --steps-json "traversal" (no privilege
+boundary), fakeGate commitSha omission (full opts forwarded), winner >= arms.length
+(correct as written), tier2 recovery regex (matches verified newId("qds") format),
+rank rationale overlap (branches disjoint), 1e20 cap (unsafe integer already refused).
+
+### Deferred: none. decision_needed: none (C1 bound 1e12 µ$ chosen conservatively).
+
+### Round 6 gate (2026-08-25)
+
+All 28 patch items applied and checked off above (13 source — fleet-lock fail-closed
+body validation, dispatch capMicroUsd boundary guard, CLI cap/roster/steps-json
+refusals, errText diagnostics, unconditional loser-ledger close log; 15 test —
+boundary/determinism/comment hardening, deadPid reap-proof, wedged-lock finally,
+tier1-lock contention barrier, tier1-teardown finally revoke). 26 dismissals each
+verified against source (ledger: pr128-r6/triage.md). Bonus gate fix: tests/scripts/
+qds-cost.test.ts was stale vs F8 fractional box-hours (expected ceil-to-2h
+7,350,000; shipped arithmetic is 1.5h×3.6M=5,400,000) — proved pre-existing via
+stash, re-pinned to F8 math (23/23). Gates: full suite 3526 pass / 8 skip /
+11 todo / 1 fail = documented pre-existing gitnexus graph-queries index-reader;
+tsc --noEmit clean; biome clean on all 15 touched files; gitnexus detect_changes
+scope = PR's own fleet/CLI/test modules, no out-of-scope symbols.
+
+### Round 7 gate (2026-08-25)
+
+17 reviewers (11 blind, 4 edge, 2 split auditors — the first auditor died on the
+full-diff context limit and was respawned as two sequential-reading halves) over an
+11-chunk bijection-verified split. Auditors: 0 AC FAILs (PARTIALs were split-scope
+artifacts, cross-covered). Ledger: `workflow-state/code-review/pr128-r7/triage.md`.
+
+Patched (13 source + 12 test items, all including LOWs):
+- [x] [Review][Patch] S1a/S1c fleet-lock refuses negative + far-future createdAt (unjudgeable, never reclaim) [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] S1b fleet-lock refuses negative pidStartTime in classifyHolder + stealJudgedReapMutex [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] S1d per-listener try/catch in signal restoration loop [src/fleet/fleet-lock.ts]
+- [x] [Review][Patch] S2a rank refuses testResults-without-testsExecuted:true at library boundary (CLI C3 parity) [src/fleet/rank.ts]
+- [x] [Review][Patch] S3a `--roster "a,,b"` empty-segment refusal [scripts/fleet.ts]
+- [x] [Review][Patch] S3b `--roster "x,x"` duplicate refusal [scripts/fleet.ts]
+- [x] [Review][Patch] S3c rank refuses orphaned zero-arms fanout record (crash-window detect-only, never deletes) [src/fleet/rank.ts]
+- [x] [Review][Patch] S4a race lowest-index tie-break documented [src/fleet/fanout-primitive.ts]
+- [x] [Review][Patch] S5a evidence scrub catch-all `sk-…{20,}` pass [tests/fleet/e2e/live-harness.ts]
+- [x] [Review][Patch] S5b runIdFor suffix space 1e4→1e6; S5c scratchClone unfetchable-SHA diagnostic [tests/fleet/e2e/live-harness.ts]
+- [x] [Review][Patch] T-g fanout-refusal test asserts lock file on disk [tests/fleet/e2e/tier1-fanout-refusal.live.test.ts]
+- [x] [Review][Patch] T-a1 patterns.test exact-count tightening (1 pinned; 4 sites documented non-pinnable — poll-cycle timing) + peak-measured-before-release bug fix [tests/fleet/patterns.test.ts]
+- [x] [Review][Patch] T-b1/T-b2/T-b3 negative-cap test, MAX_STEPS_BYTES export+import, scratch-dir afterEach sweep [tests/fleet/cli.test.ts, scripts/fleet.ts]
+- [x] [Review][Patch] T-c1 deadPid budget 100ms→2s [tests/fleet/helpers.ts]
+- [x] [Review][Patch] T-e1 tier1-harvest finally asserts teardown exit 0 when body succeeded (VM-leak visibility) [tests/fleet/e2e/tier1-harvest.live.test.ts]
+- [x] [Review][Patch] T-f1 tier1-lock barrier no longer false-throws when first teardown out-runs the poller [tests/fleet/e2e/tier1-lock.live.test.ts]
+- [x] [Review][Patch] T-h1 tier2 leak-check retry 5×8s (measured 25s+ listing lag) [tests/fleet/e2e/tier2-*.live.test.ts]
+
+Dismissed (28, each verified against source — see triage.md §DISMISS). Headline:
+steps-json "unbounded read" BLOCKER (no privilege boundary; FIFO/dir refused pre-read;
+stat-fail fall-through deliberate), cost-ledger float BLOCKER (numerator integrality
+checked before division), settle-loop toBeDefined "false pass" (reviewer error — it
+fails), runFleet "backpressure deadlock" (Promise.all drains both pipes concurrently),
+fill absolute-workdir `../bundle` break (join consistent both sides), liveChild BLOCKER
+(self-expiring 30s, call-site contract). T-i1 qds-cost ceil comment was already fixed
+in round 6 (reviewer read a stale hunk).
+
+Gates: focal suites 484 pass / 0 fail across 8 files (cli suite run 3× — one 5s-default
+timeout flake hardened to 20s with rationale); biome clean on all 17 touched files;
+tsc --noEmit exit 0; gitnexus detect_changes scope = PR's own fleet/CLI/test modules,
+no out-of-scope symbols. decision_needed: none — S3c resolved detect+refuse (fail-safe),
+S1c resolved refuse-reclamation (fail-closed).
+
+### 2026-08-26 — TIER-3 live-proof audit GREEN: 6/6 shipped patterns proven on real substrate — commits `b8da988`..`f8cb500`
+
+Full §T3 verdict matrix + per-attempt spend table + findings ledger:
+`_bmad-output/workflow-state/code-review/e2e-audit/e2e-run-report.md` §TIER-3
+FINAL. Per-test evidence: `_bmad-output/evidence/df3-e2e/2026-08-26-*` (44
+JSONs, committed).
+
+- **T3.2 many-stories PROVEN** (`131544`): both arms ready, distinct
+  briefHashes, pin null, no auto-rank, harvest+teardown ×2, spend 146 µ$ ≤
+  100k; $0 probe suite incl. P1 — the live discharge of the **PF-1 F15b
+  grouped-arithmetic fix** (`b8da988`: pre-flight groups briefs by
+  (repoSlug, issueId), Σ(count×cap) headroom per group, refusal names every
+  group's override line).
+- **T3.1 race PROVEN** att7 (`154346`): both gates ready, marker planted via
+  the **PF-3 exec-cat fix** (`fc21f8b` — copyFile was box-relative and
+  refused /run, making the race structurally undecidable on real substrate),
+  winner 0 claimed live, loser destroyed by the primitive with a REAL lazy
+  ledger row (3716 µ$ unpriced=0 — the DF2.8 proof unit tests only faked).
+- **T3.5 on-box phases PROVEN** run9 (`182443`): 3 manifest phases exec'd
+  on-box through `scripts/pipeline-run-remote.ts` (host-orchestrated shim;
+  in-box executor stays the filed story proposal), **PF-2 stdout tails**
+  ride journal values (`e586da2`), money identity 50k×3, marker in the
+  harvest bundle. Shim fixes on the way: `$HOME` resolution, per-element
+  shellQuote (reproduced dash `printf: usage` live), manifest runBudgetMs
+  60000→150000 per requiredBudgetMs arithmetic (`889e4c1`).
+- **T3.3 expose/port PROVEN** run5 (`185732`): posture-gate refusal (exit 1,
+  box alive) + anonymous world-reach serving an unguessable marker + the
+  teardown-redirect retraction proof. Assert discipline: served-BODY
+  content, never curl exit codes (exe.dev redirects ECHO the path).
+- **T3.4b reaper PROVEN** run4 (`193343`) + **product fix**: sandbox-reap's
+  SweepDeps.costLedger was missing — teardown ran but never priced box_hours
+  and never retired the reservation. Wired (`2b94456`), then proven live:
+  stale OPEN record → reap --yes → 8170 µ$ priced row → box destroyed, key
+  revoked, dry-run clean.
+- **T3.4a orphan lazy-expiry PROVEN** run7 (`204954`): after measuring the
+  admission-commit→record-create window at ~1–3 ms (5ms poll: 1-in-13), the
+  test's kill poller became a hot spin over ONE persistent readonly WAL
+  connection (`f8cb500`) — kill landed attempt 1-of-12, young-control
+  refused exit 5 (reservation still held), 368.6s later a fresh dispatch on
+  the same issue ADMITTED with reserved:0 — the lazy sweep expired the
+  orphan exactly. Zero boxes ever created; run cost ≈ $0.
+
+Arc spend ≈ 410–500k µ$ (~$0.50) against a ≈$1.22 approved envelope; no test
+approached its cap. Substrate clean at close: 0 boxes, 0 orphan keys
+(swept + verified after every test). Four PR-visible product changes above
+(PF-1, PF-2, PF-3, reaper costLedger); the rest is committed live-test +
+shim infrastructure. 9 findings ledgered in the run report (headline:
+gate-B fresh-box pi-registry init race ~25%/attempt on 2-arm runs —
+substrate-level, planning decision whether to add a bounded B-only retry).
+
 ---
 
 ## Status
 
 **in progress — PR [#128](https://github.com/biospark33/QDS-Factory/pull/128) open since 2026-08-24
-(branch `feature/df3-2-fanout-best-of-n`, 56 commits), under review.**
+(branch `feature/df3-2-fanout-best-of-n`, 60 commits at the 2026-08-26 main-merge reconciliation), under
+active review.**
 
 `sprint-status.yaml` had this story at `ready-for-dev` for the whole life of the PR; corrected to
-`in-progress` in the 2026-08-26 artifact audit. The Dev Agent Record above is still the empty
-placeholder — it gets filled when the PR merges. Not counted in the done tally.
+`in-progress` in the 2026-08-26 artifact audit (main's copy). This branch's own copy has carried
+`review` since commit `8030cda` and records seven review rounds plus the TIER-1/2/3 live-fire
+sections above — `review` stands after the 2026-08-26 merge reconciliation. The Dev Agent Record
+above is filled on this branch (Wave 2 agent D table onward); it is finalized when the PR merges.
+Not counted in the done tally.

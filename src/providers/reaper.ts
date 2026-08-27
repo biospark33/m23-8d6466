@@ -150,6 +150,16 @@ export interface SweepDeps {
   actionTimeoutMs?: number;
   /** Default REAP_PHASE_BUDGET_MS — wall-clock cap on the whole apply phase. */
   reapBudgetMs?: number;
+  /**
+   * DF2.8's box-hours ledger for the sweep's teardown units. The CLI wires it
+   * exactly as sandbox-teardown does (costLedgerOpts(store.dir) + the store's
+   * own readRunRecord) — without it a reaped run's teardown closes the record
+   * but never writes the priced box_hours row, so the dispatch's reservation
+   * stays open against the budget cap forever (MEASURED live 2026-08-26,
+   * T3.4b: "teardown 1" yet zero cost_events rows and the issue's headroom
+   * never restored). Optional only so non-CLI embedders keep compiling.
+   */
+  costLedger?: TeardownDeps["costLedger"];
 }
 
 export interface SweepOptions {
@@ -568,7 +578,8 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
 
   // Teardown/credential deps are rebuilt from the sweep's own handles: the
   // runsDir follows the store (bundles land beside the records) and gitCwd is
-  // the invoking cwd (teardown's harvest fetch target).
+  // the invoking cwd (teardown's harvest fetch target). costLedger rides only
+  // when the CLI wired one — see SweepDeps.costLedger for why it must.
   const teardownDeps: TeardownDeps = {
     driver: deps.driver,
     store: deps.store,
@@ -576,6 +587,7 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
     requestId,
     gitCwd: process.cwd(),
     runsDir: deps.store.dir,
+    ...(deps.costLedger !== undefined ? { costLedger: deps.costLedger } : {}),
   };
   const credDeps: CredentialDeps = { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId };
 

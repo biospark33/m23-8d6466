@@ -1,0 +1,66 @@
+{
+  "writtenAt": "2026-08-25T14:24:31.589Z",
+  "test": "T2.2",
+  "outcome": "fail",
+  "fanoutId": "",
+  "runIds": [
+    "qds-20260825-0f6b54",
+    "qds-20260825-26da9e"
+  ],
+  "capMicroUsdPerArm": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "perArm": true,
+      "aggregateCapMicroUsd": 100000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t22probe-mt8r9eo64b9"
+    },
+    {
+      "phase": "fanout-verb",
+      "exitCode": 1,
+      "stdout": "{\"fanoutId\":\"fan-20260825-ff6d64\",\"arm\":0,\"runId\":\"qds-20260825-0f6b54\",\"outcome\":\"ready\",\"vmName\":\"qds-20260825-0f6b54\"}\n{\"fanoutId\":\"fan-20260825-ff6d64\",\"arm\":1,\"runId\":\"qds-20260825-26da9e\",\"outcome\":\"armFailed\"}",
+      "stderrTail": "utcome\":\"ok\",\"record_write_ms\":2}\n{\"agentId\":null,\"timestamp\":\"2026-08-25T14:24:15.740Z\",\"duration\":37506,\"status\":\"ok\",\"requestId\":\"a1c0b6d2-b34a-42ef-8364-1382c73bfc83\",\"operation\":\"fleet.fanout.arm\",\"fanoutId\":\"fan-20260825-ff6d64\",\"arm\":0,\"runId\":\"qds-20260825-0f6b54\",\"outcome\":\"ready\",\"vmName\":\"qds-20260825-0f6b54\",\"durationMs\":37506}\n{\"requestId\":\"a1c0b6d2-b34a-42ef-8364-1382c73bfc83\",\"operation\":\"fanout-record.mutate\",\"agentId\":null,\"timestamp\":\"2026-08-25T14:24:15.742Z\",\"duration\":2,\"status\":\"ok\"}\n{\"requestId\":\"a1c0b6d2-b34a-42ef-8364-1382c73bfc83\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-08-25T14:24:15.749Z\",\"duration\":38708,\"durationMs\":38708,\"status\":\"error\",\"runId\":\"fan-20260825-ff6d64\",\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runIds": [
+        "qds-20260825-0f6b54",
+        "qds-20260825-26da9e"
+      ]
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 0,
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 1,
+      "exitCode": 4
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260825-0f6b54",
+      "ok": true
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260825-26da9e",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

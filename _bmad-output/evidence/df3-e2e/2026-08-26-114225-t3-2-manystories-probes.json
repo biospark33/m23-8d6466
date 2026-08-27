@@ -1,0 +1,40 @@
+{
+  "writtenAt": "2026-08-26T11:42:25.313Z",
+  "test": "T3.2 probes",
+  "outcome": "pass",
+  "phases": [
+    {
+      "phase": "ls-before",
+      "boxes": []
+    },
+    {
+      "phase": "neg-roster",
+      "exitCode": 2,
+      "stderrTail": "{\"code\":\"usage\",\"message\":\"--roster is not valid for many-stories\",\"remediation\":\"drop --roster; per-arm variation comes from the distinct briefs\"}\n{\"requestId\":\"6fd53fae-753d-4c63-8c03-a5a984d52db6\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-08-26T11:42:10.637Z\",\"duration\":29,\"durationMs\":29,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "neg-pin",
+      "exitCode": 2,
+      "stderrTail": "{\"code\":\"pin-mismatch\",\"message\":\"--pin is not valid for many-stories: per-arm pins ride each brief's commitSha\",\"remediation\":\"drop --pin, or put the intended sha on each brief\"}\n{\"requestId\":\"46ad5520-538e-4cb2-bfc5-bdabad7e4a5d\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-08-26T11:42:12.677Z\",\"duration\":221,\"durationMs\":221,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "neg-count",
+      "exitCode": 2,
+      "stderrTail": "{\"code\":\"brief-count-mismatch\",\"message\":\"many-stories got 2 briefs for n=3\",\"remediation\":\"make the brief array length equal --n\"}\n{\"requestId\":\"98beea76-de56-442c-9afd-591ad35e1b8e\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-08-26T11:42:14.812Z\",\"duration\":94,\"durationMs\":94,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "neg-n1-legal",
+      "exitCode": 2,
+      "stderrTail": "{\"code\":\"brief-count-mismatch\",\"message\":\"many-stories got 2 briefs for n=1\",\"remediation\":\"make the brief array length equal --n\"}\n{\"requestId\":\"b8f4275a-b5dc-4319-8eb4-308ae77c72c0\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-08-26T11:42:17.428Z\",\"duration\":228,\"durationMs\":228,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "p1-grouped-refusal",
+      "exitCode": 5,
+      "stderrTail": "us\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"list\",\"durationMs\":1668,\"outcome\":\"ok\",\"driver_call_ms\":1668}\n{\"issues\":[{\"issueKey\":\"biospark33/QDS-Factory#47\",\"needMicroUsd\":50000,\"availableMicroUsd\":30000,\"ceilingMicroUsd\":30000,\"spentMicroUsd\":0,\"reservedMicroUsd\":0}],\"code\":\"issue-ceiling-insufficient\",\"message\":\"fan-out of 2 arms at 50000 µ$ each needs 50000 µ$ of issue headroom for biospark33/QDS-Factory#47, but the ledger has 30000 (ceiling 30000 − spent 0 − reserved 0)\",\"remediation\":\"declare the aggregate for this fan-out in .sandbox/cost-config.json: {\\\"perIssueOverrides\\\": {\\\"biospark33/QDS-Factory#47\\\": 50000}}\"}\n{\"requestId\":\"6f884b56-151c-4683-9659-82078bdab16b\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-08-26T11:42:23.558Z\",\"duration\":3030,\"durationMs\":3030,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "ls-after",
+      "boxes": []
+    }
+  ]
+}

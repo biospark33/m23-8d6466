@@ -1,0 +1,216 @@
+{
+  "writtenAt": "2026-08-26T19:52:09.245Z",
+  "test": "T3.4a",
+  "outcome": "fail",
+  "phases": [
+    {
+      "phase": "kill-too-late",
+      "attempt": 1,
+      "runId": "qds-20260826-83ebbc",
+      "note": "record existed — tearing down, retrying"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 1,
+      "stderrTail": "ationMs\":1,\"outcome\":\"within-budget\",\"sum_query_ms\":1}\n{\"requestId\":\"328b5306-2885-4192-8c22-6e9c6d11c262\",\"operation\":\"run-record.create\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:51:39.986Z\",\"duration\":0,\"status\":\"ok\",\"runId\":\"qds-20260826-83ebbc\",\"driver\":null,\"verb\":\"create\",\"durationMs\":0,\"outcome\":\"ok\",\"record_write_ms\":0}\n{\"requestId\":\"328b5306-2885-4192-8c22-6e9c6d11c262\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:51:39.988Z\",\"duration\":2,\"status\":\"ok\",\"runId\":\"qds-20260826-83ebbc\",\"driver\":null,\"verb\":\"set\",\"durationMs\":2,\"outcome\":\"ok\",\"record_write_ms\":2}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-83ebbc",
+      "teardownExit": 0
+    },
+    {
+      "phase": "kill-too-late",
+      "attempt": 2,
+      "runId": "qds-20260826-a8b7e4",
+      "note": "record existed — tearing down, retrying"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 2,
+      "stderrTail": "ationMs\":2,\"outcome\":\"within-budget\",\"sum_query_ms\":2}\n{\"requestId\":\"716376e8-7f33-4ae1-92c2-17e830c2985b\",\"operation\":\"run-record.create\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:51:44.179Z\",\"duration\":1,\"status\":\"ok\",\"runId\":\"qds-20260826-a8b7e4\",\"driver\":null,\"verb\":\"create\",\"durationMs\":1,\"outcome\":\"ok\",\"record_write_ms\":1}\n{\"requestId\":\"716376e8-7f33-4ae1-92c2-17e830c2985b\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:51:44.180Z\",\"duration\":1,\"status\":\"ok\",\"runId\":\"qds-20260826-a8b7e4\",\"driver\":null,\"verb\":\"set\",\"durationMs\":1,\"outcome\":\"ok\",\"record_write_ms\":1}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-83ebbc",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-a8b7e4",
+      "teardownExit": 0
+    },
+    {
+      "phase": "kill-too-late",
+      "attempt": 3,
+      "runId": "qds-20260826-a85982",
+      "note": "record existed — tearing down, retrying"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 3,
+      "stderrTail": "ationMs\":3,\"outcome\":\"within-budget\",\"sum_query_ms\":3}\n{\"requestId\":\"fd8c36cf-b2d1-49f1-b656-72eb997ff848\",\"operation\":\"run-record.create\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:51:48.222Z\",\"duration\":0,\"status\":\"ok\",\"runId\":\"qds-20260826-a85982\",\"driver\":null,\"verb\":\"create\",\"durationMs\":0,\"outcome\":\"ok\",\"record_write_ms\":0}\n{\"requestId\":\"fd8c36cf-b2d1-49f1-b656-72eb997ff848\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:51:48.224Z\",\"duration\":2,\"status\":\"ok\",\"runId\":\"qds-20260826-a85982\",\"driver\":null,\"verb\":\"set\",\"durationMs\":2,\"outcome\":\"ok\",\"record_write_ms\":2}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-83ebbc",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-a8b7e4",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-a85982",
+      "teardownExit": 0
+    },
+    {
+      "phase": "kill-too-late",
+      "attempt": 4,
+      "runId": "qds-20260826-f9ccfc",
+      "note": "record existed — tearing down, retrying"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 4,
+      "stderrTail": "ationMs\":2,\"outcome\":\"within-budget\",\"sum_query_ms\":2}\n{\"requestId\":\"4b223132-3191-4ed6-a62f-a306732f8dc5\",\"operation\":\"run-record.create\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:51:55.546Z\",\"duration\":1,\"status\":\"ok\",\"runId\":\"qds-20260826-f9ccfc\",\"driver\":null,\"verb\":\"create\",\"durationMs\":1,\"outcome\":\"ok\",\"record_write_ms\":1}\n{\"requestId\":\"4b223132-3191-4ed6-a62f-a306732f8dc5\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:51:55.548Z\",\"duration\":2,\"status\":\"ok\",\"runId\":\"qds-20260826-f9ccfc\",\"driver\":null,\"verb\":\"set\",\"durationMs\":2,\"outcome\":\"ok\",\"record_write_ms\":2}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-83ebbc",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-f9ccfc",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-a8b7e4",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-a85982",
+      "teardownExit": 0
+    },
+    {
+      "phase": "kill-too-late",
+      "attempt": 5,
+      "runId": "qds-20260826-30ad2e",
+      "note": "record existed — tearing down, retrying"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 5,
+      "stderrTail": "ationMs\":2,\"outcome\":\"within-budget\",\"sum_query_ms\":2}\n{\"requestId\":\"0419c776-9d2b-4470-a374-122471196b96\",\"operation\":\"run-record.create\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:51:59.733Z\",\"duration\":0,\"status\":\"ok\",\"runId\":\"qds-20260826-30ad2e\",\"driver\":null,\"verb\":\"create\",\"durationMs\":0,\"outcome\":\"ok\",\"record_write_ms\":0}\n{\"requestId\":\"0419c776-9d2b-4470-a374-122471196b96\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:51:59.734Z\",\"duration\":1,\"status\":\"ok\",\"runId\":\"qds-20260826-30ad2e\",\"driver\":null,\"verb\":\"set\",\"durationMs\":1,\"outcome\":\"ok\",\"record_write_ms\":1}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-30ad2e",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-83ebbc",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-f9ccfc",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-a8b7e4",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-a85982",
+      "teardownExit": 0
+    },
+    {
+      "phase": "kill-too-late",
+      "attempt": 6,
+      "runId": "qds-20260826-bf3925",
+      "note": "record existed — tearing down, retrying"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 6,
+      "stderrTail": "ationMs\":2,\"outcome\":\"within-budget\",\"sum_query_ms\":2}\n{\"requestId\":\"832e1a14-926b-4d62-b446-ff5d05a4f5ef\",\"operation\":\"run-record.create\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:52:03.646Z\",\"duration\":0,\"status\":\"ok\",\"runId\":\"qds-20260826-bf3925\",\"driver\":null,\"verb\":\"create\",\"durationMs\":0,\"outcome\":\"ok\",\"record_write_ms\":0}\n{\"requestId\":\"832e1a14-926b-4d62-b446-ff5d05a4f5ef\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-08-26T19:52:03.648Z\",\"duration\":2,\"status\":\"ok\",\"runId\":\"qds-20260826-bf3925\",\"driver\":null,\"verb\":\"set\",\"durationMs\":2,\"outcome\":\"ok\",\"record_write_ms\":2}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-30ad2e",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-83ebbc",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-f9ccfc",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-a8b7e4",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-bf3925",
+      "teardownExit": 0
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260826-a85982",
+      "teardownExit": 0
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).not.toBeNull()\n\nReceived: null\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "id": "qds-20260826-30ad2e",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-teardown",
+      "id": "qds-20260826-83ebbc",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-teardown",
+      "id": "qds-20260826-f9ccfc",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-teardown",
+      "id": "qds-20260826-a8b7e4",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-teardown",
+      "id": "qds-20260826-bf3925",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-teardown",
+      "id": "qds-20260826-a85982",
+      "exitCode": 0
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

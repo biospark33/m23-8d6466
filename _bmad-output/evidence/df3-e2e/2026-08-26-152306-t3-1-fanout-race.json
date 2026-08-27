@@ -1,0 +1,395 @@
+{
+  "writtenAt": "2026-08-26T15:23:06.412Z",
+  "test": "T3.1 race",
+  "outcome": "fail",
+  "fanoutId": "fan-20260826-cee620",
+  "runIds": [
+    "qds-20260826-7724e0",
+    "qds-20260826-fe8c32"
+  ],
+  "capMicroUsdPerArm": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "aggregateCapMicroUsd": 100000
+    },
+    {
+      "phase": "fan-record-early",
+      "fanoutId": "fan-20260826-cee620",
+      "arms": [
+        {
+          "arm": 0,
+          "runId": "qds-20260826-7724e0",
+          "rosterId": "lead",
+          "briefHash": "44871e83ad7d53bb7d8d9fe9807aff6a594552b881d75342cce6ce0b74d9f107"
+        },
+        {
+          "arm": 1,
+          "runId": "qds-20260826-fe8c32",
+          "rosterId": "fixer",
+          "briefHash": "44871e83ad7d53bb7d8d9fe9807aff6a594552b881d75342cce6ce0b74d9f107"
+        }
+      ]
+    },
+    {
+      "phase": "boxes-listed",
+      "vms": [
+        "qds-20260826-7724e0",
+        "qds-20260826-fe8c32"
+      ]
+    },
+    {
+      "phase": "marker-planted",
+      "vm": "qds-20260826-7724e0",
+      "marker": "/run/journal/final.json"
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 1,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 32,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 63,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 95,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 126,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 158,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 189,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 220,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 251,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 282,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 313,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 345,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 376,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 407,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 438,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 469,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 500,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 532,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 563,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 594,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260826-7724e0",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260826-fe8c32",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "record-snapshot-at-claim-or-timeout",
+      "record": {
+        "winner": null,
+        "closedAt": null,
+        "t": 600
+      }
+    },
+    {
+      "phase": "verb-stderr-on-timeout",
+      "tail": "\"duration\":981,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":981,\"outcome\":\"ok\",\"driver_call_ms\":981}\n{\"requestId\":\"eaa9c0cc-9c0c-4ff6-a364-723aaa0a7411\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-08-26T15:21:51.828Z\",\"duration\":1010,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":1010,\"outcome\":\"ok\",\"driver_call_ms\":1010}\n{\"requestId\":\"eaa9c0cc-9c0c-4ff6-a364-723aaa0a7411\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-08-26T15:21:57.802Z\",\"duration\":971,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":971,\"outcome\":\"ok\",\"driver_call_ms\":971}\n{\"requestId\":\"eaa9c0cc-9c0c-4ff6-a364-723aaa0a7411\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-08-26T15:22:03.877Z\",\"duration\":1072,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":1072,\"outcome\":\"ok\",\"driver_call_ms\":1072}\n{\"requestId\":\"eaa9c0cc-9c0c-4ff6-a364-723aaa0a7411\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-08-26T15:22:09.831Z\",\"duration\":953,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":953,\"outcome\":\"ok\",\"driver_call_ms\":953}\n{\"requestId\":\"eaa9c0cc-9c0c-4ff6-a364-723aaa0a7411\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-08-26T15:22:15.909Z\",\"duration\":1075,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":1075,\"outcome\":\"ok\",\"driver_call_ms\":1075}\n{\"requestId\":\"eaa9c0cc-9c0c-4ff6-a364-723aaa0a7411\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-08-26T15:22:21.932Z\",\"duration\":1020,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":1020,\"outcome\":\"ok\",\"driver_call_ms\":1020}\n{\"requestId\":\"eaa9c0cc-9c0c-4ff6-a364-723aaa0a7411\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-08-26T15:22:27.926Z\",\"duration\":991,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":991,\"outcome\":\"ok\",\"driver_call_ms\":991}\n{\"requestId\":\"eaa9c0cc-9c0c-4ff6-a364-723aaa0a7411\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-08-26T15:22:34.137Z\",\"duration\":1207,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":1207,\"outcome\":\"ok\",\"driver_call_ms\":1207}\n{\"requestId\":\"eaa9c0cc-9c0c-4ff6-a364-723aaa0a7411\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-08-26T15:22:40.106Z\",\"duration\":967,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":967,\"outcome\":\"ok\",\"driver_call_ms\":967}"
+    },
+    {
+      "phase": "test-error",
+      "error": "race poller never claimed a winner in 600 s — record {\"winner\":null,\"closedAt\":null,\"t\":600}",
+      "record": {
+        "winner": null,
+        "closedAt": null,
+        "t": 600
+      }
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 0,
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 1,
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-7724e0",
+      "ok": true
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-fe8c32",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [],
+      "attempts": 5
+    }
+  ]
+}

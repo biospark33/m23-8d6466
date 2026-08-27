@@ -1,0 +1,22 @@
+{
+  "writtenAt": "2026-08-24T20:04:35.290Z",
+  "test": "T1.5",
+  "outcome": "pass",
+  "phases": [
+    {
+      "phase": "fleet-lock-held",
+      "ok": true,
+      "path": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t15-84gq6f/.sandbox/fleet.lock"
+    },
+    {
+      "phase": "fanout-verb",
+      "exitCode": 5,
+      "stdout": "",
+      "stderrTail": "2e-t15-84gq6f/.sandbox/fleet.lock (request e2e-t15-e2e-t15probe-mt7o004p2gi, pid 66593, created 2026-08-24T20:04:32.054Z)\",\"remediation\":\"wait for that fan-out to finish — or, only if you have confirmed that fan-out (pid 66593) is gone: rm /private/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t15-84gq6f/.sandbox/fleet.lock\"}\n{\"requestId\":\"bf2465f6-7242-4523-a717-b06f77cc8570\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-08-24T20:04:34.102Z\",\"duration\":31,\"durationMs\":31,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "nothing-mutated",
+      "ok": true
+    }
+  ]
+}

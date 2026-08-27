@@ -1,0 +1,79 @@
+{
+  "writtenAt": "2026-08-26T13:51:51.296Z",
+  "test": "T3.1 race",
+  "outcome": "fail",
+  "fanoutId": "fan-20260826-15067f",
+  "runIds": [
+    "qds-20260826-1fc8ce",
+    "qds-20260826-685910"
+  ],
+  "capMicroUsdPerArm": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "aggregateCapMicroUsd": 100000
+    },
+    {
+      "phase": "fan-record-early",
+      "fanoutId": "fan-20260826-15067f",
+      "arms": [
+        {
+          "arm": 0,
+          "runId": "qds-20260826-1fc8ce",
+          "rosterId": "lead",
+          "briefHash": "ab18fe086ea5c7821d231fa44a09c563c06fdd06d02da2c9ba94c10fa8397b9f"
+        },
+        {
+          "arm": 1,
+          "runId": "qds-20260826-685910",
+          "rosterId": "fixer",
+          "briefHash": "ab18fe086ea5c7821d231fa44a09c563c06fdd06d02da2c9ba94c10fa8397b9f"
+        }
+      ]
+    },
+    {
+      "phase": "boxes-listed",
+      "vms": [
+        "qds-20260826-1fc8ce",
+        "qds-20260826-685910"
+      ]
+    },
+    {
+      "phase": "marker-planted",
+      "vm": "qds-20260826-1fc8ce",
+      "marker": "/run/journal/final.json"
+    },
+    {
+      "phase": "test-error",
+      "error": "pollUntil(record winner) exceeded 300000 ms bound"
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 0,
+      "exitCode": 6
+    },
+    {
+      "phase": "finally-teardown-arm",
+      "arm": 1,
+      "exitCode": 6
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-1fc8ce",
+      "ok": false,
+      "error": "ssh exe.dev ls exited 255: No user exists for uid 501"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260826-685910",
+      "ok": false,
+      "error": "ssh exe.dev ls exited 255: No user exists for uid 501"
+    },
+    {
+      "phase": "final-ls-error",
+      "error": "ssh exe.dev ls exited 255: No user exists for uid 501"
+    }
+  ]
+}
