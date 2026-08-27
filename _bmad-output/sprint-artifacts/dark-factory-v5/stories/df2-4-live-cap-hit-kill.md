@@ -468,3 +468,13 @@ escaping escapes found); (4) exhaustion path: MAX_ITERATIONS=4096 with O(n²)
 scan makes a real trigger take hours at scale — bound documented at the test
 with boundary coverage; KEY_MANAGEMENT_URL_RE floor hardened {16,}→{8,}
 matching MIN_REDACTABLE_LEN (+3 boundary tests). Probe retry gained 1s backoff.
+
+---
+
+## Status
+
+**done — PR [#118](https://github.com/biospark33/QDS-Factory/pull/118) merged 2026-08-20 (`bba0450`).**
+Demonstrated live against a real key with real spend; the recorded evidence lives at
+`_bmad-output/sprint-artifacts/dark-factory-v5/evidence/df2-4-cap-hit.md`. Four review rounds
+applied (see the round dispositions above). Status section added in the 2026-08-26 artifact audit —
+`sprint-status.yaml` already carried `done`, this file simply had no stamp.

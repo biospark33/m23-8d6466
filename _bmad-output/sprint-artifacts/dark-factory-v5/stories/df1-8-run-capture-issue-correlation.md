@@ -248,7 +248,7 @@ manually; P1.2 automates that intake and remains KEEP, repointed by DF5.5.)*
 
 ## Dev Agent Record
 
-**Status: complete — 2026-08-18, branch `feature/df1-8-run-capture-issue-correlation`.**
+**Status: done — PR #117 merged 2026-08-18 (`3830a2f`), branch `feature/df1-8-run-capture-issue-correlation`.** The merge reference was added in the 2026-08-26 artifact audit.
 
 ### Implementation Plan (as executed)
 

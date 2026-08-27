@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "repos": {
+    "acme/widgets": {
+      "remote": "https://github.com/acme/widgets.git",
+      "baseBranch": "main",
+      "authorLogin": "steve-bot"
+    }
+  }
+}

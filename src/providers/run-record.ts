@@ -141,8 +141,25 @@ export type RunRecordPatch = Partial<Omit<RunRecord, "runId" | "createdAt" | "cl
 export const EXTENSION_NAMESPACES: Readonly<
   Record<string, { schemaVersion: number; fields: Readonly<Record<string, FieldKind>> }>
 > = {
-  /** DF5.2 */
-  pr: { schemaVersion: 1, fields: { prUrl: "string", prNumber: "int" } },
+  /**
+   * DF5.2's PR correlation. Exactly three fields, written when the host first
+   * holds the PR and never retroactively: `prUrl`/`prNumber` are DF5.3's first
+   * hop, and `createdAt` is an ISO-8601 stamp from the HOST clock — never
+   * GitHub's `created_at`, whose server clock is not comparable with the host
+   * clocks that stamp `ReverifyReport.completedAt` and the approval's
+   * `decidedAt`. DF5.4-C6 orders re-verify-precedes-PR by comparing host
+   * clocks only.
+   *
+   * On the path that opens the PR, `createdAt` is the stamp taken immediately
+   * before `POST /pulls` — the creation instant under the host clock. On the
+   * two paths that adopt an EXISTING PR instead of posting (a lost `POST
+   * /pulls` response recovered by the reuse probe, and a 422 "already exists"
+   * from a concurrent caller), no host stamp for the true creation is
+   * recoverable, and `createdAt` is the host's FIRST-OBSERVATION time. It is
+   * then later than the true creation — conservative for C6's ordering, and
+   * not a claim about when GitHub made the PR.
+   */
+  pr: { schemaVersion: 1, fields: { prUrl: "string", prNumber: "int", createdAt: "string" } },
   /** DF6.1 */
   fixLoop: { schemaVersion: 1, fields: { fixContext: "string", fixOutcome: "string" } },
   /** DF3.2 */

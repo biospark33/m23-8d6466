@@ -796,7 +796,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
         : [
             `for a in "$@"; do`,
             `  printf '%s' "$a" | grep -q '"model":"' && printf '%s\\n' "$a" >> "${opts.curlLog}"`,
-            `done`,
+            "done",
           ];
     writeFileSync(
       join(binDir, "curl"),

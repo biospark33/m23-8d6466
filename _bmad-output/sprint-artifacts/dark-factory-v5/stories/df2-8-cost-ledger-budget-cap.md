@@ -516,4 +516,4 @@ Deferred (1): internal retry/backoff for `ledger-busy` under >10 concurrent disp
 Dismissed (4): box-hour rate late-fail at teardown — spec-mandated surfacing, not silent default (blind); positive-USD→negative-µ$ — mathematically impossible in safe range (edge); open-run reservation persistence — verify-only, expiry path exists from prior round (edge, pending verifier verdict); INFO confirmations ×2 (append-only triggers, serialized admission).
 
 
-**Status:** review — implemented, four review rounds complete (this pass: 19/19 actionable patches applied, 119/119 focal green); awaiting PR #121 merge
+**Status:** done — PR #121 merged 2026-08-21 (`31c4a0d`), after four review rounds (final pass: 19/19 actionable patches applied, 119/119 focal green). This line read "review — awaiting PR #121 merge" for five days after the merge; corrected in the 2026-08-26 artifact audit.

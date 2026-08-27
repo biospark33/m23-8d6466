@@ -1,0 +1,9 @@
+{
+  "changedFiles": [
+    "src/a.ts"
+  ],
+  "result": {
+    "summary": "worker-a done",
+    "model": "model-of-worker-a"
+  }
+}

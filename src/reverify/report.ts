@@ -147,8 +147,15 @@ export interface ReverifyReport {
   readonly failure?: Readonly<{ code: string; message: string; remediation: string }>;
 }
 
-/** `redactSecrets` ignores keys its heuristic does not recognise — refuse those loudly. */
-function assertRedactable(map: RedactionMap): void {
+/**
+ * `redactSecrets` ignores keys its heuristic does not recognise — refuse those
+ * loudly.
+ *
+ * Exported because the report is not the only PUBLICATION surface: DF5.2
+ * renders the same run's redaction map into a PR body and an issue comment,
+ * and a key that is invisible here is invisible there too.
+ */
+export function assertRedactable(map: RedactionMap): void {
   for (const [key, value] of Object.entries(map)) {
     // Below redactSecrets' own floor; nothing to promise. Both the floor and
     // the key pattern are IMPORTED, never re-spelled: a local copy silently
