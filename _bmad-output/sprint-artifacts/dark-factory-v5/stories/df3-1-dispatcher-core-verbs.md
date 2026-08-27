@@ -1970,7 +1970,7 @@ qds-cost).
 
 ## Status
 
-**done — PR [#123](https://github.com/biospark33/QDS-Factory/pull/123) merged 2026-08-23 (`f1aa4db`), after nine BMAD adversarial review rounds; review round 11 (post-merge re-audit vs current main, 130 findings) landed on `fix/df3-1-review-round-11`.**
+**done — PR [#123](https://github.com/biospark33/QDS-Factory/pull/123) merged 2026-08-23 (`f1aa4db`), after nine BMAD adversarial review rounds; review round 11 (post-merge re-audit vs current main, 130 findings) landed on `fix/df3-1-review-round-11` and merged as PR [#134](https://github.com/biospark33/QDS-Factory/pull/134) on 2026-08-27 (`db271dc`), after one CodeRabbit/Gemini round over the fix branch itself (24 findings, all fixed at `8fb156b`).**
 
 Review round 10 (55 findings across the dispatcher, the CLI and the money paths) was run against
 the already-merged diff and landed separately as PR

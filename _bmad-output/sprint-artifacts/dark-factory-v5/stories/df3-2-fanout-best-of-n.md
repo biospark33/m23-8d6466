@@ -1012,9 +1012,10 @@ substrate-level, planning decision whether to add a bounded B-only retry).
 
 ## Status
 
-**in progress — PR [#128](https://github.com/biospark33/QDS-Factory/pull/128) open since 2026-08-24
-(branch `feature/df3-2-fanout-best-of-n`, 60 commits at the 2026-08-26 main-merge reconciliation), under
-active review.**
+**done — PR [#128](https://github.com/biospark33/QDS-Factory/pull/128) merged 2026-08-26 (`307cc16`,
+branch `feature/df3-2-fanout-best-of-n`, 60 commits). This Status section had stayed at "in progress"
+past the merge and was corrected 2026-08-27, the same drift shape the 2026-08-26 artifact audit
+caught on DF3.1.**
 
 `sprint-status.yaml` had this story at `ready-for-dev` for the whole life of the PR; corrected to
 `in-progress` in the 2026-08-26 artifact audit (main's copy). This branch's own copy has carried
