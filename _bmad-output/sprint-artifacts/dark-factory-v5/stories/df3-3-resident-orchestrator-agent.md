@@ -258,7 +258,121 @@ evaluation possible.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Implemented 2026-08-27** on `feature/df3-3-resident-orchestrator-agent` (qds-dev pipeline: 7-track
+parallel research → wave-0 contract → 3-cluster parallel TDD → integration reconciliation).
+
+**Code** (all new unless noted): `src/phase-engine/steering.ts` — the engine-owned solicitation
+port: `SteeringDirectiveSchema` (zod v3 `discriminatedUnion`, all four members `.strict()`),
+`createSteering({caller, rate, onTripwire})` → controller with `solicit(point, ctx)` (never
+throws; degraded/disabled → `{action:"proceed"}`), integer-µ$ metering on every reply
+(`round(tokens·ratePerMTok/1e6)` per term), prompt ≤16,000 chars including a truncation suffix
+whose width is reserved before the cut, exactly one reparse of a malformed reply then sticky
+degrade, schema-rejected directives → single `residentTripwire {cause:"gate_bypass_attempt",
+ detail:<action name>}` + deterministic default. Guard constants exported
+(`PROMPT_CHAR_CEILING`, `MAX_OUTPUT_TOKENS`, `SOLICIT_TIMEOUT_MS`, `MAX_MALFORMED_ATTEMPTS`) for
+DF3.6's projection. Successor slots are named seam comments inside `solicit` (DF3.6 bounds →
+DF3.4 drain → render → call → parse → DF3.4 ack): both successors add blocks, no DF3.3 line
+edits. `src/fleet/resident.ts` — `startResident({brief, runId, sessionDir, slug?, env?, bin?,
+persistDir?})` → `ResidentSpawn | {disabled:true}`: empty/absent brief never spawns (AC4);
+`resolveRate` refusal propagates pre-spawn; pi spawn via Bun.spawn native timeout+SIGKILL,
+argv `[pi --provider openrouter --model <id> --mode json --no-tools --session <run file> -p
+<prompt>]` (adapted from `runWorkerPi`, team-lead-driver.ts:542-659); replies harvested via the
+exported `harvestPiStream`; prompt+reply persisted pre-execution through `redactSecrets`;
+`exitStatus` from the imported CC-1 set (success/transient/logic). `scripts/pipeline-run.ts`
+(edited) — `--no-resident` flag; resident armed iff run-context.json carries a requestId and the
+flag is absent; three hook sites (run_start after `new Run` pre-walkPhases; post_gate_failure
+after DF1.3's attempt-N+1 authorization inside the retry loop; run_end after `run.finish`);
+accepted `retry` guidance lands in the authorized retry's promptContext plus an open-keyed
+`resident_directive` gate event; `abort` rethrows `GateFailureError` through the engine's own
+fail transition; code phases declaring a `testCommand` now compose `gatedBody`+`commandGate`
+(the R2 gap — composition activates only on `kind==="code" && testCommand && journal`, so no
+existing manifest changes behavior); resident telemetry lands as `JournalFile.resident?`
+(additive; `writeResident()` on the file journal, not the PhaseJournal port) and tripwires emit
+`tracer.trace({type:"log", name:"residentTripwire"})`. Barrels export both modules.
+
+**E2E demo (DOD, artifact `_bmad-output/evidence/df3-3/demo/out.json`):** steered run
+exit 0 — phases `[plan, build]` success in control order; gate events `gate_fail@1` →
+`resident_directive retry("the assertion compares bytes, not strings")@2` → `gate_pass@2`;
+`resident {status:"active", directives:3, steeringIterations:{build:1}, spendMicros:1104,
+directivesRejected:0, exitStatus:"success", tripwires:[]}`; three `resident_solicit`
+observability lines carrying runId/requestId/phase/point/directiveAction/accepted/spendMicros/
+durationMs (stderr.log). spendMicros 1104 = 3 × (336+32) — exact integer µ$ arithmetic.
+
+**Tests:** `tests/phase-engine/steering.test.ts` (25: union rejections ×4 + unknown field →
+tripwire w/ action name + single attempt + default; unreachable/timeout/malformed×2 → degraded,
+exactly 2 calls; metering integer; 20k context → ≤16000 incl suffix; closed-set roster
+rejection; steeringIterations; directives-is-a-count; barrel identity; correction prompt never
+echoes model text), `tests/fleet/resident.test.ts` (18: AC4 disabled ×4 shapes with zero spawn
+attempts; argv exact incl `--no-tools`/`--session`/env-borne key/no argv secret; RateError
+propagation; timeout→transient; ENOENT→throw; nonzero→logic; message_end-only usage; pre-
+execution redacted persistence; per-runId session path; QDS_PI_BIN fallback; stop() idempotent),
+`tests/phase-engine/resident-e2e.test.ts` (4: AC1a proceed-only vs `--no-resident` byte-identity
+after stripping `resident.*` + timing keys at every depth; AC1b steered invariants with an
+explicit no-byte-identity comment; demo slice; telemetry boundary — resident block key set exact,
+zero ratio/percent/share fields segment-scanned, CORE_FIELDS snapshot 13). Fixtures:
+`fake-resident.ts` (executable pi emulator: FAKE_RESIDENT_REPLIES/USAGE/EXIT/HANG contract,
+pi `--mode json` NDJSON with message_end-only usage), `pipeline.resident.json` (build phase,
+retries 1, state-file-counted testCommand), `pi-catalog/openrouter.json` (rates mirrored from
+host models.json).
+
+**Deviations & drift ledger (SOURCE WINS, all verified at source):**
+1. Default slug is the full OpenRouter id `deepseek/deepseek-v4-flash-0731`, not the story's
+   short display form — triple-checked against host `~/.pi/agent/models.json` (`id` field),
+   `pi --list-models`, and `validate.ts:396` key construction; rate key
+   `openrouter/deepseek/deepseek-v4-flash-0731`. The story's short form would never resolve.
+2. pi 0.55.0 has **no** maxOutputTokens CLI flag — MAX_OUTPUT_TOKENS=1024 is enforced by prompt
+   instruction; constant exported for DF3.6's projection. Session continuation is `--session
+   <path>`, not `--session-id`.
+3. `select_roster` is validated against the closed set, recorded, and traced
+   (`residentRosterChoice` row), but not applied to a dispatch_task spawn: DF1.6 exposes no
+   roster-override surface and `dispatch-task.ts` is outside this story's Files list. Deferred
+   to the story that owns that surface.
+4. Story's "twelve-field" run record is stale — CORE_FIELDS is 13 (`requestId` promoted,
+   run-record.ts:58-72). This story adds no field; `spendMicros` lives only in the journal
+   resident block per the `*Micros`/`*MicroUsd` naming rule.
+5. `resolveRate` IS exported (validate.ts:471; the hardening note claiming otherwise was wrong)
+   — consumed, not re-derived; `resetRateSources()` used for the long-lived resident.
+6. journal.ts was edited (additive `resident?` + `writeResident()`) — the spec cited it but
+   owned it to no cluster; C3 took it as the minimal correct owner.
+7. Observability `model` field: the resident slug is not exposed on `ResidentSpawn`; solicit
+   lines carry all other contract fields. Follow-up: surface the slug for log parity.
+8. Rate-source host variance: this host lacks pi's bundled catalog; e2e uses the
+   `QDS_PI_CATALOG_DIR` seam (validate.test.ts:279 precedent). In-box images carry the catalog.
+
+**Gates:** steering 25/25, resident 18/18, resident-e2e 6/6, pipeline-run regression 36/36,
+phase-lifecycle 32/32; tsc --noEmit 0 project-wide; biome clean on all touched files; GitNexus
+impact on edited symbols LOW (makeBodyFactory 1 caller; FileJournal MEDIUM/16 purely additive);
+detect_changes scoped to the 9 story files; zero open PRs (no stacked-PR conflict);
+`check-defensive-programming.sh` clean (2 annotations, 1 real fix).
+
+**Review round 1 (pre-push self-review, 7 findings — all fixed):** (1) `rosterIds` was never
+passed in the wired SolicitCtx → out-of-set `select_roster` accepted (AC2 violation); now
+`closedRosterIds()` loads DF1.5's set from the manifest's dispatch_task rosters
+(dispatch-task.ts:175 resolution), empty-set fail-closed when absent, wiring-level test bites.
+(2) observability `accepted` counted rejected directives; now directives-delta alone. (3)
+`persistDir` never set by the runner → pre-execution redacted persistence was test-only
+(DOD-Security); now `dirname(journalPath)`, demo asserts 6 artifacts at mode 0600. (4) run.finish
+emitted the terminal marker before the run-end solicitation → DF3.2's poller could observe a
+settled journal with no resident block; now a pre-seed `writeResident` lands before finish and a
+final refresh follows the run-end solicitation (spec's solicit-after-finish order preserved).
+(5) final `writeResident` unguarded above a guarded `tracer.close` — same try/catch discipline
+applied (a failing checkpoint must not downgrade a settled run). (6) an EPIPE on the observability
+`writeSync` discarded an already-parsed accepted directive; solicit and log-write now fully
+separated, directive always returned. (7) the brief's CONTENT never reached a solicitation prompt
+(user-story core); `residentContextLines()` renders the brief-identity fields + manifest essence
+through `sanitizeForMessage`, arming on brief content rather than requestId alone. Pushbacks
+accepted with evidence: an empty run-context OBJECT is unreachable on real runs (the cap reader
+refuses a witness without `effectiveCeilingMicros` first — the reachable AC4 shapes are the
+ABSENT witness and `--no-resident`, both disabled); and arming on any non-empty object broke the
+DF3.1 cap-only-witness regression leg, so arming keys on brief-identity fields
+(requestId/repoSlug/issueId/issueUrl) — the ceiling is the cap witness's own field and must not
+conjure a resident.
+
+**Integration amendment:** `tests/phase-engine/usage.test.ts` ("exactly one micros→USD DIVISION
+exists in the engine") gained a cited `steering.ts` exemption — DF3.3 adds the first sanctioned
+engine-side tokens→µ$ projection site, exactly the form the story's Technical Notes and
+validate.ts's docstring define ("every consumer divides by 1e6 at the projection"); fleet-side
+projections (DF3.2) always lived outside that walk. usage.ts's own division count is unchanged.
 
 ---
 

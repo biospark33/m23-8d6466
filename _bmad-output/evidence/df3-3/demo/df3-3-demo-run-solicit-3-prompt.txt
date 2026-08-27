@@ -1,0 +1,16 @@
+Steering point: run_end.
+pipeline resident-e2e run df3-3-demo-run
+requestId: demo-req-0001
+repoSlug: biospark33/QDS-Factory
+issueId: 999
+effectiveCeilingMicros: 250000
+phases: plan(code), build(code,1r)
+resident guidance for build (attempt 2): the assertion compares bytes, not strings
+You are the resident orchestrator for this run. Reply with ONE JSON object and nothing else.
+Keep the reply at or under 1024 output tokens.
+The object must match exactly one member of this closed union:
+{"action":"proceed"}
+{"action":"retry","guidance":string}
+{"action":"select_roster","phase":string,"rosterId":string}
+{"action":"abort","reason":string}
+Each member may also carry an optional "note" string. No other actions, no other fields.

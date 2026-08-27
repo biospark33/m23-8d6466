@@ -1,0 +1,12 @@
+{
+  "openai-completions": {
+    "deepseek/deepseek-v4-flash-0731": {
+      "cost": {
+        "input": 0.08,
+        "output": 0.18,
+        "cacheRead": 0.016,
+        "cacheWrite": 0
+      }
+    }
+  }
+}

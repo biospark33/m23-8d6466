@@ -1,0 +1,77 @@
+#!/usr/bin/env bun
+/**
+ * DF3.3 C2 test fixture — a pi-emulating binary for tests/fleet/resident.test.ts.
+ * argv-compatible with the resident's spawn contract: it is spawned AS the bin
+ * (shebang + exec bit), so Bun.argv.slice(2) is exactly the argv after the bin.
+ *
+ * On start it records { argv, env.OPENROUTER_API_KEY, promptPrePersisted } to
+ * QDS_FAKE_PI_RECORD (promptPrePersisted proves §5.2 pre-execution persistence:
+ * the redacted prompt artifact must already exist when the process starts),
+ * then behaves per QDS_FAKE_PI_MODE:
+ *   ok      — emit decoy events (message_start/message_update/toolResult with
+ *             usage 9999) then ONE message_end carrying QDS_FAKE_PI_TEXT and
+ *             usage QDS_FAKE_PI_INPUT/QDS_FAKE_PI_OUTPUT. The decoys prove the
+ *             harvest reads message_end only (INV-COST-3).
+ *   hang    — stay alive until SIGKILLed (timeout/stop path).
+ *   fail    — exit 3 (nonzero → exitStatus "logic").
+ *   garbage — print non-NDJSON, exit 0 (malformed reply, caller must resolve).
+ */
+import { existsSync, writeFileSync } from "node:fs";
+
+const recordPath = process.env.QDS_FAKE_PI_RECORD;
+if (recordPath) {
+  writeFileSync(
+    recordPath,
+    JSON.stringify({
+      argv: Bun.argv.slice(2),
+      env: { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY ?? null },
+      promptPrePersisted: process.env.QDS_FAKE_PI_PROMPT_PATH
+        ? existsSync(process.env.QDS_FAKE_PI_PROMPT_PATH)
+        : null,
+    }),
+  );
+}
+
+const mode = process.env.QDS_FAKE_PI_MODE ?? "ok";
+if (mode === "hang") {
+  // A bare pending promise does not keep a Bun process alive; a timer does.
+  setInterval(() => {}, 1 << 30);
+} else if (mode === "fail") {
+  process.exit(3);
+} else if (mode === "garbage") {
+  console.log("this is not NDJSON");
+} else {
+  const input = Number(process.env.QDS_FAKE_PI_INPUT ?? 7);
+  const output = Number(process.env.QDS_FAKE_PI_OUTPUT ?? 11);
+  const text = process.env.QDS_FAKE_PI_TEXT ?? '{"action":"proceed"}';
+  // Decoy usage — must never reach the caller's usage totals.
+  const decoyUsage = { input: 9999, output: 9999, cacheRead: 0, cacheWrite: 0, cost: { total: 9.99 } };
+  const decoy = (type: string) =>
+    JSON.stringify({
+      type,
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: `decoy-${type}` }],
+        usage: decoyUsage,
+      },
+    });
+  console.log(decoy("message_start"));
+  console.log(decoy("message_update"));
+  console.log(
+    JSON.stringify({
+      type: "toolResult",
+      message: { role: "tool", content: [{ type: "text", text: "tool" }] },
+      usage: decoyUsage,
+    }),
+  );
+  console.log(
+    JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text }],
+        usage: { input, output, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } },
+      },
+    }),
+  );
+}

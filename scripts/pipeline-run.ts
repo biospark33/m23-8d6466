@@ -18,6 +18,9 @@
  *                        and requires --issue — the pair is never defaulted
  *   --issue <n>          GitHub issue number, 1..2^31-1; requires --repo-slug
  *   --issue-url <url>    optional issue link (derivable from slug+id)
+ *   --no-resident        disable the resident orchestrator (DF3.3): no spawn,
+ *                        no solicitation, a fully deterministic run — the
+ *                        control leg of AC1a's equivalence test
  *
  * Exit: 0 run ok / 1 run settled not-ok / 2 the run could not be settled at all
  * (manifest refused, journal unwritable) — nothing was recorded, so a poller
@@ -46,11 +49,15 @@ import * as path from "node:path";
 import {
   FileJournal,
   Run,
+  commandGate,
+  GateFailureError,
+  gatedBody,
   loadManifest,
   readArtifactBeneathRoot,
   sanitizeForMessage,
   walkPhases,
   type PhaseBody,
+  type PhaseJournal,
   type PhaseSpec,
   type PhaseParams,
   type RunContext,
@@ -62,8 +69,21 @@ import {
   TracingJournal,
 } from "../src/phase-engine/index.ts";
 import type { Envelope } from "../src/phase-engine/envelopes/types.ts";
-import { parseValueFlags } from "./lib/cli-args.ts";
+import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { dispatchTask } from "../src/phase-engine/phases/dispatch-task.ts";
+// DF3.3: the steering port (engine) and the resident agent (fleet). The runner
+// is the composition root — the one place the two meet (INV-RES-1's module
+// boundary is engine-must-not-import-fleet, and steering.ts honours it).
+import {
+  createSteering,
+  type ResidentTelemetry,
+  type SolicitCtx,
+  type SteeringController,
+  type SteeringDirective,
+  type SteeringPoint,
+} from "../src/phase-engine/steering.ts";
+import { loadRoster } from "../src/phase-engine/roster/schema.ts";
+import { startResident, type ResidentSpawn } from "../src/fleet/resident.ts";
 import {
   appendDispatchFailure,
   CorrelationError,
@@ -77,16 +97,29 @@ import type { ExitStatus, ResolvedRunCorrelation } from "../src/phase-engine/typ
 const HELP = [
   "Usage: bun scripts/pipeline-run.ts --manifest <path> --budget-ms <n> --journal <path>",
   "       [--run-root <path>] [--run-id <id>] [--request-id <id>]",
-  "       [--repo-slug <owner/name> --issue <n> [--issue-url <url>]]",
+  "       [--repo-slug <owner/name> --issue <n> [--issue-url <url>]] [--no-resident]",
   "",
 ];
+
+/** The value flags main() takes — shared by the tokenizer and the value parser. */
+const VALUE_FLAGS = [
+  "--manifest",
+  "--budget-ms",
+  "--journal",
+  "--run-root",
+  "--run-id",
+  "--request-id",
+  "--repo-slug",
+  "--issue",
+  "--issue-url",
+] as const;
 
 /**
  * The environment a manifest command runs in. Deliberately narrow: INV-4 keeps
  * credentials out of the manifest, and there is no reason to hand them to the
  * command through the inherited environment instead.
  */
-function childEnv(): NodeJS.ProcessEnv {
+function childEnv(): Record<string, string> {
   return {
     PATH: process.env.PATH ?? "",
     HOME: process.env.HOME ?? "",
@@ -486,6 +519,142 @@ function admittedCeilingBeside(manifestPath: string, runRoot: string, declared: 
 }
 
 /**
+ * DF3.3: the resident's brief source — the SAME run-context.json the cap
+ * reconciliation above reads as its witness (dirname of the resolved
+ * manifest; dispatch's in-box brief carrier). Deliberately guarded: the cap
+ * path has already refused a present-but-invalid witness, so a failure here
+ * means "no resident", never a second run refusal (INV-RES-5).
+ */
+function readResidentBriefSource(
+  manifestPath: string,
+  runRoot: string,
+): Record<string, unknown> | undefined {
+  try {
+    const { bytes } = readArtifactBeneathRoot(witnessPathBeside(manifestPath), runRoot);
+    // Any parse/read failure means "no brief" — the AC4 non-error path.
+    const parsed: unknown = JSON.parse(bytes.toString("utf8")); // dp:ok guarded by this try/catch (AC4 non-error path)
+    return parsed !== null && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * DF3.3: what makeBodyFactory needs at the gate-retry seam. `steering` is
+ * undefined on the --no-resident / no-brief / failed-spawn legs — the gated
+ * retry loop still runs identically there (identical journals are AC1a's
+ * whole point); only the solicitation between authorization and attempt N+1
+ * is skipped.
+ */
+interface ResidentHooks {
+  steering?: SteeringController;
+  runId: string;
+  requestId: string;
+  /** The resident's prompt context — accepted retry guidance is appended here
+   *  for the engine-authorized attempt that consumes it. */
+  promptContext: string[];
+  /** An accepted select_roster pick, applied to the NEXT dispatch_task phase. */
+  rosterChoice: { pending?: string };
+  /** DF1.5's closed id set — handed to every solicitation (AC2). */
+  rosterIds: readonly string[];
+}
+
+/**
+ * DF3.5's closed roster id set for THIS manifest (AC2 at the wiring level):
+ * the role names of every roster its dispatch_task phases reference, resolved
+ * exactly as dispatch_task resolves them (loadRoster anchored at the same run
+ * root). No dispatch_task phases — or a roster that will not load, which that
+ * phase will refuse with the real error — leaves an EMPTY set: every
+ * select_roster is then rejected. An agent can never widen its own choice
+ * surface by the manifest's silence.
+ */
+function closedRosterIds(phases: readonly PhaseSpec[], runRoot: string): string[] {
+  const ids = new Set<string>();
+  for (const spec of phases) {
+    if (spec.kind !== "dispatch_task" || spec.roster === undefined) continue;
+    try {
+      for (const role of loadRoster(spec.roster, { cwd: runRoot }).roles) ids.add(role.name);
+    } catch {
+      /* the phase refuses with the real error; the closed set stays shut */
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * The resident's opening context: the run's own facts, the dispatch brief's
+ * meaningful fields, and the manifest's essence. Values are sanitized —
+ * witness-borne strings reach the resident's prompt the way manifest-borne
+ * strings reach log messages (types.ts's one-shared-implementation rule); a
+ * newline in a hand-forged witness value must not forge instruction lines.
+ * Bounded by construction; steering.ts enforces the 16,000-char prompt
+ * ceiling at render, head-truncated with the directive instruction reserved.
+ */
+function residentContextLines(
+  runId: string,
+  manifest: { pipelineId: string; phases: readonly PhaseSpec[] },
+  brief: Record<string, unknown>,
+): string[] {
+  const lines = [`pipeline ${manifest.pipelineId} run ${runId}`];
+  for (const key of ["requestId", "repoSlug", "issueId", "issueUrl", "effectiveCeilingMicros"]) {
+    const v = brief[key];
+    if (v !== undefined && v !== null && `${v}`.length > 0) {
+      lines.push(`${key}: ${sanitizeForMessage(String(v))}`);
+    }
+  }
+  lines.push(
+    `phases: ${manifest.phases
+      .map((p) => `${p.name}(${p.kind}${p.retries > 0 ? `,${p.retries}r` : ""})`)
+      .join(", ")}`,
+  );
+  return lines;
+}
+
+/** DF3.3: one solicitation plus its observability line (Observability Contract). */
+async function solicitResident(
+  steering: SteeringController,
+  point: SteeringPoint,
+  ctx: SolicitCtx,
+): Promise<SteeringDirective> {
+  const started = performance.now();
+  const directivesBefore = steering.telemetry.directives;
+  // The solicitation and its observability line fail SEPARATELY: the port's
+  // contract is never-throws, but if it ever does the deterministic default is
+  // the only safe landing (INV-RES-5) — and a dead-stderr EPIPE must never
+  // discard an already-parsed directive.
+  let directive: SteeringDirective;
+  try {
+    directive = await steering.solicit(point, ctx);
+  } catch {
+    return { action: "proceed" };
+  }
+  try {
+    fs.writeSync(
+      2,
+      `${JSON.stringify({
+        level: "info",
+        event: "resident_solicit",
+        runId: ctx.runId,
+        requestId: ctx.requestId ?? null,
+        phase: ctx.phase ?? null,
+        point,
+        directiveAction: directive.action,
+        // Accepted := the accepted-directive COUNT moved — a schema-rejected
+        // reply also changes telemetry, but it was never accepted.
+        accepted: steering.telemetry.directives > directivesBefore,
+        spendMicros: steering.telemetry.spendMicros,
+        durationMs: Math.round(performance.now() - started),
+      })}\n`,
+    );
+  } catch {
+    /* observability is a sidecar; the parsed directive is the payload */
+  }
+  return directive;
+}
+
+/**
  * DF1.8: the correlated dispatch-failure sink (AC4). Appends the refusal to
  * the host-side dispatch log, writes the structured stderr line, and returns
  * the exit code — the caller never continues, and no runId is ever fabricated
@@ -536,6 +705,8 @@ function makeBodyFactory(
   tracer: Tracer,
   requestId: string,
   correlation?: { runId: string; repoSlug: string; issueId: number },
+  journal?: PhaseJournal,
+  resident?: ResidentHooks,
 ) {
   const makeBody = (spec: PhaseSpec): PhaseBody<unknown> => {
     if (spec.kind === "code") {
@@ -557,13 +728,97 @@ function makeBodyFactory(
       // PF-2: the value is {exitCode, stdoutTail} — the bounded tail makes the
       // step's output queryable downstream without unseating fd 1's engine
       // ownership (the full stream still relays to stderr).
-      return ({ signal }) => runCommand(cmd, signal, cwd, tracer, requestId);
+      const base: PhaseBody<unknown> = ({ signal }) => runCommand(cmd, signal, cwd, tracer, requestId);
+      // DF3.3 closes the R2 gap: a code phase DECLARING a testCommand composes
+      // DF1.2's commandGate over the body via gatedBody, under DF1.3's retry
+      // discipline — attempt N+1 is authorized by the retries bound alone, and
+      // the resident's post-gate-failure solicitation sits strictly AFTER that
+      // authorization (the directive supplies guidance text, never the retry
+      // decision). No journal (a caller that wanted no gates) = no composition.
+      const test = spec.testCommand ?? [];
+      if (test.length === 0 || journal === undefined) {
+        return base;
+      }
+      const gate = commandGate([...test], { cwd, env: childEnv(), label: `testCommand:${spec.name}` });
+      // The loop body's try/catch IS the retry contract — GateFailureError
+      // within the retries bound continues, everything else propagates; the only
+      // awaits outside it are solicitResident (never throws, see its dp:ok).
+      const gated: PhaseBody<unknown> = async (bodyCtx) => { // dp:ok loop-level try/catch is the DF1.3 retry contract; other awaits never throw
+        for (let attempt = 1; ; attempt += 1) {
+          try {
+            return await gatedBody(
+              journal,
+              { runRoot: cwd, signal: bodyCtx.signal },
+              [gate],
+              { attempt },
+            )(base)(bodyCtx);
+          } catch (err) {
+            if (!(err instanceof GateFailureError) || attempt > spec.retries) throw err;
+            // DF1.3 authorized attempt N+1 (the retry.ts:284-287 branch,
+            // mirrored here for code phases). DF3.3 solicitation point 2 of 3:
+            // AFTER the verdict AND after the authorization.
+            if (resident?.steering === undefined) continue;
+            const directive = await solicitResident(resident.steering, "post_gate_failure", {
+              runId: resident.runId,
+              requestId: resident.requestId,
+              phase: spec.name,
+              rosterIds: resident.rosterIds,
+              promptContext: resident.promptContext,
+            });
+            if (directive.action === "abort") {
+              // The engine's own fail transition: the authorized retry is
+              // declined and the caught GateFailureError settles the phase.
+              throw err;
+            }
+            if (directive.action === "retry") {
+              resident.promptContext.push(
+                `resident guidance for ${spec.name} (attempt ${attempt + 1}): ${directive.guidance}`,
+              );
+              journal.writeGateEvent({
+                runId: resident.runId,
+                phaseId: bodyCtx.phaseId,
+                type: "resident_directive",
+                name: "resident",
+                requestId: resident.requestId,
+                phase: spec.name,
+                action: "retry",
+                guidance: directive.guidance,
+                attempt: attempt + 1,
+              });
+            }
+            // proceed (the deterministic default): the engine-authorized
+            // retry runs unguided.
+          }
+        }
+      };
+      return gated;
     }
     // DF1.6 T7: dispatch_task registration — the factory closes over the
     // run's tracer + requestId so prompt events (pre-spawn) and adapted team
     // events land in the trace store (DD-8, Observability Contract). rootDir
     // pins artifact reads to the SAME --run-root the code phases use.
     if (spec.kind === "dispatch_task") {
+      // DF3.3: an accepted select_roster pick applies to the NEXT
+      // dispatch_task phase. DRIFT (SOURCE-vs-spec): dispatchTask (DF1.6)
+      // exposes no roster override on its deps, so the application here is
+      // the recorded pick on the trace — the spawn-side switch lands when
+      // DF1.6 grows that surface. Ids outside DF1.5's closed set were
+      // already rejected in steering.ts before this ran.
+      const choice = resident?.rosterChoice.pending;
+      if (resident !== undefined && choice !== undefined) {
+        resident.rosterChoice.pending = undefined;
+        try {
+          tracer.trace({
+            type: "log",
+            name: "residentRosterChoice",
+            requestId,
+            phaseId: spec.name,
+            payloadJson: JSON.stringify({ runId: resident.runId, rosterId: choice, phase: spec.name }),
+          });
+        } catch {
+          /* the trace store is a sidecar; the run owns the verdict */
+        }
+      }
       return dispatchTask(spec, { tracer, requestId, rootDir: cwd });
     }
     return () => {
@@ -645,18 +900,17 @@ async function main(argv: readonly string[]): Promise<number> {
   let issueUrl: string | undefined;
   let runIdGiven = false;
 
-  parseValueFlags(argv, {
-    flags: [
-      "--manifest",
-      "--budget-ms",
-      "--journal",
-      "--run-root",
-      "--run-id",
-      "--request-id",
-      "--repo-slug",
-      "--issue",
-      "--issue-url",
-    ],
+  // DF3.3: --no-resident is a BOOLEAN flag. tokenizeArgs owns that grammar,
+  // parseValueFlags owns the value-flag one — the split is lib/cli-args.ts's
+  // own design (its tokenize spec carries the boolFlags channel).
+  const { flagTokens, bools } = tokenizeArgs(argv, {
+    valueFlags: VALUE_FLAGS,
+    boolFlags: ["--no-resident"],
+  });
+  const noResident = bools.has("--no-resident");
+
+  parseValueFlags(flagTokens, {
+    flags: [...VALUE_FLAGS],
     help: HELP,
     onValue: (flag, value) => {
       switch (flag) {
@@ -968,16 +1222,122 @@ async function main(argv: readonly string[]): Promise<number> {
   process.on("SIGTERM", () => onSignal("SIGTERM"));
   process.on("SIGINT", () => onSignal("SIGINT"));
 
-  const outcomes = await walkPhases(
-    run,
-    manifest.phases,
-    makeBodyFactory(
-      runRoot,
-      tracer,
-      requestId,
-      resolved ? { runId, repoSlug: resolved.repoSlug, issueId: resolved.issueId } : undefined,
-    ),
+  // DF3.3: the resident orchestrator. Source = the run-context.json witness
+  // beside the resolved manifest (dispatch's in-box brief carrier): a NON-EMPTY
+  // brief there AND no --no-resident arms the resident — arming reads the
+  // brief's CONTENT (rendered into the prompt context below), not a requestId
+  // alone; anything else leaves status "disabled" and a fully deterministic
+  // run (AC4). A RateError out of startResident REFUSES the run before spawn
+  // (DF1.5's rule, as that docstring pins) — with the tracer closed, exactly
+  // like the cap-reconciliation refusal above.
+  const residentBrief =
+    !noResident && resolvedPath !== undefined
+      ? readResidentBriefSource(resolvedPath, runRoot)
+      : undefined;
+  // Arming reads BRIEF content — any of the dispatch brief's identity fields —
+  // never requestId alone. `effectiveCeilingMicros` is deliberately excluded:
+  // it is the CAP witness's own field, present on every capped run, and must
+  // not conjure a resident out of a ceiling statement.
+  const residentArmed =
+    residentBrief !== undefined &&
+    ["requestId", "repoSlug", "issueId", "issueUrl"].some((key) => {
+      const v = residentBrief?.[key];
+      return v !== undefined && v !== null && `${v}`.length > 0;
+    });
+  const residentPromptContext: string[] = residentContextLines(
+    runId,
+    manifest,
+    residentBrief ?? {},
   );
+  // DF1.5's closed id set for select_roster, computed ONCE and handed to every
+  // solicitation (AC2 at the wiring level; steering.ts rejects outside it).
+  const rosterIds = closedRosterIds(manifest.phases, runRoot);
+  const rosterChoice: { pending?: string } = {};
+  let residentSpawn: ResidentSpawn | undefined;
+  let steering: SteeringController | undefined;
+  if (residentArmed && residentBrief !== undefined) {
+    let spawned: ReturnType<typeof startResident>;
+    try {
+      spawned = startResident({
+        brief: residentBrief,
+        runId,
+        sessionDir: path.dirname(path.resolve(journalPath)),
+        // §5.2 / DOD-Security: every prompt and raw reply persists
+        // PRE-EXECUTION, redacted, beside the journal.
+        persistDir: path.dirname(path.resolve(journalPath)),
+      });
+    } catch (err) {
+      try {
+        tracer.close();
+      } catch {
+        /* the arming refusal outranks a close failure */
+      }
+      throw err;
+    }
+    if (!("disabled" in spawned)) {
+      residentSpawn = spawned;
+      steering = createSteering({
+        caller: spawned.caller,
+        rate: spawned.rate,
+        onTripwire: (t) => {
+          // Tripwires ride type:"log" + a name — DF1.4's closed event union
+          // is untouched (R2 §4.1's recommendation, phase_state's precedent).
+          try {
+            tracer.trace({
+              type: "log",
+              name: "residentTripwire",
+              requestId,
+              payloadJson: JSON.stringify(t),
+            });
+          } catch {
+            /* the trace store is a sidecar; the journal row is the record */
+          }
+        },
+      });
+    }
+  }
+
+  // DF3.3 solicitation point 1 of 3: run start — after the manifest is
+  // validated, frozen and read, before any phase is constructed. `abort` is
+  // the engine's own fail transition: no phase opens and finish settles the
+  // empty run not-ok. `select_roster` records the pick for the NEXT
+  // dispatch_task phase.
+  let residentAborted = false;
+  if (steering !== undefined) {
+    const directive = await solicitResident(steering, "run_start", {
+      runId,
+      requestId,
+      rosterIds,
+      promptContext: residentPromptContext,
+    });
+    if (directive.action === "abort") {
+      residentAborted = true;
+    } else if (directive.action === "select_roster") {
+      rosterChoice.pending = directive.rosterId;
+    }
+  }
+
+  const outcomes = residentAborted
+    ? []
+    : await walkPhases(
+        run,
+        manifest.phases,
+        makeBodyFactory(
+          runRoot,
+          tracer,
+          requestId,
+          resolved ? { runId, repoSlug: resolved.repoSlug, issueId: resolved.issueId } : undefined,
+          journal,
+          {
+            steering,
+            runId,
+            requestId,
+            promptContext: residentPromptContext,
+            rosterChoice,
+            rosterIds,
+          },
+        ),
+      );
 
   // DF1.4: Record envelopes after each phase settles. Guarded like every
   // other tracer call — and the JSON.stringify sits inside the guard too: a
@@ -1004,7 +1364,63 @@ async function main(argv: readonly string[]): Promise<number> {
     }
   }
 
+  // The resident telemetry snapshot: steering's live counts on resident legs,
+  // the explicit "disabled" shape otherwise (AC4/AC5 — status is never absent
+  // on a settled run). Seeded BEFORE finish and refreshed after run_end.
+  const residentTelemetryOf = (): ResidentTelemetry =>
+    steering === undefined
+      ? {
+          status: "disabled",
+          directives: 0,
+          directivesRejected: 0,
+          steeringIterations: {},
+          spendMicros: 0,
+          exitStatus: null,
+          tripwires: [],
+        }
+      : { ...steering.telemetry };
+
+  // The terminal marker is emitted INSIDE Run.finish, and a poller that reads
+  // it must never find a settled journal with no resident block at all: seed
+  // the block first (this write may still throw through — nothing is settled
+  // yet, so a refusal here is honest), then finish, then run_end, then refresh.
+  innerJournal.writeResident(residentTelemetryOf());
+
   const result = run.finish(!terminated);
+
+  // DF3.3 solicitation point 3 of 3: run end — after finish(accepted), report
+  // text only. Skipped when a directive aborted the run (abort stops the
+  // resident conversation too).
+  if (steering !== undefined && !residentAborted) {
+    await solicitResident(steering, "run_end", {
+      runId,
+      requestId,
+      phase: outcomes.length > 0 ? outcomes[outcomes.length - 1]?.name : undefined,
+      rosterIds,
+      promptContext: residentPromptContext,
+    });
+  }
+
+  // Final refresh (run_end's directive + the resident process's own exit
+  // status), guarded exactly like the tracer close below it: the run is
+  // already settled and its marker written, so a failing checkpoint must not
+  // downgrade it to "never settled" — the refusal is reported, not thrown.
+  const residentBlock = residentTelemetryOf();
+  if (residentSpawn !== undefined) {
+    try {
+      residentBlock.exitStatus = await residentSpawn.exitStatus();
+    } catch {
+      /* keep null — the run is settled; the process's word is telemetry */
+    }
+  }
+  try {
+    innerJournal.writeResident(residentBlock);
+  } catch (err) {
+    fs.writeSync(
+      2,
+      `pipeline-run: resident telemetry write failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
 
   // DF1.4: run.finish flowed through TracingJournal, which already ended all
   // processes and finished the session — close the writer. Guarded: the run

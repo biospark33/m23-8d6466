@@ -14,3 +14,6 @@ export * from "./verbs.ts";
 export * from "./fanout.ts";
 export * from "./fanout-primitive.ts";
 export * from "./rank.ts";
+// DF3.3. resident.ts is fleet code by design (R3 §9.2): it imports the engine
+// barrel's steering port, never the reverse.
+export * from "./resident.ts";

@@ -167,12 +167,21 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
     expect((usage.match(/\/\s*1_000_000/g) ?? []).length).toBe(1);
     // No other engine file divides by a million (DF1.5's roster rate math
     // multiplies tokens into µ$ — different direction, different unit contract).
+    // AMENDED DF3.3: steering.ts is the one sanctioned ENGINE-SIDE tokens→µ$
+    // projection site — the story's Technical Notes ("every consumer divides
+    // by 1e6 at the projection") and validate.ts's own docstring define the
+    // contract; fleet-side projections (DF3.2) live outside this walk.
+    const steeringPath = path.join(engineRoot, "steering.ts");
     const others: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
-        else if (entry.name.endsWith(".ts") && path.resolve(dir, entry.name) !== path.join(engineRoot, "usage.ts")) {
+        else if (
+          entry.name.endsWith(".ts") &&
+          path.resolve(dir, entry.name) !== path.join(engineRoot, "usage.ts") &&
+          path.resolve(dir, entry.name) !== steeringPath
+        ) {
           if (/\/\s*1_000_000/.test(codeOnly(full))) others.push(full);
         }
       }
