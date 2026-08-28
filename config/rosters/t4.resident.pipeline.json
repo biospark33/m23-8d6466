@@ -1,0 +1,28 @@
+{
+  "version": "1.0.0",
+  "pipelineId": "t4-resident-live",
+  "runBudgetMs": 120000,
+  "phases": [
+    {
+      "name": "plan",
+      "kind": "code",
+      "description": "T4 resident live: emit the implementation plan marker before the gated build",
+      "maxDurationMs": 10000,
+      "retries": 0,
+      "command": ["echo", "t4 plan complete"]
+    },
+    {
+      "name": "build",
+      "kind": "code",
+      "description": "T4 resident live: gated build whose test command fails attempt 1 and passes attempt 2 (state-file counter under the leg's TMPDIR), so DF1.3 authorizes retry attempt 2 and the post_gate_failure solicitation point is reached with real gate evidence",
+      "maxDurationMs": 15000,
+      "retries": 1,
+      "command": ["echo", "t4 build ran"],
+      "testCommand": [
+        "sh",
+        "-c",
+        "f=\"$TMPDIR/qds-t4-resident-count\"; n=$(cat \"$f\" 2>/dev/null || echo 0); n=$((n+1)); printf '%s' \"$n\" > \"$f\"; echo \"t4 test attempt $n\"; test \"$n\" -ge 2"
+      ]
+    }
+  ]
+}
