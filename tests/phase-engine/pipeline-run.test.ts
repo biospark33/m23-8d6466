@@ -1573,15 +1573,18 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     );
     const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
 
-    // The dispatch refusal is a VALUE (DF1.6: refusals are data on the merged
-    // output), so the phase records success and the run settles ok.
-    expect(exitCode).toBe(0);
+    // The dispatch refusal is a VALUE carrying exitStatus:"logic" (DF1.6:
+    // refusals are data on the merged output), and the engine now honors the
+    // declared verdict (DF6.2, PR #136): the phase records FAIL with the
+    // refusal reason and the run settles not-ok, exit 1.
+    expect(exitCode).toBe(1);
     const journal = readJournal(ws.journal);
-    expect(journal.ok).toBe(true);
+    expect(journal.ok).toBe(false);
     expect(journal.phases.map((p) => [p.name, p.status])).toEqual([
       ["plan", "success"],
-      ["ship", "success"],
+      ["ship", "fail"],
     ]);
+    expect(journal.phases[1]?.error?.message).toContain("QDS_TEAM_RUNNER");
 
     // In-set acceptance at run_start: the closed roster id set was advertised
     // there and "lead" is in it — accepted, not tripwire-rejected.
