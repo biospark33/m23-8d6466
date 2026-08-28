@@ -38,6 +38,13 @@ coverageReporter = ["text", "lcov"]
 # declaration line. Per-file floors are NOT expressible here at all — that is
 # scripts/check-lcov.ts's job, run as its own CI step after this one.
 coverageThreshold = 0.90
+# F083 CROSS-REFERENCE, 2026-08-28: a sweep run for the new root-scope gate
+# (bunfig.coverage.toml) measured the bare number as enforced PER FILE on
+# min(% funcs, % lines), not against the "All files" aggregate the comment above
+# assumes — a run at 45.27%/48.99% aggregate still exited 1 at a threshold of
+# 0.01 because individual files sat at 0.00%. This gate is green today either
+# way, so nothing is changed here; but if the aggregate claim above is ever
+# relied on to explain a red run, measure before believing it.
 
 coveragePathIgnorePatterns = [
   # Test fixtures aren't product code; excluding a bare "test" would also
@@ -57,6 +64,16 @@ coveragePathIgnorePatterns = [
   # padded up) by a dependency's numbers.
   "../src/phase-engine/**",
 
+  # F073 DECISION (not an oversight): the ~2,700 LOC of .vue components below
+  # stay OUT of this gate on purpose. A DOM harness (@vue/test-utils + happy-dom)
+  # to cover them is a whole test stack for template glue; the logic worth
+  # testing is being EXTRACTED instead — tasks 5.5 and 5.6 move the polling and
+  # drain logic into visualizer/src/lib/**, which this gate already covers with
+  # no config change. What remains in the components after that is markup and
+  # bindings, gated by build:check (vue-tsc + vite build) and by the API-contract
+  # suite. Revisit only if a component regression ships that build:check could
+  # not have caught.
+  #
   # bun has no .vue loader — none of these ever produce an SF: record today,
   # so excluding them changes no number now. They're listed anyway so the
   # day a DOM test harness (e.g. @vue/test-utils) starts loading .vue files,

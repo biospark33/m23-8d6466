@@ -112,13 +112,51 @@ fi
 # ponytail: transient negation file, not committed — the fixture symbols are the
 # only reason we override the safety-net ignore list.
 #
-# CONCURRENT-RUN HAZARD: two invocations of this script in the same repo
+# CONCURRENT-RUN HAZARD (F092): two invocations of this script in the same repo
 # (parallel CI matrix, overlapping stories) race on the transient root
 # `.gitnexusignore` — run A's EXIT trap can `rm` the file while run B is
 # mid-analyze, dropping the negations and silently filtering the fixture.
 # Worse, `gitnexus analyze --force` running concurrently can corrupt the graph
-# DB (no file lock). Concurrent same-repo runs are UNSUPPORTED; no locking is
-# added here (out of scope) — serialize across CI matrix shards / stories.
+# DB (no file lock). CLAUDE.md names this script as THE canonical reindex
+# command, so "declared unsupported" was not prevention. The lock below refuses
+# the second run instead.
+#
+# `mkdir` and not `flock(1)`: flock is NOT installed on macOS by default (util-
+# linux only), and this script runs on developer macs as well as CI. `mkdir` is
+# atomic on every POSIX filesystem the repo can live on, needs no dependency,
+# and the whole critical section (write .gitnexusignore -> analyze -> rm it) is
+# what has to be serialized, so the lock is taken BEFORE the ignore file exists.
+# Released by cleanup() via the EXIT trap installed below.
+#
+# Stale reclaim is pid-based and therefore SAME-HOST ONLY: a lock left by a
+# SIGKILLed run on this machine is reclaimed once its pid is gone; a lock on a
+# shared network checkout written by another host is not (kill -0 would test a
+# local pid of the same number). That is the conservative direction — a false
+# "held" refuses, it does not corrupt.
+LOCK_DIR="$REPO_ROOT/.gitnexus-analyze.lock"
+CREATED_LOCK=0
+lock_fatal() {
+  echo "FATAL: another gitnexus analyze is running in this repo (lock: $LOCK_DIR)" >&2
+  echo "       Concurrent same-repo analyze races the transient .gitnexusignore and can" >&2
+  echo "       corrupt the graph DB — serialize across CI matrix shards / stories." >&2
+  echo "       If no run is live, remove the lock: rm -rf \"$LOCK_DIR\"" >&2
+  exit 1
+}
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  LOCK_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  # Reclaim only a lock whose holder is provably gone. An unreadable/absent pid
+  # file means a holder mid-acquire (it writes pid right after mkdir) — refuse.
+  if [ -n "$LOCK_PID" ] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+    echo "WARN: reclaiming stale analyze lock from dead pid $LOCK_PID" >&2
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR" 2>/dev/null || lock_fatal
+  else
+    lock_fatal
+  fi
+fi
+CREATED_LOCK=1
+echo $$ > "$LOCK_DIR/pid"
+
 IGNORE_FILE="$REPO_ROOT/.gitnexusignore"
 CREATED_IGNORE=0
 # Guard before writing: `>` follows symlinks and could clobber the target of a
@@ -133,6 +171,9 @@ CREATED_IGNORE=0
 # `[ -L ]`=true, `[ ! -f ]`=true.)
 if [ -L "$IGNORE_FILE" ] || [ -d "$IGNORE_FILE" ]; then
   echo "FATAL: $IGNORE_FILE exists as a symlink or directory — refusing to overwrite (remove it manually)" >&2
+  # The EXIT trap is not installed yet at this point, so release the lock by
+  # hand — otherwise this one refusal wedges every later run.
+  [ "$CREATED_LOCK" = "1" ] && rm -rf "$LOCK_DIR"
   exit 1
 elif [ ! -f "$IGNORE_FILE" ]; then
   printf '!tests/\n!__tests__/\n!fixtures/\n' > "$IGNORE_FILE"
@@ -166,6 +207,7 @@ cleanup() {
   # re-run" contract. Suppress so cleanup always reaches `return 0`.
   [ "${CREATED_IGNORE:-0}" = "1" ] && { rm -f "${IGNORE_FILE:-}" 2>/dev/null || true; }
   [ "${CREATED_SKILLS:-0}" = "1" ] && { rm -rf "${SKILLS_DIR:-}" 2>/dev/null || true; }
+  [ "${CREATED_LOCK:-0}" = "1" ] && { rm -rf "${LOCK_DIR:-}" 2>/dev/null || true; }
   return 0
 }
 # Trap EXIT only so cleanup runs exactly once. Signal traps set the conventional

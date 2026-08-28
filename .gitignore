@@ -31,3 +31,8 @@ visualizer/dist/
 
 # qds-pr-monitor transient state
 .claude/state/
+
+# F092: the analyze serialization lock (scripts/install-gitnexus-plus.sh).
+# Same reasoning as /.gitnexusignore above — a SIGKILLed run can leak it, and it
+# should surface as ignored scratch, not as an untracked directory.
+/.gitnexus-analyze.lock/
