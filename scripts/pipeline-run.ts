@@ -690,8 +690,16 @@ async function main(argv: readonly string[]): Promise<number> {
         case "--issue-url":
           issueUrl = value;
           break;
-        default:
+        case "--request-id":
           requestId = value;
+          break;
+        // F057: `default` used to BE the --request-id case. Nine flags were
+        // declared and eight had a case, so the tenth flag anyone added landed
+        // on `requestId` — silently overwriting the correlation key the whole
+        // DF1.8 ladder joins on, with no failure to notice. The list above and
+        // the cases must agree; this is what says so out loud.
+        default:
+          throw new Error(`unhandled flag ${flag}`);
       }
     },
   });

@@ -145,6 +145,44 @@ function invalid(
   return exitStatusOverride === undefined ? err : Object.assign(err, { exitStatus: exitStatusOverride });
 }
 
+/**
+ * The F15 reconciliation's one ledger read, with the refusal every SIBLING
+ * admission failure already gives (F048).
+ *
+ * A `SQLITE_BUSY`, an unopenable ledger file or a misconfigured
+ * `deps.ledgerFactory` used to escape this loop as a RAW `Error`: bare CLI
+ * exit 1 = `transient` = "retry me", for a condition retry does not clear —
+ * while `dispatch.ts`'s admission gate converts the identical throw to
+ * `refuse(5, "admission-failed", …)`. 5 is also honest about the side effects:
+ * this runs before the first mint, so nothing was provisioned.
+ */
+function issueSnapshot(
+  deps: FanoutDeps,
+  repoSlug: string,
+  issueId: string,
+): { ceilingMicroUsd: number; spentMicroUsd: number; reservedMicroUsd: number } {
+  try {
+    const ledger = deps.ledgerFactory();
+    try {
+      return ledger.issueBudgetSnapshot(repoSlug, issueId);
+    } finally {
+      try {
+        ledger.close();
+      } catch {
+        // a read-only probe's close failure must not mask the refusal below
+      }
+    }
+  } catch (e) {
+    const x = (e ?? {}) as { message?: string };
+    throw invalid(
+      5,
+      "admission-failed",
+      `budget admission failed: ${redactSecrets(x.message ?? e)}`,
+      "fix or move the cost ledger, then retry — nothing was provisioned",
+    );
+  }
+}
+
 // ─── D9 validation (exit 2, BEFORE the lock — zero side effects) ──────────────
 
 interface ValidatedInput {
@@ -330,17 +368,7 @@ export async function fanout(
       snapshot: { ceilingMicroUsd: number; spentMicroUsd: number; reservedMicroUsd: number };
     }> = [];
     for (const g of groups.values()) {
-      const ledger = deps.ledgerFactory();
-      let snapshotMicroUsd = { ceilingMicroUsd: 0, spentMicroUsd: 0, reservedMicroUsd: 0 };
-      try {
-        snapshotMicroUsd = ledger.issueBudgetSnapshot(g.repoSlug, g.issueId);
-      } finally {
-        try {
-          ledger.close();
-        } catch {
-          // a read-only probe's close failure must not mask the refusal below
-        }
-      }
+      const snapshotMicroUsd = issueSnapshot(deps, g.repoSlug, g.issueId);
       const available =
         snapshotMicroUsd.ceilingMicroUsd -
         snapshotMicroUsd.spentMicroUsd -

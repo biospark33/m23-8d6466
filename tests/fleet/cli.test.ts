@@ -4077,6 +4077,55 @@ process.on = ((sig, listener) => {
     };
   }
 
+  test("F019: a fan-out arm line lost to a CLOSED PIPE exits 6, not 0", async () => {
+    // `fleet fanout … | head -1` closes the pipe after the first arm. The arm
+    // lines are the ONLY place the runIds of N live, billing boxes are printed,
+    // and a bare `emit` tolerated EPIPE silently — up to seven orphaned boxes
+    // and exit 0. Same posture as the dispatch ack and teardown's `torn down:`.
+    const closedPipe = (): never => {
+      const e = new Error("write EPIPE") as NodeJS.ErrnoException;
+      e.code = "EPIPE";
+      throw e;
+    };
+    const code = await run(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+      closedPipe,
+      fanoutDeps(),
+      errOut,
+    );
+    // 6, not 1: retrying a fan-out provisions N MORE boxes.
+    expect(code).toBe(6);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("completion-unwritable")) as string) as {
+      code: string;
+    };
+    expect(envelope.code).toBe("completion-unwritable");
+  });
+
+  test("F048: an unopenable ledger during the F15 reconciliation is invalid(5), not a raw throw", async () => {
+    // The reconciliation loop's `deps.ledgerFactory()` / `issueBudgetSnapshot`
+    // sat in a bare try/finally: a SQLITE_BUSY or an unopenable ledger escaped
+    // as a raw Error → CLI exit 1 = `transient` = "retry me", for a condition
+    // retry does not clear — while dispatch.ts converts the identical throw to
+    // `refuse(5, "admission-failed", …)`.
+    const code = await runCli(["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b"], {
+      ...fanoutDeps(),
+      ledgerFactory: () => {
+        throw Object.assign(new Error("unable to open database file"), { code: "SQLITE_CANTOPEN" });
+      },
+    });
+    expect(code).toBe(5);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("admission-failed")) as string) as {
+      code: string;
+      message: string;
+      remediation: string;
+    };
+    expect(envelope.code).toBe("admission-failed");
+    expect(envelope.message).toContain("budget admission failed");
+    // 5 is honest about the side effects: this runs BEFORE the first mint.
+    expect(envelope.remediation).toContain("nothing was provisioned");
+    expectNoBoxes();
+  });
+
   test("e2e: fanout best-of-n admits its arms and prints one ack per arm plus the ranking line", async () => {
     const d = fanoutDeps();
     const code = await runCli(

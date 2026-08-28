@@ -159,8 +159,14 @@ async function main(argv: readonly string[]): Promise<number> {
         case "--request-id":
           requestId = value;
           break;
-        default:
+        case "--box-src":
           boxSrc = value;
+          break;
+        // F057, same as pipeline-run.ts: `default` was the --box-src case, so a
+        // newly declared flag with no case of its own silently became the box's
+        // source path.
+        default:
+          throw new Error(`unhandled flag ${flag}`);
       }
     },
   });

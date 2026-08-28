@@ -125,16 +125,6 @@ import type { ExitStatus } from "../cli-anything/src/types.ts";
 
 const HELP = renderHelp(listVerbs());
 
-/**
- * Extract a readable error description from any thrown value.
- * Returns the message when Error, else String(e), else "unknown".
- */
-function errText(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  if (e === null || e === undefined) return "unknown";
-  return String(e);
-}
-
 /** Brief ingress cap (story Guards): 64 KiB from stdin or --brief <path>. */
 const MAX_BRIEF_BYTES = 64 * 1024;
 // Same posture as MAX_BRIEF_BYTES, one tier up in size: --steps-json is
@@ -1129,6 +1119,42 @@ function bounded(s: string | undefined): string {
 }
 
 /**
+ * The ONE spelling of "positive decimal flag" (F050). Three flags had three
+ * regexes, three range checks and three copies of the same comment.
+ *
+ * Plain decimal ONLY, before `Number()` gets a say: it accepts hex (`0x1f4` →
+ * 500), exponents (`1e3` → 1000), surrounding whitespace (`" 8080 "`) and zero
+ * padding (`08080`) — every one of them an integer in range, and none of them
+ * the number the operator typed. Digits are unbounded here on purpose: the
+ * ceiling is `max`, not the regex width, so an over-long value is refused by
+ * the range check with the range's own message rather than the grammar's.
+ *
+ * `noun` and `remediation` stay per-flag: they are the two halves an operator
+ * reads, and parameterising them is what let the three call sites collapse
+ * without rewording a single existing refusal.
+ */
+function parseDecimalFlag(
+  name: string,
+  raw: string | undefined,
+  min: number,
+  max: number,
+  noun: string,
+  remediation: string,
+): number {
+  const n = typeof raw === "string" && /^[1-9]\d*$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(n) || n < min || n > max) {
+    // `bounded`: a rejected value is echoed, and argv is unbounded. `undefined`
+    // is echoed bare (`JSON.stringify(undefined)` is not a string) — the
+    // absent-flag wording every caller already had.
+    throw usageError(
+      `${name} ${raw === undefined ? "undefined" : JSON.stringify(bounded(raw))} is not ${noun}`,
+      remediation,
+    );
+  }
+  return n;
+}
+
+/**
  * Observe the run-id MINT through the one object both sides of a dispatch
  * already share — the record store. `dispatch()` persists the record via
  * `store.create(runId)` long before its promise resolves, but the CLI only
@@ -1350,10 +1376,11 @@ export async function run(
     try {
       emit(`${HELP}\n`, true);
     } catch (e) {
+      const x = (e ?? {}) as { message?: string };
       printError(
         note,
         "help-unwritable",
-        `the usage text could not be written to stdout: ${redactSecrets(errText(e))}`,
+        `the usage text could not be written to stdout: ${redactSecrets(x.message ?? e)}`,
         "stdout refused the bytes (disk full, bad fd) — fix the destination and re-run",
       );
       return finish(newRequestId(), "help", undefined, 6);
@@ -1404,10 +1431,11 @@ export async function run(
     try {
       emit(`${HELP}\n`, true);
     } catch (e) {
+      const x = (e ?? {}) as { message?: string };
       printError(
         note,
         "help-unwritable",
-        `the usage text could not be written to stdout: ${redactSecrets(errText(e))}`,
+        `the usage text could not be written to stdout: ${redactSecrets(x.message ?? e)}`,
         "stdout refused the bytes (disk full, bad fd) — fix the destination and re-run",
       );
       return finish(newRequestId(), bounded(parsed.verb ?? "help"), undefined, 6);
@@ -1521,23 +1549,10 @@ export async function run(
       const driverName = flags.get("--driver");
       assertDriverChosen("dispatch", driverName, deps?.driver);
       const portRaw = flags.get("--port");
-      let port: number | undefined;
-      if (portRaw !== undefined) {
-        // Plain decimal ONLY, before Number() gets a say: it accepts hex
-        // (`0x1f4` → 500), exponents (`1e3` → 1000), surrounding whitespace
-        // (`" 8080 "`) and zero padding (`08080`), every one of which is an
-        // integer in 1-65535 and none of which is the port the operator typed.
-        // The CLI must not bind a port they never wrote. The range check below
-        // still owns 0 and 65536+.
-        port = /^[1-9]\d{0,4}$/.test(portRaw) ? Number(portRaw) : Number.NaN;
-        if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-          // `bounded`: a rejected value is echoed, and argv is unbounded.
-          throw usageError(
-            `--port ${JSON.stringify(bounded(portRaw))} is not a TCP port`,
-            "--port takes an integer 1-65535",
-          );
-        }
-      }
+      const port =
+        portRaw === undefined
+          ? undefined
+          : parseDecimalFlag("--port", portRaw, 1, 65_535, "a TCP port", "--port takes an integer 1-65535");
 
       // INV-2: the brief is read and parsed — both side-effect free — before
       // anything is constructed. `new RunRecordStore` mkdirs and chmods the
@@ -1617,10 +1632,11 @@ export async function run(
           try {
             if (dispatchLock === undefined) dispatchLock = acquireRunLock(store.dir, minted, "fleet dispatch key-mint");
           } catch (e) {
+            const x = (e ?? {}) as { message?: string };
             printError(
               note,
               "key-mint-lock-unavailable",
-              `the run lock for ${minted} could not be taken while the key was being minted: ${redactSecrets(errText(e))}`,
+              `the run lock for ${minted} could not be taken while the key was being minted: ${redactSecrets(x.message ?? e)}`,
               "a concurrent harvest or teardown may be acting on this run id — check `fleet status` before touching either",
             );
           }
@@ -1660,10 +1676,15 @@ export async function run(
         // `(e ?? {})`: a sink may reject with null/undefined (a bare `throw;`,
         // a violated library contract), and reading `.message` off it would
         // make the failure REPORTER the failure — over a live, billing box.
+        // `?? e`, not `?? String(e)`: `redactSecrets` coerces anything without
+        // throwing, and `String` on a null-prototype throw does not. ONE idiom
+        // across every catch in this file (F018) — `errText`'s `String(e)` was
+        // the second one, and it threw on exactly the values this guards.
+        const x = (e ?? {}) as { message?: string };
         printError(
           note,
           "ack-unwritable",
-          `the box for ${ack.runId} is live but its ack could not be written to stdout: ${redactSecrets(errText(e))}`,
+          `the box for ${ack.runId} is live but its ack could not be written to stdout: ${redactSecrets(x.message ?? e)}`,
           `record run id ${ack.runId} now — \`fleet teardown ${ack.runId}\` is the only thing that stops it billing`,
           { runId: ack.runId },
         );
@@ -1737,31 +1758,28 @@ export async function run(
       // when --pattern is missing or garbled (the declared-exit-codes probe in
       // verbs.test.ts pins this precedence). Pattern-scoped structure follows.
       const nRaw = flags.get("--n");
-      // Mirrors --port: plain decimal ONLY, then range — Number() alone accepts
-      // hex (`0x3` → 3), exponents and zero padding that are not what was
-      // typed. Digits are unbounded on purpose: the ceiling lives solely in
-      // the range check against FANOUT_MAX_N below.
-      const n = typeof nRaw === "string" && /^[1-9][0-9]*$/.test(nRaw) ? Number(nRaw) : Number.NaN;
-      if (!Number.isInteger(n) || n < 1 || n > FANOUT_MAX_N) {
-        throw usageError(
-          `--n ${JSON.stringify(nRaw)} is not a fan-out width`,
-          `--n takes an integer 1-${FANOUT_MAX_N} (best-of-n/race need two arms to compare)`,
-        );
-      }
-      // Positive safe integer, mirroring the --port numeric-flag idiom (D10).
+      const n = parseDecimalFlag(
+        "--n",
+        nRaw,
+        1,
+        FANOUT_MAX_N,
+        "a fan-out width",
+        `--n takes an integer 1-${FANOUT_MAX_N} (best-of-n/race need two arms to compare)`,
+      );
+      // C1: Upper bound of $1M (1e12 µ$) — domain ceiling for per-arm caps.
+      const CAP_MAX_MICRO_USD = 1_000_000_000_000;
       const capRaw = flags.get("--cap-micro-usd");
-      let capMicroUsd: number | undefined;
-      if (capRaw !== undefined) {
-        capMicroUsd = /^[1-9]\d*$/.test(capRaw) ? Number(capRaw) : Number.NaN;
-        // C1: Upper bound of $1M (1e12 µ$) — domain ceiling for per-arm caps.
-        const CAP_MAX_MICRO_USD = 1_000_000_000_000;
-        if (!Number.isSafeInteger(capMicroUsd) || capMicroUsd < 1 || capMicroUsd > CAP_MAX_MICRO_USD) {
-          throw usageError(
-            `--cap-micro-usd ${JSON.stringify(capRaw)} is not a micro-dollar amount`,
-            `--cap-micro-usd takes a positive integer of micro-dollars (1-${CAP_MAX_MICRO_USD}, where $1 is 1000000)`,
-          );
-        }
-      }
+      const capMicroUsd =
+        capRaw === undefined
+          ? undefined
+          : parseDecimalFlag(
+              "--cap-micro-usd",
+              capRaw,
+              1,
+              CAP_MAX_MICRO_USD,
+              "a micro-dollar amount",
+              `--cap-micro-usd takes a positive integer of micro-dollars (1-${CAP_MAX_MICRO_USD}, where $1 is 1000000)`,
+            );
 
       // INV-2 / validation-before-construction: fanout()'s cheap structural
       // Brief ingestion comes next: reading + JSON-parsing the brief has always
@@ -1951,17 +1969,25 @@ export async function run(
 
       // One JSON line PER ARM — the status-row idiom: stdout is what a caller
       // parses, diagnostics ride stderr.
-      for (const arm of result.arms) {
-        emit(
-          `${JSON.stringify({
-            fanoutId: result.fanoutId,
-            arm: arm.arm,
-            runId: arm.runId,
-            outcome: arm.outcome,
-            ...(arm.vmName === undefined ? {} : { vmName: arm.vmName }),
-          })}\n`,
-        );
-      }
+      //
+      // F019: through `reportCompletion`, not a bare `emit`. Each line carries
+      // the runId of a box that is LIVE and BILLING, and this is the only place
+      // that id is ever printed — `fleet fanout … | head -1` closed the pipe and
+      // dropped up to seven of them while still exiting 0. Same posture as the
+      // dispatch ack and teardown's `torn down:`: the work landed, its report
+      // did not, so 6 — and NOT 1, because retrying provisions N more boxes.
+      const armLinesPrinted = reportCompletion(
+        ...result.arms.map(
+          (arm) =>
+            `${JSON.stringify({
+              fanoutId: result.fanoutId,
+              arm: arm.arm,
+              runId: arm.runId,
+              outcome: arm.outcome,
+              ...(arm.vmName === undefined ? {} : { vmName: arm.vmName }),
+            })}\n`,
+        ),
+      );
       // Auto-rank (AC7/D12): best-of-n's whole point, emitted when EVERY arm is
       // ready. Advisory — it authorizes nothing, so it carries its OWN catch:
       // a failure here (record unreadable, store construction refused) must
@@ -2001,6 +2027,9 @@ export async function run(
       )
         ? 1
         : 0;
+      // Never over an already-failing code: an arm failure is worse news than a
+      // lost line, the same rule the cleanup `finally` below states.
+      if (fanoutCode === 0 && !armLinesPrinted) fanoutCode = 6;
     } catch (e) {
       fanoutCode = report(note, e);
       transientRefusal = e instanceof FleetError && (e as { exitStatus?: unknown }).exitStatus === "transient";
@@ -2017,10 +2046,11 @@ export async function run(
         try {
           loserLedger.close();
         } catch (e) {
+          const x = (e ?? {}) as { message?: string };
           printError(
             note,
             "ledger-close-failed",
-            `could not close the loser cost ledger: ${redactSecrets(errText(e))}`,
+            `could not close the loser cost ledger: ${redactSecrets(x.message ?? e)}`,
             "the handle dies with the process; re-run to confirm it still reads",
           );
           // C5: Exit code escalation only when fanoutCode === 0 (the log is always emitted).
@@ -2633,13 +2663,14 @@ export async function run(
       try {
         ledger.close();
       } catch (e) {
+        const x = (e ?? {}) as { message?: string };
         // Same normalization as the ack arm: a null/undefined rejection here
         // would throw a TypeError from INSIDE this catch, escaping the cleanup
         // policy and hiding the original close failure under a crash.
         printError(
           note,
           "ledger-close-failed",
-          `could not close the cost ledger: ${redactSecrets(errText(e))}`,
+          `could not close the cost ledger: ${redactSecrets(x.message ?? e)}`,
           "the handle dies with the process; re-run to confirm it still reads",
         );
         cleanupFailed();
