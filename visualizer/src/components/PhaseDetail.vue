@@ -215,6 +215,18 @@ function gateChecks(g: GateResult): GateCheck[] | null {
   }
 }
 
+/**
+ * checks_json parsed ONCE per gate per render pass. The template reads four
+ * things off each gate's checks (the branch, the count label, the empty case,
+ * the row loop) and calling gateChecks() at each would re-parse the blob four
+ * times a gate, every 500ms poll.
+ */
+const checksById = computed(() => {
+  const map = new Map<number, GateCheck[] | null>()
+  for (const g of phaseGates.value) map.set(g.id, gateChecks(g))
+  return map
+})
+
 /** Collapsed-row count label: mixed gates surface how many items failed. */
 function checksLabel(checks: GateCheck[]): string {
   const failed = checks.filter((c) => !c.ok).length
@@ -252,6 +264,23 @@ function toggle(e: EventRow) {
 function richCall(e: EventRow): ToolCallPayload | null {
   return e.type === 'tool_call' ? parseToolCall(e) : null
 }
+
+/**
+ * Payloads parsed ONCE per expanded event per render pass — the panel reads the
+ * tool, the ok flag, the duration, the args and the result snippet, and calling
+ * richCall() at each would re-parse the same blob five times every poll.
+ *
+ * Keyed off `expanded` on purpose: a phase can carry hundreds of tool_call rows
+ * and only the open ones have a panel, so parsing the whole list here would cost
+ * more than the duplication it removes.
+ */
+const callById = computed(() => {
+  const map = new Map<string, ToolCallPayload | null>()
+  for (const e of phaseEvents.value) {
+    if (expanded.has(e.event_id)) map.set(e.event_id, richCall(e))
+  }
+  return map
+})
 
 // Safe for v-html: highlightJsonText/highlightJson escape all input.
 function argsHtml(call: ToolCallPayload | null): string {
@@ -536,14 +565,14 @@ function togglePanel(id: string) {
         >
           <div v-if="!phaseGates.length" class="faint">no gate results</div>
           <div v-for="g in phaseGates" :key="g.id" class="gate" :class="g.passed ? 'pass' : 'fail'">
-            <template v-if="gateChecks(g)">
+            <template v-if="checksById.get(g.id)">
               <button class="gate-line gate-toggle" @click="toggleGate(g.id)">
                 <span class="chev">{{ openGates.has(g.id) ? '▾' : '▸' }}</span>
                 <span class="gate-mark">{{ g.passed ? '✓' : '✗' }}</span>
                 <span class="gate-name">{{ g.gate }}</span>
                 <span class="tag" :class="{ 'tag-fail': !g.passed }">
                   <span class="tag-k">checks</span>
-                  <span class="tag-v">{{ checksLabel(gateChecks(g) ?? []) }}</span>
+                  <span class="tag-v">{{ checksLabel(checksById.get(g.id) ?? []) }}</span>
                 </span>
                 <span class="tag">
                   <span class="tag-k">attempt</span>
@@ -551,11 +580,11 @@ function togglePanel(id: string) {
                 </span>
               </button>
               <div v-if="openGates.has(g.id)" class="gate-checks">
-                <div v-if="!gateChecks(g)?.length" class="faint">
+                <div v-if="!checksById.get(g.id)?.length" class="faint">
                   nothing to check — the gate inspected no items
                 </div>
                 <div
-                  v-for="(c, i) in gateChecks(g)"
+                  v-for="(c, i) in checksById.get(g.id)"
                   :key="i"
                   class="gate-check"
                   :class="c.ok ? 'pass' : 'fail'"
@@ -677,22 +706,22 @@ function togglePanel(id: string) {
           </button>
 
           <div v-if="expanded.has(e.event_id)" class="payload-panel">
-            <template v-if="richCall(e)">
+            <template v-if="callById.get(e.event_id)">
               <div class="p-meta">
-                <span class="p-tool">{{ richCall(e)?.tool }}</span>
-                <span v-if="richCall(e)?.ok === false" class="t-red">failed</span>
+                <span class="p-tool">{{ callById.get(e.event_id)?.tool }}</span>
+                <span v-if="callById.get(e.event_id)?.ok === false" class="t-red">failed</span>
                 <StatChip
-                  v-if="richCall(e)?.duration_ms != null"
+                  v-if="callById.get(e.event_id)?.duration_ms != null"
                   kind="runtime"
                   compact
-                  :value="richCall(e)?.duration_ms"
+                  :value="callById.get(e.event_id)?.duration_ms"
                 />
               </div>
               <h4>args</h4>
-              <pre class="p-pre" v-html="argsHtml(richCall(e))" />
-              <template v-if="richCall(e)?.result_snippet">
+              <pre class="p-pre" v-html="argsHtml(callById.get(e.event_id) ?? null)" />
+              <template v-if="callById.get(e.event_id)?.result_snippet">
                 <h4>result</h4>
-                <pre class="p-pre">{{ richCall(e)?.result_snippet }}</pre>
+                <pre class="p-pre">{{ callById.get(e.event_id)?.result_snippet }}</pre>
               </template>
             </template>
             <template v-else-if="e.type === 'tool_call' && e.payload_json">
