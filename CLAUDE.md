@@ -83,7 +83,9 @@ block regenerates with the wrong reindex command. This section sits outside the
 markers, which every gitnexus version preserves unconditionally; it is the
 backstop if `gitnexus:keep` ever stops being honoured.
 
-qds-dev branch convention: prefix=feature/ base=main target=main
+qds-dev branch convention: prefix=feature/ base=dev target=dev (2026-08-28: `dev` is the
+integration base — ALL feature/fix PRs merge into `dev`; `dev` → `main` is a periodic
+promote/sync PR only)
 
 Live E2E rounds: use the `qds-live-e2e` skill (`.claude/skills/qds-live-e2e/`) whenever
 running or building live/no-fakes end-to-end tests (QDS_E2E_LIVE tiers, real boxes,
