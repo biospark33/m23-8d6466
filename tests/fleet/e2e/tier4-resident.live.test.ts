@@ -335,6 +335,10 @@ test.todoIf(liveTodoOff())(
       //       never the provisioning key — INV-RES-3's shape on the host) ──
       store = new RunRecordStore({ dir: recordsDir });
       const residentRunId = `${runId}-resident`;
+      // mintRunKey reads the record first (already-minted check) — a missing
+      // record is an ENOENT throw, so create the row before minting (the same
+      // create→mint ordering the harness's T1 mintCappedKey relies on).
+      store.create(residentRunId);
       const minted = await mintRunKey(
         { store, keyApi: openRouterKeyApi(), driver: ctx.driver, capMicroUsd: T4_CAP_MICRO_USD },
         residentRunId,
