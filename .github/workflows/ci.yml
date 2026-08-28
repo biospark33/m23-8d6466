@@ -12,12 +12,15 @@ concurrency:
 
 permissions:
   contents: read
-  # check-pr-conflicts.sh lists other open PRs via `gh pr list` / `gh pr diff`.
-  pull-requests: read
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Job-scoped, not workflow-scoped: only check-pr-conflicts.sh below needs
+      # it (`gh pr list` / `gh pr diff`), and `image` must not inherit it.
+      pull-requests: read
     # This job is NOT ~35s (the old comment was a 15x understatement): it runs
     # install + 2 typechecks + 2 lints + `bun test` + `test:visualizer` +
     # `check:lcov` + `build:check`. Measured full-suite wall time locally:
@@ -70,25 +73,41 @@ jobs:
       # nothing — every record of them passing was a hand-run transcribed into
       # story prose. They gate now, from here.
       #
-      # ADVISORY (continue-on-error) while the backlog is non-zero. Measured
-      # 2026-08-28 on feature/tech-debt-w3-green vs origin/main:
-      # check-defensive-programming.sh = 8 findings (4x D016, 3x D018, 1x D017);
-      # check-pr-conflicts.sh = 51 overlapping files across the stacked
-      # tech-debt PRs (#141, #147). FLIP CONDITION: when a `--base origin/main` run
-      # of check-defensive-programming.sh on a fresh branch prints
-      # "OK: no defensive-programming findings", delete this step's
-      # `continue-on-error` so it blocks. Same rule, independently, for the
-      # conflicts step.
+      # ADVISORY while the backlog is non-zero. Measured 2026-08-28 on
+      # feature/tech-debt-w3-green vs origin/main: check-defensive-programming.sh
+      # = 8 findings (4x D016, 3x D018, 1x D017); check-pr-conflicts.sh = 51
+      # overlapping files across the stacked tech-debt PRs (#141, #147).
+      #
+      # `--warn` is what makes them advisory, NOT continue-on-error. Both scripts
+      # downgrade only confirmed FINDINGS under --warn and still exit nonzero on a
+      # broken scan (missing origin/main, unauthenticated gh, moved script) — so a
+      # gate that scanned nothing still goes red, which is the whole point of F095.
+      # continue-on-error stays as the belt for the same reason it is not the
+      # mechanism: it cannot tell those two cases apart.
+      #
+      # FLIP CONDITION: when a `--base origin/main` run of
+      # check-defensive-programming.sh on a fresh branch prints
+      # "OK: no defensive-programming findings", delete `--warn` from its run line
+      # (and drop its continue-on-error) so findings block. Same rule,
+      # independently, for the conflicts step.
+      #
+      # base_ref/head_ref go through env, never `${{ }}` inside run: — expression
+      # substitution happens before the shell parses, so an attacker-named fork
+      # branch would execute as shell, and quoting the interpolation does not help.
       - name: Defensive-programming gate (advisory — 8 findings, see comment)
         if: github.event_name == 'pull_request'
         continue-on-error: true
-        run: scripts/dev/check-defensive-programming.sh --base origin/${{ github.base_ref }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: scripts/dev/check-defensive-programming.sh --base "origin/$BASE_REF" --warn
       - name: Stacked-PR conflict gate (advisory — 51 overlaps, see comment)
         if: github.event_name == 'pull_request'
         continue-on-error: true
         env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
           GH_TOKEN: ${{ github.token }}
-        run: scripts/dev/check-pr-conflicts.sh --base origin/${{ github.base_ref }} --branch "${{ github.head_ref }}"
+        run: scripts/dev/check-pr-conflicts.sh --base "origin/$BASE_REF" --branch "$HEAD_REF" --warn
 
   # DF2.9: the enterprise image contract. The license sweep is the gate — a
   # denied package, a broken pin, or a package the build cannot attribute exits
