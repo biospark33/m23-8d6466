@@ -275,7 +275,9 @@ describe("importMulch — partial failure", () => {
       expertiseDir: tmpDir,
       bankId: "bank-partial",
     });
-    expect(result.ok).toBe(true);
+    // F006: a partial import is NOT ok — `ok` mirrors failures.length === 0 so
+    // the CLI's exit code (import-mulch-expertise.ts:159) is non-zero.
+    expect(result.ok).toBe(false);
     expect(result.importedFiles).toBe(1);
     expect(result.failures.length).toBe(1);
     expect(result.failures[0]!.entryIndex).toBe(1);
@@ -295,12 +297,44 @@ describe("importMulch — partial failure", () => {
       expertiseDir: tmpDir,
       bankId: "bank-pf",
     });
-    expect(result.ok).toBe(true);
+    // F006: whole-file failure → ok:false even though good.json imported.
+    expect(result.ok).toBe(false);
     expect(result.importedFiles).toBe(1);
     expect(result.failures.length).toBe(1);
     expect(result.failures[0]!.file).toBe("broken.json");
     expect(result.failures[0]!.error).toBe("parse_failed");
     expect(result.failures[0]!.entryIndex).toBeUndefined();
+  });
+
+  test("every file failed → ok:false with a failure per file (F006)", async () => {
+    // The regression F006 names: an all-files-failed import used to return
+    // ok:true with N failures, so the CLI exited 0 on a total import failure.
+    for (let i = 0; i < 5; i++) writeFile(`bad${i}.json`, "{ not valid json");
+    const client = makeMockClient();
+    const result = await importMulch({
+      client: client as any,
+      expertiseDir: tmpDir,
+      bankId: "bank-allfail",
+    });
+    expect(result.ok).toBe(false);
+    expect(result.failures.length).toBe(5);
+    expect(result.importedFiles).toBe(0);
+  });
+
+  test("retain failure on every entry → ok:false (F006 retain_failed path)", async () => {
+    writeFile("good.json", `[{"domain":"d","concepts":["c"],"expertise":"e"}]`);
+    const client = makeMockClient();
+    client.retain = async () => {
+      throw new Error("boom");
+    };
+    const result = await importMulch({
+      client: client as any,
+      expertiseDir: tmpDir,
+      bankId: "bank-retainfail",
+    });
+    expect(result.ok).toBe(false);
+    expect(result.failures.length).toBe(1);
+    expect(result.failures[0]!.error).toStartWith("retain_failed:");
   });
 });
 
@@ -349,7 +383,8 @@ describe("importMulch — 5MB file cap", () => {
       expertiseDir: tmpDir,
       bankId: "bank-mb",
     });
-    expect(result.ok).toBe(true);
+    // F006: failures[] is non-empty below, so the envelope is ok:false.
+    expect(result.ok).toBe(false);
     expect(result.importedFiles).toBe(1);
     const cap = result.failures.find((f) => f.error === "file_too_large");
     expect(cap).toBeDefined();
@@ -395,7 +430,8 @@ describe("importMulch — symlink escape (INV-HM3)", () => {
         expertiseDir: tmpDir,
         bankId: "bank-sym",
       });
-      expect(result.ok).toBe(true);
+      // F006: failures[] is non-empty below, so the envelope is ok:false.
+      expect(result.ok).toBe(false);
       const sym = result.failures.find((f) => f.error === "symlink_escape");
       expect(sym).toBeDefined();
       expect(sym!.file).toBe("evil.json");
@@ -470,7 +506,8 @@ describe("importMulch — per-entry content cap", () => {
       expertiseDir: tmpDir,
       bankId: "bank-cap",
     });
-    expect(result.ok).toBe(true);
+    // F006: failures[] is non-empty below, so the envelope is ok:false.
+    expect(result.ok).toBe(false);
     const cap = result.failures.find((f) => f.error === "content_too_large");
     expect(cap).toBeDefined();
     expect(cap!.entryIndex).toBe(0);
@@ -588,7 +625,8 @@ describe("importMulch — fix [5] typed error classification", () => {
       expertiseDir: tmpDir,
       bankId: "bank-fe",
     });
-    expect(result.ok).toBe(true);
+    // F006: failures[] is non-empty below, so the envelope is ok:false.
+    expect(result.ok).toBe(false);
     const cap = result.failures.find((f) => f.error === "file_too_large");
     expect(cap).toBeDefined();
   });
@@ -618,7 +656,8 @@ describe("importMulch — fix [6] INV-HM3 symlink into subdir rejected", () => {
       expertiseDir: tmpDir,
       bankId: "bank-sub",
     });
-    expect(result.ok).toBe(true);
+    // F006: failures[] is non-empty below, so the envelope is ok:false.
+    expect(result.ok).toBe(false);
     // The symlink → subdir target is rejected.
     const sym = result.failures.find((f) => f.error === "symlink_escape");
     expect(sym).toBeDefined();
@@ -728,7 +767,8 @@ this is not json
       expertiseDir: tmpDir,
       bankId: "bank-jsonl",
     });
-    expect(result.ok).toBe(true);
+    // F006: failures[] is non-empty below, so the envelope is ok:false.
+    expect(result.ok).toBe(false);
     // Two valid lines retained.
     expect(client._allCalls.length).toBe(2);
     // Bad line recorded as per-entry failure.
@@ -797,7 +837,8 @@ describe("importMulch — B-1 failed retain does not poison dedup", () => {
       expertiseDir: tmpDir,
       bankId: "bank-poison",
     });
-    expect(result.ok).toBe(true);
+    // F006: failures[] is non-empty below, so the envelope is ok:false.
+    expect(result.ok).toBe(false);
     // First retain threw → retain_failed recorded.
     const rf = result.failures.find((f) =>
       f.error.startsWith("retain_failed:"),
@@ -835,7 +876,8 @@ describe("importMulch — JSONL entryIndex tracks file line, not array offset", 
       expertiseDir: tmpDir,
       bankId: "bank-desync",
     });
-    expect(result.ok).toBe(true);
+    // F006: failures[] is non-empty below, so the envelope is ok:false.
+    expect(result.ok).toBe(false);
     // line 1 still imported.
     expect(client._allCalls.length).toBe(1);
     // line 2 failed schema validation at its REAL 1-based line number (2), not
@@ -870,7 +912,8 @@ null
       expertiseDir: tmpDir,
       bankId: "bank-desync2",
     });
-    expect(result.ok).toBe(true);
+    // F006: failures[] is non-empty below, so the envelope is ok:false.
+    expect(result.ok).toBe(false);
     // The malformed line (line 5) is recorded at its real line number.
     const bad = result.failures.find((f) => f.error === "invalid_jsonl_line");
     expect(bad).toBeDefined();
