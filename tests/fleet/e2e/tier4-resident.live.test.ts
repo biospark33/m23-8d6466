@@ -256,9 +256,14 @@ function promotionOf(j: JournalBody): Array<[string | undefined, string | undefi
   return (j.phases ?? []).map((p) => [p.name, p.status] as [string | undefined, string | undefined]);
 }
 
-/** (phaseId,type) pairs — the evidence-derived gate-verdict sequence. */
+/** (phase,type) pairs — the evidence-derived gate-verdict sequence. GateEvent
+ * phaseIds are attempt-qualified (`<runId>:<attempt>:<phase>`), so the bare
+ * phase name is the last colon segment. */
 function gateSeqOf(j: JournalBody): Array<[string | undefined, string | undefined]> {
-  return (j.gateEvents ?? []).map((e) => [e.phaseId, e.type] as [string | undefined, string | undefined]);
+  return (j.gateEvents ?? []).map((e) => [
+    typeof e.phaseId === "string" ? e.phaseId.split(":").at(-1) : e.phaseId,
+    e.type,
+  ] as [string | undefined, string | undefined]);
 }
 
 test.todoIf(liveTodoOff())(
