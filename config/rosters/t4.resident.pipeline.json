@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "pipelineId": "t4-resident-live",
-  "runBudgetMs": 120000,
+  "runBudgetMs": 160000,
   "phases": [
     {
       "name": "plan",

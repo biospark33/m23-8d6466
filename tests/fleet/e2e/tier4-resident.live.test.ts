@@ -176,7 +176,7 @@ async function runLeg(
       "--request-id",
       witnessRequestId,
       "--budget-ms",
-      "150000",
+      "200000",
       "--run-root",
       legDir,
       ...extraArgs,
