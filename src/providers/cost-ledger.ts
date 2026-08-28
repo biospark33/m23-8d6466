@@ -249,6 +249,8 @@ export const ADMISSION_SKEW_MARGIN_MS = 300_000;
 
 /**
  * DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up.
+ * (The provider key API's own dollar figures — caps and usage — convert at
+ * credentials.ts's `usdToMicros`; these are two distinct wire boundaries.)
  *
  * ROUND FIRST, then validate the ROUNDED value. Validating the product was the
  * bug: `usd * 1e6` is a float, and almost no ordinary cost lands on an integer

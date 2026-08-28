@@ -64,8 +64,24 @@ const RETRY_BACKOFF_MS = 100;
 /** Verification lists at most 20 pages before failing closed (list-unverified). */
 export const MAX_VERIFY_PAGES = 20;
 
-/** DD-9: conversion happens ONLY at this HTTP boundary. */
+/**
+ * DD-9: conversion for the provider key API's dollar figures (caps and usage).
+ * Cost events arriving on DF2.7's wire convert in cost-ledger.ts's own
+ * `usdToMicros` — the two boundaries are distinct; neither is the only one.
+ *
+ * Finite guard: every input here is a provider-reported number. A NaN reaching
+ * `store.set` throws a generic "must be an integer" from teardown's SPEND step,
+ * aborting before revoke and leaving the key live — so it is refused typed and
+ * early instead (F035).
+ */
 function usdToMicros(usd: number): number {
+  if (!Number.isFinite(usd)) {
+    throw new CredentialLifecycleError(
+      "invalid-provider-usage",
+      `provider reported a non-numeric dollar figure (${usd})`,
+      "inspect the provider console for this run's key, revoke it by hand, then re-run",
+    );
+  }
   return Math.round(usd * MICRO_PER_USD);
 }
 
@@ -334,7 +350,19 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
       `re-run teardown after revoking by hand: curl -X DELETE .../keys/${res.hash} -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
     );
   }
-  deps.store.set(runId, { limitMicroUsd: usdToMicros(res.limitUsd) });
+  // F004: the cap is a CEILING, not a suggestion. budget-gate.ts:104-105 names
+  // this mint as the enforcement locus — a provider echo ABOVE the request is
+  // refused rather than persisted as this run's limit. Clamping DOWN is fine:
+  // a smaller grant cannot overspend the requested ceiling.
+  const grantedMicroUsd = usdToMicros(res.limitUsd);
+  if (grantedMicroUsd > capMicroUsd) {
+    throw new CredentialLifecycleError(
+      "mint-ceiling-mismatch",
+      `provider granted ${res.limitUsd} USD for ${name} against a ${capMicroUsd} micro-USD cap`,
+      `revoke the over-granted key and fix the provider request: curl -X DELETE https://openrouter.ai/api/v1/keys/${res.hash} -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
+    );
+  }
+  deps.store.set(runId, { limitMicroUsd: grantedMicroUsd });
   return { key: res.key, hash: res.hash };
 }
 
@@ -719,10 +747,21 @@ export function openRouterKeyApi(opts: OpenRouterKeyApiOptions = {}): KeyApi {
     // any of the candidate names, absent otherwise. Absence must degrade to
     // `key-age-unavailable`, never to an assumed age (DF2.6 D2).
     const created = k.createdAt ?? k.creation_time ?? k.created_at;
+    // F035: an unvalidated `usage` used to become NaN here and surface as a
+    // generic "spendMicroUsd must be an integer" from teardown's SPEND step —
+    // aborting BEFORE revoke and leaving the key live. Refuse it typed instead.
+    const usageUsd = Number(k.usage ?? 0);
+    if (!Number.isFinite(usageUsd) || usageUsd < 0) {
+      throw new CredentialLifecycleError(
+        "invalid-provider-usage",
+        `GET /keys reported an unusable usage (${JSON.stringify(k.usage)}) for key ${String(k.hash ?? "")}`,
+        "inspect the provider console for this key's usage, revoke it by hand, then re-run",
+      );
+    }
     return {
       hash: String(k.hash ?? ""),
       name: String(k.name ?? k.label ?? ""),
-      usageUsd: Number(k.usage ?? 0),
+      usageUsd,
       ...(typeof created === "string" && created !== "" ? { createdAt: created } : {}),
     };
   }
