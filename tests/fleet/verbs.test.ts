@@ -40,12 +40,7 @@ import {
 } from "../../src/fleet/status.ts";
 import { CostLedger } from "../../src/providers/index.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
-import {
-  provisionAdmittedRun,
-  RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX,
-  SBX_OWNERSHIP_TAG,
-  type ProviderVm,
-} from "../../src/providers/driver.ts";
+import { provisionAdmittedRun, SBX_OWNERSHIP_TAG, type ProviderVm } from "../../src/providers/driver.ts";
 import {
   RUN_ID_MAX,
   RUN_ID_RE,
@@ -2370,9 +2365,10 @@ describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", 
     // the lock — removing the record there would delete bytes a live writer is
     // about to rename back (record returns OPEN and BUDGETLESS anyway, id
     // re-mintable). The arm is chosen by `isRecordLockTimeout`, i.e. by the
-    // message prefix `RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX`; every other cause
-    // still takes the destructive rollback. Inverting the guard — routing THIS
-    // cause onto rmSync, or that one onto this refusal — must fail here.
+    // `code: "lock-timeout"` the store attaches at its throw site (F039); every
+    // other cause still takes the destructive rollback. Inverting the guard —
+    // routing THIS cause onto rmSync, or that one onto this refusal — must fail
+    // here.
     const runId = "budget-write-lock-timeout";
     const failing = Object.assign(Object.create(driver) as FakeDriver, {
       create: async (): Promise<ProviderVm> => {
@@ -2384,7 +2380,12 @@ describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", 
     store.set = ((id: string) => {
       calls += 1;
       if (calls === 1) {
-        throw new Error(`${RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX} held by pid 424242`);
+        // Shaped exactly like run-record.ts's `withLock` timeout: coded, and
+        // carrying the same message an operator would see.
+        throw Object.assign(
+          new Error("timed out waiting for the run record lock: /x/run.lock (held by pid 424242)"),
+          { code: "lock-timeout" },
+        );
       }
       return realSet(id, {} as Parameters<typeof realSet>[1]);
     }) as typeof store.set;
@@ -2397,7 +2398,7 @@ describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", 
     }
     // The LOCK-TIMEOUT refusal, typed and named — not the generic provision
     // failure the sibling above produces for an untyped write failure.
-    expect(err.message).toContain(RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX);
+    expect(err.message).toContain("timed out waiting for the run record lock:");
     expect(err.message).toContain("deliberately NOT removed");
 
     // The record SURVIVES: this is the whole point of the arm. Reading it back
