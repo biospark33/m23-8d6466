@@ -16,9 +16,20 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # Full local run is ~35s; 15 min caps a hung child process instead of
-    # burning the 6h default.
-    timeout-minutes: 15
+    # This job is NOT ~35s (the old comment was a 15x understatement): it runs
+    # install + 2 typechecks + 2 lints + `bun test` + `test:visualizer` +
+    # `check:lcov` + `build:check`. Measured full-suite wall time locally:
+    # 478 s, 498 s, 486 s, plus 500-563 s across the four runs recorded in
+    # TECH_DEBT_AUDIT.md (F082) — roughly 8-10 minutes, before CI's colder
+    # install and slower runners. 25 min caps a hung child process with real
+    # headroom instead of burning the 6h default.
+    #
+    # `test:visualizer` re-runs visualizer/test/** that the root `bun test`
+    # already covers, and it is KEPT deliberately: visualizer/bunfig.toml only
+    # resolves for runs whose cwd is visualizer/, so this is the sole
+    # coverage-instrumented run and the only producer of the lcov that the
+    # `check:lcov` step below gates on. Dropping it would drop the coverage gate.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
         with:

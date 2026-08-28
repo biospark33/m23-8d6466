@@ -125,6 +125,23 @@ function gn(args: string[]): unknown {
   }
 }
 
+/** The fixture symbol every index-dependent AC below anchors on. */
+const FIXTURE_SYMBOL = "registerSwarmClawAgent";
+
+/**
+ * F010: classify an `impact` probe result. Returns a reason when the index
+ * cannot answer the shape the ACs assert (a resolved target plus a risk
+ * string), or null when it can. Split out of indexUnavailableReason() so the
+ * branch is testable without a live index.
+ */
+function staleImpactReason(probe: unknown): string | null {
+  const r = probe as { target?: { name?: string }; risk?: unknown } | null;
+  if (r?.target?.name !== FIXTURE_SYMBOL || typeof r?.risk !== "string") {
+    return `index lacks impact data for ${FIXTURE_SYMBOL} — reindex`;
+  }
+  return null;
+}
+
 /**
  * Preflight: is this repo's gitnexus index usable by these tests?
  *
@@ -170,14 +187,25 @@ function indexUnavailableReason(): string | null {
   // one symbol every AC below anchors on.
   let probe: { status?: string } | null;
   try {
-    probe = gn(["context", "registerSwarmClawAgent", "-r", REPO_ROOT]) as { status?: string } | null;
+    probe = gn(["context", FIXTURE_SYMBOL, "-r", REPO_ROOT]) as { status?: string } | null;
   } catch {
     return null; // gitnexus itself errored — a real failure; let the tests report it.
   }
   if (probe?.status !== "found") {
-    return "fixture symbol registerSwarmClawAgent missing from index (tests/ + fixtures/ filtered by DEFAULT_IGNORE_LIST?)";
+    return `fixture symbol ${FIXTURE_SYMBOL} missing from index (tests/ + fixtures/ filtered by DEFAULT_IGNORE_LIST?) — reindex`;
   }
-  return null;
+  // F010: `context` resolving is not enough. An index built without the impact
+  // layer answers the probe above and then fails AC-1's impact assertions with a
+  // schema parse error — red for developers, dark in CI. Probe the shape those
+  // ACs actually assert (resolved target + risk) so a partially stale index
+  // skips with a diagnostic like every other environmental gap here.
+  let impact: unknown;
+  try {
+    impact = gn(["impact", FIXTURE_SYMBOL, "-r", REPO_ROOT, "--direction", "upstream"]);
+  } catch {
+    return null; // gitnexus itself errored — a real failure; let the tests report it.
+  }
+  return staleImpactReason(impact);
 }
 
 const SKIP_REASON = indexUnavailableReason();
@@ -286,6 +314,26 @@ function assertSafeQuery(q: string): void {
   if (!q || !q.trim()) throw new Error("INV-GN2: rejected empty query");
   if (!SAFE_QUERY.test(q)) throw new Error(`INV-GN2: rejected non-allowlisted chars in query: ${q}`);
 }
+
+// F010: the staleness guard's classifier, exercised WITHOUT a live index. The
+// guard used to probe only one symbol's `context` status, so a partially stale
+// index passed the probe and then blew up inside the impact assertions below
+// (schema parse error) instead of skipping with a diagnostic.
+describe("F010: staleness guard probes the impact shape the ACs assert", () => {
+  test.each([
+    ["no result at all", null],
+    ["a resolved target but no risk", { target: { name: FIXTURE_SYMBOL } }],
+    ["a risk but an unresolved target", { risk: "LOW" }],
+    ["a risk but the wrong target", { target: { name: "somethingElse" }, risk: "LOW" }],
+    ["a non-string risk", { target: { name: FIXTURE_SYMBOL }, risk: 3 }],
+  ])("a stale index that returns %s skips rather than failing the impact assertions", (_desc, probe) => {
+    expect(staleImpactReason(probe)).toMatch(/reindex/);
+  });
+
+  test("an index carrying impact data is reported usable", () => {
+    expect(staleImpactReason({ target: { name: FIXTURE_SYMBOL }, risk: "LOW" })).toBeNull();
+  });
+});
 
 describe("INV-GN2: query input sanitization", () => {
   test.each([
