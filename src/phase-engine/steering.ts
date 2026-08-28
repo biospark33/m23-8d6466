@@ -67,6 +67,7 @@ export interface SolicitCtx {
   requestId?: string;
   phase?: string; // undefined at run_start
   rosterIds?: readonly string[]; // closed DF1.5 id set, for select_roster validation
+  phaseIds?: readonly string[]; // closed phase id set, for select_roster phase validation (absent = empty set = reject)
   promptContext: string[]; // mutable — DF3.4 will push drained inbox lines pre-render
 }
 
@@ -87,7 +88,8 @@ export interface ResidentTelemetry {
   /** COUNT of accepted directives (not an array). */
   directives: number;
   directivesRejected: number;
-  /** Per-phase count of accepted retry directives. */
+  /** Per-phase count of accepted retry directives at post_gate_failure (the
+   *  only point where a retry is executable). */
   steeringIterations: Record<string, number>;
   /** Engine-metered resident subtotal, integer µ$ (usage × rate ÷ 1e6). */
   spendMicros: number;
@@ -101,7 +103,7 @@ export interface ResidentTelemetry {
 export interface SteeringController {
   readonly telemetry: ResidentTelemetry;
   /** In-memory diagnostic for the most recent degradation (call failure or
-   *  malformed-reply limit), sanitized at read. NOT journaled: the journal's
+   *  malformed-reply limit), sanitized at write. NOT journaled: the journal's
    *  resident block is a closed key set with no field for a degradation
    *  cause, and the tripwire cause union stays closed to
    *  "gate_bypass_attempt" (AC5/AC2) — so this lives on the controller only.
@@ -163,18 +165,26 @@ function renderPrompt(point: SteeringPoint, ctx: SolicitCtx): string {
   return `${header}${truncateTailWithSuffix(context, budget)}\n${DIRECTIVE_INSTRUCTION}`;
 }
 
-/** The malformed-reply correction, built from harness-authored text ONLY
- *  (INV-2, modelled on envelope-parse.ts's parseCorrectionPrompt): the parse
- *  failure is named, the model's own output is never interpolated. The union
- *  is restated so a stateless caller's correction attempt still sees the
- *  schema it must answer with. */
-function malformedCorrectionPrompt(reason: string): string {
-  return [
+/** The malformed-reply correction, built from harness-authored text plus the
+ *  bounded solicitation context (INV-2, modelled on envelope-parse.ts's
+ *  parseCorrectionPrompt): the parse failure is named, the model's own reply
+ *  is never interpolated. The steering point and the tail-truncated context
+ *  ride along so a stateless caller knows WHAT it is steering, and the union
+ *  is restated so its correction attempt still sees the schema it must answer
+ *  with. The 16,000-char ceiling holds for the whole correction, suffix
+ *  included. */
+function malformedCorrectionPrompt(reason: string, point: SteeringPoint, ctx: SolicitCtx): string {
+  const header = `Steering point: ${point}.\n`;
+  const body = [
     "Your previous response could not be parsed as a steering directive.",
     `Parse failure: ${reason}.`,
     `Reply with ONE JSON object matching the closed union, at most ${MAX_OUTPUT_TOKENS} output tokens, and nothing else.`,
     DIRECTIVE_INSTRUCTION,
   ].join("\n");
+  // Reserve header + body (+ joiner) BEFORE cutting the context so the whole
+  // correction honors the ceiling — the same discipline as renderPrompt.
+  const budget = PROMPT_CHAR_CEILING - header.length - body.length - 1;
+  return `${header}${truncateTailWithSuffix(ctx.promptContext.join("\n"), budget)}\n${body}`;
 }
 
 type ReplyParse = { ok: true; parsed: unknown } | { ok: false; reason: string };
@@ -192,15 +202,19 @@ function parseReply(raw: string): ReplyParse {
 }
 
 /** Tripwire detail for a schema rejection: the rejected action name when the
- *  reply named one outside the union, else the first sanitized issue. Both
- *  routes sanitize model-authored text (INV-2 / R7 §2c). */
+ *  reply named one outside the union; for a KNOWN action carrying an unknown
+ *  field, the action name plus the first sanitized issue (AC2's row names the
+ *  action in both cases). All routes sanitize model-authored text
+ *  (INV-2 / R7 §2c). */
 function rejectionDetail(parsed: unknown, error: ZodError): string {
   const action = (parsed as { action?: unknown } | null)?.action;
   if (typeof action === "string" && !KNOWN_ACTIONS.includes(action)) {
     return `unrecognized action: ${sanitizeForMessage(action)}`;
   }
   const issue = error.issues[0];
-  return issue === undefined ? "schema rejected the reply" : formatZodIssue(issue);
+  if (issue === undefined) return "schema rejected the reply";
+  const detail = formatZodIssue(issue);
+  return typeof action === "string" ? `action ${sanitizeForMessage(action)} rejected: ${detail}` : detail;
 }
 
 export function createSteering(deps: {
@@ -220,13 +234,17 @@ export function createSteering(deps: {
   let lastDegradationReason: string | null = null;
 
   /** Integer µ$ per reply (DD-9): round at each term, sum integers only.
-   *  A non-finite or negative token count clamps to 0 — one poisoned usage
-   *  would otherwise turn spendMicros non-integer (JSON null) for the run. */
-  const meter = (usage: { inputTokens: number; outputTokens: number }): void => {
-    const clamp = (n: number): number => (Number.isFinite(n) && n > 0 ? n : 0);
+   *  A non-finite or negative token count — or rate — clamps to 0: one
+   *  poisoned input would otherwise turn spendMicros non-integer (JSON null)
+   *  for the run. A reply carrying no usage object meters as zero rather than
+   *  throwing (the never-throws contract covers metering too). */
+  const clampTerm = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0);
+  const rateInput = clampTerm(deps.rate.inputPerMTok);
+  const rateOutput = clampTerm(deps.rate.outputPerMTok);
+  const meter = (usage: { inputTokens?: unknown; outputTokens?: unknown } | undefined): void => {
     telemetry.spendMicros +=
-      Math.round((clamp(usage.inputTokens) * deps.rate.inputPerMTok) / 1_000_000) +
-      Math.round((clamp(usage.outputTokens) * deps.rate.outputPerMTok) / 1_000_000);
+      Math.round((clampTerm(usage?.inputTokens) * rateInput) / 1_000_000) +
+      Math.round((clampTerm(usage?.outputTokens) * rateOutput) / 1_000_000);
   };
 
   /** A rejected directive has exactly one effect: a telemetry row (INV-RES-2). */
@@ -250,14 +268,32 @@ export function createSteering(deps: {
     return PROCEED;
   };
 
-  async function solicit(point: SteeringPoint, ctx: SolicitCtx): Promise<SteeringDirective> {
+  // Solicitations are serialized: a second solicit() queues behind the
+  // in-flight one so telemetry/status mutations and caller calls never
+  // interleave (the runner solicits sequentially today; the chain keeps that
+  // an invariant rather than a convention). solicit never throws, so the
+  // chain cannot wedge — the trailing catch is belt-and-braces only.
+  let chain: Promise<unknown> = Promise.resolve();
+  const solicit: SteeringController["solicit"] = (point, ctx) => {
+    const run = chain.then(() => solicitSerialized(point, ctx));
+    chain = run.catch(() => undefined);
+    return run;
+  };
+
+  async function solicitSerialized(point: SteeringPoint, ctx: SolicitCtx): Promise<SteeringDirective> {
     // Degraded residents are treated as absent: less agent influence, never
     // a skipped gate (INV-RES-5).
     if (telemetry.status !== "active") return PROCEED;
+    // SEAM DF3.6: checkBounds(point) wraps here — spend/iteration/RSS bounds
+    // gate before any prompt is rendered.
+    // SEAM DF3.4: drain the resident inbox into ctx.promptContext here,
+    // pre-render (the ctx field is mutable for exactly this slot).
     let prompt = renderPrompt(point, ctx);
     for (let attempt = 1; ; attempt += 1) {
       let reply: Awaited<ReturnType<ResidentCaller["call"]>>;
       try {
+        // SEAM: render → call. The caller (fleet) owns the SOLICIT_TIMEOUT_MS
+        // wall-clock timer; a timeout arrives here as a throw.
         reply = await deps.caller.call(prompt);
       } catch (err) {
         // Timeout / unreachable / process death: no retry of the call, no
@@ -265,12 +301,13 @@ export function createSteering(deps: {
         // kept in memory for diagnostics — the journal's resident block is a
         // closed key set, so it has no field to carry a degradation reason.
         telemetry.status = "degraded";
-        lastDegradationReason = err instanceof Error ? err.message : String(err);
+        lastDegradationReason = sanitizeForMessage(err instanceof Error ? err.message : String(err));
         return PROCEED;
       }
       meter(reply.usage);
       let parsed: ReplyParse;
       try {
+        // SEAM: call → parse.
         parsed = parseReply(reply.raw);
       } catch (err) {
         // A throwing extractor is a malformed reply like any other (AC3's
@@ -280,10 +317,10 @@ export function createSteering(deps: {
       if (!parsed.ok) {
         if (attempt >= MAX_MALFORMED_ATTEMPTS) {
           telemetry.status = "degraded";
-          lastDegradationReason = `malformed reply: ${parsed.reason}`;
+          lastDegradationReason = sanitizeForMessage(`malformed reply: ${parsed.reason}`);
           return PROCEED;
         }
-        prompt = malformedCorrectionPrompt(parsed.reason);
+        prompt = malformedCorrectionPrompt(parsed.reason, point, ctx);
         continue;
       }
       const result = SteeringDirectiveSchema.safeParse(parsed.parsed);
@@ -301,10 +338,25 @@ export function createSteering(deps: {
       ) {
         return reject(ctx, `rosterId outside closed roster set: ${sanitizeForMessage(directive.rosterId)}`);
       }
+      // The same fail-closed rule for the phase the pick names: an absent
+      // phaseIds reads as an EMPTY set, so a pick targeting a phase the
+      // runner never declared is a rejection, not an acceptance.
+      if (
+        directive.action === "select_roster" &&
+        !(ctx.phaseIds ?? []).includes(directive.phase)
+      ) {
+        return reject(ctx, `phase outside closed phase set: ${sanitizeForMessage(directive.phase)}`);
+      }
       telemetry.directives += 1;
-      if (directive.action === "retry" && ctx.phase !== undefined) {
+      // steeringIterations counts retries that are actually executable —
+      // post_gate_failure only. A retry accepted at run_start/run_end still
+      // counts in `directives`, but there is no phase attempt it could steer
+      // (AC5: the per-phase counter is steering proof, so it must not be
+      // inflated by a retry that cannot run).
+      if (directive.action === "retry" && point === "post_gate_failure" && ctx.phase !== undefined) {
         telemetry.steeringIterations[ctx.phase] = (telemetry.steeringIterations[ctx.phase] ?? 0) + 1;
       }
+      // SEAM DF3.4: ack the reply into the inbox record here.
       return directive;
     }
   }
@@ -313,7 +365,7 @@ export function createSteering(deps: {
     telemetry,
     solicit,
     get lastDegradationReason() {
-      return lastDegradationReason === null ? null : sanitizeForMessage(lastDegradationReason);
+      return lastDegradationReason; // sanitized at write (INV-2)
     },
   };
 }

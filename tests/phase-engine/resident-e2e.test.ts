@@ -109,6 +109,12 @@ function spawnRunner(
       QDS_RUN_ROOT: markerRoot,
       QDS_PI_BIN: FAKE_PI,
       QDS_PI_CATALOG_DIR: CATALOG_DIR,
+      // S2-4's least-privilege child env (src/fleet/resident.ts's
+      // CHILD_ENV_ALLOWLIST) strips everything the fake pi is scripted by.
+      // QDS_RESIDENT_ENV_PASSTHROUGH is the documented escape hatch: these
+      // names are read from the RUNNER's env and forwarded to the pi child.
+      QDS_RESIDENT_ENV_PASSTHROUGH:
+        "FAKE_RESIDENT_REPLIES,FAKE_RESIDENT_USAGE,FAKE_RESIDENT_EXIT,FAKE_RESIDENT_HANG,FAKE_RESIDENT_HANG_AT,FAKE_RESIDENT_ECHO_ENV",
       // Per-leg scratch: childEnv forwards it to the manifest command, whose
       // counter then lives in THIS leg's dir (stateFile's single source), not
       // in a host-global TMPDIR other suite processes share.
@@ -238,6 +244,21 @@ function jsonLines(stderr: string): Record<string, unknown>[] {
 const solicitsAt = (stderr: string, point: string): Record<string, unknown>[] =>
   jsonLines(stderr).filter((l) => l.event === "resident_solicit" && l.point === point);
 
+type TraceRow = { type?: string; name?: string; payload_json?: string | null };
+
+/** The tracer's JSONL mirror (`<run-root>/trace/events.jsonl`), parsed. */
+function readTraceRows(dir: string): TraceRow[] {
+  return fs
+    .readFileSync(path.join(dir, "marker", "trace", "events.jsonl"), "utf8")
+    .split("\n")
+    .filter((l) => l.trim().length > 0)
+    .map((l) => JSON.parse(l) as TraceRow);
+}
+
+/** The run's resident_directive trace rows (accepted non-proceed directives). */
+const directiveRows = (dir: string): TraceRow[] =>
+  readTraceRows(dir).filter((r) => r.type === "log" && r.name === "resident_directive");
+
 /** Timing-shaped keys, pattern-based (the old allowlist grew by hand and closed
  *  on itself): suffix `Ms`/`ms` and `At`/`_at` cover timestamps, durations and
  *  the sub-timing family; `subTimings` is the one container name. A future
@@ -319,8 +340,16 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
     const steered = await runLeg("demo", {
       runId,
       requestId: crypto.randomUUID(),
-      replies: STEERED,
-      env: { OPENROUTER_API_KEY: REDACTION_PROBE },
+      replies: [
+        STEERED[0]!,
+        STEERED[1]!,
+        // The probe rides into the reply artifact PRE-redaction: the fixture
+        // substitutes the named env var's value for the placeholder, so the
+        // run_end reply genuinely carries the credential-shaped value until
+        // resident.ts's persist chokepoint redacts it.
+        JSON.stringify({ action: "proceed", note: "report: steered run complete {{FAKE_RESIDENT_ECHO}}" }),
+      ],
+      env: { OPENROUTER_API_KEY: REDACTION_PROBE, FAKE_RESIDENT_ECHO_ENV: "OPENROUTER_API_KEY" },
     });
     expect(steered.exitCode).toBe(0);
     const j = steered.journal;
@@ -341,12 +370,7 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
     // The directive's own record: `<run-root>/trace/events.jsonl` (the
     // tracer's JSONL mirror of trace.db), payload naming the action and the
     // guidance the engine-authorized attempt N+1 consumed.
-    const traceRows = fs
-      .readFileSync(path.join(steered.dir, "marker", "trace", "events.jsonl"), "utf8")
-      .split("\n")
-      .filter((l) => l.trim().length > 0)
-      .map((l) => JSON.parse(l) as { type?: string; name?: string; payload_json?: string | null });
-    const directives = traceRows.filter((r) => r.type === "log" && r.name === "resident_directive");
+    const directives = directiveRows(steered.dir);
     expect(directives).toHaveLength(1);
     const payload = JSON.parse(directives[0]?.payload_json ?? "{}") as {
       action?: string;
@@ -386,7 +410,13 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
     expect(fs.readFileSync(promptFile, "utf8")).toContain("repoSlug");
 
     // DOD-Security redaction, actually asserted: a credential the child was
-    // handed must not survive into any persisted artifact.
+    // handed must not survive into any persisted artifact. NON-VACUOUS: the
+    // run_end reply carried the probe pre-redaction (the fixture's echo mode
+    // above), so the redacted form must be PRESENT — deleting the redaction
+    // chokepoint now fails this twice over.
+    const runEndReply = fs.readFileSync(path.join(steered.dir, `${runId}-solicit-3-reply.txt`), "utf8");
+    expect(runEndReply).toContain("[REDACTED:OPENROUTER_API_KEY]");
+    expect(runEndReply).not.toContain(REDACTION_PROBE);
     for (const f of artifacts) {
       expect(fs.readFileSync(path.join(steered.dir, f), "utf8")).not.toContain(REDACTION_PROBE);
     }
@@ -425,6 +455,88 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
     const [postGate] = solicitsAt(leg.stderr, "post_gate_failure");
     expect(postGate?.directiveAction).toBe("proceed");
     expect(postGate?.accepted).toBe(true);
+  }, 60_000);
+
+  test("run_start abort: zero phases walked, the empty run settles not-ok (exit 1), run_end never solicited", async () => {
+    const leg = await runLeg("abort-run-start", {
+      runId: "resident-abort-start-run",
+      requestId: crypto.randomUUID(),
+      replies: [JSON.stringify({ action: "abort", reason: "manifest targets the wrong repo" })],
+    });
+    // abort is the engine's own fail transition: finish settles the empty run
+    // not-ok (ok = phases > 0 && …), so the run exits 1, not 0 or 2.
+    expect(leg.exitCode).toBe(1);
+    const j = leg.journal;
+    expect(j.ok).toBe(false);
+    // walkPhases never ran: no phase rows, no gate events.
+    expect(j.phases).toHaveLength(0);
+    expect(j.gateEvents).toHaveLength(0);
+    const r = j.resident;
+    expect(r?.status).toBe("active");
+    expect(r?.directives).toBe(1);
+    expect(r?.directivesRejected).toBe(0);
+
+    // The run_end solicitation is SKIPPED on an aborted run (abort stops the
+    // resident conversation too): exactly one solicitation line exists.
+    const lines = jsonLines(leg.stderr).filter((l) => l.event === "resident_solicit");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.point).toBe("run_start");
+    expect(lines[0]?.directiveAction).toBe("abort");
+    expect(lines[0]?.accepted).toBe(true);
+
+    // The accepted non-proceed directive is recorded (S3-15): one trace row
+    // carrying the abort and the agent's reason.
+    const directives = directiveRows(leg.dir);
+    expect(directives).toHaveLength(1);
+    const payload = JSON.parse(directives[0]?.payload_json ?? "{}") as Record<string, unknown>;
+    expect(payload.point).toBe("run_start");
+    expect(payload.action).toBe("abort");
+    expect(payload.reason).toBe("manifest targets the wrong repo");
+  }, 60_000);
+
+  test("post_gate_failure abort: the authorized retry is declined, the phase settles fail, no second attempt runs", async () => {
+    const leg = await runLeg("abort-post-gate", {
+      runId: "resident-abort-gate-run",
+      requestId: crypto.randomUUID(),
+      replies: [
+        JSON.stringify({ action: "proceed" }),
+        JSON.stringify({ action: "abort", reason: "the failure is not retryable" }),
+        JSON.stringify({ action: "proceed" }),
+      ],
+    });
+    // The caught GateFailureError is rethrown: build settles fail on attempt
+    // 1, the walk halts, and the run settles not-ok.
+    expect(leg.exitCode).toBe(1);
+    const j = leg.journal;
+    expect(j.ok).toBe(false);
+    expect(j.phases.map((p) => [p.name, p.status])).toEqual([
+      ["plan", "success"],
+      ["build", "fail"],
+    ]);
+    // No retry attempt: exactly one gate event — the attempt-1 failure.
+    expect(j2GateSeq(j)).toEqual([{ type: "gate_fail", attempt: 1 }]);
+
+    // The abort's own record: a resident_directive trace row carrying the
+    // reason and the attempt the retry would have been.
+    const directives = directiveRows(leg.dir);
+    expect(directives).toHaveLength(1);
+    const payload = JSON.parse(directives[0]?.payload_json ?? "{}") as Record<string, unknown>;
+    expect(payload.action).toBe("abort");
+    expect(payload.reason).toBe("the failure is not retryable");
+    expect(payload.attempt).toBe(2);
+    expect(payload.phase).toBe("build");
+
+    // A post-gate abort is NOT residentAborted — the run_end solicitation
+    // still fires: three solicitations, all accepted.
+    const lines = jsonLines(leg.stderr).filter((l) => l.event === "resident_solicit");
+    expect(lines.map((l) => l.point)).toEqual(["run_start", "post_gate_failure", "run_end"]);
+    expect(lines.map((l) => l.directiveAction)).toEqual(["proceed", "abort", "proceed"]);
+    const r = j.resident;
+    expect(r?.status).toBe("active");
+    expect(r?.directives).toBe(3);
+    expect(r?.directivesRejected).toBe(0);
+    // An abort never counts as a steering iteration (retries only).
+    expect(r?.steeringIterations).toEqual({});
   }, 60_000);
 
   test("arming reads the brief's CONTENT, not requestId alone — a witness without requestId still arms", async () => {
@@ -631,18 +743,30 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
       }
       expect(invocations()).toBe(3);
 
-      const sent = Date.now();
       proc.kill("SIGINT");
-      const [, stderr, exitCode] = await Promise.all([
+      // Poll-until-exit with a generous bound, not a wall-clock pin: between
+      // signal and exit the runner does a SIGKILL + await, a journal flush
+      // (write+fsync+rename), a SQLite checkpoint/close and the banner write —
+      // on a saturated CI host that can legitimately outlast any fixed
+      // millisecond budget, and a timeout there must read as host slowness
+      // (with the stderr tail for the failure diff), not a functional
+      // regression. 30 s is still far below the 600 s resident timeout the
+      // first-signal stop exists to avoid.
+      const exitDeadline = Date.now() + 30_000;
+      while (proc.exitCode === null && proc.signalCode === null && Date.now() < exitDeadline) {
+        await Bun.sleep(50);
+      }
+      const [, stderr] = await Promise.all([
         new Response(proc.stdout).text(),
         new Response(proc.stderr).text(),
-        proc.exited,
       ]);
       // Prompt exit: the stop→degrade→cleanup chain, not a 600 s timeout.
-      expect(Date.now() - sent).toBeLessThan(15_000);
       // The run settled ok BEFORE the signal; a signal aimed at telemetry must
       // not rewrite a settled verdict — the normal path returns finish's code.
-      expect(exitCode).toBe(0);
+      expect(
+        proc.exitCode,
+        `runner still alive 30 s after SIGINT; stderr tail: ${stderr.slice(-2000)}`,
+      ).toBe(0);
       const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as E2eJournal;
       expect(journal.ok).toBe(true);
       expect(journal.phases.map((p) => p.status)).toEqual(["success", "success"]);

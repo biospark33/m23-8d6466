@@ -20,6 +20,12 @@
  *                          session-marker count above) — e.g. "2" hangs the
  *                          run_end solicitation while run_start/post_gate
  *                          reply normally.
+ *   FAKE_RESIDENT_ECHO_ENV name of an env var whose VALUE is substituted for
+ *                          every {{FAKE_RESIDENT_ECHO}} placeholder in the
+ *                          scripted reply — the route a redaction probe takes
+ *                          into the reply artifact's PRE-redaction content, so
+ *                          the e2e can assert the redacted form actually
+ *                          replaced something.
  *
  * stdout is pi `--mode json` NDJSON: message_start / message_end (assistant
  * text + usage) / agent_end — the exact event subset `harvestPiStream`
@@ -31,7 +37,10 @@ const argv = process.argv.slice(2);
 const pIndex = argv.indexOf("-p");
 if (pIndex < 0 || argv[pIndex + 1] === undefined) {
   process.stderr.write("fake-resident: -p <prompt> is required\n");
-  process.exitCode = 2;
+  // Real pi's argv-error path exits IMMEDIATELY: no session marker (no
+  // invocation slot consumed) and no billable assistant reply — falling
+  // through would over-report versus the real binary.
+  process.exit(2);
 }
 
 const sessionIndex = argv.indexOf("--session");
@@ -111,9 +120,18 @@ if (process.env.FAKE_RESIDENT_HANG === "1" || process.env.FAKE_RESIDENT_HANG_AT 
 
 const reply = replies[Math.min(index, replies.length - 1)]!;
 
+// FAKE_RESIDENT_ECHO_ENV: substitute the named env var's VALUE into the
+// scripted reply — the placeholder lands in the reply text pre-redaction, so
+// the e2e redaction assertion has something real to bite on.
+const echoVar = process.env.FAKE_RESIDENT_ECHO_ENV;
+const echoed =
+  echoVar === undefined || echoVar === ""
+    ? reply
+    : reply.replaceAll("{{FAKE_RESIDENT_ECHO}}", process.env[echoVar] ?? "");
+
 const message = {
   role: "assistant",
-  content: [{ type: "text", text: reply }],
+  content: [{ type: "text", text: echoed }],
   usage: {
     input: usage.input,
     output: usage.output,
@@ -128,8 +146,6 @@ console.log(JSON.stringify({ type: "message_start", message }));
 console.log(JSON.stringify({ type: "message_end", message }));
 console.log(JSON.stringify({ type: "agent_end", messages: [message] }));
 
-// A usage fault already set exitCode 2 above — FAKE_RESIDENT_EXIT must not
-// clobber it to 0 (the `?? 0 || 0` chain used to overwrite any earlier code).
-if (process.exitCode === undefined || process.exitCode === null) {
-  process.exitCode = Number(process.env.FAKE_RESIDENT_EXIT ?? 0) || 0;
-}
+// The argv-error path exits above; nothing pre-sets exitCode anymore, so the
+// scripted exit code is the whole story here.
+process.exitCode = Number(process.env.FAKE_RESIDENT_EXIT ?? 0) || 0;

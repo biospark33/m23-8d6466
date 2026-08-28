@@ -494,6 +494,86 @@ fix, times out at 60 s without it (negative control via `git stash` of the fix);
 
 ---
 
+## Review Findings — Round 5 (bmad-code-review, 2026-08-27)
+
+7-layer adversarial review (3 blind, 3 edge-case, 1 acceptance auditor) on 8 chunked diffs
+(≤881 lines each); 73 raw findings → 53 patched / 2 deferred / 13 dismissed (all dismissals
+verified against source first). Ledger: `_bmad-output/workflow-state/code-review/pr135/triage.md`
+(round-5); per-agent reports under `.../pr135/reports/`.
+
+### Patched (all fixed, checked off)
+
+Engine (`src/phase-engine/steering.ts`, `journal.ts`):
+- [x] Review/Patch: meter() clamps usage but not rate — NaN/Infinity rate no longer poisons spendMicros [S1-1]
+- [x] Review/Patch: concurrent solicit() calls now serialized (promise-chain mutex) [S1-2]
+- [x] Review/Patch: malformed-correction prompt now carries steering point + bounded context for stateless callers [S1-3]
+- [x] Review/Patch: lastDegradationReason sanitized at write, not read-side only [S1-4]
+- [x] Review/Patch: select_roster.phase fail-closed validated against new closed `phaseIds` ctx set [S1-5]
+- [x] Review/Patch: steeringIterations only counts post_gate_failure retries — run_end retry reply no longer inflates the per-phase counter (AC5) [S1-6]
+- [x] Review/Patch: tripwire detail names the action for unknown-field (.strict()) rejections [S1-7]
+- [x] Review/Patch: DF3.4/DF3.6 successor seam comments added inside solicit, as the Dev Agent Record claimed [S1-8]
+- [x] Review/Patch: meter tolerates missing/non-object usage — never-throws contract restored [S1-9]
+- [x] Review/Patch: journal doc corrected: resident block present when armed or seeded disabled; writeResident documented as deliberately twice-callable (seed+refresh) [S1-10/11]
+
+Fleet (`src/fleet/resident.ts`):
+- [x] Review/Patch: pi session file hardening — sessionDir chmod 0700 unconditionally (best-effort), session jsonl chmod 0600 after each call [S2-1]
+- [x] Review/Patch: prompt argv size guard (refuse >128 KiB, classified logic error) + ps-visibility doc note [S2-2]
+- [x] Review/Patch: non-zero exit classified "transient" on provider-failure stderr patterns (429/5xx/network); default stays "logic" [S2-3]
+- [x] **Behavior change:** child env now least-privilege allowlist (PATH/HOME/OPENROUTER_API_KEY/proxies) with `QDS_RESIDENT_ENV_PASSTHROUGH` escape hatch [S2-4]
+- [x] Review/Patch: concurrent call() refused (in-flight guard) — current slot + session file corruption closed [S2-5]
+- [x] Review/Patch: session jsonl quarantined after timeout-SIGKILL (torn-file degradation loop closed) [S2-6]
+- [x] Review/Patch: timeout death message names the timeout ("timed out after N ms") [S2-7]
+- [x] Review/Patch: stream-read failure kills the child before rethrow (no orphan, stop() stays armed) [S2-8]
+- [x] Review/Patch: briefIsEmpty true for non-string/non-object briefs (AC4 fail-safe) [S2-9]
+- [x] Review/Patch: reply-persist failure log routed through the redact chokepoint [S2-10]
+- [x] **Behavior change:** exit 0 with no message_end → exitStatus "logic" (empty harvest no longer lies "success") [S2-11]
+- [x] Review/Patch: non-empty stderr on success surfaced as one redacted warning line [S2-12]
+- [x] Review/Patch: artifact writes atomic (temp + rename, mode 0600) [S2-13]
+- [x] **Behavior change (reverses round-2 best-effort disposition):** reply-persist failure now throws fail-closed — steering degrades to the deterministic default; a directive is never executed unpersisted, per §5.2 "every raw reply persists pre-execution" [S2-14]
+- [x] Review/Patch: header comment barrel-import claim corrected [S2-15]
+
+Runner (`scripts/pipeline-run.ts`, `gates/library.ts`):
+- [x] Review/Patch: second signal post-settlement no longer exits 2 — runSettled guard exits with finish's code [S3-1]
+- [x] **Behavior change:** resident block seeded BEFORE walkPhases — timeout/terminate terminal markers can no longer precede it [S3-2]
+- [x] Review/Patch: try/finally around spawn→stop — throws no longer orphan the pi child or skip resident-block writes [S3-3]
+- [x] **Behavior change:** run_end solicitation skipped on terminated runs; first signal stops in-flight pi at every hook point [S3-4]
+- [x] Review/Patch: gated-loop timer comment corrected (shared per-phase timer, NOT retry.ts's per-attempt; path ref fixed to agents/retry.ts) — fail-closed direction kept deliberately [S3-5]
+- [x] Review/Patch: ResidentHooks docstring no longer claims the retried attempt "consumes" guidance (it steers future solicitations only) [S3-6]
+- [x] Review/Patch: closedRosterIds role-name semantics verified vs roster schema; doc fixed [S3-8]
+- [x] **Behavior change (tightens round-2 defer):** rosterIds advertised ONLY at run_start (elsewhere fail-closed rejection + tripwire); directive.phase must match the dispatch_task phase; unconsumed rosterChoice.pending traced at run end [S3-10/12]
+- [x] Review/Patch: stop() before exitStatus() post-settlement (bounded cleanup) [S3-11]
+- [x] Review/Patch: trace phaseId keyspace unified [S3-13]
+- [x] Review/Patch: run.terminate guarded inside the async signal handler [S3-14]
+- [x] Review/Patch: run_end directive + accepted run_start select_roster now leave trace rows [S3-15]
+- [x] Review/Patch: writeAll breaks on 0-byte write, bounded, dropped bytes counted [S3-16]
+- [x] Review/Patch: code-phase gate events now carry gate_ms (shape parity with DF1.3 rows) [S3-17]
+- [x] Review/Patch: credential scan depth-capped with a clear refusal message [S3-18]
+- [x] **Behavior change:** credential scan runs on ANY parsed brief, armed or not (fail-safe) [S3-19]
+
+Test hardening (wave 2):
+- [x] Review/Patch: truncation boundary tests (15 999/16 000/16 001, budget±1, astral char at the cut) [T1]
+- [x] Review/Patch: fake-pi secret-in-stderr mode — redact-then-slice(-400) now actually asserted [T1]
+- [x] Review/Patch: piEnv scrub extended to QDS_RESIDENT_TIMEOUT_MS / QDS_PI_BIN [T1]
+- [x] Review/Patch: concurrent-call rejection test; slug-shape edges (no-slash, 3-part); redundant toBe(2) removed [T1]
+- [x] Review/Patch: redaction assertion made non-vacuous — fixture echo mode (FAKE_RESIDENT_ECHO_ENV) lands the probe pre-redaction, artifact asserts [REDACTED:...] [T2]
+- [x] Review/Patch: e2e abort-directive legs (run_start + post_gate_failure) [T2]
+- [x] Review/Patch: accepted in-set select_roster leg with dispatch_task fixture (resolves round-2 defer "valid-roster-selection untested e2e") [T2]
+- [x] Review/Patch: usage.test steering pin strengthened (both meter terms pinned, not a bare count) [T2]
+- [x] Review/Patch: SIGINT leg poll-until-exit (30 s) instead of 15 s wall-clock [T2]
+- [x] Review/Patch: fake-resident missing -p exits 2 immediately (no marker/reply) [T2]
+- [x] Review/Patch: e2e harness passes QDS_RESIDENT_ENV_PASSTHROUGH for FAKE_RESIDENT_*/QDS_FAKE_PI_* after the S2-4 allowlist [T2]
+
+### Deferred (2)
+
+- [x] Review/Defer: no cwd on the pi spawn — pi config resolution from cwd is speculative; revisit if pi resolves project-local config [S2-20]
+- [x] Review/Defer: dispatch_task refusals return a value so Run.phase promotes the phase to success — PRE-EXISTING (src/phase-engine/phases/dispatch-task.ts untouched by this PR), pinned as characterization in the new roster leg; owns a follow-up
+
+### Dismissed as false positives (13, evidence in reports/)
+
+Headliners: "per-term Math.round zeroes spend" (rates are integer µ$/MTok via toMicrosPerMTok — DD-9 — and per-term round is the spec'd exact arithmetic, story :267-268); "engine retry double-authorizes gated bodies" (runAgentPhase has zero callers; Run.phase invokes the body once); "--no-resident changes existing manifests" (no manifest outside this PR's fixtures declares a code-phase testCommand); writeResident twice-call (deliberate seed+refresh); ResidentStatus union (shared journal contract, AC5); team-lead-driver import (import.meta.main-guarded); runId uniqueness (crypto.randomUUID default); tokenizeArgs parity (verified equivalent).
+
+**Round-5 gates:** full suite 3782 pass / 8 skip / 18 todo / **1 fail = pre-existing environmental**: `tests/gitnexus/graph-queries.test.ts` impact-schema assertion fails because the installed gitnexus CLI's `impact` payload no longer carries `filePath`/`affected_processes`/`affected_modules` (tooling-version drift; index freshly reindexed to HEAD d15f0ca via `scripts/install-gitnexus-plus.sh`, failure stable in isolation ×3 and independent of this diff — the test reads the committed-state index, which the round-5 working-tree changes cannot affect). All 106 DF3.3 focal tests green. biome clean on all touched files; tsc --noEmit exit 0; GitNexus detect_changes: 15 files / 59 symbols, HIGH-as-feature-blast-radius, every changed symbol inside DF3.3's own modules (pipeline-run, steering, resident, journal, gates/library + tests) — no out-of-scope process affected.
+
 ## Hardening Revision — 2026-08-20
 
 **Revised by:** Writer Agent W2 (DF3 hardening)

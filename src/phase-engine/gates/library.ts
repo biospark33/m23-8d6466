@@ -274,6 +274,11 @@ export function gatedBody<T>(
         attempt: opts?.attempt ?? 1,
         gate_exec_ms: Math.round(gateExecMs),
         gate_report_ms: Math.round(gateReportMs),
+        // Spec §Observability names `gate_ms`; the exec/report split above is
+        // finer detail beneath it — same shape DF1.3's loop emits
+        // (agents/retry.ts:253-255), so code-phase and agent-phase gate rows
+        // carry the same field set.
+        gate_ms: Math.round(gateExecMs + gateReportMs),
         violations,
         checks,
       });

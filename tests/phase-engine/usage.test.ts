@@ -180,6 +180,14 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
     // site that must be argued, not smuggled in.
     const steering = codeOnly(steeringPath);
     expect((steering.match(/\/\s*1_000_000/g) ?? []).length).toBe(2);
+    // The count alone is position-blind: removing one meter term (say, output
+    // tokens) while adding an unrelated `/ 1_000_000` elsewhere keeps it at 2
+    // and passes unexamined — exactly the smuggled conversion the pin exists
+    // to catch. Pin that BOTH token streams are the numerator of a
+    // `/ 1_000_000` term (each within the same statement, never crossing a
+    // `;`), so dropping either term fails here.
+    expect(steering).toMatch(/inputTokens[^;]{0,160}?\/\s*1_000_000/);
+    expect(steering).toMatch(/outputTokens[^;]{0,160}?\/\s*1_000_000/);
     const others: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

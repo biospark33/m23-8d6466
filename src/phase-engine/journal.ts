@@ -74,11 +74,15 @@ export interface JournalFile {
   phases: PhaseRecord[];
   gateEvents: GateEvent[];
   /**
-   * DF3.3: the resident orchestrator's telemetry block — present on every
-   * settled run (`status: "disabled"` when no resident was armed), written
-   * once at run end through `writeResident`. Not part of the PhaseJournal
-   * port: it is journal-file content, not a phase operation, and its trace
-   * mirror (tripwires) already rides the runner's own tracer rows.
+   * DF3.3: the resident orchestrator's telemetry block. Optional on the file
+   * by design: the PhaseJournal port knows nothing about the resident, so
+   * presence is a pipeline-runner guarantee, not a journal one — the runner
+   * seeds the block (`status: "disabled"` when no resident was armed) before
+   * the terminal marker can exist and refreshes it after the run-end
+   * solicitation, so a settled pipeline run always carries it. Not part of
+   * the PhaseJournal port: it is journal-file content, not a phase operation,
+   * and its trace mirror (tripwires) already rides the runner's own tracer
+   * rows.
    */
   resident?: ResidentTelemetry;
 }
@@ -122,7 +126,11 @@ export class FileJournal implements PhaseJournal {
     this.flush();
   }
 
-  /** DF3.3: sets the resident telemetry block; flushed like every other op. */
+  /** DF3.3: sets the resident telemetry block; flushed like every other op.
+   *  Deliberately twice-callable — the runner seeds pre-finish and refreshes
+   *  post-finish; the later call replaces the earlier block. The intermediate
+   *  flush is the same synchronous full-rewrite every op performs, so the
+   *  seed is durable before `finish()` emits the terminal marker. */
   writeResident(telemetry: ResidentTelemetry): void {
     this.resident = telemetry;
     this.flush();

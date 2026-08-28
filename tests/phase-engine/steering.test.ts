@@ -132,10 +132,21 @@ describe("solicit — accepted directives", () => {
     expect(noPhase.telemetry.steeringIterations).toEqual({});
   });
 
+  test("a retry accepted at run_start counts in directives but NOT steeringIterations (S1-6 point gating)", async () => {
+    // Only post_gate_failure retries steer an executable phase attempt — a
+    // run_start/run_end retry must not inflate the per-phase counter (AC5).
+    const s = scriptedCaller([{ raw: '{"action":"retry","guidance":"g"}' }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    const d = await c.solicit("run_start", ctx({ phase: "build" }));
+    expect(d).toEqual({ action: "retry", guidance: "g" });
+    expect(c.telemetry.directives).toBe(1);
+    expect(c.telemetry.steeringIterations).toEqual({});
+  });
+
   test("select_roster with an id inside the closed set is accepted", async () => {
     const s = scriptedCaller([{ raw: '{"action":"select_roster","phase":"build","rosterId":"r2"}' }]);
     const c = createSteering({ caller: s.caller, rate: RATE });
-    const d = await c.solicit("run_start", ctx({ rosterIds: ["r1", "r2"] }));
+    const d = await c.solicit("run_start", ctx({ rosterIds: ["r1", "r2"], phaseIds: ["build"] }));
     expect(d).toEqual({ action: "select_roster", phase: "build", rosterId: "r2" });
     expect(c.telemetry.directives).toBe(1);
   });
@@ -189,6 +200,8 @@ describe("AC2 — schema rejections record a gate_bypass_attempt tripwire, defau
     await c.solicit("run_start", ctx());
     expect(c.telemetry.directivesRejected).toBe(1);
     expect(c.telemetry.tripwires[0]!.cause).toBe("gate_bypass_attempt");
+    // S1-7: the detail names the KNOWN action, then the issue.
+    expect(c.telemetry.tripwires[0]!.detail).toContain("action proceed rejected:");
     expect(c.telemetry.tripwires[0]!.detail).toContain("evil");
   });
 
@@ -211,6 +224,27 @@ describe("AC2 — schema rejections record a gate_bypass_attempt tripwire, defau
     expect(c.telemetry.directives).toBe(0);
     expect(c.telemetry.directivesRejected).toBe(1);
     expect(c.telemetry.tripwires[0]!.detail).toContain("outside closed roster set");
+  });
+
+  test("select_roster naming a phase outside ctx.phaseIds is rejected (S1-5 fail-closed)", async () => {
+    const s = scriptedCaller([{ raw: '{"action":"select_roster","phase":"deploy","rosterId":"r1"}' }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    const d = await c.solicit("run_start", ctx({ rosterIds: ["r1"], phaseIds: ["build"] }));
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.status).toBe("active");
+    expect(c.telemetry.directives).toBe(0);
+    expect(c.telemetry.directivesRejected).toBe(1);
+    expect(c.telemetry.tripwires[0]!.detail).toContain("phase outside closed phase set: deploy");
+  });
+
+  test("select_roster with phaseIds ABSENT is rejected — missing set reads as empty (S1-5)", async () => {
+    // rosterId is inside the closed set, so the phase guard is what fires.
+    const s = scriptedCaller([{ raw: '{"action":"select_roster","phase":"build","rosterId":"r1"}' }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    const d = await c.solicit("run_start", ctx({ rosterIds: ["r1"] }));
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.directivesRejected).toBe(1);
+    expect(c.telemetry.tripwires[0]!.detail).toContain("phase outside closed phase set: build");
   });
 
   test("a throwing onTripwire observer never breaks the never-throws contract", async () => {
@@ -254,11 +288,10 @@ describe("AC3 — fail-closed degradation", () => {
     expect(d).toEqual(PROCEED);
     expect(c.telemetry.status).toBe("degraded");
     expect(s.calls()).toBe(MAX_MALFORMED_ATTEMPTS);
-    expect(s.calls()).toBe(2);
     // Degradation is sticky: the next solicitation point makes no third call.
     const again = await c.solicit("run_end", ctx());
     expect(again).toEqual(PROCEED);
-    expect(s.calls()).toBe(2);
+    expect(s.calls()).toBe(MAX_MALFORMED_ATTEMPTS); // unchanged — never N+1
   });
 
   test("malformed once, then a valid directive on the correction attempt → accepted", async () => {
@@ -458,6 +491,67 @@ describe("prompt ceiling — ≤ PROMPT_CHAR_CEILING including truncation suffix
     expect(prompt.length).toBeLessThanOrEqual(PROMPT_CHAR_CEILING);
     expect(prompt).toContain("line one\nline two");
     expect(prompt).not.toContain("[truncated");
+  });
+
+  // Boundary pins below measure the context budget by PROBING a short prompt
+  // (prompt = header + context + joiner + instruction) instead of mirroring
+  // source constants, so header/instruction drift cannot silently move them.
+  async function promptForContext(context: string): Promise<string> {
+    const s = scriptedCaller([{ raw: '{"action":"proceed"}' }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    await c.solicit("run_start", ctx({ promptContext: [context] }));
+    return s.prompts[0]!;
+  }
+
+  async function contextBudget(): Promise<number> {
+    const probe = "PROBE";
+    const prompt = await promptForContext(probe);
+    // reserve = header + joiner + instruction = prompt.length - context.length
+    return PROMPT_CHAR_CEILING - (prompt.length - probe.length);
+  }
+
+  test("context at exactly the budget is NOT cut — the prompt is exactly the ceiling", async () => {
+    const budget = await contextBudget();
+    const prompt = await promptForContext("x".repeat(budget));
+    expect(prompt.length).toBe(PROMPT_CHAR_CEILING); // whole-prompt length 16 000
+    expect(prompt).not.toContain("[truncated");
+  });
+
+  test("context at budget - 1 → whole prompt 15 999, uncut", async () => {
+    const budget = await contextBudget();
+    const prompt = await promptForContext("x".repeat(budget - 1));
+    expect(prompt.length).toBe(PROMPT_CHAR_CEILING - 1);
+    expect(prompt).not.toContain("[truncated");
+  });
+
+  test("context at budget + 1 (a 16 001-char candidate) is cut to exactly the ceiling", async () => {
+    const budget = await contextBudget();
+    const prompt = await promptForContext("x".repeat(budget + 1));
+    // suffix + proseBudget fills the budget exactly (no surrogate adjustment
+    // on an all-BMP context), so the clamped prompt lands on the ceiling.
+    expect(prompt.length).toBe(PROMPT_CHAR_CEILING);
+    expect(prompt).toContain(`[truncated, ${budget + 1} chars total]`);
+    expect(prompt).toContain("ONE JSON object"); // instruction survives
+  });
+
+  test("an astral character straddling the cut point is dropped whole — no lone surrogate", async () => {
+    const budget = await contextBudget();
+    const total = budget + 1;
+    const suffix = `[truncated, ${total} chars total]`;
+    const proseBudget = budget - suffix.length;
+    // cutPoint = total - proseBudget; place the astral pair so cutPoint lands
+    // on its LOW surrogate: pair at [head, head+1], cutPoint = head + 1.
+    const head = total - proseBudget - 1;
+    const context = `${"A".repeat(head)}😀${"z".repeat(total - head - 2)}`;
+    expect(context.length).toBe(total);
+    const prompt = await promptForContext(context);
+    // The surrogate-safe loop advanced past the pair: it is cut WHOLE, so the
+    // prompt contains zero surrogate code units (a lone half would match).
+    expect(/[\uD800-\uDFFF]/.test(prompt)).toBe(false);
+    expect(prompt).not.toContain("😀");
+    // The suffix survives intact at the cut boundary, followed by the z-tail.
+    expect(prompt).toContain(`${suffix}zzzz`);
+    expect(prompt.length).toBeLessThanOrEqual(PROMPT_CHAR_CEILING);
   });
 });
 

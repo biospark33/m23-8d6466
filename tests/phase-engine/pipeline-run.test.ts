@@ -1496,6 +1496,128 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     expect(stderr).toContain("credential-named field 'api_key' in brief.targets[1]");
   }, 60_000);
 
+  test("an IN-SET select_roster at run_start is accepted, consumed by the named dispatch_task phase, and traced applied:true", async () => {
+    // The accepted-pick half of the roster wiring (the out-of-set rejection is
+    // pinned in resident-e2e.test.ts). Wave-1 semantics pinned here: rosterIds
+    // are advertised ONLY at run_start; directive.phase must name a manifest
+    // phase; the pick is consumed by the dispatch_task phase whose name
+    // matches, leaving a residentRosterChoice trace row (applied:true).
+    //
+    // The roster must live INSIDE the repo root (loadRoster's INV-2
+    // confinement), so the manifest points at the DF1.6 fixture roster
+    // (roles: lead, worker). The dispatch itself is refused cheaply and
+    // deterministically: QDS_TEAM_RUNNER is not "local", so dispatchTask's AC5
+    // refusal fires FIRST — no pi catalog probe, no team spawn, no network.
+    const ws = workspace();
+    const roster = path.join(import.meta.dir, "fixtures", "dispatch-roster.yaml");
+    const manifest = path.join(ws.dir, "pipeline.json");
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({
+        version: "1.0.0",
+        pipelineId: "roster-accept",
+        runBudgetMs: 100_000,
+        phases: [
+          {
+            name: "plan",
+            kind: "code",
+            description: "Emit the plan artifact for the requested change",
+            maxDurationMs: 15_000,
+            retries: 0,
+            command: ["echo", "planned"],
+          },
+          {
+            name: "ship",
+            kind: "dispatch_task",
+            description: "Dispatch the roster-picked role to do the work",
+            maxDurationMs: 15_000,
+            retries: 0,
+            roster,
+            task: "fix the seeded failing test",
+          },
+        ],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({
+        requestId: crypto.randomUUID(),
+        repoSlug: "qds/demo",
+        issueId: 42,
+        effectiveCeilingMicros: 250_000,
+      }),
+    );
+    const requestId = crypto.randomUUID();
+    const proc = spawnRunner(
+      [
+        "--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal,
+        "--run-root", ws.dir, "--request-id", requestId,
+      ],
+      ws.markerRoot,
+      REPO_ROOT,
+      {
+        // The env-scripted fake resident, same seam as resident-e2e.test.ts;
+        // the S2-4 child-env allowlist strips FAKE_RESIDENT_REPLIES unless the
+        // passthrough names it.
+        QDS_PI_BIN: path.join(import.meta.dir, "fixtures", "fake-resident.ts"),
+        QDS_PI_CATALOG_DIR: path.join(import.meta.dir, "fixtures", "pi-catalog"),
+        QDS_PI_MODELS_JSON: path.join(ws.dir, "no-such-models.json"),
+        QDS_RESIDENT_ENV_PASSTHROUGH: "FAKE_RESIDENT_REPLIES",
+        FAKE_RESIDENT_REPLIES: JSON.stringify([
+          JSON.stringify({ action: "select_roster", phase: "ship", rosterId: "lead" }),
+          JSON.stringify({ action: "proceed" }),
+        ]),
+        // AC5 refusal before any spawn: deterministic on every host.
+        QDS_TEAM_RUNNER: "refused-for-test",
+      },
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+
+    // The dispatch refusal is a VALUE (DF1.6: refusals are data on the merged
+    // output), so the phase records success and the run settles ok.
+    expect(exitCode).toBe(0);
+    const journal = readJournal(ws.journal);
+    expect(journal.ok).toBe(true);
+    expect(journal.phases.map((p) => [p.name, p.status])).toEqual([
+      ["plan", "success"],
+      ["ship", "success"],
+    ]);
+
+    // In-set acceptance at run_start: the closed roster id set was advertised
+    // there and "lead" is in it — accepted, not tripwire-rejected.
+    const solicits = jsonLines(stderr).filter((l) => l.event === "resident_solicit");
+    expect(solicits.map((l) => l.point)).toEqual(["run_start", "run_end"]);
+    expect(solicits[0]?.directiveAction).toBe("select_roster");
+    expect(solicits[0]?.accepted).toBe(true);
+    expect(solicits[1]?.directiveAction).toBe("proceed");
+    expect(journal.resident?.status).toBe("active");
+    expect(journal.resident?.directives).toBe(2);
+    expect(journal.resident?.directivesRejected).toBe(0);
+    expect(journal.resident?.tripwires).toEqual([]);
+
+    const rows = fs
+      .readFileSync(path.join(ws.markerRoot, "trace", "events.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as { type?: string; name?: string; payload_json?: string | null });
+    // The accepted run_start directive's own record (S3-15).
+    const directives = rows.filter((r) => r.type === "log" && r.name === "resident_directive");
+    expect(directives).toHaveLength(1);
+    const directive = JSON.parse(directives[0]?.payload_json ?? "{}") as Record<string, unknown>;
+    expect(directive.point).toBe("run_start");
+    expect(directive.action).toBe("select_roster");
+    expect(directive.phase).toBe("ship");
+    expect(directive.rosterId).toBe("lead");
+    // rosterChoice.pending CONSUMED by the named phase: exactly one
+    // residentRosterChoice row, applied:true — and none of the
+    // applied:false rows (phase mismatch, or the run-end "never consumed").
+    const choices = rows
+      .filter((r) => r.type === "log" && r.name === "residentRosterChoice")
+      .map((r) => JSON.parse(r.payload_json ?? "{}") as Record<string, unknown>);
+    expect(choices).toHaveLength(1);
+    expect(choices[0]).toMatchObject({ rosterId: "lead", phase: "ship", applied: true });
+  }, 60_000);
+
   test("C12: a brief source that never existed stays QUIET (AC4), and the unreadable branch warns", async () => {
     // Reachability note: the brief source IS the cap witness, and
     // `runContextFrom` refuses a present-but-unreadable witness first — so the

@@ -15,6 +15,11 @@
  *   hang    — stay alive until SIGKILLed (timeout/stop path).
  *   fail    — exit 3 (nonzero → exitStatus "logic").
  *   garbage — print non-NDJSON, exit 0 (malformed reply, caller must resolve).
+ *   stderr-secret — write a >400-char stderr whose secret (env
+ *             QDS_FAKE_PI_STDERR_SECRET) straddles the resident's -400 cut
+ *             boundary (the cut lands at the secret's midpoint), exit 3.
+ *             Proves the nonzero-exit error path redacts BEFORE slicing:
+ *             slice-then-redact would leak the secret's second half.
  *
  * Session continuity (B14): when the argv carries `--session <path>`, the
  * fixture appends one line per invocation, so a test can watch the file grow
@@ -46,6 +51,14 @@ if (mode === "hang") {
   // A bare pending promise does not keep a Bun process alive; a timer does.
   setInterval(() => {}, 1 << 30);
 } else if (mode === "fail") {
+  process.exit(3);
+} else if (mode === "stderr-secret") {
+  const secret = process.env.QDS_FAKE_PI_STDERR_SECRET ?? "fake-pi-fixed-stderr-secret-marker";
+  // Geometry: total = 100 + |secret| + right; right = 400 - ceil(|secret|/2)
+  // puts the -400 cut at exactly 100 + floor(|secret|/2) — the secret's
+  // midpoint. No trailing newline: it would shift the cut off the midpoint.
+  const right = 400 - Math.ceil(secret.length / 2);
+  process.stderr.write(`${"L".repeat(100)}${secret}${"R".repeat(right)}`);
   process.exit(3);
 } else if (mode === "garbage") {
   console.log("this is not NDJSON");

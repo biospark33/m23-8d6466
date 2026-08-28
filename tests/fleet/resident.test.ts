@@ -71,13 +71,18 @@ function caseDir(name: string): string {
 }
 
 /** Child env for the fake pi: PATH inherited, key env-borne, fake knobs set.
- * Fixture knobs (QDS_FAKE_PI_* and FAKE_RESIDENT_* prefixes) are scrubbed from
- * THIS process's env before the spread so a developer's shell settings cannot
- * leak into a child that sets its own via `over`. */
+ * Fixture knobs (QDS_FAKE_PI_* and FAKE_RESIDENT_* prefixes) AND the resident's
+ * own env knobs (QDS_RESIDENT_TIMEOUT_MS, QDS_PI_BIN) are scrubbed from THIS
+ * process's env before the spread so a developer's shell settings cannot leak
+ * into a child that sets its own via `over` — a shell `QDS_RESIDENT_TIMEOUT_MS=1`
+ * would otherwise flake every spawn-bound test or turn the hang-mode timeout
+ * test into a multi-minute wait. */
 function piEnv(over: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (!/^(QDS_FAKE_PI_|FAKE_RESIDENT_)/.test(key)) env[key] = value;
+    if (/^(QDS_FAKE_PI_|FAKE_RESIDENT_)/.test(key)) continue;
+    if (key === "QDS_RESIDENT_TIMEOUT_MS" || key === "QDS_PI_BIN") continue;
+    env[key] = value;
   }
   return { ...env, OPENROUTER_API_KEY: SECRET, ...over };
 }
@@ -183,6 +188,50 @@ describe("ingress validation (runId + slug become paths and argv)", () => {
         }),
       ).toThrow(/vendor\/model/);
     }
+  });
+
+  test("a bare model id without a slash refuses — the story's display-name mistake", () => {
+    // The story's "deepseek-v4-flash-0731" is a DISPLAY name, never a slug;
+    // the guard requires vendor/model (resident.ts slug-shape comment).
+    expect(() =>
+      startResident({
+        brief: brief(),
+        runId: "run-baremodel",
+        sessionDir: caseDir("baremodel"),
+        slug: "deepseek-v4-flash-0731",
+        bin: fakePi,
+        env: piEnv(),
+      }),
+    ).toThrow(/vendor\/model/);
+  });
+
+  test("a three-part id passes shape validation (current behavior pinned, not endorsed)", async () => {
+    // The guard only requires a slash with no empty segments, so "a/b/c"
+    // validates today and becomes rate key openrouter/a/b/c. Pin the behavior
+    // so a future tightening (exactly two segments) is a deliberate break.
+    _injectRateSources({
+      bundled: {
+        unit: "usd-per-mtok",
+        entries: new Map([
+          ["openrouter/a/b/c", { input: 0.08, output: 0.18, cacheRead: 0.016, cacheWrite: 0.018 }],
+        ]),
+      },
+      custom: { unit: "usd-per-mtok", entries: new Map() },
+    });
+    const dir = caseDir("threepart");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-threepart",
+        sessionDir: dir,
+        slug: "a/b/c",
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
+      }),
+    );
+    await spawn.caller.call(PROMPT);
+    // The bare (provider-stripped) id is what reaches --model.
+    expect(readRecord(dir).argv).toContain("a/b/c");
   });
 });
 
@@ -342,21 +391,29 @@ describe("reply + usage harvest (harvestPiStream, message_end only)", () => {
     const reply = await spawn.caller.call(PROMPT);
     expect(reply.raw).toBe("");
     expect(reply.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
-    expect(await spawn.exitStatus()).toBe("success");
+    // S2-11: exit 0 with no harvested message_end no longer lies about the
+    // process end — "logic", while the empty raw still flows to C1's
+    // fail-closed reply validation.
+    expect(await spawn.exitStatus()).toBe("logic");
   });
 });
 
 describe("process-end mapping (exitStatus, CC-1 values)", () => {
   test("timeout SIGKILL → call throws, exitStatus 'transient'", async () => {
     const dir = caseDir("timeout");
-    process.env.QDS_RESIDENT_TIMEOUT_MS = "500";
     const spawn = enabled(
       startResident({
         brief: brief(),
         runId: "run-timeout",
         sessionDir: dir,
         bin: fakePi,
-        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json"), QDS_FAKE_PI_MODE: "hang" }),
+        // The timeout knob rides opts.env (the scrub strips any inherited
+        // process.env value, so this override is the only route).
+        env: piEnv({
+          QDS_FAKE_PI_RECORD: join(dir, "record.json"),
+          QDS_FAKE_PI_MODE: "hang",
+          QDS_RESIDENT_TIMEOUT_MS: "500",
+        }),
       }),
     );
     await expect(spawn.caller.call(PROMPT)).rejects.toThrow();
@@ -393,19 +450,61 @@ describe("process-end mapping (exitStatus, CC-1 values)", () => {
     expect(await spawn.exitStatus()).toBe("logic");
   });
 
+  test("nonzero exit redacts stderr BEFORE the -400 slice — no secret fragment straddling the cut", async () => {
+    const dir = caseDir("stderrsecret");
+    // |SECRET| = 32, even: the fixture's geometry puts the -400 cut at the
+    // secret's midpoint, so slice-then-redact would leak the second half.
+    const STDERR_SECRET = "stderr-secret-HALFA-x-HALFB-429!";
+    expect(STDERR_SECRET.length % 2).toBe(0);
+    const firstHalf = STDERR_SECRET.slice(0, STDERR_SECRET.length / 2);
+    const secondHalf = STDERR_SECRET.slice(STDERR_SECRET.length / 2);
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-stderrsecret",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({
+          QDS_FAKE_PI_RECORD: join(dir, "record.json"),
+          QDS_FAKE_PI_MODE: "stderr-secret",
+          QDS_FAKE_PI_STDERR_SECRET: STDERR_SECRET,
+        }),
+      }),
+    );
+    const err = await spawn.caller.call(PROMPT).then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
+    expect(err).not.toBeNull();
+    expect(err!.message).toContain("exited 3");
+    // Neither half of the straddling secret survives — the second half is the
+    // one a slice-then-redact ordering would leak verbatim.
+    expect(err!.message).not.toContain(firstHalf);
+    expect(err!.message).not.toContain(secondHalf);
+    // The REDACTION MARKER is what reaches the cut (partially sliced itself).
+    expect(err!.message).toContain("_STDERR_SECRET]");
+    // S2-3 ordering pin: the transient regex sees the redacted tail, never the
+    // secret — the "429" embedded in the secret must NOT classify transient.
+    expect(await spawn.exitStatus()).toBe("logic");
+  });
+
   test("stop() SIGKILLs the in-flight call (DF3.6 decides when, this supplies how)", async () => {
     const dir = caseDir("stop");
     // Timeout deliberately far above the hang fixture's kill: a NO-OP stop()
     // would let the call run to the native timeout, so a rejection arriving
     // well under the budget is the only discrimination a no-op cannot fake.
-    process.env.QDS_RESIDENT_TIMEOUT_MS = "30000";
+    // Set via opts.env — the scrub strips any inherited process.env value.
     const spawn = enabled(
       startResident({
         brief: brief(),
         runId: "run-stop",
         sessionDir: dir,
         bin: fakePi,
-        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json"), QDS_FAKE_PI_MODE: "hang" }),
+        env: piEnv({
+          QDS_FAKE_PI_RECORD: join(dir, "record.json"),
+          QDS_FAKE_PI_MODE: "hang",
+          QDS_RESIDENT_TIMEOUT_MS: "30000",
+        }),
       }),
     );
     const startedAt = performance.now();
@@ -416,6 +515,36 @@ describe("process-end mapping (exitStatus, CC-1 values)", () => {
     expect(await spawn.exitStatus()).toBe("transient");
     // Idempotent: a second stop with nothing in flight still resolves.
     await spawn.stop();
+  });
+
+  test("S2-5: an overlapping call() is refused; stop() still reaches the in-flight process", async () => {
+    const dir = caseDir("inflight");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-inflight",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({
+          QDS_FAKE_PI_RECORD: join(dir, "record.json"),
+          QDS_FAKE_PI_MODE: "hang",
+          QDS_RESIDENT_TIMEOUT_MS: "30000", // far above the stop() below
+        }),
+      }),
+    );
+    // call() runs synchronously through Bun.spawn + `current = proc` before
+    // its first await, so the slot is taken by the time the promise exists.
+    const first = spawn.caller.call(PROMPT);
+    // The ResidentCaller contract is strictly sequential — the second call
+    // throws a classified logic error instead of clobbering `current`.
+    await expect(spawn.caller.call(PROMPT)).rejects.toThrow(/already in flight/);
+    // The refused call ends no process: exitStatus stays null until the
+    // in-flight call reports its end.
+    expect(await spawn.exitStatus()).toBeNull();
+    // stop() SIGKILLs the FIRST (in-flight) process, not a clobbering second.
+    await spawn.stop();
+    await expect(first).rejects.toThrow(/killed by signal/);
+    expect(await spawn.exitStatus()).toBe("transient");
   });
 
   test("stop() BEFORE any call → the call refuses instead of spawning into a dead resident", async () => {
@@ -502,7 +631,8 @@ describe("persistence + redaction (§5.2 pre-execution, INV-RES-3)", () => {
       }),
     );
     const startedAt = performance.now();
-    await expect(spawn.caller.call(PROMPT)).rejects.toThrow(/killed by signal/);
+    // S2-7: the native timeout is now reported AS a timeout, not a bare kill.
+    await expect(spawn.caller.call(PROMPT)).rejects.toThrow(/timed out after 500 ms/);
     // The opts.env override (500 ms) fired, not the 60 s default.
     expect(performance.now() - startedAt).toBeLessThan(30_000);
     expect(await spawn.exitStatus()).toBe("transient");
@@ -524,12 +654,13 @@ describe("persistence + redaction (§5.2 pre-execution, INV-RES-3)", () => {
     expect(_resolvedSolicitTimeoutMs({})).toBe(60_000);
   });
 
-  test("B8: reply persist failure is best-effort — usage still returns", async () => {
+  test("S2-14: reply persist failure is FAIL-CLOSED — the call throws and the reply is never returned", async () => {
     const dir = caseDir("replyfail");
     const persistDir = join(dir, "trace");
     mkdirSync(persistDir, { recursive: true });
-    // The REPLY artifact path is a directory, so its write fails (EISDIR) while
-    // the prompt artifact — same dir, pre-execution, fail-closed — succeeds.
+    // The REPLY artifact path is a directory, so its write fails (the atomic
+    // rename onto a non-empty directory) while the prompt artifact — same
+    // dir, pre-execution, fail-closed — succeeds.
     mkdirSync(join(persistDir, "run-replyfail-solicit-1-reply.txt"), { recursive: true });
     const spawn = enabled(
       startResident({
@@ -545,9 +676,10 @@ describe("persistence + redaction (§5.2 pre-execution, INV-RES-3)", () => {
         }),
       }),
     );
-    const reply = await spawn.caller.call(PROMPT);
-    expect(reply.raw).toBe('{"action":"proceed"}');
-    expect(reply.usage).toEqual({ inputTokens: 5, outputTokens: 9 });
+    // §5.2: an unpersisted raw reply must never flow to steering to be acted
+    // on — the throw degrades the resident to the deterministic default.
+    await expect(spawn.caller.call(PROMPT)).rejects.toThrow(/reply artifact not persisted/);
+    // The process itself ended cleanly — the fault is host-side persistence.
     expect(await spawn.exitStatus()).toBe("success");
   });
 });
