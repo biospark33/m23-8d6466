@@ -2409,10 +2409,13 @@ export async function dispatch(
     //
     // DOWNWARD ONLY. The paragraph above names the over-mint as a defect ("if
     // the provider minted MORE, advertises headroom the ledger never reserved")
-    // and the code then did exactly that: `credentials.ts` persists
+    // and the code then did exactly that: `credentials.ts` persisted
     // `usdToMicros(res.limitUsd)` — the PROVIDER's own answer — checking only
     // that it is non-null, finite and positive, and this read adopted it
-    // whenever it was a positive safe integer, with no upper bound. A key API
+    // whenever it was a positive safe integer, with no upper bound. Since F004
+    // `mintRunKey` REFUSES an over-granted ceiling at the mint itself, so the
+    // `min` below is defence in depth: it still bounds records written before
+    // that refusal existed, and any path that reaches this read with one. A key API
     // that rounds up, applies a plan floor, is misconfigured, or is answering
     // for someone else authorized the box to spend above the ceiling the ledger
     // reserved against the issue cap, on the strength of its own reply. The

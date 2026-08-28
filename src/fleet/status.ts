@@ -314,12 +314,17 @@ function reportDuplicateBoxNames(records: readonly RunRecord[], boxes: Map<strin
   const names = new Set<string>(collapsed?.keys() ?? []);
   for (const [name, ids] of claims) if (ids.length > 1) names.add(name);
 
+  // ONE id for every line this call emits: the lines describe one listing, and
+  // a fresh uuid per line breaks the join an operator uses to group them.
+  // (`StatusDeps` carries no requestId to inherit — no caller of either entry
+  // point has one to pass, so minting it here is the whole story.)
+  const requestId = newRequestId();
   for (const name of names) {
     const boxCount = collapsed?.get(name) ?? (boxes?.has(name) === true ? 1 : 0);
     const runIds = claims.get(name) ?? [];
     try {
       log({
-        requestId: newRequestId(),
+        requestId,
         operation: "fleet.status.duplicate_box_name",
         agentId: null,
         timestamp: new Date().toISOString(),

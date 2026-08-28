@@ -57,11 +57,14 @@ import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 export interface CostLedgerHook {
   ingestBoxHours(ctx: BoxHoursCtx): { eventId: string; inserted: boolean; unpriced: boolean };
   /**
-   * F032: the DERIVED per-run total, for the divergence check at the close step.
+   * F032: the DERIVED per-run view, for the divergence check at the close step.
+   * `perRole` comes with it because the comparison has to be like-for-like: the
+   * record's `spendMicroUsd` is TOKEN spend, so the box-hours bucket this very
+   * step just ingested is subtracted back out (see reportSpendDivergence).
    * Optional because the hook is structural and DF2.8's only requirement is the
    * box-hours ingest — a hook that cannot answer is simply not asked.
    */
-  readRunCost?(runId: string): { totalMicroUsd: number };
+  readRunCost?(runId: string): { totalMicroUsd: number; perRole: Record<string, number> };
 }
 
 export class TeardownError extends Error {
@@ -341,16 +344,28 @@ function ingestBoxHoursIfAttributed(
 export const SPEND_DIVERGENCE_TOLERANCE_MICRO_USD = 1_000;
 
 /**
- * F032: say so when the two figures for one run's spend disagree.
+ * F032: say so when the two figures for one run's TOKEN spend disagree.
  *
  * `captureSpend` writes the PROVIDER-AUTHORITATIVE number into the record as
- * `spendMicroUsd` (step 1); `readRunCost` DERIVES a second one from the cost
- * ledger's rows. Nothing has ever compared them, and they are one field apart:
- * `readRunCost`'s only reader is the PR body (src/pr/open-pr.ts), and
- * `spendMicroUsd`'s are cap-hit-demo and `fleet status`. Every event the ledger
- * never received makes the per-issue cap under-count by exactly that much,
- * silently. This does not close that gap — it makes it audible at the one
- * moment the run's spend is final.
+ * `spendMicroUsd` (step 1); the cost ledger DERIVES a second one from its rows.
+ * Nothing had ever compared them, and they are one field apart:
+ * `readRunCost`'s other reader is the PR body (src/pr/open-pr.ts) — this is the
+ * second — and `spendMicroUsd`'s are cap-hit-demo and `fleet status`. Every
+ * event the ledger never received makes the per-issue cap under-count by
+ * exactly that much, silently. This does not close that gap — it makes it
+ * audible at the one moment the run's spend is final.
+ *
+ * LIKE FOR LIKE. The record's figure is the provider's key usage: TOKENS, and
+ * nothing else. The ledger's `totalMicroUsd` also carries the `box_hours` row
+ * the close step ingested moments ago, so comparing the two raw would report a
+ * divergence of exactly this run's box time on every priced teardown, forever —
+ * and in the wrong direction. The box-hours bucket is subtracted back out
+ * (`CostView.perRole`'s literal `"box-hours"` key, cost-ledger.ts's `view`).
+ *
+ * The F001 shape gets its own `outcome` — a FIELD, not prose an operator has to
+ * parse: `unwired` when the ledger holds no token spend for this run at all
+ * against a non-zero provider figure (the DF2.7 bridge is unbuilt), `divergent`
+ * when both sides have numbers and they disagree.
  *
  * Never throws: the box is destroyed and the record is closed by the time this
  * runs, so a raising log sink or an unqueryable ledger must not turn a
@@ -370,25 +385,29 @@ function reportSpendDivergence(
   // ledger that did not is exactly the divergence worth hearing about).
   if (typeof recorded !== "number" || !Number.isFinite(recorded)) return;
   try {
-    const derived = ledger.readRunCost(runId).totalMicroUsd;
+    const view = ledger.readRunCost(runId);
+    // Tokens only, both sides: this step's own box_hours row comes back out.
+    const derived = view.totalMicroUsd - (view.perRole?.["box-hours"] ?? 0);
     if (!Number.isFinite(derived)) return;
     if (Math.abs(recorded - derived) <= SPEND_DIVERGENCE_TOLERANCE_MICRO_USD) return;
+    const unwired = derived === 0 && recorded > 0;
     log({
       ...stepBase(ctx, "teardown", "close"),
       operation: "teardown.spend_divergence",
       duration: 0,
       durationMs: 0,
       status: "ok",
-      outcome: "divergent",
+      outcome: unwired ? "unwired" : "divergent",
       code: "spend-divergence",
       recordedMicroUsd: recorded,
       derivedMicroUsd: derived,
       deltaMicroUsd: recorded - derived,
       toleranceMicroUsd: SPEND_DIVERGENCE_TOLERANCE_MICRO_USD,
       reason:
-        `the provider-authoritative spend on the record (${recorded} µUSD) and the cost ledger's derived total for this run (${derived} µUSD) disagree by more than ${SPEND_DIVERGENCE_TOLERANCE_MICRO_USD} µUSD`,
-      message:
-        `run ${runId}: recorded spend ${recorded} µUSD vs derived ${derived} µUSD — every per-issue cap reads the DERIVED figure, so the difference is spend no cap counted. While the DF2.7 bridge is unbuilt the ledger holds box hours only and reads low by construction; CostLedger.emitTokenBridgeState() reports that state as tokens-ledger-unwired`,
+        `the provider-authoritative token spend on the record (${recorded} µUSD) and the cost ledger's derived token spend for this run (${derived} µUSD, box hours excluded) disagree by more than ${SPEND_DIVERGENCE_TOLERANCE_MICRO_USD} µUSD`,
+      message: unwired
+        ? `run ${runId}: the provider charged ${recorded} µUSD in tokens and the ledger holds NO token spend for this run — the DF2.7 cost-event bridge never delivered it, so no per-issue cap counted any of it (CostLedger.emitTokenBridgeState() reports the ledger-wide form of this as tokens-ledger-unwired)`
+        : `run ${runId}: recorded token spend ${recorded} µUSD vs derived ${derived} µUSD (box hours excluded) — every per-issue cap reads the DERIVED figure, so the difference is spend no cap counted`,
     });
   } catch {
     // A throwing sink or ledger must not undo a completed teardown; the close
@@ -564,8 +583,9 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
           reason: "no issue attribution — box hours not priced for this run",
         });
       }
-      // F032 — AFTER the ingest, so the derived total includes this run's box
-      // hours and the comparison is against the ledger's final state.
+      // F032 — AFTER the ingest, so the read sees the ledger's final state for
+      // this run. The box-hours row it just wrote is subtracted back out there:
+      // the record's figure is token spend, so the comparison must be too.
       reportSpendDivergence(ctx, deps.costLedger, closedRec, runId);
     }
   });
