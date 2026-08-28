@@ -612,18 +612,28 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
     exitStatus: async () => lastExit,
     stop: async () => {
       stopped = true;
-      // S2-5: release the session-path claim so a later startResident for the
-      // same runId/sessionDir can arm (the claim predates any in-flight call).
-      LIVE_SESSION_PATHS.delete(sessionPath);
       const proc = current;
-      if (proc === null) return;
-      try {
-        proc.kill("SIGKILL");
-      } catch {
-        // already gone — the awaited exit below is the truth
+      // S2-5: with no process ever spawned there is no exit to wait for —
+      // release the claim immediately so a later startResident can arm.
+      if (proc === null) {
+        LIVE_SESSION_PATHS.delete(sessionPath);
+        return;
       }
-      await proc.exited.catch(() => {});
-      if (current === proc) current = null;
+      try {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // already gone — the awaited exit below is the truth
+        }
+        // S2-5 (round 8): hold the session-path claim until the child has
+        // fully exited — releasing it before this await lets a concurrent
+        // startResident arm a second live resident on the same session file
+        // while the dying child can still append to it.
+        await proc.exited.catch(() => {});
+        if (current === proc) current = null;
+      } finally {
+        LIVE_SESSION_PATHS.delete(sessionPath);
+      }
     },
   };
 }

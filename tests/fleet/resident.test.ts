@@ -601,6 +601,43 @@ describe("process-end mapping (exitStatus, CC-1 values)", () => {
     expect(await spawn.exitStatus()).toBe("transient");
   });
 
+  test("S2-5 (round 8): stop() holds the session-path claim until the child exits — no re-arm mid-shutdown", async () => {
+    const dir = caseDir("stopclaim");
+    const opts = {
+      brief: brief(),
+      runId: "run-stopclaim",
+      sessionDir: dir,
+      bin: fakePi,
+      env: piEnv({
+        QDS_FAKE_PI_RECORD: join(dir, "record.json"),
+        QDS_FAKE_PI_MODE: "hang",
+        QDS_RESIDENT_TIMEOUT_MS: "30000", // far above the stop() below
+      }),
+    };
+    const spawn = enabled(startResident(opts));
+    const pending = spawn.caller.call(PROMPT);
+    // The fake appends the session file at startup — poll so the in-flight
+    // child (and `current`) exists before stop() captures it.
+    const sessionPath = join(dir, "run-stopclaim.resident.jsonl");
+    const pollStart = performance.now();
+    while (!existsSync(sessionPath) && performance.now() - pollStart < 5_000) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    expect(existsSync(sessionPath)).toBe(true);
+    // Fire stop() WITHOUT awaiting: releasing the claim before the exit wait
+    // (the round-8 bug) let a second startResident arm here while the
+    // SIGKILLed child could still append to the session jsonl. Holding the
+    // claim until the child exits must refuse the re-arm.
+    const stopping = spawn.stop();
+    expect(() => enabled(startResident(opts))).toThrow(/already held/);
+    await stopping;
+    await expect(pending).rejects.toThrow();
+    // Claim released only after the exit wait — the re-arm succeeds after the
+    // shutdown completes.
+    const respawn = enabled(startResident(opts));
+    await respawn.stop();
+  });
+
   test("S2-4: stdout over the 4 MiB cap kills the child — 'logic', session quarantined", async () => {
     const dir = caseDir("flood");
     const spawn = enabled(

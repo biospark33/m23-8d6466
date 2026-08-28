@@ -604,8 +604,8 @@ describe("metering — engine-side integer µ$ (DD-9)", () => {
   test("huge-but-finite tokens × a real rate overflow the PRODUCT before division — a second per-term overflow case", async () => {
     // Round-7 honesty fix: big × 2e6 overflows to Infinity BEFORE the ÷1e6,
     // so this trips the PER-TERM guard (like the MAX_VALUE cases above), not
-    // the accumulated-sum guard — the sum guard is reachable only when finite
-    // terms sum past MAX_VALUE and stays in source as defense-in-depth.
+    // the accumulated-sum guard — that one is covered by the MAX_SAFE_INTEGER
+    // sum test below.
     const big = Number.MAX_VALUE / 2;
     const s = scriptedCaller([
       { raw: '{"action":"proceed"}', usage: { inputTokens: big, outputTokens: 0 } },
@@ -620,6 +620,47 @@ describe("metering — engine-side integer µ$ (DD-9)", () => {
     expect(Number.isFinite(afterFirst)).toBe(true);
     await c.solicit("run_end", ctx());
     expect(c.telemetry.spendMicros).toBe(afterFirst);
+  });
+
+  test("finite rounded term above MAX_SAFE_INTEGER — the last exact spendMicros is preserved", async () => {
+    // 1e18 tokens × 2e6 rate = 2e24 (finite product), ÷1e6 = 2e16 µ$ — finite
+    // but past MAX_SAFE_INTEGER, so JS cannot represent it exactly; metering
+    // it would silently lose µ$ on every later addition. The meter must skip
+    // the mutation (isSafeInteger, matching every other µ$ path).
+    const s = scriptedCaller([
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 1_000, outputTokens: 0 } }, // 2_000 µ$
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 1e18, outputTokens: 0 } }, // 2e16 µ$ — unsafe, skipped
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 1_000, outputTokens: 0 } }, // 2_000 µ$
+    ]);
+    const c = createSteering({
+      caller: s.caller,
+      rate: { inputPerMTok: 2_000_000, outputPerMTok: 0 },
+    });
+    await c.solicit("run_start", ctx());
+    expect(c.telemetry.spendMicros).toBe(2_000);
+    await c.solicit("post_gate_failure", ctx());
+    expect(c.telemetry.spendMicros).toBe(2_000);
+    await c.solicit("run_end", ctx());
+    expect(c.telemetry.spendMicros).toBe(4_000);
+  });
+
+  test("two individually safe terms whose SUM passes MAX_SAFE_INTEGER — the sum guard keeps the last exact value", async () => {
+    // 4.5e15 tokens × 2e6 rate ÷1e6 = 9e15 µ$ per reply — each rounded term
+    // is a safe integer; the second accumulation (1.8e16) crosses
+    // MAX_SAFE_INTEGER, so the mutation is skipped and the exact prior total
+    // survives.
+    const s = scriptedCaller([
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 4.5e15, outputTokens: 0 } },
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 4.5e15, outputTokens: 0 } },
+    ]);
+    const c = createSteering({
+      caller: s.caller,
+      rate: { inputPerMTok: 2_000_000, outputPerMTok: 0 },
+    });
+    await c.solicit("run_start", ctx());
+    expect(c.telemetry.spendMicros).toBe(9e15);
+    await c.solicit("run_end", ctx());
+    expect(c.telemetry.spendMicros).toBe(9e15);
   });
 });
 

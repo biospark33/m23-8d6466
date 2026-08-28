@@ -277,23 +277,25 @@ export function createSteering(deps: {
    *  poisoned input would otherwise turn spendMicros non-integer (JSON null)
    *  for the run. A reply carrying no usage object meters as zero rather than
    *  throwing (the never-throws contract covers metering too).
-   *  Finite-only accumulation: clamping admits huge-but-finite inputs whose
-   *  tokens × rate product overflows to Infinity. Each rounded term and the
-   *  accumulated sum are validated before the mutation, so an overflow leaves
-   *  the last finite spendMicros intact instead of poisoning it for the run. */
+   *  Safe-integer accumulation (Number.isSafeInteger, matching every other µ$
+   *  path — usage.ts, team-event-adapter.ts, cost-ledger.ts, qds-cost.ts):
+   *  clamping admits huge-but-finite inputs whose tokens × rate product
+   *  overflows to Infinity, and JS cannot exactly represent integers above
+   *  MAX_SAFE_INTEGER — a finite-but-unsafe term or sum would silently lose
+   *  micro-dollars on every later addition. Each rounded term and the
+   *  accumulated sum are validated before the mutation, so an unsafe value
+   *  leaves the last exact spendMicros intact instead of corrupting it. */
   const clampTerm = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0);
   const rateInput = clampTerm(deps.rate.inputPerMTok);
   const rateOutput = clampTerm(deps.rate.outputPerMTok);
   const meter = (usage: { inputTokens?: unknown; outputTokens?: unknown } | undefined): void => {
     const inputMicros = Math.round((clampTerm(usage?.inputTokens) * rateInput) / 1_000_000);
     const outputMicros = Math.round((clampTerm(usage?.outputTokens) * rateOutput) / 1_000_000);
-    if (!Number.isFinite(inputMicros) || !Number.isFinite(outputMicros)) return;
+    if (!Number.isSafeInteger(inputMicros) || !Number.isSafeInteger(outputMicros)) return;
     const next = telemetry.spendMicros + inputMicros + outputMicros;
-    // Defense-in-depth: reachable only when already-finite terms SUM past
-    // MAX_VALUE — the overflow tests all trip the per-term guard above first,
-    // so this guard has no direct test; it stays as the last check before the
-    // mutation.
-    if (!Number.isFinite(next)) return;
+    // Defense-in-depth: reachable when already-safe terms SUM past
+    // MAX_SAFE_INTEGER — directly tested by the sum-guard test.
+    if (!Number.isSafeInteger(next)) return;
     telemetry.spendMicros = next;
   };
 
