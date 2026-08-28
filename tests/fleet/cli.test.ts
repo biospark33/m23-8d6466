@@ -4074,7 +4074,6 @@ process.on = ((sig, listener) => {
     return {
       ...deps(validBriefJson(dir)),
       fanoutsDir: join(dir, ".sandbox", "fanouts"),
-      lockPath: join(dir, ".sandbox", "fleet.lock"),
     };
   }
 
@@ -4211,7 +4210,7 @@ process.on = ((sig, listener) => {
       ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta", "--dir", fanouts],
       // fanoutsDir deliberately NOT injected — the flag is the subject. The
       // lock still must not land in the repo cwd.
-      { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+      deps(validBriefJson(dir)),
     );
     expect(code).toBe(0);
     const files = readdirSync(fanouts).filter((f) => f.endsWith(".json"));
@@ -4234,7 +4233,7 @@ process.on = ((sig, listener) => {
     try {
       const code = await runCli(
         ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
-        { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+        deps(validBriefJson(dir)),
       );
       expect(code).toBe(0);
       const files = readdirSync(join(dir, "env-fanouts")).filter((f) => f.endsWith(".json"));
@@ -5037,7 +5036,7 @@ process.on = ((sig, listener) => {
       // strongest form of "constructed nothing" is that the very directory the
       // invocation was aimed at still does not exist afterwards.
       ["fanout", "--driver", "fake", "--pattern", "racee", "--n", "2", "--roster", "a,b", "--dir", freshFanouts],
-      { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+      deps(validBriefJson(dir)),
     );
     expect(code).toBe(2);
     const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: usage envelope this run just emitted to errCaptured */

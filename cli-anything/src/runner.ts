@@ -553,7 +553,7 @@ export interface TeamRunOptions {
   teamStdoutCapBytes?: number;
   /** In-flight grace after the budget threshold before killTree (default 5 s). */
   graceMs?: number;
-  /** Directory for lead-failure worker partials. Default `<cwd>/artifacts`. */
+  /** Directory for lead-failure worker partials. Default `<cwd>/.sandbox/artifacts` (F100). */
   artifactsDir?: string;
   /**
    * DF1.6 T5: Effective ceiling in microdollars (µ$). When provided,

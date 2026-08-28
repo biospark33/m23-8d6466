@@ -913,14 +913,20 @@ describe("p0-10 stalenessNote — the signal must not fire on every healthy run"
  * never invokes), so this costs nothing and spawns nothing.
  */
 describe("buildAssertions — the assembled Phase-0 array (F068)", () => {
-  const assertions = buildAssertions();
+  // NOT called in the describe body: buildAssertions() THROWS on a bad schema
+  // or a duplicate id, and a throw there aborts collection for the whole file
+  // instead of failing these tests — the two tests written to name that exact
+  // fault would never get to report it.
+  test("building the array does not throw — the schema and duplicate-id checks pass", () => {
+    expect(() => buildAssertions()).not.toThrow();
+  });
 
   test("the array is non-empty — an empty gate is a vacuous pass", () => {
-    expect(assertions.length).toBeGreaterThan(0);
+    expect(buildAssertions().length).toBeGreaterThan(0);
   });
 
   test("every assertion schema-validates", () => {
-    const bad = assertions
+    const bad = buildAssertions()
       .map((a) => ({ id: a.id, parsed: GateAssertionSchema.safeParse(a) }))
       .filter((r) => !r.parsed.success)
       .map((r) => r.id);
@@ -928,7 +934,7 @@ describe("buildAssertions — the assembled Phase-0 array (F068)", () => {
   });
 
   test("ids are unique — a duplicate silently shadows a clause in the report", () => {
-    const ids = assertions.map((a) => a.id);
+    const ids = buildAssertions().map((a) => a.id);
     expect(ids.length).toBe(new Set(ids).size);
   });
 
@@ -938,6 +944,7 @@ describe("buildAssertions — the assembled Phase-0 array (F068)", () => {
     // routinely run past DEFAULT_ASSERTION_TIMEOUT_MS. An override dropped here
     // does not fail the build — it fails the assertion, as a timeout, which
     // reads as a real regression in the thing under test.
+    const assertions = buildAssertions();
     for (const prefix of ["P0.6", "P0.7", "P0.9"]) {
       const a = assertions.find((x) => x.id.startsWith(`${prefix}-`));
       expect(a, `no assertion with id prefix ${prefix}-`).toBeDefined();

@@ -127,17 +127,63 @@ function gn(args: string[]): unknown {
 
 /** The fixture symbol every index-dependent AC below anchors on. */
 const FIXTURE_SYMBOL = "registerSwarmClawAgent";
+/** The fixture file every fixture symbol lives in. */
+const FIXTURE_FILE = "tests/gitnexus/fixtures/swarmclaw.ts";
+
+/**
+ * The `impact` invocations AC-1 makes, probed verbatim at preflight — same
+ * symbols, same flags, same schema. A guard that probes a DIFFERENT call than
+ * the AC makes is not a guard for that AC.
+ *
+ * `dispatch` (AC-1's positive control, proving impact queries the index rather
+ * than echoing input) MUST carry `-f`: `src/fleet/dispatch.ts` now also defines
+ * a `dispatch`, so a bare lookup returns gitnexus's `status: "ambiguous"` shape
+ * — no `target.id`/`type`/`filePath`, no `affected_processes`/
+ * `affected_modules` — which fails ImpactResultSchema. That is a fixture
+ * collision, NOT a stale index, and no reindex fixes it; disambiguating by file
+ * does.
+ */
+const IMPACT_PROBES: ReadonlyArray<{ symbol: string; args: string[] }> = [
+  { symbol: FIXTURE_SYMBOL, args: [] },
+  { symbol: "dispatch", args: ["-f", FIXTURE_FILE] },
+];
+
+const ImpactResultSchema = z.object({
+  target: z.object({
+    id: z.string(),
+    name: z.string(),
+    type: z.string(),
+    filePath: z.string(),
+  }),
+  direction: z.enum(["upstream", "downstream"]),
+  impactedCount: z.number(),
+  risk: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"]),
+  affected_processes: z.array(z.unknown()),
+  affected_modules: z.array(z.unknown()),
+});
 
 /**
  * F010: classify an `impact` probe result. Returns a reason when the index
- * cannot answer the shape the ACs assert (a resolved target plus a risk
- * string), or null when it can. Split out of indexUnavailableReason() so the
- * branch is testable without a live index.
+ * cannot answer the shape the ACs assert, or null when it can. Split out of
+ * indexUnavailableReason() so the branch is testable without a live index.
+ *
+ * It runs `ImpactResultSchema.safeParse` — the AC's OWN schema — and not a
+ * hand-written subset. The subset it used to check (`target.name` + a string
+ * `risk`) passed on a real partially-built index whose result was missing
+ * `target.filePath`, `affected_processes` and `affected_modules`; the probe
+ * went green and AC-1 then died on the schema parse. Checking anything less
+ * than the schema the AC parses with re-opens exactly that gap, so this must
+ * stay the same schema object, not a copy of it.
  */
-function staleImpactReason(probe: unknown): string | null {
-  const r = probe as { target?: { name?: string }; risk?: unknown } | null;
-  if (r?.target?.name !== FIXTURE_SYMBOL || typeof r?.risk !== "string") {
-    return `index lacks impact data for ${FIXTURE_SYMBOL} — reindex`;
+function staleImpactReason(probe: unknown, symbol: string = FIXTURE_SYMBOL): string | null {
+  const parsed = ImpactResultSchema.safeParse(probe);
+  if (!parsed.success) {
+    return `index lacks impact data for ${symbol} (${parsed.error.issues
+      .map((i) => i.path.join("."))
+      .join(", ")}) — reindex`;
+  }
+  if (parsed.data.target.name !== symbol) {
+    return `impact resolved ${parsed.data.target.name}, not ${symbol} — reindex`;
   }
   return null;
 }
@@ -199,13 +245,17 @@ function indexUnavailableReason(): string | null {
   // schema parse error — red for developers, dark in CI. Probe the shape those
   // ACs actually assert (resolved target + risk) so a partially stale index
   // skips with a diagnostic like every other environmental gap here.
-  let impact: unknown;
-  try {
-    impact = gn(["impact", FIXTURE_SYMBOL, "-r", REPO_ROOT, "--direction", "upstream"]);
-  } catch {
-    return null; // gitnexus itself errored — a real failure; let the tests report it.
+  for (const { symbol, args } of IMPACT_PROBES) {
+    let impact: unknown;
+    try {
+      impact = gn(["impact", symbol, "-r", REPO_ROOT, "--direction", "upstream", ...args]);
+    } catch {
+      return null; // gitnexus itself errored — a real failure; let the tests report it.
+    }
+    const reason = staleImpactReason(impact, symbol);
+    if (reason !== null) return reason;
   }
-  return staleImpactReason(impact);
+  return null;
 }
 
 const SKIP_REASON = indexUnavailableReason();
@@ -285,19 +335,6 @@ const ContextResultSchema = z.object({
   processes: z.array(z.unknown()),
 });
 
-const ImpactResultSchema = z.object({
-  target: z.object({
-    id: z.string(),
-    name: z.string(),
-    type: z.string(),
-    filePath: z.string(),
-  }),
-  direction: z.enum(["upstream", "downstream"]),
-  impactedCount: z.number(),
-  risk: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"]),
-  affected_processes: z.array(z.unknown()),
-  affected_modules: z.array(z.unknown()),
-});
 
 // --- INV-GN2: query-string injection rejection (validated at OUR boundary) ---
 // gitnexus's CLI passes the query straight to the graph engine (no shell); it
@@ -320,18 +357,51 @@ function assertSafeQuery(q: string): void {
 // index passed the probe and then blew up inside the impact assertions below
 // (schema parse error) instead of skipping with a diagnostic.
 describe("F010: staleness guard probes the impact shape the ACs assert", () => {
+  /** A result that satisfies ImpactResultSchema in full. */
+  const wellFormed = (name: string = FIXTURE_SYMBOL) => ({
+    target: {
+      id: `Function:tests/gitnexus/fixtures/swarmclaw.ts:${name}`,
+      name,
+      type: "Function",
+      filePath: "tests/gitnexus/fixtures/swarmclaw.ts",
+    },
+    direction: "upstream",
+    impactedCount: 0,
+    risk: "LOW",
+    affected_processes: [],
+    affected_modules: [],
+  });
+
   test.each([
     ["no result at all", null],
     ["a resolved target but no risk", { target: { name: FIXTURE_SYMBOL } }],
     ["a risk but an unresolved target", { risk: "LOW" }],
-    ["a risk but the wrong target", { target: { name: "somethingElse" }, risk: "LOW" }],
     ["a non-string risk", { target: { name: FIXTURE_SYMBOL }, risk: 3 }],
+    // The case the OLD hand-written subset check missed, observed for real on
+    // this worktree's index: target.name and risk are both present and correct,
+    // so the old probe returned "usable", and AC-1 then died parsing the result
+    // because filePath / affected_processes / affected_modules were absent.
+    [
+      "a target+risk but no filePath, affected_processes or affected_modules",
+      {
+        target: { id: "x", name: FIXTURE_SYMBOL, type: "Function" },
+        direction: "upstream",
+        impactedCount: 0,
+        risk: "LOW",
+      },
+    ],
+    ["a well-formed result for the WRONG symbol", wellFormed("somethingElse")],
   ])("a stale index that returns %s skips rather than failing the impact assertions", (_desc, probe) => {
     expect(staleImpactReason(probe)).toMatch(/reindex/);
   });
 
-  test("an index carrying impact data is reported usable", () => {
-    expect(staleImpactReason({ target: { name: FIXTURE_SYMBOL }, risk: "LOW" })).toBeNull();
+  test("an index carrying a fully-shaped impact result is reported usable", () => {
+    expect(staleImpactReason(wellFormed())).toBeNull();
+  });
+
+  test("the positive-control symbol is judged against ITS own name", () => {
+    expect(staleImpactReason(wellFormed("dispatch"), "dispatch")).toBeNull();
+    expect(staleImpactReason(wellFormed(), "dispatch")).toMatch(/reindex/);
   });
 });
 
@@ -396,8 +466,21 @@ describeIndexed("AC-1 (make-or-break): all three tools return non-empty structur
     // (proving it queries the index, not echo). `dispatch` is another fixture
     // symbol with a real caller (routeTask). impactedCount can still be 0 without
     // --pdg, but target resolution for arbitrary input is falsifiable proof.
+    // `-f`: src/fleet/dispatch.ts also defines `dispatch`, so a bare lookup
+    // returns gitnexus's ambiguous-candidates shape instead of a resolved
+    // target. Disambiguating by the fixture file keeps this a positive control
+    // over the INDEX rather than a test of gitnexus's name-collision handling.
     const disp = ImpactResultSchema.parse(
-      gn(["impact", "dispatch", "-r", REPO_ROOT, "--direction", "upstream"]),
+      gn([
+        "impact",
+        "dispatch",
+        "-r",
+        REPO_ROOT,
+        "--direction",
+        "upstream",
+        "-f",
+        FIXTURE_FILE,
+      ]),
     );
     expect(disp.target.name).toBe("dispatch");
     expectFixturePath(disp.target.filePath);

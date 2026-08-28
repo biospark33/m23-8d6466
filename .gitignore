@@ -21,6 +21,13 @@ oci/.build/
 # DF2.1: host run records + fake-driver boxes are per-run scratch, never committed.
 .sandbox/
 
+# F100: `artifacts/` is a MIXED sink — df1-3-e2e-event-stream.json is tracked
+# evidence. The worker captures are scratch (cli-anything/src/runner.ts now
+# defaults to .sandbox/artifacts, but an explicit --artifacts-dir or an older
+# checkout can still land them here). Ignore the scratch by name, so the tracked
+# evidence beside it stays visible in `git status`.
+/artifacts/worker-*.json
+
 # DF4.2: outputs of the visualizer coverage gate and the component build gate.
 # `bun run --cwd visualizer test:coverage` writes coverage/lcov.info (the file
 # scripts/check-lcov.ts parses in the next CI step) and `build:check` writes
@@ -36,3 +43,6 @@ visualizer/dist/
 # Same reasoning as /.gitnexusignore above — a SIGKILLed run can leak it, and it
 # should surface as ignored scratch, not as an untracked directory.
 /.gitnexus-analyze.lock/
+# ...and the transient `.stale.<pid>` name a reclaim renames a dead holder's
+# lock to before removing it.
+/.gitnexus-analyze.lock.stale.*

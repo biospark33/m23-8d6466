@@ -127,7 +127,8 @@ Cost if wrong: a hard-refusal is a one-branch change at the collision log.
 ## Q10 — Was `check-defensive-programming.sh` meant to gate?
 
 **Decision: it gates.** Task 3.3 lands it in the `check` job on `pull_request`, advisory
-(`continue-on-error`) while the measured backlog is non-zero, then blocking once clear.
+(`--warn`, NOT `continue-on-error` — a broken scan must still go red) while the measured
+backlog is non-zero, then blocking once clear by dropping `--warn`.
 `check-pr-conflicts.sh` follows the same route. Story templates keep recording it, now as a
 real CI result.
 

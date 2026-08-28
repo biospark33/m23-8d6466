@@ -26,6 +26,14 @@ import { join } from "node:path";
 
 import { costLedgerOpts } from "../../scripts/lib/cost-ledger-opts.ts";
 
+/**
+ * Absolute path to the module under test, for the subprocess runner the race
+ * case writes. Anchored on `import.meta.dir`, NOT `process.cwd()` — the cwd is
+ * whatever `bun test` was launched from and the import would silently miss from
+ * anywhere but the repo root.
+ */
+const MODULE_PATH = join(import.meta.dir, "..", "..", "scripts", "lib", "cost-ledger-opts.ts");
+
 const LEDGER = "cost-ledger.db";
 
 let base: string;
@@ -89,7 +97,7 @@ describe("costLedgerOpts — concurrent migration", () => {
     const runner = join(base, "resolve.ts");
     writeFileSync(
       runner,
-      `import { costLedgerOpts } from ${JSON.stringify(join(process.cwd(), "scripts/lib/cost-ledger-opts.ts"))};\nprocess.stdout.write(costLedgerOpts(process.argv[2]).path);\n`,
+      `import { costLedgerOpts } from ${JSON.stringify(MODULE_PATH)};\nprocess.stdout.write(costLedgerOpts(process.argv[2]).path);\n`,
       "utf8",
     );
 

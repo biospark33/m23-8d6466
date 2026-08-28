@@ -97,31 +97,30 @@ jobs:
       # = 8 findings (4x D016, 3x D018, 1x D017); check-pr-conflicts.sh = 51
       # overlapping files across the stacked tech-debt PRs (#141, #147).
       #
-      # `--warn` is what makes them advisory, NOT continue-on-error. Both scripts
-      # downgrade only confirmed FINDINGS under --warn and still exit nonzero on a
-      # broken scan (missing origin/main, unauthenticated gh, moved script) — so a
-      # gate that scanned nothing still goes red, which is the whole point of F095.
-      # continue-on-error stays as the belt for the same reason it is not the
-      # mechanism: it cannot tell those two cases apart.
+      # `--warn` is the ONLY advisory mechanism here. Both scripts downgrade
+      # confirmed FINDINGS under --warn but still exit nonzero on a BROKEN SCAN
+      # (missing origin/main, unauthenticated gh, moved script) — so a gate that
+      # scanned nothing goes red, which is the whole point of F095.
+      #
+      # `continue-on-error` is deliberately NOT used: it cannot tell those two
+      # cases apart, so it would swallow the broken-scan failure too and negate
+      # the property above. An advisory gate that cannot go red is not a gate.
       #
       # FLIP CONDITION: when a `--base origin/main` run of
       # check-defensive-programming.sh on a fresh branch prints
-      # "OK: no defensive-programming findings", delete `--warn` from its run line
-      # (and drop its continue-on-error) so findings block. Same rule,
-      # independently, for the conflicts step.
+      # "OK: no defensive-programming findings", delete `--warn` from its run
+      # line so findings block. Same rule, independently, for the conflicts step.
       #
       # base_ref/head_ref go through env, never `${{ }}` inside run: — expression
       # substitution happens before the shell parses, so an attacker-named fork
       # branch would execute as shell, and quoting the interpolation does not help.
       - name: Defensive-programming gate (advisory — 8 findings, see comment)
         if: github.event_name == 'pull_request'
-        continue-on-error: true
         env:
           BASE_REF: ${{ github.base_ref }}
         run: scripts/dev/check-defensive-programming.sh --base "origin/$BASE_REF" --warn
       - name: Stacked-PR conflict gate (advisory — 51 overlaps, see comment)
         if: github.event_name == 'pull_request'
-        continue-on-error: true
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.head_ref }}
