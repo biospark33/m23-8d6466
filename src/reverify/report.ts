@@ -116,6 +116,25 @@ export type ReverifyEvidence = z.input<typeof EvidenceSchema> & {
   checks: GateCheck[];
 };
 
+/**
+ * The report AS READ BACK. `sealReport` validates on the way in; this is the
+ * way out — `readReports` feeds `preflight`, which decides whether a
+ * credential reaches git on `verdict`/`headSha`/`reverifyId`/`completedAt`.
+ * A file anyone can append to is a trust boundary in both directions.
+ *
+ * Derived from `EvidenceSchema` so the two can never drift: the evidence-only
+ * knobs are omitted, the derived verdict/reason added.
+ */
+export const ReverifyReportSchema = EvidenceSchema.omit({
+  nondeterministic: true,
+  noTestSuite: true,
+})
+  .extend({
+    verdict: z.enum(["green", "red", "error"]),
+    reason: z.string().optional(),
+  })
+  .strict();
+
 export interface ReverifyReport {
   readonly reverifyId: string;
   readonly runId: string;
@@ -315,11 +334,18 @@ export function readReports(dir: string, runId: string): ReverifyReport[] {
   const out: ReverifyReport[] = [];
   for (const line of text.split("\n")) {
     if (line.trim().length === 0) continue;
+    let parsed: unknown;
     try {
-      out.push(JSON.parse(line) as ReverifyReport);
+      parsed = JSON.parse(line);
     } catch {
       // torn or truncated line — ignore it
+      continue;
     }
+    // Parsing is not trusting: a line that is valid JSON but not a report is
+    // dropped exactly like a torn one, rather than reaching preflight with
+    // `verdict` undefined or attacker-chosen.
+    const checked = ReverifyReportSchema.safeParse(parsed);
+    if (checked.success) out.push(checked.data as ReverifyReport);
   }
   return out;
 }

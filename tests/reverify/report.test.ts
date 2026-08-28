@@ -223,6 +223,29 @@ describe("append-only persistence", () => {
     }
   });
 
+  test("a malformed report line is skipped, never handed to the caller (F066)", () => {
+    // readReports feeds preflight, which decides whether a credential reaches
+    // git on report.verdict / headSha / reverifyId / completedAt. A line that
+    // parses as JSON but is not a report must be skipped the same way a torn
+    // line is — not returned with those fields undefined.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rv-report-"));
+    try {
+      appendReport(dir, sealReport(evidence({ reverifyId: "rv-good" }), {}));
+      const file = path.join(dir, "run-1.jsonl");
+      // Parses fine; is not a ReverifyReport.
+      fs.appendFileSync(file, `${JSON.stringify({ verdict: "green", headSha: "deadbeef" })}\n`);
+      // Parses fine; a real report with one poisoned field.
+      fs.appendFileSync(
+        file,
+        `${JSON.stringify({ ...sealReport(evidence({ reverifyId: "rv-bad" }), {}), verdict: "definitely-green" })}\n`,
+      );
+      const all = readReports(dir, "run-1");
+      expect(all.map((r) => r.reverifyId)).toEqual(["rv-good"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("readReports on an absent run returns an empty list, not a throw", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rv-report-"));
     try {

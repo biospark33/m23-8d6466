@@ -13,6 +13,17 @@ const nowMs = ref(Date.now())
 let timer: ReturnType<typeof setInterval> | undefined
 let inflight = false
 
+/** Which side of the archive flag is listed. The archived side is the only
+ *  place a mis-archived run can be reached to put it back. */
+const showArchived = ref(false)
+
+function toggleArchived() {
+  showArchived.value = !showArchived.value
+  sessions.value = []
+  loaded.value = false
+  void tick()
+}
+
 const POLL_MS = 500
 const MAX_POLL_MS = 30_000
 /** Consecutive failed ticks — backs the poll off so a dead api is not hammered
@@ -33,7 +44,7 @@ async function tick() {
   if (inflight) return
   inflight = true
   try {
-    sessions.value = await fetchSessions()
+    sessions.value = await fetchSessions(showArchived.value)
     nowMs.value = Date.now()
     apiError.value = null
     loaded.value = true
@@ -77,7 +88,12 @@ const ordered = computed(() =>
   <div class="sessions">
     <div v-if="apiError" class="error-bar">api unreachable — retrying {{ apiError }}</div>
 
-    <div v-if="ordered.length" class="list-head dim">{{ ordered.length }} runs</div>
+    <div class="list-head dim">
+      <span v-if="ordered.length">{{ ordered.length }} {{ showArchived ? 'archived runs' : 'runs' }}</span>
+      <button type="button" class="archived-toggle" @click="toggleArchived">
+        {{ showArchived ? 'show active' : 'show archived' }}
+      </button>
+    </div>
 
     <div v-if="ordered.length" class="cards">
       <SessionCard
@@ -88,7 +104,9 @@ const ordered = computed(() =>
         @archived="onArchived"
       />
     </div>
-    <div v-else-if="loaded" class="empty-state">no sessions yet — run a request to see it here</div>
+    <div v-else-if="loaded" class="empty-state">
+      {{ showArchived ? 'nothing archived' : 'no sessions yet — run a request to see it here' }}
+    </div>
     <div v-else-if="!apiError" class="empty-state">loading sessions…</div>
   </div>
 </template>
@@ -100,8 +118,22 @@ const ordered = computed(() =>
 }
 
 .list-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
   padding: 16px 24px 0;
   font-size: 16px;
+}
+
+.archived-toggle {
+  margin-left: auto;
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
 }
 
 .cards {

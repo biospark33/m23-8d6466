@@ -118,7 +118,7 @@ import {
   FANOUT_MAX_N,
   type FanoutPattern,
 } from "../src/fleet/fanout-primitive.ts";
-import { rank, type ArmStepOutput } from "../src/fleet/rank.ts";
+import { assertStepOutputShape, rank, type ArmStepOutput } from "../src/fleet/rank.ts";
 import type { Brief } from "../src/fleet/brief-schema.ts";
 import type { KeyApi } from "../src/providers/credentials.ts";
 import type { ExitStatus } from "../cli-anything/src/types.ts";
@@ -2149,47 +2149,14 @@ export async function run(
         }
         // Shape-check at the trust boundary: garbage entries would otherwise
         // surface as NaN scores in the ranking table instead of a named refusal.
+        // The RULES are rank.ts's — one validator, so a payload can never pass
+        // here and be refused there under a different code. All this keeps is
+        // the wrapper naming the flag that carried the entry.
         for (const [runId, out] of Object.entries(parsedSteps as Record<string, unknown>)) {
-          const bad = (why: string): FleetError =>
-            usageError(
-              `--steps-json entry ${JSON.stringify(runId)} ${why}`,
-              "each entry carries testsExecuted?, testResults{passed,failed}? and changedFiles[]?",
-            );
-          if (typeof out !== "object" || out === null || Array.isArray(out)) throw bad("must be an object");
-          const o = out as Record<string, unknown>;
-          if (o.testsExecuted !== undefined && typeof o.testsExecuted !== "boolean") {
-            throw bad("has a non-boolean testsExecuted (it is a guard flag, never a divisor)");
-          }
-          if (o.testResults !== undefined) {
-            const tr = o.testResults as Record<string, unknown> | null;
-            if (
-              typeof tr !== "object" ||
-              tr === null ||
-              !Number.isInteger(tr.passed) ||
-              !Number.isInteger(tr.failed) ||
-              (tr.passed as number) < 0 ||
-              (tr.failed as number) < 0
-            ) {
-              // Non-negative, not just integral: a negative count would rank a
-              // broken arm above healthy ones (passRate > 1). rank()'s own
-              // shape guard refuses it too — this is the boundary naming the
-              // flag that carried it.
-              throw bad("needs testResults with non-negative integer passed/failed counts");
-            }
-          }
-          // C3: Refuse inconsistent testResults/testsExecuted combo.
-          // testResults present while testsExecuted === false is logically inconsistent.
-          // (Inverse is legal: testsExecuted true with no testResults = passRate 0).
-          if (o.testResults !== undefined && o.testsExecuted === false) {
-            throw bad("has testResults but testsExecuted is false — tests must have been executed to have results");
-          }
-          if (
-            o.changedFiles !== undefined &&
-            (!Array.isArray(o.changedFiles) || o.changedFiles.some((f) => typeof f !== "string"))
-          ) {
-            throw bad("has changedFiles that is not an array of path strings");
-          }
-          byRun.set(runId, o as unknown as ArmStepOutput); /* dp:ok shape-checked field-by-field above against ArmStepOutput's three optional keys */
+          assertStepOutputShape(runId, out as ArmStepOutput, (why, hint) =>
+            usageError(`--steps-json entry ${JSON.stringify(runId)} ${why}`, hint),
+          );
+          byRun.set(runId, out as ArmStepOutput); /* dp:ok shape-checked field-by-field by assertStepOutputShape against ArmStepOutput's three optional keys */
         }
       }
       // A WRITABLE store — rank stamps rankedAt. Shared residual: pointing

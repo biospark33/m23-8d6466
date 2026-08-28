@@ -12,15 +12,23 @@ import PhaseDots from './PhaseDots.vue'
 const props = defineProps<{ session: SessionSummary; nowMs: number }>()
 const emit = defineEmits<{ archived: [requestId: string] }>()
 
+/** True in the "show archived" listing — the same button then UN-archives. */
+const isArchived = computed(() => Number(props.session.archived ?? 0) === 1)
+
 // The card is an <a>; the button lives inside it, so the click must not
 // navigate. Told the parent optimistically — the poll would take up to half a
 // second to drop the card, and a triage click should feel instant.
+//
+// Every archive has its inverse on the same control: in the archived listing
+// this writes archived=false, so a mis-click is undone from the UI instead of
+// by hand-editing SQLite.
 async function archive(event: MouseEvent) {
   event.preventDefault()
   event.stopPropagation()
+  const next = !isArchived.value
   emit('archived', props.session.request_id)
   try {
-    await archiveSession(props.session.request_id)
+    await archiveSession(props.session.request_id, next)
   } catch {
     emit('archived', '')   // signals the parent to re-sync from the server
   }
@@ -221,11 +229,11 @@ const hiddenRowCount = computed(() =>
     <button
       class="card-archive"
       type="button"
-      title="Archive — remove this run from review"
-      aria-label="Archive run"
+      :title="isArchived ? 'Unarchive — put this run back in review' : 'Archive — remove this run from review'"
+      :aria-label="isArchived ? 'Unarchive run' : 'Archive run'"
       @click="archive"
     >
-      ×
+      {{ isArchived ? '↺' : '×' }}
     </button>
     <span class="card-id">{{ session.request_id }}</span>
     <span class="card-req" :title="session.request ?? ''">{{ session.request }}</span>

@@ -5475,6 +5475,36 @@ process.on = ((sig, listener) => {
       expect(code).toBe(4);
     });
 
+    test("F046: --steps-json entry with testResults and NO testsExecuted is refused (one shape, not two)", async () => {
+      // rank.ts refuses testResults with testsExecuted !== true; the CLI used
+      // to refuse only === false, so this payload passed the trust boundary
+      // and was then refused by the library under a different code.
+      const freshDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+      freshScratchDirs.push(freshDir);
+      const stepsPath = join(freshDir, "steps.json");
+      writeFileSync(stepsPath, JSON.stringify({ "qds-123": { testResults: { passed: 1, failed: 0 } } }));
+      const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("testResults but testsExecuted is false");
+    });
+
+    test("F046: --steps-json counts past MAX_SAFE_INTEGER are refused at the boundary", async () => {
+      const freshDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+      freshScratchDirs.push(freshDir);
+      const stepsPath = join(freshDir, "steps.json");
+      writeFileSync(
+        stepsPath,
+        '{"qds-123": {"testsExecuted": true, "testResults": {"passed": 9007199254740993, "failed": 0}}}',
+      );
+      const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("non-negative integer passed/failed counts");
+    });
+
     // round-7 review S3 findings
     test("S3a: --roster with empty segment (\"a,,b\") is refused with named error", async () => {
       const code = await runCli(

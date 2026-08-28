@@ -371,6 +371,27 @@ describe("runTestCommand — reporter formats, output cap, group kill (review ro
     expect(Date.now() - started).toBeLessThan(15_000);
   }, 20_000);
 
+  test("abort signals the child directly, never a negative pid (F038)", async () => {
+    // Bun.spawn is not detached, so the child is NOT a group leader and its pid
+    // is not a pgid. `process.kill(-pid, …)` therefore either ESRCHes into the
+    // fallback or — if some unrelated group happens to hold that id — signals
+    // THAT group. Nothing here may ever call process.kill with a negative pid.
+    const killSpy = spyOn(process, "kill");
+    try {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 150);
+      const result = await runTestCommand(
+        ["perl", "-e", '$SIG{TERM}="IGNORE"; sleep 100'],
+        { cwd: cwd2, signal: controller.signal },
+      );
+      expect(result.testsExecuted).toBe(false);
+      const negatives = killSpy.mock.calls.filter((c) => typeof c[0] === "number" && (c[0] as number) < 0);
+      expect(negatives).toEqual([]);
+    } finally {
+      killSpy.mockRestore();
+    }
+  }, 20_000);
+
   test("already-aborted signal is observed immediately (child never lingers)", async () => {
     const script = path.join(cwd2, "pre-aborted.sh");
     fs.writeFileSync(script, "#!/bin/sh\nsleep 100\n", { mode: 0o755 });

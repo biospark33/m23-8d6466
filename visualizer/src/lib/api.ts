@@ -53,8 +53,10 @@ async function getJson(url: string): Promise<unknown> {
   return parseJson(res, `GET ${url}`)
 }
 
-export function fetchSessions(): Promise<SessionSummary[]> {
-  return getJson('/api/sessions') as Promise<SessionSummary[]>
+export function fetchSessions(archived = false): Promise<SessionSummary[]> {
+  return getJson(archived ? '/api/sessions?archived=1' : '/api/sessions') as Promise<
+    SessionSummary[]
+  >
 }
 
 export async function fetchSession(requestId: string): Promise<SessionDetail> {

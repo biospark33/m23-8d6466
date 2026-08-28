@@ -230,19 +230,24 @@ export class TraceDb {
     return this.session(requestId) !== null;
   }
 
-  /** Sessions, most recent first, each with its phase statuses for the progress dots. */
-  sessions(limit = 200): SessionSummary[] {
+  /**
+   * Sessions, most recent first, each with its phase statuses for the progress
+   * dots. `archived` picks WHICH side of the flag: the live list by default,
+   * the archived one when asked. The archived side is not a nicety — it is the
+   * only place the UI can reach a row to un-archive it.
+   */
+  sessions(limit = 200, archived = false): SessionSummary[] {
     const rows = this.db
-      .query<Session, [number]>(
+      .query<Session, [number, number]>(
         `SELECT request_id, request, status, engineer, started_at, ended_at,
                 duration_ms, total_tokens, total_cost,
                 ${this.declaredOptional()}, archived
            FROM sessions
-          WHERE COALESCE(archived, 0) = 0
+          WHERE COALESCE(archived, 0) = ?
           ORDER BY started_at DESC, rowid DESC
           LIMIT ?`,
       )
-      .all(clamp(limit, 1, MAX_LIMIT));
+      .all(archived ? 1 : 0, clamp(limit, 1, MAX_LIMIT));
 
     if (rows.length === 0) return [];
 

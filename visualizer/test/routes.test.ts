@@ -131,6 +131,42 @@ describe("L1 — GET /api/sessions (AC2)", () => {
   });
 });
 
+describe("L1 — GET /api/sessions?archived=1 (F075: archive has an inverse)", () => {
+  const post = (body: string, requestId: string) =>
+    fetch(`${base()}/api/sessions/${requestId}/archive`, {
+      method: "POST",
+      headers: { ...bearer, "content-type": "application/json" },
+      body,
+    });
+
+  test("the archived listing is the complement of the default one", async () => {
+    expect((await post(JSON.stringify({ archived: true }), EMPTY_REQUEST_ID)).status).toBe(200);
+    try {
+      const live = await getJson<Array<{ request_id: string }>>("/api/sessions");
+      expect(live.body.map((s) => s.request_id)).not.toContain(EMPTY_REQUEST_ID);
+
+      const archived = await getJson<Array<{ request_id: string; archived: number | null }>>(
+        "/api/sessions?archived=1",
+      );
+      expect(archived.res.status).toBe(200);
+      expect(archived.body.map((s) => s.request_id)).toContain(EMPTY_REQUEST_ID);
+      expect(archived.body.map((s) => s.request_id)).not.toContain(FIXTURE_REQUEST_ID);
+      // Without the row coming back the UI has nothing to un-archive FROM.
+      expect(archived.body.find((s) => s.request_id === EMPTY_REQUEST_ID)?.archived).toBe(1);
+    } finally {
+      await post(JSON.stringify({ archived: false }), EMPTY_REQUEST_ID); // leave restored
+    }
+  });
+
+  test("archived=0 and a junk value both mean the live listing (no coercion surprise)", async () => {
+    for (const q of ["?archived=0", "?archived=nonsense", ""]) {
+      // eslint-disable-next-line no-await-in-loop
+      const { body } = await getJson<Array<{ request_id: string }>>(`/api/sessions${q}`);
+      expect(body.map((s) => s.request_id)).toContain(FIXTURE_REQUEST_ID);
+    }
+  });
+});
+
 describe("L2 — GET /api/sessions/:requestId (AC2)", () => {
   test("returns session + usage + phases + agents in one response", async () => {
     const { res, body } = await getJson<{

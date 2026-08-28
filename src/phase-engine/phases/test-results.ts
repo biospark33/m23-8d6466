@@ -224,17 +224,11 @@ export async function runTestCommand(
         // but DRAIN_TIMEOUT_MS (in readCapped) bounds the drain wait so we never
         // hang forever.
         try {
-          // Try process-group kill first (-pid) — may not work on all platforms,
-          // fall back to direct pid if group kill throws.
-          try {
-            if (proc.pid !== undefined) {
-              process.kill(-proc.pid, "SIGTERM");
-            } else {
-              proc.kill("SIGTERM");
-            }
-          } catch {
-            proc.kill("SIGTERM");
-          }
+          // Signal the child directly. NOT `process.kill(-pid, …)`: the spawn
+          // above is not detached, so the child is not a group leader and its
+          // pid is not a pgid — the negative form either ESRCHes or lands on
+          // whatever unrelated group holds that id.
+          proc.kill("SIGTERM");
         } catch {
           // already gone
         }
@@ -249,17 +243,9 @@ export async function runTestCommand(
         ]);
         if (graceTimer !== undefined) clearTimeout(graceTimer);
         if (!exitedDuringGrace) {
-          // Grace expired — force-kill the process group (or direct pid)
+          // Grace expired — force-kill the child (lead pid only, as above)
           try {
-            try {
-              if (proc.pid !== undefined) {
-                process.kill(-proc.pid, "SIGKILL");
-              } else {
-                proc.kill("SIGKILL");
-              }
-            } catch {
-              proc.kill("SIGKILL");
-            }
+            proc.kill("SIGKILL");
           } catch {
             // already gone
           }
