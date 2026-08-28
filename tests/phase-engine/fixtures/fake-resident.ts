@@ -16,6 +16,10 @@
  *                          message_end usage block. Default 1000/64.
  *   FAKE_RESIDENT_EXIT     process exit code (default 0).
  *   FAKE_RESIDENT_HANG     "1" → never reply (the timeout path).
+ *   FAKE_RESIDENT_HANG_AT  hang only at this 0-based invocation index (the
+ *                          session-marker count above) — e.g. "2" hangs the
+ *                          run_end solicitation while run_start/post_gate
+ *                          reply normally.
  *
  * stdout is pi `--mode json` NDJSON: message_start / message_end (assistant
  * text + usage) / agent_end — the exact event subset `harvestPiStream`
@@ -96,7 +100,7 @@ const replies = scriptedReplies();
 const usage = scriptedUsage();
 const index = invocationIndex(typeof session === "string" ? session : undefined);
 
-if (process.env.FAKE_RESIDENT_HANG === "1") {
+if (process.env.FAKE_RESIDENT_HANG === "1" || process.env.FAKE_RESIDENT_HANG_AT === String(index)) {
   // Never reply — the caller's timeout (SIGKILL) is the behavior under test.
   // The timer pins the event loop the same way fake-pi-resident.ts's hang mode
   // does: a live handle guarantees the child stays hung even on a runtime that

@@ -1329,6 +1329,14 @@ async function main(argv: readonly string[]): Promise<number> {
   // A signal becomes a terminating exception so the run closes and its rows
   // settle, rather than leaving the journal claiming work that is already dead.
   let terminated = false;
+  // Flipped once Run.finish settles the run. Past that point run.terminate has
+  // no phase body left to abort (`Run.current` is gone and the exit code is
+  // already computed), and the only long await left in main is the run-end
+  // solicitation's in-flight pi call — reachable ONLY through
+  // residentSpawn.stop(). Without this branch, a first signal during that
+  // solicitation waits out the pi timeout (or a second Ctrl-C) before the
+  // owned subprocess dies.
+  let runSettled = false;
   const onSignal = async (sig: string): Promise<void> => {
     if (terminated) {
       // The handlers removed the default disposition, so a second Ctrl-C must
@@ -1355,6 +1363,20 @@ async function main(argv: readonly string[]): Promise<number> {
       process.exit(2);
     }
     terminated = true;
+    if (runSettled) {
+      // Post-finish signal: kill the owned resident NOW so the hung run-end
+      // call unwinds. solicitResident's never-throws contract lands the kill
+      // as a degraded PROCEED, and the normal cleanup path below takes over
+      // (exitStatus, the idempotent re-stop, the resident block refresh, the
+      // tracer close). run.terminate is skipped deliberately — the run is
+      // settled, so there is no abort target and no verdict left to flip.
+      try {
+        await residentSpawn?.stop();
+      } catch {
+        /* the normal cleanup path's own stop attempt outranks teardown noise */
+      }
+      return;
+    }
     run.terminate(sig);
   };
   process.on("SIGTERM", (sig) => void onSignal(sig));
@@ -1575,6 +1597,10 @@ async function main(argv: readonly string[]): Promise<number> {
   innerJournal.writeResident(residentTelemetryOf());
 
   const result = run.finish(!terminated);
+  // OnSignal's cancellation lever changes here: the run's phase bodies are
+  // done, so from the run-end solicitation on, a signal's only meaningful
+  // target is the owned resident (see the runSettled branch there).
+  runSettled = true;
 
   // DF3.3 solicitation point 3 of 3: run end — after finish(accepted), report
   // text only. Skipped when a directive aborted the run (abort stops the

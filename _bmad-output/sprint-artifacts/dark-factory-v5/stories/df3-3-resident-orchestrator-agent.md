@@ -459,6 +459,39 @@ Headliners: "abort at run_start yields ok:true" (journal.finish computes `ok = r
 
 **Round-2 gates:** tests/phase-engine + tests/fleet = 1263 pass / 0 fail (one parallel-load timeout flake, clean ×2 re-runs); biome clean on all 14 touched files; tsc --noEmit exit 0; GitNexus detect_changes MEDIUM, all 13 changed symbols inside the story's own modules, one affected process (main).
 
+**Round-3/4 GitNexus evidence (CodeRabbit round-4 request; index refreshed to 701b924 first —
+the pre-DF3.3 index predated `assertNoResident*` entirely):**
+
+- `impact({target: "assertNoResidentCredentials", direction: "upstream"})` — risk **LOW**,
+  4 impacted. Direct callers: `main` (the arming refusal, pipeline-run.ts:1409) and
+  `assertNoResidentCredentialValue` (mutual recursion for nested objects). Affected process:
+  `Main → TracerError` (step 1, proc_102). Modules: Phase-engine, Scripts.
+- `impact({target: "assertNoResidentCredentialValue", direction: "upstream"})` — risk **LOW**,
+  3 impacted. Direct caller: `assertNoResidentCredentials` only (arrays and nested objects both
+  route through it). Same single affected process (`Main → TracerError`).
+- `impact({target: "main", direction: "upstream"})` — risk **LOW**, 2 impacted: the
+  `pipeline-run.ts` file node and `pipeline-run-remote.ts` (import). Zero engine processes
+  begin inside `main`'s callers — it is the entry point.
+- `detect_changes({scope: "compare", base_ref: "main"})` — **257 changed symbols / 38 files,
+  risk HIGH** (feature-scale delta: 83 TS symbols across pipeline-run.ts, resident.ts,
+  steering.ts, journal.ts, plus tests/fixtures/story docs). Affected processes: 6, all inside
+  the story's own footprint — `Main → TracerError` (main), `Solicit → BalancedObject`
+  (solicit, parseReply), `Gated → OnTraceError` (gated), `GatedBody → JournalWriteError`
+  (flush), `Solicit → TruncateTailWithSuffix` (solicit, renderPrompt, truncateTailWithSuffix),
+  `Solicit → Clamp` (solicit, meter, clamp). No process outside DF3.3's surfaces is affected.
+  HIGH here reads as blast-radius-of-the-feature, not unreviewed coupling: every changed
+  symbol is either new in this story or an additive seam owned by it.
+
+**Round-4 fix (CodeRabbit 3876702705):** first SIGINT/SIGTERM during the run-end solicitation
+now stops the owned resident immediately (`runSettled` flips after `Run.finish`; `onSignal`'s
+post-settle branch `await residentSpawn?.stop()` instead of the now-targetless
+`run.terminate`). The killed call degrades inside `steering.solicit` to a PROCEED and the
+normal cleanup tail (exitStatus, idempotent re-stop, resident-block refresh, tracer close)
+finishes the process with the run's own verdict. Active-run signal behavior unchanged.
+E2E: `resident-e2e.test.ts` "first SIGINT during the run-end solicitation…" — passes with the
+fix, times out at 60 s without it (negative control via `git stash` of the fix); fixture gained
+`FAKE_RESIDENT_HANG_AT` (per-invocation hang).
+
 ---
 
 ## Hardening Revision — 2026-08-20

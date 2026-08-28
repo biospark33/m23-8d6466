@@ -562,6 +562,108 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
     expect(r?.exitStatus).toBe("logic");
   }, 60_000);
 
+  test("first SIGINT during the run-end solicitation stops the resident via the normal cleanup path", async () => {
+    // The CodeRabbit scenario: the run has already settled, the run_end pi
+    // call hangs, and Run.terminate has no abort target left — so the FIRST
+    // signal must stop the owned resident itself. Without that, the runner
+    // sits on the hung call until the pi timeout (600 s here) or a second
+    // Ctrl-C; with it, the kill lands as a degraded PROCEED and the ordinary
+    // tail (exitStatus, idempotent re-stop, resident block, tracer close)
+    // finishes the process promptly with the run's own verdict intact.
+    const dir = path.join(tmpRoot, "run-end-signal");
+    fs.mkdirSync(dir, { recursive: true });
+    const manifest = path.join(dir, "pipeline.resident.json");
+    fs.copyFileSync(FIXTURE, manifest);
+    fs.writeFileSync(
+      path.join(dir, "run-context.json"),
+      JSON.stringify({
+        runId: "sig-run-end",
+        pipelineId: "resident-e2e",
+        requestId: "req-sig-run-end",
+        repoSlug: "qds/demo",
+        issueId: 42,
+        effectiveCeilingMicros: 250_000,
+      }),
+    );
+    fs.rmSync(stateFile(dir), { force: true });
+    const journalPath = path.join(dir, "out.json");
+    // startResident's sessionDir is the journal's directory; the fixture
+    // appends one marker per invocation, so the file is the readiness probe.
+    const sessionPath = path.join(dir, "sig-run-end.resident.jsonl");
+    const invocations = (): number => {
+      try {
+        return fs
+          .readFileSync(sessionPath, "utf8")
+          .split("\n")
+          .filter((l) => l.includes('"fake_resident_invocation"')).length;
+      } catch {
+        return 0;
+      }
+    };
+    const proc = spawnRunner(
+      [
+        "--manifest", manifest,
+        "--budget-ms", "50000",
+        "--journal", journalPath,
+        "--run-root", dir,
+        "--run-id", "sig-run-end",
+        "--request-id", "req-sig-run-end",
+      ],
+      path.join(dir, "marker"),
+      dir,
+      {
+        FAKE_RESIDENT_REPLIES: JSON.stringify(PROCEED_ONLY),
+        // Hang ONLY invocation 2 (run_end): run_start and post_gate answered,
+        // the run settles, and the third pi call is the one under signal fire.
+        FAKE_RESIDENT_HANG_AT: "2",
+        // The hang must outlive the test by a wide margin — the first-signal
+        // stop, not the timeout, is the mechanism that ends this run.
+        QDS_RESIDENT_TIMEOUT_MS: "600000",
+      },
+    );
+    try {
+      // Three markers = run_start + post_gate answered and the run_end call
+      // STARTED (markers append pre-hang), i.e. finish() has already settled
+      // the run and the hung solicitation is the only await left in main.
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline && invocations() < 3) {
+        await Bun.sleep(50);
+      }
+      expect(invocations()).toBe(3);
+
+      const sent = Date.now();
+      proc.kill("SIGINT");
+      const [, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      // Prompt exit: the stop→degrade→cleanup chain, not a 600 s timeout.
+      expect(Date.now() - sent).toBeLessThan(15_000);
+      // The run settled ok BEFORE the signal; a signal aimed at telemetry must
+      // not rewrite a settled verdict — the normal path returns finish's code.
+      expect(exitCode).toBe(0);
+      const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as E2eJournal;
+      expect(journal.ok).toBe(true);
+      expect(journal.phases.map((p) => p.status)).toEqual(["success", "success"]);
+      // The killed run_end call degrades the resident and records the process
+      // end as transient (a signal death), in the refreshed resident block.
+      expect(journal.resident?.status).toBe("degraded");
+      expect(journal.resident?.exitStatus).toBe("transient");
+      // All three solicitation lines emit — the killed run_end call degrades
+      // INSIDE steering.solicit (its catch returns PROCEED), so the line still
+      // lands — and no second-signal "again" line exists: the FIRST signal
+      // carried the cancellation.
+      const solicitLines = jsonLines(stderr).filter((l) => l.event === "resident_solicit");
+      expect(solicitLines).toHaveLength(3);
+      expect(solicitLines.map((l) => l.directiveAction)).toEqual(["proceed", "proceed", "proceed"]);
+      expect(stderr).not.toContain("again — exiting immediately");
+    } finally {
+      if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+      fs.rmSync(stateFile(dir), { force: true });
+    }
+  }, 60_000);
+
   test("retry authorization: a non-positive admitted ceiling refuses the run before any journal row", async () => {
     // The cap witness reader (`admittedCeilingBeside`) demands a positive
     // integer effectiveCeilingMicros on BOTH the declared and undeclared
