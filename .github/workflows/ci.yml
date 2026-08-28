@@ -12,6 +12,8 @@ concurrency:
 
 permissions:
   contents: read
+  # check-pr-conflicts.sh lists other open PRs via `gh pr list` / `gh pr diff`.
+  pull-requests: read
 
 jobs:
   check:
@@ -34,6 +36,11 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          # The two dev gates below diff from `git merge-base origin/<base> HEAD`.
+          # checkout's default depth of 1 has no merge-base and no origin/main
+          # ref at all, so both would die on the first line. Full history is the
+          # price of running them here.
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
       # Root install also covers cli-anything/ (not a declared workspace, but
       # its deps hoist from the root lockfile) — see #54.
@@ -53,6 +60,29 @@ jobs:
       - run: bun run test:visualizer
       - run: bun run check:lcov
       - run: bun run --cwd visualizer build:check
+      # F095 / decision Q10: these two gates were written, tested, and invoked by
+      # nothing — every record of them passing was a hand-run transcribed into
+      # story prose. They gate now, from here.
+      #
+      # ADVISORY (continue-on-error) while the backlog is non-zero. Measured
+      # 2026-08-28 on feature/tech-debt-w3-green vs origin/main:
+      # check-defensive-programming.sh = 8 findings (4x D016, 3x D018, 1x D017);
+      # check-pr-conflicts.sh = 51 overlapping files across the stacked
+      # tech-debt PRs (#141, #147). FLIP CONDITION: when a `--base origin/main` run
+      # of check-defensive-programming.sh on a fresh branch prints
+      # "OK: no defensive-programming findings", delete this step's
+      # `continue-on-error` so it blocks. Same rule, independently, for the
+      # conflicts step.
+      - name: Defensive-programming gate (advisory — 8 findings, see comment)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: scripts/dev/check-defensive-programming.sh --base origin/${{ github.base_ref }}
+      - name: Stacked-PR conflict gate (advisory — 51 overlaps, see comment)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/dev/check-pr-conflicts.sh --base origin/${{ github.base_ref }} --branch "${{ github.head_ref }}"
 
   # DF2.9: the enterprise image contract. The license sweep is the gate — a
   # denied package, a broken pin, or a package the build cannot attribute exits

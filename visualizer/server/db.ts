@@ -417,15 +417,6 @@ export class TraceDb {
       )
       .all(requestId);
 
-    /** First numeric key present, else 0 — camelCase spelling wins. */
-    const pick = (u: Record<string, number>, ...keys: string[]): number => {
-      for (const key of keys) {
-        const value = u[key];
-        if (typeof value === "number") return value;
-      }
-      return 0;
-    };
-
     let read = 0;
     let written = 0;
     for (const row of rows) {
@@ -550,6 +541,15 @@ export class TraceDb {
       return { ok: false, db: this.path, journal_mode: this.journalMode };
     }
   }
+}
+
+/** First numeric key present in an `agent_end` usage payload, else 0 — camelCase spelling wins. */
+function pick(u: Record<string, number>, ...keys: string[]): number {
+  for (const key of keys) {
+    const value = u[key];
+    if (typeof value === "number") return value;
+  }
+  return 0;
 }
 
 function clamp(value: number, min: number, max: number): number {

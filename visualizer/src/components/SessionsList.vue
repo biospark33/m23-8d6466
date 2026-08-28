@@ -69,7 +69,7 @@ function onArchived(requestId: string) {
 }
 
 const ordered = computed(() =>
-  [...sessions.value].sort((a, b) => (ts(b.started_at) || 0) - (ts(a.started_at) || 0)),
+  sessions.value.toSorted((a, b) => (ts(b.started_at) || 0) - (ts(a.started_at) || 0)),
 )
 </script>
 
