@@ -231,7 +231,37 @@ echo "Running gitnexus analyze (${EMBEDDINGS_FLAG:-no embeddings}, 300s cap) ...
 "${TIMEOUT[@]}" \
   "$GITNEXUS" analyze "$REPO_ROOT" --force $EMBEDDINGS_FLAG --skip-agents-md
 
-# --- 3. Report graph stats ----------------------------------------------------
+# --- 3. Version stamp + contract pin check ----------------------------------
+# Version visibility: every reindex records which CLI built the index and
+# whether it matches the version the contract suite pins. .gitnexus/ is
+# gitignored — this stamp is runtime evidence, not a committed record. The
+# committed pin is tests/gitnexus/gitnexus-cli-contract.json; bump it only via
+# the AGENTS.md upgrade ritual (bump -> reindex -> contract suite -> review).
+EXPECTED_GN_VER=""
+CONTRACT_JSON="$REPO_ROOT/tests/gitnexus/gitnexus-cli-contract.json"
+if [ -f "$CONTRACT_JSON" ]; then
+  EXPECTED_GN_VER="$(sed -n 's/.*"expectedCliVersion": *"\([^"]*\)".*/\1/p' "$CONTRACT_JSON" | head -1)"
+fi
+if [ -d "$REPO_ROOT/.gitnexus" ]; then
+  # Write-then-rename: a killed run never leaves a torn stamp behind.
+  STAMP_TMP="$REPO_ROOT/.gitnexus/.cli-version.json.tmp"
+  if printf '{\n  "installedCliVersion": "%s",\n  "expectedCliVersion": "%s",\n  "indexedAt": "%s",\n  "indexedHead": "%s"\n}\n' \
+      "${GN_VER:-unknown}" "${EXPECTED_GN_VER:-unpinned}" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(git rev-parse HEAD 2>/dev/null || echo unknown)" \
+      > "$STAMP_TMP"; then
+    mv "$STAMP_TMP" "$REPO_ROOT/.gitnexus/cli-version.json"
+    echo "version stamp: .gitnexus/cli-version.json (installed ${GN_VER:-unknown}, pinned ${EXPECTED_GN_VER:-unpinned})"
+  else
+    echo "WARN: could not write .gitnexus/cli-version.json (non-fatal)" >&2
+  fi
+fi
+if [ -n "$EXPECTED_GN_VER" ] && [ -n "${GN_VER:-}" ] && [ "$GN_VER" != "$EXPECTED_GN_VER" ]; then
+  echo "WARN: installed gitnexus ($GN_VER) != pinned contract version ($EXPECTED_GN_VER)." >&2
+  echo "      tests/gitnexus/contract.test.ts will FAIL until the pin is bumped deliberately" >&2
+  echo "      (AGENTS.md upgrade ritual: bump -> reindex -> contract suite -> review diff)." >&2
+fi
+
+# --- 4. Report graph stats ----------------------------------------------------
 echo "--- graph status ---"
 # Status is just reporting — a locked graph DB or slow read shouldn't fail CI.
 # 30s cap with the same portable resolver; non-fatal on timeout/error.
