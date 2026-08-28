@@ -143,6 +143,19 @@ describe("realBridgeProbe — F008 port/method/auth", () => {
     expect(p).toEqual({ registered: false, healthy: false });
   });
 
+  test("502 (registered but transport dead) → registered, unhealthy not -32001", async () => {
+    // handleTestMCPServer returns 502 {ok:false} when the server IS in the
+    // store but its transport is down or enumerates zero tools. Reporting that
+    // as "not registered" would send an operator hunting a registration bug.
+    process.env.SWARMCLAW_BASE_URL = "http://sw";
+    process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
+    globalThis.fetch = mock(async () =>
+      jsonRes({ ok: false, error: "transport is not running" }, 502),
+    ) as unknown as typeof fetch;
+    const p = await realBridgeProbe();
+    expect(p).toEqual({ registered: true, healthy: false });
+  });
+
   test("/test 200 with ok:false → registered, unhealthy (AC-5 fail closed)", async () => {
     process.env.SWARMCLAW_BASE_URL = "http://sw";
     process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";

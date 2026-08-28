@@ -117,15 +117,14 @@ export async function realBridgeProbe(mcpServerId?: string): Promise<BridgeProbe
       signal: ctrl.signal,
     });
     if (!res.ok) {
-      // 401/403: the bridge endpoint responded but auth-blocked us. The bridge
-      // IS registered (the HTTP server is up); health can't be verified.
-      // Anything else (404 unknown id / 5xx) → treat as not registered. Mapping
-      // 401/403 to "not registered" would misdiagnose an auth gap as a
-      // registration gap.
-      if (res.status === 401 || res.status === 403) {
-        return { registered: true, healthy: false };
-      }
-      return { registered: false, healthy: false };
+      // 404 is the ONLY "not registered" answer: `handleTestMCPServer` returns
+      // it when `store.get(id)` misses. Every other failure means the server
+      // WAS found (or the listener never got far enough to look) — 502 for a
+      // dead transport or zero enumerated tools, 401/403 for an auth gap — so
+      // it is a HEALTH failure (-32002), not a registration failure (-32001).
+      // Collapsing those into "not registered" is the same misdiagnosis review
+      // R2 removed for 401/403.
+      return { registered: res.status !== 404, healthy: false };
     }
     // A 200 proves the id is registered. A failure to PARSE the body is a
     // HEALTH-CHECK failure, not a registration failure, so it must not fall
