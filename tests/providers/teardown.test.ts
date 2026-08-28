@@ -1012,45 +1012,127 @@ describe("DF2.5 teardownSandbox", () => {
   // ─── 8c. F032: the two spend figures, compared ───────────────────
 
   describe("F032 spend divergence at the close step", () => {
-    /** A ledger hook whose derived per-run total is whatever the test says. */
-    function ledgerStub(totalMicroUsd: number): CostLedgerHook {
-      return {
-        ingestBoxHours: () => ({ eventId: "stub", inserted: true, unpriced: false }),
-        readRunCost: () => ({ totalMicroUsd, hasEvents: true }),
-      };
+    /** 30 min of box time at 1M µ$/h — the row the close step ingests itself. */
+    const BOX_HOURS_MICRO_USD = 500_000;
+    /** What FakeKeyApi's usageOnCreateUsd (0.0081) becomes on the record. */
+    const RECORDED_MICRO_USD = 8_100;
+
+    /**
+     * A REAL CostLedger, so the box-hours row the close step writes is really
+     * in the view this check reads — a fixed-total stub cannot catch the
+     * like-for-like bug (comparing token spend against tokens + box hours).
+     * `readRunRecord` backdates createdAt half an hour off the close so the
+     * box-hours row is deterministic.
+     */
+    async function realLedger(runId: string): Promise<CostLedgerHook & { close(): void }> {
+      const { CostLedger } = await import("../../src/providers/cost-ledger.ts");
+      return new CostLedger({
+        path: join(dir, `ledger-${runId}.db`),
+        readRunRecord: (id) => {
+          try {
+            const rec = store.get(id);
+            const createdAt =
+              rec.closedAt === undefined
+                ? rec.createdAt
+                : new Date(Date.parse(rec.closedAt) - 30 * 60_000).toISOString();
+            return { createdAt, closedAt: rec.closedAt, keyHash: rec.keyHash, limitMicroUsd: rec.limitMicroUsd };
+          } catch {
+            return undefined;
+          }
+        },
+        config: { defaultCapMicroUsd: 50_000_000, boxHourRateMicroUsd: 1_000_000 },
+      });
     }
 
-    test("record spend and derived ledger total disagree → one spend-divergence line at close", async () => {
-      const runId = "df25-spend-divergence";
+    /** The budget attribution the close step's box-hours ingest needs. */
+    function attribute(runId: string): void {
+      store.set(runId, {
+        extensions: {
+          budget: {
+            schemaVersion: 1,
+            repoSlug: "qds/demo",
+            issueId: "42",
+            capMicroUsd: 50_000_000,
+            spentMicroUsd: 0,
+            reservedMicroUsd: 0,
+            admittedCeilingMicroUsd: 50_000_000,
+          },
+        },
+      });
+    }
+
+    /** One priced token row for this run — the DF2.7 bridge, simulated. */
+    function ingestTokens(ledger: CostLedgerHook, runId: string, costUsd: number): void {
+      (ledger as unknown as { ingestCostEvent: (e: unknown, c: unknown) => unknown }).ingestCostEvent(
+        {
+          agentId: "lead-1",
+          model: "cheap/model",
+          inputTokens: 1_000,
+          outputTokens: 500,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          costUsd,
+          turnCount: 1,
+          unpricedTurns: 0,
+          durationMs: 1_000,
+          timestamp: "2026-08-20T12:01:00.000Z",
+        },
+        { runId, repoSlug: "qds/demo", issueId: "42", requestId: "req-f032", role: "lead", invocationSeq: 0 },
+      );
+    }
+
+    async function tornDownWith(runId: string, tokensUsd?: number): Promise<void> {
       const host = await makeHostRepo();
       await makeRun(runId);
       await mintFor(runId);
+      attribute(runId);
+      const ledger = await realLedger(runId);
+      try {
+        if (tokensUsd !== undefined) ingestTokens(ledger, runId, tokensUsd);
+        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId);
+      } finally {
+        ledger.close();
+      }
+    }
 
-      // The provider-authoritative figure captureSpend wrote (0.0081 USD), against
-      // a ledger holding box hours only — exactly the F001 shape.
-      await teardownSandbox(deps({ gitCwd: host, costLedger: ledgerStub(100) }), runId);
+    test("token spend that AGREES → no line, even though the ledger also holds this run's box hours", async () => {
+      // The regression this exists for: `totalMicroUsd` here is 508_100
+      // (8_100 tokens + 500_000 box hours), so a raw comparison against the
+      // record's 8_100 would fire on every priced teardown, forever.
+      const runId = "df25-spend-agrees";
+      await tornDownWith(runId, 0.0081);
 
-      expect(store.get(runId).spendMicroUsd).toBe(8100);
+      expect(store.get(runId).spendMicroUsd).toBe(RECORDED_MICRO_USD);
+      // the box-hours row really is there — otherwise this test proves nothing
+      const boxHours = logs.find((l) => l.operation === "teardown.box_hours" && l.outcome === "skipped");
+      expect(boxHours).toBeUndefined();
+      expect(logs.filter((l) => l.code === "spend-divergence")).toHaveLength(0);
+    }, 30_000);
+
+    test("no token row at all → outcome 'unwired' (the F001 shape), box hours excluded from derived", async () => {
+      const runId = "df25-spend-unwired";
+      await tornDownWith(runId);
+
       const lines = logs.filter((l) => l.code === "spend-divergence");
       expect(lines).toHaveLength(1);
-      expect(lines[0]!.recordedMicroUsd).toBe(8100);
-      expect(lines[0]!.derivedMicroUsd).toBe(100);
-      expect(lines[0]!.runId).toBe(runId);
-      // The line has to say WHY the two disagree, or the operator re-derives F001 by hand.
+      expect(lines[0]!.outcome).toBe("unwired");
+      expect(lines[0]!.recordedMicroUsd).toBe(RECORDED_MICRO_USD);
+      // 0, NOT the 500_000 box-hours row the close step just wrote
+      expect(lines[0]!.derivedMicroUsd).toBe(0);
       expect(String(lines[0]!.message)).toContain("tokens-ledger-unwired");
-      // and the close itself still stands
       expect(store.get(runId).closedAt).toBeString();
     }, 30_000);
 
-    test("figures that agree → no divergence line", async () => {
-      const runId = "df25-spend-agrees";
-      const host = await makeHostRepo();
-      await makeRun(runId);
-      await mintFor(runId);
+    test("token spend on both sides that disagrees → outcome 'divergent'", async () => {
+      const runId = "df25-spend-divergent";
+      await tornDownWith(runId, 0.0001); // 100 µ$ of tokens vs the provider's 8_100
 
-      await teardownSandbox(deps({ gitCwd: host, costLedger: ledgerStub(8100) }), runId);
-
-      expect(logs.filter((l) => l.code === "spend-divergence")).toHaveLength(0);
+      const lines = logs.filter((l) => l.code === "spend-divergence");
+      expect(lines).toHaveLength(1);
+      expect(lines[0]!.outcome).toBe("divergent");
+      expect(lines[0]!.derivedMicroUsd).toBe(100);
+      expect(lines[0]!.deltaMicroUsd).toBe(RECORDED_MICRO_USD - 100);
+      expect(String(lines[0]!.message)).not.toContain("tokens-ledger-unwired");
     }, 30_000);
 
     test("a hook with no readRunCost (DF2.8's box-hours-only shape) is left alone", async () => {

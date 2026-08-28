@@ -5,8 +5,10 @@
  * (§6 item 4). One append-only row per ingested event, keyed by a
  * deterministic digest: a redelivered line digests identically and lands on
  * `INSERT … ON CONFLICT DO NOTHING`, never an update. Money is integer
- * micro-dollars everywhere (DD-9); the one float→µ$ conversion happens here at
- * ingest and nowhere else. Per-issue spend is always `SUM(cost_micro_usd)`
+ * micro-dollars everywhere (DD-9); DF2.7 wire costs convert to µ$ here, at
+ * ingest. It is not the only float→µ$ boundary in the factory — the provider
+ * key API's dollar figures (usage, limits) convert in credentials.ts's own
+ * `usdToMicros` — but no OTHER conversion happens on this ledger's path. Per-issue spend is always `SUM(cost_micro_usd)`
  * over priced rows — derived on demand, never denormalized (INV-COST-2) — and
  * the gate reads that same SUM inside a BEGIN IMMEDIATE admission
  * transaction, because a bare read-and-compare is a TOCTOU two concurrent
