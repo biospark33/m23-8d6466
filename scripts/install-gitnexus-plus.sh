@@ -178,15 +178,30 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   # Reclaim only a lock whose holder is provably gone. An unreadable/absent pid
   # file means a holder mid-acquire (it writes pid right after mkdir) — refuse.
   if [ -n "$LOCK_PID" ] && ! pid_alive "$LOCK_PID"; then
-    # RECLAIM BY ATOMIC RENAME, never `rm -rf` + `mkdir`. Two runs can read the
-    # same dead pid concurrently; with rm+mkdir, A removes and recreates the
-    # lock and B then `rm -rf`s A's FRESH lock and takes its own — both proceed,
-    # which is the concurrency this whole block exists to prevent. `mv` of a
-    # directory onto a non-existent name is atomic, so exactly one racer can
-    # move the stale dir aside; the loser's `mv` fails and it refuses.
+    # RECLAIM = ATOMIC RENAME + IDENTITY CHECK. Both halves are required.
+    #
+    # The rename alone does NOT serialize two racers that read the same dead
+    # pid. Interleave: A `mv`s the stale dir aside, A `rm -rf`s it, A `mkdir`s a
+    # FRESH lock, A writes its pid — and only now does B run its `mv`. $LOCK_DIR
+    # exists again, so B's rename SUCCEEDS, carrying off A's live lock; B then
+    # mkdirs its own and both analyze concurrently, until A's EXIT trap deletes
+    # B's lock for good measure. The rename being atomic only shrinks the window
+    # to the microseconds between A's `mv` and A's `mkdir`; it does not close it.
+    #
+    # So after the rename we check WHAT WE MOVED: the pid inside it must be the
+    # exact dead pid we decided to reclaim. Anything else — A's pid, or no pid
+    # file at all (a holder mid-acquire, which sets its directory up before
+    # writing) — means we did not move the corpse we came for. Put it back and
+    # refuse. The put-back is best-effort by necessity: if it fails the lock is
+    # gone and the next run acquires cleanly, which is the safe direction.
     echo "WARN: reclaiming stale analyze lock from dead pid $LOCK_PID" >&2
     STALE_DIR="$LOCK_DIR.stale.$$"
     mv "$LOCK_DIR" "$STALE_DIR" 2>/dev/null || lock_fatal
+    MOVED_PID="$(cat "$STALE_DIR/pid" 2>/dev/null || true)"
+    if [ "$MOVED_PID" != "$LOCK_PID" ]; then
+      mv "$STALE_DIR" "$LOCK_DIR" 2>/dev/null || true
+      lock_fatal
+    fi
     rm -rf "$STALE_DIR"
     mkdir "$LOCK_DIR" 2>/dev/null || lock_fatal
   else
