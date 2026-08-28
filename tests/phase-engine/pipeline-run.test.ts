@@ -1365,18 +1365,21 @@ function armedWorkspace(): {
 } {
   const ws = workspace();
   const manifest = writeCodeManifest(ws.dir);
+  // One requestId per run: the same UUID is written into the witness brief
+  // and returned for --request-id (the sibling e2e suite matches the two).
+  const requestId = crypto.randomUUID();
   // The brief IS the cap witness (one file, two readers): it must satisfy the
   // ceiling reconciliation too, or the run refuses before the resident arms.
   fs.writeFileSync(
     path.join(ws.dir, "run-context.json"),
     JSON.stringify({
-      requestId: crypto.randomUUID(),
+      requestId,
       repoSlug: "qds/demo",
       issueId: 42,
       effectiveCeilingMicros: 250_000,
     }),
   );
-  return { ...ws, manifest, requestId: crypto.randomUUID() };
+  return { ...ws, manifest, requestId };
 }
 
 describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
@@ -1538,16 +1541,17 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
         ],
       }),
     );
+    // One requestId per run: the witness brief and --request-id agree.
+    const requestId = crypto.randomUUID();
     fs.writeFileSync(
       path.join(ws.dir, "run-context.json"),
       JSON.stringify({
-        requestId: crypto.randomUUID(),
+        requestId,
         repoSlug: "qds/demo",
         issueId: 42,
         effectiveCeilingMicros: 250_000,
       }),
     );
-    const requestId = crypto.randomUUID();
     const proc = spawnRunner(
       [
         "--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal,
@@ -1593,6 +1597,10 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     expect(solicits[0]?.directiveAction).toBe("select_roster");
     expect(solicits[0]?.accepted).toBe(true);
     expect(solicits[1]?.directiveAction).toBe("proceed");
+    // Round 7 / S1-1: run_end accepts proceed ONLY — this pin locks the one
+    // allowed run_end action into the accepted path (anything else would now
+    // be a counted rejection with a gate_bypass_attempt tripwire).
+    expect(solicits[1]?.accepted).toBe(true);
     expect(journal.resident?.status).toBe("active");
     expect(journal.resident?.directives).toBe(2);
     expect(journal.resident?.directivesRejected).toBe(0);

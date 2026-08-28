@@ -263,7 +263,11 @@ export function gatedBody<T>(
       const violations = report.violations;
       const checks = report.checks.map((c) => ({ ...c }));
       const gateReportMs = performance.now() - reportStarted;
+      // Round each term once; gate_ms then sums the ALREADY-ROUNDED values so
+      // a row always satisfies gate_ms === gate_exec_ms + gate_report_ms.
       // Sub-millisecond work may round to 0; that's observably accurate.
+      const gateExecMsRounded = Math.round(gateExecMs);
+      const gateReportMsRounded = Math.round(gateReportMs);
       journal.writeGateEvent({
         runId: bodyCtx.ctx.runId,
         phaseId: bodyCtx.phaseId,
@@ -272,13 +276,13 @@ export function gatedBody<T>(
         requestId: bodyCtx.ctx.requestId,
         phase: bodyCtx.params.name,
         attempt: opts?.attempt ?? 1,
-        gate_exec_ms: Math.round(gateExecMs),
-        gate_report_ms: Math.round(gateReportMs),
+        gate_exec_ms: gateExecMsRounded,
+        gate_report_ms: gateReportMsRounded,
         // Spec §Observability names `gate_ms`; the exec/report split above is
         // finer detail beneath it — same shape DF1.3's loop emits
         // (agents/retry.ts:253-255), so code-phase and agent-phase gate rows
         // carry the same field set.
-        gate_ms: Math.round(gateExecMs + gateReportMs),
+        gate_ms: gateExecMsRounded + gateReportMsRounded,
         violations,
         checks,
       });

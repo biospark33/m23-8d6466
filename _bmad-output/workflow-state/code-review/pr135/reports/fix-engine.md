@@ -46,3 +46,71 @@ No HIGH/CRITICAL warnings.
 - `bunx biome check src/phase-engine/steering.ts src/phase-engine/journal.ts` — clean, no fixes.
 
 No commits made.
+
+## Round 7
+
+Fixer: fix-engine. Cluster S1 (round-7 rows S1-1…S1-7). Scope touched:
+`src/phase-engine/steering.ts`, `src/phase-engine/gates/library.ts`,
+`tests/phase-engine/steering.test.ts`. `usage.test.ts` and
+`fixtures/fake-resident.ts` needed no changes (see S1-6/S1-7 — both fixes
+landed in steering.test.ts).
+
+Impact analysis: gitnexus MCP tools are NOT available in this fixer
+environment, so per-symbol `impact()` could not be run. Substitute: grep-based
+caller enumeration —
+- `createSteering` / `SteeringController.telemetry`: only caller is
+  `scripts/pipeline-run.ts` (`:765,:791-792` read `.telemetry.directives` /
+  `.spendMicros`; `:1653-1655` spread-copies it) plus tests. All read-only;
+  none depend on live mutation or object identity.
+- `SteeringDirectiveSchema`: re-exported by `src/phase-engine/index.ts:102`,
+  consumed by steering.ts internally and steering.test.ts. `.max()` is
+  type-transparent.
+- `gatedBody` (library.ts): barrel export only; arithmetic change is internal
+  to the emitted gate row.
+`src/fleet/resident.ts` imports only `SOLICIT_TIMEOUT_MS` + the
+`ResidentCaller` type from steering.ts — unaffected.
+
+| # | sev | verdict | verified-at → change |
+|---|-----|---------|----------------------|
+| S1-1 | HIGH | **patched — INTENTIONAL BEHAVIOR CHANGE** | Verified: `solicitSerialized` counted any schema-valid directive in `telemetry.directives` and returned it regardless of point (old steering.ts:357-367). Solicitation points confirmed from source: `run_start` (pipeline-run.ts:1702, applies abort + select_roster, :1709-1713), `post_gate_failure` (:921, applies abort + retry, :931-963), `run_end` (:1786, report-only — run already settled at :1771). New `POINT_ALLOWLIST` (steering.ts:78-91): run_start = proceed/abort/select_roster, post_gate_failure = proceed/retry/abort, run_end = **proceed only**. Off-point kinds take the `reject()` path BEFORE `telemetry.directives` increments (steering.ts:394-400): counted rejected, `gate_bypass_attempt` tripwire, PROCEED returned. select_roster stays allowed at run_start (legitimately solicited there — rosterIds/phaseIds wired at pipeline-run.ts:1705-1706). |
+| S1-2 | MED | **patched — telemetry change** | Verified: `gate_ms: Math.round(gateExecMs + gateReportMs)` (old library.ts:281) could disagree with the rounded siblings by ±1. Now rounds each term once into `gateExecMsRounded`/`gateReportMsRounded` and sums the rounded values (library.ts:267-285): every row satisfies `gate_ms === gate_exec_ms + gate_report_ms`. No test pinned the old arithmetic (grep of tests/ for `gate_ms`: only trace/wiring.test.ts:275-276, which pins exec/report constants for journal-bridge — untouched). NOTE: `src/phase-engine/agents/retry.ts:251-255` has the same rounds-the-sum pattern — outside my cluster, flagged for its owner. |
+| S1-3 | LOW | **patched** | Verified: guidance/reason/note/rosterId/phase were bare `z.string()` (old steering.ts:41-51). New ceilings (steering.ts:29-35): `DIRECTIVE_TEXT_CHAR_CEILING = 4_000` on guidance/reason/note, `DIRECTIVE_ID_CHAR_CEILING = 256` on rosterId/phase. Over-ceiling fails `safeParse` → existing schema-rejection path (single attempt, counted rejected, tripwire) — NOT the malformed-retry path; that is the fail-closed route the finding asked for. usage.test.ts's two-`/ 1_000_000` pin on steering.ts unaffected. |
+| S1-4 | LOW | **patched** | Verified: `renderPrompt(point, ctx)` ran outside any try/catch (old steering.ts:298); a non-array `promptContext` threw through the never-throws contract. Now wrapped (steering.ts:341-354): a render throw degrades like a call failure — `status = "degraded"`, sanitized `lastDegradationReason` (`"prompt render failed: …"`), PROCEED, caller never invoked. |
+| S1-5 | LOW | **patched** | Verified: controller returned the live `telemetry` instance (old steering.ts:372). Now a snapshot getter (steering.ts:432-443): shallow copy + copied `steeringIterations` and per-row-copied `tripwires`. Internal writes still target the private instance; interface doc updated (steering.ts:139-142). Callers verified read-only (grep above): pipeline-run.ts's `directivesBefore`/after comparison compares two snapshots taken at their read times — semantics unchanged. |
+| S1-6 | MED | **patched (test honesty)** | Verified: `big = MAX_VALUE/2` × rate `2e6` overflows to Infinity BEFORE the ÷1e6, so the test tripped the per-term guard, not the sum guard. Renamed/recommented (steering.test.ts:604-623) as a second per-term overflow case; assertions unchanged (still pin finite preservation). Sum guard kept in source as defense-in-depth with a comment saying it has no direct test (steering.ts:292-296). |
+| S1-7 | INFO | **patched** | Verified: fixture smoke piped stderr but never drained it (old steering.test.ts:628). Now drained in the same `Promise.all` and asserted empty on the success path (steering.test.ts:745-754). `usage.test.ts` / `fake-resident.ts` unmodified — the finding's fix location was the test's drain, not the fixture. |
+
+### Intentional behavior changes (wave-2 test fixer, re-pin accordingly)
+
+1. **Off-point directives are now rejections, not acceptances.** Concrete
+   flips: `retry` at run_start/run_end; `select_roster` at
+   post_gate_failure/run_end (even when rosterIds/phaseIds ARE present —
+   allowlist fires before the closed-set checks, so the tripwire detail is now
+   `action select_roster has no steering effect at <point>`, NOT
+   `rosterId outside closed roster set`); `abort` at run_end. All counted in
+   `directivesRejected` with a `gate_bypass_attempt` tripwire; PROCEED
+   returned. Steering.test.ts pins added in the new
+   "S1-1 — per-point allowlist" describe; the old
+   "retry accepted at run_start counts in directives" pin was inverted.
+   pipeline-run.ts:1798's run_end `directive.action !== "proceed"` trace
+   branch is now unreachable (harmless; pipeline owner may simplify).
+2. **Over-ceiling directive strings (>4000 text, >256 id) are schema
+   rejections** — previously accepted. A ≥4001-char guidance that was
+   previously accepted and pushed into promptContext now rejects.
+3. **`gate_ms` may shift by ±1** on rows where the unrounded sum straddled a
+   rounding boundary; it now always equals `gate_exec_ms + gate_report_ms`.
+4. **`controller.telemetry` identity changed**: each access returns a fresh
+   snapshot. Code holding a telemetry reference across solicitations no longer
+   sees updates through it (verified: no such caller in src/ or scripts/).
+5. **Malformed harness ctx** (e.g. non-array promptContext) now degrades the
+   resident (sticky, like a call failure) instead of rejecting solicit()'s
+   promise.
+
+### Gate results
+
+- `bun test tests/phase-engine/steering.test.ts tests/phase-engine/usage.test.ts tests/phase-engine/gates.test.ts` — **87 pass, 0 fail** (steering 49, usage 12, gates 26; 5 new steering pins, 1 inverted).
+- Collateral (behavior-change blast radius): `bun test tests/phase-engine/pipeline-run.test.ts tests/phase-engine/retry.test.ts tests/phase-engine/trace/` — **168 pass, 0 fail**; `bun test tests/phase-engine/resident-e2e.test.ts` — **12 pass, 0 fail**.
+- `bunx biome check src/phase-engine/steering.ts src/phase-engine/gates/library.ts tests/phase-engine/steering.test.ts tests/phase-engine/usage.test.ts tests/phase-engine/fixtures/fake-resident.ts` — clean, no fixes.
+- `bunx tsc --noEmit` — clean.
+
+No commits, no staging.

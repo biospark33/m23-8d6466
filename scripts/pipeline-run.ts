@@ -615,9 +615,10 @@ const RESIDENT_CREDENTIAL_VALUE = [
 const RESIDENT_BRIEF_MAX_DEPTH = 32;
 
 function assertNoResidentCredentials(brief: Record<string, unknown>, where = "brief", depth = 0): void {
-  if (depth > RESIDENT_BRIEF_MAX_DEPTH) {
-    throw new Error(`resident brief refused: nesting deeper than ${RESIDENT_BRIEF_MAX_DEPTH} levels at ${where}`);
-  }
+  // The depth guard lives in the value walk below, not here: a guard at this
+  // entry never fires for a PURE nested-array chain (arrays recurse through
+  // assertNoResidentCredentialValue only), which was exactly the documented
+  // ~10⁴-array RangeError case the cap exists to refuse cleanly.
   for (const [k, v] of Object.entries(brief)) {
     // Field-name checks stay scoped to meaningful object field names — an
     // array INDEX ("0", "1") is never a credential-shaped name.
@@ -631,18 +632,28 @@ function assertNoResidentCredentials(brief: Record<string, unknown>, where = "br
 /** The value half of the scan, shared by object properties and array elements:
  *  a credential-shaped string refuses anywhere it appears, and objects nest.
  *  Arrays are traversed element-wise — `[\"sk-…\"]` must not slip past a
- *  properties-only walk. */
+ *  properties-only walk.
+ *
+ *  The nesting guard lives HERE, charged once per container — array OR
+ *  object — on entry, so RESIDENT_BRIEF_MAX_DEPTH counts real nesting levels.
+ *  The earlier split charged the array branch and then the object branch
+ *  again (~2 per level for alternating nesting, an effective cap of ~16
+ *  against the documented 32) and, worse, never fired at all on a pure
+ *  nested-array chain — see assertNoResidentCredentials. */
 function assertNoResidentCredentialValue(v: unknown, where: string, depth: number): void {
   if (typeof v === "string" && RESIDENT_CREDENTIAL_VALUE.some((re) => re.test(v))) {
     throw new Error(`resident brief refused: credential-shaped value at ${where}`);
   }
+  if (v === null || typeof v !== "object") return;
+  const nested = depth + 1;
+  if (nested > RESIDENT_BRIEF_MAX_DEPTH) {
+    throw new Error(`resident brief refused: nesting deeper than ${RESIDENT_BRIEF_MAX_DEPTH} levels at ${where}`);
+  }
   if (Array.isArray(v)) {
-    v.forEach((el, i) => assertNoResidentCredentialValue(el, `${where}[${i}]`, depth + 1));
+    v.forEach((el, i) => assertNoResidentCredentialValue(el, `${where}[${i}]`, nested));
     return;
   }
-  if (v !== null && typeof v === "object") {
-    assertNoResidentCredentials(v as Record<string, unknown>, where, depth + 1);
-  }
+  assertNoResidentCredentials(v as Record<string, unknown>, where, nested);
 }
 
 /**
@@ -670,9 +681,12 @@ interface ResidentHooks {
    *  (AC2). Every other point omits it, so a select_roster there hits
    *  steering.ts's fail-closed empty-set rejection and is tripwire-recorded. */
   rosterIds: readonly string[];
-  /** Every phase name in the manifest — wired into every SolicitCtx so
-   *  steering.ts can validate a select_roster directive's `phase` against the
-   *  closed set (the port-side check is S1-5's). */
+  /** The manifest's DISPATCH_TASK phase names — the only phases a roster pick
+   *  can ever apply to — wired into every SolicitCtx so steering.ts can
+   *  validate a select_roster directive's `phase` against the closed set (the
+   *  port-side check is S1-5's). Advertising every manifest phase name counted
+   *  a pick naming a code phase as accepted yet structurally unconsumable
+   *  (S3-2). */
   phaseIds: readonly string[];
   /** The armed slug — the resident_solicit line's `model` field (Observability
    *  Contract; D4's spend-per-model eval). */
@@ -746,11 +760,13 @@ function residentContextLines(
 }
 
 /**
- * The runner's SolicitCtx plus the run's closed phase-name set. `phaseIds`
- * rides every solicitation so steering.ts can fail-close a select_roster
- * whose `phase` names no manifest phase (the port-side validation is S1-5's);
- * typed as an intersection here so this wiring compiles against a port that
- * has not declared the field yet — passing it through is excess-property-free.
+ * The runner's SolicitCtx plus the run's closed DISPATCH_TASK phase-name set.
+ * `phaseIds` rides every solicitation so steering.ts can fail-close a
+ * select_roster whose `phase` names no dispatch_task phase (the port-side
+ * validation is S1-5's; only dispatch_task phases ever consume a pick, so
+ * those are the only names advertised — S3-2). Kept as an intersection so
+ * this wiring stays excess-property-free even against a port build that
+ * pre-dates the field.
  */
 type RunnerSolicitCtx = SolicitCtx & { phaseIds?: readonly string[] };
 
@@ -770,7 +786,34 @@ async function solicitResident(
   let directive: SteeringDirective;
   try {
     directive = await steering.solicit(point, ctx);
-  } catch {
+  } catch (err) {
+    // The port's never-throws contract failed, so the deterministic default
+    // below is the only safe landing (INV-RES-5) — but any spend the attempt
+    // accrued still sits in telemetry, and skipping the observability line
+    // would leave that spend with no solicitation to account for. Emit the
+    // line with accepted:false and the error before defaulting.
+    try {
+      writeAll(
+        2,
+        `${JSON.stringify({
+          level: "warn",
+          event: "resident_solicit",
+          runId: ctx.runId,
+          requestId: ctx.requestId ?? null,
+          phase: ctx.phase ?? null,
+          point,
+          directiveAction: "proceed",
+          model,
+          accepted: false,
+          // CUMULATIVE running total — see the success line below.
+          spendMicros: steering.telemetry.spendMicros,
+          durationMs: Math.round(performance.now() - started),
+          error: sanitizeForMessage(err instanceof Error ? err.message : String(err)),
+        })}\n`,
+      );
+    } catch {
+      /* observability is a sidecar; the deterministic default is the payload */
+    }
     return { action: "proceed" };
   }
   try {
@@ -789,6 +832,11 @@ async function solicitResident(
         // Accepted := the accepted-directive COUNT moved — a schema-rejected
         // reply also changes telemetry, but it was never accepted.
         accepted: steering.telemetry.directives > directivesBefore,
+        // CUMULATIVE running total of the run's steering spend (steering's
+        // telemetry is a live accumulator), NOT this solicitation's delta:
+        // consumers diff successive lines — summing them double-counts. The
+        // field keeps its name; renaming it would break every existing
+        // consumer (S3-6).
         spendMicros: steering.telemetry.spendMicros,
         durationMs: Math.round(performance.now() - started),
       })}\n`,
@@ -898,10 +946,12 @@ function makeBodyFactory(
               { attempt },
             )(base)(bodyCtx);
           } catch (err) {
-            // An aborted body is a SETTLED run: the terminal marker may already
-            // be on disk (maxDurationMs overflow or run.terminate), so no
-            // post-settlement zombie may re-run the command, re-solicit the
-            // resident, or write journal rows after it.
+            // An aborted body belongs to a TERMINATED run: run.terminate has
+            // flipped the engine's halted state and aborted this signal (the
+            // terminal marker itself is written only by Run.finish, at the end
+            // of the unwind this throw feeds), so no post-termination zombie
+            // may re-run the command, re-solicit the resident, or write
+            // journal rows past the abort.
             if (bodyCtx.signal.aborted) throw err;
             if (!(err instanceof GateFailureError) || attempt > spec.retries) throw err;
             // DF1.3 authorized attempt N+1 (the branch at
@@ -928,6 +978,15 @@ function makeBodyFactory(
               phaseIds: resident.phaseIds,
               promptContext: resident.promptContext,
             }, resident.model);
+            // The solicitation is an await: a signal landing mid-solicit
+            // aborts bodyCtx.signal UNDER us (run.terminate), the stopped
+            // resident degrades the reply to a resolved PROCEED, and
+            // runCommand's exit path RESOLVES on a kill ({exitCode: 128}) —
+            // without this re-check the loop would respawn the command on an
+            // already-terminated run and the gate would write a phantom
+            // gate_fail row for attempt N+1. Unwind through the same path as
+            // the catch-entry guard above; nothing is journaled on it.
+            if (bodyCtx.signal.aborted) throw err;
             if (directive.action === "abort") {
               // The engine's own fail transition: the authorized retry is
               // declined and the caught GateFailureError settles the phase.
@@ -994,10 +1053,11 @@ function makeBodyFactory(
       const body = dispatchTask(spec, { tracer, requestId, rootDir: cwd });
       // DF3.3: an accepted run_start select_roster pick applies to the
       // dispatch_task phase the directive NAMED (`directive.phase` —
-      // validated against the manifest's closed phase set by steering.ts),
-      // never blindly to the next one: closedRosterIds unions role names
-      // across ALL dispatch_task rosters, so a pick naming a role from phase
-      // 2's roster must not "apply" to phase 1 running a different roster.
+      // validated against the run's closed DISPATCH_TASK phase set by
+      // steering.ts, S3-2), never blindly to the next one: closedRosterIds
+      // unions role names across ALL dispatch_task rosters, so a pick naming
+      // a role from phase 2's roster must not "apply" to phase 1 running a
+      // different roster.
       // A mismatching phase leaves the pick pending for its own phase and
       // traces the skip. DRIFT (SOURCE-vs-spec): dispatchTask (DF1.6) exposes
       // no roster override on its deps, so the application here is the
@@ -1532,8 +1592,9 @@ async function main(argv: readonly string[]): Promise<number> {
   // credential shape refuses the run BEFORE any spawn — a manifest is already
   // scanned for exactly this (manifest.ts's INV-4 walk), and the brief reaches
   // a THIRD party's prompt, which is worse. The refusal names the field, never
-  // the value. Fail-safe: the scan runs on ANY successfully parsed brief,
-  // armed or not — gating the refusal on arming let a poisoned brief slide
+  // the value. Fail-safe: the scan runs on any brief this run actually READS
+  // (--no-resident never reads one, so there is nothing to scan), armed or
+  // not — gating the refusal on arming let a poisoned brief slide
   // through exactly the run where nobody was listening. Guarded like the
   // cap-reconciliation refusal: the tracer's session is already open, so
   // throwing without the close leaks the WAL handle and leaves an unfinished
@@ -1555,18 +1616,52 @@ async function main(argv: readonly string[]): Promise<number> {
     manifest,
     residentBrief ?? {},
   );
+  // The closed set steering.ts validates a select_roster directive's `phase`
+  // against — DISPATCH_TASK names only: a code/engineer/agent phase can never
+  // consume a pick, so advertising its name counted an impossible pick as
+  // accepted and left it pending until the never-consumed trace (S3-2).
+  const dispatchPhaseNames = manifest.phases
+    .filter((p) => p.kind === "dispatch_task")
+    .map((p) => p.name);
+  // S3-7: the manifest schema has no dup-name check, and duplicate
+  // dispatch_task phase names make roster-pick routing first-match AMBIGUOUS
+  // (the runner applies a pick to the FIRST phase of that name). Fail-safe in
+  // INV-RES-5's direction: refuse to arm ROSTER steering — the advertised id
+  // and phase sets below go EMPTY, so every select_roster hits steering.ts's
+  // fail-closed rejection — while the resident still arms for retry/abort
+  // guidance. The cause lands on stderr next to the arming step.
+  const duplicateDispatchPhaseNames = [
+    ...new Set(dispatchPhaseNames.filter((n, i) => dispatchPhaseNames.indexOf(n) !== i)),
+  ];
+  const rosterSteeringEnabled = duplicateDispatchPhaseNames.length === 0;
   // DF1.5's closed id set for select_roster, computed ONCE and advertised only
   // on the run_start solicitation (AC2 at the wiring level; steering.ts
   // rejects outside it — an absent set elsewhere is the fail-closed empty set).
-  const rosterIds = closedRosterIds(manifest.phases, runRoot);
-  // Every manifest phase name — wired into every SolicitCtx so steering.ts
-  // can validate a select_roster directive's `phase` against the closed set.
-  const phaseIds = manifest.phases.map((p) => p.name);
+  const rosterIds = rosterSteeringEnabled ? closedRosterIds(manifest.phases, runRoot) : [];
+  const phaseIds = rosterSteeringEnabled ? dispatchPhaseNames : [];
   const rosterChoice: { pending?: { rosterId: string; phase: string } } = {};
   // The slug startResident arms with (main passes no override). The
   // resident_solicit observability line carries it as `model` — D4's
   // month-1 spend-per-model eval keys on it.
   const residentModel = DEFAULT_RESIDENT_SLUG;
+  if (residentArmed && !rosterSteeringEnabled) {
+    // The S3-7 refusal is visible, not silent — same sidecar discipline as the
+    // RateError path below: the run proceeds deterministically for everything
+    // except roster picks, and the operator gets the offending names (never
+    // roster content) to fix the manifest.
+    writeAll(
+      2,
+      `${JSON.stringify({
+        level: "error",
+        event: "resident_roster_steering_disabled",
+        runId,
+        requestId,
+        model: residentModel,
+        reason: "duplicate_dispatch_phase_names",
+        detail: `duplicate dispatch_task phase names make roster-pick routing first-match ambiguous: ${duplicateDispatchPhaseNames.map((n) => sanitizeForMessage(n)).join(", ")}`,
+      })}\n`,
+    );
+  }
   let steering: SteeringController | undefined;
   if (residentArmed && residentBrief !== undefined) {
     let spawned: ReturnType<typeof startResident> | undefined;
@@ -1633,8 +1728,10 @@ async function main(argv: readonly string[]): Promise<number> {
 
   // The resident telemetry snapshot: steering's live counts on resident legs,
   // the explicit "disabled" shape otherwise (AC4/AC5 — status is never absent
-  // on a settled run). Seeded BEFORE the walk and refreshed in the finally
-  // after the resident is stopped.
+  // on a settled run). Seeded BEFORE the walk, refreshed once right after
+  // run.finish (the terminal marker makes the journal readable as settled, so
+  // the seed's zeros must not cover the run_end window — S3-3), and refreshed
+  // a final time in the finally after the resident is stopped.
   const residentTelemetryOf = (): ResidentTelemetry =>
     steering === undefined
       ? {
@@ -1709,7 +1806,33 @@ async function main(argv: readonly string[]): Promise<number> {
       if (directive.action === "abort") {
         residentAborted = true;
       } else if (directive.action === "select_roster") {
-        rosterChoice.pending = { rosterId: directive.rosterId, phase: directive.phase };
+        // Wiring-layer recheck (S3-2): steering.ts already validated the
+        // pick's phase against the advertised dispatch_task set, but this
+        // runner is the composition root and must not bank a pick no
+        // dispatch_task phase can consume — an engine that skipped validation
+        // would otherwise count it accepted and leave it pending until the
+        // never-consumed trace. Reject BEFORE pending is set, traced like the
+        // never-consumed path below.
+        if (phaseIds.includes(directive.phase)) {
+          rosterChoice.pending = { rosterId: directive.rosterId, phase: directive.phase };
+        } else {
+          try {
+            tracer.trace({
+              type: "log",
+              name: "residentRosterChoice",
+              requestId,
+              payloadJson: JSON.stringify({
+                runId,
+                rosterId: directive.rosterId,
+                phase: directive.phase,
+                applied: false,
+                reason: "rejected at the wiring layer — phase is not a dispatch_task phase this run advertises",
+              }),
+            });
+          } catch {
+            /* the trace store is a sidecar; the run owns the verdict */
+          }
+        }
       }
       // An accepted run_start directive is counted in telemetry; record WHAT
       // was accepted, as the post-gate abort/retry rows do (a bare proceed
@@ -1777,6 +1900,22 @@ async function main(argv: readonly string[]): Promise<number> {
     settledExitCode = result.exitCode;
     runSettled = true;
 
+    // S3-3: the resident block on disk is still the pre-walk seed, and
+    // run.finish just wrote the terminal marker — a marker-time reader would
+    // see a SETTLED journal with zeroed resident telemetry for the whole
+    // run_end window below. Refresh it here, guarded exactly like the finally
+    // refresh (a failing write must not downgrade a settled run), which still
+    // writes the final block with run_end's directive and the resident's own
+    // exitStatus.
+    try {
+      innerJournal.writeResident(residentTelemetryOf());
+    } catch (err) {
+      writeAll(
+        2,
+        `pipeline-run: resident telemetry write failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+
     // DF3.3 solicitation point 3 of 3: run end — after finish(accepted), report
     // text only. Skipped when a directive aborted the run (abort stops the
     // resident conversation too) and when the run was TERMINATED: the operator
@@ -1837,14 +1976,12 @@ async function main(argv: readonly string[]): Promise<number> {
       /* the terminal marker is the commitment, not the trace close */
     }
 
-    // Written straight to fd 1 so the banner is on disk before the exit below, and
-    // non-fatally: the run is already settled and its marker written, so an EPIPE
-    // on stdout must not downgrade a settled run to "never settled".
-    try {
-      writeAll(1, `${result.banner}\n`);
-    } catch {
-      /* the marker is the commitment, not stdout */
-    }
+    // Written straight to fd 1 so the banner is on disk before the exit below.
+    // No guard needed: writeAll swallows write errors itself (a dropped tail
+    // lands in droppedWriteBytes, never a throw), so an EPIPE on stdout cannot
+    // downgrade the settled run to "never settled" — the marker is the
+    // commitment, not stdout.
+    writeAll(1, `${result.banner}\n`);
     return result.exitCode;
   } finally {
     // Ownership: the runner spawned the resident, so the runner stops it —

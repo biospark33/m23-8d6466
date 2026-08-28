@@ -21,6 +21,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import type { readJournal } from "./journal-test-util.ts";
+import { EXIT_STATUSES } from "../../cli-anything/src/types.ts";
 import { CORE_FIELDS } from "../../src/providers/run-record.ts";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
@@ -394,6 +395,15 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
     // call rounds to 80 + 12 = 92 µ$, three calls = 276 (D7 — the meter is
     // pinned, not merely typed).
     expect(r?.spendMicros).toBe(276);
+    // CC-1 enum membership (AC5 DOD): the journaled exitStatus must parse
+    // against the closed 5-value taxonomy — a regression writing e.g. "ok"
+    // would pass a mere null-or-string type check. All three calls in this
+    // run succeeded, so the value is pinned as well as parsed. (Widened to
+    // unknown[] only so the nullable read-side view typechecks against the
+    // const tuple; the runtime comparison is unchanged.)
+    const cc1: readonly unknown[] = EXIT_STATUSES;
+    expect(cc1).toContain(r?.exitStatus);
+    expect(r?.exitStatus).toBe("success");
 
     // §5.2 / DOD-Security: every prompt and raw reply persisted PRE-EXECUTION,
     // redacted, beside the journal — 3 solicited points => 3 prompts + 3 replies.
@@ -744,6 +754,14 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
       expect(invocations()).toBe(3);
 
       proc.kill("SIGINT");
+      // Start the drains BEFORE the exit poll (W2-4): piped-but-undrained
+      // fds deadlock at the 64KB pipe buffer, so a burst between signal and
+      // exit would deadlock the runner into the 30s timeout below — the same
+      // concurrent Promise.all shape runLeg uses.
+      const drained = Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
       // Poll-until-exit with a generous bound, not a wall-clock pin: between
       // signal and exit the runner does a SIGKILL + await, a journal flush
       // (write+fsync+rename), a SQLite checkpoint/close and the banner write —
@@ -756,10 +774,7 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
       while (proc.exitCode === null && proc.signalCode === null && Date.now() < exitDeadline) {
         await Bun.sleep(50);
       }
-      const [, stderr] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-      ]);
+      const [, stderr] = await drained;
       // Prompt exit: the stop→degrade→cleanup chain, not a 600 s timeout.
       // The run settled ok BEFORE the signal; a signal aimed at telemetry must
       // not rewrite a settled verdict — the normal path returns finish's code.
@@ -784,6 +799,19 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
       expect(stderr).not.toContain("again — exiting immediately");
     } finally {
       if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+      // W2-1 backstop: on a regression where the runner fails to kill the
+      // hung fake-pi child, killing only the runner would orphan the
+      // grandchild (its 600s sleep outlives the suite). Reap it by its
+      // unique argv marker — this test's own session path, which resident.ts
+      // puts on the pi child's command line as `--session <path>` and which
+      // appears on no unrelated process's command line (the runner's own
+      // argv carries the run ROOT, never this file). pkill's no-match exit
+      // (1) is the normal path: the runner's stop already killed the child.
+      Bun.spawnSync({
+        cmd: ["pkill", "-KILL", "-f", sessionPath],
+        stdout: "ignore",
+        stderr: "ignore",
+      });
       fs.rmSync(stateFile(dir), { force: true });
     }
   }, 60_000);
@@ -813,6 +841,12 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
       phases: [],
       gateEvents: [],
     });
+    // toEqual ignores undefined-valued keys, so `resident: undefined` would
+    // pass the shape above — pin the CLOSED key set (the telemetry-boundary
+    // leg's idiom) to prove the block is absent, not merely undefined.
+    expect(Object.keys(leg.journal).sort()).toEqual([
+      "gateEvents", "ok", "phases", "runId", "version",
+    ]);
   }, 60_000);
 });
 

@@ -341,6 +341,12 @@ host models.json).
    lines carry all other contract fields. Follow-up: surface the slug for log parity.
 8. Rate-source host variance: this host lacks pi's bundled catalog; e2e uses the
    `QDS_PI_CATALOG_DIR` seam (validate.test.ts:279 precedent). In-box images carry the catalog.
+9. Resident slug sourcing (round-7 audit): the DOD wording "roster-driven" is half-met — the
+   RATE path is genuinely DF1.5 (`resolveRate` over models.json, refusal pre-spawn), but the
+   SLUG is the pinned constant `DEFAULT_RESIDENT_SLUG` (resident.ts) with a `slug?` override;
+   no roster in `config/rosters/` defines a `resident` role and nothing reads one.
+   wave0-spec.md re-specified the constant; roster-role sourcing is deferred to the story
+   that owns the roster schema.
 
 **Gates:** steering 25/25, resident 18/18, resident-e2e 6/6, pipeline-run regression 36/36,
 phase-lifecycle 32/32; tsc --noEmit 0 project-wide; biome clean on all touched files; GitNexus
@@ -573,6 +579,50 @@ Test hardening (wave 2):
 Headliners: "per-term Math.round zeroes spend" (rates are integer µ$/MTok via toMicrosPerMTok — DD-9 — and per-term round is the spec'd exact arithmetic, story :267-268); "engine retry double-authorizes gated bodies" (runAgentPhase has zero callers; Run.phase invokes the body once); "--no-resident changes existing manifests" (no manifest outside this PR's fixtures declares a code-phase testCommand); writeResident twice-call (deliberate seed+refresh); ResidentStatus union (shared journal contract, AC5); team-lead-driver import (import.meta.main-guarded); runId uniqueness (crypto.randomUUID default); tokenizeArgs parity (verified equivalent).
 
 **Round-5 gates:** full suite 3782 pass / 8 skip / 18 todo / **1 fail = pre-existing environmental**: `tests/gitnexus/graph-queries.test.ts` impact-schema assertion fails because the installed gitnexus CLI's `impact` payload no longer carries `filePath`/`affected_processes`/`affected_modules` (tooling-version drift; index freshly reindexed to HEAD d15f0ca via `scripts/install-gitnexus-plus.sh`, failure stable in isolation ×3 and independent of this diff — the test reads the committed-state index, which the round-5 working-tree changes cannot affect). All 106 DF3.3 focal tests green. biome clean on all touched files; tsc --noEmit exit 0; GitNexus detect_changes: 15 files / 59 symbols, HIGH-as-feature-blast-radius, every changed symbol inside DF3.3's own modules (pipeline-run, steering, resident, journal, gates/library + tests) — no out-of-scope process affected.
+
+## Review Findings — Round 7 (bmad-code-review, 2026-08-28)
+
+7-layer adversarial review (3 blind, 3 edge-case, 1 acceptance auditor) on 7 chunked diffs
+(521–1175 lines each; evidence/research/prior-review artifacts excluded); 39 raw findings →
+33 unique after cross-layer dedupe → 27 patched / 3 deferred / 3 dismissed (dismissals verified
+against source first). Ledger: `_bmad-output/workflow-state/code-review/pr135/triage.md`
+(round-7); per-agent reports under `.../pr135/reports/` (`fix-engine.md`, `fix-fleet.md`,
+`fix-pipeline.md` round-7 sections; `fix-tests-e2e.md`, `fix-tests-pipeline.md`).
+
+### Patched (all fixed, checked off)
+
+- [x] Review/Patch: per-point directive allowlist in the engine — `run_end` is proceed-only, `select_roster` only at run_start, `retry` only at post_gate_failure; off-point kinds fail closed via reject() before telemetry counts them [S1-1, src/phase-engine/steering.ts]
+- [x] Review/Patch: signal-quarantine hoisted — stop()/external SIGKILL now quarantines a possibly-torn session jsonl, not just timeout kills [S2-1, src/fleet/resident.ts]
+- [x] Review/Patch: abort re-check immediately after post-gate solicitation — closes the one-zombie-retry window (phantom gate_fail row after run.terminate) [S3-1, scripts/pipeline-run.ts]
+- [x] Review/Patch: select_roster phaseIds narrowed to dispatch_task phases + wiring-level recheck; code-phase/finished-phase picks now fail closed instead of accepted-never-consumed [S3-2, scripts/pipeline-run.ts]
+- [x] Review/Patch: exitStatus() no longer fabricates "logic" on pre-spawn refusals (prompt-too-big, spawn-ENOENT) — null until a process actually ran [S2-3, src/fleet/resident.ts]
+- [x] Review/Patch: bounded stdout/stderr collectors (4 MiB / 1 MiB) — flood kills the child, quarantines the session, classifies "logic" [S2-4]
+- [x] Review/Patch: once-only session-path enforcement across startResident instances (module-level live set) [S2-5]
+- [x] Review/Patch: persistArtifact removes stale lax-mode .tmp before write [S2-2]; spawn error wrapped through redact() [S2-7]; timeout discriminator gated on timeoutMs > 25 [S2-6]; exitCode 137 treated as signal death [S2-10]; empty/whitespace prompt refused pre-spawn [S2-9]; "transient includes planned stop()" documented (CC-1 enum unwidenable) [S2-8]
+- [x] Review/Patch: gate_ms derived from rounded components (row-internal consistency) [S1-2, src/phase-engine/gates/library.ts]; directive free-text fields capped (4k text / 256 id) [S1-3]; renderPrompt throw degrades to PROCEED per never-throws contract [S1-4]; telemetry handed out as snapshot, not the live instance [S1-5]
+- [x] Review/Patch: journal resident block refreshed right after run.finish (marker-time readers no longer see zeroed telemetry during run_end) [S3-3]; thrown solicitation emits a warn-level resident_solicit line with error field [S3-4]; credential-scan depth charged once per nesting level (pure-array chains were unguarded) [S3-5]; cumulative spendMicros documented at emission sites [S3-6]; duplicate dispatch-phase names disable roster steering fail-safe with a stderr event [S3-7]; three stale/overclaiming comments corrected [S3-8/9/10]
+- [x] Review/Patch (tests): overflow test honestly recommented as per-term (sum guard kept as defense-in-depth) [S1-6]; fixture smoke drains stderr [S1-7]; no-persistDir test asserts the dir listing [S2-12]; SIGINT leg reaps the fake-pi grandchild + drains before exit-poll [W2-1/W2-4]; closed-key assertion pins "no resident block" [W2-3]; journaled exitStatus asserted against the CC-1 enum (EXIT_STATUSES) and pinned "success" in the demo leg [W2-5]; armedWorkspace uses one requestId for brief + --request-id [W2-2]; run_end leg pins accepted:true on the proceed path
+
+### Deferred (real, not this round)
+
+- [x] Review/Defer: degradation routes leave no countable telemetry field — the resident journal block is AC5's closed key set; adding a counter is spec drift. Recorded here for the story that owns the journal contract [S1-8]
+- [x] Review/Defer: child env allowlist omits CA-cert/locale vars — deliberate minimal allowlist (round-5 S2-4); `QDS_RESIDENT_ENV_PASSTHROUGH` is the documented escape hatch [S2-11]
+- [x] Review/Defer: pipeline-run.test.ts legs keep "budget 120s > timeout 60s, no kill backstop" — PRE-EXISTING file-wide convention, not a regression [W2-6]
+
+### Dismissed as false positives (3, evidence in triage.md / reports/)
+
+- "phaseIds is an undeclared excess property silently ignored" — it IS declared on the port at steering.ts:70 with `absent = empty set = reject` (fail-closed).
+- "every schema rejection tripwired as gate_bypass_attempt over-reports" — documented closed-cause-union constraint; DF3.6 owns widening the union.
+- "AC1a byte-identity tested as deep-equality" — deliberate round-2 decision, documented in the test comment.
+
+### Auditor close-out
+
+- [x] Deviation ledger entry #9 added: resident slug sourcing is a pinned constant, not roster-driven (rate path IS roster-sourced); story text now honest [C-1]
+- AC coverage re-audited: all five ACs implemented and pinned by tests with live negative controls; telemetry boundary intact (zero ratio/share fields, DF2.1 record untouched); exitStatus imported from CC-1, never re-declared; no scope creep.
+
+**Round-7 gates:** focal suites `bun test tests/phase-engine tests/fleet` 1315 pass / 0 fail / 16 todo; biome clean on all touched files; tsc --noEmit exit 0; GitNexus detect_changes (unstaged): changed symbols confined to the PR's own modules (pipeline-run, steering, resident, gates/library + their tests) — no out-of-scope process affected.
+
+**Status:** review round 7 complete — all findings resolved (27 patched, 3 deferred with rationale, 3 dismissed with evidence).
 
 ## Hardening Revision — 2026-08-20
 

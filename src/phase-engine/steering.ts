@@ -26,6 +26,13 @@ export const MAX_OUTPUT_TOKENS = 1_024;
 export const SOLICIT_TIMEOUT_MS = 60_000;
 /** Two consecutive malformed replies → degrade. Never a third call (AC3). */
 export const MAX_MALFORMED_ATTEMPTS = 2;
+/** Free-text directive field ceiling: accepted guidance is pushed into
+ *  promptContext and rides every later solicitation for the run's lifetime,
+ *  so a directive string needs its own bound well under PROMPT_CHAR_CEILING.
+ *  An over-ceiling field fails schema parse and takes the rejection path. */
+export const DIRECTIVE_TEXT_CHAR_CEILING = 4_000;
+/** Roster/phase ids are harness-minted slugs; 256 chars is generous headroom. */
+export const DIRECTIVE_ID_CHAR_CEILING = 256;
 
 /** The three engine-owned solicitation points — there is no fourth. */
 export type SteeringPoint = "run_start" | "post_gate_failure" | "run_end";
@@ -38,22 +45,50 @@ export type SteeringPoint = "run_start" | "post_gate_failure" | "run_end";
  * (`unrecognized_keys`) is a REJECTION, never a warning (INV-RES-2).
  */
 export const SteeringDirectiveSchema = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("proceed"), note: z.string().optional() }).strict(),
-  z.object({ action: z.literal("retry"), guidance: z.string(), note: z.string().optional() }).strict(),
+  z
+    .object({ action: z.literal("proceed"), note: z.string().max(DIRECTIVE_TEXT_CHAR_CEILING).optional() })
+    .strict(),
+  z
+    .object({
+      action: z.literal("retry"),
+      guidance: z.string().max(DIRECTIVE_TEXT_CHAR_CEILING),
+      note: z.string().max(DIRECTIVE_TEXT_CHAR_CEILING).optional(),
+    })
+    .strict(),
   z
     .object({
       action: z.literal("select_roster"),
-      phase: z.string(),
-      rosterId: z.string(),
-      note: z.string().optional(),
+      phase: z.string().max(DIRECTIVE_ID_CHAR_CEILING),
+      rosterId: z.string().max(DIRECTIVE_ID_CHAR_CEILING),
+      note: z.string().max(DIRECTIVE_TEXT_CHAR_CEILING).optional(),
     })
     .strict(),
-  z.object({ action: z.literal("abort"), reason: z.string(), note: z.string().optional() }).strict(),
+  z
+    .object({
+      action: z.literal("abort"),
+      reason: z.string().max(DIRECTIVE_TEXT_CHAR_CEILING),
+      note: z.string().max(DIRECTIVE_TEXT_CHAR_CEILING).optional(),
+    })
+    .strict(),
 ]);
 export type SteeringDirective = z.infer<typeof SteeringDirectiveSchema>;
 
 /** Derived from the schema itself (A8) so the literals cannot drift apart. */
 const KNOWN_ACTIONS = SteeringDirectiveSchema.options.map((m) => m.shape.action.value) as readonly string[];
+
+/** Per-point directive allowlist: a schema-valid reply whose action has
+ *  nothing to steer at this point is a REJECTION, not an acceptance —
+ *  `telemetry.directives` counts only directives the runner can actually
+ *  apply. Mirrors the runner's wiring: run_start applies abort (the empty-run
+ *  fail transition) and select_roster (the dispatch_task pick);
+ *  post_gate_failure applies retry (guidance into promptContext) and abort
+ *  (declining the authorized retry); at run_end the run is already settled —
+ *  proceed only. */
+const POINT_ALLOWLIST: Record<SteeringPoint, readonly SteeringDirective["action"][]> = {
+  run_start: ["proceed", "abort", "select_roster"],
+  post_gate_failure: ["proceed", "retry", "abort"],
+  run_end: ["proceed"],
+};
 
 /** Fleet-supplied agent caller. Engine never imports fleet (INV-RES-1). */
 export interface ResidentCaller {
@@ -101,6 +136,10 @@ export interface ResidentTelemetry {
 }
 
 export interface SteeringController {
+  /** A point-in-time SNAPSHOT: a shallow copy with `steeringIterations` and
+   *  `tripwires` (rows included) copied, so internal writes never mutate an
+   *  object a caller already holds — and a caller's writes never touch the
+   *  live counters. */
   readonly telemetry: ResidentTelemetry;
   /** In-memory diagnostic for the most recent degradation (call failure or
    *  malformed-reply limit), sanitized at write. NOT journaled: the journal's
@@ -250,6 +289,10 @@ export function createSteering(deps: {
     const outputMicros = Math.round((clampTerm(usage?.outputTokens) * rateOutput) / 1_000_000);
     if (!Number.isFinite(inputMicros) || !Number.isFinite(outputMicros)) return;
     const next = telemetry.spendMicros + inputMicros + outputMicros;
+    // Defense-in-depth: reachable only when already-finite terms SUM past
+    // MAX_VALUE — the overflow tests all trip the per-term guard above first,
+    // so this guard has no direct test; it stays as the last check before the
+    // mutation.
     if (!Number.isFinite(next)) return;
     telemetry.spendMicros = next;
   };
@@ -295,7 +338,19 @@ export function createSteering(deps: {
     // gate before any prompt is rendered.
     // SEAM DF3.4: drain the resident inbox into ctx.promptContext here,
     // pre-render (the ctx field is mutable for exactly this slot).
-    let prompt = renderPrompt(point, ctx);
+    let prompt: string;
+    try {
+      prompt = renderPrompt(point, ctx);
+    } catch (err) {
+      // A malformed harness ctx (e.g. promptContext not an array) throws HERE,
+      // outside the call/parse guards: degrade like a call failure — the
+      // never-throws contract covers prompt rendering too.
+      telemetry.status = "degraded";
+      lastDegradationReason = sanitizeForMessage(
+        `prompt render failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return PROCEED;
+    }
     for (let attempt = 1; ; attempt += 1) {
       let reply: Awaited<ReturnType<ResidentCaller["call"]>>;
       try {
@@ -336,6 +391,13 @@ export function createSteering(deps: {
         return reject(ctx, rejectionDetail(parsed.parsed, result.error));
       }
       const directive = result.data;
+      // A schema-valid directive at a point where nothing it names is pending
+      // is rejected like any other overreach — counted rejected and
+      // tripwire-recorded BEFORE `directives` can count it, never returned to
+      // the runner as an accepted steer.
+      if (!POINT_ALLOWLIST[point].includes(directive.action)) {
+        return reject(ctx, `action ${sanitizeForMessage(directive.action)} has no steering effect at ${point}`);
+      }
       // An absent rosterIds is an EMPTY set, not an unvalidated one: with no
       // closed id set in hand there is nothing a roster pick could legally
       // name (fail-closed, INV-RES-2).
@@ -356,10 +418,9 @@ export function createSteering(deps: {
       }
       telemetry.directives += 1;
       // steeringIterations counts retries that are actually executable —
-      // post_gate_failure only. A retry accepted at run_start/run_end still
-      // counts in `directives`, but there is no phase attempt it could steer
-      // (AC5: the per-phase counter is steering proof, so it must not be
-      // inflated by a retry that cannot run).
+      // post_gate_failure is the only point where a retry survives the
+      // allowlist above (AC5: the per-phase counter is steering proof, so it
+      // must not be inflated by a retry that cannot run).
       if (directive.action === "retry" && point === "post_gate_failure" && ctx.phase !== undefined) {
         telemetry.steeringIterations[ctx.phase] = (telemetry.steeringIterations[ctx.phase] ?? 0) + 1;
       }
@@ -369,7 +430,16 @@ export function createSteering(deps: {
   }
 
   return {
-    telemetry,
+    // Snapshot accessor: internal writes target the private `telemetry`
+    // instance; callers get a copy they can neither mutate through nor
+    // observe mid-flight mutation on.
+    get telemetry(): ResidentTelemetry {
+      return {
+        ...telemetry,
+        steeringIterations: { ...telemetry.steeringIterations },
+        tripwires: telemetry.tripwires.map((t) => ({ ...t })),
+      };
+    },
     solicit,
     get lastDegradationReason() {
       return lastDegradationReason; // sanitized at write (INV-2)

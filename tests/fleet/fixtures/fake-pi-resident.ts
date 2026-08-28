@@ -15,6 +15,9 @@
  *   hang    — stay alive until SIGKILLed (timeout/stop path).
  *   fail    — exit 3 (nonzero → exitStatus "logic").
  *   garbage — print non-NDJSON, exit 0 (malformed reply, caller must resolve).
+ *   flood   — write ~6 MiB to stdout, exit 0 (trips the resident's 4 MiB
+ *             stdout cap: the resident must kill/classify instead of buffering
+ *             unboundedly).
  *   stderr-secret — write a >400-char stderr whose secret (env
  *             QDS_FAKE_PI_STDERR_SECRET) straddles the resident's -400 cut
  *             boundary (the cut lands at the secret's midpoint), exit 3.
@@ -62,6 +65,10 @@ if (mode === "hang") {
   process.exit(3);
 } else if (mode === "garbage") {
   console.log("this is not NDJSON");
+} else if (mode === "flood") {
+  // One oversized write over the resident's 4 MiB stdout ceiling — the
+  // bounded collector must trip the cap rather than buffer it all.
+  process.stdout.write(`${"f".repeat(6 * 1024 * 1024)}\n`);
 } else {
   const toCount = (raw: string | undefined, fallback: number, label: string): number => {
     const n = Number(raw ?? fallback);

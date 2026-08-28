@@ -17,7 +17,7 @@
  * (:542-659); reply/usage come from its exported harvestPiStream (message_end
  * totals only, INV-COST-3). Rates come from resolveRate — never re-derived.
  */
-import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { redactSecrets, SECRET_KEY_RE } from "../../cli-anything/src/redact.ts";
@@ -57,6 +57,52 @@ const MAX_RESIDENT_TIMEOUT_MS = 600_000;
  * chars — so hitting this means a caller bug, not a big brief.
  */
 const MAX_PROMPT_BYTES = 128 * 1024;
+
+/**
+ * Output byte ceilings for the harvest buffers (S2-4, round 7). The prompt
+ * guard bounds what goes IN; nothing bounded what comes OUT — a looping pi
+ * could fill stdout/stderr faster than any timeout fires and exhaust host
+ * memory first. 4 MiB of stdout is ~250× a healthy solicitation's NDJSON; the
+ * 1 MiB stderr ceiling matches the redacted-tail diagnostics role (only the
+ * last 400 chars are ever read). On cap trip the child is SIGKILLed and
+ * classified "logic": a flood is a pi-side fault a retry will not fix — the
+ * same conservative default as every unmatched non-zero exit.
+ */
+const MAX_STDOUT_BYTES = 4 * 1024 * 1024;
+const MAX_STDERR_BYTES = 1024 * 1024;
+
+/** Sentinel distinguishing an S2-4 cap trip (we killed the child) from an ordinary stream fault. */
+class OutputCapError extends Error {}
+
+/**
+ * Bounded replacement for `new Response(stream).text()` (S2-4): accumulate
+ * chunks up to `cap` bytes, then throw OutputCapError so the caller can kill
+ * the child instead of buffering unboundedly. The error message is byte
+ * counts only — no output content ever crosses into it.
+ */
+async function collectBounded(
+  stream: ReadableStream<Uint8Array>,
+  cap: number,
+  label: string,
+): Promise<string> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > cap) {
+        throw new OutputCapError(`resident pi ${label} exceeded the ${cap}-byte output cap`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
 
 /**
  * Transient-fault patterns matched against pi's REDACTED stderr tail (S2-3):
@@ -105,6 +151,16 @@ let _rateSources: RateSources | null = null;
 export function _injectRateSources(sources: RateSources | null): void {
   _rateSources = sources;
 }
+
+/**
+ * Once-only enforcement per session FILE across startResident instances
+ * (S2-5, round 7): two live residents sharing one `--session` jsonl would
+ * interleave appends and collide on artifact seq numbers. A second
+ * startResident for a path already in this set throws at arming; stop()
+ * releases the path. Documented private seam — module-level, never exported.
+ * (Per-call overlap WITHIN one instance is the `current`-slot guard in call().)
+ */
+const LIVE_SESSION_PATHS = new Set<string>();
 
 /**
  * Per-call timeout. Default SOLICIT_TIMEOUT_MS (the frozen constant); the
@@ -248,6 +304,10 @@ function persistArtifact(
     warn(`chmod 0700 on persist dir failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   const finalPath = join(dir, name);
+  // S2-2 (round 7): writeFileSync's mode applies on CREATE only — a stale
+  // lax-mode .tmp would survive truncation and be renamed onto the artifact.
+  // Remove first so every artifact is a fresh 0o600 create.
+  rmSync(`${finalPath}.tmp`, { force: true });
   writeFileSync(`${finalPath}.tmp`, body, { mode: 0o600 });
   renameSync(`${finalPath}.tmp`, finalPath);
 }
@@ -287,6 +347,14 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
   const rate = resolveRate(rateKey, _rateSources ?? undefined);
   const bin = opts.bin ?? process.env.QDS_PI_BIN ?? "pi";
   const sessionPath = join(opts.sessionDir, `${opts.runId}.resident.jsonl`);
+  // S2-5 (round 7): refuse a second live resident on the same session file —
+  // concurrent instances would interleave jsonl appends and collide on
+  // artifact seq numbers. Released by stop().
+  if (LIVE_SESSION_PATHS.has(sessionPath)) {
+    throw new Error(
+      `resident refused: session ${sessionPath} is already held by a live startResident instance (stop() it first)`,
+    );
+  }
   // S2-4: `opts.env` is the test seam and passes through unfiltered; without
   // it the child gets the least-privilege allowlist, NOT this process's whole
   // environment. The redaction bind reads the SAME env the child receives.
@@ -306,10 +374,33 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
   } catch (err) {
     warn(`chmod 0700 on session dir failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // S2-5: armed — claim the session path (added after the dir setup above, so
+  // a throwing mkdir/chmod never leaks a claim for a resident that does not
+  // exist; nothing between here and `return` throws).
+  LIVE_SESSION_PATHS.add(sessionPath);
   let seq = 0;
   let lastExit: ExitStatus | null = null;
   let current: Bun.Subprocess | null = null;
   let stopped = false;
+
+  /**
+   * S2-1 (round 7): ANY signal death of the child — the native timeout's
+   * SIGKILL, stop()'s SIGKILL, or an external kill — can tear the session
+   * jsonl mid-append. Quarantine it (rename aside) so the next call starts a
+   * FRESH session instead of resuming a truncated file and degrading every
+   * later call. Best-effort via `warn`: a failed rename must never break a
+   * call. The timeout-vs-stop ERROR TEXT distinction lives at the throw
+   * sites, not here.
+   */
+  const quarantineSession = (reason: string): void => {
+    try {
+      if (existsSync(sessionPath)) renameSync(sessionPath, `${sessionPath}.torn-${seq}`);
+    } catch (err) {
+      warn(
+        `session quarantine after ${reason} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
 
   const call = async (prompt: string) => {
     if (stopped) throw new Error("resident stopped: stop() was called before this call");
@@ -322,12 +413,19 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
     if (current !== null) {
       throw new Error("resident busy: a solicitation is already in flight (calls are sequential)");
     }
+    // S2-9 (round 7): an empty/whitespace prompt passes the byte ceiling and
+    // would spawn pi with `-p ""` — refuse pre-spawn (fail-safe). lastExit
+    // stays untouched, matching the busy path: no process ever ran.
+    if (prompt.trim().length === 0) {
+      throw new Error("resident refused: prompt is empty — nothing to solicit");
+    }
     // S2-2: the prompt rides `-p` argv (pi 0.55.0's contract — stdin is
     // "ignore"), so refuse BEFORE persist/spawn rather than dying on E2BIG.
-    // Only the byte count is reported, never prompt content.
+    // Only the byte count is reported, never prompt content. S2-3 (round 7):
+    // lastExit stays untouched — no process ever ran, so exitStatus keeps the
+    // previous call's end (or null), never a fabricated one.
     const promptBytes = Buffer.byteLength(prompt, "utf8");
     if (promptBytes > MAX_PROMPT_BYTES) {
-      lastExit = "logic";
       throw new Error(
         `resident refused: prompt is ${promptBytes} bytes, over the ${MAX_PROMPT_BYTES}-byte argv ceiling`,
       );
@@ -372,11 +470,15 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
         },
       );
     } catch (err) {
-      // Bun.spawn throws synchronously on a missing binary (ENOENT) — that is
-      // a configuration fault (wrong QDS_PI_BIN / pi not installed), which
-      // will not heal on retry: "logic", not "transient".
-      lastExit = "logic";
-      throw err;
+      // Bun.spawn throws synchronously on a missing binary (ENOENT) — a
+      // configuration fault (wrong QDS_PI_BIN / pi not installed). S2-3
+      // (round 7): no process ever ran, so lastExit stays untouched (the
+      // busy-path rule). S2-7 (round 7): the message passes the redact
+      // chokepoint like every other error — a spawn error can echo argv or
+      // env fragments.
+      throw new Error(
+        `resident pi spawn failed: ${redact(err instanceof Error ? err.message : String(err))}`,
+      );
     }
     current = proc;
     const spawnedAt = performance.now();
@@ -384,8 +486,11 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
     let stderr = "";
     try {
       const [out, errText] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
+        // S2-4 (round 7): bounded collectors — a looping pi hits the byte cap
+        // (and is killed) long before it can exhaust host memory; the native
+        // timeout bounds TIME, not bytes.
+        collectBounded(proc.stdout, MAX_STDOUT_BYTES, "stdout"),
+        collectBounded(proc.stderr, MAX_STDERR_BYTES, "stderr"),
         // NOTE: on a signal death `exited` resolves 128+signal (137 for
         // SIGKILL), NOT null — the reliable signals are the post-exit
         // `exitCode`/`signalCode` properties checked below.
@@ -394,9 +499,9 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
       stdout = out;
       stderr = errText;
     } catch (err) {
-      // S2-8: a stream-read failure must not orphan the child — kill it
-      // BEFORE dropping the handle, or it lives until the native timeout and
-      // stop() can never reach it again.
+      // S2-8: a stream-read failure (or an S2-4 cap trip) must not orphan the
+      // child — kill it BEFORE dropping the handle, or it lives until the
+      // native timeout and stop() can never reach it again.
       try {
         proc.kill("SIGKILL");
       } catch {
@@ -404,6 +509,15 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
       }
       await proc.exited.catch(() => {});
       current = null;
+      if (err instanceof OutputCapError) {
+        // S2-4: we SIGKILLed the child mid-append, so the session jsonl may
+        // be torn — quarantine exactly like any other signal death (S2-1).
+        // "logic": a flood is a pi-side fault a retry will not fix. The cap
+        // message is byte counts only, so the raw rethrow leaks no content.
+        quarantineSession("output cap");
+        lastExit = "logic";
+        throw err;
+      }
       lastExit = "transient";
       throw err;
     }
@@ -416,21 +530,30 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
     } catch (err) {
       warn(`chmod 0600 on session file failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-    if (proc.exitCode === null || proc.signalCode !== null) {
-      // Killed by signal — the native timeout's SIGKILL or stop().
+    // S2-10 (round 7): Bun reports a signal death as signalCode set /
+    // exitCode null, but if it ever reports SIGKILL as exitCode 137
+    // (128+SIGKILL) with a null signalCode, treat that as a signal death too —
+    // otherwise the kill would fall into the generic non-zero branch and skip
+    // both the "transient" classification and the quarantine.
+    if (proc.exitCode === null || proc.signalCode !== null || proc.exitCode === 137) {
+      // Killed by signal — the native timeout's SIGKILL, stop(), or an
+      // external kill. S2-8 (round 7): the CC-1 ExitStatus enum cannot widen,
+      // so a PLANNED stop() kill is recorded "transient" here — deliberately
+      // indistinguishable from a genuine transient crash; the error text
+      // thrown below keeps the timeout-vs-stop distinction for humans.
       lastExit = "transient";
+      // S2-1 (round 7): quarantine for ANY signal death, not just the
+      // timeout's — a stop()/external SIGKILL can tear the session jsonl
+      // mid-append too, and the next call must not resume a truncated file.
+      quarantineSession("signal death");
       // S2-7: Bun exposes no timed-out flag, so elapsed time discriminates
       // the native timeout from stop()/external kills (25 ms slack for timer
       // scheduling — a stop() landing inside the slack reads as a timeout).
-      if (performance.now() - spawnedAt >= timeoutMs - 25) {
-        // S2-6: a SIGKILLed pi may have torn the session jsonl mid-append —
-        // quarantine it so the next call starts a FRESH session instead of
-        // resuming a truncated file and degrading every later call.
-        try {
-          if (existsSync(sessionPath)) renameSync(sessionPath, `${sessionPath}.torn-${seq}`);
-        } catch (err) {
-          warn(`session quarantine after timeout failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
+      // S2-6 (round 7): only trust the discriminator when timeoutMs clears
+      // the slack — at timeoutMs <= 25 the clamp floor (1 ms) makes
+      // `elapsed >= timeoutMs - 25` true for EVERY signal death, so those
+      // classify as plain signal deaths instead.
+      if (timeoutMs > 25 && performance.now() - spawnedAt >= timeoutMs - 25) {
         throw new Error(`resident pi timed out after ${timeoutMs} ms (SIGKILL on native timeout)`);
       }
       throw new Error(`resident pi killed by signal ${proc.signalCode ?? "unknown"} before exit`);
@@ -489,6 +612,9 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
     exitStatus: async () => lastExit,
     stop: async () => {
       stopped = true;
+      // S2-5: release the session-path claim so a later startResident for the
+      // same runId/sessionDir can arm (the claim predates any in-flight call).
+      LIVE_SESSION_PATHS.delete(sessionPath);
       const proc = current;
       if (proc === null) return;
       try {

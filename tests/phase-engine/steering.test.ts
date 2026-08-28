@@ -8,6 +8,9 @@
  *
  * - closed `.strict()` union: unknown actions/fields are REJECTIONS with a
  *   `gate_bypass_attempt` tripwire naming the attempt, never executed (AC2);
+ * - a per-point allowlist rejects schema-valid directives that have nothing
+ *   to steer at the solicited point (run_end is proceed-only), BEFORE
+ *   `telemetry.directives` can count them;
  * - unreachable / timeout / two consecutive malformed replies degrade to the
  *   deterministic default with no third call (AC3, R3 fail-closed);
  * - spend is metered engine-side in integer µ$ from usage × rate (DD-9);
@@ -19,6 +22,7 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
 import {
+  DIRECTIVE_TEXT_CHAR_CEILING,
   MAX_MALFORMED_ATTEMPTS,
   MAX_OUTPUT_TOKENS,
   PROMPT_CHAR_CEILING,
@@ -102,6 +106,21 @@ describe("SteeringDirectiveSchema — closed union (AC2 contract)", () => {
       "abort",
     ]);
   });
+
+  test("free-text fields carry a length ceiling — at-ceiling passes, +1 fails closed (S1-3)", () => {
+    // Accepted guidance rides promptContext for the run's lifetime, so a
+    // directive string is bounded well under PROMPT_CHAR_CEILING.
+    const atCeiling = "x".repeat(DIRECTIVE_TEXT_CHAR_CEILING);
+    const overCeiling = "x".repeat(DIRECTIVE_TEXT_CHAR_CEILING + 1);
+    expect(SteeringDirectiveSchema.safeParse({ action: "retry", guidance: atCeiling }).success).toBe(true);
+    expect(SteeringDirectiveSchema.safeParse({ action: "retry", guidance: overCeiling }).success).toBe(false);
+    expect(SteeringDirectiveSchema.safeParse({ action: "abort", reason: overCeiling }).success).toBe(false);
+    expect(SteeringDirectiveSchema.safeParse({ action: "proceed", note: overCeiling }).success).toBe(false);
+    // Ids are harness-minted slugs — a 4k-char rosterId is a probe, not a pick.
+    expect(
+      SteeringDirectiveSchema.safeParse({ action: "select_roster", phase: "build", rosterId: "r".repeat(257) }).success,
+    ).toBe(false);
+  });
 });
 
 describe("solicit — accepted directives", () => {
@@ -132,15 +151,19 @@ describe("solicit — accepted directives", () => {
     expect(noPhase.telemetry.steeringIterations).toEqual({});
   });
 
-  test("a retry accepted at run_start counts in directives but NOT steeringIterations (S1-6 point gating)", async () => {
-    // Only post_gate_failure retries steer an executable phase attempt — a
-    // run_start/run_end retry must not inflate the per-phase counter (AC5).
+  test("a retry at run_start is OFF-POINT — rejected before telemetry.directives counts it (S1-1 point allowlist)", async () => {
+    // Only post_gate_failure retries steer an executable phase attempt; at
+    // run_start there is no phase attempt a retry could steer, so the reply
+    // takes the reject() path — counted rejected, tripwire-recorded.
     const s = scriptedCaller([{ raw: '{"action":"retry","guidance":"g"}' }]);
     const c = createSteering({ caller: s.caller, rate: RATE });
     const d = await c.solicit("run_start", ctx({ phase: "build" }));
-    expect(d).toEqual({ action: "retry", guidance: "g" });
-    expect(c.telemetry.directives).toBe(1);
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.directives).toBe(0);
+    expect(c.telemetry.directivesRejected).toBe(1);
     expect(c.telemetry.steeringIterations).toEqual({});
+    expect(c.telemetry.tripwires[0]!.cause).toBe("gate_bypass_attempt");
+    expect(c.telemetry.tripwires[0]!.detail).toContain("run_start");
   });
 
   test("select_roster with an id inside the closed set is accepted", async () => {
@@ -167,6 +190,59 @@ describe("solicit — accepted directives", () => {
     expect(c.telemetry.directives).toBe(3);
     expect(Number.isInteger(c.telemetry.directives)).toBe(true);
     expect(Array.isArray(c.telemetry.directives)).toBe(false);
+  });
+});
+
+describe("S1-1 — per-point allowlist: off-point directives are rejected, never counted", () => {
+  test("run_end is proceed-only: retry / select_roster / abort are off-point rejections", async () => {
+    // The run is settled by the run_end solicitation — no phase attempt,
+    // roster decision, or fail transition is pending for these to steer.
+    for (const raw of [
+      '{"action":"retry","guidance":"g"}',
+      '{"action":"select_roster","phase":"build","rosterId":"r1"}',
+      '{"action":"abort","reason":"r"}',
+    ]) {
+      const s = scriptedCaller([{ raw }]);
+      const c = createSteering({ caller: s.caller, rate: RATE });
+      // Closed id sets deliberately PRESENT: the allowlist fires before the
+      // closed-set checks, so this cannot pass as a closed-set rejection.
+      const d = await c.solicit("run_end", ctx({ phase: "build", rosterIds: ["r1"], phaseIds: ["build"] }));
+      expect(d).toEqual(PROCEED);
+      expect(c.telemetry.directives).toBe(0);
+      expect(c.telemetry.directivesRejected).toBe(1);
+      expect(c.telemetry.tripwires[0]!.cause).toBe("gate_bypass_attempt");
+      expect(c.telemetry.tripwires[0]!.detail).toContain("run_end");
+    }
+  });
+
+  test("select_roster at post_gate_failure is off-point even with the closed sets present", async () => {
+    // No roster decision is pending mid-phase; previously this relied on the
+    // runner omitting rosterIds (empty-set rejection). Now structural.
+    const s = scriptedCaller([{ raw: '{"action":"select_roster","phase":"build","rosterId":"r1"}' }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    const d = await c.solicit("post_gate_failure", ctx({ phase: "build", rosterIds: ["r1"], phaseIds: ["build"] }));
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.directives).toBe(0);
+    expect(c.telemetry.directivesRejected).toBe(1);
+    expect(c.telemetry.tripwires[0]!.detail).toContain("post_gate_failure");
+  });
+
+  test("on-point directives still pass: abort at post_gate_failure, select_roster at run_start", async () => {
+    const aborting = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"abort","reason":"decline the retry"}' }]).caller,
+      rate: RATE,
+    });
+    const dAbort = await aborting.solicit("post_gate_failure", ctx({ phase: "build" }));
+    expect(dAbort).toEqual({ action: "abort", reason: "decline the retry" });
+    expect(aborting.telemetry.directives).toBe(1);
+
+    const picking = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"select_roster","phase":"build","rosterId":"r1"}' }]).caller,
+      rate: RATE,
+    });
+    const dPick = await picking.solicit("run_start", ctx({ rosterIds: ["r1"], phaseIds: ["build"] }));
+    expect(dPick).toEqual({ action: "select_roster", phase: "build", rosterId: "r1" });
+    expect(picking.telemetry.directives).toBe(1);
   });
 });
 
@@ -203,6 +279,19 @@ describe("AC2 — schema rejections record a gate_bypass_attempt tripwire, defau
     // S1-7: the detail names the KNOWN action, then the issue.
     expect(c.telemetry.tripwires[0]!.detail).toContain("action proceed rejected:");
     expect(c.telemetry.tripwires[0]!.detail).toContain("evil");
+  });
+
+  test("an over-ceiling free-text field is a schema rejection, counted rejected (S1-3)", async () => {
+    const s = scriptedCaller([
+      { raw: JSON.stringify({ action: "retry", guidance: "x".repeat(DIRECTIVE_TEXT_CHAR_CEILING + 1) }) },
+    ]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    const d = await c.solicit("post_gate_failure", ctx({ phase: "build" }));
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.directives).toBe(0);
+    expect(c.telemetry.directivesRejected).toBe(1);
+    expect(c.telemetry.tripwires[0]!.detail).toContain("action retry rejected:");
+    expect(s.calls()).toBe(1); // schema rejection — single attempt, no reparse
   });
 
   test("select_roster outside the closed set is a rejected directive, not a spawn", async () => {
@@ -378,6 +467,32 @@ describe("AC3 — fail-closed degradation", () => {
     expect(failing.lastDegradationReason).toBe("spawn ENOENT\\n");
     expect(failing.telemetry).not.toHaveProperty("lastDegradationReason");
   });
+
+  test("a malformed harness ctx (promptContext not an array) degrades to PROCEED — never throws (S1-4)", async () => {
+    const s = scriptedCaller([{ raw: '{"action":"proceed"}' }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    const badCtx = { ...ctx(), promptContext: "not-an-array" } as unknown as SolicitCtx;
+    const d = await c.solicit("run_start", badCtx);
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.status).toBe("degraded");
+    expect(c.lastDegradationReason).toContain("prompt render failed:");
+    expect(s.calls()).toBe(0); // the caller was never reached
+  });
+
+  test("telemetry is a snapshot: mutating a handed-out copy never touches the live counters (S1-5)", async () => {
+    const s = scriptedCaller([{ raw: '{"action":"proceed"}' }]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    const handed = c.telemetry;
+    handed.directives = 999;
+    handed.steeringIterations.build = 99;
+    handed.tripwires.push({ runId: "run-1", cause: "gate_bypass_attempt", detail: "forged" });
+    await c.solicit("run_start", ctx());
+    expect(c.telemetry.directives).toBe(1);
+    expect(c.telemetry.steeringIterations).toEqual({});
+    expect(c.telemetry.tripwires).toHaveLength(0);
+    // And the earlier snapshot is not retro-mutated by the accepted directive.
+    expect(handed.directives).toBe(999);
+  });
 });
 
 describe("metering — engine-side integer µ$ (DD-9)", () => {
@@ -486,9 +601,11 @@ describe("metering — engine-side integer µ$ (DD-9)", () => {
     expect(Number.isFinite(c.telemetry.spendMicros)).toBe(true);
   });
 
-  test("an accumulated-sum overflow is skipped too — spendMicros never crosses into non-finite", async () => {
-    // Each term is finite here; only the SUM overflows. The meter validates
-    // the accumulated value, not just the terms.
+  test("huge-but-finite tokens × a real rate overflow the PRODUCT before division — a second per-term overflow case", async () => {
+    // Round-7 honesty fix: big × 2e6 overflows to Infinity BEFORE the ÷1e6,
+    // so this trips the PER-TERM guard (like the MAX_VALUE cases above), not
+    // the accumulated-sum guard — the sum guard is reachable only when finite
+    // terms sum past MAX_VALUE and stays in source as defense-in-depth.
     const big = Number.MAX_VALUE / 2;
     const s = scriptedCaller([
       { raw: '{"action":"proceed"}', usage: { inputTokens: big, outputTokens: 0 } },
@@ -625,8 +742,15 @@ describe("fixtures/fake-resident.ts — pi-emulating fixture smoke", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
-    const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    // stderr is piped, so it must be drained alongside stdout — an undrained
+    // pipe can backpressure the child before exit.
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
     expect(exitCode).toBe(0);
+    expect(stderr).toBe(""); // the fixture's success path writes nothing to stderr
     const events = stdout.trim().split("\n").map((l) => JSON.parse(l) as { type: string });
     expect(events.map((e) => e.type)).toContain("message_end");
     expect(stdout).toContain('"text":"{\\"action\\":\\"proceed\\"}"');

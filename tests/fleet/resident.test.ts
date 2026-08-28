@@ -14,6 +14,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
 } from "node:fs";
@@ -420,7 +421,7 @@ describe("process-end mapping (exitStatus, CC-1 values)", () => {
     expect(await spawn.exitStatus()).toBe("transient");
   });
 
-  test("missing binary (ENOENT) → call throws, exitStatus 'logic' (a misconfig never heals on retry)", async () => {
+  test("missing binary (ENOENT) → call throws, exitStatus null (no process ever ran)", async () => {
     const dir = caseDir("enoent");
     const spawn = enabled(
       startResident({
@@ -431,8 +432,47 @@ describe("process-end mapping (exitStatus, CC-1 values)", () => {
         env: piEnv(),
       }),
     );
-    await expect(spawn.caller.call(PROMPT)).rejects.toThrow();
-    expect(await spawn.exitStatus()).toBe("logic");
+    // S2-7 (round 7): the spawn failure is wrapped through the redact
+    // chokepoint, not rethrown raw.
+    await expect(spawn.caller.call(PROMPT)).rejects.toThrow(/spawn failed/);
+    // S2-3 (round 7): no process ever ran, so exitStatus reports null
+    // instead of the old fabricated "logic".
+    expect(await spawn.exitStatus()).toBeNull();
+  });
+
+  test("S2-3: a prompt over the argv ceiling refuses pre-spawn — exitStatus stays null", async () => {
+    const dir = caseDir("bigprompt");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-bigprompt",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
+      }),
+    );
+    await expect(spawn.caller.call("x".repeat(128 * 1024 + 1))).rejects.toThrow(/argv ceiling/);
+    // The refusal ends no process: no fabricated lastExit, and no spawn.
+    expect(await spawn.exitStatus()).toBeNull();
+    expect(existsSync(join(dir, "record.json"))).toBe(false);
+  });
+
+  test("S2-9: empty/whitespace prompts refuse pre-spawn — no spawn, exitStatus null", async () => {
+    const dir = caseDir("emptyprompt");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-emptyprompt",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
+      }),
+    );
+    for (const empty of ["", "   ", "\n\t"]) {
+      await expect(spawn.caller.call(empty)).rejects.toThrow(/prompt is empty/);
+    }
+    expect(await spawn.exitStatus()).toBeNull();
+    expect(existsSync(join(dir, "record.json"))).toBe(false);
   });
 
   test("nonzero exit → call throws, exitStatus 'logic'", async () => {
@@ -509,10 +549,24 @@ describe("process-end mapping (exitStatus, CC-1 values)", () => {
     );
     const startedAt = performance.now();
     const pending = spawn.caller.call(PROMPT);
-    await spawn.stop(); // no sleeping: call() reaches its spawn synchronously
+    // The quarantine pin below needs the fake to have appended the session
+    // file BEFORE the kill lands — poll for the file (a condition wait, not
+    // a fixed sleep; the fake appends one line at startup).
+    const sessionPath = join(dir, "run-stop.resident.jsonl");
+    const pollStart = performance.now();
+    while (!existsSync(sessionPath) && performance.now() - pollStart < 5_000) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    expect(existsSync(sessionPath)).toBe(true);
+    await spawn.stop();
     await expect(pending).rejects.toThrow();
     expect(performance.now() - startedAt).toBeLessThan(10_000);
     expect(await spawn.exitStatus()).toBe("transient");
+    // S2-1 (round 7): a stop() SIGKILL quarantines the possibly-torn session
+    // jsonl exactly like the native timeout — the next call must resume a
+    // FRESH session, not the truncated file.
+    expect(existsSync(sessionPath)).toBe(false);
+    expect(existsSync(`${sessionPath}.torn-1`)).toBe(true);
     // Idempotent: a second stop with nothing in flight still resolves.
     await spawn.stop();
   });
@@ -544,6 +598,51 @@ describe("process-end mapping (exitStatus, CC-1 values)", () => {
     // stop() SIGKILLs the FIRST (in-flight) process, not a clobbering second.
     await spawn.stop();
     await expect(first).rejects.toThrow(/killed by signal/);
+    expect(await spawn.exitStatus()).toBe("transient");
+  });
+
+  test("S2-4: stdout over the 4 MiB cap kills the child — 'logic', session quarantined", async () => {
+    const dir = caseDir("flood");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-flood",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({
+          QDS_FAKE_PI_RECORD: join(dir, "record.json"),
+          QDS_FAKE_PI_MODE: "flood", // ~6 MiB on stdout, over the 4 MiB cap
+          QDS_RESIDENT_TIMEOUT_MS: "30000", // the cap must beat the timeout
+        }),
+      }),
+    );
+    await expect(spawn.caller.call(PROMPT)).rejects.toThrow(/output cap/);
+    // A flood is a pi-side fault a retry will not fix — "logic", and the
+    // cap kill landed mid-append so the session jsonl is quarantined like
+    // any other signal death (S2-1).
+    expect(await spawn.exitStatus()).toBe("logic");
+    const sessionPath = join(dir, "run-flood.resident.jsonl");
+    expect(existsSync(sessionPath)).toBe(false);
+    expect(existsSync(`${sessionPath}.torn-1`)).toBe(true);
+  });
+
+  test("S2-6: timeoutMs <= the 25 ms slack classifies as signal death, never 'timed out'", async () => {
+    const dir = caseDir("tinytimeout");
+    const spawn = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-tinytimeout",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({
+          QDS_FAKE_PI_MODE: "hang",
+          QDS_RESIDENT_TIMEOUT_MS: "10",
+        }),
+      }),
+    );
+    // The native timeout still SIGKILLs at 10 ms, but `elapsed >= 10 - 25`
+    // would be true for ANY signal death — the discriminator stands down.
+    await expect(spawn.caller.call(PROMPT)).rejects.toThrow(/killed by signal/);
     expect(await spawn.exitStatus()).toBe("transient");
   });
 
@@ -613,6 +712,10 @@ describe("persistence + redaction (§5.2 pre-execution, INV-RES-3)", () => {
     );
     await spawn.caller.call(PROMPT);
     expect(await spawn.exitStatus()).toBe("success");
+    // S2-12 (round 7): "nothing written" is asserted, not implied — the case
+    // dir (which is ALSO the session dir here) holds only the fake's own
+    // record.json and the session jsonl; no prompt/reply artifacts.
+    expect(readdirSync(dir).sort()).toEqual(["record.json", "run-nopersist.resident.jsonl"]);
   });
 
   test("B4: QDS_RESIDENT_TIMEOUT_MS is read from opts.env, not this process's env", async () => {
@@ -716,5 +819,28 @@ describe("session continuity (the session FILE is the conversation)", () => {
     // A different runId never shares the session file.
     expect(readFileSync(sessionPath, "utf8").trim().split("\n").length).toBe(linesAfterTwo);
     expect(readFileSync(join(sessionDir, "run-other.resident.jsonl"), "utf8")).toContain("called");
+  });
+
+  test("S2-5: a second startResident on the same session path refuses; stop() releases it", async () => {
+    const dir = caseDir("seslock");
+    const sessionDir = join(dir, "sessions");
+    const opts = () => ({
+      brief: brief(),
+      runId: "run-lock",
+      sessionDir,
+      bin: fakePi,
+      env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
+    });
+    const first = enabled(startResident(opts()));
+    // Same runId + sessionDir ⇒ the same --session file: concurrent live
+    // instances would interleave jsonl appends and collide on artifact seq
+    // numbers, so the second arming throws BEFORE any spawn.
+    expect(() => startResident(opts())).toThrow(/already held/);
+    // stop() releases the claim: a fresh resident for the same path arms and calls.
+    await first.stop();
+    const second = enabled(startResident(opts()));
+    await second.caller.call(PROMPT);
+    expect(await second.exitStatus()).toBe("success");
+    await second.stop();
   });
 });
