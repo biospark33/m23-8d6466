@@ -470,6 +470,28 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
     limitMicroUsd: rec.limitMicroUsd,
   };
 
+  // AC7: a run paused for approval whose box is gone was torn down ON PURPOSE,
+  // and the approval extension is the only thing that says so.
+  //
+  // FIRST, above the `closed` arm — and that order is load-bearing, not
+  // stylistic. `requestApproval` runs the REAL teardown before promoting to
+  // `awaiting-approval`, and teardown's last step sets `closedAt`, so EVERY
+  // genuinely paused record is also a closed record. Below `closed` this branch
+  // is unreachable in production and `fleet status` reports "closed" for a run
+  // sitting on an approver's desk (caught by the live tier-1 demo, not by unit
+  // fixtures that omitted `closedAt`).
+  //
+  // Settled approvals still fall through to `closed`: `approvalRowFields`
+  // returns undefined for approved/rejected/timed-out, so only the two PAUSED
+  // states pre-empt it. A LIVE box also still outranks the pause —
+  // `box === undefined` is the guard — because unattributed spend is the worse
+  // signal. Both entry points get it: statusAll and statusRun share this
+  // function.
+  if (box === undefined) {
+    const approval = approvalRowFields(rec);
+    if (approval !== undefined) return { ...base, ...approval };
+  }
+
   // closedAt → "closed", but the driver still gets consulted: consumers key on
   // the state, and a live box behind a closed record keeps billing silently.
   if (rec.closedAt !== undefined) {
@@ -485,19 +507,6 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
       // substrate was unreachable.
       ...(boxes === null ? {} : { boxAlive: box !== undefined }),
     };
-  }
-
-  // AC7: a run paused for approval whose box is gone was torn down ON PURPOSE,
-  // and the approval extension is the only thing that says so. Placed HERE
-  // deliberately: after `closed` (a closed record is settled history, and its
-  // still-billing case is the louder signal) and before the `boxes === null`
-  // arm, so it overrides BOTH `boxMissing` and `boxUnknown`. A LIVE box still
-  // outranks it — `box === undefined` is the guard — because unattributed
-  // spend beats a tidy pause label. Both entry points get it: statusAll and
-  // statusRun share this function.
-  if (box === undefined) {
-    const approval = approvalRowFields(rec);
-    if (approval !== undefined) return { ...base, ...approval };
   }
 
   // No list ⇒ no evidence either way, for a vmName-less record too (its box may

@@ -3637,9 +3637,18 @@ process.on = ((sig, listener) => {
    * deliberately torn down.
    */
   describe("AC7: approval-paused runs in status", () => {
+    /**
+     * A paused record as production actually produces one. `closedAt` is NOT
+     * decoration: `requestApproval` runs the real teardown before promoting to
+     * `awaiting-approval`, and teardown's last step closes the record — so a
+     * paused run carries BOTH `closedAt` and a paused approval extension.
+     * Fixtures without it exercise a state the system cannot reach, which is
+     * exactly how the live demo caught a defect this suite was green on.
+     */
     const pausedRec = (over: Record<string, unknown> = {}) => ({
       runId: "qds-20260101-pause1",
       createdAt: "2026-01-01T00:00:00.000Z",
+      closedAt: "2026-01-01T00:05:00.000Z",
       extensions: {
         approval: { schemaVersion: 1, state: "awaiting-approval", reportId: "rep-1", ...over },
       },
@@ -3671,13 +3680,14 @@ process.on = ((sig, listener) => {
     });
 
     test.each([["approved"], ["rejected"], ["timed-out"]])(
-      "a SETTLED approval (%s) is history — the row is boxMissing, not a pause",
+      "a SETTLED approval (%s) with its box gone reports closed, not a pause",
       async (state) => {
-        // Only the two PAUSED states may override boxMissing. A settled run is
-        // an ordinary open run: its missing box really is missing, and
-        // relabelling it `awaiting-approval` would hide that forever.
+        // Only the two PAUSED states may pre-empt `closed`. A decided run has
+        // nothing left to wait for, so it must fall through to the ordinary
+        // closed row — relabelling it `awaiting-approval` would strand it as
+        // pending forever. This is the S2 property, re-pinned at the new order.
         const row = await rowFor(pausedRec({ state }));
-        expect(row.state).toBe("boxMissing");
+        expect(row.state).toBe("closed");
         expect(row.reportId).toBeUndefined();
       },
     );
@@ -3699,12 +3709,16 @@ process.on = ((sig, listener) => {
       expect(row.reportId).toBe("rep-1");
     });
 
-    test("a CLOSED record still reports closed — settled history outranks the pause", async () => {
-      // Placement pin: the AC7 branch sits AFTER the `closed` arm. A closed
-      // record over a still-live box is the loudest signal status emits, and a
-      // stale approval extension must never relabel it.
-      const row = await rowFor({ ...pausedRec(), closedAt: "2026-01-02T00:00:00.000Z" });
-      expect(row.state).toBe("closed");
+    test("a paused run is awaiting-approval DESPITE its closedAt (live-demo defect)", async () => {
+      // Placement pin, inverted. The AC7 branch must sit ABOVE the `closed`
+      // arm: every genuinely paused record has closedAt set, so the old
+      // after-`closed` placement made the branch unreachable in production and
+      // `fleet status` reported "closed" for a run waiting on an approver.
+      // Caught only by the live tier-1 demo — see
+      // tests/fleet/e2e/tier1-approval-gate.live.test.ts.
+      const row = await rowFor(pausedRec());
+      expect(row.state).toBe("awaiting-approval");
+      expect(row.closedAt).toBeUndefined(); // the paused row is not a closed row
     });
 
     test("past expiresAt DISPLAYS timed-out and writes nothing", async () => {
