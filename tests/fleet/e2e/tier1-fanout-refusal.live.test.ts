@@ -37,10 +37,14 @@ test.todoIf(liveTodoOff())(
       const fanoutsDir = join(workspace, "fanouts");
       mkdirSync(fanoutsDir, { recursive: true });
 
-      // A schema-valid brief (repoSlug matches repoUrl's path, pin = commitSha).
+      // A schema-valid brief: repoSlug is DERIVED from ctx.repoUrl's path so the
+      // DF3.1 cross-refine (repoSlugOfUrl(repoUrl) === canonicalRepoSlug, fb0334a)
+      // holds for whatever substrate repo the operator pinned — the refusal under
+      // test must come from the LOCK, never from brief ingress.
+      const slugFromUrl = ctx.repoUrl.replace(/^https:\/\//i, "").replace(/^[^/]+\//, "").replace(/\.git$/, "");
       const briefPath = join(workspace, "brief.json");
       writeFileSync(briefPath, JSON.stringify({
-        repoSlug: "octocat/Hello-World",
+        repoSlug: slugFromUrl,
         issueId: 1,
         commitSha: ctx.sha,
         manifestPath: "cfg/pi.json",

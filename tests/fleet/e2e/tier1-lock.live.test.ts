@@ -43,9 +43,13 @@ test.todoIf(liveTodoOff())(
       // ponytail: deterministic barrier ensures the second teardown contends while
       // the first still holds the lock. Without this, if the first completes before
       // the second even attempts acquisition, both may win and the test flakes.
-      // The lock file <recordsDir>/<runId>.json.lock appears the instant acquireRunLock
-      // succeeds, so we poll for it before launching the contender.
-      const lockPath = join(recordsDir, `${runId}.json.lock`);
+      // The invocation lock acquireRunLock creates is <recordsDir>/<runId>.lock
+      // (run-lock.ts:945 — `resolve(runsDir, `${runId}.lock`)`). Fixed 2026-08-28:
+      // this barrier used to poll the STORE's row lock `<runId>.json.lock`
+      // (run-record.ts:1071), a different artifact the teardown only touches
+      // transiently mid-verb — it passed 2026-08-24 on timing luck and missed
+      // deterministically today.
+      const lockPath = join(recordsDir, `${runId}.lock`);
       const teardownArgv = ["teardown", runId, "--driver", "exedev", "--dir", recordsDir, "--no-harvest"] as const;
       const a = runFleet(teardownArgv, { timeoutMs: 240_000 });
       // Barrier: wait for lock file evidence (max 5s, 50ms ticks) before launching b.

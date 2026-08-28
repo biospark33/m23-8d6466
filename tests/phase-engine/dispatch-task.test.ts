@@ -963,13 +963,19 @@ describe("dispatch-task: manifest schema (kind registration)", () => {
       { name: "tail", kind: "engineer", description: "y" },
     ],
   });
-  it("accepts dispatch_task with roster+task+testCommand", () => {
+  it("rejects dispatch_task carrying testCommand (gates compose on kind 'code' only)", () => {
     const m = twoPhases({
       roster: "config/rosters/qds-default.roster.yaml",
       task: "do it",
       testCommand: ["bun", "test"],
     });
-    expect(PipelineManifestSchema.safeParse(m).success).toBe(true);
+    const result = PipelineManifestSchema.safeParse(m);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((i) => i.message).join("; ")).toContain(
+        "testCommand is forbidden when kind is 'dispatch_task'",
+      );
+    }
   });
   it("rejects dispatch_task missing roster or task", () => {
     const noRoster = twoPhases({ task: "t" });
