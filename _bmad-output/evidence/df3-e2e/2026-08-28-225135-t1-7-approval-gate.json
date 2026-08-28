@@ -1,0 +1,84 @@
+{
+  "writtenAt": "2026-08-28T22:51:35.501Z",
+  "test": "T1.7",
+  "outcome": "pass",
+  "runId": "e2e-t17-mtdjpu52hsv2",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t17-mtdjpu52hsv2",
+      "keyHash": "33ea4be9b5019b881a0bb80e5d2d94022cbf09cf0d7ebc6284d26d1299dabc25"
+    },
+    {
+      "phase": "pause",
+      "outcome": {
+        "outcome": "requested"
+      },
+      "order": [
+        "teardown-start:pausing",
+        "teardown-done"
+      ]
+    },
+    {
+      "phase": "post-pause-record",
+      "closedAt": "2026-08-28T22:51:29.479Z",
+      "approval": {
+        "schemaVersion": 1,
+        "state": "awaiting-approval",
+        "proposal": "open a PR for run e2e-t17-mtdjpu52hsv2",
+        "reportId": "rv-e2e-t17-mtdjpu52hsv2",
+        "headSha": "887c63e32fcad2219ebaa8574d57dd3afc668e5b",
+        "requestedAt": "2026-08-28T22:51:20.777Z",
+        "expiresAt": "2026-08-29T22:51:20.777Z",
+        "supersededReportIds": []
+      }
+    },
+    {
+      "phase": "status",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t17-mtdjpu52hsv2\",\"vmName\":\"e2e-t17-mtdjpu52hsv2\",\"createdAt\":\"2026-08-28T22:51:17.352Z\",\"spendMicroUsd\":0,\"limitMicroUsd\":5000,\"state\":\"awaiting-approval\",\"reportId\":\"rv-e2e-t17-mtdjpu52hsv2\",\"expiresInMs\":86387147}"
+    },
+    {
+      "phase": "attach-refusal",
+      "exitCode": 5,
+      "stderr": "{\"requestId\":\"5f23cf6a-55af-4223-ab00-358a024fef23\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-08-28T22:51:33.691Z\",\"duration\":1,\"durationMs\":1,\"status\":\"error\",\"runId\":\"e2e-t17-mtdjpu52hsv2\",\"event\":\"attach\",\"outcome\":\"run-not-attachable\",\"state\":\"awaiting-approval\",\"attach_rtt_ms\":0}\n{\"runId\":\"e2e-t17-mtdjpu52hsv2\",\"state\":\"awaiting-approval\",\"code\":\"run-not-attachable\",\"message\":\"e2e-t17-mtdjpu52hsv2 cannot take a steering message: it is awaiting-approval\",\"remediation\":\"the run is paused at the approval gate, so its box is gone — decide it with `fleet approve`/`fleet reject` instead\"}\n{\"requestId\":\"5f23cf6a-55af-4223-ab00-358a024fef23\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-08-28T22:51:33.692Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":\"e2e-t17-mtdjpu52hsv2\",\"verb\":\"attach\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "approve",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t17-mtdjpu52hsv2\",\"outcome\":\"decided\",\"state\":\"approved\",\"approverId\":\"e2e-operator@example.test\",\"decidedAt\":\"2026-08-28T22:51:33.742Z\"}",
+      "stderr": "{\"requestId\":\"3469fc76-9d06-4a19-bb43-dacd8716a7dc\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-08-28T22:51:33.744Z\",\"duration\":2,\"status\":\"ok\",\"runId\":\"e2e-t17-mtdjpu52hsv2\",\"driver\":null,\"verb\":\"set\",\"durationMs\":2,\"outcome\":\"ok\",\"record_write_ms\":2}\n{\"requestId\":\"3469fc76-9d06-4a19-bb43-dacd8716a7dc\",\"operation\":\"fleet.approve\",\"agentId\":null,\"timestamp\":\"2026-08-28T22:51:33.744Z\",\"duration\":6,\"durationMs\":6,\"status\":\"ok\",\"runId\":\"e2e-t17-mtdjpu52hsv2\",\"event\":\"approve\",\"outcome\":\"decided\",\"state\":\"approved\",\"approverId\":\"e2e-operator@example.test\",\"decision_wait_ms\":2}\n{\"requestId\":\"3469fc76-9d06-4a19-bb43-dacd8716a7dc\",\"operation\":\"fleet.approve\",\"agentId\":null,\"timestamp\":\"2026-08-28T22:51:33.744Z\",\"duration\":6,\"durationMs\":6,\"status\":\"ok\",\"runId\":\"e2e-t17-mtdjpu52hsv2\",\"verb\":\"approve\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "decided-record",
+      "approval": {
+        "schemaVersion": 1,
+        "state": "approved",
+        "proposal": "open a PR for run e2e-t17-mtdjpu52hsv2",
+        "reportId": "rv-e2e-t17-mtdjpu52hsv2",
+        "headSha": "887c63e32fcad2219ebaa8574d57dd3afc668e5b",
+        "requestedAt": "2026-08-28T22:51:20.777Z",
+        "expiresAt": "2026-08-29T22:51:20.777Z",
+        "supersededReportIds": [],
+        "approverId": "e2e-operator@example.test",
+        "decidedAt": "2026-08-28T22:51:33.742Z",
+        "reason": "e2e demo"
+      },
+      "reportCompletedAt": "2026-08-28T22:51:20.776Z"
+    },
+    {
+      "phase": "second-decision",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t17-mtdjpu52hsv2\",\"outcome\":\"already-decided\",\"state\":\"approved\",\"approverId\":\"e2e-operator@example.test\",\"decidedAt\":\"2026-08-28T22:51:33.742Z\",\"reason\":\"e2e demo\"}"
+    },
+    {
+      "phase": "final-ls",
+      "boxes": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "leaked": []
+    }
+  ]
+}

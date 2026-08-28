@@ -1,0 +1,51 @@
+{
+  "writtenAt": "2026-08-28T22:45:40.545Z",
+  "test": "T1.7",
+  "outcome": "fail",
+  "runId": "e2e-t17-mtdji9hb7nn",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t17-mtdji9hb7nn",
+      "keyHash": "38c57b8f2d0fabdff4900d134b94635133c9a948690a2e81ec100d8dcee23a8a"
+    },
+    {
+      "phase": "pause",
+      "outcome": {
+        "outcome": "requested"
+      },
+      "order": [
+        "teardown-start:pausing",
+        "teardown-done"
+      ]
+    },
+    {
+      "phase": "post-pause-record",
+      "closedAt": "2026-08-28T22:45:36.478Z",
+      "approval": {
+        "schemaVersion": 1,
+        "state": "awaiting-approval",
+        "proposal": "open a PR for run e2e-t17-mtdji9hb7nn",
+        "reportId": "rv-e2e-t17-mtdji9hb7nn",
+        "headSha": "c5ebde384b738a4085bafe2ff3315e65c927bc61",
+        "requestedAt": "2026-08-28T22:45:26.973Z",
+        "expiresAt": "2026-08-29T22:45:26.973Z",
+        "supersededReportIds": []
+      }
+    },
+    {
+      "phase": "status",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t17-mtdji9hb7nn\",\"vmName\":\"e2e-t17-mtdji9hb7nn\",\"createdAt\":\"2026-08-28T22:45:23.543Z\",\"spendMicroUsd\":0,\"limitMicroUsd\":5000,\"state\":\"closed\",\"closedAt\":\"2026-08-28T22:45:36.478Z\",\"boxAlive\":false}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: \"awaiting-approval\"\nReceived: \"closed\"\n"
+    },
+    {
+      "phase": "key-hash-delta",
+      "leaked": []
+    }
+  ]
+}
