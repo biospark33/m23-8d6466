@@ -58,6 +58,8 @@ describe("TracingJournal delegation + forwarding", () => {
 
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req-1",
       pipelineName: "test-pipeline",
     });
@@ -117,6 +119,8 @@ describe("TracingJournal delegation + forwarding", () => {
 
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req-dedup",
       pipelineName: "test-pipeline",
     });
@@ -194,6 +198,8 @@ describe("TracingJournal delegation + forwarding", () => {
 
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req-2",
       pipelineName: "test-pipeline",
     });
@@ -251,6 +257,8 @@ describe("TracingJournal delegation + forwarding", () => {
 
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req-3",
       pipelineName: "test-pipeline",
     });
@@ -323,6 +331,8 @@ describe("TracingJournal delegation + forwarding", () => {
 
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req-fail",
       pipelineName: "test-pipeline",
     });
@@ -459,6 +469,8 @@ describe("TracingJournal delegation + forwarding", () => {
 
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req-finish",
       pipelineName: "test-pipeline",
     });
@@ -529,6 +541,8 @@ describe("TracingJournal delegation + forwarding", () => {
 
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req",
       pipelineName: "test-pipeline",
     });

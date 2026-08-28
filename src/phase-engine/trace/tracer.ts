@@ -29,6 +29,8 @@ import {
   RequestIdRepoMismatchError,
   type ResolvedRunCorrelation,
 } from "../types.ts";
+// F030: one derivation of the run root for the containment boundary.
+import { runMarkerRoot } from "../journal.ts";
 
 /** Structured error carrying SQL context. */
 export class TracerError extends Error {
@@ -77,6 +79,11 @@ export interface TracerOptions {
   pipelineName?: string;
   /** Failure-only structured log sink (success silent). */
   onTraceError?: (err: TracerError) => void;
+  /**
+   * INV-1 containment root. Defaults to `runMarkerRoot()` (`QDS_RUN_ROOT ?? "/run"`).
+   * Tests whose data dir lives outside `/run` pass their own root here.
+   */
+  boundaryRoot?: string;
 }
 
 /** Generate a nanoid-style event_id. */
@@ -203,9 +210,11 @@ export class Tracer {
    * component swapped mid-initialization fails closed.
    */
   private dataDirPin?: { dev: number; ino: number };
+  private readonly boundaryRoot?: string;
 
   constructor(options: TracerOptions) {
     this.dataDir = options.dataDir;
+    this.boundaryRoot = options.boundaryRoot;
     this.requestId = options.requestId;
     this.pipelineName = options.pipelineName;
     this.onTraceError = options.onTraceError;
@@ -289,11 +298,10 @@ export class Tracer {
 
   /** INV-1: refuse configured paths resolving outside the data boundary. */
   private assertWithinBoundary(): void {
-    const boundaryRoot = process.env.QDS_RUN_ROOT;
-    if (!boundaryRoot) {
-      // No boundary configured — skip check (test may not always set QDS_RUN_ROOT)
-      return;
-    }
+    // F030: derive the boundary the way journal.ts does — an unset QDS_RUN_ROOT
+    // means the production root `/run`, never "skip the containment check".
+    // Tests that write outside `/run` pass an explicit `boundaryRoot`.
+    const boundaryRoot = this.boundaryRoot ?? runMarkerRoot();
 
     let resolvedBoundary: string;
 

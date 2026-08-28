@@ -828,3 +828,30 @@ describe("serializeTraceError (shared sink contract)", () => {
     expect(out.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
   });
 });
+
+describe("F030: containment boundary fires without QDS_RUN_ROOT", () => {
+  test("a data dir outside the derived boundary is refused even with QDS_RUN_ROOT unset", () => {
+    // biome-ignore lint/performance/noDelete: delete is the only correct way to restore "not set"
+    delete process.env.QDS_RUN_ROOT;
+    // Boundary falls back to /run (journal.ts runMarkerRoot), so a tmpdir path
+    // is outside it — on hosts without /run the refusal is "root does not exist".
+    expect(() => new Tracer({ dataDir, requestId, pipelineName })).toThrow(/boundary/);
+    expect(fs.existsSync(path.join(dataDir, "trace.db"))).toBe(false);
+  });
+
+  test("an explicit boundaryRoot overrides the env-derived one", () => {
+    // biome-ignore lint/performance/noDelete: delete is the only correct way to restore "not set"
+    delete process.env.QDS_RUN_ROOT;
+    const tracer = new Tracer({ dataDir, requestId, pipelineName, boundaryRoot: markerRoot });
+    expect(fs.existsSync(path.join(dataDir, "trace.db"))).toBe(true);
+    tracer.close();
+  });
+
+  test("an explicit boundaryRoot still refuses a path outside it", () => {
+    process.env.QDS_RUN_ROOT = markerRoot; // permissive env must not rescue it
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(tmpRoot, "outside-")));
+    expect(
+      () => new Tracer({ dataDir, requestId, pipelineName, boundaryRoot: outside }),
+    ).toThrow(/boundary/);
+  });
+});
