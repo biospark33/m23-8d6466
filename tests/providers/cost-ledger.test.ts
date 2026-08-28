@@ -7,7 +7,9 @@
  * AC5  zero-row issue reads as a zero view (hasEvents:false), never an error
  * AC6  box-hours: exactly one row per torn-down run, at close only
  * INV-COST-1 append-only enforced by store triggers
- * INV-COST-2 no denormalized cost column anywhere
+ * INV-COST-2 no denormalized cost column anywhere — DERIVATION, not
+ *            COMPLETENESS: while F001 stands, nothing outside these tests
+ *            calls ingestCostEvent, so a live ledger's SUM is box-hours only
  * INV-COST-4 integer micro-dollars everywhere; float exists only on the wire
  * INV-COST-5 key_hash + key_limit on every token row, fail-closed when absent
  * INV-COST-6 unopenable ledger / unpersistable ingest refuse, never read as zero

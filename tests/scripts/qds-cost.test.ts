@@ -705,4 +705,87 @@ console.log("ALL_OK");
       }
     });
   });
+
+  // ── F001 / Q1 "deferred": the DF2.7→ledger bridge was never built ──────────
+  //
+  // `ingestCostEvent` is the only writer of `kind='tokens'` rows and nothing
+  // in the dispatch path calls it, so a real ledger holds box-hours ONLY and
+  // the per-issue cap enforces against a fraction of the true spend. Q1 chose
+  // to keep the writer and DECLARE the gap loudly rather than wire it, so the
+  // reporting CLI is where an operator meets it.
+  //
+  // `QDS_LOG_VERBOSE=1` because src/swarmclaw/log.ts mutes the JSONL sink
+  // under NODE_ENV=test (which `bun test` sets and spawnSync inherits); in
+  // production the line is on stdout unconditionally.
+  describe("degraded token ledger (F001)", () => {
+    // Built per test, never hoisted to the describe body: the describe
+    // callback runs at COLLECTION time, before `beforeEach` sets
+    // QDS_COST_LEDGER_FILE, so a hoisted snapshot points the CLI at a ledger
+    // that does not exist (`ledger-missing`, exit 1).
+    const verbose = () => ({ ...process.env, QDS_LOG_VERBOSE: "1" });
+
+    function boxHoursOnlyLedger(): void {
+      const ledger = new CostLedger({
+        path: join(dir, "cost-ledger.db"),
+        config: { defaultCapMicroUsd: 5_000_000, boxHourRateMicroUsd: 3_600_000 },
+        readRunRecord: () => ({
+          keyHash: "hash-f001",
+          limitMicroUsd: 50_000_000,
+          createdAt: "2026-08-20T10:00:00Z",
+          closedAt: "2026-08-20T11:30:00Z",
+        }),
+      });
+      ledger.ingestBoxHours({
+        runId: "unwired-run-001",
+        repoSlug: "qds/demo",
+        issueId: "42",
+        requestId: "req-f001",
+      });
+      ledger.close();
+    }
+
+    test("a ledger with no kind='tokens' row reports tokens-ledger-unwired", () => {
+      boxHoursOnlyLedger();
+      const res = spawnSync(CLI, ["qds/demo#42"], { env: verbose() });
+      expect(res.status).toBe(0);
+      const out = res.stdout.toString();
+      expect(out).toContain("tokens-ledger-unwired");
+      expect(out).toContain("per-issue caps count box-hours only");
+    });
+
+    test("the line is ledger-wide, not issue-scoped — a token row anywhere silences it", () => {
+      boxHoursOnlyLedger();
+      const ledger = new CostLedger({
+        path: join(dir, "cost-ledger.db"),
+        config: { defaultCapMicroUsd: 5_000_000 },
+        readRunRecord: () => ({
+          keyHash: "hash-f001",
+          limitMicroUsd: 50_000_000,
+          createdAt: "2026-08-20T12:00:00Z",
+        }),
+      });
+      // A DIFFERENT issue: the claim the line makes is about the ledger's
+      // wiring, so one token row anywhere proves the bridge is live.
+      ledger.ingestCostEvent(
+        {
+          agentId: "agent-f001",
+          model: "cheap/model",
+          durationMs: 0,
+          inputTokens: 10,
+          outputTokens: 20,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          turnCount: 1,
+          costUsd: 0.01,
+          timestamp: "2026-08-20T12:05:00Z",
+        } satisfies CostEvent,
+        { runId: "wired-run-001", repoSlug: "qds/other", issueId: "7", requestId: "req-f001b", role: "worker", invocationSeq: 0 },
+      );
+      ledger.close();
+
+      const res = spawnSync(CLI, ["qds/demo#42"], { env: verbose() });
+      expect(res.status).toBe(0);
+      expect(res.stdout.toString()).not.toContain("tokens-ledger-unwired");
+    });
+  });
 });

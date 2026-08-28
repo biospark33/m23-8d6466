@@ -2,7 +2,7 @@
  * The micro-dollar cost ledger (DF2.8).
  *
  * Host-side SQLite beside the run records, so it survives box destruction
- * (§6 item 4). One append-only row per DF2.7 `cost` event, keyed by a
+ * (§6 item 4). One append-only row per ingested event, keyed by a
  * deterministic digest: a redelivered line digests identically and lands on
  * `INSERT … ON CONFLICT DO NOTHING`, never an update. Money is integer
  * micro-dollars everywhere (DD-9); the one float→µ$ conversion happens here at
@@ -11,6 +11,19 @@
  * the gate reads that same SUM inside a BEGIN IMMEDIATE admission
  * transaction, because a bare read-and-compare is a TOCTOU two concurrent
  * dispatches can both win (R2 §6 serialized-admission mandate).
+ *
+ * **What actually reaches this ledger today (F001).** `kind='box_hours'` rows
+ * only. `teardown.ts` writes those; `ingestCostEvent`, the only writer of
+ * `kind='tokens'` rows, has no caller outside `tests/` — nothing bridges the
+ * DF2.7 `CostEvent`s that `cli-anything/src/runner.ts` emits into this store.
+ * So every figure derived here, `admitIssue`'s cap included, is box time and
+ * no token spend. INV-COST-2 still holds as written — the SUM is derived and
+ * nothing is denormalized — but it promises DERIVATION, never COMPLETENESS,
+ * and the two must not be confused while reading a total. `qds-cost` says so
+ * out loud on every degraded ledger (`emitTokenBridgeState`, code
+ * `tokens-ledger-unwired`). Q1 of `docs/decisions/2026-08-tech-debt-answers.md`
+ * deferred (did not drop) the bridge: the writer and its tests stay, ready for
+ * the one dispatcher call site that would make the prose above complete.
  *
  * The float accumulator this design exists to NOT be: inkwell's tracer keeps
  * `total_cost REAL` and does `total_cost = total_cost + ?` per turn (tracer.py
@@ -640,17 +653,23 @@ export function capForIssue(config: CostConfig, repoSlug: string, issueId: strin
 
 // ─── ledger ──────────────────────────────────────────────────────────────────
 
-/** The DF2.7 wire event as this module receives it — float USD on the wire, µ$ never. */
+/**
+ * The DF2.7 wire event as this module WOULD receive it — float USD on the
+ * wire, µ$ never. No production caller passes one yet (F001, see the header);
+ * the type is the contract the unbuilt bridge would satisfy.
+ */
 export type CostWireEvent = CostEvent;
 
 export type CostRole = "lead" | "worker" | "resident" | "tier1";
 
 /**
- * The attribution context only the spawning dispatcher knows: DF2.7's event
- * carries agent/model/tokens/cost and nothing else, so run/issue/request/role
- * and the invocation counter arrive here. `role` is read from the roster entry
- * the dispatcher spawned under — never inferred from the model slug, the agent
- * name, or emission order.
+ * The attribution context only the spawning dispatcher WOULD know: DF2.7's
+ * event carries agent/model/tokens/cost and nothing else, so run/issue/request/
+ * role and the invocation counter arrive here. `role` is read from the roster
+ * entry the dispatcher spawned under — never inferred from the model slug, the
+ * agent name, or emission order.
+ *
+ * No dispatcher assembles one today (F001): only `tests/` construct this.
  */
 export interface IngestCtx {
   runId: string;
@@ -820,7 +839,16 @@ export class CostLedger {
   // ─── ingest ────────────────────────────────────────────────────────────────
 
   /**
-   * One row per emitted event. A malformed event — non-finite or negative
+   * One row per emitted event — the ONLY writer of `kind='tokens'` rows, and
+   * (F001) a writer with no caller outside `tests/`. The DF2.7 events that
+   * `cli-anything/src/runner.ts` produces are consumed by that runner's own
+   * in-process budget guard and are never handed to this method, so the
+   * behaviour described below is exercised only by its tests. Q1 kept it
+   * deliberately: the bridge is deferred, not dropped, and this is the half
+   * that already exists. Wiring it means one call at the dispatcher site that
+   * consumes the `{kind:"cost"}` team event — nothing here needs to change.
+   *
+   * A malformed event — non-finite or negative
    * `costUsd` — persists with `unpriced = 1` and `cost_micro_usd = 0`, never
    * dropped: an unrecorded cost is an unenforceable cap (AC4). An event with
    * `unpricedTurns > 0` (how DF2.7 marks absent/malformed usage upstream) is
@@ -1009,7 +1037,10 @@ export class CostLedger {
    * timestamps, written at teardown's close step — the one point at which the
    * destroy is confirmed and the lifetime is final. Never from
    * `captureSpend`: that reads the same token money DF2.7 already priced, and
-   * ingesting it would double-count inside the SUM the gate reads.
+   * ingesting it would double-count inside the SUM the gate reads — a rule
+   * that survives F001 unchanged. It is about which SOURCE owns token money,
+   * not about whether that money currently arrives; when the bridge lands,
+   * `ingestCostEvent` is still the one writer, and `captureSpend` is still not.
    *
    * F8 (2026-08-24): the DF2.8 story originally specified ceil(lifetime in
    * whole hours) × rate — a 1-hour MINIMUM per box. Live evidence (a ~20s box
@@ -1199,12 +1230,16 @@ export class CostLedger {
 
   // ─── views ─────────────────────────────────────────────────────────────────
 
-  /** The run-keyed view (DF5.3 audit hop 3 / DF5.4 C10) — same schema as the issue view. */
+  /** The run-keyed view (DF5.3 audit hop 3 / DF5.4 C10) — same schema, and the same F001 box-hours-only caveat, as the issue view. */
   readRunCost(runId: string): CostView {
     return this.view("run_id = ?", [runId], "run_id = ? AND unpriced = 0", [runId], "run_id = ? AND unpriced = 1", [runId]);
   }
 
-  /** The issue-keyed view — the same SUM the gate reads (INV-COST-2). */
+  /**
+   * The issue-keyed view — the same SUM the gate reads (INV-COST-2: derived,
+   * never denormalized; see the header for what that does NOT promise while
+   * F001 stands — the rows summed here are box hours only).
+   */
   readIssueCost(repoSlug: string, issueId: string): CostView {
     const all = issueScopeSql();
     const priced = `${all} AND unpriced = 0`;
@@ -1289,6 +1324,55 @@ export class CostLedger {
       )
       .all(...issueScopeKeys(repoSlug, issueId)) as { run_id: string; total: number; hasBox: number }[];
     return rows.map((r) => ({ runId: r.run_id, totalMicroUsd: r.total, hasBoxHours: r.hasBox === 1 }));
+  }
+
+  /**
+   * F001 / Q1 ("deferred", `docs/decisions/2026-08-tech-debt-answers.md`):
+   * announce that this ledger holds no `kind='tokens'` row at all.
+   *
+   * `ingestCostEvent` is the only writer of those rows, and nothing in the
+   * dispatch path calls it — the DF2.7 `cost` events the CLI runner emits
+   * (`cli-anything/src/runner.ts`) never reach this store. The bridge is
+   * designed, typed and tested; it is not built. So a real ledger holds box
+   * hours only, and every per-issue figure derived from it — this store's
+   * views AND `admitIssue`'s cap — counts box time and no token spend. The gap
+   * is money-shaped, so it is stated on the operator's own channel instead of
+   * being left to a docstring nobody reads while budgeting.
+   *
+   * Ledger-WIDE, not issue-scoped: the claim is about the WIRING, so a single
+   * token row anywhere is proof enough that the bridge is live, and an issue
+   * that happens to have spent nothing on tokens is not evidence of anything.
+   * A `LIMIT 1` existence probe, never a COUNT — the answer is a boolean.
+   *
+   * Returns whether the ledger is degraded, so a caller can branch without
+   * re-querying. Guarded like every other emission here: a raising sink must
+   * not convert a report into a thrown error.
+   */
+  // ponytail: this DECLARES the F001 gap rather than closing it — token spend
+  // stays outside every per-issue cap, and only an operator reading qds-cost
+  // learns that. Upgrade path: one `ingestCostEvent` call at the dispatcher
+  // site that consumes the `{kind:"cost"}` team event, after which this method
+  // can only ever return false and should be deleted with its tests.
+  emitTokenBridgeState(): boolean {
+    this.assertQueryable();
+    const row = this.db.prepare("SELECT 1 AS present FROM cost_events WHERE kind = 'tokens' LIMIT 1").get() as
+      | { present: number }
+      | null
+      | undefined;
+    if (row !== null && row !== undefined) return false;
+    emitGuarded({
+      requestId: newRequestId(),
+      operation: "cost-ledger.token-bridge",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "ok",
+      code: "tokens-ledger-unwired",
+      ledgerPath: this.path,
+      message: `no kind='tokens' row has ever been written to ${this.path} — the DF2.7 cost-event bridge into this ledger is unbuilt, so per-issue caps count box-hours only and token spend is unbudgeted`,
+      outcome: "token-bridge-unwired",
+    });
+    return true;
   }
 
   private assertQueryable(): void {

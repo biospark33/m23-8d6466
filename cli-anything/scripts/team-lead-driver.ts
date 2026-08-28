@@ -93,7 +93,13 @@ function comsEvent(
  *
  * Both emit sites (worker and lead) go through here, so the wire shape cannot
  * drift between them and there is exactly one accounting path: the numbers the
- * budget guard reads are the numbers the ledger reads (INV-COST-2).
+ * budget guard reads are the numbers the host ledger WOULD read (INV-COST-2).
+ *
+ * NOTE (F001): would. Nothing consumes these events into
+ * `src/providers/cost-ledger.ts` — the in-process budget guard in
+ * `runner.ts` is their only reader today, and the host ledger's per-issue cap
+ * sees box-hours only. The single accounting path is a property of this emit
+ * site, not yet of the system.
  */
 function costEvent(
   agentId: string,
