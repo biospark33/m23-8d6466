@@ -17,8 +17,18 @@
  *
  * Observability (CC-9): each op logs via P0.7 `log()` with the canonical
  * `{requestId, operation, bankId, timestamp, duration, status, error?}` shape.
- * Metrics emitted as log fields: `recall_ms`, `consolidate_ms`, `round_trip_ms`.
- * `slow_query:true` advisory when recall exceeds the 5s semantic target (AC-7).
+ * Metrics emitted as log fields: `recall_ms`, `server_recall_ms`,
+ * `consolidate_ms`, `round_trip_ms`. `slow_query:true` advisory when recall
+ * exceeds the 5s semantic target (AC-7).
+ *
+ * Latency provenance (F009): `recall_ms` and `durations.recall` are measured
+ * HOST-SIDE (wall clock around the client call) — the server's self-reported
+ * `durationMs` cannot be the evidence for the AC-7 target it is judged against.
+ * It is kept as `server_recall_ms` / `durations.serverRecall`.
+ * NOTE: the other four ops (retain/reflect/consolidate/post-recall) still
+ * record the server's self-report; F009 scopes the fix to the figure the 5s
+ * verdict depends on. Extend the same treatment if one of those ever gains a
+ * threshold of its own.
  *
  * Error surface (CC-W3 surface (b)): on `HindsightHttpError` from any op,
  * returns `{ok:false, error:{code,message}, requestId, step}` — NOT shaped as
@@ -128,7 +138,19 @@ export interface VerifyRoundTripOptions {
 
 export interface RoundTripDurations {
   retain: number;
+  /**
+   * Initial recall latency measured HOST-SIDE (wall clock around the client
+   * call), not the server's self-report — F009. This is the figure the AC-7
+   * 5s target is judged against: `client.ts`'s mock body reports
+   * `durationMs: 0`, which made a server-reported target vacuously green.
+   */
   recall: number;
+  /**
+   * The server's OWN reported duration for the same initial recall
+   * (`durationMs`). Kept alongside `recall` so a large host/server gap —
+   * network or client overhead rather than slow retrieval — stays visible.
+   */
+  serverRecall: number;
   reflect: number;
   consolidate: number;
   postRecall: number;
@@ -186,6 +208,7 @@ export async function verifyRoundTrip(
   const durations: RoundTripDurations = {
     retain: 0,
     recall: 0,
+    serverRecall: 0,
     reflect: 0,
     consolidate: 0,
     postRecall: 0,
@@ -250,12 +273,21 @@ export async function verifyRoundTrip(
     const start = Date.now();
     let status: "ok" | "error" = "ok";
     let errMsg: { code: string; message: string } | undefined;
+    // F009: `recallMs` is the HOST-side elapsed time around the client call.
+    // It used to be `res.durationMs` — the server's self-report — so the AC-7
+    // slow-query verdict below and every reported latency trusted the thing
+    // being measured. `client.ts`'s mockBody reports `durationMs: 0`, making
+    // the 5s target vacuously green. The server's figure is kept as
+    // `serverRecallMs` so a host/server gap stays diagnosable.
     let recallMs = 0;
+    let serverRecallMs = 0;
     let results: readonly { content: string }[] = [];
     try {
       const res = await client.recall(bankId, query, VERIFIER_RECALL_LIMIT);
-      recallMs = res.durationMs;
+      recallMs = Date.now() - start;
+      serverRecallMs = res.durationMs;
       durations.recall = recallMs;
+      durations.serverRecall = serverRecallMs;
       results = res.results;
     } catch (e) {
       status = "error";
@@ -273,6 +305,7 @@ export async function verifyRoundTrip(
         duration: Date.now() - start,
         status,
         recall_ms: recallMs,
+      server_recall_ms: serverRecallMs,
         error: errMsg,
       });
       return { ok: false, step: "recall", error: errMsg, requestId };
@@ -293,6 +326,7 @@ export async function verifyRoundTrip(
         duration: Date.now() - start,
         status,
         recall_ms: recallMs,
+      server_recall_ms: serverRecallMs,
         error: errMsg,
       });
       return { ok: false, step: "recall", error: errMsg, requestId };
@@ -313,6 +347,7 @@ export async function verifyRoundTrip(
         duration: Date.now() - start,
         status,
         recall_ms: recallMs,
+      server_recall_ms: serverRecallMs,
         error: errMsg,
       });
       return { ok: false, step: "recall", error: errMsg, requestId };
@@ -327,6 +362,7 @@ export async function verifyRoundTrip(
       duration: Date.now() - start,
       status,
       recall_ms: recallMs,
+      server_recall_ms: serverRecallMs,
       ...(slowQuery ? { slow_query: true } : {}),
     });
   }
@@ -542,6 +578,8 @@ export async function verifyRoundTrip(
   // Wall clock (Date.now - wallStart) would also include inter-op gaps; we keep
   // `wallStart` around for future profiling but report the op-time sum as
   // round_trip_ms so the metric reflects time actually spent in Hindsight.
+  // `serverRecall` is deliberately NOT summed — it is a second view of the same
+  // recall, not a sixth operation.
   durations.total =
     durations.retain +
     durations.recall +
@@ -563,6 +601,7 @@ export async function verifyRoundTrip(
     status: "ok",
     round_trip_ms: roundTripMs,
     recall_ms: durations.recall,
+    server_recall_ms: durations.serverRecall,
     consolidate_ms: durations.consolidate,
     ...(slowQuery ? { slow_query: true } : {}),
   });

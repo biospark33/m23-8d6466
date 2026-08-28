@@ -699,7 +699,7 @@ const OK_ROUND_TRIP: RoundTripResult = {
   insightCount: 2,
   consolidatedCount: 1,
   preservedCount: 1,
-  durations: { retain: 1, recall: 1, reflect: 1, consolidate: 1, postRecall: 1, total: 5 },
+  durations: { retain: 1, recall: 1, serverRecall: 1, reflect: 1, consolidate: 1, postRecall: 1, total: 5 },
   slowQuery: false,
   requestId: "r-1",
 };
