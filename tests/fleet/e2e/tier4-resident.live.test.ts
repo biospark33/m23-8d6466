@@ -40,8 +40,8 @@
  * NO FAKES anywhere in this file.
  */
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, copyFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
@@ -387,17 +387,29 @@ test.todoIf(liveTodoOff())(
       ]);
 
       // ── 5. L2 STEERED: real pi, real OpenRouter, real directives ───────
-      // QDS_PI_CATALOG_DIR: this host's global-npm pi ships no bundled
-      // provider data (deviation-ledger #8's seam), and loadBundledCatalog
-      // throws BEFORE the custom registry is consulted — without the override
-      // the resident arms then dies "rate_unresolved". The fixture catalog's
-      // rates are the host models.json integers (config parity; the resident
-      // reads input/output only, identical in both). Usage and spend substrate
-      // stay 100% real.
+      // HOST-PI ISOLATION (proven by live A/B, 2026-08-28): this host's pi
+      // resolves auth.json's openrouter entry OVER env OPENROUTER_API_KEY, and
+      // that stored key is dead — every call 401s "User not found", pi exits 0
+      // with EMPTY content, and steering fail-closed degrades (which is itself
+      // INV-RES-5 working as designed). The resident slug additionally exists
+      // only through ~/.pi/agent/models.json (custom registry). So the armed
+      // legs run pi under an ISOLATED HOME carrying a copy of models.json and
+      // NO auth.json: model resolution intact, auth strictly from the minted
+      // env key. A/B evidence: isolated-home + minted key → stopReason "stop",
+      // 4857 in / 68 out, $0.0004008 real spend.
+      // QDS_PI_CATALOG_DIR: the host's global-npm pi ships no bundled provider
+      // data either (deviation-ledger #8's seam), and loadBundledCatalog throws
+      // BEFORE the custom registry is consulted — the fixture catalog's rates
+      // are the host models.json integers (config parity). Usage and spend
+      // substrate stay 100% real.
+      const piHome = join(workspace, "pi-home");
+      mkdirSync(join(piHome, ".pi", "agent"), { recursive: true });
+      copyFileSync(join(homedir(), ".pi", "agent", "models.json"), join(piHome, ".pi", "agent", "models.json"));
       const piCatalogDir = join(REPO_ROOT, "tests/phase-engine/fixtures/pi-catalog");
       const l2 = await runLeg("l2-steered", deliveredDir, witness.requestId as string, {
         OPENROUTER_API_KEY: minted.key,
         QDS_PI_CATALOG_DIR: piCatalogDir,
+        HOME: piHome,
       });
       const l2Actions = l2.solicits.map((s) => s.directiveAction);
       const l2Aborted = l2Actions.includes("abort");
@@ -477,6 +489,7 @@ test.todoIf(liveTodoOff())(
       const l3 = await runLeg("l3-degraded", deliveredDir, witness.requestId as string, {
         OPENROUTER_API_KEY: minted.key,
         QDS_PI_CATALOG_DIR: piCatalogDir,
+        HOME: piHome,
         QDS_RESIDENT_TIMEOUT_MS: `${T4_DEGRADE_TIMEOUT_MS}`,
       });
       evidence.push({
