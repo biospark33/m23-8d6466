@@ -93,6 +93,7 @@ export const MCP_INVOKE_RESULT_MAX_BYTES = 1_048_576;
  * carries the half that actually bounds what an untrusted subprocess can push
  * through us.
  */
+// z.unknown() NAMES the contract; MCP_INVOKE_RESULT_MAX_BYTES is what enforces it.
 export const MCPInvokeResultSchema = z.unknown();
 
 /** Thrown when a result exceeds MCP_INVOKE_RESULT_MAX_BYTES. */

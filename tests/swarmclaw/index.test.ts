@@ -117,6 +117,7 @@ test("the correct token reaches the route table (and the 413 guard below it)", a
 test("with no token configured the surface is unauthenticated as before", async () => {
   cleanups.push(saveEnv("SWARMCLAW_AUTH_TOKEN"));
   // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
   delete process.env.SWARMCLAW_AUTH_TOKEN;
   const { url } = serve();
   expect((await fetch(`${url}/nope`, { method: "GET" })).status).toBe(404);
@@ -137,6 +138,7 @@ test.each([
   ["malformed", "POST /api/agents HTTP/1.1\r\nHost: a b c\r\n\r\n"],
 ])("a %s Host header is refused bodyless, with no stack", async (_label, request) => {
   cleanups.push(saveEnv("SWARMCLAW_AUTH_TOKEN"));
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
   delete process.env.SWARMCLAW_AUTH_TOKEN;
   const { port } = serve();
   const res = await rawRequest(port, request);
@@ -154,4 +156,73 @@ test("the 401 names the scheme in WWW-Authenticate", async () => {
   const res = await fetch(`${url}/api/agents`, { method: "POST", body: "{}" });
   expect(res.status).toBe(401);
   expect(res.headers.get("www-authenticate")).toBe("Bearer");
+});
+
+// ---------------------------------------------------------------------------
+// Startup refusals. A blank credential and an unpaired non-loopback bind are
+// silent fail-opens: the process comes up looking configured and is not. Both
+// are refused at construction, before the listener exists.
+// ---------------------------------------------------------------------------
+
+test.each([
+  ["blank", ""],
+  ["whitespace-only", "   "],
+])("a %s SWARMCLAW_AUTH_TOKEN is a startup refusal, not an unauthenticated boot", (_label, value) => {
+  cleanups.push(saveEnv("SWARMCLAW_AUTH_TOKEN"));
+  process.env.SWARMCLAW_AUTH_TOKEN = value;
+  expect(() => createServer(0)).toThrow(/SWARMCLAW_AUTH_TOKEN is set but blank/);
+});
+
+test("a non-loopback SWARMCLAW_BIND without a token is a startup refusal", () => {
+  cleanups.push(saveEnv("SWARMCLAW_BIND"), saveEnv("SWARMCLAW_AUTH_TOKEN"));
+  process.env.SWARMCLAW_BIND = "0.0.0.0";
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  delete process.env.SWARMCLAW_AUTH_TOKEN;
+  expect(() => createServer(0)).toThrow(/SWARMCLAW_AUTH_TOKEN is required/);
+});
+
+test("a non-loopback SWARMCLAW_BIND paired with a token starts", () => {
+  cleanups.push(saveEnv("SWARMCLAW_BIND"), saveEnv("SWARMCLAW_AUTH_TOKEN"));
+  process.env.SWARMCLAW_BIND = "0.0.0.0";
+  process.env.SWARMCLAW_AUTH_TOKEN = "t0ken";
+  expect(serve().hostname).toBe("0.0.0.0");
+});
+
+test.each(["127.0.0.1", "::1", "localhost"])(
+  "loopback bind %s needs no token",
+  (bind) => {
+    cleanups.push(saveEnv("SWARMCLAW_BIND"), saveEnv("SWARMCLAW_AUTH_TOKEN"));
+    process.env.SWARMCLAW_BIND = bind;
+    // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+    delete process.env.SWARMCLAW_AUTH_TOKEN;
+    expect(() => serve()).not.toThrow();
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Browser-origin CSRF. The loopback listener is reachable from any page the
+// user has open; a simple no-cors POST needs no preflight, and safeJson never
+// checks content-type. No legitimate caller here is a browser, so an Origin
+// header at all is the signal.
+// ---------------------------------------------------------------------------
+
+test("a request carrying an Origin header is refused, even with a valid token", async () => {
+  cleanups.push(saveEnv("SWARMCLAW_AUTH_TOKEN"));
+  process.env.SWARMCLAW_AUTH_TOKEN = "t0ken";
+  const { url } = serve();
+  const res = await fetch(`${url}/api/mcp-servers`, {
+    method: "POST",
+    headers: { origin: "http://evil.example", authorization: "Bearer t0ken" },
+    body: "{}",
+  });
+  expect(res.status).toBe(403);
+  expect(await res.text()).toBe("");
+});
+
+test("a request with no Origin header is unaffected", async () => {
+  cleanups.push(saveEnv("SWARMCLAW_AUTH_TOKEN"));
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  delete process.env.SWARMCLAW_AUTH_TOKEN;
+  const { url } = serve();
+  expect((await fetch(`${url}/nope`, { method: "GET" })).status).toBe(404);
 });

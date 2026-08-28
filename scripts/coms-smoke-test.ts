@@ -57,6 +57,9 @@
  *   PI_SMOKE_MODEL=openrouter/anthropic/claude-haiku-4.5 bun scripts/coms-smoke-test.ts
  *   # or, to deliberately pass the FULL ambient env to the spawned pi processes:
  *   PI_SMOKE_ALLOW_FULL_ENV=1 bun scripts/coms-smoke-test.ts
+ *
+ *   Exit 2 = env_scope refusal (F013): the message on stderr says which
+ *   provider key is missing. Nothing was spawned and no report is written.
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
@@ -1338,8 +1341,15 @@ async function pathSocketComs(): Promise<{
 // not spawn pi, resolve the child env, or emit a report.
 if (import.meta.main) {
 	// Resolve the child env FIRST so an F013 fail-closed refusal aborts before
-	// anything is spawned.
-	childEnv();
+	// anything is spawned. Fail closed but not loudly: the refusal is an
+	// operator configuration message, not a crash, and no JSON report is owed
+	// on this path — nothing ran.
+	try {
+		childEnv();
+	} catch (err) {
+		process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+		process.exit(2);
+	}
 	let pinnedVersion: string | null = null;
 	let modelsComs = 0;
 	let modelsComsNet = 0;

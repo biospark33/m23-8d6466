@@ -43,6 +43,17 @@ export function createServer(port = 0): SwarmClawServer {
   // would fail open silently.
   const hostname = process.env.SWARMCLAW_BIND?.trim() || "127.0.0.1";
 
+  // Both of these are silent fail-opens if tolerated: the process comes up
+  // looking configured and is not. Refuse at construction, before a listener
+  // exists. (A sourced .env or `docker --env-file` is the realistic path to a
+  // blank token — which is why .env.example keeps that line commented out.)
+  const startupToken = resolveAuthToken();
+  if (!LOOPBACK_HOSTS.has(hostname.toLowerCase()) && startupToken === undefined) {
+    throw new Error(
+      `SWARMCLAW_BIND=${hostname} waives the loopback bind, so SWARMCLAW_AUTH_TOKEN is required`,
+    );
+  }
+
   const server = Bun.serve({
     port,
     hostname,
@@ -91,12 +102,27 @@ export function createServer(port = 0): SwarmClawServer {
         return new Response(null, { status: 403, headers: { "x-request-id": requestId, connection: "close" } });
       }
 
+      // No legitimate caller of this surface is a browser, and a browser is
+      // the one client that attaches Origin. The loopback listener is
+      // reachable from any page the user has open, a `mode: "no-cors"` POST is
+      // a simple request (no preflight to fail), and safeJson never checks
+      // content-type — so the presence of the header at all is the signal.
+      if (req.headers.get("origin") !== null) {
+        logRefusal("http.origin_rejected", "403", "browser-origin request");
+        return new Response(null, { status: 403, headers: { "x-request-id": requestId, connection: "close" } });
+      }
+
       // F002: bearer credential, checked ABOVE the 413 guard so an
       // unauthenticated caller learns nothing about the body limit and cannot
       // spend the drain budget. Opt-in: unset SWARMCLAW_AUTH_TOKEN leaves the
       // surface as it was (loopback-only is the standing control).
-      const authToken = process.env.SWARMCLAW_AUTH_TOKEN;
-      if (authToken && !bearerMatches(req.headers.get("authorization"), authToken)) {
+      // Read per request, not captured at startup, so a test can flip it.
+      // Keyed on `!== undefined`, not truthiness: startup refuses a
+      // set-but-blank token, so a blank one here is a live env mutation —
+      // nothing matches "", and every request 401s. Fail closed.
+      const rawToken = process.env.SWARMCLAW_AUTH_TOKEN;
+      const authToken = rawToken?.trim();
+      if (rawToken !== undefined && !(authToken && bearerMatches(req.headers.get("authorization"), authToken))) {
         logRefusal("http.unauthorized", "401", "unauthorized");
         // Close rather than keep-alive: the request body is deliberately left
         // unread here, so the connection must not be pooled with those bytes
@@ -173,6 +199,25 @@ export function createServer(port = 0): SwarmClawServer {
   };
 
   return { port: server.port ?? port, hostname: server.hostname ?? hostname, agentStore, mcpStore, stop };
+}
+
+// Hostnames that keep the listener on the machine. Anything else is an
+// explicit waiver of the loopback bind and must carry a credential.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+
+/**
+ * The configured bearer token, trimmed. Blank is a configuration ERROR, not
+ * "run unauthenticated": `SWARMCLAW_AUTH_TOKEN=` would otherwise boot silently
+ * open, and a whitespace-only value would be a guessable credential.
+ */
+function resolveAuthToken(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env.SWARMCLAW_AUTH_TOKEN;
+  if (raw === undefined) return undefined;
+  const token = raw.trim();
+  if (!token) {
+    throw new Error("SWARMCLAW_AUTH_TOKEN is set but blank — unset it to run unauthenticated, or give it a value");
+  }
+  return token;
 }
 
 // Constant-time `Authorization: Bearer <token>` comparison. The whole header
