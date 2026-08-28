@@ -7,8 +7,10 @@
  * Uses P0.9's shipped `verifyRoundTrip`, which drives the Hindsight REST client
  * directly. That is the right surface for THIS clause — clause 7 is about
  * Hindsight round-tripping, not about the SwarmClaw bridge (clause 6 covers the
- * bridge). It also sidesteps a real defect in the provisioning script's bridge
- * probe, which issues GETs against POST-only SwarmClaw routes.
+ * bridge). (It formerly also sidestepped a defect in the provisioning script's
+ * bridge probe, which issued GETs against POST-only SwarmClaw routes on the
+ * wrong port; F008 fixed the probe, so the clause-scope argument above is now
+ * the only reason this check avoids the bridge.)
  *
  * MUTATION NOTE: a round-trip necessarily retains a memory. The probe content
  * is clearly labelled so the write is identifiable in the bank, and no
