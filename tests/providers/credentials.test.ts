@@ -608,6 +608,33 @@ describe("DF2.3 credential lifecycle", () => {
     expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeFalse();
   });
 
+  test("F004: a mint echo ABOVE the requested cap is refused (over-grant), keyHash still recorded", async () => {
+    // provider "granted" 5 USD against a 1 USD (1_000_000 µ$) request
+    api = new FakeKeyApi({ returnedLimitUsd: 5 });
+    const runId = "df23-overgrant";
+    await makeRun(runId);
+    let err: unknown;
+    try {
+      await mintRunKey(deps({ capMicroUsd: 1_000_000 }), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("mint-ceiling-mismatch");
+    // the refused-but-live key stays reachable for revoke
+    expect(store.get(runId).keyHash).toBeString();
+    // the over-granted ceiling is NOT persisted as this run's limit
+    expect(store.get(runId).limitMicroUsd).toBeUndefined();
+  });
+
+  test("F004: a provider that clamps DOWN is accepted (only over-grants are refused)", async () => {
+    api = new FakeKeyApi({ returnedLimitUsd: 0.25 });
+    const runId = "df23-clamped";
+    await makeRun(runId);
+    await mintRunKey(deps({ capMicroUsd: 1_000_000 }), runId);
+    expect(store.get(runId).limitMicroUsd).toBe(250_000);
+  });
+
   test("INV-CRED-1: a malformed limit (0/NaN) is refused like an uncapped one", async () => {
     for (const [i, bad] of [0, Number.NaN].entries()) {
       api = new FakeKeyApi({ returnedLimitUsd: bad });
@@ -883,6 +910,19 @@ describe("openRouterKeyApi (production client, fetch double)", () => {
     const cle = err as CredentialLifecycleError;
     expect(cle.code).toBe("response-unparseable");
     expect(cle.message).not.toContain("secret-key-echo");
+  });
+
+  test("F035: a non-numeric usage is refused as invalid-provider-usage, never converted to NaN", async () => {
+    const api = client();
+    setFetch(async () => jsonResponse({ data: [{ hash: "h1", name: "sbx-a", usage: "n/a" }] }));
+    let err: unknown;
+    try {
+      await api.listAllKeys(20);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("invalid-provider-usage");
   });
 
   test("deleteKey URL-encodes the hash as a single path segment", async () => {
