@@ -2579,6 +2579,45 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     }
   });
 
+  test("AC9: a RECORD holding a limit LARGER than the request is clamped down (defence in depth)", async () => {
+    // F004 refuses an over-granted echo at the mint, so the provider can no
+    // longer put a too-large figure on the record. The downward clamp at
+    // dispatch.ts:2434-2437 still guards the OTHER way in: a record written by
+    // an older binary (before that refusal existed) that already holds one.
+    // Nothing else pins `Math.min` any more — deleting it, or writing `max`,
+    // must fail here.
+    const admittedCeiling = 25_000_000;
+    const staleLimit = 90_000_000; // what an older binary persisted
+    const overStore: RunRecordStore = Object.assign(Object.create(store) as RunRecordStore, {
+      get: (id: string) => ({ ...store.get(id), limitMicroUsd: staleLimit }),
+    });
+
+    const result = await dispatch(
+      validBrief(),
+      deps({ store: overStore, ledgerFactory: () => goodLedger(admittedCeiling) }),
+    );
+
+    // Both carriers name the ADMITTED figure, never the record's larger one.
+    const delivered = await driver.exec(result.vmName, ["sh", "-c", "cat pipeline.yaml"]);
+    expect((JSON.parse(delivered.stdout) as { limitMicroUsd: number }).limitMicroUsd).toBe(admittedCeiling);
+    const ctx = await driver.exec(result.vmName, ["sh", "-c", "cat run-context.json"]);
+    expect((JSON.parse(ctx.stdout) as { effectiveCeilingMicros: number }).effectiveCeilingMicros).toBe(
+      admittedCeiling,
+    );
+    expect(delivered.stdout).not.toContain(String(staleLimit));
+    expect(ctx.stdout).not.toContain(String(staleLimit));
+
+    // …and it is a MONEY event, not a diagnostic: error-classified, naming both.
+    const overLines = entries.filter(
+      (e) => (e.error as { code?: string } | undefined)?.code === "mint-cap-over-request",
+    );
+    expect(overLines).toHaveLength(1);
+    const line = overLines[0] as LogEntry;
+    expect(line.status).toBe("error");
+    expect(String((line.error as { message?: unknown }).message)).toContain(String(staleLimit));
+    expect(String((line.error as { message?: unknown }).message)).toContain(String(admittedCeiling));
+  });
+
   test("AC9: a provider that mints BELOW the request is honoured, and logged as informational", async () => {
     // The control for the clamp above, and the direction that is NOT an
     // incident: the box gets less than it asked for and dies against a limit it

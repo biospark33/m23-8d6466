@@ -69,10 +69,12 @@ export const MAX_VERIFY_PAGES = 20;
  * Cost events arriving on DF2.7's wire convert in cost-ledger.ts's own
  * `usdToMicros` — the two boundaries are distinct; neither is the only one.
  *
- * Finite guard: every input here is a provider-reported number. A NaN reaching
- * `store.set` throws a generic "must be an integer" from teardown's SPEND step,
- * aborting before revoke and leaving the key live — so it is refused typed and
- * early instead (F035).
+ * Finite guard: every input here is a provider-reported number, and a NaN
+ * reaching `store.set` surfaces as a generic "must be an integer". This is the
+ * backstop; `captureSpend` refuses this run's own bad usage first, with a
+ * message that names the run. Teardown still ABORTS at the spend step and
+ * leaves the key live when THIS run's usage is malformed — moving revoke ahead
+ * of spend is a separate change, not this one (F035).
  */
 function usdToMicros(usd: number): number {
   if (!Number.isFinite(usd)) {
@@ -450,6 +452,21 @@ export async function captureSpend(deps: CredentialDeps, runId: string): Promise
     // looking lie. Return the last stored spend untouched.
     return rec.spendMicroUsd ?? 0;
   }
+  // F035: this run's own usage is unusable — refuse typed, naming the run and
+  // the key, rather than letting NaN reach `store.set` and surface as a generic
+  // "spendMicroUsd must be an integer". Scoped to the matched entry so an
+  // unrelated malformed row in the listing costs this run nothing.
+  // NOT a negative check: a negative usage is a REACHABLE provider behaviour
+  // (refunds) that downstream classification already fail-closes to 0 while
+  // still tearing down — refusing it here would strand the live key, the exact
+  // failure this guard exists to prevent (cap-hit-demo.test.ts:598).
+  if (!Number.isFinite(entry.usageUsd)) {
+    throw new CredentialLifecycleError(
+      "invalid-provider-usage",
+      `provider reported a non-numeric usage (${entry.usageUsd}) for run ${runId}'s key — refusing to record it as spend`,
+      `read the usage by hand and record it, then tear down: curl 'https://openrouter.ai/api/v1/keys?offset=0' -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
+    );
+  }
   const spendMicroUsd = usdToMicros(entry.usageUsd);
   deps.store.set(runId, { spendMicroUsd });
   return spendMicroUsd;
@@ -747,21 +764,17 @@ export function openRouterKeyApi(opts: OpenRouterKeyApiOptions = {}): KeyApi {
     // any of the candidate names, absent otherwise. Absence must degrade to
     // `key-age-unavailable`, never to an assumed age (DF2.6 D2).
     const created = k.createdAt ?? k.creation_time ?? k.created_at;
-    // F035: an unvalidated `usage` used to become NaN here and surface as a
-    // generic "spendMicroUsd must be an integer" from teardown's SPEND step —
-    // aborting BEFORE revoke and leaving the key live. Refuse it typed instead.
-    const usageUsd = Number(k.usage ?? 0);
-    if (!Number.isFinite(usageUsd) || usageUsd < 0) {
-      throw new CredentialLifecycleError(
-        "invalid-provider-usage",
-        `GET /keys reported an unusable usage (${JSON.stringify(k.usage)}) for key ${String(k.hash ?? "")}`,
-        "inspect the provider console for this key's usage, revoke it by hand, then re-run",
-      );
-    }
+    // F035: `usage` is unvalidated provider text and may not be a number. This
+    // mapper stays TOLERANT on purpose — it runs over EVERY row of the listing,
+    // so throwing here would let one unrelated malformed key abort the spend
+    // step of every other run (before revoke, leaving keys live) and break the
+    // reaper's sweep (reaper.ts:386 ⇒ list-unverified). A non-numeric value is
+    // carried through as NaN and refused in `captureSpend`, which reads only
+    // THIS run's entry — a poisoned row fails just the run that owns it.
     return {
       hash: String(k.hash ?? ""),
       name: String(k.name ?? k.label ?? ""),
-      usageUsd,
+      usageUsd: Number(k.usage ?? 0),
       ...(typeof created === "string" && created !== "" ? { createdAt: created } : {}),
     };
   }

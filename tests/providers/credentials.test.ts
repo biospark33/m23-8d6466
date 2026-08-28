@@ -652,6 +652,44 @@ describe("DF2.3 credential lifecycle", () => {
     }
   });
 
+  test("F035: captureSpend refuses THIS run's malformed usage instead of writing NaN", async () => {
+    const runId = "df23-bad-usage";
+    await makeRun(runId);
+    const hash = await mintFor(runId);
+    const poisoned: KeyApi = {
+      ...api,
+      createKey: (n, l) => api.createKey(n, l),
+      listAllKeys: (m) => api.listAllKeys(m),
+      deleteKey: (h) => api.deleteKey(h),
+      getKeyEntry: async () => ({
+        entry: { hash, name: `${SBX_KEY_PREFIX}${runId}`, usageUsd: Number.NaN },
+        truncated: false,
+      }),
+    };
+    let err: unknown;
+    try {
+      await captureSpend(deps({ keyApi: poisoned }), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("invalid-provider-usage");
+    expect((err as CredentialLifecycleError).message).toContain(runId);
+    // no authoritative-looking spend was written
+    expect(store.get(runId).spendMicroUsd).toBeUndefined();
+  });
+
+  test("F035: a NEGATIVE usage (provider refund) is NOT refused — it must reach teardown", async () => {
+    // The refund case is reachable provider behaviour and is fail-closed
+    // downstream (cap-hit-demo.test.ts:598). Refusing it here would abort before
+    // revoke and strand the live key — the very failure F035 is about.
+    const runId = "df23-refund";
+    await makeRun(runId);
+    const hash = await mintFor(runId);
+    api.setUsage(hash, -0.000002);
+    expect(await captureSpend(deps(), runId)).toBe(-2);
+  });
+
   test("captureSpend on a key absent from a fully-enumerated list records nothing, returns last spend", async () => {
     const runId = "df23-absent";
     await makeRun(runId);
@@ -912,17 +950,31 @@ describe("openRouterKeyApi (production client, fetch double)", () => {
     expect(cle.message).not.toContain("secret-key-echo");
   });
 
-  test("F035: a non-numeric usage is refused as invalid-provider-usage, never converted to NaN", async () => {
+  test("F035: a malformed usage row does NOT abort the listing — every other key still enumerates", async () => {
+    // Refusing inside the per-entry mapper would let ONE unrelated poisoned row
+    // abort the spend step of every run (before revoke, leaving keys live) and
+    // break the reaper's sweep. The listing stays tolerant; the refusal lives in
+    // `captureSpend`, on the entry that run actually owns.
     const api = client();
-    setFetch(async () => jsonResponse({ data: [{ hash: "h1", name: "sbx-a", usage: "n/a" }] }));
-    let err: unknown;
-    try {
-      await api.listAllKeys(20);
-    } catch (e) {
-      err = e;
-    }
-    expect(err).toBeInstanceOf(CredentialLifecycleError);
-    expect((err as CredentialLifecycleError).code).toBe("invalid-provider-usage");
+    let page = 0;
+    setFetch(async () =>
+      jsonResponse(
+        page++ === 0
+          ? {
+              data: [
+                { hash: "poisoned", name: "sbx-someone-else", usage: "n/a" },
+                { hash: "healthy", name: "sbx-mine", usage: 0.5 },
+              ],
+            }
+          : { data: [] },
+      ));
+    const list = await api.listAllKeys(20);
+    expect(list.truncated).toBeFalse();
+    expect(list.entries).toHaveLength(2);
+    // the healthy row is intact and readable by hash — the reaper's path too
+    expect(list.entries.find((k) => k.hash === "healthy")?.usageUsd).toBe(0.5);
+    // and the poisoned row carries NaN rather than a fabricated 0
+    expect(list.entries.find((k) => k.hash === "poisoned")?.usageUsd).toBeNaN();
   });
 
   test("deleteKey URL-encodes the hash as a single path segment", async () => {
