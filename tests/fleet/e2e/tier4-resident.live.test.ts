@@ -161,6 +161,13 @@ async function runLeg(
   mkdirSync(legDir, { recursive: true });
   const tmp = join(legDir, "tmp");
   mkdirSync(tmp, { recursive: true });
+  // INV-1 (pipeline-run): the manifest must resolve INSIDE --run-root, so each
+  // leg carries its own copy of the delivered pair — the copy's mtime is the
+  // fetch moment, fresh inside the S28 ±30 min witness window.
+  const legDelivered = join(legDir, "delivered");
+  mkdirSync(legDelivered, { recursive: true });
+  writeFileSync(join(legDelivered, "pipeline.yaml"), readFileSync(join(deliveredDir, "pipeline.yaml"), "utf8"));
+  writeFileSync(join(legDelivered, "run-context.json"), readFileSync(join(deliveredDir, "run-context.json"), "utf8"));
   const runId = runIdFor(`t4-${leg}`);
   const journalPath = join(legDir, "journal.jsonl");
   const proc = Bun.spawn({
@@ -168,7 +175,7 @@ async function runLeg(
       "bun",
       join(REPO_ROOT, "scripts/pipeline-run.ts"),
       "--manifest",
-      join(deliveredDir, "pipeline.yaml"),
+      join(legDelivered, "pipeline.yaml"),
       "--journal",
       journalPath,
       "--run-id",
