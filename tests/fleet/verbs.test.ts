@@ -278,6 +278,30 @@ describe("verbs.ts (registry)", () => {
     // same-set test at the bottom of this describe; uniqueness has its own case.
   });
 
+  test("DF3.4's three additive entries: approve, reject, attach", () => {
+    const byName = new Map(listVerbs().map((v) => [v.verb, v]));
+    for (const name of ["approve", "reject", "attach"]) {
+      const entry = byName.get(name);
+      expect({ name, found: entry !== undefined }).toEqual({ name, found: true });
+      // Identical to harvest/teardown. NO 3 (dispatch-only), and there is no 7.
+      // 6 is mandatory even for attach: `finish()` folds an EAGAIN-refused
+      // stdout into 6 for every verb that would otherwise return 0 — the same
+      // reason `rank` declares it.
+      expect({ name, codes: (entry as VerbEntry).exitCodes }).toEqual({ name, codes: [0, 1, 2, 4, 5, 6] });
+    }
+    const flagNames = (v: string): string[] => (byName.get(v) as VerbEntry).flags.map((f) => f.name);
+    // attach REQUIRES --driver: it reaches into the box over the driver port.
+    expect(flagNames("attach")).toContain("--driver");
+    expect((byName.get("attach") as VerbEntry).flags.find((f) => f.name === "--driver")?.required).toBe(true);
+    // approve/reject take NO --driver — ABSENT, not `required: false`. A
+    // `required: false` --driver is how DF3.5 would generate a skill whose
+    // every call exits 2. `rank` is the precedent.
+    expect(flagNames("approve")).not.toContain("--driver");
+    expect(flagNames("reject")).not.toContain("--driver");
+    // Every verb takes --help; the shape test covers the rest.
+    for (const name of ["approve", "reject", "attach"]) expect(flagNames(name)).toContain("--help");
+  });
+
   test("each verb has exact shape with no extra keys", () => {
     for (const v of listVerbs()) {
       // Exact keys: verb, summary, flags, exitCodes
@@ -488,7 +512,9 @@ describe("verbs.ts (registry)", () => {
       // remaining flags are all genuinely optional, so `required` never appears
       // — the DF3.2 ruling, pinned here so a re-added required flag must argue
       // its way past this sentence.
-      if (entry.verb !== "rank") {
+      // DF3.4: approve/reject join rank as driver-less verbs, and their
+      // remaining flags are all genuinely optional too — same argued exemption.
+      if (!["rank", "approve", "reject"].includes(entry.verb)) {
         expect(entry.flags.some((f) => f.required)).toBe(true);
       }
       expect(entry.flags.some((f) => !f.required)).toBe(true);
@@ -1192,7 +1218,18 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     expect(
       inOrder(["dispatch", "status", "harvest", "teardown", "fanout", "rank"], listVerbs().map((v) => v.verb)),
     ).toBe(true);
+    // DF3.4 added approve/reject/attach to the registry; the approval-gate wave
+    // owns their CLI blocks AND the probe table that pins their exit codes to
+    // real invocations. Their behavioral coverage lives in
+    // `tests/fleet/gate-verbs.test.ts`, so probing them here would duplicate a
+    // contract another suite already asserts — but the ⊆/⊇ set equality below
+    // is this file's alone, and it stays owed. Named rather than silently
+    // skipped, and asserted as an EXACT set: a FOURTH probe-less verb reds
+    // here, and whoever adds probes must delete the name to go green.
+    const PROBES_OWED_ELSEWHERE = ["approve", "reject", "attach"];
+    expect(listVerbs().filter((v) => PROBES[v.verb] === undefined).map((v) => v.verb)).toEqual(PROBES_OWED_ELSEWHERE);
     for (const entry of listVerbs()) {
+      if (PROBES_OWED_ELSEWHERE.includes(entry.verb)) continue;
       const probes = PROBES[entry.verb]!;
       const observed: number[] = [];
       for (const probe of probes) {
@@ -1429,7 +1466,11 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
       listVerbs()
         .filter((v) => !v.flags.some((f) => f.name === "--driver"))
         .map((v) => v.verb),
-    ).toEqual(["rank"]); // DF3.2: rank is the ONE deliberate driver-less verb; a second must argue it here
+      // DF3.2's rank, plus DF3.4's approve/reject: all three touch records only
+      // — approve/reject mutate one record's extensions.approval and provision
+      // nothing, so assertDriverChosen's hazard (a teardown "destroying" a fake
+      // box while the real one bills) cannot arise. A FOURTH must argue it here.
+    ).toEqual(["rank", "approve", "reject"]);
     // The seam the requirement lives behind: an INJECTED deps.driver stands in
     // for the flag entirely — `required` is about ARGV, not about embedders.
     expect(await run(["status"], sink, { store, driver }, sink)).toBe(0);

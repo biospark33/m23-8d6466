@@ -174,6 +174,63 @@ export function listVerbs(): VerbEntry[] {
       // provisions.
       exitCodes: [0, 1, 2, 4, 6],
     },
+    // ── DF3.4's three additive entries. No DF3.1- or DF3.2-owned entry edited.
+    {
+      verb: "approve",
+      summary: "Approve a run paused at the pre-PR gate, releasing it to open its PR",
+      flags: [
+        { name: "--dir", required: false, valueType: "path" },
+        // The approver's id; its token arrives on STDIN, never argv (DF2.3
+        // INV-CRED-3) — which is why no --token flag exists to declare.
+        { name: "--approver", required: false, valueType: "string" },
+        { name: "--reason", required: false, valueType: "string" },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // NO --driver, on `rank`'s precedent: this verb reads and writes one
+      // record's `extensions.approval` and touches no box, so requiring a flag
+      // nothing consumes would train operators to paste magic values. The
+      // assertDriverChosen hazard it exists to stop — a teardown "destroying" a
+      // fake box while the real one keeps billing — is structurally unreachable
+      // for a verb that provisions and destroys nothing. Declaring it
+      // `required: false` instead of omitting it is how DF3.5 would generate a
+      // skill whose every call exits 2.
+      //
+      // Same six as harvest/teardown. No 3 (dispatch-only). 6 = the decision
+      // LANDED and the confirmation line would not print — `finish` folds an
+      // EAGAIN-refused stdout into 6 for every verb that would return 0.
+      exitCodes: [0, 1, 2, 4, 5, 6],
+    },
+    {
+      verb: "reject",
+      summary: "Reject a run paused at the pre-PR gate, settling it without a PR",
+      flags: [
+        { name: "--dir", required: false, valueType: "path" },
+        { name: "--approver", required: false, valueType: "string" },
+        { name: "--reason", required: false, valueType: "string" },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // NO --driver — see approve above; reject is its mirror image.
+      exitCodes: [0, 1, 2, 4, 5, 6],
+    },
+    {
+      verb: "attach",
+      summary: "Queue a steering message for a run's resident agent and wait for its ack",
+      flags: [
+        // REQUIRED here, unlike approve/reject: attach reaches INTO the box
+        // over DF2.1's driver port (exec + stdin to append the inbox line,
+        // exec + cat to read the ack back), so it must never default a driver.
+        { name: "--driver", required: true, valueType: "string" },
+        { name: "--dir", required: false, valueType: "path" },
+        // The message itself; read from STDIN when absent, so operator text
+        // never has to survive a shell's quoting.
+        { name: "--message", required: false, valueType: "string" },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // 6 even though attach provisions nothing: the message can LAND in the
+      // box (or be acked) and the outcome line still fail to print, which is
+      // exactly the case `rank` declares 6 for.
+      exitCodes: [0, 1, 2, 4, 5, 6],
+    },
   ];
 }
 

@@ -798,3 +798,147 @@ describe("fixtures/fake-resident.ts — pi-emulating fixture smoke", () => {
     expect(stdout).toContain('"input":1200');
   });
 });
+
+describe("steering — DF3.4 inbox faults are observable, never silent (F1)", () => {
+  const RATE_F1 = { inputPerMTok: 0, outputPerMTok: 0 };
+
+  test("a NON-ENOENT drain failure is reported on lastDegradationReason and does not abort the solicitation", async () => {
+    // The channel used to fail open to SILENCE. `localSteeringInbox.drain`
+    // deliberately separates ENOENT ("nothing queued", return []) from a real
+    // read error ("could not read", throw) — and drainInbox's blanket catch
+    // collapsed both into "no messages", with nothing logged anywhere.
+    //
+    // The consequence is a documented guarantee turning false: `fleet attach`
+    // tells the operator "the message stays queued — neither dropped nor
+    // re-sent" (attach.ts:235-237). When every drain throws, that message is
+    // never delivered on any later solicitation and NOTHING says so.
+    const eacces = Object.assign(new Error("EACCES: permission denied, open '/run/steering/inbox.ndjson'"), {
+      code: "EACCES",
+    });
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: {
+        drain: async () => {
+          throw eacces;
+        },
+        ack: async () => {},
+      },
+    });
+    const d = await c.solicit("run_start", ctx());
+    // The solicitation still happens: steering is a sidecar and an inbox fault
+    // is not a resident fault. This half is the pre-existing behavior.
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.status).toBe("active");
+    // ...but it is now SAYABLE. This half is the fix.
+    expect(c.lastDegradationReason).toContain("steering inbox");
+    expect(c.lastDegradationReason).toContain("EACCES");
+  });
+
+  test("an EMPTY drain leaves the diagnostic untouched — nothing queued is not a fault", async () => {
+    // The other side of the split. `localSteeringInbox` maps ENOENT to `[]`,
+    // which is the ordinary case on every run before the first attach; it must
+    // never look like a broken channel.
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: { drain: async () => [], ack: async () => {} },
+    });
+    const d = await c.solicit("run_start", ctx());
+    expect(d).toEqual(PROCEED);
+    expect(c.lastDegradationReason).toBeNull();
+  });
+
+  test("onInboxError PUSHES the fault out of the process — fires once, naming the channel", async () => {
+    // lastDegradationReason is a PULL field with no consumer outside this
+    // module (steering.test.ts:468 pins it out of `telemetry` deliberately), so
+    // on its own it does not answer the original defect: the operator has no
+    // way to learn the channel is broken. This is the push half.
+    const seen: { runId: string; requestId?: string; detail: string }[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: {
+        drain: async () => {
+          throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+        },
+        ack: async () => {},
+      },
+      onInboxError: (e) => seen.push(e),
+    });
+    await c.solicit("run_start", ctx());
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.runId).toBe("run-1");
+    expect(seen[0]?.requestId).toBe("req-1");
+    expect(seen[0]?.detail).toContain("steering inbox");
+    expect(seen[0]?.detail).toContain("EACCES");
+  });
+
+  test("onInboxError does NOT fire on an empty drain, nor on an ack failure", async () => {
+    const seen: unknown[] = [];
+    const quiet = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: { drain: async () => [], ack: async () => {} },
+      onInboxError: (e) => seen.push(e),
+    });
+    await quiet.solicit("run_start", ctx());
+    expect(seen).toEqual([]);
+
+    const ackFails = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: {
+        drain: async () => [{ messageId: "m1", message: "steer" }],
+        ack: async () => {
+          throw new Error("EROFS");
+        },
+      },
+      onInboxError: (e) => seen.push(e),
+    });
+    await ackFails.solicit("run_start", ctx({ promptContext: [] }));
+    expect(seen).toEqual([]);
+  });
+
+  test("a THROWING onInboxError does not break the solicitation", async () => {
+    // Same rule as onTripwire's observer: observability is a sidecar and must
+    // never convert a solicitation into a failure.
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: {
+        drain: async () => {
+          throw new Error("EIO");
+        },
+        ack: async () => {},
+      },
+      onInboxError: () => {
+        throw new Error("the observer itself is broken");
+      },
+    });
+    const d = await c.solicit("run_start", ctx());
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.status).toBe("active");
+  });
+
+  test("an ack failure does NOT report a drain fault — the message was still folded", async () => {
+    // The fold already happened; the acks file is evidence, not delivery. An
+    // ack write failure must not be reported as an unreadable channel, or the
+    // diagnostic stops meaning anything.
+    const folded: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: {
+        drain: async () => [{ messageId: "m1", message: "look at the retry budget" }],
+        ack: async () => {
+          throw new Error("EROFS: read-only file system");
+        },
+      },
+    });
+    const c2 = ctx({ promptContext: folded });
+    await c.solicit("run_start", c2);
+    expect(folded.some((l) => l.includes("look at the retry budget"))).toBeTrue();
+    expect(c.lastDegradationReason).toBeNull();
+  });
+});

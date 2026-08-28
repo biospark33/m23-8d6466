@@ -354,7 +354,124 @@ and holds the edge in that direction.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Deviations from the story spec
+
+Nine. Each is a place where the spec, read literally, is wrong about the code it names — not a
+convenience. Evidence is code, not reasoning.
+
+| # | What the story says | What we built | Evidence |
+|---|---------------------|---------------|----------|
+| 1 | **Lock.** Technical Notes (:213-214) and AC1(a2) (:80-83): state transitions take "DF2.1's per-record PID lock". | `withApprovalLock` (`src/reverify/approval.ts:87-174`), held across the state transition **only**, never across teardown. | That lock is `private withLock` inside `RunRecordStore` (`run-record.ts:1396`), taken *internally* by `set()` — so it cannot span a caller's read-then-write, and DF5.1 Deviation 4 records that taking it externally deadlocks. It also blocks the event loop via `Atomics.wait` (`run-record.ts:1986`) for up to `LOCK_TIMEOUT_MS` 5_000. AC1(a) already states the accurate version ("the store's public patch API, which takes the per-record PID lock internally"); AC1(a2) does not. Corollary the story misses: teardown is seconds-to-minutes, so the lock must not wrap it. |
+| 2 | **Redundant revoke.** AC1(b) (:97-99) and INV-APPROVE-6 (:301-308) mandate a `revokeAndVerify(keyHash)` call after `teardownSandbox` — and disagree with each other about its position. | No separate call. `teardownSandbox` is consumed as-is. | `teardown.ts:423-438` already runs revoke (step 4) then verify (step 5) inside its fixed order. A second call converts a provider-list hiccup into a hard failure of an already-successful pause. `src/providers/teardown.ts` has four claimants (DF2.5/DF4.2/DF2.8/DF5.3) and DF3.4 is not one — zero edits. |
+| 3 | **`teardownSandbox` signature.** Spelled `teardownSandbox(runId, { noHarvest: true })` at :45, :97, :185, :328. | `teardownSandbox(deps, runId, { noHarvest: true })`. | Real signature is `teardownSandbox(deps: TeardownDeps, runId: string, opts: TeardownOptions = {})` — `teardown.ts:284`. The `noHarvest` option is honoured at `:367` and `:411`. |
+| 4 | **Ack transport.** AC6 (:148-149) and Technical Notes (:229-231) mandate `driver.copyFile(vm, "/run/steering/acks.ndjson", <host tmp>)`. | `driver.exec(vm, ["sh","-c", "cat <quoted path>"])`. Both attach legs are now `exec`: append via stdin, ack via `cat`. | `copyFile` **refuses absolute paths on both drivers** — `assertBoxPathSafe` (`src/providers/exedev/driver.ts:604-614`) rejects any path with a leading `/` as `remote-path-invalid`, and the fake driver mirrors the guard. This exact bug already burned fan-out in production: `fanout-primitive.ts:688-696` carries the dated live measurement `fan-20260826-f04c3c` — "a copyFile read died `remote-path-invalid` on every tick and the race spun to its ceiling". `exec`+`cat` is the repo's own adopted fix. A one-verb spec correction; no driver path-safety surface changes. |
+| 5 | **Ack placement.** AC6 (:146-149) implies the ack lands on the accepted path. | Ack at **drain time** (in a `finally`), not at the `steering.ts:429` seam. | The `:429` seam sits after every early return — degraded `:338`, render fail `:354`, call fail `:369`, malformed `:386`, schema reject `:393`, allowlist/roster `:401`/`:410`/`:419` — each of which returns PROCEED without reaching it. A message that *was* drained and folded into prompt context would go un-acked and attach would wrongly report `attach-not-acked`. AC6 defines the ack as the message "appear[ing] in that solicitation's prompt context", not as directive acceptance, so drain-time is what the spec text actually says. |
+| 6 | **Char ceiling attribution.** :245 attributes the 4_000-char attach bound to "DF3.6's bound, which the gate consumes rather than re-implements". | Import `DIRECTIVE_TEXT_CHAR_CEILING` (= 4_000) from DF3.3's `steering.ts:33`. | Misattribution. DF3.6 defines exactly three bounds (df3-6 `:140-143`: `maxSteeringIterations` 8/phase, `residentRssBytes` 512MiB, `residentSpendCeilingMicros` 2e6) and none is a char cap; its only attach mention (`:123`) delegates *to* DF3.4. The constant is DF3.3-owned, already exported, and its docstring rationale is verbatim the attach case. Recorded so the misattribution does not propagate. |
+| 7 | **`supersededReportIds` justification.** :206-208 says the history is carried "for DF5.3's audit chain". | Full ordered array built — but on DF3.4's own authority, not DF5.3's. | DF5.3's hop table (`df5-3-audit-chain-extended.md:120`) carries hop 8 as `run → approval | approver id, decision, decidedAt` — and the whole story has **zero** matches for `superseded`, `rebind`, `reportId` or `reverifyId`. The binding requirement is DF3.4's **own DoD** at `:345-347`: "no finish with decision against `reportId` absent from both `reportId` and `supersededReportIds`" — which a singular field cannot satisfy after two rebinds. Consequence recorded honestly: **nobody downstream is blocked** if the array had slipped to a follow-up. |
+| 8 | **`bundlePath`.** AC1(a2) (:84-88) requires the rebind to carry the new report's `bundlePath` and validate it against the stored one, refusing on mismatch; Technical Notes (:209-210) require it written at registration. | **Not stored at all** — no field, no `SHAPE_EXEMPT_PATHS` entry. Rebind re-validates by `existsSync(join(resolveRunsDir(...), runId + ".bundle"))`. | Three reasons, any one sufficient. (a) DF2.5 already made this call oppositely and explicitly — `harvest.ts:18-19`: "Harvest writes NOTHING to the run record: the bundle's presence at `<runsDir>/<run-id>.bundle` is the record, and DF2.1's schema stays closed." Registering it reverses a stated invariant of a story DF3.4 does not own. (b) **The comparison is vacuous**: `harvest.ts:435-436` is `join(runsDir, runId + ".bundle")` with no `path.resolve` in the chain, so for a given run the value is identical by construction and "unequal ⇒ refuse" can never fire on a real mismatch — while the one case it *can* fire is a false positive (move `QDS_RUNS_DIR` and a legitimately relocated bundle is refused). (c) A host-absolute path in a DF5.3 audit artifact leaks the operator username and local directory layout and is meaningless on another host. The existence check is strictly stronger: it proves the bundle is there *now*. Recorded in the namespace docstring at `run-record.ts:238-249` and guarded by a test asserting `unknown key: extensions.approval.bundlePath`. |
+| 9 | **Expiry sweep.** AC7 (:160) says expiry "is swept in the same pass" as `fleet status`. | Split: expiry is **derived virtually** in `status` (pure read — a run past `expiresAt` displays `timed-out`) and **persisted** in `approve`/`reject`. | `fleet status` builds a read-only store when `--dir` is given (`fleet.ts:2212`, `create: dir === undefined`), and a `create:false` store throws on every write (`run-record.ts:857-871`). A persisting sweep cannot run there, and making `status` writable reintroduces the round-11 chmod-0700 regression. The split still satisfies AC3's actual requirement — "expiry is evaluated lazily on every `fleet` invocation — no daemon — and **before** that invocation's own decision" — because the decision path is exactly where the write is both possible and needed. |
+
+### Guardrail waiver — Scope Enforcement (High), ACCEPTED
+
+**Item.** `StatusRow.state` TS literal union widened at `src/fleet/status.ts:32` to admit
+`"awaiting-approval"`. The story says this file "changes no DF3.1-owned line" (:264-265).
+
+**Why unavoidable.** There is no way to add a member to a TypeScript literal union without
+editing the union. **Rejected alternative:** carry the state in a new optional field — this fails
+AC7 as written, which requires the paused run to *report* `awaiting-approval` and never
+`boxMissing`, i.e. in `state` itself.
+
+**Why it is safe.** Purely additive: one union member, no DF3.1 behaviour changed, every existing
+state keeps its exact semantics. **Precedent:** the same union already grew to carry the two
+fleet-level `(fleet)` rows (`status.ts:4-7`).
+
+### Scope-list gap
+
+`scripts/pipeline-run.ts:1708-1725` is the **one** `createSteering` call site and is where the
+`inbox` port must be wired — one added property. It is **absent from this story's Files to Modify
+list**. A scope-list gap, not a judgement call; recorded rather than silently expanded.
+
+### Boundary conditions — stated, not coded around
+
+From the AC1(c) resume verification. Both are correct behaviour whose intuitive reading is wrong,
+so they are written down instead of guarded against:
+
+- **An unenumerable key list aborts a resume PRE-revoke.** `captureSpend`'s only throw path is
+  `truncated` — a transient provider fault that throws identically on a first run. Retryable and
+  fail-closed by design; not a re-run artifact.
+- **A teardown re-run leaves the FIRST successful capture in the record, not a fresher one.** This
+  is the desired semantics, but "re-running teardown refreshes spend" is the intuitive-and-wrong
+  reading. An already-revoked key degrades rather than throwing: `entry === null` returns
+  `rec.spendMicroUsd ?? 0` and **writes nothing**, because recording 0 "would be an
+  authoritative-looking lie" — pinned at `credentials.test.ts:628-637`. Double-counting is
+  structurally impossible: `captureSpend` never touches the cost ledger (`cost-ledger.ts:1010-1013`,
+  pinned by `cost-ledger.test.ts:626`, whose name is the invariant).
+
+### Documented ceilings, not defects
+
+- **Attach latency during an agent-phase retry.** `post_gate_failure` is code-phase only
+  (`pipeline-run.ts:955-1048`); agent phases retry via `agents/retry.ts:284-287` and never solicit,
+  so an attach queued during an agent-phase retry waits until `run_end`. Closing it would require
+  a **fourth** solicitation point, which DF3.3, DF3.4 and DF3.6 all forbid (INV-APPROVE-5).
+- **The ledger prices at most one box per `runId`, ever.** `boxHoursEventId` keys on
+  `(runId, closedAt)` (`cost-ledger.ts:285`) with `closedAt` frozen by first-close-wins
+  (`run-record.ts:1250-1254`). Correct for today's architecture — one run, one box, enforced by the
+  closed-record core-write refusal at `run-record.ts:1239`. A future re-provision story must widen
+  the ledger key; **DF3.4 must not, and this spec must not be amended for it.**
+
+### Sprint-level issue — raised, not fixed
+
+DF3.4 and DF3.6 both assume an **in-box engine**. `pipeline-run-remote.ts:5-19` states the
+opposite: "the box image carries no bun/node, so `pipeline-run.ts` cannot run in-box … orchestrated
+FROM THE HOST. HONEST LABEL: this is NOT the in-box executor (proposed story DF1.10)". Engine,
+resident (`resident.ts:446-471`, `Bun.spawn`) and records are all host-side today. **DF3.4 is
+unaffected in practice** — a host-side engine plus a `driver.exec` transport is exactly what the
+injected-port design assumes — so this is raised for the sprint, not handled here.
+
+### Reference-repo liftability
+
+The operator directive was to lift from the IndyDevDan reference repos. Honest finding: **nothing
+rated liftable.** Not one item scored LIFTABLE VERBATIM or WITH ADAPTATION.
+
+- `super-simple-software-factory` has no top-level `adws/` tree, but it is **not** code-free: the
+  same Python ADW sources ship under `.claude/skills/sssf/templates/adws/`
+  (`adw_build_test.py`, `adw_plan_build_test.py` and siblings), vendored under a skill's
+  `templates/` directory. It therefore adds **no new liftable surface** — it is the same code the
+  other two repos already carry.
+- `sssf-demo` and `inkwell` share one codebase: ~3502 LOC of Python 3 (uv + pydantic). DF3.4 is
+  TypeScript on Bun — any lift is a rewrite.
+- **No human-in-the-loop.** `ReviewEnvelope.approved` (`data_types.py:118`) is an *LLM reviewer's*
+  verdict, decided and consumed in the same phase: no human, no durable awaiting state, no
+  re-entry, no supersede, no terminal guard, no timeout, no approver identity.
+- No approver allowlist (every `allowlist` hit is a tool-capability or file-write boundary). No
+  token hashing (zero hits for `hashed`/`token_hash`/`sha256`/`hmac`). No steering or message
+  injection (zero hits for `inbox`/`outbox`/`message_id`/`ack`). No dedupe. No state machine —
+  `PhaseStatus` is `queued|running|success|fail`, single-writer single-process.
+- **These repos never open a PR.** `grep -rniE "gh pr create|create_pr|open_pr|pull_request|gh pr "`
+  over `*.py`/`*.md`/`*.sh` across all three returns **zero** hits. `adw_simple_sdlc.py` commits
+  locally on green+approved and never pushes — so "what gates PR creation" has no answer there.
+- No unit or integration test suites. The `*_test.py` filenames are misleading: `adw_build_test.py`
+  and `adw_plan_build_test.py` are ADW **workflow** scripts — `adw_plan_build_test.py` is "ADW Plan
+  Build Test — the full starter chain", whose phases run engineer → planner → builder → code(test)
+  → git(commit). "Test" names a pipeline phase there, not the nature of the file.
+
+Three items are concept-only (`tracer.py:103-137` append-only events; `session.py:20-35` SIGTERM
+finalization; `gates.py:75-94` verdict self-consistency) and in all three QDS-Factory already has a
+stricter, TypeScript, tested precedent — lifting would be a downgrade.
+
+**Provenance.** The PR-creation and human-in-the-loop findings were re-run and verified against the
+repos at `/Users/steve/reference-repos`, as was the `super-simple-software-factory` correction
+above. The LOC count and the per-file citations (`data_types.py:118`, `adw_simple_sdlc.py`,
+`tracer.py`, `session.py`, `gates.py`) remain R6b's findings and are **not** independently
+verified. The conclusion — nothing liftable — is unaffected either way.
+
+**The real reuse is in-repo**, and that is where the minimize-net-new directive was pointed:
+
+1. `src/reverify/approval.ts` — port, adapter and the full lock protocol. DF3.4 swaps the **adapter** only.
+2. `src/pr/push.ts:257-299` — the six-code refusal matrix, already written against DF3.4's record shape.
+3. `tests/pr/helpers.ts:105-125` — `writeAllowlist(host, entries|null, mode=0o600)`, cloned wholesale for `approvers.json`.
+4. `src/phase-engine/steering.ts` — closed `.strict()` zod directive union, char ceilings, `MAX_MALFORMED_ATTEMPTS`. The steering *vocabulary* exists; attach needs a **transport**, not a new schema.
+5. `tests/fleet/e2e/live-harness.ts` — the complete live demo harness.
 
 ---
 

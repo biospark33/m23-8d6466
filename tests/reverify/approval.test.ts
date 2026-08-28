@@ -59,7 +59,11 @@ describe("recordApprovalPort", () => {
       expect(ext?.state).toBe("awaiting-approval");
       expect(ext?.reportId).toBe("rv-2");
       expect(ext?.headSha).toBe("b".repeat(40));
-      expect(ext?.supersededReportId).toBe("rv-1");
+      // The RECORD keeps the full ordered history; the singular
+      // `supersededReportId` asserted above on the OUTCOME is derived from it
+      // (DF3.4 W4). Two stored fields would be two sources of truth, and a
+      // record whose scalar and array disagree is unfalsifiable in an audit.
+      expect(ext?.supersededReportIds).toEqual(["rv-1"]);
     } finally {
       s.cleanup();
     }

@@ -399,7 +399,20 @@ const MAX_BRIEF_BYTES = 64 * 1024;
  * below shrink with the registry: delete `harvest` and a registry-derived loop
  * still passes.
  */
-const EXPECTED_VERBS = ["dispatch", "status", "harvest", "teardown", "fanout", "rank"] as const;
+const EXPECTED_VERBS = [
+  "dispatch",
+  "status",
+  "harvest",
+  "teardown",
+  "fanout",
+  "rank",
+  // DF3.4's three additive registry entries, dispatched by the approval-gate
+  // blocks at fleet.ts `verb === "approve" || verb === "reject"` and
+  // `verb === "attach"`.
+  "approve",
+  "reject",
+  "attach",
+] as const;
 
 /** Exit code for `fleet <verb>` with no positional and an injected driver. */
 const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
@@ -409,6 +422,9 @@ const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
   teardown: 2, // missing <run-id>
   fanout: 2, // no --n given (DF3.2; the brief would be refused next anyway)
   rank: 2, // missing <fanout-id>
+  approve: 2, // missing <run-id>
+  reject: 2, // missing <run-id>
+  attach: 2, // missing <run-id>
 };
 
 /**
@@ -3612,6 +3628,148 @@ process.on = ((sig, listener) => {
     // Every emitted row line ends in a newline by design; the forged SECOND
     // line is what must not exist.
     expect(text()).not.toContain("\nFLEET teardown ok");
+  });
+
+  /**
+   * AC7. A run paused for approval whose box is gone is an INTENTIONAL pause,
+   * not a lost box — the `extensions.approval` entry is what tells them apart,
+   * and reporting `boxMissing` there sends an operator hunting a box that was
+   * deliberately torn down.
+   */
+  describe("AC7: approval-paused runs in status", () => {
+    const pausedRec = (over: Record<string, unknown> = {}) => ({
+      runId: "qds-20260101-pause1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      extensions: {
+        approval: { schemaVersion: 1, state: "awaiting-approval", reportId: "rep-1", ...over },
+      },
+    });
+
+    /** One status row from a store double holding exactly `rec`. */
+    const rowFor = async (rec: object): Promise<Record<string, unknown>> => {
+      const store = {
+        dir: runsDir,
+        listWithAnomalies: () => ({ records: [rec], skipped: [] }),
+        get: () => rec,
+      } as unknown as RunRecordStore;
+      reset();
+      const code = await runCli(["status", "--driver", "fake"], { ...deps(validBriefJson(dir)), store });
+      expect(code).toBe(0);
+      return JSON.parse(outOnly[0] as string) as Record<string, unknown>;
+    };
+
+    test("box gone reports awaiting-approval, never boxMissing", async () => {
+      const row = await rowFor(pausedRec());
+      expect(row.state).toBe("awaiting-approval");
+      expect(row.state).not.toBe("boxMissing");
+      // The bound report and the time left are what an operator acts on.
+      expect(row.reportId).toBe("rep-1");
+    });
+
+    test("`pausing` reads as awaiting-approval too — the pause is already underway", async () => {
+      expect((await rowFor(pausedRec({ state: "pausing" }))).state).toBe("awaiting-approval");
+    });
+
+    test.each([["approved"], ["rejected"], ["timed-out"]])(
+      "a SETTLED approval (%s) is history — the row is boxMissing, not a pause",
+      async (state) => {
+        // Only the two PAUSED states may override boxMissing. A settled run is
+        // an ordinary open run: its missing box really is missing, and
+        // relabelling it `awaiting-approval` would hide that forever.
+        const row = await rowFor(pausedRec({ state }));
+        expect(row.state).toBe("boxMissing");
+        expect(row.reportId).toBeUndefined();
+      },
+    );
+
+    test("an unparseable expiresAt stays awaiting-approval, never a guessed timed-out", async () => {
+      const row = await rowFor(pausedRec({ expiresAt: "not-a-timestamp" }));
+      expect(row.state).toBe("awaiting-approval");
+      expect(row.expiresInMs).toBeUndefined();
+    });
+
+    test("time remaining before expiresAt is surfaced", async () => {
+      const expiresAt = new Date(Date.now() + 600_000).toISOString();
+      const row = await rowFor(pausedRec({ expiresAt }));
+      expect(typeof row.expiresInMs).toBe("number");
+      // ~10 min out; generous bounds so a slow box never reds this.
+      expect(row.expiresInMs as number).toBeGreaterThan(500_000);
+      expect(row.expiresInMs as number).toBeLessThanOrEqual(600_000);
+      // reportId rides the expiry path too, not just the no-expiresAt one.
+      expect(row.reportId).toBe("rep-1");
+    });
+
+    test("a CLOSED record still reports closed — settled history outranks the pause", async () => {
+      // Placement pin: the AC7 branch sits AFTER the `closed` arm. A closed
+      // record over a still-live box is the loudest signal status emits, and a
+      // stale approval extension must never relabel it.
+      const row = await rowFor({ ...pausedRec(), closedAt: "2026-01-02T00:00:00.000Z" });
+      expect(row.state).toBe("closed");
+    });
+
+    test("past expiresAt DISPLAYS timed-out and writes nothing", async () => {
+      const rec = pausedRec({ expiresAt: "2020-01-01T00:00:00.000Z" });
+      // A REAL record on disk, so "no write" is a claim about actual bytes.
+      const store = new RunRecordStore({ dir: runsDir });
+      store.create(rec.runId);
+      store.set(rec.runId, {
+        extensions: { approval: { state: "awaiting-approval", reportId: "rep-1", expiresAt: "2020-01-01T00:00:00.000Z" } },
+      });
+      const path = join(runsDir, `${rec.runId}.json`);
+      const before = readFileSync(path);
+
+      reset();
+      const code = await runCli(["status", "--driver", "fake", "--dir", runsDir], deps(validBriefJson(dir)));
+      expect(code).toBe(0);
+      const row = JSON.parse(outOnly[0] as string) as Record<string, unknown>;
+      expect(row.state).toBe("timed-out");
+      expect(row.expiresInMs).toBe(0);
+      // Byte-identical: status DERIVES expiry, it never persists it. The
+      // authoritative sweep belongs to approve/reject, which hold a writable
+      // store and the lock — `fleet status --dir` builds a create:false store
+      // that throws on every write.
+      expect(readFileSync(path).equals(before)).toBeTrue();
+    });
+
+    test("a LIVE box outranks the pause — unattributed spend is the worse signal", async () => {
+      // A REAL dispatched box, through the CLI, so "live" is the substrate's
+      // answer and not a fixture's.
+      const shared = deps(validBriefJson(dir));
+      reset();
+      expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+      const runId = (JSON.parse(outOnly[0] as string) as { runId: string }).runId;
+      (shared.store as RunRecordStore).set(runId, {
+        extensions: { approval: { state: "awaiting-approval", reportId: "rep-1" } },
+      });
+
+      reset();
+      expect(await runCli(["status", "--driver", "fake"], shared)).toBe(0);
+      const row = JSON.parse(outOnly[0] as string) as Record<string, unknown>;
+      expect(row.state).toBe("live");
+      // The pause fields are withheld too — the row is not a half-paused hybrid.
+      expect(row.reportId).toBeUndefined();
+    });
+
+    test("one unreadable .json does not kill the listing", async () => {
+      const shared = deps(validBriefJson(dir));
+      const store = shared.store as RunRecordStore;
+      store.create("qds-20260101-pause3");
+      store.set("qds-20260101-pause3", {
+        extensions: { approval: { state: "awaiting-approval", reportId: "rep-1" } },
+      });
+      // listWithAnomalies SKIPS this; plain list() would throw and take the
+      // whole sweep with it.
+      writeFileSync(join(runsDir, "qds-20260101-broken.json"), "{not json");
+
+      reset();
+      // Exit 2 is the DOCUMENTED outcome of a skipped record ("the rows above
+      // are not the whole fleet"), not a crash: the point is that the paused
+      // row still EMITS alongside the caveat rather than the sweep dying whole.
+      expect(await runCli(["status", "--driver", "fake"], shared)).toBe(2);
+      const rows = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(rows.some((r) => r.state === "awaiting-approval")).toBeTrue();
+      expect(rows.some((r) => r.state === "recordsSkipped")).toBeTrue();
+    });
   });
 
   test("a listing whose RECORDS are not objects refuses typed, not as a TypeError", async () => {

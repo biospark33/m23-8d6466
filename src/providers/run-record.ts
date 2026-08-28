@@ -44,8 +44,34 @@ import { log, newRequestId } from "../swarmclaw/log.ts";
 // Schema
 // ---------------------------------------------------------------------------
 
-/** Value shapes the core schema admits. */
-export type FieldKind = "string" | "int" | "ports";
+/**
+ * Value shapes the core schema admits.
+ *
+ * `strings` is an array of TEXT, and it is deliberately a separate kind from
+ * `ports` (an array of integers) rather than a shared "array" kind: integers
+ * cannot be credentials, text can, so the two take different paths through
+ * `assertNoSecret`. Collapsing them is how the scan gets skipped.
+ */
+export type FieldKind = "string" | "int" | "ports" | "strings";
+
+/**
+ * How many elements a `strings` field may hold, and how long each may be.
+ *
+ * The field this exists for is `extensions.approval.supersededReportIds`,
+ * which gains one element on every df3-4 AC1(a2) rebind with nothing else
+ * capping it — and the record is re-read in full by `fleet status` and by
+ * every `list()` sweep, so unbounded growth is a fleet-wide read cost
+ * discovered long after the writes that caused it. The story bounds
+ * `proposal` at 8_000 chars and `reason` at 1_000 and is silent here, so the
+ * bound is set at the store instead: a named schema rejection at the WRITE,
+ * like every other bound in this file, never a disk problem later.
+ *
+ * 200 chars per element is the file's usual LOOSER backstop, not a tight fit:
+ * a `reverifyId` is `rv-<runId>-<iso>-<6>` (src/reverify/runner.ts) and tops
+ * out near 98 chars with a maximum-length run id, so nothing legal is close.
+ */
+const STRINGS_MAX_ELEMENTS = 256;
+const STRINGS_MAX_ELEMENT_LEN = 200;
 
 /**
  * The core fields. These camelCase spellings are the only ones any
@@ -112,15 +138,22 @@ export interface RunRecord {
   extensions?: RunRecordExtensions;
 }
 
+/**
+ * What an extension field may hold. `string[]` is the `strings` kind — see
+ * `FieldKind`. Widening this is what lets `supersededReportIds` carry its
+ * ordered rebind history instead of one displaced id.
+ */
+export type ExtensionValue = string | number | string[];
+
 export interface ExtensionEntry {
   schemaVersion: number;
-  [field: string]: string | number;
+  [field: string]: ExtensionValue;
 }
 
 export type RunRecordExtensions = Record<string, ExtensionEntry>;
 
 /** Extension fields as a caller supplies them — `schemaVersion` is the store's to stamp. */
-export type ExtensionPatch = Record<string, Record<string, string | number>>;
+export type ExtensionPatch = Record<string, Record<string, ExtensionValue>>;
 
 /**
  * Fields a caller may write. `runId`/`createdAt` are immutable and `closedAt` is
@@ -189,7 +222,36 @@ export const EXTENSION_NAMESPACES: Readonly<
    * of the `requestApproval` CALLER — can bind a green host verdict to a
    * decision. `reportId` is a `ReverifyReport.reverifyId` and `headSha` is that
    * same report's head: the approval binds to one report, not to a run in
-   * general, and `supersededReportId` records the report a rebind displaced.
+   * general.
+   *
+   * `supersededReportIds` is the FULL rebind history, ordered oldest-first —
+   * each AC1(a2) rebind appends the id it displaced. It replaces the singular
+   * `supersededReportId` this namespace carried while DF5.1 was the only
+   * writer: two fields would be two sources of truth for the same fact in the
+   * one place a disagreement is worst, an approval audit trail, and the
+   * per-field deep merge in `validateExtensions` makes keeping them consistent
+   * a trap (a write that omits one silently retains the previous cycle's
+   * value). DF5.1's published `ApprovalOutcome.supersededReportId` is
+   * unaffected: "the id THIS call displaced" is a per-call fact, derived at
+   * that seam rather than stored here.
+   *
+   * There is deliberately NO `bundlePath` field. DF2.5 already decided this
+   * and in the other direction — "Harvest writes NOTHING to the run record:
+   * the bundle's presence at `<runsDir>/<run-id>.bundle` is the record, and
+   * DF2.1's schema stays closed" (harvest.ts:18-19) — and registering it here
+   * would reverse a stated invariant of a story this one does not own. It
+   * would also buy nothing: the path is `join(runsDir, runId + ".bundle")`
+   * (harvest.ts:435-436), a pure function of the run id, so AC1(a2)'s
+   * "refuse a rebind whose bundlePath differs" can never fire on a real
+   * mismatch — and the one case where it COULD fire is a false positive: move
+   * `QDS_RUNS_DIR` between the two calls and a legitimately relocated bundle
+   * is refused, so storing the path makes the gate more fragile, not less. A
+   * rebind re-validates by EXISTENCE instead, which is strictly stronger — it
+   * proves the bundle is there now, rather than that two
+   * equal-by-construction strings are equal. Do not "fix" this omission.
+   *
+   * `requestId` is the dispatch correlation id carried onto every gate event,
+   * and `expiresAt` is what the lazy timeout sweep reads.
    *
    * States: `pausing` (created before teardown, not yet promoted),
    * `awaiting-approval`, then terminal `approved` / `rejected` / `timed-out`.
@@ -202,8 +264,10 @@ export const EXTENSION_NAMESPACES: Readonly<
       proposal: "string",
       reportId: "string",
       headSha: "string",
+      requestId: "string",
+      expiresAt: "string",
       requestedAt: "string",
-      supersededReportId: "string",
+      supersededReportIds: "strings",
       approverId: "string",
       decidedAt: "string",
       reason: "string",
@@ -500,6 +564,11 @@ const SHAPE_EXEMPT_PATHS: ReadonlySet<string> = new Set([
   // ever reach the record, and both are written AFTER the box exists.
   extPath("budget", "repoSlug"),
   extPath("budget", "issueId"),
+  // No `extensions.approval` path is exempt. `supersededReportIds` in
+  // particular stays subject to the heuristic: a reverify id is short and
+  // lowercase by construction (src/reverify/runner.ts builds it that way for
+  // exactly this reason), so the check costs it nothing and must keep running
+  // on the approval field a caller could put arbitrary text into.
 ]);
 
 /**
@@ -526,6 +595,23 @@ function extPath(ns: string, field: string): string {
  * class is not enough on its own, though: see `SHAPE_EXEMPT_PATHS`.
  */
 function assertNoSecret(key: string, value: unknown): void {
+  // ARRAYS ARE WALKED, not waved through. The early return below is correct
+  // for `ports` — an integer cannot be a token — and it was the whole function
+  // for as long as `ports` was the only array in the schema. The moment an
+  // array of TEXT became writable (`strings`, for
+  // `extensions.approval.supersededReportIds`) that same line became a hole:
+  // every element skipped the prefix scan AND the shape heuristic and landed
+  // on disk unread, which is INV-2 silently not running on the newest field.
+  //
+  // Recursion, not `.filter(isString)`: a mixed array must still have its
+  // strings scanned, and its non-strings hit the early return one level down.
+  // The element is reported under the FIELD's path — an index would not help a
+  // caller who supplied the array whole, and `SHAPE_EXEMPT_PATHS` is keyed on
+  // that path, so the exemption stays consistent across every element.
+  if (Array.isArray(value)) {
+    for (const el of value) assertNoSecret(key, el);
+    return;
+  }
   if (typeof value !== "string") return;
   const v = value.trim();
   // Matched at a token boundary, not just at position 0: a credential can ride
@@ -578,9 +664,55 @@ function assertKind(key: string, kind: FieldKind, value: unknown): void {
     }
     return;
   }
-  if (!Array.isArray(value) || value.some((p) => typeof p !== "number" || !Number.isInteger(p))) {
-    throw new Error(`${key} must be an array of integers`);
+  // EXPLICIT, not the trailing else it used to be. `ports` was the implicit
+  // fallthrough while it was the only array kind, and the moment a second one
+  // (`strings`) exists that shape silently routes every string array into the
+  // array-of-INTEGERS check below — a kind that can never accept a legal
+  // value, failing at the write with a message naming the wrong type.
+  if (kind === "ports") {
+    if (!Array.isArray(value) || value.some((p) => typeof p !== "number" || !Number.isInteger(p))) {
+      throw new Error(`${key} must be an array of integers`);
+    }
+    return;
   }
+  if (!Array.isArray(value) || value.some((s) => typeof s !== "string")) {
+    throw new Error(`${key} must be an array of strings`);
+  }
+  // Bounds are part of the KIND, not of one field's own validation, so every
+  // future `strings` field inherits them instead of re-deriving them (or not).
+  // The counts are named in the message: "too long" without the numbers sends
+  // an operator to read the source to find out what the limit was.
+  if (value.length > STRINGS_MAX_ELEMENTS) {
+    throw new Error(`${key} has ${value.length} elements, over the ${STRINGS_MAX_ELEMENTS} bound`);
+  }
+  const over = value.findIndex((s) => s.length > STRINGS_MAX_ELEMENT_LEN);
+  if (over !== -1) {
+    throw new Error(
+      `${key}[${over}] is ${(value[over] as string).length} chars, over the ${STRINGS_MAX_ELEMENT_LEN} bound`,
+    );
+  }
+}
+
+/**
+ * Copy an array value in, so the stored entry never ALIASES the caller's array.
+ *
+ * `merged` is a `structuredClone` of what was already on the record, so the
+ * existing side was never shared — but the INCOMING value was stored by
+ * reference. Every extension value was a primitive until `strings` existed, so
+ * nothing could observe it; now `set()` would hand back a record sharing
+ * caller-owned mutable state, and a later push to that array silently
+ * desynchronizes the in-memory record from the bytes on disk. In an approval
+ * audit trail that divergence IS the defect.
+ *
+ * A SHALLOW copy is complete here, not a shortcut: `assertKind` has already
+ * proven a `strings` value is a flat array of strings, and strings are
+ * immutable — there is no deeper structure for `structuredClone` to reach, so
+ * it would buy nothing and cost a serialization round trip on every write.
+ * If a future `FieldKind` ever admits a nested value, this is the one place
+ * that has to change.
+ */
+function detached(value: ExtensionValue): ExtensionValue {
+  return Array.isArray(value) ? [...value] : value;
 }
 
 /**
@@ -641,14 +773,14 @@ function validateExtensions(
         // record on disk throw out of `list()`, and INV-4 turns that into the
         // reaper reaping nothing at all — the outage the guard was meant to
         // prevent, entered through the other door.
-        entry[field] = value as string | number;
+        entry[field] = detached(value as ExtensionValue);
         continue;
       }
       const kind = Object.hasOwn(spec.fields, field) ? spec.fields[field] : undefined;
       if (!kind) throw new Error(`unknown key: ${extPath(ns, field)}`);
       assertKind(extPath(ns, field), kind, value);
       assertNoSecret(extPath(ns, field), value);
-      entry[field] = value as string | number;
+      entry[field] = detached(value as ExtensionValue);
     }
     merged[ns] = entry;
   }

@@ -29,7 +29,23 @@ export interface StatusRow {
    * precisely what the documented union exists to surface (it has no record,
    * hence no createdAt: the field is ABSENT and the row sorts first).
    */
-  state: "live" | "boxMissing" | "boxUnknown" | "closed" | "orphan" | "listUnavailable" | "recordsSkipped";
+  /**
+   * DF3.4 AC7 adds `awaiting-approval` and `timed-out`: a run paused for
+   * approval whose box is gone is an INTENTIONAL pause, and reporting it as
+   * `boxMissing` sends an operator hunting a box that was deliberately torn
+   * down. `timed-out` is DERIVED from `expiresAt` at read time and never
+   * persisted here — see `approvalRowFields`.
+   */
+  state:
+    | "live"
+    | "boxMissing"
+    | "boxUnknown"
+    | "closed"
+    | "orphan"
+    | "listUnavailable"
+    | "recordsSkipped"
+    | "awaiting-approval"
+    | "timed-out";
   /**
    * INV-4-bis's cross-layer join key, straight off the record — the id that ties
    * this run's dispatch ack, driver lines and record writes together in the log
@@ -52,6 +68,15 @@ export interface StatusRow {
    * failure silently reported the still-billing case as confirmed-destroyed.
    */
   boxAlive?: boolean;
+  /**
+   * AC7, and set only on the two approval states: the DF5.1 report this pause
+   * is bound to, and the time left before `expiresAt` (0 once past it, so a
+   * `timed-out` row reads as expired rather than negative). Both ABSENT when
+   * the record carries no approval extension — an absent field is how a
+   * consumer tells "not paused" from "paused with nothing bound".
+   */
+  reportId?: string;
+  expiresInMs?: number;
   /**
    * The record's creation instant. Optional because an `orphan` row has no
    * record to take one from, and only there. A placeholder `""` was worse than
@@ -370,6 +395,49 @@ async function listOwnedBoxesOnce(
  * live box. Matching on `vmName` alone reports that box missing, which is the
  * INV-1 crash window the record was designed to survive.
  */
+/**
+ * AC7's row fields for a run PAUSED for approval, or `undefined` when the run
+ * is not paused — which is what makes this an override rather than a relabel.
+ *
+ * Only the two paused states qualify. A settled approval (`approved`,
+ * `rejected`, and a persisted `timed-out`) is history: such a run is an
+ * ordinary open run, and a box missing under it really is missing. `pausing`
+ * and `awaiting-approval` both surface as `awaiting-approval` — the operator-
+ * facing question is the same ("this run is waiting on you"), and `pausing` is
+ * a mid-teardown instant, not a state anyone acts on differently.
+ *
+ * Expiry is DERIVED, never written: `fleet status --dir` builds a `create:false`
+ * store that throws on every write, so a sweep here would either crash or
+ * reintroduce the writable-store regression. A past `expiresAt` therefore
+ * DISPLAYS as `timed-out`; approve/reject persist it, holding the lock and a
+ * writable store. An unparseable `expiresAt` is left as `awaiting-approval`
+ * with no `expiresInMs` — declaring a run expired on a garbage timestamp is
+ * the one failure mode worth avoiding here.
+ */
+function approvalRowFields(
+  rec: RunRecord,
+): { state: "awaiting-approval" | "timed-out"; reportId?: string; expiresInMs?: number } | undefined {
+  const approval = rec.extensions?.approval;
+  if (approval === undefined) return undefined;
+  const state = approval.state;
+  if (state !== "pausing" && state !== "awaiting-approval") return undefined;
+
+  // ponytail: MAX_REQUEST_ID reused — a reportId is the same class of harness-
+  // minted id and sanitizeOptional wants a bound, not a bespoke constant.
+  const reportId = sanitizeOptional(
+    typeof approval.reportId === "string" ? approval.reportId : undefined,
+    MAX_REQUEST_ID,
+  );
+  const expiresAt = typeof approval.expiresAt === "string" ? Date.parse(approval.expiresAt) : Number.NaN;
+  if (Number.isNaN(expiresAt)) return { state: "awaiting-approval", ...(reportId === undefined ? {} : { reportId }) };
+  const remaining = expiresAt - Date.now();
+  return {
+    state: remaining > 0 ? "awaiting-approval" : "timed-out",
+    ...(reportId === undefined ? {} : { reportId }),
+    expiresInMs: Math.max(0, remaining),
+  };
+}
+
 function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): StatusRow {
   const names = rec.vmName === undefined ? [rec.runId] : [rec.vmName, rec.runId];
   const box = boxes === null ? undefined : names.map((n) => boxes.get(n)).find((b) => b !== undefined);
@@ -417,6 +485,19 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
       // substrate was unreachable.
       ...(boxes === null ? {} : { boxAlive: box !== undefined }),
     };
+  }
+
+  // AC7: a run paused for approval whose box is gone was torn down ON PURPOSE,
+  // and the approval extension is the only thing that says so. Placed HERE
+  // deliberately: after `closed` (a closed record is settled history, and its
+  // still-billing case is the louder signal) and before the `boxes === null`
+  // arm, so it overrides BOTH `boxMissing` and `boxUnknown`. A LIVE box still
+  // outranks it — `box === undefined` is the guard — because unattributed
+  // spend beats a tidy pause label. Both entry points get it: statusAll and
+  // statusRun share this function.
+  if (box === undefined) {
+    const approval = approvalRowFields(rec);
+    if (approval !== undefined) return { ...base, ...approval };
   }
 
   // No list ⇒ no evidence either way, for a vmName-less record too (its box may

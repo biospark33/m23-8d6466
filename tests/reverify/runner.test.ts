@@ -447,7 +447,9 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
       });
       const ext = h.store.get(h.repo.runId).extensions?.approval;
       expect(ext?.reportId).toBe(second.report.reverifyId);
-      expect(ext?.supersededReportId).toBe(first.report.reverifyId);
+      // Record-side history is the ARRAY (DF3.4 W4); the singular on the
+      // OUTCOME above is derived per-call and is asserted unchanged.
+      expect(ext?.supersededReportIds).toEqual([first.report.reverifyId]);
       expect(ext?.state).toBe("awaiting-approval");
     } finally {
       h.cleanup();

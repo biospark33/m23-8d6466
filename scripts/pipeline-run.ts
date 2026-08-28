@@ -83,6 +83,7 @@ import {
   type SteeringPoint,
 } from "../src/phase-engine/steering.ts";
 import { loadRoster } from "../src/phase-engine/roster/schema.ts";
+import { localSteeringInbox } from "../src/fleet/attach.ts";
 import { DEFAULT_RESIDENT_SLUG, startResident, type ResidentSpawn } from "../src/fleet/resident.ts";
 import { RateError } from "../src/phase-engine/roster/validate.ts";
 import {
@@ -1708,6 +1709,28 @@ async function main(argv: readonly string[]): Promise<number> {
       steering = createSteering({
         caller: spawned.caller,
         rate: spawned.rate,
+        // DF3.4 AC6: `fleet attach`'s queued messages are folded into the next
+        // of DF3.3's three solicitation points. The engine addresses the in-box
+        // steering paths as local paths, exactly as journal.ts addresses
+        // runMarkerPath() — so no driver reference is needed here (and none is
+        // in scope: this runner has no vm).
+        inbox: localSteeringInbox(),
+        // An unreadable steering channel is an operational fault the operator
+        // has to be able to see: `fleet attach` keeps reporting the message
+        // "stays queued" while no later drain will ever deliver it. Same sink
+        // and same sidecar guard as the tripwire below.
+        onInboxError: (e) => {
+          try {
+            tracer.trace({
+              type: "log",
+              name: "steeringInboxError",
+              requestId,
+              payloadJson: JSON.stringify(e),
+            });
+          } catch {
+            /* the trace store is a sidecar; the journal row is the record */
+          }
+        },
         onTripwire: (t) => {
           // Tripwires ride type:"log" + a name — DF1.4's closed event union
           // is untouched (R2 §4.1's recommendation, phase_state's precedent).

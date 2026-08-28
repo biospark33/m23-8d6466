@@ -330,6 +330,204 @@ describe("set (AC2)", () => {
     expect(() => store.set("run-c", { keyHash: "-----BEGIN OPENSSH PRIVATE KEY-----" })).toThrow(/key material/);
   });
 
+  // ── DF3.4: the "strings" FieldKind ───────────────────────────────────────
+  //
+  // `supersededReportIds` is the first extension field holding an ARRAY OF
+  // TEXT. Every guard in this file was written when the only non-scalar was
+  // `ports` — a number array, which cannot be a token — so each one has to be
+  // re-proven against text.
+
+  test("a strings field round-trips an ordered array, and the order is preserved", () => {
+    // DELIBERATELY not in sorted order, and with a duplicate: the array is a
+    // rebind HISTORY ordered oldest-first (df3-4 AC1(a2)), so an
+    // implementation that sorted or set-ified it would still satisfy a length
+    // check and a sorted fixture. A run CAN legitimately rebind back to a
+    // report it displaced earlier, so the duplicate must survive too.
+    const ids = ["rv-c", "rv-a", "rv-b", "rv-a"];
+    const rec = store.set("run-c", { extensions: { approval: { supersededReportIds: ids } } });
+    expect(rec.extensions?.approval?.supersededReportIds).toEqual(["rv-c", "rv-a", "rv-b", "rv-a"]);
+    expect(store.get("run-c").extensions?.approval?.supersededReportIds).toEqual(["rv-c", "rv-a", "rv-b", "rv-a"]);
+    // The caller's own array is not mutated in place either — sorting it
+    // "before" storing would corrupt the value the caller still holds.
+    expect(ids).toEqual(["rv-c", "rv-a", "rv-b", "rv-a"]);
+    // Empty is the registration default and must not be confused with absent.
+    const cleared = store.set("run-c", { extensions: { approval: { supersededReportIds: [] } } });
+    expect(cleared.extensions?.approval?.supersededReportIds).toEqual([]);
+  });
+
+  test("a strings value is COPIED in, never aliased — the returned record does not share the caller's array", () => {
+    // The other direction of the test above, and the one that actually bites.
+    // Existing values are structuredCloned into the merge; the INCOMING one
+    // used to be stored by reference, so `set()` handed back a record sharing
+    // caller-owned mutable state. Every prior extension value was a primitive,
+    // so this could not happen until `strings` existed.
+    //
+    // The failure it causes: DF3.4's rebind builds `[...prior, displaced]` and
+    // keeps the local. Any later push to that local silently desynchronizes the
+    // in-memory record from the bytes on disk — in an approval audit trail,
+    // where "what the record says" is the whole product.
+    const ids = ["rv-1"];
+    const rec = store.set("run-c", { extensions: { approval: { supersededReportIds: ids } } });
+    // IDENTITY, not just equality: deep equality passes on an alias right up
+    // until somebody mutates, which is precisely the bug.
+    expect(rec.extensions?.approval?.supersededReportIds).not.toBe(ids);
+    ids.push("MUTATED-AFTER-WRITE");
+    expect(rec.extensions?.approval?.supersededReportIds).toEqual(["rv-1"]);
+    expect(store.get("run-c").extensions?.approval?.supersededReportIds).toEqual(["rv-1"]);
+    // And the record read back off disk is likewise not shared with the one
+    // handed to the caller — two reads must not alias each other either.
+    expect(store.get("run-c").extensions?.approval?.supersededReportIds).not.toBe(
+      rec.extensions?.approval?.supersededReportIds,
+    );
+  });
+
+  test("a strings field rejects a non-array and a non-string element, naming the key", () => {
+    const before = snapshot("run-c");
+    expect(() => store.set("run-c", { extensions: { approval: { supersededReportIds: "rv-a" } } })).toThrow(
+      /extensions\.approval\.supersededReportIds must be an array of strings/,
+    );
+    // `as never`, the same cast the `{ ports: ["80"] }` case above needs: the
+    // patch type refuses these at compile time too, and the cast is what lets
+    // the RUNTIME rejection still be asserted — dynamic callers (the CLI builds
+    // its patch from argv) never went through the type.
+    expect(() => store.set("run-c", { extensions: { approval: { supersededReportIds: [1] } } } as never)).toThrow(
+      /extensions\.approval\.supersededReportIds must be an array of strings/,
+    );
+    expect(() =>
+      store.set("run-c", { extensions: { approval: { supersededReportIds: ["ok", null] } } } as never),
+    ).toThrow(/extensions\.approval\.supersededReportIds must be an array of strings/);
+    expect(snapshot("run-c")).toEqual(before);
+  });
+
+  test("INV-2 walks INTO a strings array — every element is scanned, at every prefix", () => {
+    // THE security regression this whole kind exists behind. `assertNoSecret`
+    // opened with `if (typeof value !== "string") return;`, correct while the
+    // only array was `ports` (integers are not tokens) and a hole the moment
+    // an array of TEXT became writable: the element never reaches the prefix
+    // scan or the shape heuristic and lands on disk unread. A `.filter(String)`
+    // implementation passes the single-element cases and fails the mixed one.
+    for (const prefix of ["sk-", "sk_live_", "ghp_", "ghs_", "github_pat_", "xoxb-", "AKIA", "-----BEGIN"]) {
+      expect(() =>
+        store.set("run-c", { extensions: { approval: { supersededReportIds: [`${prefix}abcdefghijklmnop`] } } }),
+      ).toThrow(/refusing to write key material into the run record: extensions\.approval\.supersededReportIds/);
+    }
+    // The SHAPE half, not just the prefix half: a 40-char mixed-class blob.
+    expect(() =>
+      store.set("run-c", {
+        extensions: { approval: { supersededReportIds: ["wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"] } },
+      }),
+    ).toThrow(/key material/);
+    // Not only the FIRST element — a scan that stopped at [0] would pass above.
+    expect(() =>
+      store.set("run-c", { extensions: { approval: { supersededReportIds: ["rv-fine", "ghp_abcdefghijklmnop"] } } }),
+    ).toThrow(/key material/);
+    // And legal reverify ids still get through, or the guard is just a wall.
+    const ok = store.set("run-c", {
+      extensions: { approval: { supersededReportIds: ["rv-run-c-2026-08-28t17-00-00-000z-a1b2c3"] } },
+    });
+    expect(ok.extensions?.approval?.supersededReportIds).toHaveLength(1);
+  });
+
+  test("supersededReportIds is NOT shape-exempt — the heuristic keeps running on reverify ids", () => {
+    // No approval path is exempt, and this one in particular must stay under
+    // the heuristic: it is the field a caller could put arbitrary text into.
+    // A reverify id is short and lowercase by construction
+    // (src/reverify/runner.ts), so nothing legal is lost by checking it.
+    expect(() =>
+      store.set("run-c", {
+        extensions: { approval: { supersededReportIds: [`Aa1${"b".repeat(37)}C9`] } },
+      }),
+    ).toThrow(/key material/);
+  });
+
+  test("ports still takes integers and still refuses strings — the strings kind did not capture it", () => {
+    // `ports` was the IMPLICIT ELSE of assertKind. Adding a kind above it
+    // without an explicit branch sends `ports` into the wrong arm, or sends
+    // `strings` into the array-of-INTEGERS check. Both directions asserted.
+    expect(store.set("run-c", { ports: [8080, 9090] }).ports).toEqual([8080, 9090]);
+    expect(() => store.set("run-c", { ports: ["80"] } as never)).toThrow(/ports must be an array of integers/);
+    expect(() => store.set("run-c", { ports: [1.5] })).toThrow(/ports must be an array of integers/);
+    // An integer array is still waved through assertNoSecret untouched.
+    expect(store.set("run-c", { ports: [443] }).ports).toEqual([443]);
+  });
+
+  test("a strings field is bounded — element count and element length are schema rejections", () => {
+    const before = snapshot("run-c");
+    // supersededReportIds grows by one on every AC1(a2) rebind and the record
+    // is re-read on every `fleet status` and every list() sweep. Unbounded
+    // growth is a disk problem discovered late; this is a named refusal at the
+    // write, like every other bound in this file.
+    expect(() =>
+      store.set("run-c", { extensions: { approval: { supersededReportIds: Array(257).fill("rv-a") } } }),
+    ).toThrow(/extensions\.approval\.supersededReportIds has 257 elements, over the 256 bound/);
+    expect(() =>
+      store.set("run-c", { extensions: { approval: { supersededReportIds: ["r".repeat(201)] } } }),
+    ).toThrow(/extensions\.approval\.supersededReportIds\[0\] is 201 chars, over the 200 bound/);
+    expect(snapshot("run-c")).toEqual(before);
+    // Both bounds are inclusive on the legal side.
+    expect(
+      store.set("run-c", { extensions: { approval: { supersededReportIds: Array(256).fill("rv-a") } } }).extensions
+        ?.approval?.supersededReportIds,
+    ).toHaveLength(256);
+    expect(() =>
+      store.set("run-c", { extensions: { approval: { supersededReportIds: ["r".repeat(200)] } } }),
+    ).not.toThrow();
+  });
+
+  test("the approval namespace carries DF3.4's decide-side fields, and no longer the singular", () => {
+    const rec = store.set("run-c", {
+      extensions: {
+        approval: {
+          state: "awaiting-approval",
+          proposal: "ship it",
+          reportId: "rv-1",
+          headSha: "0123456789abcdef0123456789abcdef01234567",
+          requestId: "req-1",
+          expiresAt: "2026-08-29T00:00:00.000Z",
+          supersededReportIds: ["rv-0"],
+        },
+      },
+    });
+    expect(rec.extensions?.approval).toMatchObject({
+      schemaVersion: 1,
+      requestId: "req-1",
+      expiresAt: "2026-08-29T00:00:00.000Z",
+      supersededReportIds: ["rv-0"],
+    });
+    // The singular is GONE — the array is the single source of truth, and a
+    // writer still using the old spelling must fail loudly, not write a second
+    // field nothing reads.
+    expect(() => store.set("run-c", { extensions: { approval: { supersededReportId: "rv-0" } } })).toThrow(
+      /unknown key: extensions\.approval\.supersededReportId/,
+    );
+  });
+
+  test("bundlePath is deliberately NOT a registered approval field", () => {
+    // DF2.5 owns this call and made it the other way: "Harvest writes NOTHING
+    // to the run record: the bundle's presence at
+    // `<runsDir>/<run-id>.bundle` is the record" (harvest.ts:18-19). The path
+    // is `join(runsDir, runId + ".bundle")` (harvest.ts:435-436) — a pure
+    // function of the run id — so storing it buys a second source of truth and
+    // a comparison that can never fail. A rebind re-validates by EXISTENCE.
+    //
+    // This test exists so re-adding the field is a RED test carrying the
+    // reasoning, not a silent "fix" of an omission that looks like a mistake.
+    expect(() =>
+      store.set("run-c", {
+        extensions: { approval: { bundlePath: "/Users/steve/QDS-Factory/.sandbox/runs/run-c.bundle" } },
+      }),
+    ).toThrow(/unknown key: extensions\.approval\.bundlePath/);
+    // And nothing under `approval` is shape-exempt, so were it ever added it
+    // would ALSO be host-dependent: this same path throws as suspected key
+    // material (uppercase from the repo dir, digits from the run id), while
+    // an all-lowercase Linux CI path does not.
+    expect(() =>
+      store.set("run-c", {
+        extensions: { approval: { proposal: "/Users/steve/QDS-Factory/.sandbox/runs/run-c-20260828.bundle" } },
+      }),
+    ).toThrow(/key material/);
+  });
+
   test("a failure injected between temp-write and rename leaves the record byte-identical", () => {
     const before = snapshot("run-c");
     const failing = new RunRecordStore({

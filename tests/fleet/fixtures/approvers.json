@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "approvers": {
+    "alice@example.test": {
+      "salt": "s41t-alice",
+      "hash": "dd0a171bb2b7aa4544d334ce2840c3a312a232afb882a08bd4bdf29e85c17a47"
+    },
+    "bob@example.test": {
+      "salt": "s41t-bob",
+      "hash": "314d8b5f86e002b47903480faff0b62f2550b96eadcb040d801a3c09eb31c2e4"
+    }
+  }
+}
