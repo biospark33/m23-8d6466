@@ -84,3 +84,7 @@ markers, which every gitnexus version preserves unconditionally; it is the
 backstop if `gitnexus:keep` ever stops being honoured.
 
 qds-dev branch convention: prefix=feature/ base=main target=main
+
+Live E2E rounds: use the `qds-live-e2e` skill (`.claude/skills/qds-live-e2e/`) whenever
+running or building live/no-fakes end-to-end tests (QDS_E2E_LIVE tiers, real boxes,
+real spend).
