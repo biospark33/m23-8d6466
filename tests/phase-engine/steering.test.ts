@@ -452,6 +452,58 @@ describe("metering — engine-side integer µ$ (DD-9)", () => {
     expect(Number.isFinite(c.telemetry.spendMicros)).toBe(true);
     expect(c.telemetry.spendMicros).toBe(111);
   });
+
+  test("finite MAX_VALUE tokens overflow a term — the last finite spendMicros is preserved", async () => {
+    // clampTerm admits any finite positive input, so MAX_VALUE tokens × a
+    // real rate overflows the rounded term to Infinity; the meter must skip
+    // the mutation rather than poison spendMicros (JSON null) for the run.
+    const s = scriptedCaller([
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 1_000, outputTokens: 0 } }, // 100
+      { raw: '{"action":"proceed"}', usage: { inputTokens: Number.MAX_VALUE, outputTokens: 0 } },
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 0, outputTokens: Number.MAX_VALUE } },
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 1_000, outputTokens: 0 } }, // 100
+    ]);
+    const c = createSteering({ caller: s.caller, rate: RATE });
+    await c.solicit("run_start", ctx());
+    await c.solicit("post_gate_failure", ctx());
+    await c.solicit("post_gate_failure", ctx());
+    await c.solicit("run_end", ctx());
+    expect(Number.isFinite(c.telemetry.spendMicros)).toBe(true);
+    // Only the two well-formed replies metered; both overflow replies skipped.
+    expect(c.telemetry.spendMicros).toBe(200);
+  });
+
+  test("finite MAX_VALUE RATES overflow both terms — spendMicros stays finite", async () => {
+    const s = scriptedCaller([
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 1_000, outputTokens: 1_000 } },
+    ]);
+    const c = createSteering({
+      caller: s.caller,
+      rate: { inputPerMTok: Number.MAX_VALUE, outputPerMTok: Number.MAX_VALUE },
+    });
+    await c.solicit("run_start", ctx());
+    expect(c.telemetry.spendMicros).toBe(0);
+    expect(Number.isFinite(c.telemetry.spendMicros)).toBe(true);
+  });
+
+  test("an accumulated-sum overflow is skipped too — spendMicros never crosses into non-finite", async () => {
+    // Each term is finite here; only the SUM overflows. The meter validates
+    // the accumulated value, not just the terms.
+    const big = Number.MAX_VALUE / 2;
+    const s = scriptedCaller([
+      { raw: '{"action":"proceed"}', usage: { inputTokens: big, outputTokens: 0 } },
+      { raw: '{"action":"proceed"}', usage: { inputTokens: big, outputTokens: 0 } },
+    ]);
+    const c = createSteering({
+      caller: s.caller,
+      rate: { inputPerMTok: 2_000_000, outputPerMTok: 0 },
+    });
+    await c.solicit("run_start", ctx());
+    const afterFirst = c.telemetry.spendMicros;
+    expect(Number.isFinite(afterFirst)).toBe(true);
+    await c.solicit("run_end", ctx());
+    expect(c.telemetry.spendMicros).toBe(afterFirst);
+  });
 });
 
 describe("prompt ceiling — ≤ PROMPT_CHAR_CEILING including truncation suffix", () => {

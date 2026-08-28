@@ -237,14 +237,21 @@ export function createSteering(deps: {
    *  A non-finite or negative token count — or rate — clamps to 0: one
    *  poisoned input would otherwise turn spendMicros non-integer (JSON null)
    *  for the run. A reply carrying no usage object meters as zero rather than
-   *  throwing (the never-throws contract covers metering too). */
+   *  throwing (the never-throws contract covers metering too).
+   *  Finite-only accumulation: clamping admits huge-but-finite inputs whose
+   *  tokens × rate product overflows to Infinity. Each rounded term and the
+   *  accumulated sum are validated before the mutation, so an overflow leaves
+   *  the last finite spendMicros intact instead of poisoning it for the run. */
   const clampTerm = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0);
   const rateInput = clampTerm(deps.rate.inputPerMTok);
   const rateOutput = clampTerm(deps.rate.outputPerMTok);
   const meter = (usage: { inputTokens?: unknown; outputTokens?: unknown } | undefined): void => {
-    telemetry.spendMicros +=
-      Math.round((clampTerm(usage?.inputTokens) * rateInput) / 1_000_000) +
-      Math.round((clampTerm(usage?.outputTokens) * rateOutput) / 1_000_000);
+    const inputMicros = Math.round((clampTerm(usage?.inputTokens) * rateInput) / 1_000_000);
+    const outputMicros = Math.round((clampTerm(usage?.outputTokens) * rateOutput) / 1_000_000);
+    if (!Number.isFinite(inputMicros) || !Number.isFinite(outputMicros)) return;
+    const next = telemetry.spendMicros + inputMicros + outputMicros;
+    if (!Number.isFinite(next)) return;
+    telemetry.spendMicros = next;
   };
 
   /** A rejected directive has exactly one effect: a telemetry row (INV-RES-2). */

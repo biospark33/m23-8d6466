@@ -2,6 +2,7 @@
 
 Diff: origin/dev...HEAD (8305 lines, 37 files; evidence/research artifacts excluded).
 Note: rounds 2–4 already landed (see git log). Every finding below MUST be re-verified against current source — earlier rounds may already have fixed it. Stale findings are reported as already-fixed, not re-patched.
+**Ledger state: PRE-FIX SNAPSHOT.** Rows S1/S2/S3 below record findings as verified against `d15f0ca` (round-4 head; parent of the round-5 fix commit `84b37b2` that landed this ledger). Their `class` column is the round-5 PLAN, not a final disposition — the final per-row outcomes (patched / dismissed-with-evidence / deferred) are recorded in `reports/fix-engine.md`, `reports/fix-fleet.md`, `reports/fix-pipeline.md` and the wave-2 `reports/fix-tests-*.md`, and the passing-test evidence is in those reports' gate sections. Read this file as "what we set out to do," the reports as "what happened."
 Layers: blind-engine, blind-fleet, blind-pipeline, edge-pipeline, edge-tests-a, edge-tests-b, auditor. 0 failed layers.
 Raw findings: 73 → ~50 unique after dedupe. patch ~35 · defer 1 · dismiss-candidates ~12 (verify-first).
 
