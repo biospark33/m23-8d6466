@@ -62,6 +62,7 @@ import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { goodLedger } from "./helpers.ts";
 import { FanoutRecordStore } from "../../src/fleet/fanout.ts";
 import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
+import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 
 /**
  * Await a refusal and hand back the TYPED error — never a bare "something threw".
@@ -2211,6 +2212,68 @@ describe("status.ts (statusAll join logic)", () => {
     // The box name teardown would target, taken from the box itself.
     expect(rows[0]!.vmName).toBe(runId);
     expect(rows.filter((r) => r.state === "orphan")).toHaveLength(0);
+  });
+
+  // ─── F091: the name collision at the join ─────────────────────────────────
+
+  /** statusAll plus whatever it emitted on the shared log sink. */
+  async function statusWithLines(d: StatusDeps): Promise<{ rows: StatusRow[]; lines: LogEntry[] }> {
+    const lines: LogEntry[] = [];
+    const restore = setLogSink((e) => lines.push(e));
+    try {
+      return { rows: await statusAll(d), lines };
+    } finally {
+      restore();
+    }
+  }
+
+  test("two records claiming one box name → a duplicate-box-name line naming BOTH run ids", async () => {
+    // `name` is the join key across records, driver and teardown, so two records
+    // resolving to one box means one of them is reporting a box it does not own
+    // — and the other's box, if it has one, is nowhere in the table.
+    await provision("dup-run-1");
+    store.create("dup-run-2");
+    store.set("dup-run-2", { vmName: "dup-run-1" });
+
+    const { rows, lines } = await statusWithLines({ driver, store, listTimeoutMs: 1000 });
+
+    const line = lines.find((l) => l.code === "duplicate-box-name");
+    expect(line).toBeDefined();
+    const text = JSON.stringify(line);
+    expect(text).toContain("duplicate-box-name");
+    expect(text).toContain("dup-run-1");
+    expect(text).toContain("dup-run-2");
+    // The table is unchanged — the collision is REPORTED, not repaired.
+    expect(rows.filter((r) => r.state === "live")).toHaveLength(2);
+  });
+
+  test("substrate reports two boxes under one name → the dropped box is reported, table keeps last-wins", async () => {
+    // The last-wins map at the record→VM join: the earlier box vanishes from the
+    // output while it is still live and billing.
+    const twoBoxes = {
+      list: async (): Promise<ProviderVm[]> => [
+        { name: "dup-box", tag: SBX_OWNERSHIP_TAG, httpsUrl: "https://first.example" },
+        { name: "dup-box", tag: SBX_OWNERSHIP_TAG, httpsUrl: "https://second.example" },
+      ],
+    };
+    store.create("dup-claimant");
+    store.set("dup-claimant", { vmName: "dup-box" });
+
+    const { rows, lines } = await statusWithLines({ driver: twoBoxes, store, listTimeoutMs: 1000 });
+
+    const line = lines.find((l) => l.code === "duplicate-box-name");
+    expect(line).toBeDefined();
+    expect(line!.boxCount).toBe(2);
+    expect(JSON.stringify(line)).toContain("dup-claimant");
+    // last-wins stands: one row, one box.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.state).toBe("live");
+  });
+
+  test("no collision → no duplicate-box-name line", async () => {
+    await provision("no-dup-run");
+    const { lines } = await statusWithLines({ driver, store, listTimeoutMs: 1000 });
+    expect(lines.filter((l) => l.code === "duplicate-box-name")).toHaveLength(0);
   });
 });
 

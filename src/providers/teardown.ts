@@ -56,6 +56,12 @@ import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
  */
 export interface CostLedgerHook {
   ingestBoxHours(ctx: BoxHoursCtx): { eventId: string; inserted: boolean; unpriced: boolean };
+  /**
+   * F032: the DERIVED per-run total, for the divergence check at the close step.
+   * Optional because the hook is structural and DF2.8's only requirement is the
+   * box-hours ingest — a hook that cannot answer is simply not asked.
+   */
+  readRunCost?(runId: string): { totalMicroUsd: number };
 }
 
 export class TeardownError extends Error {
@@ -322,6 +328,74 @@ function ingestBoxHoursIfAttributed(
   return true;
 }
 
+/**
+ * F032: how far the record's spend and the ledger's derived total may sit apart
+ * before the close step says so, in micro-USD. A tenth of a cent — above the
+ * rounding noise of per-token and per-box-hour pricing (both round to whole
+ * micro-USD), and far below any real gap: the divergence this exists to catch
+ * is a whole class of events missing from one side, not a rounding remainder.
+ * Absolute, not proportional, because the interesting case is a derived total
+ * of ~0 against a real provider figure, where a percentage threshold is
+ * meaningless.
+ */
+export const SPEND_DIVERGENCE_TOLERANCE_MICRO_USD = 1_000;
+
+/**
+ * F032: say so when the two figures for one run's spend disagree.
+ *
+ * `captureSpend` writes the PROVIDER-AUTHORITATIVE number into the record as
+ * `spendMicroUsd` (step 1); `readRunCost` DERIVES a second one from the cost
+ * ledger's rows. Nothing has ever compared them, and they are one field apart:
+ * `readRunCost`'s only reader is the PR body (src/pr/open-pr.ts), and
+ * `spendMicroUsd`'s are cap-hit-demo and `fleet status`. Every event the ledger
+ * never received makes the per-issue cap under-count by exactly that much,
+ * silently. This does not close that gap — it makes it audible at the one
+ * moment the run's spend is final.
+ *
+ * Never throws: the box is destroyed and the record is closed by the time this
+ * runs, so a raising log sink or an unqueryable ledger must not turn a
+ * completed teardown into an abort (an unqueryable ledger already refused
+ * loudly at the ingest above).
+ */
+function reportSpendDivergence(
+  ctx: StepCtx,
+  ledger: CostLedgerHook,
+  rec: { spendMicroUsd?: number },
+  runId: string,
+): void {
+  if (ledger.readRunCost === undefined) return;
+  const recorded = rec.spendMicroUsd;
+  // No captured spend ⇒ nothing to compare. A run with no key never reaches
+  // step 1, and a `0` IS a comparison (a provider that reported zero against a
+  // ledger that did not is exactly the divergence worth hearing about).
+  if (typeof recorded !== "number" || !Number.isFinite(recorded)) return;
+  try {
+    const derived = ledger.readRunCost(runId).totalMicroUsd;
+    if (!Number.isFinite(derived)) return;
+    if (Math.abs(recorded - derived) <= SPEND_DIVERGENCE_TOLERANCE_MICRO_USD) return;
+    log({
+      ...stepBase(ctx, "teardown", "close"),
+      operation: "teardown.spend_divergence",
+      duration: 0,
+      durationMs: 0,
+      status: "ok",
+      outcome: "divergent",
+      code: "spend-divergence",
+      recordedMicroUsd: recorded,
+      derivedMicroUsd: derived,
+      deltaMicroUsd: recorded - derived,
+      toleranceMicroUsd: SPEND_DIVERGENCE_TOLERANCE_MICRO_USD,
+      reason:
+        `the provider-authoritative spend on the record (${recorded} µUSD) and the cost ledger's derived total for this run (${derived} µUSD) disagree by more than ${SPEND_DIVERGENCE_TOLERANCE_MICRO_USD} µUSD`,
+      message:
+        `run ${runId}: recorded spend ${recorded} µUSD vs derived ${derived} µUSD — every per-issue cap reads the DERIVED figure, so the difference is spend no cap counted. While the DF2.7 bridge is unbuilt the ledger holds box hours only and reads low by construction; CostLedger.emitTokenBridgeState() reports that state as tokens-ledger-unwired`,
+    });
+  } catch {
+    // A throwing sink or ledger must not undo a completed teardown; the close
+    // above already landed and the divergence is a report, not a gate.
+  }
+}
+
 async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOptions, ctx: StepCtx): Promise<void> {
   // Preflight — all before ANY mutation; the box stays untouched throughout.
   // Shared classifier (harvest.ts getRecord): genuine absence → no-record,
@@ -490,6 +564,9 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
           reason: "no issue attribution — box hours not priced for this run",
         });
       }
+      // F032 — AFTER the ingest, so the derived total includes this run's box
+      // hours and the comparison is against the ledger's final state.
+      reportSpendDivergence(ctx, deps.costLedger, closedRec, runId);
     }
   });
 }
