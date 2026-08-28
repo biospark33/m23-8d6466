@@ -37,14 +37,17 @@ export function createServer(port = 0): SwarmClawServer {
   // F002: loopback-only by default. The routes spawn subprocesses and proxy
   // arbitrary tool calls into them, so the listener must not be reachable off
   // the host unless an operator explicitly waives it with SWARMCLAW_BIND.
-  const hostname = process.env.SWARMCLAW_BIND ?? "127.0.0.1";
+  // `||` not `??`: a set-but-blank value (`docker -e SWARMCLAW_BIND=`, a blank
+  // export, the blank-value style .env.example uses) is NOT a waiver. Bun
+  // takes "" as "every interface" while still reporting a hostname, so `??`
+  // would fail open silently.
+  const hostname = process.env.SWARMCLAW_BIND?.trim() || "127.0.0.1";
 
   const server = Bun.serve({
     port,
     hostname,
     async fetch(req) {
       const start = Date.now();
-      const url = new URL(req.url);
       // CC-9 join key is a UUID — regenerate non-conforming inbound ids
       // (subsumes empty-string and unbounded-length values).
       const hdr = req.headers.get("x-request-id");
@@ -53,7 +56,6 @@ export function createServer(port = 0): SwarmClawServer {
           ? hdr
           : newRequestId();
       const { method } = req;
-      const path = url.pathname;
 
       const json = (r: { status: number; body: unknown }, extraHeaders?: Record<string, string>) =>
         new Response(JSON.stringify(r.body), {
@@ -61,16 +63,33 @@ export function createServer(port = 0): SwarmClawServer {
           headers: { "content-type": "application/json", "x-request-id": requestId, ...extraHeaders },
         });
 
-      const logPayloadTooLarge = () =>
+      const logRefusal = (operation: string, code: string, message: string) =>
         log({
           requestId,
-          operation: "http.payload_too_large",
+          operation,
           agentId: null,
           timestamp: new Date().toISOString(),
           duration: Date.now() - start,
           status: "error",
-          error: { code: "413", message: "payload too large" },
+          error: { code, message },
         });
+
+      const logPayloadTooLarge = () => logRefusal("http.payload_too_large", "413", "payload too large");
+
+      // Bun builds req.url from the Host header, so an empty, whitespace-only,
+      // absent (HTTP/1.0) or malformed ("Host: a b c") value leaves it an
+      // unparseable target. That parse used to sit above the credential gate
+      // AND outside the try/catch, so an unauthenticated caller could throw
+      // past both into Bun's default error page — 67KB of source excerpt,
+      // stack and absolute file paths, and no CC-9 log line. Refuse here,
+      // bodyless, before anything else is parsed.
+      let path: string;
+      try {
+        path = new URL(req.url).pathname;
+      } catch {
+        logRefusal("http.host_rejected", "403", "unparseable request target");
+        return new Response(null, { status: 403, headers: { "x-request-id": requestId, connection: "close" } });
+      }
 
       // F002: bearer credential, checked ABOVE the 413 guard so an
       // unauthenticated caller learns nothing about the body limit and cannot
@@ -78,19 +97,14 @@ export function createServer(port = 0): SwarmClawServer {
       // surface as it was (loopback-only is the standing control).
       const authToken = process.env.SWARMCLAW_AUTH_TOKEN;
       if (authToken && !bearerMatches(req.headers.get("authorization"), authToken)) {
-        log({
-          requestId,
-          operation: "http.unauthorized",
-          agentId: null,
-          timestamp: new Date().toISOString(),
-          duration: Date.now() - start,
-          status: "error",
-          error: { code: "401", message: "unauthorized" },
-        });
+        logRefusal("http.unauthorized", "401", "unauthorized");
         // Close rather than keep-alive: the request body is deliberately left
         // unread here, so the connection must not be pooled with those bytes
         // still buffered (same socket-poisoning reasoning as the 413 path).
-        return json({ status: 401, body: { error: "unauthorized" } }, { connection: "close" });
+        return json(
+          { status: 401, body: { error: "unauthorized" } },
+          { "www-authenticate": "Bearer", connection: "close" },
+        );
       }
 
       // Reject oversized bodies before buffering them (all routes are POST).
@@ -161,7 +175,11 @@ export function createServer(port = 0): SwarmClawServer {
   return { port: server.port ?? port, hostname: server.hostname ?? hostname, agentStore, mcpStore, stop };
 }
 
-// Constant-time `Authorization: Bearer <token>` comparison. timingSafeEqual
+// Constant-time `Authorization: Bearer <token>` comparison. The whole header
+// is compared, so the scheme match is byte-exact by design: "bearer x" and
+// "Bearer  x" are rejected. RFC 7235 says the scheme is case-insensitive, but
+// every caller here is ours and the strictness costs nothing.
+// timingSafeEqual
 // throws on unequal lengths, so length is checked first — that leaks only the
 // header's length, never which bytes of the token matched.
 function bearerMatches(header: string | null, token: string): boolean {

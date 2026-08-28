@@ -5,6 +5,7 @@
  * "unauthorized", nor spend the server's body-drain budget.
  */
 import { afterEach, expect, test } from "bun:test";
+import { connect } from "node:net";
 import { createServer, MAX_BODY_BYTES } from "../../src/swarmclaw/index.ts";
 
 function saveEnv(key: string): () => void {
@@ -23,10 +24,33 @@ afterEach(async () => {
   for (const c of cleanups.splice(0).reverse()) await c();
 });
 
-function serve(): { url: string; hostname: string } {
+function serve(): { url: string; hostname: string; port: number } {
   const srv = createServer(0);
   cleanups.push(() => srv.stop());
-  return { url: `http://${srv.hostname}:${srv.port}`, hostname: srv.hostname };
+  return { url: `http://${srv.hostname}:${srv.port}`, hostname: srv.hostname, port: srv.port };
+}
+
+/**
+ * Send a raw request line with NO Host header. fetch() always sets one, so a
+ * socket is the only way to reach the pre-parse path.
+ */
+function rawRequest(port: number, request: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const sock = connect(port, "127.0.0.1", () => sock.write(request));
+    let out = "";
+    sock.setTimeout(5000, () => sock.destroy(new Error("timeout")));
+    sock.on("data", (d) => {
+      out += d.toString();
+      // These responses are bodyless, so the header terminator is the whole
+      // response — don't wait on the peer to close the socket.
+      if (out.includes("\r\n\r\n")) {
+        sock.destroy();
+        resolve(out);
+      }
+    });
+    sock.on("close", () => resolve(out));
+    sock.on("error", reject);
+  });
 }
 
 const OVERSIZE = "x".repeat(MAX_BODY_BYTES + 1024);
@@ -35,6 +59,21 @@ test("serve binds loopback by default", () => {
   cleanups.push(saveEnv("SWARMCLAW_BIND"));
   // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
   delete process.env.SWARMCLAW_BIND;
+  expect(serve().hostname).toBe("127.0.0.1");
+});
+
+test("an empty SWARMCLAW_BIND does not fail open to every interface", () => {
+  cleanups.push(saveEnv("SWARMCLAW_BIND"));
+  // `docker -e SWARMCLAW_BIND=`, a blank shell export, or the blank-value
+  // style .env.example itself uses. `??` would pass "" straight to Bun.serve,
+  // which binds ALL interfaces while reporting hostname "localhost".
+  process.env.SWARMCLAW_BIND = "";
+  expect(serve().hostname).toBe("127.0.0.1");
+});
+
+test("a whitespace-only SWARMCLAW_BIND does not fail open either", () => {
+  cleanups.push(saveEnv("SWARMCLAW_BIND"));
+  process.env.SWARMCLAW_BIND = "   ";
   expect(serve().hostname).toBe("127.0.0.1");
 });
 
@@ -81,4 +120,38 @@ test("with no token configured the surface is unauthenticated as before", async 
   delete process.env.SWARMCLAW_AUTH_TOKEN;
   const { url } = serve();
   expect((await fetch(`${url}/nope`, { method: "GET" })).status).toBe(404);
+});
+
+// Bun builds req.url from the Host header. Each of these leaves it an
+// unparseable target that `new URL` throws on. Before the fix that throw
+// escaped the try/catch AND the credential gate, and Bun answered with a 67KB
+// default error page carrying the source excerpt, stack and absolute paths.
+// (An absent Host on HTTP/1.1 is the one case Bun itself refuses, with a
+// bodyless 400 before `fetch` runs — asserted here so a Bun upgrade that stops
+// doing that is caught.)
+test.each([
+  ["absent (HTTP/1.1)", "POST /api/agents HTTP/1.1\r\n\r\n"],
+  ["empty", "POST /api/agents HTTP/1.1\r\nHost:\r\n\r\n"],
+  ["whitespace-only", "POST /api/agents HTTP/1.1\r\nHost: \r\n\r\n"],
+  ["absent (HTTP/1.0)", "POST /api/agents HTTP/1.0\r\n\r\n"],
+  ["malformed", "POST /api/agents HTTP/1.1\r\nHost: a b c\r\n\r\n"],
+])("a %s Host header is refused bodyless, with no stack", async (_label, request) => {
+  cleanups.push(saveEnv("SWARMCLAW_AUTH_TOKEN"));
+  delete process.env.SWARMCLAW_AUTH_TOKEN;
+  const { port } = serve();
+  const res = await rawRequest(port, request);
+  expect(res).toMatch(/^HTTP\/1\.1 40[03] /);
+  expect(res).not.toContain("<html");
+  expect(res).not.toContain("src/swarmclaw/index.ts");
+  // Bodyless: headers only, nothing after the blank line.
+  expect(res.split("\r\n\r\n")[1] ?? "").toBe("");
+});
+
+test("the 401 names the scheme in WWW-Authenticate", async () => {
+  cleanups.push(saveEnv("SWARMCLAW_AUTH_TOKEN"));
+  process.env.SWARMCLAW_AUTH_TOKEN = "t0ken";
+  const { url } = serve();
+  const res = await fetch(`${url}/api/agents`, { method: "POST", body: "{}" });
+  expect(res.status).toBe(401);
+  expect(res.headers.get("www-authenticate")).toBe("Bearer");
 });
