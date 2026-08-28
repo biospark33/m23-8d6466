@@ -20,7 +20,7 @@ sits the **Phase-0 scaffolding** — `src/gate/`, `src/swarmclaw/`,
 `pi-vs-claude-code-vendor/` — which was the whole product in July and is now the
 harness underneath it. That layer's exit gate is still
 `gate-red-not-exitable`, while 23 of 31 Dark Factory stories have shipped on top
-of it; read a Phase-0 module as scaffolding unless you are working on the gate
+of it as of 2026-08-28; read a Phase-0 module as scaffolding unless you are working on the gate
 itself.
 
 ### Dark Factory v5 control plane
@@ -32,7 +32,7 @@ itself.
 | `src/phase-engine/` | Runs manifest-driven phases inside the box and writes the SQLite run trace. |
 | `src/pr/` | Opens the pull request for a harvested run, with a redaction map over run secrets. |
 | `src/reverify/` | Re-verifies a harvested tree in an isolated worktree before `src/pr/` publishes it. |
-| `visualizer/` | Vue 3 + Bun read-only UI over the run trace. The one part of the repo with a build step (`vue-tsc --noEmit && vite build`, wired as `build:check` in CI). |
+| `visualizer/` | Vue 3 + Bun read-only UI over the run trace. The one part of the source tree with a compile step (`vue-tsc --noEmit && vite build`, wired as `build:check` in CI). |
 
 ### Phase-0 scaffolding
 
@@ -74,8 +74,8 @@ Anything beyond those two is yours. Delete this paragraph once both are fixed.
 The 13 `*.live.test.ts` files are a separate, **manual** tier and are by design
 never run in CI — they spend real money on rented machines. They are driven by
 hand with `QDS_E2E_LIVE=1` before each merge that touches the substrate; the
-TIER-1/2/3 evidence notes in `_bmad-output/sprint-artifacts/sprint-status.yaml`
-are the record of those runs. Their absence from CI is a decision, not an
+TIER-1/2/3 evidence lives in per-story notes in `sprint-status.yaml` and in
+`sprint-status-history.md`, the record of those runs. Their absence from CI is a decision, not an
 oversight.
 
 Routine observability output — the swarmclaw JSONL log lines
@@ -91,7 +91,7 @@ Two sinks are **not** muted and still print during a test run: the CLI's stdout
 result contract at `cli-anything/src/index.ts:263`, which tests hit because they
 invoke `main()` in-process, and the visualizer's `viz_request` lines in
 `visualizer/server/index.ts`. Both are tracked and will be gated on the same
-predicate as the other two.
+predicate as the other two. Delete this paragraph when F088 (Task 8.5) lands.
 
 Copy `.env.example` to `.env` for the full list of configurable environment
 variables — every one has a default, so nothing is required to run the tests.
