@@ -387,8 +387,17 @@ test.todoIf(liveTodoOff())(
       ]);
 
       // ── 5. L2 STEERED: real pi, real OpenRouter, real directives ───────
+      // QDS_PI_CATALOG_DIR: this host's global-npm pi ships no bundled
+      // provider data (deviation-ledger #8's seam), and loadBundledCatalog
+      // throws BEFORE the custom registry is consulted — without the override
+      // the resident arms then dies "rate_unresolved". The fixture catalog's
+      // rates are the host models.json integers (config parity; the resident
+      // reads input/output only, identical in both). Usage and spend substrate
+      // stay 100% real.
+      const piCatalogDir = join(REPO_ROOT, "tests/phase-engine/fixtures/pi-catalog");
       const l2 = await runLeg("l2-steered", deliveredDir, witness.requestId as string, {
         OPENROUTER_API_KEY: minted.key,
+        QDS_PI_CATALOG_DIR: piCatalogDir,
       });
       const l2Actions = l2.solicits.map((s) => s.directiveAction);
       const l2Aborted = l2Actions.includes("abort");
@@ -467,6 +476,7 @@ test.todoIf(liveTodoOff())(
       //       skipped gates (INV-RES-5 live) ──────────────────────────────
       const l3 = await runLeg("l3-degraded", deliveredDir, witness.requestId as string, {
         OPENROUTER_API_KEY: minted.key,
+        QDS_PI_CATALOG_DIR: piCatalogDir,
         QDS_RESIDENT_TIMEOUT_MS: `${T4_DEGRADE_TIMEOUT_MS}`,
       });
       evidence.push({
