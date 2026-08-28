@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test";
 import { GitHubApiError } from "../../src/pr/github.ts";
 import { openPullRequest, resolveIssueRefs } from "../../src/pr/open-pr.ts";
 import { refusalPath } from "../../src/pr/push.ts";
+import { captureHostToken, runRedactionMap } from "../../src/reverify/redaction.ts";
 import {
   BASE_BRANCH,
   AUTHOR_LOGIN,
@@ -704,5 +705,74 @@ describe("review round 11 — boundary validation and durable refusal", () => {
     if (!out.ok) return;
     expect(out.reused).toBe(false);
     expect(github.created).toHaveLength(1);
+  });
+});
+
+describe("INV-PR-7 — the map the shipped CLI assembles (F007)", () => {
+  // Sentinels, not real credentials. Long enough to clear
+  // `MIN_REDACTABLE_VALUE_LEN`, which is what makes them redactable at all.
+  const KEY_HASH = "sha256-sentinel-key-hash-0123456789abcdef";
+
+  test("the run's key hash comes off the record and the token is added at the read", async () => {
+    const runId = "run-map";
+    const host = await makeHost(runId);
+    makeRecord(host, runId);
+    host.store.set(runId, { keyHash: KEY_HASH });
+
+    const map = runRedactionMap(runId, host.runsDir);
+    expect(map).toEqual({ QDS_PROVIDER_KEY_HASH: KEY_HASH });
+
+    // The token is NOT read to build the map — the preflight reads it last, on
+    // purpose. `captureHostToken` fills the entry in at that read.
+    const read = captureHostToken(map, async () => TOKEN);
+    expect(map.QDS_PR_TOKEN).toBeUndefined();
+    expect(await read()).toBe(TOKEN);
+    expect(map.QDS_PR_TOKEN).toBe(TOKEN);
+  });
+
+  test("an absent record yields an empty map rather than throwing", async () => {
+    const host = await makeHost("run-present");
+    expect(runRedactionMap("run-absent", host.runsDir)).toEqual({});
+  });
+
+  test("a push whose stderr echoes the credential publishes neither the token nor the hash", async () => {
+    const runId = "run-redact";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    host.store.set(runId, { keyHash: KEY_HASH });
+    approve(host, runId, writeReport(host, runId));
+    const github = fakeGitHub();
+
+    // Assembled exactly as `scripts/open-pr.ts` assembles it — this test is the
+    // CLI's map, not a bespoke one.
+    const redaction = runRedactionMap(runId, host.runsDir);
+
+    // git echoing back the credential it was handed. `push.ts` carries push
+    // stderr verbatim into the refusal, and `open-pr.ts` renders the refusal
+    // into an issue comment: the publication surface F007 left unredacted.
+    const exec = async (argv: readonly string[], opts: { cwd?: string; env?: Record<string, string> } = {}) =>
+      argv.includes("push")
+        ? {
+            exitCode: 128,
+            stdout: "",
+            stderr: `fatal: Authentication failed for 'https://x-access-token:${TOKEN}@github.com/${REPO_SLUG}.git' (key ${KEY_HASH})`,
+          }
+        : host.exec(argv, opts);
+
+    const out = await openPullRequest(
+      runId,
+      deps(host, github, { exec, redaction, token: captureHostToken(redaction, async () => TOKEN) }),
+    );
+    expect(out.ok).toBe(false);
+
+    expect(github.comments).toHaveLength(1);
+    const body = github.comments[0]!.body;
+    expect(body).not.toContain(TOKEN);
+    expect(body).not.toContain(KEY_HASH);
+    // Positive proof the map MATCHED — `not.toContain` alone also passes when
+    // the refusal text never carried the values in the first place.
+    expect(body).toContain("[REDACTED:QDS_PR_TOKEN]");
+    expect(body).toContain("[REDACTED:QDS_PROVIDER_KEY_HASH]");
   });
 });

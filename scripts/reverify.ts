@@ -15,6 +15,7 @@
  * `fleet reverify` is DF3.1's, out of scope here.
  */
 import { reverify } from "../src/reverify/index.ts";
+import { runRedactionMap } from "../src/reverify/redaction.ts";
 
 const EXIT_BY_VERDICT = { green: 0, red: 1, error: 2 } as const;
 
@@ -25,7 +26,11 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const { report, approval } = await reverify(runId);
+  // INV-RV-4: `sealReport` scrubs the report through `deps.redaction`, which
+  // defaults to `{}` — redacting nothing. This is the only shipped caller, so
+  // the map is assembled here or nowhere (F007). No host GitHub token is in
+  // play here: this command never pushes.
+  const { report, approval } = await reverify(runId, { redaction: runRedactionMap(runId) });
 
   // stdout carries the report; the step log is on stderr (observability
   // contract), so a caller can pipe one without swallowing the other.
