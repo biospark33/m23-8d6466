@@ -362,7 +362,22 @@ async function remoteTip(pre: Preflight, ref: string): Promise<string | null> {
     throw new PrRefusalError("remote-unreachable", `git ls-remote ${ref} failed (exit ${res.exitCode}): ${res.stderr.trim()}`);
   }
   const line = res.stdout.split("\n").find((l) => l.trim().length > 0);
-  return line ? (line.split(/\s+/)[0] ?? null) : null;
+  const tip = line ? (line.split(/\s+/)[0] ?? null) : null;
+  if (tip === null) return null;
+  // The remote decides this string, and it lands in `git fetch … <tip>` and
+  // `git merge-base --is-ancestor <tip> …` — a leading `-` parses as an option
+  // there. Everything else in this module is validated before a git child
+  // (`assertPublishableRef`); the tip was the one value that was not (F065).
+  // Both object-format widths, so a sha256 remote is a refusal-free upgrade
+  // rather than an outage.
+  if (!/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(tip)) {
+    throw new PrRefusalError(
+      "remote-tip-unreadable",
+      `git ls-remote ${ref} answered with ${JSON.stringify(tip)}, which is not an object id; the factory never passes an unshaped remote value to git`,
+      { securityEvent: true },
+    );
+  }
+  return tip;
 }
 
 /**

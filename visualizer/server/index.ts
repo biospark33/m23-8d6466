@@ -232,6 +232,17 @@ async function serveStatic(req: Request): Promise<Response> {
 const STATIC_HEADERS = {
   "cache-control": "no-store",
   "x-content-type-options": "nosniff",
+  // F079: second layer under the five v-html sinks in PhaseDetail.vue. The
+  // escaping there was traced and holds; this is defence in depth over trace
+  // payloads written by third-party coding agents, not a fix for a live hole.
+  // NOTE: script-src is deliberately ABSENT — `default-src 'self'` covers it.
+  // The Vite build emits index.html with an external `<script type="module"
+  // src="/assets/…">` and no inline script, verified against `bun run --cwd
+  // visualizer build`, so scripts need no 'unsafe-inline' and none is granted.
+  // 'unsafe-inline' appears for style-src ONLY: Vue writes runtime `style`
+  // attributes for its bindings, which CSP counts as inline styles.
+  "content-security-policy":
+    "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'",
 } as const;
 
 /** A dotted last segment is an asset request, not a client-side route. */

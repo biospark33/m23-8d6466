@@ -77,6 +77,49 @@ export const MCPTestResponseSchema = z
     message: "ok=true requires non-empty tools",
   });
 
+/**
+ * Cap on a serialized `result` payload, in UTF-8 bytes. The subprocess is
+ * untrusted and its frame cap is 16 MB, so without this the success path would
+ * relay an arbitrary multi-megabyte blob straight into an HTTP response while
+ * every error path is schema-validated (F067). 1 MB is far above any real
+ * hindsight recall and far below the frame cap.
+ */
+export const MCP_INVOKE_RESULT_MAX_BYTES = 1_048_576;
+
+/**
+ * The success payload's stated contract. Deliberately permissive about SHAPE —
+ * MCP tools return whatever their own schema says and the bridge is a proxy,
+ * not an interpreter — but not about SIZE: `assertInvokeResultWithinCap`
+ * carries the half that actually bounds what an untrusted subprocess can push
+ * through us.
+ */
+export const MCPInvokeResultSchema = z.unknown();
+
+/** Thrown when a result exceeds MCP_INVOKE_RESULT_MAX_BYTES. */
+export class MCPResultTooLargeError extends Error {
+  constructor(readonly bytes: number) {
+    super(`MCP tool result is ${bytes} bytes, over the ${MCP_INVOKE_RESULT_MAX_BYTES}-byte response cap`);
+    this.name = "MCPResultTooLargeError";
+  }
+}
+
+/**
+ * Validate a tool result and prove it fits. Serializes ONCE and measures the
+ * bytes that would actually be written — `JSON.stringify` also throws on a
+ * cyclic or non-serializable payload, which is the same refusal for the same
+ * reason: it could never have reached the client intact.
+ */
+export function assertInvokeResultWithinCap(result: unknown): void {
+  MCPInvokeResultSchema.parse(result);
+  let bytes: number;
+  try {
+    bytes = Buffer.byteLength(JSON.stringify(result) ?? "undefined", "utf8");
+  } catch {
+    throw new MCPResultTooLargeError(Number.POSITIVE_INFINITY);
+  }
+  if (bytes > MCP_INVOKE_RESULT_MAX_BYTES) throw new MCPResultTooLargeError(bytes);
+}
+
 export const MCPInvokeErrorResponseSchema = z.object({
   jsonrpc: z.literal("2.0"),
   error: z.object({

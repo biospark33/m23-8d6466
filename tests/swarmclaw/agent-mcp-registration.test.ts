@@ -10,6 +10,7 @@ import {
   handleTestMCPServer,
   type TransportFactory,
 } from "../../src/swarmclaw/routes/mcp-servers.ts";
+import { MCP_INVOKE_RESULT_MAX_BYTES } from "../../src/swarmclaw/mcp/tool-bridge.ts";
 import { AgentStore, isLoopbackEndpoint, setDnsLookup } from "../../src/swarmclaw/store/agent-store.ts";
 import { MCPStore } from "../../src/swarmclaw/store/mcp-store.ts";
 
@@ -1341,5 +1342,46 @@ describe("Input-schema validation across the tool-cache TTL", () => {
       }
       rmSync(defsFile, { force: true });
     }
+  }, 15000);
+});
+
+describe("F067: the success payload has a stated contract", () => {
+  async function serverWithResult(name: string, result: unknown) {
+    const mcpStore = newMcpStore();
+    const reg = await handleRegisterMCPServer(
+      mcpStore,
+      { name, transport: "stdio", command: "hindsight-local-mcp" },
+      undefined,
+      fakeFactory(),
+    );
+    const id = (reg.body as { id: string }).id;
+    const rec = mcpStore.get(id)!;
+    // The subprocess is untrusted and its success payload was echoed opaquely,
+    // bounded only by the 16 MB frame cap — while every ERROR path was schema
+    // validated. Stand in for a hostile server by answering from the bridge.
+    rec.bridge.invoke = (() => Promise.resolve(result)) as typeof rec.bridge.invoke;
+    return { mcpStore, id };
+  }
+
+  test("an oversized result is a 502, not an echoed blob", async () => {
+    const huge = { content: [{ type: "text", text: "A".repeat(MCP_INVOKE_RESULT_MAX_BYTES) }] };
+    const { mcpStore, id } = await serverWithResult("srv-f067-big", huge);
+    const resp = await handleInvokeMCPServer(mcpStore, id, { tool: "retain", arguments: { bank_id: "b", content: "c" } }, "req-f067-big");
+    expect(resp.status).toBe(502);
+    const body = resp.body as { jsonrpc: string; error: { code: number; message: string }; id: string };
+    // Same error envelope every other 502 uses — not a bespoke shape.
+    expect(body.jsonrpc).toBe("2.0");
+    expect(body.error.code).toBe(-32603);
+    expect(body.error.message).toMatch(/result/i);
+    expect(body.id).toBe("req-f067-big");
+    // The blob itself never made it into the response.
+    expect(JSON.stringify(resp.body)).not.toContain("AAAAAAAAAA");
+  }, 15000);
+
+  test("a normal result still passes through unchanged", async () => {
+    const { mcpStore, id } = await serverWithResult("srv-f067-ok", { content: [{ type: "text", text: "ok" }] });
+    const resp = await handleInvokeMCPServer(mcpStore, id, { tool: "retain", arguments: { bank_id: "b", content: "c" } }, "req-f067-ok");
+    expect(resp.status).toBe(200);
+    expect(resp.body).toEqual({ jsonrpc: "2.0", result: { content: [{ type: "text", text: "ok" }] }, id: "req-f067-ok" });
   }, 15000);
 });

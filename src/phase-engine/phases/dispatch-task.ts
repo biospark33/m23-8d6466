@@ -123,7 +123,19 @@ export function dispatchTask(
       // Empty or whitespace-only values don't count as present — they'd fail at spawn
       if (v !== undefined && v.trim().length > 0) secretEnv[key] = v;
     }
-    const redact = (s: string): string => redactSecrets(s, secretEnv);
+    // The redaction map is the WHOLE parent env, not the two provider keys:
+    // this closure scrubs traced prompts, team-event payloads and every
+    // refusal message — the same records `phase.ts` scrubs against all of
+    // process.env and `command-gate.ts` against parentEnvStrings(). Two
+    // definitions of "secret" over one body of text is the bug (F058);
+    // `redactSecrets` already filters by SECRET_KEY_RE, so widening the map
+    // costs nothing and cannot mangle ordinary env values. `secretEnv` stays
+    // the PRESENCE gate below, and nothing else.
+    const redactEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (typeof v === "string") redactEnv[k] = v;
+    }
+    const redact = (s: string): string => redactSecrets(s, redactEnv);
 
     // AC5: QDS_TEAM_RUNNER refusal FIRST — unset and every non-"local" value
     // alike refuse before any spawn. The seam's own code default is "warren"

@@ -985,3 +985,33 @@ describe("dispatch-task: manifest schema (kind registration)", () => {
     expect(PipelineManifestSchema.safeParse(m).success).toBe(false);
   });
 });
+
+describe("dispatch-task: F058 redaction map is the full parent env", () => {
+  it("scrubs a secret that lives in the parent env under neither known provider key", async () => {
+    const savedGh = process.env.GITHUB_TOKEN;
+    // A real credential the dispatch redactor never knew about: `phase.ts`
+    // scrubs the SAME records against the whole of process.env, so the two
+    // sinks disagreed about what "secret" means (F058).
+    const secret = "ghp_F058AAAABBBBCCCCDDDDEEEEFFFF";
+    process.env.GITHUB_TOKEN = secret;
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    // The runner refusal echoes the offending value back — the cheapest sink
+    // that puts caller-controlled text through `redact` before spawn.
+    process.env.QDS_TEAM_RUNNER = secret;
+    try {
+      const spy = injectFake(() => successResult());
+      const result = await runDispatch();
+      expect(result.exitStatus).toBe("logic");
+      expect(result.error?.message).not.toContain(secret);
+      expect(result.error?.message).toContain("[REDACTED:GITHUB_TOKEN]");
+      expect(spy.calls).toBe(0);
+    } finally {
+      if (savedGh === undefined) {
+        // biome-ignore lint/performance/noDelete: unset is the semantic — assignment would leave "undefined" in the env.
+        delete process.env.GITHUB_TOKEN;
+      } else {
+        process.env.GITHUB_TOKEN = savedGh;
+      }
+    }
+  });
+});

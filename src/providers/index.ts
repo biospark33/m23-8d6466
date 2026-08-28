@@ -12,6 +12,7 @@ import { FakeDriver } from "./fake-driver.ts";
 import { ExeDevDriver } from "./exedev/driver.ts";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import type { ProviderDriver } from "./driver.ts";
+import { redactSecrets } from "./step-log.ts";
 
 export type DriverFactory = () => ProviderDriver;
 
@@ -42,7 +43,9 @@ export function resolveDriver(name: string, ctx: ResolveContext = {}): ProviderD
 
 /**
  * Wrap every async primitive with the observability contract. Errors are logged
- * as `{ code, message }` and re-thrown — the wrapper never swallows or reshapes
+ * as `{ code, message }` — redacted, because `exec`/`copyFile` reject with box
+ * stderr and driver argv (F020; same `redactSecrets(err.message ?? e)` form as
+ * `timedLoggedStep`) — and re-thrown — the wrapper never swallows or reshapes
  * a failure, and it never logs a record's `keyHash` value (it only ever sees
  * driver arguments, which carry no credential; DF2.3 delivers keys on stdin and
  * that argument is deliberately not logged).
@@ -95,7 +98,7 @@ function instrument(driver: ProviderDriver, ctx: ResolveContext): ProviderDriver
         try {
           result = (value as (...a: unknown[]) => unknown).apply(target, args);
         } catch (e) {
-          emit("error", { code: errCode(e), message: (e as Error).message });
+          emit("error", { code: errCode(e), message: redactSecrets((e as Error)?.message ?? e) });
           throw e;
         }
         if (!(result instanceof Promise)) {
@@ -108,7 +111,7 @@ function instrument(driver: ProviderDriver, ctx: ResolveContext): ProviderDriver
             return v;
           },
           (e) => {
-            emit("error", { code: errCode(e), message: (e as Error).message });
+            emit("error", { code: errCode(e), message: redactSecrets((e as Error)?.message ?? e) });
             throw e;
           },
         );
