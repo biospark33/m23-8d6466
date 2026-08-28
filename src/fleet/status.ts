@@ -9,6 +9,7 @@
  * FleetError unified: ONE class, in dispatch.ts (C2). Imported here, never
  * re-exported — see the import below.
  */
+import { log, newRequestId } from "../swarmclaw/log.ts";
 import { SBX_OWNERSHIP_TAG, type ProviderVm } from "../providers/driver.ts";
 import type { RunRecord, RunRecordListing, RunRecordStore } from "../providers/run-record.ts";
 
@@ -270,6 +271,76 @@ async function listWithTimeout(
 }
 
 /**
+ * F091: box names the substrate reported MORE THAN ONCE, keyed by the map they
+ * were collapsed into, with how many boxes answered to each. A WeakMap for the
+ * same reason `sortInstants` is one — the join map stays a plain `Map` that
+ * every caller reads with `get`, and the collision rides alongside it instead
+ * of widening the type through the whole join.
+ */
+const collapsedBoxNames = new WeakMap<object, Map<string, number>>();
+
+/**
+ * F091: one `duplicate-box-name` line per colliding name, naming every record
+ * that claims it.
+ *
+ * Two collisions, one line, because they are the same accident seen from the
+ * two sides of the join and both end with a LIVE, BILLING box the operator's
+ * own status verb does not show:
+ *  - the SUBSTRATE reported two boxes under one name (`collapsedBoxNames`), so
+ *    the map kept the last and the earlier box has no row at all — not even as
+ *    an orphan;
+ *  - two RECORDS claim one name, so one of them is reporting a box it does not
+ *    own, and its own box is unaccounted for.
+ *
+ * Reported, never repaired: the table keeps last-wins exactly as before (see
+ * the marker in `listOwnedBoxesOnce`). Never throws — a status verb must not
+ * die on the way to describing a broken fleet.
+ */
+function reportDuplicateBoxNames(records: readonly RunRecord[], boxes: Map<string, ProviderVm> | null): void {
+  // Claims by the SAME two names the join looks a record up under, so this can
+  // never disagree with `rowForRecord` about who claims what.
+  const claims = new Map<string, string[]>();
+  const claim = (name: string, runId: string): void => {
+    const ids = claims.get(name);
+    if (ids === undefined) claims.set(name, [runId]);
+    else if (!ids.includes(runId)) ids.push(runId);
+  };
+  for (const rec of records) {
+    claim(rec.runId, rec.runId);
+    if (rec.vmName !== undefined && rec.vmName !== rec.runId) claim(rec.vmName, rec.runId);
+  }
+
+  const collapsed = boxes === null ? undefined : collapsedBoxNames.get(boxes);
+  const names = new Set<string>(collapsed?.keys() ?? []);
+  for (const [name, ids] of claims) if (ids.length > 1) names.add(name);
+
+  for (const name of names) {
+    const boxCount = collapsed?.get(name) ?? (boxes?.has(name) === true ? 1 : 0);
+    const runIds = claims.get(name) ?? [];
+    try {
+      log({
+        requestId: newRequestId(),
+        operation: "fleet.status.duplicate_box_name",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "ok",
+        code: "duplicate-box-name",
+        // Substrate-supplied, and this one is interpolated into a sentence.
+        boxName: safeName(name),
+        boxCount,
+        runIds,
+        message:
+          `box name ${safeName(name)} is not unique: the substrate reported ${boxCount} box(es) under it and ${runIds.length} record(s) claim it (${runIds.join(", ") || "none"}). \`fleet status\` keeps the LAST box under a name, so any other box under it is live and billing with no row in the table — reconcile by name before acting on this listing`,
+        outcome: "duplicate-box-name",
+      });
+    } catch {
+      // a throwing log sink must not take the status verb down
+    }
+  }
+}
+
+/**
  * Owned boxes by name, or `null` when the list failed/timed out (→ boxUnknown).
  *
  * The shaping runs INSIDE the try: a driver that answers with a non-array (or
@@ -346,16 +417,26 @@ async function listOwnedBoxesOnce(
 ): Promise<Map<string, ProviderVm> | null> {
   try {
     const vms = await listWithTimeout(deps.driver, timeoutMs, name);
-    // ponytail: last-wins on a duplicate `name`, which hides the earlier box's
-    // row. The name IS the join key across records, driver and teardown, so two
-    // boxes sharing one is a substrate that has already broken the addressing
-    // every verb depends on; carrying `Map<string, ProviderVm[]>` through the
-    // record join to report both is the upgrade if a substrate ever allows it.
-    return new Map(
-      vms
-        .filter((v) => typeof v?.name === "string" && v.name.length > 0 && isOwnedVm(v))
-        .map((v) => [v.name, v] as const),
-    );
+    // ponytail: still last-wins on a duplicate `name` for the TABLE — but the
+    // collision is no longer silent (F091): every collapsed name is recorded on
+    // `collapsedBoxNames` below and reported by `reportDuplicateBoxNames`, so
+    // the hidden box is named on the operator's channel even though its row is
+    // not in the table. The name IS the join key across records, driver and
+    // teardown, so two boxes sharing one is a substrate that has already broken
+    // the addressing every verb depends on; carrying `Map<string, ProviderVm[]>`
+    // through the record join to give the hidden box a ROW of its own is still
+    // the upgrade if a substrate ever allows it.
+    const owned = vms.filter((v) => typeof v?.name === "string" && v.name.length > 0 && isOwnedVm(v));
+    const boxes = new Map(owned.map((v) => [v.name, v] as const));
+    if (owned.length > boxes.size) {
+      const counts = new Map<string, number>();
+      for (const v of owned) counts.set(v.name, (counts.get(v.name) ?? 0) + 1);
+      collapsedBoxNames.set(
+        boxes,
+        new Map([...counts].filter(([, n]) => n > 1)),
+      );
+    }
+    return boxes;
   } catch {
     return null;
   }
@@ -652,6 +733,9 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
   const boxes = await listOwnedBoxes(deps, timeoutMs);
 
   const records = listing.records;
+  // F091 — before the rows are built, so the collision is on the operator's
+  // channel even if a later step throws.
+  reportDuplicateBoxNames(records, boxes);
   const rows: StatusRow[] = records.map((rec) => {
     const row = rowForRecord(rec, boxes);
     // From the RAW value, before sanitization bounded it — see sortInstants.
@@ -798,5 +882,8 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
   const filter = rec.vmName === undefined || rec.vmName === rec.runId ? rec.runId : undefined;
   const boxes = await listOwnedBoxes(deps, timeoutMs, filter);
 
+  // F091: the same collision, on the entry point an operator types when they
+  // already know the id — one record, so only the substrate-side arm can fire.
+  reportDuplicateBoxNames([rec], boxes);
   return rowForRecord(rec, boxes);
 }

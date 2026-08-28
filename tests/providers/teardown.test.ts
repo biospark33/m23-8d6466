@@ -1009,6 +1009,66 @@ describe("DF2.5 teardownSandbox", () => {
     }, 30_000);
   });
 
+  // ─── 8c. F032: the two spend figures, compared ───────────────────
+
+  describe("F032 spend divergence at the close step", () => {
+    /** A ledger hook whose derived per-run total is whatever the test says. */
+    function ledgerStub(totalMicroUsd: number): CostLedgerHook {
+      return {
+        ingestBoxHours: () => ({ eventId: "stub", inserted: true, unpriced: false }),
+        readRunCost: () => ({ totalMicroUsd, hasEvents: true }),
+      };
+    }
+
+    test("record spend and derived ledger total disagree → one spend-divergence line at close", async () => {
+      const runId = "df25-spend-divergence";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+
+      // The provider-authoritative figure captureSpend wrote (0.0081 USD), against
+      // a ledger holding box hours only — exactly the F001 shape.
+      await teardownSandbox(deps({ gitCwd: host, costLedger: ledgerStub(100) }), runId);
+
+      expect(store.get(runId).spendMicroUsd).toBe(8100);
+      const lines = logs.filter((l) => l.code === "spend-divergence");
+      expect(lines).toHaveLength(1);
+      expect(lines[0]!.recordedMicroUsd).toBe(8100);
+      expect(lines[0]!.derivedMicroUsd).toBe(100);
+      expect(lines[0]!.runId).toBe(runId);
+      // The line has to say WHY the two disagree, or the operator re-derives F001 by hand.
+      expect(String(lines[0]!.message)).toContain("tokens-ledger-unwired");
+      // and the close itself still stands
+      expect(store.get(runId).closedAt).toBeString();
+    }, 30_000);
+
+    test("figures that agree → no divergence line", async () => {
+      const runId = "df25-spend-agrees";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+
+      await teardownSandbox(deps({ gitCwd: host, costLedger: ledgerStub(8100) }), runId);
+
+      expect(logs.filter((l) => l.code === "spend-divergence")).toHaveLength(0);
+    }, 30_000);
+
+    test("a hook with no readRunCost (DF2.8's box-hours-only shape) is left alone", async () => {
+      const runId = "df25-spend-nohook";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+
+      await teardownSandbox(
+        deps({ gitCwd: host, costLedger: { ingestBoxHours: () => ({ eventId: "x", inserted: true, unpriced: false }) } }),
+        runId,
+      );
+
+      expect(logs.filter((l) => l.code === "spend-divergence")).toHaveLength(0);
+      expect(store.get(runId).closedAt).toBeString();
+    }, 30_000);
+  });
+
   // ─── 9b. Crash between destroy and close — dead box, open record ──────────
 
   test("box already destroyed before the re-run: artifacts+harvest skip 'box already gone', run still closes", async () => {
