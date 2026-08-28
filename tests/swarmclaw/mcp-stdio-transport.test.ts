@@ -24,7 +24,7 @@ function bunFake(env: Record<string, string> = {}): StdioTransport {
     command: "bun",
     args: [FAKE],
     env: { ...(process.env as Record<string, string>), ...env },
-    validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+    validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun", SWARMCLAW_ARG_POLICY: "bun" },
   });
 }
 
@@ -688,7 +688,7 @@ for await (const chunk of Bun.stdin.stream()) {
       command: "bun",
       args: ["-e", script],
       env: { ...(process.env as Record<string, string>) },
-      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun", SWARMCLAW_ARG_POLICY: "bun" },
     });
     live.push(t);
     await t.spawn();
@@ -728,7 +728,7 @@ for await (const chunk of Bun.stdin.stream()) {
       command: "bun",
       args: ["-e", script],
       env: { ...(process.env as Record<string, string>) },
-      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun", SWARMCLAW_ARG_POLICY: "bun" },
     });
     live.push(t);
     await t.spawn();
@@ -768,7 +768,7 @@ for await (const chunk of Bun.stdin.stream()) {
       command: "bun",
       args: ["-e", script],
       env: { ...(process.env as Record<string, string>) },
-      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun", SWARMCLAW_ARG_POLICY: "bun" },
     });
     live.push(t);
     await t.spawn();
@@ -860,4 +860,45 @@ describe("real hindsight-local-mcp (integration)", () => {
     // Above the 60s internal bound so the wrapper never fires first.
     75_000,
   );
+});
+
+// ---------------------------------------------------------------------------
+// F005: default-deny argv for allowlisted commands with no arg validator.
+// ---------------------------------------------------------------------------
+
+describe("F005 default-deny unvalidated argv", () => {
+  test("an allowlisted command with no arg validator refuses args", () => {
+    expect(() => validateCommand({ command: "hindsight-local-mcp", args: ["--evil"], env: {} })).toThrow(
+      /no arg policy/,
+    );
+  });
+
+  test("the same command with no args is still accepted", () => {
+    expect(() => validateCommand({ command: "hindsight-local-mcp", args: [], env: {} })).not.toThrow();
+  });
+
+  test("SWARMCLAW_ARG_POLICY opts a command in by basename", () => {
+    expect(() =>
+      validateCommand({
+        command: "hindsight-local-mcp",
+        args: ["--port", "8888"],
+        env: { SWARMCLAW_ARG_POLICY: "hindsight-local-mcp" },
+      }),
+    ).not.toThrow();
+  });
+
+  test("SWARMCLAW_ARG_POLICY naming a different command does not waive this one", () => {
+    expect(() =>
+      validateCommand({
+        command: "hindsight-local-mcp",
+        args: ["--evil"],
+        env: { SWARMCLAW_ARG_POLICY: "some-other-cmd" },
+      }),
+    ).toThrow(/no arg policy/);
+  });
+
+  test("node and npx keep their own validators (arg policy is not consulted)", () => {
+    expect(() => validateCommand({ command: "node", args: ["server.js"], env: {} })).not.toThrow();
+    expect(() => validateCommand({ command: "node", args: ["-e", "1"], env: {} })).toThrow(CommandValidationError);
+  });
 });

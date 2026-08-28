@@ -11,6 +11,7 @@
  * grace 5s, then SIGKILL, then exit.
  */
 
+import { timingSafeEqual } from "node:crypto";
 import { log, newRequestId } from "./mcp/stdio-transport.ts";
 import { handleRegisterAgent } from "./routes/agents.ts";
 import {
@@ -23,6 +24,7 @@ import { MCPStore } from "./store/mcp-store.ts";
 
 export interface SwarmClawServer {
   port: number;
+  hostname: string;
   agentStore: AgentStore;
   mcpStore: MCPStore;
   stop: () => Promise<void>;
@@ -32,8 +34,14 @@ export function createServer(port = 0): SwarmClawServer {
   const agentStore = new AgentStore();
   const mcpStore = new MCPStore();
 
+  // F002: loopback-only by default. The routes spawn subprocesses and proxy
+  // arbitrary tool calls into them, so the listener must not be reachable off
+  // the host unless an operator explicitly waives it with SWARMCLAW_BIND.
+  const hostname = process.env.SWARMCLAW_BIND ?? "127.0.0.1";
+
   const server = Bun.serve({
     port,
+    hostname,
     async fetch(req) {
       const start = Date.now();
       const url = new URL(req.url);
@@ -63,6 +71,27 @@ export function createServer(port = 0): SwarmClawServer {
           status: "error",
           error: { code: "413", message: "payload too large" },
         });
+
+      // F002: bearer credential, checked ABOVE the 413 guard so an
+      // unauthenticated caller learns nothing about the body limit and cannot
+      // spend the drain budget. Opt-in: unset SWARMCLAW_AUTH_TOKEN leaves the
+      // surface as it was (loopback-only is the standing control).
+      const authToken = process.env.SWARMCLAW_AUTH_TOKEN;
+      if (authToken && !bearerMatches(req.headers.get("authorization"), authToken)) {
+        log({
+          requestId,
+          operation: "http.unauthorized",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: Date.now() - start,
+          status: "error",
+          error: { code: "401", message: "unauthorized" },
+        });
+        // Close rather than keep-alive: the request body is deliberately left
+        // unread here, so the connection must not be pooled with those bytes
+        // still buffered (same socket-poisoning reasoning as the 413 path).
+        return json({ status: 401, body: { error: "unauthorized" } }, { connection: "close" });
+      }
 
       // Reject oversized bodies before buffering them (all routes are POST).
       if (method === "POST") {
@@ -129,7 +158,16 @@ export function createServer(port = 0): SwarmClawServer {
     await mcpStore.shutdownAll();
   };
 
-  return { port: server.port ?? port, agentStore, mcpStore, stop };
+  return { port: server.port ?? port, hostname: server.hostname ?? hostname, agentStore, mcpStore, stop };
+}
+
+// Constant-time `Authorization: Bearer <token>` comparison. timingSafeEqual
+// throws on unequal lengths, so length is checked first — that leaks only the
+// header's length, never which bytes of the token matched.
+function bearerMatches(header: string | null, token: string): boolean {
+  const got = Buffer.from(header ?? "");
+  const want = Buffer.from(`Bearer ${token}`);
+  return got.length === want.length && timingSafeEqual(got, want);
 }
 
 export const MAX_BODY_BYTES = 1_048_576;

@@ -27,7 +27,7 @@ function fakeFactory(extraEnv: Record<string, string> = {}): TransportFactory {
       // needs to run and the test's behavior flags. We deliberately do NOT spread
       // process.env here — that would defeat the env-isolation assertion.
       env: { PATH: process.env.PATH ?? "", ...opts.env, ...extraEnv },
-      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun", SWARMCLAW_ARG_POLICY: "bun" },
     });
 }
 
@@ -38,7 +38,7 @@ function brokenFactory(): TransportFactory {
       command: "bun",
       args: [FAKE],
       env: { ...process.env, ...opts.env, FAKE_MCP_EXIT_CODE: "3" },
-      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun", SWARMCLAW_ARG_POLICY: "bun" },
     });
 }
 
@@ -284,7 +284,7 @@ describe("AC3: broken transport never silently succeeds", () => {
         command: "bun",
         args: [FAKE],
         env: { ...process.env, ...opts.env, FAKE_MCP_EXIT_CODE: "3", FAKE_MCP_STDERR_MARKER: "marker123" },
-        validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+        validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun", SWARMCLAW_ARG_POLICY: "bun" },
       });
     try {
       const resp = await handleRegisterMCPServer(
@@ -1042,6 +1042,12 @@ describe("Schema boundaries", () => {
   // be ACCEPTED (the over-limit cases above are one past these caps). Arg
   // LENGTH 4096/4097 is covered by the dedicated args-length test.
   test("MCP boundary accepted: 256 args + 64 env keys → 201", async () => {
+    // F005 default-denies args for an allowlisted command with no validator;
+    // this test is about the *schema* caps, so opt the command into an arg
+    // policy and let the 256-arg payload reach the schema boundary.
+    const restoreArgPolicy = saveEnv("SWARMCLAW_ARG_POLICY");
+    process.env.SWARMCLAW_ARG_POLICY = "hindsight-local-mcp";
+    try {
     const mcpStore = newMcpStore();
     const r1 = await handleRegisterMCPServer(
       mcpStore,
@@ -1062,6 +1068,9 @@ describe("Schema boundaries", () => {
       fakeFactory(),
     );
     expect(r2.status).toBe(201);
+    } finally {
+      restoreArgPolicy();
+    }
   }, 15000);
 
   test("name 128 chars (boundary) → 201, and tool 257 chars → 400 -32602", async () => {
@@ -1169,7 +1178,7 @@ describe("Registration failure contracts", () => {
       command: "bun",
       args: [FAKE],
       env: { PATH: process.env.PATH ?? "" },
-      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun", SWARMCLAW_ARG_POLICY: "bun" },
     });
     mcpStore.attachTransport(rid, t);
     // Drain the pending transport BEFORE it ever spawns.
