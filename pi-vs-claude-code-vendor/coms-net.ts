@@ -35,7 +35,6 @@ import {
 	abbreviateModel,
 	envBoundedInt,
 	fallbackColor,
-	findSystemPromptPath,
 	hexFg,
 	isDuplicateRegistration,
 	isSafePathComponent,
@@ -2249,7 +2248,12 @@ export default function (pi: ExtensionAPI) {
 				resp = await httpFetch("GET", `/v1/agents${qs}`);
 			} catch (err) {
 				if (err instanceof HttpError) {
-					const detail = (err.body?.error) || err.message;
+					// err.body is parsed hub JSON — `error` is any type and
+					// this message reaches the terminal as tool-error text.
+					const raw = err.body?.error;
+					const detail = typeof raw === "string"
+						? sanitizePeerText(raw, "", 256)
+						: err.message;
 					throw new Error(`coms-net: list failed (${err.status}): ${detail}`);
 				}
 				throw new Error(`coms-net: list failed: ${safeError(err)}`);
@@ -2389,7 +2393,12 @@ export default function (pi: ExtensionAPI) {
 				resp = await httpFetch("POST", "/v1/messages", req) as SendResponse;
 			} catch (err) {
 				if (err instanceof HttpError) {
-					const detail = (err.body?.error) || err.message;
+					// err.body is parsed hub JSON — `error` is any type and
+					// this message reaches the terminal as tool-error text.
+					const raw = err.body?.error;
+					const detail = typeof raw === "string"
+						? sanitizePeerText(raw, "", 256)
+						: err.message;
 					throw new Error(`coms-net: send failed (${err.status}): ${detail}`);
 				}
 				throw new Error(`coms-net: send failed: ${safeError(err)}`);
@@ -3191,8 +3200,10 @@ export default function (pi: ExtensionAPI) {
 			if (tokens.includes("--server")) {
 				try {
 					const health = await httpFetch("GET", "/health");
+					// httpFetch returns `any` — both fields are hub-controlled
+					// and this string goes straight to the terminal notifier.
 					ctx.ui?.notify?.(
-						`coms-net server: ${serverUrl} · version ${health?.version ?? "?"} · server_id ${health?.server_id ?? "?"}`,
+						`coms-net server: ${serverUrl} · version ${sanitizePeerText(health?.version, "?", 64)} · server_id ${sanitizePeerText(health?.server_id, "?", 64)}`,
 						"info",
 					);
 				} catch (err) {

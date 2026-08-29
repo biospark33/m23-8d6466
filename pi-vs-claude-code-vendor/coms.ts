@@ -26,7 +26,6 @@
  */
 
 import type { AgentToolResult, ExtensionAPI, ExtensionContext, RegisteredCommand, Theme, ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { applyExtensionDefaults } from "./themeMap.ts";
@@ -34,7 +33,6 @@ import {
 	abbreviateModel,
 	envBoundedInt,
 	fallbackColor,
-	findSystemPromptPath,
 	hexFg,
 	isDuplicateRegistration,
 	isSafePathComponent,
@@ -769,7 +767,11 @@ function sendEnvelope(endpoint: string, envelope: Envelope | Pong | { type: stri
 					// Definitive rejection (unauthorized, hops exceeded, ...):
 					// the prompt was NOT queued, so no bytesWritten flag —
 					// coms_send rolls the pending entry back.
-					reject(new Error(parsed.error || "nack"));
+					//
+					// `parsed.error` is peer-controlled and this message reaches
+					// the terminal through the tool-error render, so sanitize it
+					// at the point it becomes an Error message.
+					reject(new Error(sanitizePeerText(parsed.error, "", 256) || "nack"));
 				} else if (parsed && parsed.type === expectedReply && parsed.msg_id === expectedMsgId) {
 					resolve(parsed);
 				} else {

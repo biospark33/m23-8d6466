@@ -127,3 +127,57 @@ describe("vendored source keeps the narrowed boundary", () => {
 		expect(/response_schema: Type\.Optional\(Type\.Any\(/.test(comsNetSrc)).toBe(false);
 	});
 });
+
+/**
+ * Wave-8: three sinks turned a peer- or hub-controlled string into terminal
+ * output without sanitizing — the nack error, the two HttpError handlers, and
+ * the `--server` /health notify. Same split as above: one runtime test of the
+ * expression shape the fixed handlers now use, plus source assertions, which
+ * are the only thing that catches a revert inside an unexported closure.
+ */
+describe("wave-8: terminal-reaching error and notify strings", () => {
+	test("the HttpError detail expression sanitizes a string body and falls back otherwise", () => {
+		// coms-net.ts's list/send catch blocks, reduced to the lines under test.
+		const detailOf = (body: { error?: unknown } | undefined, message: string) => {
+			const raw = body?.error;
+			return typeof raw === "string" ? sanitizePeerText(raw, "", 256) : message;
+		};
+		expect(detailOf({ error: HOSTILE }, "fallback")).toBe(CLEAN);
+		// A non-string body field falls back to err.message, not to "".
+		expect(detailOf({ error: { not: "a string" } }, "fallback")).toBe("fallback");
+		expect(detailOf(undefined, "fallback")).toBe("fallback");
+		// 256, not the 64-char default — a whole error message must survive.
+		expect(detailOf({ error: "e".repeat(200) }, "fallback")).toHaveLength(200);
+	});
+
+	test("the nack path sanitizes the peer error before it becomes an Error message", () => {
+		expect(
+			comsSrc.includes('reject(new Error(sanitizePeerText(parsed.error, "", 256) || "nack"));'),
+		).toBe(true);
+		expect(comsSrc.includes('reject(new Error(parsed.error || "nack"));')).toBe(false);
+	});
+
+	test("both HttpError handlers sanitize err.body?.error", () => {
+		expect(comsNetSrc.includes("const detail = (err.body?.error) || err.message;")).toBe(false);
+		const guarded = comsNetSrc.match(/const raw = err\.body\?\.error;/g) ?? [];
+		expect(guarded).toHaveLength(2);
+		const sanitized = comsNetSrc.match(/sanitizePeerText\(raw, "", 256\)/g) ?? [];
+		expect(sanitized).toHaveLength(2);
+	});
+
+	test("the /health notify sanitizes version and server_id", () => {
+		expect(comsNetSrc.includes('sanitizePeerText(health?.version, "?", 64)')).toBe(true);
+		expect(comsNetSrc.includes('sanitizePeerText(health?.server_id, "?", 64)')).toBe(true);
+		expect(comsNetSrc.includes("${health?.version ?? \"?\"}")).toBe(false);
+	});
+
+	test("the registry read boundary sanitizes every peer-controlled display field", () => {
+		// DIVERGENCE.md's earlier "coms_list renders raw" claim was false: this
+		// is the boundary both the tool text and renderResult rows inherit.
+		expect(comsSrc.includes('purpose: sanitizePeerText(parsed.purpose, "", 256),')).toBe(true);
+		expect(comsSrc.includes('model: sanitizePeerText(parsed.model, "unknown", 64),')).toBe(true);
+		expect(comsSrc.includes('cwd: sanitizePeerText(parsed.cwd, "", 256),')).toBe(true);
+		// `name` is admitted only through the path-component whitelist.
+		expect(comsSrc.includes("isSafePathComponent(parsed.name) &&")).toBe(true);
+	});
+});

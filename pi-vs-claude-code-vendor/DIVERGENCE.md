@@ -174,14 +174,36 @@ are transport-coupled; unifying would not be zero-behavior:
   because this is a whole error message, not a name. `coms_get`'s `renderResult`
   status is NOT sanitized and does not need to be: unlike coms-net's, it comes
   from a local string literal, never off the wire.
-- **Known remaining gap (F080)** — `coms_list` renders `a.name` / `a.model`
-  straight off the registry entries in both its tool text and its
-  `renderResult` rows. Registry files are peer-written, so these are
-  peer-controlled, and coms-net's equivalent is sanitized via `sanitizeCard`.
-  Not fixed here: the tool-output text is the larger surface and out of this
-  story's scope. Covered by `tests/vendor/coms-net.test.ts`, which asserts the
-  compile-time force with a `@ts-expect-error` as well as the runtime
-  sanitization of both the argument and result sides.
+- **Terminal-reaching error/notify strings (wave-8)** — three sinks turned a
+  peer- or hub-controlled string into terminal output without sanitizing:
+  `coms.ts`'s nack path (`parsed.error` → `new Error(...)` → the tool-error
+  render), `coms-net.ts`'s two `HttpError` handlers (`err.body?.error`, `any`
+  off parsed hub JSON, → tool-error text), and the `--server` `/health` notify
+  (`version`/`server_id` → `ctx.ui.notify`). All four now go through
+  `sanitizePeerText(..., 256)` (64 for the two `/health` fields); the
+  `err.body?.error` sites keep the `typeof === "string"` check so a non-string
+  body falls back to `err.message` rather than to `""`.
+  `coms_list` is NOT in this list, contrary to an earlier note here: its
+  registry-read boundary (`coms.ts:448-468`) already sanitizes `purpose`,
+  `model` and `cwd` and admits `name` only through the `isSafePathComponent`
+  whitelist, so both the tool text and the `renderResult` rows inherit it.
+- **Known remaining gaps — deliberately deferred, not oversights**
+  - `httpFetch` returns `any`; every caller that reads a field off it is
+    trusting hub JSON shape. Narrowing it is its own change.
+  - `renderResult`'s `result.details as any` in the coms tools — the details
+    object is produced locally by the same file's `execute`, so the cast is
+    safe today, but nothing enforces that.
+  - Peer-supplied `sender_endpoint` and the registry `endpoint` reach
+    `net.createConnection({ path })`. Length is bounded; confinement to the
+    known socket roots is deliberately not enforced (`coms.ts:1024-1028`: a
+    legitimate relay may run under a different `PI_COMS_DIR`). Changing that
+    is its own story.
+  - Raw `error` / `status` values placed into a tool result's `content`. That
+    text goes to the model's context, not to the terminal, so it is not an
+    ANSI-injection channel; prompt-injection hardening of tool output is a
+    separate concern.
+  - Unbounded peer fields written to `appendEntry` / `audit` logs. Log files
+    are not rendered by the TUI; capping them is a log-hygiene change.
 
 ## `coms-net.ts` (HTTP/SSE hub transport)
 
