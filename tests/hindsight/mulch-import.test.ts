@@ -276,7 +276,7 @@ describe("importMulch — partial failure", () => {
       bankId: "bank-partial",
     });
     // F006: a partial import is NOT ok — `ok` mirrors failures.length === 0 so
-    // the CLI's exit code (import-mulch-expertise.ts:159) is non-zero.
+    // the CLI's exit code (import-mulch-expertise.ts:164) is non-zero.
     expect(result.ok).toBe(false);
     expect(result.importedFiles).toBe(1);
     expect(result.failures.length).toBe(1);

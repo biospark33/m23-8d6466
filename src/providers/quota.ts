@@ -132,8 +132,17 @@ export function loadQuotaLimits(
           message: `no quota limits at ${file} — ceilings fall back to the built-in defaults`,
           outcome: "default-limits",
         });
-      } catch {
-        // best-effort signal only; the defaults stand either way
+      } catch (e2) {
+        // Named once on stderr like cost-ledger's `emitGuarded`: a swallowed
+        // throw here means the absent-config signal is gone AND nothing says
+        // it is gone. The fallback itself stands either way.
+        try {
+          process.stderr.write(
+            `quota: log sink threw for quota.limits (${(e2 as Error).message}) — defaults stand\n`,
+          );
+        } catch {
+          // best-effort diagnostic only
+        }
       }
       return { limits: DEFAULT_QUOTA_LIMITS, source: "default" };
     }

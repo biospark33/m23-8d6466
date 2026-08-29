@@ -305,7 +305,7 @@ export async function verifyRoundTrip(
         duration: Date.now() - start,
         status,
         recall_ms: recallMs,
-      server_recall_ms: serverRecallMs,
+        server_recall_ms: serverRecallMs,
         error: errMsg,
       });
       return { ok: false, step: "recall", error: errMsg, requestId };
@@ -326,7 +326,7 @@ export async function verifyRoundTrip(
         duration: Date.now() - start,
         status,
         recall_ms: recallMs,
-      server_recall_ms: serverRecallMs,
+        server_recall_ms: serverRecallMs,
         error: errMsg,
       });
       return { ok: false, step: "recall", error: errMsg, requestId };
@@ -347,7 +347,7 @@ export async function verifyRoundTrip(
         duration: Date.now() - start,
         status,
         recall_ms: recallMs,
-      server_recall_ms: serverRecallMs,
+        server_recall_ms: serverRecallMs,
         error: errMsg,
       });
       return { ok: false, step: "recall", error: errMsg, requestId };
@@ -362,7 +362,7 @@ export async function verifyRoundTrip(
       duration: Date.now() - start,
       status,
       recall_ms: recallMs,
-      server_recall_ms: serverRecallMs,
+        server_recall_ms: serverRecallMs,
       ...(slowQuery ? { slow_query: true } : {}),
     });
   }

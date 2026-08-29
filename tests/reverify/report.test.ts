@@ -16,9 +16,11 @@ import {
   CLAIMED_FILES_MAX,
   appendReport,
   readReports,
+  readReportsWithTail,
   sealReport,
   type ReverifyEvidence,
 } from "../../src/reverify/report.ts";
+import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 
 function evidence(over: Partial<ReverifyEvidence> = {}): ReverifyEvidence {
   return {
@@ -241,9 +243,47 @@ describe("append-only persistence", () => {
       );
       const all = readReports(dir, "run-1");
       expect(all.map((r) => r.reverifyId)).toEqual(["rv-good"]);
+      // The tail was one of the dropped lines: `at(-1)` would hand a caller the
+      // EARLIER report, so the fact is surfaced rather than skipped silently.
+      expect(readReportsWithTail(dir, "run-1").lastLineInvalid).toBe(true);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test("a malformed line that is NOT the tail stays a plain skip", () => {
+    // The nondeterminism heuristic in runner.ts reads history, not authority:
+    // a torn middle line must not refuse anything.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rv-report-"));
+    try {
+      appendReport(dir, sealReport(evidence({ reverifyId: "rv-1" }), {}));
+      fs.appendFileSync(path.join(dir, "run-1.jsonl"), "{ torn\n");
+      appendReport(dir, sealReport(evidence({ reverifyId: "rv-2" }), {}));
+      const { reports, lastLineInvalid } = readReportsWithTail(dir, "run-1");
+      expect(reports.map((r) => r.reverifyId)).toEqual(["rv-1", "rv-2"]);
+      expect(lastLineInvalid).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("every dropped line emits one guarded structured log line", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rv-report-"));
+    const lines: LogEntry[] = [];
+    const restore = setLogSink((e) => lines.push(e));
+    try {
+      appendReport(dir, sealReport(evidence({ reverifyId: "rv-1" }), {}));
+      fs.appendFileSync(path.join(dir, "run-1.jsonl"), "{ torn\n");
+      readReports(dir, "run-1");
+    } finally {
+      restore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    const dropped = lines.filter((l) => l.code === "reverify-report-line-unparsable");
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]?.lineIndex).toBe(2);
+    expect(String(dropped[0]?.reportFile)).toContain("run-1.jsonl");
+    expect(dropped[0]?.status).toBe("error");
   });
 
   test("readReports on an absent run returns an empty list, not a throw", () => {

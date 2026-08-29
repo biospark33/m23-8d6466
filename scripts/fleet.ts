@@ -474,13 +474,20 @@ function report(err: (s: string) => void, e: unknown): number {
   // Non-Error rejections normalize to {} so the printer cannot itself throw
   // while reporting one.
   const x = (e ?? {}) as { code?: string; message?: string; remediation?: string; stack?: string; cause?: unknown };
-  // No `code` at all means NOBODY designed this failure: a TypeError out of a
-  // driver, a RangeError from inside teardownSandbox. One bare message for a
-  // failure that may have left a box half-torn-down makes root-causing it
+  // No DESIGNED refusal means nobody planned for this failure: a TypeError out
+  // of a driver, a RangeError from inside teardownSandbox. One bare message for
+  // a failure that may have left a box half-torn-down makes root-causing it
   // require re-running the destructive command — carry the stack (and the
   // cause's message) so the first run is enough. Typed refusals (RunLockedError,
   // the credential and harvest errors) already say what went wrong and where,
   // and stay the clean one-liners operators read daily.
+  //
+  // The test is `code` AND `remediation`, not `code` alone: a designed refusal
+  // carries the operator's next step, and that is what makes it self-contained
+  // enough to drop the stack. Codes alone did not — F040's run-record validators
+  // throw context-free messages ("vmName must be a string") with a code and no
+  // remediation, and `code !== undefined` silently binned the only thing that
+  // said WHICH call site produced them.
   //
   // This branch and `asUsage` are the two places foreign text enters this
   // file's output, so both redact here rather than in `printError` — see there
@@ -490,7 +497,7 @@ function report(err: (s: string) => void, e: unknown): number {
   // own words.
   const cause = (x.cause ?? undefined) as { message?: string } | undefined;
   const debris =
-    x.code !== undefined
+    x.code !== undefined && x.remediation !== undefined
       ? undefined
       : {
           ...(typeof x.stack === "string" ? { stack: redactSecrets(x.stack) } : {}),
@@ -1304,7 +1311,7 @@ export async function run(
    * lost to a closed pipe is as lost as one lost to ENOSPC — `| head -1` must
    * not turn "the box is destroyed" into a silent success the caller never saw.
    */
-  const reportCompletion = (...lines: string[]): boolean => {
+  const reportCompletion = (lines: string[], remediation?: string): boolean => {
     try {
       for (const line of lines) emit(line, true);
       return true;
@@ -1314,7 +1321,12 @@ export async function run(
         note,
         "completion-unwritable",
         `the command completed but its result line could not be written to stdout: ${redactSecrets(x.message ?? e)}`,
-        "the work the missing line describes DID happen — confirm with `fleet status`; do not treat the short output as a failure to retry",
+        // Teardown's and harvest's lost lines describe work that is FINISHED;
+        // fan-out's describe boxes that are live and BILLING, and the ids are
+        // gone with the line. That call site passes its own remediation naming
+        // the recovery, the way `ack-unwritable` does for a single box.
+        remediation ??
+          "the work the missing line describes DID happen — confirm with `fleet status`; do not treat the short output as a failure to retry",
       );
       return false;
     }
@@ -1977,7 +1989,7 @@ export async function run(
       // dispatch ack and teardown's `torn down:`: the work landed, its report
       // did not, so 6 — and NOT 1, because retrying provisions N more boxes.
       const armLinesPrinted = reportCompletion(
-        ...result.arms.map(
+        result.arms.map(
           (arm) =>
             `${JSON.stringify({
               fanoutId: result.fanoutId,
@@ -1987,6 +1999,7 @@ export async function run(
               ...(arm.vmName === undefined ? {} : { vmName: arm.vmName }),
             })}\n`,
         ),
+        `the run ids in the missing lines belong to boxes that are LIVE and BILLING — \`fleet status\` lists them and \`fleet teardown <id>\` is the only thing that stops each one; fan-out ${result.fanoutId} names the set`,
       );
       // Auto-rank (AC7/D12): best-of-n's whole point, emitted when EVERY arm is
       // ready. Advisory — it authorizes nothing, so it carries its OWN catch:
@@ -2465,9 +2478,9 @@ export async function run(
       const res = await harvestRun(tdeps, runIdArg);
       // Through `reportCompletion`, not a bare `emit` (see it): the harvest
       // has already run, so a lost result line is 6, never a retryable 1.
-      code = reportCompletion(
+      code = reportCompletion([
         res.outcome === "harvested" ? `harvested: ${res.count}\n` : "harvested: none\n",
-      )
+      ])
         ? 0
         : 6;
     } else {
@@ -2583,10 +2596,10 @@ export async function run(
       }
       // Reported AFTER the teardown ran: printed first, it claims a waiver for
       // a teardown that may never have happened.
-      const reportedLanding = reportCompletion(
+      const reportedLanding = reportCompletion([
         ...(noHarvest ? [`teardown.harvest_waived ${runIdArg}\n`] : []),
         `torn down: ${runIdArg}\n`,
-      );
+      ]);
       // NOT 0. The box is gone and the record is closed, so the verb's own work
       // landed — but a key that may still be minting spend was not revoked and
       // this CLI cannot find it. `torn down:` + exit 0 is what `fleet teardown

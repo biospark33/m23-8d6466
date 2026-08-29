@@ -90,7 +90,12 @@ const ordered = computed(() =>
 
     <div class="list-head dim">
       <span v-if="ordered.length">{{ ordered.length }} {{ showArchived ? 'archived runs' : 'runs' }}</span>
-      <button type="button" class="archived-toggle" @click="toggleArchived">
+      <button
+        type="button"
+        class="archived-toggle"
+        :aria-pressed="showArchived"
+        @click="toggleArchived"
+      >
         {{ showArchived ? 'show active' : 'show archived' }}
       </button>
     </div>

@@ -382,7 +382,7 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
   }
 
   // F006: `ok` is the honest verdict on the whole import, not "the importer
-  // ran without crashing". `scripts/import-mulch-expertise.ts:159` maps it to
+  // ran without crashing". `scripts/import-mulch-expertise.ts:164` maps it to
   // the exit code, so an import where every file hit `retain_failed` used to
   // exit 0 carrying a green envelope with N failures. Rule: ok ⟺ zero
   // failures. A partial import (some entries in, some in `failures[]`) is
@@ -397,7 +397,22 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
     failures,
     requestId,
   };
-  emitLog(requestId, "import", opts.bankId, start, "ok");
+  // Same rule one line up: the LOG line's status is the honest verdict too. It
+  // said "ok" for an import where every file failed, so a dashboard filtering
+  // on status never saw what `result.ok` already knew.
+  emitLog(
+    requestId,
+    "import",
+    opts.bankId,
+    start,
+    result.ok ? "ok" : "error",
+    result.ok
+      ? undefined
+      : {
+          code: "import_partial_failure",
+          message: `${failures.length} of ${supportedFiles.length} files failed to import`,
+        },
+  );
   return result;
 }
 

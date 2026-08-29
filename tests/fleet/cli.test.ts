@@ -57,6 +57,7 @@ import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { leakScan, MIN_REDACTABLE_LEN } from "../providers/fixtures/leak-scan.ts";
 import { RUN_ID_RE, RunRecordStore } from "../../src/providers/run-record.ts";
 import { FanoutRecordStore, mintFanoutId } from "../../src/fleet/fanout.ts";
+import { CostLedgerError } from "../../src/providers/cost-ledger.ts";
 import { DEFAULT_QUOTA_LIMITS } from "../../src/providers/quota.ts";
 import type { FleetDeps, } from "../../scripts/fleet.ts";
 import type { KeyApi } from "../../src/providers/credentials.ts";
@@ -3874,6 +3875,44 @@ process.on = ((sig, listener) => {
     expect(readdirSync(runsDir)).toHaveLength(0);
   });
 
+  test("a coded failure with NO remediation keeps its stack (F040 codes are context-free)", async () => {
+    // The suppression is a trade: a designed refusal drops the stack because it
+    // already says what to do. `code !== undefined` alone was the wrong test —
+    // F040's run-record validators throw "vmName must be a string" with a code
+    // and no remediation, so the only thing naming the call site was binned.
+    const code = await runCli(["dispatch", "--driver", "fake"], {
+      ...deps(validBriefJson(dir)),
+      readBrief: () =>
+        Promise.reject(Object.assign(new Error("vmName must be a string"), { code: "invalid-run-record" })),
+    });
+    const envelope = JSON.parse(errCaptured[0] as string) as {
+      code: string;
+      stack?: string;
+      remediation?: string;
+    };
+    expect(code).toBe(1);
+    expect(envelope.code).toBe("invalid-run-record");
+    expect(envelope.remediation).toBeUndefined();
+    expect(envelope.stack).toContain("vmName must be a string");
+  });
+
+  test("a coded failure WITH remediation stays the clean one-liner", async () => {
+    const code = await runCli(["dispatch", "--driver", "fake"], {
+      ...deps(validBriefJson(dir)),
+      readBrief: () =>
+        Promise.reject(
+          Object.assign(new Error("the run is locked"), {
+            code: "run-locked",
+            remediation: "wait for the holder to exit, then retry",
+          }),
+        ),
+    });
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; stack?: string };
+    expect(code).toBe(1);
+    expect(envelope.code).toBe("run-locked");
+    expect(envelope.stack).toBeUndefined();
+  });
+
   test("dispatch whose ack cannot be written exits 6 with the box LIVE and the run id named", async () => {
     // `fleet dispatch … | head -0`: the pipe closes before the ack line lands,
     // `out()` throws EPIPE, and the run id — the ONLY handle on a box that is
@@ -4097,8 +4136,13 @@ process.on = ((sig, listener) => {
     expect(code).toBe(6);
     const envelope = JSON.parse(errCaptured.find((l) => l.includes("completion-unwritable")) as string) as {
       code: string;
+      remediation: string;
     };
     expect(envelope.code).toBe("completion-unwritable");
+    // Billing, not just lost output: the ids in those lines are the only handle
+    // on N live boxes, so the remediation must name the command that stops them.
+    expect(envelope.remediation).toContain("BILLING");
+    expect(envelope.remediation).toContain("fleet teardown");
   });
 
   test("F048: an unopenable ledger during the F15 reconciliation is invalid(5), not a raw throw", async () => {
@@ -4123,6 +4167,34 @@ process.on = ((sig, listener) => {
     expect(envelope.message).toContain("budget admission failed");
     // 5 is honest about the side effects: this runs BEFORE the first mint.
     expect(envelope.remediation).toContain("nothing was provisioned");
+    // The provider's own code rides the payload as diagnosis — the operator
+    // greps `admission-failed` and still learns it was SQLITE_CANTOPEN and not
+    // SQLITE_BUSY, which is the difference between "fix the path" and "wait".
+    expect((envelope as unknown as { providerCode?: string }).providerCode).toBe("SQLITE_CANTOPEN");
+    expectNoBoxes();
+  });
+
+  test("F048: a typed CostLedgerError becomes ledger-failed with its own code, message and remediation", async () => {
+    // dispatch.ts:1930-1956's rule: a FIXED fleet code so this CLI's exit-code
+    // table is not whatever cost-ledger.ts currently emits, with the ledger's
+    // own code in the payload and its message/remediation kept as diagnosis.
+    const code = await runCli(["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b"], {
+      ...fanoutDeps(),
+      ledgerFactory: () => {
+        throw new CostLedgerError("ledger-unwritable", "the ledger is read-only", "chmod the ledger, then retry");
+      },
+    });
+    expect(code).toBe(5);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("ledger-failed")) as string) as {
+      code: string;
+      message: string;
+      remediation: string;
+      providerCode?: string;
+    };
+    expect(envelope.code).toBe("ledger-failed");
+    expect(envelope.message).toContain("the ledger is read-only");
+    expect(envelope.remediation).toContain("chmod the ledger");
+    expect(envelope.providerCode).toBe("ledger-unwritable");
     expectNoBoxes();
   });
 

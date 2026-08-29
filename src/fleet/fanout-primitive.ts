@@ -26,6 +26,7 @@ import {
   checkHeadroom,
   type HeadroomResult,
 } from "../providers/quota.ts";
+import { CostLedgerError } from "../providers/cost-ledger.ts";
 import { TimeoutError, withTimeout } from "../providers/timeout.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
 import { defaultKeyCapMicroUsd, type KeyApi } from "../providers/credentials.ts";
@@ -173,12 +174,36 @@ function issueSnapshot(
       }
     }
   } catch (e) {
-    const x = (e ?? {}) as { message?: string };
+    // A FleetError from below is already classified — relabelling it here would
+    // overwrite a designed refusal with a generic one.
+    if (e instanceof FleetError) throw e;
+    const q = e as { code?: unknown; remediation?: unknown };
+    if (e instanceof CostLedgerError) {
+      // dispatch.ts:1930-1956, verbatim rule: a FIXED fleet code with the
+      // ledger's own in the payload. `invalid(5, e.code, …)` would make this
+      // CLI's exit-code table whatever cost-ledger.ts currently emits. The
+      // MESSAGE and REMEDIATION stay the ledger's — those are diagnosis and the
+      // operator's literal next command, not a classification.
+      throw invalid(
+        5,
+        "ledger-failed",
+        e.message,
+        e.remediation,
+        typeof q.code === "string" ? { providerCode: q.code } : undefined,
+      );
+    }
+    // Everything else — a raw bun:sqlite SQLITE_BUSY/SQLITE_CANTOPEN, a
+    // TypeError out of a misconfigured `deps.ledgerFactory`. The provider's own
+    // code rides the payload as diagnosis, as the `headroom-failed` arm below
+    // already does; it does not become this layer's FleetError code.
     throw invalid(
       5,
       "admission-failed",
-      `budget admission failed: ${redactSecrets(x.message ?? e)}`,
-      "fix or move the cost ledger, then retry — nothing was provisioned",
+      `budget admission failed: ${errText(e)}`,
+      typeof q.remediation === "string"
+        ? q.remediation
+        : "fix or move the cost ledger, then retry — nothing was provisioned",
+      typeof q.code === "string" ? { providerCode: q.code } : undefined,
     );
   }
 }
@@ -885,7 +910,13 @@ function emitLine(fields: Record<string, unknown>): void {
 }
 
 function errText(e: unknown): string {
-  return redactSecrets(e instanceof Error ? e.message : String(e));
+  // The F018 idiom, not `String(e)`: `String` throws on a null-prototype or
+  // hostile-`toString` rejection — exactly the values a catch-all must survive
+  // — and `redactSecrets` coerces anything without throwing. `(e ?? {})` also
+  // reads `.message` off a non-Error that carries one, which `instanceof`
+  // rendered as "[object Object]".
+  const x = (e ?? {}) as { message?: string };
+  return redactSecrets(x.message ?? e);
 }
 
 // ─── extension stamps (AC9/D3) ────────────────────────────────────────────────
