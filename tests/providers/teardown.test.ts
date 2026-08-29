@@ -1100,10 +1100,24 @@ describe("DF2.5 teardownSandbox", () => {
       // (8_100 tokens + 500_000 box hours), so a raw comparison against the
       // record's 8_100 would fire on every priced teardown, forever.
       const runId = "df25-spend-agrees";
-      await tornDownWith(runId, 0.0081);
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      attribute(runId);
+      const ledger = await realLedger(runId);
+      let view: { totalMicroUsd: number; perRole: Record<string, number> };
+      try {
+        ingestTokens(ledger, runId, 0.0081);
+        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId);
+        // Read BEFORE close: absence of a "skipped" log doesn't prove the
+        // box-hours row actually landed — read the ledger back to prove it.
+        view = ledger.readRunCost!(runId);
+      } finally {
+        ledger.close();
+      }
 
       expect(store.get(runId).spendMicroUsd).toBe(RECORDED_MICRO_USD);
-      // the box-hours row really is there — otherwise this test proves nothing
+      expect(view.totalMicroUsd).toBe(RECORDED_MICRO_USD + BOX_HOURS_MICRO_USD);
       const boxHours = logs.find((l) => l.operation === "teardown.box_hours" && l.outcome === "skipped");
       expect(boxHours).toBeUndefined();
       expect(logs.filter((l) => l.code === "spend-divergence")).toHaveLength(0);

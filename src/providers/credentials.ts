@@ -472,6 +472,17 @@ export async function captureSpend(deps: CredentialDeps, runId: string): Promise
     );
   }
   const spendMicroUsd = usdToMicros(entry.usageUsd);
+  // usdToMicros only rejects a non-finite INPUT — Number.MAX_VALUE is finite
+  // but overflows to Infinity once scaled to micro-dollars, and store.set()
+  // would surface that as a generic "must be an integer" instead of this
+  // typed refusal. Safe negatives stay valid (refunds).
+  if (!Number.isSafeInteger(spendMicroUsd)) {
+    throw new CredentialLifecycleError(
+      "invalid-provider-usage",
+      `provider reported an unusable usage (${entry.usageUsd}) for run ${runId}'s key — refusing to record it as spend`,
+      `read the usage by hand and record it, then tear down: curl 'https://openrouter.ai/api/v1/keys?offset=0' -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
+    );
+  }
   deps.store.set(runId, { spendMicroUsd });
   return spendMicroUsd;
 }
