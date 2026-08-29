@@ -6,7 +6,9 @@
  * NOTE: no `url` field. `transport` admits only "stdio", so a URL had no
  * consumer — it was parsed and dropped, never stored on MCPServerRecord nor
  * read anywhere. The schema is non-strict, so a client that still sends `url`
- * is unaffected (it is stripped, exactly as before). An http/sse transport
+ * is unaffected: a syntactically valid `url` is stripped as before, but a
+ * malformed one is now ignored rather than refused (400 becomes 201), since
+ * nothing validates the field any more. An http/sse transport
  * lands the field back alongside the transport that reads it.
  */
 

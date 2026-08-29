@@ -426,6 +426,11 @@ function blockStyle(p: Phase, lane: Lane): Record<string, string> | undefined {
  * still running. NaN when neither is available — the CALLER picks the fallback,
  * because the three call sites genuinely disagree about it (a bar collapses to
  * its start, a block duration is NaN, a session duration counts up from now).
+ *
+ * Precedence is status-first and deliberate: `status === 'running'` wins over a
+ * stale `ended_at` (a retried phase keeps its old `ended_at` via COALESCE while
+ * status flips back to running). The two bar-geometry sites previously
+ * preferred `ended_at`; routing all four through here makes them consistent.
  */
 function endMs(row: { status?: string | null; ended_at?: string | null }): number {
   return row.status === 'running' ? nowMs.value : ts(row.ended_at)
