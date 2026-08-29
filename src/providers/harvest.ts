@@ -44,6 +44,7 @@ import { PassThrough } from "node:stream";
 import { createGunzip } from "node:zlib";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
+import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "./bounded-exec.ts";
 import type { ExecResult, ProviderDriver } from "./driver.ts";
 import { resolveRunsDir as resolveExportedRunsDir, type RunRecord, type RunRecordStore } from "./run-record.ts";
 import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
@@ -195,9 +196,12 @@ export const bunGitRunner: GitRunner = async (argv, cwd) => {
     timeout: GIT_TIMEOUT_MS,
     killSignal: "SIGKILL",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+  const kill = () => {
+    proc.kill(9);
+  };
+  const [{ text: stdout }, { text: stderr }, exitCode] = await Promise.all([
+    readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
+    readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
     proc.exited,
   ]);
   return { stdout, stderr, exitCode };
@@ -491,9 +495,13 @@ export async function harvestRun(
     await timedStep(ctx, "transfer", async () => {
       // Pre-copy size probe: the box reported the bundle's byte count, so a
       // cooperative box never streams an over-cap file at all.
-      // ponytail: driver copyFile streams unbounded — the pre-probe bounds
-      // cooperative boxes, the post-copy stat bounds hostile ones after the
-      // write; a true stream cap needs a driver-seam change (future story).
+      // F036 closed the exec-output half of this gap: every driver `run` now
+      // reads through `readBounded`. What is left is narrower — `copyFile`
+      // writes the box's bytes straight to a local PATH, never through our
+      // buffers, so the pre-probe bounds cooperative boxes and the post-copy
+      // stat bounds hostile ones after the write.
+      // ponytail: no cap DURING the copy; a true stream cap needs a
+      // driver-seam change (future story), not a reader change.
       if ((stepA.bytes ?? 0) > BUNDLE_MAX_BYTES) {
         throw new HarvestError(
           "bundle-over-cap",

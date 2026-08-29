@@ -12,6 +12,7 @@
  */
 
 import { httpRequest, retryAfterMs } from "../lib/http.ts";
+import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "../providers/bounded-exec.ts";
 
 export interface CreatePrInput {
   owner: string;
@@ -170,7 +171,15 @@ export async function readHostToken(): Promise<string | null> {
       stdout: "pipe",
       stderr: "ignore",
     });
-    const [code, out] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+    const [code, { text: out }] = await Promise.all([
+      proc.exited,
+      readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, {
+        kill: () => {
+          proc.kill(9);
+        },
+        exited: proc.exited,
+      }),
+    ]);
     if (code === 0 && out.trim().length > 0) keychain = out.trim();
   } catch {
     // No keychain on this host. Fall through to stdin; never surface the error,

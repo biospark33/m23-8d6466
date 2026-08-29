@@ -11,6 +11,7 @@ import { rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { assertExistingRunId } from "../providers/run-record.ts";
+import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "../providers/bounded-exec.ts";
 
 /** A named, remediable failure. Every one of these maps to an `error` verdict. */
 export class ReverifyError extends Error {
@@ -53,10 +54,13 @@ export async function exec(
   } catch (err) {
     return { exitCode: -1, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
   }
-  const [exitCode, stdout, stderr] = await Promise.all([
+  const kill = () => {
+    proc.kill(9);
+  };
+  const [exitCode, { text: stdout }, { text: stderr }] = await Promise.all([
     proc.exited,
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
+    readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
   ]);
   return { exitCode, stdout, stderr };
 }
@@ -224,7 +228,13 @@ async function processTable(): Promise<Map<number, { ppid: number; rss: number }
 function processTableSync(): Map<number, { ppid: number; rss: number }> {
   try {
     const res = Bun.spawnSync(PS_ARGV, { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    return res.exitCode === 0 ? parsePsTable(res.stdout.toString()) : new Map();
+    if (res.exitCode !== 0) return new Map();
+    const table = parsePsTable(res.stdout.toString());
+    // `ps` lists ITSELF, and it is dead by the time this returns. Leaving it in
+    // the baseline exempts that pid from the sweep forever — and a recycled pid
+    // is a live process this re-verify may well have spawned.
+    table.delete(res.pid);
+    return table;
   } catch {
     // No baseline is the pre-F064 behavior (sweep everything) — noisy, never
     // unsafe for this re-verify's own children.

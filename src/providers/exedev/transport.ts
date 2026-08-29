@@ -13,6 +13,7 @@
  */
 
 import type { ExecResult } from "../driver.ts";
+import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "../bounded-exec.ts";
 import { withTimeout } from "../timeout.ts";
 
 /** DF2.3's error shape: machine `code`, human message, literal next command. */
@@ -71,9 +72,12 @@ export function sshCommand(defaultTimeoutMs: number = DEFAULT_EXEC_TIMEOUT_MS): 
       timeout: Math.max(1, opts?.timeoutMs ?? defaultTimeoutMs), /* dp:ok defensive clamp; callers pass validated budgets */
       killSignal: "SIGKILL",
     });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
+    const kill = () => {
+      proc.kill(9);
+    };
+    const [{ text: stdout }, { text: stderr }, exitCode] = await Promise.all([
+      readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
+      readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
       proc.exited,
     ]);
     return { stdout, stderr, exitCode };

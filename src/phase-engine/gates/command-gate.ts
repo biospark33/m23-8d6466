@@ -14,6 +14,7 @@
  */
 import { redactSecrets } from "../../../cli-anything/src/redact.ts";
 import type { Envelope } from "../envelopes/types.ts";
+import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "../../providers/bounded-exec.ts";
 import type { Gate, GateContext } from "./library.ts";
 import { GateReport } from "./report.ts";
 
@@ -81,11 +82,19 @@ export function commandGate(argv: string[], opts: CommandGateOptions = {}): Gate
       let stdout = "";
       let stderr = "";
       try {
-        [exitCode, stdout, stderr] = await Promise.all([
+        const kill = () => {
+          proc.kill(9);
+        };
+        // The cap here is MEMORY, not display: the note below is cut to
+        // GATE_NOTE_TAIL_CHARS regardless.
+        const [code, out, err] = await Promise.all([
           proc.exited,
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
+          readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited, signal }),
+          readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited, signal }),
         ]);
+        exitCode = code;
+        stdout = out.text;
+        stderr = err.text;
       } catch (err) {
         // A binary that vanishes mid-spawn can fail here rather than at the
         // Bun.spawn call; it is the same AC5 case.

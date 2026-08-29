@@ -31,6 +31,7 @@
 import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "../../providers/bounded-exec.ts";
 import type { ResolvedRole, ResolvedRoster } from "./schema.ts";
 
 // ---------------------------------------------------------------------------
@@ -611,7 +612,13 @@ export async function runPi(args: string[]): Promise<PiRun> {
       // here and nothing secret is placed in argv (INV-1).
       signal: controller.signal,
     });
-    const stdout = await new Response(proc.stdout).text();
+    const { text: stdout } = await readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, {
+      kill: () => {
+        proc.kill(9);
+      },
+      exited: proc.exited,
+      signal: controller.signal,
+    });
     const code = await proc.exited;
     return { code, stdout, timedOut };
   } finally {

@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { log, newRequestId } from "../swarmclaw/log.ts";
+import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "./bounded-exec.ts";
 import type { ExecResult, ProviderDriver, ProviderVm, ProviderVmListing } from "./driver.ts";
 import { assertExistingRunId, assertValidRunId } from "./run-record.ts";
 
@@ -372,9 +373,9 @@ export class FakeDriver implements ProviderDriver {
     const kill = killTree(proc);
     kills.add(kill);
     this.execChildren.set(vm, kills);
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
+    const [{ text: stdout }, { text: stderr }, exitCode] = await Promise.all([
+      readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
+      readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
       proc.exited,
     ]);
     // Eager prune: an exec that settled with its group already fully gone
