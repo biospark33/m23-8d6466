@@ -1300,6 +1300,211 @@ class DispatchContext {
   }
 }
 
+/**
+ * Step 3 — manifest + roster. INV-2: pure validation, so it runs before
+ * anything billable exists. Lifted out of `dispatch()` verbatim (F003); the
+ * two facts that outlive it are what it returns.
+ */
+function loadManifestAndRoster(
+  ctx: DispatchContext,
+  deps: DispatchDeps,
+  valid: Brief,
+): { loaded: ReturnType<typeof loadManifest>; rosterPath: string } {
+  // Loading the manifest at fill time meant a manifest defect was discovered
+  // after a box, a key and a URL already existed — every input needed to refuse
+  // was available at step 1.
+  //
+  // The containment root is the REPO, not `dirname(manifestPath)`: a root
+  // derived from the candidate path makes every path its own root and the
+  // beneath-root assertion vacuous. callerBudgetMs: the dispatch wall clock IS
+  // the upstream ceiling — the engine never assumes one, and a manifest whose
+  // runBudgetMs exceeds the dispatch ceiling must refuse here, not mid-run. What
+  // is passed is what is LEFT of that ceiling, not the whole of it: schema
+  // validation and correlation have already spent part, so the full figure
+  // admitted a manifest with `runBudgetMs === timeoutMs` that was then
+  // guaranteed to overrun.
+  //
+  // `deps.repoRoot` and nothing else: an ambient `process.cwd()` makes the trust
+  // anchor of a security guard depend on where the process happened to start.
+  // The default keeps every existing caller (the CLI passes none) on cwd.
+  // `loadManifest` realpaths it and refuses an unresolvable root, so no
+  // resolution is repeated here — a second copy would be the weaker one
+  // (manifest.ts avoids Bun's `realpathSync`, which hangs on a planted FIFO).
+  const repoRoot = deps.repoRoot ?? process.cwd();
+  // Resolved against the CONTAINMENT ROOT, not the process cwd. A relative
+  // `manifestPath` is relative to the repo the brief names — resolving it
+  // against wherever the dispatcher happened to be started made an identical
+  // brief refuse or resolve depending on the caller's cwd, and made `repoRoot`
+  // a seam that moved the guard without moving what the guard measures. An
+  // absolute path is unaffected: `resolve` ignores the base for those.
+  const manifestPath = resolve(repoRoot, valid.manifestPath);
+  const manifestBudgetMs = ctx.remaining();
+  // Checked separately so an exhausted ceiling reports as a TIMEOUT rather than
+  // as a rejected manifest — the loader would refuse a non-positive budget, and
+  // "manifest rejected" is the wrong diagnosis for a slow substrate.
+  if (manifestBudgetMs <= 0) throw ctx.timedOut("manifest");
+  let loaded: ReturnType<typeof loadManifest>;
+  try {
+    loaded = loadManifest(manifestPath, manifestBudgetMs, repoRoot);
+  } catch (e) {
+    throw ctx.refuse(
+      2,
+      "manifest-rejected",
+      `manifest rejected: ${errorMessage(e)}`,
+      `fix the manifest, or point manifestPath at one beneath ${repoRoot}`,
+      { manifestPath },
+    );
+  }
+  // C7: the AUTHOR does not get to set the run's money ceiling. AC9a makes the
+  // manifest the cap's only in-box carrier, so a hand-authored `limitMicroUsd`
+  // in the source manifest is an attempt to name the ceiling the budget gate is
+  // supposed to name.
+  //
+  // Stripped HERE and deliberately NOT inside `loadManifest`:
+  // `scripts/pipeline-run.ts` reads the DELIVERED, already-stamped
+  // `pipeline.yaml` through that same loader, so a strip down there deletes the
+  // dispatcher's own stamp and the engine runs uncapped — the opposite defect.
+  // This is the one read of an untrusted, unstamped manifest.
+  //
+  // ponytail: belt and braces. `stampManifestLimit` below spreads its own value
+  // over whatever was there, so the authored one cannot reach the box today;
+  // this makes the rule independent of that overwrite staying last.
+  //
+  // `stripAuthoredLimit`, not a hand-rolled destructure. The two copies had
+  // already diverged (the export freezes its result, this did not), and the
+  // export had ZERO non-test callers — so deleting these lines would have taken
+  // the AC9a money guard with them while manifest.ts's own test stayed green.
+  // One rule, one implementation.
+  loaded = stripAuthoredLimit(loaded);
+  // The exedev gate reads the ACTIVE roster beside the manifest. Its absence is
+  // a defect in the brief, not a gate outcome, so it refuses before a box
+  // exists rather than as a failed assertion on a live box (INV-5 would then
+  // forbid tearing that box down). Only checked where that gate will actually
+  // run: an injected gate and a dir box never read a roster.
+  const rosterPath = join(dirname(manifestPath), "roster.yaml");
+  if (deps.setupGate === undefined && isExedevDriver(deps.driver)) {
+    if (!existsSync(rosterPath)) {
+      throw ctx.refuse(
+        2,
+        "roster-missing",
+        `no roster beside the manifest: ${rosterPath}`,
+        "place the active roster at that path, or point manifestPath at a directory that has one",
+        { rosterPath },
+      );
+    }
+    // CHARSET, host-side. `assertPathSafe` (setup-gate.ts) refuses a roster path
+    // outside `[A-Za-z0-9._/-]` because it is interpolated into a remote `sh`
+    // command — but it runs INSIDE the gate, i.e. after the box exists and is
+    // billing, and INV-5 then forbids tearing that box down. A repo checked out
+    // under `/Users/x/My Projects/…` or any accented path therefore provisioned,
+    // billed, and failed with the record OPEN over a fact knowable at step 1.
+    // `rosterPath` is absolute, so `repoRoot` is inside what is tested.
+    //
+    // The gate keeps its own check — this is the pre-check, not a replacement.
+    if (!ROSTER_PATH_CHARSET.test(rosterPath)) {
+      throw ctx.refuse(
+        2,
+        "roster-path-unsafe",
+        `roster path ${JSON.stringify(rosterPath)} is outside the setup gate's plain-path charset [A-Za-z0-9._/-]`,
+        "check the repository out under a path with no spaces or non-ASCII characters, or pass a gate via deps.setupGate",
+        { rosterPath },
+      );
+    }
+    // CONTENT, same argument. The gate reads this file with this same
+    // `parseRoster`, so a `roster.yaml` that is a directory (EISDIR — which
+    // `existsSync` reports as present), unparseable YAML, a roster that fails
+    // the closed schema, or a role slug outside the model-id charset all used to
+    // surface at step 9 on a live box. Every one of them is host-side and
+    // knowable here.
+    let rosterSlugs: string[];
+    try {
+      // OPEN then FSTAT THE HANDLE, and open non-blocking — not
+      // `statSync(path)` followed by `readFileSync(path)`.
+      //
+      // Two defects in that pair, both on a path an untrusted brief steers
+      // (`manifestPath` → `dirname` → `roster.yaml`). It was a TOCTOU: the
+      // `isFile()` verdict was about whatever the name pointed at THEN, and the
+      // read resolved the name again. And a FIFO planted between the two calls
+      // made `readFileSync` block FOREVER — this block runs outside `within`,
+      // so no timer can fire and the dispatch hangs before any admission is
+      // spent. Line ~1170 above already names that vector as the reason
+      // manifest.ts avoids Bun's `realpathSync`; it was reintroduced two blocks
+      // later.
+      //
+      // `O_NONBLOCK` is what makes the ORDER work: opening a FIFO for reading
+      // blocks until a writer appears, so the check has to come after an open
+      // that cannot block, and it has to be about the handle the read will use.
+      // On a regular file the flag changes nothing. A directory (EISDIR, which
+      // `existsSync` reports as present) fails the same `isFile()`.
+      const fd = openSync(rosterPath, constants.O_RDONLY | constants.O_NONBLOCK);
+      try {
+        const st = fstatSync(fd);
+        if (!st.isFile()) throw new Error(`${rosterPath} is not a regular file`);
+        // SIZE, before the read. The read + parseRoster pair is synchronous
+        // and runs OUTSIDE every within() deadline — nothing can interrupt it
+        // — so an uncapped read let a planted multi-gigabyte roster.yaml hang
+        // the dispatch before any admission is spent: the same pre-admission
+        // wedge the FIFO guard above exists for, by volume instead of by
+        // blocking. The schema's own load path enforces this ceiling (it stats
+        // before reading too); this pre-check reads a handle directly, so the
+        // check moves with it. Same message shape, so one vocabulary.
+        if (st.size > ROSTER_MAX_BYTES) {
+          throw new Error(
+            `roster is ${st.size} bytes, over the ${ROSTER_MAX_BYTES}-byte (${kibLabel(ROSTER_MAX_BYTES)}) ceiling`,
+          );
+        }
+        // CAPPED READ, not a slurp. A readFileSync here would swallow whatever
+        // landed between the size verdict above and the read — synchronously,
+        // outside every within() deadline, the same pre-admission wedge the
+        // FIFO guard exists for, by volume instead of by blocking. At most
+        // ROSTER_MAX_BYTES + 1 bytes ever enter memory, and parseRoster never
+        // sees a byte over the ceiling: over-cap refuses HERE, on what was
+        // actually read, before any parsing runs.
+        const capped = Buffer.alloc(ROSTER_MAX_BYTES + 1);
+        let total = 0;
+        while (total < capped.length) {
+          const n = readSync(fd, capped, total, capped.length - total, null);
+          if (n === 0) break;
+          total += n;
+        }
+        // RE-FSTAT AFTER the read. The size verdict above described the file as
+        // it stood THEN; a writer still appending shows up ON DISK even when
+        // the capped read has already bounded what entered memory. Both figures
+        // are checked: what was READ bounds the parse, what is ON DISK catches
+        // an append still landing.
+        const after = fstatSync(fd);
+        if (total > ROSTER_MAX_BYTES || after.size > ROSTER_MAX_BYTES) {
+          throw new Error(
+            `roster grew past the ${ROSTER_MAX_BYTES}-byte (${kibLabel(ROSTER_MAX_BYTES)}) ceiling while it was read (${total} bytes read, ${after.size} on disk)`,
+          );
+        }
+        rosterSlugs = parseRoster(capped.toString("utf8", 0, total), rosterPath).roles.map((r) => r.slug);
+      } finally {
+        closeSync(fd);
+      }
+    } catch (e) {
+      throw ctx.refuse(
+        2,
+        "roster-rejected",
+        `roster rejected: ${errorMessage(e)}`,
+        "fix the roster beside the manifest, or point manifestPath at a directory with a valid one",
+        { rosterPath },
+      );
+    }
+    const badSlug = rosterSlugs.find((slug) => !ROSTER_PATH_CHARSET.test(slug));
+    if (badSlug !== undefined) {
+      throw ctx.refuse(
+        2,
+        "roster-rejected",
+        `roster slug ${JSON.stringify(badSlug)} is outside the model-id charset [A-Za-z0-9._/-]`,
+        "fix the roster entry — the slug is interpolated into the gate's in-box ping",
+        { rosterPath },
+      );
+    }
+  }
+  return { loaded, rosterPath };
+}
+
 export async function dispatch(
   brief: unknown,
   deps: DispatchDeps,
@@ -1563,198 +1768,7 @@ export async function dispatch(
   }
 
   // ── 3. manifest + roster (INV-2: pure validation, so it belongs HERE) ──────
-  // Loading the manifest at fill time meant a manifest defect was discovered
-  // after a box, a key and a URL already existed — every input needed to refuse
-  // was available at step 1.
-  //
-  // The containment root is the REPO, not `dirname(manifestPath)`: a root
-  // derived from the candidate path makes every path its own root and the
-  // beneath-root assertion vacuous. callerBudgetMs: the dispatch wall clock IS
-  // the upstream ceiling — the engine never assumes one, and a manifest whose
-  // runBudgetMs exceeds the dispatch ceiling must refuse here, not mid-run. What
-  // is passed is what is LEFT of that ceiling, not the whole of it: schema
-  // validation and correlation have already spent part, so the full figure
-  // admitted a manifest with `runBudgetMs === timeoutMs` that was then
-  // guaranteed to overrun.
-  //
-  // `deps.repoRoot` and nothing else: an ambient `process.cwd()` makes the trust
-  // anchor of a security guard depend on where the process happened to start.
-  // The default keeps every existing caller (the CLI passes none) on cwd.
-  // `loadManifest` realpaths it and refuses an unresolvable root, so no
-  // resolution is repeated here — a second copy would be the weaker one
-  // (manifest.ts avoids Bun's `realpathSync`, which hangs on a planted FIFO).
-  const repoRoot = deps.repoRoot ?? process.cwd();
-  // Resolved against the CONTAINMENT ROOT, not the process cwd. A relative
-  // `manifestPath` is relative to the repo the brief names — resolving it
-  // against wherever the dispatcher happened to be started made an identical
-  // brief refuse or resolve depending on the caller's cwd, and made `repoRoot`
-  // a seam that moved the guard without moving what the guard measures. An
-  // absolute path is unaffected: `resolve` ignores the base for those.
-  const manifestPath = resolve(repoRoot, valid.manifestPath);
-  const manifestBudgetMs = remaining();
-  // Checked separately so an exhausted ceiling reports as a TIMEOUT rather than
-  // as a rejected manifest — the loader would refuse a non-positive budget, and
-  // "manifest rejected" is the wrong diagnosis for a slow substrate.
-  if (manifestBudgetMs <= 0) throw timedOut("manifest");
-  let loaded: ReturnType<typeof loadManifest>;
-  try {
-    loaded = loadManifest(manifestPath, manifestBudgetMs, repoRoot);
-  } catch (e) {
-    throw refuse(
-      2,
-      "manifest-rejected",
-      `manifest rejected: ${errorMessage(e)}`,
-      `fix the manifest, or point manifestPath at one beneath ${repoRoot}`,
-      { manifestPath },
-    );
-  }
-  // C7: the AUTHOR does not get to set the run's money ceiling. AC9a makes the
-  // manifest the cap's only in-box carrier, so a hand-authored `limitMicroUsd`
-  // in the source manifest is an attempt to name the ceiling the budget gate is
-  // supposed to name.
-  //
-  // Stripped HERE and deliberately NOT inside `loadManifest`:
-  // `scripts/pipeline-run.ts` reads the DELIVERED, already-stamped
-  // `pipeline.yaml` through that same loader, so a strip down there deletes the
-  // dispatcher's own stamp and the engine runs uncapped — the opposite defect.
-  // This is the one read of an untrusted, unstamped manifest.
-  //
-  // ponytail: belt and braces. `stampManifestLimit` below spreads its own value
-  // over whatever was there, so the authored one cannot reach the box today;
-  // this makes the rule independent of that overwrite staying last.
-  //
-  // `stripAuthoredLimit`, not a hand-rolled destructure. The two copies had
-  // already diverged (the export freezes its result, this did not), and the
-  // export had ZERO non-test callers — so deleting these lines would have taken
-  // the AC9a money guard with them while manifest.ts's own test stayed green.
-  // One rule, one implementation.
-  loaded = stripAuthoredLimit(loaded);
-  // The exedev gate reads the ACTIVE roster beside the manifest. Its absence is
-  // a defect in the brief, not a gate outcome, so it refuses before a box
-  // exists rather than as a failed assertion on a live box (INV-5 would then
-  // forbid tearing that box down). Only checked where that gate will actually
-  // run: an injected gate and a dir box never read a roster.
-  const rosterPath = join(dirname(manifestPath), "roster.yaml");
-  if (deps.setupGate === undefined && isExedevDriver(deps.driver)) {
-    if (!existsSync(rosterPath)) {
-      throw refuse(
-        2,
-        "roster-missing",
-        `no roster beside the manifest: ${rosterPath}`,
-        "place the active roster at that path, or point manifestPath at a directory that has one",
-        { rosterPath },
-      );
-    }
-    // CHARSET, host-side. `assertPathSafe` (setup-gate.ts) refuses a roster path
-    // outside `[A-Za-z0-9._/-]` because it is interpolated into a remote `sh`
-    // command — but it runs INSIDE the gate, i.e. after the box exists and is
-    // billing, and INV-5 then forbids tearing that box down. A repo checked out
-    // under `/Users/x/My Projects/…` or any accented path therefore provisioned,
-    // billed, and failed with the record OPEN over a fact knowable at step 1.
-    // `rosterPath` is absolute, so `repoRoot` is inside what is tested.
-    //
-    // The gate keeps its own check — this is the pre-check, not a replacement.
-    if (!ROSTER_PATH_CHARSET.test(rosterPath)) {
-      throw refuse(
-        2,
-        "roster-path-unsafe",
-        `roster path ${JSON.stringify(rosterPath)} is outside the setup gate's plain-path charset [A-Za-z0-9._/-]`,
-        "check the repository out under a path with no spaces or non-ASCII characters, or pass a gate via deps.setupGate",
-        { rosterPath },
-      );
-    }
-    // CONTENT, same argument. The gate reads this file with this same
-    // `parseRoster`, so a `roster.yaml` that is a directory (EISDIR — which
-    // `existsSync` reports as present), unparseable YAML, a roster that fails
-    // the closed schema, or a role slug outside the model-id charset all used to
-    // surface at step 9 on a live box. Every one of them is host-side and
-    // knowable here.
-    let rosterSlugs: string[];
-    try {
-      // OPEN then FSTAT THE HANDLE, and open non-blocking — not
-      // `statSync(path)` followed by `readFileSync(path)`.
-      //
-      // Two defects in that pair, both on a path an untrusted brief steers
-      // (`manifestPath` → `dirname` → `roster.yaml`). It was a TOCTOU: the
-      // `isFile()` verdict was about whatever the name pointed at THEN, and the
-      // read resolved the name again. And a FIFO planted between the two calls
-      // made `readFileSync` block FOREVER — this block runs outside `within`,
-      // so no timer can fire and the dispatch hangs before any admission is
-      // spent. Line ~1170 above already names that vector as the reason
-      // manifest.ts avoids Bun's `realpathSync`; it was reintroduced two blocks
-      // later.
-      //
-      // `O_NONBLOCK` is what makes the ORDER work: opening a FIFO for reading
-      // blocks until a writer appears, so the check has to come after an open
-      // that cannot block, and it has to be about the handle the read will use.
-      // On a regular file the flag changes nothing. A directory (EISDIR, which
-      // `existsSync` reports as present) fails the same `isFile()`.
-      const fd = openSync(rosterPath, constants.O_RDONLY | constants.O_NONBLOCK);
-      try {
-        const st = fstatSync(fd);
-        if (!st.isFile()) throw new Error(`${rosterPath} is not a regular file`);
-        // SIZE, before the read. The read + parseRoster pair is synchronous
-        // and runs OUTSIDE every within() deadline — nothing can interrupt it
-        // — so an uncapped read let a planted multi-gigabyte roster.yaml hang
-        // the dispatch before any admission is spent: the same pre-admission
-        // wedge the FIFO guard above exists for, by volume instead of by
-        // blocking. The schema's own load path enforces this ceiling (it stats
-        // before reading too); this pre-check reads a handle directly, so the
-        // check moves with it. Same message shape, so one vocabulary.
-        if (st.size > ROSTER_MAX_BYTES) {
-          throw new Error(
-            `roster is ${st.size} bytes, over the ${ROSTER_MAX_BYTES}-byte (${kibLabel(ROSTER_MAX_BYTES)}) ceiling`,
-          );
-        }
-        // CAPPED READ, not a slurp. A readFileSync here would swallow whatever
-        // landed between the size verdict above and the read — synchronously,
-        // outside every within() deadline, the same pre-admission wedge the
-        // FIFO guard exists for, by volume instead of by blocking. At most
-        // ROSTER_MAX_BYTES + 1 bytes ever enter memory, and parseRoster never
-        // sees a byte over the ceiling: over-cap refuses HERE, on what was
-        // actually read, before any parsing runs.
-        const capped = Buffer.alloc(ROSTER_MAX_BYTES + 1);
-        let total = 0;
-        while (total < capped.length) {
-          const n = readSync(fd, capped, total, capped.length - total, null);
-          if (n === 0) break;
-          total += n;
-        }
-        // RE-FSTAT AFTER the read. The size verdict above described the file as
-        // it stood THEN; a writer still appending shows up ON DISK even when
-        // the capped read has already bounded what entered memory. Both figures
-        // are checked: what was READ bounds the parse, what is ON DISK catches
-        // an append still landing.
-        const after = fstatSync(fd);
-        if (total > ROSTER_MAX_BYTES || after.size > ROSTER_MAX_BYTES) {
-          throw new Error(
-            `roster grew past the ${ROSTER_MAX_BYTES}-byte (${kibLabel(ROSTER_MAX_BYTES)}) ceiling while it was read (${total} bytes read, ${after.size} on disk)`,
-          );
-        }
-        rosterSlugs = parseRoster(capped.toString("utf8", 0, total), rosterPath).roles.map((r) => r.slug);
-      } finally {
-        closeSync(fd);
-      }
-    } catch (e) {
-      throw refuse(
-        2,
-        "roster-rejected",
-        `roster rejected: ${errorMessage(e)}`,
-        "fix the roster beside the manifest, or point manifestPath at a directory with a valid one",
-        { rosterPath },
-      );
-    }
-    const badSlug = rosterSlugs.find((slug) => !ROSTER_PATH_CHARSET.test(slug));
-    if (badSlug !== undefined) {
-      throw refuse(
-        2,
-        "roster-rejected",
-        `roster slug ${JSON.stringify(badSlug)} is outside the model-id charset [A-Za-z0-9._/-]`,
-        "fix the roster entry — the slug is interpolated into the gate's in-box ping",
-        { rosterPath },
-      );
-    }
-  }
+  const { loaded, rosterPath } = loadManifestAndRoster(ctx, deps, valid);
 
   // ── 4. runId (dispatcher-owned; AC2 opts.runId only accepts minted ids) ────
   // `MintedRunId` already refuses a caller-invented literal at compile time; the
