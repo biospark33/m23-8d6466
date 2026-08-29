@@ -1695,6 +1695,209 @@ async function mintAndDeliverKey(
   return mintedCeilingMicros;
 }
 
+/**
+ * Step 10 — expose the port and make the box public, in that order and only
+ * once the gate has proved the box (INV-5). Lifted out of `dispatch()`
+ * verbatim (F003); a no-op when no port was asked for.
+ *
+ * Writes the box's URL onto the context rather than returning it: `ctx.httpsUrl`
+ * is what the refusal payload and the ack both read, and it is set from
+ * `vm.httpsUrl` at create time whether or not this step runs.
+ */
+async function exposeGatedBox(
+  ctx: DispatchContext,
+  deps: DispatchDeps,
+  args: { runId: string; vm: Awaited<ReturnType<typeof provisionAdmittedRun>>["vm"] },
+): Promise<void> {
+  const { runId, vm } = args;
+  // ── 10. expose (INV-5 ordering: PUBLIC only once the gate has proved it) ─
+  const port = deps.port;
+  if (port !== undefined) {
+    // The ceiling was never sampled after the gate — the single longest await
+    // in the whole dispatch — so a run could ack "ready" well past its budget.
+    //
+    // Sampled INSIDE the port branch, i.e. only where there is work left the
+    // ceiling can still refuse. Outside it, this line refused a dispatch that
+    // was byte-for-byte COMPLETE: with no port, step 10 is a no-op, so a run
+    // whose gate went green had its box alive, its key delivered at the full
+    // admitted ceiling, its record written and nothing left to do — and was
+    // still reported exit 1 with "tear the run down". The ack-log guard at the
+    // very bottom of this function names that hazard exactly ("the operator's
+    // natural response to that bare failure — tear down, retry — re-spends the
+    // issue's cap on a run that had already SUCCEEDED"); this line
+    // manufactured it. A deadline is a bound on WORK REMAINING; where none
+    // remains there is nothing for it to bound, and refusing a healthy run is
+    // the more expensive of the two errors.
+    //
+    // Labelled "post-gate", not "gate": it fires only once the gate has
+    // RETURNED ready, so `dispatch exceeded N ms at gate` accused a gate that
+    // had passed all five assertions — and `ctx.gate` is set by then, so the
+    // payload's `debugCommands` come from that passing gate. `gateReady` says
+    // so on the payload.
+    if (ctx.remaining() <= 0) throw ctx.timedOut("post-gate", { gateReady: true });
+
+    // `expose` RESOLVING is the moment the port stops being speculative — the
+    // retraction below turns on this and nothing else. It cannot be inferred
+    // from `ctx.httpsUrl`, which is already set from `vm.httpsUrl` at create
+    // time and so is non-undefined on plenty of runs where `expose` never ran.
+    let portOpened = false;
+    // Whether the locator write landed — the one state claim still made AFTER
+    // a call, so its failure mode needs its own repair path below.
+    let httpsUrlPersisted = false;
+    try {
+      ctx.httpsUrl = await ctx.within(
+        "expose",
+        () => {
+          // Intent marker BEFORE the provider call, but INSIDE the step:
+          // `within` pre-checks the budget before invoking its thunk, so a
+          // deadline that expires between the post-gate sample above and that
+          // pre-check throws before any claim exists. The claim used to sit
+          // outside, and a `dispatch-timeout` from a NEVER-STARTED expose was
+          // then exempted from the retraction below like an abandoned one —
+          // leaving `ports: [port]` on the record for a port nothing opened,
+          // visible to `fleet status` and port-keyed reapers until teardown.
+          //
+          // Written before the driver call either way: `within` ABANDONS
+          // rather than cancels (no AbortSignal at the seam), so an expose
+          // abandoned at the deadline can still complete seconds later — the
+          // box is then publicly reachable while the record must already
+          // claim its port, or `fleet status` under-reports a live public box
+          // and port-keyed reapers miss it entirely.
+          deps.store.set(runId, { ports: [port] });
+          return deps.driver.expose(vm.name, port);
+        },
+        // A late expose opens the port after the refusal; the URL is what the
+        // record could not be told.
+        (url) => ({ httpsUrl: typeof url === "string" ? redact(url) : undefined, port }),
+        // An abandoned expose that then FAILS settles it: the port will never
+        // open, so the claim written inside the thunk is now phantom — the
+        // same state the synchronous retraction below fixes for an ordinary
+        // failure, reachable only here because a `dispatch-timeout` is exempt
+        // there (at throw time the call may still land). Retract at the
+        // rejection, best-effort exactly like the catch's own.
+        () => {
+          try {
+            deps.store.set(runId, { ports: [] });
+          } catch {
+            // best-effort: the refusal stands either way
+          }
+        },
+      );
+      portOpened = true;
+      // The URL was the one state claim still made AFTER the call it describes.
+      // Two ways that lost it: a failed — or, by the same abandon-not-cancel
+      // reasoning as the `ports` claim above, an ABANDONED — `setPublic` left
+      // the record with a port and no URL for a box `expose` had already given
+      // one; and a driver that resolved no URL still went on to be made PUBLIC,
+      // i.e. publicly reachable with nothing on the record saying where.
+      //
+      // `expose` is DECLARED `Promise<string>`, so the undefined arm is a
+      // driver-boundary guard, not a modelled outcome — and the right answer at
+      // that boundary is to refuse before the box is public (INV-5 keeps it
+      // alive and diagnosable) rather than to publish a box nobody can name.
+      // Blank is the same outcome by another road: driver.ts normalizes
+      // whitespace-only URLs to undefined at ITS boundary (`address`), but
+      // `""` is a string and is not an address either, so a driver that skips
+      // that helper hands one straight through — same refusal, same family.
+      // The port claim below is RETAINED: `expose` RESOLVED, so the port is
+      // real even where the address is not usable (the retraction's own
+      // second case).
+      // The MAIN path's read of `expose`'s resolution — the one read with no
+      // `typeof` guard (the late-success handler checks, this did not).
+      // `expose` is DECLARED `Promise<string>`, but `deps.driver` is an
+      // injection seam and a truthy non-string here threw out of `.trim()`,
+      // escaping to the outer catch as exit-1 `dispatch-failed` instead of
+      // the purpose-built refusal below. The port claim stays real either
+      // way (`expose` resolved), and the box is left PRIVATE (INV-5) rather
+      // than published with an unusable locator.
+      if (
+        typeof ctx.httpsUrl !== "string" ||
+        ctx.httpsUrl === undefined ||
+        ctx.httpsUrl.trim().length === 0
+      ) {
+        throw ctx.refuse(
+          1,
+          "expose-no-url",
+          `expose returned no URL for run ${runId} on port ${port}`,
+          "the run record is OPEN and the box is ALIVE but NOT public (INV-5) — inspect it, then tear it down",
+          { port },
+        );
+      }
+      // Verbatim DELIBERATELY, unlike every log-line copy of this field: the
+      // record is the persistent locator for a public box (the ack return and
+      // this write are its only copies), so a lossy form here — `redact`
+      // eats long host labels outright — leaves a live box whose address is
+      // recorded nowhere. The operator-facing halves sanitize at their own
+      // boundaries instead: the structured lines redact, and `fleet status`'s
+      // `safeUrl` drops userinfo-bearing URLs entirely.
+      deps.store.set(runId, { httpsUrl: ctx.httpsUrl });
+      httpsUrlPersisted = true;
+      await ctx.within(
+        "setPublic",
+        () => deps.driver.setPublic(vm.name),
+        // Resolves `void`. What a late one means is the whole of it: this box
+        // became PUBLICLY REACHABLE after the operator was told the dispatch
+        // failed.
+        () => ({ vmName: vm.name, publiclyReachable: true }),
+      );
+    } catch (e) {
+      // The URL write failing after `expose` resolved left a record holding a
+      // port with NO locator, permanently — the store merges patches and has
+      // no way to remove one. One best-effort repair before the refusal: this
+      // is the only moment the URL is known and the write is cheap to repeat.
+      // Guarded on the URL actually being usable, so an `expose-no-url`
+      // failure does not write garbage over the absence it is refusing for.
+      if (
+        portOpened &&
+        !httpsUrlPersisted &&
+        typeof ctx.httpsUrl === "string" &&
+        ctx.httpsUrl.trim().length > 0
+      ) {
+        try {
+          deps.store.set(runId, { httpsUrl: ctx.httpsUrl });
+        } catch {
+          // still unrecorded — vmName and port ride the refusal payload and
+          // the box stays alive (INV-5), so the operator can read the
+          // address off it directly
+        }
+      }
+      // RETRACT the speculative `ports` claim, but ONLY while it is still
+      // speculative. Left standing on a failed `expose`, the record
+      // permanently advertised a port on a box where nothing was opened:
+      // port-keyed reapers and `fleet status` both read a port the box does
+      // not have.
+      //
+      // Two cases KEEP the claim, and both are ones where the port is real:
+      //
+      //  - An ABANDONED call, which is what the claim was written for: a
+      //    `dispatch-timeout` is precisely the case where the expose may still
+      //    land after the refusal. A `dispatch-timeout` can now also mean the
+      //    step NEVER started (budget gone before `within` invoked its thunk)
+      //    — but then no claim was written either, so exempting it here
+      //    retracts nothing and leaves no phantom port behind.
+      //  - Anything that failed AFTER `expose` resolved — `expose-no-url` and
+      //    every `setPublic` failure. The port is OPEN on those; retracting
+      //    left the record denying a port the box is listening on, and
+      //    `httpsUrl` (written between the two calls) contradicting the same
+      //    record's empty `ports`. That is the inconsistency this retraction
+      //    exists to prevent, pointed the other way.
+      //
+      // `[]` rather than an unset, because the store merges patches and has no
+      // way to remove a field — an empty list is "this run claims no port",
+      // which is what a reaper and `fleet status` both need to read.
+      if (!portOpened && !(e instanceof FleetError && e.code === "dispatch-timeout")) {
+        try {
+          deps.store.set(runId, { ports: [] });
+        } catch {
+          // best-effort, exactly like the gate-outcome write: the refusal
+          // being reported must not be replaced by a record-write failure
+        }
+      }
+      throw e;
+    }
+  }
+}
+
 export async function dispatch(
   brief: unknown,
   deps: DispatchDeps,
@@ -2806,192 +3009,7 @@ export async function dispatch(
         // nothing left to report it on
       }
     }
-    // ── 10. expose (INV-5 ordering: PUBLIC only once the gate has proved it) ─
-    const port = deps.port;
-    if (port !== undefined) {
-      // The ceiling was never sampled after the gate — the single longest await
-      // in the whole dispatch — so a run could ack "ready" well past its budget.
-      //
-      // Sampled INSIDE the port branch, i.e. only where there is work left the
-      // ceiling can still refuse. Outside it, this line refused a dispatch that
-      // was byte-for-byte COMPLETE: with no port, step 10 is a no-op, so a run
-      // whose gate went green had its box alive, its key delivered at the full
-      // admitted ceiling, its record written and nothing left to do — and was
-      // still reported exit 1 with "tear the run down". The ack-log guard at the
-      // very bottom of this function names that hazard exactly ("the operator's
-      // natural response to that bare failure — tear down, retry — re-spends the
-      // issue's cap on a run that had already SUCCEEDED"); this line
-      // manufactured it. A deadline is a bound on WORK REMAINING; where none
-      // remains there is nothing for it to bound, and refusing a healthy run is
-      // the more expensive of the two errors.
-      //
-      // Labelled "post-gate", not "gate": it fires only once the gate has
-      // RETURNED ready, so `dispatch exceeded N ms at gate` accused a gate that
-      // had passed all five assertions — and `ctx.gate` is set by then, so the
-      // payload's `debugCommands` come from that passing gate. `gateReady` says
-      // so on the payload.
-      if (remaining() <= 0) throw timedOut("post-gate", { gateReady: true });
-
-      // `expose` RESOLVING is the moment the port stops being speculative — the
-      // retraction below turns on this and nothing else. It cannot be inferred
-      // from `ctx.httpsUrl`, which is already set from `vm.httpsUrl` at create
-      // time and so is non-undefined on plenty of runs where `expose` never ran.
-      let portOpened = false;
-      // Whether the locator write landed — the one state claim still made AFTER
-      // a call, so its failure mode needs its own repair path below.
-      let httpsUrlPersisted = false;
-      try {
-        ctx.httpsUrl = await within(
-          "expose",
-          () => {
-            // Intent marker BEFORE the provider call, but INSIDE the step:
-            // `within` pre-checks the budget before invoking its thunk, so a
-            // deadline that expires between the post-gate sample above and that
-            // pre-check throws before any claim exists. The claim used to sit
-            // outside, and a `dispatch-timeout` from a NEVER-STARTED expose was
-            // then exempted from the retraction below like an abandoned one —
-            // leaving `ports: [port]` on the record for a port nothing opened,
-            // visible to `fleet status` and port-keyed reapers until teardown.
-            //
-            // Written before the driver call either way: `within` ABANDONS
-            // rather than cancels (no AbortSignal at the seam), so an expose
-            // abandoned at the deadline can still complete seconds later — the
-            // box is then publicly reachable while the record must already
-            // claim its port, or `fleet status` under-reports a live public box
-            // and port-keyed reapers miss it entirely.
-            deps.store.set(runId, { ports: [port] });
-            return deps.driver.expose(vm.name, port);
-          },
-          // A late expose opens the port after the refusal; the URL is what the
-          // record could not be told.
-          (url) => ({ httpsUrl: typeof url === "string" ? redact(url) : undefined, port }),
-          // An abandoned expose that then FAILS settles it: the port will never
-          // open, so the claim written inside the thunk is now phantom — the
-          // same state the synchronous retraction below fixes for an ordinary
-          // failure, reachable only here because a `dispatch-timeout` is exempt
-          // there (at throw time the call may still land). Retract at the
-          // rejection, best-effort exactly like the catch's own.
-          () => {
-            try {
-              deps.store.set(runId, { ports: [] });
-            } catch {
-              // best-effort: the refusal stands either way
-            }
-          },
-        );
-        portOpened = true;
-        // The URL was the one state claim still made AFTER the call it describes.
-        // Two ways that lost it: a failed — or, by the same abandon-not-cancel
-        // reasoning as the `ports` claim above, an ABANDONED — `setPublic` left
-        // the record with a port and no URL for a box `expose` had already given
-        // one; and a driver that resolved no URL still went on to be made PUBLIC,
-        // i.e. publicly reachable with nothing on the record saying where.
-        //
-        // `expose` is DECLARED `Promise<string>`, so the undefined arm is a
-        // driver-boundary guard, not a modelled outcome — and the right answer at
-        // that boundary is to refuse before the box is public (INV-5 keeps it
-        // alive and diagnosable) rather than to publish a box nobody can name.
-        // Blank is the same outcome by another road: driver.ts normalizes
-        // whitespace-only URLs to undefined at ITS boundary (`address`), but
-        // `""` is a string and is not an address either, so a driver that skips
-        // that helper hands one straight through — same refusal, same family.
-        // The port claim below is RETAINED: `expose` RESOLVED, so the port is
-        // real even where the address is not usable (the retraction's own
-        // second case).
-        // The MAIN path's read of `expose`'s resolution — the one read with no
-        // `typeof` guard (the late-success handler checks, this did not).
-        // `expose` is DECLARED `Promise<string>`, but `deps.driver` is an
-        // injection seam and a truthy non-string here threw out of `.trim()`,
-        // escaping to the outer catch as exit-1 `dispatch-failed` instead of
-        // the purpose-built refusal below. The port claim stays real either
-        // way (`expose` resolved), and the box is left PRIVATE (INV-5) rather
-        // than published with an unusable locator.
-        if (
-          typeof ctx.httpsUrl !== "string" ||
-          ctx.httpsUrl === undefined ||
-          ctx.httpsUrl.trim().length === 0
-        ) {
-          throw refuse(
-            1,
-            "expose-no-url",
-            `expose returned no URL for run ${runId} on port ${port}`,
-            "the run record is OPEN and the box is ALIVE but NOT public (INV-5) — inspect it, then tear it down",
-            { port },
-          );
-        }
-        // Verbatim DELIBERATELY, unlike every log-line copy of this field: the
-        // record is the persistent locator for a public box (the ack return and
-        // this write are its only copies), so a lossy form here — `redact`
-        // eats long host labels outright — leaves a live box whose address is
-        // recorded nowhere. The operator-facing halves sanitize at their own
-        // boundaries instead: the structured lines redact, and `fleet status`'s
-        // `safeUrl` drops userinfo-bearing URLs entirely.
-        deps.store.set(runId, { httpsUrl: ctx.httpsUrl });
-        httpsUrlPersisted = true;
-        await within(
-          "setPublic",
-          () => deps.driver.setPublic(vm.name),
-          // Resolves `void`. What a late one means is the whole of it: this box
-          // became PUBLICLY REACHABLE after the operator was told the dispatch
-          // failed.
-          () => ({ vmName: vm.name, publiclyReachable: true }),
-        );
-      } catch (e) {
-        // The URL write failing after `expose` resolved left a record holding a
-        // port with NO locator, permanently — the store merges patches and has
-        // no way to remove one. One best-effort repair before the refusal: this
-        // is the only moment the URL is known and the write is cheap to repeat.
-        // Guarded on the URL actually being usable, so an `expose-no-url`
-        // failure does not write garbage over the absence it is refusing for.
-        if (
-          portOpened &&
-          !httpsUrlPersisted &&
-          typeof ctx.httpsUrl === "string" &&
-          ctx.httpsUrl.trim().length > 0
-        ) {
-          try {
-            deps.store.set(runId, { httpsUrl: ctx.httpsUrl });
-          } catch {
-            // still unrecorded — vmName and port ride the refusal payload and
-            // the box stays alive (INV-5), so the operator can read the
-            // address off it directly
-          }
-        }
-        // RETRACT the speculative `ports` claim, but ONLY while it is still
-        // speculative. Left standing on a failed `expose`, the record
-        // permanently advertised a port on a box where nothing was opened:
-        // port-keyed reapers and `fleet status` both read a port the box does
-        // not have.
-        //
-        // Two cases KEEP the claim, and both are ones where the port is real:
-        //
-        //  - An ABANDONED call, which is what the claim was written for: a
-        //    `dispatch-timeout` is precisely the case where the expose may still
-        //    land after the refusal. A `dispatch-timeout` can now also mean the
-        //    step NEVER started (budget gone before `within` invoked its thunk)
-        //    — but then no claim was written either, so exempting it here
-        //    retracts nothing and leaves no phantom port behind.
-        //  - Anything that failed AFTER `expose` resolved — `expose-no-url` and
-        //    every `setPublic` failure. The port is OPEN on those; retracting
-        //    left the record denying a port the box is listening on, and
-        //    `httpsUrl` (written between the two calls) contradicting the same
-        //    record's empty `ports`. That is the inconsistency this retraction
-        //    exists to prevent, pointed the other way.
-        //
-        // `[]` rather than an unset, because the store merges patches and has no
-        // way to remove a field — an empty list is "this run claims no port",
-        // which is what a reaper and `fleet status` both need to read.
-        if (!portOpened && !(e instanceof FleetError && e.code === "dispatch-timeout")) {
-          try {
-            deps.store.set(runId, { ports: [] });
-          } catch {
-            // best-effort, exactly like the gate-outcome write: the refusal
-            // being reported must not be replaced by a record-write failure
-          }
-        }
-        throw e;
-      }
-    }
+    await exposeGatedBox(ctx, deps, { runId, vm });
   } catch (e) {
     // Same rule as the key-delivery arm: rethrow only a refusal that ALREADY
     // went out. A FleetError thrown straight past `refuse` (a seam's own
