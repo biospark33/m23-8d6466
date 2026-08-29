@@ -16,7 +16,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-// ponytail: src/ does not exist yet — this import fails red as expected
 import {
   Tracer,
   TracerError,
