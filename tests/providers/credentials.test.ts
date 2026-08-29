@@ -635,6 +635,23 @@ describe("DF2.3 credential lifecycle", () => {
     expect(store.get(runId).limitMicroUsd).toBe(250_000);
   });
 
+  test("F004: a fractional over-grant that rounds DOWN to the cap is still refused", async () => {
+    // 1.0000004 USD rounds to exactly 1_000_000 µ$ under Math.round — a
+    // post-rounding comparison would miss this over-grant entirely.
+    api = new FakeKeyApi({ returnedLimitUsd: 1.0000004 });
+    const runId = "df23-fractional-overgrant";
+    await makeRun(runId);
+    let err: unknown;
+    try {
+      await mintRunKey(deps({ capMicroUsd: 1_000_000 }), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("mint-ceiling-mismatch");
+    expect(store.get(runId).limitMicroUsd).toBeUndefined();
+  });
+
   test("INV-CRED-1: a malformed limit (0/NaN) is refused like an uncapped one", async () => {
     for (const [i, bad] of [0, Number.NaN].entries()) {
       api = new FakeKeyApi({ returnedLimitUsd: bad });

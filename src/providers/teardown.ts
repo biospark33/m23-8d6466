@@ -438,6 +438,11 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
         (wrapped as Error & { cause: unknown }).cause = e;
         throw wrapped;
       }
+      // F032, recovered runs too: the fresh-close path (below) reports
+      // divergence right after ingest — a process that dies between
+      // store.close and reportSpendDivergence must get the same report on
+      // retry, or a token-ledger gap for that run goes unreported forever.
+      reportSpendDivergence(ctx, deps.costLedger, rec, runId);
     }
     return;
   }

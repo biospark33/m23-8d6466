@@ -1135,6 +1135,38 @@ describe("DF2.5 teardownSandbox", () => {
       expect(String(lines[0]!.message)).not.toContain("tokens-ledger-unwired");
     }, 30_000);
 
+    test("crash-window recovery ALSO reports spend divergence (F032), not just box hours", async () => {
+      // The regression this exists for: the early (already-closed) path
+      // ran ingestBoxHoursIfAttributed but never reportSpendDivergence, so a
+      // process that died between store.close and the divergence report
+      // left that run's token-ledger gap unreported forever, even on retry.
+      const runId = "df32-recovery-divergence";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      attribute(runId);
+
+      // First run: close WITHOUT a costLedger — simulates a crash before
+      // ingest+divergence would have run.
+      await teardownSandbox(deps({ gitCwd: host }), runId);
+      expect(store.get(runId).closedAt).toBeString();
+      expect(logs.filter((l) => l.code === "spend-divergence")).toHaveLength(0);
+
+      // Second run: record is already closed; the recovery path must ingest
+      // box hours AND report divergence, same as a fresh close would.
+      const ledger = await realLedger(runId);
+      try {
+        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId);
+      } finally {
+        ledger.close();
+      }
+
+      const lines = logs.filter((l) => l.code === "spend-divergence");
+      expect(lines).toHaveLength(1);
+      expect(lines[0]!.outcome).toBe("unwired");
+      expect(lines[0]!.recordedMicroUsd).toBe(RECORDED_MICRO_USD);
+    }, 30_000);
+
     test("a hook with no readRunCost (DF2.8's box-hours-only shape) is left alone", async () => {
       const runId = "df25-spend-nohook";
       const host = await makeHostRepo();

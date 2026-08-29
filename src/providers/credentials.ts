@@ -356,14 +356,18 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
   // this mint as the enforcement locus — a provider echo ABOVE the request is
   // refused rather than persisted as this run's limit. Clamping DOWN is fine:
   // a smaller grant cannot overspend the requested ceiling.
-  const grantedMicroUsd = usdToMicros(res.limitUsd);
-  if (grantedMicroUsd > capMicroUsd) {
+  // Compared in the USD domain, BEFORE usdToMicros' Math.round: a fractional
+  // over-grant under 0.5 micro-USD (e.g. 1.0000004 against a 1_000_000 µ$ cap)
+  // rounds down to exactly the cap and would slip past a post-rounding
+  // comparison. The raw provider figure is what the key can actually spend.
+  if (res.limitUsd > microsToUsd(capMicroUsd)) {
     throw new CredentialLifecycleError(
       "mint-ceiling-mismatch",
       `provider granted ${res.limitUsd} USD for ${name} against a ${capMicroUsd} micro-USD cap`,
       `revoke the over-granted key and fix the provider request: curl -X DELETE https://openrouter.ai/api/v1/keys/${res.hash} -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
     );
   }
+  const grantedMicroUsd = usdToMicros(res.limitUsd);
   deps.store.set(runId, { limitMicroUsd: grantedMicroUsd });
   return { key: res.key, hash: res.hash };
 }
