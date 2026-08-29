@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { type LogEntry, setLogSink, StdioTransport } from "../../src/swarmclaw/mcp/stdio-transport.ts";
 import { handleRegisterAgent } from "../../src/swarmclaw/routes/agents.ts";
 import {
+  handleDeleteMCPServer,
   handleInvokeMCPServer,
   handleRegisterMCPServer,
   handleTestMCPServer,
@@ -1384,4 +1385,60 @@ describe("F067: the success payload has a stated contract", () => {
     expect(resp.status).toBe(200);
     expect(resp.body).toEqual({ jsonrpc: "2.0", result: { content: [{ type: "text", text: "ok" }] }, id: "req-f067-ok" });
   }, 15000);
+});
+
+// ---------------------------------------------------------------------------
+// F069: a registered server can be reclaimed. Without a delete route every
+// registration held a slot (and a live subprocess) until process restart, so a
+// repeatedly-run probe walked the fleet into MAX_MCP_SERVERS with no recourse
+// but a restart.
+// ---------------------------------------------------------------------------
+describe("F069 DELETE /api/mcp-servers/{id}", () => {
+  test("deleting a registered server frees its slot, its name and its subprocess", async () => {
+    const mcpStore = newMcpStore();
+    const reg = await handleRegisterMCPServer(
+      mcpStore,
+      { name: "reclaimable", transport: "stdio", command: "hindsight-local-mcp" },
+      undefined,
+      fakeFactory(),
+    );
+    expect(reg.status).toBe(201);
+    const id = (reg.body as { id: string }).id;
+    const rec = mcpStore.get(id)!;
+    expect(mcpStore.size).toBe(1);
+
+    const del = await handleDeleteMCPServer(mcpStore, id);
+    expect(del.status).toBe(200);
+    expect(del.body).toEqual({ ok: true, id });
+    expect(mcpStore.size).toBe(0);
+    expect(mcpStore.get(id)).toBeUndefined();
+    // The subprocess is gone, not merely unreferenced — the leak this closes
+    // is a live child per registration, not a map entry.
+    expect(rec.stdio.isRunning).toBeFalse();
+
+    // The name is free again: re-registering the SAME name is a 201, not a 409.
+    const again = await handleRegisterMCPServer(
+      mcpStore,
+      { name: "reclaimable", transport: "stdio", command: "hindsight-local-mcp" },
+      undefined,
+      fakeFactory(),
+    );
+    expect(again.status).toBe(201);
+  }, 20000);
+
+  test("deleting an unknown id is a 404, and a second delete of the same id is too", async () => {
+    const mcpStore = newMcpStore();
+    const missing = await handleDeleteMCPServer(mcpStore, crypto.randomUUID());
+    expect(missing.status).toBe(404);
+
+    const reg = await handleRegisterMCPServer(
+      mcpStore,
+      { name: "twice-deleted", transport: "stdio", command: "hindsight-local-mcp" },
+      undefined,
+      fakeFactory(),
+    );
+    const id = (reg.body as { id: string }).id;
+    expect((await handleDeleteMCPServer(mcpStore, id)).status).toBe(200);
+    expect((await handleDeleteMCPServer(mcpStore, id)).status).toBe(404);
+  }, 20000);
 });

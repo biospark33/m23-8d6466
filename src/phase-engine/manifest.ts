@@ -243,11 +243,21 @@ function realpathNoOpen(input: string): string {
  * fd-path facility — throws; the caller turns that into a failed gate check.
  * Size ceiling reuses `MANIFEST_MAX_BYTES`: gate-examined artifacts are
  * manifests' peers (small JSON evidence), not unbounded logs.
+ *
+ * F060 — this is the RESOLVER half, and every one of the four steps above
+ * completes here, before a single byte is read. Callers that only need the
+ * verdict ("does this artifact exist, beneath the root, as a regular file
+ * within the ceiling?") stop here and pay nothing for the body;
+ * `readArtifactBeneathRoot` below is the thin reader on top.
+ *
+ * OWNERSHIP: the returned `fd` is OPEN. The caller must `fs.closeSync` it — on
+ * every path, including its own throws. Any refusal raised in here closes it
+ * first, so a thrown call leaks nothing.
  */
-export function readArtifactBeneathRoot(
+export function resolveArtifactBeneathRoot(
   artifactPath: string,
   runRoot: string,
-): { bytes: Buffer; resolvedPath: string; size: number } {
+): { fd: number; resolvedPath: string; size: number } {
   let rootReal: string;
   try {
     rootReal = realpathNoOpen(path.resolve(runRoot));
@@ -272,6 +282,7 @@ export function readArtifactBeneathRoot(
   } catch (err) {
     throw new ManifestError(`artifact could not be opened: ${fileReal}`, { cause: err });
   }
+  let size: number;
   try {
     const openedAs = fdRealPath(fd);
     if (openedAs === null) {
@@ -294,18 +305,39 @@ export function readArtifactBeneathRoot(
         `artifact is ${stat.size} bytes, above the ${MANIFEST_MAX_BYTES}-byte ceiling`,
       );
     }
+    size = stat.size;
+  } catch (err) {
+    // A refusal owns the descriptor it opened — only a SUCCESSFUL return hands
+    // it to the caller.
+    fs.closeSync(fd);
+    throw err;
+  }
+  return { fd, resolvedPath: fileReal, size };
+}
+
+/**
+ * The thin reader on top of `resolveArtifactBeneathRoot`: the whole hardened
+ * walk, then the body through the descriptor that walk verified. The path
+ * string is never re-opened (INV-1 step 4).
+ */
+export function readArtifactBeneathRoot(
+  artifactPath: string,
+  runRoot: string,
+): { bytes: Buffer; resolvedPath: string; size: number } {
+  const { fd, resolvedPath, size } = resolveArtifactBeneathRoot(artifactPath, runRoot);
+  try {
     let bytes: Buffer;
     try {
       bytes = fs.readFileSync(fd);
     } catch (err) {
-      throw new ManifestError(`artifact could not be read: ${fileReal}`, { cause: err });
+      throw new ManifestError(`artifact could not be read: ${resolvedPath}`, { cause: err });
     }
     if (bytes.byteLength > MANIFEST_MAX_BYTES) {
       throw new ManifestError(
         `artifact read ${bytes.byteLength} bytes, above the ${MANIFEST_MAX_BYTES}-byte ceiling`,
       );
     }
-    return { bytes, resolvedPath: fileReal, size: stat.size };
+    return { bytes, resolvedPath, size };
   } finally {
     fs.closeSync(fd);
   }

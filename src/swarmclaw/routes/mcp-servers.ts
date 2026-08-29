@@ -3,6 +3,7 @@
  *   POST /api/mcp-servers            — register + spawn + handshake + enumerate
  *   POST /api/mcp-servers/{id}/test  — re-validate transport health, list tools
  *   POST /api/mcp-servers/{id}/invoke — proxy a tool call with arg validation
+ *   DELETE /api/mcp-servers/{id}    — reclaim: shut the subprocess down, free the slot
  */
 
 import {
@@ -219,6 +220,29 @@ export async function handleTestMCPServer(
       body: { ok: false, error: safeMessage },
     }, (err as Error).message);
   }
+}
+
+/**
+ * F069 — the reclaim route. Registration was one-way: nothing but a restart
+ * (`shutdownAll`) freed a slot, so every caller that registers per invocation
+ * leaked a record AND a live subprocess against the 32-server cap. Deleting is
+ * idempotent from the caller's side in the only sense that matters — a second
+ * delete is a 404, never a 500 — and the store frees the name and the slot
+ * synchronously, before the transport shutdown it awaits.
+ */
+export async function handleDeleteMCPServer(
+  store: MCPStore,
+  id: string,
+  requestId = newRequestId(),
+): Promise<RouteResponse> {
+  const start = Date.now();
+  if (!(await store.remove(id))) {
+    return logAndReturn(start, requestId, "mcp.delete", {
+      status: 404,
+      body: { ok: false, error: "MCP server not found" },
+    });
+  }
+  return logAndReturn(start, requestId, "mcp.delete", { status: 200, body: { ok: true, id } });
 }
 
 export async function handleInvokeMCPServer(

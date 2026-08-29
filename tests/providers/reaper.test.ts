@@ -15,7 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,6 +24,7 @@ import { run as runReap } from "../../scripts/sandbox-reap.ts";
 import {
   sweep,
   SweepError,
+  REAP_HISTORY_MAX_REPORTS,
   RUN_ID_SHAPE,
   type SweepDeps,
   type SweepReport,
@@ -999,5 +1000,34 @@ describe("DF2.6 sweep", () => {
     // revoke executed list is empty — the key was never revoked
     expect(report.executed.revoke).toEqual([]);
     expect(await keyLive(fleet, orphanHash)).toBeTrue(); // key still live
+  });
+
+  // F043: every sweep writes one report and nothing ever deleted one, so an
+  // operator who sweeps hourly grows the reap dir forever while only the newest
+  // REAP_HISTORY_MAX_REPORTS are ever READ — countReapBlocked pays a readdir +
+  // statSync over the whole history for 200 files of evidence.
+  test("F043: a successful report write prunes the reap dir to REAP_HISTORY_MAX_REPORTS", async () => {
+    const fleet = await seedFleet(dir, e2eState(), NOW);
+    const reapDir = join(dir, "reap");
+    mkdirSync(reapDir, { recursive: true, mode: 0o700 });
+    // Pre-seed one over the ceiling with parseable dry-run reports, aged so the
+    // mtime ordering is unambiguous (the newest survivors are deterministic).
+    const seeded = REAP_HISTORY_MAX_REPORTS + 5;
+    for (let i = 0; i < seeded; i++) {
+      const f = join(reapDir, `seed-${String(i).padStart(4, "0")}.json`);
+      writeFileSync(f, `${JSON.stringify({ mode: "dry-run", failures: [], executed: {} })}\n`, { mode: 0o600 });
+      utimesSync(f, new Date(NOW.getTime() - (seeded - i) * 60_000), new Date(NOW.getTime() - (seeded - i) * 60_000));
+    }
+    expect(readdirSync(reapDir)).toHaveLength(seeded);
+
+    const report = await sweep(deps(fleet));
+
+    const after = readdirSync(reapDir);
+    expect(after).toHaveLength(REAP_HISTORY_MAX_REPORTS);
+    // The report this sweep just wrote is never the one pruned.
+    expect(existsSync(report.reportFile)).toBeTrue();
+    // The OLDEST seeds went, not an arbitrary slice.
+    expect(after).not.toContain("seed-0000.json");
+    expect(after).toContain(`seed-${String(seeded - 1).padStart(4, "0")}.json`);
   });
 });

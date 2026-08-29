@@ -9,7 +9,7 @@
  * pre-spawn, INV-2 path validation (incl. intermediate-symlink walk), INV-4
  * redaction, manifest schema.
  */
-import { describe, it, test, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
 import {
   mkdtempSync,
   rmSync,
@@ -19,6 +19,7 @@ import {
   unlinkSync,
   existsSync,
 } from "node:fs";
+import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import type { PhaseSpec } from "../../src/phase-engine/types.ts";
 import type { PhaseBodyContext } from "../../src/phase-engine/phase.ts";
@@ -857,6 +858,24 @@ describe("dispatch-task: INV-2 path validation", () => {
         // best-effort cleanup — warn so orphaned temp dirs are visible
         console.warn(`dispatch-task.test cleanup failed: ${outside}`, e instanceof Error ? e.message : String(e));
       }
+    }
+  });
+
+  // F060: the beneath-root WALK is the validation — the file body is not.
+  // validateArtifacts discarded the bytes it paid to read, so a run with N
+  // artifacts moved up to N MiB through the heap to answer a yes/no question.
+  test("artifacts: validation resolves the path without reading the body (F060)", () => {
+    const big = join(tmpRoot, "big.bin");
+    // 512 KiB — under MANIFEST_MAX_BYTES, so the artifact VALIDATES; the point
+    // is that none of those bytes are read to say so.
+    writeFileSync(big, Buffer.alloc(512 * 1024, 0x61));
+    const spy = spyOn(nodeFs, "readFileSync");
+    try {
+      const valid = validateArtifacts([{ name: "big", path: "big.bin" }], tmpRoot);
+      expect(valid.map((a) => a.name)).toEqual(["big"]);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
     }
   });
 });

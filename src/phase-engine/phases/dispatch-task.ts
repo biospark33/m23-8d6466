@@ -12,7 +12,7 @@
  * event adaptation + stream counters → precedence classification →
  * engine-side testCommand → INV-1/2 path validation → buildMergedOutput.
  */
-import { readArtifactBeneathRoot } from "../manifest.ts";
+import { resolveArtifactBeneathRoot } from "../manifest.ts";
 import { loadRoster } from "../roster/schema.ts";
 import type { ResolvedRoster } from "../roster/schema.ts";
 import { validateRoster } from "../roster/validate.ts";
@@ -37,7 +37,7 @@ import type { RunFacts } from "../../../cli-anything/src/runner.ts";
 import type { MergedOutput, TeamManifest } from "../../../cli-anything/src/types.ts";
 import type { PhaseBody, PhaseBodyContext } from "../phase.ts";
 import type { PhaseSpec, PhaseSubTimings, ExitStatus } from "../types.ts";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -674,14 +674,23 @@ export function validateArtifacts(
 
     if (!claimOk.has(artifact.path)) continue;
     try {
-      // The read IS the validation: through the one canonical root, via the
-      // DF1.1 resolver. Relative paths resolve against that root — the same
-      // root validation used (INV-1: one canonical root, never cwd). INV-5 —
-      // if the walk cannot be performed, this throws and the artifact is
-      // refused, never silently accepted.
+      // The WALK is the validation — realpath, beneath-root re-assert, the
+      // O_NOFOLLOW open, the fd-path verification, fstat and the size ceiling
+      // all complete before any byte is read, so the body is never touched
+      // (F060: this used to read up to MANIFEST_MAX_BYTES per artifact and
+      // discard every byte). Through the one canonical root, via the DF1.1
+      // resolver: relative paths resolve against that root (INV-1: one
+      // canonical root, never cwd). INV-5 — if the walk cannot be performed,
+      // this throws and the artifact is refused, never silently accepted.
       // Defense-in-depth: validateChangedFiles already rejects absolute paths,
       // but we keep this branch for explicitness and in case that check evolves.
-      readArtifactBeneathRoot(isAbsolute(artifact.path) ? artifact.path : join(runRoot, artifact.path), runRoot);
+      const { fd } = resolveArtifactBeneathRoot(
+        isAbsolute(artifact.path) ? artifact.path : join(runRoot, artifact.path),
+        runRoot,
+      );
+      // The resolver hands the caller an OPEN descriptor; validation wants
+      // nothing from it but the fact that it opened.
+      closeSync(fd);
       valid.push(artifact);
     } catch {
       // D10: log dropped artifacts for observability

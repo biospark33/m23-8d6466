@@ -6,6 +6,7 @@
  *   POST /api/mcp-servers
  *   POST /api/mcp-servers/{id}/test
  *   POST /api/mcp-servers/{id}/invoke
+ *   DELETE /api/mcp-servers/{id}
  *
  * Lifecycle (AC6): on SIGTERM, propagate SIGTERM to all MCP subprocesses,
  * grace 5s, then SIGKILL, then exit.
@@ -15,6 +16,7 @@ import { timingSafeEqual } from "node:crypto";
 import { log, newRequestId } from "./mcp/stdio-transport.ts";
 import { handleRegisterAgent } from "./routes/agents.ts";
 import {
+  handleDeleteMCPServer,
   handleInvokeMCPServer,
   handleRegisterMCPServer,
   handleTestMCPServer,
@@ -164,6 +166,13 @@ export function createServer(port = 0): SwarmClawServer {
         const invokeMatch = path.match(/^\/api\/mcp-servers\/([^/]+)\/invoke$/);
         if (method === "POST" && invokeMatch) {
           return json(await handleInvokeMCPServer(mcpStore, invokeMatch[1]!, await safeJson(req), requestId));
+        }
+        // F069 reclaim. Same table, so it sits behind the same Origin refusal
+        // and the same opt-in bearer as every POST above; it carries no body,
+        // so the 413 guard has nothing to do for it.
+        const deleteMatch = path.match(/^\/api\/mcp-servers\/([^/]+)$/);
+        if (method === "DELETE" && deleteMatch) {
+          return json(await handleDeleteMCPServer(mcpStore, deleteMatch[1]!, requestId));
         }
         return json({ status: 404, body: { error: "not found" } });
       } catch (err) {
