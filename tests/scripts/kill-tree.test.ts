@@ -128,4 +128,92 @@ describe.skipIf(process.platform === "win32")("McpClient.close sweeps the server
 		},
 		{ timeout: 20_000 },
 	);
+
+	// Round 1, finding 2: the escalation used to be gated on the LEADER's exit.
+	// This is the case that gate missed — the server exits on SIGTERM, and the
+	// grandchild traps it and hangs on. Leader-gated: no escalation, leak.
+	test(
+		"escalates on GROUP liveness, not the leader's exit",
+		async () => {
+			const marker = `3000.${process.pid}${Math.floor(Math.random() * 1e6)}`;
+			const dir = mkdtempSync(join(tmpdir(), "qds-mcp-group-"));
+			const server = join(dir, "server.cjs");
+			writeFileSync(
+				server,
+				[
+					'const { spawn } = require("node:child_process");',
+					// The grandchild IGNORES SIGTERM; the leader takes it and dies.
+					`spawn("sh", ["-c", "trap '' TERM; sleep ${marker}"], { stdio: "ignore" });`,
+					"setInterval(() => {}, 1000);",
+				].join("\n"),
+			);
+			const alive = () =>
+				Bun.spawnSync(["pgrep", "-f", marker]).stdout.toString().trim().split("\n").filter(Boolean).length;
+
+			const client = new McpClient(server, dir, process.env);
+			try {
+				await new Promise((r) => setTimeout(r, 1_200));
+				// The `sh` wrapper and its `sleep` both carry the marker in argv.
+				expect(alive()).toBeGreaterThan(0); // non-vacuous
+				client.close();
+				await new Promise((r) => setTimeout(r, 3_500)); // past the 2 s escalation
+				expect(alive()).toBe(0);
+			} finally {
+				Bun.spawnSync(["pkill", "-f", marker]);
+			}
+		},
+		{ timeout: 20_000 },
+	);
+
+	// Round 1: `detached: true` costs terminal SIGINT delivery, and the two
+	// harnesses on this client have no signal handler — node's default SIGINT
+	// disposition never runs their `finally`. So the constructor installs one.
+	// Without it, Ctrl-C leaks BOTH the server and its grandchild.
+	test(
+		"Ctrl-C on the harness kills the server and its grandchild",
+		async () => {
+			const marker = `3000.${process.pid}${Math.floor(Math.random() * 1e6)}`;
+			const dir = mkdtempSync(join(tmpdir(), "qds-mcp-sigint-"));
+			const server = join(dir, "server.cjs");
+			writeFileSync(
+				server,
+				[
+					'const { spawn } = require("node:child_process");',
+					`spawn("sleep", ["${marker}"], { stdio: "ignore" });`,
+					"setInterval(() => {}, 1000);",
+				].join("\n"),
+			);
+			// A harness shaped like lsp-verify.ts: opens a client, does its work
+			// in a try, and tears down ONLY in a finally.
+			const harnessFile = join(dir, "harness.ts");
+			writeFileSync(
+				harnessFile,
+				[
+					`import { McpClient } from ${JSON.stringify(join(import.meta.dir, "../../scripts/lib/mcp-stdio-client.ts"))};`,
+					`const c = new McpClient(${JSON.stringify(server)}, ${JSON.stringify(dir)}, process.env);`,
+					"try {",
+					"  await new Promise((r) => setTimeout(r, 60_000));",
+					"} finally {",
+					"  c.close();",
+					"}",
+				].join("\n"),
+			);
+			const alive = () =>
+				Bun.spawnSync(["pgrep", "-f", marker]).stdout.toString().trim().split("\n").filter(Boolean).length;
+
+			const harness = Bun.spawn(["bun", harnessFile], { stdout: "ignore", stderr: "ignore" });
+			try {
+				await new Promise((r) => setTimeout(r, 1_500));
+				expect(alive()).toBe(1); // non-vacuous
+				harness.kill("SIGINT");
+				await harness.exited;
+				await new Promise((r) => setTimeout(r, 1_000));
+				expect(alive()).toBe(0);
+			} finally {
+				harness.kill("SIGKILL");
+				Bun.spawnSync(["pkill", "-f", marker]);
+			}
+		},
+		{ timeout: 20_000 },
+	);
 });

@@ -28,6 +28,11 @@ import { spawnSync } from "node:child_process";
  *
  * `child` accepts null/undefined so callers holding a not-yet-spawned or
  * already-cleared handle can call it unconditionally.
+ *
+ * A child with no `pid` returns WITHOUT a direct kill. That narrows the old
+ * `cli-anything/src/runner.ts` copy, which attempted `child.kill("SIGKILL")`
+ * first — a no-op in practice, since a pid-less ChildProcess is one whose
+ * spawn failed and there is nothing to signal.
  */
 export function killTree(child: ChildProcess | null | undefined, signal: NodeJS.Signals = "SIGKILL"): void {
 	if (!child) return;
