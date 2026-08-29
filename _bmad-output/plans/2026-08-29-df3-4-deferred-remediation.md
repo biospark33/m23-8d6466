@@ -1217,10 +1217,33 @@ drop D5 or D6 to make room for it, and is not reporting itself complete while
 silently skipping it: this is the explicit statement the rider table requires.
 
 Nothing was cherry-picked and no merged tree was assembled by hand, as this
-item's own instruction forbids. **Both PRs are `MERGEABLE` right now** — merging
-#169 is the cheap unblock (it is small, self-contained, does not depend on #150,
-and is a HIGH authorization fix sitting unmerged), and it satisfies half the
-precondition at no risk to the DF3.4 work.
+item's own instruction forbids.
+
+### UPDATE — #169 MERGED after Session C closed · precondition now HALF met
+
+The operator merged PR #169 at **2026-08-29T20:38:14Z**, merge commit `6e877db`
+into `dev`; the `feature/df4-allowlist-path-guards` branch was verified
+fully-contained (`git merge-base --is-ancestor 483a3e3 origin/dev`) and then
+deleted locally, remotely and from remote-tracking. Re-checked immediately
+after:
+
+```console
+$ git cat-file -e origin/dev:src/providers/allowlist-path.ts   →  ON dev  (#169 landed)
+$ git cat-file -e origin/dev:src/fleet/approvers.ts            →  ABSENT  (still needs #150)
+```
+
+So **D10 is still NOT startable, but the remaining blocker is now #150 itself**
+rather than two independent merges. Two ways to satisfy it, both legitimate per
+this item's own text:
+
+1. **#150 merges to `dev`** — then both files sit in one tree and D10 is a cheap
+   closer.
+2. **`dev` is merged INTO #150's branch** — now sufficient *on its own*, which it
+   was not before, because `allowlist-path.ts` is on `dev`. This is the route
+   that does not depend on #150 landing first.
+
+Session D must still run the two `git cat-file` commands itself rather than
+trust this snapshot.
 
 ### Acceptance criteria
 
@@ -1699,14 +1722,17 @@ one. Repo root `/Users/steve/QDS-Factory`, branch
 Backlog is **7 / 11**. D3/D1/D2 closed in Session A; D4/D7 in Session B; D5/D6 in
 Session C. Four remain: **D8, D9, D10, D11.**
 
-Two PRs, both **OPEN and MERGEABLE** as of Session C's close:
+PR state (updated after Session C closed):
 
-- **#169** (`feature/df4-allowlist-path-guards` → `dev`) — D4, the **HIGH
-  authorization fix**, commit `483a3e3`. Small, self-contained, does not depend on
-  #150. **It has NO CodeRabbit review** — the bot was rate-limited and never
-  produced one. Worth knowing before it merges.
-- **#150** (`feature/df3-4-approval-gate-attach-steering` → `dev`) — DF3.4 plus
-  Sessions A, B and C.
+- **#169** — **MERGED** into `dev` at 2026-08-29T20:38:14Z, merge commit `6e877db`.
+  D4, the HIGH authorization fix. Its branch was verified fully-contained and then
+  deleted locally, remotely and from remote-tracking. **It merged with NO CodeRabbit
+  review** — the bot was rate-limited and never produced one — so
+  `src/providers/allowlist-path.ts` and `tests/providers/allowlist-path.test.ts` are
+  now on `dev` having had human review only. Worth a read if you touch that module
+  for D10.
+- **#150** (`feature/df3-4-approval-gate-attach-steering` → `dev`) — **OPEN**,
+  head `1b126fa`. DF3.4 plus Sessions A, B and C. This is your branch.
 
 **GitNexus is reliable.** `impact()` resolves this branch's symbols to their real
 files, so ground rule 6 is in force — run it, do not fall back to grep. Caveat
@@ -1730,10 +1756,22 @@ Recommended order, with the reasoning so you can override it deliberately:
    git cat-file -e origin/dev:src/providers/allowlist-path.ts && echo "D4 landed"
    git cat-file -e origin/dev:src/fleet/approvers.ts && echo "DF3.4 landed"
    ```
-   Both present ⇒ D10 is a cheap closer, take it. Either absent ⇒ **D10 is not
-   yours**; say so explicitly and open it as a GitHub issue at this session's
-   close, which is what the rider table's row 3 requires so it cannot evaporate
-   with the backlog. Do NOT assemble the merged tree by hand.
+   **As of this handoff the FIRST is present and the SECOND is not** — #169
+   merged, #150 has not. So D10 is not startable as the tree stands, but the only
+   remaining blocker is #150 itself.
+
+   You have a route Session C did not: **merging `dev` into this branch is now
+   sufficient on its own**, because `allowlist-path.ts` is already on `dev`. That
+   is explicitly allowed by D10's own precondition ("or `dev` has been merged into
+   #150's branch, so both files sit in one tree") and it does not require #150 to
+   land first. It is also a merge you may want anyway, to keep this branch from
+   drifting further behind `dev`.
+
+   Both present ⇒ D10 is a cheap closer, take it. Still blocked at session close ⇒
+   **D10 is not yours**; say so explicitly and open it as a GitHub issue, which is
+   what the rider table's row 3 requires so it cannot evaporate with the backlog.
+   Do NOT cherry-pick, and do NOT assemble the merged tree by hand — a real merge
+   is fine, a hand-built one is what the item forbids.
 2. **D11 — MED, a DESIGN DECISION, and the one I would not defer again.** It is
    the third distinct symptom of one design, and three review rounds have each
    patched the release instead. **Do not make it four.** Read D11's section for
