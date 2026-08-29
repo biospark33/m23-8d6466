@@ -905,6 +905,69 @@ describe("withApprovalLock — reclamation is a cross-PROCESS decision", () => {
       s.cleanup();
     }
   });
+
+  test("the release never TOUCHES a successor's lock — same inode, not merely same bytes", async () => {
+    // The test above pins the successor's BYTES. That was not enough, and a
+    // CodeRabbit finding on the round-6 release is what surfaced it: the old
+    // release renamed `lockPath` away UNCONDITIONALLY and only then looked at
+    // whose bytes it had captured, restoring them if they were not its own. So
+    // the successor's file was destroyed and RECREATED even on the path that
+    // "worked" — a new inode, and, for the duration of the rename plus a read,
+    // NO FILE AT `lockPath` AT ALL.
+    //
+    // That vacancy is the actual defect. A third waiter arriving inside it
+    // creates `lockPath` legitimately; the departing holder's restore then
+    // fails EEXIST and it deletes the successor's captured lock, leaving the
+    // successor and the third waiter both inside the critical section. The
+    // interleaving needs process scheduling to reproduce, but its ROOT FACT
+    // does not: identity. A release that never removes a file it does not own
+    // cannot vacate the path, so pinning the inode pins the whole class.
+    //
+    // Verified RED against the pre-fix release: the restore rewrote the file
+    // and the inode changed.
+    const s = store();
+    try {
+      const lock = path.join(s.dir, "run-1.approval.lock");
+      let successorIno = -1;
+      await withApprovalLock(s.dir, "run-1", () => {
+        // Exactly what a real reclaim leaves: same path, a different holder's
+        // content, a NEW file. Written with `wx` after an unlink so it is
+        // genuinely a distinct inode rather than an overwrite in place.
+        fs.rmSync(lock, { force: true });
+        fs.writeFileSync(lock, "999999:successor-nonce", { flag: "wx", mode: 0o600 });
+        successorIno = fs.statSync(lock).ino;
+      });
+      expect(fs.existsSync(lock)).toBe(true);
+      // THE assertion: the successor still holds the very file it created.
+      expect(fs.statSync(lock).ino).toBe(successorIno);
+      expect(fs.readdirSync(s.dir).filter((f) => f.includes(".release."))).toEqual([]);
+      fs.rmSync(lock, { force: true });
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("a holder whose OWN lock was removed by hand releases without recreating or wedging", async () => {
+    // The other half of fencing on identity: if there is nothing at `lockPath`
+    // — swept by an operator, or reclaimed and then released by a successor —
+    // the departing holder must do nothing at all and must not throw. A throw
+    // in the `finally` would REPLACE whatever `body()` raised.
+    const s = store();
+    try {
+      const lock = path.join(s.dir, "run-1.approval.lock");
+      expect(
+        await withApprovalLock(s.dir, "run-1", () => {
+          fs.rmSync(lock, { force: true });
+          return "body still returns";
+        }),
+      ).toBe("body still returns");
+      expect(fs.existsSync(lock)).toBe(false);
+      expect(fs.readdirSync(s.dir).filter((f) => f.includes(".release."))).toEqual([]);
+      expect(await withApprovalLock(s.dir, "run-1", () => "reacquired")).toBe("reacquired");
+    } finally {
+      s.cleanup();
+    }
+  });
 });
 
 describe("truncation — the cap is the cap, suffix INCLUDED", () => {
@@ -1108,6 +1171,14 @@ describe("submitDecision — the terminal write is validated BEFORE it is taken"
       // `submitDecision` reads through `readApproval`, which does NOT catch
       // ENOENT (unlike `readApprovalIfPresent`), so this is a throw and not a
       // `not-decidable` — pinned so the two readers cannot silently converge.
+      //
+      // D7 resolved this as CORRECT rather than changing it, and the reasoning
+      // is on `readApproval` in the source. The short version: this is the
+      // LIBRARY layer's backstop, and the operator never meets it — the verb
+      // block's `assertRunExists` classifies a missing run as exit 4 first,
+      // which `tests/fleet/gate-verbs.test.ts`'s D7 case now pins out of
+      // process. Loosening this to `not-decidable` would map a typo to exit 5
+      // ("a guard fired") instead of 4 ("that run does not exist").
       await expect(
         submitDecision(deps(s.store), "run-typo", {
           decision: "approved",

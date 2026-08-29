@@ -48,7 +48,7 @@
  * runs, and it is retaken to promote.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { assertExistingRunId, type ExtensionEntry, type RunRecordStore } from "../providers/run-record.ts";
@@ -159,16 +159,32 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
   assertExistingRunId(runId);
   const lockPath = join(dir, `${runId}.approval.lock`);
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
-  // THIS acquisition's content, kept so the release below can prove the file it
-  // is about to remove is still the one this call created. See the finally.
+  // THIS acquisition's content, read by OTHER processes' reclaim path: the pid
+  // lets a later waiter check the holder is actually dead (not just slow), and
+  // the nonce makes the content unique per acquisition so reclamation cannot be
+  // fooled by a replacement lock that happens to reuse the same pid.
   const ownContent = `${process.pid}:${randomUUID()}`;
+  // THIS acquisition's IDENTITY, for the release in the finally. Content answers
+  // "whose bytes are these" and needs a read; the inode answers "is this the
+  // very file I created" and needs only a stat. The release fences on the
+  // inode — see the finally for why identity, not content, is the right
+  // question there.
+  let ownIno = -1;
   for (;;) {
     try {
-      // Content proves ownership: pid lets a later waiter check the holder is
-      // actually dead (not just slow), and the nonce makes the content unique
-      // per acquisition so reclamation can't be fooled by a replacement lock
-      // that happens to reuse the same pid.
-      writeFileSync(lockPath, ownContent, { flag: "wx", mode: 0o600 });
+      // `openSync` + `fstatSync` rather than `writeFileSync` + `statSync`:
+      // `wx` creates atomically, and fstat on OUR OWN fd reports the inode of
+      // the file THIS call created with no window in which a replacement could
+      // be measured instead. A `statSync(lockPath)` after the write would be a
+      // second path lookup, and recording somebody else's inode would make the
+      // release refuse to remove our own lock.
+      const fd = openSync(lockPath, "wx", 0o600);
+      try {
+        writeFileSync(fd, ownContent);
+        ownIno = fstatSync(fd).ino;
+      } finally {
+        closeSync(fd);
+      }
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
@@ -263,53 +279,76 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
     // in it. The reclaim path's careful atomicity bought nothing while the
     // release could undo it.
     //
-    // Same rename-to-a-private-path move the reclaim above makes, for the same
-    // reason: `rename` is atomic on one filesystem, so this either captures the
-    // exact bytes it is deciding about or fails ENOENT — there is no
-    // read-then-delete gap for a replacement to fall into.
+    // FENCED ON IDENTITY, and it does NOT take the file away to find out whose
+    // it is. The previous shape — rename `lockPath` to a private path, read the
+    // bytes, restore them if they turned out to be a successor's — was fencing
+    // the DELETE while leaving the vacancy wide open, and the vacancy is the
+    // defect. Between the rename and the restore there is no file at
+    // `lockPath`, so a third waiter creates one legitimately; the restore then
+    // fails EEXIST and the departing holder deletes the successor's captured
+    // lock, leaving the successor and the third waiter both inside the critical
+    // section. Not deleting the captured file would not have fixed that — by
+    // then the successor's lock is already off-path and the third waiter
+    // already holds `lockPath`. The rename was the bug, not the `rmSync`.
+    //
+    // So: ask a question that does not require possession. `wx` created this
+    // file, and `fstat` on that same fd recorded its inode, so `ownIno` names
+    // an object no other process can be holding. If `lockPath` still resolves
+    // to it, it is ours and removing it is correct. If it resolves to anything
+    // else, a reclaimer replaced us and the ONLY correct action is to touch
+    // nothing at all — the successor keeps the very file it created, and the
+    // path is never vacated by a non-owner.
+    //
+    // RESIDUAL, stated rather than glossed: a reclaim landing between the
+    // `statSync` and the `rmSync` would still see us unlink a successor's lock.
+    // That window is two adjacent syscalls where the old one spanned a rename,
+    // a read and a write. POSIX has no unlink-if-inode primitive to close it
+    // outright, and reaching it at all requires the abandon door to have fired
+    // — which already means mutual exclusion was deliberately surrendered.
+    //
     // NOTHING in this block returns or throws, and that is a correctness
     // requirement rather than a style rule. A `return` inside a `finally` is
     // read as returning `T` in this generic function AND discards whatever
     // `body()` produced; a `throw` REPLACES the exception `body()` raised, so a
     // cleanup hiccup would erase the real approval failure the caller has to
-    // see. The old `rmSync(..., {force: true})` could not do either. Every
-    // failure below is therefore a diagnostic, and the WORST of them leaves the
-    // lock in place — which the staleness path already knows how to recover.
-    const releasePath = `${lockPath}.release.${process.pid}.${randomUUID()}`;
-    let captured = false;
+    // see. Every failure below is therefore a diagnostic, and the WORST of them
+    // leaves the lock in place — which the staleness path already recovers.
+    // BOTH identity and content must match, because they fail independently and
+    // the conjunction is the fail-safe direction — when either says "not yours",
+    // the answer is leave it alone, and a lock left standing is recovered by the
+    // staleness path while a lock wrongly removed is a second process in the
+    // critical section.
+    //
+    //  - the INODE catches replacement, which is what a real reclaim performs:
+    //    it renames the old lock to a private path and then creates a fresh one
+    //    with `wx`, so a successor's lock is ALWAYS a different inode. Content
+    //    alone cannot see this coming, because it has to take the file away to
+    //    read it.
+    //  - the CONTENT catches in-place mutation, which leaves the inode intact —
+    //    no code path here does that, but an operator with `echo > lock` does,
+    //    and the round-6 assertion this preserves was written against exactly
+    //    that shape.
+    //
+    // The read is second and conditional, so the ordinary release is one stat
+    // and one unlink; the extra syscall is paid only by a lock that is still
+    // ours by identity.
     try {
-      renameSync(lockPath, releasePath);
-      captured = true;
+      if (statSync(lockPath).ino === ownIno && readFileSync(lockPath, "utf8") === ownContent) {
+        rmSync(lockPath, { force: true });
+      }
+      // else: somebody else's now. Deliberately no `else` branch and no note —
+      // being reclaimed mid-body is a designed outcome of the abandon door, not
+      // an anomaly worth a line on every operator's stderr.
     } catch (e) {
-      // ENOENT is the ordinary case, not a fault: already reclaimed, or swept
-      // by hand. Nothing to release and nothing to restore — the successor, if
-      // any, owns its own file. Anything else leaves the lock where it is, so
-      // the run is recoverable by the same staleness path as a crashed holder.
+      // ENOENT is the ordinary case, not a fault: already reclaimed and
+      // released, or swept by hand. Nothing of ours is there. Anything else
+      // leaves the lock where it is, so the run stays recoverable by the same
+      // staleness path as a crashed holder's.
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
         noteOnStderr(
-          `approval lock release: could not claim ${lockPath} for removal (${(e as Error).message}); it will be reclaimed as stale\n`,
+          `approval lock release: could not release ${lockPath} (${(e as Error).message}); it will be reclaimed as stale\n`,
         );
       }
-    }
-    if (captured) {
-      const content = readFileSync(releasePath, "utf8");
-      if (content !== ownContent) {
-        // A successor's lock, captured by accident. Put it back — the
-        // alternative is a LIVE holder's lock stranded off-path while that
-        // holder believes it still holds one.
-        try {
-          writeFileSync(lockPath, content, { flag: "wx", mode: 0o600 });
-        } catch (restoreErr) {
-          if ((restoreErr as NodeJS.ErrnoException).code !== "EEXIST") {
-            noteOnStderr(
-              `approval lock release: failed to restore successor lock from ${releasePath} back to ${lockPath}; remove or restore it by hand: ${(restoreErr as Error).message}\n`,
-            );
-          }
-          // EEXIST: a newer holder has since taken the path — nothing to
-          // restore onto it, and overwriting would be the original bug again.
-        }
-      }
-      rmSync(releasePath, { force: true });
     }
   }
 }
@@ -440,11 +479,46 @@ export function expiredState(ext: ExtensionEntry | undefined, now: Date): string
   return now.getTime() > expiresAt ? "timed-out" : state;
 }
 
+/**
+ * The STRICT reader: a missing record throws. Used where the caller has already
+ * established that the run exists and absence is therefore a broken
+ * precondition, not a state — `submitDecision`'s compare-and-set and
+ * `pauseRun`'s re-read under the lock.
+ *
+ * D4/D7 NOTE — the asymmetry with `readApprovalIfPresent` below is DELIBERATE,
+ * and it was checked against the real CLI rather than reasoned about, because
+ * "two readers in one module with different ENOENT postures" reads accidental.
+ *
+ * The concern was that `fleet approve <typo>` would surface a raw
+ * `unreadable run record run-typo.json: ENOENT`. IT DOES NOT. A real
+ * subprocess against a genuinely absent run exits **4** with
+ * `{code: "run-not-found", message: "no run record for run-typo",
+ * remediation: "check the id (fleet status) — nothing was mutated"}`, because
+ * the verb block calls `assertRunExists` before it ever reaches here
+ * (scripts/fleet.ts, and see `tests/fleet/gate-verbs.test.ts`'s D7 case, which
+ * pins that exit code out of process so removing the guard goes red).
+ *
+ * So this throw is a BACKSTOP for a precondition the shipped caller
+ * guarantees, and loosening it would make things worse, not better: a missing
+ * record classified as `not-decidable` maps to exit **5** in the CLI, and 5
+ * means "a guard fired before anything was mutated" while 4 means "that run
+ * does not exist". Conflating them would answer the most ordinary operator
+ * error on this verb — a typo — with the wrong code, and would erase a
+ * distinction scripts/fleet.ts documents explicitly.
+ *
+ * The tolerant reader exists for the POLLERS, which is the real reason the two
+ * differ: `sweepExpired` and `awaitDecision` observe a record repeatedly over
+ * time, where absence is an ordinary observation rather than a caller error.
+ */
 function readApproval(store: RunRecordStore, runId: string): ExtensionEntry | undefined {
   return store.get(runId).extensions?.approval;
 }
 
-/** ENOENT ⇒ no such run, the `stampFanoutExtension` idiom. Everything else throws. */
+/**
+ * The TOLERANT reader, for callers that POLL. ENOENT ⇒ no such run, the
+ * `stampFanoutExtension` idiom. Everything else throws. See `readApproval`
+ * above for why the two postures differ on purpose.
+ */
 function readApprovalIfPresent(store: RunRecordStore, runId: string): ExtensionEntry | undefined | null {
   try {
     return readApproval(store, runId);

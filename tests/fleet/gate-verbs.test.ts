@@ -17,6 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
+import { hashToken } from "../../src/fleet/approvers.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { requestApproval } from "../../src/fleet/approval-gate.ts";
@@ -790,17 +791,15 @@ describe("fleet attach", () => {
     expect(printed).not.toHaveProperty("requestId");
   });
 
-  test("attach with NO --message at all is a usage refusal, never an empty steering line", async () => {
-    // `--message "   "` is covered above; the flag being ABSENT is the other
-    // half and takes a different route — the stdin read — which under a
-    // non-interactive fd 0 yields nothing and must land on the same refusal
-    // rather than queueing an empty directive.
-    withBox();
-    const s = streams();
-    const code = await run(["attach", RUN, "--driver", "fake", "--dir", dir], s.sink, { ...driver(), store }, s.errSink);
-    expect(code).toBe(2);
-    expect(envelopes(s.err)[0]?.message).toMatch(/message/i);
-  });
+  // NOTE: "attach with NO --message at all is a usage refusal" used to live
+  // here, in process. It could not: with the flag absent the CLI reads the REAL
+  // fd 0 (`Bun.stdin.stream()` at scripts/fleet.ts:741 — there is no seam), so
+  // the test's outcome depended on whatever stdin the person running `bun test`
+  // happened to have. Under a fd 0 that stays open with no data it blocked and
+  // died on bun's 5 s timeout; that is why it passed in one session's full run
+  // and failed in the next against identical source. It is now a real
+  // subprocess with a real empty pipe, in the D2 describe below where its
+  // `--message -` sibling already lives.
 
   test("an untyped throw past the existence check is exit 1", async () => {
     // attach's only route to exit 1, which the registry declares and nothing
@@ -1176,6 +1175,70 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
 
   const NOTE = "the value `-` reads the message from stdin";
 
+  /**
+   * D7 — a typo'd run id is the most ordinary operator error on this verb, and
+   * NOTHING pinned what an operator actually gets. The library reader
+   * (`readApproval`) throws a raw storage error on a missing record, and the
+   * deferred question was whether that reaches the operator. It does not: the
+   * verb block's `assertRunExists` classifies it first. Pinned OUT OF PROCESS
+   * because the property is the process's exit code, which an in-process call
+   * cannot observe.
+   *
+   * Verified as a genuine guard, not a tautology: deleting the
+   * `assertRunExists(probe, runIdArg)` call from the approve block turns this
+   * red — the absent run then lands on exit **2**, a usage/validation refusal,
+   * which tells an operator to check their flags when the flags were fine.
+   * Source restored and re-verified byte-identical afterwards.
+   *
+   * `--approver`/auth: the CLI defers reporting a missing run until AFTER
+   * authentication on purpose, so an unauthenticated caller cannot separate
+   * "no such run" (4) from "that run exists" (5) by exit code and enumerate
+   * run ids. That is why this test enrols a REAL approver with a REAL token on
+   * a REAL 0600 allowlist and pipes it on stdin — with a bad token the verb
+   * correctly answers 5 and would prove nothing about the absent-run path.
+   */
+  test("D7 — `fleet approve` on a run that does not exist is exit 4, naming the id", async () => {
+    const host = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-d7-host-"));
+    try {
+      const factory = path.join(host, ".factory");
+      fs.mkdirSync(factory, { mode: 0o700 });
+      fs.chmodSync(host, 0o700);
+      const salt = "d7salt";
+      const token = "d7-token-value-not-a-real-credential";
+      // `hashToken`, not a hand-rolled sha256: it is exported precisely so a
+      // fixture and the check cannot drift apart on the formula.
+      const hash = hashToken(salt, token);
+      const allowlist = path.join(factory, "approvers.json");
+      fs.writeFileSync(allowlist, JSON.stringify({ version: 1, approvers: { alice: { salt, hash } } }));
+      fs.chmodSync(allowlist, 0o600);
+
+      // `cwd: host` — the allowlist is read from `process.cwd()`, so this
+      // invocation must run from the host, not from the repo.
+      const cmd = `exec bun ${q(CLI)} ${["approve", "run-typo-d7", "--approver", "alice", "--dir", dir].map(q).join(" ")}`;
+      const proc = Bun.spawn(["sh", "-c", `printf %s ${q(token)} | ${cmd}`], { cwd: host, stdout: "pipe", stderr: "pipe" });
+      const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+
+      // 4, not 1 and not 5: "that run does not exist", the documented no-record
+      // code, distinct from "a guard fired before anything was mutated".
+      expect(code).toBe(4);
+      const refusal = envelopes([err]).find((e) => e.code !== undefined);
+      expect(refusal).toMatchObject({ code: "run-not-found" });
+      // The remediation NAMES what to do, and the message names the id — an
+      // operator who typed one character wrong can act on this without reading
+      // source. A raw `ENOENT` satisfies neither.
+      expect(String(refusal?.message)).toContain("run-typo-d7");
+      expect(String(refusal?.remediation)).toContain("fleet status");
+      // The raw storage error never surfaces.
+      expect(err).not.toContain("ENOENT");
+      expect(err).not.toContain("unreadable run record");
+      // Nothing was mutated: no record, and no lock left behind for the id.
+      expect(fs.existsSync(path.join(dir, "run-typo-d7.json"))).toBe(false);
+      expect(fs.existsSync(path.join(dir, "run-typo-d7.approval.lock"))).toBe(false);
+    } finally {
+      fs.rmSync(host, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("`fleet attach --help` tells an operator what `-` does", async () => {
     const { code, out } = await cli(["attach", "--help"]);
     expect(code).toBe(0);
@@ -1194,6 +1257,22 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
     const { code, err } = await cli(["attach", RUN, "--driver", "fake", "--dir", dir, "--message", "-"], "printf ''");
     expect(code).toBe(2);
     expect(err).toContain("attach requires a message");
+  }, 30_000);
+
+  test("attach with NO --message at all is a usage refusal, never an empty steering line", async () => {
+    // `--message "   "` is covered in the in-process block above; the flag being
+    // ABSENT is the other half and takes a different route — the stdin read —
+    // which on an empty pipe yields nothing and must land on the same refusal
+    // rather than queueing an empty directive.
+    //
+    // The pipe is EXPLICIT and empty rather than inherited. That is the whole
+    // repair: an inherited fd 0 that stays open with no data makes this read
+    // block, and a test that hangs looks like a product defect until the
+    // runner's timeout fires.
+    store.create(RUN);
+    const { code, err } = await cli(["attach", RUN, "--driver", "fake", "--dir", dir], "printf ''");
+    expect(code).toBe(2);
+    expect(err).toMatch(/message/i);
   }, 30_000);
 
   test("`--message -` sends what the PIPE contains, not the flag's value", async () => {

@@ -59,12 +59,16 @@ closes it to enterprise standard, updates this file, and hands off to the next.
 | D3 | GitNexus index stale + corrupted | tooling | A | ☑ |
 | D1 | `pause` gate event never emitted; `record_write_ms` absent | MED | A | ☑ |
 | D2 | `--message -` undeclared sentinel; `VerbFlag` cannot express it | MED | A | ☑ |
-| D4 | `src/pr/repos.ts` allowlist has NO dir-mode, ownership, isFile or containment check | **HIGH** | B | ☐ |
-| D7 | `submitDecision` raw ENOENT on a nonexistent run | LOW | B | ☐ |
+| D4 | `src/pr/repos.ts` allowlist has NO dir-mode, ownership, isFile or containment check | **HIGH** | B | ☑ |
+| D7 | `submitDecision` raw ENOENT on a nonexistent run | LOW | B | ☑ |
 | D5 | `FleetError.exitCode` typed `1\|2\|3\|4\|5` vs `report()`'s 1–6 | LOW | C | ☐ |
 | D6 | `listedKeyHashes()` discards `truncated` — key-leak check unsound | MED | C | ☐ |
 | D8 | AC1(b) teardown ordering is vacuous in the only shipped caller | spec | D | ☐ |
 | D9 | `hashToken` single-round sha256, no work factor | LOW | D | ☐ |
+| D10 | `approvers.ts` still has its own copy of the path guard D4 extracted | consistency | C | ☐ |
+
+**Status: 5 / 10 complete.** D10 is NEW, opened by D4 — see its Outcome block for why it
+could not be closed in the same session.
 
 ---
 
@@ -560,6 +564,94 @@ Real filesystem, real mode bits, real `mkdtemp` roots — no `fs` mocking:
       invocation against a correctly-provisioned allowlist, so the hardening is not
       proven only by its refusals.
 
+### Outcome — CLOSED 2026-08-29 (Session B) · commit `456d1b7` · **PR #169**
+
+All four guards shipped. Every acceptance box above is ticked, and the one the
+plan expected to be unprovable turned out to be provable.
+
+#### The branch-topology discovery that shaped the fix
+
+`src/pr/repos.ts` is **byte-identical on `dev` and on #150's branch**, so D4
+branched cleanly off `dev` — the HIGH fix reaches `dev` without waiting for
+#150, which is what "own branch, own PR" was for.
+
+But **`src/fleet/approvers.ts` does not exist on `dev`.** It is DF3.4 and
+arrives with #150. So the "second caller" that would earn the extraction is not
+on D4's base branch. Three options were weighed and the operator chose (b):
+
+- **(a)** guard inline in `repos.ts` — smallest diff, but knowingly ships the
+  duplication D4 is *about*, and makes the later unify "extract + convert both".
+- **(b) chosen** — extract to `src/providers/allowlist-path.ts`, `repos.ts`
+  delegates, `approvers.ts` adopts later (**D10**). The guard exists exactly
+  once from day one; the module carries one caller until #150 merges.
+- **(c)** stack the PR on #150 — cleanest end state, but blocks a HIGH
+  authorization fix behind a 59-file PR.
+
+Because of (b), the shared module's logic was lifted **verbatim** from
+round-6-hardened `approvers.ts` — including its refusal-code suffixes — so D10
+is a behaviour-preserving delegation rather than a rewrite. Codes are
+`${codePrefix}-path|-dir-mode|-owner|-unreadable|-mode`, which reproduces
+`approver-allowlist-*` exactly; those are pinned by
+`tests/fleet/approvers.test.ts` and must not move.
+
+#### What shipped
+
+- **`src/providers/allowlist-path.ts`** (new) — `readGuardedFile(hostRoot, file,
+  spec)`. Home is `src/providers/` because it is neutral: `src/pr/` importing
+  `src/fleet/`, or the reverse, is an edge between peers for a filesystem check
+  belonging to neither. A caller supplies only prose (`codePrefix`, `label`,
+  `defaultFile`, `contentHint`, `consequence`); **every threshold is fixed in
+  the callee so no caller can weaken one.** The BOM strip both callers had
+  independently moved here too.
+- **`src/pr/repos.ts`** — delegates. `precondition` stays `"allowlist"` on every
+  arm, so no downstream `switch` changed (`detect_changes`: **0 affected
+  processes**). The specific guard rides in `failingChecks`, the field that
+  already exists to name a failed check and is rendered by
+  `renderRefusalComment`.
+- The `isFile()`-before-mode ORDER is called out at the arm as load-bearing, so
+  a future tidy-up cannot reorder it back into the fifo hang.
+
+#### Verification — real filesystem, zero `fs` mocking
+
+`tests/providers/allowlist-path.test.ts` (21 cases) + 3 caller-level cases in
+`tests/pr/open-pr.test.ts`.
+
+- Real 0777 ancestor above a correct 0700 dir ⇒ refused, **offender named**, and
+  the innocent 0700 directory below it is asserted *not* named.
+- Real `mkfifo` ⇒ refused, proven inside a real 10 s wall-clock deadline **in a
+  subprocess**. A synchronous block cannot be raced in-process, and the exit
+  code (0, not a signal) is what distinguishes "refused" from "hung and shot".
+- Real absolute-path and real `../` escapes ⇒ refused. Plus a real
+  **prefix-sibling** directory (`<root>-evil`), the containment off-by-one a
+  `startsWith` without the trailing separator admits.
+- Real BOM and schema-invalid files ⇒ existing refusals still fire.
+- **Happy path**, plus a 0755/0750 deployment layout — the case that catches an
+  over-tight guard. Every refusal test would still pass if the guard refused
+  unconditionally.
+- Caller level: a group-writable ancestor refuses the PR with
+  `failingChecks: ["repo-allowlist-dir-mode"]`, a `chmod go-w` remediation, a
+  logged `securityEvent`, and **no ref on the bare remote**; and the refusal is
+  asserted **not** posted as an issue comment, so host paths and uids never
+  reach GitHub.
+
+#### The expected gap that was NOT a gap
+
+The plan said the foreign-owner arm was "very likely unprovable on a single-uid
+host". **It is provable, for real** — macOS ships service-account-owned
+directories with clean write bits (`/var/db/lockdown`, uid 213, mode 0701), so
+the refusal is exercised against a genuine third uid with no sudo and no
+fabricated uid. Root-owned-accepted is proven against a real root-owned
+directory and a real root-owned 0600 file. All three fixtures are discovered at
+runtime and `skipIf`-guarded, so another host degrades to a stated skip rather
+than a false green.
+
+#### HONEST GAP — the file-level foreign-owner arm
+
+No foreign-owned **regular file** at 0600 exists on this host, so that specific
+arm is proven only through the **directory** arm. Both evaluate the identical
+`ownedElsewhere` predicate, so the logic is covered; the file-level call site is
+not independently exercised. Not faked, not silently skipped — written down.
+
 ---
 
 ## D7 — `submitDecision` throws a raw storage error on a nonexistent run
@@ -594,6 +686,69 @@ comment; the asymmetry looks accidental.
 
 Real store on a real temp dir with a genuinely absent record; real `bun scripts/fleet.ts approve`
 subprocess asserting the real exit code and the real stderr text.
+
+### Outcome — CLOSED 2026-08-29 (Session B) · lands on PR #150
+
+**Decision: the throw is CORRECT and the asymmetry is INTENTIONAL. No behaviour
+changed.** Taken on evidence, not on reading — the premise this item rests on is
+false.
+
+#### The premise was wrong, and a real subprocess is what settled it
+
+The item states `fleet approve --run <typo>` surfaces
+`unreadable run record run-typo.json: ENOENT`. **It does not.** A real
+invocation, real 0600 allowlist, real token on a real pipe:
+
+```
+$ printf %s "$TOKEN" | bun scripts/fleet.ts approve run-typo --approver alice --dir <store>
+{"code":"run-not-found","message":"no run record for run-typo",
+ "remediation":"check the id (fleet status) — nothing was mutated"}
+EXIT=4
+```
+
+Exit **4**, the documented no-record code, with a remediation naming the id.
+The verb block calls `assertRunExists` **before** `submitDecision` is reached,
+so the library throw is a backstop for a precondition the shipped caller already
+guarantees. Round 6 added that guard; this item was filed from reading
+`submitDecision` in isolation.
+
+#### Why classifying it would have made things WORSE
+
+`not-decidable` maps to exit **5** in the CLI. 5 means "a guard fired before
+anything was mutated"; 4 means "that run does not exist" — a distinction
+`scripts/fleet.ts` documents explicitly. Loosening `readApproval` would answer
+the most ordinary operator error on this verb, a typo, with the wrong code.
+
+The real reason the two readers differ is the one nobody wrote down: the
+tolerant reader exists for the **pollers**. `sweepExpired` and `awaitDecision`
+observe a record repeatedly over time, where absence is an ordinary observation.
+`submitDecision` performs one compare-and-set against a record the caller named,
+where absence is a broken precondition.
+
+#### What shipped
+
+- **`src/fleet/approval-gate.ts`** — the reasoning above now sits on
+  `readApproval` and `readApprovalIfPresent`, with the real exit-4 envelope
+  quoted, so the next reader does not re-open this. **Comment-only; zero
+  non-comment lines changed** in either function.
+- **`tests/fleet/gate-verbs.test.ts`** — the gap round 6 actually left. It
+  pinned the *library* throw; **nothing pinned what an operator gets.** A real
+  `fleet approve` subprocess against a genuinely absent run now asserts exit 4,
+  `code: "run-not-found"`, the id in the message, `fleet status` in the
+  remediation, that `ENOENT`/`unreadable run record` never appear, and that
+  neither a record nor a lock is left behind.
+  - **Negative control run:** deleting `assertRunExists(probe, runIdArg)` from
+    the approve block turns it red — the absent run lands on exit **2**, a
+    usage refusal telling an operator to check flags that were fine. Source
+    restored and re-verified byte-identical.
+  - The test enrols a REAL approver with a REAL token on a REAL 0600 allowlist,
+    because the CLI defers reporting a missing run until after authentication on
+    purpose (so exit codes cannot enumerate run ids). With a bad token the verb
+    correctly answers 5 and would prove nothing.
+  - `hashToken` is used for the fixture rather than a hand-rolled sha256 — it is
+    exported precisely so a fixture and the check cannot drift on the formula.
+- The round-6 pin in `tests/fleet/approval-gate.test.ts` keeps asserting the
+  throw AND the lock release, with a comment pointing at the CLI-level proof.
 
 ---
 
@@ -757,6 +912,117 @@ Real subprocess `fleet approve` end-to-end with a real token over real stdin.
 
 ---
 
+## D10 — `approvers.ts` still carries its own copy of the guard D4 extracted
+
+**Severity:** consistency (the divergence D4 was filed for, one merge away from
+recurring) · **Session:** C or later · **Opened by:** D4, Session B
+
+### What is wrong
+
+D4 put the shared path guard in `src/providers/allowlist-path.ts` and pointed
+`src/pr/repos.ts` at it. `src/fleet/approvers.ts` still has its own inline copy,
+because it does not exist on `dev` — it arrives with PR #150 — so it could not be
+converted on D4's branch. Until it is, there are two copies again, which is the
+precise condition D4 exists to end.
+
+### Preconditions — do NOT start before both are true
+
+- [ ] **PR #169 (D4) is merged to `dev`**, so `src/providers/allowlist-path.ts`
+      exists there.
+- [ ] **PR #150 is merged to `dev`**, or `dev` has been merged into #150's
+      branch, so both files sit in one tree.
+
+### Acceptance criteria
+
+- [ ] `authenticateApprover` delegates to `readGuardedFile` with
+      `codePrefix: "approver-allowlist"`, `label: "approver allowlist"`,
+      `defaultFile: DEFAULT_APPROVERS_FILE`, `contentHint: "mapping each
+      approverId to its {salt, hash}"`, `consequence: "every decision is
+      refused"`.
+- [ ] **Every existing refusal CODE is unchanged.** `tests/fleet/approvers.test.ts`
+      pins `approver-allowlist-{unreadable,mode,dir-mode,owner,path,invalid}`;
+      the first five come from the shared callee's suffixes and the sixth stays
+      in `approvers.ts` (parse is the caller's, only the caller knows the schema).
+      **If any of those five change, the delegation is wrong — do not update the
+      test to match.**
+- [ ] The guards inside `approvers.ts` are DELETED, not left as a second layer.
+      Two guards that must agree are the same defect one level down.
+- [ ] `authenticateApprover`'s own arms — empty-id, unknown-approver with the
+      case-insensitive near-match hint, `constantTimeEqual` — are untouched.
+      They are not path guards and do not belong in the shared callee.
+
+### Known cosmetic drift, already accepted
+
+The shared callee emits ONE `consequence` clause where `approvers.ts` had two
+near-identical variants ("with no allowlist…" vs "with no readable allowlist…").
+Nothing pins those strings — only `not a regular file` is asserted, and it is
+preserved verbatim. Do not add a second spec field to reproduce the variance.
+
+### Verification (real, no fakes)
+
+`bun test tests/fleet/approvers.test.ts` must go green with **no test edits**.
+That is the whole proof: the suite was written against the pre-extraction
+behaviour, so an unedited green run is what makes this a behaviour-preserving
+delegation rather than a rewrite. If a test needs changing, stop and find out why.
+
+---
+
+## The approval-lock release — a CodeRabbit finding, fixed in Session B
+
+Not a D-item; filed by CodeRabbit at 11:26:46Z on 2026-08-29 against `8019611`,
+which is Session A's own follow-up round. Triaged first, per the session brief.
+
+**Finding CONFIRMED. Its proposed remedy REJECTED, in writing.**
+
+CodeRabbit's headline was "do not discard a captured successor lock after
+`EEXIST`". That does not fix the stated failure: by the time the `EEXIST` branch
+runs, the successor's lock is already off-path and the third waiter already
+holds `lockPath`. Deleting or keeping the captured file changes only whether a
+stale `.release.*` file is littered.
+
+**The root cause is one line earlier.** The release did
+`renameSync(lockPath, releasePath)` **unconditionally** and only then looked at
+whose bytes it had captured. That vacates `lockPath` for the duration of a
+rename plus a read — and *that vacancy* is what lets a third waiter in.
+
+**Fix: fence on IDENTITY, and never take the file away to ask.** Acquire now
+creates the lock with `openSync(lockPath, "wx")` and records `fstatSync(fd).ino`
+— the inode of the file this call created, measured on its own fd, so no
+replacement can be measured instead. Release removes `lockPath` only when it
+still resolves to that inode **and** still carries this acquisition's content.
+Otherwise it touches nothing. Net **deletion** of the capture/restore dance.
+
+Both checks are required because they fail independently, and the conjunction is
+the fail-safe direction: the inode catches replacement (a real reclaim renames
+the old lock away and creates a fresh one, so a successor is ALWAYS a new
+inode), the content catches in-place mutation (which preserves the inode — no
+code path does it, but `echo > lock` does, and the round-6 assertion was written
+against exactly that shape).
+
+**Residual, stated not glossed:** a reclaim landing between the `statSync` and
+the `rmSync` would still see a successor's lock unlinked. That window is two
+adjacent syscalls where the old one spanned a rename, a read and a write. POSIX
+has no unlink-if-inode primitive to close it outright, and reaching it requires
+the abandon door to have fired — which already means mutual exclusion was
+deliberately surrendered.
+
+**Proven RED first.** The EEXIST interleaving needs process scheduling to
+reproduce, so the test pins its root fact instead, which is deterministic:
+identity. `the release never TOUCHES a successor's lock — same inode, not merely
+same bytes` failed against the pre-fix release with
+`Expected: 359808228, Received: 359808229` — the successor's lock really was
+destroyed and recreated even on the path that "worked". A release that never
+removes a file it does not own cannot vacate the path, so pinning the inode
+pins the whole class.
+
+**A latent test defect the round-6 test surfaced, and the lesson.** The round-6
+test simulates a reclaim with an in-place overwrite, which keeps the inode — so
+the first version of the fix turned it red. The simulation, not the fix, was
+unfaithful: a real reclaim always produces a new inode. That is what drove the
+conjunction rather than deleting an inconvenient assertion to fit the change.
+
+---
+
 ## Session handoff protocol
 
 Every session ends by doing all five, in order:
@@ -855,6 +1121,261 @@ Verified against `git diff`, not inferred from the tool's labels:
   the non-comment diff shows zero changes in any of them.
 - `src/fleet/verbs.ts:VerbEntry`, `listVerbs`, `renderHelp` — the additive `note`.
 
+
+---
+
+## Session B — gates
+
+Two commits, on two branches, because D4 is a HIGH authorization finding on a
+different subsystem than #150 and had to reach `dev` independently.
+
+| Gate | D4 — `456d1b7` on `feature/df4-allowlist-path-guards` (PR #169 → dev) | D7 + lock — on `feature/df3-4-approval-gate-attach-steering` (PR #150) |
+|------|------|------|
+| `bun test` (full) | **3853 pass / 8 skip / 19 todo / 0 fail**, 16 346 assertions, 3880 tests / 129 files, 587.7 s | **4122 pass / 8 skip / 20 todo / 1 fail**, 4151 tests / 133 files, 596.8 s |
+| `bunx tsc --noEmit` | **0 errors** | **0 errors** |
+| `bunx biome check src/ scripts/ tests/` | **259 files, no fixes applied** | **266 files, no fixes applied** |
+| `detect_changes({scope:"all"})` | 3 symbols / 3 files / **low** / **0 affected processes** | 11 symbols / 4 files / `high` aggregate / 10 affected processes — see below |
+
+### The one failure is the SAME pre-existing one Session A documented
+
+`tests/fleet/cli.test.ts` → `a fleet-busy race refusal creates NO loser cost
+ledger (INV-2: the money file follows admission)`, timing out at its own 20 s
+bound. Verified, not assumed:
+
+- `bun test tests/fleet/cli.test.ts` **with** this session's diff: **155 pass / 0 fail**.
+- `git stash push src/ scripts/ tests/`, same file on pristine `8019611`:
+  **155 pass / 0 fail**. Then `git stash pop`.
+
+So it reproduces **only under full-suite contention**, and behaves identically
+with and without this session's diff. Session A proved the same test fails under
+full-suite conditions on pristine `24632ed`. Third distinct symptom of issue
+#138; not fixed here and not hidden.
+
+### A SECOND failure appeared and was FIXED, not excused
+
+The first full run on #150's branch also failed `attach with NO --message at all
+is a usage refusal`. Proven pre-existing at `8019611` the same way (identical
+5003 ms timeout on a stashed tree), and it is **a latent test defect**, not a
+product fault: it called `run()` in process with the flag absent, which makes the
+CLI read the REAL fd 0 (`Bun.stdin.stream()`, `scripts/fleet.ts:741` — there is
+no seam). Its outcome therefore depended on whatever stdin the person running
+`bun test` happened to have; under a fd 0 that stays open with no data it blocked
+and died on bun's 5 s timeout. **That is why it passed in Session A's full run
+and failed here against identical source.** It is now a real subprocess with a
+real empty pipe, in the `D2 —` describe where its `--message -` sibling lives.
+`gate-verbs.test.ts`: 68 pass / 0 fail, and the file dropped 6.34 s → 1.46 s.
+
+### Blast radius, symbol by symbol — verified against `git diff`, not the labels
+
+**D4** — `resolveRepoEntry` and `refuse` genuinely changed.
+`DEFAULT_REPOS_FILE` is reported `touched` from **adjacency only**: its
+declaration is byte-identical and the new spec const simply sits below it. New
+files carry no prior symbols. `0 affected processes` is the AC's "downstream
+must not need a `switch` update", measured rather than asserted.
+
+**D7 + lock** — the aggregate `high` is misleading and the non-comment diff
+proves it. Stripping comments, **every changed line is inside
+`withApprovalLock`** plus one import:
+
+- `withApprovalLock` — genuinely changed: fd-based create recording `ownIno`,
+  and a release that fences on inode + content. Net deletion.
+- `readApproval`, `readApprovalIfPresent` — **zero non-comment lines changed.**
+  All 10 affected processes are driven by these two, so the `high` grade is a
+  statement about where they SIT (the `submitDecision`/`awaitDecision` paths),
+  not about any behaviour change. Same caveat Session A recorded.
+- `nowOf` (×2), `state`, `expiresAt`, `capText`, `expiredState`,
+  `requestApproval`, `GateDeps` — line-offset shift only; not one appears in the
+  non-comment diff.
+
+`impact({target:"resolveRepoEntry"})` **LOW**, 7 impacted / 2 direct.
+`impact({target:"withApprovalLock"})` **LOW**, 6 impacted / 3 direct — signature
+unchanged, internals only. No HIGH or CRITICAL to warn on.
+
+### Also landed: a rule so a 10-minute suite is never run blind again
+
+`bun test` output must be captured to a file, with the CR/ANSI strip a raw bun
+log silently needs (a plain `grep '(fail)'` over one matches nothing and reads as
+"no failures"). This cost a full re-run in this session. **`AGENTS.md` had
+drifted to a strict subset of `CLAUDE.md`** — missing the branch convention and
+the live-e2e pointer as well — and is now byte-identical rather than a second,
+staler source of truth.
+
+### No live tier was run
+
+Neither item needs a box: D4 is a filesystem authorization guard and D7 is a CLI
+exit code. Zero spend, no keys minted, no boxes provisioned. `.sandbox/fleet.lock`
+checked and absent before the suite runs.
+
+---
+
+## Handoff — Session C
+
+Copy the block below into a fresh conversation.
+
+---
+
+Work the QDS-Factory DF3.4 deferred-remediation backlog, **Session C**.
+
+**READ FIRST, IN THIS ORDER**
+
+1. `_bmad-output/plans/2026-08-29-df3-4-deferred-remediation.md` — this tracking
+   document, the single source of truth. Read ALL of it, including Sessions A
+   and B's five `### Outcome` blocks. Three rulings there you will be asked to
+   apply again: when a shared callee is earned (D1's `boundedEcho`, D4's
+   `readGuardedFile`), what "additive" must mean when another story compares
+   against a shape (D2), and **that a deferred item's stated premise may simply
+   be false — D7's was, and only a real subprocess revealed it.**
+2. `.claude/skills/qds-live-e2e/SKILL.md` — **mandatory**, because D6 ends in a
+   live round against the real OpenRouter account. Gotcha #4 (leaked
+   `.sandbox/fleet.lock`) and #5 (suite-under-load flakes) have now cost time in
+   three consecutive sessions.
+3. `src/providers/credentials.ts:104-106` — the `KeyApi` contract D6 says is
+   being violated. Read the contract before reading the violation.
+4. `tests/fleet/verbs.test.ts`'s `ONLY_REACHABLE_ELSEWHERE` before touching D5.
+   The goal is to SHRINK it, not duplicate it.
+
+**SITUATION**
+
+Two PRs are open and they are independent:
+
+- **#169** (`feature/df4-allowlist-path-guards` → `dev`) — D4, the HIGH
+  authorization fix. Commit `456d1b7`.
+- **#150** (`feature/df3-4-approval-gate-attach-steering` → `dev`) — DF3.4 plus
+  Sessions A and B's work.
+
+Backlog is **5 / 10**. D3, D1, D2 closed in Session A; D4, D7 in Session B; D10
+is new, opened by D4.
+
+**GitNexus is reliable** — `impact()` resolves this branch's symbols to their
+real files, so ground rule 6 is in force: run it, do not fall back to grep.
+Caveat unchanged: the index is BM25-only on this host (no `--embeddings`, issue
+#74), so `query()` can miss symbol-name-only hits; `impact`/`context`/
+`detect_changes` are unaffected.
+
+**Before you start:** CodeRabbit was asked for a full re-review of both #169 and
+#150. Check `gh pr view 169 --comments` and `gh pr view 150 --comments` and
+triage anything filed against Session B's diff first. Note the shape Session B
+used: a finding can be **real while its suggested remedy is wrong** — the lock
+finding was exactly that. Verify every finding against source, fix the real ones,
+and dismiss the rest in writing with the source cited.
+
+**SESSION C SCOPE — D5 first (it is smaller and D6 does not depend on it), then D6.**
+
+- **D5 — LOW, one token with a wide read surface.** `FleetError.exitCode` is
+  typed `1|2|3|4|5` (`src/fleet/dispatch.ts:207`) while `report()` accepts and
+  documents 1–6. That mismatch is WHY round 6 had to express the attach append
+  failure as a returned result rather than a typed throw. **The value is in the
+  audit, not the edit** — widen to `1|2|3|4|5|6`, then read every `FleetError`
+  construction and every `report()` arm. Do NOT reflexively convert
+  `attachToRun`'s `send-failed` result into a throw: its `reason` field is what
+  the remediation branches on, and a bare exit code loses it.
+
+- **D6 — MED, test soundness on a real-money path.** `listedKeyHashes()` in
+  `tests/fleet/e2e/live-harness.ts` calls `keyApi.listAllKeys(10)`. The `10` is
+  **pages, not entries**, and `listedKeyHashes` **discards `truncated`**. So on
+  a large account both the leak baseline and the delta are computed over a
+  partial population and a leaked key can hide in the unlisted remainder. Round
+  6 made the leak delta assert, which means it now *looks* authoritative while
+  still being unsound at scale.
+  - A truncated listing must **fail loudly**, not under-report. A key-leak check
+    that cannot see the whole population must refuse to render a verdict —
+    silence means "we did not look", which is the opposite of what an empty
+    `leaked` array claims.
+  - Audit for the same discard elsewhere: `grep -rn "listAllKeys" tests/ src/`.
+  - **Session A's live evidence is implicated.** Its TIER-1 round asserts
+    `leaked: []` from this very function, and every green leak check in
+    `_bmad-output/evidence/df3-e2e/` shares that ceiling. Say so in the outcome
+    block — whether those greens were sound depends on the real account's page
+    count, which D6's live round is what actually measures.
+
+**NON-NEGOTIABLE STANDARDS**
+
+- Enterprise-grade, long-term-correct. No band-aids. No abstraction without a
+  second caller — but when there IS one, the logic goes in the shared callee.
+- **Root-cause, not symptom.** Check every caller before editing a function.
+- **NO FAKES IN THE PROOF.** D6's substrate is the real OpenRouter API against
+  the real account. A stubbed `truncated: true` proves the assertion fires, not
+  that the API ever produces it.
+- **Honest gaps beat fake greens.** Session A wrote one for
+  `teardown_at_pause_ms`; Session B wrote one for the file-level foreign-owner
+  arm. Do the same.
+- **Capture `bun test` output to a file** — `CLAUDE.md` now requires it. A bare
+  run whose failure names scroll off costs a second 10-minute run, and a plain
+  `grep '(fail)'` over a raw bun log silently matches nothing.
+- Impact analysis before editing any exported symbol; warn on HIGH/CRITICAL.
+- Gates before any commit: full `bun test`, `bunx tsc --noEmit`,
+  `bunx biome check src/ scripts/ tests/`, `detect_changes` with the blast
+  radius reviewed **symbol by symbol against `git diff`** — many symbols report
+  `touched` from line-offset shift or adjacency alone, and comment-only edits
+  can drive a `high` aggregate over ten processes for zero behaviour change
+  (Session B's D7 is the worked example).
+
+**THE ONE KNOWN PRE-EXISTING FAILURE**
+
+`tests/fleet/cli.test.ts` → `a fleet-busy race refusal creates NO loser cost
+ledger (INV-2: the money file follows admission)`, timing out at its own 20 s
+bound, under full-suite contention only. It passes 155/155 when the file runs
+alone, with or without a diff. If you see **exactly** that one, verify it the
+same way (`git stash push src/ scripts/ tests/`, run the file, pop) and report
+it. **Any other failure is yours** — and note Session B's second failure looked
+pre-existing too and turned out to be a fixable environment-coupled test defect,
+so "pre-existing" is a starting point for the investigation, not its conclusion.
+
+**VERIFICATION PLAN (real, no fakes)**
+
+- **D5:** real subprocess invocations asserting real exit codes on the paths that
+  produce each of 1–6. Shrink `ONLY_REACHABLE_ELSEWHERE` by the codes you can now
+  probe directly; whatever remains stays bound to a named behavioural case.
+- **D6:** real OpenRouter API, real account. If the account has fewer than 10
+  pages (likely), prove the guard by **lowering the bound** — `listAllKeys(1)`
+  against an account with more than one page produces a **real** truncated
+  response from the real API, and the assertion must fail loudly. That is a real
+  proof, not a stubbed one. Then restore the production bound and confirm green.
+  Fold into a TIER-1 round; zero model spend, boxes only.
+- Spend protocol applies to any TIER ≥ 2: print the worst-case estimate, get an
+  explicit operator "go", revoke every key in `finally`, destroy every box in
+  `finally`, assert `final-ls` is empty.
+
+**SESSION C ENDS WITH**
+
+1. This tracking doc updated: status board ticked, an `### Outcome` block under
+   D5 and D6 with the commit SHA, verbatim gate results, evidence paths, and
+   every honest gap.
+2. Full gate green, commit naming which D-items closed, ending with
+   `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`.
+3. Push, update the PR, post a summary comment, request CodeRabbit re-review.
+4. A `## Handoff — Session D` section (D8 + D9) appended with this same rigor.
+
+**WHAT SESSIONS A AND B LEARNED THAT CHANGES LATER ITEMS**
+
+- **D10 is blocked on merges, not on work.** It cannot start until #169 AND #150
+  are both on `dev` (or `dev` is merged into #150's branch). Its acceptance test
+  is that `tests/fleet/approvers.test.ts` goes green with **no test edits** — if
+  a test needs changing, the delegation is wrong. If both PRs land during Session
+  C, D10 is a good closer for it.
+- **D8 is partly pre-decided.** `teardown_at_pause_ms` is emitted by `emitPause`
+  only when `deps.teardown` actually ran, and is deliberately ABSENT (not `0`)
+  otherwise, because the one shipped caller (`recordApprovalPort`,
+  `src/reverify/runner.ts:406`) passes no seam. Live evidence shows it at 8454 ms
+  when a real seam IS passed. That is the empirical half of D8's "does ANY caller
+  reach the gate with a live box": the live TEST does, no shipped caller does.
+- **D9 gets a new neighbour.** `hashToken` is now also used by
+  `tests/fleet/gate-verbs.test.ts`'s D7 fixture. If D9 changes the formula, that
+  fixture follows automatically — which is the point of using the exported
+  function — but the versioned-entry migration in D9's option (2) must account
+  for it.
+- **`dispatchRequestId` is the gate-event join key**, on every gate event. Two
+  producers: `emitPause` (`src/fleet/approval-gate.ts`) and `gateEvent`
+  (`scripts/fleet.ts`). `tests/fleet/gate-verbs.test.ts`'s `gateEvent union ↔
+  producers` goes red if a declared member loses its producer.
+- **`boundedEcho`/`MAX_ECHO` live in `src/providers/step-log.ts`**, and the
+  shared path guard lives in `src/providers/allowlist-path.ts`. `src/providers/`
+  is the established neutral home when two peer subsystems need the same logic —
+  reach for it before coupling `src/pr/` to `src/fleet/` in either direction.
+- **An in-process test that lets the CLI read fd 0 is broken by construction.**
+  `scripts/fleet.ts:741` reads `Bun.stdin.stream()` with no seam, so any such
+  test depends on the ambient stdin of whoever ran `bun test`. Use the `cli()`
+  subprocess helper in `tests/fleet/gate-verbs.test.ts` with an explicit pipe.
 
 ---
 
