@@ -813,8 +813,8 @@ async function withAdmissionSingleFlight<T>(section: () => Promise<T>): Promise<
 class DispatchContext {
 
   constructor(
-    private readonly now: () => number,
-    private readonly wallStart: number,
+    readonly now: () => number,
+    readonly wallStart: number,
     private readonly timeoutMs: number,
     private readonly dispatchLog: string,
     private readonly timings: Record<string, number>,
@@ -828,6 +828,10 @@ class DispatchContext {
   // `port-invalid`, `invalid-brief`) would stamp an exit-2-worthy string onto
   // the correlation key of an AC4 evidence row. Named `unresolved` until the
   // shape check has passed, like every other fact this context holds.
+  /** Record one step's wall time — the ack line and every refusal report these. */
+  phase(name: string, ms: number): void {
+    this.timings[name] = ms;
+  }
   requestId: string | null = null;
   repoSlug: string | null = null;
   issueId: number | null = null;
@@ -1505,6 +1509,192 @@ function loadManifestAndRoster(
   return { loaded, rosterPath };
 }
 
+/**
+ * Step 7 — mint the provider key and deliver it into the box (INV-4: the
+ * plaintext exists in the mint return and nowhere else). Lifted out of
+ * `dispatch()` verbatim (F003).
+ *
+ * Returns the ceiling the box is actually STAMPED with: the admitted figure,
+ * or the provider's own where it minted less. Never more (see AC9 below).
+ */
+async function mintAndDeliverKey(
+  ctx: DispatchContext,
+  deps: DispatchDeps,
+  args: {
+    requestId: string;
+    runId: string;
+    vm: Awaited<ReturnType<typeof provisionAdmittedRun>>["vm"];
+    effectiveCeilingMicros: number;
+  },
+): Promise<number> {
+  const { requestId, runId, vm, effectiveCeilingMicros } = args;
+  // ── 7. key (INV-4: plaintext exists in the mint return and nowhere else) ─
+  const tMint = ctx.now();
+  const credEnvFile = envFileFor(deps.driver);
+  // Its OWN catch, with a FIXED message. `deliverRunKey` writes the plaintext
+  // key into the box through `driver.exec`, and an exec wrapper that reports a
+  // failure by including its argv — the ordinary way such a wrapper reports —
+  // puts that key in the thrown message. The generic catch below interpolates
+  // a caught message into `dispatch failed after the box was created: …`,
+  // which is written to the dispatch log AND the structured line AND the
+  // returned FleetError. `redact` now carries `redactSecrets`, so a bare token
+  // no longer survives those three — but this catch stays: defence in depth
+  // for an issuer whose prefix is not on the list and whose token is too short
+  // for the long-token arm. INV-4 says plaintext exists in the mint return and
+  // nowhere else, so the provider's free text never reaches a sink here — only
+  // its `code`, in the payload.
+  try {
+    const { key } = await ctx.within(
+      "mint",
+      () =>
+        mintRunKey(
+          {
+            keyApi: deps.keyApi,
+            driver: deps.driver,
+            store: deps.store,
+            requestId,
+            capMicroUsd: effectiveCeilingMicros,
+            ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
+          },
+          runId,
+        ),
+      // An ABANDONED mint that lands anyway is a live provider key spending
+      // against this issue's cap, and `within` cannot cancel it. The refusal
+      // has already gone out naming nothing about it, so this line is the only
+      // operator-facing pointer that exists until the record write inside
+      // `mintRunKey` catches up.
+      //
+      // `hash`, never `key`: INV-4 says the plaintext exists in the mint
+      // return and nowhere else, and this is a log sink. The hash is the
+      // provider-side IDENTIFIER (credentials.ts persists it in the plaintext
+      // record and keeps it through redaction for exactly this reason) and it
+      // is charset-checked before `mintRunKey` returns, so it cannot carry
+      // anything into a line an operator pastes. The CAP goes with it because
+      // "a key is live" and "it can spend N µ$" are different sizes of
+      // incident.
+      (minted) => ({ keyHash: minted.hash, capMicroUsd: effectiveCeilingMicros }),
+    );
+    await ctx.within(
+      "deliver",
+      () =>
+        deliverRunKey(
+          {
+            keyApi: deps.keyApi,
+            driver: deps.driver,
+            store: deps.store,
+            requestId,
+            ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
+          },
+          vm.name,
+          key,
+        ),
+      // Resolves `void`; what a late one means is that the key reached the box
+      // AFTER the operator was told the dispatch failed. The box is the fact.
+      () => ({ vmName: vm.name, keyDelivered: true }),
+    );
+  } catch (e) {
+    // Rethrow only when `refuse` already logged this one — a FleetError that
+    // did NOT pass through `refuse` (a seam throwing one directly) would
+    // otherwise escape with no dispatch-log entry, no structured line and no
+    // payload: exactly the bare-exit-1 treatment this catch exists to deny.
+    if (alreadyRefused(e)) throw e;
+    throw ctx.refuse(
+      1,
+      e instanceof FleetError ? "key-delivery-refused" : "key-delivery-failed",
+      e instanceof FleetError
+        ? `${e.message} — during key mint or delivery for run ${runId}`
+        : `key mint or delivery failed for run ${runId}`,
+      e instanceof FleetError && typeof e.remediation === "string"
+        ? e.remediation
+        : "the run record is OPEN and the box is ALIVE (INV-5) — inspect it, then tear it down",
+      {
+        ...(e instanceof FleetError && e.code !== undefined ? { code: e.code } : {}),
+        ...providerCodePayload(e),
+      },
+    );
+  }
+  ctx.phase("mint_ms", ctx.now() - tMint);
+
+  // AC9: what reaches the box is the cap the provider actually MINTED, not the
+  // one that was requested. `mintRunKey` refuses a non-positive or non-finite
+  // `limitUsd` outright and persists `usdToMicros(res.limitUsd)` on the
+  // record, so by the time the fill step runs the record holds the true
+  // figure — while `pipeline.yaml` and `run-context.json` were carrying the
+  // REQUEST. A manifest that names a ceiling the key does not carry is a run
+  // that either dies mid-phase against a provider limit nothing told it about,
+  // or (if the provider minted MORE) advertises headroom the ledger never
+  // reserved.
+  //
+  // DOWNWARD ONLY. The paragraph above names the over-mint as a defect ("if
+  // the provider minted MORE, advertises headroom the ledger never reserved")
+  // and the code then did exactly that: `credentials.ts` persisted
+  // `usdToMicros(res.limitUsd)` — the PROVIDER's own answer — checking only
+  // that it is non-null, finite and positive, and this read adopted it
+  // whenever it was a positive safe integer, with no upper bound. Since F004
+  // `mintRunKey` REFUSES an over-granted ceiling at the mint itself, so the
+  // `min` below is defence in depth: it still bounds records written before
+  // that refusal existed, and any path that reaches this read with one. A key API
+  // that rounds up, applies a plan floor, is misconfigured, or is answering
+  // for someone else authorized the box to spend above the ceiling the ledger
+  // reserved against the issue cap, on the strength of its own reply. The
+  // admitted ceiling is the only figure this factory has any claim to, so it
+  // is the ceiling: `min` in one direction, never `max` in the other.
+  //
+  // Falls back to the requested figure if the record cannot be read or holds
+  // no usable limit: reading it back is diagnosis, and a failure here must not
+  // become the run's failure when the key is already live and delivered.
+  let persistedCeilingMicros: number | undefined;
+  try {
+    const persisted = deps.store.get(runId).limitMicroUsd;
+    if (Number.isSafeInteger(persisted) && (persisted as number) > 0) {
+      persistedCeilingMicros = persisted as number;
+    }
+  } catch {
+    // see above — the requested ceiling stays the stamp
+  }
+  const mintedCeilingMicros =
+    persistedCeilingMicros === undefined
+      ? effectiveCeilingMicros
+      : Math.min(effectiveCeilingMicros, persistedCeilingMicros);
+  // An over-mint is a MONEY event, not a diagnostic. It used to log
+  // `status:"ok"` / `exitStatus:"success"` in both directions, so the one
+  // direction that means "the provider tried to hand this run more headroom
+  // than it was admitted for" never reached error-based alerting. Under-mint
+  // stays informational: the box gets less than it asked for and dies against
+  // a limit it was told about, which is the manifest stamp doing its job.
+  const overMinted =
+    persistedCeilingMicros !== undefined && persistedCeilingMicros > effectiveCeilingMicros;
+  if (overMinted || mintedCeilingMicros !== effectiveCeilingMicros) {
+    try {
+      log({
+        requestId,
+        operation: "fleet.dispatch",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: ctx.now() - ctx.wallStart,
+        durationMs: ctx.now() - ctx.wallStart,
+        status: overMinted ? "error" : "ok",
+        error: {
+          code: overMinted ? "mint-cap-over-request" : "mint-cap-differs",
+          message: overMinted
+            ? `provider minted ${persistedCeilingMicros} µ$ ABOVE the admitted request of ${effectiveCeilingMicros} µ$ — the box is stamped with the admitted figure and the excess is not honoured`
+            : `provider minted ${mintedCeilingMicros} µ$ against a request of ${effectiveCeilingMicros} µ$ — the box is stamped with the minted figure`,
+        },
+        runId,
+        verb: "dispatch",
+        phase: "minted",
+        // The key itself is live at the provider's figure whatever this module
+        // stamps, so an over-mint is a real condition someone has to look at —
+        // "transient" is the retry classification, not a claim it is harmless.
+        exitStatus: (overMinted ? "transient" : "success") as ExitStatus,
+      });
+    } catch {
+      // see `refuse` — a sink failure is never the run's failure
+    }
+  }
+  return mintedCeilingMicros;
+}
+
 export async function dispatch(
   brief: unknown,
   deps: DispatchDeps,
@@ -1538,11 +1728,9 @@ export async function dispatch(
       join(dirname(logDir) === logDir ? storeDir : logDir, basename(DISPATCH_FAILURE_LOG)),
   );
   const timings: Record<string, number> = {};
-  const phase = (name: string, ms: number): void => {
-    timings[name] = ms;
-  };
 
   const ctx = new DispatchContext(now, wallStart, timeoutMs, dispatchLog, timings);
+  const phase = ctx.phase.bind(ctx);
   // Aliases, so every step below still reads `refuse(…)` / `within(…)`: this
   // commit moves the machinery and nothing else. `within` is spelled out rather
   // than bound because `bind` drops the generic parameter.
@@ -2360,170 +2548,12 @@ export async function dispatch(
     // (INV-5).
     deps.store.set(runId, { requestId });
 
-    // ── 7. key (INV-4: plaintext exists in the mint return and nowhere else) ─
-    const tMint = now();
-    const credEnvFile = envFileFor(deps.driver);
-    // Its OWN catch, with a FIXED message. `deliverRunKey` writes the plaintext
-    // key into the box through `driver.exec`, and an exec wrapper that reports a
-    // failure by including its argv — the ordinary way such a wrapper reports —
-    // puts that key in the thrown message. The generic catch below interpolates
-    // a caught message into `dispatch failed after the box was created: …`,
-    // which is written to the dispatch log AND the structured line AND the
-    // returned FleetError. `redact` now carries `redactSecrets`, so a bare token
-    // no longer survives those three — but this catch stays: defence in depth
-    // for an issuer whose prefix is not on the list and whose token is too short
-    // for the long-token arm. INV-4 says plaintext exists in the mint return and
-    // nowhere else, so the provider's free text never reaches a sink here — only
-    // its `code`, in the payload.
-    try {
-      const { key } = await within(
-        "mint",
-        () =>
-          mintRunKey(
-            {
-              keyApi: deps.keyApi,
-              driver: deps.driver,
-              store: deps.store,
-              requestId,
-              capMicroUsd: effectiveCeilingMicros,
-              ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
-            },
-            runId,
-          ),
-        // An ABANDONED mint that lands anyway is a live provider key spending
-        // against this issue's cap, and `within` cannot cancel it. The refusal
-        // has already gone out naming nothing about it, so this line is the only
-        // operator-facing pointer that exists until the record write inside
-        // `mintRunKey` catches up.
-        //
-        // `hash`, never `key`: INV-4 says the plaintext exists in the mint
-        // return and nowhere else, and this is a log sink. The hash is the
-        // provider-side IDENTIFIER (credentials.ts persists it in the plaintext
-        // record and keeps it through redaction for exactly this reason) and it
-        // is charset-checked before `mintRunKey` returns, so it cannot carry
-        // anything into a line an operator pastes. The CAP goes with it because
-        // "a key is live" and "it can spend N µ$" are different sizes of
-        // incident.
-        (minted) => ({ keyHash: minted.hash, capMicroUsd: effectiveCeilingMicros }),
-      );
-      await within(
-        "deliver",
-        () =>
-          deliverRunKey(
-            {
-              keyApi: deps.keyApi,
-              driver: deps.driver,
-              store: deps.store,
-              requestId,
-              ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
-            },
-            vm.name,
-            key,
-          ),
-        // Resolves `void`; what a late one means is that the key reached the box
-        // AFTER the operator was told the dispatch failed. The box is the fact.
-        () => ({ vmName: vm.name, keyDelivered: true }),
-      );
-    } catch (e) {
-      // Rethrow only when `refuse` already logged this one — a FleetError that
-      // did NOT pass through `refuse` (a seam throwing one directly) would
-      // otherwise escape with no dispatch-log entry, no structured line and no
-      // payload: exactly the bare-exit-1 treatment this catch exists to deny.
-      if (alreadyRefused(e)) throw e;
-      throw refuse(
-        1,
-        e instanceof FleetError ? "key-delivery-refused" : "key-delivery-failed",
-        e instanceof FleetError
-          ? `${e.message} — during key mint or delivery for run ${runId}`
-          : `key mint or delivery failed for run ${runId}`,
-        e instanceof FleetError && typeof e.remediation === "string"
-          ? e.remediation
-          : "the run record is OPEN and the box is ALIVE (INV-5) — inspect it, then tear it down",
-        {
-          ...(e instanceof FleetError && e.code !== undefined ? { code: e.code } : {}),
-          ...providerCodePayload(e),
-        },
-      );
-    }
-    phase("mint_ms", now() - tMint);
-
-    // AC9: what reaches the box is the cap the provider actually MINTED, not the
-    // one that was requested. `mintRunKey` refuses a non-positive or non-finite
-    // `limitUsd` outright and persists `usdToMicros(res.limitUsd)` on the
-    // record, so by the time the fill step runs the record holds the true
-    // figure — while `pipeline.yaml` and `run-context.json` were carrying the
-    // REQUEST. A manifest that names a ceiling the key does not carry is a run
-    // that either dies mid-phase against a provider limit nothing told it about,
-    // or (if the provider minted MORE) advertises headroom the ledger never
-    // reserved.
-    //
-    // DOWNWARD ONLY. The paragraph above names the over-mint as a defect ("if
-    // the provider minted MORE, advertises headroom the ledger never reserved")
-    // and the code then did exactly that: `credentials.ts` persisted
-    // `usdToMicros(res.limitUsd)` — the PROVIDER's own answer — checking only
-    // that it is non-null, finite and positive, and this read adopted it
-    // whenever it was a positive safe integer, with no upper bound. Since F004
-    // `mintRunKey` REFUSES an over-granted ceiling at the mint itself, so the
-    // `min` below is defence in depth: it still bounds records written before
-    // that refusal existed, and any path that reaches this read with one. A key API
-    // that rounds up, applies a plan floor, is misconfigured, or is answering
-    // for someone else authorized the box to spend above the ceiling the ledger
-    // reserved against the issue cap, on the strength of its own reply. The
-    // admitted ceiling is the only figure this factory has any claim to, so it
-    // is the ceiling: `min` in one direction, never `max` in the other.
-    //
-    // Falls back to the requested figure if the record cannot be read or holds
-    // no usable limit: reading it back is diagnosis, and a failure here must not
-    // become the run's failure when the key is already live and delivered.
-    let persistedCeilingMicros: number | undefined;
-    try {
-      const persisted = deps.store.get(runId).limitMicroUsd;
-      if (Number.isSafeInteger(persisted) && (persisted as number) > 0) {
-        persistedCeilingMicros = persisted as number;
-      }
-    } catch {
-      // see above — the requested ceiling stays the stamp
-    }
-    const mintedCeilingMicros =
-      persistedCeilingMicros === undefined
-        ? effectiveCeilingMicros
-        : Math.min(effectiveCeilingMicros, persistedCeilingMicros);
-    // An over-mint is a MONEY event, not a diagnostic. It used to log
-    // `status:"ok"` / `exitStatus:"success"` in both directions, so the one
-    // direction that means "the provider tried to hand this run more headroom
-    // than it was admitted for" never reached error-based alerting. Under-mint
-    // stays informational: the box gets less than it asked for and dies against
-    // a limit it was told about, which is the manifest stamp doing its job.
-    const overMinted =
-      persistedCeilingMicros !== undefined && persistedCeilingMicros > effectiveCeilingMicros;
-    if (overMinted || mintedCeilingMicros !== effectiveCeilingMicros) {
-      try {
-        log({
-          requestId,
-          operation: "fleet.dispatch",
-          agentId: null,
-          timestamp: new Date().toISOString(),
-          duration: now() - wallStart,
-          durationMs: now() - wallStart,
-          status: overMinted ? "error" : "ok",
-          error: {
-            code: overMinted ? "mint-cap-over-request" : "mint-cap-differs",
-            message: overMinted
-              ? `provider minted ${persistedCeilingMicros} µ$ ABOVE the admitted request of ${effectiveCeilingMicros} µ$ — the box is stamped with the admitted figure and the excess is not honoured`
-              : `provider minted ${mintedCeilingMicros} µ$ against a request of ${effectiveCeilingMicros} µ$ — the box is stamped with the minted figure`,
-          },
-          runId,
-          verb: "dispatch",
-          phase: "minted",
-          // The key itself is live at the provider's figure whatever this module
-          // stamps, so an over-mint is a real condition someone has to look at —
-          // "transient" is the retry classification, not a claim it is harmless.
-          exitStatus: (overMinted ? "transient" : "success") as ExitStatus,
-        });
-      } catch {
-        // see `refuse` — a sink failure is never the run's failure
-      }
-    }
+    const mintedCeilingMicros = await mintAndDeliverKey(ctx, deps, {
+      requestId,
+      runId,
+      vm,
+      effectiveCeilingMicros,
+    });
 
     // ── 8. fill at the pinned SHA (AC9a: manifest is the cap's only carrier) ─
     const tFill = now();
