@@ -460,6 +460,9 @@ export function decideCapHitVerdict(inputs: CapHitVerdictInputs): {
   return { verdict, reason };
 }
 
+// ponytail: 823 lines — the live setup (step 5), the workload argv assembly
+// (step 6) and the wall-clock race (step 7) remain inline. Split the race pair
+// next (F021-b); it is not a mechanical cut.
 export async function runCapHitDemo(
   deps: CapHitDemoDeps,
   opts: CapHitDemoOptions = {},

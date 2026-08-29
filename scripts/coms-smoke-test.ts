@@ -711,239 +711,239 @@ interface SocketComsResult {
 	replyContentVerified: boolean;
 }
 
-	const registryPath = (agentsDir: string, name: string) => path.join(agentsDir, `${name}.json`);
-	const readRegistryEntry = (agentsDir: string, name: string): RegistryEntry | null => {
-		try {
-			const parsed = JSON.parse(fs.readFileSync(registryPath(agentsDir, name), "utf8")) as RegistryEntry;
-			return parsed && typeof parsed.session_id === "string" ? parsed : null;
-		} catch {
-			return null;
-		}
-	};
-	// Poll for coms.ts's OWN session_start to write the entry — the registry
-	// is the only coordination channel between this script and the peers.
-	// Race the poll against the peer's exit: a dead peer will never write
-	// its entry, so don't burn the full poll budget on it (C5). Use 'exit'
-	// not 'close' — 'close' is delayed when a grandchild (e.g. the bash tool's
-	// `sleep 60` in smoke-b) inherits and holds the pipe stdio open after the
-	// pi process itself has terminated, which would hang this loop for the
-	// full poll budget. 'exit' fires the moment the peer dies regardless.
-	const waitForRegistryEntry = async (
+const registryPath = (agentsDir: string, name: string) => path.join(agentsDir, `${name}.json`);
+function readRegistryEntry(agentsDir: string, name: string): RegistryEntry | null {
+	try {
+		const parsed = JSON.parse(fs.readFileSync(registryPath(agentsDir, name), "utf8")) as RegistryEntry;
+		return parsed && typeof parsed.session_id === "string" ? parsed : null;
+	} catch {
+		return null;
+	}
+}
+// Poll for coms.ts's OWN session_start to write the entry — the registry
+// is the only coordination channel between this script and the peers.
+// Race the poll against the peer's exit: a dead peer will never write
+// its entry, so don't burn the full poll budget on it (C5). Use 'exit'
+// not 'close' — 'close' is delayed when a grandchild (e.g. the bash tool's
+// `sleep 60` in smoke-b) inherits and holds the pipe stdio open after the
+// pi process itself has terminated, which would hang this loop for the
+// full poll budget. 'exit' fires the moment the peer dies regardless.
+async function waitForRegistryEntry(
 	agentsDir: string,
 	name: string,
 	proc: ChildProcess,
-): Promise<RegistryEntry | null> => {
-		let exited = proc.exitCode !== null || proc.signalCode !== null;
-		const onExit = new Promise<void>((r) => {
-			if (exited) r();
-			else
-				proc.once("exit", () => {
-					exited = true;
-					r();
-				});
+): Promise<RegistryEntry | null> {
+	let exited = proc.exitCode !== null || proc.signalCode !== null;
+	const onExit = new Promise<void>((r) => {
+		if (exited) r();
+		else
+			proc.once("exit", () => {
+				exited = true;
+				r();
+			});
+	});
+	const deadline = Date.now() + REGISTRY_POLL_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		const entry = readRegistryEntry(agentsDir, name);
+		if (entry) return entry;
+		if (exited) break;
+		await Promise.race([new Promise((r) => setTimeout(r, 250)), onExit]);
+	}
+	// Final UNCONDITIONAL read: an entry written during the last poll
+	// window (or by a peer that registered on its way out) must not be
+	// missed (C10).
+	return readRegistryEntry(agentsDir, name);
+}
+// A registry FILE is not proof the peer's socket is accepting — probe a
+// real connection to the advertised endpoint (unix socket / named pipe)
+// with bounded retries before spawning A.
+const probeEndpoint = (endpoint: string): Promise<boolean> =>
+	new Promise((resolve) => {
+		const sock = net.createConnection({ path: endpoint });
+		const t = setTimeout(() => {
+			sock.destroy();
+			resolve(false);
+		}, 500);
+		sock.once("connect", () => {
+			clearTimeout(t);
+			sock.destroy();
+			resolve(true);
 		});
-		const deadline = Date.now() + REGISTRY_POLL_TIMEOUT_MS;
-		while (Date.now() < deadline) {
-			const entry = readRegistryEntry(agentsDir, name);
-			if (entry) return entry;
-			if (exited) break;
-			await Promise.race([new Promise((r) => setTimeout(r, 250)), onExit]);
-		}
-		// Final UNCONDITIONAL read: an entry written during the last poll
-		// window (or by a peer that registered on its way out) must not be
-		// missed (C10).
-		return readRegistryEntry(agentsDir, name);
-	};
-	// A registry FILE is not proof the peer's socket is accepting — probe a
-	// real connection to the advertised endpoint (unix socket / named pipe)
-	// with bounded retries before spawning A.
-	const probeEndpoint = (endpoint: string): Promise<boolean> =>
-		new Promise((resolve) => {
-			const sock = net.createConnection({ path: endpoint });
-			const t = setTimeout(() => {
-				sock.destroy();
-				resolve(false);
-			}, 500);
-			sock.once("connect", () => {
-				clearTimeout(t);
-				sock.destroy();
-				resolve(true);
-			});
-			sock.once("error", () => {
-				clearTimeout(t);
-				resolve(false);
-			});
+		sock.once("error", () => {
+			clearTimeout(t);
+			resolve(false);
 		});
-	const waitForReady = async (entry: RegistryEntry): Promise<boolean> => {
-		for (let i = 0; i < 10; i++) {
-			if (await probeEndpoint(entry.endpoint)) return true;
-			await new Promise((r) => setTimeout(r, 250));
-		}
-		return false;
-	};
+	});
+async function waitForReady(entry: RegistryEntry): Promise<boolean> {
+	for (let i = 0; i < 10; i++) {
+		if (await probeEndpoint(entry.endpoint)) return true;
+		await new Promise((r) => setTimeout(r, 250));
+	}
+	return false;
+}
 
-	// INV-2 check, extracted so the early-failure returns record the SAME
-	// check set as the main path (C15). Assert the REAL dir's perms/
-	// ownership (the old tmpdir-prefix check was a tautology — mkdtemp
-	// output always starts with tmpdir). Path B is POSIX-only: coms.ts
-	// fails fast on win32 (no named-pipe ACL equivalent of the 0700 socket
-	// dir), so on win32 this is a best-effort confinement note rather than
-	// a perms assertion — never a silent tautology (C14).
-	const recordInv2 = (comsDir: string, tmpRoot: string): void => {
-		let inv2Ok = comsDir.startsWith(tmpRoot);
-		let inv2Detail = `registry confined to ${comsDir}`;
-		if (process.platform !== "win32") {
-			const st = fs.statSync(comsDir);
-			const mode = st.mode & 0o777;
-			const ownerOk = typeof process.getuid === "function" && st.uid === process.getuid();
-			inv2Ok = inv2Ok && mode === 0o700 && ownerOk;
-			inv2Detail += `; dir mode=${mode.toString(8)} uid=${st.uid}`;
-		} else {
-			inv2Detail += "; win32: perms assertion n/a (coms.ts is POSIX-only and fails fast there)";
-		}
-		record({ name: "inv2_per_user_isolation", ok: inv2Ok, detail: inv2Detail });
-	};
+// INV-2 check, extracted so the early-failure returns record the SAME
+// check set as the main path (C15). Assert the REAL dir's perms/
+// ownership (the old tmpdir-prefix check was a tautology — mkdtemp
+// output always starts with tmpdir). Path B is POSIX-only: coms.ts
+// fails fast on win32 (no named-pipe ACL equivalent of the 0700 socket
+// dir), so on win32 this is a best-effort confinement note rather than
+// a perms assertion — never a silent tautology (C14).
+function recordInv2(comsDir: string, tmpRoot: string): void {
+	let inv2Ok = comsDir.startsWith(tmpRoot);
+	let inv2Detail = `registry confined to ${comsDir}`;
+	if (process.platform !== "win32") {
+		const st = fs.statSync(comsDir);
+		const mode = st.mode & 0o777;
+		const ownerOk = typeof process.getuid === "function" && st.uid === process.getuid();
+		inv2Ok = inv2Ok && mode === 0o700 && ownerOk;
+		inv2Detail += `; dir mode=${mode.toString(8)} uid=${st.uid}`;
+	} else {
+		inv2Detail += "; win32: perms assertion n/a (coms.ts is POSIX-only and fails fast there)";
+	}
+	record({ name: "inv2_per_user_isolation", ok: inv2Ok, detail: inv2Detail });
+}
 
-	// ── Raw-socket negative probes (C4): auth-free checks against B's LIVE
-	//    endpoint exercising coms.ts's REAL server-side validation — no
-	//    model auth needed, so these gate unconditionally. Each probe opens
-	//    a raw net socket and asserts a single JSON-line nack (coms.ts's
-	//    nack framing: {"type":"nack","msg_id":…,"error":…}\n). ────────────
-	const probeNack = (
-		endpoint: string,
-		payload: string | Buffer,
-		expectError: string,
-	): Promise<{ ok: boolean; detail: string }> =>
-		new Promise((resolve) => {
-			const sock = net.createConnection({ path: endpoint });
-			const chunks: Buffer[] = [];
-			let connected = false;
-			let settled = false;
-			const started = Date.now();
-			const finish = (ok: boolean, detail: string) => {
-				if (settled) return;
-				settled = true;
-				clearInterval(tick);
-				sock.destroy();
-				resolve({ ok, detail });
-			};
-			// The budget is STALL, not total wall clock. The oversize probe
-			// must push a full COMS_LINE_CAP_BYTES down the socket before
-			// coms.ts can see the cap exceeded and nack, so a deadline
-			// measured from connect was really a bulk-transfer budget: it
-			// scaled with machine load and went red under CPU contention
-			// while coms.ts was behaving correctly (#72).
-			//
-			// Progress is SAMPLED from the socket's own counters, not driven by
-			// events: a single 16 MiB write emits exactly one 'drain' — when
-			// the whole userspace buffer has finally flushed — so events
-			// cannot tell "streaming against a descheduled peer" apart from
-			// "peer is gone". `bytesWritten` alone would not either, since it
-			// counts bytes handed to write() including those still queued;
-			// subtracting `writableLength` leaves the bytes the kernel has
-			// actually taken, which advances only as the peer drains them.
-			const flushed = () => sock.bytesWritten - sock.writableLength + sock.bytesRead;
-			let lastProgressAt = Date.now();
-			let lastBytes = -1;
-			const tick = setInterval(() => {
-				if (settled) return;
-				const moved = flushed();
-				if (moved !== lastBytes) {
-					lastBytes = moved;
-					lastProgressAt = Date.now();
-					return;
-				}
-				if (Date.now() - lastProgressAt >= PROBE_IDLE_MS) {
-					finish(
-						false,
-						`no nack line: the socket moved no bytes for ${Date.now() - lastProgressAt}ms against a ${PROBE_IDLE_MS}ms stall budget (observed ${Date.now() - started}ms total, ${sock.bytesWritten - sock.writableLength}/${typeof payload === "string" ? Buffer.byteLength(payload) : payload.length} bytes flushed, ${sock.bytesRead} read)`,
-					);
-				}
-			}, 250);
-			sock.on("error", (e) => {
-				// After connect, write errors (e.g. EPIPE when the server ends
-				// the socket right after nacking the oversized probe) are not
-				// probe failures — the nack line or close decides.
-				if (!connected) finish(false, `connect error: ${e.message}`);
-			});
-			sock.once("connect", () => {
-				connected = true;
+// ── Raw-socket negative probes (C4): auth-free checks against B's LIVE
+//    endpoint exercising coms.ts's REAL server-side validation — no
+//    model auth needed, so these gate unconditionally. Each probe opens
+//    a raw net socket and asserts a single JSON-line nack (coms.ts's
+//    nack framing: {"type":"nack","msg_id":…,"error":…}\n). ────────────
+const probeNack = (
+	endpoint: string,
+	payload: string | Buffer,
+	expectError: string,
+): Promise<{ ok: boolean; detail: string }> =>
+	new Promise((resolve) => {
+		const sock = net.createConnection({ path: endpoint });
+		const chunks: Buffer[] = [];
+		let connected = false;
+		let settled = false;
+		const started = Date.now();
+		const finish = (ok: boolean, detail: string) => {
+			if (settled) return;
+			settled = true;
+			clearInterval(tick);
+			sock.destroy();
+			resolve({ ok, detail });
+		};
+		// The budget is STALL, not total wall clock. The oversize probe
+		// must push a full COMS_LINE_CAP_BYTES down the socket before
+		// coms.ts can see the cap exceeded and nack, so a deadline
+		// measured from connect was really a bulk-transfer budget: it
+		// scaled with machine load and went red under CPU contention
+		// while coms.ts was behaving correctly (#72).
+		//
+		// Progress is SAMPLED from the socket's own counters, not driven by
+		// events: a single 16 MiB write emits exactly one 'drain' — when
+		// the whole userspace buffer has finally flushed — so events
+		// cannot tell "streaming against a descheduled peer" apart from
+		// "peer is gone". `bytesWritten` alone would not either, since it
+		// counts bytes handed to write() including those still queued;
+		// subtracting `writableLength` leaves the bytes the kernel has
+		// actually taken, which advances only as the peer drains them.
+		const flushed = () => sock.bytesWritten - sock.writableLength + sock.bytesRead;
+		let lastProgressAt = Date.now();
+		let lastBytes = -1;
+		const tick = setInterval(() => {
+			if (settled) return;
+			const moved = flushed();
+			if (moved !== lastBytes) {
+				lastBytes = moved;
 				lastProgressAt = Date.now();
-				sock.write(payload);
-			});
-			sock.on("data", (c) => {
-				chunks.push(c);
-				const buf = Buffer.concat(chunks);
-				const nl = buf.indexOf(0x0a);
-				if (nl < 0) return;
-				try {
-					const parsed = JSON.parse(buf.slice(0, nl).toString("utf8")) as {
-						type?: string;
-						error?: unknown;
-					};
-					const got = typeof parsed?.error === "string" ? parsed.error : "";
-					finish(
-						parsed?.type === "nack" && got === expectError,
-						`nack error="${got}" (expected "${expectError}")`,
-					);
-				} catch {
-					finish(false, `non-JSON response: ${buf.slice(0, nl).toString("utf8").slice(0, 80)}`);
-				}
-			});
-			sock.once("close", () => finish(false, "connection closed without a nack line"));
+				return;
+			}
+			if (Date.now() - lastProgressAt >= PROBE_IDLE_MS) {
+				finish(
+					false,
+					`no nack line: the socket moved no bytes for ${Date.now() - lastProgressAt}ms against a ${PROBE_IDLE_MS}ms stall budget (observed ${Date.now() - started}ms total, ${sock.bytesWritten - sock.writableLength}/${typeof payload === "string" ? Buffer.byteLength(payload) : payload.length} bytes flushed, ${sock.bytesRead} read)`,
+				);
+			}
+		}, 250);
+		sock.on("error", (e) => {
+			// After connect, write errors (e.g. EPIPE when the server ends
+			// the socket right after nacking the oversized probe) are not
+			// probe failures — the nack line or close decides.
+			if (!connected) finish(false, `connect error: ${e.message}`);
 		});
-	const probeEnvelope = (overrides: Record<string, unknown>): string =>
-		`${JSON.stringify({
-			// isValidEnvelope (coms.ts) checks only type/msg_id/sender_session/
-			// sender_endpoint; handlePrompt then gates secret → hops → fields.
-			type: "prompt",
-			msg_id: ulid(),
-			sender_session: "smoke-probe",
-			sender_endpoint: "smoke-probe",
-			hops: 0,
-			timestamp: new Date().toISOString(),
-			secret: "smoke-probe-deliberately-wrong",
-			prompt: "probe",
-			sender_name: "smoke-probe",
-			sender_cwd: os.tmpdir(),
-			...overrides,
-		})}\n`;
-	const recordProbesFailed = (reason: string): void => {
-		record({ name: "socket_probe_wrong_secret_nack", ok: false, detail: reason });
-		record({ name: "socket_probe_hops_exceeded_nack", ok: false, detail: reason });
-		record({ name: "socket_probe_oversize_line_nack", ok: false, detail: reason });
-	};
-	const runSocketNegativeProbes = async (entry: RegistryEntry): Promise<void> => {
-		// (a) valid envelope + wrong secret → handlePrompt's auth gate nacks
-		// "unauthorized" before any turn is triggered.
-		const a = await probeNack(entry.endpoint, probeEnvelope({}), "unauthorized");
-		record({ name: "socket_probe_wrong_secret_nack", ok: a.ok, detail: a.detail });
-		// (b) CORRECT secret (read from B's registry entry in the local 0700
-		// dir — no model auth involved) + hops >= MAX_HOPS → nack "hops
-		// exceeded". The secret gate runs first in handlePrompt, so a missing
-		// registry secret fails this probe honestly rather than faking a pass.
-		const b =
-			typeof entry.secret === "string" && entry.secret.length > 0
-				? await probeNack(
-						entry.endpoint,
-						probeEnvelope({ secret: entry.secret, hops: COMS_MAX_HOPS }),
-						"hops exceeded",
-					)
-				: {
-						ok: false,
-						detail:
-							"smoke-b's registry entry carries no `secret` — hops probe cannot pass the auth gate (envelope-auth protocol change not present in coms.ts)",
-					};
-		record({ name: "socket_probe_hops_exceeded_nack", ok: b.ok, detail: b.detail });
-		// (c) one line larger than LINE_CAP_BYTES → connHandler nacks
-		// "malformed envelope" (msg_id "") as soon as the cap is exceeded.
-		const c = await probeNack(
-			entry.endpoint,
-			Buffer.alloc(COMS_LINE_CAP_BYTES + 2, 0x41),
-			"malformed envelope",
-		);
-		record({ name: "socket_probe_oversize_line_nack", ok: c.ok, detail: c.detail });
-	};
+		sock.once("connect", () => {
+			connected = true;
+			lastProgressAt = Date.now();
+			sock.write(payload);
+		});
+		sock.on("data", (c) => {
+			chunks.push(c);
+			const buf = Buffer.concat(chunks);
+			const nl = buf.indexOf(0x0a);
+			if (nl < 0) return;
+			try {
+				const parsed = JSON.parse(buf.slice(0, nl).toString("utf8")) as {
+					type?: string;
+					error?: unknown;
+				};
+				const got = typeof parsed?.error === "string" ? parsed.error : "";
+				finish(
+					parsed?.type === "nack" && got === expectError,
+					`nack error="${got}" (expected "${expectError}")`,
+				);
+			} catch {
+				finish(false, `non-JSON response: ${buf.slice(0, nl).toString("utf8").slice(0, 80)}`);
+			}
+		});
+		sock.once("close", () => finish(false, "connection closed without a nack line"));
+	});
+const probeEnvelope = (overrides: Record<string, unknown>): string =>
+	`${JSON.stringify({
+		// isValidEnvelope (coms.ts) checks only type/msg_id/sender_session/
+		// sender_endpoint; handlePrompt then gates secret → hops → fields.
+		type: "prompt",
+		msg_id: ulid(),
+		sender_session: "smoke-probe",
+		sender_endpoint: "smoke-probe",
+		hops: 0,
+		timestamp: new Date().toISOString(),
+		secret: "smoke-probe-deliberately-wrong",
+		prompt: "probe",
+		sender_name: "smoke-probe",
+		sender_cwd: os.tmpdir(),
+		...overrides,
+	})}\n`;
+function recordProbesFailed(reason: string): void {
+	record({ name: "socket_probe_wrong_secret_nack", ok: false, detail: reason });
+	record({ name: "socket_probe_hops_exceeded_nack", ok: false, detail: reason });
+	record({ name: "socket_probe_oversize_line_nack", ok: false, detail: reason });
+}
+async function runSocketNegativeProbes(entry: RegistryEntry): Promise<void> {
+	// (a) valid envelope + wrong secret → handlePrompt's auth gate nacks
+	// "unauthorized" before any turn is triggered.
+	const a = await probeNack(entry.endpoint, probeEnvelope({}), "unauthorized");
+	record({ name: "socket_probe_wrong_secret_nack", ok: a.ok, detail: a.detail });
+	// (b) CORRECT secret (read from B's registry entry in the local 0700
+	// dir — no model auth involved) + hops >= MAX_HOPS → nack "hops
+	// exceeded". The secret gate runs first in handlePrompt, so a missing
+	// registry secret fails this probe honestly rather than faking a pass.
+	const b =
+		typeof entry.secret === "string" && entry.secret.length > 0
+			? await probeNack(
+					entry.endpoint,
+					probeEnvelope({ secret: entry.secret, hops: COMS_MAX_HOPS }),
+					"hops exceeded",
+				)
+			: {
+					ok: false,
+					detail:
+						"smoke-b's registry entry carries no `secret` — hops probe cannot pass the auth gate (envelope-auth protocol change not present in coms.ts)",
+				};
+	record({ name: "socket_probe_hops_exceeded_nack", ok: b.ok, detail: b.detail });
+	// (c) one line larger than LINE_CAP_BYTES → connHandler nacks
+	// "malformed envelope" (msg_id "") as soon as the cap is exceeded.
+	const c = await probeNack(
+		entry.endpoint,
+		Buffer.alloc(COMS_LINE_CAP_BYTES + 2, 0x41),
+		"malformed envelope",
+	);
+	record({ name: "socket_probe_oversize_line_nack", ok: c.ok, detail: c.detail });
+}
 
 /**
  * F081: the client-side envelope-shape self-check (C5), lifted out of

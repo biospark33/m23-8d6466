@@ -1898,6 +1898,8 @@ async function exposeGatedBox(
   }
 }
 
+// ponytail: 1,191 lines — steps 1-2, 4-6, 8-9 and 11 remain inline. Lift steps
+// 5, 8 and 11 next (F003-b); the DispatchContext seam is already in place.
 export async function dispatch(
   brief: unknown,
   deps: DispatchDeps,
@@ -1937,6 +1939,9 @@ export async function dispatch(
   // Aliases, so every step below still reads `refuse(…)` / `within(…)`: this
   // commit moves the machinery and nothing else. `within` is spelled out rather
   // than bound because `bind` drops the generic parameter.
+  // NOTE: `refuse` and `ctx.refuse` are the same method — the aliases exist only
+  // to keep the moved bodies verbatim, and go when the remaining steps are
+  // lifted onto the context (F003-b).
   const refuse = ctx.refuse.bind(ctx);
   const remaining = ctx.remaining.bind(ctx);
   const timedOut = ctx.timedOut.bind(ctx);

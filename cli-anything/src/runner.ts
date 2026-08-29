@@ -636,79 +636,77 @@ interface TeamRunCtx {
  */
 function processTeamLine(ctx: TeamRunCtx, line: string): void {
   const { state } = ctx;
-  {
-    // DF1.6 R3: gate onTeamEvent on settled flag — drop lines after settle.
-    // A grandchild holding stdout pipe open → force-finalize resolves, but later
-    // lines still parse + callback. Consumer state must not mutate post-resolution.
-    if (state.settled) return;
-    const event = parseTeamEventLine(line);
-    // DF1.6 T7: observe every surviving line (null = parser rejection).
-    // Observer failures must not take down the internal event loop — a
-    // throwing callback inside a stream `data` handler is an uncaught
-    // exception for the whole process.
-    try {
-      ctx.opts.onTeamEvent?.(event, { droppedOversize: false });
-    } catch (err) {
-      console.error("cli-anything: onTeamEvent callback threw", err);
-    }
-    if (event !== null) {
-      switch (event.kind) {
-        case "cost": {
-          // Budget poll AFTER each turn (P0.3-S-H4): synchronous check.
-          // DF2.7: costUsd is now the emitting subprocess's SESSION total
-          // (one ledger row per event, SUM across rows) — no event
-          // restates another's spend, so summing here is still exactly
-          // right and is the ONLY accumulator the kill decision reads
-          // (INV-COST-2). applyCostEvent is the single source of truth
-          // for this math, shared with the unit tests in
-          // runner.test.ts so the guard cannot drift from what's tested.
-          const wasUnpriced = state.costUnpriced;
-          const next = applyCostEvent(
-            {
-              cumulativeCostUsd: state.cumulativeCostUsd,
-              costUnpriced: state.costUnpriced,
-            },
-            event.event,
+  // DF1.6 R3: gate onTeamEvent on settled flag — drop lines after settle.
+  // A grandchild holding stdout pipe open → force-finalize resolves, but later
+  // lines still parse + callback. Consumer state must not mutate post-resolution.
+  if (state.settled) return;
+  const event = parseTeamEventLine(line);
+  // DF1.6 T7: observe every surviving line (null = parser rejection).
+  // Observer failures must not take down the internal event loop — a
+  // throwing callback inside a stream `data` handler is an uncaught
+  // exception for the whole process.
+  try {
+    ctx.opts.onTeamEvent?.(event, { droppedOversize: false });
+  } catch (err) {
+    console.error("cli-anything: onTeamEvent callback threw", err);
+  }
+  if (event !== null) {
+    switch (event.kind) {
+      case "cost": {
+        // Budget poll AFTER each turn (P0.3-S-H4): synchronous check.
+        // DF2.7: costUsd is now the emitting subprocess's SESSION total
+        // (one ledger row per event, SUM across rows) — no event
+        // restates another's spend, so summing here is still exactly
+        // right and is the ONLY accumulator the kill decision reads
+        // (INV-COST-2). applyCostEvent is the single source of truth
+        // for this math, shared with the unit tests in
+        // runner.test.ts so the guard cannot drift from what's tested.
+        const wasUnpriced = state.costUnpriced;
+        const next = applyCostEvent(
+          {
+            cumulativeCostUsd: state.cumulativeCostUsd,
+            costUnpriced: state.costUnpriced,
+          },
+          event.event,
+        );
+        state.cumulativeCostUsd = next.cumulativeCostUsd;
+        state.costUnpriced = next.costUnpriced;
+        if (state.costUnpriced && !wasUnpriced) {
+          // console.error, not diag(): diag is routine per-run
+          // diagnostics and is silenced under NODE_ENV=test. A
+          // known-partial billing total is a warning — on the success
+          // path this line is the ONLY surface for it, because
+          // MergedOutput's key set is frozen (P0.3-M2).
+          console.error(
+            "cli-anything: cost event reports unpriced turns; cumulative total is partial (INV-COST-5)",
           );
-          state.cumulativeCostUsd = next.cumulativeCostUsd;
-          state.costUnpriced = next.costUnpriced;
-          if (state.costUnpriced && !wasUnpriced) {
-            // console.error, not diag(): diag is routine per-run
-            // diagnostics and is silenced under NODE_ENV=test. A
-            // known-partial billing total is a warning — on the success
-            // path this line is the ONLY surface for it, because
-            // MergedOutput's key set is frozen (P0.3-M2).
-            console.error(
-              "cli-anything: cost event reports unpriced turns; cumulative total is partial (INV-COST-5)",
-            );
-          }
-          if (state.cumulativeCostUsd >= ctx.killThresholdUsd) ctx.onBudgetThreshold();
+        }
+        if (state.cumulativeCostUsd >= ctx.killThresholdUsd) ctx.onBudgetThreshold();
+        break;
+      }
+      case "coms":
+        ctx.comsLog.push(event.raw);
+        break;
+      case "worker_output":
+        // Security (CR #40): agentId rides an untrusted NDJSON event and
+        // becomes an artifact filename — whitelist against the declared
+        // worker set (which zod already constrained to safe path
+        // components). Unknown/crafted ids are dropped, not written.
+        if (!ctx.pendings.has(event.agentId)) {
+          console.error(
+            "cli-anything: dropping worker_output for undeclared agentId",
+          );
           break;
         }
-        case "coms":
-          ctx.comsLog.push(event.raw);
-          break;
-        case "worker_output":
-          // Security (CR #40): agentId rides an untrusted NDJSON event and
-          // becomes an artifact filename — whitelist against the declared
-          // worker set (which zod already constrained to safe path
-          // components). Unknown/crafted ids are dropped, not written.
-          if (!ctx.pendings.has(event.agentId)) {
-            console.error(
-              "cli-anything: dropping worker_output for undeclared agentId",
-            );
-            break;
-          }
-          ctx.workerOutputs.set(event.agentId, event.output);
-          ctx.pendings.get(event.agentId)?.settle("response");
-          break;
-        case "merged":
-          state.mergedResult = event.result;
-          break;
-        case "coms_init_error":
-          state.comsInitError = event.reason;
-          break;
-      }
+        ctx.workerOutputs.set(event.agentId, event.output);
+        ctx.pendings.get(event.agentId)?.settle("response");
+        break;
+      case "merged":
+        state.mergedResult = event.result;
+        break;
+      case "coms_init_error":
+        state.comsInitError = event.reason;
+        break;
     }
   }
 }
@@ -720,84 +718,84 @@ function processTeamLine(ctx: TeamRunCtx, line: string): void {
  */
 function ingestTeamStdout(ctx: TeamRunCtx, chunk: Buffer): void {
   const { state } = ctx;
-    // F15 (per-line cap): bound each newline-delimited LINE, not cumulative
-    // run output. A long legitimate run emits many small NDJSON lines that
-    // would exhaust a cumulative budget and silently drop every later
-    // event — including `merged`, misclassifying a clean run as
-    // lead_failure/logic. The chunk is scanned by PHYSICAL newline
-    // boundaries and the cap is judged independently per line: small lines
-    // coalesced into one chunk are never falsely dropped, and each oversized
-    // line emits exactly one droppedOversize event and is discarded through
-    // its terminating newline.
-    let rest: Buffer = chunk;
-    // Resume after an oversized line: drop through its terminating newline,
-    // which may sit inside this same chunk, then parse the tail.
-    if (state.teamStdoutCapped) {
-      const nl = rest.indexOf(0x0a);
-      if (nl === -1) return;
-      rest = rest.subarray(nl + 1);
-      state.teamStdoutCapped = false;
-      state.teamStdoutBytes = 0;
+  // F15 (per-line cap): bound each newline-delimited LINE, not cumulative
+  // run output. A long legitimate run emits many small NDJSON lines that
+  // would exhaust a cumulative budget and silently drop every later
+  // event — including `merged`, misclassifying a clean run as
+  // lead_failure/logic. The chunk is scanned by PHYSICAL newline
+  // boundaries and the cap is judged independently per line: small lines
+  // coalesced into one chunk are never falsely dropped, and each oversized
+  // line emits exactly one droppedOversize event and is discarded through
+  // its terminating newline.
+  let rest: Buffer = chunk;
+  // Resume after an oversized line: drop through its terminating newline,
+  // which may sit inside this same chunk, then parse the tail.
+  if (state.teamStdoutCapped) {
+    const nl = rest.indexOf(0x0a);
+    if (nl === -1) return;
+    rest = rest.subarray(nl + 1);
+    state.teamStdoutCapped = false;
+    state.teamStdoutBytes = 0;
+    state.lineBuffer = "";
+    // Defensive: drop any partial-char bytes buffered while the discarded
+    // line was still being decoded, so they cannot prefix the resumed tail.
+    state.decoder = new StringDecoder("utf8");
+  }
+  while (rest.length > 0) {
+    const nl = rest.indexOf(0x0a);
+    const segEnd = nl === -1 ? rest.length : nl + 1;
+    const seg = rest.subarray(0, segEnd);
+    rest = rest.subarray(segEnd);
+    // Count raw Buffer bytes BEFORE decoding: decoded.length is UTF-16
+    // code units and undercounts multibyte UTF-8 (up to 4x), so a line of
+    // 3-byte chars could slip past the cap and grow lineBuffer unbounded.
+    if (state.teamStdoutBytes + seg.length > ctx.teamStdoutCapBytes) {
+      console.error(
+        `cli-anything: lead stdout line exceeded ${ctx.teamStdoutCapBytes} byte cap — line dropped, parsing resumes after next newline`,
+      );
+      // DF1.6 T7 (AC2): a cap-dropped line never reaches the parser — count
+      // it as droppedOversize, never as malformed.
+      try {
+        ctx.opts.onTeamEvent?.(null, { droppedOversize: true });
+      } catch (err) {
+        console.error("cli-anything: onTeamEvent callback threw", err);
+      }
       state.lineBuffer = "";
-      // Defensive: drop any partial-char bytes buffered while the discarded
-      // line was still being decoded, so they cannot prefix the resumed tail.
+      state.teamStdoutBytes = 0;
+      // Reset the decoder: earlier chunks of THIS oversized line may have
+      // left a partial multibyte char buffered. Dropping it here stops
+      // those stale bytes from corrupting the first line parsed after
+      // resume.
       state.decoder = new StringDecoder("utf8");
-    }
-    while (rest.length > 0) {
-      const nl = rest.indexOf(0x0a);
-      const segEnd = nl === -1 ? rest.length : nl + 1;
-      const seg = rest.subarray(0, segEnd);
-      rest = rest.subarray(segEnd);
-      // Count raw Buffer bytes BEFORE decoding: decoded.length is UTF-16
-      // code units and undercounts multibyte UTF-8 (up to 4x), so a line of
-      // 3-byte chars could slip past the cap and grow lineBuffer unbounded.
-      if (state.teamStdoutBytes + seg.length > ctx.teamStdoutCapBytes) {
-        console.error(
-          `cli-anything: lead stdout line exceeded ${ctx.teamStdoutCapBytes} byte cap — line dropped, parsing resumes after next newline`,
-        );
-        // DF1.6 T7 (AC2): a cap-dropped line never reaches the parser — count
-        // it as droppedOversize, never as malformed.
-        try {
-          ctx.opts.onTeamEvent?.(null, { droppedOversize: true });
-        } catch (err) {
-          console.error("cli-anything: onTeamEvent callback threw", err);
-        }
-        state.lineBuffer = "";
-        state.teamStdoutBytes = 0;
-        // Reset the decoder: earlier chunks of THIS oversized line may have
-        // left a partial multibyte char buffered. Dropping it here stops
-        // those stale bytes from corrupting the first line parsed after
-        // resume.
-        state.decoder = new StringDecoder("utf8");
-        if (nl === -1) {
-          // Oversized line continues into later chunks — stay in discard
-          // mode until its newline lands (no second event for this line).
-          state.teamStdoutCapped = true;
-          return;
-        }
-        // The segment ended this line — following segments are fresh lines.
-        continue;
+      if (nl === -1) {
+        // Oversized line continues into later chunks — stay in discard
+        // mode until its newline lands (no second event for this line).
+        state.teamStdoutCapped = true;
+        return;
       }
-      const decoded = state.decoder.write(seg);
-      state.lineBuffer += decoded;
-      state.teamStdoutBytes += seg.length;
-      if (nl !== -1) {
-        // seg ended a line: the counter starts fresh for the next segment.
-        state.teamStdoutBytes = 0;
-      }
-      // DF1.6 T1/R9: collect partial output (capped, surrogate-safe —
-      // see appendPartialOutput).
-      ctx.appendPartialOutput(decoded);
+      // The segment ended this line — following segments are fresh lines.
+      continue;
     }
-    // Consume complete lines; reset the per-line byte counter for whatever
-    // partial line remains after each newline.
-    let nl2 = state.lineBuffer.indexOf("\n");
-    while (nl2 !== -1) {
-      processTeamLine(ctx, state.lineBuffer.slice(0, nl2));
-      state.lineBuffer = state.lineBuffer.slice(nl2 + 1);
-      state.teamStdoutBytes = Buffer.byteLength(state.lineBuffer, "utf8");
-      nl2 = state.lineBuffer.indexOf("\n");
+    const decoded = state.decoder.write(seg);
+    state.lineBuffer += decoded;
+    state.teamStdoutBytes += seg.length;
+    if (nl !== -1) {
+      // seg ended a line: the counter starts fresh for the next segment.
+      state.teamStdoutBytes = 0;
     }
+    // DF1.6 T1/R9: collect partial output (capped, surrogate-safe —
+    // see appendPartialOutput).
+    ctx.appendPartialOutput(decoded);
+  }
+  // Consume complete lines; reset the per-line byte counter for whatever
+  // partial line remains after each newline.
+  let nl2 = state.lineBuffer.indexOf("\n");
+  while (nl2 !== -1) {
+    processTeamLine(ctx, state.lineBuffer.slice(0, nl2));
+    state.lineBuffer = state.lineBuffer.slice(nl2 + 1);
+    state.teamStdoutBytes = Buffer.byteLength(state.lineBuffer, "utf8");
+    nl2 = state.lineBuffer.indexOf("\n");
+  }
 }
 
 /**
@@ -990,6 +988,8 @@ export interface TeamRunState {
  * single subprocess, which spawns the workers inside the sandbox) to the
  * merged-JSON build — harness boot/parse excluded.
  */
+// ponytail: 534 lines — the spawn/env/watchdog prologue remains inline. Lift it
+// and add matrix tests for finalizeTeamRun/ingestTeamStdout (F025-b).
 export async function runTeamManifest(
   manifestPath: string,
   opts: TeamRunOptions = {},
@@ -1423,9 +1423,9 @@ export async function runTeamManifest(
           reason: "overflow",
           message: `wall-clock cap ${wallClockCapMs} ms exceeded`,
           details: {
-              cumulativeCostUsd: state.cumulativeCostUsd,
-              costUnpriced: state.costUnpriced,
-            },
+            cumulativeCostUsd: state.cumulativeCostUsd,
+            costUnpriced: state.costUnpriced,
+          },
         });
       });
     });
@@ -1451,9 +1451,9 @@ export async function runTeamManifest(
             reason: "overflow",
             message: `budget kill threshold $${killThresholdUsd.toFixed(4)} reached (cap $${budgetCapUsd.toFixed(2)})`,
             details: {
-              cumulativeCostUsd: state.cumulativeCostUsd,
-              costUnpriced: state.costUnpriced,
-            },
+            cumulativeCostUsd: state.cumulativeCostUsd,
+            costUnpriced: state.costUnpriced,
+          },
           });
         });
       });
@@ -1472,10 +1472,10 @@ export async function runTeamManifest(
       comsLog,
       workerOutputs,
       pendings,
-      settle: (exitStatus, partial, error, agentOutputsOverride) =>
-        settle(exitStatus, partial, error, agentOutputsOverride),
-      onBudgetThreshold: () => onBudgetThreshold(),
-      appendPartialOutput: (decoded) => appendPartialOutput(decoded),
+      // Hoisted `function` declarations — referenced directly, no wrapper.
+      settle,
+      onBudgetThreshold,
+      appendPartialOutput,
     };
 
     child.stdout!.on("data", (chunk: Buffer) => {

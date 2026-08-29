@@ -405,6 +405,9 @@ function printError(
  * are read from is how a fan-out becomes unfindable — so the change an
  * operator has to make is announced here first, on stderr, where it cannot
  * affect the exit code or the parsed output.
+ *
+ * ponytail: one-release deprecation — delete `--dir` from fanout/rank in
+ * verbs.ts and this warning with it at the next tagged release.
  */
 function warnDirDeprecated(note: (s: string) => void, verb: string): void {
   printError(
@@ -2021,11 +2024,21 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
 
     // Validation-before-construction, dispatch's exact posture: these
     // constructors mkdir/chmod, so an invalid brief must refuse without them.
-    // --dir is NOT this store's dir: for both producer and consumer it names
-    // the FAN-OUTS directory (rank's semantics — one flag, one meaning), and
-    // a fan-*.json inside a runs dir would make every later sweep of that
-    // dir report malformed_record_name anomalies. The run records follow
-    // their own default/env chain.
+    // --dir is NOT this store's dir. `--fanouts-dir` names the fan-outs
+    // directory; `--dir` is still accepted on fanout and rank for one release
+    // (deprecated on stderr below) because it has always meant the fan-outs
+    // directory on these two verbs. A fan-*.json inside a runs dir would make
+    // every later sweep of that dir report malformed_record_name anomalies.
+    // The run records follow their own default/env chain.
+    // F049: `--fanouts-dir` is this directory's own flag. `--dir` still names it
+    // here for one release (deprecated on stderr) so no working invocation
+    // breaks silently; an injected seam still wins over both — and silences the
+    // warning, so the test seam does not print a deprecation it never used.
+    // Warned BEFORE the constructors, matching rank.
+    const fanoutsDirFlag = flags.get("--fanouts-dir");
+    if (deps?.fanoutsDir === undefined && fanoutsDirFlag === undefined && dir !== undefined) {
+      warnDirDeprecated(note, verb);
+    }
     const briefsOk = schemaList.every((b) => BriefSchema.safeParse(b).success);
     const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId: fanRequestId }));
     const keyApi = deps?.keyApi ?? (briefsOk ? asUsage(() => openRouterKeyApi()) : unusedKeyApi());
@@ -2044,11 +2057,6 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
       costLedger: injectedCostLedger,
       ...seams
     } = deps ?? {};
-    // F049: `--fanouts-dir` is this directory's own flag. `--dir` still names it
-    // here for one release (deprecated on stderr above) so no working
-    // invocation breaks silently; an injected seam still wins over both.
-    const fanoutsDirFlag = flags.get("--fanouts-dir");
-    if (fanoutsDirFlag === undefined && dir !== undefined) warnDirDeprecated(note, verb);
     const fanoutsFlagDir = injectedFanoutsDir ?? fanoutsDirFlag ?? dir;
     // The hook defers FURTHER than its own construction: the real CostLedger
     // opens on the FIRST ingestBoxHours, and only a LOSER'S teardown close

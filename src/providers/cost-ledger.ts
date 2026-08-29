@@ -1818,7 +1818,8 @@ export class CostLedger {
         // unreadable record is far more likely a real in-flight dispatch than
         // an orphan, and refusing once is recoverable where over-granting the
         // cap is not.
-        let record: RunCostRecord | undefined;
+        let read: ReservationRecord;
+        let readError: unknown;
         try {
           // Prefetched outside the write lock — but only a successful read is
           // trusted across that gap. A cache miss (row appeared since, or the
@@ -1828,18 +1829,27 @@ export class CostLedger {
           // classification below is unchanged — a throw still lands on THIS
           // dispatch, young ⇒ refuse, aged ⇒ expire.
           const cached = prefetched.get(row.runId);
-          record = cached ?? this.readRunRecord(row.runId);
+          const record = cached ?? this.readRunRecord(row.runId);
+          read = record === undefined ? { kind: "absent" } : { kind: "resolved", record };
         } catch (e) {
-          if (young) throw e;
+          readError = e;
           // Aged: expiry is reserved for STRUCTURAL absence — proven ENOENT or
           // a confirmed zero-byte tombstone (see `recordStructurallyAbsent`).
-          if (
-            classifyReservation(
-              row,
-              { kind: "unreadable", structurallyAbsent: this.recordStructurallyAbsent(row.runId) },
-              graceCutoff,
-            ) === "hold-unresolvable"
-          ) {
+          // A young row refuses whatever the answer, so the probe is skipped
+          // there rather than paying for a syscall that cannot change it.
+          read = {
+            kind: "unreadable",
+            structurallyAbsent: young ? false : this.recordStructurallyAbsent(row.runId),
+          };
+        }
+        // The row's whole fate, decided once: classifyReservation owns the rule
+        // (F042) and every one of its five verdicts is answered here.
+        const verdict = classifyReservation(row, read, graceCutoff);
+        switch (verdict) {
+          case "refuse":
+            // A young unreadable record propagates the ORIGINAL error.
+            throw readError;
+          case "hold-unresolvable":
             pendingLogs.push({
               requestId: input.requestId,
               operation: "cost-ledger.gate",
@@ -1854,46 +1864,50 @@ export class CostLedger {
               orphanRunId: row.runId,
               orphanDecidedAt: row.decidedAt,
               orphanCeilingMicroUsd: row.ceiling,
-              message: `reservation for run ${row.runId} is past the grace window and its record could not be read (${(e as Error).message}) — the record file is present on disk (or its absence is unprovable), so its ceiling stays counted against the cap`,
+              message: `reservation for run ${row.runId} is past the grace window and its record could not be read (${(readError as Error).message}) — the record file is present on disk (or its absence is unprovable), so its ceiling stays counted against the cap`,
               outcome: "reservation-held",
             });
             reserve(row.ceiling);
-            continue;
+            break;
+          case "expire-unresolvable":
+            // Never silent: the expired row is named, so an operator can tell an
+            // expiry from a reservation that simply retired. Queued, not logged —
+            // the sink runs after the write lock is released.
+            pendingLogs.push({
+              requestId: input.requestId,
+              operation: "cost-ledger.gate",
+              agentId: null,
+              timestamp: new Date().toISOString(),
+              duration: Date.now() - started,
+              status: "ok",
+              runId: input.runId,
+              repoSlug,
+              issueId,
+              code: "reservation-unresolvable-expired",
+              orphanRunId: row.runId,
+              orphanDecidedAt: row.decidedAt,
+              orphanCeilingMicroUsd: row.ceiling,
+              message: `reservation for run ${row.runId} is past the grace window and its record cannot be read (${(readError as Error).message}) — expiring it rather than wedging the issue's cap`,
+              outcome: "reservation-expired",
+            });
+            break;
+          case "expire":
+            break;
+          case "count":
+            reserve(row.ceiling);
+            break;
+          default: {
+            // Unreachable while the switch is exhaustive — this assignment is
+            // what makes tsc say so, and it fails the build the moment a
+            // verdict is added without a case here. If one ever did reach
+            // runtime, keep the ceiling counted: under-admitting is the safe
+            // direction (INV-COST-6), silently dropping it is not.
+            const _exhaustive: never = verdict;
+            void _exhaustive;
+            reserve(row.ceiling);
+            break;
           }
-          // Never silent: the expired row is named, so an operator can tell an
-          // expiry from a reservation that simply retired. Queued, not logged —
-          // the sink runs after the write lock is released.
-          pendingLogs.push({
-            requestId: input.requestId,
-            operation: "cost-ledger.gate",
-            agentId: null,
-            timestamp: new Date().toISOString(),
-            duration: Date.now() - started,
-            status: "ok",
-            runId: input.runId,
-            repoSlug,
-            issueId,
-            code: "reservation-unresolvable-expired",
-            orphanRunId: row.runId,
-            orphanDecidedAt: row.decidedAt,
-            orphanCeilingMicroUsd: row.ceiling,
-            message: `reservation for run ${row.runId} is past the grace window and its record cannot be read (${(e as Error).message}) — expiring it rather than wedging the issue's cap`,
-            outcome: "reservation-expired",
-          });
-          continue;
         }
-        // The rest of the row's fate — orphan guard and the closed-record
-        // retirement — is classifyReservation's pure decision (F042).
-        if (
-          classifyReservation(
-            row,
-            record === undefined ? { kind: "absent" } : { kind: "resolved", record },
-            graceCutoff,
-          ) === "expire"
-        ) {
-          continue;
-        }
-        reserve(row.ceiling);
       }
       const unpricedRow = this.db
         .prepare(

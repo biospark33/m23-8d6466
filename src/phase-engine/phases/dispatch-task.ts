@@ -33,6 +33,7 @@ import {
 import { buildMergedOutput } from "../../../cli-anything/src/merger.ts";
 import { redactSecrets } from "../../../cli-anything/src/redact.ts";
 import { runTeamManifest } from "../../../cli-anything/src/runner.ts";
+import type { RunFacts } from "../../../cli-anything/src/runner.ts";
 import type { MergedOutput, TeamManifest } from "../../../cli-anything/src/types.ts";
 import type { PhaseBody, PhaseBodyContext } from "../phase.ts";
 import type { PhaseSpec, PhaseSubTimings, ExitStatus } from "../types.ts";
@@ -103,12 +104,12 @@ function refuse(message: string, redact: (s: string) => string): DispatchTaskVal
   };
 }
 
-/** The exit-signal evidence dispatch reconciles against. */
-export interface DispatchRunFacts {
-  exitCode: number | null;
-  termSignal: string | null;
-  killOrigin: "watchdog" | "budget" | "wallClock" | "requestedShutdown" | null;
-}
+/**
+ * The exit-signal evidence dispatch reconciles against — a projection of the
+ * runner's own RunFacts, never a restatement of its killOrigin union (the
+ * union widens on the runner's side and every copy of it drifts).
+ */
+export type DispatchRunFacts = Pick<RunFacts, "exitCode" | "termSignal" | "killOrigin">;
 
 /**
  * F061: the three-stage exit reconciliation, pure. The phase's own
@@ -394,11 +395,7 @@ export function dispatchTask(
     let mergedResult: Record<string, unknown> | null = null;
     let mergedSeen = false;
     let comsInitError: string | null = null;
-    let runFacts: {
-      exitCode: number | null;
-      termSignal: string | null;
-      killOrigin: "watchdog" | "budget" | "wallClock" | "requestedShutdown" | null;
-    } = { exitCode: null, termSignal: null, killOrigin: null };
+    let runFacts: DispatchRunFacts = { exitCode: null, termSignal: null, killOrigin: null };
 
     try {
       writeFileSync(manifestFile, JSON.stringify(manifest), { mode: 0o600 });
