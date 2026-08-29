@@ -44,6 +44,11 @@ const eventRowSchema = z
   })
   .passthrough();
 
+// ponytail: archived isn't pinned to z.number() here even though
+// TraceSessionRow types it non-nullable — optionalColumn reads a store
+// without the column as NULL (see createSessionsFixture tests), and that's
+// intentional drift tolerance, not a bug. Upgrade: pin archived: z.number()
+// once no supported store predates the F054 migration (Task 9.2 follow-up).
 const sessionRowSchema = z
   .object({
     request_id: z.string(),

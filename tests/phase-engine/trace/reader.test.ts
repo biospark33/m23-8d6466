@@ -1192,14 +1192,36 @@ describe("F055: reader boundary validation", () => {
   });
 
   test("hasColumn caches a `false` result — a cached miss does not re-run PRAGMA table_info", () => {
-    const { dbPath } = createWalFixture(testDir, ["req-cache"], 1);
-    const reader = openTraceReader(dbPath);
+    // events table deliberately missing "payload_json" (one of the columns
+    // readEvents probes via optionalColumn), so the first readEvents call
+    // latches columnCache["events.payload_json"] to false. Count PRAGMA
+    // executions across two calls: with `.has()` it should stay flat, not
+    // re-probe on every call because `!cache.get(key)` treated a cached
+    // `false` as uncached.
+    const dbPath = path.join(testDir, "trace.db");
+    const db = new Database(dbPath);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS events (
+        event_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        phase_id TEXT,
+        parent_id TEXT,
+        type TEXT,
+        name TEXT,
+        tokens INTEGER,
+        started_at TEXT,
+        ended_at TEXT
+      )
+    `);
+    db.prepare("INSERT INTO events (event_id, request_id, type) VALUES (?, ?, ?)").run(
+      "evt-cache-1",
+      "req-cache",
+      "test",
+    );
+    db.close();
 
-    // "phase_id" is absent from the events table createWalFixture builds, so
-    // the first readEvents call latches columnCache["events.phase_id"] to
-    // false via optionalColumn -> hasColumn. Count PRAGMA executions across
-    // two calls: with `.has()` it should stay flat, not re-probe on every
-    // call because `!cache.get(key)` treated a cached `false` as uncached.
+    const reader = openTraceReader(dbPath);
     let pragmaCount = 0;
     const originalQuery = Database.prototype.query;
     Database.prototype.query = function (this: Database, sql: string, ...rest: unknown[]) {
